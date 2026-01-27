@@ -9,6 +9,7 @@ import {
   Put,
   Query,
   UseFilters,
+  Logger
 } from '@nestjs/common';
 import { ioRedis } from '@gitroom/nestjs-libraries/redis/redis.service';
 import { ConnectIntegrationDto } from '@gitroom/nestjs-libraries/dtos/integrations/connect.integration.dto';
@@ -242,6 +243,17 @@ export class IntegrationsController {
 
       return { url };
     } catch (err) {
+      if (err instanceof Error) {
+        Logger.error(
+          `Error generating integration url for ${integration}: ${err.message}`,
+          err.stack
+        );
+      } else {
+        Logger.error(
+          `Error generating integration url for ${integration}: ${JSON.stringify(err)}`,
+          ''
+        );
+      }
       return { err: true };
     }
   }
