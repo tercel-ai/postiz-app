@@ -31,7 +31,9 @@ export class AuthMiddleware implements NestMiddleware {
     private _userService: UsersService
   ) {}
   async use(req: Request, res: Response, next: NextFunction) {
-    const auth = req.headers.auth || req.cookies.auth;
+    const authHeader = req.headers.authorization;
+    const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null;
+    const auth = bearerToken || req.headers.auth || req.cookies.auth;
     if (!auth) {
       throw new HttpForbiddenException();
     }

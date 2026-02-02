@@ -6,8 +6,18 @@ export const loadSwagger = (app: INestApplication) => {
     .setTitle('Postiz Swagger file')
     .setDescription('API description')
     .setVersion('1.0')
+    .addBearerAuth(
+      {
+        type: 'http',
+        scheme: 'bearer',
+        bearerFormat: 'JWT',
+        description: 'Enter your JWT token',
+      },
+      'JWT-auth'
+    )
     .build();
 
   const document = SwaggerModule.createDocument(app, config);
+  document.security = [{ 'JWT-auth': [] }];
   SwaggerModule.setup('docs', app, document);
 };
