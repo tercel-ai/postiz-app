@@ -57,6 +57,7 @@ services:
   temporal-elasticsearch:
     container_name: temporal-elasticsearch
     image: elasticsearch:7.17.27
+    restart: always
     environment:
       - cluster.routing.allocation.disk.threshold_enabled=true
       - cluster.routing.allocation.disk.watermark.low=512mb
@@ -70,11 +71,17 @@ services:
     expose:
       - 9200
     volumes:
-      - /var/lib/elasticsearch/data
+      - temporal-es-data:/var/lib/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   temporal-postgresql:
     container_name: temporal-postgresql
     image: postgres:16
+    restart: always
     environment:
       POSTGRES_PASSWORD: temporal
       POSTGRES_USER: temporal
@@ -83,16 +90,24 @@ services:
     expose:
       - 5432
     volumes:
-      - /var/lib/postgresql/data
+      - temporal-pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temporal"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   temporal:
     container_name: temporal
+    restart: always
     ports:
       - "7233:7233"
     image: temporalio/auto-setup:1.28.1
     depends_on:
-      - temporal-postgresql
-      - temporal-elasticsearch
+      temporal-postgresql:
+        condition: service_healthy
+      temporal-elasticsearch:
+        condition: service_healthy
     environment:
       - DB=postgres12
       - DB_PORT=5432
@@ -136,9 +151,10 @@ services:
       - "8080:8080"
 
 volumes:
-  redisinsight:
-  postgres-volume:
-    external: false
+  temporal-pg-data:                                                                                                                                                                                                                                                                                                                                                                                                                          
+    external: false                                                                                                                                                                                                                                                                                                                                                                                                                                                   
+  temporal-es-data:                                                                                                                                                                                                                                                                                                                                                                                                                              
+    external: false 
 
 networks:
   postiz-network:

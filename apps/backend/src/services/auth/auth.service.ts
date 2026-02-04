@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { Provider, User } from '@prisma/client';
 import { CreateOrgUserDto } from '@gitroom/nestjs-libraries/dtos/auth/create.org.user.dto';
 import { LoginUserDto } from '@gitroom/nestjs-libraries/dtos/auth/login.user.dto';
@@ -11,14 +11,18 @@ import { NotificationService } from '@gitroom/nestjs-libraries/database/prisma/n
 import { ForgotReturnPasswordDto } from '@gitroom/nestjs-libraries/dtos/auth/forgot-return.password.dto';
 import { EmailService } from '@gitroom/nestjs-libraries/services/email.service';
 import { NewsletterService } from '@gitroom/nestjs-libraries/newsletter/newsletter.service';
+import { SsoClient } from '@gitroom/backend/services/auth/sso.client';
 
 @Injectable()
 export class AuthService {
+  private readonly logger = new Logger(AuthService.name);
+
   constructor(
     private _userService: UsersService,
     private _organizationService: OrganizationService,
     private _notificationService: NotificationService,
-    private _emailService: EmailService
+    private _emailService: EmailService,
+    private _ssoClient: SsoClient
   ) {}
   async canRegister(provider: string) {
     if (
@@ -42,6 +46,13 @@ export class AuthService {
       if (process.env.DISALLOW_PLUS && body.email.includes('+')) {
         throw new Error('Email with plus sign is not allowed');
       }
+
+      // Proxy to sso for LOCAL auth
+      if (process.env.SSO_AUTH_URL) {
+        return this.routeAuthViaSso(body, addToOrg);
+      }
+
+      // Fallback: original local auth (when SSO_AUTH_URL is not set)
       const user = await this._userService.getUserByEmail(body.email);
       if (body instanceof CreateOrgUserDto) {
         if (user) {
@@ -106,6 +117,88 @@ export class AuthService {
           )
         : false;
     return { addedOrg, jwt: await this.jwt(user) };
+  }
+
+  private async routeAuthViaSso(
+    body: CreateOrgUserDto | LoginUserDto,
+    addToOrg?: boolean | { orgId: string; role: 'USER' | 'ADMIN'; id: string }
+  ) {
+    if (body instanceof CreateOrgUserDto) {
+      // Register via sso
+      // sso will callback /internal/users to create local User
+      const result = await this._ssoClient.register(
+        body.email,
+        body.password,
+        (body as any).vcode || '000000',
+        body.company
+      );
+
+      const accessToken = result.access_data.access_token;
+      const ssoUserId = result.user.id;
+
+      // Wait briefly then look up the local user (created by sso callback)
+      let localUser = await this._userService.getUserById(ssoUserId);
+
+      // Lazy creation fallback if callback hasn't arrived yet
+      if (!localUser) {
+        this.logger.warn(
+          `Local user not found after registration (id=${ssoUserId}), creating lazily`
+        );
+        const created = await this._organizationService.createOrgAndUserWithId(
+          ssoUserId,
+          body.email,
+          body.company
+        );
+        localUser = created.users[0].user;
+      }
+
+      const addedOrg =
+        addToOrg && typeof addToOrg !== 'boolean'
+          ? await this._organizationService.addUserToOrg(
+              localUser.id,
+              addToOrg.id,
+              addToOrg.orgId,
+              addToOrg.role
+            )
+          : false;
+
+      // Return the sso JWT directly
+      return { addedOrg, jwt: accessToken };
+    }
+
+    // Login via sso
+    const result = await this._ssoClient.login(
+      body.email,
+      body.password
+    );
+
+    const accessToken = result.access_data.access_token;
+    const ssoUserId = result.user.id;
+
+    // Check local user exists (lazy creation fallback)
+    let localUser = await this._userService.getUserById(ssoUserId);
+    if (!localUser) {
+      this.logger.warn(
+        `Local user not found during login (id=${ssoUserId}), creating lazily`
+      );
+      const created = await this._organizationService.createOrgAndUserWithId(
+        ssoUserId,
+        body.email
+      );
+      localUser = created.users[0].user;
+    }
+
+    const addedOrg =
+      addToOrg && typeof addToOrg !== 'boolean'
+        ? await this._organizationService.addUserToOrg(
+            localUser.id,
+            addToOrg.id,
+            addToOrg.orgId,
+            addToOrg.role
+          )
+        : false;
+
+    return { addedOrg, jwt: accessToken };
   }
 
   public getOrgFromCookie(cookie?: string) {

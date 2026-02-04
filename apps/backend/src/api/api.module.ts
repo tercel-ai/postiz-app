@@ -31,6 +31,9 @@ import { AutopostController } from '@gitroom/backend/api/routes/autopost.control
 import { SetsController } from '@gitroom/backend/api/routes/sets.controller';
 import { ThirdPartyController } from '@gitroom/backend/api/routes/third-party.controller';
 import { MonitorController } from '@gitroom/backend/api/routes/monitor.controller';
+import { InternalController } from '@gitroom/backend/api/routes/internal.controller';
+import { SsoClient } from '@gitroom/backend/services/auth/sso.client';
+import { InternalAuthGuard } from '@gitroom/backend/services/auth/internal-auth.guard';
 
 const authenticatedController = [
   UsersController,
@@ -56,6 +59,7 @@ const authenticatedController = [
     AuthController,
     PublicController,
     MonitorController,
+    InternalController,
     ...authenticatedController,
   ],
   providers: [
@@ -71,6 +75,8 @@ const authenticatedController = [
     TrackService,
     ShortLinkService,
     Nowpayments,
+    SsoClient,
+    InternalAuthGuard,
   ],
   get exports() {
     return [...this.imports, ...this.providers];

@@ -252,6 +252,46 @@ export class OrganizationRepository {
     });
   }
 
+  async createOrgAndUserWithId(
+    userId: string,
+    email: string,
+    name?: string
+  ) {
+    return this._organization.model.organization.create({
+      data: {
+        name: name || email,
+        apiKey: AuthService.fixedEncryption(makeId(20)),
+        allowTrial: true,
+        isTrailing: true,
+        users: {
+          create: {
+            role: Role.SUPERADMIN,
+            user: {
+              create: {
+                id: userId,
+                activated: true,
+                email,
+                password: '',
+                providerName: 'LOCAL',
+                providerId: '',
+                timezone: 0,
+                name: name || undefined,
+              },
+            },
+          },
+        },
+      },
+      select: {
+        id: true,
+        users: {
+          select: {
+            user: true,
+          },
+        },
+      },
+    });
+  }
+
   getOrgByCustomerId(customerId: string) {
     return this._organization.model.organization.findFirst({
       where: {

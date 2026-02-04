@@ -28,6 +28,18 @@ export class OrganizationService {
     );
   }
 
+  async createOrgAndUserWithId(
+    userId: string,
+    email: string,
+    name?: string
+  ) {
+    return this._organizationRepository.createOrgAndUserWithId(
+      userId,
+      email,
+      name
+    );
+  }
+
   async getCount() {
     return this._organizationRepository.getCount();
   }

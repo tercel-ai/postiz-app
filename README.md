@@ -103,6 +103,31 @@
 
 To have the project up and running, please follow the [Quick Start Guide](https://docs.postiz.com/quickstart)
 
+## Developer
+Set environment variables
+Copy the .env.example file to .env and fill in the values
+
+Install the dependencies
+```
+pnpm install
+```
+
+Generate the prisma client and run the migrations
+```
+pnpm run prisma-db-push
+```
+
+Create temporal namespace (Optional)
+```
+docker exec temporal-admin-tools temporal operator namespace create --namespace dev   
+```
+
+Run the project
+```
+pnpm run dev
+```
+
+
 ## Sponsor Postiz
 
 We now give a few options to Sponsor Postiz:

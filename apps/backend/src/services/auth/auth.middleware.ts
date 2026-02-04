@@ -1,4 +1,4 @@
-import { Injectable, NestMiddleware } from '@nestjs/common';
+import { Injectable, Logger, NestMiddleware } from '@nestjs/common';
 import { Request, Response, NextFunction } from 'express';
 import { AuthService } from '@gitroom/helpers/auth/auth.service';
 import { User } from '@prisma/client';
@@ -26,6 +26,8 @@ export const removeAuth = (res: Response) => {
 
 @Injectable()
 export class AuthMiddleware implements NestMiddleware {
+  private readonly logger = new Logger(AuthMiddleware.name);
+
   constructor(
     private _organizationService: OrganizationService,
     private _userService: UsersService
@@ -38,8 +40,31 @@ export class AuthMiddleware implements NestMiddleware {
       throw new HttpForbiddenException();
     }
     try {
-      let user = AuthService.verifyJWT(auth) as User | null;
+      let user: User | null = null;
       const orgHeader = req.cookies.showorg || req.headers.showorg;
+
+      const payload = AuthService.verifyJWT(auth) as any;
+
+      if (payload?.sub) {
+        // SSO token (sub = User.id)
+        user = await this._userService.getUserById(payload.sub);
+
+        // Lazy creation fallback if local user doesn't exist
+        if (!user && payload.email) {
+          this.logger.warn(
+            `SSO JWT valid but local user not found (id=${payload.sub}), creating lazily`
+          );
+          const created =
+            await this._organizationService.createOrgAndUserWithId(
+              payload.sub,
+              payload.email
+            );
+          user = created.users[0].user;
+        }
+      } else {
+        // Legacy postiz token (payload is the full User object)
+        user = payload as User | null;
+      }
 
       if (!user) {
         throw new HttpForbiddenException();
