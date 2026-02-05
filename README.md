@@ -117,7 +117,7 @@ Generate the prisma client and run the migrations
 pnpm run prisma-db-push
 ```
 
-Create temporal namespace (Optional)
+Create temporal namespace (Optional if .env TEMPORAL_NAMESPACE=dev)
 ```
 docker exec temporal-admin-tools temporal operator namespace create --namespace dev   
 ```
