@@ -136,21 +136,22 @@ export class AuthService {
       const accessToken = result.access_data.access_token;
       const ssoUserId = result.user.id;
 
-      // Wait briefly then look up the local user (created by sso callback)
-      let localUser = await this._userService.getUserById(ssoUserId);
-
-      // Lazy creation fallback if callback hasn't arrived yet
-      if (!localUser) {
-        this.logger.warn(
-          `Local user not found after registration (id=${ssoUserId}), creating lazily`
-        );
-        const created = await this._organizationService.createOrgAndUserWithId(
-          ssoUserId,
-          body.email,
-          body.company
-        );
-        localUser = created.users[0].user;
+      // Check if user already exists
+      const existingUser = await this._userService.getUserById(ssoUserId);
+      if (existingUser) {
+        throw new Error('Email already exists');
       }
+
+      // Lazy creation if sso callback hasn't arrived yet
+      this.logger.warn(
+        `Local user not found after registration (id=${ssoUserId}), creating lazily`
+      );
+      const created = await this._organizationService.createOrgAndUserWithId(
+        ssoUserId,
+        body.email,
+        body.company
+      );
+      const localUser = created.users[0].user;
 
       const addedOrg =
         addToOrg && typeof addToOrg !== 'boolean'
