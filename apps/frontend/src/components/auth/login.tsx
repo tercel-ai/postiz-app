@@ -97,14 +97,14 @@ export function Login() {
                 <Input
                   label="Email"
                   translationKey="label_email"
-                  {...form.register('email')}
+                  name="email"
                   type="email"
                   placeholder={t('email_address', 'Email Address')}
                 />
                 <Input
                   label="Password"
                   translationKey="label_password"
-                  {...form.register('password')}
+                  name="password"
                   autoComplete="off"
                   type="password"
                   placeholder={t('label_password', 'Password')}

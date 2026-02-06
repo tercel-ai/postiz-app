@@ -8,9 +8,11 @@ import {
   Post,
   Put,
   Query,
+  Req,
   UseFilters,
   Logger
 } from '@nestjs/common';
+import { Request } from 'express';
 import { ioRedis } from '@gitroom/nestjs-libraries/redis/redis.service';
 import { ConnectIntegrationDto } from '@gitroom/nestjs-libraries/dtos/integrations/connect.integration.dto';
 import { IntegrationManager } from '@gitroom/nestjs-libraries/integrations/integration.manager';
@@ -50,6 +52,32 @@ export class IntegrationsController {
     private _postService: PostsService,
     private _refreshIntegrationService: RefreshIntegrationService
   ) {}
+
+  private resolveCallbackBaseUrl(origin?: string): string {
+    if (!origin) return process.env.FRONTEND_URL!;
+
+    const allowedOrigins = [
+      process.env.FRONTEND_URL,
+      'http://localhost:6274',
+      'http://localhost:3000',
+      'http://localhost:3001',
+      'http://localhost:4200',
+      ...(process.env.MAIN_URL ? [process.env.MAIN_URL] : []),
+    ].filter(Boolean).map(o => o!.replace(/\/$/, ''));
+
+    const normalized = origin.replace(/\/$/, '');
+    return allowedOrigins.includes(normalized) ? normalized : process.env.FRONTEND_URL!;
+  }
+
+  private async withCallbackUrl<T>(callbackBaseUrl: string, fn: () => Promise<T>): Promise<T> {
+    const original = process.env.FRONTEND_URL;
+    process.env.FRONTEND_URL = callbackBaseUrl;
+    try {
+      return await fn();
+    } finally {
+      process.env.FRONTEND_URL = original;
+    }
+  }
   @Get('/')
   getIntegrations() {
     return this._integrationManager.getAllIntegrations();
@@ -194,6 +222,7 @@ export class IntegrationsController {
   @Get('/social/:integration')
   @CheckPolicies([AuthorizationActions.Create, Sections.CHANNEL])
   async getIntegrationUrl(
+    @Req() req: Request,
     @Param('integration') integration: string,
     @Query('refresh') refresh: string,
     @Query('externalUrl') externalUrl: string,
@@ -215,6 +244,10 @@ export class IntegrationsController {
     }
 
     try {
+      const callbackBaseUrl = this.resolveCallbackBaseUrl(
+        req.headers['origin'] as string | undefined
+      );
+
       const getExternalUrl = integrationProvider.externalUrl
         ? {
             ...(await integrationProvider.externalUrl(externalUrl)),
@@ -223,7 +256,9 @@ export class IntegrationsController {
         : undefined;
 
       const { codeVerifier, state, url } =
-        await integrationProvider.generateAuthUrl(getExternalUrl);
+        await this.withCallbackUrl(callbackBaseUrl, () =>
+          integrationProvider.generateAuthUrl(getExternalUrl)
+        );
 
       if (refresh) {
         await ioRedis.set(`refresh:${state}`, refresh, 'EX', 300);
@@ -240,6 +275,7 @@ export class IntegrationsController {
         'EX',
         300
       );
+      await ioRedis.set(`callbackUrl:${state}`, callbackBaseUrl, 'EX', 300);
 
       return { url };
     } catch (err) {
@@ -431,6 +467,11 @@ export class IntegrationsController {
       await ioRedis.del(`onboarding:${body.state}`);
     }
 
+    const callbackBaseUrl = await ioRedis.get(`callbackUrl:${body.state}`);
+    if (callbackBaseUrl) {
+      await ioRedis.del(`callbackUrl:${body.state}`);
+    }
+
     const {
       error,
       accessToken,
@@ -443,13 +484,16 @@ export class IntegrationsController {
       additionalSettings,
       // eslint-disable-next-line no-async-promise-executor
     } = await new Promise<AuthTokenDetails>(async (res) => {
-      const auth = await integrationProvider.authenticate(
-        {
-          code: body.code,
-          codeVerifier: getCodeVerifier,
-          refresh: body.refresh,
-        },
-        details ? JSON.parse(details) : undefined
+      const auth = await this.withCallbackUrl(
+        callbackBaseUrl || process.env.FRONTEND_URL!,
+        () => integrationProvider.authenticate(
+          {
+            code: body.code,
+            codeVerifier: getCodeVerifier,
+            refresh: body.refresh,
+          },
+          details ? JSON.parse(details) : undefined
+        )
       );
 
       if (typeof auth === 'string') {
