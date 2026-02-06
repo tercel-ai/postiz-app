@@ -27,6 +27,9 @@ async function start() {
         'Content-Type',
         'Authorization',
         'x-copilotkit-runtime-client-gql-version',
+        'Cache-Control',
+        'Pragma',
+        'Expires',
       ],
       exposedHeaders: [
         'reload',
