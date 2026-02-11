@@ -30,6 +30,7 @@ import { SignatureController } from '@gitroom/backend/api/routes/signature.contr
 import { AutopostController } from '@gitroom/backend/api/routes/autopost.controller';
 import { SetsController } from '@gitroom/backend/api/routes/sets.controller';
 import { ThirdPartyController } from '@gitroom/backend/api/routes/third-party.controller';
+import { DashboardController } from '@gitroom/backend/api/routes/dashboard.controller';
 import { MonitorController } from '@gitroom/backend/api/routes/monitor.controller';
 import { InternalController } from '@gitroom/backend/api/routes/internal.controller';
 import { SsoClient } from '@gitroom/backend/services/auth/sso.client';
@@ -50,6 +51,7 @@ const authenticatedController = [
   AutopostController,
   SetsController,
   ThirdPartyController,
+  DashboardController,
 ];
 @Module({
   imports: [UploadModule],
