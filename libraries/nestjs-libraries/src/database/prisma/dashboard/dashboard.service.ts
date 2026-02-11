@@ -38,7 +38,14 @@ export class DashboardService {
     let impressionsTotal = 0;
     let trafficsTotal = 0;
 
+    const channelsByPlatform = new Map<string, number>();
     for (const integration of integrations) {
+      const platform = integration.providerIdentifier;
+      channelsByPlatform.set(
+        platform,
+        (channelsByPlatform.get(platform) || 0) + 1
+      );
+
       try {
         const analytics: AnalyticsData[] =
           await this._integrationService.checkAnalytics(
@@ -66,6 +73,9 @@ export class DashboardService {
     const result = {
       post_count: postCount,
       channel_count: channelCount,
+      channels_by_platform: Array.from(channelsByPlatform.entries()).map(
+        ([platform, count]) => ({ platform, count })
+      ),
       impressions_total: impressionsTotal,
       traffics_total: trafficsTotal,
     };
@@ -128,6 +138,14 @@ export class DashboardService {
       await this._dashboardRepository.getActiveIntegrations(org.id);
 
     const platformValues = new Map<string, number>();
+    const platformRecent = new Map<string, number>();
+    const platformOlder = new Map<string, number>();
+
+    // Split 30-day window into two halves at the midpoint (day 15).
+    // "older" = days 16-30 ago, "recent" = days 0-15 ago.
+    // delta = ((recent - older) / older) * 100  (percentage change).
+    // Frontend usage: delta > 0 → show ↑ in green; delta < 0 → show ↓ in red.
+    const midDate = dayjs().subtract(15, 'day');
 
     for (const integration of integrations) {
       try {
@@ -140,15 +158,25 @@ export class DashboardService {
 
         for (const metric of analytics) {
           if (TRAFFICS_RE.test(metric.label)) {
-            const total = metric.data.reduce(
-              (sum, d) => sum + Number(d.total || 0),
-              0
-            );
             const platform = integration.providerIdentifier;
-            platformValues.set(
-              platform,
-              (platformValues.get(platform) || 0) + total
-            );
+            for (const point of metric.data) {
+              const val = Number(point.total || 0);
+              platformValues.set(
+                platform,
+                (platformValues.get(platform) || 0) + val
+              );
+              if (dayjs(point.date).isAfter(midDate)) {
+                platformRecent.set(
+                  platform,
+                  (platformRecent.get(platform) || 0) + val
+                );
+              } else {
+                platformOlder.set(
+                  platform,
+                  (platformOlder.get(platform) || 0) + val
+                );
+              }
+            }
           }
         }
       } catch {
@@ -162,15 +190,30 @@ export class DashboardService {
     );
 
     const result = Array.from(platformValues.entries()).map(
-      ([platform, value]) => ({
-        platform,
-        value,
-        percentage:
-          grandTotal > 0
-            ? Math.round((value / grandTotal) * 10000) / 100
-            : 0,
-        delta: 0,
-      })
+      ([platform, value]) => {
+        const recent = platformRecent.get(platform) || 0;
+        const older = platformOlder.get(platform) || 0;
+        // Half-over-half percentage change:
+        //   older > 0  → ((recent - older) / older) * 100
+        //   older == 0 && recent > 0 → 100 (new traffic, treat as +100%)
+        //   both 0 → 0
+        // Frontend: delta > 0 → ↑ green, delta < 0 → ↓ red, delta === 0 → neutral
+        const delta =
+          older > 0
+            ? Math.round(((recent - older) / older) * 10000) / 100
+            : recent > 0
+              ? 100
+              : 0;
+        return {
+          platform,
+          value,
+          percentage:
+            grandTotal > 0
+              ? Math.round((value / grandTotal) * 10000) / 100
+              : 0,
+          delta,
+        };
+      }
     );
 
     result.sort((a, b) => b.value - a.value);
