@@ -34,6 +34,12 @@ export interface IAuthenticator {
     postId: string,
     fromDate: number,
   ): Promise<AnalyticsData[]>;
+  batchPostAnalytics?(
+    integrationId: string,
+    accessToken: string,
+    postIds: string[],
+    fromDate: number,
+  ): Promise<BatchPostAnalyticsResult>;
   changeNickname?(
     id: string,
     accessToken: string,
@@ -50,6 +56,10 @@ export interface AnalyticsData {
   label: string;
   data: Array<{ total: string; date: string }>;
   percentageChange: number;
+}
+
+export interface BatchPostAnalyticsResult {
+  [postId: string]: AnalyticsData[];
 }
 
 

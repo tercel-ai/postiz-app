@@ -54,6 +54,7 @@ export class DashboardRepository {
         id: true,
         releaseId: true,
         publishDate: true,
+        integrationId: true,
         integration: {
           select: {
             id: true,

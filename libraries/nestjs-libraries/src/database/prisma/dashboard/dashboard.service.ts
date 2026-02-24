@@ -1,11 +1,13 @@
 import { Injectable } from '@nestjs/common';
-import { Organization } from '@prisma/client';
+import { Integration, Organization } from '@prisma/client';
 import dayjs from 'dayjs';
 import isoWeek from 'dayjs/plugin/isoWeek';
 import { DashboardRepository } from '@gitroom/nestjs-libraries/database/prisma/dashboard/dashboard.repository';
 import { IntegrationService } from '@gitroom/nestjs-libraries/database/prisma/integrations/integration.service';
 import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.service';
-import { AnalyticsData } from '@gitroom/nestjs-libraries/integrations/social/social.integrations.interface';
+import { IntegrationManager } from '@gitroom/nestjs-libraries/integrations/integration.manager';
+import { RefreshIntegrationService } from '@gitroom/nestjs-libraries/integrations/refresh.integration.service';
+import { AnalyticsData, BatchPostAnalyticsResult } from '@gitroom/nestjs-libraries/integrations/social/social.integrations.interface';
 import { ioRedis } from '@gitroom/nestjs-libraries/redis/redis.service';
 
 dayjs.extend(isoWeek);
@@ -26,7 +28,9 @@ export class DashboardService {
   constructor(
     private _dashboardRepository: DashboardRepository,
     private _integrationService: IntegrationService,
-    private _postsService: PostsService
+    private _postsService: PostsService,
+    private _integrationManager: IntegrationManager,
+    private _refreshIntegrationService: RefreshIntegrationService
   ) {}
 
   async getSummary(org: Organization) {
@@ -328,76 +332,105 @@ export class DashboardService {
       }
     }
 
-    let postsFailed = 0;
-    const BATCH_SIZE = 5;
-    // Track consecutive failures per platform to skip rate-limited platforms early
-    const platformFailCount = new Map<string, number>();
-    const PLATFORM_FAIL_THRESHOLD = 2;
+    // Build integration lookup: integrationId -> full Integration object (with token)
+    const integrationById = new Map<string, Integration>();
+    for (const integration of activeIntegrations) {
+      integrationById.set(integration.id, integration);
+    }
 
-    for (let i = 0; i < posts.length; i += BATCH_SIZE) {
-      const batch = posts.slice(i, i + BATCH_SIZE);
-      const results = await Promise.allSettled(
-        batch.map((post) => {
-          const platform = post.integration?.providerIdentifier ?? 'unknown';
-          // Skip platforms that have hit consecutive failure threshold (likely rate-limited)
-          if (
-            (platformFailCount.get(platform) || 0) >= PLATFORM_FAIL_THRESHOLD
-          ) {
-            return Promise.resolve([] as AnalyticsData[]);
-          }
-          return this._postsService.checkPostAnalytics(org.id, post.id, days);
-        })
+    // Group posts by integrationId
+    const postsByIntegration = new Map<
+      string,
+      Array<{ id: string; releaseId: string | null; platform: string }>
+    >();
+    for (const post of posts) {
+      const intId = post.integrationId;
+      if (!intId) continue;
+      if (!postsByIntegration.has(intId)) {
+        postsByIntegration.set(intId, []);
+      }
+      postsByIntegration.get(intId)!.push({
+        id: post.id,
+        releaseId: post.releaseId,
+        platform: post.integration?.providerIdentifier ?? 'unknown',
+      });
+    }
+
+    let postsFailed = 0;
+
+    // Process each integration group
+    for (const [integrationId, groupPosts] of postsByIntegration) {
+      const fullIntegration = integrationById.get(integrationId);
+      if (!fullIntegration) {
+        postsFailed += groupPosts.length;
+        continue;
+      }
+
+      const provider = this._integrationManager.getSocialIntegration(
+        fullIntegration.providerIdentifier
       );
 
-      for (let j = 0; j < results.length; j++) {
-        const result = results[j];
-        const post = batch[j];
-        const platform = post.integration?.providerIdentifier ?? 'unknown';
+      // Batch path: provider supports batchPostAnalytics
+      if (provider?.batchPostAnalytics) {
+        const batchAnalytics = await this._processBatchAnalytics(
+          org.id,
+          fullIntegration,
+          provider.batchPostAnalytics.bind(provider),
+          groupPosts,
+          days
+        );
 
-        if (result.status === 'rejected' || !result.value?.length) {
-          if (result.status === 'rejected') {
-            postsFailed++;
-            platformFailCount.set(
-              platform,
-              (platformFailCount.get(platform) || 0) + 1
-            );
-          }
-          continue;
+        for (const post of groupPosts) {
+          const metrics = batchAnalytics.get(post.id);
+          if (!metrics || metrics.length === 0) continue;
+
+          const platformData = platformMap.get(post.platform);
+          if (!platformData) continue;
+          platformData.post_count++;
+          this._accumulateMetrics(metrics, totals, platformData);
         }
+      } else {
+        // Fallback path: per-post calls with circuit breaker
+        const platformFailCount = new Map<string, number>();
+        const PLATFORM_FAIL_THRESHOLD = 2;
+        const BATCH_SIZE = 5;
 
-        // Reset fail count on success
-        platformFailCount.set(platform, 0);
-
-        if (!platformMap.has(platform)) {
-          platformMap.set(platform, {
-            views: 0,
-            likes: 0,
-            comments: 0,
-            saves: 0,
-            post_count: 0,
-          });
-        }
-        const platformData = platformMap.get(platform)!;
-        platformData.post_count++;
-
-        for (const metric of result.value) {
-          const total = metric.data.reduce(
-            (sum, d) => sum + Number(d.total || 0),
-            0
+        for (let i = 0; i < groupPosts.length; i += BATCH_SIZE) {
+          const batch = groupPosts.slice(i, i + BATCH_SIZE);
+          const results = await Promise.allSettled(
+            batch.map((post) => {
+              if (
+                (platformFailCount.get(post.platform) || 0) >=
+                PLATFORM_FAIL_THRESHOLD
+              ) {
+                return Promise.resolve([] as AnalyticsData[]);
+              }
+              return this._postsService.checkPostAnalytics(
+                org.id,
+                post.id,
+                days
+              );
+            })
           );
 
-          if (VIEWS_RE.test(metric.label)) {
-            totals.views += total;
-            platformData.views += total;
-          } else if (LIKES_RE.test(metric.label)) {
-            totals.likes += total;
-            platformData.likes += total;
-          } else if (COMMENTS_RE.test(metric.label)) {
-            totals.comments += total;
-            platformData.comments += total;
-          } else if (SAVES_RE.test(metric.label)) {
-            totals.saves += total;
-            platformData.saves += total;
+          for (let j = 0; j < results.length; j++) {
+            const result = results[j];
+            const post = batch[j];
+
+            if (result.status === 'rejected' || !result.value?.length) {
+              if (result.status === 'rejected') postsFailed++;
+              platformFailCount.set(
+                post.platform,
+                (platformFailCount.get(post.platform) || 0) + 1
+              );
+              continue;
+            }
+
+            platformFailCount.set(post.platform, 0);
+            const platformData = platformMap.get(post.platform);
+            if (!platformData) continue;
+            platformData.post_count++;
+            this._accumulateMetrics(result.value, totals, platformData);
           }
         }
       }
@@ -420,5 +453,115 @@ export class DashboardService {
 
     await ioRedis.set(cacheKey, JSON.stringify(response), 'EX', CACHE_TTL);
     return response;
+  }
+
+  private async _processBatchAnalytics(
+    orgId: string,
+    integration: Integration,
+    batchPostAnalytics: (integrationId: string, accessToken: string, postIds: string[], fromDate: number) => Promise<BatchPostAnalyticsResult>,
+    posts: Array<{ id: string; releaseId: string | null; platform: string }>,
+    days: number
+  ): Promise<Map<string, AnalyticsData[]>> {
+    const result = new Map<string, AnalyticsData[]>();
+
+    // Check per-post cache first, collect uncached posts
+    const postsWithRelease = posts.filter((p): p is typeof p & { releaseId: string } => !!p.releaseId);
+    const cacheKeys = postsWithRelease.map((p) => `integration:${orgId}:${p.id}:${days}`);
+    const cachedValues = cacheKeys.length > 0 ? await ioRedis.mget(...cacheKeys) : [];
+
+    const uncachedPosts: Array<{ id: string; releaseId: string }> = [];
+    for (let i = 0; i < postsWithRelease.length; i++) {
+      const post = postsWithRelease[i];
+      const cached = cachedValues[i];
+      if (cached) {
+        result.set(post.id, JSON.parse(cached));
+      } else {
+        uncachedPosts.push({ id: post.id, releaseId: post.releaseId });
+      }
+    }
+
+    if (uncachedPosts.length === 0) {
+      return result;
+    }
+
+    // Refresh token if expired (once for the entire integration)
+    let token = integration.token;
+    if (dayjs(integration.tokenExpiration).isBefore(dayjs())) {
+      try {
+        const refreshed =
+          await this._refreshIntegrationService.refresh(integration);
+        if (!refreshed || !refreshed.accessToken) {
+          return result;
+        }
+        token = refreshed.accessToken;
+      } catch {
+        return result;
+      }
+    }
+
+    try {
+      const batchResult = await batchPostAnalytics(
+        integration.internalId,
+        token,
+        uncachedPosts.map((p) => p.releaseId),
+        days
+      );
+
+      // Map results back by releaseId and cache per-post
+      for (const post of uncachedPosts) {
+        const analytics = batchResult[post.releaseId] || [];
+        result.set(post.id, analytics);
+
+        await ioRedis.set(
+          `integration:${orgId}:${post.id}:${days}`,
+          JSON.stringify(analytics),
+          'EX',
+          CACHE_TTL
+        );
+      }
+    } catch (err: any) {
+      if (err?.code === 429 || err?.rateLimit) {
+        console.log(
+          `Batch analytics rate limited for integration ${integration.id}, returning cached data only`
+        );
+      } else {
+        console.log('Error in batch post analytics:', err);
+      }
+      // Uncached posts get empty arrays
+      for (const post of uncachedPosts) {
+        if (!result.has(post.id)) {
+          result.set(post.id, []);
+        }
+      }
+    }
+
+    return result;
+  }
+
+  private _accumulateMetrics(
+    metrics: AnalyticsData[],
+    totals: { views: number; likes: number; comments: number; saves: number },
+    platformData: { views: number; likes: number; comments: number; saves: number }
+  ) {
+    for (const metric of metrics) {
+      const total = metric.data.reduce(
+        (sum, d) => sum + Number(d.total || 0),
+        0
+      );
+
+      if (VIEWS_RE.test(metric.label)) {
+        totals.views += total;
+        platformData.views += total;
+      } else if (LIKES_RE.test(metric.label)) {
+        totals.likes += total;
+        platformData.likes += total;
+      } else if (COMMENTS_RE.test(metric.label)) {
+        totals.comments += total;
+        platformData.comments += total;
+      } else if (SAVES_RE.test(metric.label)) {
+        totals.saves += total;
+        platformData.saves += total;
+      }
+    }
   }
 }

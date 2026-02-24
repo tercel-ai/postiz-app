@@ -132,11 +132,15 @@ export class PostsService {
           : 3600
       );
       return loadAnalytics;
-    } catch (e) {
-      console.log(e);
+    } catch (e: any) {
       if (e instanceof RefreshToken) {
         return this.checkPostAnalytics(orgId, postId, date, true);
       }
+      // Re-throw rate limit errors so callers (e.g. dashboard) can detect and skip
+      if (e?.code === 429 || e?.rateLimit) {
+        throw e;
+      }
+      console.log(e);
     }
 
     return [];

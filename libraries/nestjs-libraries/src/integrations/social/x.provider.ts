@@ -2,6 +2,7 @@ import { TweetV2, TwitterApi } from 'twitter-api-v2';
 import {
   AnalyticsData,
   AuthTokenDetails,
+  BatchPostAnalyticsResult,
   PostDetails,
   PostResponse,
   SocialProvider,
@@ -19,6 +20,7 @@ import { uniqBy } from 'lodash';
 import { stripHtmlValidation } from '@gitroom/helpers/utils/strip.html.validation';
 import { XDto } from '@gitroom/nestjs-libraries/dtos/posts/providers-settings/x.dto';
 import { Rules } from '@gitroom/nestjs-libraries/chat/rules.description.decorator';
+import { ioRedis } from '@gitroom/nestjs-libraries/redis/redis.service';
 
 @Rules(
   'X can have maximum 4 pictures, or maximum one video, it can also be without attachments'
@@ -308,6 +310,19 @@ export class XProvider extends SocialAbstract implements SocialProvider {
     });
   }
 
+  private static readonly RATE_LIMIT_KEY = 'x:tweets:rate-limit-reset';
+
+  private async _isRateLimited(): Promise<boolean> {
+    const resetStr = await ioRedis.get(XProvider.RATE_LIMIT_KEY);
+    if (!resetStr) return false;
+    return Math.floor(Date.now() / 1000) < Number(resetStr);
+  }
+
+  private async _setRateLimited(resetEpoch: number): Promise<void> {
+    const ttl = Math.max(resetEpoch - Math.floor(Date.now() / 1000), 60);
+    await ioRedis.set(XProvider.RATE_LIMIT_KEY, String(resetEpoch), 'EX', ttl);
+  }
+
   private async uploadMedia(
     client: TwitterApi,
     postDetails: PostDetails<any>[]
@@ -510,6 +525,10 @@ export class XProvider extends SocialAbstract implements SocialProvider {
       return [];
     }
 
+    if (await this._isRateLimited()) {
+      return [];
+    }
+
     const until = dayjs().endOf('day');
     const since = dayjs().subtract(date, 'day');
 
@@ -585,8 +604,17 @@ export class XProvider extends SocialAbstract implements SocialProvider {
           },
         ],
       }));
-    } catch (err) {
-      console.log(err);
+    } catch (err: any) {
+      if (err?.code === 429 || err?.rateLimit) {
+        if (err?.rateLimit?.reset) {
+          await this._setRateLimited(err.rateLimit.reset);
+        }
+        console.log(
+          `X API rate limited for analytics, reset at ${err?.rateLimit?.reset || 'unknown'}`
+        );
+      } else {
+        console.log(err);
+      }
     }
     return [];
   }
@@ -598,6 +626,10 @@ export class XProvider extends SocialAbstract implements SocialProvider {
     date: number
   ): Promise<AnalyticsData[]> {
     if (process.env.DISABLE_X_ANALYTICS) {
+      return [];
+    }
+
+    if (await this._isRateLimited()) {
       return [];
     }
 
@@ -676,15 +708,120 @@ export class XProvider extends SocialAbstract implements SocialProvider {
       return result;
     } catch (err: any) {
       if (err?.code === 429 || err?.rateLimit) {
+        if (err?.rateLimit?.reset) {
+          await this._setRateLimited(err.rateLimit.reset);
+        }
         console.log(
           `X API rate limited for post ${postId}, reset at ${err?.rateLimit?.reset || 'unknown'}`
         );
-      } else {
-        console.log('Error fetching X post analytics:', err);
+        throw err;
       }
+      console.log('Error fetching X post analytics:', err);
     }
 
     return [];
+  }
+
+  async batchPostAnalytics(
+    integrationId: string,
+    accessToken: string,
+    postIds: string[],
+    date: number
+  ): Promise<BatchPostAnalyticsResult> {
+    if (process.env.DISABLE_X_ANALYTICS || postIds.length === 0) {
+      return {};
+    }
+
+    if (await this._isRateLimited()) {
+      return {};
+    }
+
+    const today = dayjs().format('YYYY-MM-DD');
+
+    const [accessTokenSplit, accessSecretSplit] = accessToken.split(':');
+    const client = new TwitterApi({
+      appKey: process.env.X_API_KEY!,
+      appSecret: process.env.X_API_SECRET!,
+      accessToken: accessTokenSplit,
+      accessSecret: accessSecretSplit,
+    });
+
+    const result: BatchPostAnalyticsResult = {};
+
+    try {
+      // X API v2.tweets accepts max 100 IDs per request
+      for (let i = 0; i < postIds.length; i += 100) {
+        const chunk = postIds.slice(i, i + 100);
+        const data = await client.v2.tweets(chunk, {
+          'tweet.fields': ['public_metrics'],
+        });
+
+        for (const tweet of data.data) {
+          const metrics = tweet.public_metrics;
+          if (!metrics) continue;
+
+          const analytics: AnalyticsData[] = [];
+
+          if (metrics.impression_count !== undefined) {
+            analytics.push({
+              label: 'Impressions',
+              percentageChange: 0,
+              data: [{ total: String(metrics.impression_count), date: today }],
+            });
+          }
+          if (metrics.like_count !== undefined) {
+            analytics.push({
+              label: 'Likes',
+              percentageChange: 0,
+              data: [{ total: String(metrics.like_count), date: today }],
+            });
+          }
+          if (metrics.retweet_count !== undefined) {
+            analytics.push({
+              label: 'Retweets',
+              percentageChange: 0,
+              data: [{ total: String(metrics.retweet_count), date: today }],
+            });
+          }
+          if (metrics.reply_count !== undefined) {
+            analytics.push({
+              label: 'Replies',
+              percentageChange: 0,
+              data: [{ total: String(metrics.reply_count), date: today }],
+            });
+          }
+          if (metrics.quote_count !== undefined) {
+            analytics.push({
+              label: 'Quotes',
+              percentageChange: 0,
+              data: [{ total: String(metrics.quote_count), date: today }],
+            });
+          }
+          if (metrics.bookmark_count !== undefined) {
+            analytics.push({
+              label: 'Bookmarks',
+              percentageChange: 0,
+              data: [{ total: String(metrics.bookmark_count), date: today }],
+            });
+          }
+
+          result[tweet.id] = analytics;
+        }
+      }
+    } catch (err: any) {
+      if (err?.code === 429 || err?.rateLimit) {
+        if (err?.rateLimit?.reset) {
+          await this._setRateLimited(err.rateLimit.reset);
+        }
+        console.log(
+          `X API rate limited for batch post analytics, reset at ${err?.rateLimit?.reset || 'unknown'}`
+        );
+        throw err;
+      }
+      console.log('Error fetching X batch post analytics:', err);
+    }
+
+    return result;
   }
 
   override async mention(token: string, d: { query: string }) {
