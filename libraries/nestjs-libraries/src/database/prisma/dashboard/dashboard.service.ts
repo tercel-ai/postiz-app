@@ -330,25 +330,44 @@ export class DashboardService {
 
     let postsFailed = 0;
     const BATCH_SIZE = 5;
+    // Track consecutive failures per platform to skip rate-limited platforms early
+    const platformFailCount = new Map<string, number>();
+    const PLATFORM_FAIL_THRESHOLD = 2;
 
     for (let i = 0; i < posts.length; i += BATCH_SIZE) {
       const batch = posts.slice(i, i + BATCH_SIZE);
       const results = await Promise.allSettled(
-        batch.map((post) =>
-          this._postsService.checkPostAnalytics(org.id, post.id, days)
-        )
+        batch.map((post) => {
+          const platform = post.integration?.providerIdentifier ?? 'unknown';
+          // Skip platforms that have hit consecutive failure threshold (likely rate-limited)
+          if (
+            (platformFailCount.get(platform) || 0) >= PLATFORM_FAIL_THRESHOLD
+          ) {
+            return Promise.resolve([] as AnalyticsData[]);
+          }
+          return this._postsService.checkPostAnalytics(org.id, post.id, days);
+        })
       );
 
       for (let j = 0; j < results.length; j++) {
         const result = results[j];
         const post = batch[j];
+        const platform = post.integration?.providerIdentifier ?? 'unknown';
 
         if (result.status === 'rejected' || !result.value?.length) {
-          if (result.status === 'rejected') postsFailed++;
+          if (result.status === 'rejected') {
+            postsFailed++;
+            platformFailCount.set(
+              platform,
+              (platformFailCount.get(platform) || 0) + 1
+            );
+          }
           continue;
         }
 
-        const platform = post.integration?.providerIdentifier ?? 'unknown';
+        // Reset fail count on success
+        platformFailCount.set(platform, 0);
+
         if (!platformMap.has(platform)) {
           platformMap.set(platform, {
             views: 0,

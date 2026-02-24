@@ -674,8 +674,14 @@ export class XProvider extends SocialAbstract implements SocialProvider {
       }
 
       return result;
-    } catch (err) {
-      console.log('Error fetching X post analytics:', err);
+    } catch (err: any) {
+      if (err?.code === 429 || err?.rateLimit) {
+        console.log(
+          `X API rate limited for post ${postId}, reset at ${err?.rateLimit?.reset || 'unknown'}`
+        );
+      } else {
+        console.log('Error fetching X post analytics:', err);
+      }
     }
 
     return [];
