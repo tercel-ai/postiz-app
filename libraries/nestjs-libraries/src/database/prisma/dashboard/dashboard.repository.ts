@@ -39,6 +39,33 @@ export class DashboardRepository {
     });
   }
 
+  getPublishedPostsWithRelease(orgId: string, sinceDays: number) {
+    return this._post.model.post.findMany({
+      where: {
+        organizationId: orgId,
+        deletedAt: null,
+        state: 'PUBLISHED',
+        releaseId: { not: null },
+        publishDate: {
+          gte: dayjs().subtract(sinceDays, 'day').toDate(),
+        },
+      },
+      select: {
+        id: true,
+        releaseId: true,
+        publishDate: true,
+        integration: {
+          select: {
+            id: true,
+            providerIdentifier: true,
+          },
+        },
+      },
+      orderBy: { publishDate: 'desc' },
+      take: 100,
+    });
+  }
+
   getPostsForTrend(orgId: string, sinceDays: number) {
     return this._post.model.post.findMany({
       where: {

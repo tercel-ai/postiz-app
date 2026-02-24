@@ -4,6 +4,7 @@ import dayjs from 'dayjs';
 import isoWeek from 'dayjs/plugin/isoWeek';
 import { DashboardRepository } from '@gitroom/nestjs-libraries/database/prisma/dashboard/dashboard.repository';
 import { IntegrationService } from '@gitroom/nestjs-libraries/database/prisma/integrations/integration.service';
+import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.service';
 import { AnalyticsData } from '@gitroom/nestjs-libraries/integrations/social/social.integrations.interface';
 import { ioRedis } from '@gitroom/nestjs-libraries/redis/redis.service';
 
@@ -12,6 +13,11 @@ dayjs.extend(isoWeek);
 const IMPRESSIONS_RE = /impression|views|page.views|reach/i;
 const TRAFFICS_RE = /click|engagement|traffic/i;
 
+const VIEWS_RE = /^(impression|views|reach|unique.impression)/i;
+const LIKES_RE = /^(like|reaction)/i;
+const COMMENTS_RE = /^(comment|repl)/i;
+const SAVES_RE = /^(save|bookmark|favorite)/i;
+
 const CACHE_TTL =
   !process.env.NODE_ENV || process.env.NODE_ENV === 'development' ? 1 : 3600;
 
@@ -19,7 +25,8 @@ const CACHE_TTL =
 export class DashboardService {
   constructor(
     private _dashboardRepository: DashboardRepository,
-    private _integrationService: IntegrationService
+    private _integrationService: IntegrationService,
+    private _postsService: PostsService
   ) {}
 
   async getSummary(org: Organization) {
@@ -140,6 +147,14 @@ export class DashboardService {
     const platformValues = new Map<string, number>();
     const platformRecent = new Map<string, number>();
     const platformOlder = new Map<string, number>();
+
+    // Pre-populate all connected platforms so they always appear in the result
+    for (const integration of integrations) {
+      const platform = integration.providerIdentifier;
+      if (!platformValues.has(platform)) {
+        platformValues.set(platform, 0);
+      }
+    }
 
     // Split 30-day window into two halves at the midpoint (day 15).
     // "older" = days 16-30 ago, "recent" = days 0-15 ago.
@@ -279,5 +294,112 @@ export class DashboardService {
 
     await ioRedis.set(cacheKey, JSON.stringify(result), 'EX', CACHE_TTL);
     return result;
+  }
+
+  async getPostEngagement(org: Organization, days: number = 30) {
+    const cacheKey = `dashboard:post-engagement:${org.id}:${days}`;
+    const cached = await ioRedis.get(cacheKey);
+    if (cached) {
+      return JSON.parse(cached);
+    }
+
+    const [posts, activeIntegrations] = await Promise.all([
+      this._dashboardRepository.getPublishedPostsWithRelease(org.id, days),
+      this._dashboardRepository.getActiveIntegrations(org.id),
+    ]);
+
+    const totals = { views: 0, likes: 0, comments: 0, saves: 0 };
+    const platformMap = new Map<
+      string,
+      { views: number; likes: number; comments: number; saves: number; post_count: number }
+    >();
+
+    // Pre-populate all connected platforms so they always appear in the result
+    for (const integration of activeIntegrations) {
+      const platform = integration.providerIdentifier;
+      if (!platformMap.has(platform)) {
+        platformMap.set(platform, {
+          views: 0,
+          likes: 0,
+          comments: 0,
+          saves: 0,
+          post_count: 0,
+        });
+      }
+    }
+
+    let postsFailed = 0;
+    const BATCH_SIZE = 5;
+
+    for (let i = 0; i < posts.length; i += BATCH_SIZE) {
+      const batch = posts.slice(i, i + BATCH_SIZE);
+      const results = await Promise.allSettled(
+        batch.map((post) =>
+          this._postsService.checkPostAnalytics(org.id, post.id, days)
+        )
+      );
+
+      for (let j = 0; j < results.length; j++) {
+        const result = results[j];
+        const post = batch[j];
+
+        if (result.status === 'rejected' || !result.value?.length) {
+          if (result.status === 'rejected') postsFailed++;
+          continue;
+        }
+
+        const platform = post.integration?.providerIdentifier ?? 'unknown';
+        if (!platformMap.has(platform)) {
+          platformMap.set(platform, {
+            views: 0,
+            likes: 0,
+            comments: 0,
+            saves: 0,
+            post_count: 0,
+          });
+        }
+        const platformData = platformMap.get(platform)!;
+        platformData.post_count++;
+
+        for (const metric of result.value) {
+          const total = metric.data.reduce(
+            (sum, d) => sum + Number(d.total || 0),
+            0
+          );
+
+          if (VIEWS_RE.test(metric.label)) {
+            totals.views += total;
+            platformData.views += total;
+          } else if (LIKES_RE.test(metric.label)) {
+            totals.likes += total;
+            platformData.likes += total;
+          } else if (COMMENTS_RE.test(metric.label)) {
+            totals.comments += total;
+            platformData.comments += total;
+          } else if (SAVES_RE.test(metric.label)) {
+            totals.saves += total;
+            platformData.saves += total;
+          }
+        }
+      }
+    }
+
+    const by_platform = Array.from(platformMap.entries()).map(
+      ([platform, data]) => ({ platform, ...data })
+    );
+
+    const response = {
+      totals,
+      by_platform,
+      meta: {
+        posts_analyzed: posts.length - postsFailed,
+        posts_failed: postsFailed,
+        posts_total: posts.length,
+        days,
+      },
+    };
+
+    await ioRedis.set(cacheKey, JSON.stringify(response), 'EX', CACHE_TTL);
+    return response;
   }
 }

@@ -3,7 +3,7 @@ import { Organization } from '@prisma/client';
 import { GetOrgFromRequest } from '@gitroom/nestjs-libraries/user/org.from.request';
 import { ApiTags } from '@nestjs/swagger';
 import { DashboardService } from '@gitroom/nestjs-libraries/database/prisma/dashboard/dashboard.service';
-import { PostsTrendQueryDto, ImpressionsQueryDto } from '@gitroom/nestjs-libraries/dtos/dashboard/dashboard.dto';
+import { PostsTrendQueryDto, ImpressionsQueryDto, PostEngagementQueryDto } from '@gitroom/nestjs-libraries/dtos/dashboard/dashboard.dto';
 
 @ApiTags('Dashboard')
 @Controller('/dashboard')
@@ -34,5 +34,13 @@ export class DashboardController {
     @Query() query: ImpressionsQueryDto
   ) {
     return this._dashboardService.getImpressions(org, query.period);
+  }
+
+  @Get('/post-engagement')
+  async getPostEngagement(
+    @GetOrgFromRequest() org: Organization,
+    @Query() query: PostEngagementQueryDto
+  ) {
+    return this._dashboardService.getPostEngagement(org, query.days);
   }
 }
