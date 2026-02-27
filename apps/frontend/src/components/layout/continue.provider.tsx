@@ -93,11 +93,10 @@ const ModalContent: FC<{
           editor: 'normal',
           additionalSettings: '',
           display: '',
-          time: [
-            {
-              time: 0,
-            },
-          ],
+          time: {
+            version: 2,
+            schedules: [{ type: 'daily', time: 0 }],
+          },
           id: continueId,
           type: '',
           name: '',
