@@ -3,6 +3,7 @@ import { Injectable } from '@nestjs/common';
 import { Post as PostBody } from '@gitroom/nestjs-libraries/dtos/posts/create.post.dto';
 import { APPROVED_SUBMIT_FOR_ORDER, Post, State } from '@prisma/client';
 import { GetPostsDto } from '@gitroom/nestjs-libraries/dtos/posts/get.posts.dto';
+import { GetPostsListDto } from '@gitroom/nestjs-libraries/dtos/posts/get.posts-list.dto';
 import dayjs from 'dayjs';
 import isoWeek from 'dayjs/plugin/isoWeek';
 import weekOfYear from 'dayjs/plugin/weekOfYear';
@@ -91,6 +92,58 @@ export class PostsRepository {
         },
       },
     });
+  }
+
+  async getPostsList(orgId: string, query: GetPostsListDto) {
+    const skip = (query.page - 1) * query.pageSize;
+    const where = {
+      organizationId: orgId,
+      deletedAt: null,
+      parentPostId: null,
+      ...(query.state ? { state: query.state } : {}),
+      ...(query.integrationId ? { integrationId: query.integrationId } : {}),
+    };
+
+    const [results, total] = await Promise.all([
+      this._post.model.post.findMany({
+        where,
+        orderBy: {
+          [query.sortBy]: query.sortOrder,
+        },
+        select: {
+          id: true,
+          content: true,
+          publishDate: true,
+          releaseURL: true,
+          state: true,
+          group: true,
+          tags: {
+            select: {
+              tag: true,
+            },
+          },
+          integration: {
+            select: {
+              id: true,
+              providerIdentifier: true,
+              name: true,
+              picture: true,
+            },
+          },
+        },
+        skip,
+        take: query.pageSize,
+      }),
+      this._post.model.post.count({ where }),
+    ]);
+
+    return {
+      results,
+      total,
+      page: query.page,
+      pageSize: query.pageSize,
+      totalPages: Math.ceil(total / query.pageSize),
+    };
   }
 
   updateImages(id: string, images: string) {
