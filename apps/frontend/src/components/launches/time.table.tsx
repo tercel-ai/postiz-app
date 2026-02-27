@@ -1,7 +1,11 @@
 'use client';
 
 import React, { FC, useCallback, useMemo, useState } from 'react';
-import { Integrations } from '@gitroom/frontend/components/launches/calendar.context';
+import {
+  Integrations,
+  ScheduleRule,
+  ScheduleRuleType,
+} from '@gitroom/frontend/components/launches/calendar.context';
 import dayjs from 'dayjs';
 import { deleteDialog } from '@gitroom/react/helpers/delete.dialog';
 import { Select } from '@gitroom/react/form/select';
@@ -34,6 +38,45 @@ const minutes = [...Array(60).keys()].map((i) => ({
   value: i,
 }));
 
+const ruleTypeLabels: Record<ScheduleRuleType, string> = {
+  daily: 'Every Day',
+  weekday: 'Weekdays (Mon-Fri)',
+  dayOfWeek: 'Day of Week',
+  specificDate: 'Specific Date',
+};
+
+const dayOfWeekLabels = [
+  'Sunday',
+  'Monday',
+  'Tuesday',
+  'Wednesday',
+  'Thursday',
+  'Friday',
+  'Saturday',
+];
+
+const ruleTypeBadgeColors: Record<ScheduleRuleType, string> = {
+  daily: 'bg-[#612BD3]/15 text-[#612BD3]',
+  weekday: 'bg-blue-500/15 text-blue-400',
+  dayOfWeek: 'bg-amber-500/15 text-amber-400',
+  specificDate: 'bg-emerald-500/15 text-emerald-400',
+};
+
+function formatRuleLabel(rule: ScheduleRule): string {
+  switch (rule.type) {
+    case 'daily':
+      return 'Every Day';
+    case 'weekday':
+      return 'Weekdays';
+    case 'dayOfWeek':
+      return dayOfWeekLabels[rule.day ?? 0];
+    case 'specificDate':
+      return rule.date ?? '';
+    default:
+      return '';
+  }
+}
+
 export const TimeTable: FC<{
   integration: Integrations;
   mutate: () => void;
@@ -43,7 +86,15 @@ export const TimeTable: FC<{
     integration: { time },
     mutate,
   } = props;
-  const [currentTimes, setCurrentTimes] = useState([...time]);
+
+  const [schedules, setSchedules] = useState<ScheduleRule[]>([
+    ...(time?.schedules || []),
+  ]);
+  const [ruleType, setRuleType] = useState<ScheduleRuleType>('daily');
+  const [dayOfWeek, setDayOfWeek] = useState(1);
+  const [specificDate, setSpecificDate] = useState(
+    dayjs().format('YYYY-MM-DD')
+  );
   const [hour, setHour] = useState(0);
   const [minute, setMinute] = useState(0);
   const fetch = useFetch();
@@ -79,12 +130,12 @@ export const TimeTable: FC<{
       ) {
         return;
       }
-      setCurrentTimes((prev) => prev.filter((_, i) => i !== index));
+      setSchedules((prev) => prev.filter((_, i) => i !== index));
     },
     []
   );
 
-  const addHour = useCallback(() => {
+  const addSlot = useCallback(() => {
     const calculateMinutes =
       newDayjs()
         .utc()
@@ -93,42 +144,58 @@ export const TimeTable: FC<{
         .add(minute, 'minutes')
         .diff(newDayjs().utc().startOf('day'), 'minutes') -
       dayjs.tz().utcOffset();
-    setCurrentTimes((prev) => [
-      ...prev,
-      {
-        time: calculateMinutes,
-      },
-    ]);
-  }, [hour, minute]);
 
-  const times = useMemo(() => {
+    const baseRule = { time: calculateMinutes };
+
+    let newRule: ScheduleRule;
+    switch (ruleType) {
+      case 'daily':
+        newRule = { type: 'daily', ...baseRule };
+        break;
+      case 'weekday':
+        newRule = { type: 'weekday', ...baseRule };
+        break;
+      case 'dayOfWeek':
+        newRule = { type: 'dayOfWeek', day: dayOfWeek, ...baseRule };
+        break;
+      case 'specificDate':
+        newRule = { type: 'specificDate', date: specificDate, ...baseRule };
+        break;
+    }
+
+    setSchedules((prev) => [...prev, newRule]);
+  }, [hour, minute, ruleType, dayOfWeek, specificDate]);
+
+  const displaySchedules = useMemo(() => {
     return sortBy(
-      currentTimes.map(({ time }) => ({
-        value: time,
+      schedules.map((rule, originalIndex) => ({
+        rule,
+        originalIndex,
         formatted: dayjs
           .utc()
           .startOf('day')
-          .add(time, 'minutes')
+          .add(rule.time, 'minutes')
           .local()
           .format('HH:mm'),
       })),
-      (p) => p.value
+      [(p) => p.rule.type, (p) => p.rule.time]
     );
-  }, [currentTimes]);
+  }, [schedules]);
 
   const save = useCallback(async () => {
     await fetch(`/integrations/${props.integration.id}/time`, {
       method: 'POST',
       body: JSON.stringify({
-        time: currentTimes,
+        version: 2,
+        schedules,
       }),
     });
     mutate();
     modal.closeAll();
-  }, [currentTimes]);
+  }, [schedules]);
 
   return (
-    <div className="relative w-full max-w-[400px] mx-auto">
+    <div className="relative w-full max-w-[460px] mx-auto">
       {/* Add Time Slot Section */}
       <div className="bg-newBgColorInner rounded-[12px] p-[20px] border border-newTableBorder">
         <div className="text-[15px] font-semibold mb-[16px] flex items-center gap-[8px]">
@@ -136,6 +203,64 @@ export const TimeTable: FC<{
           {t('add_time_slot', 'Add Time Slot')}
         </div>
 
+        {/* Rule Type Selector */}
+        <div className="mb-[12px]">
+          <Select
+            label={t('rule_type', 'Rule Type')}
+            name="ruleType"
+            disableForm={true}
+            hideErrors={true}
+            value={ruleType}
+            onChange={(e) =>
+              setRuleType(e.target.value as ScheduleRuleType)
+            }
+          >
+            {(
+              Object.entries(ruleTypeLabels) as [ScheduleRuleType, string][]
+            ).map(([key, label]) => (
+              <option key={key} value={key}>
+                {label}
+              </option>
+            ))}
+          </Select>
+        </div>
+
+        {/* Day of Week selector */}
+        {ruleType === 'dayOfWeek' && (
+          <div className="mb-[12px]">
+            <Select
+              label={t('day_of_week', 'Day of Week')}
+              name="dayOfWeek"
+              disableForm={true}
+              hideErrors={true}
+              value={dayOfWeek}
+              onChange={(e) => setDayOfWeek(Number(e.target.value))}
+            >
+              {dayOfWeekLabels.map((label, i) => (
+                <option key={i} value={i}>
+                  {label}
+                </option>
+              ))}
+            </Select>
+          </div>
+        )}
+
+        {/* Specific Date selector */}
+        {ruleType === 'specificDate' && (
+          <div className="mb-[12px]">
+            <label className="block text-[13px] text-newTextColor/60 mb-[4px]">
+              {t('date', 'Date')}
+            </label>
+            <input
+              type="date"
+              value={specificDate}
+              onChange={(e) => setSpecificDate(e.target.value)}
+              className="w-full h-[42px] px-[12px] rounded-[8px] border border-newTableBorder bg-transparent text-[14px]"
+            />
+          </div>
+        )}
+
+        {/* Hour / Minute / Add button */}
         <div className="flex gap-[12px] items-end">
           <div className="flex-1">
             <Select
@@ -171,7 +296,7 @@ export const TimeTable: FC<{
           </div>
           <button
             type="button"
-            onClick={addHour}
+            onClick={addSlot}
             className="h-[42px] px-[16px] bg-[#612BD3] hover:bg-[#7640e0] transition-colors rounded-[8px] flex items-center gap-[6px] text-white text-[14px] font-medium"
           >
             <PlusIcon size={14} />
@@ -183,21 +308,21 @@ export const TimeTable: FC<{
       {/* Time Slots List */}
       <div className="mt-[20px]">
         <div className="text-[14px] text-newTextColor/60 mb-[12px]">
-          {t('scheduled_times', 'Scheduled Times')} ({times.length})
+          {t('scheduled_times', 'Scheduled Times')} ({displaySchedules.length})
         </div>
 
-        {times.length === 0 ? (
+        {displaySchedules.length === 0 ? (
           <div className="text-center py-[32px] text-newTextColor/40 text-[14px] border border-dashed border-newTableBorder rounded-[12px]">
             {t('no_time_slots', 'No time slots added yet')}
           </div>
         ) : (
           <div className="flex flex-col gap-[8px]">
-            {times.map((timeSlot, index) => (
+            {displaySchedules.map((item) => (
               <div
-                key={`${timeSlot.value}-${index}`}
+                key={`${item.rule.type}-${item.rule.time}-${item.originalIndex}`}
                 className={clsx(
                   'group flex items-center justify-between',
-                  'h-[48px] px-[16px] rounded-[8px]',
+                  'min-h-[48px] px-[16px] py-[8px] rounded-[8px]',
                   'bg-newBgColorInner border border-newTableBorder',
                   'hover:border-[#612BD3]/40 transition-colors'
                 )}
@@ -205,12 +330,20 @@ export const TimeTable: FC<{
                 <div className="flex items-center gap-[12px]">
                   <div className="w-[8px] h-[8px] rounded-full bg-[#612BD3]" />
                   <span className="text-[15px] font-medium tabular-nums">
-                    {timeSlot.formatted}
+                    {item.formatted}
+                  </span>
+                  <span
+                    className={clsx(
+                      'text-[11px] px-[8px] py-[2px] rounded-full font-medium',
+                      ruleTypeBadgeColors[item.rule.type]
+                    )}
+                  >
+                    {formatRuleLabel(item.rule)}
                   </span>
                 </div>
                 <button
                   type="button"
-                  onClick={removeSlot(index)}
+                  onClick={removeSlot(item.originalIndex)}
                   className="opacity-0 group-hover:opacity-100 transition-opacity p-[8px] hover:bg-red-500/10 rounded-[6px] text-red-400 hover:text-red-500"
                 >
                   <TrashIcon size={16} />

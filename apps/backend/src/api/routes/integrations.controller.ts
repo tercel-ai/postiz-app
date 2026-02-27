@@ -26,7 +26,7 @@ import { ApiTags } from '@nestjs/swagger';
 import { GetUserFromRequest } from '@gitroom/nestjs-libraries/user/user.from.request';
 import { NotEnoughScopesFilter } from '@gitroom/nestjs-libraries/integrations/integration.missing.scopes';
 import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.service';
-import { IntegrationTimeDto } from '@gitroom/nestjs-libraries/dtos/integrations/integration.time.dto';
+import { normalizePostingTimes } from '@gitroom/nestjs-libraries/dtos/integrations/posting-times.utils';
 import { AuthService } from '@gitroom/helpers/auth/auth.service';
 import { AuthTokenDetails } from '@gitroom/nestjs-libraries/integrations/social/social.integrations.interface';
 import { PlugDto } from '@gitroom/nestjs-libraries/dtos/plugs/plug.dto';
@@ -141,7 +141,7 @@ export class IntegrationsController {
               : {}),
             display: p.profile,
             type: p.type,
-            time: JSON.parse(p.postingTimes),
+            time: normalizePostingTimes(p.postingTimes),
             changeProfilePicture: !!findIntegration?.changeProfilePicture,
             changeNickName: !!findIntegration?.changeNickname,
             customer: p.customer,
@@ -298,7 +298,7 @@ export class IntegrationsController {
   async setTime(
     @GetOrgFromRequest() org: Organization,
     @Param('id') id: string,
-    @Body() body: IntegrationTimeDto
+    @Body() body: any
   ) {
     return this._integrationService.setTimes(org.id, id, body);
   }

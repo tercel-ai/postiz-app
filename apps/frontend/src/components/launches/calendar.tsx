@@ -123,16 +123,33 @@ export const DayView = () => {
         groupBy(
           [
             ...createdPosts,
-            ...integrations.flatMap((p) =>
-              p.time.flatMap((t) => ({
-                integration: p,
-                identifier: p?.identifier,
-                name: p?.name,
-                id: p?.id,
-                image: p?.picture,
-                time: t?.time,
-              }))
-            ),
+            ...integrations.flatMap((p) => {
+              const dow = currentDay.day();
+              const dateStr = currentDay.format('YYYY-MM-DD');
+              return (p.time?.schedules || [])
+                .filter((rule) => {
+                  switch (rule.type) {
+                    case 'daily':
+                      return true;
+                    case 'weekday':
+                      return dow >= 1 && dow <= 5;
+                    case 'dayOfWeek':
+                      return dow === rule.day;
+                    case 'specificDate':
+                      return dateStr === rule.date;
+                    default:
+                      return true;
+                  }
+                })
+                .map((rule) => ({
+                  integration: p,
+                  identifier: p?.identifier,
+                  name: p?.name,
+                  id: p?.id,
+                  image: p?.picture,
+                  time: rule.time,
+                }));
+            }),
           ],
           (p: any) => p.time
         )

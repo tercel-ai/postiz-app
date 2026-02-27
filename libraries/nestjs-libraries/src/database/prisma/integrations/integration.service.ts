@@ -17,10 +17,15 @@ import dayjs from 'dayjs';
 import { timer } from '@gitroom/helpers/utils/timer';
 import { ioRedis } from '@gitroom/nestjs-libraries/redis/redis.service';
 import { RefreshToken } from '@gitroom/nestjs-libraries/integrations/social.abstract';
-import { IntegrationTimeDto } from '@gitroom/nestjs-libraries/dtos/integrations/integration.time.dto';
 import { UploadFactory } from '@gitroom/nestjs-libraries/upload/upload.factory';
 import { PlugDto } from '@gitroom/nestjs-libraries/dtos/plugs/plug.dto';
 import { difference, uniq } from 'lodash';
+import { PostingTimesV2 } from '@gitroom/nestjs-libraries/dtos/integrations/posting-times.types';
+import {
+  normalizePostingTimes,
+  serializePostingTimes,
+  validateScheduleRules,
+} from '@gitroom/nestjs-libraries/dtos/integrations/posting-times.utils';
 import utc from 'dayjs/plugin/utc';
 import { AutopostRepository } from '@gitroom/nestjs-libraries/database/prisma/autopost/autopost.repository';
 import { RefreshIntegrationService } from '@gitroom/nestjs-libraries/integrations/refresh.integration.service';
@@ -67,9 +72,46 @@ export class IntegrationService {
   async setTimes(
     orgId: string,
     integrationId: string,
-    times: IntegrationTimeDto
+    body: any
   ) {
-    return this._integrationRepository.setTimes(orgId, integrationId, times);
+    let v2: PostingTimesV2;
+
+    if (body?.version === 2 && Array.isArray(body?.schedules)) {
+      const error = validateScheduleRules(body.schedules);
+      if (error) {
+        throw new HttpException(error, HttpStatus.BAD_REQUEST);
+      }
+      v2 = {
+        version: 2,
+        schedules: body.schedules.map((s: any) => {
+          const base: any = { type: s.type, time: s.time };
+          if (s.type === 'dayOfWeek') base.day = s.day;
+          if (s.type === 'specificDate') base.date = s.date;
+          return base;
+        }),
+      };
+    } else if (body?.time && Array.isArray(body.time)) {
+      const schedules = body.time.map((t: { time: number }) => ({
+        type: 'daily' as const,
+        time: t.time,
+      }));
+      const error = validateScheduleRules(schedules);
+      if (error) {
+        throw new HttpException(error, HttpStatus.BAD_REQUEST);
+      }
+      v2 = { version: 2, schedules };
+    } else {
+      throw new HttpException(
+        'Invalid posting times format',
+        HttpStatus.BAD_REQUEST
+      );
+    }
+
+    return this._integrationRepository.setTimes(
+      orgId,
+      integrationId,
+      serializePostingTimes(v2)
+    );
   }
 
   updateProviderSettings(org: string, id: string, additionalSettings: string) {
@@ -549,20 +591,28 @@ export class IntegrationService {
   async findFreeDateTime(
     orgId: string,
     integrationsId?: string
-  ): Promise<number[]> {
+  ): Promise<PostingTimesV2> {
     const findTimes = await this._integrationRepository.getPostingTimes(
       orgId,
       integrationsId
     );
-    return uniq(
-      findTimes.reduce((all: any, current: any) => {
-        return [
-          ...all,
-          ...JSON.parse(current.postingTimes).map(
-            (p: { time: number }) => p.time
-          ),
-        ];
-      }, [] as number[])
+    const allSchedules = findTimes.reduce(
+      (all: PostingTimesV2['schedules'], current: any) => {
+        const v2 = normalizePostingTimes(current.postingTimes);
+        return [...all, ...v2.schedules];
+      },
+      [] as PostingTimesV2['schedules']
     );
+
+    // Deduplicate schedules by serializing each rule
+    const seen = new Set<string>();
+    const uniqueSchedules = allSchedules.filter((rule) => {
+      const key = JSON.stringify(rule);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+
+    return { version: 2, schedules: uniqueSchedules };
   }
 }

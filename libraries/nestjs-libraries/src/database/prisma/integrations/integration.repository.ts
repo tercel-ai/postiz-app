@@ -3,7 +3,6 @@ import { Injectable } from '@nestjs/common';
 import dayjs from 'dayjs';
 import { Integration } from '@prisma/client';
 import { makeId } from '@gitroom/nestjs-libraries/services/make.is';
-import { IntegrationTimeDto } from '@gitroom/nestjs-libraries/dtos/integrations/integration.time.dto';
 import { UploadFactory } from '@gitroom/nestjs-libraries/upload/upload.factory';
 import { PlugDto } from '@gitroom/nestjs-libraries/dtos/plugs/plug.dto';
 
@@ -98,7 +97,7 @@ export class IntegrationRepository {
     });
   }
 
-  async setTimes(org: string, id: string, times: IntegrationTimeDto) {
+  async setTimes(org: string, id: string, serializedTimes: string) {
     return this._integration.model.integration.update({
       select: {
         id: true,
@@ -108,7 +107,7 @@ export class IntegrationRepository {
         organizationId: org,
       },
       data: {
-        postingTimes: JSON.stringify(times.time),
+        postingTimes: serializedTimes,
       },
     });
   }
@@ -199,15 +198,20 @@ export class IntegrationRepository {
     timezone?: number,
     customInstanceDetails?: string
   ) {
-    const postTimes = timezone
-      ? {
-          postingTimes: JSON.stringify([
-            { time: 560 - timezone },
-            { time: 850 - timezone },
-            { time: 1140 - timezone },
-          ]),
-        }
-      : {};
+    const wrapMinutes = (m: number) => ((m % 1440) + 1440) % 1440;
+    const postTimes =
+      timezone !== undefined && timezone !== null
+        ? {
+            postingTimes: JSON.stringify({
+              version: 2,
+              schedules: [
+                { type: 'daily', time: wrapMinutes(560 - timezone) },
+                { type: 'daily', time: wrapMinutes(850 - timezone) },
+                { type: 'daily', time: wrapMinutes(1140 - timezone) },
+              ],
+            }),
+          }
+        : {};
     const upsert = await this._integration.model.integration.upsert({
       where: {
         organizationId_internalId: {

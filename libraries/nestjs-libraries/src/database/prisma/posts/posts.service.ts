@@ -35,6 +35,8 @@ import { timer } from '@gitroom/helpers/utils/timer';
 import { ioRedis } from '@gitroom/nestjs-libraries/redis/redis.service';
 import { RefreshToken } from '@gitroom/nestjs-libraries/integrations/social.abstract';
 import { RefreshIntegrationService } from '@gitroom/nestjs-libraries/integrations/refresh.integration.service';
+import { PostingTimesV2 } from '@gitroom/nestjs-libraries/dtos/integrations/posting-times.types';
+import { resolveTimeSlotsForDate } from '@gitroom/nestjs-libraries/dtos/integrations/posting-times.utils';
 
 type PostWithConditionals = Post & {
   integration?: Integration;
@@ -754,13 +756,13 @@ export class PostsService {
   }
 
   async findFreeDateTime(orgId: string, integrationId?: string) {
-    const findTimes = await this._integrationService.findFreeDateTime(
+    const timesConfig = await this._integrationService.findFreeDateTime(
       orgId,
       integrationId
     );
     return this.findFreeDateTimeRecursive(
       orgId,
-      findTimes,
+      timesConfig,
       dayjs.utc().startOf('day')
     );
   }
@@ -776,9 +778,27 @@ export class PostsService {
 
   private async findFreeDateTimeRecursive(
     orgId: string,
-    times: number[],
-    date: dayjs.Dayjs
+    timesConfig: PostingTimesV2,
+    date: dayjs.Dayjs,
+    depth = 0
   ): Promise<string> {
+    if (depth >= 365) {
+      throw new BadRequestException(
+        'No available posting time slot found within the next 365 days'
+      );
+    }
+
+    const times = resolveTimeSlotsForDate(timesConfig, date);
+
+    if (!times.length) {
+      return this.findFreeDateTimeRecursive(
+        orgId,
+        timesConfig,
+        date.add(1, 'day'),
+        depth + 1
+      );
+    }
+
     const list = await this._postRepository.getPostsCountsByDates(
       orgId,
       times,
@@ -786,7 +806,12 @@ export class PostsService {
     );
 
     if (!list.length) {
-      return this.findFreeDateTimeRecursive(orgId, times, date.add(1, 'day'));
+      return this.findFreeDateTimeRecursive(
+        orgId,
+        timesConfig,
+        date.add(1, 'day'),
+        depth + 1
+      );
     }
 
     const num = list.reduce<null | number>((prev, curr) => {

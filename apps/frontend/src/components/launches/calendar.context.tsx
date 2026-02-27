@@ -65,6 +65,20 @@ export const CalendarContext = createContext({
   },
 });
 
+export type ScheduleRuleType = 'daily' | 'weekday' | 'dayOfWeek' | 'specificDate';
+
+export interface ScheduleRule {
+  type: ScheduleRuleType;
+  time: number;
+  day?: number;   // 0-6 for dayOfWeek
+  date?: string;  // YYYY-MM-DD for specificDate
+}
+
+export interface PostingTimesV2 {
+  version: 2;
+  schedules: ScheduleRule[];
+}
+
 export interface Integrations {
   name: string;
   id: string;
@@ -78,9 +92,7 @@ export interface Integrations {
   changeProfilePicture: boolean;
   additionalSettings: string;
   changeNickName: boolean;
-  time: {
-    time: number;
-  }[];
+  time: PostingTimesV2;
   customer?: {
     name?: string;
     id?: string;
