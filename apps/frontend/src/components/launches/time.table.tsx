@@ -136,7 +136,7 @@ export const TimeTable: FC<{
   );
 
   const addSlot = useCallback(() => {
-    const calculateMinutes =
+    const rawMinutes =
       newDayjs()
         .utc()
         .startOf('day')
@@ -144,6 +144,7 @@ export const TimeTable: FC<{
         .add(minute, 'minutes')
         .diff(newDayjs().utc().startOf('day'), 'minutes') -
       dayjs.tz().utcOffset();
+    const calculateMinutes = ((rawMinutes % 1440) + 1440) % 1440;
 
     const baseRule = { time: calculateMinutes };
 
