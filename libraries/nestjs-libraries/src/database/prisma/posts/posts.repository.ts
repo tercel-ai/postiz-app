@@ -101,7 +101,9 @@ export class PostsRepository {
       deletedAt: null,
       parentPostId: null,
       ...(query.state ? { state: query.state } : {}),
-      ...(query.integrationId ? { integrationId: query.integrationId } : {}),
+      ...(query.integrationId?.length
+        ? { integrationId: { in: query.integrationId } }
+        : {}),
     };
 
     const [results, total] = await Promise.all([
