@@ -279,9 +279,16 @@ export class XProvider extends SocialAbstract implements SocialProvider {
       return `X authentication failed: ${err?.data?.detail || err?.message || 'Service temporarily unavailable. Please try again.'}`;
     }
 
+    // Try v2 first, fallback to v1.1 if v2 returns 503
+    let username: string;
+    let verified: boolean | undefined;
+    let profile_image_url: string | undefined;
+    let name: string;
+    let id: string | number;
+
     try {
       const {
-        data: { username, verified, profile_image_url, name, id },
+        data: { username: u, verified: v, profile_image_url: p, name: n, id: i },
       } = await client.v2.me({
         'user.fields': [
           'username',
@@ -291,29 +298,46 @@ export class XProvider extends SocialAbstract implements SocialProvider {
           'name',
         ],
       });
-
-      return {
-        id: String(id),
-        accessToken: accessToken + ':' + accessSecret,
-        name,
-        refreshToken: '',
-        expiresIn: 999999999,
-        picture: profile_image_url || '',
-        username,
-        additionalSettings: [
-          {
-            title: 'Verified',
-            description: 'Is this a verified user? (Premium)',
-            type: 'checkbox' as const,
-            value: verified,
-          },
-        ],
-      };
+      username = u;
+      verified = v;
+      profile_image_url = p;
+      name = n;
+      id = i;
     } catch (err: any) {
       const status = err?.code || err?.status || '';
-      console.error(`X user info fetch failed (${status}):`, err?.data || err?.message || err);
-      return `Failed to fetch X account info: ${err?.data?.detail || err?.message || 'Service temporarily unavailable. Please try again.'}`;
+      console.warn(`X v2.me failed (${status}), trying v1.1 fallback...`);
+
+      try {
+        const v1User = await client.v1.verifyCredentials();
+        username = v1User.screen_name;
+        verified = v1User.verified;
+        profile_image_url = v1User.profile_image_url_https;
+        name = v1User.name;
+        id = v1User.id_str;
+      } catch (v1Err: any) {
+        const v1Status = v1Err?.code || v1Err?.status || '';
+        console.error(`X v1.1 fallback also failed (${v1Status}):`, v1Err?.data || v1Err?.message || v1Err);
+        return `Failed to fetch X account info: ${err?.data?.detail || err?.message || 'Service temporarily unavailable. Please try again.'}`;
+      }
     }
+
+    return {
+      id: String(id),
+      accessToken: accessToken + ':' + accessSecret,
+      name,
+      refreshToken: '',
+      expiresIn: 999999999,
+      picture: profile_image_url || '',
+      username,
+      additionalSettings: [
+        {
+          title: 'Verified',
+          description: 'Is this a verified user? (Premium)',
+          type: 'checkbox' as const,
+          value: verified,
+        },
+      ],
+    };
   }
 
   private async getClient(accessToken: string) {
