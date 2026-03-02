@@ -483,22 +483,45 @@ export class IntegrationsController {
       username,
       additionalSettings,
       // eslint-disable-next-line no-async-promise-executor
-    } = await new Promise<AuthTokenDetails>(async (res) => {
-      const auth = await this.withCallbackUrl(
-        callbackBaseUrl || process.env.FRONTEND_URL!,
-        () => integrationProvider.authenticate(
-          {
-            code: body.code,
-            codeVerifier: getCodeVerifier,
-            refresh: body.refresh,
-          },
-          details ? JSON.parse(details) : undefined
-        )
-      );
+    } = await new Promise<AuthTokenDetails>(async (res, rej) => {
+      try {
+        const auth = await this.withCallbackUrl(
+          callbackBaseUrl || process.env.FRONTEND_URL!,
+          () => integrationProvider.authenticate(
+            {
+              code: body.code,
+              codeVerifier: getCodeVerifier,
+              refresh: body.refresh,
+            },
+            details ? JSON.parse(details) : undefined
+          )
+        );
 
-      if (typeof auth === 'string') {
+        if (typeof auth === 'string') {
+          return res({
+            error: auth,
+            accessToken: '',
+            id: '',
+            name: '',
+            picture: '',
+            username: '',
+            additionalSettings: [],
+          });
+        }
+
+        if (refresh && integrationProvider.reConnect) {
+          const newAuth = await integrationProvider.reConnect(
+            auth.id,
+            refresh,
+            auth.accessToken
+          );
+          return res({ ...newAuth, refreshToken: body.refresh });
+        }
+
+        return res(auth);
+      } catch (err: any) {
         return res({
-          error: auth,
+          error: err?.message || 'Authentication failed',
           accessToken: '',
           id: '',
           name: '',
@@ -507,17 +530,6 @@ export class IntegrationsController {
           additionalSettings: [],
         });
       }
-
-      if (refresh && integrationProvider.reConnect) {
-        const newAuth = await integrationProvider.reConnect(
-          auth.id,
-          refresh,
-          auth.accessToken
-        );
-        return res({ ...newAuth, refreshToken: body.refresh });
-      }
-
-      return res(auth);
     });
 
     if (error) {

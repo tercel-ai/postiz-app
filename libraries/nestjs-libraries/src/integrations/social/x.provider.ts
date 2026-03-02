@@ -265,39 +265,55 @@ export class XProvider extends SocialAbstract implements SocialProvider {
       accessSecret: oauth_token_secret,
     });
 
-    const { accessToken, client, accessSecret } = await startingClient.login(
-      code
-    );
+    let accessToken: string;
+    let accessSecret: string;
+    let client: TwitterApi;
+    try {
+      const loginResult = await startingClient.login(code);
+      accessToken = loginResult.accessToken;
+      accessSecret = loginResult.accessSecret;
+      client = loginResult.client;
+    } catch (err: any) {
+      const status = err?.code || err?.status || '';
+      console.error(`X OAuth login failed (${status}):`, err?.data || err?.message || err);
+      return `X authentication failed: ${err?.data?.detail || err?.message || 'Service temporarily unavailable. Please try again.'}`;
+    }
 
-    const {
-      data: { username, verified, profile_image_url, name, id },
-    } = await client.v2.me({
-      'user.fields': [
-        'username',
-        'verified',
-        'verified_type',
-        'profile_image_url',
-        'name',
-      ],
-    });
+    try {
+      const {
+        data: { username, verified, profile_image_url, name, id },
+      } = await client.v2.me({
+        'user.fields': [
+          'username',
+          'verified',
+          'verified_type',
+          'profile_image_url',
+          'name',
+        ],
+      });
 
-    return {
-      id: String(id),
-      accessToken: accessToken + ':' + accessSecret,
-      name,
-      refreshToken: '',
-      expiresIn: 999999999,
-      picture: profile_image_url || '',
-      username,
-      additionalSettings: [
-        {
-          title: 'Verified',
-          description: 'Is this a verified user? (Premium)',
-          type: 'checkbox' as const,
-          value: verified,
-        },
-      ],
-    };
+      return {
+        id: String(id),
+        accessToken: accessToken + ':' + accessSecret,
+        name,
+        refreshToken: '',
+        expiresIn: 999999999,
+        picture: profile_image_url || '',
+        username,
+        additionalSettings: [
+          {
+            title: 'Verified',
+            description: 'Is this a verified user? (Premium)',
+            type: 'checkbox' as const,
+            value: verified,
+          },
+        ],
+      };
+    } catch (err: any) {
+      const status = err?.code || err?.status || '';
+      console.error(`X user info fetch failed (${status}):`, err?.data || err?.message || err);
+      return `Failed to fetch X account info: ${err?.data?.detail || err?.message || 'Service temporarily unavailable. Please try again.'}`;
+    }
   }
 
   private async getClient(accessToken: string) {
