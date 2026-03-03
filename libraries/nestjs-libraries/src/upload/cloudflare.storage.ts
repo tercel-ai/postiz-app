@@ -58,17 +58,34 @@ class CloudflareStorage implements IUploadProvider {
   }
 
   async uploadSimple(path: string) {
-    const loadImage = await fetch(path);
-    const contentType =
-      loadImage?.headers?.get('content-type') ||
-      loadImage?.headers?.get('Content-Type');
-    const extension = getExtension(contentType)!;
+    let body: Buffer;
+    let extension: string;
+    let contentType: string | null;
+
+    if (path.startsWith('data:')) {
+      // Handle data URIs (e.g. data:image/png;base64,iVBOR...)
+      const matches = path.match(/^data:([^;]+);base64,(.+)$/);
+      if (!matches) {
+        throw new Error('Invalid data URI format');
+      }
+      contentType = matches[1];
+      extension = getExtension(contentType) || 'png';
+      body = Buffer.from(matches[2], 'base64');
+    } else {
+      const loadImage = await fetch(path);
+      contentType =
+        loadImage?.headers?.get('content-type') ||
+        loadImage?.headers?.get('Content-Type');
+      extension = getExtension(contentType)!;
+      body = Buffer.from(await loadImage.arrayBuffer());
+    }
+
     const id = makeId(10);
 
     const params = {
       Bucket: this._bucketName,
       Key: `${id}.${extension}`,
-      Body: Buffer.from(await loadImage.arrayBuffer()),
+      Body: body,
       ContentType: contentType,
       ChecksumMode: 'DISABLED',
     };

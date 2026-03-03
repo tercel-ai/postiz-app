@@ -1,9 +1,14 @@
-import { Controller, Get, Query } from '@nestjs/common';
+import { BadRequestException, Controller, Get, Query } from '@nestjs/common';
 import { Organization } from '@prisma/client';
 import { GetOrgFromRequest } from '@gitroom/nestjs-libraries/user/org.from.request';
 import { ApiTags } from '@nestjs/swagger';
 import { DashboardService } from '@gitroom/nestjs-libraries/database/prisma/dashboard/dashboard.service';
-import { PostsTrendQueryDto, ImpressionsQueryDto, PostEngagementQueryDto } from '@gitroom/nestjs-libraries/dtos/dashboard/dashboard.dto';
+import {
+  PostsTrendQueryDto,
+  ImpressionsQueryDto,
+  PostEngagementQueryDto,
+  DashboardSummaryQueryDto,
+} from '@gitroom/nestjs-libraries/dtos/dashboard/dashboard.dto';
 
 @ApiTags('Dashboard')
 @Controller('/dashboard')
@@ -11,8 +16,18 @@ export class DashboardController {
   constructor(private _dashboardService: DashboardService) {}
 
   @Get('/summary')
-  async getSummary(@GetOrgFromRequest() org: Organization) {
-    return this._dashboardService.getSummary(org);
+  async getSummary(
+    @GetOrgFromRequest() org: Organization,
+    @Query() query: DashboardSummaryQueryDto
+  ) {
+    const startDate = query.startDate ? new Date(query.startDate) : undefined;
+    const endDate = query.endDate ? new Date(query.endDate) : undefined;
+
+    if (startDate && endDate && startDate > endDate) {
+      throw new BadRequestException('startDate must be before endDate');
+    }
+
+    return this._dashboardService.getSummary(org, startDate, endDate);
   }
 
   @Get('/posts-trend')

@@ -33,7 +33,7 @@ The table below describes each feature from a **user perspective**:
 
 | Feature | One-line description | Business question it answers | Optional parameters |
 |---------|---------------------|------------------------------|-------------------|
-| **Summary** | A "snapshot" of key operational metrics | "How many posts have I published? How many accounts are connected? How are overall impressions and traffic?" | None |
+| **Summary** | A "snapshot" of key operational metrics | "How many posts have I published? How many accounts are connected? How are overall impressions and traffic?" | Date range: startDate / endDate |
 | **Posts Trend** | How posting volume changes over time | "How many posts have been published per day/week/month? How are they distributed across platforms?" | Time granularity: daily/weekly/monthly |
 | **Traffic Analysis** | Traffic share and trends by platform | "Which platform drives the most traffic? Is traffic going up or down recently?" | None |
 | **Impressions Trend** | How content impressions change over time | "How many people are seeing my content? Are impressions growing?" | Time granularity: daily/weekly/monthly |
@@ -47,13 +47,21 @@ The table below describes each feature from a **user perspective**:
 
 **Endpoint**: `GET /dashboard/summary`
 
-**Business scenario**: The first screen users see when entering the dashboard. Provides an at-a-glance view of overall operational performance.
+**Business scenario**: The first screen users see when entering the dashboard. Provides an at-a-glance view of overall operational performance, with optional date range filtering for post statistics.
+
+**Optional parameters**:
+
+| Parameter | Type | Default | Validation | Meaning |
+|-----------|------|---------|------------|---------|
+| `startDate` | ISO 8601 date string | — (no filter) | `@IsDateString()` | Start of the date range for post statistics (inclusive, normalized to start of day) |
+| `endDate` | ISO 8601 date string | — (no filter) | `@IsDateString()` | End of the date range for post statistics (inclusive, normalized to end of day) |
+
+> **Note**: If both `startDate` and `endDate` are provided, `startDate` must be before `endDate` — otherwise the API returns a `400 Bad Request`. Either parameter can be used independently.
 
 **What the user sees (example)**:
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│  Total Posts           128                           │
 │  Connected Channels    5                             │
 │                                                     │
 │  Channels by Platform:                               │
@@ -62,20 +70,33 @@ The table below describes each feature from a **user perspective**:
 │                                                     │
 │  30-day Total Impressions    50,000                   │
 │  30-day Total Traffic        12,000 clicks            │
+│                                                     │
+│  Posts Stats:                                        │
+│    Total        128                                  │
+│    Scheduled     15                                  │
+│    Published    100                                  │
+│    Drafts        10                                  │
+│    Errors         3                                  │
 └─────────────────────────────────────────────────────┘
 ```
 
 **Response structure**:
 ```json
 {
-  "post_count": 128,
   "channel_count": 5,
   "channels_by_platform": [
     { "platform": "twitter", "count": 2 },
     { "platform": "instagram", "count": 3 }
   ],
   "impressions_total": 50000,
-  "traffics_total": 12000
+  "traffics_total": 12000,
+  "posts_stats": {
+    "total": 128,
+    "scheduled": 15,
+    "published": 100,
+    "drafts": 10,
+    "errors": 3
+  }
 }
 ```
 
@@ -83,11 +104,23 @@ The table below describes each feature from a **user perspective**:
 
 | Field | Meaning | How to interpret |
 |-------|---------|-----------------|
-| `post_count` | Total number of posts | All posts created by the organization (excluding deleted ones) |
 | `channel_count` | Total number of channels | Number of connected and enabled social accounts |
 | `channels_by_platform` | Channels by platform | Grouped by platform, e.g., 2 Twitter accounts connected |
 | `impressions_total` | Total impressions | Total number of times content was displayed across all platforms in the last 30 days |
 | `traffics_total` | Total traffic | Total number of clicks/interactions across all platforms in the last 30 days |
+| **posts_stats** | | |
+| `posts_stats.total` | Total posts | All posts matching the date filter (or all posts if no filter). Sum of all states below. |
+| `posts_stats.scheduled` | Scheduled posts | Posts in `QUEUE` state (waiting to be published) |
+| `posts_stats.published` | Published posts | Posts in `PUBLISHED` state |
+| `posts_stats.drafts` | Draft posts | Posts in `DRAFT` state |
+| `posts_stats.errors` | Error posts | Posts in `ERROR` state (publishing failed) |
+
+**How does date filtering work?**
+
+- When `startDate` and/or `endDate` are provided, only posts whose `publishDate` falls within the range are counted in `posts_stats`.
+- Dates are normalized: `startDate` → start of day (00:00:00), `endDate` → end of day (23:59:59.999). This means `?startDate=2026-03-01&endDate=2026-03-01` includes all posts on March 1st.
+- When no date parameters are provided, all posts (excluding deleted) are counted — same behavior as before.
+- Impressions and traffic totals are always based on the last 30 days and are **not** affected by the date filter.
 
 **Impressions vs. Traffic — What's the difference?**
 
@@ -102,12 +135,16 @@ The system automatically categorizes metrics returned by each platform by matchi
 <summary>Technical implementation details (for developers)</summary>
 
 **Algorithm**:
-1. Check Redis cache → return immediately if cache hit
-2. Query in parallel: total posts + total channels + active integrations list
-3. Group channels by platform
-4. Iterate through each integration, call `checkAnalytics(org, id, '30')` to get 30-day analytics data
-5. Classify and accumulate using regex: `IMPRESSIONS_RE` / `TRAFFICS_RE`
-6. Write result to Redis cache (TTL 1 hour), return
+1. Normalize `startDate` / `endDate` to day boundaries (`startOf('day')` / `endOf('day')`)
+2. Check Redis cache (key includes normalized date timestamps) → return immediately if cache hit
+3. Query in parallel: total channels + active integrations list + post stats grouped by state (with date filter)
+4. Map `groupBy` results to `posts_stats` object (QUEUE→scheduled, PUBLISHED→published, DRAFT→drafts, ERROR→errors)
+5. Group channels by platform
+6. Iterate through each integration, call `checkAnalytics(org, id, '30')` to get 30-day analytics data
+7. Classify and accumulate using regex: `IMPRESSIONS_RE` / `TRAFFICS_RE`
+8. Write result to Redis cache (TTL 1 hour), return
+
+**Date validation**: The controller throws `BadRequestException` if `startDate > endDate`.
 
 **Error handling**: If a single platform API fails, it is silently skipped without affecting the overall response.
 
@@ -502,7 +539,7 @@ After cache expires:  Back to the first-request flow
 
 | Feature | Cache duration | Notes |
 |---------|---------------|-------|
-| Summary | 1 hour | Includes post count, channel count, impressions/traffic totals |
+| Summary | 1 hour | Includes channel count, impressions/traffic totals, posts stats by state. Cache key varies by date range. |
 | Traffic Analysis | 1 hour | Per-platform traffic and period-over-period changes |
 | Impressions Trend | 1 hour | Separate cache for each time granularity |
 | Post Engagement | 1 hour | Both aggregate result cache + individual post analysis cache |
@@ -557,6 +594,12 @@ The Dashboard connects to multiple external social platforms, any of which could
 ### DTO parameter validation
 
 ```
+DashboardSummaryQueryDto
+├── startDate?: string   (ISO 8601 date string, optional)
+├── endDate?: string     (ISO 8601 date string, optional)
+├── Validation: @IsOptional, @IsDateString
+├── Controller-level: BadRequestException if startDate > endDate
+
 PostsTrendQueryDto / ImpressionsQueryDto
 ├── period?: 'daily' | 'weekly' | 'monthly'   (default: 'daily')
 ├── Validation: @IsOptional, @IsString, @IsIn(['daily', 'weekly', 'monthly'])
@@ -570,9 +613,9 @@ PostEngagementQueryDto
 
 | Method | Purpose | Filter conditions |
 |--------|---------|------------------|
-| `getPostCount(orgId)` | Count total posts | `organizationId = orgId AND deletedAt IS NULL` |
 | `getChannelCount(orgId)` | Count total channels | `organizationId = orgId AND deletedAt IS NULL AND disabled = false` |
 | `getActiveIntegrations(orgId)` | Get active integrations | `organizationId = orgId AND deletedAt IS NULL AND disabled = false AND type = 'social'` |
+| `getPostsStats(orgId, startDate?, endDate?)` | Count posts grouped by state | `organizationId = orgId AND deletedAt IS NULL [AND publishDate >= startDate] [AND publishDate <= endDate]`, `GROUP BY state` |
 | `getPostsForTrend(orgId, sinceDays)` | Query post publishing trend | `organizationId = orgId AND deletedAt IS NULL AND publishDate >= (NOW - sinceDays)` |
 | `getPublishedPostsWithRelease(orgId, sinceDays)` | Query published posts (with platform association) | `state = 'PUBLISHED' AND releaseId IS NOT NULL AND publishDate >= (NOW - sinceDays) LIMIT 100` |
 
@@ -580,7 +623,7 @@ PostEngagementQueryDto
 
 | Cache key pattern | TTL | Used by |
 |-------------------|-----|---------|
-| `dashboard:summary:{orgId}` | Dev 1s / Prod 3600s | `/summary` |
+| `dashboard:summary:{orgId}:{startTimestamp\|'all'}:{endTimestamp\|'all'}` | Dev 1s / Prod 3600s | `/summary` |
 | `dashboard:traffics:{orgId}` | Same | `/traffics` |
 | `dashboard:impressions:{orgId}:{period}` | Same | `/impressions` |
 | `dashboard:post-engagement:{orgId}:{days}` | Same | `/post-engagement` |
@@ -591,10 +634,12 @@ PostEngagementQueryDto
 ```
 Controller                    Service                          Repository / External deps
 ┌──────────────────┐   ┌──────────────────────┐   ┌──────────────────────┐
-│ GET /summary     │──→│ getSummary()         │──→│ getPostCount()       │
-│                  │   │  ├ Redis cache check  │   │ getChannelCount()    │
-│                  │   │  ├ Parallel queries   │   │ getActiveIntegrations│
-│                  │   │  ├ Iterate integrations│   └──────────────────────┘
+│ GET /summary     │──→│ getSummary()         │──→│ getChannelCount()    │
+│  ?startDate=     │   │  ├ Redis cache check  │   │ getActiveIntegrations│
+│  &endDate=       │   │  ├ Normalize dates    │   │ getPostsStats()      │
+│                  │   │  ├ Parallel queries   │   └──────────────────────┘
+│                  │   │  ├ Map state→stats    │
+│                  │   │  ├ Iterate integrations│
 │                  │   │  │  └ checkAnalytics() │──→ IntegrationService
 │                  │   │  └ Regex classify &   │
 │                  │   │    accumulate         │

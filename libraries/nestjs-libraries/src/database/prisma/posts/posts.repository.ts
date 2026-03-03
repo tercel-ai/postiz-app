@@ -104,6 +104,9 @@ export class PostsRepository {
       ...(query.integrationId?.length
         ? { integrationId: { in: query.integrationId } }
         : {}),
+      ...(query.channel?.length
+        ? { integration: { providerIdentifier: { in: query.channel } } }
+        : {}),
     };
 
     const [results, total] = await Promise.all([

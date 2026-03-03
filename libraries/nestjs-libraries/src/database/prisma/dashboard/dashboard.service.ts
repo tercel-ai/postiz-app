@@ -33,18 +33,47 @@ export class DashboardService {
     private _refreshIntegrationService: RefreshIntegrationService
   ) {}
 
-  async getSummary(org: Organization) {
-    const cacheKey = `dashboard:summary:${org.id}`;
+  async getSummary(org: Organization, startDate?: Date, endDate?: Date) {
+    const normalizedStart = startDate ? dayjs(startDate).startOf('day').toDate() : undefined;
+    const normalizedEnd = endDate ? dayjs(endDate).endOf('day').toDate() : undefined;
+    const cacheKey = `dashboard:summary:${org.id}:${normalizedStart?.getTime() || 'all'}:${normalizedEnd?.getTime() || 'all'}`;
     const cached = await ioRedis.get(cacheKey);
     if (cached) {
       return JSON.parse(cached);
     }
 
-    const [postCount, channelCount, integrations] = await Promise.all([
-      this._dashboardRepository.getPostCount(org.id),
+    const [channelCount, integrations, postStats] = await Promise.all([
       this._dashboardRepository.getChannelCount(org.id),
       this._dashboardRepository.getActiveIntegrations(org.id),
+      this._dashboardRepository.getPostsStats(org.id, normalizedStart, normalizedEnd),
     ]);
+
+    const stats = {
+      total: 0,
+      scheduled: 0,
+      published: 0,
+      drafts: 0,
+      errors: 0,
+    };
+
+    for (const stat of postStats) {
+      const count = stat._count._all;
+      stats.total += count;
+      switch (stat.state) {
+        case 'QUEUE':
+          stats.scheduled = count;
+          break;
+        case 'PUBLISHED':
+          stats.published = count;
+          break;
+        case 'DRAFT':
+          stats.drafts = count;
+          break;
+        case 'ERROR':
+          stats.errors = count;
+          break;
+      }
+    }
 
     let impressionsTotal = 0;
     let trafficsTotal = 0;
@@ -82,13 +111,13 @@ export class DashboardService {
     }
 
     const result = {
-      post_count: postCount,
       channel_count: channelCount,
       channels_by_platform: Array.from(channelsByPlatform.entries()).map(
         ([platform, count]) => ({ platform, count })
       ),
       impressions_total: impressionsTotal,
       traffics_total: trafficsTotal,
+      posts_stats: stats,
     };
 
     await ioRedis.set(cacheKey, JSON.stringify(result), 'EX', CACHE_TTL);

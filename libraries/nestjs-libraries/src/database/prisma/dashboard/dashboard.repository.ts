@@ -1,5 +1,6 @@
 import { PrismaRepository } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
 import { Injectable } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import dayjs from 'dayjs';
 
 @Injectable()
@@ -8,15 +9,6 @@ export class DashboardRepository {
     private _post: PrismaRepository<'post'>,
     private _integration: PrismaRepository<'integration'>
   ) {}
-
-  getPostCount(orgId: string) {
-    return this._post.model.post.count({
-      where: {
-        organizationId: orgId,
-        deletedAt: null,
-      },
-    });
-  }
 
   getChannelCount(orgId: string) {
     return this._integration.model.integration.count({
@@ -37,6 +29,30 @@ export class DashboardRepository {
         type: 'social',
       },
     });
+  }
+
+  async getPostsStats(orgId: string, startDate?: Date, endDate?: Date) {
+    const where: Prisma.PostWhereInput = {
+      organizationId: orgId,
+      deletedAt: null,
+    };
+
+    if (startDate || endDate) {
+      where.publishDate = {
+        ...(startDate && { gte: startDate }),
+        ...(endDate && { lte: endDate }),
+      };
+    }
+
+    const stats = await this._post.model.post.groupBy({
+      by: ['state'],
+      where,
+      _count: {
+        _all: true,
+      },
+    });
+
+    return stats;
   }
 
   getPublishedPostsWithRelease(orgId: string, sinceDays: number) {

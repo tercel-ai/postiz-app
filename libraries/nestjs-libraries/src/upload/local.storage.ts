@@ -9,11 +9,26 @@ export class LocalStorage implements IUploadProvider {
   constructor(private uploadDirectory: string) {}
 
   async uploadSimple(path: string) {
-    const loadImage = await axios.get(path, { responseType: 'arraybuffer' });
-    const contentType =
-      loadImage?.headers?.['content-type'] ||
-      loadImage?.headers?.['Content-Type'];
-    const findExtension = mime.getExtension(contentType)!;
+    let imageBuffer: Buffer;
+    let findExtension: string;
+
+    if (path.startsWith('data:')) {
+      // Handle data URIs (e.g. data:image/png;base64,iVBOR...)
+      const matches = path.match(/^data:([^;]+);base64,(.+)$/);
+      if (!matches) {
+        throw new Error('Invalid data URI format');
+      }
+      const contentType = matches[1];
+      findExtension = mime.getExtension(contentType) || 'png';
+      imageBuffer = Buffer.from(matches[2], 'base64');
+    } else {
+      const loadImage = await axios.get(path, { responseType: 'arraybuffer' });
+      const contentType =
+        loadImage?.headers?.['content-type'] ||
+        loadImage?.headers?.['Content-Type'];
+      findExtension = mime.getExtension(contentType) || 'png';
+      imageBuffer = Buffer.from(loadImage.data);
+    }
 
     const now = new Date();
     const year = now.getFullYear();
@@ -32,7 +47,7 @@ export class LocalStorage implements IUploadProvider {
     const filePath = `${dir}/${randomName}.${findExtension}`;
     const publicPath = `${innerPath}/${randomName}.${findExtension}`;
     // Logic to save the file to the filesystem goes here
-    writeFileSync(filePath, loadImage.data);
+    writeFileSync(filePath, imageBuffer);
 
     return process.env.FRONTEND_URL + '/uploads' + publicPath;
   }
