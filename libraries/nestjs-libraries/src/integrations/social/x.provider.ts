@@ -153,12 +153,15 @@ export class XProvider extends SocialAbstract implements SocialProvider {
       accessSecret: accessSecretSplit,
     });
 
-    const {
-      data: { id },
-    } = await client.v2.me();
+    let userId: string;
+    try {
+      userId = await this._getUserId(client);
+    } catch {
+      return;
+    }
 
     try {
-      await client.v2.retweet(id, postId);
+      await client.v2.retweet(userId, postId);
     } catch (err) {
       /** nothing **/
     }
@@ -350,6 +353,37 @@ export class XProvider extends SocialAbstract implements SocialProvider {
     });
   }
 
+  // v2.me() can be unstable; fallback to v1.1 verifyCredentials
+  private async _getUsername(client: TwitterApi): Promise<string> {
+    try {
+      const { data } = await this.runInConcurrent(async () =>
+        client.v2.me({ 'user.fields': 'username' })
+      );
+      return data.username;
+    } catch (err) {
+      try {
+        const v1User = await client.v1.verifyCredentials();
+        return v1User.screen_name;
+      } catch {
+        throw err;
+      }
+    }
+  }
+
+  private async _getUserId(client: TwitterApi): Promise<string> {
+    try {
+      const { data } = await client.v2.me();
+      return data.id;
+    } catch (err) {
+      try {
+        const v1User = await client.v1.verifyCredentials();
+        return v1User.id_str;
+      } catch {
+        throw err;
+      }
+    }
+  }
+
   private static readonly RATE_LIMIT_KEY = 'x:tweets:rate-limit-reset';
 
   private async _isRateLimited(): Promise<boolean> {
@@ -424,13 +458,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
     }>[]
   ): Promise<PostResponse[]> {
     const client = await this.getClient(accessToken);
-    const {
-      data: { username },
-    } = await this.runInConcurrent(async () =>
-      client.v2.me({
-        'user.fields': 'username',
-      })
-    );
+    const username = await this._getUsername(client);
 
     const [firstPost] = postDetails;
 
@@ -484,13 +512,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
     integration: Integration
   ): Promise<PostResponse[]> {
     const client = await this.getClient(accessToken);
-    const {
-      data: { username },
-    } = await this.runInConcurrent(async () =>
-      client.v2.me({
-        'user.fields': 'username',
-      })
-    );
+    const username = await this._getUsername(client);
 
     const [commentPost] = postDetails;
 
