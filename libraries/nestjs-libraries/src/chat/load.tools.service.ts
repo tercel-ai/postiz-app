@@ -1,12 +1,29 @@
 import { Injectable } from '@nestjs/common';
 import { Agent } from '@mastra/core/agent';
-import { openai } from '@ai-sdk/openai';
+import { openai, createOpenAI } from '@ai-sdk/openai';
 import { Memory } from '@mastra/memory';
 import { pStore } from '@gitroom/nestjs-libraries/chat/mastra.store';
 import { array, object, string } from 'zod';
 import { ModuleRef } from '@nestjs/core';
 import { toolList } from '@gitroom/nestjs-libraries/chat/tools/tool.list';
 import dayjs from 'dayjs';
+
+function getAgentModel() {
+  const provider = (process.env.IMAGE_PROVIDER || 'openai').toLowerCase();
+  const hasOpenAiKey =
+    process.env.OPENAI_API_KEY &&
+    process.env.OPENAI_API_KEY !== 'sk-proj-' &&
+    process.env.OPENAI_API_KEY.length > 0;
+
+  if (provider === 'openrouter' && !hasOpenAiKey) {
+    const openrouter = createOpenAI({
+      apiKey: process.env.OPENROUTER_API_KEY || '',
+      baseURL: 'https://openrouter.ai/api/v1',
+    });
+    return openrouter(process.env.OPENROUTER_TEXT_MODEL || 'openai/gpt-4.1');
+  }
+  return openai('gpt-4.1');
+}
 
 export const AgentState = object({
   proverbs: array(string()).default([]),
@@ -85,7 +102,7 @@ export class LoadToolsService {
       )}
 `;
       },
-      model: openai('gpt-4.1'),
+      model: getAgentModel(),
       tools,
       memory: new Memory({
         storage: pStore,

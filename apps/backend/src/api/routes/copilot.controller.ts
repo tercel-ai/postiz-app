@@ -14,6 +14,7 @@ import {
   copilotRuntimeNodeHttpEndpoint,
   copilotRuntimeNextJSAppRouterEndpoint,
 } from '@copilotkit/runtime';
+import OpenAI from 'openai';
 import { GetOrgFromRequest } from '@gitroom/nestjs-libraries/user/org.from.request';
 import { Organization } from '@prisma/client';
 import { SubscriptionService } from '@gitroom/nestjs-libraries/database/prisma/subscriptions/subscription.service';
@@ -23,6 +24,38 @@ import { Request, Response } from 'express';
 import { RuntimeContext } from '@mastra/core/di';
 import { CheckPolicies } from '@gitroom/backend/services/auth/permissions/permissions.ability';
 import { AuthorizationActions, Sections } from '@gitroom/backend/services/auth/permissions/permission.exception.class';
+
+function hasValidOpenAiKey(): boolean {
+  const key = process.env.OPENAI_API_KEY;
+  return !!key && key !== 'sk-proj-' && key.length > 0;
+}
+
+function isOpenRouterProvider(): boolean {
+  return (process.env.IMAGE_PROVIDER || 'openai').toLowerCase() === 'openrouter';
+}
+
+function createServiceAdapter(): OpenAIAdapter {
+  if (isOpenRouterProvider() && !hasValidOpenAiKey()) {
+    if (!process.env.OPENROUTER_API_KEY) {
+      throw new Error(
+        'OPENROUTER_API_KEY is required when IMAGE_PROVIDER=openrouter without OPENAI_API_KEY'
+      );
+    }
+    const openrouterClient = new OpenAI({
+      apiKey: process.env.OPENROUTER_API_KEY,
+      baseURL: 'https://openrouter.ai/api/v1',
+    });
+    return new OpenAIAdapter({
+      openai: openrouterClient as any,
+      model: process.env.OPENROUTER_TEXT_MODEL || 'openai/gpt-4.1',
+    });
+  }
+  return new OpenAIAdapter({ model: 'gpt-4.1' });
+}
+
+function hasAnyApiKey(): boolean {
+  return hasValidOpenAiKey() || (isOpenRouterProvider() && !!process.env.OPENROUTER_API_KEY);
+}
 
 export type ChannelsContext = {
   integrations: string;
@@ -38,20 +71,15 @@ export class CopilotController {
   ) {}
   @Post('/chat')
   chatAgent(@Req() req: Request, @Res() res: Response) {
-    if (
-      process.env.OPENAI_API_KEY === undefined ||
-      process.env.OPENAI_API_KEY === ''
-    ) {
-      Logger.warn('OpenAI API key not set, chat functionality will not work');
+    if (!hasAnyApiKey()) {
+      Logger.warn('No AI API key set (OPENAI_API_KEY or OPENROUTER_API_KEY), chat functionality will not work');
       return;
     }
 
     const copilotRuntimeHandler = copilotRuntimeNodeHttpEndpoint({
       endpoint: '/copilot/chat',
       runtime: new CopilotRuntime(),
-      serviceAdapter: new OpenAIAdapter({
-        model: 'gpt-4.1',
-      }),
+      serviceAdapter: createServiceAdapter(),
     });
 
     return copilotRuntimeHandler(req, res);
@@ -64,11 +92,8 @@ export class CopilotController {
     @Res() res: Response,
     @GetOrgFromRequest() organization: Organization
   ) {
-    if (
-      process.env.OPENAI_API_KEY === undefined ||
-      process.env.OPENAI_API_KEY === ''
-    ) {
-      Logger.warn('OpenAI API key not set, chat functionality will not work');
+    if (!hasAnyApiKey()) {
+      Logger.warn('No AI API key set (OPENAI_API_KEY or OPENROUTER_API_KEY), chat functionality will not work');
       return;
     }
     const mastra = await this._mastraService.mastra();
@@ -96,9 +121,7 @@ export class CopilotController {
       endpoint: '/copilot/agent',
       runtime,
       // properties: req.body.variables.properties,
-      serviceAdapter: new OpenAIAdapter({
-        model: 'gpt-4.1',
-      }),
+      serviceAdapter: createServiceAdapter(),
     });
 
     return copilotRuntimeHandler.handleRequest(req, res);

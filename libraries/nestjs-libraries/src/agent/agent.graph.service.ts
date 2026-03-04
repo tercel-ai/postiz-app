@@ -21,11 +21,32 @@ const tools = !process.env.TAVILY_API_KEY
   : [new TavilySearchResults({ maxResults: 3 })];
 const toolNode = new ToolNode(tools);
 
-const model = new ChatOpenAI({
-  apiKey: process.env.OPENAI_API_KEY || 'sk-proj-',
-  model: 'gpt-4.1',
-  temperature: 0.7,
-});
+function isOpenRouterProvider(): boolean {
+  return (process.env.IMAGE_PROVIDER || 'openai').toLowerCase() === 'openrouter';
+}
+
+function hasValidOpenAiKey(): boolean {
+  const key = process.env.OPENAI_API_KEY;
+  return !!key && key !== 'sk-proj-' && key.length > 0;
+}
+
+const model = (() => {
+  if (isOpenRouterProvider() && !hasValidOpenAiKey()) {
+    return new ChatOpenAI({
+      apiKey: process.env.OPENROUTER_API_KEY || '',
+      model: process.env.OPENROUTER_TEXT_MODEL || 'openai/gpt-4.1',
+      temperature: 0.7,
+      configuration: {
+        baseURL: 'https://openrouter.ai/api/v1',
+      },
+    });
+  }
+  return new ChatOpenAI({
+    apiKey: process.env.OPENAI_API_KEY || 'sk-proj-',
+    model: 'gpt-4.1',
+    temperature: 0.7,
+  });
+})();
 
 const dalle = new DallEAPIWrapper({
   apiKey: process.env.OPENAI_API_KEY || 'sk-proj-',
