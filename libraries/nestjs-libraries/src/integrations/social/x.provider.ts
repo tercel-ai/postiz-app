@@ -518,6 +518,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
         });
         tweetId = v1Result.id_str;
       } catch (v1Err) {
+        console.error('[x] v1.1 tweet fallback also failed:', JSON.stringify(v1Err?.data || v1Err?.message || v1Err));
         throw err;
       }
     }
@@ -577,6 +578,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
         });
         tweetId = v1Result.id_str;
       } catch (v1Err) {
+        console.error('[x] v1.1 tweet (comment) fallback also failed:', JSON.stringify(v1Err?.data || v1Err?.message || v1Err));
         throw err;
       }
     }
