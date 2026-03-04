@@ -43,7 +43,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
 
   override handleErrors(body: string):
     | {
-        type: 'refresh-token' | 'bad-body';
+        type: 'refresh-token' | 'bad-body' | 'retryable';
         value: string;
       }
     | undefined {
@@ -54,6 +54,24 @@ export class XProvider extends SocialAbstract implements SocialProvider {
       };
     }
 
+    if (body.includes('"code":503') || body.includes('Service Unavailable')) {
+      return {
+        type: 'retryable',
+        value: 'X API is temporarily unavailable (503), will retry',
+      };
+    }
+    if (body.includes('"code":429') || body.includes('Too Many Requests')) {
+      return {
+        type: 'retryable',
+        value: 'X API rate limited (429), will retry',
+      };
+    }
+    if (body.includes('"code":500') || body.includes('Internal Server Error')) {
+      return {
+        type: 'retryable',
+        value: 'X API internal error (500), will retry',
+      };
+    }
     if (body.includes('usage-capped')) {
       return {
         type: 'bad-body',
@@ -467,34 +485,48 @@ export class XProvider extends SocialAbstract implements SocialProvider {
 
     const media_ids = (uploadAll[firstPost.id] || []).filter((f) => f);
 
-    // @ts-ignore
-    const { data }: { data: { id: string } } = await this.runInConcurrent(
-      async () =>
-        // @ts-ignore
-        client.v2.tweet({
-          ...(!firstPost?.settings?.who_can_reply_post ||
-          firstPost?.settings?.who_can_reply_post === 'everyone'
-            ? {}
-            : {
-                reply_settings: firstPost?.settings?.who_can_reply_post,
-              }),
-          ...(firstPost?.settings?.community
-            ? {
-                share_with_followers: true,
-                community_id:
-                  firstPost?.settings?.community?.split('/').pop() || '',
-              }
-            : {}),
-          text: firstPost.message,
-          ...(media_ids.length ? { media: { media_ids } } : {}),
-        })
-    );
+    let tweetId: string;
+    try {
+      // @ts-ignore
+      const { data }: { data: { id: string } } = await this.runInConcurrent(
+        async () =>
+          // @ts-ignore
+          client.v2.tweet({
+            ...(!firstPost?.settings?.who_can_reply_post ||
+            firstPost?.settings?.who_can_reply_post === 'everyone'
+              ? {}
+              : {
+                  reply_settings: firstPost?.settings?.who_can_reply_post,
+                }),
+            ...(firstPost?.settings?.community
+              ? {
+                  share_with_followers: true,
+                  community_id:
+                    firstPost?.settings?.community?.split('/').pop() || '',
+                }
+              : {}),
+            text: firstPost.message,
+            ...(media_ids.length ? { media: { media_ids } } : {}),
+          })
+      );
+      tweetId = data.id;
+    } catch (err) {
+      console.warn('[x] v2.tweet failed, trying v1.1 fallback...');
+      try {
+        const v1Result = await client.v1.tweet(firstPost.message, {
+          ...(media_ids.length ? { media_ids: media_ids.join(',') } : {}),
+        });
+        tweetId = v1Result.id_str;
+      } catch (v1Err) {
+        throw err;
+      }
+    }
 
     return [
       {
-        postId: data.id,
+        postId: tweetId,
         id: firstPost.id,
-        releaseURL: `https://twitter.com/${username}/status/${data.id}`,
+        releaseURL: `https://twitter.com/${username}/status/${tweetId}`,
         status: 'posted',
       },
     ];
@@ -523,22 +555,37 @@ export class XProvider extends SocialAbstract implements SocialProvider {
 
     const replyToId = lastCommentId || postId;
 
-    // @ts-ignore
-    const { data }: { data: { id: string } } = await this.runInConcurrent(
-      async () =>
-        // @ts-ignore
-        client.v2.tweet({
-          text: commentPost.message,
-          ...(media_ids.length ? { media: { media_ids } } : {}),
-          reply: { in_reply_to_tweet_id: replyToId },
-        })
-    );
+    let tweetId: string;
+    try {
+      // @ts-ignore
+      const { data }: { data: { id: string } } = await this.runInConcurrent(
+        async () =>
+          // @ts-ignore
+          client.v2.tweet({
+            text: commentPost.message,
+            ...(media_ids.length ? { media: { media_ids } } : {}),
+            reply: { in_reply_to_tweet_id: replyToId },
+          })
+      );
+      tweetId = data.id;
+    } catch (err) {
+      console.warn('[x] v2.tweet (comment) failed, trying v1.1 fallback...');
+      try {
+        const v1Result = await client.v1.tweet(commentPost.message, {
+          in_reply_to_status_id: replyToId,
+          ...(media_ids.length ? { media_ids: media_ids.join(',') } : {}),
+        });
+        tweetId = v1Result.id_str;
+      } catch (v1Err) {
+        throw err;
+      }
+    }
 
     return [
       {
-        postId: data.id,
+        postId: tweetId,
         id: commentPost.id,
-        releaseURL: `https://twitter.com/${username}/status/${data.id}`,
+        releaseURL: `https://twitter.com/${username}/status/${tweetId}`,
         status: 'posted',
       },
     ];
