@@ -116,23 +116,46 @@ export class OpenaiService {
     }
 
     const data = await response.json();
-    const content = data?.choices?.[0]?.message?.content;
+    const message = data?.choices?.[0]?.message;
+    const content = message?.content;
+    const images = message?.images;
 
-    if (!content || !Array.isArray(content)) {
-      throw new Error(
-        'OpenRouter returned unexpected response format: no content array'
+    let imageUrl: string | undefined;
+
+    // 1. Check message.images array (OpenRouter standard format)
+    if (Array.isArray(images) && images.length > 0) {
+      const imagePart = images.find(
+        (part: any) => part.type === 'image_url' && part.image_url?.url
       );
+      if (imagePart) {
+        imageUrl = imagePart.image_url.url;
+      }
     }
 
-    const imagePart = content.find(
-      (part: any) => part.type === 'image_url' && part.image_url?.url
-    );
+    // 2. Check content array (multimodal content format)
+    if (!imageUrl && Array.isArray(content)) {
+      const imagePart = content.find(
+        (part: any) => part.type === 'image_url' && part.image_url?.url
+      );
+      if (imagePart) {
+        imageUrl = imagePart.image_url.url;
+      }
+    }
 
-    if (!imagePart) {
+    // 3. Check content string for embedded base64 data URI
+    if (!imageUrl && typeof content === 'string') {
+      const dataUriMatch = content.match(/(data:image\/[^;]+;base64,[A-Za-z0-9+/=]+)/);
+      if (dataUriMatch) {
+        imageUrl = dataUriMatch[1];
+      }
+    }
+
+    if (!imageUrl) {
+      console.error('[OpenRouter] No image found in response. Keys:', Object.keys(message || {}),
+        'content type:', typeof content,
+        'images:', images ? JSON.stringify(images).substring(0, 200) : 'undefined');
       throw new Error('OpenRouter response did not contain an image');
     }
-
-    const imageUrl: string = imagePart.image_url.url;
 
     // imageUrl is typically a data URI like "data:image/png;base64,..."
     if (isUrl) {

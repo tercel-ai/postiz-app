@@ -35,6 +35,7 @@ export class DashboardRepository {
     const where: Prisma.PostWhereInput = {
       organizationId: orgId,
       deletedAt: null,
+      parentPostId: null,
     };
 
     if (startDate || endDate) {
@@ -60,6 +61,7 @@ export class DashboardRepository {
       where: {
         organizationId: orgId,
         deletedAt: null,
+        parentPostId: null,
         state: 'PUBLISHED',
         releaseId: { not: null },
         publishDate: {
@@ -88,6 +90,7 @@ export class DashboardRepository {
       where: {
         organizationId: orgId,
         deletedAt: null,
+        parentPostId: null,
         publishDate: {
           gte: dayjs().subtract(sinceDays, 'day').toDate(),
         },
