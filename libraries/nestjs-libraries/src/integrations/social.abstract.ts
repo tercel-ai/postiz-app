@@ -90,10 +90,10 @@ export abstract class SocialAbstract {
           value.value || ''
         );
       }
-      if (value.type === 'retryable') {
+      if (value.type === 'retry') {
         throw ApplicationFailure.retryable(
           value.value || 'Temporary error, will retry',
-          'retryable'
+          'retry'
         );
       }
       throw new BadBody('', safeStringify({}), {} as any, value.value || '');

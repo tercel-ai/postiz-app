@@ -43,7 +43,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
 
   override handleErrors(body: string):
     | {
-        type: 'refresh-token' | 'bad-body' | 'retryable';
+        type: 'refresh-token' | 'bad-body' | 'retry';
         value: string;
       }
     | undefined {
@@ -56,19 +56,19 @@ export class XProvider extends SocialAbstract implements SocialProvider {
 
     if (body.includes('"code":503') || body.includes('Service Unavailable')) {
       return {
-        type: 'retryable',
+        type: 'retry',
         value: 'X API is temporarily unavailable (503), will retry',
       };
     }
     if (body.includes('"code":429') || body.includes('Too Many Requests')) {
       return {
-        type: 'retryable',
+        type: 'retry',
         value: 'X API rate limited (429), will retry',
       };
     }
     if (body.includes('"code":500') || body.includes('Internal Server Error')) {
       return {
-        type: 'retryable',
+        type: 'retry',
         value: 'X API internal error (500), will retry',
       };
     }
