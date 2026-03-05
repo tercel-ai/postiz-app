@@ -265,7 +265,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
         {
           authAccessType: 'write',
           linkMode: 'authenticate',
-          forceLogin: false,
+          forceLogin: true,
         }
       );
     return {
