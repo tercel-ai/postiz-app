@@ -31,11 +31,19 @@ export class DashboardRepository {
     });
   }
 
-  async getPostsStats(orgId: string, startDate?: Date, endDate?: Date) {
+  async getPostsStats(
+    orgId: string,
+    startDate?: Date,
+    endDate?: Date,
+    integrationId?: string[],
+    channel?: string[]
+  ) {
     const where: Prisma.PostWhereInput = {
       organizationId: orgId,
       deletedAt: null,
       parentPostId: null,
+      ...(integrationId?.length && { integrationId: { in: integrationId } }),
+      ...(channel?.length && { integration: { providerIdentifier: { in: channel } } }),
     };
 
     if (startDate || endDate) {

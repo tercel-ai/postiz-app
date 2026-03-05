@@ -27,7 +27,7 @@ export class DashboardController {
       throw new BadRequestException('startDate must be before endDate');
     }
 
-    return this._dashboardService.getSummary(org, startDate, endDate);
+    return this._dashboardService.getSummary(org, startDate, endDate, query.integrationId, query.channel);
   }
 
   @Get('/posts-trend')

@@ -33,10 +33,18 @@ export class DashboardService {
     private _refreshIntegrationService: RefreshIntegrationService
   ) {}
 
-  async getSummary(org: Organization, startDate?: Date, endDate?: Date) {
+  async getSummary(
+    org: Organization,
+    startDate?: Date,
+    endDate?: Date,
+    integrationId?: string[],
+    channel?: string[]
+  ) {
     const normalizedStart = startDate ? dayjs(startDate).startOf('day').toDate() : undefined;
     const normalizedEnd = endDate ? dayjs(endDate).endOf('day').toDate() : undefined;
-    const cacheKey = `dashboard:summary:${org.id}:${normalizedStart?.getTime() || 'all'}:${normalizedEnd?.getTime() || 'all'}`;
+    const intKey = integrationId?.length ? [...integrationId].sort().join(',') : 'all';
+    const chKey = channel?.length ? [...channel].sort().join(',') : 'all';
+    const cacheKey = `dashboard:summary:${org.id}:${normalizedStart?.getTime() || 'all'}:${normalizedEnd?.getTime() || 'all'}:${intKey}:${chKey}`;
     const cached = await ioRedis.get(cacheKey);
     if (cached) {
       return JSON.parse(cached);
@@ -45,7 +53,7 @@ export class DashboardService {
     const [channelCount, integrations, postStats] = await Promise.all([
       this._dashboardRepository.getChannelCount(org.id),
       this._dashboardRepository.getActiveIntegrations(org.id),
-      this._dashboardRepository.getPostsStats(org.id, normalizedStart, normalizedEnd),
+      this._dashboardRepository.getPostsStats(org.id, normalizedStart, normalizedEnd, integrationId, channel),
     ]);
 
     const stats = {
