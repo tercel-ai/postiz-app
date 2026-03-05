@@ -541,6 +541,9 @@ export class IntegrationsController {
     }
 
     if (refresh && String(id) !== String(refresh)) {
+      console.error(
+        `[Refresh mismatch] provider=${integration}, oauth_id="${String(id)}", expected_internalId="${String(refresh)}", state=${body.state}`
+      );
       throw new NotEnoughScopes(
         'Please refresh the channel that needs to be refreshed'
       );
