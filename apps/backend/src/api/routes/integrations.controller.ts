@@ -223,6 +223,7 @@ export class IntegrationsController {
   @CheckPolicies([AuthorizationActions.Create, Sections.CHANNEL])
   async getIntegrationUrl(
     @Req() req: Request,
+    @GetOrgFromRequest() org: Organization,
     @Param('integration') integration: string,
     @Query('refresh') refresh: string,
     @Query('externalUrl') externalUrl: string,
@@ -261,7 +262,20 @@ export class IntegrationsController {
         );
 
       if (refresh) {
-        await ioRedis.set(`refresh:${state}`, refresh, 'EX', 300);
+        // The frontend may pass either the integration's primary key (id) or
+        // its internalId.  The /connect callback compares the value stored
+        // here against the provider's account id (internalId), so we must
+        // always store the internalId.
+        let refreshValue = refresh;
+        const existing =
+          await this._integrationService.getIntegrationById(
+            org.id,
+            refresh
+          );
+        if (existing?.internalId) {
+          refreshValue = existing.internalId;
+        }
+        await ioRedis.set(`refresh:${state}`, refreshValue, 'EX', 300);
       }
 
       if (onboarding === 'true') {
