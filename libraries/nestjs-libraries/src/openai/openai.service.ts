@@ -84,29 +84,44 @@ export class OpenaiService {
       process.env.OPENROUTER_IMAGE_MODEL ||
       'google/gemini-3.1-flash-image-preview';
 
-    const response = await fetch(
-      'https://openrouter.ai/api/v1/chat/completions',
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          model,
-          messages: [
-            {
-              role: 'user',
-              content: prompt,
-            },
-          ],
-          modalities: ['image', 'text'],
-          image_config: {
-            aspect_ratio: isVertical ? '9:16' : '1:1',
+    const controller = new AbortController();
+    const timeoutMs = Number(process.env.OPENROUTER_IMAGE_TIMEOUT_MS) || 300_000;
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+    let response: Response;
+    try {
+      response = await fetch(
+        'https://openrouter.ai/api/v1/chat/completions',
+        {
+          method: 'POST',
+          signal: controller.signal,
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
           },
-        }),
+          body: JSON.stringify({
+            model,
+            messages: [
+              {
+                role: 'user',
+                content: prompt,
+              },
+            ],
+            modalities: ['image', 'text'],
+            image_config: {
+              aspect_ratio: isVertical ? '9:16' : '1:1',
+            },
+          }),
+        }
+      );
+    } catch (err: any) {
+      clearTimeout(timeout);
+      if (err?.name === 'AbortError') {
+        throw new Error(`OpenRouter image generation timed out after ${timeoutMs / 1000}s`);
       }
-    );
+      throw err;
+    }
+    clearTimeout(timeout);
 
     if (!response.ok) {
       const errorBody = await response.text();
