@@ -293,7 +293,14 @@ export class XProvider extends SocialAbstract implements SocialProvider {
       const loginResult = await startingClient.login(code);
       accessToken = loginResult.accessToken;
       accessSecret = loginResult.accessSecret;
-      client = loginResult.client;
+      // Build a fresh client with explicit OAuth 1.0a credentials
+      // loginResult.client may not sign v2 requests correctly
+      client = new TwitterApi({
+        appKey: process.env.X_API_KEY!,
+        appSecret: process.env.X_API_SECRET!,
+        accessToken,
+        accessSecret,
+      });
     } catch (err: any) {
       const status = err?.code || err?.status || '';
       console.error(`X OAuth login failed (${status}):`, err?.data || err?.message || err);
