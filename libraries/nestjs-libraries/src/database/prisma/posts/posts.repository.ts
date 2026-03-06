@@ -215,10 +215,15 @@ export class PostsRepository {
         ],
         deletedAt: null,
         parentPostId: null,
-        ...(query.customer
+        ...(query.state ? { state: query.state } : {}),
+        ...(query.integrationId?.length
+          ? { integrationId: { in: query.integrationId } }
+          : {}),
+        ...((query.channel?.length || query.customer)
           ? {
             integration: {
-              customerId: query.customer,
+              ...(query.channel?.length ? { providerIdentifier: { in: query.channel } } : {}),
+              ...(query.customer ? { customerId: query.customer } : {}),
             },
           }
           : {}),
