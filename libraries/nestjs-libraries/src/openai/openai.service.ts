@@ -4,6 +4,63 @@ import { shuffle } from 'lodash';
 import { zodResponseFormat } from 'openai/helpers/zod';
 import { z } from 'zod';
 
+export type BillingMode = 'per_token' | 'per_image';
+
+export interface AiUsageInfo {
+  servicer: string;
+  provider: string;
+  model: string;
+  type: 'text' | 'image';
+  billing_mode: BillingMode;
+  method: string;
+  usage: {
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+    cached_prompt_tokens?: number;
+  };
+  image_billing?: {
+    count: number;
+    size: string;
+    quality: string;
+  };
+}
+
+/**
+ * Parse a model identifier like "google/gemini-3.1-flash-image-preview"
+ * into { provider: "google", model: "gemini-3.1-flash-image-preview" }.
+ * If no slash, provider falls back to the servicer value.
+ */
+export function parseModelId(
+  rawModel: string,
+  servicer: string
+): { provider: string; model: string } {
+  const slashIdx = rawModel.indexOf('/');
+  if (slashIdx > 0) {
+    return {
+      provider: rawModel.slice(0, slashIdx),
+      model: rawModel.slice(slashIdx + 1),
+    };
+  }
+  return { provider: servicer, model: rawModel };
+}
+
+export function logAiUsage(info: AiUsageInfo): void {
+  const parts = [
+    `[AI Usage] servicer=${info.servicer} provider=${info.provider} model=${info.model} type=${info.type} billing_mode=${info.billing_mode} method=${info.method}`,
+    `prompt_tokens=${info.usage.prompt_tokens} completion_tokens=${info.usage.completion_tokens} total_tokens=${info.usage.total_tokens}`,
+  ];
+  if (info.usage.cached_prompt_tokens) {
+    parts.push(`cached_prompt_tokens=${info.usage.cached_prompt_tokens}`);
+  }
+  if (info.image_billing) {
+    parts.push(
+      `image_count=${info.image_billing.count} size=${info.image_billing.size} quality=${info.image_billing.quality}`
+    );
+  }
+  console.log(parts.join(' '));
+}
+
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY || 'sk-proj-',
 });
@@ -29,44 +86,75 @@ const VoicePrompt = z.object({
 
 @Injectable()
 export class OpenaiService {
-  private getTextClient(): { client: OpenAI; model: string } {
-    const provider = (process.env.IMAGE_PROVIDER || 'openai').toLowerCase();
+  private getTextClient(): {
+    client: OpenAI;
+    model: string;
+    servicer: string;
+    provider: string;
+  } {
+    const configProvider = (
+      process.env.IMAGE_PROVIDER || 'openai'
+    ).toLowerCase();
     const hasOpenAiKey =
       process.env.OPENAI_API_KEY &&
       process.env.OPENAI_API_KEY !== 'sk-proj-' &&
       process.env.OPENAI_API_KEY.length > 0;
 
-    if (provider === 'openrouter' && !hasOpenAiKey) {
+    if (configProvider === 'openrouter' && !hasOpenAiKey) {
       if (!process.env.OPENROUTER_API_KEY) {
         throw new Error(
           'OPENROUTER_API_KEY is required when IMAGE_PROVIDER=openrouter without OPENAI_API_KEY'
         );
       }
+      const rawModel =
+        process.env.OPENROUTER_TEXT_MODEL || 'openai/gpt-4.1';
+      const parsed = parseModelId(rawModel, 'openrouter');
       return {
         client: getOpenRouterClient(),
-        model: process.env.OPENROUTER_TEXT_MODEL || 'openai/gpt-4.1',
+        model: parsed.model,
+        servicer: 'openrouter',
+        provider: parsed.provider,
       };
     }
 
-    return { client: openai, model: 'gpt-4.1' };
+    return {
+      client: openai,
+      model: 'gpt-4.1',
+      servicer: 'openai',
+      provider: 'openai',
+    };
   }
 
   async generateImage(prompt: string, isUrl: boolean, isVertical = false) {
-    const provider = (process.env.IMAGE_PROVIDER || 'openai').toLowerCase();
+    const configuredServicer = (process.env.IMAGE_PROVIDER || 'openai').toLowerCase();
 
-    if (provider === 'openrouter') {
+    if (configuredServicer === 'openrouter') {
       return this.generateImageViaOpenRouter(prompt, isUrl, isVertical);
     }
 
-    const generate = (
-      await openai.images.generate({
-        prompt,
-        response_format: isUrl ? 'url' : 'b64_json',
-        model: 'dall-e-3',
-        ...(isVertical ? { size: '1024x1792' } : {}),
-      })
-    ).data[0];
+    const dalleModel = 'dall-e-3';
+    const quality = 'standard';
+    const size = isVertical ? '1024x1792' : '1024x1024';
+    const response = await openai.images.generate({
+      prompt,
+      response_format: isUrl ? 'url' : 'b64_json',
+      model: dalleModel,
+      quality,
+      size,
+    });
 
+    logAiUsage({
+      servicer: 'openai',
+      provider: 'openai',
+      model: dalleModel,
+      type: 'image',
+      billing_mode: 'per_image',
+      method: 'generateImage',
+      usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+      image_billing: { count: 1, size, quality },
+    });
+
+    const generate = response.data[0];
     return isUrl ? generate.url : generate.b64_json;
   }
 
@@ -80,9 +168,13 @@ export class OpenaiService {
       throw new Error('OPENROUTER_API_KEY is required when IMAGE_PROVIDER=openrouter');
     }
 
-    const model =
+    const rawModel =
       process.env.OPENROUTER_IMAGE_MODEL ||
       'google/gemini-3.1-flash-image-preview';
+    const { provider: imageProvider, model: imageModel } = parseModelId(
+      rawModel,
+      'openrouter'
+    );
 
     const controller = new AbortController();
     const timeoutMs = Number(process.env.OPENROUTER_IMAGE_TIMEOUT_MS) || 300_000;
@@ -100,7 +192,7 @@ export class OpenaiService {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
-            model,
+            model: rawModel,
             messages: [
               {
                 role: 'user',
@@ -131,6 +223,30 @@ export class OpenaiService {
     }
 
     const data = await response.json();
+
+    // Log token usage from OpenRouter response
+    const orUsage = data?.usage;
+    const orTotalTokens = orUsage?.total_tokens ?? 0;
+    logAiUsage({
+      servicer: 'openrouter',
+      provider: imageProvider,
+      model: imageModel,
+      type: 'image',
+      billing_mode: orTotalTokens > 0 ? 'per_token' : 'per_image',
+      method: 'generateImageViaOpenRouter',
+      usage: {
+        prompt_tokens: orUsage?.prompt_tokens ?? 0,
+        completion_tokens: orUsage?.completion_tokens ?? 0,
+        total_tokens: orUsage?.total_tokens ?? 0,
+        cached_prompt_tokens: orUsage?.prompt_tokens_details?.cached_tokens ?? orUsage?.cached_prompt_tokens ?? 0,
+      },
+      image_billing: {
+        count: 1,
+        size: isVertical ? '9:16' : '1:1',
+        quality: 'standard',
+      },
+    });
+
     const message = data?.choices?.[0]?.message;
     const content = message?.content;
     const images = message?.images;
@@ -184,87 +300,130 @@ export class OpenaiService {
   }
 
   async generatePromptForPicture(prompt: string) {
-    const { client, model } = this.getTextClient();
-    return (
-      (
-        await client.chat.completions.parse({
-          model,
-          messages: [
-            {
-              role: 'system',
-              content: `You are an assistant that take a description and style and generate a prompt that will be used later to generate images, make it a very long and descriptive explanation, and write a lot of things for the renderer like, if it${"'"}s realistic describe the camera`,
-            },
-            {
-              role: 'user',
-              content: `prompt: ${prompt}`,
-            },
-          ],
-          response_format: zodResponseFormat(PicturePrompt, 'picturePrompt'),
-        })
-      ).choices[0].message.parsed?.prompt || ''
-    );
+    const { client, model, servicer, provider } = this.getTextClient();
+    const response = await client.chat.completions.parse({
+      model,
+      messages: [
+        {
+          role: 'system',
+          content: `You are an assistant that take a description and style and generate a prompt that will be used later to generate images, make it a very long and descriptive explanation, and write a lot of things for the renderer like, if it${"'"}s realistic describe the camera`,
+        },
+        {
+          role: 'user',
+          content: `prompt: ${prompt}`,
+        },
+      ],
+      response_format: zodResponseFormat(PicturePrompt, 'picturePrompt'),
+    });
+
+    logAiUsage({
+      servicer,
+      provider,
+      model,
+      type: 'text',
+      billing_mode: 'per_token',
+      method: 'generatePromptForPicture',
+      usage: {
+        prompt_tokens: response.usage?.prompt_tokens ?? 0,
+        completion_tokens: response.usage?.completion_tokens ?? 0,
+        total_tokens: response.usage?.total_tokens ?? 0,
+        cached_prompt_tokens: response.usage?.prompt_tokens_details?.cached_tokens ?? 0,
+      },
+    });
+
+    return response.choices[0].message.parsed?.prompt || '';
   }
 
   async generateVoiceFromText(prompt: string) {
-    const { client, model } = this.getTextClient();
-    return (
-      (
-        await client.chat.completions.parse({
-          model,
-          messages: [
-            {
-              role: 'system',
-              content: `You are an assistant that takes a social media post and convert it to a normal human voice, to be later added to a character, when a person talk they don\'t use "-", and sometimes they add pause with "..." to make it sounds more natural, make sure you use a lot of pauses and make it sound like a real person`,
-            },
-            {
-              role: 'user',
-              content: `prompt: ${prompt}`,
-            },
-          ],
-          response_format: zodResponseFormat(VoicePrompt, 'voice'),
-        })
-      ).choices[0].message.parsed?.voice || ''
-    );
+    const { client, model, servicer, provider } = this.getTextClient();
+    const response = await client.chat.completions.parse({
+      model,
+      messages: [
+        {
+          role: 'system',
+          content: `You are an assistant that takes a social media post and convert it to a normal human voice, to be later added to a character, when a person talk they don\'t use "-", and sometimes they add pause with "..." to make it sounds more natural, make sure you use a lot of pauses and make it sound like a real person`,
+        },
+        {
+          role: 'user',
+          content: `prompt: ${prompt}`,
+        },
+      ],
+      response_format: zodResponseFormat(VoicePrompt, 'voice'),
+    });
+
+    logAiUsage({
+      servicer,
+      provider,
+      model,
+      type: 'text',
+      billing_mode: 'per_token',
+      method: 'generateVoiceFromText',
+      usage: {
+        prompt_tokens: response.usage?.prompt_tokens ?? 0,
+        completion_tokens: response.usage?.completion_tokens ?? 0,
+        total_tokens: response.usage?.total_tokens ?? 0,
+        cached_prompt_tokens: response.usage?.prompt_tokens_details?.cached_tokens ?? 0,
+      },
+    });
+
+    return response.choices[0].message.parsed?.voice || '';
   }
 
   async generatePosts(content: string) {
-    const { client, model } = this.getTextClient();
-    const posts = (
-      await Promise.all([
-        client.chat.completions.create({
-          messages: [
-            {
-              role: 'assistant',
-              content:
-                'Generate a Twitter post from the content without emojis in the following JSON format: { "post": string } put it in an array with one element',
-            },
-            {
-              role: 'user',
-              content: content!,
-            },
-          ],
-          n: 5,
-          temperature: 1,
-          model,
-        }),
-        client.chat.completions.create({
-          messages: [
-            {
-              role: 'assistant',
-              content:
-                'Generate a thread for social media in the following JSON format: Array<{ "post": string }> without emojis',
-            },
-            {
-              role: 'user',
-              content: content!,
-            },
-          ],
-          n: 5,
-          temperature: 1,
-          model,
-        }),
-      ])
-    ).flatMap((p) => p.choices);
+    const { client, model, servicer, provider } = this.getTextClient();
+    const responses = await Promise.all([
+      client.chat.completions.create({
+        messages: [
+          {
+            role: 'assistant',
+            content:
+              'Generate a Twitter post from the content without emojis in the following JSON format: { "post": string } put it in an array with one element',
+          },
+          {
+            role: 'user',
+            content: content!,
+          },
+        ],
+        n: 5,
+        temperature: 1,
+        model,
+      }),
+      client.chat.completions.create({
+        messages: [
+          {
+            role: 'assistant',
+            content:
+              'Generate a thread for social media in the following JSON format: Array<{ "post": string }> without emojis',
+          },
+          {
+            role: 'user',
+            content: content!,
+          },
+        ],
+        n: 5,
+        temperature: 1,
+        model,
+      }),
+    ]);
+
+    for (const resp of responses) {
+      logAiUsage({
+        servicer,
+        provider,
+        model,
+        type: 'text',
+        billing_mode: 'per_token',
+        method: 'generatePosts',
+        usage: {
+          prompt_tokens: resp.usage?.prompt_tokens ?? 0,
+          completion_tokens: resp.usage?.completion_tokens ?? 0,
+          total_tokens: resp.usage?.total_tokens ?? 0,
+          cached_prompt_tokens: resp.usage?.prompt_tokens_details?.cached_tokens ?? 0,
+        },
+      });
+    }
+
+    const posts = responses.flatMap((p) => p.choices);
 
     return shuffle(
       posts.map((choice) => {
@@ -287,7 +446,7 @@ export class OpenaiService {
     );
   }
   async extractWebsiteText(content: string) {
-    const { client, model } = this.getTextClient();
+    const { client, model, servicer, provider } = this.getTextClient();
     const websiteContent = await client.chat.completions.create({
       messages: [
         {
@@ -303,13 +462,28 @@ export class OpenaiService {
       model,
     });
 
+    logAiUsage({
+      servicer,
+      provider,
+      model,
+      type: 'text',
+      billing_mode: 'per_token',
+      method: 'extractWebsiteText',
+      usage: {
+        prompt_tokens: websiteContent.usage?.prompt_tokens ?? 0,
+        completion_tokens: websiteContent.usage?.completion_tokens ?? 0,
+        total_tokens: websiteContent.usage?.total_tokens ?? 0,
+        cached_prompt_tokens: websiteContent.usage?.prompt_tokens_details?.cached_tokens ?? 0,
+      },
+    });
+
     const { content: articleContent } = websiteContent.choices[0].message;
 
     return this.generatePosts(articleContent!);
   }
 
   async separatePosts(content: string, len: number) {
-    const { client, model } = this.getTextClient();
+    const { client, model, servicer, provider } = this.getTextClient();
     const SeparatePostsPrompt = z.object({
       posts: z.array(z.string()),
     });
@@ -318,28 +492,42 @@ export class OpenaiService {
       post: z.string().max(len),
     });
 
-    const posts =
-      (
-        await client.chat.completions.parse({
-          model,
-          messages: [
-            {
-              role: 'system',
-              content: `You are an assistant that take a social media post and break it to a thread, each post must be minimum ${
-                len - 10
-              } and maximum ${len} characters, keeping the exact wording and break lines, however make sure you split posts based on context`,
-            },
-            {
-              role: 'user',
-              content: content,
-            },
-          ],
-          response_format: zodResponseFormat(
-            SeparatePostsPrompt,
-            'separatePosts'
-          ),
-        })
-      ).choices[0].message.parsed?.posts || [];
+    const separateResponse = await client.chat.completions.parse({
+      model,
+      messages: [
+        {
+          role: 'system',
+          content: `You are an assistant that take a social media post and break it to a thread, each post must be minimum ${
+            len - 10
+          } and maximum ${len} characters, keeping the exact wording and break lines, however make sure you split posts based on context`,
+        },
+        {
+          role: 'user',
+          content: content,
+        },
+      ],
+      response_format: zodResponseFormat(
+        SeparatePostsPrompt,
+        'separatePosts'
+      ),
+    });
+
+    logAiUsage({
+      servicer,
+      provider,
+      model,
+      type: 'text',
+      billing_mode: 'per_token',
+      method: 'separatePosts',
+      usage: {
+        prompt_tokens: separateResponse.usage?.prompt_tokens ?? 0,
+        completion_tokens: separateResponse.usage?.completion_tokens ?? 0,
+        total_tokens: separateResponse.usage?.total_tokens ?? 0,
+        cached_prompt_tokens: separateResponse.usage?.prompt_tokens_details?.cached_tokens ?? 0,
+      },
+    });
+
+    const posts = separateResponse.choices[0].message.parsed?.posts || [];
 
     return {
       posts: await Promise.all(
@@ -351,27 +539,40 @@ export class OpenaiService {
           let retries = 4;
           while (retries) {
             try {
-              return (
-                (
-                  await client.chat.completions.parse({
-                    model,
-                    messages: [
-                      {
-                        role: 'system',
-                        content: `You are an assistant that take a social media post and shrink it to be maximum ${len} characters, keeping the exact wording and break lines`,
-                      },
-                      {
-                        role: 'user',
-                        content: post,
-                      },
-                    ],
-                    response_format: zodResponseFormat(
-                      SeparatePostPrompt,
-                      'separatePost'
-                    ),
-                  })
-                ).choices[0].message.parsed?.post || ''
-              );
+              const shrinkResponse = await client.chat.completions.parse({
+                model,
+                messages: [
+                  {
+                    role: 'system',
+                    content: `You are an assistant that take a social media post and shrink it to be maximum ${len} characters, keeping the exact wording and break lines`,
+                  },
+                  {
+                    role: 'user',
+                    content: post,
+                  },
+                ],
+                response_format: zodResponseFormat(
+                  SeparatePostPrompt,
+                  'separatePost'
+                ),
+              });
+
+              logAiUsage({
+                servicer,
+                provider,
+                model,
+                type: 'text',
+                billing_mode: 'per_token',
+                method: 'separatePosts.shrink',
+                usage: {
+                  prompt_tokens: shrinkResponse.usage?.prompt_tokens ?? 0,
+                  completion_tokens: shrinkResponse.usage?.completion_tokens ?? 0,
+                  total_tokens: shrinkResponse.usage?.total_tokens ?? 0,
+                  cached_prompt_tokens: shrinkResponse.usage?.prompt_tokens_details?.cached_tokens ?? 0,
+                },
+              });
+
+              return shrinkResponse.choices[0].message.parsed?.post || '';
             } catch (e) {
               retries--;
             }
@@ -384,41 +585,53 @@ export class OpenaiService {
   }
 
   async generateSlidesFromText(text: string) {
-    const { client, model } = this.getTextClient();
+    const { client, model, servicer, provider } = this.getTextClient();
     for (let i = 0; i < 3; i++) {
       try {
         const message = `You are an assistant that takes a text and break it into slides, each slide should have an image prompt and voice text to be later used to generate a video and voice, image prompt should capture the essence of the slide and also have a back dark gradient on top, image prompt should not contain text in the picture, generate between 3-5 slides maximum`;
-        const parse =
-          (
-            await client.chat.completions.parse({
-              model,
-              messages: [
-                {
-                  role: 'system',
-                  content: message,
-                },
-                {
-                  role: 'user',
-                  content: text,
-                },
-              ],
-              response_format: zodResponseFormat(
-                z.object({
-                  slides: z
-                    .array(
-                      z.object({
-                        imagePrompt: z.string(),
-                        voiceText: z.string(),
-                      })
-                    )
-                    .describe('an array of slides'),
-                }),
-                'slides'
-              ),
-            })
-          ).choices[0].message.parsed?.slides || [];
+        const response = await client.chat.completions.parse({
+          model,
+          messages: [
+            {
+              role: 'system',
+              content: message,
+            },
+            {
+              role: 'user',
+              content: text,
+            },
+          ],
+          response_format: zodResponseFormat(
+            z.object({
+              slides: z
+                .array(
+                  z.object({
+                    imagePrompt: z.string(),
+                    voiceText: z.string(),
+                  })
+                )
+                .describe('an array of slides'),
+            }),
+            'slides'
+          ),
+        });
 
-        return parse;
+        logAiUsage({
+          servicer,
+          provider,
+          model,
+          type: 'text',
+          billing_mode: 'per_token',
+          method: 'generateSlidesFromText',
+          usage: {
+            prompt_tokens: response.usage?.prompt_tokens ?? 0,
+            completion_tokens: response.usage?.completion_tokens ?? 0,
+            total_tokens: response.usage?.total_tokens ?? 0,
+            cached_prompt_tokens: response.usage?.prompt_tokens_details?.cached_tokens ?? 0,
+          },
+        });
+
+        return response.choices[0].message.parsed?.slides || [];
       } catch (err) {
         console.log(err);
       }

@@ -15,23 +15,56 @@ import { z } from 'zod';
 import { MediaService } from '@gitroom/nestjs-libraries/database/prisma/media/media.service';
 import { UploadFactory } from '@gitroom/nestjs-libraries/upload/upload.factory';
 import { GeneratorDto } from '@gitroom/nestjs-libraries/dtos/generator/generator.dto';
+import { BaseCallbackHandler } from '@langchain/core/callbacks/base';
+import { parseModelId, logAiUsage } from '@gitroom/nestjs-libraries/openai/openai.service';
+
+const agentServicer: string =
+  (process.env.IMAGE_PROVIDER || 'openai').toLowerCase() === 'openrouter' &&
+  !(
+    process.env.OPENAI_API_KEY &&
+    process.env.OPENAI_API_KEY !== 'sk-proj-' &&
+    process.env.OPENAI_API_KEY.length > 0
+  )
+    ? 'openrouter'
+    : 'openai';
+
+class AiUsageCallbackHandler extends BaseCallbackHandler {
+  name = 'AiUsageCallbackHandler';
+
+  async handleLLMEnd(output: any) {
+    const usage = output?.llmOutput?.tokenUsage || output?.llmOutput?.usage;
+    const rawModel =
+      output?.llmOutput?.model_name ||
+      output?.llmOutput?.model ||
+      'unknown';
+    const { provider, model } = parseModelId(rawModel, agentServicer);
+    if (usage) {
+      logAiUsage({
+        servicer: agentServicer,
+        provider,
+        model,
+        type: 'text',
+        billing_mode: 'per_token',
+        method: 'agent',
+        usage: {
+          prompt_tokens: usage.promptTokens ?? usage.prompt_tokens ?? 0,
+          completion_tokens: usage.completionTokens ?? usage.completion_tokens ?? 0,
+          total_tokens: usage.totalTokens ?? usage.total_tokens ?? 0,
+        },
+      });
+    }
+  }
+}
+
+const aiUsageCallback = new AiUsageCallbackHandler();
 
 const tools = !process.env.TAVILY_API_KEY
   ? []
   : [new TavilySearchResults({ maxResults: 3 })];
 const toolNode = new ToolNode(tools);
 
-function isOpenRouterProvider(): boolean {
-  return (process.env.IMAGE_PROVIDER || 'openai').toLowerCase() === 'openrouter';
-}
-
-function hasValidOpenAiKey(): boolean {
-  const key = process.env.OPENAI_API_KEY;
-  return !!key && key !== 'sk-proj-' && key.length > 0;
-}
-
 const model = (() => {
-  if (isOpenRouterProvider() && !hasValidOpenAiKey()) {
+  if (agentServicer === 'openrouter') {
     return new ChatOpenAI({
       apiKey: process.env.OPENROUTER_API_KEY || '',
       model: process.env.OPENROUTER_TEXT_MODEL || 'openai/gpt-4.1',
@@ -39,12 +72,14 @@ const model = (() => {
       configuration: {
         baseURL: 'https://openrouter.ai/api/v1',
       },
+      callbacks: [aiUsageCallback],
     });
   }
   return new ChatOpenAI({
     apiKey: process.env.OPENAI_API_KEY || 'sk-proj-',
     model: 'gpt-4.1',
     temperature: 0.7,
+    callbacks: [aiUsageCallback],
   });
 })();
 
@@ -342,6 +377,16 @@ export class AgentGraphService {
     const newContent = await Promise.all(
       (state.content || []).map(async (p) => {
         const image = await dalle.invoke(p.prompt!);
+        logAiUsage({
+          servicer: 'openai',
+          provider: 'openai',
+          model: 'dall-e-3',
+          type: 'image',
+          billing_mode: 'per_image',
+          method: 'agent.generatePictures',
+          usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+          image_billing: { count: 1, size: '1024x1024', quality: 'standard' },
+        });
         return {
           ...p,
           image,
