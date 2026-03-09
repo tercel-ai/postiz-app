@@ -104,6 +104,8 @@ model User {
   organizations         UserOrganization[]
   sendSuccessEmails     Boolean            @default(true)
   sendFailureEmails     Boolean            @default(true)
+  maxChannels           Int?
+  maxPostsPerMonth      Int?
 
   @@unique([email, providerName])
   @@index([lastReadNotifications])
@@ -885,4 +887,16 @@ enum ShortLinkPreference {
   ASK
   YES
   NO
+}
+
+model Settings {
+  id          String   @id @default(uuid())
+  key         String   @unique
+  type        String   @default("string") // string, number, boolean, object, array
+  required    Boolean  @default(false)
+  description String?
+  value       Json?
+  default     Json?    @map("default_value")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 }

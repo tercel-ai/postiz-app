@@ -51,4 +51,15 @@ export class UsersService {
   updateEmailNotifications(userId: string, body: EmailNotificationsDto) {
     return this._usersRepository.updateEmailNotifications(userId, body);
   }
+
+  getUserLimits(userId: string) {
+    return this._usersRepository.getUserLimits(userId);
+  }
+
+  updateUserLimits(
+    userId: string,
+    limits: { maxChannels?: number | null; maxPostsPerMonth?: number | null }
+  ) {
+    return this._usersRepository.updateUserLimits(userId, limits);
+  }
 }

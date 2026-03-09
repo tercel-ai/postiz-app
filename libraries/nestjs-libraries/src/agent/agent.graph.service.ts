@@ -31,7 +31,7 @@ const agentServicer: string =
 class AiUsageCallbackHandler extends BaseCallbackHandler {
   name = 'AiUsageCallbackHandler';
 
-  async handleLLMEnd(output: any) {
+  override async handleLLMEnd(output: any) {
     const usage = output?.llmOutput?.tokenUsage || output?.llmOutput?.usage;
     const rawModel =
       output?.llmOutput?.model_name ||

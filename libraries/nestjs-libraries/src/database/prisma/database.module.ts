@@ -38,6 +38,10 @@ import { DashboardService } from '@gitroom/nestjs-libraries/database/prisma/dash
 import { VideoManager } from '@gitroom/nestjs-libraries/videos/video.manager';
 import { FalService } from '@gitroom/nestjs-libraries/openai/fal.service';
 import { RefreshIntegrationService } from '@gitroom/nestjs-libraries/integrations/refresh.integration.service';
+import { SettingsRepository } from '@gitroom/nestjs-libraries/database/prisma/settings/settings.repository';
+import { SettingsService } from '@gitroom/nestjs-libraries/database/prisma/settings/settings.service';
+import { AiPricingService } from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/ai-pricing.service';
+import { AiseeClient } from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/aisee.client';
 
 @Global()
 @Module({
@@ -85,6 +89,10 @@ import { RefreshIntegrationService } from '@gitroom/nestjs-libraries/integration
     DashboardRepository,
     DashboardService,
     VideoManager,
+    SettingsRepository,
+    SettingsService,
+    AiPricingService,
+    AiseeClient,
   ],
   get exports() {
     return this.providers;

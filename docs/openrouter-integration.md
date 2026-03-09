@@ -18,8 +18,8 @@ OPENROUTER_API_KEY="sk-or-v1-..."
 # Model for image generation (default: google/gemini-3.1-flash-image-preview)
 OPENROUTER_IMAGE_MODEL="google/gemini-3.1-flash-image-preview"
 
-# Model for text generation — post creation, prompt enhancement, etc. (default: openai/gpt-4.1)
-OPENROUTER_TEXT_MODEL="openai/gpt-4.1"
+# Model for text generation — post creation, prompt enhancement, etc. (default: openai/gpt-5.1)
+OPENROUTER_TEXT_MODEL="openai/gpt-5.1"
 ```
 
 ## Configuration Scenarios
@@ -45,7 +45,7 @@ OPENAI_API_KEY="sk-proj-..."  # valid OpenAI key
 ```
 
 - Image generation → OpenRouter (`OPENROUTER_IMAGE_MODEL`)
-- Text generation → OpenAI (`gpt-4.1`) — since a valid OpenAI key is present
+- Text generation → OpenAI (`gpt-5.1`) — since a valid OpenAI key is present
 
 ### Scenario 3: OpenAI only (default, no changes needed)
 
@@ -83,7 +83,7 @@ The image model must support `modalities: ["image", "text"]` in the OpenRouter A
 
 | Model | Notes |
 |-------|-------|
-| `openai/gpt-4.1` | Default. Best structured output support. |
+| `openai/gpt-5.1` | Default. Best structured output support. |
 | `anthropic/claude-sonnet-4` | Strong alternative. |
 | `google/gemini-2.5-flash-preview` | Fast and cost-effective. |
 
@@ -125,4 +125,4 @@ As part of this integration, a bug was fixed in both `LocalStorage` and `Cloudfl
 | `OpenRouter image generation failed (401)` | Check your API key is valid and has credits |
 | `OpenRouter response did not contain an image` | Your `OPENROUTER_IMAGE_MODEL` may not support image generation. Use a model with `modalities: ["image"]` support. |
 | `generatePosts` fails with `n` parameter error | Some models don't support `n > 1`. Switch `OPENROUTER_TEXT_MODEL` to `openai/gpt-4.1` which supports it. |
-| Structured output errors | Ensure your `OPENROUTER_TEXT_MODEL` supports JSON schema `response_format`. GPT-4.1 and Claude models do. |
+| Structured output errors | Ensure your `OPENROUTER_TEXT_MODEL` supports JSON schema `response_format`. GPT-5.1 and Claude models do. |

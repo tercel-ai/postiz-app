@@ -26,7 +26,7 @@ export class InternalController {
   constructor(
     private _organizationService: OrganizationService,
     private _userService: UsersService
-  ) {}
+  ) { }
 
   @Post('/users')
   @HttpCode(200)
@@ -47,7 +47,7 @@ export class InternalController {
     const result = await this._organizationService.createOrgAndUserWithId(
       body.id,
       body.email,
-      body.name
+      body.name,
     );
 
     this.logger.log(

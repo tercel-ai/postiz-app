@@ -172,4 +172,40 @@ export class UsersRepository {
       },
     });
   }
+
+  async getUserLimits(userId: string) {
+    const user = await this._user.model.user.findUnique({
+      where: { id: userId },
+      select: {
+        maxChannels: true,
+        maxPostsPerMonth: true,
+      },
+    });
+    return {
+      maxChannels: user?.maxChannels ?? null,
+      maxPostsPerMonth: user?.maxPostsPerMonth ?? null,
+    };
+  }
+
+  async updateUserLimits(
+    userId: string,
+    limits: { maxChannels?: number | null; maxPostsPerMonth?: number | null }
+  ) {
+    return this._user.model.user.update({
+      where: { id: userId },
+      data: {
+        ...(limits.maxChannels !== undefined
+          ? { maxChannels: limits.maxChannels }
+          : {}),
+        ...(limits.maxPostsPerMonth !== undefined
+          ? { maxPostsPerMonth: limits.maxPostsPerMonth }
+          : {}),
+      },
+      select: {
+        id: true,
+        maxChannels: true,
+        maxPostsPerMonth: true,
+      },
+    });
+  }
 }

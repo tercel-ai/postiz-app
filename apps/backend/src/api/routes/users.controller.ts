@@ -3,6 +3,7 @@ import {
   Controller,
   Get,
   HttpException,
+  Param,
   Post,
   Query,
   Req,
@@ -23,6 +24,7 @@ import { ApiTags } from '@nestjs/swagger';
 import { UsersService } from '@gitroom/nestjs-libraries/database/prisma/users/users.service';
 import { UserDetailDto } from '@gitroom/nestjs-libraries/dtos/users/user.details.dto';
 import { EmailNotificationsDto } from '@gitroom/nestjs-libraries/dtos/users/email-notifications.dto';
+import { UpdateUserLimitsDto } from '@gitroom/nestjs-libraries/dtos/users/user.limits.dto';
 import { HttpForbiddenException } from '@gitroom/nestjs-libraries/services/exception.filter';
 import { RealIP } from 'nestjs-real-ip';
 import { UserAgent } from '@gitroom/nestjs-libraries/user/user.agent';
@@ -71,12 +73,44 @@ export class UsersController {
       allowTrial: organization?.allowTrial,
       // @ts-ignore
       publicApi: organization?.users[0]?.role === 'SUPERADMIN' || organization?.users[0]?.role === 'ADMIN' ? organization?.apiKey : '',
+      maxChannels: user.maxChannels,
+      maxPostsPerMonth: user.maxPostsPerMonth,
     };
   }
 
   @Get('/personal')
   async getPersonalInformation(@GetUserFromRequest() user: User) {
     return this._userService.getPersonal(user.id);
+  }
+
+  @Get('/limits')
+  async getUserLimits(@GetUserFromRequest() user: User) {
+    return this._userService.getUserLimits(user.id);
+  }
+
+  @Get('/limits/:userId')
+  async getUserLimitsById(
+    @GetUserFromRequest() user: User,
+    @Param('userId') userId: string
+  ) {
+    if (!user.isSuperAdmin) {
+      throw new HttpException('Unauthorized', 400);
+    }
+    return this._userService.getUserLimits(userId);
+  }
+
+  @Post('/limits')
+  async updateUserLimits(
+    @GetUserFromRequest() user: User,
+    @Body() body: UpdateUserLimitsDto
+  ) {
+    if (!user.isSuperAdmin) {
+      throw new HttpException('Unauthorized', 400);
+    }
+    return this._userService.updateUserLimits(body.userId, {
+      maxChannels: body.maxChannels,
+      maxPostsPerMonth: body.maxPostsPerMonth,
+    });
   }
 
   @Get('/impersonate')
