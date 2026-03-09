@@ -1,6 +1,7 @@
 import { BadRequestException, Controller, Get, Query } from '@nestjs/common';
 import { Organization } from '@prisma/client';
 import { GetOrgFromRequest } from '@gitroom/nestjs-libraries/user/org.from.request';
+import { GetTimezone } from '@gitroom/nestjs-libraries/user/timezone.from.request';
 import { ApiTags } from '@nestjs/swagger';
 import { DashboardService } from '@gitroom/nestjs-libraries/database/prisma/dashboard/dashboard.service';
 import {
@@ -33,9 +34,10 @@ export class DashboardController {
   @Get('/posts-trend')
   async getPostsTrend(
     @GetOrgFromRequest() org: Organization,
-    @Query() query: PostsTrendQueryDto
+    @Query() query: PostsTrendQueryDto,
+    @GetTimezone() tz?: string
   ) {
-    return this._dashboardService.getPostsTrend(org, query.period);
+    return this._dashboardService.getPostsTrend(org, query.period, tz);
   }
 
   @Get('/traffics')

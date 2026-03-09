@@ -39,6 +39,7 @@ async function start() {
         'Sentry-Trace',
         'Baggage',
         'x-copilotkit-runtime-client-gql-version',
+        'x-timezone',
       ],
       exposedHeaders: [
         'reload',

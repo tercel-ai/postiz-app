@@ -2,6 +2,8 @@ import { Injectable } from '@nestjs/common';
 import { Integration, Organization } from '@prisma/client';
 import dayjs from 'dayjs';
 import isoWeek from 'dayjs/plugin/isoWeek';
+import utc from 'dayjs/plugin/utc';
+import timezone from 'dayjs/plugin/timezone';
 import { DashboardRepository } from '@gitroom/nestjs-libraries/database/prisma/dashboard/dashboard.repository';
 import { IntegrationService } from '@gitroom/nestjs-libraries/database/prisma/integrations/integration.service';
 import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.service';
@@ -11,6 +13,8 @@ import { AnalyticsData, BatchPostAnalyticsResult } from '@gitroom/nestjs-librari
 import { ioRedis } from '@gitroom/nestjs-libraries/redis/redis.service';
 
 dayjs.extend(isoWeek);
+dayjs.extend(utc);
+dayjs.extend(timezone);
 
 const IMPRESSIONS_RE = /impression|views|page.views|reach/i;
 const TRAFFICS_RE = /click|engagement|traffic/i;
@@ -134,7 +138,8 @@ export class DashboardService {
 
   async getPostsTrend(
     org: Organization,
-    period: 'daily' | 'weekly' | 'monthly' = 'daily'
+    period: 'daily' | 'weekly' | 'monthly' = 'daily',
+    tz?: string
   ) {
     const sinceDays = period === 'monthly' ? 365 : period === 'weekly' ? 90 : 30;
     const posts = await this._dashboardRepository.getPostsForTrend(
@@ -147,7 +152,9 @@ export class DashboardService {
     for (const post of posts) {
       if (!post.publishDate || !post.integration) continue;
 
-      const d = dayjs(post.publishDate);
+      const d = tz
+        ? dayjs.utc(post.publishDate).tz(tz)
+        : dayjs.utc(post.publishDate);
       let dateKey: string;
       switch (period) {
         case 'weekly':
