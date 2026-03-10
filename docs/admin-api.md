@@ -6,7 +6,7 @@ Superadmin-only REST API for managing application settings and AI pricing config
 
 ## Authentication
 
-All endpoints are behind `AuthMiddleware` (JWT cookie-based). Additionally, each handler checks `user.isSuperAdmin` and returns HTTP 403 if not a superadmin.
+All endpoints are behind `AuthMiddleware` (JWT cookie-based or Bearer token). Additionally, each handler checks `user.isSuperAdmin` and returns HTTP 403 if not a superadmin.
 
 ### Setting a user as superadmin
 
@@ -20,7 +20,7 @@ UPDATE "User" SET "isSuperAdmin" = true WHERE email = 'admin@example.com';
 
 #### GET /admin/settings
 
-List settings with pagination and search.
+List settings with pagination and search. All query params are optional.
 
 | Query Param | Type | Default | Description |
 |-------------|------|---------|-------------|
@@ -48,9 +48,29 @@ Response: `{ "key": "my_key", "value": ... }`
 
 Returns 404 if key doesn't exist.
 
+#### POST /admin/settings
+
+Create a new setting. Returns 409 if key already exists.
+
+Body:
+```json
+{
+  "key": "my_key",
+  "value": { "any": "json value" },
+  "type": "object",
+  "description": "Optional description"
+}
+```
+
+- `key` — required, must not already exist
+- `value` — required
+- `type`, `description` — optional
+
+**Note:** Reserved keys (e.g., `ai_model_pricing`) cannot be created through this endpoint. Returns 400 for reserved keys.
+
 #### PUT /admin/settings/:key
 
-Create or update a setting.
+Update an existing setting. Returns 404 if key doesn't exist.
 
 Body:
 ```json
@@ -61,7 +81,10 @@ Body:
 }
 ```
 
-**Note:** Reserved keys (e.g., `ai_model_pricing`) cannot be modified through this endpoint. Use the dedicated `/admin/ai-pricing` endpoint instead. Returns 400 for reserved keys.
+- `value` — required
+- `type`, `description` — optional
+
+**Note:** Reserved keys (e.g., `ai_model_pricing`) cannot be modified through this endpoint. Returns 400 for reserved keys.
 
 #### DELETE /admin/settings/:key
 
@@ -95,9 +118,15 @@ Response:
 }
 ```
 
+#### POST /admin/ai-pricing
+
+Create AI model pricing config. Returns 409 if config already exists.
+
+Body: same as PUT (see below).
+
 #### PUT /admin/ai-pricing
 
-Update AI model pricing. Both `text` and `image` entries are required.
+Update AI model pricing. Returns 404 if config doesn't exist. Both `text` and `image` entries are required.
 
 Body (validated with `class-validator`):
 ```json
@@ -124,9 +153,11 @@ Validation rules:
 - `billing_mode` — must be `per_token` or `per_image`
 - `price` — required number, minimum 0
 
-This endpoint also clears the in-memory pricing cache.
+Both POST and PUT clear the in-memory pricing cache.
 
 ## Key Files
 
 - `apps/backend/src/api/routes/admin.controller.ts`
 - `libraries/nestjs-libraries/src/dtos/admin/ai-pricing.dto.ts`
+- `libraries/nestjs-libraries/src/dtos/admin/settings-body.dto.ts`
+- `libraries/nestjs-libraries/src/dtos/admin/settings-query.dto.ts`
