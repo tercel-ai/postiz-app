@@ -8,7 +8,7 @@ import {
   Put,
   Query,
 } from '@nestjs/common';
-import { ApiTags } from '@nestjs/swagger';
+import { ApiQuery, ApiTags } from '@nestjs/swagger';
 import { User } from '@prisma/client';
 import { GetUserFromRequest } from '@gitroom/nestjs-libraries/user/user.from.request';
 import { SettingsService } from '@gitroom/nestjs-libraries/database/prisma/settings/settings.service';
@@ -45,6 +45,10 @@ export class AdminController {
   // ============ Settings CRUD ============
 
   @Get('/settings')
+  @ApiQuery({ name: 'page', required: false, description: 'Page number (default 1)' })
+  @ApiQuery({ name: 'pageSize', required: false, description: 'Items per page (default 20, max 100)' })
+  @ApiQuery({ name: 'keyword', required: false, description: 'Search in key and description' })
+  @ApiQuery({ name: 'type', required: false, description: 'Filter by type (string, number, boolean, object, array)' })
   async listSettings(
     @GetUserFromRequest() user: User,
     @Query('page') page?: string,
