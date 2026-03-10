@@ -42,6 +42,8 @@ import { SettingsRepository } from '@gitroom/nestjs-libraries/database/prisma/se
 import { SettingsService } from '@gitroom/nestjs-libraries/database/prisma/settings/settings.service';
 import { AiPricingService } from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/ai-pricing.service';
 import { AiseeClient } from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/aisee.client';
+import { ErrorsRepository } from '@gitroom/nestjs-libraries/database/prisma/errors/errors.repository';
+import { ErrorsService } from '@gitroom/nestjs-libraries/database/prisma/errors/errors.service';
 
 @Global()
 @Module({
@@ -93,6 +95,8 @@ import { AiseeClient } from '@gitroom/nestjs-libraries/database/prisma/ai-pricin
     SettingsService,
     AiPricingService,
     AiseeClient,
+    ErrorsRepository,
+    ErrorsService,
   ],
   get exports() {
     return this.providers;

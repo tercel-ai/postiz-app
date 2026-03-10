@@ -55,7 +55,7 @@ async function start() {
         'http://localhost:4200',
         ...(process.env.MAIN_URL ? [process.env.MAIN_URL] : []),
         ...(process.env.EXTRA_CORS_ORIGINS
-          ? process.env.EXTRA_CORS_ORIGINS.split(',').map((s) => s.trim())
+          ? process.env.EXTRA_CORS_ORIGINS.split(',').map((s) => s.trim()).filter(Boolean)
           : []),
       ],
     },

@@ -359,6 +359,37 @@ export class DashboardService {
     return response;
   }
 
+  async getGlobalStats() {
+    const [
+      totalPosts,
+      postsByState,
+      totalIntegrations,
+      integrationsByPlatform,
+      postsToday,
+      errorsLast7Days,
+      postsLast7Days,
+    ] = await this._dashboardRepository.getGlobalStats();
+
+    return {
+      total_posts: totalPosts,
+      posts_by_state: postsByState.map((s) => ({
+        state: s.state,
+        count: s._count._all,
+      })),
+      total_integrations: totalIntegrations,
+      integrations_by_platform: integrationsByPlatform.map((p) => ({
+        platform: p.providerIdentifier,
+        count: p._count._all,
+      })),
+      posts_today: postsToday,
+      error_rate_7d:
+        postsLast7Days > 0
+          ? Math.round((errorsLast7Days / postsLast7Days) * 10000) / 100
+          : 0,
+      errors_last_7d: errorsLast7Days,
+    };
+  }
+
   /**
    * Fetch post-level analytics for all published posts, using batch APIs
    * where available and per-post fallback with circuit breaker otherwise.

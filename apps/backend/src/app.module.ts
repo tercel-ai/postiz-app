@@ -3,7 +3,9 @@ import { DatabaseModule } from '@gitroom/nestjs-libraries/database/prisma/databa
 import { ApiModule } from '@gitroom/backend/api/api.module';
 import { APP_GUARD } from '@nestjs/core';
 import { PoliciesGuard } from '@gitroom/backend/services/auth/permissions/permissions.guard';
+import { SuperAdminGuard } from '@gitroom/backend/services/auth/admin/super-admin.guard';
 import { PublicApiModule } from '@gitroom/backend/public-api/public.api.module';
+import { AdminApiModule } from '@gitroom/backend/admin-api/admin.api.module';
 import { ThrottlerBehindProxyGuard } from '@gitroom/nestjs-libraries/throttler/throttler.provider';
 import { ThrottlerModule } from '@nestjs/throttler';
 import { AgentModule } from '@gitroom/nestjs-libraries/agent/agent.module';
@@ -23,6 +25,7 @@ import { InfiniteWorkflowRegisterModule } from '@gitroom/nestjs-libraries/tempor
     DatabaseModule,
     ApiModule,
     PublicApiModule,
+    AdminApiModule,
     AgentModule,
     ThirdPartyModule,
     VideoModule,
@@ -48,11 +51,16 @@ import { InfiniteWorkflowRegisterModule } from '@gitroom/nestjs-libraries/tempor
       provide: APP_GUARD,
       useClass: PoliciesGuard,
     },
+    {
+      provide: APP_GUARD,
+      useClass: SuperAdminGuard,
+    },
   ],
   exports: [
     DatabaseModule,
     ApiModule,
     PublicApiModule,
+    AdminApiModule,
     AgentModule,
     ThrottlerModule,
     ChatModule,

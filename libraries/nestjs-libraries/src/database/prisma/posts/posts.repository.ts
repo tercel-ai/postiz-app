@@ -94,6 +94,113 @@ export class PostsRepository {
     });
   }
 
+  getPostByIdForAdmin(id: string) {
+    return this._post.model.post.findUnique({
+      where: { id, deletedAt: null },
+      select: {
+        id: true,
+        content: true,
+        image: true,
+        publishDate: true,
+        createdAt: true,
+        updatedAt: true,
+        releaseURL: true,
+        releaseId: true,
+        state: true,
+        error: true,
+        group: true,
+        delay: true,
+        intervalInDays: true,
+        organizationId: true,
+        tags: { select: { tag: true } },
+        integration: {
+          select: {
+            id: true,
+            providerIdentifier: true,
+            name: true,
+            picture: true,
+          },
+        },
+        organization: {
+          select: { id: true, name: true },
+        },
+        childrenPost: {
+          where: { deletedAt: null },
+          select: {
+            id: true,
+            content: true,
+            image: true,
+            delay: true,
+          },
+        },
+      },
+    });
+  }
+
+  async getAllPostsList(query: GetPostsListDto & { organizationId?: string }) {
+    const skip = (query.page - 1) * query.pageSize;
+    const where = {
+      deletedAt: null,
+      parentPostId: null,
+      ...(query.organizationId
+        ? { organizationId: query.organizationId }
+        : {}),
+      ...(query.state ? { state: query.state } : {}),
+      ...(query.integrationId?.length
+        ? { integrationId: { in: query.integrationId } }
+        : {}),
+      ...(query.channel?.length
+        ? { integration: { providerIdentifier: { in: query.channel } } }
+        : {}),
+    };
+
+    const [results, total] = await Promise.all([
+      this._post.model.post.findMany({
+        where,
+        orderBy: { [query.sortBy]: query.sortOrder },
+        select: {
+          id: true,
+          content: true,
+          image: true,
+          publishDate: true,
+          createdAt: true,
+          releaseURL: true,
+          state: true,
+          group: true,
+          organizationId: true,
+          tags: {
+            select: { tag: true },
+          },
+          integration: {
+            select: {
+              id: true,
+              providerIdentifier: true,
+              name: true,
+              picture: true,
+            },
+          },
+          organization: {
+            select: {
+              id: true,
+              name: true,
+            },
+          },
+        },
+        skip,
+        take: query.pageSize,
+      }),
+      this._post.model.post.count({ where }),
+    ]);
+
+    return {
+      results,
+      total,
+      page: query.page,
+      pageSize: query.pageSize,
+      totalPages: Math.ceil(total / query.pageSize),
+    };
+  }
+
   async getPostsList(orgId: string, query: GetPostsListDto) {
     const skip = (query.page - 1) * query.pageSize;
     const where = {

@@ -1,5 +1,5 @@
 import { PrismaRepository } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
-import { Role, ShortLinkPreference, SubscriptionTier } from '@prisma/client';
+import { Prisma, Role, ShortLinkPreference, SubscriptionTier } from '@prisma/client';
 import { Injectable } from '@nestjs/common';
 import { AuthService } from '@gitroom/helpers/auth/auth.service';
 import { CreateOrgUserDto } from '@gitroom/nestjs-libraries/dtos/auth/create.org.user.dto';
@@ -32,6 +32,63 @@ export class OrganizationRepository {
 
   getCount() {
     return this._organization.model.organization.count();
+  }
+
+  async paginate(options: {
+    page: number;
+    pageSize: number;
+    keyword?: string;
+  }) {
+    const { page, pageSize, keyword } = options;
+    const where: Prisma.OrganizationWhereInput = {};
+    if (keyword) {
+      where.OR = [
+        { name: { contains: keyword, mode: 'insensitive' } },
+        { id: { contains: keyword, mode: 'insensitive' } },
+      ];
+    }
+
+    const [items, total] = await Promise.all([
+      this._organization.model.organization.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+        select: {
+          id: true,
+          name: true,
+          createdAt: true,
+          updatedAt: true,
+          users: {
+            select: {
+              role: true,
+              user: {
+                select: {
+                  id: true,
+                  email: true,
+                  name: true,
+                },
+              },
+            },
+          },
+          subscription: {
+            select: {
+              subscriptionTier: true,
+              totalChannels: true,
+              isLifetime: true,
+            },
+          },
+          _count: {
+            select: {
+              post: true,
+            },
+          },
+        },
+      }),
+      this._organization.model.organization.count({ where }),
+    ]);
+
+    return { items, total, page, pageSize, totalPages: Math.ceil(total / pageSize) };
   }
 
   getUserOrg(id: string) {

@@ -60,6 +60,18 @@ export class MediaService {
     return this._mediaRepository.getMedia(org, page);
   }
 
+  paginate(options: {
+    page: number;
+    pageSize: number;
+    keyword?: string;
+    organizationId?: string;
+    type?: string;
+    sortBy?: string;
+    sortOrder?: 'asc' | 'desc';
+  }) {
+    return this._mediaRepository.paginate(options);
+  }
+
   saveMediaInformation(org: string, data: SaveMediaInformationDto) {
     return this._mediaRepository.saveMediaInformation(org, data);
   }

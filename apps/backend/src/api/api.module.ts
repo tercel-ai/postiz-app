@@ -33,7 +33,6 @@ import { ThirdPartyController } from '@gitroom/backend/api/routes/third-party.co
 import { DashboardController } from '@gitroom/backend/api/routes/dashboard.controller';
 import { MonitorController } from '@gitroom/backend/api/routes/monitor.controller';
 import { InternalController } from '@gitroom/backend/api/routes/internal.controller';
-import { AdminController } from '@gitroom/backend/api/routes/admin.controller';
 import { SsoClient } from '@gitroom/backend/services/auth/sso.client';
 import { InternalAuthGuard } from '@gitroom/backend/services/auth/internal-auth.guard';
 
@@ -53,7 +52,6 @@ const authenticatedController = [
   SetsController,
   ThirdPartyController,
   DashboardController,
-  AdminController,
 ];
 @Module({
   imports: [UploadModule],

@@ -190,6 +190,24 @@ export class IntegrationService {
     return this._integrationRepository.getIntegrationsList(org);
   }
 
+  getByIdForAdmin(id: string) {
+    return this._integrationRepository.getByIdForAdmin(id);
+  }
+
+  paginate(options: {
+    page: number;
+    pageSize: number;
+    keyword?: string;
+    organizationId?: string;
+    providerIdentifier?: string;
+    disabled?: boolean;
+    refreshNeeded?: boolean;
+    sortBy?: string;
+    sortOrder?: 'asc' | 'desc';
+  }) {
+    return this._integrationRepository.paginate(options);
+  }
+
   getIntegrationForOrder(id: string, order: string, user: string, org: string) {
     return this._integrationRepository.getIntegrationForOrder(
       id,

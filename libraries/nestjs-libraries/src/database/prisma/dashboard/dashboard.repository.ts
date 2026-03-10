@@ -92,6 +92,54 @@ export class DashboardRepository {
     });
   }
 
+  getGlobalStats() {
+    const last7Days = dayjs().subtract(7, 'day').toDate();
+    return Promise.all([
+      // [0] totalPosts
+      this._post.model.post.count({ where: { deletedAt: null, parentPostId: null } }),
+      // [1] postsByState
+      this._post.model.post.groupBy({
+        by: ['state'],
+        where: { deletedAt: null, parentPostId: null },
+        _count: { _all: true },
+      }),
+      // [2] totalIntegrations
+      this._integration.model.integration.count({ where: { deletedAt: null } }),
+      // [3] integrationsByPlatform
+      this._integration.model.integration.groupBy({
+        by: ['providerIdentifier'],
+        where: { deletedAt: null },
+        _count: { _all: true },
+        orderBy: { _count: { providerIdentifier: 'desc' } },
+      }),
+      // [4] postsToday
+      this._post.model.post.count({
+        where: {
+          deletedAt: null,
+          parentPostId: null,
+          createdAt: { gte: new Date(new Date().setHours(0, 0, 0, 0)) },
+        },
+      }),
+      // [5] errorsLast7Days (ERROR state only)
+      this._post.model.post.count({
+        where: {
+          deletedAt: null,
+          parentPostId: null,
+          state: 'ERROR',
+          createdAt: { gte: last7Days },
+        },
+      }),
+      // [6] postsLast7Days (all states, for error rate denominator)
+      this._post.model.post.count({
+        where: {
+          deletedAt: null,
+          parentPostId: null,
+          createdAt: { gte: last7Days },
+        },
+      }),
+    ]);
+  }
+
   getPostsForTrend(orgId: string, sinceDays: number) {
     return this._post.model.post.findMany({
       where: {

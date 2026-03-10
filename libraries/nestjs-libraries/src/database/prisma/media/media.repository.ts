@@ -1,5 +1,6 @@
 import { PrismaRepository } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
 import { Injectable } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { SaveMediaInformationDto } from '@gitroom/nestjs-libraries/dtos/media/save.media.information.dto';
 
 @Injectable()
@@ -67,6 +68,54 @@ export class MediaRepository {
         thumbnailTimestamp: true,
       },
     });
+  }
+
+  async paginate(options: {
+    page: number;
+    pageSize: number;
+    keyword?: string;
+    organizationId?: string;
+    type?: string;
+    sortBy?: string;
+    sortOrder?: 'asc' | 'desc';
+  }) {
+    const { page, pageSize, keyword, organizationId, type, sortBy = 'createdAt', sortOrder = 'desc' } = options;
+    const where: Prisma.MediaWhereInput = {
+      deletedAt: null,
+    };
+
+    if (keyword) {
+      where.name = { contains: keyword, mode: 'insensitive' };
+    }
+    if (organizationId) where.organizationId = organizationId;
+    if (type) where.type = type;
+
+    const [items, total] = await Promise.all([
+      this._media.model.media.findMany({
+        where,
+        orderBy: { [sortBy]: sortOrder },
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+        select: {
+          id: true,
+          name: true,
+          path: true,
+          type: true,
+          fileSize: true,
+          createdAt: true,
+          organizationId: true,
+          organization: {
+            select: {
+              id: true,
+              name: true,
+            },
+          },
+        },
+      }),
+      this._media.model.media.count({ where }),
+    ]);
+
+    return { items, total, page, pageSize, totalPages: Math.ceil(total / pageSize) };
   }
 
   async getMedia(org: string, page: number) {

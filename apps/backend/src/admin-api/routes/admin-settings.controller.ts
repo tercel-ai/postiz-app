@@ -10,21 +10,14 @@ import {
   Query,
 } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
-import { User } from '@prisma/client';
-import { GetUserFromRequest } from '@gitroom/nestjs-libraries/user/user.from.request';
 import { SettingsService } from '@gitroom/nestjs-libraries/database/prisma/settings/settings.service';
 import { AiPricingService } from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/ai-pricing.service';
 import { UpdateAiPricingDto } from '@gitroom/nestjs-libraries/dtos/admin/ai-pricing.dto';
 import { ListSettingsQueryDto } from '@gitroom/nestjs-libraries/dtos/admin/settings-query.dto';
 import { CreateSettingDto, UpdateSettingDto } from '@gitroom/nestjs-libraries/dtos/admin/settings-body.dto';
+import { SuperAdmin } from '@gitroom/backend/services/auth/admin/super-admin.decorator';
 
 const RESERVED_KEYS = ['ai_model_pricing'];
-
-function requireSuperAdmin(user: User) {
-  if (!user.isSuperAdmin) {
-    throw new HttpException('Unauthorized: superadmin required', 403);
-  }
-}
 
 function safePage(val?: string): number {
   const n = val ? Number(val) : 1;
@@ -39,7 +32,8 @@ function safePageSize(val?: string): number {
 
 @ApiTags('Admin')
 @Controller('/admin')
-export class AdminController {
+@SuperAdmin()
+export class AdminSettingsController {
   constructor(
     private _settingsService: SettingsService,
     private _aiPricingService: AiPricingService
@@ -48,11 +42,7 @@ export class AdminController {
   // ============ Settings CRUD ============
 
   @Get('/settings')
-  async listSettings(
-    @GetUserFromRequest() user: User,
-    @Query() query: ListSettingsQueryDto
-  ) {
-    requireSuperAdmin(user);
+  async listSettings(@Query() query: ListSettingsQueryDto) {
     return this._settingsService.paginate({
       page: safePage(query.page),
       pageSize: safePageSize(query.pageSize),
@@ -62,11 +52,7 @@ export class AdminController {
   }
 
   @Get('/settings/:key')
-  async getSetting(
-    @GetUserFromRequest() user: User,
-    @Param('key') key: string
-  ) {
-    requireSuperAdmin(user);
+  async getSetting(@Param('key') key: string) {
     const value = await this._settingsService.get(key);
     if (value === null) {
       throw new HttpException(`Setting "${key}" not found`, 404);
@@ -75,11 +61,7 @@ export class AdminController {
   }
 
   @Post('/settings')
-  async createSetting(
-    @GetUserFromRequest() user: User,
-    @Body() body: CreateSettingDto
-  ) {
-    requireSuperAdmin(user);
+  async createSetting(@Body() body: CreateSettingDto) {
     if (RESERVED_KEYS.includes(body.key)) {
       throw new HttpException(
         `Setting "${body.key}" is managed by a dedicated API, use the corresponding endpoint instead`,
@@ -99,11 +81,9 @@ export class AdminController {
 
   @Put('/settings/:key')
   async updateSetting(
-    @GetUserFromRequest() user: User,
     @Param('key') key: string,
     @Body() body: UpdateSettingDto
   ) {
-    requireSuperAdmin(user);
     if (RESERVED_KEYS.includes(key)) {
       throw new HttpException(
         `Setting "${key}" is managed by a dedicated API, use the corresponding endpoint instead`,
@@ -122,11 +102,7 @@ export class AdminController {
   }
 
   @Delete('/settings/:key')
-  async deleteSetting(
-    @GetUserFromRequest() user: User,
-    @Param('key') key: string
-  ) {
-    requireSuperAdmin(user);
+  async deleteSetting(@Param('key') key: string) {
     if (RESERVED_KEYS.includes(key)) {
       throw new HttpException(
         `Setting "${key}" is managed by a dedicated API and cannot be deleted here`,
@@ -143,18 +119,13 @@ export class AdminController {
   // ============ AI Pricing ============
 
   @Get('/ai-pricing')
-  async getAiPricing(@GetUserFromRequest() user: User) {
-    requireSuperAdmin(user);
+  async getAiPricing() {
     const config = await this._aiPricingService.getPricingConfig();
     return config || {};
   }
 
   @Post('/ai-pricing')
-  async createAiPricing(
-    @GetUserFromRequest() user: User,
-    @Body() body: UpdateAiPricingDto
-  ) {
-    requireSuperAdmin(user);
+  async createAiPricing(@Body() body: UpdateAiPricingDto) {
     const existing = await this._aiPricingService.getPricingConfig();
     if (existing) {
       throw new HttpException('AI pricing config already exists, use PUT to update', 409);
@@ -164,11 +135,7 @@ export class AdminController {
   }
 
   @Put('/ai-pricing')
-  async updateAiPricing(
-    @GetUserFromRequest() user: User,
-    @Body() body: UpdateAiPricingDto
-  ) {
-    requireSuperAdmin(user);
+  async updateAiPricing(@Body() body: UpdateAiPricingDto) {
     const existing = await this._aiPricingService.getPricingConfig();
     if (!existing) {
       throw new HttpException('AI pricing config not found, use POST to create', 404);

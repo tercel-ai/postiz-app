@@ -1,7 +1,7 @@
 import { PrismaRepository } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
 import { Injectable } from '@nestjs/common';
 import dayjs from 'dayjs';
-import { Integration } from '@prisma/client';
+import { Integration, Prisma } from '@prisma/client';
 import { makeId } from '@gitroom/nestjs-libraries/services/make.is';
 import { UploadFactory } from '@gitroom/nestjs-libraries/upload/upload.factory';
 import { PlugDto } from '@gitroom/nestjs-libraries/dtos/plugs/plug.dto';
@@ -439,6 +439,93 @@ export class IntegrationRepository {
         deletedAt: null,
       },
     });
+  }
+
+  getByIdForAdmin(id: string) {
+    return this._integration.model.integration.findFirst({
+      where: { id, deletedAt: null },
+      select: {
+        id: true,
+        name: true,
+        providerIdentifier: true,
+        picture: true,
+        type: true,
+        disabled: true,
+        refreshNeeded: true,
+        inBetweenSteps: true,
+        tokenExpiration: true,
+        profile: true,
+        organizationId: true,
+        customInstanceDetails: true,
+        createdAt: true,
+        updatedAt: true,
+        organization: {
+          select: { id: true, name: true },
+        },
+        _count: {
+          select: { posts: true },
+        },
+      },
+    });
+  }
+
+  async paginate(options: {
+    page: number;
+    pageSize: number;
+    keyword?: string;
+    organizationId?: string;
+    providerIdentifier?: string;
+    disabled?: boolean;
+    refreshNeeded?: boolean;
+    sortBy?: string;
+    sortOrder?: 'asc' | 'desc';
+  }) {
+    const { page, pageSize, keyword, organizationId, providerIdentifier, disabled, refreshNeeded, sortBy = 'createdAt', sortOrder = 'desc' } = options;
+    const where: Prisma.IntegrationWhereInput = {
+      deletedAt: null,
+    };
+
+    if (keyword) {
+      where.OR = [
+        { name: { contains: keyword, mode: 'insensitive' } },
+        { providerIdentifier: { contains: keyword, mode: 'insensitive' } },
+      ];
+    }
+    if (organizationId) where.organizationId = organizationId;
+    if (providerIdentifier) where.providerIdentifier = providerIdentifier;
+    if (disabled !== undefined) where.disabled = disabled;
+    if (refreshNeeded !== undefined) where.refreshNeeded = refreshNeeded;
+
+    const [items, total] = await Promise.all([
+      this._integration.model.integration.findMany({
+        where,
+        orderBy: { [sortBy]: sortOrder },
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+        select: {
+          id: true,
+          name: true,
+          providerIdentifier: true,
+          picture: true,
+          type: true,
+          disabled: true,
+          refreshNeeded: true,
+          tokenExpiration: true,
+          organizationId: true,
+          createdAt: true,
+          updatedAt: true,
+          organization: {
+            select: {
+              id: true,
+              name: true,
+            },
+          },
+        },
+      }),
+      this._integration.model.integration.count({ where }),
+    ]);
+
+    return { items, total, page, pageSize, totalPages: Math.ceil(total / pageSize) };
   }
 
   getIntegrationsList(org: string) {

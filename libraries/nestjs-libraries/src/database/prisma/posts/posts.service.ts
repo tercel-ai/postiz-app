@@ -249,6 +249,14 @@ export class PostsService {
     return this._postRepository.getPostsList(orgId, query);
   }
 
+  async getAllPostsList(query: GetPostsListDto & { organizationId?: string }) {
+    return this._postRepository.getAllPostsList(query);
+  }
+
+  getPostByIdForAdmin(id: string) {
+    return this._postRepository.getPostByIdForAdmin(id);
+  }
+
   async updateMedia(id: string, imagesList: any[], convertToJPEG = false) {
     try {
       let imageUpdateNeeded = false;

@@ -44,6 +44,10 @@ export class OrganizationService {
     return this._organizationRepository.getCount();
   }
 
+  async paginate(options: { page: number; pageSize: number; keyword?: string }) {
+    return this._organizationRepository.paginate(options);
+  }
+
   addUserToOrg(
     userId: string,
     id: string,
