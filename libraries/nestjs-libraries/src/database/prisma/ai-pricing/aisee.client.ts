@@ -1,4 +1,5 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
+import { sign } from 'jsonwebtoken';
 
 export interface AiseeDeductRequest {
   userId: string;
@@ -24,21 +25,52 @@ export interface AiseeCreditBalance {
 
 @Injectable()
 export class AiseeClient {
+  private readonly logger = new Logger(AiseeClient.name);
+
+  private _cachedToken: string | null = null;
+  private _tokenExpiresAt = 0;
+
   private get baseUrl(): string {
     return process.env.AISEE_ORCHESTRATOR_URL || 'http://localhost:8000';
-  }
-
-  private get apiKey(): string {
-    return process.env.AISEE_API_KEY || '';
   }
 
   private get enabled(): boolean {
     return !!process.env.AISEE_ORCHESTRATOR_URL;
   }
 
+  /**
+   * Sign a short-lived JWT with system-internal role for service-to-service auth.
+   * Uses the same JWT_SECRET as the rest of the platform.
+   * Cached and reused until 1 minute before expiry.
+   */
+  private signInternalToken(): string {
+    const now = Math.floor(Date.now() / 1000);
+    if (this._cachedToken && now < this._tokenExpiresAt - 60) {
+      return this._cachedToken;
+    }
+
+    const secret = process.env.JWT_SECRET;
+    if (!secret) {
+      throw new Error('JWT_SECRET is not configured');
+    }
+
+    const expiresIn = 120; // 2 minutes
+    this._cachedToken = sign(
+      { roles: ['system-internal'], iss: 'postiz' },
+      secret,
+      { expiresIn }
+    );
+    this._tokenExpiresAt = now + expiresIn;
+    return this._cachedToken;
+  }
+
+  private get authHeaders(): Record<string, string> {
+    return { Authorization: `Bearer ${this.signInternalToken()}` };
+  }
+
   async deductCredits(req: AiseeDeductRequest): Promise<AiseeDeductResponse> {
     if (!this.enabled) {
-      console.warn('[AiseeClient] Not configured, skipping credit deduction');
+      this.logger.warn('Not configured, skipping credit deduction');
       return { success: true, skipped: true };
     }
 
@@ -47,7 +79,7 @@ export class AiseeClient {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          ...(this.apiKey ? { Authorization: `Bearer ${this.apiKey}` } : {}),
+          ...this.authHeaders,
         },
         body: JSON.stringify({
           user_id: req.userId,
@@ -59,8 +91,8 @@ export class AiseeClient {
 
       if (!response.ok) {
         const errorText = await response.text();
-        console.error(
-          `[AiseeClient] Credit deduction failed: ${response.status} ${errorText}`
+        this.logger.error(
+          `Credit deduction failed: ${response.status} ${errorText}`
         );
         return {
           success: false,
@@ -69,13 +101,20 @@ export class AiseeClient {
       }
 
       const data = await response.json();
+      if (!data.success) {
+        return {
+          success: false,
+          error: data.error || 'Unknown error from orchestrator',
+        };
+      }
+
       return {
         success: true,
         transactionId: data.transaction_id,
-        remainingBalance: data.remaining_balance,
+        remainingBalance: Number(data.remaining_balance),
       };
     } catch (error) {
-      console.error('[AiseeClient] Credit deduction error:', error);
+      this.logger.error('Credit deduction error:', error);
       return {
         success: false,
         error: error instanceof Error ? error.message : String(error),
@@ -90,18 +129,14 @@ export class AiseeClient {
 
     try {
       const response = await fetch(
-        `${this.baseUrl}/credit-balance/${encodeURIComponent(userId)}/balance`,
+        `${this.baseUrl}/credit/balance/${encodeURIComponent(userId)}`,
         {
-          headers: {
-            ...(this.apiKey ? { Authorization: `Bearer ${this.apiKey}` } : {}),
-          },
+          headers: this.authHeaders,
         }
       );
 
       if (!response.ok) {
-        console.error(
-          `[AiseeClient] Balance query failed: ${response.status}`
-        );
+        this.logger.error(`Balance query failed: ${response.status}`);
         return null;
       }
 
@@ -113,7 +148,7 @@ export class AiseeClient {
         total: Number(data.total),
       };
     } catch (error) {
-      console.error('[AiseeClient] Balance query error:', error);
+      this.logger.error('Balance query error:', error);
       return null;
     }
   }

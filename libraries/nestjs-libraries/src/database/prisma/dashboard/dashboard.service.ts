@@ -87,7 +87,6 @@ export class DashboardService {
       }
     }
 
-    let impressionsTotal = 0;
     let trafficsTotal = 0;
 
     const channelsByPlatform = new Map<string, number>();
@@ -105,22 +104,22 @@ export class DashboardService {
             integration.id,
             '30'
           );
-
         for (const metric of analytics) {
-          const total = metric.data.reduce(
-            (sum, d) => sum + Number(d.total || 0),
-            0
-          );
-          if (IMPRESSIONS_RE.test(metric.label)) {
-            impressionsTotal += total;
-          } else if (TRAFFICS_RE.test(metric.label)) {
-            trafficsTotal += total;
+          if (TRAFFICS_RE.test(metric.label)) {
+            trafficsTotal += metric.data.reduce(
+              (sum, d) => sum + Number(d.total || 0),
+              0
+            );
           }
         }
       } catch {
         // skip failed integrations
       }
     }
+
+    // Aggregate impressions from Postiz-managed published posts only
+    const engagement = await this.getPostEngagement(org, 30);
+    const impressionsTotal = engagement.totals.views;
 
     const result = {
       channel_count: channelCount,
@@ -295,44 +294,30 @@ export class DashboardService {
       return JSON.parse(cached);
     }
 
-    const integrations =
-      await this._dashboardRepository.getActiveIntegrations(org.id);
+    const { analyticsMap } = await this._fetchAllPostAnalytics(org, 30);
 
     const dateBuckets = new Map<string, number>();
-
-    for (const integration of integrations) {
-      try {
-        const analytics: AnalyticsData[] =
-          await this._integrationService.checkAnalytics(
-            org,
-            integration.id,
-            '30'
-          );
-
-        for (const metric of analytics) {
-          if (IMPRESSIONS_RE.test(metric.label)) {
-            for (const point of metric.data) {
-              const d = dayjs(point.date);
-              let dateKey: string;
-              switch (period) {
-                case 'weekly':
-                  dateKey = d.isoWeekday(1).format('YYYY-MM-DD');
-                  break;
-                case 'monthly':
-                  dateKey = d.format('YYYY-MM');
-                  break;
-                default:
-                  dateKey = d.format('YYYY-MM-DD');
-              }
-              dateBuckets.set(
-                dateKey,
-                (dateBuckets.get(dateKey) || 0) + Number(point.total || 0)
-              );
-            }
+    for (const { metrics } of analyticsMap.values()) {
+      for (const metric of metrics) {
+        if (!IMPRESSIONS_RE.test(metric.label)) continue;
+        for (const point of metric.data) {
+          const d = dayjs(point.date);
+          let dateKey: string;
+          switch (period) {
+            case 'weekly':
+              dateKey = d.isoWeekday(1).format('YYYY-MM-DD');
+              break;
+            case 'monthly':
+              dateKey = d.format('YYYY-MM');
+              break;
+            default:
+              dateKey = d.format('YYYY-MM-DD');
           }
+          dateBuckets.set(
+            dateKey,
+            (dateBuckets.get(dateKey) || 0) + Number(point.total || 0)
+          );
         }
-      } catch {
-        // skip failed integrations
       }
     }
 
@@ -351,10 +336,11 @@ export class DashboardService {
       return JSON.parse(cached);
     }
 
-    const [posts, activeIntegrations] = await Promise.all([
-      this._dashboardRepository.getPublishedPostsWithRelease(org.id, days),
-      this._dashboardRepository.getActiveIntegrations(org.id),
-    ]);
+    const activeIntegrations =
+      await this._dashboardRepository.getActiveIntegrations(org.id);
+
+    const { analyticsMap, postsFailed, postsTotal } =
+      await this._fetchAllPostAnalytics(org, days);
 
     const totals = { views: 0, likes: 0, comments: 0, saves: 0 };
     const platformMap = new Map<
@@ -362,7 +348,6 @@ export class DashboardService {
       { views: number; likes: number; comments: number; saves: number; post_count: number }
     >();
 
-    // Pre-populate all connected platforms so they always appear in the result
     for (const integration of activeIntegrations) {
       const platform = integration.providerIdentifier;
       if (!platformMap.has(platform)) {
@@ -376,13 +361,57 @@ export class DashboardService {
       }
     }
 
-    // Build integration lookup: integrationId -> full Integration object (with token)
+    for (const [, { metrics, platform }] of analyticsMap) {
+      if (!metrics.length) continue;
+      const platformData = platformMap.get(platform);
+      if (!platformData) continue;
+      platformData.post_count++;
+      this._accumulateMetrics(metrics, totals, platformData);
+    }
+
+    const by_platform = Array.from(platformMap.entries()).map(
+      ([platform, data]) => ({ platform, ...data })
+    );
+
+    const response = {
+      totals,
+      by_platform,
+      meta: {
+        posts_analyzed: postsTotal - postsFailed,
+        posts_failed: postsFailed,
+        posts_total: postsTotal,
+        days,
+      },
+    };
+
+    await ioRedis.set(cacheKey, JSON.stringify(response), 'EX', CACHE_TTL);
+    return response;
+  }
+
+  /**
+   * Fetch post-level analytics for all published posts, using batch APIs
+   * where available and per-post fallback with circuit breaker otherwise.
+   */
+  private async _fetchAllPostAnalytics(
+    org: Organization,
+    days: number
+  ): Promise<{
+    analyticsMap: Map<string, { metrics: AnalyticsData[]; platform: string }>;
+    postsFailed: number;
+    postsTotal: number;
+  }> {
+    const [posts, activeIntegrations] = await Promise.all([
+      this._dashboardRepository.getPublishedPostsWithRelease(org.id, days),
+      this._dashboardRepository.getActiveIntegrations(org.id),
+    ]);
+
+    const analyticsMap = new Map<string, { metrics: AnalyticsData[]; platform: string }>();
+
     const integrationById = new Map<string, Integration>();
     for (const integration of activeIntegrations) {
       integrationById.set(integration.id, integration);
     }
 
-    // Group posts by integrationId
     const postsByIntegration = new Map<
       string,
       Array<{ id: string; releaseId: string | null; platform: string }>
@@ -402,7 +431,6 @@ export class DashboardService {
 
     let postsFailed = 0;
 
-    // Process each integration group
     for (const [integrationId, groupPosts] of postsByIntegration) {
       const fullIntegration = integrationById.get(integrationId);
       if (!fullIntegration) {
@@ -414,7 +442,6 @@ export class DashboardService {
         fullIntegration.providerIdentifier
       );
 
-      // Batch path: provider supports batchPostAnalytics
       if (provider?.batchPostAnalytics) {
         const batchAnalytics = await this._processBatchAnalytics(
           org.id,
@@ -425,16 +452,10 @@ export class DashboardService {
         );
 
         for (const post of groupPosts) {
-          const metrics = batchAnalytics.get(post.id);
-          if (!metrics || metrics.length === 0) continue;
-
-          const platformData = platformMap.get(post.platform);
-          if (!platformData) continue;
-          platformData.post_count++;
-          this._accumulateMetrics(metrics, totals, platformData);
+          const metrics = batchAnalytics.get(post.id) || [];
+          analyticsMap.set(post.id, { metrics, platform: post.platform });
         }
       } else {
-        // Fallback path: per-post calls with circuit breaker
         const platformFailCount = new Map<string, number>();
         const PLATFORM_FAIL_THRESHOLD = 2;
         const BATCH_SIZE = 5;
@@ -467,36 +488,18 @@ export class DashboardService {
                 post.platform,
                 (platformFailCount.get(post.platform) || 0) + 1
               );
+              analyticsMap.set(post.id, { metrics: [], platform: post.platform });
               continue;
             }
 
             platformFailCount.set(post.platform, 0);
-            const platformData = platformMap.get(post.platform);
-            if (!platformData) continue;
-            platformData.post_count++;
-            this._accumulateMetrics(result.value, totals, platformData);
+            analyticsMap.set(post.id, { metrics: result.value, platform: post.platform });
           }
         }
       }
     }
 
-    const by_platform = Array.from(platformMap.entries()).map(
-      ([platform, data]) => ({ platform, ...data })
-    );
-
-    const response = {
-      totals,
-      by_platform,
-      meta: {
-        posts_analyzed: posts.length - postsFailed,
-        posts_failed: postsFailed,
-        posts_total: posts.length,
-        days,
-      },
-    };
-
-    await ioRedis.set(cacheKey, JSON.stringify(response), 'EX', CACHE_TTL);
-    return response;
+    return { analyticsMap, postsFailed, postsTotal: posts.length };
   }
 
   private async _processBatchAnalytics(

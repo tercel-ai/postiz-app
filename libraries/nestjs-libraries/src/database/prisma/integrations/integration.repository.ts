@@ -198,20 +198,6 @@ export class IntegrationRepository {
     timezone?: number,
     customInstanceDetails?: string
   ) {
-    const wrapMinutes = (m: number) => ((m % 1440) + 1440) % 1440;
-    const postTimes =
-      timezone !== undefined && timezone !== null
-        ? {
-            postingTimes: JSON.stringify({
-              version: 2,
-              schedules: [
-                { type: 'daily', time: wrapMinutes(560 - timezone) },
-                { type: 'daily', time: wrapMinutes(850 - timezone) },
-                { type: 'daily', time: wrapMinutes(1140 - timezone) },
-              ],
-            }),
-          }
-        : {};
     const upsert = await this._integration.model.integration.upsert({
       where: {
         organizationId_internalId: {
@@ -232,7 +218,6 @@ export class IntegrationRepository {
           ? { tokenExpiration: new Date(Date.now() + expiresIn * 1000) }
           : {}),
         internalId,
-        ...postTimes,
         organizationId: org,
         refreshNeeded: false,
         rootInternalId: internalId.split('_').pop(),
