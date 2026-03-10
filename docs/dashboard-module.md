@@ -10,34 +10,79 @@ The Dashboard provides a **one-stop summary of social media operations data** fo
 - Impressions and traffic trends across platforms
 - How many likes, comments, and saves each post has received on each platform
 
-Data is sourced from official APIs of each social platform (such as X/Twitter API, Instagram Graph API, YouTube Data API, LinkedIn API, etc.). The system fetches the latest data in real time when a user views the dashboard, and caches it for 1 hour to avoid excessive API requests.
+**Important: All analytics data (impressions, traffic, engagement) is scoped to posts published through Postiz only.** Data from posts created directly on social platforms (outside Postiz) is not included. This ensures consistent and accurate measurement of content managed through the system.
+
+Data is sourced from official post-level APIs of each social platform (such as X/Twitter API, Instagram Graph API, YouTube Data API, LinkedIn API, etc.). The system fetches the latest data in real time when a user views the dashboard, and caches it for 1 hour to avoid excessive API requests.
 
 ### Which social platforms are supported?
 
-| Platform | Account-level data (impressions/traffic) | Post-level data (likes/comments/saves) | Data source |
-|----------|:---:|:---:|------|
-| X (Twitter) | ✅ | ✅ | Twitter API v2 |
-| Instagram | ✅ | ✅ | Facebook Graph API |
-| Facebook | ✅ | ✅ | Facebook Graph API |
-| LinkedIn | ✅ | ✅ | LinkedIn API v2 |
-| YouTube | ✅ | ✅ | YouTube Data API v3 |
-| Other platforms | Depends on integration | Depends on integration | Platform-specific APIs |
+| Platform | Post-level analytics (`postAnalytics`) | Data source |
+|----------|:---:|------|
+| X (Twitter) | Yes | Twitter API v2 |
+| Instagram | Yes | Facebook Graph API |
+| Facebook | Yes | Facebook Graph API |
+| LinkedIn Page | Yes | LinkedIn API v2 |
+| YouTube | Yes | YouTube Data API v3 |
+| Pinterest | Yes | Pinterest API |
+| Threads | Yes | Meta Threads API |
+| Dribbble | Yes | Dribbble API |
+| GMB (Google My Business) | Yes | Google Business API |
+| Reddit, Bluesky, Mastodon, TikTok, Discord, Slack, Medium, Dev.to, Telegram, etc. | No | — |
 
-> **Note**: If a platform's integration (Provider) has not implemented post-level analytics, posts from that platform will not be included in the statistics, but this does not affect data from other platforms.
+> **Note**: Platforms that have not implemented `postAnalytics` will not contribute impressions, traffic, or engagement data to the dashboard. Their posts are still tracked in post counts, but analytics metrics will be 0 for those platforms.
 
 ---
 
-## 2. Feature Overview — What can you see on the dashboard?
+## 2. Data Source Architecture
 
-The table below describes each feature from a **user perspective**:
+All dashboard analytics endpoints use a **unified post-level data pipeline** (`_fetchAllPostAnalytics`):
 
-| Feature | One-line description | Business question it answers | Optional parameters |
-|---------|---------------------|------------------------------|-------------------|
-| **Summary** | A "snapshot" of key operational metrics | "How many posts have I published? How many accounts are connected? How are overall impressions and traffic?" | Date range: startDate / endDate |
-| **Posts Trend** | How posting volume changes over time | "How many posts have been published per day/week/month? How are they distributed across platforms?" | Time granularity: daily/weekly/monthly |
-| **Traffic Analysis** | Traffic share and trends by platform | "Which platform drives the most traffic? Is traffic going up or down recently?" | None |
-| **Impressions Trend** | How content impressions change over time | "How many people are seeing my content? Are impressions growing?" | Time granularity: daily/weekly/monthly |
-| **Post Engagement** | Aggregated likes/comments/saves across all posts | "How is my post engagement? Which platform's audience is most active?" | Lookback period: 1–90 days |
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    _fetchAllPostAnalytics()                         │
+│                                                                     │
+│  1. Query DB for published posts (state=PUBLISHED, releaseId!=null) │
+│  2. Group posts by integration (account)                            │
+│  3. For each integration group:                                     │
+│     ├─ Batch path: provider.batchPostAnalytics() if available       │
+│     └─ Fallback: per-post provider.postAnalytics() with circuit     │
+│        breaker (5 concurrent, fail threshold = 2)                   │
+│  4. Return Map<postId, { metrics, platform }>                       │
+└─────────────────────────────────────────────────────────────────────┘
+         │
+         ▼  Consumed by:
+   ┌─────────────┬──────────────┬──────────────┬──────────────────┐
+   │ getSummary() │ getTraffics()│getImpressions│getPostEngagement │
+   │ impressions  │ traffic by   │ impressions  │ views/likes/     │
+   │ + traffic    │ platform     │ by date      │ comments/saves   │
+   │ totals       │ + delta      │              │ by platform      │
+   └─────────────┴──────────────┴──────────────┴──────────────────┘
+```
+
+### Metrics Data Source Summary
+
+| Endpoint | Metric | Data source | Scope |
+|----------|--------|-------------|-------|
+| **Summary** `impressions_total` | Impressions | Post-level `postAnalytics()` | Postiz posts only, last 30 days |
+| **Summary** `traffics_total` | Traffic/Clicks | Post-level `postAnalytics()` | Postiz posts only, last 30 days |
+| **Summary** `posts_stats` | Post counts | Database query | All Postiz posts (no limit) |
+| **Summary** `channel_count` | Channel count | Database query | All active integrations |
+| **Impressions Trend** | Impressions by date | Post-level `postAnalytics()` | Postiz posts only, last 30 days |
+| **Traffic Analysis** | Traffic by platform | Post-level `postAnalytics()` | Postiz posts only, last 30 days |
+| **Post Engagement** | Views/Likes/Comments/Saves | Post-level `postAnalytics()` | Postiz posts only, configurable 1–90 days |
+| **Posts Trend** | Post count by date | Database query | All Postiz posts (no limit) |
+
+### Known Factors That May Cause Inaccuracy
+
+| Factor | Impact | Severity |
+|--------|--------|----------|
+| **High post volume** | `getPublishedPostsWithRelease` fetches all posts (no limit). For users with very high post volumes, the first uncached request may be slow. Circuit breaker and per-post caching mitigate this. | Low |
+| **Platforms without `postAnalytics`** | ~19 platforms (Reddit, Bluesky, Mastodon, TikTok, etc.) return empty analytics. Posts from these platforms have 0 impressions/traffic/engagement. | High (if user primarily uses these platforms) |
+| **API failures / rate limiting** | Posts that fail to fetch are skipped. Circuit breaker stops trying after 2 consecutive failures per platform. `postsFailed` tracks the count but is only visible in the Post Engagement endpoint's `meta`. | Low |
+| **Cache staleness** | Each endpoint has its own Redis cache (1hr prod / 1s dev). Per-post analytics also cached independently. Different endpoints may reflect data from different points in time. | Low |
+| **Post deleted on platform** | If a post was published via Postiz but later deleted on the platform, `postAnalytics()` returns empty — that post's metrics are lost. | Low |
+| **Traffic metrics rarely available at post level** | Most platforms' `postAnalytics()` do not return click/engagement/traffic metrics (X returns Impressions, Likes, Retweets, Replies, Quotes, Bookmarks — none match `TRAFFICS_RE`). `traffics_total` will likely be 0 for most platforms. | Medium |
+| **Regex classification overlap** | `IMPRESSIONS_RE` and `VIEWS_RE` have slightly different patterns. Summary uses `IMPRESSIONS_RE` (includes `page.views`); Post Engagement uses `VIEWS_RE` (includes `unique.impression`). In practice the difference is minimal. | Low |
 
 ---
 
@@ -106,8 +151,8 @@ The table below describes each feature from a **user perspective**:
 |-------|---------|-----------------|
 | `channel_count` | Total number of channels | Number of connected and enabled social accounts |
 | `channels_by_platform` | Channels by platform | Grouped by platform, e.g., 2 Twitter accounts connected |
-| `impressions_total` | Total impressions | Total number of times content was displayed across all platforms in the last 30 days |
-| `traffics_total` | Total traffic | Total number of clicks/interactions across all platforms in the last 30 days |
+| `impressions_total` | Total impressions | Sum of impressions from all Postiz-managed published posts in the last 30 days |
+| `traffics_total` | Total traffic | Sum of click/engagement/traffic metrics from all Postiz-managed published posts in the last 30 days. Note: most platforms do not return traffic metrics at post level, so this value may be 0. |
 | **posts_stats** | | |
 | `posts_stats.total` | Total posts | All posts matching the date filter (or all posts if no filter). Sum of all states below. |
 | `posts_stats.scheduled` | Scheduled posts | Posts in `QUEUE` state (waiting to be published) |
@@ -140,13 +185,13 @@ The system automatically categorizes metrics returned by each platform by matchi
 3. Query in parallel: total channels + active integrations list + post stats grouped by state (with date filter)
 4. Map `groupBy` results to `posts_stats` object (QUEUE→scheduled, PUBLISHED→published, DRAFT→drafts, ERROR→errors)
 5. Group channels by platform
-6. Iterate through each integration, call `checkAnalytics(org, id, '30')` to get 30-day analytics data
+6. Call `_fetchAllPostAnalytics(org, 30)` to get post-level analytics for all published posts
 7. Classify and accumulate using regex: `IMPRESSIONS_RE` / `TRAFFICS_RE`
 8. Write result to Redis cache (TTL 1 hour), return
 
 **Date validation**: The controller throws `BadRequestException` if `startDate > endDate`.
 
-**Error handling**: If a single platform API fails, it is silently skipped without affecting the overall response.
+**Error handling**: If a single post's API call fails, it is silently skipped without affecting the overall response.
 
 </details>
 
@@ -216,6 +261,8 @@ Posts Trend (daily, last 30 days)
 
 **Business scenario**: Marketing staff want to know "which platform performs best" and "is traffic trending up or down" to inform resource allocation decisions.
 
+> **Important**: Traffic data comes from **post-level analytics only** (posts published through Postiz). Most social platforms do not return click/engagement/traffic metrics in their post-level APIs, so traffic values may be 0 for many platforms. This is a platform API limitation, not a system bug.
+
 **What the user sees (example)**:
 
 ```
@@ -263,7 +310,7 @@ Traffic Analysis by Platform (last 30 days)
 | Field | Meaning | How to interpret |
 |-------|---------|-----------------|
 | `platform` | Platform name | e.g., twitter, instagram, linkedin |
-| `value` | 30-day total traffic | Total clicks/interactions on this platform in the last 30 days |
+| `value` | 30-day total traffic | Total clicks/interactions from Postiz-managed posts on this platform in the last 30 days |
 | `percentage` | Share (%) | This platform's traffic as a percentage of total traffic across all platforms |
 | `delta` | Period-over-period change (%) | Percentage change comparing the last 15 days vs. the prior 15 days. Positive = growth, negative = decline |
 
@@ -286,7 +333,7 @@ Special cases:
 <details>
 <summary>Technical implementation details (for developers)</summary>
 
-**Algorithm**: Pre-populates `platformValues` with all connected platforms (value 0) to ensure they always appear in results. Then iterates through each integration's 30-day analytics data, splitting data points into `platformRecent` / `platformOlder` Maps based on `midDate = 15 days ago`. Delta precision is kept to two decimal places (`Math.round(x * 10000) / 100`). Results are sorted by value in descending order.
+**Algorithm**: Pre-populates `platformValues` with all connected platforms (value 0) to ensure they always appear in results. Calls `_fetchAllPostAnalytics(org, 30)` to get post-level analytics, then filters for metrics matching `TRAFFICS_RE`. Splits data points into `platformRecent` / `platformOlder` Maps based on `midDate = 15 days ago`. Delta precision is kept to two decimal places (`Math.round(x * 10000) / 100`). Results are sorted by value in descending order.
 
 **Caching**: Redis cache, TTL 1 hour.
 
@@ -328,14 +375,14 @@ Impressions Trend (daily, last 30 days)
 | Field | Meaning |
 |-------|---------|
 | `date` | Time point |
-| `impressions` | Total impressions for that time period (aggregated across all platforms) |
+| `impressions` | Total impressions for that time period (aggregated across all platforms, Postiz posts only) |
 
 > **How this differs from Posts Trend**: Impressions Trend data is **merged across all platforms** (all platform impressions are added together), not broken down by platform. This is because users care about "how many times was my content seen overall."
 
 <details>
 <summary>Technical implementation details (for developers)</summary>
 
-**Algorithm**: Iterates through analytics data for each integration, filters for metrics matching `IMPRESSIONS_RE`, and accumulates into time buckets by granularity.
+**Algorithm**: Calls `_fetchAllPostAnalytics(org, 30)` to get post-level analytics, filters for metrics matching `IMPRESSIONS_RE`, and accumulates into time buckets by granularity.
 
 **Caching**: Redis cache; cache key includes the period parameter, TTL 1 hour.
 
@@ -343,19 +390,11 @@ Impressions Trend (daily, last 30 days)
 
 ---
 
-### 3.5 Post Engagement Aggregation (New Feature)
+### 3.5 Post Engagement Aggregation
 
 **Endpoint**: `GET /dashboard/post-engagement?days=30`
 
 **Business scenario**: Operations staff want to understand content engagement from a **per-post perspective** — "How many total likes have my posts received? How many comments? Which platform's audience is most engaged?" This data helps evaluate content quality and compare audience activity across platforms.
-
-**How this differs from other endpoints**:
-
-| Comparison | Summary / Traffic / Impressions | Post Engagement (this endpoint) |
-|------------|:---:|:---:|
-| Data source | **Account-level** analytics APIs | **Post-level** analytics APIs |
-| What it measures | Overall account impressions and clicks | Individual post likes, comments, saves, views |
-| Use case | "How many people are seeing my content overall?" | "How much engagement is my content generating?" |
 
 **Optional parameters**:
 
@@ -465,7 +504,7 @@ User opens the dashboard
     │
     └── No → Start real-time fetch ▼
 
-② Query the database for posts published in the last N days (up to 100 posts)
+② Query the database for all posts published in the last N days
     │
     ▼
 ③ Fetch engagement data from each platform's API in batches
@@ -489,7 +528,7 @@ User opens the dashboard
 | Question | Answer |
 |----------|--------|
 | Is the data real-time? | The first request fetches data from platform APIs in real time. Subsequent requests within 1 hour return cached data. So data can be up to 1 hour old. |
-| Why only the most recent 100 posts? | Each post requires a separate API call to the platform. Too many would make the endpoint too slow. 100 posts is the balance between performance and data completeness. |
+| Is there a post limit? | No hard limit. All published posts in the time range are analyzed. Per-post results are cached (1 hour), so subsequent requests are fast. A circuit breaker stops API calls to a platform after 2 consecutive failures. |
 | Why do some posts fail to fetch? | Possible reasons: temporary platform API outage, the post was deleted on the platform, or the platform doesn't support post-level analytics. The failure count is shown in `meta.posts_failed`. |
 | Will the second visit to the dashboard be faster? | Yes. The second request hits the Redis cache, with response times typically in milliseconds. |
 | What happens when a new social account is connected? | Posts published from the new account are automatically included in the statistics — no additional configuration needed. |
@@ -499,20 +538,19 @@ User opens the dashboard
 
 **Algorithm**:
 1. Check Redis cache (key: `dashboard:post-engagement:{orgId}:{days}`)
-2. Call Repository to get published posts (`state=PUBLISHED`, `releaseId IS NOT NULL`, `publishDate >= N days ago`, `LIMIT 100`)
-3. Batch call `PostsService.checkPostAnalytics()`: 5 per batch, using `Promise.allSettled` for fault tolerance
-4. Cross-platform metric normalization (regex classification):
+2. Call `_fetchAllPostAnalytics(org, days)` which queries published posts and fetches analytics via batch or per-post APIs
+3. Cross-platform metric normalization (regex classification):
    - `VIEWS_RE = /^(impression|views|reach|unique.impression)/i`
    - `LIKES_RE = /^(like|reaction)/i`
    - `COMMENTS_RE = /^(comment|repl)/i`
    - `SAVES_RE = /^(save|bookmark|favorite)/i`
-5. Accumulate into totals + group by platform in platformMap
-6. Write result to Redis (TTL 1 hour), return
+4. Accumulate into totals + group by platform in platformMap
+5. Write result to Redis (TTL 1 hour), return
 
-**Data fetch pipeline**:
-- `checkPostAnalytics()` → look up Integration linked to the post → get platform Provider → call `provider.postAnalytics()`
+**Data fetch pipeline** (inside `_fetchAllPostAnalytics`):
+- Groups posts by integration, uses `batchPostAnalytics()` when available, falls back to `checkPostAnalytics()` per-post
+- Circuit breaker: after 2 consecutive failures for a platform, remaining posts for that platform are skipped
 - Automatic token expiration handling: check `tokenExpiration` → call `RefreshIntegrationService.refresh()` → retry
-- On 401 error, throws `RefreshToken` exception → recursive self-call (`forceRefresh=true`)
 - Individual post analytics are independently cached (key: `integration:{orgId}:{postId}:{date}`, TTL 1 hour)
 
 </details>
@@ -563,9 +601,10 @@ The Dashboard connects to multiple external social platforms, any of which could
 | Platform access token has expired | Automatically refresh the token and retry once | User doesn't notice — may only be slightly slower |
 | Token refresh fails | Disconnect that channel, return empty data | User needs to re-authorize that channel |
 | A post has been deleted on the platform | That post returns empty data, not counted in statistics | Does not affect other posts |
-| Some posts fail during Post Engagement fetch | `meta.posts_failed` records the failure count | User can see a failure notice |
+| Some posts fail during analytics fetch | Circuit breaker skips remaining posts for that platform after 2 failures | Affected platform's numbers may be lower than actual |
 | Platform rate-limits API requests (429) | Automatically wait 5 seconds and retry (up to 3 retries) | User may experience slightly slower response |
 | A connected platform has no data yet | Platform still appears in results with all values at 0 | User sees a complete list of all connected platforms — no confusion about missing platforms |
+| Platform doesn't implement `postAnalytics` | Posts from that platform return empty metrics | Analytics show 0 for that platform, but post counts are still accurate |
 
 ---
 
@@ -617,7 +656,7 @@ PostEngagementQueryDto
 | `getActiveIntegrations(orgId)` | Get active integrations | `organizationId = orgId AND deletedAt IS NULL AND disabled = false AND type = 'social'` |
 | `getPostsStats(orgId, startDate?, endDate?)` | Count posts grouped by state | `organizationId = orgId AND deletedAt IS NULL [AND publishDate >= startDate] [AND publishDate <= endDate]`, `GROUP BY state` |
 | `getPostsForTrend(orgId, sinceDays)` | Query post publishing trend | `organizationId = orgId AND deletedAt IS NULL AND publishDate >= (NOW - sinceDays)` |
-| `getPublishedPostsWithRelease(orgId, sinceDays)` | Query published posts (with platform association) | `state = 'PUBLISHED' AND releaseId IS NOT NULL AND publishDate >= (NOW - sinceDays) LIMIT 100` |
+| `getPublishedPostsWithRelease(orgId, sinceDays)` | Query published posts (with platform association) | `state = 'PUBLISHED' AND releaseId IS NOT NULL AND publishDate >= (NOW - sinceDays) no limit` |
 
 ### Redis cache keys
 
@@ -639,39 +678,48 @@ Controller                    Service                          Repository / Exte
 │  &endDate=       │   │  ├ Normalize dates    │   │ getPostsStats()      │
 │                  │   │  ├ Parallel queries   │   └──────────────────────┘
 │                  │   │  ├ Map state→stats    │
-│                  │   │  ├ Iterate integrations│
-│                  │   │  │  └ checkAnalytics() │──→ IntegrationService
+│                  │   │  ├ _fetchAllPost      │
+│                  │   │  │  Analytics()       │──→ PostsService / Providers
 │                  │   │  └ Regex classify &   │
 │                  │   │    accumulate         │
 │ GET /posts-trend │──→│ getPostsTrend()       │──→│ getPostsForTrend()   │
 │                  │   │  └ Bucket & sort      │   └──────────────────────┘
-│ GET /traffics    │──→│ getTraffics()         │──→│ getActiveIntegrations│
-│                  │   │  ├ Redis cache        │   └──────────────────────┘
-│                  │   │  ├ Split 30 days in   │
+│ GET /traffics    │──→│ getTraffics()         │──→│ _fetchAllPost        │
+│                  │   │  ├ Redis cache        │   │  Analytics()         │
+│                  │   │  ├ Split 30 days in   │   └──────────────────────┘
 │                  │   │  │ half                │
 │                  │   │  └ Calculate delta     │
-│ GET /impressions │──→│ getImpressions()      │──→│ getActiveIntegrations│
-│                  │   │  ├ Redis cache        │   └──────────────────────┘
-│                  │   │  └ Aggregate by time  │
+│ GET /impressions │──→│ getImpressions()      │──→│ _fetchAllPost        │
+│                  │   │  ├ Redis cache        │   │  Analytics()         │
+│                  │   │  └ Aggregate by time  │   └──────────────────────┘
 │                  │   │    granularity        │
-│GET /post-engage- │──→│ getPostEngagement()   │──→│getPublishedPostsWith │
-│  ment            │   │  ├ Redis cache        │   │  Release()           │
-│                  │   │  ├ Batch calls        │   └──────────────────────┘
-│                  │   │  │ (batch=5)          │
-│                  │   │  │ └checkPostAnalytics│──→ PostsService
-│                  │   │  ├ Regex normalize    │
+│GET /post-engage- │──→│ getPostEngagement()   │──→│ _fetchAllPost        │
+│  ment            │   │  ├ Redis cache        │   │  Analytics()         │
+│                  │   │  ├ Regex normalize    │   └──────────────────────┘
 │                  │   │  │ metrics            │
 │                  │   │  └ Group by platform  │
 └──────────────────┘   └──────────────────────┘
 ```
 
+### Shared analytics pipeline: `_fetchAllPostAnalytics()`
+
+All analytics endpoints share a single private method that handles the complete post-level analytics fetch:
+
+1. Query `getPublishedPostsWithRelease(orgId, days)` — all published posts in time range
+2. Query `getActiveIntegrations(orgId)` — for token management
+3. Group posts by `integrationId`
+4. For each integration group:
+   - **Batch path**: If the provider implements `batchPostAnalytics()`, fetch all posts in one API call
+   - **Fallback path**: Call `checkPostAnalytics()` per post, 5 concurrent, with circuit breaker (stops after 2 consecutive failures per platform)
+5. Returns `{ analyticsMap, postsFailed, postsTotal }`
+
 ### Metric classification regex
 
-**Account-level metrics** (used by summary / traffics / impressions):
+**Used by Summary / Traffics / Impressions Trend** (classify raw post-level metrics):
 - `IMPRESSIONS_RE = /impression|views|page.views|reach/i`
 - `TRAFFICS_RE = /click|engagement|traffic/i`
 
-**Post-level metrics** (used by post-engagement):
+**Used by Post Engagement** (classify into 4 unified metrics):
 - `VIEWS_RE = /^(impression|views|reach|unique.impression)/i`
 - `LIKES_RE = /^(like|reaction)/i`
 - `COMMENTS_RE = /^(comment|repl)/i`
@@ -679,14 +727,15 @@ Controller                    Service                          Repository / Exte
 
 ### Design principles
 
-1. **Multi-tenant isolation**: All queries are scoped by `orgId`
-2. **Soft delete**: All database queries filter `deletedAt IS NULL`
-3. **Graceful degradation**: Single platform/post failure does not cause overall failure
-4. **Flexible time granularity**: Daily/weekly/monthly aggregation; weekly uses ISO 8601 standard
-5. **Two-level caching**: Redis cache reduces third-party API call volume
-6. **Regex-driven metric classification**: Automatically normalizes metric names across platforms
-7. **Batched concurrency control**: 5 posts per concurrent batch to avoid platform API rate limits
-8. **Post hard limit**: Maximum 100 posts to prevent endpoint timeout
-9. **Reuse existing infrastructure**: `getPostEngagement` reuses `checkPostAnalytics()`, inheriting token refresh and per-post caching capabilities
+1. **Post-level only**: All analytics data comes from post-level APIs (`postAnalytics`), never from account-level APIs. This ensures only Postiz-managed content is measured.
+2. **Multi-tenant isolation**: All queries are scoped by `orgId`
+3. **Soft delete**: All database queries filter `deletedAt IS NULL`
+4. **Graceful degradation**: Single platform/post failure does not cause overall failure
+5. **Flexible time granularity**: Daily/weekly/monthly aggregation; weekly uses ISO 8601 standard
+6. **Two-level caching**: Redis cache reduces third-party API call volume
+7. **Regex-driven metric classification**: Automatically normalizes metric names across platforms
+8. **Batched concurrency control**: 5 posts per concurrent batch to avoid platform API rate limits
+9. **No artificial post limit**: All published posts in the time range are analyzed; circuit breaker and caching prevent runaway API calls
+10. **Shared pipeline**: `_fetchAllPostAnalytics()` is the single source of truth for all analytics endpoints, ensuring consistent data across the dashboard
 
 </details>

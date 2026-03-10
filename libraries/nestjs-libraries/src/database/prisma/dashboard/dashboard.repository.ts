@@ -89,7 +89,6 @@ export class DashboardRepository {
         },
       },
       orderBy: { publishDate: 'desc' },
-      take: 100,
     });
   }
 
