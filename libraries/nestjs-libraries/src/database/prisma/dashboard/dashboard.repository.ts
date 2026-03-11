@@ -10,23 +10,27 @@ export class DashboardRepository {
     private _integration: PrismaRepository<'integration'>
   ) {}
 
-  getChannelCount(orgId: string) {
+  getChannelCount(orgId: string, integrationId?: string[], channel?: string[]) {
     return this._integration.model.integration.count({
       where: {
         organizationId: orgId,
         deletedAt: null,
         disabled: false,
+        ...(integrationId?.length && { id: { in: integrationId } }),
+        ...(channel?.length && { providerIdentifier: { in: channel } }),
       },
     });
   }
 
-  getActiveIntegrations(orgId: string) {
+  getActiveIntegrations(orgId: string, integrationId?: string[], channel?: string[]) {
     return this._integration.model.integration.findMany({
       where: {
         organizationId: orgId,
         deletedAt: null,
         disabled: false,
         type: 'social',
+        ...(integrationId?.length && { id: { in: integrationId } }),
+        ...(channel?.length && { providerIdentifier: { in: channel } }),
       },
     });
   }
@@ -64,7 +68,7 @@ export class DashboardRepository {
     return stats;
   }
 
-  getPublishedPostsWithRelease(orgId: string, sinceDays: number) {
+  getPublishedPostsWithRelease(orgId: string, sinceDays: number, integrationId?: string[], channel?: string[]) {
     return this._post.model.post.findMany({
       where: {
         organizationId: orgId,
@@ -75,6 +79,8 @@ export class DashboardRepository {
         publishDate: {
           gte: dayjs().subtract(sinceDays, 'day').toDate(),
         },
+        ...(integrationId?.length && { integrationId: { in: integrationId } }),
+        ...(channel?.length && { integration: { providerIdentifier: { in: channel } } }),
       },
       select: {
         id: true,

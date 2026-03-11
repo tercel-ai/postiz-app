@@ -366,6 +366,23 @@ export const Menu: FC<{
           )}
           <div
             className="flex gap-[12px] items-center py-[8px] px-[10px]"
+            onClick={() => {
+              setShow(false);
+              router.push(`/integrations/${findIntegration.id}`);
+            }}
+          >
+            <div>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
+                <circle cx="12" cy="7" r="4"></circle>
+              </svg>
+            </div>
+            <div className="text-[14px]">
+              {t('account_profile', 'Account Profile')}
+            </div>
+          </div>
+          <div
+            className="flex gap-[12px] items-center py-[8px] px-[10px]"
             onClick={copyChannelId(findIntegration)}
           >
             <div>

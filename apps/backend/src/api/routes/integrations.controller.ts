@@ -204,6 +204,36 @@ export class IntegrationsController {
     return this._integrationService.updateNameAndUrl(id, name, url);
   }
 
+  @Get('/profile/:id')
+  async getIntegrationProfile(
+    @GetOrgFromRequest() org: Organization,
+    @Param('id') id: string,
+    @GetUserFromRequest() user: User
+  ) {
+    const integration = await this._integrationService.getIntegrationById(
+      org.id,
+      id
+    );
+    if (!integration) {
+      throw new Error('Integration not found');
+    }
+
+    const posts = await this._integrationService.getPostsForChannel(org.id, id);
+    let analytics = [];
+    try {
+      analytics = await this._integrationService.checkAnalytics(org, id, '30');
+    } catch (err) {
+      // ignore
+    }
+
+    return {
+      integration,
+      postsCount: posts.length,
+      analytics,
+      userEmail: user.email,
+    };
+  }
+
   @Get('/:id')
   getSingleIntegration(
     @Param('id') id: string,

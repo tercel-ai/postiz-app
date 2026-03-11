@@ -133,6 +133,11 @@ Integrates **OpenRouter** and local AI logic to support:
 - **Internal Plugs**: Automatic reposts/likes by internal organization members.
 - **Global Plugs**: Trigger automatic replies when specific conditions (e.g., like count) are met.
 
+### 7.3 Account Profile Module
+- **Consolidated View**: Displays per-account performance stats and profile info.
+- **Cross-Platform Compatibility**: Unified UI for monitoring different social accounts like X, Reddit, and YouTube.
+- **Analytics Integration**: Pulls live data from platform APIs for impressions, likes, and more.
+
 ---
 
 ## 8. Development Suggestions

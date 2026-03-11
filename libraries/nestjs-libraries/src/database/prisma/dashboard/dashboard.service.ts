@@ -53,8 +53,8 @@ export class DashboardService {
     }
 
     const [channelCount, integrations, postStats] = await Promise.all([
-      this._dashboardRepository.getChannelCount(org.id),
-      this._dashboardRepository.getActiveIntegrations(org.id),
+      this._dashboardRepository.getChannelCount(org.id, integrationId, channel),
+      this._dashboardRepository.getActiveIntegrations(org.id, integrationId, channel),
       this._dashboardRepository.getPostsStats(org.id, normalizedStart, normalizedEnd, integrationId, channel),
     ]);
 
@@ -95,7 +95,7 @@ export class DashboardService {
     }
 
     // Aggregate from Postiz-managed published posts only
-    const { analyticsMap } = await this._fetchAllPostAnalytics(org, 30);
+    const { analyticsMap } = await this._fetchAllPostAnalytics(org, 30, integrationId, channel);
     let impressionsTotal = 0;
     let trafficsTotal = 0;
     for (const { metrics } of analyticsMap.values()) {
@@ -396,15 +396,17 @@ export class DashboardService {
    */
   private async _fetchAllPostAnalytics(
     org: Organization,
-    days: number
+    days: number,
+    integrationId?: string[],
+    channel?: string[]
   ): Promise<{
     analyticsMap: Map<string, { metrics: AnalyticsData[]; platform: string }>;
     postsFailed: number;
     postsTotal: number;
   }> {
     const [posts, activeIntegrations] = await Promise.all([
-      this._dashboardRepository.getPublishedPostsWithRelease(org.id, days),
-      this._dashboardRepository.getActiveIntegrations(org.id),
+      this._dashboardRepository.getPublishedPostsWithRelease(org.id, days, integrationId, channel),
+      this._dashboardRepository.getActiveIntegrations(org.id, integrationId, channel),
     ]);
 
     const analyticsMap = new Map<string, { metrics: AnalyticsData[]; platform: string }>();
@@ -433,8 +435,8 @@ export class DashboardService {
 
     let postsFailed = 0;
 
-    for (const [integrationId, groupPosts] of postsByIntegration) {
-      const fullIntegration = integrationById.get(integrationId);
+    for (const [intId, groupPosts] of postsByIntegration) {
+      const fullIntegration = integrationById.get(intId);
       if (!fullIntegration) {
         postsFailed += groupPosts.length;
         continue;
