@@ -2,6 +2,18 @@ import { ArrayMaxSize, IsArray, IsOptional, IsString, IsIn, IsInt, Min, Max, IsD
 import { Transform, Type } from 'class-transformer';
 import { VALID_CHANNELS, Channel } from '@gitroom/nestjs-libraries/dtos/posts/get.posts-list.dto';
 
+const integrationIdTransform = Transform(({ value }) =>
+  (Array.isArray(value) ? value : [value]).flatMap((v: string) =>
+    v.includes(',') ? v.split(',') : [v]
+  )
+);
+
+const channelTransform = Transform(({ value }) =>
+  (Array.isArray(value) ? value : [value]).flatMap((v: string) =>
+    v.includes(',') ? v.split(',') : [v]
+  )
+);
+
 export class DashboardSummaryQueryDto {
   @IsOptional()
   @IsDateString()
@@ -15,11 +27,7 @@ export class DashboardSummaryQueryDto {
   @IsArray()
   @ArrayMaxSize(50)
   @IsString({ each: true })
-  @Transform(({ value }) =>
-    (Array.isArray(value) ? value : [value]).flatMap((v: string) =>
-      v.includes(',') ? v.split(',') : [v]
-    )
-  )
+  @integrationIdTransform
   integrationId?: string[];
 
   @IsOptional()
@@ -27,11 +35,7 @@ export class DashboardSummaryQueryDto {
   @ArrayMaxSize(30)
   @IsString({ each: true })
   @IsIn(VALID_CHANNELS as unknown as string[], { each: true })
-  @Transform(({ value }) =>
-    (Array.isArray(value) ? value : [value]).flatMap((v: string) =>
-      v.includes(',') ? v.split(',') : [v]
-    )
-  )
+  @channelTransform
   channel?: Channel[];
 }
 
@@ -47,6 +51,38 @@ export class ImpressionsQueryDto {
   @IsString()
   @IsIn(['daily', 'weekly', 'monthly'])
   period?: 'daily' | 'weekly' | 'monthly' = 'daily';
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(50)
+  @IsString({ each: true })
+  @integrationIdTransform
+  integrationId?: string[];
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(30)
+  @IsString({ each: true })
+  @IsIn(VALID_CHANNELS as unknown as string[], { each: true })
+  @channelTransform
+  channel?: Channel[];
+}
+
+export class TrafficsQueryDto {
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(50)
+  @IsString({ each: true })
+  @integrationIdTransform
+  integrationId?: string[];
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(30)
+  @IsString({ each: true })
+  @IsIn(VALID_CHANNELS as unknown as string[], { each: true })
+  @channelTransform
+  channel?: Channel[];
 }
 
 export class PostEngagementQueryDto {

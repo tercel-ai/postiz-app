@@ -40,6 +40,7 @@ model Organization {
   usedCodes         UsedCodes[]
   users             UserOrganization[]
   webhooks          Webhooks[]
+  dataTicks         DataTicks[]
 }
 
 model Tags {
@@ -332,6 +333,7 @@ model Integration {
   orderItems            OrderItems[]
   plugs                 Plugs[]
   posts                 Post[]
+  dataTicks             DataTicks[]
 
   @@unique([organizationId, internalId])
   @@index([rootInternalId])
@@ -899,4 +901,28 @@ model Settings {
   default     Json?    @map("default_value")
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
+}
+
+model DataTicks {
+  id             String       @id @default(uuid())
+  organizationId String
+  integrationId  String
+  platform       String
+  userId         String?
+  type           String       // Currently: impressions. Extensible to other metric types.
+  timeUnit       String       // hour | day | week | month
+  statisticsTime DateTime     // bucket start aligned to timeUnit
+  value          BigInt       @default(0)
+  postsAnalyzed  Int          @default(0)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  integration    Integration  @relation(fields: [integrationId], references: [id])
+
+  @@unique([organizationId, integrationId, type, timeUnit, statisticsTime])
+  @@index([organizationId, platform, type, timeUnit, statisticsTime])
+  @@index([organizationId, type, timeUnit, statisticsTime])
+  @@index([userId, type, timeUnit, statisticsTime])
+  @@index([integrationId])
 }

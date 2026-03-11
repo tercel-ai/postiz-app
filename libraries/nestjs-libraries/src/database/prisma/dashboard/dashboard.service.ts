@@ -10,13 +10,11 @@ import { IntegrationManager } from '@gitroom/nestjs-libraries/integrations/integ
 import { RefreshIntegrationService } from '@gitroom/nestjs-libraries/integrations/refresh.integration.service';
 import { AnalyticsData, BatchPostAnalyticsResult } from '@gitroom/nestjs-libraries/integrations/social/social.integrations.interface';
 import { ioRedis } from '@gitroom/nestjs-libraries/redis/redis.service';
+import { DataTicksService } from '@gitroom/nestjs-libraries/database/prisma/data-ticks/data-ticks.service';
 
 dayjs.extend(isoWeek);
 dayjs.extend(utc);
 dayjs.extend(timezone);
-
-const IMPRESSIONS_RE = /impression|views|page.views|reach/i;
-const TRAFFICS_RE = /click|engagement|traffic/i;
 
 const VIEWS_RE = /^(impression|views|reach|unique.impression)/i;
 const LIKES_RE = /^(like|reaction)/i;
@@ -32,7 +30,8 @@ export class DashboardService {
     private _dashboardRepository: DashboardRepository,
     private _postsService: PostsService,
     private _integrationManager: IntegrationManager,
-    private _refreshIntegrationService: RefreshIntegrationService
+    private _refreshIntegrationService: RefreshIntegrationService,
+    private _dataTicksService: DataTicksService
   ) {}
 
   async getSummary(
@@ -52,10 +51,15 @@ export class DashboardService {
       return JSON.parse(cached);
     }
 
-    const [channelCount, integrations, postStats] = await Promise.all([
+    const [channelCount, integrations, postStats, impressionsSummary] = await Promise.all([
       this._dashboardRepository.getChannelCount(org.id, integrationId, channel),
       this._dashboardRepository.getActiveIntegrations(org.id, integrationId, channel),
       this._dashboardRepository.getPostsStats(org.id, normalizedStart, normalizedEnd, integrationId, channel),
+      this._dataTicksService.getImpressionsSummaryByPlatform({
+        organizationId: org.id,
+        integrationId,
+        channel,
+      }),
     ]);
 
     const stats = {
@@ -94,23 +98,7 @@ export class DashboardService {
       );
     }
 
-    // Aggregate from Postiz-managed published posts only
-    const { analyticsMap } = await this._fetchAllPostAnalytics(org, 30, integrationId, channel);
-    let impressionsTotal = 0;
-    let trafficsTotal = 0;
-    for (const { metrics } of analyticsMap.values()) {
-      for (const metric of metrics) {
-        const total = metric.data.reduce(
-          (sum, d) => sum + Number(d.total || 0),
-          0
-        );
-        if (IMPRESSIONS_RE.test(metric.label)) {
-          impressionsTotal += total;
-        } else if (TRAFFICS_RE.test(metric.label)) {
-          trafficsTotal += total;
-        }
-      }
-    }
+    const impressionsTotal = impressionsSummary.reduce((sum: number, p: { value: number }) => sum + p.value, 0);
 
     const result = {
       channel_count: channelCount,
@@ -118,7 +106,6 @@ export class DashboardService {
         ([platform, count]) => ({ platform, count })
       ),
       impressions_total: impressionsTotal,
-      traffics_total: trafficsTotal,
       posts_stats: stats,
     };
 
@@ -172,84 +159,24 @@ export class DashboardService {
     return result;
   }
 
-  async getTraffics(org: Organization) {
-    const cacheKey = `dashboard:traffics:${org.id}`;
+  async getTraffics(
+    org: Organization,
+    integrationId?: string[],
+    channel?: string[]
+  ) {
+    const intKey = integrationId?.length ? [...integrationId].sort().join(',') : 'all';
+    const chKey = channel?.length ? [...channel].sort().join(',') : 'all';
+    const cacheKey = `dashboard:traffics:${org.id}:${intKey}:${chKey}`;
     const cached = await ioRedis.get(cacheKey);
     if (cached) {
       return JSON.parse(cached);
     }
 
-    const integrations =
-      await this._dashboardRepository.getActiveIntegrations(org.id);
-
-    const platformValues = new Map<string, number>();
-    const platformRecent = new Map<string, number>();
-    const platformOlder = new Map<string, number>();
-
-    // Pre-populate all connected platforms so they always appear in the result
-    for (const integration of integrations) {
-      const platform = integration.providerIdentifier;
-      if (!platformValues.has(platform)) {
-        platformValues.set(platform, 0);
-      }
-    }
-
-    // Split 30-day window into two halves at the midpoint (day 15).
-    const midDate = dayjs().subtract(15, 'day');
-
-    const { analyticsMap } = await this._fetchAllPostAnalytics(org, 30);
-    for (const { metrics, platform } of analyticsMap.values()) {
-      for (const metric of metrics) {
-        if (!TRAFFICS_RE.test(metric.label)) continue;
-        for (const point of metric.data) {
-          const val = Number(point.total || 0);
-          platformValues.set(
-            platform,
-            (platformValues.get(platform) || 0) + val
-          );
-          if (dayjs(point.date).isAfter(midDate)) {
-            platformRecent.set(
-              platform,
-              (platformRecent.get(platform) || 0) + val
-            );
-          } else {
-            platformOlder.set(
-              platform,
-              (platformOlder.get(platform) || 0) + val
-            );
-          }
-        }
-      }
-    }
-
-    const grandTotal = Array.from(platformValues.values()).reduce(
-      (a, b) => a + b,
-      0
-    );
-
-    const result = Array.from(platformValues.entries()).map(
-      ([platform, value]) => {
-        const recent = platformRecent.get(platform) || 0;
-        const older = platformOlder.get(platform) || 0;
-        const delta =
-          older > 0
-            ? Math.round(((recent - older) / older) * 10000) / 100
-            : recent > 0
-              ? 100
-              : 0;
-        return {
-          platform,
-          value,
-          percentage:
-            grandTotal > 0
-              ? Math.round((value / grandTotal) * 10000) / 100
-              : 0,
-          delta,
-        };
-      }
-    );
-
-    result.sort((a, b) => b.value - a.value);
+    const result = await this._dataTicksService.getImpressionsSummaryByPlatform({
+      organizationId: org.id,
+      integrationId,
+      channel,
+    });
 
     await ioRedis.set(cacheKey, JSON.stringify(result), 'EX', CACHE_TTL);
     return result;
@@ -257,44 +184,24 @@ export class DashboardService {
 
   async getImpressions(
     org: Organization,
-    period: 'daily' | 'weekly' | 'monthly' = 'daily'
+    period: 'daily' | 'weekly' | 'monthly' = 'daily',
+    integrationId?: string[],
+    channel?: string[]
   ) {
-    const cacheKey = `dashboard:impressions:${org.id}:${period}`;
+    const intKey = integrationId?.length ? [...integrationId].sort().join(',') : 'all';
+    const chKey = channel?.length ? [...channel].sort().join(',') : 'all';
+    const cacheKey = `dashboard:impressions:${org.id}:${period}:${intKey}:${chKey}`;
     const cached = await ioRedis.get(cacheKey);
     if (cached) {
       return JSON.parse(cached);
     }
 
-    const { analyticsMap } = await this._fetchAllPostAnalytics(org, 30);
-
-    const dateBuckets = new Map<string, number>();
-    for (const { metrics } of analyticsMap.values()) {
-      for (const metric of metrics) {
-        if (!IMPRESSIONS_RE.test(metric.label)) continue;
-        for (const point of metric.data) {
-          const d = dayjs(point.date);
-          let dateKey: string;
-          switch (period) {
-            case 'weekly':
-              dateKey = d.isoWeekday(1).format('YYYY-MM-DD');
-              break;
-            case 'monthly':
-              dateKey = d.format('YYYY-MM');
-              break;
-            default:
-              dateKey = d.format('YYYY-MM-DD');
-          }
-          dateBuckets.set(
-            dateKey,
-            (dateBuckets.get(dateKey) || 0) + Number(point.total || 0)
-          );
-        }
-      }
-    }
-
-    const result = Array.from(dateBuckets.entries())
-      .map(([date, impressions]) => ({ date, impressions }))
-      .sort((a, b) => a.date.localeCompare(b.date));
+    const result = await this._dataTicksService.getImpressionsByPlatform({
+      organizationId: org.id,
+      period,
+      integrationId,
+      channel,
+    });
 
     await ioRedis.set(cacheKey, JSON.stringify(result), 'EX', CACHE_TTL);
     return result;

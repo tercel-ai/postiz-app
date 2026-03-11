@@ -7,14 +7,26 @@ export class InfiniteWorkflowRegister implements OnModuleInit {
 
   async onModuleInit(): Promise<void> {
     if (!!process.env.RUN_CRON) {
-      try {
-        await this._temporalService.client
-          ?.getRawClient()
-          ?.workflow?.start('missingPostWorkflow', {
-            workflowId: 'missing-post-workflow',
+      const client = this._temporalService.client?.getRawClient();
+      if (!client) return;
+
+      // Start infinite workflows with TERMINATE_EXISTING to pick up new code
+      const infiniteWorkflows = [
+        { workflowId: 'missing-post-workflow', name: 'missingPostWorkflow' },
+        { workflowId: 'data-ticks-sync-workflow', name: 'dataTicksSyncWorkflow' },
+      ];
+
+      for (const wf of infiniteWorkflows) {
+        try {
+          await client.workflow?.start(wf.name, {
+            workflowId: wf.workflowId,
             taskQueue: 'main',
+            workflowIdConflictPolicy: 'USE_EXISTING',
           });
-      } catch (err) {}
+        } catch (err) {
+          console.error(`Failed to start ${wf.name}:`, err);
+        }
+      }
     }
   }
 }

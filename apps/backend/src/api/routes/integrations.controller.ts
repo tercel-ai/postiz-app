@@ -219,17 +219,41 @@ export class IntegrationsController {
     }
 
     const posts = await this._integrationService.getPostsForChannel(org.id, id);
-    let analytics = [];
+    
+    const stats: Record<string, number | null> = {
+      followers: null,
+      impressions: null,
+      likes: null,
+      replies: null,
+      retweets: null,
+      quotes: null,
+      bookmarks: null,
+    };
+
     try {
-      analytics = await this._integrationService.checkAnalytics(org, id, '30');
+      const analytics = await this._integrationService.checkAnalytics(org, id, '30');
+      if (analytics && Array.isArray(analytics)) {
+        analytics.forEach((item) => {
+          const label = item.label.toLowerCase();
+          const value = item.data?.length ? Number(item.data[item.data.length - 1].total) : 0;
+          
+          if (label.includes('impression')) stats.impressions = value;
+          if (label.includes('like')) stats.likes = value;
+          if (label.includes('reply')) stats.replies = value;
+          if (label.includes('retweet')) stats.retweets = value;
+          if (label.includes('quote')) stats.quotes = value;
+          if (label.includes('bookmark')) stats.bookmarks = value;
+          if (label.includes('follower') || label.includes('subscriber') || label.includes('karma')) stats.followers = value;
+        });
+      }
     } catch (err) {
-      // ignore
+      // ignore analytics errors
     }
 
     return {
       integration,
       postsCount: posts.length,
-      analytics,
+      stats,
       userEmail: user.email,
     };
   }

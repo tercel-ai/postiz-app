@@ -38,15 +38,11 @@ export const AccountProfile = ({ id }: { id: string }) => {
     );
   }
 
-  const { integration, postsCount, analytics, userEmail } = data;
+  const { integration, postsCount, stats, userEmail } = data;
 
-  const findAnalytic = (label: string) => {
-    const item = analytics?.find(
-      (a: any) => a.label?.toLowerCase() === label.toLowerCase()
-    );
-    if (!item || !item.data || !item.data.length) return '--';
-    const val = item.data[item.data.length - 1].total;
-    return new Intl.NumberFormat('en-US').format(Number(val));
+  const renderValue = (val: number | null | undefined) => {
+    if (val === null || val === undefined) return '--';
+    return new Intl.NumberFormat('en-US').format(val);
   };
 
   const copyId = () => {
@@ -135,6 +131,12 @@ export const AccountProfile = ({ id }: { id: string }) => {
             <div className="flex flex-col gap-[14px] text-[14px]">
               <div className="flex justify-between items-center">
                 <div className="flex items-center gap-3 text-gray-600 dark:text-gray-300">
+                  <span>👥</span> {t('followers', 'Followers')}
+                </div>
+                <div className="font-[500]">{renderValue(stats?.followers)}</div>
+              </div>
+              <div className="flex justify-between items-center">
+                <div className="flex items-center gap-3 text-gray-600 dark:text-gray-300">
                   <span>📄</span> {t('posts', 'Posts')}
                 </div>
                 <div className="font-[500]">
@@ -145,37 +147,37 @@ export const AccountProfile = ({ id }: { id: string }) => {
                 <div className="flex items-center gap-3 text-gray-600 dark:text-gray-300">
                   <span>📈</span> {t('impressions', 'Impressions')}
                 </div>
-                <div className="font-[500]">{findAnalytic('impressions')}</div>
+                <div className="font-[500]">{renderValue(stats?.impressions)}</div>
               </div>
               <div className="flex justify-between items-center">
                 <div className="flex items-center gap-3 text-gray-600 dark:text-gray-300">
                   <span>❤️</span> {t('like', 'like')}
                 </div>
-                <div className="font-[500]">{findAnalytic('likes')}</div>
+                <div className="font-[500]">{renderValue(stats?.likes)}</div>
               </div>
               <div className="flex justify-between items-center">
                 <div className="flex items-center gap-3 text-gray-600 dark:text-gray-300">
                   <span>💬</span> {t('replies', 'Replies')}
                 </div>
-                <div className="font-[500]">{findAnalytic('replies')}</div>
+                <div className="font-[500]">{renderValue(stats?.replies)}</div>
               </div>
               <div className="flex justify-between items-center">
                 <div className="flex items-center gap-3 text-gray-600 dark:text-gray-300">
                   <span>🔁</span> {t('retweets', 'Retweets')}
                 </div>
-                <div className="font-[500]">{findAnalytic('retweets')}</div>
+                <div className="font-[500]">{renderValue(stats?.retweets)}</div>
               </div>
               <div className="flex justify-between items-center">
                 <div className="flex items-center gap-3 text-gray-600 dark:text-gray-300">
                   <span>📝</span> {t('quotes', 'Quotes')}
                 </div>
-                <div className="font-[500]">{findAnalytic('quotes')}</div>
+                <div className="font-[500]">{renderValue(stats?.quotes)}</div>
               </div>
               <div className="flex justify-between items-center">
                 <div className="flex items-center gap-3 text-gray-600 dark:text-gray-300">
                   <span>🔖</span> {t('bookmarks', 'Bookmarks')}
                 </div>
-                <div className="font-[500]">{findAnalytic('bookmarks')}</div>
+                <div className="font-[500]">{renderValue(stats?.bookmarks)}</div>
               </div>
             </div>
           </div>
@@ -203,9 +205,9 @@ export const AccountProfile = ({ id }: { id: string }) => {
               </div>
               <div>
                 <div className="text-[12px] text-gray-500 mb-1">
-                  {t('krama', 'Krama')}
+                  {integration.providerIdentifier === 'reddit' ? t('karma', 'Karma') : t('followers', 'Followers')}
                 </div>
-                <div className="font-[500] text-[14px]">--</div>
+                <div className="font-[500] text-[14px]">{renderValue(stats?.followers)}</div>
               </div>
               <div>
                 <div className="text-[12px] text-gray-500 mb-1">

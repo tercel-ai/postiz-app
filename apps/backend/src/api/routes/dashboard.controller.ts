@@ -7,6 +7,7 @@ import { DashboardService } from '@gitroom/nestjs-libraries/database/prisma/dash
 import {
   PostsTrendQueryDto,
   ImpressionsQueryDto,
+  TrafficsQueryDto,
   PostEngagementQueryDto,
   DashboardSummaryQueryDto,
 } from '@gitroom/nestjs-libraries/dtos/dashboard/dashboard.dto';
@@ -41,8 +42,11 @@ export class DashboardController {
   }
 
   @Get('/traffics')
-  async getTraffics(@GetOrgFromRequest() org: Organization) {
-    return this._dashboardService.getTraffics(org);
+  async getTraffics(
+    @GetOrgFromRequest() org: Organization,
+    @Query() query: TrafficsQueryDto
+  ) {
+    return this._dashboardService.getTraffics(org, query.integrationId, query.channel);
   }
 
   @Get('/impressions')
@@ -50,7 +54,7 @@ export class DashboardController {
     @GetOrgFromRequest() org: Organization,
     @Query() query: ImpressionsQueryDto
   ) {
-    return this._dashboardService.getImpressions(org, query.period);
+    return this._dashboardService.getImpressions(org, query.period, query.integrationId, query.channel);
   }
 
   @Get('/post-engagement')
