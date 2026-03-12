@@ -663,7 +663,7 @@ export class PostsService {
             true
           );
         } catch (err) {
-          await this.changeState(posts[0].id, 'ERROR', `Workflow start failed: ${err?.message || err}`);
+          await this.changeState(posts[0].id, 'ERROR', `Workflow start failed: ${(err as Error)?.message || err}`);
           throw err;
         }
       } else {
