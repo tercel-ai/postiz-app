@@ -73,19 +73,21 @@ export abstract class SocialAbstract {
     ignoreConcurrency?: boolean
   ) {
     let value: any;
+    let rawError = '';
     try {
       value = await func();
     } catch (err) {
-      console.error(`[${this.identifier}] runInConcurrent error:`, safeStringify(err));
-      const handle = this.handleErrors(safeStringify(err));
+      rawError = safeStringify(err);
+      console.error(`[${this.identifier}] runInConcurrent error:`, rawError);
+      const handle = this.handleErrors(rawError);
       value = { err: true, value: 'Unknown Error', ...(handle || {}) };
     }
 
     if (value && value?.err && value?.value) {
       if (value.type === 'refresh-token') {
         throw new RefreshToken(
-          '',
-          safeStringify({}),
+          this.identifier,
+          rawError || safeStringify({}),
           {} as any,
           value.value || ''
         );
@@ -96,7 +98,7 @@ export abstract class SocialAbstract {
           'retry'
         );
       }
-      throw new BadBody('', safeStringify({}), {} as any, value.value || '');
+      throw new BadBody(this.identifier, rawError || safeStringify({}), {} as any, value.value || '');
     }
 
     return value;

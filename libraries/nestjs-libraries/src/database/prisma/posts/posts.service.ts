@@ -624,9 +624,7 @@ export class PostsService {
           ]),
         });
     } catch (err) {
-      if (postNow) {
-        throw err;
-      }
+      throw err;
     }
   }
 
@@ -657,18 +655,27 @@ export class PostsService {
       }
 
       if (body.type === 'now') {
-        await this.startWorkflow(
-          post.settings.__type.split('-')[0].toLowerCase(),
-          posts[0].id,
-          orgId,
-          true
-        );
+        try {
+          await this.startWorkflow(
+            post.settings.__type.split('-')[0].toLowerCase(),
+            posts[0].id,
+            orgId,
+            true
+          );
+        } catch (err) {
+          await this.changeState(posts[0].id, 'ERROR', `Workflow start failed: ${err?.message || err}`);
+          throw err;
+        }
       } else {
         this.startWorkflow(
           post.settings.__type.split('-')[0].toLowerCase(),
           posts[0].id,
           orgId
-        ).catch((err) => {});
+        ).catch((err) => {
+          Sentry.captureException(err, {
+            extra: { postId: posts[0].id, orgId },
+          });
+        });
       }
 
       Sentry.metrics.count('post_created', 1);

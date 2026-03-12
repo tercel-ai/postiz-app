@@ -369,12 +369,15 @@ export class PostsRepository {
 
       const addMorePosts = [];
       let startingDate = dayjs.utc(post.publishDate);
+      const now = dayjs.utc();
       while (dayjs.utc(endDate).isSameOrAfter(startingDate)) {
         if (dayjs(startingDate).isSameOrAfter(dayjs.utc(post.publishDate))) {
+          const isFuture = startingDate.isAfter(now);
           addMorePosts.push({
             ...post,
             publishDate: startingDate.toDate(),
             actualDate: post.publishDate,
+            ...(isFuture && post.state !== 'DRAFT' ? { state: 'QUEUE' } : {}),
           });
         }
 
