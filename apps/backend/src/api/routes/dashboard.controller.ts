@@ -46,7 +46,12 @@ export class DashboardController {
     @GetOrgFromRequest() org: Organization,
     @Query() query: TrafficsQueryDto
   ) {
-    return this._dashboardService.getTraffics(org, query.integrationId, query.channel);
+    const startDate = query.startDate ? new Date(query.startDate) : undefined;
+    const endDate = query.endDate ? new Date(query.endDate) : undefined;
+    if (startDate && endDate && startDate > endDate) {
+      throw new BadRequestException('startDate must be before endDate');
+    }
+    return this._dashboardService.getTraffics(org, query.integrationId, query.channel, startDate, endDate);
   }
 
   @Get('/impressions')
@@ -54,7 +59,12 @@ export class DashboardController {
     @GetOrgFromRequest() org: Organization,
     @Query() query: ImpressionsQueryDto
   ) {
-    return this._dashboardService.getImpressions(org, query.period, query.integrationId, query.channel);
+    const startDate = query.startDate ? new Date(query.startDate) : undefined;
+    const endDate = query.endDate ? new Date(query.endDate) : undefined;
+    if (startDate && endDate && startDate > endDate) {
+      throw new BadRequestException('startDate must be before endDate');
+    }
+    return this._dashboardService.getImpressions(org, query.period, query.integrationId, query.channel, startDate, endDate);
   }
 
   @Get('/post-engagement')

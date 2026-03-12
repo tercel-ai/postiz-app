@@ -32,6 +32,7 @@ import {
   postId as postIdSearchParam,
 } from '@gitroom/nestjs-libraries/temporal/temporal.search.attribute';
 import { AnalyticsData } from '@gitroom/nestjs-libraries/integrations/social/social.integrations.interface';
+import { computeTrafficScore } from '@gitroom/nestjs-libraries/integrations/social/traffic.calculator';
 import { timer } from '@gitroom/helpers/utils/timer';
 import { ioRedis } from '@gitroom/nestjs-libraries/redis/redis.service';
 import { RefreshToken } from '@gitroom/nestjs-libraries/integrations/social.abstract';
@@ -126,6 +127,20 @@ export class PostsService {
         post.releaseId,
         date
       );
+
+      // Append computed Traffic score as an additional metric
+      const trafficScore = computeTrafficScore(
+        post.integration.providerIdentifier,
+        loadAnalytics
+      );
+      if (trafficScore !== null) {
+        loadAnalytics.push({
+          label: 'Traffic',
+          data: [{ total: String(trafficScore), date: dayjs.utc().format('YYYY-MM-DD') }],
+          percentageChange: 0,
+        });
+      }
+
       await ioRedis.set(
         `integration:${orgId}:${post.id}:${date}`,
         JSON.stringify(loadAnalytics),
@@ -560,7 +575,7 @@ export class PostsService {
     return this._postRepository.getPostByForWebhookId(id);
   }
 
-  async startWorkflow(taskQueue: string, postId: string, orgId: string) {
+  async startWorkflow(taskQueue: string, postId: string, orgId: string, postNow = false) {
     try {
       const workflows = this._temporalService.client
         .getRawClient()
@@ -594,6 +609,7 @@ export class PostsService {
               taskQueue: taskQueue,
               postId: postId,
               organizationId: orgId,
+              postNow: postNow,
             },
           ],
           typedSearchAttributes: new TypedSearchAttributes([
@@ -607,7 +623,11 @@ export class PostsService {
             },
           ]),
         });
-    } catch (err) {}
+    } catch (err) {
+      if (postNow) {
+        throw err;
+      }
+    }
   }
 
   async createPost(orgId: string, body: CreatePostDto): Promise<any[]> {
@@ -636,11 +656,20 @@ export class PostsService {
         return [] as any[];
       }
 
-      this.startWorkflow(
-        post.settings.__type.split('-')[0].toLowerCase(),
-        posts[0].id,
-        orgId
-      ).catch((err) => {});
+      if (body.type === 'now') {
+        await this.startWorkflow(
+          post.settings.__type.split('-')[0].toLowerCase(),
+          posts[0].id,
+          orgId,
+          true
+        );
+      } else {
+        this.startWorkflow(
+          post.settings.__type.split('-')[0].toLowerCase(),
+          posts[0].id,
+          orgId
+        ).catch((err) => {});
+      }
 
       Sentry.metrics.count('post_created', 1);
       postList.push({

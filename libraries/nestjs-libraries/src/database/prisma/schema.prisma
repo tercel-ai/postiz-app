@@ -30,8 +30,8 @@ model Organization {
   buyerOrganization MessagesGroup[]
   notifications     Notifications[]
   plugs             Plugs[]
-  post              Post[]             @relation("organization")
-  submittedPost     Post[]             @relation("submittedForOrg")
+  post              Post[]              @relation("organization")
+  submittedPost     Post[]              @relation("submittedForOrg")
   sets              Sets[]
   signatures        Signatures[]
   subscription      Subscription?
@@ -904,21 +904,21 @@ model Settings {
 }
 
 model DataTicks {
-  id             String       @id @default(uuid())
+  id             String   @id @default(uuid())
   organizationId String
   integrationId  String
   platform       String
   userId         String?
-  type           String       // Currently: impressions. Extensible to other metric types.
-  timeUnit       String       // hour | day | week | month
-  statisticsTime DateTime     // bucket start aligned to timeUnit
-  value          BigInt       @default(0)
-  postsAnalyzed  Int          @default(0)
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
+  type           String // impressions (cumulative snapshot), traffic (weighted engagement score)
+  timeUnit       String // hour | day | week | month
+  statisticsTime DateTime // bucket start aligned to timeUnit
+  value          BigInt   @default(0)
+  postsAnalyzed  Int      @default(0)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 
-  organization   Organization @relation(fields: [organizationId], references: [id])
-  integration    Integration  @relation(fields: [integrationId], references: [id])
+  organization Organization @relation(fields: [organizationId], references: [id])
+  integration  Integration  @relation(fields: [integrationId], references: [id])
 
   @@unique([organizationId, integrationId, type, timeUnit, statisticsTime])
   @@index([organizationId, platform, type, timeUnit, statisticsTime])

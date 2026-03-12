@@ -125,7 +125,7 @@ export class OpenaiService {
     };
   }
 
-  async generateImage(prompt: string, isUrl: boolean, isVertical = false) {
+  async generateImage(prompt: string, isUrl: boolean, isVertical = false): Promise<{ data: string | undefined; usage: AiUsageInfo }> {
     const configuredServicer = (process.env.IMAGE_PROVIDER || 'openai').toLowerCase();
 
     if (configuredServicer === 'openrouter') {
@@ -143,7 +143,7 @@ export class OpenaiService {
       size,
     });
 
-    logAiUsage({
+    const usage: AiUsageInfo = {
       servicer: 'openai',
       provider: 'openai',
       model: dalleModel,
@@ -152,17 +152,18 @@ export class OpenaiService {
       method: 'generateImage',
       usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
       image_billing: { count: 1, size, quality },
-    });
+    };
+    logAiUsage(usage);
 
     const generate = response.data[0];
-    return isUrl ? generate.url : generate.b64_json;
+    return { data: isUrl ? generate.url : generate.b64_json, usage };
   }
 
   private async generateImageViaOpenRouter(
     prompt: string,
     isUrl: boolean,
     isVertical: boolean
-  ): Promise<string | undefined> {
+  ): Promise<{ data: string | undefined; usage: AiUsageInfo }> {
     const apiKey = process.env.OPENROUTER_API_KEY;
     if (!apiKey) {
       throw new Error('OPENROUTER_API_KEY is required when IMAGE_PROVIDER=openrouter');
@@ -227,7 +228,7 @@ export class OpenaiService {
     // Log token usage from OpenRouter response
     const orUsage = data?.usage;
     const orTotalTokens = orUsage?.total_tokens ?? 0;
-    logAiUsage({
+    const aiUsage: AiUsageInfo = {
       servicer: 'openrouter',
       provider: imageProvider,
       model: imageModel,
@@ -245,7 +246,8 @@ export class OpenaiService {
         size: isVertical ? '9:16' : '1:1',
         quality: 'standard',
       },
-    });
+    };
+    logAiUsage(aiUsage);
 
     const message = data?.choices?.[0]?.message;
     const content = message?.content;
@@ -290,16 +292,15 @@ export class OpenaiService {
 
     // imageUrl is typically a data URI like "data:image/png;base64,..."
     if (isUrl) {
-      // Return the data URI directly — LocalStorage.uploadSimple can handle it
-      return imageUrl;
+      return { data: imageUrl, usage: aiUsage };
     }
 
     // Extract raw base64 from the data URI
     const base64Match = imageUrl.match(/^data:[^;]+;base64,(.+)$/);
-    return base64Match ? base64Match[1] : imageUrl;
+    return { data: base64Match ? base64Match[1] : imageUrl, usage: aiUsage };
   }
 
-  async generatePromptForPicture(prompt: string) {
+  async generatePromptForPicture(prompt: string): Promise<{ data: string; usage: AiUsageInfo }> {
     const { client, model, servicer, provider } = this.getTextClient();
     const response = await client.chat.completions.parse({
       model,
@@ -316,7 +317,7 @@ export class OpenaiService {
       response_format: zodResponseFormat(PicturePrompt, 'picturePrompt'),
     });
 
-    logAiUsage({
+    const usage: AiUsageInfo = {
       servicer,
       provider,
       model,
@@ -329,9 +330,10 @@ export class OpenaiService {
         total_tokens: response.usage?.total_tokens ?? 0,
         cached_prompt_tokens: response.usage?.prompt_tokens_details?.cached_tokens ?? 0,
       },
-    });
+    };
+    logAiUsage(usage);
 
-    return response.choices[0].message.parsed?.prompt || '';
+    return { data: response.choices[0].message.parsed?.prompt || '', usage };
   }
 
   async generateVoiceFromText(prompt: string) {

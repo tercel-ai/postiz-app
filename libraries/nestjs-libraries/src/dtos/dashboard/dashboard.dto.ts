@@ -53,6 +53,14 @@ export class ImpressionsQueryDto {
   period?: 'daily' | 'weekly' | 'monthly' = 'daily';
 
   @IsOptional()
+  @IsDateString()
+  startDate?: string;
+
+  @IsOptional()
+  @IsDateString()
+  endDate?: string;
+
+  @IsOptional()
   @IsArray()
   @ArrayMaxSize(50)
   @IsString({ each: true })
@@ -69,6 +77,14 @@ export class ImpressionsQueryDto {
 }
 
 export class TrafficsQueryDto {
+  @IsOptional()
+  @IsDateString()
+  startDate?: string;
+
+  @IsOptional()
+  @IsDateString()
+  endDate?: string;
+
   @IsOptional()
   @IsArray()
   @ArrayMaxSize(50)

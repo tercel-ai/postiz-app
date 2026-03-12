@@ -11,9 +11,9 @@ import { RefreshIntegrationService } from '@gitroom/nestjs-libraries/integration
 import { ioRedis } from '@gitroom/nestjs-libraries/redis/redis.service';
 import {
   AnalyticsData,
-  AuthTokenDetails,
   BatchPostAnalyticsResult,
 } from '@gitroom/nestjs-libraries/integrations/social/social.integrations.interface';
+import { computeTrafficScore } from '@gitroom/nestjs-libraries/integrations/social/traffic.calculator';
 
 dayjs.extend(utc);
 dayjs.extend(isoWeek);
@@ -67,8 +67,13 @@ export class DataTicksService {
   ) {}
 
   /**
-   * Sync daily impressions for all orgs.
-   * Called by the daily cron workflow at UTC 00:05 for the previous day.
+   * Sync daily impressions + traffic snapshots for all orgs.
+   * Called by the daily cron workflow at UTC 00:05.
+   *
+   * Note: Platform APIs return lifetime cumulative totals per post, not daily
+   * increments. We store the cumulative sum across all posts per integration.
+   * Traffic is a weighted engagement score computed from per-post metrics.
+   * Frontend computes deltas if needed.
    */
   async syncDailyTicks(targetDate?: Date) {
     const date = targetDate
@@ -146,17 +151,18 @@ export class DataTicksService {
       fullIntegrations.map((i) => [i.id, i])
     );
 
-    // Accumulate impressions per integration
-    const integrationImpressions = new Map<
+    // Accumulate impressions and traffic per integration
+    const integrationMetrics = new Map<
       string,
-      { platform: string; impressions: number; postsAnalyzed: number }
+      { platform: string; impressions: number; traffic: number; postsAnalyzed: number }
     >();
 
     // Initialize all integrations (explicit zero if no posts)
     for (const int of integrations) {
-      integrationImpressions.set(int.id, {
+      integrationMetrics.set(int.id, {
         platform: int.platform,
         impressions: 0,
+        traffic: 0,
         postsAnalyzed: 0,
       });
     }
@@ -172,7 +178,7 @@ export class DataTicksService {
       const fullIntegration = integrationById.get(intId);
       if (!fullIntegration) continue;
 
-      const accum = integrationImpressions.get(intId);
+      const accum = integrationMetrics.get(intId);
       if (!accum) continue;
 
       const provider = this._integrationManager.getSocialIntegration(
@@ -203,28 +209,46 @@ export class DataTicksService {
         for (const metric of metrics) {
           if (!isImpressionsLabel(accum.platform, metric.label)) continue;
 
-          // Sum only data points that fall within the target day
+          // API returns lifetime cumulative totals (one data point per metric,
+          // date is always "today"). Sum all matching data points directly.
           for (const point of metric.data) {
-            if (dayjs.utc(point.date).isSame(dayStart, 'day')) {
-              accum.impressions += Number(point.total || 0);
-            }
+            accum.impressions += Number(point.total || 0);
           }
+        }
+
+        // Compute weighted traffic score for this post (exclude synthetic labels)
+        const rawMetrics = metrics.filter((m) => m.label !== 'Traffic');
+        const trafficScore = computeTrafficScore(accum.platform, rawMetrics);
+        if (trafficScore !== null) {
+          accum.traffic += trafficScore;
         }
       }
     }
 
-    // Upsert one tick per integration (type = "impressions")
-    const records = Array.from(integrationImpressions.entries()).map(
-      ([intId, accum]) => ({
-        organizationId: orgId,
-        integrationId: intId,
-        platform: accum.platform,
-        type: 'impressions',
-        timeUnit: 'day' as TimeUnit,
-        statisticsTime: dayStart,
-        value: BigInt(accum.impressions),
-        postsAnalyzed: accum.postsAnalyzed,
-      })
+    // Upsert ticks per integration: one for impressions, one for traffic
+    const records = Array.from(integrationMetrics.entries()).flatMap(
+      ([intId, accum]) => [
+        {
+          organizationId: orgId,
+          integrationId: intId,
+          platform: accum.platform,
+          type: 'impressions',
+          timeUnit: 'day' as TimeUnit,
+          statisticsTime: dayStart,
+          value: BigInt(accum.impressions),
+          postsAnalyzed: accum.postsAnalyzed,
+        },
+        {
+          organizationId: orgId,
+          integrationId: intId,
+          platform: accum.platform,
+          type: 'traffic',
+          timeUnit: 'day' as TimeUnit,
+          statisticsTime: dayStart,
+          value: BigInt(Math.round(accum.traffic)),
+          postsAnalyzed: accum.postsAnalyzed,
+        },
+      ]
     );
 
     if (records.length > 0) {
@@ -322,27 +346,47 @@ export class DataTicksService {
 
   // --- Query methods for dashboard ---
 
+  /** Get impressions time series. */
+  async getImpressionsByPlatform(params: TimeSeriesQueryParams) {
+    return this._queryTimeSeriesByType('impressions', params);
+  }
+
+  /** Get traffic time series (weighted engagement scores). */
+  async getTrafficByPlatform(params: TimeSeriesQueryParams) {
+    return this._queryTimeSeriesByType('traffic', params);
+  }
+
+  /** Get impressions summary per platform (latest snapshot per integration). */
+  async getImpressionsSummaryByPlatform(params: SummaryQueryParams) {
+    return this._querySummaryByType('impressions', params);
+  }
+
+  /** Get traffic summary per platform (latest snapshot per integration). */
+  async getTrafficSummaryByPlatform(params: SummaryQueryParams) {
+    return this._querySummaryByType('traffic', params);
+  }
+
+  // --- Shared query internals ---
+
   /**
-   * Get impressions time series.
-   * - No channel filter → { x: [{date,value}], instagram: [{date,value}] }
-   * - With channel filter → [{date,value}]
+   * Time series query: fetches ticks of the given type, groups by platform + period bucket.
+   * For cumulative data, keeps the latest snapshot per (integration, bucket), then sums across integrations.
    */
-  async getImpressionsByPlatform(params: {
-    organizationId: string;
-    period: 'daily' | 'weekly' | 'monthly';
-    integrationId?: string[];
-    channel?: string[];
-  }): Promise<
-    Record<string, Array<{ date: string; value: number }>> |
-    Array<{ date: string; value: number }>
-  > {
-    const days = params.period === 'monthly' ? 365 : params.period === 'weekly' ? 90 : ANALYTICS_LOOKBACK_DAYS;
-    const startTime = dayjs.utc().subtract(days, 'day').startOf('day').toDate();
-    const endTime = dayjs.utc().endOf('day').toDate();
+  private async _queryTimeSeriesByType(
+    type: string,
+    params: TimeSeriesQueryParams
+  ): Promise<Array<{ date: string; value: number; platform: string }>> {
+    const defaultDays = params.period === 'monthly' ? 365 : params.period === 'weekly' ? 90 : ANALYTICS_LOOKBACK_DAYS;
+    const startTime = params.startDate
+      ? dayjs.utc(params.startDate).startOf('day').toDate()
+      : dayjs.utc().subtract(defaultDays, 'day').startOf('day').toDate();
+    const endTime = params.endDate
+      ? dayjs.utc(params.endDate).endOf('day').toDate()
+      : dayjs.utc().endOf('day').toDate();
 
     const ticks = await this._dataTicksRepository.query({
       organizationId: params.organizationId,
-      type: 'impressions',
+      type,
       timeUnit: 'day',
       startTime,
       endTime,
@@ -353,8 +397,12 @@ export class DataTicksService {
       ? ticks.filter((t) => params.channel!.includes(t.platform))
       : ticks;
 
-    // Roll up: group by platform + period bucket
-    const platformBuckets = new Map<string, Map<string, number>>();
+    // Step 1: For each (integration, bucket), keep the latest snapshot value.
+    // Ticks are sorted ASC, so later entries overwrite earlier ones.
+    const integrationBuckets = new Map<
+      string,
+      { platform: string; dateKey: string; value: number }
+    >();
     for (const tick of filtered) {
       const d = dayjs.utc(tick.statisticsTime);
       let dateKey: string;
@@ -369,45 +417,48 @@ export class DataTicksService {
           dateKey = d.format('YYYY-MM-DD');
       }
 
-      if (!platformBuckets.has(tick.platform)) {
-        platformBuckets.set(tick.platform, new Map());
+      integrationBuckets.set(`${tick.integrationId}|${dateKey}`, {
+        platform: tick.platform,
+        dateKey,
+        value: Number(tick.value),
+      });
+    }
+
+    // Step 2: Sum latest-per-integration values by (platform, bucket)
+    const bucketMap = new Map<string, { date: string; value: number; platform: string }>();
+    for (const [, { platform, dateKey, value }] of integrationBuckets) {
+      const key = `${platform}|${dateKey}`;
+      const existing = bucketMap.get(key);
+      if (existing) {
+        existing.value += value;
+      } else {
+        bucketMap.set(key, { date: dateKey, value, platform });
       }
-      const dateBuckets = platformBuckets.get(tick.platform)!;
-      dateBuckets.set(dateKey, (dateBuckets.get(dateKey) || 0) + Number(tick.value));
     }
 
-    // Build sorted arrays per platform
-    const byPlatform: Record<string, Array<{ date: string; value: number }>> = {};
-    for (const [platform, dateBuckets] of platformBuckets) {
-      byPlatform[platform] = Array.from(dateBuckets.entries())
-        .map(([date, value]) => ({ date, value }))
-        .sort((a, b) => a.date.localeCompare(b.date));
-    }
-
-    // Single channel filter → flat array (empty array if no data)
-    if (params.channel?.length === 1) {
-      return byPlatform[params.channel[0]] || [];
-    }
-
-    return byPlatform;
+    const result = Array.from(bucketMap.values());
+    result.sort((a, b) => a.date.localeCompare(b.date) || a.platform.localeCompare(b.platform));
+    return result;
   }
 
   /**
-   * Get impressions totals per platform (for traffics/distribution view).
-   * Returns total, percentage, and half-period delta.
+   * Summary query: fetches ticks of the given type, picks latest snapshot per integration,
+   * sums by platform, returns sorted array with percentages.
    */
-  async getImpressionsSummaryByPlatform(params: {
-    organizationId: string;
-    integrationId?: string[];
-    channel?: string[];
-  }) {
-    const startTime = dayjs.utc().subtract(ANALYTICS_LOOKBACK_DAYS, 'day').startOf('day').toDate();
-    const endTime = dayjs.utc().endOf('day').toDate();
-    const midDate = dayjs.utc().subtract(Math.floor(ANALYTICS_LOOKBACK_DAYS / 2), 'day');
+  private async _querySummaryByType(
+    type: string,
+    params: SummaryQueryParams
+  ) {
+    const startTime = params.startDate
+      ? dayjs.utc(params.startDate).startOf('day').toDate()
+      : dayjs.utc().subtract(ANALYTICS_LOOKBACK_DAYS, 'day').startOf('day').toDate();
+    const endTime = params.endDate
+      ? dayjs.utc(params.endDate).endOf('day').toDate()
+      : dayjs.utc().endOf('day').toDate();
 
     const ticks = await this._dataTicksRepository.query({
       organizationId: params.organizationId,
-      type: 'impressions',
+      type,
       timeUnit: 'day',
       startTime,
       endTime,
@@ -418,45 +469,48 @@ export class DataTicksService {
       ? ticks.filter((t) => params.channel!.includes(t.platform))
       : ticks;
 
-    const platformTotal = new Map<string, number>();
-    const platformRecent = new Map<string, number>();
-    const platformOlder = new Map<string, number>();
-
+    // Latest snapshot per integration (ticks sorted ASC → later overwrites earlier)
+    const latestByIntegration = new Map<string, { platform: string; value: number }>();
     for (const tick of filtered) {
-      const val = Number(tick.value);
-      const platform = tick.platform;
-      platformTotal.set(platform, (platformTotal.get(platform) || 0) + val);
+      latestByIntegration.set(tick.integrationId, {
+        platform: tick.platform,
+        value: Number(tick.value),
+      });
+    }
 
-      if (dayjs.utc(tick.statisticsTime).isAfter(midDate)) {
-        platformRecent.set(platform, (platformRecent.get(platform) || 0) + val);
-      } else {
-        platformOlder.set(platform, (platformOlder.get(platform) || 0) + val);
-      }
+    const platformTotal = new Map<string, number>();
+    for (const [, { platform, value }] of latestByIntegration) {
+      platformTotal.set(platform, (platformTotal.get(platform) || 0) + value);
     }
 
     const grandTotal = Array.from(platformTotal.values()).reduce((a, b) => a + b, 0);
 
-    const result = Array.from(platformTotal.entries()).map(([platform, value]) => {
-      const recent = platformRecent.get(platform) || 0;
-      const older = platformOlder.get(platform) || 0;
-      const delta =
-        older > 0
-          ? Math.round(((recent - older) / older) * 10000) / 100
-          : recent > 0
-            ? 100
-            : 0;
-      return {
-        platform,
-        value,
-        percentage:
-          grandTotal > 0
-            ? Math.round((value / grandTotal) * 10000) / 100
-            : 0,
-        delta,
-      };
-    });
+    const result = Array.from(platformTotal.entries()).map(([platform, value]) => ({
+      platform,
+      value,
+      percentage: grandTotal > 0 ? Math.round((value / grandTotal) * 10000) / 100 : 0,
+    }));
 
     result.sort((a, b) => b.value - a.value);
     return result;
   }
+}
+
+// --- Query parameter types ---
+
+interface TimeSeriesQueryParams {
+  organizationId: string;
+  period: 'daily' | 'weekly' | 'monthly';
+  integrationId?: string[];
+  channel?: string[];
+  startDate?: Date;
+  endDate?: Date;
+}
+
+interface SummaryQueryParams {
+  organizationId: string;
+  integrationId?: string[];
+  channel?: string[];
+  startDate?: Date;
+  endDate?: Date;
 }

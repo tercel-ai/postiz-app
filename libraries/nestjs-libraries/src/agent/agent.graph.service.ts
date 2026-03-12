@@ -16,7 +16,16 @@ import { MediaService } from '@gitroom/nestjs-libraries/database/prisma/media/me
 import { UploadFactory } from '@gitroom/nestjs-libraries/upload/upload.factory';
 import { GeneratorDto } from '@gitroom/nestjs-libraries/dtos/generator/generator.dto';
 import { BaseCallbackHandler } from '@langchain/core/callbacks/base';
-import { parseModelId, logAiUsage } from '@gitroom/nestjs-libraries/openai/openai.service';
+import {
+  AiUsageInfo,
+  parseModelId,
+  logAiUsage,
+} from '@gitroom/nestjs-libraries/openai/openai.service';
+import { AiseeCreditService } from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/aisee-credit.service';
+import {
+  AiseeClient,
+  AiseeBusinessType,
+} from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/aisee.client';
 
 const agentServicer: string =
   (process.env.IMAGE_PROVIDER || 'openai').toLowerCase() === 'openrouter' &&
@@ -28,8 +37,13 @@ const agentServicer: string =
     ? 'openrouter'
     : 'openai';
 
-class AiUsageCallbackHandler extends BaseCallbackHandler {
-  name = 'AiUsageCallbackHandler';
+/**
+ * Per-run usage collector. Each agent invocation creates its own instance
+ * so concurrent requests don't mix usage data.
+ */
+class AiUsageCollector extends BaseCallbackHandler {
+  name = 'AiUsageCollector';
+  readonly usages: AiUsageInfo[] = [];
 
   override async handleLLMEnd(output: any) {
     const usage = output?.llmOutput?.tokenUsage || output?.llmOutput?.usage;
@@ -39,7 +53,7 @@ class AiUsageCallbackHandler extends BaseCallbackHandler {
       'unknown';
     const { provider, model } = parseModelId(rawModel, agentServicer);
     if (usage) {
-      logAiUsage({
+      const info: AiUsageInfo = {
         servicer: agentServicer,
         provider,
         model,
@@ -48,22 +62,23 @@ class AiUsageCallbackHandler extends BaseCallbackHandler {
         method: 'agent',
         usage: {
           prompt_tokens: usage.promptTokens ?? usage.prompt_tokens ?? 0,
-          completion_tokens: usage.completionTokens ?? usage.completion_tokens ?? 0,
+          completion_tokens:
+            usage.completionTokens ?? usage.completion_tokens ?? 0,
           total_tokens: usage.totalTokens ?? usage.total_tokens ?? 0,
         },
-      });
+      };
+      logAiUsage(info);
+      this.usages.push(info);
     }
   }
 }
-
-const aiUsageCallback = new AiUsageCallbackHandler();
 
 const tools = !process.env.TAVILY_API_KEY
   ? []
   : [new TavilySearchResults({ maxResults: 3 })];
 const toolNode = new ToolNode(tools);
 
-const model = (() => {
+function createModel(callbacks: BaseCallbackHandler[]) {
   if (agentServicer === 'openrouter') {
     return new ChatOpenAI({
       apiKey: process.env.OPENROUTER_API_KEY || '',
@@ -72,16 +87,16 @@ const model = (() => {
       configuration: {
         baseURL: 'https://openrouter.ai/api/v1',
       },
-      callbacks: [aiUsageCallback],
+      callbacks,
     });
   }
   return new ChatOpenAI({
     apiKey: process.env.OPENAI_API_KEY || 'sk-proj-',
     model: 'gpt-4.1',
     temperature: 0.7,
-    callbacks: [aiUsageCallback],
+    callbacks,
   });
-})();
+}
 
 const dalle = new DallEAPIWrapper({
   apiKey: process.env.OPENAI_API_KEY || 'sk-proj-',
@@ -107,6 +122,8 @@ interface WorkflowChannelsState {
   }[];
   isPicture?: boolean;
   popularPosts?: { content: string; hook: string }[];
+  /** Per-run usage collector — injected at start */
+  _usageCollector?: AiUsageCollector;
 }
 
 const category = z.object({
@@ -162,7 +179,8 @@ export class AgentGraphService {
   private storage = UploadFactory.createStorage();
   constructor(
     private _postsService: PostsService,
-    private _mediaService: MediaService
+    private _mediaService: MediaService,
+    private _aiseeCreditService: AiseeCreditService
   ) {}
   static state = () =>
     new StateGraph<WorkflowChannelsState>({
@@ -184,11 +202,14 @@ export class AgentGraphService {
         popularPosts: null,
         topic: null,
         isPicture: null,
+        _usageCollector: null,
       },
     });
 
   async startCall(state: WorkflowChannelsState) {
-    const runTools = model.bindTools(tools);
+    const collector = state._usageCollector!;
+    const runModel = createModel([collector]);
+    const runTools = runModel.bindTools(tools);
     const response = await ChatPromptTemplate.fromTemplate(
       `
     Today is ${dayjs().format()}, You are an assistant that gets a social media post or requests for a social media post.
@@ -211,8 +232,10 @@ export class AgentGraphService {
   }
 
   async findCategories(state: WorkflowChannelsState) {
+    const collector = state._usageCollector!;
+    const runModel = createModel([collector]);
     const allCategories = await this._postsService.findAllExistingCategories();
-    const structuredOutput = model.withStructuredOutput(category);
+    const structuredOutput = runModel.withStructuredOutput(category);
     const { category: outputCategory } = await ChatPromptTemplate.fromTemplate(
       `
         You are an assistant that gets a text that will be later summarized into a social media post
@@ -232,6 +255,8 @@ export class AgentGraphService {
   }
 
   async findTopic(state: WorkflowChannelsState) {
+    const collector = state._usageCollector!;
+    const runModel = createModel([collector]);
     const allTopics = await this._postsService.findAllExistingTopicsOfCategory(
       state?.category!
     );
@@ -239,7 +264,7 @@ export class AgentGraphService {
       return { topic: null };
     }
 
-    const structuredOutput = model.withStructuredOutput(topic);
+    const structuredOutput = runModel.withStructuredOutput(topic);
     const { topic: outputTopic } = await ChatPromptTemplate.fromTemplate(
       `
         You are an assistant that gets a text that will be later summarized into a social media post
@@ -267,7 +292,9 @@ export class AgentGraphService {
   }
 
   async generateHook(state: WorkflowChannelsState) {
-    const structuredOutput = model.withStructuredOutput(hook);
+    const collector = state._usageCollector!;
+    const runModel = createModel([collector]);
+    const structuredOutput = runModel.withStructuredOutput(hook);
     const { hook: outputHook } = await ChatPromptTemplate.fromTemplate(
       `
         You are an assistant that gets content for a social media post, and generate only the hook.
@@ -285,15 +312,15 @@ export class AgentGraphService {
         <!-- BEGIN request of the user -->
         {request}
         <!-- END request of the user -->
-        
+
         <!-- BEGIN existing hooks -->
         {hooks}
         <!-- END existing hooks -->
-        
+
         <!-- BEGIN current content -->
         {text}
         <!-- END current content -->
-       
+
       `
     )
       .pipe(structuredOutput)
@@ -309,7 +336,9 @@ export class AgentGraphService {
   }
 
   async generateContent(state: WorkflowChannelsState) {
-    const structuredOutput = model.withStructuredOutput(
+    const collector = state._usageCollector!;
+    const runModel = createModel([collector]);
+    const structuredOutput = runModel.withStructuredOutput(
       contentZod(!!state.isPicture, state.format)
     );
     const { content: outputContent } = await ChatPromptTemplate.fromTemplate(
@@ -336,13 +365,13 @@ export class AgentGraphService {
         - Try to put some call to action at the end of the post
         - Make sure you add "\n" between the lines
         - Add "\n" after every "."
-        
+
         Hook:
         {hook}
-        
+
         User request:
         {request}
-        
+
         current content information:
         {information}
       `
@@ -374,10 +403,11 @@ export class AgentGraphService {
       return {};
     }
 
+    const collector = state._usageCollector!;
     const newContent = await Promise.all(
       (state.content || []).map(async (p) => {
         const image = await dalle.invoke(p.prompt!);
-        logAiUsage({
+        const imageUsage: AiUsageInfo = {
           servicer: 'openai',
           provider: 'openai',
           model: 'dall-e-3',
@@ -386,7 +416,9 @@ export class AgentGraphService {
           method: 'agent.generatePictures',
           usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
           image_billing: { count: 1, size: '1024x1024', quality: 'standard' },
-        });
+        };
+        logAiUsage(imageUsage);
+        collector.usages.push(imageUsage);
         return {
           ...p,
           image,
@@ -436,7 +468,31 @@ export class AgentGraphService {
     return { date: await this._postsService.findFreeDateTime(state.orgId) };
   }
 
-  start(orgId: string, body: GeneratorDto) {
+  /**
+   * Bill all collected AI usages after the graph completes.
+   */
+  private async billUsages(
+    orgId: string,
+    collector: AiUsageCollector
+  ): Promise<void> {
+    if (collector.usages.length === 0) return;
+
+    const taskId = AiseeClient.buildTaskId(`agent_${orgId}_${Date.now()}`);
+    await this._aiseeCreditService.billCollectedUsages(
+      {
+        userId: orgId,
+        taskId,
+        businessType: AiseeBusinessType.AI_COPYWRITING,
+        description: 'Agent post generation (text + image)',
+      },
+      collector.usages
+    );
+  }
+
+  async *start(orgId: string, body: GeneratorDto) {
+    // Per-run usage collector
+    const collector = new AiUsageCollector();
+
     const state = AgentGraphService.state();
     const workflow = state
       .addNode('agent', this.startCall.bind(this))
@@ -470,18 +526,28 @@ export class AgentGraphService {
 
     const app = workflow.compile();
 
-    return app.streamEvents(
+    const stream = app.streamEvents(
       {
         messages: [new HumanMessage(body.research)],
         isPicture: body.isPicture,
         format: body.format,
         tone: body.tone,
         orgId,
+        _usageCollector: collector,
       },
       {
         streamMode: 'values',
         version: 'v2',
       }
     );
+
+    for await (const event of stream) {
+      yield event;
+    }
+
+    // Bill after stream completes — fire-and-forget
+    this.billUsages(orgId, collector).catch((err) => {
+      console.error('[AgentBilling] Unhandled billing error:', err);
+    });
   }
 }

@@ -1,6 +1,6 @@
 import { HttpException, Injectable } from '@nestjs/common';
 import { MediaRepository } from '@gitroom/nestjs-libraries/database/prisma/media/media.repository';
-import { OpenaiService } from '@gitroom/nestjs-libraries/openai/openai.service';
+import { OpenaiService, AiUsageInfo } from '@gitroom/nestjs-libraries/openai/openai.service';
 import { SubscriptionService } from '@gitroom/nestjs-libraries/database/prisma/subscriptions/subscription.service';
 import { Organization } from '@prisma/client';
 import { SaveMediaInformationDto } from '@gitroom/nestjs-libraries/dtos/media/save.media.information.dto';
@@ -12,6 +12,11 @@ import {
   Sections,
   SubscriptionException,
 } from '@gitroom/backend/services/auth/permissions/permission.exception.class';
+import { AiseeCreditService } from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/aisee-credit.service';
+import {
+  AiseeClient,
+  AiseeBusinessType,
+} from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/aisee.client';
 
 @Injectable()
 export class MediaService {
@@ -21,7 +26,8 @@ export class MediaService {
     private _mediaRepository: MediaRepository,
     private _openAi: OpenaiService,
     private _subscriptionService: SubscriptionService,
-    private _videoManager: VideoManager
+    private _videoManager: VideoManager,
+    private _aiseeCreditService: AiseeCreditService
   ) {}
 
   async deleteMedia(org: string, id: string) {
@@ -41,11 +47,34 @@ export class MediaService {
       org,
       'ai_images',
       async () => {
+        const usages: AiUsageInfo[] = [];
+
         if (generatePromptFirst) {
-          prompt = await this._openAi.generatePromptForPicture(prompt);
-          console.log('Prompt:', prompt);
+          const promptResult = await this._openAi.generatePromptForPicture(prompt);
+          prompt = promptResult.data;
+          usages.push(promptResult.usage);
         }
-        return this._openAi.generateImage(prompt, !!generatePromptFirst);
+
+        const imageResult = await this._openAi.generateImage(prompt, !!generatePromptFirst);
+        usages.push(imageResult.usage);
+
+        // Aisee billing — fire after LLM success
+        const taskId = AiseeClient.buildTaskId(`img_${org.id}_${Date.now()}`);
+        this._aiseeCreditService
+          .billCollectedUsages(
+            {
+              userId: org.id,
+              taskId,
+              businessType: AiseeBusinessType.IMAGE_GEN,
+              description: `Image generation${generatePromptFirst ? ' (with prompt enhancement)' : ''}`,
+            },
+            usages
+          )
+          .catch((err) => {
+            console.error('[AiseeBilling] Image billing failed:', err);
+          });
+
+        return imageResult.data;
       }
     );
 

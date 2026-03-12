@@ -10,7 +10,7 @@ export class InfiniteWorkflowRegister implements OnModuleInit {
       const client = this._temporalService.client?.getRawClient();
       if (!client) return;
 
-      // Start infinite workflows with TERMINATE_EXISTING to pick up new code
+      // Start infinite workflows with USE_EXISTING to avoid restarting already running ones
       const infiniteWorkflows = [
         { workflowId: 'missing-post-workflow', name: 'missingPostWorkflow' },
         { workflowId: 'data-ticks-sync-workflow', name: 'dataTicksSyncWorkflow' },

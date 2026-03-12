@@ -59,6 +59,8 @@ export class DashboardService {
         organizationId: org.id,
         integrationId,
         channel,
+        startDate: normalizedStart,
+        endDate: normalizedEnd,
       }),
     ]);
 
@@ -162,20 +164,26 @@ export class DashboardService {
   async getTraffics(
     org: Organization,
     integrationId?: string[],
-    channel?: string[]
+    channel?: string[],
+    startDate?: Date,
+    endDate?: Date
   ) {
     const intKey = integrationId?.length ? [...integrationId].sort().join(',') : 'all';
     const chKey = channel?.length ? [...channel].sort().join(',') : 'all';
-    const cacheKey = `dashboard:traffics:${org.id}:${intKey}:${chKey}`;
+    const sdKey = startDate?.getTime() || 'all';
+    const edKey = endDate?.getTime() || 'all';
+    const cacheKey = `dashboard:traffics:${org.id}:${intKey}:${chKey}:${sdKey}:${edKey}`;
     const cached = await ioRedis.get(cacheKey);
     if (cached) {
       return JSON.parse(cached);
     }
 
-    const result = await this._dataTicksService.getImpressionsSummaryByPlatform({
+    const result = await this._dataTicksService.getTrafficSummaryByPlatform({
       organizationId: org.id,
       integrationId,
       channel,
+      startDate,
+      endDate,
     });
 
     await ioRedis.set(cacheKey, JSON.stringify(result), 'EX', CACHE_TTL);
@@ -186,11 +194,15 @@ export class DashboardService {
     org: Organization,
     period: 'daily' | 'weekly' | 'monthly' = 'daily',
     integrationId?: string[],
-    channel?: string[]
+    channel?: string[],
+    startDate?: Date,
+    endDate?: Date
   ) {
     const intKey = integrationId?.length ? [...integrationId].sort().join(',') : 'all';
     const chKey = channel?.length ? [...channel].sort().join(',') : 'all';
-    const cacheKey = `dashboard:impressions:${org.id}:${period}:${intKey}:${chKey}`;
+    const sdKey = startDate?.getTime() || 'all';
+    const edKey = endDate?.getTime() || 'all';
+    const cacheKey = `dashboard:impressions:${org.id}:${period}:${intKey}:${chKey}:${sdKey}:${edKey}`;
     const cached = await ioRedis.get(cacheKey);
     if (cached) {
       return JSON.parse(cached);
@@ -201,6 +213,8 @@ export class DashboardService {
       period,
       integrationId,
       channel,
+      startDate,
+      endDate,
     });
 
     await ioRedis.set(cacheKey, JSON.stringify(result), 'EX', CACHE_TTL);

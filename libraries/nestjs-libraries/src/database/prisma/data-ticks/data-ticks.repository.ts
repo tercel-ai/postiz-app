@@ -15,37 +15,6 @@ export class DataTicksRepository {
     private _tx: PrismaTransaction
   ) {}
 
-  async upsertTick(data: {
-    organizationId: string;
-    integrationId: string;
-    platform: string;
-    userId?: string;
-    type: string;
-    timeUnit: TimeUnit;
-    statisticsTime: Date;
-    value: bigint;
-    postsAnalyzed: number;
-  }) {
-    return this._dataTicks.model.dataTicks.upsert({
-      where: {
-        organizationId_integrationId_type_timeUnit_statisticsTime: {
-          organizationId: data.organizationId,
-          integrationId: data.integrationId,
-          type: data.type,
-          timeUnit: data.timeUnit,
-          statisticsTime: data.statisticsTime,
-        },
-      },
-      update: {
-        value: data.value,
-        postsAnalyzed: data.postsAnalyzed,
-        platform: data.platform,
-        userId: data.userId,
-      },
-      create: data,
-    });
-  }
-
   async upsertMany(
     records: Array<{
       organizationId: string;
@@ -109,52 +78,6 @@ export class DataTicksRepository {
     return this._dataTicks.model.dataTicks.findMany({
       where,
       orderBy: { statisticsTime: 'asc' },
-    });
-  }
-
-  async queryGroupedByPlatform(params: {
-    organizationId: string;
-    type: string;
-    timeUnit: TimeUnit;
-    startTime: Date;
-    endTime: Date;
-    integrationId?: string[];
-  }) {
-    const where: Prisma.DataTicksWhereInput = {
-      organizationId: params.organizationId,
-      type: params.type,
-      timeUnit: params.timeUnit,
-      statisticsTime: {
-        gte: params.startTime,
-        lte: params.endTime,
-      },
-      ...(params.integrationId?.length && {
-        integrationId: { in: params.integrationId },
-      }),
-    };
-
-    return this._dataTicks.model.dataTicks.groupBy({
-      by: ['platform', 'statisticsTime'],
-      where,
-      _sum: { value: true },
-      orderBy: [{ statisticsTime: 'asc' }],
-    });
-  }
-
-  async getLatestTick(
-    organizationId: string,
-    integrationId: string,
-    type: string,
-    timeUnit: TimeUnit
-  ) {
-    return this._dataTicks.model.dataTicks.findFirst({
-      where: {
-        organizationId,
-        integrationId,
-        type,
-        timeUnit,
-      },
-      orderBy: { statisticsTime: 'desc' },
     });
   }
 
