@@ -92,6 +92,28 @@ export class PostReleaseRepository {
     });
   }
 
+  async getReleasesForPostPaginated(
+    postId: string,
+    orgId: string,
+    page: number,
+    pageSize: number
+  ) {
+    const where = { postId, organizationId: orgId };
+    const skip = (page - 1) * pageSize;
+
+    const [data, total] = await Promise.all([
+      this._postRelease.model.postRelease.findMany({
+        where,
+        orderBy: { publishDate: 'desc' },
+        skip,
+        take: pageSize,
+      }),
+      this._postRelease.model.postRelease.count({ where }),
+    ]);
+
+    return { data, total, page, pageSize };
+  }
+
   batchUpdateAnalytics(
     updates: Array<{
       id: string;

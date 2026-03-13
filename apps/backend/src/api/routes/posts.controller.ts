@@ -10,10 +10,12 @@ import {
   Res,
 } from '@nestjs/common';
 import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.service';
+import { PostReleaseService } from '@gitroom/nestjs-libraries/database/prisma/post-releases/post-release.service';
 import { GetOrgFromRequest } from '@gitroom/nestjs-libraries/user/org.from.request';
 import { Organization, User } from '@prisma/client';
 import { GetPostsDto } from '@gitroom/nestjs-libraries/dtos/posts/get.posts.dto';
 import { GetPostsListDto } from '@gitroom/nestjs-libraries/dtos/posts/get.posts-list.dto';
+import { GetPostReleasesDto } from '@gitroom/nestjs-libraries/dtos/posts/get.post-releases.dto';
 import { CheckPolicies } from '@gitroom/backend/services/auth/permissions/permissions.ability';
 import { ApiTags } from '@nestjs/swagger';
 import { GeneratorDto } from '@gitroom/nestjs-libraries/dtos/generator/generator.dto';
@@ -33,6 +35,7 @@ import {
 export class PostsController {
   constructor(
     private _postsService: PostsService,
+    private _postReleaseService: PostReleaseService,
     private _agentGraphService: AgentGraphService,
     private _shortLinkService: ShortLinkService
   ) {}
@@ -105,6 +108,19 @@ export class PostsController {
     @Param('id') id?: string
   ) {
     return { date: await this._postsService.findFreeDateTime(org.id, id) };
+  }
+
+  @Get('/release-list')
+  async getPostReleases(
+    @GetOrgFromRequest() org: Organization,
+    @Query() query: GetPostReleasesDto
+  ) {
+    return this._postReleaseService.getReleasesForPostPaginated(
+      query.postId,
+      org.id,
+      query.page,
+      query.pageSize
+    );
   }
 
   @Get('/list')

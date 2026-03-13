@@ -21,6 +21,10 @@ export class PostReleaseService {
     return this._postReleaseRepository.getReleasesForPost(postId);
   }
 
+  getReleasesForPostPaginated(postId: string, orgId: string, page: number, pageSize: number) {
+    return this._postReleaseRepository.getReleasesForPostPaginated(postId, orgId, page, pageSize);
+  }
+
   getReleasesInDateRange(params: {
     postIds: string[];
     startDate: Date;
