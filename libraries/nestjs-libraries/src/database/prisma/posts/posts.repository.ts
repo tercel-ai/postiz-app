@@ -137,13 +137,13 @@ export class PostsRepository {
     });
   }
 
-  async getAllPostsList(query: GetPostsListDto & { organizationId?: string }) {
+  async getAllPostsList(query: GetPostsListDto & { organizationId?: string | string[] }) {
     const skip = (query.page - 1) * query.pageSize;
     const where = {
       deletedAt: null,
       parentPostId: null,
       ...(query.organizationId
-        ? { organizationId: query.organizationId }
+        ? { organizationId: Array.isArray(query.organizationId) ? { in: query.organizationId } : query.organizationId }
         : {}),
       ...(query.state ? { state: query.state } : {}),
       ...(query.integrationId?.length

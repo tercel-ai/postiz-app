@@ -473,7 +473,7 @@ export class IntegrationRepository {
     page: number;
     pageSize: number;
     keyword?: string;
-    organizationId?: string;
+    organizationId?: string | string[];
     providerIdentifier?: string;
     disabled?: boolean;
     refreshNeeded?: boolean;
@@ -491,7 +491,7 @@ export class IntegrationRepository {
         { providerIdentifier: { contains: keyword, mode: 'insensitive' } },
       ];
     }
-    if (organizationId) where.organizationId = organizationId;
+    if (organizationId) where.organizationId = Array.isArray(organizationId) ? { in: organizationId } : organizationId;
     if (providerIdentifier) where.providerIdentifier = providerIdentifier;
     if (disabled !== undefined) where.disabled = disabled;
     if (refreshNeeded !== undefined) where.refreshNeeded = refreshNeeded;

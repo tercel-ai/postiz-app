@@ -22,6 +22,10 @@ export class AdminPostsQueryDto {
   organizationId?: string;
 
   @IsOptional()
+  @IsString()
+  userId?: string;
+
+  @IsOptional()
   @IsEnum(State)
   state?: State;
 

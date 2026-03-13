@@ -93,7 +93,7 @@ export class MediaService {
     page: number;
     pageSize: number;
     keyword?: string;
-    organizationId?: string;
+    organizationId?: string | string[];
     type?: string;
     sortBy?: string;
     sortOrder?: 'asc' | 'desc';

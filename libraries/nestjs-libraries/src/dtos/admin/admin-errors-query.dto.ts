@@ -25,6 +25,10 @@ export class AdminErrorsQueryDto {
 
   @IsOptional()
   @IsString()
+  userId?: string;
+
+  @IsOptional()
+  @IsString()
   platform?: string;
 
   @IsOptional()

@@ -25,6 +25,10 @@ export class AdminIntegrationsQueryDto {
 
   @IsOptional()
   @IsString()
+  userId?: string;
+
+  @IsOptional()
+  @IsString()
   providerIdentifier?: string;
 
   @IsOptional()

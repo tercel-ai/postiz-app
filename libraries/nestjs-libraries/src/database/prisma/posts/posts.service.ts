@@ -264,7 +264,7 @@ export class PostsService {
     return this._postRepository.getPostsList(orgId, query);
   }
 
-  async getAllPostsList(query: GetPostsListDto & { organizationId?: string }) {
+  async getAllPostsList(query: GetPostsListDto & { organizationId?: string | string[] }) {
     return this._postRepository.getAllPostsList(query);
   }
 

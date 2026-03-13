@@ -44,7 +44,7 @@ export class ErrorsRepository {
     page: number;
     pageSize: number;
     keyword?: string;
-    organizationId?: string;
+    organizationId?: string | string[];
     platform?: string;
     sortBy?: string;
     sortOrder?: 'asc' | 'desc';
@@ -55,7 +55,7 @@ export class ErrorsRepository {
     if (keyword) {
       where.message = { contains: keyword, mode: 'insensitive' };
     }
-    if (organizationId) where.organizationId = organizationId;
+    if (organizationId) where.organizationId = Array.isArray(organizationId) ? { in: organizationId } : organizationId;
     if (platform) where.platform = platform;
 
     const [items, total] = await Promise.all([

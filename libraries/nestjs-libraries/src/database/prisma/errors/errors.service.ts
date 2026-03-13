@@ -13,7 +13,7 @@ export class ErrorsService {
     page: number;
     pageSize: number;
     keyword?: string;
-    organizationId?: string;
+    organizationId?: string | string[];
     platform?: string;
     sortBy?: string;
     sortOrder?: 'asc' | 'desc';

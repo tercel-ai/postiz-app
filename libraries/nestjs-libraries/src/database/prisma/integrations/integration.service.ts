@@ -198,7 +198,7 @@ export class IntegrationService {
     page: number;
     pageSize: number;
     keyword?: string;
-    organizationId?: string;
+    organizationId?: string | string[];
     providerIdentifier?: string;
     disabled?: boolean;
     refreshNeeded?: boolean;

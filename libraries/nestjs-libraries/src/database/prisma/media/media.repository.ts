@@ -74,7 +74,7 @@ export class MediaRepository {
     page: number;
     pageSize: number;
     keyword?: string;
-    organizationId?: string;
+    organizationId?: string | string[];
     type?: string;
     sortBy?: string;
     sortOrder?: 'asc' | 'desc';
@@ -87,7 +87,7 @@ export class MediaRepository {
     if (keyword) {
       where.name = { contains: keyword, mode: 'insensitive' };
     }
-    if (organizationId) where.organizationId = organizationId;
+    if (organizationId) where.organizationId = Array.isArray(organizationId) ? { in: organizationId } : organizationId;
     if (type) where.type = type;
 
     const [items, total] = await Promise.all([

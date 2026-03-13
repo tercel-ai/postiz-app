@@ -25,6 +25,10 @@ export class AdminMediaQueryDto {
 
   @IsOptional()
   @IsString()
+  userId?: string;
+
+  @IsOptional()
+  @IsString()
   type?: string;
 
   @IsOptional()
