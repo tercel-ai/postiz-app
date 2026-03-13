@@ -874,6 +874,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
           'tweet.fields': ['public_metrics'],
         });
 
+        if (!data?.data?.length) continue;
         for (const tweet of data.data) {
           const metrics = tweet.public_metrics;
           if (!metrics) continue;

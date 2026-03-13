@@ -54,14 +54,22 @@ function isImpressionsLabel(platform: string, label: string): boolean {
   return IMPRESSIONS_FALLBACK.has(label.toLowerCase());
 }
 
+/**
+ * Strip synthetic metrics (e.g. 'Traffic') that checkPostAnalytics may have
+ * appended. Only real platform-returned metrics should be used for aggregation.
+ */
+function stripSyntheticMetrics(metrics: AnalyticsData[]): AnalyticsData[] {
+  return metrics.filter((m) => m.label !== 'Traffic');
+}
+
 /** Extract impressions and traffic score from platform analytics metrics. */
 function extractMetrics(
   platform: string,
   metrics: AnalyticsData[]
 ): { impressions: number; trafficScore: number | null; rawMetrics: AnalyticsData[] } {
-  const rawMetrics = metrics.filter((m) => m.label !== 'Traffic');
+  const rawMetrics = stripSyntheticMetrics(metrics);
   let impressions = 0;
-  for (const metric of metrics) {
+  for (const metric of rawMetrics) {
     if (isImpressionsLabel(platform, metric.label)) {
       for (const point of metric.data) {
         impressions += Number(point.total || 0);
@@ -171,21 +179,11 @@ export class DataTicksService {
       fullIntegrations.map((i) => [i.id, i])
     );
 
-    // Accumulate impressions and traffic per integration
+    // Accumulate impressions and traffic only for integrations that have posts
     const integrationMetrics = new Map<
       string,
       { platform: string; impressions: number; traffic: number; postsAnalyzed: number }
     >();
-
-    // Initialize all integrations (explicit zero if no posts)
-    for (const int of integrations) {
-      integrationMetrics.set(int.id, {
-        platform: int.platform,
-        impressions: 0,
-        traffic: 0,
-        postsAnalyzed: 0,
-      });
-    }
 
     // How many days of analytics to request from the API.
     // Minimum 2 so that the target day is always within the API response window.
@@ -198,8 +196,19 @@ export class DataTicksService {
       const fullIntegration = integrationById.get(intId);
       if (!fullIntegration) continue;
 
-      const accum = integrationMetrics.get(intId);
-      if (!accum) continue;
+      // Find platform from the integration list (or from posts)
+      const intEntry = integrations.find((i) => i.id === intId);
+      const platform = intEntry?.platform ?? fullIntegration.providerIdentifier;
+
+      if (!integrationMetrics.has(intId)) {
+        integrationMetrics.set(intId, {
+          platform,
+          impressions: 0,
+          traffic: 0,
+          postsAnalyzed: 0,
+        });
+      }
+      const accum = integrationMetrics.get(intId)!;
 
       const provider = this._integrationManager.getSocialIntegration(
         fullIntegration.providerIdentifier
@@ -216,17 +225,21 @@ export class DataTicksService {
         );
       } else {
         postAnalytics = await this._fetchPerPostAnalytics(
-          orgId,
+          fullIntegration,
+          provider,
           groupPosts,
           analyticsDays
         );
       }
 
       for (const [, metrics] of postAnalytics) {
-        if (!metrics.length) continue;
+        // Strip synthetic metrics (e.g. Traffic appended by checkPostAnalytics)
+        // before counting, so only real platform data drives postsAnalyzed.
+        const realMetrics = stripSyntheticMetrics(metrics);
+        if (!realMetrics.length) continue;
         accum.postsAnalyzed++;
 
-        const { impressions, trafficScore } = extractMetrics(accum.platform, metrics);
+        const { impressions, trafficScore } = extractMetrics(accum.platform, realMetrics);
         accum.impressions += impressions;
         if (trafficScore !== null) {
           accum.traffic += trafficScore;
@@ -234,9 +247,11 @@ export class DataTicksService {
       }
     }
 
-    // Upsert ticks per integration: one for impressions, one for traffic
-    const records = Array.from(integrationMetrics.entries()).flatMap(
-      ([intId, accum]) => [
+    // Only upsert DataTicks for integrations that actually have analyzed posts.
+    // This avoids polluting the table with 0-value rows for integrations with no posts.
+    const records = Array.from(integrationMetrics.entries())
+      .filter(([, accum]) => accum.postsAnalyzed > 0)
+      .flatMap(([intId, accum]) => [
         {
           organizationId: orgId,
           integrationId: intId,
@@ -257,8 +272,7 @@ export class DataTicksService {
           value: BigInt(Math.round(accum.traffic)),
           postsAnalyzed: accum.postsAnalyzed,
         },
-      ]
-    );
+      ]);
 
     if (records.length > 0) {
       await this._dataTicksRepository.upsertMany(records);
@@ -438,10 +452,11 @@ export class DataTicksService {
     }
 
     try {
+      const releaseIds = postsWithRelease.map((p) => p.releaseId);
       const batchResult = await batchPostAnalytics(
         integration.internalId,
         token,
-        postsWithRelease.map((p) => p.releaseId),
+        releaseIds,
         days
       );
       for (const post of postsWithRelease) {
@@ -454,19 +469,50 @@ export class DataTicksService {
     return result;
   }
 
+  /**
+   * Fetch per-post analytics by calling postAnalytics directly on the provider.
+   * This avoids going through checkPostAnalytics which appends a synthetic
+   * Traffic metric and uses Redis caching that can interfere with aggregation.
+   */
   private async _fetchPerPostAnalytics(
-    orgId: string,
+    integration: Integration,
+    provider: { postAnalytics?: (...args: any[]) => Promise<AnalyticsData[]> },
     posts: Array<{ id: string; releaseId: string | null; platform: string }>,
     days: number
   ): Promise<Map<string, AnalyticsData[]>> {
     const result = new Map<string, AnalyticsData[]>();
-    const BATCH_SIZE = 5;
 
-    for (let i = 0; i < posts.length; i += BATCH_SIZE) {
-      const batch = posts.slice(i, i + BATCH_SIZE);
+    if (!provider?.postAnalytics) return result;
+
+    const postsWithRelease = posts.filter(
+      (p): p is typeof p & { releaseId: string } => !!p.releaseId
+    );
+    if (!postsWithRelease.length) return result;
+
+    // Refresh token if needed
+    let token = integration.token;
+    if (dayjs(integration.tokenExpiration).isBefore(dayjs())) {
+      try {
+        const refreshed =
+          await this._refreshIntegrationService.refresh(integration);
+        if (refreshed === false) return result;
+        token = refreshed.accessToken;
+      } catch {
+        return result;
+      }
+    }
+
+    const BATCH_SIZE = 5;
+    for (let i = 0; i < postsWithRelease.length; i += BATCH_SIZE) {
+      const batch = postsWithRelease.slice(i, i + BATCH_SIZE);
       const results = await Promise.allSettled(
         batch.map((post) =>
-          this._postsService.checkPostAnalytics(orgId, post.id, days)
+          provider.postAnalytics!(
+            integration.internalId,
+            token,
+            post.releaseId,
+            days
+          )
         )
       );
 
