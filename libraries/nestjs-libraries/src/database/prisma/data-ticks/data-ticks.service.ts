@@ -14,6 +14,7 @@ import {
   BatchPostAnalyticsResult,
 } from '@gitroom/nestjs-libraries/integrations/social/social.integrations.interface';
 import { computeTrafficScore } from '@gitroom/nestjs-libraries/integrations/social/traffic.calculator';
+import { PostReleaseRepository } from '@gitroom/nestjs-libraries/database/prisma/post-releases/post-release.repository';
 
 dayjs.extend(utc);
 dayjs.extend(isoWeek);
@@ -53,6 +54,24 @@ function isImpressionsLabel(platform: string, label: string): boolean {
   return IMPRESSIONS_FALLBACK.has(label.toLowerCase());
 }
 
+/** Extract impressions and traffic score from platform analytics metrics. */
+function extractMetrics(
+  platform: string,
+  metrics: AnalyticsData[]
+): { impressions: number; trafficScore: number | null; rawMetrics: AnalyticsData[] } {
+  const rawMetrics = metrics.filter((m) => m.label !== 'Traffic');
+  let impressions = 0;
+  for (const metric of metrics) {
+    if (isImpressionsLabel(platform, metric.label)) {
+      for (const point of metric.data) {
+        impressions += Number(point.total || 0);
+      }
+    }
+  }
+  const trafficScore = computeTrafficScore(platform, rawMetrics);
+  return { impressions, trafficScore, rawMetrics };
+}
+
 /** How many days of posts to fetch for analytics aggregation. */
 const ANALYTICS_LOOKBACK_DAYS = 30;
 
@@ -63,7 +82,8 @@ export class DataTicksService {
     private _dashboardRepository: DashboardRepository,
     private _postsService: PostsService,
     private _integrationManager: IntegrationManager,
-    private _refreshIntegrationService: RefreshIntegrationService
+    private _refreshIntegrationService: RefreshIntegrationService,
+    private _postReleaseRepository: PostReleaseRepository
   ) {}
 
   /**
@@ -206,19 +226,8 @@ export class DataTicksService {
         if (!metrics.length) continue;
         accum.postsAnalyzed++;
 
-        for (const metric of metrics) {
-          if (!isImpressionsLabel(accum.platform, metric.label)) continue;
-
-          // API returns lifetime cumulative totals (one data point per metric,
-          // date is always "today"). Sum all matching data points directly.
-          for (const point of metric.data) {
-            accum.impressions += Number(point.total || 0);
-          }
-        }
-
-        // Compute weighted traffic score for this post (exclude synthetic labels)
-        const rawMetrics = metrics.filter((m) => m.label !== 'Traffic');
-        const trafficScore = computeTrafficScore(accum.platform, rawMetrics);
+        const { impressions, trafficScore } = extractMetrics(accum.platform, metrics);
+        accum.impressions += impressions;
         if (trafficScore !== null) {
           accum.traffic += trafficScore;
         }
@@ -264,7 +273,138 @@ export class DataTicksService {
       }
     }
 
+    // Sync analytics to individual PostRelease records (each with its own releaseId)
+    await this._syncPostReleaseAnalytics(orgId, integrationById, analyticsDays);
+
     return records.length;
+  }
+
+  /**
+   * Sync analytics for ALL PostRelease records, each using its own releaseId.
+   * This handles recurring posts correctly — previous releases keep their own
+   * releaseId and get independent analytics from the platform API.
+   */
+  private async _syncPostReleaseAnalytics(
+    orgId: string,
+    integrationById: Map<string, Integration>,
+    analyticsDays: number
+  ) {
+    const releases =
+      await this._postReleaseRepository.getRecentReleasesForOrg(
+        orgId,
+        ANALYTICS_LOOKBACK_DAYS
+      );
+
+    if (!releases.length) return;
+
+    // Group releases by integrationId
+    const releasesByIntegration = new Map<
+      string,
+      Array<typeof releases[number]>
+    >();
+    for (const release of releases) {
+      if (!releasesByIntegration.has(release.integrationId)) {
+        releasesByIntegration.set(release.integrationId, []);
+      }
+      releasesByIntegration.get(release.integrationId)!.push(release);
+    }
+
+    // Collect all updates across integrations, then batch-write in one transaction
+    const pendingUpdates: Array<{
+      id: string;
+      impressions?: number;
+      trafficScore?: number;
+      analytics?: any;
+    }> = [];
+
+    for (const [intId, intReleases] of releasesByIntegration) {
+      const fullIntegration = integrationById.get(intId);
+      if (!fullIntegration) continue;
+
+      const provider = this._integrationManager.getSocialIntegration(
+        fullIntegration.providerIdentifier
+      );
+
+      if (!provider?.postAnalytics) continue;
+
+      // Refresh token if needed
+      let token = fullIntegration.token;
+      if (dayjs(fullIntegration.tokenExpiration).isBefore(dayjs())) {
+        try {
+          const refreshed =
+            await this._refreshIntegrationService.refresh(fullIntegration);
+          if (refreshed === false) continue;
+          token = refreshed.accessToken;
+        } catch {
+          continue;
+        }
+      }
+
+      const platform = fullIntegration.providerIdentifier;
+
+      if (provider.batchPostAnalytics) {
+        try {
+          const batchResult = await provider.batchPostAnalytics(
+            fullIntegration.internalId,
+            token,
+            intReleases.map((r) => r.releaseId),
+            analyticsDays
+          );
+
+          for (const release of intReleases) {
+            const metrics = batchResult[release.releaseId] || [];
+            if (!metrics.length) continue;
+
+            const { impressions, trafficScore, rawMetrics } = extractMetrics(platform, metrics);
+            pendingUpdates.push({
+              id: release.id,
+              impressions,
+              trafficScore: trafficScore ?? undefined,
+              analytics: rawMetrics,
+            });
+          }
+        } catch (err) {
+          console.error(`PostRelease batch analytics error for integration ${intId}:`, err);
+        }
+      } else {
+        const BATCH_SIZE = 5;
+        for (let i = 0; i < intReleases.length; i += BATCH_SIZE) {
+          const batch = intReleases.slice(i, i + BATCH_SIZE);
+          const results = await Promise.allSettled(
+            batch.map((release) =>
+              provider.postAnalytics!(
+                fullIntegration.internalId,
+                token,
+                release.releaseId,
+                analyticsDays
+              )
+            )
+          );
+
+          for (let j = 0; j < results.length; j++) {
+            const r = results[j];
+            if (r.status !== 'fulfilled' || !r.value?.length) continue;
+
+            const { impressions, trafficScore, rawMetrics } = extractMetrics(platform, r.value);
+            pendingUpdates.push({
+              id: batch[j].id,
+              impressions,
+              trafficScore: trafficScore ?? undefined,
+              analytics: rawMetrics,
+            });
+          }
+        }
+      }
+    }
+
+    // Batch write all PostRelease analytics in a single transaction
+    if (pendingUpdates.length > 0) {
+      try {
+        await this._postReleaseRepository.batchUpdateAnalytics(pendingUpdates);
+      } catch (e) {
+        console.error(`PostRelease batch analytics write error for org ${orgId}:`, e);
+      }
+    }
   }
 
   private async _fetchBatchAnalytics(

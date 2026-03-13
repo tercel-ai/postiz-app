@@ -47,6 +47,8 @@ import { ErrorsRepository } from '@gitroom/nestjs-libraries/database/prisma/erro
 import { ErrorsService } from '@gitroom/nestjs-libraries/database/prisma/errors/errors.service';
 import { DataTicksRepository } from '@gitroom/nestjs-libraries/database/prisma/data-ticks/data-ticks.repository';
 import { DataTicksService } from '@gitroom/nestjs-libraries/database/prisma/data-ticks/data-ticks.service';
+import { PostReleaseRepository } from '@gitroom/nestjs-libraries/database/prisma/post-releases/post-release.repository';
+import { PostReleaseService } from '@gitroom/nestjs-libraries/database/prisma/post-releases/post-release.service';
 
 @Global()
 @Module({
@@ -103,6 +105,8 @@ import { DataTicksService } from '@gitroom/nestjs-libraries/database/prisma/data
     ErrorsService,
     DataTicksRepository,
     DataTicksService,
+    PostReleaseRepository,
+    PostReleaseService,
   ],
   get exports() {
     return this.providers;

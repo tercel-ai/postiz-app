@@ -41,6 +41,7 @@ model Organization {
   users             UserOrganization[]
   webhooks          Webhooks[]
   dataTicks         DataTicks[]
+  postReleases      PostRelease[]
 }
 
 model Tags {
@@ -334,6 +335,7 @@ model Integration {
   plugs                 Plugs[]
   posts                 Post[]
   dataTicks             DataTicks[]
+  postReleases          PostRelease[]
 
   @@unique([organizationId, internalId])
   @@index([rootInternalId])
@@ -419,6 +421,7 @@ model Post {
   submittedForOrder          Orders?                   @relation(fields: [submittedForOrderId], references: [id])
   submittedForOrganization   Organization?             @relation("submittedForOrg", fields: [submittedForOrganizationId], references: [id])
   tags                       TagsPosts[]
+  releases                   PostRelease[]
 
   @@index([group])
   @@index([deletedAt])
@@ -925,4 +928,30 @@ model DataTicks {
   @@index([organizationId, type, timeUnit, statisticsTime])
   @@index([userId, type, timeUnit, statisticsTime])
   @@index([integrationId])
+}
+
+model PostRelease {
+  id             String   @id @default(cuid())
+  postId         String
+  releaseId      String
+  releaseURL     String?
+  publishDate    DateTime
+  impressions    Int?
+  trafficScore   Float?
+  analytics      Json?
+  organizationId String
+  integrationId  String
+  group          String
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  post         Post         @relation(fields: [postId], references: [id])
+  organization Organization @relation(fields: [organizationId], references: [id])
+  integration  Integration  @relation(fields: [integrationId], references: [id])
+
+  @@unique([postId, releaseId])
+  @@index([postId, publishDate])
+  @@index([organizationId, publishDate])
+  @@index([integrationId, publishDate])
+  @@index([group])
 }

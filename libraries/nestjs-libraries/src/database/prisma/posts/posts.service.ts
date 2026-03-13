@@ -39,6 +39,7 @@ import { RefreshToken } from '@gitroom/nestjs-libraries/integrations/social.abst
 import { RefreshIntegrationService } from '@gitroom/nestjs-libraries/integrations/refresh.integration.service';
 import { PostingTimesV2 } from '@gitroom/nestjs-libraries/dtos/integrations/posting-times.types';
 import { resolveTimeSlotsForDate } from '@gitroom/nestjs-libraries/dtos/integrations/posting-times.utils';
+import { PostReleaseService } from '@gitroom/nestjs-libraries/database/prisma/post-releases/post-release.service';
 
 type PostWithConditionals = Post & {
   integration?: Integration;
@@ -56,15 +57,32 @@ export class PostsService {
     private _shortLinkService: ShortLinkService,
     private _openaiService: OpenaiService,
     private _temporalService: TemporalService,
-    private _refreshIntegrationService: RefreshIntegrationService
+    private _refreshIntegrationService: RefreshIntegrationService,
+    private _postReleaseService: PostReleaseService
   ) {}
 
   searchForMissingThreeHoursPosts() {
     return this._postRepository.searchForMissingThreeHoursPosts();
   }
 
-  updatePost(id: string, postId: string, releaseURL: string) {
-    return this._postRepository.updatePost(id, postId, releaseURL);
+  async updatePost(id: string, postId: string, releaseURL: string) {
+    const updatedPost = await this._postRepository.updatePost(id, postId, releaseURL);
+
+    try {
+      await this._postReleaseService.createRelease({
+        postId: updatedPost.id,
+        releaseId: postId,
+        releaseURL,
+        publishDate: new Date(),
+        organizationId: updatedPost.organizationId,
+        integrationId: updatedPost.integrationId,
+        group: updatedPost.group,
+      });
+    } catch (e) {
+      console.error('Failed to create PostRelease record:', e);
+    }
+
+    return updatedPost;
   }
 
   async checkPostAnalytics(

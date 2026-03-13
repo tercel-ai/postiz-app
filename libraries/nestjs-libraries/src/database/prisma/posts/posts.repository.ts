@@ -25,7 +25,8 @@ export class PostsRepository {
     private _comments: PrismaRepository<'comments'>,
     private _tags: PrismaRepository<'tags'>,
     private _tagsPosts: PrismaRepository<'tagsPosts'>,
-    private _errors: PrismaRepository<'errors'>
+    private _errors: PrismaRepository<'errors'>,
+    private _postRelease: PrismaRepository<'postRelease'>
   ) { }
 
   searchForMissingThreeHoursPosts() {
@@ -229,6 +230,7 @@ export class PostsRepository {
           publishDate: true,
           createdAt: true,
           releaseURL: true,
+          intervalInDays: true,
           state: true,
           group: true,
           tags: {
@@ -362,29 +364,67 @@ export class PostsRepository {
       },
     });
 
+    // Collect recurring post IDs for PostRelease lookup
+    const recurringPosts = list.filter((p) => p.intervalInDays);
+    const recurringPostIds = recurringPosts.map((p) => p.id);
+
+    // Fetch real release records for recurring posts within the date range
+    const releases = recurringPostIds.length
+      ? await this._postRelease.model.postRelease.findMany({
+        where: {
+          postId: { in: recurringPostIds },
+          publishDate: { gte: startDate, lte: endDate },
+        },
+        orderBy: { publishDate: 'asc' },
+      })
+      : [];
+
+    // Group releases by postId
+    const releasesByPostId = new Map<string, typeof releases>();
+    for (const release of releases) {
+      if (!releasesByPostId.has(release.postId)) {
+        releasesByPostId.set(release.postId, []);
+      }
+      releasesByPostId.get(release.postId)!.push(release);
+    }
+
     return list.reduce((all, post) => {
       if (!post.intervalInDays) {
         return [...all, post];
       }
 
-      const addMorePosts = [];
-      let startingDate = dayjs.utc(post.publishDate);
+      const postReleases = releasesByPostId.get(post.id) || [];
       const now = dayjs.utc();
+      const result = [];
+
+      // Add real release records (past published instances)
+      for (const release of postReleases) {
+        result.push({
+          ...post,
+          publishDate: release.publishDate,
+          releaseId: release.releaseId,
+          releaseURL: release.releaseURL,
+          actualDate: post.publishDate,
+          state: 'PUBLISHED' as const,
+          postReleaseId: release.id,
+        });
+      }
+
+      // Generate virtual entries for future scheduled dates only
+      let startingDate = dayjs.utc(post.publishDate);
       while (dayjs.utc(endDate).isSameOrAfter(startingDate)) {
-        if (dayjs(startingDate).isSameOrAfter(dayjs.utc(post.publishDate))) {
-          const isFuture = startingDate.isAfter(now);
-          addMorePosts.push({
+        if (startingDate.isAfter(now) && post.state !== 'DRAFT') {
+          result.push({
             ...post,
             publishDate: startingDate.toDate(),
             actualDate: post.publishDate,
-            ...(isFuture && post.state !== 'DRAFT' ? { state: 'QUEUE' } : {}),
+            state: 'QUEUE' as const,
           });
         }
-
         startingDate = startingDate.add(post.intervalInDays, 'days');
       }
 
-      return [...all, ...addMorePosts];
+      return [...all, ...result];
     }, [] as any[]);
   }
 
@@ -466,20 +506,69 @@ export class PostsRepository {
         state: 'PUBLISHED',
         releaseURL,
         releaseId: postId,
+        error: null,
       },
     });
   }
 
+  private extractErrorMessage(err: any): string {
+    if (typeof err === 'string') return err;
+
+    // Extract from Temporal ActivityFailure / ApplicationFailure chain
+    const parts: string[] = [];
+    let current = err;
+    const seen = new Set();
+    let depth = 0;
+    const MAX_DEPTH = 10;
+    while (current && depth < MAX_DEPTH) {
+      if (seen.has(current)) break;
+      seen.add(current);
+      if (current.message) parts.push(current.message);
+      if (current.type) parts.push(`type=${current.type}`);
+      if (current.stackTrace) parts.push(current.stackTrace);
+      if (current.cause && current.cause !== current) {
+        current = current.cause;
+      } else {
+        break;
+      }
+      depth++;
+    }
+
+    // Also try extracting details from ApplicationFailure
+    if (err?.cause?.details?.length) {
+      try {
+        parts.push(`details=${JSON.stringify(err.cause.details)}`);
+      } catch (_) { }
+    }
+
+    if (parts.length > 0) return parts.join(' | ');
+
+    // Fallback: try to serialize with Error-aware stringify
+    try {
+      if (err instanceof Error) {
+        return JSON.stringify({
+          name: err.name,
+          message: err.message,
+          stack: err.stack,
+          ...Object.keys(err).reduce((acc, k) => { acc[k] = (err as any)[k]; return acc; }, {} as Record<string, any>),
+        });
+      }
+      return JSON.stringify(err);
+    } catch (_) {
+      return String(err);
+    }
+  }
+
   async changeState(id: string, state: State, err?: any, body?: any) {
+    const errorMessage = err ? this.extractErrorMessage(err) : undefined;
+
     const update = await this._post.model.post.update({
       where: {
         id,
       },
       data: {
         state,
-        ...(err
-          ? { error: typeof err === 'string' ? err : JSON.stringify(err) }
-          : {}),
+        ...(errorMessage ? { error: errorMessage } : {}),
       },
       include: {
         integration: {
@@ -494,7 +583,7 @@ export class PostsRepository {
       try {
         await this._errors.model.errors.create({
           data: {
-            message: typeof err === 'string' ? err : JSON.stringify(err),
+            message: errorMessage || '',
             organizationId: update.organizationId,
             platform: update.integration.providerIdentifier,
             postId: update.id,

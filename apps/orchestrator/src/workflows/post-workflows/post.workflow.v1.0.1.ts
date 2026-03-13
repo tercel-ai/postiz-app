@@ -164,27 +164,12 @@ export async function postWorkflowV101({
           );
         }
 
-        // mark post as successful
+        // mark post as successful — once this succeeds, the post is considered published
         await updatePost(
           postsList[i].id,
           postsResults[i].postId,
           postsResults[i].releaseURL
         );
-
-        if (i === 0) {
-          // send notification on a sucessful post
-          await inAppNotification(
-            post.integration.organizationId,
-            `Your post has been published on ${capitalize(
-              post.integration.providerIdentifier
-            )}`,
-            `Your post has been published on ${capitalize(
-              post.integration.providerIdentifier
-            )} at ${postsResults[0].releaseURL}`,
-            true,
-            true
-          );
-        }
 
         // break the current while to move to the next post
         break;
@@ -205,7 +190,8 @@ export async function postWorkflowV101({
           continue;
         }
 
-        // for other errors, change state and inform the user if needed
+        // Mark as ERROR — this catch is only reachable if postSocial/postComment
+        // or updatePost itself failed (notification was moved outside the try block)
         await changeState(postsList[0].id, 'ERROR', err, postsList);
 
         // specific case for bad body errors
@@ -234,6 +220,26 @@ export async function postWorkflowV101({
     if (postsResults.length === before) {
       // all retries exhausted without success
       return false;
+    }
+
+    // send notification after successful post (outside try-catch to avoid
+    // notification failures overwriting the PUBLISHED state to ERROR)
+    if (i === 0) {
+      try {
+        await inAppNotification(
+          post.integration.organizationId,
+          `Your post has been published on ${capitalize(
+            post.integration.providerIdentifier
+          )}`,
+          `Your post has been published on ${capitalize(
+            post.integration.providerIdentifier
+          )} at ${postsResults[0].releaseURL}`,
+          true,
+          true
+        );
+      } catch (_) {
+        // notification failure should not affect post state
+      }
     }
   }
 

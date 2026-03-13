@@ -33,12 +33,41 @@ export class NotEnoughScopes {
 function safeStringify(obj: any) {
   const seen = new WeakSet();
 
+  // Extract useful properties from Error objects before serializing
+  if (obj instanceof Error) {
+    const errorObj: Record<string, any> = {
+      name: obj.name,
+      message: obj.message,
+      stack: obj.stack,
+    };
+    // Copy any enumerable properties (e.g. status, code, data from API errors)
+    for (const key of Object.keys(obj)) {
+      errorObj[key] = (obj as any)[key];
+    }
+    // Also try common non-enumerable properties from API client errors
+    for (const prop of ['status', 'statusCode', 'code', 'data', 'response', 'errors', 'rateLimit', 'type']) {
+      if (prop in obj && !(prop in errorObj)) {
+        errorObj[prop] = (obj as any)[prop];
+      }
+    }
+    obj = errorObj;
+  }
+
   return JSON.stringify(obj, (key, value) => {
     if (typeof value === 'object' && value !== null) {
       if (seen.has(value)) {
         return '[Circular]';
       }
       seen.add(value);
+    }
+    // Also handle nested Error objects
+    if (value instanceof Error) {
+      return {
+        name: value.name,
+        message: value.message,
+        stack: value.stack,
+        ...Object.keys(value).reduce((acc, k) => { acc[k] = (value as any)[k]; return acc; }, {} as Record<string, any>),
+      };
     }
     return value;
   });
