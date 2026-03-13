@@ -4,6 +4,7 @@ import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/po
 import { OrganizationService } from '@gitroom/nestjs-libraries/database/prisma/organizations/organization.service';
 import { AdminPostsQueryDto } from '@gitroom/nestjs-libraries/dtos/admin/admin-posts-query.dto';
 import { SuperAdmin } from '@gitroom/backend/services/auth/admin/super-admin.decorator';
+import { resolveOrganizationId } from '@gitroom/backend/admin-api/admin.utils';
 
 @ApiTags('Admin')
 @Controller('/admin/posts')
@@ -16,12 +17,13 @@ export class AdminPostsController {
 
   @Get('/')
   async list(@Query() query: AdminPostsQueryDto) {
-    let organizationId: string | string[] | undefined = query.organizationId;
-    if (!organizationId && query.userId) {
-      const orgs = await this._organizationService.getOrgsByUserId(query.userId);
-      if (orgs.length > 0) {
-        organizationId = orgs.map((o) => o.id);
-      }
+    const { organizationId, empty } = await resolveOrganizationId(
+      this._organizationService,
+      query.organizationId,
+      query.userId,
+    );
+    if (empty) {
+      return { results: [], total: 0, page: query.page, pageSize: query.pageSize, totalPages: 0 };
     }
     return this._postsService.getAllPostsList({
       page: query.page,

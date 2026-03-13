@@ -4,6 +4,7 @@ import { MediaService } from '@gitroom/nestjs-libraries/database/prisma/media/me
 import { OrganizationService } from '@gitroom/nestjs-libraries/database/prisma/organizations/organization.service';
 import { AdminMediaQueryDto } from '@gitroom/nestjs-libraries/dtos/admin/admin-media-query.dto';
 import { SuperAdmin } from '@gitroom/backend/services/auth/admin/super-admin.decorator';
+import { resolveOrganizationId } from '@gitroom/backend/admin-api/admin.utils';
 
 @ApiTags('Admin')
 @Controller('/admin/media')
@@ -16,12 +17,13 @@ export class AdminMediaController {
 
   @Get('/')
   async list(@Query() query: AdminMediaQueryDto) {
-    let organizationId: string | string[] | undefined = query.organizationId;
-    if (!organizationId && query.userId) {
-      const orgs = await this._organizationService.getOrgsByUserId(query.userId);
-      if (orgs.length > 0) {
-        organizationId = orgs.map((o) => o.id);
-      }
+    const { organizationId, empty } = await resolveOrganizationId(
+      this._organizationService,
+      query.organizationId,
+      query.userId,
+    );
+    if (empty) {
+      return { items: [], total: 0, page: query.page, pageSize: query.pageSize, totalPages: 0 };
     }
     return this._mediaService.paginate({
       page: query.page,
