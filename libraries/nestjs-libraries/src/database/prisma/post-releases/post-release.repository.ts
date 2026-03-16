@@ -19,6 +19,8 @@ export class PostReleaseRepository {
     organizationId: string;
     integrationId: string;
     group: string;
+    state?: string;
+    error?: string;
   }) {
     return this._postRelease.model.postRelease.upsert({
       where: {
@@ -30,6 +32,8 @@ export class PostReleaseRepository {
       update: {
         releaseURL: data.releaseURL,
         publishDate: data.publishDate,
+        state: data.state,
+        error: data.error,
       },
       create: data,
     });

@@ -89,7 +89,7 @@ Both pipelines source data exclusively from post-level APIs (`batchPostAnalytics
 |----------|--------|-------------|-------|
 | **Summary** `impressions_total` | Impressions | DataTicks (`getImpressionsSummaryByPlatform`) | Postiz posts only, latest snapshot per integration |
 | **Summary** `traffics_total` | Traffic | DataTicks (`getTrafficSummaryByPlatform`) | Postiz posts only, latest snapshot per integration |
-| **Summary** `posts_stats` | Post counts | Database query | All Postiz posts (no limit) |
+| **Summary** `posts_stats` | Post counts | Database query | All Postiz posts including recurring clones (each send = 1 count) |
 | **Summary** `channel_count` | Channel count | Database query | All active integrations |
 | **Impressions Trend** | Impressions by date + platform | DataTicks (`getImpressionsByPlatform`) | Postiz posts only, time series |
 | **Traffic Analysis** | Traffic by platform | DataTicks (`getTrafficSummaryByPlatform`) | Postiz posts only, latest snapshot |
@@ -105,6 +105,7 @@ Both pipelines source data exclusively from post-level APIs (`batchPostAnalytics
 | **API failures / rate limiting** | Posts that fail to fetch during DataTicks sync are skipped. `postsAnalyzed` tracks how many posts contributed to each tick. | Low |
 | **Cache staleness** | Each endpoint has its own Redis cache (1hr prod / 1s dev). DataTicks sync invalidates relevant cache keys. | Low |
 | **Post deleted on platform** | If a post was published via Postiz but later deleted on the platform, its analytics return empty and are not counted. | Low |
+| **Recurring post clones** | Each recurring send creates a cloned Post. All clones are included in post counts, analytics, and trends. This accurately reflects the actual number of publications to social platforms. | Info |
 
 ---
 
@@ -180,7 +181,7 @@ Both pipelines source data exclusively from post-level APIs (`batchPostAnalytics
 | **posts_stats** | | |
 | `posts_stats.total` | Total posts | All posts matching the date filter (or all posts if no filter). Sum of all states below. |
 | `posts_stats.scheduled` | Scheduled posts | Posts in `QUEUE` state (waiting to be published) |
-| `posts_stats.published` | Published posts | Posts in `PUBLISHED` state |
+| `posts_stats.published` | Published posts | Posts in `PUBLISHED` state (includes cloned records from recurring sends — each send counts as 1) |
 | `posts_stats.drafts` | Draft posts | Posts in `DRAFT` state |
 | `posts_stats.errors` | Error posts | Posts in `ERROR` state (publishing failed) |
 

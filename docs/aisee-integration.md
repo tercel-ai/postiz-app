@@ -11,7 +11,10 @@ AI Call → logAiUsage(AiUsageInfo) → AiPricingService.calculateCost() → Ais
                                           ↓                                      ↓
                                    Settings table                         aisee_orchestrator
                                    (ai_model_pricing)                     POST /credit/deduct
+                                   credits per token                      amount in credits
 ```
+
+All prices and costs are in **Aisee credits** ($1 = 100 credits). No USD-to-credit conversion is needed — the entire pipeline operates in credits.
 
 ## AiseeClient
 
@@ -42,9 +45,11 @@ When `AISEE_ORCHESTRATOR_URL` is not set, `AiseeClient` is disabled — `deductC
 ```typescript
 interface AiseeDeductRequest {
   userId: string;
-  amount: number;     // cost from AiPricingService.calculateCost()
-  taskId: string;     // format: postiz_{postId}
+  amount: string;     // cost in credits from AiPricingService.calculateCost()
+  taskId: string;     // format: postiz_{label}_{random}
   description: string;
+  businessType: AiseeBusinessType;  // 'ai_copywriting' | 'image_gen'
+  costItems: AiseeCostItem[];       // breakdown of individual costs
 }
 ```
 

@@ -13,6 +13,8 @@ export class PostReleaseService {
     organizationId: string;
     integrationId: string;
     group: string;
+    state?: string;
+    error?: string;
   }) {
     return this._postReleaseRepository.createRelease(data);
   }

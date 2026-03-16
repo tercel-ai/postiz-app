@@ -93,7 +93,9 @@ Default pricing in credits ($1 = 100 credits, based on OpenRouter output prices 
 | text | openai/gpt-5.1 | 0.0015 | 0.000375 | 0.0015 | input $2.5/M, output $10/M × 1.5 |
 | image | google/gemini-3.1-flash-image-preview | 0.00045 | 0.0000225 | 0.00045 | input $0.15/M, output $3/M × 1.5 |
 
-Run seed:
+Seed is automatically applied on application startup via `AiPricingService.onModuleInit()` — if `ai_model_pricing` does not exist in Settings, the default seed is written. No manual step required.
+
+Manual seed (alternative):
 ```bash
 npx ts-node -r tsconfig-paths/register libraries/nestjs-libraries/src/database/prisma/ai-pricing/run-seed-pricing.ts
 ```

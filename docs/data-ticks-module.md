@@ -108,6 +108,7 @@ Temporal Workflow (daily @ UTC 00:05)
 - Strips synthetic metrics before aggregation to prevent double-counting
 - Platform APIs return lifetime cumulative totals per post
 - Refreshes expired tokens before API calls
+- For recurring posts (`intervalInDays > 0`), each send creates a cloned Post with its own `releaseId`. The original stays `QUEUE` without a `releaseId`, so `getPublishedPostsWithRelease` naturally picks up only the clones — no duplicates
 
 ### Admin Backfill
 

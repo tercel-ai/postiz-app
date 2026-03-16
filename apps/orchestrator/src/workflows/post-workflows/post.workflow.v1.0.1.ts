@@ -35,6 +35,7 @@ const {
   updatePost,
   sendWebhooks,
   isCommentable,
+  recordFailedRelease,
 } = proxyActivities<PostActivity>({
   startToCloseTimeout: '10 minute',
   retry: {
@@ -77,6 +78,9 @@ export async function postWorkflowV101({
   });
 
   const startTime = new Date();
+  // Unique releaseId for this publish attempt (used for PostRelease tracking)
+  const attemptReleaseId = `attempt_${startTime.toISOString()}_${makeId(6)}`;
+
   // get all the posts and comments to post
   const postsListBefore = await getPostsList(organizationId, postId);
   const [post] = postsListBefore;
@@ -183,6 +187,7 @@ export async function postWorkflowV101({
           const refresh = await refreshToken(post.integration);
           if (!refresh || !refresh.accessToken) {
             await changeState(postsList[0].id, 'ERROR', err, postsList);
+            await recordFailedRelease(postsList[0].id, attemptReleaseId, 'Token refresh failed');
             return false;
           }
 
@@ -193,6 +198,10 @@ export async function postWorkflowV101({
         // Mark as ERROR — this catch is only reachable if postSocial/postComment
         // or updatePost itself failed (notification was moved outside the try block)
         await changeState(postsList[0].id, 'ERROR', err, postsList);
+        const errMsg = err instanceof ActivityFailure && err.cause instanceof ApplicationFailure
+          ? err.cause.message || err.cause.type || 'Unknown error'
+          : String(err);
+        await recordFailedRelease(postsList[0].id, attemptReleaseId, errMsg);
 
         // specific case for bad body errors
         if (

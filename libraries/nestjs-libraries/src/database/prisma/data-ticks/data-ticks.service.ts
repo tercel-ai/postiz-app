@@ -14,7 +14,7 @@ import {
   BatchPostAnalyticsResult,
 } from '@gitroom/nestjs-libraries/integrations/social/social.integrations.interface';
 import { computeTrafficScore } from '@gitroom/nestjs-libraries/integrations/social/traffic.calculator';
-import { PostReleaseRepository } from '@gitroom/nestjs-libraries/database/prisma/post-releases/post-release.repository';
+import { PostsRepository } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.repository';
 
 dayjs.extend(utc);
 dayjs.extend(isoWeek);
@@ -91,7 +91,7 @@ export class DataTicksService {
     private _postsService: PostsService,
     private _integrationManager: IntegrationManager,
     private _refreshIntegrationService: RefreshIntegrationService,
-    private _postReleaseRepository: PostReleaseRepository
+    private _postsRepository: PostsRepository
   ) {}
 
   /**
@@ -287,43 +287,46 @@ export class DataTicksService {
       }
     }
 
-    // Sync analytics to individual PostRelease records (each with its own releaseId)
-    await this._syncPostReleaseAnalytics(orgId, integrationById, analyticsDays);
+    // Sync analytics to individual Post records (each with its own releaseId)
+    await this._syncPostAnalytics(orgId, integrationById, analyticsDays);
 
     return records.length;
   }
 
   /**
-   * Sync analytics for ALL PostRelease records, each using its own releaseId.
-   * This handles recurring posts correctly — previous releases keep their own
-   * releaseId and get independent analytics from the platform API.
+   * Sync analytics for all published Posts with releaseId.
+   * For recurring posts, each clone has its own releaseId and gets
+   * independent analytics from the platform API.
    */
-  private async _syncPostReleaseAnalytics(
+  private async _syncPostAnalytics(
     orgId: string,
     integrationById: Map<string, Integration>,
     analyticsDays: number
   ) {
-    const releases =
-      await this._postReleaseRepository.getRecentReleasesForOrg(
-        orgId,
-        ANALYTICS_LOOKBACK_DAYS
-      );
+    const posts = await this._dashboardRepository.getPublishedPostsWithRelease(
+      orgId,
+      ANALYTICS_LOOKBACK_DAYS
+    );
 
-    if (!releases.length) return;
+    if (!posts.length) return;
 
-    // Group releases by integrationId
-    const releasesByIntegration = new Map<
+    // Group posts by integrationId
+    const postsByIntegration = new Map<
       string,
-      Array<typeof releases[number]>
+      Array<{ id: string; releaseId: string; integrationId: string }>
     >();
-    for (const release of releases) {
-      if (!releasesByIntegration.has(release.integrationId)) {
-        releasesByIntegration.set(release.integrationId, []);
+    for (const post of posts) {
+      if (!post.releaseId || !post.integrationId) continue;
+      if (!postsByIntegration.has(post.integrationId)) {
+        postsByIntegration.set(post.integrationId, []);
       }
-      releasesByIntegration.get(release.integrationId)!.push(release);
+      postsByIntegration.get(post.integrationId)!.push({
+        id: post.id,
+        releaseId: post.releaseId,
+        integrationId: post.integrationId,
+      });
     }
 
-    // Collect all updates across integrations, then batch-write in one transaction
     const pendingUpdates: Array<{
       id: string;
       impressions?: number;
@@ -331,7 +334,7 @@ export class DataTicksService {
       analytics?: any;
     }> = [];
 
-    for (const [intId, intReleases] of releasesByIntegration) {
+    for (const [intId, intPosts] of postsByIntegration) {
       const fullIntegration = integrationById.get(intId);
       if (!fullIntegration) continue;
 
@@ -341,7 +344,6 @@ export class DataTicksService {
 
       if (!provider?.postAnalytics) continue;
 
-      // Refresh token if needed
       let token = fullIntegration.token;
       if (dayjs(fullIntegration.tokenExpiration).isBefore(dayjs())) {
         try {
@@ -361,35 +363,35 @@ export class DataTicksService {
           const batchResult = await provider.batchPostAnalytics(
             fullIntegration.internalId,
             token,
-            intReleases.map((r) => r.releaseId),
+            intPosts.map((p) => p.releaseId),
             analyticsDays
           );
 
-          for (const release of intReleases) {
-            const metrics = batchResult[release.releaseId] || [];
+          for (const post of intPosts) {
+            const metrics = batchResult[post.releaseId] || [];
             if (!metrics.length) continue;
 
             const { impressions, trafficScore, rawMetrics } = extractMetrics(platform, metrics);
             pendingUpdates.push({
-              id: release.id,
+              id: post.id,
               impressions,
               trafficScore: trafficScore ?? undefined,
               analytics: rawMetrics,
             });
           }
         } catch (err) {
-          console.error(`PostRelease batch analytics error for integration ${intId}:`, err);
+          console.error(`Post batch analytics error for integration ${intId}:`, err);
         }
       } else {
         const BATCH_SIZE = 5;
-        for (let i = 0; i < intReleases.length; i += BATCH_SIZE) {
-          const batch = intReleases.slice(i, i + BATCH_SIZE);
+        for (let i = 0; i < intPosts.length; i += BATCH_SIZE) {
+          const batch = intPosts.slice(i, i + BATCH_SIZE);
           const results = await Promise.allSettled(
-            batch.map((release) =>
+            batch.map((post) =>
               provider.postAnalytics!(
                 fullIntegration.internalId,
                 token,
-                release.releaseId,
+                post.releaseId,
                 analyticsDays
               )
             )
@@ -411,12 +413,11 @@ export class DataTicksService {
       }
     }
 
-    // Batch write all PostRelease analytics in a single transaction
     if (pendingUpdates.length > 0) {
       try {
-        await this._postReleaseRepository.batchUpdateAnalytics(pendingUpdates);
+        await this._postsRepository.batchUpdatePostAnalytics(pendingUpdates);
       } catch (e) {
-        console.error(`PostRelease batch analytics write error for org ${orgId}:`, e);
+        console.error(`Post batch analytics write error for org ${orgId}:`, e);
       }
     }
   }

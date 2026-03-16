@@ -56,6 +56,14 @@ export class GetPostsListDto {
   channel?: Channel[];
 
   @IsOptional()
+  @IsString()
+  sourcePostId?: string;
+
+  @IsOptional()
+  @IsIn(['templates', 'timeline'])
+  view?: 'templates' | 'timeline' = 'timeline';
+
+  @IsOptional()
   @IsIn(['publishDate', 'createdAt', 'updatedAt', 'state'])
   sortBy: 'publishDate' | 'createdAt' | 'updatedAt' | 'state' = 'publishDate';
 

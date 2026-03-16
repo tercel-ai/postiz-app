@@ -25,8 +25,7 @@ export class PostsRepository {
     private _comments: PrismaRepository<'comments'>,
     private _tags: PrismaRepository<'tags'>,
     private _tagsPosts: PrismaRepository<'tagsPosts'>,
-    private _errors: PrismaRepository<'errors'>,
-    private _postRelease: PrismaRepository<'postRelease'>
+    private _errors: PrismaRepository<'errors'>
   ) { }
 
   searchForMissingThreeHoursPosts() {
@@ -208,6 +207,8 @@ export class PostsRepository {
       organizationId: orgId,
       deletedAt: null,
       parentPostId: null,
+      ...(query.view === 'templates' ? { sourcePostId: null } : {}),
+      ...(query.sourcePostId ? { sourcePostId: query.sourcePostId } : {}),
       ...(query.state ? { state: query.state } : {}),
       ...(query.integrationId?.length
         ? { integrationId: { in: query.integrationId } }
@@ -233,6 +234,10 @@ export class PostsRepository {
           intervalInDays: true,
           state: true,
           group: true,
+          error: true,
+          sourcePostId: true,
+          impressions: true,
+          trafficScore: true,
           tags: {
             select: {
               tag: true,
@@ -245,19 +250,6 @@ export class PostsRepository {
               name: true,
               picture: true,
             },
-          },
-          releases: {
-            select: {
-              id: true,
-              releaseId: true,
-              releaseURL: true,
-              publishDate: true,
-              impressions: true,
-              trafficScore: true,
-              analytics: true,
-            },
-            orderBy: { publishDate: 'desc' },
-            take: 1000,
           },
         },
         skip,
@@ -377,28 +369,30 @@ export class PostsRepository {
       },
     });
 
-    // Collect recurring post IDs for PostRelease lookup
+    // Collect recurring post IDs for clone Post lookup
     const recurringPosts = list.filter((p) => p.intervalInDays);
     const recurringPostIds = recurringPosts.map((p) => p.id);
 
-    // Fetch real release records for recurring posts within the date range
-    const releases = recurringPostIds.length
-      ? await this._postRelease.model.postRelease.findMany({
+    // Fetch clone Post records for recurring posts within the date range
+    const clones = recurringPostIds.length
+      ? await this._post.model.post.findMany({
         where: {
-          postId: { in: recurringPostIds },
+          sourcePostId: { in: recurringPostIds },
           publishDate: { gte: startDate, lte: endDate },
+          deletedAt: null,
         },
         orderBy: { publishDate: 'asc' },
       })
       : [];
 
-    // Group releases by postId
-    const releasesByPostId = new Map<string, typeof releases>();
-    for (const release of releases) {
-      if (!releasesByPostId.has(release.postId)) {
-        releasesByPostId.set(release.postId, []);
+    // Group clones by sourcePostId
+    const clonesBySourceId = new Map<string, typeof clones>();
+    for (const clone of clones) {
+      if (!clone.sourcePostId) continue;
+      if (!clonesBySourceId.has(clone.sourcePostId)) {
+        clonesBySourceId.set(clone.sourcePostId, []);
       }
-      releasesByPostId.get(release.postId)!.push(release);
+      clonesBySourceId.get(clone.sourcePostId)!.push(clone);
     }
 
     return list.reduce((all, post) => {
@@ -406,20 +400,19 @@ export class PostsRepository {
         return [...all, post];
       }
 
-      const postReleases = releasesByPostId.get(post.id) || [];
+      const postClones = clonesBySourceId.get(post.id) || [];
       const now = dayjs.utc();
       const result = [];
 
-      // Add real release records (past published instances)
-      for (const release of postReleases) {
+      // Add clone records (past published/failed instances)
+      for (const clone of postClones) {
         result.push({
           ...post,
-          publishDate: release.publishDate,
-          releaseId: release.releaseId,
-          releaseURL: release.releaseURL,
+          publishDate: clone.publishDate,
+          releaseId: clone.releaseId,
+          releaseURL: clone.releaseURL,
           actualDate: post.publishDate,
-          state: 'PUBLISHED' as const,
-          postReleaseId: release.id,
+          state: clone.state,
         });
       }
 
@@ -524,6 +517,81 @@ export class PostsRepository {
     });
   }
 
+  async clonePostAsRelease(
+    originalPost: any,
+    data: {
+      releaseId: string;
+      releaseURL?: string;
+      state: 'PUBLISHED' | 'ERROR';
+      error?: string;
+    }
+  ) {
+    // Check if a clone already exists for this (sourcePostId, releaseId) pair
+    // to prevent duplicates from retry loops.
+    const existing = await this._post.model.post.findFirst({
+      where: {
+        sourcePostId: originalPost.id,
+        releaseId: data.releaseId,
+      },
+      select: { id: true },
+    });
+
+    if (existing) {
+      // Update existing clone instead of creating duplicate
+      return this._post.model.post.update({
+        where: { id: existing.id },
+        data: {
+          state: data.state,
+          releaseURL: data.releaseURL || null,
+          error: data.error || null,
+        },
+      });
+    }
+
+    return this._post.model.post.create({
+      data: {
+        content: originalPost.content,
+        title: originalPost.title,
+        description: originalPost.description,
+        image: originalPost.image,
+        settings: originalPost.settings,
+        group: originalPost.group,
+        delay: originalPost.delay,
+        organizationId: originalPost.organizationId,
+        integrationId: originalPost.integrationId,
+        publishDate: new Date(),
+        state: data.state,
+        releaseId: data.releaseId,
+        releaseURL: data.releaseURL || null,
+        error: data.error || null,
+        sourcePostId: originalPost.id,
+      },
+    });
+  }
+
+  batchUpdatePostAnalytics(
+    updates: Array<{
+      id: string;
+      impressions?: number;
+      trafficScore?: number;
+      analytics?: any;
+    }>
+  ) {
+    if (!updates.length) return Promise.resolve([]);
+    return Promise.all(
+      updates.map((u) =>
+        this._post.model.post.update({
+          where: { id: u.id },
+          data: {
+            impressions: u.impressions,
+            trafficScore: u.trafficScore,
+            analytics: u.analytics,
+          },
+        })
+      )
+    );
+  }
+
   private extractErrorMessage(err: any): string {
     if (typeof err === 'string') return err;
 
@@ -607,6 +675,33 @@ export class PostsRepository {
     }
 
     return update;
+  }
+
+  async logError(id: string, err?: any, body?: any) {
+    const errorMessage = err ? this.extractErrorMessage(err) : undefined;
+    const post = await this._post.model.post.findUnique({
+      where: { id },
+      include: {
+        integration: {
+          select: { providerIdentifier: true },
+        },
+      },
+    });
+    if (!post) return;
+
+    try {
+      await this._errors.model.errors.create({
+        data: {
+          message: errorMessage || '',
+          organizationId: post.organizationId,
+          platform: post.integration.providerIdentifier,
+          postId: post.id,
+          body: body
+            ? typeof body === 'string' ? body : JSON.stringify(body)
+            : '',
+        },
+      });
+    } catch (_) {}
   }
 
   async changeDate(orgId: string, id: string, date: string) {

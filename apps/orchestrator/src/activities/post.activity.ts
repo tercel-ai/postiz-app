@@ -82,6 +82,11 @@ export class PostActivity {
   }
 
   @ActivityMethod()
+  async recordFailedRelease(postId: string, releaseId: string, error: string) {
+    return this._postService.recordFailedRelease(postId, releaseId, error);
+  }
+
+  @ActivityMethod()
   async getPostsList(orgId: string, postId: string) {
     const getPosts = await this._postService.getPostsRecursively(postId, true, orgId);
     if (!getPosts || getPosts.length === 0 || getPosts[0].parentPostId) {

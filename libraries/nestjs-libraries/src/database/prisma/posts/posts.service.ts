@@ -39,8 +39,6 @@ import { RefreshToken } from '@gitroom/nestjs-libraries/integrations/social.abst
 import { RefreshIntegrationService } from '@gitroom/nestjs-libraries/integrations/refresh.integration.service';
 import { PostingTimesV2 } from '@gitroom/nestjs-libraries/dtos/integrations/posting-times.types';
 import { resolveTimeSlotsForDate } from '@gitroom/nestjs-libraries/dtos/integrations/posting-times.utils';
-import { PostReleaseService } from '@gitroom/nestjs-libraries/database/prisma/post-releases/post-release.service';
-
 type PostWithConditionals = Post & {
   integration?: Integration;
   childrenPost: Post[];
@@ -57,8 +55,7 @@ export class PostsService {
     private _shortLinkService: ShortLinkService,
     private _openaiService: OpenaiService,
     private _temporalService: TemporalService,
-    private _refreshIntegrationService: RefreshIntegrationService,
-    private _postReleaseService: PostReleaseService
+    private _refreshIntegrationService: RefreshIntegrationService
   ) {}
 
   searchForMissingThreeHoursPosts() {
@@ -66,23 +63,43 @@ export class PostsService {
   }
 
   async updatePost(id: string, postId: string, releaseURL: string) {
-    const updatedPost = await this._postRepository.updatePost(id, postId, releaseURL);
+    const post = await this._postRepository.getPostById(id);
 
-    try {
-      await this._postReleaseService.createRelease({
-        postId: updatedPost.id,
+    if (post && post.intervalInDays && post.intervalInDays > 0 && !post.parentPostId) {
+      // Recurring main post: clone as published, original stays QUEUE
+      await this._postRepository.clonePostAsRelease(post, {
         releaseId: postId,
         releaseURL,
-        publishDate: new Date(),
-        organizationId: updatedPost.organizationId,
-        integrationId: updatedPost.integrationId,
-        group: updatedPost.group,
+        state: 'PUBLISHED',
       });
-    } catch (e) {
-      console.error('Failed to create PostRelease record:', e);
+
+      return post;
     }
 
+    // Non-recurring: update original in place (current behavior)
+    const updatedPost = await this._postRepository.updatePost(id, postId, releaseURL);
+
     return updatedPost;
+  }
+
+  async recordFailedRelease(postId: string, releaseId: string, error: string) {
+    const post = await this._postRepository.getPostById(postId);
+    if (!post) return;
+
+    // Only clone for recurring posts — non-recurring failures are already
+    // captured by changeState(ERROR) on the original post.
+    if (post.intervalInDays && post.intervalInDays > 0 && !post.parentPostId) {
+      try {
+        await this._postRepository.clonePostAsRelease(post, {
+          releaseId,
+          state: 'ERROR',
+          error,
+        });
+      } catch (e) {
+        console.error('Failed to clone post as failed release:', e);
+      }
+    }
+
   }
 
   async checkPostAnalytics(
@@ -711,6 +728,17 @@ export class PostsService {
   }
 
   async changeState(id: string, state: State, err?: any, body?: any) {
+    // For recurring posts, don't set ERROR on the original — it needs to stay
+    // QUEUE so that subsequent scheduled sends can proceed. The error is
+    // captured in the cloned Post (via recordFailedRelease) instead.
+    if (state === 'ERROR') {
+      const post = await this._postRepository.getPostById(id);
+      if (post?.intervalInDays && post.intervalInDays > 0 && !post.parentPostId) {
+        // Don't change original state, but log the error for observability
+        await this._postRepository.logError(id, err, body);
+        return;
+      }
+    }
     return this._postRepository.changeState(id, state, err, body);
   }
 

@@ -407,6 +407,10 @@ model Post {
   lastMessageId              String?
   intervalInDays             Int?
   error                      String?
+  sourcePostId               String?
+  impressions                Int?
+  trafficScore               Float?
+  analytics                  Json?
   createdAt                  DateTime                  @default(now())
   updatedAt                  DateTime                  @updatedAt
   deletedAt                  DateTime?
@@ -418,6 +422,8 @@ model Post {
   organization               Organization              @relation("organization", fields: [organizationId], references: [id])
   parentPost                 Post?                     @relation("parentPostId", fields: [parentPostId], references: [id])
   childrenPost               Post[]                    @relation("parentPostId")
+  sourcePost                 Post?                     @relation("sourcePost", fields: [sourcePostId], references: [id])
+  clonedPosts                Post[]                    @relation("sourcePost")
   submittedForOrder          Orders?                   @relation(fields: [submittedForOrderId], references: [id])
   submittedForOrganization   Organization?             @relation("submittedForOrg", fields: [submittedForOrganizationId], references: [id])
   tags                       TagsPosts[]
@@ -437,6 +443,7 @@ model Post {
   @@index([updatedAt])
   @@index([releaseURL])
   @@index([integrationId])
+  @@index([sourcePostId])
 }
 
 model Notifications {
@@ -936,6 +943,8 @@ model PostRelease {
   releaseId      String
   releaseURL     String?
   publishDate    DateTime
+  state          String   @default("SUCCESS") // SUCCESS | FAILED
+  error          String?
   impressions    Int?
   trafficScore   Float?
   analytics      Json?
@@ -954,4 +963,5 @@ model PostRelease {
   @@index([organizationId, publishDate])
   @@index([integrationId, publishDate])
   @@index([group])
+  @@index([state])
 }
