@@ -1,5 +1,7 @@
-import { IsIn, IsNumber, IsString, Min, ValidateNested } from 'class-validator';
+import { IsIn, IsOptional, IsString, Matches, ValidateNested } from 'class-validator';
 import { Type } from 'class-transformer';
+
+const PRICE_PATTERN = /^\d+(\.\d+)?$/;
 
 export class AiPricingEntryDto {
   @IsString()
@@ -14,9 +16,16 @@ export class AiPricingEntryDto {
   @IsIn(['per_token', 'per_image'])
   billing_mode: 'per_token' | 'per_image';
 
-  @IsNumber()
-  @Min(0)
-  price: number;
+  @Matches(PRICE_PATTERN, { message: 'price must be a non-negative decimal string (e.g. "0.0015")' })
+  price: string;
+
+  @IsOptional()
+  @Matches(PRICE_PATTERN, { message: 'input_price must be a non-negative decimal string (e.g. "0.000375")' })
+  input_price?: string;
+
+  @IsOptional()
+  @Matches(PRICE_PATTERN, { message: 'output_price must be a non-negative decimal string (e.g. "0.0015")' })
+  output_price?: string;
 }
 
 export class UpdateAiPricingDto {

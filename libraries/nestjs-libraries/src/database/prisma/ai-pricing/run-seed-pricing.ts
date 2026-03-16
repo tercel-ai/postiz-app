@@ -24,17 +24,19 @@ async function main() {
           type: 'object',
           required: false,
           description:
-            'AI model pricing: price unit depends on billing_mode (per_token: per 1M tokens, per_image: per image)',
+            'AI model pricing in credits ($1=100 credits). per_token: credits per 1 token, per_image: credits per 1 image.',
           value: AI_PRICING_SEED as any,
           default: AI_PRICING_SEED as any,
         },
       });
 
       const { text, image } = AI_PRICING_SEED;
-      const fmt = (e: typeof text) =>
-        e.billing_mode === 'per_token'
-          ? `$${e.price}/1M tokens`
-          : `$${e.price}/image`;
+      const fmt = (e: typeof text) => {
+        const parts = [`price=${e.price}`];
+        if (e.input_price) parts.push(`input=${e.input_price}`);
+        if (e.output_price) parts.push(`output=${e.output_price}`);
+        return `${e.billing_mode === 'per_token' ? 'credits/token' : 'credits/image'} (${parts.join(', ')})`;
+      };
 
       console.log('Seeded ai_model_pricing:');
       console.log(

@@ -1,6 +1,7 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { SettingsService } from '@gitroom/nestjs-libraries/database/prisma/settings/settings.service';
 import { AiUsageInfo } from '@gitroom/nestjs-libraries/openai/openai.service';
+import { AI_PRICING_SEED } from './seed-pricing';
 
 const SETTINGS_KEY = 'ai_model_pricing';
 
@@ -14,7 +15,12 @@ export interface AiPricingEntry {
   provider: string;
   model: string;
   billing_mode: 'per_token' | 'per_image';
-  price: number; // per_token: per 1M tokens, per_image: per image
+  /** Default price: credits per 1 token (per_token) or credits per 1 image (per_image). Uses output price when input_price/output_price not set. */
+  price: string;
+  /** Optional: credits per 1 input token. When both input_price and output_price are set, overrides price for per_token billing. */
+  input_price?: string;
+  /** Optional: credits per 1 output token. When both input_price and output_price are set, overrides price for per_token billing. */
+  output_price?: string;
 }
 
 export interface AiCostResult {
@@ -23,18 +29,29 @@ export interface AiCostResult {
   model: string;
   type: 'text' | 'image';
   billingMode: 'per_token' | 'per_image';
-  unitPrice: number;
+  price: string;
+  inputPrice?: string;
+  outputPrice?: string;
   quantity: number; // per_token: total_tokens, per_image: count
-  cost: number;
+  cost: number; // in credits
   pricingFound: boolean;
 }
 
 @Injectable()
-export class AiPricingService {
+export class AiPricingService implements OnModuleInit {
+  private readonly logger = new Logger(AiPricingService.name);
   private _cache: { data: AiModelPricingConfig; expiry: number } | null = null;
   private readonly CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
   constructor(private _settingsService: SettingsService) {}
+
+  async onModuleInit(): Promise<void> {
+    const existing = await this.getPricingConfig();
+    if (!existing) {
+      await this.setPricingConfig(AI_PRICING_SEED);
+      this.logger.log('Seeded default ai_model_pricing config');
+    }
+  }
 
   async getPricingConfig(): Promise<AiModelPricingConfig | null> {
     if (this._cache && Date.now() < this._cache.expiry) {
@@ -51,7 +68,7 @@ export class AiPricingService {
     await this._settingsService.set(SETTINGS_KEY, config, {
       type: 'object',
       description:
-        'AI model pricing: price unit depends on billing_mode (per_token: per 1M tokens, per_image: per image)',
+        'AI model pricing: price in credits (per_token: credits per 1 token, per_image: credits per 1 image). $1 = 100 credits.',
     });
     this._cache = null;
   }
@@ -61,8 +78,8 @@ export class AiPricingService {
     const entry = config?.[usage.type];
 
     if (!entry) {
-      console.warn(
-        `[AiPricing] No pricing config for type=${usage.type}`
+      this.logger.warn(
+        `No pricing config for type=${usage.type}`
       );
       return {
         servicer: usage.servicer,
@@ -70,7 +87,7 @@ export class AiPricingService {
         model: usage.model,
         type: usage.type,
         billingMode: 'per_token',
-        unitPrice: 0,
+        price: '0',
         quantity: 0,
         cost: 0,
         pricingFound: false,
@@ -81,11 +98,37 @@ export class AiPricingService {
     let cost: number;
 
     if (entry.billing_mode === 'per_image') {
+      // credits per 1 image
       quantity = usage.image_billing?.count || 1;
-      cost = quantity * entry.price;
+      cost = quantity * parseFloat(entry.price);
     } else {
+      // per_token: credits per 1 token
       quantity = usage.usage.total_tokens;
-      cost = (quantity / 1_000_000) * entry.price;
+      const hasInputPrice = !!entry.input_price;
+      const hasOutputPrice = !!entry.output_price;
+      if (hasInputPrice && hasOutputPrice) {
+        // Split input/output pricing
+        const inputCost =
+          usage.usage.prompt_tokens * parseFloat(entry.input_price!);
+        const outputCost =
+          usage.usage.completion_tokens * parseFloat(entry.output_price!);
+        cost = inputCost + outputCost;
+      } else {
+        if (hasInputPrice !== hasOutputPrice) {
+          this.logger.warn(
+            `Only one of input_price/output_price is set for type=${usage.type}, falling back to price`
+          );
+        }
+        // Fallback: use price (output price) for all tokens
+        cost = quantity * parseFloat(entry.price);
+      }
+    }
+
+    if (isNaN(cost)) {
+      this.logger.error(
+        `NaN cost detected for type=${usage.type}, price=${entry.price} input_price=${entry.input_price} output_price=${entry.output_price}`
+      );
+      cost = 0;
     }
 
     return {
@@ -94,7 +137,9 @@ export class AiPricingService {
       model: entry.model,
       type: usage.type,
       billingMode: entry.billing_mode,
-      unitPrice: entry.price,
+      price: entry.price,
+      inputPrice: entry.input_price,
+      outputPrice: entry.output_price,
       quantity,
       cost,
       pricingFound: true,
