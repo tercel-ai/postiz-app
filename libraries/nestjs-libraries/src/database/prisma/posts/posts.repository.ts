@@ -329,7 +329,17 @@ export class PostsRepository {
         ],
         deletedAt: null,
         parentPostId: null,
-        ...(query.state ? { state: query.state } : {}),
+        // For recurring posts the original always stays QUEUE; state filter is
+        // applied later after clone/virtual expansion.  Non-recurring posts are
+        // filtered directly by state here.
+        ...(query.state
+          ? {
+              OR: [
+                { state: query.state, intervalInDays: null },
+                { intervalInDays: { not: null } },
+              ],
+            }
+          : {}),
         ...(query.integrationId?.length
           ? { integrationId: { in: query.integrationId } }
           : {}),
@@ -380,6 +390,7 @@ export class PostsRepository {
           sourcePostId: { in: recurringPostIds },
           publishDate: { gte: startDate, lte: endDate },
           deletedAt: null,
+          ...(query.state ? { state: query.state } : {}),
         },
         orderBy: { publishDate: 'asc' },
       })
@@ -416,18 +427,22 @@ export class PostsRepository {
         });
       }
 
-      // Generate virtual entries for future scheduled dates only
-      let startingDate = dayjs.utc(post.publishDate);
-      while (dayjs.utc(endDate).isSameOrAfter(startingDate)) {
-        if (startingDate.isAfter(now) && post.state !== 'DRAFT') {
-          result.push({
-            ...post,
-            publishDate: startingDate.toDate(),
-            actualDate: post.publishDate,
-            state: 'QUEUE' as const,
-          });
+      // Generate virtual entries for future scheduled dates only.
+      // Skip when a state filter is active and it isn't QUEUE, because virtual
+      // entries are always QUEUE and would otherwise pollute filtered results.
+      if (!query.state || query.state === 'QUEUE') {
+        let startingDate = dayjs.utc(post.publishDate);
+        while (dayjs.utc(endDate).isSameOrAfter(startingDate)) {
+          if (startingDate.isAfter(now) && post.state !== 'DRAFT') {
+            result.push({
+              ...post,
+              publishDate: startingDate.toDate(),
+              actualDate: post.publishDate,
+              state: 'QUEUE' as const,
+            });
+          }
+          startingDate = startingDate.add(post.intervalInDays, 'days');
         }
-        startingDate = startingDate.add(post.intervalInDays, 'days');
       }
 
       return [...all, ...result];
