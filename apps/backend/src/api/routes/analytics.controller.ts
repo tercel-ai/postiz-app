@@ -19,7 +19,7 @@ export class AnalyticsController {
     @Param('integration') integration: string,
     @Query('date') date: string
   ) {
-    return this._integrationService.checkAnalytics(org, integration, date);
+    return this._integrationService.getPostsLevelAnalytics(org, integration, +date || 30);
   }
 
   @Get('/post/:postId')

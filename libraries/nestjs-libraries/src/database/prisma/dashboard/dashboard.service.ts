@@ -51,11 +51,18 @@ export class DashboardService {
       return JSON.parse(cached);
     }
 
-    const [channelCount, integrations, postStats, impressionsSummary] = await Promise.all([
+    const [channelCount, integrations, postStats, impressionsSummary, trafficSummary] = await Promise.all([
       this._dashboardRepository.getChannelCount(org.id, integrationId, channel),
       this._dashboardRepository.getActiveIntegrations(org.id, integrationId, channel),
       this._dashboardRepository.getPostsStats(org.id, normalizedStart, normalizedEnd, integrationId, channel),
       this._dataTicksService.getImpressionsSummaryByPlatform({
+        organizationId: org.id,
+        integrationId,
+        channel,
+        startDate: normalizedStart,
+        endDate: normalizedEnd,
+      }),
+      this._dataTicksService.getTrafficSummaryByPlatform({
         organizationId: org.id,
         integrationId,
         channel,
@@ -101,6 +108,7 @@ export class DashboardService {
     }
 
     const impressionsTotal = impressionsSummary.reduce((sum: number, p: { value: number }) => sum + p.value, 0);
+    const trafficsTotal = trafficSummary.reduce((sum: number, p: { value: number }) => sum + p.value, 0);
 
     const result = {
       channel_count: channelCount,
@@ -108,6 +116,7 @@ export class DashboardService {
         ([platform, count]) => ({ platform, count })
       ),
       impressions_total: impressionsTotal,
+      traffics_total: trafficsTotal,
       posts_stats: stats,
     };
 

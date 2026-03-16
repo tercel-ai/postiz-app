@@ -231,12 +231,12 @@ export class IntegrationsController {
     };
 
     try {
-      const analytics = await this._integrationService.checkAnalytics(org, id, '30');
+      const analytics = await this._integrationService.getPostsLevelAnalytics(org, id, 30);
       if (analytics && Array.isArray(analytics)) {
         analytics.forEach((item) => {
           const label = item.label.toLowerCase();
           const value = item.data?.length ? Number(item.data[item.data.length - 1].total) : 0;
-          
+
           if (label.includes('impression')) stats.impressions = value;
           if (label.includes('like')) stats.likes = value;
           if (label.includes('reply')) stats.replies = value;

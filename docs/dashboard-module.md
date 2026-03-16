@@ -12,7 +12,14 @@ The Dashboard provides a **one-stop summary of social media operations data** fo
 
 **Important: All analytics data (impressions, traffic, engagement) is scoped to posts published through Postiz only.** Data from posts created directly on social platforms (outside Postiz) is not included. This ensures consistent and accurate measurement of content managed through the system.
 
-Data is sourced from official post-level APIs of each social platform (such as X/Twitter API, Instagram Graph API, YouTube Data API, LinkedIn API, etc.). The system fetches the latest data in real time when a user views the dashboard, and caches it for 1 hour to avoid excessive API requests.
+### Data pipeline overview
+
+The dashboard uses **two complementary data pipelines**:
+
+1. **DataTicks (pre-aggregated)** — A background Temporal workflow syncs post-level analytics daily at UTC 00:05, storing cumulative impressions and weighted traffic scores in the `DataTicks` table. Used by: Summary, Traffics, Impressions Trend.
+2. **Real-time fetch** — On-demand post-level API calls when the user opens the page. Used by: Post Engagement.
+
+Both pipelines source data exclusively from post-level APIs (`batchPostAnalytics` / `postAnalytics`), never from account-level APIs.
 
 ### Which social platforms are supported?
 
@@ -35,54 +42,69 @@ Data is sourced from official post-level APIs of each social platform (such as X
 
 ## 2. Data Source Architecture
 
-All dashboard analytics endpoints use a **unified post-level data pipeline** (`_fetchAllPostAnalytics`):
-
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                    _fetchAllPostAnalytics()                         │
-│                                                                     │
-│  1. Query DB for published posts (state=PUBLISHED, releaseId!=null) │
-│  2. Group posts by integration (account)                            │
-│  3. For each integration group:                                     │
-│     ├─ Batch path: provider.batchPostAnalytics() if available       │
-│     └─ Fallback: per-post provider.postAnalytics() with circuit     │
-│        breaker (5 concurrent, fail threshold = 2)                   │
-│  4. Return Map<postId, { metrics, platform }>                       │
-└─────────────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────────────┐
+│  Temporal Workflow: dataTicksSyncWorkflow (daily @ UTC 00:05)         │
+│                                                                       │
+│  For each org → for each integration with Postiz posts:               │
+│    1. Fetch post-level analytics (batchPostAnalytics / postAnalytics) │
+│    2. Extract impressions (cumulative snapshot)                        │
+│    3. Compute traffic score (weighted engagement formula)              │
+│    4. Upsert DataTicks records (type=impressions, type=traffic)       │
+│    5. Invalidate Redis cache                                          │
+└───────────────────────────────────────────────────────────────────────┘
+         │
+         ▼  Pre-aggregated data consumed by:
+   ┌─────────────┬──────────────┬──────────────┐
+   │ getSummary() │ getTraffics()│getImpressions│
+   │ impressions  │ traffic by   │ impressions  │
+   │ + traffic    │ platform     │ by date +    │
+   │ totals       │ + percentage │ platform     │
+   └─────────────┴──────────────┴──────────────┘
+
+┌───────────────────────────────────────────────────────────────────────┐
+│  Real-time pipeline: _fetchAllPostAnalytics()                         │
+│                                                                       │
+│  1. Query DB for published posts (state=PUBLISHED, releaseId!=null)   │
+│  2. Group posts by integration (account)                              │
+│  3. For each integration group:                                       │
+│     ├─ Batch path: provider.batchPostAnalytics() if available         │
+│     └─ Fallback: per-post provider.postAnalytics() with circuit       │
+│        breaker (5 concurrent, fail threshold = 2)                     │
+│  4. Return Map<postId, { metrics, platform }>                         │
+└───────────────────────────────────────────────────────────────────────┘
          │
          ▼  Consumed by:
-   ┌─────────────┬──────────────┬──────────────┬──────────────────┐
-   │ getSummary() │ getTraffics()│getImpressions│getPostEngagement │
-   │ impressions  │ traffic by   │ impressions  │ views/likes/     │
-   │ + traffic    │ platform     │ by date      │ comments/saves   │
-   │ totals       │ + delta      │              │ by platform      │
-   └─────────────┴──────────────┴──────────────┴──────────────────┘
+   ┌──────────────────┐
+   │getPostEngagement │
+   │ views/likes/     │
+   │ comments/saves   │
+   │ by platform      │
+   └──────────────────┘
 ```
 
 ### Metrics Data Source Summary
 
 | Endpoint | Metric | Data source | Scope |
 |----------|--------|-------------|-------|
-| **Summary** `impressions_total` | Impressions | Post-level `postAnalytics()` | Postiz posts only, last 30 days |
-| **Summary** `traffics_total` | Traffic/Clicks | Post-level `postAnalytics()` | Postiz posts only, last 30 days |
+| **Summary** `impressions_total` | Impressions | DataTicks (`getImpressionsSummaryByPlatform`) | Postiz posts only, latest snapshot per integration |
+| **Summary** `traffics_total` | Traffic | DataTicks (`getTrafficSummaryByPlatform`) | Postiz posts only, latest snapshot per integration |
 | **Summary** `posts_stats` | Post counts | Database query | All Postiz posts (no limit) |
 | **Summary** `channel_count` | Channel count | Database query | All active integrations |
-| **Impressions Trend** | Impressions by date | Post-level `postAnalytics()` | Postiz posts only, last 30 days |
-| **Traffic Analysis** | Traffic by platform | Post-level `postAnalytics()` | Postiz posts only, last 30 days |
-| **Post Engagement** | Views/Likes/Comments/Saves | Post-level `postAnalytics()` | Postiz posts only, configurable 1–90 days |
+| **Impressions Trend** | Impressions by date + platform | DataTicks (`getImpressionsByPlatform`) | Postiz posts only, time series |
+| **Traffic Analysis** | Traffic by platform | DataTicks (`getTrafficSummaryByPlatform`) | Postiz posts only, latest snapshot |
+| **Post Engagement** | Views/Likes/Comments/Saves | Real-time `_fetchAllPostAnalytics()` | Postiz posts only, configurable 1–90 days |
 | **Posts Trend** | Post count by date | Database query | All Postiz posts (no limit) |
 
 ### Known Factors That May Cause Inaccuracy
 
 | Factor | Impact | Severity |
 |--------|--------|----------|
-| **High post volume** | `getPublishedPostsWithRelease` fetches all posts (no limit). For users with very high post volumes, the first uncached request may be slow. Circuit breaker and per-post caching mitigate this. | Low |
+| **DataTicks sync delay** | DataTicks sync runs daily at UTC 00:05. Data may be up to ~24 hours stale for Summary/Traffics/Impressions. Post Engagement uses real-time fetch. | Low |
 | **Platforms without `postAnalytics`** | ~19 platforms (Reddit, Bluesky, Mastodon, TikTok, etc.) return empty analytics. Posts from these platforms have 0 impressions/traffic/engagement. | High (if user primarily uses these platforms) |
-| **API failures / rate limiting** | Posts that fail to fetch are skipped. Circuit breaker stops trying after 2 consecutive failures per platform. `postsFailed` tracks the count but is only visible in the Post Engagement endpoint's `meta`. | Low |
-| **Cache staleness** | Each endpoint has its own Redis cache (1hr prod / 1s dev). Per-post analytics also cached independently. Different endpoints may reflect data from different points in time. | Low |
-| **Post deleted on platform** | If a post was published via Postiz but later deleted on the platform, `postAnalytics()` returns empty — that post's metrics are lost. | Low |
-| **Traffic metrics rarely available at post level** | Most platforms' `postAnalytics()` do not return click/engagement/traffic metrics (X returns Impressions, Likes, Retweets, Replies, Quotes, Bookmarks — none match `TRAFFICS_RE`). `traffics_total` will likely be 0 for most platforms. | Medium |
-| **Regex classification overlap** | `IMPRESSIONS_RE` and `VIEWS_RE` have slightly different patterns. Summary uses `IMPRESSIONS_RE` (includes `page.views`); Post Engagement uses `VIEWS_RE` (includes `unique.impression`). In practice the difference is minimal. | Low |
+| **API failures / rate limiting** | Posts that fail to fetch during DataTicks sync are skipped. `postsAnalyzed` tracks how many posts contributed to each tick. | Low |
+| **Cache staleness** | Each endpoint has its own Redis cache (1hr prod / 1s dev). DataTicks sync invalidates relevant cache keys. | Low |
+| **Post deleted on platform** | If a post was published via Postiz but later deleted on the platform, its analytics return empty and are not counted. | Low |
 
 ---
 
@@ -92,7 +114,7 @@ All dashboard analytics endpoints use a **unified post-level data pipeline** (`_
 
 **Endpoint**: `GET /dashboard/summary`
 
-**Business scenario**: The first screen users see when entering the dashboard. Provides an at-a-glance view of overall operational performance, with optional date range filtering for post statistics.
+**Business scenario**: The first screen users see when entering the dashboard. Provides an at-a-glance view of overall operational performance, with optional date range and integration filtering.
 
 **Optional parameters**:
 
@@ -100,6 +122,8 @@ All dashboard analytics endpoints use a **unified post-level data pipeline** (`_
 |-----------|------|---------|------------|---------|
 | `startDate` | ISO 8601 date string | — (no filter) | `@IsDateString()` | Start of the date range for post statistics (inclusive, normalized to start of day) |
 | `endDate` | ISO 8601 date string | — (no filter) | `@IsDateString()` | End of the date range for post statistics (inclusive, normalized to end of day) |
+| `integrationId[]` | string array | — (all) | `@IsArray, @ArrayMaxSize(50)` | Filter by specific integration IDs |
+| `channel[]` | string array | — (all) | `@IsIn(VALID_CHANNELS)` | Filter by platform channel names |
 
 > **Note**: If both `startDate` and `endDate` are provided, `startDate` must be before `endDate` — otherwise the API returns a `400 Bad Request`. Either parameter can be used independently.
 
@@ -114,7 +138,7 @@ All dashboard analytics endpoints use a **unified post-level data pipeline** (`_
 │    Instagram  3 accounts                             │
 │                                                     │
 │  30-day Total Impressions    50,000                   │
-│  30-day Total Traffic        12,000 clicks            │
+│  30-day Total Traffic        12,000                   │
 │                                                     │
 │  Posts Stats:                                        │
 │    Total        128                                  │
@@ -151,8 +175,8 @@ All dashboard analytics endpoints use a **unified post-level data pipeline** (`_
 |-------|---------|-----------------|
 | `channel_count` | Total number of channels | Number of connected and enabled social accounts |
 | `channels_by_platform` | Channels by platform | Grouped by platform, e.g., 2 Twitter accounts connected |
-| `impressions_total` | Total impressions | Sum of impressions from all Postiz-managed published posts in the last 30 days |
-| `traffics_total` | Total traffic | Sum of click/engagement/traffic metrics from all Postiz-managed published posts in the last 30 days. Note: most platforms do not return traffic metrics at post level, so this value may be 0. |
+| `impressions_total` | Total impressions | Sum of latest DataTicks impressions snapshots across all integrations (default last 30 days) |
+| `traffics_total` | Total traffic | Sum of latest DataTicks traffic snapshots across all integrations (weighted engagement score, default last 30 days) |
 | **posts_stats** | | |
 | `posts_stats.total` | Total posts | All posts matching the date filter (or all posts if no filter). Sum of all states below. |
 | `posts_stats.scheduled` | Scheduled posts | Posts in `QUEUE` state (waiting to be published) |
@@ -165,33 +189,26 @@ All dashboard analytics endpoints use a **unified post-level data pipeline** (`_
 - When `startDate` and/or `endDate` are provided, only posts whose `publishDate` falls within the range are counted in `posts_stats`.
 - Dates are normalized: `startDate` → start of day (00:00:00), `endDate` → end of day (23:59:59.999). This means `?startDate=2026-03-01&endDate=2026-03-01` includes all posts on March 1st.
 - When no date parameters are provided, all posts (excluding deleted) are counted — same behavior as before.
-- Impressions and traffic totals are always based on the last 30 days and are **not** affected by the date filter.
+- Impressions and traffic totals come from DataTicks and use the same date range (or default last 30 days if no date filter).
 
 **Impressions vs. Traffic — What's the difference?**
 
-- **Impressions**: The number of times content appeared on a user's screen. For example, if your tweet appeared in someone's timeline 1,000 times, that counts as 1,000 impressions. The user doesn't need to click — just "seeing" it counts.
-- **Traffic**: The number of times users actually clicked or interacted. For example, clicking a link, clicking an image, or other deliberate actions.
-
-The system automatically categorizes metrics returned by each platform by matching their names:
-- Names containing `impression`, `views`, `reach` → classified as Impressions
-- Names containing `click`, `engagement`, `traffic` → classified as Traffic
+- **Impressions**: Cumulative exposure count — the number of times content appeared on users' screens. Extracted from platform metrics labeled as `impressions`, `views`, or `reach`.
+- **Traffic**: Weighted engagement score — a composite metric computed from likes, comments, shares, bookmarks, etc. Each engagement type has a platform-specific weight (see `data-ticks-module.md` for the formula).
 
 <details>
 <summary>Technical implementation details (for developers)</summary>
 
 **Algorithm**:
 1. Normalize `startDate` / `endDate` to day boundaries (`startOf('day')` / `endOf('day')`)
-2. Check Redis cache (key includes normalized date timestamps) → return immediately if cache hit
-3. Query in parallel: total channels + active integrations list + post stats grouped by state (with date filter)
+2. Check Redis cache (key: `dashboard:summary:${orgId}:${start}:${end}:${intKey}:${chKey}`) → return immediately if cache hit
+3. Query in parallel: total channels + active integrations list + post stats grouped by state (with date filter) + impressions summary from DataTicks + traffic summary from DataTicks
 4. Map `groupBy` results to `posts_stats` object (QUEUE→scheduled, PUBLISHED→published, DRAFT→drafts, ERROR→errors)
 5. Group channels by platform
-6. Call `_fetchAllPostAnalytics(org, 30)` to get post-level analytics for all published posts
-7. Classify and accumulate using regex: `IMPRESSIONS_RE` / `TRAFFICS_RE`
-8. Write result to Redis cache (TTL 1 hour), return
+6. Sum impressions/traffic summaries to get totals
+7. Write result to Redis cache (TTL 1 hour), return
 
 **Date validation**: The controller throws `BadRequestException` if `startDate > endDate`.
-
-**Error handling**: If a single post's API call fails, it is silently skipped without affecting the overall response.
 
 </details>
 
@@ -247,7 +264,7 @@ Posts Trend (daily, last 30 days)
 <details>
 <summary>Technical implementation details (for developers)</summary>
 
-**Algorithm**: Queries post `publishDate` from the database, then groups into time buckets using a `dateKey|platform` composite key in a Map. Weekly aggregation uses the ISO 8601 standard, mapping dates to the Monday of their respective week.
+**Algorithm**: Queries post `publishDate` from the database, then groups into time buckets using a `dateKey|platform` composite key in a Map. Weekly aggregation uses the ISO 8601 standard, mapping dates to the Monday of their respective week. Supports `x-timezone` header for timezone-aware bucketing.
 
 **Caching**: This endpoint does not use Redis caching — it queries the database in real time (internal data only, so it's fast enough).
 
@@ -259,25 +276,29 @@ Posts Trend (daily, last 30 days)
 
 **Endpoint**: `GET /dashboard/traffics`
 
-**Business scenario**: Marketing staff want to know "which platform performs best" and "is traffic trending up or down" to inform resource allocation decisions.
+**Business scenario**: Marketing staff want to know "which platform performs best" to inform resource allocation decisions.
 
-> **Important**: Traffic data comes from **post-level analytics only** (posts published through Postiz). Most social platforms do not return click/engagement/traffic metrics in their post-level APIs, so traffic values may be 0 for many platforms. This is a platform API limitation, not a system bug.
+> **Important**: Traffic is a **weighted engagement score** computed from post-level metrics (likes, comments, shares, bookmarks, etc.), not raw clicks. The score is pre-computed daily by the DataTicks background sync.
+
+**Optional parameters**:
+
+| Parameter | Type | Default | Meaning |
+|-----------|------|---------|---------|
+| `startDate` | ISO 8601 date string | — (last 30 days) | Start of date range |
+| `endDate` | ISO 8601 date string | — (today) | End of date range |
+| `integrationId[]` | string array | — (all) | Filter by integration IDs |
+| `channel[]` | string array | — (all) | Filter by platform channels |
 
 **What the user sees (example)**:
 
 ```
 Traffic Analysis by Platform (last 30 days)
 
-  Twitter      ████████████████████  8,000 (66.67%)  ↑ 25.5%
-  Instagram    ██████████            4,000 (33.33%)  ↓ -10.2%
-  YouTube                                0 (0.00%)     0.0%
-                                                     ──────
-                                           Total     12,000
+  Twitter      ████████████████████  8,000 (66.67%)
+  Instagram    ██████████            4,000 (33.33%)
+                                              ──────
+                                    Total     12,000
 ```
-
-- **↑ 25.5%** means Twitter's traffic in the last 15 days grew by 25.5% compared to the prior 15 days (positive trend, shown in green)
-- **↓ -10.2%** means Instagram's traffic declined by 10.2% (negative trend, shown in red)
-- **YouTube** is connected but has no traffic data yet — it still appears in the list with all values at 0
 
 **Response structure**:
 ```json
@@ -285,57 +306,32 @@ Traffic Analysis by Platform (last 30 days)
   {
     "platform": "twitter",
     "value": 8000,
-    "percentage": 66.67,
-    "delta": 25.5
+    "percentage": 66.67
   },
   {
     "platform": "instagram",
     "value": 4000,
-    "percentage": 33.33,
-    "delta": -10.2
-  },
-  {
-    "platform": "youtube",
-    "value": 0,
-    "percentage": 0,
-    "delta": 0
+    "percentage": 33.33
   }
 ]
 ```
 
-> **Note**: All connected platforms always appear in the results, even if they have no traffic data. This ensures the frontend can display a complete view of all platforms the user has set up.
+> **Note**: Only platforms with DataTicks data appear in the results. Platforms with no analyzed posts will not be listed.
 
 **Field descriptions**:
 
 | Field | Meaning | How to interpret |
 |-------|---------|-----------------|
-| `platform` | Platform name | e.g., twitter, instagram, linkedin |
-| `value` | 30-day total traffic | Total clicks/interactions from Postiz-managed posts on this platform in the last 30 days |
+| `platform` | Platform name | e.g., x, instagram, linkedin |
+| `value` | Total traffic score | Weighted engagement score from Postiz-managed posts on this platform |
 | `percentage` | Share (%) | This platform's traffic as a percentage of total traffic across all platforms |
-| `delta` | Period-over-period change (%) | Percentage change comparing the last 15 days vs. the prior 15 days. Positive = growth, negative = decline |
-
-**How is the period-over-period change calculated?**
-
-The system splits the last 30 days into two halves for comparison:
-```
-        First half (days 16–30 ago)       Second half (last 0–15 days)
-      ┌──────────────────┐          ┌──────────────────┐
-      │   older = 3200   │          │  recent = 4000   │
-      └──────────────────┘          └──────────────────┘
-
-      delta = (4000 - 3200) / 3200 × 100 = 25%  → Traffic grew by 25%
-```
-
-Special cases:
-- First half is 0 but second half has data → shows +100% (represents "new traffic")
-- Both halves are 0 → shows 0%
 
 <details>
 <summary>Technical implementation details (for developers)</summary>
 
-**Algorithm**: Pre-populates `platformValues` with all connected platforms (value 0) to ensure they always appear in results. Calls `_fetchAllPostAnalytics(org, 30)` to get post-level analytics, then filters for metrics matching `TRAFFICS_RE`. Splits data points into `platformRecent` / `platformOlder` Maps based on `midDate = 15 days ago`. Delta precision is kept to two decimal places (`Math.round(x * 10000) / 100`). Results are sorted by value in descending order.
+**Algorithm**: Reads pre-aggregated DataTicks records (`type='traffic'`). For each integration, takes the latest snapshot within the date range. Sums across integrations by platform. Computes percentages. Returns sorted by value descending.
 
-**Caching**: Redis cache, TTL 1 hour.
+**Caching**: Redis cache (key: `dashboard:traffics:${orgId}:${intKey}:${chKey}:${sdKey}:${edKey}`), TTL 1 hour. Cache is invalidated when DataTicks sync runs.
 
 </details>
 
@@ -347,7 +343,17 @@ Special cases:
 
 **Business scenario**: Product or marketing staff want to see "how content reach changes over time" to evaluate whether the content strategy is working.
 
-**Optional parameters**: Same as Posts Trend (`daily` / `weekly` / `monthly`).
+**Optional parameters**:
+
+| Parameter | Type | Default | Meaning |
+|-----------|------|---------|---------|
+| `period` | `daily` / `weekly` / `monthly` | `daily` | Time aggregation granularity |
+| `startDate` | ISO 8601 date string | — (default lookback) | Start of date range |
+| `endDate` | ISO 8601 date string | — (today) | End of date range |
+| `integrationId[]` | string array | — (all) | Filter by integration IDs |
+| `channel[]` | string array | — (all) | Filter by platform channels |
+
+Default lookback: 30 days (daily), 90 days (weekly), 365 days (monthly).
 
 **What the user sees (example)**:
 
@@ -365,8 +371,9 @@ Impressions Trend (daily, last 30 days)
 **Response structure**:
 ```json
 [
-  { "date": "2026-02-01", "impressions": 1500 },
-  { "date": "2026-02-02", "impressions": 2300 }
+  { "date": "2026-02-01", "value": 1500, "platform": "x" },
+  { "date": "2026-02-01", "value": 800, "platform": "instagram" },
+  { "date": "2026-02-02", "value": 2300, "platform": "x" }
 ]
 ```
 
@@ -374,17 +381,16 @@ Impressions Trend (daily, last 30 days)
 
 | Field | Meaning |
 |-------|---------|
-| `date` | Time point |
-| `impressions` | Total impressions for that time period (aggregated across all platforms, Postiz posts only) |
-
-> **How this differs from Posts Trend**: Impressions Trend data is **merged across all platforms** (all platform impressions are added together), not broken down by platform. This is because users care about "how many times was my content seen overall."
+| `date` | Time point (format depends on period: `YYYY-MM-DD` daily, `YYYY-MM-DD` weekly (Monday), `YYYY-MM` monthly) |
+| `value` | Impressions for that time bucket (latest snapshot per integration, summed across integrations) |
+| `platform` | Social platform identifier |
 
 <details>
 <summary>Technical implementation details (for developers)</summary>
 
-**Algorithm**: Calls `_fetchAllPostAnalytics(org, 30)` to get post-level analytics, filters for metrics matching `IMPRESSIONS_RE`, and accumulates into time buckets by granularity.
+**Algorithm**: Reads pre-aggregated DataTicks records (`type='impressions'`). Groups by (integration, time bucket), keeping only the latest snapshot per integration per bucket. Sums across integrations by (platform, bucket). Returns sorted by date then platform.
 
-**Caching**: Redis cache; cache key includes the period parameter, TTL 1 hour.
+**Caching**: Redis cache (key includes period, integrationId, channel, date range), TTL 1 hour.
 
 </details>
 
@@ -441,14 +447,6 @@ Post Engagement Overview (last 30 days, 55 posts analyzed)
       "comments": 450,
       "saves": 180,
       "post_count": 35
-    },
-    {
-      "platform": "instagram",
-      "views": 32000,
-      "likes": 1000,
-      "comments": 350,
-      "saves": 40,
-      "post_count": 15
     }
   ],
   "meta": {
@@ -492,52 +490,11 @@ Different social platforms use different terminology for the same concepts. The 
 
 > **Note**: If a platform does not provide a certain metric (marked with "—" in the table), that metric's value will be 0 for that platform, but this does not affect the overall statistics.
 
-**How is the data fetched?**
-
-```
-User opens the dashboard
-    │
-    ▼
-① Check cache: has this been queried within the last hour?
-    │
-    ├── Yes → Return cached data immediately (millisecond response)
-    │
-    └── No → Start real-time fetch ▼
-
-② Query the database for all posts published in the last N days
-    │
-    ▼
-③ Fetch engagement data from each platform's API in batches
-   (5 posts concurrently per batch to avoid rate limiting)
-    │
-    ├── Each post also has its own independent cache (1 hour); repeat posts use the cache
-    │
-    ├── If a platform token has expired → automatically refresh the token and retry
-    │
-    └── If a specific post request fails → skip it, does not affect other posts
-    │
-    ▼
-④ Aggregate all successfully fetched data grouped by platform
-    │
-    ▼
-⑤ Write result to cache, return to frontend
-```
-
-**Frequently asked questions**:
-
-| Question | Answer |
-|----------|--------|
-| Is the data real-time? | The first request fetches data from platform APIs in real time. Subsequent requests within 1 hour return cached data. So data can be up to 1 hour old. |
-| Is there a post limit? | No hard limit. All published posts in the time range are analyzed. Per-post results are cached (1 hour), so subsequent requests are fast. A circuit breaker stops API calls to a platform after 2 consecutive failures. |
-| Why do some posts fail to fetch? | Possible reasons: temporary platform API outage, the post was deleted on the platform, or the platform doesn't support post-level analytics. The failure count is shown in `meta.posts_failed`. |
-| Will the second visit to the dashboard be faster? | Yes. The second request hits the Redis cache, with response times typically in milliseconds. |
-| What happens when a new social account is connected? | Posts published from the new account are automatically included in the statistics — no additional configuration needed. |
-
 <details>
 <summary>Technical implementation details (for developers)</summary>
 
 **Algorithm**:
-1. Check Redis cache (key: `dashboard:post-engagement:{orgId}:{days}`)
+1. Check Redis cache (key: `dashboard:post-engagement:${orgId}:${days}`)
 2. Call `_fetchAllPostAnalytics(org, days)` which queries published posts and fetches analytics via batch or per-post APIs
 3. Cross-platform metric normalization (regex classification):
    - `VIEWS_RE = /^(impression|views|reach|unique.impression)/i`
@@ -551,7 +508,7 @@ User opens the dashboard
 - Groups posts by integration, uses `batchPostAnalytics()` when available, falls back to `checkPostAnalytics()` per-post
 - Circuit breaker: after 2 consecutive failures for a platform, remaining posts for that platform are skipped
 - Automatic token expiration handling: check `tokenExpiration` → call `RefreshIntegrationService.refresh()` → retry
-- Individual post analytics are independently cached (key: `integration:{orgId}:{postId}:{date}`, TTL 1 hour)
+- Individual post analytics are independently cached (key: `integration:${orgId}:${postId}:${date}`, TTL 1 hour)
 
 </details>
 
@@ -561,8 +518,20 @@ User opens the dashboard
 
 ### How often is data updated?
 
-All Dashboard data uses an **on-demand fetch + cache** strategy:
+The dashboard uses **two data refresh strategies**:
 
+**Pre-aggregated data (Summary, Traffics, Impressions):**
+```
+Background sync:      Temporal workflow runs daily @ UTC 00:05
+                      → Fetches post-level analytics for all orgs
+                      → Upserts DataTicks records
+                      → Invalidates Redis cache
+
+User request:         Check Redis cache → return if hit (TTL 1hr)
+                      → Cache miss: query DataTicks table → cache result → return
+```
+
+**Real-time data (Post Engagement):**
 ```
 First request:        User opens page → Real-time API calls to each platform → Return data → Store in cache
                                          (may take 3–15 seconds)
@@ -575,19 +544,29 @@ After cache expires:  Back to the first-request flow
 
 ### Caching strategy overview
 
-| Feature | Cache duration | Notes |
-|---------|---------------|-------|
-| Summary | 1 hour | Includes channel count, impressions/traffic totals, posts stats by state. Cache key varies by date range. |
-| Traffic Analysis | 1 hour | Per-platform traffic and period-over-period changes |
-| Impressions Trend | 1 hour | Separate cache for each time granularity |
-| Post Engagement | 1 hour | Both aggregate result cache + individual post analysis cache |
-| Posts Trend | No cache | Data comes from internal database — fast enough without caching |
+| Feature | Cache duration | Cache key pattern | Notes |
+|---------|---------------|-------------------|-------|
+| Summary | 1 hour | `dashboard:summary:${orgId}:${start}:${end}:${intKey}:${chKey}` | Invalidated by DataTicks sync |
+| Traffic Analysis | 1 hour | `dashboard:traffics:${orgId}:${intKey}:${chKey}:${sdKey}:${edKey}` | Invalidated by DataTicks sync |
+| Impressions Trend | 1 hour | `dashboard:impressions:${orgId}:${period}:${intKey}:${chKey}:${sdKey}:${edKey}` | Invalidated by DataTicks sync |
+| Post Engagement | 1 hour | `dashboard:post-engagement:${orgId}:${days}` | On-demand fetch + cache |
+| Posts Trend | No cache | — | Database query only, fast enough |
 
 > **Development environment**: Cache duration is reduced to 1 second for quick iteration during debugging.
 
-### Doesn't the system sync data automatically in the background?
+### Background sync details
 
-Currently, no. Dashboard data is **fetched on demand when the user opens the page** — there are no background sync jobs. However, the system does automatically refresh each social platform's access tokens via background tasks, ensuring tokens are always valid when users need data.
+The `dataTicksSyncWorkflow` Temporal workflow runs continuously, scheduling daily syncs at UTC 00:05:
+
+1. Fetches all active integrations grouped by organization
+2. For each org, queries published posts from the last 30+ days
+3. Calls `batchPostAnalytics()` or `postAnalytics()` per post to get metrics
+4. Extracts impressions and computes traffic scores
+5. Upserts DataTicks records (only for integrations with `postsAnalyzed > 0`)
+6. Invalidates all dashboard cache keys for the org
+7. Admin backfill available via `POST /admin/dashboard/data-ticks/backfill?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD`
+
+See `docs/data-ticks-module.md` for the complete DataTicks design documentation.
 
 ---
 
@@ -599,12 +578,11 @@ The Dashboard connects to multiple external social platforms, any of which could
 |----------|----------------|----------------|
 | A platform API is temporarily unavailable | Skip that platform; data from other platforms returns normally | That platform's data may be missing or show as 0 |
 | Platform access token has expired | Automatically refresh the token and retry once | User doesn't notice — may only be slightly slower |
-| Token refresh fails | Disconnect that channel, return empty data | User needs to re-authorize that channel |
+| Token refresh fails | Skip that integration, return empty data | User needs to re-authorize that channel |
 | A post has been deleted on the platform | That post returns empty data, not counted in statistics | Does not affect other posts |
 | Some posts fail during analytics fetch | Circuit breaker skips remaining posts for that platform after 2 failures | Affected platform's numbers may be lower than actual |
-| Platform rate-limits API requests (429) | Automatically wait 5 seconds and retry (up to 3 retries) | User may experience slightly slower response |
-| A connected platform has no data yet | Platform still appears in results with all values at 0 | User sees a complete list of all connected platforms — no confusion about missing platforms |
 | Platform doesn't implement `postAnalytics` | Posts from that platform return empty metrics | Analytics show 0 for that platform, but post counts are still accurate |
+| DataTicks sync fails for an org | Previous day's ticks are retained | Data may be 1 day stale; retries on next sync |
 
 ---
 
@@ -629,6 +607,9 @@ The Dashboard connects to multiple external social platforms, any of which could
 | Service | `libraries/nestjs-libraries/src/database/prisma/dashboard/dashboard.service.ts` |
 | Repository | `libraries/nestjs-libraries/src/database/prisma/dashboard/dashboard.repository.ts` |
 | DTO | `libraries/nestjs-libraries/src/dtos/dashboard/dashboard.dto.ts` |
+| DataTicks Service | `libraries/nestjs-libraries/src/database/prisma/data-ticks/data-ticks.service.ts` |
+| DataTicks Repository | `libraries/nestjs-libraries/src/database/prisma/data-ticks/data-ticks.repository.ts` |
+| Traffic Calculator | `libraries/nestjs-libraries/src/integrations/social/traffic.calculator.ts` |
 
 ### DTO parameter validation
 
@@ -636,106 +617,70 @@ The Dashboard connects to multiple external social platforms, any of which could
 DashboardSummaryQueryDto
 ├── startDate?: string   (ISO 8601 date string, optional)
 ├── endDate?: string     (ISO 8601 date string, optional)
-├── Validation: @IsOptional, @IsDateString
+├── integrationId?: string[]  (array, max 50, supports comma-separated)
+├── channel?: string[]   (array, max 30, must be in VALID_CHANNELS)
+├── Validation: @IsOptional, @IsDateString, @IsArray
 ├── Controller-level: BadRequestException if startDate > endDate
 
-PostsTrendQueryDto / ImpressionsQueryDto
+ImpressionsQueryDto
 ├── period?: 'daily' | 'weekly' | 'monthly'   (default: 'daily')
-├── Validation: @IsOptional, @IsString, @IsIn(['daily', 'weekly', 'monthly'])
+├── startDate?, endDate?, integrationId?, channel?  (same as above)
+
+TrafficsQueryDto
+├── startDate?, endDate?, integrationId?, channel?  (same as above)
+
+PostsTrendQueryDto
+├── period?: 'daily' | 'weekly' | 'monthly'   (default: 'daily')
 
 PostEngagementQueryDto
 ├── days?: number   (default: 30, range: 1–90)
 ├── Validation: @IsOptional, @Type(() => Number), @IsInt, @Min(1), @Max(90)
 ```
 
-### Database query layer (Repository)
-
-| Method | Purpose | Filter conditions |
-|--------|---------|------------------|
-| `getChannelCount(orgId)` | Count total channels | `organizationId = orgId AND deletedAt IS NULL AND disabled = false` |
-| `getActiveIntegrations(orgId)` | Get active integrations | `organizationId = orgId AND deletedAt IS NULL AND disabled = false AND type = 'social'` |
-| `getPostsStats(orgId, startDate?, endDate?)` | Count posts grouped by state | `organizationId = orgId AND deletedAt IS NULL [AND publishDate >= startDate] [AND publishDate <= endDate]`, `GROUP BY state` |
-| `getPostsForTrend(orgId, sinceDays)` | Query post publishing trend | `organizationId = orgId AND deletedAt IS NULL AND publishDate >= (NOW - sinceDays)` |
-| `getPublishedPostsWithRelease(orgId, sinceDays)` | Query published posts (with platform association) | `state = 'PUBLISHED' AND releaseId IS NOT NULL AND publishDate >= (NOW - sinceDays) no limit` |
-
-### Redis cache keys
-
-| Cache key pattern | TTL | Used by |
-|-------------------|-----|---------|
-| `dashboard:summary:{orgId}:{startTimestamp\|'all'}:{endTimestamp\|'all'}` | Dev 1s / Prod 3600s | `/summary` |
-| `dashboard:traffics:{orgId}` | Same | `/traffics` |
-| `dashboard:impressions:{orgId}:{period}` | Same | `/impressions` |
-| `dashboard:post-engagement:{orgId}:{days}` | Same | `/post-engagement` |
-| `integration:{orgId}:{postId}:{date}` | Same | Individual post analytics cache |
-
 ### Architecture diagram
 
 ```
-Controller                    Service                          Repository / External deps
+Controller                    Service                          Data Source
 ┌──────────────────┐   ┌──────────────────────┐   ┌──────────────────────┐
-│ GET /summary     │──→│ getSummary()         │──→│ getChannelCount()    │
-│  ?startDate=     │   │  ├ Redis cache check  │   │ getActiveIntegrations│
-│  &endDate=       │   │  ├ Normalize dates    │   │ getPostsStats()      │
-│                  │   │  ├ Parallel queries   │   └──────────────────────┘
-│                  │   │  ├ Map state→stats    │
-│                  │   │  ├ _fetchAllPost      │
-│                  │   │  │  Analytics()       │──→ PostsService / Providers
-│                  │   │  └ Regex classify &   │
-│                  │   │    accumulate         │
-│ GET /posts-trend │──→│ getPostsTrend()       │──→│ getPostsForTrend()   │
-│                  │   │  └ Bucket & sort      │   └──────────────────────┘
-│ GET /traffics    │──→│ getTraffics()         │──→│ _fetchAllPost        │
-│                  │   │  ├ Redis cache        │   │  Analytics()         │
-│                  │   │  ├ Split 30 days in   │   └──────────────────────┘
-│                  │   │  │ half                │
-│                  │   │  └ Calculate delta     │
-│ GET /impressions │──→│ getImpressions()      │──→│ _fetchAllPost        │
-│                  │   │  ├ Redis cache        │   │  Analytics()         │
-│                  │   │  └ Aggregate by time  │   └──────────────────────┘
-│                  │   │    granularity        │
+│ GET /summary     │──→│ getSummary()         │──→│ DataTicksService     │
+│  ?startDate=     │   │  ├ Redis cache check  │   │  .getImpressions     │
+│  &endDate=       │   │  ├ Normalize dates    │   │   SummaryByPlatform()│
+│  &integrationId= │   │  ├ Parallel queries   │   │  .getTraffic         │
+│  &channel=       │   │  ├ DataTicks summary  │   │   SummaryByPlatform()│
+│                  │   │  └ Sum totals         │   ├──────────────────────┤
+│                  │   │                       │   │ DashboardRepository  │
+│                  │   │                       │   │  .getChannelCount()  │
+│                  │   │                       │   │  .getPostsStats()    │
+│                  │   │                       │   │  .getActiveIntegr()  │
+│                  │   │                       │   └──────────────────────┘
+│ GET /posts-trend │──→│ getPostsTrend()       │──→│ DashboardRepository  │
+│                  │   │  └ Bucket & sort      │   │  .getPostsForTrend() │
+│                  │   │                       │   └──────────────────────┘
+│ GET /traffics    │──→│ getTraffics()         │──→│ DataTicksService     │
+│                  │   │  └ Redis cache        │   │  .getTraffic         │
+│                  │   │                       │   │   SummaryByPlatform()│
+│                  │   │                       │   └──────────────────────┘
+│ GET /impressions │──→│ getImpressions()      │──→│ DataTicksService     │
+│                  │   │  └ Redis cache        │   │  .getImpressions     │
+│                  │   │                       │   │   ByPlatform()       │
+│                  │   │                       │   └──────────────────────┘
 │GET /post-engage- │──→│ getPostEngagement()   │──→│ _fetchAllPost        │
 │  ment            │   │  ├ Redis cache        │   │  Analytics()         │
-│                  │   │  ├ Regex normalize    │   └──────────────────────┘
-│                  │   │  │ metrics            │
-│                  │   │  └ Group by platform  │
+│                  │   │  ├ Regex normalize    │   │  → platform APIs     │
+│                  │   │  └ Group by platform  │   └──────────────────────┘
 └──────────────────┘   └──────────────────────┘
 ```
 
-### Shared analytics pipeline: `_fetchAllPostAnalytics()`
-
-All analytics endpoints share a single private method that handles the complete post-level analytics fetch:
-
-1. Query `getPublishedPostsWithRelease(orgId, days)` — all published posts in time range
-2. Query `getActiveIntegrations(orgId)` — for token management
-3. Group posts by `integrationId`
-4. For each integration group:
-   - **Batch path**: If the provider implements `batchPostAnalytics()`, fetch all posts in one API call
-   - **Fallback path**: Call `checkPostAnalytics()` per post, 5 concurrent, with circuit breaker (stops after 2 consecutive failures per platform)
-5. Returns `{ analyticsMap, postsFailed, postsTotal }`
-
-### Metric classification regex
-
-**Used by Summary / Traffics / Impressions Trend** (classify raw post-level metrics):
-- `IMPRESSIONS_RE = /impression|views|page.views|reach/i`
-- `TRAFFICS_RE = /click|engagement|traffic/i`
-
-**Used by Post Engagement** (classify into 4 unified metrics):
-- `VIEWS_RE = /^(impression|views|reach|unique.impression)/i`
-- `LIKES_RE = /^(like|reaction)/i`
-- `COMMENTS_RE = /^(comment|repl)/i`
-- `SAVES_RE = /^(save|bookmark|favorite)/i`
-
 ### Design principles
 
-1. **Post-level only**: All analytics data comes from post-level APIs (`postAnalytics`), never from account-level APIs. This ensures only Postiz-managed content is measured.
-2. **Multi-tenant isolation**: All queries are scoped by `orgId`
-3. **Soft delete**: All database queries filter `deletedAt IS NULL`
-4. **Graceful degradation**: Single platform/post failure does not cause overall failure
-5. **Flexible time granularity**: Daily/weekly/monthly aggregation; weekly uses ISO 8601 standard
-6. **Two-level caching**: Redis cache reduces third-party API call volume
-7. **Regex-driven metric classification**: Automatically normalizes metric names across platforms
+1. **Post-level only**: All analytics data comes from post-level APIs (`batchPostAnalytics` / `postAnalytics`), never from account-level APIs. This ensures only Postiz-managed content is measured.
+2. **Two-pipeline architecture**: Pre-aggregated DataTicks for summary/trend endpoints (fast reads), real-time fetch for detailed engagement (fresh data).
+3. **Multi-tenant isolation**: All queries are scoped by `orgId`
+4. **Soft delete**: All database queries filter `deletedAt IS NULL`
+5. **Graceful degradation**: Single platform/post failure does not cause overall failure
+6. **Background sync with cache invalidation**: DataTicks sync runs daily and invalidates relevant dashboard caches
+7. **Flexible time granularity**: Daily/weekly/monthly aggregation; weekly uses ISO 8601 standard
 8. **Batched concurrency control**: 5 posts per concurrent batch to avoid platform API rate limits
-9. **No artificial post limit**: All published posts in the time range are analyzed; circuit breaker and caching prevent runaway API calls
-10. **Shared pipeline**: `_fetchAllPostAnalytics()` is the single source of truth for all analytics endpoints, ensuring consistent data across the dashboard
+9. **Circuit breaker**: Stops API calls to a platform after 2 consecutive failures
 
 </details>

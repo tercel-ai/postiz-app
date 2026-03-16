@@ -9,6 +9,7 @@ import { IntegrationRepository } from '@gitroom/nestjs-libraries/database/prisma
 import { IntegrationManager } from '@gitroom/nestjs-libraries/integrations/integration.manager';
 import {
   AnalyticsData,
+  BatchPostAnalyticsResult,
   SocialProvider,
 } from '@gitroom/nestjs-libraries/integrations/social/social.integrations.interface';
 import { Integration, Organization } from '@prisma/client';
@@ -461,6 +462,141 @@ export class IntegrationService {
     }
 
     return [];
+  }
+
+  /**
+   * Get aggregated analytics for Postiz-published posts only (not account-level).
+   */
+  async getPostsLevelAnalytics(
+    org: Organization,
+    integrationId: string,
+    days = 30
+  ): Promise<AnalyticsData[]> {
+    const cacheKey = `posts-analytics:${org.id}:${integrationId}:${days}`;
+    const cached = await ioRedis.get(cacheKey);
+    if (cached) {
+      return JSON.parse(cached);
+    }
+
+    const integration = await this.getIntegrationById(org.id, integrationId);
+    if (!integration || integration.type !== 'social') {
+      return [];
+    }
+
+    const provider = this._integrationManager.getSocialIntegration(
+      integration.providerIdentifier
+    );
+
+    // Refresh token if expired
+    let token = integration.token;
+    if (dayjs(integration.tokenExpiration).isBefore(dayjs())) {
+      try {
+        const refreshed = await this._refreshIntegrationService.refresh(integration);
+        if (!refreshed || !refreshed.accessToken) return [];
+        token = refreshed.accessToken;
+      } catch {
+        return [];
+      }
+    }
+
+    const posts = await this._integrationRepository.getPublishedPostsWithReleaseForIntegration(
+      org.id,
+      integrationId,
+      days
+    );
+
+    const postsWithRelease = posts.filter(
+      (p): p is typeof p & { releaseId: string } => !!p.releaseId
+    );
+    if (postsWithRelease.length === 0) return [];
+
+    const releaseIds = postsWithRelease.map((p) => p.releaseId);
+    let result: AnalyticsData[];
+
+    if (provider.batchPostAnalytics) {
+      try {
+        const batchResult = await provider.batchPostAnalytics(
+          integration.internalId,
+          token,
+          releaseIds,
+          days
+        );
+        result = this._aggregateBatchAnalytics(batchResult, days);
+      } catch {
+        return [];
+      }
+    } else if (provider.postAnalytics) {
+      const allMetrics: AnalyticsData[] = [];
+      const BATCH_SIZE = 5;
+      const FAIL_THRESHOLD = 2;
+      let consecutiveFailures = 0;
+
+      for (let i = 0; i < releaseIds.length; i += BATCH_SIZE) {
+        if (consecutiveFailures >= FAIL_THRESHOLD) break;
+
+        const batch = releaseIds.slice(i, i + BATCH_SIZE);
+        const results = await Promise.allSettled(
+          batch.map((releaseId) =>
+            provider.postAnalytics!(
+              integration.internalId,
+              token,
+              releaseId,
+              days
+            )
+          )
+        );
+
+        for (const r of results) {
+          if (r.status === 'fulfilled' && r.value?.length) {
+            consecutiveFailures = 0;
+            allMetrics.push(...r.value);
+          } else {
+            consecutiveFailures++;
+          }
+        }
+      }
+      result = this._aggregatePostAnalytics(allMetrics, days);
+    } else {
+      return [];
+    }
+
+    const cacheTtl =
+      !process.env.NODE_ENV || process.env.NODE_ENV === 'development' ? 1 : 3600;
+    await ioRedis.set(cacheKey, JSON.stringify(result), 'EX', cacheTtl);
+    return result;
+  }
+
+  private _aggregateBatchAnalytics(
+    batchResult: Record<string, AnalyticsData[]>,
+    days: number
+  ): AnalyticsData[] {
+    const allMetrics: AnalyticsData[] = [];
+    for (const metrics of Object.values(batchResult)) {
+      allMetrics.push(...metrics);
+    }
+    return this._aggregatePostAnalytics(allMetrics, days);
+  }
+
+  private _aggregatePostAnalytics(metrics: AnalyticsData[], days: number): AnalyticsData[] {
+    const totals = new Map<string, number>();
+    for (const metric of metrics) {
+      const label = metric.label;
+      const value = metric.data?.length
+        ? metric.data.reduce((sum, d) => sum + Number(d.total || 0), 0)
+        : 0;
+      totals.set(label, (totals.get(label) || 0) + value);
+    }
+
+    const since = dayjs().subtract(days, 'day').format('YYYY-MM-DD');
+    const until = dayjs().format('YYYY-MM-DD');
+    return Array.from(totals.entries()).map(([label, value]) => ({
+      label,
+      percentageChange: 0,
+      data: [
+        { total: String(0), date: since },
+        { total: String(value), date: until },
+      ],
+    }));
   }
 
   customers(orgId: string) {

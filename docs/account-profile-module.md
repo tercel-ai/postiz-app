@@ -22,7 +22,7 @@ The Account Profile module provides a comprehensive view of a connected social m
 - **Logic**:
   1. Fetch `Integration` details from the database.
   2. Count associated `Post` records for the specific integration ID.
-  3. Invoke `IntegrationService.checkAnalytics()` to pull live data from the social platform's API (e.g., X API v2).
+  3. Invoke `IntegrationService.getPostsLevelAnalytics()` to fetch analytics for Postiz-published posts only (using `batchPostAnalytics` or per-post `postAnalytics` APIs). Results are cached in Redis for 1 hour.
   4. Return a consolidated JSON response including profile info, post counts, and analytics.
 
 ### 3.2 Frontend Component

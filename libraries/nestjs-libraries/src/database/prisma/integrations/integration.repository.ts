@@ -575,6 +575,27 @@ export class IntegrationRepository {
     });
   }
 
+  getPublishedPostsWithReleaseForIntegration(org: string, integrationId: string, sinceDays: number) {
+    return this._posts.model.post.findMany({
+      where: {
+        organizationId: org,
+        integrationId,
+        deletedAt: null,
+        parentPostId: null,
+        state: 'PUBLISHED',
+        releaseId: { not: null },
+        publishDate: {
+          gte: dayjs().subtract(sinceDays, 'day').toDate(),
+        },
+      },
+      select: {
+        id: true,
+        releaseId: true,
+      },
+      orderBy: { publishDate: 'desc' },
+    });
+  }
+
   deleteChannel(org: string, id: string) {
     return this._integration.model.integration.update({
       where: {
