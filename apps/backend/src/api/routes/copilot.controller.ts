@@ -24,6 +24,11 @@ import { Request, Response } from 'express';
 import { RuntimeContext } from '@mastra/core/di';
 import { CheckPolicies } from '@gitroom/backend/services/auth/permissions/permissions.ability';
 import { AuthorizationActions, Sections } from '@gitroom/backend/services/auth/permissions/permission.exception.class';
+import { AiseeCreditService } from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/aisee-credit.service';
+import { AiseeBusinessType } from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/aisee.client';
+import { runWithContext, getCollectedUsages } from '@gitroom/nestjs-libraries/chat/async.storage';
+import { randomUUID } from 'crypto';
+import { logAiUsage } from '@gitroom/nestjs-libraries/openai/openai.service';
 
 function hasValidOpenAiKey(): boolean {
   const key = process.env.OPENAI_API_KEY;
@@ -65,9 +70,12 @@ export type ChannelsContext = {
 
 @Controller('/copilot')
 export class CopilotController {
+  private readonly logger = new Logger(CopilotController.name);
+
   constructor(
     private _subscriptionService: SubscriptionService,
-    private _mastraService: MastraService
+    private _mastraService: MastraService,
+    private _creditService: AiseeCreditService
   ) {}
   @Post('/chat')
   chatAgent(@Req() req: Request, @Res() res: Response) {
@@ -96,6 +104,13 @@ export class CopilotController {
       Logger.warn('No AI API key set (OPENAI_API_KEY or OPENROUTER_API_KEY), chat functionality will not work');
       return;
     }
+
+    const hasBalance = await this._creditService.hasCredits(organization.id);
+    if (!hasBalance) {
+      res.status(402).json({ error: 'Insufficient credits' });
+      return;
+    }
+
     const mastra = await this._mastraService.mastra();
     const runtimeContext = new RuntimeContext<ChannelsContext>();
     runtimeContext.set(
@@ -123,7 +138,43 @@ export class CopilotController {
       serviceAdapter: createServiceAdapter(),
     });
 
-    return handler(req, res);
+    // Register billing callback when response stream closes
+    res.on('close', () => {
+      this.billAfterResponse(organization);
+    });
+
+    // Run handler within AsyncLocalStorage context for usage collection
+    return runWithContext(
+      { requestId: randomUUID(), auth: organization, usages: [] },
+      () => handler(req, res)
+    );
+  }
+
+  private billAfterResponse(organization: Organization): void {
+    const usages = getCollectedUsages();
+    if (usages.length === 0) {
+      return;
+    }
+
+    for (const usage of usages) {
+      logAiUsage(usage);
+    }
+
+    const taskId = `postiz_agent_chat_${organization.id}_${Date.now()}_${randomUUID().slice(0, 8)}`;
+
+    this._creditService
+      .billCollectedUsages(
+        {
+          userId: organization.id,
+          taskId,
+          businessType: AiseeBusinessType.AI_COPYWRITING,
+          description: 'Agent chat conversation',
+        },
+        usages
+      )
+      .catch((err) => {
+        this.logger.error('Failed to bill agent chat usage:', err);
+      });
   }
 
   @Get('/credits')

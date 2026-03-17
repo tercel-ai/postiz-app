@@ -6,6 +6,7 @@ import { pStore } from '@gitroom/nestjs-libraries/chat/mastra.store';
 import { array, object, string } from 'zod';
 import { ModuleRef } from '@nestjs/core';
 import { toolList } from '@gitroom/nestjs-libraries/chat/tools/tool.list';
+import { withBillingTracking } from '@gitroom/nestjs-libraries/chat/billing.middleware';
 import dayjs from 'dayjs';
 
 function getAgentModel() {
@@ -20,9 +21,11 @@ function getAgentModel() {
       apiKey: process.env.OPENROUTER_API_KEY || '',
       baseURL: 'https://openrouter.ai/api/v1',
     });
-    return openrouter(process.env.OPENROUTER_TEXT_MODEL || 'openai/gpt-4.1');
+    return withBillingTracking(
+      openrouter(process.env.OPENROUTER_TEXT_MODEL || 'openai/gpt-4.1')
+    );
   }
-  return openai('gpt-4.1');
+  return withBillingTracking(openai('gpt-4.1'));
 }
 
 export const AgentState = object({
@@ -110,6 +113,8 @@ export class LoadToolsService {
           threads: {
             generateTitle: true,
           },
+          lastMessages: false,
+          semanticRecall: false,
           workingMemory: {
             enabled: true,
             schema: AgentState,

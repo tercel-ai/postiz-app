@@ -1,9 +1,11 @@
 // context.ts
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { AiUsageInfo } from '@gitroom/nestjs-libraries/openai/openai.service';
 
 type Ctx = {
   requestId: string;
   auth: any; // replace with your org type if you have it, e.g. Organization
+  usages?: AiUsageInfo[];
 };
 
 const als = new AsyncLocalStorage<Ctx>();
@@ -22,4 +24,15 @@ export function getAuth<T = any>(): T | undefined {
 
 export function getRequestId(): string | undefined {
   return als.getStore()?.requestId;
+}
+
+export function collectUsage(usage: AiUsageInfo): void {
+  const store = als.getStore();
+  if (store?.usages) {
+    store.usages.push(usage);
+  }
+}
+
+export function getCollectedUsages(): AiUsageInfo[] {
+  return als.getStore()?.usages ?? [];
 }
