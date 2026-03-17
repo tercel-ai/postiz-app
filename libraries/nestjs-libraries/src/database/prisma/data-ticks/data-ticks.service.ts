@@ -372,12 +372,16 @@ export class DataTicksService {
             if (!metrics.length) continue;
 
             const { impressions, trafficScore, rawMetrics } = extractMetrics(platform, metrics);
-            pendingUpdates.push({
-              id: post.id,
-              impressions,
-              trafficScore: trafficScore ?? undefined,
-              analytics: rawMetrics,
-            });
+            // Only update if we got meaningful data — avoids overwriting valid
+            // previous values with 0 when the API returns unrecognized labels.
+            if (impressions > 0 || trafficScore !== null) {
+              pendingUpdates.push({
+                id: post.id,
+                impressions,
+                trafficScore: trafficScore ?? undefined,
+                analytics: rawMetrics,
+              });
+            }
           }
         } catch (err) {
           console.error(`Post batch analytics error for integration ${intId}:`, err);
@@ -402,12 +406,14 @@ export class DataTicksService {
             if (r.status !== 'fulfilled' || !r.value?.length) continue;
 
             const { impressions, trafficScore, rawMetrics } = extractMetrics(platform, r.value);
-            pendingUpdates.push({
-              id: batch[j].id,
-              impressions,
-              trafficScore: trafficScore ?? undefined,
-              analytics: rawMetrics,
-            });
+            if (impressions > 0 || trafficScore !== null) {
+              pendingUpdates.push({
+                id: batch[j].id,
+                impressions,
+                trafficScore: trafficScore ?? undefined,
+                analytics: rawMetrics,
+              });
+            }
           }
         }
       }
