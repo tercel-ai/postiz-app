@@ -737,4 +737,29 @@ export class IntegrationRepository {
       },
     });
   }
+
+  /**
+   * Find integrations that need attention (refresh, stuck, or disabled).
+   */
+  findUnhealthyIntegrations() {
+    return this._integration.model.integration.findMany({
+      where: {
+        deletedAt: null,
+        OR: [
+          { refreshNeeded: true },
+          { inBetweenSteps: true },
+          { disabled: true },
+        ],
+      },
+      select: {
+        id: true,
+        name: true,
+        providerIdentifier: true,
+        organizationId: true,
+        refreshNeeded: true,
+        inBetweenSteps: true,
+        disabled: true,
+      },
+    });
+  }
 }

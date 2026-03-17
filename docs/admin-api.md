@@ -155,9 +155,56 @@ Validation rules:
 
 Both POST and PUT clear the in-memory pricing cache.
 
+---
+
+### Diagnostics
+
+Health check endpoints for monitoring data anomalies.
+
+#### GET /admin/diagnostics/overview
+
+Aggregated health check across all diagnostic categories. Returns a single `healthy` boolean and per-category summaries.
+
+Response:
+```json
+{
+  "checkedAt": "2026-03-17T12:00:00.000Z",
+  "healthy": false,
+  "recurringPosts": { "recurringPostsCount": 5, "prematureCount": 1, "duplicateCount": 0, "missedCount": 0, "healthy": false },
+  "stuckPosts": { "count": 0, "healthy": true },
+  "integrations": { "total": 1, "refreshNeeded": 1, "inBetweenSteps": 0, "disabled": 0, "healthy": false },
+  "errorPosts": { "count": 3, "healthy": false }
+}
+```
+
+#### GET /admin/diagnostics/recurring-posts
+
+Checks recurring post anomalies:
+
+| Check | Description | Detection |
+|-------|-------------|-----------|
+| `prematureClones` | Clone published before its `publishDate` | `publishDate - createdAt > 1 hour` |
+| `duplicateClones` | Multiple PUBLISHED clones on the same day | Same `sourcePostId` + same day |
+| `missedCycles` | Expected publish date with no clone | Past 7 days, based on `intervalInDays` |
+
+#### GET /admin/diagnostics/stuck-posts
+
+Finds non-recurring QUEUE posts whose `publishDate` passed more than 2 hours ago. These should have been picked up by `missingPostWorkflow`. Excludes recurring posts (they stay QUEUE by design).
+
+#### GET /admin/diagnostics/integrations
+
+Lists unhealthy integrations (`refreshNeeded`, `inBetweenSteps`, or `disabled`) and counts how many QUEUE posts are blocked by each.
+
+#### GET /admin/diagnostics/error-posts
+
+Lists posts with ERROR state from the last 7 days, including error details. Covers both non-recurring errors and recurring clone errors.
+
+---
+
 ## Key Files
 
-- `apps/backend/src/api/routes/admin.controller.ts`
+- `apps/backend/src/admin-api/routes/admin-settings.controller.ts`
+- `apps/backend/src/admin-api/routes/admin-diagnostics.controller.ts`
 - `libraries/nestjs-libraries/src/dtos/admin/ai-pricing.dto.ts`
 - `libraries/nestjs-libraries/src/dtos/admin/settings-body.dto.ts`
 - `libraries/nestjs-libraries/src/dtos/admin/settings-query.dto.ts`

@@ -594,6 +594,134 @@ export class PostsRepository {
     });
   }
 
+  /**
+   * Find all recurring main posts (intervalInDays > 0, not a clone).
+   */
+  findRecurringPosts() {
+    return this._post.model.post.findMany({
+      where: {
+        intervalInDays: { not: null },
+        sourcePostId: null,
+        parentPostId: null,
+        deletedAt: null,
+      },
+      select: {
+        id: true,
+        publishDate: true,
+        intervalInDays: true,
+        state: true,
+        createdAt: true,
+        integration: {
+          select: {
+            id: true,
+            providerIdentifier: true,
+            name: true,
+          },
+        },
+      },
+    });
+  }
+
+  /**
+   * Find all clone posts for given source post IDs.
+   */
+  findClonesBySourceIds(sourceIds: string[]) {
+    return this._post.model.post.findMany({
+      where: {
+        sourcePostId: { in: sourceIds },
+        deletedAt: null,
+      },
+      select: {
+        id: true,
+        sourcePostId: true,
+        publishDate: true,
+        createdAt: true,
+        state: true,
+        releaseURL: true,
+        releaseId: true,
+        error: true,
+      },
+      orderBy: { publishDate: 'asc' },
+    });
+  }
+
+  /**
+   * Find non-recurring QUEUE posts whose publishDate has passed.
+   */
+  findStuckQueuePosts(before: Date) {
+    return this._post.model.post.findMany({
+      where: {
+        state: 'QUEUE',
+        publishDate: { lt: before },
+        deletedAt: null,
+        parentPostId: null,
+        sourcePostId: null,
+        intervalInDays: null,
+      },
+      select: {
+        id: true,
+        publishDate: true,
+        createdAt: true,
+        intervalInDays: true,
+        organizationId: true,
+        integration: {
+          select: {
+            id: true,
+            providerIdentifier: true,
+            name: true,
+          },
+        },
+      },
+      orderBy: { publishDate: 'asc' },
+    });
+  }
+
+  /**
+   * Count QUEUE posts grouped by integration ID.
+   */
+  countQueuePostsByIntegrations(integrationIds: string[]) {
+    return this._post.model.post.groupBy({
+      by: ['integrationId'],
+      where: {
+        integrationId: { in: integrationIds },
+        state: 'QUEUE',
+        deletedAt: null,
+        parentPostId: null,
+      },
+      _count: true,
+    });
+  }
+
+  /**
+   * Find recent posts with ERROR state.
+   */
+  findRecentErrorPosts(since: Date) {
+    return this._post.model.post.findMany({
+      where: {
+        state: 'ERROR',
+        createdAt: { gte: since },
+        deletedAt: null,
+      },
+      select: {
+        id: true,
+        publishDate: true,
+        createdAt: true,
+        error: true,
+        sourcePostId: true,
+        organizationId: true,
+        integration: {
+          select: {
+            id: true,
+            providerIdentifier: true,
+            name: true,
+          },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 100,
+    });
+  }
+
   batchUpdatePostAnalytics(
     updates: Array<{
       id: string;

@@ -38,7 +38,7 @@ The backend exposes several endpoints specifically for the Agents module under t
 ### Core AI Endpoints (`/copilot`)
 | Endpoint | Method | Description |
 | :--- | :--- | :--- |
-| `/copilot/agent` | `POST` | The main runtime endpoint for CopilotKit. Orchestrates Mastra agents and tools. |
+| `/copilot/agent` | `POST` | The main runtime endpoint for CopilotKit. Orchestrates Mastra agents and tools. Includes pre-chat credit check (402 if insufficient) and post-response token billing. |
 | `/copilot/list` | `GET` | Retrieves a paginated list of chat threads for the organization. |
 | `/copilot/:thread/list` | `GET` | Retrieves the message history for a specific thread. |
 | `/copilot/credits` | `GET` | Checks remaining AI credits (images/videos) for the organization. |
@@ -105,7 +105,33 @@ sequenceDiagram
 
 ---
 
-## 6. Integration Rules Summary
+## 6. Agent Model Selection
+
+The agent's LLM model is driven by the `ai_model_pricing` Settings config (see [ai-pricing-module.md](./ai-pricing-module.md)). The `text` entry determines which model the agent uses:
+
+```json
+{ "servicer": "openrouter", "provider": "openai", "model": "gpt-5.1" }
+```
+
+- `servicer=openrouter` → uses OpenRouter API with model ID `openai/gpt-5.1`
+- `servicer=openai` → uses OpenAI API directly with model ID `gpt-5.1`
+- If no config exists, falls back to environment variables (`OPENROUTER_TEXT_MODEL` / `OPENAI_API_KEY`)
+
+The model is resolved once at Mastra Agent initialization (singleton). Config changes require a backend restart.
+
+## 7. Agent Chat Billing
+
+Each `/copilot/agent` request follows this billing flow:
+
+1. **Pre-check**: `checkMinChatCredits()` estimates minimum cost (~500 tokens) and returns HTTP 402 if balance is insufficient.
+2. **Usage collection**: The LLM model is wrapped with `withBillingTracking()` (Proxy on `doGenerate`/`doStream`) that captures token usage into `AsyncLocalStorage`.
+3. **Post-billing**: On `res.close`, collected usages are sent to Aisee via `billCollectedUsages()` (fire-and-forget).
+
+### Memory Configuration
+
+Mastra Memory is configured with `lastMessages: false` and `semanticRecall: false` to prevent duplicate message injection — CopilotKit already sends the full conversation history in each request. Messages are still persisted for thread management and the `/copilot/:thread/list` endpoint.
+
+## 8. Integration Rules Summary
 AI follows strict rules based on platform identifiers:
 - **X (Twitter)**: Handle threads vs. long posts based on premium status.
 - **LinkedIn/Facebook**: Handle multi-part content as post + comments.

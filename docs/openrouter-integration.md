@@ -35,6 +35,7 @@ OPENAI_API_KEY=""            # empty or omitted
 All AI features route through OpenRouter:
 - Image generation → `OPENROUTER_IMAGE_MODEL`
 - Text generation (posts, prompts, voice, slides, etc.) → `OPENROUTER_TEXT_MODEL`
+- **Agent chat** → driven by `ai_model_pricing.text` config (see [ai-pricing-module.md](./ai-pricing-module.md)), falls back to `OPENROUTER_TEXT_MODEL` if no config exists
 
 ### Scenario 2: OpenRouter for images, OpenAI for text
 

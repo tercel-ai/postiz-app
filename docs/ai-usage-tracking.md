@@ -67,6 +67,15 @@ Determined by the model's actual response:
 | `AiUsageCallbackHandler.handleLLMEnd` | text | Intercepts all ChatOpenAI calls |
 | `generatePictures` | image | DALL-E via DallEAPIWrapper |
 
+### billing.middleware.ts (Agent Chat via CopilotKit)
+
+| Method | Type | Notes |
+|--------|------|-------|
+| `withBillingTracking` Proxy → `doGenerate` | text | Captures usage from non-streaming LLM calls |
+| `withBillingTracking` Proxy → `doStream` finish chunk | text | Captures usage from streaming LLM calls |
+
+The billing middleware wraps the ai-sdk `LanguageModelV2` with a `Proxy` that intercepts `doGenerate` and `doStream`. Token usage is collected into `AsyncLocalStorage` via `collectUsage()`, then billed via `AiseeCreditService.billCollectedUsages()` when the HTTP response stream closes.
+
 ## Log Format
 
 ```
@@ -77,3 +86,5 @@ Determined by the model's actual response:
 
 - `libraries/nestjs-libraries/src/openai/openai.service.ts` — `AiUsageInfo`, `parseModelId()`, `logAiUsage()`
 - `libraries/nestjs-libraries/src/agent/agent.graph.service.ts` — `AiUsageCallbackHandler`
+- `libraries/nestjs-libraries/src/chat/billing.middleware.ts` — `withBillingTracking()` Proxy for agent chat
+- `libraries/nestjs-libraries/src/chat/async.storage.ts` — `collectUsage()`, `getCollectedUsages()`

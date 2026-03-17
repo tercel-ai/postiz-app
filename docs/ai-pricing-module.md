@@ -4,6 +4,8 @@
 
 Calculates AI operation costs in Aisee credits ($1 = 100 credits) based on a pricing configuration stored in the Settings table. Supports both per-token and per-image billing modes.
 
+The `ai_model_pricing` config also drives **model selection** for the Copilot agent chat — the `text` entry's `servicer`, `provider`, and `model` fields determine which LLM the agent uses (see [agents-module-technical-guide.md](./agents-module-technical-guide.md)).
+
 ## Pricing Config Structure
 
 Stored in Settings table under key `ai_model_pricing`:

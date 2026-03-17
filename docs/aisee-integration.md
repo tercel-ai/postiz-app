@@ -14,6 +14,22 @@ AI Call → logAiUsage(AiUsageInfo) → AiPricingService.calculateCost() → Ais
                                    credits per token                      amount in credits
 ```
 
+### Agent Chat Billing Flow
+
+```
+POST /copilot/agent
+  → checkMinChatCredits() → 402 if balance < estimated min cost
+  → runWithContext({ usages: [] })
+      → handler(req, res)
+          → Mastra Agent → LLM (withBillingTracking Proxy)
+              → doStream finish → collectUsage() → writes to AsyncLocalStorage
+  → res.on('close')
+      → billAfterResponse()
+          → getCollectedUsages() from ALS
+          → logAiUsage()
+          → AiseeCreditService.billCollectedUsages() → POST /credit/deduct (fire-and-forget)
+```
+
 All prices and costs are in **Aisee credits** ($1 = 100 credits). No USD-to-credit conversion is needed — the entire pipeline operates in credits.
 
 ## AiseeClient
@@ -37,7 +53,7 @@ When `AISEE_ORCHESTRATOR_URL` is not set, `AiseeClient` is disabled — `deductC
 | Method | Description |
 |--------|-------------|
 | `deductCredits(req)` | POST to `/credit/deduct` with userId, amount, taskId, description |
-| `getBalance(userId)` | GET `/credit-balance/{userId}/balance` |
+| `getBalance(userId)` | GET `/credit/balance/{userId}` |
 | `AiseeClient.buildTaskId(postId)` | Returns `postiz_{postId}` |
 
 ### AiseeDeductRequest
@@ -74,7 +90,21 @@ All Postiz operations use the format `postiz_{postId}` as the task_id for aisee 
 - **aisee_orchestrator** needs a new `POST /credit/deduct` endpoint that wraps `credit_service.consume_credits()`. Currently only internal methods exist for credit deduction.
 - **media.service.ts** integration: replace current `useCredit()` flow with `AiPricingService.calculateCost()` + `AiseeClient.deductCredits()`.
 
+## AiseeCreditService
+
+Orchestrates the credit lifecycle. Key methods:
+
+| Method | Description |
+|--------|-------------|
+| `getBalance(userId)` | Returns credit balance (null if Aisee disabled) |
+| `hasCredits(userId)` | Returns `true` if balance > 0 or Aisee disabled |
+| `executeWithBilling(opts, llmCall)` | Single-step: check balance → execute → calculate cost → deduct |
+| `billCollectedUsages(opts, usages)` | Post-hoc billing for already-collected usages (agent chat) |
+
 ## Key Files
 
 - `libraries/nestjs-libraries/src/database/prisma/ai-pricing/aisee.client.ts`
+- `libraries/nestjs-libraries/src/database/prisma/ai-pricing/aisee-credit.service.ts`
 - `libraries/nestjs-libraries/src/database/prisma/ai-pricing/ai-pricing.service.ts`
+- `libraries/nestjs-libraries/src/chat/billing.middleware.ts` — Agent chat token tracking
+- `apps/backend/src/api/routes/copilot.controller.ts` — Pre-check + post-billing wiring
