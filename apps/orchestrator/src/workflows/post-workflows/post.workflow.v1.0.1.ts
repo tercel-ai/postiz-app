@@ -139,6 +139,8 @@ export async function postWorkflowV101({
   // iterate over the posts
   for (let i = 0; i < postsList.length; i++) {
     const before = postsResults.length;
+    let lastErr: unknown = null;
+
     // this is a small trick to repeat an action in case of token refresh
     for (const _ of iterate) {
       try {
@@ -175,9 +177,12 @@ export async function postWorkflowV101({
           postsResults[i].releaseURL
         );
 
+        lastErr = null;
         // break the current while to move to the next post
         break;
       } catch (err) {
+        lastErr = err;
+
         // if token refresh is needed, do it and repeat
         if (
           err instanceof ActivityFailure &&
@@ -195,20 +200,18 @@ export async function postWorkflowV101({
           continue;
         }
 
-        // Mark as ERROR — this catch is only reachable if postSocial/postComment
-        // or updatePost itself failed (notification was moved outside the try block)
+        // Log error for observability (for recurring posts this only writes to
+        // Errors table without changing the original's state).
         await changeState(postsList[0].id, 'ERROR', err, postsList);
-        const errMsg = err instanceof ActivityFailure && err.cause instanceof ApplicationFailure
-          ? err.cause.message || err.cause.type || 'Unknown error'
-          : String(err);
-        await recordFailedRelease(postsList[0].id, attemptReleaseId, errMsg);
 
-        // specific case for bad body errors
+        // specific case for bad body errors — no point retrying
         if (
           err instanceof ActivityFailure &&
           err.cause instanceof ApplicationFailure &&
           err.cause.type === 'bad_body'
         ) {
+          const errMsg = err.cause.message || err.cause.type || 'Unknown error';
+          await recordFailedRelease(postsList[0].id, attemptReleaseId, errMsg);
           await inAppNotification(
             post.organizationId,
             `Error posting${i === 0 ? ' ' : ' comments '}on ${
@@ -223,11 +226,18 @@ export async function postWorkflowV101({
           );
           return false;
         }
+
+        // Other errors: don't record failure yet — there may be more retries.
+        // The error clone is only created after all retries are exhausted.
       }
     }
 
     if (postsResults.length === before) {
-      // all retries exhausted without success
+      // all retries exhausted without success — record a single ERROR clone
+      const errMsg = lastErr instanceof ActivityFailure && lastErr.cause instanceof ApplicationFailure
+        ? lastErr.cause.message || lastErr.cause.type || 'Unknown error'
+        : String(lastErr);
+      await recordFailedRelease(postsList[0].id, attemptReleaseId, errMsg);
       return false;
     }
 

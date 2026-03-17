@@ -574,12 +574,21 @@ export class PostsRepository {
         delay: originalPost.delay,
         organizationId: originalPost.organizationId,
         integrationId: originalPost.integrationId,
-        publishDate: new Date(),
+        publishDate: originalPost.publishDate,
         state: data.state,
         releaseId: data.releaseId,
         releaseURL: data.releaseURL || null,
         error: data.error || null,
         sourcePostId: originalPost.id,
+      },
+    });
+  }
+
+  advancePublishDate(id: string, currentPublishDate: Date, intervalInDays: number) {
+    return this._post.model.post.update({
+      where: { id },
+      data: {
+        publishDate: dayjs.utc(currentPublishDate).add(intervalInDays, 'days').toDate(),
       },
     });
   }

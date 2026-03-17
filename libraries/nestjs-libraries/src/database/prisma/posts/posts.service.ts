@@ -73,6 +73,15 @@ export class PostsService {
         state: 'PUBLISHED',
       });
 
+      // Advance original publishDate to next scheduled time so that:
+      // 1. searchForMissingThreeHoursPosts can recover missed sends
+      // 2. Calendar virtual entries start from the correct next date
+      await this._postRepository.advancePublishDate(
+        post.id,
+        post.publishDate,
+        post.intervalInDays
+      );
+
       return post;
     }
 
@@ -98,8 +107,20 @@ export class PostsService {
       } catch (e) {
         console.error('Failed to clone post as failed release:', e);
       }
-    }
 
+      // Advance publishDate so the next scheduled send can proceed.
+      // This is safe because recordFailedRelease is only called from the
+      // workflow after all retries are exhausted (terminal failure).
+      try {
+        await this._postRepository.advancePublishDate(
+          post.id,
+          post.publishDate,
+          post.intervalInDays
+        );
+      } catch (e) {
+        console.error('Failed to advance publishDate after error:', e);
+      }
+    }
   }
 
   async checkPostAnalytics(

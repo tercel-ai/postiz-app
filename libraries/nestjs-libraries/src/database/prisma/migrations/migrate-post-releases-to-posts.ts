@@ -143,6 +143,83 @@ async function main() {
     console.log(`  Migrated: ${migrated}`);
     console.log(`  Skipped:  ${skipped} (already exists or missing original)`);
     console.log(`  Failed:   ${failed}`);
+
+    // --- Phase 2: Reset ALL recurring originals to template state ---
+    // 1. Clear stale releaseId/releaseURL from old code (before clone architecture)
+    // 2. Compute correct publishDate = latest clone publishDate + interval
+    //    (so searchForMissingThreeHoursPosts and calendar virtual entries work)
+    console.log('\nPhase 2: Resetting recurring originals...');
+
+    const allRecurringOriginals = await prisma.post.findMany({
+      where: {
+        intervalInDays: { gt: 0 },
+        sourcePostId: null,        // is an original, not a clone
+        parentPostId: null,        // is a main post
+        deletedAt: null,
+      },
+      select: { id: true, intervalInDays: true, publishDate: true, releaseId: true, state: true },
+    });
+
+    console.log(`  Found ${allRecurringOriginals.length} recurring originals to check.`);
+
+    let resetCount = 0;
+    let skippedNoClones = 0;
+    for (const orig of allRecurringOriginals) {
+      try {
+        // Find the latest clone's publishDate to compute next scheduled time
+        const latestClone = await prisma.post.findFirst({
+          where: {
+            sourcePostId: orig.id,
+            deletedAt: null,
+          },
+          orderBy: { publishDate: 'desc' },
+          select: { publishDate: true },
+        });
+
+        if (!latestClone) {
+          // No clones — never sent. Only clean stale fields if needed.
+          if (orig.releaseId || orig.state !== 'QUEUE') {
+            await prisma.post.update({
+              where: { id: orig.id },
+              data: {
+                state: 'QUEUE',
+                releaseId: null,
+                releaseURL: null,
+                error: null,
+              },
+            });
+            resetCount++;
+          } else {
+            skippedNoClones++;
+          }
+          continue;
+        }
+
+        // Next publishDate = latest clone time + interval
+        const nextPublishDate = new Date(
+          latestClone.publishDate.getTime() + orig.intervalInDays! * 86400000
+        );
+
+        await prisma.post.update({
+          where: { id: orig.id },
+          data: {
+            state: 'QUEUE',
+            releaseId: null,
+            releaseURL: null,
+            error: null,
+            publishDate: nextPublishDate,
+          },
+        });
+        resetCount++;
+      } catch (e) {
+        console.error(
+          `  FAIL reset: original ${orig.id}:`,
+          e instanceof Error ? e.message : e
+        );
+      }
+    }
+
+    console.log(`  Reset: ${resetCount}, Skipped (no clones, already clean): ${skippedNoClones}`);
   } finally {
     await prisma.$disconnect();
   }
