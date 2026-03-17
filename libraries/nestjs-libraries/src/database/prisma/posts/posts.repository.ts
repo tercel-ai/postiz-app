@@ -329,6 +329,7 @@ export class PostsRepository {
         ],
         deletedAt: null,
         parentPostId: null,
+        sourcePostId: null,
         // For recurring posts the original always stays QUEUE; state filter is
         // applied later after clone/virtual expansion.  Non-recurring posts are
         // filtered directly by state here.

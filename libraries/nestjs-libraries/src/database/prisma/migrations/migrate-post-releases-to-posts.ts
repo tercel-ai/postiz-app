@@ -60,6 +60,14 @@ async function main() {
           continue;
         }
 
+        // Only create clones for recurring MAIN posts — non-recurring posts
+        // hold releaseId/releaseURL directly; child posts (threads/comments)
+        // don't need independent clones.
+        if (!originalPost.intervalInDays || originalPost.intervalInDays <= 0 || originalPost.parentPostId) {
+          skipped++;
+          continue;
+        }
+
         // Check if a clone already exists for this (sourcePostId, releaseId) pair
         const existing = await prisma.post.findFirst({
           where: {
@@ -186,6 +194,9 @@ async function main() {
                 releaseId: null,
                 releaseURL: null,
                 error: null,
+                impressions: null,
+                trafficScore: null,
+                analytics: null,
               },
             });
             resetCount++;
@@ -207,6 +218,9 @@ async function main() {
             releaseId: null,
             releaseURL: null,
             error: null,
+            impressions: null,
+            trafficScore: null,
+            analytics: null,
             publishDate: nextPublishDate,
           },
         });
