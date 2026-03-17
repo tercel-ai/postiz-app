@@ -99,6 +99,23 @@ export async function postWorkflowV101({
     );
   }
 
+  // Re-check post state after sleep to prevent duplicate publishing.
+  // Another workflow (missingPostWorkflow or repeat-post child) may have
+  // already published and advanced the publishDate while we were sleeping.
+  if (!postNow) {
+    const postsListAfterSleep = await getPostsList(organizationId, postId);
+    const [freshPost] = postsListAfterSleep;
+    if (!freshPost || freshPost.state !== 'QUEUE') {
+      return;
+    }
+    // For recurring posts, state stays QUEUE after publishing — the only
+    // indicator that this cycle was already handled is an advanced publishDate.
+    if (freshPost.publishDate && post.publishDate &&
+        new Date(freshPost.publishDate).getTime() !== new Date(post.publishDate).getTime()) {
+      return;
+    }
+  }
+
   // if refresh is needed from last time, let's inform the user
   if (post.integration?.refreshNeeded) {
     await inAppNotification(
@@ -412,7 +429,8 @@ export async function postWorkflowV101({
             taskQueue,
             postId,
             organizationId,
-            postNow: true,
+            // postNow defaults to false — child workflow will sleep until
+            // the advanced publishDate, preventing premature publishing
           },
         ],
         workflowId: `post_${post.id}_${makeId(10)}`,

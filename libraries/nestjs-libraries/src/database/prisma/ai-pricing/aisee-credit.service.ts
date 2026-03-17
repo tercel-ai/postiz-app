@@ -3,6 +3,7 @@ import {
   AiseeClient,
   AiseeBusinessType,
   AiseeCostItem,
+  AiseeCreditBalance,
   AiseeDeductResponse,
 } from './aisee.client';
 import { AiPricingService, AiCostResult } from './ai-pricing.service';
@@ -40,11 +41,19 @@ export class AiseeCreditService {
   ) {}
 
   /**
+   * Get the user's credit balance.
+   * Returns null if Aisee is disabled (self-hosted / no billing).
+   */
+  async getBalance(userId: string): Promise<AiseeCreditBalance | null> {
+    return this.aiseeClient.getBalance(userId);
+  }
+
+  /**
    * Check whether the user has a positive credit balance.
    * Returns true if Aisee is disabled (self-hosted / no billing).
    */
   async hasCredits(userId: string): Promise<boolean> {
-    const balance = await this.aiseeClient.getBalance(userId);
+    const balance = await this.getBalance(userId);
     if (!balance) {
       return true;
     }

@@ -25,7 +25,8 @@ import { RuntimeContext } from '@mastra/core/di';
 import { CheckPolicies } from '@gitroom/backend/services/auth/permissions/permissions.ability';
 import { AuthorizationActions, Sections } from '@gitroom/backend/services/auth/permissions/permission.exception.class';
 import { AiseeCreditService } from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/aisee-credit.service';
-import { AiseeBusinessType } from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/aisee.client';
+import { AiseeBusinessType, AiseeClient } from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/aisee.client';
+import { AiPricingService } from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/ai-pricing.service';
 import { runWithContext, getCollectedUsages } from '@gitroom/nestjs-libraries/chat/async.storage';
 import { randomUUID } from 'crypto';
 import { logAiUsage } from '@gitroom/nestjs-libraries/openai/openai.service';
@@ -75,7 +76,8 @@ export class CopilotController {
   constructor(
     private _subscriptionService: SubscriptionService,
     private _mastraService: MastraService,
-    private _creditService: AiseeCreditService
+    private _creditService: AiseeCreditService,
+    private _aiPricingService: AiPricingService
   ) {}
   @Post('/chat')
   chatAgent(@Req() req: Request, @Res() res: Response) {
@@ -105,9 +107,9 @@ export class CopilotController {
       return;
     }
 
-    const hasBalance = await this._creditService.hasCredits(organization.id);
-    if (!hasBalance) {
-      res.status(402).json({ error: 'Insufficient credits' });
+    const insufficientError = await this.checkMinChatCredits(organization.id);
+    if (insufficientError) {
+      res.status(402).json(insufficientError);
       return;
     }
 
@@ -138,16 +140,61 @@ export class CopilotController {
       serviceAdapter: createServiceAdapter(),
     });
 
-    // Register billing callback when response stream closes
-    res.on('close', () => {
-      this.billAfterResponse(organization);
-    });
-
     // Run handler within AsyncLocalStorage context for usage collection
     return runWithContext(
       { requestId: randomUUID(), auth: organization, usages: [] },
-      () => handler(req, res)
+      () => {
+        // Register billing callback inside ALS context so it can read collected usages
+        res.on('close', () => {
+          this.billAfterResponse(organization);
+        });
+        return handler(req, res);
+      }
     );
+  }
+
+  /**
+   * Estimate minimum credits needed for one chat round (~500 tokens)
+   * and check if the user has enough balance.
+   * Returns error object if insufficient, null if OK.
+   */
+  private async checkMinChatCredits(
+    userId: string
+  ): Promise<{ error: string; required: number; balance: number } | null> {
+    const balance = await this._creditService.getBalance(userId);
+    if (!balance) {
+      return null; // Aisee disabled, allow
+    }
+
+    const config = await this._aiPricingService.getPricingConfig();
+    const textEntry = config?.text;
+    if (!textEntry) {
+      return null; // No pricing config, allow
+    }
+
+    // Estimate: ~200 input tokens + ~300 output tokens for a minimal chat round
+    const MIN_INPUT_TOKENS = 200;
+    const MIN_OUTPUT_TOKENS = 300;
+    let minCost: number;
+
+    if (textEntry.input_price && textEntry.output_price) {
+      minCost =
+        MIN_INPUT_TOKENS * parseFloat(textEntry.input_price) +
+        MIN_OUTPUT_TOKENS * parseFloat(textEntry.output_price);
+    } else {
+      minCost =
+        (MIN_INPUT_TOKENS + MIN_OUTPUT_TOKENS) * parseFloat(textEntry.price);
+    }
+
+    if (balance.total < minCost) {
+      return {
+        error: 'Insufficient credits for chat',
+        required: minCost,
+        balance: balance.total,
+      };
+    }
+
+    return null;
   }
 
   private billAfterResponse(organization: Organization): void {
@@ -160,7 +207,7 @@ export class CopilotController {
       logAiUsage(usage);
     }
 
-    const taskId = `postiz_agent_chat_${organization.id}_${Date.now()}_${randomUUID().slice(0, 8)}`;
+    const taskId = AiseeClient.buildTaskId(`agent_chat_${organization.id}_${Date.now()}`);
 
     this._creditService
       .billCollectedUsages(
