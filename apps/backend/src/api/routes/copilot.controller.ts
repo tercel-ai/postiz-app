@@ -12,7 +12,7 @@ import {
   CopilotRuntime,
   OpenAIAdapter,
   copilotRuntimeNodeHttpEndpoint,
-  copilotRuntimeNextJSAppRouterEndpoint,
+  copilotRuntimeNestEndpoint,
 } from '@copilotkit/runtime';
 import OpenAI from 'openai';
 import { GetOrgFromRequest } from '@gitroom/nestjs-libraries/user/org.from.request';
@@ -117,14 +117,13 @@ export class CopilotController {
       agents,
     });
 
-    const copilotRuntimeHandler = copilotRuntimeNextJSAppRouterEndpoint({
+    const handler = copilotRuntimeNestEndpoint({
       endpoint: '/copilot/agent',
       runtime,
-      // properties: req.body.variables.properties,
       serviceAdapter: createServiceAdapter(),
     });
 
-    return copilotRuntimeHandler.handleRequest(req, res);
+    return handler(req, res);
   }
 
   @Get('/credits')
