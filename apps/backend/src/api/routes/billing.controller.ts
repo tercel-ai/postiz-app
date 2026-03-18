@@ -10,7 +10,15 @@ import { NotificationService } from '@gitroom/nestjs-libraries/database/prisma/n
 import { Request } from 'express';
 import { Nowpayments } from '@gitroom/nestjs-libraries/crypto/nowpayments';
 import { AuthService } from '@gitroom/helpers/auth/auth.service';
+import { isThirdPartyBilling } from '@gitroom/nestjs-libraries/services/billing.helper';
 
+/**
+ * Billing controller.
+ *
+ * When BILL_TYPE=third (default), Stripe-specific endpoints return stub
+ * responses because billing is handled by Aisee (../aisee-core).
+ * When BILL_TYPE=internal, the original Stripe flow is active.
+ */
 @ApiTags('Billing')
 @Controller('/billing')
 export class BillingController {
@@ -26,6 +34,9 @@ export class BillingController {
     @GetOrgFromRequest() org: Organization,
     @Param('id') body: string
   ) {
+    if (isThirdPartyBilling()) {
+      return { status: null, skipped: true };
+    }
     return {
       status: await this._stripeService.checkSubscription(org.id, body),
     };
@@ -33,6 +44,9 @@ export class BillingController {
 
   @Get('/check-discount')
   async checkDiscount(@GetOrgFromRequest() org: Organization) {
+    if (isThirdPartyBilling()) {
+      return { offerCoupon: false, skipped: true };
+    }
     return {
       offerCoupon: !(await this._stripeService.checkDiscount(org.paymentId))
         ? false
@@ -42,11 +56,17 @@ export class BillingController {
 
   @Post('/apply-discount')
   async applyDiscount(@GetOrgFromRequest() org: Organization) {
+    if (isThirdPartyBilling()) {
+      return { skipped: true };
+    }
     await this._stripeService.applyDiscount(org.paymentId);
   }
 
   @Post('/finish-trial')
   async finishTrial(@GetOrgFromRequest() org: Organization) {
+    if (isThirdPartyBilling()) {
+      return { finish: true, skipped: true };
+    }
     try {
       await this._stripeService.finishTrial(org.paymentId);
     } catch (err) {}
@@ -69,6 +89,9 @@ export class BillingController {
     @Body() body: BillingSubscribeDto,
     @Req() req: Request
   ) {
+    if (isThirdPartyBilling()) {
+      return { skipped: true, message: 'Billing handled by Aisee (BILL_TYPE=third)' };
+    }
     const uniqueId = req?.cookies?.track;
     return this._stripeService.embedded(
       uniqueId,
@@ -86,6 +109,9 @@ export class BillingController {
     @Body() body: BillingSubscribeDto,
     @Req() req: Request
   ) {
+    if (isThirdPartyBilling()) {
+      return { skipped: true, message: 'Billing handled by Aisee (BILL_TYPE=third)' };
+    }
     const uniqueId = req?.cookies?.track;
     return this._stripeService.subscribe(
       uniqueId,
@@ -98,6 +124,9 @@ export class BillingController {
 
   @Get('/portal')
   async modifyPayment(@GetOrgFromRequest() org: Organization) {
+    if (isThirdPartyBilling()) {
+      return { portal: null, skipped: true };
+    }
     const customer = await this._stripeService.getCustomerByOrganizationId(
       org.id
     );
@@ -118,6 +147,9 @@ export class BillingController {
     @GetUserFromRequest() user: User,
     @Body() body: { feedback: string }
   ) {
+    if (isThirdPartyBilling()) {
+      return { skipped: true, message: 'Billing handled by Aisee (BILL_TYPE=third)' };
+    }
     await this._notificationService.sendEmail(
       process.env.EMAIL_FROM_ADDRESS,
       'Subscription Cancelled',
@@ -133,6 +165,9 @@ export class BillingController {
     @GetOrgFromRequest() org: Organization,
     @Body() body: BillingSubscribeDto
   ) {
+    if (isThirdPartyBilling()) {
+      return { skipped: true, message: 'Billing handled by Aisee (BILL_TYPE=third)' };
+    }
     return this._stripeService.prorate(org.id, body);
   }
 

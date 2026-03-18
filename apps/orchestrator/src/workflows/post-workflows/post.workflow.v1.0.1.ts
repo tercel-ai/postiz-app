@@ -153,6 +153,11 @@ export async function postWorkflowV101({
   // list of all the saved results
   const postsResults: PostResponse[] = [];
 
+  // Track whether this workflow won the race for recurring posts.
+  // If another workflow already advanced publishDate, we lost and should
+  // skip repeat-post scheduling to avoid double-advance.
+  let lostRace = false;
+
   // iterate over the posts
   for (let i = 0; i < postsList.length; i++) {
     const before = postsResults.length;
@@ -187,12 +192,18 @@ export async function postWorkflowV101({
           );
         }
 
-        // mark post as successful — once this succeeds, the post is considered published
-        await updatePost(
+        // mark post as successful — once this succeeds, the post is considered published.
+        // For recurring posts, updatePost returns null if another workflow
+        // already advanced publishDate (optimistic lock race lost).
+        const updateResult = await updatePost(
           postsList[i].id,
           postsResults[i].postId,
           postsResults[i].releaseURL
         );
+
+        if (updateResult === null && i === 0) {
+          lostRace = true;
+        }
 
         lastErr = null;
         // break the current while to move to the next post
@@ -307,8 +318,10 @@ export async function postWorkflowV101({
     []
   );
 
-  // Check if the post is repeatable
-  const repeatPost = !post.intervalInDays
+  // Check if the post is repeatable.
+  // Skip repeat-post if we lost the optimistic lock race — the winning
+  // workflow will handle the next cycle's scheduling.
+  const repeatPost = !post.intervalInDays || lostRace
     ? []
     : [
         {

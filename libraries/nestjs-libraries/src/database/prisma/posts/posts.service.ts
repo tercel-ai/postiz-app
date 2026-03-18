@@ -66,21 +66,30 @@ export class PostsService {
     const post = await this._postRepository.getPostById(id);
 
     if (post && post.intervalInDays && post.intervalInDays > 0 && !post.parentPostId) {
-      // Recurring main post: clone as published, original stays QUEUE
+      // Optimistic lock: advance publishDate first.
+      // Only one workflow can win — the loser gets count=0 and skips cloning,
+      // preventing double-advance (which would skip a day).
+      const advanced = await this._postRepository.advancePublishDate(
+        post.id,
+        post.publishDate,
+        post.intervalInDays
+      );
+
+      if (!advanced) {
+        // Another workflow already advanced this cycle — skip to avoid
+        // creating a ghost clone and double-advancing publishDate.
+        console.warn(
+          `[updatePost] Lost race for post ${id}: publishDate already advanced from ${post.publishDate}`
+        );
+        return null;
+      }
+
+      // Only the winner creates the clone record.
       await this._postRepository.clonePostAsRelease(post, {
         releaseId: postId,
         releaseURL,
         state: 'PUBLISHED',
       });
-
-      // Advance original publishDate to next scheduled time so that:
-      // 1. searchForMissingThreeHoursPosts can recover missed sends
-      // 2. Calendar virtual entries start from the correct next date
-      await this._postRepository.advancePublishDate(
-        post.id,
-        post.publishDate,
-        post.intervalInDays
-      );
 
       return post;
     }
@@ -98,6 +107,25 @@ export class PostsService {
     // Only clone for recurring posts — non-recurring failures are already
     // captured by changeState(ERROR) on the original post.
     if (post.intervalInDays && post.intervalInDays > 0 && !post.parentPostId) {
+      // Optimistic lock: advance first, skip if another workflow already handled this cycle.
+      try {
+        const advanced = await this._postRepository.advancePublishDate(
+          post.id,
+          post.publishDate,
+          post.intervalInDays
+        );
+
+        if (!advanced) {
+          console.warn(
+            `[recordFailedRelease] Lost race for post ${postId}: publishDate already advanced`
+          );
+          return;
+        }
+      } catch (e) {
+        console.error('Failed to advance publishDate after error:', e);
+        return;
+      }
+
       try {
         await this._postRepository.clonePostAsRelease(post, {
           releaseId,
@@ -106,19 +134,6 @@ export class PostsService {
         });
       } catch (e) {
         console.error('Failed to clone post as failed release:', e);
-      }
-
-      // Advance publishDate so the next scheduled send can proceed.
-      // This is safe because recordFailedRelease is only called from the
-      // workflow after all retries are exhausted (terminal failure).
-      try {
-        await this._postRepository.advancePublishDate(
-          post.id,
-          post.publishDate,
-          post.intervalInDays
-        );
-      } catch (e) {
-        console.error('Failed to advance publishDate after error:', e);
       }
     }
   }

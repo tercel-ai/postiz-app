@@ -1,3 +1,4 @@
+import { PrismaClient } from '@prisma/client';
 import { TweetV2, TwitterApi } from 'twitter-api-v2';
 import {
   AnalyticsData,
@@ -26,6 +27,14 @@ import { ioRedis } from '@gitroom/nestjs-libraries/redis/redis.service';
   'X can have maximum 4 pictures, or maximum one video, it can also be without attachments'
 )
 export class XProvider extends SocialAbstract implements SocialProvider {
+  private static _prismaInstance: PrismaClient | null = null;
+  private static get _prisma(): PrismaClient {
+    if (!XProvider._prismaInstance) {
+      XProvider._prismaInstance = new PrismaClient();
+    }
+    return XProvider._prismaInstance;
+  }
+
   identifier = 'x';
   name = 'X';
   isBetweenSteps = false;
@@ -379,20 +388,56 @@ export class XProvider extends SocialAbstract implements SocialProvider {
   }
 
   // v2.me() can be unstable; fallback to v1.1 verifyCredentials
-  private async _getUsername(client: TwitterApi): Promise<string> {
+  private async _getUserInfo(client: TwitterApi): Promise<{ username: string; verified: boolean }> {
     try {
       const { data } = await this.runInConcurrent(async () =>
-        client.v2.me({ 'user.fields': 'username' })
+        client.v2.me({ 'user.fields': ['username', 'verified'] })
       );
-      return data.username;
+      return { username: data.username, verified: !!data.verified };
     } catch (err) {
       try {
         const v1User = await client.v1.verifyCredentials();
-        return v1User.screen_name;
+        return { username: v1User.screen_name, verified: !!v1User.verified };
       } catch {
         throw err;
       }
     }
+  }
+
+  /**
+   * Sync the verified (premium) status from X API to the integration's additionalSettings.
+   * Only updates the database when the value has actually changed.
+   */
+  private async _syncVerifiedStatus(integration: Integration, verified: boolean): Promise<void> {
+    const currentSettings: { title: string; description: string; type: string; value: any }[] =
+      JSON.parse(integration.additionalSettings || '[]');
+    const verifiedSetting = currentSettings.find((s) => s.title === 'Verified');
+
+    if (verifiedSetting && verifiedSetting.value === verified) {
+      return; // no change
+    }
+
+    const updatedSettings = verifiedSetting
+      ? currentSettings.map((s) =>
+          s.title === 'Verified' ? { ...s, value: verified } : s
+        )
+      : [
+          ...currentSettings,
+          {
+            title: 'Verified',
+            description: 'Is this a verified user? (Premium)',
+            type: 'checkbox',
+            value: verified,
+          },
+        ];
+
+    const newSettingsJson = JSON.stringify(updatedSettings);
+    integration.additionalSettings = newSettingsJson;
+
+    await XProvider._prisma.integration.update({
+      where: { id: integration.id },
+      data: { additionalSettings: newSettingsJson },
+    });
   }
 
   private async _getUserId(client: TwitterApi): Promise<string> {
@@ -480,10 +525,16 @@ export class XProvider extends SocialAbstract implements SocialProvider {
         | 'mentionedUsers'
         | 'subscribers'
         | 'verified';
-    }>[]
+    }>[],
+    integration: Integration
   ): Promise<PostResponse[]> {
     const client = await this.getClient(accessToken);
-    const username = await this._getUsername(client);
+    const { username, verified } = await this._getUserInfo(client);
+
+    // Best-effort sync — do not block posting if this fails
+    this._syncVerifiedStatus(integration, verified).catch((err) =>
+      console.warn('[x] Failed to sync verified status:', err?.message || err)
+    );
 
     const [firstPost] = postDetails;
 
@@ -552,7 +603,12 @@ export class XProvider extends SocialAbstract implements SocialProvider {
     integration: Integration
   ): Promise<PostResponse[]> {
     const client = await this.getClient(accessToken);
-    const username = await this._getUsername(client);
+    const { username, verified } = await this._getUserInfo(client);
+
+    // Best-effort sync — do not block posting if this fails
+    this._syncVerifiedStatus(integration, verified).catch((err) =>
+      console.warn('[x] Failed to sync verified status:', err?.message || err)
+    );
 
     const [commentPost] = postDetails;
 

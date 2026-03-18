@@ -42,6 +42,7 @@ model Organization {
   webhooks          Webhooks[]
   dataTicks         DataTicks[]
   postReleases      PostRelease[]
+  billingRecords    BillingRecord[]
 }
 
 model Tags {
@@ -260,6 +261,8 @@ model SocialMediaAgencyNiche {
   @@id([agencyId, niche])
 }
 
+/// Subscription-based credit counter. Only used when BILL_TYPE=internal.
+/// When BILL_TYPE=third, billing goes through Aisee and BillingRecord instead.
 model Credits {
   id             String       @id @default(uuid())
   organizationId String
@@ -271,6 +274,46 @@ model Credits {
 
   @@index([organizationId])
   @@index([createdAt])
+}
+
+/// Local audit trail for every Aisee credit deduction (BILL_TYPE=third).
+/// The record is created BEFORE calling Aisee so that its id (postizBillingId)
+/// can be sent to Aisee for cross-system reconciliation.
+model BillingRecord {
+  id              String       @id @default(uuid())
+  organizationId  String
+  /// Aisee transaction ID returned after successful deduction
+  transactionId   String?
+  /// Idempotency key sent to Aisee (postiz_{label}_{random})
+  taskId          String       @unique
+  /// Total cost in Aisee credits (decimal string)
+  amount          String
+  /// ai_copywriting | image_gen | video_gen
+  businessType    String
+  description     String
+  /// JSON-serialised AiseeCostItem[] breakdown
+  costItems       String       @default("[]")
+  /// Optional related entity ID for business context (e.g. post ID, media ID)
+  relatedId       String?
+  /// pending  → record created, Aisee call not yet made
+  /// success  → Aisee deduction confirmed
+  /// failed   → Aisee deduction failed or refunded
+  /// skipped  → Aisee not configured (self-hosted)
+  status          String       @default("pending")
+  /// Remaining balance returned by Aisee after deduction
+  remainingBalance String?
+  /// Non-null when user balance went negative
+  debtAmount      String?
+  /// Error message if deduction failed
+  error           String?
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+  organization    Organization @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId])
+  @@index([createdAt])
+  @@index([status])
+  @@index([relatedId])
 }
 
 model Subscription {

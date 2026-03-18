@@ -228,6 +228,10 @@ export class SubscriptionRepository {
     return load?.[0]?._sum?.credits || 0;
   }
 
+  /**
+   * Track one subscription-based credit usage (BILL_TYPE=internal only).
+   * When BILL_TYPE=third, use AiseeCreditService.billCollectedUsages() instead.
+   */
   async useCredit<T>(
     org: Organization,
     type = 'ai_images',

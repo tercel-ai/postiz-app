@@ -9,7 +9,9 @@ import { randomBytes } from 'crypto';
 export const AiseeBusinessType = {
   AI_COPYWRITING: 'ai_copywriting',
   IMAGE_GEN: 'image_gen',
-  // TODO: AI_VIDEO — pending KieAI cost integration with Aisee billing
+  // TODO: VIDEO_GEN billing — pending KieAI cost integration with Aisee billing.
+  // Once KieAI reports usage info, use this type in media.service.ts generateVideo().
+  VIDEO_GEN: 'video_gen',
 } as const;
 
 export type AiseeBusinessType =
@@ -53,6 +55,8 @@ export interface AiseeDeductRequest {
   businessType: AiseeBusinessType;
   /** Breakdown of individual costs (text, image, etc.) — stored in transaction data */
   costItems: AiseeCostItem[];
+  /** Postiz-side BillingRecord.id — sent to Aisee for cross-system reconciliation / auditing */
+  postizBillingId?: string;
 }
 
 export interface AiseeDeductResponse {
@@ -194,6 +198,7 @@ export class AiseeClient {
           channel: AiseeClient.CHANNEL,
           business_type: req.businessType,
           cost_items: req.costItems,
+          postiz_billing_id: req.postizBillingId,
         }),
       });
 

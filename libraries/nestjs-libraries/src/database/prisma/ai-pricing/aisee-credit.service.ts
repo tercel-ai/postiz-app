@@ -8,12 +8,17 @@ import {
 } from './aisee.client';
 import { AiPricingService, AiCostResult } from './ai-pricing.service';
 import { AiUsageInfo } from '@gitroom/nestjs-libraries/openai/openai.service';
+import {
+  PrismaRepository,
+} from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
 
 export interface AiseeCreditExecOptions {
   userId: string;
   taskId: string;
   businessType: AiseeBusinessType;
   description: string;
+  /** Optional related entity ID for business context (e.g. post ID, media ID) */
+  relatedId?: string;
 }
 
 export interface AiseeCreditExecResult<T> {
@@ -28,8 +33,10 @@ export interface AiseeCreditExecResult<T> {
  *   1. getBalance()        — soft check, reject if balance <= 0
  *   2. execute LLM call    — if it fails, stop here (zero cost)
  *   3. calculateCost()     — determine amount from AI usage
- *   4. deductCredits()     — atomic deduction on Aisee (one txn per post, with cost_items breakdown)
- *   5. confirmDeduction()  — fire-and-forget delivery receipt
+ *   4. create BillingRecord — local audit row (status=pending), id sent to Aisee
+ *   5. deductCredits()     — atomic deduction on Aisee (one txn per post, with cost_items breakdown)
+ *   6. update BillingRecord — set status + transactionId from Aisee response
+ *   7. confirmDeduction()  — fire-and-forget delivery receipt
  */
 @Injectable()
 export class AiseeCreditService {
@@ -37,7 +44,8 @@ export class AiseeCreditService {
 
   constructor(
     private readonly aiseeClient: AiseeClient,
-    private readonly aiPricingService: AiPricingService
+    private readonly aiPricingService: AiPricingService,
+    private readonly _billingRecord: PrismaRepository<'billingRecord'>
   ) {}
 
   /**
@@ -140,6 +148,17 @@ export class AiseeCreditService {
         taskId,
         status: 'failed',
       });
+
+      // Update local record
+      await this._billingRecord.model.billingRecord
+        .update({
+          where: { taskId },
+          data: { status: 'failed' },
+        })
+        .catch(() => {
+          // Record may not exist if deduction was never created
+        });
+
       if (resp.refundedAmount) {
         this.logger.log(
           `Refunded ${resp.refundedAmount} credits for task=${taskId}`
@@ -216,6 +235,13 @@ export class AiseeCreditService {
     return `${intStr}.${fracStr}`;
   }
 
+  /**
+   * Core deduction flow:
+   * 1. Create local BillingRecord (status=pending) — its id is sent to Aisee for reconciliation
+   * 2. Call Aisee deductCredits()
+   * 3. Update local record with Aisee response (status, transactionId, etc.)
+   * 4. Fire-and-forget confirm
+   */
   private async deductWithItems(
     opts: AiseeCreditExecOptions,
     costItems: AiseeCostItem[]
@@ -224,6 +250,32 @@ export class AiseeCreditService {
       costItems.map((item) => item.amount)
     );
 
+    // Step 1: Create local audit record BEFORE calling Aisee.
+    // If DB write fails, proceed with deduction anyway — billing must not be
+    // blocked by a local audit failure.
+    let recordId: string | undefined;
+    try {
+      const record = await this._billingRecord.model.billingRecord.create({
+        data: {
+          organizationId: opts.userId,
+          taskId: opts.taskId,
+          amount: totalAmount,
+          businessType: opts.businessType,
+          description: opts.description,
+          costItems: JSON.stringify(costItems),
+          relatedId: opts.relatedId || null,
+          status: 'pending',
+        },
+      });
+      recordId = record.id;
+    } catch (dbErr) {
+      this.logger.error(
+        `Failed to create BillingRecord for task=${opts.taskId}, proceeding with deduction:`,
+        dbErr
+      );
+    }
+
+    // Step 2: Call Aisee with postizBillingId for reconciliation
     const deduction = await this.aiseeClient.deductCredits({
       userId: opts.userId,
       amount: totalAmount,
@@ -231,7 +283,21 @@ export class AiseeCreditService {
       description: opts.description,
       businessType: opts.businessType,
       costItems,
+      postizBillingId: recordId,
     });
+
+    // Step 3: Update local record with Aisee response.
+    // Wrapped in catch — a failed status update must never mask the deduction result.
+    if (recordId) {
+      this.updateBillingRecord(recordId, deduction).catch(
+        (dbErr) => {
+          this.logger.error(
+            `Failed to update BillingRecord id=${recordId} for task=${opts.taskId}:`,
+            dbErr
+          );
+        }
+      );
+    }
 
     if (!deduction.success && !deduction.skipped) {
       this.logger.error(
@@ -239,11 +305,42 @@ export class AiseeCreditService {
       );
     }
 
+    // Step 4: Fire-and-forget confirm on success
     if (deduction.success && !deduction.skipped && deduction.transactionId) {
       this.fireConfirm(opts.taskId, 'success');
     }
 
     return deduction;
+  }
+
+  private async updateBillingRecord(
+    recordId: string,
+    deduction: AiseeDeductResponse
+  ): Promise<void> {
+    if (deduction.skipped) {
+      await this._billingRecord.model.billingRecord.update({
+        where: { id: recordId },
+        data: { status: 'skipped' },
+      });
+    } else if (deduction.success) {
+      await this._billingRecord.model.billingRecord.update({
+        where: { id: recordId },
+        data: {
+          status: 'success',
+          transactionId: deduction.transactionId,
+          remainingBalance: deduction.remainingBalance,
+          debtAmount: deduction.debtAmount,
+        },
+      });
+    } else {
+      await this._billingRecord.model.billingRecord.update({
+        where: { id: recordId },
+        data: {
+          status: 'failed',
+          error: deduction.error,
+        },
+      });
+    }
   }
 
   private fireConfirm(taskId: string, status: 'success' | 'failed'): void {

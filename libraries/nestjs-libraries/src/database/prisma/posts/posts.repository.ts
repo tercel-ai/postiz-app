@@ -585,13 +585,22 @@ export class PostsRepository {
     });
   }
 
-  advancePublishDate(id: string, currentPublishDate: Date, intervalInDays: number) {
-    return this._post.model.post.update({
-      where: { id },
+  /**
+   * Advance publishDate using optimistic locking.
+   * Only succeeds if publishDate still equals currentPublishDate (i.e. no
+   * other workflow has already advanced it).  Returns true on success.
+   */
+  async advancePublishDate(id: string, currentPublishDate: Date, intervalInDays: number): Promise<boolean> {
+    const result = await this._post.model.post.updateMany({
+      where: {
+        id,
+        publishDate: currentPublishDate,
+      },
       data: {
         publishDate: dayjs.utc(currentPublishDate).add(intervalInDays, 'days').toDate(),
       },
     });
+    return result.count > 0;
   }
 
   /**

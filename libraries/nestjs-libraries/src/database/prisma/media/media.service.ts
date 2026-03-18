@@ -17,6 +17,7 @@ import {
   AiseeClient,
   AiseeBusinessType,
 } from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/aisee.client';
+import { isInternalBilling } from '@gitroom/nestjs-libraries/services/billing.helper';
 
 @Injectable()
 export class MediaService {
@@ -43,42 +44,78 @@ export class MediaService {
     org: Organization,
     generatePromptFirst?: boolean
   ) {
+    // BILL_TYPE=internal → original useCredit() subscription quota only
+    // BILL_TYPE=third    → Aisee credits only (no subscription quota)
+    if (isInternalBilling()) {
+      return this._generateImageInternal(prompt, org, generatePromptFirst);
+    }
+
+    return this._generateImageThird(prompt, org, generatePromptFirst);
+  }
+
+  /**
+   * Original billing path: subscription-based useCredit() quota tracking.
+   * No Aisee involved.
+   */
+  private async _generateImageInternal(
+    prompt: string,
+    org: Organization,
+    generatePromptFirst?: boolean
+  ) {
     const generating = await this._subscriptionService.useCredit(
       org,
       'ai_images',
       async () => {
-        const usages: AiUsageInfo[] = [];
-
         if (generatePromptFirst) {
           const promptResult = await this._openAi.generatePromptForPicture(prompt);
           prompt = promptResult.data;
-          usages.push(promptResult.usage);
         }
 
         const imageResult = await this._openAi.generateImage(prompt, !!generatePromptFirst);
-        usages.push(imageResult.usage);
-
-        // Aisee billing — fire after LLM success
-        const taskId = AiseeClient.buildTaskId(`img_${org.id}_${Date.now()}`);
-        this._aiseeCreditService
-          .billCollectedUsages(
-            {
-              userId: org.id,
-              taskId,
-              businessType: AiseeBusinessType.IMAGE_GEN,
-              description: `Image generation${generatePromptFirst ? ' (with prompt enhancement)' : ''}`,
-            },
-            usages
-          )
-          .catch((err) => {
-            console.error('[AiseeBilling] Image billing failed:', err);
-          });
-
         return imageResult.data;
       }
     );
 
     return generating;
+  }
+
+  /**
+   * Aisee billing path: deduct actual AI usage credits via Aisee.
+   * No subscription quota involved.
+   */
+  private async _generateImageThird(
+    prompt: string,
+    org: Organization,
+    generatePromptFirst?: boolean
+  ): Promise<string> {
+    const usages: AiUsageInfo[] = [];
+
+    if (generatePromptFirst) {
+      const promptResult = await this._openAi.generatePromptForPicture(prompt);
+      prompt = promptResult.data;
+      usages.push(promptResult.usage);
+    }
+
+    const imageResult = await this._openAi.generateImage(prompt, !!generatePromptFirst);
+    usages.push(imageResult.usage);
+
+    // Aisee billing — fire after LLM success
+    const taskId = AiseeClient.buildTaskId(`img_${org.id}_${Date.now()}`);
+    this._aiseeCreditService
+      .billCollectedUsages(
+        {
+          userId: org.id,
+          taskId,
+          businessType: AiseeBusinessType.IMAGE_GEN,
+          description: `Image generation${generatePromptFirst ? ' (with prompt enhancement)' : ''}`,
+        },
+        usages
+      )
+      .catch((err) => {
+        console.error('[AiseeBilling] Image billing failed:', err);
+      });
+
+    return imageResult.data;
   }
 
   saveFile(org: string, fileName: string, filePath: string) {
@@ -123,18 +160,6 @@ export class MediaService {
   }
 
   async generateVideo(org: Organization, body: VideoDto) {
-    const totalCredits = await this._subscriptionService.checkCredits(
-      org,
-      'ai_videos'
-    );
-
-    if (totalCredits.credits <= 0) {
-      throw new SubscriptionException({
-        action: AuthorizationActions.Create,
-        section: Sections.VIDEOS_PER_MONTH,
-      });
-    }
-
     const video = this._videoManager.getVideoByName(body.type);
     if (!video) {
       throw new Error(`Video type ${body.type} not found`);
@@ -144,23 +169,51 @@ export class MediaService {
       throw new HttpException('This video is not available in trial mode', 406);
     }
 
-    console.log(body.customParams);
     await video.instance.processAndValidate(body.customParams);
-    console.log('no err');
 
-    return await this._subscriptionService.useCredit(
-      org,
-      'ai_videos',
-      async () => {
-        const loadedData = await video.instance.process(
-          body.output,
-          body.customParams
-        );
+    // BILL_TYPE=internal → legacy subscription credit check + useCredit wrapper
+    if (isInternalBilling()) {
+      const totalCredits = await this._subscriptionService.checkCredits(
+        org,
+        'ai_videos'
+      );
 
-        const file = await this.storage.uploadSimple(loadedData);
-        return this.saveFile(org.id, file.split('/').pop(), file);
+      if (totalCredits.credits <= 0) {
+        throw new SubscriptionException({
+          action: AuthorizationActions.Create,
+          section: Sections.VIDEOS_PER_MONTH,
+        });
       }
+
+      return this._subscriptionService.useCredit(
+        org,
+        'ai_videos',
+        () => this._generateVideoCore(video, org, body)
+      );
+    }
+
+    // BILL_TYPE=third → Aisee billing (TODO: pending KieAI cost integration)
+    return this._generateVideoCore(video, org, body);
+  }
+
+  private async _generateVideoCore(
+    video: ReturnType<VideoManager['getVideoByName']>,
+    org: Organization,
+    body: VideoDto
+  ) {
+    const loadedData = await video.instance.process(
+      body.output,
+      body.customParams
     );
+
+    const file = await this.storage.uploadSimple(loadedData);
+
+    // TODO: Aisee billing for video generation — pending KieAI cost integration.
+    // Once available, collect AiUsageInfo from video.instance.process() and call
+    // this._aiseeCreditService.billCollectedUsages() with businessType VIDEO_GEN,
+    // similar to image generation above.
+
+    return this.saveFile(org.id, file.split('/').pop(), file);
   }
 
   async videoFunction(identifier: string, functionName: string, body: any) {

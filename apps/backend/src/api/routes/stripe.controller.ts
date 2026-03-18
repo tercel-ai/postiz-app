@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { StripeService } from '@gitroom/nestjs-libraries/services/stripe.service';
 import { ApiTags } from '@nestjs/swagger';
+import { isThirdPartyBilling } from '@gitroom/nestjs-libraries/services/billing.helper';
 
 @ApiTags('Stripe')
 @Controller('/stripe')
@@ -17,6 +18,13 @@ export class StripeController {
 
   @Post('/')
   stripe(@Req() req: RawBodyRequest<Request>) {
+    // When BILL_TYPE=third, all subscription billing is handled by Aisee
+    // (../aisee-core). The webhook endpoint stays alive so lingering Stripe
+    // webhook configurations do not 404.
+    if (isThirdPartyBilling()) {
+      return { ok: true, skipped: true, reason: 'BILL_TYPE=third' };
+    }
+
     const event = this._stripeService.validateRequest(
       req.rawBody,
       // @ts-ignore
