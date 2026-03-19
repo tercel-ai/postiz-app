@@ -81,6 +81,9 @@ export async function postWorkflowV101({
   // get all the posts and comments to post
   const postsListBefore = await getPostsList(organizationId, postId);
   const [post] = postsListBefore;
+  // publishDate arrives as an ISO string from JSON serialization across
+  // the Temporal activity boundary, but TypeScript types it as Date.
+  const publishDateStr = String(post?.publishDate ?? '');
 
   // in case doesn't exists for some reason, fail it
   if (!post || (!postNow && post.state !== 'QUEUE')) {
@@ -194,7 +197,7 @@ export async function postWorkflowV101({
           postsList[i].id,
           postsResults[i].postId,
           postsResults[i].releaseURL,
-          post.publishDate
+          publishDateStr
         );
 
         lastErr = null;
@@ -212,7 +215,7 @@ export async function postWorkflowV101({
           const refresh = await refreshToken(post.integration);
           if (!refresh || !refresh.accessToken) {
             await changeState(postsList[0].id, 'ERROR', err, postsList);
-            await recordFailedRelease(postsList[0].id, attemptReleaseId, 'Token refresh failed', post.publishDate);
+            await recordFailedRelease(postsList[0].id, attemptReleaseId, 'Token refresh failed', publishDateStr);
             return false;
           }
 
@@ -231,7 +234,7 @@ export async function postWorkflowV101({
           err.cause.type === 'bad_body'
         ) {
           const errMsg = err.cause.message || err.cause.type || 'Unknown error';
-          await recordFailedRelease(postsList[0].id, attemptReleaseId, errMsg, post.publishDate);
+          await recordFailedRelease(postsList[0].id, attemptReleaseId, errMsg, publishDateStr);
           await inAppNotification(
             post.organizationId,
             `Error posting${i === 0 ? ' ' : ' comments '}on ${
@@ -257,7 +260,7 @@ export async function postWorkflowV101({
       const errMsg = lastErr instanceof ActivityFailure && lastErr.cause instanceof ApplicationFailure
         ? lastErr.cause.message || lastErr.cause.type || 'Unknown error'
         : String(lastErr);
-      await recordFailedRelease(postsList[0].id, attemptReleaseId, errMsg, post.publishDate);
+      await recordFailedRelease(postsList[0].id, attemptReleaseId, errMsg, publishDateStr);
       return false;
     }
 
