@@ -6,6 +6,7 @@ import {
 } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
 import { AiseeCreditService } from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/aisee-credit.service';
 import { AiseeClient } from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/aisee.client';
+import { AdminBillingRecordsQueryDto } from '@gitroom/nestjs-libraries/dtos/admin/admin-billing-records-query.dto';
 
 @ApiTags('Admin')
 @Controller('/admin/billing')
@@ -29,15 +30,10 @@ export class AdminBillingController {
    *   - pageSize: items per page (default: 50, max: 200)
    */
   @Get('/records')
-  async listRecords(
-    @Query('status') status?: string,
-    @Query('organizationId') organizationId?: string,
-    @Query('businessType') businessType?: string,
-    @Query('page') page?: string,
-    @Query('pageSize') pageSize?: string
-  ) {
-    const take = Math.min(parseInt(pageSize || '50', 10) || 50, 200);
-    const skip = ((parseInt(page || '1', 10) || 1) - 1) * take;
+  async listRecords(@Query() query: AdminBillingRecordsQueryDto) {
+    const { status, organizationId, businessType, page, pageSize } = query;
+    const take = pageSize;
+    const skip = (page - 1) * take;
 
     const where: Record<string, any> = {};
     if (status) where.status = status;

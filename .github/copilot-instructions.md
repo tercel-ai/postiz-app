@@ -10,14 +10,40 @@
 - Social login integrations (Instagram, Facebook) and Make.com/N8N integrations.
 
 ## Developer Workflows
-- Use Node.js 20.17.0 and pnpm 8+.
+- Use Node.js 22.12+ and pnpm 10+.
 - Install dependencies: `pnpm install`
 - Build all apps: `pnpm run build`
+- Build backend only: `pnpm run build:backend`
+- Build orchestrator only: `pnpm run build:orchestrator`
 - Run all apps in dev mode: `pnpm run dev`
-- Test: `pnpm test` (Jest, coverage enabled)
 - Individual app scripts are in each app's `package.json` (e.g., `pnpm --filter ./apps/backend run dev`).
 - Prisma DB commands: `pnpm run prisma-generate`, `pnpm run prisma-db-push`, `pnpm run prisma-reset`.
 - Docker: `docker compose -f ./docker-compose.dev.yaml up -d`
+
+## Testing
+- Test framework: **Vitest** (configured in `vitest.config.ts` at project root).
+- Test files use the `*.spec.ts` suffix and live alongside or under `__tests__/` directories next to source.
+- Run all tests:
+  ```bash
+  npx vitest run
+  ```
+- Run tests in watch mode (re-runs on file change):
+  ```bash
+  npx vitest
+  ```
+- Run a single test file:
+  ```bash
+  npx vitest run libraries/nestjs-libraries/src/chat/__tests__/billing.middleware.spec.ts
+  ```
+- Run tests matching a name pattern:
+  ```bash
+  npx vitest run -t "should calculate"
+  ```
+- Current test files:
+  - `libraries/nestjs-libraries/src/dtos/integrations/posting-times.utils.spec.ts` — posting time slot utilities
+  - `libraries/nestjs-libraries/src/chat/__tests__/billing.middleware.spec.ts` — billing middleware
+  - `libraries/nestjs-libraries/src/chat/tools/__tests__/integration.schedule.post.spec.ts` — copilot post scheduling
+- After making code changes, always run `npx vitest run` and verify all tests pass before committing.
 
 ## Conventions & Patterns
 - Use conventional commits (`feat:`, `fix:`, `chore:`).
