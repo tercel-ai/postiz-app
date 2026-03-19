@@ -125,14 +125,79 @@ Each `/copilot/agent` request follows this billing flow:
 
 1. **Pre-check**: `checkMinChatCredits()` estimates minimum cost (~500 tokens) and returns HTTP 402 if balance is insufficient.
 2. **Usage collection**: The LLM model is wrapped with `withBillingTracking()` (Proxy on `doGenerate`/`doStream`) that captures token usage into `AsyncLocalStorage`.
-3. **Post-billing**: On `res.close`, collected usages are sent to Aisee via `billCollectedUsages()` (fire-and-forget).
+   - **Important**: For `doStream`, the `TransformStream.transform` callback runs in a detached async context where ALS is lost. The middleware captures the ALS store reference (`ctxSnapshot`) before creating the TransformStream and writes directly to `ctxSnapshot.usages` to bypass the ALS lookup.
+3. **Post-billing**: On `res.close`, collected usages are sent to Aisee via `billCollectedUsages()` (fire-and-forget). A local `BillingRecord` is created for audit.
+
+### Admin Billing API
+
+Failed billing records (e.g. Aisee service down) can be retried via admin endpoints:
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/admin/billing/records` | GET | List billing records (filterable by status, org, businessType) |
+| `/admin/billing/records/:id` | GET | Single record detail |
+| `/admin/billing/summary` | GET | Aggregated counts by status and businessType |
+| `/admin/billing/retry/:id` | POST | Retry single failed record |
+| `/admin/billing/retry-all-failed` | POST | Batch retry all failed records |
+
+All admin endpoints require `@SuperAdmin()` permission.
 
 ### Memory Configuration
 
 Mastra Memory is configured with `lastMessages: false` and `semanticRecall: false` to prevent duplicate message injection — CopilotKit already sends the full conversation history in each request. Messages are still persisted for thread management and the `/copilot/:thread/list` endpoint.
 
-## 8. Integration Rules Summary
+## 8. Agent Tools Reference
+
+The `postiz` agent has 8 tools, each triggered by LLM intent recognition:
+
+| Tool | File | Trigger | Billing |
+|------|------|---------|---------|
+| `integrationList` | `integration.list.tool.ts` | Need channel list | No |
+| `integrationSchema` | `integration.validation.tool.ts` | Before scheduling (required) | No |
+| `triggerTool` | `integration.trigger.tool.ts` | Need platform-specific data (tag IDs, etc.) | No |
+| `schedulePostTool` | `integration.schedule.post.ts` | User confirms post → calls `PostsService.createPost()` | No (post itself) |
+| `generateImageTool` | `generate.image.tool.ts` | Need image for post → `MediaService.generateImage()` | `image_gen` |
+| `generateVideoOptions` | `generate.video.options.tool.ts` | User wants video, list options | No |
+| `videoFunctionTool` | `video.function.tool.ts` | Pre-video data (voice ID, etc.) | No |
+| `generateVideoTool` | `generate.video.tool.ts` | Confirm video → `MediaService.generateVideo()` | TODO: `video_gen` |
+
+### schedulePostTool Details
+
+Supports three modes via `type` field:
+- `now` — immediate publish (triggers Temporal workflow immediately)
+- `schedule` — future publish (Temporal workflow sleeps until publishDate)
+- `draft` — save without publishing
+
+The tool validates integration existence (returns error if not found), checks platform-specific settings via DTO validation, and enforces character limits per platform. On validation error, the LLM automatically retries with corrected parameters.
+
+A single `/copilot/agent` conversation may produce multiple billing records:
+- **LLM tokens** (`ai_copywriting`) — always, from the agent conversation itself
+- **Image generation** (`image_gen`) — if `generateImageTool` was called
+- **Video generation** (`video_gen`) — if `generateVideoTool` was called (TODO)
+
+## 9. Integration Rules Summary
 AI follows strict rules based on platform identifiers:
 - **X (Twitter)**: Handle threads vs. long posts based on premium status.
 - **LinkedIn/Facebook**: Handle multi-part content as post + comments.
 - **Format**: Wrap lines in `<p>` for HTML platforms; use specific allowed tags (`h1`, `h2`, `strong`, etc.).
+
+## 10. Testing
+
+### Test Runner
+
+Tests use **Vitest** (config: `vitest.config.ts`). Run with:
+
+```bash
+npx vitest run
+```
+
+### Test Files
+
+| File | Tests | Coverage |
+|------|-------|---------|
+| `chat/__tests__/billing.middleware.spec.ts` | 9 | ALS context fix, doGenerate/doStream token collection, provider detection |
+| `chat/tools/__tests__/integration.schedule.post.spec.ts` | 16 | now/schedule/draft, multi-channel, X thread, batch 5-day, attachments, settings, edge cases |
+
+### Manual Test Scenarios
+
+See `tests/copilot-schedule-scenarios.md` for 17 manual test scenarios covering various conversation styles, multi-channel scheduling, and edge cases.

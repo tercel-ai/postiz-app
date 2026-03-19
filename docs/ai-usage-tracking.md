@@ -91,10 +91,18 @@ Tracked `AiUsageInfo` feeds into `AiPricingService.calculateCost()` for credit c
 
 See [aisee-billing-env.md](./aisee-billing-env.md) for details.
 
+## Implementation Note: AsyncLocalStorage in TransformStream
+
+The `withBillingTracking()` proxy intercepts `doStream` and wraps the stream with a `TransformStream` to capture token usage from the `finish` chunk. However, `TransformStream.transform` callbacks run in a detached async context where `AsyncLocalStorage.getStore()` returns `undefined`.
+
+**Fix**: The middleware captures the ALS store reference (`ctxSnapshot = getContext()`) before creating the TransformStream, then writes directly to `ctxSnapshot.usages` inside the transform callback. A fallback to `collectUsage()` (ALS-based) is kept for environments where Node.js does propagate context.
+
+This is covered by tests in `chat/__tests__/billing.middleware.spec.ts`.
+
 ## Key Files
 
 - `libraries/nestjs-libraries/src/openai/openai.service.ts` — `AiUsageInfo`, `parseModelId()`, `logAiUsage()`
 - `libraries/nestjs-libraries/src/agent/agent.graph.service.ts` — `AiUsageCallbackHandler`
-- `libraries/nestjs-libraries/src/chat/billing.middleware.ts` — `withBillingTracking()` Proxy for agent chat
-- `libraries/nestjs-libraries/src/chat/async.storage.ts` — `collectUsage()`, `getCollectedUsages()`
+- `libraries/nestjs-libraries/src/chat/billing.middleware.ts` — `withBillingTracking()` Proxy for agent chat (ALS snapshot)
+- `libraries/nestjs-libraries/src/chat/async.storage.ts` — `collectUsage()`, `getCollectedUsages()`, `getContext()`
 - `libraries/nestjs-libraries/src/services/billing.helper.ts` — `getBillType()`, `isInternalBilling()`

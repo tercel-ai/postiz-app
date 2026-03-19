@@ -125,11 +125,16 @@ If the tools return errors, you would need to rerun it with the right parameters
 
         const integrations = {} as Record<string, Integration>;
         for (const platform of context.socialPost) {
-          integrations[platform.integrationId] =
-            await this._integrationService.getIntegrationById(
-              organizationId,
-              platform.integrationId
-            );
+          const integration = await this._integrationService.getIntegrationById(
+            organizationId,
+            platform.integrationId
+          );
+
+          if (!integration) {
+            return { errors: `Integration ${platform.integrationId} not found` };
+          }
+
+          integrations[platform.integrationId] = integration;
 
           const { dto, maxLength, identifier } = socialIntegrationList.find(
             (p) =>

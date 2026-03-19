@@ -95,6 +95,20 @@ Subscription-based per-operation counter. Tracks monthly quota usage for `ai_ima
 
 Local audit trail with `postiz_billing_id` sent to Aisee for reconciliation. Supports `relatedId` for linking to business entities (posts, media, etc.).
 
+## Admin Billing API
+
+All endpoints require `@SuperAdmin()` permission.
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/admin/billing/records` | GET | List billing records with filters (`status`, `organizationId`, `businessType`, pagination) |
+| `/admin/billing/records/:id` | GET | Single record detail with parsed `costItems` |
+| `/admin/billing/summary` | GET | Aggregated counts by status and businessType |
+| `/admin/billing/retry/:id` | POST | Retry single failed/pending record — re-sends deduction to Aisee |
+| `/admin/billing/retry-all-failed` | POST | Batch retry all `failed` records sequentially |
+
+Retry uses the original `taskId` (idempotency key), so duplicate deductions are prevented by Aisee.
+
 ## Key Files
 
 | File | Purpose |
@@ -104,6 +118,8 @@ Local audit trail with `postiz_billing_id` sent to Aisee for reconciliation. Sup
 | `libraries/.../ai-pricing/aisee-credit.service.ts` | Credit lifecycle orchestration + local BillingRecord |
 | `libraries/.../ai-pricing/ai-pricing.service.ts` | Cost calculation (token/image → credits) |
 | `libraries/.../media/media.service.ts` | Image/video generation billing (branches on BILL_TYPE) |
+| `libraries/.../chat/billing.middleware.ts` | Agent chat token tracking (ALS context snapshot for TransformStream) |
 | `apps/backend/.../copilot.controller.ts` | Copilot chat billing |
 | `apps/backend/.../stripe.controller.ts` | Stripe webhook (branches on BILL_TYPE) |
 | `apps/backend/.../billing.controller.ts` | Billing API (branches on BILL_TYPE) |
+| `apps/backend/.../admin-billing.controller.ts` | Admin billing list + retry API |

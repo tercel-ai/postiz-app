@@ -134,6 +134,10 @@ Orchestrates the credit lifecycle. Key methods:
 
 All deduction methods create a local BillingRecord before calling Aisee and update it with the response.
 
+## Admin Billing API
+
+Failed billing records can be listed and retried via `/admin/billing/*` endpoints (requires `@SuperAdmin()`). See [aisee-billing-env.md](./aisee-billing-env.md#admin-billing-api) for the full endpoint reference.
+
 ## Key Files
 
 - `libraries/nestjs-libraries/src/services/billing.helper.ts` — `getBillType()`, `isInternalBilling()`, `isThirdPartyBilling()`
@@ -141,7 +145,8 @@ All deduction methods create a local BillingRecord before calling Aisee and upda
 - `libraries/nestjs-libraries/src/database/prisma/ai-pricing/aisee-credit.service.ts`
 - `libraries/nestjs-libraries/src/database/prisma/ai-pricing/ai-pricing.service.ts`
 - `libraries/nestjs-libraries/src/database/prisma/media/media.service.ts` — Image/video billing (branches on BILL_TYPE)
-- `libraries/nestjs-libraries/src/chat/billing.middleware.ts` — Agent chat token tracking
+- `libraries/nestjs-libraries/src/chat/billing.middleware.ts` — Agent chat token tracking (ALS context snapshot)
 - `apps/backend/src/api/routes/copilot.controller.ts` — Pre-check + post-billing wiring
 - `apps/backend/src/api/routes/stripe.controller.ts` — Stripe webhook (branches on BILL_TYPE)
 - `apps/backend/src/api/routes/billing.controller.ts` — Billing API (branches on BILL_TYPE)
+- `apps/backend/src/admin-api/routes/admin-billing.controller.ts` — Admin billing list + retry
