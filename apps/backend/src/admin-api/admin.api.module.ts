@@ -9,6 +9,7 @@ import { AdminErrorsController } from './routes/admin-errors.controller';
 import { AdminMediaController } from './routes/admin-media.controller';
 import { AdminDashboardController } from './routes/admin-dashboard.controller';
 import { AdminDiagnosticsController } from './routes/admin-diagnostics.controller';
+import { AdminBillingController } from './routes/admin-billing.controller';
 
 const adminControllers = [
   AdminSettingsController,
@@ -19,6 +20,7 @@ const adminControllers = [
   AdminMediaController,
   AdminDashboardController,
   AdminDiagnosticsController,
+  AdminBillingController,
 ];
 
 @Module({

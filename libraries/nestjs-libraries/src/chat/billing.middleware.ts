@@ -1,4 +1,4 @@
-import { collectUsage } from './async.storage';
+import { collectUsage, getContext } from './async.storage';
 import {
   AiUsageInfo,
   parseModelId,
@@ -61,18 +61,28 @@ export function withBillingTracking<T extends { provider: string; modelId: strin
             return result;
           }
 
+          // Capture ALS store reference NOW — TransformStream.transform runs
+          // in a different async context where AsyncLocalStorage is lost.
+          const ctxSnapshot = getContext();
+
           const originalStream = result.stream;
           const transformStream = new TransformStream({
             transform(chunk: any, controller: any) {
               if (chunk?.type === 'finish' && chunk?.usage) {
-                collectUsage(
-                  buildUsageInfo(
-                    target.provider,
-                    target.modelId,
-                    chunk.usage.promptTokens ?? 0,
-                    chunk.usage.completionTokens ?? 0
-                  )
+                const usageInfo = buildUsageInfo(
+                  target.provider,
+                  target.modelId,
+                  chunk.usage.promptTokens ?? 0,
+                  chunk.usage.completionTokens ?? 0
                 );
+                // Write directly to captured store — collectUsage() would
+                // fail here because ALS context is lost in TransformStream.
+                if (ctxSnapshot?.usages) {
+                  ctxSnapshot.usages.push(usageInfo);
+                } else {
+                  // Fallback: try ALS (works if Node.js propagates context)
+                  collectUsage(usageInfo);
+                }
               }
               controller.enqueue(chunk);
             },

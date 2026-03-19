@@ -106,7 +106,9 @@ npx ts-node -r tsconfig-paths/register libraries/nestjs-libraries/src/database/p
 
 The calculated cost from `AiCostResult` (in credits) feeds directly into `AiseeClient.deductCredits()`. The `amount` field sent to Aisee is already in credits — no USD-to-credit conversion needed.
 
-See [aisee-integration.md](./aisee-integration.md).
+Cost calculation is used in both billing modes (`BILL_TYPE=internal` and `BILL_TYPE=third`). When `BILL_TYPE=third`, the cost feeds into the `BillingRecord` audit trail and is sent to Aisee with `postiz_billing_id` for cross-system reconciliation.
+
+See [aisee-integration.md](./aisee-integration.md) and [aisee-billing-env.md](./aisee-billing-env.md).
 
 ## Key Files
 

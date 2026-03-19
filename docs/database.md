@@ -47,6 +47,27 @@ pnpm run prisma-reset
 
 Force-resets the database and re-pushes the schema. **All data will be lost.**
 
+## Key Tables
+
+### Billing-Related
+
+| Table | Used When | Purpose |
+|-------|-----------|---------|
+| `Credits` | `BILL_TYPE=internal` | Subscription-based per-operation counter for `ai_images` and `ai_videos` monthly quotas |
+| `BillingRecord` | `BILL_TYPE=third` | Local audit trail for Aisee credit deductions. Created before calling Aisee, stores `postizBillingId` for cross-system reconciliation |
+| `Subscription` | Both modes | Organization subscription tier, period, and channel limits |
+
+See [aisee-billing-env.md](./aisee-billing-env.md) for the `BILL_TYPE` configuration reference.
+
+### Migration: BillingRecord
+
+The `BillingRecord` table migration is at:
+```
+libraries/nestjs-libraries/src/database/prisma/migrations/add-billing-record.sql
+```
+
+This SQL can be run standalone, or the table will be created automatically by `prisma db push`.
+
 ## Notes
 
 - Production uses `prisma db push --accept-data-loss` (not migrations). This means schema changes are applied directly without migration files.

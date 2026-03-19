@@ -4,14 +4,21 @@
 
 Postiz integrates with [aisee_orchestrator](../aisee-core/aisee_orchestrator/) for credit-based billing. Postiz handles AI model pricing and cost calculation; aisee handles credit balance and deduction.
 
+Billing mode is controlled by `BILL_TYPE` env var:
+- `internal` — legacy Stripe-based subscription billing (Credits table)
+- `third` (default) — Aisee handles all billing externally (BillingRecord table)
+
+See [aisee-billing-env.md](./aisee-billing-env.md) for full environment variable reference.
+
 ## Architecture
 
 ```
-AI Call → logAiUsage(AiUsageInfo) → AiPricingService.calculateCost() → AiseeClient.deductCredits()
+AI Call → logAiUsage(AiUsageInfo) → AiPricingService.calculateCost() → AiseeCreditService.deductWithItems()
                                           ↓                                      ↓
-                                   Settings table                         aisee_orchestrator
-                                   (ai_model_pricing)                     POST /credit/deduct
-                                   credits per token                      amount in credits
+                                   Settings table                     1. Create BillingRecord (pending)
+                                   (ai_model_pricing)                 2. POST /credit/deduct (with postiz_billing_id)
+                                   credits per token                  3. Update BillingRecord (success/failed/skipped)
+                                                                      4. POST /credit/deduct/confirm (fire-and-forget)
 ```
 
 ### Agent Chat Billing Flow
@@ -39,11 +46,11 @@ HTTP client for communicating with aisee_orchestrator.
 ### Environment Variables
 
 ```env
-# Required: aisee orchestrator base URL
+# Required: aisee orchestrator base URL (only when BILL_TYPE=third)
 AISEE_ORCHESTRATOR_URL="http://localhost:8000"
 
-# Optional: API key for authentication
-AISEE_API_KEY="your-api-key"
+# Required: shared JWT secret for service-to-service auth
+JWT_SECRET="your-jwt-secret"
 ```
 
 When `AISEE_ORCHESTRATOR_URL` is not set, `AiseeClient` is disabled — `deductCredits()` returns `{ success: true, skipped: true }`.
@@ -52,9 +59,10 @@ When `AISEE_ORCHESTRATOR_URL` is not set, `AiseeClient` is disabled — `deductC
 
 | Method | Description |
 |--------|-------------|
-| `deductCredits(req)` | POST to `/credit/deduct` with userId, amount, taskId, description |
+| `deductCredits(req)` | POST to `/credit/deduct` with userId, amount, taskId, postiz_billing_id |
+| `confirmDeduction(req)` | POST to `/credit/deduct/confirm` with taskId, status (success/failed) |
 | `getBalance(userId)` | GET `/credit/balance/{userId}` |
-| `AiseeClient.buildTaskId(postId)` | Returns `postiz_{postId}` |
+| `AiseeClient.buildTaskId(label)` | Returns `postiz_{label}_{random}` |
 
 ### AiseeDeductRequest
 
@@ -64,8 +72,9 @@ interface AiseeDeductRequest {
   amount: string;     // cost in credits from AiPricingService.calculateCost()
   taskId: string;     // format: postiz_{label}_{random}
   description: string;
-  businessType: AiseeBusinessType;  // 'ai_copywriting' | 'image_gen'
+  businessType: AiseeBusinessType;  // 'ai_copywriting' | 'image_gen' | 'video_gen'
   costItems: AiseeCostItem[];       // breakdown of individual costs
+  postizBillingId?: string;         // BillingRecord.id for cross-system reconciliation
 }
 ```
 
@@ -76,19 +85,39 @@ interface AiseeDeductResponse {
   success: boolean;
   skipped?: boolean;        // true when aisee is not configured
   transactionId?: string;
-  remainingBalance?: number;
+  remainingBalance?: string;
+  debtAmount?: string;      // non-null when user balance went negative
   error?: string;
 }
 ```
 
+## Local Audit Trail (BillingRecord)
+
+When `BILL_TYPE=third`, every deduction creates a local `BillingRecord` **before** calling Aisee:
+
+```
+BillingRecord.id  →  sent as postiz_billing_id  →  enables cross-system reconciliation
+```
+
+The record tracks: taskId, amount, businessType, costItems (JSON), relatedId (optional business entity), status (pending→success/failed/skipped), transactionId, remainingBalance, debtAmount, error.
+
+If the local DB write fails, the deduction proceeds anyway — billing must not be blocked by audit failures. If the status update fails after Aisee responds, the error is logged but the deduction result is returned cleanly.
+
 ## Task ID Format
 
-All Postiz operations use the format `postiz_{postId}` as the task_id for aisee credit deduction. This allows tracing costs back to specific posts.
+All Postiz operations use the format `postiz_{label}_{random}` as the task_id for aisee credit deduction. Examples:
+- Agent chat: `postiz_agent_chat_{orgId}_{timestamp}_{random}`
+- Image generation: `postiz_img_{orgId}_{timestamp}_{random}`
+- Agent post generation: `postiz_agent_{orgId}_{timestamp}_{random}`
 
-## Pending Work
+## Billing Touchpoints
 
-- **aisee_orchestrator** needs a new `POST /credit/deduct` endpoint that wraps `credit_service.consume_credits()`. Currently only internal methods exist for credit deduction.
-- **media.service.ts** integration: replace current `useCredit()` flow with `AiPricingService.calculateCost()` + `AiseeClient.deductCredits()`.
+| Scenario | Trigger | Business Type | BILL_TYPE=internal | BILL_TYPE=third |
+|----------|---------|---------------|--------------------|-----------------
+| **Copilot chat** | `POST /copilot/agent` | `ai_copywriting` | Aisee (pre-check + post-billing) | Same |
+| **Image generation** | `POST /media/generate-image` | `image_gen` | Subscription useCredit() only | Aisee credits only |
+| **Agent post generation** | Agent workflow | `ai_copywriting` | Aisee only | Same |
+| **Video generation** | `POST /media/generate-video` | `video_gen` | Subscription useCredit() | **TODO**: Aisee (pending KieAI) |
 
 ## AiseeCreditService
 
@@ -99,12 +128,20 @@ Orchestrates the credit lifecycle. Key methods:
 | `getBalance(userId)` | Returns credit balance (null if Aisee disabled) |
 | `hasCredits(userId)` | Returns `true` if balance > 0 or Aisee disabled |
 | `executeWithBilling(opts, llmCall)` | Single-step: check balance → execute → calculate cost → deduct |
+| `executeMultiStepWithBilling(opts, llmCall)` | Multi-step: check balance → execute → aggregate costs → single deduct |
 | `billCollectedUsages(opts, usages)` | Post-hoc billing for already-collected usages (agent chat) |
+| `confirmFailed(taskId)` | Confirm deduction as failed — triggers refund on Aisee side |
+
+All deduction methods create a local BillingRecord before calling Aisee and update it with the response.
 
 ## Key Files
 
+- `libraries/nestjs-libraries/src/services/billing.helper.ts` — `getBillType()`, `isInternalBilling()`, `isThirdPartyBilling()`
 - `libraries/nestjs-libraries/src/database/prisma/ai-pricing/aisee.client.ts`
 - `libraries/nestjs-libraries/src/database/prisma/ai-pricing/aisee-credit.service.ts`
 - `libraries/nestjs-libraries/src/database/prisma/ai-pricing/ai-pricing.service.ts`
+- `libraries/nestjs-libraries/src/database/prisma/media/media.service.ts` — Image/video billing (branches on BILL_TYPE)
 - `libraries/nestjs-libraries/src/chat/billing.middleware.ts` — Agent chat token tracking
 - `apps/backend/src/api/routes/copilot.controller.ts` — Pre-check + post-billing wiring
+- `apps/backend/src/api/routes/stripe.controller.ts` — Stripe webhook (branches on BILL_TYPE)
+- `apps/backend/src/api/routes/billing.controller.ts` — Billing API (branches on BILL_TYPE)

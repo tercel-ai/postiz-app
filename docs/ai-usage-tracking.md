@@ -82,9 +82,19 @@ The billing middleware wraps the ai-sdk `LanguageModelV2` with a `Proxy` that in
 [AI Usage] servicer=openrouter provider=google model=gemini-3.1-flash-image-preview type=image billing_mode=per_token method=generateImageViaOpenRouter prompt_tokens=50 completion_tokens=1200 total_tokens=1250
 ```
 
+## Billing Integration
+
+Tracked `AiUsageInfo` feeds into `AiPricingService.calculateCost()` for credit calculation, then into `AiseeCreditService` for deduction. The billing path depends on `BILL_TYPE`:
+
+- `BILL_TYPE=internal` — Image/video generation uses subscription-based `useCredit()` quotas only (no Aisee). Copilot chat and Agent workflows always use Aisee.
+- `BILL_TYPE=third` — All AI usage is billed via Aisee. Local `BillingRecord` provides audit trail.
+
+See [aisee-billing-env.md](./aisee-billing-env.md) for details.
+
 ## Key Files
 
 - `libraries/nestjs-libraries/src/openai/openai.service.ts` — `AiUsageInfo`, `parseModelId()`, `logAiUsage()`
 - `libraries/nestjs-libraries/src/agent/agent.graph.service.ts` — `AiUsageCallbackHandler`
 - `libraries/nestjs-libraries/src/chat/billing.middleware.ts` — `withBillingTracking()` Proxy for agent chat
 - `libraries/nestjs-libraries/src/chat/async.storage.ts` — `collectUsage()`, `getCollectedUsages()`
+- `libraries/nestjs-libraries/src/services/billing.helper.ts` — `getBillType()`, `isInternalBilling()`

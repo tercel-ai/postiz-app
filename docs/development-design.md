@@ -129,11 +129,18 @@ Integrates **OpenRouter** and local AI logic to support:
 - Content polishing and formatting.
 - Multi-language translation.
 
-### 7.2 Plugin System (Plugs)
+### 7.2 Billing System
+Controlled by `BILL_TYPE` env var (`internal` or `third`, default `third`):
+- **internal**: Legacy Stripe-based subscription billing with per-operation quotas (Credits table).
+- **third**: Aisee (`../aisee-core`) handles all billing externally. Local `BillingRecord` table provides audit trail with `postiz_billing_id` for cross-system reconciliation.
+
+Stripe webhook and billing endpoints branch on `BILL_TYPE` — returning stubs when `third`, processing normally when `internal`. See [aisee-billing-env.md](./aisee-billing-env.md).
+
+### 7.3 Plugin System (Plugs)
 - **Internal Plugs**: Automatic reposts/likes by internal organization members.
 - **Global Plugs**: Trigger automatic replies when specific conditions (e.g., like count) are met.
 
-### 7.3 Account Profile Module
+### 7.4 Account Profile Module
 - **Consolidated View**: Displays per-account performance stats and profile info.
 - **Cross-Platform Compatibility**: Unified UI for monitoring different social accounts like X, Reddit, and YouTube.
 - **Analytics Integration**: Pulls live data from platform APIs for impressions, likes, and more.
