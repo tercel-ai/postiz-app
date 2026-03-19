@@ -63,10 +63,10 @@ export class XProvider extends SocialAbstract implements SocialProvider {
       };
     }
 
-    if (body.includes('"code":503') || body.includes('Service Unavailable')) {
+    if (body.includes('"code":503') || body.includes('Service Unavailable') || body.includes('ECONNRESET') || body.includes('ETIMEDOUT') || body.includes('TIMEOUT')) {
       return {
         type: 'retry',
-        value: 'X API is temporarily unavailable (503), will retry',
+        value: 'X API or network is temporarily unavailable, will retry',
       };
     }
     if (body.includes('"code":429') || body.includes('Too Many Requests')) {

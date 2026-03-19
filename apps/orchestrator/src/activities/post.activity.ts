@@ -237,6 +237,11 @@ export class PostActivity {
   }
 
   @ActivityMethod()
+  async logError(id: string, err?: any, body?: any) {
+    return this._postService.logError(id, err, body);
+  }
+
+  @ActivityMethod()
   async changeState(id: string, state: State, err?: any, body?: any) {
     return this._postService.changeState(id, state, err, body);
   }

@@ -124,7 +124,8 @@ export abstract class SocialAbstract {
       if (value.type === 'retry') {
         throw ApplicationFailure.retryable(
           value.value || 'Temporary error, will retry',
-          'retry'
+          'retry',
+          [rawError]
         );
       }
       throw new BadBody(this.identifier, rawError || safeStringify({}), {} as any, value.value || '');

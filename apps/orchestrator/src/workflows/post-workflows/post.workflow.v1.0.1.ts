@@ -27,6 +27,7 @@ const {
   getPostsList,
   inAppNotification,
   changeState,
+  logError,
   updatePost,
   sendWebhooks,
   isCommentable,
@@ -40,6 +41,7 @@ const {
     initialInterval: '2 minutes',
   },
 });
+
 
 const iterate = Array.from({ length: 5 });
 
@@ -240,9 +242,9 @@ export async function postWorkflowV101({
           continue;
         }
 
-        // Log error for observability (for recurring posts this only writes to
-        // Errors table without changing the original's state).
-        await changeState(postsList[0].id, 'ERROR', err, postsList);
+        // Log error for observability.  Intermediate failures don't change
+        // the post's state yet to avoid false failures.
+        await logError(postsList[0].id, err, postsList);
 
         // specific case for bad body errors — no point retrying
         if (
@@ -257,6 +259,7 @@ export async function postWorkflowV101({
               error: errMsg,
             });
           }
+          await changeState(postsList[0].id, 'ERROR', err, postsList);
           await inAppNotification(
             post.organizationId,
             `Error posting${i === 0 ? ' ' : ' comments '}on ${
@@ -287,6 +290,7 @@ export async function postWorkflowV101({
           error: errMsg,
         });
       }
+      await changeState(postsList[0].id, 'ERROR', lastErr, postsList);
       return false;
     }
 

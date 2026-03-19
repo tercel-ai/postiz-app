@@ -892,46 +892,68 @@ export class PostsRepository {
   private extractErrorMessage(err: any): string {
     if (typeof err === 'string') return err;
 
-    // Extract from Temporal ActivityFailure / ApplicationFailure chain
     const parts: string[] = [];
     let current = err;
     const seen = new Set();
     let depth = 0;
     const MAX_DEPTH = 10;
+
     while (current && depth < MAX_DEPTH) {
       if (seen.has(current)) break;
       seen.add(current);
-      if (current.message) parts.push(current.message);
-      if (current.type) parts.push(`type=${current.type}`);
-      if (current.stackTrace) parts.push(current.stackTrace);
+
+      const message = current.message || current.details?.message || '';
+      const type = current.type || current.name || '';
+      const code = current.code || current.status || current.statusCode || '';
+
+      let part = '';
+      if (type && type !== 'Error') part += `[${type}] `;
+      if (code) part += `(Code: ${code}) `;
+      if (message) part += message;
+
+      if (part) parts.push(part);
+
+      // Extract details if available (especially for ApplicationFailure)
+      const details = current.details || current.cause?.details;
+      if (details) {
+        try {
+          const detailedStr = typeof details === 'string' ? details : JSON.stringify(details);
+          if (detailedStr !== '{}' && detailedStr !== '[]') {
+            parts.push(`Details: ${detailedStr}`);
+          }
+        } catch (_) {}
+      }
+
+      if (current.stackTrace || current.stack) {
+        // Just take the first couple of lines of stack trace to avoid bloating the database
+        const stack = (current.stackTrace || current.stack).split('\n').slice(0, 3).join('\n');
+        parts.push(`Stack: ${stack}`);
+      }
+
       if (current.cause && current.cause !== current) {
         current = current.cause;
+      } else if (current.originalError && current.originalError !== current) {
+        current = current.originalError;
       } else {
         break;
       }
       depth++;
     }
 
-    // Also try extracting details from ApplicationFailure
-    if (err?.cause?.details?.length) {
-      try {
-        parts.push(`details=${JSON.stringify(err.cause.details)}`);
-      } catch (_) { }
-    }
-
     if (parts.length > 0) return parts.join(' | ');
 
-    // Fallback: try to serialize with Error-aware stringify
     try {
-      if (err instanceof Error) {
-        return JSON.stringify({
-          name: err.name,
-          message: err.message,
-          stack: err.stack,
-          ...Object.keys(err).reduce((acc, k) => { acc[k] = (err as any)[k]; return acc; }, {} as Record<string, any>),
-        });
-      }
-      return JSON.stringify(err);
+      return JSON.stringify(err, (key, value) => {
+        if (value instanceof Error) {
+          return {
+            name: value.name,
+            message: value.message,
+            stack: value.stack?.split('\n').slice(0, 3).join('\n'),
+            ...value,
+          };
+        }
+        return value;
+      });
     } catch (_) {
       return String(err);
     }
