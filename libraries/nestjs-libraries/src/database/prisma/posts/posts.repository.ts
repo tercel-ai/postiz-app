@@ -548,6 +548,117 @@ export class PostsRepository {
     });
   }
 
+  /**
+   * Idempotent: find or create a QUEUE clone for a recurring post cycle.
+   * Used as a pre-publish lock — if a clone already exists for this
+   * (sourcePostId, publishDate) pair, return it instead of creating a new one.
+   *
+   * Returns { clone, alreadyHandled }:
+   *  - alreadyHandled=true  → clone is PUBLISHED or ERROR, skip this cycle
+   *  - alreadyHandled=false → clone is QUEUE, proceed to publish
+   */
+  async findOrCreateCycleClone(
+    originalPost: any,
+    cyclePublishDate: Date,
+    claimToken: string
+  ): Promise<{ clone: any; alreadyHandled: boolean }> {
+    const existing = await this._post.model.post.findFirst({
+      where: {
+        sourcePostId: originalPost.id,
+        publishDate: cyclePublishDate,
+      },
+      select: { id: true, state: true, releaseId: true },
+    });
+
+    if (existing) {
+      if (existing.state === 'PUBLISHED' || existing.state === 'ERROR') {
+        return { clone: existing, alreadyHandled: true };
+      }
+
+      // Clone is QUEUE — try to atomically claim it by setting releaseId.
+      // Only succeeds if releaseId is still null (no other workflow claimed it).
+      const claimed = await this._post.model.post.updateMany({
+        where: {
+          id: existing.id,
+          state: 'QUEUE',
+          releaseId: null,
+        },
+        data: {
+          releaseId: claimToken,
+        },
+      });
+
+      if (claimed.count === 0) {
+        // Another workflow already claimed this QUEUE clone
+        return { clone: existing, alreadyHandled: true };
+      }
+
+      return { clone: existing, alreadyHandled: false };
+    }
+
+    const clone = await this._post.model.post.create({
+      data: {
+        content: originalPost.content,
+        title: originalPost.title,
+        description: originalPost.description,
+        image: originalPost.image,
+        settings: originalPost.settings,
+        group: originalPost.group,
+        delay: originalPost.delay,
+        organizationId: originalPost.organizationId,
+        integrationId: originalPost.integrationId,
+        publishDate: cyclePublishDate,
+        state: 'QUEUE',
+        releaseId: claimToken,
+        sourcePostId: originalPost.id,
+      },
+    });
+
+    // Guard against concurrent creates: if another workflow also created a
+    // clone for the same (sourcePostId, publishDate) between our findFirst
+    // and create, multiple clones exist.  The one with the earliest createdAt
+    // wins; losers delete their clone and bail out.
+    const allClones = await this._post.model.post.findMany({
+      where: {
+        sourcePostId: originalPost.id,
+        publishDate: cyclePublishDate,
+      },
+      select: { id: true, createdAt: true },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    if (allClones.length > 1 && allClones[0].id !== clone.id) {
+      // We lost the race — delete our clone and report as already handled
+      await this._post.model.post.delete({ where: { id: clone.id } });
+      return { clone: allClones[0], alreadyHandled: true };
+    }
+
+    return { clone, alreadyHandled: false };
+  }
+
+  /**
+   * Finalize a cycle clone after publish attempt.
+   */
+  async finalizeCycleClone(
+    cloneId: string,
+    data: {
+      state: 'PUBLISHED' | 'ERROR';
+      releaseId?: string;
+      releaseURL?: string;
+      error?: string;
+    }
+  ) {
+    return this._post.model.post.update({
+      where: { id: cloneId },
+      data: {
+        state: data.state,
+        releaseId: data.releaseId || null,
+        releaseURL: data.releaseURL || null,
+        error: data.error || null,
+      },
+    });
+  }
+
   async clonePostAsRelease(
     originalPost: any,
     data: {

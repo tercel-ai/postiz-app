@@ -4,8 +4,6 @@ import {
   ApplicationFailure,
   proxyActivities,
   sleep,
-  defineSignal,
-  setHandler,
 } from '@temporalio/workflow';
 import dayjs from 'dayjs';
 import { Integration } from '@prisma/client';
@@ -32,7 +30,8 @@ const {
   updatePost,
   sendWebhooks,
   isCommentable,
-  recordFailedRelease,
+  prepareRecurringCycle,
+  finalizeRecurringCycle,
 } = proxyActivities<PostActivity>({
   startToCloseTimeout: '10 minute',
   retry: {
@@ -41,8 +40,6 @@ const {
     initialInterval: '2 minutes',
   },
 });
-
-const poke = defineSignal('poke');
 
 const iterate = Array.from({ length: 5 });
 
@@ -69,15 +66,6 @@ export async function postWorkflowV101({
     processPlug,
   } = proxyTaskQueue(taskQueue);
 
-  let poked = false;
-  setHandler(poke, () => {
-    poked = true;
-  });
-
-  const startTime = new Date();
-  // Unique releaseId for this publish attempt (used for PostRelease tracking)
-  const attemptReleaseId = `attempt_${startTime.toISOString()}_${makeId(6)}`;
-
   // get all the posts and comments to post
   const postsListBefore = await getPostsList(organizationId, postId);
   const [post] = postsListBefore;
@@ -90,7 +78,7 @@ export async function postWorkflowV101({
     return;
   }
 
-  // if it's a repeatable post, we should ignore this.
+  // sleep until publishDate
   if (!postNow) {
     await sleep(
       dayjs(post.publishDate).isBefore(dayjs())
@@ -116,6 +104,23 @@ export async function postWorkflowV101({
     }
   }
 
+  // ── Recurring post: pre-publish idempotent lock ──
+  // Create a QUEUE clone BEFORE calling postSocial.  The claimToken acts as
+  // an atomic lock — only one workflow can claim a QUEUE clone.  If the clone
+  // is already PUBLISHED/ERROR or claimed by another workflow, skip.
+  const isRecurring = !!(post as any).intervalInDays;
+  let cycleCloneId: string | null = null;
+  const claimToken = `claim_${new Date().toISOString()}_${makeId(6)}`;
+
+  if (isRecurring) {
+    const prepared = await prepareRecurringCycle(postId, publishDateStr, claimToken);
+    if (prepared?.alreadyHandled) {
+      // Another workflow already claimed, published, or recorded failure
+      return;
+    }
+    cycleCloneId = prepared?.clone?.id ?? null;
+  }
+
   // if refresh is needed from last time, let's inform the user
   if (post.integration?.refreshNeeded) {
     await inAppNotification(
@@ -126,6 +131,12 @@ export async function postWorkflowV101({
       false,
       'info'
     );
+    if (isRecurring && cycleCloneId) {
+      await finalizeRecurringCycle(postId, cycleCloneId, publishDateStr, {
+        state: 'ERROR',
+        error: 'Integration requires reconnection',
+      });
+    }
     return;
   }
 
@@ -139,6 +150,12 @@ export async function postWorkflowV101({
       false,
       'info'
     );
+    if (isRecurring && cycleCloneId) {
+      await finalizeRecurringCycle(postId, cycleCloneId, publishDateStr, {
+        state: 'ERROR',
+        error: 'Integration is disabled',
+      });
+    }
     return;
   }
 
@@ -187,21 +204,16 @@ export async function postWorkflowV101({
           );
         }
 
-        // mark post as successful — once this succeeds, the post is considered published.
-        // For recurring posts, updatePost returns null if another workflow
-        // already advanced publishDate (optimistic lock race lost).
-        // Pass the publishDate we read at workflow start so the optimistic
-        // lock compares against the cycle we intend to publish, not whatever
-        // the DB currently holds (which may have been advanced by a rival).
-        const updateResult = await updatePost(
-          postsList[i].id,
-          postsResults[i].postId,
-          postsResults[i].releaseURL,
-          publishDateStr
-        );
+        // For non-recurring posts: update original in place
+        if (!isRecurring) {
+          await updatePost(
+            postsList[i].id,
+            postsResults[i].postId,
+            postsResults[i].releaseURL
+          );
+        }
 
         lastErr = null;
-        // break the current while to move to the next post
         break;
       } catch (err) {
         lastErr = err;
@@ -215,7 +227,12 @@ export async function postWorkflowV101({
           const refresh = await refreshToken(post.integration);
           if (!refresh || !refresh.accessToken) {
             await changeState(postsList[0].id, 'ERROR', err, postsList);
-            await recordFailedRelease(postsList[0].id, attemptReleaseId, 'Token refresh failed', publishDateStr);
+            if (isRecurring && cycleCloneId) {
+              await finalizeRecurringCycle(postId, cycleCloneId, publishDateStr, {
+                state: 'ERROR',
+                error: 'Token refresh failed',
+              });
+            }
             return false;
           }
 
@@ -234,7 +251,12 @@ export async function postWorkflowV101({
           err.cause.type === 'bad_body'
         ) {
           const errMsg = err.cause.message || err.cause.type || 'Unknown error';
-          await recordFailedRelease(postsList[0].id, attemptReleaseId, errMsg, publishDateStr);
+          if (isRecurring && cycleCloneId) {
+            await finalizeRecurringCycle(postId, cycleCloneId, publishDateStr, {
+              state: 'ERROR',
+              error: errMsg,
+            });
+          }
           await inAppNotification(
             post.organizationId,
             `Error posting${i === 0 ? ' ' : ' comments '}on ${
@@ -251,16 +273,20 @@ export async function postWorkflowV101({
         }
 
         // Other errors: don't record failure yet — there may be more retries.
-        // The error clone is only created after all retries are exhausted.
       }
     }
 
     if (postsResults.length === before) {
-      // all retries exhausted without success — record a single ERROR clone
+      // all retries exhausted without success
       const errMsg = lastErr instanceof ActivityFailure && lastErr.cause instanceof ApplicationFailure
         ? lastErr.cause.message || lastErr.cause.type || 'Unknown error'
         : String(lastErr);
-      await recordFailedRelease(postsList[0].id, attemptReleaseId, errMsg, publishDateStr);
+      if (isRecurring && cycleCloneId) {
+        await finalizeRecurringCycle(postId, cycleCloneId, publishDateStr, {
+          state: 'ERROR',
+          error: errMsg,
+        });
+      }
       return false;
     }
 
@@ -283,6 +309,15 @@ export async function postWorkflowV101({
         // notification failure should not affect post state
       }
     }
+  }
+
+  // ── Recurring post: finalize with PUBLISHED + advance publishDate ──
+  if (isRecurring && cycleCloneId) {
+    await finalizeRecurringCycle(postId, cycleCloneId, publishDateStr, {
+      state: 'PUBLISHED',
+      releaseId: postsResults[0].postId,
+      releaseURL: postsResults[0].releaseURL,
+    });
   }
 
   // send webhooks for the post
@@ -313,26 +348,18 @@ export async function postWorkflowV101({
     []
   );
 
-  // Recurring posts are now scheduled entirely by missingPostWorkflow, which
-  // picks them up when publishDate is within ±2h of now (or when they are
-  // stuck in the past).  This eliminates the race between a child workflow
-  // and missingPostWorkflow that previously caused double social-media posts.
-
   // Sort all the actions by delay, so we can process them in order
   const list = sortBy(
     [...internalPlugsList, ...globalPlugsList],
     'delay'
   );
 
-  // process all the plugs in order, we are using while because in some cases we need to remove items from the list
+  // process all the plugs in order
   while (list.length > 0) {
-    // get the next to process
     const todo = list.shift();
 
-    // wait for the delay
     await sleep(Math.max(0, Number(todo.delay ?? 0)));
 
-    // process internal plug
     if (todo.type === 'internal-plug') {
       for (const _ of iterate) {
         try {
@@ -349,10 +376,8 @@ export async function postWorkflowV101({
             if (!refresh || !refresh.accessToken) {
               break;
             }
-
             continue;
           }
-
           if (
             err instanceof ActivityFailure &&
             err.cause instanceof ApplicationFailure &&
@@ -360,14 +385,12 @@ export async function postWorkflowV101({
           ) {
             break;
           }
-
           continue;
         }
         break;
       }
     }
 
-    // process global plug
     if (todo.type === 'global') {
       for (const _ of iterate) {
         try {
@@ -381,7 +404,6 @@ export async function postWorkflowV101({
                 if (current.plugId === todo.plugId) {
                   all.push(index);
                 }
-
                 return all;
               }, [])
               .reverse();
@@ -400,10 +422,8 @@ export async function postWorkflowV101({
             if (!refresh || !refresh.accessToken) {
               break;
             }
-
             continue;
           }
-
           if (
             err instanceof ActivityFailure &&
             err.cause instanceof ApplicationFailure &&
@@ -411,13 +431,10 @@ export async function postWorkflowV101({
           ) {
             break;
           }
-
           continue;
         }
-
         break;
       }
     }
-
   }
 }

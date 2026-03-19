@@ -77,19 +77,35 @@ export class PostActivity {
   }
 
   @ActivityMethod()
-  async updatePost(id: string, postId: string, releaseURL: string, expectedPublishDate?: string) {
-    return this._postService.updatePost(
-      id, postId, releaseURL,
-      expectedPublishDate ? new Date(expectedPublishDate) : undefined
+  async prepareRecurringCycle(postId: string, expectedPublishDate: string, claimToken: string) {
+    return this._postService.prepareRecurringCycle(postId, new Date(expectedPublishDate), claimToken);
+  }
+
+  @ActivityMethod()
+  async finalizeRecurringCycle(
+    postId: string,
+    cloneId: string,
+    expectedPublishDate: string,
+    result: {
+      state: 'PUBLISHED' | 'ERROR';
+      releaseId?: string;
+      releaseURL?: string;
+      error?: string;
+    }
+  ) {
+    return this._postService.finalizeRecurringCycle(
+      postId, cloneId, new Date(expectedPublishDate), result
     );
   }
 
   @ActivityMethod()
-  async recordFailedRelease(postId: string, releaseId: string, error: string, expectedPublishDate?: string) {
-    return this._postService.recordFailedRelease(
-      postId, releaseId, error,
-      expectedPublishDate ? new Date(expectedPublishDate) : undefined
-    );
+  async updatePost(id: string, postId: string, releaseURL: string) {
+    return this._postService.updatePost(id, postId, releaseURL);
+  }
+
+  @ActivityMethod()
+  async recordFailedRelease(postId: string, releaseId: string, error: string) {
+    return this._postService.recordFailedRelease(postId, releaseId, error);
   }
 
   @ActivityMethod()

@@ -62,90 +62,69 @@ export class PostsService {
     return this._postRepository.searchForMissingThreeHoursPosts();
   }
 
-  async updatePost(id: string, postId: string, releaseURL: string, expectedPublishDate?: Date) {
-    const post = await this._postRepository.getPostById(id);
-
-    if (post && post.intervalInDays && post.intervalInDays > 0 && !post.parentPostId) {
-      // Use the expectedPublishDate from the workflow (the publishDate the
-      // workflow read at start) instead of re-reading from DB.  This prevents
-      // a race where two competing workflows each read a different
-      // (already-advanced) publishDate and both successfully advance+clone.
-      const lockDate = expectedPublishDate || post.publishDate;
-
-      const advanced = await this._postRepository.advancePublishDate(
-        post.id,
-        lockDate,
-        post.intervalInDays
-      );
-
-      if (!advanced) {
-        console.warn(
-          `[updatePost] Lost race for post ${id}: publishDate already advanced from ${lockDate}`
-        );
-        return null;
-      }
-
-      // Only the winner creates the clone record.
-      // Use lockDate for the clone's publishDate so it reflects the actual
-      // cycle date, not whatever the DB currently holds.
-      await this._postRepository.clonePostAsRelease(
-        { ...post, publishDate: lockDate },
-        {
-          releaseId: postId,
-          releaseURL,
-          state: 'PUBLISHED',
-        }
-      );
-
-      return post;
+  /**
+   * Pre-publish step for recurring posts: create a QUEUE clone as an
+   * idempotent lock for the given cycle.  Returns:
+   *  - { clone, alreadyHandled: true }  → skip publishing (already done)
+   *  - { clone, alreadyHandled: false } → proceed to postSocial
+   *  - null                             → not a recurring post
+   */
+  async prepareRecurringCycle(postId: string, expectedPublishDate: Date, claimToken: string) {
+    const post = await this._postRepository.getPostById(postId);
+    if (!post || !post.intervalInDays || post.intervalInDays <= 0 || post.parentPostId) {
+      return null;
     }
 
-    // Non-recurring: update original in place (current behavior)
-    const updatedPost = await this._postRepository.updatePost(id, postId, releaseURL);
+    return this._postRepository.findOrCreateCycleClone(post, expectedPublishDate, claimToken);
+  }
 
+  /**
+   * Post-publish step for recurring posts: mark the clone as
+   * PUBLISHED or ERROR, then advance publishDate to the next cycle.
+   * Always advances regardless of success/failure so the next cycle
+   * is never blocked.
+   */
+  async finalizeRecurringCycle(
+    postId: string,
+    cloneId: string,
+    expectedPublishDate: Date,
+    result: {
+      state: 'PUBLISHED' | 'ERROR';
+      releaseId?: string;
+      releaseURL?: string;
+      error?: string;
+    }
+  ) {
+    const post = await this._postRepository.getPostById(postId);
+    if (!post || !post.intervalInDays) return;
+
+    // 1. Finalize clone state
+    await this._postRepository.finalizeCycleClone(cloneId, result);
+
+    // 2. Advance publishDate to next cycle (always, regardless of result)
+    const advanced = await this._postRepository.advancePublishDate(
+      post.id,
+      expectedPublishDate,
+      post.intervalInDays
+    );
+
+    if (!advanced) {
+      console.warn(
+        `[finalizeRecurringCycle] publishDate already advanced for post ${postId} from ${expectedPublishDate}`
+      );
+    }
+  }
+
+  async updatePost(id: string, postId: string, releaseURL: string) {
+    // Non-recurring: update original in place
+    const updatedPost = await this._postRepository.updatePost(id, postId, releaseURL);
     return updatedPost;
   }
 
-  async recordFailedRelease(postId: string, releaseId: string, error: string, expectedPublishDate?: Date) {
-    const post = await this._postRepository.getPostById(postId);
-    if (!post) return;
-
-    // Only clone for recurring posts — non-recurring failures are already
-    // captured by changeState(ERROR) on the original post.
-    if (post.intervalInDays && post.intervalInDays > 0 && !post.parentPostId) {
-      const lockDate = expectedPublishDate || post.publishDate;
-
-      try {
-        const advanced = await this._postRepository.advancePublishDate(
-          post.id,
-          lockDate,
-          post.intervalInDays
-        );
-
-        if (!advanced) {
-          console.warn(
-            `[recordFailedRelease] Lost race for post ${postId}: publishDate already advanced`
-          );
-          return;
-        }
-      } catch (e) {
-        console.error('Failed to advance publishDate after error:', e);
-        return;
-      }
-
-      try {
-        await this._postRepository.clonePostAsRelease(
-          { ...post, publishDate: lockDate },
-          {
-            releaseId,
-            state: 'ERROR',
-            error,
-          }
-        );
-      } catch (e) {
-        console.error('Failed to clone post as failed release:', e);
-      }
-    }
+  async recordFailedRelease(postId: string, releaseId: string, error: string) {
+    // Non-recurring failures are captured by changeState(ERROR) on the
+    // original post.  This method is kept for backward compatibility but
+    // recurring posts now use prepareRecurringCycle + finalizeRecurringCycle.
   }
 
   async checkPostAnalytics(
@@ -776,7 +755,7 @@ export class PostsService {
   async changeState(id: string, state: State, err?: any, body?: any) {
     // For recurring posts, don't set ERROR on the original — it needs to stay
     // QUEUE so that subsequent scheduled sends can proceed. The error is
-    // captured in the cloned Post (via recordFailedRelease) instead.
+    // captured in the cycle clone (via finalizeRecurringCycle) instead.
     if (state === 'ERROR') {
       const post = await this._postRepository.getPostById(id);
       if (post?.intervalInDays && post.intervalInDays > 0 && !post.parentPostId) {
