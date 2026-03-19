@@ -2,7 +2,6 @@ import { PostActivity } from '@gitroom/orchestrator/activities/post.activity';
 import {
   ActivityFailure,
   ApplicationFailure,
-  startChild,
   proxyActivities,
   sleep,
   defineSignal,
@@ -13,8 +12,6 @@ import { Integration } from '@prisma/client';
 import { capitalize, sortBy } from 'lodash';
 import { PostResponse } from '@gitroom/nestjs-libraries/integrations/social/social.integrations.interface';
 import { makeId } from '@gitroom/nestjs-libraries/services/make.is';
-import { TypedSearchAttributes } from '@temporalio/common';
-import { postId as postIdSearchParam } from '@gitroom/nestjs-libraries/temporal/temporal.search.attribute';
 
 const proxyTaskQueue = (taskQueue: string) => {
   return proxyActivities<PostActivity>({
@@ -100,8 +97,8 @@ export async function postWorkflowV101({
   }
 
   // Re-check post state after sleep to prevent duplicate publishing.
-  // Another workflow (missingPostWorkflow or repeat-post child) may have
-  // already published and advanced the publishDate while we were sleeping.
+  // Another workflow may have already published and advanced the
+  // publishDate while we were sleeping.
   if (!postNow) {
     const postsListAfterSleep = await getPostsList(organizationId, postId);
     const [freshPost] = postsListAfterSleep;
@@ -153,11 +150,6 @@ export async function postWorkflowV101({
   // list of all the saved results
   const postsResults: PostResponse[] = [];
 
-  // Track whether this workflow won the race for recurring posts.
-  // If another workflow already advanced publishDate, we lost and should
-  // skip repeat-post scheduling to avoid double-advance.
-  let lostRace = false;
-
   // iterate over the posts
   for (let i = 0; i < postsList.length; i++) {
     const before = postsResults.length;
@@ -195,15 +187,15 @@ export async function postWorkflowV101({
         // mark post as successful — once this succeeds, the post is considered published.
         // For recurring posts, updatePost returns null if another workflow
         // already advanced publishDate (optimistic lock race lost).
+        // Pass the publishDate we read at workflow start so the optimistic
+        // lock compares against the cycle we intend to publish, not whatever
+        // the DB currently holds (which may have been advanced by a rival).
         const updateResult = await updatePost(
           postsList[i].id,
           postsResults[i].postId,
-          postsResults[i].releaseURL
+          postsResults[i].releaseURL,
+          post.publishDate
         );
-
-        if (updateResult === null && i === 0) {
-          lostRace = true;
-        }
 
         lastErr = null;
         // break the current while to move to the next post
@@ -220,7 +212,7 @@ export async function postWorkflowV101({
           const refresh = await refreshToken(post.integration);
           if (!refresh || !refresh.accessToken) {
             await changeState(postsList[0].id, 'ERROR', err, postsList);
-            await recordFailedRelease(postsList[0].id, attemptReleaseId, 'Token refresh failed');
+            await recordFailedRelease(postsList[0].id, attemptReleaseId, 'Token refresh failed', post.publishDate);
             return false;
           }
 
@@ -239,7 +231,7 @@ export async function postWorkflowV101({
           err.cause.type === 'bad_body'
         ) {
           const errMsg = err.cause.message || err.cause.type || 'Unknown error';
-          await recordFailedRelease(postsList[0].id, attemptReleaseId, errMsg);
+          await recordFailedRelease(postsList[0].id, attemptReleaseId, errMsg, post.publishDate);
           await inAppNotification(
             post.organizationId,
             `Error posting${i === 0 ? ' ' : ' comments '}on ${
@@ -265,7 +257,7 @@ export async function postWorkflowV101({
       const errMsg = lastErr instanceof ActivityFailure && lastErr.cause instanceof ApplicationFailure
         ? lastErr.cause.message || lastErr.cause.type || 'Unknown error'
         : String(lastErr);
-      await recordFailedRelease(postsList[0].id, attemptReleaseId, errMsg);
+      await recordFailedRelease(postsList[0].id, attemptReleaseId, errMsg, post.publishDate);
       return false;
     }
 
@@ -318,23 +310,14 @@ export async function postWorkflowV101({
     []
   );
 
-  // Check if the post is repeatable.
-  // Skip repeat-post if we lost the optimistic lock race — the winning
-  // workflow will handle the next cycle's scheduling.
-  const repeatPost = !post.intervalInDays || lostRace
-    ? []
-    : [
-        {
-          type: 'repeat-post',
-          delay:
-            post.intervalInDays * 24 * 60 * 60 * 1000 -
-            (new Date().getTime() - startTime.getTime()),
-        },
-      ];
+  // Recurring posts are now scheduled entirely by missingPostWorkflow, which
+  // picks them up when publishDate is within ±2h of now (or when they are
+  // stuck in the past).  This eliminates the race between a child workflow
+  // and missingPostWorkflow that previously caused double social-media posts.
 
   // Sort all the actions by delay, so we can process them in order
   const list = sortBy(
-    [...internalPlugsList, ...globalPlugsList, ...repeatPost],
+    [...internalPlugsList, ...globalPlugsList],
     'delay'
   );
 
@@ -433,27 +416,5 @@ export async function postWorkflowV101({
       }
     }
 
-    // process repeat post in a new workflow, this is important so the other plugs can keep running
-    if (todo.type === 'repeat-post') {
-      await startChild(postWorkflowV101, {
-        parentClosePolicy: 'ABANDON',
-        args: [
-          {
-            taskQueue,
-            postId,
-            organizationId,
-            // postNow defaults to false — child workflow will sleep until
-            // the advanced publishDate, preventing premature publishing
-          },
-        ],
-        workflowId: `post_${post.id}_${makeId(10)}`,
-        typedSearchAttributes: new TypedSearchAttributes([
-          {
-            key: postIdSearchParam,
-            value: postId,
-          },
-        ]),
-      });
-    }
   }
 }

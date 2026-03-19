@@ -36,10 +36,25 @@ export class PostsRepository {
           inBetweenSteps: false,
           disabled: false,
         },
-        publishDate: {
-          gte: dayjs.utc().subtract(2, 'hour').toDate(),
-          lt: dayjs.utc().add(2, 'hour').toDate(),
-        },
+        OR: [
+          // Normal case: posts due within ±2 hours
+          {
+            publishDate: {
+              gte: dayjs.utc().subtract(2, 'hour').toDate(),
+              lt: dayjs.utc().add(2, 'hour').toDate(),
+            },
+          },
+          // Recurring posts stuck in the past (initial workflow failed or
+          // server restarted).  These need to be picked up so their
+          // publishDate can be advanced and the next cycle scheduled.
+          {
+            intervalInDays: { not: null },
+            sourcePostId: null,
+            publishDate: {
+              lt: dayjs.utc().subtract(2, 'hour').toDate(),
+            },
+          },
+        ],
         state: 'QUEUE',
         deletedAt: null,
         parentPostId: null,
@@ -591,13 +606,22 @@ export class PostsRepository {
    * other workflow has already advanced it).  Returns true on success.
    */
   async advancePublishDate(id: string, currentPublishDate: Date, intervalInDays: number): Promise<boolean> {
+    // Calculate the next publish date.  If currentPublishDate + interval is
+    // still in the past (e.g. the post was stuck), keep advancing until we
+    // land in the future.  This prevents a burst of rapid catch-up publishes.
+    const now = dayjs.utc();
+    let next = dayjs.utc(currentPublishDate).add(intervalInDays, 'days');
+    while (next.isBefore(now)) {
+      next = next.add(intervalInDays, 'days');
+    }
+
     const result = await this._post.model.post.updateMany({
       where: {
         id,
         publishDate: currentPublishDate,
       },
       data: {
-        publishDate: dayjs.utc(currentPublishDate).add(intervalInDays, 'days').toDate(),
+        publishDate: next.toDate(),
       },
     });
     return result.count > 0;

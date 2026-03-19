@@ -77,13 +77,19 @@ export class PostActivity {
   }
 
   @ActivityMethod()
-  async updatePost(id: string, postId: string, releaseURL: string) {
-    return this._postService.updatePost(id, postId, releaseURL);
+  async updatePost(id: string, postId: string, releaseURL: string, expectedPublishDate?: string) {
+    return this._postService.updatePost(
+      id, postId, releaseURL,
+      expectedPublishDate ? new Date(expectedPublishDate) : undefined
+    );
   }
 
   @ActivityMethod()
-  async recordFailedRelease(postId: string, releaseId: string, error: string) {
-    return this._postService.recordFailedRelease(postId, releaseId, error);
+  async recordFailedRelease(postId: string, releaseId: string, error: string, expectedPublishDate?: string) {
+    return this._postService.recordFailedRelease(
+      postId, releaseId, error,
+      expectedPublishDate ? new Date(expectedPublishDate) : undefined
+    );
   }
 
   @ActivityMethod()

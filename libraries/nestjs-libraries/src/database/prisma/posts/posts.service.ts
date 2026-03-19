@@ -62,34 +62,40 @@ export class PostsService {
     return this._postRepository.searchForMissingThreeHoursPosts();
   }
 
-  async updatePost(id: string, postId: string, releaseURL: string) {
+  async updatePost(id: string, postId: string, releaseURL: string, expectedPublishDate?: Date) {
     const post = await this._postRepository.getPostById(id);
 
     if (post && post.intervalInDays && post.intervalInDays > 0 && !post.parentPostId) {
-      // Optimistic lock: advance publishDate first.
-      // Only one workflow can win — the loser gets count=0 and skips cloning,
-      // preventing double-advance (which would skip a day).
+      // Use the expectedPublishDate from the workflow (the publishDate the
+      // workflow read at start) instead of re-reading from DB.  This prevents
+      // a race where two competing workflows each read a different
+      // (already-advanced) publishDate and both successfully advance+clone.
+      const lockDate = expectedPublishDate || post.publishDate;
+
       const advanced = await this._postRepository.advancePublishDate(
         post.id,
-        post.publishDate,
+        lockDate,
         post.intervalInDays
       );
 
       if (!advanced) {
-        // Another workflow already advanced this cycle — skip to avoid
-        // creating a ghost clone and double-advancing publishDate.
         console.warn(
-          `[updatePost] Lost race for post ${id}: publishDate already advanced from ${post.publishDate}`
+          `[updatePost] Lost race for post ${id}: publishDate already advanced from ${lockDate}`
         );
         return null;
       }
 
       // Only the winner creates the clone record.
-      await this._postRepository.clonePostAsRelease(post, {
-        releaseId: postId,
-        releaseURL,
-        state: 'PUBLISHED',
-      });
+      // Use lockDate for the clone's publishDate so it reflects the actual
+      // cycle date, not whatever the DB currently holds.
+      await this._postRepository.clonePostAsRelease(
+        { ...post, publishDate: lockDate },
+        {
+          releaseId: postId,
+          releaseURL,
+          state: 'PUBLISHED',
+        }
+      );
 
       return post;
     }
@@ -100,18 +106,19 @@ export class PostsService {
     return updatedPost;
   }
 
-  async recordFailedRelease(postId: string, releaseId: string, error: string) {
+  async recordFailedRelease(postId: string, releaseId: string, error: string, expectedPublishDate?: Date) {
     const post = await this._postRepository.getPostById(postId);
     if (!post) return;
 
     // Only clone for recurring posts — non-recurring failures are already
     // captured by changeState(ERROR) on the original post.
     if (post.intervalInDays && post.intervalInDays > 0 && !post.parentPostId) {
-      // Optimistic lock: advance first, skip if another workflow already handled this cycle.
+      const lockDate = expectedPublishDate || post.publishDate;
+
       try {
         const advanced = await this._postRepository.advancePublishDate(
           post.id,
-          post.publishDate,
+          lockDate,
           post.intervalInDays
         );
 
@@ -127,11 +134,14 @@ export class PostsService {
       }
 
       try {
-        await this._postRepository.clonePostAsRelease(post, {
-          releaseId,
-          state: 'ERROR',
-          error,
-        });
+        await this._postRepository.clonePostAsRelease(
+          { ...post, publishDate: lockDate },
+          {
+            releaseId,
+            state: 'ERROR',
+            error,
+          }
+        );
       } catch (e) {
         console.error('Failed to clone post as failed release:', e);
       }
