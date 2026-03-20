@@ -231,10 +231,22 @@ export class AiseeCreditService {
       }
     }
 
-    if (costItems.length === 0) {
+    if (costItems.length === 0 && usages.length > 0) {
+      // Token counts were 0 (tracking issue) but LLM was invoked.
+      // Apply a minimum charge so usage is never free.
       this.logger.warn(
-        `No billable cost for task=${opts.taskId} — skipping deduction`
+        `Zero-cost usages for task=${opts.taskId} (${usages.length} calls, tokens may not have been tracked). Applying minimum charge.`
       );
+      costItems.push({
+        type: 'text',
+        amount: (0.01 * usages.length).toFixed(6), // 0.01 credits per untracked call
+        model: usages[0]?.model || 'unknown',
+        billing_mode: 'per_token',
+        quantity: 0,
+      });
+    }
+
+    if (costItems.length === 0) {
       return null;
     }
 

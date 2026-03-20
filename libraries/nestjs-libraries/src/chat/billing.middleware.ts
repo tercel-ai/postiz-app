@@ -41,12 +41,20 @@ export function withBillingTracking<T extends { provider: string; modelId: strin
         return async (...args: any[]) => {
           const result = await (target as any).doGenerate(...args);
           if (result?.usage) {
+            const promptTokens = result.usage.promptTokens
+              ?? result.usage.inputTokens
+              ?? result.usage.prompt_tokens
+              ?? 0;
+            const completionTokens = result.usage.completionTokens
+              ?? result.usage.outputTokens
+              ?? result.usage.completion_tokens
+              ?? 0;
             collectUsage(
               buildUsageInfo(
                 target.provider,
                 target.modelId,
-                result.usage.promptTokens ?? 0,
-                result.usage.completionTokens ?? 0
+                promptTokens,
+                completionTokens
               )
             );
           }
@@ -68,12 +76,26 @@ export function withBillingTracking<T extends { provider: string; modelId: strin
           const originalStream = result.stream;
           const transformStream = new TransformStream({
             transform(chunk: any, controller: any) {
+              if (chunk?.type === 'finish') {
+                // Debug: log actual chunk structure to diagnose token=0 issues
+                console.log(
+                  `[BillingTracking] finish chunk: usage=${JSON.stringify(chunk.usage)} | model=${target.modelId}`
+                );
+              }
               if (chunk?.type === 'finish' && chunk?.usage) {
+                const promptTokens = chunk.usage.promptTokens
+                  ?? chunk.usage.inputTokens
+                  ?? chunk.usage.prompt_tokens
+                  ?? 0;
+                const completionTokens = chunk.usage.completionTokens
+                  ?? chunk.usage.outputTokens
+                  ?? chunk.usage.completion_tokens
+                  ?? 0;
                 const usageInfo = buildUsageInfo(
                   target.provider,
                   target.modelId,
-                  chunk.usage.promptTokens ?? 0,
-                  chunk.usage.completionTokens ?? 0
+                  promptTokens,
+                  completionTokens
                 );
                 // Write directly to captured store — collectUsage() would
                 // fail here because ALS context is lost in TransformStream.

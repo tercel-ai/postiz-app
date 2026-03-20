@@ -159,11 +159,20 @@ export class CopilotController {
    * Returns error object if insufficient, null if OK.
    */
   private async checkMinChatCredits(
-    userId: string
+    organizationId: string
   ): Promise<{ error: string; required: number; balance: number } | null> {
-    const balance = await this._creditService.getBalance(userId);
+    const balance = await this._creditService.getBalance(organizationId);
     if (!balance) {
       return null; // Aisee disabled, allow
+    }
+
+    // Hard block: balance <= 0
+    if (balance.total <= 0) {
+      return {
+        error: 'Insufficient credits. Please top up to continue.',
+        required: 0,
+        balance: balance.total,
+      };
     }
 
     const config = await this._aiPricingService.getPricingConfig();
