@@ -191,10 +191,7 @@ export class AiseeClient {
 
     try {
       const url = `${this.baseUrl}/credit/deduct`;
-      const headers = {
-        'Content-Type': 'application/json',
-        ...this.authHeaders,
-      };
+      const authHeaders = this.authHeaders;
       const payload = {
         user_id: req.userId,
         amount: req.amount,
@@ -207,12 +204,15 @@ export class AiseeClient {
       };
       const bodyStr = JSON.stringify(payload);
       this.logger.log(
-        `[deductCredits] curl -X 'POST' '${url}' -H 'Content-Type: application/json' -H 'Authorization: ${headers.Authorization}' -d '${bodyStr}'`
+        `[deductCredits] curl -X 'POST' '${url}' -H 'Content-Type: application/json' -H 'Authorization: ${authHeaders.Authorization}' -d '${bodyStr}'`
       );
 
       const response = await fetch(url, {
         method: 'POST',
-        headers,
+        headers: {
+          'Content-Type': 'application/json',
+          ...authHeaders,
+        },
         body: bodyStr,
       });
 
