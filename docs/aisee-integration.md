@@ -39,6 +39,26 @@ POST /copilot/agent
 
 All prices and costs are in **Aisee credits** ($1 = 100 credits). No USD-to-credit conversion is needed — the entire pipeline operates in credits.
 
+## User ID Resolution (organizationId → Aisee userId)
+
+Aisee bills by **user**, but Postiz's AI operations are scoped to **organizations**. The `AiseeCreditService` transparently resolves this:
+
+```
+Caller passes organizationId
+  → resolveOwnerUserId(organizationId)
+      → UserOrganization table: find SUPERADMIN (preferred) or ADMIN
+      → returns userId
+  → AiseeClient calls Aisee API with resolved userId
+```
+
+- Callers (agent, media service, copilot) always pass `organizationId` as `opts.userId`
+- `AiseeCreditService` resolves it internally before every Aisee API call (`getBalance`, `deductCredits`)
+- The resolved userId is cached for 5 minutes to avoid repeated DB lookups
+- `BillingRecord` stores the original `organizationId` (local audit), not the resolved userId
+- If no SUPERADMIN/ADMIN is found, falls back to `organizationId` with a warning log
+
+**Important**: When creating users in Aisee, use the Postiz **User.id** (not Organization.id). The billing owner is the organization's SUPERADMIN.
+
 ## AiseeClient
 
 HTTP client for communicating with aisee_orchestrator.
@@ -59,10 +79,12 @@ When `AISEE_ORCHESTRATOR_URL` is not set, `AiseeClient` is disabled — `deductC
 
 | Method | Description |
 |--------|-------------|
-| `deductCredits(req)` | POST to `/credit/deduct` with userId, amount, taskId, postiz_billing_id |
+| `deductCredits(req)` | POST to `/credit/deduct` with Aisee userId, amount, taskId, postiz_billing_id |
 | `confirmDeduction(req)` | POST to `/credit/deduct/confirm` with taskId, status (success/failed) |
-| `getBalance(userId)` | GET `/credit/balance/{userId}` |
+| `getBalance(userId)` | GET `/credit/balance/{userId}` — expects **Aisee user ID** (not org ID) |
 | `AiseeClient.buildTaskId(label)` | Returns `postiz_{label}_{random}` |
+
+> **Note**: `AiseeClient` methods expect the **resolved Aisee user ID**. Do not pass `organizationId` directly — use `AiseeCreditService` which handles the resolution automatically.
 
 ### AiseeDeductRequest
 
@@ -121,18 +143,21 @@ All Postiz operations use the format `postiz_{label}_{random}` as the task_id fo
 
 ## AiseeCreditService
 
-Orchestrates the credit lifecycle. Key methods:
+Orchestrates the credit lifecycle. All methods accept `organizationId` and internally resolve it to the Aisee user ID via `resolveOwnerUserId()`.
 
 | Method | Description |
 |--------|-------------|
-| `getBalance(userId)` | Returns credit balance (null if Aisee disabled) |
-| `hasCredits(userId)` | Returns `true` if balance > 0 or Aisee disabled |
+| `resolveOwnerUserId(orgId)` | Resolves org → owner user ID (SUPERADMIN > ADMIN), cached 5 min |
+| `getBalance(orgId)` | Returns credit balance (null if Aisee disabled) |
+| `hasCredits(orgId)` | Returns `true` if balance > 0 or Aisee disabled |
 | `executeWithBilling(opts, llmCall)` | Single-step: check balance → execute → calculate cost → deduct |
 | `executeMultiStepWithBilling(opts, llmCall)` | Multi-step: check balance → execute → aggregate costs → single deduct |
 | `billCollectedUsages(opts, usages)` | Post-hoc billing for already-collected usages (agent chat) |
 | `confirmFailed(taskId)` | Confirm deduction as failed — triggers refund on Aisee side |
 
-All deduction methods create a local BillingRecord before calling Aisee and update it with the response.
+`opts.userId` in `AiseeCreditExecOptions` is the **organizationId** (naming is historical). The resolution to Aisee user ID happens inside the service.
+
+All deduction methods create a local BillingRecord (keyed by `organizationId`) before calling Aisee and update it with the response.
 
 ## Admin Billing API
 
