@@ -150,13 +150,19 @@ export class AiseeClient {
     }
 
     try {
-      const response = await fetch(
-        `${this.baseUrl}/credit/balance/${encodeURIComponent(userId)}`,
-        { headers: this.authHeaders }
+      const url = `${this.baseUrl}/credit/balance/${encodeURIComponent(userId)}`;
+      const headers = this.authHeaders;
+      this.logger.log(
+        `[getBalance] curl -X 'GET' '${url}' -H 'Authorization: ${headers.Authorization}'`
       );
 
+      const response = await fetch(url, { headers });
+
       if (!response.ok) {
-        this.logger.error(`Balance query failed: ${response.status}`);
+        const errorBody = await response.text().catch(() => '');
+        this.logger.error(
+          `Balance query failed: ${response.status} | body=${errorBody}`
+        );
         return null;
       }
 
@@ -184,28 +190,36 @@ export class AiseeClient {
     }
 
     try {
-      const response = await fetch(`${this.baseUrl}/credit/deduct`, {
+      const url = `${this.baseUrl}/credit/deduct`;
+      const headers = {
+        'Content-Type': 'application/json',
+        ...this.authHeaders,
+      };
+      const payload = {
+        user_id: req.userId,
+        amount: req.amount,
+        task_id: req.taskId,
+        description: req.description,
+        channel: AiseeClient.CHANNEL,
+        business_type: req.businessType,
+        cost_items: req.costItems,
+        postiz_billing_id: req.postizBillingId,
+      };
+      const bodyStr = JSON.stringify(payload);
+      this.logger.log(
+        `[deductCredits] curl -X 'POST' '${url}' -H 'Content-Type: application/json' -H 'Authorization: ${headers.Authorization}' -d '${bodyStr}'`
+      );
+
+      const response = await fetch(url, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...this.authHeaders,
-        },
-        body: JSON.stringify({
-          user_id: req.userId,
-          amount: req.amount,
-          task_id: req.taskId,
-          description: req.description,
-          channel: AiseeClient.CHANNEL,
-          business_type: req.businessType,
-          cost_items: req.costItems,
-          postiz_billing_id: req.postizBillingId,
-        }),
+        headers,
+        body: bodyStr,
       });
 
       if (!response.ok) {
         const errorText = await response.text();
         this.logger.error(
-          `Credit deduction failed: ${response.status} ${errorText}`
+          `Credit deduction failed: ${response.status} | body=${errorText}`
         );
         return {
           success: false,
