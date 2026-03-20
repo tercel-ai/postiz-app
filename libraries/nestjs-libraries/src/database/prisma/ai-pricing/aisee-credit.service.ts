@@ -45,23 +45,63 @@ export class AiseeCreditService {
   constructor(
     private readonly aiseeClient: AiseeClient,
     private readonly aiPricingService: AiPricingService,
-    private readonly _billingRecord: PrismaRepository<'billingRecord'>
+    private readonly _billingRecord: PrismaRepository<'billingRecord'>,
+    private readonly _userOrganization: PrismaRepository<'userOrganization'>
   ) {}
 
+  // Short-lived cache: orgId → userId (avoids double DB query per billing flow)
+  private _ownerCache = new Map<string, { userId: string; expiresAt: number }>();
+
   /**
-   * Get the user's credit balance.
+   * Resolve the owner (SUPERADMIN or ADMIN) user ID for an organization.
+   * Aisee bills by user, not by organization.
+   * Cached for 5 minutes to avoid repeated DB lookups within a single flow.
+   */
+  async resolveOwnerUserId(organizationId: string): Promise<string> {
+    const cached = this._ownerCache.get(organizationId);
+    if (cached && Date.now() < cached.expiresAt) {
+      return cached.userId;
+    }
+    // Prefer SUPERADMIN over ADMIN
+    const owner =
+      (await this._userOrganization.model.userOrganization.findFirst({
+        where: { organizationId, role: 'SUPERADMIN', disabled: false },
+        select: { userId: true },
+      })) ||
+      (await this._userOrganization.model.userOrganization.findFirst({
+        where: { organizationId, role: 'ADMIN', disabled: false },
+        select: { userId: true },
+      }));
+
+    if (!owner) {
+      this.logger.warn(
+        `No owner found for org=${organizationId}, falling back to orgId`
+      );
+      return organizationId;
+    }
+
+    this._ownerCache.set(organizationId, {
+      userId: owner.userId,
+      expiresAt: Date.now() + 5 * 60 * 1000, // 5 minutes
+    });
+    return owner.userId;
+  }
+
+  /**
+   * Get the credit balance for an organization (resolved to owner user).
    * Returns null if Aisee is disabled (self-hosted / no billing).
    */
-  async getBalance(userId: string): Promise<AiseeCreditBalance | null> {
+  async getBalance(organizationId: string): Promise<AiseeCreditBalance | null> {
+    const userId = await this.resolveOwnerUserId(organizationId);
     return this.aiseeClient.getBalance(userId);
   }
 
   /**
-   * Check whether the user has a positive credit balance.
+   * Check whether the organization's owner has a positive credit balance.
    * Returns true if Aisee is disabled (self-hosted / no billing).
    */
-  async hasCredits(userId: string): Promise<boolean> {
-    const balance = await this.getBalance(userId);
+  async hasCredits(organizationId: string): Promise<boolean> {
+    const balance = await this.getBalance(organizationId);
     if (!balance) {
       return true;
     }
@@ -250,6 +290,9 @@ export class AiseeCreditService {
       costItems.map((item) => item.amount)
     );
 
+    // Resolve organization ID to owner user ID for Aisee billing
+    const aiseeUserId = await this.resolveOwnerUserId(opts.userId);
+
     // Step 1: Create local audit record BEFORE calling Aisee.
     // If DB write fails, proceed with deduction anyway — billing must not be
     // blocked by a local audit failure.
@@ -275,9 +318,9 @@ export class AiseeCreditService {
       );
     }
 
-    // Step 2: Call Aisee with postizBillingId for reconciliation
+    // Step 2: Call Aisee with resolved user ID (not org ID)
     const deduction = await this.aiseeClient.deductCredits({
-      userId: opts.userId,
+      userId: aiseeUserId,
       amount: totalAmount,
       taskId: opts.taskId,
       description: opts.description,
