@@ -144,8 +144,11 @@ export class AdminBillingController {
 
     const costItems = JSON.parse(record.costItems);
 
+    // Resolve orgId → Aisee userId (BillingRecord stores orgId, not user ID)
+    const aiseeUserId = await this._creditService.resolveOwnerUserId(record.organizationId);
+
     const deduction = await this._aiseeClient.deductCredits({
-      userId: record.organizationId,
+      userId: aiseeUserId,
       amount: record.amount,
       taskId: record.taskId,
       description: `[RETRY] ${record.description}`,
@@ -213,9 +216,10 @@ export class AdminBillingController {
 
     for (const record of failedRecords) {
       const costItems = JSON.parse(record.costItems);
+      const aiseeUserId = await this._creditService.resolveOwnerUserId(record.organizationId);
 
       const deduction = await this._aiseeClient.deductCredits({
-        userId: record.organizationId,
+        userId: aiseeUserId,
         amount: record.amount,
         taskId: record.taskId,
         description: `[RETRY] ${record.description}`,
