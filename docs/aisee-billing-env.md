@@ -40,14 +40,14 @@ Controls which billing system is active:
 Communicates with the Aisee orchestrator REST API:
 
 - **`GET /credit/balance/{user_id}`** — Check credit balance (subscription + top-up + bonus).
-- **`POST /credit/deduct`** — Deduct credits. Sends `task_id` (idempotency key), `amount`, `cost_items` breakdown, and `postiz_billing_id` (Postiz `BillingRecord.id` for reconciliation).
+- **`POST /credit/deduct`** — Deduct credits. Sends `task_id`, `amount`, `related_id` (optional entity link), and `data` dict (business metadata stored as-is).
 - **`POST /credit/deduct/confirm`** — Confirm deduction as `success` or `failed` (triggers refund on failure).
 
 All requests include a short-lived JWT (`Authorization: Bearer <token>`) signed with `JWT_SECRET`.
 
 ### 2. Local Audit Trail (`BillingRecord` table)
 
-Every deduction creates a local `BillingRecord` row **before** calling Aisee:
+Every AI operation creates a `BillingRecord` row **regardless of BILL_TYPE**:
 
 ```
 BillingRecord.id  →  sent to Aisee as postiz_billing_id  →  enables cross-system reconciliation
@@ -59,9 +59,11 @@ BillingRecord.id  →  sent to Aisee as postiz_billing_id  →  enables cross-sy
 | `taskId` | Idempotency key (`postiz_{label}_{random}`) — unique index |
 | `amount` | Total cost in Aisee credits (decimal string) |
 | `businessType` | `ai_copywriting` / `image_gen` / `video_gen` |
+| `subType` | Fine-grained sub-type: `chat` / `post_gen` / `image` / `video` (nullable) |
 | `costItems` | JSON-serialised `AiseeCostItem[]` breakdown |
-| `relatedId` | Optional related entity ID (e.g. post ID, media ID) for business context |
-| `status` | `pending` → `success` / `failed` / `skipped` |
+| `relatedId` | Optional related entity ID (e.g. threadId, mediaId) — can be back-filled |
+| `data` | Flexible business context JSON (prompt, generation params, associated entities) |
+| `status` | `pending` / `success` / `failed` / `skipped` / `internal` |
 | `transactionId` | Aisee transaction ID (set after successful deduction) |
 | `remainingBalance` | User's remaining balance after deduction |
 | `debtAmount` | Non-null if user went into debt |
@@ -69,12 +71,13 @@ BillingRecord.id  →  sent to Aisee as postiz_billing_id  →  enables cross-sy
 
 ### 3. Billing Touchpoints
 
-| Scenario | Trigger | Business Type | BILL_TYPE=internal | BILL_TYPE=third |
-|----------|---------|---------------|--------------------|-----------------
-| **Copilot chat** | `POST /copilot/agent` | `ai_copywriting` | Aisee (pre-check + post-billing) | Same |
-| **Image generation** | `POST /media/generate-image` | `image_gen` | Subscription useCredit() only | Aisee credits only |
-| **Agent post generation** | Agent workflow | `ai_copywriting` | Aisee only | Same |
-| **Video generation** | `POST /media/generate-video` | `video_gen` | Subscription useCredit() | **TODO**: Aisee (pending KieAI) |
+| Scenario | Trigger | Business Type | Sub Type | relatedId | BILL_TYPE=internal | BILL_TYPE=third |
+|----------|---------|---------------|----------|-----------|--------------------|-----------------
+| **Copilot chat** | `POST /copilot/agent` | `ai_copywriting` | `chat` | threadId | Aisee (pre-check + post-billing) | Same |
+| **Image generation** | `POST /media/generate-image` | `image_gen` | `image` | null | Subscription useCredit() only | Aisee credits only |
+| **Image gen+save** | `POST /media/generate-image-with-prompt` | `image_gen` | `image` | mediaId | Subscription useCredit() only | Aisee credits only |
+| **Agent post generation** | Agent workflow | `ai_copywriting` | `post_gen` | null | Aisee only | Same |
+| **Video generation** | `POST /media/generate-video` | `video_gen` | — | — | Subscription useCredit() | **TODO**: Aisee (pending KieAI) |
 | **Stripe webhooks** | `POST /stripe` | — | Active | Skipped |
 | **Billing endpoints** | `/billing/*` | — | Active | Stubs |
 
@@ -91,9 +94,13 @@ BillingRecord.id  →  sent to Aisee as postiz_billing_id  →  enables cross-sy
 
 Subscription-based per-operation counter. Tracks monthly quota usage for `ai_images` and `ai_videos`.
 
-### BillingRecord (BILL_TYPE=third only)
+### BillingRecord (both modes)
 
-Local audit trail with `postiz_billing_id` sent to Aisee for reconciliation. Supports `relatedId` for linking to business entities (posts, media, etc.).
+Unified AI operation log. Always created regardless of `BILL_TYPE`:
+- `internal` → status='internal', no Aisee call. Subscription credit deducted separately via `useCredit()`.
+- `third` → status='pending'→'success'/'failed'/'skipped'. `postiz_billing_id` sent to Aisee for reconciliation.
+
+Supports `relatedId` for linking to business entities and `data` (JSON) for flexible business context. Both can be back-filled via `associateEntity()`.
 
 ## Admin Billing API
 
@@ -104,6 +111,7 @@ All endpoints require `@SuperAdmin()` permission.
 | `/admin/billing/records` | GET | List billing records with filters (`status`, `organizationId`, `businessType`, pagination) |
 | `/admin/billing/records/:id` | GET | Single record detail with parsed `costItems` |
 | `/admin/billing/summary` | GET | Aggregated counts by status and businessType |
+| `/admin/billing/associate/:taskId` | PATCH | Back-fill `relatedId` and/or `data` on a BillingRecord (merge semantics) |
 | `/admin/billing/retry/:id` | POST | Retry single failed/pending record — re-sends deduction to Aisee |
 | `/admin/billing/retry-all-failed` | POST | Batch retry all `failed` records sequentially |
 

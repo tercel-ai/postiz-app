@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Param, Query } from '@nestjs/common';
+import { Controller, Get, Post, Patch, Param, Query, Body } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 import { SuperAdmin } from '@gitroom/backend/services/auth/admin/super-admin.decorator';
 import {
@@ -119,6 +119,21 @@ export class AdminBillingController {
   }
 
   /**
+   * PATCH /admin/billing/associate/:taskId
+   *
+   * Back-fill a BillingRecord with a business entity created after billing.
+   * Used when Post / Media is created after the AI generation.
+   */
+  @Patch('/associate/:taskId')
+  async associateEntity(
+    @Param('taskId') taskId: string,
+    @Body() body: { relatedId?: string; data?: Record<string, unknown> }
+  ) {
+    const updated = await this._creditService.associateEntity(taskId, body);
+    return { success: updated, taskId };
+  }
+
+  /**
    * POST /admin/billing/retry/:id
    *
    * Retry a single failed billing record.
@@ -142,7 +157,9 @@ export class AdminBillingController {
       return { success: false, error: 'Record was skipped (Aisee not configured)' };
     }
 
-    const costItems = JSON.parse(record.costItems);
+    if (record.status === 'internal') {
+      return { success: false, error: 'Record was billed via subscription (BILL_TYPE=internal)' };
+    }
 
     // Resolve orgId → Aisee userId (BillingRecord stores orgId, not user ID)
     const aiseeUserId = await this._creditService.resolveOwnerUserId(record.organizationId);
@@ -152,9 +169,14 @@ export class AdminBillingController {
       amount: record.amount,
       taskId: record.taskId,
       description: `[RETRY] ${record.description}`,
-      businessType: record.businessType as any,
-      costItems,
-      postizBillingId: record.id,
+      relatedId: record.relatedId || undefined,
+      data: {
+        business_type: record.businessType,
+        sub_type: record.subType,
+        cost_items: JSON.parse(record.costItems),
+        postiz_billing_id: record.id,
+        ...((record.data as Record<string, unknown>) || {}),
+      },
     });
 
     if (deduction.success) {
@@ -215,7 +237,6 @@ export class AdminBillingController {
     const results: Array<{ id: string; taskId: string; success: boolean; error?: string }> = [];
 
     for (const record of failedRecords) {
-      const costItems = JSON.parse(record.costItems);
       const aiseeUserId = await this._creditService.resolveOwnerUserId(record.organizationId);
 
       const deduction = await this._aiseeClient.deductCredits({
@@ -223,9 +244,14 @@ export class AdminBillingController {
         amount: record.amount,
         taskId: record.taskId,
         description: `[RETRY] ${record.description}`,
-        businessType: record.businessType as any,
-        costItems,
-        postizBillingId: record.id,
+        relatedId: record.relatedId || undefined,
+        data: {
+          business_type: record.businessType,
+          sub_type: record.subType,
+          cost_items: JSON.parse(record.costItems),
+          postiz_billing_id: record.id,
+          ...((record.data as Record<string, unknown>) || {}),
+        },
       });
 
       if (deduction.success) {

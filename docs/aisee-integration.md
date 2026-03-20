@@ -5,8 +5,8 @@
 Postiz integrates with [aisee_orchestrator](../aisee-core/aisee_orchestrator/) for credit-based billing. Postiz handles AI model pricing and cost calculation; aisee handles credit balance and deduction.
 
 Billing mode is controlled by `BILL_TYPE` env var:
-- `internal` — legacy Stripe-based subscription billing (Credits table)
-- `third` (default) — Aisee handles all billing externally (BillingRecord table)
+- `internal` — legacy Stripe-based subscription billing (Credits table). BillingRecord still created (status=`internal`) for unified AI operation tracking.
+- `third` (default) — Aisee handles all billing externally. BillingRecord tracks deduction lifecycle (pending→success/failed/skipped).
 
 See [aisee-billing-env.md](./aisee-billing-env.md) for full environment variable reference.
 
@@ -15,9 +15,11 @@ See [aisee-billing-env.md](./aisee-billing-env.md) for full environment variable
 ```
 AI Call → logAiUsage(AiUsageInfo) → AiPricingService.calculateCost() → AiseeCreditService.deductWithItems()
                                           ↓                                      ↓
-                                   Settings table                     1. Create BillingRecord (pending)
-                                   (ai_model_pricing)                 2. POST /credit/deduct (with postiz_billing_id)
-                                   credits per token                  3. Update BillingRecord (success/failed/skipped)
+                                   Settings table                     1. Create BillingRecord (always)
+                                   (ai_model_pricing)                    - BILL_TYPE=internal → status='internal', stop
+                                   credits per token                     - BILL_TYPE=third    → status='pending', continue:
+                                                                      2. POST /credit/deduct (with postiz_billing_id)
+                                                                      3. Update BillingRecord (success/failed/skipped)
                                                                       4. POST /credit/deduct/confirm (fire-and-forget)
 ```
 
@@ -91,14 +93,21 @@ When `AISEE_ORCHESTRATOR_URL` is not set, `AiseeClient` is disabled — `deductC
 ```typescript
 interface AiseeDeductRequest {
   userId: string;
-  amount: string;     // cost in credits from AiPricingService.calculateCost()
-  taskId: string;     // format: postiz_{label}_{random}
+  amount: string;       // cost in credits from AiPricingService.calculateCost()
+  taskId: string;       // format: postiz_{label}_{random}
   description: string;
-  businessType: AiseeBusinessType;  // 'ai_copywriting' | 'image_gen' | 'video_gen'
-  costItems: AiseeCostItem[];       // breakdown of individual costs
-  postizBillingId?: string;         // BillingRecord.id for cross-system reconciliation
+  relatedId?: string;   // business entity ID → Aisee Transaction.related_id column
+  data?: {              // all business metadata → Aisee transaction.data (stored as-is)
+    business_type: string;      // 'ai_copywriting' | 'image_gen' | 'video_gen'
+    sub_type?: string;          // 'chat' | 'post_gen' | 'image' | 'video'
+    cost_items: AiseeCostItem[];
+    postiz_billing_id?: string;
+    [key: string]: unknown;     // prompt, format, tone, etc.
+  };
 }
 ```
+
+**Wire format** — `related_id` is a top-level field (stored as Aisee Transaction column, indexed). All other business metadata goes into `data` dict which Aisee stores as-is without parsing.
 
 ### AiseeDeductResponse
 
@@ -115,15 +124,25 @@ interface AiseeDeductResponse {
 
 ## Local Audit Trail (BillingRecord)
 
-When `BILL_TYPE=third`, every deduction creates a local `BillingRecord` **before** calling Aisee:
+**Every AI operation creates a BillingRecord**, regardless of `BILL_TYPE`:
 
 ```
 BillingRecord.id  →  sent as postiz_billing_id  →  enables cross-system reconciliation
 ```
 
-The record tracks: taskId, amount, businessType, costItems (JSON), relatedId (optional business entity), status (pending→success/failed/skipped), transactionId, remainingBalance, debtAmount, error.
+The record tracks: taskId, amount, businessType, subType (fine-grained categorization), costItems (JSON), relatedId (optional business entity), data (JSON business context), status, transactionId, remainingBalance, debtAmount, error.
 
-If the local DB write fails, the deduction proceeds anyway — billing must not be blocked by audit failures. If the status update fails after Aisee responds, the error is logged but the deduction result is returned cleanly.
+| Status | Meaning |
+|--------|---------|
+| `pending` | Record created, Aisee call not yet made |
+| `success` | Aisee deduction confirmed |
+| `failed` | Aisee deduction failed or refunded |
+| `skipped` | Aisee not configured (self-hosted) |
+| `internal` | BILL_TYPE=internal, subscription billing, no Aisee call |
+
+The `data` field (JSON) stores flexible business context: prompt, generation parameters, associated entity IDs. It supports **back-filling** via `associateEntity(taskId, { relatedId, data })` — used when business entities (Post, Media) are created after AI generation.
+
+If the local DB write fails, the deduction proceeds anyway — billing must not be blocked by audit failures.
 
 ## Task ID Format
 
@@ -134,12 +153,13 @@ All Postiz operations use the format `postiz_{label}_{random}` as the task_id fo
 
 ## Billing Touchpoints
 
-| Scenario | Trigger | Business Type | BILL_TYPE=internal | BILL_TYPE=third |
-|----------|---------|---------------|--------------------|-----------------
-| **Copilot chat** | `POST /copilot/agent` | `ai_copywriting` | Aisee (pre-check + post-billing) | Same |
-| **Image generation** | `POST /media/generate-image` | `image_gen` | Subscription useCredit() only | Aisee credits only |
-| **Agent post generation** | Agent workflow | `ai_copywriting` | Aisee only | Same |
-| **Video generation** | `POST /media/generate-video` | `video_gen` | Subscription useCredit() | **TODO**: Aisee (pending KieAI) |
+| Scenario | Trigger | Business Type | Sub Type | relatedId | BILL_TYPE=internal | BILL_TYPE=third |
+|----------|---------|---------------|----------|-----------|--------------------|-----------------
+| **Copilot chat** | `POST /copilot/agent` | `ai_copywriting` | `chat` | threadId | Aisee (pre-check + post-billing) | Same |
+| **Image generation** | `POST /media/generate-image` | `image_gen` | `image` | null | Subscription useCredit() only | Aisee credits only |
+| **Image gen+save** | `POST /media/generate-image-with-prompt` | `image_gen` | `image` | mediaId | Subscription useCredit() only | Aisee credits only |
+| **Agent post generation** | Agent workflow | `ai_copywriting` | `post_gen` | null | Aisee only | Same |
+| **Video generation** | `POST /media/generate-video` | `video_gen` | — | — | Subscription useCredit() | **TODO**: Aisee (pending KieAI) |
 
 ## AiseeCreditService
 
@@ -154,14 +174,22 @@ Orchestrates the credit lifecycle. All methods accept `organizationId` and inter
 | `executeMultiStepWithBilling(opts, llmCall)` | Multi-step: check balance → execute → aggregate costs → single deduct |
 | `billCollectedUsages(opts, usages)` | Post-hoc billing for already-collected usages (agent chat) |
 | `confirmFailed(taskId)` | Confirm deduction as failed — triggers refund on Aisee side |
+| `associateEntity(taskId, update)` | Back-fill relatedId + data on existing BillingRecord (merge semantics) |
 
 `opts.userId` in `AiseeCreditExecOptions` is the **organizationId** (naming is historical). The resolution to Aisee user ID happens inside the service.
 
-All deduction methods create a local BillingRecord (keyed by `organizationId`) before calling Aisee and update it with the response.
+All deduction methods create a local BillingRecord (keyed by `organizationId`) — in both billing modes. `BILL_TYPE=internal` sets status='internal' and skips Aisee call; `BILL_TYPE=third` proceeds with deduction.
+
+`opts.data` (optional JSON) stores business context (prompt, generation params). It is saved to BillingRecord.data and also merged into the Aisee `data` payload (alongside `business_type`, `sub_type`, `cost_items`, etc.).
 
 ## Admin Billing API
 
-Failed billing records can be listed and retried via `/admin/billing/*` endpoints (requires `@SuperAdmin()`). See [aisee-billing-env.md](./aisee-billing-env.md#admin-billing-api) for the full endpoint reference.
+Billing records can be managed via `/admin/billing/*` endpoints (requires `@SuperAdmin()`):
+- **List / detail / summary** — query and aggregate records
+- **Associate** — `PATCH /associate/:taskId` back-fills `relatedId` and `data` (merge semantics)
+- **Retry** — re-send failed deductions to Aisee (guards against retrying `internal` or `skipped` records)
+
+See [aisee-billing-env.md](./aisee-billing-env.md#admin-billing-api) for the full endpoint reference.
 
 ## Key Files
 

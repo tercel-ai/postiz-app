@@ -1,4 +1,4 @@
-import { HttpException, Injectable } from '@nestjs/common';
+import { HttpException, Injectable, Logger } from '@nestjs/common';
 import { MediaRepository } from '@gitroom/nestjs-libraries/database/prisma/media/media.repository';
 import { OpenaiService, AiUsageInfo } from '@gitroom/nestjs-libraries/openai/openai.service';
 import { SubscriptionService } from '@gitroom/nestjs-libraries/database/prisma/subscriptions/subscription.service';
@@ -16,11 +16,13 @@ import { AiseeCreditService } from '@gitroom/nestjs-libraries/database/prisma/ai
 import {
   AiseeClient,
   AiseeBusinessType,
+  AiseeBusinessSubType,
 } from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/aisee.client';
 import { isInternalBilling } from '@gitroom/nestjs-libraries/services/billing.helper';
 
 @Injectable()
 export class MediaService {
+  private readonly logger = new Logger(MediaService.name);
   private storage = UploadFactory.createStorage();
 
   constructor(
@@ -54,40 +56,33 @@ export class MediaService {
   }
 
   /**
-   * Original billing path: subscription-based useCredit() quota tracking.
-   * No Aisee involved.
+   * Internal billing path: subscription-based useCredit() quota tracking.
+   * Also creates BillingRecord (status='internal') for unified tracking.
    */
   private async _generateImageInternal(
     prompt: string,
     org: Organization,
     generatePromptFirst?: boolean
   ) {
-    const generating = await this._subscriptionService.useCredit(
+    return this._subscriptionService.useCredit(
       org,
       'ai_images',
       async () => {
-        if (generatePromptFirst) {
-          const promptResult = await this._openAi.generatePromptForPicture(prompt);
-          prompt = promptResult.data;
-        }
-
-        const imageResult = await this._openAi.generateImage(prompt, !!generatePromptFirst);
-        return imageResult.data;
+        const { data, usages } = await this._generateImageCore(prompt, org, generatePromptFirst);
+        this._billImageUsages(org, usages, { prompt, generatePromptFirst });
+        return data;
       }
     );
-
-    return generating;
   }
 
   /**
-   * Aisee billing path: deduct actual AI usage credits via Aisee.
-   * No subscription quota involved.
+   * Core image generation — returns data + usages without billing.
    */
-  private async _generateImageThird(
+  private async _generateImageCore(
     prompt: string,
     org: Organization,
     generatePromptFirst?: boolean
-  ): Promise<string> {
+  ): Promise<{ data: string; usages: AiUsageInfo[] }> {
     const usages: AiUsageInfo[] = [];
 
     if (generatePromptFirst) {
@@ -99,7 +94,18 @@ export class MediaService {
     const imageResult = await this._openAi.generateImage(prompt, !!generatePromptFirst);
     usages.push(imageResult.usage);
 
-    // Aisee billing — fire after LLM success
+    return { data: imageResult.data, usages };
+  }
+
+  /**
+   * Fire image billing — fire-and-forget.
+   * Always creates a BillingRecord regardless of billing mode.
+   */
+  private _billImageUsages(
+    org: Organization,
+    usages: AiUsageInfo[],
+    opts?: { relatedId?: string; prompt?: string; generatePromptFirst?: boolean }
+  ): void {
     const taskId = AiseeClient.buildTaskId(`img_${org.id}_${Date.now()}`);
     this._aiseeCreditService
       .billCollectedUsages(
@@ -107,15 +113,57 @@ export class MediaService {
           userId: org.id,
           taskId,
           businessType: AiseeBusinessType.IMAGE_GEN,
-          description: `Image generation${generatePromptFirst ? ' (with prompt enhancement)' : ''}`,
+          subType: AiseeBusinessSubType.IMAGE,
+          relatedId: opts?.relatedId,
+          description: `Image generation${opts?.generatePromptFirst ? ' (with prompt enhancement)' : ''}`,
+          data: opts?.prompt ? { prompt: opts.prompt } : undefined,
         },
         usages
       )
       .catch((err) => {
-        console.error('[AiseeBilling] Image billing failed:', err);
+        this.logger.error('[AiseeBilling] Image billing failed:', err);
       });
+  }
 
-    return imageResult.data;
+  /**
+   * Aisee billing path: deduct actual AI usage credits via Aisee.
+   * No subscription quota involved.
+   */
+  private async _generateImageThird(
+    prompt: string,
+    org: Organization,
+    generatePromptFirst?: boolean
+  ): Promise<string> {
+    const { data, usages } = await this._generateImageCore(prompt, org, generatePromptFirst);
+    this._billImageUsages(org, usages, { prompt, generatePromptFirst });
+    return data;
+  }
+
+  /**
+   * Generate an image, upload + save to media, and bill with the saved mediaId.
+   * Used by the /generate-image-with-prompt endpoint.
+   * Always creates a BillingRecord with relatedId=mediaId.
+   */
+  async generateImageWithSave(
+    prompt: string,
+    org: Organization
+  ): Promise<ReturnType<MediaService['saveFile']>> {
+    const doGenerate = async () => {
+      const { data, usages } = await this._generateImageCore(prompt, org, true);
+      const file = await this.storage.uploadSimple(data);
+      const saved = await this.saveFile(org.id, file.split('/').pop()!, file);
+      this._billImageUsages(org, usages, {
+        relatedId: saved.id,
+        prompt,
+        generatePromptFirst: true,
+      });
+      return saved;
+    };
+
+    if (isInternalBilling()) {
+      return this._subscriptionService.useCredit(org, 'ai_images', doGenerate);
+    }
+    return doGenerate();
   }
 
   saveFile(org: string, fileName: string, filePath: string) {

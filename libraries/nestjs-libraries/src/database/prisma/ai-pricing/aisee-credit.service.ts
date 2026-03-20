@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import {
   AiseeClient,
   AiseeBusinessType,
+  AiseeBusinessSubType,
   AiseeCostItem,
   AiseeCreditBalance,
   AiseeDeductResponse,
@@ -11,6 +12,7 @@ import { AiUsageInfo } from '@gitroom/nestjs-libraries/openai/openai.service';
 import {
   PrismaRepository,
 } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
+import { isInternalBilling } from '@gitroom/nestjs-libraries/services/billing.helper';
 
 export interface AiseeCreditExecOptions {
   userId: string;
@@ -19,6 +21,10 @@ export interface AiseeCreditExecOptions {
   description: string;
   /** Optional related entity ID for business context (e.g. post ID, media ID) */
   relatedId?: string;
+  /** Fine-grained sub-type within businessType (e.g. chat, post_gen, image) */
+  subType?: AiseeBusinessSubType;
+  /** Flexible business context (prompt, generation params, etc.) */
+  data?: Record<string, unknown>;
 }
 
 export interface AiseeCreditExecResult<T> {
@@ -289,10 +295,9 @@ export class AiseeCreditService {
 
   /**
    * Core deduction flow:
-   * 1. Create local BillingRecord (status=pending) — its id is sent to Aisee for reconciliation
-   * 2. Call Aisee deductCredits()
-   * 3. Update local record with Aisee response (status, transactionId, etc.)
-   * 4. Fire-and-forget confirm
+   * 1. Create local BillingRecord — always, regardless of billing mode
+   * 2. If BILL_TYPE=internal: set status='internal', skip Aisee call
+   * 3. If BILL_TYPE=third: call Aisee deductCredits(), update record, confirm
    */
   private async deductWithItems(
     opts: AiseeCreditExecOptions,
@@ -302,12 +307,9 @@ export class AiseeCreditService {
       costItems.map((item) => item.amount)
     );
 
-    // Resolve organization ID to owner user ID for Aisee billing
-    const aiseeUserId = await this.resolveOwnerUserId(opts.userId);
+    const internal = isInternalBilling();
 
-    // Step 1: Create local audit record BEFORE calling Aisee.
-    // If DB write fails, proceed with deduction anyway — billing must not be
-    // blocked by a local audit failure.
+    // Step 1: Create local BillingRecord — always created for unified tracking.
     let recordId: string | undefined;
     try {
       const record = await this._billingRecord.model.billingRecord.create({
@@ -316,33 +318,45 @@ export class AiseeCreditService {
           taskId: opts.taskId,
           amount: totalAmount,
           businessType: opts.businessType,
+          subType: opts.subType || null,
           description: opts.description,
           costItems: JSON.stringify(costItems),
           relatedId: opts.relatedId || null,
-          status: 'pending',
+          data: (opts.data as any) || undefined,
+          status: internal ? 'internal' : 'pending',
         },
       });
       recordId = record.id;
     } catch (dbErr) {
       this.logger.error(
-        `Failed to create BillingRecord for task=${opts.taskId}, proceeding with deduction:`,
+        `Failed to create BillingRecord for task=${opts.taskId}, proceeding:`,
         dbErr
       );
     }
 
-    // Step 2: Call Aisee with resolved user ID (not org ID)
+    // Step 2: Internal billing — record created, no Aisee call needed
+    if (internal) {
+      return { success: true, skipped: true };
+    }
+
+    // Step 3: Call Aisee with resolved user ID (not org ID)
+    const aiseeUserId = await this.resolveOwnerUserId(opts.userId);
     const deduction = await this.aiseeClient.deductCredits({
       userId: aiseeUserId,
       amount: totalAmount,
       taskId: opts.taskId,
       description: opts.description,
-      businessType: opts.businessType,
-      costItems,
-      postizBillingId: recordId,
+      relatedId: opts.relatedId,
+      data: {
+        business_type: opts.businessType,
+        sub_type: opts.subType,
+        cost_items: costItems,
+        postiz_billing_id: recordId,
+        ...(opts.data || {}),
+      },
     });
 
-    // Step 3: Update local record with Aisee response.
-    // Wrapped in catch — a failed status update must never mask the deduction result.
+    // Step 4: Update local record with Aisee response.
     if (recordId) {
       this.updateBillingRecord(recordId, deduction).catch(
         (dbErr) => {
@@ -360,7 +374,7 @@ export class AiseeCreditService {
       );
     }
 
-    // Step 4: Fire-and-forget confirm on success
+    // Step 5: Fire-and-forget confirm on success
     if (deduction.success && !deduction.skipped && deduction.transactionId) {
       this.fireConfirm(opts.taskId, 'success');
     }
@@ -411,5 +425,52 @@ export class AiseeCreditService {
       .catch((err) => {
         this.logger.error(`Confirm ${status} error for task=${taskId}:`, err);
       });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Back-fill: associate business entities after the fact
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Associate a BillingRecord with a business entity created after billing.
+   * Used when the entity (Post, Media) is created after the AI generation.
+   *
+   * @param taskId - The billing taskId (returned to the caller at generation time)
+   * @param update - Fields to back-fill (relatedId, data merge)
+   */
+  async associateEntity(
+    taskId: string,
+    update: { relatedId?: string; data?: Record<string, unknown> }
+  ): Promise<boolean> {
+    try {
+      const record = await this._billingRecord.model.billingRecord.findUnique({
+        where: { taskId },
+      });
+      if (!record) {
+        this.logger.warn(`associateEntity: no record for task=${taskId}`);
+        return false;
+      }
+
+      const mergedData = {
+        ...((record.data as Record<string, unknown>) || {}),
+        ...(update.data || {}),
+      };
+
+      await this._billingRecord.model.billingRecord.update({
+        where: { taskId },
+        data: {
+          relatedId: update.relatedId ?? record.relatedId,
+          data: mergedData as any,
+        },
+      });
+
+      this.logger.log(
+        `associateEntity: task=${taskId} → relatedId=${update.relatedId}`
+      );
+      return true;
+    } catch (err) {
+      this.logger.error(`associateEntity failed for task=${taskId}:`, err);
+      return false;
+    }
   }
 }

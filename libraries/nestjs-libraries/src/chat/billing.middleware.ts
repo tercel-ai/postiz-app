@@ -76,12 +76,6 @@ export function withBillingTracking<T extends { provider: string; modelId: strin
           const originalStream = result.stream;
           const transformStream = new TransformStream({
             transform(chunk: any, controller: any) {
-              if (chunk?.type === 'finish') {
-                // Debug: log actual chunk structure to diagnose token=0 issues
-                console.log(
-                  `[BillingTracking] finish chunk: usage=${JSON.stringify(chunk.usage)} | model=${target.modelId}`
-                );
-              }
               if (chunk?.type === 'finish' && chunk?.usage) {
                 const promptTokens = chunk.usage.promptTokens
                   ?? chunk.usage.inputTokens

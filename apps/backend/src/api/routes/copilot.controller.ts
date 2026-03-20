@@ -25,7 +25,7 @@ import { RuntimeContext } from '@mastra/core/di';
 import { CheckPolicies } from '@gitroom/backend/services/auth/permissions/permissions.ability';
 import { AuthorizationActions, Sections } from '@gitroom/backend/services/auth/permissions/permission.exception.class';
 import { AiseeCreditService } from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/aisee-credit.service';
-import { AiseeBusinessType, AiseeClient } from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/aisee.client';
+import { AiseeBusinessType, AiseeBusinessSubType, AiseeClient } from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/aisee.client';
 import { AiPricingService } from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/ai-pricing.service';
 import { runWithContext, getCollectedUsages } from '@gitroom/nestjs-libraries/chat/async.storage';
 import { randomUUID } from 'crypto';
@@ -140,13 +140,18 @@ export class CopilotController {
       serviceAdapter: createServiceAdapter(),
     });
 
+    // Extract threadId from CopilotKit GraphQL variables
+    const threadId = req?.body?.variables?.threadId
+      || req?.body?.threadId
+      || undefined;
+
     // Run handler within AsyncLocalStorage context for usage collection
     return runWithContext(
       { requestId: randomUUID(), auth: organization, usages: [] },
       () => {
-        // Register billing callback inside ALS context so it can read collected usages
+        // Capture threadId from closure — ALS context may not survive the 'close' event
         res.on('close', () => {
-          this.billAfterResponse(organization);
+          this.billAfterResponse(organization, threadId);
         });
         return handler(req, res);
       }
@@ -206,7 +211,7 @@ export class CopilotController {
     return null;
   }
 
-  private billAfterResponse(organization: Organization): void {
+  private billAfterResponse(organization: Organization, threadId?: string): void {
     const usages = getCollectedUsages();
     if (usages.length === 0) {
       return;
@@ -224,7 +229,10 @@ export class CopilotController {
           userId: organization.id,
           taskId,
           businessType: AiseeBusinessType.AI_COPYWRITING,
+          subType: AiseeBusinessSubType.CHAT,
+          relatedId: threadId,
           description: 'Agent chat conversation',
+          data: { ...(threadId && { threadId }), messageCount: usages.length },
         },
         usages
       )

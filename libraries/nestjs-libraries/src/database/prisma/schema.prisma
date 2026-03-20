@@ -290,15 +290,20 @@ model BillingRecord {
   amount          String
   /// ai_copywriting | image_gen | video_gen
   businessType    String
+  /// Fine-grained sub-type: chat | post_gen | image | video
+  subType         String?
   description     String
   /// JSON-serialised AiseeCostItem[] breakdown
   costItems       String       @default("[]")
   /// Optional related entity ID for business context (e.g. post ID, media ID)
   relatedId       String?
+  /// Flexible business context JSON (prompt, generation params, associated entities)
+  data            Json?
   /// pending  → record created, Aisee call not yet made
   /// success  → Aisee deduction confirmed
   /// failed   → Aisee deduction failed or refunded
   /// skipped  → Aisee not configured (self-hosted)
+  /// internal → BILL_TYPE=internal, subscription billing, no Aisee call
   status          String       @default("pending")
   /// Remaining balance returned by Aisee after deduction
   remainingBalance String?
@@ -314,6 +319,7 @@ model BillingRecord {
   @@index([createdAt])
   @@index([status])
   @@index([relatedId])
+  @@index([subType])
 }
 
 model Subscription {

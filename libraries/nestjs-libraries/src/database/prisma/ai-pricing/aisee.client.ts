@@ -26,6 +26,20 @@ export const AiseeConsumptionType = {
 export type AiseeConsumptionType =
   (typeof AiseeConsumptionType)[keyof typeof AiseeConsumptionType];
 
+// ---------------------------------------------------------------------------
+// Business sub-type constants — fine-grained categorization within businessType
+// ---------------------------------------------------------------------------
+
+export const AiseeBusinessSubType = {
+  CHAT: 'chat',
+  POST_GEN: 'post_gen',
+  IMAGE: 'image',
+  VIDEO: 'video',
+} as const;
+
+export type AiseeBusinessSubType =
+  (typeof AiseeBusinessSubType)[keyof typeof AiseeBusinessSubType];
+
 /** One line-item within a deduction — stored in Aisee transaction.data for audit */
 export interface AiseeCostItem {
   /** text / image / video */
@@ -51,12 +65,14 @@ export interface AiseeDeductRequest {
   /** Idempotency key, e.g. "postiz_{postId}" */
   taskId: string;
   description: string;
-  /** Business category for analytics */
-  businessType: AiseeBusinessType;
-  /** Breakdown of individual costs (text, image, etc.) — stored in transaction data */
-  costItems: AiseeCostItem[];
-  /** Postiz-side BillingRecord.id — sent to Aisee for cross-system reconciliation / auditing */
-  postizBillingId?: string;
+  /** Related business entity ID (e.g. threadId, mediaId) — stored in Transaction.related_id column */
+  relatedId?: string;
+  /**
+   * All business metadata sent to Aisee as `data` dict.
+   * Aisee stores it as-is in transaction.data and transaction.output.
+   * Contains: business_type, sub_type, cost_items, postiz_billing_id, prompt, etc.
+   */
+  data?: Record<string, unknown>;
 }
 
 export interface AiseeDeductResponse {
@@ -192,15 +208,14 @@ export class AiseeClient {
     try {
       const url = `${this.baseUrl}/credit/deduct`;
       const authHeaders = this.authHeaders;
-      const payload = {
+      const payload: Record<string, unknown> = {
         user_id: req.userId,
         amount: req.amount,
         task_id: req.taskId,
         description: req.description,
         channel: AiseeClient.CHANNEL,
-        business_type: req.businessType,
-        cost_items: req.costItems,
-        postiz_billing_id: req.postizBillingId,
+        related_id: req.relatedId || undefined,
+        data: req.data || undefined,
       };
       const bodyStr = JSON.stringify(payload);
       this.logger.log(

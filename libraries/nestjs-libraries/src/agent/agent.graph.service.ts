@@ -25,6 +25,7 @@ import { AiseeCreditService } from '@gitroom/nestjs-libraries/database/prisma/ai
 import {
   AiseeClient,
   AiseeBusinessType,
+  AiseeBusinessSubType,
 } from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/aisee.client';
 
 const agentServicer: string =
@@ -473,7 +474,8 @@ export class AgentGraphService {
    */
   private async billUsages(
     orgId: string,
-    collector: AiUsageCollector
+    collector: AiUsageCollector,
+    body: GeneratorDto
   ): Promise<void> {
     if (collector.usages.length === 0) return;
 
@@ -483,7 +485,14 @@ export class AgentGraphService {
         userId: orgId,
         taskId,
         businessType: AiseeBusinessType.AI_COPYWRITING,
+        subType: AiseeBusinessSubType.POST_GEN,
         description: 'Agent post generation (text + image)',
+        data: {
+          prompt: body.research,
+          format: body.format,
+          tone: body.tone,
+          isPicture: body.isPicture,
+        },
       },
       collector.usages
     );
@@ -546,7 +555,7 @@ export class AgentGraphService {
     }
 
     // Bill after stream completes — fire-and-forget
-    this.billUsages(orgId, collector).catch((err) => {
+    this.billUsages(orgId, collector, body).catch((err) => {
       console.error('[AgentBilling] Unhandled billing error:', err);
     });
   }
