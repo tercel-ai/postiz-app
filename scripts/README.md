@@ -1,5 +1,31 @@
 # Scripts
 
+## test-agent-simple.ts
+
+A simplified E2E test script for the Chat Agent. It bypasses the login process by signing a JWT directly using the `JWT_SECRET` from your `.env` file. This allows for rapid testing of the Agent's personas, content generation, and X.com (Twitter) scheduling.
+
+### Scenarios Covered
+- **Pure Text**: Professional tech tip (Architect persona).
+- **Image + Text**: Marketing post with AI-generated image (Marketer persona).
+- **Single Image**: Meme post with minimal text (Critic persona).
+- **Multi-turn Conversation**: Automatically handles the "Confirm schedule" step.
+
+### Quick Start
+
+```bash
+# 1. Get your USER_ID and ORG_ID from the database
+# 2. Run the script (ensure BACKEND_INTERNAL_URL is set in .env or defaults to http://localhost:3000)
+USER_ID="your-user-uuid" ORG_ID="your-org-uuid" pnpm dlx ts-node scripts/test-agent-simple.ts
+```
+
+### Environment Variables Used
+- `USER_ID`: The UUID of the user to impersonate.
+- `ORG_ID` (Optional): The UUID of the organization to use.
+- `JWT_SECRET`: Used to sign the authentication token.
+- `BACKEND_INTERNAL_URL`: The URL of the backend API (e.g., `http://localhost:3000`).
+
+---
+
 ## reauth-integrations.ts
 
 Safe re-authorization script for integrations after server-level API key rotation.

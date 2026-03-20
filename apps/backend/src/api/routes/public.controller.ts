@@ -70,22 +70,43 @@ export class PublicController {
 
   @Get(`/posts/:id`)
   async getPreview(@Param('id') id: string) {
-    return (await this._postsService.getPostsRecursively(id, true)).map(
-      ({ childrenPost, ...p }) => ({
-        ...p,
-        ...(p.integration
-          ? {
-              integration: {
-                id: p.integration.id,
-                name: p.integration.name,
-                picture: p.integration.picture,
-                providerIdentifier: p.integration.providerIdentifier,
-                profile: p.integration.profile,
-              },
-            }
-          : {}),
-      })
-    );
+    const posts = await this._postsService.getPostsRecursively(id, true);
+    if (!posts.length) {
+      return [];
+    }
+
+    // For recurring posts, try to return the latest published clone instead
+    // of the original (which permanently stays QUEUE).
+    const root = posts[0];
+    if (root.intervalInDays && root.intervalInDays > 0) {
+      const clone = await this._postsService.getLatestPublishedClone(root.id);
+      if (clone) {
+        posts[0] = {
+          ...root,
+          publishDate: clone.publishDate,
+          state: clone.state,
+          releaseId: clone.releaseId,
+          releaseURL: clone.releaseURL,
+          error: clone.error,
+          actualDate: root.publishDate,
+        } as typeof root;
+      }
+    }
+
+    return posts.map(({ childrenPost, ...p }) => ({
+      ...p,
+      ...(p.integration
+        ? {
+            integration: {
+              id: p.integration.id,
+              name: p.integration.name,
+              picture: p.integration.picture,
+              providerIdentifier: p.integration.providerIdentifier,
+              profile: p.integration.profile,
+            },
+          }
+        : {}),
+    }));
   }
 
   @Get(`/posts/:id/comments`)
