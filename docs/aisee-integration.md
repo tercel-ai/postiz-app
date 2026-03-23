@@ -61,6 +61,75 @@ Caller passes organizationId
 
 **Important**: When creating users in Aisee, use the Postiz **User.id** (not Organization.id). The billing owner is the organization's SUPERADMIN.
 
+## User Credit Package & Limits
+
+User-level limits (post send limit, channel limit) are fetched dynamically from the Aisee API at permission-check time, **not stored in the Postiz database**.
+
+### Flow
+
+```
+Permission check (PoliciesGuard)
+  → UsersService.getUserLimits(userId)
+      → AiseeClient.getUserCreditPackage(userId)
+          → GET /user-credit-package/uid/{userId}
+      → Returns { postChannelLimit, postSendLimit, periodStart, periodEnd, name, interval }
+      → If API fails / no package / periodEnd expired → hard block: { postChannelLimit: 0, postSendLimit: 0 }
+```
+
+### Response Mapping (Aisee → Postiz)
+
+| Aisee field | Postiz field | Description |
+|-------------|-------------|-------------|
+| `credit_package.post_send_limit` | `postSendLimit` | Max posts per billing period |
+| `credit_package.post_channel_limit` | `postChannelLimit` | Max social channels |
+| `credit_package.interval` | `interval` | Billing period (e.g. "month") |
+| `period_start` | `periodStart` | Current billing period start |
+| `period_end` | `periodEnd` | Current billing period end |
+| `name` | `name` | Plan display name (e.g. "Starter Plan (Monthly)") |
+
+### Hard Block Conditions
+
+Users are blocked from adding channels and sending posts (limits = 0) when:
+- Aisee API returns a non-200 response
+- `credit_package` is null (no active subscription)
+- `periodEnd` is missing or in the past
+
+> **Note**: The `User.maxChannels` and `User.maxPostsPerMonth` database fields have been removed. All limit data comes from the Aisee API.
+
+## Post Overage Billing
+
+When a user exceeds their `postSendLimit`, they can **still send posts** — each overage post is charged credits.
+
+### Flow
+
+```
+POST /posts/
+  → PoliciesGuard: postSendLimit > 0 → always allow (0 = no subscription = block)
+  → createPost() succeeds
+  → PostOverageService.deductIfOverage(orgId, userId, postId)  [fire-and-forget]
+      → getUserLimits(userId) → { postSendLimit, periodStart }
+      → countPostsFromDay(orgId, periodStart) → count
+      → if count > postSendLimit:
+          → read overage cost from Settings (key: post_send_overage_cost, default: 25)
+          → AiseeCreditService.deductAndConfirm()
+              taskId: postiz_post_overage_{postId}  (fixed, idempotent)
+              businessType: post_overage
+              amount: overageCost credits
+```
+
+### Settings
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `post_send_overage_cost` | number | 25 | Credits deducted per post when monthly limit is exceeded |
+
+Initialized automatically on application startup by `PostOverageService.onModuleInit()` — only creates the key if it doesn't already exist.
+
+### Key Files
+
+- `libraries/nestjs-libraries/src/database/prisma/posts/post-overage.service.ts`
+- `apps/backend/src/services/auth/permissions/permissions.service.ts`
+
 ## AiseeClient
 
 HTTP client for communicating with aisee_orchestrator.
@@ -81,6 +150,7 @@ When `AISEE_ORCHESTRATOR_URL` is not set, `AiseeClient` is disabled — `deductC
 
 | Method | Description |
 |--------|-------------|
+| `getUserCreditPackage(userId)` | GET `/user-credit-package/uid/{userId}` — returns plan limits, period dates, or null |
 | `deductCredits(req)` | POST to `/credit/deduct` with Aisee userId, amount, taskId, postiz_billing_id |
 | `confirmDeduction(req)` | POST to `/credit/deduct/confirm` with taskId, status (success/failed) |
 | `getBalance(userId)` | GET `/credit/balance/{userId}` — expects **Aisee user ID** (not org ID) |
@@ -160,6 +230,7 @@ All Postiz operations use the format `postiz_{label}_{random}` as the task_id fo
 | **Image gen+save** | `POST /media/generate-image-with-prompt` | `image_gen` | `image` | mediaId | Subscription useCredit() only | Aisee credits only |
 | **Agent post generation** | Agent workflow | `ai_copywriting` | `post_gen` | null | Aisee only | Same |
 | **Video generation** | `POST /media/generate-video` | `video_gen` | — | — | Subscription useCredit() | **TODO**: Aisee (pending KieAI) |
+| **Post overage** | `POST /posts/` (when count > limit) | `post_overage` | — | postId | N/A | Aisee credits (fixed cost from Settings) |
 
 ## AiseeCreditService
 

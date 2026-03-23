@@ -20,7 +20,8 @@ export class DashboardController {
   @Get('/summary')
   async getSummary(
     @GetOrgFromRequest() org: Organization,
-    @Query() query: DashboardSummaryQueryDto
+    @Query() query: DashboardSummaryQueryDto,
+    @GetTimezone() tz?: string
   ) {
     const startDate = query.startDate ? new Date(query.startDate) : undefined;
     const endDate = query.endDate ? new Date(query.endDate) : undefined;
@@ -29,7 +30,7 @@ export class DashboardController {
       throw new BadRequestException('startDate must be before endDate');
     }
 
-    return this._dashboardService.getSummary(org, startDate, endDate, query.integrationId, query.channel);
+    return this._dashboardService.getSummary(org, startDate, endDate, query.integrationId, query.channel, tz);
   }
 
   @Get('/posts-trend')

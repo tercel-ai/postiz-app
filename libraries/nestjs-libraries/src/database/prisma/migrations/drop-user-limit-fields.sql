@@ -1,0 +1,2 @@
+ALTER TABLE "User" DROP COLUMN IF EXISTS "maxChannels";
+ALTER TABLE "User" DROP COLUMN IF EXISTS "maxPostsPerMonth";

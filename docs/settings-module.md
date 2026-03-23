@@ -52,6 +52,15 @@ await this._settingsService.set('my_feature_flag', true, {
 });
 ```
 
+## Auto-Seeded Settings
+
+These keys are initialized automatically on application startup (`OnModuleInit`) — only created if the key does not already exist.
+
+| Key | Type | Default | Seeded by | Description |
+|-----|------|---------|-----------|-------------|
+| `ai_model_pricing` | object | See [ai-pricing-module.md](./ai-pricing-module.md) | `AiPricingService` | AI model pricing config (credits per token/image) |
+| `post_send_overage_cost` | number | `25` | `PostOverageService` | Credits deducted per post when monthly send limit is exceeded |
+
 ## Admin API
 
 See [admin-api.md](./admin-api.md) for REST endpoints.

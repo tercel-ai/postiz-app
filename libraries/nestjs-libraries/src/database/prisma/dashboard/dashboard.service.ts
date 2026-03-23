@@ -39,19 +39,24 @@ export class DashboardService {
     startDate?: Date,
     endDate?: Date,
     integrationId?: string[],
-    channel?: string[]
+    channel?: string[],
+    tz?: string
   ) {
     const normalizedStart = startDate ? dayjs(startDate).startOf('day').toDate() : undefined;
     const normalizedEnd = endDate ? dayjs(endDate).endOf('day').toDate() : undefined;
     const intKey = integrationId?.length ? [...integrationId].sort().join(',') : 'all';
     const chKey = channel?.length ? [...channel].sort().join(',') : 'all';
-    const cacheKey = `dashboard:summary:${org.id}:${normalizedStart?.getTime() || 'all'}:${normalizedEnd?.getTime() || 'all'}:${intKey}:${chKey}`;
+    const cacheKey = `dashboard:summary:${org.id}:${normalizedStart?.getTime() || 'all'}:${normalizedEnd?.getTime() || 'all'}:${intKey}:${chKey}:${tz || 'utc'}`;
     const cached = await ioRedis.get(cacheKey);
     if (cached) {
       return JSON.parse(cached);
     }
 
-    const [channelCount, integrations, postStats, impressionsSummary, trafficSummary] = await Promise.all([
+    // Month start in user's timezone (or UTC), used for published_this_month count
+    const now = tz ? dayjs().tz(tz) : dayjs.utc();
+    const monthStart = now.startOf('month').toDate();
+
+    const [channelCount, integrations, postStats, impressionsSummary, trafficSummary, publishedThisMonth] = await Promise.all([
       this._dashboardRepository.getChannelCount(org.id, integrationId, channel),
       this._dashboardRepository.getActiveIntegrations(org.id, integrationId, channel),
       this._dashboardRepository.getPostsStats(org.id, normalizedStart, normalizedEnd, integrationId, channel),
@@ -69,6 +74,7 @@ export class DashboardService {
         startDate: normalizedStart,
         endDate: normalizedEnd,
       }),
+      this._dashboardRepository.countPublishedThisMonth(org.id, monthStart),
     ]);
 
     const stats = {
@@ -118,6 +124,7 @@ export class DashboardService {
       impressions_total: impressionsTotal,
       traffics_total: trafficsTotal,
       posts_stats: stats,
+      published_this_month: publishedThisMonth,
     };
 
     await ioRedis.set(cacheKey, JSON.stringify(result), 'EX', CACHE_TTL);

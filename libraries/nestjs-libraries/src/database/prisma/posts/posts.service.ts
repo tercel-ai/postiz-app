@@ -320,8 +320,8 @@ export class PostsService {
     ];
   }
 
-  async getPosts(orgId: string, query: GetPostsDto) {
-    return this._postRepository.getPosts(orgId, query);
+  async getPosts(orgId: string, query: GetPostsDto, tz?: string) {
+    return this._postRepository.getPosts(orgId, query, tz);
   }
 
   async getPostsList(orgId: string, query: GetPostsListDto) {
@@ -711,7 +711,8 @@ export class PostsService {
         body.type === 'now' ? dayjs().format('YYYY-MM-DDTHH:mm:00') : body.date,
         post,
         body.tags,
-        body.inter
+        body.inter,
+        body.source
       );
 
       if (!posts?.length) {

@@ -59,6 +59,26 @@ export class AiseeCreditService {
   private _ownerCache = new Map<string, { userId: string; expiresAt: number }>();
 
   /**
+   * Infer a default sub-type from businessType if missing.
+   * Ensures backward compatibility and consistent analytics in Aisee.
+   */
+  static inferSubType(
+    businessType: AiseeBusinessType,
+    providedSubType?: AiseeBusinessSubType
+  ): AiseeBusinessSubType | undefined {
+    return (
+      providedSubType ||
+      (businessType === AiseeBusinessType.IMAGE_GEN
+        ? AiseeBusinessSubType.IMAGE
+        : businessType === AiseeBusinessType.VIDEO_GEN
+        ? AiseeBusinessSubType.VIDEO
+        : businessType === AiseeBusinessType.AI_COPYWRITING
+        ? AiseeBusinessSubType.CHAT
+        : undefined)
+    );
+  }
+
+  /**
    * Resolve the owner (SUPERADMIN or ADMIN) user ID for an organization.
    * Aisee bills by user, not by organization.
    * Cached for 5 minutes to avoid repeated DB lookups within a single flow.
@@ -309,6 +329,12 @@ export class AiseeCreditService {
 
     const internal = isInternalBilling();
 
+    // Infer default subType if missing
+    const subType = AiseeCreditService.inferSubType(
+      opts.businessType,
+      opts.subType as AiseeBusinessSubType
+    );
+
     // Step 1: Create local BillingRecord — always created for unified tracking.
     let recordId: string | undefined;
     try {
@@ -318,7 +344,7 @@ export class AiseeCreditService {
           taskId: opts.taskId,
           amount: totalAmount,
           businessType: opts.businessType,
-          subType: opts.subType || null,
+          subType: subType || null,
           description: opts.description,
           costItems: JSON.stringify(costItems),
           relatedId: opts.relatedId || null,
@@ -349,7 +375,7 @@ export class AiseeCreditService {
       relatedId: opts.relatedId,
       data: {
         business_type: opts.businessType,
-        sub_type: opts.subType,
+        sub_type: subType,
         cost_items: costItems,
         postiz_billing_id: recordId,
         ...(opts.data || {}),

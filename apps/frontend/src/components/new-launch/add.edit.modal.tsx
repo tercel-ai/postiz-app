@@ -12,6 +12,7 @@ import { newDayjs } from '@gitroom/frontend/components/layout/set.timezone';
 
 export interface AddEditModalProps {
   dummy?: boolean;
+  source?: 'calendar' | 'chat';
   date: dayjs.Dayjs;
   integrations: Integrations[];
   allIntegrations?: Integrations[];

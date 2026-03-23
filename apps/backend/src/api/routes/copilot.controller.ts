@@ -232,7 +232,7 @@ export class CopilotController {
           subType: AiseeBusinessSubType.CHAT,
           relatedId: threadId,
           description: 'Agent chat conversation',
-          data: { ...(threadId && { threadId }), messageCount: usages.length },
+          data: { ...(threadId && { threadId }), messageCount: usages.length, source: 'chat' },
         },
         usages
       )

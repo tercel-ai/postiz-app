@@ -61,7 +61,7 @@ export const ManageModal: FC<AddEditModalProps> = (props) => {
   const [showSettings, setShowSettings] = useState(false);
   const { data: shortlinkPreferenceData } = useShortlinkPreference();
 
-  const { addEditSets, mutate, customClose, dummy } = props;
+  const { addEditSets, mutate, customClose, dummy, source } = props;
 
   const {
     selectedIntegrations,
@@ -326,6 +326,7 @@ export const ManageModal: FC<AddEditModalProps> = (props) => {
       const group = existingData.group || makeId(10);
       const data = {
         type,
+        source: source || 'calendar',
         ...(repeater ? { inter: repeater } : {}),
         tags,
         shortLink,

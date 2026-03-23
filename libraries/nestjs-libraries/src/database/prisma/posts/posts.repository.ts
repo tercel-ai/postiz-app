@@ -9,6 +9,7 @@ import isoWeek from 'dayjs/plugin/isoWeek';
 import weekOfYear from 'dayjs/plugin/weekOfYear';
 import isSameOrAfter from 'dayjs/plugin/isSameOrAfter';
 import utc from 'dayjs/plugin/utc';
+import timezone from 'dayjs/plugin/timezone';
 import { v4 as uuidv4 } from 'uuid';
 import { CreateTagDto } from '@gitroom/nestjs-libraries/dtos/posts/create.tag.dto';
 
@@ -16,6 +17,13 @@ dayjs.extend(isoWeek);
 dayjs.extend(weekOfYear);
 dayjs.extend(isSameOrAfter);
 dayjs.extend(utc);
+dayjs.extend(timezone);
+
+function displayToUnit(display: 'day' | 'week' | 'month'): 'day' | 'isoWeek' | 'month' {
+  if (display === 'day') return 'day';
+  if (display === 'week') return 'isoWeek';
+  return 'month';
+}
 
 @Injectable()
 export class PostsRepository {
@@ -308,10 +316,19 @@ export class PostsRepository {
     });
   }
 
-  async getPosts(orgId: string, query: GetPostsDto) {
+  async getPosts(orgId: string, query: GetPostsDto, tz?: string) {
     // Use the provided start and end dates directly
-    const startDate = dayjs.utc(query.startDate).toDate();
-    const endDate = dayjs.utc(query.endDate).toDate();
+    let startDate = dayjs.utc(query.startDate).toDate();
+    let endDate = dayjs.utc(query.endDate).toDate();
+
+    if (tz && query.display) {
+      // Snap the input dates to the start/end of the display period in the user's timezone.
+      // This ensures the backend fetches the correct local range even if the frontend
+      // UTC timestamp has minor drift.
+      const unit = displayToUnit(query.display);
+      startDate = dayjs.tz(query.startDate, tz).startOf(unit).toDate();
+      endDate = dayjs.tz(query.endDate, tz).endOf(unit).toDate();
+    }
 
     const list = await this._post.model.post.findMany({
       where: {
@@ -447,9 +464,25 @@ export class PostsRepository {
       // Skip when a state filter is active and it isn't QUEUE, because virtual
       // entries are always QUEUE and would otherwise pollute filtered results.
       if (!query.state || query.state === 'QUEUE') {
-        let startingDate = dayjs.utc(post.publishDate);
-        while (dayjs.utc(endDate).isSameOrAfter(startingDate)) {
-          if (startingDate.isAfter(now) && post.state !== 'DRAFT') {
+        let startingDate = tz ? dayjs.tz(post.publishDate, tz) : dayjs.utc(post.publishDate);
+        const start = dayjs.utc(startDate);
+        const end = dayjs.utc(endDate);
+
+        // Fast-forward startingDate to the first occurrence that could be within or after the range
+        if (startingDate.isBefore(start)) {
+          const daysToWait = start.diff(startingDate, 'days');
+          const occurrencesToSkip = Math.floor(daysToWait / post.intervalInDays);
+          if (occurrencesToSkip > 0) {
+            startingDate = startingDate.add(occurrencesToSkip * post.intervalInDays, 'days');
+          }
+          // Ensure we are at or after start
+          while (startingDate.isBefore(start)) {
+            startingDate = startingDate.add(post.intervalInDays, 'days');
+          }
+        }
+
+        while (end.isSameOrAfter(startingDate)) {
+          if (startingDate.isSameOrAfter(start) && startingDate.isAfter(now) && post.state !== 'DRAFT') {
             result.push({
               ...post,
               publishDate: startingDate.toDate(),
@@ -1085,7 +1118,8 @@ export class PostsRepository {
     date: string,
     body: PostBody,
     tags: { value: string; label: string }[],
-    inter?: number
+    inter?: number,
+    source?: 'calendar' | 'chat'
   ) {
     const posts: Post[] = [];
     const uuid = uuidv4();
@@ -1118,6 +1152,7 @@ export class PostsRepository {
         delay: value.delay || 0,
         group: uuid,
         intervalInDays: inter ? +inter : null,
+        ...(type === 'create' ? { source: source || 'calendar' } : {}),
         approvedSubmitForOrder: APPROVED_SUBMIT_FOR_ORDER.NO,
         state: state === 'draft' ? ('DRAFT' as const) : ('QUEUE' as const),
         image: JSON.stringify(value.image),

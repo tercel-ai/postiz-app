@@ -107,9 +107,6 @@ model User {
   organizations         UserOrganization[]
   sendSuccessEmails     Boolean            @default(true)
   sendFailureEmails     Boolean            @default(true)
-  maxChannels           Int?
-  maxPostsPerMonth      Int?
-
   @@unique([email, providerName])
   @@index([lastReadNotifications])
   @@index([inviteId])
@@ -454,6 +451,7 @@ model Post {
   submittedForOrganizationId String?
   approvedSubmitForOrder     APPROVED_SUBMIT_FOR_ORDER @default(NO)
   lastMessageId              String?
+  source                     String    @default("calendar")
   intervalInDays             Int?
   error                      String?
   sourcePostId               String?
@@ -493,6 +491,7 @@ model Post {
   @@index([releaseURL])
   @@index([integrationId])
   @@index([sourcePostId])
+  @@index([source])
 }
 
 model Notifications {

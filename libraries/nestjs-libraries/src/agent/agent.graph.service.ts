@@ -492,6 +492,7 @@ export class AgentGraphService {
           format: body.format,
           tone: body.tone,
           isPicture: body.isPicture,
+          source: 'calendar',
         },
       },
       collector.usages

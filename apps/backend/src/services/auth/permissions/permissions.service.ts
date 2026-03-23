@@ -60,25 +60,22 @@ export class PermissionsService {
       if (needsUserLimits) {
         const userLimits = await this._usersService.getUserLimits(userId);
         for (const [action, section] of requestedPermission) {
-          if (section === Sections.CHANNEL && userLimits.maxChannels !== null) {
+          if (section === Sections.CHANNEL) {
             const totalChannels = (
               await this._integrationService.getIntegrationsList(orgId)
             ).filter((f) => !f.refreshNeeded).length;
-            if (totalChannels >= userLimits.maxChannels) {
-              continue;
+            if (totalChannels < userLimits.postChannelLimit) {
+              can(action, section);
             }
+            continue;
           }
-          if (section === Sections.POSTS_PER_MONTH && userLimits.maxPostsPerMonth !== null) {
-            const userCreatedAt = created_at;
-            const monthsPast = Math.abs(dayjs(userCreatedAt).diff(dayjs(), 'month'));
-            const monthStart = dayjs(userCreatedAt).add(monthsPast, 'month');
-            const count = await this._postsService.countPostsFromDay(
-              orgId,
-              monthStart.toDate()
-            );
-            if (count >= userLimits.maxPostsPerMonth) {
-              continue;
+          if (section === Sections.POSTS_PER_MONTH) {
+            // postSendLimit=0 means no active subscription — block
+            // postSendLimit>0: always allow; overage is deducted post-creation
+            if (userLimits.postSendLimit > 0) {
+              can(action, section);
             }
+            continue;
           }
           can(action, section);
         }
@@ -101,7 +98,7 @@ export class PermissionsService {
     );
     const userLimits = needsUserLimitsCheck
       ? await this._usersService.getUserLimits(userId)
-      : { maxChannels: null, maxPostsPerMonth: null };
+      : { postChannelLimit: null, postSendLimit: null };
 
     const { subscription, options } = await this.getPackageOptions(orgId);
     for (const [action, section] of requestedPermission) {
@@ -111,12 +108,11 @@ export class PermissionsService {
           await this._integrationService.getIntegrationsList(orgId)
         ).filter((f) => !f.refreshNeeded).length;
 
-        // Per-user channel limit takes priority if set
-        if (userLimits.maxChannels !== null) {
-          if (totalChannels >= userLimits.maxChannels) {
-            continue;
+        // Per-user channel limit (from Aisee) takes priority
+        if (userLimits.postChannelLimit !== null) {
+          if (totalChannels < userLimits.postChannelLimit) {
+            can(action, section);
           }
-          can(action, section);
           continue;
         }
 
@@ -151,12 +147,13 @@ export class PermissionsService {
           checkFrom.toDate()
         );
 
-        // Per-user posts limit takes priority if set
-        if (userLimits.maxPostsPerMonth !== null) {
-          if (count >= userLimits.maxPostsPerMonth) {
-            continue;
+        // Per-user posts limit (from Aisee) takes priority
+        // postSendLimit=0: no subscription — block
+        // postSendLimit>0: always allow; overage credits deducted post-creation
+        if (userLimits.postSendLimit !== null) {
+          if (userLimits.postSendLimit > 0) {
+            can(action, section);
           }
-          can(action, section);
           continue;
         }
 

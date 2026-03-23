@@ -44,15 +44,16 @@ export class MediaService {
   async generateImage(
     prompt: string,
     org: Organization,
-    generatePromptFirst?: boolean
+    generatePromptFirst?: boolean,
+    source?: 'calendar' | 'chat'
   ) {
     // BILL_TYPE=internal → original useCredit() subscription quota only
     // BILL_TYPE=third    → Aisee credits only (no subscription quota)
     if (isInternalBilling()) {
-      return this._generateImageInternal(prompt, org, generatePromptFirst);
+      return this._generateImageInternal(prompt, org, generatePromptFirst, source);
     }
 
-    return this._generateImageThird(prompt, org, generatePromptFirst);
+    return this._generateImageThird(prompt, org, generatePromptFirst, source);
   }
 
   /**
@@ -62,14 +63,15 @@ export class MediaService {
   private async _generateImageInternal(
     prompt: string,
     org: Organization,
-    generatePromptFirst?: boolean
+    generatePromptFirst?: boolean,
+    source?: 'calendar' | 'chat'
   ) {
     return this._subscriptionService.useCredit(
       org,
       'ai_images',
       async () => {
         const { data, usages } = await this._generateImageCore(prompt, org, generatePromptFirst);
-        this._billImageUsages(org, usages, { prompt, generatePromptFirst });
+        this._billImageUsages(org, usages, { prompt, generatePromptFirst, source });
         return data;
       }
     );
@@ -104,7 +106,7 @@ export class MediaService {
   private _billImageUsages(
     org: Organization,
     usages: AiUsageInfo[],
-    opts?: { relatedId?: string; prompt?: string; generatePromptFirst?: boolean }
+    opts?: { relatedId?: string; prompt?: string; generatePromptFirst?: boolean; source?: 'calendar' | 'chat' }
   ): void {
     const taskId = AiseeClient.buildTaskId(`img_${org.id}_${Date.now()}`);
     this._aiseeCreditService
@@ -116,7 +118,10 @@ export class MediaService {
           subType: AiseeBusinessSubType.IMAGE,
           relatedId: opts?.relatedId,
           description: `Image generation${opts?.generatePromptFirst ? ' (with prompt enhancement)' : ''}`,
-          data: opts?.prompt ? { prompt: opts.prompt } : undefined,
+          data: {
+            ...(opts?.prompt ? { prompt: opts.prompt } : {}),
+            source: opts?.source || 'calendar',
+          },
         },
         usages
       )
@@ -132,10 +137,11 @@ export class MediaService {
   private async _generateImageThird(
     prompt: string,
     org: Organization,
-    generatePromptFirst?: boolean
+    generatePromptFirst?: boolean,
+    source?: 'calendar' | 'chat'
   ): Promise<string> {
     const { data, usages } = await this._generateImageCore(prompt, org, generatePromptFirst);
-    this._billImageUsages(org, usages, { prompt, generatePromptFirst });
+    this._billImageUsages(org, usages, { prompt, generatePromptFirst, source });
     return data;
   }
 
@@ -146,7 +152,8 @@ export class MediaService {
    */
   async generateImageWithSave(
     prompt: string,
-    org: Organization
+    org: Organization,
+    source?: 'calendar' | 'chat'
   ): Promise<ReturnType<MediaService['saveFile']>> {
     const doGenerate = async () => {
       const { data, usages } = await this._generateImageCore(prompt, org, true);
@@ -156,6 +163,7 @@ export class MediaService {
         relatedId: saved.id,
         prompt,
         generatePromptFirst: true,
+        source,
       });
       return saved;
     };

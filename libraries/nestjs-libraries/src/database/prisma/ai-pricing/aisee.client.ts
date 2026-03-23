@@ -12,6 +12,7 @@ export const AiseeBusinessType = {
   // TODO: VIDEO_GEN billing — pending KieAI cost integration with Aisee billing.
   // Once KieAI reports usage info, use this type in media.service.ts generateVideo().
   VIDEO_GEN: 'video_gen',
+  POST_OVERAGE: 'post_overage',
 } as const;
 
 export type AiseeBusinessType =
@@ -105,6 +106,15 @@ export interface AiseeCreditBalance {
   total: number;
 }
 
+export interface AiseeUserCreditPackage {
+  postSendLimit: number;
+  postChannelLimit: number;
+  interval: string;
+  periodStart: string;
+  periodEnd: string;
+  name: string;
+}
+
 // ---------------------------------------------------------------------------
 // Client
 // ---------------------------------------------------------------------------
@@ -168,9 +178,7 @@ export class AiseeClient {
     try {
       const url = `${this.baseUrl}/credit/balance/${encodeURIComponent(userId)}`;
       const headers = this.authHeaders;
-      this.logger.log(
-        `[getBalance] curl -X 'GET' '${url}' -H 'Authorization: ${headers.Authorization}'`
-      );
+      this.logger.log(`[getBalance] GET ${url}`);
 
       const response = await fetch(url, { headers });
 
@@ -191,6 +199,44 @@ export class AiseeClient {
       };
     } catch (error) {
       this.logger.error('Balance query error:', error);
+      return null;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // GET /user-credit-package/uid/{userId}
+  // -------------------------------------------------------------------------
+
+  async getUserCreditPackage(userId: string): Promise<AiseeUserCreditPackage | null> {
+    if (!this.enabled) {
+      return null;
+    }
+
+    try {
+      const url = `${this.baseUrl}/user-credit-package/uid/${encodeURIComponent(userId)}`;
+      const response = await fetch(url, { headers: this.authHeaders });
+
+      if (!response.ok) {
+        this.logger.error(`getUserCreditPackage failed: ${response.status} for user=${userId}`);
+        return null;
+      }
+
+      const data = await response.json();
+      const pkg = data?.credit_package;
+      if (!pkg) {
+        return null;
+      }
+
+      return {
+        postSendLimit: Number(pkg.post_send_limit),
+        postChannelLimit: Number(pkg.post_channel_limit),
+        interval: pkg.interval,
+        periodStart: data.period_start,
+        periodEnd: data.period_end,
+        name: data.name,
+      };
+    } catch (error) {
+      this.logger.error(`getUserCreditPackage error for user=${userId}:`, error);
       return null;
     }
   }
@@ -218,9 +264,7 @@ export class AiseeClient {
         data: req.data || undefined,
       };
       const bodyStr = JSON.stringify(payload);
-      this.logger.log(
-        `[deductCredits] curl -X 'POST' '${url}' -H 'Content-Type: application/json' -H 'Authorization: ${authHeaders.Authorization}' -d '${bodyStr}'`
-      );
+      this.logger.log(`[deductCredits] POST ${url} body=${bodyStr}`);
 
       const response = await fetch(url, {
         method: 'POST',

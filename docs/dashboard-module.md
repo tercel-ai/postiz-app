@@ -166,7 +166,8 @@ Both pipelines source data exclusively from post-level APIs (`batchPostAnalytics
     "published": 100,
     "drafts": 10,
     "errors": 3
-  }
+  },
+  "published_this_month": 42
 }
 ```
 
@@ -184,6 +185,7 @@ Both pipelines source data exclusively from post-level APIs (`batchPostAnalytics
 | `posts_stats.published` | Published posts | Posts in `PUBLISHED` state (includes cloned records from recurring sends — each send counts as 1) |
 | `posts_stats.drafts` | Draft posts | Posts in `DRAFT` state |
 | `posts_stats.errors` | Error posts | Posts in `ERROR` state (publishing failed) |
+| `published_this_month` | Published posts this calendar month | Count of `PUBLISHED` (non-deleted, top-level) posts from the 1st of the current month in the user's timezone (`x-timezone` header). Always present regardless of date filters. |
 
 **How does date filtering work?**
 
@@ -547,7 +549,7 @@ After cache expires:  Back to the first-request flow
 
 | Feature | Cache duration | Cache key pattern | Notes |
 |---------|---------------|-------------------|-------|
-| Summary | 1 hour | `dashboard:summary:${orgId}:${start}:${end}:${intKey}:${chKey}` | Invalidated by DataTicks sync |
+| Summary | 1 hour | `dashboard:summary:${orgId}:${start}:${end}:${intKey}:${chKey}:${tz}` | Invalidated by DataTicks sync |
 | Traffic Analysis | 1 hour | `dashboard:traffics:${orgId}:${intKey}:${chKey}:${sdKey}:${edKey}` | Invalidated by DataTicks sync |
 | Impressions Trend | 1 hour | `dashboard:impressions:${orgId}:${period}:${intKey}:${chKey}:${sdKey}:${edKey}` | Invalidated by DataTicks sync |
 | Post Engagement | 1 hour | `dashboard:post-engagement:${orgId}:${days}` | On-demand fetch + cache |

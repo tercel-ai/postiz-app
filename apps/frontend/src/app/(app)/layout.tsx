@@ -17,13 +17,13 @@ import { FacebookComponent } from '@gitroom/frontend/components/layout/facebook.
 import { headers } from 'next/headers';
 import { headerName } from '@gitroom/react/translation/i18n.config';
 import { HtmlComponent } from '@gitroom/frontend/components/layout/html.component';
-// import dynamicLoad from 'next/dynamic';
-// const SetTimezone = dynamicLoad(
-//   () => import('@gitroom/frontend/components/layout/set.timezone'),
-//   {
-//     ssr: false,
-//   }
-// );
+import dynamicLoad from 'next/dynamic';
+const SetTimezone = dynamicLoad(
+  () => import('@gitroom/frontend/components/layout/set.timezone'),
+  {
+    ssr: false,
+  }
+);
 
 // System font stack for better compatibility
 const systemFontClass = 'font-sans';
@@ -76,7 +76,7 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
           }
         >
           <SentryComponent>
-            {/*<SetTimezone />*/}
+            <SetTimezone />
             <HtmlComponent />
             <DubAnalytics />
             <FacebookComponent />

@@ -325,6 +325,7 @@ const OpenModal: FC<{
             >
               <AddEditModal
                 date={dayjs.utc(integration.date)}
+                source="chat"
                 allIntegrations={properties}
                 integrations={properties.filter(
                   (p) => p.id === integration.integrationId

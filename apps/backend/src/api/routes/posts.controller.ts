@@ -11,6 +11,7 @@ import {
 } from '@nestjs/common';
 import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.service';
 import { PostReleaseService } from '@gitroom/nestjs-libraries/database/prisma/post-releases/post-release.service';
+import { PostOverageService } from '@gitroom/nestjs-libraries/database/prisma/posts/post-overage.service';
 import { GetOrgFromRequest } from '@gitroom/nestjs-libraries/user/org.from.request';
 import { Organization, User } from '@prisma/client';
 import { GetPostsDto } from '@gitroom/nestjs-libraries/dtos/posts/get.posts.dto';
@@ -29,6 +30,7 @@ import {
   AuthorizationActions,
   Sections,
 } from '@gitroom/backend/services/auth/permissions/permission.exception.class';
+import { GetTimezone } from '@gitroom/nestjs-libraries/user/timezone.from.request';
 
 @ApiTags('Posts')
 @Controller('/posts')
@@ -37,7 +39,8 @@ export class PostsController {
     private _postsService: PostsService,
     private _postReleaseService: PostReleaseService,
     private _agentGraphService: AgentGraphService,
-    private _shortLinkService: ShortLinkService
+    private _shortLinkService: ShortLinkService,
+    private _postOverageService: PostOverageService
   ) {}
 
   @Get('/:id/statistics')
@@ -88,9 +91,10 @@ export class PostsController {
   @Get('/')
   async getPosts(
     @GetOrgFromRequest() org: Organization,
-    @Query() query: GetPostsDto
+    @Query() query: GetPostsDto,
+    @GetTimezone() tz?: string
   ) {
-    const posts = await this._postsService.getPosts(org.id, query);
+    const posts = await this._postsService.getPosts(org.id, query, tz);
 
     return {
       posts,
@@ -153,11 +157,17 @@ export class PostsController {
   @CheckPolicies([AuthorizationActions.Create, Sections.POSTS_PER_MONTH])
   async createPost(
     @GetOrgFromRequest() org: Organization,
+    @GetUserFromRequest() user: User,
     @Body() rawBody: any
   ) {
     console.log(JSON.stringify(rawBody, null, 2));
     const body = await this._postsService.mapTypeToPost(rawBody, org.id);
-    return this._postsService.createPost(org.id, body);
+    const result = await this._postsService.createPost(org.id, body);
+    const postId = result[0]?.id;
+    if (postId) {
+      this._postOverageService.deductIfOverage(org.id, user.id, postId).catch(() => {});
+    }
+    return result;
   }
 
   @Post('/generator/draft')

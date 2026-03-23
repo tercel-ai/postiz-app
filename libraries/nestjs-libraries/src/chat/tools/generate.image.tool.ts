@@ -34,7 +34,9 @@ export class GenerateImageTool implements AgentToolInterface {
         const org = JSON.parse(runtimeContext.get('organization') as string);
         const image = await this._mediaService.generateImage(
           context.prompt,
-          org
+          org,
+          false,
+          'chat'
         );
 
         const file = await this.storage.uploadSimple(

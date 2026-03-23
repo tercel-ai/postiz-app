@@ -64,7 +64,7 @@ export class MediaController {
     return {
       output:
         (isPicturePrompt ? '' : 'data:image/png;base64,') +
-        (await this._mediaService.generateImage(prompt, org, isPicturePrompt)),
+        (await this._mediaService.generateImage(prompt, org, isPicturePrompt, 'calendar')),
     };
   }
 
@@ -78,7 +78,7 @@ export class MediaController {
       return false;
     }
 
-    return this._mediaService.generateImageWithSave(prompt, org);
+    return this._mediaService.generateImageWithSave(prompt, org, 'calendar');
   }
 
   @Post('/upload-server')

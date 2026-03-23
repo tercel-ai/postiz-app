@@ -20,6 +20,11 @@ export class GetPostsDto {
 
   @IsOptional()
   @IsString()
+  @IsIn(['day', 'week', 'month'])
+  display?: 'day' | 'week' | 'month';
+
+  @IsOptional()
+  @IsString()
   customer: string;
 
   @IsOptional()

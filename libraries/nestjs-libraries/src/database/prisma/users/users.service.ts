@@ -1,15 +1,19 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { UsersRepository } from '@gitroom/nestjs-libraries/database/prisma/users/users.repository';
 import { Provider } from '@prisma/client';
 import { UserDetailDto } from '@gitroom/nestjs-libraries/dtos/users/user.details.dto';
 import { EmailNotificationsDto } from '@gitroom/nestjs-libraries/dtos/users/email-notifications.dto';
 import { OrganizationRepository } from '@gitroom/nestjs-libraries/database/prisma/organizations/organization.repository';
+import { AiseeClient } from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/aisee.client';
 
 @Injectable()
 export class UsersService {
+  private readonly logger = new Logger(UsersService.name);
+
   constructor(
     private _usersRepository: UsersRepository,
-    private _organizationRepository: OrganizationRepository
+    private _organizationRepository: OrganizationRepository,
+    private _aiseeClient: AiseeClient
   ) {}
 
   getUserByEmail(email: string) {
@@ -52,14 +56,32 @@ export class UsersService {
     return this._usersRepository.updateEmailNotifications(userId, body);
   }
 
-  getUserLimits(userId: string) {
-    return this._usersRepository.getUserLimits(userId);
+  async getUserLimits(userId: string): Promise<
+    | { postChannelLimit: number; postSendLimit: number }
+    | { postChannelLimit: number; postSendLimit: number; periodStart: string; periodEnd: string; name: string; interval: string }
+  > {
+    const pkg = await this._aiseeClient.getUserCreditPackage(userId);
+
+    // API failed or no active package — hard block
+    if (pkg === null) {
+      this.logger.warn(`No credit package for user=${userId}, blocking channels and posts`);
+      return { postChannelLimit: 0, postSendLimit: 0 };
+    }
+
+    // Package expired or periodEnd missing — hard block
+    if (!pkg.periodEnd || new Date(pkg.periodEnd) < new Date()) {
+      this.logger.warn(`Credit package expired at ${pkg.periodEnd} for user=${userId}, blocking channels and posts`);
+      return { postChannelLimit: 0, postSendLimit: 0 };
+    }
+
+    return {
+      postChannelLimit: pkg.postChannelLimit,
+      postSendLimit: pkg.postSendLimit,
+      periodStart: pkg.periodStart,
+      periodEnd: pkg.periodEnd,
+      name: pkg.name,
+      interval: pkg.interval,
+    };
   }
 
-  updateUserLimits(
-    userId: string,
-    limits: { maxChannels?: number | null; maxPostsPerMonth?: number | null }
-  ) {
-    return this._usersRepository.updateUserLimits(userId, limits);
-  }
 }

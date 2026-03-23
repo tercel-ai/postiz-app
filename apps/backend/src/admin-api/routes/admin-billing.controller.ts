@@ -164,6 +164,12 @@ export class AdminBillingController {
     // Resolve orgId → Aisee userId (BillingRecord stores orgId, not user ID)
     const aiseeUserId = await this._creditService.resolveOwnerUserId(record.organizationId);
 
+    // Infer subType if missing from record (for old data)
+    const subType = AiseeCreditService.inferSubType(
+      record.businessType as any,
+      record.subType as any
+    );
+
     const deduction = await this._aiseeClient.deductCredits({
       userId: aiseeUserId,
       amount: record.amount,
@@ -172,7 +178,7 @@ export class AdminBillingController {
       relatedId: record.relatedId || undefined,
       data: {
         business_type: record.businessType,
-        sub_type: record.subType,
+        sub_type: subType,
         cost_items: JSON.parse(record.costItems),
         postiz_billing_id: record.id,
         ...((record.data as Record<string, unknown>) || {}),
@@ -184,6 +190,7 @@ export class AdminBillingController {
         where: { id: record.id },
         data: {
           status: 'success',
+          subType: subType, // Back-fill missing subType
           transactionId: deduction.transactionId,
           remainingBalance: deduction.remainingBalance,
           debtAmount: deduction.debtAmount,
@@ -239,6 +246,12 @@ export class AdminBillingController {
     for (const record of failedRecords) {
       const aiseeUserId = await this._creditService.resolveOwnerUserId(record.organizationId);
 
+      // Infer subType if missing from record (for old data)
+      const subType = AiseeCreditService.inferSubType(
+        record.businessType as any,
+        record.subType as any
+      );
+
       const deduction = await this._aiseeClient.deductCredits({
         userId: aiseeUserId,
         amount: record.amount,
@@ -247,7 +260,7 @@ export class AdminBillingController {
         relatedId: record.relatedId || undefined,
         data: {
           business_type: record.businessType,
-          sub_type: record.subType,
+          sub_type: subType,
           cost_items: JSON.parse(record.costItems),
           postiz_billing_id: record.id,
           ...((record.data as Record<string, unknown>) || {}),
@@ -259,6 +272,7 @@ export class AdminBillingController {
           where: { id: record.id },
           data: {
             status: 'success',
+            subType: subType, // Back-fill missing subType
             transactionId: deduction.transactionId,
             remainingBalance: deduction.remainingBalance,
             debtAmount: deduction.debtAmount,
