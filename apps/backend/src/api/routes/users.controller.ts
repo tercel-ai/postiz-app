@@ -25,6 +25,7 @@ import { UsersService } from '@gitroom/nestjs-libraries/database/prisma/users/us
 import { UserDetailDto } from '@gitroom/nestjs-libraries/dtos/users/user.details.dto';
 import { EmailNotificationsDto } from '@gitroom/nestjs-libraries/dtos/users/email-notifications.dto';
 import { HttpForbiddenException } from '@gitroom/nestjs-libraries/services/exception.filter';
+import { isThirdPartyBilling } from '@gitroom/nestjs-libraries/services/billing.helper';
 import { RealIP } from 'nestjs-real-ip';
 import { UserAgent } from '@gitroom/nestjs-libraries/user/user.agent';
 import { TrackEnum } from '@gitroom/nestjs-libraries/user/track.enum';
@@ -80,23 +81,7 @@ export class UsersController {
     return this._userService.getPersonal(user.id);
   }
 
-  @Get('/limits')
-  async getUserLimits(@GetUserFromRequest() user: User) {
-    return this._userService.getUserLimits(user.id);
-  }
-
-  @Get('/limits/:userId')
-  async getUserLimitsById(
-    @GetUserFromRequest() user: User,
-    @Param('userId') userId: string
-  ) {
-    if (!user.isSuperAdmin) {
-      throw new HttpException('Unauthorized', 400);
-    }
-    return this._userService.getUserLimits(userId);
-  }
-
-@Get('/impersonate')
+  @Get('/impersonate')
   async getImpersonate(
     @GetUserFromRequest() user: User,
     @Query('name') name: string
@@ -158,7 +143,15 @@ export class UsersController {
 
   @Get('/subscription')
   @CheckPolicies([AuthorizationActions.Create, Sections.ADMIN])
-  async getSubscription(@GetOrgFromRequest() organization: Organization) {
+  async getSubscription(
+    @GetOrgFromRequest() organization: Organization,
+    @GetUserFromRequest() user: User
+  ) {
+    if (isThirdPartyBilling()) {
+      const limits = await this._userService.getUserLimits(user.id);
+      return { subscription: limits };
+    }
+
     const subscription =
       await this._subscriptionService.getSubscriptionByOrganizationId(
         organization.id
