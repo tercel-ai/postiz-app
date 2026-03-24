@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import axios from 'axios';
-import { sign } from 'jsonwebtoken';
+import pkg from 'jsonwebtoken';
+const { sign } = pkg;
 
 /**
  * SIMPLIFIED E2E TEST FOR CHAT AGENT
