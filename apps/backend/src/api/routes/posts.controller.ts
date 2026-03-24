@@ -3,6 +3,7 @@ import {
   Controller,
   Delete,
   Get,
+  Logger,
   Param,
   Post,
   Put,
@@ -35,6 +36,8 @@ import { GetTimezone } from '@gitroom/nestjs-libraries/user/timezone.from.reques
 @ApiTags('Posts')
 @Controller('/posts')
 export class PostsController {
+  private readonly logger = new Logger(PostsController.name);
+
   constructor(
     private _postsService: PostsService,
     private _postReleaseService: PostReleaseService,
@@ -160,12 +163,13 @@ export class PostsController {
     @GetUserFromRequest() user: User,
     @Body() rawBody: any
   ) {
-    console.log(JSON.stringify(rawBody, null, 2));
     const body = await this._postsService.mapTypeToPost(rawBody, org.id);
     const result = await this._postsService.createPost(org.id, body);
-    const postId = result[0]?.id;
+    const postId = result[0]?.postId;
     if (postId) {
-      this._postOverageService.deductIfOverage(org.id, user.id, postId).catch(() => {});
+      this._postOverageService.deductIfOverage(org.id, user.id, postId).catch((err) => {
+        this.logger.error(`deductIfOverage failed for postId=${postId}:`, err);
+      });
     }
     return result;
   }
