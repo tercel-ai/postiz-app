@@ -42,11 +42,19 @@ export class PostOverageService implements OnModuleInit {
    * Fire-and-forget — does not block the response.
    */
   async deductIfOverage(orgId: string, userId: string, postId: string): Promise<void> {
+    const tag = `[deductIfOverage orgId=${orgId} userId=${userId} postId=${postId}]`;
     try {
+      this.logger.log(`${tag} START`);
+
       const limits = await this._usersService.getUserLimits(userId);
+      this.logger.log(
+        `${tag} getUserLimits returned: postSendLimit=${limits.postSendLimit} postChannelLimit=${limits.postChannelLimit}` +
+        ('periodStart' in limits ? ` periodStart=${limits.periodStart} periodEnd=${limits.periodEnd}` : ' (no period info)')
+      );
 
       // No active subscription or hard-blocked — nothing to deduct
       if (!limits.postSendLimit) {
+        this.logger.warn(`${tag} SKIP — postSendLimit is falsy (${limits.postSendLimit}), no active subscription`);
         return;
       }
 
@@ -55,18 +63,23 @@ export class PostOverageService implements OnModuleInit {
         : null;
 
       if (!periodStart) {
+        this.logger.warn(`${tag} SKIP — periodStart is missing or falsy`);
         return;
       }
 
       const count = await this._postsRepository.countPostsFromDay(orgId, periodStart);
+      this.logger.log(`${tag} countPostsFromDay(orgId=${orgId}, since=${periodStart.toISOString()}) = ${count}, limit=${limits.postSendLimit}`);
 
       if (count <= limits.postSendLimit) {
+        this.logger.log(`${tag} SKIP — count(${count}) <= limit(${limits.postSendLimit}), within allowance`);
         return;
       }
 
       const overageCost = await this.getOverageCost();
       // Fixed taskId (no random suffix) — ensures Aisee-side idempotency on retry
       const taskId = `postiz_post_overage_${postId}`;
+
+      this.logger.log(`${tag} DEDUCTING: cost=${overageCost} taskId=${taskId} count=${count}/${limits.postSendLimit}`);
 
       await this._aiseeCreditService.deductAndConfirm({
         userId: orgId,
@@ -86,11 +99,9 @@ export class PostOverageService implements OnModuleInit {
         ],
       });
 
-      this.logger.log(
-        `Overage deduction: orgId=${orgId} postId=${postId} count=${count}/${limits.postSendLimit} cost=${overageCost}`
-      );
+      this.logger.log(`${tag} SUCCESS — deducted ${overageCost} credits`);
     } catch (error) {
-      this.logger.error(`deductIfOverage failed for orgId=${orgId} postId=${postId}:`, error);
+      this.logger.error(`${tag} FAILED:`, error);
     }
   }
 }

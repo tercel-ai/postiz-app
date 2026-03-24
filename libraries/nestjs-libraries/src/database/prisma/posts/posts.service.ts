@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   Injectable,
+  Logger,
   ValidationPipe,
 } from '@nestjs/common';
 import { PostsRepository } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.repository';
@@ -37,6 +38,7 @@ import { timer } from '@gitroom/helpers/utils/timer';
 import { ioRedis } from '@gitroom/nestjs-libraries/redis/redis.service';
 import { RefreshToken } from '@gitroom/nestjs-libraries/integrations/social.abstract';
 import { RefreshIntegrationService } from '@gitroom/nestjs-libraries/integrations/refresh.integration.service';
+import { PostOverageService } from '@gitroom/nestjs-libraries/database/prisma/posts/post-overage.service';
 import { PostingTimesV2 } from '@gitroom/nestjs-libraries/dtos/integrations/posting-times.types';
 import { resolveTimeSlotsForDate } from '@gitroom/nestjs-libraries/dtos/integrations/posting-times.utils';
 type PostWithConditionals = Post & {
@@ -46,6 +48,7 @@ type PostWithConditionals = Post & {
 
 @Injectable()
 export class PostsService {
+  private readonly logger = new Logger(PostsService.name);
   private storage = UploadFactory.createStorage();
   constructor(
     private _postRepository: PostsRepository,
@@ -55,7 +58,8 @@ export class PostsService {
     private _shortLinkService: ShortLinkService,
     private _openaiService: OpenaiService,
     private _temporalService: TemporalService,
-    private _refreshIntegrationService: RefreshIntegrationService
+    private _refreshIntegrationService: RefreshIntegrationService,
+    private _postOverageService: PostOverageService
   ) {}
 
   searchForMissingThreeHoursPosts() {
@@ -692,7 +696,10 @@ export class PostsService {
     }
   }
 
-  async createPost(orgId: string, body: CreatePostDto): Promise<any[]> {
+  async createPost(orgId: string, body: CreatePostDto, userId?: string): Promise<any[]> {
+    this.logger.log(
+      `createPost: orgId=${orgId} userId=${userId ?? 'N/A'} type=${body.type} postsCount=${body.posts?.length ?? 0}`
+    );
     const postList = [];
     for (const post of body.posts) {
       const messages = (post.value || []).map((p) => p.content);
@@ -744,10 +751,22 @@ export class PostsService {
       }
 
       Sentry.metrics.count('post_created', 1);
+      const createdPostId = posts[0].id;
       postList.push({
-        postId: posts[0].id,
+        postId: createdPostId,
         integration: post.integration.id,
       });
+
+      // Trigger overage deduction (fire-and-forget)
+      if (userId) {
+        this._postOverageService.deductIfOverage(orgId, userId, createdPostId).catch((err) => {
+          this.logger.error(`createPost: deductIfOverage failed for postId=${createdPostId}:`, err);
+        });
+      } else {
+        this.logger.warn(
+          `createPost: skipping deductIfOverage for postId=${createdPostId} — no userId provided`
+        );
+      }
     }
 
     return postList;

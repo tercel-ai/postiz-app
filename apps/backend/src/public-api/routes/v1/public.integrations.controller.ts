@@ -12,7 +12,8 @@ import {
 } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 import { GetOrgFromRequest } from '@gitroom/nestjs-libraries/user/org.from.request';
-import { Organization } from '@prisma/client';
+import { GetUserFromRequest } from '@gitroom/nestjs-libraries/user/user.from.request';
+import { Organization, User } from '@prisma/client';
 import { IntegrationService } from '@gitroom/nestjs-libraries/database/prisma/integrations/integration.service';
 import { CheckPolicies } from '@gitroom/backend/services/auth/permissions/permissions.ability';
 import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.service';
@@ -120,6 +121,7 @@ export class PublicIntegrationsController {
   @CheckPolicies([AuthorizationActions.Create, Sections.POSTS_PER_MONTH])
   async createPost(
     @GetOrgFromRequest() org: Organization,
+    @GetUserFromRequest() user: User,
     @Body() rawBody: any
   ) {
     Sentry.metrics.count("public_api-request", 1);
@@ -130,8 +132,7 @@ export class PublicIntegrationsController {
     );
     body.type = rawBody.type;
 
-    console.log(JSON.stringify(body, null, 2));
-    return this._postsService.createPost(org.id, body);
+    return this._postsService.createPost(org.id, body, user?.id);
   }
 
   @Delete('/posts/:id')

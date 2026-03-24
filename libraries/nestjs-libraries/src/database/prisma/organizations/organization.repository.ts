@@ -19,6 +19,12 @@ export class OrganizationRepository {
         apiKey: api,
       },
       include: {
+        users: {
+          where: { disabled: false },
+          orderBy: { createdAt: 'asc' },
+          take: 1,
+          select: { userId: true, role: true },
+        },
         subscription: {
           select: {
             subscriptionTier: true,

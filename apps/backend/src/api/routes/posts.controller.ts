@@ -3,7 +3,6 @@ import {
   Controller,
   Delete,
   Get,
-  Logger,
   Param,
   Post,
   Put,
@@ -12,7 +11,6 @@ import {
 } from '@nestjs/common';
 import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.service';
 import { PostReleaseService } from '@gitroom/nestjs-libraries/database/prisma/post-releases/post-release.service';
-import { PostOverageService } from '@gitroom/nestjs-libraries/database/prisma/posts/post-overage.service';
 import { GetOrgFromRequest } from '@gitroom/nestjs-libraries/user/org.from.request';
 import { Organization, User } from '@prisma/client';
 import { GetPostsDto } from '@gitroom/nestjs-libraries/dtos/posts/get.posts.dto';
@@ -36,14 +34,11 @@ import { GetTimezone } from '@gitroom/nestjs-libraries/user/timezone.from.reques
 @ApiTags('Posts')
 @Controller('/posts')
 export class PostsController {
-  private readonly logger = new Logger(PostsController.name);
-
   constructor(
     private _postsService: PostsService,
     private _postReleaseService: PostReleaseService,
     private _agentGraphService: AgentGraphService,
-    private _shortLinkService: ShortLinkService,
-    private _postOverageService: PostOverageService
+    private _shortLinkService: ShortLinkService
   ) {}
 
   @Get('/:id/statistics')
@@ -164,14 +159,7 @@ export class PostsController {
     @Body() rawBody: any
   ) {
     const body = await this._postsService.mapTypeToPost(rawBody, org.id);
-    const result = await this._postsService.createPost(org.id, body);
-    const postId = result[0]?.postId;
-    if (postId) {
-      this._postOverageService.deductIfOverage(org.id, user.id, postId).catch((err) => {
-        this.logger.error(`deductIfOverage failed for postId=${postId}:`, err);
-      });
-    }
-    return result;
+    return this._postsService.createPost(org.id, body, user.id);
   }
 
   @Post('/generator/draft')

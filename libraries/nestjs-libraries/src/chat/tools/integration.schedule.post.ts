@@ -121,6 +121,8 @@ If the tools return errors, you would need to rerun it with the right parameters
           // @ts-ignore
           runtimeContext.get('organization') as string
         ).id;
+        // @ts-ignore
+        const userId = runtimeContext.get('userId') as string | undefined;
         const finalOutput = [];
 
         const integrations = {} as Record<string, Integration>;
@@ -221,7 +223,7 @@ If the tools return errors, you would need to rerun it with the right parameters
                 })),
               },
             ],
-          });
+          }, userId);
           finalOutput.push(...output);
         }
 

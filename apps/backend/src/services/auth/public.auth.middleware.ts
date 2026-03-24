@@ -27,6 +27,13 @@ export class PublicAuthMiddleware implements NestMiddleware {
         return;
       }
 
+      // Set the org owner as the request user so downstream services can bill correctly
+      const orgOwner = org.users?.[0];
+      if (orgOwner) {
+        // @ts-ignore
+        req.user = { id: orgOwner.userId };
+      }
+
       // @ts-ignore
       req.org = { ...org, users: [{ users: { role: 'SUPERADMIN' } }] };
     } catch (err) {
