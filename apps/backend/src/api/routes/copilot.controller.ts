@@ -67,6 +67,7 @@ function hasAnyApiKey(): boolean {
 export type ChannelsContext = {
   integrations: string;
   organization: string;
+  userId: string;
   ui: string;
 };
 
