@@ -74,6 +74,7 @@ export class PostOverageService implements OnModuleInit {
         businessType: AiseeBusinessType.POST_OVERAGE,
         description: `Post overage: ${count}/${limits.postSendLimit} posts used this period`,
         relatedId: postId,
+        data: { source: 'calendar' },
         costItems: [
           {
             type: 'text',

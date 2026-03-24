@@ -154,7 +154,7 @@ export class AiseeClient {
 
     const expiresIn = 120; // 2 minutes
     this._cachedToken = sign(
-      { roles: ['system-internal'], iss: 'postiz' },
+      { roles: ['system-internal'], iss: 'postiz', is_super_user: true },
       secret,
       { expiresIn }
     );

@@ -4,26 +4,26 @@ import { sign } from 'jsonwebtoken';
 
 /**
  * SIMPLIFIED E2E TEST FOR CHAT AGENT
- * 
+ *
  * Usage:
- * USER_ID="your-user-uuid" ORG_ID="your-org-uuid" pnpm dlx ts-node scripts/test-agent-simple.ts
- * 
- * It will automatically:
- * 1. Sign a JWT for the USER_ID using JWT_SECRET from .env
- * 2. Use BACKEND_INTERNAL_URL from .env
- * 3. Fetch integrations and run X.com test scenarios
+ * USER_ID="uuid" ORG_ID="uuid" pnpm dlx ts-node scripts/test-agent-simple.ts
+ *
+ * Optional: filter to a specific integration by ID or name
+ * USER_ID="uuid" ORG_ID="uuid" INTEGRATION="my-x-account" pnpm dlx ts-node scripts/test-agent-simple.ts
+ *
+ * JWT_SECRET and BACKEND_INTERNAL_URL are loaded from .env automatically.
  */
 
 const {
   USER_ID,
   ORG_ID,
   JWT_SECRET,
-  BACKEND_INTERNAL_URL = 'http://localhost:3000'
+  BACKEND_INTERNAL_URL = 'http://localhost:3000',
+  INTEGRATION,
 } = process.env;
 
 if (!USER_ID || !JWT_SECRET) {
-  console.error('❌ ERROR: USER_ID and JWT_SECRET are required.');
-  console.log('You can find USER_ID in your database (User table) and JWT_SECRET in your .env file.');
+  console.error('ERROR: USER_ID is required. JWT_SECRET must be set in .env.');
   process.exit(1);
 }
 
@@ -97,8 +97,24 @@ async function main() {
     console.log(`🔗 Connecting to ${BACKEND_INTERNAL_URL}...`);
     
     // Verify auth and get integrations
-    const { data: integrations } = await client.get('/integrations');
-    console.log(`✅ Auth successful. Found ${integrations.length} integrations.`);
+    const { data: allIntegrations } = await client.get('/integrations');
+    console.log(`Auth successful. Found ${allIntegrations.length} integrations.`);
+
+    // Filter integrations if INTEGRATION env var is set (match by id or name)
+    let integrations = allIntegrations;
+    if (INTEGRATION) {
+      integrations = allIntegrations.filter(
+        (i: any) => i.id === INTEGRATION || i.name === INTEGRATION
+      );
+      if (integrations.length === 0) {
+        console.error(`No integration matching "${INTEGRATION}". Available:`);
+        for (const i of allIntegrations) {
+          console.log(`  - ${i.name} (${i.providerIdentifier}) id=${i.id}`);
+        }
+        process.exit(1);
+      }
+      console.log(`Filtered to: ${integrations.map((i: any) => `${i.name} (${i.providerIdentifier})`).join(', ')}`);
+    }
 
     // Test Scenarios
     await runScenario(
