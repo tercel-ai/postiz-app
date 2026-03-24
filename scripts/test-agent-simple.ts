@@ -100,7 +100,7 @@ function buildVariables(
         textMessage: { content: m.content },
       })),
       frontend: {
-        actions: [],
+        actions: [] as string[],
         url: 'http://localhost:4200',
       },
     },
