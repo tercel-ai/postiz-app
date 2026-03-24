@@ -68,17 +68,6 @@ export class DashboardRepository {
     return stats;
   }
 
-  countPublishedThisMonth(orgId: string, monthStart: Date) {
-    return this._post.model.post.count({
-      where: {
-        organizationId: orgId,
-        deletedAt: null,
-        parentPostId: null,
-        state: 'PUBLISHED',
-        publishDate: { gte: monthStart },
-      },
-    });
-  }
 
   getPublishedPostsWithRelease(orgId: string, sinceDays: number, integrationId?: string[], channel?: string[]) {
     return this._post.model.post.findMany({

@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { Integration, Organization } from '@prisma/client';
 import dayjs from 'dayjs';
 import isoWeek from 'dayjs/plugin/isoWeek';
@@ -11,6 +11,7 @@ import { RefreshIntegrationService } from '@gitroom/nestjs-libraries/integration
 import { AnalyticsData, BatchPostAnalyticsResult } from '@gitroom/nestjs-libraries/integrations/social/social.integrations.interface';
 import { ioRedis } from '@gitroom/nestjs-libraries/redis/redis.service';
 import { DataTicksService } from '@gitroom/nestjs-libraries/database/prisma/data-ticks/data-ticks.service';
+import { UsersService } from '@gitroom/nestjs-libraries/database/prisma/users/users.service';
 
 dayjs.extend(isoWeek);
 dayjs.extend(utc);
@@ -26,16 +27,20 @@ const CACHE_TTL =
 
 @Injectable()
 export class DashboardService {
+  private readonly logger = new Logger(DashboardService.name);
+
   constructor(
     private _dashboardRepository: DashboardRepository,
     private _postsService: PostsService,
     private _integrationManager: IntegrationManager,
     private _refreshIntegrationService: RefreshIntegrationService,
-    private _dataTicksService: DataTicksService
+    private _dataTicksService: DataTicksService,
+    private _usersService: UsersService
   ) {}
 
   async getSummary(
     org: Organization,
+    userId?: string,
     startDate?: Date,
     endDate?: Date,
     integrationId?: string[],
@@ -52,11 +57,32 @@ export class DashboardService {
       return JSON.parse(cached);
     }
 
-    // Month start in user's timezone (or UTC), used for published_this_month count
-    const now = tz ? dayjs().tz(tz) : dayjs.utc();
-    const monthStart = now.startOf('month').toDate();
+    // Use Aisee billing period for published_this_period count; fall back to calendar month
+    let periodStart: Date;
+    let periodEnd: Date | undefined;
+    let postSendLimit: number | undefined;
+    if (userId) {
+      try {
+        const limits = await this._usersService.getUserLimits(userId);
+        if ('periodStart' in limits && limits.periodStart) {
+          periodStart = new Date(limits.periodStart);
+          periodEnd = 'periodEnd' in limits && limits.periodEnd ? new Date(limits.periodEnd) : undefined;
+          postSendLimit = limits.postSendLimit;
+        } else {
+          const now = tz ? dayjs().tz(tz) : dayjs.utc();
+          periodStart = now.startOf('month').toDate();
+        }
+      } catch (err) {
+        this.logger.warn(`getSummary: getUserLimits failed for userId=${userId}, falling back to calendar month`);
+        const now = tz ? dayjs().tz(tz) : dayjs.utc();
+        periodStart = now.startOf('month').toDate();
+      }
+    } else {
+      const now = tz ? dayjs().tz(tz) : dayjs.utc();
+      periodStart = now.startOf('month').toDate();
+    }
 
-    const [channelCount, integrations, postStats, impressionsSummary, trafficSummary, publishedThisMonth] = await Promise.all([
+    const [channelCount, integrations, postStats, impressionsSummary, trafficSummary, publishedThisPeriod] = await Promise.all([
       this._dashboardRepository.getChannelCount(org.id, integrationId, channel),
       this._dashboardRepository.getActiveIntegrations(org.id, integrationId, channel),
       this._dashboardRepository.getPostsStats(org.id, normalizedStart, normalizedEnd, integrationId, channel),
@@ -74,7 +100,7 @@ export class DashboardService {
         startDate: normalizedStart,
         endDate: normalizedEnd,
       }),
-      this._dashboardRepository.countPublishedThisMonth(org.id, monthStart),
+      this._postsService.countPostsFromDay(org.id, periodStart),
     ]);
 
     const stats = {
@@ -124,7 +150,9 @@ export class DashboardService {
       impressions_total: impressionsTotal,
       traffics_total: trafficsTotal,
       posts_stats: stats,
-      published_this_month: publishedThisMonth,
+      published_this_month: publishedThisPeriod,
+      ...(postSendLimit !== undefined ? { post_send_limit: postSendLimit } : {}),
+      ...(periodEnd ? { period_end: periodEnd.toISOString() } : {}),
     };
 
     await ioRedis.set(cacheKey, JSON.stringify(result), 'EX', CACHE_TTL);

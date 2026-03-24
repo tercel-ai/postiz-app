@@ -1094,6 +1094,7 @@ export class PostsRepository {
     return this._post.model.post.count({
       where: {
         organizationId: orgId,
+        parentPostId: null,
         publishDate: {
           gte: date,
         },
