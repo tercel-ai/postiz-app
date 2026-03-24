@@ -7,12 +7,20 @@ const { sign } = pkg;
  * SIMPLIFIED E2E TEST FOR CHAT AGENT
  *
  * Usage:
- * USER_ID="uuid" ORG_ID="uuid" pnpm dlx ts-node scripts/test-agent-simple.ts
+ *   USER_ID="uuid" ORG_ID="uuid" pnpm dlx ts-node scripts/test-agent-simple.ts
  *
- * Optional: filter to a specific integration by ID or name
- * USER_ID="uuid" ORG_ID="uuid" INTEGRATION="my-x-account" pnpm dlx ts-node scripts/test-agent-simple.ts
+ * Options (env vars):
+ *   INTEGRATION   - filter by integration ID or name
+ *   ROUNDS        - number of test rounds (default: 1)
+ *   INTERVAL      - seconds between rounds (default: 10)
+ *   BACKEND_INTERNAL_URL - backend base URL (default: http://localhost:3000)
  *
- * JWT_SECRET and BACKEND_INTERNAL_URL are loaded from .env automatically.
+ * Examples:
+ *   # Single round, specific integration
+ *   USER_ID=xxx ORG_ID=yyy INTEGRATION=cmn2mc... pnpm dlx ts-node scripts/test-agent-simple.ts
+ *
+ *   # 5 rounds, 30s apart (batch stress test)
+ *   USER_ID=xxx ORG_ID=yyy ROUNDS=5 INTERVAL=30 pnpm dlx ts-node scripts/test-agent-simple.ts
  */
 
 const {
@@ -21,57 +29,61 @@ const {
   JWT_SECRET,
   BACKEND_INTERNAL_URL = 'http://localhost:3000',
   INTEGRATION,
+  ROUNDS: ROUNDS_STR = '1',
+  INTERVAL: INTERVAL_STR = '10',
 } = process.env;
+
+const ROUNDS = Math.max(1, parseInt(ROUNDS_STR, 10) || 1);
+const INTERVAL = Math.max(0, parseInt(INTERVAL_STR, 10) || 10);
 
 if (!USER_ID || !JWT_SECRET) {
   console.error('ERROR: USER_ID is required. JWT_SECRET must be set in .env.');
   process.exit(1);
 }
 
-// Generate a valid JWT for the user
 const token = sign({ id: USER_ID, activated: true }, JWT_SECRET);
 
 const client = axios.create({
   baseURL: BACKEND_INTERNAL_URL,
   headers: {
     'Authorization': `Bearer ${token}`,
-    'showorg': ORG_ID || '', // Optional: specify which org to use if user has many
-    'Content-Type': 'application/json'
-  }
+    'showorg': ORG_ID || '',
+    'Content-Type': 'application/json',
+  },
 });
 
+function sleep(seconds: number) {
+  return new Promise((resolve) => setTimeout(resolve, seconds * 1000));
+}
+
 async function runScenario(scenarioName: string, prompt: string, integrations: any[]) {
-  console.log(`\n🚀 [${scenarioName}]`);
-  
+  console.log(`\n--- [${scenarioName}]`);
+
   const threadId = `e2e-simple-${Date.now()}`;
-  const xIntegration = integrations.find(i => i.providerIdentifier === 'x');
-  
-  if (!xIntegration) {
-    console.warn('⚠️ No X integration found, the agent might not be able to schedule.');
-  }
 
   const payload = {
     threadId,
     messages: [{ id: '1', role: 'user', content: prompt }],
     variables: {
       properties: {
-        integrations: integrations.map(i => ({
+        integrations: integrations.map((i: any) => ({
           id: i.id,
           name: i.name,
-          providerIdentifier: i.providerIdentifier,
+          providerIdentifier: i.identifier || i.providerIdentifier,
           picture: i.picture,
-          profile: i.profile
-        }))
-      }
-    }
+          profile: i.display || i.profile,
+        })),
+      },
+    },
   };
 
   try {
     console.log(`User: ${prompt}`);
     const { data } = await client.post('/copilot/agent', payload);
-    
-    // Get the response content
-    const assistantMessage = data.messages ? data.messages[data.messages.length - 1]?.content : 'Check preview';
+
+    const assistantMessage = data.messages
+      ? data.messages[data.messages.length - 1]?.content
+      : 'Check preview';
     console.log('Agent:', assistantMessage);
 
     // Auto-confirm
@@ -81,58 +93,76 @@ async function runScenario(scenarioName: string, prompt: string, integrations: a
       messages: [
         ...payload.messages,
         { id: '2', role: 'assistant', content: assistantMessage },
-        { id: '3', role: 'user', content: 'Yes, please schedule it right away. This is for testing.' }
-      ]
+        { id: '3', role: 'user', content: 'Yes, please schedule it right away. This is for testing.' },
+      ],
     };
 
     const { data: finalData } = await client.post('/copilot/agent', confirmPayload);
     console.log('Final Result:', JSON.stringify(finalData, null, 2));
-
+    return true;
   } catch (err: any) {
-    console.error('❌ Error:', err.response?.data || err.message);
+    console.error('Error:', err.response?.data || err.message);
+    return false;
   }
 }
 
 async function main() {
   try {
-    console.log(`🔗 Connecting to ${BACKEND_INTERNAL_URL}...`);
-    
-    // Verify auth and get integrations
-    const { data: allIntegrations } = await client.get('/integrations');
+    console.log(`Connecting to ${BACKEND_INTERNAL_URL}...`);
+    console.log(`Config: ROUNDS=${ROUNDS} INTERVAL=${INTERVAL}s`);
+
+    // GET /integrations/list returns { integrations: [...] }
+    const { data } = await client.get('/integrations/list');
+    const allIntegrations: any[] = data.integrations || data || [];
     console.log(`Auth successful. Found ${allIntegrations.length} integrations.`);
 
-    // Filter integrations if INTEGRATION env var is set (match by id or name)
+    if (allIntegrations.length === 0) {
+      console.error('No integrations found. Connect at least one social account first.');
+      process.exit(1);
+    }
+
+    // Filter integrations if INTEGRATION env var is set
     let integrations = allIntegrations;
     if (INTEGRATION) {
       integrations = allIntegrations.filter(
-        (i: any) => i.id === INTEGRATION || i.name === INTEGRATION
+        (i: any) => i.id === INTEGRATION || i.name === INTEGRATION,
       );
       if (integrations.length === 0) {
         console.error(`No integration matching "${INTEGRATION}". Available:`);
         for (const i of allIntegrations) {
-          console.log(`  - ${i.name} (${i.providerIdentifier}) id=${i.id}`);
+          console.log(`  - ${i.name} (${i.identifier || i.providerIdentifier}) id=${i.id}`);
         }
         process.exit(1);
       }
-      console.log(`Filtered to: ${integrations.map((i: any) => `${i.name} (${i.providerIdentifier})`).join(', ')}`);
+    }
+    console.log(
+      `Using: ${integrations.map((i: any) => `${i.name} (${i.identifier || i.providerIdentifier})`).join(', ')}`,
+    );
+
+    let passed = 0;
+    let failed = 0;
+
+    for (let round = 1; round <= ROUNDS; round++) {
+      console.log(`\n========== Round ${round}/${ROUNDS} ==========`);
+
+      const ok = await runScenario(
+        `Round ${round} - Text Post`,
+        `Create a short professional tech tip post. Schedule it for now. (test round ${round})`,
+        integrations,
+      );
+      if (ok) passed++;
+      else failed++;
+
+      if (round < ROUNDS) {
+        console.log(`\nWaiting ${INTERVAL}s before next round...`);
+        await sleep(INTERVAL);
+      }
     }
 
-    // Test Scenarios
-    await runScenario(
-      'Text Only',
-      'Create a professional tech tip for X.com about React performance. Schedule it for now.',
-      integrations
-    );
-
-    await runScenario(
-      'Image + Text',
-      'Create a marketing post for X.com about Postiz AI. Generate a futuristic image. Schedule for tomorrow 10am.',
-      integrations
-    );
-
-    console.log('\n✨ All tests completed.');
+    console.log(`\n========== Summary ==========`);
+    console.log(`Total: ${ROUNDS} | Passed: ${passed} | Failed: ${failed}`);
   } catch (err: any) {
-    console.error('❌ Initialization failed:', err.response?.data || err.message);
+    console.error('Initialization failed:', err.response?.data || err.message);
   }
 }
 
