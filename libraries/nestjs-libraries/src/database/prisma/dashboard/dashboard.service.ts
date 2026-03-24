@@ -51,14 +51,17 @@ export class DashboardService {
     const normalizedEnd = endDate ? dayjs(endDate).endOf('day').toDate() : undefined;
     const intKey = integrationId?.length ? [...integrationId].sort().join(',') : 'all';
     const chKey = channel?.length ? [...channel].sort().join(',') : 'all';
-    const cacheKey = `dashboard:summary:${org.id}:${normalizedStart?.getTime() || 'all'}:${normalizedEnd?.getTime() || 'all'}:${intKey}:${chKey}:${tz || 'utc'}`;
+    const cacheKey = `dashboard:summary:${org.id}:${userId || 'anon'}:${normalizedStart?.getTime() || 'all'}:${normalizedEnd?.getTime() || 'all'}:${intKey}:${chKey}:${tz || 'utc'}`;
     const cached = await ioRedis.get(cacheKey);
     if (cached) {
       return JSON.parse(cached);
     }
 
     // Use Aisee billing period for published_this_period count; fall back to calendar month
-    let periodStart: Date;
+    const calendarMonthStart = () =>
+      (tz ? dayjs().tz(tz) : dayjs.utc()).startOf('month').toDate();
+
+    let periodStart: Date = calendarMonthStart();
     let periodEnd: Date | undefined;
     let postSendLimit: number | undefined;
     if (userId) {
@@ -68,18 +71,10 @@ export class DashboardService {
           periodStart = new Date(limits.periodStart);
           periodEnd = 'periodEnd' in limits && limits.periodEnd ? new Date(limits.periodEnd) : undefined;
           postSendLimit = limits.postSendLimit;
-        } else {
-          const now = tz ? dayjs().tz(tz) : dayjs.utc();
-          periodStart = now.startOf('month').toDate();
         }
       } catch (err) {
         this.logger.warn(`getSummary: getUserLimits failed for userId=${userId}, falling back to calendar month`);
-        const now = tz ? dayjs().tz(tz) : dayjs.utc();
-        periodStart = now.startOf('month').toDate();
       }
-    } else {
-      const now = tz ? dayjs().tz(tz) : dayjs.utc();
-      periodStart = now.startOf('month').toDate();
     }
 
     const [channelCount, integrations, postStats, impressionsSummary, trafficSummary, publishedThisPeriod] = await Promise.all([

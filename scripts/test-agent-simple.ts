@@ -57,7 +57,15 @@ function sleep(seconds: number) {
 }
 
 // ---------------------------------------------------------------------------
-// CopilotKit GraphQL mutation
+// CopilotKit GraphQL mutation — matches actual schema from @copilotkit/runtime
+//
+// Key types:
+//   GenerateCopilotResponseInput { threadId, runId, metadata, messages, frontend }
+//   MessageInput { textMessage: TextMessageInput }
+//   TextMessageInput { role: MessageRole, content: String }
+//   FrontendInput { actions: [ActionInput!]!, url: String }
+//   CopilotResponse { threadId, runId, status, messages }
+//   BaseMessageOutput -> TextMessageOutput { id, role, content: [String] }
 // ---------------------------------------------------------------------------
 
 const GENERATE_MUTATION = `
@@ -66,17 +74,15 @@ mutation generateCopilotResponse($data: GenerateCopilotResponseInput!, $properti
     threadId
     runId
     messages {
-      ... on ResponseMessageOutput {
+      ... on TextMessageOutput {
         id
         role
-        content {
-          ... on TextMessageOutput { value }
-        }
+        content
       }
     }
     status {
       ... on SuccessResponseStatus { code }
-      ... on FailedResponseStatus { code reason details }
+      ... on FailedResponseStatus { code reason }
       ... on PendingResponseStatus { code }
     }
   }
@@ -85,7 +91,7 @@ mutation generateCopilotResponse($data: GenerateCopilotResponseInput!, $properti
 function buildVariables(
   threadId: string,
   messages: { id: string; role: string; content: string }[],
-  integrations: any[],
+  integrations: Record<string, unknown>[],
 ) {
   return {
     data: {
@@ -96,16 +102,18 @@ function buildVariables(
       },
       messages: messages.map((m) => ({
         id: m.id,
-        role: m.role === 'user' ? 'user' : 'assistant',
-        textMessage: { content: m.content },
+        textMessage: {
+          role: m.role,           // "user" | "assistant"
+          content: m.content,
+        },
       })),
       frontend: {
-        actions: [] as string[],
+        actions: [] as Record<string, unknown>[],
         url: 'http://localhost:4200',
       },
     },
     properties: {
-      integrations: integrations.map((i: any) => ({
+      integrations: integrations.map((i: Record<string, unknown>) => ({
         id: i.id,
         name: i.name,
         providerIdentifier: i.identifier || i.providerIdentifier,
@@ -120,20 +128,22 @@ function buildVariables(
 // Scenario runner
 // ---------------------------------------------------------------------------
 
-async function runScenario(scenarioName: string, prompt: string, integrations: any[]) {
+async function runScenario(
+  scenarioName: string,
+  prompt: string,
+  integrations: Record<string, unknown>[],
+): Promise<boolean> {
   console.log(`\n--- [${scenarioName}]`);
 
   const threadId = `e2e-${Date.now()}`;
-
   const messages = [{ id: '1', role: 'user', content: prompt }];
-  const body = {
-    query: GENERATE_MUTATION,
-    variables: buildVariables(threadId, messages, integrations),
-  };
 
   try {
     console.log(`User: ${prompt}`);
-    const { data } = await client.post('/copilot/agent', body);
+    const { data } = await client.post('/copilot/agent', {
+      query: GENERATE_MUTATION,
+      variables: buildVariables(threadId, messages, integrations),
+    });
 
     if (data.errors) {
       console.error('GraphQL errors:', JSON.stringify(data.errors, null, 2));
@@ -141,10 +151,14 @@ async function runScenario(scenarioName: string, prompt: string, integrations: a
     }
 
     const resp = data.data?.generateCopilotResponse;
-    const agentMessages = resp?.messages || [];
-    const lastMsg = agentMessages[agentMessages.length - 1];
-    const agentText =
-      lastMsg?.content?.map((c: any) => c.value).join('') || '(no text)';
+    const textMessages = (resp?.messages || []).filter(
+      (m: Record<string, unknown>) => m.role === 'assistant' && m.content,
+    );
+    // TextMessageOutput.content is [String]
+    const lastMsg = textMessages[textMessages.length - 1];
+    const agentText = Array.isArray(lastMsg?.content)
+      ? lastMsg.content.join('')
+      : String(lastMsg?.content || '(no text)');
     console.log('Agent:', agentText);
 
     // Auto-confirm
@@ -158,12 +172,12 @@ async function runScenario(scenarioName: string, prompt: string, integrations: a
         content: 'Yes, please schedule it right away. This is for testing.',
       },
     ];
-    const confirmBody = {
+
+    const { data: finalData } = await client.post('/copilot/agent', {
       query: GENERATE_MUTATION,
       variables: buildVariables(threadId, confirmMessages, integrations),
-    };
+    });
 
-    const { data: finalData } = await client.post('/copilot/agent', confirmBody);
     if (finalData.errors) {
       console.error('Confirm errors:', JSON.stringify(finalData.errors, null, 2));
       return false;
@@ -173,8 +187,9 @@ async function runScenario(scenarioName: string, prompt: string, integrations: a
     const status = finalResp?.status?.code || 'unknown';
     console.log(`Status: ${status}`);
     return status !== 'failed';
-  } catch (err: any) {
-    console.error('Error:', err.response?.data || err.message);
+  } catch (err: unknown) {
+    const e = err as { response?: { data?: unknown }; message?: string };
+    console.error('Error:', e.response?.data || e.message);
     return false;
   }
 }
@@ -188,9 +203,9 @@ async function main() {
     console.log(`Connecting to ${BACKEND_INTERNAL_URL}...`);
     console.log(`Config: ROUNDS=${ROUNDS} INTERVAL=${INTERVAL}s`);
 
-    // GET /integrations/list returns { integrations: [...] }
     const { data } = await client.get('/integrations/list');
-    const allIntegrations: any[] = data.integrations || data || [];
+    const allIntegrations: Record<string, unknown>[] =
+      data.integrations || data || [];
     console.log(`Auth successful. Found ${allIntegrations.length} integrations.`);
 
     if (allIntegrations.length === 0) {
@@ -198,11 +213,10 @@ async function main() {
       process.exit(1);
     }
 
-    // Filter
     let integrations = allIntegrations;
     if (INTEGRATION) {
       integrations = allIntegrations.filter(
-        (i: any) => i.id === INTEGRATION || i.name === INTEGRATION,
+        (i) => i.id === INTEGRATION || i.name === INTEGRATION,
       );
       if (integrations.length === 0) {
         console.error(`No integration matching "${INTEGRATION}". Available:`);
@@ -213,7 +227,7 @@ async function main() {
       }
     }
     console.log(
-      `Using: ${integrations.map((i: any) => `${i.name} (${i.identifier})`).join(', ')}`,
+      `Using: ${integrations.map((i) => `${i.name} (${i.identifier})`).join(', ')}`,
     );
 
     let passed = 0;
@@ -238,8 +252,9 @@ async function main() {
 
     console.log(`\n========== Summary ==========`);
     console.log(`Total: ${ROUNDS} | Passed: ${passed} | Failed: ${failed}`);
-  } catch (err: any) {
-    console.error('Initialization failed:', err.response?.data || err.message);
+  } catch (err: unknown) {
+    const e = err as { response?: { data?: unknown }; message?: string };
+    console.error('Initialization failed:', e.response?.data || e.message);
   }
 }
 
