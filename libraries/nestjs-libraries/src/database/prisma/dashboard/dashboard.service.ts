@@ -150,7 +150,7 @@ export class DashboardService {
       impressions_total: impressionsTotal,
       traffics_total: trafficsTotal,
       posts_stats: stats,
-      published_this_month: publishedThisPeriod,
+      published_this_period: publishedThisPeriod,
       ...(postSendLimit !== undefined ? { post_send_limit: postSendLimit } : {}),
       ...(periodEnd ? { period_end: periodEnd.toISOString() } : {}),
     };

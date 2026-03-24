@@ -53,7 +53,7 @@ const fakeOrg = { id: 'org-1' } as any;
 // Tests
 // ---------------------------------------------------------------------------
 
-describe('DashboardService.getSummary — published_this_month uses billing period', () => {
+describe('DashboardService.getSummary — published_this_period uses billing period', () => {
   let mocks: ReturnType<typeof createMocks>;
   let service: DashboardService;
 
@@ -77,7 +77,7 @@ describe('DashboardService.getSummary — published_this_month uses billing peri
       'org-1',
       new Date('2026-03-15T00:00:00.000Z'),
     );
-    expect(result.published_this_month).toBe(5);
+    expect(result.published_this_period).toBe(5);
   });
 
   it('includes post_send_limit and period_end from Aisee', async () => {
@@ -95,7 +95,7 @@ describe('DashboardService.getSummary — published_this_month uses billing peri
     const result = await service.getSummary(fakeOrg, 'user-1');
 
     // Same method, same periodStart — consistent with PostOverageService
-    expect(result.published_this_month).toBe(7);
+    expect(result.published_this_period).toBe(7);
     expect(mocks.postsService.countPostsFromDay).toHaveBeenCalledTimes(1);
   });
 
@@ -120,7 +120,7 @@ describe('DashboardService.getSummary — published_this_month uses billing peri
 
     const result = await service.getSummary(fakeOrg, 'user-1');
 
-    expect(result.published_this_month).toBe(4);
+    expect(result.published_this_period).toBe(4);
     const calledDate = mocks.postsService.countPostsFromDay.mock.calls[0][1] as Date;
     expect(calledDate.getDate()).toBe(1);
   });
@@ -134,7 +134,7 @@ describe('DashboardService.getSummary — published_this_month uses billing peri
 
     const result = await service.getSummary(fakeOrg, 'user-1');
 
-    expect(result.published_this_month).toBe(2);
+    expect(result.published_this_period).toBe(2);
     const calledDate = mocks.postsService.countPostsFromDay.mock.calls[0][1] as Date;
     expect(calledDate.getDate()).toBe(1);
   });
