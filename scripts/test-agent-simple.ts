@@ -375,8 +375,9 @@ function buildScenarios(): Scenario[] {
       name: 'Schema → write → send',
       description: 'integrationSchema + schedulePostTool',
       steps: [
-        () => '帮我写一条关于效率提升的帖子，内容你来决定，回复权限设everyone，立即发送。',
+        () => '帮我写一条很短的效率提升帖子，50字以内，内容你来决定，回复权限everyone，立即发送。',
         () => '确认，就用你写的内容，回复权限everyone，立即发送，不需要再确认了。',
+        () => '直接发送，不要再问了。回复权限everyone。',
       ],
       verify: verify.all(verify.postCreated(), verify.postState('QUEUE', 'PUBLISHED')),
     },
@@ -500,8 +501,8 @@ function buildScenarios(): Scenario[] {
       name: 'Post with link',
       description: 'Share a URL with intro text',
       steps: [
-        () => '分享这个链接 https://example.com/best-practices-2026 ，写段介绍，发送。不要短链接。',
-        () => '发送。',
+        () => '分享这个链接 https://example.com/best-practices-2026 ，写一句简短介绍，50字以内，回复权限everyone，不要短链接，立即发送。',
+        () => '确认，就用你写的文案，回复权限everyone，立即发送，不要再问了。',
       ],
       verify: verify.all(
         verify.postCreated(),
@@ -573,7 +574,7 @@ function buildScenarios(): Scenario[] {
         () => 'Write a 3-part thread about why startups should invest in developer experience. Each part under 180 chars. Reply permission: everyone.',
         () => 'Confirmed. Send the thread now, reply permission everyone, no modal, do not ask anything else.',
       ],
-      verify: verify.postCreated(2), // thread creates multiple posts
+      verify: verify.postCreated(1), // X thread = 1 socialPost with multiple postsAndComments = 1 DB post
     },
     {
       id: 'M06',
