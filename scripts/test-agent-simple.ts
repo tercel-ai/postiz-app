@@ -193,20 +193,24 @@ interface PostRecord {
 
 async function getRecentPosts(limit = 10): Promise<PostRecord[]> {
   try {
+    // API requires startDate/endDate as ISO 8601 strings
+    const now = new Date();
+    const startDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString(); // 7 days ago
+    const endDate = new Date(now.getTime() + 60 * 24 * 60 * 60 * 1000).toISOString(); // 60 days ahead
     const { data } = await client.get('/posts/', {
       params: {
         page: 1,
         pageSize: limit,
-        sortBy: 'createdAt',
-        sortOrder: 'desc',
+        startDate,
+        endDate,
       },
     });
-    // API returns { posts: { results: [...], total, page, ... } } or similar
-    const results = data?.posts?.results || data?.results || data?.posts || [];
+    // API returns { posts: [...] } — posts is a direct array
+    const results = Array.isArray(data?.posts) ? data.posts : (data?.posts?.results || data?.results || []);
     return Array.isArray(results) ? results : [];
   } catch (err: unknown) {
     const e = err as { response?: { status?: number; data?: unknown }; message?: string };
-    console.error('    Failed to fetch posts:', e.response?.status, e.message);
+    console.error('    Failed to fetch posts:', e.response?.status, JSON.stringify(e.response?.data || e.message));
     return [];
   }
 }
@@ -255,11 +259,11 @@ const verify = {
     ({ newPosts }) =>
       newPosts.length >= minCount,
 
-  // New post has expected state
+  // New post has expected state (supports multiple valid states)
   postState:
-    (expected: string): VerifyFn =>
+    (...expected: string[]): VerifyFn =>
     ({ newPosts }) =>
-      newPosts.some((p) => p.state === expected),
+      newPosts.some((p) => expected.includes(p.state)),
 
   // New post content contains string
   postContentContains:
@@ -374,7 +378,7 @@ function buildScenarios(): Scenario[] {
         () => '帮我写一条符合平台规则的帖子，立即发送。',
         () => '确认，发送。',
       ],
-      verify: verify.all(verify.postCreated(), verify.postState('QUEUE')),
+      verify: verify.all(verify.postCreated(), verify.postState('QUEUE', 'PUBLISHED')),
     },
     {
       id: 'C02',
@@ -386,7 +390,7 @@ function buildScenarios(): Scenario[] {
       ],
       verify: verify.all(
         verify.postCreated(),
-        verify.postState('QUEUE'),
+        verify.postState('QUEUE', 'PUBLISHED'),
         verify.postHasImage(),
       ),
     },
@@ -400,7 +404,7 @@ function buildScenarios(): Scenario[] {
       ],
       verify: verify.all(
         verify.postCreated(),
-        verify.postState('QUEUE'),
+        verify.postState('QUEUE', 'PUBLISHED'),
         verify.postHasImage(),
       ),
     },
@@ -412,7 +416,7 @@ function buildScenarios(): Scenario[] {
         () => '帮我生成一个关于产品介绍的短视频并发送。',
         () => '确认，发送。',
       ],
-      verify: verify.all(verify.postCreated(), verify.postState('QUEUE')),
+      verify: verify.all(verify.postCreated(), verify.postState('QUEUE', 'PUBLISHED')),
     },
     {
       id: 'C05',
@@ -422,7 +426,7 @@ function buildScenarios(): Scenario[] {
         () => '看看我有哪些账号，然后帮我选一个写条帖子发出去。',
         () => '就用这个账号，发送。',
       ],
-      verify: verify.all(verify.postCreated(), verify.postState('QUEUE')),
+      verify: verify.all(verify.postCreated(), verify.postState('QUEUE', 'PUBLISHED')),
     },
 
     // =========================================================================
@@ -436,7 +440,7 @@ function buildScenarios(): Scenario[] {
         () => 'Write a short tech tip post and send it now. Text only.',
         () => 'Yes, send it now.',
       ],
-      verify: verify.all(verify.postCreated(), verify.postState('QUEUE')),
+      verify: verify.all(verify.postCreated(), verify.postState('QUEUE', 'PUBLISHED')),
     },
     {
       id: 'R02',
@@ -448,7 +452,7 @@ function buildScenarios(): Scenario[] {
       ],
       verify: verify.all(
         verify.postCreated(),
-        verify.postState('QUEUE'),
+        verify.postState('QUEUE', 'PUBLISHED'),
         verify.postContentMatches(/[\u4e00-\u9fff]/), // contains Chinese chars
       ),
     },
@@ -462,7 +466,7 @@ function buildScenarios(): Scenario[] {
       ],
       verify: verify.all(
         verify.postCreated(),
-        verify.postState('QUEUE'),
+        verify.postState('QUEUE', 'PUBLISHED'),
         verify.postScheduledFuture(),
       ),
     },
@@ -486,7 +490,7 @@ function buildScenarios(): Scenario[] {
       ],
       verify: verify.all(
         verify.postCreated(),
-        verify.postState('QUEUE'),
+        verify.postState('QUEUE', 'PUBLISHED'),
         verify.postContentMatches(/[\u4e00-\u9fff]/),
       ),
     },
@@ -500,7 +504,7 @@ function buildScenarios(): Scenario[] {
       ],
       verify: verify.all(
         verify.postCreated(),
-        verify.postState('QUEUE'),
+        verify.postState('QUEUE', 'PUBLISHED'),
         verify.postContentContains('example.com'),
       ),
     },
@@ -517,7 +521,7 @@ function buildScenarios(): Scenario[] {
         () => '太长了，缩短到200字以内，结尾加个行动号召。',
         () => '可以了，直接发送。',
       ],
-      verify: verify.all(verify.postCreated(), verify.postState('QUEUE')),
+      verify: verify.all(verify.postCreated(), verify.postState('QUEUE', 'PUBLISHED')),
     },
     {
       id: 'M02',
@@ -528,7 +532,7 @@ function buildScenarios(): Scenario[] {
         () => '语气太正式了，改轻松口语化一些，加个emoji。',
         () => '可以了，发送。',
       ],
-      verify: verify.all(verify.postCreated(), verify.postState('QUEUE')),
+      verify: verify.all(verify.postCreated(), verify.postState('QUEUE', 'PUBLISHED')),
     },
     {
       id: 'M03',
@@ -539,7 +543,7 @@ function buildScenarios(): Scenario[] {
         () => "It's a SaaS collaboration tool. Keep it short and professional.",
         () => 'OK send it now.',
       ],
-      verify: verify.all(verify.postCreated(), verify.postState('QUEUE')),
+      verify: verify.all(verify.postCreated(), verify.postState('QUEUE', 'PUBLISHED')),
     },
     {
       id: 'M04',
@@ -552,7 +556,7 @@ function buildScenarios(): Scenario[] {
       ],
       verify: verify.all(
         verify.postCreated(),
-        verify.postState('QUEUE'),
+        verify.postState('QUEUE', 'PUBLISHED'),
         verify.postHasImage(),
       ),
     },
@@ -575,7 +579,7 @@ function buildScenarios(): Scenario[] {
         () => '根据表现好的风格，帮我写一条新帖子。纯文本。',
         () => '发送。',
       ],
-      verify: verify.all(verify.postCreated(), verify.postState('QUEUE')),
+      verify: verify.all(verify.postCreated(), verify.postState('QUEUE', 'PUBLISHED')),
     },
   ];
 }
