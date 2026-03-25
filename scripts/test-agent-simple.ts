@@ -123,6 +123,21 @@ function buildVariables(
 // Send one message and get agent response
 // ---------------------------------------------------------------------------
 
+// Append hidden integration context to user message, same as frontend NewInput component
+function appendIntegrationContext(text: string, integrations: Record<string, unknown>[]): string {
+  if (integrations.length === 0) return text;
+  const payload = integrations.map((i) => ({
+    id: i.id,
+    platform: i.identifier || i.providerIdentifier,
+    profilePicture: i.picture,
+    additionalSettings: i.additionalSettings,
+  }));
+  return `${text}
+[--integrations--]
+Use the following social media platforms: ${JSON.stringify(payload)}
+[--integrations--]`;
+}
+
 async function sendMessage(
   threadId: string,
   messages: { id: string; role: string; content: string }[],
@@ -162,10 +177,6 @@ interface Scenario {
 }
 
 interface ScenarioContext {
-  channelInfo: string; // e.g. "aipartnerup-team (platform: x, id: cmn2mc...)"
-  channelName: string;
-  channelPlatform: string;
-  channelId: string;
   agentReplies: string[]; // agent replies from prior steps
 }
 
@@ -175,155 +186,155 @@ interface ScenarioContext {
 
 function buildScenarios(): Scenario[] {
   return [
-    // 1. Simple one-shot: English text post, schedule now
+    // 1. Simple English text post, send now
     {
-      name: 'EN text post - schedule now',
-      description: 'Single-turn: English text post, immediate schedule',
+      name: 'EN text post - send now',
+      description: 'Single-turn: English text, immediate send',
       steps: [
-        (ctx) =>
-          `Create a short professional tech tip post and schedule it right away to: ${ctx.channelInfo}. Text only, no images, UTC timezone. Do not ask me any questions, just schedule it now.`,
-        (ctx) =>
-          `Yes, confirmed. Schedule it right away, no modal needed. This is an automated test.`,
+        (_ctx) =>
+          `Write a short tech tip post and send it now. Text only, no images.`,
+        (_ctx) =>
+          `Yes, send it now.`,
       ],
     },
 
-    // 2. Chinese text post, schedule now
+    // 2. Chinese text post, send now
     {
-      name: 'CN text post - schedule now',
-      description: 'Single-turn: Chinese text post, immediate schedule',
+      name: 'CN text post - send now',
+      description: 'Single-turn: Chinese text, immediate send',
       steps: [
-        (ctx) =>
-          `用中文写一条关于AI编程效率提升的短帖子，立即发送到: ${ctx.channelInfo}。纯文本，不需要图片，UTC时区。不要问我任何问题，直接发送。`,
-        (ctx) =>
-          `确认，立即发送，不需要弹窗预览。这是自动化测试。`,
+        (_ctx) =>
+          `用中文写一条关于AI编程效率提升的短帖子，立即发送。纯文本就行。`,
+        (_ctx) =>
+          `确认，立即发送。`,
       ],
     },
 
-    // 3. Multi-turn: user asks agent to draft, then revises, then confirms
+    // 3. Multi-turn: draft → revise → send
     {
       name: 'Multi-turn: draft → revise → send',
-      description: '3-turn conversation: draft, revise content, then confirm send',
+      description: '3-turn: draft, revise content, then confirm',
       steps: [
-        (ctx) =>
-          `Help me write a post about remote work productivity tips for: ${ctx.channelInfo}. Just draft it first, don't schedule yet.`,
-        (ctx) =>
-          `Make it shorter, under 200 characters. Also add a call to action at the end.`,
-        (ctx) =>
-          `Looks good. Schedule it right away, no modal needed. UTC timezone. This is an automated test.`,
+        (_ctx) =>
+          `帮我写一条关于远程办公效率的帖子。先帮我草拟看看，不要直接发。`,
+        (_ctx) =>
+          `太长了，缩短到200字以内，结尾加个行动号召。`,
+        (_ctx) =>
+          `可以了，直接发送吧。`,
       ],
     },
 
-    // 4. Multi-turn Chinese: ask, modify tone, send
+    // 4. Multi-turn Chinese: modify tone
     {
       name: 'Multi-turn CN: draft → modify tone → send',
-      description: '3-turn Chinese: draft, adjust tone, confirm send',
+      description: '3-turn Chinese: draft, adjust tone, confirm',
       steps: [
-        (ctx) =>
-          `帮我写一条关于开源社区协作的帖子，发送到: ${ctx.channelInfo}。先草拟，不要立即发送。`,
-        (ctx) =>
-          `语气改轻松一些，更口语化，加个emoji。`,
-        (ctx) =>
-          `可以了，立即发送，不需要弹窗。UTC时区。这是自动化测试。`,
+        (_ctx) =>
+          `帮我写一条关于开源社区协作的帖子。先看看草稿。`,
+        (_ctx) =>
+          `语气太正式了，改轻松口语化一些，加个emoji。`,
+        (_ctx) =>
+          `可以了，发送。`,
       ],
     },
 
     // 5. Post with image generation
     {
       name: 'Text + generated image',
-      description: 'Generate an image and schedule post with it',
+      description: 'Generate an image and post together',
       steps: [
-        (ctx) =>
-          `Create a post about the future of AI in healthcare for: ${ctx.channelInfo}. Generate a relevant image to go with it. Schedule it right away, UTC timezone. Do not ask me any questions.`,
-        (ctx) =>
-          `Yes, confirmed. Schedule it right away with the image, no modal needed. This is an automated test.`,
+        (_ctx) =>
+          `写一条关于AI在医疗领域应用的帖子，帮我配一张图。`,
+        (_ctx) =>
+          `确认，带图发送。`,
       ],
     },
 
     // 6. Schedule for future time
     {
       name: 'Schedule for future time',
-      description: 'Schedule a post for a specific future time',
+      description: 'Schedule a post for next Monday',
       steps: [
-        (ctx) =>
-          `Write a motivational Monday post for: ${ctx.channelInfo}. Schedule it for next Monday at 9:00 AM UTC. Text only, no images. Do not ask me any questions.`,
-        (ctx) =>
-          `Confirmed, schedule it for that time, no modal needed. This is an automated test.`,
+        (_ctx) =>
+          `Write a motivational post. Schedule it for next Monday 9am UTC. Text only.`,
+        (_ctx) =>
+          `Confirmed, schedule it.`,
       ],
     },
 
-    // 7. Draft mode (don't send)
+    // 7. Draft mode (save, don't send)
     {
       name: 'Save as draft',
-      description: 'Create a post and save as draft, not send',
+      description: 'Create a post and save as draft only',
       steps: [
-        (ctx) =>
-          `Write a post about JavaScript best practices for: ${ctx.channelInfo}. Save it as a draft, do NOT schedule or send it. Text only, UTC timezone.`,
-        (ctx) =>
-          `Yes, save as draft. Do not schedule. No modal needed. This is an automated test.`,
+        (_ctx) =>
+          `帮我写一条JavaScript最佳实践的帖子，保存为草稿就行，不要发送。`,
+        (_ctx) =>
+          `对，只保存草稿，别发。`,
       ],
     },
 
-    // 8. Long-form thread (X thread with multiple parts)
+    // 8. Thread (multi-part)
     {
-      name: 'X thread (multi-part)',
-      description: 'Create a thread with multiple tweets',
+      name: 'Thread (multi-part)',
+      description: 'Create a thread with 3 posts',
       steps: [
-        (ctx) =>
-          `Create a 3-part thread about "why startups should invest in developer experience" for: ${ctx.channelInfo}. Schedule it now, UTC timezone. Do not ask me any questions, just schedule it.`,
-        (ctx) =>
-          `Yes, confirmed. Schedule the thread right away, no modal needed. This is an automated test.`,
+        (_ctx) =>
+          `I want to write a 3-part thread about why startups should invest in developer experience. Post it now.`,
+        (_ctx) =>
+          `Looks good, send the thread now.`,
       ],
     },
 
-    // 9. Multi-turn: vague request → agent asks → user clarifies → send
+    // 9. Vague request → agent asks → user clarifies
     {
       name: 'Multi-turn: vague → clarify → send',
-      description: 'Start vague, let agent ask questions, then provide details',
+      description: 'Start vague, let agent ask, then clarify and send',
       steps: [
-        (ctx) =>
+        (_ctx) =>
           `I want to post something about our new product launch.`,
-        (ctx) =>
-          `It's a SaaS tool for team collaboration. Post it to ${ctx.channelInfo}. Keep it professional and concise.`,
-        (ctx) =>
-          `Schedule it right away, no modal needed. UTC timezone. This is an automated test.`,
+        (_ctx) =>
+          `It's a SaaS collaboration tool. Keep it short and professional.`,
+        (_ctx) =>
+          `OK send it now.`,
       ],
     },
 
-    // 10. Mixed language: English prompt, ask for Chinese output
+    // 10. English prompt, Chinese content
     {
       name: 'EN prompt → CN content',
-      description: 'User prompts in English but wants Chinese post content',
+      description: 'User prompts in English, wants Chinese output',
       steps: [
-        (ctx) =>
-          `Write a post in Chinese about cloud-native architecture trends in 2026 for: ${ctx.channelInfo}. Schedule it now, text only, UTC timezone. Do not ask any questions.`,
-        (ctx) =>
-          `确认发送。不需要弹窗。这是自动化测试。`,
+        (_ctx) =>
+          `Write a post in Chinese about cloud-native trends in 2026. Send it now. Text only.`,
+        (_ctx) =>
+          `确认发送。`,
       ],
     },
 
-    // 11. Post with link
+    // 11. Post with a link
     {
       name: 'Post with link',
-      description: 'Text post containing a URL, no short link',
+      description: 'Share an article URL with brief intro',
       steps: [
-        (ctx) =>
-          `Create a post sharing this article: https://example.com/best-practices-2026 — write a brief intro about it for: ${ctx.channelInfo}. Schedule now, UTC timezone, no short link, no images. Do not ask questions.`,
-        (ctx) =>
-          `Confirmed. Schedule right away, no modal. This is an automated test.`,
+        (_ctx) =>
+          `帮我分享这篇文章 https://example.com/best-practices-2026 ，写个简短的介绍。不要短链接。`,
+        (_ctx) =>
+          `发送。`,
       ],
     },
 
-    // 12. Multi-turn: ask for analytics then schedule
+    // 12. Check analytics → write post
     {
-      name: 'Multi-turn: check analytics → write post → send',
-      description: 'User asks about analytics first, then creates a post based on insights',
+      name: 'Multi-turn: analytics → write → send',
+      description: 'Ask analytics, then create post based on insights',
       steps: [
-        (ctx) =>
-          `Show me analytics for my social media channels.`,
-        (ctx) =>
-          `Based on what's working well, write a new post in a similar style for: ${ctx.channelInfo}. Text only.`,
-        (ctx) =>
-          `Schedule it right away, no modal needed. UTC timezone. This is an automated test.`,
+        (_ctx) =>
+          `Show me how my posts have been performing recently.`,
+        (_ctx) =>
+          `Based on that, help me write a new post in a similar style. Text only.`,
+        (_ctx) =>
+          `Send it now.`,
       ],
     },
   ];
@@ -343,22 +354,17 @@ async function runScenario(
   const threadId = `e2e-${Date.now()}`;
   const conversationHistory: { id: string; role: string; content: string }[] = [];
 
-  const firstIntegration = integrations[0] || {};
   const ctx: ScenarioContext = {
-    channelInfo: integrations
-      .map((i) => `${i.name} (platform: ${i.identifier}, id: ${i.id})`)
-      .join(', '),
-    channelName: String(firstIntegration.name || ''),
-    channelPlatform: String(firstIntegration.identifier || ''),
-    channelId: String(firstIntegration.id || ''),
     agentReplies: [],
   };
 
   try {
     for (let step = 0; step < scenario.steps.length; step++) {
       const userMessage = scenario.steps[step](ctx);
+      // Append hidden integration context to every user message, same as frontend
+      const messageWithContext = appendIntegrationContext(userMessage, integrations);
       const msgId = String(conversationHistory.length + 1);
-      conversationHistory.push({ id: msgId, role: 'user', content: userMessage });
+      conversationHistory.push({ id: msgId, role: 'user', content: messageWithContext });
 
       console.log(`  [Step ${step + 1}/${scenario.steps.length}] User: ${userMessage.slice(0, 120)}${userMessage.length > 120 ? '...' : ''}`);
 
