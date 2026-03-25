@@ -100,6 +100,9 @@ function buildVariables(
       metadata: {
         requestType: 'Chat',
       },
+      agentSession: {
+        agentName: 'postiz',
+      },
       messages: messages.map((m) => ({
         id: m.id,
         createdAt: new Date().toISOString(),
