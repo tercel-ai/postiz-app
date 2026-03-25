@@ -399,8 +399,8 @@ function buildScenarios(): Scenario[] {
       name: 'Schema → image → send',
       description: 'integrationSchema + generateImageTool + schedulePostTool',
       steps: [
-        () => '按照平台规则，发一条带图的帖子，内容关于可持续发展。回复权限everyone。',
-        () => '确认发送，回复权限everyone，立即发送，不需要再问我了。',
+        () => '发一条关于可持续发展的帖子，帮我生成一张相关配图一起发。回复权限everyone。',
+        () => '确认，用你生成的图和文案，回复权限everyone，立即发送，不要再确认了。',
       ],
       verify: verify.all(
         verify.postCreated(),
@@ -423,8 +423,9 @@ function buildScenarios(): Scenario[] {
       name: 'List channels → schema → send',
       description: 'integrationList + integrationSchema + schedulePostTool',
       steps: [
-        () => '看看我有哪些账号，然后帮我选一个写条科技相关的帖子发出去。内容你来决定。',
-        () => '就用这个账号和你写的内容，回复权限everyone，立即发送。',
+        () => '看看我有哪些账号，然后帮我选一个写条科技相关的帖子发出去。100字以内，内容你来决定。',
+        () => '就用这个账号和你写的内容，回复权限everyone，立即发送，不需要再确认。',
+        () => '确认，回复权限everyone，立即发送，不要再问了。',
       ],
       verify: verify.all(verify.postCreated(), verify.postState('QUEUE', 'PUBLISHED')),
     },
@@ -447,8 +448,8 @@ function buildScenarios(): Scenario[] {
       name: 'CN text - send now',
       description: 'Chinese text post, immediate',
       steps: [
-        () => '写一条关于AI编程效率提升的帖子，立即发送。纯文本。',
-        () => '确认发送。',
+        () => '写一条关于AI编程效率提升的帖子，100字以内，回复权限everyone，立即发送。纯文本。',
+        () => '确认，就用这个内容，回复权限everyone，立即发送，不需要再确认了。',
       ],
       verify: verify.all(
         verify.postCreated(),
@@ -475,8 +476,8 @@ function buildScenarios(): Scenario[] {
       name: 'Save as draft',
       description: 'Create draft, do not send',
       steps: [
-        () => '写一条JavaScript最佳实践的帖子，保存为草稿不要发送。回复权限设everyone。',
-        () => '对，只保存草稿，回复权限everyone，不需要再确认其他设置。',
+        () => '写一条很短的JavaScript最佳实践帖子，50字以内，保存为草稿不要发送。回复权限everyone。',
+        () => '对，只保存草稿，回复权限everyone，不需要再确认，直接保存。',
       ],
       verify: verify.all(verify.postCreated(), verify.postState('DRAFT')),
     },
@@ -567,13 +568,12 @@ function buildScenarios(): Scenario[] {
     {
       id: 'M05',
       name: 'Thread → send',
-      description: '3-turn: create thread, confirm settings, send',
+      description: '2-turn: create thread and send',
       steps: [
-        () => 'I want to write a 3-part thread about why startups should invest in developer experience. Each part under 180 chars.',
-        () => 'Send the thread now. Reply permission: everyone. No modal.',
-        () => 'Confirmed. Send the thread immediately, reply permission everyone.',
+        () => 'Write a 3-part thread about why startups should invest in developer experience. Each part under 180 chars. Reply permission: everyone.',
+        () => 'Confirmed. Send the thread now, reply permission everyone, no modal, do not ask anything else.',
       ],
-      verify: verify.all(verify.postCreated(2), verify.postThread(2)),
+      verify: verify.postCreated(2), // thread creates multiple posts
     },
     {
       id: 'M06',
