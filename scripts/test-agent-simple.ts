@@ -173,7 +173,7 @@ async function runScenario(
       {
         id: '3',
         role: 'user',
-        content: 'Yes, please schedule it right away. This is for testing.',
+        content: 'Yes, confirmed. Schedule it right away, no modal needed. This is an automated test.',
       },
     ];
 
@@ -240,9 +240,12 @@ async function main() {
     for (let round = 1; round <= ROUNDS; round++) {
       console.log(`\n========== Round ${round}/${ROUNDS} ==========`);
 
+      const channelNames = integrations
+        .map((i) => `${i.name} (${i.identifier})`)
+        .join(', ');
       const ok = await runScenario(
         `Round ${round} - Text Post`,
-        `Create a short professional tech tip post. Schedule it for now. (test round ${round})`,
+        `Create a short professional tech tip post and schedule it right away to: ${channelNames}. No images needed, text only, use UTC timezone. Do not ask me any questions, just schedule it now. (test round ${round})`,
         integrations,
       );
       if (ok) passed++;
