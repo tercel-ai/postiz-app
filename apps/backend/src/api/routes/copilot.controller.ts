@@ -11,6 +11,7 @@ import {
 import {
   CopilotRuntime,
   OpenAIAdapter,
+  EmptyAdapter,
   copilotRuntimeNodeHttpEndpoint,
   copilotRuntimeNestEndpoint,
 } from '@copilotkit/runtime';
@@ -41,6 +42,12 @@ function isOpenRouterProvider(): boolean {
   return (process.env.IMAGE_PROVIDER || 'openai').toLowerCase() === 'openrouter';
 }
 
+// TODO: OpenAIAdapter is incompatible with openai v6 — it calls beta.chat.completions.stream()
+// which was removed in v6. Currently only used by /copilot/chat (works for now).
+// If it breaks, options:
+//   1. Write a custom CopilotServiceAdapter using v6 API (openai.chat.completions.create)
+//   2. Upgrade @copilotkit/runtime to a version that supports openai v6
+//   3. Downgrade openai to v4
 function createServiceAdapter(): OpenAIAdapter {
   if (isOpenRouterProvider() && !hasValidOpenAiKey()) {
     if (!process.env.OPENROUTER_API_KEY) {
@@ -141,7 +148,10 @@ export class CopilotController {
     const handler = copilotRuntimeNestEndpoint({
       endpoint: '/copilot/agent',
       runtime,
-      serviceAdapter: createServiceAdapter(),
+      // EmptyAdapter: Mastra agent handles LLM calls via @ai-sdk/openai → OpenRouter.
+      // OpenAIAdapter cannot be used here — openai v6 removed beta.chat.completions.stream().
+      // See createServiceAdapter() TODO for follow-up options.
+      serviceAdapter: new EmptyAdapter(),
     });
 
     // Extract threadId from CopilotKit GraphQL variables
