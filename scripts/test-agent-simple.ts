@@ -240,12 +240,12 @@ async function main() {
     for (let round = 1; round <= ROUNDS; round++) {
       console.log(`\n========== Round ${round}/${ROUNDS} ==========`);
 
-      const channelNames = integrations
-        .map((i) => `${i.name} (${i.identifier})`)
+      const channelInfo = integrations
+        .map((i) => `${i.name} (platform: ${i.identifier}, id: ${i.id})`)
         .join(', ');
       const ok = await runScenario(
         `Round ${round} - Text Post`,
-        `Create a short professional tech tip post and schedule it right away to: ${channelNames}. No images needed, text only, use UTC timezone. Do not ask me any questions, just schedule it now. (test round ${round})`,
+        `Create a short professional tech tip post and schedule it right away to: ${channelInfo}. No images needed, text only, use UTC timezone. Do not ask me any questions, just schedule it now. (test round ${round})`,
         integrations,
       );
       if (ok) passed++;
