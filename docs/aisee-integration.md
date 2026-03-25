@@ -102,32 +102,52 @@ When a user exceeds their `postSendLimit`, they can **still send posts** — eac
 
 ### Flow
 
+Overage deduction is handled inside `PostsService.createPost()`, ensuring **all 4 entry points** are covered:
+
+| Entry point | userId source |
+|-------------|--------------|
+| `POST /posts/` (Calendar UI) | `@GetUserFromRequest()` |
+| `POST /public-api/posts` (Public API) | Org owner from `PublicAuthMiddleware` |
+| Chat Agent (`integrationSchedulePostTool`) | `runtimeContext.get('userId')` from copilot controller |
+| Autopost (`autopost.service.ts`) | Creates `type: 'draft'` only — not billed |
+
 ```
-POST /posts/
-  → PoliciesGuard: postSendLimit > 0 → always allow (0 = no subscription = block)
-  → createPost() succeeds
-  → PostOverageService.deductIfOverage(orgId, userId, postId)  [fire-and-forget]
-      → getUserLimits(userId) → { postSendLimit, periodStart }
-      → countPostsFromDay(orgId, periodStart) → count
-      → if count > postSendLimit:
-          → read overage cost from Settings (key: post_send_overage_cost, default: 25)
-          → AiseeCreditService.deductAndConfirm()
-              taskId: postiz_post_overage_{postId}  (fixed, idempotent)
-              businessType: post_overage
-              amount: overageCost credits
+PostsService.createPost(orgId, body, userId?)
+  → for each post created:
+      → if userId provided:
+          PostOverageService.deductIfOverage(orgId, userId, postId)  [fire-and-forget]
+            → getUserLimits(userId) → { postSendLimit, periodStart }
+            → countPostsFromDay(orgId, periodStart) → count
+            → if count > postSendLimit:
+                → read overage cost from Settings (key: post_send_overage_cost, default: 25)
+                → AiseeCreditService.deductAndConfirm()
+                    taskId: postiz_post_overage_{postId}  (fixed, idempotent)
+                    businessType: post_overage
+                    amount: overageCost credits
 ```
+
+### Post Counting Rules
+
+`countPostsFromDay` uses these criteria (shared by dashboard and billing):
+
+- Only **main posts** (`parentPostId IS NULL`) — child posts (comments/replies in Threads, X threads) don't count
+- States: `QUEUE` + `PUBLISHED` — scheduled posts also consume quota
+- Time range: from Aisee `periodStart` (billing period start, UTC)
+
+Example: Threads with 1 post + 2 comments = **1** post toward quota.
 
 ### Settings
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `post_send_overage_cost` | number | 25 | Credits deducted per post when monthly limit is exceeded |
+| `post_send_overage_cost` | number | 25 | Credits deducted per post when billing period limit is exceeded |
 
 Initialized automatically on application startup by `PostOverageService.onModuleInit()` — only creates the key if it doesn't already exist.
 
 ### Key Files
 
 - `libraries/nestjs-libraries/src/database/prisma/posts/post-overage.service.ts`
+- `libraries/nestjs-libraries/src/database/prisma/posts/posts.service.ts` — `createPost()` calls `deductIfOverage`
 - `apps/backend/src/services/auth/permissions/permissions.service.ts`
 
 ## AiseeClient

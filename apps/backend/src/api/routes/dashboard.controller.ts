@@ -3,6 +3,7 @@ import { Organization, User } from '@prisma/client';
 import { GetOrgFromRequest } from '@gitroom/nestjs-libraries/user/org.from.request';
 import { GetUserFromRequest } from '@gitroom/nestjs-libraries/user/user.from.request';
 import { GetTimezone } from '@gitroom/nestjs-libraries/user/timezone.from.request';
+import { parseDateToUTC } from '@gitroom/helpers/utils/date.utils';
 import { ApiTags } from '@nestjs/swagger';
 import { DashboardService } from '@gitroom/nestjs-libraries/database/prisma/dashboard/dashboard.service';
 import {
@@ -25,8 +26,8 @@ export class DashboardController {
     @Query() query: DashboardSummaryQueryDto,
     @GetTimezone() tz?: string
   ) {
-    const startDate = query.startDate ? new Date(query.startDate) : undefined;
-    const endDate = query.endDate ? new Date(query.endDate) : undefined;
+    const startDate = query.startDate ? parseDateToUTC(query.startDate, tz) : undefined;
+    const endDate = query.endDate ? parseDateToUTC(query.endDate, tz) : undefined;
 
     if (startDate && endDate && startDate > endDate) {
       throw new BadRequestException('startDate must be before endDate');
@@ -47,10 +48,11 @@ export class DashboardController {
   @Get('/traffics')
   async getTraffics(
     @GetOrgFromRequest() org: Organization,
-    @Query() query: TrafficsQueryDto
+    @Query() query: TrafficsQueryDto,
+    @GetTimezone() tz?: string
   ) {
-    const startDate = query.startDate ? new Date(query.startDate) : undefined;
-    const endDate = query.endDate ? new Date(query.endDate) : undefined;
+    const startDate = query.startDate ? parseDateToUTC(query.startDate, tz) : undefined;
+    const endDate = query.endDate ? parseDateToUTC(query.endDate, tz) : undefined;
     if (startDate && endDate && startDate > endDate) {
       throw new BadRequestException('startDate must be before endDate');
     }
@@ -60,10 +62,11 @@ export class DashboardController {
   @Get('/impressions')
   async getImpressions(
     @GetOrgFromRequest() org: Organization,
-    @Query() query: ImpressionsQueryDto
+    @Query() query: ImpressionsQueryDto,
+    @GetTimezone() tz?: string
   ) {
-    const startDate = query.startDate ? new Date(query.startDate) : undefined;
-    const endDate = query.endDate ? new Date(query.endDate) : undefined;
+    const startDate = query.startDate ? parseDateToUTC(query.startDate, tz) : undefined;
+    const endDate = query.endDate ? parseDateToUTC(query.endDate, tz) : undefined;
     if (startDate && endDate && startDate > endDate) {
       throw new BadRequestException('startDate must be before endDate');
     }

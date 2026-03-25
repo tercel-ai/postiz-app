@@ -11,6 +11,7 @@ import isSameOrAfter from 'dayjs/plugin/isSameOrAfter';
 import utc from 'dayjs/plugin/utc';
 import timezone from 'dayjs/plugin/timezone';
 import { v4 as uuidv4 } from 'uuid';
+import { parseDate } from '@gitroom/helpers/utils/date.utils';
 import { CreateTagDto } from '@gitroom/nestjs-libraries/dtos/posts/create.tag.dto';
 
 dayjs.extend(isoWeek);
@@ -317,17 +318,13 @@ export class PostsRepository {
   }
 
   async getPosts(orgId: string, query: GetPostsDto, tz?: string) {
-    // Use the provided start and end dates directly
-    let startDate = dayjs.utc(query.startDate).toDate();
-    let endDate = dayjs.utc(query.endDate).toDate();
+    let startDate = parseDate(query.startDate, tz).toDate();
+    let endDate = parseDate(query.endDate, tz).toDate();
 
     if (tz && query.display) {
-      // Snap the input dates to the start/end of the display period in the user's timezone.
-      // This ensures the backend fetches the correct local range even if the frontend
-      // UTC timestamp has minor drift.
       const unit = displayToUnit(query.display);
-      startDate = dayjs.tz(query.startDate, tz).startOf(unit).toDate();
-      endDate = dayjs.tz(query.endDate, tz).endOf(unit).toDate();
+      startDate = parseDate(query.startDate, tz).startOf(unit).toDate();
+      endDate = parseDate(query.endDate, tz).endOf(unit).toDate();
     }
 
     const list = await this._post.model.post.findMany({

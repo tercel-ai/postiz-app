@@ -167,7 +167,9 @@ Both pipelines source data exclusively from post-level APIs (`batchPostAnalytics
     "drafts": 10,
     "errors": 3
   },
-  "published_this_month": 42
+  "published_this_period": 5,
+  "post_send_limit": 20,
+  "period_end": "2026-04-23T06:21:39.000Z"
 }
 ```
 
@@ -185,7 +187,9 @@ Both pipelines source data exclusively from post-level APIs (`batchPostAnalytics
 | `posts_stats.published` | Published posts | Posts in `PUBLISHED` state (includes cloned records from recurring sends — each send counts as 1) |
 | `posts_stats.drafts` | Draft posts | Posts in `DRAFT` state |
 | `posts_stats.errors` | Error posts | Posts in `ERROR` state (publishing failed) |
-| `published_this_month` | Published posts this calendar month | Count of `PUBLISHED` (non-deleted, top-level) posts from the 1st of the current month in the user's timezone (`x-timezone` header). Always present regardless of date filters. |
+| `published_this_period` | Posts used this billing period | Count of `QUEUE` + `PUBLISHED` (top-level) posts since the Aisee billing period start (`periodStart`). Falls back to calendar month start if no Aisee subscription. Uses the same `countPostsFromDay` query as overage billing — ensuring dashboard and billing always show the same number. |
+| `post_send_limit` | Billing period post limit | Max posts allowed per billing period (from Aisee `postSendLimit`). Only present when Aisee subscription is active. |
+| `period_end` | Billing period end | ISO 8601 UTC timestamp of billing period end. Only present when Aisee subscription is active. |
 
 **How does date filtering work?**
 
@@ -193,6 +197,19 @@ Both pipelines source data exclusively from post-level APIs (`batchPostAnalytics
 - Dates are normalized: `startDate` → start of day (00:00:00), `endDate` → end of day (23:59:59.999). This means `?startDate=2026-03-01&endDate=2026-03-01` includes all posts on March 1st.
 - When no date parameters are provided, all posts (excluding deleted) are counted — same behavior as before.
 - Impressions and traffic totals come from DataTicks and use the same date range (or default last 30 days if no date filter).
+
+**Date & timezone parsing rules:**
+
+All date-accepting endpoints use `parseDate()` (`@gitroom/helpers/utils/date.utils`) for consistent timezone handling:
+
+| Client sends | `x-timezone` header | Interpretation |
+|-------------|-------------------|----------------|
+| `2026-03-20T00:00:00+08:00` | `Asia/Shanghai` | Local time — offset determines UTC instant |
+| `2026-03-20T00:00:00+08:00` | (none) | Local time — offset determines UTC instant |
+| `2026-03-20T00:00:00` | `Asia/Shanghai` | Local time in Shanghai timezone |
+| `2026-03-20T00:00:00` | (none) | UTC time |
+
+Cases 1–3 all represent "the client means this local time". Case 4 means UTC. The `x-timezone` header is used for `startOf(day)`/`endOf(day)` snapping when a display period is specified.
 
 **Impressions vs. Traffic — What's the difference?**
 
@@ -203,13 +220,14 @@ Both pipelines source data exclusively from post-level APIs (`batchPostAnalytics
 <summary>Technical implementation details (for developers)</summary>
 
 **Algorithm**:
-1. Normalize `startDate` / `endDate` to day boundaries (`startOf('day')` / `endOf('day')`)
-2. Check Redis cache (key: `dashboard:summary:${orgId}:${start}:${end}:${intKey}:${chKey}`) → return immediately if cache hit
-3. Query in parallel: total channels + active integrations list + post stats grouped by state (with date filter) + impressions summary from DataTicks + traffic summary from DataTicks
-4. Map `groupBy` results to `posts_stats` object (QUEUE→scheduled, PUBLISHED→published, DRAFT→drafts, ERROR→errors)
-5. Group channels by platform
-6. Sum impressions/traffic summaries to get totals
-7. Write result to Redis cache (TTL 1 hour), return
+1. Parse dates with `parseDateToUTC(input, tz)` — respects offset and timezone header
+2. Normalize `startDate` / `endDate` to day boundaries in the user's timezone
+3. Fetch Aisee billing period (`getUserLimits(userId)`) for `published_this_period`; fall back to calendar month if unavailable
+4. Check Redis cache (key: `dashboard:summary:${orgId}:${userId}:${start}:${end}:${intKey}:${chKey}:${tz}`) → return immediately if cache hit
+5. Query in parallel: total channels + active integrations list + post stats grouped by state + impressions/traffic from DataTicks + post count via `countPostsFromDay(orgId, periodStart)`
+6. Map `groupBy` results to `posts_stats` object (QUEUE→scheduled, PUBLISHED→published, DRAFT→drafts, ERROR→errors)
+7. Group channels by platform, sum impressions/traffic totals
+8. Write result to Redis cache (TTL 1 hour), return
 
 **Date validation**: The controller throws `BadRequestException` if `startDate > endDate`.
 
@@ -610,6 +628,7 @@ The Dashboard connects to multiple external social platforms, any of which could
 | Service | `libraries/nestjs-libraries/src/database/prisma/dashboard/dashboard.service.ts` |
 | Repository | `libraries/nestjs-libraries/src/database/prisma/dashboard/dashboard.repository.ts` |
 | DTO | `libraries/nestjs-libraries/src/dtos/dashboard/dashboard.dto.ts` |
+| Date Utils | `libraries/helpers/src/utils/date.utils.ts` — `parseDate()` / `parseDateToUTC()` |
 | DataTicks Service | `libraries/nestjs-libraries/src/database/prisma/data-ticks/data-ticks.service.ts` |
 | DataTicks Repository | `libraries/nestjs-libraries/src/database/prisma/data-ticks/data-ticks.repository.ts` |
 | Traffic Calculator | `libraries/nestjs-libraries/src/integrations/social/traffic.calculator.ts` |

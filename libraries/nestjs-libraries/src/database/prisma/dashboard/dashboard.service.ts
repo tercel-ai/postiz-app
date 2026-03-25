@@ -47,8 +47,12 @@ export class DashboardService {
     channel?: string[],
     tz?: string
   ) {
-    const normalizedStart = startDate ? dayjs(startDate).startOf('day').toDate() : undefined;
-    const normalizedEnd = endDate ? dayjs(endDate).endOf('day').toDate() : undefined;
+    const normalizedStart = startDate
+      ? (tz ? dayjs(startDate).tz(tz) : dayjs.utc(startDate)).startOf('day').toDate()
+      : undefined;
+    const normalizedEnd = endDate
+      ? (tz ? dayjs(endDate).tz(tz) : dayjs.utc(endDate)).endOf('day').toDate()
+      : undefined;
     const intKey = integrationId?.length ? [...integrationId].sort().join(',') : 'all';
     const chKey = channel?.length ? [...channel].sort().join(',') : 'all';
     const cacheKey = `dashboard:summary:${org.id}:${userId || 'anon'}:${normalizedStart?.getTime() || 'all'}:${normalizedEnd?.getTime() || 'all'}:${intKey}:${chKey}:${tz || 'utc'}`;
@@ -57,7 +61,7 @@ export class DashboardService {
       return JSON.parse(cached);
     }
 
-    // Use Aisee billing period for published_this_period count; fall back to calendar month
+    // Quota usage: QUEUE + PUBLISHED posts since billing period start; fall back to calendar month
     const calendarMonthStart = () =>
       (tz ? dayjs().tz(tz) : dayjs.utc()).startOf('month').toDate();
 

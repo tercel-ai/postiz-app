@@ -68,7 +68,6 @@ export class DashboardRepository {
     return stats;
   }
 
-
   getPublishedPostsWithRelease(orgId: string, sinceDays: number, integrationId?: string[], channel?: string[]) {
     return this._post.model.post.findMany({
       where: {
