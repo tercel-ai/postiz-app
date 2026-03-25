@@ -102,6 +102,7 @@ function buildVariables(
       },
       messages: messages.map((m) => ({
         id: m.id,
+        createdAt: new Date().toISOString(),
         textMessage: {
           role: m.role,           // "user" | "assistant"
           content: m.content,
