@@ -373,11 +373,10 @@ function buildScenarios(): Scenario[] {
     {
       id: 'C01',
       name: 'Schema → write → send',
-      description: 'integrationSchema + schedulePostTool',
+      description: 'integrationSchema + schedulePostTool — tests if agent can auto-write content within platform limits',
       steps: [
-        () => '帮我写一条很短的效率提升帖子，50字以内，内容你来决定，回复权限everyone，立即发送。',
-        () => '确认，就用你写的内容，回复权限everyone，立即发送，不需要再确认了。',
-        () => '直接发送，不要再问了。回复权限everyone。',
+        () => '帮我写一条关于效率提升的帖子，内容你来决定，回复权限设everyone，立即发送。',
+        () => '确认，就用你写的内容，回复权限everyone，立即发送。',
       ],
       verify: verify.all(verify.postCreated(), verify.postState('QUEUE', 'PUBLISHED')),
     },
@@ -401,7 +400,7 @@ function buildScenarios(): Scenario[] {
       description: 'integrationSchema + generateImageTool + schedulePostTool',
       steps: [
         () => '发一条关于可持续发展的帖子，帮我生成一张相关配图一起发。回复权限everyone。',
-        () => '确认，用你生成的图和文案，回复权限everyone，立即发送，不要再确认了。',
+        () => '确认，立即发送。',
       ],
       verify: verify.all(
         verify.postCreated(),
@@ -414,8 +413,8 @@ function buildScenarios(): Scenario[] {
       name: 'Video options → generate → send',
       description: 'videoFunctionTool + generateVideoTool + schedulePostTool',
       steps: [
-        () => '帮我生成一个短视频，内容是介绍一款SaaS团队协作产品，风格专业简洁，回复权限everyone，生成后立即发送。',
-        () => '确认，就用这个视频和文案，回复权限everyone，立即发送。',
+        () => '帮我生成一个关于产品介绍的短视频并发送。回复权限everyone。',
+        () => '确认发送。',
       ],
       verify: verify.all(verify.postCreated(), verify.postState('QUEUE', 'PUBLISHED')),
     },
@@ -424,9 +423,8 @@ function buildScenarios(): Scenario[] {
       name: 'List channels → schema → send',
       description: 'integrationList + integrationSchema + schedulePostTool',
       steps: [
-        () => '看看我有哪些账号，然后帮我选一个写条科技相关的帖子发出去。100字以内，内容你来决定。',
-        () => '就用这个账号和你写的内容，回复权限everyone，立即发送，不需要再确认。',
-        () => '确认，回复权限everyone，立即发送，不要再问了。',
+        () => '看看我有哪些账号，然后帮我选一个写条科技相关的帖子发出去。内容你来决定。回复权限everyone。',
+        () => '就用这个账号和你写的内容，立即发送。',
       ],
       verify: verify.all(verify.postCreated(), verify.postState('QUEUE', 'PUBLISHED')),
     },
@@ -449,8 +447,8 @@ function buildScenarios(): Scenario[] {
       name: 'CN text - send now',
       description: 'Chinese text post, immediate',
       steps: [
-        () => '写一条关于AI编程效率提升的帖子，100字以内，回复权限everyone，立即发送。纯文本。',
-        () => '确认，就用这个内容，回复权限everyone，立即发送，不需要再确认了。',
+        () => '写一条关于AI编程效率提升的帖子，回复权限everyone，立即发送。纯文本。',
+        () => '确认发送。',
       ],
       verify: verify.all(
         verify.postCreated(),
@@ -477,8 +475,8 @@ function buildScenarios(): Scenario[] {
       name: 'Save as draft',
       description: 'Create draft, do not send',
       steps: [
-        () => '写一条很短的JavaScript最佳实践帖子，50字以内，保存为草稿不要发送。回复权限everyone。',
-        () => '对，只保存草稿，回复权限everyone，不需要再确认，直接保存。',
+        () => '写一条JavaScript最佳实践的帖子，保存为草稿不要发送。回复权限everyone。',
+        () => '对，只保存草稿。',
       ],
       verify: verify.all(verify.postCreated(), verify.postState('DRAFT')),
     },
@@ -487,8 +485,8 @@ function buildScenarios(): Scenario[] {
       name: 'EN prompt → CN content',
       description: 'English instruction, Chinese output',
       steps: [
-        () => 'Write a very short post (under 100 chars) in Chinese about cloud-native trends. Reply permission: everyone. Send it now. Text only.',
-        () => '确认发送，回复权限everyone，立即发送。',
+        () => 'Write a post in Chinese about cloud-native trends. Reply permission: everyone. Send it now. Text only.',
+        () => '确认发送。',
       ],
       verify: verify.all(
         verify.postCreated(),
@@ -499,10 +497,10 @@ function buildScenarios(): Scenario[] {
     {
       id: 'R06',
       name: 'Post with link',
-      description: 'Share a URL with intro text',
+      description: 'Share a URL with intro text — tests if agent sends on simple confirm',
       steps: [
-        () => '分享这个链接 https://example.com/best-practices-2026 ，写一句简短介绍，50字以内，回复权限everyone，不要短链接，立即发送。',
-        () => '确认，就用你写的文案，回复权限everyone，立即发送，不要再问了。',
+        () => '分享这个链接 https://example.com/best-practices-2026 ，写段介绍，回复权限everyone，不要短链接，立即发送。',
+        () => '确认发送。',
       ],
       verify: verify.all(
         verify.postCreated(),
@@ -517,48 +515,44 @@ function buildScenarios(): Scenario[] {
     {
       id: 'M01',
       name: 'Draft → revise → send',
-      description: '4-turn: draft, shorten, confirm settings, send',
+      description: '3-turn: draft, shorten, confirm send',
       steps: [
         () => '帮我写一条关于远程办公效率的帖子。先草拟，不要发。',
-        () => '太长了，缩短到100字以内，结尾加个行动号召。',
-        () => '内容可以了。回复权限设everyone，立即发送，不需要弹窗。',
-        () => '确认，就用这个内容，回复权限everyone，立即发送。不需要再问我任何问题。',
+        () => '太长了，缩短一些，结尾加个行动号召。',
+        () => '可以了，回复权限everyone，立即发送。',
       ],
       verify: verify.all(verify.postCreated(), verify.postState('QUEUE', 'PUBLISHED')),
     },
     {
       id: 'M02',
       name: 'Draft → change tone → send',
-      description: '4-turn Chinese: draft, adjust tone, confirm settings, send',
+      description: '3-turn Chinese: draft, adjust tone, confirm send',
       steps: [
-        () => '帮我写一条关于开源社区协作的帖子，100字以内。先看看草稿。',
-        () => '语气太正式了，改轻松口语化一些，加个emoji。保持100字以内。',
-        () => '这版可以了。回复权限everyone，立即发送。',
-        () => '确认发送，回复权限everyone，不需要再确认了，直接发。',
+        () => '帮我写一条关于开源社区协作的帖子。先看看草稿。',
+        () => '语气太正式了，改轻松口语化一些，加个emoji。',
+        () => '可以了，回复权限everyone，立即发送。',
       ],
       verify: verify.all(verify.postCreated(), verify.postState('QUEUE', 'PUBLISHED')),
     },
     {
       id: 'M03',
       name: 'Vague → clarify → send',
-      description: '4-turn: vague request, clarify, confirm, send',
+      description: '3-turn: vague request, clarify, confirm send',
       steps: [
         () => 'I want to post something about our new product launch.',
-        () => "It's a SaaS collaboration tool. Keep it under 150 chars, professional tone.",
-        () => 'Use that text. Reply permission: everyone. Send it now, no modal.',
-        () => 'Confirmed. Send it immediately with reply permission everyone. No more questions please.',
+        () => "It's a SaaS collaboration tool. Keep it short and professional.",
+        () => 'Looks good. Reply permission: everyone. Send it now.',
       ],
       verify: verify.all(verify.postCreated(), verify.postState('QUEUE', 'PUBLISHED')),
     },
     {
       id: 'M04',
       name: 'Write → add image → send',
-      description: '4-turn: text first, generate image, confirm, send',
+      description: '3-turn: text first, generate image, confirm send',
       steps: [
-        () => '写一条关于AI在医疗领域应用的帖子，100字以内。先不要发。',
+        () => '写一条关于AI在医疗领域应用的帖子。先不要发。',
         () => '帮我配一张相关的图片。',
-        () => '用这个文案和图片。回复权限everyone，立即发送。',
-        () => '确认，带图发送，回复权限everyone，立即发送，不要再问了。',
+        () => '用这个文案和图片，回复权限everyone，立即发送。',
       ],
       verify: verify.all(
         verify.postCreated(),
@@ -574,16 +568,16 @@ function buildScenarios(): Scenario[] {
         () => 'Write a 3-part thread about why startups should invest in developer experience. Each part under 180 chars. Reply permission: everyone.',
         () => 'Confirmed. Send the thread now, reply permission everyone, no modal, do not ask anything else.',
       ],
-      verify: verify.postCreated(1), // X thread = 1 socialPost with multiple postsAndComments = 1 DB post
+      verify: verify.postCreated(1), // X thread: verify at least 1 post created in DB
     },
     {
       id: 'M06',
       name: 'Write from scratch → send',
       description: '3-turn: ask for post idea, write, send',
       steps: [
-        () => '帮我想一个适合发X的话题，然后写一条100字以内的帖子。',
-        () => '就用这个内容。回复权限everyone，立即发送。',
-        () => '确认发送，回复权限everyone，不要再问了，直接发。',
+        () => '帮我想一个适合发X的话题，然后写一条帖子。',
+        () => '就用这个内容，回复权限everyone，立即发送。',
+        () => '确认发送。',
       ],
       verify: verify.all(verify.postCreated(), verify.postState('QUEUE', 'PUBLISHED')),
     },
