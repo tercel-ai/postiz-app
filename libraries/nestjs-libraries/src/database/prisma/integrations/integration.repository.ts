@@ -16,7 +16,7 @@ export class IntegrationRepository {
     private _exisingPlugData: PrismaRepository<'exisingPlugData'>,
     private _customers: PrismaRepository<'customer'>,
     private _mentions: PrismaRepository<'mentions'>
-  ) {}
+  ) { }
 
   getMentions(platform: string, q: string) {
     return this._mentions.model.mentions.findMany({
@@ -175,12 +175,12 @@ export class IntegrationRepository {
   async createOrUpdateIntegration(
     additionalSettings:
       | {
-          title: string;
-          description: string;
-          type: 'checkbox' | 'text' | 'textarea';
-          value: any;
-          regex?: string;
-        }[]
+        title: string;
+        description: string;
+        type: 'checkbox' | 'text' | 'textarea';
+        value: any;
+        regex?: string;
+      }[]
       | undefined,
     oneTimeToken: boolean,
     org: string,
@@ -234,8 +234,8 @@ export class IntegrationRepository {
         type: type as any,
         ...(!refresh
           ? {
-              inBetweenSteps: isBetweenSteps,
-            }
+            inBetweenSteps: isBetweenSteps,
+          }
           : {}),
         ...(picture ? { picture } : {}),
         profile: username,
@@ -381,17 +381,17 @@ export class IntegrationRepository {
     const customer = !name
       ? undefined
       : (await this._customers.model.customer.findFirst({
-          where: {
-            orgId: org,
-            name,
-          },
-        })) ||
-        (await this._customers.model.customer.create({
-          data: {
-            name,
-            orgId: org,
-          },
-        }));
+        where: {
+          orgId: org,
+          name,
+        },
+      })) ||
+      (await this._customers.model.customer.create({
+        data: {
+          name,
+          orgId: org,
+        },
+      }));
 
     return this._integration.model.integration.update({
       where: {
@@ -402,10 +402,10 @@ export class IntegrationRepository {
         customer: !customer
           ? { disconnect: true }
           : {
-              connect: {
-                id: customer.id,
-              },
+            connect: {
+              id: customer.id,
             },
+          },
       },
     });
   }
@@ -418,17 +418,17 @@ export class IntegrationRepository {
       },
       data: !group
         ? {
-            customer: {
-              disconnect: true,
-            },
-          }
+          customer: {
+            disconnect: true,
+          },
+        }
         : {
-            customer: {
-              connect: {
-                id: group,
-              },
+          customer: {
+            connect: {
+              id: group,
             },
           },
+        },
     });
   }
 
@@ -505,6 +505,7 @@ export class IntegrationRepository {
         select: {
           id: true,
           name: true,
+          profile: true,
           providerIdentifier: true,
           picture: true,
           type: true,
