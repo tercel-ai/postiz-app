@@ -564,28 +564,6 @@ export class PostsRepository {
     });
   }
 
-  /**
-   * Find the most recently published clone for a recurring post.
-   * Returns null if no published clone exists.
-   */
-  getLatestPublishedClone(sourcePostId: string) {
-    return this._post.model.post.findFirst({
-      where: {
-        sourcePostId,
-        state: 'PUBLISHED',
-        deletedAt: null,
-      },
-      orderBy: { publishDate: 'desc' },
-      select: {
-        publishDate: true,
-        state: true,
-        releaseId: true,
-        releaseURL: true,
-        error: true,
-      },
-    });
-  }
-
   updatePost(id: string, postId: string, releaseURL: string) {
     return this._post.model.post.update({
       where: {

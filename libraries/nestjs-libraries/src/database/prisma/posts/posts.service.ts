@@ -290,10 +290,6 @@ export class PostsService {
     });
   }
 
-  async getLatestPublishedClone(sourcePostId: string) {
-    return this._postRepository.getLatestPublishedClone(sourcePostId);
-  }
-
   async getPostsRecursively(
     id: string,
     includeIntegration = false,

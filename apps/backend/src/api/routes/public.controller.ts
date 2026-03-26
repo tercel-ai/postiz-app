@@ -75,24 +75,6 @@ export class PublicController {
       return [];
     }
 
-    // For recurring posts, try to return the latest published clone instead
-    // of the original (which permanently stays QUEUE).
-    const root = posts[0];
-    if (root.intervalInDays && root.intervalInDays > 0) {
-      const clone = await this._postsService.getLatestPublishedClone(root.id);
-      if (clone) {
-        posts[0] = {
-          ...root,
-          publishDate: clone.publishDate,
-          state: clone.state,
-          releaseId: clone.releaseId,
-          releaseURL: clone.releaseURL,
-          error: clone.error,
-          actualDate: root.publishDate,
-        } as typeof root;
-      }
-    }
-
     return posts.map(({ childrenPost, ...p }) => ({
       ...p,
       ...(p.integration

@@ -36,7 +36,9 @@ export default async function Auth({
     share?: string;
   };
 }) {
-  const post = await (await internalFetch(`/public/posts/${id}`)).json();
+  const post = await (
+    await internalFetch(`/public/posts/${id}`)
+  ).json();
   const t = await getT();
   if (!post.length) {
     return (
