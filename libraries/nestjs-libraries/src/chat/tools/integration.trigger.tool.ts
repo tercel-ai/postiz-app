@@ -12,6 +12,7 @@ import { RefreshToken } from '@gitroom/nestjs-libraries/integrations/social.abst
 import { timer } from '@gitroom/helpers/utils/timer';
 import { checkAuth } from '@gitroom/nestjs-libraries/chat/auth.context';
 import { RefreshIntegrationService } from '@gitroom/nestjs-libraries/integrations/refresh.integration.service';
+import { resolveIntegrationIds, SelectedIntegration } from './resolve-integration';
 
 @Injectable()
 export class IntegrationTriggerTool implements AgentToolInterface {
@@ -28,7 +29,9 @@ export class IntegrationTriggerTool implements AgentToolInterface {
       description: `After using the integrationSchema, we sometimes miss details we can\'t ask from the user, like ids.
       Sometimes this tool requires to user prompt for some settings, like a word to search for. methodName is required [input:callable-tools]`,
       inputSchema: z.object({
-        integrationId: z.string().describe('The id of the integration'),
+        integrationId: z.string().optional().describe(
+          'Optional. The integration ID. If only 1 channel is selected, this is auto-resolved. For multiple channels, specify which one to trigger.'
+        ),
         methodName: z
           .string()
           .describe(
@@ -53,15 +56,36 @@ export class IntegrationTriggerTool implements AgentToolInterface {
           runtimeContext.get('organization') as string
         ).id;
 
-        const getIntegration =
-          await this._integrationService.getIntegrationById(
-            organizationId,
-            context.integrationId
-          );
+        // Resolve integration using shared routing logic
+        const selectedIntegrations: SelectedIntegration[] =
+          // @ts-ignore
+          (runtimeContext.get('integrations') as any[] || []);
+
+        const resolved = resolveIntegrationIds(selectedIntegrations, context.integrationId);
+
+        if (resolved.kind === 'error') {
+          return { output: resolved.message };
+        }
+
+        // triggerTool operates on a single integration — use first resolved ID
+        // For 'all' case with multiple channels, ask LLM to specify
+        if (resolved.kind === 'all' && resolved.integrationIds.length > 1) {
+          const available = selectedIntegrations
+            .map((si) => `${si.name || si.platform} (id: ${si.id})`)
+            .join(', ');
+          return {
+            output: `Multiple channels selected: ${available}. Please specify which channel to use for this operation.`,
+          };
+        }
+
+        const getIntegration = await this._integrationService.getIntegrationById(
+          organizationId,
+          resolved.integrationIds[0]
+        );
 
         if (!getIntegration) {
           return {
-            output: 'Integration not found',
+            output: `Integration not found in database.`,
           };
         }
 

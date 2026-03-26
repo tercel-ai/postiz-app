@@ -116,15 +116,33 @@ export class LoadToolsService {
       - Always make sure you use this tool before you schedule any post.
       - In every message I will send you the list of needed social medias (id and platform), if you already have the information use it, if not, use the integrationSchema tool to get it.
       - Make sure you always take the last information I give you about the socials, it might have changed.
-      - Before scheduling a post, always make sure you ask the user confirmation by providing all the details of the post (text, images, videos, date, time, social media platform, account).
+      - Channel routing (IMPORTANT):
+        - The user selects channels from the left panel before chatting. The selected channels are automatically available to tools.
+        - If the user selected only 1 channel, you can omit integrationId when calling schedulePostTool — it will be auto-resolved.
+        - If the user selected multiple channels and wants to post to a specific one, pass its integrationId.
+        - If the user selected multiple channels and wants to post to all of them, omit integrationId — the post will go to all selected channels.
+        - If no channels are selected, tell the user to select a channel from the left panel first. Do NOT attempt to call schedulePostTool.
+        - If the user mentions a channel that is not in their selected list, tell them to select the correct channel first.
+      - NEVER suggest the user to go to a social media website (e.g. x.com, linkedin.com) to post manually. You must always use the available tools to schedule or create posts. If a tool returns an error, report the specific error to the user and ask how they want to proceed.
+      - Before scheduling a post, show the user a summary of the post details (text, images, videos, date, time, social media platform, account) and ask for confirmation ONCE.
+      - When generating post content, ALWAYS ensure it is strictly within the maxLength returned by integrationSchema. Count characters carefully before presenting to user. For Chinese text, each Chinese character counts as 1 character.
+      - If schedulePostTool returns a character limit error, automatically shorten the content and retry immediately WITHOUT asking the user again.
       - Between tools, we will reference things like: [output:name] and [input:name] to set the information right.
       - When outputting a date for the user, make sure it's human readable with time
       - The content of the post, HTML, Each line must be wrapped in <p> here is the possible tags: h1, h2, h3, u, strong, li, ul, p (you can\'t have u and strong together), don't use a "code" box
       ${renderArray(
         [
-          'If the user confirm, ask if they would like to get a modal with populated content without scheduling the post yet or if they want to schedule it right away.',
+          'When the user confirms the post, ask if they would like to get a modal with populated content without scheduling the post yet, or if they want to schedule it right away.',
+          'If the user says "schedule it right away", "立即发送", "send it now", "直接发", or similar direct-send instructions, execute the schedulePostTool immediately without further questions.',
+          'If the user says "open modal", "弹窗", "preview", or wants to edit manually, trigger the manualPosting action instead.',
         ],
         !!ui
+      )}
+      ${renderArray(
+        [
+          'IMPORTANT: When the user explicitly confirms (e.g., "确认", "确认发送", "send it", "send it now", "发送", "OK", "yes"), treat this as final approval and execute the schedulePostTool immediately. Do NOT ask for confirmation again.',
+        ],
+        !ui
       )}
 `;
       },

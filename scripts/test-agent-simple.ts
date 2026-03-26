@@ -6,18 +6,19 @@ const { sign } = pkg;
 /**
  * E2E TEST FOR CHAT AGENT — Tool Calling Coverage
  *
- * Covers 4 dimensions:
+ * Covers 5 dimensions:
  *   - Single tool trigger (S01-S04)
  *   - Combined tool trigger (C01-C05)
  *   - Single-turn conversation (R01-R06)
  *   - Multi-turn conversation (M01-M06)
+ *   - Integration routing (P01-P08) — tests 6 routing rules from docs/agent-integration-routing.md
  *
  * Usage:
  *   USER_ID="uuid" ORG_ID="uuid" pnpm dlx ts-node scripts/test-agent-simple.ts
  *
  * Options (env vars):
  *   INTEGRATION   - filter by integration ID or name
- *   SCENARIO      - run specific scenario(s): "S01", "C01", "R01-R06", "M01", or "all" (default)
+ *   SCENARIO      - run specific scenario(s): "S01", "C01", "R01-R06", "M01", "P01-P08", "P" or "all" (default)
  *   INTERVAL      - seconds between scenarios (default: 15)
  *   BACKEND_INTERNAL_URL - backend base URL (default: http://localhost:3000)
  *
@@ -111,13 +112,8 @@ function buildVariables(
       },
     },
     properties: {
-      integrations: integrations.map((i: Record<string, unknown>) => ({
-        id: i.id,
-        name: i.name,
-        providerIdentifier: i.identifier || i.providerIdentifier,
-        picture: i.picture,
-        profile: i.display || i.profile,
-      })),
+      // Pass full integration objects, same as frontend CopilotKit properties
+      integrations: integrations,
     },
   };
 }
@@ -304,6 +300,37 @@ const verify = {
       return Array.from(groups.values()).some((count) => count >= minParts);
     },
 
+  // New post belongs to a specific integration ID
+  postForIntegration:
+    (integrationId: string): VerifyFn =>
+    ({ newPosts }) =>
+      newPosts.some((p) => {
+        // Post object may have integration.id or integrationId depending on API shape
+        const postIntId = (p as any).integration?.id || p.integrationId;
+        return postIntId === integrationId;
+      }),
+
+  // Posts created for multiple distinct integrations
+  postForMultipleIntegrations:
+    (minCount = 2): VerifyFn =>
+    ({ newPosts }) => {
+      const uniqueIntegrations = new Set(
+        newPosts.map((p) => (p as any).integration?.id || p.integrationId)
+      );
+      return uniqueIntegrations.size >= minCount;
+    },
+
+  // Agent response does NOT contain any of the keywords
+  responseNotContains:
+    (...keywords: string[]): VerifyFn =>
+    ({ agentText }) => {
+      const lower = agentText.toLowerCase();
+      return keywords.every((kw) => !lower.includes(kw.toLowerCase()));
+    },
+
+  // No posts were created (error scenarios)
+  noPostCreated: (): VerifyFn => ({ newPosts }) => newPosts.length === 0,
+
   // Combine multiple verifiers (all must pass)
   all:
     (...fns: VerifyFn[]): VerifyFn =>
@@ -323,6 +350,10 @@ interface Scenario {
   verify: VerifyFn;
   // If true, skip DB post verification (info-only scenarios)
   infoOnly?: boolean;
+  // Override integrations for this scenario (for routing tests).
+  // If undefined, uses the default integrations from CLI args.
+  // Pass [] for "no channels selected" tests.
+  overrideIntegrations?: Record<string, unknown>[] | ((allIntegrations: Record<string, unknown>[]) => Record<string, unknown>[]);
 }
 
 // ---------------------------------------------------------------------------
@@ -568,7 +599,7 @@ function buildScenarios(): Scenario[] {
         () => 'Write a 3-part thread about why startups should invest in developer experience. Each part under 180 chars. Reply permission: everyone.',
         () => 'Confirmed. Send the thread now, reply permission everyone, no modal, do not ask anything else.',
       ],
-      verify: verify.postCreated(1), // X thread: verify at least 1 post created in DB
+      verify: verify.all(verify.postCreated(1), verify.postState('QUEUE', 'PUBLISHED')),
     },
     {
       id: 'M06',
@@ -581,6 +612,125 @@ function buildScenarios(): Scenario[] {
       ],
       verify: verify.all(verify.postCreated(), verify.postState('QUEUE', 'PUBLISHED')),
     },
+
+    // =========================================================================
+    // Dimension 5: Integration Routing (P01-P08)
+    // Tests the 6 routing rules from docs/agent-integration-routing.md
+    // =========================================================================
+
+    // Rule 1a: 1 channel selected, LLM omits integrationId → auto-resolve
+    {
+      id: 'P01',
+      name: 'Routing: 1 channel, auto-resolve',
+      description: 'Rule 1a — single channel selected, agent omits integrationId → post goes to that channel',
+      steps: [
+        () => 'Write a short tech tip and send it now. Reply permission: everyone.',
+        () => 'Yes, send it.',
+      ],
+      // Uses default single integration from INTEGRATION env var
+      verify: verify.all(verify.postCreated(), verify.postState('QUEUE', 'PUBLISHED')),
+    },
+
+    // Rule 1a variant: LLM passes matching name → still works
+    {
+      id: 'P02',
+      name: 'Routing: 1 channel, LLM passes matching name',
+      description: 'Rule 1a — single channel, agent passes account name as integrationId → resolves correctly',
+      steps: [
+        () => '帮我写一条短帖子，发到当前选中的账号。回复权限everyone，立即发送。',
+        () => '确认发送。',
+      ],
+      verify: verify.all(verify.postCreated(), verify.postState('QUEUE', 'PUBLISHED')),
+    },
+
+    // Rule 1b: 1 channel selected, user mentions different platform → error, no post
+    {
+      id: 'P03',
+      name: 'Routing: 1 channel, wrong platform mentioned',
+      description: 'Rule 1b — single channel (X) selected, user says "post to Facebook" → error, no post created',
+      steps: [
+        () => '帮我写一条帖子发到我的Facebook账号。',
+      ],
+      verify: verify.all(
+        verify.noPostCreated(),
+        verify.responseContains('select', 'chosen', '选择', '没有', 'not', 'Facebook'),
+      ),
+    },
+
+    // Rule 2: multiple channels, user specifies one in list → use that one
+    {
+      id: 'P04',
+      name: 'Routing: multi-channel, specify one',
+      description: 'Rule 2 — 2 channels selected, user says "post to X" → only X gets the post',
+      overrideIntegrations: (all) => all.slice(0, 2), // use first 2 integrations
+      steps: [
+        () => 'Write a short post about AI and send it to my X account only. Reply permission: everyone.',
+        () => 'Yes, send it.',
+      ],
+      verify: verify.all(verify.postCreated(), verify.postState('QUEUE', 'PUBLISHED')),
+    },
+
+    // Rule 3: multiple channels, user doesn't specify → all channels
+    {
+      id: 'P05',
+      name: 'Routing: multi-channel, send to all',
+      description: 'Rule 3 — 2 channels selected, user says "post this" without specifying → goes to all',
+      overrideIntegrations: (all) => all.slice(0, 2),
+      steps: [
+        () => 'Write a short post about productivity. Send it to all my channels. Reply permission: everyone.',
+        () => '确认发送。',
+      ],
+      verify: verify.all(
+        verify.postCreated(2),
+        verify.postForMultipleIntegrations(2),
+      ),
+    },
+
+    // Rule 4: no channels selected → error, no post
+    {
+      id: 'P06',
+      name: 'Routing: no channels selected',
+      description: 'Rule 4 — 0 channels selected → error, no post created',
+      overrideIntegrations: [], // empty — no channels
+      steps: [
+        () => 'Write a post and send it now.',
+      ],
+      verify: verify.all(
+        verify.noPostCreated(),
+        verify.responseContains('select', 'channel', '选择', '渠道', 'left panel'),
+      ),
+    },
+
+    // Rule 5: multiple channels, user specifies one NOT in list → error, no post
+    {
+      id: 'P07',
+      name: 'Routing: multi-channel, wrong platform',
+      description: 'Rule 5 — 2 channels selected, user says "post to TikTok" → error, no post created',
+      overrideIntegrations: (all) => all.slice(0, 2),
+      steps: [
+        () => '帮我发一条帖子到TikTok。',
+      ],
+      verify: verify.all(
+        verify.noPostCreated(),
+        verify.responseContains('select', '选择', 'not', 'TikTok', 'available', '没有'),
+      ),
+    },
+
+    // Agent behavior: never suggest manual posting
+    {
+      id: 'P08',
+      name: 'Routing: never suggest manual posting',
+      description: 'Agent should never suggest "go to x.com to post manually" even on errors',
+      infoOnly: true,
+      overrideIntegrations: [], // trigger error condition
+      steps: [
+        () => 'I need to post something right now, this is urgent!',
+      ],
+      verify: verify.all(
+        verify.responseNotContains('x.com', 'twitter.com', 'linkedin.com', 'go to', '登录', '手动'),
+        verify.responseContains('select', 'channel', '选择', '渠道'),
+      ),
+    },
   ];
 }
 
@@ -591,9 +741,22 @@ function buildScenarios(): Scenario[] {
 async function runScenario(
   scenario: Scenario,
   integrations: Record<string, unknown>[],
+  allIntegrations: Record<string, unknown>[],
 ): Promise<{ passed: boolean; reason: string }> {
   console.log(`\n--- [${scenario.id}] ${scenario.name}`);
   console.log(`    ${scenario.description}`);
+
+  // Resolve scenario-specific integrations
+  let scenarioIntegrations = integrations;
+  if (scenario.overrideIntegrations !== undefined) {
+    if (typeof scenario.overrideIntegrations === 'function') {
+      scenarioIntegrations = scenario.overrideIntegrations(allIntegrations);
+    } else {
+      scenarioIntegrations = scenario.overrideIntegrations;
+    }
+    const count = scenarioIntegrations.length;
+    console.log(`    [override] Using ${count} integration(s)${count > 0 ? ': ' + scenarioIntegrations.map((i) => `${i.name} (${i.identifier})`).join(', ') : ' (none)'}`);
+  }
 
   const threadId = `e2e-${Date.now()}-${scenario.id}`;
   const conversationHistory: { id: string; role: string; content: string }[] = [];
@@ -607,14 +770,14 @@ async function runScenario(
     // Execute conversation steps
     for (let step = 0; step < scenario.steps.length; step++) {
       const rawMessage = scenario.steps[step]({ agentReplies });
-      const messageWithContext = appendIntegrationContext(rawMessage, integrations);
+      const messageWithContext = appendIntegrationContext(rawMessage, scenarioIntegrations);
       const msgId = String(conversationHistory.length + 1);
       conversationHistory.push({ id: msgId, role: 'user', content: messageWithContext });
 
       const display = rawMessage.slice(0, 100) + (rawMessage.length > 100 ? '...' : '');
       console.log(`    [${step + 1}/${scenario.steps.length}] User: ${display}`);
 
-      const result = await sendMessage(threadId, conversationHistory, integrations);
+      const result = await sendMessage(threadId, conversationHistory, scenarioIntegrations);
       if (!result) {
         return { passed: false, reason: `No response at step ${step + 1}` };
       }
@@ -642,7 +805,7 @@ async function runScenario(
       agentText: agentReplies[agentReplies.length - 1] || '',
       allAgentTexts: agentReplies,
       newPosts,
-      integrations,
+      integrations: scenarioIntegrations,
     };
 
     const passed = scenario.verify(verifyCtx);
@@ -683,8 +846,8 @@ function filterScenarios(all: Scenario[], filter: string): Scenario[] {
     return inRange;
   }
 
-  // Prefix: "S", "C", "R", "M"
-  if (/^[SCRM]$/.test(filter)) {
+  // Prefix: "S", "C", "R", "M", "P"
+  if (/^[SCRMP]$/.test(filter)) {
     return all.filter((s) => s.id.startsWith(filter));
   }
 
@@ -734,7 +897,17 @@ async function main() {
     );
 
     const allScenarios = buildScenarios();
-    const scenariosToRun = filterScenarios(allScenarios, SCENARIO_STR);
+    let scenariosToRun = filterScenarios(allScenarios, SCENARIO_STR);
+
+    // Warn and skip multi-channel routing tests if account has < 2 integrations
+    const multiChannelIds = ['P04', 'P05', 'P07'];
+    if (allIntegrations.length < 2) {
+      const skipped = scenariosToRun.filter((s) => multiChannelIds.includes(s.id));
+      if (skipped.length > 0) {
+        console.warn(`\nWARN: Account has only ${allIntegrations.length} integration(s). Skipping multi-channel tests: ${skipped.map((s) => s.id).join(', ')}`);
+        scenariosToRun = scenariosToRun.filter((s) => !multiChannelIds.includes(s.id));
+      }
+    }
 
     console.log(`\nRunning ${scenariosToRun.length} scenario(s):`);
     scenariosToRun.forEach((s) => console.log(`  ${s.id} - ${s.name}`));
@@ -745,7 +918,7 @@ async function main() {
       const scenario = scenariosToRun[i];
       console.log(`\n========== ${scenario.id} (${i + 1}/${scenariosToRun.length}) ==========`);
 
-      const result = await runScenario(scenario, integrations);
+      const result = await runScenario(scenario, integrations, allIntegrations);
       results.push({ id: scenario.id, name: scenario.name, ...result });
 
       console.log(result.passed ? '    ✓ PASS' : `    ✗ FAIL: ${result.reason}`);

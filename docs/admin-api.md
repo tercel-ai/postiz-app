@@ -201,8 +201,72 @@ Lists posts with ERROR state from the last 7 days, including error details. Cove
 
 ---
 
+### Dashboard
+
+Overview and data management for application-wide statistics.
+
+#### GET /admin/dashboard
+
+Get a global overview of the application's health and activity.
+
+**Response Fields:**
+- `total_organizations` (number): Total count of organizations in the system.
+- `total_posts` (number): Total count of non-deleted, root posts.
+- `total_integrations` (number): Total count of non-deleted social media integrations.
+- `posts_today` (number): Number of posts created today.
+- `errors_last_7d` (number): Number of posts that failed (ERROR state) in the last 7 days.
+- `error_rate_7d` (number): Percentage of failed posts over total posts created in the last 7 days (e.g., `1.5` for 1.5%).
+- `posts_by_state` (array): Breakdown of posts by their current state.
+  - `state` (string): `DRAFT`, `QUEUE`, `PUBLISHED`, or `ERROR`.
+  - `count` (number): Number of posts in this state.
+- `integrations_by_platform` (array): Breakdown of active integrations by social platform.
+  - `platform` (string): The provider identifier (e.g., `twitter`, `linkedin`).
+  - `count` (number): Number of connected accounts for this platform.
+
+**Response Example:**
+```json
+{
+  "total_organizations": 150,
+  "total_posts": 1250,
+  "posts_by_state": [
+    { "state": "PUBLISHED", "count": 1000 },
+    { "state": "QUEUE", "count": 200 },
+    { "state": "DRAFT", "count": 40 },
+    { "state": "ERROR", "count": 10 }
+  ],
+  "total_integrations": 300,
+  "integrations_by_platform": [
+    { "platform": "linkedin", "count": 150 },
+    { "platform": "twitter", "count": 150 }
+  ],
+  "posts_today": 25,
+  "error_rate_7d": 0.8,
+  "errors_last_7d": 2
+}
+```
+
+#### POST /admin/dashboard/data-ticks/backfill
+
+Manually trigger a backfill of daily statistics (DataTicks) for a specific date or date range. This is useful for correcting missing or corrupted historical analytics data.
+
+| Query Param | Type | Required | Description |
+|-------------|------|----------|-------------|
+| `startDate` | string | Yes | Start date in `YYYY-MM-DD` format. |
+| `endDate` | string | No | End date in `YYYY-MM-DD` format. Defaults to `startDate`. |
+
+**Response:**
+```json
+{
+  "backfilled": 10,
+  "results": [...]
+}
+```
+
+---
+
 ## Key Files
 
+- `apps/backend/src/admin-api/routes/admin-dashboard.controller.ts`
 - `apps/backend/src/admin-api/routes/admin-settings.controller.ts`
 - `apps/backend/src/admin-api/routes/admin-diagnostics.controller.ts`
 - `libraries/nestjs-libraries/src/dtos/admin/ai-pricing.dto.ts`

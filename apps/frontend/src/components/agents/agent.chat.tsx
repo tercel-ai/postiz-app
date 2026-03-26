@@ -278,8 +278,32 @@ const OpenModal: FC<{
 }> = ({ args, respond }) => {
   const modals = useModals();
   const { properties } = useContext(PropertiesContext);
+
+  // Fuzzy match: LLM may pass exact id, platform name, or account name
+  const findIntegration = useCallback(
+    (integrationId: string) => {
+      const lower = (integrationId || '').toLowerCase();
+      return (
+        properties.find((p) => p.id === integrationId) ||
+        properties.find((p) => (p.identifier || '').toLowerCase() === lower) ||
+        properties.find((p) => ((p as any).platform || '').toLowerCase() === lower) ||
+        properties.find((p) => (p.providerIdentifier || '').toLowerCase() === lower) ||
+        properties.find((p) => (p.name || '').toLowerCase() === lower) ||
+        (properties.length === 1 ? properties[0] : undefined)
+      );
+    },
+    [properties]
+  );
+
   const startModal = useCallback(async () => {
     for (const integration of args.list) {
+      const matched = findIntegration(integration.integrationId);
+      if (!matched) {
+        respond(`Integration "${integration.integrationId}" not found in selected channels. Please select the correct channel and try again.`);
+        return;
+      }
+      const resolvedId = matched.id;
+
       await new Promise((res) => {
         const group = makeId(10);
         modals.openModal({
@@ -298,10 +322,8 @@ const OpenModal: FC<{
             <ExistingDataContextProvider
               value={{
                 group,
-                integration: integration.integrationId,
-                integrationPicture:
-                  properties.find((p) => p.id === integration.integrationId)
-                    .picture || '',
+                integration: resolvedId,
+                integrationPicture: matched.picture || '',
                 settings: integration.settings || {},
                 posts: integration.posts.map((p) => ({
                   approvedSubmitForOrder: 'NO',
@@ -311,10 +333,8 @@ const OpenModal: FC<{
                   id: makeId(10),
                   settings: JSON.stringify(integration.settings || {}),
                   group,
-                  integrationId: integration.integrationId,
-                  integration: properties.find(
-                    (p) => p.id === integration.integrationId
-                  ),
+                  integrationId: resolvedId,
+                  integration: matched,
                   publishDate: dayjs.utc(integration.date).toISOString(),
                   image: p.attachments.map((a) => ({
                     id: a.id,
@@ -327,9 +347,7 @@ const OpenModal: FC<{
                 date={dayjs.utc(integration.date)}
                 source="chat"
                 allIntegrations={properties}
-                integrations={properties.filter(
-                  (p) => p.id === integration.integrationId
-                )}
+                integrations={[matched]}
                 onlyValues={integration.posts.map((p) => ({
                   content: p.content,
                   id: makeId(10),
@@ -349,7 +367,7 @@ const OpenModal: FC<{
     }
 
     respond('User scheduled all the posts');
-  }, [args, respond, properties]);
+  }, [args, respond, findIntegration]);
 
   useEffect(() => {
     startModal();

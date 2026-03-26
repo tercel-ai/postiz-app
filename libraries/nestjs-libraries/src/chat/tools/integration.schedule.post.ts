@@ -12,6 +12,7 @@ import { Integration } from '@prisma/client';
 import { checkAuth } from '@gitroom/nestjs-libraries/chat/auth.context';
 import { stripHtmlValidation } from '@gitroom/helpers/utils/strip.html.validation';
 import { weightedLength } from '@gitroom/helpers/utils/count.length';
+import { resolveIntegrationIds, SelectedIntegration } from './resolve-integration';
 
 function countCharacters(text: string, type: string): number {
   if (type !== 'x') {
@@ -44,6 +45,11 @@ If the user want to post 20 posts for facebook each in individual days without c
 - postsAndComments array length will be one
 
 If the tools return errors, you would need to rerun it with the right parameters, don't ask again, just run it
+
+Integration routing:
+- If the user selected only 1 channel, you can omit integrationId — it will be auto-resolved.
+- If the user selected multiple channels and wants to post to a specific one, pass its integrationId.
+- If the user selected multiple channels and wants to post to all, omit integrationId.
 `,
       inputSchema: z.object({
         socialPost: z
@@ -51,7 +57,10 @@ If the tools return errors, you would need to rerun it with the right parameters
             z.object({
               integrationId: z
                 .string()
-                .describe('The id of the integration (not internal id)'),
+                .optional()
+                .describe(
+                  'Optional. The integration ID from the selected channels. If only 1 channel is selected, this is auto-resolved. If omitted with multiple channels, the post goes to ALL selected channels.'
+                ),
               isPremium: z
                 .boolean()
                 .describe(
@@ -123,32 +132,81 @@ If the tools return errors, you would need to rerun it with the right parameters
         ).id;
         // @ts-ignore
         const userId = runtimeContext.get('userId') as string | undefined;
+
+        // Get user-selected integrations from runtimeContext (set by frontend)
+        const selectedIntegrations: SelectedIntegration[] =
+          // @ts-ignore
+          (runtimeContext.get('integrations') as any[] || []);
+
         const finalOutput = [];
 
-        const integrations = {} as Record<string, Integration>;
-        for (const platform of context.socialPost) {
-          const integration = await this._integrationService.getIntegrationById(
-            organizationId,
-            platform.integrationId
-          );
+        // Expand socialPost items: resolve integrationIds using routing rules
+        interface ExpandedPost {
+          resolvedIntegrationId: string;
+          isPremium: boolean;
+          date: string;
+          shortLink: boolean;
+          type: string;
+          postsAndComments: { content: string; attachments: string[] }[];
+          settings: { key: string; value: any }[];
+        }
+        const expandedPosts: ExpandedPost[] = [];
 
-          if (!integration) {
-            return { errors: `Integration ${platform.integrationId} not found` };
+        for (const post of context.socialPost) {
+          const result = resolveIntegrationIds(selectedIntegrations, post.integrationId);
+
+          if (result.kind === 'error') {
+            return { errors: result.message };
           }
 
-          integrations[platform.integrationId] = integration;
+          for (const resolvedId of result.integrationIds) {
+            expandedPosts.push({
+              resolvedIntegrationId: resolvedId,
+              isPremium: post.isPremium,
+              date: post.date,
+              shortLink: post.shortLink,
+              type: post.type,
+              postsAndComments: post.postsAndComments,
+              settings: post.settings,
+            });
+          }
+        }
 
-          const { dto, maxLength, identifier } = socialIntegrationList.find(
-            (p) =>
-              p.identifier ===
-              integrations[platform.integrationId].providerIdentifier
-          )!;
+        // Validate all expanded posts
+        const integrations = {} as Record<string, Integration>;
+        for (const post of expandedPosts) {
+          if (!integrations[post.resolvedIntegrationId]) {
+            const integration = await this._integrationService.getIntegrationById(
+              organizationId,
+              post.resolvedIntegrationId
+            );
+
+            if (!integration) {
+              return {
+                errors: `Integration ${post.resolvedIntegrationId} not found in database.`,
+              };
+            }
+            integrations[post.resolvedIntegrationId] = integration;
+          }
+
+          const integration = integrations[post.resolvedIntegrationId];
+          const providerInfo = socialIntegrationList.find(
+            (p) => p.identifier === integration.providerIdentifier
+          );
+
+          if (!providerInfo) {
+            return {
+              errors: `Unknown platform for integration ${integration.name || post.resolvedIntegrationId}.`,
+            };
+          }
+
+          const { dto, maxLength, identifier } = providerInfo;
 
           if (dto) {
             const newDTO = new dto();
             const obj = Object.assign(
               newDTO,
-              platform.settings.reduce(
+              post.settings.reduce(
                 (acc, s) => ({
                   ...acc,
                   [s.key]: s.value,
@@ -164,16 +222,16 @@ If the tools return errors, you would need to rerun it with the right parameters
             }
 
             const errorsLength = [];
-            for (const post of platform.postsAndComments) {
-              const maximumCharacters = maxLength(platform.isPremium);
-              const strip = stripHtmlValidation('normal', post.content, true);
-              const weightedLength = countCharacters(strip, identifier || '');
+            for (const p of post.postsAndComments) {
+              const maximumCharacters = maxLength(post.isPremium);
+              const strip = stripHtmlValidation('normal', p.content, true);
+              const wLen = countCharacters(strip, identifier || '');
               const totalCharacters =
-                weightedLength > strip.length ? weightedLength : strip.length;
+                wLen > strip.length ? wLen : strip.length;
 
               if (totalCharacters > (maximumCharacters || 1000000)) {
                 errorsLength.push({
-                  value: post.content,
+                  value: p.content,
                   error: `The maximum characters is ${maximumCharacters}, we got ${totalCharacters}, please fix it, and try integrationSchedulePostTool again.`,
                 });
               }
@@ -187,12 +245,9 @@ If the tools return errors, you would need to rerun it with the right parameters
           }
         }
 
-        for (const post of context.socialPost) {
-          const integration = integrations[post.integrationId];
-
-          if (!integration) {
-            throw new Error('Integration not found');
-          }
+        // Create posts
+        for (const post of expandedPosts) {
+          const integration = integrations[post.resolvedIntegrationId];
 
           const output = await this._postsService.createPost(organizationId, {
             date: post.date,
@@ -216,9 +271,9 @@ If the tools return errors, you would need to rerun it with the right parameters
                   content: p.content,
                   id: makeId(10),
                   delay: 0,
-                  image: p.attachments.map((p) => ({
+                  image: p.attachments.map((a) => ({
                     id: makeId(10),
-                    path: p,
+                    path: a,
                   })),
                 })),
               },
