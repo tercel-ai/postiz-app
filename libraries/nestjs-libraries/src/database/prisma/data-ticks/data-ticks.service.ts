@@ -13,72 +13,11 @@ import {
   AnalyticsData,
   BatchPostAnalyticsResult,
 } from '@gitroom/nestjs-libraries/integrations/social/social.integrations.interface';
-import { computeTrafficScore } from '@gitroom/nestjs-libraries/integrations/social/traffic.calculator';
+import { extractMetrics, stripSyntheticMetrics } from '@gitroom/nestjs-libraries/integrations/social/analytics.utils';
 import { PostsRepository } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.repository';
 
 dayjs.extend(utc);
 dayjs.extend(isoWeek);
-
-/**
- * Per-platform mapping: which API label(s) represent total impressions/exposure.
- * All labels are matched case-insensitively.
- *
- * X:          "Impressions"
- * YouTube:    "Views"
- * Threads:    "Views"
- * Pinterest:  "Impressions"
- * Instagram:  "Impressions"
- * LinkedIn:   "Impressions" (not "Unique Impressions" to avoid double-counting)
- * Facebook:   "Impressions"
- */
-const IMPRESSIONS_LABELS: Record<string, Set<string>> = {
-  x:                     new Set(['impressions']),
-  youtube:               new Set(['views']),
-  threads:               new Set(['views']),
-  pinterest:             new Set(['impressions']),
-  instagram:             new Set(['impressions']),
-  'instagram-standalone': new Set(['impressions']),
-  facebook:              new Set(['impressions']),
-  linkedin:              new Set(['impressions']),
-  'linkedin-page':       new Set(['impressions']),
-};
-
-/** Fallback: if platform not in map, try these common labels. */
-const IMPRESSIONS_FALLBACK = new Set(['impressions', 'views']);
-
-function isImpressionsLabel(platform: string, label: string): boolean {
-  const platformLabels = IMPRESSIONS_LABELS[platform.toLowerCase()];
-  if (platformLabels) {
-    return platformLabels.has(label.toLowerCase());
-  }
-  return IMPRESSIONS_FALLBACK.has(label.toLowerCase());
-}
-
-/**
- * Strip synthetic metrics (e.g. 'Traffic') that checkPostAnalytics may have
- * appended. Only real platform-returned metrics should be used for aggregation.
- */
-function stripSyntheticMetrics(metrics: AnalyticsData[]): AnalyticsData[] {
-  return metrics.filter((m) => m.label !== 'Traffic');
-}
-
-/** Extract impressions and traffic score from platform analytics metrics. */
-function extractMetrics(
-  platform: string,
-  metrics: AnalyticsData[]
-): { impressions: number; trafficScore: number | null; rawMetrics: AnalyticsData[] } {
-  const rawMetrics = stripSyntheticMetrics(metrics);
-  let impressions = 0;
-  for (const metric of rawMetrics) {
-    if (isImpressionsLabel(platform, metric.label)) {
-      for (const point of metric.data) {
-        impressions += Number(point.total || 0);
-      }
-    }
-  }
-  const trafficScore = computeTrafficScore(platform, rawMetrics);
-  return { impressions, trafficScore, rawMetrics };
-}
 
 /** How many days of posts to fetch for analytics aggregation. */
 const ANALYTICS_LOOKBACK_DAYS = 30;

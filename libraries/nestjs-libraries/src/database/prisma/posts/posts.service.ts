@@ -34,6 +34,7 @@ import {
 } from '@gitroom/nestjs-libraries/temporal/temporal.search.attribute';
 import { AnalyticsData } from '@gitroom/nestjs-libraries/integrations/social/social.integrations.interface';
 import { computeTrafficScore } from '@gitroom/nestjs-libraries/integrations/social/traffic.calculator';
+import { extractMetrics } from '@gitroom/nestjs-libraries/integrations/social/analytics.utils';
 import { timer } from '@gitroom/helpers/utils/timer';
 import { ioRedis } from '@gitroom/nestjs-libraries/redis/redis.service';
 import { RefreshToken } from '@gitroom/nestjs-libraries/integrations/social.abstract';
@@ -213,6 +214,24 @@ export class PostsService {
           ? 1
           : 3600
       );
+
+      const { impressions, trafficScore: extractedTrafficScore, rawMetrics } =
+        extractMetrics(post.integration.providerIdentifier, loadAnalytics);
+      if (impressions > 0 || extractedTrafficScore !== null) {
+        this._postRepository
+          .batchUpdatePostAnalytics([
+            {
+              id: post.id,
+              impressions,
+              trafficScore: extractedTrafficScore ?? undefined,
+              analytics: rawMetrics,
+            },
+          ])
+          .catch((e) =>
+            console.error(`Post analytics write-back error for ${post.id}:`, e)
+          );
+      }
+
       return loadAnalytics;
     } catch (e: any) {
       if (e instanceof RefreshToken) {
