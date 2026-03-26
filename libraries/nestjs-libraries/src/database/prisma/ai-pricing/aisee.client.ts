@@ -7,12 +7,12 @@ import { randomBytes } from 'crypto';
 // ---------------------------------------------------------------------------
 
 export const AiseeBusinessType = {
-  AI_COPYWRITING: 'ai_copywriting',
-  IMAGE_GEN: 'image_gen',
+  AI_COPYWRITING: 'ai_copywriting',  // generate text
+  IMAGE_GEN: 'image_gen',  // image generate
   // TODO: VIDEO_GEN billing — pending KieAI cost integration with Aisee billing.
   // Once KieAI reports usage info, use this type in media.service.ts generateVideo().
-  VIDEO_GEN: 'video_gen',
-  POST_OVERAGE: 'post_overage',
+  VIDEO_GEN: 'video_gen',  // video generate
+  POST_OVERAGE: 'post_overage', // post beyond the subscription limit
 } as const;
 
 export type AiseeBusinessType =

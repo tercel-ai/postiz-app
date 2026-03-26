@@ -7,6 +7,8 @@ import {
 import { AiseeCreditService } from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/aisee-credit.service';
 import { AiseeClient } from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/aisee.client';
 import { AdminBillingRecordsQueryDto } from '@gitroom/nestjs-libraries/dtos/admin/admin-billing-records-query.dto';
+import { OrganizationService } from '@gitroom/nestjs-libraries/database/prisma/organizations/organization.service';
+import { resolveOrganizationId } from '@gitroom/backend/admin-api/admin.utils';
 
 @ApiTags('Admin')
 @Controller('/admin/billing')
@@ -15,7 +17,8 @@ export class AdminBillingController {
   constructor(
     private readonly _billingRecord: PrismaRepository<'billingRecord'>,
     private readonly _creditService: AiseeCreditService,
-    private readonly _aiseeClient: AiseeClient
+    private readonly _aiseeClient: AiseeClient,
+    private readonly _organizationService: OrganizationService
   ) {}
 
   /**
@@ -31,13 +34,27 @@ export class AdminBillingController {
    */
   @Get('/records')
   async listRecords(@Query() query: AdminBillingRecordsQueryDto) {
-    const { status, organizationId, businessType, page, pageSize } = query;
+    const { status, businessType, page, pageSize } = query;
+
+    const { organizationId, empty } = await resolveOrganizationId(
+      this._organizationService,
+      query.organizationId,
+      query.userId,
+    );
+    if (empty) {
+      return { records: [], pagination: { page, pageSize, total: 0, totalPages: 0 } };
+    }
+
     const take = pageSize;
     const skip = (page - 1) * take;
 
     const where: Record<string, any> = {};
     if (status) where.status = status;
-    if (organizationId) where.organizationId = organizationId;
+    if (organizationId) {
+      where.organizationId = Array.isArray(organizationId)
+        ? { in: organizationId }
+        : organizationId;
+    }
     if (businessType) where.businessType = businessType;
 
     const [records, total] = await Promise.all([
@@ -46,14 +63,44 @@ export class AdminBillingController {
         orderBy: { createdAt: 'desc' },
         take,
         skip,
+        select: {
+          id: true,
+          organizationId: true,
+          transactionId: true,
+          taskId: true,
+          amount: true,
+          businessType: true,
+          subType: true,
+          description: true,
+          costItems: true,
+          relatedId: true,
+          data: true,
+          status: true,
+          remainingBalance: true,
+          debtAmount: true,
+          error: true,
+          createdAt: true,
+          updatedAt: true,
+          organization: {
+            select: {
+              users: {
+                where: { role: { in: ['SUPERADMIN', 'ADMIN'] }, disabled: false },
+                orderBy: { role: 'asc' },
+                take: 1,
+                select: { userId: true },
+              },
+            },
+          },
+        },
       }),
       this._billingRecord.model.billingRecord.count({ where }),
     ]);
 
     return {
-      records: records.map((r) => ({
+      records: records.map(({ organization, ...r }) => ({
         ...r,
         costItems: JSON.parse(r.costItems),
+        userId: organization?.users[0]?.userId ?? null,
       })),
       pagination: {
         page: Math.floor(skip / take) + 1,

@@ -12,6 +12,10 @@ export class AdminBillingRecordsQueryDto {
 
   @IsOptional()
   @IsString()
+  userId?: string;
+
+  @IsOptional()
+  @IsString()
   businessType?: string;
 
   @IsOptional()

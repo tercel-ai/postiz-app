@@ -207,6 +207,12 @@ export class PostsRepository {
             select: {
               id: true,
               name: true,
+              users: {
+                where: { role: { in: ['SUPERADMIN', 'ADMIN'] }, disabled: false },
+                orderBy: { role: 'asc' },
+                take: 1,
+                select: { userId: true },
+              },
             },
           },
         },
@@ -217,7 +223,14 @@ export class PostsRepository {
     ]);
 
     return {
-      results,
+      results: results.map(({ organization, ...item }) => ({
+        ...item,
+        organization: {
+          id: organization.id,
+          name: organization.name,
+        },
+        userId: organization.users[0]?.userId ?? null,
+      })),
       total,
       page: query.page,
       pageSize: query.pageSize,

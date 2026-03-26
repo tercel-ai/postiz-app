@@ -518,6 +518,12 @@ export class IntegrationRepository {
             select: {
               id: true,
               name: true,
+              users: {
+                where: { role: { in: ['SUPERADMIN', 'ADMIN'] }, disabled: false },
+                orderBy: { role: 'asc' },
+                take: 1,
+                select: { userId: true },
+              },
             },
           },
         },
@@ -525,7 +531,20 @@ export class IntegrationRepository {
       this._integration.model.integration.count({ where }),
     ]);
 
-    return { items, total, page, pageSize, totalPages: Math.ceil(total / pageSize) };
+    return {
+      items: items.map(({ organization, ...item }) => ({
+        ...item,
+        organization: {
+          id: organization.id,
+          name: organization.name,
+        },
+        userId: organization.users[0]?.userId ?? null,
+      })),
+      total,
+      page,
+      pageSize,
+      totalPages: Math.ceil(total / pageSize),
+    };
   }
 
   getIntegrationsList(org: string) {
