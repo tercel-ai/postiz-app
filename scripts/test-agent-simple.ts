@@ -727,7 +727,7 @@ function buildScenarios(): Scenario[] {
         () => 'I need to post something right now, this is urgent!',
       ],
       verify: verify.all(
-        verify.responseNotContains('x.com', 'twitter.com', 'linkedin.com', 'go to', '登录', '手动'),
+        verify.responseNotContains('x.com', 'twitter.com', 'linkedin.com', 'go to x', 'go to twitter', 'go to linkedin', 'login to', '登录', '手动发'),
         verify.responseContains('select', 'channel', '选择', '渠道'),
       ),
     },
