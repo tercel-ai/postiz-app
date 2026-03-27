@@ -68,7 +68,8 @@ export class IntegrationsController {
     ].filter(Boolean).map(o => o!.replace(/\/$/, ''));
 
     const normalized = origin.replace(/\/$/, '');
-    return allowedOrigins.includes(normalized) ? normalized : process.env.FRONTEND_URL!;
+    const matched = allowedOrigins.find((o) => o!.startsWith(normalized));
+    return matched ? matched : process.env.FRONTEND_URL!;
   }
 
   private async withCallbackUrl<T>(callbackBaseUrl: string, fn: () => Promise<T>): Promise<T> {
