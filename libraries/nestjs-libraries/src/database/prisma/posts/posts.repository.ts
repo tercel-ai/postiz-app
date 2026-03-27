@@ -819,6 +819,7 @@ export class PostsRepository {
       },
       select: {
         id: true,
+        group: true,
         publishDate: true,
         intervalInDays: true,
         state: true,
