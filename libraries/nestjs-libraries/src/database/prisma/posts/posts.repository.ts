@@ -422,31 +422,35 @@ export class PostsRepository {
       },
     });
 
-    // Collect recurring post IDs for clone Post lookup
+    // Collect recurring posts for clone lookup
     const recurringPosts = list.filter((p) => p.intervalInDays);
-    const recurringPostIds = recurringPosts.map((p) => p.id);
+    const recurringPostIds = new Set(recurringPosts.map((p) => p.id));
+    const recurringGroups = recurringPosts.map((p) => p.group);
 
-    // Fetch clone Post records for recurring posts within the date range
-    const clones = recurringPostIds.length
+    // Fetch clone Post records for recurring posts within the date range.
+    // Clones share the same group as their original but have no sourcePostId.
+    const clones = recurringGroups.length
       ? await this._post.model.post.findMany({
         where: {
-          sourcePostId: { in: recurringPostIds },
+          group: { in: recurringGroups },
+          id: { notIn: [...recurringPostIds] },
           publishDate: { gte: startDate, lte: endDate },
           deletedAt: null,
+          parentPostId: null,
           ...(query.state ? { state: query.state } : {}),
         },
         orderBy: { publishDate: 'asc' },
       })
       : [];
 
-    // Group clones by sourcePostId
-    const clonesBySourceId = new Map<string, typeof clones>();
+    // Group clones by group (each recurring post has a unique group)
+    const clonesByGroup = new Map<string, typeof clones>();
     for (const clone of clones) {
-      if (!clone.sourcePostId) continue;
-      if (!clonesBySourceId.has(clone.sourcePostId)) {
-        clonesBySourceId.set(clone.sourcePostId, []);
+      if (!clone.group) continue;
+      if (!clonesByGroup.has(clone.group)) {
+        clonesByGroup.set(clone.group, []);
       }
-      clonesBySourceId.get(clone.sourcePostId)!.push(clone);
+      clonesByGroup.get(clone.group)!.push(clone);
     }
 
     return list.reduce((all, post) => {
@@ -454,7 +458,7 @@ export class PostsRepository {
         return [...all, post];
       }
 
-      const postClones = clonesBySourceId.get(post.id) || [];
+      const postClones = clonesByGroup.get(post.group) || [];
       const now = dayjs.utc();
       const result = [];
 
@@ -509,21 +513,36 @@ export class PostsRepository {
   }
 
   async deletePost(orgId: string, group: string) {
-    // For recurring posts, preserve published/errored clones — only soft-delete
-    // QUEUE posts (the original + any unclaimed clones).
-    await this._post.model.post.updateMany({
-      where: {
-        organizationId: orgId,
-        group,
-        OR: [
-          { sourcePostId: null },
-          { state: { in: ['QUEUE', 'DRAFT'] } },
-        ],
-      },
-      data: {
-        deletedAt: new Date(),
-      },
+    // Check if this group contains a recurring post
+    const hasRecurring = await this._post.model.post.findFirst({
+      where: { organizationId: orgId, group, intervalInDays: { not: null } },
+      select: { id: true },
     });
+
+    if (hasRecurring) {
+      // Recurring: preserve PUBLISHED/ERROR clones, only delete QUEUE/DRAFT
+      await this._post.model.post.updateMany({
+        where: {
+          organizationId: orgId,
+          group,
+          state: { in: ['QUEUE', 'DRAFT'] },
+        },
+        data: {
+          deletedAt: new Date(),
+        },
+      });
+    } else {
+      // Non-recurring: delete everything in the group
+      await this._post.model.post.updateMany({
+        where: {
+          organizationId: orgId,
+          group,
+        },
+        data: {
+          deletedAt: new Date(),
+        },
+      });
+    }
 
     return this._post.model.post.findFirst({
       where: {
@@ -599,8 +618,8 @@ export class PostsRepository {
 
   /**
    * Idempotent: find or create a QUEUE clone for a recurring post cycle.
-   * Used as a pre-publish lock — if a clone already exists for this
-   * (sourcePostId, publishDate) pair, return it instead of creating a new one.
+   * Uses (group, publishDate) to detect existing clones — no sourcePostId
+   * so the clone is always a standalone post visible in calendar and list.
    *
    * Returns { clone, alreadyHandled }:
    *  - alreadyHandled=true  → clone is PUBLISHED or ERROR, skip this cycle
@@ -613,8 +632,9 @@ export class PostsRepository {
   ): Promise<{ clone: any; alreadyHandled: boolean }> {
     const existing = await this._post.model.post.findFirst({
       where: {
-        sourcePostId: originalPost.id,
+        group: originalPost.group,
         publishDate: cyclePublishDate,
+        id: { not: originalPost.id },
       },
       select: { id: true, state: true, releaseId: true },
     });
@@ -659,18 +679,17 @@ export class PostsRepository {
         publishDate: cyclePublishDate,
         state: 'QUEUE',
         releaseId: claimToken,
-        sourcePostId: originalPost.id,
       },
     });
 
     // Guard against concurrent creates: if another workflow also created a
-    // clone for the same (sourcePostId, publishDate) between our findFirst
-    // and create, multiple clones exist.  The one with the earliest createdAt
-    // wins; losers delete their clone and bail out.
+    // clone for the same (group, publishDate) between our findFirst and
+    // create, multiple clones exist.  The earliest createdAt wins.
     const allClones = await this._post.model.post.findMany({
       where: {
-        sourcePostId: originalPost.id,
+        group: originalPost.group,
         publishDate: cyclePublishDate,
+        id: { not: originalPost.id },
       },
       select: { id: true, createdAt: true },
       orderBy: { createdAt: 'asc' },
@@ -816,17 +835,19 @@ export class PostsRepository {
   }
 
   /**
-   * Find all clone posts for given source post IDs.
+   * Find all clone posts for given recurring post groups.
    */
-  findClonesBySourceIds(sourceIds: string[]) {
+  findClonesByGroups(groups: string[], excludeIds: string[]) {
     return this._post.model.post.findMany({
       where: {
-        sourcePostId: { in: sourceIds },
+        group: { in: groups },
+        id: { notIn: excludeIds },
         deletedAt: null,
+        parentPostId: null,
       },
       select: {
         id: true,
-        sourcePostId: true,
+        group: true,
         publishDate: true,
         createdAt: true,
         state: true,
@@ -1232,22 +1253,37 @@ export class PostsRepository {
       : undefined;
 
     if (body.group) {
-      // Preserve published/errored clones of recurring posts — only soft-delete
-      // originals and QUEUE/DRAFT clones so edit doesn't erase history.
-      await this._post.model.post.updateMany({
-        where: {
-          group: body.group,
-          deletedAt: null,
-          OR: [
-            { sourcePostId: null },
-            { state: { in: ['QUEUE', 'DRAFT'] } },
-          ],
-        },
-        data: {
-          parentPostId: null,
-          deletedAt: new Date(),
-        },
+      const hasRecurring = await this._post.model.post.findFirst({
+        where: { group: body.group, intervalInDays: { not: null }, deletedAt: null },
+        select: { id: true },
       });
+
+      if (hasRecurring) {
+        // Recurring: preserve PUBLISHED/ERROR clones, only delete QUEUE/DRAFT
+        await this._post.model.post.updateMany({
+          where: {
+            group: body.group,
+            deletedAt: null,
+            state: { in: ['QUEUE', 'DRAFT'] },
+          },
+          data: {
+            parentPostId: null,
+            deletedAt: new Date(),
+          },
+        });
+      } else {
+        // Non-recurring: delete everything in the group
+        await this._post.model.post.updateMany({
+          where: {
+            group: body.group,
+            deletedAt: null,
+          },
+          data: {
+            parentPostId: null,
+            deletedAt: new Date(),
+          },
+        });
+      }
     }
 
     return { previousPost, posts };

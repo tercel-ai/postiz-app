@@ -37,21 +37,22 @@ export class AdminDiagnosticsController {
     }
 
     const recurringIds = recurringPosts.map((p) => p.id);
-    const allClones = await this._postsRepository.findClonesBySourceIds(recurringIds);
+    const recurringGroups = recurringPosts.map((p) => p.group);
+    const allClones = await this._postsRepository.findClonesByGroups(recurringGroups, recurringIds);
 
     const cloneMap = new Map<string, typeof allClones>();
     for (const clone of allClones) {
-      if (!clone.sourcePostId) continue;
-      if (!cloneMap.has(clone.sourcePostId)) {
-        cloneMap.set(clone.sourcePostId, []);
+      if (!clone.group) continue;
+      if (!cloneMap.has(clone.group)) {
+        cloneMap.set(clone.group, []);
       }
-      cloneMap.get(clone.sourcePostId)!.push(clone);
+      cloneMap.get(clone.group)!.push(clone);
     }
 
     const now = new Date();
 
     for (const post of recurringPosts) {
-      const clones = cloneMap.get(post.id) || [];
+      const clones = cloneMap.get(post.group) || [];
 
       // Check 1: Premature clones — createdAt is significantly before publishDate (>1h)
       for (const clone of clones) {
