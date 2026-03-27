@@ -2,6 +2,7 @@ import { PostActivity } from '@gitroom/orchestrator/activities/post.activity';
 import {
   ActivityFailure,
   ApplicationFailure,
+  continueAsNew,
   proxyActivities,
   sleep,
 } from '@temporalio/workflow';
@@ -138,6 +139,7 @@ export async function postWorkflowV101({
         state: 'ERROR',
         error: 'Integration requires reconnection',
       });
+      await continueAsNew<typeof postWorkflowV101>({ taskQueue, postId, organizationId });
     }
     return;
   }
@@ -157,6 +159,7 @@ export async function postWorkflowV101({
         state: 'ERROR',
         error: 'Integration is disabled',
       });
+      await continueAsNew<typeof postWorkflowV101>({ taskQueue, postId, organizationId });
     }
     return;
   }
@@ -234,6 +237,7 @@ export async function postWorkflowV101({
                 state: 'ERROR',
                 error: 'Token refresh failed',
               });
+              await continueAsNew<typeof postWorkflowV101>({ taskQueue, postId, organizationId });
             }
             return false;
           }
@@ -272,6 +276,9 @@ export async function postWorkflowV101({
             false,
             'fail'
           );
+          if (isRecurring) {
+            await continueAsNew<typeof postWorkflowV101>({ taskQueue, postId, organizationId });
+          }
           return false;
         }
 
@@ -291,6 +298,9 @@ export async function postWorkflowV101({
         });
       }
       await changeState(postsList[0].id, 'ERROR', lastErr, postsList);
+      if (isRecurring) {
+        await continueAsNew<typeof postWorkflowV101>({ taskQueue, postId, organizationId });
+      }
       return false;
     }
 
@@ -440,5 +450,10 @@ export async function postWorkflowV101({
         break;
       }
     }
+  }
+
+  // ── Recurring post: schedule the next cycle ──
+  if (isRecurring) {
+    await continueAsNew<typeof postWorkflowV101>({ taskQueue, postId, organizationId });
   }
 }

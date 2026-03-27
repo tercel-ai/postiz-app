@@ -509,10 +509,16 @@ export class PostsRepository {
   }
 
   async deletePost(orgId: string, group: string) {
+    // For recurring posts, preserve published/errored clones — only soft-delete
+    // QUEUE posts (the original + any unclaimed clones).
     await this._post.model.post.updateMany({
       where: {
         organizationId: orgId,
         group,
+        OR: [
+          { sourcePostId: null },
+          { state: { in: ['QUEUE', 'DRAFT'] } },
+        ],
       },
       data: {
         deletedAt: new Date(),
@@ -1226,10 +1232,16 @@ export class PostsRepository {
       : undefined;
 
     if (body.group) {
+      // Preserve published/errored clones of recurring posts — only soft-delete
+      // originals and QUEUE/DRAFT clones so edit doesn't erase history.
       await this._post.model.post.updateMany({
         where: {
           group: body.group,
           deletedAt: null,
+          OR: [
+            { sourcePostId: null },
+            { state: { in: ['QUEUE', 'DRAFT'] } },
+          ],
         },
         data: {
           parentPostId: null,
