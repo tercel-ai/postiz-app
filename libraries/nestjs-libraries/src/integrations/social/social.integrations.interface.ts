@@ -40,6 +40,10 @@ export interface IAuthenticator {
     postIds: string[],
     fromDate: number,
   ): Promise<BatchPostAnalyticsResult>;
+  accountMetrics?(
+    integrationId: string,
+    accessToken: string,
+  ): Promise<AccountMetrics | null>;
   changeNickname?(
     id: string,
     accessToken: string,
@@ -61,6 +65,13 @@ export interface AnalyticsData {
 export interface BatchPostAnalyticsResult {
   [postId: string]: AnalyticsData[];
 }
+
+/**
+ * Account-level metrics returned by each platform.
+ * Keys are metric names (e.g. 'followers', 'following', 'posts', 'listed').
+ * Each platform returns only the metrics it supports.
+ */
+export type AccountMetrics = Record<string, number>;
 
 
 export type GenerateAuthUrlResponse = {

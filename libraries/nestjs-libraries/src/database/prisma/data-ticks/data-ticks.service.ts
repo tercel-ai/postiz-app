@@ -42,6 +42,23 @@ export class DataTicksService {
    * Traffic is a weighted engagement score computed from per-post metrics.
    * Frontend computes deltas if needed.
    */
+  private static readonly ACCOUNT_METRICS_COOLDOWN = 3600; // 1 hour
+
+  async syncAccountMetricsById(integrationId: string, skipCooldown = false): Promise<Record<string, number> | null> {
+    if (!skipCooldown) {
+      const cooldownKey = `account-metrics:cooldown:${integrationId}`;
+      const locked = await ioRedis.get(cooldownKey);
+      if (locked) return null;
+      await ioRedis.set(cooldownKey, '1', 'EX', DataTicksService.ACCOUNT_METRICS_COOLDOWN);
+    }
+
+    const integration = await this._dashboardRepository.getIntegrationById(integrationId);
+    if (!integration || integration.deletedAt || integration.disabled) {
+      return null;
+    }
+    return this.syncSingleAccountMetrics(integration);
+  }
+
   async syncDailyTicks(targetDate?: Date) {
     const date = targetDate
       ? dayjs.utc(targetDate).startOf('day')
@@ -229,6 +246,9 @@ export class DataTicksService {
     // Sync analytics to individual Post records (each with its own releaseId)
     await this._syncPostAnalytics(orgId, integrationById, analyticsDays);
 
+    // Sync account-level metrics (followers, etc.) to Integration records
+    await this._syncAccountMetrics(fullIntegrations);
+
     return records.length;
   }
 
@@ -365,6 +385,49 @@ export class DataTicksService {
         console.error(`Post batch analytics write error for org ${orgId}:`, e);
       }
     }
+  }
+
+  private async _syncAccountMetrics(integrations: Integration[]) {
+    for (const integration of integrations) {
+      try {
+        await this.syncSingleAccountMetrics(integration);
+      } catch (err) {
+        console.error(
+          `Account metrics error for integration ${integration.id}:`,
+          err
+        );
+      }
+    }
+  }
+
+  async syncSingleAccountMetrics(integration: Integration): Promise<Record<string, number> | null> {
+    const provider = this._integrationManager.getSocialIntegration(
+      integration.providerIdentifier
+    );
+    if (!provider?.accountMetrics) {
+      return null;
+    }
+
+    let token = integration.token;
+    if (dayjs(integration.tokenExpiration).isBefore(dayjs())) {
+      const refreshed =
+        await this._refreshIntegrationService.refresh(integration);
+      if (refreshed === false) return null;
+      token = refreshed.accessToken;
+    }
+
+    const metrics = await provider.accountMetrics(
+      integration.internalId,
+      token
+    );
+    if (!metrics || Object.keys(metrics).length === 0) return null;
+
+    await this._dashboardRepository.updateAccountMetrics(
+      integration.id,
+      metrics
+    );
+
+    return metrics;
   }
 
   private async _fetchBatchAnalytics(

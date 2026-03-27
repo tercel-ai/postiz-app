@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Query, BadRequestException } from '@nestjs/common';
+import { Controller, Get, Param, Post, Query, BadRequestException } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 import { DashboardService } from '@gitroom/nestjs-libraries/database/prisma/dashboard/dashboard.service';
 import { OrganizationService } from '@gitroom/nestjs-libraries/database/prisma/organizations/organization.service';
@@ -117,5 +117,22 @@ export class AdminDashboardController {
       query.channel,
       tz
     );
+  }
+
+  /**
+   * POST /admin/dashboard/account-metrics/:integrationId
+   *
+   * Trigger account-level metrics sync for a single integration.
+   * Returns the fetched metrics or null if the provider doesn't support it.
+   */
+  @Post('/account-metrics/:integrationId')
+  async syncAccountMetrics(@Param('integrationId') integrationId: string) {
+    const metrics = await this._dataTicksService.syncAccountMetricsById(integrationId, true);
+    if (metrics === null) {
+      throw new BadRequestException(
+        'Integration not found, disabled, or provider does not support account metrics'
+      );
+    }
+    return { integrationId, metrics };
   }
 }

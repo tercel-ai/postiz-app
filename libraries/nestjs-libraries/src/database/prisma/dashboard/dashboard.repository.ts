@@ -166,4 +166,41 @@ export class DashboardRepository {
       },
     });
   }
+
+  getIntegrationById(id: string) {
+    return this._integration.model.integration.findUnique({
+      where: { id },
+    });
+  }
+
+  async updateAccountMetrics(integrationId: string, metrics: Record<string, number>) {
+    const integration = await this._integration.model.integration.findUnique({
+      where: { id: integrationId },
+      select: { additionalSettings: true },
+    });
+    if (!integration) return;
+
+    const settings: Array<{ title: string; description: string; type: string; value: any }> =
+      JSON.parse(integration.additionalSettings || '[]');
+
+    for (const [key, value] of Object.entries(metrics)) {
+      const title = `account:${key}`;
+      const existing = settings.find((s) => s.title === title);
+      if (existing) {
+        existing.value = value;
+      } else {
+        settings.push({
+          title,
+          description: key,
+          type: 'readonly',
+          value,
+        });
+      }
+    }
+
+    await this._integration.model.integration.update({
+      where: { id: integrationId },
+      data: { additionalSettings: JSON.stringify(settings) },
+    });
+  }
 }

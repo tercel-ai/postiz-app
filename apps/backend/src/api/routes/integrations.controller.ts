@@ -26,6 +26,7 @@ import { ApiTags } from '@nestjs/swagger';
 import { GetUserFromRequest } from '@gitroom/nestjs-libraries/user/user.from.request';
 import { NotEnoughScopesFilter } from '@gitroom/nestjs-libraries/integrations/integration.missing.scopes';
 import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.service';
+import { DataTicksService } from '@gitroom/nestjs-libraries/database/prisma/data-ticks/data-ticks.service';
 import { normalizePostingTimes } from '@gitroom/nestjs-libraries/dtos/integrations/posting-times.utils';
 import { AuthService } from '@gitroom/helpers/auth/auth.service';
 import { AuthTokenDetails } from '@gitroom/nestjs-libraries/integrations/social/social.integrations.interface';
@@ -50,7 +51,8 @@ export class IntegrationsController {
     private _integrationManager: IntegrationManager,
     private _integrationService: IntegrationService,
     private _postService: PostsService,
-    private _refreshIntegrationService: RefreshIntegrationService
+    private _refreshIntegrationService: RefreshIntegrationService,
+    private _dataTicksService: DataTicksService
   ) {}
 
   private resolveCallbackBaseUrl(origin?: string): string {
@@ -117,11 +119,16 @@ export class IntegrationsController {
 
   @Get('/list')
   async getIntegrationList(@GetOrgFromRequest() org: Organization) {
+    const integrations = await this._integrationService.getIntegrationsList(org.id);
+
+    // Fire-and-forget: sync account metrics in background
+    for (const p of integrations) {
+      this._dataTicksService.syncAccountMetricsById(p.id).catch(() => {});
+    }
+
     return {
       integrations: await Promise.all(
-        (
-          await this._integrationService.getIntegrationsList(org.id)
-        ).map(async (p) => {
+        integrations.map(async (p) => {
           const findIntegration = this._integrationManager.getSocialIntegration(
             p.providerIdentifier
           );

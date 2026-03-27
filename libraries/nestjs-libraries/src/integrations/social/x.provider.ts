@@ -1,6 +1,7 @@
 import { PrismaClient } from '@prisma/client';
 import { TweetV2, TwitterApi } from 'twitter-api-v2';
 import {
+  AccountMetrics,
   AnalyticsData,
   AuthTokenDetails,
   BatchPostAnalyticsResult,
@@ -894,6 +895,53 @@ export class XProvider extends SocialAbstract implements SocialProvider {
     }
 
     return [];
+  }
+
+  async accountMetrics(
+    integrationId: string,
+    accessToken: string
+  ): Promise<AccountMetrics | null> {
+    if (process.env.DISABLE_X_ANALYTICS) {
+      return null;
+    }
+
+    if (await this._isRateLimited()) {
+      return null;
+    }
+
+    const [accessTokenSplit, accessSecretSplit] = accessToken.split(':');
+    const client = new TwitterApi({
+      appKey: process.env.X_API_KEY!,
+      appSecret: process.env.X_API_SECRET!,
+      accessToken: accessTokenSplit,
+      accessSecret: accessSecretSplit,
+    });
+
+    try {
+      const { data } = await client.v2.me({
+        'user.fields': ['public_metrics'],
+      });
+
+      const metrics = data.public_metrics;
+      if (!metrics) {
+        return null;
+      }
+
+      const result: AccountMetrics = {};
+      if (metrics.followers_count !== undefined) result.followers = metrics.followers_count;
+      if (metrics.following_count !== undefined) result.following = metrics.following_count;
+      if (metrics.tweet_count !== undefined) result.posts = metrics.tweet_count;
+      if (metrics.listed_count !== undefined) result.listed = metrics.listed_count;
+      return result;
+    } catch (err: any) {
+      if (err?.code === 429 || err?.rateLimit) {
+        if (err?.rateLimit?.reset) {
+          await this._setRateLimited(err.rateLimit.reset);
+        }
+      }
+      console.error('Error fetching X account metrics:', err);
+      return null;
+    }
   }
 
   async batchPostAnalytics(
