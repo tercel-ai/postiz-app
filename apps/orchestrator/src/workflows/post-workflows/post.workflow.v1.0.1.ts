@@ -12,20 +12,23 @@ import { capitalize, sortBy } from 'lodash';
 import { PostResponse } from '@gitroom/nestjs-libraries/integrations/social/social.integrations.interface';
 import { makeId } from '@gitroom/nestjs-libraries/services/make.is';
 
-const proxyTaskQueue = (taskQueue: string) => {
+const proxyTaskQueue = (taskQueue: string, noRetry = false) => {
   return proxyActivities<PostActivity>({
     startToCloseTimeout: '10 minute',
     taskQueue,
-    retry: {
-      maximumAttempts: 3,
-      backoffCoefficient: 1,
-      initialInterval: '2 minutes',
-    },
+    retry: noRetry
+      ? { maximumAttempts: 1 }
+      : {
+          maximumAttempts: 3,
+          backoffCoefficient: 1,
+          initialInterval: '2 minutes',
+        },
   });
 };
 
 const {
   getPostsList,
+  getPostNowRetry,
   inAppNotification,
   changeState,
   logError,
@@ -57,6 +60,10 @@ export async function postWorkflowV101({
   organizationId: string;
   postNow?: boolean;
 }) {
+  // When POST_NOW_RETRY=false (default) and postNow=true, don't retry on failure.
+  const postNowRetry = postNow ? await getPostNowRetry() : true;
+  const noRetry = postNow && !postNowRetry;
+
   // Dynamic task queue, for concurrency
   const {
     postSocial,
@@ -67,7 +74,7 @@ export async function postWorkflowV101({
     globalPlugs,
     processInternalPlug,
     processPlug,
-  } = proxyTaskQueue(taskQueue);
+  } = proxyTaskQueue(taskQueue, noRetry);
 
   // get all the posts and comments to post
   const postsListBefore = await getPostsList(organizationId, postId);
@@ -180,8 +187,10 @@ export async function postWorkflowV101({
     const before = postsResults.length;
     let lastErr: unknown = null;
 
-    // this is a small trick to repeat an action in case of token refresh
-    for (const _ of iterate) {
+    // Retry loop: noRetry (postNow + POST_NOW_RETRY=false) gets 1 attempt,
+    // otherwise 5 attempts (postNow+retry=true or scheduled posts).
+    const maxAttempts = noRetry ? [undefined] : iterate;
+    for (const _ of maxAttempts) {
       try {
         // first post the main post
         if (i === 0) {

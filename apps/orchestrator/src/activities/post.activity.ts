@@ -37,6 +37,11 @@ export class PostActivity {
   ) {}
 
   @ActivityMethod()
+  async getPostNowRetry(): Promise<boolean> {
+    return process.env.POST_NOW_RETRY === 'true';
+  }
+
+  @ActivityMethod()
   async getIntegrationById(orgId: string, id: string) {
     return this._integrationService.getIntegrationById(orgId, id);
   }

@@ -681,33 +681,44 @@ export class PostsService {
       }
     } catch (err) {}
 
-    try {
-      await this._temporalService.client
-        .getRawClient()
-        ?.workflow.start('postWorkflowV101', {
-          workflowId: `post_${postId}`,
-          taskQueue: 'main',
-          args: [
-            {
-              taskQueue: taskQueue,
-              postId: postId,
-              organizationId: orgId,
-              postNow: postNow,
-            },
-          ],
-          typedSearchAttributes: new TypedSearchAttributes([
-            {
-              key: postIdSearchParam,
-              value: postId,
-            },
-            {
-              key: organizationId,
-              value: orgId,
-            },
-          ]),
-        });
-    } catch (err) {
-      throw err;
+    await this._temporalService.client
+      .getRawClient()
+      ?.workflow.start('postWorkflowV101', {
+        workflowId: `post_${postId}`,
+        taskQueue: 'main',
+        args: [
+          {
+            taskQueue: taskQueue,
+            postId: postId,
+            organizationId: orgId,
+            postNow: postNow,
+          },
+        ],
+        typedSearchAttributes: new TypedSearchAttributes([
+          {
+            key: postIdSearchParam,
+            value: postId,
+          },
+          {
+            key: organizationId,
+            value: orgId,
+          },
+        ]),
+      });
+
+    // When postNow=true, poll until the first attempt resolves (PUBLISHED/ERROR)
+    // so the caller gets immediate feedback. Retries (if enabled) continue in background.
+    if (postNow) {
+      const maxWaitMs = 60_000; // 1 minute max
+      const intervalMs = 500;
+      const start = Date.now();
+      while (Date.now() - start < maxWaitMs) {
+        const post = await this._postRepository.getPostById(postId);
+        if (post && post.state !== 'QUEUE') {
+          return; // PUBLISHED or ERROR — first attempt done
+        }
+        await new Promise((r) => setTimeout(r, intervalMs));
+      }
     }
   }
 
@@ -750,8 +761,14 @@ export class PostsService {
             true
           );
         } catch (err) {
-          await this.changeState(posts[0].id, 'ERROR', `Workflow start failed: ${(err as Error)?.message || err}`);
-          throw err;
+          // Workflow failed or was rejected — check if post ended up as ERROR
+          const failedPost = await this._postRepository.getPostById(posts[0].id);
+          if (failedPost?.state === 'ERROR') {
+            // Post already marked ERROR by the workflow — return it with error info
+            // (don't throw, let frontend handle the ERROR state)
+          } else {
+            await this.changeState(posts[0].id, 'ERROR', `Workflow failed: ${(err as Error)?.message || err}`);
+          }
         }
       } else {
         this.startWorkflow(
@@ -767,10 +784,23 @@ export class PostsService {
 
       Sentry.metrics.count('post_created', 1);
       const createdPostId = posts[0].id;
-      postList.push({
-        postId: createdPostId,
-        integration: post.integration.id,
-      });
+
+      // For postNow, fetch the final state after workflow completes
+      if (body.type === 'now') {
+        const finalPost = await this._postRepository.getPostById(createdPostId);
+        postList.push({
+          postId: createdPostId,
+          integration: post.integration.id,
+          state: finalPost?.state || 'ERROR',
+          releaseURL: finalPost?.releaseURL || null,
+          error: finalPost?.error || null,
+        });
+      } else {
+        postList.push({
+          postId: createdPostId,
+          integration: post.integration.id,
+        });
+      }
 
       // Trigger overage deduction (fire-and-forget)
       if (userId) {
