@@ -520,16 +520,14 @@ export class PostsRepository {
     });
 
     if (hasRecurring) {
-      // Recurring: preserve PUBLISHED/ERROR clones, only delete QUEUE/DRAFT
+      // Recurring: only delete QUEUE/DRAFT, preserve PUBLISHED/ERROR clones
       await this._post.model.post.updateMany({
         where: {
           organizationId: orgId,
           group,
           state: { in: ['QUEUE', 'DRAFT'] },
         },
-        data: {
-          deletedAt: new Date(),
-        },
+        data: { deletedAt: new Date() },
       });
     } else {
       // Non-recurring: delete everything in the group
@@ -538,9 +536,7 @@ export class PostsRepository {
           organizationId: orgId,
           group,
         },
-        data: {
-          deletedAt: new Date(),
-        },
+        data: { deletedAt: new Date() },
       });
     }
 
@@ -1139,7 +1135,17 @@ export class PostsRepository {
     source?: 'calendar' | 'chat'
   ) {
     const posts: Post[] = [];
-    const uuid = uuidv4();
+    // Reuse existing group when editing, new UUID only for fresh posts.
+    // This keeps published clones in the same group as the original.
+    const uuid = body.group || uuidv4();
+
+    // Snapshot: was the old group a recurring group BEFORE upsert changes it?
+    const wasRecurring = body.group
+      ? !!(await this._post.model.post.findFirst({
+          where: { group: body.group, intervalInDays: { not: null }, deletedAt: null },
+          select: { id: true },
+        }))
+      : false;
 
     for (const value of body.value) {
       const updateData = (type: 'create' | 'update') => ({
@@ -1254,18 +1260,14 @@ export class PostsRepository {
       : undefined;
 
     if (body.group) {
-      const hasRecurring = await this._post.model.post.findFirst({
-        where: { group: body.group, intervalInDays: { not: null }, deletedAt: null },
-        select: { id: true },
-      });
-
-      if (hasRecurring) {
-        // Recurring: preserve PUBLISHED/ERROR clones, only delete QUEUE/DRAFT
+      if (wasRecurring) {
+        // Recurring: only delete QUEUE/DRAFT, preserve PUBLISHED/ERROR clones
         await this._post.model.post.updateMany({
           where: {
             group: body.group,
             deletedAt: null,
             state: { in: ['QUEUE', 'DRAFT'] },
+            id: { notIn: posts.map((p) => p.id) },
           },
           data: {
             parentPostId: null,
@@ -1273,11 +1275,12 @@ export class PostsRepository {
           },
         });
       } else {
-        // Non-recurring: delete everything in the group
+        // Non-recurring: delete everything in the old group (except new posts)
         await this._post.model.post.updateMany({
           where: {
             group: body.group,
             deletedAt: null,
+            id: { notIn: posts.map((p) => p.id) },
           },
           data: {
             parentPostId: null,
