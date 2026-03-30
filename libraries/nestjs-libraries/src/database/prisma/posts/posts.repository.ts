@@ -512,31 +512,42 @@ export class PostsRepository {
     }, [] as any[]);
   }
 
+  /**
+   * Soft-delete QUEUE/DRAFT posts in a group, optionally excluding specific IDs.
+   * PUBLISHED and ERROR posts are never touched — they are immutable history.
+   * All group-level deletions (explicit delete, edit cleanup) must go through here.
+   */
+  private async _softDeleteGroupPosts(
+    group: string,
+    opts: { organizationId?: string; excludeIds?: string[] } = {}
+  ) {
+    return this._post.model.post.updateMany({
+      where: {
+        group,
+        deletedAt: null,
+        state: { in: ['QUEUE', 'DRAFT'] },
+        ...(opts.organizationId ? { organizationId: opts.organizationId } : {}),
+        ...(opts.excludeIds?.length ? { id: { notIn: opts.excludeIds } } : {}),
+      },
+      data: { parentPostId: null, deletedAt: new Date() },
+    });
+  }
+
   async deletePost(orgId: string, group: string) {
-    // Check if this group contains a recurring post
+    // For recurring posts: preserve PUBLISHED/ERROR clones (publish history).
+    // For non-recurring posts: delete everything including PUBLISHED — the user
+    // wants the post gone, there are no separate clone rows to preserve.
     const hasRecurring = await this._post.model.post.findFirst({
-      where: { organizationId: orgId, group, intervalInDays: { not: null } },
+      where: { organizationId: orgId, group, intervalInDays: { not: null }, deletedAt: null },
       select: { id: true },
     });
 
     if (hasRecurring) {
-      // Recurring: only delete QUEUE/DRAFT, preserve PUBLISHED/ERROR clones
-      await this._post.model.post.updateMany({
-        where: {
-          organizationId: orgId,
-          group,
-          state: { in: ['QUEUE', 'DRAFT'] },
-        },
-        data: { deletedAt: new Date() },
-      });
+      await this._softDeleteGroupPosts(group, { organizationId: orgId });
     } else {
-      // Non-recurring: delete everything in the group
       await this._post.model.post.updateMany({
-        where: {
-          organizationId: orgId,
-          group,
-        },
-        data: { deletedAt: new Date() },
+        where: { organizationId: orgId, group },
+        data: { parentPostId: null, deletedAt: new Date() },
       });
     }
 
@@ -1257,42 +1268,9 @@ export class PostsRepository {
     // created by the first call (same group, different integration).
     const isEditingExisting = body.value.some((v) => !!v.id);
     if (body.group && isEditingExisting) {
-      // Check whether the group is recurring (queried after upsert, but intervalInDays
-      // is set by the edit body so the result reflects the current recurring intent).
-      // Only queried when actually needed (editing path).
-      const wasRecurring = !!(await this._post.model.post.findFirst({
-        where: { group: body.group, intervalInDays: { not: null }, deletedAt: null },
-        select: { id: true },
-      }));
-
-      if (wasRecurring) {
-        // Recurring: only delete QUEUE/DRAFT, preserve PUBLISHED/ERROR clones
-        await this._post.model.post.updateMany({
-          where: {
-            group: body.group,
-            deletedAt: null,
-            state: { in: ['QUEUE', 'DRAFT'] },
-            id: { notIn: posts.map((p) => p.id) },
-          },
-          data: {
-            parentPostId: null,
-            deletedAt: new Date(),
-          },
-        });
-      } else {
-        // Non-recurring: delete everything in the old group (except new posts)
-        await this._post.model.post.updateMany({
-          where: {
-            group: body.group,
-            deletedAt: null,
-            id: { notIn: posts.map((p) => p.id) },
-          },
-          data: {
-            parentPostId: null,
-            deletedAt: new Date(),
-          },
-        });
-      }
+      await this._softDeleteGroupPosts(body.group, {
+        excludeIds: posts.map((p) => p.id),
+      });
     }
 
     return { previousPost, posts };
