@@ -2,6 +2,7 @@ import { PrismaRepository } from '@gitroom/nestjs-libraries/database/prisma/pris
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import dayjs from 'dayjs';
+import { mergeAdditionalSettings } from '@gitroom/nestjs-libraries/database/prisma/integrations/additional-settings.utils';
 
 @Injectable()
 export class DashboardRepository {
@@ -180,27 +181,16 @@ export class DashboardRepository {
     });
     if (!integration) return;
 
-    const settings: Array<{ title: string; description: string; type: string; value: any }> =
-      JSON.parse(integration.additionalSettings || '[]');
-
-    for (const [key, value] of Object.entries(metrics)) {
-      const title = `account:${key}`;
-      const existing = settings.find((s) => s.title === title);
-      if (existing) {
-        existing.value = value;
-      } else {
-        settings.push({
-          title,
-          description: key,
-          type: 'readonly',
-          value,
-        });
-      }
-    }
+    const incoming = Object.entries(metrics).map(([key, value]) => ({
+      title: `account:${key}`,
+      description: key,
+      type: 'readonly' as const,
+      value,
+    }));
 
     await this._integration.model.integration.update({
       where: { id: integrationId },
-      data: { additionalSettings: JSON.stringify(settings) },
+      data: { additionalSettings: mergeAdditionalSettings(integration.additionalSettings, incoming) },
     });
   }
 }

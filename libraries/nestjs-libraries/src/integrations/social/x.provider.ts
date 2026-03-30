@@ -21,6 +21,7 @@ import dayjs from 'dayjs';
 import { uniqBy } from 'lodash';
 import { stripHtmlValidation } from '@gitroom/helpers/utils/strip.html.validation';
 import { XDto } from '@gitroom/nestjs-libraries/dtos/posts/providers-settings/x.dto';
+import { mergeAdditionalSettings, parseAdditionalSettings } from '@gitroom/nestjs-libraries/database/prisma/integrations/additional-settings.utils';
 import { Rules } from '@gitroom/nestjs-libraries/chat/rules.description.decorator';
 import { ioRedis } from '@gitroom/nestjs-libraries/redis/redis.service';
 
@@ -419,30 +420,24 @@ export class XProvider extends SocialAbstract implements SocialProvider {
    * Only updates the database when the value has actually changed.
    */
   private async _syncVerifiedStatus(integration: Integration, verified: boolean): Promise<void> {
-    const currentSettings: { title: string; description: string; type: string; value: any }[] =
-      JSON.parse(integration.additionalSettings || '[]');
-    const verifiedSetting = currentSettings.find((s) => s.title === 'Verified');
+    // Read fresh from DB to avoid overwriting account:* entries written by
+    // updateAccountMetrics (which runs on a separate schedule). Using the
+    // in-memory integration object here would cause a last-write-wins race.
+    const fresh = await XProvider._prisma.integration.findUnique({
+      where: { id: integration.id },
+      select: { additionalSettings: true },
+    });
+    if (!fresh) return;
 
+    const current = parseAdditionalSettings(fresh.additionalSettings);
+    const verifiedSetting = current.find((s) => s.title === 'Verified');
     if (verifiedSetting && verifiedSetting.value === verified) {
       return; // no change
     }
 
-    const updatedSettings = verifiedSetting
-      ? currentSettings.map((s) =>
-          s.title === 'Verified' ? { ...s, value: verified } : s
-        )
-      : [
-          ...currentSettings,
-          {
-            title: 'Verified',
-            description: 'Is this a verified user? (Premium)',
-            type: 'checkbox',
-            value: verified,
-          },
-        ];
-
-    const newSettingsJson = JSON.stringify(updatedSettings);
-    integration.additionalSettings = newSettingsJson;
+    const newSettingsJson = mergeAdditionalSettings(fresh.additionalSettings, [
+      { title: 'Verified', description: 'Is this a verified user? (Premium)', type: 'checkbox', value: verified },
+    ]);
 
     await XProvider._prisma.integration.update({
       where: { id: integration.id },

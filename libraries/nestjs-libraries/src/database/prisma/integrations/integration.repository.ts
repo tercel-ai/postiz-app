@@ -5,6 +5,7 @@ import { Integration, Prisma } from '@prisma/client';
 import { makeId } from '@gitroom/nestjs-libraries/services/make.is';
 import { UploadFactory } from '@gitroom/nestjs-libraries/upload/upload.factory';
 import { PlugDto } from '@gitroom/nestjs-libraries/dtos/plugs/plug.dto';
+import { mergeAdditionalSettings, parseAdditionalSettings } from './additional-settings.utils';
 
 @Injectable()
 export class IntegrationRepository {
@@ -85,15 +86,18 @@ export class IntegrationRepository {
     return findIt.length > 0;
   }
 
-  updateProviderSettings(org: string, id: string, settings: string) {
+  async updateProviderSettings(org: string, id: string, incoming: string) {
+    const current = await this._integration.model.integration.findUnique({
+      where: { id, organizationId: org },
+      select: { additionalSettings: true },
+    });
+    const merged = mergeAdditionalSettings(
+      current?.additionalSettings,
+      parseAdditionalSettings(incoming)
+    );
     return this._integration.model.integration.update({
-      where: {
-        id,
-        organizationId: org,
-      },
-      data: {
-        additionalSettings: settings,
-      },
+      where: { id, organizationId: org },
+      data: { additionalSettings: merged },
     });
   }
 
@@ -198,6 +202,20 @@ export class IntegrationRepository {
     timezone?: number,
     customInstanceDetails?: string
   ) {
+    // Pre-compute merged additionalSettings to avoid await inside upsert args.
+    // Only query existing settings when there's something to merge.
+    let mergedAdditionalSettings: string | undefined;
+    if (additionalSettings) {
+      const existing = await this._integration.model.integration.findFirst({
+        where: { internalId, organizationId: org },
+        select: { additionalSettings: true },
+      });
+      mergedAdditionalSettings = mergeAdditionalSettings(
+        existing?.additionalSettings,
+        additionalSettings
+      );
+    }
+
     const upsert = await this._integration.model.integration.upsert({
       where: {
         organizationId_internalId: {
@@ -227,9 +245,7 @@ export class IntegrationRepository {
           : '[]',
       },
       update: {
-        ...(additionalSettings
-          ? { additionalSettings: JSON.stringify(additionalSettings) }
-          : {}),
+        ...(mergedAdditionalSettings ? { additionalSettings: mergedAdditionalSettings } : {}),
         ...(customInstanceDetails ? { customInstanceDetails } : {}),
         type: type as any,
         ...(!refresh

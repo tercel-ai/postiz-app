@@ -15,6 +15,7 @@
 
 import { PrismaClient } from '@prisma/client';
 import { TwitterApi } from 'twitter-api-v2';
+import { mergeAdditionalSettings } from '../libraries/nestjs-libraries/src/database/prisma/integrations/additional-settings.utils';
 
 interface CliArgs {
   integrationId: string | null;
@@ -154,40 +155,26 @@ async function fetchXAccountInfo(token: string): Promise<AccountInfo> {
   }
 }
 
-function mergeAdditionalSettings(
-  existing: string | null,
+function buildMetricsAndPremium(
   metrics: Record<string, number>,
   isPremium: boolean,
-): string {
-  const settings: Array<{ title: string; description: string; type: string; value: any }> =
-    JSON.parse(existing || '[]');
-
-  for (const [key, value] of Object.entries(metrics)) {
-    const title = `account:${key}`;
-    const existing = settings.find((s) => s.title === title);
-    if (existing) {
-      existing.value = value;
-    } else {
-      settings.push({ title, description: key, type: 'readonly', value });
-    }
-  }
-
+) {
+  const entries = Object.entries(metrics).map(([key, value]) => ({
+    title: `account:${key}`,
+    description: key,
+    type: 'readonly' as const,
+    value,
+  }));
   // Sync the Verified (X Premium) flag using verified_type === 'blue',
   // which correctly identifies paid subscribers (the legacy `verified` field
   // only covers org/celebrity checkmarks and is unreliable for Premium).
-  const verifiedEntry = settings.find((s) => s.title === 'Verified');
-  if (verifiedEntry) {
-    verifiedEntry.value = isPremium;
-  } else {
-    settings.push({
-      title: 'Verified',
-      description: 'Is this a verified user? (Premium)',
-      type: 'checkbox',
-      value: isPremium,
-    });
-  }
-
-  return JSON.stringify(settings);
+  entries.push({
+    title: 'Verified',
+    description: 'Is this a verified user? (Premium)',
+    type: 'checkbox',
+    value: isPremium,
+  });
+  return entries;
 }
 
 async function main(): Promise<void> {
@@ -281,7 +268,10 @@ async function main(): Promise<void> {
         continue;
       }
 
-      const newSettings = mergeAdditionalSettings(integration.additionalSettings, metrics, info.isPremium);
+      const newSettings = mergeAdditionalSettings(
+        integration.additionalSettings,
+        buildMetricsAndPremium(metrics, info.isPremium)
+      );
       const updateData: Record<string, any> = { additionalSettings: newSettings };
 
       if (updateProfile) {
