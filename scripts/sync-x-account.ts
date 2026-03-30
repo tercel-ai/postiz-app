@@ -15,7 +15,7 @@
 
 import { PrismaClient } from '@prisma/client';
 import { TwitterApi } from 'twitter-api-v2';
-import { mergeAdditionalSettings } from '../libraries/nestjs-libraries/src/database/prisma/integrations/additional-settings.utils';
+import { mergeAdditionalSettings, AdditionalSetting } from '../libraries/nestjs-libraries/src/database/prisma/integrations/additional-settings.utils';
 
 interface CliArgs {
   integrationId: string | null;
@@ -159,10 +159,10 @@ function buildMetricsAndPremium(
   metrics: Record<string, number>,
   isPremium: boolean,
 ) {
-  const entries = Object.entries(metrics).map(([key, value]) => ({
+  const entries: AdditionalSetting[] = Object.entries(metrics).map(([key, value]) => ({
     title: `account:${key}`,
     description: key,
-    type: 'readonly' as const,
+    type: 'readonly',
     value,
   }));
   // Sync the Verified (X Premium) flag using verified_type === 'blue',
