@@ -15,7 +15,16 @@
 
 import { PrismaClient } from '@prisma/client';
 import { TwitterApi } from 'twitter-api-v2';
-import { mergeAdditionalSettings, AdditionalSetting } from '../libraries/nestjs-libraries/src/database/prisma/integrations/additional-settings.utils';
+// Inlined from additional-settings.utils.ts (avoids dependency on uncompiled library code)
+type AdditionalSetting = { title: string; description: string; type: string; value: any };
+function parseAdditionalSettings(raw: string | null | undefined): AdditionalSetting[] {
+  try { return JSON.parse(raw || '[]'); } catch { return []; }
+}
+function mergeAdditionalSettings(existing: string | null | undefined, incoming: AdditionalSetting[]): string {
+  const map = new Map(parseAdditionalSettings(existing).map((s) => [s.title, s]));
+  for (const entry of incoming) map.set(entry.title, { ...map.get(entry.title), ...entry });
+  return JSON.stringify(Array.from(map.values()));
+}
 
 interface CliArgs {
   integrationId: string | null;
