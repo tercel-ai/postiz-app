@@ -570,3 +570,133 @@ describe('PostsService.changeState — recurring post protection', () => {
     expect(mocks.postRepository.changeState).toHaveBeenCalledWith('post-1', 'ERROR', 'some error', undefined);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Tests: createOrUpdatePost — multi-account group cleanup guard
+// ---------------------------------------------------------------------------
+
+describe('PostsRepository.createOrUpdatePost — group cleanup guard', () => {
+  let repo: any;
+  let mockPrismaPost: any;
+  let mockTagsPosts: any;
+  let mockTags: any;
+
+  function makeUpsertResult(id: string) {
+    return {
+      id,
+      organizationId: 'org-1',
+      group: 'group-abc',
+      state: 'QUEUE',
+      publishDate: new Date('2026-04-01T10:00:00Z'),
+      content: '<p>hello</p>',
+      image: '[]',
+      settings: '{"__type":"x"}',
+      delay: 0,
+      intervalInDays: null,
+      parentPostId: null,
+      releaseURL: null,
+      releaseId: null,
+    };
+  }
+
+  function makeBody(overrides?: { group?: string; valueId?: string }) {
+    return {
+      integration: { id: 'int-1' },
+      group: overrides?.group,
+      value: [
+        {
+          id: overrides?.valueId,
+          content: '<p>hello</p>',
+          image: [],
+          delay: 0,
+        },
+      ],
+      settings: { __type: 'x' },
+    };
+  }
+
+  beforeEach(() => {
+    mockPrismaPost = {
+      findFirst: vi.fn().mockResolvedValue(null),
+      upsert: vi.fn(),
+      update: vi.fn().mockResolvedValue({}),
+      updateMany: vi.fn().mockResolvedValue({ count: 0 }),
+    };
+    mockTagsPosts = {
+      deleteMany: vi.fn().mockResolvedValue({}),
+    };
+    mockTags = {
+      findMany: vi.fn().mockResolvedValue([]),
+    };
+
+    repo = new PostsRepository(
+      { model: { post: mockPrismaPost } } as any,
+      {} as any, // _popularPosts
+      {} as any, // _comments
+      { model: { tags: mockTags } } as any,
+      { model: { tagsPosts: mockTagsPosts } } as any,
+      {} as any, // _errors
+    );
+  });
+
+  it('does NOT run group cleanup when creating new posts (no value.id)', async () => {
+    mockPrismaPost.upsert.mockResolvedValue(makeUpsertResult('post-new-1'));
+
+    await repo.createOrUpdatePost(
+      'schedule',
+      'org-1',
+      '2026-04-01T10:00:00',
+      makeBody({ group: 'group-abc' }), // group passed, but no value.id
+      [],
+    );
+
+    expect(mockPrismaPost.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('does NOT soft-delete a sibling post created earlier in the same group', async () => {
+    // Simulate two sequential calls for two different integrations sharing the same group.
+    // Call 1 creates post-A (no value.id).
+    mockPrismaPost.upsert.mockResolvedValue(makeUpsertResult('post-A'));
+    await repo.createOrUpdatePost(
+      'schedule', 'org-1', '2026-04-01T10:00:00',
+      makeBody({ group: 'group-abc' }),
+      [],
+    );
+
+    vi.clearAllMocks();
+    mockPrismaPost.findFirst.mockResolvedValue(null);
+    mockPrismaPost.upsert.mockResolvedValue(makeUpsertResult('post-B'));
+
+    // Call 2 creates post-B for a different integration in the same group.
+    await repo.createOrUpdatePost(
+      'schedule', 'org-1', '2026-04-01T10:00:00',
+      makeBody({ group: 'group-abc' }),
+      [],
+    );
+
+    // The cleanup updateMany must NOT have been called — post-A must survive.
+    expect(mockPrismaPost.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('DOES run group cleanup when editing an existing post (value.id present)', async () => {
+    mockPrismaPost.upsert.mockResolvedValue(makeUpsertResult('post-existing'));
+
+    await repo.createOrUpdatePost(
+      'schedule',
+      'org-1',
+      '2026-04-01T10:00:00',
+      makeBody({ group: 'group-abc', valueId: 'post-existing' }),
+      [],
+    );
+
+    expect(mockPrismaPost.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          group: 'group-abc',
+          id: { notIn: ['post-existing'] },
+        }),
+        data: expect.objectContaining({ deletedAt: expect.any(Date) }),
+      }),
+    );
+  });
+});

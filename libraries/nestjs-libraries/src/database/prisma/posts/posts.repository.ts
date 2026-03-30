@@ -1259,7 +1259,12 @@ export class PostsRepository {
       )?.id!
       : undefined;
 
-    if (body.group) {
+    // Only clean up old group posts when editing existing posts (value.id present).
+    // For new multi-account posts every integration is processed separately in a
+    // loop; without this guard the second call would soft-delete the post just
+    // created by the first call (same group, different integration).
+    const isEditingExisting = body.value.some((v) => !!v.id);
+    if (body.group && isEditingExisting) {
       if (wasRecurring) {
         // Recurring: only delete QUEUE/DRAFT, preserve PUBLISHED/ERROR clones
         await this._post.model.post.updateMany({

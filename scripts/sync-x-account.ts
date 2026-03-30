@@ -270,6 +270,9 @@ async function main(): Promise<void> {
       );
 
       if (dryRun) {
+        if (updateProfile) {
+          console.log(`    -> would also update name="${info.name}", picture="${info.picture}"`);
+        }
         successCount++;
         continue;
       }
