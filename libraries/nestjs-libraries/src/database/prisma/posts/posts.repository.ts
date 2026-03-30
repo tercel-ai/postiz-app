@@ -1139,14 +1139,6 @@ export class PostsRepository {
     // This keeps published clones in the same group as the original.
     const uuid = body.group || uuidv4();
 
-    // Snapshot: was the old group a recurring group BEFORE upsert changes it?
-    const wasRecurring = body.group
-      ? !!(await this._post.model.post.findFirst({
-          where: { group: body.group, intervalInDays: { not: null }, deletedAt: null },
-          select: { id: true },
-        }))
-      : false;
-
     for (const value of body.value) {
       const updateData = (type: 'create' | 'update') => ({
         publishDate: dayjs(date).toDate(),
@@ -1265,6 +1257,14 @@ export class PostsRepository {
     // created by the first call (same group, different integration).
     const isEditingExisting = body.value.some((v) => !!v.id);
     if (body.group && isEditingExisting) {
+      // Check whether the group is recurring (queried after upsert, but intervalInDays
+      // is set by the edit body so the result reflects the current recurring intent).
+      // Only queried when actually needed (editing path).
+      const wasRecurring = !!(await this._post.model.post.findFirst({
+        where: { group: body.group, intervalInDays: { not: null }, deletedAt: null },
+        select: { id: true },
+      }));
+
       if (wasRecurring) {
         // Recurring: only delete QUEUE/DRAFT, preserve PUBLISHED/ERROR clones
         await this._post.model.post.updateMany({

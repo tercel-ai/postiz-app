@@ -368,7 +368,7 @@ model Integration {
   updatedAt             DateTime?              @updatedAt
   inBetweenSteps        Boolean                @default(false)
   refreshNeeded         Boolean                @default(false)
-  postingTimes          String                 @default("{\"version\":2,\"schedules\":[{\"type\":\"daily\",\"time\":120},{\"type\":\"daily\",\"time\":400},{\"type\":\"daily\",\"time\":700}]}")
+  postingTimes          String                 @default("{\"version\":2,\"schedules\":[]}")
   customInstanceDetails String?
   customerId            String?
   rootInternalId        String?

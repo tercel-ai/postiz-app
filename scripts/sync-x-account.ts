@@ -100,7 +100,7 @@ interface AccountInfo {
   name: string;
   username: string;
   picture: string;
-  verified: boolean;
+  isPremium: boolean;
 }
 
 async function fetchXAccountInfo(token: string): Promise<AccountInfo> {
@@ -131,7 +131,9 @@ async function fetchXAccountInfo(token: string): Promise<AccountInfo> {
       name: data.name,
       username: data.username,
       picture: data.profile_image_url || '',
-      verified: !!data.verified,
+      // verified_type === 'blue' → X Premium subscriber
+      // legacy `verified` covers org/celebrity checkmarks
+      isPremium: data.verified_type === 'blue' || !!data.verified,
     };
   } catch (v2Err: any) {
     // Fallback to v1.1 if v2 fails
@@ -145,14 +147,17 @@ async function fetchXAccountInfo(token: string): Promise<AccountInfo> {
       name: v1User.name,
       username: v1User.screen_name,
       picture: v1User.profile_image_url_https || '',
-      verified: !!v1User.verified,
+      // v1.1 API has no verified_type equivalent; `verified` only covers
+      // org/celebrity checkmarks — X Premium (Blue) cannot be detected via v1.1.
+      isPremium: !!v1User.verified,
     };
   }
 }
 
 function mergeAdditionalSettings(
   existing: string | null,
-  metrics: Record<string, number | boolean>,
+  metrics: Record<string, number>,
+  isPremium: boolean,
 ): string {
   const settings: Array<{ title: string; description: string; type: string; value: any }> =
     JSON.parse(existing || '[]');
@@ -167,19 +172,19 @@ function mergeAdditionalSettings(
     }
   }
 
-  // Also sync the Verified setting (non-prefixed, used elsewhere in the app)
-  if ('verified' in metrics) {
-    const verifiedEntry = settings.find((s) => s.title === 'Verified');
-    if (verifiedEntry) {
-      verifiedEntry.value = metrics.verified;
-    } else {
-      settings.push({
-        title: 'Verified',
-        description: 'Is this a verified user? (Premium)',
-        type: 'checkbox',
-        value: metrics.verified,
-      });
-    }
+  // Sync the Verified (X Premium) flag using verified_type === 'blue',
+  // which correctly identifies paid subscribers (the legacy `verified` field
+  // only covers org/celebrity checkmarks and is unreliable for Premium).
+  const verifiedEntry = settings.find((s) => s.title === 'Verified');
+  if (verifiedEntry) {
+    verifiedEntry.value = isPremium;
+  } else {
+    settings.push({
+      title: 'Verified',
+      description: 'Is this a verified user? (Premium)',
+      type: 'checkbox',
+      value: isPremium,
+    });
   }
 
   return JSON.stringify(settings);
@@ -257,16 +262,15 @@ async function main(): Promise<void> {
         continue;
       }
 
-      const metrics: Record<string, number | boolean> = {
+      const metrics: Record<string, number> = {
         followers: info.followers,
         following: info.following,
         posts: info.tweets,
         listed: info.listed,
-        verified: info.verified,
       };
 
       console.log(
-        `followers=${info.followers}, following=${info.following}, tweets=${info.tweets}, listed=${info.listed}, verified=${info.verified}`,
+        `followers=${info.followers}, following=${info.following}, tweets=${info.tweets}, listed=${info.listed}, premium=${info.isPremium}`,
       );
 
       if (dryRun) {
@@ -277,7 +281,7 @@ async function main(): Promise<void> {
         continue;
       }
 
-      const newSettings = mergeAdditionalSettings(integration.additionalSettings, metrics);
+      const newSettings = mergeAdditionalSettings(integration.additionalSettings, metrics, info.isPremium);
       const updateData: Record<string, any> = { additionalSettings: newSettings };
 
       if (updateProfile) {

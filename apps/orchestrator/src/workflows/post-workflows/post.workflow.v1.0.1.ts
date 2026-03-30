@@ -28,7 +28,6 @@ const proxyTaskQueue = (taskQueue: string, noRetry = false) => {
 
 const {
   getPostsList,
-  getPostNowRetry,
   inAppNotification,
   changeState,
   logError,
@@ -54,14 +53,17 @@ export async function postWorkflowV101({
   postId,
   organizationId,
   postNow = false,
+  postNowRetry = false,
 }: {
   taskQueue: string;
   postId: string;
   organizationId: string;
   postNow?: boolean;
+  /** Whether to retry on failure for postNow. Controlled by POST_NOW_RETRY env var, resolved at call site. */
+  postNowRetry?: boolean;
 }) {
-  // When POST_NOW_RETRY=false (default) and postNow=true, don't retry on failure.
-  const postNowRetry = postNow ? await getPostNowRetry() : true;
+  // noRetry=true when posting immediately AND retry is disabled (postNowRetry=false).
+  // Scheduled posts always use the full retry policy.
   const noRetry = postNow && !postNowRetry;
 
   // Dynamic task queue, for concurrency

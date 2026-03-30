@@ -22,10 +22,10 @@ const prisma = new PrismaClient();
 
 function printSample(items: any[], maxItems = 10) {
   for (const c of items.slice(0, maxItems)) {
+    const platform = c.integration ? `${c.integration.providerIdentifier}/${c.integration.name}` : '?';
     console.log(
-      `  ${c.id} | ${String(c.state).padEnd(9)} | pub=${c.publishDate?.toISOString().slice(0, 10) || '?'} | ` +
-      `created=${c.createdAt?.toISOString().slice(0, 10) || '?'} | ` +
-      `parent=${c.parentPostId?.slice(0, 10) || 'null'} | ` +
+      `  ${c.id} | ${String(c.state).padEnd(9)} | ${platform} | ` +
+      `pub=${c.publishDate?.toISOString().slice(0, 10) || '?'} | ` +
       `url=${c.releaseURL?.slice(0, 40) || 'none'}`
     );
   }
@@ -99,9 +99,11 @@ async function main() {
   // These are recurring clone groups. Fix parentPostId, state, and publishDate.
 
   // Find all posts with parentPostId pointing to another post, OR
-  // state=QUEUE but releaseURL set (should be PUBLISHED)
-  const suspectPosts = await prisma.post.findMany({
+  // state=QUEUE but releaseURL set (should be PUBLISHED).
+  // Scoped to recurring groups only to avoid false positives on normal QUEUE posts.
+  const suspectPosts = recurringGroupSet.size > 0 ? await prisma.post.findMany({
     where: {
+      group: { in: [...recurringGroupSet] },
       deletedAt: null,
       releaseURL: { not: null },
       ...orgFilter,
@@ -115,7 +117,7 @@ async function main() {
       publishDate: true, createdAt: true, organizationId: true, releaseURL: true,
       integration: { select: { name: true, providerIdentifier: true } },
     },
-  });
+  }) : [];
 
   // Group by group ID
   const suspectByGroup = new Map<string, typeof suspectPosts>();
@@ -126,7 +128,10 @@ async function main() {
 
   const caseD: typeof suspectPosts = []; // parentPostId to clear
   const caseE: typeof suspectPosts = []; // state QUEUE → PUBLISHED
-  const caseF: Array<{ id: string; newPublishDate: Date }> = []; // publishDate to fix
+  const caseF: Array<{ id: string; newPublishDate: Date; integration?: { name: string; providerIdentifier: string } }> = []; // publishDate to fix
+
+  // Build a lookup map: post id → integration for case F display
+  const suspectById = new Map(suspectPosts.map((p) => [p.id, p]));
 
   for (const [group, posts] of suspectByGroup) {
     // Get ALL posts in this group
@@ -169,7 +174,7 @@ async function main() {
         const cloneDate = new Date(p.createdAt);
         cloneDate.setUTCHours(origTime.getUTCHours(), origTime.getUTCMinutes(), origTime.getUTCSeconds(), 0);
         if (cloneDate.getTime() !== p.publishDate.getTime()) {
-          caseF.push({ id: p.id, newPublishDate: cloneDate });
+          caseF.push({ id: p.id, newPublishDate: cloneDate, integration: suspectById.get(p.id)?.integration ?? undefined });
         }
       }
     }
@@ -213,7 +218,8 @@ async function main() {
 
   console.log(`\nCase F: ${caseF.length} post(s) with incorrect publishDate to fix`);
   for (const f of caseF.slice(0, 10)) {
-    console.log(`  ${f.id} → ${f.newPublishDate.toISOString().slice(0, 19)}`);
+    const platform = f.integration ? `${f.integration.providerIdentifier}/${f.integration.name}` : '?';
+    console.log(`  ${f.id} | ${platform} → ${f.newPublishDate.toISOString().slice(0, 19)}`);
   }
   if (caseF.length > 10) console.log(`  ... and ${caseF.length - 10} more`);
 

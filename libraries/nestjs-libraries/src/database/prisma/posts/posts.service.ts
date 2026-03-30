@@ -681,30 +681,36 @@ export class PostsService {
       }
     } catch (err) {}
 
-    await this._temporalService.client
-      .getRawClient()
-      ?.workflow.start('postWorkflowV101', {
-        workflowId: `post_${postId}`,
-        taskQueue: 'main',
-        args: [
-          {
-            taskQueue: taskQueue,
-            postId: postId,
-            organizationId: orgId,
-            postNow: postNow,
-          },
-        ],
-        typedSearchAttributes: new TypedSearchAttributes([
-          {
-            key: postIdSearchParam,
-            value: postId,
-          },
-          {
-            key: organizationId,
-            value: orgId,
-          },
-        ]),
-      });
+    const rawClient = this._temporalService.client.getRawClient();
+    if (!rawClient) {
+      const msg = `Temporal client unavailable — cannot start workflow for postId=${postId}`;
+      this.logger.error(`startWorkflow: ${msg}`);
+      throw new Error(msg);
+    }
+
+    await rawClient.workflow.start('postWorkflowV101', {
+      workflowId: `post_${postId}`,
+      taskQueue: 'main',
+      args: [
+        {
+          taskQueue: taskQueue,
+          postId: postId,
+          organizationId: orgId,
+          postNow: postNow,
+          ...(postNow ? { postNowRetry: process.env.POST_NOW_RETRY === 'true' } : {}),
+        },
+      ],
+      typedSearchAttributes: new TypedSearchAttributes([
+        {
+          key: postIdSearchParam,
+          value: postId,
+        },
+        {
+          key: organizationId,
+          value: orgId,
+        },
+      ]),
+    });
 
     // When postNow=true, poll until the first attempt resolves (PUBLISHED/ERROR)
     // so the caller gets immediate feedback. Retries (if enabled) continue in background.
@@ -719,6 +725,7 @@ export class PostsService {
         }
         await new Promise((r) => setTimeout(r, intervalMs));
       }
+      this.logger.warn(`startWorkflow: postNow poll timed out after ${maxWaitMs}ms for postId=${postId}`);
     }
   }
 
@@ -765,7 +772,7 @@ export class PostsService {
           const failedPost = await this._postRepository.getPostById(posts[0].id);
           if (failedPost?.state === 'ERROR') {
             // Post already marked ERROR by the workflow — return it with error info
-            // (don't throw, let frontend handle the ERROR state)
+            this.logger.warn(`createPost: postNow workflow threw but post already in ERROR state, postId=${posts[0].id}: ${(err as Error)?.message || err}`);
           } else {
             await this.changeState(posts[0].id, 'ERROR', `Workflow failed: ${(err as Error)?.message || err}`);
           }

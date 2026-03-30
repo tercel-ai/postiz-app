@@ -326,7 +326,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
 
     try {
       const {
-        data: { username: u, verified: v, profile_image_url: p, name: n, id: i },
+        data: { username: u, verified: v, verified_type, profile_image_url: p, name: n, id: i },
       } = await client.v2.me({
         'user.fields': [
           'username',
@@ -337,7 +337,9 @@ export class XProvider extends SocialAbstract implements SocialProvider {
         ],
       });
       username = u;
-      verified = v;
+      // verified_type === 'blue' means X Premium subscriber.
+      // The legacy `verified` flag covers org/celebrity checkmarks only.
+      verified = verified_type === 'blue' || !!v;
       profile_image_url = p;
       name = n;
       id = i;
@@ -348,6 +350,8 @@ export class XProvider extends SocialAbstract implements SocialProvider {
       try {
         const v1User = await client.v1.verifyCredentials();
         username = v1User.screen_name;
+        // v1.1 API has no verified_type equivalent; `verified` here only covers
+        // org/celebrity checkmarks — X Premium (Blue) cannot be detected via v1.1.
         verified = v1User.verified;
         profile_image_url = v1User.profile_image_url_https;
         name = v1User.name;
@@ -392,12 +396,17 @@ export class XProvider extends SocialAbstract implements SocialProvider {
   private async _getUserInfo(client: TwitterApi): Promise<{ username: string; verified: boolean }> {
     try {
       const { data } = await this.runInConcurrent(async () =>
-        client.v2.me({ 'user.fields': ['username', 'verified'] })
+        client.v2.me({ 'user.fields': ['username', 'verified', 'verified_type'] })
       );
-      return { username: data.username, verified: !!data.verified };
+      return {
+        username: data.username,
+        verified: data.verified_type === 'blue' || !!data.verified,
+      };
     } catch (err) {
       try {
         const v1User = await client.v1.verifyCredentials();
+        // v1.1 API has no verified_type equivalent; `verified` here only covers
+        // org/celebrity checkmarks — X Premium (Blue) cannot be detected via v1.1.
         return { username: v1User.screen_name, verified: !!v1User.verified };
       } catch {
         throw err;
