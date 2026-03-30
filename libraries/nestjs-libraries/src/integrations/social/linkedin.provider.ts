@@ -272,33 +272,50 @@ export class LinkedinProvider extends SocialAbstract implements SocialProvider {
       )
     ).json();
 
-    const sendUrlRequest = uploadInstructions?.[0]?.uploadUrl || uploadUrl;
     const finalOutput = video || image || document;
-
     const etags = [];
-    for (let i = 0; i < picture.length; i += 1024 * 1024 * 2) {
-      const upload = await this.fetch(
-        sendUrlRequest,
+
+    if (isVideo && uploadInstructions?.length) {
+      // Multi-part video upload: each instruction has its own uploadUrl and byte range.
+      // Must use instruction.uploadUrl per part — LinkedIn rejects ETags from wrong URLs.
+      for (const instruction of uploadInstructions) {
+        const chunk = picture.slice(instruction.firstByte, instruction.lastByte + 1);
+        const upload = await this.fetch(
+          instruction.uploadUrl,
+          {
+            method: 'PUT',
+            headers: {
+              'X-Restli-Protocol-Version': '2.0.0',
+              'LinkedIn-Version': '202511',
+              Authorization: `Bearer ${accessToken}`,
+              'Content-Type': 'application/octet-stream',
+            },
+            body: chunk,
+          },
+          'linkedin',
+          0,
+          true
+        );
+        etags.push(upload.headers.get('etag'));
+      }
+    } else {
+      // Single PUT for images and documents.
+      await this.fetch(
+        uploadUrl,
         {
           method: 'PUT',
           headers: {
             'X-Restli-Protocol-Version': '2.0.0',
             'LinkedIn-Version': '202511',
             Authorization: `Bearer ${accessToken}`,
-            ...(isVideo
-              ? { 'Content-Type': 'application/octet-stream' }
-              : isPdf
-              ? { 'Content-Type': 'application/pdf' }
-              : {}),
+            ...(isPdf ? { 'Content-Type': 'application/pdf' } : {}),
           },
-          body: picture.slice(i, i + 1024 * 1024 * 2),
+          body: picture,
         },
         'linkedin',
         0,
         true
       );
-
-      etags.push(upload.headers.get('etag'));
     }
 
     if (isVideo) {
@@ -582,11 +599,13 @@ export class LinkedinProvider extends SocialAbstract implements SocialProvider {
       body: JSON.stringify(postPayload),
     });
 
-    if (response.status !== 201 && response.status !== 200) {
-      throw new Error('Error posting to LinkedIn');
+    const postId = response.headers.get('x-restli-id');
+    if (!postId) {
+      const body = await response.text().catch(() => '');
+      throw new Error(`LinkedIn did not return a post ID (x-restli-id missing). Body: ${body}`);
     }
 
-    return response.headers.get('x-restli-id')!;
+    return postId;
   }
 
   private async createCommentPost(
@@ -619,8 +638,12 @@ export class LinkedinProvider extends SocialAbstract implements SocialProvider {
       }
     );
 
-    const { object } = await response.json();
-    return object;
+    const commentId = response.headers.get('x-restli-id');
+    if (!commentId) {
+      const body = await response.text().catch(() => '');
+      throw new Error(`LinkedIn did not return a comment ID (x-restli-id missing). Body: ${body}`);
+    }
+    return commentId;
   }
 
   private createPostResponse(

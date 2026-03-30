@@ -734,6 +734,7 @@ export class PostsService {
       `createPost: orgId=${orgId} userId=${userId ?? 'N/A'} type=${body.type} postsCount=${body.posts?.length ?? 0}`
     );
     const postList = [];
+    const postNowErrors: string[] = [];
     for (const post of body.posts) {
       const messages = (post.value || []).map((p) => p.content);
       const updateContent = !body.shortLink
@@ -792,16 +793,21 @@ export class PostsService {
       Sentry.metrics.count('post_created', 1);
       const createdPostId = posts[0].id;
 
-      // For postNow, fetch the final state after workflow completes
+      // For postNow, fetch the final state after workflow completes.
+      // Collect errors per account so all accounts are attempted before throwing.
+      // Scheduled-post errors are saved to DB only (caller never waits for them).
       if (body.type === 'now') {
         const finalPost = await this._postRepository.getPostById(createdPostId);
-        postList.push({
-          postId: createdPostId,
-          integration: post.integration.id,
-          state: finalPost?.state || 'ERROR',
-          releaseURL: finalPost?.releaseURL || null,
-          error: finalPost?.error || null,
-        });
+        if (!finalPost || finalPost.state === 'ERROR') {
+          postNowErrors.push(finalPost?.error || 'Post failed');
+        } else {
+          postList.push({
+            postId: createdPostId,
+            integration: post.integration.id,
+            state: finalPost.state,
+            releaseURL: finalPost.releaseURL || null,
+          });
+        }
       } else {
         postList.push({
           postId: createdPostId,
@@ -819,6 +825,10 @@ export class PostsService {
           `createPost: skipping deductIfOverage for postId=${createdPostId} — no userId provided`
         );
       }
+    }
+
+    if (postNowErrors.length > 0) {
+      throw new BadRequestException(postNowErrors.join(' | '));
     }
 
     return postList;

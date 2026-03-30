@@ -372,29 +372,35 @@ export const ManageModal: FC<AddEditModalProps> = (props) => {
       }
 
       if (!dummy) {
-        addEditSets
-          ? addEditSets(data)
-          : await fetch('/posts', {
-              method: 'POST',
-              body: JSON.stringify(data),
-            });
+        if (addEditSets) {
+          addEditSets(data);
+        } else {
+          const res = await fetch('/posts', {
+            method: 'POST',
+            body: JSON.stringify(data),
+          });
 
-        if (!addEditSets) {
+          if (!res.ok) {
+            const { message } = await res.json().catch(() => ({ message: 'Post failed' }));
+            toaster.show(message || 'Post failed', 'warning');
+            setLoading(false);
+            return;
+          }
+
           mutate();
           toaster.show(
             !existingData.integration
               ? t('added_successfully', 'Added successfully')
               : t('updated_successfully', 'Updated successfully')
           );
+
+          modal.closeAll();
         }
+
         if (customClose) {
           setTimeout(() => {
             customClose();
           }, 2000);
-        }
-
-        if (!addEditSets) {
-          modal.closeAll();
         }
       }
     },
