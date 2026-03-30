@@ -29,6 +29,7 @@ Content-Type: application/json
   "shortLink": false,                  // convert URLs to tracked short links
   "inter": 7,                          // (optional) recurring interval in days
   "source": "calendar",               // (optional) "calendar" | "chat"
+  "order": "...",                      // (optional) unused — accepted by DTO but not read by service
   "tags": [],                          // array of tag objects
   "posts": [ /* Post[] — see below */ ]
 }
