@@ -546,7 +546,7 @@ export class PostsRepository {
       await this._softDeleteGroupPosts(group, { organizationId: orgId });
     } else {
       await this._post.model.post.updateMany({
-        where: { organizationId: orgId, group },
+        where: { organizationId: orgId, group, deletedAt: null },
         data: { parentPostId: null, deletedAt: new Date() },
       });
     }
@@ -556,6 +556,7 @@ export class PostsRepository {
         organizationId: orgId,
         group,
         parentPostId: null,
+        deletedAt: null,
       },
       select: {
         id: true,

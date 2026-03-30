@@ -319,7 +319,7 @@ export class LinkedinProvider extends SocialAbstract implements SocialProvider {
     }
 
     if (isVideo) {
-      const a = await this.fetch(
+      await this.fetch(
         'https://api.linkedin.com/rest/videos?action=finalizeUpload',
         {
           method: 'POST',
@@ -552,7 +552,8 @@ export class LinkedinProvider extends SocialAbstract implements SocialProvider {
     type: 'company' | 'personal',
     message: string,
     mediaIds: string[],
-    isPdf: boolean
+    isPdf: boolean,
+    visibility: 'PUBLIC' | 'CONNECTIONS' | 'LOGGED_IN' = 'PUBLIC'
   ) {
     const author =
       type === 'personal' ? `urn:li:person:${id}` : `urn:li:organization:${id}`;
@@ -560,7 +561,7 @@ export class LinkedinProvider extends SocialAbstract implements SocialProvider {
     return {
       author,
       commentary: this.fixText(message),
-      visibility: 'PUBLIC',
+      visibility,
       distribution: {
         feedDistribution: 'MAIN_FEED',
         targetEntities: [] as string[],
@@ -572,20 +573,52 @@ export class LinkedinProvider extends SocialAbstract implements SocialProvider {
     };
   }
 
+  private async _setCommentsState(
+    postUrn: string,
+    accessToken: string,
+    actorId: string,
+    type: 'company' | 'personal',
+    state: 'OPEN' | 'CLOSED'
+  ): Promise<void> {
+    const actor =
+      type === 'personal'
+        ? `urn:li:person:${actorId}`
+        : `urn:li:organization:${actorId}`;
+
+    await this.fetch(
+      `https://api.linkedin.com/rest/socialMetadata/${encodeURIComponent(postUrn)}?actor=${encodeURIComponent(actor)}`,
+      {
+        method: 'POST',
+        headers: {
+          'LinkedIn-Version': '202511',
+          'X-Restli-Protocol-Version': '2.0.0',
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${accessToken}`,
+          'X-RestLi-Method': 'PARTIAL_UPDATE',
+        },
+        body: JSON.stringify({
+          patch: { $set: { commentsState: state } },
+        }),
+      }
+    );
+  }
+
   private async createMainPost(
     id: string,
     accessToken: string,
     firstPost: PostDetails,
     mediaIds: string[],
     type: 'company' | 'personal',
-    isPdf: boolean
+    isPdf: boolean,
+    visibility: 'PUBLIC' | 'CONNECTIONS' | 'LOGGED_IN' = 'PUBLIC'
   ): Promise<string> {
     const postPayload = this.createLinkedInPostPayload(
       id,
       type,
       firstPost.message,
       mediaIds,
-      isPdf
+      isPdf,
+      visibility
     );
 
     const response = await this.fetch(`https://api.linkedin.com/rest/posts`, {
@@ -703,8 +736,19 @@ export class LinkedinProvider extends SocialAbstract implements SocialProvider {
       processedFirstPost,
       mainPostMediaIds,
       type,
-      !!firstPost.settings?.post_as_images_carousel
+      !!firstPost.settings?.post_as_images_carousel,
+      firstPost.settings?.visibility || 'PUBLIC'
     );
+
+    // Disable comments if requested (must be done after post creation via Social Metadata API).
+    // Non-critical: post is already live if this fails, so catch and log rather than propagate.
+    if (firstPost.settings?.disable_comments) {
+      try {
+        await this._setCommentsState(mainPostId, accessToken, id, type, 'CLOSED');
+      } catch (e) {
+        console.error('LinkedIn: failed to disable comments on post', mainPostId, e);
+      }
+    }
 
     // Return response for main post only
     return [this.createPostResponse(mainPostId, processedFirstPost.id, true)];

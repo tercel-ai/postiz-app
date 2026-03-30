@@ -5,6 +5,7 @@ import {
   withProvider,
 } from '@gitroom/frontend/components/new-launch/providers/high.order.provider';
 import { Checkbox } from '@gitroom/react/form/checkbox';
+import { Select } from '@gitroom/react/form/select';
 import { useT } from '@gitroom/react/translation/get.transation.service.client';
 import { useSettings } from '@gitroom/frontend/components/launches/helpers/use.values';
 import { LinkedinDto } from '@gitroom/nestjs-libraries/dtos/posts/providers-settings/linkedin.dto';
@@ -12,14 +13,30 @@ import { LinkedinPreview } from '@gitroom/frontend/components/new-launch/provide
 
 const LinkedInSettings = () => {
   const t = useT();
-  const { watch, register, formState, control } = useSettings();
+  const { register } = useSettings();
 
   return (
-    <div className="mb-[20px]">
+    <div className="mb-[20px] flex flex-col gap-[12px]">
       <Checkbox
         variant="hollow"
         label={t('post_as_images_carousel', 'Post as images carousel')}
         {...register('post_as_images_carousel', {
+          value: false,
+        })}
+      />
+      <Select
+        label={t('visibility', 'Who can see your post')}
+        name="visibility"
+        extraForm={{ value: 'PUBLIC' }}
+      >
+        <option value="PUBLIC">{t('visibility_public', 'Anyone')}</option>
+        <option value="CONNECTIONS">{t('visibility_connections', 'Connections only')}</option>
+        <option value="LOGGED_IN">{t('visibility_logged_in', 'LinkedIn members only')}</option>
+      </Select>
+      <Checkbox
+        variant="hollow"
+        label={t('disable_comments', 'Disable comments')}
+        {...register('disable_comments', {
           value: false,
         })}
       />
