@@ -88,17 +88,20 @@ Passed directly to the LinkedIn post payload's `visibility` field:
 
 ### Disable comments
 
-LinkedIn does not support setting comment state at post creation time. After `createMainPost` succeeds, the backend internally calls `_setCommentsState` (a private method in `LinkedinProvider`) which hits the LinkedIn **Social Metadata API**:
+LinkedIn does not support comment control at post creation time. After `createMainPost` succeeds, the backend internally calls `_setCommentsState` which hits the **Social Metadata API**:
 
 ```
 POST https://api.linkedin.com/rest/socialMetadata/{postUrn}?actor={actorUrn}
-X-RestLi-Method: PARTIAL_UPDATE
 { "patch": { "$set": { "commentsState": "CLOSED" } } }
 ```
 
-This is a server-side call made during the publish workflow — not exposed to the frontend. `commentsState: 'CLOSED'` disables new comments and removes existing ones.
+Returns **202 Accepted** on success. This endpoint is NOT called via `SocialAbstract.fetch()` — it uses native `fetch` directly, because `SocialAbstract.fetch()` only accepts HTTP 200/201 and would reject the 202.
 
-**Important**: this call is non-critical. If it fails (network error, rate limit), the post is already live on LinkedIn and the failure is logged as a warning — it does not cause the post to be marked as `ERROR`.
+`commentsState: 'CLOSED'` disables new comments and removes existing ones.
+
+**Non-critical**: if this call fails, the post is already live. The failure is logged and does not mark the post as ERROR.
+
+See: [Social Metadata API docs](https://learn.microsoft.com/en-us/linkedin/marketing/community-management/shares/social-metadata-api)
 
 ---
 

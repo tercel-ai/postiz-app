@@ -573,6 +573,12 @@ export class LinkedinProvider extends SocialAbstract implements SocialProvider {
     };
   }
 
+  /**
+   * Enable or disable comments on a post via the Social Metadata API.
+   * This is the only official way — the Posts API does not support comment control at creation time.
+   * Uses native fetch because LinkedIn returns 202 Accepted, which SocialAbstract.fetch rejects (only accepts 200/201).
+   * See: https://learn.microsoft.com/en-us/linkedin/marketing/community-management/shares/social-metadata-api
+   */
   private async _setCommentsState(
     postUrn: string,
     accessToken: string,
@@ -585,7 +591,7 @@ export class LinkedinProvider extends SocialAbstract implements SocialProvider {
         ? `urn:li:person:${actorId}`
         : `urn:li:organization:${actorId}`;
 
-    await this.fetch(
+    const response = await fetch(
       `https://api.linkedin.com/rest/socialMetadata/${encodeURIComponent(postUrn)}?actor=${encodeURIComponent(actor)}`,
       {
         method: 'POST',
@@ -594,13 +600,17 @@ export class LinkedinProvider extends SocialAbstract implements SocialProvider {
           'X-Restli-Protocol-Version': '2.0.0',
           'Content-Type': 'application/json',
           Authorization: `Bearer ${accessToken}`,
-          'X-RestLi-Method': 'PARTIAL_UPDATE',
         },
         body: JSON.stringify({
           patch: { $set: { commentsState: state } },
         }),
       }
     );
+
+    if (!response.ok) {
+      const body = await response.text().catch(() => '');
+      throw new Error(`LinkedIn socialMetadata returned ${response.status}: ${body}`);
+    }
   }
 
   private async createMainPost(
@@ -740,8 +750,8 @@ export class LinkedinProvider extends SocialAbstract implements SocialProvider {
       firstPost.settings?.visibility || 'PUBLIC'
     );
 
-    // Disable comments if requested (must be done after post creation via Social Metadata API).
-    // Non-critical: post is already live if this fails, so catch and log rather than propagate.
+    // Disable comments if requested — must be a separate call after post creation.
+    // Non-critical: post is already live if this fails, so catch and log.
     if (firstPost.settings?.disable_comments) {
       try {
         await this._setCommentsState(mainPostId, accessToken, id, type, 'CLOSED');
