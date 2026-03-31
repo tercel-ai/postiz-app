@@ -1,4 +1,6 @@
 import {
+  AccountMetrics,
+  AnalyticsData,
   AuthTokenDetails,
   PostDetails,
   PostResponse,
@@ -8,6 +10,8 @@ import { makeId } from '@gitroom/nestjs-libraries/services/make.is';
 import { SocialAbstract } from '@gitroom/nestjs-libraries/integrations/social.abstract';
 import dayjs from 'dayjs';
 import { Integration } from '@prisma/client';
+
+const MASTODON_DEFAULT_URL = process.env.MASTODON_URL || 'https://mastodon.social';
 
 export class MastodonProvider extends SocialAbstract implements SocialProvider {
   override maxConcurrentJob = 5; // Mastodon instances typically have generous limits
@@ -35,10 +39,11 @@ export class MastodonProvider extends SocialAbstract implements SocialProvider {
     customUrl: string,
     state: string,
     clientId: string,
-    url: string
+    url: string,
+    refresh?: string
   ) {
     return `${customUrl}/oauth/authorize?client_id=${clientId}&response_type=code&redirect_uri=${encodeURIComponent(
-      `${url}/integrations/social/mastodon`
+      `${url}/integrations/social/mastodon${refresh ? `?refresh=${refresh}` : ''}`
     )}&scope=${this.scopes.join('+')}&state=${state}`;
   }
 
@@ -244,8 +249,88 @@ export class MastodonProvider extends SocialAbstract implements SocialProvider {
       postId,
       lastCommentId,
       accessToken,
-      process.env.MASTODON_URL || 'https://mastodon.social',
+      MASTODON_DEFAULT_URL,
       postDetails
     );
+  }
+
+  async postAnalytics(
+    integrationId: string,
+    accessToken: string,
+    postId: string,
+    date: number,
+    url = MASTODON_DEFAULT_URL
+  ): Promise<AnalyticsData[]> {
+    const today = dayjs().format('YYYY-MM-DD');
+
+    try {
+      const status = await (
+        await this.fetch(`${url}/api/v1/statuses/${postId}`, {
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+          },
+        })
+      ).json();
+
+      if (!status) return [];
+
+      const result: AnalyticsData[] = [];
+
+      if (status.favourites_count !== undefined) {
+        result.push({
+          label: 'Favourites',
+          percentageChange: 0,
+          data: [{ total: String(status.favourites_count), date: today }],
+        });
+      }
+
+      if (status.reblogs_count !== undefined) {
+        result.push({
+          label: 'Boosts',
+          percentageChange: 0,
+          data: [{ total: String(status.reblogs_count), date: today }],
+        });
+      }
+
+      if (status.replies_count !== undefined) {
+        result.push({
+          label: 'Replies',
+          percentageChange: 0,
+          data: [{ total: String(status.replies_count), date: today }],
+        });
+      }
+
+      return result;
+    } catch (err) {
+      console.error('Error fetching Mastodon post analytics:', err);
+      return [];
+    }
+  }
+
+  async accountMetrics(
+    integrationId: string,
+    accessToken: string,
+    url = MASTODON_DEFAULT_URL
+  ): Promise<AccountMetrics | null> {
+    try {
+      const account = await (
+        await this.fetch(`${url}/api/v1/accounts/verify_credentials`, {
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+          },
+        })
+      ).json();
+
+      if (!account) return null;
+
+      const result: AccountMetrics = {};
+      if (account.followers_count !== undefined) result.followers = account.followers_count;
+      if (account.following_count !== undefined) result.following = account.following_count;
+      if (account.statuses_count !== undefined) result.posts = account.statuses_count;
+      return Object.keys(result).length > 0 ? result : null;
+    } catch (err) {
+      console.error('Error fetching Mastodon account metrics:', err);
+      return null;
+    }
   }
 }

@@ -718,15 +718,15 @@ export class IntegrationsController {
     @GetOrgFromRequest() org: Organization,
     @Body('id') id: string
   ) {
-    const isTherePosts = await this._integrationService.getPostsForChannel(
+    // Soft-delete only this integration's unpublished posts.
+    // Published posts are preserved so history survives if the user
+    // re-adds the same account later.
+    // We delete by integrationId (not by group) to avoid accidentally
+    // removing posts from other integrations in multi-channel groups.
+    await this._integrationService.softDeleteUnpublishedPostsForChannel(
       org.id,
       id
     );
-    if (isTherePosts.length) {
-      for (const post of isTherePosts) {
-        await this._postService.deletePost(org.id, post.group);
-      }
-    }
 
     return this._integrationService.deleteChannel(org.id, id);
   }

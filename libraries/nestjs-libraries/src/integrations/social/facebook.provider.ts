@@ -1,4 +1,5 @@
 import {
+  AccountMetrics,
   AnalyticsData,
   AuthTokenDetails,
   PostDetails,
@@ -152,13 +153,33 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
   }
 
   async refreshToken(refresh_token: string): Promise<AuthTokenDetails> {
+    const { access_token } = await (
+      await fetch(
+        'https://graph.facebook.com/v21.0/oauth/access_token' +
+          '?grant_type=fb_exchange_token' +
+          `&client_id=${process.env.FACEBOOK_APP_ID}` +
+          `&client_secret=${process.env.FACEBOOK_APP_SECRET}` +
+          `&fb_exchange_token=${refresh_token}`
+      )
+    ).json();
+
+    if (!access_token) {
+      throw new Error('Failed to refresh Facebook token');
+    }
+
+    const { id, name, picture } = await (
+      await fetch(
+        `https://graph.facebook.com/v21.0/me?fields=id,name,picture&access_token=${access_token}`
+      )
+    ).json();
+
     return {
-      refreshToken: '',
-      expiresIn: 0,
-      accessToken: '',
-      id: '',
-      name: '',
-      picture: '',
+      id,
+      name,
+      accessToken: access_token,
+      refreshToken: access_token,
+      expiresIn: dayjs().add(59, 'days').unix() - dayjs().unix(),
+      picture: picture?.data?.url || '',
       username: '',
     };
   }
@@ -167,7 +188,7 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
     const state = makeId(6);
     return {
       url:
-        'https://www.facebook.com/v20.0/dialog/oauth' +
+        'https://www.facebook.com/v21.0/dialog/oauth' +
         `?client_id=${process.env.FACEBOOK_APP_ID}` +
         `&redirect_uri=${encodeURIComponent(
           `${process.env.FRONTEND_URL}/integrations/social/facebook`
@@ -204,7 +225,7 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
   }) {
     const getAccessToken = await (
       await fetch(
-        'https://graph.facebook.com/v20.0/oauth/access_token' +
+        'https://graph.facebook.com/v21.0/oauth/access_token' +
           `?client_id=${process.env.FACEBOOK_APP_ID}` +
           `&redirect_uri=${encodeURIComponent(
             `${process.env.FRONTEND_URL}/integrations/social/facebook${
@@ -218,7 +239,7 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
 
     const { access_token } = await (
       await fetch(
-        'https://graph.facebook.com/v20.0/oauth/access_token' +
+        'https://graph.facebook.com/v21.0/oauth/access_token' +
           '?grant_type=fb_exchange_token' +
           `&client_id=${process.env.FACEBOOK_APP_ID}` +
           `&client_secret=${process.env.FACEBOOK_APP_SECRET}` +
@@ -228,7 +249,7 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
 
     const { data } = await (
       await fetch(
-        `https://graph.facebook.com/v20.0/me/permissions?access_token=${access_token}`
+        `https://graph.facebook.com/v21.0/me/permissions?access_token=${access_token}`
       )
     ).json();
 
@@ -239,7 +260,7 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
 
     const { id, name, picture } = await (
       await fetch(
-        `https://graph.facebook.com/v20.0/me?fields=id,name,picture&access_token=${access_token}`
+        `https://graph.facebook.com/v21.0/me?fields=id,name,picture&access_token=${access_token}`
       )
     ).json();
 
@@ -257,7 +278,7 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
   async pages(accessToken: string) {
     const { data } = await (
       await fetch(
-        `https://graph.facebook.com/v20.0/me/accounts?fields=id,username,name,picture.type(large)&access_token=${accessToken}`
+        `https://graph.facebook.com/v21.0/me/accounts?fields=id,username,name,picture.type(large)&access_token=${accessToken}`
       )
     ).json();
 
@@ -276,7 +297,7 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
       },
     } = await (
       await fetch(
-        `https://graph.facebook.com/v20.0/${pageId}?fields=username,access_token,name,picture.type(large)&access_token=${accessToken}`
+        `https://graph.facebook.com/v21.0/${pageId}?fields=username,access_token,name,picture.type(large)&access_token=${accessToken}`
       )
     ).json();
 
@@ -305,7 +326,7 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
         ...all
       } = await (
         await this.fetch(
-          `https://graph.facebook.com/v20.0/${id}/videos?access_token=${accessToken}&fields=id,permalink_url`,
+          `https://graph.facebook.com/v21.0/${id}/videos?access_token=${accessToken}&fields=id,permalink_url`,
           {
             method: 'POST',
             headers: {
@@ -330,7 +351,7 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
             firstPost.media.map(async (media) => {
               const { id: photoId } = await (
                 await this.fetch(
-                  `https://graph.facebook.com/v20.0/${id}/photos?access_token=${accessToken}`,
+                  `https://graph.facebook.com/v21.0/${id}/photos?access_token=${accessToken}`,
                   {
                     method: 'POST',
                     headers: {
@@ -355,7 +376,7 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
         ...all
       } = await (
         await this.fetch(
-          `https://graph.facebook.com/v20.0/${id}/feed?access_token=${accessToken}&fields=id,permalink_url`,
+          `https://graph.facebook.com/v21.0/${id}/feed?access_token=${accessToken}&fields=id,permalink_url`,
           {
             method: 'POST',
             headers: {
@@ -401,7 +422,7 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
 
     const data = await (
       await this.fetch(
-        `https://graph.facebook.com/v20.0/${replyToId}/comments?access_token=${accessToken}&fields=id,permalink_url`,
+        `https://graph.facebook.com/v21.0/${replyToId}/comments?access_token=${accessToken}&fields=id,permalink_url`,
         {
           method: 'POST',
           headers: {
@@ -438,7 +459,7 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
 
     const { data } = await (
       await fetch(
-        `https://graph.facebook.com/v20.0/${id}/insights?metric=page_impressions_unique,page_posts_impressions_unique,page_post_engagements,page_daily_follows,page_video_views&access_token=${accessToken}&period=day&since=${since}&until=${until}`
+        `https://graph.facebook.com/v21.0/${id}/insights?metric=page_impressions_unique,page_posts_impressions_unique,page_post_engagements,page_daily_follows,page_video_views&access_token=${accessToken}&period=day&since=${since}&until=${until}`
       )
     ).json();
 
@@ -463,6 +484,27 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
     );
   }
 
+  async accountMetrics(
+    integrationId: string,
+    accessToken: string
+  ): Promise<AccountMetrics | null> {
+    try {
+      const { fan_count, followers_count } = await (
+        await this.fetch(
+          `https://graph.facebook.com/v21.0/${integrationId}?fields=fan_count,followers_count&access_token=${accessToken}`
+        )
+      ).json();
+
+      const result: AccountMetrics = {};
+      if (fan_count !== undefined) result.followers = fan_count;
+      if (followers_count !== undefined) result.followers = followers_count;
+      return Object.keys(result).length > 0 ? result : null;
+    } catch (err) {
+      console.error('Error fetching Facebook account metrics:', err);
+      return null;
+    }
+  }
+
   async postAnalytics(
     integrationId: string,
     accessToken: string,
@@ -475,7 +517,7 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
       // Fetch post insights from Facebook Graph API
       const { data } = await (
         await this.fetch(
-          `https://graph.facebook.com/v20.0/${postId}/insights?metric=post_impressions_unique,post_reactions_by_type_total,post_clicks,post_clicks_by_type&access_token=${accessToken}`
+          `https://graph.facebook.com/v21.0/${postId}/insights?metric=post_impressions_unique,post_reactions_by_type_total,post_clicks,post_clicks_by_type&access_token=${accessToken}`
         )
       ).json();
 
@@ -500,17 +542,6 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
           case 'post_clicks':
             label = 'Clicks';
             total = String(value);
-            break;
-          case 'post_clicks_by_type':
-            // This returns an object with click types
-            if (typeof value === 'object') {
-              const totalClicks = Object.values(value as Record<string, number>).reduce(
-                (sum: number, v: number) => sum + v,
-                0
-              );
-              label = 'Clicks by Type';
-              total = String(totalClicks);
-            }
             break;
           case 'post_reactions_by_type_total':
             // This returns an object with reaction types

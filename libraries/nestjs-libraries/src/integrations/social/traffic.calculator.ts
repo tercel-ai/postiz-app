@@ -55,6 +55,40 @@ const TRAFFIC_WEIGHTS: Record<string, Record<string, number>> = {
     'outbound clicks': 5,
     saves: 2,
   },
+  tiktok: {
+    views: 0.1,
+    likes: 1,
+    comments: 3,
+    shares: 4,
+  },
+  linkedin: {
+    impressions: 0.05,
+    likes: 1,
+    comments: 4,
+    shares: 3,
+    reach: 0.1,
+  },
+  reddit: {
+    score: 0.5,
+    upvotes: 1,
+    comments: 3,
+  },
+  bluesky: {
+    likes: 1,
+    reposts: 1.5,
+    replies: 2,
+    quotes: 2,
+  },
+  mastodon: {
+    favourites: 1,
+    boosts: 1.5,
+    replies: 2,
+  },
+  'mastodon-custom': {
+    favourites: 1,
+    boosts: 1.5,
+    replies: 2,
+  },
 };
 
 /** Fallback weights for platforms without a specific formula. */

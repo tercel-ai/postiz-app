@@ -1,4 +1,6 @@
 import {
+  AccountMetrics,
+  AnalyticsData,
   AuthTokenDetails,
   PostDetails,
   PostResponse,
@@ -7,6 +9,7 @@ import {
 import { makeId } from '@gitroom/nestjs-libraries/services/make.is';
 import { RedditSettingsDto } from '@gitroom/nestjs-libraries/dtos/posts/providers-settings/reddit.dto';
 import { timer } from '@gitroom/helpers/utils/timer';
+import dayjs from 'dayjs';
 import { groupBy } from 'lodash';
 import { SocialAbstract } from '@gitroom/nestjs-libraries/integrations/social.abstract';
 import { lookup } from 'mime-types';
@@ -478,5 +481,97 @@ export class RedditProvider extends SocialAbstract implements SocialProvider {
           name: p.text,
         })) || [],
     };
+  }
+
+  async postAnalytics(
+    integrationId: string,
+    accessToken: string,
+    postId: string,
+    date: number
+  ): Promise<AnalyticsData[]> {
+    const today = dayjs().format('YYYY-MM-DD');
+
+    try {
+      // postId may be comma-separated for cross-posted Reddit posts; use the first
+      const firstId = postId.split(',')[0];
+      const thingId = firstId.startsWith('t3_') ? firstId : `t3_${firstId}`;
+
+      const { data } = await (
+        await this.fetch(
+          `https://oauth.reddit.com/api/info?id=${thingId}`,
+          {
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+            },
+          }
+        )
+      ).json();
+
+      const post = data?.children?.[0]?.data;
+      if (!post) return [];
+
+      const result: AnalyticsData[] = [];
+
+      if (post.score !== undefined) {
+        result.push({
+          label: 'Score',
+          percentageChange: 0,
+          data: [{ total: String(post.score), date: today }],
+        });
+      }
+
+      if (post.ups !== undefined) {
+        result.push({
+          label: 'Upvotes',
+          percentageChange: 0,
+          data: [{ total: String(post.ups), date: today }],
+        });
+      }
+
+      if (post.num_comments !== undefined) {
+        result.push({
+          label: 'Comments',
+          percentageChange: 0,
+          data: [{ total: String(post.num_comments), date: today }],
+        });
+      }
+
+      if (post.upvote_ratio !== undefined) {
+        result.push({
+          label: 'Upvote Ratio',
+          percentageChange: 0,
+          data: [{ total: String(Math.round(post.upvote_ratio * 100)), date: today }],
+        });
+      }
+
+      return result;
+    } catch (err) {
+      console.error('Error fetching Reddit post analytics:', err);
+      return [];
+    }
+  }
+
+  async accountMetrics(
+    integrationId: string,
+    accessToken: string
+  ): Promise<AccountMetrics | null> {
+    try {
+      const { link_karma, comment_karma, total_karma } = await (
+        await this.fetch('https://oauth.reddit.com/api/v1/me', {
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+          },
+        })
+      ).json();
+
+      const result: AccountMetrics = {};
+      if (total_karma !== undefined) result.karma = total_karma;
+      if (link_karma !== undefined) result.linkKarma = link_karma;
+      if (comment_karma !== undefined) result.commentKarma = comment_karma;
+      return Object.keys(result).length > 0 ? result : null;
+    } catch (err) {
+      console.error('Error fetching Reddit account metrics:', err);
+      return null;
+    }
   }
 }

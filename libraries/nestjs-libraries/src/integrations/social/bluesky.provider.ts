@@ -1,4 +1,6 @@
 import {
+  AccountMetrics,
+  AnalyticsData,
   AuthTokenDetails,
   PostDetails,
   PostResponse,
@@ -571,5 +573,98 @@ export class BlueskyProvider extends SocialAbstract implements SocialProvider {
 
   mentionFormat(idOrHandle: string, name: string) {
     return `@${idOrHandle}`;
+  }
+
+  async postAnalytics(
+    integrationId: string,
+    accessToken: string,
+    postId: string,
+    date: number
+  ): Promise<AnalyticsData[]> {
+    const today = dayjs().format('YYYY-MM-DD');
+
+    try {
+      // Use public API to get post thread with like/reply counts
+      const response = await this.fetch(
+        `https://public.api.bsky.app/xrpc/app.bsky.feed.getPostThread?uri=${encodeURIComponent(postId)}&depth=0`,
+        {
+          headers: {
+            Accept: 'application/json',
+          },
+        }
+      );
+
+      const { thread } = await response.json();
+      const post = thread?.post;
+      if (!post) return [];
+
+      const result: AnalyticsData[] = [];
+
+      if (post.likeCount !== undefined) {
+        result.push({
+          label: 'Likes',
+          percentageChange: 0,
+          data: [{ total: String(post.likeCount), date: today }],
+        });
+      }
+
+      if (post.repostCount !== undefined) {
+        result.push({
+          label: 'Reposts',
+          percentageChange: 0,
+          data: [{ total: String(post.repostCount), date: today }],
+        });
+      }
+
+      if (post.replyCount !== undefined) {
+        result.push({
+          label: 'Replies',
+          percentageChange: 0,
+          data: [{ total: String(post.replyCount), date: today }],
+        });
+      }
+
+      if (post.quoteCount !== undefined) {
+        result.push({
+          label: 'Quotes',
+          percentageChange: 0,
+          data: [{ total: String(post.quoteCount), date: today }],
+        });
+      }
+
+      return result;
+    } catch (err) {
+      console.error('Error fetching Bluesky post analytics:', err);
+      return [];
+    }
+  }
+
+  async accountMetrics(
+    integrationId: string,
+    accessToken: string
+  ): Promise<AccountMetrics | null> {
+    try {
+      // Use public API to get profile (integrationId is the DID)
+      const response = await this.fetch(
+        `https://public.api.bsky.app/xrpc/app.bsky.actor.getProfile?actor=${encodeURIComponent(integrationId)}`,
+        {
+          headers: {
+            Accept: 'application/json',
+          },
+        }
+      );
+
+      const profile = await response.json();
+      if (!profile) return null;
+
+      const result: AccountMetrics = {};
+      if (profile.followersCount !== undefined) result.followers = profile.followersCount;
+      if (profile.followsCount !== undefined) result.following = profile.followsCount;
+      if (profile.postsCount !== undefined) result.posts = profile.postsCount;
+      return Object.keys(result).length > 0 ? result : null;
+    } catch (err) {
+      console.error('Error fetching Bluesky account metrics:', err);
+      return null;
+    }
   }
 }

@@ -194,6 +194,14 @@ export class PostsController {
     return this._postsService.deletePost(org.id, group);
   }
 
+  @Post('/:id/retry')
+  retryPost(
+    @GetOrgFromRequest() org: Organization,
+    @Param('id') id: string
+  ) {
+    return this._postsService.retryPost(org.id, id);
+  }
+
   @Put('/:id/date')
   changeDate(
     @GetOrgFromRequest() org: Organization,

@@ -15,6 +15,11 @@ const IMPRESSIONS_LABELS: Record<string, Set<string>> = {
   facebook:               new Set(['impressions']),
   linkedin:               new Set(['impressions']),
   'linkedin-page':        new Set(['impressions']),
+  tiktok:                 new Set(['views']),
+  reddit:                 new Set(['score']),
+  bluesky:                new Set(['likes']),
+  mastodon:               new Set(['favourites']),
+  'mastodon-custom':      new Set(['favourites']),
 };
 
 const IMPRESSIONS_FALLBACK = new Set(['impressions', 'views']);

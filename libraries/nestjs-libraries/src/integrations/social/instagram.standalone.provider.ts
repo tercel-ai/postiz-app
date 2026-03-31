@@ -1,4 +1,5 @@
 import {
+  AccountMetrics,
   AuthTokenDetails,
   PostDetails,
   PostResponse,
@@ -205,6 +206,17 @@ export class InstagramStandaloneProvider
       accessToken,
       postId,
       date,
+      'graph.instagram.com'
+    );
+  }
+
+  async accountMetrics(
+    integrationId: string,
+    accessToken: string
+  ): Promise<AccountMetrics | null> {
+    return instagramProvider.accountMetrics(
+      integrationId,
+      accessToken,
       'graph.instagram.com'
     );
   }

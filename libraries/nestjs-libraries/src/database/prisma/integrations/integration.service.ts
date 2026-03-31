@@ -330,6 +330,17 @@ export class IntegrationService {
     return this._integrationRepository.getPostsForChannel(org, id);
   }
 
+  async getUnpublishedPostsForChannel(org: string, id: string) {
+    return this._integrationRepository.getUnpublishedPostsForChannel(org, id);
+  }
+
+  async softDeleteUnpublishedPostsForChannel(org: string, integrationId: string) {
+    return this._integrationRepository.softDeleteUnpublishedPostsByIntegration(
+      org,
+      integrationId
+    );
+  }
+
   async deleteChannel(org: string, id: string) {
     return this._integrationRepository.deleteChannel(org, id);
   }
@@ -338,9 +349,6 @@ export class IntegrationService {
     return this._integrationRepository.disableIntegrations(org, totalChannels);
   }
 
-  async checkForDeletedOnceAndUpdate(org: string, page: string) {
-    return this._integrationRepository.checkForDeletedOnceAndUpdate(org, page);
-  }
 
   async saveProviderPage(org: string, id: string, data: any) {
     const getIntegration = await this._integrationRepository.getIntegrationById(
@@ -370,13 +378,57 @@ export class IntegrationService {
       data
     );
 
-    await this.checkForDeletedOnceAndUpdate(
-      org,
-      String(getIntegrationInformation.id)
-    );
+    const pageInternalId = String(getIntegrationInformation.id);
+
+    // Check if an integration with this page ID already exists in this org.
+    const existingRecord =
+      await this._integrationRepository.findIntegrationByInternalId(
+        org,
+        pageInternalId
+      );
+
+    if (existingRecord && existingRecord.id !== id) {
+      if (existingRecord.deletedAt) {
+        // Soft-deleted: restore it (preserving Post/DataTicks history) and
+        // discard the temporary inBetweenSteps record.
+        await this._integrationRepository.updateIntegration(existingRecord.id, {
+          picture: getIntegrationInformation.picture,
+          name: getIntegrationInformation.name,
+          inBetweenSteps: false,
+          token: getIntegrationInformation.access_token,
+          profile: getIntegrationInformation.username,
+          deletedAt: null,
+          refreshNeeded: false,
+          disabled: false,
+        });
+        // Remove the temporary record created during OAuth
+        try {
+          await this._integrationRepository.hardDeleteIntegration(id);
+        } catch {
+          // FK constraint — fall back to soft-delete
+          await this._integrationRepository.deleteChannel(org, id);
+        }
+        return { success: true };
+      }
+
+      // Still active — the page is already connected, update it in place
+      await this._integrationRepository.updateIntegration(existingRecord.id, {
+        picture: getIntegrationInformation.picture,
+        name: getIntegrationInformation.name,
+        token: getIntegrationInformation.access_token,
+        profile: getIntegrationInformation.username,
+      });
+      try {
+        await this._integrationRepository.hardDeleteIntegration(id);
+      } catch {
+        await this._integrationRepository.deleteChannel(org, id);
+      }
+      return { success: true };
+    }
+
     await this._integrationRepository.updateIntegration(id, {
       picture: getIntegrationInformation.picture,
-      internalId: String(getIntegrationInformation.id),
+      internalId: pageInternalId,
       name: getIntegrationInformation.name,
       inBetweenSteps: false,
       token: getIntegrationInformation.access_token,

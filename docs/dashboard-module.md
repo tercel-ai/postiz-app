@@ -23,20 +23,33 @@ Both pipelines source data exclusively from post-level APIs (`batchPostAnalytics
 
 ### Which social platforms are supported?
 
-| Platform | Post-level analytics (`postAnalytics`) | Data source |
-|----------|:---:|------|
-| X (Twitter) | Yes | Twitter API v2 |
-| Instagram | Yes | Facebook Graph API |
-| Facebook | Yes | Facebook Graph API |
-| LinkedIn Page | Yes | LinkedIn API v2 |
-| YouTube | Yes | YouTube Data API v3 |
-| Pinterest | Yes | Pinterest API |
-| Threads | Yes | Meta Threads API |
-| Dribbble | Yes | Dribbble API |
-| GMB (Google My Business) | Yes | Google Business API |
-| Reddit, Bluesky, Mastodon, TikTok, Discord, Slack, Medium, Dev.to, Telegram, etc. | No | — |
+| Platform | `postAnalytics` | `accountMetrics` | `batchPostAnalytics` | Data source |
+|----------|:---:|:---:|:---:|------|
+| X (Twitter) | Yes | Yes | Yes | Twitter API v2 |
+| Instagram | Yes | Yes | — | Facebook Graph API v21.0 |
+| Instagram Standalone | Yes | Yes | — | Instagram Graph API v21.0 |
+| Facebook | Yes | Yes | — | Facebook Graph API v21.0 |
+| LinkedIn Page | Yes | Yes | Yes | LinkedIn API v2 (organizationalEntityShareStatistics) |
+| LinkedIn (personal) | Yes | — | — | LinkedIn REST API (memberCreatorPostAnalytics), fallback to socialActions |
+| YouTube | Yes | Yes | — | YouTube Data API v3 |
+| Pinterest | Yes | Yes | — | Pinterest API v5 |
+| Threads | Yes | Yes | — | Meta Threads API |
+| TikTok | Yes | Yes | — | TikTok API v2 (requires `video.list` + `user.info.stats` scopes) |
+| Reddit | Yes | Yes | — | Reddit OAuth API |
+| Bluesky | Yes | Yes | — | AT Protocol public API |
+| Mastodon / Mastodon-Custom | Yes | Yes | — | Mastodon v1 API |
+| Dribbble | Yes (stub) | — | — | Dribbble API |
+| GMB (Google My Business) | Yes (stub) | — | — | Google Business API |
+| Discord, Slack, Medium, Dev.to, Telegram, etc. | — | — | — | — |
 
-> **Note**: Platforms that have not implemented `postAnalytics` will not contribute impressions, traffic, or engagement data to the dashboard. Their posts are still tracked in post counts, but analytics metrics will be 0 for those platforms.
+> **Notes:**
+> - `postAnalytics` — per-post metrics (impressions, likes, etc.) used for daily DataTicks sync and dashboard display.
+> - `accountMetrics` — account-level metrics (followers, posts count, etc.) synced to the Integration table.
+> - `batchPostAnalytics` — batch version of postAnalytics for platforms that support multi-post queries (reduces API calls).
+> - Platforms without `postAnalytics` will not contribute impressions, traffic, or engagement data. Their posts are still tracked in post counts.
+> - TikTok analytics require additional OAuth scopes (`video.list`, `user.info.stats`) not currently requested during authentication. Analytics calls will gracefully return empty results until these scopes are added.
+> - LinkedIn personal accounts now support impressions, reach, reactions, reshares, and comments via the `memberCreatorPostAnalytics` API (requires `r_member_postAnalytics` scope). Users with older tokens that lack this scope fall back to the legacy `socialActions` API (likes + comments only).
+> - Bluesky, Mastodon, Reddit have no native "impressions" concept; the closest available metric is used as a proxy (likes/favourites/score).
 
 ---
 

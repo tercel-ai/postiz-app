@@ -1,6 +1,8 @@
 import {
+  AccountMetrics,
   AnalyticsData,
   AuthTokenDetails,
+  BatchPostAnalyticsResult,
   PostDetails,
   PostResponse,
   SocialProvider,
@@ -417,7 +419,7 @@ export class LinkedinPageProvider
     }));
   }
 
-  async postAnalytics(
+  override async postAnalytics(
     integrationId: string,
     accessToken: string,
     postId: string,
@@ -541,6 +543,191 @@ export class LinkedinPageProvider
       }));
 
     return result as any;
+  }
+
+  async accountMetrics(
+    integrationId: string,
+    accessToken: string
+  ): Promise<AccountMetrics | null> {
+    try {
+      // Fetch total follower count via networkSizes
+      const networkSizesUrl = `https://api.linkedin.com/v2/networkSizes/urn:li:organization:${integrationId}?edgeType=CompanyFollowedByMember`;
+      const networkSizes = await (
+        await this.fetch(networkSizesUrl, {
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'LinkedIn-Version': '202511',
+            'X-Restli-Protocol-Version': '2.0.0',
+          },
+        })
+      ).json();
+
+      const result: AccountMetrics = {};
+
+      if (networkSizes?.firstDegreeSize !== undefined) {
+        result.followers = networkSizes.firstDegreeSize;
+      }
+
+      return Object.keys(result).length > 0 ? result : null;
+    } catch (err) {
+      console.error('Error fetching LinkedIn Page account metrics:', err);
+      return null;
+    }
+  }
+
+  async batchPostAnalytics(
+    integrationId: string,
+    accessToken: string,
+    postIds: string[],
+    date: number
+  ): Promise<BatchPostAnalyticsResult> {
+    if (postIds.length === 0) return {};
+
+    const today = dayjs().format('YYYY-MM-DD');
+    const endDate = dayjs().unix() * 1000;
+    const startDate = dayjs().subtract(date, 'days').unix() * 1000;
+    const result: BatchPostAnalyticsResult = {};
+
+    // LinkedIn API accepts multiple shares in a single request
+    // Process in chunks of 20 to avoid URL length limits
+    const CHUNK_SIZE = 20;
+    for (let i = 0; i < postIds.length; i += CHUNK_SIZE) {
+      const chunk = postIds.slice(i, i + CHUNK_SIZE);
+
+      try {
+        const sharesList = chunk
+          .map((id) => encodeURIComponent(id))
+          .join(',');
+
+        const shareStatsUrl = `https://api.linkedin.com/v2/organizationalEntityShareStatistics?q=organizationalEntity&organizationalEntity=${encodeURIComponent(
+          `urn:li:organization:${integrationId}`
+        )}&shares=List(${sharesList})&timeIntervals=(timeRange:(start:${startDate},end:${endDate}),timeGranularityType:DAY)`;
+
+        const { elements: shareElements } = await (
+          await this.fetch(shareStatsUrl, {
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+              'LinkedIn-Version': '202511',
+              'X-Restli-Protocol-Version': '2.0.0',
+            },
+          })
+        ).json();
+
+        if (!shareElements?.length) continue;
+
+        // Group elements by share URN
+        for (const element of shareElements) {
+          const shareUrn = element.share;
+          if (!shareUrn) continue;
+
+          if (!result[shareUrn]) {
+            result[shareUrn] = [];
+          }
+
+          const stats = element.totalShareStatistics;
+          if (!stats) continue;
+
+          const dateStr = element.timeRange
+            ? dayjs(element.timeRange.start).format('YYYY-MM-DD')
+            : today;
+
+          // Accumulate metrics per post
+          const existing = result[shareUrn];
+          const addOrUpdate = (label: string, value: number) => {
+            const found = existing.find((a) => a.label === label);
+            if (found) {
+              found.data.push({ total: String(value), date: dateStr });
+            } else {
+              existing.push({
+                label,
+                percentageChange: 0,
+                data: [{ total: String(value), date: dateStr }],
+              });
+            }
+          };
+
+          if (stats.impressionCount !== undefined)
+            addOrUpdate('Impressions', stats.impressionCount);
+          if (stats.uniqueImpressionsCount !== undefined)
+            addOrUpdate('Unique Impressions', stats.uniqueImpressionsCount);
+          if (stats.clickCount !== undefined)
+            addOrUpdate('Clicks', stats.clickCount);
+          if (stats.likeCount !== undefined)
+            addOrUpdate('Likes', stats.likeCount);
+          if (stats.commentCount !== undefined)
+            addOrUpdate('Comments', stats.commentCount);
+          if (stats.shareCount !== undefined)
+            addOrUpdate('Shares', stats.shareCount);
+          if (stats.engagement !== undefined)
+            addOrUpdate('Engagement', stats.engagement);
+        }
+      } catch (err) {
+        console.error(
+          `Error fetching LinkedIn Page batch post analytics (chunk ${i}):`,
+          err
+        );
+      }
+    }
+
+    // For posts that didn't get share stats, fall back to socialActions
+    for (const postId of postIds) {
+      if (result[postId]?.length) continue;
+
+      try {
+        const socialActionsUrl = `https://api.linkedin.com/v2/socialActions/${encodeURIComponent(
+          postId
+        )}`;
+        const socialActions = await (
+          await this.fetch(socialActionsUrl, {
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+              'LinkedIn-Version': '202511',
+              'X-Restli-Protocol-Version': '2.0.0',
+            },
+          })
+        ).json();
+
+        const analytics: AnalyticsData[] = [];
+
+        if (socialActions?.likesSummary?.totalLikes !== undefined) {
+          analytics.push({
+            label: 'Likes',
+            percentageChange: 0,
+            data: [
+              {
+                total: String(socialActions.likesSummary.totalLikes),
+                date: today,
+              },
+            ],
+          });
+        }
+
+        if (
+          socialActions?.commentsSummary?.totalFirstLevelComments !== undefined
+        ) {
+          analytics.push({
+            label: 'Comments',
+            percentageChange: 0,
+            data: [
+              {
+                total: String(
+                  socialActions.commentsSummary.totalFirstLevelComments
+                ),
+                date: today,
+              },
+            ],
+          });
+        }
+
+        if (analytics.length > 0) {
+          result[postId] = analytics;
+        }
+      } catch {
+        // socialActions may not be available for all posts
+      }
+    }
+
+    return result;
   }
 
   @Plug({

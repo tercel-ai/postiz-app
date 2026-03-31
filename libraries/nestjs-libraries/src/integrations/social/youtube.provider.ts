@@ -1,4 +1,5 @@
 import {
+  AccountMetrics,
   AnalyticsData,
   AuthTokenDetails,
   PostDetails,
@@ -447,6 +448,35 @@ export class YoutubeProvider extends SocialAbstract implements SocialProvider {
       return acc;
     } catch (err) {
       return [];
+    }
+  }
+
+  async accountMetrics(
+    integrationId: string,
+    accessToken: string
+  ): Promise<AccountMetrics | null> {
+    try {
+      const { client, youtube } = clientAndYoutube();
+      client.setCredentials({ access_token: accessToken });
+      const youtubeClient = youtube(client);
+
+      const response = await youtubeClient.channels.list({
+        part: ['statistics'],
+        id: [integrationId],
+      });
+
+      const channel = response.data.items?.[0];
+      if (!channel?.statistics) return null;
+
+      const stats = channel.statistics;
+      const result: AccountMetrics = {};
+      if (stats.subscriberCount !== undefined) result.followers = Number(stats.subscriberCount);
+      if (stats.videoCount !== undefined) result.posts = Number(stats.videoCount);
+      if (stats.viewCount !== undefined) result.views = Number(stats.viewCount);
+      return Object.keys(result).length > 0 ? result : null;
+    } catch (err) {
+      console.error('Error fetching YouTube account metrics:', err);
+      return null;
     }
   }
 

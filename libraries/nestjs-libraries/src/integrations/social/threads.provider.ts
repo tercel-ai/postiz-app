@@ -1,4 +1,5 @@
 import {
+  AccountMetrics,
   AnalyticsData,
   AuthTokenDetails,
   PostDetails,
@@ -521,6 +522,26 @@ export class ThreadsProvider extends SocialAbstract implements SocialProvider {
     }
 
     return false;
+  }
+
+  async accountMetrics(
+    integrationId: string,
+    accessToken: string
+  ): Promise<AccountMetrics | null> {
+    try {
+      const { followers_count } = await (
+        await this.fetch(
+          `https://graph.threads.net/v1.0/${integrationId}?fields=followers_count&access_token=${accessToken}`
+        )
+      ).json();
+
+      const result: AccountMetrics = {};
+      if (followers_count !== undefined) result.followers = followers_count;
+      return Object.keys(result).length > 0 ? result : null;
+    } catch (err) {
+      console.error('Error fetching Threads account metrics:', err);
+      return null;
+    }
   }
 
   async postAnalytics(

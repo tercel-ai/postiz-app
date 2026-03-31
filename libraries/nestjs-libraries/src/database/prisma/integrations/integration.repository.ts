@@ -611,6 +611,30 @@ export class IntegrationRepository {
     });
   }
 
+  getUnpublishedPostsForChannel(org: string, id: string) {
+    return this._posts.model.post.groupBy({
+      by: ['group'],
+      where: {
+        organizationId: org,
+        integrationId: id,
+        deletedAt: null,
+        state: { notIn: ['PUBLISHED', 'ERROR'] },
+      },
+    });
+  }
+
+  softDeleteUnpublishedPostsByIntegration(org: string, integrationId: string) {
+    return this._posts.model.post.updateMany({
+      where: {
+        organizationId: org,
+        integrationId,
+        deletedAt: null,
+        state: { in: ['QUEUE', 'DRAFT'] },
+      },
+      data: { deletedAt: new Date() },
+    });
+  }
+
   getPublishedPostsWithReleaseForIntegration(org: string, integrationId: string, sinceDays: number) {
     return this._posts.model.post.findMany({
       where: {
@@ -644,18 +668,18 @@ export class IntegrationRepository {
     });
   }
 
-  async checkForDeletedOnceAndUpdate(org: string, page: string) {
-    return this._integration.model.integration.updateMany({
+  async findIntegrationByInternalId(org: string, internalId: string) {
+    return this._integration.model.integration.findFirst({
       where: {
         organizationId: org,
-        internalId: page,
-        deletedAt: {
-          not: null,
-        },
+        internalId,
       },
-      data: {
-        internalId: makeId(10),
-      },
+    });
+  }
+
+  async hardDeleteIntegration(id: string) {
+    return this._integration.model.integration.delete({
+      where: { id },
     });
   }
 

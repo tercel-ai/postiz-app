@@ -653,6 +653,29 @@ export const CalendarColumn: FC<{
     [toaster, t]
   );
 
+  const retryPost = useCallback(
+    (post: Post) => async () => {
+      try {
+        const res = await fetch(`/posts/${post.id}/retry`, {
+          method: 'POST',
+        });
+        if (!res.ok) {
+          const { message } = await res.json().catch(() => ({ message: 'Retry failed' }));
+          toaster.show(message || t('retry_failed', 'Retry failed'), 'warning');
+          return;
+        }
+        toaster.show(
+          t('post_retried_successfully', 'Post retried successfully'),
+          'success'
+        );
+        reloadCalendarView();
+      } catch {
+        toaster.show(t('retry_failed', 'Retry failed'), 'warning');
+      }
+    },
+    [toaster, t]
+  );
+
   const addProvider = useAddProvider();
   return (
     <div
@@ -706,6 +729,7 @@ export const CalendarColumn: FC<{
                   post={post}
                   integrations={integrations}
                   deletePost={deletePost(post)}
+                  retryPost={retryPost(post)}
                 />
               </div>
             </div>
@@ -809,6 +833,7 @@ const CalendarItem: FC<{
   editPost: () => void;
   duplicatePost: () => void;
   deletePost: () => void;
+  retryPost: () => void;
   statistics: () => void;
   integrations: Integrations[];
   state: State;
@@ -831,7 +856,17 @@ const CalendarItem: FC<{
     state,
     display,
     deletePost,
+    retryPost,
   } = props;
+  const [retrying, setRetrying] = useState(false);
+  const handleRetry = useCallback(async () => {
+    setRetrying(true);
+    try {
+      await retryPost();
+    } finally {
+      setRetrying(false);
+    }
+  }, [retryPost]);
   const { disableXAnalytics } = useVariables();
   const preview = useCallback(() => {
     window.open(`/p/` + post.id + '?share=true', '_blank');
@@ -915,6 +950,20 @@ const CalendarItem: FC<{
         >
           <DeletePost />
         </div>
+        {state === 'ERROR' && (
+          <div
+            className={clsx(
+              'hidden group-hover:block hover:underline cursor-pointer',
+              post?.tags?.[0]?.tag?.color && 'mix-blend-difference'
+            )}
+            onClick={(e) => {
+              e.stopPropagation();
+              handleRetry();
+            }}
+          >
+            <RetryPost retrying={retrying} />
+          </div>
+        )}
       </div>
       <div
         onClick={editPost}
@@ -937,6 +986,7 @@ const CalendarItem: FC<{
         <div className="w-full flex-1 flex flex-col min-h-[40px]">
           <div className="text-start">
             {state === 'DRAFT' ? t('draft', 'Draft') + ': ' : ''}
+            {state === 'ERROR' ? <span className="text-red-500">{t('failed', 'Failed')}: </span> : ''}
           </div>
             <div className="w-full relative">
               <div className="absolute top-0 start-0 w-full text-ellipsis break-words line-clamp-1 text-start">
@@ -1021,6 +1071,28 @@ export const DeletePost = () => {
     >
       <path
         d="M15 10V18H9V10H15ZM14 4H9.9L8.9 5H6V7H18V5H15L14 4ZM17 8H7V18C7 19.1 7.9 20 9 20H15C16.1 20 17 19.1 17 18V8Z"
+        fill="currentColor"
+      />
+    </svg>
+  );
+};
+
+const RetryPost: FC<{ retrying?: boolean }> = ({ retrying }) => {
+  const t = useT();
+  return retrying ? (
+    <div className="w-[15px] h-[15px] animate-spin border-2 border-white border-t-transparent rounded-full" />
+  ) : (
+    <svg
+      width="15"
+      height="15"
+      viewBox="0 0 24 24"
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+      data-tooltip-id="tooltip"
+      data-tooltip-content={t('retry_post', 'Retry Post')}
+    >
+      <path
+        d="M17.65 6.35C16.2 4.9 14.21 4 12 4C7.58 4 4.01 7.58 4.01 12C4.01 16.42 7.58 20 12 20C15.73 20 18.84 17.45 19.73 14H17.65C16.83 16.33 14.61 18 12 18C8.69 18 6 15.31 6 12C6 8.69 8.69 6 12 6C13.66 6 15.14 6.69 16.22 7.78L13 11H20V4L17.65 6.35Z"
         fill="currentColor"
       />
     </svg>

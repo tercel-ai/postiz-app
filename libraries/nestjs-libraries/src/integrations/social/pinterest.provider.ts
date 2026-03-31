@@ -1,4 +1,5 @@
 import {
+  AccountMetrics,
   AnalyticsData,
   AuthTokenDetails,
   PostDetails,
@@ -357,6 +358,31 @@ export class PinterestProvider
         { label: 'Saves', data: [] as any[] },
       ]
     );
+  }
+
+  async accountMetrics(
+    integrationId: string,
+    accessToken: string
+  ): Promise<AccountMetrics | null> {
+    try {
+      const { follower_count, pin_count, monthly_views } = await (
+        await fetch('https://api.pinterest.com/v5/user_account', {
+          method: 'GET',
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+          },
+        })
+      ).json();
+
+      const result: AccountMetrics = {};
+      if (follower_count !== undefined) result.followers = follower_count;
+      if (pin_count !== undefined) result.posts = pin_count;
+      if (monthly_views !== undefined) result.views = monthly_views;
+      return Object.keys(result).length > 0 ? result : null;
+    } catch (err) {
+      console.error('Error fetching Pinterest account metrics:', err);
+      return null;
+    }
   }
 
   async postAnalytics(

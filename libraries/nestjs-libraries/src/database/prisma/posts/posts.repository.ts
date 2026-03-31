@@ -1339,6 +1339,34 @@ export class PostsRepository {
     });
   }
 
+  async hasRecurringOriginalInGroup(group: string): Promise<boolean> {
+    const count = await this._post.model.post.count({
+      where: {
+        group,
+        intervalInDays: { not: null },
+        deletedAt: null,
+      },
+    });
+    return count > 0;
+  }
+
+  async resetPostForRetry(id: string, orgId: string): Promise<boolean> {
+    const result = await this._post.model.post.updateMany({
+      where: {
+        id,
+        organizationId: orgId,
+        state: 'ERROR',
+        deletedAt: null,
+      },
+      data: {
+        state: 'QUEUE',
+        releaseId: null,
+        error: null,
+      },
+    });
+    return result.count > 0;
+  }
+
   getPostById(id: string, org?: string) {
     return this._post.model.post.findUnique({
       where: {

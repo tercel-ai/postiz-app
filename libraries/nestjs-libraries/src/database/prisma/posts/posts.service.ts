@@ -883,6 +883,88 @@ export class PostsService {
     return this._postRepository.changeState(id, state, err, body);
   }
 
+  async retryPost(orgId: string, postId: string) {
+    const post = await this._postRepository.getPostById(postId, orgId);
+    if (!post) {
+      throw new BadRequestException('Post not found');
+    }
+    if (!post.integration) {
+      throw new BadRequestException('Integration not found or has been removed');
+    }
+    if (post.state !== 'ERROR') {
+      throw new BadRequestException('Only failed posts can be retried');
+    }
+
+    // Recurring originals should never be retried directly — they use the
+    // clone-per-cycle mechanism.  Only clones (intervalInDays=null) or
+    // plain non-recurring posts are retryable.
+    if (post.intervalInDays && post.intervalInDays > 0 && !post.parentPostId) {
+      throw new BadRequestException('Recurring posts cannot be retried directly');
+    }
+
+    // Fail fast: if integration is broken, don't bother starting a workflow.
+    // The workflow would silently return without setting ERROR (pre-existing gap),
+    // leaving the post stuck in QUEUE.
+    if (post.integration.refreshNeeded) {
+      throw new BadRequestException(
+        `Cannot retry: ${post.integration.name} needs to be reconnected`
+      );
+    }
+    if (post.integration.disabled) {
+      throw new BadRequestException(
+        `Cannot retry: ${post.integration.name} is disabled`
+      );
+    }
+
+    // Recurring clones: only allow retry within the same day.
+    // The next day a new clone is created automatically, so retrying old ones is pointless.
+    // Non-recurring posts: no day restriction — there's no auto-retry mechanism for them.
+    const isRecurringClone = !post.intervalInDays
+      && await this._postRepository.hasRecurringOriginalInGroup(post.group);
+    if (isRecurringClone && !dayjs.utc().isSame(dayjs.utc(post.publishDate), 'day')) {
+      throw new BadRequestException('Can only retry recurring posts from today');
+    }
+
+    // Atomically reset clone to QUEUE — returns false if already reset (double-click guard)
+    const didReset = await this._postRepository.resetPostForRetry(postId, orgId);
+    if (!didReset) {
+      throw new BadRequestException('Post is already being retried');
+    }
+
+    const taskQueue = post.integration.providerIdentifier.split('-')[0].toLowerCase();
+    try {
+      // Clone has no intervalInDays, so the workflow treats it as a normal (non-recurring) post
+      await this.startWorkflow(taskQueue, postId, orgId, true);
+    } catch (err) {
+      // Only set ERROR if the post is still QUEUE (workflow never ran or failed before publishing).
+      // If the post is already PUBLISHED or ERROR, the workflow handled it — don't overwrite.
+      const failedPost = await this._postRepository.getPostById(postId);
+      if (failedPost?.state === 'QUEUE') {
+        await this.changeState(postId, 'ERROR', `Retry workflow failed: ${(err as Error)?.message || err}`);
+      }
+    }
+
+    const finalPost = await this._postRepository.getPostById(postId);
+    if (!finalPost || finalPost.state === 'ERROR') {
+      throw new BadRequestException(finalPost?.error || 'Retry failed');
+    }
+
+    // Safety net: if the workflow returned without publishing (e.g., integration
+    // state changed between our check and the workflow execution), the post is
+    // stuck in QUEUE.  Reset it back to ERROR so the user can try again later.
+    if (finalPost.state === 'QUEUE') {
+      await this.changeState(postId, 'ERROR',
+        'Retry did not complete — the integration may need to be reconnected');
+      throw new BadRequestException('Retry did not complete — check your integration status');
+    }
+
+    return {
+      postId: finalPost.id,
+      state: finalPost.state,
+      releaseURL: finalPost.releaseURL || null,
+    };
+  }
+
   async changeDate(orgId: string, id: string, date: string) {
     const getPostById = await this._postRepository.getPostById(id, orgId);
     const newDate = await this._postRepository.changeDate(orgId, id, date);

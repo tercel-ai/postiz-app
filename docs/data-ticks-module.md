@@ -49,9 +49,13 @@ Platform-specific label mapping:
 | YouTube | `views` |
 | Threads | `views` |
 | Pinterest | `impressions` |
-| Instagram | `impressions` |
+| Instagram / Instagram-Standalone | `impressions` |
 | LinkedIn / LinkedIn-Page | `impressions` |
 | Facebook | `impressions` |
+| TikTok | `views` |
+| Reddit | `score` |
+| Bluesky | `likes` (no native impressions API) |
+| Mastodon / Mastodon-Custom | `favourites` (no native impressions API) |
 
 ### Traffic (`type = "traffic"`)
 
@@ -61,11 +65,18 @@ Weighted engagement score computed by `traffic.calculator.ts`. Each engagement t
 |----------|---------|
 | **X** | likes: 1, replies: 2, retweets: 1.5, quotes: 2, bookmarks: 1.5 |
 | **YouTube** | views: 1, likes: 2, comments: 5, favorites: 2 |
-| **Instagram** | likes: 1, comments: 3, saves: 5, shares: 4 |
+| **Instagram / Instagram-Standalone** | likes: 1, comments: 3, saves: 5, shares: 4 |
 | **LinkedIn-Page** | clicks: 5, likes: 1, comments: 4, shares: 3, engagement: 0.5 |
+| **LinkedIn** (personal) | impressions: 0.05, likes: 1, comments: 4, shares: 3, reach: 0.1 |
 | **Facebook** | clicks: 3, reactions: 1 |
 | **Threads** | likes: 1, replies: 2, reposts: 1.5, quotes: 2 |
 | **Pinterest** | pin clicks: 3, outbound clicks: 5, saves: 2 |
+| **TikTok** | views: 0.1, likes: 1, comments: 3, shares: 4 |
+| **Reddit** | score: 0.5, upvotes: 1, comments: 3 |
+| **Bluesky** | likes: 1, reposts: 1.5, replies: 2, quotes: 2 |
+| **Mastodon / Mastodon-Custom** | favourites: 1, boosts: 1.5, replies: 2 |
+
+Platforms not listed above use fallback weights: likes: 1, comments: 3, shares: 2, clicks: 5.
 
 **Formula:** `Traffic Score = Σ(metric_value × weight)`
 

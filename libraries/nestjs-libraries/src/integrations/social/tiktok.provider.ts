@@ -1,4 +1,6 @@
 import {
+  AccountMetrics,
+  AnalyticsData,
   AuthTokenDetails,
   PostDetails,
   PostResponse,
@@ -538,5 +540,108 @@ export class TiktokProvider extends SocialAbstract implements SocialProvider {
         status: 'success',
       },
     ];
+  }
+
+  async postAnalytics(
+    integrationId: string,
+    accessToken: string,
+    postId: string,
+    date: number
+  ): Promise<AnalyticsData[]> {
+    const today = dayjs().format('YYYY-MM-DD');
+
+    try {
+      const response = await this.fetch(
+        'https://open.tiktokapis.com/v2/video/query/?fields=like_count,comment_count,share_count,view_count',
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${accessToken}`,
+          },
+          body: JSON.stringify({
+            filters: {
+              video_ids: [postId],
+            },
+          }),
+        }
+      );
+
+      const { data } = await response.json();
+      const video = data?.videos?.[0];
+      if (!video) return [];
+
+      const result: AnalyticsData[] = [];
+
+      if (video.view_count !== undefined) {
+        result.push({
+          label: 'Views',
+          percentageChange: 0,
+          data: [{ total: String(video.view_count), date: today }],
+        });
+      }
+
+      if (video.like_count !== undefined) {
+        result.push({
+          label: 'Likes',
+          percentageChange: 0,
+          data: [{ total: String(video.like_count), date: today }],
+        });
+      }
+
+      if (video.comment_count !== undefined) {
+        result.push({
+          label: 'Comments',
+          percentageChange: 0,
+          data: [{ total: String(video.comment_count), date: today }],
+        });
+      }
+
+      if (video.share_count !== undefined) {
+        result.push({
+          label: 'Shares',
+          percentageChange: 0,
+          data: [{ total: String(video.share_count), date: today }],
+        });
+      }
+
+      return result;
+    } catch (err) {
+      console.error('Error fetching TikTok post analytics:', err);
+      return [];
+    }
+  }
+
+  async accountMetrics(
+    integrationId: string,
+    accessToken: string
+  ): Promise<AccountMetrics | null> {
+    try {
+      const {
+        data: { user },
+      } = await (
+        await fetch(
+          'https://open.tiktokapis.com/v2/user/info/?fields=follower_count,following_count,likes_count,video_count',
+          {
+            method: 'GET',
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+            },
+          }
+        )
+      ).json();
+
+      if (!user) return null;
+
+      const result: AccountMetrics = {};
+      if (user.follower_count !== undefined) result.followers = user.follower_count;
+      if (user.following_count !== undefined) result.following = user.following_count;
+      if (user.likes_count !== undefined) result.likes = user.likes_count;
+      if (user.video_count !== undefined) result.posts = user.video_count;
+      return Object.keys(result).length > 0 ? result : null;
+    } catch (err) {
+      console.error('Error fetching TikTok account metrics:', err);
+      return null;
+    }
   }
 }

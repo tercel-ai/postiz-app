@@ -1,10 +1,13 @@
 import {
+  AccountMetrics,
+  AnalyticsData,
   AuthTokenDetails,
   PostDetails,
   PostResponse,
   SocialProvider,
 } from '@gitroom/nestjs-libraries/integrations/social/social.integrations.interface';
 import { makeId } from '@gitroom/nestjs-libraries/services/make.is';
+import dayjs from 'dayjs';
 import sharp from 'sharp';
 import { lookup } from 'mime-types';
 import { readOrFetch } from '@gitroom/helpers/utils/read.or.fetch';
@@ -34,6 +37,7 @@ export class LinkedinProvider extends SocialAbstract implements SocialProvider {
     'rw_organization_admin',
     'w_organization_social',
     'r_organization_social',
+    'r_member_postAnalytics',
   ];
   override maxConcurrentJob = 2; // LinkedIn has professional posting limits
   refreshWait = true;
@@ -867,6 +871,156 @@ export class LinkedinProvider extends SocialAbstract implements SocialProvider {
         Authorization: `Bearer ${integration.token}`,
       },
     });
+  }
+
+  async postAnalytics(
+    integrationId: string,
+    accessToken: string,
+    postId: string,
+    date: number
+  ): Promise<AnalyticsData[]> {
+    const today = dayjs().format('YYYY-MM-DD');
+
+    // Try the newer memberCreatorPostAnalytics API first (requires r_member_postAnalytics scope)
+    try {
+      return await this._fetchMemberPostAnalytics(accessToken, postId, today);
+    } catch (err: any) {
+      // 403 = scope not granted (existing users who haven't re-authenticated)
+      // Fall back to legacy socialActions API
+      if (err?.status === 403 || err?.message?.includes('403')) {
+        console.warn(
+          'LinkedIn memberCreatorPostAnalytics not available (scope missing), falling back to socialActions'
+        );
+      } else {
+        console.error('Error fetching LinkedIn member post analytics:', err);
+      }
+    }
+
+    // Fallback: legacy socialActions API (likes + comments only)
+    return this._fetchSocialActionsAnalytics(accessToken, postId, today);
+  }
+
+  private async _fetchMemberPostAnalytics(
+    accessToken: string,
+    postId: string,
+    today: string
+  ): Promise<AnalyticsData[]> {
+    // Build RestLi 2.0 entity parameter: entity=(entityType:urn-encoded)
+    // postId is a full URN like "urn:li:share:123" or "urn:li:ugcPost:123"
+    const entityType = postId.includes(':ugcPost:') ? 'ugcPost' : 'share';
+    const encodedUrn = encodeURIComponent(postId);
+    const entityParam = `(${entityType}:${encodedUrn})`;
+
+    const metrics = [
+      { queryType: 'IMPRESSION', label: 'Impressions' },
+      { queryType: 'REACTION', label: 'Likes' },
+      { queryType: 'COMMENT', label: 'Comments' },
+      { queryType: 'RESHARE', label: 'Shares' },
+      { queryType: 'MEMBERS_REACHED', label: 'Reach' },
+    ] as const;
+
+    const headers = {
+      Authorization: `Bearer ${accessToken}`,
+      'LinkedIn-Version': '202511',
+      'X-Restli-Protocol-Version': '2.0.0',
+    };
+
+    const results = await Promise.allSettled(
+      metrics.map(async ({ queryType, label }) => {
+        const url =
+          `https://api.linkedin.com/rest/memberCreatorPostAnalytics` +
+          `?q=entity&entity=${entityParam}` +
+          `&queryType=${queryType}&aggregation=TOTAL`;
+
+        const response = await fetch(url, { headers });
+
+        if (response.status === 403) {
+          const error: any = new Error('Scope not granted');
+          error.status = 403;
+          throw error;
+        }
+
+        if (!response.ok) {
+          return null;
+        }
+
+        const data = await response.json();
+        const elements = data?.elements || [];
+        let total = 0;
+        for (const el of elements) {
+          total += el?.metricValue ?? 0;
+        }
+
+        return {
+          label,
+          percentageChange: 0,
+          data: [{ total: String(total), date: today }],
+        } as AnalyticsData;
+      })
+    );
+
+    // If any request got 403, propagate it so we fall back
+    for (const r of results) {
+      if (r.status === 'rejected' && r.reason?.status === 403) {
+        throw r.reason;
+      }
+    }
+
+    return results
+      .filter(
+        (r): r is PromiseFulfilledResult<AnalyticsData | null> =>
+          r.status === 'fulfilled' && r.value !== null
+      )
+      .map((r) => r.value!);
+  }
+
+  private async _fetchSocialActionsAnalytics(
+    accessToken: string,
+    postId: string,
+    today: string
+  ): Promise<AnalyticsData[]> {
+    try {
+      const socialActionsUrl = `https://api.linkedin.com/v2/socialActions/${encodeURIComponent(
+        postId
+      )}`;
+      const socialActions = await (
+        await this.fetch(socialActionsUrl, {
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'LinkedIn-Version': '202511',
+            'X-Restli-Protocol-Version': '2.0.0',
+          },
+        })
+      ).json();
+
+      const result: AnalyticsData[] = [];
+
+      if (socialActions?.likesSummary?.totalLikes !== undefined) {
+        result.push({
+          label: 'Likes',
+          percentageChange: 0,
+          data: [{ total: String(socialActions.likesSummary.totalLikes), date: today }],
+        });
+      }
+
+      if (socialActions?.commentsSummary?.totalFirstLevelComments !== undefined) {
+        result.push({
+          label: 'Comments',
+          percentageChange: 0,
+          data: [
+            {
+              total: String(socialActions.commentsSummary.totalFirstLevelComments),
+              date: today,
+            },
+          ],
+        });
+      }
+
+      return result;
+    } catch (err) {
+      console.error('Error fetching LinkedIn personal post analytics:', err);
+      return [];
+    }
   }
 
   override async mention(token: string, data: { query: string }) {

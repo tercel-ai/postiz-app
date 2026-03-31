@@ -18,6 +18,9 @@ OAuth 2.0 with the following scopes:
 | `rw_organization_admin` | Manage company pages |
 | `w_organization_social` | Post on behalf of company page |
 | `r_organization_social` | Read company page analytics |
+| `r_member_postAnalytics` | Read personal post analytics (impressions, reach, reactions, reshares, comments) |
+
+> **Note:** `r_member_postAnalytics` is only in the personal provider's scopes. `LinkedinPageProvider` overrides the scopes array and excludes it — company page OAuth does not request this scope.
 
 Tokens are refreshed via the refresh token flow. `refreshWait = true` serialises refresh calls to avoid race conditions.
 
@@ -129,7 +132,45 @@ The UI uses react-hook-form via `useSettings()`. Visibility defaults to `PUBLIC`
 
 ---
 
+## Analytics
+
+### LinkedIn Personal (`linkedin`)
+
+`postAnalytics` uses the **`memberCreatorPostAnalytics` REST API** (requires `r_member_postAnalytics` scope) to fetch:
+- **Impressions** (`IMPRESSION` queryType)
+- **Likes** (`REACTION` queryType)
+- **Comments** (`COMMENT` queryType)
+- **Shares** (`RESHARE` queryType)
+- **Reach** (`MEMBERS_REACHED` queryType)
+
+API endpoint: `GET /rest/memberCreatorPostAnalytics?q=entity&entity=(share:{encodedUrn})&queryType={METRIC}&aggregation=TOTAL`
+
+Each metric requires a separate API call (5 calls per post). All 5 are fetched in parallel via `Promise.allSettled`.
+
+**Graceful fallback:** If the user's token lacks `r_member_postAnalytics` (e.g., existing users who haven't re-authenticated), the API returns 403. The provider falls back to the legacy `GET /v2/socialActions/{postId}` endpoint which only provides Likes and Comments.
+
+**Entity encoding:** Uses RestLi 2.0 tuple format — `(share:urn%3Ali%3Ashare%3A123)` or `(ugcPost:urn%3Ali%3AugcPost%3A123)` depending on the post URN type.
+
+No `accountMetrics` or `batchPostAnalytics` — LinkedIn does not expose follower count for personal accounts, and the `memberCreatorPostAnalytics` API does not support batch per-post queries.
+
+### LinkedIn Page (`linkedin-page`)
+
+Full analytics support:
+
+| Method | API | Metrics |
+|--------|-----|---------|
+| `postAnalytics` | `GET /v2/organizationalEntityShareStatistics` + fallback `GET /v2/socialActions/{postId}` | Impressions, Unique Impressions, Clicks, Likes, Comments, Shares, Engagement |
+| `batchPostAnalytics` | Same API with `shares=List(...)` parameter (up to 20 posts per request) | Same as above, per-post |
+| `accountMetrics` | `GET /v2/networkSizes/urn:li:organization:{id}?edgeType=CompanyFollowedByMember` | followers |
+| `analytics` (account-level) | `organizationPageStatistics` + `organizationalEntityFollowerStatistics` + `organizationalEntityShareStatistics` | Page Views, Organic/Paid Followers, Clicks, Shares, Engagement, Comments |
+
+All API calls use `LinkedIn-Version: 202511` and `X-Restli-Protocol-Version: 2.0.0` headers.
+
+---
+
 ## Known Limitations
 
 - `createCommentPost` still uses the v2 API (`/v2/socialActions/`) rather than the newer REST API with `LinkedIn-Version: 202511`. This is functional but inconsistent with the rest of the provider.
 - `maxConcurrentJob = 2` due to LinkedIn professional posting rate limits.
+- LinkedIn personal accounts now support impressions/reach/reactions/reshares/comments via `memberCreatorPostAnalytics` API, but still cannot access follower count. Users must re-authenticate to grant the `r_member_postAnalytics` scope — existing tokens fall back to the legacy socialActions API (likes + comments only).
+- The `memberCreatorPostAnalytics` API requires 5 separate API calls per post (one per metric). For accounts with many posts, this can consume significant API quota during daily sync.
