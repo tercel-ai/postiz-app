@@ -99,6 +99,11 @@ export class PostActivity {
   }
 
   @ActivityMethod()
+  async claimPostForPublishing(id: string, claimToken: string): Promise<boolean> {
+    return this._postService.claimPostForPublishing(id, claimToken);
+  }
+
+  @ActivityMethod()
   async updatePost(id: string, postId: string, releaseURL: string) {
     return this._postService.updatePost(id, postId, releaseURL);
   }

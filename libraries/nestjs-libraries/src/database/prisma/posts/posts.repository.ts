@@ -517,7 +517,7 @@ export class PostsRepository {
    * PUBLISHED and ERROR posts are never touched — they are immutable history.
    * All group-level deletions (explicit delete, edit cleanup) must go through here.
    */
-  private async _softDeleteGroupPosts(
+  async softDeleteGroupPosts(
     group: string,
     opts: { organizationId?: string; excludeIds?: string[] } = {}
   ) {
@@ -543,7 +543,7 @@ export class PostsRepository {
     });
 
     if (hasRecurring) {
-      await this._softDeleteGroupPosts(group, { organizationId: orgId });
+      await this.softDeleteGroupPosts(group, { organizationId: orgId });
     } else {
       await this._post.model.post.updateMany({
         where: { organizationId: orgId, group, deletedAt: null },
@@ -785,6 +785,43 @@ export class PostsRepository {
         sourcePostId: originalPost.id,
       },
     });
+  }
+
+  /**
+   * Reset the claim lock on a QUEUE post whose workflow was terminated.
+   * Only resets if the post is still in QUEUE — a PUBLISHED post must not be touched.
+   * The releaseId is a claim token (starts with 'claim_'), not a platform post ID.
+   */
+  async resetClaimForPost(id: string): Promise<void> {
+    await this._post.model.post.updateMany({
+      where: {
+        id,
+        state: 'QUEUE',
+        releaseId: { not: null },
+      },
+      data: {
+        releaseId: null,
+      },
+    });
+  }
+
+  /**
+   * Atomically claim a non-recurring QUEUE post for publishing.
+   * Sets releaseId to the given claimToken only if it is currently null and state is QUEUE.
+   * Returns true if this caller won the claim; false if another workflow already claimed it.
+   */
+  async claimPostForPublishing(id: string, claimToken: string): Promise<boolean> {
+    const result = await this._post.model.post.updateMany({
+      where: {
+        id,
+        state: 'QUEUE',
+        releaseId: null,
+      },
+      data: {
+        releaseId: claimToken,
+      },
+    });
+    return result.count > 0;
   }
 
   /**
@@ -1182,6 +1219,9 @@ export class PostsRepository {
         ...(type === 'create' ? { source: source || 'calendar' } : {}),
         approvedSubmitForOrder: APPROVED_SUBMIT_FOR_ORDER.NO,
         state: state === 'draft' ? ('DRAFT' as const) : ('QUEUE' as const),
+        releaseId: null,
+        releaseURL: null,
+        error: null,
         image: JSON.stringify(value.image),
         settings: JSON.stringify(body.settings),
         organization: {
@@ -1262,17 +1302,6 @@ export class PostsRepository {
         })
       )?.id!
       : undefined;
-
-    // Only clean up old group posts when editing existing posts (value.id present).
-    // For new multi-account posts every integration is processed separately in a
-    // loop; without this guard the second call would soft-delete the post just
-    // created by the first call (same group, different integration).
-    const isEditingExisting = body.value.some((v) => !!v.id);
-    if (body.group && isEditingExisting) {
-      await this._softDeleteGroupPosts(body.group, {
-        excludeIds: posts.map((p) => p.id),
-      });
-    }
 
     return { previousPost, posts };
   }

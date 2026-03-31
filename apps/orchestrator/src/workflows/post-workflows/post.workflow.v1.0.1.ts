@@ -34,6 +34,7 @@ const {
   updatePost,
   sendWebhooks,
   isCommentable,
+  claimPostForPublishing,
   prepareRecurringCycle,
   finalizeRecurringCycle,
 } = proxyActivities<PostActivity>({
@@ -171,6 +172,16 @@ export async function postWorkflowV101({
       await continueAsNew<typeof postWorkflowV101>({ taskQueue, postId, organizationId });
     }
     return;
+  }
+
+  // ── Non-recurring post: atomic claim before publishing ──
+  // For non-recurring posts, atomically set releaseId as a lock.
+  // If another workflow already claimed it, bail out to prevent duplicate publishing.
+  if (!isRecurring) {
+    const claimed = await claimPostForPublishing(postId, claimToken);
+    if (!claimed) {
+      return; // Another workflow already claimed this post
+    }
   }
 
   // Do we need to post comment for this social?

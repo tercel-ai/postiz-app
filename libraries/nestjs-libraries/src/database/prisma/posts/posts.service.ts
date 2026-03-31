@@ -120,6 +120,10 @@ export class PostsService {
     }
   }
 
+  async claimPostForPublishing(id: string, claimToken: string): Promise<boolean> {
+    return this._postRepository.claimPostForPublishing(id, claimToken);
+  }
+
   async updatePost(id: string, postId: string, releaseURL: string) {
     // Non-recurring: update original in place
     const updatedPost = await this._postRepository.updatePost(id, postId, releaseURL);
@@ -659,6 +663,7 @@ export class PostsService {
   }
 
   async startWorkflow(taskQueue: string, postId: string, orgId: string, postNow = false) {
+    let terminated = false;
     try {
       const workflows = this._temporalService.client
         .getRawClient()
@@ -676,10 +681,17 @@ export class PostsService {
             (await workflow.describe()).status.name !== 'TERMINATED'
           ) {
             await workflow.terminate();
+            terminated = true;
           }
         } catch (err) {}
       }
     } catch (err) {}
+
+    // If a previous workflow was terminated, it may have already claimed the post
+    // (set releaseId). Reset releaseId so the new workflow can claim it.
+    if (terminated) {
+      await this._postRepository.resetClaimForPost(postId);
+    }
 
     const rawClient = this._temporalService.client.getRawClient();
     if (!rawClient) {
@@ -735,6 +747,7 @@ export class PostsService {
     );
     const postList = [];
     const postNowErrors: string[] = [];
+    const allCreatedPostIds: string[] = [];
     for (const post of body.posts) {
       const messages = (post.value || []).map((p) => p.content);
       const updateContent = !body.shortLink
@@ -759,6 +772,9 @@ export class PostsService {
       if (!posts?.length) {
         return [] as any[];
       }
+
+      // Accumulate IDs so subsequent iterations won't soft-delete these posts
+      allCreatedPostIds.push(...posts.map((p) => p.id));
 
       if (body.type === 'now') {
         try {
@@ -825,6 +841,16 @@ export class PostsService {
           `createPost: skipping deductIfOverage for postId=${createdPostId} — no userId provided`
         );
       }
+    }
+
+    // Clean up stale QUEUE/DRAFT posts from previous edit AFTER all accounts are processed.
+    // Must happen after the loop so no iteration soft-deletes a sibling that hasn't been upserted yet.
+    const group = body.posts[0]?.group;
+    const isEditingExisting = body.posts.some((p) => p.value?.some((v) => !!v.id));
+    if (group && isEditingExisting && allCreatedPostIds.length > 0) {
+      await this._postRepository.softDeleteGroupPosts(group, {
+        excludeIds: allCreatedPostIds,
+      });
     }
 
     if (postNowErrors.length > 0) {
