@@ -34,7 +34,6 @@ export class LinkedinProvider extends SocialAbstract implements SocialProvider {
     'profile',
     'w_member_social',
     'r_basicprofile',
-    'r_member_postAnalytics',
   ];
   override maxConcurrentJob = 2; // LinkedIn has professional posting limits
   refreshWait = true;
