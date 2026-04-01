@@ -8,5 +8,8 @@
     "emitDecoratorMetadata": true,
     "skipLibCheck": true
   },
+  "ts-node": {
+    "require": ["tsconfig-paths/register"]
+  },
   "include": ["./**/*.ts"]
 }
