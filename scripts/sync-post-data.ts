@@ -13,13 +13,12 @@
  * so running this multiple times per day safely overwrites the previous values.
  *
  * Usage:
- *   npx ts-node scripts/sync-post-data.ts --dry-run
- *   npx ts-node scripts/sync-post-data.ts --execute
- *   npx ts-node scripts/sync-post-data.ts --date 2026-03-28 --execute
- *   npx ts-node scripts/sync-post-data.ts --start-date 2026-03-01 --end-date 2026-03-10 --execute
+ *   npx ts-node --project scripts/tsconfig.json scripts/sync-post-data.ts --dry-run
+ *   npx ts-node --project scripts/tsconfig.json scripts/sync-post-data.ts --execute
+ *   npx ts-node --project scripts/tsconfig.json scripts/sync-post-data.ts --date 2026-03-28 --execute
+ *   npx ts-node --project scripts/tsconfig.json scripts/sync-post-data.ts --start-date 2026-03-01 --end-date 2026-03-10 --execute
  */
 
-// Suppress Sentry noise in script mode
 process.env.NODE_ENV = process.env.NODE_ENV || 'production';
 process.env.TZ = 'UTC';
 
@@ -28,9 +27,7 @@ import { Module } from '@nestjs/common';
 import { DatabaseModule } from '@gitroom/nestjs-libraries/database/prisma/database.module';
 import { DataTicksService } from '@gitroom/nestjs-libraries/database/prisma/data-ticks/data-ticks.service';
 
-@Module({
-  imports: [DatabaseModule],
-})
+@Module({ imports: [DatabaseModule] })
 class ScriptModule {}
 
 interface CliArgs {
@@ -83,7 +80,7 @@ function parseArgs(): CliArgs {
 
 function printHelp(): void {
   console.log(`
-Usage: npx ts-node scripts/sync-post-data.ts [options]
+Usage: npx ts-node --project scripts/tsconfig.json scripts/sync-post-data.ts [options]
 
 Options:
   --date <YYYY-MM-DD>        Sync for a specific date (default: yesterday)
@@ -96,10 +93,10 @@ Options:
 DataTicks use upsert, so running multiple times per day safely overwrites previous values.
 
 Examples:
-  npx ts-node scripts/sync-post-data.ts --dry-run
-  npx ts-node scripts/sync-post-data.ts --execute                          # sync yesterday
-  npx ts-node scripts/sync-post-data.ts --date 2026-03-28 --execute        # sync specific date
-  npx ts-node scripts/sync-post-data.ts --start-date 2026-03-01 --end-date 2026-03-10 --execute
+  npx ts-node --project scripts/tsconfig.json scripts/sync-post-data.ts --dry-run
+  npx ts-node --project scripts/tsconfig.json scripts/sync-post-data.ts --execute
+  npx ts-node --project scripts/tsconfig.json scripts/sync-post-data.ts --date 2026-03-28 --execute
+  npx ts-node --project scripts/tsconfig.json scripts/sync-post-data.ts --start-date 2026-03-01 --end-date 2026-03-10 --execute
 `);
 }
 
@@ -130,7 +127,7 @@ function buildDateRange(args: CliArgs): Array<Date | undefined> {
     }
     dates.push(d);
   } else {
-    // Default: no targetDate passed → syncDailyTicks defaults to yesterday
+    // Default: no targetDate passed -> syncDailyTicks defaults to yesterday
     dates.push(undefined);
   }
 
@@ -153,7 +150,7 @@ async function main(): Promise<void> {
   }
 
   console.log('');
-  console.log('This script calls DataTicksService.syncDailyTicks() — the same method');
+  console.log('This script calls DataTicksService.syncDailyTicks() -- the same method');
   console.log('used by the daily Temporal workflow. It will:');
   console.log('  1. Fetch post analytics from platform APIs (last 30 days of posts)');
   console.log('  2. Update Post.impressions, Post.trafficScore, Post.analytics');

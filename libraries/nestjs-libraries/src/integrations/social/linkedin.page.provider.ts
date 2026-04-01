@@ -551,7 +551,8 @@ export class LinkedinPageProvider
   ): Promise<AccountMetrics | null> {
     try {
       // Fetch total follower count via networkSizes
-      const networkSizesUrl = `https://api.linkedin.com/v2/networkSizes/urn:li:organization:${integrationId}?edgeType=CompanyFollowedByMember`;
+      const urn = encodeURIComponent(`urn:li:organization:${integrationId}`);
+      const networkSizesUrl = `https://api.linkedin.com/v2/networkSizes/${urn}?edgeType=CompanyFollowedByMember`;
       const networkSizes = await (
         await this.fetch(networkSizesUrl, {
           headers: {

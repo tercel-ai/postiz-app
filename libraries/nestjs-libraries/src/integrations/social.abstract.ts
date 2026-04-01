@@ -164,7 +164,11 @@ export abstract class SocialAbstract {
       json.includes('rate_limit_exceeded') ||
       json.includes('Rate limit')
     ) {
-      await timer(5000);
+      const delay = this._getRetryDelay(request, totalRetries);
+      console.warn(
+        `[${this.identifier}] HTTP ${request.status}, retry ${totalRetries + 1}/3 after ${delay}ms`
+      );
+      await timer(delay);
       return this.fetch(
         url,
         options,
@@ -177,7 +181,8 @@ export abstract class SocialAbstract {
     const handleError = this.handleErrors(json || '{}');
 
     if (handleError?.type === 'retry') {
-      await timer(5000);
+      const delay = this._getRetryDelay(request, totalRetries);
+      await timer(delay);
       return this.fetch(
         url,
         options,
@@ -206,6 +211,22 @@ export abstract class SocialAbstract {
       options.body!,
       handleError?.value || ''
     );
+  }
+
+  /**
+   * Calculate retry delay: use Retry-After header if present,
+   * otherwise exponential backoff (5s, 15s, 45s).
+   */
+  private _getRetryDelay(response: Response, retryCount: number): number {
+    const retryAfter = response.headers.get('retry-after');
+    if (retryAfter) {
+      const seconds = Number(retryAfter);
+      if (!isNaN(seconds) && seconds > 0) {
+        return Math.min(seconds * 1000, 120_000); // cap at 2 minutes
+      }
+    }
+    // Exponential backoff: 5s → 15s → 45s
+    return 5000 * Math.pow(3, retryCount);
   }
 
   checkScopes(required: string[], got: string | string[]) {

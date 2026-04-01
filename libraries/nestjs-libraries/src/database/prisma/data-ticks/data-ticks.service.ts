@@ -15,12 +15,19 @@ import {
 } from '@gitroom/nestjs-libraries/integrations/social/social.integrations.interface';
 import { extractMetrics, stripSyntheticMetrics } from '@gitroom/nestjs-libraries/integrations/social/analytics.utils';
 import { PostsRepository } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.repository';
+import { timer } from '@gitroom/helpers/utils/timer';
 
 dayjs.extend(utc);
 dayjs.extend(isoWeek);
 
 /** How many days of posts to fetch for analytics aggregation. */
 const ANALYTICS_LOOKBACK_DAYS = 30;
+
+/** Delay between API calls to different integrations (ms). */
+const INTER_INTEGRATION_DELAY = 1000;
+
+/** Delay between per-post analytics batches (ms). */
+const INTER_BATCH_DELAY = 2000;
 
 @Injectable()
 export class DataTicksService {
@@ -148,7 +155,13 @@ export class DataTicksService {
       dayjs.utc().diff(dayjs.utc(dayStart), 'day') + 1
     );
 
+    let integrationIndex = 0;
     for (const [intId, groupPosts] of postsByIntegration) {
+      // Throttle between integrations to avoid rate limits
+      if (integrationIndex++ > 0) {
+        await timer(INTER_INTEGRATION_DELAY);
+      }
+
       const fullIntegration = integrationById.get(intId);
       if (!fullIntegration) continue;
 
@@ -293,7 +306,13 @@ export class DataTicksService {
       analytics?: any;
     }> = [];
 
+    let postSyncIndex = 0;
     for (const [intId, intPosts] of postsByIntegration) {
+      // Throttle between integrations
+      if (postSyncIndex++ > 0) {
+        await timer(INTER_INTEGRATION_DELAY);
+      }
+
       const fullIntegration = integrationById.get(intId);
       if (!fullIntegration) continue;
 
@@ -348,6 +367,11 @@ export class DataTicksService {
       } else {
         const BATCH_SIZE = 5;
         for (let i = 0; i < intPosts.length; i += BATCH_SIZE) {
+          // Throttle between batches
+          if (i > 0) {
+            await timer(INTER_BATCH_DELAY);
+          }
+
           const batch = intPosts.slice(i, i + BATCH_SIZE);
           const results = await Promise.allSettled(
             batch.map((post) =>
@@ -513,6 +537,11 @@ export class DataTicksService {
 
     const BATCH_SIZE = 5;
     for (let i = 0; i < postsWithRelease.length; i += BATCH_SIZE) {
+      // Throttle between batches to avoid rate limits
+      if (i > 0) {
+        await timer(INTER_BATCH_DELAY);
+      }
+
       const batch = postsWithRelease.slice(i, i + BATCH_SIZE);
       const results = await Promise.allSettled(
         batch.map((post) =>

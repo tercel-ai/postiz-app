@@ -5,14 +5,13 @@
  * cron workflow, with cooldown skipped so it can be run on-demand.
  *
  * Usage:
- *   npx ts-node scripts/sync-account-metrics.ts --dry-run
- *   npx ts-node scripts/sync-account-metrics.ts --execute
- *   npx ts-node scripts/sync-account-metrics.ts --integration <id> --execute
- *   npx ts-node scripts/sync-account-metrics.ts --org <orgId> --execute
- *   npx ts-node scripts/sync-account-metrics.ts --platform x --execute
+ *   npx ts-node --project scripts/tsconfig.json scripts/sync-account-metrics.ts --dry-run
+ *   npx ts-node --project scripts/tsconfig.json scripts/sync-account-metrics.ts --execute
+ *   npx ts-node --project scripts/tsconfig.json scripts/sync-account-metrics.ts --integration <id> --execute
+ *   npx ts-node --project scripts/tsconfig.json scripts/sync-account-metrics.ts --org <orgId> --execute
+ *   npx ts-node --project scripts/tsconfig.json scripts/sync-account-metrics.ts --platform x --execute
  */
 
-// Suppress Sentry noise in script mode
 process.env.NODE_ENV = process.env.NODE_ENV || 'production';
 process.env.TZ = 'UTC';
 
@@ -22,9 +21,7 @@ import { DatabaseModule } from '@gitroom/nestjs-libraries/database/prisma/databa
 import { DataTicksService } from '@gitroom/nestjs-libraries/database/prisma/data-ticks/data-ticks.service';
 import { PrismaClient } from '@prisma/client';
 
-@Module({
-  imports: [DatabaseModule],
-})
+@Module({ imports: [DatabaseModule] })
 class ScriptModule {}
 
 interface CliArgs {
@@ -77,7 +74,7 @@ function parseArgs(): CliArgs {
 
 function printHelp(): void {
   console.log(`
-Usage: npx ts-node scripts/sync-account-metrics.ts [options]
+Usage: npx ts-node --project scripts/tsconfig.json scripts/sync-account-metrics.ts [options]
 
 Options:
   --integration <id>  Sync a specific integration
@@ -88,11 +85,10 @@ Options:
   --help              Show this help message
 
 Examples:
-  npx ts-node scripts/sync-account-metrics.ts --dry-run
-  npx ts-node scripts/sync-account-metrics.ts --execute
-  npx ts-node scripts/sync-account-metrics.ts --org org_123 --execute
-  npx ts-node scripts/sync-account-metrics.ts --platform x --execute
-  npx ts-node scripts/sync-account-metrics.ts --integration clxyz123 --execute
+  npx ts-node --project scripts/tsconfig.json scripts/sync-account-metrics.ts --dry-run
+  npx ts-node --project scripts/tsconfig.json scripts/sync-account-metrics.ts --execute
+  npx ts-node --project scripts/tsconfig.json scripts/sync-account-metrics.ts --org org_123 --execute
+  npx ts-node --project scripts/tsconfig.json scripts/sync-account-metrics.ts --platform x --execute
 `);
 }
 
@@ -106,7 +102,7 @@ async function main(): Promise<void> {
   if (platform) console.log(`Platform:    ${platform}`);
   console.log('');
 
-  // Use raw Prisma to list target integrations
+  // Use raw Prisma to list target integrations (dry-run doesn't need full NestJS context)
   const prisma = new PrismaClient();
   const integrations = await prisma.integration.findMany({
     where: {
@@ -122,7 +118,6 @@ async function main(): Promise<void> {
       name: true,
       providerIdentifier: true,
       organizationId: true,
-      additionalSettings: true,
     },
     orderBy: { createdAt: 'asc' },
   });

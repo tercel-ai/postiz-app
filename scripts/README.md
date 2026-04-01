@@ -131,3 +131,160 @@ WHERE "integrationId" IN (
 ```
 
 In the UI, affected channels will show a "re-authorization needed" prompt. Once the user re-authorizes via OAuth, new tokens are stored and `refreshNeeded` resets to `false`.
+
+---
+
+## sync-account-metrics.ts
+
+Sync account-level metrics (followers, following, listed count, etc.) for social integrations. Uses the same `DataTicksService.syncAccountMetricsById()` method as the daily Temporal cron workflow, with cooldown skipped for on-demand use.
+
+> **Note:** This script bootstraps a NestJS application context and must be run with the scripts-specific tsconfig to enable decorator compilation.
+
+### Quick Start
+
+```bash
+# 1. Preview target integrations (dry-run, no API calls)
+npx ts-node --project scripts/tsconfig.json scripts/sync-account-metrics.ts --dry-run
+
+# 2. Sync all active integrations
+npx ts-node --project scripts/tsconfig.json scripts/sync-account-metrics.ts --execute
+```
+
+### Options
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--dry-run` | List matching integrations without syncing | Yes (default) |
+| `--execute` | Actually call platform APIs and update metrics | — |
+| `--integration <id>` | Target a specific integration by ID | All |
+| `--org <id>` | Scope to a specific organization | All |
+| `--platform <name>` | Filter by platform (x, linkedin, instagram, etc.) | All |
+| `--help` | Show usage help | — |
+
+### Examples
+
+```bash
+# Only X (Twitter) integrations
+npx ts-node --project scripts/tsconfig.json scripts/sync-account-metrics.ts --platform x --execute
+
+# Specific organization
+npx ts-node --project scripts/tsconfig.json scripts/sync-account-metrics.ts --org org_123 --execute
+
+# Single integration
+npx ts-node --project scripts/tsconfig.json scripts/sync-account-metrics.ts --integration clxyz123 --execute
+```
+
+### What It Does
+
+1. Queries the database for active social integrations matching the filters
+2. For each integration, calls the platform's `accountMetrics()` API (e.g. Twitter `v2.me`, LinkedIn `networkSizes`)
+3. Writes metrics (followers, following, posts, etc.) into `Integration.additionalSettings`
+4. Skips the 1-hour Redis cooldown so the script can be run repeatedly
+
+### Output Example
+
+```
+=== Account Metrics Sync Script ===
+
+Mode:     EXECUTE
+Platform: x
+
+Found 3 integration(s):
+
+  [abc123] @myaccount (x, org: org_456)
+  [def789] @otheracct (x, org: org_456)
+  [ghi012] @third (x, org: org_789)
+
+Bootstrapping NestJS context...
+
+  Syncing [abc123] @myaccount (x) ... OK: followers=1234, following=567, posts=890, listed=12
+  Syncing [def789] @otheracct (x) ... OK: followers=5678, following=123, posts=456, listed=3
+  Syncing [ghi012] @third (x) ... SKIPPED (provider has no accountMetrics or integration unavailable)
+
+Done: 2 synced, 1 skipped, 0 error(s).
+```
+
+---
+
+## sync-post-data.ts
+
+Sync post analytics and DataTicks for all organizations. Uses the same `DataTicksService.syncDailyTicks()` method as the daily Temporal cron workflow (UTC 00:05). Supports single-date, date-range, and backfill modes.
+
+DataTicks use an upsert on `(organizationId, integrationId, type, timeUnit, statisticsTime)`, so running this multiple times per day safely **overwrites** previous values.
+
+> **Note:** This script bootstraps a NestJS application context and must be run with the scripts-specific tsconfig to enable decorator compilation.
+
+### Quick Start
+
+```bash
+# 1. Preview (dry-run, no API calls)
+npx ts-node --project scripts/tsconfig.json scripts/sync-post-data.ts --dry-run
+
+# 2. Sync yesterday (default)
+npx ts-node --project scripts/tsconfig.json scripts/sync-post-data.ts --execute
+```
+
+### Options
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--dry-run` | Show what would be synced without making changes | Yes (default) |
+| `--execute` | Actually perform the sync | — |
+| `--date <YYYY-MM-DD>` | Sync for a specific date | Yesterday |
+| `--start-date <YYYY-MM-DD>` | Start of date range (for backfill) | — |
+| `--end-date <YYYY-MM-DD>` | End of date range (used with `--start-date`) | Same as start-date |
+| `--help` | Show usage help | — |
+
+### Examples
+
+```bash
+# Sync a specific date
+npx ts-node --project scripts/tsconfig.json scripts/sync-post-data.ts --date 2026-03-28 --execute
+
+# Backfill a date range
+npx ts-node --project scripts/tsconfig.json scripts/sync-post-data.ts --start-date 2026-03-01 --end-date 2026-03-10 --execute
+```
+
+### What It Does
+
+For each target date, calls `DataTicksService.syncDailyTicks(date)` which:
+
+1. Fetches published posts with `releaseId` from the last 30 days across all organizations
+2. Calls platform APIs (`batchPostAnalytics` or per-post `postAnalytics`) to get metrics
+3. Updates individual `Post` records: `impressions`, `trafficScore`, `analytics`
+4. Upserts aggregated `DataTicks` records (impressions + traffic per integration per day)
+5. Invalidates dashboard Redis cache (`dashboard:impressions:*`, `dashboard:traffics:*`, `dashboard:summary:*`)
+6. Syncs account-level metrics (followers, etc.) for each integration
+
+### Output Example
+
+```
+=== Post Data & DataTicks Sync Script ===
+
+Mode: EXECUTE
+Date(s): 2026-03-28
+
+Bootstrapping NestJS context...
+
+  Syncing 2026-03-28 ... OK: 12 ticks upserted, 0 org error(s)
+
+Done: 12 total ticks upserted, 0 total error(s).
+```
+
+### Backfill Example
+
+```
+=== Post Data & DataTicks Sync Script ===
+
+Mode: EXECUTE
+Date(s): 2026-03-01 to 2026-03-10 (10 days)
+
+Bootstrapping NestJS context...
+
+  Syncing 2026-03-01 ... OK: 8 ticks upserted, 0 org error(s)
+  Syncing 2026-03-02 ... OK: 10 ticks upserted, 0 org error(s)
+  ...
+  Syncing 2026-03-10 ... OK: 12 ticks upserted, 0 org error(s)
+
+Done: 98 total ticks upserted, 0 total error(s).
+```
