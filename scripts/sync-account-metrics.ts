@@ -113,6 +113,7 @@ async function main(): Promise<void> {
       deletedAt: null,
       disabled: false,
       type: 'social',
+      refreshNeeded: false,
       ...(integrationId ? { id: integrationId } : {}),
       ...(orgId ? { organizationId: orgId } : {}),
       ...(platform ? { providerIdentifier: platform } : {}),
