@@ -36,7 +36,7 @@ export class DashboardService {
     private _refreshIntegrationService: RefreshIntegrationService,
     private _dataTicksService: DataTicksService,
     private _usersService: UsersService
-  ) {}
+  ) { }
 
   async getSummary(
     org: Organization,
@@ -81,8 +81,9 @@ export class DashboardService {
       }
     }
 
-    const [channelCount, integrations, postStats, impressionsSummary, trafficSummary, publishedThisPeriod] = await Promise.all([
+    const [channelCount, channelConnectedCount, integrations, postStats, impressionsSummary, trafficSummary, publishedThisPeriod] = await Promise.all([
       this._dashboardRepository.getChannelCount(org.id, integrationId, channel),
+      this._dashboardRepository.getChannelCount(org.id, integrationId, channel, false),
       this._dashboardRepository.getActiveIntegrations(org.id, integrationId, channel),
       this._dashboardRepository.getPostsStats(org.id, normalizedStart, normalizedEnd, integrationId, channel),
       this._dataTicksService.getImpressionsSummaryByPlatform({
@@ -143,6 +144,7 @@ export class DashboardService {
 
     const result = {
       channel_count: channelCount,
+      channel_connected_count: channelConnectedCount,
       channels_by_platform: Array.from(channelsByPlatform.entries()).map(
         ([platform, count]) => ({ platform, count })
       ),

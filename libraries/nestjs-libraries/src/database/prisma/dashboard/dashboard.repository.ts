@@ -9,9 +9,9 @@ export class DashboardRepository {
   constructor(
     private _post: PrismaRepository<'post'>,
     private _integration: PrismaRepository<'integration'>
-  ) {}
+  ) { }
 
-  getChannelCount(orgId: string, integrationId?: string[], channel?: string[]) {
+  getChannelCount(orgId: string, integrationId?: string[], channel?: string[], refreshNeeded?: boolean) {
     return this._integration.model.integration.count({
       where: {
         organizationId: orgId,
@@ -19,6 +19,7 @@ export class DashboardRepository {
         disabled: false,
         ...(integrationId?.length && { id: { in: integrationId } }),
         ...(channel?.length && { providerIdentifier: { in: channel } }),
+        ...(refreshNeeded !== undefined && { refreshNeeded }),
       },
     });
   }
