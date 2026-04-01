@@ -71,6 +71,7 @@ const ModalContent: FC<{
   integrations: string[];
 }> = ({ continueId, added, provider: Provider, closeModal, integrations }) => {
   const fetch = useFetch();
+  const savedRef = React.useRef(false);
 
   const onSave = useCallback(
     async (data: any) => {
@@ -78,10 +79,24 @@ const ModalContent: FC<{
         method: 'POST',
         body: JSON.stringify(data),
       });
+      savedRef.current = true;
       closeModal();
     },
     [continueId, closeModal]
   );
+
+  // Clean up the temporary inBetweenSteps integration if the user
+  // closes the dialog without selecting a page.
+  useEffect(() => {
+    return () => {
+      if (!savedRef.current) {
+        fetch('/integrations/', {
+          method: 'DELETE',
+          body: JSON.stringify({ id: continueId }),
+        }).catch(() => {});
+      }
+    };
+  }, [continueId]);
 
   return (
     <IntegrationContext.Provider
@@ -108,7 +123,7 @@ const ModalContent: FC<{
         },
       }}
     >
-      <Provider onSave={onSave} existingId={integrations} />
+      <Provider onSave={onSave} existingId={integrations} onClose={closeModal} />
     </IntegrationContext.Provider>
   );
 };
