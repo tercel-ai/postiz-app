@@ -83,6 +83,12 @@ export class XProvider extends SocialAbstract implements SocialProvider {
         value: 'X API internal error (500), will retry',
       };
     }
+    if (body.includes('"status":403') || body.includes('You are not permitted to perform this action')) {
+      return {
+        type: 'bad-body',
+        value: 'X API returned 403 Forbidden — your app may lack write permission, or the content was rejected. Check X Developer Portal settings.',
+      };
+    }
     if (body.includes('usage-capped')) {
       return {
         type: 'bad-body',
@@ -394,12 +400,13 @@ export class XProvider extends SocialAbstract implements SocialProvider {
   }
 
   // v2.me() can be unstable; fallback to v1.1 verifyCredentials
-  private async _getUserInfo(client: TwitterApi): Promise<{ username: string; verified: boolean }> {
+  private async _getUserInfo(client: TwitterApi): Promise<{ id: string; username: string; verified: boolean }> {
     try {
       const { data } = await this.runInConcurrent(async () =>
         client.v2.me({ 'user.fields': ['username', 'verified', 'verified_type'] })
       );
       return {
+        id: data.id,
         username: data.username,
         verified: data.verified_type === 'blue' || !!data.verified,
       };
@@ -408,10 +415,48 @@ export class XProvider extends SocialAbstract implements SocialProvider {
         const v1User = await client.v1.verifyCredentials();
         // v1.1 API has no verified_type equivalent; `verified` here only covers
         // org/celebrity checkmarks — X Premium (Blue) cannot be detected via v1.1.
-        return { username: v1User.screen_name, verified: !!v1User.verified };
+        return { id: v1User.id_str, username: v1User.screen_name, verified: !!v1User.verified };
       } catch {
         throw err;
       }
+    }
+  }
+
+  /**
+   * Search user's recent tweets (last 24h) for content matching the given text.
+   * Used for idempotency: detect tweets that were posted successfully on X but
+   * not recorded by Postiz (e.g. network timeout after X accepted the request).
+   * Comparison strips t.co URLs since X auto-shortens all links.
+   */
+  private async _findExistingTweet(
+    client: TwitterApi,
+    userId: string,
+    text: string
+  ): Promise<{ id: string } | null> {
+    try {
+      const since = dayjs().subtract(24, 'hour').toISOString();
+      const until = dayjs().toISOString();
+      const tweets = await client.v2.userTimeline(userId, {
+        'tweet.fields': ['id', 'text'],
+        exclude: ['replies', 'retweets'],
+        start_time: since,
+        end_time: until,
+        max_results: 20,
+      });
+      if (!tweets.data?.data?.length) return null;
+
+      const normalize = (s: string) =>
+        s.replace(/https?:\/\/t\.co\/\S+/g, '').replace(/\s+/g, ' ').trim();
+      const needle = normalize(text);
+      if (!needle) return null;
+
+      const match = tweets.data.data.find(
+        (t) => normalize(t.text) === needle
+      );
+      return match ? { id: match.id } : null;
+    } catch (err) {
+      console.warn('[x] _findExistingTweet failed, skipping duplicate check:', (err as Error)?.message || err);
+      return null;
     }
   }
 
@@ -534,7 +579,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
     integration: Integration
   ): Promise<PostResponse[]> {
     const client = await this.getClient(accessToken);
-    const { username, verified } = await this._getUserInfo(client);
+    const { id: userId, username, verified } = await this._getUserInfo(client);
 
     // Best-effort sync — do not block posting if this fails
     this._syncVerifiedStatus(integration, verified).catch((err) =>
@@ -573,7 +618,25 @@ export class XProvider extends SocialAbstract implements SocialProvider {
           })
       );
       tweetId = data.id;
-    } catch (err) {
+    } catch (err: any) {
+      // --- 403 fallback: check if the tweet was already posted (idempotency) ---
+      const is403 = err?.code === 403 || err?.data?.status === 403
+        || String(err?.message || '').includes('403');
+      if (is403) {
+        const fallback = await this._findExistingTweet(client, userId, firstPost.message);
+        if (fallback) {
+          console.log(`[x] 403 on post but found existing tweet ${fallback.id} — treating as success`);
+          return [
+            {
+              postId: fallback.id,
+              id: firstPost.id,
+              releaseURL: `https://twitter.com/${username}/status/${fallback.id}`,
+              status: 'posted',
+            },
+          ];
+        }
+      }
+
       console.warn('[x] v2.tweet failed, trying v1.1 fallback...');
       try {
         const v1Result = await client.v1.tweet(firstPost.message, {
