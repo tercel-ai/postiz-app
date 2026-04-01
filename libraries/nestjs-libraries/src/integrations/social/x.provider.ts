@@ -597,46 +597,43 @@ export class XProvider extends SocialAbstract implements SocialProvider {
     try {
       // @ts-ignore
       const { data }: { data: { id: string } } = await this.runInConcurrent(
-        async () =>
-          // @ts-ignore
-          client.v2.tweet({
-            ...(!firstPost?.settings?.who_can_reply_post ||
-            firstPost?.settings?.who_can_reply_post === 'everyone'
-              ? {}
-              : {
-                  reply_settings: firstPost?.settings?.who_can_reply_post,
-                }),
-            ...(firstPost?.settings?.community
-              ? {
-                  share_with_followers: true,
-                  community_id:
-                    firstPost?.settings?.community?.split('/').pop() || '',
-                }
-              : {}),
-            text: firstPost.message,
-            ...(media_ids.length ? { media: { media_ids } } : {}),
-          })
+        async () => {
+          try {
+            // @ts-ignore
+            return await client.v2.tweet({
+              ...(!firstPost?.settings?.who_can_reply_post ||
+              firstPost?.settings?.who_can_reply_post === 'everyone'
+                ? {}
+                : {
+                    reply_settings: firstPost?.settings?.who_can_reply_post,
+                  }),
+              ...(firstPost?.settings?.community
+                ? {
+                    share_with_followers: true,
+                    community_id:
+                      firstPost?.settings?.community?.split('/').pop() || '',
+                  }
+                : {}),
+              text: firstPost.message,
+              ...(media_ids.length ? { media: { media_ids } } : {}),
+            });
+          } catch (tweetErr: any) {
+            // --- 403 idempotency fallback: check if the tweet already exists on X ---
+            const is403 = tweetErr?.code === 403 || tweetErr?.data?.status === 403
+              || String(tweetErr?.message || '').includes('403');
+            if (is403) {
+              const existing = await this._findExistingTweet(client, userId, firstPost.message);
+              if (existing) {
+                console.log(`[x] 403 on v2.tweet but found existing tweet ${existing.id} — treating as success`);
+                return { data: { id: existing.id } };
+              }
+            }
+            throw tweetErr;
+          }
+        }
       );
       tweetId = data.id;
     } catch (err: any) {
-      // --- 403 fallback: check if the tweet was already posted (idempotency) ---
-      const is403 = err?.code === 403 || err?.data?.status === 403
-        || String(err?.message || '').includes('403');
-      if (is403) {
-        const fallback = await this._findExistingTweet(client, userId, firstPost.message);
-        if (fallback) {
-          console.log(`[x] 403 on post but found existing tweet ${fallback.id} — treating as success`);
-          return [
-            {
-              postId: fallback.id,
-              id: firstPost.id,
-              releaseURL: `https://twitter.com/${username}/status/${fallback.id}`,
-              status: 'posted',
-            },
-          ];
-        }
-      }
-
       console.warn('[x] v2.tweet failed, trying v1.1 fallback...');
       try {
         const v1Result = await client.v1.tweet(firstPost.message, {
