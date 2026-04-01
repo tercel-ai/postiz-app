@@ -117,18 +117,19 @@ export async function postWorkflowV101({
     }
   }
 
-  // ── Recurring post: pre-publish idempotent lock ──
-  // Create a QUEUE clone BEFORE calling postSocial.  The claimToken acts as
-  // an atomic lock — only one workflow can claim a QUEUE clone.  If the clone
-  // is already PUBLISHED/ERROR or claimed by another workflow, skip.
   const isRecurring = !!(post as any).intervalInDays;
   let cycleCloneId: string | null = null;
   const claimToken = `claim_${new Date().toISOString()}_${makeId(6)}`;
 
+  // ── Recurring post: pre-publish idempotent lock ──
+  // Create a QUEUE clone BEFORE calling postSocial. The claimToken acts as
+  // an atomic lock — only one workflow can claim a QUEUE clone. If the clone
+  // is already PUBLISHED/ERROR or claimed by another workflow, skip.
+  // NOTE: After deploying this code, all old Temporal workflow executions
+  // must be terminated so they restart with this new activity sequence.
   if (isRecurring) {
     const prepared = await prepareRecurringCycle(postId, publishDateStr, claimToken);
     if (prepared?.alreadyHandled) {
-      // Another workflow already claimed, published, or recorded failure
       return;
     }
     cycleCloneId = prepared?.clone?.id ?? null;
@@ -149,6 +150,8 @@ export async function postWorkflowV101({
         state: 'ERROR',
         error: 'Integration requires reconnection',
       });
+    }
+    if (isRecurring) {
       await continueAsNew<typeof postWorkflowV101>({ taskQueue, postId, organizationId });
     }
     return;
@@ -169,18 +172,18 @@ export async function postWorkflowV101({
         state: 'ERROR',
         error: 'Integration is disabled',
       });
+    }
+    if (isRecurring) {
       await continueAsNew<typeof postWorkflowV101>({ taskQueue, postId, organizationId });
     }
     return;
   }
 
   // ── Non-recurring post: atomic claim before publishing ──
-  // For non-recurring posts, atomically set releaseId as a lock.
-  // If another workflow already claimed it, bail out to prevent duplicate publishing.
   if (!isRecurring) {
     const claimed = await claimPostForPublishing(postId, claimToken);
     if (!claimed) {
-      return; // Another workflow already claimed this post
+      return;
     }
   }
 
@@ -231,7 +234,9 @@ export async function postWorkflowV101({
           );
         }
 
-        // For non-recurring posts: update original in place
+        // For non-recurring posts only: update original in place.
+        // Recurring posts record results via finalizeRecurringCycle (new path)
+        // or skip recording (legacy path) — either way the original must stay QUEUE.
         if (!isRecurring) {
           await updatePost(
             postsList[i].id,
@@ -259,6 +264,8 @@ export async function postWorkflowV101({
                 state: 'ERROR',
                 error: 'Token refresh failed',
               });
+            }
+            if (isRecurring) {
               await continueAsNew<typeof postWorkflowV101>({ taskQueue, postId, organizationId });
             }
             return false;
