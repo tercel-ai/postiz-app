@@ -37,6 +37,15 @@ export class LinkedinPageProvider
     'r_organization_social',
   ];
 
+  /**
+   * LinkedIn Page internalId must be a numeric organization ID.
+   * Personal profile IDs (e.g. "p_Eqrb3Fz486") are not valid for
+   * organization API endpoints and will cause 400 errors.
+   */
+  private _isValidOrgId(id: string): boolean {
+    return /^\d+$/.test(id);
+  }
+
   override editor = 'normal' as const;
 
   override async refreshToken(
@@ -151,15 +160,17 @@ export class LinkedinPageProvider
       )
     ).json();
 
-    return (elements || []).map((e: any) => ({
-      id: e.organizationalTarget.split(':').pop(),
-      page: e.organizationalTarget.split(':').pop(),
-      username: e['organizationalTarget~'].vanityName,
-      name: e['organizationalTarget~'].localizedName,
-      picture:
-        e['organizationalTarget~'].logoV2?.['original~']?.elements?.[0]
-          ?.identifiers?.[0]?.identifier,
-    }));
+    return (elements || [])
+      .map((e: any) => ({
+        id: e.organizationalTarget.split(':').pop(),
+        page: e.organizationalTarget.split(':').pop(),
+        username: e['organizationalTarget~'].vanityName,
+        name: e['organizationalTarget~'].localizedName,
+        picture:
+          e['organizationalTarget~'].logoV2?.['original~']?.elements?.[0]
+            ?.identifiers?.[0]?.identifier,
+      }))
+      .filter((c: any) => this._isValidOrgId(c.id));
   }
 
   async reConnect(
@@ -182,6 +193,13 @@ export class LinkedinPageProvider
 
   async fetchPageInformation(accessToken: string, params: { page: string }) {
     const pageId = params.page;
+
+    if (!this._isValidOrgId(pageId)) {
+      throw new Error(
+        `Invalid LinkedIn Page: "${pageId}" is not an organization. Personal accounts should use the LinkedIn (personal) integration instead.`
+      );
+    }
+
     const data = await (
       await fetch(
         `https://api.linkedin.com/v2/organizations/${pageId}?projection=(id,localizedName,vanityName,logoV2(original~:playableStreams))`,
@@ -192,6 +210,12 @@ export class LinkedinPageProvider
         }
       )
     ).json();
+
+    if (!data?.id || !this._isValidOrgId(String(data.id))) {
+      throw new Error(
+        `LinkedIn API returned a non-organization ID (${data?.id}). This account cannot be added as a LinkedIn Page.`
+      );
+    }
 
     return {
       id: data.id,
@@ -425,6 +449,8 @@ export class LinkedinPageProvider
     postId: string,
     date: number
   ): Promise<AnalyticsData[]> {
+    if (!this._isValidOrgId(integrationId)) return [];
+
     const endDate = dayjs().unix() * 1000;
     const startDate = dayjs().subtract(date, 'days').unix() * 1000;
 
@@ -549,6 +575,11 @@ export class LinkedinPageProvider
     integrationId: string,
     accessToken: string
   ): Promise<AccountMetrics | null> {
+    if (!this._isValidOrgId(integrationId)) {
+      console.warn(`LinkedIn Page accountMetrics skipped: internalId "${integrationId}" is not a valid organization ID`);
+      return null;
+    }
+
     try {
       // Fetch total follower count via networkSizes
       const urn = encodeURIComponent(`urn:li:organization:${integrationId}`);
@@ -582,7 +613,7 @@ export class LinkedinPageProvider
     postIds: string[],
     date: number
   ): Promise<BatchPostAnalyticsResult> {
-    if (postIds.length === 0) return {};
+    if (postIds.length === 0 || !this._isValidOrgId(integrationId)) return {};
 
     const today = dayjs().format('YYYY-MM-DD');
     const endDate = dayjs().unix() * 1000;
