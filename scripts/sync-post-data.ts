@@ -19,6 +19,9 @@
  *   npx ts-node --project scripts/tsconfig.json scripts/sync-post-data.ts --start-date 2026-03-01 --end-date 2026-03-10 --execute
  */
 
+import * as dotenv from 'dotenv';
+dotenv.config();
+
 process.env.NODE_ENV = process.env.NODE_ENV || 'production';
 process.env.TZ = 'UTC';
 
