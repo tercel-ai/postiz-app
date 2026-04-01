@@ -26,8 +26,9 @@ import { NestFactory } from '@nestjs/core';
 import { Module } from '@nestjs/common';
 import { DatabaseModule } from '@gitroom/nestjs-libraries/database/prisma/database.module';
 import { DataTicksService } from '@gitroom/nestjs-libraries/database/prisma/data-ticks/data-ticks.service';
+import { getTemporalModule } from '@gitroom/nestjs-libraries/temporal/temporal.module';
 
-@Module({ imports: [DatabaseModule] })
+@Module({ imports: [DatabaseModule, getTemporalModule(false)] })
 class ScriptModule {}
 
 interface CliArgs {
