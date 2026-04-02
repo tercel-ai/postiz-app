@@ -589,12 +589,14 @@ export class XProvider extends SocialAbstract implements SocialProvider {
 
     const [firstPost] = postDetails;
 
-    // extract tweet id for quote
-    const quoteTweetId = firstPost?.settings?.quote_tweet_url
-      ? firstPost.settings.quote_tweet_url.split('/status/').pop()?.split('?')[0]
-      : undefined;
-    if (firstPost?.settings?.quote_tweet_url && !quoteTweetId) {
-      console.warn(`[x] Could not extract tweet ID from quote URL: ${firstPost.settings.quote_tweet_url}`);
+    // Append quote tweet URL to message text (X auto-renders it as a quote tweet).
+    // This approach works across all API tiers, unlike the quote_tweet_id parameter
+    // which returns 403 on some tiers (e.g. Pay Per Use).
+    const quoteUrl = firstPost?.settings?.quote_tweet_url;
+    if (quoteUrl) {
+      firstPost.message = firstPost.message
+        ? `${firstPost.message}\n${quoteUrl}`
+        : quoteUrl;
     }
 
     // upload media for the first post
@@ -610,7 +612,6 @@ export class XProvider extends SocialAbstract implements SocialProvider {
           try {
             // @ts-ignore
             return await client.v2.tweet({
-              ...(quoteTweetId ? { quote_tweet_id: quoteTweetId } : {}),
               ...(!firstPost?.settings?.who_can_reply_post ||
               firstPost?.settings?.who_can_reply_post === 'everyone'
                 ? {}
@@ -645,9 +646,6 @@ export class XProvider extends SocialAbstract implements SocialProvider {
       tweetId = data.id;
     } catch (err: any) {
       console.warn('[x] v2.tweet failed, trying v1.1 fallback...');
-      if (quoteTweetId) {
-        console.warn('[x] Quote tweet will be dropped — v1.1 API does not support quote_tweet_id');
-      }
       try {
         const v1Result = await client.v1.tweet(firstPost.message, {
           ...(media_ids.length ? { media_ids: media_ids.join(',') } : {}),

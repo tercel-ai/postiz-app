@@ -54,17 +54,15 @@ Plain tweet IDs (e.g., `123456789`) are **not** accepted.
 
 File: `libraries/nestjs-libraries/src/integrations/social/x.provider.ts`
 
-The tweet ID is extracted from the URL and passed to the X API:
+The quote URL is appended to the message text. X automatically renders a tweet URL at the end of a post as an embedded quote tweet. This approach works across all API tiers (including Pay Per Use), unlike the `quote_tweet_id` parameter which returns 403 on some tiers.
 
 ```typescript
-const quoteTweetId = firstPost?.settings?.quote_tweet_url
-  ? firstPost.settings.quote_tweet_url.split('/status/').pop()?.split('?')[0]
-  : undefined;
-
-await client.v2.tweet({
-  ...(quoteTweetId ? { quote_tweet_id: quoteTweetId } : {}),
-  text: firstPost.message,
-});
+const quoteUrl = firstPost?.settings?.quote_tweet_url;
+if (quoteUrl) {
+  firstPost.message = firstPost.message
+    ? `${firstPost.message}\n${quoteUrl}`
+    : quoteUrl;
+}
 ```
 
 ### Frontend
@@ -74,7 +72,7 @@ File: `apps/frontend/src/components/new-launch/providers/x/x.provider.tsx`
 ### Known Limitations
 
 - **Thread support**: Only the first tweet in a thread can quote another tweet. This matches X's native behavior.
-- **v1.1 fallback**: If the v2 API fails and the provider falls back to v1.1, the quote tweet parameter is not forwarded (v1.1 uses `attachment_url` instead of `quote_tweet_id`).
+- **Character limit**: The appended URL is wrapped by X as a `t.co` link, consuming ~24 characters (newline + 23-char t.co URL) from the character limit. The frontend label includes a hint about this.
 
 ---
 
