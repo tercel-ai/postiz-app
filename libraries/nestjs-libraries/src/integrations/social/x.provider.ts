@@ -49,7 +49,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
   dto = XDto;
 
   maxLength(isTwitterPremium: boolean) {
-    return isTwitterPremium ? 4000 : 200;
+    return isTwitterPremium ? 4000 : 280;
   }
 
   override handleErrors(body: string):
