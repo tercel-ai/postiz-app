@@ -59,6 +59,13 @@ const SettingsComponent = () => {
       </Select>
 
       <Input
+        label={t('quote_tweet_url', 'Quote Tweet URL')}
+        placeholder="https://x.com/user/status/123456"
+        className="mb-5"
+        {...register('quote_tweet_url')}
+      />
+
+      <Input
         label={
           'Post to a community, URL (Ex: https://x.com/i/communities/1493446837214187523)'
         }

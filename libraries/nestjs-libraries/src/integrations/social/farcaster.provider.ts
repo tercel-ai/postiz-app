@@ -88,12 +88,24 @@ export class FarcasterProvider
         ? [undefined]
         : firstPost?.settings?.subreddit;
 
+    // Build embeds: media + optional quote cast URL (Farcaster allows max 2 embeds)
+    const mediaEmbeds =
+      firstPost?.media?.map((media) => ({
+        url: media.path,
+      })) || [];
+    const quoteCastUrl = firstPost?.settings?.quote_cast_url;
+    let embeds = mediaEmbeds;
+    if (quoteCastUrl) {
+      if (mediaEmbeds.length >= 2) {
+        console.warn('[farcaster] Quote cast URL dropped — embed limit (2) already reached by media');
+      } else {
+        embeds = [...mediaEmbeds.slice(0, 1), { url: quoteCastUrl }];
+      }
+    }
+
     for (const channel of channels) {
       const data = await client.publishCast({
-        embeds:
-          firstPost?.media?.map((media) => ({
-            url: media.path,
-          })) || [],
+        embeds,
         signerUuid: accessToken,
         text: firstPost.message,
         ...(channel?.value?.id ? { channelId: channel?.value?.id } : {}),

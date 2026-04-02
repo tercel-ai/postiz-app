@@ -550,10 +550,19 @@ export class LinkedinProvider extends SocialAbstract implements SocialProvider {
     message: string,
     mediaIds: string[],
     isPdf: boolean,
-    visibility: 'PUBLIC' | 'CONNECTIONS' | 'LOGGED_IN' = 'PUBLIC'
+    visibility: 'PUBLIC' | 'CONNECTIONS' | 'LOGGED_IN' = 'PUBLIC',
+    reshareUrl?: string
   ) {
     const author =
       type === 'personal' ? `urn:li:person:${id}` : `urn:li:organization:${id}`;
+
+    // Extract activity ID from LinkedIn post URL for reshare
+    const reshareActivityUrn = reshareUrl
+      ? this.extractLinkedInActivityUrn(reshareUrl)
+      : undefined;
+    if (reshareUrl && !reshareActivityUrn) {
+      console.warn(`[linkedin] Could not extract activity URN from reshare URL: ${reshareUrl}`);
+    }
 
     return {
       author,
@@ -567,7 +576,24 @@ export class LinkedinProvider extends SocialAbstract implements SocialProvider {
       ...this.buildPostContent(isPdf, mediaIds),
       lifecycleState: 'PUBLISHED',
       isReshareDisabledByAuthor: false,
+      ...(reshareActivityUrn
+        ? { reshareContext: { parent: reshareActivityUrn } }
+        : {}),
     };
+  }
+
+  private extractLinkedInActivityUrn(url: string): string | undefined {
+    // Format: https://www.linkedin.com/feed/update/urn:li:activity:1234567890/
+    const feedMatch = url.match(/urn:li:activity:(\d+)/);
+    if (feedMatch) {
+      return `urn:li:activity:${feedMatch[1]}`;
+    }
+    // Format: https://www.linkedin.com/posts/username_activity-1234567890-xxxx
+    const postsMatch = url.match(/activity-(\d+)/);
+    if (postsMatch) {
+      return `urn:li:activity:${postsMatch[1]}`;
+    }
+    return undefined;
   }
 
   /**
@@ -617,7 +643,8 @@ export class LinkedinProvider extends SocialAbstract implements SocialProvider {
     mediaIds: string[],
     type: 'company' | 'personal',
     isPdf: boolean,
-    visibility: 'PUBLIC' | 'CONNECTIONS' | 'LOGGED_IN' = 'PUBLIC'
+    visibility: 'PUBLIC' | 'CONNECTIONS' | 'LOGGED_IN' = 'PUBLIC',
+    reshareUrl?: string
   ): Promise<string> {
     const postPayload = this.createLinkedInPostPayload(
       id,
@@ -625,7 +652,8 @@ export class LinkedinProvider extends SocialAbstract implements SocialProvider {
       firstPost.message,
       mediaIds,
       isPdf,
-      visibility
+      visibility,
+      reshareUrl
     );
 
     const response = await this.fetch(`https://api.linkedin.com/rest/posts`, {
@@ -744,7 +772,8 @@ export class LinkedinProvider extends SocialAbstract implements SocialProvider {
       mainPostMediaIds,
       type,
       !!firstPost.settings?.post_as_images_carousel,
-      firstPost.settings?.visibility || 'PUBLIC'
+      firstPost.settings?.visibility || 'PUBLIC',
+      firstPost.settings?.reshare_url
     );
 
     // Disable comments if requested — must be a separate call after post creation.

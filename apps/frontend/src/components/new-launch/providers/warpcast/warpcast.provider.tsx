@@ -10,6 +10,7 @@ import { useFieldArray } from 'react-hook-form';
 import { deleteDialog } from '@gitroom/react/helpers/delete.dialog';
 import { Button } from '@gitroom/react/form/button';
 import { Subreddit } from './subreddit';
+import { Input } from '@gitroom/react/form/input';
 import { useT } from '@gitroom/react/translation/get.transation.service.client';
 const WrapcastProvider: FC = () => {
   const { register, control } = useSettings();
@@ -54,6 +55,12 @@ const WrapcastProvider: FC = () => {
         ))}
       </div>
       <Button onClick={addField}>{t('add_channel', 'Add Channel')}</Button>
+      <Input
+        label={t('quote_cast_url', 'Quote Cast URL')}
+        placeholder="https://warpcast.com/username/0xabcdef"
+        className="mt-[20px]"
+        {...register('quote_cast_url')}
+      />
     </>
   );
 };

@@ -569,6 +569,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
       active_thread_finisher: boolean;
       thread_finisher: string;
       community?: string;
+      quote_tweet_url?: string;
       who_can_reply_post:
         | 'everyone'
         | 'following'
@@ -588,6 +589,14 @@ export class XProvider extends SocialAbstract implements SocialProvider {
 
     const [firstPost] = postDetails;
 
+    // extract tweet id for quote
+    const quoteTweetId = firstPost?.settings?.quote_tweet_url
+      ? firstPost.settings.quote_tweet_url.split('/status/').pop()?.split('?')[0]
+      : undefined;
+    if (firstPost?.settings?.quote_tweet_url && !quoteTweetId) {
+      console.warn(`[x] Could not extract tweet ID from quote URL: ${firstPost.settings.quote_tweet_url}`);
+    }
+
     // upload media for the first post
     const uploadAll = await this.uploadMedia(client, [firstPost]);
 
@@ -601,6 +610,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
           try {
             // @ts-ignore
             return await client.v2.tweet({
+              ...(quoteTweetId ? { quote_tweet_id: quoteTweetId } : {}),
               ...(!firstPost?.settings?.who_can_reply_post ||
               firstPost?.settings?.who_can_reply_post === 'everyone'
                 ? {}
@@ -635,6 +645,9 @@ export class XProvider extends SocialAbstract implements SocialProvider {
       tweetId = data.id;
     } catch (err: any) {
       console.warn('[x] v2.tweet failed, trying v1.1 fallback...');
+      if (quoteTweetId) {
+        console.warn('[x] Quote tweet will be dropped — v1.1 API does not support quote_tweet_id');
+      }
       try {
         const v1Result = await client.v1.tweet(firstPost.message, {
           ...(media_ids.length ? { media_ids: media_ids.join(',') } : {}),

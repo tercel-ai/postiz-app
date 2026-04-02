@@ -2,6 +2,12 @@ import { IsIn, IsOptional, Matches } from 'class-validator';
 
 export class XDto {
   @IsOptional()
+  @Matches(/^https:\/\/(x|twitter)\.com\/[a-zA-Z0-9_]+\/status\/\d+(\?.*)?$/, {
+    message: 'Invalid X/Twitter URL. It should be in the format: https://x.com/user/status/123456',
+  })
+  quote_tweet_url?: string;
+
+  @IsOptional()
   @Matches(/^(https:\/\/x\.com\/i\/communities\/\d+)?$/, {
     message:
       'Invalid X community URL. It should be in the format: https://x.com/i/communities/1493446837214187523',
