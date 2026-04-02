@@ -288,3 +288,44 @@ Bootstrapping NestJS context...
 
 Done: 98 total ticks upserted, 0 total error(s).
 ```
+
+---
+
+## Database Check Scripts
+
+Lightweight diagnostic scripts for quickly inspecting recent database state. Useful for verifying deployment health, debugging user-reported issues, or spot-checking after incidents. All scripts read from the database configured in `.env` (`DATABASE_URL`).
+
+### Quick Start
+
+```bash
+npx ts-node scripts/check_recent_posts.ts
+npx ts-node scripts/check_recent_notifications.ts
+npx ts-node scripts/check_new_orgs.ts
+```
+
+### check_recent_posts.ts
+
+Fetches up to 10 posts created, updated, or scheduled within the last 2 days. Shows state, integration, publish date, and content preview.
+
+**When to use:**
+- A user reports a post is stuck or missing — quickly verify its state (QUEUE / PUBLISHED / ERROR)
+- After a deployment — confirm recent posts are still flowing correctly
+- Debugging recurring post issues — check if clones were created
+
+### check_recent_notifications.ts
+
+Lists all in-app notifications created today (UTC), sorted newest first.
+
+**When to use:**
+- Verify that error/success notifications are being generated after posting
+- A user says they didn't receive a notification — check if it exists in the DB
+- After changing notification logic — confirm new notifications appear
+
+### check_new_orgs.ts
+
+Lists organizations created today (UTC).
+
+**When to use:**
+- Daily sanity check for new sign-ups
+- After changing onboarding flow — verify new orgs are still being created
+- Investigating a registration issue reported by a user

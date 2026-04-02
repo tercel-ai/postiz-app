@@ -1,3 +1,5 @@
+import * as dotenv from 'dotenv';
+dotenv.config();
 import { PrismaClient } from '@prisma/client';
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc';
@@ -6,13 +8,16 @@ dayjs.extend(utc);
 const prisma = new PrismaClient();
 
 async function main() {
-  const today = dayjs.utc().startOf('day').toDate();
-  console.log('Checking posts deleted today:', today.toISOString());
+  const since = dayjs.utc().subtract(2, 'days').toDate();
+  console.log('Fetching recent posts since', since.toISOString());
 
-  // @ts-ignore
   const posts = await prisma.post.findMany({
     where: {
-      deletedAt: { gte: today }
+      OR: [
+        { createdAt: { gte: since } },
+        { updatedAt: { gte: since } },
+        { publishDate: { gte: since } }
+      ]
     },
     select: {
       id: true,
@@ -30,10 +35,11 @@ async function main() {
         }
       }
     },
-    orderBy: { deletedAt: 'desc' }
+    orderBy: { createdAt: 'desc' },
+    take: 10
   });
 
-  console.log(`Found ${posts.length} deleted posts.`);
+  console.log(`Found ${posts.length} posts.`);
   for (const post of posts) {
     console.log(`ID: ${post.id}`);
     console.log(`  State: ${post.state}`);
