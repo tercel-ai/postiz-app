@@ -258,7 +258,7 @@ export async function postWorkflowV101({
         ) {
           const refresh = await refreshToken(post.integration);
           if (!refresh || !refresh.accessToken) {
-            await changeState(postsList[0].id, 'ERROR', err, postsList);
+            await changeState(postsList[0].id, 'ERROR', 'Token refresh failed — please reconnect your account', postsList);
             if (isRecurring && cycleCloneId) {
               await finalizeRecurringCycle(postId, cycleCloneId, publishDateStr, {
                 state: 'ERROR',
@@ -292,7 +292,9 @@ export async function postWorkflowV101({
               error: errMsg,
             });
           }
-          await changeState(postsList[0].id, 'ERROR', err, postsList);
+          // Pass the friendly message, not the raw error — full details
+          // are already saved by logError() above for debugging.
+          await changeState(postsList[0].id, 'ERROR', errMsg, postsList);
           await inAppNotification(
             post.organizationId,
             `Error posting${i === 0 ? ' ' : ' comments '}on ${
@@ -326,7 +328,7 @@ export async function postWorkflowV101({
           error: errMsg,
         });
       }
-      await changeState(postsList[0].id, 'ERROR', lastErr, postsList);
+      await changeState(postsList[0].id, 'ERROR', errMsg, postsList);
       if (isRecurring) {
         await continueAsNew<typeof postWorkflowV101>({ taskQueue, postId, organizationId });
       }

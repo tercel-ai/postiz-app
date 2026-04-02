@@ -86,7 +86,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
     if (body.includes('"status":403') || body.includes('You are not permitted to perform this action')) {
       return {
         type: 'bad-body',
-        value: 'X API returned 403 Forbidden — your app may lack write permission, or the content was rejected. Check X Developer Portal settings.',
+        value: 'X rejected this post (403 Forbidden). This is usually caused by content that exceeds the character limit, contains restricted words, or triggers X\'s spam filter. Try shortening the text or removing special content.',
       };
     }
     if (body.includes('usage-capped')) {
