@@ -18,6 +18,7 @@ import {
 import OpenAI from 'openai';
 import { GetOrgFromRequest } from '@gitroom/nestjs-libraries/user/org.from.request';
 import { GetUserFromRequest } from '@gitroom/nestjs-libraries/user/user.from.request';
+import { GetTimezone } from '@gitroom/nestjs-libraries/user/timezone.from.request';
 import { Organization, User } from '@prisma/client';
 import { SubscriptionService } from '@gitroom/nestjs-libraries/database/prisma/subscriptions/subscription.service';
 import { MastraAgent } from '@ag-ui/mastra';
@@ -110,7 +111,8 @@ export class CopilotController {
     @Req() req: Request,
     @Res() res: Response,
     @GetOrgFromRequest() organization: Organization,
-    @GetUserFromRequest() user: User
+    @GetUserFromRequest() user: User,
+    @GetTimezone() timezone: string | undefined
   ) {
     if (!hasAnyApiKey()) {
       Logger.warn('No AI API key set (OPENAI_API_KEY or OPENROUTER_API_KEY), chat functionality will not work');
@@ -133,6 +135,7 @@ export class CopilotController {
     runtimeContext.set('organization', JSON.stringify(organization));
     runtimeContext.set('userId', user.id);
     runtimeContext.set('ui', 'true');
+    runtimeContext.set('timezone', timezone || 'UTC');
 
     const agents = MastraAgent.getLocalAgents({
       resourceId: organization.id,

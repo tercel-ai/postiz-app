@@ -33,6 +33,7 @@ import dayjs from 'dayjs';
 import { makeId } from '@gitroom/nestjs-libraries/services/make.is';
 import { ExistingDataContextProvider } from '@gitroom/frontend/components/launches/helpers/use.existing.data';
 import { useT } from '@gitroom/react/translation/get.transation.service.client';
+import { getTimezone } from '@gitroom/frontend/components/layout/set.timezone';
 
 export const AgentChat: FC = () => {
   const { backendUrl } = useVariables();
@@ -49,6 +50,9 @@ export const AgentChat: FC = () => {
       agent="postiz"
       properties={{
         integrations: properties,
+      }}
+      headers={{
+        'x-timezone': getTimezone(),
       }}
     >
       <Hooks />

@@ -6,6 +6,7 @@ import { socialIntegrationList } from '@gitroom/nestjs-libraries/integrations/in
 import { IntegrationService } from '@gitroom/nestjs-libraries/database/prisma/integrations/integration.service';
 import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.service';
 import { makeId } from '@gitroom/nestjs-libraries/services/make.is';
+import { parseDate } from '@gitroom/helpers/utils/date.utils';
 import { AllProvidersSettings } from '@gitroom/nestjs-libraries/dtos/posts/providers-settings/all.providers.settings';
 import { validate } from 'class-validator';
 import { Integration } from '@prisma/client';
@@ -66,7 +67,7 @@ Integration routing:
                 .describe(
                   "If the integration is X, return if it's premium or not"
                 ),
-              date: z.string().describe('The date of the post in UTC time'),
+              date: z.string().describe('The date of the post in ISO 8601 format'),
               shortLink: z
                 .boolean()
                 .describe(
@@ -132,6 +133,8 @@ Integration routing:
         ).id;
         // @ts-ignore
         const userId = runtimeContext.get('userId') as string | undefined;
+        // @ts-ignore
+        const userTimezone: string = runtimeContext.get('timezone') as string || 'UTC';
 
         // Get user-selected integrations from runtimeContext (set by frontend)
         const selectedIntegrations: SelectedIntegration[] =
@@ -160,10 +163,13 @@ Integration routing:
           }
 
           for (const resolvedId of result.integrationIds) {
+            // Convert user's local time to UTC using the same parseDate utility
+            // as the rest of the codebase (case 3: no offset + tz → local time in that tz)
+            const utcDate = parseDate(post.date, userTimezone).utc().toISOString();
             expandedPosts.push({
               resolvedIntegrationId: resolvedId,
               isPremium: post.isPremium,
-              date: post.date,
+              date: utcDate,
               shortLink: post.shortLink,
               type: post.type,
               postsAndComments: post.postsAndComments,

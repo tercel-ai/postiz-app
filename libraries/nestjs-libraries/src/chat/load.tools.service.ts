@@ -12,6 +12,10 @@ import {
   AiPricingEntry,
 } from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/ai-pricing.service';
 import dayjs from 'dayjs';
+import utc from 'dayjs/plugin/utc';
+import timezone from 'dayjs/plugin/timezone';
+dayjs.extend(utc);
+dayjs.extend(timezone);
 
 function buildModelFromConfig(entry: AiPricingEntry) {
   const modelId =
@@ -90,9 +94,11 @@ export class LoadToolsService {
       description: 'Agent that helps manage and schedule social media posts for users',
       instructions: ({ runtimeContext }) => {
         const ui: string = runtimeContext.get('ui' as never);
+        const userTimezone: string = runtimeContext.get('timezone' as never) || 'UTC';
+        const nowLocal = dayjs.utc().tz(userTimezone);
         return `
       Global information:
-        - Date (UTC): ${dayjs().format('YYYY-MM-DD HH:mm:ss')}
+        - Current date and time: ${nowLocal.format('YYYY-MM-DD HH:mm:ss')} (${userTimezone})
 
       You are an agent that helps manage and schedule social media posts for users, you can:
         - Schedule posts into the future, or now, adding texts, images and videos
