@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useMemo, useRef, useState, useCallback } from 'react';
 import { useCopilotContext, useCopilotReadable } from '@copilotkit/react-core';
 import AutoResizingTextarea from '@gitroom/frontend/components/agents/agent.textarea';
 import { useChatContext } from '@copilotkit/react-ui';
@@ -20,6 +20,7 @@ export const Input = ({
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [isComposing, setIsComposing] = useState(false);
+  const sendingRef = useRef(false);
 
   const handleDivClick = (event: React.MouseEvent<HTMLDivElement>) => {
     const target = event.target as HTMLElement;
@@ -35,13 +36,17 @@ export const Input = ({
   };
 
   const [text, setText] = useState('');
-  const send = () => {
-    if (inProgress) return;
+  const send = useCallback(() => {
+    if (inProgress || sendingRef.current) return;
+    sendingRef.current = true;
     onSend(text);
     setText('');
-
     textareaRef.current?.focus();
-  };
+    // Reset after a tick to allow React state to propagate
+    setTimeout(() => {
+      sendingRef.current = false;
+    }, 300);
+  }, [inProgress, onSend, text]);
 
   const isInProgress = inProgress;
   const buttonIcon =

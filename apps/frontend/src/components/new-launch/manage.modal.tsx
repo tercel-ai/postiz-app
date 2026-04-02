@@ -56,6 +56,7 @@ export const ManageModal: FC<AddEditModalProps> = (props) => {
   const ref = useRef(null);
   const existingData = useExistingData();
   const [loading, setLoading] = useState(false);
+  const submittingRef = useRef(false);
   const toaster = useToaster();
   const modal = useModals();
   const [showSettings, setShowSettings] = useState(false);
@@ -203,7 +204,10 @@ export const ManageModal: FC<AddEditModalProps> = (props) => {
 
   const schedule = useCallback(
     (type: 'draft' | 'now' | 'schedule') => async () => {
+      if (submittingRef.current) return;
+      submittingRef.current = true;
       setLoading(true);
+      try {
       const checkAllValid = await ref.current.checkAllValid();
       if (type !== 'draft') {
         const notEnoughChars = checkAllValid.filter((p: any) => {
@@ -402,6 +406,9 @@ export const ManageModal: FC<AddEditModalProps> = (props) => {
             customClose();
           }, 2000);
         }
+      }
+      } finally {
+        submittingRef.current = false;
       }
     },
     [ref, repeater, tags, date, addEditSets, dummy, shortlinkPreferenceData]
