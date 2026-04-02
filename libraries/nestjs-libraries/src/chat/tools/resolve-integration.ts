@@ -35,7 +35,7 @@ export function resolveIntegrationIds(
   if (!selectedIntegrations || selectedIntegrations.length === 0) {
     return {
       kind: 'error',
-      message: 'No channels selected. Please select a channel from the left panel first.',
+      message: 'No channels selected. Please select a channel from the sidebar first.',
     };
   }
 
