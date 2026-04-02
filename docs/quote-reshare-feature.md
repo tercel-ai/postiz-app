@@ -37,10 +37,10 @@ Defined in `libraries/nestjs-libraries/src/dtos/posts/providers-settings/x.dto.t
 
 ### URL Validation
 
-Accepts both `x.com` and `twitter.com` domains:
+Accepts both `x.com` and `twitter.com` domains (empty string also allowed):
 
 ```
-^https:\/\/(x|twitter)\.com\/[a-zA-Z0-9_]+\/status\/\d+(\?.*)?$
+^(https:\/\/(x|twitter)\.com\/[a-zA-Z0-9_]+\/status\/\d+(\?.*)?)?$
 ```
 
 Valid examples:
@@ -90,10 +90,10 @@ Defined in `libraries/nestjs-libraries/src/dtos/posts/providers-settings/linkedi
 
 ### URL Validation
 
-Supports two LinkedIn URL formats:
+Supports two LinkedIn URL formats (empty string also allowed):
 
 ```
-^https:\/\/(www\.)?linkedin\.com\/(feed\/update\/urn:li:activity:\d+|posts\/[a-zA-Z0-9_-]+activity-\d+-[a-zA-Z0-9_-]+)\/?(\?.*)?$
+^(https:\/\/(www\.)?linkedin\.com\/(feed\/update\/urn:li:activity:\d+|posts\/[a-zA-Z0-9_-]+activity-\d+-[a-zA-Z0-9_-]+)\/?(\?.*)?)?$
 ```
 
 Valid examples:
@@ -142,8 +142,10 @@ Defined in `libraries/nestjs-libraries/src/dtos/posts/providers-settings/farcast
 
 ### URL Validation
 
+Empty string also allowed:
+
 ```
-^https:\/\/warpcast\.com\/[a-zA-Z0-9._-]+\/0x[a-fA-F0-9]+(\?.*)?$
+^(https:\/\/warpcast\.com\/[a-zA-Z0-9._-]+\/0x[a-fA-F0-9]+(\?.*)?)?$
 ```
 
 Valid example: `https://warpcast.com/username/0xabcdef`
@@ -156,9 +158,14 @@ Farcaster's quote mechanism is native — a cast URL included as an embed is aut
 
 ```typescript
 const quoteCastUrl = firstPost?.settings?.quote_cast_url;
-const embeds = quoteCastUrl
-  ? [...mediaEmbeds, { url: quoteCastUrl }]
-  : mediaEmbeds;
+let embeds = mediaEmbeds;
+if (quoteCastUrl) {
+  if (mediaEmbeds.length >= 2) {
+    console.warn('[farcaster] Quote cast URL dropped — embed limit (2) already reached by media');
+  } else {
+    embeds = [...mediaEmbeds.slice(0, 1), { url: quoteCastUrl }];
+  }
+}
 
 await client.publishCast({
   embeds,

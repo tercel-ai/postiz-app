@@ -16,7 +16,7 @@ export class FarcasterDto {
   subreddit: FarcasterValue[];
 
   @IsOptional()
-  @Matches(/^https:\/\/warpcast\.com\/[a-zA-Z0-9._-]+\/0x[a-fA-F0-9]+(\?.*)?$/, {
+  @Matches(/^(https:\/\/warpcast\.com\/[a-zA-Z0-9._-]+\/0x[a-fA-F0-9]+(\?.*)?)?$/, {
     message: 'Invalid Warpcast URL. Example: https://warpcast.com/username/0xabcdef',
   })
   quote_cast_url?: string;
