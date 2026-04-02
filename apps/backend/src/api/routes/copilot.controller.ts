@@ -77,6 +77,7 @@ export type ChannelsContext = {
   organization: string;
   userId: string;
   ui: string;
+  timezone: string;
 };
 
 @Controller('/copilot')
