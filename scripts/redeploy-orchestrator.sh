@@ -14,17 +14,17 @@ echo "=== Orchestrator Redeploy ==="
 echo ""
 
 # 1. Build FIRST — if it fails, no workflows are disrupted
-echo "Step 1: Building..."
-pnpm build 2>&1 | tail -5
-echo ""
+# echo "Step 1: Building..."
+# pnpm build 2>&1 | tail -5
+# echo ""
 
 # 2. Terminate existing workflows
-echo "Step 2: Terminating old workflows..."
+echo "Step 1: Terminating old workflows..."
 npx ts-node --project scripts/tsconfig.json scripts/terminate-workflows.ts --execute $EXTRA_ARGS
 echo ""
 
 # 3. Restart orchestrator immediately after terminate (minimize gap)
-echo "Step 3: Restarting $PM2_PROCESS..."
+echo "Step 2: Restarting $PM2_PROCESS..."
 pm2 restart "$PM2_PROCESS"
 echo ""
 
