@@ -413,12 +413,18 @@ export class XProvider extends SocialAbstract implements SocialProvider {
     const client = await this.getClient(accessToken);
     try {
       const tweet = await client.v2.singleTweet(tweetId, {
-        'tweet.fields': ['text', 'created_at', 'public_metrics', 'author_id'],
-        expansions: ['author_id'],
+        'tweet.fields': ['text', 'created_at', 'public_metrics', 'author_id', 'attachments'],
+        expansions: ['author_id', 'attachments.media_keys'],
         'user.fields': ['name', 'username', 'profile_image_url'],
+        'media.fields': ['url', 'preview_image_url', 'type'],
       });
 
       const author = tweet.includes?.users?.[0];
+      const media = tweet.includes?.media?.map((m: any) => ({
+        type: m.type,
+        url: m.url || m.preview_image_url,
+      })).filter((m: any) => m.url) || [];
+
       return {
         id: tweet.data.id,
         text: tweet.data.text,
@@ -431,6 +437,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
               profileImageUrl: author.profile_image_url,
             }
           : null,
+        media,
       };
     } catch (err: any) {
       console.warn(`[x] fetchTweet failed for ${tweetId}:`, err?.message || err);

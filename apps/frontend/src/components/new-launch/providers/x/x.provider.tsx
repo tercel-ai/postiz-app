@@ -94,6 +94,18 @@ const QuoteTweetPreview = ({ url }: { url: string }) => {
         <span className="text-gray-400">@{tweet.author?.username}</span>
       </div>
       <p className="text-gray-300 whitespace-pre-wrap">{tweet.text}</p>
+      {tweet.media?.length > 0 && (
+        <div className="flex gap-1 mt-2 overflow-hidden rounded">
+          {tweet.media.map((m: any, i: number) => (
+            <img
+              key={i}
+              src={m.url}
+              alt=""
+              className="max-h-[120px] rounded object-cover"
+            />
+          ))}
+        </div>
+      )}
     </div>
   );
 };
