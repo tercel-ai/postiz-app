@@ -21,6 +21,7 @@ import dayjs from 'dayjs';
 import { uniqBy } from 'lodash';
 import { stripHtmlValidation } from '@gitroom/helpers/utils/strip.html.validation';
 import { XDto } from '@gitroom/nestjs-libraries/dtos/posts/providers-settings/x.dto';
+import { Tool } from '@gitroom/nestjs-libraries/integrations/tool.decorator';
 import { mergeAdditionalSettings, parseAdditionalSettings } from '@gitroom/nestjs-libraries/database/prisma/integrations/additional-settings.utils';
 import { Rules } from '@gitroom/nestjs-libraries/chat/rules.description.decorator';
 import { ioRedis } from '@gitroom/nestjs-libraries/redis/redis.service';
@@ -399,6 +400,44 @@ export class XProvider extends SocialAbstract implements SocialProvider {
     });
   }
 
+  @Tool({
+    description: 'Fetch tweet details by URL',
+    dataSchema: [{ key: 'url', type: 'string', description: 'Tweet URL' }],
+  })
+  async fetchTweet(accessToken: string, data: { url: string }) {
+    const tweetId = data.url?.split('/status/')?.pop()?.split('?')[0];
+    if (!tweetId) {
+      return null;
+    }
+
+    const client = await this.getClient(accessToken);
+    try {
+      const tweet = await client.v2.singleTweet(tweetId, {
+        'tweet.fields': ['text', 'created_at', 'public_metrics', 'author_id'],
+        expansions: ['author_id'],
+        'user.fields': ['name', 'username', 'profile_image_url'],
+      });
+
+      const author = tweet.includes?.users?.[0];
+      return {
+        id: tweet.data.id,
+        text: tweet.data.text,
+        createdAt: tweet.data.created_at,
+        metrics: tweet.data.public_metrics,
+        author: author
+          ? {
+              name: author.name,
+              username: author.username,
+              profileImageUrl: author.profile_image_url,
+            }
+          : null,
+      };
+    } catch (err: any) {
+      console.warn(`[x] fetchTweet failed for ${tweetId}:`, err?.message || err);
+      return null;
+    }
+  }
+
   // v2.me() can be unstable; fallback to v1.1 verifyCredentials
   private async _getUserInfo(client: TwitterApi): Promise<{ id: string; username: string; verified: boolean }> {
     try {
@@ -592,7 +631,8 @@ export class XProvider extends SocialAbstract implements SocialProvider {
     // Append quote tweet URL to message text (X auto-renders it as a quote tweet).
     // This approach works across all API tiers, unlike the quote_tweet_id parameter
     // which returns 403 on some tiers (e.g. Pay Per Use).
-    const quoteUrl = firstPost?.settings?.quote_tweet_url;
+    // Strip query params (e.g. ?s=20) as they can prevent X from rendering the quote card.
+    const quoteUrl = firstPost?.settings?.quote_tweet_url?.split('?')[0];
     if (quoteUrl) {
       firstPost.message = firstPost.message
         ? `${firstPost.message}\n${quoteUrl}`

@@ -10,6 +10,8 @@ import { useT } from '@gitroom/react/translation/get.transation.service.client';
 import { useSettings } from '@gitroom/frontend/components/launches/helpers/use.values';
 import { XDto } from '@gitroom/nestjs-libraries/dtos/posts/providers-settings/x.dto';
 import { Input } from '@gitroom/react/form/input';
+import { useCustomProviderFunction } from '@gitroom/frontend/components/launches/helpers/use.custom.provider.function';
+import { useCallback, useEffect, useRef, useState, useMemo } from 'react';
 
 const whoCanReply = [
   {
@@ -34,9 +36,72 @@ const whoCanReply = [
   },
 ];
 
+const QuoteTweetPreview = ({ url }: { url: string }) => {
+  const { get } = useCustomProviderFunction();
+  const [tweet, setTweet] = useState<any>(null);
+  const [loading, setLoading] = useState(false);
+  const lastUrlRef = useRef('');
+
+  const fetchTweet = useCallback(
+    async (tweetUrl: string) => {
+      if (!tweetUrl || lastUrlRef.current === tweetUrl) return;
+      lastUrlRef.current = tweetUrl;
+      setLoading(true);
+      try {
+        const result = await get('fetchTweet', { url: tweetUrl });
+        setTweet(result);
+      } catch {
+        setTweet(null);
+      } finally {
+        setLoading(false);
+      }
+    },
+    [get]
+  );
+
+  useEffect(() => {
+    const clean = url?.split('?')[0] || '';
+    if (/^https:\/\/(x|twitter)\.com\/\w+\/status\/\d+$/.test(clean)) {
+      const timer = setTimeout(() => fetchTweet(clean), 500);
+      return () => clearTimeout(timer);
+    } else {
+      setTweet(null);
+      lastUrlRef.current = '';
+    }
+  }, [url, fetchTweet]);
+
+  if (loading) {
+    return (
+      <div className="text-xs text-gray-400 mb-3">Loading tweet preview...</div>
+    );
+  }
+
+  if (!tweet) return null;
+
+  return (
+    <div className="mb-3 rounded-lg border border-gray-700 p-3 text-sm">
+      <div className="flex items-center gap-2 mb-1">
+        {tweet.author?.profileImageUrl && (
+          <img
+            src={tweet.author.profileImageUrl}
+            alt=""
+            className="w-5 h-5 rounded-full"
+          />
+        )}
+        <span className="font-semibold text-white">
+          {tweet.author?.name}
+        </span>
+        <span className="text-gray-400">@{tweet.author?.username}</span>
+      </div>
+      <p className="text-gray-300 whitespace-pre-wrap">{tweet.text}</p>
+    </div>
+  );
+};
+
 const SettingsComponent = () => {
   const t = useT();
   const { register, watch, setValue } = useSettings();
+  const quoteUrl = watch('quote_tweet_url');
 
   return (
     <>
@@ -61,9 +126,10 @@ const SettingsComponent = () => {
       <Input
         label={t('quote_tweet_url', 'Quote Tweet URL (uses ~24 chars from limit)')}
         placeholder="https://x.com/user/status/123456"
-        className="mb-5"
+        className="mb-2"
         {...register('quote_tweet_url')}
       />
+      <QuoteTweetPreview url={quoteUrl} />
 
       <Input
         label={

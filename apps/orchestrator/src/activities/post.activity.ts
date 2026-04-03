@@ -314,6 +314,44 @@ export class PostActivity {
   }
 
   @ActivityMethod()
+  async postThreadFinisher(
+    mainPostId: string,
+    lastCommentId: string,
+    integration: Integration,
+    finisherText: string,
+    releaseURL: string
+  ) {
+    const getIntegration = this._integrationManager.getSocialIntegration(
+      integration.providerIdentifier
+    );
+
+    const message = stripHtmlValidation(
+      getIntegration.editor,
+      finisherText,
+      true,
+      false,
+      !/<\/?[a-z][\s\S]*>/i.test(finisherText),
+      getIntegration.mentionFormat
+    );
+
+    return getIntegration.comment!(
+      integration.internalId,
+      mainPostId,
+      lastCommentId,
+      integration.token,
+      [
+        {
+          id: `finisher-${mainPostId}`,
+          message: message + '\n' + releaseURL,
+          settings: {},
+          media: [],
+        },
+      ],
+      integration
+    );
+  }
+
+  @ActivityMethod()
   async refreshToken(
     integration: Integration
   ): Promise<false | AuthTokenDetails> {

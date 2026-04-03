@@ -71,6 +71,7 @@ export async function postWorkflowV101({
   const {
     postSocial,
     postComment,
+    postThreadFinisher,
     getIntegrationById,
     refreshToken,
     internalPlugs,
@@ -353,6 +354,30 @@ export async function postWorkflowV101({
       } catch (_) {
         // notification failure should not affect post state
       }
+    }
+  }
+
+  // ── Thread finisher: append a wrap-up reply after all posted items ──
+  if (postsResults.length > 0) {
+    try {
+      const firstSettings = JSON.parse(postsList[0].settings || '{}');
+      const canComment = await isCommentable(post.integration);
+      if (
+        canComment &&
+        firstSettings.active_thread_finisher &&
+        firstSettings.thread_finisher
+      ) {
+        await postThreadFinisher(
+          postsResults[0].postId,
+          postsResults[postsResults.length - 1].postId,
+          post.integration as Integration,
+          firstSettings.thread_finisher,
+          postsResults[0].releaseURL
+        );
+      }
+    } catch (err) {
+      // Thread finisher failure should not affect the overall post state
+      console.warn('[workflow] Thread finisher failed:', err);
     }
   }
 
