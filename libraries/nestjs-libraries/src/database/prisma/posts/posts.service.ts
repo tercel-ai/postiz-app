@@ -125,9 +125,18 @@ export class PostsService {
   }
 
   async updatePost(id: string, postId: string, releaseURL: string) {
-    // Non-recurring: update original in place
-    const updatedPost = await this._postRepository.updatePost(id, postId, releaseURL);
-    return updatedPost;
+    // Defense-in-depth: recurring originals must NEVER be directly published.
+    // They use the clone-per-cycle mechanism (prepareRecurringCycle + finalizeRecurringCycle).
+    const post = await this._postRepository.getPostById(id);
+    if (post?.intervalInDays && post.intervalInDays > 0 && !post.parentPostId) {
+      this.logger.error(
+        `updatePost: Blocked direct publish of recurring original post ${id} (intervalInDays=${post.intervalInDays}). ` +
+        `This indicates the workflow did not recognize the post as recurring. releaseId=${postId} releaseURL=${releaseURL}`
+      );
+      return null;
+    }
+
+    return this._postRepository.updatePost(id, postId, releaseURL);
   }
 
   async recordFailedRelease(postId: string, releaseId: string, error: string) {

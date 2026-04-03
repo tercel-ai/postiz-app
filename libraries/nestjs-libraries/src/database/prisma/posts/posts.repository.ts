@@ -171,7 +171,14 @@ export class PostsRepository {
       ...(query.organizationId
         ? { organizationId: Array.isArray(query.organizationId) ? { in: query.organizationId } : query.organizationId }
         : {}),
-      ...(query.state ? { state: query.state } : {}),
+      ...(query.state
+        ? {
+            OR: [
+              { state: query.state, intervalInDays: null },
+              { intervalInDays: { not: null } },
+            ],
+          }
+        : {}),
       ...(query.integrationId?.length
         ? { integrationId: { in: query.integrationId } }
         : {}),
@@ -248,7 +255,17 @@ export class PostsRepository {
       parentPostId: null,
       ...(query.view === 'templates' ? { sourcePostId: null } : {}),
       ...(query.sourcePostId ? { sourcePostId: query.sourcePostId } : {}),
-      ...(query.state ? { state: query.state } : {}),
+      // For recurring posts the original always stays QUEUE; state filter is
+      // applied later if needed, but typically we want the template visible.
+      // Matching the getPosts (calendar) logic for consistency.
+      ...(query.state
+        ? {
+            OR: [
+              { state: query.state, intervalInDays: null },
+              { intervalInDays: { not: null } },
+            ],
+          }
+        : {}),
       ...(query.integrationId?.length
         ? { integrationId: { in: query.integrationId } }
         : {}),
