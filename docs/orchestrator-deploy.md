@@ -51,71 +51,69 @@ If the code has changed in a way that produces a different sequence of commands 
 
 ---
 
-## Automatic Recovery: missingPostWorkflow
+## Workflow Types
 
-The system has a built-in recovery mechanism:
+| Workflow | File | Auto-restart? | Notes |
+|----------|------|:---:|-------|
+| `postWorkflowV101` | `post.workflow.v1.0.1.ts` | Via `missingPostWorkflow` | Recreated for QUEUE posts within ~1 hour |
+| `missingPostWorkflow` | `missing.post.workflow.ts` | **Yes** (on boot) | Runs every 1h, recreates orphaned post workflows |
+| `dataTicksSyncWorkflow` | `data-ticks.workflow.ts` | **Yes** (on boot) | Daily analytics sync |
+| `autoPostWorkflow` | `autopost.workflow.ts` | **No** (on-demand) | Started when user enables autopost |
+| `refreshTokenWorkflow` | `refresh.token.workflow.ts` | **No** (on-demand) | Started per-integration when token nears expiry |
+| `digestEmailWorkflow` | `digest.email.workflow.ts` | **No** (on-demand) | Started for email digests |
+| `sendEmailWorkflow` | `send.email.workflow.ts` | **No** (on-demand) | Started for sending emails |
 
-```
-missingPostWorkflow → runs every 1 hour
-  → searchForMissingThreeHoursPosts()
-    → finds QUEUE posts without a running workflow
-    → signalWithStart('postWorkflowV101', ...) to recreate them
-```
-
-After terminating old workflows, `missingPostWorkflow` automatically recreates workflows for all `QUEUE` posts within 1 hour. For recurring posts, the original post stays in `QUEUE` state permanently, so it will always be picked up.
+**Auto-restart** workflows are registered in `InfiniteWorkflowRegister` and start automatically when the orchestrator boots. **On-demand** workflows are started by application logic and will NOT be recreated after termination — they resume naturally when their trigger fires again.
 
 ---
 
 ## Deployment Steps
 
-### Quick Deploy (workflow changes)
+### Quick Deploy (workflow function changes)
 
 ```bash
 bash scripts/redeploy-orchestrator.sh
 ```
 
 This script:
-1. Terminates all running workflows via `scripts/terminate-workflows.ts`
-2. Rebuilds the project
-3. Restarts the orchestrator pm2 process
+1. **Builds** the project (fails fast if build broken — no workflows disrupted)
+2. **Terminates** all running workflows via `scripts/terminate-workflows.ts`
+3. **Restarts** the orchestrator pm2 process (immediately after terminate)
 4. `missingPostWorkflow` auto-starts and recreates workflows for QUEUE posts
 
-### Manual Deploy (workflow changes)
+Use `--only-posts` to skip on-demand workflows (autopost, refreshToken, email):
+```bash
+bash scripts/redeploy-orchestrator.sh --only-posts
+```
+
+### Manual Deploy (workflow function changes)
 
 ```bash
-# 1. Preview what will be terminated
+# 1. Build first
+pnpm build
+
+# 2. Preview what will be terminated
 npx ts-node --project scripts/tsconfig.json scripts/terminate-workflows.ts --dry-run
 
-# 2. Terminate all running workflows
+# 3. Terminate + restart (back-to-back, minimize gap)
 npx ts-node --project scripts/tsconfig.json scripts/terminate-workflows.ts --execute
-
-# 3. Build and restart
-pnpm build
 pm2 restart orchestrator
 ```
 
-### Safe Deploy (no workflow changes)
+### Safe Deploy (only activity/service changes)
 
-When only activity implementations changed (service/repository code):
+When only activity implementations changed (service/repository code), no workflow termination needed:
 
 ```bash
 pnpm build
 pm2 restart orchestrator
 ```
-
-No workflow termination needed.
 
 ---
 
 ## Terminate Workflows Script
 
-`scripts/terminate-workflows.ts` uses `@temporalio/client` SDK to connect to the Temporal server and terminate running workflows. No need to install the `temporal` CLI.
-
-**Targeted workflow types:**
-- `postWorkflowV101` — post scheduling workflows
-- `missingPostWorkflow` — orphaned post recovery (auto-restarts on boot)
-- `dataTicksSyncWorkflow` — daily analytics sync (auto-restarts on boot)
-- `refreshTokenWorkflow` — token refresh monitoring (auto-restarts on boot)
+`scripts/terminate-workflows.ts` connects to Temporal via `@temporalio/client` SDK to list and terminate running workflows.
 
 **Usage:**
 
@@ -125,6 +123,9 @@ npx ts-node --project scripts/tsconfig.json scripts/terminate-workflows.ts --dry
 
 # Execute — terminate all running workflows
 npx ts-node --project scripts/tsconfig.json scripts/terminate-workflows.ts --execute
+
+# Execute — only post + infrastructure workflows (skip on-demand)
+npx ts-node --project scripts/tsconfig.json scripts/terminate-workflows.ts --execute --only-posts
 ```
 
 **Environment variables:**
@@ -153,7 +154,6 @@ pm2 restart orchestrator
 After orchestrator restarts, `missingPostWorkflow` runs every hour to recreate workflows for QUEUE posts. To verify:
 
 ```bash
-# Check orchestrator logs for workflow creation
 pm2 logs orchestrator --lines 30 --nostream 2>&1 | grep -i "workflow\|signal"
 ```
 
@@ -182,20 +182,6 @@ WHERE id IN ('...');  -- IDs from query above
 
 ---
 
-## Infrastructure Workflows
-
-These workflows are registered at orchestrator startup via `InfiniteWorkflowRegisterModule` and auto-restart when the orchestrator boots:
-
-| Workflow | Purpose | Restart Behavior |
-|----------|---------|-----------------|
-| `missingPostWorkflow` | Recreates workflows for orphaned QUEUE posts (every 1h) | Auto-starts on boot |
-| `dataTicksSyncWorkflow` | Daily analytics sync (UTC 00:05) | Auto-starts on boot |
-| `refreshTokenWorkflow` | Token refresh monitoring | Auto-starts on boot |
-
-All are terminated by `scripts/terminate-workflows.ts` and automatically recreated when the orchestrator restarts.
-
----
-
 ## Recurring Post Architecture
 
 For context on how recurring posts work with the cycle-clone mechanism, see the workflow code at `apps/orchestrator/src/workflows/post-workflows/post.workflow.v1.0.1.ts`.
@@ -205,4 +191,5 @@ For context on how recurring posts work with the cycle-clone mechanism, see the 
 - Each publish cycle creates a clone with `PUBLISHED`/`ERROR` state
 - `publishDate` on the original is advanced after each cycle (regardless of success/failure)
 - `changeState('ERROR')` on recurring originals is a no-op (service layer protection)
+- `updatePost()` on recurring originals is blocked (service layer defense-in-depth)
 - Failed cycles don't block subsequent cycles

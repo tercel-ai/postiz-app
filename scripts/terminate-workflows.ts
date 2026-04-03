@@ -1,9 +1,12 @@
 /**
- * Terminate all running Temporal post workflows so they restart with new code.
+ * Terminate all running Temporal workflows so they restart with new code.
  *
  * Usage:
- *   npx ts-node scripts/terminate-workflows.ts --dry-run
- *   npx ts-node scripts/terminate-workflows.ts --execute
+ *   npx ts-node --project scripts/tsconfig.json scripts/terminate-workflows.ts --dry-run
+ *   npx ts-node --project scripts/tsconfig.json scripts/terminate-workflows.ts --execute
+ *
+ * Options:
+ *   --only-posts   Only terminate postWorkflowV101 (skip infrastructure workflows)
  */
 
 import * as dotenv from 'dotenv';
@@ -11,20 +14,39 @@ dotenv.config();
 
 import { Connection, Client } from '@temporalio/client';
 
-const WORKFLOW_TYPES = [
+// Post workflows — must be terminated when workflow function code changes
+const POST_WORKFLOW_TYPES = [
   'postWorkflowV101',
+];
+
+// Infrastructure workflows — auto-restart on orchestrator boot (InfiniteWorkflowRegister)
+const INFRA_WORKFLOW_TYPES = [
   'missingPostWorkflow',
   'dataTicksSyncWorkflow',
+];
+
+// On-demand workflows — started by application logic, NOT auto-restarted.
+// Only terminate these when their workflow function code changes.
+const ON_DEMAND_WORKFLOW_TYPES = [
+  'autoPostWorkflow',
   'refreshTokenWorkflow',
+  'digestEmailWorkflow',
+  'sendEmailWorkflow',
 ];
 
 async function main() {
   const dryRun = !process.argv.includes('--execute');
+  const onlyPosts = process.argv.includes('--only-posts');
   const address = process.env.TEMPORAL_ADDRESS || 'localhost:7233';
   const namespace = process.env.TEMPORAL_NAMESPACE || 'default';
 
+  const workflowTypes = onlyPosts
+    ? [...POST_WORKFLOW_TYPES, ...INFRA_WORKFLOW_TYPES]
+    : [...POST_WORKFLOW_TYPES, ...INFRA_WORKFLOW_TYPES, ...ON_DEMAND_WORKFLOW_TYPES];
+
   console.log('=== Terminate Temporal Workflows ===\n');
   console.log(`Mode:      ${dryRun ? 'DRY RUN' : 'EXECUTE'}`);
+  console.log(`Scope:     ${onlyPosts ? 'post + infra only' : 'ALL workflows'}`);
   console.log(`Address:   ${address}`);
   console.log(`Namespace: ${namespace}`);
   console.log('');
@@ -34,7 +56,7 @@ async function main() {
 
   let totalTerminated = 0;
 
-  for (const workflowType of WORKFLOW_TYPES) {
+  for (const workflowType of workflowTypes) {
     console.log(`--- ${workflowType} ---`);
 
     const query = `WorkflowType='${workflowType}' AND ExecutionStatus='Running'`;
@@ -75,8 +97,9 @@ async function main() {
     console.log('--- DRY RUN complete. Run with --execute to terminate. ---');
   } else {
     console.log(`Done. Terminated ${totalTerminated} workflow(s).`);
-    console.log('Restart orchestrator now: pm2 restart orchestrator');
-    console.log('missingPostWorkflow will recreate post workflows within minutes.');
+    console.log('');
+    console.log('Auto-restart on boot: missingPostWorkflow, dataTicksSyncWorkflow');
+    console.log('NOT auto-restarted:   refreshTokenWorkflow (on-demand), autoPostWorkflow (on-demand)');
   }
 
   await connection.close();
