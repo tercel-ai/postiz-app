@@ -371,10 +371,9 @@ export class PostsRepository {
         ],
         deletedAt: null,
         parentPostId: null,
-        sourcePostId: null,
+        // Removed sourcePostId: null to allow clones to be fetched.
         // For recurring posts the original always stays QUEUE; state filter is
-        // applied later after clone/virtual expansion.  Non-recurring posts are
-        // filtered directly by state here.
+        // applied later after expansion. Non-recurring posts are filtered directly here.
         ...(query.state
           ? {
               OR: [
@@ -406,6 +405,8 @@ export class PostsRepository {
         state: true,
         intervalInDays: true,
         group: true,
+        integrationId: true,
+        sourcePostId: true,
         tags: {
           select: {
             tag: true,
@@ -422,94 +423,98 @@ export class PostsRepository {
       },
     });
 
-    // Collect recurring posts for clone lookup
-    const recurringPosts = list.filter((p) => p.intervalInDays);
-    const recurringPostIds = new Set(recurringPosts.map((p) => p.id));
-    const recurringGroups = recurringPosts.map((p) => p.group);
+    const now = dayjs.utc();
+    const start = dayjs.utc(startDate);
+    const end = dayjs.utc(endDate);
 
-    // Fetch clone Post records for recurring posts within the date range.
-    // Clones share the same group as their original but have no sourcePostId.
-    const clones = recurringGroups.length
-      ? await this._post.model.post.findMany({
-        where: {
-          group: { in: recurringGroups },
-          id: { notIn: [...recurringPostIds] },
-          publishDate: { gte: startDate, lte: endDate },
-          deletedAt: null,
-          parentPostId: null,
-          ...(query.state ? { state: query.state } : {}),
-        },
-        orderBy: { publishDate: 'asc' },
-      })
-      : [];
+    const allIds = new Set(list.map((p) => p.id));
+    const originals = list.filter((p) => p.intervalInDays);
+    const realPosts = list
+      .filter((p) => {
+        const pDate = dayjs.utc(p.publishDate);
+        const inRange = pDate.isSameOrAfter(start) && pDate.isSameOrBefore(end);
+        if (!inRange) return false;
 
-    // Group clones by group (each recurring post has a unique group)
-    const clonesByGroup = new Map<string, typeof clones>();
-    for (const clone of clones) {
-      if (!clone.group) continue;
-      if (!clonesByGroup.has(clone.group)) {
-        clonesByGroup.set(clone.group, []);
-      }
-      clonesByGroup.get(clone.group)!.push(clone);
-    }
-
-    return list.reduce((all, post) => {
-      if (!post.intervalInDays) {
-        return [...all, post];
-      }
-
-      const postClones = clonesByGroup.get(post.group) || [];
-      const now = dayjs.utc();
-      const result = [];
-
-      // Add clone records (past published/failed instances)
-      for (const clone of postClones) {
-        result.push({
-          ...post,
-          publishDate: clone.publishDate,
-          releaseId: clone.releaseId,
-          releaseURL: clone.releaseURL,
-          actualDate: post.publishDate,
-          state: clone.state,
-        });
-      }
-
-      // Generate virtual entries for future scheduled dates only.
-      // Skip when a state filter is active and it isn't QUEUE, because virtual
-      // entries are always QUEUE and would otherwise pollute filtered results.
-      if (!query.state || query.state === 'QUEUE') {
-        let startingDate = tz ? dayjs.tz(post.publishDate, tz) : dayjs.utc(post.publishDate);
-        const start = dayjs.utc(startDate);
-        const end = dayjs.utc(endDate);
-
-        // Fast-forward startingDate to the first occurrence that could be within or after the range
-        if (startingDate.isBefore(start)) {
-          const daysToWait = start.diff(startingDate, 'days');
-          const occurrencesToSkip = Math.floor(daysToWait / post.intervalInDays);
-          if (occurrencesToSkip > 0) {
-            startingDate = startingDate.add(occurrencesToSkip * post.intervalInDays, 'days');
-          }
-          // Ensure we are at or after start
-          while (startingDate.isBefore(start)) {
-            startingDate = startingDate.add(post.intervalInDays, 'days');
-          }
+        // Filter by state if requested
+        if (query.state && p.state !== query.state) {
+          return false;
         }
 
-        while (end.isSameOrAfter(startingDate)) {
-          if (startingDate.isSameOrAfter(start) && startingDate.isAfter(now) && post.state !== 'DRAFT') {
-            result.push({
+        // If it's a release clone (sourcePostId is set), only show it if the original isn't already in the list
+        // This prevents duplicates for non-recurring posts that might have snapshots.
+        if (p.sourcePostId && allIds.has(p.sourcePostId)) {
+          return false;
+        }
+
+        return true;
+      })
+      .map((p) => {
+        if (p.intervalInDays) return p;
+
+        // Link clones (Cycle Clones have sourcePostId: null, Release Clones have it set)
+        const original = originals.find(
+          (o) =>
+            (p.sourcePostId && o.id === p.sourcePostId) ||
+            (o.group === p.group && o.integrationId === p.integrationId)
+        );
+
+        return original ? { ...p, actualDate: original.publishDate } : p;
+      });
+
+    const realPostsSlots = new Set(
+      realPosts.map(
+        (p) =>
+          `${p.group}:${p.integrationId}:${dayjs
+            .utc(p.publishDate)
+            .format('YYYY-MM-DD')}`
+      )
+    );
+
+    const virtualEntries = [];
+    for (const post of originals) {
+      if (post.state === 'DRAFT') continue;
+      if (query.state && query.state !== 'QUEUE') continue;
+
+      let startingDate = tz
+        ? dayjs.tz(post.publishDate, tz)
+        : dayjs.utc(post.publishDate);
+
+      // Fast-forward startingDate to the first occurrence that could be within or after the range
+      if (startingDate.isBefore(start)) {
+        const daysToWait = start.diff(startingDate, 'days');
+        const occurrencesToSkip = Math.floor(daysToWait / post.intervalInDays);
+        if (occurrencesToSkip > 0) {
+          startingDate = startingDate.add(
+            occurrencesToSkip * post.intervalInDays,
+            'days'
+          );
+        }
+        while (startingDate.isBefore(start)) {
+          startingDate = startingDate.add(post.intervalInDays, 'days');
+        }
+      }
+
+      while (end.isSameOrAfter(startingDate)) {
+        if (startingDate.isSameOrAfter(start) && startingDate.isAfter(now)) {
+          // Check if we already have a real post for this group, account and day
+          const slotKey = `${post.group}:${
+            post.integrationId
+          }:${startingDate.format('YYYY-MM-DD')}`;
+          if (!realPostsSlots.has(slotKey)) {
+            virtualEntries.push({
               ...post,
               publishDate: startingDate.toDate(),
               actualDate: post.publishDate,
               state: 'QUEUE' as const,
             });
           }
-          startingDate = startingDate.add(post.intervalInDays, 'days');
         }
+        startingDate = startingDate.add(post.intervalInDays, 'days');
       }
+    }
 
-      return [...all, ...result];
-    }, [] as any[]);
+    return [...realPosts, ...virtualEntries];
+
   }
 
   /**
