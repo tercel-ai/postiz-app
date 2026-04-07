@@ -683,6 +683,21 @@ export class XProvider extends SocialAbstract implements SocialProvider {
             : rawQuoteUrl;
         }
       }
+      // Observability: log which quote-tweet mode was selected for this post. This is the
+      // *initial* mode decision; if v2 native fails it may still degrade via the fallback
+      // chain below (those failures are logged separately as warns).
+      const reason = hasMedia
+        ? ' [forced url-append: post has media (mutually exclusive with quote_tweet_id)]'
+        : appendQuoteUrlMode
+        ? ' [forced url-append: X_QUOTE_TWEET_APPEND_URL=true]'
+        : '';
+      console.log(
+        `[x] Quote tweet mode for post ${firstPost.id}: ${
+          quoteTweetId
+            ? `native (quote_tweet_id=${quoteTweetId})`
+            : 'url-append'
+        }${reason}`
+      );
     }
 
     // Common v2.tweet params shared by every attempt below. Text and quote_tweet_id are
