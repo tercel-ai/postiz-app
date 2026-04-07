@@ -255,17 +255,22 @@ export class PostsRepository {
       parentPostId: null,
       ...(query.view === 'templates' ? { sourcePostId: null } : {}),
       ...(query.sourcePostId ? { sourcePostId: query.sourcePostId } : {}),
-      // For recurring posts the original always stays QUEUE; state filter is
-      // applied later if needed, but typically we want the template visible.
-      // Matching the getPosts (calendar) logic for consistency.
-      ...(query.state
-        ? {
-            OR: [
-              { state: query.state, intervalInDays: null },
-              { intervalInDays: { not: null } },
-            ],
-          }
-        : {}),
+      // IMPORTANT — keep this as a plain `{ state: query.state }`.
+      //
+      // Unlike `getPosts` (calendar) above, this endpoint:
+      //   1. has no date-range / virtual-occurrence expansion, and
+      //   2. returns Prisma rows DIRECTLY to the client with NO post-filter.
+      //
+      // The calendar version uses an `OR` that intentionally pulls every
+      // recurring template regardless of state, because two later in-memory
+      // filters (line ~452 and line ~489 in getPosts) re-apply the state
+      // constraint after expansion. This endpoint has neither of those, so
+      // the same OR would leak QUEUE/DRAFT recurring templates into results
+      // filtered by `state=ERROR` — that bug existed between commit 95aa1dc8
+      // (2026-04-03) and its fix; do not reintroduce it by "aligning" this
+      // clause with the calendar one. See the long comment in getPosts above
+      // for the full rationale.
+      ...(query.state ? { state: query.state } : {}),
       ...(query.integrationId?.length
         ? { integrationId: { in: query.integrationId } }
         : {}),
@@ -391,8 +396,28 @@ export class PostsRepository {
         deletedAt: null,
         parentPostId: null,
         // Removed sourcePostId: null to allow clones to be fetched.
-        // For recurring posts the original always stays QUEUE; state filter is
-        // applied later after expansion. Non-recurring posts are filtered directly here.
+        //
+        // IMPORTANT — recurring template state filter:
+        // Recurring template originals always stay in QUEUE state (clones carry
+        // the real lifecycle state, see posts.service.ts notes on
+        // `intervalInDays=null` for clones). The OR below intentionally pulls
+        // ALL templates regardless of `query.state`, because the calendar
+        // post-processing below needs them to (a) anchor cycle clones via
+        // `originals.find(...)` at line ~468 and (b) expand `virtualEntries`
+        // for future occurrences at line ~487.
+        //
+        // The leak that this would otherwise cause (templates surviving a
+        // `state=ERROR` filter) is closed by TWO post-filters further down:
+        //   - line ~452: `if (query.state && p.state !== query.state) return false;`
+        //   - line ~489: `if (query.state && query.state !== 'QUEUE') continue;`
+        // Both must stay in sync with this OR — do not relax them.
+        //
+        // DO NOT copy this OR pattern into endpoints that return rows directly
+        // without those post-filters. The sibling `getPostsList` below uses a
+        // plain `{ state: query.state }` for exactly that reason — see the
+        // comment there. Mirroring this OR into a list-style endpoint reopens
+        // the bug fixed in this file's history (QUEUE/DRAFT recurring rows
+        // leaking into `state=ERROR` results).
         ...(query.state
           ? {
               OR: [
