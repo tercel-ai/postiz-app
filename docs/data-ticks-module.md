@@ -109,13 +109,24 @@ Temporal Workflow (daily @ UTC 00:05)
                  │    ├─ Extract impressions (sum exposure metrics)
                  │    └─ Compute traffic score (weighted formula)
                  ├─ Upsert DataTicks records (impressions + traffic)
-                 │   (only if postsAnalyzed > 0)
+                 │   (real rows when postsAnalyzed > 0;
+                 │    carry-forward rows for failed integrations — see below)
                  ├─ Invalidate Redis cache (dashboard:impressions/traffics/summary)
                  └─ Sync individual PostRelease analytics
 ```
 
 **Key behaviors:**
-- Only creates ticks when `postsAnalyzed > 0` — avoids zero-value rows
+- Real ticks (`postsAnalyzed > 0`) come from successful platform-API fetches
+- **Carry-forward ticks (`postsAnalyzed = 0`)** are written for integrations
+  that *had posts to analyze* but whose fetch failed entirely (rate limit,
+  expired token, batch error). The service looks up the most recent prior
+  row for the (integration, type) pair via `findLatestUpTo` and copies its
+  `value` into `dayStart`. This keeps the dashboard time-series monotonic
+  and prevents collapse-to-zero on partial outages. If a row already
+  exists at `dayStart` (real or prior carry-forward), it is **never**
+  overwritten — the carry-forward is a hole filler, not a refresh
+- Integrations with **no posts at all** in the lookback window get no row
+  (neither real nor carry-forward) — avoids polluting the table
 - Strips synthetic metrics before aggregation to prevent double-counting
 - Platform APIs return lifetime cumulative totals per post
 - Refreshes expired tokens before API calls
@@ -126,6 +137,167 @@ Temporal Workflow (daily @ UTC 00:05)
 `POST /admin/dashboard/data-ticks/backfill?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD`
 
 Iterates day-by-day and calls `syncDailyTicks(date)` for each day. Useful for populating historical data.
+
+### Forward-Fill Repair Script
+
+**File:** `scripts/forward-fill-data-ticks.ts`
+
+Pure-DB repair tool — does **not** call any platform API. Restores the
+"impressions/traffic are monotonic non-decreasing per integration" invariant
+after the DataTicks table has been corrupted by upstream outages or botched
+re-syncs.
+
+#### When to use it
+
+Use this script when the dashboard chart shows any of:
+
+| Symptom | Cause | This script fixes? |
+|---|---|---|
+| A day in the middle of the range with `value=0` or no bucket | The orchestrator was down that day, or a re-sync silently failed for that day | ✅ fills the gap with the prior day's value |
+| A day whose value is **smaller than** an earlier day (cumulative dip) | A re-sync hit rate-limits / partial responses and wrote a too-small number | ✅ with `--repair-regressions` |
+| Several consecutive missing or wrong days from a multi-day outage | Combination of the above | ✅ both passes in one run |
+| The whole platform's curve is too low compared to reality | Platform API is genuinely returning low values right now | ❌ wait for the next cron, or fix the upstream issue |
+| An integration legitimately lost impressions (deleted posts) | Real cumulative drop | ❌ don't run with `--repair-regressions`; the dip is correct |
+
+The structural carry-forward inside `_syncOrgDailyTicks` only protects
+**future** runs from this class of bug. Historical holes that already
+exist in the DB must be repaired by this script.
+
+#### How it works
+
+For each `(integration, type)` pair walks the requested range one day at
+a time, maintaining a rolling **baseline** = the latest real (or already
+carried-forward) value seen so far:
+
+- **Missing day:** inserts a synthetic row with `value = baseline` and
+  `postsAnalyzed = 0`. Then advances the baseline to that day.
+- **Existing day, value ≥ baseline:** healthy. Adopts it as the new baseline.
+- **Existing day, value < baseline:**
+  - With `--repair-regressions`: overwrites the row with the baseline
+    value (still `postsAnalyzed = 0`) and advances the baseline.
+  - Without the flag: leaves the row alone, **does not** adopt it as
+    baseline (so the regression doesn't poison subsequent missing days),
+    and prints a warning.
+- **Integration with no prior data anywhere:** skipped — there's nothing
+  to carry forward from.
+
+Always idempotent on re-runs: an already-correct row is never touched.
+
+#### CLI
+
+```
+Required:
+  --start-date <YYYY-MM-DD>  First day to fill (inclusive, UTC)
+  --end-date <YYYY-MM-DD>    Last day to fill (inclusive, UTC)
+
+Optional:
+  --org <id>                 Limit to a single organization
+  --integration <id>         Limit to a single integration
+  --type <name>              Limit to one type (impressions | traffic)
+  --repair-regressions       Also overwrite existing rows whose value is
+                             smaller than the rolling baseline.
+  --dry-run                  Show planned writes without touching the DB
+                             (default — must pass --execute to write)
+  --execute                  Actually perform the writes
+  --help                     Show full help
+```
+
+#### Recipes
+
+**Recipe 1 — Fix a multi-day outage (e.g. orchestrator down 2026-04-03 → 04-05)**
+
+Just missing days, no known regressions:
+
+```bash
+# 1. Preview what will be written
+npx ts-node --project scripts/tsconfig.json scripts/forward-fill-data-ticks.ts \
+  --start-date 2026-04-03 --end-date 2026-04-05 --dry-run
+
+# 2. Apply
+npx ts-node --project scripts/tsconfig.json scripts/forward-fill-data-ticks.ts \
+  --start-date 2026-04-03 --end-date 2026-04-05 --execute
+```
+
+**Recipe 2 — Fix a botched re-sync (some days missing, others have wrong values)**
+
+The case where `4/4` is missing AND `4/5` has a value smaller than `4/3`:
+
+```bash
+# 1. Preview — look for "REPAIR" lines AND "carry" lines in the output
+npx ts-node --project scripts/tsconfig.json scripts/forward-fill-data-ticks.ts \
+  --start-date 2026-04-04 --end-date 2026-04-05 \
+  --repair-regressions --dry-run
+
+# 2. Apply
+npx ts-node --project scripts/tsconfig.json scripts/forward-fill-data-ticks.ts \
+  --start-date 2026-04-04 --end-date 2026-04-05 \
+  --repair-regressions --execute
+```
+
+**Recipe 3 — Repair only one integration / one platform**
+
+When you've identified a specific channel that's broken:
+
+```bash
+npx ts-node --project scripts/tsconfig.json scripts/forward-fill-data-ticks.ts \
+  --start-date 2026-04-04 --end-date 2026-04-05 \
+  --integration <integration-id> \
+  --repair-regressions --execute
+```
+
+To scope to a single org:
+
+```bash
+npx ts-node --project scripts/tsconfig.json scripts/forward-fill-data-ticks.ts \
+  --start-date 2026-04-04 --end-date 2026-04-05 \
+  --org <org-id> --execute
+```
+
+To scope to one metric type:
+
+```bash
+npx ts-node --project scripts/tsconfig.json scripts/forward-fill-data-ticks.ts \
+  --start-date 2026-04-04 --end-date 2026-04-05 \
+  --type impressions --execute
+```
+
+**Recipe 4 — Detect regressions without fixing them**
+
+Run a dry-run **without** `--repair-regressions` over a wide range. Any
+`⚠ regression ... left in place` lines in the output are days where the
+DB has a non-monotonic dip:
+
+```bash
+npx ts-node --project scripts/tsconfig.json scripts/forward-fill-data-ticks.ts \
+  --start-date 2026-03-01 --end-date 2026-04-07 --dry-run
+```
+
+#### After running the script
+
+The script writes directly to the DB but does **not** clear the dashboard
+Redis cache. After `--execute`, manually invalidate so users see the fix:
+
+```bash
+redis-cli -h <redis-host> --scan --pattern 'dashboard:impressions:*' | xargs -r redis-cli -h <redis-host> DEL
+redis-cli -h <redis-host> --scan --pattern 'dashboard:traffics:*'    | xargs -r redis-cli -h <redis-host> DEL
+redis-cli -h <redis-host> --scan --pattern 'dashboard:summary:*'     | xargs -r redis-cli -h <redis-host> DEL
+```
+
+Then reload the dashboard. Per-integration cumulative curves should now be
+monotonic non-decreasing across the repaired range.
+
+#### Safety notes
+
+- The script **never overwrites** an existing row unless you pass
+  `--repair-regressions`. Default mode is hole-filling only.
+- Synthetic and repaired rows are marked with `postsAnalyzed = 0`. This is
+  the same marker used by the in-service carry-forward (see "Key behaviors"
+  above), so the dashboard treats them identically to real data.
+- `--repair-regressions` is destructive for any row it touches. If you're
+  not sure whether a dip is "wrong" or "really happened" (e.g. user deleted
+  many posts), do NOT use the flag — fix that integration manually instead.
+- Always run `--dry-run` first. The output enumerates every planned write
+  and is safe to capture for audit.
 
 ---
 

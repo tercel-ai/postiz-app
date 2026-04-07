@@ -218,6 +218,16 @@ export class DataTicksService {
 
     // Only upsert DataTicks for integrations that actually have analyzed posts.
     // This avoids polluting the table with 0-value rows for integrations with no posts.
+    // Integrations that HAD posts to analyze but ended with postsAnalyzed=0
+    // (rate limit, token refresh failure, batch error, ...) are handled below
+    // as a carry-forward instead of being silently dropped.
+    const failedIntegrationIds: string[] = [];
+    for (const [intId, accum] of integrationMetrics) {
+      if (accum.postsAnalyzed === 0) {
+        failedIntegrationIds.push(intId);
+      }
+    }
+
     const records = Array.from(integrationMetrics.entries())
       .filter(([, accum]) => accum.postsAnalyzed > 0)
       .flatMap(([intId, accum]) => [
@@ -242,6 +252,59 @@ export class DataTicksService {
           postsAnalyzed: accum.postsAnalyzed,
         },
       ]);
+
+    // Carry-forward rows for integrations whose fetch failed entirely.
+    // We look up the most recent (integration, type) row at or before
+    // dayStart and copy its value into dayStart so the dashboard time-series
+    // stays monotonic and does not collapse to 0 just because one API call
+    // failed.
+    //
+    // Critical: if the lookup returns a row whose statisticsTime is already
+    // dayStart, we MUST skip the carry-forward. That row was either written
+    // by a successful earlier run today (postsAnalyzed > 0) — in which case
+    // overwriting it would replace good data with a stale baseline — or it
+    // was already a carry-forward from a previous run today, in which case
+    // overwriting is a redundant no-op. Either way, leave it alone.
+    if (failedIntegrationIds.length > 0) {
+      try {
+        const carryForwards = await this._dataTicksRepository.findLatestUpTo({
+          organizationId: orgId,
+          integrationIds: failedIntegrationIds,
+          types: ['impressions', 'traffic'],
+          upTo: dayStart,
+        });
+        const dayStartMs = dayStart.getTime();
+        for (const cf of carryForwards) {
+          if (cf.statisticsTime.getTime() === dayStartMs) {
+            // A row already exists for dayStart (real or prior carry-forward).
+            // Do not overwrite — see comment above.
+            continue;
+          }
+          records.push({
+            organizationId: cf.organizationId,
+            integrationId: cf.integrationId,
+            platform: cf.platform,
+            type: cf.type,
+            timeUnit: 'day' as TimeUnit,
+            statisticsTime: dayStart,
+            value: cf.value,
+            // postsAnalyzed=0 marks this row as a synthetic carry-forward
+            // (no real fetch contributed to it).
+            postsAnalyzed: 0,
+          });
+          console.warn(
+            `[DataTicks] carry-forward integration=${cf.integrationId} type=${cf.type} ` +
+              `from ${dayjs.utc(cf.statisticsTime).format('YYYY-MM-DD')} ` +
+              `to ${dayjs.utc(dayStart).format('YYYY-MM-DD')} (fetch failed)`
+          );
+        }
+      } catch (err) {
+        console.error(
+          `DataTicks carry-forward lookup failed for org ${orgId}:`,
+          err
+        );
+      }
+    }
 
     if (records.length > 0) {
       await this._dataTicksRepository.upsertMany(records);
