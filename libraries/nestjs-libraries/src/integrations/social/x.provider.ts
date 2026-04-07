@@ -727,6 +727,20 @@ export class XProvider extends SocialAbstract implements SocialProvider {
           : rawQuoteUrl
         : originalMessage;
 
+    // Extract only the useful fields from a twitter-api-v2 error so logs don't dump
+    // axios/socket internals (which contain TLS cert bytes and circular refs).
+    const formatTweetError = (e: any) => ({
+      code: e?.code,
+      status: e?.data?.status ?? e?.status,
+      title: e?.data?.title,
+      detail: e?.data?.detail,
+      type: e?.data?.type,
+      errors: e?.data?.errors,
+      message: e?.message,
+      rateLimitRemaining: e?.rateLimit?.remaining,
+      rateLimitReset: e?.rateLimit?.reset,
+    });
+
     let tweetId: string;
     try {
       // @ts-ignore
@@ -762,10 +776,11 @@ export class XProvider extends SocialAbstract implements SocialProvider {
       // which the v1.1 fallback below cannot preserve. Note: by construction this branch only
       // runs in the no-media path — see the M4 mutual-exclusion guard above.
       if (quoteTweetId && rawQuoteUrl) {
+        console.warn(
+          `[x] v2.tweet with quote_tweet_id=${quoteTweetId} failed for post ${firstPost.id}, retrying v2 with URL-append fallback. Original error:`,
+          formatTweetError(err)
+        );
         try {
-          console.warn(
-            '[x] v2.tweet with quote_tweet_id failed, retrying v2 with URL-append fallback...'
-          );
           // @ts-ignore
           const { data }: { data: { id: string } } = await client.v2.tweet({
             ...commonV2Params,
@@ -782,12 +797,15 @@ export class XProvider extends SocialAbstract implements SocialProvider {
           ];
         } catch (retryErr: any) {
           console.warn(
-            '[x] v2 URL-append retry also failed, trying v1.1 fallback...',
-            retryErr?.data || retryErr?.message || retryErr
+            `[x] v2 URL-append retry also failed for post ${firstPost.id}, trying v1.1 fallback. Error:`,
+            formatTweetError(retryErr)
           );
         }
       } else {
-        console.warn('[x] v2.tweet failed, trying v1.1 fallback...');
+        console.warn(
+          `[x] v2.tweet failed for post ${firstPost.id}, trying v1.1 fallback. Error:`,
+          formatTweetError(err)
+        );
       }
       try {
         // v1.1 has no quote_tweet_id parameter — if we were attempting a native quote,
@@ -799,7 +817,10 @@ export class XProvider extends SocialAbstract implements SocialProvider {
         });
         tweetId = v1Result.id_str;
       } catch (v1Err: any) {
-        console.error('[x] v1.1 tweet fallback also failed:', JSON.stringify(v1Err?.data || v1Err?.message || v1Err));
+        console.error(
+          `[x] v1.1 tweet fallback also failed for post ${firstPost.id}. Error:`,
+          formatTweetError(v1Err)
+        );
         throw err;
       }
     }
