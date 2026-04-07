@@ -635,21 +635,82 @@ export class XProvider extends SocialAbstract implements SocialProvider {
 
     const [firstPost] = postDetails;
 
-    // Append quote tweet URL to message text (X auto-renders it as a quote tweet).
-    // This approach works across all API tiers, unlike the quote_tweet_id parameter
-    // which returns 403 on some tiers (e.g. Pay Per Use).
-    // Strip query params (e.g. ?s=20) as they can prevent X from rendering the quote card.
-    const quoteUrl = firstPost?.settings?.quote_tweet_url?.split('?')[0];
-    if (quoteUrl) {
-      firstPost.message = firstPost.message
-        ? `${firstPost.message}\n${quoteUrl}`
-        : quoteUrl;
-    }
-
     // upload media for the first post
     const uploadAll = await this.uploadMedia(client, [firstPost]);
 
     const media_ids = (uploadAll[firstPost.id] || []).filter((f) => f);
+
+    // Quote tweet handling. Two modes, controlled by env var X_QUOTE_TWEET_APPEND_URL:
+    //   - Default (native): pass quote_tweet_id to v2.tweet — produces a real native quote
+    //     tweet (counts toward quote_count, appears in the quote timeline). May return 403
+    //     on restricted API tiers (e.g. Pay Per Use).
+    //   - Fallback (X_QUOTE_TWEET_APPEND_URL=true): append the quote URL to the message text
+    //     and let X auto-render it as a quote card. Works on all tiers but is not a true
+    //     native quote (does not increment the source tweet's quote_count).
+    //
+    // Hard constraint from X's OpenAPI spec (TweetCreateRequest schema): `quote_tweet_id` is
+    // **mutually exclusive** with `media`, `poll`, and `card_uri`. So when the post has any
+    // attached media we MUST skip native mode and fall back to URL append, otherwise the
+    // request will be rejected with 400.
+    //
+    // Query params (e.g. ?s=20) are stripped because they prevent X from rendering the card
+    // in URL-append mode and are irrelevant to the parsed tweet id in native mode.
+    const rawQuoteUrl = firstPost?.settings?.quote_tweet_url?.split('?')[0];
+    const appendQuoteUrlMode =
+      String(process.env.X_QUOTE_TWEET_APPEND_URL || '').toLowerCase() === 'true';
+    const hasMedia = media_ids.length > 0;
+    // Capture the original message *before* any mutation, so messageWithQuoteUrl below is
+    // always derivable from the unmodified text regardless of which branch ran.
+    const originalMessage = firstPost.message;
+    let quoteTweetId: string | undefined;
+    if (rawQuoteUrl) {
+      const forceUrlAppend = appendQuoteUrlMode || hasMedia;
+      if (forceUrlAppend) {
+        firstPost.message = originalMessage
+          ? `${originalMessage}\n${rawQuoteUrl}`
+          : rawQuoteUrl;
+      } else {
+        const match = rawQuoteUrl.match(/\/status\/(\d+)/);
+        if (match) {
+          quoteTweetId = match[1];
+        } else {
+          // Could not parse a tweet id — degrade to URL append so the user still gets a card.
+          console.warn(
+            `[x] Could not parse tweet id from quote_tweet_url "${rawQuoteUrl}", falling back to URL append`
+          );
+          firstPost.message = originalMessage
+            ? `${originalMessage}\n${rawQuoteUrl}`
+            : rawQuoteUrl;
+        }
+      }
+    }
+
+    // Common v2.tweet params shared by every attempt below. Text and quote_tweet_id are
+    // applied per-attempt so we can degrade gracefully if a native quote is rejected.
+    const commonV2Params = {
+      ...(!firstPost?.settings?.who_can_reply_post ||
+      firstPost?.settings?.who_can_reply_post === 'everyone'
+        ? {}
+        : {
+            reply_settings: firstPost?.settings?.who_can_reply_post,
+          }),
+      ...(firstPost?.settings?.community
+        ? {
+            share_with_followers: true,
+            community_id:
+              firstPost?.settings?.community?.split('/').pop() || '',
+          }
+        : {}),
+      ...(media_ids.length ? { media: { media_ids } } : {}),
+    };
+    // Derived from originalMessage (not firstPost.message) so it stays correct even if a
+    // branch above already mutated firstPost.message in URL-append mode.
+    const messageWithQuoteUrl =
+      rawQuoteUrl
+        ? originalMessage
+          ? `${originalMessage}\n${rawQuoteUrl}`
+          : rawQuoteUrl
+        : originalMessage;
 
     let tweetId: string;
     try {
@@ -659,21 +720,9 @@ export class XProvider extends SocialAbstract implements SocialProvider {
           try {
             // @ts-ignore
             return await client.v2.tweet({
-              ...(!firstPost?.settings?.who_can_reply_post ||
-              firstPost?.settings?.who_can_reply_post === 'everyone'
-                ? {}
-                : {
-                    reply_settings: firstPost?.settings?.who_can_reply_post,
-                  }),
-              ...(firstPost?.settings?.community
-                ? {
-                    share_with_followers: true,
-                    community_id:
-                      firstPost?.settings?.community?.split('/').pop() || '',
-                  }
-                : {}),
+              ...commonV2Params,
               text: firstPost.message,
-              ...(media_ids.length ? { media: { media_ids } } : {}),
+              ...(quoteTweetId ? { quote_tweet_id: quoteTweetId } : {}),
             });
           } catch (tweetErr: any) {
             // --- 403 idempotency fallback: check if the tweet already exists on X ---
@@ -692,9 +741,45 @@ export class XProvider extends SocialAbstract implements SocialProvider {
       );
       tweetId = data.id;
     } catch (err: any) {
-      console.warn('[x] v2.tweet failed, trying v1.1 fallback...');
+      // Intermediate fallback: if we attempted a native quote (quote_tweet_id) and v2 failed,
+      // retry v2 *without* quote_tweet_id and append the URL to the text instead. This keeps
+      // community_id / reply_settings intact for restricted-tier users (e.g. Pay Per Use),
+      // which the v1.1 fallback below cannot preserve. Note: by construction this branch only
+      // runs in the no-media path — see the M4 mutual-exclusion guard above.
+      if (quoteTweetId && rawQuoteUrl) {
+        try {
+          console.warn(
+            '[x] v2.tweet with quote_tweet_id failed, retrying v2 with URL-append fallback...'
+          );
+          // @ts-ignore
+          const { data }: { data: { id: string } } = await client.v2.tweet({
+            ...commonV2Params,
+            text: messageWithQuoteUrl,
+          });
+          tweetId = data.id;
+          return [
+            {
+              postId: tweetId,
+              id: firstPost.id,
+              releaseURL: `https://twitter.com/${username}/status/${tweetId}`,
+              status: 'posted',
+            },
+          ];
+        } catch (retryErr: any) {
+          console.warn(
+            '[x] v2 URL-append retry also failed, trying v1.1 fallback...',
+            retryErr?.data || retryErr?.message || retryErr
+          );
+        }
+      } else {
+        console.warn('[x] v2.tweet failed, trying v1.1 fallback...');
+      }
       try {
-        const v1Result = await client.v1.tweet(firstPost.message, {
+        // v1.1 has no quote_tweet_id parameter — if we were attempting a native quote,
+        // degrade to URL append so the user still gets a quote card.
+        const v1Text =
+          quoteTweetId && rawQuoteUrl ? messageWithQuoteUrl : firstPost.message;
+        const v1Result = await client.v1.tweet(v1Text, {
           ...(media_ids.length ? { media_ids: media_ids.join(',') } : {}),
         });
         tweetId = v1Result.id_str;

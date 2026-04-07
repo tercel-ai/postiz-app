@@ -136,7 +136,7 @@ const SettingsComponent = () => {
       </Select>
 
       <Input
-        label={t('quote_tweet_url', 'Quote Tweet URL (uses ~24 chars from limit)')}
+        label={t('quote_tweet_url', 'Quote Tweet URL')}
         placeholder="https://x.com/user/status/123456"
         className="mb-2"
         {...register('quote_tweet_url')}
