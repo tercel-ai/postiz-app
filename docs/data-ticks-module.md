@@ -138,138 +138,147 @@ Temporal Workflow (daily @ UTC 00:05)
 
 Iterates day-by-day and calls `syncDailyTicks(date)` for each day. Useful for populating historical data.
 
-### Forward-Fill Repair Script
+### Forward-Fill + Monotonic Repair Script
 
 **File:** `scripts/forward-fill-data-ticks.ts`
 
 Pure-DB repair tool — does **not** call any platform API. Restores the
 "impressions/traffic are monotonic non-decreasing per integration" invariant
-after the DataTicks table has been corrupted by upstream outages or botched
-re-syncs.
+after the DataTicks table has been corrupted by upstream outages, botched
+re-syncs, or post deletions that the cumulative metric semantics treat as
+errors.
 
 #### When to use it
 
-Use this script when the dashboard chart shows any of:
-
 | Symptom | Cause | This script fixes? |
 |---|---|---|
-| A day in the middle of the range with `value=0` or no bucket | The orchestrator was down that day, or a re-sync silently failed for that day | ✅ fills the gap with the prior day's value |
-| A day whose value is **smaller than** an earlier day (cumulative dip) | A re-sync hit rate-limits / partial responses and wrote a too-small number | ✅ with `--repair-regressions` |
-| Several consecutive missing or wrong days from a multi-day outage | Combination of the above | ✅ both passes in one run |
-| The whole platform's curve is too low compared to reality | Platform API is genuinely returning low values right now | ❌ wait for the next cron, or fix the upstream issue |
-| An integration legitimately lost impressions (deleted posts) | Real cumulative drop | ❌ don't run with `--repair-regressions`; the dip is correct |
+| A day in the middle of the range with `value=0` or no bucket | Orchestrator outage / silent re-sync failure | ✅ fills with rolling baseline |
+| A day whose value is **smaller than** an earlier day | Re-sync rate-limit, partial response, deleted posts, platform metric revision | ✅ overwrites with rolling baseline |
+| Both above mixed across many days | Multi-day outage + later rate-limited recovery | ✅ both passes in one run |
+| The whole platform's curve is too low compared to reality | Platform API is genuinely returning low values right now | ❌ wait for the next cron / fix upstream |
 
 The structural carry-forward inside `_syncOrgDailyTicks` only protects
-**future** runs from this class of bug. Historical holes that already
-exist in the DB must be repaired by this script.
+**future** runs. Historical holes and dips already in the DB must be
+repaired by this script.
 
 #### How it works
 
-For each `(integration, type)` pair walks the requested range one day at
-a time, maintaining a rolling **baseline** = the latest real (or already
-carried-forward) value seen so far:
+The script always performs **both** passes in a single walk per
+`(integration, type)` pair, maintaining a rolling **baseline** = the
+latest value adopted so far for this integration:
 
-- **Missing day:** inserts a synthetic row with `value = baseline` and
-  `postsAnalyzed = 0`. Then advances the baseline to that day.
-- **Existing day, value ≥ baseline:** healthy. Adopts it as the new baseline.
-- **Existing day, value < baseline:**
-  - With `--repair-regressions`: overwrites the row with the baseline
-    value (still `postsAnalyzed = 0`) and advances the baseline.
-  - Without the flag: leaves the row alone, **does not** adopt it as
-    baseline (so the regression doesn't poison subsequent missing days),
-    and prints a warning.
-- **Integration with no prior data anywhere:** skipped — there's nothing
-  to carry forward from.
+- **Missing day** → insert a synthetic row with `value = baseline`,
+  `postsAnalyzed = 0`. Roll the baseline forward to that day.
+- **Existing day, value ≥ baseline** → healthy. Adopt it as the new
+  baseline. Leave the row untouched.
+- **Existing day, value < baseline** → regression. Overwrite the row
+  with `value = baseline`, `postsAnalyzed = 0`. Roll the baseline forward.
+- **Integration with no prior data anywhere** → skip (nothing to carry
+  forward from).
 
-Always idempotent on re-runs: an already-correct row is never touched.
+The result for every (integration, type) is a non-decreasing sequence
+across the requested range. Re-runs are idempotent: a previously
+repaired row is already at the baseline, so it's adopted as-is.
+
+**Worked example** — one integration with mixed problems in 2026-04-03 → 04-06:
+
+| Day | DB before | Walk decision | DB after |
+|---|---|---|---|
+| 4/02 (pre-range) | 1796 (real) | seed `lastGood = 1796` | unchanged |
+| 4/03 | 1796 (real) | `1796 ≥ 1796` → adopt baseline | unchanged |
+| 4/04 | _missing_ | fill with baseline 1796 | new row, value=1796, p=0 |
+| 4/05 | 1784 (real) | `1784 < 1796` → REPAIR | overwritten to 1796, p=0 |
+| 4/06 | 1652 (real) | `1652 < 1796` → REPAIR | overwritten to 1796, p=0 |
+
+After run: 1796 → 1796 → 1796 → 1796 → 1796. Curve is flat at the prior peak.
 
 #### CLI
 
 ```
 Required:
-  --start-date <YYYY-MM-DD>  First day to fill (inclusive, UTC)
-  --end-date <YYYY-MM-DD>    Last day to fill (inclusive, UTC)
+  --start-date <YYYY-MM-DD>  First day to repair (inclusive, UTC)
+  --end-date <YYYY-MM-DD>    Last day to repair (inclusive, UTC)
 
 Optional:
   --org <id>                 Limit to a single organization
   --integration <id>         Limit to a single integration
   --type <name>              Limit to one type (impressions | traffic)
-  --repair-regressions       Also overwrite existing rows whose value is
-                             smaller than the rolling baseline.
   --dry-run                  Show planned writes without touching the DB
                              (default — must pass --execute to write)
   --execute                  Actually perform the writes
   --help                     Show full help
 ```
 
+#### Trade-off you should know about
+
+If an integration's value LEGITIMATELY dropped (e.g. all of its top
+posts were deleted and the cumulative impression sum is genuinely
+smaller than a week ago), the script will **hide** that drop and pin
+the curve at the prior peak. That is the correct behavior for
+"monotonic cumulative" semantics, but it does mean you cannot use the
+chart to detect a real platform-side decline. If you want to preserve
+a specific real decline, exclude that integration via `--integration`
+and handle it manually.
+
 #### Recipes
 
-**Recipe 1 — Fix a multi-day outage (e.g. orchestrator down 2026-04-03 → 04-05)**
-
-Just missing days, no known regressions:
+**Recipe 1 — Fix a multi-day outage**
 
 ```bash
-# 1. Preview what will be written
+# 1. Preview — look at REPAIR and ← carry lines
 npx ts-node --project scripts/tsconfig.json scripts/forward-fill-data-ticks.ts \
-  --start-date 2026-04-03 --end-date 2026-04-05 --dry-run
+  --start-date 2026-04-03 --end-date 2026-04-06 --dry-run
 
 # 2. Apply
 npx ts-node --project scripts/tsconfig.json scripts/forward-fill-data-ticks.ts \
-  --start-date 2026-04-03 --end-date 2026-04-05 --execute
+  --start-date 2026-04-03 --end-date 2026-04-06 --execute
 ```
 
-**Recipe 2 — Fix a botched re-sync (some days missing, others have wrong values)**
-
-The case where `4/4` is missing AND `4/5` has a value smaller than `4/3`:
-
-```bash
-# 1. Preview — look for "REPAIR" lines AND "carry" lines in the output
-npx ts-node --project scripts/tsconfig.json scripts/forward-fill-data-ticks.ts \
-  --start-date 2026-04-04 --end-date 2026-04-05 \
-  --repair-regressions --dry-run
-
-# 2. Apply
-npx ts-node --project scripts/tsconfig.json scripts/forward-fill-data-ticks.ts \
-  --start-date 2026-04-04 --end-date 2026-04-05 \
-  --repair-regressions --execute
-```
-
-**Recipe 3 — Repair only one integration / one platform**
-
-When you've identified a specific channel that's broken:
+**Recipe 2 — Repair only one organization**
 
 ```bash
 npx ts-node --project scripts/tsconfig.json scripts/forward-fill-data-ticks.ts \
-  --start-date 2026-04-04 --end-date 2026-04-05 \
-  --integration <integration-id> \
-  --repair-regressions --execute
-```
-
-To scope to a single org:
-
-```bash
-npx ts-node --project scripts/tsconfig.json scripts/forward-fill-data-ticks.ts \
-  --start-date 2026-04-04 --end-date 2026-04-05 \
+  --start-date 2026-04-03 --end-date 2026-04-06 \
   --org <org-id> --execute
 ```
 
-To scope to one metric type:
+**Recipe 3 — Repair only one integration**
 
 ```bash
 npx ts-node --project scripts/tsconfig.json scripts/forward-fill-data-ticks.ts \
-  --start-date 2026-04-04 --end-date 2026-04-05 \
+  --start-date 2026-04-03 --end-date 2026-04-06 \
+  --integration <integration-id> --execute
+```
+
+**Recipe 4 — Repair only impressions, leave traffic alone**
+
+```bash
+npx ts-node --project scripts/tsconfig.json scripts/forward-fill-data-ticks.ts \
+  --start-date 2026-04-03 --end-date 2026-04-06 \
   --type impressions --execute
 ```
 
-**Recipe 4 — Detect regressions without fixing them**
+**Recipe 5 — Find org IDs by user email (helper for `--org`)**
 
-Run a dry-run **without** `--repair-regressions` over a wide range. Any
-`⚠ regression ... left in place` lines in the output are days where the
-DB has a non-monotonic dip:
+```sql
+SELECT o.id AS org_id, o.name, u.email
+FROM "Organization" o
+JOIN "UserOrganization" uo ON uo."organizationId" = o.id
+JOIN "User" u ON u.id = uo."userId"
+WHERE u.email = 'user@example.com';
+```
 
-```bash
-npx ts-node --project scripts/tsconfig.json scripts/forward-fill-data-ticks.ts \
-  --start-date 2026-03-01 --end-date 2026-04-07 --dry-run
+To list all orgs that have impressions activity in a given date range
+(useful when you don't know which orgs were affected by an outage):
+
+```sql
+SELECT DISTINCT "organizationId", COUNT(*) AS row_count
+FROM "DataTicks"
+WHERE "timeUnit" = 'day'
+  AND type = 'impressions'
+  AND "statisticsTime" >= '2026-04-01'
+GROUP BY "organizationId"
+ORDER BY row_count DESC;
 ```
 
 #### After running the script
@@ -288,16 +297,50 @@ monotonic non-decreasing across the repaired range.
 
 #### Safety notes
 
-- The script **never overwrites** an existing row unless you pass
-  `--repair-regressions`. Default mode is hole-filling only.
-- Synthetic and repaired rows are marked with `postsAnalyzed = 0`. This is
-  the same marker used by the in-service carry-forward (see "Key behaviors"
-  above), so the dashboard treats them identically to real data.
-- `--repair-regressions` is destructive for any row it touches. If you're
-  not sure whether a dip is "wrong" or "really happened" (e.g. user deleted
-  many posts), do NOT use the flag — fix that integration manually instead.
-- Always run `--dry-run` first. The output enumerates every planned write
-  and is safe to capture for audit.
+- Default is `--dry-run`. Nothing is written unless you pass `--execute`.
+- The dry-run output enumerates every planned write (one line per row);
+  always read it before executing.
+- Synthetic / repaired rows are marked with `postsAnalyzed = 0`, the
+  same marker used by the in-service carry-forward (see "Key behaviors"
+  above). The dashboard treats them identically to real data.
+- The `--repair-regressions` flag from earlier versions is now the
+  default and is silently accepted (with a deprecation note) if passed.
+- The script is idempotent: running it twice on the same range produces
+  the same result. Re-runs are safe.
+
+#### Verifying the result after a run
+
+After `--execute` and Redis flush, run these queries to confirm the fix:
+
+```sql
+-- 1. No duplicate rows for any (integration, type, day) — sanity check
+SELECT "integrationId", type, "statisticsTime"::date, COUNT(*)
+FROM "DataTicks"
+WHERE "timeUnit" = 'day' AND "statisticsTime" >= '<start-date>'
+GROUP BY "integrationId", type, "statisticsTime"::date
+HAVING COUNT(*) > 1;
+-- expected: 0 rows
+
+-- 2. No remaining regressions for the org you fixed
+WITH ranked AS (
+  SELECT
+    "integrationId", type, "statisticsTime", value,
+    LAG(value) OVER (PARTITION BY "integrationId", type ORDER BY "statisticsTime") AS prev
+  FROM "DataTicks"
+  WHERE "organizationId" = '<your-org-id>'
+    AND "timeUnit" = 'day'
+    AND "statisticsTime" >= '<start-date>'
+)
+SELECT * FROM ranked WHERE value < prev;
+-- expected: 0 rows
+
+-- 3. Synthetic row count in the repaired range (sanity)
+SELECT type, COUNT(*) FROM "DataTicks"
+WHERE "timeUnit" = 'day'
+  AND "postsAnalyzed" = 0
+  AND "statisticsTime" BETWEEN '<start-date>' AND '<end-date>'
+GROUP BY type;
+```
 
 ---
 

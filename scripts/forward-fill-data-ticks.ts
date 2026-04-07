@@ -1,25 +1,48 @@
 /**
- * Forward-fill missing DataTicks rows over a date range.
+ * Repair DataTicks impressions/traffic so they satisfy the "cumulative
+ * non-decreasing per integration" invariant the dashboard expects.
  *
  * Why this exists:
- *   DataTicks impressions/traffic are conceptually cumulative snapshots. When
- *   the orchestrator goes down for several days and we re-run sync scripts
- *   afterwards, some integrations fail (rate limits, token refresh, batch
- *   errors) and their rows for the missing days are never written. The
- *   dashboard time-series query then renders those days as 0 or as a sum
- *   over fewer integrations than adjacent days, breaking the
- *   "later >= earlier" invariant.
+ *   DataTicks impressions/traffic are conceptually cumulative. When the
+ *   orchestrator goes down for several days, OR when a re-sync hits rate
+ *   limits / partial responses / deleted posts, the table ends up with
+ *   two classes of damage:
+ *
+ *     (A) Missing days — gaps where no row was ever written.
+ *     (B) Regression days — rows whose value is SMALLER than an earlier
+ *         row for the same integration. The dashboard sums per-day, so
+ *         these dips break the "later >= earlier" invariant of cumulative
+ *         metrics, even when the underlying API measurement is technically
+ *         "real" (e.g. a deleted post lowered the per-post lifetime sum).
  *
  *   This script does NOT call any platform API. For each (integration, type)
- *   pair, it walks the requested date range and, where a day is missing,
- *   inserts a row carrying the most recent prior value forward. Existing
- *   rows are never overwritten.
+ *   pair it walks the requested date range and applies BOTH fixes in a
+ *   single pass:
+ *
+ *     Pass 1 (fill):     each MISSING day gets a synthetic row carrying
+ *                        the rolling baseline (most recent value seen,
+ *                        real or already filled/repaired).
+ *     Pass 2 (repair):   each EXISTING day whose value < baseline gets
+ *                        overwritten with the baseline value, then the
+ *                        baseline rolls forward to that day.
+ *
+ *   The result for every (integration, type) is a non-decreasing sequence
+ *   over the requested range. Synthetic and repaired rows are marked with
+ *   `postsAnalyzed = 0`.
+ *
+ * Trade-off you should know about:
+ *   If an integration legitimately RECOVERED to lower values (e.g. all its
+ *   high-impression posts were deleted), the script will hide that drop
+ *   and pin the curve at the prior peak. That is the correct behavior for
+ *   "monotonic cumulative" semantics, but if you have a specific
+ *   integration where you want to preserve a real decline, exclude it via
+ *   `--integration` and handle that one manually.
  *
  * Usage:
  *   npx ts-node --project scripts/tsconfig.json scripts/forward-fill-data-ticks.ts \
- *     --start-date 2026-04-03 --end-date 2026-04-05 --dry-run
+ *     --start-date 2026-04-03 --end-date 2026-04-06 --dry-run
  *   npx ts-node --project scripts/tsconfig.json scripts/forward-fill-data-ticks.ts \
- *     --start-date 2026-04-03 --end-date 2026-04-05 --execute
+ *     --start-date 2026-04-03 --end-date 2026-04-06 --execute
  *
  * Optional filters:
  *   --org <id>          Limit to one organization
@@ -42,7 +65,6 @@ interface CliArgs {
   integrationId: string | null;
   type: string | null;
   dryRun: boolean;
-  repairRegressions: boolean;
 }
 
 const ALL_TYPES = ['impressions', 'traffic'] as const;
@@ -52,35 +74,30 @@ function printHelp(): void {
 Usage: npx ts-node --project scripts/tsconfig.json scripts/forward-fill-data-ticks.ts [options]
 
 Required:
-  --start-date <YYYY-MM-DD>  First day to fill (inclusive, UTC)
-  --end-date <YYYY-MM-DD>    Last day to fill (inclusive, UTC)
+  --start-date <YYYY-MM-DD>  First day to repair (inclusive, UTC)
+  --end-date <YYYY-MM-DD>    Last day to repair (inclusive, UTC)
 
 Optional:
   --org <id>                 Limit to a single organization
   --integration <id>         Limit to a single integration
   --type <name>              Limit to one type (impressions | traffic)
-  --repair-regressions       Also overwrite existing rows whose value is
-                             smaller than the rolling carry-forward baseline.
-                             Use this to fix monotonicity violations caused
-                             by previously botched re-syncs (e.g. partial
-                             API responses that produced "smaller than
-                             yesterday" cumulative values).
-  --dry-run                  Show planned upserts without writing (default)
-  --execute                  Actually perform the upserts
+  --dry-run                  Show planned writes without touching the DB
+                             (default — must pass --execute to write)
+  --execute                  Actually perform the writes
   --help                     Show this help message
 
-Behavior:
-  - Walks each (integration, type) pair that has any DataTicks row anywhere.
-  - For each MISSING day in the range, inserts a row carrying the value from
-    the most recent prior row (real or already carried-forward).
-  - For each EXISTING day in the range:
-      * Without --repair-regressions: leave it untouched and use it as the
-        new baseline. Existing rows are NEVER overwritten.
-      * With --repair-regressions: if value < baseline, overwrite with the
-        baseline value. Otherwise leave untouched and use it as the new
-        baseline.
-  - postsAnalyzed is set to 0 to mark synthetic / repaired rows.
-  - Skips integrations with no prior data at all (cannot carry forward).
+Behavior (always both passes):
+  - Walks each (integration, type) pair across the requested range.
+  - Pass 1 — fill: each MISSING day gets a synthetic row carrying the
+    rolling baseline (the most recent value seen for this integration,
+    real or already filled / repaired).
+  - Pass 2 — repair: each EXISTING day whose value < baseline is
+    overwritten with the baseline value (cumulative invariant).
+  - Both written rows are marked postsAnalyzed=0.
+  - Healthy days (existing AND value >= baseline) become the new
+    baseline and are left untouched.
+  - Integrations with no prior data anywhere are skipped (nothing to
+    carry forward from).
 `);
 }
 
@@ -92,7 +109,6 @@ function parseArgs(): CliArgs {
   let integrationId: string | null = null;
   let type: string | null = null;
   let dryRun = true;
-  let repairRegressions = false;
 
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {
@@ -112,7 +128,10 @@ function parseArgs(): CliArgs {
         type = args[++i] ?? null;
         break;
       case '--repair-regressions':
-        repairRegressions = true;
+        // Kept for backwards compatibility — repair is now always on.
+        console.warn(
+          'NOTE: --repair-regressions is now the default and the flag is ignored.'
+        );
         break;
       case '--execute':
         dryRun = false;
@@ -146,7 +165,6 @@ function parseArgs(): CliArgs {
     integrationId,
     type,
     dryRun,
-    repairRegressions,
   };
 }
 
@@ -180,11 +198,12 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  console.log('=== DataTicks Forward-Fill ===\n');
+  console.log('=== DataTicks Forward-Fill + Monotonic Repair ===\n');
   console.log(`Mode:    ${args.dryRun ? 'DRY RUN (no writes)' : 'EXECUTE'}`);
   console.log(`Range:   ${args.startDate} → ${args.endDate} (UTC, inclusive)`);
   console.log(
-    `Repair:  ${args.repairRegressions ? 'YES (overwrite regressions)' : 'no (missing days only)'}`
+    'Behavior: fill missing days from prior baseline, then overwrite ' +
+      'any existing day whose value < baseline'
   );
   if (args.orgId) console.log(`Org:     ${args.orgId}`);
   if (args.integrationId) console.log(`Integration: ${args.integrationId}`);
@@ -198,7 +217,6 @@ async function main(): Promise<void> {
   let plannedRepairs = 0;
   let actualWrites = 0;
   let skippedNoPrior = 0;
-  let regressionsLeftInPlace = 0;
 
   for (const type of types) {
     // Pull every row up to and including the end of the range that matches
@@ -258,64 +276,48 @@ async function main(): Promise<void> {
         const existing = dayMap.get(key);
 
         if (existing) {
-          // Existing row inside the range: check for monotonic regression.
-          const isRegression =
-            lastGood !== null && existing.value < lastGood.value;
-
-          if (!isRegression) {
-            // Healthy row: adopt it as the new baseline.
+          // Existing row in range: healthy or regression?
+          if (lastGood === null || existing.value >= lastGood.value) {
+            // Healthy: adopt as new baseline, leave row untouched.
             lastGood = existing;
             continue;
           }
 
-          // Regression detected (existing < baseline).
-          if (args.repairRegressions) {
-            plannedRepairs++;
-            console.log(
-              `  ${type} ${key} integration=${intId} ⚠ REPAIR ` +
-                `existing=${existing.value} < baseline=${lastGood!.value} ` +
-                `← carry ${dayKey(lastGood!.statisticsTime)}`
-            );
-            if (!args.dryRun) {
-              await prisma.dataTicks.update({
-                where: {
-                  organizationId_integrationId_type_timeUnit_statisticsTime: {
-                    organizationId: existing.organizationId,
-                    integrationId: existing.integrationId,
-                    type,
-                    timeUnit: 'day',
-                    statisticsTime: day,
-                  },
+          // Regression: existing.value < baseline → overwrite to baseline.
+          plannedRepairs++;
+          console.log(
+            `  ${type} ${key} integration=${intId} ⚠ REPAIR ` +
+              `existing=${existing.value} < baseline=${lastGood.value} ` +
+              `← carry ${dayKey(lastGood.statisticsTime)}`
+          );
+          if (!args.dryRun) {
+            await prisma.dataTicks.update({
+              where: {
+                organizationId_integrationId_type_timeUnit_statisticsTime: {
+                  organizationId: existing.organizationId,
+                  integrationId: existing.integrationId,
+                  type,
+                  timeUnit: 'day',
+                  statisticsTime: day,
                 },
-                data: {
-                  value: lastGood!.value,
-                  postsAnalyzed: 0,
-                },
-              });
-              actualWrites++;
-            }
-            // After repair, the synthesized value becomes the new baseline.
-            lastGood = {
-              ...lastGood!,
-              statisticsTime: day,
-            };
-          } else {
-            // Not repairing — leave the regression in place but DO NOT
-            // adopt it as baseline, otherwise subsequent missing days
-            // would propagate the lower (wrong) value forward.
-            regressionsLeftInPlace++;
-            console.warn(
-              `  ${type} ${key} integration=${intId} ⚠ regression ` +
-                `(existing=${existing.value} < baseline=${lastGood!.value}) ` +
-                `left in place — re-run with --repair-regressions to fix`
-            );
-            // lastGood unchanged
+              },
+              data: {
+                value: lastGood.value,
+                postsAnalyzed: 0,
+              },
+            });
+            actualWrites++;
           }
+          // After repair the synthesized value rolls forward as baseline.
+          lastGood = {
+            ...lastGood,
+            statisticsTime: day,
+          };
           continue;
         }
 
-        // Missing day → carry-forward.
-        if (!lastGood) {
+        // Missing day → fill from baseline.
+        if (lastGood === null) {
           skippedNoPrior++;
           continue;
         }
@@ -338,7 +340,7 @@ async function main(): Promise<void> {
                 statisticsTime: day,
               },
             },
-            // Defensive: never overwrite an existing row in this branch
+            // Defensive: never overwrite an existing row from this branch
             // (we already handled the existing case above).
             update: {},
             create: {
@@ -356,7 +358,7 @@ async function main(): Promise<void> {
           actualWrites++;
         }
 
-        // Treat the synthesized row as the new lastGood for subsequent days.
+        // Roll the baseline forward to the synthesized row.
         lastGood = {
           ...lastGood,
           statisticsTime: day,
@@ -368,14 +370,9 @@ async function main(): Promise<void> {
   console.log('');
   console.log(`Planned fills:   ${plannedFills} missing day(s)`);
   console.log(`Planned repairs: ${plannedRepairs} regression(s)`);
+  console.log(`Total planned:   ${plannedFills + plannedRepairs} write(s)`);
   if (!args.dryRun) {
     console.log(`Executed writes: ${actualWrites}`);
-  }
-  if (regressionsLeftInPlace > 0) {
-    console.log(
-      `Regressions left in place: ${regressionsLeftInPlace} ` +
-        `(re-run with --repair-regressions to fix)`
-    );
   }
   if (skippedNoPrior > 0) {
     console.log(
