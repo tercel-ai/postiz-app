@@ -24,7 +24,10 @@ import { XDto } from '@gitroom/nestjs-libraries/dtos/posts/providers-settings/x.
 import { Tool } from '@gitroom/nestjs-libraries/integrations/tool.decorator';
 import { mergeAdditionalSettings, parseAdditionalSettings } from '@gitroom/nestjs-libraries/database/prisma/integrations/additional-settings.utils';
 import { Rules } from '@gitroom/nestjs-libraries/chat/rules.description.decorator';
-import { ioRedis } from '@gitroom/nestjs-libraries/redis/redis.service';
+import {
+  ioRedis,
+  notifyOncePerCooldown,
+} from '@gitroom/nestjs-libraries/redis/redis.service';
 
 @Rules(
   'X can have maximum 4 pictures, or maximum one video, it can also be without attachments'
@@ -563,6 +566,117 @@ export class XProvider extends SocialAbstract implements SocialProvider {
     await ioRedis.set(XProvider.RATE_LIMIT_KEY, String(resetEpoch), 'EX', ttl);
   }
 
+  /**
+   * Identify the X-side "this user account is suspended" 403 error. Tokens
+   * remain valid in this state — when the platform reinstates the account, the
+   * very next API call will start succeeding again with the same token. We
+   * MUST NOT route this through `refreshNeeded`, which would force the user to
+   * re-authenticate unnecessarily and freeze their scheduled queue.
+   */
+  private _isUserSuspendedError(err: any): boolean {
+    if (!err || err.code !== 403) return false;
+    const type =
+      typeof err?.data?.type === 'string' ? err.data.type : '';
+    if (type.includes('user-suspended') || type.includes('app-suspended')) {
+      return true;
+    }
+    const detail =
+      typeof err?.data?.detail === 'string' ? err.data.detail : '';
+    if (detail.toLowerCase().includes('user used for authentication is suspended')) {
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Notify the organisation that owns this integration that their X account has
+   * been suspended by X. Deduped via Redis NX EX so cron retries do not spam the
+   * inbox: at most one notification per cooldown window (default 24h, override
+   * via X_SUSPENDED_NOTIFY_COOLDOWN_SECONDS).
+   *
+   * The Redis key auto-expires, so no manual clearing is required when the
+   * platform reinstates the account — the next suspension event after the
+   * cooldown elapses will simply notify again.
+   *
+   * Failures here must never break the caller (analytics / posting). Wrap and
+   * swallow.
+   */
+  private async _notifyXSuspendedOnce(integrationId: string): Promise<void> {
+    try {
+      const cooldownSeconds = parseInt(
+        process.env.X_SUSPENDED_NOTIFY_COOLDOWN_SECONDS || '86400',
+        10
+      );
+      await notifyOncePerCooldown({
+        provider: 'x',
+        event: 'suspended',
+        subjectId: integrationId,
+        cooldownSeconds: Number.isFinite(cooldownSeconds)
+          ? cooldownSeconds
+          : 86400,
+        notify: async () => {
+          const integration = await XProvider._prisma.integration.findUnique({
+            where: { id: integrationId },
+            select: { id: true, name: true, organizationId: true },
+          });
+          if (!integration) return;
+
+          const content =
+            `Your X account "${integration.name}" has been suspended by X. ` +
+            `Scheduled posts and analytics will keep failing until X reinstates the account. ` +
+            `Please appeal at <a href="https://help.x.com/en/managing-your-account/suspended-x-accounts" target="_blank" rel="noopener noreferrer">help.x.com</a>. ` +
+            `Postiz will resume automatically once your account is reinstated — no need to re-authorize.`;
+
+          await XProvider._prisma.notifications.create({
+            data: {
+              organizationId: integration.organizationId,
+              content,
+            },
+          });
+
+          console.warn(
+            `[x] Notified suspended account: integration=${integrationId} org=${integration.organizationId}`
+          );
+        },
+      });
+    } catch (err: any) {
+      console.warn(
+        `[x] Failed to send suspended notification for integration=${integrationId}: ${
+          err?.message || err
+        }`
+      );
+    }
+  }
+
+  /**
+   * Synchronous wrapper around `_notifyXSuspendedOnce` that GUARANTEES no
+   * exception ever escapes into the caller, regardless of failure mode:
+   *   - Async rejections inside `_notifyXSuspendedOnce` → already caught by its
+   *     own try/catch, but we add `.catch` here as an extra safety net.
+   *   - Synchronous TypeError (e.g. method missing in some test/build edge
+   *     case) → caught by the outer try/catch.
+   *
+   * Use this from every X API catch block. The notification fix MUST never
+   * affect existing functionality, even in pathological failure modes.
+   */
+  private _safeFireSuspendedNotification(integrationId: string): void {
+    try {
+      this._notifyXSuspendedOnce(integrationId).catch((err: any) => {
+        console.warn(
+          `[x] suspended notification swallowed for integration=${integrationId}: ${
+            err?.message || err
+          }`
+        );
+      });
+    } catch (err: any) {
+      console.warn(
+        `[x] suspended notification dispatcher failed for integration=${integrationId}: ${
+          err?.message || err
+        }`
+      );
+    }
+  }
+
   private async uploadMedia(
     client: TwitterApi,
     postDetails: PostDetails<any>[]
@@ -821,6 +935,16 @@ export class XProvider extends SocialAbstract implements SocialProvider {
           `[x] v1.1 tweet fallback also failed for post ${firstPost.id}. Error:`,
           formatTweetError(v1Err)
         );
+        // Strictly additive: if either error matches X's "user suspended" 403,
+        // fire a deduped in-app notification so the org owner can see why
+        // posting is failing. We still throw the original error so the post
+        // lands in the ERROR state and `handleErrors` classifies it.
+        if (
+          this._isUserSuspendedError(err) ||
+          this._isUserSuspendedError(v1Err)
+        ) {
+          this._safeFireSuspendedNotification(integration.id);
+        }
         throw err;
       }
     }
@@ -1134,6 +1258,13 @@ export class XProvider extends SocialAbstract implements SocialProvider {
         );
         throw err;
       }
+      if (this._isUserSuspendedError(err)) {
+        console.warn(
+          `[x] post analytics skipped: integration=${integrationId} post=${postId} suspended by platform`
+        );
+        this._safeFireSuspendedNotification(integrationId);
+        return [];
+      }
       console.log('Error fetching X post analytics:', err);
     }
 
@@ -1181,6 +1312,14 @@ export class XProvider extends SocialAbstract implements SocialProvider {
         if (err?.rateLimit?.reset) {
           await this._setRateLimited(err.rateLimit.reset);
         }
+      }
+      if (this._isUserSuspendedError(err)) {
+        console.warn(
+          `[x] account metrics skipped: integration=${integrationId} suspended by platform`
+        );
+        // fire-and-forget; safe wrapper guarantees no exception escapes
+        this._safeFireSuspendedNotification(integrationId);
+        return null;
       }
       console.error('Error fetching X account metrics:', err);
       return null;
@@ -1283,6 +1422,13 @@ export class XProvider extends SocialAbstract implements SocialProvider {
           `X API rate limited for batch post analytics, reset at ${err?.rateLimit?.reset || 'unknown'}`
         );
         throw err;
+      }
+      if (this._isUserSuspendedError(err)) {
+        console.warn(
+          `[x] batch post analytics skipped: integration=${integrationId} suspended by platform`
+        );
+        this._safeFireSuspendedNotification(integrationId);
+        return result;
       }
       console.log('Error fetching X batch post analytics:', err);
     }
