@@ -44,7 +44,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
   identifier = 'x';
   name = 'X';
   isBetweenSteps = false;
-  scopes = [] as string[];
+  scopes = ['tweet.read', 'tweet.write', 'users.read', 'offline.access'];
   override maxConcurrentJob = 1; // X has strict rate limits (300 posts per 3 hours)
   toolTip =
     'You will be logged in into your current account, if you would like a different account, change it first on X';
@@ -56,13 +56,40 @@ export class XProvider extends SocialAbstract implements SocialProvider {
     return isTwitterPremium ? 4000 : 280;
   }
 
+  async refreshToken(refreshToken: string): Promise<AuthTokenDetails> {
+    const client = new TwitterApi({
+      clientId: process.env.X_CLIENT_ID!,
+      clientSecret: process.env.X_CLIENT_SECRET!,
+    });
+
+    const {
+      accessToken,
+      refreshToken: newRefreshToken,
+      expiresIn,
+    } = await client.refreshOAuth2Token(refreshToken);
+
+    const newClient = new TwitterApi(accessToken);
+    const { username, verified, profile_image_url, name, id } =
+      await this._getUserInfo(newClient);
+
+    return {
+      id: String(id),
+      accessToken,
+      refreshToken: newRefreshToken,
+      expiresIn,
+      name,
+      picture: profile_image_url || '',
+      username,
+    };
+  }
+
   override handleErrors(body: string):
     | {
         type: 'refresh-token' | 'bad-body' | 'retry';
         value: string;
       }
     | undefined {
-    if (body.includes('Unsupported Authentication')) {
+    if (body.includes('Unsupported Authentication') || body.includes('invalid_grant')) {
       return {
         type: 'refresh-token',
         value: 'X authentication has expired, please reconnect your account',
@@ -276,110 +303,67 @@ export class XProvider extends SocialAbstract implements SocialProvider {
 
   async generateAuthUrl() {
     const client = new TwitterApi({
-      appKey: process.env.X_API_KEY!,
-      appSecret: process.env.X_API_SECRET!,
+      clientId: process.env.X_CLIENT_ID!,
+      clientSecret: process.env.X_CLIENT_SECRET!,
     });
-    const { url, oauth_token, oauth_token_secret } =
-      await client.generateAuthLink(
-        (process.env.X_URL || process.env.FRONTEND_URL) +
-          `/integrations/social/x`,
-        {
-          authAccessType: 'write',
-          linkMode: 'authorize',
-          forceLogin: false,
-        }
-      );
+
+    const { url, codeVerifier, state } = client.generateOAuth2AuthLink(
+      (process.env.X_URL || process.env.FRONTEND_URL) +
+        `/integrations/social/x`,
+      {
+        scope: this.scopes as any,
+      }
+    );
+
     return {
       url,
-      codeVerifier: oauth_token + ':' + oauth_token_secret,
-      state: oauth_token,
+      codeVerifier,
+      state,
     };
   }
 
   async authenticate(params: { code: string; codeVerifier: string }) {
     const { code, codeVerifier } = params;
-    const [oauth_token, oauth_token_secret] = codeVerifier.split(':');
 
-    const startingClient = new TwitterApi({
-      appKey: process.env.X_API_KEY!,
-      appSecret: process.env.X_API_SECRET!,
-      accessToken: oauth_token,
-      accessSecret: oauth_token_secret,
+    const client = new TwitterApi({
+      clientId: process.env.X_CLIENT_ID!,
+      clientSecret: process.env.X_CLIENT_SECRET!,
     });
 
     let accessToken: string;
-    let accessSecret: string;
-    let client: TwitterApi;
+    let refreshToken: string;
+    let expiresIn: number;
     try {
-      const loginResult = await startingClient.login(code);
-      accessToken = loginResult.accessToken;
-      accessSecret = loginResult.accessSecret;
-      // Build a fresh client with explicit OAuth 1.0a credentials
-      // loginResult.client may not sign v2 requests correctly
-      client = new TwitterApi({
-        appKey: process.env.X_API_KEY!,
-        appSecret: process.env.X_API_SECRET!,
-        accessToken,
-        accessSecret,
+      const {
+        accessToken: acc,
+        refreshToken: ref,
+        expiresIn: exp,
+      } = await client.loginWithOAuth2({
+        code,
+        codeVerifier,
+        redirectUri:
+          (process.env.X_URL || process.env.FRONTEND_URL) +
+          `/integrations/social/x`,
       });
+      accessToken = acc;
+      refreshToken = ref!;
+      expiresIn = exp;
     } catch (err: any) {
       const status = err?.code || err?.status || '';
-      console.error(`X OAuth login failed (${status}):`, err?.data || err?.message || err);
+      console.error(`X OAuth 2.0 login failed (${status}):`, err?.data || err?.message || err);
       return `X authentication failed: ${err?.data?.detail || err?.message || 'Service temporarily unavailable. Please try again.'}`;
     }
 
-    // Try v2 first, fallback to v1.1 if v2 returns 503
-    let username: string;
-    let verified: boolean | undefined;
-    let profile_image_url: string | undefined;
-    let name: string;
-    let id: string | number;
-
-    try {
-      const {
-        data: { username: u, verified: v, verified_type, profile_image_url: p, name: n, id: i },
-      } = await client.v2.me({
-        'user.fields': [
-          'username',
-          'verified',
-          'verified_type',
-          'profile_image_url',
-          'name',
-        ],
-      });
-      username = u;
-      // verified_type === 'blue' means X Premium subscriber.
-      // The legacy `verified` flag covers org/celebrity checkmarks only.
-      verified = verified_type === 'blue' || !!v;
-      profile_image_url = p;
-      name = n;
-      id = i;
-    } catch (err: any) {
-      const status = err?.code || err?.status || '';
-      console.warn(`X v2.me failed (${status}), trying v1.1 fallback...`);
-
-      try {
-        const v1User = await client.v1.verifyCredentials();
-        username = v1User.screen_name;
-        // v1.1 API has no verified_type equivalent; `verified` here only covers
-        // org/celebrity checkmarks — X Premium (Blue) cannot be detected via v1.1.
-        verified = v1User.verified;
-        profile_image_url = v1User.profile_image_url_https;
-        name = v1User.name;
-        id = v1User.id_str;
-      } catch (v1Err: any) {
-        const v1Status = v1Err?.code || v1Err?.status || '';
-        console.error(`X v1.1 fallback also failed (${v1Status}):`, v1Err?.data || v1Err?.message || v1Err);
-        return `Failed to fetch X account info: ${err?.data?.detail || err?.message || 'Service temporarily unavailable. Please try again.'}`;
-      }
-    }
+    const newClient = new TwitterApi(accessToken);
+    const { username, verified, profile_image_url, name, id } =
+      await this._getUserInfo(newClient);
 
     return {
       id: String(id),
-      accessToken: accessToken + ':' + accessSecret,
+      accessToken,
       name,
-      refreshToken: '',
-      expiresIn: 999999999,
+      refreshToken,
+      expiresIn,
       picture: profile_image_url || '',
       username,
       additionalSettings: [
@@ -394,13 +378,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
   }
 
   private async getClient(accessToken: string) {
-    const [accessTokenSplit, accessSecretSplit] = accessToken.split(':');
-    return new TwitterApi({
-      appKey: process.env.X_API_KEY!,
-      appSecret: process.env.X_API_SECRET!,
-      accessToken: accessTokenSplit,
-      accessSecret: accessSecretSplit,
-    });
+    return new TwitterApi(accessToken);
   }
 
   @Tool({
@@ -449,26 +427,25 @@ export class XProvider extends SocialAbstract implements SocialProvider {
   }
 
   // v2.me() can be unstable; fallback to v1.1 verifyCredentials
-  private async _getUserInfo(client: TwitterApi): Promise<{ id: string; username: string; verified: boolean }> {
-    try {
-      const { data } = await this.runInConcurrent(async () =>
-        client.v2.me({ 'user.fields': ['username', 'verified', 'verified_type'] })
-      );
-      return {
-        id: data.id,
-        username: data.username,
-        verified: data.verified_type === 'blue' || !!data.verified,
-      };
-    } catch (err) {
-      try {
-        const v1User = await client.v1.verifyCredentials();
-        // v1.1 API has no verified_type equivalent; `verified` here only covers
-        // org/celebrity checkmarks — X Premium (Blue) cannot be detected via v1.1.
-        return { id: v1User.id_str, username: v1User.screen_name, verified: !!v1User.verified };
-      } catch {
-        throw err;
-      }
-    }
+  private async _getUserInfo(client: TwitterApi): Promise<{ id: string; username: string; verified: boolean; profile_image_url: string; name: string }> {
+    const { data } = await this.runInConcurrent(async () =>
+      client.v2.me({
+        'user.fields': [
+          'username',
+          'verified',
+          'verified_type',
+          'profile_image_url',
+          'name',
+        ],
+      })
+    );
+    return {
+      id: data.id,
+      username: data.username,
+      verified: ['blue', 'business', 'government'].includes(data.verified_type as any) || !!data.verified,
+      profile_image_url: data.profile_image_url!,
+      name: data.name,
+    };
   }
 
   /**
@@ -540,17 +517,8 @@ export class XProvider extends SocialAbstract implements SocialProvider {
   }
 
   private async _getUserId(client: TwitterApi): Promise<string> {
-    try {
-      const { data } = await client.v2.me();
-      return data.id;
-    } catch (err) {
-      try {
-        const v1User = await client.v1.verifyCredentials();
-        return v1User.id_str;
-      } catch {
-        throw err;
-      }
-    }
+    const { data } = await client.v2.me();
+    return data.id;
   }
 
   private static readonly RATE_LIMIT_KEY = 'x:tweets:rate-limit-reset';
@@ -886,9 +854,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
     } catch (err: any) {
       // Intermediate fallback: if we attempted a native quote (quote_tweet_id) and v2 failed,
       // retry v2 *without* quote_tweet_id and append the URL to the text instead. This keeps
-      // community_id / reply_settings intact for restricted-tier users (e.g. Pay Per Use),
-      // which the v1.1 fallback below cannot preserve. Note: by construction this branch only
-      // runs in the no-media path — see the M4 mutual-exclusion guard above.
+      // community_id / reply_settings intact for restricted-tier users (e.g. Pay Per Use).
       if (quoteTweetId && rawQuoteUrl) {
         console.warn(
           `[x] v2.tweet with quote_tweet_id=${quoteTweetId} failed for post ${firstPost.id}, retrying v2 with URL-append fallback. Original error:`,
@@ -901,48 +867,22 @@ export class XProvider extends SocialAbstract implements SocialProvider {
             text: messageWithQuoteUrl,
           });
           tweetId = data.id;
-          return [
-            {
-              postId: tweetId,
-              id: firstPost.id,
-              releaseURL: `https://twitter.com/${username}/status/${tweetId}`,
-              status: 'posted',
-            },
-          ];
         } catch (retryErr: any) {
-          console.warn(
-            `[x] v2 URL-append retry also failed for post ${firstPost.id}, trying v1.1 fallback. Error:`,
+          console.error(
+            `[x] v2 URL-append retry also failed for post ${firstPost.id}. Error:`,
             formatTweetError(retryErr)
           );
+          if (this._isUserSuspendedError(err) || this._isUserSuspendedError(retryErr)) {
+            this._safeFireSuspendedNotification(integration.id);
+          }
+          throw retryErr;
         }
       } else {
-        console.warn(
-          `[x] v2.tweet failed for post ${firstPost.id}, trying v1.1 fallback. Error:`,
+        console.error(
+          `[x] v2.tweet failed for post ${firstPost.id}. Error:`,
           formatTweetError(err)
         );
-      }
-      try {
-        // v1.1 has no quote_tweet_id parameter — if we were attempting a native quote,
-        // degrade to URL append so the user still gets a quote card.
-        const v1Text =
-          quoteTweetId && rawQuoteUrl ? messageWithQuoteUrl : firstPost.message;
-        const v1Result = await client.v1.tweet(v1Text, {
-          ...(media_ids.length ? { media_ids: media_ids.join(',') } : {}),
-        });
-        tweetId = v1Result.id_str;
-      } catch (v1Err: any) {
-        console.error(
-          `[x] v1.1 tweet fallback also failed for post ${firstPost.id}. Error:`,
-          formatTweetError(v1Err)
-        );
-        // Strictly additive: if either error matches X's "user suspended" 403,
-        // fire a deduped in-app notification so the org owner can see why
-        // posting is failing. We still throw the original error so the post
-        // lands in the ERROR state and `handleErrors` classifies it.
-        if (
-          this._isUserSuspendedError(err) ||
-          this._isUserSuspendedError(v1Err)
-        ) {
+        if (this._isUserSuspendedError(err)) {
           this._safeFireSuspendedNotification(integration.id);
         }
         throw err;
@@ -1000,18 +940,9 @@ export class XProvider extends SocialAbstract implements SocialProvider {
           })
       );
       tweetId = data.id;
-    } catch (err) {
-      console.warn('[x] v2.tweet (comment) failed, trying v1.1 fallback...');
-      try {
-        const v1Result = await client.v1.tweet(commentPost.message, {
-          in_reply_to_status_id: replyToId,
-          ...(media_ids.length ? { media_ids: media_ids.join(',') } : {}),
-        });
-        tweetId = v1Result.id_str;
-      } catch (v1Err: any) {
-        console.error('[x] v1.1 tweet (comment) fallback also failed:', JSON.stringify(v1Err?.data || v1Err?.message || v1Err));
-        throw err;
-      }
+    } catch (err: any) {
+      console.error('[x] v2.tweet (comment) failed:', formatTweetError(err));
+      throw err;
     }
 
     return [
@@ -1177,13 +1108,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
 
     const today = dayjs().format('YYYY-MM-DD');
 
-    const [accessTokenSplit, accessSecretSplit] = accessToken.split(':');
-    const client = new TwitterApi({
-      appKey: process.env.X_API_KEY!,
-      appSecret: process.env.X_API_SECRET!,
-      accessToken: accessTokenSplit,
-      accessSecret: accessSecretSplit,
-    });
+    const client = await this.getClient(accessToken);
 
     try {
       // Fetch the specific tweet with public metrics
@@ -1283,13 +1208,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
       return null;
     }
 
-    const [accessTokenSplit, accessSecretSplit] = accessToken.split(':');
-    const client = new TwitterApi({
-      appKey: process.env.X_API_KEY!,
-      appSecret: process.env.X_API_SECRET!,
-      accessToken: accessTokenSplit,
-      accessSecret: accessSecretSplit,
-    });
+    const client = await this.getClient(accessToken);
 
     try {
       const { data } = await client.v2.me({
@@ -1342,13 +1261,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
 
     const today = dayjs().format('YYYY-MM-DD');
 
-    const [accessTokenSplit, accessSecretSplit] = accessToken.split(':');
-    const client = new TwitterApi({
-      appKey: process.env.X_API_KEY!,
-      appSecret: process.env.X_API_SECRET!,
-      accessToken: accessTokenSplit,
-      accessSecret: accessSecretSplit,
-    });
+    const client = await this.getClient(accessToken);
 
     const result: BatchPostAnalyticsResult = {};
 

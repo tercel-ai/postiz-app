@@ -22,13 +22,6 @@ export const ContinueIntegration: FC<{
     (async () => {
       const timezone = String(dayjs.tz().utcOffset());
       const modifiedParams = { ...searchParams };
-      if (provider === 'x') {
-        Object.assign(modifiedParams, {
-          state: searchParams.oauth_token || '',
-          code: searchParams.oauth_verifier || '',
-          refresh: searchParams.refresh || '',
-        });
-      }
 
       if (provider === 'vk') {
         Object.assign(modifiedParams, {
