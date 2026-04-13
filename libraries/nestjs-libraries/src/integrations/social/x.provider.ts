@@ -417,8 +417,9 @@ export class XProvider extends SocialAbstract implements SocialProvider {
 
   // v2.me() can be unstable; fallback to v1.1 verifyCredentials
   private async _getUserInfo(client: TwitterApi): Promise<{ id: string; username: string; verified: boolean; profile_image_url: string; name: string }> {
-    const { data } = await this.runInConcurrent(async () =>
-      client.v2.me({
+    let result: Awaited<ReturnType<typeof client.v2.me>>;
+    try {
+      result = await client.v2.me({
         'user.fields': [
           'username',
           'verified',
@@ -426,8 +427,23 @@ export class XProvider extends SocialAbstract implements SocialProvider {
           'profile_image_url',
           'name',
         ],
-      })
-    );
+      });
+    } catch (err: any) {
+      const status = err?.code || err?.data?.status || err?.status;
+      if (status === 403) {
+        if (this._isUserSuspendedError(err)) {
+          throw new Error(
+            'This X account is suspended. Please restore the account on X before connecting.'
+          );
+        }
+        throw new Error(
+          'X API returned 403 when fetching user info. ' +
+          'Please ensure your X app has "users.read" scope enabled and OAuth 2.0 User Authentication is configured in the X Developer Portal.'
+        );
+      }
+      throw err;
+    }
+    const { data } = result;
     return {
       id: data.id,
       username: data.username,
