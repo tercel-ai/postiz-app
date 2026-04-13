@@ -289,17 +289,6 @@ export class XProvider extends SocialAbstract implements SocialProvider {
     return false;
   }
 
-  async refreshToken(): Promise<AuthTokenDetails> {
-    return {
-      id: '',
-      name: '',
-      accessToken: '',
-      refreshToken: '',
-      expiresIn: 0,
-      picture: '',
-      username: '',
-    };
-  }
 
   async generateAuthUrl() {
     const client = new TwitterApi({
@@ -541,6 +530,22 @@ export class XProvider extends SocialAbstract implements SocialProvider {
    * MUST NOT route this through `refreshNeeded`, which would force the user to
    * re-authenticate unnecessarily and freeze their scheduled queue.
    */
+  // Extract only the useful fields from a twitter-api-v2 error so logs don't dump
+  // axios/socket internals (which contain TLS cert bytes and circular refs).
+  private formatTweetError(e: any) {
+    return {
+      code: e?.code,
+      status: e?.data?.status ?? e?.status,
+      title: e?.data?.title,
+      detail: e?.data?.detail,
+      type: e?.data?.type,
+      errors: e?.data?.errors,
+      message: e?.message,
+      rateLimitRemaining: e?.rateLimit?.remaining,
+      rateLimitReset: e?.rateLimit?.reset,
+    };
+  }
+
   private _isUserSuspendedError(err: any): boolean {
     if (!err || err.code !== 403) return false;
     const type =
@@ -809,20 +814,6 @@ export class XProvider extends SocialAbstract implements SocialProvider {
           : rawQuoteUrl
         : originalMessage;
 
-    // Extract only the useful fields from a twitter-api-v2 error so logs don't dump
-    // axios/socket internals (which contain TLS cert bytes and circular refs).
-    const formatTweetError = (e: any) => ({
-      code: e?.code,
-      status: e?.data?.status ?? e?.status,
-      title: e?.data?.title,
-      detail: e?.data?.detail,
-      type: e?.data?.type,
-      errors: e?.data?.errors,
-      message: e?.message,
-      rateLimitRemaining: e?.rateLimit?.remaining,
-      rateLimitReset: e?.rateLimit?.reset,
-    });
-
     let tweetId: string;
     try {
       // @ts-ignore
@@ -858,7 +849,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
       if (quoteTweetId && rawQuoteUrl) {
         console.warn(
           `[x] v2.tweet with quote_tweet_id=${quoteTweetId} failed for post ${firstPost.id}, retrying v2 with URL-append fallback. Original error:`,
-          formatTweetError(err)
+          this.formatTweetError(err)
         );
         try {
           // @ts-ignore
@@ -870,7 +861,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
         } catch (retryErr: any) {
           console.error(
             `[x] v2 URL-append retry also failed for post ${firstPost.id}. Error:`,
-            formatTweetError(retryErr)
+            this.formatTweetError(retryErr)
           );
           if (this._isUserSuspendedError(err) || this._isUserSuspendedError(retryErr)) {
             this._safeFireSuspendedNotification(integration.id);
@@ -880,7 +871,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
       } else {
         console.error(
           `[x] v2.tweet failed for post ${firstPost.id}. Error:`,
-          formatTweetError(err)
+          this.formatTweetError(err)
         );
         if (this._isUserSuspendedError(err)) {
           this._safeFireSuspendedNotification(integration.id);
@@ -941,7 +932,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
       );
       tweetId = data.id;
     } catch (err: any) {
-      console.error('[x] v2.tweet (comment) failed:', formatTweetError(err));
+      console.error('[x] v2.tweet (comment) failed:', this.formatTweetError(err));
       throw err;
     }
 
