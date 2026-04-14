@@ -194,4 +194,10 @@ export interface SocialProvider
     accessToken: string,
     data: any
   ): Promise<FetchPageInformationResult>;
+  /**
+   * Returns true if the given access token is permanent and never needs OAuth refresh.
+   * Providers that support legacy token formats (e.g. OAuth 1.0a) should implement this
+   * to prevent the generic refresh logic from treating a non-expiring token as expired.
+   */
+  isTokenPermanent?(token: string): boolean;
 }

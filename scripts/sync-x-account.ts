@@ -113,14 +113,28 @@ interface AccountInfo {
   isPremium: boolean;
 }
 
+/** True when the stored token is in OAuth 1.0a "accessToken:accessSecret" format. */
+function isOAuth1Token(token: string): boolean {
+  const colonIdx = token.indexOf(':');
+  return colonIdx > 0 && token.length > colonIdx + 1;
+}
+
+function buildXClient(token: string): TwitterApi {
+  if (isOAuth1Token(token)) {
+    const [accessToken, accessSecret] = token.split(':');
+    return new TwitterApi({
+      appKey: process.env.X_API_KEY!,
+      appSecret: process.env.X_API_SECRET!,
+      accessToken,
+      accessSecret,
+    });
+  }
+  // OAuth 2.0 bearer token
+  return new TwitterApi(token);
+}
+
 async function fetchXAccountInfo(token: string): Promise<AccountInfo> {
-  const [accessToken, accessSecret] = token.split(':');
-  const client = new TwitterApi({
-    appKey: process.env.X_API_KEY!,
-    appSecret: process.env.X_API_SECRET!,
-    accessToken,
-    accessSecret,
-  });
+  const client = buildXClient(token);
 
   try {
     const { data } = await client.v2.me({
@@ -146,7 +160,11 @@ async function fetchXAccountInfo(token: string): Promise<AccountInfo> {
       isPremium: data.verified_type === 'blue' || !!data.verified,
     };
   } catch (v2Err: any) {
-    // Fallback to v1.1 if v2 fails
+    // v1.1 fallback is only available for OAuth 1.0a tokens (OAuth 2.0 bearer tokens
+    // do not have v1.1 access).
+    if (!isOAuth1Token(token)) {
+      throw v2Err;
+    }
     console.warn(`  v2.me failed (${v2Err?.code ?? '?'}), trying v1.1 fallback...`);
     const v1User = await client.v1.verifyCredentials();
     return {
@@ -193,8 +211,8 @@ async function main(): Promise<void> {
     console.error('Error: DATABASE_URL environment variable is not set');
     process.exit(1);
   }
-  if (!process.env.X_API_KEY || !process.env.X_API_SECRET) {
-    console.error('Error: X_API_KEY and X_API_SECRET environment variables are required');
+  if (!process.env.X_API_KEY && !process.env.X_CLIENT_ID) {
+    console.error('Error: at least one of X_API_KEY/X_API_SECRET (OAuth 1.0a) or X_CLIENT_ID/X_CLIENT_SECRET (OAuth 2.0) must be set');
     process.exit(1);
   }
 

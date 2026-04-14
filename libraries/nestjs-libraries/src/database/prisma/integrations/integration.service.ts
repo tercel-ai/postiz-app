@@ -458,9 +458,10 @@ export class IntegrationService {
       getIntegration.providerIdentifier
     );
 
+    const isPermAnalytics = integrationProvider?.isTokenPermanent?.(getIntegration.token) ?? false;
     if (
-      dayjs(getIntegration?.tokenExpiration).isBefore(dayjs()) ||
-      forceRefresh
+      !isPermAnalytics &&
+      (dayjs(getIntegration?.tokenExpiration).isBefore(dayjs()) || forceRefresh)
     ) {
       const data = await this._refreshIntegrationService.refresh(
         getIntegration

@@ -45,12 +45,52 @@ export class XProvider extends SocialAbstract implements SocialProvider {
   name = 'X';
   isBetweenSteps = false;
   scopes = ['tweet.read', 'tweet.write', 'users.read', 'offline.access'];
+  // OAuth 2.0 access tokens expire in ~2 hours; start the Temporal refresh workflow
+  // so tokens are rotated proactively and never actually expire in practice.
+  // OAuth 1.0a tokens are detected by isTokenPermanent() and bypassed entirely.
+  refreshCron = true;
   override maxConcurrentJob = 1; // X has strict rate limits (300 posts per 3 hours)
   toolTip =
     'You will be logged in into your current account, if you would like a different account, change it first on X';
 
   editor = 'normal' as const;
   dto = XDto;
+
+  /**
+   * Detect whether a stored access token is in OAuth 1.0a format ("accessToken:accessSecret").
+   * OAuth 1.0a tokens are permanent and must never be sent to the OAuth 2.0 refresh endpoint.
+   * OAuth 2.0 bearer tokens are long alphanumeric strings without an embedded colon.
+   */
+  static isOAuth1Token(token: string): boolean {
+    if (!token) return false;
+    const colonIdx = token.indexOf(':');
+    return colonIdx > 0 && token.length > colonIdx + 1;
+  }
+
+  /**
+   * OAuth 1.0a tokens never expire, so the generic expiry / refresh logic must be skipped.
+   */
+  isTokenPermanent(token: string): boolean {
+    return XProvider.isOAuth1Token(token);
+  }
+
+  /**
+   * Build the appropriate TwitterApi client for the given access token.
+   * - OAuth 1.0a ("token:secret"): uses the server-level app key/secret pair.
+   * - OAuth 2.0 (bearer token): passes the token directly as a user-context bearer.
+   */
+  private buildClient(accessToken: string): TwitterApi {
+    if (XProvider.isOAuth1Token(accessToken)) {
+      const [tokenPart, secretPart] = accessToken.split(':');
+      return new TwitterApi({
+        appKey: process.env.X_API_KEY!,
+        appSecret: process.env.X_API_SECRET!,
+        accessToken: tokenPart,
+        accessSecret: secretPart,
+      });
+    }
+    return new TwitterApi(accessToken);
+  }
 
   maxLength(isTwitterPremium: boolean) {
     return isTwitterPremium ? 4000 : 280;
@@ -176,15 +216,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
     id: string,
     fields: { likesAmount: string }
   ) {
-    // @ts-ignore
-    // eslint-disable-next-line prefer-rest-params
-    const [accessTokenSplit, accessSecretSplit] = integration.token.split(':');
-    const client = new TwitterApi({
-      appKey: process.env.X_API_KEY!,
-      appSecret: process.env.X_API_SECRET!,
-      accessToken: accessTokenSplit,
-      accessSecret: accessSecretSplit,
-    });
+    const client = this.buildClient(integration.token);
 
     if (
       (await client.v2.tweetLikedBy(id)).meta.result_count >=
@@ -211,13 +243,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
     postId: string,
     information: any
   ) {
-    const [accessTokenSplit, accessSecretSplit] = integration.token.split(':');
-    const client = new TwitterApi({
-      appKey: process.env.X_API_KEY!,
-      appSecret: process.env.X_API_SECRET!,
-      accessToken: accessTokenSplit,
-      accessSecret: accessSecretSplit,
-    });
+    const client = this.buildClient(integration.token);
 
     let userId: string;
     try {
@@ -263,15 +289,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
     id: string,
     fields: { likesAmount: string; post: string }
   ) {
-    // @ts-ignore
-    // eslint-disable-next-line prefer-rest-params
-    const [accessTokenSplit, accessSecretSplit] = integration.token.split(':');
-    const client = new TwitterApi({
-      appKey: process.env.X_API_KEY!,
-      appSecret: process.env.X_API_SECRET!,
-      accessToken: accessTokenSplit,
-      accessSecret: accessSecretSplit,
-    });
+    const client = this.buildClient(integration.token);
 
     if (
       (await client.v2.tweetLikedBy(id)).meta.result_count >=
@@ -367,7 +385,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
   }
 
   private async getClient(accessToken: string) {
-    return new TwitterApi(accessToken);
+    return this.buildClient(accessToken);
   }
 
   @Tool({
@@ -1012,13 +1030,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
     const until = dayjs().endOf('day');
     const since = dayjs().subtract(date, 'day');
 
-    const [accessTokenSplit, accessSecretSplit] = accessToken.split(':');
-    const client = new TwitterApi({
-      appKey: process.env.X_API_KEY!,
-      appSecret: process.env.X_API_SECRET!,
-      accessToken: accessTokenSplit,
-      accessSecret: accessSecretSplit,
-    });
+    const client = this.buildClient(accessToken);
 
     try {
       const tweets = uniqBy(
@@ -1357,13 +1369,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
   }
 
   override async mention(token: string, d: { query: string }) {
-    const [accessTokenSplit, accessSecretSplit] = token.split(':');
-    const client = new TwitterApi({
-      appKey: process.env.X_API_KEY!,
-      appSecret: process.env.X_API_SECRET!,
-      accessToken: accessTokenSplit,
-      accessSecret: accessSecretSplit,
-    });
+    const client = this.buildClient(token);
 
     try {
       const data = await client.v2.userByUsername(d.query, {

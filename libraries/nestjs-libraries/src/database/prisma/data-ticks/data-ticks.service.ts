@@ -12,6 +12,7 @@ import { ioRedis } from '@gitroom/nestjs-libraries/redis/redis.service';
 import {
   AnalyticsData,
   BatchPostAnalyticsResult,
+  SocialProvider,
 } from '@gitroom/nestjs-libraries/integrations/social/social.integrations.interface';
 import { extractMetrics, stripSyntheticMetrics } from '@gitroom/nestjs-libraries/integrations/social/analytics.utils';
 import { PostsRepository } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.repository';
@@ -190,7 +191,8 @@ export class DataTicksService {
           fullIntegration,
           provider.batchPostAnalytics.bind(provider),
           groupPosts,
-          analyticsDays
+          analyticsDays,
+          provider
         );
       } else {
         postAnalytics = await this._fetchPerPostAnalytics(
@@ -386,7 +388,8 @@ export class DataTicksService {
       if (!provider?.postAnalytics) continue;
 
       let token = fullIntegration.token;
-      if (dayjs(fullIntegration.tokenExpiration).isBefore(dayjs())) {
+      const isPermPost = provider.isTokenPermanent?.(fullIntegration.token) ?? false;
+      if (!isPermPost && dayjs(fullIntegration.tokenExpiration).isBefore(dayjs())) {
         try {
           const refreshed =
             await this._refreshIntegrationService.refresh(fullIntegration);
@@ -496,7 +499,8 @@ export class DataTicksService {
     }
 
     let token = integration.token;
-    if (dayjs(integration.tokenExpiration).isBefore(dayjs())) {
+    const isPermToken = provider.isTokenPermanent?.(integration.token) ?? false;
+    if (!isPermToken && dayjs(integration.tokenExpiration).isBefore(dayjs())) {
       const refreshed =
         await this._refreshIntegrationService.refresh(integration);
       if (refreshed === false) return null;
@@ -526,7 +530,8 @@ export class DataTicksService {
       fromDate: number
     ) => Promise<BatchPostAnalyticsResult>,
     posts: Array<{ id: string; releaseId: string | null; platform: string }>,
-    days: number
+    days: number,
+    provider?: SocialProvider
   ): Promise<Map<string, AnalyticsData[]>> {
     const result = new Map<string, AnalyticsData[]>();
     const postsWithRelease = posts.filter(
@@ -536,7 +541,8 @@ export class DataTicksService {
     if (!postsWithRelease.length) return result;
 
     let token = integration.token;
-    if (dayjs(integration.tokenExpiration).isBefore(dayjs())) {
+    const isPermBatch = provider?.isTokenPermanent?.(integration.token) ?? false;
+    if (!isPermBatch && dayjs(integration.tokenExpiration).isBefore(dayjs())) {
       try {
         const refreshed =
           await this._refreshIntegrationService.refresh(integration);

@@ -41,6 +41,17 @@ export class RefreshIntegrationService {
       refresh.expiresIn
     );
 
+    // Re-arm the proactive refresh workflow so the next expiry is handled
+    // automatically regardless of whether a workflow was already running.
+    // workflowIdConflictPolicy = TERMINATE_EXISTING makes this idempotent.
+    this.startRefreshWorkflow(
+      integration.organizationId,
+      integration.id,
+      socialProvider
+    ).catch(() => {
+      // Non-fatal: reactive refresh already succeeded; workflow restart is best-effort.
+    });
+
     return refresh;
   }
 
