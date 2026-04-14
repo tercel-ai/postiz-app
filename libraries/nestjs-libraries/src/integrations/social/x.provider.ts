@@ -247,7 +247,8 @@ export class XProvider extends SocialAbstract implements SocialProvider {
 
     let userId: string;
     try {
-      userId = await this._getUserId(client);
+      const { id } = await this._getUserInfo(client);
+      userId = id;
     } catch {
       return;
     }
@@ -537,11 +538,6 @@ export class XProvider extends SocialAbstract implements SocialProvider {
       where: { id: integration.id },
       data: { additionalSettings: newSettingsJson },
     });
-  }
-
-  private async _getUserId(client: TwitterApi): Promise<string> {
-    const { data } = await client.v2.me();
-    return data.id;
   }
 
   private static readonly RATE_LIMIT_KEY = 'x:tweets:rate-limit-reset';
@@ -1101,11 +1097,11 @@ export class XProvider extends SocialAbstract implements SocialProvider {
         if (err?.rateLimit?.reset) {
           await this._setRateLimited(err.rateLimit.reset);
         }
-        console.log(
+        console.warn(
           `X API rate limited for analytics, reset at ${err?.rateLimit?.reset || 'unknown'}`
         );
       } else {
-        console.log(err);
+        console.error('[x] analytics() error:', this.formatTweetError(err));
       }
     }
     return [];

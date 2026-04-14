@@ -17,6 +17,7 @@ export class IntegrationsActivity {
     return this._integrationService.getIntegrationById(orgId, id);
   }
 
+  @ActivityMethod()
   async refreshToken(integration: Integration) {
     return this._refreshIntegrationService.refresh(integration);
   }

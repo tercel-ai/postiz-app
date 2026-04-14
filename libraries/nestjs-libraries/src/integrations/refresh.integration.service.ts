@@ -82,6 +82,13 @@ export class RefreshIntegrationService {
     integration: Integration,
     socialProvider: SocialProvider
   ): Promise<AuthTokenDetails | false> {
+    // Permanent tokens (e.g. OAuth 1.0a) never expire and have no refresh endpoint.
+    // Calling the OAuth 2.0 refresh flow on them would always fail and incorrectly
+    // flag the integration as needing re-auth.
+    if (socialProvider.isTokenPermanent?.(integration.token)) {
+      return false;
+    }
+
     const refresh: false | AuthTokenDetails = await socialProvider
       .refreshToken(integration.refreshToken)
       .catch((err) => false);
