@@ -81,7 +81,9 @@ export class XProvider extends SocialAbstract implements SocialProvider {
    */
   private buildClient(accessToken: string): TwitterApi {
     if (XProvider.isOAuth1Token(accessToken)) {
-      const [tokenPart, secretPart] = accessToken.split(':');
+      const colonIdx = accessToken.indexOf(':');
+      const tokenPart  = accessToken.substring(0, colonIdx);
+      const secretPart = accessToken.substring(colonIdx + 1);
       return new TwitterApi({
         appKey: process.env.X_API_KEY!,
         appSecret: process.env.X_API_SECRET!,
@@ -108,18 +110,24 @@ export class XProvider extends SocialAbstract implements SocialProvider {
       expiresIn,
     } = await client.refreshOAuth2Token(refreshToken);
 
-    const newClient = new TwitterApi(accessToken);
-    const { username, verified, profile_image_url, name, id } =
-      await this._getUserInfo(newClient);
+    if (!newRefreshToken) {
+      throw new Error('Twitter did not return a new refresh token — offline.access scope may be missing');
+    }
 
+    // Do NOT call _getUserInfo here. The caller (refresh.integration.service.ts)
+    // uses integration.name / integration.picture from the DB, not from this result.
+    // Calling _getUserInfo after refreshOAuth2Token is dangerous: if it fails for
+    // any reason (rate limit, transient 401, etc.) the refresh token is already
+    // consumed by Twitter but the new tokens are never saved — permanently
+    // breaking the integration.
     return {
-      id: String(id),
+      id: '',        // unused by refresh() — caller reads integration.internalId
+      name: '',      // unused by refresh() — caller reads integration.name
+      picture: '',   // unused by refresh() — caller reads integration.picture
+      username: '',  // unused by refresh() — caller reads integration.profile
       accessToken,
       refreshToken: newRefreshToken,
       expiresIn,
-      name,
-      picture: profile_image_url || '',
-      username,
     };
   }
 
@@ -354,8 +362,11 @@ export class XProvider extends SocialAbstract implements SocialProvider {
           `/integrations/social/x`,
       });
       accessToken = acc;
-      refreshToken = ref!;
       expiresIn = exp;
+      if (!ref) {
+        return 'X did not return a refresh token. Ensure the offline.access scope is enabled in your X app settings.';
+      }
+      refreshToken = ref;
     } catch (err: any) {
       const status = err?.code || err?.status || '';
       console.error(`X OAuth 2.0 login failed (${status}):`, err?.data || err?.message || err);
