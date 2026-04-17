@@ -75,15 +75,17 @@ in UI labels or client-side aggregations.**
 | :--- | :--- | :--- | :--- |
 | `integration.additionalSettings.account:*` | **Account-wide total on the platform** | Periodic `accountMetrics()` sync via `DataTicksService` | The lifetime/current value as reported by the platform for the entire account (e.g. all followers the account has ever gained, every post the user has ever published on the platform — **not just via Postiz**). |
 | `stats.*` | **Postiz-published posts only, last 30 days** | `IntegrationService.getPostsLevelAnalytics()` via `batchPostAnalytics()` / `postAnalytics()` | Aggregate across the set of posts that were **created through Postiz and published in the last 30 days**, using each post's platform ID (`releaseId`). Does not include posts the user authored natively on the platform. |
-| `postsCount` | **Postiz-published posts only** | `Post` table filter by `integrationId` | Count of rows in the Postiz database for this integration — it will never equal the account's total post count shown on the platform profile. |
+| `postsCount` | **Postiz post groups, lifetime, any state except soft-deleted** | `Post` table `groupBy({ by: ['group'] })` filtered by `integrationId` and `deletedAt: null` | Count of distinct **post groups** Postiz has ever created for this integration. A group is one scheduling unit (a single tweet, a thread, a multi-attachment post). Includes drafts, scheduled, published, and errored states — not just posts that reached the platform. |
 
-Concrete example: for an X account with 10,000 lifetime tweets of which 3 were
-posted through Postiz in the last 30 days, the response will report:
+Concrete example: for an X account with 10,000 lifetime tweets of which 3
+single-tweet groups (one of which has 2 replies = 1 thread) were scheduled
+through Postiz over the account's history, the response will report:
 
-- `additionalSettings.account:posts` → `10000` (lifetime, from `v2/users/me`)
-- `postsCount` → `3` (Postiz database)
-- `stats.impressions` → sum of impressions across **those 3 Postiz tweets only**
-  for the last 30 days — not the account's 30-day total reach.
+- `additionalSettings.account:posts` → `10000` (lifetime on X, from `v2/users/me`)
+- `postsCount` → `3` (distinct Postiz groups, lifetime, including the thread as one group)
+- `stats.impressions` → sum of impressions across Postiz-published posts
+  **in the last 30 days only** — not the account's 30-day total reach, not
+  the lifetime Postiz post count.
 
 This is intentional: the Account Profile view is about **how Postiz-scheduled
 content is performing**, not a mirror of the platform's native analytics
@@ -373,48 +375,218 @@ the platform for the entire account (not scoped to Postiz).
 Platforms with no analytics integration (`discord`, `slack`, `telegram`,
 `dribbble`, `nostr`, `vk`) have an empty `additionalSettings` array.
 
-### 6.2 Postiz Post Aggregates — `stats.*` (Last 30 Days)
+### 6.2 Postiz-Scoped Post Data
 
-Source: `batchPostAnalytics()` / `postAnalytics()`. **Every checkmark is a sum
-across Postiz-published posts only**, not the account's native activity.
+All values below describe **posts Postiz created for this integration** —
+never the account's native activity on the platform.
 
-| Platform | impressions | likes | replies | retweets | quotes | bookmarks |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **x**             | YES | YES | YES | YES | YES | YES |
-| **linkedin**      | YES | YES | –   | –   | –   | –   |
-| **linkedin-page** | YES\* | YES | –   | –   | –   | –   |
-| **facebook**      | YES | –   | –   | –   | –   | –   |
-| **instagram**     | YES | YES | –   | –   | –   | –   |
-| **threads**       | –   | YES | YES | –   | YES | –   |
-| **youtube**       | –   | YES | –   | –   | –   | –   |
-| **tiktok**        | –   | YES | –   | –   | –   | –   |
-| **pinterest**     | YES | –   | –   | –   | –   | –   |
-| **reddit**        | –   | –   | –   | –   | –   | –   |
-| **mastodon**      | –   | –   | YES | –   | –   | –   |
-| **bluesky**       | –   | YES | YES | –   | YES | –   |
+Two different scopes share this table:
 
-`stats.followers` is intentionally omitted — it is defined in the response
-shape but **is always `null` for every provider** (see §7 item 1).
+- **`posts`** column → `postsCount` at the response root. `groupBy(group)`
+  over the `Post` table, **lifetime**, any state except soft-deleted
+  (includes drafts, scheduled, published, errored). Populated for every
+  integration regardless of platform analytics support.
+- Remaining columns → `stats.*`. `batchPostAnalytics()` / `postAnalytics()`
+  aggregated over **the last 30 days only**, against posts that actually
+  reached the platform (have a `releaseId`).
+
+| Platform | posts | impressions | likes | replies | retweets | quotes | bookmarks |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **x**             | YES | YES | YES | YES | YES | YES | YES |
+| **linkedin**      | YES | YES | YES | –   | –   | –   | –   |
+| **linkedin-page** | YES | YES\* | YES | –   | –   | –   | –   |
+| **facebook**      | YES | YES | –   | –   | –   | –   | –   |
+| **instagram**     | YES | YES | YES | –   | –   | –   | –   |
+| **threads**       | YES | –   | YES | YES | –   | YES | –   |
+| **youtube**       | YES | –   | YES | –   | –   | –   | –   |
+| **tiktok**        | YES | –   | YES | –   | –   | –   | –   |
+| **pinterest**     | YES | YES | –   | –   | –   | –   | –   |
+| **reddit**        | YES | –   | –   | –   | –   | –   | –   |
+| **mastodon**      | YES | –   | –   | YES | –   | –   | –   |
+| **bluesky**       | YES | –   | YES | YES | –   | YES | –   |
+| **discord / slack / telegram / dribbble / nostr / vk** | YES | –   | –   | –   | –   | –   | –   |
+
+`posts` is always populated because it is a straight DB count that does not
+depend on any provider API. `stats.followers` is intentionally omitted — it is
+defined in the response shape but **is always `null` for every provider**
+(see §7 item 1).
 
 \* `Unique Impressions` label overrides `Impressions` (see §5.3).
 
-## 7. Known Gaps & Improvement Notes
+## 7. Known Gaps & Proposed Enhancements
 
-1. **`stats.followers` is always `null`** across all providers. The controller
-   is designed to pull `followers` from `postAnalytics` labels, but no provider
-   emits a post-level `followers` / `subscriber` / `karma` label. Clients that
-   need the account follower count should read
-   `integration.additionalSettings` → `account:followers` instead.
-2. **Many platform-native metrics are dropped.** YouTube Views, TikTok
-   Views/Shares/Comments, Instagram Reach/Saves, Pinterest Saves/Clicks, all
-   Reddit metrics, Threads/Bluesky Reposts, and Mastodon Favourites/Boosts are
-   all fetched but never surfaced in `stats`. Expanding the label-to-field
-   mapping in `IntegrationsController.getIntegrationProfile` (or switching to
-   a richer pass-through response shape) is required to expose them.
-3. **Label-matching is fragile.** `String.includes()` causes accidental
-   collisions such as `Unique Impressions` overriding `Impressions`, and
-   locale-sensitive misses such as `Favourites` vs `like`. Consider an
-   explicit label-to-field lookup table per provider.
+The current response carries the bare minimum needed by the legacy Account
+Profile card. For a richer profile view (state breakdowns, percent-change,
+time series) the sections below enumerate everything the backend already
+has that is not surfaced, plus additions that would need new code.
+
+### 7.1 Tier 1 — Zero-Design Fixes (Controller-Only)
+
+#### 7.1.1 `stats.followers` is always `null`
+
+The controller is designed to pull `followers` from `postAnalytics` labels,
+but no provider emits a post-level `followers` / `subscriber` / `karma`
+label. Clients that need the account follower count must read
+`integration.additionalSettings` → `account:followers` instead. Either drop
+the `followers` field from `stats` to stop the null confusion, or have the
+controller populate it from `account:followers` (while documenting that it
+is account-scoped, not post-scoped — which would muddle the scope contract).
+
+#### 7.1.2 Many platform-native metrics are fetched but dropped
+
+Providers already call the platform APIs and emit these labels, but the
+controller's `String.includes()` matcher does not recognize any of them and
+they are silently discarded:
+
+| Dropped label | Emitted by | Suggested `stats.*` field |
+| :--- | :--- | :--- |
+| `Views` | Threads, YouTube, TikTok | `views` |
+| `Reach` | Instagram, LinkedIn personal | `reach` |
+| `Saves` | Instagram, Pinterest | `saves` |
+| `Comments` | LinkedIn, LinkedIn Page, Instagram, YouTube, TikTok, Reddit | `comments` |
+| `Shares` | Instagram, LinkedIn, LinkedIn Page, TikTok | `shares` |
+| `Clicks` / `Pin Clicks` / `Outbound Clicks` | LinkedIn Page, Facebook, Pinterest | `clicks` |
+| `Engagement` | Instagram, LinkedIn Page | `engagement` |
+| `Reactions` | Facebook | `reactions` |
+| `Favourites` / `Favorites` | Mastodon (UK), YouTube (US) | `favorites` (normalize spelling) |
+| `Boosts` / `Reposts` | Mastodon, Threads, Bluesky | `reposts` (semantically equal to `retweets`; merge) |
+| `Score` / `Upvotes` / `Upvote Ratio` | Reddit | `score`, `upvotes`, `upvoteRatio` |
+| `Unique Impressions` | LinkedIn Page | `uniqueImpressions` (fixes the Impressions-override bug in §5.3) |
+
+Reddit currently has **every** post-level metric dropped — fixing this
+single mapping change is the biggest single-platform win.
+
+#### 7.1.3 Label-matching is fragile
+
+`String.includes()` causes accidental collisions (`Unique Impressions`
+overriding `Impressions`) and locale-sensitive misses (`Favourites` vs
+`like`). Replace with an explicit label-to-field lookup table per provider.
+
+#### 7.1.4 `additionalSettings` is a stringified JSON blob
+
+Clients currently do:
+
+```ts
+const account = JSON.parse(integration.additionalSettings)
+  .filter(s => s.title.startsWith('account:'))
+  .reduce((acc, s) => ({ ...acc, [s.title.slice(8)]: s.value }), {});
+```
+
+This is verbose and the `additional-settings.utils.ts` helper already exists
+server-side. Promoting a parsed `account` object to the response root would
+eliminate client-side plumbing:
+
+```jsonc
+{
+  "integration": { ... },
+  "account": {
+    "followers": 2,
+    "following": null,
+    "posts": null,
+    "verified": false   // X only; other platform-specific booleans slot here
+  },
+  "postsCount": 5,
+  "stats": { ... }
+}
+```
+
+### 7.2 Tier 2 — Small Additive Enhancements
+
+#### 7.2.1 Post state breakdown
+
+`postsCount: 5` hides the fact that some of those groups may be drafts,
+scheduled, errored, etc. A single `groupBy({ by: ['state'] })` covers it:
+
+```jsonc
+"posts": {
+  "total": 5,
+  "published": 3,
+  "scheduled": 1,
+  "draft": 0,
+  "error": 1
+}
+```
+
+Lets the UI surface "1 post failed on this integration" without extra
+round trips.
+
+#### 7.2.2 Timeline markers
+
+Three `findFirst` queries would add operational signal for "is this channel
+still active?":
+
+```jsonc
+"timeline": {
+  "lastPublishedAt": "2026-04-15T08:30:00Z",
+  "nextScheduledAt": "2026-04-18T12:00:00Z",
+  "firstPostAt":     "2026-04-14T09:15:00Z"
+}
+```
+
+#### 7.2.3 Real `percentageChange`
+
+`_aggregatePostAnalytics` currently hard-codes `percentageChange: 0` on
+every output. The field is meaningless today — either remove it from the
+response or compute it against a prior-period window (query 31–60 days,
+same aggregation). Leaving `0` makes any UI that trusts the field lie to
+the user.
+
+#### 7.2.4 Time range parameter
+
+`GET /integrations/profile/:id?days=30|7|90`
+
+Drop the hard-coded 30-day window to unblock 7/30/90-day switchers in the
+UI. `getPostsLevelAnalytics()` already accepts a `days` argument.
+
+#### 7.2.5 Integration health snapshot
+
+Several fields already exist on the `Integration` row but are scattered
+across the flat `integration` object. Grouping them as a `health` block
+improves discoverability:
+
+```jsonc
+"health": {
+  "disabled": false,
+  "refreshNeeded": false,
+  "tokenExpiresAt": "2026-06-13T08:57:03Z",
+  "tokenPermanent": false,                          // provider.isTokenPermanent(token)
+  "lastAccountMetricsSyncAt": "2026-04-17T02:43:26Z",
+  "connectedAt": "2026-04-14T08:57:04Z"
+}
+```
+
+### 7.3 Tier 3 — New Capabilities (Require Design)
+
+Listed for completeness; none of these exist in any form today.
+
+- **Recent posts list** — last N posts with `{ id, excerpt, state, publishedAt, perPostMetrics }` for a "recent activity" block.
+- **Top post** — highest-performing post(s) in the window (by impressions
+  / engagement).
+- **Daily time series** — `dailyMetrics: [{ date, impressions, engagement, ... }]`
+  for trend charts. `DataTick` table already stores daily rollups for the
+  dashboard and could be reused.
+- **Derived averages** — `avgImpressionsPerPost`, `engagementRate =
+  (likes + comments + ...) / impressions`.
+- **Error cause aggregation** — top N failure reasons from `Post.error`
+  for errored groups, aids debugging recurring posting issues.
+
+### 7.4 Suggested Priority
+
+| Priority | Item | Backend effort | Client benefit |
+| :--- | :--- | :--- | :--- |
+| **P0** | 7.1.4 parsed `account` block | ~5 LOC | Removes client-side JSON parsing |
+| **P0** | 7.1.2 recover dropped labels | ~30 LOC + lookup table | Reddit/YouTube/TikTok/Pinterest profile pages become useful |
+| **P1** | 7.2.1 post state breakdown | ~10 LOC + 1 repo method | Surfaces failures and backlog |
+| **P1** | 7.2.5 `health` block | ~15 LOC | Unified token/connection status |
+| **P2** | 7.2.3 real `percentageChange` | ~30 LOC (prior-period query) | Enables "↑12%" UI |
+| **P2** | 7.2.2 timeline markers | ~20 LOC | Channel-activity signal |
+| **P2** | 7.2.4 `?days=` param | ~10 LOC | 7/30/90-day switcher |
+| **P3** | 7.3 new capabilities | New endpoints or significant extension | Full analytics product form |
+
+The minimal responsible-closure change is P0 + P0 (~40 LOC, no breaking
+change — response only grows). This single pass removes the most painful
+client plumbing and unlocks Reddit / YouTube / TikTok / Pinterest profile
+pages that are currently blank.
 
 ## 8. How to Access
 1. Go to the **Launches** (Calendar) page.
