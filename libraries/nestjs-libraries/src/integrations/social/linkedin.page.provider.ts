@@ -490,10 +490,17 @@ export class LinkedinPageProvider
     }
 
     // Process share statistics into time series data
+    const todayForAgg = dayjs().format('YYYY-MM-DD');
     const analytics = (shareElements || []).reduce(
       (all, current) => {
         if (typeof current?.totalShareStatistics !== 'undefined') {
-          const dateStr = dayjs(current.timeRange.start).format('YYYY-MM-DD');
+          // LinkedIn occasionally returns an aggregate element without
+          // `timeRange` even when the request specified `timeGranularityType:DAY`
+          // (e.g. when no per-day buckets match the filter). Fall back to
+          // today's date so the downstream consumer still gets a valid entry.
+          const dateStr = current.timeRange
+            ? dayjs(current.timeRange.start).format('YYYY-MM-DD')
+            : todayForAgg;
 
           all['Impressions'].push({
             total: current.totalShareStatistics.impressionCount || 0,

@@ -20,6 +20,28 @@ import { Readable } from 'stream';
 import { Rules } from '@gitroom/nestjs-libraries/chat/rules.description.decorator';
 import { string } from 'yup';
 
+// LinkedIn returns 403 ACCESS_DENIED for every personal post-analytics
+// endpoint under Postiz's current OAuth scopes (see
+// docs/account-profile-module.md §7.1.6). Detecting this specific failure
+// mode lets us skip guaranteed-failure fallbacks and silence repetitive
+// error logs without hiding real errors (rate limits, transient 5xx, etc.)
+function isLinkedInAccessDenied(err: any): boolean {
+  if (!err) return false;
+  if (err.status === 403) return true;
+  if (typeof err.message === 'string' && err.message.includes('403')) return true;
+  const details = Array.isArray(err.details) ? err.details : [];
+  for (const d of details) {
+    const json = d?.json;
+    if (
+      typeof json === 'string' &&
+      (json.includes('"status":403') || json.includes('"code":"ACCESS_DENIED"'))
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 @Rules(
   'LinkedIn can have maximum one attachment when selecting video, when choosing a carousel on LinkedIn minimum amount of attachment must be two, and only pictures, if uploading a video, LinkedIn can have only one attachment'
 )
@@ -907,15 +929,15 @@ export class LinkedinProvider extends SocialAbstract implements SocialProvider {
     try {
       return await this._fetchMemberPostAnalytics(accessToken, postId, today);
     } catch (err: any) {
-      // 403 = scope not granted (existing users who haven't re-authenticated)
-      // Fall back to legacy socialActions API
-      if (err?.status === 403 || err?.message?.includes('403')) {
-        console.warn(
-          'LinkedIn memberCreatorPostAnalytics not available (scope missing), falling back to socialActions'
-        );
-      } else {
-        console.error('Error fetching LinkedIn member post analytics:', err);
+      if (isLinkedInAccessDenied(err)) {
+        // Both memberCreatorPostAnalytics (r_member_post_analytics) and the
+        // legacy /v2/socialActions fallback (r_member_social) require scopes
+        // Postiz does not request. Calling the fallback would trigger another
+        // guaranteed 403 and duplicate the error log. Return empty silently
+        // — this is a permanent OAuth-scope gap, not a runtime failure.
+        return [];
       }
+      console.error('Error fetching LinkedIn member post analytics:', err);
     }
 
     // Fallback: legacy socialActions API (likes + comments only)
@@ -1040,6 +1062,11 @@ export class LinkedinProvider extends SocialAbstract implements SocialProvider {
 
       return result;
     } catch (err) {
+      if (isLinkedInAccessDenied(err)) {
+        // See comment in postAnalytics — 403 on /v2/socialActions is the
+        // expected permanent state for personal LinkedIn under current scopes.
+        return [];
+      }
       console.error('Error fetching LinkedIn personal post analytics:', err);
       return [];
     }
