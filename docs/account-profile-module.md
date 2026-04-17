@@ -489,29 +489,93 @@ and emits `stats.traffic` would expose this "summary engagement" number
 for the profile view at zero new platform-API cost (same data already
 fetched for `stats.*`).
 
-Per-platform input labels and weights (from `traffic.calculator.ts`):
+Per-platform input labels and weights from `traffic.calculator.ts`
+(`TRAFFIC_WEIGHTS` constant). The final score is
+`Σ(metric_value × weight)` rounded to two decimals. Labels are matched
+case-insensitively against `AnalyticsData.label`.
 
-| Platform | Traffic inputs |
+| Platform | Weighted formula |
 | :--- | :--- |
-| `x` | likes, replies, retweets, quotes, bookmarks |
-| `youtube` | views, likes, comments, favorites |
-| `instagram` / `instagram-standalone` | likes, comments, saves, shares |
-| `linkedin-page` | clicks, likes, comments, shares, engagement |
-| `linkedin` | impressions, likes, comments, shares, reach |
-| `facebook` | clicks, reactions |
-| `threads` | likes, replies, reposts, quotes |
-| `pinterest` | pin clicks, outbound clicks, saves |
-| `tiktok` | views, likes, comments, shares |
-| `reddit` | score, upvotes, comments |
-| `bluesky` | likes, reposts, replies, quotes |
-| `mastodon` / `mastodon-custom` | favourites, boosts, replies |
-| Other / fallback | likes, comments, shares, clicks |
+| **`x`** | `likes × 1` + `replies × 2` + `retweets × 1.5` + `quotes × 2` + `bookmarks × 1.5` |
+| **`youtube`** | `views × 1` + `likes × 2` + `comments × 5` + `favorites × 2` |
+| **`instagram`** | `likes × 1` + `comments × 3` + `saves × 5` + `shares × 4` |
+| **`instagram-standalone`** | `likes × 1` + `comments × 3` + `saves × 5` + `shares × 4` (same as `instagram`) |
+| **`linkedin-page`** | `clicks × 5` + `likes × 1` + `comments × 4` + `shares × 3` + `engagement × 0.5` |
+| **`linkedin`** (personal) | `impressions × 0.05` + `likes × 1` + `comments × 4` + `shares × 3` + `reach × 0.1` |
+| **`facebook`** | `clicks × 3` + `reactions × 1` |
+| **`threads`** | `likes × 1` + `replies × 2` + `reposts × 1.5` + `quotes × 2` |
+| **`pinterest`** | `pin clicks × 3` + `outbound clicks × 5` + `saves × 2` |
+| **`tiktok`** | `views × 0.1` + `likes × 1` + `comments × 3` + `shares × 4` |
+| **`reddit`** | `score × 0.5` + `upvotes × 1` + `comments × 3` |
+| **`bluesky`** | `likes × 1` + `reposts × 1.5` + `replies × 2` + `quotes × 2` |
+| **`mastodon`** | `favourites × 1` + `boosts × 1.5` + `replies × 2` |
+| **`mastodon-custom`** | `favourites × 1` + `boosts × 1.5` + `replies × 2` (same as `mastodon`) |
+
+**Fallback** (`FALLBACK_WEIGHTS`, used when `providerIdentifier` is not in
+the table above — e.g. a future provider without a tuned formula):
+
+```
+likes × 1 + comments × 3 + shares × 2 + clicks × 5
+```
+
+Providers with no `postAnalytics` at all (`discord`, `slack`, `telegram`,
+`nostr`, `vk`, `dribbble` stub) cannot produce any weighted input, so
+`computeTrafficScore` returns `null` for them regardless of the weight
+table used.
+
+**Design notes in the weights themselves:**
+
+- `x` uses `retweets × 1.5` and `bookmarks × 1.5` (lower than the
+  `replies × 2` / `quotes × 2` — replies and quotes are higher-effort
+  engagement).
+- `youtube` weights `comments × 5` the heaviest — comments are the
+  scarcest and highest-signal engagement on YouTube.
+- `linkedin-page` weights `clicks × 5` the heaviest — outbound link
+  clicks are considered the most valuable engagement for B2B.
+- `linkedin` (personal) includes `impressions × 0.05` and `reach × 0.1`
+  as a low-weight baseline so accounts with no direct engagement still
+  get a nonzero score; the `-page` variant excludes these.
+- `tiktok` weights `views × 0.1` — views are cheap on TikTok so they
+  are weighted 10× lower than `likes`.
+- `pinterest` distinguishes `outbound clicks × 5` (leave-the-platform
+  traffic) from `pin clicks × 3` (in-platform clicks).
+- `facebook` only uses `clicks` and `reactions` — the FB Graph API's
+  insights coverage for Pages is narrower than Meta's Instagram API,
+  so other metrics are not reliably available.
+- `reddit` uses `score × 0.5` and `upvotes × 1`; `score` is the
+  net value (upvotes − downvotes) so double-counting is partially
+  mitigated by the lower weight.
+- `mastodon` intentionally keeps British-spelled `favourites` (matches
+  what the Mastodon provider emits) — this is also why §7.1.2 proposes
+  normalizing to `favorites` only at the output stage, not at the
+  traffic-calculator input stage (changing the key here would break
+  existing `DataTick` rows).
 
 Note: some of these inputs (Views, Reach, Comments, Shares, Saves, Clicks,
 Reactions, Boosts, Reposts, Favourites) are the same labels currently
 dropped by §7.1.2 — so fixing 7.1.2 first makes 7.1.4 more meaningful
 because the raw components and the computed composite score would both
 be available to the client.
+
+**Display semantics — three distinct states.** `computeTrafficScore`
+(`traffic.calculator.ts:110`) uses a `hasMatch` flag that flips the moment
+**any** weighted input label appears in the metrics array, regardless of
+its value. The UI must treat the three outcomes differently:
+
+| Returned value | Trigger | Recommended UI |
+| :--- | :--- | :--- |
+| `null` | **None** of the weighted input labels are present in the provider's output (e.g. provider has no `postAnalytics`, platform API returned nothing, or every returned label is outside the platform's weight table) | Hide the Traffic card — there is no data source to compute against |
+| `0` | At least one weighted label is present, but the weighted sum of values is exactly zero (cold-start account, freshly posted content with no engagement yet, or all input metrics really are 0) | Show `0` — this is a real data point, not missing data |
+| `> 0` | Normal case | Show the numeric value |
+
+So the rule is **"any one weighted input field is present ⇒ Traffic is
+shown (even if 0)"**, not "any field has a non-zero value ⇒ show". A
+freshly connected account with 5 posts and 0 engagement on all of them
+would produce `traffic = 0`, not `traffic = null`.
+
+This distinction also dictates the client TypeScript type: `traffic:
+number | null`, not `traffic?: number` — absence (`null`) and zero are
+semantically different.
 
 #### 7.1.5 `additionalSettings` is a stringified JSON blob
 
