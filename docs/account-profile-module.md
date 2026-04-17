@@ -198,14 +198,54 @@ account-wide value, not a per-post metric, so they live under
 
 ### 5.2 LinkedIn Personal (`linkedin`)
 
-Official API: `GET /v2/socialActions/{urn}`
-([Social Actions API](https://learn.microsoft.com/en-us/linkedin/marketing/community-management/shares/social-actions-api)).
+Attempted APIs (both currently fail with 403 under Postiz's OAuth scopes —
+see below):
+
+- `GET /rest/memberCreatorPostAnalytics` ([Member Creator Post Analytics](https://learn.microsoft.com/en-us/linkedin/marketing/community-management/member/member-post-analytics))
+- `GET /v2/socialActions/{urn}` (legacy fallback) ([Social Actions API](https://learn.microsoft.com/en-us/linkedin/marketing/community-management/shares/social-actions-api))
 
 | Field | Value |
 | :--- | :--- |
-| `additionalSettings` (account total) | **none** — `LinkedinProvider` does not implement `accountMetrics()` because LinkedIn does not expose personal follower/connection counts without restricted scopes (`r_1st_connections_size`, not requested by Postiz). |
-| `stats.*` populated (Postiz posts, 30d) | `impressions`, `likes` |
-| Dropped labels (Postiz posts, 30d) | `Comments`, `Shares`, `Reach` |
+| `additionalSettings` (account total) | **none** — `LinkedinProvider` does not implement `accountMetrics()`. |
+| `stats.*` populated (Postiz posts, 30d) | **none in practice** — the code paths emit `impressions, likes, comments, shares, reach` when successful, but both LinkedIn endpoints refuse the request under the current OAuth scopes (see below). |
+| Dropped labels (Postiz posts, 30d) | N/A — no data is ever returned to be dropped. |
+
+**OAuth scope limitation (the root cause):** Postiz's personal LinkedIn
+connection requests only these scopes (`linkedin.provider.ts:32-37`):
+
+```
+openid, profile, w_member_social, email
+```
+
+- `w_member_social` allows *writing* posts on behalf of the member.
+- None of the requested scopes grant **read access** to a member's post
+  analytics or social actions.
+
+Each attempted endpoint requires a different scope Postiz has not requested:
+
+| Endpoint | Required scope | Status |
+| :--- | :--- | :--- |
+| `/rest/memberCreatorPostAnalytics` | `r_member_post_analytics` (Community Management API, LinkedIn partner-gated) | Not requested — Partner review required, typically not granted to SaaS apps |
+| `/v2/socialActions/{urn}` | `r_member_social` | Not requested — LinkedIn restricts this scope and new apps rarely get approval |
+
+**Observed runtime error** (from backend logs at UTC 2026-04-17 07:52):
+
+```
+LinkedIn memberCreatorPostAnalytics not available (scope missing), falling back to socialActions
+Error fetching LinkedIn personal post analytics: ApplicationFailure
+  details: [{ json: '{"status":403,"serviceErrorCode":100,"code":"ACCESS_DENIED",
+               "message":"Not enough permissions to access: socialActions.GET.NO_VERSION"}' }]
+```
+
+**Effective behavior:** both `postAnalytics` and `batchPostAnalytics` for a
+personal LinkedIn integration return an empty array. Neither
+`/analytics/post/:postId` nor `/integrations/profile/:id` surfaces any post
+engagement numbers for personal LinkedIn today.
+
+**Note:** this limitation is specific to the `linkedin` (personal)
+integration. `linkedin-page` (§5.3) authorizes a separate set of scopes
+including `r_organization_social`, which is why Page post analytics work
+normally.
 
 ### 5.3 LinkedIn Page (`linkedin-page`)
 
@@ -420,7 +460,7 @@ Two different scopes share this table:
 | Platform | posts | impressions | likes | replies | retweets | quotes | bookmarks |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 | **x**             | YES | YES | YES | YES | YES | YES | YES |
-| **linkedin**      | YES | YES | YES | –   | –   | –   | –   |
+| **linkedin**      | YES | –\*\* | –\*\* | –   | –   | –   | –   |
 | **linkedin-page** | YES | YES\* | YES | –   | –   | –   | –   |
 | **facebook**      | YES | YES | –   | –   | –   | –   | –   |
 | **instagram**     | YES | YES | YES | –   | –   | –   | –   |
@@ -439,6 +479,11 @@ defined in the response shape but **is always `null` for every provider**
 (see §7.1.1).
 
 \* `Unique Impressions` label overrides `Impressions` (see §5.3).
+
+\*\* Personal LinkedIn: the code paths would emit these labels, but the
+LinkedIn APIs refuse the request (HTTP 403) under Postiz's current OAuth
+scopes. In practice no `stats.*` data is populated. See §5.2 for the
+scope-gap analysis and §7.1.6 for the proposed handling.
 
 > **Not in this endpoint: Traffic score.** Every platform in §6.2 also has a
 > weighted-engagement "Traffic" score computed by `computeTrafficScore`
@@ -631,6 +676,31 @@ eliminate client-side plumbing:
   "stats": { ... }
 }
 ```
+
+#### 7.1.6 Personal LinkedIn post analytics returns 403 under current scopes
+
+See §5.2 for the detailed scope analysis. In short: the personal LinkedIn
+integration requests `openid, profile, w_member_social, email`, none of which
+grant read access to post analytics. Both `postAnalytics` code paths hit
+HTTP 403 and every call to `/analytics/post/:postId` for a personal LinkedIn
+post returns `[]` while the backend logs an error.
+
+Two things to do:
+
+1. **Silently degrade in the provider.** Catch the 403 responses in
+   `linkedin.provider.ts._fetchMemberPostAnalytics` and
+   `_fetchSocialActionsAnalytics` and return `[]` without logging `error`.
+   These 403s are not runtime failures — they are a permanent consequence
+   of the OAuth scope set. Keeping the `error` log level causes
+   alert/dashboard noise on every request.
+2. **Stop attempting the call.** Have `postAnalytics` early-return `[]` for
+   personal LinkedIn when scopes are known to be insufficient (e.g. guard
+   by checking a provider flag). Avoids spending a LinkedIn API quota unit
+   on every request.
+
+Adding the missing scopes (`r_member_post_analytics` — Partner-gated;
+`r_member_social` — effectively deprecated for new apps) is not a realistic
+path today and would force every already-connected user to re-authorize.
 
 ### 7.2 Tier 2 — Small Additive Enhancements
 
