@@ -115,18 +115,32 @@ Temporal Workflow (daily @ UTC 00:05)
                  └─ Sync individual PostRelease analytics
 ```
 
-**Key behaviors:**
-- Real ticks (`postsAnalyzed > 0`) come from successful platform-API fetches
-- **Carry-forward ticks (`postsAnalyzed = 0`)** are written for integrations
-  that *had posts to analyze* but whose fetch failed entirely (rate limit,
-  expired token, batch error). The service looks up the most recent prior
-  row for the (integration, type) pair via `findLatestUpTo` and copies its
-  `value` into `dayStart`. This keeps the dashboard time-series monotonic
-  and prevents collapse-to-zero on partial outages. If a row already
-  exists at `dayStart` (real or prior carry-forward), it is **never**
-  overwritten — the carry-forward is a hole filler, not a refresh
-- Integrations with **no posts at all** in the lookback window get no row
-  (neither real nor carry-forward) — avoids polluting the table
+**Unified write rules (per integration, per type):**
+
+Before writing, the service loads the latest prior tick for every active
+integration via `findLatestUpTo(upTo=dayStart)`. Each integration then
+falls into exactly one of four paths:
+
+| Situation | Action | `postsAnalyzed` |
+|---|---|---|
+| Fetch succeeded, `fetched ≥ prior` (or no prior) | write real tick, value=fetched | `> 0` |
+| Fetch succeeded, `fetched < prior` | **clamp**: write value=prior, warn | `> 0` |
+| Fetch failed / integration has no posts in lookback, has prior history | **carry-forward**: write value=prior, warn | `0` |
+| No prior anywhere | skip (no signal to carry) | n/a |
+
+Rationale for clamp: platform APIs can legitimately shrink the cumulative
+total (user deletes a top post, platform recomputes, post goes private).
+The cumulative-metric contract requires the series to be monotonic
+non-decreasing, so we pin to prior instead of writing the regression.
+A paper trail is kept in log lines prefixed with `[DataTicks] clamp`.
+
+**Other invariants:**
+
+- If a row already exists at `dayStart` (real or prior carry-forward), the
+  carry-forward path is **never** allowed to overwrite it — the check
+  compares `prior.statisticsTime` to `dayStart` and skips on equality.
+  The clamp path (real fetch) is allowed to update it, since it carries
+  fresh signal.
 - Strips synthetic metrics before aggregation to prevent double-counting
 - Platform APIs return lifetime cumulative totals per post
 - Refreshes expired tokens before API calls
@@ -351,10 +365,16 @@ GROUP BY type;
 Used by: `GET /dashboard/summary`, `GET /dashboard/traffics`
 
 1. Query DataTicks for date range (default: last 30 days), `timeUnit='day'`
-2. For each integration, keep only the **latest** record (sorted ASC, later overwrites)
+2. For each integration, keep the **max** value seen in the window
 3. Sum values by platform
 4. Compute percentages: `round(value / grandTotal * 10000) / 100`
 5. Return sorted by value DESC: `[{ platform, value, percentage }]`
+
+Max-per-integration (not latest) keeps the summary endpoint consistent with
+the time-series endpoint's clamp: if historical data contains a regression
+(e.g. `1000 → 300` from a pre-clamp write or a genuinely deleted post),
+both endpoints report `1000`. Taking "latest" would reintroduce the dip
+that the time-series walker just hid.
 
 ### Time Series Query (`_queryTimeSeriesByType`)
 
@@ -362,13 +382,38 @@ Used by: `GET /dashboard/impressions`
 
 1. Query DataTicks for date range, grouped by period (daily/weekly/monthly)
 2. For each (integration, bucket), keep latest snapshot
-3. Sum latest-per-integration values by (platform, bucket)
-4. Return sorted: `[{ date, value, platform }]`
+3. **Per integration, walk from its first in-window bucket to the global last
+   bucket, forward-filling missing buckets with the prior value and clamping
+   regressions to the running baseline.** Impressions and traffic are
+   cumulative, so the per-integration series must be monotonic non-decreasing.
+   This masks gaps caused by:
+   - posts falling out of the 30-day analytics lookback (sync writes no row)
+   - platform APIs returning a smaller value on a later re-sync
+   - post deletions that shrink the cumulative total
+4. Sum per-integration filled values by (platform, bucket)
+5. Return sorted: `[{ date, value, platform }]`
 
 Period bucketing:
 - **daily**: `YYYY-MM-DD` (default 30 days lookback)
 - **weekly**: Monday of week (default 90 days)
 - **monthly**: `YYYY-MM` (default 365 days)
+
+Query-time forward-fill does **not** write anything back to the DB — it only
+shapes the response. The offline `forward-fill-data-ticks.ts` script is still
+the way to persist a monotonic history; the query-time layer is a safety net
+for operational gaps between syncs.
+
+**Coverage boundary:** the query-time walker operates on ticks returned by
+the repository's window filter (`statisticsTime BETWEEN startTime AND endTime`).
+An integration whose most recent tick is **older than** `startTime` is not
+returned by the query and therefore not included in the walker. It relies
+on the write-side carry-forward to keep a fresh row landing in each daily
+bucket. If a transient write-side failure then skips that integration for
+a day inside the window, the walker has no seed and the integration is
+absent from the response for that day. The write-side carry-forward and
+the offline repair script are the primary defense; the query-time layer
+covers operational gaps once the integration already has at least one tick
+inside the requested window.
 
 ---
 

@@ -78,13 +78,9 @@ export class DataTicksService {
     let totalUpserted = 0;
     let totalErrors = 0;
 
-    for (const [orgId, integrations] of integrationsByOrg) {
+    for (const [orgId] of integrationsByOrg) {
       try {
-        const count = await this._syncOrgDailyTicks(
-          orgId,
-          integrations,
-          date.toDate()
-        );
+        const count = await this._syncOrgDailyTicks(orgId, date.toDate());
         totalUpserted += count;
       } catch (err) {
         totalErrors++;
@@ -102,7 +98,6 @@ export class DataTicksService {
 
   private async _syncOrgDailyTicks(
     orgId: string,
-    integrations: Array<{ id: string; platform: string }>,
     dayStart: Date
   ): Promise<number> {
     // Calculate lookback relative to now so the repository query works for backfill too.
@@ -166,9 +161,7 @@ export class DataTicksService {
       const fullIntegration = integrationById.get(intId);
       if (!fullIntegration) continue;
 
-      // Find platform from the integration list (or from posts)
-      const intEntry = integrations.find((i) => i.id === intId);
-      const platform = intEntry?.platform ?? fullIntegration.providerIdentifier;
+      const platform = fullIntegration.providerIdentifier;
 
       if (!integrationMetrics.has(intId)) {
         integrationMetrics.set(intId, {
@@ -218,92 +211,155 @@ export class DataTicksService {
       }
     }
 
-    // Only upsert DataTicks for integrations that actually have analyzed posts.
-    // This avoids polluting the table with 0-value rows for integrations with no posts.
-    // Integrations that HAD posts to analyze but ended with postsAnalyzed=0
-    // (rate limit, token refresh failure, batch error, ...) are handled below
-    // as a carry-forward instead of being silently dropped.
-    const failedIntegrationIds: string[] = [];
-    for (const [intId, accum] of integrationMetrics) {
-      if (accum.postsAnalyzed === 0) {
-        failedIntegrationIds.push(intId);
+    // Build records with a unified rule set that enforces monotonic
+    // non-decreasing values per (integration, type) across days. Four cases:
+    //
+    //   1. Fetch succeeded and value ≥ prior → write real tick as-is.
+    //   2. Fetch succeeded but value < prior → clamp to prior and warn.
+    //      Reason: platform APIs can legitimately return smaller cumulative
+    //      values (user-deleted posts, privated posts, platform metric
+    //      recomputation), but our cumulative-metric contract requires the
+    //      series to be monotonic non-decreasing.
+    //   3. Fetch failed OR integration has no posts in the lookback window,
+    //      but prior history exists → write a carry-forward row copying the
+    //      prior value. This is the case that previously let integrations
+    //      silently disappear on the dashboard once their last post aged
+    //      out of the 30-day lookback.
+    //   4. No prior anywhere and no fetch → skip (nothing to carry forward,
+    //      no signal worth recording).
+    //
+    // Critical invariant: if the prior lookup returns a row whose
+    // statisticsTime IS dayStart, we MUST NOT overwrite it with a synthetic
+    // (postsAnalyzed=0) row. It was either a successful earlier run today
+    // or an earlier carry-forward from today — overwriting degrades it.
+    const allActiveIntegrationIds = fullIntegrations.map((i) => i.id);
+    const priorByKey = new Map<
+      string,
+      { value: bigint; platform: string; statisticsTime: Date }
+    >();
+    try {
+      const priorTicks = await this._dataTicksRepository.findLatestUpTo({
+        organizationId: orgId,
+        integrationIds: allActiveIntegrationIds,
+        types: ['impressions', 'traffic'],
+        upTo: dayStart,
+      });
+      for (const p of priorTicks) {
+        priorByKey.set(`${p.integrationId}|${p.type}`, {
+          value: p.value,
+          platform: p.platform,
+          statisticsTime: p.statisticsTime,
+        });
       }
+    } catch (err) {
+      console.error(
+        `DataTicks prior-value lookup failed for org ${orgId}:`,
+        err
+      );
+      // Graceful degradation: continue without prior values. Clamping is
+      // disabled for this run, and no carry-forward will be produced for
+      // dormant integrations. Real-fetch writes still go through.
     }
 
-    const records = Array.from(integrationMetrics.entries())
-      .filter(([, accum]) => accum.postsAnalyzed > 0)
-      .flatMap(([intId, accum]) => [
-        {
+    const dayStartMs = dayStart.getTime();
+    const records: Array<{
+      organizationId: string;
+      integrationId: string;
+      platform: string;
+      type: string;
+      timeUnit: TimeUnit;
+      statisticsTime: Date;
+      value: bigint;
+      postsAnalyzed: number;
+    }> = [];
+
+    for (const integration of fullIntegrations) {
+      const intId = integration.id;
+      const accum = integrationMetrics.get(intId);
+      const hasFetchResult = !!accum && accum.postsAnalyzed > 0;
+      const platform = accum?.platform ?? integration.providerIdentifier;
+      const priorImp = priorByKey.get(`${intId}|impressions`);
+      const priorTrf = priorByKey.get(`${intId}|traffic`);
+
+      if (hasFetchResult) {
+        // Case 1/2: clamp against prior if the fetched cumulative shrank.
+        let impValue = BigInt(accum!.impressions);
+        if (priorImp && impValue < priorImp.value) {
+          console.warn(
+            `[DataTicks] clamp integration=${intId} type=impressions ` +
+              `fetched=${impValue} < prior=${priorImp.value} — pinning to prior ` +
+              `(deletion / platform regression)`
+          );
+          impValue = priorImp.value;
+        }
+        let trfValue = BigInt(Math.round(accum!.traffic));
+        if (priorTrf && trfValue < priorTrf.value) {
+          console.warn(
+            `[DataTicks] clamp integration=${intId} type=traffic ` +
+              `fetched=${trfValue} < prior=${priorTrf.value} — pinning to prior`
+          );
+          trfValue = priorTrf.value;
+        }
+        records.push(
+          {
+            organizationId: orgId,
+            integrationId: intId,
+            platform,
+            type: 'impressions',
+            timeUnit: 'day' as TimeUnit,
+            statisticsTime: dayStart,
+            value: impValue,
+            postsAnalyzed: accum!.postsAnalyzed,
+          },
+          {
+            organizationId: orgId,
+            integrationId: intId,
+            platform,
+            type: 'traffic',
+            timeUnit: 'day' as TimeUnit,
+            statisticsTime: dayStart,
+            value: trfValue,
+            postsAnalyzed: accum!.postsAnalyzed,
+          }
+        );
+        continue;
+      }
+
+      // Case 3: no fetch result. Carry forward if history exists and no
+      // row is already at dayStart.
+      const reason = accum ? 'fetch failed' : 'no posts in lookback';
+      if (priorImp && priorImp.statisticsTime.getTime() !== dayStartMs) {
+        records.push({
           organizationId: orgId,
           integrationId: intId,
-          platform: accum.platform,
+          platform: priorImp.platform,
           type: 'impressions',
           timeUnit: 'day' as TimeUnit,
           statisticsTime: dayStart,
-          value: BigInt(accum.impressions),
-          postsAnalyzed: accum.postsAnalyzed,
-        },
-        {
+          value: priorImp.value,
+          postsAnalyzed: 0,
+        });
+        console.warn(
+          `[DataTicks] carry-forward integration=${intId} type=impressions ` +
+            `from ${dayjs.utc(priorImp.statisticsTime).format('YYYY-MM-DD')} ` +
+            `to ${dayjs.utc(dayStart).format('YYYY-MM-DD')} (${reason})`
+        );
+      }
+      if (priorTrf && priorTrf.statisticsTime.getTime() !== dayStartMs) {
+        records.push({
           organizationId: orgId,
           integrationId: intId,
-          platform: accum.platform,
+          platform: priorTrf.platform,
           type: 'traffic',
           timeUnit: 'day' as TimeUnit,
           statisticsTime: dayStart,
-          value: BigInt(Math.round(accum.traffic)),
-          postsAnalyzed: accum.postsAnalyzed,
-        },
-      ]);
-
-    // Carry-forward rows for integrations whose fetch failed entirely.
-    // We look up the most recent (integration, type) row at or before
-    // dayStart and copy its value into dayStart so the dashboard time-series
-    // stays monotonic and does not collapse to 0 just because one API call
-    // failed.
-    //
-    // Critical: if the lookup returns a row whose statisticsTime is already
-    // dayStart, we MUST skip the carry-forward. That row was either written
-    // by a successful earlier run today (postsAnalyzed > 0) — in which case
-    // overwriting it would replace good data with a stale baseline — or it
-    // was already a carry-forward from a previous run today, in which case
-    // overwriting is a redundant no-op. Either way, leave it alone.
-    if (failedIntegrationIds.length > 0) {
-      try {
-        const carryForwards = await this._dataTicksRepository.findLatestUpTo({
-          organizationId: orgId,
-          integrationIds: failedIntegrationIds,
-          types: ['impressions', 'traffic'],
-          upTo: dayStart,
+          value: priorTrf.value,
+          postsAnalyzed: 0,
         });
-        const dayStartMs = dayStart.getTime();
-        for (const cf of carryForwards) {
-          if (cf.statisticsTime.getTime() === dayStartMs) {
-            // A row already exists for dayStart (real or prior carry-forward).
-            // Do not overwrite — see comment above.
-            continue;
-          }
-          records.push({
-            organizationId: cf.organizationId,
-            integrationId: cf.integrationId,
-            platform: cf.platform,
-            type: cf.type,
-            timeUnit: 'day' as TimeUnit,
-            statisticsTime: dayStart,
-            value: cf.value,
-            // postsAnalyzed=0 marks this row as a synthetic carry-forward
-            // (no real fetch contributed to it).
-            postsAnalyzed: 0,
-          });
-          console.warn(
-            `[DataTicks] carry-forward integration=${cf.integrationId} type=${cf.type} ` +
-              `from ${dayjs.utc(cf.statisticsTime).format('YYYY-MM-DD')} ` +
-              `to ${dayjs.utc(dayStart).format('YYYY-MM-DD')} (fetch failed)`
-          );
-        }
-      } catch (err) {
-        console.error(
-          `DataTicks carry-forward lookup failed for org ${orgId}:`,
-          err
+        console.warn(
+          `[DataTicks] carry-forward integration=${intId} type=traffic ` +
+            `from ${dayjs.utc(priorTrf.statisticsTime).format('YYYY-MM-DD')} ` +
+            `to ${dayjs.utc(dayStart).format('YYYY-MM-DD')} (${reason})`
         );
       }
     }
@@ -690,42 +746,78 @@ export class DataTicksService {
       ? ticks.filter((t) => params.channel!.includes(t.platform))
       : ticks;
 
-    // Step 1: For each (integration, bucket), keep the latest snapshot value.
+    const bucketKeyOf = (d: dayjs.Dayjs): string => {
+      switch (params.period) {
+        case 'weekly':
+          return d.isoWeekday(1).format('YYYY-MM-DD');
+        case 'monthly':
+          return d.format('YYYY-MM');
+        default:
+          return d.format('YYYY-MM-DD');
+      }
+    };
+    const nextBucketKey = (key: string): string => {
+      const seed = params.period === 'monthly' ? `${key}-01` : key;
+      const d = dayjs.utc(seed);
+      switch (params.period) {
+        case 'weekly':
+          return d.add(7, 'day').format('YYYY-MM-DD');
+        case 'monthly':
+          return d.add(1, 'month').format('YYYY-MM');
+        default:
+          return d.add(1, 'day').format('YYYY-MM-DD');
+      }
+    };
+
+    // Step 1: Keep the latest snapshot per (integration, bucket).
     // Ticks are sorted ASC, so later entries overwrite earlier ones.
     const integrationBuckets = new Map<
       string,
-      { platform: string; dateKey: string; value: number }
+      { platform: string; perBucket: Map<string, number> }
     >();
+    let globalLastKey: string | null = null;
     for (const tick of filtered) {
-      const d = dayjs.utc(tick.statisticsTime);
-      let dateKey: string;
-      switch (params.period) {
-        case 'weekly':
-          dateKey = d.isoWeekday(1).format('YYYY-MM-DD');
-          break;
-        case 'monthly':
-          dateKey = d.format('YYYY-MM');
-          break;
-        default:
-          dateKey = d.format('YYYY-MM-DD');
+      const dateKey = bucketKeyOf(dayjs.utc(tick.statisticsTime));
+      let entry = integrationBuckets.get(tick.integrationId);
+      if (!entry) {
+        entry = { platform: tick.platform, perBucket: new Map() };
+        integrationBuckets.set(tick.integrationId, entry);
       }
-
-      integrationBuckets.set(`${tick.integrationId}|${dateKey}`, {
-        platform: tick.platform,
-        dateKey,
-        value: Number(tick.value),
-      });
+      entry.perBucket.set(dateKey, Number(tick.value));
+      if (!globalLastKey || dateKey > globalLastKey) globalLastKey = dateKey;
     }
 
-    // Step 2: Sum latest-per-integration values by (platform, bucket)
-    const bucketMap = new Map<string, { date: string; value: number; platform: string }>();
-    for (const [, { platform, dateKey, value }] of integrationBuckets) {
-      const key = `${platform}|${dateKey}`;
-      const existing = bucketMap.get(key);
-      if (existing) {
-        existing.value += value;
-      } else {
-        bucketMap.set(key, { date: dateKey, value, platform });
+    // Step 2: For each integration, walk from its first in-window bucket up
+    // to the global last bucket, forward-filling missing buckets with the
+    // last known value and clamping regressions. Impressions and traffic
+    // scores are cumulative, so the per-integration series must be
+    // monotonic non-decreasing; gaps happen when:
+    //   - an integration's posts fall out of the 30-day analytics lookback
+    //     window so sync writes no row at all
+    //   - a platform API returns a smaller value on a later re-sync
+    //   - posts are deleted and shrink the cumulative total
+    // This mirrors the offline monotonic-repair script at read time so the
+    // dashboard never shows a dip on cumulative curves.
+    const bucketMap = new Map<
+      string,
+      { date: string; value: number; platform: string }
+    >();
+    if (globalLastKey) {
+      for (const [, { platform, perBucket }] of integrationBuckets) {
+        // Ticks arrive ASC-sorted by statisticsTime (repository orderBy),
+        // so the first inserted key is always the earliest bucket.
+        const firstKey = perBucket.keys().next().value as string;
+        let cursor = firstKey;
+        let baseline = 0;
+        while (cursor <= globalLastKey) {
+          const rec = perBucket.get(cursor);
+          if (rec !== undefined && rec > baseline) baseline = rec;
+          const key = `${platform}|${cursor}`;
+          const existing = bucketMap.get(key);
+          if (existing) existing.value += baseline;
+          else bucketMap.set(key, { date: cursor, value: baseline, platform });
+          cursor = nextBucketKey(cursor);
+        }
       }
     }
 
@@ -735,8 +827,16 @@ export class DataTicksService {
   }
 
   /**
-   * Summary query: fetches ticks of the given type, picks latest snapshot per integration,
-   * sums by platform, returns sorted array with percentages.
+   * Summary query: fetches ticks of the given type, picks the MAX snapshot
+   * per integration, sums by platform, returns sorted array with percentages.
+   *
+   * Max (not "latest") enforces the cumulative-monotonic contract: if the DB
+   * holds a historical regression (e.g. real fetch=300 written before the
+   * write-side clamp shipped, or a value legitimately shrinking because of
+   * post deletion), "latest" would expose the dip at the summary layer while
+   * `_queryTimeSeriesByType` clamps the same dip away. Taking the max keeps
+   * the two endpoints in agreement. See docs/data-ticks-module.md § Summary
+   * Query.
    */
   private async _querySummaryByType(
     type: string,
@@ -762,17 +862,20 @@ export class DataTicksService {
       ? ticks.filter((t) => params.channel!.includes(t.platform))
       : ticks;
 
-    // Latest snapshot per integration (ticks sorted ASC → later overwrites earlier)
-    const latestByIntegration = new Map<string, { platform: string; value: number }>();
+    const maxByIntegration = new Map<string, { platform: string; value: number }>();
     for (const tick of filtered) {
-      latestByIntegration.set(tick.integrationId, {
-        platform: tick.platform,
-        value: Number(tick.value),
-      });
+      const v = Number(tick.value);
+      const prev = maxByIntegration.get(tick.integrationId);
+      if (!prev || v > prev.value) {
+        maxByIntegration.set(tick.integrationId, {
+          platform: tick.platform,
+          value: v,
+        });
+      }
     }
 
     const platformTotal = new Map<string, number>();
-    for (const [, { platform, value }] of latestByIntegration) {
+    for (const [, { platform, value }] of maxByIntegration) {
       platformTotal.set(platform, (platformTotal.get(platform) || 0) + value);
     }
 

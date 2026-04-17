@@ -348,10 +348,12 @@ describe('DataTicksService.syncDailyTicks — carry-forward on failed fetch', ()
 
     await service.syncDailyTicks(DAY_START);
 
-    // findLatestUpTo should be called only for the failing integration
+    // findLatestUpTo is now called for every active integration — it
+    // powers both the clamp path (real fetch) and the carry-forward path
+    // (failed fetch / dormant integration).
     expect(mocks.dataTicksRepository.findLatestUpTo).toHaveBeenCalledWith({
       organizationId: ORG_ID,
-      integrationIds: [FAIL_INT_ID],
+      integrationIds: expect.arrayContaining([SUCCESS_INT_ID, FAIL_INT_ID]),
       types: ['impressions', 'traffic'],
       upTo: DAY_START,
     });
@@ -384,6 +386,314 @@ describe('DataTicksService.syncDailyTicks — carry-forward on failed fetch', ()
       postsAnalyzed: 0,
       value: BigInt(40),
       statisticsTime: DAY_START,
+    });
+  });
+
+  it('clamps fetched value to prior when the platform returns a smaller cumulative', async () => {
+    // Simulates: user deleted a top post on X between yesterday and today,
+    // so the re-aggregated cumulative impressions would be *smaller* than
+    // yesterday's stored value. The write must clamp to yesterday so the
+    // series never decreases.
+    const successProvider = {
+      batchPostAnalytics: vi.fn().mockResolvedValue({
+        'rel-1': [
+          {
+            label: 'Impressions',
+            percentageChange: 0,
+            // Fetched cumulative = 300, lower than yesterday's 1000.
+            data: [{ total: '300', date: '2026-04-04' }],
+          },
+        ],
+      }),
+    };
+    mocks.integrationManager.getSocialIntegration.mockReturnValue(
+      successProvider,
+    );
+
+    mocks.dataTicksRepository.findLatestUpTo.mockResolvedValue([
+      {
+        organizationId: ORG_ID,
+        integrationId: INT_ID,
+        platform: PLATFORM,
+        userId: null,
+        type: 'impressions',
+        statisticsTime: PRIOR_DAY,
+        value: BigInt(1000),
+        postsAnalyzed: 8,
+      },
+      {
+        organizationId: ORG_ID,
+        integrationId: INT_ID,
+        platform: PLATFORM,
+        userId: null,
+        type: 'traffic',
+        statisticsTime: PRIOR_DAY,
+        value: BigInt(50),
+        postsAnalyzed: 8,
+      },
+    ]);
+
+    await service.syncDailyTicks(DAY_START);
+
+    expect(mocks.dataTicksRepository.upsertMany).toHaveBeenCalledTimes(1);
+    const records = mocks.dataTicksRepository.upsertMany.mock.calls[0][0];
+    const imp = records.find((r: any) => r.type === 'impressions');
+
+    // Value clamped to prior 1000 (not fetched 300). postsAnalyzed stays
+    // > 0 because a real fetch did happen; only the value is pinned.
+    expect(imp.value).toBe(BigInt(1000));
+    expect(imp.postsAnalyzed).toBeGreaterThan(0);
+  });
+
+  it('writes a carry-forward row for a dormant integration (no posts in lookback)', async () => {
+    // The live bug: an integration whose most recent post has aged out of
+    // the 30-day lookback window produces no row at all under the old
+    // logic, so the dashboard sum drops. Now we must carry forward from
+    // the last known tick.
+    const DORMANT_ID = 'int-dormant';
+    const ACTIVE_ID = 'int-active';
+
+    mocks.dataTicksRepository.getAllActiveIntegrationsByOrg.mockResolvedValue(
+      new Map([
+        [
+          ORG_ID,
+          [
+            { id: ACTIVE_ID, platform: PLATFORM },
+            { id: DORMANT_ID, platform: PLATFORM },
+          ],
+        ],
+      ]),
+    );
+    mocks.dashboardRepository.getActiveIntegrations.mockResolvedValue([
+      { ...FULL_INTEGRATION, id: ACTIVE_ID, internalId: 'x-active' },
+      { ...FULL_INTEGRATION, id: DORMANT_ID, internalId: 'x-dormant' },
+    ]);
+
+    // Only the active integration has posts in lookback. Dormant absent
+    // from postsByIntegration entirely.
+    mocks.dashboardRepository.getPublishedPostsWithRelease.mockResolvedValue([
+      {
+        id: 'post-active',
+        integrationId: ACTIVE_ID,
+        releaseId: 'rel-active',
+        integration: { providerIdentifier: PLATFORM },
+      },
+    ]);
+
+    const activeProvider = {
+      batchPostAnalytics: vi.fn().mockResolvedValue({
+        'rel-active': [
+          {
+            label: 'Impressions',
+            percentageChange: 0,
+            data: [{ total: '211', date: '2026-04-04' }],
+          },
+        ],
+      }),
+    };
+    mocks.integrationManager.getSocialIntegration.mockReturnValue(
+      activeProvider,
+    );
+
+    // Dormant has a prior tick; active has none (first time).
+    mocks.dataTicksRepository.findLatestUpTo.mockResolvedValue([
+      {
+        organizationId: ORG_ID,
+        integrationId: DORMANT_ID,
+        platform: PLATFORM,
+        userId: null,
+        type: 'impressions',
+        statisticsTime: PRIOR_DAY,
+        value: BigInt(86),
+        postsAnalyzed: 3,
+      },
+      {
+        organizationId: ORG_ID,
+        integrationId: DORMANT_ID,
+        platform: PLATFORM,
+        userId: null,
+        type: 'traffic',
+        statisticsTime: PRIOR_DAY,
+        value: BigInt(12),
+        postsAnalyzed: 3,
+      },
+    ]);
+
+    await service.syncDailyTicks(DAY_START);
+
+    const records = mocks.dataTicksRepository.upsertMany.mock.calls[0][0];
+
+    // 2 real (active) + 2 carry-forward (dormant) = 4
+    expect(records).toHaveLength(4);
+
+    const dormantRecords = records.filter(
+      (r: any) => r.integrationId === DORMANT_ID,
+    );
+    expect(dormantRecords).toHaveLength(2);
+    for (const r of dormantRecords) {
+      expect(r.postsAnalyzed).toBe(0);
+      expect(r.statisticsTime).toEqual(DAY_START);
+    }
+    const dormantImp = dormantRecords.find(
+      (r: any) => r.type === 'impressions',
+    );
+    expect(dormantImp.value).toBe(BigInt(86));
+  });
+
+  it('emits [DataTicks] carry-forward warn for BOTH impressions and traffic', async () => {
+    // F-05/F-02 regression guard: the logs ARE the operational signal that
+    // tells on-call "this tick is synthetic". A silent refactor that drops
+    // either warn is a real bug. Previously the traffic branch was missing
+    // its warn — pin both now.
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mocks.dataTicksRepository.findLatestUpTo.mockResolvedValue([
+      {
+        organizationId: ORG_ID,
+        integrationId: INT_ID,
+        platform: PLATFORM,
+        userId: null,
+        type: 'impressions',
+        statisticsTime: PRIOR_DAY,
+        value: BigInt(1000),
+        postsAnalyzed: 5,
+      },
+      {
+        organizationId: ORG_ID,
+        integrationId: INT_ID,
+        platform: PLATFORM,
+        userId: null,
+        type: 'traffic',
+        statisticsTime: PRIOR_DAY,
+        value: BigInt(50),
+        postsAnalyzed: 5,
+      },
+    ]);
+
+    await service.syncDailyTicks(DAY_START);
+
+    const impressionsWarn = warnSpy.mock.calls.find(
+      (args) =>
+        typeof args[0] === 'string' &&
+        args[0].includes('[DataTicks] carry-forward') &&
+        args[0].includes('type=impressions'),
+    );
+    const trafficWarn = warnSpy.mock.calls.find(
+      (args) =>
+        typeof args[0] === 'string' &&
+        args[0].includes('[DataTicks] carry-forward') &&
+        args[0].includes('type=traffic'),
+    );
+
+    expect(impressionsWarn).toBeDefined();
+    expect(trafficWarn).toBeDefined();
+
+    warnSpy.mockRestore();
+  });
+
+  it('emits [DataTicks] clamp warn for BOTH impressions and traffic on regression', async () => {
+    // Platform returns a cumulative value lower than the prior snapshot for
+    // both types. Both clamp warns must fire so on-call can correlate.
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const successProvider = {
+      batchPostAnalytics: vi.fn().mockResolvedValue({
+        'rel-1': [
+          {
+            label: 'Impressions',
+            percentageChange: 0,
+            data: [{ total: '100', date: '2026-04-04' }],
+          },
+        ],
+      }),
+    };
+    mocks.integrationManager.getSocialIntegration.mockReturnValue(
+      successProvider,
+    );
+
+    mocks.dataTicksRepository.findLatestUpTo.mockResolvedValue([
+      {
+        organizationId: ORG_ID,
+        integrationId: INT_ID,
+        platform: PLATFORM,
+        userId: null,
+        type: 'impressions',
+        statisticsTime: PRIOR_DAY,
+        value: BigInt(500),
+        postsAnalyzed: 5,
+      },
+      {
+        organizationId: ORG_ID,
+        integrationId: INT_ID,
+        platform: PLATFORM,
+        userId: null,
+        type: 'traffic',
+        statisticsTime: PRIOR_DAY,
+        value: BigInt(80),
+        postsAnalyzed: 5,
+      },
+    ]);
+
+    await service.syncDailyTicks(DAY_START);
+
+    const impressionsClampWarn = warnSpy.mock.calls.find(
+      (args) =>
+        typeof args[0] === 'string' &&
+        args[0].includes('[DataTicks] clamp') &&
+        args[0].includes('type=impressions'),
+    );
+    const trafficClampWarn = warnSpy.mock.calls.find(
+      (args) =>
+        typeof args[0] === 'string' &&
+        args[0].includes('[DataTicks] clamp') &&
+        args[0].includes('type=traffic'),
+    );
+
+    expect(impressionsClampWarn).toBeDefined();
+    expect(trafficClampWarn).toBeDefined();
+
+    warnSpy.mockRestore();
+  });
+
+  it('carries forward only the type that has prior history (partial-prior dormant)', async () => {
+    // Dormant integration has prior impressions but NO prior traffic
+    // (realistic for early-adopter data migrated from before traffic
+    // tracking existed). The two if-blocks must independently handle this.
+    const DORMANT_ID = 'int-dormant-partial';
+
+    mocks.dataTicksRepository.getAllActiveIntegrationsByOrg.mockResolvedValue(
+      new Map([
+        [ORG_ID, [{ id: DORMANT_ID, platform: PLATFORM }]],
+      ]),
+    );
+    mocks.dashboardRepository.getActiveIntegrations.mockResolvedValue([
+      { ...FULL_INTEGRATION, id: DORMANT_ID, internalId: 'x-dormant' },
+    ]);
+    // Dormant: no posts in lookback.
+    mocks.dashboardRepository.getPublishedPostsWithRelease.mockResolvedValue(
+      [],
+    );
+    // Only impressions prior exists; traffic prior is absent.
+    mocks.dataTicksRepository.findLatestUpTo.mockResolvedValue([
+      {
+        organizationId: ORG_ID,
+        integrationId: DORMANT_ID,
+        platform: PLATFORM,
+        userId: null,
+        type: 'impressions',
+        statisticsTime: PRIOR_DAY,
+        value: BigInt(42),
+        postsAnalyzed: 2,
+      },
+    ]);
+
+    await service.syncDailyTicks(DAY_START);
+
+    const records = mocks.dataTicksRepository.upsertMany.mock.calls[0][0];
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({
+      integrationId: DORMANT_ID,
+      type: 'impressions',
+      value: BigInt(42),
+      postsAnalyzed: 0,
     });
   });
 });
