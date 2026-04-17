@@ -409,9 +409,16 @@ Two different scopes share this table:
 `posts` is always populated because it is a straight DB count that does not
 depend on any provider API. `stats.followers` is intentionally omitted — it is
 defined in the response shape but **is always `null` for every provider**
-(see §7 item 1).
+(see §7.1.1).
 
 \* `Unique Impressions` label overrides `Impressions` (see §5.3).
+
+> **Not in this endpoint: Traffic score.** Every platform in §6.2 also has a
+> weighted-engagement "Traffic" score computed by `computeTrafficScore`
+> (`traffic.calculator.ts`), but it is only exposed by
+> `/analytics/post/:id`, `/dashboard/traffics`, and the daily `DataTick`
+> sync — never by `/integrations/profile/:id`. See §7.1.4 for the proposal
+> to surface it here.
 
 ## 7. Known Gaps & Proposed Enhancements
 
@@ -462,7 +469,51 @@ single mapping change is the biggest single-platform win.
 overriding `Impressions`) and locale-sensitive misses (`Favourites` vs
 `like`). Replace with an explicit label-to-field lookup table per provider.
 
-#### 7.1.4 `additionalSettings` is a stringified JSON blob
+#### 7.1.4 Traffic score is computed but not surfaced here
+
+`computeTrafficScore` (`traffic.calculator.ts`) already defines weighted
+engagement formulas for all 13 supported platforms plus a fallback. It is
+consumed by:
+
+- `DataTicksService` daily sync → persisted as `DataTick` rows with
+  `type='traffic'`
+- `/analytics/post/:id` — appends the per-post traffic score to the
+  response
+- `/dashboard/traffics` — aggregates stored traffic ticks for the org
+
+But `IntegrationsController.getIntegrationProfile` calls
+`getPostsLevelAnalytics` → `_aggregatePostAnalytics`, which never invokes
+`computeTrafficScore`. Adding a single line that passes the aggregated
+metrics through `computeTrafficScore(integration.providerIdentifier, ...)`
+and emits `stats.traffic` would expose this "summary engagement" number
+for the profile view at zero new platform-API cost (same data already
+fetched for `stats.*`).
+
+Per-platform input labels and weights (from `traffic.calculator.ts`):
+
+| Platform | Traffic inputs |
+| :--- | :--- |
+| `x` | likes, replies, retweets, quotes, bookmarks |
+| `youtube` | views, likes, comments, favorites |
+| `instagram` / `instagram-standalone` | likes, comments, saves, shares |
+| `linkedin-page` | clicks, likes, comments, shares, engagement |
+| `linkedin` | impressions, likes, comments, shares, reach |
+| `facebook` | clicks, reactions |
+| `threads` | likes, replies, reposts, quotes |
+| `pinterest` | pin clicks, outbound clicks, saves |
+| `tiktok` | views, likes, comments, shares |
+| `reddit` | score, upvotes, comments |
+| `bluesky` | likes, reposts, replies, quotes |
+| `mastodon` / `mastodon-custom` | favourites, boosts, replies |
+| Other / fallback | likes, comments, shares, clicks |
+
+Note: some of these inputs (Views, Reach, Comments, Shares, Saves, Clicks,
+Reactions, Boosts, Reposts, Favourites) are the same labels currently
+dropped by §7.1.2 — so fixing 7.1.2 first makes 7.1.4 more meaningful
+because the raw components and the computed composite score would both
+be available to the client.
+
+#### 7.1.5 `additionalSettings` is a stringified JSON blob
 
 Clients currently do:
 
@@ -574,8 +625,9 @@ Listed for completeness; none of these exist in any form today.
 
 | Priority | Item | Backend effort | Client benefit |
 | :--- | :--- | :--- | :--- |
-| **P0** | 7.1.4 parsed `account` block | ~5 LOC | Removes client-side JSON parsing |
+| **P0** | 7.1.5 parsed `account` block | ~5 LOC | Removes client-side JSON parsing |
 | **P0** | 7.1.2 recover dropped labels | ~30 LOC + lookup table | Reddit/YouTube/TikTok/Pinterest profile pages become useful |
+| **P0** | 7.1.4 add `stats.traffic` | ~5 LOC (reuse existing calculator) | One composite "engagement" number the UI can show for every platform |
 | **P1** | 7.2.1 post state breakdown | ~10 LOC + 1 repo method | Surfaces failures and backlog |
 | **P1** | 7.2.5 `health` block | ~15 LOC | Unified token/connection status |
 | **P2** | 7.2.3 real `percentageChange` | ~30 LOC (prior-period query) | Enables "↑12%" UI |
