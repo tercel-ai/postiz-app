@@ -219,13 +219,17 @@ export class PostsService {
         });
       }
 
+      // 5-minute TTL — balances platform rate limits against UX freshness.
+      // Most platform APIs update post-level metrics on a 1-15min cadence, so
+      // shorter TTLs (e.g. 60s) would mostly hit unchanged data; 1h felt
+      // noticeably stale for users watching engagement come in.
       await ioRedis.set(
         `integration:${orgId}:${post.id}:${date}`,
         JSON.stringify(loadAnalytics),
         'EX',
         !process.env.NODE_ENV || process.env.NODE_ENV === 'development'
           ? 1
-          : 3600
+          : 300
       );
 
       const { impressions, trafficScore: extractedTrafficScore, rawMetrics } =

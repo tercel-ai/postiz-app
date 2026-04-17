@@ -543,20 +543,49 @@ export class LinkedinPageProvider
       }
     );
 
-    // If no time series data but we have social actions, create a single data point
-    if (
-      Object.values(analytics).every((arr) => arr.length === 0) &&
-      socialActions
-    ) {
+    // Supplement Likes/Comments with socialActions when share statistics either
+    // returned no data OR reports all-zero values for those two fields.
+    //
+    // `organizationalEntityShareStatistics` has a 24-48h aggregation delay and
+    // only reports engagement that falls inside the requested `timeRange`, so a
+    // fresh post — or one whose reactions happened before the window — can
+    // yield shareStats likeCount=0 even when the post actually has reactions
+    // visible on LinkedIn. `/v2/socialActions/{urn}` returns the post's current
+    // cumulative totals and is authoritative for Likes and Comments.
+    //
+    // Impressions / Clicks / Shares / Engagement are NOT supplemented because
+    // socialActions does not provide them and we prefer the time-series
+    // resolution from share statistics for those fields.
+    if (socialActions) {
       const today = dayjs().format('YYYY-MM-DD');
-      analytics['Likes'].push({
-        total: socialActions.likesSummary?.totalLikes || 0,
-        date: today,
-      });
-      analytics['Comments'].push({
-        total: socialActions.commentsSummary?.totalFirstLevelComments || 0,
-        date: today,
-      });
+      // Note: when a supplement fires, a multi-day zero series like
+      // [{0,d1},{0,d2},{0,d3}] is replaced by a single snapshot
+      // [{N,today}]. Aggregation (_aggregatePostAnalytics) and the "latest
+      // total" UI view are unaffected; per-day trend consumers (none today)
+      // would see a one-off collapse.
+      const allZero = (arr: { total: number; date: string }[]) =>
+        arr.length === 0 || arr.every((d) => d.total === 0);
+
+      if (
+        socialActions.likesSummary?.totalLikes !== undefined &&
+        allZero(analytics['Likes'])
+      ) {
+        analytics['Likes'] = [
+          { total: socialActions.likesSummary.totalLikes, date: today },
+        ];
+      }
+
+      if (
+        socialActions.commentsSummary?.totalFirstLevelComments !== undefined &&
+        allZero(analytics['Comments'])
+      ) {
+        analytics['Comments'] = [
+          {
+            total: socialActions.commentsSummary.totalFirstLevelComments,
+            date: today,
+          },
+        ];
+      }
     }
 
     // Filter out empty analytics
@@ -701,9 +730,44 @@ export class LinkedinPageProvider
       }
     }
 
-    // For posts that didn't get share stats, fall back to socialActions
+    // Supplement Likes/Comments with socialActions per post when share stats
+    // are missing or report zero for those fields. See `postAnalytics` for the
+    // full reasoning — share statistics has a 24-48h aggregation delay and a
+    // bounded timeRange window, while socialActions returns the post's current
+    // cumulative totals and is authoritative for Likes and Comments.
+    //
+    // socialActions is only fetched when share stats did not cover Likes or
+    // Comments for that post, so the normal case (fresh share stats available)
+    // does not incur any extra API call.
+    // Note: when a supplement fires, a multi-day zero series like
+    // [{0,d1},{0,d2},{0,d3}] is replaced by a single snapshot [{N,today}].
+    // Aggregation and latest-total consumers are unaffected; per-day trend
+    // consumers (none today) would see a one-off collapse.
+    const allZero = (entry: AnalyticsData | undefined) =>
+      !entry || entry.data.every((d) => Number(d.total) === 0);
+
+    const replaceLabel = (
+      bucket: AnalyticsData[],
+      label: string,
+      value: number
+    ) => {
+      const idx = bucket.findIndex((a) => a.label === label);
+      const entry: AnalyticsData = {
+        label,
+        percentageChange: 0,
+        data: [{ total: String(value), date: today }],
+      };
+      if (idx >= 0) bucket[idx] = entry;
+      else bucket.push(entry);
+    };
+
     for (const postId of postIds) {
-      if (result[postId]?.length) continue;
+      if (!result[postId]) result[postId] = [];
+      const bucket = result[postId];
+
+      const needsLikes = allZero(bucket.find((a) => a.label === 'Likes'));
+      const needsComments = allZero(bucket.find((a) => a.label === 'Comments'));
+      if (!needsLikes && !needsComments) continue;
 
       try {
         const socialActionsUrl = `https://api.linkedin.com/v2/socialActions/${encodeURIComponent(
@@ -719,43 +783,31 @@ export class LinkedinPageProvider
           })
         ).json();
 
-        const analytics: AnalyticsData[] = [];
-
-        if (socialActions?.likesSummary?.totalLikes !== undefined) {
-          analytics.push({
-            label: 'Likes',
-            percentageChange: 0,
-            data: [
-              {
-                total: String(socialActions.likesSummary.totalLikes),
-                date: today,
-              },
-            ],
-          });
+        if (
+          needsLikes &&
+          socialActions?.likesSummary?.totalLikes !== undefined
+        ) {
+          replaceLabel(bucket, 'Likes', socialActions.likesSummary.totalLikes);
         }
 
         if (
+          needsComments &&
           socialActions?.commentsSummary?.totalFirstLevelComments !== undefined
         ) {
-          analytics.push({
-            label: 'Comments',
-            percentageChange: 0,
-            data: [
-              {
-                total: String(
-                  socialActions.commentsSummary.totalFirstLevelComments
-                ),
-                date: today,
-              },
-            ],
-          });
-        }
-
-        if (analytics.length > 0) {
-          result[postId] = analytics;
+          replaceLabel(
+            bucket,
+            'Comments',
+            socialActions.commentsSummary.totalFirstLevelComments
+          );
         }
       } catch {
         // socialActions may not be available for all posts
+      } finally {
+        // Placeholder bucket was created before we knew whether socialActions
+        // would yield anything usable — discard empty ones in either branch.
+        if (bucket.length === 0) {
+          delete result[postId];
+        }
       }
     }
 

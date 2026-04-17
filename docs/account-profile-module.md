@@ -209,9 +209,12 @@ Official API: `GET /v2/socialActions/{urn}`
 
 ### 5.3 LinkedIn Page (`linkedin-page`)
 
-Official API: `GET /v2/organizationalEntityShareStatistics`,
+Official API:
+`GET /v2/organizationalEntityShareStatistics`,
+`GET /v2/socialActions/{urn}`,
 `GET /v2/networkSizes/{org-urn}?edgeType=CompanyFollowedByMember`
 ([Share Statistics](https://learn.microsoft.com/en-us/linkedin/marketing/community-management/organizations/share-statistics),
+[Social Actions](https://learn.microsoft.com/en-us/linkedin/marketing/community-management/shares/social-actions-api),
 [Network Sizes](https://learn.microsoft.com/en-us/linkedin/marketing/community-management/organizations/network-sizes)).
 
 | Field | Value |
@@ -223,6 +226,30 @@ Official API: `GET /v2/organizationalEntityShareStatistics`,
 **Known quirk:** both `Impressions` and `Unique Impressions` labels are emitted
 and both match the `impression` rule. The loop assigns in emission order, so
 `stats.impressions` ends up holding the **Unique Impressions** value.
+
+**Likes / Comments dual-source strategy** (`postAnalytics` &
+`batchPostAnalytics`): `organizationalEntityShareStatistics` is the primary
+source because it yields per-day time series for Impressions / Clicks / Shares
+/ Engagement that `socialActions` cannot provide. However, share statistics
+has a 24-48h aggregation delay and is bounded by the requested `timeRange`, so
+recently-published posts (or posts whose engagement falls outside the 30-day
+window) can return `likeCount: 0` / `commentCount: 0` while LinkedIn's native
+UI correctly shows reactions and comments. To fix the resulting "shows 0 on
+Postiz, shows real numbers on LinkedIn" symptom, both analytics methods now
+also read `/v2/socialActions/{urn}` and supplement:
+
+- **When** share statistics returned no `Likes` entry OR returned an all-zero
+  series → replace with `socialActions.likesSummary.totalLikes` as a single
+  snapshot dated today.
+- Same rule for `Comments` ←
+  `socialActions.commentsSummary.totalFirstLevelComments`.
+- Impressions / Clicks / Shares / Engagement are **not** supplemented because
+  `socialActions` does not report them; keeping the time series from share
+  statistics is preferable even when values are zero.
+
+To minimize extra API calls, `socialActions` is only fetched per post when
+share stats failed to cover Likes or Comments for that post. Posts with
+healthy share statistics skip the supplement call entirely.
 
 ### 5.4 Facebook (`facebook`)
 
