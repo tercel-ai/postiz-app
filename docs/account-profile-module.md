@@ -109,6 +109,59 @@ Labels that do not match any of the keywords above are silently discarded. This
 is why several platform-native metrics (Views, Reach, Saves, Clicks, Upvotes,
 Shares, Boosts, Reposts, etc.) never appear in `stats` today.
 
+### 4.3 Data Freshness & Sync Timing
+
+Three sync points drive when values in `additionalSettings.account:*` and
+`stats.*` become current.
+
+| Trigger | What runs | Where it lives | Affects |
+| :--- | :--- | :--- | :--- |
+| **Connect / re-authorize an integration** | `DataTicksService.syncAccountMetricsById(id, skipCooldown=true)` awaited inline after `createOrUpdateIntegration`, capped at 5 s via `Promise.race` | `integrations.controller.ts` — the `POST /integrations/social/:integration/connect` handler | `additionalSettings.account:*` is populated **before the connect response returns**. Bypasses the pre-sync cooldown check, then primes the cooldown key after a successful sync so the immediately following `/integrations/list` does not re-call the provider. |
+| **Any call to `GET /integrations/list`** | `syncAccountMetricsById(id)` fire-and-forget for every integration in the org (no `await`) | `integrations.controller.ts:121` | Opportunistic refresh. Each integration is serialized by the `account-metrics:cooldown:{id}` Redis key for 1 hour, so repeated list calls do not hammer provider APIs. |
+| **Daily Temporal cron at UTC 00:05** | `DataTicksService.syncDailyTicks()` → `_syncAccountMetrics()` for all active integrations | `data-ticks.service.ts:70` | Backstop that keeps stale accounts fresh even if no user interaction happens. |
+
+**Post-level `stats.*` has a separate cache**: results of
+`getPostsLevelAnalytics()` are cached in Redis for 1 hour under
+`posts-analytics:{orgId}:{integrationId}:30` and are only computed on demand
+when the profile page loads — never pre-warmed.
+
+#### Timing Table — What's In `additionalSettings` At Each Moment
+
+| Moment | X | linkedin-page | linkedin (personal) |
+| :--- | :--- | :--- | :--- |
+| Immediately after connect / re-auth returns | `Verified`, `account:{followers,following,posts,listed}` | `account:followers` | `[]` (no `accountMetrics` implementation) |
+| After first user-facing post goes through Postiz + `GET /integrations/profile/:id` | `stats.*` populated for the 6 matching fields | `stats.{impressions, likes}` | `stats.{impressions, likes}` |
+| Next UTC 00:05 | Full refresh | Full refresh | Still `[]` |
+
+#### Why `skipCooldown=true` On Connect
+
+The 1-hour Redis cooldown exists to serialize background syncs triggered by
+`/integrations/list`. Without `skipCooldown`, a just-connected integration
+whose cooldown key was recently set (e.g. by a prior disable/re-enable cycle,
+or by an admin using the `/admin/dashboard/account-metrics/:id` endpoint
+earlier) would silently skip the sync and ship stale data. Bypassing the lock
+at the explicit connect/re-auth moment is safe because the user is already
+waiting on one provider API call (OAuth exchange) — one more is bounded.
+
+After a successful forced sync, `syncAccountMetricsById` primes the cooldown
+key regardless of the `skipCooldown` flag. This prevents the
+`/integrations/list` fire-and-forget loop from immediately re-calling the
+provider for the same integration within the hour.
+
+#### Failure & Timeout Handling
+
+The inline sync is wrapped in `try/catch` and `Promise.race` with a 5-second
+timeout. The connect response still succeeds in any of these cases:
+
+- `accountMetrics()` throws or the provider API returns an error
+- Provider API stalls past 5 s (timeout rejects with
+  `account-metrics-sync-timeout-5s`)
+- Provider has no `accountMetrics()` implementation (returns `null` fast)
+
+A `[integrations.connect] immediate account metrics sync failed` warning is
+logged in each failure case. The next `/integrations/list` call or the daily
+UTC 00:05 cron will backfill.
+
 ## 5. Platform Data Inventory
 
 Each table has three rows with different scopes — re-read §4.1 if the
@@ -291,27 +344,57 @@ Official API: `app.bsky.actor.getProfile`, `app.bsky.feed.getPosts`
 | `dribbble` | — | stub (returns `[]`) | same as above |
 | `nostr`, `vk` | — | — | same as above |
 
-## 6. `stats` Availability At A Glance
+## 6. Data Availability At A Glance
 
-The table below shows which `stats.*` fields are populated per provider. **All
-checkmarks refer to Postiz-published posts in the last 30 days**, never to the
-account's native activity on the platform. For account-wide totals, read the
-corresponding `account:*` key in `additionalSettings`.
+The two tables below cover the two data scopes separately. The response
+carries **both** for every supported provider; pick the right table based on
+what the UI needs to show.
 
-| Platform | followers | impressions | likes | replies | retweets | quotes | bookmarks |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **x**             | – | YES | YES | YES | YES | YES | YES |
-| **linkedin**      | – | YES | YES | –   | –   | –   | –   |
-| **linkedin-page** | – | YES\* | YES | –   | –   | –   | –   |
-| **facebook**      | – | YES | –   | –   | –   | –   | –   |
-| **instagram**     | – | YES | YES | –   | –   | –   | –   |
-| **threads**       | – | –   | YES | YES | –   | YES | –   |
-| **youtube**       | – | –   | YES | –   | –   | –   | –   |
-| **tiktok**        | – | –   | YES | –   | –   | –   | –   |
-| **pinterest**     | – | YES | –   | –   | –   | –   | –   |
-| **reddit**        | – | –   | –   | –   | –   | –   | –   |
-| **mastodon**      | – | –   | –   | YES | –   | –   | –   |
-| **bluesky**       | – | –   | YES | YES | –   | YES | –   |
+### 6.1 Account-Wide Totals — `additionalSettings.account:*`
+
+Source: `accountMetrics()`. These are lifetime/current totals as reported by
+the platform for the entire account (not scoped to Postiz).
+
+| Platform | followers | following | posts | views | Other `account:*` |
+| :--- | :---: | :---: | :---: | :---: | :--- |
+| **x**             | YES | YES | YES | –   | `Verified` (checkbox), `listed` |
+| **linkedin**      | –   | –   | –   | –   | — (no `accountMetrics` implemented) |
+| **linkedin-page** | YES | –   | –   | –   | — |
+| **facebook**      | YES | –   | –   | –   | — |
+| **instagram**     | YES | –   | YES | –   | — |
+| **threads**       | YES | –   | –   | –   | — |
+| **youtube**       | YES | –   | YES | YES | — (`followers` = subscribers, `posts` = videos) |
+| **tiktok**        | YES | YES | YES | –   | `likes` (lifetime likes received) |
+| **pinterest**     | YES | –   | YES | YES | — |
+| **reddit**        | –   | –   | –   | –   | `karma`, `linkKarma`, `commentKarma` |
+| **mastodon**      | YES | YES | YES | –   | — |
+| **bluesky**       | YES | YES | YES | –   | — |
+
+Platforms with no analytics integration (`discord`, `slack`, `telegram`,
+`dribbble`, `nostr`, `vk`) have an empty `additionalSettings` array.
+
+### 6.2 Postiz Post Aggregates — `stats.*` (Last 30 Days)
+
+Source: `batchPostAnalytics()` / `postAnalytics()`. **Every checkmark is a sum
+across Postiz-published posts only**, not the account's native activity.
+
+| Platform | impressions | likes | replies | retweets | quotes | bookmarks |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **x**             | YES | YES | YES | YES | YES | YES |
+| **linkedin**      | YES | YES | –   | –   | –   | –   |
+| **linkedin-page** | YES\* | YES | –   | –   | –   | –   |
+| **facebook**      | YES | –   | –   | –   | –   | –   |
+| **instagram**     | YES | YES | –   | –   | –   | –   |
+| **threads**       | –   | YES | YES | –   | YES | –   |
+| **youtube**       | –   | YES | –   | –   | –   | –   |
+| **tiktok**        | –   | YES | –   | –   | –   | –   |
+| **pinterest**     | YES | –   | –   | –   | –   | –   |
+| **reddit**        | –   | –   | –   | –   | –   | –   |
+| **mastodon**      | –   | –   | YES | –   | –   | –   |
+| **bluesky**       | –   | YES | YES | –   | YES | –   |
+
+`stats.followers` is intentionally omitted — it is defined in the response
+shape but **is always `null` for every provider** (see §7 item 1).
 
 \* `Unique Impressions` label overrides `Impressions` (see §5.3).
 

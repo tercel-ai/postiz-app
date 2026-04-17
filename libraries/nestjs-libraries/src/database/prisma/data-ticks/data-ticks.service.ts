@@ -53,8 +53,8 @@ export class DataTicksService {
   private static readonly ACCOUNT_METRICS_COOLDOWN = 3600; // 1 hour
 
   async syncAccountMetricsById(integrationId: string, skipCooldown = false): Promise<Record<string, number> | null> {
+    const cooldownKey = `account-metrics:cooldown:${integrationId}`;
     if (!skipCooldown) {
-      const cooldownKey = `account-metrics:cooldown:${integrationId}`;
       const locked = await ioRedis.get(cooldownKey);
       if (locked) return null;
       await ioRedis.set(cooldownKey, '1', 'EX', DataTicksService.ACCOUNT_METRICS_COOLDOWN);
@@ -64,7 +64,17 @@ export class DataTicksService {
     if (!integration || integration.deletedAt || integration.disabled) {
       return null;
     }
-    return this.syncSingleAccountMetrics(integration);
+    const metrics = await this.syncSingleAccountMetrics(integration);
+
+    // Prime the cooldown key after a successful forced sync so any immediately
+    // following background sync (e.g. the `/integrations/list` fire-and-forget
+    // loop right after connect/re-auth) skips this integration and avoids a
+    // duplicate provider API call.
+    if (skipCooldown && metrics) {
+      await ioRedis.set(cooldownKey, '1', 'EX', DataTicksService.ACCOUNT_METRICS_COOLDOWN);
+    }
+
+    return metrics;
   }
 
   async syncDailyTicks(targetDate?: Date) {

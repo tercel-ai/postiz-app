@@ -677,6 +677,32 @@ export class IntegrationsController {
         console.log(err);
       });
 
+    // Immediately sync account-level metrics so the first `/integrations/list`
+    // response after connect / re-auth already contains up-to-date values
+    // (followers, posts, etc.). `skipCooldown=true` bypasses the 1-hour Redis
+    // lock that otherwise throttles background syncs. Providers without an
+    // `accountMetrics()` implementation return `null` and cost nothing.
+    //
+    // The call is capped at 5 s so a stalled provider API cannot hold the
+    // OAuth connect response. If the timeout fires, the next
+    // `/integrations/list` call or the daily cron will backfill.
+    try {
+      await Promise.race([
+        this._dataTicksService.syncAccountMetricsById(createUpdate.id, true),
+        new Promise((_, reject) =>
+          setTimeout(
+            () => reject(new Error('account-metrics-sync-timeout-5s')),
+            5000
+          )
+        ),
+      ]);
+    } catch (err) {
+      console.warn(
+        `[integrations.connect] immediate account metrics sync failed for ${createUpdate.id}:`,
+        (err as Error)?.message || err
+      );
+    }
+
     return {
       ...createUpdate,
       onboarding: onboarding === 'true',
