@@ -44,7 +44,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
   identifier = 'x';
   name = 'X';
   isBetweenSteps = false;
-  scopes = ['tweet.read', 'tweet.write', 'users.read', 'offline.access'];
+  scopes = ['tweet.read', 'tweet.write', 'users.read', 'offline.access', 'media.write'];
   // OAuth 2.0 access tokens expire in ~2 hours; start the Temporal refresh workflow
   // so tokens are rotated proactively and never actually expire in practice.
   // OAuth 1.0a tokens are detected by isTokenPermanent() and bypassed entirely.
@@ -701,22 +701,41 @@ export class XProvider extends SocialAbstract implements SocialProvider {
           p?.media?.flatMap(async (m) => {
             return {
               id: await this.runInConcurrent(
-                async () =>
-                  client.v2.uploadMedia(
-                    m.path.indexOf('mp4') > -1
-                      ? Buffer.from(await readOrFetch(m.path))
-                      : await sharp(await readOrFetch(m.path), {
-                          animated: lookup(m.path) === 'image/gif',
-                        })
-                          .resize({
-                            width: 1000,
-                          })
-                          .gif()
-                          .toBuffer(),
-                    {
-                      media_type: (lookup(m.path) || '') as any,
-                    }
-                  ),
+                async () => {
+                  const mediaBuffer = Buffer.from(await readOrFetch(m.path));
+                  const mimeType = lookup(m.path) || 'image/jpeg';
+                  const isVideo = m.path.toLowerCase().endsWith('.mp4') || mimeType === 'video/mp4';
+
+                  if (isVideo) {
+                    return client.v2.uploadMedia(mediaBuffer, {
+                      media_type: 'video/mp4',
+                      media_category: 'tweet_video' as any,
+                    });
+                  }
+
+                  const isGif = mimeType === 'image/gif';
+                  const sharped = sharp(mediaBuffer, { animated: isGif })
+                    .resize({ width: 1000, withoutEnlargement: true });
+
+                  let outputBuffer: Buffer;
+                  let category: any = 'tweet_image';
+                  let finalMimeType: any = mimeType;
+
+                  if (isGif) {
+                    outputBuffer = await sharped.gif().toBuffer();
+                    category = 'tweet_gif';
+                  } else if (mimeType === 'image/png') {
+                    outputBuffer = await sharped.png().toBuffer();
+                  } else {
+                    outputBuffer = await sharped.jpeg().toBuffer();
+                    finalMimeType = 'image/jpeg';
+                  }
+
+                  return client.v2.uploadMedia(outputBuffer, {
+                    media_type: finalMimeType,
+                    media_category: category,
+                  });
+                },
                 true
               ),
               postId: p.id,
@@ -725,7 +744,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
         )
       )
     ).reduce((acc, val) => {
-      if (!val?.id) {
+      if (!val?.id || (typeof val.id === 'object' && (val.id as any).err)) {
         return acc;
       }
 
