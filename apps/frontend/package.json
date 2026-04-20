@@ -8,8 +8,9 @@
     "dev:local": "dotenv -e ../../.env -- sh -c 'next dev -p 4200 --experimental-https -H $(node -e \"console.log(new URL(process.env.FRONTEND_URL).hostname)\")'",
     "build": "next build",
     "build:sentry": "dotenv -e ../../.env -- next build",
-    "start": "dotenv -e ../../.env -- next start -p 4200",
-    "pm2": "pm2 start pnpm --name frontend -- start"
+    "start": "dotenv -e ../../.env -- next start -p ${FRONTEND_PORT:-4200}",
+    "pm2": "pm2 start pnpm --name frontend -- start",
+    "pm2:prod": "pm2 start pnpm --name frontend-prod -- start"
   },
   "keywords": [],
   "author": "",
