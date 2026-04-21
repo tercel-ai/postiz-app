@@ -37,8 +37,12 @@ const ON_DEMAND_WORKFLOW_TYPES = [
 async function main() {
   const dryRun = !process.argv.includes('--execute');
   const onlyPosts = process.argv.includes('--only-posts');
-  const address = process.env.TEMPORAL_ADDRESS || 'localhost:7233';
-  const namespace = process.env.TEMPORAL_NAMESPACE || 'default';
+
+  const argNamespace = process.argv.find((a) => a.startsWith('--namespace='))?.split('=')[1];
+  const argAddress = process.argv.find((a) => a.startsWith('--address='))?.split('=')[1];
+
+  const address = argAddress || process.env.TEMPORAL_ADDRESS || 'localhost:7233';
+  const namespace = argNamespace || process.env.TEMPORAL_NAMESPACE || 'default';
 
   const workflowTypes = onlyPosts
     ? [...POST_WORKFLOW_TYPES, ...INFRA_WORKFLOW_TYPES]
