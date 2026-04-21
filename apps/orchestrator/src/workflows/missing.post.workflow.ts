@@ -1,7 +1,7 @@
 import { proxyActivities, sleep } from '@temporalio/workflow';
 import { PostActivity } from '@gitroom/orchestrator/activities/post.activity';
 
-const { searchForMissingThreeHoursPosts } = proxyActivities<PostActivity>({
+const { searchForMissingThreeHoursPosts, markStaleQueuePostsAsError } = proxyActivities<PostActivity>({
   startToCloseTimeout: '10 minute',
   retry: {
     maximumAttempts: 3,
@@ -12,8 +12,10 @@ const { searchForMissingThreeHoursPosts } = proxyActivities<PostActivity>({
 
 export async function missingPostWorkflow() {
   await searchForMissingThreeHoursPosts();
+  await markStaleQueuePostsAsError();
   while (true) {
     await sleep('1 hour');
     await searchForMissingThreeHoursPosts();
+    await markStaleQueuePostsAsError();
   }
 }

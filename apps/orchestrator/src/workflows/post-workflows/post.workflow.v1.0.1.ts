@@ -26,6 +26,22 @@ const proxyTaskQueue = (taskQueue: string, noRetry = false) => {
   });
 };
 
+// Heavy activities (postSocial, postComment) get a longer timeout to accommodate
+// large media uploads (LinkedIn/X videos) that can exceed 10 minutes.
+const proxyTaskQueueHeavy = (taskQueue: string, noRetry = false) => {
+  return proxyActivities<PostActivity>({
+    startToCloseTimeout: '30 minute',
+    taskQueue,
+    retry: noRetry
+      ? { maximumAttempts: 1 }
+      : {
+          maximumAttempts: 3,
+          backoffCoefficient: 1,
+          initialInterval: '2 minutes',
+        },
+  });
+};
+
 const {
   getPostsList,
   inAppNotification,
@@ -69,8 +85,6 @@ export async function postWorkflowV101({
 
   // Dynamic task queue, for concurrency
   const {
-    postSocial,
-    postComment,
     postThreadFinisher,
     getIntegrationById,
     refreshToken,
@@ -79,6 +93,8 @@ export async function postWorkflowV101({
     processInternalPlug,
     processPlug,
   } = proxyTaskQueue(taskQueue, noRetry);
+
+  const { postSocial, postComment } = proxyTaskQueueHeavy(taskQueue, noRetry);
 
   // get all the posts and comments to post
   const postsListBefore = await getPostsList(organizationId, postId);
@@ -152,6 +168,11 @@ export async function postWorkflowV101({
         error: 'Integration requires reconnection',
       });
     }
+    // Non-recurring posts must be explicitly marked ERROR — without this they
+    // remain in QUEUE indefinitely and appear "pending" to the user.
+    if (!isRecurring) {
+      await changeState(postId, 'ERROR', 'Integration requires reconnection', postsListBefore);
+    }
     if (isRecurring) {
       await continueAsNew<typeof postWorkflowV101>({ taskQueue, postId, organizationId });
     }
@@ -173,6 +194,10 @@ export async function postWorkflowV101({
         state: 'ERROR',
         error: 'Integration is disabled',
       });
+    }
+    // Same as above — non-recurring posts must be explicitly marked ERROR.
+    if (!isRecurring) {
+      await changeState(postId, 'ERROR', 'Integration is disabled', postsListBefore);
     }
     if (isRecurring) {
       await continueAsNew<typeof postWorkflowV101>({ taskQueue, postId, organizationId });
@@ -204,6 +229,53 @@ export async function postWorkflowV101({
     const before = postsResults.length;
     let lastErr: unknown = null;
 
+    // When i=0 (main post) fails, mark the main post ERROR (covers the whole group
+    // since the main post was never published).
+    // When i>0 (thread item) fails, the main post is already PUBLISHED — mark only
+    // the failed thread item and any remaining unposted items as ERROR.
+    // Loop starts at j=i, so already-PUBLISHED items (j<i) are never touched.
+    const markError = async (errMsg: string) => {
+      if (i === 0) {
+        await changeState(postsList[0].id, 'ERROR', errMsg, postsList);
+      } else {
+        for (let j = i; j < postsList.length; j++) {
+          const reason = j === i ? errMsg : 'Thread chain broken — previous item failed to post';
+          await changeState(postsList[j].id, 'ERROR', reason, postsList);
+        }
+      }
+    };
+
+    // For recurring posts: finalize the cycle clone with the correct state.
+    // When i=0 fails, the main post was never published → ERROR.
+    // When i>0 fails, the main post was already published → PUBLISHED (thread
+    // item failure is tracked separately via markError on the thread posts).
+    // TODO(webhooks): when i>0 fails, sendWebhooks/plugs should still fire for
+    // the successfully-published main post. Currently the error paths return early
+    // before reaching sendWebhooks. Restructuring requires extracting the thread
+    // loop — defer until a full workflow refactor.
+    const finalizeCycle = async (errMsg: string) => {
+      if (!isRecurring || !cycleCloneId) return;
+      if (i === 0) {
+        await finalizeRecurringCycle(postId, cycleCloneId, publishDateStr, {
+          state: 'ERROR',
+          error: errMsg,
+        });
+      } else {
+        await finalizeRecurringCycle(postId, cycleCloneId, publishDateStr, {
+          state: 'PUBLISHED',
+          releaseId: postsResults[0].postId,
+          releaseURL: postsResults[0].releaseURL,
+        });
+      }
+    };
+
+    // Apply thread delay once, BEFORE the retry loop — retries should not re-wait.
+    // delay field unit: minutes (1 → 60 000 ms). Note: plug delays elsewhere in
+    // this workflow are already in milliseconds and do NOT multiply by 60000.
+    if (i > 0 && postsList[i].delay) {
+      await sleep(60000 * Math.max(0, Number(postsList[i].delay ?? 0)));
+    }
+
     // Retry loop: noRetry (postNow + POST_NOW_RETRY=false) gets 1 attempt,
     // otherwise 5 attempts (postNow+retry=true or scheduled posts).
     const maxAttempts = noRetry ? [undefined] : iterate;
@@ -219,10 +291,6 @@ export async function postWorkflowV101({
 
           // then post the comments if any
         } else {
-          if (postsList[i].delay) {
-            await sleep(60000 * Math.max(0, Number(postsList[i].delay ?? 0)));
-          }
-
           postsResults.push(
             ...(await postComment(
               postsResults[0].postId,
@@ -259,13 +327,8 @@ export async function postWorkflowV101({
         ) {
           const refresh = await refreshToken(post.integration);
           if (!refresh || !refresh.accessToken) {
-            await changeState(postsList[0].id, 'ERROR', 'Token refresh failed — please reconnect your account', postsList);
-            if (isRecurring && cycleCloneId) {
-              await finalizeRecurringCycle(postId, cycleCloneId, publishDateStr, {
-                state: 'ERROR',
-                error: 'Token refresh failed',
-              });
-            }
+            await markError('Token refresh failed — please reconnect your account');
+            await finalizeCycle('Token refresh failed');
             if (isRecurring) {
               await continueAsNew<typeof postWorkflowV101>({ taskQueue, postId, organizationId });
             }
@@ -276,10 +339,6 @@ export async function postWorkflowV101({
           continue;
         }
 
-        // Log error for observability.  Intermediate failures don't change
-        // the post's state yet to avoid false failures.
-        await logError(postsList[0].id, err, postsList);
-
         // specific case for bad body errors — no point retrying
         if (
           err instanceof ActivityFailure &&
@@ -287,15 +346,9 @@ export async function postWorkflowV101({
           err.cause.type === 'bad_body'
         ) {
           const errMsg = err.cause.message || err.cause.type || 'Unknown error';
-          if (isRecurring && cycleCloneId) {
-            await finalizeRecurringCycle(postId, cycleCloneId, publishDateStr, {
-              state: 'ERROR',
-              error: errMsg,
-            });
-          }
-          // Pass the friendly message, not the raw error — full details
-          // are already saved by logError() above for debugging.
-          await changeState(postsList[0].id, 'ERROR', errMsg, postsList);
+          await logError(postsList[i].id, err, postsList);
+          await finalizeCycle(errMsg);
+          await markError(errMsg);
           await inAppNotification(
             post.organizationId,
             `Error posting${i === 0 ? ' ' : ' comments '}on ${
@@ -314,22 +367,18 @@ export async function postWorkflowV101({
           return false;
         }
 
-        // Other errors: don't record failure yet — there may be more retries.
+        // Other errors: don't log yet — there may be more retries (log once at exhaustion).
       }
     }
 
     if (postsResults.length === before) {
-      // all retries exhausted without success
+      // all retries exhausted without success — log once here (not per retry attempt)
       const errMsg = lastErr instanceof ActivityFailure && lastErr.cause instanceof ApplicationFailure
         ? lastErr.cause.message || lastErr.cause.type || 'Unknown error'
-        : String(lastErr);
-      if (isRecurring && cycleCloneId) {
-        await finalizeRecurringCycle(postId, cycleCloneId, publishDateStr, {
-          state: 'ERROR',
-          error: errMsg,
-        });
-      }
-      await changeState(postsList[0].id, 'ERROR', errMsg, postsList);
+        : String(lastErr ?? 'Unknown error');
+      await logError(postsList[i].id, lastErr, postsList);
+      await finalizeCycle(errMsg);
+      await markError(errMsg);
       if (isRecurring) {
         await continueAsNew<typeof postWorkflowV101>({ taskQueue, postId, organizationId });
       }

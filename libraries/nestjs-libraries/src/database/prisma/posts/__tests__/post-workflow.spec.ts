@@ -569,6 +569,211 @@ describe('PostsService.changeState — recurring post protection', () => {
 
     expect(mocks.postRepository.changeState).toHaveBeenCalledWith('post-1', 'ERROR', 'some error', undefined);
   });
+
+  // Regression: thread items (parentPostId != null) must NOT be protected by the
+  // recurring-original guard — only the original (parentPostId=null, intervalInDays>0)
+  // is protected. When a workflow calls markError for a thread item i>0, changeState
+  // must actually update the DB record.
+  it('should set ERROR on a recurring-group THREAD ITEM (parentPostId set)', async () => {
+    const threadItem = makePost({
+      id: 'thread-item-1',
+      parentPostId: 'main-post-1',   // ← thread item
+      intervalInDays: null,          // thread items never have intervalInDays
+    });
+    mocks.postRepository.getPostById.mockResolvedValue(threadItem);
+    mocks.postRepository.changeState.mockResolvedValue(undefined);
+
+    await service.changeState('thread-item-1', 'ERROR' as any, 'thread failed');
+
+    // Must update, NOT no-op — the guard only applies to recurring originals
+    expect(mocks.postRepository.changeState).toHaveBeenCalledWith(
+      'thread-item-1', 'ERROR', 'thread failed', undefined
+    );
+  });
+
+  it('should set PUBLISHED on a thread item via updatePost', async () => {
+    // updatePost is called by the workflow for each successfully-posted item
+    mocks.postRepository.updatePost.mockResolvedValue(undefined);
+
+    await (mocks.postRepository as any).updatePost('thread-item-1', 'tw-999', 'https://x.com/status/999');
+
+    expect(mocks.postRepository.updatePost).toHaveBeenCalledWith(
+      'thread-item-1', 'tw-999', 'https://x.com/status/999'
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Regression: thread post failure — finalizeRecurringCycle must use PUBLISHED
+// when the main post (i=0) succeeded before the thread item (i>0) failed.
+// ---------------------------------------------------------------------------
+
+describe('PostsService.finalizeRecurringCycle — thread failure uses PUBLISHED state', () => {
+  let mocks: ReturnType<typeof createServiceMocks>;
+  let service: PostsService;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks = createServiceMocks();
+    service = createService(mocks);
+  });
+
+  it('records PUBLISHED for the cycle clone when main post succeeded (i>0 failed)', async () => {
+    // Simulate: main post published tw-123, thread item failed.
+    // The workflow calls finalizeCycle(errMsg) where i=1 → should use PUBLISHED.
+    const recurringPost = makeRecurringPost();
+    mocks.postRepository.getPostById.mockResolvedValue(recurringPost);
+
+    // The workflow calls finalizeRecurringCycle with PUBLISHED + main post IDs
+    await service.finalizeRecurringCycle(
+      'post-1', 'clone-1', recurringPost.publishDate,
+      {
+        state: 'PUBLISHED',
+        releaseId: 'tw-123',
+        releaseURL: 'https://twitter.com/user/status/123',
+      }
+    );
+
+    // clone must be stamped PUBLISHED, not ERROR
+    expect(mocks.postRepository.finalizeCycleClone).toHaveBeenCalledWith('clone-1', {
+      state: 'PUBLISHED',
+      releaseId: 'tw-123',
+      releaseURL: 'https://twitter.com/user/status/123',
+    });
+    // publishDate advances for the next cycle
+    expect(mocks.postRepository.advancePublishDate).toHaveBeenCalled();
+  });
+
+  it('records ERROR for the cycle clone when main post failed (i=0 failed)', async () => {
+    const recurringPost = makeRecurringPost();
+    mocks.postRepository.getPostById.mockResolvedValue(recurringPost);
+
+    await service.finalizeRecurringCycle(
+      'post-1', 'clone-1', recurringPost.publishDate,
+      { state: 'ERROR', error: 'Rate limit exceeded' }
+    );
+
+    expect(mocks.postRepository.finalizeCycleClone).toHaveBeenCalledWith('clone-1', {
+      state: 'ERROR',
+      error: 'Rate limit exceeded',
+    });
+    // Still advances — the next cycle must not be blocked by this failure
+    expect(mocks.postRepository.advancePublishDate).toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Regression: refreshNeeded/disabled paths must mark non-recurring posts ERROR.
+// Before this fix, the workflow returned early without calling changeState,
+// leaving posts stuck in QUEUE forever ("pending" state in the UI).
+// ---------------------------------------------------------------------------
+
+describe('PostsService.changeState — refreshNeeded / disabled early-exit', () => {
+  let mocks: ReturnType<typeof createServiceMocks>;
+  let service: PostsService;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks = createServiceMocks();
+    service = createService(mocks);
+  });
+
+  it('marks non-recurring post ERROR when integration requires reconnection', async () => {
+    const post = makePost({ refreshNeeded: true });
+    mocks.postRepository.getPostById.mockResolvedValue(post);
+    mocks.postRepository.changeState.mockResolvedValue(undefined);
+
+    await service.changeState('post-1', 'ERROR' as any, 'Integration requires reconnection');
+
+    expect(mocks.postRepository.changeState).toHaveBeenCalledWith(
+      'post-1', 'ERROR', 'Integration requires reconnection', undefined
+    );
+  });
+
+  it('marks non-recurring post ERROR when integration is disabled', async () => {
+    const post = makePost({ disabled: true });
+    mocks.postRepository.getPostById.mockResolvedValue(post);
+    mocks.postRepository.changeState.mockResolvedValue(undefined);
+
+    await service.changeState('post-1', 'ERROR' as any, 'Integration is disabled');
+
+    expect(mocks.postRepository.changeState).toHaveBeenCalledWith(
+      'post-1', 'ERROR', 'Integration is disabled', undefined
+    );
+  });
+
+  it('does NOT mark recurring original ERROR (stays QUEUE for next cycle)', async () => {
+    const post = makeRecurringPost({ parentPostId: null });
+    mocks.postRepository.getPostById.mockResolvedValue(post);
+
+    await service.changeState('post-1', 'ERROR' as any, 'Integration requires reconnection');
+
+    expect(mocks.postRepository.changeState).not.toHaveBeenCalled();
+    expect(mocks.postRepository.logError).toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tests: markStaleQueuePostsAsError — stale QUEUE sweep
+// ---------------------------------------------------------------------------
+
+describe('PostsRepository.markStaleQueuePostsAsError', () => {
+  let repo: any;
+  let mockPrismaPost: any;
+
+  beforeEach(() => {
+    mockPrismaPost = {
+      updateMany: vi.fn().mockResolvedValue({ count: 0 }),
+    };
+
+    repo = new PostsRepository(
+      { model: { post: mockPrismaPost } } as any,
+    );
+  });
+
+  it('marks stale non-recurring QUEUE posts as ERROR', async () => {
+    mockPrismaPost.updateMany.mockResolvedValue({ count: 3 });
+
+    const count = await repo.markStaleQueuePostsAsError();
+
+    expect(count).toBe(3);
+    const call = mockPrismaPost.updateMany.mock.calls[0][0];
+    expect(call.where.state).toBe('QUEUE');
+    expect(call.where.intervalInDays).toBe(null);
+    expect(call.where.parentPostId).toBe(null);
+    expect(call.data.state).toBe('ERROR');
+  });
+
+  it('excludes recurring originals (intervalInDays set)', async () => {
+    mockPrismaPost.updateMany.mockResolvedValue({ count: 0 });
+
+    await repo.markStaleQueuePostsAsError();
+
+    const call = mockPrismaPost.updateMany.mock.calls[0][0];
+    // intervalInDays: null means only non-recurring posts are targeted
+    expect(call.where.intervalInDays).toBe(null);
+  });
+
+  it('excludes thread children (parentPostId set)', async () => {
+    mockPrismaPost.updateMany.mockResolvedValue({ count: 0 });
+
+    await repo.markStaleQueuePostsAsError();
+
+    const call = mockPrismaPost.updateMany.mock.calls[0][0];
+    expect(call.where.parentPostId).toBe(null);
+  });
+
+  it('only targets posts older than 7 days', async () => {
+    mockPrismaPost.updateMany.mockResolvedValue({ count: 0 });
+
+    await repo.markStaleQueuePostsAsError();
+
+    const call = mockPrismaPost.updateMany.mock.calls[0][0];
+    const cutoff = call.where.publishDate.lt as Date;
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    // cutoff should be approximately 7 days ago (within 5 seconds)
+    expect(Math.abs(cutoff.getTime() - sevenDaysAgo.getTime())).toBeLessThan(5000);
+  });
 });
 
 // ---------------------------------------------------------------------------

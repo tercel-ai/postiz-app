@@ -124,6 +124,14 @@ export class PostsService {
     return this._postRepository.claimPostForPublishing(id, claimToken);
   }
 
+  async resetClaimForPost(id: string): Promise<void> {
+    return this._postRepository.resetClaimForPost(id);
+  }
+
+  async markStaleQueuePostsAsError(): Promise<number> {
+    return this._postRepository.markStaleQueuePostsAsError();
+  }
+
   async updatePost(id: string, postId: string, releaseURL: string) {
     // Defense-in-depth: recurring originals must NEVER be directly published.
     // They use the clone-per-cycle mechanism (prepareRecurringCycle + finalizeRecurringCycle).

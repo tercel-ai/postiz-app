@@ -45,6 +45,10 @@ export class PostActivity {
   async searchForMissingThreeHoursPosts() {
     const list = await this._postService.searchForMissingThreeHoursPosts();
     for (const post of list) {
+      // Reset any orphaned claim token before signaling/starting the workflow.
+      // Safe for in-flight workflows: they use Temporal event history for the
+      // claim result, not the DB value, so resetting here can't cause duplicates.
+      await this._postService.resetClaimForPost(post.id);
       await this._temporalService.client
         .getRawClient()
         .workflow.signalWithStart('postWorkflowV101', {
@@ -74,6 +78,11 @@ export class PostActivity {
           ]),
         });
     }
+  }
+
+  @ActivityMethod()
+  async markStaleQueuePostsAsError() {
+    return this._postService.markStaleQueuePostsAsError();
   }
 
   @ActivityMethod()

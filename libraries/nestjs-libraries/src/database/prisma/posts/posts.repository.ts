@@ -65,6 +65,17 @@ export class PostsRepository {
               lt: dayjs.utc().subtract(2, 'hour').toDate(),
             },
           },
+          // Non-recurring posts stuck in the past (orchestrator was down >2h).
+          // Recovery window: up to 7 days back.  Posts older than that are
+          // swept to ERROR by markStaleQueuePostsAsError.
+          {
+            intervalInDays: null,
+            sourcePostId: null,
+            publishDate: {
+              gte: dayjs.utc().subtract(7, 'day').toDate(),
+              lt: dayjs.utc().subtract(2, 'hour').toDate(),
+            },
+          },
         ],
         state: 'QUEUE',
         deletedAt: null,
@@ -852,6 +863,31 @@ export class PostsRepository {
         releaseId: null,
       },
     });
+  }
+
+  /**
+   * Mark non-recurring QUEUE posts whose publishDate is over 7 days old as ERROR.
+   * These fell outside the recovery window and will never be published.
+   * Excludes recurring originals (intervalInDays set) and thread children (parentPostId set).
+   */
+  async markStaleQueuePostsAsError(): Promise<number> {
+    const cutoff = dayjs.utc().subtract(7, 'day').toDate();
+    const result = await this._post.model.post.updateMany({
+      where: {
+        state: 'QUEUE',
+        deletedAt: null,
+        parentPostId: null,
+        intervalInDays: null,
+        publishDate: {
+          lt: cutoff,
+        },
+      },
+      data: {
+        state: 'ERROR',
+        error: 'Post was never published — it fell outside the recovery window. Please reschedule.',
+      },
+    });
+    return result.count;
   }
 
   /**
