@@ -774,6 +774,77 @@ describe('PostsRepository.markStaleQueuePostsAsError', () => {
     // cutoff should be approximately 7 days ago (within 5 seconds)
     expect(Math.abs(cutoff.getTime() - sevenDaysAgo.getTime())).toBeLessThan(5000);
   });
+
+  it('clears releaseId so stale claim tokens do not leak to clients', async () => {
+    mockPrismaPost.updateMany.mockResolvedValue({ count: 0 });
+
+    await repo.markStaleQueuePostsAsError();
+
+    const call = mockPrismaPost.updateMany.mock.calls[0][0];
+    expect(call.data.releaseId).toBe(null);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tests: changeState — claim-token cleanup on ERROR
+// Regression: non-recurring posts hold a `claim_*` lock token in `releaseId`
+// while publishing. If publish fails and the row flips to ERROR without
+// clearing it, the token leaks via the calendar API (which selects releaseId).
+// ---------------------------------------------------------------------------
+
+describe('PostsRepository.changeState — claim-token cleanup', () => {
+  let repo: any;
+  let mockPrismaPost: any;
+  let mockPrismaErrors: any;
+
+  beforeEach(() => {
+    mockPrismaPost = {
+      update: vi.fn().mockResolvedValue({
+        id: 'post-1',
+        organizationId: 'org-1',
+        integration: { providerIdentifier: 'x' },
+      }),
+    };
+    mockPrismaErrors = { create: vi.fn() };
+
+    repo = new PostsRepository(
+      { model: { post: mockPrismaPost } } as any,
+      { model: { popularPosts: {} } } as any,
+      { model: { comments: {} } } as any,
+      { model: { tags: {} } } as any,
+      { model: { tagsPosts: {} } } as any,
+      { model: { errors: mockPrismaErrors } } as any,
+    );
+  });
+
+  it('clears releaseId when transitioning to ERROR (no body)', async () => {
+    await repo.changeState('post-1', 'ERROR', '403 Forbidden');
+
+    const call = mockPrismaPost.update.mock.calls[0][0];
+    expect(call.where).toEqual({ id: 'post-1' });
+    expect(call.data.state).toBe('ERROR');
+    expect(call.data.releaseId).toBe(null);
+    expect(call.data.error).toContain('403');
+  });
+
+  it('clears releaseId when transitioning to ERROR (with body → errors.create)', async () => {
+    mockPrismaErrors.create.mockResolvedValue({});
+
+    await repo.changeState('post-1', 'ERROR', '403 Forbidden', [{ id: 'post-1' }]);
+
+    const call = mockPrismaPost.update.mock.calls[0][0];
+    expect(call.data.state).toBe('ERROR');
+    expect(call.data.releaseId).toBe(null);
+    expect(mockPrismaErrors.create).toHaveBeenCalled();
+  });
+
+  it('does NOT touch releaseId on non-ERROR transitions (must not wipe real platform IDs)', async () => {
+    await repo.changeState('post-1', 'PUBLISHED');
+
+    const call = mockPrismaPost.update.mock.calls[0][0];
+    expect(call.data.state).toBe('PUBLISHED');
+    expect('releaseId' in call.data).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -885,6 +885,7 @@ export class PostsRepository {
       data: {
         state: 'ERROR',
         error: 'Post was never published — it fell outside the recovery window. Please reschedule.',
+        releaseId: null,
       },
     });
     return result.count;
@@ -1170,6 +1171,7 @@ export class PostsRepository {
       data: {
         state,
         ...(errorMessage ? { error: errorMessage } : {}),
+        ...(state === 'ERROR' ? { releaseId: null } : {}),
       },
       include: {
         integration: {
