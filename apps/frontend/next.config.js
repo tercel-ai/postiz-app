@@ -1,5 +1,9 @@
 // @ts-check
 import { withSentryConfig } from '@sentry/nextjs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
@@ -22,11 +26,39 @@ const nextConfig = {
   productionBrowserSourceMaps: true,
   
   // Custom webpack config to ensure sourcemaps are generated properly
-  webpack: (config, { buildId, dev, isServer, defaultLoaders }) => {
+  webpack: (config, { buildId, dev, isServer, defaultLoaders, webpack }) => {
     // Enable sourcemaps for both client and server in production
     if (!dev) {
       config.devtool = isServer ? 'source-map' : 'hidden-source-map';
     }
+    
+    if (!isServer) {
+        config.resolve.fallback = {
+            ...config.resolve.fallback,
+            fs: false,
+            net: false,
+            tls: false,
+        };
+    }
+
+    // Shared DTO classes in libraries/nestjs-libraries reference
+    // @nestjs/swagger decorators. The real package transitively imports
+    // @nestjs/core, which requires Node built-ins (perf_hooks, async_hooks,
+    // repl, kafkajs) that webpack cannot bundle for the browser. The frontend
+    // never renders API docs, so we alias the package to a no-op stub.
+    config.resolve.alias = {
+      ...(config.resolve.alias || {}),
+      '@nestjs/swagger': path.resolve(
+        __dirname,
+        'src/stubs/nestjs-swagger.stub.js'
+      ),
+    };
+
+    config.plugins.push(
+      new webpack.IgnorePlugin({
+        resourceRegExp: /^(@nestjs\/websockets\/socket-module|class-transformer\/storage|@grpc\/grpc-js|@nestjs\/microservices)$/
+      })
+    );
     
     return config;
   },
@@ -116,3 +148,4 @@ export default withSentryConfig(nextConfig, {
     return;
   },
 });
+
