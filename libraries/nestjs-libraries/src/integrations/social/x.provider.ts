@@ -1,5 +1,6 @@
 import { PrismaClient } from '@prisma/client';
 import { TweetV2, TwitterApi } from 'twitter-api-v2';
+import { weightedLength } from '@gitroom/helpers/utils/count.length';
 import {
   AccountMetrics,
   AnalyticsData,
@@ -775,12 +776,20 @@ export class XProvider extends SocialAbstract implements SocialProvider {
     const client = await this.getClient(accessToken);
     const { id: userId, username, verified } = await this._getUserInfo(client);
 
+    const limit = this.maxLength(verified);
+    const [firstPost] = postDetails;
+
+    const currentWeight = weightedLength(firstPost.message);
+    if (currentWeight > limit) {
+      throw new Error(
+        `X_CHARACTER_LIMIT_EXCEEDED: Your post is ${currentWeight} weighted characters, but the limit is ${limit}.`
+      );
+    }
+
     // Best-effort sync — do not block posting if this fails
     this._syncVerifiedStatus(integration, verified).catch((err) =>
       console.warn('[x] Failed to sync verified status:', err?.message || err)
     );
-
-    const [firstPost] = postDetails;
 
     // upload media for the first post
     const uploadAll = await this.uploadMedia(client, [firstPost]);
@@ -964,12 +973,20 @@ export class XProvider extends SocialAbstract implements SocialProvider {
     const client = await this.getClient(accessToken);
     const { username, verified } = await this._getUserInfo(client);
 
+    const limit = this.maxLength(verified);
+    const [commentPost] = postDetails;
+
+    const currentWeight = weightedLength(commentPost.message);
+    if (currentWeight > limit) {
+      throw new Error(
+        `X_CHARACTER_LIMIT_EXCEEDED: Your comment is ${currentWeight} weighted characters, but the limit is ${limit}.`
+      );
+    }
+
     // Best-effort sync — do not block posting if this fails
     this._syncVerifiedStatus(integration, verified).catch((err) =>
       console.warn('[x] Failed to sync verified status:', err?.message || err)
     );
-
-    const [commentPost] = postDetails;
 
     // upload media for the comment
     const uploadAll = await this.uploadMedia(client, [commentPost]);
