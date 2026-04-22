@@ -20,4 +20,8 @@ export const loadSwagger = (app: INestApplication) => {
   const document = SwaggerModule.createDocument(app, config);
   document.security = [{ 'JWT-auth': [] }];
   SwaggerModule.setup('docs', app, document);
+
+  app.getHttpAdapter().get('/openapi.json', (req: any, res: any) => {
+    app.getHttpAdapter().reply(res, document, 200);
+  });
 };
