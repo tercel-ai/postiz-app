@@ -4,7 +4,7 @@ import { GetOrgFromRequest } from '@gitroom/nestjs-libraries/user/org.from.reque
 import { GetUserFromRequest } from '@gitroom/nestjs-libraries/user/user.from.request';
 import { GetTimezone } from '@gitroom/nestjs-libraries/user/timezone.from.request';
 import { parseDateToUTC } from '@gitroom/helpers/utils/date.utils';
-import { ApiTags } from '@nestjs/swagger';
+import { ApiOkResponse, ApiTags } from '@nestjs/swagger';
 import { DashboardService } from '@gitroom/nestjs-libraries/database/prisma/dashboard/dashboard.service';
 import {
   PostsTrendQueryDto,
@@ -20,6 +20,10 @@ export class DashboardController {
   constructor(private _dashboardService: DashboardService) {}
 
   @Get('/summary')
+  @ApiOkResponse({
+    description: 'Returns dashboard summary',
+    schema: { type: 'object' },
+  })
   async getSummary(
     @GetOrgFromRequest() org: Organization,
     @GetUserFromRequest() user: User,
@@ -37,6 +41,10 @@ export class DashboardController {
   }
 
   @Get('/posts-trend')
+  @ApiOkResponse({
+    description: 'Returns posts trend',
+    schema: { type: 'object' },
+  })
   async getPostsTrend(
     @GetOrgFromRequest() org: Organization,
     @Query() query: PostsTrendQueryDto,
@@ -46,6 +54,10 @@ export class DashboardController {
   }
 
   @Get('/traffics')
+  @ApiOkResponse({
+    description: 'Returns traffic analytics',
+    schema: { type: 'object' },
+  })
   async getTraffics(
     @GetOrgFromRequest() org: Organization,
     @Query() query: TrafficsQueryDto,
@@ -60,6 +72,10 @@ export class DashboardController {
   }
 
   @Get('/impressions')
+  @ApiOkResponse({
+    description: 'Returns impressions analytics',
+    schema: { type: 'object' },
+  })
   async getImpressions(
     @GetOrgFromRequest() org: Organization,
     @Query() query: ImpressionsQueryDto,
@@ -74,6 +90,10 @@ export class DashboardController {
   }
 
   @Get('/post-engagement')
+  @ApiOkResponse({
+    description: 'Returns post engagement analytics',
+    schema: { type: 'object' },
+  })
   async getPostEngagement(
     @GetOrgFromRequest() org: Organization,
     @Query() query: PostEngagementQueryDto

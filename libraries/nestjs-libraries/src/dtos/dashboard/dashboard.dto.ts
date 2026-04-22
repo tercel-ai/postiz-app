@@ -1,6 +1,7 @@
 import { ArrayMaxSize, IsArray, IsOptional, IsString, IsIn, IsInt, Min, Max, IsDateString } from 'class-validator';
 import { Transform, Type } from 'class-transformer';
 import { VALID_CHANNELS, Channel } from '@gitroom/nestjs-libraries/dtos/posts/get.posts-list.dto';
+import { ApiPropertyOptional } from '@nestjs/swagger';
 
 const integrationIdTransform = Transform(({ value }) =>
   (Array.isArray(value) ? value : [value]).flatMap((v: string) =>
@@ -15,14 +16,17 @@ const channelTransform = Transform(({ value }) =>
 );
 
 export class DashboardSummaryQueryDto {
+  @ApiPropertyOptional()
   @IsOptional()
   @IsDateString()
   startDate?: string;
 
+  @ApiPropertyOptional()
   @IsOptional()
   @IsDateString()
   endDate?: string;
 
+  @ApiPropertyOptional({ type: [String] })
   @IsOptional()
   @IsArray()
   @ArrayMaxSize(50)
@@ -30,6 +34,7 @@ export class DashboardSummaryQueryDto {
   @integrationIdTransform
   integrationId?: string[];
 
+  @ApiPropertyOptional({ enum: VALID_CHANNELS, isArray: true })
   @IsOptional()
   @IsArray()
   @ArrayMaxSize(30)
@@ -40,6 +45,7 @@ export class DashboardSummaryQueryDto {
 }
 
 export class PostsTrendQueryDto {
+  @ApiPropertyOptional({ enum: ['daily', 'weekly', 'monthly'], default: 'daily' })
   @IsOptional()
   @IsString()
   @IsIn(['daily', 'weekly', 'monthly'])
@@ -47,19 +53,23 @@ export class PostsTrendQueryDto {
 }
 
 export class ImpressionsQueryDto {
+  @ApiPropertyOptional({ enum: ['daily', 'weekly', 'monthly'], default: 'daily' })
   @IsOptional()
   @IsString()
   @IsIn(['daily', 'weekly', 'monthly'])
   period?: 'daily' | 'weekly' | 'monthly' = 'daily';
 
+  @ApiPropertyOptional()
   @IsOptional()
   @IsDateString()
   startDate?: string;
 
+  @ApiPropertyOptional()
   @IsOptional()
   @IsDateString()
   endDate?: string;
 
+  @ApiPropertyOptional({ type: [String] })
   @IsOptional()
   @IsArray()
   @ArrayMaxSize(50)
@@ -67,6 +77,7 @@ export class ImpressionsQueryDto {
   @integrationIdTransform
   integrationId?: string[];
 
+  @ApiPropertyOptional({ enum: VALID_CHANNELS, isArray: true })
   @IsOptional()
   @IsArray()
   @ArrayMaxSize(30)
@@ -77,14 +88,17 @@ export class ImpressionsQueryDto {
 }
 
 export class TrafficsQueryDto {
+  @ApiPropertyOptional()
   @IsOptional()
   @IsDateString()
   startDate?: string;
 
+  @ApiPropertyOptional()
   @IsOptional()
   @IsDateString()
   endDate?: string;
 
+  @ApiPropertyOptional({ type: [String] })
   @IsOptional()
   @IsArray()
   @ArrayMaxSize(50)
@@ -92,6 +106,7 @@ export class TrafficsQueryDto {
   @integrationIdTransform
   integrationId?: string[];
 
+  @ApiPropertyOptional({ enum: VALID_CHANNELS, isArray: true })
   @IsOptional()
   @IsArray()
   @ArrayMaxSize(30)
@@ -102,6 +117,7 @@ export class TrafficsQueryDto {
 }
 
 export class PostEngagementQueryDto {
+  @ApiPropertyOptional({ minimum: 1, maximum: 90, default: 30 })
   @IsOptional()
   @Type(() => Number)
   @IsInt()

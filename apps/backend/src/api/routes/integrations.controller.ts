@@ -22,7 +22,7 @@ import { Organization, User } from '@prisma/client';
 import { IntegrationFunctionDto } from '@gitroom/nestjs-libraries/dtos/integrations/integration.function.dto';
 import { CheckPolicies } from '@gitroom/backend/services/auth/permissions/permissions.ability';
 import { pricing } from '@gitroom/nestjs-libraries/database/prisma/subscriptions/pricing';
-import { ApiTags } from '@nestjs/swagger';
+import { ApiOkResponse, ApiTags } from '@nestjs/swagger';
 import { GetUserFromRequest } from '@gitroom/nestjs-libraries/user/user.from.request';
 import { NotEnoughScopesFilter } from '@gitroom/nestjs-libraries/integrations/integration.missing.scopes';
 import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.service';
@@ -82,6 +82,9 @@ export class IntegrationsController {
     }
   }
   @Get('/')
+  @ApiOkResponse({
+    description: 'Returns all available social integrations',
+  })
   getIntegrations() {
     return this._integrationManager.getAllIntegrations();
   }
@@ -119,6 +122,15 @@ export class IntegrationsController {
   }
 
   @Get('/list')
+  @ApiOkResponse({
+    description: 'Returns all connected integrations for the organization',
+    schema: {
+      type: 'object',
+      properties: {
+        integrations: { type: 'array', items: { type: 'object' } },
+      },
+    },
+  })
   async getIntegrationList(@GetOrgFromRequest() org: Organization) {
     const integrations = await this._integrationService.getIntegrationsList(org.id);
 

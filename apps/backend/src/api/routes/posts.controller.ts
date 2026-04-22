@@ -17,7 +17,7 @@ import { GetPostsDto } from '@gitroom/nestjs-libraries/dtos/posts/get.posts.dto'
 import { GetPostsListDto } from '@gitroom/nestjs-libraries/dtos/posts/get.posts-list.dto';
 import { GetPostReleasesDto } from '@gitroom/nestjs-libraries/dtos/posts/get.post-releases.dto';
 import { CheckPolicies } from '@gitroom/backend/services/auth/permissions/permissions.ability';
-import { ApiTags } from '@nestjs/swagger';
+import { ApiBody, ApiOkResponse, ApiTags, getSchemaPath } from '@nestjs/swagger';
 import { GeneratorDto } from '@gitroom/nestjs-libraries/dtos/generator/generator.dto';
 import { CreateGeneratedPostsDto } from '@gitroom/nestjs-libraries/dtos/generator/create.generated.posts.dto';
 import { AgentGraphService } from '@gitroom/nestjs-libraries/agent/agent.graph.service';
@@ -25,6 +25,7 @@ import { Response } from 'express';
 import { GetUserFromRequest } from '@gitroom/nestjs-libraries/user/user.from.request';
 import { ShortLinkService } from '@gitroom/nestjs-libraries/short-linking/short.link.service';
 import { CreateTagDto } from '@gitroom/nestjs-libraries/dtos/posts/create.tag.dto';
+import { CreatePostDto } from '@gitroom/nestjs-libraries/dtos/posts/create.post.dto';
 import {
   AuthorizationActions,
   Sections,
@@ -87,6 +88,18 @@ export class PostsController {
   }
 
   @Get('/')
+  @ApiOkResponse({
+    description: 'Returns a list of posts',
+    schema: {
+      type: 'object',
+      properties: {
+        posts: {
+          type: 'array',
+          items: { type: 'object' },
+        },
+      },
+    },
+  })
   async getPosts(
     @GetOrgFromRequest() org: Organization,
     @Query() query: GetPostsDto,
@@ -107,7 +120,7 @@ export class PostsController {
   @Get('/find-slot/:id')
   async findSlotIntegration(
     @GetOrgFromRequest() org: Organization,
-    @Param('id') id?: string
+    @Param('id') id: string
   ) {
     return { date: await this._postsService.findFreeDateTime(org.id, id) };
   }
@@ -126,6 +139,16 @@ export class PostsController {
   }
 
   @Get('/list')
+  @ApiOkResponse({
+    description: 'Returns a paginated list of posts',
+    schema: {
+      type: 'object',
+      properties: {
+        total: { type: 'number' },
+        posts: { type: 'array', items: { type: 'object' } },
+      },
+    },
+  })
   async getPostsList(
     @GetOrgFromRequest() org: Organization,
     @Query() query: GetPostsListDto
@@ -152,6 +175,22 @@ export class PostsController {
   }
 
   @Post('/')
+  @ApiBody({ type: CreatePostDto })
+  @ApiOkResponse({
+    description: 'Creates one or more posts',
+    schema: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          postId: { type: 'string' },
+          integration: { type: 'string' },
+          state: { type: 'string' },
+          releaseURL: { type: 'string', nullable: true },
+        },
+      },
+    },
+  })
   @CheckPolicies([AuthorizationActions.Create, Sections.POSTS_PER_MONTH])
   async createPost(
     @GetOrgFromRequest() org: Organization,

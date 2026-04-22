@@ -15,23 +15,27 @@ export const VALID_CHANNELS = [
 export type Channel = (typeof VALID_CHANNELS)[number];
 
 export class GetPostsListDto {
+  @ApiPropertyOptional({ minimum: 1, default: 1 })
   @IsOptional()
   @Type(() => Number)
   @IsInt()
   @Min(1)
-  page: number = 1;
+  page?: number = 1;
 
+  @ApiPropertyOptional({ minimum: 1, maximum: 100, default: 20 })
   @IsOptional()
   @Type(() => Number)
   @IsInt()
   @Min(1)
   @Max(100)
-  pageSize: number = 20;
+  pageSize?: number = 20;
 
+  @ApiPropertyOptional({ enum: State })
   @IsOptional()
   @IsEnum(State)
   state?: State;
 
+  @ApiPropertyOptional({ type: [String] })
   @IsOptional()
   @IsArray()
   @IsString({ each: true })
@@ -42,7 +46,7 @@ export class GetPostsListDto {
   )
   integrationId?: string[];
 
-  @ApiPropertyOptional({ type: [String], description: 'Filter by provider type (e.g. x, reddit, linkedin)' })
+  @ApiPropertyOptional({ type: [String], description: 'Filter by provider type (e.g. x, reddit, linkedin)', enum: VALID_CHANNELS })
   @IsOptional()
   @IsArray()
   @ArrayMaxSize(30)
@@ -55,19 +59,23 @@ export class GetPostsListDto {
   )
   channel?: Channel[];
 
+  @ApiPropertyOptional()
   @IsOptional()
   @IsString()
   sourcePostId?: string;
 
+  @ApiPropertyOptional({ enum: ['templates', 'timeline'], default: 'timeline' })
   @IsOptional()
   @IsIn(['templates', 'timeline'])
   view?: 'templates' | 'timeline' = 'timeline';
 
+  @ApiPropertyOptional({ enum: ['publishDate', 'createdAt', 'updatedAt', 'state'], default: 'publishDate' })
   @IsOptional()
   @IsIn(['publishDate', 'createdAt', 'updatedAt', 'state'])
-  sortBy: 'publishDate' | 'createdAt' | 'updatedAt' | 'state' = 'publishDate';
+  sortBy?: 'publishDate' | 'createdAt' | 'updatedAt' | 'state' = 'publishDate';
 
+  @ApiPropertyOptional({ enum: ['asc', 'desc'], default: 'desc' })
   @IsOptional()
   @IsIn(['asc', 'desc'])
-  sortOrder: 'asc' | 'desc' = 'desc';
+  sortOrder?: 'asc' | 'desc' = 'desc';
 }
