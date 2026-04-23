@@ -6,7 +6,9 @@
  *   npx ts-node --project scripts/tsconfig.json scripts/terminate-workflows.ts --execute
  *
  * Options:
- *   --only-posts   Only terminate postWorkflowV101 (skip infrastructure workflows)
+ *   --only-posts            Only terminate postWorkflowV101 + infra workflows
+ *   --task-queues=q1,q2     Only terminate workflows running on these task queues
+ *                           (applies to postWorkflowV101; forces --only-posts scope)
  */
 
 import * as dotenv from 'dotenv';
@@ -40,19 +42,36 @@ async function main() {
 
   const argNamespace = process.argv.find((a) => a.startsWith('--namespace='))?.split('=')[1];
   const argAddress = process.argv.find((a) => a.startsWith('--address='))?.split('=')[1];
+  const argTaskQueues = process.argv.find((a) => a.startsWith('--task-queues='))?.split('=')[1];
 
   const address = argAddress || process.env.TEMPORAL_ADDRESS || 'localhost:7233';
   const namespace = argNamespace || process.env.TEMPORAL_NAMESPACE || 'default';
+  const taskQueues = argTaskQueues
+    ? argTaskQueues.split(',').map((q) => q.trim()).filter(Boolean)
+    : null;
 
-  const workflowTypes = onlyPosts
+  // Task-queue filtering only makes sense for post workflows (infra/on-demand
+  // all run on 'main'). Forcing --only-posts scope avoids accidentally sweeping
+  // unrelated infra workflows when --task-queues is specified.
+  const workflowTypes = taskQueues
+    ? POST_WORKFLOW_TYPES
+    : onlyPosts
     ? [...POST_WORKFLOW_TYPES, ...INFRA_WORKFLOW_TYPES]
     : [...POST_WORKFLOW_TYPES, ...INFRA_WORKFLOW_TYPES, ...ON_DEMAND_WORKFLOW_TYPES];
 
   console.log('=== Terminate Temporal Workflows ===\n');
-  console.log(`Mode:      ${dryRun ? 'DRY RUN' : 'EXECUTE'}`);
-  console.log(`Scope:     ${onlyPosts ? 'post + infra only' : 'ALL workflows'}`);
-  console.log(`Address:   ${address}`);
-  console.log(`Namespace: ${namespace}`);
+  console.log(`Mode:       ${dryRun ? 'DRY RUN' : 'EXECUTE'}`);
+  console.log(
+    `Scope:      ${
+      taskQueues
+        ? `postWorkflowV101 on task queues [${taskQueues.join(', ')}]`
+        : onlyPosts
+        ? 'post + infra only'
+        : 'ALL workflows'
+    }`
+  );
+  console.log(`Address:    ${address}`);
+  console.log(`Namespace:  ${namespace}`);
   console.log('');
 
   const connection = await Connection.connect({ address });
@@ -63,7 +82,10 @@ async function main() {
   for (const workflowType of workflowTypes) {
     console.log(`--- ${workflowType} ---`);
 
-    const query = `WorkflowType='${workflowType}' AND ExecutionStatus='Running'`;
+    const taskQueueFilter = taskQueues
+      ? ` AND TaskQueue IN (${taskQueues.map((q) => `'${q}'`).join(',')})`
+      : '';
+    const query = `WorkflowType='${workflowType}' AND ExecutionStatus='Running'${taskQueueFilter}`;
     let count = 0;
 
     try {

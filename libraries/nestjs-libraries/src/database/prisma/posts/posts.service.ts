@@ -42,6 +42,7 @@ import { RefreshIntegrationService } from '@gitroom/nestjs-libraries/integration
 import { PostOverageService } from '@gitroom/nestjs-libraries/database/prisma/posts/post-overage.service';
 import { PostingTimesV2 } from '@gitroom/nestjs-libraries/dtos/integrations/posting-times.types';
 import { resolveTimeSlotsForDate } from '@gitroom/nestjs-libraries/dtos/integrations/posting-times.utils';
+import { getSocialTaskQueue } from '@gitroom/nestjs-libraries/temporal/task-queue';
 type PostWithConditionals = Post & {
   integration?: Integration;
   childrenPost: Post[];
@@ -800,7 +801,7 @@ export class PostsService {
       if (body.type === 'now') {
         try {
           await this.startWorkflow(
-            post.settings.__type.split('-')[0].toLowerCase(),
+            getSocialTaskQueue(post.settings.__type),
             posts[0].id,
             orgId,
             true
@@ -817,7 +818,7 @@ export class PostsService {
         }
       } else {
         this.startWorkflow(
-          post.settings.__type.split('-')[0].toLowerCase(),
+          getSocialTaskQueue(post.settings.__type),
           posts[0].id,
           orgId
         ).catch((err) => {
@@ -952,7 +953,7 @@ export class PostsService {
       throw new BadRequestException('Post is already being retried');
     }
 
-    const taskQueue = post.integration.providerIdentifier.split('-')[0].toLowerCase();
+    const taskQueue = getSocialTaskQueue(post.integration.providerIdentifier);
     try {
       // Clone has no intervalInDays, so the workflow treats it as a normal (non-recurring) post
       await this.startWorkflow(taskQueue, postId, orgId, true);
@@ -992,7 +993,7 @@ export class PostsService {
 
     try {
       await this.startWorkflow(
-        getPostById.integration.providerIdentifier.split('-')[0].toLowerCase(),
+        getSocialTaskQueue(getPostById.integration.providerIdentifier),
         getPostById.id,
         orgId
       );

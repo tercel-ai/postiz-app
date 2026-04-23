@@ -10,6 +10,7 @@ dotenv.config();
 
 import { Connection, Client } from '@temporalio/client';
 import { PrismaClient } from '@prisma/client';
+import { getSocialTaskQueue } from '@gitroom/nestjs-libraries/temporal/task-queue';
 
 async function main() {
   const postIds = process.argv.slice(2);
@@ -40,7 +41,9 @@ async function main() {
       continue;
     }
 
-    const taskQueue = post.integration?.providerIdentifier?.split('-')[0]?.toLowerCase() || 'main';
+    const taskQueue = post.integration?.providerIdentifier
+      ? getSocialTaskQueue(post.integration.providerIdentifier)
+      : 'main';
     const workflowId = `post_${postId}`;
 
     try {

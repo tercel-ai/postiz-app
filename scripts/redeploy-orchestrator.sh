@@ -1,40 +1,40 @@
 #!/bin/bash
 # Redeploy orchestrator with clean workflow restart.
 #
+# All deployment identity (namespace, PM2 process name) comes from .env —
+# single source of truth, matches whatever the running app is using.
+#
 # Usage:
-#   bash scripts/redeploy-orchestrator.sh dev
-#   bash scripts/redeploy-orchestrator.sh prod
-#   bash scripts/redeploy-orchestrator.sh prod --only-posts
+#   bash scripts/redeploy-orchestrator.sh
+#   bash scripts/redeploy-orchestrator.sh --only-posts
 export NODE_OPTIONS="--max-old-space-size=4096"
 export NEXT_FONT_GOOGLE_MOCKED_RESPONSES=true
 
 set -euo pipefail
 
-# 0. Identify Environment
-ARG1="${1:-}"
+# Pass through any extra args to terminate-workflows.ts (e.g., --only-posts).
+EXTRA_ARGS="${*:-}"
 
-if [[ "$ARG1" == "prod" ]]; then
-  ENV_NAME="prod"
-  PM2_PROCESS="orchestrator-prod"
-  NAMESPACE="prod"
-  shift
-elif [[ "$ARG1" == "dev" ]]; then
-  ENV_NAME="dev"
-  PM2_PROCESS="orchestrator"
-  NAMESPACE="dev"
-  shift
-else
-  echo "Error: Missing or invalid environment argument."
-  echo "Usage: $0 {dev|prod} [options]"
+ENV_FILE=".env"
+if [[ ! -f "$ENV_FILE" ]]; then
+  echo "Error: $ENV_FILE not found. Run this from the repo root."
   exit 1
 fi
 
-# Collect all remaining arguments
-EXTRA_ARGS="${*:-}"
+read_env_value() {
+  local key="$1"
+  grep -E "^${key}=" "$ENV_FILE" | tail -1 \
+    | sed -E "s/^${key}=//; s/^\"(.*)\"$/\1/; s/^'(.*)'$/\1/"
+}
 
-echo "=== Orchestrator Redeploy ($ENV_NAME) ==="
-echo "Targeting PM2: $PM2_PROCESS"
-echo "Namespace:     $NAMESPACE"
+NAMESPACE=$(read_env_value "TEMPORAL_NAMESPACE")
+NAMESPACE="${NAMESPACE:-default}"
+PM2_PROCESS=$(read_env_value "PM2_ORCHESTRATOR_NAME")
+PM2_PROCESS="${PM2_PROCESS:-orchestrator}"
+
+echo "=== Orchestrator Redeploy ==="
+echo "Targeting PM2: $PM2_PROCESS (from .env)"
+echo "Namespace:     $NAMESPACE (from .env)"
 echo ""
 
 # 1. Build FIRST — if it fails, no workflows are disrupted
@@ -42,9 +42,9 @@ echo "Step 1: Building..."
 pnpm build 2>&1 | tail -5
 echo ""
 
-# 2. Terminate existing workflows
+# 2. Terminate existing workflows — namespace resolved by the ts script from .env
 echo "Step 2: Terminating old workflows in $NAMESPACE..."
-npx ts-node --project scripts/tsconfig.json scripts/terminate-workflows.ts --execute --namespace="$NAMESPACE" $EXTRA_ARGS
+npx ts-node --project scripts/tsconfig.json scripts/terminate-workflows.ts --execute $EXTRA_ARGS
 echo ""
 
 # 3. Restart orchestrator immediately after terminate (minimize gap)

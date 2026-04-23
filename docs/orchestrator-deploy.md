@@ -69,6 +69,26 @@ If the code has changed in a way that produces a different sequence of commands 
 
 ## Deployment Steps
 
+All deployment scripts read PM2 process names and Temporal namespace from `.env` — there is no `dev`/`prod` argument. On each machine, configure:
+
+```bash
+TEMPORAL_NAMESPACE="default"           # or "production", etc.
+PM2_BACKEND_NAME="backend"             # whatever name pm2 registered
+PM2_ORCHESTRATOR_NAME="orchestrator"
+```
+
+Defaults (when unset in code): `backend`, `orchestrator`, `default` namespace — matches `pnpm pm2` (non-prod).
+
+### Auto-write on first launch
+
+When you run `pnpm pm2` or `pnpm pm2:prod`, the script `scripts/ensure-pm2-names.sh` runs first and **idempotently** fills in `PM2_BACKEND_NAME` and `PM2_ORCHESTRATOR_NAME` with the flavor-appropriate values (adding `-prod` suffix for `pm2:prod`). It:
+
+- Only writes keys that are missing or empty
+- Never overwrites a user-customized value (warns instead)
+- Gracefully skips if `.env` doesn't exist
+
+So after `pnpm pm2:prod` once, your `.env` has `PM2_BACKEND_NAME="backend-prod"` / `PM2_ORCHESTRATOR_NAME="orchestrator-prod"` and all management scripts (`redeploy-orchestrator.sh`, `switch-worker-mode.sh`, `update-enabled-providers.sh`) target the right processes automatically.
+
 ### Quick Deploy (workflow function changes)
 
 ```bash
@@ -97,7 +117,7 @@ npx ts-node --project scripts/tsconfig.json scripts/terminate-workflows.ts --dry
 
 # 3. Terminate + restart (back-to-back, minimize gap)
 npx ts-node --project scripts/tsconfig.json scripts/terminate-workflows.ts --execute
-pm2 restart orchestrator
+pm2 restart "$PM2_ORCHESTRATOR_NAME"
 ```
 
 ### Safe Deploy (only activity/service changes)
@@ -106,8 +126,15 @@ When only activity implementations changed (service/repository code), no workflo
 
 ```bash
 pnpm build
-pm2 restart orchestrator
+pm2 restart "$PM2_ORCHESTRATOR_NAME"
 ```
+
+### Related: Worker Mode and Provider Allowlist
+
+Orchestrator startup cost depends on how many Temporal workers get spawned. See [temporal-worker-modes.md](./temporal-worker-modes.md) for:
+- Choosing between `merged` (one shared worker) and `per-provider` (one worker per platform) modes
+- Limiting which providers spawn workers via `ENABLED_PROVIDERS`
+- Scripts `switch-worker-mode.sh` and `update-enabled-providers.sh` for safe runtime switching
 
 ---
 
@@ -139,14 +166,14 @@ npx ts-node --project scripts/tsconfig.json scripts/terminate-workflows.ts --exe
 ### Check for nondeterminism errors
 
 ```bash
-pm2 logs orchestrator --lines 50 --nostream 2>&1 | grep -i "nondeterminism\|TMPRL1100"
+pm2 logs "$PM2_ORCHESTRATOR_NAME" --lines 50 --nostream 2>&1 | grep -i "nondeterminism\|TMPRL1100"
 ```
 
 If you see nondeterminism errors, workflows were not properly terminated:
 
 ```bash
 npx ts-node --project scripts/tsconfig.json scripts/terminate-workflows.ts --execute
-pm2 restart orchestrator
+pm2 restart "$PM2_ORCHESTRATOR_NAME"
 ```
 
 ### Check workflow recreation
@@ -154,7 +181,7 @@ pm2 restart orchestrator
 After orchestrator restarts, `missingPostWorkflow` runs every hour to recreate workflows for QUEUE posts. To verify:
 
 ```bash
-pm2 logs orchestrator --lines 30 --nostream 2>&1 | grep -i "workflow\|signal"
+pm2 logs "$PM2_ORCHESTRATOR_NAME" --lines 30 --nostream 2>&1 | grep -i "workflow\|signal"
 ```
 
 ### Check for stuck recurring posts

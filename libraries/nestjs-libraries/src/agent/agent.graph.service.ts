@@ -499,44 +499,48 @@ export class AgentGraphService {
     );
   }
 
+  private compiledApp: any;
+
   async *start(orgId: string, body: GeneratorDto) {
     // Per-run usage collector
     const collector = new AiUsageCollector();
 
-    const state = AgentGraphService.state();
-    const workflow = state
-      .addNode('agent', this.startCall.bind(this))
-      .addNode('research', toolNode)
-      .addNode('save-research', this.saveResearch.bind(this))
-      .addNode('find-category', this.findCategories.bind(this))
-      .addNode('find-topic', this.findTopic.bind(this))
-      .addNode('find-popular-posts', this.findPopularPosts.bind(this))
-      .addNode('generate-hook', this.generateHook.bind(this))
-      .addNode('generate-content', this.generateContent.bind(this))
-      .addNode('generate-content-fix', this.fixArray.bind(this))
-      .addNode('generate-picture', this.generatePictures.bind(this))
-      .addNode('upload-pictures', this.uploadPictures.bind(this))
-      .addNode('post-time', this.postDateTime.bind(this))
-      .addEdge(START, 'agent')
-      .addEdge('agent', 'research')
-      .addEdge('research', 'save-research')
-      .addEdge('save-research', 'find-category')
-      .addEdge('find-category', 'find-topic')
-      .addEdge('find-topic', 'find-popular-posts')
-      .addEdge('find-popular-posts', 'generate-hook')
-      .addEdge('generate-hook', 'generate-content')
-      .addEdge('generate-content', 'generate-content-fix')
-      .addConditionalEdges(
-        'generate-content-fix',
-        this.isGeneratePicture.bind(this)
-      )
-      .addEdge('generate-picture', 'upload-pictures')
-      .addEdge('upload-pictures', 'post-time')
-      .addEdge('post-time', END);
+    if (!this.compiledApp) {
+      const state = AgentGraphService.state();
+      const workflow = state
+        .addNode('agent', this.startCall.bind(this))
+        .addNode('research', toolNode)
+        .addNode('save-research', this.saveResearch.bind(this))
+        .addNode('find-category', this.findCategories.bind(this))
+        .addNode('find-topic', this.findTopic.bind(this))
+        .addNode('find-popular-posts', this.findPopularPosts.bind(this))
+        .addNode('generate-hook', this.generateHook.bind(this))
+        .addNode('generate-content', this.generateContent.bind(this))
+        .addNode('generate-content-fix', this.fixArray.bind(this))
+        .addNode('generate-picture', this.generatePictures.bind(this))
+        .addNode('upload-pictures', this.uploadPictures.bind(this))
+        .addNode('post-time', this.postDateTime.bind(this))
+        .addEdge(START, 'agent')
+        .addEdge('agent', 'research')
+        .addEdge('research', 'save-research')
+        .addEdge('save-research', 'find-category')
+        .addEdge('find-category', 'find-topic')
+        .addEdge('find-topic', 'find-popular-posts')
+        .addEdge('find-popular-posts', 'generate-hook')
+        .addEdge('generate-hook', 'generate-content')
+        .addEdge('generate-content', 'generate-content-fix')
+        .addConditionalEdges(
+          'generate-content-fix',
+          this.isGeneratePicture.bind(this)
+        )
+        .addEdge('generate-picture', 'upload-pictures')
+        .addEdge('upload-pictures', 'post-time')
+        .addEdge('post-time', END);
 
-    const app = workflow.compile();
+      this.compiledApp = workflow.compile();
+    }
 
-    const stream = app.streamEvents(
+    const stream = this.compiledApp.streamEvents(
       {
         messages: [new HumanMessage(body.research)],
         isPicture: body.isPicture,

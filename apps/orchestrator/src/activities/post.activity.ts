@@ -22,6 +22,7 @@ import {
   organizationId,
   postId as postIdSearchParam,
 } from '@gitroom/nestjs-libraries/temporal/temporal.search.attribute';
+import { getSocialTaskQueue } from '@gitroom/nestjs-libraries/temporal/task-queue';
 
 @Injectable()
 @Activity()
@@ -59,9 +60,7 @@ export class PostActivity {
           signalArgs: [],
           args: [
             {
-              taskQueue: post.integration.providerIdentifier
-                .split('-')[0]
-                .toLowerCase(),
+              taskQueue: getSocialTaskQueue(post.integration.providerIdentifier),
               postId: post.id,
               organizationId: post.organizationId,
             },
