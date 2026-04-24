@@ -1,0 +1,85 @@
+# Do **not** use this yml for production. It is not up-to-date.
+# Use https://docs.postiz.com/installation/docker-compose
+# This is only for the dev enviroment
+
+services:
+  temporal-postgresql:
+    container_name: temporal-postgresql
+    image: postgres:16
+    restart: always
+    environment:
+      POSTGRES_PASSWORD: temporal
+      POSTGRES_USER: temporal
+    networks:
+      - temporal-network
+    expose:
+      - 5432
+    volumes:
+      - temporal-pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U temporal" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  temporal:
+    container_name: temporal
+    restart: always
+    ports:
+      - "7233:7233"
+    image: temporalio/auto-setup:1.28.1
+    depends_on:
+      temporal-postgresql:
+        condition: service_healthy
+    environment:
+      - DB=postgres12
+      - DB_PORT=5432
+      - POSTGRES_USER=temporal
+      - POSTGRES_PWD=temporal
+      - POSTGRES_SEEDS=temporal-postgresql
+      - DYNAMIC_CONFIG_FILE_PATH=config/dynamicconfig/development-sql.yaml
+      - ENABLE_ES=false
+      - TEMPORAL_NAMESPACE=${TEMPORAL_NAMESPACE:-default}
+    networks:
+      - temporal-network
+    volumes:
+      - ./dynamicconfig:/etc/temporal/config/dynamicconfig
+    labels:
+      kompose.volume.type: configMap
+
+  temporal-admin-tools:
+    container_name: temporal-admin-tools
+    image: temporalio/admin-tools:1.28.1-tctl-1.18.4-cli-1.4.1
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+      - TEMPORAL_CLI_ADDRESS=temporal:7233
+    networks:
+      - temporal-network
+    stdin_open: true
+    depends_on:
+      - temporal
+    tty: true
+
+  temporal-ui:
+    container_name: temporal-ui
+    image: temporalio/ui:2.34.0
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+      - TEMPORAL_CORS_ORIGINS=http://127.0.0.1:3000
+    networks:
+      - temporal-network
+    ports:
+      - "8090:8080"
+
+volumes:
+  temporal-pg-data:
+    external: false
+  temporal-es-data:
+    external: false
+
+networks:
+  postiz-network:
+    external: false
+  temporal-network:
+    driver: bridge
+    name: temporal-network
