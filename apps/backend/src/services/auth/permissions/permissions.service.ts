@@ -58,13 +58,19 @@ export class PermissionsService {
         ([, s]) => s === Sections.CHANNEL || s === Sections.POSTS_PER_MONTH
       );
       if (needsUserLimits) {
-        const userLimits = await this._usersService.getUserLimits(userId);
+        const userLimits = (await this._usersService.getUserLimits(userId)) || {
+          postChannelLimit: null,
+          postSendLimit: null,
+        };
         for (const [action, section] of requestedPermission) {
           if (section === Sections.CHANNEL) {
             const totalChannels = (
               await this._integrationService.getIntegrationsList(orgId)
             ).filter((f) => !f.refreshNeeded).length;
-            if (totalChannels < userLimits.postChannelLimit) {
+            if (
+              userLimits.postChannelLimit === null ||
+              totalChannels < userLimits.postChannelLimit
+            ) {
               can(action, section);
             }
             continue;
@@ -72,7 +78,10 @@ export class PermissionsService {
           if (section === Sections.POSTS_PER_MONTH) {
             // postSendLimit=0 means no active subscription — block
             // postSendLimit>0: always allow; overage is deducted post-creation
-            if (userLimits.postSendLimit > 0) {
+            if (
+              userLimits.postSendLimit === null ||
+              userLimits.postSendLimit > 0
+            ) {
               can(action, section);
             }
             continue;
@@ -96,9 +105,9 @@ export class PermissionsService {
     const needsUserLimitsCheck = userId && requestedPermission.some(
       ([, s]) => s === Sections.CHANNEL || s === Sections.POSTS_PER_MONTH
     );
-    const userLimits = needsUserLimitsCheck
+    const userLimits = (needsUserLimitsCheck
       ? await this._usersService.getUserLimits(userId)
-      : { postChannelLimit: null, postSendLimit: null };
+      : null) || { postChannelLimit: null, postSendLimit: null };
 
     const { subscription, options } = await this.getPackageOptions(orgId);
     for (const [action, section] of requestedPermission) {

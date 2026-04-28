@@ -71,7 +71,7 @@ export class DashboardService {
     if (userId) {
       try {
         const limits = await this._usersService.getUserLimits(userId);
-        if ('periodStart' in limits && limits.periodStart) {
+        if (limits && 'periodStart' in limits && limits.periodStart) {
           periodStart = new Date(limits.periodStart);
           periodEnd = 'periodEnd' in limits && limits.periodEnd ? new Date(limits.periodEnd) : undefined;
           postSendLimit = limits.postSendLimit;

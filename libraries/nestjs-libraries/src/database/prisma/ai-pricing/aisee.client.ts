@@ -132,7 +132,7 @@ export class AiseeClient {
     return process.env.AISEE_ORCHESTRATOR_URL || 'http://localhost:8000';
   }
 
-  private get enabled(): boolean {
+  public get enabled(): boolean {
     return !!process.env.AISEE_ORCHESTRATOR_URL;
   }
 

@@ -46,11 +46,11 @@ export class PostOverageService implements OnModuleInit {
     try {
       const limits = await this._usersService.getUserLimits(userId);
 
-      if (!limits.postSendLimit) {
+      if (!limits || !limits.postSendLimit) {
         return;
       }
 
-      const periodStart = 'periodStart' in limits && limits.periodStart
+      const periodStart = limits && 'periodStart' in limits && limits.periodStart
         ? new Date(limits.periodStart)
         : null;
 

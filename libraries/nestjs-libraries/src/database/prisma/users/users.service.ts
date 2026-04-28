@@ -59,7 +59,12 @@ export class UsersService {
   async getUserLimits(userId: string): Promise<
     | { postChannelLimit: number; postSendLimit: number }
     | { postChannelLimit: number; postSendLimit: number; periodStart: string; periodEnd: string; name: string; interval: string }
+    | null
   > {
+    if (!this._aiseeClient.enabled) {
+      return null;
+    }
+
     const pkg = await this._aiseeClient.getUserCreditPackage(userId);
 
     // API failed or no active package — hard block
