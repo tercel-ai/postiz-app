@@ -63,7 +63,12 @@ export class RefreshIntegrationService {
     );
   }
 
-  public async startRefreshWorkflow(orgId: string, id: string, integration: SocialProvider) {
+  public async startRefreshWorkflow(
+    orgId: string,
+    id: string,
+    integration: SocialProvider,
+    conflictPolicy: 'TERMINATE_EXISTING' | 'USE_EXISTING' = 'TERMINATE_EXISTING'
+  ) {
     if (!integration.refreshCron) {
       return false;
     }
@@ -74,7 +79,7 @@ export class RefreshIntegrationService {
         workflowId: `refresh_${id}`,
         args: [{integrationId: id, organizationId: orgId}],
         taskQueue: 'main',
-        workflowIdConflictPolicy: 'TERMINATE_EXISTING',
+        workflowIdConflictPolicy: conflictPolicy,
       });
   }
 

@@ -145,6 +145,19 @@ export class XProvider extends SocialAbstract implements SocialProvider {
       };
     }
 
+    // twitter-api-v2 throws ApiResponseError with code=401 when the access token
+    // is expired or revoked. This path bypasses social.abstract.ts:fetch() (which
+    // already handles HTTP 401), so we must handle it here explicitly.
+    if (
+      body.includes('"code":401') ||
+      body.includes('Request failed with code 401')
+    ) {
+      return {
+        type: 'refresh-token',
+        value: 'X authentication has expired, please reconnect your account',
+      };
+    }
+
     if (body.includes('"code":503') || body.includes('Service Unavailable') || body.includes('ECONNRESET') || body.includes('ETIMEDOUT') || body.includes('TIMEOUT')) {
       return {
         type: 'retry',

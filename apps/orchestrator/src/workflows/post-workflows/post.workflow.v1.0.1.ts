@@ -278,6 +278,11 @@ export async function postWorkflowV101({
 
     // Retry loop: noRetry (postNow + POST_NOW_RETRY=false) gets 1 attempt,
     // otherwise 5 attempts (postNow+retry=true or scheduled posts).
+    //
+    // IMPORTANT: updatePost is intentionally outside this loop. Putting it
+    // inside would cause postSocial to be retried if the DB write fails —
+    // the social platform call already succeeded and a retry would duplicate
+    // the post. updatePost is called once after the loop succeeds.
     const maxAttempts = noRetry ? [undefined] : iterate;
     for (const _ of maxAttempts) {
       try {
@@ -300,17 +305,6 @@ export async function postWorkflowV101({
               post.integration,
               [postsList[i]]
             ))
-          );
-        }
-
-        // For non-recurring posts only: update original in place.
-        // Recurring posts record results via finalizeRecurringCycle (new path)
-        // or skip recording (legacy path) — either way the original must stay QUEUE.
-        if (!isRecurring) {
-          await updatePost(
-            postsList[i].id,
-            postsResults[i].postId,
-            postsResults[i].releaseURL
           );
         }
 
@@ -383,6 +377,37 @@ export async function postWorkflowV101({
         await continueAsNew<typeof postWorkflowV101>({ taskQueue, postId, organizationId });
       }
       return false;
+    }
+
+    // For non-recurring posts: update the DB record with the platform post ID and URL.
+    // This is intentionally outside the postSocial retry loop — a DB write failure
+    // must NOT cause the social platform call to be retried (which would duplicate the post).
+    //
+    // If updatePost itself fails after all Temporal retries (persistent DB outage),
+    // we do NOT let the workflow crash — a crashed workflow leaves the post in QUEUE
+    // with a stale claim token, which the recovery cron would clear and re-publish
+    // (another duplicate). Instead we log and mark ERROR with a message that includes
+    // the platform post ID so the user knows the content WAS actually published.
+    if (!isRecurring) {
+      try {
+        await updatePost(
+          postsList[i].id,
+          postsResults[i].postId,
+          postsResults[i].releaseURL
+        );
+      } catch (updateErr) {
+        const platformPostId = postsResults[i].postId;
+        const releaseURL = postsResults[i].releaseURL;
+        const errMsg = `Post was published on ${post.integration?.providerIdentifier} (${releaseURL}, id=${platformPostId}) but the DB record could not be updated. Please manually mark this post as published.`;
+        console.error(`[postWorkflow] updatePost failed for post=${postsList[i].id} platformId=${platformPostId}:`, (updateErr as any)?.message || updateErr);
+        await logError(postsList[i].id, updateErr, postsList);
+        await finalizeCycle(errMsg);
+        await markError(errMsg);
+        if (isRecurring) {
+          await continueAsNew<typeof postWorkflowV101>({ taskQueue, postId, organizationId });
+        }
+        return false;
+      }
     }
 
     // send notification after successful post (outside try-catch to avoid

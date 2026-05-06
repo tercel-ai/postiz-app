@@ -14,6 +14,7 @@ export class InfiniteWorkflowRegister implements OnModuleInit {
       const infiniteWorkflows = [
         { workflowId: 'missing-post-workflow', name: 'missingPostWorkflow' },
         { workflowId: 'data-ticks-sync-workflow', name: 'dataTicksSyncWorkflow' },
+        { workflowId: 'refresh-workflow-recovery', name: 'refreshWorkflowRecoveryWorkflow' },
       ];
 
       for (const wf of infiniteWorkflows) {

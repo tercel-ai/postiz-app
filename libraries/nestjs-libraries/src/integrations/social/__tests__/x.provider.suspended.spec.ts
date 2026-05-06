@@ -154,4 +154,31 @@ describe('XProvider — suspended account detection', () => {
       expect(result?.value).toContain('character limit');
     });
   });
+
+  describe('handleErrors — 401 expired token', () => {
+    it('returns refresh-token for twitter-api-v2 ApiResponseError code=401', () => {
+      const body = JSON.stringify({
+        name: 'ApiResponseError',
+        message: 'Request failed with code 401',
+        code: 401,
+        data: { title: 'Unauthorized', status: 401, detail: 'Unauthorized' },
+      });
+      const result = provider.handleErrors(body);
+      expect(result?.type).toBe('refresh-token');
+    });
+
+    it('returns refresh-token for "Request failed with code 401" message string', () => {
+      const body = JSON.stringify({
+        message: 'Request failed with code 401',
+      });
+      const result = provider.handleErrors(body);
+      expect(result?.type).toBe('refresh-token');
+    });
+
+    it('does not match non-401 error codes', () => {
+      const body = JSON.stringify({ code: 400, message: 'Bad Request' });
+      const result = provider.handleErrors(body);
+      expect(result?.type).not.toBe('refresh-token');
+    });
+  });
 });

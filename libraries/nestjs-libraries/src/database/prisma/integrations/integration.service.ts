@@ -265,6 +265,17 @@ export class IntegrationService {
     return this._integrationRepository.refreshNeeded(org, id);
   }
 
+  /**
+   * Return integrations that have a refresh token workflow scheduled (refreshCron providers)
+   * but may have lost their running workflow (workflow FAILED / never started).
+   * Used by the recovery cron to restart lost workflows.
+   * Returns integrations with a tokenExpiration set (OAuth 2.0) that are not
+   * already marked as needing reconnection.
+   */
+  async getIntegrationsNeedingRefreshWorkflow() {
+    return this._integrationRepository.getIntegrationsWithTokenExpiration();
+  }
+
   async setBetweenRefreshSteps(id: string) {
     return this._integrationRepository.setBetweenRefreshSteps(id);
   }

@@ -314,6 +314,28 @@ export class IntegrationRepository {
     });
   }
 
+  /**
+   * Return all OAuth 2.0 integrations (tokenExpiration is set) that are active
+   * and not already flagged for reconnection. Used by the refresh workflow
+   * recovery cron to restart any workflows that silently died.
+   */
+  getIntegrationsWithTokenExpiration() {
+    return this._integration.model.integration.findMany({
+      where: {
+        tokenExpiration: { not: null },
+        inBetweenSteps: false,
+        deletedAt: null,
+        refreshNeeded: false,
+        disabled: false,
+      },
+      select: {
+        id: true,
+        organizationId: true,
+        providerIdentifier: true,
+      },
+    });
+  }
+
   async setBetweenRefreshSteps(id: string) {
     return this._integration.model.integration.update({
       where: {
