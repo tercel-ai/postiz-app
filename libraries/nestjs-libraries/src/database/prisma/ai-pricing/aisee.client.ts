@@ -367,6 +367,22 @@ export class AiseeClient {
     }
   }
 
+  // -------------------------------------------------------------------------
+  // POST /post-agent/integration/update  — sync integration state changes
+  // -------------------------------------------------------------------------
+
+  syncIntegration(userId: string, channelId: string, data: Record<string, unknown>): void {
+    if (!this.enabled) return;
+
+    fetch(`${this.baseUrl}/post-agent/integration/update`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...this.authHeaders },
+      body: JSON.stringify({ user_id: userId, data: { id: channelId, ...data } }),
+    }).catch((err) =>
+      this.logger.warn(`[syncIntegration] Failed to sync channel ${channelId}: ${err.message}`)
+    );
+  }
+
   /**
    * Build a unique task_id: postiz_{label}_{random}
    * The random suffix prevents collisions when Date.now() overlaps.

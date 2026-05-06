@@ -499,4 +499,14 @@ export class AiseeCreditService {
       return false;
     }
   }
+
+  syncIntegration(orgId: string, channelId: string, data: Record<string, unknown>): void {
+    if (!this.aiseeClient.enabled) return;
+
+    this.resolveOwnerUserId(orgId)
+      .then((userId) => this.aiseeClient.syncIntegration(userId, channelId, data))
+      .catch((err) =>
+        this.logger.warn(`[syncIntegration] org=${orgId} channel=${channelId}: ${err.message}`)
+      );
+  }
 }

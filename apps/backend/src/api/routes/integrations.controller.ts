@@ -43,6 +43,7 @@ import {
 } from '@gitroom/backend/services/auth/permissions/permission.exception.class';
 import { uniqBy } from 'lodash';
 import { RefreshIntegrationService } from '@gitroom/nestjs-libraries/integrations/refresh.integration.service';
+import { AiseeCreditService } from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/aisee-credit.service';
 
 @ApiTags('Integrations')
 @Controller('/integrations')
@@ -52,7 +53,8 @@ export class IntegrationsController {
     private _integrationService: IntegrationService,
     private _postService: PostsService,
     private _refreshIntegrationService: RefreshIntegrationService,
-    private _dataTicksService: DataTicksService
+    private _dataTicksService: DataTicksService,
+    private _aiseeClient: AiseeCreditService
   ) {}
 
   private resolveCallbackBaseUrl(origin?: string): string {
@@ -715,7 +717,7 @@ export class IntegrationsController {
       );
     }
 
-    this.notifyAiseeCore(org.id, createUpdate.id, { deletedAt: createUpdate.deletedAt?.toISOString() ?? null });
+    this._aiseeClient.syncIntegration(org.id, createUpdate.id, { deletedAt: createUpdate.deletedAt?.toISOString() ?? null });
     return {
       ...createUpdate,
       onboarding: onboarding === 'true',
@@ -728,7 +730,7 @@ export class IntegrationsController {
     @Body('id') id: string
   ) {
     const result = await this._integrationService.disableChannel(org.id, id);
-    this.notifyAiseeCore(org.id, id, { disabled: true });
+    this._aiseeClient.syncIntegration(org.id, id, { disabled: true });
     return result;
   }
 
@@ -752,24 +754,8 @@ export class IntegrationsController {
       org?.subscription?.totalChannels || pricing.FREE.channel,
       id
     );
-    this.notifyAiseeCore(org.id, id, { disabled: false });
+    this._aiseeClient.syncIntegration(org.id, id, { disabled: false });
     return result;
-  }
-
-  private notifyAiseeCore(orgId: string, channelId: string, data: Record<string, unknown>): void {
-    const baseUrl = process.env.AISEE_ORCHESTRATOR_URL;
-    if (!baseUrl) return;
-
-    fetch(`${baseUrl}/post-agent/integration/update`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        user_id: orgId,
-        data: { id: channelId, ...data },
-      }),
-    }).catch((err) =>
-      Logger.warn(`[aisee-core] Failed to sync channel ${channelId}: ${err.message}`)
-    );
   }
 
   @Delete('/')
@@ -788,7 +774,7 @@ export class IntegrationsController {
     );
 
     const result = await this._integrationService.deleteChannel(org.id, id);
-    this.notifyAiseeCore(org.id, id, { deletedAt: result.deletedAt?.toISOString() ?? null });
+    this._aiseeClient.syncIntegration(org.id, id, { deletedAt: result.deletedAt?.toISOString() ?? null });
     return result;
   }
 
