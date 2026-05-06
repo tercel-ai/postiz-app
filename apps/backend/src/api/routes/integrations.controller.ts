@@ -715,6 +715,7 @@ export class IntegrationsController {
       );
     }
 
+    this.notifyAiseeCore(org.id, createUpdate.id, { deletedAt: createUpdate.deletedAt?.toISOString() ?? null });
     return {
       ...createUpdate,
       onboarding: onboarding === 'true',
@@ -722,11 +723,13 @@ export class IntegrationsController {
   }
 
   @Post('/disable')
-  disableChannel(
+  async disableChannel(
     @GetOrgFromRequest() org: Organization,
     @Body('id') id: string
   ) {
-    return this._integrationService.disableChannel(org.id, id);
+    const result = await this._integrationService.disableChannel(org.id, id);
+    this.notifyAiseeCore(org.id, id, { disabled: true });
+    return result;
   }
 
   @Post('/provider/:id/connect')
@@ -739,15 +742,33 @@ export class IntegrationsController {
   }
 
   @Post('/enable')
-  enableChannel(
+  async enableChannel(
     @GetOrgFromRequest() org: Organization,
     @Body('id') id: string
   ) {
-    return this._integrationService.enableChannel(
+    const result = await this._integrationService.enableChannel(
       org.id,
       // @ts-ignore
       org?.subscription?.totalChannels || pricing.FREE.channel,
       id
+    );
+    this.notifyAiseeCore(org.id, id, { disabled: false });
+    return result;
+  }
+
+  private notifyAiseeCore(orgId: string, channelId: string, data: Record<string, unknown>): void {
+    const baseUrl = process.env.AISEE_ORCHESTRATOR_URL;
+    if (!baseUrl) return;
+
+    fetch(`${baseUrl}/post-agent/integration/update`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        user_id: orgId,
+        data: { id: channelId, ...data },
+      }),
+    }).catch((err) =>
+      Logger.warn(`[aisee-core] Failed to sync channel ${channelId}: ${err.message}`)
     );
   }
 
@@ -766,7 +787,9 @@ export class IntegrationsController {
       id
     );
 
-    return this._integrationService.deleteChannel(org.id, id);
+    const result = await this._integrationService.deleteChannel(org.id, id);
+    this.notifyAiseeCore(org.id, id, { deletedAt: result.deletedAt?.toISOString() ?? null });
+    return result;
   }
 
   @Get('/plug/list')
