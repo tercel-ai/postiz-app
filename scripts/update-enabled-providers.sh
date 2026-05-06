@@ -54,7 +54,9 @@ fi
 # Read a single env key from .env (returns empty if unset). Handles quoted values.
 read_env_value() {
   local key="$1"
-  grep -E "^${key}=" "$ENV_FILE" | tail -1 \
+  local match
+  match=$(grep -E "^${key}=" "$ENV_FILE" 2>/dev/null || true)
+  echo "$match" | tail -1 \
     | sed -E "s/^${key}=//; s/^\"(.*)\"$/\1/; s/^'(.*)'$/\1/"
 }
 

@@ -23,7 +23,11 @@ fi
 
 read_env_value() {
   local key="$1"
-  grep -E "^${key}=" "$ENV_FILE" | tail -1 \
+  local match
+  # grep exits 1 when key is absent — capture separately so pipefail doesn't
+  # propagate before the default substitution on the call site can apply.
+  match=$(grep -E "^${key}=" "$ENV_FILE" 2>/dev/null || true)
+  echo "$match" | tail -1 \
     | sed -E "s/^${key}=//; s/^\"(.*)\"$/\1/; s/^'(.*)'$/\1/"
 }
 
