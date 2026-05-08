@@ -11,6 +11,7 @@ import { IntegrationManager } from '@gitroom/nestjs-libraries/integrations/integ
 import { Integration, Post, Media, From, State } from '@prisma/client';
 import { GetPostsDto } from '@gitroom/nestjs-libraries/dtos/posts/get.posts.dto';
 import { GetPostsListDto } from '@gitroom/nestjs-libraries/dtos/posts/get.posts-list.dto';
+import { LocatePostInListDto } from '@gitroom/nestjs-libraries/dtos/posts/locate.post-in-list.dto';
 import { shuffle } from 'lodash';
 import { CreateGeneratedPostsDto } from '@gitroom/nestjs-libraries/dtos/generator/create.generated.posts.dto';
 import { IntegrationService } from '@gitroom/nestjs-libraries/database/prisma/integrations/integration.service';
@@ -371,6 +372,10 @@ export class PostsService {
 
   async getPostsList(orgId: string, query: GetPostsListDto) {
     return this._postRepository.getPostsList(orgId, query);
+  }
+
+  async locatePostInList(orgId: string, query: LocatePostInListDto) {
+    return this._postRepository.locatePostInList(orgId, query);
   }
 
   async getAllPostsList(query: GetPostsListDto & { organizationId?: string | string[] }) {

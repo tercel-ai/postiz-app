@@ -15,6 +15,7 @@ import { GetOrgFromRequest } from '@gitroom/nestjs-libraries/user/org.from.reque
 import { Organization, User } from '@prisma/client';
 import { GetPostsDto } from '@gitroom/nestjs-libraries/dtos/posts/get.posts.dto';
 import { GetPostsListDto } from '@gitroom/nestjs-libraries/dtos/posts/get.posts-list.dto';
+import { LocatePostInListDto } from '@gitroom/nestjs-libraries/dtos/posts/locate.post-in-list.dto';
 import { GetPostReleasesDto } from '@gitroom/nestjs-libraries/dtos/posts/get.post-releases.dto';
 import { CheckPolicies } from '@gitroom/backend/services/auth/permissions/permissions.ability';
 import { ApiBody, ApiOkResponse, ApiTags, getSchemaPath } from '@nestjs/swagger';
@@ -154,6 +155,29 @@ export class PostsController {
     @Query() query: GetPostsListDto
   ) {
     return this._postsService.getPostsList(org.id, query);
+  }
+
+  @Get('/list/locate')
+  @ApiOkResponse({
+    description:
+      'Locate the page of a given postId within /posts/list using the same filters and sort. Returns null page when the post does not match the filters.',
+    schema: {
+      type: 'object',
+      properties: {
+        found: { type: 'boolean' },
+        page: { type: 'number', nullable: true },
+        position: { type: 'number', nullable: true },
+        total: { type: 'number' },
+        pageSize: { type: 'number' },
+        totalPages: { type: 'number' },
+      },
+    },
+  })
+  async locatePostInList(
+    @GetOrgFromRequest() org: Organization,
+    @Query() query: LocatePostInListDto
+  ) {
+    return this._postsService.locatePostInList(org.id, query);
   }
 
   @Get('/old')

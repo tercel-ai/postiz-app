@@ -2,6 +2,7 @@ import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { INestApplication } from '@nestjs/common';
 import { GetPostsDto } from '@gitroom/nestjs-libraries/dtos/posts/get.posts.dto';
 import { GetPostsListDto } from '@gitroom/nestjs-libraries/dtos/posts/get.posts-list.dto';
+import { LocatePostInListDto } from '@gitroom/nestjs-libraries/dtos/posts/locate.post-in-list.dto';
 import { CreatePostDto } from '@gitroom/nestjs-libraries/dtos/posts/create.post.dto';
 import { MediaDto } from '@gitroom/nestjs-libraries/dtos/media/media.dto';
 
@@ -22,7 +23,7 @@ export const loadSwagger = (app: INestApplication) => {
     .build();
 
   const document = SwaggerModule.createDocument(app, config, {
-    extraModels: [GetPostsDto, GetPostsListDto, CreatePostDto, MediaDto],
+    extraModels: [GetPostsDto, GetPostsListDto, LocatePostInListDto, CreatePostDto, MediaDto],
   });
   document.security = [{ 'JWT-auth': [] }];
   SwaggerModule.setup('docs', app, document);

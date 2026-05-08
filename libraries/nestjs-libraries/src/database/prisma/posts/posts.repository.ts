@@ -4,6 +4,7 @@ import { Post as PostBody } from '@gitroom/nestjs-libraries/dtos/posts/create.po
 import { APPROVED_SUBMIT_FOR_ORDER, Post, State } from '@prisma/client';
 import { GetPostsDto } from '@gitroom/nestjs-libraries/dtos/posts/get.posts.dto';
 import { GetPostsListDto } from '@gitroom/nestjs-libraries/dtos/posts/get.posts-list.dto';
+import { LocatePostInListDto } from '@gitroom/nestjs-libraries/dtos/posts/locate.post-in-list.dto';
 import dayjs from 'dayjs';
 import isoWeek from 'dayjs/plugin/isoWeek';
 import weekOfYear from 'dayjs/plugin/weekOfYear';
@@ -293,9 +294,12 @@ export class PostsRepository {
     const [results, total] = await Promise.all([
       this._post.model.post.findMany({
         where,
-        orderBy: {
-          [query.sortBy]: query.sortOrder,
-        },
+        orderBy: [
+          { [query.sortBy]: query.sortOrder },
+          // Stable tiebreaker so `locatePostInList` can reproduce the exact
+          // page index for posts sharing the same `sortBy` value.
+          { id: query.sortOrder },
+        ],
         select: {
           id: true,
           content: true,
@@ -336,6 +340,86 @@ export class PostsRepository {
       page: query.page,
       pageSize: query.pageSize,
       totalPages: Math.ceil(total / query.pageSize),
+    };
+  }
+
+  async locatePostInList(orgId: string, query: LocatePostInListDto) {
+    // Mirror the `where` from `getPostsList` exactly so the position we
+    // compute matches the index the post occupies in `/posts/list`.
+    const where = {
+      organizationId: orgId,
+      deletedAt: null,
+      parentPostId: null,
+      ...(query.view === 'templates' ? { sourcePostId: null } : {}),
+      ...(query.sourcePostId ? { sourcePostId: query.sourcePostId } : {}),
+      ...(query.state ? { state: query.state } : {}),
+      ...(query.integrationId?.length
+        ? { integrationId: { in: query.integrationId } }
+        : {}),
+      ...(query.channel?.length
+        ? { integration: { providerIdentifier: { in: query.channel } } }
+        : {}),
+    };
+
+    const sortBy = query.sortBy!;
+    const sortOrder = query.sortOrder!;
+    const pageSize = query.pageSize!;
+
+    const post = await this._post.model.post.findFirst({
+      where: { ...where, id: query.postId },
+      select: {
+        id: true,
+        publishDate: true,
+        createdAt: true,
+        updatedAt: true,
+        state: true,
+      },
+    });
+
+    if (!post) {
+      // Either the post does not exist, does not belong to the org, or it
+      // is excluded by the same filters that `/posts/list` would apply.
+      const total = await this._post.model.post.count({ where });
+      return {
+        found: false as const,
+        page: null as number | null,
+        position: null as number | null,
+        total,
+        pageSize,
+        totalPages: Math.ceil(total / pageSize),
+      };
+    }
+
+    const sortValue = (post as Record<string, unknown>)[sortBy];
+    // For desc, "before" the target means strictly greater; for asc, less.
+    // Tiebreaker on equal sort values follows the same id ordering applied
+    // in `getPostsList`.
+    const cmp = sortOrder === 'desc' ? 'gt' : 'lt';
+
+    const [precedingByValue, precedingByTie, total] = await Promise.all([
+      this._post.model.post.count({
+        where: { ...where, [sortBy]: { [cmp]: sortValue } },
+      }),
+      this._post.model.post.count({
+        where: {
+          ...where,
+          [sortBy]: { equals: sortValue },
+          id: { [cmp]: post.id },
+        },
+      }),
+      this._post.model.post.count({ where }),
+    ]);
+
+    const position = precedingByValue + precedingByTie + 1;
+    const page = Math.ceil(position / pageSize);
+
+    return {
+      found: true as const,
+      page,
+      position,
+      total,
+      pageSize,
+      totalPages: Math.ceil(total / pageSize),
     };
   }
 
