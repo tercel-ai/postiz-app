@@ -408,6 +408,61 @@ export class PostActivity {
   }
 
   /**
+   * Mark an integration as needing user re-authorization. Mirrors the
+   * permanent-failure side effects in refreshIntegrationService.refreshProcess:
+   *   - refreshNeeded = true (blocks future automated refresh attempts)
+   *   - disconnectChannel (the integration is no longer usable)
+   *   - informAboutRefreshError (notification to the user)
+   *
+   * Use this when the post.workflow has clear evidence that the refresh_token
+   * itself is dead — e.g. after one successful access_token refresh, the next
+   * postSocial call STILL returns 401. At that point we know:
+   *   (a) The refresh_token was valid enough to get us a new access_token,
+   *       AND
+   *   (b) The new access_token was immediately rejected by the platform,
+   *   ⇒ Either the platform rotated the refresh_token mid-flight, or the
+   *     account is suspended at the platform side, or scopes changed. None
+   *     of these are recoverable without user re-authorization. Retrying
+   *     would waste OAuth refresh quota and delay the user-facing signal.
+   *
+   * Each step is independently try/caught — partial success is better than
+   * leaving the integration in a half-disabled state.
+   */
+  @ActivityMethod()
+  async markIntegrationRefreshNeeded(integration: Integration): Promise<void> {
+    try {
+      await this._integrationService.refreshNeeded(
+        integration.organizationId,
+        integration.id
+      );
+    } catch (e) {
+      console.error(
+        `[markIntegrationRefreshNeeded] refreshNeeded failed for integration=${integration.id} provider=${integration.providerIdentifier}: ${(e as any)?.message ?? e}`
+      );
+    }
+    try {
+      await this._integrationService.disconnectChannel(
+        integration.organizationId,
+        integration
+      );
+    } catch (e) {
+      console.error(
+        `[markIntegrationRefreshNeeded] disconnectChannel failed for integration=${integration.id} provider=${integration.providerIdentifier}: ${(e as any)?.message ?? e}`
+      );
+    }
+    try {
+      await this._integrationService.informAboutRefreshError(
+        integration.organizationId,
+        integration
+      );
+    } catch (e) {
+      console.warn(
+        `[markIntegrationRefreshNeeded] informAboutRefreshError failed for integration=${integration.id}: ${(e as any)?.message ?? e}. User will not be notified.`
+      );
+    }
+  }
+
+  /**
    * Best-effort park: mark integration as inBetweenSteps + emit operator
    * notification. Wraps the underlying service call so a failure here does
    * not crash the activity, but DOES log the underlying error — the

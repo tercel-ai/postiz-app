@@ -181,4 +181,98 @@ describe('XProvider — suspended account detection', () => {
       expect(result?.type).not.toBe('refresh-token');
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // _getUserInfo 401 → RefreshToken (regression for "Request failed with code 401"
+  // unclear error and missing token-refresh trigger)
+  // ---------------------------------------------------------------------------
+  // Before the fix: _getUserInfo() at x.provider.ts:463-489 caught the
+  // twitter-api-v2 ApiResponseError but only translated 403 → custom message.
+  // For 401 it just `throw err` → the raw ApiResponseError ("Request failed
+  // with code 401") propagated up through postSocial → Temporal wrapped it but
+  // the type was NOT 'refresh_token' → workflow's reactive refresh path never
+  // triggered → 5 retries with the same expired token → finally Post.error
+  // ended up as the unclear "Request failed with code 401".
+  //
+  // After the fix: 401 is translated to `throw new RefreshToken(...)` with the
+  // type='refresh_token' marker so the workflow can refresh and retry.
+  describe('_getUserInfo — 401 translation (regression)', () => {
+    it('throws RefreshToken (type=refresh_token) instead of raw ApiResponseError for 401', async () => {
+      // Build a fake TwitterApi client whose .v2.me() throws the same shape
+      // the real twitter-api-v2 library throws.
+      const apiErr: any = new Error('Request failed with code 401');
+      apiErr.name = 'ApiResponseError';
+      apiErr.code = 401;
+      apiErr.data = { title: 'Unauthorized', status: 401, detail: 'Unauthorized' };
+
+      const fakeClient: any = {
+        v2: {
+          me: vi.fn().mockRejectedValue(apiErr),
+        },
+      };
+
+      let thrown: any;
+      try {
+        await (provider as any)._getUserInfo(fakeClient);
+      } catch (e) {
+        thrown = e;
+      }
+
+      expect(thrown).toBeDefined();
+      // The crucial property — without this, workflow won't recognize it as a
+      // refreshable failure.
+      expect(thrown.type).toBe('refresh_token');
+      expect(thrown.name).toBe('ApplicationFailure');
+      // User-facing message is clear, not the raw SDK string.
+      expect(thrown.message).toBe(
+        'X authentication has expired, please reconnect your account'
+      );
+      // Raw error details preserved in `details` for debugging.
+      expect(thrown.details?.[0]).toBeDefined();
+    });
+
+    it('still throws the original error for non-401, non-403 statuses', async () => {
+      const apiErr: any = new Error('Request failed with code 500');
+      apiErr.code = 500;
+
+      const fakeClient: any = {
+        v2: { me: vi.fn().mockRejectedValue(apiErr) },
+      };
+
+      let thrown: any;
+      try {
+        await (provider as any)._getUserInfo(fakeClient);
+      } catch (e) {
+        thrown = e;
+      }
+
+      expect(thrown).toBe(apiErr); // exact same instance — not wrapped
+      expect(thrown.type).toBeUndefined();
+    });
+
+    it('still throws clear suspended-account error for 403 (existing behavior preserved)', async () => {
+      const suspendedErr: any = new Error('Forbidden');
+      suspendedErr.code = 403;
+      suspendedErr.data = {
+        detail: 'The user used for authentication is suspended',
+        title: 'Forbidden',
+      };
+
+      const fakeClient: any = {
+        v2: { me: vi.fn().mockRejectedValue(suspendedErr) },
+      };
+
+      let thrown: any;
+      try {
+        await (provider as any)._getUserInfo(fakeClient);
+      } catch (e) {
+        thrown = e;
+      }
+
+      expect(thrown).toBeDefined();
+      expect(thrown.message).toContain('suspended');
+      // Not a RefreshToken — the user needs to take a different action.
+      expect(thrown.type).toBeUndefined();
+    });
+  });
 });

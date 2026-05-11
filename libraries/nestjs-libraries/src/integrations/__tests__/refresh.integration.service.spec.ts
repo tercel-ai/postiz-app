@@ -200,6 +200,24 @@ describe('RefreshIntegrationService.refresh', () => {
     expect(mocks.refreshNeeded).not.toHaveBeenCalled();
   });
 
+  it('marks refreshNeeded + disconnects when the REFRESH endpoint itself returns 401 (refresh_token expired)', async () => {
+    // When the call to the platform's /oauth/token endpoint returns 401, it
+    // means the refresh_token we sent is itself dead — the user must
+    // re-authorize. isTransientRefreshError must classify this as permanent
+    // (not transient) so refreshProcess sets refreshNeeded=true instead of
+    // retrying forever.
+    const { svc, mocks } = buildService({
+      providerRefresh: vi.fn().mockRejectedValue({ response: { status: 401 } }),
+    });
+
+    const result = await svc.refresh(makeIntegration());
+    expect(result).toBe(false);
+
+    expect(mocks.refreshNeeded).toHaveBeenCalledOnce();
+    expect(mocks.disconnectChannel).toHaveBeenCalledOnce();
+    expect(mocks.informAboutRefreshError).toHaveBeenCalledOnce();
+  });
+
   it('marks refreshNeeded + disconnects on invalid_grant (permanent revoke)', async () => {
     const { svc, mocks } = buildService({
       providerRefresh: vi

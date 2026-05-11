@@ -485,6 +485,26 @@ export class XProvider extends SocialAbstract implements SocialProvider {
           'Please ensure your X app has "users.read" scope enabled and OAuth 2.0 User Authentication is configured in the X Developer Portal.'
         );
       }
+      // CRITICAL: 401 means the access token is expired/revoked. We MUST throw
+      // RefreshToken (not the raw ApiResponseError) so the workflow's reactive
+      // refresh path triggers — otherwise the workflow retries the SAME expired
+      // token 5 times then writes "Request failed with code 401" as a useless
+      // Post.error message. Mirrors the pattern already in use at line ~1501
+      // (lookupUser) and the runInConcurrent → handleErrors path (which catches
+      // this via the "Request failed with code 401" string match).
+      if (status === 401) {
+        throw new RefreshToken(
+          this.identifier,
+          JSON.stringify({
+            message: err?.message,
+            code: err?.code,
+            data: err?.data,
+            errors: err?.errors,
+          }),
+          '',
+          'X authentication has expired, please reconnect your account'
+        );
+      }
       throw err;
     }
     const { data } = result;

@@ -89,6 +89,7 @@ export async function postWorkflowV101({
     getIntegrationById,
     refreshToken,
     ensureFreshToken,
+    markIntegrationRefreshNeeded,
     internalPlugs,
     globalPlugs,
     processInternalPlug,
@@ -306,6 +307,12 @@ export async function postWorkflowV101({
     // the social platform call already succeeded and a retry would duplicate
     // the post. updatePost is called once after the loop succeeds.
     const maxAttempts = noRetry ? [undefined] : iterate;
+    // SINGLE-REFRESH POLICY: a fresh access_token obtained from a successful
+    // refresh call must not need another refresh on the very next postSocial.
+    // If it does, the refresh_token itself is rotated/revoked/dead and the
+    // user must reconnect — looping more would only burn OAuth refresh quota
+    // and delay the user-facing "please reconnect" signal.
+    let alreadyRefreshed = false;
     for (const _ of maxAttempts) {
       try {
         // first post the main post
@@ -341,6 +348,23 @@ export async function postWorkflowV101({
           err.cause instanceof ApplicationFailure &&
           err.cause.type === 'refresh_token'
         ) {
+          // GUARD: if we already refreshed once in this retry loop and the
+          // brand-new access_token STILL gets refresh_token errors, the
+          // refresh_token itself is no longer functional. Stop the loop,
+          // mark the integration as refreshNeeded so the user is prompted to
+          // reconnect, and bail this post.
+          if (alreadyRefreshed) {
+            await markIntegrationRefreshNeeded(post.integration as Integration);
+            const reason =
+              'X authentication is no longer valid (refresh succeeded but the new token was rejected). Please reconnect your account.';
+            await markError(reason);
+            await finalizeCycle(reason);
+            if (isRecurring) {
+              await continueAsNew<typeof postWorkflowV101>({ taskQueue, postId, organizationId });
+            }
+            return false;
+          }
+
           // refreshToken activity may throw if Temporal exhausted its retries
           // on a transient platform error (5xx / 429 / network). When that
           // happens the integration is healthy but unreachable right now —
@@ -355,6 +379,10 @@ export async function postWorkflowV101({
           }
 
           if (!refresh || !refresh.accessToken) {
+            // refresh = false means the refresh API call returned a permanent
+            // failure (refresh_token 401 / invalid_grant / 4xx). refreshProcess
+            // already marked refreshNeeded=true + disconnectChannel. Don't
+            // double-mark; just surface a clear user-facing message.
             const reason = refreshTransient
               ? 'Token refresh temporarily unavailable (platform 5xx / rate-limited). Will retry on next scheduled cycle.'
               : 'Token refresh failed — please reconnect your account';
@@ -365,6 +393,8 @@ export async function postWorkflowV101({
             }
             return false;
           }
+
+          alreadyRefreshed = true;
 
           post.integration.token = refresh.accessToken;
           continue;

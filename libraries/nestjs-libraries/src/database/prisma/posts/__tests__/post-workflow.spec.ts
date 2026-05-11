@@ -345,31 +345,61 @@ describe('PostsRepository.getPosts — calendar clone display', () => {
     );
   });
 
-  it('should fetch clones by group, not sourcePostId', async () => {
+  it('returns recurring template + clones in one query and links them by group (not by sourcePostId)', async () => {
+    // ARCHITECTURE NOTE (2026 refactor):
+    // The previous implementation fetched originals first, then ran a second
+    // findMany scoped by sourcePostId to pull clones. That second query was
+    // removed — the main query now drops `sourcePostId: null` so clones come
+    // back inline (see posts.repository.ts:493 comment "Removed sourcePostId:
+    // null to allow clones to be fetched"). Linking is done in-memory via
+    // `originals.find(o => o.group === p.group && o.integrationId === p.integrationId)`.
+    //
+    // This test was previously asserting against `findMany.mock.calls[1]`
+    // which never executes in the new architecture. Updated to assert the
+    // single-query behavior: (a) no sourcePostId filter, (b) result correctly
+    // surfaces both clones as PUBLISHED entries.
     const recurringOriginal = makeRecurringPost({
       id: 'orig-1',
       group: 'grp-1',
+      integrationId: 'int-1',
       publishDate: new Date('2026-04-10T10:00:00Z'),
     });
 
-    // First call: main query (originals)
-    mockPrismaPost.findMany
-      .mockResolvedValueOnce([recurringOriginal])
-      // Second call: clone lookup
-      .mockResolvedValueOnce([
-        {
-          ...makePost({ id: 'clone-1', group: 'grp-1', state: 'PUBLISHED' }),
-          publishDate: new Date('2026-04-01T10:00:00Z'),
-          releaseId: 'tw-1',
-          releaseURL: 'https://twitter.com/1',
-        },
-        {
-          ...makePost({ id: 'clone-2', group: 'grp-1', state: 'PUBLISHED' }),
-          publishDate: new Date('2026-04-02T10:00:00Z'),
-          releaseId: 'tw-2',
-          releaseURL: 'https://twitter.com/2',
-        },
-      ]);
+    const clone1 = {
+      ...makePost({
+        id: 'clone-1',
+        group: 'grp-1',
+        state: 'PUBLISHED',
+      }),
+      // Clones in the new model have intervalInDays: null and may have
+      // sourcePostId: null (cycle clones) or a value (release clones).
+      intervalInDays: null,
+      sourcePostId: null,
+      integrationId: 'int-1',
+      publishDate: new Date('2026-04-01T10:00:00Z'),
+      releaseId: 'tw-1',
+      releaseURL: 'https://twitter.com/1',
+    };
+    const clone2 = {
+      ...makePost({
+        id: 'clone-2',
+        group: 'grp-1',
+        state: 'PUBLISHED',
+      }),
+      intervalInDays: null,
+      sourcePostId: null,
+      integrationId: 'int-1',
+      publishDate: new Date('2026-04-02T10:00:00Z'),
+      releaseId: 'tw-2',
+      releaseURL: 'https://twitter.com/2',
+    };
+
+    // Single findMany call now returns both template AND clones together.
+    mockPrismaPost.findMany.mockResolvedValueOnce([
+      recurringOriginal,
+      clone1,
+      clone2,
+    ]);
 
     const query = {
       startDate: '2026-04-01',
@@ -378,15 +408,20 @@ describe('PostsRepository.getPosts — calendar clone display', () => {
 
     const results = await repo.getPosts('org-1', query);
 
-    // Clone query should use group, not sourcePostId
-    const cloneQuery = mockPrismaPost.findMany.mock.calls[1][0];
-    expect(cloneQuery.where.group).toEqual({ in: ['grp-1'] });
-    expect(cloneQuery.where.sourcePostId).toBeUndefined();
-    expect(cloneQuery.where.id).toEqual({ notIn: ['orig-1'] });
+    // (a) Only ONE findMany — no second clone-lookup query exists.
+    expect(mockPrismaPost.findMany).toHaveBeenCalledOnce();
 
-    // Results should include both clones
+    // (b) The main query must NOT filter out clones — `sourcePostId` must be
+    //     absent from the where clause (otherwise clones with non-null
+    //     sourcePostId would be excluded).
+    const mainQuery = mockPrismaPost.findMany.mock.calls[0][0];
+    expect(mainQuery.where.sourcePostId).toBeUndefined();
+
+    // (c) Both clones surface as PUBLISHED in the result, regardless of how
+    //     they're linked to the template.
     const publishedResults = results.filter((r: any) => r.state === 'PUBLISHED');
     expect(publishedResults.length).toBe(2);
+    expect(publishedResults.map((p: any) => p.id).sort()).toEqual(['clone-1', 'clone-2']);
   });
 
   it('should show clones even when original is deleted (sourcePostId not needed)', async () => {
@@ -954,21 +989,31 @@ describe('PostsRepository.createOrUpdatePost — group cleanup guard', () => {
     expect(mockPrismaPost.updateMany).not.toHaveBeenCalled();
   });
 
-  it('DOES run group cleanup when editing an existing post (value.id present)', async () => {
-    mockPrismaPost.upsert.mockResolvedValue(makeUpsertResult('post-existing'));
-
-    await repo.createOrUpdatePost(
-      'schedule',
-      'org-1',
-      '2026-04-01T10:00:00',
-      makeBody({ group: 'group-abc', valueId: 'post-existing' }),
-      [],
-    );
+  // ARCHITECTURE NOTE (2026 refactor):
+  // Group cleanup on edit was moved OUT of PostsRepository.createOrUpdatePost
+  // and INTO PostsService.createPost (posts.service.ts:875-881). The service
+  // now calls softDeleteGroupPosts ONCE after iterating over all integrations,
+  // so a sibling post upserted later in the same call doesn't get soft-deleted
+  // by an earlier iteration.
+  //
+  // The repository-level invariant is therefore now expressed on
+  // softDeleteGroupPosts itself: it must (a) limit deletion to QUEUE/DRAFT
+  // (PUBLISHED/ERROR are immutable history per the function doc), (b) honour
+  // the excludeIds list via `id: { notIn: [...] }`, and (c) restrict to the
+  // requested group.
+  it('softDeleteGroupPosts uses id notIn for excludeIds and only touches QUEUE/DRAFT', async () => {
+    await repo.softDeleteGroupPosts('group-abc', {
+      organizationId: 'org-1',
+      excludeIds: ['post-existing'],
+    });
 
     expect(mockPrismaPost.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
           group: 'group-abc',
+          organizationId: 'org-1',
+          deletedAt: null,
+          state: { in: ['QUEUE', 'DRAFT'] },
           id: { notIn: ['post-existing'] },
         }),
         data: expect.objectContaining({ deletedAt: expect.any(Date) }),

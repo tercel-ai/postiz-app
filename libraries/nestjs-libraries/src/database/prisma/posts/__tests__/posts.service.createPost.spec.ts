@@ -15,6 +15,15 @@ function createMocks() {
       createOrUpdatePost: vi.fn().mockResolvedValue({
         posts: [makePost('post-1')],
       }),
+      // posts.service.ts:843 reads the final state for body.type === 'now'
+      // posts. Without this mock the postNow branch crashes with
+      // "this._postRepository.getPostById is not a function".
+      getPostById: vi.fn().mockImplementation(async (id: string) => ({
+        id,
+        state: 'PUBLISHED',
+        error: null,
+        releaseURL: null,
+      })),
     },
     integrationManager: {},
     integrationService: {},

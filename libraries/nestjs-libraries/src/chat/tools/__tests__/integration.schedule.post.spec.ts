@@ -76,17 +76,37 @@ vi.mock('@gitroom/helpers/utils/count.length', () => ({
 // Helpers
 // ---------------------------------------------------------------------------
 
-function buildRuntimeContext() {
+/**
+ * Build a RuntimeContext that mirrors what the frontend sends. The tool's
+ * `resolveIntegrationIds()` step at integration.schedule.post.ts:159 reads the
+ * `integrations` key — if absent, every test would error with "No channels
+ * selected" before reaching createPost. By default we expose BOTH the LinkedIn
+ * and X integrations as "selected", which lets routing rule 2 (multiple
+ * selected + LLM-specified id) drive each test to its intended provider.
+ *
+ * Tests that need a different set (e.g. "integration not found" E1) can pass
+ * an override via the second argument.
+ */
+function buildRuntimeContext(
+  selectedIntegrations: Array<{ id: string; providerIdentifier?: string; name?: string }> = [
+    { id: linkedinIntegration.id, providerIdentifier: 'linkedin', name: linkedinIntegration.name },
+    { id: xIntegration.id, providerIdentifier: 'x', name: xIntegration.name },
+  ]
+) {
   const ctx = new RuntimeContext();
   ctx.set('organization' as never, JSON.stringify(mockOrg) as never);
   ctx.set('ui' as never, 'true' as never);
+  ctx.set('integrations' as never, selectedIntegrations as never);
   return ctx;
 }
 
-function buildArgs(socialPost: any[]) {
+function buildArgs(
+  socialPost: any[],
+  selectedIntegrations?: Array<{ id: string; providerIdentifier?: string; name?: string }>
+) {
   return {
     context: { socialPost },
-    runtimeContext: buildRuntimeContext(),
+    runtimeContext: buildRuntimeContext(selectedIntegrations),
   };
 }
 
@@ -399,7 +419,14 @@ describe('IntegrationSchedulePostTool', () => {
 
   describe('E: Edge Cases', () => {
     it('E1: integration not found — returns error', async () => {
-      mockIntegrationService.getIntegrationById.mockResolvedValueOnce(null);
+      // NOTE: the previous mockResolvedValueOnce(null) here was redundant AND
+      // harmful. The tool's resolveIntegrationIds() step rejects any LLM-supplied
+      // integration id that isn't in the user's selected channels BEFORE
+      // calling getIntegrationById. So the queued `null` was never consumed and
+      // leaked into the next test that DID call getIntegrationById (E3), making
+      // that test see a null integration and skip createPost.
+      // `vi.clearAllMocks()` only clears .mock.calls — it does NOT drain the
+      // mockResolvedValueOnce queue, hence the cross-test contamination.
 
       const result = await tool.execute!(
         buildArgs([
