@@ -13,7 +13,7 @@ import {
 import { lookup } from 'mime-types';
 import sharp from 'sharp';
 import { readOrFetch } from '@gitroom/helpers/utils/read.or.fetch';
-import { SocialAbstract } from '@gitroom/nestjs-libraries/integrations/social.abstract';
+import { RefreshToken, SocialAbstract } from '@gitroom/nestjs-libraries/integrations/social.abstract';
 import { Plug } from '@gitroom/helpers/decorators/plug.decorator';
 import { Integration } from '@prisma/client';
 import { timer } from '@gitroom/helpers/utils/timer';
@@ -1447,6 +1447,62 @@ export class XProvider extends SocialAbstract implements SocialProvider {
       console.log(err);
     }
     return [];
+  }
+
+  override async fetchUserByUsername(token: string, d: { username: string }) {
+    const client = this.buildClient(token);
+    const handle = (d.username || '').trim().replace(/^@+/, '');
+    if (!handle) {
+      return { notFound: true as const };
+    }
+
+    try {
+      const result = await client.v2.userByUsername(handle, {
+        'user.fields': [
+          'id',
+          'name',
+          'username',
+          'description',
+          'profile_image_url',
+          'verified',
+          'verified_type',
+          'url',
+          'public_metrics',
+          'created_at',
+          'location',
+        ],
+      });
+
+      const user = result?.data;
+      if (!user?.username) {
+        return { notFound: true as const };
+      }
+
+      const verifiedType = (user as any).verified_type as string | undefined;
+      return {
+        id: user.id,
+        username: user.username,
+        name: user.name,
+        image: user.profile_image_url,
+        description: user.description,
+        url: `https://twitter.com/${user.username}`,
+        verified:
+          ['blue', 'business', 'government'].includes(verifiedType as any) ||
+          !!user.verified,
+        followers: user.public_metrics?.followers_count,
+        following: user.public_metrics?.following_count,
+        raw: user,
+      };
+    } catch (err: any) {
+      const status = err?.code || err?.data?.status || err?.status;
+      if (status === 404 || status === 400) {
+        return { notFound: true as const };
+      }
+      if (status === 401) {
+        throw new RefreshToken(this.identifier, JSON.stringify(err?.data || {}), '', 'X token expired');
+      }
+      throw err;
+    }
   }
 
   mentionFormat(idOrHandle: string, name: string) {

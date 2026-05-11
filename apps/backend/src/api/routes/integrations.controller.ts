@@ -20,6 +20,7 @@ import { IntegrationService } from '@gitroom/nestjs-libraries/database/prisma/in
 import { GetOrgFromRequest } from '@gitroom/nestjs-libraries/user/org.from.request';
 import { Organization, User } from '@prisma/client';
 import { IntegrationFunctionDto } from '@gitroom/nestjs-libraries/dtos/integrations/integration.function.dto';
+import { UserByUsernameDto } from '@gitroom/nestjs-libraries/dtos/integrations/user.by.username.dto';
 import { CheckPolicies } from '@gitroom/backend/services/auth/permissions/permissions.ability';
 import { pricing } from '@gitroom/nestjs-libraries/database/prisma/subscriptions/pricing';
 import { ApiOkResponse, ApiTags } from '@nestjs/swagger';
@@ -447,6 +448,73 @@ export class IntegrationsController {
       ],
       (p) => p.id
     ).filter((f) => f.label && f.id);
+  }
+
+  @Post('/user-by-username')
+  async fetchUserByUsername(
+    @GetOrgFromRequest() org: Organization,
+    @Body() body: UserByUsernameDto
+  ): Promise<any> {
+    const getIntegration = await this._integrationService.getIntegrationById(
+      org.id,
+      body.id
+    );
+    if (!getIntegration) {
+      throw new HttpException('Invalid integration', 400);
+    }
+
+    const integrationProvider = this._integrationManager.getSocialIntegration(
+      getIntegration.providerIdentifier
+    );
+    if (!integrationProvider) {
+      throw new HttpException('Invalid provider', 400);
+    }
+
+    try {
+      const result = await integrationProvider.fetchUserByUsername(
+        getIntegration.token,
+        { username: body.username },
+        getIntegration.internalId,
+        getIntegration
+      );
+
+      if (result && 'supported' in result && result.supported === false) {
+        throw new HttpException(
+          {
+            error: 'unsupported',
+            message: `${getIntegration.providerIdentifier} does not support username lookup`,
+          },
+          501
+        );
+      }
+
+      if (result && 'notFound' in result && result.notFound === true) {
+        throw new HttpException(
+          { error: 'not_found', message: 'User not found' },
+          404
+        );
+      }
+
+      return result;
+    } catch (err) {
+      if (err instanceof HttpException) {
+        throw err;
+      }
+      if (err instanceof RefreshToken) {
+        const refreshed = await this._refreshIntegrationService.refresh(
+          getIntegration
+        );
+        if (refreshed?.accessToken) {
+          if (integrationProvider.refreshWait) {
+            await timer(10000);
+          }
+          return this.fetchUserByUsername(org, body);
+        }
+        throw new HttpException('Token refresh failed', 401);
+      }
+      console.error('fetchUserByUsername error:', err);
+      throw new HttpException('Failed to fetch user', 500);
+    }
   }
 
   @Post('/function')

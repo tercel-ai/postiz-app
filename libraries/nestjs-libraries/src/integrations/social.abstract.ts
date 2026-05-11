@@ -30,6 +30,24 @@ export class NotEnoughScopes {
   constructor(public message = 'Not enough scopes') {}
 }
 
+export interface SocialUserLookupSuccess {
+  id: string;
+  username: string;
+  name?: string;
+  image?: string;
+  verified?: boolean;
+  description?: string;
+  url?: string;
+  followers?: number;
+  following?: number;
+  raw?: any;
+}
+
+export type SocialUserLookupResult =
+  | SocialUserLookupSuccess
+  | { notFound: true }
+  | { supported: false };
+
 function safeStringify(obj: any) {
   const seen = new WeakSet();
 
@@ -95,6 +113,15 @@ export abstract class SocialAbstract {
     | { none: true }
   > {
     return { none: true };
+  }
+
+  public async fetchUserByUsername(
+    token: string,
+    d: { username: string },
+    id: string,
+    integration: Integration
+  ): Promise<SocialUserLookupResult> {
+    return { supported: false };
   }
 
   async runInConcurrent<T>(
