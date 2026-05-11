@@ -38,8 +38,12 @@ export async function refreshTokenWorkflow({
     const today = new Date();
     const endDate = new Date(integration.tokenExpiration);
 
-    // Refresh 5 minutes before expiry to avoid clock skew / scheduling jitter.
-    const REFRESH_BUFFER_MS = 5 * 60 * 1000;
+    // Refresh 10 minutes before expiry. Buffer must comfortably exceed the
+    // worst-case refreshToken activity duration: 3 Temporal retries at
+    // 2-minute intervals = up to ~6 min, plus platform-side latency and
+    // scheduling jitter. A 5-minute buffer is not enough; 10 minutes leaves
+    // headroom even when the first 1-2 refresh attempts time out.
+    const REFRESH_BUFFER_MS = 10 * 60 * 1000;
     const minMax = Math.max(0, endDate.getTime() - today.getTime() - REFRESH_BUFFER_MS);
     if (minMax > 0) {
       await sleep(minMax);

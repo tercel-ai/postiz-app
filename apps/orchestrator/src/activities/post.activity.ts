@@ -13,7 +13,10 @@ import { Integration, Post, State } from '@prisma/client';
 import { stripHtmlValidation } from '@gitroom/helpers/utils/strip.html.validation';
 import { IntegrationManager } from '@gitroom/nestjs-libraries/integrations/integration.manager';
 import { AuthTokenDetails } from '@gitroom/nestjs-libraries/integrations/social/social.integrations.interface';
-import { RefreshIntegrationService } from '@gitroom/nestjs-libraries/integrations/refresh.integration.service';
+import {
+  RefreshIntegrationService,
+  TransientRefreshError,
+} from '@gitroom/nestjs-libraries/integrations/refresh.integration.service';
 import { timer } from '@gitroom/helpers/utils/timer';
 import { IntegrationService } from '@gitroom/nestjs-libraries/database/prisma/integrations/integration.service';
 import { WebhooksService } from '@gitroom/nestjs-libraries/database/prisma/webhooks/webhooks.service';
@@ -372,6 +375,10 @@ export class PostActivity {
         integration
       );
       if (!refresh) {
+        // Permanent failure: refreshProcess already called refreshNeeded() +
+        // disconnectChannel(). Return false so callers know the token is
+        // permanently dead — no Temporal retry needed (would only re-confirm
+        // the same outcome and waste platform API quota).
         return false;
       }
 
@@ -381,7 +388,119 @@ export class PostActivity {
 
       return refresh;
     } catch (err) {
-      await this._refreshIntegrationService.setBetweenSteps(integration);
+      // CRITICAL: rethrow transient errors so Temporal's activity retry
+      // policy ({maximumAttempts: 3, initialInterval: 2 min}) actually
+      // engages. The previous catch-all swallowed these errors, making the
+      // retry config a no-op and causing a single network blip to look like
+      // a successful "no refresh available" outcome.
+      if (err instanceof TransientRefreshError) {
+        throw err;
+      }
+
+      // Truly unexpected error (e.g. DB write failure mid-refresh, code bug).
+      // Park the integration in inBetweenSteps so the user is informed and an
+      // operator can investigate. This matches the pre-fix behavior for the
+      // "unknown error" case, but is now narrowed to actually unexpected
+      // errors instead of being triggered by every network glitch.
+      try {
+        await this._refreshIntegrationService.setBetweenSteps(integration);
+      } catch (_) {}
+      return false;
+    }
+  }
+
+  /**
+   * Proactive token refresh, called by post.workflow.v1.0.1 right before
+   * `postSocial`. Reads the freshest copy of the Integration row from the DB
+   * (the one carried by the workflow may be stale — the per-platform
+   * refreshTokenWorkflow could have rotated the token while the post slept
+   * until publishDate) and refreshes if it is within `bufferMs` of expiry.
+   *
+   * Why this matters:
+   *  - Without this, scheduled posts at night / on weekends often fire with
+   *    an already-expired token, get a 401 from the platform, and only THEN
+   *    refresh — but for OAuth 1.0a-style providers without `refreshToken`,
+   *    or when the refresh fails on first try, the post hard-fails.
+   *  - The per-platform refreshTokenWorkflow only covers integrations with
+   *    `refreshCron = true` (currently X / Threads / Instagram Standalone).
+   *    LinkedIn / TikTok / Facebook / YouTube etc. have NO background
+   *    refresh — this pre-send check is their only proactive path.
+   *
+   * Return value:
+   *  - `null` if no refresh was needed or no refresh is possible (permanent
+   *    token, no expiration set, integration missing). Caller keeps using
+   *    the token already on `integration`.
+   *  - The refreshed `Integration` row (with the new token + expiration) on
+   *    success. Caller should replace `post.integration` with this.
+   *  - `false` if a refresh was attempted but failed. Caller should fall
+   *    through to the existing reactive-refresh path (postSocial will throw
+   *    `refresh_token` on 401 and the workflow retries once).
+   */
+  @ActivityMethod()
+  async ensureFreshToken(
+    integration: Integration,
+    bufferMs: number = 10 * 60 * 1000
+  ): Promise<Integration | null | false> {
+    // Re-read the integration to pick up any token rotation that happened
+    // while the workflow was sleeping until publishDate.
+    const fresh = await this._integrationService.getIntegrationById(
+      integration.organizationId,
+      integration.id
+    );
+    if (!fresh || fresh.deletedAt || fresh.refreshNeeded || fresh.disabled) {
+      return null;
+    }
+
+    // Permanent tokens (OAuth 1.0a) have no expiration and no refresh flow.
+    if (!fresh.tokenExpiration) {
+      return null;
+    }
+
+    const socialProvider = this._integrationManager.getSocialIntegration(
+      fresh.providerIdentifier
+    );
+    if (socialProvider.isTokenPermanent?.(fresh.token)) {
+      return null;
+    }
+
+    const msToExpiry = new Date(fresh.tokenExpiration).getTime() - Date.now();
+    if (msToExpiry > bufferMs) {
+      // Token is comfortably fresh — no work to do. Return the (possibly
+      // newer) DB copy so the caller benefits from any concurrent rotation.
+      return fresh;
+    }
+
+    try {
+      const refresh = await this._refreshIntegrationService.refresh(fresh);
+      if (!refresh || !refresh.accessToken) {
+        return false;
+      }
+      if (socialProvider.refreshWait) {
+        await timer(10000);
+      }
+      // Re-read so the caller sees the updated token + new tokenExpiration.
+      return (
+        (await this._integrationService.getIntegrationById(
+          fresh.organizationId,
+          fresh.id
+        )) || null
+      );
+    } catch (err) {
+      // Transient errors: silently fall through. ensureFreshToken is
+      // best-effort — the reactive 401-refresh path inside post.workflow
+      // will get another chance once postSocial actually fails. We
+      // explicitly DO NOT call setBetweenSteps here, because that would
+      // disable the integration on every network blip during pre-flight
+      // checks.
+      if (err instanceof TransientRefreshError) {
+        return false;
+      }
+
+      // Truly unexpected error — same conservative treatment as
+      // refreshToken: park in inBetweenSteps so an operator can investigate.
+      try {
+        await this._refreshIntegrationService.setBetweenSteps(fresh);
+      } catch (_) {}
       return false;
     }
   }

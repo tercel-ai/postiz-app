@@ -88,6 +88,7 @@ export async function postWorkflowV101({
     postThreadFinisher,
     getIntegrationById,
     refreshToken,
+    ensureFreshToken,
     internalPlugs,
     globalPlugs,
     processInternalPlug,
@@ -213,6 +214,27 @@ export async function postWorkflowV101({
     }
   }
 
+  // ── Proactive token refresh ──
+  // Before contacting the social platform, make sure the access token is not
+  // about to expire. This is the only proactive refresh path for providers
+  // without `refreshCron = true` (LinkedIn / TikTok / Facebook / YouTube /
+  // Mastodon / Bluesky / Pinterest etc.) and an extra safety net for the rest.
+  //
+  // Behavior:
+  //   - Non-fatal: any failure here falls through to postSocial; the existing
+  //     reactive 401 → refresh → retry path inside the loop still runs.
+  //   - 10-minute buffer matches refresh.token.workflow.ts. See that file for
+  //     the rationale (refresh activity itself can take up to ~6 min worst-case).
+  try {
+    const refreshed = await ensureFreshToken(post.integration as Integration, 10 * 60 * 1000);
+    // ensureFreshToken returns Integration | null | false; only Integration is truthy.
+    if (refreshed) {
+      post.integration = refreshed as any;
+    }
+  } catch (_) {
+    // Activity-level errors are intentionally swallowed — see comment above.
+  }
+
   // Do we need to post comment for this social?
   const toComment: boolean =
     postsListBefore.length === 1
@@ -319,10 +341,25 @@ export async function postWorkflowV101({
           err.cause instanceof ApplicationFailure &&
           err.cause.type === 'refresh_token'
         ) {
-          const refresh = await refreshToken(post.integration);
+          // refreshToken activity may throw if Temporal exhausted its retries
+          // on a transient platform error (5xx / 429 / network). When that
+          // happens the integration is healthy but unreachable right now —
+          // we must NOT mark refreshNeeded; just fail this post attempt and
+          // let the outer retry / next workflow cycle try again.
+          let refresh: false | { accessToken?: string } = false;
+          let refreshTransient = false;
+          try {
+            refresh = await refreshToken(post.integration);
+          } catch (refreshErr) {
+            refreshTransient = true;
+          }
+
           if (!refresh || !refresh.accessToken) {
-            await markError('Token refresh failed — please reconnect your account');
-            await finalizeCycle('Token refresh failed');
+            const reason = refreshTransient
+              ? 'Token refresh temporarily unavailable (platform 5xx / rate-limited). Will retry on next scheduled cycle.'
+              : 'Token refresh failed — please reconnect your account';
+            await markError(reason);
+            await finalizeCycle(reason);
             if (isRecurring) {
               await continueAsNew<typeof postWorkflowV101>({ taskQueue, postId, organizationId });
             }
@@ -514,9 +551,16 @@ export async function postWorkflowV101({
             err.cause instanceof ApplicationFailure &&
             err.cause.type === 'refresh_token'
           ) {
-            const refresh = await refreshToken(
-              await getIntegrationById(organizationId, todo.integration)
-            );
+            // refreshToken may now throw on transient platform errors;
+            // catch so plug failure cannot crash the parent workflow.
+            let refresh: false | { accessToken?: string } = false;
+            try {
+              refresh = await refreshToken(
+                await getIntegrationById(organizationId, todo.integration)
+              );
+            } catch (_) {
+              refresh = false;
+            }
             if (!refresh || !refresh.accessToken) {
               break;
             }
@@ -562,7 +606,13 @@ export async function postWorkflowV101({
             err.cause instanceof ApplicationFailure &&
             err.cause.type === 'refresh_token'
           ) {
-            const refresh = await refreshToken(post.integration);
+            // Same transient-safe wrapper as the internal-plug path above.
+            let refresh: false | { accessToken?: string } = false;
+            try {
+              refresh = await refreshToken(post.integration);
+            } catch (_) {
+              refresh = false;
+            }
             if (!refresh || !refresh.accessToken) {
               break;
             }

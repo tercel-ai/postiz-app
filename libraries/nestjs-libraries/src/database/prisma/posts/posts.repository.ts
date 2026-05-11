@@ -1175,45 +1175,108 @@ export class PostsRepository {
     );
   }
 
-  private extractErrorMessage(err: any): string {
-    if (typeof err === 'string') return err;
+  // Stored details fields are capped to avoid bloating the DB. Errors with
+  // huge platform response bodies (HTML pages, multi-MB stack frames) can
+  // otherwise eat unbounded space.
+  private static readonly MAX_STACK_LEN = 32_000;
+  private static readonly MAX_DETAILS_LEN = 32_000;
 
-    const parts: string[] = [];
-    let current = err;
-    const seen = new Set();
+  /**
+   * Walk an error and its cause chain, returning a structured view suitable
+   * for persisting to the Errors table.
+   *
+   *  - `message`:  short human-readable summary (type/code/message of each
+   *                level joined with ` | `). Goes into Errors.message.
+   *  - `stack`:    full stack traces of every cause-chain level, joined.
+   *                Goes into Errors.stack. NOT truncated to 3 lines anymore.
+   *  - `code`:     first non-empty code/status/statusCode found in the chain.
+   *  - `type`:     first non-empty type/name found in the chain (skipping
+   *                bare `Error`).
+   *  - `details`:  JSON of structured payloads (cause.details, raw response
+   *                bodies from Twitter/LinkedIn SDKs, etc.).
+   */
+  private extractErrorDetails(err: any): {
+    message: string;
+    stack: string | null;
+    code: string | null;
+    type: string | null;
+    details: string | null;
+  } {
+    if (err == null) {
+      return { message: '', stack: null, code: null, type: null, details: null };
+    }
+    if (typeof err === 'string') {
+      return { message: err, stack: null, code: null, type: null, details: null };
+    }
+
+    const messageParts: string[] = [];
+    const stackParts: string[] = [];
+    const detailParts: any[] = [];
+    let firstCode: string | null = null;
+    let firstType: string | null = null;
+
+    let current: any = err;
+    const seen = new Set<any>();
     let depth = 0;
     const MAX_DEPTH = 10;
 
     while (current && depth < MAX_DEPTH) {
-      if (seen.has(current)) break;
-      seen.add(current);
+      if (typeof current === 'object' && seen.has(current)) break;
+      if (typeof current === 'object') seen.add(current);
 
       const message = current.message || current.details?.message || '';
       const type = current.type || current.name || '';
       const code = current.code || current.status || current.statusCode || '';
 
-      let part = '';
-      if (type && type !== 'Error') part += `[${type}] `;
-      if (code) part += `(Code: ${code}) `;
-      if (message) part += message;
-
-      if (part) parts.push(part);
-
-      // Extract details if available (especially for ApplicationFailure)
-      const details = current.details || current.cause?.details;
-      if (details) {
-        try {
-          const detailedStr = typeof details === 'string' ? details : JSON.stringify(details);
-          if (detailedStr !== '{}' && detailedStr !== '[]') {
-            parts.push(`Details: ${detailedStr}`);
-          }
-        } catch (_) {}
+      if (!firstType && type && type !== 'Error') firstType = String(type);
+      if (!firstCode && code !== undefined && code !== null && code !== '') {
+        firstCode = String(code);
       }
 
-      if (current.stackTrace || current.stack) {
-        // Just take the first couple of lines of stack trace to avoid bloating the database
-        const stack = (current.stackTrace || current.stack).split('\n').slice(0, 3).join('\n');
-        parts.push(`Stack: ${stack}`);
+      let line = '';
+      if (type && type !== 'Error') line += `[${type}] `;
+      if (code !== undefined && code !== null && code !== '') line += `(Code: ${code}) `;
+      if (message) line += message;
+      if (line) messageParts.push(line);
+
+      // Capture full stack — no .slice(0, 3) anymore. The `stack` column is
+      // dedicated to this and final length is capped once at the end.
+      const rawStack: string | undefined = current.stackTrace || current.stack;
+      if (rawStack) {
+        const header = type && type !== 'Error' ? `[${type}]` : '(stack)';
+        stackParts.push(`${header}\n${rawStack}`);
+      }
+
+      // Structured details — common shapes:
+      //   - Temporal ApplicationFailure: `details` array
+      //   - twitter-api-v2 ApiResponseError: `data`, `errors`, `rateLimit`
+      //   - axios / undici: `response.data`, `response.status`, `config.url`
+      const structured: Record<string, unknown> = {};
+      if (current.details && current.details !== current.message) {
+        structured.details = current.details;
+      }
+      if (current.data !== undefined) structured.data = current.data;
+      if (current.errors !== undefined) structured.errors = current.errors;
+      if (current.rateLimit !== undefined) structured.rateLimit = current.rateLimit;
+      if (current.response !== undefined) {
+        const r = current.response;
+        structured.response = {
+          status: r?.status,
+          statusText: r?.statusText,
+          data: r?.data,
+          headers: r?.headers,
+        };
+      }
+      if (current.config?.url) {
+        structured.requestUrl = current.config.url;
+        structured.requestMethod = current.config.method;
+      }
+      if (Object.keys(structured).length > 0) {
+        detailParts.push({
+          level: depth,
+          type: type || undefined,
+          ...structured,
+        });
       }
 
       if (current.cause && current.cause !== current) {
@@ -1226,27 +1289,78 @@ export class PostsRepository {
       depth++;
     }
 
-    if (parts.length > 0) return parts.join(' | ');
-
-    try {
-      return JSON.stringify(err, (key, value) => {
-        if (value instanceof Error) {
-          return {
-            name: value.name,
-            message: value.message,
-            stack: value.stack?.split('\n').slice(0, 3).join('\n'),
-            ...value,
-          };
-        }
-        return value;
-      });
-    } catch (_) {
-      return String(err);
+    let message = messageParts.join(' | ');
+    if (!message) {
+      try {
+        message = JSON.stringify(err, (_k, v) => {
+          if (v instanceof Error) {
+            return { name: v.name, message: v.message };
+          }
+          return v;
+        });
+      } catch (_) {
+        message = String(err);
+      }
     }
+
+    const stack = stackParts.length > 0
+      ? this.truncate(stackParts.join('\n\n'), PostsRepository.MAX_STACK_LEN)
+      : null;
+
+    let details: string | null = null;
+    if (detailParts.length > 0) {
+      try {
+        details = this.truncate(
+          JSON.stringify(detailParts, this.replacer()),
+          PostsRepository.MAX_DETAILS_LEN
+        );
+      } catch (_) {
+        details = null;
+      }
+    }
+
+    return {
+      message,
+      stack,
+      code: firstCode,
+      type: firstType,
+      details,
+    };
+  }
+
+  private truncate(s: string, max: number): string {
+    if (s.length <= max) return s;
+    return s.slice(0, max) + `\n... [truncated ${s.length - max} chars]`;
+  }
+
+  private replacer() {
+    const seen = new WeakSet();
+    return (_key: string, value: unknown) => {
+      if (typeof value === 'object' && value !== null) {
+        if (seen.has(value as object)) return '[Circular]';
+        seen.add(value as object);
+      }
+      if (value instanceof Error) {
+        return { name: value.name, message: value.message };
+      }
+      return value;
+    };
+  }
+
+  /**
+   * Backwards-compatible wrapper. Returns just the joined message string;
+   * callers that need the full structured form should call
+   * `extractErrorDetails` directly.
+   */
+  private extractErrorMessage(err: any): string {
+    return this.extractErrorDetails(err).message;
   }
 
   async changeState(id: string, state: State, err?: any, body?: any) {
-    const errorMessage = err ? this.extractErrorMessage(err) : undefined;
+    const errorDetails = err
+      ? this.extractErrorDetails(err)
+      : { message: '', stack: null, code: null, type: null, details: null };
+    const errorMessage = errorDetails.message || undefined;
 
     const update = await this._post.model.post.update({
       where: {
@@ -1275,6 +1389,10 @@ export class PostsRepository {
             platform: update.integration.providerIdentifier,
             postId: update.id,
             body: typeof body === 'string' ? body : JSON.stringify(body),
+            stack: errorDetails.stack,
+            code: errorDetails.code,
+            type: errorDetails.type,
+            details: errorDetails.details,
           },
         });
       } catch (err) { }
@@ -1284,7 +1402,10 @@ export class PostsRepository {
   }
 
   async logError(id: string, err?: any, body?: any) {
-    const errorMessage = err ? this.extractErrorMessage(err) : undefined;
+    const errorDetails = err
+      ? this.extractErrorDetails(err)
+      : { message: '', stack: null, code: null, type: null, details: null };
+    const errorMessage = errorDetails.message || undefined;
     const post = await this._post.model.post.findUnique({
       where: { id },
       include: {
@@ -1305,6 +1426,10 @@ export class PostsRepository {
           body: body
             ? typeof body === 'string' ? body : JSON.stringify(body)
             : '',
+          stack: errorDetails.stack,
+          code: errorDetails.code,
+          type: errorDetails.type,
+          details: errorDetails.details,
         },
       });
     } catch (_) {}

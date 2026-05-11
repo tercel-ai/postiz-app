@@ -8,6 +8,105 @@ import {
 } from '@gitroom/nestjs-libraries/integrations/social/social.integrations.interface';
 import { TemporalService } from 'nestjs-temporal-core';
 
+/**
+ * Sentinel error thrown by refreshProcess when the underlying refresh failed
+ * for a reason that is plausibly retry-able (network blip, platform 5xx,
+ * 429 rate-limit). Callers (activity wrappers) MUST let this propagate
+ * untouched so Temporal's activity retry policy kicks in. Swallowing it would
+ * permanently lose the retry opportunity and — much worse — risk falsely
+ * marking the integration as `refreshNeeded=true`, forcing the user to
+ * manually reconnect a perfectly healthy account.
+ */
+export class TransientRefreshError extends Error {
+  readonly transient = true as const;
+  constructor(message: string, public readonly cause?: unknown) {
+    super(message);
+    this.name = 'TransientRefreshError';
+  }
+}
+
+/**
+ * Classify an error from a social provider's `refreshToken()` call.
+ *
+ * Returns true ⇒ retry-able (network / rate-limit / platform outage).
+ * Returns false ⇒ treat as permanent (OAuth invalid_grant, revoked, etc.).
+ *
+ * Heuristics, in order:
+ *   1. OAuth standard error codes in the response body (invalid_grant,
+ *      invalid_token, unauthorized_client, invalid_client) → PERMANENT.
+ *      These are the only errors that genuinely mean "user must reconnect".
+ *   2. HTTP 5xx / 429 / 408 / 425 → TRANSIENT (server-side issue or rate limit).
+ *   3. Node.js network error codes → TRANSIENT.
+ *   4. AbortError / timeout signals → TRANSIENT.
+ *   5. HTTP 4xx (except 408/425/429) → PERMANENT (client-side bad request).
+ *   6. Anything else / unknown shape → PERMANENT (conservative — better to
+ *      ask the user to reconnect once than to retry forever on a real bug).
+ *
+ * Exported for unit testing.
+ */
+export function isTransientRefreshError(err: unknown): boolean {
+  if (err == null) return false;
+  const e: any = err;
+
+  // 1. OAuth standard error codes (axios `response.data.error` or our own
+  //    SDK wrapper `data.error` / `error`).
+  const oauthError =
+    e?.response?.data?.error ??
+    e?.data?.error ??
+    e?.error ??
+    e?.body?.error;
+  if (typeof oauthError === 'string') {
+    const permanent = new Set([
+      'invalid_grant',
+      'invalid_token',
+      'invalid_client',
+      'unauthorized_client',
+      'unsupported_grant_type',
+      'access_denied',
+    ]);
+    if (permanent.has(oauthError)) return false;
+    // Anything that explicitly mentions rate limiting is transient.
+    if (oauthError === 'rate_limit' || oauthError === 'temporarily_unavailable') return true;
+  }
+
+  // 2 & 5. HTTP status.
+  const status: unknown =
+    e?.response?.status ?? e?.status ?? e?.statusCode ?? e?.code;
+  if (typeof status === 'number') {
+    if (status >= 500 && status < 600) return true;          // 5xx
+    if (status === 408 || status === 425 || status === 429) return true; // 408/425/429
+    if (status >= 400 && status < 500) return false;         // other 4xx
+  }
+
+  // 3. Node.js network errors. `code` here is a STRING (different from
+  //    HTTP status which is a number).
+  const codeStr: unknown = e?.code;
+  if (typeof codeStr === 'string') {
+    const networkCodes = new Set([
+      'ECONNRESET',
+      'ECONNREFUSED',
+      'ETIMEDOUT',
+      'ENOTFOUND',
+      'EAI_AGAIN',
+      'EHOSTUNREACH',
+      'ENETUNREACH',
+      'EPIPE',
+      'EPROTO',
+      'UND_ERR_SOCKET',
+      'UND_ERR_CONNECT_TIMEOUT',
+      'UND_ERR_HEADERS_TIMEOUT',
+      'UND_ERR_BODY_TIMEOUT',
+    ]);
+    if (networkCodes.has(codeStr)) return true;
+  }
+
+  // 4. Abort / timeout names.
+  if (e?.name === 'AbortError' || e?.name === 'TimeoutError') return true;
+
+  // 6. Default: permanent (conservative).
+  return false;
+}
+
 @Injectable()
 export class RefreshIntegrationService {
   constructor(
@@ -94,9 +193,31 @@ export class RefreshIntegrationService {
       return false;
     }
 
-    const refresh: false | AuthTokenDetails = await socialProvider
-      .refreshToken(integration.refreshToken)
-      .catch((err) => false);
+    // CRITICAL: do NOT blanket-catch errors here. A transient failure (5xx,
+    // 429, network blip) must propagate so Temporal can retry. Previously a
+    // single network glitch would set `refreshNeeded=true` and force the user
+    // to manually reconnect a perfectly healthy account.
+    //
+    // Three cases:
+    //   - success           → return the new token details
+    //   - permanent failure → return false (caller marks refreshNeeded & disconnects)
+    //   - transient failure → throw TransientRefreshError (Temporal retries)
+    let refresh: false | AuthTokenDetails;
+    try {
+      refresh = await socialProvider.refreshToken(integration.refreshToken);
+    } catch (err) {
+      if (isTransientRefreshError(err)) {
+        // Re-throw as a clearly-labeled sentinel so activity wrappers can
+        // distinguish "retry me" from "unknown failure, mark as needing reconnect".
+        throw new TransientRefreshError(
+          `Transient refresh failure for ${integration.providerIdentifier} (${integration.id}): ${(err as any)?.message ?? err}`,
+          err
+        );
+      }
+      // Permanent failure (invalid_grant, 4xx other than 429/408/425, etc.).
+      // Fall through to the refreshNeeded path below.
+      refresh = false;
+    }
 
     if (!refresh || !refresh.accessToken) {
       await this._integrationService.refreshNeeded(

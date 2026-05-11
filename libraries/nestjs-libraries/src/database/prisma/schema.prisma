@@ -715,11 +715,25 @@ model Errors {
   updatedAt      DateTime     @updatedAt
   postId         String
   body           String       @default("{}")
+  // Full stack trace of the error chain (not truncated). Stored separately
+  // from `message` so the human-readable summary stays short while debugging
+  // still has the full trace available.
+  stack          String?
+  // SDK / HTTP error code (e.g. "401", "ECONNRESET", "rate_limit").
+  // Surfaced as a top-level column for aggregation queries.
+  code           String?
+  // Error class / type (e.g. "ApiResponseError", "refresh_token", "bad_body").
+  type           String?
+  // Serialized cause chain + raw platform response (JSON). May be large;
+  // optional and only populated when extra context is available.
+  details        String?
   organization   Organization @relation(fields: [organizationId], references: [id])
   post           Post         @relation(fields: [postId], references: [id])
 
   @@index([organizationId])
   @@index([createdAt])
+  @@index([code])
+  @@index([platform, code])
 }
 
 model Mentions {
