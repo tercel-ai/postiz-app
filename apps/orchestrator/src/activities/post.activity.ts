@@ -402,10 +402,27 @@ export class PostActivity {
       // operator can investigate. This matches the pre-fix behavior for the
       // "unknown error" case, but is now narrowed to actually unexpected
       // errors instead of being triggered by every network glitch.
-      try {
-        await this._refreshIntegrationService.setBetweenSteps(integration);
-      } catch (_) {}
+      await this.parkIntegration(integration, err);
       return false;
+    }
+  }
+
+  /**
+   * Best-effort park: mark integration as inBetweenSteps + emit operator
+   * notification. Wraps the underlying service call so a failure here does
+   * not crash the activity, but DOES log the underlying error — the
+   * pre-existing empty `catch (_) {}` was effectively a black hole that made
+   * partial-disabled integrations un-diagnosable in production (D8 finding).
+   */
+  private async parkIntegration(integration: Integration, originalErr: unknown) {
+    try {
+      await this._refreshIntegrationService.setBetweenSteps(integration);
+    } catch (parkErr) {
+      console.warn(
+        `[parkIntegration] setBetweenSteps failed for integration=${integration.id} provider=${integration.providerIdentifier}. ` +
+          `Original error: ${(originalErr as any)?.message ?? originalErr}. ` +
+          `Park error: ${(parkErr as any)?.message ?? parkErr}`
+      );
     }
   }
 
@@ -416,20 +433,37 @@ export class PostActivity {
    * refreshTokenWorkflow could have rotated the token while the post slept
    * until publishDate) and refreshes if it is within `bufferMs` of expiry.
    *
-   * Why this matters:
-   *  - Without this, scheduled posts at night / on weekends often fire with
-   *    an already-expired token, get a 401 from the platform, and only THEN
-   *    refresh — but for OAuth 1.0a-style providers without `refreshToken`,
-   *    or when the refresh fails on first try, the post hard-fails.
-   *  - The per-platform refreshTokenWorkflow only covers integrations with
-   *    `refreshCron = true` (currently X / Threads / Instagram Standalone).
-   *    LinkedIn / TikTok / Facebook / YouTube etc. have NO background
-   *    refresh — this pre-send check is their only proactive path.
+   * Scope (CRITICAL — fixes Layer-1/Layer-2 race condition):
+   *  - For providers with `refreshCron = true` (X / Threads / Instagram-Standalone),
+   *    a per-integration `refreshTokenWorkflow` already proactively refreshes
+   *    via a workflowId-bound Temporal workflow (refresh.integration.service.ts
+   *    startRefreshWorkflow). Running ensureFreshToken in parallel with that
+   *    workflow can cause both code paths to call `socialProvider.refreshToken`
+   *    simultaneously, and on providers that rotate refresh_tokens (X v2,
+   *    Threads, IG) the second call sees an already-revoked refresh_token →
+   *    400/invalid_grant → permanent failure path → refreshNeeded=true →
+   *    healthy account flipped to disabled. This re-introduces the exact bug
+   *    the proactive-refresh design is supposed to eliminate.
+   *  - SOLUTION: refreshCron providers are SKIPPED here. Layer 1 covers them.
+   *    If Layer 1 is broken (workflow died, recovery cron hasn't run yet),
+   *    Layer 3 (reactive 401 inside post.workflow's retry loop) is the
+   *    fallback — still strictly better than racing.
+   *  - ensureFreshToken's job is the non-refreshCron platforms (LinkedIn,
+   *    TikTok, Facebook, YouTube, Mastodon, Bluesky, Pinterest, etc.) which
+   *    have NO background refresh and previously relied entirely on reactive
+   *    401 handling.
+   *
+   * Best-effort semantics:
+   *  - This activity is documented as best-effort. The reactive 401 path
+   *    inside post.workflow is the source of truth for "is the token usable".
+   *    Failures here MUST NOT disable a healthy account — a Prisma connection
+   *    blip during ensureFreshToken caused a confirmed regression in
+   *    pre-review behavior.
    *
    * Return value:
    *  - `null` if no refresh was needed or no refresh is possible (permanent
-   *    token, no expiration set, integration missing). Caller keeps using
-   *    the token already on `integration`.
+   *    token, no expiration set, integration missing, refreshCron skip).
+   *    Caller keeps using the token already on `integration`.
    *  - The refreshed `Integration` row (with the new token + expiration) on
    *    success. Caller should replace `post.integration` with this.
    *  - `false` if a refresh was attempted but failed. Caller should fall
@@ -456,11 +490,25 @@ export class PostActivity {
       return null;
     }
 
+    // inBetweenSteps means Layer 1 (or a prior Layer-2 invocation) is
+    // currently transitioning this integration. Concurrent refresh would
+    // race; defer to whatever is in flight.
+    if (fresh.inBetweenSteps) {
+      return null;
+    }
+
     const socialProvider = this._integrationManager.getSocialIntegration(
       fresh.providerIdentifier
     );
     if (socialProvider.isTokenPermanent?.(fresh.token)) {
       return null;
+    }
+
+    // Race-prevention: providers with refreshCron=true have a dedicated
+    // workflowId-bound refresh workflow. Skip here to avoid the dual-refresh
+    // refresh-token-rotation race described in the doc comment above.
+    if (socialProvider.refreshCron) {
+      return fresh;
     }
 
     const msToExpiry = new Date(fresh.tokenExpiration).getTime() - Date.now();
@@ -473,11 +521,19 @@ export class PostActivity {
     try {
       const refresh = await this._refreshIntegrationService.refresh(fresh);
       if (!refresh || !refresh.accessToken) {
+        // refreshProcess already marked refreshNeeded + disconnected for
+        // permanent failures. Nothing more to do here.
+        console.warn(
+          `[ensureFreshToken] permanent refresh failure for integration=${fresh.id} provider=${fresh.providerIdentifier}; integration marked refreshNeeded by refreshProcess`
+        );
         return false;
       }
       if (socialProvider.refreshWait) {
         await timer(10000);
       }
+      console.info(
+        `[ensureFreshToken] refreshed token for integration=${fresh.id} provider=${fresh.providerIdentifier} msToExpiry_before=${msToExpiry}`
+      );
       // Re-read so the caller sees the updated token + new tokenExpiration.
       return (
         (await this._integrationService.getIntegrationById(
@@ -486,21 +542,25 @@ export class PostActivity {
         )) || null
       );
     } catch (err) {
-      // Transient errors: silently fall through. ensureFreshToken is
-      // best-effort — the reactive 401-refresh path inside post.workflow
-      // will get another chance once postSocial actually fails. We
-      // explicitly DO NOT call setBetweenSteps here, because that would
-      // disable the integration on every network blip during pre-flight
-      // checks.
+      // Transient errors (TransientRefreshError) — silently fall through.
+      // The reactive 401 path inside post.workflow will handle once
+      // postSocial actually fails. We DO NOT setBetweenSteps here because
+      // ensureFreshToken is best-effort and the reactive path is robust.
       if (err instanceof TransientRefreshError) {
+        console.warn(
+          `[ensureFreshToken] transient refresh failure for integration=${fresh.id} provider=${fresh.providerIdentifier}: ${(err as any)?.message ?? err}. Falling through to reactive 401 path.`
+        );
         return false;
       }
 
-      // Truly unexpected error — same conservative treatment as
-      // refreshToken: park in inBetweenSteps so an operator can investigate.
-      try {
-        await this._refreshIntegrationService.setBetweenSteps(fresh);
-      } catch (_) {}
+      // Truly unexpected error — this is best-effort pre-flight. A bug here
+      // (Prisma blip, code path bug, integrationManager surprise) must NOT
+      // disable a healthy account. We log loudly and fall through; the
+      // reactive 401 path is responsible for actual token validity.
+      console.error(
+        `[ensureFreshToken] unexpected error for integration=${fresh.id} provider=${fresh.providerIdentifier}: ${(err as any)?.message ?? err}. Returning false; integration NOT disabled (reactive path is authoritative).`,
+        err
+      );
       return false;
     }
   }

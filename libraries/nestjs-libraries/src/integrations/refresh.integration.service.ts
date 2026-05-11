@@ -220,20 +220,49 @@ export class RefreshIntegrationService {
     }
 
     if (!refresh || !refresh.accessToken) {
-      await this._integrationService.refreshNeeded(
-        integration.organizationId,
-        integration.id
-      );
+      // The three side effects below MUST all run on a permanent refresh
+      // failure, but each can fail independently (DB write timeout,
+      // notification service down, etc.). Previously these were chained
+      // with bare `await` — if any threw, the remaining ones were skipped
+      // and the integration was left in a partially-disabled state
+      // (refreshNeeded=true but channel not disconnected, or vice-versa).
+      //
+      // Each step now runs under its own try/catch so a failure in one
+      // does NOT block the others. The first step (refreshNeeded) is the
+      // most important — it blocks Layer 1's refresh workflow from
+      // continuing — so its failure is logged at error level.
+      try {
+        await this._integrationService.refreshNeeded(
+          integration.organizationId,
+          integration.id
+        );
+      } catch (e) {
+        console.error(
+          `[refreshProcess] refreshNeeded failed for integration=${integration.id} provider=${integration.providerIdentifier}: ${(e as any)?.message ?? e}. Integration may continue to attempt refreshes.`
+        );
+      }
 
-      await this._integrationService.informAboutRefreshError(
-        integration.organizationId,
-        integration
-      );
+      try {
+        await this._integrationService.informAboutRefreshError(
+          integration.organizationId,
+          integration
+        );
+      } catch (e) {
+        console.warn(
+          `[refreshProcess] informAboutRefreshError failed for integration=${integration.id}: ${(e as any)?.message ?? e}. User will not be notified.`
+        );
+      }
 
-      await this._integrationService.disconnectChannel(
-        integration.organizationId,
-        integration
-      );
+      try {
+        await this._integrationService.disconnectChannel(
+          integration.organizationId,
+          integration
+        );
+      } catch (e) {
+        console.error(
+          `[refreshProcess] disconnectChannel failed for integration=${integration.id} provider=${integration.providerIdentifier}: ${(e as any)?.message ?? e}. Integration is refreshNeeded but channel not disconnected — operator intervention needed.`
+        );
+      }
 
       return false;
     }

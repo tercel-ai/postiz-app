@@ -1175,45 +1175,149 @@ export class PostsRepository {
     );
   }
 
-  // Stored details fields are capped to avoid bloating the DB. Errors with
-  // huge platform response bodies (HTML pages, multi-MB stack frames) can
-  // otherwise eat unbounded space.
-  private static readonly MAX_STACK_LEN = 32_000;
-  private static readonly MAX_DETAILS_LEN = 32_000;
+  // Single-field cap so the message column doesn't grow unbounded. Big enough
+  // to comfortably hold a multi-level Temporal ActivityFailure with full
+  // stacks and platform response bodies.
+  private static readonly MAX_MESSAGE_LEN = 64_000;
+
+  // Headers that carry credentials or session state. Matched case-insensitively
+  // against header names. Anything matching is redacted to "[REDACTED]" before
+  // the response is serialized into Errors.message.
+  private static readonly SENSITIVE_HEADER_PATTERNS: readonly RegExp[] = [
+    /^authorization$/i,
+    /^proxy-authorization$/i,
+    /^cookie$/i,
+    /^set-cookie$/i,
+    /^x-api-key$/i,
+    /^x-auth-token$/i,
+    /^x-csrf-token$/i,
+    /^x-session-token$/i,
+    /^x-access-token$/i,
+    /^x-refresh-token$/i,
+    /^api-key$/i,
+    /^bearer$/i,
+    /token/i, // catches x-amz-security-token, dropbox-api-token, etc.
+  ];
+
+  // Query-string parameters that may carry credentials. Stripped from
+  // captured URLs before storing.
+  private static readonly SENSITIVE_QUERY_PARAMS: readonly string[] = [
+    'access_token',
+    'refresh_token',
+    'id_token',
+    'code',
+    'client_secret',
+    'api_key',
+    'apikey',
+    'token',
+    'auth',
+    'signature',
+    'sig',
+  ];
 
   /**
-   * Walk an error and its cause chain, returning a structured view suitable
-   * for persisting to the Errors table.
-   *
-   *  - `message`:  short human-readable summary (type/code/message of each
-   *                level joined with ` | `). Goes into Errors.message.
-   *  - `stack`:    full stack traces of every cause-chain level, joined.
-   *                Goes into Errors.stack. NOT truncated to 3 lines anymore.
-   *  - `code`:     first non-empty code/status/statusCode found in the chain.
-   *  - `type`:     first non-empty type/name found in the chain (skipping
-   *                bare `Error`).
-   *  - `details`:  JSON of structured payloads (cause.details, raw response
-   *                bodies from Twitter/LinkedIn SDKs, etc.).
+   * Replace credential-carrying header values with "[REDACTED]". Accepts the
+   * shape used by axios/undici/Node http: either a plain `Record<string, string>`
+   * or a `Headers`-like object with `.forEach`. Returns a plain object — the
+   * caller will JSON.stringify it.
    */
-  private extractErrorDetails(err: any): {
-    message: string;
-    stack: string | null;
-    code: string | null;
-    type: string | null;
-    details: string | null;
-  } {
-    if (err == null) {
-      return { message: '', stack: null, code: null, type: null, details: null };
+  private static redactHeaders(headers: any): Record<string, string> | undefined {
+    if (headers == null) return undefined;
+
+    const isSensitive = (name: string) =>
+      PostsRepository.SENSITIVE_HEADER_PATTERNS.some((re) => re.test(name));
+
+    const out: Record<string, string> = {};
+
+    // Headers-API shape (fetch / undici)
+    if (typeof headers.forEach === 'function' && typeof headers.get === 'function') {
+      try {
+        headers.forEach((value: string, name: string) => {
+          out[name] = isSensitive(name) ? '[REDACTED]' : String(value);
+        });
+        return out;
+      } catch (_) {
+        // fall through to plain-object path
+      }
     }
-    if (typeof err === 'string') {
-      return { message: err, stack: null, code: null, type: null, details: null };
+
+    // Plain object / axios headers
+    if (typeof headers === 'object') {
+      for (const [name, value] of Object.entries(headers)) {
+        if (value == null) continue;
+        out[name] = isSensitive(name)
+          ? '[REDACTED]'
+          : Array.isArray(value)
+            ? value.map((v) => String(v)).join(', ')
+            : String(value);
+      }
+      return out;
     }
+
+    return undefined;
+  }
+
+  /**
+   * Strip credential-carrying query parameters from a URL while preserving
+   * the rest. Falsy input passes through unchanged. Unparseable URLs are
+   * returned as-is (better to log than to drop the diagnostic info).
+   */
+  private static redactUrl(url: unknown): string | undefined {
+    if (url == null) return undefined;
+    const raw = String(url);
+
+    try {
+      // URL constructor requires absolute URL or a base. Provider SDKs use
+      // absolute URLs; fall back to a synthetic base for safety.
+      const u = new URL(raw, 'http://internal.invalid');
+      let changed = false;
+      for (const key of PostsRepository.SENSITIVE_QUERY_PARAMS) {
+        if (u.searchParams.has(key)) {
+          u.searchParams.set(key, '[REDACTED]');
+          changed = true;
+        }
+      }
+      // Preserve original-style URL: if synthetic base was used and unchanged,
+      // hand back the raw string to avoid spurious http://internal.invalid prefix.
+      if (!changed && u.origin === 'http://internal.invalid') return raw;
+      return u.origin === 'http://internal.invalid'
+        ? u.pathname + (u.search || '')
+        : u.toString();
+    } catch (_) {
+      // Best-effort regex fallback for non-URL-parseable strings.
+      let s = raw;
+      for (const key of PostsRepository.SENSITIVE_QUERY_PARAMS) {
+        const re = new RegExp(`([?&]${key}=)[^&]*`, 'gi');
+        s = s.replace(re, `$1[REDACTED]`);
+      }
+      return s;
+    }
+  }
+
+  /**
+   * Walk an error and its cause chain, producing a single comprehensive
+   * string suitable for the Errors.message column. We intentionally keep
+   * everything in one field (rather than splitting into stack/code/type
+   * columns) because:
+   *   - Temporal already serializes ActivityFailure to JSON with the full
+   *     cause chain, stack traces, retry state, and activity metadata.
+   *   - That JSON is stored verbatim by callers that pass it through `body`,
+   *     so a parallel column structure would be redundant.
+   *   - One field is simpler to inspect in any admin UI / psql query.
+   *
+   * Output shape:
+   *   [Type] (Code: 401) Message  |  [InnerType] (Code: ECONNRESET) InnerMsg  |  ...
+   *   Details: <JSON of structured payloads (response bodies, rate limits, etc.)>
+   *   Stack:
+   *     <full stack traces of every cause-chain level — NOT truncated to 3 lines>
+   */
+  private extractErrorMessage(err: any): string {
+    if (err == null) return '';
+    if (typeof err === 'string') return this.truncateMessage(err);
 
     const messageParts: string[] = [];
     const stackParts: string[] = [];
     const detailParts: any[] = [];
-    let firstCode: string | null = null;
-    let firstType: string | null = null;
 
     let current: any = err;
     const seen = new Set<any>();
@@ -1228,26 +1332,21 @@ export class PostsRepository {
       const type = current.type || current.name || '';
       const code = current.code || current.status || current.statusCode || '';
 
-      if (!firstType && type && type !== 'Error') firstType = String(type);
-      if (!firstCode && code !== undefined && code !== null && code !== '') {
-        firstCode = String(code);
-      }
-
       let line = '';
       if (type && type !== 'Error') line += `[${type}] `;
       if (code !== undefined && code !== null && code !== '') line += `(Code: ${code}) `;
       if (message) line += message;
       if (line) messageParts.push(line);
 
-      // Capture full stack — no .slice(0, 3) anymore. The `stack` column is
-      // dedicated to this and final length is capped once at the end.
+      // Capture the FULL stack — no .slice(0, 3) truncation. Final length is
+      // capped at the very end so even a 50-frame stack survives.
       const rawStack: string | undefined = current.stackTrace || current.stack;
       if (rawStack) {
         const header = type && type !== 'Error' ? `[${type}]` : '(stack)';
         stackParts.push(`${header}\n${rawStack}`);
       }
 
-      // Structured details — common shapes:
+      // Structured payloads — common shapes:
       //   - Temporal ApplicationFailure: `details` array
       //   - twitter-api-v2 ApiResponseError: `data`, `errors`, `rateLimit`
       //   - axios / undici: `response.data`, `response.status`, `config.url`
@@ -1264,11 +1363,20 @@ export class PostsRepository {
           status: r?.status,
           statusText: r?.statusText,
           data: r?.data,
-          headers: r?.headers,
+          // CRITICAL: headers are redacted. axios/undici/twitter-api-v2 error
+          // objects expose request+response headers, which routinely contain
+          // `Authorization: Bearer <accessToken>` and `Set-Cookie` / session
+          // tokens. Persisting these to the multi-tenant Errors table is a
+          // credential exposure (any admin / support / analytics consumer
+          // could impersonate the user's OAuth identity until rotation).
+          headers: PostsRepository.redactHeaders(r?.headers),
         };
       }
       if (current.config?.url) {
-        structured.requestUrl = current.config.url;
+        // Same threat: many OAuth providers historically accept
+        // `?access_token=...` / `?refresh_token=...` in the URL. Strip
+        // sensitive query parameters before storing.
+        structured.requestUrl = PostsRepository.redactUrl(current.config.url);
         structured.requestMethod = current.config.method;
       }
       if (Object.keys(structured).length > 0) {
@@ -1289,46 +1397,33 @@ export class PostsRepository {
       depth++;
     }
 
-    let message = messageParts.join(' | ');
-    if (!message) {
-      try {
-        message = JSON.stringify(err, (_k, v) => {
-          if (v instanceof Error) {
-            return { name: v.name, message: v.message };
-          }
-          return v;
-        });
-      } catch (_) {
-        message = String(err);
-      }
+    const sections: string[] = [];
+    if (messageParts.length > 0) {
+      sections.push(messageParts.join(' | '));
     }
-
-    const stack = stackParts.length > 0
-      ? this.truncate(stackParts.join('\n\n'), PostsRepository.MAX_STACK_LEN)
-      : null;
-
-    let details: string | null = null;
     if (detailParts.length > 0) {
       try {
-        details = this.truncate(
-          JSON.stringify(detailParts, this.replacer()),
-          PostsRepository.MAX_DETAILS_LEN
-        );
+        sections.push(`Details: ${JSON.stringify(detailParts, this.replacer())}`);
+      } catch (_) {}
+    }
+    if (stackParts.length > 0) {
+      sections.push(`Stack:\n${stackParts.join('\n\n')}`);
+    }
+
+    let out = sections.join('\n');
+    if (!out) {
+      try {
+        out = JSON.stringify(err, this.replacer());
       } catch (_) {
-        details = null;
+        out = String(err);
       }
     }
 
-    return {
-      message,
-      stack,
-      code: firstCode,
-      type: firstType,
-      details,
-    };
+    return this.truncateMessage(out);
   }
 
-  private truncate(s: string, max: number): string {
+  private truncateMessage(s: string): string {
+    const max = PostsRepository.MAX_MESSAGE_LEN;
     if (s.length <= max) return s;
     return s.slice(0, max) + `\n... [truncated ${s.length - max} chars]`;
   }
@@ -1347,20 +1442,8 @@ export class PostsRepository {
     };
   }
 
-  /**
-   * Backwards-compatible wrapper. Returns just the joined message string;
-   * callers that need the full structured form should call
-   * `extractErrorDetails` directly.
-   */
-  private extractErrorMessage(err: any): string {
-    return this.extractErrorDetails(err).message;
-  }
-
   async changeState(id: string, state: State, err?: any, body?: any) {
-    const errorDetails = err
-      ? this.extractErrorDetails(err)
-      : { message: '', stack: null, code: null, type: null, details: null };
-    const errorMessage = errorDetails.message || undefined;
+    const errorMessage = err ? this.extractErrorMessage(err) : undefined;
 
     const update = await this._post.model.post.update({
       where: {
@@ -1389,10 +1472,6 @@ export class PostsRepository {
             platform: update.integration.providerIdentifier,
             postId: update.id,
             body: typeof body === 'string' ? body : JSON.stringify(body),
-            stack: errorDetails.stack,
-            code: errorDetails.code,
-            type: errorDetails.type,
-            details: errorDetails.details,
           },
         });
       } catch (err) { }
@@ -1402,10 +1481,7 @@ export class PostsRepository {
   }
 
   async logError(id: string, err?: any, body?: any) {
-    const errorDetails = err
-      ? this.extractErrorDetails(err)
-      : { message: '', stack: null, code: null, type: null, details: null };
-    const errorMessage = errorDetails.message || undefined;
+    const errorMessage = err ? this.extractErrorMessage(err) : undefined;
     const post = await this._post.model.post.findUnique({
       where: { id },
       include: {
@@ -1426,10 +1502,6 @@ export class PostsRepository {
           body: body
             ? typeof body === 'string' ? body : JSON.stringify(body)
             : '',
-          stack: errorDetails.stack,
-          code: errorDetails.code,
-          type: errorDetails.type,
-          details: errorDetails.details,
         },
       });
     } catch (_) {}

@@ -4,18 +4,13 @@ import { PostsRepository } from '../posts.repository';
 // ---------------------------------------------------------------------------
 // Test setup
 // ---------------------------------------------------------------------------
-// Build a PostsRepository instance with minimal dependencies. We only exercise
-// logError, which touches `_post` (for findUnique) and `_errors` (for create).
-// The remaining PrismaRepository slots are unused by the code paths under test.
+// We exercise logError only — it touches `_post` (findUnique) and `_errors`
+// (create). Unused PrismaRepository slots are passed empty.
 
 type Captured = {
   data: {
     message: string;
     body: string;
-    stack: string | null;
-    code: string | null;
-    type: string | null;
-    details: string | null;
     platform: string;
     postId: string;
     organizationId: string;
@@ -64,8 +59,7 @@ function buildRepo() {
 // Error-shape fixtures
 // ---------------------------------------------------------------------------
 
-// twitter-api-v2 ApiResponseError shape (the actual class is harder to import
-// here; we replicate the relevant surface).
+// twitter-api-v2 ApiResponseError shape.
 class ApiResponseError extends Error {
   code = 401;
   data = { errors: [{ message: 'Unauthorized', code: 89 }] };
@@ -94,46 +88,40 @@ class ApplicationFailureLike extends Error {
 // Tests
 // ---------------------------------------------------------------------------
 
-describe('PostsRepository.logError — error detail persistence', () => {
-  it('saves the full stack into the dedicated `stack` column (not truncated to 3 lines)', async () => {
+describe('PostsRepository.logError — message field content', () => {
+  it('preserves the full stack (not truncated to 3 lines) in the message field', async () => {
     const { repo, captured } = buildRepo();
 
     const err = new Error('boom');
-    // Force a long stack so we can detect truncation.
     err.stack =
       'Error: boom\n' +
       Array.from({ length: 50 }, (_, i) => `    at frame${i} (/file${i}.ts:${i}:${i})`).join('\n');
 
     await repo.logError('post-1', err);
 
-    expect(captured).toHaveLength(1);
-    const { stack } = captured[0].data;
-    expect(stack).not.toBeNull();
-    // Should retain far more than the old 3-line cap.
-    const lineCount = (stack as string).split('\n').length;
-    expect(lineCount).toBeGreaterThan(20);
-    // And specifically: the last frame must be present.
-    expect(stack).toContain('frame49');
+    const message = captured[0].data.message;
+    expect(message).toContain('Stack:');
+    // Should retain the full stack, not just the first 3 lines.
+    expect(message).toContain('frame49');
+    expect(message).toContain('frame25');
   });
 
-  it('extracts code, type, and ApiResponseError-style details for 401 failures', async () => {
+  it('includes code, type, and structured details for 401 ApiResponseError', async () => {
     const { repo, captured } = buildRepo();
 
     await repo.logError('post-1', new ApiResponseError('Request failed with code 401'));
 
-    const d = captured[0].data;
-    expect(d.code).toBe('401');
-    expect(d.type).toBe('ApiResponseError');
-    // Human-readable summary still gets the message
-    expect(d.message).toContain('Request failed with code 401');
-    expect(d.message).toContain('[ApiResponseError]');
-    // Structured details column contains the platform response bodies
-    expect(d.details).not.toBeNull();
-    expect(d.details).toContain('Unauthorized');
-    expect(d.details).toContain('rateLimit');
+    const message = captured[0].data.message;
+    expect(message).toContain('[ApiResponseError]');
+    expect(message).toContain('(Code: 401)');
+    expect(message).toContain('Request failed with code 401');
+    // Structured details — Twitter SDK payload + rate limit info
+    expect(message).toContain('Details:');
+    expect(message).toContain('Unauthorized');
+    expect(message).toContain('rateLimit');
   });
 
-  it('walks the cause chain (Temporal ApplicationFailure → original platform error)', async () => {
+  it('walks the cause chain (Temporal ApplicationFailure → inner platform error)', async () => {
     const { repo, captured } = buildRepo();
 
     const inner = new ApiResponseError('Request failed with code 401');
@@ -145,21 +133,16 @@ describe('PostsRepository.logError — error detail persistence', () => {
 
     await repo.logError('post-1', outer);
 
-    const d = captured[0].data;
-    // For Temporal ApplicationFailure we prefer .type ("refresh_token") over
-    // .name ("ApplicationFailure") because the type is what actually drives
-    // the workflow's retry / refresh decisions and is far more useful for
-    // triage / aggregation than the generic class name.
-    expect(d.type).toBe('refresh_token');
-    // Code should come from the inner platform error since outer has none.
-    expect(d.code).toBe('401');
-    // Message should include both levels joined with ' | '
-    expect(d.message).toContain('Activity task failed');
-    expect(d.message).toContain('Request failed with code 401');
-    expect(d.message).toContain('[refresh_token]');
-    expect(d.message).toContain('[ApiResponseError]');
-    // Details should include the inner ApiResponseError data
-    expect(d.details).toContain('Unauthorized');
+    const message = captured[0].data.message;
+    // Outer Temporal frame
+    expect(message).toContain('[refresh_token]');
+    expect(message).toContain('Activity task failed');
+    // Inner platform frame
+    expect(message).toContain('[ApiResponseError]');
+    expect(message).toContain('Request failed with code 401');
+    expect(message).toContain('(Code: 401)');
+    // Inner platform details
+    expect(message).toContain('Unauthorized');
   });
 
   it('handles plain string errors without crashing', async () => {
@@ -167,15 +150,10 @@ describe('PostsRepository.logError — error detail persistence', () => {
 
     await repo.logError('post-1', 'simple string error');
 
-    const d = captured[0].data;
-    expect(d.message).toBe('simple string error');
-    expect(d.stack).toBeNull();
-    expect(d.code).toBeNull();
-    expect(d.type).toBeNull();
-    expect(d.details).toBeNull();
+    expect(captured[0].data.message).toBe('simple string error');
   });
 
-  it('truncates absurdly long stacks with a marker rather than blowing up the DB row', async () => {
+  it('caps overly long messages with a truncation marker (no unbounded growth)', async () => {
     const { repo, captured } = buildRepo();
 
     const err = new Error('huge');
@@ -183,23 +161,19 @@ describe('PostsRepository.logError — error detail persistence', () => {
 
     await repo.logError('post-1', err);
 
-    const stack = captured[0].data.stack as string;
-    expect(stack.length).toBeLessThan(40_000);
-    expect(stack).toContain('[truncated');
+    const message = captured[0].data.message;
+    expect(message.length).toBeLessThan(70_000); // well under MAX_MESSAGE_LEN + slack
+    expect(message).toContain('[truncated');
   });
 
-  it('does NOT overwrite the legacy `body` column (postsList context) with error data', async () => {
+  it('keeps the legacy `body` column unchanged (still postsList context)', async () => {
     const { repo, captured } = buildRepo();
 
     const postsList = [{ id: 'post-1' }, { id: 'post-2' }];
     await repo.logError('post-1', new Error('boom'), postsList);
 
-    const d = captured[0].data;
-    // body keeps the original postsList semantics
-    expect(d.body).toBe(JSON.stringify(postsList));
-    // structured error info goes into the new columns
-    expect(d.message).toContain('boom');
-    expect(d.stack).not.toBeNull();
+    expect(captured[0].data.body).toBe(JSON.stringify(postsList));
+    expect(captured[0].data.message).toContain('boom');
   });
 
   it('handles circular references in error.details without throwing', async () => {
@@ -213,6 +187,146 @@ describe('PostsRepository.logError — error detail persistence', () => {
     await repo.logError('post-1', err);
 
     expect(captured).toHaveLength(1);
-    expect(captured[0].data.details).toContain('[Circular]');
+    expect(captured[0].data.message).toContain('[Circular]');
+  });
+
+  // -------------------------------------------------------------------------
+  // W2 fix: credential redaction in captured headers + URLs
+  // -------------------------------------------------------------------------
+  // Provider SDK errors (axios, twitter-api-v2, etc.) routinely expose the
+  // request `config` with the Authorization header that was sent. Without
+  // redaction, persisting these into the multi-tenant Errors.message column
+  // would leak OAuth Bearer tokens to anyone with read access to the table.
+  // -------------------------------------------------------------------------
+
+  describe('credential redaction (W2)', () => {
+    it('redacts Authorization / Cookie / x-api-key headers but keeps innocuous ones', async () => {
+      const { repo, captured } = buildRepo();
+      const err: any = new Error('401 from platform');
+      err.response = {
+        status: 401,
+        headers: {
+          authorization: 'Bearer eyJabc.def.ghi-VERY-SECRET-TOKEN',
+          cookie: 'session=DEADBEEF; csrf=ABC',
+          'set-cookie': ['session=NEW-SESSION-TOKEN; path=/'],
+          'x-api-key': 'sk_live_SECRET_KEY',
+          'x-auth-token': 'auth-secret-token',
+          'content-type': 'application/json',
+          'x-ratelimit-limit': '300',
+          'x-ratelimit-remaining': '0',
+        },
+        data: { error: 'invalid_token' },
+      };
+
+      await repo.logError('post-1', err);
+
+      const message = captured[0].data.message;
+
+      // Sensitive material is gone, marker present.
+      expect(message).not.toContain('eyJabc.def.ghi-VERY-SECRET-TOKEN');
+      expect(message).not.toContain('DEADBEEF');
+      expect(message).not.toContain('NEW-SESSION-TOKEN');
+      expect(message).not.toContain('sk_live_SECRET_KEY');
+      expect(message).not.toContain('auth-secret-token');
+      expect(message).toContain('[REDACTED]');
+
+      // Innocuous diagnostic headers survive for triage value.
+      expect(message).toContain('application/json');
+      expect(message).toContain('x-ratelimit-limit');
+      expect(message).toContain('300');
+    });
+
+    it('redacts headers regardless of case (Authorization vs authorization vs AUTHORIZATION)', async () => {
+      const { repo, captured } = buildRepo();
+      const err: any = new Error('boom');
+      err.response = {
+        status: 401,
+        headers: {
+          Authorization: 'Bearer SECRET1',
+          AUTHORIZATION: 'Bearer SECRET2',
+          'X-API-Key': 'SECRET3',
+        },
+      };
+
+      await repo.logError('post-1', err);
+
+      const message = captured[0].data.message;
+      expect(message).not.toContain('SECRET1');
+      expect(message).not.toContain('SECRET2');
+      expect(message).not.toContain('SECRET3');
+    });
+
+    it('redacts headers from fetch/undici-style Headers objects (forEach + get)', async () => {
+      const { repo, captured } = buildRepo();
+      // Simulate WHATWG Headers shape (used by undici / native fetch).
+      const fakeHeaders = {
+        _data: new Map([
+          ['authorization', 'Bearer FETCH-SECRET'],
+          ['content-type', 'application/json'],
+        ]),
+        get(name: string) {
+          return this._data.get(name.toLowerCase());
+        },
+        forEach(cb: (value: string, name: string) => void) {
+          this._data.forEach((v: string, k: string) => cb(v, k));
+        },
+      };
+      const err: any = new Error('boom');
+      err.response = { status: 401, headers: fakeHeaders };
+
+      await repo.logError('post-1', err);
+
+      const message = captured[0].data.message;
+      expect(message).not.toContain('FETCH-SECRET');
+      expect(message).toContain('[REDACTED]');
+      expect(message).toContain('application/json');
+    });
+
+    it('strips access_token / refresh_token / code / client_secret from captured config.url', async () => {
+      const { repo, captured } = buildRepo();
+      const err: any = new Error('400 from platform');
+      err.config = {
+        method: 'POST',
+        url: 'https://api.x.com/2/oauth/token?access_token=AAAA-LEAK&refresh_token=BBBB-LEAK&code=CCCC&client_secret=DDDD&grant_type=refresh_token',
+      };
+
+      await repo.logError('post-1', err);
+
+      const message = captured[0].data.message;
+      expect(message).not.toContain('AAAA-LEAK');
+      expect(message).not.toContain('BBBB-LEAK');
+      expect(message).not.toContain('CCCC');
+      expect(message).not.toContain('DDDD');
+      // Non-sensitive params survive
+      expect(message).toContain('grant_type=refresh_token');
+      // The URL itself is still there for triage
+      expect(message).toContain('api.x.com/2/oauth/token');
+    });
+
+    it('handles non-URL-parseable url strings gracefully (regex fallback)', async () => {
+      const { repo, captured } = buildRepo();
+      const err: any = new Error('boom');
+      err.config = {
+        method: 'GET',
+        // Intentionally malformed-but-recognizable shape
+        url: 'not-a-real-url?access_token=LEAKY-VALUE&foo=bar',
+      };
+
+      await repo.logError('post-1', err);
+
+      const message = captured[0].data.message;
+      expect(message).not.toContain('LEAKY-VALUE');
+      expect(message).toContain('foo=bar');
+    });
+
+    it('does not crash when response.headers is null/undefined/missing', async () => {
+      const { repo, captured } = buildRepo();
+      const err: any = new Error('boom');
+      err.response = { status: 500, data: { error: 'server' } };
+      // headers intentionally absent
+
+      await expect(repo.logError('post-1', err)).resolves.not.toThrow();
+      expect(captured).toHaveLength(1);
+    });
   });
 });
