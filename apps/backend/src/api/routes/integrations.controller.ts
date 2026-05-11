@@ -504,7 +504,7 @@ export class IntegrationsController {
         const refreshed = await this._refreshIntegrationService.refresh(
           getIntegration
         );
-        if (refreshed?.accessToken) {
+        if (refreshed && refreshed.accessToken) {
           if (integrationProvider.refreshWait) {
             await timer(10000);
           }
