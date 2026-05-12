@@ -992,17 +992,60 @@ export class PostsService {
     };
   }
 
+  /**
+   * Reschedule a QUEUE post.
+   *
+   * Two gates protect against the "modify-mid-publish" race that causes
+   * duplicate sends on the social platform:
+   *   1. claim gate — releaseId='claim_xxx' means a workflow has already
+   *      claimed this post and may be in postSocial. Terminating its workflow
+   *      cannot cancel the in-flight HTTP call to the platform, so any new
+   *      workflow we start would publish a second copy.
+   *   2. window gate — workflow timer fires exactly at publishDate. Refusing
+   *      changes within RESCHEDULE_LOCKOUT_MS guarantees the workflow is still
+   *      sleeping when startWorkflow runs, making terminate() clean.
+   *      30s covers worker scheduling + visibility-index lag + clock skew,
+   *      well above the few seconds startWorkflow itself takes to complete.
+   */
   async changeDate(orgId: string, id: string, date: string) {
-    const getPostById = await this._postRepository.getPostById(id, orgId);
+    const RESCHEDULE_LOCKOUT_MS = 30_000;
+
+    const post = await this._postRepository.getPostById(id, orgId);
+    if (!post) throw new BadRequestException('Post not found');
+    if (!post.integration) {
+      throw new BadRequestException('Integration not found or has been removed');
+    }
+    if (post.state !== 'QUEUE') {
+      throw new BadRequestException('Post is not pending — cannot reschedule');
+    }
+    if (post.releaseId?.startsWith('claim_')) {
+      throw new BadRequestException(
+        'Post is already being published — cannot reschedule. Please wait for the result.'
+      );
+    }
+    const msToPublish = dayjs(post.publishDate).diff(dayjs(), 'millisecond');
+    if (msToPublish < RESCHEDULE_LOCKOUT_MS) {
+      const seconds = Math.max(0, Math.ceil(msToPublish / 1000));
+      throw new BadRequestException(
+        `Post will be published in ${seconds}s — too late to reschedule.`
+      );
+    }
+
     const newDate = await this._postRepository.changeDate(orgId, id, date);
 
     try {
       await this.startWorkflow(
-        getSocialTaskQueue(getPostById.integration.providerIdentifier),
-        getPostById.id,
+        getSocialTaskQueue(post.integration.providerIdentifier),
+        post.id,
         orgId
       );
-    } catch (err) {}
+    } catch (err) {
+      this.logger.error(
+        `changeDate: startWorkflow failed for postId=${id}: ${(err as Error)?.message || err}`
+      );
+      Sentry.captureException(err, { extra: { postId: id, orgId, date } });
+      throw new BadRequestException('Reschedule failed, please try again');
+    }
 
     return newDate;
   }
