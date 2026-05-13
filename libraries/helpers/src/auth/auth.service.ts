@@ -43,7 +43,15 @@ export class AuthService {
     return sign(value, process.env.JWT_SECRET!);
   }
   static verifyJWT(token: string) {
-    return verify(token, process.env.JWT_SECRET!);
+    const publicKey = process.env.JWT_PUBLIC_KEY?.replace(/\\n/g, '\n');
+    if (publicKey) {
+      try {
+        return verify(token, publicKey, { algorithms: ['RS256'] });
+      } catch {
+        // fall through to HS256 for tokens issued before RS256 migration
+      }
+    }
+    return verify(token, process.env.JWT_SECRET!, { algorithms: ['HS256'] });
   }
 
   static fixedEncryption(value: string) {
