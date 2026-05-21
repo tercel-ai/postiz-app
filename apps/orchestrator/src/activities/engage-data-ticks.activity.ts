@@ -124,8 +124,13 @@ export class EngageDataTicksActivity {
     if (reply.opportunity.platform === 'reddit' && reply.post.releaseURL) {
       await this._syncRedditMetrics(reply.post.id, reply.post.releaseURL, reply.id, reply.opportunity.authorUsername);
     } else if (reply.opportunity.platform === 'x' && reply.post.releaseURL) {
-      // Pass the DB post ID (for integration lookup) and the tweet URL (to extract snowflake ID)
-      await this._checkXAuthorReplied(reply.id, reply.post.id, reply.post.releaseURL, reply.opportunity.externalPostId);
+      await this._checkXAuthorReplied(
+        reply.id,
+        reply.post.id,
+        reply.post.releaseURL,
+        reply.opportunity.externalPostId,
+        reply.opportunity.authorUsername  // needed to resolve original author's numeric user ID
+      );
     }
   }
 
@@ -193,9 +198,10 @@ export class EngageDataTicksActivity {
 
   private async _checkXAuthorReplied(
     sentReplyId: string,
-    postDbId: string,       // DB UUID of the Post record (for integration lookup)
-    replyTweetUrl: string,  // https://twitter.com/user/status/<tweetId>
-    originalTweetId: string
+    postDbId: string,           // DB UUID of the Post record (for integration lookup)
+    replyTweetUrl: string,      // https://twitter.com/user/status/<tweetId>
+    originalTweetId: string,
+    authorUsername: string      // X @username of the original post's author
   ): Promise<void> {
     const bearerToken = process.env.X_BEARER_TOKEN;
     if (!bearerToken) return;
@@ -205,13 +211,15 @@ export class EngageDataTicksActivity {
     if (!replyTweetId) return;
 
     try {
-      // Fetch our integration's X user ID so we can identify our own tweets in the conversation
-      const replyPost = await this._post.model.post.findUnique({
-        where: { id: postDbId },
-        select: { integration: { select: { internalId: true } } },
-      });
-      const ourXUserId = replyPost?.integration?.internalId;
-      if (!ourXUserId) return;
+      // Resolve the original post author's username → numeric user ID
+      const authorRes = await fetch(
+        `https://api.twitter.com/2/users/by/username/${authorUsername}`,
+        { headers: { Authorization: `Bearer ${bearerToken}` } }
+      );
+      if (!authorRes.ok) return;
+      const authorJson = (await authorRes.json()) as { data?: { id: string } };
+      const originalAuthorId = authorJson.data?.id;
+      if (!originalAuthorId) return;
 
       // Fetch recent tweets in the original tweet's conversation
       const res = await fetch(
@@ -223,9 +231,9 @@ export class EngageDataTicksActivity {
         data?: Array<{ id: string; author_id: string }>;
       };
 
-      // Check if the original author replied AFTER our reply (tweet Snowflake ID > replyTweetId)
+      // Check if the ORIGINAL AUTHOR specifically replied AFTER our reply
       const authorReplied = (json.data ?? []).some(
-        (t) => t.author_id !== ourXUserId && BigInt(t.id) > BigInt(replyTweetId)
+        (t) => t.author_id === originalAuthorId && BigInt(t.id) > BigInt(replyTweetId)
       );
       if (authorReplied) {
         await this._engageRepository.markAuthorReplied(sentReplyId);

@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Delete,
@@ -230,7 +231,8 @@ export class EngageController {
     @Body() body: GenerateDraftDto,
     @Res() res: Response
   ) {
-    const opportunity = await this._engageService.getOpportunityById(org, id);
+    // Only generate drafts for actionable opportunities (not already REPLIED/DISMISSED/EXPIRED)
+    const opportunity = await this._engageService.getOpportunityForReply(org, id);
 
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
@@ -317,6 +319,10 @@ export class EngageController {
   ) {
     const opportunity = await this._engageService.getOpportunityForReply(org, id);
 
+    if (new Date(body.scheduledAt) <= new Date()) {
+      throw new BadRequestException('scheduledAt must be a future date');
+    }
+
     const created = await this._postsService.createPost(
       org.id,
       {
@@ -353,7 +359,9 @@ export class EngageController {
     });
 
     await this._engageRepository.setOpportunityStatus(id, 'SCHEDULED');
-    await this._engageService.startMetricsSyncForReply(sentReply.id);
+    // NOTE: metrics sync is NOT started here for scheduled posts.
+    // The 24h sync must begin after the post actually publishes, not at schedule time.
+    // The post workflow will trigger it via the engage-metrics-sync-on-publish mechanism (TODO).
     return sentReply;
   }
 
@@ -367,6 +375,9 @@ export class EngageController {
     @Body() body: ConfirmManualReplyDto
   ) {
     void user;
+    // Idempotency: reject if opportunity is already in a terminal state (same guard as sendReply/scheduleReply)
+    await this._engageService.getOpportunityForReply(org, id);
+
     // Step 1: create Post(PUBLISHED, no releaseURL) + EngageSentReply immediately.
     // User has already posted to Reddit manually; we record it here for metrics tracking.
     // Post.releaseURL remains null until Step 2 (PATCH /sent/:id/reply-url).

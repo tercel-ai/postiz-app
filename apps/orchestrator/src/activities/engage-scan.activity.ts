@@ -96,11 +96,14 @@ export class EngageScanActivity {
       .map((p) => scorePost(p, enabledKeywords))
       .filter((p): p is ScoredPost => p !== null && p.score >= MIN_SCORE);
 
-    if (!scored.length) return;
+    if (scored.length > 0) {
+      const classified = await this._classifyIntents(scored);
+      await this._persistOpportunities(orgId, classified);
+    }
 
-    const classified = await this._classifyIntents(scored);
-    await this._persistOpportunities(orgId, classified);
-    // Keep stale-opportunity cleanup and lastScanAt consistent with runDailyScan
+    // Housekeeping runs unconditionally — independent of whether new posts scored above threshold.
+    // Without this, stale NEW opportunities never expire and lastScanAt is never advanced
+    // when all fetched tweets score below MIN_SCORE.
     await this._expireStaleOpportunities(orgId);
     await this._engageRepository.saveConfig(orgId, { lastScanAt: new Date() });
   }

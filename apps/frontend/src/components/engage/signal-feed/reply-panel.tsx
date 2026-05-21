@@ -46,6 +46,7 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
     enabledAccounts[0]?.id ?? ''
   );
   const [sending, setSending] = useState(false);
+  const [scheduledAt, setScheduledAt] = useState('');
 
   // Reddit 3-step state
   const [redditStep, setRedditStep] = useState<'draft' | 'confirm' | 'url'>('draft');
@@ -350,16 +351,14 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
               <div className="flex gap-2 mt-2">
                 <input
                   type="datetime-local"
-                  id="schedule-datetime"
+                  value={scheduledAt}
+                  onChange={(e) => setScheduledAt(e.target.value)}
                   className="flex-1 bg-[#1e2536] border border-[#2d3748] text-white rounded-lg px-2 py-1 text-xs"
                   min={new Date().toISOString().slice(0, 16)}
                 />
                 <button
-                  onClick={() => {
-                    const el = document.getElementById('schedule-datetime') as HTMLInputElement;
-                    if (el?.value) handleSchedule(el.value);
-                  }}
-                  disabled={sending || !draft || overLimit || !selectedAccountId}
+                  onClick={() => { if (scheduledAt) handleSchedule(scheduledAt); }}
+                  disabled={sending || !draft || overLimit || !selectedAccountId || !scheduledAt}
                   className="px-3 py-1 text-xs bg-purple-600 hover:bg-purple-700 disabled:bg-gray-700 text-white rounded-lg transition-colors"
                 >
                   Schedule

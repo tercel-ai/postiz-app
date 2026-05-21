@@ -170,11 +170,12 @@ export function ReplyAccounts() {
                     />
                   </div>
                   <div>
-                    <label className="text-xs text-gray-500 block mb-1">
+                    <label htmlFor={`tz-${acc.id}`} className="text-xs text-gray-500 block mb-1">
                       Timezone
                     </label>
                     <select
-                      defaultValue={settings.autoReplyTimezone ?? 'Asia/Shanghai'}
+                      id={`tz-${acc.id}`}
+                      value={settings.autoReplyTimezone ?? 'Asia/Shanghai'}
                       onChange={(e) =>
                         update(acc.id, { autoReplyTimezone: e.target.value })
                       }
