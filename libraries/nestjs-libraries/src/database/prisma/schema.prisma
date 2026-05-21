@@ -1172,6 +1172,11 @@ model EngageOpportunity {
   @@index([organizationId, scoreAuthority])
   @@index([organizationId, scoreTracked])
   @@index([organizationId, bookmarked])
+  // Range filter index for date='today'|'week'|'month' on listOpportunities / getScoreStats.
+  @@index([organizationId, postPublishedAt])
+  // GIN index for intentTags @> ARRAY[...] (Prisma: { has: tag }) — without it
+  // intent filtering degenerates to a sequential scan.
+  @@index([intentTags], type: Gin)
 }
 
 enum EngageOpportunityStatus {

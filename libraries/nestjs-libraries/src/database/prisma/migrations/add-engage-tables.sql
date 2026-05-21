@@ -270,3 +270,15 @@ ALTER TABLE "EngageSentReply" ADD CONSTRAINT "EngageSentReply_opportunityId_fkey
 
 -- AddForeignKey
 ALTER TABLE "EngageSentReply" ADD CONSTRAINT "EngageSentReply_postId_fkey" FOREIGN KEY ("postId") REFERENCES "Post"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Indexes added 2026-05-21 (review fix F-02 / F-03):
+--   • postPublishedAt range filter
+--   • GIN on intentTags array (intent filter @> queries)
+-- ─────────────────────────────────────────────────────────────────────────────
+
+-- CreateIndex
+CREATE INDEX "EngageOpportunity_organizationId_postPublishedAt_idx" ON "EngageOpportunity"("organizationId", "postPublishedAt");
+
+-- CreateIndex (GIN — array contains queries for { intentTags: { has: 'help_seeking' } })
+CREATE INDEX "EngageOpportunity_intentTags_idx" ON "EngageOpportunity" USING GIN ("intentTags");
