@@ -1,6 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Activity, ActivityMethod } from 'nestjs-temporal-core';
-import { PrismaRepository } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
+import { Context } from '@temporalio/activity';
+import {
+  PrismaRepository,
+  PrismaTransaction,
+} from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
 import { EngageRepository } from '@gitroom/nestjs-libraries/engage/engage.repository';
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc';
@@ -16,8 +20,17 @@ export class EngageDataTicksActivity {
     private _engageRepository: EngageRepository,
     private _post: PrismaRepository<'post'>,
     private _engageDataTicks: PrismaRepository<'engageDataTicks'>,
-    private _engageSentReply: PrismaRepository<'engageSentReply'>
+    private _engageSentReply: PrismaRepository<'engageSentReply'>,
+    private _tx: PrismaTransaction
   ) {}
+
+  private _heartbeat(progress?: unknown): void {
+    try {
+      Context.current().heartbeat(progress);
+    } catch {
+      // Not running in a Temporal activity context.
+    }
+  }
 
   @ActivityMethod()
   async aggregateDailyEngageTicks(orgId?: string): Promise<void> {
@@ -69,34 +82,41 @@ export class EngageDataTicksActivity {
       );
       platformMap.set('all', allAgg);
 
+      this._heartbeat({ stage: 'aggregate', org: orgId });
+      // Batch per-org upserts in one $transaction round-trip — avoids
+      // K orgs × (P+1) platforms × 3 metric-types sequential DB hops.
+      const ops: Array<Promise<unknown>> = [];
       for (const [platform, agg] of platformMap) {
         for (const [type, val] of [
           ['replies', agg.count],
           ['impressions', agg.impressions],
           ['traffic', agg.traffic],
         ] as const) {
-          await this._engageDataTicks.model.engageDataTicks.upsert({
-            where: {
-              organizationId_platform_type_timeUnit_statisticsTime: {
+          ops.push(
+            this._engageDataTicks.model.engageDataTicks.upsert({
+              where: {
+                organizationId_platform_type_timeUnit_statisticsTime: {
+                  organizationId: orgId,
+                  platform,
+                  type,
+                  timeUnit: 'day',
+                  statisticsTime: yesterday,
+                },
+              },
+              create: {
                 organizationId: orgId,
                 platform,
                 type,
                 timeUnit: 'day',
                 statisticsTime: yesterday,
+                value: BigInt(Math.round(val)),
               },
-            },
-            create: {
-              organizationId: orgId,
-              platform,
-              type,
-              timeUnit: 'day',
-              statisticsTime: yesterday,
-              value: BigInt(Math.round(val)),
-            },
-            update: { value: BigInt(Math.round(val)) },
-          });
+              update: { value: BigInt(Math.round(val)) },
+            })
+          );
         }
       }
+      await this._tx.model.$transaction(ops as never);
     }
 
     this.logger.log(
@@ -149,7 +169,13 @@ export class EngageDataTicksActivity {
         `https://www.reddit.com/api/info.json?id=t1_${commentId}`,
         { headers: { 'User-Agent': 'AISEE-Engage/1.0' } }
       );
-      if (!infoRes.ok) return;
+      if (!infoRes.ok) {
+        const body = await infoRes.text().catch(() => '<unreadable>');
+        this.logger.warn(
+          `Reddit /api/info.json returned ${infoRes.status} for t1_${commentId}: ${body.slice(0, 200)}`
+        );
+        return;
+      }
       const infoJson = (await infoRes.json()) as {
         data?: { children?: Array<{ data: { score: number; num_comments: number } }> };
       };
@@ -180,7 +206,12 @@ export class EngageDataTicksActivity {
           `https://www.reddit.com/r/${subreddit}/comments/${postId_}/.json?comment=${commentId}&depth=1&limit=25`,
           { headers: { 'User-Agent': 'AISEE-Engage/1.0' } }
         );
-        if (threadRes.ok) {
+        if (!threadRes.ok) {
+          const body = await threadRes.text().catch(() => '<unreadable>');
+          this.logger.warn(
+            `Reddit thread .json returned ${threadRes.status} for r/${subreddit}/${postId_}: ${body.slice(0, 200)}`
+          );
+        } else {
           const threadJson = (await threadRes.json()) as Array<{
             data?: { children?: Array<{ data?: { replies?: { data?: { children?: Array<{ data?: { author?: string } }> } } } }> };
           }>;
@@ -216,7 +247,13 @@ export class EngageDataTicksActivity {
         `https://api.twitter.com/2/users/by/username/${authorUsername}`,
         { headers: { Authorization: `Bearer ${bearerToken}` } }
       );
-      if (!authorRes.ok) return;
+      if (!authorRes.ok) {
+        const body = await authorRes.text().catch(() => '<unreadable>');
+        this.logger.warn(
+          `X /users/by/username returned ${authorRes.status} for @${authorUsername}: ${body.slice(0, 200)}`
+        );
+        return;
+      }
       const authorJson = (await authorRes.json()) as { data?: { id: string } };
       const originalAuthorId = authorJson.data?.id;
       if (!originalAuthorId) return;
@@ -226,7 +263,13 @@ export class EngageDataTicksActivity {
         `https://api.twitter.com/2/tweets/search/recent?query=conversation_id:${originalTweetId}&tweet.fields=author_id&max_results=50`,
         { headers: { Authorization: `Bearer ${bearerToken}` } }
       );
-      if (!res.ok) return;
+      if (!res.ok) {
+        const body = await res.text().catch(() => '<unreadable>');
+        this.logger.warn(
+          `X /tweets/search/recent (conversation_id) returned ${res.status} for ${originalTweetId}: ${body.slice(0, 200)}`
+        );
+        return;
+      }
       const json = (await res.json()) as {
         data?: Array<{ id: string; author_id: string }>;
       };

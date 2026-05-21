@@ -54,11 +54,36 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
   const [replyUrl, setReplyUrl] = useState('');
 
   const abortRef = useRef<AbortController | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const previouslyFocusedRef = useRef<HTMLElement | null>(null);
 
   // Abort any in-progress stream when the panel unmounts
   useEffect(() => {
     return () => { abortRef.current?.abort(); };
   }, []);
+
+  // Sync selectedAccountId when replyAccounts arrives after mount (slow network race).
+  useEffect(() => {
+    if (!selectedAccountId && enabledAccounts[0]?.id) {
+      setSelectedAccountId(enabledAccounts[0].id);
+    }
+    // enabledAccounts is recomputed every render from replyAccounts; key on its
+    // first id to avoid re-running on every render once stable.
+  }, [enabledAccounts[0]?.id, selectedAccountId]);
+
+  // Modal-style a11y: bind Escape to close + manage focus on open/close.
+  useEffect(() => {
+    previouslyFocusedRef.current = document.activeElement as HTMLElement | null;
+    panelRef.current?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      previouslyFocusedRef.current?.focus?.();
+    };
+  }, [onClose]);
 
   const generateDraft = useCallback(async () => {
     if (streaming) {
@@ -231,10 +256,19 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
   const overLimit = isX && charCount > MAX_X_CHARS;
 
   return (
-    <div className="w-[420px] flex-shrink-0 bg-[#111827] border-l border-[#1e2536] flex flex-col h-full">
+    <div
+      ref={panelRef}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="reply-panel-title"
+      tabIndex={-1}
+      className="w-[420px] flex-shrink-0 bg-[#111827] border-l border-[#1e2536] flex flex-col h-full outline-none"
+    >
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-[#1e2536]">
-        <h3 className="text-sm font-semibold text-white">Craft Reply</h3>
+        <h3 id="reply-panel-title" className="text-sm font-semibold text-white">
+          Craft Reply
+        </h3>
         <button
           onClick={onClose}
           aria-label="Close reply panel"
@@ -385,7 +419,19 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
                   min={new Date().toISOString().slice(0, 16)}
                 />
                 <button
-                  onClick={() => { if (scheduledAt) handleSchedule(scheduledAt); }}
+                  onClick={() => {
+                    if (!scheduledAt) return;
+                    // datetime-local yields a naive "YYYY-MM-DDTHH:MM" string;
+                    // converting via the browser's Date pins it to the user's
+                    // local TZ, then toISOString sends an unambiguous UTC moment
+                    // so the backend doesn't interpret it in the server's TZ.
+                    const absolute = new Date(scheduledAt);
+                    if (Number.isNaN(absolute.getTime())) {
+                      toaster.show('Invalid schedule time', 'warning');
+                      return;
+                    }
+                    handleSchedule(absolute.toISOString());
+                  }}
                   disabled={sending || !draft || overLimit || !selectedAccountId || !scheduledAt}
                   className="px-3 py-1 text-xs bg-purple-600 hover:bg-purple-700 disabled:bg-gray-700 text-white rounded-lg transition-colors"
                 >
@@ -401,9 +447,16 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
               <>
                 <div className="flex items-center gap-2">
                   <button
-                    onClick={() => {
-                      navigator.clipboard.writeText(draft);
-                      toaster.show('Draft copied!', 'success');
+                    onClick={async () => {
+                      try {
+                        await navigator.clipboard.writeText(draft);
+                        toaster.show('Draft copied!', 'success');
+                      } catch {
+                        toaster.show(
+                          'Copy failed — select & copy manually',
+                          'warning'
+                        );
+                      }
                     }}
                     className="flex-1 py-2 text-sm bg-[#2d3748] hover:bg-[#374151] text-white rounded-lg transition-colors"
                   >

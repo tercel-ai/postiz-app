@@ -5,7 +5,12 @@ import { useFetch } from '@gitroom/helpers/utils/custom.fetch';
 import { useRouter } from 'next/navigation';
 import { useToaster } from '@gitroom/react/toaster/toaster';
 
-const KEYWORD_TYPE_COLORS: Record<string, string> = {
+// Must match the backend's KEYWORD_TYPES whitelist in engage.dto.ts — the
+// scorer strict-equals these literals to grant the BRAND/COMPETITOR bonus.
+const KEYWORD_TYPES = ['CORE', 'BRAND', 'COMPETITOR'] as const;
+type KeywordType = (typeof KEYWORD_TYPES)[number];
+
+const KEYWORD_TYPE_COLORS: Record<KeywordType, string> = {
   CORE: 'bg-blue-500/20 text-blue-400',
   BRAND: 'bg-green-500/20 text-green-400',
   COMPETITOR: 'bg-red-500/20 text-red-400',
@@ -17,7 +22,7 @@ export function SetupWizard() {
   const toaster = useToaster();
 
   const [keywords, setKeywords] = useState<
-    Array<{ keyword: string; type: string; enabled: boolean }>
+    Array<{ keyword: string; type: KeywordType; enabled: boolean }>
   >([]);
   const [input, setInput] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -41,14 +46,19 @@ export function SetupWizard() {
     if (!keywords.length) return;
     setSubmitting(true);
     try {
-      // Save only enabled keywords
-      for (const kw of keywords.filter((k) => k.enabled)) {
-        const res = await fetch('/engage/keywords', {
+      const enabled = keywords.filter((k) => k.enabled);
+      if (enabled.length) {
+        // Atomic bulk-add: createMany skipDuplicates is one INSERT, so a mid-list
+        // failure can't leave the user half-committed (and a retry won't 409 on
+        // keywords saved by a previous attempt).
+        const res = await fetch('/engage/keywords/bulk', {
           method: 'POST',
-          body: JSON.stringify({ keyword: kw.keyword, type: kw.type }),
+          body: JSON.stringify({
+            keywords: enabled.map((k) => ({ keyword: k.keyword, type: k.type })),
+          }),
         });
         if (!res.ok) {
-          toaster.show(`Failed to add "${kw.keyword}" — setup aborted`, 'warning');
+          toaster.show('Failed to save keywords — please retry', 'warning');
           return;
         }
       }

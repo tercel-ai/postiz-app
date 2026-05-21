@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Activity, ActivityMethod } from 'nestjs-temporal-core';
+import { Context } from '@temporalio/activity';
 import { EngageRepository } from '@gitroom/nestjs-libraries/engage/engage.repository';
 import { EngageIntentClassifierService } from '@gitroom/nestjs-libraries/engage/engage-intent-classifier.service';
 import {
@@ -7,7 +8,10 @@ import {
   RawPost,
   ScoredPost,
 } from '@gitroom/nestjs-libraries/engage/engage-scorer';
-import { PrismaRepository } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
+import {
+  PrismaRepository,
+  PrismaTransaction,
+} from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
 import { EngageKeyword } from '@prisma/client';
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc';
@@ -31,8 +35,21 @@ export class EngageScanActivity {
     private _opportunity: PrismaRepository<'engageOpportunity'>,
     private _keyword: PrismaRepository<'engageKeyword'>,
     private _trackedAccount: PrismaRepository<'engageTrackedAccount'>,
-    private _channel: PrismaRepository<'engageMonitoredChannel'>
+    private _channel: PrismaRepository<'engageMonitoredChannel'>,
+    private _tx: PrismaTransaction
   ) {}
+
+  // Emit a Temporal heartbeat when running inside the activity worker. The
+  // worker may not be present in unit tests; swallow the InvalidArgumentError
+  // and continue. With a configured heartbeatTimeout this lets Temporal detect
+  // worker death faster than startToCloseTimeout and respect cancellation.
+  private _heartbeat(progress?: unknown): void {
+    try {
+      Context.current().heartbeat(progress);
+    } catch {
+      // Not running inside a Temporal activity context (e.g. unit tests).
+    }
+  }
 
   // ─── Main scan pipeline ──────────────────────────────────────────────────
 
@@ -74,6 +91,7 @@ export class EngageScanActivity {
 
     const xPosts: RawPost[] = [];
     for (const account of enabledAccounts) {
+      this._heartbeat({ stage: 'tracked_fetch', username: account.username });
       try {
         const tweets = await this._fetchUserTweets(
           account.username,
@@ -134,6 +152,7 @@ export class EngageScanActivity {
 
     const results: RawPost[] = [];
     for (const keyword of keywords) {
+      this._heartbeat({ stage: 'x_search', keyword: keyword.keyword });
       try {
         const tweets = await this._searchXByKeyword(keyword.keyword, token);
         results.push(...tweets);
@@ -162,7 +181,15 @@ export class EngageScanActivity {
       `https://api.twitter.com/2/tweets/search/recent?${params}`,
       { headers: { Authorization: `Bearer ${accessToken}` } }
     );
-    if (!res.ok) return [];
+    if (!res.ok) {
+      // Differentiate API failure from "no results" — operators need a signal to
+      // detect token expiry / quota exhaustion / 429 rate limiting.
+      const body = await res.text().catch(() => '<unreadable>');
+      this.logger.warn(
+        `X /tweets/search/recent returned ${res.status} for "${keyword}": ${body.slice(0, 200)}`
+      );
+      return [];
+    }
     const json = (await res.json()) as {
       data?: Array<{
         id: string;
@@ -232,6 +259,11 @@ export class EngageScanActivity {
         case 'reddit': {
           let successCount = 0;
           for (const keyword of keywords) {
+            this._heartbeat({
+              stage: 'reddit_search',
+              channel: channel.channelId,
+              keyword: keyword.keyword,
+            });
             try {
               const posts = await this._searchRedditPosts(
                 channel.channelId,
@@ -268,7 +300,13 @@ export class EngageScanActivity {
     const res = await fetch(url, {
       headers: { 'User-Agent': 'AISEE-Engage/1.0' },
     });
-    if (!res.ok) return [];
+    if (!res.ok) {
+      const body = await res.text().catch(() => '<unreadable>');
+      this.logger.warn(
+        `Reddit /search.json returned ${res.status} for r/${subreddit} "${keyword}": ${body.slice(0, 200)}`
+      );
+      return [];
+    }
     const json = (await res.json()) as {
       data?: {
         children?: Array<{
@@ -334,8 +372,12 @@ export class EngageScanActivity {
     orgId: string,
     posts: ScoredPost[]
   ): Promise<void> {
-    for (const post of posts) {
-      await this._opportunity.model.engageOpportunity.upsert({
+    if (!posts.length) return;
+    this._heartbeat({ stage: 'persist_opportunities', count: posts.length });
+    // Batch all upserts in one $transaction round-trip instead of N sequential
+    // awaits — keeps wall-clock independent of DB latency × row count.
+    const ops = posts.map((post) =>
+      this._opportunity.model.engageOpportunity.upsert({
         where: {
           organizationId_platform_externalPostId: {
             organizationId: orgId,
@@ -391,8 +433,9 @@ export class EngageScanActivity {
           metricComments: post.metricComments,
           // intentTags / primaryIntent / status NOT updated — preserve user state
         },
-      });
-    }
+      })
+    );
+    await this._tx.model.$transaction(ops);
   }
 
   private async _updateKeywordHitCounts(
@@ -408,16 +451,19 @@ export class EngageScanActivity {
         }
       }
     }
-    for (const [kwId, hits] of hitMap) {
-      await this._keyword.model.engageKeyword.update({
+    if (!hitMap.size) return;
+    const now = new Date();
+    const ops = Array.from(hitMap, ([kwId, hits]) =>
+      this._keyword.model.engageKeyword.update({
         where: { id: kwId },
         data: {
           weeklyHitCount: { increment: hits },
           totalHitCount: { increment: hits },
-          lastCountedAt: new Date(),
+          lastCountedAt: now,
         },
-      });
-    }
+      })
+    );
+    await this._tx.model.$transaction(ops);
   }
 
   private async _expireStaleOpportunities(orgId: string): Promise<void> {
@@ -462,7 +508,13 @@ export class EngageScanActivity {
       `https://api.twitter.com/2/users/by/username/${username}`,
       { headers: { Authorization: `Bearer ${bearerToken}` } }
     );
-    if (!userRes.ok) return [];
+    if (!userRes.ok) {
+      const body = await userRes.text().catch(() => '<unreadable>');
+      this.logger.warn(
+        `X /users/by/username returned ${userRes.status} for @${username}: ${body.slice(0, 200)}`
+      );
+      return [];
+    }
     const userJson = (await userRes.json()) as {
       data?: { id: string; public_metrics?: { followers_count: number } };
     };
@@ -473,7 +525,13 @@ export class EngageScanActivity {
       `https://api.twitter.com/2/users/${userId}/tweets?${params}`,
       { headers: { Authorization: `Bearer ${bearerToken}` } }
     );
-    if (!tweetsRes.ok) return [];
+    if (!tweetsRes.ok) {
+      const body = await tweetsRes.text().catch(() => '<unreadable>');
+      this.logger.warn(
+        `X /users/${userId}/tweets returned ${tweetsRes.status} for @${username}: ${body.slice(0, 200)}`
+      );
+      return [];
+    }
     const json = (await tweetsRes.json()) as {
       data?: Array<{
         id: string;

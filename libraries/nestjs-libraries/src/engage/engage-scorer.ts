@@ -82,9 +82,17 @@ export function scorePost(
 // ─── Keyword scoring ──────────────────────────────────────────────────────────
 
 function postMatchesKeyword(content: string, keyword: string): boolean {
-  // Use word-boundary regex to prevent "AI" matching "rail", "paid", etc.
   const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return new RegExp(`\\b${escaped}\\b`, 'i').test(content);
+  // For ASCII keywords, keep \b boundaries to prevent "AI" matching "rail".
+  // For keywords containing any non-ASCII character (CJK, accented, emoji),
+  // do a case-insensitive substring match. CJK text has no whitespace-based
+  // word boundaries, and \b is ASCII-only — using either \b or \p{L}-aware
+  // lookarounds on mixed Chinese content (e.g. "SEO媒体" inside "推荐SEO媒体") rejects
+  // legitimate hits. Substring is the conventional match semantics for CJK.
+  const isAscii = /^[\x00-\x7F]+$/.test(keyword);
+  return isAscii
+    ? new RegExp(`\\b${escaped}\\b`, 'i').test(content)
+    : new RegExp(escaped, 'i').test(content);
 }
 
 function computeKeywordScore(

@@ -8,6 +8,10 @@ import type { EngageScanActivity } from '@gitroom/orchestrator/activities/engage
 
 const { runDailyScan } = proxyActivities<EngageScanActivity>({
   startToCloseTimeout: '20 minutes',
+  // Detect worker death between heartbeats faster than startToCloseTimeout —
+  // engage-scan.activity emits Context.heartbeat() inside every per-keyword and
+  // per-channel iteration.
+  heartbeatTimeout: '2 minutes',
   retry: {
     maximumAttempts: 3,
     backoffCoefficient: 2,

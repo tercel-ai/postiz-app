@@ -3,6 +3,7 @@ import { Prisma } from '@prisma/client';
 import { PrismaRepository } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
 import {
   AddKeywordDto,
+  AddKeywordsBulkDto,
   AddMonitoredChannelDto,
   AddTrackedAccountDto,
   ListOpportunitiesDto,
@@ -36,8 +37,12 @@ export class EngageRepository {
   // ─── Config ────────────────────────────────────────────────────────────────
 
   async getOrCreateConfig(organizationId: string) {
-    const existing = await this._config.model.engageConfig.findUnique({
+    // Atomic upsert: two concurrent first-call requests would otherwise both
+    // miss findUnique and race on create → Prisma P2002 unique violation.
+    return this._config.model.engageConfig.upsert({
       where: { organizationId },
+      create: { organizationId, setupCompleted: false },
+      update: {},
       include: {
         keywords: { orderBy: { createdAt: 'asc' } },
         monitoredChannels: { orderBy: { createdAt: 'asc' } },
@@ -54,28 +59,6 @@ export class EngageRepository {
             },
           },
           orderBy: { createdAt: 'asc' },
-        },
-      },
-    });
-    if (existing) return existing;
-
-    return this._config.model.engageConfig.create({
-      data: { organizationId, setupCompleted: false },
-      include: {
-        keywords: true,
-        monitoredChannels: true,
-        trackedAccounts: true,
-        xReplyAccounts: {
-          include: {
-            integration: {
-              select: {
-                id: true,
-                name: true,
-                providerIdentifier: true,
-                picture: true,
-              },
-            },
-          },
         },
       },
     });
@@ -114,6 +97,28 @@ export class EngageRepository {
         type: dto.type ?? 'CORE',
         enabled: dto.enabled ?? true,
       },
+    });
+  }
+
+  // Atomic bulk-add — used by the setup wizard so a partial-commit mid-loop
+  // cannot leave the user in a half-initialized state. createMany compiles to
+  // a single INSERT … ON CONFLICT DO NOTHING (skipDuplicates), so repeating a
+  // setup attempt with overlapping keywords is safe.
+  async addKeywordsBulk(
+    configId: string,
+    organizationId: string,
+    dto: AddKeywordsBulkDto
+  ) {
+    const data = dto.keywords.map((kw) => ({
+      configId,
+      organizationId,
+      keyword: kw.keyword,
+      type: kw.type ?? 'CORE',
+      enabled: kw.enabled ?? true,
+    }));
+    return this._keyword.model.engageKeyword.createMany({
+      data,
+      skipDuplicates: true,
     });
   }
 

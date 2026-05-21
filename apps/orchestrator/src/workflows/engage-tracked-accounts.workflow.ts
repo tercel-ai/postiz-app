@@ -8,6 +8,8 @@ import type { EngageScanActivity } from '@gitroom/orchestrator/activities/engage
 
 const { runTrackedAccountsScan } = proxyActivities<EngageScanActivity>({
   startToCloseTimeout: '10 minutes',
+  // engage-scan.activity emits Context.heartbeat() between each tracked account.
+  heartbeatTimeout: '2 minutes',
   retry: {
     maximumAttempts: 3,
     backoffCoefficient: 2,

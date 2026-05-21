@@ -8,6 +8,8 @@ import type { EngageDataTicksActivity } from '@gitroom/orchestrator/activities/e
 
 const { aggregateDailyEngageTicks } = proxyActivities<EngageDataTicksActivity>({
   startToCloseTimeout: '30 minutes',
+  // engage-data-ticks.activity emits Context.heartbeat() per org while aggregating.
+  heartbeatTimeout: '2 minutes',
   retry: {
     maximumAttempts: 3,
     backoffCoefficient: 2,

@@ -1,20 +1,28 @@
 import {
   BadRequestException,
+  HttpException,
   Injectable,
+  InternalServerErrorException,
   Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { Organization } from '@prisma/client';
 import { TemporalService } from 'nestjs-temporal-core';
 import { EngageRepository } from '@gitroom/nestjs-libraries/engage/engage.repository';
+import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.service';
+import { PostOverageService } from '@gitroom/nestjs-libraries/database/prisma/posts/post-overage.service';
 import {
   AddKeywordDto,
+  AddKeywordsBulkDto,
   AddMonitoredChannelDto,
   AddTrackedAccountDto,
+  ConfirmManualReplyDto,
   ListOpportunitiesDto,
   ListSentDto,
   SaveEngageConfigDto,
+  ScheduleReplyDto,
   ScoreStatsDto,
+  SendReplyDto,
   UpdateKeywordDto,
   UpdateMonitoredChannelDto,
   UpdateReplyAccountDto,
@@ -32,7 +40,9 @@ export class EngageService {
 
   constructor(
     private _engageRepository: EngageRepository,
-    private _temporalService: TemporalService
+    private _temporalService: TemporalService,
+    private _postsService: PostsService,
+    private _postOverageService: PostOverageService
   ) {}
 
   // ─── Config ───────────────────────────────────────────────────────────────
@@ -59,6 +69,11 @@ export class EngageService {
   async addKeyword(org: Organization, dto: AddKeywordDto) {
     const config = await this._engageRepository.getOrCreateConfig(org.id);
     return this._engageRepository.addKeyword(config.id, org.id, dto);
+  }
+
+  async addKeywordsBulk(org: Organization, dto: AddKeywordsBulkDto) {
+    const config = await this._engageRepository.getOrCreateConfig(org.id);
+    return this._engageRepository.addKeywordsBulk(config.id, org.id, dto);
   }
 
   async updateKeyword(org: Organization, id: string, dto: UpdateKeywordDto) {
@@ -246,6 +261,238 @@ export class EngageService {
       } catch (err) {
         this.logger.error(`Failed to start ${name} for org ${orgId}:`, err);
       }
+    }
+  }
+
+  // ─── Reply transactional flows ────────────────────────────────────────────
+  //
+  // These three methods own the multi-step claim → publish → sentReply → sync
+  // orchestration. They live in the service tier (not the controller) so the
+  // controller only depends on services, never on EngageRepository directly.
+
+  async sendReply(
+    org: Organization,
+    userId: string | undefined,
+    opportunityId: string,
+    body: SendReplyDto
+  ) {
+    // Atomic claim: marks status=REPLIED iff currently NEW/AUTO_QUEUED. Loser
+    // of a concurrent race throws NotFoundException here, BEFORE createPost —
+    // eliminates duplicate X publishes and orphan Post rows.
+    const { opp: opportunity, priorStatus } =
+      await this._engageRepository.claimOpportunityForReply(
+        org.id,
+        opportunityId,
+        'REPLIED'
+      );
+
+    // Phase 1 — invoke the post pipeline. type='now' BLOCKS until X publish
+    // completes; a failure means the reply never reached X. Full rollback safe.
+    let postId: string | undefined;
+    try {
+      const created = await this._postsService.createPost(
+        org.id,
+        {
+          type: 'now',
+          source: 'engage',
+          tags: [],
+          shortLink: false,
+          date: new Date().toISOString(),
+          posts: [
+            {
+              integration: { id: body.integrationId },
+              value: [
+                { content: body.draftContent, image: [], delay: 0, id: '' } as never,
+              ],
+              group: '',
+              settings: {
+                __type: 'x',
+                reply_to_tweet_id: opportunity.externalPostId,
+                who_can_reply_post: 'everyone',
+              } as never,
+            } as never,
+          ],
+        },
+        userId
+      );
+      // PostsService.createPost returns objects keyed `postId` (not `id`).
+      postId = created?.[0]?.postId;
+      if (!postId) throw new Error('Post creation failed');
+    } catch (err) {
+      if (postId) await this._engageRepository.deletePostById(postId);
+      await this._engageRepository.releaseOpportunityClaim(
+        org.id,
+        opportunityId,
+        priorStatus
+      );
+      throw err;
+    }
+
+    // Phase 2 — the X reply IS LIVE on twitter.com. Do NOT roll back.
+    try {
+      const sentReply = await this._engageRepository.createSentReply({
+        organizationId: org.id,
+        opportunityId,
+        postId,
+        strategy: body.strategy,
+        brandStrength: body.brandStrength,
+      });
+      // 24h metrics sync — best-effort; the inner method swallows + logs.
+      await this.startMetricsSyncForReply(sentReply.id);
+      return sentReply;
+    } catch (err) {
+      this.logger.error(
+        `sendReply: X reply published (postId=${postId}, opportunityId=${opportunityId}, ` +
+          `orgId=${org.id}) but failed to record EngageSentReply.`,
+        err instanceof Error ? err.stack : err
+      );
+      if (err instanceof HttpException) throw err;
+      throw new InternalServerErrorException(
+        'Reply was published but the tracking record could not be created. ' +
+          'Contact support to reconcile.',
+        { cause: err instanceof Error ? err : undefined }
+      );
+    }
+  }
+
+  async scheduleReply(
+    org: Organization,
+    userId: string | undefined,
+    opportunityId: string,
+    body: ScheduleReplyDto
+  ) {
+    if (new Date(body.scheduledAt) <= new Date()) {
+      throw new BadRequestException('scheduledAt must be a future date');
+    }
+
+    const { opp: opportunity, priorStatus } =
+      await this._engageRepository.claimOpportunityForReply(
+        org.id,
+        opportunityId,
+        'SCHEDULED'
+      );
+
+    // Scheduled posts publish at a future time — full rollback on failure is safe.
+    let postId: string | undefined;
+    try {
+      const created = await this._postsService.createPost(
+        org.id,
+        {
+          type: 'schedule',
+          source: 'engage',
+          tags: [],
+          shortLink: false,
+          date: body.scheduledAt,
+          posts: [
+            {
+              integration: { id: body.integrationId },
+              value: [
+                { content: body.draftContent, image: [], delay: 0, id: '' } as never,
+              ],
+              group: '',
+              settings: {
+                __type: 'x',
+                reply_to_tweet_id: opportunity.externalPostId,
+                who_can_reply_post: 'everyone',
+              } as never,
+            } as never,
+          ],
+        },
+        userId
+      );
+      postId = created?.[0]?.postId;
+      if (!postId) throw new Error('Post creation failed');
+
+      return await this._engageRepository.createSentReply({
+        organizationId: org.id,
+        opportunityId,
+        postId,
+        strategy: body.strategy,
+        brandStrength: body.brandStrength,
+      });
+      // metrics sync is started after the scheduled post actually publishes
+      // (the post workflow triggers it via engage-metrics-sync-on-publish).
+    } catch (err) {
+      if (postId) await this._engageRepository.deletePostById(postId);
+      await this._engageRepository.releaseOpportunityClaim(
+        org.id,
+        opportunityId,
+        priorStatus
+      );
+      throw err;
+    }
+  }
+
+  async confirmManualReply(
+    org: Organization,
+    userId: string | undefined,
+    opportunityId: string,
+    body: ConfirmManualReplyDto
+  ) {
+    const { priorStatus } =
+      await this._engageRepository.claimOpportunityForReply(
+        org.id,
+        opportunityId,
+        'REPLIED'
+      );
+
+    let postId: string | undefined;
+    try {
+      const post = await this._engageRepository.createManualRedditPost({
+        organizationId: org.id,
+        content: body.draftContent,
+        date: new Date(),
+      });
+      postId = post.id;
+    } catch (err) {
+      await this._engageRepository.releaseOpportunityClaim(
+        org.id,
+        opportunityId,
+        priorStatus
+      );
+      throw err;
+    }
+
+    // Engage shares the regular post quota. Reddit manual path bypasses
+    // PostsService.createPost, so we trigger the overage check here.
+    // Fire-and-forget — billing failures must not break the user-visible flow.
+    if (userId) {
+      this._postOverageService
+        .deductIfOverage(org.id, userId, postId, 'engage')
+        .catch((err) => {
+          this.logger.error(
+            `confirmManualReply: deductIfOverage failed for postId=${postId}:`,
+            err
+          );
+        });
+    } else {
+      this.logger.warn(
+        `confirmManualReply: skipping deductIfOverage for postId=${postId} — no userId on request`
+      );
+    }
+
+    try {
+      const sentReply = await this._engageRepository.createSentReply({
+        organizationId: org.id,
+        opportunityId,
+        postId,
+        strategy: body.strategy,
+        brandStrength: body.brandStrength,
+      });
+      await this.startMetricsSyncForReply(sentReply.id);
+      return sentReply;
+    } catch (err) {
+      this.logger.error(
+        `confirmManualReply: Reddit reply recorded (postId=${postId}, ` +
+          `opportunityId=${opportunityId}, orgId=${org.id}) but failed to record EngageSentReply.`,
+        err instanceof Error ? err.stack : err
+      );
+      if (err instanceof HttpException) throw err;
+      throw new InternalServerErrorException(
+        'Reply was recorded but the tracking record could not be created. ' +
+          'Contact support to reconcile.',
+        { cause: err instanceof Error ? err : undefined }
+      );
     }
   }
 

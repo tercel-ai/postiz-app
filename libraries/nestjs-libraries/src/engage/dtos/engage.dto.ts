@@ -1,4 +1,7 @@
 import {
+  ArrayMaxSize,
+  ArrayMinSize,
+  IsArray,
   IsBoolean,
   IsDateString,
   IsEnum,
@@ -10,11 +13,18 @@ import {
   MaxLength,
   Min,
   MinLength,
+  ValidateNested,
 } from 'class-validator';
 import { Transform, Type } from 'class-transformer';
 import { EngageOpportunityStatus } from '@prisma/client';
 
 const VALID_STRATEGIES = ['EXPERT_ANSWER', 'DATA_BACKED', 'EMPATHY_LED'] as const;
+
+// Keyword types must match the literals the scorer strict-equals (engage-scorer.ts
+// computeKeywordScore). Without this enum, lowercase / mis-cased values silently
+// store but never receive the +5/+3 brand/competitor bonus.
+export const KEYWORD_TYPES = ['CORE', 'BRAND', 'COMPETITOR'] as const;
+export type KeywordType = (typeof KEYWORD_TYPES)[number];
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
@@ -33,8 +43,8 @@ export class AddKeywordDto {
   keyword: string;
 
   @IsOptional()
-  @IsString()
-  type?: string; // 'CORE' | 'BRAND' | 'COMPETITOR' | future
+  @IsIn(KEYWORD_TYPES)
+  type?: KeywordType;
 
   @IsOptional()
   @IsBoolean()
@@ -43,12 +53,21 @@ export class AddKeywordDto {
 
 export class UpdateKeywordDto {
   @IsOptional()
-  @IsString()
-  type?: string;
+  @IsIn(KEYWORD_TYPES)
+  type?: KeywordType;
 
   @IsOptional()
   @IsBoolean()
   enabled?: boolean;
+}
+
+export class AddKeywordsBulkDto {
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(100)
+  @ValidateNested({ each: true })
+  @Type(() => AddKeywordDto)
+  keywords: AddKeywordDto[];
 }
 
 // ─── Monitored Channels ───────────────────────────────────────────────────────

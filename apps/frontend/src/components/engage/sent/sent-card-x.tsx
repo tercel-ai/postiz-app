@@ -89,7 +89,7 @@ export const SentCardX: FC<SentCardXProps> = ({ reply }) => {
           { icon: '👁', label: 'Impressions', value: impressions, color: 'text-blue-400' },
           { icon: '♥', label: 'Likes', value: likes, color: 'text-red-400' },
           { icon: '🔁', label: 'Retweets', value: retweets, color: 'text-green-400' },
-          { icon: '💬', label: 'Replies', value: replies, color: 'text-olive-400 text-yellow-600' },
+          { icon: '💬', label: 'Replies', value: replies, color: 'text-yellow-600' },
           { icon: '🔖', label: 'Bookmarks', value: bookmarks, color: 'text-purple-400' },
         ].map((m) => (
           <div key={m.label} className="text-center bg-[#0f1219] rounded-lg p-2">
@@ -100,16 +100,28 @@ export const SentCardX: FC<SentCardXProps> = ({ reply }) => {
         ))}
       </div>
 
-      {post.releaseURL && (
-        <a
-          href={post.releaseURL.startsWith('http') ? post.releaseURL : `https://x.com/i/web/status/${post.releaseURL}`}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="text-xs text-blue-400 hover:underline mt-2 block"
-        >
-          View on X ↗
-        </a>
-      )}
+      {(() => {
+        const raw = post.releaseURL ?? '';
+        // Render only when releaseURL is a full http(s) URL or a bare numeric
+        // tweet id — anything else (empty string, internal id, malformed path)
+        // would silently produce a broken https://x.com/i/web/status/...  link.
+        const href = raw.startsWith('http')
+          ? raw
+          : /^\d+$/.test(raw)
+          ? `https://x.com/i/web/status/${raw}`
+          : null;
+        if (!href) return null;
+        return (
+          <a
+            href={href}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-xs text-blue-400 hover:underline mt-2 block"
+          >
+            View on X ↗
+          </a>
+        );
+      })()}
     </div>
   );
 };

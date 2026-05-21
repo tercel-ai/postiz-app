@@ -30,9 +30,13 @@ services:
       # CLOUDFLARE_BUCKET_URL: 'https://your-bucket-url.r2.cloudflarestorage.com/'
       # CLOUDFLARE_REGION: 'auto'
 
-      # === Social Media API Settings
+      # === social Media API Settings
+      ANTHROPIC_API_KEY: ''
+      OPENROUTER_API_KEY: ''
+      OPENROUTER_INTENT_MODEL: 'anthropic/claude-haiku-4.5'
       X_API_KEY: ''
       X_API_SECRET: ''
+
       LINKEDIN_CLIENT_ID: ''
       LINKEDIN_CLIENT_SECRET: ''
       REDDIT_CLIENT_ID: ''
@@ -111,6 +115,7 @@ services:
     volumes:
       - postiz-config:/config/
       - postiz-uploads:/uploads/
+      - ./model_cache:/root/.cache/huggingface
     ports:
       - "4007:5000"
     networks:

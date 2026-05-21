@@ -19,7 +19,13 @@ export class EngageIntentClassifierService implements OnModuleInit {
   private readonly logger = new Logger(EngageIntentClassifierService.name);
   private classifier: ZeroShotPipeline | null = null;
   private readonly anthropic = new Anthropic({
-    apiKey: process.env.ANTHROPIC_API_KEY ?? process.env.CLAUDE_API_KEY,
+    apiKey:
+      process.env.ANTHROPIC_API_KEY ??
+      process.env.CLAUDE_API_KEY ??
+      process.env.OPENROUTER_API_KEY,
+    baseURL: process.env.OPENROUTER_API_KEY
+      ? 'https://openrouter.ai/api/v1'
+      : undefined,
   });
 
   async onModuleInit() {
@@ -30,7 +36,8 @@ export class EngageIntentClassifierService implements OnModuleInit {
       const { pipeline } = await import('@xenova/transformers');
       this.classifier = await pipeline(
         'zero-shot-classification',
-        'Xenova/nli-deberta-v3-small'
+        'Xenova/nli-deberta-v3-small',
+        { quantized: true }
       ) as unknown as ZeroShotPipeline;
       this.logger.log('Intent classifier loaded: Xenova/nli-deberta-v3-small');
     } catch (err) {
@@ -77,19 +84,34 @@ export class EngageIntentClassifierService implements OnModuleInit {
     const results: Record<string, ClassifyResult> = {};
     for (let i = 0; i < posts.length; i += concurrency) {
       const batch = posts.slice(i, i + concurrency);
-      // Use classifyWithFallback so that low-confidence local predictions (< 0.45) escalate to Haiku
-      const classified = await Promise.all(
+      // Isolate per-item failures: one corrupt post must not reject the whole
+      // chunk (e.g. a malformed string that crashes the local NLI pipeline).
+      // Use classifyWithFallback so low-confidence local predictions (< 0.45)
+      // still escalate to Haiku.
+      const settled = await Promise.allSettled(
         batch.map((p) =>
           this.classifyWithFallback(p.content).then((r) => ({ id: p.id, ...r }))
         )
       );
-      for (const item of classified) {
-        results[item.id] = {
-          intentTags: item.intentTags,
-          primaryIntent: item.primaryIntent,
-          intentScore: item.intentScore,
-        };
-      }
+      settled.forEach((s, idx) => {
+        if (s.status === 'fulfilled') {
+          results[s.value.id] = {
+            intentTags: s.value.intentTags,
+            primaryIntent: s.value.primaryIntent,
+            intentScore: s.value.intentScore,
+          };
+        } else {
+          const failedId = batch[idx].id;
+          this.logger.warn(
+            `classifyBatch: item ${failedId} failed — ${(s.reason as Error)?.message ?? s.reason}`
+          );
+          results[failedId] = {
+            intentTags: ['discussion'],
+            primaryIntent: 'discussion',
+            intentScore: 0,
+          };
+        }
+      });
     }
     return results;
   }
@@ -121,31 +143,50 @@ export class EngageIntentClassifierService implements OnModuleInit {
 
   private async _claudeFallbackClassify(text: string): Promise<ClassifyResult> {
     try {
-      const msg = await this.anthropic.messages.create({
-        model: 'claude-haiku-4-5',
-        max_tokens: 128,
-        tools: [
-          {
-            name: 'set_intent',
-            input_schema: {
-              type: 'object' as const,
-              properties: {
-                intentTags: { type: 'array', items: { type: 'string' } },
-                primaryIntent: { type: 'string' },
-                intentScore: { type: 'number' },
+      const isOpenRouter = !!process.env.OPENROUTER_API_KEY;
+      const model =
+        process.env.OPENROUTER_INTENT_MODEL ??
+        (isOpenRouter ? 'anthropic/claude-haiku-4.5' : 'claude-3-haiku-20240307');
+
+      const extraHeaders = isOpenRouter
+        ? {
+            'HTTP-Referer': 'https://postiz.com',
+            'X-Title': 'Postiz Engage',
+          }
+        : undefined;
+
+      const msg = await this.anthropic.messages.create(
+        {
+          model,
+          max_tokens: 128,
+          tools: [
+            {
+              name: 'set_intent',
+              input_schema: {
+                type: 'object' as const,
+                properties: {
+                  intentTags: { type: 'array', items: { type: 'string' } },
+                  primaryIntent: { type: 'string' },
+                  intentScore: { type: 'number' },
+                },
+                required: ['intentTags', 'primaryIntent', 'intentScore'],
               },
-              required: ['intentTags', 'primaryIntent', 'intentScore'],
             },
-          },
-        ],
-        tool_choice: { type: 'tool', name: 'set_intent' },
-        messages: [
-          {
-            role: 'user',
-            content: `Classify this post's intent. Labels: ${INTENT_LABELS.join(', ')}.\n\n"${text.slice(0, 400)}"`,
-          },
-        ],
-      });
+          ],
+          tool_choice: { type: 'tool', name: 'set_intent' },
+          messages: [
+            {
+              role: 'user',
+              content: `Classify this post's intent. Labels: ${INTENT_LABELS.join(
+                ', '
+              )}.\n\n"${text.slice(0, 400)}"`,
+            },
+          ],
+        },
+        {
+          headers: extraHeaders as any,
+        }
+      );
 
       const toolUse = msg.content.find((b) => b.type === 'tool_use');
       if (toolUse && toolUse.type === 'tool_use') {
