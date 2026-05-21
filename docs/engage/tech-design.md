@@ -1011,46 +1011,54 @@ export async function engageTrackedAccountsWorkflow(orgId: string): Promise<void
 
 **Schedule**: Daily at UTC 01:00 (after `engageScanWorkflow` at 00:30, and after `dataTicksSyncWorkflow` at 00:05 so Post.impressions/trafficScore are already fresh).
 
+**Registration**: Registered as a single **global singleton** workflow via `libraries/nestjs-libraries/src/temporal/infinite.workflow.register.ts` — one instance handles ALL organizations in one pass per day. (Unlike the per-org `engageScanWorkflow`, this avoids fan-out for a purely-aggregate task.)
+
 ```typescript
-export async function engageDataTicksWorkflow(orgId: string): Promise<void> {
+// Workflow signature: no args — global singleton aggregates every org in one pass.
+export async function engageDataTicksWorkflow(): Promise<void> {
   const yesterday = startOfDay(subDays(new Date(), 1));
 
-  // Aggregate Post WHERE source='engage' AND publishDate IN yesterday bucket
-  const posts = await fetchEngagePublishedPosts(orgId, yesterday);
+  // Aggregate Post WHERE source='engage' AND publishDate IN yesterday bucket,
+  // grouped by (organizationId, platform).
+  const posts = await fetchEngagePublishedPosts(yesterday);
 
-  const byPlatform: Record<string, { count: number; impressions: number; traffic: number }> = {};
-
+  // First group by org, then by platform within each org.
+  const byOrgPlatform: Record<string, Record<string, { count: number; impressions: number; traffic: number }>> = {};
   for (const post of posts) {
+    const orgId = post.organizationId;
     const p = post.integration?.providerIdentifier ?? 'reddit';  // reddit has no integration
-    if (!byPlatform[p]) byPlatform[p] = { count: 0, impressions: 0, traffic: 0 };
-    byPlatform[p].count       += 1;
-    byPlatform[p].impressions += post.impressions ?? 0;
-    byPlatform[p].traffic     += post.trafficScore ?? 0;
+    byOrgPlatform[orgId] ??= {};
+    byOrgPlatform[orgId][p] ??= { count: 0, impressions: 0, traffic: 0 };
+    byOrgPlatform[orgId][p].count       += 1;
+    byOrgPlatform[orgId][p].impressions += post.impressions ?? 0;
+    byOrgPlatform[orgId][p].traffic     += post.trafficScore ?? 0;
   }
 
-  // Upsert per-platform rows + cross-platform "all" row
-  const platforms = [...Object.keys(byPlatform), 'all'];
-  for (const platform of platforms) {
-    const agg = platform === 'all'
-      ? Object.values(byPlatform).reduce((a, b) => ({
-          count: a.count + b.count,
-          impressions: a.impressions + b.impressions,
-          traffic: a.traffic + b.traffic,
-        }), { count: 0, impressions: 0, traffic: 0 })
-      : byPlatform[platform] ?? { count: 0, impressions: 0, traffic: 0 };
+  // Upsert per-org × per-platform rows + cross-platform "all" row per org.
+  for (const [orgId, byPlatform] of Object.entries(byOrgPlatform)) {
+    const platforms = [...Object.keys(byPlatform), 'all'];
+    for (const platform of platforms) {
+      const agg = platform === 'all'
+        ? Object.values(byPlatform).reduce((a, b) => ({
+            count: a.count + b.count,
+            impressions: a.impressions + b.impressions,
+            traffic: a.traffic + b.traffic,
+          }), { count: 0, impressions: 0, traffic: 0 })
+        : byPlatform[platform] ?? { count: 0, impressions: 0, traffic: 0 };
 
-    for (const [type, val] of [
-      ['replies',     agg.count      ],
-      ['impressions', agg.impressions],
-      ['traffic',     agg.traffic    ],
-    ] as const) {
-      await prisma.engageDataTicks.upsert({
-        where: { organizationId_platform_type_timeUnit_statisticsTime: {
-          organizationId: orgId, platform, type, timeUnit: 'day', statisticsTime: yesterday,
-        }},
-        create:  { organizationId: orgId, platform, type, timeUnit: 'day', statisticsTime: yesterday, value: val },
-        update:  { value: val },
-      });
+      for (const [type, val] of [
+        ['replies',     agg.count      ],
+        ['impressions', agg.impressions],
+        ['traffic',     agg.traffic    ],
+      ] as const) {
+        await prisma.engageDataTicks.upsert({
+          where: { organizationId_platform_type_timeUnit_statisticsTime: {
+            organizationId: orgId, platform, type, timeUnit: 'day', statisticsTime: yesterday,
+          }},
+          create:  { organizationId: orgId, platform, type, timeUnit: 'day', statisticsTime: yesterday, value: val },
+          update:  { value: val },
+        });
+      }
     }
   }
 }
@@ -1111,7 +1119,7 @@ GET https://www.reddit.com/api/info.json?id=t1_{comment_id}
 Response: { data: { children: [{ data: { score, num_comments } }] } }
 ```
 
-### 5.3 Workflow Registration
+### 5.5 Workflow Registration
 
 **File**: `apps/orchestrator/src/app.module.ts` (or equivalent workflow registration)
 
