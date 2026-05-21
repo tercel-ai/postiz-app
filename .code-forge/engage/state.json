@@ -468,7 +468,7 @@
       "raw_findings_count": 22
     }
   },
-  "updated": "2026-05-21T09:45:00.000Z",
+  "updated": "2026-05-21T10:00:00.000Z",
   "fixes": [
     {
       "bug": "review fixes \u2014 41 issues (3 blockers, 12 criticals, 26 warnings)",
@@ -539,6 +539,26 @@
       ],
       "doc_updates": [],
       "fixed_at": "2026-05-21T09:45:00.000Z"
+    },
+    {
+      "bug": "fourth re-review fixes \u2014 5 issues (1 critical regression + 4 warnings)",
+      "root_cause_level": 1,
+      "root_cause": "Issues discovered by re-review of /code-forge:review engage: latent .id vs .postId bug propagated by prior fix; rollback after live X publish; AUTO_QUEUED status lost on claim release; SWR errors silently swallowed; DeferredTimeInput overwrote in-progress edits",
+      "fixed_files": [
+        "apps/backend/src/api/routes/engage.controller.ts",
+        "libraries/nestjs-libraries/src/engage/engage.repository.ts",
+        "apps/frontend/src/components/engage/signal-feed/signal-feed.tsx",
+        "apps/frontend/src/components/engage/settings/keyword-manager.tsx",
+        "apps/frontend/src/components/engage/settings/monitored-channel-manager.tsx",
+        "apps/frontend/src/components/engage/settings/tracked-accounts.tsx",
+        "apps/frontend/src/components/engage/settings/reply-accounts.tsx"
+      ],
+      "commits": [
+        "9a43c6b4",
+        "e330ad5f"
+      ],
+      "doc_updates": [],
+      "fixed_at": "2026-05-21T10:00:00.000Z"
     }
   ]
 }
