@@ -92,8 +92,8 @@ export class CreatePostDto {
   type: 'draft' | 'schedule' | 'now';
 
   @IsOptional()
-  @IsIn(['calendar', 'chat'])
-  source?: 'calendar' | 'chat';
+  @IsIn(['calendar', 'chat', 'engage'])
+  source?: 'calendar' | 'chat' | 'engage';
 
   @IsOptional()
   @IsString()

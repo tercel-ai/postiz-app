@@ -8,6 +8,8 @@ import ImageWithFallback from '@gitroom/react/helpers/image.with.fallback';
 import Image from 'next/image';
 import { useFetch } from '@gitroom/helpers/utils/custom.fetch';
 import { RenderAnalytics } from '@gitroom/frontend/components/platform-analytics/render.analytics';
+import { EngagePerformancePanel } from '@gitroom/frontend/components/engage/dashboard/engage-performance-panel';
+import { TrafficFromEngagePanel } from '@gitroom/frontend/components/engage/dashboard/traffic-from-engage-panel';
 import { Select } from '@gitroom/react/form/select';
 import { Button } from '@gitroom/react/form/button';
 import { useRouter } from 'next/navigation';
@@ -271,6 +273,10 @@ export const PlatformAnalytics = () => {
         </div>
       </div>
       <div className="bg-newBgColorInner flex-1 flex-col flex p-[20px] gap-[12px]">
+        <div className="flex flex-col gap-[12px]">
+          <EngagePerformancePanel />
+          <TrafficFromEngagePanel />
+        </div>
         {!!options.length && (
           <div className="flex-1 flex flex-col gap-[14px]">
             <div className="max-w-[200px]">

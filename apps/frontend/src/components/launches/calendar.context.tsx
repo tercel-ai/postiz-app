@@ -63,6 +63,10 @@ export const CalendarContext = createContext({
   changeDate: (id: string, date: dayjs.Dayjs) => {
     /** empty **/
   },
+  showEngage: true,
+  setShowEngage: (_: boolean) => {
+    /** empty **/
+  },
 });
 
 export type ScheduleRuleType = 'daily' | 'weekday' | 'dayOfWeek' | 'specificDate';
@@ -134,6 +138,7 @@ export const CalendarWeekProvider: FC<{
   const fetch = useFetch();
   const [internalData, setInternalData] = useState([] as any[]);
   const [trendings] = useState<string[]>([]);
+  const [showEngage, setShowEngage] = useState(true);
   const searchParams = useSearchParams();
   const [displaySaved, setDisplaySaved] = useCookie('calendar-display', 'week');
   const display = searchParams.get('display') || displaySaved;
@@ -264,7 +269,11 @@ export const CalendarWeekProvider: FC<{
         trendings,
         reloadCalendarView: swr.mutate,
         ...filters,
-        posts: isLoading ? [] : internalData,
+        posts: isLoading
+          ? []
+          : showEngage
+          ? internalData
+          : internalData.filter((p: any) => p.source !== 'engage'),
         loading: swr.isLoading,
         integrations,
         setFilters: setFiltersWrapper,
@@ -272,6 +281,8 @@ export const CalendarWeekProvider: FC<{
         comments,
         sets: sets || [],
         signature: sign,
+        showEngage,
+        setShowEngage,
       }}
     >
       {children}

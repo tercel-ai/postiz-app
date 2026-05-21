@@ -899,7 +899,9 @@ const CalendarItem: FC<{
           'text-white text-[11px] max-h-[24px] h-[24px] min-h-[24px] w-full rounded-tr-[10px] rounded-tl-[10px] flex items-center justify-center gap-[10px] px-[5px] bg-btnPrimary'
         )}
         style={{
-          backgroundColor: post?.tags?.[0]?.tag?.color,
+          backgroundColor: (post as any).source === 'engage'
+            ? (state === 'PUBLISHED' ? '#7a6020' : state === 'QUEUE' ? '#5a3d9e' : state === 'ERROR' ? '#8b2020' : undefined)
+            : post?.tags?.[0]?.tag?.color,
         }}
       >
         <div
@@ -908,7 +910,7 @@ const CalendarItem: FC<{
             'group-hover:hidden cursor-pointer'
           )}
         >
-          {post.tags.map((p) => p.tag.name).join(', ')}
+          {(post as any).source === 'engage' ? `💬 ${post.tags.map((p) => p.tag.name).join(', ')}` : post.tags.map((p) => p.tag.name).join(', ')}
         </div>
         <div
           className={clsx(

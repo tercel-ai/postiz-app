@@ -17,6 +17,7 @@ import { ChatModule } from '@gitroom/nestjs-libraries/chat/chat.module';
 import { getTemporalModule } from '@gitroom/nestjs-libraries/temporal/temporal.module';
 import { TemporalRegisterMissingSearchAttributesModule } from '@gitroom/nestjs-libraries/temporal/temporal.register';
 import { InfiniteWorkflowRegisterModule } from '@gitroom/nestjs-libraries/temporal/infinite.workflow.register';
+import { EngageModule } from '@gitroom/backend/engage/engage.module';
 
 @Global()
 @Module({
@@ -24,6 +25,7 @@ import { InfiniteWorkflowRegisterModule } from '@gitroom/nestjs-libraries/tempor
     SentryModule.forRoot(),
     DatabaseModule,
     ApiModule,
+    EngageModule,
     PublicApiModule,
     AdminApiModule,
     AgentModule,

@@ -48,6 +48,8 @@ export class DashboardRepository {
       organizationId: orgId,
       deletedAt: null,
       parentPostId: null,
+      // Exclude Engage reply posts — they are tracked separately via EngageDataTicks
+      source: { notIn: ['engage'] },
       ...(integrationId?.length && { integrationId: { in: integrationId } }),
       ...(channel?.length && { integration: { providerIdentifier: { in: channel } } }),
     };
@@ -78,6 +80,8 @@ export class DashboardRepository {
         parentPostId: null,
         state: 'PUBLISHED',
         releaseId: { not: null },
+        // Exclude Engage reply posts — they are aggregated separately via EngageDataTicks
+        source: { notIn: ['engage'] },
         publishDate: {
           gte: dayjs().subtract(sinceDays, 'day').toDate(),
         },
@@ -154,6 +158,8 @@ export class DashboardRepository {
         organizationId: orgId,
         deletedAt: null,
         parentPostId: null,
+        // Exclude Engage reply posts — they are tracked separately via EngageDataTicks
+        source: { notIn: ['engage'] },
         publishDate: {
           gte: dayjs().subtract(sinceDays, 'day').toDate(),
         },

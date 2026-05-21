@@ -43,6 +43,9 @@ model Organization {
   dataTicks         DataTicks[]
   postReleases      PostRelease[]
   billingRecords    BillingRecord[]
+  engageConfig      EngageConfig?
+  engageOpportunities EngageOpportunity[]
+  engageSentReplies   EngageSentReply[]
 }
 
 model Tags {
@@ -382,6 +385,7 @@ model Integration {
   posts                 Post[]
   dataTicks             DataTicks[]
   postReleases          PostRelease[]
+  engageXReplyAccount   EngageXReplyAccount?
 
   @@unique([organizationId, internalId])
   @@index([rootInternalId])
@@ -436,7 +440,7 @@ model Post {
   state                      State                     @default(QUEUE)
   publishDate                DateTime
   organizationId             String
-  integrationId              String
+  integrationId              String?
   content                    String
   delay                      Int                       @default(0)
   group                      String
@@ -464,7 +468,7 @@ model Post {
   comments                   Comments[]
   errors                     Errors[]
   payoutProblems             PayoutProblems[]
-  integration                Integration               @relation(fields: [integrationId], references: [id])
+  integration                Integration?              @relation(fields: [integrationId], references: [id])
   lastMessage                Messages?                 @relation(fields: [lastMessageId], references: [id])
   organization               Organization              @relation("organization", fields: [organizationId], references: [id])
   parentPost                 Post?                     @relation("parentPostId", fields: [parentPostId], references: [id])
@@ -475,6 +479,7 @@ model Post {
   submittedForOrganization   Organization?             @relation("submittedForOrg", fields: [submittedForOrganizationId], references: [id])
   tags                       TagsPosts[]
   releases                   PostRelease[]
+  engageSentReply            EngageSentReply?
 
   @@index([group])
   @@index([deletedAt])
@@ -1012,4 +1017,204 @@ model PostRelease {
   @@index([integrationId, publishDate])
   @@index([group])
   @@index([state])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ENGAGE MODULE MODELS
+// ─────────────────────────────────────────────────────────────────────────────
+
+model EngageConfig {
+  id             String    @id @default(uuid())
+  organizationId String    @unique
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  setupCompleted Boolean   @default(false)
+  lastScanAt     DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  keywords          EngageKeyword[]
+  monitoredChannels EngageMonitoredChannel[]
+  trackedAccounts   EngageTrackedAccount[]
+  xReplyAccounts    EngageXReplyAccount[]
+}
+
+model EngageKeyword {
+  id             String    @id @default(uuid())
+  configId       String
+  config         EngageConfig @relation(fields: [configId], references: [id], onDelete: Cascade)
+  organizationId String
+  keyword        String
+  type           String    @default("CORE")
+  enabled        Boolean   @default(true)
+  weeklyHitCount Int       @default(0)
+  totalHitCount  Int       @default(0)
+  lastCountedAt  DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@unique([configId, keyword])
+  @@index([organizationId])
+  @@index([configId, enabled])
+}
+
+model EngageMonitoredChannel {
+  id             String    @id @default(uuid())
+  configId       String
+  config         EngageConfig @relation(fields: [configId], references: [id], onDelete: Cascade)
+  organizationId String
+  platform       String
+  channelId      String
+  channelName    String
+  audienceSize   Int       @default(0)
+  enabled        Boolean   @default(true)
+  lastScannedAt  DateTime?
+  metadata       Json?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@unique([configId, platform, channelId])
+  @@index([organizationId])
+  @@index([configId, platform, enabled])
+}
+
+model EngageTrackedAccount {
+  id             String    @id @default(uuid())
+  configId       String
+  config         EngageConfig @relation(fields: [configId], references: [id], onDelete: Cascade)
+  organizationId String
+  platform       String    @default("x")
+  username       String
+  displayName    String?
+  categoryLabel  String?
+  enabled        Boolean   @default(true)
+  lastCheckedAt  DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@unique([configId, platform, username])
+  @@index([organizationId, enabled])
+}
+
+model EngageXReplyAccount {
+  id                  String    @id @default(uuid())
+  configId            String
+  config              EngageConfig @relation(fields: [configId], references: [id], onDelete: Cascade)
+  organizationId      String
+  integrationId       String    @unique
+  integration         Integration @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  engageEnabled       Boolean   @default(true)
+  autoReplyEnabled    Boolean   @default(false)
+  autoReplyTimeStart  String?
+  autoReplyTimeEnd    String?
+  autoReplyTimezone   String?
+  defaultStrategy     String    @default("EXPERT_ANSWER")
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  @@unique([configId, integrationId])
+  @@index([organizationId, engageEnabled])
+}
+
+model EngageOpportunity {
+  id               String    @id @default(uuid())
+  organizationId   String
+  organization     Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  platform         String
+  externalPostId   String
+  externalPostUrl  String
+  channelId        String?
+  channelName      String?
+  authorUsername   String
+  authorDisplayName String?
+  authorFollowers  Int?
+  authorAvatarUrl  String?
+  postContent      String
+  postPublishedAt  DateTime
+
+  score            Int       @default(0)
+  scoreKeyword     Int       @default(0)
+  scoreHeat        Int       @default(0)
+  scoreAuthority   Int       @default(0)
+  scoreRecency     Int       @default(0)
+  scoreTracked     Int       @default(0)
+  scoreBreakdown   Json?
+
+  intentTags       String[]
+  primaryIntent    String    @default("discussion")
+  intentScore      Float?
+
+  status           EngageOpportunityStatus @default(NEW)
+  bookmarked       Boolean   @default(false)
+
+  metricLikes      Int       @default(0)
+  metricReplies    Int       @default(0)
+  metricRetweets   Int       @default(0)
+  metricQuotes     Int       @default(0)
+  metricScore      Int       @default(0)
+  metricUpvoteRatio Float?
+  metricComments   Int       @default(0)
+
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  deletedAt        DateTime?
+
+  sentReply        EngageSentReply?
+
+  @@unique([organizationId, platform, externalPostId])
+  @@index([organizationId])
+  @@index([organizationId, status])
+  @@index([organizationId, platform])
+  @@index([createdAt])
+  @@index([deletedAt])
+  @@index([organizationId, score])
+  @@index([organizationId, scoreKeyword])
+  @@index([organizationId, scoreHeat])
+  @@index([organizationId, scoreAuthority])
+  @@index([organizationId, scoreTracked])
+  @@index([organizationId, bookmarked])
+}
+
+enum EngageOpportunityStatus {
+  NEW
+  DISMISSED
+  REPLIED
+  SCHEDULED
+  AUTO_QUEUED
+  EXPIRED
+}
+
+model EngageSentReply {
+  id             String    @id @default(uuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  opportunityId  String    @unique
+  opportunity    EngageOpportunity @relation(fields: [opportunityId], references: [id])
+
+  postId         String    @unique
+  post           Post      @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  strategy       String
+  brandStrength  Int       @default(1)
+  authorReplied  Boolean   @default(false)
+
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@index([organizationId])
+}
+
+model EngageDataTicks {
+  organizationId String
+  platform       String
+  type           String
+  timeUnit       String
+  statisticsTime DateTime
+  value          BigInt    @default(0)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@unique([organizationId, platform, type, timeUnit, statisticsTime])
+  @@index([organizationId, platform, type, timeUnit])
+  @@index([organizationId, type, statisticsTime])
 }

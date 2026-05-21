@@ -1,0 +1,485 @@
+{
+  "feature": "engage",
+  "source": "docs/features/engage-manifest.md",
+  "techDesign": "docs/engage/tech-design.md",
+  "prd": "docs/engage/prd.md",
+  "created": "2026-05-20",
+  "status": "completed",
+  "tasks": [
+    {
+      "id": "T1.1",
+      "feature": "engage-f1-schema",
+      "title": "Add Engage models to schema.prisma",
+      "description": "Add all 8 new Prisma models: EngageConfig, EngageKeyword, EngageMonitoredChannel, EngageTrackedAccount, EngageXReplyAccount, EngageOpportunity, EngageSentReply, EngageDataTicks. Include all indexes, unique constraints, and the EngageOpportunityStatus enum.",
+      "status": "completed",
+      "tdd": "Verify schema validates with `pnpm prisma validate`; check generated types include all new models",
+      "files": [
+        "libraries/nestjs-libraries/src/database/prisma/schema.prisma"
+      ]
+    },
+    {
+      "id": "T1.2",
+      "feature": "engage-f1-schema",
+      "title": "Add extensions to Organization, Integration, Post models",
+      "description": "Add back-relations to Organization (engageConfig, engageOpportunities, engageSentReplies), Integration (engageXReplyAccount), and Post (engageSentReply). No new fields — only Prisma relations.",
+      "status": "completed",
+      "tdd": "Verify `prisma validate` passes; check Organization type includes all 3 engage relations",
+      "files": [
+        "libraries/nestjs-libraries/src/database/prisma/schema.prisma"
+      ]
+    },
+    {
+      "id": "T1.3",
+      "feature": "engage-f1-schema",
+      "title": "Run Prisma migration",
+      "description": "Run `pnpm prisma migrate dev --name add_engage_tables`. Verify the migration SQL creates all tables with correct indexes. Verify `pnpm prisma generate` succeeds.",
+      "status": "completed",
+      "tdd": "Migration file created; `pnpm prisma db push` succeeds on test DB; all 8 tables exist in schema",
+      "files": [
+        "libraries/nestjs-libraries/src/database/prisma/migrations/"
+      ]
+    },
+    {
+      "id": "T2.1",
+      "feature": "engage-f2-core-api",
+      "title": "Scaffold EngageModule, EngageService, EngageRepository",
+      "description": "Create the NestJS module structure: engage.module.ts (imports DatabaseModule + PostsModule), engage.service.ts (Injectable), engage.repository.ts. Register EngageModule in app.module.ts.",
+      "status": "completed",
+      "tdd": "Module bootstraps without errors; `pnpm build` passes; EngageModule appears in app module graph",
+      "files": [
+        "apps/backend/src/engage/engage.module.ts",
+        "libraries/nestjs-libraries/src/engage/engage.service.ts",
+        "libraries/nestjs-libraries/src/engage/engage.repository.ts",
+        "apps/backend/src/app.module.ts"
+      ]
+    },
+    {
+      "id": "T2.2",
+      "feature": "engage-f2-core-api",
+      "title": "Implement all Engage DTOs",
+      "description": "Create engage.dto.ts with all DTO classes: GenerateDraftDto, SendReplyDto, ScheduleReplyDto, ConfirmManualReplyDto, ListOpportunitiesDto, ListSentDto, SentStatsResult, ScoreStatsDto, ScoreStatsResult, AddTrackedAccountDto, UpdateTrackedAccountDto, AddMonitoredChannelDto, UpdateMonitoredChannelDto, SearchChannelsDto, UpdateReplyAccountDto. Apply class-validator decorators.",
+      "status": "completed",
+      "tdd": "DTO validation tests: valid payloads pass, invalid payloads (missing required fields) throw ValidationError",
+      "files": [
+        "libraries/nestjs-libraries/src/engage/dtos/engage.dto.ts"
+      ]
+    },
+    {
+      "id": "T2.3",
+      "feature": "engage-f2-core-api",
+      "title": "Implement EngageConfig CRUD (getConfig, saveConfig, resetConfig)",
+      "description": "Service + repository methods: getOrCreateConfig(orgId), saveConfig(orgId, dto), resetConfig(orgId). Controller endpoints: GET /config, POST /config, POST /config/reset.",
+      "status": "completed",
+      "tdd": "Unit test: getConfig for new org creates default EngageConfig with setupCompleted=false; saveConfig updates fields; resetConfig sets setupCompleted=false",
+      "files": [
+        "libraries/nestjs-libraries/src/engage/engage.service.ts",
+        "libraries/nestjs-libraries/src/engage/engage.repository.ts",
+        "apps/backend/src/api/routes/engage.controller.ts"
+      ]
+    },
+    {
+      "id": "T2.4",
+      "feature": "engage-f2-core-api",
+      "title": "Implement Keywords CRUD (add, update, delete, list)",
+      "description": "Service + repository methods for EngageKeyword: addKeyword, updateKeyword, deleteKeyword. Controller: POST /keywords, PATCH /keywords/:id, DELETE /keywords/:id. Enforce @@unique([configId, keyword]).",
+      "status": "completed",
+      "tdd": "Unit test: adding duplicate keyword throws unique constraint error; deleting non-existent keyword throws 404; type defaults to 'CORE'",
+      "files": [
+        "libraries/nestjs-libraries/src/engage/engage.service.ts",
+        "libraries/nestjs-libraries/src/engage/engage.repository.ts",
+        "apps/backend/src/api/routes/engage.controller.ts"
+      ]
+    },
+    {
+      "id": "T2.5",
+      "feature": "engage-f2-core-api",
+      "title": "Implement MonitoredChannels CRUD + search",
+      "description": "Service + repository for EngageMonitoredChannel: add, update (enabled/channelName), remove, list, searchChannels (platform-specific). Controller endpoints: GET/POST/PATCH/DELETE /monitored-channels, POST /monitored-channels/search.",
+      "status": "completed",
+      "tdd": "Unit test: adding same channelId+platform twice throws duplicate error; search returns results filtered by platform",
+      "files": [
+        "libraries/nestjs-libraries/src/engage/engage.service.ts",
+        "libraries/nestjs-libraries/src/engage/engage.repository.ts",
+        "apps/backend/src/api/routes/engage.controller.ts"
+      ]
+    },
+    {
+      "id": "T2.6",
+      "feature": "engage-f2-core-api",
+      "title": "Implement TrackedAccounts CRUD",
+      "description": "Service + repository for EngageTrackedAccount (external X accounts we monitor): add, update (enabled/categoryLabel), remove, list. Controller: GET/POST/PATCH/DELETE /tracked-accounts.",
+      "status": "completed",
+      "tdd": "Unit test: duplicate username+platform throws unique constraint; tracked accounts are NOT Integration accounts (no token field)",
+      "files": [
+        "libraries/nestjs-libraries/src/engage/engage.service.ts",
+        "libraries/nestjs-libraries/src/engage/engage.repository.ts",
+        "apps/backend/src/api/routes/engage.controller.ts"
+      ]
+    },
+    {
+      "id": "T2.7",
+      "feature": "engage-f2-core-api",
+      "title": "Implement ReplyAccounts management",
+      "description": "Service + repository for EngageXReplyAccount: getOrCreate per Integration, update (engageEnabled, autoReplyEnabled, timeStart, timeEnd, timezone). Controller: GET /reply-accounts (joins Integration), PATCH /reply-accounts/:integrationId.",
+      "status": "completed",
+      "tdd": "Unit test: listReplyAccounts returns Integration records with joined EngageXReplyAccount settings; update persists timezone and defaultStrategy",
+      "files": [
+        "libraries/nestjs-libraries/src/engage/engage.service.ts",
+        "libraries/nestjs-libraries/src/engage/engage.repository.ts",
+        "apps/backend/src/api/routes/engage.controller.ts"
+      ]
+    },
+    {
+      "id": "T3.1",
+      "feature": "engage-f3-discovery",
+      "title": "Implement engage-scorer.ts with 5-dimension ScoreBreakdown",
+      "description": "scorePost(post, keywords) → ScoredPost | null. Implements: Layer 1 keyword hard filter, Layer 2 computeBreakdown (keyword+heat+authority+recency+tracked). All 4 dimension scorers: computeKeywordScore, computeXHeatScore, computeCommunityHeatScore, computeXAuthorityScore, computeCommunityAuthorityScore.",
+      "status": "completed",
+      "tdd": "Unit tests: post with no keyword match returns null; X post with 2500 likes+replies gets heat=35; post from tracked account gets scoreTracked=5; total = sum of dimensions; null followers returns authority=3",
+      "files": [
+        "libraries/nestjs-libraries/src/engage/engage-scorer.ts"
+      ]
+    },
+    {
+      "id": "T3.2",
+      "feature": "engage-f3-discovery",
+      "title": "Implement EngageIntentClassifierService (local NLI + Haiku fallback)",
+      "description": "OnModuleInit loads Xenova/nli-deberta-v3-small (44MB). classify(text) returns {intentTags, primaryIntent, intentScore}. classifyBatch(posts, concurrency=4). classifyWithFallback: if intentScore < 0.45 falls back to Claude Haiku structured output. Create engage-intent.constants.ts with INTENT_LABELS and INTENT_DEFAULT_STRATEGY.",
+      "status": "completed",
+      "tdd": "Unit tests (mock classifier): multi-label output with confidence > 0.4 → multiple tags; single best label if none exceed threshold; fallback triggers when intentScore < 0.45",
+      "files": [
+        "libraries/nestjs-libraries/src/engage/engage-intent-classifier.service.ts",
+        "libraries/nestjs-libraries/src/engage/engage-intent.constants.ts"
+      ]
+    },
+    {
+      "id": "T3.3",
+      "feature": "engage-f3-discovery",
+      "title": "Implement engageScanWorkflow activities (scanX + scanReddit + persist + expire)",
+      "description": "Activities: scanXPlatform (uses OAuth 2.0 from first enabled EngageXReplyAccount; calls X /tweets/search/recent), scanMonitoredChannels (switch by platform; reddit calls /r/{channelId}/search.json, updates lastScannedAt), persistOpportunities (UPSERT — updates scores, preserves status/intentTags), expireStaleOpportunities (NEW → EXPIRED after TTL_DAYS), updateKeywordHitCounts, updateLastScanAt.",
+      "status": "completed",
+      "tdd": "Integration tests (mocked APIs): duplicate externalPostId upserts correctly; dismissed opportunity status NOT overwritten on rescan; expired opportunities have status=EXPIRED",
+      "files": [
+        "apps/orchestrator/src/workflows/engage-scan.workflow.ts"
+      ]
+    },
+    {
+      "id": "T3.4",
+      "feature": "engage-f3-discovery",
+      "title": "Implement engageTrackedAccountsWorkflow (every 3h)",
+      "description": "Separate Temporal workflow that polls tracked X accounts every 3h. Fetches new tweets since lastCheckedAt for each enabled EngageTrackedAccount, marks isFromTrackedAccount=true (applies +5 score bonus), runs through same score+classify+persist pipeline.",
+      "status": "completed",
+      "tdd": "Integration test: tweets from tracked accounts get scoreTracked=5; lastCheckedAt updated after poll",
+      "files": [
+        "apps/orchestrator/src/workflows/engage-tracked-accounts.workflow.ts"
+      ]
+    },
+    {
+      "id": "T3.5",
+      "feature": "engage-f3-discovery",
+      "title": "Add Opportunities endpoints to EngageController",
+      "description": "GET /opportunities (with ListOpportunitiesDto filtering: platform, status, intent GIN query, minScore, bookmarked, sortBy/sortOrder, pagination). PATCH /opportunities/:id/dismiss (status→DISMISSED). PATCH /opportunities/:id/bookmark (toggle bookmarked). GET /opportunities/score-stats (returns ScoreStatsResult with distribution, averages, top-by-dimension).",
+      "status": "completed",
+      "tdd": "API tests: filter by intent='help_seeking' returns only matching; sortBy='scoreHeat' returns heat-descending; score-stats distribution sums to 100%",
+      "files": [
+        "apps/backend/src/api/routes/engage.controller.ts",
+        "libraries/nestjs-libraries/src/engage/engage.service.ts",
+        "libraries/nestjs-libraries/src/engage/engage.repository.ts"
+      ]
+    },
+    {
+      "id": "T4.1",
+      "feature": "engage-f4-reply",
+      "title": "Modify XDto and CreatePostDto + postWorkflow to support reply_to_tweet_id",
+      "description": "Add @IsOptional() @IsString() reply_to_tweet_id to XDto. Add 'engage' to @IsIn() source enum in CreatePostDto. In postWorkflowV101 postSocial() activity: read xSettings.reply_to_tweet_id and set reply: { in_reply_to_tweet_id } on postDetails before calling XProvider.",
+      "status": "completed",
+      "tdd": "Unit test: CreatePostDto with source='engage' passes validation; XDto with reply_to_tweet_id='12345' passes validation; postSocial passes reply field to XProvider when reply_to_tweet_id present",
+      "files": [
+        "libraries/nestjs-libraries/src/dtos/posts/providers-settings/x.dto.ts",
+        "libraries/nestjs-libraries/src/dtos/posts/create.post.dto.ts",
+        "apps/orchestrator/src/workflows/post-workflows/post.workflow.v1.0.1.ts"
+      ]
+    },
+    {
+      "id": "T4.2",
+      "feature": "engage-f4-reply",
+      "title": "Implement EngageDraftService (Claude Sonnet SSE streaming)",
+      "description": "generateDraft(opportunity, strategy, brandStrength): AsyncGenerator<string>. buildSystemPrompt dynamically assembles from STRATEGY_PROMPTS + BRAND_PROMPTS + INTENT_PROMPTS (with 'discussion' fallback for unknown intent). Streaming via claude-sonnet-4-5, max_tokens=400. Add STRATEGY_PROMPTS, BRAND_PROMPTS, INTENT_PROMPTS as string-keyed Records.",
+      "status": "completed",
+      "tdd": "Unit tests: buildSystemPrompt includes correct strategy instruction; unknown intent falls back to discussion prompt; brand strength 0 includes 'Do not mention AISEE'; streaming yields text chunks",
+      "files": [
+        "libraries/nestjs-libraries/src/engage/engage-draft.service.ts"
+      ]
+    },
+    {
+      "id": "T4.3",
+      "feature": "engage-f4-reply",
+      "title": "Implement draft generation SSE endpoint",
+      "description": "POST /opportunities/:id/draft → SSE stream. Sets Content-Type: text/event-stream. Calls EngageDraftService.generateDraft(). Streams data: {text} events, ends with data: [DONE].",
+      "status": "completed",
+      "tdd": "Integration test: SSE response contains text chunks ending with [DONE]; unknown opportunity returns 404",
+      "files": [
+        "apps/backend/src/api/routes/engage.controller.ts"
+      ]
+    },
+    {
+      "id": "T4.4",
+      "feature": "engage-f4-reply",
+      "title": "Implement X send/schedule reply endpoints",
+      "description": "POST /opportunities/:id/reply: calls PostService.createPost({source:'engage', type:'now', settings:{__type:'x', reply_to_tweet_id, who_can_reply_post:'everyone'}}), atomically creates EngageSentReply, sets EngageOpportunity.status=REPLIED. POST /opportunities/:id/schedule: same with type:'schedule' and scheduledAt, sets status=SCHEDULED.",
+      "status": "completed",
+      "tdd": "Integration tests: sendReply creates Post with source='engage'; Post.settings contains __type='x' and reply_to_tweet_id; EngageSentReply.postId linked; opportunity status=REPLIED",
+      "files": [
+        "apps/backend/src/api/routes/engage.controller.ts",
+        "libraries/nestjs-libraries/src/engage/engage.service.ts"
+      ]
+    },
+    {
+      "id": "T4.5",
+      "feature": "engage-f4-reply",
+      "title": "Implement Reddit manual reply flow (2-step)",
+      "description": "POST /opportunities/:id/manual-reply (Step 1): creates Post(source='engage', state=PUBLISHED, no releaseURL) + EngageSentReply; opportunity.status=REPLIED. Record shows in Sent with 'no URL' warning. PATCH /sent/:id/reply-url (Step 2): validates Reddit URL regex, updates Post.releaseURL.",
+      "status": "completed",
+      "tdd": "Integration test: manual-reply creates Post with state=PUBLISHED and releaseURL=null; submit-url sets Post.releaseURL; invalid Reddit URL regex rejected with 400",
+      "files": [
+        "apps/backend/src/api/routes/engage.controller.ts",
+        "libraries/nestjs-libraries/src/engage/engage.service.ts"
+      ]
+    },
+    {
+      "id": "T4.6",
+      "feature": "engage-f4-reply",
+      "title": "Implement Sent list and stats endpoints",
+      "description": "GET /sent: queries EngageSentReply JOIN Post JOIN EngageOpportunity, supports ListSentDto filters (platform via Post.integration, status derived from Post.state, date range, pagination). GET /sent/stats: returns SentStatsResult (weeklyCount, responseRate, totalImpressions, avgLikes).",
+      "status": "completed",
+      "tdd": "Unit test: status filter 'manual' returns posts with Post.state=PUBLISHED and Post.releaseURL=null; weeklyCount counts only current week",
+      "files": [
+        "apps/backend/src/api/routes/engage.controller.ts",
+        "libraries/nestjs-libraries/src/engage/engage.service.ts",
+        "libraries/nestjs-libraries/src/engage/engage.repository.ts"
+      ]
+    },
+    {
+      "id": "T5.1",
+      "feature": "engage-f5-analytics",
+      "title": "Add source filter to DataTicks pipeline (isolate Engage from regular posts)",
+      "description": "Modify getPublishedPostsWithRelease() in dashboard.repository.ts to add WHERE source NOT IN ('engage'). This prevents Engage reply posts from polluting the existing DataTicks aggregation for regular published posts.",
+      "status": "completed",
+      "tdd": "Integration test: Post with source='engage' is NOT included in DataTicks sync; Post with source='calendar' IS included; existing DataTicks behavior unchanged",
+      "files": [
+        "libraries/nestjs-libraries/src/database/prisma/dashboard/dashboard.repository.ts"
+      ]
+    },
+    {
+      "id": "T5.2",
+      "feature": "engage-f5-analytics",
+      "title": "Implement engageDataTicksWorkflow (daily 01:00 aggregation)",
+      "description": "Fetches Post WHERE source='engage' AND state=PUBLISHED AND publishDate IN yesterday bucket. Aggregates by platform (x, reddit, all): count/impressions/trafficScore. Upserts into EngageDataTicks for each (platform × type) combination. Platform is derived from Post.integration.providerIdentifier ?? 'reddit'.",
+      "status": "completed",
+      "tdd": "Integration test: after workflow runs, EngageDataTicks has rows for 'x', 'reddit', 'all' platforms; SUM(impressions by platform) == total impressions; value is BigInt",
+      "files": [
+        "apps/orchestrator/src/workflows/engage-data-ticks.workflow.ts"
+      ]
+    },
+    {
+      "id": "T5.3",
+      "feature": "engage-f5-analytics",
+      "title": "Implement engageMetricsSyncWorkflow (authorReplied + Reddit metrics)",
+      "description": "Triggered per EngageSentReply after send; sleeps 24h. X path: checkXAuthorReplied (search conversation for original author reply) → markAuthorReplied if found. Reddit path: if Post.releaseURL set, fetchRedditCommentMetrics → write AnalyticsData[] to Post.analytics in existing format (label/data/percentageChange); set impressions = (score+comments)×20; trafficScore computed by traffic.calculator.ts.",
+      "status": "completed",
+      "tdd": "Unit test: checkXAuthorReplied returns true when author username appears in conversation; Reddit analytics written in AnalyticsData[] format; trafficScore NOT set manually (deferred to traffic.calculator)",
+      "files": [
+        "apps/orchestrator/src/workflows/engage-metrics-sync.workflow.ts"
+      ]
+    },
+    {
+      "id": "T5.4",
+      "feature": "engage-f5-analytics",
+      "title": "Add Engage dashboard stats endpoint",
+      "description": "Add GET /dashboard/engage-stats to dashboard.controller.ts. Service queries Post WHERE source='engage': weeklyCount, responseRate (authorReplied/total), totalImpressions (SUM Post.impressions), totalTrafficScore (SUM Post.trafficScore), byPlatform breakdown, bestReply (highest trafficScore this week), trafficByReply[] array for Traffic from Engage panel.",
+      "status": "completed",
+      "tdd": "Unit test: responseRate = authorReplied count / total × 100; trafficByReply ordered by trafficScore DESC; byPlatform includes x and reddit keys",
+      "files": [
+        "apps/backend/src/api/routes/dashboard.controller.ts",
+        "libraries/nestjs-libraries/src/database/prisma/dashboard/dashboard.service.ts"
+      ]
+    },
+    {
+      "id": "T6.1",
+      "feature": "engage-f6-feed",
+      "title": "Add Engage navigation item and route layout",
+      "description": "Add 'Engage' to firstMenu in top.menu.tsx (after Analytics). Create /engage/layout.tsx with tab navigation (Signal Feed | Sent | Settings). Create /engage/page.tsx skeleton. Check EngageConfig.setupCompleted; if false, show setup wizard instead of feed.",
+      "status": "completed",
+      "tdd": "E2E: navigating to /engage redirects to setup wizard if setupCompleted=false; shows Signal Feed if setupCompleted=true; tab navigation switches between Feed/Sent/Settings",
+      "files": [
+        "apps/frontend/src/components/layout/top.menu.tsx",
+        "apps/frontend/src/app/(app)/(site)/engage/layout.tsx",
+        "apps/frontend/src/app/(app)/(site)/engage/page.tsx"
+      ]
+    },
+    {
+      "id": "T6.2",
+      "feature": "engage-f6-feed",
+      "title": "Implement setup-wizard.tsx (one-time initial config)",
+      "description": "Two-column layout: keywords (left) + X accounts + channels (right). Keyword section with type badges (CORE/BRAND/COMPETITOR). X reply accounts from /reply-accounts. Monitored channels grid with platform badge + audienceSize. Bottom action bar with real-time summary and '🚀 开始抓取帖子' button. On submit: POST /config with setupCompleted=true, redirect to Signal Feed.",
+      "status": "completed",
+      "tdd": "Component test: submit button disabled when keyword count=0; real-time banner updates on keyword toggle; Reddit URL validation shown before submit",
+      "files": [
+        "apps/frontend/src/components/engage/setup-wizard/setup-wizard.tsx"
+      ]
+    },
+    {
+      "id": "T6.3",
+      "feature": "engage-f6-feed",
+      "title": "Implement opportunity-card.tsx and feed-filters.tsx",
+      "description": "opportunity-card.tsx: left border (black=X, orange=Reddit), platform badge, intent tags, score badge with color grade (85+=deep green, 70+=yellow-green, 60+=orange), author row, 2-line truncated body, keyword tags, engagement metrics, Generate Reply button, bookmark toggle, ⚡ Auto tag. feed-filters.tsx: platform, minScore (≥85/≥70/all), intent, status, date, bookmarked, sort controls.",
+      "status": "completed",
+      "tdd": "Component test: score 87 renders deep green badge; bookmarked card shows filled star; clicking card calls onSelect; ⚡ Auto tag visible only when auto-reply enabled",
+      "files": [
+        "apps/frontend/src/components/engage/signal-feed/opportunity-card.tsx",
+        "apps/frontend/src/components/engage/signal-feed/feed-filters.tsx"
+      ]
+    },
+    {
+      "id": "T6.4",
+      "feature": "engage-f6-feed",
+      "title": "Implement reply-panel.tsx with SSE draft streaming",
+      "description": "400px right-side drawer. Sections: original post preview (grey card), 3-strategy radio (EXPERT_ANSWER/DATA_BACKED/EMPATHY_LED), AI draft textarea with typewriter SSE streaming, brand-strength slider (0-3), account selector dropdown (EngageXReplyAccount engageEnabled=true only). X actions: Skip, Schedule (inline date picker), Send reply. Reddit actions: 3-step flow (Copy Draft → I Replied Manually → Submit URL). Character counter for X (≤280).",
+      "status": "completed",
+      "tdd": "Component test: strategy change triggers re-generation; character counter turns red at 280; Reddit URL input validates format; account selector shows only engageEnabled accounts (NOT EngageTrackedAccount)",
+      "files": [
+        "apps/frontend/src/components/engage/signal-feed/reply-panel.tsx"
+      ]
+    },
+    {
+      "id": "T7.1",
+      "feature": "engage-f7-settings",
+      "title": "Implement keyword-manager.tsx",
+      "description": "List all keywords with type badge (CORE default, BRAND green, COMPETITOR red), weeklyHitCount progress bar (relative to max), expand button for matched posts, enable/disable toggle, delete button. Add keyword input (Enter to confirm, auto-CORE). Competitor keywords default OFF.",
+      "status": "completed",
+      "tdd": "Component test: adding duplicate keyword shows error; progress bar width proportional to max hit count; competitor keyword badge is red",
+      "files": [
+        "apps/frontend/src/app/(app)/(site)/engage/settings/page.tsx",
+        "apps/frontend/src/components/engage/settings/keyword-manager.tsx"
+      ]
+    },
+    {
+      "id": "T7.2",
+      "feature": "engage-f7-settings",
+      "title": "Implement monitored-channel-manager.tsx",
+      "description": "2-column grid of EngageMonitoredChannel entries with platform badge + channel name + audienceSize + enabled toggle. '+ Add channel' opens search modal (platform selector + search). Delete button. Platform badge colors: Reddit=orange, YouTube=red, QQ=blue.",
+      "status": "completed",
+      "tdd": "Component test: toggle OFF shows disabled state; platform badge color matches platform; add channel search filters by selected platform",
+      "files": [
+        "apps/frontend/src/components/engage/settings/monitored-channel-manager.tsx"
+      ]
+    },
+    {
+      "id": "T7.3",
+      "feature": "engage-f7-settings",
+      "title": "Implement tracked-accounts.tsx and reply-accounts.tsx",
+      "description": "tracked-accounts.tsx: list EngageTrackedAccount (EXTERNAL accounts we monitor) with avatar initials, username, categoryLabel (editable), platform, enable toggle. reply-accounts.tsx: list EngageXReplyAccount (OUR OWN accounts) with Integration display, engageEnabled toggle, autoReplyEnabled toggle, time window inputs (start/end + timezone), defaultStrategy selector.",
+      "status": "completed",
+      "tdd": "Component test: tracked-accounts shows no token/OAuth fields; reply-accounts time window inputs disabled when autoReplyEnabled=false; timezone selector shows IANA zones",
+      "files": [
+        "apps/frontend/src/components/engage/settings/tracked-accounts.tsx",
+        "apps/frontend/src/components/engage/settings/reply-accounts.tsx"
+      ]
+    },
+    {
+      "id": "T8.1",
+      "feature": "engage-f8-sent",
+      "title": "Implement sent-list.tsx with top-4 stats and filters",
+      "description": "Page reads GET /engage/sent/stats for 4-cell header (weeklyCount, responseRate, totalImpressions, avgLikes). List reads GET /engage/sent with ListSentDto filters. Each row shows: original post snippet, reply text, platform badge, sent timestamp, Post.state badge, ⚠ warning if Reddit with no URL.",
+      "status": "completed",
+      "tdd": "Component test: MANUAL Reddit records (no URL) show ⚠ 未提交回复链接 badge; weeklyCount cell updates on filter change; ERROR state shows red badge",
+      "files": [
+        "apps/frontend/src/app/(app)/(site)/engage/sent/page.tsx",
+        "apps/frontend/src/components/engage/sent/sent-list.tsx"
+      ]
+    },
+    {
+      "id": "T8.2",
+      "feature": "engage-f8-sent",
+      "title": "Implement sent-card-x.tsx and sent-card-reddit.tsx",
+      "description": "sent-card-x.tsx: 5 metric cells from Post.analytics — 👁 impressions (blue), ♥ likes (red), 🔁 retweets (green), 💬 replies (olive), 🔖 bookmarks (purple). Shows authorReplied badge. sent-card-reddit.tsx: 3 cells — ↑ score (red), 💬 comments (olive), 👁 est.impressions (blue, labeled '估算'). '⚠ 未提交回复链接' warning if Post.releaseURL=null.",
+      "status": "completed",
+      "tdd": "Component test: Reddit estimated impressions shows '估算' label; X traffic index formula displayed; authorReplied=true shows author reply badge",
+      "files": [
+        "apps/frontend/src/components/engage/sent/sent-card-x.tsx",
+        "apps/frontend/src/components/engage/sent/sent-card-reddit.tsx"
+      ]
+    },
+    {
+      "id": "T9.1",
+      "feature": "engage-f9-integration",
+      "title": "Implement Engage Dashboard panels",
+      "description": "engage-performance-panel.tsx: lime-green border, '💬 Engage' badge, 4 stat cells (weeklyCount/responseRate/totalImpressions/totalTrafficScore), platform split (X N replies · Reddit N replies), best reply card, 'View all →' link to /engage/sent. traffic-from-engage-panel.tsx: list of trafficByReply with progress bars, 'Traffic from Engage' header.",
+      "status": "completed",
+      "tdd": "Component test: panel renders with lime border; 'View all →' href='/engage/sent'; progress bar width proportional to trafficTotal",
+      "files": [
+        "apps/frontend/src/components/engage/dashboard/engage-performance-panel.tsx",
+        "apps/frontend/src/components/engage/dashboard/traffic-from-engage-panel.tsx"
+      ]
+    },
+    {
+      "id": "T9.2",
+      "feature": "engage-f9-integration",
+      "title": "Modify Dashboard page to include Engage panels and chart overlay",
+      "description": "Add <EngagePerformancePanel> at top of dashboard content. Add lime-colored dataset to 'Your Posts' chart using EngageDataTicks WHERE type='replies' AND timeUnit='day'. Add <TrafficFromEngagePanel> in second row. Ensure DataTicks queries for existing charts exclude source='engage' (verified in T5.1).",
+      "status": "completed",
+      "tdd": "Component test: EngagePerformancePanel renders above existing panels; chart dataset includes lime series; TrafficFromEngagePanel appears in second row",
+      "files": [
+        "apps/frontend/src/app/(app)/(site)/dashboard/page.tsx"
+      ]
+    },
+    {
+      "id": "T9.3",
+      "feature": "engage-f9-integration",
+      "title": "Modify Calendar to show Engage events with color coding",
+      "description": "Add showEngage boolean state (default true) to calendar. Add source-based filter: when showEngage=false, exclude Post WHERE source='engage'. Color mapping: source='engage' AND state=PUBLISHED → amber (#FFF4D0/#D0A040, 💬 prefix); QUEUE → purple (#F0E8FF/#A070D0, 📅); ERROR → red (#FFE4E4/#D04040, ⚠️). Add 'Show Engage' toggle to toolbar. Add 'Engage' banner counter (amber dot) showing month total.",
+      "status": "completed",
+      "tdd": "Component test: 'Show Engage' toggle=false hides Engage events; amber color applied to PUBLISHED Engage posts; banner Engage counter matches POST count WHERE source='engage' this month",
+      "files": [
+        "apps/frontend/src/components/launches/calendar/"
+      ]
+    }
+  ],
+  "review": {
+    "date": "2026-05-21T00:04:09.041Z",
+    "rating": "needs_changes",
+    "merge_readiness": "fix_required",
+    "total_issues": 53,
+    "blockers": 3,
+    "criticals": 12,
+    "warnings": 26,
+    "suggestions": 12,
+    "health": {
+      "verdict": "inflated",
+      "finding_density": 0.9,
+      "critical_share": 0.283,
+      "auto_downgrade_share": 0,
+      "drop_share": 0.329,
+      "loc_reviewed": 5900,
+      "top_pre_downgrade": 15,
+      "top_post": 15,
+      "raw_findings_count": 79,
+      "auto_downgrades": {
+        "missing_evidence": 0,
+        "internal_trust_boundary": 0
+      },
+      "drops": {
+        "speculative_phrasing": 4,
+        "warning_no_observable_downside": 0,
+        "warning_unverified_claim": 2,
+        "suggestion_no_concrete_benefit": 0,
+        "suggestion_nitpick": 0,
+        "suggestion_over_budget": 0,
+        "suggestion_consolidated": 0,
+        "orphan_finding": 0,
+        "scratchpad_bypass": 0
+      }
+    }
+  },
+  "updated": "2026-05-21T00:04:09.042Z"
+}

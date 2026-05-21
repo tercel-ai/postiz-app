@@ -906,6 +906,10 @@ export class XProvider extends SocialAbstract implements SocialProvider {
           }
         : {}),
       ...(media_ids.length ? { media: { media_ids } } : {}),
+      // Engage replies: attach reply context when replying to a specific tweet
+      ...(firstPost?.settings?.reply_to_tweet_id
+        ? { reply: { in_reply_to_tweet_id: firstPost.settings.reply_to_tweet_id } }
+        : {}),
     };
     // Derived from originalMessage (not firstPost.message) so it stays correct even if a
     // branch above already mutated firstPost.message in URL-append mode.

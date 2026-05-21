@@ -1549,7 +1549,7 @@ export class PostsRepository {
     body: PostBody,
     tags: { value: string; label: string }[],
     inter?: number,
-    source?: 'calendar' | 'chat'
+    source?: 'calendar' | 'chat' | 'engage'
   ) {
     const posts: Post[] = [];
     // Reuse existing group when editing, new UUID only for fresh posts.

@@ -15,6 +15,8 @@ export class InfiniteWorkflowRegister implements OnModuleInit {
         { workflowId: 'missing-post-workflow', name: 'missingPostWorkflow' },
         { workflowId: 'data-ticks-sync-workflow', name: 'dataTicksSyncWorkflow' },
         { workflowId: 'refresh-workflow-recovery', name: 'refreshWorkflowRecoveryWorkflow' },
+        // Engage: daily aggregation of EngageDataTicks (all orgs, global singleton)
+        { workflowId: 'engage-data-ticks-workflow', name: 'engageDataTicksWorkflow' },
       ];
 
       for (const wf of infiniteWorkflows) {

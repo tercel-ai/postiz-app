@@ -666,6 +666,8 @@ export class IntegrationRepository {
         parentPostId: null,
         state: 'PUBLISHED',
         releaseId: { not: null },
+        // Exclude Engage reply posts — they are tracked separately via EngageDataTicks
+        source: { notIn: ['engage'] },
         publishDate: {
           gte: dayjs().subtract(sinceDays, 'day').toDate(),
         },

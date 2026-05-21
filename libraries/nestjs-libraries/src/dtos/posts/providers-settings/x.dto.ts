@@ -1,4 +1,4 @@
-import { IsIn, IsOptional, Matches } from 'class-validator';
+import { IsIn, IsOptional, IsString, Matches } from 'class-validator';
 
 export class XDto {
   @IsOptional()
@@ -13,6 +13,10 @@ export class XDto {
       'Invalid X community URL. It should be in the format: https://x.com/i/communities/1493446837214187523',
   })
   community?: string;
+
+  @IsOptional()
+  @IsString()
+  reply_to_tweet_id?: string;  // Engage only: tweet ID this reply targets
 
   @IsIn(['everyone', 'following', 'mentionedUsers', 'subscribers', 'verified'])
   who_can_reply_post:

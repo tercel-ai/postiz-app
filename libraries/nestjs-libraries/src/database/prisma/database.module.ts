@@ -50,6 +50,10 @@ import { DataTicksService } from '@gitroom/nestjs-libraries/database/prisma/data
 import { PostReleaseRepository } from '@gitroom/nestjs-libraries/database/prisma/post-releases/post-release.repository';
 import { PostReleaseService } from '@gitroom/nestjs-libraries/database/prisma/post-releases/post-release.service';
 import { PostOverageService } from '@gitroom/nestjs-libraries/database/prisma/posts/post-overage.service';
+import { EngageRepository } from '@gitroom/nestjs-libraries/engage/engage.repository';
+import { EngageService } from '@gitroom/nestjs-libraries/engage/engage.service';
+import { EngageIntentClassifierService } from '@gitroom/nestjs-libraries/engage/engage-intent-classifier.service';
+import { EngageDraftService } from '@gitroom/nestjs-libraries/engage/engage-draft.service';
 
 @Global()
 @Module({
@@ -109,6 +113,10 @@ import { PostOverageService } from '@gitroom/nestjs-libraries/database/prisma/po
     PostReleaseRepository,
     PostReleaseService,
     PostOverageService,
+    EngageRepository,
+    EngageService,
+    EngageIntentClassifierService,
+    EngageDraftService,
   ],
   get exports() {
     return this.providers;

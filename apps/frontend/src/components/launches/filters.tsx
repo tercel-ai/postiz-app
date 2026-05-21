@@ -319,6 +319,18 @@ export const Filters = () => {
           {t('month', 'Month')}
         </div>
       </div>
+      {/* Show Engage toggle */}
+      <button
+        onClick={() => calendar.setShowEngage(!calendar.showEngage)}
+        className={clsx(
+          'ml-2 text-[12px] px-[10px] h-[34px] rounded-[8px] border font-medium transition-colors',
+          calendar.showEngage
+            ? 'border-lime-500/50 text-lime-400 bg-lime-500/10'
+            : 'border-newTableBorder text-textColor opacity-60'
+        )}
+      >
+        💬 Engage
+      </button>
     </div>
   );
 };
