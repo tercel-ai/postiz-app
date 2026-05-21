@@ -223,6 +223,42 @@ describe('PostOverageService', () => {
   });
 
   // -------------------------------------------------------------------------
+  // Source attribution — the data.source field reflects the originating Post.source
+  // -------------------------------------------------------------------------
+
+  it('attributes the overage record to source="calendar" by default', async () => {
+    mocks.usersService.getUserLimits.mockResolvedValue({
+      postChannelLimit: 10,
+      postSendLimit: 5,
+      periodStart: '2026-03-01T00:00:00.000Z',
+      periodEnd: '2026-04-01T00:00:00.000Z',
+    });
+    mocks.postsRepository.countPostsFromDay.mockResolvedValue(6);
+
+    await service.deductIfOverage('org-1', 'user-1', 'post-cal');
+
+    expect(mocks.aiseeCreditService.deductAndConfirm).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { source: 'calendar' } }),
+    );
+  });
+
+  it('attributes the overage record to source="engage" for Engage replies', async () => {
+    mocks.usersService.getUserLimits.mockResolvedValue({
+      postChannelLimit: 10,
+      postSendLimit: 5,
+      periodStart: '2026-03-01T00:00:00.000Z',
+      periodEnd: '2026-04-01T00:00:00.000Z',
+    });
+    mocks.postsRepository.countPostsFromDay.mockResolvedValue(6);
+
+    await service.deductIfOverage('org-1', 'user-1', 'post-eng', 'engage');
+
+    expect(mocks.aiseeCreditService.deductAndConfirm).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { source: 'engage' } }),
+    );
+  });
+
+  // -------------------------------------------------------------------------
   // Idempotency — taskId is deterministic
   // -------------------------------------------------------------------------
 

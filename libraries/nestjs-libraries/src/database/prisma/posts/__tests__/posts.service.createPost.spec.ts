@@ -93,7 +93,7 @@ describe('PostsService.createPost — overage billing integration', () => {
   // userId provided → deductIfOverage called
   // -------------------------------------------------------------------------
 
-  it('calls deductIfOverage with orgId, userId, postId when userId is provided', async () => {
+  it('calls deductIfOverage with orgId, userId, postId, source when userId is provided', async () => {
     mocks.postRepository.createOrUpdatePost.mockResolvedValue({
       posts: [makePost('post-abc')],
     });
@@ -105,6 +105,22 @@ describe('PostsService.createPost — overage billing integration', () => {
       'org-1',
       'user-1',
       'post-abc',
+      'calendar',
+    );
+  });
+
+  it('forwards body.source="engage" to deductIfOverage for Engage replies', async () => {
+    mocks.postRepository.createOrUpdatePost.mockResolvedValue({
+      posts: [makePost('post-engage')],
+    });
+
+    await service.createPost('org-1', makeBody({ source: 'engage' } as any), 'user-1');
+
+    expect(mocks.postOverageService.deductIfOverage).toHaveBeenCalledWith(
+      'org-1',
+      'user-1',
+      'post-engage',
+      'engage',
     );
   });
 
@@ -125,9 +141,9 @@ describe('PostsService.createPost — overage billing integration', () => {
     await service.createPost('org-1', body, 'user-1');
 
     expect(mocks.postOverageService.deductIfOverage).toHaveBeenCalledTimes(3);
-    expect(mocks.postOverageService.deductIfOverage).toHaveBeenNthCalledWith(1, 'org-1', 'user-1', 'post-1');
-    expect(mocks.postOverageService.deductIfOverage).toHaveBeenNthCalledWith(2, 'org-1', 'user-1', 'post-2');
-    expect(mocks.postOverageService.deductIfOverage).toHaveBeenNthCalledWith(3, 'org-1', 'user-1', 'post-3');
+    expect(mocks.postOverageService.deductIfOverage).toHaveBeenNthCalledWith(1, 'org-1', 'user-1', 'post-1', 'calendar');
+    expect(mocks.postOverageService.deductIfOverage).toHaveBeenNthCalledWith(2, 'org-1', 'user-1', 'post-2', 'calendar');
+    expect(mocks.postOverageService.deductIfOverage).toHaveBeenNthCalledWith(3, 'org-1', 'user-1', 'post-3', 'calendar');
   });
 
   // -------------------------------------------------------------------------
@@ -208,7 +224,7 @@ describe('PostsService.createPost — overage billing integration', () => {
     await service.createPost('org-1', body, 'user-1');
 
     expect(mocks.postOverageService.deductIfOverage).toHaveBeenCalledWith(
-      'org-1', 'user-1', 'post-now',
+      'org-1', 'user-1', 'post-now', 'calendar',
     );
   });
 
@@ -221,7 +237,7 @@ describe('PostsService.createPost — overage billing integration', () => {
     await service.createPost('org-1', body, 'user-1');
 
     expect(mocks.postOverageService.deductIfOverage).toHaveBeenCalledWith(
-      'org-1', 'user-1', 'post-draft',
+      'org-1', 'user-1', 'post-draft', 'calendar',
     );
   });
 });

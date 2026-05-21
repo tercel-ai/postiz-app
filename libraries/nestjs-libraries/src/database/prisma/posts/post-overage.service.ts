@@ -40,9 +40,17 @@ export class PostOverageService implements OnModuleInit {
    * After a post is created, check if the user is over their monthly limit.
    * If so, deduct overageCost credits from their Aisee balance.
    * Fire-and-forget — does not block the response.
+   *
+   * `source` reflects the originating Post.source (e.g. 'calendar', 'chat',
+   * 'engage') so the overage record can be attributed correctly in audits.
    */
-  async deductIfOverage(orgId: string, userId: string, postId: string): Promise<void> {
-    const tag = `[overage orgId=${orgId} postId=${postId}]`;
+  async deductIfOverage(
+    orgId: string,
+    userId: string,
+    postId: string,
+    source: string = 'calendar'
+  ): Promise<void> {
+    const tag = `[overage orgId=${orgId} postId=${postId} source=${source}]`;
     try {
       const limits = await this._usersService.getUserLimits(userId);
 
@@ -76,7 +84,7 @@ export class PostOverageService implements OnModuleInit {
         businessType: AiseeBusinessType.POST_OVERAGE,
         description: `Post overage: ${count}/${limits.postSendLimit} posts used this period`,
         relatedId: postId,
-        data: { source: 'calendar' },
+        data: { source },
         costItems: [
           {
             type: 'text',

@@ -858,11 +858,15 @@ export class PostsService {
         });
       }
 
-      // Trigger overage deduction (fire-and-forget)
+      // Trigger overage deduction (fire-and-forget).
+      // Pass body.source so the overage record is attributed to the actual
+      // originator (calendar | chat | engage) instead of defaulting to 'calendar'.
       if (userId) {
-        this._postOverageService.deductIfOverage(orgId, userId, createdPostId).catch((err) => {
-          this.logger.error(`createPost: deductIfOverage failed for postId=${createdPostId}:`, err);
-        });
+        this._postOverageService
+          .deductIfOverage(orgId, userId, createdPostId, body.source ?? 'calendar')
+          .catch((err) => {
+            this.logger.error(`createPost: deductIfOverage failed for postId=${createdPostId}:`, err);
+          });
       } else {
         this.logger.warn(
           `createPost: skipping deductIfOverage for postId=${createdPostId} — no userId provided`
