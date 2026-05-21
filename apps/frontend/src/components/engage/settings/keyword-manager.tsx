@@ -28,6 +28,7 @@ export function KeywordManager() {
 
   const { data: config, mutate } = useSWR('/engage/config', async (url) => {
     const res = await fetch(url);
+    if (!res.ok) throw new Error(`engage/config returned ${res.status}`);
     return res.json();
   });
 
@@ -41,10 +42,14 @@ export function KeywordManager() {
     const kw = input.trim();
     if (!kw) return;
     try {
-      await fetch('/engage/keywords', {
+      const res = await fetch('/engage/keywords', {
         method: 'POST',
         body: JSON.stringify({ keyword: kw, type: inputType }),
       });
+      if (!res.ok) {
+        toaster.show('Failed to add keyword (may be duplicate)', 'warning');
+        return;
+      }
       setInput('');
       mutate();
     } catch {
@@ -55,10 +60,14 @@ export function KeywordManager() {
   const toggleKeyword = useCallback(
     async (kw: Keyword) => {
       try {
-        await fetch(`/engage/keywords/${kw.id}`, {
+        const res = await fetch(`/engage/keywords/${kw.id}`, {
           method: 'PATCH',
           body: JSON.stringify({ enabled: !kw.enabled }),
         });
+        if (!res.ok) {
+          toaster.show('Failed to update keyword', 'warning');
+          return;
+        }
         mutate();
       } catch {
         toaster.show('Failed to update keyword', 'warning');
@@ -70,7 +79,11 @@ export function KeywordManager() {
   const deleteKeyword = useCallback(
     async (id: string) => {
       try {
-        await fetch(`/engage/keywords/${id}`, { method: 'DELETE' });
+        const res = await fetch(`/engage/keywords/${id}`, { method: 'DELETE' });
+        if (!res.ok) {
+          toaster.show('Failed to delete keyword', 'warning');
+          return;
+        }
         mutate();
       } catch {
         toaster.show('Failed to delete keyword', 'warning');

@@ -20,6 +20,7 @@ export function TrackedAccounts() {
 
   const { data, mutate } = useSWR('/engage/tracked-accounts', async (url) => {
     const res = await fetch(url);
+    if (!res.ok) throw new Error(`engage/tracked-accounts returned ${res.status}`);
     return res.json() as Promise<TrackedAccount[]>;
   });
 
@@ -32,10 +33,14 @@ export function TrackedAccounts() {
     const u = username.replace('@', '').trim();
     if (!u) return;
     try {
-      await fetch('/engage/tracked-accounts', {
+      const res = await fetch('/engage/tracked-accounts', {
         method: 'POST',
         body: JSON.stringify({ username: u, categoryLabel: category || undefined }),
       });
+      if (!res.ok) {
+        toaster.show('Failed (may already exist)', 'warning');
+        return;
+      }
       setUsername('');
       setCategory('');
       mutate();
@@ -47,21 +52,37 @@ export function TrackedAccounts() {
 
   const removeAccount = useCallback(
     async (id: string) => {
-      await fetch(`/engage/tracked-accounts/${id}`, { method: 'DELETE' });
-      mutate();
+      try {
+        const res = await fetch(`/engage/tracked-accounts/${id}`, { method: 'DELETE' });
+        if (!res.ok) {
+          toaster.show('Failed to remove account', 'warning');
+          return;
+        }
+        mutate();
+      } catch {
+        toaster.show('Failed to remove account', 'warning');
+      }
     },
-    [fetch, mutate]
+    [fetch, mutate, toaster]
   );
 
   const toggleAccount = useCallback(
     async (acc: TrackedAccount) => {
-      await fetch(`/engage/tracked-accounts/${acc.id}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ enabled: !acc.enabled }),
-      });
-      mutate();
+      try {
+        const res = await fetch(`/engage/tracked-accounts/${acc.id}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ enabled: !acc.enabled }),
+        });
+        if (!res.ok) {
+          toaster.show('Failed to update account', 'warning');
+          return;
+        }
+        mutate();
+      } catch {
+        toaster.show('Failed to update account', 'warning');
+      }
     },
-    [fetch, mutate]
+    [fetch, mutate, toaster]
   );
 
   return (

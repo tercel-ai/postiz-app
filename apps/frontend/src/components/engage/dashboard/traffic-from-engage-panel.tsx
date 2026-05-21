@@ -15,6 +15,7 @@ export function TrafficFromEngagePanel() {
 
   const { data: stats } = useSWR('/engage/sent?limit=10', async (url) => {
     const res = await fetch(url);
+    if (!res.ok) throw new Error(`engage/sent returned ${res.status}`);
     const json = await res.json();
     return (json.items ?? []) as Array<{
       id: string;

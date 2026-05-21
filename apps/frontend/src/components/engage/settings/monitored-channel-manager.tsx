@@ -29,6 +29,7 @@ export function MonitoredChannelManager() {
 
   const { data, mutate } = useSWR('/engage/monitored-channels', async (url) => {
     const res = await fetch(url);
+    if (!res.ok) throw new Error(`engage/monitored-channels returned ${res.status}`);
     return res.json() as Promise<Channel[]>;
   });
 
@@ -55,6 +56,10 @@ export function MonitoredChannelManager() {
         method: 'POST',
         body: JSON.stringify({ platform: searchPlatform, query: searchQuery }),
       });
+      if (!res.ok) {
+        toaster.show('Search failed', 'warning');
+        return;
+      }
       const results = await res.json();
       setSearchResults(results);
     } catch {
@@ -67,10 +72,14 @@ export function MonitoredChannelManager() {
   const addChannel = useCallback(
     async (ch: { channelId: string; channelName: string; audienceSize: number; platform: string }) => {
       try {
-        await fetch('/engage/monitored-channels', {
+        const res = await fetch('/engage/monitored-channels', {
           method: 'POST',
           body: JSON.stringify(ch),
         });
+        if (!res.ok) {
+          toaster.show('Failed to add (may already exist)', 'warning');
+          return;
+        }
         mutate();
         setShowAdd(false);
         setSearchResults([]);
@@ -85,21 +94,37 @@ export function MonitoredChannelManager() {
 
   const toggleChannel = useCallback(
     async (ch: Channel) => {
-      await fetch(`/engage/monitored-channels/${ch.id}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ enabled: !ch.enabled }),
-      });
-      mutate();
+      try {
+        const res = await fetch(`/engage/monitored-channels/${ch.id}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ enabled: !ch.enabled }),
+        });
+        if (!res.ok) {
+          toaster.show('Failed to update channel', 'warning');
+          return;
+        }
+        mutate();
+      } catch {
+        toaster.show('Failed to update channel', 'warning');
+      }
     },
-    [fetch, mutate]
+    [fetch, mutate, toaster]
   );
 
   const removeChannel = useCallback(
     async (id: string) => {
-      await fetch(`/engage/monitored-channels/${id}`, { method: 'DELETE' });
-      mutate();
+      try {
+        const res = await fetch(`/engage/monitored-channels/${id}`, { method: 'DELETE' });
+        if (!res.ok) {
+          toaster.show('Failed to remove channel', 'warning');
+          return;
+        }
+        mutate();
+      } catch {
+        toaster.show('Failed to remove channel', 'warning');
+      }
     },
-    [fetch, mutate]
+    [fetch, mutate, toaster]
   );
 
   return (

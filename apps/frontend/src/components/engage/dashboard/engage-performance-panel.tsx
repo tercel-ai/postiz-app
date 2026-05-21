@@ -19,6 +19,7 @@ export function EngagePerformancePanel() {
     '/engage/dashboard-stats',
     async (url) => {
       const res = await fetch(url);
+      if (!res.ok) throw new Error(`engage/dashboard-stats returned ${res.status}`);
       return res.json() as Promise<EngageStats>;
     }
   );

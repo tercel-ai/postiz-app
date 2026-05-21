@@ -16,12 +16,24 @@ export function SignalFeed() {
 
   const { data: config } = useSWR('/engage/config', async (url) => {
     const res = await fetch(url);
+    if (!res.ok) throw new Error(`engage/config returned ${res.status}`);
     return res.json();
   });
 
   const { data: accounts } = useSWR('/engage/reply-accounts', async (url) => {
     const res = await fetch(url);
-    return res.json();
+    if (!res.ok) throw new Error(`engage/reply-accounts returned ${res.status}`);
+    return res.json() as Promise<
+      Array<{
+        id: string;
+        name: string;
+        picture?: string;
+        engageXReplyAccount?: {
+          engageEnabled: boolean;
+          defaultStrategy: string;
+        } | null;
+      }>
+    >;
   });
 
   const [filters, setFilters] = useState<FeedFilters>({
@@ -48,6 +60,7 @@ export function SignalFeed() {
     mutate,
   } = useSWR(`/engage/opportunities?${queryParams}`, async (url) => {
     const res = await fetch(url);
+    if (!res.ok) throw new Error(`engage/opportunities returned ${res.status}`);
     return res.json() as Promise<{
       items: Opportunity[];
       total: number;
@@ -59,7 +72,11 @@ export function SignalFeed() {
   const handleDismiss = useCallback(
     async (id: string) => {
       try {
-        await fetch(`/engage/opportunities/${id}/dismiss`, { method: 'PATCH' });
+        const res = await fetch(`/engage/opportunities/${id}/dismiss`, { method: 'PATCH' });
+        if (!res.ok) {
+          toaster.show('Failed to dismiss opportunity', 'warning');
+          return;
+        }
         mutate();
         if (selectedId === id) setSelectedId(null);
       } catch {
@@ -72,7 +89,11 @@ export function SignalFeed() {
   const handleBookmark = useCallback(
     async (id: string) => {
       try {
-        await fetch(`/engage/opportunities/${id}/bookmark`, { method: 'PATCH' });
+        const res = await fetch(`/engage/opportunities/${id}/bookmark`, { method: 'PATCH' });
+        if (!res.ok) {
+          toaster.show('Failed to update bookmark', 'warning');
+          return;
+        }
         mutate();
       } catch {
         toaster.show('Failed to update bookmark', 'warning');
@@ -174,6 +195,7 @@ export function SignalFeed() {
       {/* Reply panel */}
       {selectedOpp && (
         <ReplyPanel
+          key={selectedOpp.id}
           opportunity={selectedOpp}
           replyAccounts={accounts ?? []}
           onClose={() => setSelectedId(null)}

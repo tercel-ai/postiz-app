@@ -43,16 +43,24 @@ export function SetupWizard() {
     try {
       // Save only enabled keywords
       for (const kw of keywords.filter((k) => k.enabled)) {
-        await fetch('/engage/keywords', {
+        const res = await fetch('/engage/keywords', {
           method: 'POST',
           body: JSON.stringify({ keyword: kw.keyword, type: kw.type }),
         });
+        if (!res.ok) {
+          toaster.show(`Failed to add "${kw.keyword}" — setup aborted`, 'warning');
+          return;
+        }
       }
       // Mark setup complete
-      await fetch('/engage/config', {
+      const cfgRes = await fetch('/engage/config', {
         method: 'POST',
         body: JSON.stringify({ setupCompleted: true }),
       });
+      if (!cfgRes.ok) {
+        toaster.show('Setup save failed. Please try again.', 'warning');
+        return;
+      }
       toaster.show('Setup complete! Starting first scan...', 'success');
       router.push('/engage');
       router.refresh();

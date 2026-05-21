@@ -104,9 +104,13 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
         }
       }
     } catch (err: unknown) {
-      if ((err as Error).name !== 'AbortError') {
-        toaster.show('Failed to generate draft', 'warning');
+      const name = (err as Error)?.name;
+      if (name === 'AbortError') {
+        // user-initiated stop — keep partial draft visible without an error toast
+        return;
       }
+      // Network failure or unparseable stream — surface a concrete message
+      toaster.show('Generation interrupted — check your connection', 'warning');
     } finally {
       setStreaming(false);
     }
@@ -116,7 +120,7 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
     if (!draft || !selectedAccountId) return;
     setSending(true);
     try {
-      await fetch(`/engage/opportunities/${opportunity.id}/reply`, {
+      const res = await fetch(`/engage/opportunities/${opportunity.id}/reply`, {
         method: 'POST',
         body: JSON.stringify({
           integrationId: selectedAccountId,
@@ -125,6 +129,10 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
           brandStrength,
         }),
       });
+      if (!res.ok) {
+        toaster.show('Failed to send reply', 'warning');
+        return;
+      }
       toaster.show('Reply sent!', 'success');
       onSent();
     } catch {
@@ -139,7 +147,7 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
       if (!draft || !selectedAccountId) return;
       setSending(true);
       try {
-        await fetch(`/engage/opportunities/${opportunity.id}/schedule`, {
+        const res = await fetch(`/engage/opportunities/${opportunity.id}/schedule`, {
           method: 'POST',
           body: JSON.stringify({
             integrationId: selectedAccountId,
@@ -149,6 +157,10 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
             scheduledAt,
           }),
         });
+        if (!res.ok) {
+          toaster.show('Failed to schedule reply', 'warning');
+          return;
+        }
         toaster.show('Reply scheduled!', 'success');
         onSent();
       } catch {
@@ -171,7 +183,15 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
           body: JSON.stringify({ draftContent: draft, strategy, brandStrength }),
         }
       );
-      const data = await res.json();
+      if (!res.ok) {
+        toaster.show('Failed to record reply', 'warning');
+        return;
+      }
+      const data = (await res.json()) as { id?: string };
+      if (!data?.id) {
+        toaster.show('Server returned no reply id — please retry', 'warning');
+        return;
+      }
       setSentReplyId(data.id);
       setRedditStep('url');
     } catch {
@@ -185,14 +205,22 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
     if (!replyUrl) return;
     setSending(true);
     try {
-      await fetch(`/engage/sent/${sentReplyId}/reply-url`, {
+      const res = await fetch(`/engage/sent/${sentReplyId}/reply-url`, {
         method: 'PATCH',
         body: JSON.stringify({ url: replyUrl }),
       });
+      if (!res.ok) {
+        const message =
+          res.status === 400
+            ? 'Invalid Reddit URL'
+            : 'Failed to save URL — please retry';
+        toaster.show(message, 'warning');
+        return;
+      }
       toaster.show('Reply URL saved!', 'success');
       onSent();
     } catch {
-      toaster.show('Invalid Reddit URL', 'warning');
+      toaster.show('Failed to save URL — please retry', 'warning');
     } finally {
       setSending(false);
     }

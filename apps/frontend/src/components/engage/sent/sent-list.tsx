@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import useSWR from 'swr';
 import { useFetch } from '@gitroom/helpers/utils/custom.fetch';
 import { useToaster } from '@gitroom/react/toaster/toaster';
@@ -50,6 +50,7 @@ export function SentList() {
 
   const { data: stats } = useSWR('/engage/sent/stats', async (url) => {
     const res = await fetch(url);
+    if (!res.ok) throw new Error(`engage/sent/stats returned ${res.status}`);
     return res.json() as Promise<Stats>;
   });
 
@@ -64,6 +65,7 @@ export function SentList() {
     `/engage/sent?${queryParams}`,
     async (url) => {
       const res = await fetch(url);
+      if (!res.ok) throw new Error(`engage/sent returned ${res.status}`);
       return res.json() as Promise<{
         items: SentReply[];
         total: number;
@@ -76,21 +78,45 @@ export function SentList() {
   const submitUrl = useCallback(async () => {
     if (!urlSubmitId || !urlInput) return;
     try {
-      await fetch(`/engage/sent/${urlSubmitId}/reply-url`, {
+      const res = await fetch(`/engage/sent/${urlSubmitId}/reply-url`, {
         method: 'PATCH',
         body: JSON.stringify({ url: urlInput }),
       });
+      if (!res.ok) {
+        const message =
+          res.status === 400
+            ? 'Invalid Reddit URL'
+            : 'Failed to save URL — please retry';
+        toaster.show(message, 'warning');
+        return;
+      }
       toaster.show('URL saved', 'success');
       setUrlSubmitId(null);
       setUrlInput('');
       mutate();
     } catch {
-      toaster.show('Invalid Reddit URL', 'warning');
+      toaster.show('Failed to save URL — please retry', 'warning');
     }
   }, [urlSubmitId, urlInput, fetch, mutate, toaster]);
 
   const replies = data?.items ?? [];
   const total = data?.total ?? 0;
+
+  const closeModal = useCallback(() => {
+    setUrlSubmitId(null);
+    setUrlInput('');
+  }, []);
+
+  // Document-level Escape handler — backdrop click already closes, this adds
+  // keyboard parity for users who use the keyboard to interact with the modal.
+  useEffect(() => {
+    if (!urlSubmitId) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') closeModal();
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [urlSubmitId, closeModal]);
 
   return (
     <div className="p-6">
@@ -141,7 +167,7 @@ export function SentList() {
       {urlSubmitId && (
         <div
           className="fixed inset-0 bg-black/70 flex items-center justify-center z-50"
-          onClick={() => { setUrlSubmitId(null); setUrlInput(''); }}
+          onClick={closeModal}
         >
           <div
             role="dialog"
@@ -159,11 +185,14 @@ export function SentList() {
               placeholder="https://www.reddit.com/r/.../comments/.../comment/..."
               value={urlInput}
               onChange={(e) => setUrlInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && urlInput) submitUrl();
+              }}
               autoFocus
             />
             <div className="flex gap-2">
               <button
-                onClick={() => { setUrlSubmitId(null); setUrlInput(''); }}
+                onClick={closeModal}
                 className="flex-1 py-2 text-sm text-gray-400 border border-[#2d3748] rounded-lg"
               >
                 Cancel

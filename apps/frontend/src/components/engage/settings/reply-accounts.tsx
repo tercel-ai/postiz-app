@@ -1,9 +1,34 @@
 'use client';
 
-import { useCallback } from 'react';
+import { FC, useCallback, useEffect, useState } from 'react';
 import useSWR from 'swr';
 import { useFetch } from '@gitroom/helpers/utils/custom.fetch';
 import { useToaster } from '@gitroom/react/toaster/toaster';
+
+// Local-state time input — commits only on blur (or Enter) instead of firing a
+// PATCH per keystroke. Prevents PATCH-spam when the user clicks the time
+// spinner arrows.
+const DeferredTimeInput: FC<{
+  id: string;
+  value: string;
+  onCommit: (next: string) => void;
+}> = ({ id, value, onCommit }) => {
+  const [local, setLocal] = useState(value);
+  useEffect(() => { setLocal(value); }, [value]);
+  return (
+    <input
+      id={id}
+      type="time"
+      value={local}
+      onChange={(e) => setLocal(e.target.value)}
+      onBlur={() => { if (local !== value) onCommit(local); }}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+      }}
+      className="w-full bg-[#0f1219] border border-[#2d3748] text-white rounded px-2 py-1 text-sm"
+    />
+  );
+};
 
 const STRATEGIES = ['EXPERT_ANSWER', 'DATA_BACKED', 'EMPATHY_LED'];
 const TIMEZONES = [
@@ -37,16 +62,21 @@ export function ReplyAccounts() {
 
   const { data, mutate } = useSWR('/engage/reply-accounts', async (url) => {
     const res = await fetch(url);
+    if (!res.ok) throw new Error(`engage/reply-accounts returned ${res.status}`);
     return res.json() as Promise<Integration[]>;
   });
 
   const update = useCallback(
     async (integrationId: string, patch: Record<string, unknown>) => {
       try {
-        await fetch(`/engage/reply-accounts/${integrationId}`, {
+        const res = await fetch(`/engage/reply-accounts/${integrationId}`, {
           method: 'PATCH',
           body: JSON.stringify(patch),
         });
+        if (!res.ok) {
+          toaster.show('Failed to update settings', 'warning');
+          return;
+        }
         mutate();
       } catch {
         toaster.show('Failed to update settings', 'warning');
@@ -145,28 +175,24 @@ export function ReplyAccounts() {
                     <label htmlFor={`start-${acc.id}`} className="text-xs text-gray-500 block mb-1">
                       Start
                     </label>
-                    <input
+                    <DeferredTimeInput
                       id={`start-${acc.id}`}
-                      type="time"
                       value={settings.autoReplyTimeStart ?? '09:00'}
-                      onChange={(e) =>
-                        update(acc.id, { autoReplyTimeStart: e.target.value })
+                      onCommit={(next) =>
+                        update(acc.id, { autoReplyTimeStart: next })
                       }
-                      className="w-full bg-[#0f1219] border border-[#2d3748] text-white rounded px-2 py-1 text-sm"
                     />
                   </div>
                   <div>
                     <label htmlFor={`end-${acc.id}`} className="text-xs text-gray-500 block mb-1">
                       End
                     </label>
-                    <input
+                    <DeferredTimeInput
                       id={`end-${acc.id}`}
-                      type="time"
                       value={settings.autoReplyTimeEnd ?? '18:00'}
-                      onChange={(e) =>
-                        update(acc.id, { autoReplyTimeEnd: e.target.value })
+                      onCommit={(next) =>
+                        update(acc.id, { autoReplyTimeEnd: next })
                       }
-                      className="w-full bg-[#0f1219] border border-[#2d3748] text-white rounded px-2 py-1 text-sm"
                     />
                   </div>
                   <div>
