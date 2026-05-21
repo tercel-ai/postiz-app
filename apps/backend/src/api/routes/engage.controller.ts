@@ -4,6 +4,7 @@ import {
   Controller,
   Delete,
   Get,
+  InternalServerErrorException,
   Logger,
   Param,
   Patch,
@@ -277,15 +278,16 @@ export class EngageController {
     // Atomic claim: marks status=REPLIED iff currently NEW/AUTO_QUEUED. Loser of a
     // concurrent race throws NotFoundException here, BEFORE createPost — eliminates
     // duplicate X publishes and orphan Post rows.
-    const opportunity = await this._engageRepository.claimOpportunityForReply(
-      org.id,
-      id,
-      'REPLIED'
-    );
+    const { opp: opportunity, priorStatus } =
+      await this._engageRepository.claimOpportunityForReply(org.id, id, 'REPLIED');
 
+    // Phase 1 — invoke the post pipeline. type='now' BLOCKS until X publish completes,
+    // so a failure here means the reply either never made it to X or was rejected by X.
+    // Full rollback is safe in this window.
     let postId: string | undefined;
+    let created: Array<{ postId?: string }> | undefined;
     try {
-      const created = await this._postsService.createPost(
+      created = await this._postsService.createPost(
         org.id,
         {
           type: 'now',
@@ -308,10 +310,21 @@ export class EngageController {
         },
         user?.id
       );
-
-      postId = created?.[0]?.id;
+      // PostsService.createPost returns objects keyed `postId` (not `id`) —
+      // see libraries/nestjs-libraries/src/database/prisma/posts/posts.service.ts:847,855
+      postId = created?.[0]?.postId;
       if (!postId) throw new Error('Post creation failed');
+    } catch (err) {
+      // Pre-publish failure: roll back fully so the user can retry.
+      if (postId) await this._engageRepository.deletePostById(postId);
+      await this._engageRepository.releaseOpportunityClaim(org.id, id, priorStatus);
+      throw err;
+    }
 
+    // Phase 2 — at this point the X reply IS LIVE on twitter.com. We MUST NOT roll back
+    // the claim or delete the Post: doing so would let the user retry and produce a
+    // duplicate live reply. Instead, log the inconsistency and return a specific error.
+    try {
       const sentReply = await this._engageRepository.createSentReply({
         organizationId: org.id,
         opportunityId: id,
@@ -319,15 +332,19 @@ export class EngageController {
         strategy: body.strategy,
         brandStrength: body.brandStrength,
       });
-
-      // Start 24h metrics sync workflow (best-effort; failure logged but not thrown)
+      // 24h metrics sync — best-effort; the inner method swallows + logs on failure.
       await this._engageService.startMetricsSyncForReply(sentReply.id);
       return sentReply;
     } catch (err) {
-      // Roll back the claim + orphan Post so the user can retry
-      if (postId) await this._engageRepository.deletePostById(postId);
-      await this._engageRepository.releaseOpportunityClaim(org.id, id);
-      throw err;
+      this.logger.error(
+        `sendReply: X reply published (postId=${postId}, opportunityId=${id}, orgId=${org.id}) ` +
+          `but failed to record EngageSentReply. Manual reconciliation required.`,
+        err instanceof Error ? err.stack : err
+      );
+      throw new InternalServerErrorException(
+        'Reply was published but the tracking record could not be created. ' +
+          'Contact support to reconcile.'
+      );
     }
   }
 
@@ -342,12 +359,11 @@ export class EngageController {
       throw new BadRequestException('scheduledAt must be a future date');
     }
 
-    const opportunity = await this._engageRepository.claimOpportunityForReply(
-      org.id,
-      id,
-      'SCHEDULED'
-    );
+    const { opp: opportunity, priorStatus } =
+      await this._engageRepository.claimOpportunityForReply(org.id, id, 'SCHEDULED');
 
+    // Scheduled posts are not published until their scheduled time — full rollback
+    // on any failure is safe.
     let postId: string | undefined;
     try {
       const created = await this._postsService.createPost(
@@ -374,7 +390,9 @@ export class EngageController {
         user?.id
       );
 
-      postId = created?.[0]?.id;
+      // PostsService.createPost returns objects keyed `postId` (not `id`) —
+      // see libraries/nestjs-libraries/src/database/prisma/posts/posts.service.ts:847,855
+      postId = created?.[0]?.postId;
       if (!postId) throw new Error('Post creation failed');
 
       const sentReply = await this._engageRepository.createSentReply({
@@ -391,7 +409,7 @@ export class EngageController {
       return sentReply;
     } catch (err) {
       if (postId) await this._engageRepository.deletePostById(postId);
-      await this._engageRepository.releaseOpportunityClaim(org.id, id);
+      await this._engageRepository.releaseOpportunityClaim(org.id, id, priorStatus);
       throw err;
     }
   }
@@ -407,35 +425,50 @@ export class EngageController {
   ) {
     void user;
     // Atomic claim — same race guard as sendReply / scheduleReply
-    await this._engageRepository.claimOpportunityForReply(org.id, id, 'REPLIED');
+    const { priorStatus } =
+      await this._engageRepository.claimOpportunityForReply(org.id, id, 'REPLIED');
 
+    // Phase 1 — record the Post locally. The user has already manually posted on
+    // Reddit, but we haven't yet stored anything on our side, so a failure here can
+    // be safely rolled back (they just won't see the metric tracking until they retry).
     let postId: string | undefined;
     try {
-      // Step 1: create Post(PUBLISHED, no releaseURL) + EngageSentReply immediately.
-      // User has already posted to Reddit manually; we record it here for metrics tracking.
-      // Post.releaseURL remains null until Step 2 (PATCH /sent/:id/reply-url).
       const post = await this._engageRepository.createManualRedditPost({
         organizationId: org.id,
         content: body.draftContent,
         date: new Date(),
       });
       postId = post.id;
+    } catch (err) {
+      await this._engageRepository.releaseOpportunityClaim(org.id, id, priorStatus);
+      throw err;
+    }
 
+    // Phase 2 — at this point the user's Reddit reply has happened AND we have a
+    // local Post record. Do not roll back the claim (the user can't un-post on
+    // Reddit, and clearing REPLIED would invite a confusing retry). Log + surface
+    // a specific error if SentReply creation fails.
+    try {
       const sentReply = await this._engageRepository.createSentReply({
         organizationId: org.id,
         opportunityId: id,
-        postId: post.id,
+        postId,
         strategy: body.strategy,
         brandStrength: body.brandStrength,
       });
-
       // Start metrics sync — Reddit path: waits for user to submit URL then checks for author reply
       await this._engageService.startMetricsSyncForReply(sentReply.id);
       return sentReply;
     } catch (err) {
-      if (postId) await this._engageRepository.deletePostById(postId);
-      await this._engageRepository.releaseOpportunityClaim(org.id, id);
-      throw err;
+      this.logger.error(
+        `confirmManualReply: Reddit reply recorded (postId=${postId}, opportunityId=${id}, ` +
+          `orgId=${org.id}) but failed to record EngageSentReply. Manual reconciliation required.`,
+        err instanceof Error ? err.stack : err
+      );
+      throw new InternalServerErrorException(
+        'Reply was recorded but the tracking record could not be created. ' +
+          'Contact support to reconcile.'
+      );
     }
   }
 

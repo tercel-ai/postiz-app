@@ -401,36 +401,56 @@ export class EngageRepository {
   // Atomic claim — only one concurrent caller succeeds. Prevents the orphan-Post + duplicate-X-reply
   // race where two concurrent reply attempts both pass a non-locking findFirst then both invoke
   // PostsService.createPost.
+  //
+  // Returns the opportunity plus the `priorStatus` (NEW | AUTO_QUEUED) so the caller can restore
+  // the original status on rollback — preventing the loss of AUTO_QUEUED markers when the
+  // auto-reply worker had pre-queued the opportunity.
   async claimOpportunityForReply(
     organizationId: string,
     id: string,
     claimStatus: 'REPLIED' | 'SCHEDULED'
   ) {
-    const result = await this._opportunity.model.engageOpportunity.updateMany({
+    // Read prior status (snapshot for rollback). The followup updateMany is conditional
+    // on this exact status — if a concurrent claimer flipped it between the read and
+    // the update, the conditional update yields count=0 and we throw.
+    const existing = await this._opportunity.model.engageOpportunity.findFirst({
       where: {
         id,
         organizationId,
         status: { in: ['NEW', 'AUTO_QUEUED'] },
       },
+      select: { status: true },
+    });
+    if (!existing) {
+      throw new NotFoundException('Opportunity not found or already replied');
+    }
+    const priorStatus = existing.status as 'NEW' | 'AUTO_QUEUED';
+
+    const result = await this._opportunity.model.engageOpportunity.updateMany({
+      where: { id, organizationId, status: priorStatus },
       data: { status: claimStatus },
     });
     if (result.count === 0) {
-      throw new NotFoundException('Opportunity not found or already replied');
+      throw new NotFoundException('Opportunity already claimed by another request');
     }
     const opp = await this._opportunity.model.engageOpportunity.findUnique({
       where: { id },
     });
     if (!opp) throw new NotFoundException('Opportunity not found');
-    return opp;
+    return { opp, priorStatus };
   }
 
-  // Rollback helper — restores an opportunity to NEW after a failed post-claim operation
-  // (e.g., PostsService.createPost throws). Best-effort; never throws.
-  async releaseOpportunityClaim(organizationId: string, id: string) {
+  // Rollback helper — restores an opportunity to its prior status after a failed
+  // post-claim operation. Best-effort; never throws.
+  async releaseOpportunityClaim(
+    organizationId: string,
+    id: string,
+    priorStatus: 'NEW' | 'AUTO_QUEUED' = 'NEW'
+  ) {
     try {
       await this._opportunity.model.engageOpportunity.updateMany({
         where: { id, organizationId },
-        data: { status: 'NEW' },
+        data: { status: priorStatus },
       });
     } catch {
       // swallow — caller is already handling an error
