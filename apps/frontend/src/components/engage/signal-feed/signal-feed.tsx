@@ -14,7 +14,7 @@ export function SignalFeed() {
 
   const toaster = useToaster();
 
-  const { data: config } = useSWR('/engage/config', async (url) => {
+  const { data: config, error: configError } = useSWR('/engage/config', async (url) => {
     const res = await fetch(url);
     if (!res.ok) throw new Error(`engage/config returned ${res.status}`);
     return res.json();
@@ -57,6 +57,7 @@ export function SignalFeed() {
 
   const {
     data,
+    error: feedError,
     mutate,
   } = useSWR(`/engage/opportunities?${queryParams}`, async (url) => {
     const res = await fetch(url);
@@ -107,6 +108,17 @@ export function SignalFeed() {
     setSelectedId(null);
   }, [mutate]);
 
+  if (configError) {
+    return (
+      <div className="flex flex-col items-center justify-center h-48 text-sm">
+        <p className="text-red-400 mb-1">Failed to load Engage configuration.</p>
+        <p className="text-gray-500 text-xs">
+          Check your connection and refresh the page.
+        </p>
+      </div>
+    );
+  }
+
   if (!config) {
     return (
       <div className="flex items-center justify-center h-48 text-gray-500 text-sm">
@@ -146,7 +158,18 @@ export function SignalFeed() {
         )}
 
         <div className="flex-1 overflow-y-auto p-4 space-y-3">
-          {opportunities.length === 0 ? (
+          {feedError ? (
+            <div className="text-center py-16">
+              <p className="text-4xl mb-3">⚠️</p>
+              <p className="text-sm text-red-400">Failed to load opportunities.</p>
+              <button
+                onClick={() => mutate()}
+                className="text-xs mt-2 text-blue-400 hover:text-blue-300"
+              >
+                Retry
+              </button>
+            </div>
+          ) : opportunities.length === 0 ? (
             <div className="text-center py-16 text-gray-500">
               <p className="text-4xl mb-3">🔍</p>
               <p className="text-sm">No opportunities yet.</p>

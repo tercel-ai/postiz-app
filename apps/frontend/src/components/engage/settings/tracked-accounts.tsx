@@ -18,7 +18,7 @@ export function TrackedAccounts() {
   const fetch = useFetch();
   const toaster = useToaster();
 
-  const { data, mutate } = useSWR('/engage/tracked-accounts', async (url) => {
+  const { data, error, mutate } = useSWR('/engage/tracked-accounts', async (url) => {
     const res = await fetch(url);
     if (!res.ok) throw new Error(`engage/tracked-accounts returned ${res.status}`);
     return res.json() as Promise<TrackedAccount[]>;
@@ -87,6 +87,17 @@ export function TrackedAccounts() {
 
   return (
     <div>
+      {error && (
+        <div className="mb-4 p-3 bg-red-500/10 border border-red-500/30 rounded-lg flex items-center justify-between">
+          <p className="text-sm text-red-400">Failed to load tracked accounts.</p>
+          <button
+            onClick={() => mutate()}
+            className="text-xs text-blue-400 hover:text-blue-300"
+          >
+            Retry
+          </button>
+        </div>
+      )}
       <p className="text-sm text-gray-400 mb-4">
         External X accounts to monitor for new posts. Posts from these accounts
         receive a +5 score bonus and appear in your Signal Feed.

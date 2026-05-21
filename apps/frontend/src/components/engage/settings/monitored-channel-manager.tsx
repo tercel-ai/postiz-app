@@ -27,7 +27,7 @@ export function MonitoredChannelManager() {
   const fetch = useFetch();
   const toaster = useToaster();
 
-  const { data, mutate } = useSWR('/engage/monitored-channels', async (url) => {
+  const { data, error, mutate } = useSWR('/engage/monitored-channels', async (url) => {
     const res = await fetch(url);
     if (!res.ok) throw new Error(`engage/monitored-channels returned ${res.status}`);
     return res.json() as Promise<Channel[]>;
@@ -129,6 +129,17 @@ export function MonitoredChannelManager() {
 
   return (
     <div>
+      {error && (
+        <div className="mb-4 p-3 bg-red-500/10 border border-red-500/30 rounded-lg flex items-center justify-between">
+          <p className="text-sm text-red-400">Failed to load monitored channels.</p>
+          <button
+            onClick={() => mutate()}
+            className="text-xs text-blue-400 hover:text-blue-300"
+          >
+            Retry
+          </button>
+        </div>
+      )}
       <div className="flex justify-between items-center mb-4">
         <p className="text-sm text-gray-400">
           Subscribe to communities like r/SEO, YouTube channels, or QQ groups.

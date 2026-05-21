@@ -26,7 +26,7 @@ export function KeywordManager() {
   const fetch = useFetch();
   const toaster = useToaster();
 
-  const { data: config, mutate } = useSWR('/engage/config', async (url) => {
+  const { data: config, error, mutate } = useSWR('/engage/config', async (url) => {
     const res = await fetch(url);
     if (!res.ok) throw new Error(`engage/config returned ${res.status}`);
     return res.json();
@@ -94,6 +94,17 @@ export function KeywordManager() {
 
   return (
     <div>
+      {error && (
+        <div className="mb-4 p-3 bg-red-500/10 border border-red-500/30 rounded-lg flex items-center justify-between">
+          <p className="text-sm text-red-400">Failed to load keywords.</p>
+          <button
+            onClick={() => mutate()}
+            className="text-xs text-blue-400 hover:text-blue-300"
+          >
+            Retry
+          </button>
+        </div>
+      )}
       <div className="flex gap-2 mb-4">
         <input
           type="text"

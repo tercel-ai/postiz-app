@@ -1,6 +1,6 @@
 'use client';
 
-import { FC, useCallback, useEffect, useState } from 'react';
+import { FC, useCallback, useEffect, useRef, useState } from 'react';
 import useSWR from 'swr';
 import { useFetch } from '@gitroom/helpers/utils/custom.fetch';
 import { useToaster } from '@gitroom/react/toaster/toaster';
@@ -8,20 +8,32 @@ import { useToaster } from '@gitroom/react/toaster/toaster';
 // Local-state time input — commits only on blur (or Enter) instead of firing a
 // PATCH per keystroke. Prevents PATCH-spam when the user clicks the time
 // spinner arrows.
+//
+// Focus-aware sync: when an unrelated SWR refetch returns a new settings object
+// (e.g. user toggled timezone for the same account), the `value` prop changes.
+// Without the focus guard, we'd overwrite the user's in-progress edits. The ref
+// tracks focus so the effect only resyncs when the user is NOT typing.
 const DeferredTimeInput: FC<{
   id: string;
   value: string;
   onCommit: (next: string) => void;
 }> = ({ id, value, onCommit }) => {
   const [local, setLocal] = useState(value);
-  useEffect(() => { setLocal(value); }, [value]);
+  const focusedRef = useRef(false);
+  useEffect(() => {
+    if (!focusedRef.current) setLocal(value);
+  }, [value]);
   return (
     <input
       id={id}
       type="time"
       value={local}
       onChange={(e) => setLocal(e.target.value)}
-      onBlur={() => { if (local !== value) onCommit(local); }}
+      onFocus={() => { focusedRef.current = true; }}
+      onBlur={() => {
+        focusedRef.current = false;
+        if (local !== value) onCommit(local);
+      }}
       onKeyDown={(e) => {
         if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
       }}
@@ -60,7 +72,7 @@ export function ReplyAccounts() {
   const fetch = useFetch();
   const toaster = useToaster();
 
-  const { data, mutate } = useSWR('/engage/reply-accounts', async (url) => {
+  const { data, error, mutate } = useSWR('/engage/reply-accounts', async (url) => {
     const res = await fetch(url);
     if (!res.ok) throw new Error(`engage/reply-accounts returned ${res.status}`);
     return res.json() as Promise<Integration[]>;
@@ -86,6 +98,20 @@ export function ReplyAccounts() {
   );
 
   const accounts = data ?? [];
+
+  if (error) {
+    return (
+      <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg flex items-center justify-between">
+        <p className="text-sm text-red-400">Failed to load reply accounts.</p>
+        <button
+          onClick={() => mutate()}
+          className="text-xs text-blue-400 hover:text-blue-300"
+        >
+          Retry
+        </button>
+      </div>
+    );
+  }
 
   if (accounts.length === 0) {
     return (
