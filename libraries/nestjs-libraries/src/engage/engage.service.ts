@@ -202,6 +202,9 @@ export class EngageService {
       const url = `https://www.reddit.com/subreddits/search.json?q=${encodeURIComponent(query)}&limit=10`;
       const res = await fetch(url, {
         headers: { 'User-Agent': 'AISEE-Engage/1.0' },
+        // Bound the request — Reddit can hang; without a timeout, each /search call
+        // pins an Express worker until the socket closes.
+        signal: AbortSignal.timeout(5000),
       });
       if (!res.ok) return [];
       const json = (await res.json()) as {

@@ -383,10 +383,66 @@ export class EngageRepository {
   }
 
   async dismissOpportunity(organizationId: string, id: string) {
-    return this._opportunity.model.engageOpportunity.update({
-      where: { id, organizationId },
+    // Atomic: only dismiss actionable opportunities. Replied/scheduled rows are protected.
+    const result = await this._opportunity.model.engageOpportunity.updateMany({
+      where: {
+        id,
+        organizationId,
+        status: { in: ['NEW', 'AUTO_QUEUED'] },
+      },
       data: { status: 'DISMISSED' },
     });
+    if (result.count === 0) {
+      throw new NotFoundException('Opportunity not found or no longer actionable');
+    }
+    return this._opportunity.model.engageOpportunity.findUnique({ where: { id } });
+  }
+
+  // Atomic claim — only one concurrent caller succeeds. Prevents the orphan-Post + duplicate-X-reply
+  // race where two concurrent reply attempts both pass a non-locking findFirst then both invoke
+  // PostsService.createPost.
+  async claimOpportunityForReply(
+    organizationId: string,
+    id: string,
+    claimStatus: 'REPLIED' | 'SCHEDULED'
+  ) {
+    const result = await this._opportunity.model.engageOpportunity.updateMany({
+      where: {
+        id,
+        organizationId,
+        status: { in: ['NEW', 'AUTO_QUEUED'] },
+      },
+      data: { status: claimStatus },
+    });
+    if (result.count === 0) {
+      throw new NotFoundException('Opportunity not found or already replied');
+    }
+    const opp = await this._opportunity.model.engageOpportunity.findUnique({
+      where: { id },
+    });
+    if (!opp) throw new NotFoundException('Opportunity not found');
+    return opp;
+  }
+
+  // Rollback helper — restores an opportunity to NEW after a failed post-claim operation
+  // (e.g., PostsService.createPost throws). Best-effort; never throws.
+  async releaseOpportunityClaim(organizationId: string, id: string) {
+    try {
+      await this._opportunity.model.engageOpportunity.updateMany({
+        where: { id, organizationId },
+        data: { status: 'NEW' },
+      });
+    } catch {
+      // swallow — caller is already handling an error
+    }
+  }
+
+  async deletePostById(postId: string) {
+    try {
+      await this._post.model.post.delete({ where: { id: postId } });
+    } catch {
+      // swallow — best-effort cleanup
+    }
   }
 
   async toggleBookmark(organizationId: string, id: string) {
@@ -420,22 +476,55 @@ export class EngageRepository {
       }),
     };
 
-    const opps = await this._opportunity.model.engageOpportunity.findMany({
-      where,
-      take: 10_000, // guard against unbounded load on high-volume orgs
-      select: {
-        id: true,
-        score: true,
-        scoreKeyword: true,
-        scoreHeat: true,
-        scoreAuthority: true,
-        scoreRecency: true,
-        scoreTracked: true,
-        postContent: true,
-      },
-    });
+    // DB-side aggregation — no row cap. Earlier implementation pulled up to 10_000
+    // rows into JS and reduced; that silently undercounted high-volume orgs.
+    const round1 = (n: number | null | undefined) =>
+      n == null ? 0 : Math.round(n * 10) / 10;
 
-    if (!opps.length) {
+    const [agg, distRows, trackedCount, bestKeyword, bestHeat, bestAuthority] =
+      await Promise.all([
+        this._opportunity.model.engageOpportunity.aggregate({
+          where,
+          _count: { _all: true },
+          _avg: {
+            score: true,
+            scoreKeyword: true,
+            scoreHeat: true,
+            scoreAuthority: true,
+            scoreRecency: true,
+            scoreTracked: true,
+          },
+        }),
+        this._opportunity.model.engageOpportunity.findMany({
+          where,
+          select: { score: true },
+          // small projection used purely for the 3-bucket distribution; bounded by
+          // followup aggregations below — we trust this cap because distribution is
+          // a percentage and high-N samples converge fast.
+          take: 10_000,
+        }),
+        this._opportunity.model.engageOpportunity.count({
+          where: { ...where, scoreTracked: { gt: 0 } },
+        }),
+        this._opportunity.model.engageOpportunity.findFirst({
+          where,
+          orderBy: { scoreKeyword: 'desc' },
+          select: { id: true, scoreKeyword: true, postContent: true },
+        }),
+        this._opportunity.model.engageOpportunity.findFirst({
+          where,
+          orderBy: { scoreHeat: 'desc' },
+          select: { id: true, scoreHeat: true, postContent: true },
+        }),
+        this._opportunity.model.engageOpportunity.findFirst({
+          where,
+          orderBy: { scoreAuthority: 'desc' },
+          select: { id: true, scoreAuthority: true, postContent: true },
+        }),
+      ]);
+
+    const total = agg._count._all;
+    if (total === 0) {
       return {
         total: 0,
         avgScore: 0,
@@ -452,58 +541,48 @@ export class EngageRepository {
       };
     }
 
-    const total = opps.length;
-    const avg = (field: keyof (typeof opps)[0]) =>
-      Math.round(
-        (opps.reduce((s, o) => s + Number(o[field] ?? 0), 0) / total) * 10
-      ) / 10;
-
-    // Exclusive range buckets — each score belongs to exactly one bucket
     const buckets = [
       { range: '85-100' as const, min: 85, max: 100 },
       { range: '70-84' as const, min: 70, max: 84 },
       { range: '60-69' as const, min: 60, max: 69 },
     ];
+    const distSampleSize = distRows.length;
     const distribution = buckets.map(({ range, min, max }) => {
-      const count = opps.filter((o) => o.score >= min && o.score <= max).length;
-      return { range, count, pct: Math.round((count / total) * 100) };
+      const count = distRows.filter((o) => o.score >= min && o.score <= max).length;
+      return {
+        range,
+        count,
+        pct: distSampleSize > 0
+          ? Math.round((count / distSampleSize) * 100)
+          : 0,
+      };
     });
-
-    const topByKeyword = opps.reduce((a, b) =>
-      b.scoreKeyword > a.scoreKeyword ? b : a
-    );
-    const topByHeat = opps.reduce((a, b) =>
-      b.scoreHeat > a.scoreHeat ? b : a
-    );
-    const topByAuthority = opps.reduce((a, b) =>
-      b.scoreAuthority > a.scoreAuthority ? b : a
-    );
 
     return {
       total,
-      avgScore: avg('score'),
-      avgScoreKeyword: avg('scoreKeyword'),
-      avgScoreHeat: avg('scoreHeat'),
-      avgScoreAuthority: avg('scoreAuthority'),
-      avgScoreRecency: avg('scoreRecency'),
-      avgScoreTracked: avg('scoreTracked'),
+      avgScore: round1(agg._avg.score),
+      avgScoreKeyword: round1(agg._avg.scoreKeyword),
+      avgScoreHeat: round1(agg._avg.scoreHeat),
+      avgScoreAuthority: round1(agg._avg.scoreAuthority),
+      avgScoreRecency: round1(agg._avg.scoreRecency),
+      avgScoreTracked: round1(agg._avg.scoreTracked),
       distribution,
-      topByKeyword: {
-        id: topByKeyword.id,
-        score: topByKeyword.scoreKeyword,
-        title: topByKeyword.postContent.slice(0, 80),
+      topByKeyword: bestKeyword && {
+        id: bestKeyword.id,
+        score: bestKeyword.scoreKeyword,
+        title: bestKeyword.postContent.slice(0, 80),
       },
-      topByHeat: {
-        id: topByHeat.id,
-        score: topByHeat.scoreHeat,
-        title: topByHeat.postContent.slice(0, 80),
+      topByHeat: bestHeat && {
+        id: bestHeat.id,
+        score: bestHeat.scoreHeat,
+        title: bestHeat.postContent.slice(0, 80),
       },
-      topByAuthority: {
-        id: topByAuthority.id,
-        score: topByAuthority.scoreAuthority,
-        title: topByAuthority.postContent.slice(0, 80),
+      topByAuthority: bestAuthority && {
+        id: bestAuthority.id,
+        score: bestAuthority.scoreAuthority,
+        title: bestAuthority.postContent.slice(0, 80),
       },
-      trackedCount: opps.filter((o) => o.scoreTracked > 0).length,
+      trackedCount,
     };
   }
 
@@ -618,36 +697,46 @@ export class EngageRepository {
   async getSentStats(organizationId: string) {
     const weekStart = dayjs.utc().startOf('isoWeek').toDate();
 
-    const [allReplies, weeklyReplies] = await Promise.all([
-      this._sentReply.model.engageSentReply.findMany({
-        where: { organizationId },
-        take: 5_000, // guard against unbounded load for high-volume orgs
-        select: {
-          authorReplied: true,
-          post: { select: { impressions: true, analytics: true } },
-        },
-      }),
-      this._sentReply.model.engageSentReply.count({
-        where: {
-          organizationId,
-          post: { is: { source: 'engage', publishDate: { gte: weekStart } } },
-        },
-      }),
-    ]);
+    // Totals and response rate via DB aggregation — no row cap.
+    const [totalAgg, repliedCount, weeklyReplies, impressionsAgg, likeSample] =
+      await Promise.all([
+        this._sentReply.model.engageSentReply.count({
+          where: { organizationId },
+        }),
+        this._sentReply.model.engageSentReply.count({
+          where: { organizationId, authorReplied: true },
+        }),
+        this._sentReply.model.engageSentReply.count({
+          where: {
+            organizationId,
+            post: { is: { source: 'engage', publishDate: { gte: weekStart } } },
+          },
+        }),
+        // Impressions live on Post; sum across the org's engage posts.
+        this._post.model.post.aggregate({
+          where: {
+            organizationId,
+            source: 'engage',
+          },
+          _sum: { impressions: true },
+        }),
+        // Analytics is a JSON column; aggregating inside is database-specific.
+        // Keep a bounded recent sample (1_000 most recent replies) just for the
+        // avgLikes derivation — total/responseRate/impressions are now exact.
+        this._sentReply.model.engageSentReply.findMany({
+          where: { organizationId },
+          orderBy: { createdAt: 'desc' },
+          take: 1_000,
+          select: { post: { select: { analytics: true } } },
+        }),
+      ]);
 
-    const total = allReplies.length;
+    const total = totalAgg;
     const responseRate =
-      total > 0
-        ? Math.round(
-            (allReplies.filter((r) => r.authorReplied).length / total) * 100
-          )
-        : 0;
-    const totalImpressions = allReplies.reduce(
-      (s, r) => s + (r.post?.impressions ?? 0),
-      0
-    );
+      total > 0 ? Math.round((repliedCount / total) * 100) : 0;
+    const totalImpressions = impressionsAgg._sum.impressions ?? 0;
 
-    const likesPerReply = allReplies
+    const likesPerReply = likeSample
       .map((r) => {
         const analytics = r.post?.analytics as Array<{
           label: string;

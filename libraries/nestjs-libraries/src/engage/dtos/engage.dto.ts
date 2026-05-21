@@ -330,3 +330,9 @@ export class ConfirmManualReplyDto {
   @Type(() => Number)
   brandStrength: number;
 }
+
+export class SubmitManualReplyUrlDto {
+  @IsString()
+  @MaxLength(2048)
+  url: string;
+}

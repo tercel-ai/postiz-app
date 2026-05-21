@@ -4,6 +4,7 @@ import {
   Controller,
   Delete,
   Get,
+  Logger,
   Param,
   Patch,
   Post,
@@ -32,6 +33,7 @@ import {
   ScoreStatsDto,
   SearchChannelsDto,
   SendReplyDto,
+  SubmitManualReplyUrlDto,
   UpdateKeywordDto,
   UpdateMonitoredChannelDto,
   UpdateReplyAccountDto,
@@ -41,6 +43,8 @@ import {
 @ApiTags('Engage')
 @Controller('/engage')
 export class EngageController {
+  private readonly logger = new Logger(EngageController.name);
+
   constructor(
     private _engageService: EngageService,
     private _engageDraftService: EngageDraftService,
@@ -248,6 +252,10 @@ export class EngageController {
       }
       res.write(`data: [DONE]\n\n`);
     } catch (err) {
+      this.logger.error(
+        `generateDraft failed for opportunity ${id} (org ${org.id})`,
+        err instanceof Error ? err.stack : err
+      );
       if (!res.writableEnded) {
         res.write(`data: ${JSON.stringify({ error: 'generation_failed' })}\n\n`);
         res.write(`data: [DONE]\n\n`);
@@ -266,48 +274,61 @@ export class EngageController {
     @Param('id') id: string,
     @Body() body: SendReplyDto
   ) {
-    // getOpportunityForReply also enforces idempotency: throws if already REPLIED/SCHEDULED
-    const opportunity = await this._engageService.getOpportunityForReply(org, id);
-
-    const created = await this._postsService.createPost(
+    // Atomic claim: marks status=REPLIED iff currently NEW/AUTO_QUEUED. Loser of a
+    // concurrent race throws NotFoundException here, BEFORE createPost — eliminates
+    // duplicate X publishes and orphan Post rows.
+    const opportunity = await this._engageRepository.claimOpportunityForReply(
       org.id,
-      {
-        type: 'now',
-        source: 'engage',
-        tags: [],
-        shortLink: false,
-        date: new Date().toISOString(),
-        posts: [
-          {
-            integration: { id: body.integrationId },
-            value: [{ content: body.draftContent, image: [], delay: 0, id: '' } as never],
-            group: '',
-            settings: {
-              __type: 'x',
-              reply_to_tweet_id: opportunity.externalPostId,
-              who_can_reply_post: 'everyone',
-            } as never,
-          } as never,
-        ],
-      },
-      user?.id
+      id,
+      'REPLIED'
     );
 
-    const postId = created?.[0]?.id;
-    if (!postId) throw new Error('Post creation failed');
+    let postId: string | undefined;
+    try {
+      const created = await this._postsService.createPost(
+        org.id,
+        {
+          type: 'now',
+          source: 'engage',
+          tags: [],
+          shortLink: false,
+          date: new Date().toISOString(),
+          posts: [
+            {
+              integration: { id: body.integrationId },
+              value: [{ content: body.draftContent, image: [], delay: 0, id: '' } as never],
+              group: '',
+              settings: {
+                __type: 'x',
+                reply_to_tweet_id: opportunity.externalPostId,
+                who_can_reply_post: 'everyone',
+              } as never,
+            } as never,
+          ],
+        },
+        user?.id
+      );
 
-    const sentReply = await this._engageRepository.createSentReply({
-      organizationId: org.id,
-      opportunityId: id,
-      postId,
-      strategy: body.strategy,
-      brandStrength: body.brandStrength,
-    });
+      postId = created?.[0]?.id;
+      if (!postId) throw new Error('Post creation failed');
 
-    await this._engageRepository.setOpportunityStatus(id, 'REPLIED');
-    // Start 24h metrics sync workflow (best-effort; failure logged but not thrown)
-    await this._engageService.startMetricsSyncForReply(sentReply.id);
-    return sentReply;
+      const sentReply = await this._engageRepository.createSentReply({
+        organizationId: org.id,
+        opportunityId: id,
+        postId,
+        strategy: body.strategy,
+        brandStrength: body.brandStrength,
+      });
+
+      // Start 24h metrics sync workflow (best-effort; failure logged but not thrown)
+      await this._engageService.startMetricsSyncForReply(sentReply.id);
+      return sentReply;
+    } catch (err) {
+      // Roll back the claim + orphan Post so the user can retry
+      if (postId) await this._engageRepository.deletePostById(postId);
+      await this._engageRepository.releaseOpportunityClaim(org.id, id);
+      throw err;
+    }
   }
 
   @Post('/opportunities/:id/schedule')
@@ -317,52 +338,62 @@ export class EngageController {
     @Param('id') id: string,
     @Body() body: ScheduleReplyDto
   ) {
-    const opportunity = await this._engageService.getOpportunityForReply(org, id);
-
     if (new Date(body.scheduledAt) <= new Date()) {
       throw new BadRequestException('scheduledAt must be a future date');
     }
 
-    const created = await this._postsService.createPost(
+    const opportunity = await this._engageRepository.claimOpportunityForReply(
       org.id,
-      {
-        type: 'schedule',
-        source: 'engage',
-        tags: [],
-        shortLink: false,
-        date: body.scheduledAt,
-        posts: [
-          {
-            integration: { id: body.integrationId },
-            value: [{ content: body.draftContent, image: [], delay: 0, id: '' } as never],
-            group: '',
-            settings: {
-              __type: 'x',
-              reply_to_tweet_id: opportunity.externalPostId,
-              who_can_reply_post: 'everyone',
-            } as never,
-          } as never,
-        ],
-      },
-      user?.id
+      id,
+      'SCHEDULED'
     );
 
-    const postId = created?.[0]?.id;
-    if (!postId) throw new Error('Post creation failed');
+    let postId: string | undefined;
+    try {
+      const created = await this._postsService.createPost(
+        org.id,
+        {
+          type: 'schedule',
+          source: 'engage',
+          tags: [],
+          shortLink: false,
+          date: body.scheduledAt,
+          posts: [
+            {
+              integration: { id: body.integrationId },
+              value: [{ content: body.draftContent, image: [], delay: 0, id: '' } as never],
+              group: '',
+              settings: {
+                __type: 'x',
+                reply_to_tweet_id: opportunity.externalPostId,
+                who_can_reply_post: 'everyone',
+              } as never,
+            } as never,
+          ],
+        },
+        user?.id
+      );
 
-    const sentReply = await this._engageRepository.createSentReply({
-      organizationId: org.id,
-      opportunityId: id,
-      postId,
-      strategy: body.strategy,
-      brandStrength: body.brandStrength,
-    });
+      postId = created?.[0]?.id;
+      if (!postId) throw new Error('Post creation failed');
 
-    await this._engageRepository.setOpportunityStatus(id, 'SCHEDULED');
-    // NOTE: metrics sync is NOT started here for scheduled posts.
-    // The 24h sync must begin after the post actually publishes, not at schedule time.
-    // The post workflow will trigger it via the engage-metrics-sync-on-publish mechanism (TODO).
-    return sentReply;
+      const sentReply = await this._engageRepository.createSentReply({
+        organizationId: org.id,
+        opportunityId: id,
+        postId,
+        strategy: body.strategy,
+        brandStrength: body.brandStrength,
+      });
+
+      // NOTE: metrics sync is NOT started here for scheduled posts. The 24h sync must
+      // begin after the post actually publishes; the post workflow triggers it via
+      // engage-metrics-sync-on-publish.
+      return sentReply;
+    } catch (err) {
+      if (postId) await this._engageRepository.deletePostById(postId);
+      await this._engageRepository.releaseOpportunityClaim(org.id, id);
+      throw err;
+    }
   }
 
   // ─── Reddit manual reply (2-step) ─────────────────────────────────────────
@@ -375,30 +406,37 @@ export class EngageController {
     @Body() body: ConfirmManualReplyDto
   ) {
     void user;
-    // Idempotency: reject if opportunity is already in a terminal state (same guard as sendReply/scheduleReply)
-    await this._engageService.getOpportunityForReply(org, id);
+    // Atomic claim — same race guard as sendReply / scheduleReply
+    await this._engageRepository.claimOpportunityForReply(org.id, id, 'REPLIED');
 
-    // Step 1: create Post(PUBLISHED, no releaseURL) + EngageSentReply immediately.
-    // User has already posted to Reddit manually; we record it here for metrics tracking.
-    // Post.releaseURL remains null until Step 2 (PATCH /sent/:id/reply-url).
-    const post = await this._engageRepository.createManualRedditPost({
-      organizationId: org.id,
-      content: body.draftContent,
-      date: new Date(),
-    });
+    let postId: string | undefined;
+    try {
+      // Step 1: create Post(PUBLISHED, no releaseURL) + EngageSentReply immediately.
+      // User has already posted to Reddit manually; we record it here for metrics tracking.
+      // Post.releaseURL remains null until Step 2 (PATCH /sent/:id/reply-url).
+      const post = await this._engageRepository.createManualRedditPost({
+        organizationId: org.id,
+        content: body.draftContent,
+        date: new Date(),
+      });
+      postId = post.id;
 
-    const sentReply = await this._engageRepository.createSentReply({
-      organizationId: org.id,
-      opportunityId: id,
-      postId: post.id,
-      strategy: body.strategy,
-      brandStrength: body.brandStrength,
-    });
+      const sentReply = await this._engageRepository.createSentReply({
+        organizationId: org.id,
+        opportunityId: id,
+        postId: post.id,
+        strategy: body.strategy,
+        brandStrength: body.brandStrength,
+      });
 
-    await this._engageRepository.setOpportunityStatus(id, 'REPLIED');
-    // Start metrics sync — Reddit path: waits for user to submit URL then checks for author reply
-    await this._engageService.startMetricsSyncForReply(sentReply.id);
-    return sentReply;
+      // Start metrics sync — Reddit path: waits for user to submit URL then checks for author reply
+      await this._engageService.startMetricsSyncForReply(sentReply.id);
+      return sentReply;
+    } catch (err) {
+      if (postId) await this._engageRepository.deletePostById(postId);
+      await this._engageRepository.releaseOpportunityClaim(org.id, id);
+      throw err;
+    }
   }
 
   // ─── Sent Replies ─────────────────────────────────────────────────────────
@@ -420,7 +458,7 @@ export class EngageController {
   submitManualReplyUrl(
     @GetOrgFromRequest() org: Organization,
     @Param('id') id: string,
-    @Body() body: { url: string }
+    @Body() body: SubmitManualReplyUrlDto
   ) {
     return this._engageService.submitManualReplyUrl(org, id, body.url);
   }
