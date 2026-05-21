@@ -13,6 +13,7 @@ import {
   Res,
 } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 import { Organization, User } from '@prisma/client';
 import { Response } from 'express';
 import { GetOrgFromRequest } from '@gitroom/nestjs-libraries/user/org.from.request';
@@ -20,6 +21,7 @@ import { GetUserFromRequest } from '@gitroom/nestjs-libraries/user/user.from.req
 import { EngageService } from '@gitroom/nestjs-libraries/engage/engage.service';
 import { EngageDraftService } from '@gitroom/nestjs-libraries/engage/engage-draft.service';
 import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.service';
+import { PostOverageService } from '@gitroom/nestjs-libraries/database/prisma/posts/post-overage.service';
 import { EngageRepository } from '@gitroom/nestjs-libraries/engage/engage.repository';
 import {
   AddKeywordDto,
@@ -50,6 +52,7 @@ export class EngageController {
     private _engageService: EngageService,
     private _engageDraftService: EngageDraftService,
     private _postsService: PostsService,
+    private _postOverageService: PostOverageService,
     private _engageRepository: EngageRepository
   ) {}
 
@@ -229,6 +232,10 @@ export class EngageController {
 
   // ─── Draft Generation (SSE) ───────────────────────────────────────────────
 
+  // Spec §11 (tech-design.md): 20 generations/user/hour. Each call opens a
+  // Claude Sonnet streaming completion; without a cap an authenticated user
+  // can replay the request and bleed Anthropic spend.
+  @Throttle({ default: { limit: 20, ttl: 3_600_000 } })
   @Post('/opportunities/:id/draft')
   async generateDraft(
     @GetOrgFromRequest() org: Organization,
@@ -423,7 +430,6 @@ export class EngageController {
     @Param('id') id: string,
     @Body() body: ConfirmManualReplyDto
   ) {
-    void user;
     // Atomic claim — same race guard as sendReply / scheduleReply
     const { priorStatus } =
       await this._engageRepository.claimOpportunityForReply(org.id, id, 'REPLIED');
@@ -442,6 +448,25 @@ export class EngageController {
     } catch (err) {
       await this._engageRepository.releaseOpportunityClaim(org.id, id, priorStatus);
       throw err;
+    }
+
+    // Engage shares the regular post quota. The Reddit manual path bypasses
+    // PostsService.createPost, so we must trigger the overage check here to stay
+    // symmetric with the X path (posts.service.ts:863). Fire-and-forget — billing
+    // failures must not break the user-visible flow.
+    if (user?.id) {
+      this._postOverageService
+        .deductIfOverage(org.id, user.id, postId, 'engage')
+        .catch((err) => {
+          this.logger.error(
+            `confirmManualReply: deductIfOverage failed for postId=${postId}:`,
+            err
+          );
+        });
+    } else {
+      this.logger.warn(
+        `confirmManualReply: skipping deductIfOverage for postId=${postId} — no userId on request`
+      );
     }
 
     // Phase 2 — at this point the user's Reddit reply has happened AND we have a
