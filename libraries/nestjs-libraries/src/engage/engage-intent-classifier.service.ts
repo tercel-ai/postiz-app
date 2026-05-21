@@ -49,10 +49,26 @@ export class EngageIntentClassifierService implements OnModuleInit {
   }
 
   async classifyWithFallback(text: string): Promise<ClassifyResult> {
+    // If onModuleInit failed to load the local model, _localClassify returns
+    // intentScore=0 for every post → every post would silently escalate to
+    // Claude Haiku, inverting the spec's "<15% fallback" expectation into
+    // 100% Claude calls. Short-circuit straight to Claude so the cost is at
+    // least observable per call (and logged on classifier-unavailable).
+    if (!this.classifier) {
+      if (!this._loggedUnavailable) {
+        this.logger.warn(
+          'Local NLI classifier unavailable — all classifyWithFallback calls will go to Claude Haiku.'
+        );
+        this._loggedUnavailable = true;
+      }
+      return this._claudeFallbackClassify(text);
+    }
     const local = await this._localClassify(text);
     if (local.intentScore >= 0.45) return local;
     return this._claudeFallbackClassify(text);
   }
+
+  private _loggedUnavailable = false;
 
   async classifyBatch(
     posts: Array<{ id: string; content: string }>,

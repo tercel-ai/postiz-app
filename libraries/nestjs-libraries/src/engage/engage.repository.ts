@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaRepository } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
 import {
@@ -788,7 +788,19 @@ export class EngageRepository {
   }
 
   async updateReplyUrl(organizationId: string, sentReplyId: string, url: string) {
-    const reply = await this.getSentReplyById(organizationId, sentReplyId);
+    // Joining the opportunity here so we can reject non-Reddit replies. Without
+    // this guard a caller can supply any sentReplyId in the org and overwrite an
+    // X reply's tweet URL with a Reddit comment URL, corrupting metrics linkage.
+    const reply = await this._sentReply.model.engageSentReply.findFirst({
+      where: { id: sentReplyId, organizationId },
+      include: { opportunity: { select: { platform: true } } },
+    });
+    if (!reply) throw new NotFoundException('Sent reply not found');
+    if (reply.opportunity.platform !== 'reddit') {
+      throw new BadRequestException(
+        'Reply-URL submission is only valid for Reddit manual replies'
+      );
+    }
     return this._post.model.post.update({
       where: { id: reply.postId },
       data: { releaseURL: url },

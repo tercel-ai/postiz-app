@@ -21,8 +21,10 @@ import {
   UpdateTrackedAccountDto,
 } from '@gitroom/nestjs-libraries/engage/dtos/engage.dto';
 
+// Anchored at $ to reject trailing query strings / fragments that would otherwise
+// pollute the stored releaseURL (e.g. `?utm_source=...`). Matches spec §12.4.
 const REDDIT_COMMENT_URL_RE =
-  /^https?:\/\/(www\.)?reddit\.com\/r\/[^/]+\/comments\/[^/]+\/[^/]+\/[a-z0-9]+\/?/i;
+  /^https?:\/\/(www\.)?reddit\.com\/r\/[^/]+\/comments\/[^/]+\/[^/]+\/[a-z0-9]+\/?$/i;
 
 @Injectable()
 export class EngageService {
