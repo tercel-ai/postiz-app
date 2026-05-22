@@ -187,7 +187,7 @@ export function MonitoredChannelManager() {
             </button>
           </div>
 
-          {searchResults.length > 0 && (
+          {searchResults.length > 0 ? (
             <div className="space-y-1">
               {searchResults.map((r) => (
                 <div
@@ -209,7 +209,27 @@ export function MonitoredChannelManager() {
                 </div>
               ))}
             </div>
-          )}
+          ) : searchQuery.trim() && !searching ? (
+            <div className="flex items-center justify-between bg-[#0f1219] rounded-lg px-3 py-2">
+              <span className="text-sm text-gray-400">
+                No results — add <span className="text-white">{searchQuery.replace(/^r\//i, '')}</span> directly?
+              </span>
+              <button
+                onClick={() => {
+                  const name = searchQuery.replace(/^r\//i, '').trim();
+                  addChannel({
+                    platform: searchPlatform,
+                    channelId: name,
+                    channelName: searchPlatform === 'reddit' ? `r/${name}` : name,
+                    audienceSize: 0,
+                  });
+                }}
+                className="text-xs text-blue-400 hover:text-blue-300 ml-3 shrink-0"
+              >
+                + Add directly
+              </button>
+            </div>
+          ) : null}
         </div>
       )}
 

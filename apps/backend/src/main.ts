@@ -1,5 +1,11 @@
 import { initializeSentry } from '@gitroom/nestjs-libraries/sentry/initialize.sentry';
+import { ProxyAgent, setGlobalDispatcher } from 'undici';
 initializeSentry('backend', true);
+
+const _backendProxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
+if (_backendProxyUrl) {
+  setGlobalDispatcher(new ProxyAgent(_backendProxyUrl));
+}
 
 import { loadSwagger } from '@gitroom/helpers/swagger/load.swagger';
 import { json } from 'express';
@@ -40,6 +46,7 @@ async function start() {
         'Baggage',
         'x-copilotkit-runtime-client-gql-version',
         'x-timezone',
+        ...(process.env.NOT_SECURED ? ['auth', 'showorg', 'impersonate'] : []),
       ],
       exposedHeaders: [
         'reload',

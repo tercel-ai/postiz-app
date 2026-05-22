@@ -172,7 +172,7 @@ export function SignalFeed() {
     );
   }
 
-  if (!config.setupCompleted) {
+  if (!config.enabled) {
     return <SetupWizard />;
   }
 

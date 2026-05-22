@@ -30,6 +30,7 @@ import {
   ListOpportunitiesDto,
   ListSentDto,
   SaveEngageConfigDto,
+  SetupEngageDto,
   ScheduleReplyDto,
   ScoreStatsDto,
   SearchChannelsDto,
@@ -71,6 +72,14 @@ export class EngageController {
     return this._engageService.resetConfig(org);
   }
 
+  @Post('/setup')
+  setupEngage(
+    @GetOrgFromRequest() org: Organization,
+    @Body() body: SetupEngageDto
+  ) {
+    return this._engageService.setupEngage(org, body);
+  }
+
   // ─── Keywords ─────────────────────────────────────────────────────────────
 
   @Post('/keywords')
@@ -81,8 +90,6 @@ export class EngageController {
     return this._engageService.addKeyword(org, body);
   }
 
-  // Atomic bulk-add used by the setup wizard — one INSERT (skipDuplicates) so a
-  // mid-loop failure cannot leave the org half-committed with no setupCompleted.
   @Post('/keywords/bulk')
   addKeywordsBulk(
     @GetOrgFromRequest() org: Organization,
@@ -209,7 +216,7 @@ export class EngageController {
   @Post('/scan')
   triggerScan(
     @GetOrgFromRequest() org: Organization,
-    @Body(new ParseArrayPipe({ items: String, optional: true, maxSize: 100 }))
+    @Body(new ParseArrayPipe({ items: String, optional: true }))
     keywordIds: string[]
   ) {
     return this._engageService.triggerImmediateScan(org, keywordIds);

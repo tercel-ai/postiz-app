@@ -20,6 +20,7 @@ import {
   ListOpportunitiesDto,
   ListSentDto,
   SaveEngageConfigDto,
+  SetupEngageDto,
   ScheduleReplyDto,
   ScoreStatsDto,
   SendReplyDto,
@@ -28,6 +29,7 @@ import {
   UpdateReplyAccountDto,
   UpdateTrackedAccountDto,
 } from '@gitroom/nestjs-libraries/engage/dtos/engage.dto';
+import { getRedditToken, redditAuthHeaders } from '@gitroom/nestjs-libraries/engage/reddit-auth';
 
 // Anchored at $ to reject trailing query strings / fragments that would otherwise
 // pollute the stored releaseURL (e.g. `?utm_source=...`). Matches spec §12.4.
@@ -53,10 +55,15 @@ export class EngageService {
 
   async saveConfig(org: Organization, dto: SaveEngageConfigDto) {
     const result = await this._engageRepository.saveConfig(org.id, dto);
-    // When an org completes setup for the first time, start its per-org workflows
-    if (dto.setupCompleted) {
+    if (dto.enabled) {
       await this._startEngageWorkflowsForOrg(org.id);
     }
+    return result;
+  }
+
+  async setupEngage(org: Organization, dto: SetupEngageDto) {
+    const result = await this._engageRepository.setupEngage(org.id, dto);
+    await this._startEngageWorkflowsForOrg(org.id);
     return result;
   }
 
@@ -213,30 +220,65 @@ export class EngageService {
   // ─── Private helpers ──────────────────────────────────────────────────────
 
   private async _searchRedditSubreddits(query: string) {
-    // Calls Reddit public search; no auth required for listing subreddits.
-    // Falls back to empty list on any network error.
+    // Strip leading "r/" so users can type either "SEO" or "r/SEO".
+    const normalized = query.replace(/^r\//i, '').trim();
+    if (!normalized) return [];
+
+    const token = await getRedditToken();
+    if (!token) return [];
+
+    // Primary: subreddit search via OAuth API.
     try {
-      const url = `https://www.reddit.com/subreddits/search.json?q=${encodeURIComponent(query)}&limit=10`;
+      const url = `https://oauth.reddit.com/subreddits/search?q=${encodeURIComponent(normalized)}&limit=10&type=sr`;
       const res = await fetch(url, {
-        headers: { 'User-Agent': 'AISEE-Engage/1.0' },
-        // Bound the request — Reddit can hang; without a timeout, each /search call
-        // pins an Express worker until the socket closes.
-        signal: AbortSignal.timeout(5000),
+        headers: redditAuthHeaders(token),
+        signal: AbortSignal.timeout(8000),
       });
-      if (!res.ok) return [];
-      const json = (await res.json()) as {
-        data?: { children?: Array<{ data: Record<string, unknown> }> };
-      };
-      return (json?.data?.children ?? []).map((c) => ({
-        platform: 'reddit',
-        channelId: c.data.display_name as string,
-        channelName: `r/${c.data.display_name as string}`,
-        audienceSize: Number(c.data.subscribers ?? 0),
-        metadata: {
-          description: c.data.public_description,
-          url: `https://reddit.com/r/${c.data.display_name}`,
+      if (res.ok) {
+        const json = (await res.json()) as {
+          data?: { children?: Array<{ data: Record<string, unknown> }> };
+        };
+        const results = (json?.data?.children ?? []).map((c) => ({
+          platform: 'reddit',
+          channelId: c.data.display_name as string,
+          channelName: `r/${c.data.display_name as string}`,
+          audienceSize: Number(c.data.subscribers ?? 0),
+          metadata: {
+            description: c.data.public_description,
+            url: `https://reddit.com/r/${c.data.display_name}`,
+          },
+        }));
+        if (results.length) return results;
+      }
+    } catch {
+      // fall through to direct lookup
+    }
+
+    // Fallback: exact subreddit name — useful for small/new subreddits not in search.
+    try {
+      const aboutRes = await fetch(
+        `https://oauth.reddit.com/r/${encodeURIComponent(normalized)}/about`,
+        {
+          headers: redditAuthHeaders(token),
+          signal: AbortSignal.timeout(8000),
+        }
+      );
+      if (!aboutRes.ok) return [];
+      const about = (await aboutRes.json()) as { data?: Record<string, unknown> };
+      const d = about.data;
+      if (!d || d.subreddit_type === 'private') return [];
+      return [
+        {
+          platform: 'reddit',
+          channelId: d.display_name as string,
+          channelName: `r/${d.display_name as string}`,
+          audienceSize: Number(d.subscribers ?? 0),
+          metadata: {
+            description: d.public_description,
+            url: `https://reddit.com/r/${d.display_name}`,
+          },
         },
-      }));
+      ];
     } catch {
       return [];
     }

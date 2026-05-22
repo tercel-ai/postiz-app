@@ -1,6 +1,6 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
-import { PrismaRepository } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
+import { PrismaRepository, PrismaTransaction } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
 import {
   AddKeywordDto,
   AddKeywordsBulkDto,
@@ -8,6 +8,7 @@ import {
   AddTrackedAccountDto,
   ListOpportunitiesDto,
   ListSentDto,
+  SetupEngageDto,
   UpdateKeywordDto,
   UpdateMonitoredChannelDto,
   UpdateReplyAccountDto,
@@ -31,7 +32,8 @@ export class EngageRepository {
     private _opportunity: PrismaRepository<'engageOpportunity'>,
     private _sentReply: PrismaRepository<'engageSentReply'>,
     private _integration: PrismaRepository<'integration'>,
-    private _post: PrismaRepository<'post'>
+    private _post: PrismaRepository<'post'>,
+    private _tx: PrismaTransaction
   ) {}
 
   // ─── Config ────────────────────────────────────────────────────────────────
@@ -41,7 +43,7 @@ export class EngageRepository {
     // miss findUnique and race on create → Prisma P2002 unique violation.
     return this._config.model.engageConfig.upsert({
       where: { organizationId },
-      create: { organizationId, setupCompleted: false },
+      create: { organizationId, enabled: false },
       update: {},
       include: {
         keywords: { orderBy: { createdAt: 'asc' } },
@@ -66,7 +68,7 @@ export class EngageRepository {
 
   async saveConfig(
     organizationId: string,
-    data: Partial<{ setupCompleted: boolean; lastScanAt: Date }>
+    data: Partial<{ enabled: boolean; lastScanAt: Date }>
   ) {
     return this._config.model.engageConfig.upsert({
       where: { organizationId },
@@ -78,7 +80,7 @@ export class EngageRepository {
   async resetConfig(organizationId: string) {
     return this._config.model.engageConfig.update({
       where: { organizationId },
-      data: { setupCompleted: false },
+      data: { enabled: false },
     });
   }
 
@@ -94,7 +96,7 @@ export class EngageRepository {
         configId,
         organizationId,
         keyword: dto.keyword,
-        type: dto.type ?? 'CORE',
+        type: dto.type ?? null,
         enabled: dto.enabled ?? true,
       },
     });
@@ -113,7 +115,7 @@ export class EngageRepository {
       configId,
       organizationId,
       keyword: kw.keyword,
-      type: kw.type ?? 'CORE',
+      type: kw.type ?? null,
       enabled: kw.enabled ?? true,
     }));
     return this._keyword.model.engageKeyword.createMany({
@@ -848,6 +850,61 @@ export class EngageRepository {
         delay: 0,
         // integrationId intentionally omitted: Reddit manual posts have no integration
       },
+    });
+  }
+
+  // ─── Setup (atomic bulk init) ─────────────────────────────────────────────
+
+  async setupEngage(organizationId: string, dto: SetupEngageDto) {
+    return this._tx.model.$transaction(async (tx) => {
+      const config = await tx.engageConfig.upsert({
+        where: { organizationId },
+        create: { organizationId, enabled: true },
+        update: { enabled: true },
+      });
+
+      if (dto.keywords?.length) {
+        await tx.engageKeyword.createMany({
+          data: dto.keywords.map((kw) => ({
+            configId: config.id,
+            organizationId,
+            keyword: kw.keyword,
+            type: kw.type ?? null,
+            enabled: kw.enabled ?? true,
+          })),
+          skipDuplicates: true,
+        });
+      }
+
+      if (dto.monitoredChannels?.length) {
+        await tx.engageMonitoredChannel.createMany({
+          data: dto.monitoredChannels.map((ch) => ({
+            configId: config.id,
+            organizationId,
+            platform: ch.platform,
+            channelId: ch.channelId,
+            channelName: ch.channelName,
+            audienceSize: ch.audienceSize ?? 0,
+            ...(ch.metadata && { metadata: ch.metadata as Prisma.InputJsonValue }),
+          })),
+          skipDuplicates: true,
+        });
+      }
+
+      if (dto.trackedAccounts?.length) {
+        await tx.engageTrackedAccount.createMany({
+          data: dto.trackedAccounts.map((acc) => ({
+            configId: config.id,
+            organizationId,
+            platform: acc.platform ?? 'x',
+            username: acc.username,
+            ...(acc.categoryLabel && { categoryLabel: acc.categoryLabel }),
+          })),
+          skipDuplicates: true,
+        });
+      }
+
+      return config;
     });
   }
 

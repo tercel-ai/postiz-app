@@ -24,14 +24,35 @@ const VALID_STRATEGIES = ['EXPERT_ANSWER', 'DATA_BACKED', 'EMPATHY_LED'] as cons
 // computeKeywordScore). Without this enum, lowercase / mis-cased values silently
 // store but never receive the +5/+3 brand/competitor bonus.
 export const KEYWORD_TYPES = ['CORE', 'BRAND', 'COMPETITOR'] as const;
-export type KeywordType = (typeof KEYWORD_TYPES)[number];
+export type KeywordType = (typeof KEYWORD_TYPES)[number] | null;
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
 export class SaveEngageConfigDto {
   @IsOptional()
   @IsBoolean()
-  setupCompleted?: boolean;
+  enabled?: boolean;
+}
+
+export class SetupEngageDto {
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(100)
+  @ValidateNested({ each: true })
+  @Type(() => AddKeywordDto)
+  keywords: AddKeywordDto[];
+
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => AddMonitoredChannelDto)
+  monitoredChannels?: AddMonitoredChannelDto[];
+
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => AddTrackedAccountDto)
+  trackedAccounts?: AddTrackedAccountDto[];
 }
 
 // ─── Keywords ─────────────────────────────────────────────────────────────────

@@ -12,6 +12,7 @@
 - [General Conventions](#general-conventions)
 - [Enums and Constants](#enums-and-constants)
 - [Data Models](#data-models)
+- [Setup — Initial Setup (Atomic)](#setup--initial-setup-atomic)
 - [Config — Configuration](#config--configuration)
 - [Keywords — Keywords](#keywords--keywords)
 - [Monitored Channels — Monitored Channels](#monitored-channels--monitored-channels)
@@ -74,7 +75,7 @@ type IntentType =
 interface EngageConfig {
   id: string;
   organizationId: string;
-  setupCompleted: boolean;
+  enabled: boolean;       // true = setup complete and scanning active
   lastScanAt: string | null;
   createdAt: string;
   updatedAt: string;
@@ -94,7 +95,7 @@ interface EngageKeyword {
   configId: string;
   organizationId: string;
   keyword: string;
-  type: KeywordType;   // 'CORE' | 'BRAND' | 'COMPETITOR'
+  type: KeywordType | null;   // 'CORE' | 'BRAND' | 'COMPETITOR' | null
   enabled: boolean;
   weeklyHitCount: number;
   totalHitCount: number;
@@ -260,12 +261,58 @@ interface EngageSentReplyWithDetails extends EngageSentReply {
 
 ---
 
+## Setup — Initial Setup (Atomic)
+
+### POST `/api/engage/setup`
+
+**One-shot Setup Wizard submission.** Atomically writes all initial configuration in a single Prisma transaction, then starts the Temporal scanning workflow.
+
+> Use this endpoint instead of the individual CRUD endpoints during the first-time setup flow. For subsequent edits (adding/removing keywords after setup), use the individual endpoints under [Keywords](#keywords--keywords), [Monitored Channels](#monitored-channels--monitored-channels), etc.
+
+**Request Body**
+
+```json
+{
+  "keywords": [
+    { "keyword": "GEO SEO" },
+    { "keyword": "AISEE", "type": "BRAND" },
+    { "keyword": "SurferSEO", "type": "COMPETITOR", "enabled": false }
+  ],
+  "monitoredChannels": [
+    {
+      "platform": "reddit",
+      "channelId": "SEO",
+      "channelName": "r/SEO",
+      "audienceSize": 1200000
+    }
+  ],
+  "trackedAccounts": [
+    { "username": "randfish", "platform": "x", "categoryLabel": "GEO Expert" }
+  ]
+}
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `keywords` | **Yes** (1–100 items) | Keywords to monitor. `type` optional (`CORE`/`BRAND`/`COMPETITOR`). Duplicates skipped. |
+| `monitoredChannels` | No | Channels to scan. Duplicates (`platform+channelId`) skipped. |
+| `trackedAccounts` | No | External accounts to track. Duplicates (`platform+username`) skipped. |
+
+**Response** `200 OK` — Returns the updated `EngageConfig` (with `enabled: true`)
+
+**Side Effect**: Starts the `engageScanWorkflow` and `engageTrackedAccountsWorkflow` Temporal workflows for this organization (idempotent — re-calling is safe).
+
+**Errors**
+- `400` — `keywords` is empty or missing
+
+---
+
 ## Config — Configuration
 
 ### GET `/api/engage/config`
 
 Retrieve the Engage configuration for the current organization (including all keywords, channels, tracked accounts, and reply accounts).  
-The first call will automatically create a default configuration (`setupCompleted: false`).
+The first call will automatically create a default configuration (`enabled: false`).
 
 **Response** `200 OK`
 
@@ -273,7 +320,7 @@ The first call will automatically create a default configuration (`setupComplete
 {
   "id": "uuid",
   "organizationId": "uuid",
-  "setupCompleted": false,
+  "enabled": false,
   "lastScanAt": null,
   "createdAt": "2026-05-22T00:00:00.000Z",
   "updatedAt": "2026-05-22T00:00:00.000Z",
@@ -284,17 +331,19 @@ The first call will automatically create a default configuration (`setupComplete
 }
 ```
 
+> **Frontend routing**: If `enabled: false`, redirect to the Setup Wizard. If `enabled: true`, render the Signal Feed.
+
 ---
 
 ### POST `/api/engage/config`
 
-Save configuration. **When `setupCompleted: true`, the backend will automatically start the Temporal scanning workflow** (called after the Setup Wizard is finished).
+Update configuration fields. Does not perform bulk writes to related tables — use `POST /setup` for the initial wizard submission.
 
 **Request Body**
 
 ```json
 {
-  "setupCompleted": true  // Optional, set to true to indicate initial setup completion
+  "enabled": true   // Optional — setting true also starts Temporal workflows (idempotent)
 }
 ```
 
@@ -304,7 +353,7 @@ Save configuration. **When `setupCompleted: true`, the backend will automaticall
 
 ### POST `/api/engage/config/reset`
 
-Reset `setupCompleted` to `false` (re-enter Setup Wizard).
+Reset `enabled` to `false` (re-enter Setup Wizard). Does not delete existing keywords or channels.
 
 **Response** `200 OK` — Returns the updated `EngageConfig`
 
@@ -332,7 +381,7 @@ Add a single keyword.
 
 ### POST `/api/engage/keywords/bulk`
 
-Bulk add keywords (atomic operation, used by Setup Wizard). Duplicate keywords are automatically skipped without throwing an error.
+Bulk add keywords (atomic operation). Duplicate keywords are automatically skipped without throwing an error.
 
 **Request Body**
 

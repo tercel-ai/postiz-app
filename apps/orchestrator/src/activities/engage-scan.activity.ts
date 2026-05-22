@@ -13,6 +13,7 @@ import {
   PrismaTransaction,
 } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
 import { EngageKeyword } from '@prisma/client';
+import { getRedditToken, redditAuthHeaders } from '@gitroom/nestjs-libraries/engage/reddit-auth';
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc';
 
@@ -56,7 +57,7 @@ export class EngageScanActivity {
   @ActivityMethod()
   async runDailyScan(orgId: string, keywordIds?: string[]): Promise<void> {
     const config = await this._engageRepository.getOrCreateConfig(orgId);
-    if (!config.setupCompleted) return;
+    if (!config.enabled) return;
 
     const allEnabled = config.keywords.filter((k) => k.enabled);
     const enabledKeywords =
@@ -87,7 +88,7 @@ export class EngageScanActivity {
   @ActivityMethod()
   async runTrackedAccountsScan(orgId: string): Promise<void> {
     const config = await this._engageRepository.getOrCreateConfig(orgId);
-    if (!config.setupCompleted) return;
+    if (!config.enabled) return;
 
     const enabledKeywords = config.keywords.filter((k) => k.enabled);
     const enabledAccounts = config.trackedAccounts.filter((a) => a.enabled);
@@ -300,56 +301,110 @@ export class EngageScanActivity {
     keyword: string,
     audienceSize: number
   ): Promise<RawPost[]> {
-    const url = `https://www.reddit.com/r/${encodeURIComponent(subreddit)}/search.json?q=${encodeURIComponent(keyword)}&sort=new&t=day&limit=25`;
+    const token = await getRedditToken();
+
+    if (token) {
+      // OAuth path — full access, proper rate limits.
+      const url = `https://oauth.reddit.com/r/${encodeURIComponent(subreddit)}/search?q=${encodeURIComponent(keyword)}&sort=new&t=day&limit=25&restrict_sr=true`;
+      const res = await fetch(url, { headers: redditAuthHeaders(token) });
+      if (res.ok) {
+        const json = (await res.json()) as {
+          data?: { children?: Array<{ data: Record<string, unknown> }> };
+        };
+        return this._parseRedditJsonPosts(json.data?.children ?? [], subreddit, audienceSize);
+      }
+      const body = await res.text().catch(() => '<unreadable>');
+      this.logger.warn(`Reddit OAuth search ${res.status} for r/${subreddit} "${keyword}": ${body.slice(0, 200)}`);
+      // fall through to RSS
+    }
+
+    // RSS fallback — no credentials required; Reddit RSS is publicly accessible.
+    return this._searchRedditPostsViaRss(subreddit, keyword, audienceSize);
+  }
+
+  private async _searchRedditPostsViaRss(
+    subreddit: string,
+    keyword: string,
+    audienceSize: number
+  ): Promise<RawPost[]> {
+    const url = `https://www.reddit.com/r/${encodeURIComponent(subreddit)}/search.rss?q=${encodeURIComponent(keyword)}&sort=new&t=day&restrict_sr=on`;
     const res = await fetch(url, {
       headers: { 'User-Agent': 'AISEE-Engage/1.0' },
     });
     if (!res.ok) {
-      const body = await res.text().catch(() => '<unreadable>');
-      this.logger.warn(
-        `Reddit /search.json returned ${res.status} for r/${subreddit} "${keyword}": ${body.slice(0, 200)}`
-      );
+      this.logger.warn(`Reddit RSS ${res.status} for r/${subreddit} "${keyword}"`);
       return [];
     }
-    const json = (await res.json()) as {
-      data?: {
-        children?: Array<{
-          data: {
-            id: string;
-            title: string;
-            selftext: string;
-            permalink: string;
-            author: string;
-            created_utc: number;
-            score: number;
-            upvote_ratio: number;
-            num_comments: number;
-          };
-        }>;
-      };
-    };
-    return (json.data?.children ?? []).map((c) => {
+    const xml = await res.text();
+    return this._parseRedditRssPosts(xml, subreddit, audienceSize);
+  }
+
+  private _parseRedditJsonPosts(
+    children: Array<{ data: Record<string, unknown> }>,
+    subreddit: string,
+    audienceSize: number
+  ): RawPost[] {
+    return children.map((c) => {
       const p = c.data;
       return {
-        id: `reddit_${p.id}`,
+        id: `reddit_${p.id as string}`,
         platform: 'reddit',
-        externalPostId: p.id,
-        externalPostUrl: `https://www.reddit.com${p.permalink}`,
+        externalPostId: p.id as string,
+        externalPostUrl: `https://www.reddit.com${p.permalink as string}`,
         channelId: subreddit,
         channelName: `r/${subreddit}`,
-        authorUsername: p.author,
-        authorFollowers: audienceSize, // community audienceSize as authority proxy
-        postContent: `${p.title}\n${p.selftext}`.trim(),
-        postPublishedAt: new Date(p.created_utc * 1000),
+        authorUsername: p.author as string,
+        authorFollowers: audienceSize,
+        postContent: `${p.title as string}\n${p.selftext as string}`.trim(),
+        postPublishedAt: new Date((p.created_utc as number) * 1000),
         metricLikes: 0,
         metricReplies: 0,
         metricRetweets: 0,
         metricQuotes: 0,
-        metricScore: p.score,
-        metricUpvoteRatio: p.upvote_ratio,
-        metricComments: p.num_comments,
+        metricScore: p.score as number,
+        metricUpvoteRatio: p.upvote_ratio as number,
+        metricComments: p.num_comments as number,
       };
     });
+  }
+
+  private _parseRedditRssPosts(xml: string, subreddit: string, audienceSize: number): RawPost[] {
+    const results: RawPost[] = [];
+    const itemRegex = /<entry>([\s\S]*?)<\/entry>/g;
+    let match: RegExpExecArray | null;
+    const get = (tag: string, src: string) => {
+      const m = src.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`));
+      return m ? m[1].replace(/<[^>]+>/g, '').trim() : '';
+    };
+    while ((match = itemRegex.exec(xml)) !== null) {
+      const entry = match[1];
+      const link = entry.match(/rel="alternate" href="([^"]+)"/)?.[1] ?? '';
+      const id = link.split('/comments/')?.[1]?.split('/')?.[0] ?? `rss_${Date.now()}`;
+      const title = get('title', entry);
+      const author = get('name', entry);
+      const updated = get('updated', entry);
+      if (!title) continue;
+      results.push({
+        id: `reddit_${id}`,
+        platform: 'reddit',
+        externalPostId: id,
+        externalPostUrl: link,
+        channelId: subreddit,
+        channelName: `r/${subreddit}`,
+        authorUsername: author,
+        authorFollowers: audienceSize,
+        postContent: title,
+        postPublishedAt: updated ? new Date(updated) : new Date(),
+        metricLikes: 0,
+        metricReplies: 0,
+        metricRetweets: 0,
+        metricQuotes: 0,
+        metricScore: 0,
+        metricUpvoteRatio: 0,
+        metricComments: 0,
+      });
+    }
+    return results;
   }
 
   // ─── Intent classification ────────────────────────────────────────────────

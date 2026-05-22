@@ -11,7 +11,7 @@ const TYPE_COLORS: Record<string, string> = {
   COMPETITOR: 'bg-red-500/20 text-red-400',
 };
 
-const TYPE_OPTIONS = ['CORE', 'BRAND', 'COMPETITOR'];
+const TYPE_OPTIONS = ['', 'CORE', 'BRAND', 'COMPETITOR'];
 
 interface Keyword {
   id: string;
@@ -33,7 +33,7 @@ export function KeywordManager() {
   });
 
   const [input, setInput] = useState('');
-  const [inputType, setInputType] = useState('CORE');
+  const [inputType, setInputType] = useState('');
 
   const keywords: Keyword[] = config?.keywords ?? [];
   const maxHit = Math.max(...keywords.map((k) => k.weeklyHitCount), 1);
@@ -121,7 +121,7 @@ export function KeywordManager() {
         >
           {TYPE_OPTIONS.map((t) => (
             <option key={t} value={t}>
-              {t}
+              {t || '— no type —'}
             </option>
           ))}
         </select>
@@ -140,9 +140,9 @@ export function KeywordManager() {
             className="flex items-center gap-3 bg-[#1a2035] rounded-lg px-4 py-3"
           >
             <span
-              className={`text-xs px-2 py-0.5 rounded font-medium ${TYPE_COLORS[kw.type] ?? TYPE_COLORS.CORE}`}
+              className={`text-xs px-2 py-0.5 rounded font-medium ${TYPE_COLORS[kw.type ?? ''] ?? 'bg-gray-500/20 text-gray-400'}`}
             >
-              {kw.type}
+              {kw.type || '—'}
             </span>
             <span className="text-white text-sm flex-1">{kw.keyword}</span>
 

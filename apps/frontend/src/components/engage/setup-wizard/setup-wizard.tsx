@@ -5,69 +5,36 @@ import { useFetch } from '@gitroom/helpers/utils/custom.fetch';
 import { useRouter } from 'next/navigation';
 import { useToaster } from '@gitroom/react/toaster/toaster';
 
-// Must match the backend's KEYWORD_TYPES whitelist in engage.dto.ts — the
-// scorer strict-equals these literals to grant the BRAND/COMPETITOR bonus.
-const KEYWORD_TYPES = ['CORE', 'BRAND', 'COMPETITOR'] as const;
-type KeywordType = (typeof KEYWORD_TYPES)[number];
-
-const KEYWORD_TYPE_COLORS: Record<KeywordType, string> = {
-  CORE: 'bg-blue-500/20 text-blue-400',
-  BRAND: 'bg-green-500/20 text-green-400',
-  COMPETITOR: 'bg-red-500/20 text-red-400',
-};
-
 export function SetupWizard() {
   const fetch = useFetch();
   const router = useRouter();
   const toaster = useToaster();
 
-  const [keywords, setKeywords] = useState<
-    Array<{ keyword: string; type: KeywordType; enabled: boolean }>
-  >([]);
+  const [keywords, setKeywords] = useState<string[]>([]);
   const [input, setInput] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
   const addKeyword = useCallback(() => {
     const kw = input.trim();
-    if (!kw || keywords.some((k) => k.keyword === kw)) return;
-    setKeywords((prev) => [...prev, { keyword: kw, type: 'CORE', enabled: true }]);
+    if (!kw || keywords.includes(kw)) return;
+    setKeywords((prev) => [...prev, kw]);
     setInput('');
   }, [input, keywords]);
 
   const removeKeyword = (idx: number) =>
     setKeywords((prev) => prev.filter((_, i) => i !== idx));
 
-  const toggleKeyword = (idx: number) =>
-    setKeywords((prev) =>
-      prev.map((k, i) => (i === idx ? { ...k, enabled: !k.enabled } : k))
-    );
-
   const handleSubmit = useCallback(async () => {
     if (!keywords.length) return;
     setSubmitting(true);
     try {
-      const enabled = keywords.filter((k) => k.enabled);
-      if (enabled.length) {
-        // Atomic bulk-add: createMany skipDuplicates is one INSERT, so a mid-list
-        // failure can't leave the user half-committed (and a retry won't 409 on
-        // keywords saved by a previous attempt).
-        const res = await fetch('/engage/keywords/bulk', {
-          method: 'POST',
-          body: JSON.stringify({
-            keywords: enabled.map((k) => ({ keyword: k.keyword, type: k.type })),
-          }),
-        });
-        if (!res.ok) {
-          toaster.show('Failed to save keywords — please retry', 'warning');
-          return;
-        }
-      }
-      // Mark setup complete
-      const cfgRes = await fetch('/engage/config', {
+      const res = await fetch('/engage/setup', {
         method: 'POST',
-        body: JSON.stringify({ setupCompleted: true }),
+        body: JSON.stringify({
+          keywords: keywords.map((kw) => ({ keyword: kw })),
+        }),
       });
-      if (!cfgRes.ok) {
+      if (!res.ok) {
         toaster.show('Setup save failed. Please try again.', 'warning');
         return;
       }
@@ -124,32 +91,13 @@ export function SetupWizard() {
               key={idx}
               className="flex items-center justify-between bg-[#1e2536] rounded-lg px-4 py-3"
             >
-              <div className="flex items-center gap-3">
-                <span
-                  className={`text-xs px-2 py-0.5 rounded font-medium ${
-                    KEYWORD_TYPE_COLORS[kw.type]
-                  }`}
-                >
-                  {kw.type}
-                </span>
-                <span className="text-white text-sm">{kw.keyword}</span>
-              </div>
-              <div className="flex items-center gap-3">
-                <button
-                  onClick={() => toggleKeyword(idx)}
-                  className={`text-xs ${
-                    kw.enabled ? 'text-green-400' : 'text-gray-500'
-                  }`}
-                >
-                  {kw.enabled ? 'ON' : 'OFF'}
-                </button>
-                <button
-                  onClick={() => removeKeyword(idx)}
-                  className="text-gray-500 hover:text-red-400 text-lg leading-none"
-                >
-                  ×
-                </button>
-              </div>
+              <span className="text-white text-sm">{kw}</span>
+              <button
+                onClick={() => removeKeyword(idx)}
+                className="text-gray-500 hover:text-red-400 text-lg leading-none"
+              >
+                ×
+              </button>
             </div>
           ))}
         </div>
@@ -158,8 +106,7 @@ export function SetupWizard() {
       {/* Action bar */}
       <div className="flex items-center justify-between pt-4 border-t border-[#1e2536]">
         <p className="text-sm text-gray-400">
-          {keywords.filter((k) => k.enabled).length} keyword
-          {keywords.filter((k) => k.enabled).length !== 1 ? 's' : ''} ready
+          {keywords.length} keyword{keywords.length !== 1 ? 's' : ''} ready
         </p>
         <button
           onClick={handleSubmit}

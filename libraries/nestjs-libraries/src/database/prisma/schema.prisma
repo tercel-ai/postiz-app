@@ -1027,7 +1027,7 @@ model EngageConfig {
   id             String    @id @default(uuid())
   organizationId String    @unique
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  setupCompleted Boolean   @default(false)
+  enabled        Boolean   @default(false)
   lastScanAt     DateTime?
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
@@ -1044,7 +1044,7 @@ model EngageKeyword {
   config         EngageConfig @relation(fields: [configId], references: [id], onDelete: Cascade)
   organizationId String
   keyword        String
-  type           String    @default("CORE")
+  type           String?
   enabled        Boolean   @default(true)
   weeklyHitCount Int       @default(0)
   totalHitCount  Int       @default(0)
