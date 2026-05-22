@@ -1,10 +1,15 @@
 import {
+  condition,
   continueAsNew,
+  defineSignal,
   log,
   proxyActivities,
-  sleep,
+  setHandler,
 } from '@temporalio/workflow';
 import type { EngageScanActivity } from '@gitroom/orchestrator/activities/engage-scan.activity';
+
+// Carries the keyword IDs to scan; empty array means "scan all enabled keywords".
+export const triggerScanNowSignal = defineSignal<[string[]]>('triggerScanNow');
 
 const { runDailyScan } = proxyActivities<EngageScanActivity>({
   startToCloseTimeout: '20 minutes',
@@ -38,23 +43,41 @@ function orgStaggerOffsetMs(orgId: string): number {
  * Daily scan workflow — runs at UTC 00:30 per org (+ deterministic 0-30min stagger).
  * Fetches X keywords + monitored channels, scores, classifies, persists.
  * Uses continueAsNew to prevent event history growth.
+ *
+ * Pass runImmediately=true on the first invocation (setup completion) to skip
+ * the initial sleep and scan right away. All continueAsNew calls pass false so
+ * subsequent runs follow the normal daily schedule.
  */
-export async function engageScanWorkflow(orgId: string): Promise<void> {
-  // Sleep until next UTC 00:30, then add per-org stagger to avoid burst.
-  const now = Date.now();
-  const next = new Date();
-  next.setUTCHours(0, 30, 0, 0);
-  if (next.getTime() <= now) {
-    next.setUTCDate(next.getUTCDate() + 1);
+export async function engageScanWorkflow(orgId: string, runImmediately = false): Promise<void> {
+  // Signal handler — fires when a manual "Scan Now" request signals the workflow.
+  // keywordIds: IDs to scan; empty = scan all enabled keywords.
+  let runNow = runImmediately;
+  let pendingKeywordIds: string[] = [];
+  setHandler(triggerScanNowSignal, (ids: string[]) => {
+    runNow = true;
+    pendingKeywordIds = ids;
+  });
+
+  if (!runNow) {
+    // Sleep until next UTC 00:30 + per-org stagger, but allow early wake via signal.
+    const now = Date.now();
+    const next = new Date();
+    next.setUTCHours(0, 30, 0, 0);
+    if (next.getTime() <= now) {
+      next.setUTCDate(next.getUTCDate() + 1);
+    }
+    const delay = next.getTime() - now + orgStaggerOffsetMs(orgId);
+
+    // condition(predicate, timeout) resolves when the predicate becomes true
+    // (signal received) or after the timeout — no dangling timer.
+    await condition(() => runNow, delay);
   }
 
-  await sleep(next.getTime() - now + orgStaggerOffsetMs(orgId));
-
   try {
-    await runDailyScan(orgId);
+    await runDailyScan(orgId, pendingKeywordIds.length ? pendingKeywordIds : undefined);
   } catch (err) {
     log.error(`engageScanWorkflow failed for org=${orgId}`, { error: String(err) });
   }
 
-  await continueAsNew<typeof engageScanWorkflow>(orgId);
+  await continueAsNew<typeof engageScanWorkflow>(orgId, false);
 }

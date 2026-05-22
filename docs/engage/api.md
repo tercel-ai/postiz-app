@@ -22,6 +22,7 @@
 - [Reply Actions — Send/Schedule/Manual Reply](#reply-actions--sendschedulemanual-reply)
 - [Sent Replies — Sent Records](#sent-replies--sent-records)
 - [Dashboard Stats — Dashboard Statistics](#dashboard-stats--dashboard-statistics)
+- [Scan — Manual Scan Trigger](#scan--manual-scan-trigger)
 - [Error Handling](#error-handling)
 
 ---
@@ -1045,6 +1046,39 @@ Retrieve Dashboard Engage panel data (returns the same structure as `GET /sent/s
 
 ---
 
+## Scan — Manual Scan Trigger
+
+### POST `/api/engage/scan`
+
+Immediately trigger a keyword scan for the current organization, without waiting for the next scheduled UTC 00:30 run.
+
+Internally, this sends a Temporal signal to the running `engageScanWorkflow`. If a scan is already in progress, the signal is buffered and a new scan starts automatically after the current one completes.
+
+**Rate Limit**: Max 5 calls per organization per hour.
+
+**Request Body**
+
+A JSON array of keyword IDs to scan. Pass an empty array (or omit the body) to scan all enabled keywords.
+
+```json
+["keyword-uuid-1", "keyword-uuid-2", "keyword-uuid-3"]
+```
+
+| Body | Behavior |
+|------|----------|
+| `["id1", "id2"]` | Only scan the specified keywords |
+| `[]` | Scan all enabled keywords |
+| _(empty body)_ | Scan all enabled keywords |
+
+**Response** `200 OK` — Empty body (fire-and-forget; scan runs asynchronously)
+
+**Errors**
+- `429 Too Many Requests` — Rate limit exceeded (5 calls/hour/org)
+
+> **Note**: Results appear in the Signal Feed in approximately 15 minutes. The daily automatic scan at UTC 00:30 is unaffected.
+
+---
+
 ## Error Handling
 
 All error response formats (NestJS default):
@@ -1061,7 +1095,7 @@ All error response formats (NestJS default):
 |---|---|
 | `400 Bad Request` | Parameter validation failed, invalid URL format, scheduledAt is not in the future |
 | `404 Not Found` | Resource doesn't exist, doesn't belong to current organization, opportunity already in a final state |
-| `429 Too Many Requests` | Draft generation rate limit exceeded (20 calls/hour/user) |
+| `429 Too Many Requests` | Draft generation rate limit exceeded (20 calls/hour/user); or scan trigger rate limit exceeded (5 calls/hour/org) |
 | `500 Internal Server Error` | X API call failed, database exception |
 
 **Concurrency Protection**: `POST /reply` and `POST /schedule` use internal atomic locks; only one of two concurrent requests will succeed, the other returns `404` ("Opportunity already claimed by another request").

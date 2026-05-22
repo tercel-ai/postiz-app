@@ -108,6 +108,51 @@ export function SignalFeed() {
     setSelectedId(null);
   }, [mutate]);
 
+  const keywords: Array<{ id: string; keyword: string; type: string }> =
+    config?.keywords?.filter((k: { enabled: boolean }) => k.enabled) ?? [];
+
+  const [scanning, setScanning] = useState(false);
+  const [showKeywordPicker, setShowKeywordPicker] = useState(false);
+  const [selectedKeywordIds, setSelectedKeywordIds] = useState<Set<string>>(new Set());
+
+  const openKeywordPicker = useCallback(() => {
+    // Default: all enabled keywords selected
+    setSelectedKeywordIds(new Set(keywords.map((k) => k.id)));
+    setShowKeywordPicker(true);
+  }, [keywords]);
+
+  const toggleKeyword = useCallback((id: string) => {
+    setSelectedKeywordIds((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  }, []);
+
+  const handleScanNow = useCallback(async () => {
+    setShowKeywordPicker(false);
+    setScanning(true);
+    const ids = [...selectedKeywordIds];
+    try {
+      const res = await fetch('/engage/scan', {
+        method: 'POST',
+        body: JSON.stringify(ids),
+      });
+      if (!res.ok) {
+        const msg = res.status === 429
+          ? 'Too many scans — try again later.'
+          : 'Failed to trigger scan. Try again later.';
+        toaster.show(msg, 'warning');
+        return;
+      }
+      toaster.show('Scan triggered — results will appear in ~15 minutes.', 'success');
+    } catch {
+      toaster.show('Failed to trigger scan. Try again later.', 'warning');
+    } finally {
+      setScanning(false);
+    }
+  }, [fetch, selectedKeywordIds, toaster]);
+
   if (configError) {
     return (
       <div className="flex flex-col items-center justify-center h-48 text-sm">
@@ -150,10 +195,55 @@ export function SignalFeed() {
         />
 
         {/* Stats bar */}
-        {config.lastScanAt && (
-          <div className="px-6 py-2 text-xs text-gray-500 border-b border-[#1e2536]">
-            {total} opportunities · Last scan:{' '}
-            {new Date(config.lastScanAt).toLocaleString()}
+        <div className="px-6 py-2 text-xs text-gray-500 border-b border-[#1e2536] flex items-center justify-between">
+          <span>
+            {config.lastScanAt
+              ? `${total} opportunities · Last scan: ${new Date(config.lastScanAt).toLocaleString()}`
+              : 'No scan yet'}
+          </span>
+          <button
+            onClick={openKeywordPicker}
+            disabled={scanning || keywords.length === 0}
+            className="px-3 py-1 rounded bg-blue-600/20 hover:bg-blue-600/40 text-blue-400 disabled:text-gray-600 disabled:cursor-not-allowed transition-colors"
+          >
+            {scanning ? 'Scanning…' : 'Scan Now'}
+          </button>
+        </div>
+
+        {/* Keyword picker */}
+        {showKeywordPicker && (
+          <div className="mx-6 mt-2 mb-1 p-3 bg-[#1a2035] border border-[#2d3748] rounded-lg text-xs">
+            <p className="text-gray-400 mb-2">Select keywords to scan:</p>
+            <div className="flex flex-wrap gap-2 mb-3">
+              {keywords.map((kw) => (
+                <button
+                  key={kw.id}
+                  onClick={() => toggleKeyword(kw.id)}
+                  className={`px-2 py-1 rounded border transition-colors ${
+                    selectedKeywordIds.has(kw.id)
+                      ? 'border-blue-500 bg-blue-500/20 text-blue-300'
+                      : 'border-[#2d3748] text-gray-500'
+                  }`}
+                >
+                  {kw.keyword}
+                </button>
+              ))}
+            </div>
+            <div className="flex gap-2 justify-end">
+              <button
+                onClick={() => setShowKeywordPicker(false)}
+                className="px-3 py-1 rounded text-gray-500 hover:text-gray-300 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleScanNow}
+                disabled={selectedKeywordIds.size === 0}
+                className="px-3 py-1 rounded bg-blue-600 hover:bg-blue-700 disabled:bg-gray-700 disabled:text-gray-500 text-white transition-colors"
+              >
+                Scan {selectedKeywordIds.size} keyword{selectedKeywordIds.size !== 1 ? 's' : ''}
+              </button>
+            </div>
           </div>
         )}
 
@@ -174,7 +264,7 @@ export function SignalFeed() {
               <p className="text-4xl mb-3">🔍</p>
               <p className="text-sm">No opportunities yet.</p>
               <p className="text-xs mt-1">
-                The daily scan runs at 00:30 UTC. Check back tomorrow!
+                First scan is running — results appear in ~15 minutes. Ongoing scans run daily at 00:30 UTC.
               </p>
             </div>
           ) : (

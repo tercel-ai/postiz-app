@@ -54,11 +54,15 @@ export class EngageScanActivity {
   // ─── Main scan pipeline ──────────────────────────────────────────────────
 
   @ActivityMethod()
-  async runDailyScan(orgId: string): Promise<void> {
+  async runDailyScan(orgId: string, keywordIds?: string[]): Promise<void> {
     const config = await this._engageRepository.getOrCreateConfig(orgId);
     if (!config.setupCompleted) return;
 
-    const enabledKeywords = config.keywords.filter((k) => k.enabled);
+    const allEnabled = config.keywords.filter((k) => k.enabled);
+    const enabledKeywords =
+      keywordIds?.length
+        ? allEnabled.filter((k) => keywordIds.includes(k.id))
+        : allEnabled;
     if (!enabledKeywords.length) return;
 
     const [xPosts, channelPosts] = await Promise.all([

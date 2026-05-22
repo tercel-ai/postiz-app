@@ -247,15 +247,17 @@ export class EngageService {
   private async _startEngageWorkflowsForOrg(orgId: string): Promise<void> {
     const client = this._temporalService.client?.getRawClient();
     if (!client) return;
-    for (const [workflowId, name] of [
-      [`engage-scan-${orgId}`, 'engageScanWorkflow'],
-      [`engage-tracked-${orgId}`, 'engageTrackedAccountsWorkflow'],
-    ] as const) {
+    const workflows: Array<{ workflowId: string; name: string; args: unknown[] }> = [
+      // runImmediately=true → skip the initial UTC 00:30 sleep on first setup.
+      { workflowId: `engage-scan-${orgId}`, name: 'engageScanWorkflow', args: [orgId, true] },
+      { workflowId: `engage-tracked-${orgId}`, name: 'engageTrackedAccountsWorkflow', args: [orgId] },
+    ];
+    for (const { workflowId, name, args } of workflows) {
       try {
         await client.workflow?.start(name, {
           workflowId,
           taskQueue: 'main',
-          args: [orgId],
+          args,
           workflowIdConflictPolicy: 'USE_EXISTING',
         });
       } catch (err) {
@@ -493,6 +495,17 @@ export class EngageService {
           'Contact support to reconcile.',
         { cause: err instanceof Error ? err : undefined }
       );
+    }
+  }
+
+  async triggerImmediateScan(org: Organization, keywordIds: string[] = []): Promise<void> {
+    const client = this._temporalService.client?.getRawClient();
+    if (!client) return;
+    try {
+      const handle = client.workflow.getHandle(`engage-scan-${org.id}`);
+      await handle.signal('triggerScanNow', keywordIds);
+    } catch (err) {
+      this.logger.warn(`triggerImmediateScan: could not signal workflow for org ${org.id}:`, err);
     }
   }
 

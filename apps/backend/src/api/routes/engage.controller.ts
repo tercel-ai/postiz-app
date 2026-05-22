@@ -6,6 +6,7 @@ import {
   Logger,
   NotFoundException,
   Param,
+  ParseArrayPipe,
   Patch,
   Post,
   Query,
@@ -198,6 +199,20 @@ export class EngageController {
       integrationId,
       body
     );
+  }
+
+  // ─── Manual scan trigger ──────────────────────────────────────────────────
+
+  // 5 manual triggers per org per hour — prevents API abuse while allowing
+  // legitimate re-scans after adding new keywords.
+  @Throttle({ default: { limit: 5, ttl: 3_600_000 } })
+  @Post('/scan')
+  triggerScan(
+    @GetOrgFromRequest() org: Organization,
+    @Body(new ParseArrayPipe({ items: String, optional: true, maxSize: 100 }))
+    keywordIds: string[]
+  ) {
+    return this._engageService.triggerImmediateScan(org, keywordIds);
   }
 
   // ─── Opportunities ────────────────────────────────────────────────────────
