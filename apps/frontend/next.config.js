@@ -7,6 +7,12 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  serverExternalPackages: [
+    '@sentry/node',
+    '@opentelemetry/resources',
+    '@opentelemetry/sdk-trace-base',
+    '@opentelemetry/api',
+  ],
   experimental: {
     proxyTimeout: 90_000,
   },

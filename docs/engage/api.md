@@ -1,0 +1,1094 @@
+# Engage Module — Frontend API Reference
+
+**Version**: 1.0  
+**Date**: 2026-05-22  
+**Base Path**: `/api/engage`  
+**Auth**: All endpoints require a valid session cookie (same as existing Post Agent APIs).
+
+---
+
+## Table of Contents
+
+- [General Conventions](#general-conventions)
+- [Enums and Constants](#enums-and-constants)
+- [Data Models](#data-models)
+- [Config — Configuration](#config--configuration)
+- [Keywords — Keywords](#keywords--keywords)
+- [Monitored Channels — Monitored Channels](#monitored-channels--monitored-channels)
+- [Tracked Accounts — Tracked Accounts](#tracked-accounts--tracked-accounts)
+- [Reply Accounts — Reply Accounts](#reply-accounts--reply-accounts)
+- [Opportunities — Signal Feed](#opportunities--signal-feed)
+- [Draft Generation — AI Draft Generation (SSE)](#draft-generation--ai-draft-generation-sse)
+- [Reply Actions — Send/Schedule/Manual Reply](#reply-actions--sendschedulemanual-reply)
+- [Sent Replies — Sent Records](#sent-replies--sent-records)
+- [Dashboard Stats — Dashboard Statistics](#dashboard-stats--dashboard-statistics)
+- [Error Handling](#error-handling)
+
+---
+
+## General Conventions
+
+- All requests/responses are `application/json`, except for SSE endpoints.
+- Pagination parameters: `page` (default 1), `limit` (default 20, max 100).
+- Time fields are ISO 8601 strings (UTC).
+- `id` fields are UUID strings.
+
+---
+
+## Enums and Constants
+
+```typescript
+// Opportunity Status
+type EngageOpportunityStatus =
+  | 'NEW'         // New opportunity, actionable
+  | 'DISMISSED'   // Dismissed/Ignored
+  | 'REPLIED'     // Replied (Directly on X)
+  | 'SCHEDULED'   // Scheduled
+  | 'AUTO_QUEUED' // In auto-reply queue
+  | 'EXPIRED';    // Expired
+
+// AI Draft Strategy
+type ReplyStrategy = 'EXPERT_ANSWER' | 'DATA_BACKED' | 'EMPATHY_LED';
+
+// Keyword Type
+type KeywordType = 'CORE' | 'BRAND' | 'COMPETITOR';
+
+// Intent Type (Values in intentTags)
+type IntentType =
+  | 'help_seeking'  // Seeking help
+  | 'rant'          // Ranting/Complaining
+  | 'discussion'    // Discussion
+  | 'opinion'       // Opinionated
+  | 'comparison'    // Comparison
+  | 'data_share';   // Sharing data
+```
+
+---
+
+## Data Models
+
+### EngageConfig
+
+```typescript
+interface EngageConfig {
+  id: string;
+  organizationId: string;
+  setupCompleted: boolean;
+  lastScanAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  // Embedded relations (only returned by GET /config)
+  keywords: EngageKeyword[];
+  monitoredChannels: EngageMonitoredChannel[];
+  trackedAccounts: EngageTrackedAccount[];
+  xReplyAccounts: EngageXReplyAccount[];
+}
+```
+
+### EngageKeyword
+
+```typescript
+interface EngageKeyword {
+  id: string;
+  configId: string;
+  organizationId: string;
+  keyword: string;
+  type: KeywordType;   // 'CORE' | 'BRAND' | 'COMPETITOR'
+  enabled: boolean;
+  weeklyHitCount: number;
+  totalHitCount: number;
+  lastCountedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+```
+
+### EngageMonitoredChannel
+
+```typescript
+interface EngageMonitoredChannel {
+  id: string;
+  configId: string;
+  organizationId: string;
+  platform: string;      // 'reddit' | 'youtube' | ...
+  channelId: string;     // e.g. 'SEO' (subreddit name without r/)
+  channelName: string;   // e.g. 'r/SEO'
+  audienceSize: number;
+  enabled: boolean;
+  lastScannedAt: string | null;
+  metadata: Record<string, unknown> | null;
+  createdAt: string;
+  updatedAt: string;
+}
+```
+
+### EngageTrackedAccount
+
+```typescript
+interface EngageTrackedAccount {
+  id: string;
+  configId: string;
+  organizationId: string;
+  platform: string;           // 'x' (v1.0 X only)
+  username: string;           // Without @ prefix
+  displayName: string | null;
+  categoryLabel: string | null; // Custom category, e.g., 'GEO Expert'
+  enabled: boolean;
+  lastCheckedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+```
+
+### EngageXReplyAccount (Nested in Integration)
+
+```typescript
+// GET /reply-accounts returns Integration objects with nested engageXReplyAccount
+interface Integration {
+  id: string;
+  name: string;
+  providerIdentifier: 'x';
+  picture: string | null;
+  // Other Integration fields...
+  engageXReplyAccount: EngageXReplyAccountConfig | null;
+}
+
+interface EngageXReplyAccountConfig {
+  id: string;
+  integrationId: string;
+  engageEnabled: boolean;
+  autoReplyEnabled: boolean;
+  autoReplyTimeStart: string | null;   // 'HH:MM' 24h
+  autoReplyTimeEnd: string | null;
+  autoReplyTimezone: string | null;    // IANA timezone, e.g., 'Asia/Shanghai'
+  defaultStrategy: ReplyStrategy;
+  createdAt: string;
+  updatedAt: string;
+}
+```
+
+### EngageOpportunity
+
+```typescript
+interface EngageOpportunity {
+  id: string;
+  organizationId: string;
+  platform: string;            // 'x' | 'reddit'
+  externalPostId: string;
+  externalPostUrl: string;
+  channelId: string | null;    // Reddit: subreddit name; X: null
+  channelName: string | null;
+  authorUsername: string | null;
+  authorDisplayName: string | null;
+  authorAvatarUrl: string | null;
+  authorFollowers: number | null;
+  postContent: string;
+  postPublishedAt: string;
+  // Scoring (0-100)
+  score: number;
+  scoreKeyword: number;     // Keyword score 0-35
+  scoreHeat: number;        // Heat score 0-35
+  scoreAuthority: number;   // Authority score 0-20
+  scoreRecency: number;     // Recency score 0-5
+  scoreTracked: number;     // Tracked account bonus 0 or 5
+  scoreBreakdown: Record<string, unknown> | null;
+  // Intent
+  intentTags: IntentType[];
+  primaryIntent: IntentType;
+  intentScore: number | null;
+  // Status
+  status: EngageOpportunityStatus;
+  bookmarked: boolean;
+  // Platform Metrics
+  metricLikes: number;
+  metricReplies: number;
+  metricRetweets: number;
+  metricQuotes: number;
+  metricScore: number;       // Reddit: score (upvotes - downvotes)
+  metricUpvoteRatio: number | null;
+  metricComments: number;
+  createdAt: string;
+  updatedAt: string;
+  deletedAt: string | null;
+}
+```
+
+### EngageSentReply
+
+```typescript
+interface EngageSentReply {
+  id: string;
+  organizationId: string;
+  opportunityId: string;
+  postId: string;            // Reference to Post table (published post)
+  strategy: ReplyStrategy;
+  brandStrength: number;     // 0-3
+  authorReplied: boolean;    // Whether the original author replied to us
+  createdAt: string;
+  updatedAt: string;
+}
+
+// Extended object returned by listSentReplies (includes nested post + opportunity)
+interface EngageSentReplyWithDetails extends EngageSentReply {
+  post: {
+    id: string;
+    content: string;
+    state: string;         // 'PUBLISHED' | 'QUEUE' | 'ERROR'
+    releaseURL: string | null; // X tweet URL or Reddit comment URL
+    publishDate: string;
+    impressions: number;
+    trafficScore: number;
+    analytics: Array<{ label: string; data: number[] }> | null;
+    integration: {
+      id: string;
+      name: string;
+      providerIdentifier: string;
+      picture: string | null;
+    } | null;
+  };
+  opportunity: {
+    id: string;
+    platform: string;
+    externalPostUrl: string;
+    postContent: string;
+    authorUsername: string | null;
+    authorDisplayName: string | null;
+  };
+}
+```
+
+---
+
+## Config — Configuration
+
+### GET `/api/engage/config`
+
+Retrieve the Engage configuration for the current organization (including all keywords, channels, tracked accounts, and reply accounts).  
+The first call will automatically create a default configuration (`setupCompleted: false`).
+
+**Response** `200 OK`
+
+```json
+{
+  "id": "uuid",
+  "organizationId": "uuid",
+  "setupCompleted": false,
+  "lastScanAt": null,
+  "createdAt": "2026-05-22T00:00:00.000Z",
+  "updatedAt": "2026-05-22T00:00:00.000Z",
+  "keywords": [],
+  "monitoredChannels": [],
+  "trackedAccounts": [],
+  "xReplyAccounts": []
+}
+```
+
+---
+
+### POST `/api/engage/config`
+
+Save configuration. **When `setupCompleted: true`, the backend will automatically start the Temporal scanning workflow** (called after the Setup Wizard is finished).
+
+**Request Body**
+
+```json
+{
+  "setupCompleted": true  // Optional, set to true to indicate initial setup completion
+}
+```
+
+**Response** `200 OK` — Returns the updated `EngageConfig` (without embedded relations)
+
+---
+
+### POST `/api/engage/config/reset`
+
+Reset `setupCompleted` to `false` (re-enter Setup Wizard).
+
+**Response** `200 OK` — Returns the updated `EngageConfig`
+
+---
+
+## Keywords — Keywords
+
+### POST `/api/engage/keywords`
+
+Add a single keyword.
+
+**Request Body**
+
+```json
+{
+  "keyword": "GEO SEO",      // Required, 1-100 characters
+  "type": "CORE",            // Optional, default 'CORE'. Enums: 'CORE' | 'BRAND' | 'COMPETITOR'
+  "enabled": true            // Optional, default true
+}
+```
+
+**Response** `200 OK` — Returns the created `EngageKeyword` object
+
+---
+
+### POST `/api/engage/keywords/bulk`
+
+Bulk add keywords (atomic operation, used by Setup Wizard). Duplicate keywords are automatically skipped without throwing an error.
+
+**Request Body**
+
+```json
+{
+  "keywords": [
+    { "keyword": "AI SEO", "type": "CORE", "enabled": true },
+    { "keyword": "AISEE", "type": "BRAND", "enabled": true },
+    { "keyword": "SurferSEO", "type": "COMPETITOR", "enabled": false }
+  ]
+}
+```
+
+> `keywords` array: 1-100 items
+
+**Response** `200 OK`
+
+```json
+{ "count": 3 }
+```
+
+---
+
+### PATCH `/api/engage/keywords/:id`
+
+Update a keyword's type or enabled status.
+
+**Request Body** (All fields optional)
+
+```json
+{
+  "type": "BRAND",    // 'CORE' | 'BRAND' | 'COMPETITOR'
+  "enabled": false
+}
+```
+
+**Response** `200 OK` — Returns the updated `EngageKeyword`
+
+**Error** `404` — Keyword not found
+
+---
+
+### DELETE `/api/engage/keywords/:id`
+
+Delete a keyword.
+
+**Response** `200 OK` — Returns the deleted `EngageKeyword`
+
+**Error** `404` — Keyword not found
+
+---
+
+## Monitored Channels — Monitored Channels
+
+### GET `/api/engage/monitored-channels`
+
+Retrieve all monitored channels for the current organization.
+
+**Response** `200 OK` — `EngageMonitoredChannel[]`
+
+```json
+[
+  {
+    "id": "uuid",
+    "platform": "reddit",
+    "channelId": "SEO",
+    "channelName": "r/SEO",
+    "audienceSize": 1200000,
+    "enabled": true,
+    "lastScannedAt": null,
+    "metadata": { "description": "...", "url": "https://reddit.com/r/SEO" },
+    "createdAt": "...",
+    "updatedAt": "..."
+  }
+]
+```
+
+---
+
+### POST `/api/engage/monitored-channels/search`
+
+Search for channels to add (v1.0 only supports Reddit subreddits).
+
+**Request Body**
+
+```json
+{
+  "platform": "reddit",
+  "query": "SEO"
+}
+```
+
+**Response** `200 OK`
+
+```json
+[
+  {
+    "platform": "reddit",
+    "channelId": "SEO",
+    "channelName": "r/SEO",
+    "audienceSize": 1200000,
+    "metadata": {
+      "description": "Search engine optimization discussion",
+      "url": "https://reddit.com/r/SEO"
+    }
+  }
+]
+```
+
+> Returns `[]` on search failure or network timeout, does not throw an error.
+
+---
+
+### POST `/api/engage/monitored-channels`
+
+Add a monitored channel. `channelId` + `platform` must be unique; duplicate additions return `409`.
+
+**Request Body**
+
+```json
+{
+  "platform": "reddit",
+  "channelId": "SEO",          // Required, subreddit name (without r/)
+  "channelName": "r/SEO",      // Required, display name
+  "audienceSize": 1200000,     // Optional
+  "metadata": {}               // Optional, any JSON
+}
+```
+
+**Response** `200 OK` — Returns the created `EngageMonitoredChannel`
+
+---
+
+### PATCH `/api/engage/monitored-channels/:id`
+
+Update channel information.
+
+**Request Body** (All fields optional)
+
+```json
+{
+  "enabled": false,
+  "channelName": "r/SEO",
+  "audienceSize": 1250000
+}
+```
+
+**Response** `200 OK` — Returns the updated `EngageMonitoredChannel`
+
+**Error** `404` — Channel not found
+
+---
+
+### DELETE `/api/engage/monitored-channels/:id`
+
+Delete a monitored channel (historical Feed records are preserved).
+
+**Response** `200 OK` — Returns the deleted `EngageMonitoredChannel`
+
+**Error** `404` — Channel not found
+
+---
+
+## Tracked Accounts — Tracked Accounts
+
+> Tracked accounts are **external third-party X accounts** (not ours), used to monitor their posts and push them into the Feed. They cannot be used to send replies.
+
+### GET `/api/engage/tracked-accounts`
+
+Retrieve all tracked accounts.
+
+**Response** `200 OK` — `EngageTrackedAccount[]`
+
+---
+
+### POST `/api/engage/tracked-accounts`
+
+Add a tracked account.
+
+**Request Body**
+
+```json
+{
+  "username": "randfish",       // Required, 1-50 characters, without @ prefix
+  "platform": "x",             // Optional, default 'x'
+  "categoryLabel": "GEO Expert"   // Optional, max 100 characters
+}
+```
+
+**Response** `200 OK` — Returns the created `EngageTrackedAccount`
+
+---
+
+### PATCH `/api/engage/tracked-accounts/:id`
+
+Update a tracked account.
+
+**Request Body** (All fields optional)
+
+```json
+{
+  "enabled": false,
+  "categoryLabel": "SEO Media"
+}
+```
+
+**Response** `200 OK` — Returns the updated `EngageTrackedAccount`
+
+**Error** `404` — Tracked account not found
+
+---
+
+### DELETE `/api/engage/tracked-accounts/:id`
+
+Delete a tracked account (historical Feed records are preserved).
+
+**Response** `200 OK` — Returns the deleted `EngageTrackedAccount`
+
+**Error** `404` — Tracked account not found
+
+---
+
+## Reply Accounts — Reply Accounts
+
+> Reply accounts are **our connected X OAuth accounts** (Integration table), used to send replies. They are completely independent from tracked accounts.
+
+### GET `/api/engage/reply-accounts`
+
+Retrieve all available X accounts and their Engage configurations.
+
+**Response** `200 OK` — `Integration[]` (with nested `engageXReplyAccount`)
+
+```json
+[
+  {
+    "id": "integration-uuid",
+    "name": "mycompany_x",
+    "providerIdentifier": "x",
+    "picture": "https://...",
+    "engageXReplyAccount": {
+      "id": "uuid",
+      "integrationId": "integration-uuid",
+      "engageEnabled": true,
+      "autoReplyEnabled": false,
+      "autoReplyTimeStart": "09:00",
+      "autoReplyTimeEnd": "18:00",
+      "autoReplyTimezone": "Asia/Shanghai",
+      "defaultStrategy": "EXPERT_ANSWER",
+      "createdAt": "...",
+      "updatedAt": "..."
+    }
+  }
+]
+```
+
+> `engageXReplyAccount` being `null` means the account has not been configured with Engage settings (uses defaults).
+
+---
+
+### PATCH `/api/engage/reply-accounts/:integrationId`
+
+Update Engage settings for a specific X account (automatically creates if not exists).
+
+**URL Param**: `integrationId` — The `id` of the Integration (from `GET /reply-accounts`)
+
+**Request Body** (All fields optional)
+
+```json
+{
+  "engageEnabled": true,           // Whether to enable this account in Engage
+  "autoReplyEnabled": false,       // Whether to enable auto-reply
+  "autoReplyTimeStart": "09:00",   // Auto-reply time window start (HH:MM 24h)
+  "autoReplyTimeEnd": "18:00",     // Auto-reply time window end
+  "autoReplyTimezone": "Asia/Shanghai", // IANA timezone
+  "defaultStrategy": "EXPERT_ANSWER"   // Default draft strategy
+}
+```
+
+**Response** `200 OK` — Returns `EngageXReplyAccountConfig`
+
+**Error** `404` — Integration not found or does not belong to the current organization
+
+---
+
+## Opportunities — Signal Feed
+
+### GET `/api/engage/opportunities/score-stats`
+
+Retrieve scoring statistics for the Feed (used for the top dashboard).
+
+**Query Params**
+
+| Parameter | Type | Description |
+|---|---|---|
+| `date` | `'today' \| 'week' \| 'month'` | Time range, defaults to all |
+| `platform` | `string` | Platform filter, e.g., `'x'` / `'reddit'` |
+
+**Response** `200 OK`
+
+```json
+{
+  "total": 142,
+  "avgScore": 74.3,
+  "avgScoreKeyword": 22.1,
+  "avgScoreHeat": 25.6,
+  "avgScoreAuthority": 18.4,
+  "avgScoreRecency": 3.2,
+  "avgScoreTracked": 0.5,
+  "distribution": [
+    { "range": "85-100", "count": 28, "pct": 20 },
+    { "range": "70-84",  "count": 71, "pct": 50 },
+    { "range": "60-69",  "count": 43, "pct": 30 }
+  ],
+  "topByKeyword": {
+    "id": "opp-uuid",
+    "score": 35,
+    "title": "How does GEO actually work for ranking in AI search..."
+  },
+  "topByHeat": {
+    "id": "opp-uuid",
+    "score": 35,
+    "title": "Best SEO tools in 2026 vs 2025..."
+  },
+  "topByAuthority": {
+    "id": "opp-uuid",
+    "score": 20,
+    "title": "My honest review of AISEE after 3 months..."
+  },
+  "trackedCount": 7
+}
+```
+
+> When no data: `total: 0`, other fields are 0 / `null`.
+
+---
+
+### GET `/api/engage/opportunities`
+
+Retrieve the list of opportunities (main Signal Feed endpoint).
+
+**Query Params**
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `platform` | `string` | — | Platform filter: `'x'` / `'reddit'` |
+| `status` | `EngageOpportunityStatus` | — | Status filter |
+| `intent` | `IntentType` | — | Intent filter |
+| `date` | `'today' \| 'week'` | — | Time range |
+| `minScore` | `number` | — | Minimum total score |
+| `minScoreKeyword` | `number` | — | Minimum keyword score |
+| `minScoreHeat` | `number` | — | Minimum heat score |
+| `minScoreAuthority` | `number` | — | Minimum authority score |
+| `trackedOnly` | `boolean` | `false` | Only show posts from tracked accounts |
+| `bookmarked` | `boolean` | — | Only show bookmarked |
+| `sortBy` | `string` | `'score'` | Sort field: `score` / `scoreKeyword` / `scoreHeat` / `scoreAuthority` / `scoreRecency` / `scoreTracked` / `createdAt` |
+| `sortOrder` | `'asc' \| 'desc'` | `'desc'` | Sort direction |
+| `page` | `number` | `1` | Page number |
+| `limit` | `number` | `20` | Items per page, max 100 |
+
+**Response** `200 OK`
+
+```json
+{
+  "items": [ /* EngageOpportunity[] */ ],
+  "total": 142,
+  "page": 1,
+  "limit": 20
+}
+```
+
+**UI Reference: Score Level Colors**
+
+| Score Range | Level | Recommended Color |
+|---|---|---|
+| 85–100 | High Priority | Dark Green |
+| 70–84 | Medium Priority | Yellow-Green |
+| 60–69 | Low Priority | Orange |
+
+---
+
+### PATCH `/api/engage/opportunities/:id/dismiss`
+
+Dismiss an opportunity (only valid for `NEW` / `AUTO_QUEUED` states).
+
+**Response** `200 OK` — Returns the updated `EngageOpportunity`
+
+**Error** `404` — Not found or already in a final state (REPLIED / SCHEDULED / DISMISSED)
+
+---
+
+### PATCH `/api/engage/opportunities/:id/bookmark`
+
+Toggle bookmark status. Does not affect Feed sorting.
+
+**Response** `200 OK` — Returns the updated `EngageOpportunity`
+
+**Error** `404` — Opportunity not found
+
+---
+
+## Draft Generation — AI Draft Generation (SSE)
+
+**Rate Limit**: Max 20 calls per user per hour.
+
+### POST `/api/engage/opportunities/:id/draft`
+
+Stream the generation of an AI reply draft. Response is Server-Sent Events (`text/event-stream`).
+
+> **Note**: This endpoint is only valid for opportunities in `NEW` / `AUTO_QUEUED` status. Replied/Dismissed opportunities will return an error SSE frame.
+
+**Request Body**
+
+```json
+{
+  "strategy": "EXPERT_ANSWER",  // Required: 'EXPERT_ANSWER' | 'DATA_BACKED' | 'EMPATHY_LED'
+  "brandStrength": 1            // Required: 0-3 integer
+}
+```
+
+**Strategy Descriptions**
+
+| strategy | Use Case | Generation Style |
+|---|---|---|
+| `EXPERT_ANSWER` | Help-seeking, Discussion | Expert step-by-step advice |
+| `DATA_BACKED` | Any type | Data-driven, cites specific numbers |
+| `EMPATHY_LED` | Help-seeking, Ranting | Empathize first, then provide insights |
+
+**Brand Strength Descriptions**
+
+| brandStrength | Name | Behavior |
+|---|---|---|
+| `0` | None | Pure value output, no mention of AISEE |
+| `1` | Implicit (Default)| Implicitly establishes authority |
+| `2` | Natural | Naturally mentions AISEE when highly relevant |
+| `3` | Direct | Proactively introduces AISEE and invites trial |
+
+**SSE Response Format**
+
+```
+Content-Type: text/event-stream
+Cache-Control: no-cache
+Connection: keep-alive
+```
+
+Per-line data format:
+
+```
+data: {"text": "Here is "}
+
+data: {"text": "my expert answer..."}
+
+data: [DONE]
+```
+
+On error:
+
+```
+data: {"error": "opportunity_unavailable"}
+
+data: [DONE]
+```
+
+| error code | Meaning |
+|---|---|
+| `opportunity_unavailable` | Opportunity doesn't exist or is already in a final state (404) |
+| `generation_failed` | Claude API call failed |
+
+**Frontend Integration Example (TypeScript)**
+
+```typescript
+const response = await fetch(`/api/engage/opportunities/${id}/draft`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ strategy: 'EXPERT_ANSWER', brandStrength: 1 }),
+  credentials: 'include',
+});
+
+const reader = response.body!.getReader();
+const decoder = new TextDecoder();
+let buffer = '';
+
+while (true) {
+  const { done, value } = await reader.read();
+  if (done) break;
+  buffer += decoder.decode(value, { stream: true });
+  const lines = buffer.split('\n');
+  buffer = lines.pop()!;
+  for (const line of lines) {
+    if (!line.startsWith('data: ')) continue;
+    const data = line.slice(6);
+    if (data === '[DONE]') return;
+    const parsed = JSON.parse(data);
+    if (parsed.error) throw new Error(parsed.error);
+    setDraftText(prev => prev + parsed.text);
+  }
+}
+```
+
+---
+
+## Reply Actions — Send/Schedule/Manual Reply
+
+### POST `/api/engage/opportunities/:id/reply`
+
+**Send Immediately** X reply (real-time call to X API via OAuth).
+
+> Internally: Atomic lock of opportunity → Call X API to post tweet → Write EngageSentReply → Trigger 24h metrics sync.
+
+**Request Body**
+
+```json
+{
+  "integrationId": "integration-uuid",  // Required, from Integration.id of GET /reply-accounts
+  "draftContent": "Great point! Here's what I...",  // Required, max 4000 chars (Please keep within 280 for X)
+  "strategy": "EXPERT_ANSWER",          // Required
+  "brandStrength": 1                    // Required, 0-3
+}
+```
+
+**Response** `200 OK` — Returns `EngageSentReply`
+
+**Errors**
+- `404` — Opportunity doesn't exist or already replied (concurrency protection)
+- `500` — X API call failed (opportunity status will automatically roll back)
+
+---
+
+### POST `/api/engage/opportunities/:id/schedule`
+
+**Schedule Reply** for X (write to schedule queue, publish in future).
+
+**Request Body** (Adds `scheduledAt` to SendReplyDto)
+
+```json
+{
+  "integrationId": "integration-uuid",
+  "draftContent": "Great point! Here's what I...",
+  "strategy": "EXPERT_ANSWER",
+  "brandStrength": 1,
+  "scheduledAt": "2026-05-23T10:00:00.000Z"  // Required, ISO string, must be in the future
+}
+```
+
+**Response** `200 OK` — Returns `EngageSentReply`
+
+**Errors**
+- `400` — `scheduledAt` is not in the future
+- `404` — Opportunity doesn't exist or already replied
+
+---
+
+### POST `/api/engage/opportunities/:id/manual-reply`
+
+**Reddit Manual Reply Confirmation** (User has manually replied on Reddit, confirming record).
+
+> Due to API ToS restrictions, Reddit does not support automatic sending. Uses a "Copy Draft → Manual Paste → Return to Confirm" 3-step flow.
+
+**Request Body**
+
+```json
+{
+  "draftContent": "Here is my reply...",  // Required, max 4000 characters
+  "strategy": "EXPERT_ANSWER",            // Required
+  "brandStrength": 1                      // Required, 0-3
+}
+```
+
+**Response** `200 OK` — Returns `EngageSentReply`
+
+> After calling this endpoint, the record enters the Sent list with status "⚠ No reply URL submitted" until the URL is provided.
+
+---
+
+## Sent Replies — Sent Records
+
+### GET `/api/engage/sent`
+
+Retrieve the list of sent replies (includes original post summary and metrics data).
+
+**Query Params**
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `platform` | `string` | — | Platform filter |
+| `status` | `'published' \| 'scheduled' \| 'manual' \| 'error'` | — | Status filter |
+| `date` | `'today' \| 'week' \| 'month'` | — | Time range |
+| `page` | `number` | `1` | Page number |
+| `limit` | `number` | `20` | Items per page, max 100 |
+
+**Response** `200 OK`
+
+```json
+{
+  "items": [
+    {
+      "id": "sent-reply-uuid",
+      "organizationId": "...",
+      "opportunityId": "opp-uuid",
+      "postId": "post-uuid",
+      "strategy": "EXPERT_ANSWER",
+      "brandStrength": 1,
+      "authorReplied": false,
+      "createdAt": "...",
+      "updatedAt": "...",
+      "post": {
+        "id": "post-uuid",
+        "content": "Great point! Here's what I...",
+        "state": "PUBLISHED",
+        "releaseURL": "https://x.com/user/status/123456",
+        "publishDate": "2026-05-22T10:00:00.000Z",
+        "impressions": 1240,
+        "trafficScore": 87.5,
+        "analytics": [
+          { "label": "Likes", "data": [42] },
+          { "label": "Retweets", "data": [8] },
+          { "label": "Replies", "data": [3] }
+        ],
+        "integration": {
+          "id": "integration-uuid",
+          "name": "mycompany_x",
+          "providerIdentifier": "x",
+          "picture": "https://..."
+        }
+      },
+      "opportunity": {
+        "id": "opp-uuid",
+        "platform": "x",
+        "externalPostUrl": "https://x.com/someuser/status/999",
+        "postContent": "What's the best way to use AI for SEO?",
+        "authorUsername": "someuser",
+        "authorDisplayName": "Some User"
+      }
+    }
+  ],
+  "total": 38,
+  "page": 1,
+  "limit": 20
+}
+```
+
+**`post.state` Meanings**
+
+| state | Meaning |
+|---|---|
+| `PUBLISHED` | Published |
+| `QUEUE` | Scheduled |
+| `ERROR` | Failed to send |
+
+**Special Handling for Reddit Manual Replies**: When `post.releaseURL` is `null`, it means the user has not yet submitted the Reddit comment URL; they should be prompted to provide it.
+
+---
+
+### GET `/api/engage/sent/stats`
+
+Retrieve summary statistics for sent records (used for the top of the Sent page and Dashboard panels).
+
+**Response** `200 OK`
+
+```json
+{
+  "weeklyCount": 23,        // Number sent this week
+  "responseRate": 35,       // Response rate (integer percentage, 0-100)
+  "totalImpressions": 48620, // Total X impressions (from Post.impressions)
+  "avgLikes": 18            // Average likes received
+}
+```
+
+---
+
+### PATCH `/api/engage/sent/:id/reply-url`
+
+**Reddit Manual Reply Only**. Submit a Reddit comment URL to enable metrics tracking.
+
+**URL Param**: `id` — `EngageSentReply.id`
+
+**Request Body**
+
+```json
+{
+  "url": "https://www.reddit.com/r/SEO/comments/abc123/title/xyz789/"
+}
+```
+
+URL format must match: `reddit.com/r/{subreddit}/comments/{post_id}/{title}/{comment_id}/`
+
+**Response** `200 OK` — Returns the updated `Post` object (including `releaseURL`)
+
+**Errors**
+- `400` — Invalid URL format (must be a valid Reddit comment URL)
+- `400` — This record is not a Reddit reply
+- `404` — Record not found
+
+---
+
+## Dashboard Stats — Dashboard Statistics
+
+### GET `/api/engage/dashboard-stats`
+
+Retrieve Dashboard Engage panel data (returns the same structure as `GET /sent/stats`).
+
+**Response** `200 OK`
+
+```json
+{
+  "weeklyCount": 23,
+  "responseRate": 35,
+  "totalImpressions": 48620,
+  "avgLikes": 18
+}
+```
+
+---
+
+## Error Handling
+
+All error response formats (NestJS default):
+
+```json
+{
+  "statusCode": 404,
+  "message": "Opportunity not found",
+  "error": "Not Found"
+}
+```
+
+| HTTP Status Code | Meaning |
+|---|---|
+| `400 Bad Request` | Parameter validation failed, invalid URL format, scheduledAt is not in the future |
+| `404 Not Found` | Resource doesn't exist, doesn't belong to current organization, opportunity already in a final state |
+| `429 Too Many Requests` | Draft generation rate limit exceeded (20 calls/hour/user) |
+| `500 Internal Server Error` | X API call failed, database exception |
+
+**Concurrency Protection**: `POST /reply` and `POST /schedule` use internal atomic locks; only one of two concurrent requests will succeed, the other returns `404` ("Opportunity already claimed by another request").
+
+---
+
+## Appendix: Scoring Algorithm Quick Reference
+
+```
+// Total Score (Only ≥60 enters the Feed)
+total = scoreKeyword(0-35) + scoreHeat(0-35) + scoreAuthority(0-20)
+      + scoreRecency(0-5) + scoreTracked(0 or 5)
+
+// X Heat
+x_heat = likes×1 + replies×3 + retweets×2 + quotes×2
+// Threshold mapping: ≥2000→35, ≥1000→26, ≥300→18, ≥80→9, else→3
+
+// Reddit Heat
+reddit_heat = score × upvote_ratio + num_comments × 2
+// Thresholds: ≥800→35, ≥400→26, ≥100→18, ≥30→9, else→3
+
+// X Traffic Index (Used for display on Sent page)
+x_traffic = likes×1.0 + replies×2.0 + retweets×1.5 + quotes×2.0 + bookmarks×1.5
+
+// Reddit Estimated Impressions
+reddit_impressions = (score + num_comments) × 20
+
+// Reddit Traffic Index
+reddit_traffic = score×1.0 + num_comments×3.0
+```

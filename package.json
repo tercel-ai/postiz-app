@@ -317,7 +317,8 @@
   },
   "pnpm": {
     "overrides": {
-      "next": "14.2.35"
+      "next": "14.2.35",
+      "@smithy/core": "^3.24.3"
     },
     "onlyBuiltDependencies": [
       "bcrypt"
