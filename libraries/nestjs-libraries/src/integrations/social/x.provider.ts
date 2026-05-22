@@ -797,6 +797,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
       thread_finisher: string;
       community?: string;
       quote_tweet_url?: string;
+      reply_to_tweet_id?: string;
       who_can_reply_post:
         | 'everyone'
         | 'following'
