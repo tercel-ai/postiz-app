@@ -2,6 +2,10 @@ import { Injectable } from '@nestjs/common';
 import Anthropic from '@anthropic-ai/sdk';
 import { EngageOpportunity } from '@prisma/client';
 
+const isOpenRouter = !!process.env.OPENROUTER_API_KEY;
+const DRAFT_MODEL =
+  process.env.OPENROUTER_TEXT_MODEL ?? 'anthropic/claude-sonnet-4-6';
+
 const STRATEGY_PROMPTS: Record<string, string> = {
   EXPERT_ANSWER:
     'Give expert step-by-step advice. Share actionable frameworks. Be specific and concrete.',
@@ -33,7 +37,11 @@ const INTENT_PROMPTS: Record<string, string> = {
 @Injectable()
 export class EngageDraftService {
   private readonly anthropic = new Anthropic({
-    apiKey: process.env.ANTHROPIC_API_KEY ?? process.env.CLAUDE_API_KEY,
+    apiKey:
+      process.env.ANTHROPIC_API_KEY ??
+      process.env.CLAUDE_API_KEY ??
+      process.env.OPENROUTER_API_KEY,
+    ...(isOpenRouter && { baseURL: 'https://openrouter.ai/api/v1' }),
   });
 
   async *generateDraft(
@@ -50,7 +58,7 @@ export class EngageDraftService {
     const userPrompt = this._buildUserPrompt(opportunity);
 
     const stream = await this.anthropic.messages.create({
-      model: 'claude-sonnet-4-6',
+      model: DRAFT_MODEL,
       max_tokens: 400,
       system: systemPrompt,
       messages: [{ role: 'user', content: userPrompt }],

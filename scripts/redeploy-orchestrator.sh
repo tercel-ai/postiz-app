@@ -51,8 +51,15 @@ echo "Step 2: Terminating old workflows in $NAMESPACE..."
 npx ts-node --project scripts/tsconfig.json scripts/terminate-workflows.ts --execute $EXTRA_ARGS
 echo ""
 
-# 3. Restart orchestrator immediately after terminate (minimize gap)
-echo "Step 3: Restarting $PM2_PROCESS..."
+# 3. Pre-download NLP model — ensures instant startup
+echo "Step 3: Pre-downloading NLP model..."
+# Cleanup nested sharp in transformers to avoid architecture errors
+rm -rf node_modules/@xenova/transformers/node_modules/sharp 2>/dev/null || true
+npx ts-node -r tsconfig-paths/register scripts/download-model.ts
+echo ""
+
+# 4. Restart orchestrator immediately after terminate (minimize gap)
+echo "Step 4: Restarting $PM2_PROCESS..."
 pm2 restart "$PM2_PROCESS"
 echo ""
 
