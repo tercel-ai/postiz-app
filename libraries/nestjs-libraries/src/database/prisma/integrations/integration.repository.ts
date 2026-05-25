@@ -379,6 +379,28 @@ export class IntegrationRepository {
     });
   }
 
+  findActiveIntegrationsByProvider(provider: string) {
+    return this._integration.model.integration.findMany({
+      where: {
+        providerIdentifier: provider,
+        disabled: false,
+        deletedAt: null,
+        refreshNeeded: false,
+        inBetweenSteps: false,
+      },
+      select: {
+        id: true,
+        token: true,
+        internalId: true,
+        providerIdentifier: true,
+        refreshToken: true,
+        tokenExpiration: true,
+        organizationId: true,
+      },
+      take: 100,
+    });
+  }
+
   async getIntegrationForOrder(
     id: string,
     order: string,

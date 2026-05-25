@@ -1,10 +1,15 @@
-import { IsDefined, IsNotEmpty, IsString, MaxLength } from 'class-validator';
+import { IsDefined, IsNotEmpty, IsOptional, IsString, MaxLength, ValidateIf } from 'class-validator';
 
 export class UserByUsernameDto {
   @IsString()
-  @IsDefined()
+  @IsOptional()
+  id?: string;
+
+  @ValidateIf((o) => !o.id)
+  @IsString()
   @IsNotEmpty()
-  id: string;
+  @MaxLength(50)
+  provider?: string;
 
   @IsString()
   @IsDefined()

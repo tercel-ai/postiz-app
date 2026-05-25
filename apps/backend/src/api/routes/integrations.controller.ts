@@ -455,12 +455,24 @@ export class IntegrationsController {
     @GetOrgFromRequest() org: Organization,
     @Body() body: UserByUsernameDto
   ): Promise<any> {
-    const getIntegration = await this._integrationService.getIntegrationById(
-      org.id,
-      body.id
-    );
-    if (!getIntegration) {
-      throw new HttpException('Invalid integration', 400);
+    let getIntegration: any;
+
+    if (body.id) {
+      getIntegration = await this._integrationService.getIntegrationById(org.id, body.id);
+      if (!getIntegration) {
+        throw new HttpException('Invalid integration', 400);
+      }
+    } else {
+      // System-wide round-robin across all active integrations for the provider.
+      // provider is validated at DTO level (@ValidateIf) and here against the allowlist.
+      const provider = body.provider!;
+      if (!this._integrationManager.getAllowedSocialsIntegrations().includes(provider)) {
+        throw new HttpException('Invalid provider', 400);
+      }
+      getIntegration = await this._integrationService.pickActiveIntegrationByProvider(provider);
+      if (!getIntegration) {
+        throw new HttpException(`No active integration available for provider: ${provider}`, 503);
+      }
     }
 
     const integrationProvider = this._integrationManager.getSocialIntegration(
@@ -470,51 +482,61 @@ export class IntegrationsController {
       throw new HttpException('Invalid provider', 400);
     }
 
-    try {
-      const result = await integrationProvider.fetchUserByUsername(
-        getIntegration.token,
-        { username: body.username },
-        getIntegration.internalId,
-        getIntegration
-      );
-
-      if (result && 'supported' in result && result.supported === false) {
-        throw new HttpException(
-          {
-            error: 'unsupported',
-            message: `${getIntegration.providerIdentifier} does not support username lookup`,
-          },
-          501
+    // Retry loop: at most one token refresh attempt on the same integration.
+    // Avoids unbounded recursion and ensures the refreshed token is the one used.
+    let currentToken = getIntegration.token;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const result = await integrationProvider.fetchUserByUsername(
+          currentToken,
+          { username: body.username },
+          getIntegration.internalId,
+          { ...getIntegration, token: currentToken }
         );
-      }
 
-      if (result && 'notFound' in result && result.notFound === true) {
-        throw new HttpException(
-          { error: 'not_found', message: 'User not found' },
-          404
-        );
-      }
-
-      return result;
-    } catch (err) {
-      if (err instanceof HttpException) {
-        throw err;
-      }
-      if (err instanceof RefreshToken) {
-        const refreshed = await this._refreshIntegrationService.refresh(
-          getIntegration
-        );
-        if (refreshed && refreshed.accessToken) {
-          if (integrationProvider.refreshWait) {
-            await timer(10000);
-          }
-          return this.fetchUserByUsername(org, body);
+        if (result && 'supported' in result && result.supported === false) {
+          throw new HttpException(
+            {
+              error: 'unsupported',
+              message: `${getIntegration.providerIdentifier} does not support username lookup`,
+            },
+            501
+          );
         }
-        throw new HttpException('Token refresh failed', 401);
+
+        if (result && 'notFound' in result && result.notFound === true) {
+          throw new HttpException(
+            { error: 'not_found', message: 'User not found' },
+            404
+          );
+        }
+
+        return result;
+      } catch (err) {
+        if (err instanceof HttpException) {
+          throw err;
+        }
+        if (err instanceof RefreshToken && attempt === 0) {
+          const refreshed = await this._refreshIntegrationService.refresh(getIntegration);
+          if (refreshed && refreshed.accessToken) {
+            if (integrationProvider.refreshWait) {
+              await timer(10000);
+            }
+            currentToken = refreshed.accessToken;
+            continue;
+          }
+          throw new HttpException('Token refresh failed', 401);
+        }
+        console.error('fetchUserByUsername error:', {
+          integrationId: getIntegration.id,
+          internalId: getIntegration.internalId,
+          provider: getIntegration.providerIdentifier,
+          err,
+        });
+        throw new HttpException('Failed to fetch user', 500);
       }
-      console.error('fetchUserByUsername error:', err);
-      throw new HttpException('Failed to fetch user', 500);
     }
+    throw new HttpException('Failed to fetch user', 500);
   }
 
   @Post('/function')

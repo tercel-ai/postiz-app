@@ -226,6 +226,16 @@ export class IntegrationService {
     return this._integrationRepository.getIntegrationById(org, id);
   }
 
+  async pickActiveIntegrationByProvider(provider: string) {
+    const candidates = await this._integrationRepository.findActiveIntegrationsByProvider(provider);
+    if (!candidates.length) return null;
+    const rrKey = `rr:provider:${provider}`;
+    const idx = await ioRedis.incr(rrKey);
+    // Reset TTL on every write so the key expires a week after last use
+    await ioRedis.expire(rrKey, 604800);
+    return candidates[Number(idx) % candidates.length];
+  }
+
   async refreshToken(provider: SocialProvider, refresh: string) {
     try {
       const { refreshToken, accessToken, expiresIn } =
