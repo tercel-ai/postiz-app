@@ -23,8 +23,9 @@ export class EngageIntentClassifierService implements OnModuleInit {
       process.env.ANTHROPIC_API_KEY ??
       process.env.CLAUDE_API_KEY ??
       process.env.OPENROUTER_API_KEY,
+    // Anthropic SDK appends /v1 automatically, so omit it from the base path.
     baseURL: process.env.OPENROUTER_API_KEY
-      ? 'https://openrouter.ai/api/v1'
+      ? 'https://openrouter.ai/api'
       : undefined,
   });
 
@@ -146,7 +147,7 @@ export class EngageIntentClassifierService implements OnModuleInit {
       const isOpenRouter = !!process.env.OPENROUTER_API_KEY;
       const model =
         process.env.OPENROUTER_INTENT_MODEL ??
-        (isOpenRouter ? 'anthropic/claude-haiku-4.5' : 'claude-3-haiku-20240307');
+        (isOpenRouter ? 'anthropic/claude-haiku-4.5' : 'claude-haiku-4-5-20251001');
 
       const extraHeaders = isOpenRouter
         ? {
@@ -209,9 +210,8 @@ export class EngageIntentClassifierService implements OnModuleInit {
         };
       }
     } catch (err) {
-      this.logger.warn(
-        `Claude Haiku fallback failed: ${(err as Error).message}`
-      );
+      const msg = (err as Error).message ?? String(err);
+      this.logger.warn(`Claude Haiku fallback failed: ${msg.slice(0, 200)}`);
     }
 
     return { intentTags: ['discussion'], primaryIntent: 'discussion', intentScore: 0 };

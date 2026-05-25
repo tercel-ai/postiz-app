@@ -152,8 +152,7 @@ export class EngageController {
     @GetOrgFromRequest() org: Organization,
     @Body() body: SearchChannelsDto
   ) {
-    void org;
-    return this._engageService.searchChannels(body.platform, body.query);
+    return this._engageService.searchChannels(org, body.platform, body.query);
   }
 
   // ─── Tracked Accounts ─────────────────────────────────────────────────────

@@ -20,5 +20,6 @@ export default defineConfig({
   test: {
     globals: false,
     environment: 'node',
+    setupFiles: ['dotenv/config'],
   },
 });

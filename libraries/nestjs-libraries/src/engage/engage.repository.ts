@@ -267,6 +267,20 @@ export class EngageRepository {
 
   // ─── Reply Accounts ───────────────────────────────────────────────────────
 
+  async getRedditIntegrationToken(organizationId: string): Promise<string | null> {
+    const integration = await this._integration.model.integration.findFirst({
+      where: {
+        organizationId,
+        providerIdentifier: 'reddit',
+        deletedAt: null,
+        disabled: false,
+      },
+      select: { token: true },
+      orderBy: { createdAt: 'desc' },
+    });
+    return integration?.token ?? null;
+  }
+
   async listXIntegrationsWithReplySettings(organizationId: string) {
     return this._integration.model.integration.findMany({
       where: {

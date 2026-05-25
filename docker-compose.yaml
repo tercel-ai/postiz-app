@@ -33,7 +33,7 @@ services:
       # === social Media API Settings
       ANTHROPIC_API_KEY: ''
       OPENROUTER_API_KEY: ''
-      OPENROUTER_INTENT_MODEL: 'anthropic/claude-haiku-4.5'
+      OPENROUTER_INTENT_MODEL: 'anthropic/claude-haiku-4-6'
       X_API_KEY: ''
       X_API_SECRET: ''
 
@@ -99,7 +99,6 @@ services:
 
       # === Developer Settings
       NX_ADD_PLUGINS: false
-
       # === Short Link Service Settings (Optional - leave blank if unused)
       # DUB_TOKEN: ""
       # DUB_API_ENDPOINT: "https://api.dub.co"

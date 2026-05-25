@@ -14,6 +14,12 @@ const PLATFORM_COLORS: Record<string, string> = {
 
 const PLATFORMS = ['reddit', 'youtube', 'qq', 'discord'];
 
+interface ChannelMetadata {
+  avatar?: string | null;
+  description?: string | null;
+  url?: string | null;
+}
+
 interface Channel {
   id: string;
   platform: string;
@@ -21,6 +27,15 @@ interface Channel {
   channelName: string;
   audienceSize: number;
   enabled: boolean;
+  metadata?: ChannelMetadata | null;
+}
+
+interface SearchResult {
+  channelId: string;
+  channelName: string;
+  audienceSize: number;
+  platform: string;
+  metadata?: ChannelMetadata | null;
 }
 
 export function MonitoredChannelManager() {
@@ -36,14 +51,7 @@ export function MonitoredChannelManager() {
   const [showAdd, setShowAdd] = useState(false);
   const [searchPlatform, setSearchPlatform] = useState('reddit');
   const [searchQuery, setSearchQuery] = useState('');
-  const [searchResults, setSearchResults] = useState<
-    Array<{
-      channelId: string;
-      channelName: string;
-      audienceSize: number;
-      platform: string;
-    }>
-  >([]);
+  const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [searching, setSearching] = useState(false);
 
   const channels = data ?? [];
@@ -70,7 +78,7 @@ export function MonitoredChannelManager() {
   }, [searchPlatform, searchQuery, fetch, toaster]);
 
   const addChannel = useCallback(
-    async (ch: { channelId: string; channelName: string; audienceSize: number; platform: string }) => {
+    async (ch: SearchResult) => {
       try {
         const res = await fetch('/engage/monitored-channels', {
           method: 'POST',
@@ -194,11 +202,22 @@ export function MonitoredChannelManager() {
                   key={r.channelId}
                   className="flex items-center justify-between bg-[#0f1219] rounded-lg px-3 py-2"
                 >
-                  <div>
-                    <span className="text-sm text-white">{r.channelName}</span>
-                    <span className="text-xs text-gray-500 ml-2">
-                      {r.audienceSize.toLocaleString()} members
-                    </span>
+                  <div className="flex items-center gap-2">
+                    {r.metadata?.avatar ? (
+                      <img
+                        src={r.metadata.avatar}
+                        alt=""
+                        className="w-7 h-7 rounded-full object-cover shrink-0"
+                      />
+                    ) : (
+                      <div className="w-7 h-7 rounded-full bg-[#2d3748] shrink-0" />
+                    )}
+                    <div>
+                      <span className="text-sm text-white">{r.channelName}</span>
+                      <span className="text-xs text-gray-500 ml-2">
+                        {r.audienceSize.toLocaleString()} members
+                      </span>
+                    </div>
                   </div>
                   <button
                     onClick={() => addChannel(r)}
@@ -241,13 +260,21 @@ export function MonitoredChannelManager() {
             className="bg-[#1a2035] rounded-lg p-4 flex items-center justify-between"
           >
             <div className="flex items-center gap-3">
-              <span
-                className={`text-xs px-2 py-0.5 rounded font-medium ${
-                  PLATFORM_COLORS[ch.platform] ?? 'bg-gray-500/20 text-gray-400'
-                }`}
-              >
-                {ch.platform}
-              </span>
+              {ch.metadata?.avatar ? (
+                <img
+                  src={ch.metadata.avatar}
+                  alt=""
+                  className="w-8 h-8 rounded-full object-cover shrink-0"
+                />
+              ) : (
+                <span
+                  className={`text-xs px-2 py-0.5 rounded font-medium ${
+                    PLATFORM_COLORS[ch.platform] ?? 'bg-gray-500/20 text-gray-400'
+                  }`}
+                >
+                  {ch.platform}
+                </span>
+              )}
               <div>
                 <p className="text-sm text-white">{ch.channelName}</p>
                 <p className="text-xs text-gray-500">

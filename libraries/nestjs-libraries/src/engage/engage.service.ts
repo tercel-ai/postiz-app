@@ -54,7 +54,9 @@ export class EngageService {
   }
 
   async saveConfig(org: Organization, dto: SaveEngageConfigDto) {
-    const result = await this._engageRepository.saveConfig(org.id, dto);
+    const result = await this._engageRepository.saveConfig(org.id, {
+      ...(dto.enabled !== undefined && { enabled: dto.enabled }),
+    });
     if (dto.enabled) {
       await this._startEngageWorkflowsForOrg(org.id);
     }
@@ -118,11 +120,10 @@ export class EngageService {
     return this._engageRepository.removeMonitoredChannel(org.id, id);
   }
 
-  async searchChannels(platform: string, query: string) {
-    // Platform-specific channel search stub.
-    // V1: Reddit search via public API; others return empty.
+  async searchChannels(org: Organization, platform: string, query: string) {
     if (platform === 'reddit') {
-      return this._searchRedditSubreddits(query);
+      const userToken = await this._engageRepository.getRedditIntegrationToken(org.id);
+      return this._searchRedditSubreddits(query, userToken);
     }
     return [];
   }
@@ -219,66 +220,68 @@ export class EngageService {
 
   // ─── Private helpers ──────────────────────────────────────────────────────
 
-  private async _searchRedditSubreddits(query: string) {
+  private async _searchRedditSubreddits(query: string, userToken?: string | null) {
     // Strip leading "r/" so users can type either "SEO" or "r/SEO".
     const normalized = query.replace(/^r\//i, '').trim();
     if (!normalized) return [];
 
-    const token = await getRedditToken();
-    if (!token) return [];
+    // Prefer user-level OAuth token (from connected Reddit account) over app-level token.
+    // Reddit blocks both public JSON API and client_credentials from server environments.
+    const token = userToken || (await getRedditToken());
 
-    // Primary: subreddit search via OAuth API.
+    // Build fetch options: OAuth headers when token available, public JSON API otherwise.
+    // Reddit's public .json endpoints work without auth (lower rate limits, sufficient for search).
+    const makeOpts = (t: string | null): RequestInit => ({
+      headers: t
+        ? redditAuthHeaders(t)
+        : { 'User-Agent': 'AISEE-Engage/1.0' },
+      signal: AbortSignal.timeout(8000),
+    });
+
+    const searchBase = token
+      ? `https://oauth.reddit.com/subreddits/search`
+      : `https://www.reddit.com/subreddits/search.json`;
+
+    const aboutBase = (name: string) =>
+      token
+        ? `https://oauth.reddit.com/r/${encodeURIComponent(name)}/about`
+        : `https://www.reddit.com/r/${encodeURIComponent(name)}/about.json`;
+
+    const mapSubreddit = (d: Record<string, unknown>) => ({
+      platform: 'reddit' as const,
+      channelId: d.display_name as string,
+      channelName: `r/${d.display_name as string}`,
+      audienceSize: Number(d.subscribers ?? 0),
+      metadata: {
+        description: d.public_description,
+        url: `https://reddit.com/r/${d.display_name}`,
+        avatar: (d.community_icon as string)?.split('?')[0] || (d.icon_img as string) || null,
+      },
+    });
+
+    // Primary: subreddit search.
     try {
-      const url = `https://oauth.reddit.com/subreddits/search?q=${encodeURIComponent(normalized)}&limit=10&type=sr`;
-      const res = await fetch(url, {
-        headers: redditAuthHeaders(token),
-        signal: AbortSignal.timeout(8000),
-      });
+      const url = `${searchBase}?q=${encodeURIComponent(normalized)}&limit=10&type=sr`;
+      const res = await fetch(url, makeOpts(token));
       if (res.ok) {
         const json = (await res.json()) as {
           data?: { children?: Array<{ data: Record<string, unknown> }> };
         };
-        const results = (json?.data?.children ?? []).map((c) => ({
-          platform: 'reddit',
-          channelId: c.data.display_name as string,
-          channelName: `r/${c.data.display_name as string}`,
-          audienceSize: Number(c.data.subscribers ?? 0),
-          metadata: {
-            description: c.data.public_description,
-            url: `https://reddit.com/r/${c.data.display_name}`,
-          },
-        }));
+        const results = (json?.data?.children ?? []).map((c) => mapSubreddit(c.data));
         if (results.length) return results;
       }
     } catch {
       // fall through to direct lookup
     }
 
-    // Fallback: exact subreddit name — useful for small/new subreddits not in search.
+    // Fallback: exact subreddit name — handles small/new subreddits absent from search index.
     try {
-      const aboutRes = await fetch(
-        `https://oauth.reddit.com/r/${encodeURIComponent(normalized)}/about`,
-        {
-          headers: redditAuthHeaders(token),
-          signal: AbortSignal.timeout(8000),
-        }
-      );
+      const aboutRes = await fetch(aboutBase(normalized), makeOpts(token));
       if (!aboutRes.ok) return [];
       const about = (await aboutRes.json()) as { data?: Record<string, unknown> };
       const d = about.data;
       if (!d || d.subreddit_type === 'private') return [];
-      return [
-        {
-          platform: 'reddit',
-          channelId: d.display_name as string,
-          channelName: `r/${d.display_name as string}`,
-          audienceSize: Number(d.subscribers ?? 0),
-          metadata: {
-            description: d.public_description,
-            url: `https://reddit.com/r/${d.display_name}`,
-          },
-        },
-      ];
+      return [mapSubreddit(d)];
     } catch {
       return [];
     }
@@ -540,14 +543,39 @@ export class EngageService {
     }
   }
 
-  async triggerImmediateScan(org: Organization, keywordIds: string[] = []): Promise<void> {
+  async triggerImmediateScan(
+    org: Organization,
+    keywordIds: string[] = []
+  ): Promise<{ status: 'signaled' | 'started' | 'no_client' | 'error' }> {
     const client = this._temporalService.client?.getRawClient();
-    if (!client) return;
+    if (!client) return { status: 'no_client' };
+
+    const workflowId = `engage-scan-${org.id}`;
     try {
-      const handle = client.workflow.getHandle(`engage-scan-${org.id}`);
+      const handle = client.workflow.getHandle(workflowId);
       await handle.signal('triggerScanNow', keywordIds);
-    } catch (err) {
-      this.logger.warn(`triggerImmediateScan: could not signal workflow for org ${org.id}:`, err);
+      return { status: 'signaled' };
+    } catch (signalErr) {
+      // Workflow not running — start it so the scan fires immediately.
+      this.logger.warn(
+        `triggerImmediateScan: workflow ${workflowId} not running, starting it`,
+        signalErr
+      );
+      try {
+        await client.workflow.start('engageScanWorkflow', {
+          workflowId,
+          taskQueue: 'main',
+          args: [org.id, true],
+          workflowIdConflictPolicy: 'USE_EXISTING',
+        });
+        return { status: 'started' };
+      } catch (startErr) {
+        this.logger.error(
+          `triggerImmediateScan: failed to start workflow for org ${org.id}`,
+          startErr
+        );
+        return { status: 'error' };
+      }
     }
   }
 

@@ -378,7 +378,8 @@ export class EngageScanActivity {
     };
     while ((match = itemRegex.exec(xml)) !== null) {
       const entry = match[1];
-      const link = entry.match(/rel="alternate" href="([^"]+)"/)?.[1] ?? '';
+      // Reddit Atom feed uses <link href="..." /> (no rel attribute on search results)
+      const link = entry.match(/<link[^>]+href="([^"]+)"/)?.[1] ?? '';
       const id = link.split('/comments/')?.[1]?.split('/')?.[0] ?? `rss_${Date.now()}`;
       const title = get('title', entry);
       const author = get('name', entry);

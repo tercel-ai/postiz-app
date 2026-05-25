@@ -90,27 +90,29 @@ export class RedditProvider extends SocialAbstract implements SocialProvider {
   }
 
   async authenticate(params: { code: string; codeVerifier: string }) {
+    const rawTokenRes = await fetch('https://www.reddit.com/api/v1/access_token', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Authorization: `Basic ${Buffer.from(
+          `${process.env.REDDIT_CLIENT_ID}:${process.env.REDDIT_CLIENT_SECRET}`
+        ).toString('base64')}`,
+      },
+      body: new URLSearchParams({
+        grant_type: 'authorization_code',
+        code: params.code,
+        redirect_uri: `${process.env.FRONTEND_URL}/integrations/social/reddit`,
+      }),
+    });
+    const tokenJson = await rawTokenRes.json();
+    console.log(`[Reddit authenticate] HTTP ${rawTokenRes.status} redirect_uri=${process.env.FRONTEND_URL}/integrations/social/reddit body=${JSON.stringify(tokenJson)}`);
+
     const {
       access_token: accessToken,
       refresh_token: refreshToken,
       expires_in: expiresIn,
       scope,
-    } = await (
-      await this.fetch('https://www.reddit.com/api/v1/access_token', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-          Authorization: `Basic ${Buffer.from(
-            `${process.env.REDDIT_CLIENT_ID}:${process.env.REDDIT_CLIENT_SECRET}`
-          ).toString('base64')}`,
-        },
-        body: new URLSearchParams({
-          grant_type: 'authorization_code',
-          code: params.code,
-          redirect_uri: `${process.env.FRONTEND_URL}/integrations/social/reddit`,
-        }),
-      })
-    ).json();
+    } = tokenJson;
 
     this.checkScopes(this.scopes, scope);
 

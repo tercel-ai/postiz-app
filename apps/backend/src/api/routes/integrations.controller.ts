@@ -463,9 +463,9 @@ export class IntegrationsController {
         throw new HttpException('Invalid integration', 400);
       }
     } else {
-      // System-wide round-robin across all active integrations for the provider.
-      // provider is validated at DTO level (@ValidateIf) and here against the allowlist.
-      const provider = body.provider!;
+      // No integration ID supplied — fall back to round-robin across all active integrations.
+      // Default to 'x' so callers can omit provider when doing X username lookups.
+      const provider = body.provider ?? 'x';
       if (!this._integrationManager.getAllowedSocialsIntegrations().includes(provider)) {
         throw new HttpException('Invalid provider', 400);
       }

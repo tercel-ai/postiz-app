@@ -136,6 +136,7 @@ export function SignalFeed() {
     try {
       const res = await fetch('/engage/scan', {
         method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(ids),
       });
       if (!res.ok) {
