@@ -65,6 +65,7 @@ export class AddKeywordDto {
 
   @IsOptional()
   @IsIn(KEYWORD_TYPES)
+  @Transform(({ value }) => value === '' ? undefined : value)
   type?: KeywordType;
 
   @IsOptional()
