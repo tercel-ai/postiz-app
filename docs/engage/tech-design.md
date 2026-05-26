@@ -742,6 +742,7 @@ interface ScoreStatsResult {
 export class AddTrackedAccountDto {
   username: string;      // external X @username (no @ prefix)
   categoryLabel?: string; // e.g. "GEO专家"
+  enabled?: boolean;    // default true
 }
 
 export class UpdateTrackedAccountDto {

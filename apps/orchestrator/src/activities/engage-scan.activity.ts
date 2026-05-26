@@ -98,14 +98,14 @@ export class EngageScanActivity {
     for (const account of enabledAccounts) {
       this._heartbeat({ stage: 'tracked_fetch', username: account.username });
       try {
-        const tweets = await this._fetchUserTweets(
+        const { posts, profile } = await this._fetchUserTweets(
           account.username,
           account.lastCheckedAt ?? undefined
         );
         xPosts.push(
-          ...tweets.map((t) => ({ ...t, isFromTrackedAccount: true }))
+          ...posts.map((t) => ({ ...t, isFromTrackedAccount: true }))
         );
-        await this._updateTrackedAccountLastChecked(account.id);
+        await this._updateTrackedAccountAfterScan(account.id, profile);
       } catch (err) {
         this.logger.warn(
           `Failed to fetch tweets for @${account.username}: ${(err as Error).message}`
@@ -534,10 +534,20 @@ export class EngageScanActivity {
     });
   }
 
-  private async _updateTrackedAccountLastChecked(id: string): Promise<void> {
+  private async _updateTrackedAccountAfterScan(
+    id: string,
+    profile?: { picture?: string; displayName?: string }
+  ): Promise<void> {
     await this._trackedAccount.model.engageTrackedAccount.update({
       where: { id },
-      data: { lastCheckedAt: new Date() },
+      data: {
+        lastCheckedAt: new Date(),
+        // Backfill avatar / display name from the X user lookup. Only overwrite
+        // when the API actually returned a value so a transient gap can't wipe
+        // a previously stored picture.
+        ...(profile?.picture && { picture: profile.picture }),
+        ...(profile?.displayName && { displayName: profile.displayName }),
+      },
     });
   }
 
@@ -553,7 +563,10 @@ export class EngageScanActivity {
   private async _fetchUserTweets(
     username: string,
     since?: Date | null
-  ): Promise<RawPost[]> {
+  ): Promise<{
+    posts: RawPost[];
+    profile?: { picture?: string; displayName?: string };
+  }> {
     const params = new URLSearchParams({
       max_results: '10',
       'tweet.fields': 'public_metrics,created_at,text',
@@ -562,10 +575,14 @@ export class EngageScanActivity {
     });
     // Uses app-level bearer token for read-only public timeline
     const bearerToken = process.env.X_BEARER_TOKEN;
-    if (!bearerToken) return [];
+    if (!bearerToken) return { posts: [] };
 
+    // profile_image_url + name backfill the tracked account's avatar / display name.
+    const userParams = new URLSearchParams({
+      'user.fields': 'public_metrics,profile_image_url,name',
+    });
     const userRes = await fetch(
-      `https://api.twitter.com/2/users/by/username/${username}`,
+      `https://api.twitter.com/2/users/by/username/${username}?${userParams}`,
       { headers: { Authorization: `Bearer ${bearerToken}` } }
     );
     if (!userRes.ok) {
@@ -573,13 +590,28 @@ export class EngageScanActivity {
       this.logger.warn(
         `X /users/by/username returned ${userRes.status} for @${username}: ${body.slice(0, 200)}`
       );
-      return [];
+      return { posts: [] };
     }
     const userJson = (await userRes.json()) as {
-      data?: { id: string; public_metrics?: { followers_count: number } };
+      data?: {
+        id: string;
+        name?: string;
+        profile_image_url?: string;
+        public_metrics?: { followers_count: number };
+      };
     };
     const userId = userJson.data?.id;
-    if (!userId) return [];
+    if (!userId) return { posts: [] };
+
+    // X returns the 48px "_normal" variant; request the 400x400 crop for crisp UI.
+    const picture = userJson.data?.profile_image_url?.replace(
+      '_normal',
+      '_400x400'
+    );
+    const profile = {
+      ...(picture && { picture }),
+      ...(userJson.data?.name && { displayName: userJson.data.name }),
+    };
 
     const tweetsRes = await fetch(
       `https://api.twitter.com/2/users/${userId}/tweets?${params}`,
@@ -590,7 +622,7 @@ export class EngageScanActivity {
       this.logger.warn(
         `X /users/${userId}/tweets returned ${tweetsRes.status} for @${username}: ${body.slice(0, 200)}`
       );
-      return [];
+      return { posts: [], profile };
     }
     const json = (await tweetsRes.json()) as {
       data?: Array<{
@@ -606,12 +638,14 @@ export class EngageScanActivity {
       }>;
     };
 
-    return (json.data ?? []).map((tweet) => ({
+    const posts: RawPost[] = (json.data ?? []).map((tweet) => ({
       id: `x_${tweet.id}`,
       platform: 'x',
       externalPostId: tweet.id,
       externalPostUrl: `https://x.com/${username}/status/${tweet.id}`,
       authorUsername: username,
+      authorDisplayName: profile.displayName,
+      authorAvatarUrl: profile.picture,
       authorFollowers: userJson.data?.public_metrics?.followers_count,
       postContent: tweet.text,
       postPublishedAt: new Date(tweet.created_at),
@@ -622,6 +656,7 @@ export class EngageScanActivity {
       metricScore: 0,
       metricComments: 0,
     }));
+    return { posts, profile };
   }
 
   // ─── Helpers ──────────────────────────────────────────────────────────────

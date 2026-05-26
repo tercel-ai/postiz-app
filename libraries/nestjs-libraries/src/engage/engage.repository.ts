@@ -221,7 +221,9 @@ export class EngageRepository {
         organizationId,
         platform: dto.platform ?? 'x',
         username: dto.username,
+        ...(dto.picture && { picture: dto.picture }),
         ...(dto.categoryLabel && { categoryLabel: dto.categoryLabel }),
+        ...(dto.enabled !== undefined && { enabled: dto.enabled }),
       },
     });
   }
@@ -247,6 +249,7 @@ export class EngageRepository {
       where: { id },
       data: {
         ...(dto.enabled !== undefined && { enabled: dto.enabled }),
+        ...(dto.picture !== undefined && { picture: dto.picture }),
         ...(dto.categoryLabel !== undefined && {
           categoryLabel: dto.categoryLabel,
         }),
@@ -912,6 +915,7 @@ export class EngageRepository {
             organizationId,
             platform: acc.platform ?? 'x',
             username: acc.username,
+            ...(acc.picture && { picture: acc.picture }),
             ...(acc.categoryLabel && { categoryLabel: acc.categoryLabel }),
           })),
           skipDuplicates: true,

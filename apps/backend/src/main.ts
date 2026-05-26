@@ -1,11 +1,10 @@
 import { initializeSentry } from '@gitroom/nestjs-libraries/sentry/initialize.sentry';
-import { ProxyAgent, setGlobalDispatcher } from 'undici';
+import { setupHttpDispatcher } from '@gitroom/helpers/proxy/setup-dispatcher';
 initializeSentry('backend', true);
 
-const _backendProxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
-if (_backendProxyUrl) {
-  setGlobalDispatcher(new ProxyAgent(_backendProxyUrl));
-}
+// Reddit (REDDIT_PROXY) is routed separately from general traffic (HTTPS_PROXY)
+// because Reddit's API IP-blocks data-center / commercial-VPN exit IPs.
+setupHttpDispatcher();
 
 import { loadSwagger } from '@gitroom/helpers/swagger/load.swagger';
 import { json } from 'express';

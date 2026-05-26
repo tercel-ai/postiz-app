@@ -1085,6 +1085,7 @@ model EngageTrackedAccount {
   platform       String    @default("x")
   username       String
   displayName    String?
+  picture        String?
   categoryLabel  String?
   enabled        Boolean   @default(true)
   lastCheckedAt  DateTime?

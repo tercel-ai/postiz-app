@@ -45,7 +45,7 @@ export class EngageService {
     private _temporalService: TemporalService,
     private _postsService: PostsService,
     private _postOverageService: PostOverageService
-  ) {}
+  ) { }
 
   // ─── Config ───────────────────────────────────────────────────────────────
 
@@ -225,12 +225,16 @@ export class EngageService {
     const normalized = query.replace(/^r\//i, '').trim();
     if (!normalized) return [];
 
-    // Prefer user-level OAuth token (from connected Reddit account) over app-level token.
-    // Reddit blocks both public JSON API and client_credentials from server environments.
+    // Prefer user-level OAuth token (from a connected Reddit account). The
+    // app-level client_credentials token (getRedditToken) is unavailable for
+    // "web app" type apps — Reddit forbids that grant (403) — so it falls back
+    // to the public JSON API, which works from a clean (non-blocked) IP.
     const token = userToken || (await getRedditToken());
 
-    // Build fetch options: OAuth headers when token available, public JSON API otherwise.
-    // Reddit's public .json endpoints work without auth (lower rate limits, sufficient for search).
+    // Build fetch options: OAuth headers when a token is available, public JSON
+    // API otherwise. Reddit's public .json endpoints need no auth (lower rate
+    // limits, sufficient for search). Outbound requests to *.reddit.com are
+    // routed via REDDIT_PROXY when set (see setup-dispatcher.ts).
     const makeOpts = (t: string | null): RequestInit => ({
       headers: t
         ? redditAuthHeaders(t)
@@ -390,13 +394,13 @@ export class EngageService {
     } catch (err) {
       this.logger.error(
         `sendReply: X reply published (postId=${postId}, opportunityId=${opportunityId}, ` +
-          `orgId=${org.id}) but failed to record EngageSentReply.`,
+        `orgId=${org.id}) but failed to record EngageSentReply.`,
         err instanceof Error ? err.stack : err
       );
       if (err instanceof HttpException) throw err;
       throw new InternalServerErrorException(
         'Reply was published but the tracking record could not be created. ' +
-          'Contact support to reconcile.',
+        'Contact support to reconcile.',
         { cause: err instanceof Error ? err : undefined }
       );
     }
@@ -531,13 +535,13 @@ export class EngageService {
     } catch (err) {
       this.logger.error(
         `confirmManualReply: Reddit reply recorded (postId=${postId}, ` +
-          `opportunityId=${opportunityId}, orgId=${org.id}) but failed to record EngageSentReply.`,
+        `opportunityId=${opportunityId}, orgId=${org.id}) but failed to record EngageSentReply.`,
         err instanceof Error ? err.stack : err
       );
       if (err instanceof HttpException) throw err;
       throw new InternalServerErrorException(
         'Reply was recorded but the tracking record could not be created. ' +
-          'Contact support to reconcile.',
+        'Contact support to reconcile.',
         { cause: err instanceof Error ? err : undefined }
       );
     }

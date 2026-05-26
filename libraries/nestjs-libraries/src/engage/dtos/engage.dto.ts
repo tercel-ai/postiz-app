@@ -153,14 +153,28 @@ export class AddTrackedAccountDto {
 
   @IsOptional()
   @IsString()
+  @MaxLength(2048)
+  picture?: string; // profile avatar URL (usually backfilled during scan)
+
+  @IsOptional()
+  @IsString()
   @MaxLength(100)
   categoryLabel?: string; // e.g. 'GEO专家'
+
+  @IsOptional()
+  @IsBoolean()
+  enabled?: boolean; // default true (Prisma schema default)
 }
 
 export class UpdateTrackedAccountDto {
   @IsOptional()
   @IsBoolean()
   enabled?: boolean;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(2048)
+  picture?: string;
 
   @IsOptional()
   @IsString()

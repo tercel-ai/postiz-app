@@ -1,5 +1,5 @@
 import 'source-map-support/register';
-import { ProxyAgent, setGlobalDispatcher } from 'undici';
+import { setupHttpDispatcher } from '@gitroom/helpers/proxy/setup-dispatcher';
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc';
 dayjs.extend(utc);
@@ -9,10 +9,9 @@ import { AppModule } from '@gitroom/orchestrator/app.module';
 import * as dns from 'node:dns';
 dns.setDefaultResultOrder('ipv4first');
 
-const _orchestratorProxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
-if (_orchestratorProxyUrl) {
-  setGlobalDispatcher(new ProxyAgent(_orchestratorProxyUrl));
-}
+// Reddit (REDDIT_PROXY) is routed separately from general traffic (HTTPS_PROXY)
+// because Reddit's API IP-blocks data-center / commercial-VPN exit IPs.
+setupHttpDispatcher();
 
 async function bootstrap() {
   // some comment again

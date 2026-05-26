@@ -618,10 +618,16 @@ export class IntegrationsController {
     const integrationProvider =
       this._integrationManager.getSocialIntegration(integration);
 
+    // TEMP DIAGNOSTIC (Reddit connect debugging) — remove once resolved.
+    console.log(
+      `[connect] hit integration=${integration} state=${body?.state} hasCode=${!!body?.code} codeLen=${body?.code?.length ?? 0}`
+    );
+
     const getCodeVerifier = integrationProvider.customFields
       ? 'none'
       : await ioRedis.get(`login:${body.state}`);
     if (!getCodeVerifier) {
+      console.error(`[connect] INVALID STATE: no login:${body?.state} in redis`);
       throw new Error('Invalid state');
     }
 
@@ -700,6 +706,14 @@ export class IntegrationsController {
 
         return res(auth);
       } catch (err: any) {
+        // TEMP DIAGNOSTIC (Reddit connect debugging) — remove once resolved.
+        // BadBody/RefreshToken carry Reddit's raw response in err.details.
+        console.error(
+          `[connect:${integration}] authenticate threw:`,
+          'message=', JSON.stringify(err?.message),
+          'type=', err?.type,
+          'details=', JSON.stringify(err?.details)?.slice(0, 1500)
+        );
         return res({
           error: err?.message || 'Authentication failed',
           accessToken: '',

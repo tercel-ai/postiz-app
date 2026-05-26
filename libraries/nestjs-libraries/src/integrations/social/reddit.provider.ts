@@ -21,6 +21,13 @@ import { Integration } from '@prisma/client';
 // @ts-ignore
 global.WebSocket = WebSocket;
 
+// Reddit requires every request to carry a unique, descriptive User-Agent.
+// Missing or generic UAs (e.g. undici's default "node") are blocked with HTTP
+// 403 ("whoa there, pardner!"). Format recommended by Reddit:
+//   <platform>:<app id>:<version> (by /u/<reddit username>)
+const REDDIT_USER_AGENT =
+  process.env.REDDIT_USER_AGENT || 'web:postiz:v1.0 (by /u/postiz-app)';
+
 export class RedditProvider extends SocialAbstract implements SocialProvider {
   override maxConcurrentJob = 1; // Reddit has strict rate limits (1 request per second)
   identifier = 'reddit';
@@ -32,6 +39,32 @@ export class RedditProvider extends SocialAbstract implements SocialProvider {
 
   maxLength() {
     return 10000;
+  }
+
+  // Inject Reddit's required User-Agent into every request. Reddit blocks the
+  // undici default ("node") with HTTP 403, so this must be set on all calls —
+  // token exchange, OAuth, posting and analytics alike. Caller-supplied headers
+  // win, but none set User-Agent, so REDDIT_USER_AGENT always applies.
+  override fetch(
+    url: string,
+    options: RequestInit = {},
+    identifier = '',
+    totalRetries = 0,
+    ignoreConcurrency = false
+  ): Promise<Response> {
+    return super.fetch(
+      url,
+      {
+        ...options,
+        headers: {
+          'User-Agent': REDDIT_USER_AGENT,
+          ...(options.headers as Record<string, string> | undefined),
+        },
+      },
+      identifier,
+      totalRetries,
+      ignoreConcurrency
+    );
   }
 
   async refreshToken(refreshToken: string): Promise<AuthTokenDetails> {
@@ -90,29 +123,35 @@ export class RedditProvider extends SocialAbstract implements SocialProvider {
   }
 
   async authenticate(params: { code: string; codeVerifier: string }) {
-    const rawTokenRes = await fetch('https://www.reddit.com/api/v1/access_token', {
+    // TEMP DIAGNOSTIC (Reddit connect debugging) — remove once resolved.
+    const _redirectUri = `${process.env.FRONTEND_URL}/integrations/social/reddit`;
+    const _clientId = process.env.REDDIT_CLIENT_ID || '';
+    const _clientSecret = process.env.REDDIT_CLIENT_SECRET || '';
+    console.log(
+      `[reddit.authenticate] redirect_uri=${_redirectUri} client_id=${_clientId} secretLen=${_clientSecret.length} codeLen=${params.code?.length} UA=${REDDIT_USER_AGENT}`
+    );
+    const _raw = await fetch('https://www.reddit.com/api/v1/access_token', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
-        Authorization: `Basic ${Buffer.from(
-          `${process.env.REDDIT_CLIENT_ID}:${process.env.REDDIT_CLIENT_SECRET}`
-        ).toString('base64')}`,
+        'User-Agent': REDDIT_USER_AGENT,
+        Authorization: `Basic ${Buffer.from(`${_clientId}:${_clientSecret}`).toString('base64')}`,
       },
       body: new URLSearchParams({
         grant_type: 'authorization_code',
         code: params.code,
-        redirect_uri: `${process.env.FRONTEND_URL}/integrations/social/reddit`,
+        redirect_uri: _redirectUri,
       }),
     });
-    const tokenJson = await rawTokenRes.json();
-    console.log(`[Reddit authenticate] HTTP ${rawTokenRes.status} redirect_uri=${process.env.FRONTEND_URL}/integrations/social/reddit body=${JSON.stringify(tokenJson)}`);
+    const _bodyText = await _raw.text();
+    console.log(`[reddit.authenticate] token HTTP ${_raw.status} body=${_bodyText}`);
 
     const {
       access_token: accessToken,
       refresh_token: refreshToken,
       expires_in: expiresIn,
       scope,
-    } = tokenJson;
+    } = JSON.parse(_bodyText);
 
     this.checkScopes(this.scopes, scope);
 

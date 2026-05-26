@@ -10,6 +10,7 @@ interface TrackedAccount {
   platform: string;
   username: string;
   displayName?: string;
+  picture?: string;
   categoryLabel?: string;
   enabled: boolean;
 }
@@ -133,10 +134,19 @@ export function TrackedAccounts() {
             key={acc.id}
             className="flex items-center gap-3 bg-[#1a2035] rounded-lg px-4 py-3"
           >
-            {/* Avatar initials */}
-            <div className="w-8 h-8 rounded-full bg-[#2d3748] flex items-center justify-center text-xs font-bold text-white uppercase shrink-0">
-              {acc.username.slice(0, 2)}
-            </div>
+            {/* Real avatar when known (backfilled during scan), else initials */}
+            {acc.picture ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={acc.picture}
+                alt={acc.username}
+                className="w-8 h-8 rounded-full object-cover shrink-0"
+              />
+            ) : (
+              <div className="w-8 h-8 rounded-full bg-[#2d3748] flex items-center justify-center text-xs font-bold text-white uppercase shrink-0">
+                {acc.username.slice(0, 2)}
+              </div>
+            )}
             <div className="flex-1 min-w-0">
               <span className="text-white text-sm">@{acc.username}</span>
               {acc.categoryLabel && (
