@@ -20,6 +20,10 @@ import { EngageOpportunityStatus } from '@prisma/client';
 
 const VALID_STRATEGIES = ['EXPERT_ANSWER', 'DATA_BACKED', 'EMPATHY_LED'] as const;
 
+// Sentinel for the `channels` / `authors` opportunity filters meaning
+// "all of this org's configured channels / tracked accounts".
+export const ENGAGE_FILTER_ALL = '__all__';
+
 // Keyword types must match the literals the scorer strict-equals (engage-scorer.ts
 // computeKeywordScore). Without this enum, lowercase / mis-cased values silently
 // store but never receive the +5/+3 brand/competitor bonus.
@@ -254,10 +258,17 @@ export class ListOpportunitiesDto {
   @Min(0)
   minScoreAuthority?: number;
 
+  // Channel filter. `__all__` (ENGAGE_FILTER_ALL) = all of this org's enabled
+  // monitored channels; any other value = that specific channel id (e.g. "SEO").
   @IsOptional()
-  @Transform(({ value }) => value === 'true' || value === true)
-  @IsBoolean()
-  trackedOnly?: boolean;
+  @IsString()
+  channels?: string;
+
+  // Author filter. `__all__` = posts from any of this org's tracked accounts
+  // (i.e. scoreTracked > 0); any other value = that specific author username.
+  @IsOptional()
+  @IsString()
+  authors?: string;
 
   @IsOptional()
   @Transform(({ value }) =>

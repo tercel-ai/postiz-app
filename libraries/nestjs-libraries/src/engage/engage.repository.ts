@@ -13,6 +13,7 @@ import {
   UpdateMonitoredChannelDto,
   UpdateReplyAccountDto,
   UpdateTrackedAccountDto,
+  ENGAGE_FILTER_ALL,
 } from '@gitroom/nestjs-libraries/engage/dtos/engage.dto';
 import dayjs from 'dayjs';
 import isoWeek from 'dayjs/plugin/isoWeek';
@@ -430,6 +431,26 @@ export class EngageRepository {
     const limit = dto.limit ?? 20;
     const offset = (page - 1) * limit;
 
+    // Channel filter: `__all__` → this org's enabled monitored channels (empty set
+    // → match none, which is correct: no channels means no channel-sourced posts);
+    // any other value → that specific channel id.
+    const channelsAll = dto.channels === ENGAGE_FILTER_ALL;
+    let channelIdFilter: Prisma.StringNullableFilter | string | undefined;
+    if (dto.channels && !channelsAll) {
+      channelIdFilter = dto.channels;
+    } else if (channelsAll) {
+      const channels = await this._channel.model.engageMonitoredChannel.findMany({
+        where: { organizationId, enabled: true },
+        select: { channelId: true },
+      });
+      channelIdFilter = { in: channels.map((c) => c.channelId) };
+    }
+
+    // Author filter: `__all__` → any tracked account (scoreTracked on the state row,
+    // case-normalized at scan time); any other value → that specific author username.
+    const authorsAll = dto.authors === ENGAGE_FILTER_ALL;
+    const authorSpecific = dto.authors && !authorsAll ? dto.authors : undefined;
+
     // State-table filters (per-org) + nested opportunity filters (global).
     const where: Prisma.EngageOpportunityStateWhereInput = {
       organizationId,
@@ -439,10 +460,14 @@ export class EngageRepository {
       ...(dto.minScoreKeyword !== undefined && {
         scoreKeyword: { gte: dto.minScoreKeyword },
       }),
-      ...(dto.trackedOnly && { scoreTracked: { gt: 0 } }),
+      ...(authorsAll && { scoreTracked: { gt: 0 } }),
       opportunity: {
         deletedAt: null,
         ...(dto.platform && { platform: dto.platform }),
+        ...(channelIdFilter !== undefined && { channelId: channelIdFilter }),
+        ...(authorSpecific && {
+          authorUsername: { equals: authorSpecific, mode: 'insensitive' },
+        }),
         ...(dto.intent && { intentTags: { has: dto.intent } }),
         ...(dto.minScoreHeat !== undefined && {
           scoreHeat: { gte: dto.minScoreHeat },

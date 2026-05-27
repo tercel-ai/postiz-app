@@ -18,7 +18,11 @@ function buildRepo() {
   const stateFindFirst = vi.fn();
   const oppAggregate = vi.fn();
   const oppFindFirst = vi.fn();
+  const channelFindMany = vi.fn();
 
+  const channel = {
+    model: { engageMonitoredChannel: { findMany: channelFindMany } },
+  } as any;
   const opportunity = {
     model: { engageOpportunity: { aggregate: oppAggregate, findFirst: oppFindFirst } },
   } as any;
@@ -36,12 +40,14 @@ function buildRepo() {
   // Constructor order: _config, _keyword, _channel, _trackedAccount,
   // _replyAccount, _opportunity, _oppState, _sentReply, _integration, _post, _tx
   const repo = new EngageRepository(
-    {} as any, {} as any, {} as any, {} as any, {} as any,
+    {} as any, {} as any,
+    channel,      // _channel
+    {} as any, {} as any,
     opportunity,  // _opportunity
     oppState,     // _oppState
     {} as any, {} as any, {} as any, {} as any
   );
-  return { repo, stateFindMany, stateCount, stateAggregate, stateFindFirst, oppAggregate, oppFindFirst };
+  return { repo, stateFindMany, stateCount, stateAggregate, stateFindFirst, oppAggregate, oppFindFirst, channelFindMany };
 }
 
 const STATE_ROW = {
@@ -108,6 +114,58 @@ describe('EngageRepository — two-table reads', () => {
       await repo.listOpportunities('org1', {} as any);
       expect(stateFindMany.mock.calls[0][0].where.organizationId).toBe('org1');
       expect(stateFindMany.mock.calls[0][0].where.opportunity.deletedAt).toBeNull();
+    });
+
+    it('authors=__all__ filters scoreTracked on the state table', async () => {
+      const { repo, stateFindMany, stateCount } = buildRepo();
+      stateFindMany.mockResolvedValue([]);
+      stateCount.mockResolvedValue(0);
+
+      await repo.listOpportunities('org1', { authors: '__all__' } as any);
+      expect(stateFindMany.mock.calls[0][0].where.scoreTracked).toEqual({ gt: 0 });
+      // "all tracked" must NOT add an authorUsername filter on the opportunity.
+      expect(stateFindMany.mock.calls[0][0].where.opportunity.authorUsername).toBeUndefined();
+    });
+
+    it('channels=<specific> filters the specific channel on the opportunity', async () => {
+      const { repo, stateFindMany, stateCount, channelFindMany } = buildRepo();
+      stateFindMany.mockResolvedValue([]);
+      stateCount.mockResolvedValue(0);
+
+      await repo.listOpportunities('org1', { channels: 'SEO' } as any);
+      expect(stateFindMany.mock.calls[0][0].where.opportunity.channelId).toBe('SEO');
+      // A specific channel must NOT trigger the org-channel-set lookup.
+      expect(channelFindMany).not.toHaveBeenCalled();
+    });
+
+    it('channels=__all__ restricts to the org enabled monitored-channel set', async () => {
+      const { repo, stateFindMany, stateCount, channelFindMany } = buildRepo();
+      channelFindMany.mockResolvedValue([{ channelId: 'SEO' }, { channelId: 'marketing' }]);
+      stateFindMany.mockResolvedValue([]);
+      stateCount.mockResolvedValue(0);
+
+      await repo.listOpportunities('org1', { channels: '__all__' } as any);
+      expect(channelFindMany.mock.calls[0][0].where).toEqual({
+        organizationId: 'org1',
+        enabled: true,
+      });
+      expect(stateFindMany.mock.calls[0][0].where.opportunity.channelId).toEqual({
+        in: ['SEO', 'marketing'],
+      });
+    });
+
+    it('authors=<specific> filters authorUsername case-insensitively on the opportunity', async () => {
+      const { repo, stateFindMany, stateCount } = buildRepo();
+      stateFindMany.mockResolvedValue([]);
+      stateCount.mockResolvedValue(0);
+
+      await repo.listOpportunities('org1', { authors: 'BobSmith' } as any);
+      expect(stateFindMany.mock.calls[0][0].where.opportunity.authorUsername).toEqual({
+        equals: 'BobSmith',
+        mode: 'insensitive',
+      });
+      // A specific author is NOT "all tracked" → no scoreTracked filter.
+      expect(stateFindMany.mock.calls[0][0].where.scoreTracked).toBeUndefined();
     });
   });
 
