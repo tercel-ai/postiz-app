@@ -793,11 +793,24 @@ Retrieve the list of opportunities (main Signal Feed endpoint).
 
 **UI Reference: Score Level Colors**
 
+Total score max is 105 (scoreKeyword 35 + scoreHeat 45 + scoreAuthority 15 + scoreRecency 1 + scoreTracked 5). Only posts scoring ≥60 are stored.
+
 | Score Range | Level | Recommended Color |
 |---|---|---|
-| 85–100 | High Priority | Dark Green |
+| 85–105 | High Priority | Dark Green |
 | 70–84 | Medium Priority | Yellow-Green |
 | 60–69 | Low Priority | Orange |
+
+**Score field quick reference (for rendering per-dimension breakdowns):**
+
+| Field | Max | Meaning |
+|---|---|---|
+| `scoreKeyword` | 35 | 关键词质量 — keyword match strength; each hit +15 |
+| `scoreHeat` | 45 | 平台热度 — platform engagement (likes/replies/etc.) |
+| `scoreAuthority` | 15 | 账号影响力 — author follower count / subreddit size |
+| `scoreRecency` | 5 | 时效性 — freshness: 1 if within 24h, else 0 |
+| `scoreTracked` | 5 | 重点账户 — 5 if author is a tracked account, else 0 |
+| `score` | 105 | 总分 — sum of all dimensions |
 
 ---
 

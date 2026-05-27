@@ -178,20 +178,31 @@ Engage uses **two completely separate account concepts** that must not be confla
 
 #### Scoring Algorithm
 
+**Score Dimension Summary**
+
+| 维度 | 字段 | 最高分 | 公式 |
+|---|---|---|---|
+| 关键词质量 | `scoreKeyword` | 35 | 每个关键词命中 +15，上限 35 |
+| 平台热度 | `scoreHeat` | 45 | 按平台专属公式计算（见下方） |
+| 账号影响力 | `scoreAuthority` | 15 | 按平台分别用粉丝数 / subreddit 规模计算（见下方） |
+| 时效性 | `scoreRecency` | 5 | 24h 内 → 1；超出 → 0 |
+| 重点账户 | `scoreTracked` | 5 | 命中重点账户 +5 |
+| **总分** | `score` | **105** | 以上五项之和 |
+
 **Layer 1: Keyword Hard Filter** (must pass)
 - Post body must contain ≥1 active keyword (case-insensitive, phrase-exact)
 - Hashtag content extracted (#GEO → "GEO")
 - Posts failing this filter are discarded, not stored
 
-**Layer 2: Composite Score (0–100, ≥60 enters Feed)**
+**Layer 2: Composite Score (0–105, ≥60 enters Feed)**
 
-| Dimension | Max Score | Logic |
-|---|---|---|
-| Keyword Quality | 35 | Hit +15; brand keyword highest; competitor mid; core normal |
-| Platform Heat | 35 | X: `x_heat = likes×1 + replies×3 + retweets×2 + quotes×2`; thresholds at 2000/1000/300/80 → 35/26/18/9/3 pts |
-| Account Influence | 20 | X: followers >50K/10K/1K/≤1K → 20/15/8/3 pts; Reddit: subreddit members >1M/100K/10K/≤10K → 20/15/8/3 pts |
-| Recency | 5 | Within 24h: +1; else: 0 (max dimension cap: 5) |
-| Tracked Account Bonus | +5 | Post author is one of the user's **追踪账号 (EngageTrackedAccount)** → +5 bonus |
+| Dimension | Field | Max | Logic |
+|---|---|---|---|
+| 关键词质量 Keyword Quality | `scoreKeyword` | 35 | Each hit +15, capped at 35 |
+| 平台热度 Platform Heat | `scoreHeat` | 45 | Per-platform formula; X thresholds at 2000/1000/300/80 → 35/26/18/9/3 pts |
+| 账号影响力 Account Authority | `scoreAuthority` | 15 | X follower count / subreddit audienceSize; per-platform thresholds |
+| 时效性 Recency | `scoreRecency` | 5 | Within 24h → 1; else → 0 |
+| 重点账户 Tracked Account | `scoreTracked` | 5 | Author is in **追踪账号 (EngageTrackedAccount)** → +5 |
 
 Reddit heat: `reddit_heat = score × upvote_ratio + num_comments × 2`; thresholds 800/400/100/30.
 
@@ -199,7 +210,7 @@ Reddit heat: `reddit_heat = score × upvote_ratio + num_comments × 2`; threshol
 
 | Range | Grade | Color |
 |---|---|---|
-| 85–100 | High Priority | Deep green |
+| 85–105 | High Priority | Deep green |
 | 70–84 | Medium Priority | Yellow-green |
 | 60–69 | Low Priority | Orange |
 | <60 | Discarded | Not stored |
@@ -572,7 +583,8 @@ Engage replies appear in the existing Calendar. No new calendar page.
 
 ```
 // Total score
-total_score = keyword_score(0~35) + authority_score(0~20) + heat_score(0~35) + recency_score(0~5) + competitor_bonus(0~5)
+total_score = keyword_score(0~35) + heat_score(0~45) + authority_score(0~15) + recency_score(0~1) + tracked_bonus(0~5)
+// max 105; ≥60 → enters Feed
 // ≥60 → enters Feed / <60 → discard
 
 // X heat (for Feed scoring)
