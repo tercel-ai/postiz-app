@@ -66,11 +66,20 @@ async function printStats(prisma: PrismaClient) {
       take: 10,
       select: { keyword: true, type: true, weeklyHitCount: true, totalHitCount: true },
     }),
-    prisma.engageOpportunity.findMany({
-      where: { deletedAt: null, ...platformFilter },
+    // Recent opportunities are per-org now: score/status live on
+    // EngageOpportunityState, content/platform/author on the global opportunity.
+    prisma.engageOpportunityState.findMany({
+      where: { opportunity: { deletedAt: null, ...platformFilter } },
       orderBy: { createdAt: 'desc' },
       take: 8,
-      select: { platform: true, authorUsername: true, postContent: true, score: true, createdAt: true },
+      select: {
+        score: true,
+        status: true,
+        createdAt: true,
+        opportunity: {
+          select: { platform: true, authorUsername: true, postContent: true },
+        },
+      },
     }),
   ]);
 
@@ -120,8 +129,11 @@ async function printStats(prisma: PrismaClient) {
   } else {
     for (const opp of recentOpps) {
       const age = Math.round((now.getTime() - opp.createdAt.getTime()) / 60_000);
-      const snippet = opp.postContent.replace(/\n/g, ' ').slice(0, 60);
-      console.log(`  [${opp.platform.padEnd(7)}] score:${String(opp.score).padStart(3)}  ${age}m ago  @${opp.authorUsername}`);
+      const snippet = opp.opportunity.postContent.replace(/\n/g, ' ').slice(0, 60);
+      console.log(
+        `  [${opp.opportunity.platform.padEnd(7)}] score:${String(opp.score).padStart(3)}` +
+        ` ${opp.status.padEnd(10)} ${age}m ago  @${opp.opportunity.authorUsername}`
+      );
       console.log(`           "${snippet}"`);
     }
   }
