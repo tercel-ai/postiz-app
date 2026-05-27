@@ -235,11 +235,14 @@ model EngageXReplyAccount {
   @@index([organizationId, engageEnabled])
 }
 
-// Discovered engagement opportunity (scored post from X or Reddit)
+// Discovered engagement opportunity — GLOBAL post, shared across all orgs.
+// One row per (platform, externalPostId): the same public post is stored ONCE,
+// not duplicated per org. Holds immutable content, raw metrics, and the
+// OBJECTIVE scores (identical for every org). Per-org mutable state (status,
+// bookmark, keyword/tracked scores) lives in EngageOpportunityState below.
+// (Refactored 2026-05-27 from a per-org table into this two-table split.)
 model EngageOpportunity {
   id                    String    @id @default(uuid())
-  organizationId        String
-  organization          Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   platform              String    // "x" | "reddit" | "youtube" | ...
   externalPostId        String    // platform-native ID (tweet_id, reddit post id, YT video id, etc.)
   externalPostUrl       String
@@ -251,74 +254,87 @@ model EngageOpportunity {
   authorAvatarUrl       String?
   postContent           String
   postPublishedAt       DateTime
-  // ── Composite score ──────────────────────────────────────────────────────
-  score                 Int       // total 0-100 (sum of all dimensions below)
 
-  // ── Per-dimension score breakdown ────────────────────────────────────────
-  // Stored individually to support per-dimension filtering, sorting, and analytics.
-  //
-  // Dimension      Max   Formula / thresholds
-  // scoreKeyword    35   hit core+15; brand > competitor > core weighting
-  // scoreHeat       35   X: likes×1+replies×3+retweets×2+quotes×2 → 35/26/18/9/3
-  //                      Reddit: score×upvoteRatio+comments×2 → 35/26/18/9/3
-  // scoreAuthority  20   X followers >50K/10K/1K/≤1K → 20/15/8/3
-  //                      Community audienceSize >1M/100K/10K/≤10K → 20/15/8/3
-  // scoreRecency     5   within 24h → 1; else 0  (cap: 5, current: 0 or 1)
-  // scoreTracked     5   post author is in EngageTrackedAccount → +5; else 0
-  scoreKeyword          Int       @default(0)
+  // ── Objective scores (same for every org → live on the global row) ────────
+  // scoreHeat       35   per-platform engagement; 4 branches (see §9):
+  //                      text(x/threads/mastodon/bluesky), video(youtube/tiktok),
+  //                      network(linkedin/instagram/pinterest), community(reddit)
+  // scoreAuthority  20   X followers >50K/10K/1K/≤1K → 20/15/8/3; community by audienceSize
+  // scoreRecency     5   <1h=5,<6h=4,<12h=3,<24h=2,<48h=1, else 0
   scoreHeat             Int       @default(0)
   scoreAuthority        Int       @default(0)
   scoreRecency          Int       @default(0)
-  scoreTracked          Int       @default(0)  // tracked account bonus
-  // Future dimensions go here as JSON — no migration needed.
-  // DB-level filter/sort not supported; use for display or offline analysis only.
-  // e.g. { "sentiment": 8, "replyGap": 6, "languageMatch": 9, "brandMention": 3 }
-  scoreBreakdown        Json?
 
   // ── Intent classification ─────────────────────────────────────────────
   intentTags            String[]  // all matched intents (confidence > 0.4)
   primaryIntent         String    @default("discussion")
   intentScore           Float?    // classifier confidence for primaryIntent (0-1)
 
-  status                EngageOpportunityStatus @default(NEW)
-  bookmarked            Boolean   @default(false)
-
   // ── Raw platform metrics at discovery time (inputs to scoring) ────────
   metricLikes           Int       @default(0)
   metricReplies         Int       @default(0)
-  metricRetweets        Int       @default(0)
+  metricRetweets        Int       @default(0)  // X retweet | Threads repost | Mastodon reblog | Bluesky repost
   metricQuotes          Int       @default(0)
+  metricBookmarks       Int       @default(0)  // X bookmark_count
+  metricViews           Int       @default(0)  // YouTube/TikTok views | Threads/LinkedIn/IG impressions
+  metricShares          Int       @default(0)  // TikTok/LinkedIn/IG shares
+  metricSaves           Int       @default(0)  // Instagram saved | Pinterest SAVE
   metricScore           Int       @default(0)  // Reddit score
   metricUpvoteRatio     Float?                  // Reddit
-  metricComments        Int       @default(0)  // Reddit num_comments
+  metricComments        Int       @default(0)  // Reddit num_comments | YouTube/TikTok comment_count
+
+  rawData               Json?     // original platform API response (debug / field-coverage audit)
 
   createdAt             DateTime  @default(now())
   updatedAt             DateTime  @updatedAt
   deletedAt             DateTime?
 
-  sentReply             EngageSentReply?
+  states                EngageOpportunityState[]
+  sentReplies           EngageSentReply[]
 
-  // ── Deduplication constraint ─────────────────────────────────────────────
-  // CRITICAL: prevents the same post from being inserted twice across daily scans.
-  @@unique([organizationId, platform, externalPostId])
+  // ── Deduplication constraint (now GLOBAL, not per-org) ────────────────────
+  @@unique([platform, externalPostId])
 
-  // ── Base indexes ──────────────────────────────────────────────────────────
-  @@index([organizationId])
-  @@index([organizationId, status])
-  @@index([organizationId, platform])
   @@index([createdAt])
   @@index([deletedAt])
-  // ── Per-dimension score indexes — ORDER BY / WHERE on each dimension ──────
-  @@index([organizationId, score])
-  @@index([organizationId, scoreKeyword])
-  @@index([organizationId, scoreHeat])
-  @@index([organizationId, scoreAuthority])
-  @@index([organizationId, scoreTracked])
-  @@index([organizationId, bookmarked])   // support "Saved" Feed filter
-  // ── GIN index for intentTags array contains queries ───────────────────────
-  // Required for: WHERE intentTags @> ARRAY['help_seeking'] (Prisma: has: 'help_seeking')
-  // Without this index, intent filtering causes full table scan.
+  @@index([postPublishedAt])
+  // GIN index for intentTags @> ARRAY[...] (Prisma: has: tag).
   @@index([intentTags], type: Gin)
+  // NOTE: a pg_trgm GIN index on postContent (backs the getKeywordPosts ILIKE
+  // preview) is NOT declarable here — `prisma db push` can't create a
+  // gin_trgm_ops index. It lives in prisma/engage-indexes.sql, run by the
+  // `prisma-db-indexes` npm script which is chained into `prisma-db-push`.
+}
+
+// Per-org mutable state for a global opportunity. Created at scan time when a
+// post matches THIS org's keywords. SUBJECTIVE scores (depend on the org's own
+// keyword set / tracked accounts) live here; objective scores stay on the
+// global row. The feed's total `score` is recomputed every scan and stored here.
+//
+// Dimension      Max   Formula / thresholds
+// scoreKeyword    35   hit core+15; brand(+5) > competitor(+3) > core
+// scoreTracked     5   post author is in this org's EngageTrackedAccount → +5
+// score          100   = scoreKeyword + scoreTracked + opportunity.(scoreHeat+scoreAuthority+scoreRecency)
+model EngageOpportunityState {
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  opportunityId  String
+  opportunity    EngageOpportunity @relation(fields: [opportunityId], references: [id], onDelete: Cascade)
+
+  status         EngageOpportunityStatus @default(NEW)
+  bookmarked     Boolean   @default(false)
+  score          Int       @default(0)
+  scoreKeyword   Int       @default(0)
+  scoreTracked   Int       @default(0)
+
+  createdAt      DateTime  @default(now())  // when THIS org first matched the post (drives TTL/expiry)
+  updatedAt      DateTime  @updatedAt
+
+  @@id([organizationId, opportunityId])
+  @@index([organizationId, status])
+  @@index([organizationId, score])
+  @@index([organizationId, bookmarked])   // support "Saved" Feed filter
+  @@index([opportunityId])
 }
 
 enum EngageOpportunityStatus {
@@ -347,7 +363,7 @@ model EngageSentReply {
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
-  opportunityId  String   @unique  // FK → EngageOpportunity (one reply per opportunity)
+  opportunityId  String   // FK → EngageOpportunity (global post)
   opportunity    EngageOpportunity @relation(fields: [opportunityId], references: [id])
 
   postId         String   @unique  // FK → Post (source='engage'; created atomically with this record)
@@ -361,6 +377,9 @@ model EngageSentReply {
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
+  // Each org replies to a given global post at most once; different orgs may
+  // each reply to the same post (so the key is composite, not opportunityId-unique).
+  @@unique([organizationId, opportunityId])
   @@index([organizationId])
 }
 
@@ -404,9 +423,9 @@ model EngageDataTicks {
 
 ```prisma
 // Add to existing model Organization:
-engageConfig          EngageConfig?
-engageOpportunities   EngageOpportunity[]
-engageSentReplies     EngageSentReply[]
+engageConfig             EngageConfig?
+engageOpportunityStates  EngageOpportunityState[]  // per-org state; EngageOpportunity itself is global (no org relation)
+engageSentReplies        EngageSentReply[]
 // EngageDataTicks has no Prisma relation — queried directly by organizationId
 ```
 
@@ -442,11 +461,16 @@ Organization
 │   ├── EngageMonitoredChannel[] (1:N)  ← subscribed channels (r/SEO, YT, QQ群, ...)
 │   ├── EngageTrackedAccount[] (1:N)    ← EXTERNAL accounts monitored for new posts
 │   └── EngageXReplyAccount[] (1:N)    ← OUR OWN X accounts (→ Integration)
-├── EngageOpportunity[] (1:N)          ← Discovered posts from scan
-│   └── EngageSentReply (1:0..1)       ← Engage metadata (strategy, brandStrength, authorReplied)
-│       └── Post (1:1) ←──────────────── source='engage'; carries state/metrics/content
+├── EngageOpportunityState[] (1:N)     ← per-org state for a discovered post (status, bookmark, keyword/tracked score)
+│   └── EngageOpportunity (N:1) ←─────── GLOBAL post (content, metrics, objective scores); shared across orgs
+├── EngageSentReply[] (1:N)            ← Engage metadata (strategy, brandStrength, authorReplied); unique per (org, opportunity)
+│   └── Post (1:1) ←──────────────────── source='engage'; carries state/metrics/content
 ├── Post[] (1:N, source='engage')      ← All Engage replies; queried for real-time stats
 └── EngageDataTicks[] (1:N)           ← Pre-aggregated time-series (replies/impressions/traffic)
+
+EngageOpportunity (GLOBAL — no Organization relation)
+├── EngageOpportunityState[] (1:N)     ← one per org that matched this post
+└── EngageSentReply[] (1:N)            ← one per org that replied to this post
 
 Integration (existing)
 └── EngageXReplyAccount (1:0..1)       ← Per-account Engage settings (enabled, auto-reply)
@@ -681,8 +705,17 @@ export class ListOpportunitiesDto {
   minScoreKeyword?:   number;  // keyword quality
   minScoreHeat?:      number;  // platform heat
   minScoreAuthority?: number;  // account influence
-  trackedOnly?:       boolean; // only show posts from tracked accounts (scoreTracked > 0)
   bookmarked?:        boolean; // true = only bookmarked; false = only non-bookmarked; omit = all
+
+  // ── Source filters (channel / author) ──────────────────────────────────
+  // Each accepts the sentinel ENGAGE_FILTER_ALL ('__all__') or a specific value.
+  // channels='__all__' → posts from any of this org's enabled monitored channels
+  // channels='SEO'     → that specific channel id (e.g. subreddit)
+  // authors='__all__'  → posts from any tracked account (maps to scoreTracked > 0)
+  // authors='elonmusk' → that specific author username (case-insensitive)
+  // (Replaced the former `trackedOnly` boolean: authors='__all__' is its equivalent.)
+  channels?: string;
+  authors?:  string;
 
   // ── Sorting ────────────────────────────────────────────────────────────
   // Default: score DESC (highest total first)
@@ -922,9 +955,17 @@ async function scanMonitoredChannels(orgId: string, config: EngageConfig) {
   return results;
 }
 
+// NOTE: simplified pre-split sketch. The real implementation
+// (engage-scan.activity.ts `_persistOpportunities`) is a TWO-PHASE upsert per the
+// §3.1 two-table model: phase 1 upserts the global EngageOpportunity by
+// [platform, externalPostId] (content + metrics + objective scores); phase 2 upserts
+// per-org EngageOpportunityState by [organizationId, opportunityId] (status, keyword/
+// tracked score). Both phases are chunked. The single-table sketch below is kept only
+// to illustrate the UPSERT/idempotency intent.
+//
 // persistOpportunities uses UPSERT — same post can appear across multiple daily scans.
-// On conflict (same org+platform+externalPostId): update scoring metrics only;
-// do NOT overwrite status or intentTags (user may have already acted on this opportunity).
+// On conflict: update scoring metrics only; do NOT overwrite status or intentTags
+// (user may have already acted on this opportunity).
 async function persistOpportunities(orgId: string, posts: ScoredPost[]) {
   for (const post of posts) {
     await prisma.engageOpportunity.upsert({
@@ -937,7 +978,7 @@ async function persistOpportunities(orgId: string, posts: ScoredPost[]) {
         score: post.score,
         scoreKeyword: post.scoreKeyword, scoreHeat: post.scoreHeat,
         scoreAuthority: post.scoreAuthority, scoreRecency: post.scoreRecency,
-        scoreTracked: post.scoreTracked, scoreBreakdown: post.scoreBreakdown,
+        scoreTracked: post.scoreTracked,
         metricLikes: post.metricLikes, metricReplies: post.metricReplies,
         metricRetweets: post.metricRetweets, metricQuotes: post.metricQuotes,
         metricScore: post.metricScore, metricUpvoteRatio: post.metricUpvoteRatio,
@@ -1590,13 +1631,24 @@ async fetchRedditCommentMetrics(commentId: string): Promise<{ score: number; num
 
 ### Scoring Dimension Descriptions
 
-| Dimension | Field | Max Score | Notes |
-|---|---|---|---|
-| Keyword Quality | `scoreKeyword` | 35 | Brand > Competitor > Core weighting decreases |
-| Platform Heat | `scoreHeat` | 35 | Platform-specific formulas for X / Reddit (see below) |
-| Account Authority | `scoreAuthority` | 20 | X uses follower count; communities use audienceSize |
-| Recency | `scoreRecency` | 5 | +1 if within 24h, else 0 (Max 5 for future extensibility) |
-| Tracked Account | `scoreTracked` | 5 | +5 if author is in `EngageTrackedAccount` |
+| Dimension | Field | Max | Stored on | Notes |
+|---|---|---|---|---|
+| Keyword Quality | `scoreKeyword` | 35 | `EngageOpportunityState` (per-org) | Brand(+5) > Competitor(+3) > Core; depends on the org's keyword set |
+| Platform Heat | `scoreHeat` | 35 | `EngageOpportunity` (global) | Per-platform formula, 4 branches (see below) |
+| Account Authority | `scoreAuthority` | 20 | `EngageOpportunity` (global) | X follower count; communities use audienceSize |
+| Recency | `scoreRecency` | 5 | `EngageOpportunity` (global) | <1h=5,<6h=4,<12h=3,<24h=2,<48h=1, else 0 |
+| Tracked Account | `scoreTracked` | 5 | `EngageOpportunityState` (per-org) | +5 if author is in this org's `EngageTrackedAccount` |
+
+**Score ownership (two-table split):** the OBJECTIVE dimensions (heat / authority / recency) are identical for every org, so they live on the global `EngageOpportunity` row. The SUBJECTIVE dimensions (keyword / tracked) depend on the org's own keyword set and tracked accounts, so they — plus the total `score` (= keyword + tracked + heat + authority + recency) — live on the per-org `EngageOpportunityState`. The total is recomputed each scan; the feed reads it directly.
+
+**Platform Heat branches** (`scoreHeat`, all 0–35, bucketed):
+
+| Branch | Platforms | Formula |
+|---|---|---|
+| text | x / threads / mastodon / bluesky | `likes×1 + replies×3 + retweets×2 + quotes×2 + shares×2` |
+| video | youtube / tiktok | `views×0.005 + likes×2 + comments×5 + shares×3` |
+| network | linkedin / instagram / pinterest | `views×0.05 + likes×3 + comments×8 + shares×5 + saves×4` |
+| community | reddit / fallback | `max(score,0)×upvoteRatio + comments×2` |
 
 > **Note**: The original PRD mentioned "Platform Heat Max 45, Account Authority Max 15", but the Appendix formulas specify `heat_score(0~35) + authority_score(0~20)` to reach a total of 100. The Appendix formulas are prioritized.
 
@@ -1644,7 +1696,6 @@ export function scorePost(post: RawPost, keywords: EngageKeyword[]): ScoredPost 
     scoreAuthority: bd.authority,
     scoreRecency:   bd.recency,
     scoreTracked:   bd.tracked,
-    scoreBreakdown: bd.extra ? bd.extra : undefined,  // future dimensions
     intentTags:     [],
     primaryIntent:  'discussion',
   };
@@ -1960,7 +2011,9 @@ const posts = await prisma.post.findMany({
 
 ### 12.3 Organization Isolation
 
-All Engage data is scoped to `organizationId`. No cross-org data access. Existing `@CheckPolicies()` guards enforce this at the controller layer.
+All per-org Engage data is scoped to `organizationId`. Config, keywords, channels, tracked accounts, `EngageOpportunityState`, and `EngageSentReply` are org-scoped, and every repository query filters by `organizationId`; existing `@CheckPolicies()` guards enforce this at the controller layer.
+
+The `EngageOpportunity` row itself is GLOBAL (a shared public post — content + objective metrics, no `organizationId`), but an org can only see or mutate it **through its own `EngageOpportunityState`**: the feed inner-joins state→opportunity, and dismiss/bookmark/reply operate on the state row keyed by `[organizationId, opportunityId]`. So no org can read another org's status/bookmark/score or reply to a post on another org's behalf — isolation holds at the state/reply layer even though the post body is shared.
 
 ### 12.4 Input Validation
 
@@ -1972,19 +2025,29 @@ All Engage data is scoped to `organizationId`. No cross-org data access. Existin
 
 ## 13. Migration Plan
 
-### 13.1 Prisma Migration
+### 13.1 Schema Sync (db push, not migrate)
 
-New migration file: `libraries/nestjs-libraries/src/database/prisma/migrations/YYYYMMDD_add_engage_tables.sql`
-
-All new tables; no modifications to existing tables (only additive relation fields on `Organization`).
+The project provisions schema with **`prisma db push`**, not `prisma migrate` — the
+historical `migrations/*.sql` files are NOT applied (see startup-checklist §"Database").
+Apply schema + the trigram index in one step:
 
 ```bash
-pnpm prisma migrate dev --name add_engage_tables
+pnpm run prisma-db-push   # db push  →  then chains prisma-db-indexes (engage-indexes.sql)
 ```
+
+`prisma-db-indexes` runs `engage-indexes.sql` (`CREATE EXTENSION pg_trgm` + the
+`postContent` GIN index) because `db push` cannot create a `gin_trgm_ops` index.
+
+> The Engage data model is the two-table split (§3.1): global `EngageOpportunity`
+> + per-org `EngageOpportunityState`. A single global post is shared across orgs.
 
 ### 13.2 Temporal Workflow Registration
 
-Add to orchestrator's workflow list. No changes to existing workflows.
+Three global single-instance scan workflows (keyword / channel / tracked) registered
+in the orchestrator; `EngageService.onApplicationBootstrap` starts them with
+`workflowIdConflictPolicy: USE_EXISTING`. Activity-code changes are picked up on
+worker restart (activities are re-invoked, not replayed), so no non-determinism risk
+from the persistence refactor.
 
 ### 13.3 Feature Flag (Optional)
 

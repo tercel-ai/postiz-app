@@ -172,9 +172,13 @@ interface EngageXReplyAccountConfig {
 ### EngageOpportunity
 
 ```typescript
+// API response shape (the merged view). Server-side this is a global
+// EngageOpportunity row flattened with the caller org's EngageOpportunityState
+// (status/bookmarked/score/scoreKeyword/scoreTracked). `id` is the GLOBAL post id.
+// Note: there is no `organizationId` field — the post is shared across orgs and
+// the request is already org-scoped by auth.
 interface EngageOpportunity {
   id: string;
-  organizationId: string;
   platform: string;            // 'x' | 'reddit'
   externalPostId: string;
   externalPostUrl: string;
@@ -186,29 +190,33 @@ interface EngageOpportunity {
   authorFollowers: number | null;
   postContent: string;
   postPublishedAt: string;
-  // Scoring (0-100)
+  // Scoring (0-100) — heat/authority/recency are global; keyword/tracked/total per-org
   score: number;
   scoreKeyword: number;     // Keyword score 0-35
   scoreHeat: number;        // Heat score 0-35
   scoreAuthority: number;   // Authority score 0-20
   scoreRecency: number;     // Recency score 0-5
   scoreTracked: number;     // Tracked account bonus 0 or 5
-  scoreBreakdown: Record<string, unknown> | null;
   // Intent
   intentTags: IntentType[];
   primaryIntent: IntentType;
   intentScore: number | null;
-  // Status
+  // Status (per-org)
   status: EngageOpportunityStatus;
   bookmarked: boolean;
-  // Platform Metrics
+  // Platform Metrics (captured at discovery)
   metricLikes: number;
   metricReplies: number;
   metricRetweets: number;
   metricQuotes: number;
+  metricBookmarks: number;   // X bookmark_count
+  metricViews: number;       // YouTube/TikTok views | Threads/LinkedIn/IG impressions
+  metricShares: number;      // TikTok/LinkedIn/IG shares
+  metricSaves: number;       // Instagram/Pinterest saves
   metricScore: number;       // Reddit: score (upvotes - downvotes)
   metricUpvoteRatio: number | null;
   metricComments: number;
+  rawData: Record<string, unknown> | null;  // original platform API response (debug)
   createdAt: string;
   updatedAt: string;
   deletedAt: string | null;
@@ -429,6 +437,36 @@ Update a keyword's type or enabled status.
 Delete a keyword.
 
 **Response** `200 OK` — Returns the deleted `EngageKeyword`
+
+**Error** `404` — Keyword not found
+
+---
+
+### GET `/api/engage/keywords/:id/posts`
+
+Preview recent global posts whose content matches this keyword (ILIKE on
+`postContent`, backed by the pg_trgm index). Used by the keyword-manager expand
+panel. Returns up to 8 posts, newest first. Not org-state-scoped — these are
+global discovered posts that match the keyword text.
+
+**Response** `200 OK`
+
+```json
+[
+  {
+    "id": "uuid",
+    "platform": "reddit",
+    "externalPostUrl": "https://www.reddit.com/r/SEO/comments/.../",
+    "authorUsername": "someuser",
+    "postContent": "…",
+    "postPublishedAt": "2026-05-27T08:00:00Z",
+    "metricScore": 42,
+    "metricComments": 7,
+    "metricLikes": 0,
+    "scoreHeat": 18
+  }
+]
+```
 
 **Error** `404` — Keyword not found
 
@@ -734,7 +772,8 @@ Retrieve the list of opportunities (main Signal Feed endpoint).
 | `minScoreKeyword` | `number` | — | Minimum keyword score |
 | `minScoreHeat` | `number` | — | Minimum heat score |
 | `minScoreAuthority` | `number` | — | Minimum authority score |
-| `trackedOnly` | `boolean` | `false` | Only show posts from tracked accounts |
+| `channels` | `string` | — | `'__all__'` = posts from any of the org's enabled monitored channels; or a specific channel id (e.g. subreddit `'SEO'`) |
+| `authors` | `string` | — | `'__all__'` = posts from any tracked account (= old `trackedOnly`); or a specific author username (case-insensitive) |
 | `bookmarked` | `boolean` | — | Only show bookmarked |
 | `sortBy` | `string` | `'score'` | Sort field: `score` / `scoreKeyword` / `scoreHeat` / `scoreAuthority` / `scoreRecency` / `scoreTracked` / `createdAt` |
 | `sortOrder` | `'asc' \| 'desc'` | `'desc'` | Sort direction |

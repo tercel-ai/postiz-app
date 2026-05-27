@@ -156,6 +156,7 @@ pnpm run prisma-db-push
 
 - [ ] The project currently uses **`prisma db push`** instead of `prisma migrate`.
 - [ ] This step is automatically included in the `pm2-run` / `pm2-run:prod` startup sequence; no need to rerun if using those commands in §5.
+- [ ] `prisma-db-push` now also runs **`engage-indexes.sql`** (chained as `prisma-db-indexes`), which creates the `pg_trgm` extension + the Engage `postContent` trigram GIN index. `db push` cannot create that index on its own, so a fresh DB must go through this script (not a bare `prisma db push`).
 - [ ] Although historical SQL files like `add-engage-tables.sql` exist in `libraries/nestjs-libraries/src/database/prisma/migrations/`, they are **not applied** via `prisma migrate deploy`. Do not mix workflows, or the `_prisma_migrations` table will go out of sync with the actual schema.
 
 ---
