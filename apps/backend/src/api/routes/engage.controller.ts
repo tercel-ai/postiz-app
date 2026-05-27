@@ -115,6 +115,14 @@ export class EngageController {
     return this._engageService.deleteKeyword(org, id);
   }
 
+  @Get('/keywords/:id/posts')
+  getKeywordPosts(
+    @GetOrgFromRequest() org: Organization,
+    @Param('id') id: string
+  ) {
+    return this._engageService.getKeywordPosts(org, id);
+  }
+
   // ─── Monitored Channels ───────────────────────────────────────────────────
 
   @Get('/monitored-channels')

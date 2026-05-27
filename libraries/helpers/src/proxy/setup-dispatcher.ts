@@ -65,9 +65,14 @@ export function setupHttpDispatcher(): void {
   const generalProxy = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
   const redditProxy = process.env.REDDIT_PROXY;
 
+  console.log(
+    `[setupHttpDispatcher] generalProxy=${generalProxy || '(none)'} redditProxy=${redditProxy || '(none)'}`
+  );
+
   if (!redditProxy) {
     if (generalProxy) {
       setGlobalDispatcher(new ProxyAgent(generalProxy));
+      console.log(`[setupHttpDispatcher] global dispatcher → ProxyAgent(${generalProxy})`);
     }
     return;
   }

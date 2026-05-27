@@ -100,8 +100,7 @@ export function TrackedAccounts() {
         </div>
       )}
       <p className="text-sm text-gray-400 mb-4">
-        External X accounts to monitor for new posts. Posts from these accounts
-        receive a +5 score bonus and appear in your Signal Feed.
+        追踪外部 X 账号，每 3 小时自动检查新帖。来自这些账号的帖子会获得 +5 分加成并优先显示在 Signal Feed 中。
       </p>
 
       <div className="flex gap-2 mb-6">
@@ -124,7 +123,7 @@ export function TrackedAccounts() {
           onClick={addAccount}
           className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors"
         >
-          Add
+          + Add
         </button>
       </div>
 
@@ -175,7 +174,7 @@ export function TrackedAccounts() {
 
         {accounts.length === 0 && (
           <p className="text-center text-gray-500 text-sm py-8">
-            No tracked accounts yet. Add X accounts to monitor.
+            还没有追踪账号。添加 X 账号开始监控。
           </p>
         )}
       </div>

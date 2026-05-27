@@ -17,10 +17,11 @@ import { getRedditToken, redditAuthHeaders } from '../reddit-auth';
 import { EngageService } from '../engage.service';
 
 const TIMEOUT = 20_000;
-// Live network tests are opt-in; they need a clean egress IP to reach Reddit.
-const RUN_LIVE = process.env.RUN_REDDIT_LIVE === '1';
 const hasRedditCreds =
   !!process.env.REDDIT_CLIENT_ID && !!process.env.REDDIT_CLIENT_SECRET;
+// Live network tests run when credentials are present (loaded from .env) or
+// when RUN_REDDIT_LIVE=1 is set explicitly (for credential-free steps).
+const RUN_LIVE = hasRedditCreds || process.env.RUN_REDDIT_LIVE === '1';
 
 const TARGET = 'football'; // the subreddit the user tried to find
 
@@ -212,6 +213,67 @@ describe.skipIf(!RUN_LIVE)('Step 3b — public JSON API, bot UA vs browser UA', 
     const body = await res.text();
     console.log(`\n[Browser UA] about.json status:`, res.status, res.statusText);
     console.log('Body (first 500):', body.slice(0, 500));
+  }, TIMEOUT);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Step 5: global Reddit post search by keyword
+// ─────────────────────────────────────────────────────────────────────────────
+
+const BROWSER_HEADERS_POST = {
+  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  'Accept': 'application/json, text/javascript, */*; q=0.01',
+  'Accept-Language': 'en-US,en;q=0.9',
+  'Referer': 'https://www.reddit.com/',
+};
+
+describe.skipIf(!RUN_LIVE)(`Step 5 — global post search for keyword "${TARGET}"`, () => {
+  it('searches posts across all subreddits and prints data', async () => {
+    const url = `https://www.reddit.com/search.json?q=${encodeURIComponent(TARGET)}&sort=new&t=day&limit=10&type=link`;
+    console.log('\nGET', url);
+
+    const res = await fetch(url, {
+      headers: BROWSER_HEADERS_POST,
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    console.log('HTTP status:', res.status, res.statusText);
+    expect(res.ok).toBe(true);
+
+    const json = (await res.json()) as any;
+    const children: any[] = json?.data?.children ?? [];
+    console.log(`Found ${children.length} post(s)`);
+
+    for (const c of children) {
+      const p = c.data;
+      console.log({
+        id: p.id,
+        subreddit: p.subreddit,
+        title: (p.title as string)?.slice(0, 80),
+        author: p.author,
+        score: p.score,
+        upvote_ratio: p.upvote_ratio,
+        num_comments: p.num_comments,
+        subreddit_subscribers: p.subreddit_subscribers,
+        created_utc: new Date((p.created_utc as number) * 1000).toISOString(),
+        url: `https://www.reddit.com${p.permalink}`,
+        selftext_preview: (p.selftext as string)?.slice(0, 60) || '(link post)',
+      });
+    }
+
+    expect(Array.isArray(children)).toBe(true);
+  }, TIMEOUT);
+
+  it('bot UA → same endpoint returns same results?', async () => {
+    const url = `https://www.reddit.com/search.json?q=${encodeURIComponent(TARGET)}&sort=new&t=day&limit=5&type=link`;
+    const res = await fetch(url, {
+      headers: { 'User-Agent': 'AISEE-Engage/1.0' },
+      signal: AbortSignal.timeout(10_000),
+    });
+    const body = await res.text();
+    console.log('\n[Bot UA] post search status:', res.status, res.statusText);
+    console.log('Body (first 300):', body.slice(0, 300));
+    // 200 with results = bot UA works; 429/403 = blocked; document either way.
   }, TIMEOUT);
 });
 

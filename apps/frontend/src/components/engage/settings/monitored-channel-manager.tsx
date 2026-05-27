@@ -150,13 +150,13 @@ export function MonitoredChannelManager() {
       )}
       <div className="flex justify-between items-center mb-4">
         <p className="text-sm text-gray-400">
-          Subscribe to communities like r/SEO, YouTube channels, or QQ groups.
+          订阅 Reddit 版块（如 r/SEO、r/marketing），新帖会按关键字过滤后进入 Signal Feed。
         </p>
         <button
           onClick={() => setShowAdd(!showAdd)}
           className="text-sm px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors"
         >
-          + Add Channel
+          + Add subreddit
         </button>
       </div>
 
@@ -303,7 +303,7 @@ export function MonitoredChannelManager() {
 
         {channels.length === 0 && (
           <div className="col-span-2 text-center text-gray-500 text-sm py-8">
-            No channels yet. Add a community to monitor.
+            还没有版块。添加一个 subreddit 开始监控。
           </div>
         )}
       </div>

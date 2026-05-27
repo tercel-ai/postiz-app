@@ -34,7 +34,7 @@ Engage involves two completely separate "account" concepts. Confusing them is a 
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│  回复账号 (Reply Account)          追踪账号 (Tracked Account)              │
+│  Reply Account (回复账号)           Tracked Account (追踪账号)              │
 │  ─────────────────────────         ──────────────────────────────────── │
 │  Source:  Integration table        Source:  EngageTrackedAccount table  │
 │  Owned:   By the user (our acct)   Owned:   External/third-party        │
@@ -314,7 +314,7 @@ model EngageOpportunity {
   @@index([organizationId, scoreHeat])
   @@index([organizationId, scoreAuthority])
   @@index([organizationId, scoreTracked])
-  @@index([organizationId, bookmarked])   // support "已保存" Feed filter
+  @@index([organizationId, bookmarked])   // support "Saved" Feed filter
   // ── GIN index for intentTags array contains queries ───────────────────────
   // Required for: WHERE intentTags @> ARRAY['help_seeking'] (Prisma: has: 'help_seeking')
   // Without this index, intent filtering causes full table scan.
@@ -531,9 +531,9 @@ export class EngageController {
     //             + create EngageSentReply + update EngageOpportunity.status = SCHEDULED
   ) { ... }
 
-  // Reddit manual-flow STEP 1: user clicked "✓ 已手动回复" (confirmed reply, no URL yet)
+  // Reddit manual-flow STEP 1: user clicked "✓ Replied Manually" (confirmed reply, no URL yet)
   // Creates Post(PUBLISHED, no releaseURL) + EngageSentReply immediately.
-  // Record appears in Sent with "⚠ 未提交回复链接" warning until URL is submitted.
+  // Record appears in Sent with "⚠ Reply URL missing" warning until URL is submitted.
   @Post('/opportunities/:id/manual-reply')
   confirmManualReply(
     @GetOrgFromRequest() org: Organization,
@@ -570,7 +570,7 @@ export class EngageController {
     @Query() query: ListSentDto  // platform, status, date, page, limit
   ) { ... }
 
-  // Sent page top-4 stats cells (本周发出 / 回复率 / 总曝光量 / 平均获赞)
+  // Sent page top-4 stats cells (Issued this week / Reply rate / Total Impressions / Avg Likes)
   @Get('/sent/stats')
   getSentStats(@GetOrgFromRequest() org: Organization) { ... }
   // Returns: SentStatsResult
@@ -589,7 +589,7 @@ export class EngageController {
   @Patch('/keywords/:id')
   updateKeyword(@GetOrgFromRequest() org: Organization, @Param('id') id: string, @Body() body: UpdateKeywordDto) { ... }
 
-  // ── MONITORED CHANNELS (具体频道/社群: r/SEO, YT channel, QQ群, ...) ────────
+  // ── MONITORED CHANNELS (r/SEO, YT channel, QQ group, ...) ────────
   @Get('/monitored-channels')
   listMonitoredChannels(@GetOrgFromRequest() org: Organization) { ... }
 
@@ -606,7 +606,7 @@ export class EngageController {
   @Post('/monitored-channels/search')
   searchChannels(@GetOrgFromRequest() org: Organization, @Body() body: SearchChannelsDto) { ... }
 
-  // ── TRACKED ACCOUNTS (追踪账号): External X accounts we MONITOR ──────────
+  // ── TRACKED ACCOUNTS: External X accounts we MONITOR ──────────
   // These are NOT the user's own accounts. No OAuth. Just username + settings.
   @Get('/tracked-accounts')
   listTrackedAccounts(@GetOrgFromRequest() org: Organization) { ... }
@@ -620,7 +620,7 @@ export class EngageController {
   @Delete('/tracked-accounts/:id')
   removeTrackedAccount(@GetOrgFromRequest() org: Organization, @Param('id') id: string) { ... }
 
-  // ── REPLY ACCOUNTS (回复账号): Our own X accounts from Integration ────────
+  // ── REPLY ACCOUNTS: Our own X accounts from Integration ────────
   // Returns Integration accounts with their EngageXReplyAccount settings.
   // Does NOT create integrations — those are managed in /integrations routes.
   @Get('/reply-accounts')
@@ -706,10 +706,10 @@ export class ListSentDto {
 // GET /engage/sent/stats — top-4 cells shown above Sent history list
 // Separate from dashboard stats; scoped to all-time (not just this week)
 interface SentStatsResult {
-  weeklyCount:       number;   // 本周发出: COUNT Post(source='engage') WHERE publishDate >= Mon
-  responseRate:      number;   // 回复率: COUNT(authorReplied=true) / total × 100
-  totalImpressions:  number;   // 总曝光量: SUM(Post.impressions) WHERE source='engage'
-  avgLikes:          number;   // 平均获赞: AVG of X likes + Reddit score from Post.analytics
+  weeklyCount:       number;   // issued this week: COUNT Post(source='engage') WHERE publishDate >= Mon
+  responseRate:      number;   // reply rate: COUNT(authorReplied=true) / total × 100
+  totalImpressions:  number;   // total impressions: SUM(Post.impressions) WHERE source='engage'
+  avgLikes:          number;   // avg likes: AVG of X likes + Reddit score from Post.analytics
 }
 
 // ── SCORE STATS DTO ────────────────────────────────────────────────────────
@@ -738,10 +738,10 @@ interface ScoreStatsResult {
   trackedCount:   number;  // how many from tracked accounts
 }
 
-// ── TRACKED ACCOUNTS (追踪账号) DTOs — external accounts ──────────────────
+// ── TRACKED ACCOUNTS DTOs ───────────────────────────────────────────────
 export class AddTrackedAccountDto {
   username: string;      // external X @username (no @ prefix)
-  categoryLabel?: string; // e.g. "GEO专家"
+  categoryLabel?: string; // e.g. "GEO Expert"
   enabled?: boolean;    // default true
 }
 
@@ -754,7 +754,7 @@ export class UpdateTrackedAccountDto {
 export class AddMonitoredChannelDto {
   platform: string;      // "reddit" | "youtube" | "qq" | "discord" | ...
   channelId: string;     // platform-native ID (subreddit name, YT channel ID, QQ group ID, etc.)
-  channelName: string;   // display name ("r/SEO", "Channel Title", "SEO交流群")
+  channelName: string;   // display name ("r/SEO", "Channel Title", "SEO Chat Group")
   audienceSize?: number;
   metadata?: Record<string, unknown>;
 }
@@ -1257,32 +1257,32 @@ const INTENT_PROMPTS: Record<string, string> = {
 
 **File**: `libraries/nestjs-libraries/src/engage/engage-intent-classifier.service.ts`
 
-#### 模型选型
+#### Model Selection
 
-| 场景 | 模型 | 大小 | 速度/条 | 备注 |
+| Scenario | Model | Size | Speed/Item | Notes |
 |---|---|---|---|---|
-| v1.0 (英文 X/Reddit) | `Xenova/nli-deberta-v3-small` | **44 MB** | ~80ms | 首选 |
-| v1.x (含中文 QQ/微信) | `Xenova/mDeBERTa-v3-base-mnli-xnli` | 278 MB | ~150ms | 多语言 |
+| v1.0 (English X/Reddit) | `Xenova/nli-deberta-v3-small` | **44 MB** | ~80ms | Primary choice |
+| v1.x (Incl. Chinese QQ/WeChat) | `Xenova/mDeBERTa-v3-base-mnli-xnli` | 278 MB | ~150ms | Multilingual |
 
-模型在 `onModuleInit` 时下载一次并缓存到本地，之后所有分类均离线完成，无 API 费用、无速率限制。
+The model is downloaded once during `onModuleInit` and cached locally. All subsequent classifications are performed offline, with no API costs or rate limits.
 
-#### 意图标签（字符串常量，非 enum）
+#### Intent Labels (String Constants, not Enums)
 
 ```typescript
 // libraries/nestjs-libraries/src/engage/engage-intent.constants.ts
 
 export const INTENT_LABELS = [
-  'help_seeking',  // 求助型：含 ? + how/help/anyone
-  'rant',          // 吐槽型：frustrated/hate/tired of/so annoying
-  'discussion',    // 讨论型：开放性陈述 + thoughts?/what do you think
-  'opinion',       // 观点型：I think/hot take/unpopular opinion
-  'comparison',    // 比较型：vs/compare/better than/alternative
-  'data_share',    // 数据分享：数字/% + found/report/study
+  'help_seeking',  // help_seeking: contains ? + how/help/anyone
+  'rant',          // rant: frustrated/hate/tired of/so annoying
+  'discussion',    // discussion: open-ended statement + thoughts?/what do you think
+  'opinion',       // opinion: I think/hot take/unpopular opinion
+  'comparison',    // comparison: vs/compare/better than/alternative
+  'data_share',    // data_share: numbers/% + found/report/study
 ] as const;
 
 export type IntentLabel = typeof INTENT_LABELS[number];
 
-// primaryIntent → 默认推荐的回复策略
+// primaryIntent → Default recommended reply strategy
 export const INTENT_DEFAULT_STRATEGY: Record<IntentLabel, string> = {
   help_seeking: 'EXPERT_ANSWER',
   rant:         'EMPATHY_LED',
@@ -1293,7 +1293,7 @@ export const INTENT_DEFAULT_STRATEGY: Record<IntentLabel, string> = {
 };
 ```
 
-#### 分类服务
+#### Classification Service
 
 ```typescript
 import { pipeline, ZeroShotClassificationPipeline } from '@xenova/transformers';
@@ -1356,7 +1356,7 @@ export class EngageIntentClassifierService implements OnModuleInit {
 
 #### Confidence Fallback to Claude Haiku
 
-低置信度帖子（primaryIntent confidence < 0.45）自动 fallback 到 Claude Haiku，保证分类质量。预计触发率 < 15%，整体成本极低。
+Low-confidence posts (primaryIntent confidence < 0.45) automatically fallback to Claude Haiku to ensure classification quality. Expected trigger rate < 15%, keeping overall costs extremely low.
 
 ```typescript
 async classifyWithFallback(text: string) {
@@ -1411,13 +1411,13 @@ async function classifyIntentsBatch(scored: ScoredPost[]): Promise<ScoredPost[]>
 }
 ```
 
-#### 依赖安装
+#### Dependency Installation
 
 ```bash
 pnpm add @xenova/transformers --filter @postiz/nestjs-libraries
 ```
 
-模型文件在首次 `onModuleInit` 时自动下载（44 MB），存入 `~/.cache/huggingface/`，Docker 部署时可通过 volume 挂载复用缓存。
+Model files are automatically downloaded (44 MB) during the first `onModuleInit`, stored in `~/.cache/huggingface/`. For Docker deployments, use volume mounting to reuse the cache.
 
 ### 6.3 Streaming API Endpoint
 
@@ -1588,17 +1588,17 @@ async fetchRedditCommentMetrics(commentId: string): Promise<{ score: number; num
 
 **File**: `libraries/nestjs-libraries/src/engage/engage-scorer.ts`
 
-### 评分维度说明
+### Scoring Dimension Descriptions
 
-| 维度 | 字段 | 最大分 | 备注 |
+| Dimension | Field | Max Score | Notes |
 |---|---|---|---|
-| 关键词质量 | `scoreKeyword` | 35 | 命中 brand > competitor > core 权重递减 |
-| 平台热度 | `scoreHeat` | 35 | X / Reddit 各自公式，见下方 |
-| 账号影响力 | `scoreAuthority` | 20 | X 用粉丝数；社区平台用 audienceSize |
-| 时效性 | `scoreRecency` | 5 | 24h 内 +1，否则 0（维度上限 5，留扩展空间） |
-| 重点账户 | `scoreTracked` | 5 | 作者在 EngageTrackedAccount → +5 |
+| Keyword Quality | `scoreKeyword` | 35 | Brand > Competitor > Core weighting decreases |
+| Platform Heat | `scoreHeat` | 35 | Platform-specific formulas for X / Reddit (see below) |
+| Account Authority | `scoreAuthority` | 20 | X uses follower count; communities use audienceSize |
+| Recency | `scoreRecency` | 5 | +1 if within 24h, else 0 (Max 5 for future extensibility) |
+| Tracked Account | `scoreTracked` | 5 | +5 if author is in `EngageTrackedAccount` |
 
-> **注**：原始需求文档表头写的是「平台热度满分45、账号影响力满分15」，但 Appendix 公式为 `heat_score(0~35) + authority_score(0~20)`，总和才能达到 100。以 Appendix 公式为准。
+> **Note**: The original PRD mentioned "Platform Heat Max 45, Account Authority Max 15", but the Appendix formulas specify `heat_score(0~35) + authority_score(0~20)` to reach a total of 100. The Appendix formulas are prioritized.
 
 ```typescript
 // ── Types ────────────────────────────────────────────────────────────────
@@ -1766,8 +1766,8 @@ apps/frontend/src/components/engage/
 ├── settings/
 │   ├── keyword-manager.tsx          → Keyword list + add/edit
 │   ├── monitored-channel-manager.tsx  → Channel/community grid (r/SEO, YT channel, QQ群, ...)
-│   ├── tracked-accounts.tsx         → 追踪账号: EXTERNAL accounts we monitor (EngageTrackedAccount)
-│   └── reply-accounts.tsx           → 回复账号: OUR OWN X accounts (Integration + EngageXReplyAccount)
+│   ├── tracked-accounts.tsx         → Tracked Accounts: EXTERNAL accounts we monitor (EngageTrackedAccount)
+│   └── reply-accounts.tsx           → Reply Accounts: OUR OWN X accounts (Integration + EngageXReplyAccount)
 ├── setup-wizard/
 │   └── setup-wizard.tsx          → One-time config (Page 01)
 └── dashboard/
@@ -1829,34 +1829,34 @@ async function generateDraft(opportunityId: string, strategy: string, brandStren
 
 ## 11. Dashboard & Calendar Integration
 
-### 数据隔离原则
+### Data Isolation Principle
 
 ```
-普通发帖统计 (Post.source='calendar'|'chat')
-  └── DataTicks 聚合 → Dashboard 曝光/流量图表
+Standard Publishing Stats (Post.source='calendar'|'chat')
+  └── DataTicks Aggregation → Dashboard Impressions/Traffic Charts
          ↑
-         DataTicks sync 过滤 source != 'engage'，Engage 数据不进入此管道
+         DataTicks sync filters source != 'engage'; Engage data does NOT enter this pipeline.
 
-Engage 回帖统计 (Post.source='engage')
-  └── 直接查 Post → Engage Performance 面板（独立面板，不影响普通统计）
+Engage Reply Stats (Post.source='engage')
+  └── Direct Query on Post → Engage Performance Panel (Independent panel, doesn't affect standard stats)
 ```
 
-**两套数据完全隔离**，互不干扰：
-- Dashboard 现有的曝光量、流量图表只反映普通发帖效果
-- Engage 面板只反映回帖效果
-- "Your Posts" 图表上的 lime 色叠加柱是**视觉叠加**，不改变原有数据
+**Two account systems are completely isolated** and do not interfere:
+- Existing Dashboard charts (Impressions, Traffic) only reflect standard publishing performance.
+- The Engage panel only reflects reply performance.
+- The lime-colored overlay bar on the "Your Posts" chart is a **visual overlay** and does not alter the underlying data.
 
-### DataTicks 隔离（必须修改）
+### DataTicks Isolation (Required Modification)
 
 **File**: `libraries/nestjs-libraries/src/database/prisma/data-ticks/data-ticks.service.ts`
 
-`getPublishedPostsWithRelease()` 需加 source 过滤，防止 Engage 回帖污染 DataTicks：
+`getPublishedPostsWithRelease()` must include a source filter to prevent Engage replies from polluting DataTicks:
 
 ```typescript
-// dashboard.repository.ts — getPublishedPostsWithRelease() 加条件：
+// dashboard.repository.ts — getPublishedPostsWithRelease() add condition:
 WHERE state = 'PUBLISHED'
   AND releaseId IS NOT NULL
-  AND (source IS NULL OR source NOT IN ('engage'))  // ← 新增：排除 Engage 回帖
+  AND (source IS NULL OR source NOT IN ('engage'))  // ← NEW: Exclude Engage replies
 ```
 
 ### 11.1 Dashboard — Engage Performance Panel
@@ -1869,25 +1869,25 @@ async getEngageStats(
   @GetOrgFromRequest() org: Organization,
   @Query('days') days = 7
 ) {
-  // 直接查 Post WHERE source='engage'，不经过 DataTicks
+  // Direct query on Post WHERE source='engage', bypassing DataTicks
   return this._engageService.getDashboardStats(org.id, days);
 }
 ```
 
-**Return shape** — 指标直接读 `Post.impressions` / `Post.trafficScore` / `Post.analytics`：
+**Return shape** — metrics read directly from `Post.impressions` / `Post.trafficScore` / `Post.analytics`:
 ```typescript
 {
-  // ① Engage Performance 面板 (4 cells)
-  weeklyCount:       number,   // 本周互动条数
-  responseRate:      number,   // 响应率: authorReplied=true / total × 100
-  totalImpressions:  number,   // X 总曝光: SUM(Post.impressions WHERE platform='x')
-  totalTrafficScore: number,   // X 流量指数: SUM(Post.trafficScore WHERE platform='x')
+  // ① Engage Performance Panel (4 cells)
+  weeklyCount:       number,   // Issued interactions this week
+  responseRate:      number,   // Reply rate: authorReplied=true / total × 100
+  totalImpressions:  number,   // X Total Impressions: SUM(Post.impressions WHERE platform='x')
+  totalTrafficScore: number,   // X Traffic Index: SUM(Post.trafficScore WHERE platform='x')
   byPlatform: {
     [platform: string]: { count: number; impressions: number; trafficScore: number }
   },
-  bestReply: { platform, content, publishDate, trafficScore }, // 本周最佳回复
+  bestReply: { platform, content, publishDate, trafficScore }, // Best reply of the week
 
-  // ③ Traffic from Engage 面板 — per-reply breakdown (progress bars in UI)
+  // ③ Traffic from Engage Panel — per-reply breakdown (progress bars in UI)
   trafficByReply: Array<{
     postId:       string,
     content:      string,      // reply text snippet
@@ -1901,19 +1901,19 @@ async getEngageStats(
 ```
 
 **Frontend** (`apps/frontend/src/app/(app)/(site)/dashboard/page.tsx`):
-- `<EngagePerformancePanel>` 读 `/dashboard/engage-stats`（独立面板，不影响现有数据）
-- "Your Posts" 图表 lime 色叠加柱：读 `EngageDataTicks WHERE type='replies' AND timeUnit='day'` — 与现有 DataTicks 图表查询模式完全一致
-- "Traffic from Engage" 趋势：读 `EngageDataTicks WHERE type='traffic' AND timeUnit='day'`
+- `<EngagePerformancePanel>` reads from `/dashboard/engage-stats` (independent panel, doesn't affect existing data).
+- "Your Posts" chart lime overlay bar: reads `EngageDataTicks WHERE type='replies' AND timeUnit='day'` — consistent with existing DataTicks chart query patterns.
+- "Traffic from Engage" trend: reads `EngageDataTicks WHERE type='traffic' AND timeUnit='day'`.
 
-**EngageDataTicks 与 DataTicks 对比**：
+**Comparison: EngageDataTicks vs. DataTicks**:
 
-| | DataTicks (现有) | EngageDataTicks (新增) |
+| | DataTicks (Existing) | EngageDataTicks (New) |
 |---|---|---|
-| 粒度 | per-integration (per social account) | per-platform (x/reddit/all) |
+| Granularity | per-integration (per social account) | per-platform (x/reddit/all) |
 | type | impressions / traffic | replies / impressions / traffic |
-| 更新 | `dataTicksSyncWorkflow` UTC 00:05 | `engageDataTicksWorkflow` UTC 01:00 |
-| 用途 | 普通发帖趋势图 | Engage 回帖趋势图 |
-| 缓存 | Redis `dashboard:impressions:${orgId}` | Redis `engage:ticks:${orgId}` |
+| Update | `dataTicksSyncWorkflow` UTC 00:05 | `engageDataTicksWorkflow` UTC 01:00 |
+| Purpose | Standard post trend charts | Engage reply trend charts |
+| Cache | Redis `dashboard:impressions:${orgId}` | Redis `engage:ticks:${orgId}` |
 
 ### 11.2 Calendar Integration
 
@@ -1939,8 +1939,8 @@ const posts = await prisma.post.findMany({
 | `source='engage'` AND `state=ERROR` | `#FFE4E4` | `#D04040` | ⚠️ |
 
 **Toolbar additions** (minimal changes to existing calendar UI):
-- "Show Engage" toggle → controls the `showEngage` flag in the query
-- Banner "Engage" counter: `COUNT Post WHERE source='engage' AND publishDate IN this month`
+- "Show Engage" toggle → controls the `showEngage` flag in the query.
+- Banner "Engage" counter: `COUNT Post WHERE source='engage' AND publishDate IN this month`.
 
 ---
 
@@ -1948,15 +1948,15 @@ const posts = await prisma.post.findMany({
 
 ### 12.1 OAuth Token Scoping
 
-- X API calls use the *user's own* connected integration token — never a shared platform token
-- Engage never reads DMs or private data; scopes limited to `tweet.read`, `tweet.write`, `users.read`
-- Reddit API calls are read-only (no OAuth needed); only the user manually posts on Reddit
+- X API calls use the *user's own* connected integration token — never a shared platform token.
+- Engage never reads DMs or private data; scopes limited to `tweet.read`, `tweet.write`, `users.read`.
+- Reddit API calls are read-only (no OAuth needed); only the user manually posts on Reddit.
 
 ### 12.2 Rate Limit Protection
 
-- Scan workflow: max 50 API calls per org per run; configurable backoff on 429
-- Draft generation: rate-limited to 20 generations/user/hour via existing throttle guard
-- X send: wrapped with existing `handleErrors` → `'retry' | 'bad-body' | 'refresh-token'` classification
+- Scan workflow: max 50 API calls per org per run; configurable backoff on 429.
+- Draft generation: rate-limited to 20 generations/user/hour via existing throttle guard.
+- X send: wrapped with existing `handleErrors` → `'retry' | 'bad-body' | 'refresh-token'` classification.
 
 ### 12.3 Organization Isolation
 
@@ -1965,8 +1965,8 @@ All Engage data is scoped to `organizationId`. No cross-org data access. Existin
 ### 12.4 Input Validation
 
 - Reddit comment URL validated via regex: `^https?://www\.reddit\.com/r/[^/]+/comments/[^/]+/[^/]*/[a-z0-9]+/?$`
-- AI draft content stored as-is; no execution or further processing
-- Keyword max length: 100 chars; max 50 keywords per org
+- AI draft content stored as-is; no execution or further processing.
+- Keyword max length: 100 chars; max 50 keywords per org.
 
 ---
 

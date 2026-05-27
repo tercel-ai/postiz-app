@@ -15,6 +15,7 @@ import { SocialAbstract } from '@gitroom/nestjs-libraries/integrations/social.ab
 import { lookup } from 'mime-types';
 import axios from 'axios';
 import WebSocket from 'ws';
+import { fetch as undiciFetch, ProxyAgent } from 'undici';
 import { Tool } from '@gitroom/nestjs-libraries/integrations/tool.decorator';
 import { Integration } from '@prisma/client';
 
@@ -34,6 +35,8 @@ export class RedditProvider extends SocialAbstract implements SocialProvider {
   name = 'Reddit';
   isBetweenSteps = false;
   scopes = ['read', 'identity', 'submit', 'flair'];
+  // flair is optional — posting works without it; only flair selection requires it
+  requiredScopes = ['read', 'identity', 'submit'];
   editor = 'normal' as const;
   dto = RedditSettingsDto;
 
@@ -110,11 +113,13 @@ export class RedditProvider extends SocialAbstract implements SocialProvider {
   async generateAuthUrl() {
     const state = makeId(6);
     const codeVerifier = makeId(30);
+    const redirectUri = `${process.env.FRONTEND_URL}/integrations/social/reddit`;
     const url = `https://www.reddit.com/api/v1/authorize?client_id=${
       process.env.REDDIT_CLIENT_ID
     }&response_type=code&state=${state}&redirect_uri=${encodeURIComponent(
-      `${process.env.FRONTEND_URL}/integrations/social/reddit`
-    )}&duration=permanent&scope=${encodeURIComponent(this.scopes.join(' '))}`;
+      redirectUri
+    )}&duration=permanent&scope=${encodeURIComponent(this.scopes.join(' '))}&approval_prompt=force`;
+    console.log(`[reddit.generateAuthUrl] redirect_uri=${redirectUri} state=${state}`);
     return {
       url,
       codeVerifier,
@@ -123,37 +128,50 @@ export class RedditProvider extends SocialAbstract implements SocialProvider {
   }
 
   async authenticate(params: { code: string; codeVerifier: string }) {
-    // TEMP DIAGNOSTIC (Reddit connect debugging) — remove once resolved.
-    const _redirectUri = `${process.env.FRONTEND_URL}/integrations/social/reddit`;
-    const _clientId = process.env.REDDIT_CLIENT_ID || '';
-    const _clientSecret = process.env.REDDIT_CLIENT_SECRET || '';
-    console.log(
-      `[reddit.authenticate] redirect_uri=${_redirectUri} client_id=${_clientId} secretLen=${_clientSecret.length} codeLen=${params.code?.length} UA=${REDDIT_USER_AGENT}`
-    );
-    const _raw = await fetch('https://www.reddit.com/api/v1/access_token', {
+    const redirectUri = `${process.env.FRONTEND_URL}/integrations/social/reddit`;
+    const clientId = process.env.REDDIT_CLIENT_ID || '';
+    const clientSecret = process.env.REDDIT_CLIENT_SECRET || '';
+
+    // Use npm undici's fetch with an explicit ProxyAgent so the proxy is guaranteed
+    // regardless of global dispatcher state. globalThis.fetch in Node.js 22 uses a
+    // separate internal undici instance that is not affected by npm undici's
+    // setGlobalDispatcher, so we must pass the dispatcher explicitly here.
+    const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
+    const dispatcher = proxyUrl ? new ProxyAgent(proxyUrl) : undefined;
+    console.log(`[reddit.authenticate] token exchange proxy=${proxyUrl || '(direct)'} redirect_uri=${redirectUri}`);
+
+    // 'as any' is required because undici.RequestInit.dispatcher is not in DOM RequestInit
+    const tokenRes = await (undiciFetch as any)('https://www.reddit.com/api/v1/access_token', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
         'User-Agent': REDDIT_USER_AGENT,
-        Authorization: `Basic ${Buffer.from(`${_clientId}:${_clientSecret}`).toString('base64')}`,
+        Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString('base64')}`,
       },
       body: new URLSearchParams({
         grant_type: 'authorization_code',
         code: params.code,
-        redirect_uri: _redirectUri,
-      }),
+        redirect_uri: redirectUri,
+      }).toString(),
+      ...(dispatcher && { dispatcher }),
     });
-    const _bodyText = await _raw.text();
-    console.log(`[reddit.authenticate] token HTTP ${_raw.status} body=${_bodyText}`);
+
+    const bodyText = await tokenRes.text();
+    console.log(`[reddit.authenticate] token HTTP ${tokenRes.status} body=${bodyText}`);
+
+    if (!tokenRes.ok) {
+      const errBody = (() => { try { return JSON.parse(bodyText); } catch { return {}; } })();
+      throw new Error(`Reddit token exchange failed (HTTP ${tokenRes.status}): ${errBody?.message || bodyText}`);
+    }
 
     const {
       access_token: accessToken,
       refresh_token: refreshToken,
       expires_in: expiresIn,
       scope,
-    } = JSON.parse(_bodyText);
+    } = JSON.parse(bodyText);
 
-    this.checkScopes(this.scopes, scope);
+    this.checkScopes(this.requiredScopes, scope);
 
     const { name, id, icon_img } = await (
       await this.fetch('https://oauth.reddit.com/api/v1/me', {
