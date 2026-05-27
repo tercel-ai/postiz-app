@@ -353,6 +353,13 @@ export class GenerateDraftDto {
   @Max(3)
   @Type(() => Number)
   brandStrength: number;
+
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  @MaxLength(100, { each: true })
+  @ArrayMaxSize(20)
+  mentions?: string[];
 }
 
 // ─── Reply Sending ────────────────────────────────────────────────────────────

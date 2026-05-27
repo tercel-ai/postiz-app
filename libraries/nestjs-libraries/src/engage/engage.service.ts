@@ -56,8 +56,16 @@ export class EngageService implements OnApplicationBootstrap {
 
   // ─── Config ───────────────────────────────────────────────────────────────
 
-  getConfig(org: Organization) {
-    return this._engageRepository.getOrCreateConfig(org.id);
+  async getConfig(org: Organization) {
+    const config = await this._engageRepository.getOrCreateConfig(org.id);
+    return {
+      ...config,
+      scanIntervals: {
+        keywordHours: Number(process.env.ENGAGE_KEYWORD_SCAN_INTERVAL_HOURS ?? 24),
+        channelHours: Number(process.env.ENGAGE_CHANNEL_SCAN_INTERVAL_HOURS ?? 3),
+        trackedHours: Number(process.env.ENGAGE_TRACKED_SCAN_INTERVAL_HOURS ?? 3),
+      },
+    };
   }
 
   async saveConfig(org: Organization, dto: SaveEngageConfigDto) {

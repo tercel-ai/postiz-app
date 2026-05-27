@@ -312,7 +312,7 @@ model EngageOpportunity {
 // global row. The feed's total `score` is recomputed every scan and stored here.
 //
 // Dimension      Max   Formula / thresholds
-// scoreKeyword    35   hit core+15; brand(+5) > competitor(+3) > core
+// scoreKeyword    35   min(hits×15, 35); +5 if any BRAND hit; +3 if any COMPETITOR hit; capped at 35
 // scoreTracked     5   post author is in this org's EngageTrackedAccount → +5
 // score          100   = scoreKeyword + scoreTracked + opportunity.(scoreHeat+scoreAuthority+scoreRecency)
 model EngageOpportunityState {

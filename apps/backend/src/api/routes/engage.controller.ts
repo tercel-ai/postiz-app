@@ -289,7 +289,8 @@ export class EngageController {
       for await (const chunk of this._engageDraftService.generateDraft(
         opportunity,
         body.strategy,
-        body.brandStrength
+        body.brandStrength,
+        body.mentions
       )) {
         res.write(`data: ${JSON.stringify({ text: chunk })}\n\n`);
       }

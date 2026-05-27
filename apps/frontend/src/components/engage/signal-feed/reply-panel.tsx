@@ -23,7 +23,7 @@ const STRATEGIES = [
   { value: 'EMPATHY_LED', label: 'Empathy Led', desc: 'Acknowledge first, then insight' },
 ];
 
-const MAX_X_CHARS = 280;
+const MAX_X_CHARS = 260;
 
 export const ReplyPanel: FC<ReplyPanelProps> = ({
   opportunity,
@@ -40,6 +40,8 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
 
   const [strategy, setStrategy] = useState('EXPERT_ANSWER');
   const [brandStrength, setBrandStrength] = useState(1);
+  const [mentions, setMentions] = useState<string[]>([]);
+  const [mentionInput, setMentionInput] = useState('');
   const [draft, setDraft] = useState('');
   const [streaming, setStreaming] = useState(false);
   const [selectedAccountId, setSelectedAccountId] = useState(
@@ -85,6 +87,16 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
     };
   }, [onClose]);
 
+  const addMention = useCallback((raw: string) => {
+    const tag = raw.trim().replace(/^#/, '');
+    if (!tag || mentions.includes(tag) || mentions.length >= 20) return;
+    setMentions((prev) => [...prev, tag]);
+  }, [mentions]);
+
+  const removeMention = useCallback((tag: string) => {
+    setMentions((prev) => prev.filter((m) => m !== tag));
+  }, []);
+
   const generateDraft = useCallback(async () => {
     if (streaming) {
       abortRef.current?.abort();
@@ -97,7 +109,7 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
     try {
       const res = await fetch(`/engage/opportunities/${opportunity.id}/draft`, {
         method: 'POST',
-        body: JSON.stringify({ strategy, brandStrength }),
+        body: JSON.stringify({ strategy, brandStrength, mentions }),
         signal: abortRef.current.signal,
       });
       if (!res.ok) {
@@ -139,7 +151,7 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
     } finally {
       setStreaming(false);
     }
-  }, [opportunity.id, strategy, brandStrength, streaming, fetch, toaster]);
+  }, [opportunity.id, strategy, brandStrength, mentions, streaming, fetch, toaster]);
 
   const handleSend = useCallback(async () => {
     if (!draft || !selectedAccountId) return;
@@ -331,6 +343,58 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
             <span>Natural</span>
             <span>Direct</span>
           </div>
+        </div>
+
+        {/* Mentions */}
+        <div>
+          <p className="text-xs text-gray-400 mb-2 font-medium uppercase tracking-wide">
+            Mentions
+          </p>
+          {/* Tag list */}
+          {mentions.length > 0 && (
+            <div className="flex flex-wrap gap-1 mb-2">
+              {mentions.map((tag) => (
+                <span
+                  key={tag}
+                  className="flex items-center gap-1 bg-blue-600/20 border border-blue-500/40 text-blue-300 text-xs rounded-full px-2 py-0.5"
+                >
+                  {tag}
+                  <button
+                    onClick={() => removeMention(tag)}
+                    aria-label={`Remove ${tag}`}
+                    className="text-blue-400 hover:text-white leading-none"
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
+          <input
+            type="text"
+            value={mentionInput}
+            onChange={(e) => setMentionInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ',' || e.key === 'Tab') {
+                e.preventDefault();
+                addMention(mentionInput);
+                setMentionInput('');
+              } else if (e.key === 'Backspace' && !mentionInput && mentions.length > 0) {
+                setMentions((prev) => prev.slice(0, -1));
+              }
+            }}
+            onBlur={() => {
+              if (mentionInput.trim()) {
+                addMention(mentionInput);
+                setMentionInput('');
+              }
+            }}
+            placeholder="e.g. AI, ai agent, llm — press Enter to add"
+            className="w-full bg-[#1e2536] border border-[#2d3748] text-white rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-500 placeholder-gray-600"
+          />
+          <p className="text-xs text-gray-600 mt-1">
+            Topics/entities the AI will naturally weave into the reply
+          </p>
         </div>
 
         {/* Draft textarea */}
