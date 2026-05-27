@@ -29,7 +29,8 @@ const hasAiKey = !!(process.env.ANTHROPIC_API_KEY || process.env.CLAUDE_API_KEY 
 function buildActivity(): EngageScanActivity {
   return new EngageScanActivity(
     {} as any, {} as any, {} as any, {} as any,
-    {} as any, {} as any, {} as any, {} as any
+    {} as any, {} as any, {} as any, {} as any,
+    {} as any
   );
 }
 
