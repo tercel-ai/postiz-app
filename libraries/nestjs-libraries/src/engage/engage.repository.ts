@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { Prisma, EngageOpportunity, EngageOpportunityStatus } from '@prisma/client';
 import { PrismaRepository, PrismaTransaction } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
 import {
   AddKeywordDto,
@@ -30,6 +30,7 @@ export class EngageRepository {
     private _trackedAccount: PrismaRepository<'engageTrackedAccount'>,
     private _replyAccount: PrismaRepository<'engageXReplyAccount'>,
     private _opportunity: PrismaRepository<'engageOpportunity'>,
+    private _oppState: PrismaRepository<'engageOpportunityState'>,
     private _sentReply: PrismaRepository<'engageSentReply'>,
     private _integration: PrismaRepository<'integration'>,
     private _post: PrismaRepository<'post'>,
@@ -62,6 +63,27 @@ export class EngageRepository {
           },
           orderBy: { createdAt: 'asc' },
         },
+      },
+    });
+  }
+
+  async getAllEnabledOrgContexts() {
+    return this._config.model.engageConfig.findMany({
+      where: { enabled: true },
+      include: {
+        keywords: {
+          where: { enabled: true },
+          orderBy: { createdAt: 'asc' },
+        },
+        monitoredChannels: {
+          where: { enabled: true },
+          orderBy: { createdAt: 'asc' },
+        },
+        trackedAccounts: {
+          where: { enabled: true },
+          orderBy: { createdAt: 'asc' },
+        },
+        xReplyAccounts: { where: { engageEnabled: true } },
       },
     });
   }
@@ -148,6 +170,35 @@ export class EngageRepository {
     });
     if (!kw) throw new NotFoundException('Keyword not found');
     return this._keyword.model.engageKeyword.delete({ where: { id } });
+  }
+
+  async getKeywordPosts(organizationId: string, keywordId: string, limit = 8) {
+    const kw = await this._keyword.model.engageKeyword.findFirst({
+      where: { id: keywordId, organizationId },
+    });
+    if (!kw) throw new NotFoundException('Keyword not found');
+    // Posts are global now — preview any post whose content matches the keyword.
+    // The trigram GIN index on postContent backs this ILIKE.
+    return this._opportunity.model.engageOpportunity.findMany({
+      where: {
+        deletedAt: null,
+        postContent: { contains: kw.keyword, mode: 'insensitive' },
+      },
+      orderBy: { postPublishedAt: 'desc' },
+      take: limit,
+      select: {
+        id: true,
+        platform: true,
+        externalPostUrl: true,
+        authorUsername: true,
+        postContent: true,
+        postPublishedAt: true,
+        metricScore: true,
+        metricComments: true,
+        metricLikes: true,
+        scoreHeat: true,
+      },
+    });
   }
 
   // ─── Monitored Channels ───────────────────────────────────────────────────
@@ -349,69 +400,107 @@ export class EngageRepository {
 
   // ─── Opportunities ────────────────────────────────────────────────────────
 
+  // Flatten a per-org state row + its global opportunity into the legacy
+  // EngageOpportunity response shape the API/frontend expect. `id` stays the
+  // opportunity id (the value the controller's :id routes operate on).
+  private _merge<
+    T extends {
+      status: EngageOpportunityStatus;
+      bookmarked: boolean;
+      score: number;
+      scoreKeyword: number;
+      scoreTracked: number;
+      opportunity: EngageOpportunity;
+    }
+  >(state: T) {
+    const { opportunity, status, bookmarked, score, scoreKeyword, scoreTracked } =
+      state;
+    return {
+      ...opportunity,
+      status,
+      bookmarked,
+      score,
+      scoreKeyword,
+      scoreTracked,
+    };
+  }
+
   async listOpportunities(organizationId: string, dto: ListOpportunitiesDto) {
     const page = dto.page ?? 1;
     const limit = dto.limit ?? 20;
     const offset = (page - 1) * limit;
 
-    const where: Prisma.EngageOpportunityWhereInput = {
+    // State-table filters (per-org) + nested opportunity filters (global).
+    const where: Prisma.EngageOpportunityStateWhereInput = {
       organizationId,
-      deletedAt: null,
-      ...(dto.platform && { platform: dto.platform }),
       ...(dto.status && { status: dto.status }),
-      ...(dto.intent && { intentTags: { has: dto.intent } }),
+      ...(dto.bookmarked !== undefined && { bookmarked: dto.bookmarked }),
       ...(dto.minScore !== undefined && { score: { gte: dto.minScore } }),
       ...(dto.minScoreKeyword !== undefined && {
         scoreKeyword: { gte: dto.minScoreKeyword },
       }),
-      ...(dto.minScoreHeat !== undefined && {
-        scoreHeat: { gte: dto.minScoreHeat },
-      }),
-      ...(dto.minScoreAuthority !== undefined && {
-        scoreAuthority: { gte: dto.minScoreAuthority },
-      }),
       ...(dto.trackedOnly && { scoreTracked: { gt: 0 } }),
-      ...(dto.bookmarked !== undefined && { bookmarked: dto.bookmarked }),
-      ...(dto.date === 'today' && {
-        postPublishedAt: { gte: dayjs.utc().startOf('day').toDate() },
-      }),
-      ...(dto.date === 'week' && {
-        postPublishedAt: { gte: dayjs.utc().startOf('isoWeek').toDate() },
-      }),
+      opportunity: {
+        deletedAt: null,
+        ...(dto.platform && { platform: dto.platform }),
+        ...(dto.intent && { intentTags: { has: dto.intent } }),
+        ...(dto.minScoreHeat !== undefined && {
+          scoreHeat: { gte: dto.minScoreHeat },
+        }),
+        ...(dto.minScoreAuthority !== undefined && {
+          scoreAuthority: { gte: dto.minScoreAuthority },
+        }),
+        ...(dto.date === 'today' && {
+          postPublishedAt: { gte: dayjs.utc().startOf('day').toDate() },
+        }),
+        ...(dto.date === 'week' && {
+          postPublishedAt: { gte: dayjs.utc().startOf('isoWeek').toDate() },
+        }),
+      },
     };
 
-    const validSortFields = new Set([
+    // Route sort field to the table that owns it.
+    const stateSortFields = new Set([
       'score',
       'scoreKeyword',
-      'scoreHeat',
-      'scoreAuthority',
-      'scoreRecency',
       'scoreTracked',
       'createdAt',
     ]);
+    const oppSortFields = new Set([
+      'scoreHeat',
+      'scoreAuthority',
+      'scoreRecency',
+    ]);
     const sortBy =
-      dto.sortBy && validSortFields.has(dto.sortBy) ? dto.sortBy : 'score';
+      dto.sortBy && (stateSortFields.has(dto.sortBy) || oppSortFields.has(dto.sortBy))
+        ? dto.sortBy
+        : 'score';
     const sortOrder = dto.sortOrder ?? 'desc';
+    const orderBy = oppSortFields.has(sortBy)
+      ? { opportunity: { [sortBy]: sortOrder } }
+      : { [sortBy]: sortOrder };
 
-    const [items, total] = await Promise.all([
-      this._opportunity.model.engageOpportunity.findMany({
+    const [rows, total] = await Promise.all([
+      this._oppState.model.engageOpportunityState.findMany({
         where,
-        orderBy: { [sortBy]: sortOrder },
+        include: { opportunity: true },
+        orderBy,
         skip: offset,
         take: limit,
       }),
-      this._opportunity.model.engageOpportunity.count({ where }),
+      this._oppState.model.engageOpportunityState.count({ where }),
     ]);
 
-    return { items, total, page, limit };
+    return { items: rows.map((r) => this._merge(r)), total, page, limit };
   }
 
   async dismissOpportunity(organizationId: string, id: string) {
     // Atomic: only dismiss actionable opportunities. Replied/scheduled rows are protected.
-    const result = await this._opportunity.model.engageOpportunity.updateMany({
+    // `id` is the opportunity id; status lives on this org's state row.
+    const result = await this._oppState.model.engageOpportunityState.updateMany({
       where: {
-        id,
         organizationId,
+        opportunityId: id,
         status: { in: ['NEW', 'AUTO_QUEUED'] },
       },
       data: { status: 'DISMISSED' },
@@ -419,7 +508,13 @@ export class EngageRepository {
     if (result.count === 0) {
       throw new NotFoundException('Opportunity not found or no longer actionable');
     }
-    return this._opportunity.model.engageOpportunity.findUnique({ where: { id } });
+    const row = await this._oppState.model.engageOpportunityState.findUnique({
+      where: {
+        organizationId_opportunityId: { organizationId, opportunityId: id },
+      },
+      include: { opportunity: true },
+    });
+    return row ? this._merge(row) : null;
   }
 
   // Atomic claim — only one concurrent caller succeeds. Prevents the orphan-Post + duplicate-X-reply
@@ -437,31 +532,32 @@ export class EngageRepository {
     // Read prior status (snapshot for rollback). The followup updateMany is conditional
     // on this exact status — if a concurrent claimer flipped it between the read and
     // the update, the conditional update yields count=0 and we throw.
-    const existing = await this._opportunity.model.engageOpportunity.findFirst({
+    const existing = await this._oppState.model.engageOpportunityState.findUnique({
       where: {
-        id,
-        organizationId,
-        status: { in: ['NEW', 'AUTO_QUEUED'] },
+        organizationId_opportunityId: { organizationId, opportunityId: id },
       },
       select: { status: true },
     });
-    if (!existing) {
+    if (!existing || !['NEW', 'AUTO_QUEUED'].includes(existing.status)) {
       throw new NotFoundException('Opportunity not found or already replied');
     }
     const priorStatus = existing.status as 'NEW' | 'AUTO_QUEUED';
 
-    const result = await this._opportunity.model.engageOpportunity.updateMany({
-      where: { id, organizationId, status: priorStatus },
+    const result = await this._oppState.model.engageOpportunityState.updateMany({
+      where: { organizationId, opportunityId: id, status: priorStatus },
       data: { status: claimStatus },
     });
     if (result.count === 0) {
       throw new NotFoundException('Opportunity already claimed by another request');
     }
-    const opp = await this._opportunity.model.engageOpportunity.findUnique({
-      where: { id },
+    const row = await this._oppState.model.engageOpportunityState.findUnique({
+      where: {
+        organizationId_opportunityId: { organizationId, opportunityId: id },
+      },
+      include: { opportunity: true },
     });
-    if (!opp) throw new NotFoundException('Opportunity not found');
-    return { opp, priorStatus };
+    if (!row) throw new NotFoundException('Opportunity not found');
+    return { opp: this._merge(row), priorStatus };
   }
 
   // Rollback helper — restores an opportunity to its prior status after a failed
@@ -472,8 +568,8 @@ export class EngageRepository {
     priorStatus: 'NEW' | 'AUTO_QUEUED' = 'NEW'
   ) {
     try {
-      await this._opportunity.model.engageOpportunity.updateMany({
-        where: { id, organizationId },
+      await this._oppState.model.engageOpportunityState.updateMany({
+        where: { organizationId, opportunityId: id },
         data: { status: priorStatus },
       });
     } catch {
@@ -490,14 +586,20 @@ export class EngageRepository {
   }
 
   async toggleBookmark(organizationId: string, id: string) {
-    const opp = await this._opportunity.model.engageOpportunity.findFirst({
-      where: { id, organizationId },
+    const row = await this._oppState.model.engageOpportunityState.findUnique({
+      where: {
+        organizationId_opportunityId: { organizationId, opportunityId: id },
+      },
     });
-    if (!opp) throw new NotFoundException('Opportunity not found');
-    return this._opportunity.model.engageOpportunity.update({
-      where: { id },
-      data: { bookmarked: !opp.bookmarked },
+    if (!row) throw new NotFoundException('Opportunity not found');
+    const updated = await this._oppState.model.engageOpportunityState.update({
+      where: {
+        organizationId_opportunityId: { organizationId, opportunityId: id },
+      },
+      data: { bookmarked: !row.bookmarked },
+      include: { opportunity: true },
     });
+    return this._merge(updated);
   }
 
   async getScoreStats(
@@ -505,8 +607,10 @@ export class EngageRepository {
     date?: 'today' | 'week' | 'month',
     platform?: string
   ) {
-    const where: Prisma.EngageOpportunityWhereInput = {
-      organizationId,
+    // Date/platform filters live on the global opportunity; per-org membership is
+    // expressed via the state relation. Two aggregates: org-specific scores from
+    // the state table, objective scores from the opportunity table.
+    const oppFilter: Prisma.EngageOpportunityWhereInput = {
       deletedAt: null,
       ...(platform && { platform }),
       ...(date === 'today' && {
@@ -519,55 +623,59 @@ export class EngageRepository {
         postPublishedAt: { gte: dayjs.utc().startOf('month').toDate() },
       }),
     };
+    const stateWhere: Prisma.EngageOpportunityStateWhereInput = {
+      organizationId,
+      opportunity: oppFilter,
+    };
+    const oppWhere: Prisma.EngageOpportunityWhereInput = {
+      ...oppFilter,
+      states: { some: { organizationId } },
+    };
 
-    // DB-side aggregation — no row cap. Earlier implementation pulled up to 10_000
-    // rows into JS and reduced; that silently undercounted high-volume orgs.
     const round1 = (n: number | null | undefined) =>
       n == null ? 0 : Math.round(n * 10) / 10;
 
-    const [agg, distRows, trackedCount, bestKeyword, bestHeat, bestAuthority] =
+    const [stateAgg, oppAgg, distRows, trackedCount, bestKeyword, bestHeat, bestAuthority] =
       await Promise.all([
-        this._opportunity.model.engageOpportunity.aggregate({
-          where,
+        this._oppState.model.engageOpportunityState.aggregate({
+          where: stateWhere,
           _count: { _all: true },
-          _avg: {
-            score: true,
-            scoreKeyword: true,
-            scoreHeat: true,
-            scoreAuthority: true,
-            scoreRecency: true,
-            scoreTracked: true,
-          },
+          _avg: { score: true, scoreKeyword: true, scoreTracked: true },
         }),
-        this._opportunity.model.engageOpportunity.findMany({
-          where,
+        this._opportunity.model.engageOpportunity.aggregate({
+          where: oppWhere,
+          _avg: { scoreHeat: true, scoreAuthority: true, scoreRecency: true },
+        }),
+        this._oppState.model.engageOpportunityState.findMany({
+          where: stateWhere,
           select: { score: true },
-          // small projection used purely for the 3-bucket distribution; bounded by
-          // followup aggregations below — we trust this cap because distribution is
-          // a percentage and high-N samples converge fast.
           take: 10_000,
         }),
-        this._opportunity.model.engageOpportunity.count({
-          where: { ...where, scoreTracked: { gt: 0 } },
+        this._oppState.model.engageOpportunityState.count({
+          where: { ...stateWhere, scoreTracked: { gt: 0 } },
         }),
-        this._opportunity.model.engageOpportunity.findFirst({
-          where,
+        this._oppState.model.engageOpportunityState.findFirst({
+          where: stateWhere,
           orderBy: { scoreKeyword: 'desc' },
-          select: { id: true, scoreKeyword: true, postContent: true },
+          select: {
+            opportunityId: true,
+            scoreKeyword: true,
+            opportunity: { select: { postContent: true } },
+          },
         }),
         this._opportunity.model.engageOpportunity.findFirst({
-          where,
+          where: oppWhere,
           orderBy: { scoreHeat: 'desc' },
           select: { id: true, scoreHeat: true, postContent: true },
         }),
         this._opportunity.model.engageOpportunity.findFirst({
-          where,
+          where: oppWhere,
           orderBy: { scoreAuthority: 'desc' },
           select: { id: true, scoreAuthority: true, postContent: true },
         }),
       ]);
 
-    const total = agg._count._all;
+    const total = stateAgg._count._all;
     if (total === 0) {
       return {
         total: 0,
@@ -604,17 +712,17 @@ export class EngageRepository {
 
     return {
       total,
-      avgScore: round1(agg._avg.score),
-      avgScoreKeyword: round1(agg._avg.scoreKeyword),
-      avgScoreHeat: round1(agg._avg.scoreHeat),
-      avgScoreAuthority: round1(agg._avg.scoreAuthority),
-      avgScoreRecency: round1(agg._avg.scoreRecency),
-      avgScoreTracked: round1(agg._avg.scoreTracked),
+      avgScore: round1(stateAgg._avg.score),
+      avgScoreKeyword: round1(stateAgg._avg.scoreKeyword),
+      avgScoreHeat: round1(oppAgg._avg.scoreHeat),
+      avgScoreAuthority: round1(oppAgg._avg.scoreAuthority),
+      avgScoreRecency: round1(oppAgg._avg.scoreRecency),
+      avgScoreTracked: round1(stateAgg._avg.scoreTracked),
       distribution,
       topByKeyword: bestKeyword && {
-        id: bestKeyword.id,
+        id: bestKeyword.opportunityId,
         score: bestKeyword.scoreKeyword,
-        title: bestKeyword.postContent.slice(0, 80),
+        title: bestKeyword.opportunity.postContent.slice(0, 80),
       },
       topByHeat: bestHeat && {
         id: bestHeat.id,
@@ -631,19 +739,27 @@ export class EngageRepository {
   }
 
   async getOpportunityById(organizationId: string, id: string) {
-    const opp = await this._opportunity.model.engageOpportunity.findFirst({
-      where: { id, organizationId },
+    const row = await this._oppState.model.engageOpportunityState.findUnique({
+      where: {
+        organizationId_opportunityId: { organizationId, opportunityId: id },
+      },
+      include: { opportunity: true },
     });
-    if (!opp) throw new NotFoundException('Opportunity not found');
-    return opp;
+    if (!row) throw new NotFoundException('Opportunity not found');
+    return this._merge(row);
   }
 
   async getOpportunityForReply(organizationId: string, id: string) {
-    const opp = await this._opportunity.model.engageOpportunity.findFirst({
-      where: { id, organizationId, status: { in: ['NEW', 'AUTO_QUEUED'] } },
+    const row = await this._oppState.model.engageOpportunityState.findUnique({
+      where: {
+        organizationId_opportunityId: { organizationId, opportunityId: id },
+      },
+      include: { opportunity: true },
     });
-    if (!opp) throw new NotFoundException('Opportunity not found or already replied');
-    return opp;
+    if (!row || !['NEW', 'AUTO_QUEUED'].includes(row.status)) {
+      throw new NotFoundException('Opportunity not found or already replied');
+    }
+    return this._merge(row);
   }
 
   // ─── Sent Replies ─────────────────────────────────────────────────────────
@@ -839,11 +955,14 @@ export class EngageRepository {
   }
 
   async setOpportunityStatus(
+    organizationId: string,
     opportunityId: string,
     status: 'REPLIED' | 'SCHEDULED' | 'DISMISSED' | 'AUTO_QUEUED' | 'EXPIRED'
   ) {
-    return this._opportunity.model.engageOpportunity.update({
-      where: { id: opportunityId },
+    return this._oppState.model.engageOpportunityState.update({
+      where: {
+        organizationId_opportunityId: { organizationId, opportunityId },
+      },
       data: { status },
     });
   }

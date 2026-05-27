@@ -5,6 +5,7 @@ import {
   InternalServerErrorException,
   Logger,
   NotFoundException,
+  OnApplicationBootstrap,
 } from '@nestjs/common';
 import { Organization } from '@prisma/client';
 import { TemporalService } from 'nestjs-temporal-core';
@@ -37,7 +38,7 @@ const REDDIT_COMMENT_URL_RE =
   /^https?:\/\/(www\.)?reddit\.com\/r\/[^/]+\/comments\/[^/]+\/[^/]+\/[a-z0-9]+\/?$/i;
 
 @Injectable()
-export class EngageService {
+export class EngageService implements OnApplicationBootstrap {
   private readonly logger = new Logger(EngageService.name);
 
   constructor(
@@ -46,6 +47,12 @@ export class EngageService {
     private _postsService: PostsService,
     private _postOverageService: PostOverageService
   ) { }
+
+  // Auto-start global workflows on every app boot so pnpm dev / Docker restart
+  // never leaves the system in a state where no workflow is running.
+  async onApplicationBootstrap() {
+    await this._ensureGlobalWorkflowsRunning();
+  }
 
   // ─── Config ───────────────────────────────────────────────────────────────
 
@@ -58,14 +65,20 @@ export class EngageService {
       ...(dto.enabled !== undefined && { enabled: dto.enabled }),
     });
     if (dto.enabled) {
-      await this._startEngageWorkflowsForOrg(org.id);
+      await this._ensureGlobalWorkflowsRunning();
+      this.triggerImmediateScan(org).catch((err) =>
+        this.logger.warn(`Immediate scan trigger failed for org ${org.id}:`, err)
+      );
     }
     return result;
   }
 
   async setupEngage(org: Organization, dto: SetupEngageDto) {
     const result = await this._engageRepository.setupEngage(org.id, dto);
-    await this._startEngageWorkflowsForOrg(org.id);
+    await this._ensureGlobalWorkflowsRunning();
+    this.triggerImmediateScan(org).catch((err) =>
+      this.logger.warn(`Immediate scan trigger failed for org ${org.id}:`, err)
+    );
     return result;
   }
 
@@ -91,6 +104,10 @@ export class EngageService {
 
   async deleteKeyword(org: Organization, id: string) {
     return this._engageRepository.deleteKeyword(org.id, id);
+  }
+
+  async getKeywordPosts(org: Organization, keywordId: string) {
+    return this._engageRepository.getKeywordPosts(org.id, keywordId);
   }
 
   // ─── Monitored Channels ───────────────────────────────────────────────────
@@ -291,15 +308,23 @@ export class EngageService {
     }
   }
 
-  // Starts per-org Temporal workflows when setup completes.
-  // USE_EXISTING policy prevents double-starting if the org re-saves config.
-  private async _startEngageWorkflowsForOrg(orgId: string): Promise<void> {
+  // Ensures the 3 global workflows are running.
+  // Intervals are read from env vars; USE_EXISTING makes this idempotent on every call.
+  //   ENGAGE_KEYWORD_SCAN_INTERVAL_HOURS  (default 24)
+  //   ENGAGE_CHANNEL_SCAN_INTERVAL_HOURS  (default 3)
+  //   ENGAGE_TRACKED_SCAN_INTERVAL_HOURS  (default 3)
+  private async _ensureGlobalWorkflowsRunning(): Promise<void> {
     const client = this._temporalService.client?.getRawClient();
     if (!client) return;
-    const workflows: Array<{ workflowId: string; name: string; args: unknown[] }> = [
-      // runImmediately=true → skip the initial UTC 00:30 sleep on first setup.
-      { workflowId: `engage-scan-${orgId}`, name: 'engageScanWorkflow', args: [orgId, true] },
-      { workflowId: `engage-tracked-${orgId}`, name: 'engageTrackedAccountsWorkflow', args: [orgId] },
+
+    const keywordHours = Number(process.env.ENGAGE_KEYWORD_SCAN_INTERVAL_HOURS ?? 24);
+    const channelHours = Number(process.env.ENGAGE_CHANNEL_SCAN_INTERVAL_HOURS ?? 3);
+    const trackedHours = Number(process.env.ENGAGE_TRACKED_SCAN_INTERVAL_HOURS ?? 3);
+
+    const workflows = [
+      { workflowId: 'engage-keyword-global', name: 'engageGlobalKeywordScanWorkflow', args: [false, keywordHours] as unknown[] },
+      { workflowId: 'engage-channel-global', name: 'engageGlobalChannelScanWorkflow', args: [false, channelHours] as unknown[] },
+      { workflowId: 'engage-tracked-global', name: 'engageGlobalTrackedWorkflow',     args: [false, trackedHours] as unknown[] },
     ];
     for (const { workflowId, name, args } of workflows) {
       try {
@@ -310,7 +335,7 @@ export class EngageService {
           workflowIdConflictPolicy: 'USE_EXISTING',
         });
       } catch (err) {
-        this.logger.error(`Failed to start ${name} for org ${orgId}:`, err);
+        this.logger.error(`Failed to start ${name}:`, err);
       }
     }
   }
@@ -549,38 +574,42 @@ export class EngageService {
 
   async triggerImmediateScan(
     org: Organization,
-    keywordIds: string[] = []
+    _keywordIds: string[] = []
   ): Promise<{ status: 'signaled' | 'started' | 'no_client' | 'error' }> {
     const client = this._temporalService.client?.getRawClient();
     if (!client) return { status: 'no_client' };
 
-    const workflowId = `engage-scan-${org.id}`;
-    try {
-      const handle = client.workflow.getHandle(workflowId);
-      await handle.signal('triggerScanNow', keywordIds);
-      return { status: 'signaled' };
-    } catch (signalErr) {
-      // Workflow not running — start it so the scan fires immediately.
-      this.logger.warn(
-        `triggerImmediateScan: workflow ${workflowId} not running, starting it`,
-        signalErr
-      );
+    const keywordHours = Number(process.env.ENGAGE_KEYWORD_SCAN_INTERVAL_HOURS ?? 24);
+    const channelHours = Number(process.env.ENGAGE_CHANNEL_SCAN_INTERVAL_HOURS ?? 3);
+    const trackedHours = Number(process.env.ENGAGE_TRACKED_SCAN_INTERVAL_HOURS ?? 3);
+
+    // Signal all 3 workflows; fall back to start if any is not yet running.
+    const targets = [
+      { workflowId: 'engage-keyword-global', signal: 'triggerKeywordScanNow',  startName: 'engageGlobalKeywordScanWorkflow', intervalHours: keywordHours },
+      { workflowId: 'engage-channel-global', signal: 'triggerChannelScanNow',  startName: 'engageGlobalChannelScanWorkflow', intervalHours: channelHours },
+      { workflowId: 'engage-tracked-global', signal: 'triggerTrackedScanNow',  startName: 'engageGlobalTrackedWorkflow',     intervalHours: trackedHours },
+    ];
+
+    let anyError = false;
+    for (const { workflowId, signal, startName, intervalHours } of targets) {
       try {
-        await client.workflow.start('engageScanWorkflow', {
-          workflowId,
-          taskQueue: 'main',
-          args: [org.id, true],
-          workflowIdConflictPolicy: 'USE_EXISTING',
-        });
-        return { status: 'started' };
-      } catch (startErr) {
-        this.logger.error(
-          `triggerImmediateScan: failed to start workflow for org ${org.id}`,
-          startErr
-        );
-        return { status: 'error' };
+        await client.workflow.getHandle(workflowId).signal(signal);
+      } catch {
+        try {
+          await client.workflow.start(startName, {
+            workflowId,
+            taskQueue: 'main',
+            args: [true, intervalHours],
+            workflowIdConflictPolicy: 'USE_EXISTING',
+          });
+        } catch (startErr) {
+          this.logger.error(`triggerImmediateScan: failed to start ${workflowId} (org=${org.id})`, startErr);
+          anyError = true;
+        }
       }
     }
+
+    return { status: anyError ? 'error' : 'signaled' };
   }
 
   // Called by engage.controller after creating an EngageSentReply to start 24h metrics sync.
