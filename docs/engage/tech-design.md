@@ -256,11 +256,11 @@ model EngageOpportunity {
   postPublishedAt       DateTime
 
   // ── Objective scores (same for every org → live on the global row) ────────
-  // scoreHeat       35   per-platform engagement; 4 branches (see §9):
+  // scoreHeat       45   per-platform engagement; 4 branches (see §9):
   //                      text(x/threads/mastodon/bluesky), video(youtube/tiktok),
   //                      network(linkedin/instagram/pinterest), community(reddit)
-  // scoreAuthority  20   X followers >50K/10K/1K/≤1K → 20/15/8/3; community by audienceSize
-  // scoreRecency     5   <1h=5,<6h=4,<12h=3,<24h=2,<48h=1, else 0
+  // scoreAuthority  15   X follower count / subreddit audienceSize; see §9 for per-platform thresholds
+  // scoreRecency     5   within 24h → 1; else → 0
   scoreHeat             Int       @default(0)
   scoreAuthority        Int       @default(0)
   scoreRecency          Int       @default(0)
@@ -312,9 +312,9 @@ model EngageOpportunity {
 // global row. The feed's total `score` is recomputed every scan and stored here.
 //
 // Dimension      Max   Formula / thresholds
-// scoreKeyword    35   min(hits×15, 35); +5 if any BRAND hit; +3 if any COMPETITOR hit; capped at 35
-// scoreTracked     5   post author is in this org's EngageTrackedAccount → +5
-// score          100   = scoreKeyword + scoreTracked + opportunity.(scoreHeat+scoreAuthority+scoreRecency)
+// scoreKeyword    35   each keyword hit +15, capped at 35 (关键词质量)
+// scoreTracked     5   post author is in this org's EngageTrackedAccount → +5 (重点账户)
+// score          105   = scoreKeyword + scoreTracked + opportunity.(scoreHeat+scoreAuthority+scoreRecency)
 model EngageOpportunityState {
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
@@ -1633,15 +1633,15 @@ async fetchRedditCommentMetrics(commentId: string): Promise<{ score: number; num
 
 | Dimension | Field | Max | Stored on | Notes |
 |---|---|---|---|---|
-| Keyword Quality | `scoreKeyword` | 35 | `EngageOpportunityState` (per-org) | Brand(+5) > Competitor(+3) > Core; depends on the org's keyword set |
-| Platform Heat | `scoreHeat` | 35 | `EngageOpportunity` (global) | Per-platform formula, 4 branches (see below) |
-| Account Authority | `scoreAuthority` | 20 | `EngageOpportunity` (global) | X follower count; communities use audienceSize |
-| Recency | `scoreRecency` | 5 | `EngageOpportunity` (global) | <1h=5,<6h=4,<12h=3,<24h=2,<48h=1, else 0 |
-| Tracked Account | `scoreTracked` | 5 | `EngageOpportunityState` (per-org) | +5 if author is in this org's `EngageTrackedAccount` |
+| Keyword Quality | `scoreKeyword` | 35 | `EngageOpportunityState` (per-org) | Each hit +15, capped at 35 (关键词质量) |
+| Platform Heat | `scoreHeat` | 45 | `EngageOpportunity` (global) | Per-platform formula, 4 branches (see below) (平台热度) |
+| Account Authority | `scoreAuthority` | 15 | `EngageOpportunity` (global) | X follower count / subreddit audienceSize; per-platform thresholds (账号影响力) |
+| Recency | `scoreRecency` | 5 | `EngageOpportunity` (global) | within 24h → 1; else → 0 (时效性) |
+| Tracked Account | `scoreTracked` | 5 | `EngageOpportunityState` (per-org) | +5 if author is in this org's `EngageTrackedAccount` (重点账户) |
 
-**Score ownership (two-table split):** the OBJECTIVE dimensions (heat / authority / recency) are identical for every org, so they live on the global `EngageOpportunity` row. The SUBJECTIVE dimensions (keyword / tracked) depend on the org's own keyword set and tracked accounts, so they — plus the total `score` (= keyword + tracked + heat + authority + recency) — live on the per-org `EngageOpportunityState`. The total is recomputed each scan; the feed reads it directly.
+**Score ownership (two-table split):** the OBJECTIVE dimensions (heat / authority / recency) are identical for every org, so they live on the global `EngageOpportunity` row. The SUBJECTIVE dimensions (keyword / tracked) depend on the org's own keyword set and tracked accounts, so they — plus the total `score` (= keyword + tracked + heat + authority + recency, max 105) — live on the per-org `EngageOpportunityState`. The total is recomputed each scan; the feed reads it directly.
 
-**Platform Heat branches** (`scoreHeat`, all 0–35, bucketed):
+**Platform Heat branches** (`scoreHeat`, all 0–45, bucketed):
 
 | Branch | Platforms | Formula |
 |---|---|---|
@@ -1650,18 +1650,17 @@ async fetchRedditCommentMetrics(commentId: string): Promise<{ score: number; num
 | network | linkedin / instagram / pinterest | `views×0.05 + likes×3 + comments×8 + shares×5 + saves×4` |
 | community | reddit / fallback | `max(score,0)×upvoteRatio + comments×2` |
 
-> **Note**: The original PRD mentioned "Platform Heat Max 45, Account Authority Max 15", but the Appendix formulas specify `heat_score(0~35) + authority_score(0~20)` to reach a total of 100. The Appendix formulas are prioritized.
 
 ```typescript
 // ── Types ────────────────────────────────────────────────────────────────
 
 interface ScoreBreakdown {
-  total:     number;  // sum of all dimensions, 0-100
-  keyword:   number;  // 0-35
-  heat:      number;  // 0-35
-  authority: number;  // 0-20
-  recency:   number;  // 0-5 (currently 0 or 1)
-  tracked:   number;  // 0 or 5
+  total:     number;  // sum of all dimensions, 0-105
+  keyword:   number;  // 0-35 (关键词质量)
+  heat:      number;  // 0-45 (平台热度)
+  authority: number;  // 0-15 (账号影响力)
+  recency:   number;  // 0 or 1: within 24h→1, else→0 (时效性)
+  tracked:   number;  // 0 or 5 (重点账户)
   // Extensible: future dimensions added here without schema migration.
   // Not indexed — display / offline analysis only.
   extra?: Record<string, number>;

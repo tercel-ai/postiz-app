@@ -190,13 +190,13 @@ interface EngageOpportunity {
   authorFollowers: number | null;
   postContent: string;
   postPublishedAt: string;
-  // Scoring (0-100) — heat/authority/recency are global; keyword/tracked/total per-org
+  // Scoring (0-105) — heat/authority/recency are global; keyword/tracked/total per-org
   score: number;
-  scoreKeyword: number;     // Keyword score 0-35
-  scoreHeat: number;        // Heat score 0-35
-  scoreAuthority: number;   // Authority score 0-20
-  scoreRecency: number;     // Recency score 0-5
-  scoreTracked: number;     // Tracked account bonus 0 or 5
+  scoreKeyword: number;     // Keyword score 0-35 (关键词质量)
+  scoreHeat: number;        // Heat score 0-45 (平台热度)
+  scoreAuthority: number;   // Authority score 0-15 (账号影响力)
+  scoreRecency: number;     // Recency score 0-1: within 24h→1, else→0 (时效性)
+  scoreTracked: number;     // Tracked account bonus 0 or 5 (重点账户)
   // Intent
   intentTags: IntentType[];
   primaryIntent: IntentType;
@@ -1194,8 +1194,8 @@ All error response formats (NestJS default):
 
 ```
 // Total Score (Only ≥60 enters the Feed)
-total = scoreKeyword(0-35) + scoreHeat(0-35) + scoreAuthority(0-20)
-      + scoreRecency(0-5) + scoreTracked(0 or 5)
+total = scoreKeyword(0-35) + scoreHeat(0-45) + scoreAuthority(0-15)
+      + scoreRecency(0-1) + scoreTracked(0 or 5)   // max 105
 
 // X Heat
 x_heat = likes×1 + replies×3 + retweets×2 + quotes×2

@@ -15,6 +15,7 @@ export interface Opportunity {
   scoreHeat: number;
   scoreKeyword: number;
   scoreAuthority: number;
+  scoreRecency: number;
   scoreTracked: number;
   intentTags: string[];
   primaryIntent: string;

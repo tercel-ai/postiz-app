@@ -59,6 +59,9 @@ const SORT_OPTIONS = [
   { label: 'Score', value: 'score' },
   { label: 'Heat', value: 'scoreHeat' },
   { label: 'Authority', value: 'scoreAuthority' },
+  { label: 'Recency', value: 'scoreRecency' },
+  { label: 'Keyword', value: 'scoreKeyword' },
+  { label: 'Tracked', value: 'scoreTracked' },
   { label: 'Newest', value: 'createdAt' },
 ];
 
