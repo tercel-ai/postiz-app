@@ -36,6 +36,31 @@ export function SignalFeed() {
     >;
   });
 
+  // Monitored channels + tracked accounts populate the feed's source-filter dropdowns.
+  const { data: monitoredChannels } = useSWR('/engage/monitored-channels', async (url) => {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`engage/monitored-channels returned ${res.status}`);
+    return res.json() as Promise<
+      Array<{ channelId: string; channelName: string; enabled: boolean }>
+    >;
+  });
+
+  const { data: trackedAccounts } = useSWR('/engage/tracked-accounts', async (url) => {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`engage/tracked-accounts returned ${res.status}`);
+    return res.json() as Promise<
+      Array<{ username: string; displayName?: string | null; enabled: boolean }>
+    >;
+  });
+
+  const channelOptions = (monitoredChannels ?? [])
+    .filter((c) => c.enabled)
+    .map((c) => ({ value: c.channelId, label: c.channelName || c.channelId }));
+
+  const authorOptions = (trackedAccounts ?? [])
+    .filter((a) => a.enabled)
+    .map((a) => ({ value: a.username, label: `@${a.username}` }));
+
   const [filters, setFilters] = useState<FeedFilters>({
     sortBy: 'score',
     sortOrder: 'desc',
@@ -51,6 +76,8 @@ export function SignalFeed() {
     ...(filters.platform && { platform: filters.platform }),
     ...(filters.minScore && { minScore: String(filters.minScore) }),
     ...(filters.intent && { intent: filters.intent }),
+    ...(filters.channels && { channels: filters.channels }),
+    ...(filters.authors && { authors: filters.authors }),
     ...(filters.bookmarked != null && { bookmarked: String(filters.bookmarked) }),
     status: 'NEW',
   });
@@ -193,6 +220,8 @@ export function SignalFeed() {
             setFilters(f);
             setPage(1);
           }}
+          channelOptions={channelOptions}
+          authorOptions={authorOptions}
         />
 
         {/* Stats bar */}

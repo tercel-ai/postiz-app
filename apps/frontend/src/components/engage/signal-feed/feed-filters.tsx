@@ -3,19 +3,34 @@
 import { FC } from 'react';
 import clsx from 'clsx';
 
+// Sentinel matching the backend ENGAGE_FILTER_ALL: "all of this org's configured
+// channels / tracked accounts" (vs '' = no filter, or a specific id/username).
+export const FILTER_ALL = '__all__';
+
 export interface FeedFilters {
   platform?: string;
   minScore?: number;
   intent?: string;
   status?: string;
   bookmarked?: boolean;
+  channels?: string;   // '' | '__all__' | <channelId>
+  authors?: string;    // '' | '__all__' | <username>
   sortBy?: string;
   sortOrder?: 'asc' | 'desc';
+}
+
+interface FilterOption {
+  value: string;
+  label: string;
 }
 
 interface FeedFiltersProps {
   filters: FeedFilters;
   onChange: (filters: FeedFilters) => void;
+  // Specific monitored channels / tracked accounts for this org. Each dropdown is
+  // hidden when its list is empty.
+  channelOptions?: FilterOption[];
+  authorOptions?: FilterOption[];
 }
 
 const PLATFORMS = [
@@ -47,7 +62,12 @@ const SORT_OPTIONS = [
   { label: 'Newest', value: 'createdAt' },
 ];
 
-export const FeedFiltersBar: FC<FeedFiltersProps> = ({ filters, onChange }) => {
+export const FeedFiltersBar: FC<FeedFiltersProps> = ({
+  filters,
+  onChange,
+  channelOptions = [],
+  authorOptions = [],
+}) => {
   const set = (patch: Partial<FeedFilters>) => onChange({ ...filters, ...patch });
 
   return (
@@ -95,6 +115,42 @@ export const FeedFiltersBar: FC<FeedFiltersProps> = ({ filters, onChange }) => {
           </option>
         ))}
       </select>
+
+      {/* Monitored channels — hidden when the org has none */}
+      {channelOptions.length > 0 && (
+        <select
+          className="text-xs bg-[#1e2536] border border-[#2d3748] text-gray-300 rounded-md px-2 py-1"
+          value={filters.channels ?? ''}
+          onChange={(e) => set({ channels: e.target.value || undefined })}
+          title="Filter by monitored channel"
+        >
+          <option value="">Any channel</option>
+          <option value={FILTER_ALL}>All monitored channels</option>
+          {channelOptions.map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
+            </option>
+          ))}
+        </select>
+      )}
+
+      {/* Tracked accounts — hidden when the org has none */}
+      {authorOptions.length > 0 && (
+        <select
+          className="text-xs bg-[#1e2536] border border-[#2d3748] text-gray-300 rounded-md px-2 py-1"
+          value={filters.authors ?? ''}
+          onChange={(e) => set({ authors: e.target.value || undefined })}
+          title="Filter by tracked account"
+        >
+          <option value="">Any author</option>
+          <option value={FILTER_ALL}>All tracked accounts</option>
+          {authorOptions.map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
+            </option>
+          ))}
+        </select>
+      )}
 
       {/* Bookmarked toggle */}
       <button
