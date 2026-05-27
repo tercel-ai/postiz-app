@@ -86,4 +86,66 @@ describe('engage-scorer', () => {
       expect(result).toBeNull();
     });
   });
+
+  describe('scoreHeat — per-platform branch routing', () => {
+    // Build a post that hits the keyword "GEO" with every metric explicit (0 by
+    // default) so each heat formula reads defined numbers, not undefined → NaN.
+    function metricPost(platform: string, m: Partial<RawPost> = {}): RawPost {
+      return makePost({
+        platform,
+        postContent: 'GEO matters',
+        metricLikes: 0,
+        metricReplies: 0,
+        metricRetweets: 0,
+        metricQuotes: 0,
+        metricBookmarks: 0,
+        metricViews: 0,
+        metricShares: 0,
+        metricSaves: 0,
+        metricScore: 0,
+        metricUpvoteRatio: 0,
+        metricComments: 0,
+        ...m,
+      });
+    }
+    const heatOf = (post: RawPost) =>
+      scorePost(post, [makeKeyword('GEO')])!.scoreHeat;
+
+    it('text branch (bluesky): likes*1+replies*3+... → 400 lands in the >300 bucket (18)', () => {
+      // bluesky is not "x" — proves the text branch covers all engagement platforms.
+      expect(heatOf(metricPost('bluesky', { metricLikes: 400 }))).toBe(18);
+    });
+
+    it('video branch (youtube): views are weighted (200k*0.005=1000 → >800 bucket, 26)', () => {
+      expect(heatOf(metricPost('youtube', { metricViews: 200_000 }))).toBe(26);
+    });
+
+    it('text branch ignores views entirely (same 200k views on x → base 3)', () => {
+      // Discriminates video from text: views only count under the video branch.
+      expect(heatOf(metricPost('x', { metricViews: 200_000 }))).toBe(3);
+    });
+
+    it('network branch (instagram): saves are weighted (300*4=1200 → >1000 bucket, 35)', () => {
+      expect(heatOf(metricPost('instagram', { metricSaves: 300 }))).toBe(35);
+    });
+
+    it('community branch (reddit): score*upvoteRatio+comments*2 → 500 in the >400 bucket (26)', () => {
+      expect(
+        heatOf(metricPost('reddit', { metricScore: 500, metricUpvoteRatio: 1 }))
+      ).toBe(26);
+    });
+
+    it('unknown platform falls through to the community branch', () => {
+      // e.g. "discord" is in no case list → default (community) formula.
+      expect(
+        heatOf(metricPost('discord', { metricScore: 200, metricUpvoteRatio: 1 }))
+      ).toBe(18);
+    });
+
+    it('community branch clamps a heavily-downvoted score to 0 (no negative heat)', () => {
+      expect(
+        heatOf(metricPost('reddit', { metricScore: -500, metricUpvoteRatio: 1 }))
+      ).toBe(3);
+    });
+  });
 });

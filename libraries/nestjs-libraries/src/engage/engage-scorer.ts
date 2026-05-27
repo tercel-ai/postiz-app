@@ -19,11 +19,16 @@ export interface RawPost {
   // Raw platform metrics
   metricLikes: number;
   metricReplies: number;
-  metricRetweets: number;
-  metricQuotes: number;
-  metricScore: number;        // Reddit score (upvotes - downvotes)
+  metricRetweets: number;   // X retweet | Threads repost | Mastodon reblog | Bluesky repost
+  metricQuotes: number;     // X quote | Threads quote | Bluesky quote
+  metricBookmarks: number;  // X bookmark_count
+  metricViews: number;      // YouTube viewCount | TikTok view_count | Threads views | LinkedIn impressions | Instagram impressions
+  metricShares: number;     // TikTok share_count | LinkedIn reshare | Instagram shares
+  metricSaves: number;      // Instagram saved | Pinterest SAVE
+  metricScore: number;      // Reddit score (upvotes - downvotes)
   metricUpvoteRatio?: number; // Reddit
-  metricComments: number;     // Reddit num_comments
+  metricComments: number;   // Reddit num_comments | YouTube commentCount | TikTok comment_count | LinkedIn comment | Instagram comments
+  rawData?: Record<string, unknown>; // original platform API response object
 }
 
 export interface ScoredPost extends RawPost {
@@ -33,7 +38,6 @@ export interface ScoredPost extends RawPost {
   scoreAuthority: number;
   scoreRecency: number;
   scoreTracked: number;
-  scoreBreakdown?: Record<string, number>; // future dimensions
   intentTags: string[];
   primaryIntent: string;
   intentScore?: number;
@@ -52,14 +56,28 @@ export function scorePost(
   if (hits.length === 0) return null;
 
   const scoreKeyword = computeKeywordScore(hits);
-  const scoreHeat =
-    post.platform === 'x'
-      ? computeXHeatScore(post)
-      : computeCommunityHeatScore(post);
-  const scoreAuthority =
-    post.platform === 'x'
-      ? computeXAuthorityScore(post.authorFollowers ?? null)
-      : computeCommunityAuthorityScore(post.authorFollowers ?? null);
+  const scoreHeat = (() => {
+    switch (post.platform) {
+      case 'x':
+      case 'threads':
+      case 'mastodon':
+      case 'bluesky':
+        return computeTextHeatScore(post);
+      case 'youtube':
+      case 'tiktok':
+        return computeVideoHeatScore(post);
+      case 'linkedin':
+      case 'linkedin-page':
+      case 'instagram':
+      case 'pinterest':
+        return computeNetworkHeatScore(post);
+      default:
+        return computeCommunityHeatScore(post); // reddit and others
+    }
+  })();
+  const scoreAuthority = ['x', 'threads', 'mastodon', 'bluesky'].includes(post.platform)
+    ? computeXAuthorityScore(post.authorFollowers ?? null)
+    : computeCommunityAuthorityScore(post.authorFollowers ?? null);
   const scoreRecency = computeRecencyScore(post.postPublishedAt);
   const scoreTracked = post.isFromTrackedAccount ? 5 : 0;
   const score =
@@ -106,12 +124,14 @@ function computeKeywordScore(
 
 // ─── Heat scoring ─────────────────────────────────────────────────────────────
 
-function computeXHeatScore(post: RawPost): number {
+// X, Threads, Mastodon, Bluesky — engagement-based (no view counts)
+function computeTextHeatScore(post: RawPost): number {
   const heat =
     post.metricLikes * 1 +
     post.metricReplies * 3 +
     post.metricRetweets * 2 +
-    post.metricQuotes * 2;
+    post.metricQuotes * 2 +
+    post.metricShares * 2;
   if (heat > 2000) return 35;
   if (heat > 1000) return 26;
   if (heat > 300) return 18;
@@ -119,6 +139,36 @@ function computeXHeatScore(post: RawPost): number {
   return 3;
 }
 
+// YouTube, TikTok — views-based with engagement weighting
+function computeVideoHeatScore(post: RawPost): number {
+  const heat =
+    post.metricViews * 0.005 +
+    post.metricLikes * 2 +
+    post.metricComments * 5 +
+    post.metricShares * 3;
+  if (heat > 2000) return 35;
+  if (heat > 800) return 26;
+  if (heat > 200) return 18;
+  if (heat > 50) return 9;
+  return 3;
+}
+
+// LinkedIn, Instagram — impression/view weighted
+function computeNetworkHeatScore(post: RawPost): number {
+  const heat =
+    post.metricViews * 0.05 +
+    post.metricLikes * 3 +
+    post.metricComments * 8 +
+    post.metricShares * 5 +
+    post.metricSaves * 4;
+  if (heat > 1000) return 35;
+  if (heat > 400) return 26;
+  if (heat > 100) return 18;
+  if (heat > 25) return 9;
+  return 3;
+}
+
+// Reddit — upvote score + comments
 function computeCommunityHeatScore(post: RawPost): number {
   // Clamp metricScore to 0 — highly downvoted posts should not produce negative heat
   const score = Math.max(post.metricScore ?? 0, 0);
