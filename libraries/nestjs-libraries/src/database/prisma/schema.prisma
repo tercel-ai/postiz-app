@@ -44,7 +44,7 @@ model Organization {
   postReleases      PostRelease[]
   billingRecords    BillingRecord[]
   engageConfig      EngageConfig?
-  engageOpportunities EngageOpportunity[]
+  engageOpportunityStates EngageOpportunityState[]
   engageSentReplies   EngageSentReply[]
 }
 
@@ -1116,10 +1116,11 @@ model EngageXReplyAccount {
   @@index([organizationId, engageEnabled])
 }
 
+// Global post table — one row per (platform, externalPostId), shared across all
+// orgs. Holds immutable content + objective metrics/scores. Per-org mutable state
+// (status, bookmark, keyword/tracked scores) lives in EngageOpportunityState.
 model EngageOpportunity {
   id               String    @id @default(uuid())
-  organizationId   String
-  organization     Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   platform         String
   externalPostId   String
   externalPostUrl  String
@@ -1132,52 +1133,46 @@ model EngageOpportunity {
   postContent      String
   postPublishedAt  DateTime
 
-  score            Int       @default(0)
-  scoreKeyword     Int       @default(0)
+  // Objective scores — identical for every org viewing this post.
   scoreHeat        Int       @default(0)
   scoreAuthority   Int       @default(0)
   scoreRecency     Int       @default(0)
-  scoreTracked     Int       @default(0)
-  scoreBreakdown   Json?
 
   intentTags       String[]
   primaryIntent    String    @default("discussion")
   intentScore      Float?
 
-  status           EngageOpportunityStatus @default(NEW)
-  bookmarked       Boolean   @default(false)
-
   metricLikes      Int       @default(0)
   metricReplies    Int       @default(0)
   metricRetweets   Int       @default(0)
   metricQuotes     Int       @default(0)
+  metricBookmarks  Int       @default(0)
+  metricViews      Int       @default(0)
+  metricShares     Int       @default(0)
+  metricSaves      Int       @default(0)
   metricScore      Int       @default(0)
   metricUpvoteRatio Float?
   metricComments   Int       @default(0)
+
+  rawData          Json?
 
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
   deletedAt        DateTime?
 
-  sentReply        EngageSentReply?
+  states           EngageOpportunityState[]
+  sentReplies      EngageSentReply[]
 
-  @@unique([organizationId, platform, externalPostId])
-  @@index([organizationId])
-  @@index([organizationId, status])
-  @@index([organizationId, platform])
+  @@unique([platform, externalPostId])
   @@index([createdAt])
   @@index([deletedAt])
-  @@index([organizationId, score])
-  @@index([organizationId, scoreKeyword])
-  @@index([organizationId, scoreHeat])
-  @@index([organizationId, scoreAuthority])
-  @@index([organizationId, scoreTracked])
-  @@index([organizationId, bookmarked])
-  // Range filter index for date='today'|'week'|'month' on listOpportunities / getScoreStats.
-  @@index([organizationId, postPublishedAt])
-  // GIN index for intentTags @> ARRAY[...] (Prisma: { has: tag }) — without it
-  // intent filtering degenerates to a sequential scan.
+  @@index([postPublishedAt])
+  // GIN index for intentTags @> ARRAY[...] (Prisma: { has: tag }).
   @@index([intentTags], type: Gin)
+  // Trigram index on postContent for keyword ILIKE previews (getKeywordPosts).
+  // `db push` cannot create a pg_trgm/gin_trgm_ops index, so it is created by
+  // ./engage-indexes.sql, run automatically after push via the "prisma-db-push"
+  // npm script (which chains "prisma-db-indexes").
 }
 
 enum EngageOpportunityStatus {
@@ -1189,12 +1184,38 @@ enum EngageOpportunityStatus {
   EXPIRED
 }
 
+// Per-org mutable state for a global opportunity. Created at scan time when a
+// post matches the org's keywords. Total `score` = scoreKeyword + scoreTracked +
+// opportunity.(scoreHeat + scoreAuthority + scoreRecency); recomputed each scan.
+model EngageOpportunityState {
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  opportunityId  String
+  opportunity    EngageOpportunity @relation(fields: [opportunityId], references: [id], onDelete: Cascade)
+
+  status         EngageOpportunityStatus @default(NEW)
+  bookmarked     Boolean   @default(false)
+
+  score          Int       @default(0)
+  scoreKeyword   Int       @default(0)
+  scoreTracked   Int       @default(0)
+
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@id([organizationId, opportunityId])
+  @@index([organizationId, status])
+  @@index([organizationId, score])
+  @@index([organizationId, bookmarked])
+  @@index([opportunityId])
+}
+
 model EngageSentReply {
   id             String    @id @default(uuid())
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
-  opportunityId  String    @unique
+  opportunityId  String
   opportunity    EngageOpportunity @relation(fields: [opportunityId], references: [id])
 
   postId         String    @unique
@@ -1207,6 +1228,8 @@ model EngageSentReply {
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
 
+  // A given org replies to a given post at most once; different orgs may each reply.
+  @@unique([organizationId, opportunityId])
   @@index([organizationId])
 }
 
