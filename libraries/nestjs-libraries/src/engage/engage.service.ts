@@ -526,6 +526,7 @@ export class EngageService implements OnApplicationBootstrap {
         organizationId: org.id,
         content: body.draftContent,
         date: new Date(),
+        replyUrl: body.replyUrl,
       });
       postId = post.id;
     } catch (err) {

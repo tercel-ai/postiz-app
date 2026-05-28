@@ -109,7 +109,7 @@ export const DayView = () => {
 
   const options = useMemo(() => {
     const createdPosts = posts.map((post) => ({
-      integration: [integrations.find((i) => i.id === post.integration.id)!],
+      integration: post.integration ? [integrations.find((i) => i.id === post.integration!.id)!] : [],
       image: post?.integration?.picture || '',
       identifier: post?.integration?.providerIdentifier || '',
       id: post?.integration?.id || '',
@@ -930,7 +930,7 @@ const CalendarItem: FC<{
         >
           <Preview />
         </div>{' '}
-        {((post.integration.providerIdentifier === 'x' && disableXAnalytics) || !post.releaseId) ? (
+        {(!post.integration || (post.integration.providerIdentifier === 'x' && disableXAnalytics) || !post.releaseId) ? (
           <></>
         ) : (
           <div
@@ -978,7 +978,7 @@ const CalendarItem: FC<{
         <div className={clsx('relative min-w-[20px]')}>
           <img
             className="w-[20px] h-[20px] rounded-[8px]"
-            src={post.integration.picture! || '/no-picture.jpg'}
+            src={post.integration?.picture || '/no-picture.jpg'}
           />
           <img
             className="w-[12px] h-[12px] rounded-[8px] absolute z-10 top-[10px] end-0 border border-fifth"

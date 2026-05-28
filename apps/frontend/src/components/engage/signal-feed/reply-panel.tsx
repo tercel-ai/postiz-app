@@ -51,9 +51,9 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
   const [scheduledAt, setScheduledAt] = useState('');
 
   // Reddit 3-step state
-  const [redditStep, setRedditStep] = useState<'draft' | 'confirm' | 'url'>('draft');
-  const [sentReplyId, setSentReplyId] = useState('');
+  const [redditStep, setRedditStep] = useState<'draft' | 'url'>('draft');
   const [replyUrl, setReplyUrl] = useState('');
+  const [copied, setCopied] = useState(false);
 
   const abortRef = useRef<AbortController | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
@@ -214,59 +214,41 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
     [draft, selectedAccountId, opportunity.id, strategy, brandStrength, fetch, toaster, onSent]
   );
 
-  const handleManualConfirm = useCallback(async () => {
-    if (!draft) return;
-    setSending(true);
-    try {
-      const res = await fetch(
-        `/engage/opportunities/${opportunity.id}/manual-reply`,
-        {
-          method: 'POST',
-          body: JSON.stringify({ draftContent: draft, strategy, brandStrength }),
+  const handleConfirmReply = useCallback(
+    async (url?: string) => {
+      if (!draft) return;
+      setSending(true);
+      try {
+        const res = await fetch(
+          `/engage/opportunities/${opportunity.id}/manual-reply`,
+          {
+            method: 'POST',
+            body: JSON.stringify({
+              draftContent: draft,
+              strategy,
+              brandStrength,
+              ...(url ? { replyUrl: url } : {}),
+            }),
+          }
+        );
+        if (!res.ok) {
+          const message =
+            res.status === 400
+              ? 'Invalid Reddit URL format'
+              : 'Failed to record reply — please retry';
+          toaster.show(message, 'warning');
+          return;
         }
-      );
-      if (!res.ok) {
-        toaster.show('Failed to record reply', 'warning');
-        return;
+        toaster.show(url ? 'Reply recorded with URL!' : 'Reply recorded!', 'success');
+        onSent();
+      } catch {
+        toaster.show('Failed to record reply — please retry', 'warning');
+      } finally {
+        setSending(false);
       }
-      const data = (await res.json()) as { id?: string };
-      if (!data?.id) {
-        toaster.show('Server returned no reply id — please retry', 'warning');
-        return;
-      }
-      setSentReplyId(data.id);
-      setRedditStep('url');
-    } catch {
-      toaster.show('Failed to record reply', 'warning');
-    } finally {
-      setSending(false);
-    }
-  }, [draft, opportunity.id, strategy, brandStrength, fetch, toaster]);
-
-  const handleSubmitUrl = useCallback(async () => {
-    if (!replyUrl) return;
-    setSending(true);
-    try {
-      const res = await fetch(`/engage/sent/${sentReplyId}/reply-url`, {
-        method: 'PATCH',
-        body: JSON.stringify({ url: replyUrl }),
-      });
-      if (!res.ok) {
-        const message =
-          res.status === 400
-            ? 'Invalid Reddit URL'
-            : 'Failed to save URL — please retry';
-        toaster.show(message, 'warning');
-        return;
-      }
-      toaster.show('Reply URL saved!', 'success');
-      onSent();
-    } catch {
-      toaster.show('Failed to save URL — please retry', 'warning');
-    } finally {
-      setSending(false);
-    }
-  }, [replyUrl, sentReplyId, fetch, toaster, onSent]);
+    },
+    [draft, opportunity.id, strategy, brandStrength, fetch, toaster, onSent]
+  );
 
   const isX = opportunity.platform === 'x';
   const charCount = draft.length;
@@ -519,7 +501,8 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
                     onClick={async () => {
                       try {
                         await navigator.clipboard.writeText(draft);
-                        toaster.show('Draft copied!', 'success');
+                        setCopied(true);
+                        setTimeout(() => setCopied(false), 1500);
                       } catch {
                         toaster.show(
                           'Copy failed — select & copy manually',
@@ -527,9 +510,13 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
                         );
                       }
                     }}
-                    className="flex-1 py-2 text-sm bg-[#2d3748] hover:bg-[#374151] text-white rounded-lg transition-colors"
+                    className={`flex-1 py-2 text-sm rounded-lg transition-colors ${
+                      copied
+                        ? 'bg-green-700 text-white'
+                        : 'bg-[#2d3748] hover:bg-[#374151] text-white'
+                    }`}
                   >
-                    📋 Copy Draft
+                    {copied ? '✓ Copied' : '📋 Copy Draft'}
                   </button>
                   <a
                     href={opportunity.externalPostUrl}
@@ -541,22 +528,13 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
                   </a>
                 </div>
                 <button
-                  onClick={() => setRedditStep('confirm')}
-                  className="w-full py-2 text-sm bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium transition-colors"
+                  onClick={() => setRedditStep('url')}
+                  disabled={!draft}
+                  className="w-full py-2 text-sm bg-green-600 hover:bg-green-700 disabled:bg-gray-700 disabled:text-gray-500 text-white rounded-lg font-medium transition-colors"
                 >
                   ✓ I Replied Manually
                 </button>
               </>
-            )}
-
-            {redditStep === 'confirm' && (
-              <button
-                onClick={handleManualConfirm}
-                disabled={sending}
-                className="w-full py-2 text-sm bg-green-600 hover:bg-green-700 disabled:bg-gray-700 text-white rounded-lg font-medium transition-colors"
-              >
-                {sending ? 'Recording...' : 'Confirm & Save Reply'}
-              </button>
             )}
 
             {redditStep === 'url' && (
@@ -573,13 +551,14 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
                 />
                 <div className="flex gap-2">
                   <button
-                    onClick={onSent}
-                    className="flex-1 py-2 text-sm text-gray-400 border border-[#2d3748] rounded-lg hover:text-white transition-colors"
+                    onClick={() => handleConfirmReply()}
+                    disabled={sending}
+                    className="flex-1 py-2 text-sm text-gray-400 border border-[#2d3748] rounded-lg hover:text-white disabled:opacity-50 transition-colors"
                   >
-                    Skip
+                    {sending ? 'Saving...' : 'Skip'}
                   </button>
                   <button
-                    onClick={handleSubmitUrl}
+                    onClick={() => handleConfirmReply(replyUrl)}
                     disabled={sending || !replyUrl}
                     className="flex-1 py-2 text-sm bg-blue-600 hover:bg-blue-700 disabled:bg-gray-700 text-white rounded-lg font-medium transition-colors"
                   >

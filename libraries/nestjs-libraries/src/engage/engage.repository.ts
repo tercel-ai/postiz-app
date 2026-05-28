@@ -1036,6 +1036,7 @@ export class EngageRepository {
     organizationId: string;
     content: string;
     date: Date;
+    replyUrl?: string;
   }) {
     const { randomUUID } = await import('crypto');
     return this._post.model.post.create({
@@ -1049,6 +1050,7 @@ export class EngageRepository {
         settings: JSON.stringify({ __type: 'reddit' }),
         group: randomUUID(),
         delay: 0,
+        ...(data.replyUrl ? { releaseURL: data.replyUrl } : {}),
         // integrationId intentionally omitted: Reddit manual posts have no integration
       },
     });

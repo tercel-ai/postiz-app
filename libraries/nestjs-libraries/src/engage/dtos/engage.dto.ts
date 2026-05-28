@@ -402,6 +402,11 @@ export class ConfirmManualReplyDto {
   @Max(3)
   @Type(() => Number)
   brandStrength: number;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(2048)
+  replyUrl?: string;
 }
 
 export class SubmitManualReplyUrlDto {
