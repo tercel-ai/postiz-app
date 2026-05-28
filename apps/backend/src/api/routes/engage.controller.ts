@@ -10,12 +10,13 @@ import {
   Patch,
   Post,
   Query,
+  Req,
   Res,
 } from '@nestjs/common';
-import { ApiTags } from '@nestjs/swagger';
+import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { Organization, User } from '@prisma/client';
-import { Response } from 'express';
+import { Request, Response } from 'express';
 import { GetOrgFromRequest } from '@gitroom/nestjs-libraries/user/org.from.request';
 import { GetUserFromRequest } from '@gitroom/nestjs-libraries/user/user.from.request';
 import { EngageService } from '@gitroom/nestjs-libraries/engage/engage.service';
@@ -54,11 +55,13 @@ export class EngageController {
 
   // ─── Config ───────────────────────────────────────────────────────────────
 
+  @ApiOperation({ summary: 'Get Engage config and keywords/channels/accounts for this org' })
   @Get('/config')
   getConfig(@GetOrgFromRequest() org: Organization) {
     return this._engageService.getConfig(org);
   }
 
+  @ApiOperation({ summary: 'Update Engage config (enable/disable)' })
   @Post('/config')
   saveConfig(
     @GetOrgFromRequest() org: Organization,
@@ -67,11 +70,13 @@ export class EngageController {
     return this._engageService.saveConfig(org, body);
   }
 
+  @ApiOperation({ summary: 'Reset Engage config to disabled state' })
   @Post('/config/reset')
   resetConfig(@GetOrgFromRequest() org: Organization) {
     return this._engageService.resetConfig(org);
   }
 
+  @ApiOperation({ summary: 'Atomic bulk setup: create config + keywords + channels + tracked accounts' })
   @Post('/setup')
   setupEngage(
     @GetOrgFromRequest() org: Organization,
@@ -82,6 +87,7 @@ export class EngageController {
 
   // ─── Keywords ─────────────────────────────────────────────────────────────
 
+  @ApiOperation({ summary: 'Add a keyword to monitor' })
   @Post('/keywords')
   addKeyword(
     @GetOrgFromRequest() org: Organization,
@@ -90,6 +96,7 @@ export class EngageController {
     return this._engageService.addKeyword(org, body);
   }
 
+  @ApiOperation({ summary: 'Bulk-add keywords (idempotent; duplicates skipped)' })
   @Post('/keywords/bulk')
   addKeywordsBulk(
     @GetOrgFromRequest() org: Organization,
@@ -98,6 +105,8 @@ export class EngageController {
     return this._engageService.addKeywordsBulk(org, body);
   }
 
+  @ApiOperation({ summary: 'Update keyword enabled state or type' })
+  @ApiResponse({ status: 404, description: 'Keyword not found' })
   @Patch('/keywords/:id')
   updateKeyword(
     @GetOrgFromRequest() org: Organization,
@@ -107,6 +116,8 @@ export class EngageController {
     return this._engageService.updateKeyword(org, id, body);
   }
 
+  @ApiOperation({ summary: 'Delete a keyword' })
+  @ApiResponse({ status: 404, description: 'Keyword not found' })
   @Delete('/keywords/:id')
   deleteKeyword(
     @GetOrgFromRequest() org: Organization,
@@ -115,6 +126,8 @@ export class EngageController {
     return this._engageService.deleteKeyword(org, id);
   }
 
+  @ApiOperation({ summary: 'Preview recent posts matching a keyword' })
+  @ApiResponse({ status: 404, description: 'Keyword not found' })
   @Get('/keywords/:id/posts')
   getKeywordPosts(
     @GetOrgFromRequest() org: Organization,
@@ -125,11 +138,13 @@ export class EngageController {
 
   // ─── Monitored Channels ───────────────────────────────────────────────────
 
+  @ApiOperation({ summary: 'List monitored channels for this org' })
   @Get('/monitored-channels')
   listMonitoredChannels(@GetOrgFromRequest() org: Organization) {
     return this._engageService.listMonitoredChannels(org);
   }
 
+  @ApiOperation({ summary: 'Add a channel to monitor (Reddit subreddit, etc.)' })
   @Post('/monitored-channels')
   addMonitoredChannel(
     @GetOrgFromRequest() org: Organization,
@@ -138,6 +153,8 @@ export class EngageController {
     return this._engageService.addMonitoredChannel(org, body);
   }
 
+  @ApiOperation({ summary: 'Update a monitored channel (enable/disable, metadata)' })
+  @ApiResponse({ status: 404, description: 'Channel not found' })
   @Patch('/monitored-channels/:id')
   updateMonitoredChannel(
     @GetOrgFromRequest() org: Organization,
@@ -147,6 +164,8 @@ export class EngageController {
     return this._engageService.updateMonitoredChannel(org, id, body);
   }
 
+  @ApiOperation({ summary: 'Remove a monitored channel' })
+  @ApiResponse({ status: 404, description: 'Channel not found' })
   @Delete('/monitored-channels/:id')
   removeMonitoredChannel(
     @GetOrgFromRequest() org: Organization,
@@ -155,6 +174,7 @@ export class EngageController {
     return this._engageService.removeMonitoredChannel(org, id);
   }
 
+  @ApiOperation({ summary: 'Search for channels to add (e.g. Reddit subreddit search)' })
   @Post('/monitored-channels/search')
   searchChannels(
     @GetOrgFromRequest() org: Organization,
@@ -165,11 +185,13 @@ export class EngageController {
 
   // ─── Tracked Accounts ─────────────────────────────────────────────────────
 
+  @ApiOperation({ summary: 'List external X accounts tracked by this org' })
   @Get('/tracked-accounts')
   listTrackedAccounts(@GetOrgFromRequest() org: Organization) {
     return this._engageService.listTrackedAccounts(org);
   }
 
+  @ApiOperation({ summary: 'Add an external X account to track' })
   @Post('/tracked-accounts')
   addTrackedAccount(
     @GetOrgFromRequest() org: Organization,
@@ -178,6 +200,8 @@ export class EngageController {
     return this._engageService.addTrackedAccount(org, body);
   }
 
+  @ApiOperation({ summary: 'Update a tracked account (enable/disable, label)' })
+  @ApiResponse({ status: 404, description: 'Tracked account not found' })
   @Patch('/tracked-accounts/:id')
   updateTrackedAccount(
     @GetOrgFromRequest() org: Organization,
@@ -187,6 +211,8 @@ export class EngageController {
     return this._engageService.updateTrackedAccount(org, id, body);
   }
 
+  @ApiOperation({ summary: 'Remove a tracked account' })
+  @ApiResponse({ status: 404, description: 'Tracked account not found' })
   @Delete('/tracked-accounts/:id')
   removeTrackedAccount(
     @GetOrgFromRequest() org: Organization,
@@ -197,11 +223,14 @@ export class EngageController {
 
   // ─── Reply Accounts ───────────────────────────────────────────────────────
 
+  @ApiOperation({ summary: "List this org's X integrations with Engage reply settings" })
   @Get('/reply-accounts')
   listReplyAccounts(@GetOrgFromRequest() org: Organization) {
     return this._engageService.listReplyAccounts(org);
   }
 
+  @ApiOperation({ summary: 'Update reply account settings (auto-reply window, strategy)' })
+  @ApiResponse({ status: 404, description: 'Integration not found' })
   @Patch('/reply-accounts/:integrationId')
   updateReplyAccountSettings(
     @GetOrgFromRequest() org: Organization,
@@ -219,6 +248,8 @@ export class EngageController {
 
   // 5 manual triggers per org per hour — prevents API abuse while allowing
   // legitimate re-scans after adding new keywords.
+  @ApiOperation({ summary: 'Manually trigger an immediate keyword/channel scan' })
+  @ApiResponse({ status: 429, description: 'Rate limit exceeded (5/hour)' })
   @Throttle({ default: { limit: 5, ttl: 3_600_000 } })
   @Post('/scan')
   triggerScan(
@@ -231,6 +262,7 @@ export class EngageController {
 
   // ─── Opportunities ────────────────────────────────────────────────────────
 
+  @ApiOperation({ summary: 'Score distribution and top-opportunity stats for this org' })
   @Get('/opportunities/score-stats')
   getScoreStats(
     @GetOrgFromRequest() org: Organization,
@@ -239,6 +271,7 @@ export class EngageController {
     return this._engageService.getScoreStats(org, query);
   }
 
+  @ApiOperation({ summary: 'Paginated list of signal-feed opportunities for this org' })
   @Get('/opportunities')
   listOpportunities(
     @GetOrgFromRequest() org: Organization,
@@ -247,6 +280,8 @@ export class EngageController {
     return this._engageService.listOpportunities(org, query);
   }
 
+  @ApiOperation({ summary: 'Dismiss an opportunity (moves it to DISMISSED status)' })
+  @ApiResponse({ status: 404, description: 'Opportunity not found or no longer actionable' })
   @Patch('/opportunities/:id/dismiss')
   dismissOpportunity(
     @GetOrgFromRequest() org: Organization,
@@ -255,6 +290,8 @@ export class EngageController {
     return this._engageService.dismissOpportunity(org, id);
   }
 
+  @ApiOperation({ summary: 'Toggle bookmark on an opportunity' })
+  @ApiResponse({ status: 404, description: 'Opportunity not found' })
   @Patch('/opportunities/:id/bookmark')
   toggleBookmark(
     @GetOrgFromRequest() org: Organization,
@@ -268,12 +305,17 @@ export class EngageController {
   // Spec §11 (tech-design.md): 20 generations/user/hour. Each call opens a
   // Claude Sonnet streaming completion; without a cap an authenticated user
   // can replay the request and bleed Anthropic spend.
+  @ApiOperation({ summary: 'Stream an AI-generated reply draft via SSE (text/event-stream)' })
+  @ApiResponse({ status: 200, description: 'SSE stream of text chunks; ends with [DONE]' })
+  @ApiResponse({ status: 404, description: 'Opportunity not found or already replied' })
+  @ApiResponse({ status: 429, description: 'Rate limit exceeded (20/hour)' })
   @Throttle({ default: { limit: 20, ttl: 3_600_000 } })
   @Post('/opportunities/:id/draft')
   async generateDraft(
     @GetOrgFromRequest() org: Organization,
     @Param('id') id: string,
     @Body() body: GenerateDraftDto,
+    @Req() req: Request,
     @Res() res: Response
   ) {
     // Set SSE headers FIRST so a pre-stream failure (e.g. opportunity not found)
@@ -283,6 +325,9 @@ export class EngageController {
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
 
+    const abortController = new AbortController();
+    req.on('close', () => abortController.abort());
+
     try {
       // Only generate drafts for actionable opportunities (not REPLIED/DISMISSED/EXPIRED).
       const opportunity = await this._engageService.getOpportunityForReply(org, id);
@@ -290,12 +335,20 @@ export class EngageController {
         opportunity,
         body.strategy,
         body.brandStrength,
-        body.mentions
+        body.mentions,
+        abortController.signal
       )) {
+        if (abortController.signal.aborted) break;
         res.write(`data: ${JSON.stringify({ text: chunk })}\n\n`);
       }
-      res.write(`data: [DONE]\n\n`);
+      if (!abortController.signal.aborted) {
+        res.write(`data: [DONE]\n\n`);
+      }
     } catch (err) {
+      if ((err as Error)?.name === 'AbortError') {
+        // Client disconnected — no-op; connection is already closed
+        return;
+      }
       this.logger.error(
         `generateDraft failed for opportunity ${id} (org ${org.id})`,
         err instanceof Error ? err.stack : err
@@ -309,12 +362,14 @@ export class EngageController {
         res.write(`data: [DONE]\n\n`);
       }
     } finally {
-      res.end();
+      if (!res.writableEnded) res.end();
     }
   }
 
   // ─── Send / Schedule Reply (X via Post pipeline) ─────────────────────────
 
+  @ApiOperation({ summary: 'Send an immediate reply to an opportunity via X' })
+  @ApiResponse({ status: 404, description: 'Opportunity not found or already replied' })
   @Post('/opportunities/:id/reply')
   sendReply(
     @GetOrgFromRequest() org: Organization,
@@ -325,6 +380,8 @@ export class EngageController {
     return this._engageService.sendReply(org, user?.id, id, body);
   }
 
+  @ApiOperation({ summary: 'Schedule a reply to an opportunity for future publishing' })
+  @ApiResponse({ status: 404, description: 'Opportunity not found or already replied' })
   @Post('/opportunities/:id/schedule')
   scheduleReply(
     @GetOrgFromRequest() org: Organization,
@@ -337,6 +394,8 @@ export class EngageController {
 
   // ─── Reddit manual reply (2-step) ─────────────────────────────────────────
 
+  @ApiOperation({ summary: 'Confirm a manual Reddit reply and record it in the system' })
+  @ApiResponse({ status: 404, description: 'Opportunity not found or already replied' })
   @Post('/opportunities/:id/manual-reply')
   confirmManualReply(
     @GetOrgFromRequest() org: Organization,
@@ -349,6 +408,7 @@ export class EngageController {
 
   // ─── Sent Replies ─────────────────────────────────────────────────────────
 
+  @ApiOperation({ summary: 'Paginated list of sent Engage replies' })
   @Get('/sent')
   listSentReplies(
     @GetOrgFromRequest() org: Organization,
@@ -357,11 +417,15 @@ export class EngageController {
     return this._engageService.listSentReplies(org, query);
   }
 
+  @ApiOperation({ summary: 'Aggregate stats for sent replies (impressions, response rate)' })
   @Get('/sent/stats')
   getSentStats(@GetOrgFromRequest() org: Organization) {
     return this._engageService.getSentStats(org);
   }
 
+  @ApiOperation({ summary: 'Submit the Reddit comment URL for a manual reply' })
+  @ApiResponse({ status: 404, description: 'Sent reply not found' })
+  @ApiResponse({ status: 400, description: 'Only valid for Reddit manual replies' })
   @Patch('/sent/:id/reply-url')
   submitManualReplyUrl(
     @GetOrgFromRequest() org: Organization,
@@ -373,6 +437,7 @@ export class EngageController {
 
   // ─── Dashboard Stats ──────────────────────────────────────────────────────
 
+  @ApiOperation({ summary: 'Engage dashboard summary (weekly replies, response rate, impressions)' })
   @Get('/dashboard-stats')
   getDashboardStats(@GetOrgFromRequest() org: Organization) {
     return this._engageService.getSentStats(org);

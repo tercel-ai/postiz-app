@@ -1,5 +1,6 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import Anthropic from '@anthropic-ai/sdk';
+import OpenAI from 'openai';
 import { INTENT_LABELS, IntentLabel } from './engage-intent.constants';
 
 type ClassifyResult = {
@@ -18,16 +19,21 @@ type ZeroShotPipeline = (
 export class EngageIntentClassifierService implements OnModuleInit {
   private readonly logger = new Logger(EngageIntentClassifierService.name);
   private classifier: ZeroShotPipeline | null = null;
-  private readonly anthropic = new Anthropic({
-    apiKey:
-      process.env.ANTHROPIC_API_KEY ??
-      process.env.CLAUDE_API_KEY ??
-      process.env.OPENROUTER_API_KEY,
-    // Anthropic SDK appends /v1 automatically, so omit it from the base path.
-    baseURL: process.env.OPENROUTER_API_KEY
-      ? 'https://openrouter.ai/api'
-      : undefined,
-  });
+
+  // Two separate code paths — never mix a key from one provider with the
+  // base URL of the other. OpenRouter speaks OpenAI wire format, not Anthropic.
+  private readonly _useOpenRouter = !!process.env.OPENROUTER_API_KEY;
+  private readonly _openRouterClient: OpenAI | null = this._useOpenRouter
+    ? new OpenAI({
+        apiKey: process.env.OPENROUTER_API_KEY!,
+        baseURL: 'https://openrouter.ai/api/v1',
+      })
+    : null;
+  private readonly _anthropicClient: Anthropic | null = !this._useOpenRouter
+    ? new Anthropic({
+        apiKey: process.env.ANTHROPIC_API_KEY ?? process.env.CLAUDE_API_KEY ?? '',
+      })
+    : null;
 
   async onModuleInit() {
     try {
@@ -143,21 +149,39 @@ export class EngageIntentClassifierService implements OnModuleInit {
   }
 
   private async _claudeFallbackClassify(text: string): Promise<ClassifyResult> {
-    try {
-      const isOpenRouter = !!process.env.OPENROUTER_API_KEY;
-      const model =
-        process.env.OPENROUTER_INTENT_MODEL ??
-        (isOpenRouter ? 'anthropic/claude-haiku-4.5' : 'claude-haiku-4-5-20251001');
+    const prompt = `Classify this post's intent. Labels: ${INTENT_LABELS.join(', ')}.\n\n"${text.slice(0, 400)}"`;
 
-      const extraHeaders = isOpenRouter
-        ? {
+    try {
+      let rawResult: { intentTags: string[]; primaryIntent: string; intentScore: number } | null = null;
+
+      if (this._useOpenRouter && this._openRouterClient) {
+        const model = process.env.OPENROUTER_INTENT_MODEL ?? 'anthropic/claude-haiku-4.5';
+        const response = await this._openRouterClient.chat.completions.create({
+          model,
+          max_tokens: 128,
+          messages: [
+            {
+              role: 'system',
+              content: `You are an intent classifier. Respond with JSON only: {"intentTags":["<label>",...],"primaryIntent":"<label>","intentScore":<0-1>}. Valid labels: ${INTENT_LABELS.join(', ')}.`,
+            },
+            { role: 'user', content: prompt },
+          ],
+        },
+        {
+          headers: {
             'HTTP-Referer': 'https://postiz.com',
             'X-Title': 'Postiz Engage',
-          }
-        : undefined;
-
-      const msg = await this.anthropic.messages.create(
-        {
+          },
+        });
+        const content = response.choices[0]?.message?.content ?? '';
+        try {
+          rawResult = JSON.parse(content);
+        } catch {
+          // non-JSON response — fall through to default
+        }
+      } else if (this._anthropicClient) {
+        const model = 'claude-haiku-4-5-20251001';
+        const msg = await this._anthropicClient.messages.create({
           model,
           max_tokens: 128,
           tools: [
@@ -175,43 +199,29 @@ export class EngageIntentClassifierService implements OnModuleInit {
             },
           ],
           tool_choice: { type: 'tool', name: 'set_intent' },
-          messages: [
-            {
-              role: 'user',
-              content: `Classify this post's intent. Labels: ${INTENT_LABELS.join(
-                ', '
-              )}.\n\n"${text.slice(0, 400)}"`,
-            },
-          ],
-        },
-        {
-          headers: extraHeaders as any,
+          messages: [{ role: 'user', content: prompt }],
+        });
+        const toolUse = msg.content.find((b) => b.type === 'tool_use');
+        if (toolUse && toolUse.type === 'tool_use') {
+          rawResult = toolUse.input as typeof rawResult;
         }
-      );
+      }
 
-      const toolUse = msg.content.find((b) => b.type === 'tool_use');
-      if (toolUse && toolUse.type === 'tool_use') {
-        const input = toolUse.input as {
-          intentTags: string[];
-          primaryIntent: string;
-          intentScore: number;
-        };
-        // Filter to only known labels — Haiku may return labels outside the defined set
+      if (rawResult) {
         const validSet = new Set<string>(INTENT_LABELS);
-        const intentTags = (input.intentTags ?? [])
-          .filter((t) => validSet.has(t)) as IntentLabel[];
-        const primaryIntent = validSet.has(input.primaryIntent)
-          ? input.primaryIntent
+        const intentTags = (rawResult.intentTags ?? []).filter((t) => validSet.has(t)) as IntentLabel[];
+        const primaryIntent = validSet.has(rawResult.primaryIntent)
+          ? rawResult.primaryIntent
           : (intentTags[0] ?? 'discussion');
         return {
           intentTags: intentTags.length > 0 ? intentTags : ['discussion' as IntentLabel],
           primaryIntent,
-          intentScore: typeof input.intentScore === 'number' ? input.intentScore : 0,
+          intentScore: typeof rawResult.intentScore === 'number' ? rawResult.intentScore : 0,
         };
       }
     } catch (err) {
       const msg = (err as Error).message ?? String(err);
-      this.logger.warn(`Claude Haiku fallback failed: ${msg.slice(0, 200)}`);
+      this.logger.warn(`Intent classifier fallback failed: ${msg.slice(0, 200)}`);
     }
 
     return { intentTags: ['discussion'], primaryIntent: 'discussion', intentScore: 0 };

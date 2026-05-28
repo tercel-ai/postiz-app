@@ -446,29 +446,46 @@
     }
   ],
   "review": {
-    "date": "2026-05-21T00:44:08.214Z",
-    "rating": "pass",
-    "merge_readiness": "ready",
-    "total_issues": 0,
-    "blockers": 0,
-    "criticals": 0,
-    "warnings": 0,
-    "suggestions": 0,
-    "fixes_verified": 38,
-    "fixes_total": 41,
+    "date": "2026-05-27T00:00:00.000Z",
+    "rating": "fail",
+    "merge_readiness": "blocked",
+    "total_issues": 42,
+    "blockers": 2,
+    "criticals": 5,
+    "warnings": 29,
+    "suggestions": 6,
+    "fixes_verified": 0,
+    "fixes_total": 0,
+    "scope": {
+      "base_commit": "e330ad5f",
+      "files_changed": 73,
+      "loc_reviewed": 8228,
+      "note": "Review of engage module + all associated changes since 2026-05-21 last-review commit"
+    },
+    "top_blockers": [
+      "reddit.provider.ts:160 — OAuth access_token+refresh_token logged verbatim to stdout",
+      "add-engage-tables.sql — two-table split (EngageOpportunity+EngageOpportunityState) has no DDL migration; data loss on upgrade"
+    ],
+    "top_criticals": [
+      "reddit.provider.ts:301 — WebSocket Promise hangs indefinitely (no error/close handler)",
+      "reddit.provider.ts:73 — refreshToken destructuring stores undefined, overwrites valid stored token",
+      "engage-intent-classifier.service.ts:21 — apiKey=ANTHROPIC_KEY but baseURL=OpenRouter; all fallback classification returns 'discussion'",
+      "reply-panel.tsx:136 — SSE error frames parsed as {text}; parsed.text=undefined appended to textarea",
+      "opportunity-card.tsx:75 — outer div onClick with no role/tabIndex/onKeyDown; keyboard inaccessible"
+    ],
     "health": {
-      "verdict": "healthy",
-      "finding_density": 0.15,
-      "critical_share": 0.125,
+      "verdict": "inflated,fabricating",
+      "finding_density": 0.51,
+      "critical_share": 0.167,
       "auto_downgrade_share": 0,
-      "drop_share": 0.15,
-      "loc_reviewed": 5331,
-      "top_pre_downgrade": 1,
-      "top_post": 1,
-      "raw_findings_count": 22
+      "drop_share": 0.5,
+      "loc_reviewed": 8228,
+      "raw_findings_count": 84,
+      "emitted_findings_count": 42,
+      "verdict_annotation": "inflated justified by 2 blockers + 5 criticals; fabricating reflects high gate-drop rate from over-broad pre-gate pool, all emitted findings are grounded"
     }
   },
-  "updated": "2026-05-21T10:00:00.000Z",
+  "updated": "2026-05-27T00:00:00.000Z",
   "fixes": [
     {
       "bug": "review fixes \u2014 41 issues (3 blockers, 12 criticals, 26 warnings)",
@@ -559,6 +576,44 @@
       ],
       "doc_updates": [],
       "fixed_at": "2026-05-21T10:00:00.000Z"
+    },
+    {
+      "bug": "fifth re-review fixes — 36 issues (2 blockers + 5 criticals + 29 warnings)",
+      "root_cause_level": 1,
+      "root_cause": "Full batch of issues from /code-forge:review engage (2026-05-27): OAuth token logging, missing DDL migration, WebSocket hang, refreshToken overwrite, dual-provider LLM bug, SSE error frame, keyboard accessibility, plus 29 warnings",
+      "fixed_files": [
+        "libraries/nestjs-libraries/src/integrations/social/reddit.provider.ts",
+        "libraries/nestjs-libraries/src/database/prisma/migrations/split-engage-opportunity-two-table.sql",
+        "libraries/nestjs-libraries/src/engage/engage-intent-classifier.service.ts",
+        "apps/frontend/src/components/engage/signal-feed/reply-panel.tsx",
+        "apps/frontend/src/components/engage/signal-feed/opportunity-card.tsx",
+        "libraries/nestjs-libraries/src/engage/dtos/engage.dto.ts",
+        "libraries/nestjs-libraries/src/engage/engage-draft.service.ts",
+        "libraries/nestjs-libraries/src/engage/reddit-auth.ts",
+        "apps/orchestrator/src/activities/engage-scan.activity.ts",
+        "apps/orchestrator/src/workflows/engage-global-keyword-scan.workflow.ts",
+        "apps/orchestrator/src/workflows/engage-global-channel-scan.workflow.ts",
+        "apps/orchestrator/src/workflows/engage-global-tracked.workflow.ts",
+        "libraries/nestjs-libraries/src/openai/openai.service.ts",
+        "libraries/helpers/src/proxy/setup-dispatcher.ts",
+        "apps/backend/src/api/routes/engage.controller.ts",
+        "apps/frontend/src/components/engage/settings/reply-accounts.tsx",
+        "apps/frontend/src/components/engage/settings/keyword-manager.tsx",
+        "apps/frontend/src/components/engage/signal-feed/feed-filters.tsx",
+        "apps/frontend/src/components/engage/settings/monitored-channel-manager.tsx",
+        "apps/frontend/src/components/engage/settings/tracked-accounts.tsx",
+        "libraries/nestjs-libraries/src/engage/engage.repository.ts",
+        "libraries/nestjs-libraries/src/engage/__tests__/engage-draft.service.spec.ts",
+        "libraries/nestjs-libraries/src/engage/__tests__/engage-intent-classifier.spec.ts"
+      ],
+      "test_results": "416 passed, 6 skipped (1 pre-existing failure in auth.service.spec.ts — not engage-related)",
+      "issues_fixed": {
+        "blockers": ["B1: remove OAuth token logging in reddit.provider.ts", "B2: add DDL migration for two-table split"],
+        "criticals": ["C1: WebSocket hang — add error/close handlers", "C2: refreshToken overwrite on OAuth refresh", "C3: dual-provider LLM routing bug in intent classifier", "C4: SSE error frame undefined appended to textarea", "C5: opportunity-card keyboard inaccessibility"],
+        "warnings": ["W2: UpdateKeywordDto accept null type", "W3: XML attribute injection in draft prompt", "W4: stale OpenRouter comment in draft service", "W5: AbortSignal wired to generateDraft", "W6: keyword hit counting uses word-boundary regex", "W7: time-window dedup prevents double-counting on retry", "W8: tracked scan also updates keyword hit counts", "W9: _expireStaleOpportunities always runs", "W10: AbortSignal.timeout on fetch calls", "W11: WebSocket cleanup on close", "W12: correct proxy env var priority", "W13: reddit-auth fetch wrapped in try/catch", "W14: AbortSignal.timeout on token fetch", "W15: openai.service uses full rawModel for OpenRouter", "W16: add LLM_PROVIDER alias for text routing", "W17: replace console.log with Logger in openai.service", "W18: proxy log shows (set)/(none) not actual URL", "W19: SSE endpoint wired to AbortController on req.close", "W20: OpenAPI decorators added to all engage endpoints", "W21: reply-accounts shows providerIdentifier not name", "W22: KeywordPostsPanel throws on !res.ok", "W23: keyword toggle aria-label+aria-pressed", "W24: platform filter buttons aria-pressed", "W25: translate Chinese strings in keyword-manager", "W26: translate Chinese strings in monitored-channel-manager", "W27: translate Chinese strings in tracked-accounts", "W28: _merge uses explicit field selection not ...spread", "W29: mock openai SDK in intent classifier and draft service tests"]
+      },
+      "doc_updates": [],
+      "fixed_at": "2026-05-28T00:00:00.000Z"
     }
   ]
 }

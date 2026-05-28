@@ -46,11 +46,11 @@ interface PostSnippet {
 
 function KeywordPostsPanel({ keywordId }: { keywordId: string }) {
   const fetch = useFetch();
-  const { data, isLoading } = useSWR(
+  const { data, isLoading, error } = useSWR(
     `/engage/keywords/${keywordId}/posts`,
     async (url) => {
       const res = await fetch(url);
-      if (!res.ok) return [];
+      if (!res.ok) throw new Error(`posts returned ${res.status}`);
       return res.json() as Promise<PostSnippet[]>;
     }
   );
@@ -58,6 +58,12 @@ function KeywordPostsPanel({ keywordId }: { keywordId: string }) {
   if (isLoading) {
     return (
       <div className="py-3 px-4 text-xs text-gray-500">Loading posts…</div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="py-3 px-4 text-xs text-red-400">Failed to load posts.</div>
     );
   }
 
@@ -270,7 +276,7 @@ export function KeywordManager() {
                   />
                 </div>
                 <span className="text-xs text-gray-500 w-14 text-right shrink-0">
-                  本周 {kw.weeklyHitCount} 条
+                  {kw.weeklyHitCount} this week
                 </span>
               </div>
 
@@ -288,6 +294,8 @@ export function KeywordManager() {
 
               <button
                 onClick={() => toggleKeyword(kw)}
+                aria-label={`${kw.enabled ? 'Disable' : 'Enable'} keyword ${kw.keyword}`}
+                aria-pressed={kw.enabled}
                 className={`text-xs font-medium w-8 shrink-0 ${
                   kw.enabled ? 'text-green-400' : 'text-gray-600'
                 }`}

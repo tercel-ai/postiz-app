@@ -13,11 +13,10 @@ export const triggerKeywordScanNowSignal = defineSignal('triggerKeywordScanNow')
 const { runGlobalKeywordScan } = proxyActivities<EngageScanActivity>({
   startToCloseTimeout: '20 minutes',
   heartbeatTimeout: '2 minutes',
-  retry: {
-    maximumAttempts: 3,
-    backoffCoefficient: 2,
-    initialInterval: '5 minutes',
-  },
+  // maximumAttempts:1 — the scan activity includes non-idempotent hit-count
+  // increments. A retry would double-count. On transient failure the next
+  // scheduled scan (default every 24h) will recover.
+  retry: { maximumAttempts: 1 },
 });
 
 /**

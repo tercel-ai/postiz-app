@@ -125,12 +125,11 @@ export class EngageScanActivity {
     ]);
 
     const allRaw = deduplicatePosts([...xPosts, ...redditPosts]);
-    if (!allRaw.length) {
-      await this._finalizeAllOrgs(orgContexts);
-      return;
+    if (allRaw.length) {
+      await Promise.all(orgContexts.map((ctx) => this._fanOutToOrg(ctx, allRaw)));
     }
-
-    await Promise.all(orgContexts.map((ctx) => this._fanOutToOrg(ctx, allRaw)));
+    // Always expire stale opportunities regardless of scan yield.
+    await Promise.all(orgContexts.map((ctx) => this._expireStaleOpportunities(ctx.organizationId)));
     await this._finalizeAllOrgs(orgContexts);
   }
 
@@ -160,13 +159,11 @@ export class EngageScanActivity {
       await this._scanMonitoredChannelsGlobal(globalSubreddits, keywords)
     );
 
-    if (!allRaw.length) {
-      await this._updateAllChannelsLastScannedAt(orgContexts.map((c) => c.organizationId));
-      await this._finalizeAllOrgs(orgContexts);
-      return;
+    if (allRaw.length) {
+      await Promise.all(orgContexts.map((ctx) => this._fanOutToOrg(ctx, allRaw)));
     }
-
-    await Promise.all(orgContexts.map((ctx) => this._fanOutToOrg(ctx, allRaw)));
+    // Always expire stale opportunities regardless of scan yield.
+    await Promise.all(orgContexts.map((ctx) => this._expireStaleOpportunities(ctx.organizationId)));
     await this._updateAllChannelsLastScannedAt(orgContexts.map((c) => c.organizationId));
     await this._finalizeAllOrgs(orgContexts);
   }
@@ -228,6 +225,7 @@ export class EngageScanActivity {
           if (scored.length) {
             const classified = await this._classifyIntents(scored);
             await this._persistOpportunities(ctx.organizationId, classified);
+            await this._updateKeywordHitCounts(ctx.organizationId, classified, ctx.keywords);
           }
         }
 
@@ -273,7 +271,7 @@ export class EngageScanActivity {
     });
     const res = await fetch(
       `https://api.twitter.com/2/tweets/search/recent?${params}`,
-      { headers: { Authorization: `Bearer ${accessToken}` } }
+      { headers: { Authorization: `Bearer ${accessToken}` }, signal: AbortSignal.timeout(15_000) }
     );
     if (!res.ok) {
       const body = await res.text().catch(() => '<unreadable>');
@@ -373,7 +371,10 @@ export class EngageScanActivity {
 
     if (token) {
       const url = `https://oauth.reddit.com/r/${encodeURIComponent(subreddit)}/search?q=${encodeURIComponent(keyword)}&sort=top&t=week&limit=25&restrict_sr=true`;
-      const res = await fetch(url, { headers: redditAuthHeaders(token) });
+      const res = await fetch(url, {
+        headers: redditAuthHeaders(token),
+        signal: AbortSignal.timeout(10_000),
+      });
       if (res.ok) {
         const json = (await res.json()) as {
           data?: { children?: Array<{ data: Record<string, unknown> }> };
@@ -494,6 +495,7 @@ export class EngageScanActivity {
     const url = `https://www.reddit.com/r/${encodeURIComponent(subreddit)}/search.rss?q=${encodeURIComponent(keyword)}&sort=top&t=week&restrict_sr=on`;
     const res = await fetch(url, {
       headers: REDDIT_BROWSER_HEADERS,
+      signal: AbortSignal.timeout(10_000),
     });
     if (!res.ok) {
       this.logger.warn(`Reddit RSS ${res.status} for r/${subreddit} "${keyword}"`);
@@ -606,11 +608,12 @@ export class EngageScanActivity {
       .map((p) => scorePost(p, orgKeywords))
       .filter((p): p is ScoredPost => p !== null && p.score >= MIN_SCORE);
 
-    if (!scored.length) return;
-
-    const classified = await this._classifyIntents(scored);
-    await this._persistOpportunities(ctx.organizationId, classified);
-    await this._updateKeywordHitCounts(ctx.organizationId, classified, orgKeywords);
+    if (scored.length) {
+      const classified = await this._classifyIntents(scored);
+      await this._persistOpportunities(ctx.organizationId, classified);
+      await this._updateKeywordHitCounts(ctx.organizationId, classified, orgKeywords);
+    }
+    // Expiry runs regardless — quiet scans must not leave stale NEW opportunities alive.
     await this._expireStaleOpportunities(ctx.organizationId);
   }
 
@@ -757,24 +760,44 @@ export class EngageScanActivity {
     const hitMap = new Map<string, number>();
     for (const post of posts) {
       for (const kw of keywords) {
-        if (kw.enabled && post.postContent.toLowerCase().includes(kw.keyword.toLowerCase())) {
+        // Use word-boundary regex for consistency with engage-scorer.ts.
+        // .includes() was a substring match — "react" would match "overreacting".
+        const pattern = new RegExp(`\\b${kw.keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
+        if (kw.enabled && pattern.test(post.postContent)) {
           hitMap.set(kw.id, (hitMap.get(kw.id) ?? 0) + 1);
         }
       }
     }
     if (!hitMap.size) return;
+
+    // Guard against double-counting on Temporal retry: skip keywords whose
+    // lastCountedAt is within the last 5 minutes (matching the initial retry
+    // backoff). Combined with maximumAttempts:1 on the activity this prevents
+    // most double-count scenarios without a schema change.
+    const recentCutoff = new Date(Date.now() - 5 * 60 * 1000);
+    const kwIds = Array.from(hitMap.keys());
+    const existing = await this._keyword.model.engageKeyword.findMany({
+      where: { id: { in: kwIds } },
+      select: { id: true, lastCountedAt: true },
+    });
+    const alreadyCounted = new Set(
+      existing.filter((k) => k.lastCountedAt && k.lastCountedAt > recentCutoff).map((k) => k.id)
+    );
+
     const now = new Date();
-    const ops = Array.from(hitMap, ([kwId, hits]) =>
-      this._keyword.model.engageKeyword.update({
+    const ops = Array.from(hitMap, ([kwId, hits]) => {
+      if (alreadyCounted.has(kwId)) return null;
+      return this._keyword.model.engageKeyword.update({
         where: { id: kwId },
         data: {
           weeklyHitCount: { increment: hits },
           totalHitCount: { increment: hits },
           lastCountedAt: now,
         },
-      })
-    );
-    await this._tx.model.$transaction(ops);
+      });
+    }).filter((op): op is NonNullable<typeof op> => op !== null);
+
+    if (ops.length) await this._tx.model.$transaction(ops);
   }
 
   private async _expireStaleOpportunities(orgId: string): Promise<void> {
@@ -838,7 +861,7 @@ export class EngageScanActivity {
     });
     const userRes = await fetch(
       `https://api.twitter.com/2/users/by/username/${username}?${userParams}`,
-      { headers: { Authorization: `Bearer ${bearerToken}` } }
+      { headers: { Authorization: `Bearer ${bearerToken}` }, signal: AbortSignal.timeout(10_000) }
     );
     if (!userRes.ok) {
       const body = await userRes.text().catch(() => '<unreadable>');
@@ -866,7 +889,7 @@ export class EngageScanActivity {
 
     const tweetsRes = await fetch(
       `https://api.twitter.com/2/users/${userId}/tweets?${params}`,
-      { headers: { Authorization: `Bearer ${bearerToken}` } }
+      { headers: { Authorization: `Bearer ${bearerToken}` }, signal: AbortSignal.timeout(10_000) }
     );
     if (!tweetsRes.ok) {
       const body = await tweetsRes.text().catch(() => '<unreadable>');

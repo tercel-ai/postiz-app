@@ -3,7 +3,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { EngageDraftService } from '../engage-draft.service';
 import { EngageOpportunity } from '@prisma/client';
 
-// Mock Anthropic
+// Shared mock stream — two text chunks followed by a stop event.
 const mockStream = {
   [Symbol.asyncIterator]: async function* () {
     yield {
@@ -17,6 +17,7 @@ const mockStream = {
   },
 };
 
+// Mock Anthropic — prevents live API calls when ANTHROPIC_API_KEY is set
 vi.mock('@anthropic-ai/sdk', () => {
   return {
     default: vi.fn().mockImplementation(() => {
@@ -26,6 +27,27 @@ vi.mock('@anthropic-ai/sdk', () => {
         },
       };
     }),
+  };
+});
+
+// Mock OpenAI (OpenRouter path) — prevents live API calls when OPENROUTER_API_KEY is set.
+// The service picks OpenRouter when OPENROUTER_API_KEY is present, so we must mock openai
+// here to stop vitest (which loads .env via dotenv/config) from hitting the real API.
+vi.mock('openai', () => {
+  const fakeStream = {
+    [Symbol.asyncIterator]: async function* () {
+      yield { choices: [{ delta: { content: 'Hello ' } }] };
+      yield { choices: [{ delta: { content: 'world!' } }] };
+    },
+  };
+  return {
+    default: vi.fn().mockImplementation(() => ({
+      chat: {
+        completions: {
+          create: vi.fn().mockResolvedValue(fakeStream),
+        },
+      },
+    })),
   };
 });
 
@@ -54,7 +76,7 @@ describe('EngageDraftService', () => {
 
     it('should include platform-specific character limits in system prompt', () => {
       const xPrompt = (service as any)._buildSystemPrompt('x', 'EXPERT_ANSWER', 'help_seeking', 1);
-      expect(xPrompt).toContain('under 280 characters');
+      expect(xPrompt).toContain('under 260 Twitter-weighted characters');
 
       const redditPrompt = (service as any)._buildSystemPrompt('reddit', 'EXPERT_ANSWER', 'help_seeking', 1);
       expect(redditPrompt).toContain('up to 500 words');

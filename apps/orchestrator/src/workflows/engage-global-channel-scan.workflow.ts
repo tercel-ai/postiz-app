@@ -13,11 +13,7 @@ export const triggerChannelScanNowSignal = defineSignal('triggerChannelScanNow')
 const { runGlobalChannelScan } = proxyActivities<EngageScanActivity>({
   startToCloseTimeout: '20 minutes',
   heartbeatTimeout: '2 minutes',
-  retry: {
-    maximumAttempts: 3,
-    backoffCoefficient: 2,
-    initialInterval: '5 minutes',
-  },
+  retry: { maximumAttempts: 1 },
 });
 
 /**

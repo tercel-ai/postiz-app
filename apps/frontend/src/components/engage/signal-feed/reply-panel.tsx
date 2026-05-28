@@ -133,8 +133,13 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
           const data = line.slice(6).trim();
           if (data === '[DONE]') { done_signal = true; break; }
           try {
-            const parsed = JSON.parse(data) as { text: string };
-            setDraft((prev) => prev + parsed.text);
+            const parsed = JSON.parse(data) as { text?: string; error?: string };
+            if (parsed.error) {
+              toaster.show(`Generation error: ${parsed.error}`, 'warning');
+              done_signal = true;
+              break;
+            }
+            if (parsed.text) setDraft((prev) => prev + parsed.text);
           } catch {
             // ignore parse errors for non-JSON SSE frames
           }

@@ -100,7 +100,7 @@ export function TrackedAccounts() {
         </div>
       )}
       <p className="text-sm text-gray-400 mb-4">
-        追踪外部 X 账号，每 3 小时自动检查新帖。来自这些账号的帖子会获得 +5 分加成并优先显示在 Signal Feed 中。
+        Track external X accounts checked every 3 hours. Posts from these accounts receive a +5 score bonus and appear first in the Signal Feed.
       </p>
 
       <div className="flex gap-2 mb-6">
@@ -174,7 +174,7 @@ export function TrackedAccounts() {
 
         {accounts.length === 0 && (
           <p className="text-center text-gray-500 text-sm py-8">
-            还没有追踪账号。添加 X 账号开始监控。
+            No tracked accounts yet. Add an X account to start monitoring.
           </p>
         )}
       </div>

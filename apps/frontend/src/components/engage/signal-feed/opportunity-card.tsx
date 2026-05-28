@@ -72,7 +72,17 @@ export const OpportunityCard: FC<OpportunityCardProps> = ({
 }) => {
   return (
     <div
+      role="button"
+      tabIndex={0}
       onClick={() => onSelect(opp.id)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onSelect(opp.id);
+        }
+      }}
+      aria-pressed={selected}
+      aria-label={`Select opportunity from @${opp.authorUsername}`}
       className={clsx(
         'border-l-4 bg-[#1a2035] rounded-r-lg p-4 cursor-pointer transition-all hover:bg-[#1e2740]',
         platformColor(opp.platform),

@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import OpenAI from 'openai';
 import { shuffle } from 'lodash';
 import { zodResponseFormat } from 'openai/helpers/zod';
@@ -45,9 +45,11 @@ export function parseModelId(
   return { provider: servicer, model: rawModel };
 }
 
+const _aiUsageLogger = new Logger('AiUsage');
+
 export function logAiUsage(info: AiUsageInfo): void {
   const parts = [
-    `[AI Usage] servicer=${info.servicer} provider=${info.provider} model=${info.model} type=${info.type} billing_mode=${info.billing_mode} method=${info.method}`,
+    `servicer=${info.servicer} provider=${info.provider} model=${info.model} type=${info.type} billing_mode=${info.billing_mode} method=${info.method}`,
     `prompt_tokens=${info.usage.prompt_tokens} completion_tokens=${info.usage.completion_tokens} total_tokens=${info.usage.total_tokens}`,
   ];
   if (info.usage.cached_prompt_tokens) {
@@ -58,7 +60,7 @@ export function logAiUsage(info: AiUsageInfo): void {
       `image_count=${info.image_billing.count} size=${info.image_billing.size} quality=${info.image_billing.quality}`
     );
   }
-  console.log(parts.join(' '));
+  _aiUsageLogger.log(parts.join(' '));
 }
 
 const openai = new OpenAI({
@@ -92,8 +94,10 @@ export class OpenaiService {
     servicer: string;
     provider: string;
   } {
+    // LLM_PROVIDER is the canonical name for text-LLM routing; IMAGE_PROVIDER
+    // is the older alias kept for backward compatibility.
     const configProvider = (
-      process.env.IMAGE_PROVIDER || 'openai'
+      process.env.LLM_PROVIDER || process.env.IMAGE_PROVIDER || 'openai'
     ).toLowerCase();
     const hasOpenAiKey =
       process.env.OPENAI_API_KEY &&
@@ -103,7 +107,7 @@ export class OpenaiService {
     if (configProvider === 'openrouter' && !hasOpenAiKey) {
       if (!process.env.OPENROUTER_API_KEY) {
         throw new Error(
-          'OPENROUTER_API_KEY is required when IMAGE_PROVIDER=openrouter without OPENAI_API_KEY'
+          'OPENROUTER_API_KEY is required when LLM_PROVIDER=openrouter without OPENAI_API_KEY'
         );
       }
       const rawModel =
@@ -111,7 +115,7 @@ export class OpenaiService {
       const parsed = parseModelId(rawModel, 'openrouter');
       return {
         client: getOpenRouterClient(),
-        model: parsed.model,
+        model: rawModel, // OpenRouter requires the fully-qualified "provider/model" identifier
         servicer: 'openrouter',
         provider: parsed.provider,
       };

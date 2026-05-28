@@ -153,7 +153,7 @@ export function ReplyAccounts() {
               )}
               <div>
                 <p className="text-white font-medium">{acc.name}</p>
-                <p className="text-xs text-gray-500">@{acc.name}</p>
+                <p className="text-xs text-gray-500">@{acc.providerIdentifier || acc.name}</p>
               </div>
               {/* Enable toggle */}
               <div className="ml-auto flex items-center gap-2">

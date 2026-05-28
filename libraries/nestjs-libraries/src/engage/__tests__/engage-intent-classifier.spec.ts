@@ -3,7 +3,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { EngageIntentClassifierService } from '../engage-intent-classifier.service';
 import { INTENT_LABELS } from '../engage-intent.constants';
 
-// Mock Anthropic
+// Mock Anthropic — prevents live API calls when ANTHROPIC_API_KEY is set in CI
 vi.mock('@anthropic-ai/sdk', () => {
   return {
     default: vi.fn().mockImplementation(() => {
@@ -24,6 +24,31 @@ vi.mock('@anthropic-ai/sdk', () => {
         },
       };
     }),
+  };
+});
+
+// Mock OpenAI (OpenRouter path) — prevents live API calls when OPENROUTER_API_KEY is set in CI
+vi.mock('openai', () => {
+  return {
+    default: vi.fn().mockImplementation(() => ({
+      chat: {
+        completions: {
+          create: vi.fn().mockResolvedValue({
+            choices: [
+              {
+                message: {
+                  content: JSON.stringify({
+                    intentTags: ['help_seeking'],
+                    primaryIntent: 'help_seeking',
+                    intentScore: 0.9,
+                  }),
+                },
+              },
+            ],
+          }),
+        },
+      },
+    })),
   };
 });
 

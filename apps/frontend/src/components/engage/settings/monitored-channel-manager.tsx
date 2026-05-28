@@ -150,7 +150,7 @@ export function MonitoredChannelManager() {
       )}
       <div className="flex justify-between items-center mb-4">
         <p className="text-sm text-gray-400">
-          订阅 Reddit 版块（如 r/SEO、r/marketing），新帖会按关键字过滤后进入 Signal Feed。
+          Subscribe to subreddits (e.g. r/SEO, r/marketing). New posts are filtered by your keywords and surfaced in the Signal Feed.
         </p>
         <button
           onClick={() => setShowAdd(!showAdd)}
@@ -303,7 +303,7 @@ export function MonitoredChannelManager() {
 
         {channels.length === 0 && (
           <div className="col-span-2 text-center text-gray-500 text-sm py-8">
-            还没有版块。添加一个 subreddit 开始监控。
+            No channels yet. Add a subreddit to start monitoring.
           </div>
         )}
       </div>

@@ -404,6 +404,11 @@ export class EngageRepository {
   // Flatten a per-org state row + its global opportunity into the legacy
   // EngageOpportunity response shape the API/frontend expect. `id` stays the
   // opportunity id (the value the controller's :id routes operate on).
+  //
+  // Fields are listed explicitly (not via `...opportunity`) so the compiler
+  // catches any future schema migration that accidentally moves a score field
+  // to the wrong table — the global/per-org boundary is enforced at the type
+  // level by naming each field's source.
   private _merge<
     T extends {
       status: EngageOpportunityStatus;
@@ -417,7 +422,42 @@ export class EngageRepository {
     const { opportunity, status, bookmarked, score, scoreKeyword, scoreTracked } =
       state;
     return {
-      ...opportunity,
+      // ── Global fields (EngageOpportunity) ──────────────────────────────────
+      id: opportunity.id,
+      platform: opportunity.platform,
+      externalPostId: opportunity.externalPostId,
+      externalPostUrl: opportunity.externalPostUrl,
+      channelId: opportunity.channelId,
+      channelName: opportunity.channelName,
+      authorUsername: opportunity.authorUsername,
+      authorDisplayName: opportunity.authorDisplayName,
+      authorFollowers: opportunity.authorFollowers,
+      authorAvatarUrl: opportunity.authorAvatarUrl,
+      postContent: opportunity.postContent,
+      postPublishedAt: opportunity.postPublishedAt,
+      // Objective scores — identical across all orgs
+      scoreHeat: opportunity.scoreHeat,
+      scoreAuthority: opportunity.scoreAuthority,
+      scoreRecency: opportunity.scoreRecency,
+      intentTags: opportunity.intentTags,
+      primaryIntent: opportunity.primaryIntent,
+      intentScore: opportunity.intentScore,
+      metricLikes: opportunity.metricLikes,
+      metricReplies: opportunity.metricReplies,
+      metricRetweets: opportunity.metricRetweets,
+      metricQuotes: opportunity.metricQuotes,
+      metricBookmarks: opportunity.metricBookmarks,
+      metricViews: opportunity.metricViews,
+      metricShares: opportunity.metricShares,
+      metricSaves: opportunity.metricSaves,
+      metricScore: opportunity.metricScore,
+      metricUpvoteRatio: opportunity.metricUpvoteRatio,
+      metricComments: opportunity.metricComments,
+      rawData: opportunity.rawData,
+      createdAt: opportunity.createdAt,
+      updatedAt: opportunity.updatedAt,
+      deletedAt: opportunity.deletedAt,
+      // ── Per-org fields (EngageOpportunityState) ───────────────────────────
       status,
       bookmarked,
       score,

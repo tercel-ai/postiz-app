@@ -76,11 +76,12 @@ export const FeedFiltersBar: FC<FeedFiltersProps> = ({
   return (
     <div className="flex flex-wrap items-center gap-3 px-6 py-3 border-b border-[#1e2536] bg-[#0f1219]">
       {/* Platform */}
-      <div className="flex gap-1">
+      <div className="flex gap-1" role="group" aria-label="Platform filter">
         {PLATFORMS.map((p) => (
           <button
             key={p.value}
             onClick={() => set({ platform: p.value || undefined })}
+            aria-pressed={(filters.platform ?? '') === p.value}
             className={clsx(
               'px-3 py-1 text-xs rounded-full font-medium transition-colors',
               (filters.platform ?? '') === p.value

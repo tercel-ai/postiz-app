@@ -35,8 +35,7 @@ const INTENT_PROMPTS: Record<string, string> = {
 @Injectable()
 export class EngageDraftService {
   // Use OpenAI-compatible SDK for OpenRouter; fall back to Anthropic SDK for
-  // direct Anthropic API keys. OpenRouter does NOT support the Anthropic wire
-  // format — it only speaks OpenAI /v1/chat/completions.
+  // direct Anthropic API keys.
   private readonly useOpenRouter = !!process.env.OPENROUTER_API_KEY;
   private readonly openRouterModel =
     process.env.OPENROUTER_TEXT_MODEL ?? 'anthropic/claude-sonnet-4-6';
@@ -59,7 +58,8 @@ export class EngageDraftService {
     opportunity: EngageOpportunity,
     strategy: string,
     brandStrength: number,
-    mentions?: string[]
+    mentions?: string[],
+    signal?: AbortSignal
   ): AsyncGenerator<string> {
     const systemPrompt = this._buildSystemPrompt(
       opportunity.platform,
@@ -70,11 +70,13 @@ export class EngageDraftService {
     );
     const userPrompt = this._buildUserPrompt(opportunity);
 
+    if (signal?.aborted) return;
+
     let rawStream: AsyncGenerator<string>;
     if (this.useOpenRouter && this.openRouterClient) {
-      rawStream = this._streamViaOpenRouter(systemPrompt, userPrompt);
+      rawStream = this._streamViaOpenRouter(systemPrompt, userPrompt, signal);
     } else if (this.anthropicClient) {
-      rawStream = this._streamViaAnthropic(systemPrompt, userPrompt);
+      rawStream = this._streamViaAnthropic(systemPrompt, userPrompt, signal);
     } else {
       throw new Error(
         'No LLM provider configured. Set OPENROUTER_API_KEY or ANTHROPIC_API_KEY.'
@@ -112,7 +114,8 @@ export class EngageDraftService {
 
   private async *_streamViaOpenRouter(
     systemPrompt: string,
-    userPrompt: string
+    userPrompt: string,
+    signal?: AbortSignal
   ): AsyncGenerator<string> {
     const stream = await this.openRouterClient!.chat.completions.create({
       model: this.openRouterModel,
@@ -122,7 +125,7 @@ export class EngageDraftService {
         { role: 'user', content: userPrompt },
       ],
       stream: true,
-    });
+    }, { signal });
 
     for await (const chunk of stream) {
       const text = chunk.choices[0]?.delta?.content;
@@ -132,7 +135,8 @@ export class EngageDraftService {
 
   private async *_streamViaAnthropic(
     systemPrompt: string,
-    userPrompt: string
+    userPrompt: string,
+    signal?: AbortSignal
   ): AsyncGenerator<string> {
     const stream = await this.anthropicClient!.messages.create({
       model: 'claude-sonnet-4-6',
@@ -140,7 +144,7 @@ export class EngageDraftService {
       system: systemPrompt,
       messages: [{ role: 'user', content: userPrompt }],
       stream: true,
-    });
+    }, { signal });
 
     for await (const event of stream) {
       if (
@@ -196,7 +200,8 @@ system. Only output the reply text — no preface, no quotation of the original.
   }
 
   private _buildUserPrompt(opportunity: EngageOpportunity): string {
-    const author = this._sanitizeForPrompt(opportunity.authorUsername ?? '', 100);
+    const author = this._sanitizeForPrompt(opportunity.authorUsername ?? '', 100)
+      .replace(/[&"<>]/g, (c) => ({ '&': '&amp;', '"': '&quot;', '<': '&lt;', '>': '&gt;' }[c]!));
     const content = this._sanitizeForPrompt(opportunity.postContent ?? '', 2000);
     return `<original_post author="${author}">
 ${content}

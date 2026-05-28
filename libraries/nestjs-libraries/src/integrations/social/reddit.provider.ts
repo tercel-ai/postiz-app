@@ -99,11 +99,13 @@ export class RedditProvider extends SocialAbstract implements SocialProvider {
       })
     ).json();
 
+    // Reddit omits refresh_token when the existing token is still valid (RFC 6749 §6).
+    // Fall back to the caller-supplied token so we never overwrite it with undefined.
     return {
       id,
       name,
       accessToken,
-      refreshToken: newRefreshToken,
+      refreshToken: newRefreshToken ?? refreshToken,
       expiresIn,
       picture: icon_img?.split?.('?')?.[0] || '',
       username: name,
@@ -119,7 +121,6 @@ export class RedditProvider extends SocialAbstract implements SocialProvider {
     }&response_type=code&state=${state}&redirect_uri=${encodeURIComponent(
       redirectUri
     )}&duration=permanent&scope=${encodeURIComponent(this.scopes.join(' '))}&approval_prompt=force`;
-    console.log(`[reddit.generateAuthUrl] redirect_uri=${redirectUri} state=${state}`);
     return {
       url,
       codeVerifier,
@@ -136,9 +137,8 @@ export class RedditProvider extends SocialAbstract implements SocialProvider {
     // regardless of global dispatcher state. globalThis.fetch in Node.js 22 uses a
     // separate internal undici instance that is not affected by npm undici's
     // setGlobalDispatcher, so we must pass the dispatcher explicitly here.
-    const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
+    const proxyUrl = process.env.REDDIT_PROXY || process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
     const dispatcher = proxyUrl ? new ProxyAgent(proxyUrl) : undefined;
-    console.log(`[reddit.authenticate] token exchange proxy=${proxyUrl || '(direct)'} redirect_uri=${redirectUri}`);
 
     // 'as any' is required because undici.RequestInit.dispatcher is not in DOM RequestInit
     const tokenRes = await (undiciFetch as any)('https://www.reddit.com/api/v1/access_token', {
@@ -157,7 +157,9 @@ export class RedditProvider extends SocialAbstract implements SocialProvider {
     });
 
     const bodyText = await tokenRes.text();
-    console.log(`[reddit.authenticate] token HTTP ${tokenRes.status} body=${bodyText}`);
+    if (process.env.NODE_ENV !== 'production') {
+      console.debug(`[reddit.authenticate] token HTTP ${tokenRes.status}`);
+    }
 
     if (!tokenRes.ok) {
       const errBody = (() => { try { return JSON.parse(bodyText); } catch { return {}; } })();
@@ -302,17 +304,25 @@ export class RedditProvider extends SocialAbstract implements SocialProvider {
         id: string;
         name: string;
         url: string;
-      }>((res) => {
+      }>((resolve) => {
         if (all?.json?.data?.id) {
-          res(all.json.data);
+          resolve(all.json.data);
+          return;
         }
 
         const ws = new WebSocket(all.json.data.websocket_url);
+        const timeout = setTimeout(() => {
+          ws.close();
+          resolve({ id: '', name: '', url: '' });
+        }, 30_000);
+
+        const finish = (result: { id: string; name: string; url: string }) => {
+          clearTimeout(timeout);
+          ws.close();
+          resolve(result);
+        };
+
         ws.on('message', (data: any) => {
-          setTimeout(() => {
-            res({ id: '', name: '', url: '' });
-            ws.close();
-          }, 30_000);
           try {
             const parsedData = JSON.parse(data.toString());
             if (parsedData?.payload?.redirect) {
@@ -320,7 +330,7 @@ export class RedditProvider extends SocialAbstract implements SocialProvider {
                 /https:\/\/www\.reddit\.com\/r\/.*?\/comments\/(.*?)\/.*/g,
                 '$1'
               );
-              res({
+              finish({
                 id: onlyId,
                 name: `t3_${onlyId}`,
                 url: parsedData?.payload?.redirect,
@@ -328,6 +338,9 @@ export class RedditProvider extends SocialAbstract implements SocialProvider {
             }
           } catch (err) {}
         });
+
+        ws.on('error', () => finish({ id: '', name: '', url: '' }));
+        ws.on('close', () => finish({ id: '', name: '', url: '' }));
       });
 
       valueArray.push({

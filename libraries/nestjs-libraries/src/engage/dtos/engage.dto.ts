@@ -79,7 +79,7 @@ export class AddKeywordDto {
 
 export class UpdateKeywordDto {
   @IsOptional()
-  @IsIn(KEYWORD_TYPES)
+  @IsIn([...KEYWORD_TYPES, null])
   type?: KeywordType;
 
   @IsOptional()
