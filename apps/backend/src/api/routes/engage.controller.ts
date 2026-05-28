@@ -32,6 +32,8 @@ import {
   ListSentDto,
   SaveEngageConfigDto,
   SetupEngageDto,
+  BatchScheduleReplyDto,
+  BatchSendReplyDto,
   ScheduleReplyDto,
   ScoreStatsDto,
   SearchChannelsDto,
@@ -390,6 +392,31 @@ export class EngageController {
     @Body() body: ScheduleReplyDto
   ) {
     return this._engageService.scheduleReply(org, user?.id, id, body);
+  }
+
+  @ApiOperation({ summary: 'Schedule replies from multiple integrations at different times in one request' })
+  @ApiResponse({ status: 400, description: 'Any scheduledAt is not in the future, or items array is invalid' })
+  @ApiResponse({ status: 404, description: 'Opportunity not found or already replied' })
+  @Post('/opportunities/:id/batch-schedule')
+  batchScheduleReply(
+    @GetOrgFromRequest() org: Organization,
+    @GetUserFromRequest() user: User,
+    @Param('id') id: string,
+    @Body() body: BatchScheduleReplyDto
+  ) {
+    return this._engageService.batchScheduleReply(org, user?.id, id, body);
+  }
+
+  @ApiOperation({ summary: 'Send replies from multiple integrations immediately in one request' })
+  @ApiResponse({ status: 404, description: 'Opportunity not found or already replied' })
+  @Post('/opportunities/:id/batch-send')
+  batchSendReply(
+    @GetOrgFromRequest() org: Organization,
+    @GetUserFromRequest() user: User,
+    @Param('id') id: string,
+    @Body() body: BatchSendReplyDto
+  ) {
+    return this._engageService.batchSendReply(org, user?.id, id, body);
   }
 
   // ─── Reddit manual reply (2-step) ─────────────────────────────────────────

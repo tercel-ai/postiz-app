@@ -388,6 +388,24 @@ export class ScheduleReplyDto extends SendReplyDto {
   scheduledAt: string; // ISO date string (must be a future date)
 }
 
+export class BatchSendReplyDto {
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => SendReplyDto)
+  @ArrayMinSize(1)
+  @ArrayMaxSize(20)
+  items: SendReplyDto[];
+}
+
+export class BatchScheduleReplyDto {
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => ScheduleReplyDto)
+  @ArrayMinSize(1)
+  @ArrayMaxSize(20)
+  items: ScheduleReplyDto[];
+}
+
 export class ConfirmManualReplyDto {
   @IsString()
   @MaxLength(4000)

@@ -26,6 +26,7 @@ import {
   postId as postIdSearchParam,
 } from '@gitroom/nestjs-libraries/temporal/temporal.search.attribute';
 import { getSocialTaskQueue } from '@gitroom/nestjs-libraries/temporal/task-queue';
+import { PrismaRepository } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
 
 @Injectable()
 @Activity()
@@ -37,7 +38,9 @@ export class PostActivity {
     private _integrationService: IntegrationService,
     private _refreshIntegrationService: RefreshIntegrationService,
     private _webhookService: WebhooksService,
-    private _temporalService: TemporalService
+    private _temporalService: TemporalService,
+    private _engageSentReply: PrismaRepository<'engageSentReply'>,
+    private _engageOppState: PrismaRepository<'engageOpportunityState'>
   ) {}
 
   @ActivityMethod()
@@ -617,6 +620,40 @@ export class PostActivity {
         err
       );
       return false;
+    }
+  }
+
+  // Called by the post workflow after a scheduled engage reply is published.
+  // Transitions the opportunity state from SCHEDULED → REPLIED and starts the
+  // 24h metrics sync workflow. Both steps are best-effort; failures are logged
+  // but must not roll back the post's PUBLISHED state.
+  @ActivityMethod()
+  async syncEngageOnPublish(postId: string): Promise<void> {
+    const sentReply = await this._engageSentReply.model.engageSentReply.findUnique({
+      where: { postId },
+    });
+    if (!sentReply) return;
+
+    await this._engageOppState.model.engageOpportunityState.updateMany({
+      where: {
+        organizationId: sentReply.organizationId,
+        opportunityId: sentReply.opportunityId,
+        status: 'SCHEDULED',
+      },
+      data: { status: 'REPLIED' },
+    });
+
+    const client = this._temporalService.client?.getRawClient();
+    if (!client) return;
+    try {
+      await client.workflow.start('engageMetricsSyncWorkflow', {
+        workflowId: `engage-metrics-${sentReply.id}`,
+        taskQueue: 'main',
+        args: [sentReply.id],
+        workflowIdConflictPolicy: 'USE_EXISTING',
+      });
+    } catch (err) {
+      console.error(`[syncEngageOnPublish] failed to start metrics sync for sentReply=${sentReply.id}:`, err);
     }
   }
 }

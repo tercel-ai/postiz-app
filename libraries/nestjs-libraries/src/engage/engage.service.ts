@@ -7,7 +7,7 @@ import {
   NotFoundException,
   OnApplicationBootstrap,
 } from '@nestjs/common';
-import { Organization } from '@prisma/client';
+import { EngageSentReply, Organization } from '@prisma/client';
 import { TemporalService } from 'nestjs-temporal-core';
 import { EngageRepository } from '@gitroom/nestjs-libraries/engage/engage.repository';
 import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.service';
@@ -22,6 +22,8 @@ import {
   ListSentDto,
   SaveEngageConfigDto,
   SetupEngageDto,
+  BatchScheduleReplyDto,
+  BatchSendReplyDto,
   ScheduleReplyDto,
   ScoreStatsDto,
   SendReplyDto,
@@ -505,6 +507,174 @@ export class EngageService implements OnApplicationBootstrap {
       );
       throw err;
     }
+  }
+
+  async batchScheduleReply(
+    org: Organization,
+    userId: string | undefined,
+    opportunityId: string,
+    body: BatchScheduleReplyDto
+  ) {
+    for (const item of body.items) {
+      if (new Date(item.scheduledAt) <= new Date()) {
+        throw new BadRequestException('All scheduledAt values must be future dates');
+      }
+    }
+
+    const { opp: opportunity, priorStatus } =
+      await this._engageRepository.claimOpportunityForReply(
+        org.id,
+        opportunityId,
+        'SCHEDULED'
+      );
+
+    const createdPostIds: string[] = [];
+    try {
+      for (const item of body.items) {
+        const created = await this._postsService.createPost(
+          org.id,
+          {
+            type: 'schedule',
+            source: 'engage',
+            tags: [],
+            shortLink: false,
+            date: item.scheduledAt,
+            posts: [
+              {
+                integration: { id: item.integrationId },
+                value: [
+                  { content: item.draftContent, image: [], delay: 0, id: '' } as never,
+                ],
+                group: '',
+                settings: {
+                  __type: 'x',
+                  reply_to_tweet_id: opportunity.externalPostId,
+                  who_can_reply_post: 'everyone',
+                } as never,
+              } as never,
+            ],
+          },
+          userId
+        );
+        const postId = created?.[0]?.postId;
+        if (!postId) throw new Error('Post creation failed');
+        createdPostIds.push(postId);
+      }
+    } catch (err) {
+      for (const postId of createdPostIds) {
+        await this._engageRepository.deletePostById(postId);
+      }
+      await this._engageRepository.releaseOpportunityClaim(org.id, opportunityId, priorStatus);
+      throw err;
+    }
+
+    // Phase 2: scheduled posts haven't published yet; best-effort record creation.
+    // Log failures but continue — a missing SentReply is recoverable; a missing Post is not.
+    const results: EngageSentReply[] = [];
+    for (let i = 0; i < body.items.length; i++) {
+      const item = body.items[i];
+      try {
+        const reply = await this._engageRepository.createSentReply({
+          organizationId: org.id,
+          opportunityId,
+          postId: createdPostIds[i],
+          strategy: item.strategy,
+          brandStrength: item.brandStrength,
+        });
+        results.push(reply);
+      } catch (err) {
+        this.logger.error(
+          `batchScheduleReply: post scheduled (postId=${createdPostIds[i]}, opportunityId=${opportunityId}, ` +
+          `orgId=${org.id}) but failed to record EngageSentReply.`,
+          err instanceof Error ? err.stack : err
+        );
+      }
+    }
+    return results;
+  }
+
+  async batchSendReply(
+    org: Organization,
+    userId: string | undefined,
+    opportunityId: string,
+    body: BatchSendReplyDto
+  ) {
+    const { opp: opportunity, priorStatus } =
+      await this._engageRepository.claimOpportunityForReply(
+        org.id,
+        opportunityId,
+        'REPLIED'
+      );
+
+    const now = new Date().toISOString();
+    const createdPostIds: string[] = [];
+    try {
+      for (const item of body.items) {
+        const created = await this._postsService.createPost(
+          org.id,
+          {
+            type: 'now',
+            source: 'engage',
+            tags: [],
+            shortLink: false,
+            date: now,
+            posts: [
+              {
+                integration: { id: item.integrationId },
+                value: [
+                  { content: item.draftContent, image: [], delay: 0, id: '' } as never,
+                ],
+                group: '',
+                settings: {
+                  __type: 'x',
+                  reply_to_tweet_id: opportunity.externalPostId,
+                  who_can_reply_post: 'everyone',
+                } as never,
+              } as never,
+            ],
+          },
+          userId
+        );
+        const postId = created?.[0]?.postId;
+        if (!postId) throw new Error('Post creation failed');
+        createdPostIds.push(postId);
+      }
+    } catch (err) {
+      for (const postId of createdPostIds) {
+        await this._engageRepository.deletePostById(postId);
+      }
+      await this._engageRepository.releaseOpportunityClaim(org.id, opportunityId, priorStatus);
+      throw err;
+    }
+
+    // Phase 2: all X replies are LIVE. Do NOT roll back.
+    const results: EngageSentReply[] = [];
+    for (let i = 0; i < body.items.length; i++) {
+      const item = body.items[i];
+      try {
+        const sentReply = await this._engageRepository.createSentReply({
+          organizationId: org.id,
+          opportunityId,
+          postId: createdPostIds[i],
+          strategy: item.strategy,
+          brandStrength: item.brandStrength,
+        });
+        await this.startMetricsSyncForReply(sentReply.id);
+        results.push(sentReply);
+      } catch (err) {
+        this.logger.error(
+          `batchSendReply: X reply published (postId=${createdPostIds[i]}, opportunityId=${opportunityId}, ` +
+          `orgId=${org.id}) but failed to record EngageSentReply.`,
+          err instanceof Error ? err.stack : err
+        );
+      }
+    }
+    if (results.length === 0) {
+      throw new InternalServerErrorException(
+        'All replies were published but no tracking records could be created. Contact support to reconcile.'
+      );
+    }
+    return results;
   }
 
   async confirmManualReply(

@@ -53,6 +53,7 @@ const {
   claimPostForPublishing,
   prepareRecurringCycle,
   finalizeRecurringCycle,
+  syncEngageOnPublish,
 } = proxyActivities<PostActivity>({
   startToCloseTimeout: '10 minute',
   retry: {
@@ -474,6 +475,14 @@ export async function postWorkflowV101({
           await continueAsNew<typeof postWorkflowV101>({ taskQueue, postId, organizationId });
         }
         return false;
+      }
+
+      // Best-effort: if this was a scheduled engage reply, transition
+      // EngageOpportunityState SCHEDULED → REPLIED and start metrics sync.
+      try {
+        await syncEngageOnPublish(postsList[i].id);
+      } catch {
+        // non-fatal — engage sync failure must not affect the post's PUBLISHED state
       }
     }
 

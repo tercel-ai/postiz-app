@@ -21,6 +21,11 @@
 - [Opportunities — Signal Feed](#opportunities--signal-feed)
 - [Draft Generation — AI Draft Generation (SSE)](#draft-generation--ai-draft-generation-sse)
 - [Reply Actions — Send/Schedule/Manual Reply](#reply-actions--sendschedulemanual-reply)
+  - [POST /reply](#post-apienageopportunitiesidreply) — immediate single
+  - [POST /schedule](#post-apienageopportunitiesidschedule) — scheduled single
+  - [POST /batch-schedule](#post-apienageopportunitiesidatch-schedule) — scheduled multi-integration
+  - [POST /batch-send](#post-apienageopportunitiesidatch-send) — immediate multi-integration
+  - [POST /manual-reply](#post-apienageopportunitiesidanual-reply) — Reddit manual
 - [Sent Replies — Sent Records](#sent-replies--sent-records)
 - [Dashboard Stats — Dashboard Statistics](#dashboard-stats--dashboard-statistics)
 - [Scan — Manual Scan Trigger](#scan--manual-scan-trigger)
@@ -985,6 +990,95 @@ while (true) {
 
 ---
 
+### POST `/api/engage/opportunities/:id/batch-schedule`
+
+**Batch Schedule Reply** — Schedule replies from multiple integrations at different times in a single request.
+
+> Internally: Single atomic claim → Creates one Post per item (each at its own `scheduledAt`) → Creates one `EngageSentReply` per item. All posts are rolled back if any Post creation fails. SentReply creation is best-effort (logged on failure, does not abort remaining items).
+
+**Request Body**
+
+```json
+{
+  "items": [
+    {
+      "integrationId": "integration-uuid-A",
+      "draftContent": "Great point! Here's what I...",
+      "strategy": "EXPERT_ANSWER",
+      "brandStrength": 1,
+      "scheduledAt": "2026-05-29T10:00:00.000Z"
+    },
+    {
+      "integrationId": "integration-uuid-B",
+      "draftContent": "Based on the data...",
+      "strategy": "DATA_BACKED",
+      "brandStrength": 2,
+      "scheduledAt": "2026-05-29T14:00:00.000Z"
+    }
+  ]
+}
+```
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `items` | `array` | ✓ | 1–20 items |
+| `items[].integrationId` | `string` | ✓ | Integration ID (from GET /reply-accounts) |
+| `items[].draftContent` | `string` | ✓ | Reply content, max 4000 chars |
+| `items[].strategy` | `string` | ✓ | `EXPERT_ANSWER` / `DATA_BACKED` / `EMPATHY_LED` |
+| `items[].brandStrength` | `number` | ✓ | 0–3 |
+| `items[].scheduledAt` | `string` | ✓ | ISO date string, must be in the future |
+
+**Response** `200 OK` — Returns `EngageSentReply[]` (one entry per item)
+
+**Errors**
+- `400` — Any `scheduledAt` is not in the future, or array is empty / exceeds 20 items
+- `404` — Opportunity doesn't exist or already replied
+
+---
+
+### POST `/api/engage/opportunities/:id/batch-send`
+
+**Batch Send Reply** — Send replies from multiple integrations immediately in a single request.
+
+> Internally: Single atomic claim → Calls X API sequentially per item → Creates one `EngageSentReply` + triggers metrics sync per item. Phase 1 (post creation) rolls back fully on failure; Phase 2 (record creation) is best-effort — individual failures are logged and skipped. Returns `500` only if **all** record creations fail.
+
+**Request Body**
+
+```json
+{
+  "items": [
+    {
+      "integrationId": "integration-uuid-A",
+      "draftContent": "Great point! Here's what I...",
+      "strategy": "EXPERT_ANSWER",
+      "brandStrength": 1
+    },
+    {
+      "integrationId": "integration-uuid-B",
+      "draftContent": "Based on the data...",
+      "strategy": "DATA_BACKED",
+      "brandStrength": 2
+    }
+  ]
+}
+```
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `items` | `array` | ✓ | 1–20 items |
+| `items[].integrationId` | `string` | ✓ | Integration ID (from GET /reply-accounts) |
+| `items[].draftContent` | `string` | ✓ | Reply content, max 4000 chars |
+| `items[].strategy` | `string` | ✓ | `EXPERT_ANSWER` / `DATA_BACKED` / `EMPATHY_LED` |
+| `items[].brandStrength` | `number` | ✓ | 0–3 |
+
+**Response** `200 OK` — Returns `EngageSentReply[]`. May be shorter than `items` if individual SentReply recording fails (individual failures are logged). Returns `500` only if all recording fails.
+
+**Errors**
+- `404` — Opportunity doesn't exist or already replied
+- `500` — All X API calls failed (posts rolled back, claim released); or all posts published but zero records could be created
+
+---
+
 ### POST `/api/engage/opportunities/:id/manual-reply`
 
 **Reddit Manual Reply Confirmation** (User has manually replied on Reddit, confirming record).
@@ -1199,7 +1293,7 @@ All error response formats (NestJS default):
 | `429 Too Many Requests` | Draft generation rate limit exceeded (20 calls/hour/user); or scan trigger rate limit exceeded (5 calls/hour/org) |
 | `500 Internal Server Error` | X API call failed, database exception |
 
-**Concurrency Protection**: `POST /reply` and `POST /schedule` use internal atomic locks; only one of two concurrent requests will succeed, the other returns `404` ("Opportunity already claimed by another request").
+**Concurrency Protection**: `POST /reply`, `POST /schedule`, `POST /batch-send`, and `POST /batch-schedule` all use internal atomic locks on the opportunity. Only one concurrent request will succeed; others return `404` ("Opportunity already claimed by another request"). The batch endpoints claim the opportunity once and create multiple posts/replies within that single claim.
 
 ---
 

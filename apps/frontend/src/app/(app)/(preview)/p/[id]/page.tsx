@@ -124,15 +124,15 @@ export default async function Auth({
                       <div className="w-[50px] h-[50px] z-[20]">
                         <img
                           className="w-full h-full relative z-[20] bg-black aspect-square rounded-full border-tableBorder"
-                          alt={post[0].integration.name}
-                          src={post[0].integration.picture}
+                          alt={p.integration?.name ?? ''}
+                          src={p.integration?.picture ?? ''}
                         />
                       </div>
                       <div className="absolute -end-[5px] -bottom-[5px] w-[30px] h-[30px] z-[20]">
                         <img
                           className="w-full h-full bg-black aspect-square rounded-full border-tableBorder"
-                          alt={post[0].integration.providerIdentifier}
-                          src={`/icons/platforms/${post[0].integration.providerIdentifier}.png`}
+                          alt={p.integration?.providerIdentifier ?? ''}
+                          src={`/icons/platforms/${p.integration?.providerIdentifier ?? ''}.png`}
                         />
                       </div>
                     </div>
@@ -140,10 +140,10 @@ export default async function Auth({
                   <div className="flex-1 space-y-1">
                     <div className="flex items-center space-x-2">
                       <h2 className="text-sm font-semibold">
-                        {post[0].integration.name}
+                        {p.integration?.name ?? ''}
                       </h2>
                       <span className="text-sm text-gray-500">
-                        @{post[0].integration.profile}
+                        @{p.integration?.profile ?? ''}
                       </span>
                     </div>
                     <div className="flex flex-col gap-[20px]">
