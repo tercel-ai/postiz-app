@@ -420,8 +420,7 @@ export class EngageService implements OnApplicationBootstrap {
         organizationId: org.id,
         opportunityId,
         postId,
-        strategy: body.strategy,
-        brandStrength: body.brandStrength,
+        inputData: { strategy: body.strategy, brandStrength: body.brandStrength, mentions: body.mentions },
       });
       // 24h metrics sync — best-effort; the inner method swallows + logs.
       await this.startMetricsSyncForReply(sentReply.id);
@@ -493,8 +492,7 @@ export class EngageService implements OnApplicationBootstrap {
         organizationId: org.id,
         opportunityId,
         postId,
-        strategy: body.strategy,
-        brandStrength: body.brandStrength,
+        inputData: { strategy: body.strategy, brandStrength: body.brandStrength, mentions: body.mentions },
       });
       // metrics sync is started after the scheduled post actually publishes
       // (the post workflow triggers it via engage-metrics-sync-on-publish).
@@ -578,8 +576,7 @@ export class EngageService implements OnApplicationBootstrap {
           organizationId: org.id,
           opportunityId,
           postId: createdPostIds[i],
-          strategy: item.strategy,
-          brandStrength: item.brandStrength,
+          inputData: { strategy: item.strategy, brandStrength: item.brandStrength, mentions: item.mentions },
         });
         results.push(reply);
       } catch (err) {
@@ -656,8 +653,7 @@ export class EngageService implements OnApplicationBootstrap {
           organizationId: org.id,
           opportunityId,
           postId: createdPostIds[i],
-          strategy: item.strategy,
-          brandStrength: item.brandStrength,
+          inputData: { strategy: item.strategy, brandStrength: item.brandStrength, mentions: item.mentions },
         });
         await this.startMetricsSyncForReply(sentReply.id);
         results.push(sentReply);
@@ -731,8 +727,7 @@ export class EngageService implements OnApplicationBootstrap {
         organizationId: org.id,
         opportunityId,
         postId,
-        strategy: body.strategy,
-        brandStrength: body.brandStrength,
+        inputData: { strategy: body.strategy, brandStrength: body.brandStrength },
       });
       await this.startMetricsSyncForReply(sentReply.id);
       return sentReply;

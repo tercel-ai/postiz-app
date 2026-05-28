@@ -1221,8 +1221,7 @@ model EngageSentReply {
   postId         String    @unique
   post           Post      @relation(fields: [postId], references: [id], onDelete: Cascade)
 
-  strategy       String
-  brandStrength  Int       @default(1)
+  inputData      Json
   authorReplied  Boolean   @default(false)
 
   createdAt      DateTime  @default(now())

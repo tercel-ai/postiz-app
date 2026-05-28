@@ -833,8 +833,7 @@ export class EngageRepository {
     organizationId: string;
     opportunityId: string;
     postId: string;
-    strategy: string;
-    brandStrength: number;
+    inputData: object;
   }) {
     return this._sentReply.model.engageSentReply.create({ data });
   }

@@ -13,12 +13,20 @@ const STRATEGY_PROMPTS: Record<string, string> = {
     'Acknowledge the frustration or situation first, then pivot to a concrete insight.',
 };
 
-const BRAND_PROMPTS: Record<number, string> = {
-  0: 'Do not mention AISEE or any brand name. Provide pure value.',
-  1: 'Share insights and data naturally. Build authority without naming any brand.',
-  2: 'When highly relevant, naturally mention AISEE as an example or tool.',
-  3: 'Proactively introduce AISEE and invite the person to try it.',
-};
+function buildBrandInstruction(brandStrength: number, mentions?: string[]): string {
+  const brand = mentions?.length ? mentions.join(', ') : null;
+  switch (brandStrength) {
+    case 0: return 'Do not mention any brand name. Provide pure value.';
+    case 1: return 'Share insights and data naturally. Build authority without naming any brand.';
+    case 2: return brand
+      ? `When highly relevant, naturally mention ${brand} as an example or tool.`
+      : 'Share insights naturally. Build authority without naming any brand.';
+    case 3: return brand
+      ? `Proactively introduce ${brand} and invite the person to try it.`
+      : 'Share insights naturally. Build authority without naming any brand.';
+    default: return 'Share insights and data naturally. Build authority without naming any brand.';
+  }
+}
 
 const INTENT_PROMPTS: Record<string, string> = {
   help_seeking: 'The person is asking for help. Give them a direct, usable answer.',
@@ -169,19 +177,14 @@ export class EngageDraftService {
         : 'up to 500 words';
     const strategyInstruction =
       STRATEGY_PROMPTS[strategy] ?? STRATEGY_PROMPTS['EXPERT_ANSWER'];
-    const brandInstruction = BRAND_PROMPTS[brandStrength] ?? BRAND_PROMPTS[1];
+    const brandInstruction = buildBrandInstruction(brandStrength, mentions);
     const intentInstruction =
       INTENT_PROMPTS[primaryIntent] ?? INTENT_PROMPTS['discussion'];
-    const mentionInstruction =
-      mentions && mentions.length > 0
-        ? `Naturally weave in references to the following topics or entities where relevant: ${mentions.join(', ')}. Do not force them in — only include when they add genuine value to the reply.`
-        : '';
 
     return `You are a social media engagement expert writing a reply on ${platform}.
 ${strategyInstruction}
 ${brandInstruction}
 ${intentInstruction}
-${mentionInstruction}
 Platform constraint: Keep the reply ${charLimit}.
 Be direct, natural, and valuable. Do not start with "Great post!" or similar openers.
 

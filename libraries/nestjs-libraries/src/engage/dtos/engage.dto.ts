@@ -381,6 +381,13 @@ export class SendReplyDto {
   @Max(3)
   @Type(() => Number)
   brandStrength: number;
+
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  @MaxLength(100, { each: true })
+  @ArrayMaxSize(20)
+  mentions?: string[];
 }
 
 export class ScheduleReplyDto extends SendReplyDto {
