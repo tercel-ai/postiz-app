@@ -27,6 +27,10 @@
   - [POST /batch-send](#post-apienageopportunitiesidatch-send) — immediate multi-integration
   - [POST /manual-reply](#post-apienageopportunitiesidanual-reply) — Reddit manual
 - [Sent Replies — Sent Records](#sent-replies--sent-records)
+  - [GET /sent](#get-apienagesent) — paginated list
+  - [GET /sent/stats](#get-apienagesentstats) — aggregate stats
+  - [PATCH /sent/:id](#patch-apienagesentid) — edit scheduled reply
+  - [PATCH /sent/:id/reply-url](#patch-apienagesentidreply-url) — Reddit URL submission
 - [Dashboard Stats — Dashboard Statistics](#dashboard-stats--dashboard-statistics)
 - [Scan — Manual Scan Trigger](#scan--manual-scan-trigger)
 - [Error Handling](#error-handling)
@@ -1127,8 +1131,11 @@ Retrieve the list of sent replies (includes original post summary and metrics da
       "organizationId": "...",
       "opportunityId": "opp-uuid",
       "postId": "post-uuid",
-      "strategy": "EXPERT_ANSWER",
-      "brandStrength": 1,
+      "inputData": {
+        "strategy": "EXPERT_ANSWER",
+        "brandStrength": 1,
+        "mentions": ["competitor_brand"]
+      },
       "authorReplied": false,
       "createdAt": "...",
       "updatedAt": "...",
@@ -1168,6 +1175,8 @@ Retrieve the list of sent replies (includes original post summary and metrics da
 }
 ```
 
+> `inputData` contains the generation metadata saved at reply time. Use it to pre-populate the edit form for scheduled replies. Fields: `strategy` (`EXPERT_ANSWER` | `DATA_BACKED` | `EMPATHY_LED`), `brandStrength` (0–3), `mentions` (optional string array).
+
 **`post.state` Meanings**
 
 | state | Meaning |
@@ -1194,6 +1203,48 @@ Retrieve summary statistics for sent records (used for the top of the Sent page 
   "avgLikes": 18            // Average likes received
 }
 ```
+
+---
+
+### PATCH `/api/engage/sent/:id`
+
+Edit a **scheduled** (QUEUE) engage reply. All fields are optional; supply only what needs to change.
+
+**URL Param**: `id` — `EngageSentReply.id`
+
+**Request Body**
+
+| Field | Type | Description |
+|---|---|---|
+| `content` | `string` (max 4000) | New reply text — written to `Post.content`, read by Temporal at publish time |
+| `scheduledAt` | `string` (ISO date) | New publish time — must be in the future; restarts the Temporal timer with claim-gate protection |
+| `strategy` | `'EXPERT_ANSWER' \| 'DATA_BACKED' \| 'EMPATHY_LED'` | Updated generation strategy — stored in `inputData` |
+| `brandStrength` | `number` (0–3) | Updated brand strength — stored in `inputData` |
+| `mentions` | `string[]` (max 20) | Updated mention list — stored in `inputData` |
+
+```json
+{
+  "content": "Updated reply text here...",
+  "scheduledAt": "2026-05-30T10:00:00.000Z",
+  "strategy": "DATA_BACKED",
+  "brandStrength": 2,
+  "mentions": ["acme_corp"]
+}
+```
+
+**Propagation**
+
+- `content` → `Post.content` (the value Temporal reads when publishing to the social platform)
+- `scheduledAt` → `Post.publishDate` via `PostsService.changeDate`, which terminates the old Temporal workflow and starts a new one sleeping until the new time
+- `strategy` / `brandStrength` / `mentions` → `EngageSentReply.inputData` only (metadata for AI draft re-generation)
+
+**Response** `200 OK` — Returns the updated `EngageSentReply` with `post` fields `{ id, content, state, publishDate }`.
+
+**Errors**
+- `400` — Reply has already been sent (post state is not `QUEUE`)
+- `400` — `scheduledAt` is not in the future
+- `400` — Post is within the 30 s publish lockout window (Temporal already claiming it)
+- `404` — Record not found
 
 ---
 

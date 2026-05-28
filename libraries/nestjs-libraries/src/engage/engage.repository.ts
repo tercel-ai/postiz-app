@@ -856,8 +856,10 @@ export class EngageRepository {
       }),
     };
 
-    if (dto.status === 'published') postWhere.state = 'PUBLISHED';
-    else if (dto.status === 'scheduled') postWhere.state = 'QUEUE';
+    if (dto.status === 'published') {
+      postWhere.state = 'PUBLISHED';
+      postWhere.releaseURL = { not: null };
+    } else if (dto.status === 'scheduled') postWhere.state = 'QUEUE';
     else if (dto.status === 'error') postWhere.state = 'ERROR';
     else if (dto.status === 'manual') {
       postWhere.state = 'PUBLISHED';
@@ -980,6 +982,49 @@ export class EngageRepository {
         : 0;
 
     return { weeklyCount: weeklyReplies, responseRate, totalImpressions, avgLikes };
+  }
+
+  async updateScheduledReply(
+    organizationId: string,
+    id: string,
+    data: { content?: string; inputData?: object }
+  ) {
+    const reply = await this._sentReply.model.engageSentReply.findFirst({
+      where: { id, organizationId },
+      include: { post: { select: { id: true, state: true } } },
+    });
+    if (!reply) throw new NotFoundException('Sent reply not found');
+    if (reply.post.state !== 'QUEUE') {
+      throw new BadRequestException('Reply has already been sent — cannot edit');
+    }
+
+    const ops: Promise<unknown>[] = [];
+
+    if (data.content !== undefined) {
+      ops.push(
+        this._post.model.post.update({
+          where: { id: reply.postId },
+          data: { content: data.content },
+        })
+      );
+    }
+
+    if (data.inputData !== undefined) {
+      ops.push(
+        this._sentReply.model.engageSentReply.update({
+          where: { id },
+          data: { inputData: data.inputData },
+        })
+      );
+    }
+
+    await Promise.all(ops);
+    return this._sentReply.model.engageSentReply.findFirst({
+      where: { id },
+      include: {
+        post: { select: { id: true, content: true, state: true, publishDate: true } },
+      },
+    });
   }
 
   async getSentReplyById(organizationId: string, id: string) {

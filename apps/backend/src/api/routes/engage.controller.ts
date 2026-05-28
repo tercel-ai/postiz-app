@@ -43,6 +43,7 @@ import {
   UpdateMonitoredChannelDto,
   UpdateReplyAccountDto,
   UpdateTrackedAccountDto,
+  UpdateScheduledReplyDto,
 } from '@gitroom/nestjs-libraries/engage/dtos/engage.dto';
 
 @ApiTags('Engage')
@@ -448,6 +449,18 @@ export class EngageController {
   @Get('/sent/stats')
   getSentStats(@GetOrgFromRequest() org: Organization) {
     return this._engageService.getSentStats(org);
+  }
+
+  @ApiOperation({ summary: 'Edit content / schedule of a scheduled (QUEUE) engage reply' })
+  @ApiResponse({ status: 400, description: 'Reply already sent, or scheduledAt is not in the future' })
+  @ApiResponse({ status: 404, description: 'Sent reply not found' })
+  @Patch('/sent/:id')
+  updateScheduledReply(
+    @GetOrgFromRequest() org: Organization,
+    @Param('id') id: string,
+    @Body() body: UpdateScheduledReplyDto
+  ) {
+    return this._engageService.updateScheduledReply(org, id, body);
   }
 
   @ApiOperation({ summary: 'Submit the Reddit comment URL for a manual reply' })

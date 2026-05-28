@@ -31,6 +31,7 @@ import {
   UpdateMonitoredChannelDto,
   UpdateReplyAccountDto,
   UpdateTrackedAccountDto,
+  UpdateScheduledReplyDto,
 } from '@gitroom/nestjs-libraries/engage/dtos/engage.dto';
 import { getRedditToken, redditAuthHeaders } from '@gitroom/nestjs-libraries/engage/reddit-auth';
 
@@ -226,6 +227,30 @@ export class EngageService implements OnApplicationBootstrap {
 
   async listSentReplies(org: Organization, dto: ListSentDto) {
     return this._engageRepository.listSentReplies(org.id, dto);
+  }
+
+  async updateScheduledReply(org: Organization, id: string, dto: UpdateScheduledReplyDto) {
+    if (dto.scheduledAt !== undefined) {
+      if (new Date(dto.scheduledAt) <= new Date()) {
+        throw new BadRequestException('scheduledAt must be a future date');
+      }
+      const reply = await this._engageRepository.getSentReplyById(org.id, id);
+      // changeDate handles the claim-gate and Temporal workflow restart
+      await this._postsService.changeDate(org.id, reply.post.id, dto.scheduledAt);
+    }
+
+    const inputData = (dto.strategy !== undefined || dto.brandStrength !== undefined || dto.mentions !== undefined)
+      ? { strategy: dto.strategy, brandStrength: dto.brandStrength, mentions: dto.mentions }
+      : undefined;
+
+    if (dto.content !== undefined || inputData !== undefined) {
+      return this._engageRepository.updateScheduledReply(org.id, id, {
+        content: dto.content,
+        inputData,
+      });
+    }
+
+    return this._engageRepository.getSentReplyById(org.id, id);
   }
 
   async getSentStats(org: Organization) {

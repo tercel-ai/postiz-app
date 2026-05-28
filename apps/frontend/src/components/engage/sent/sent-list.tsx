@@ -43,6 +43,7 @@ export function SentList() {
   const toaster = useToaster();
 
   const [platform, setPlatform] = useState('');
+  const [status, setStatus] = useState('');
   const [date, setDate] = useState('');
   const [page, setPage] = useState(1);
   const [urlSubmitId, setUrlSubmitId] = useState<string | null>(null);
@@ -58,6 +59,7 @@ export function SentList() {
     page: String(page),
     limit: '20',
     ...(platform && { platform }),
+    ...(status && { status }),
     ...(date && { date }),
   });
 
@@ -150,6 +152,17 @@ export function SentList() {
           <option value="">All platforms</option>
           <option value="x">X</option>
           <option value="reddit">Reddit</option>
+        </select>
+        <select
+          value={status}
+          onChange={(e) => { setStatus(e.target.value); setPage(1); }}
+          className="text-sm bg-[#1e2536] border border-[#2d3748] text-gray-300 rounded-lg px-3 py-1.5"
+        >
+          <option value="">All statuses</option>
+          <option value="published">Published</option>
+          <option value="scheduled">Scheduled</option>
+          <option value="manual">Manual</option>
+          <option value="error">Error</option>
         </select>
         <select
           value={date}

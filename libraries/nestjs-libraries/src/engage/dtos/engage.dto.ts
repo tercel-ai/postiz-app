@@ -440,3 +440,33 @@ export class SubmitManualReplyUrlDto {
   url: string;
 }
 
+export class UpdateScheduledReplyDto {
+  @IsOptional()
+  @IsString()
+  @MaxLength(4000)
+  content?: string;
+
+  @IsOptional()
+  @IsDateString()
+  scheduledAt?: string; // must be a future date
+
+  @IsOptional()
+  @IsString()
+  @IsIn(VALID_STRATEGIES)
+  strategy?: string;
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(3)
+  @Type(() => Number)
+  brandStrength?: number;
+
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  @MaxLength(100, { each: true })
+  @ArrayMaxSize(20)
+  mentions?: string[];
+}
+
