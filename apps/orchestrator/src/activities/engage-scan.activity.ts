@@ -265,7 +265,7 @@ export class EngageScanActivity {
     const params = new URLSearchParams({
       query: keyword,
       max_results: '50',
-      'tweet.fields': 'public_metrics,author_id,created_at,text',
+      'tweet.fields': 'public_metrics,author_id,created_at,text,reply_settings',
       'user.fields': 'public_metrics,name,username',
       expansions: 'author_id',
     });
@@ -286,6 +286,7 @@ export class EngageScanActivity {
         text: string;
         created_at: string;
         author_id: string;
+        reply_settings?: string;
         public_metrics?: {
           like_count: number;
           reply_count: number;
@@ -850,7 +851,7 @@ export class EngageScanActivity {
   }> {
     const params = new URLSearchParams({
       max_results: '10',
-      'tweet.fields': 'public_metrics,created_at,text',
+      'tweet.fields': 'public_metrics,created_at,text,reply_settings',
       'user.fields': 'public_metrics',
     });
     const bearerToken = process.env.X_BEARER_TOKEN;
@@ -903,6 +904,7 @@ export class EngageScanActivity {
         id: string;
         text: string;
         created_at: string;
+        reply_settings?: string;
         public_metrics?: {
           like_count: number;
           reply_count: number;

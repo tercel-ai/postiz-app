@@ -177,9 +177,44 @@ export class XProvider extends SocialAbstract implements SocialProvider {
       };
     }
     if (body.includes('"status":403') || body.includes('You are not permitted to perform this action')) {
+      // 403 covers many distinct X API sub-errors — give a more accurate message.
+      if (body.includes('"code":453') || body.includes('access to a subset')) {
+        return {
+          type: 'bad-body',
+          value: 'X API access level too low (error 453). Your X app is on the Free tier which has very limited posting quotas. Upgrade your X developer plan to post.',
+        };
+      }
+      if (body.includes('"code":261') || body.includes('cannot perform write actions')) {
+        return {
+          type: 'bad-body',
+          value: 'X app does not have write permission (error 261). Enable "Read and Write" access in your X developer portal app settings, then regenerate tokens.',
+        };
+      }
+      if (body.includes('"code":326') || body.includes('temporarily locked')) {
+        return {
+          type: 'bad-body',
+          value: 'This X account is temporarily locked by X\'s spam protection (error 326). Log into Twitter.com and follow the unlock steps.',
+        };
+      }
+      if (body.includes('"code":220') || body.includes('credentials do not allow')) {
+        return {
+          type: 'refresh-token',
+          value: 'X token does not have write permission. Please reconnect your X account with tweet.write scope.',
+        };
+      }
+      if (
+        body.includes('not allowed to create a reply') ||
+        body.includes('not-authorized-for-resource') ||
+        body.includes('have not been mentioned or otherwise engaged')
+      ) {
+        return {
+          type: 'bad-body',
+          value: 'X does not allow replying to this tweet via API because your account has no prior engagement with its author (not mentioned, not following, etc.). This is an X API anti-spam restriction and cannot be bypassed.',
+        };
+      }
       return {
         type: 'bad-body',
-        value: 'X rejected this post (403 Forbidden). This is usually caused by content that exceeds the character limit, contains restricted words, or triggers X\'s spam filter. Try shortening the text or removing special content.',
+        value: 'X rejected this post (403 Forbidden). This may be a permission issue with your X account or app, or the content triggered X\'s spam filter.',
       };
     }
     if (body.includes('usage-capped')) {
@@ -934,6 +969,13 @@ export class XProvider extends SocialAbstract implements SocialProvider {
               ...(quoteTweetId ? { quote_tweet_id: quoteTweetId } : {}),
             });
           } catch (tweetErr: any) {
+            // Log the original twitter-api-v2 error here before runInConcurrent wraps it,
+            // because formatTweetError in the outer catch receives an ApplicationFailure
+            // (not the raw API error object) and loses the structured fields.
+            console.error(
+              `[x] v2.tweet raw error for post ${firstPost.id}:`,
+              this.formatTweetError(tweetErr)
+            );
             // --- 403 idempotency fallback: check if the tweet already exists on X ---
             const is403 = tweetErr?.code === 403 || tweetErr?.data?.status === 403
               || String(tweetErr?.message || '').includes('403');
