@@ -311,7 +311,11 @@ export class EngageService implements OnApplicationBootstrap {
     const makeOpts = (t: string | null): RequestInit => ({
       headers: t
         ? redditAuthHeaders(t)
-        : { 'User-Agent': 'AISEE-Engage/1.0' },
+        : {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
+          'Accept': '*/*',
+          'Accept-Language': 'en-US,en;q=0.9',
+        },
       signal: AbortSignal.timeout(8000),
     });
 
@@ -380,7 +384,7 @@ export class EngageService implements OnApplicationBootstrap {
     const workflows = [
       { workflowId: 'engage-keyword-global', name: 'engageGlobalKeywordScanWorkflow', args: [false, keywordHours] as unknown[] },
       { workflowId: 'engage-channel-global', name: 'engageGlobalChannelScanWorkflow', args: [false, channelHours] as unknown[] },
-      { workflowId: 'engage-tracked-global', name: 'engageGlobalTrackedWorkflow',     args: [false, trackedHours] as unknown[] },
+      { workflowId: 'engage-tracked-global', name: 'engageGlobalTrackedWorkflow', args: [false, trackedHours] as unknown[] },
     ];
     for (const { workflowId, name, args } of workflows) {
       try {
@@ -822,9 +826,9 @@ export class EngageService implements OnApplicationBootstrap {
 
     // Signal all 3 workflows; fall back to start if any is not yet running.
     const targets = [
-      { workflowId: 'engage-keyword-global', signal: 'triggerKeywordScanNow',  startName: 'engageGlobalKeywordScanWorkflow', intervalHours: keywordHours },
-      { workflowId: 'engage-channel-global', signal: 'triggerChannelScanNow',  startName: 'engageGlobalChannelScanWorkflow', intervalHours: channelHours },
-      { workflowId: 'engage-tracked-global', signal: 'triggerTrackedScanNow',  startName: 'engageGlobalTrackedWorkflow',     intervalHours: trackedHours },
+      { workflowId: 'engage-keyword-global', signal: 'triggerKeywordScanNow', startName: 'engageGlobalKeywordScanWorkflow', intervalHours: keywordHours },
+      { workflowId: 'engage-channel-global', signal: 'triggerChannelScanNow', startName: 'engageGlobalChannelScanWorkflow', intervalHours: channelHours },
+      { workflowId: 'engage-tracked-global', signal: 'triggerTrackedScanNow', startName: 'engageGlobalTrackedWorkflow', intervalHours: trackedHours },
     ];
 
     let anyError = false;
