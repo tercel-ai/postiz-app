@@ -219,6 +219,10 @@ export class EngageService implements OnApplicationBootstrap {
     return this._engageRepository.getOpportunityById(org.id, id);
   }
 
+  async getOpportunityDetail(org: Organization, id: string) {
+    return this._engageRepository.getOpportunityDetail(org.id, id);
+  }
+
   async getOpportunityForReply(org: Organization, id: string) {
     return this._engageRepository.getOpportunityForReply(org.id, id);
   }

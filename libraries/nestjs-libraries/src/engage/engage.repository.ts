@@ -814,6 +814,61 @@ export class EngageRepository {
     return this._merge(row);
   }
 
+  async getOpportunityDetail(organizationId: string, id: string) {
+    const row = await this._oppState.model.engageOpportunityState.findUnique({
+      where: {
+        organizationId_opportunityId: { organizationId, opportunityId: id },
+      },
+      include: { opportunity: true },
+    });
+    if (!row) throw new NotFoundException('Opportunity not found');
+
+    const merged = this._merge(row);
+
+    if (row.status === 'SCHEDULED' || row.status === 'REPLIED') {
+      const sentReply = await this._sentReply.model.engageSentReply.findUnique({
+        where: {
+          organizationId_opportunityId: { organizationId, opportunityId: id },
+        },
+        include: {
+          post: {
+            select: {
+              id: true,
+              content: true,
+              state: true,
+              releaseURL: true,
+              publishDate: true,
+              impressions: true,
+              trafficScore: true,
+              analytics: true,
+              integration: {
+                select: {
+                  id: true,
+                  name: true,
+                  providerIdentifier: true,
+                  picture: true,
+                },
+              },
+            },
+          },
+          opportunity: {
+            select: {
+              id: true,
+              platform: true,
+              externalPostUrl: true,
+              postContent: true,
+              authorUsername: true,
+              authorDisplayName: true,
+            },
+          },
+        },
+      });
+      return { ...merged, sentReply };
+    }
+
+    return { ...merged, sentReply: null };
+  }
+
   async getOpportunityForReply(organizationId: string, id: string) {
     const row = await this._oppState.model.engageOpportunityState.findUnique({
       where: {

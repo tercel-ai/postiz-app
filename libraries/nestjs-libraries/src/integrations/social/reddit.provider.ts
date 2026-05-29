@@ -157,13 +157,30 @@ export class RedditProvider extends SocialAbstract implements SocialProvider {
     });
 
     const bodyText = await tokenRes.text();
+    // `server: snooserv` means the response came from Reddit's own app layer; any
+    // other value (or none) means an intermediary (proxy/edge) answered — the usual
+    // cause of an opaque "Forbidden" that never reached Reddit. We log it (plus
+    // whether the proxy was applied) so a 403 can be diagnosed without guesswork.
+    const upstreamServer = tokenRes.headers.get('server') || 'unknown';
     if (process.env.NODE_ENV !== 'production') {
-      console.debug(`[reddit.authenticate] token HTTP ${tokenRes.status}`);
+      console.debug(
+        `[reddit.authenticate] token HTTP ${tokenRes.status} server=${upstreamServer} ` +
+          `proxy=${dispatcher ? 'yes' : 'no'} hasClientId=${!!clientId} hasClientSecret=${!!clientSecret} ` +
+          `body=${bodyText.slice(0, 200)}`
+      );
     }
 
     if (!tokenRes.ok) {
       const errBody = (() => { try { return JSON.parse(bodyText); } catch { return {}; } })();
-      throw new Error(`Reddit token exchange failed (HTTP ${tokenRes.status}): ${errBody?.message || bodyText}`);
+      const fromReddit = upstreamServer === 'snooserv';
+      const hint = !fromReddit
+        ? ` (response served by "${upstreamServer}", not Reddit — likely an edge/proxy block; check REDDIT_PROXY/HTTPS_PROXY and the proxy's exit IP)`
+        : tokenRes.status === 403
+        ? ` (Reddit returned 403 — the authorization code is likely already used or expired; retry with a fresh login)`
+        : '';
+      throw new Error(
+        `Reddit token exchange failed (HTTP ${tokenRes.status}): ${errBody?.message || bodyText}${hint}`
+      );
     }
 
     const {

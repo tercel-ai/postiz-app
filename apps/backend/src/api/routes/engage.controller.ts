@@ -283,6 +283,16 @@ export class EngageController {
     return this._engageService.listOpportunities(org, query);
   }
 
+  @ApiOperation({ summary: 'Get full detail for a single opportunity; includes sentReply when status is SCHEDULED or REPLIED' })
+  @ApiResponse({ status: 404, description: 'Opportunity not found' })
+  @Get('/opportunities/:id')
+  getOpportunityDetail(
+    @GetOrgFromRequest() org: Organization,
+    @Param('id') id: string
+  ) {
+    return this._engageService.getOpportunityDetail(org, id);
+  }
+
   @ApiOperation({ summary: 'Dismiss an opportunity (moves it to DISMISSED status)' })
   @ApiResponse({ status: 404, description: 'Opportunity not found or no longer actionable' })
   @Patch('/opportunities/:id/dismiss')
