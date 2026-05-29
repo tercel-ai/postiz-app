@@ -280,6 +280,9 @@ npx ts-node --project scripts/tsconfig.json scripts/engage-scan.ts --stats
 
 # Trigger scans + refresh results every 10 seconds until Ctrl-C
 npx ts-node --project scripts/tsconfig.json scripts/engage-scan.ts --all --watch
+
+# View current scan targets(X accounts, Reddit subreddits, Keywords)
+npx ts-node --project scripts/tsconfig.json scripts/engage-scan.ts --targets
 ```
 
 Output includes:

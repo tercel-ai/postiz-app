@@ -8,6 +8,7 @@
  *   npx ts-node --project scripts/tsconfig.json scripts/engage-scan.ts --tracked
  *   npx ts-node --project scripts/tsconfig.json scripts/engage-scan.ts --stats
  *   npx ts-node --project scripts/tsconfig.json scripts/engage-scan.ts --stats --watch
+ *   npx ts-node --project scripts/tsconfig.json scripts/engage-scan.ts --targets
  *
  * Flags:
  *   --all       Signal all 3 workflows (keyword + channel + tracked)
@@ -16,6 +17,7 @@
  *   --tracked   Signal engage-tracked-global only
  *   --stats     Print DB stats (opportunities, keywords, workflow status)
  *   --watch     After triggering, poll stats every 10s until Ctrl-C
+ *   --targets   Show exactly what each workflow will scan (accounts / channels / keywords)
  */
 
 import * as dotenv from 'dotenv';
@@ -174,6 +176,73 @@ async function triggerScans(client: Client, targets: typeof WORKFLOWS) {
   console.log('');
 }
 
+// ─── Scan targets ─────────────────────────────────────────────────────────────
+
+async function printTargets(prisma: PrismaClient) {
+  const orgs = await (prisma as any).engageConfig.findMany({
+    where: { enabled: true },
+    include: {
+      keywords:         { where: { enabled: true }, orderBy: { keyword: 'asc' } },
+      monitoredChannels:{ where: { enabled: true }, orderBy: { channelId: 'asc' } },
+      trackedAccounts:  { where: { enabled: true }, orderBy: { username: 'asc' } },
+    },
+  });
+
+  // Deduplicate exactly as the activity does
+  const uniqueUsernames  = new Map<string, string[]>();  // lower → [username, ...]
+  const uniqueSubreddits = new Map<string, number>();    // channelId → max audienceSize
+  const uniqueKeywords   = new Map<string, string>();    // lower → original
+
+  for (const org of orgs) {
+    for (const acc of org.trackedAccounts) {
+      const key = (acc.username as string).toLowerCase();
+      if (!uniqueUsernames.has(key)) uniqueUsernames.set(key, []);
+      uniqueUsernames.get(key)!.push(acc.username as string);
+    }
+    for (const ch of org.monitoredChannels) {
+      if (ch.platform !== 'reddit') continue;
+      const cur = uniqueSubreddits.get(ch.channelId as string) ?? 0;
+      if ((ch.audienceSize as number) > cur) uniqueSubreddits.set(ch.channelId as string, ch.audienceSize as number);
+    }
+    for (const kw of org.keywords) {
+      uniqueKeywords.set((kw.keyword as string).toLowerCase(), kw.keyword as string);
+    }
+  }
+
+  console.log('\n═══════════════════════════════════════════════════════');
+  console.log(' SCAN TARGETS  —  ' + new Date().toLocaleString());
+  console.log('═══════════════════════════════════════════════════════');
+
+  console.log(`\n── engage-tracked-global  (${uniqueUsernames.size} unique X account(s)) ──`);
+  if (uniqueUsernames.size === 0) {
+    console.log('  (none — workflow will skip immediately)');
+  } else {
+    for (const [, names] of uniqueUsernames) {
+      console.log(`  @${names[0]}`);
+    }
+  }
+
+  console.log(`\n── engage-channel-global  (${uniqueSubreddits.size} unique subreddit(s) × ${uniqueKeywords.size} keyword(s) = ${uniqueSubreddits.size * uniqueKeywords.size} requests) ──`);
+  if (uniqueSubreddits.size === 0) {
+    console.log('  (none — workflow will skip immediately)');
+  } else {
+    for (const [id, size] of uniqueSubreddits) {
+      console.log(`  r/${id}  (audience ${size.toLocaleString()})`);
+    }
+  }
+
+  console.log(`\n── engage-keyword-global  (${uniqueKeywords.size} unique keyword(s)) ──`);
+  if (uniqueKeywords.size === 0) {
+    console.log('  (none — workflow will skip immediately)');
+  } else {
+    for (const [, kw] of uniqueKeywords) {
+      console.log(`  "${kw}"`);
+    }
+  }
+
+  console.log('');
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -182,8 +251,9 @@ async function main() {
   const doKeyword = args.includes('--keyword') || doAll;
   const doChannel = args.includes('--channel') || doAll;
   const doTracked = args.includes('--tracked') || doAll;
-  const doStats   = args.includes('--stats') || (!doKeyword && !doChannel && !doTracked);
+  const doStats   = args.includes('--stats') || (!doKeyword && !doChannel && !doTracked && !args.includes('--targets'));
   const doWatch   = args.includes('--watch');
+  const doTargets = args.includes('--targets');
 
   const targets = WORKFLOWS.filter((wf, i) => [doKeyword, doChannel, doTracked][i]);
 
@@ -198,6 +268,10 @@ async function main() {
   try {
     if (targets.length > 0) {
       await triggerScans(client, targets);
+    }
+
+    if (doTargets) {
+      await printTargets(prisma);
     }
 
     if (doStats || doWatch) {
