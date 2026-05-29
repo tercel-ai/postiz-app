@@ -1064,28 +1064,57 @@ export class EngageRepository {
   }
 
   // Dashboard panel ① "Engage Performance": weekly interaction count, response
-  // rate, X-only total impressions and traffic index, per-platform split for the
-  // week, and this week's single best (most-liked) reply.
-  async getDashboardStats(organizationId: string) {
+  // rate, impressions, traffic index, total likes/upvotes, per-platform split for
+  // the week, and this week's single best reply. Pass platform='x' or 'reddit'
+  // for the UI tab/chip scoped view; omitted means all engage platforms.
+  async getDashboardStats(
+    organizationId: string,
+    opts: { platform?: string } = {}
+  ) {
     const weekStart = dayjs.utc().startOf('isoWeek').toDate();
+    const platform = opts.platform;
+    const platformFilter = platform ? { opportunity: { platform } } : {};
     const weekPostFilter = {
       is: { source: 'engage', publishDate: { gte: weekStart } },
     };
 
-    const [total, repliedCount, weeklyReplies, xWeekly, redditWeekly, xPostAgg, weekReplyRows] =
+    const [
+      total,
+      repliedCount,
+      weeklyReplies,
+      xWeekly,
+      redditWeekly,
+      totalPostAgg,
+      xPostAgg,
+      replyRows,
+      weekReplyRows,
+    ] =
       await Promise.all([
-        this._sentReply.model.engageSentReply.count({ where: { organizationId } }),
         this._sentReply.model.engageSentReply.count({
-          where: { organizationId, authorReplied: true },
+          where: { organizationId, ...platformFilter },
         }),
         this._sentReply.model.engageSentReply.count({
-          where: { organizationId, post: weekPostFilter },
+          where: { organizationId, authorReplied: true, ...platformFilter },
+        }),
+        this._sentReply.model.engageSentReply.count({
+          where: { organizationId, post: weekPostFilter, ...platformFilter },
         }),
         this._sentReply.model.engageSentReply.count({
           where: { organizationId, post: weekPostFilter, opportunity: { platform: 'x' } },
         }),
         this._sentReply.model.engageSentReply.count({
           where: { organizationId, post: weekPostFilter, opportunity: { platform: 'reddit' } },
+        }),
+        // Headline impressions + traffic for the selected UI scope.
+        this._post.model.post.aggregate({
+          where: {
+            organizationId,
+            source: 'engage',
+            ...(platform
+              ? { engageSentReply: { is: { opportunity: { platform } } } }
+              : {}),
+          },
+          _sum: { impressions: true, trafficScore: true },
         }),
         // X-only cumulative impressions + traffic index across all engage X posts.
         this._post.model.post.aggregate({
@@ -1096,9 +1125,18 @@ export class EngageRepository {
           },
           _sum: { impressions: true, trafficScore: true },
         }),
+        // Likes/upvotes for the selected UI scope. Analytics is JSON, so use
+        // the same platform-aware extractor as sent stats after loading the rows.
+        this._sentReply.model.engageSentReply.findMany({
+          where: { organizationId, ...platformFilter },
+          select: {
+            opportunity: { select: { platform: true } },
+            post: { select: { analytics: true } },
+          },
+        }),
         // This week's replies (bounded by the week) to pick the single best one.
         this._sentReply.model.engageSentReply.findMany({
-          where: { organizationId, post: weekPostFilter },
+          where: { organizationId, post: weekPostFilter, ...platformFilter },
           select: {
             opportunity: { select: { id: true, platform: true, externalPostUrl: true } },
             post: { select: { content: true, releaseURL: true, analytics: true } },
@@ -1135,6 +1173,12 @@ export class EngageRepository {
       responseRate,
       xImpressions: xPostAgg._sum.impressions ?? 0,
       xTrafficIndex: Math.round(xPostAgg._sum.trafficScore ?? 0),
+      totalImpressions: totalPostAgg._sum.impressions ?? 0,
+      totalTrafficScore: Math.round(totalPostAgg._sum.trafficScore ?? 0),
+      totalLikes: replyRows.reduce(
+        (sum, r) => sum + this._extractLikes(r.post?.analytics, r.opportunity.platform),
+        0
+      ),
       platformSplit: { x: xWeekly, reddit: redditWeekly },
       bestReply,
     };

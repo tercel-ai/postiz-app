@@ -262,6 +262,9 @@ describe('EngageRepository — two-table reads', () => {
       expect(stats.responseRate).toBe(40); // 4/10
       expect(stats.xImpressions).toBe(1200);
       expect(stats.xTrafficIndex).toBe(88); // round(87.6)
+      expect(stats.totalImpressions).toBe(1200);
+      expect(stats.totalTrafficScore).toBe(88);
+      expect(stats.totalLikes).toBe(17);
       expect(stats.platformSplit).toEqual({ x: 4, reddit: 2 });
       // Best reply is the Reddit one (score 12 > like 5); url falls back to externalPostUrl
       expect(stats.bestReply).toEqual({
@@ -271,6 +274,51 @@ describe('EngageRepository — two-table reads', () => {
         likes: 12,
         url: 'u2',
       });
+    });
+
+    it('scopes headline stats and best reply when a platform filter is provided', async () => {
+      const { repo, sentCount, sentFindMany, postAggregate } = buildRepo();
+      sentCount
+        .mockResolvedValueOnce(5)
+        .mockResolvedValueOnce(4)
+        .mockResolvedValueOnce(2)
+        .mockResolvedValueOnce(6)
+        .mockResolvedValueOnce(2);
+      postAggregate
+        .mockResolvedValueOnce({ _sum: { impressions: 900, trafficScore: 234.2 } })
+        .mockResolvedValueOnce({ _sum: { impressions: 1200, trafficScore: 87.6 } });
+      sentFindMany
+        .mockResolvedValueOnce([
+          {
+            opportunity: { platform: 'reddit' },
+            post: { analytics: [{ label: 'score', data: [{ total: '12' }] }] },
+          },
+        ])
+        .mockResolvedValueOnce([
+          {
+            opportunity: { id: 'o2', platform: 'reddit', externalPostUrl: 'u2' },
+            post: { content: 'b', releaseURL: null, analytics: [{ label: 'score', data: [{ total: '12' }] }] },
+          },
+        ]);
+
+      const stats = await repo.getDashboardStats('org1', { platform: 'reddit' });
+
+      expect(stats.weeklyCount).toBe(2);
+      expect(stats.responseRate).toBe(80); // 4/5
+      expect(stats.totalImpressions).toBe(900);
+      expect(stats.totalTrafficScore).toBe(234);
+      expect(stats.totalLikes).toBe(12);
+      expect(stats.xImpressions).toBe(1200); // legacy helper remains X-only
+      expect(stats.xTrafficIndex).toBe(88);
+      expect(stats.bestReply?.platform).toBe('reddit');
+      expect(sentCount.mock.calls[0][0].where.opportunity).toEqual({ platform: 'reddit' });
+      expect(sentCount.mock.calls[1][0].where.opportunity).toEqual({ platform: 'reddit' });
+      expect(sentCount.mock.calls[2][0].where.opportunity).toEqual({ platform: 'reddit' });
+      expect(postAggregate.mock.calls[0][0].where.engageSentReply).toEqual({
+        is: { opportunity: { platform: 'reddit' } },
+      });
+      expect(sentFindMany.mock.calls[0][0].where.opportunity).toEqual({ platform: 'reddit' });
+      expect(sentFindMany.mock.calls[1][0].where.opportunity).toEqual({ platform: 'reddit' });
     });
 
     it('returns bestReply=null and responseRate=0 when there is no engagement data', async () => {

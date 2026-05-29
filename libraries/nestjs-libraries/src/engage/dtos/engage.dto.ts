@@ -343,6 +343,14 @@ export class ListSentDto {
 
 // ─── Dashboard ──────────────────────────────────────────────────────────────
 
+// Panel ① "Engage Performance" — headline stats, optionally scoped to one platform.
+export class DashboardStatsDto {
+  @IsOptional()
+  @IsString()
+  @IsIn(['x', 'reddit'])
+  platform?: string;
+}
+
 // Panel ② "Your Posts" overlay — daily Engage reply counts over a trailing window.
 export class DashboardDailyDto {
   @IsOptional()
@@ -495,4 +503,3 @@ export class UpdateScheduledReplyDto {
   @ArrayMaxSize(20)
   mentions?: string[];
 }
-

@@ -28,6 +28,7 @@ import {
   AddTrackedAccountDto,
   ConfirmManualReplyDto,
   DashboardDailyDto,
+  DashboardStatsDto,
   DashboardTrafficDto,
   GenerateDraftDto,
   ListOpportunitiesDto,
@@ -489,12 +490,15 @@ export class EngageController {
 
   // ─── Dashboard Stats ──────────────────────────────────────────────────────
 
-  // Panel ① "Engage Performance": weekly count, response rate, X impressions,
-  // X traffic index, per-platform split, and this week's best (most-liked) reply.
-  @ApiOperation({ summary: 'Engage Performance panel: weekly count, response rate, X impressions/traffic, platform split, best reply' })
+  // Panel ① "Engage Performance": weekly count, response rate, impressions,
+  // traffic index, likes/upvotes, per-platform split, and this week's best reply.
+  @ApiOperation({ summary: 'Engage Performance panel: headline stats, optional platform filter, platform split, best reply' })
   @Get('/dashboard-stats')
-  getDashboardStats(@GetOrgFromRequest() org: Organization) {
-    return this._engageService.getDashboardStats(org);
+  getDashboardStats(
+    @GetOrgFromRequest() org: Organization,
+    @Query() query: DashboardStatsDto
+  ) {
+    return this._engageService.getDashboardStats(org, query.platform);
   }
 
   // Panel ② "Your Posts" overlay: Engage reply counts bucketed by publish day.

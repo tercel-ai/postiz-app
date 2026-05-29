@@ -1208,7 +1208,7 @@ Retrieve summary statistics for sent records (used for the top of the Sent page 
 }
 ```
 
-> `avgLikes` is platform-aware: for X it reads the `Likes` metric, for Reddit the `score` metric, from each reply's `Post.analytics` blob (bounded to the 1,000 most recent replies). `totalImpressions` here is the all-platform sum; the Dashboard panel uses the X-only figure (see `/dashboard-stats`).
+> `avgLikes` is platform-aware: for X it reads the `Likes` metric, for Reddit the `score` metric, from each reply's `Post.analytics` blob (bounded to the 1,000 most recent replies). `totalImpressions` here is the all-platform sum; the Dashboard panel has its own combined/platform-scoped impression fields (see `/dashboard-stats`).
 
 ---
 
@@ -1287,32 +1287,46 @@ The Engage data surfaces inside the existing Dashboard as three panels (no stand
 
 ### GET `/api/engage/dashboard-stats`
 
-**Panel ① — Engage Performance.** Four headline metrics plus this week's platform split and best reply.
+**Panel ① — Engagement Performance.** Five headline metrics plus this week's platform split and best reply. The panel has platform chips/tabs:
+
+- no `platform` param: combined X + Reddit view
+- `platform=x`: X-only view
+- `platform=reddit`: Reddit-only view
+
+**Query Params**
+
+| Param | Type | Default | Description |
+|---|---|---|---|
+| `platform` | `string` (`x` \| `reddit`) | — (all) | Scope the headline cards and best-reply badge to one platform. Omit for the combined panel. |
 
 **Response** `200 OK`
 
 ```json
 {
-  "weeklyCount": 23,           // 本周互动条数 — engage replies published since this ISO week's Monday (UTC)
-  "responseRate": 35,          // 响应率 — authorReplied / total, integer percentage 0-100 (all-time)
-  "xImpressions": 48620,       // X 总曝光 — SUM(Post.impressions) over all X engage posts (cumulative)
-  "xTrafficIndex": 1284,       // X 流量指数 — SUM(Post.trafficScore) over all X engage posts, rounded
-  "platformSplit": {           // 平台拆分 — reply counts THIS WEEK per platform
+  "weeklyCount": 23,             // Replies — replies published since this ISO week's Monday (UTC), scoped by platform if provided
+  "responseRate": 35,            // Reply rate — authorReplied / total, integer percentage 0-100, scoped by platform if provided
+  "totalImpressions": 48620,     // Total impressions — SUM(Post.impressions), scoped by platform if provided
+  "totalTrafficScore": 1284,     // Traffic — SUM(Post.trafficScore), rounded, scoped by platform if provided
+  "totalLikes": 1650,            // Total likes/upvotes — SUM(X like_count or Reddit score), scoped by platform if provided
+  "xImpressions": 48620,         // Legacy helper — X-only SUM(Post.impressions), always X scoped
+  "xTrafficIndex": 1284,         // Legacy helper — X-only SUM(Post.trafficScore), always X scoped and rounded
+  "platformSplit": {             // Platform split — reply counts THIS WEEK per platform, used to render/switch X and Reddit chips
     "x": 15,
     "reddit": 8
   },
-  "bestReply": {               // 本周最佳回复 — most-liked reply this week, or null if no engagement data
+  "bestReply": {                 // This week's best — most-liked/upvoted reply in the selected scope, or null
     "opportunityId": "uuid",
     "platform": "x",
     "content": "Reply text...",
-    "likes": 142,              // X like_count / Reddit score (from Post.analytics)
+    "likes": 142,                // X like_count / Reddit score (from Post.analytics)
     "url": "https://twitter.com/.../status/123"  // Post.releaseURL, falls back to the original post URL
   }
 }
 ```
 
-- `bestReply` is `null` when no reply this week has any recorded likes/score yet.
-- `weeklyCount` and `platformSplit` are scoped to the current ISO week; `responseRate`, `xImpressions`, `xTrafficIndex` are cumulative.
+- `bestReply` is `null` when no reply this week in the selected scope has any recorded likes/score yet.
+- `weeklyCount` and `platformSplit` are scoped to the current ISO week; `responseRate`, `totalImpressions`, `totalTrafficScore`, and `totalLikes` are cumulative.
+- In the combined view, `totalLikes` is `X likes + Reddit score`. In the Reddit chip view, the UI label should read "Total upvotes"; in the X chip view, it should read "Total likes".
 
 ---
 

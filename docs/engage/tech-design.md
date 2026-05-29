@@ -600,8 +600,8 @@ export class EngageController {
   // Returns: SentStatsResult
 
   // Dashboard stats — three panels (see §11.1)
-  @Get('/dashboard-stats')                  // ① Engage Performance
-  getDashboardStats(@GetOrgFromRequest() org: Organization) { ... }
+  @Get('/dashboard-stats')                  // ① Engagement Performance (?platform=x|reddit)
+  getDashboardStats(@GetOrgFromRequest() org: Organization, @Query() q: DashboardStatsDto) { ... }
   @Get('/dashboard/daily-replies')          // ② Your Posts overlay (?days=30)
   getDashboardDailyReplies(@GetOrgFromRequest() org: Organization, @Query() q: DashboardDailyDto) { ... }
   @Get('/dashboard/traffic')                // ③ Traffic from Engage (?platform&limit)
@@ -1918,13 +1918,16 @@ WHERE state = 'PUBLISHED'
 
 **File**: `apps/backend/src/api/routes/engage.controller.ts`. All three read directly from `Post` (`source='engage'`), bypassing DataTicks. Full request/response contracts live in [`api.md`](./api.md#dashboard-stats--dashboard-statistics); summarised here:
 
-**① `GET /api/engage/dashboard-stats`** — Engage Performance panel
+**① `GET /api/engage/dashboard-stats?platform=x|reddit`** — Engagement Performance panel
 ```typescript
 {
-  weeklyCount:   number,            // 本周互动条数 — replies published this ISO week (UTC)
-  responseRate:  number,            // 响应率 — authorReplied / total × 100 (all-time)
-  xImpressions:  number,            // X 总曝光 — SUM(Post.impressions) over X engage posts (cumulative)
-  xTrafficIndex: number,            // X 流量指数 — SUM(Post.trafficScore) over X engage posts (rounded)
+  weeklyCount:       number,        // Replies — this ISO week, scoped by platform if provided
+  responseRate:      number,        // Reply rate — authorReplied / total × 100, scoped by platform if provided
+  totalImpressions:  number,        // Total impressions — selected platform or combined
+  totalTrafficScore: number,        // Traffic — selected platform or combined, rounded
+  totalLikes:        number,        // Total likes/upvotes — X likes + Reddit score in combined view
+  xImpressions:      number,        // Legacy helper: X-only impressions
+  xTrafficIndex:     number,        // Legacy helper: X-only traffic index
   platformSplit: { x: number; reddit: number },  // 平台拆分 — reply counts THIS WEEK
   bestReply: {                      // 本周最佳回复 (most likes), or null
     opportunityId: string; platform: string; content: string;
@@ -1933,6 +1936,7 @@ WHERE state = 'PUBLISHED'
   } | null,
 }
 ```
+Omit `platform` for the combined X + Reddit view. Pass `platform=x` or `platform=reddit` when the UI chip is selected; the headline cards and `bestReply` are then scoped to that platform. Reddit labels should render `totalLikes` as total upvotes.
 
 **② `GET /api/engage/dashboard/daily-replies?days=30`** — "Your Posts" overlay
 ```typescript

@@ -263,8 +263,8 @@ export class EngageService implements OnApplicationBootstrap {
 
   // ─── Dashboard ────────────────────────────────────────────────────────────
 
-  async getDashboardStats(org: Organization) {
-    return this._engageRepository.getDashboardStats(org.id);
+  async getDashboardStats(org: Organization, platform?: string) {
+    return this._engageRepository.getDashboardStats(org.id, { platform });
   }
 
   async getDashboardDailyReplies(org: Organization, days?: number) {
