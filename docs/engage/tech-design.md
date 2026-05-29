@@ -599,9 +599,13 @@ export class EngageController {
   getSentStats(@GetOrgFromRequest() org: Organization) { ... }
   // Returns: SentStatsResult
 
-  // Dashboard stats
-  @Get('/dashboard-stats')
+  // Dashboard stats — three panels (see §11.1)
+  @Get('/dashboard-stats')                  // ① Engage Performance
   getDashboardStats(@GetOrgFromRequest() org: Organization) { ... }
+  @Get('/dashboard/daily-replies')          // ② Your Posts overlay (?days=30)
+  getDashboardDailyReplies(@GetOrgFromRequest() org: Organization, @Query() q: DashboardDailyDto) { ... }
+  @Get('/dashboard/traffic')                // ③ Traffic from Engage (?platform&limit)
+  getDashboardTraffic(@GetOrgFromRequest() org: Organization, @Query() q: DashboardTrafficDto) { ... }
 
   // Keywords
   @Post('/keywords')
@@ -1110,11 +1114,12 @@ export async function engageDataTicksWorkflow(): Promise<void> {
 
 ### 5.4 Engage Metrics Sync Workflow (simplified)
 
-**Purpose**: Handles the two things the existing `postWorkflowV101` cannot do for Engage replies:
+**Purpose**: Handles the things the global analytics job cannot do for Engage replies:
 1. **`authorReplied` detection** — check if the original post author replied to our reply
-2. **Reddit metrics** — poll Reddit comment URL → write to `Post.analytics` (Reddit replies have a Post but were created manually, not via provider workflow)
+2. **X metrics** — fetch the reply tweet's `public_metrics` and write `Post.{impressions, trafficScore, analytics}`
+3. **Reddit metrics** — poll Reddit comment URL → write to `Post.analytics` (Reddit replies have a Post but were created manually, not via provider workflow)
 
-X metrics (impressions, trafficScore, analytics) are handled by the **existing Post analytics pipeline** — no duplication needed.
+> **Why X metrics are driven here.** Engage posts (`source='engage'`) are intentionally **excluded** from the global analytics job (`dashboard.repository.ts#getPublishedPostsWithRelease` filters `source NOT IN ('engage')`), so they are NOT picked up automatically. The Engage sync therefore calls `PostsService.checkPostAnalytics(orgId, postId, date)` itself — the *same* code path regular posts use. It refreshes the integration's OAuth token, calls `x.provider.postAnalytics` (reads `public_metrics` incl. `impression_count` + `bookmark_count`), computes `trafficScore` via `traffic.calculator.ts` (the `x` weights equal the spec's `X_traffic_index`), and writes `Post.{impressions, trafficScore, analytics}` back. The app-only `X_BEARER_TOKEN` is used only for `authorReplied` detection (conversation search).
 
 **File**: `apps/orchestrator/src/workflows/engage-metrics-sync.workflow.ts`
 
@@ -1125,29 +1130,28 @@ export async function engageMetricsSyncWorkflow(sentReplyId: string): Promise<vo
   const reply = await fetchSentReply(sentReplyId);  // includes reply.post (Post record)
   if (!reply) return;
 
-  if (reply.post.platform === 'x') {
-    // X metrics already handled by existing postWorkflowV101 analytics.
-    // Only check authorReplied.
+  if (reply.opportunity.platform === 'x') {
+    // 1) Fetch X reply metrics via the integration's OAuth token (engage posts
+    //    are excluded from the global analytics job, so drive it explicitly).
+    //    checkPostAnalytics writes Post.{impressions, trafficScore, analytics}.
+    await postsService.checkPostAnalytics(reply.organizationId, reply.postId, Date.now());
+    // 2) authorReplied detection via app-only bearer (conversation search).
     const replied = await checkXAuthorReplied(reply.post.releaseURL, reply.opportunity.externalPostId);
     if (replied) await markAuthorReplied(sentReplyId);
 
   } else if (reply.post.releaseURL) {
     // Reddit / manual-flow: Post.releaseURL = comment URL submitted by user.
-    // Fetch metrics and write to Post.analytics (existing field).
+    // No provider.postAnalytics for engage Reddit comments, so fetch + write directly.
     const commentId = extractCommentIdFromUrl(reply.post.releaseURL);
     const raw = await fetchRedditCommentMetrics(commentId);
-    // Write in AnalyticsData[] format — matches existing Post.analytics schema
-    // so the existing traffic.calculator.ts can derive trafficScore consistently.
-    // Reddit 'score' maps to impressions in the existing analytics pipeline.
     const analyticsData: AnalyticsData[] = [
       { label: 'score',    data: [{ total: String(raw.score),        date: todayISO() }], percentageChange: 0 },
       { label: 'comments', data: [{ total: String(raw.num_comments), date: todayISO() }], percentageChange: 0 },
     ];
-    await updatePostAnalytics(reply.postId, {
-      analytics:   analyticsData,
-      impressions: Math.round((raw.score + raw.num_comments) * 20),
-      // trafficScore computed by traffic.calculator.ts from analyticsData — NOT set manually here
-      // This keeps formula consistent with all other platforms (traffic.calculator.ts is the SoT)
+    await updatePostMetrics(reply.postId, {
+      analytics:    analyticsData,
+      impressions:  Math.round((raw.score + raw.num_comments) * 20),  // Reddit has no public impressions; estimate ×20
+      trafficScore: raw.score * 1 + raw.num_comments * 3,             // Reddit_traffic_index (set explicitly; no provider path)
     });
     const replied = await checkRedditAuthorReplied(commentId, reply.opportunity.authorUsername);
     if (replied) await markAuthorReplied(sentReplyId);
@@ -1192,8 +1196,9 @@ const engageDataTicksActivities = createActivities([
 ]);
 
 // Metrics sync activities (24h after reply sent)
-// X impressions/trafficScore: handled by existing postWorkflowV101 analytics pipeline
-// Reddit: fetch comment metrics + write AnalyticsData[] to Post.analytics
+// X impressions/trafficScore: engage drives PostsService.checkPostAnalytics itself
+//   (engage posts are excluded from the global analytics job, source != 'engage')
+// Reddit: fetch comment metrics + write {analytics, impressions, trafficScore} to Post
 const engageMetricsActivities = createActivities([
   fetchRedditCommentMetrics,
   updatePostAnalytics,          // writes AnalyticsData[] to Post.analytics
@@ -1909,51 +1914,54 @@ WHERE state = 'PUBLISHED'
   AND (source IS NULL OR source NOT IN ('engage'))  // ← NEW: Exclude Engage replies
 ```
 
-### 11.1 Dashboard — Engage Performance Panel
+### 11.1 Dashboard — Three Endpoints (as implemented)
 
-**Existing file**: `apps/backend/src/api/routes/dashboard.controller.ts`
+**File**: `apps/backend/src/api/routes/engage.controller.ts`. All three read directly from `Post` (`source='engage'`), bypassing DataTicks. Full request/response contracts live in [`api.md`](./api.md#dashboard-stats--dashboard-statistics); summarised here:
 
+**① `GET /api/engage/dashboard-stats`** — Engage Performance panel
 ```typescript
-@Get('/engage-stats')
-async getEngageStats(
-  @GetOrgFromRequest() org: Organization,
-  @Query('days') days = 7
-) {
-  // Direct query on Post WHERE source='engage', bypassing DataTicks
-  return this._engageService.getDashboardStats(org.id, days);
+{
+  weeklyCount:   number,            // 本周互动条数 — replies published this ISO week (UTC)
+  responseRate:  number,            // 响应率 — authorReplied / total × 100 (all-time)
+  xImpressions:  number,            // X 总曝光 — SUM(Post.impressions) over X engage posts (cumulative)
+  xTrafficIndex: number,            // X 流量指数 — SUM(Post.trafficScore) over X engage posts (rounded)
+  platformSplit: { x: number; reddit: number },  // 平台拆分 — reply counts THIS WEEK
+  bestReply: {                      // 本周最佳回复 (most likes), or null
+    opportunityId: string; platform: string; content: string;
+    likes: number;                  // X like_count / Reddit score (from Post.analytics)
+    url: string | null;             // Post.releaseURL → falls back to original post URL
+  } | null,
 }
 ```
 
-**Return shape** — metrics read directly from `Post.impressions` / `Post.trafficScore` / `Post.analytics`:
+**② `GET /api/engage/dashboard/daily-replies?days=30`** — "Your Posts" overlay
 ```typescript
 {
-  // ① Engage Performance Panel (4 cells)
-  weeklyCount:       number,   // Issued interactions this week
-  responseRate:      number,   // Reply rate: authorReplied=true / total × 100
-  totalImpressions:  number,   // X Total Impressions: SUM(Post.impressions WHERE platform='x')
-  totalTrafficScore: number,   // X Traffic Index: SUM(Post.trafficScore WHERE platform='x')
-  byPlatform: {
-    [platform: string]: { count: number; impressions: number; trafficScore: number }
-  },
-  bestReply: { platform, content, publishDate, trafficScore }, // Best reply of the week
+  days: number,
+  items: Array<{ date: string; count: number; x: number; reddit: number }>,  // zero-filled, incl. today
+}
+```
+Buckets keyed by `Post.publishDate` (UTC `YYYY-MM-DD`). Computed directly from sent replies (not `EngageDataTicks`) so today's count is included.
 
-  // ③ Traffic from Engage Panel — per-reply breakdown (progress bars in UI)
-  trafficByReply: Array<{
-    postId:       string,
-    content:      string,      // reply text snippet
-    platform:     string,
-    publishDate:  string,
-    trafficScore: number,      // Post.trafficScore
-    impressions:  number,      // Post.impressions
+**③ `GET /api/engage/dashboard/traffic?platform=x&limit=10`** — "Traffic from Engage"
+```typescript
+{
+  totalClicks: number,              // SUM(Post.trafficScore) (filtered by platform if given), rounded
+  items: Array<{                    // top-N replies by trafficScore, desc
+    opportunityId: string; platform: string; content: string;
+    clicks: number;                 // Post.trafficScore (rounded)
+    time: string | null;            // Post.publishDate
+    url: string | null;             // Post.releaseURL → falls back to original post URL
   }>,
-  trafficTotal: number,        // SUM(trafficScore) — same as totalTrafficScore above
 }
 ```
 
 **Frontend** (`apps/frontend/src/app/(app)/(site)/dashboard/page.tsx`):
-- `<EngagePerformancePanel>` reads from `/dashboard/engage-stats` (independent panel, doesn't affect existing data).
-- "Your Posts" chart lime overlay bar: reads `EngageDataTicks WHERE type='replies' AND timeUnit='day'` — consistent with existing DataTicks chart query patterns.
-- "Traffic from Engage" trend: reads `EngageDataTicks WHERE type='traffic' AND timeUnit='day'`.
+- `<EngagePerformancePanel>` ← `/dashboard-stats` (independent panel, doesn't affect existing data).
+- "Your Posts" chart lime overlay bar ← `/dashboard/daily-replies` (per-day reply counts, includes today).
+- "Traffic from Engage" panel ← `/dashboard/traffic` (total + per-reply progress bars).
+
+> The daily `EngageDataTicks` aggregate (`type='replies'|'impressions'|'traffic'`, `timeUnit='day'`) remains the long-horizon trend store, but the live dashboard endpoints query `Post` directly so they include same-day activity.
 
 **Comparison: EngageDataTicks vs. DataTicks**:
 

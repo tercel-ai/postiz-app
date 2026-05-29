@@ -19,6 +19,9 @@ function buildRepo() {
   const oppAggregate = vi.fn();
   const oppFindFirst = vi.fn();
   const channelFindMany = vi.fn();
+  const sentCount = vi.fn();
+  const sentFindMany = vi.fn();
+  const postAggregate = vi.fn();
 
   const channel = {
     model: { engageMonitoredChannel: { findMany: channelFindMany } },
@@ -36,6 +39,12 @@ function buildRepo() {
       },
     },
   } as any;
+  const sentReply = {
+    model: { engageSentReply: { count: sentCount, findMany: sentFindMany } },
+  } as any;
+  const post = {
+    model: { post: { aggregate: postAggregate } },
+  } as any;
 
   // Constructor order: _config, _keyword, _channel, _trackedAccount,
   // _replyAccount, _opportunity, _oppState, _sentReply, _integration, _post, _tx
@@ -45,9 +54,16 @@ function buildRepo() {
     {} as any, {} as any,
     opportunity,  // _opportunity
     oppState,     // _oppState
-    {} as any, {} as any, {} as any, {} as any
+    sentReply,    // _sentReply
+    {} as any,
+    post,         // _post
+    {} as any
   );
-  return { repo, stateFindMany, stateCount, stateAggregate, stateFindFirst, oppAggregate, oppFindFirst, channelFindMany };
+  return {
+    repo, stateFindMany, stateCount, stateAggregate, stateFindFirst,
+    oppAggregate, oppFindFirst, channelFindMany,
+    sentCount, sentFindMany, postAggregate,
+  };
 }
 
 const STATE_ROW = {
@@ -214,6 +230,119 @@ describe('EngageRepository — two-table reads', () => {
       const stats = await repo.getScoreStats('org1');
       expect(stats.total).toBe(0);
       expect(stats.topByKeyword).toBeNull();
+    });
+  });
+
+  describe('getDashboardStats (panel ①)', () => {
+    it('computes response rate, X-only impressions/traffic, weekly platform split, and best reply', async () => {
+      const { repo, sentCount, sentFindMany, postAggregate } = buildRepo();
+      // Promise.all order: total, replied, weekly, xWeekly, redditWeekly
+      sentCount
+        .mockResolvedValueOnce(10)
+        .mockResolvedValueOnce(4)
+        .mockResolvedValueOnce(6)
+        .mockResolvedValueOnce(4)
+        .mockResolvedValueOnce(2);
+      postAggregate.mockResolvedValue({
+        _sum: { impressions: 1200, trafficScore: 87.6 },
+      });
+      sentFindMany.mockResolvedValue([
+        {
+          opportunity: { id: 'o1', platform: 'x', externalPostUrl: 'u1' },
+          post: { content: 'a', releaseURL: 'r1', analytics: [{ label: 'like_count', data: [{ total: '5' }] }] },
+        },
+        {
+          opportunity: { id: 'o2', platform: 'reddit', externalPostUrl: 'u2' },
+          post: { content: 'b', releaseURL: null, analytics: [{ label: 'score', data: [{ total: '12' }] }] },
+        },
+      ]);
+
+      const stats = await repo.getDashboardStats('org1');
+      expect(stats.weeklyCount).toBe(6);
+      expect(stats.responseRate).toBe(40); // 4/10
+      expect(stats.xImpressions).toBe(1200);
+      expect(stats.xTrafficIndex).toBe(88); // round(87.6)
+      expect(stats.platformSplit).toEqual({ x: 4, reddit: 2 });
+      // Best reply is the Reddit one (score 12 > like 5); url falls back to externalPostUrl
+      expect(stats.bestReply).toEqual({
+        opportunityId: 'o2',
+        platform: 'reddit',
+        content: 'b',
+        likes: 12,
+        url: 'u2',
+      });
+    });
+
+    it('returns bestReply=null and responseRate=0 when there is no engagement data', async () => {
+      const { repo, sentCount, sentFindMany, postAggregate } = buildRepo();
+      sentCount.mockResolvedValue(0);
+      postAggregate.mockResolvedValue({ _sum: { impressions: null, trafficScore: null } });
+      sentFindMany.mockResolvedValue([]);
+
+      const stats = await repo.getDashboardStats('org1');
+      expect(stats.responseRate).toBe(0);
+      expect(stats.xImpressions).toBe(0);
+      expect(stats.xTrafficIndex).toBe(0);
+      expect(stats.bestReply).toBeNull();
+    });
+  });
+
+  describe('getDashboardDailyReplies (panel ②)', () => {
+    it('seeds a continuous window and buckets replies by publish day and platform', async () => {
+      const { repo, sentFindMany } = buildRepo();
+      sentFindMany.mockResolvedValue([
+        { opportunity: { platform: 'x' }, post: { publishDate: new Date() } },
+        { opportunity: { platform: 'reddit' }, post: { publishDate: new Date() } },
+        { opportunity: { platform: 'x' }, post: { publishDate: null } }, // ignored
+      ]);
+
+      const res = await repo.getDashboardDailyReplies('org1', 7);
+      expect(res.days).toBe(7);
+      expect(res.items).toHaveLength(7); // zero-filled continuous buckets
+      const totals = res.items.reduce(
+        (a, b) => ({ count: a.count + b.count, x: a.x + b.x, reddit: a.reddit + b.reddit }),
+        { count: 0, x: 0, reddit: 0 }
+      );
+      expect(totals).toEqual({ count: 2, x: 1, reddit: 1 }); // null publishDate dropped
+    });
+  });
+
+  describe('getDashboardTraffic (panel ③)', () => {
+    it('returns total traffic index and a per-reply breakdown sorted by traffic', async () => {
+      const { repo, sentFindMany, postAggregate } = buildRepo();
+      postAggregate.mockResolvedValue({ _sum: { trafficScore: 42.4 } });
+      sentFindMany.mockResolvedValue([
+        {
+          opportunity: { id: 'o1', platform: 'x', externalPostUrl: 'u1' },
+          post: { content: 'c', releaseURL: 'r1', publishDate: new Date('2026-05-20'), trafficScore: 30.2 },
+        },
+        {
+          opportunity: { id: 'o2', platform: 'reddit', externalPostUrl: 'u2' },
+          post: { content: 'd', releaseURL: null, publishDate: new Date('2026-05-19'), trafficScore: 12 },
+        },
+      ]);
+
+      const res = await repo.getDashboardTraffic('org1', { limit: 5 });
+      expect(res.totalClicks).toBe(42); // round(42.4)
+      expect(res.items).toHaveLength(2);
+      expect(res.items[0]).toMatchObject({ opportunityId: 'o1', clicks: 30, url: 'r1' });
+      expect(res.items[1]).toMatchObject({ opportunityId: 'o2', clicks: 12, url: 'u2' }); // releaseURL null → externalPostUrl
+      // top-N ordering and platform filter wiring
+      expect(sentFindMany.mock.calls[0][0].orderBy).toEqual({ post: { trafficScore: 'desc' } });
+      expect(sentFindMany.mock.calls[0][0].take).toBe(5);
+    });
+
+    it('scopes the aggregate and list to a platform when provided', async () => {
+      const { repo, sentFindMany, postAggregate } = buildRepo();
+      postAggregate.mockResolvedValue({ _sum: { trafficScore: 0 } });
+      sentFindMany.mockResolvedValue([]);
+
+      await repo.getDashboardTraffic('org1', { platform: 'x' });
+      expect(postAggregate.mock.calls[0][0].where.engageSentReply).toEqual({
+        is: { opportunity: { platform: 'x' } },
+      });
+      expect(sentFindMany.mock.calls[0][0].where.opportunity).toEqual({ platform: 'x' });
+      expect(sentFindMany.mock.calls[0][0].take).toBe(10); // default limit
     });
   });
 });

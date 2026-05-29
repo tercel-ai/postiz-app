@@ -1020,7 +1020,10 @@ export class EngageRepository {
           where: { organizationId },
           orderBy: { createdAt: 'desc' },
           take: 1_000,
-          select: { post: { select: { analytics: true } } },
+          select: {
+            post: { select: { analytics: true } },
+            opportunity: { select: { platform: true } },
+          },
         }),
       ]);
 
@@ -1029,16 +1032,10 @@ export class EngageRepository {
       total > 0 ? Math.round((repliedCount / total) * 100) : 0;
     const totalImpressions = impressionsAgg._sum.impressions ?? 0;
 
+    // 平均获赞 = AVG(X like_count) combined with AVG(Reddit score). Both are read
+    // out of the analytics blob via the same platform-aware extractor.
     const likesPerReply = likeSample
-      .map((r) => {
-        const analytics = r.post?.analytics as Array<{
-          label: string;
-          data: number[];
-        }> | null;
-        if (!analytics) return 0;
-        const likesEntry = analytics.find((a) => /like|reaction/i.test(a.label));
-        return likesEntry?.data?.[0] ?? 0;
-      })
+      .map((r) => this._extractLikes(r.post?.analytics, r.opportunity.platform))
       .filter((v) => v > 0);
 
     const avgLikes =
@@ -1049,6 +1046,193 @@ export class EngageRepository {
         : 0;
 
     return { weeklyCount: weeklyReplies, responseRate, totalImpressions, avgLikes };
+  }
+
+  // Pull the "likes" metric out of a Post.analytics JSON blob. X stores it under
+  // a like/favorite label; Reddit's equivalent is the post score. The sync writes
+  // each metric as { label, data: [{ total, date }], percentageChange }.
+  private _extractLikes(analytics: unknown, platform: string): number {
+    if (!Array.isArray(analytics)) return 0;
+    const wanted = platform === 'reddit' ? /score|upvote/i : /like|favorite|reaction/i;
+    const entry = (
+      analytics as Array<{ label?: string; data?: Array<{ total?: string | number }> }>
+    ).find((a) => a.label && wanted.test(a.label));
+    const raw = entry?.data?.[entry.data.length - 1]?.total;
+    const n =
+      typeof raw === 'string' ? parseInt(raw, 10) : typeof raw === 'number' ? raw : 0;
+    return Number.isFinite(n) ? n : 0;
+  }
+
+  // Dashboard panel ① "Engage Performance": weekly interaction count, response
+  // rate, X-only total impressions and traffic index, per-platform split for the
+  // week, and this week's single best (most-liked) reply.
+  async getDashboardStats(organizationId: string) {
+    const weekStart = dayjs.utc().startOf('isoWeek').toDate();
+    const weekPostFilter = {
+      is: { source: 'engage', publishDate: { gte: weekStart } },
+    };
+
+    const [total, repliedCount, weeklyReplies, xWeekly, redditWeekly, xPostAgg, weekReplyRows] =
+      await Promise.all([
+        this._sentReply.model.engageSentReply.count({ where: { organizationId } }),
+        this._sentReply.model.engageSentReply.count({
+          where: { organizationId, authorReplied: true },
+        }),
+        this._sentReply.model.engageSentReply.count({
+          where: { organizationId, post: weekPostFilter },
+        }),
+        this._sentReply.model.engageSentReply.count({
+          where: { organizationId, post: weekPostFilter, opportunity: { platform: 'x' } },
+        }),
+        this._sentReply.model.engageSentReply.count({
+          where: { organizationId, post: weekPostFilter, opportunity: { platform: 'reddit' } },
+        }),
+        // X-only cumulative impressions + traffic index across all engage X posts.
+        this._post.model.post.aggregate({
+          where: {
+            organizationId,
+            source: 'engage',
+            engageSentReply: { is: { opportunity: { platform: 'x' } } },
+          },
+          _sum: { impressions: true, trafficScore: true },
+        }),
+        // This week's replies (bounded by the week) to pick the single best one.
+        this._sentReply.model.engageSentReply.findMany({
+          where: { organizationId, post: weekPostFilter },
+          select: {
+            opportunity: { select: { id: true, platform: true, externalPostUrl: true } },
+            post: { select: { content: true, releaseURL: true, analytics: true } },
+          },
+        }),
+      ]);
+
+    const responseRate = total > 0 ? Math.round((repliedCount / total) * 100) : 0;
+
+    let bestReply: {
+      opportunityId: string;
+      platform: string;
+      content: string;
+      likes: number;
+      url: string | null;
+    } | null = null;
+    let bestLikes = 0;
+    for (const r of weekReplyRows) {
+      const likes = this._extractLikes(r.post?.analytics, r.opportunity.platform);
+      if (likes > bestLikes) {
+        bestLikes = likes;
+        bestReply = {
+          opportunityId: r.opportunity.id,
+          platform: r.opportunity.platform,
+          content: r.post?.content ?? '',
+          likes,
+          url: r.post?.releaseURL ?? r.opportunity.externalPostUrl ?? null,
+        };
+      }
+    }
+
+    return {
+      weeklyCount: weeklyReplies,
+      responseRate,
+      xImpressions: xPostAgg._sum.impressions ?? 0,
+      xTrafficIndex: Math.round(xPostAgg._sum.trafficScore ?? 0),
+      platformSplit: { x: xWeekly, reddit: redditWeekly },
+      bestReply,
+    };
+  }
+
+  // Dashboard panel ② "Your Posts" overlay: Engage reply counts bucketed by the
+  // day they were published, over a trailing window. Every day in the window is
+  // seeded so the chart has continuous (zero-filled) buckets. Includes today,
+  // which the daily EngageDataTicks aggregate does not yet cover.
+  async getDashboardDailyReplies(organizationId: string, days = 30) {
+    const rangeStart = dayjs.utc().subtract(days - 1, 'day').startOf('day').toDate();
+
+    const rows = await this._sentReply.model.engageSentReply.findMany({
+      where: {
+        organizationId,
+        post: { is: { source: 'engage', publishDate: { gte: rangeStart } } },
+      },
+      select: {
+        opportunity: { select: { platform: true } },
+        post: { select: { publishDate: true } },
+      },
+    });
+
+    const buckets = new Map<
+      string,
+      { date: string; count: number; x: number; reddit: number }
+    >();
+    for (let i = 0; i < days; i++) {
+      const d = dayjs.utc().subtract(days - 1 - i, 'day').format('YYYY-MM-DD');
+      buckets.set(d, { date: d, count: 0, x: 0, reddit: 0 });
+    }
+    for (const r of rows) {
+      if (!r.post?.publishDate) continue;
+      const d = dayjs.utc(r.post.publishDate).format('YYYY-MM-DD');
+      const b = buckets.get(d);
+      if (!b) continue;
+      b.count++;
+      if (r.opportunity.platform === 'reddit') b.reddit++;
+      else b.x++;
+    }
+
+    return { days, items: [...buckets.values()] };
+  }
+
+  // Dashboard panel ③ "Traffic from Engage": total traffic index (clicks) plus a
+  // per-reply breakdown sorted by traffic, for the progress-bar list. Defaults to
+  // all engage platforms; pass platform='x' for the X-only "X 流量指数汇总".
+  async getDashboardTraffic(
+    organizationId: string,
+    opts: { platform?: string; limit?: number } = {}
+  ) {
+    const limit = opts.limit ?? 10;
+    const platform = opts.platform;
+
+    const [agg, items] = await Promise.all([
+      this._post.model.post.aggregate({
+        where: {
+          organizationId,
+          source: 'engage',
+          ...(platform
+            ? { engageSentReply: { is: { opportunity: { platform } } } }
+            : {}),
+        },
+        _sum: { trafficScore: true },
+      }),
+      this._sentReply.model.engageSentReply.findMany({
+        where: {
+          organizationId,
+          ...(platform ? { opportunity: { platform } } : {}),
+          post: { is: { source: 'engage', trafficScore: { not: null } } },
+        },
+        select: {
+          opportunity: { select: { id: true, platform: true, externalPostUrl: true } },
+          post: {
+            select: {
+              content: true,
+              releaseURL: true,
+              publishDate: true,
+              trafficScore: true,
+            },
+          },
+        },
+        orderBy: { post: { trafficScore: 'desc' } },
+        take: limit,
+      }),
+    ]);
+
+    return {
+      totalClicks: Math.round(agg._sum.trafficScore ?? 0),
+      items: items.map((r) => ({
+        opportunityId: r.opportunity.id,
+        platform: r.opportunity.platform,
+        content: r.post?.content ?? '',
+        clicks: Math.round(r.post?.trafficScore ?? 0),
+        time: r.post?.publishDate ?? null,
+        url: r.post?.releaseURL ?? r.opportunity.externalPostUrl ?? null,
+      })),
+    };
   }
 
   async updateScheduledReply(
@@ -1134,6 +1318,46 @@ export class EngageRepository {
     return this._sentReply.model.engageSentReply.update({
       where: { id: sentReplyId },
       data: { authorReplied: true },
+    });
+  }
+
+  async findPendingEngageMetrics(orgId?: string, platform?: string) {
+    return this._sentReply.model.engageSentReply.findMany({
+      where: {
+        ...(orgId ? { organizationId: orgId } : {}),
+        post: {
+          source: 'engage',
+          state: 'PUBLISHED',
+          releaseURL: { not: null },
+          impressions: null,
+        },
+        ...(platform
+          ? { opportunity: { platform } }
+          : {}),
+      },
+      select: {
+        id: true,
+        organizationId: true,
+        authorReplied: true,
+        post: { select: { id: true, releaseURL: true } },
+        opportunity: { select: { platform: true, externalPostId: true, authorUsername: true } },
+      },
+    });
+  }
+
+  async updatePostMetrics(
+    postId: string,
+    impressions: number,
+    analytics: unknown,
+    trafficScore?: number
+  ) {
+    return this._post.model.post.update({
+      where: { id: postId },
+      data: {
+        impressions,
+        analytics: analytics as never,
+        ...(trafficScore !== undefined && { trafficScore }),
+      },
     });
   }
 

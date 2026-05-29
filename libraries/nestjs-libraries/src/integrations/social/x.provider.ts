@@ -209,7 +209,13 @@ export class XProvider extends SocialAbstract implements SocialProvider {
       ) {
         return {
           type: 'bad-body',
-          value: 'X does not allow replying to this tweet via API because your account has no prior engagement with its author (not mentioned, not following, etc.). This is an X API anti-spam restriction and cannot be bypassed.',
+          // X returns "...not been mentioned or otherwise engaged by the author...",
+          // but that wording is misleading: on limited / Pay-Per-Use X API access
+          // tiers, replying to OTHER users' tweets is blocked regardless of follow or
+          // engagement status (verified — mutual-follow + prior replies still 403).
+          // Manual replies in the browser are unaffected. The only fix is upgrading
+          // the X API plan (Basic/Pro); it cannot be bypassed in code.
+          value: 'X rejected this reply (403). Your X API access tier (Free / Pay-Per-Use) blocks replying to other users\' tweets via API — following the author or having prior engagement does NOT lift this, and it cannot be bypassed in code. Manual replies in the browser still work. Upgrade the X API plan (Basic/Pro) to reply via API.',
         };
       }
       return {

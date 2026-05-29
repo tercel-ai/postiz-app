@@ -341,6 +341,32 @@ export class ListSentDto {
   limit?: number;
 }
 
+// ─── Dashboard ──────────────────────────────────────────────────────────────
+
+// Panel ② "Your Posts" overlay — daily Engage reply counts over a trailing window.
+export class DashboardDailyDto {
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(90)
+  days?: number;
+}
+
+// Panel ③ "Traffic from Engage" — per-reply traffic-index breakdown.
+export class DashboardTrafficDto {
+  @IsOptional()
+  @IsString()
+  platform?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(50)
+  limit?: number;
+}
+
 // ─── Draft Generation ─────────────────────────────────────────────────────────
 
 export class GenerateDraftDto {

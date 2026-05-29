@@ -27,6 +27,8 @@ import {
   AddMonitoredChannelDto,
   AddTrackedAccountDto,
   ConfirmManualReplyDto,
+  DashboardDailyDto,
+  DashboardTrafficDto,
   GenerateDraftDto,
   ListOpportunitiesDto,
   ListSentDto,
@@ -487,9 +489,50 @@ export class EngageController {
 
   // ─── Dashboard Stats ──────────────────────────────────────────────────────
 
-  @ApiOperation({ summary: 'Engage dashboard summary (weekly replies, response rate, impressions)' })
+  // Panel ① "Engage Performance": weekly count, response rate, X impressions,
+  // X traffic index, per-platform split, and this week's best (most-liked) reply.
+  @ApiOperation({ summary: 'Engage Performance panel: weekly count, response rate, X impressions/traffic, platform split, best reply' })
   @Get('/dashboard-stats')
   getDashboardStats(@GetOrgFromRequest() org: Organization) {
-    return this._engageService.getSentStats(org);
+    return this._engageService.getDashboardStats(org);
+  }
+
+  // Panel ② "Your Posts" overlay: Engage reply counts bucketed by publish day.
+  @ApiOperation({ summary: 'Daily Engage reply counts over a trailing window (for the Your Posts chart overlay)' })
+  @Get('/dashboard/daily-replies')
+  getDashboardDailyReplies(
+    @GetOrgFromRequest() org: Organization,
+    @Query() query: DashboardDailyDto
+  ) {
+    return this._engageService.getDashboardDailyReplies(org, query.days);
+  }
+
+  // Panel ③ "Traffic from Engage": total traffic index + per-reply breakdown.
+  @ApiOperation({ summary: 'Total Engage traffic index plus per-reply breakdown (Traffic from Engage panel)' })
+  @Get('/dashboard/traffic')
+  getDashboardTraffic(
+    @GetOrgFromRequest() org: Organization,
+    @Query() query: DashboardTrafficDto
+  ) {
+    return this._engageService.getDashboardTraffic(org, {
+      platform: query.platform,
+      limit: query.limit,
+    });
+  }
+
+  // ─── Admin: resync metrics ─────────────────────────────────────────────────
+
+  @ApiOperation({ summary: 'Re-fetch Reddit/X metrics for published engage replies with missing stats' })
+  @Post('/admin/resync-metrics')
+  resyncEngageMetrics(
+    @GetOrgFromRequest() org: Organization,
+    @Query('platform') platform?: string,
+    @Query('dry_run') dryRun?: string,
+  ) {
+    return this._engageService.resyncEngageMetrics({
+      orgId: org.id,
+      platform,
+      dryRun: dryRun === 'true',
+    });
   }
 }

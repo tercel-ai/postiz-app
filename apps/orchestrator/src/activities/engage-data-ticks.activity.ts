@@ -6,6 +6,8 @@ import {
   PrismaTransaction,
 } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
 import { EngageRepository } from '@gitroom/nestjs-libraries/engage/engage.repository';
+import { getRedditToken, redditAuthHeaders } from '@gitroom/nestjs-libraries/engage/reddit-auth';
+import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.service';
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc';
 
@@ -21,7 +23,8 @@ export class EngageDataTicksActivity {
     private _post: PrismaRepository<'post'>,
     private _engageDataTicks: PrismaRepository<'engageDataTicks'>,
     private _engageSentReply: PrismaRepository<'engageSentReply'>,
-    private _tx: PrismaTransaction
+    private _tx: PrismaTransaction,
+    private _postsService: PostsService
   ) {}
 
   private _heartbeat(progress?: unknown): void {
@@ -144,7 +147,8 @@ export class EngageDataTicksActivity {
     if (reply.opportunity.platform === 'reddit' && reply.post.releaseURL) {
       await this._syncRedditMetrics(reply.post.id, reply.post.releaseURL, reply.id, reply.opportunity.authorUsername);
     } else if (reply.opportunity.platform === 'x' && reply.post.releaseURL) {
-      await this._checkXAuthorReplied(
+      await this._syncXMetrics(
+        reply.organizationId,
         reply.id,
         reply.post.id,
         reply.post.releaseURL,
@@ -164,15 +168,21 @@ export class EngageDataTicksActivity {
     if (!commentId) return;
 
     try {
-      // Fetch our comment's metadata for score/num_comments
-      const infoRes = await fetch(
-        `https://www.reddit.com/api/info.json?id=t1_${commentId}`,
-        { headers: { 'User-Agent': 'AISEE-Engage/1.0' } }
-      );
+      // Fetch our comment's metadata for score/num_comments.
+      // Prefer authenticated oauth.reddit.com; fall back to public endpoint.
+      const token = await getRedditToken();
+      const infoUrl = token
+        ? `https://oauth.reddit.com/api/info?id=t1_${commentId}`
+        : `https://www.reddit.com/api/info.json?id=t1_${commentId}`;
+      const infoHeaders = token
+        ? redditAuthHeaders(token)
+        : { 'User-Agent': 'AISEE-Engage/1.0' };
+
+      const infoRes = await fetch(infoUrl, { headers: infoHeaders });
       if (!infoRes.ok) {
         const body = await infoRes.text().catch(() => '<unreadable>');
         this.logger.warn(
-          `Reddit /api/info.json returned ${infoRes.status} for t1_${commentId}: ${body.slice(0, 200)}`
+          `Reddit /api/info returned ${infoRes.status} for t1_${commentId}: ${body.slice(0, 200)}`
         );
         return;
       }
@@ -193,6 +203,8 @@ export class EngageDataTicksActivity {
         data: {
           analytics: analyticsData as never,
           impressions: Math.round((commentData.score + commentData.num_comments) * 20),
+          // Reddit_traffic_index = score×1 + num_comments×3 (Appendix formula).
+          trafficScore: commentData.score * 1 + commentData.num_comments * 3,
         },
       });
 
@@ -202,10 +214,13 @@ export class EngageDataTicksActivity {
       if (threadMatch) {
         const subreddit = threadMatch[1];
         const postId_ = threadMatch[2];
-        const threadRes = await fetch(
-          `https://www.reddit.com/r/${subreddit}/comments/${postId_}/.json?comment=${commentId}&depth=1&limit=25`,
-          { headers: { 'User-Agent': 'AISEE-Engage/1.0' } }
-        );
+        const threadToken = await getRedditToken();
+        const threadUrl = threadToken
+          ? `https://oauth.reddit.com/r/${subreddit}/comments/${postId_}?comment=${commentId}&depth=1&limit=25`
+          : `https://www.reddit.com/r/${subreddit}/comments/${postId_}/.json?comment=${commentId}&depth=1&limit=25`;
+        const threadRes = await fetch(threadUrl, {
+          headers: threadToken ? redditAuthHeaders(threadToken) : { 'User-Agent': 'AISEE-Engage/1.0' },
+        });
         if (!threadRes.ok) {
           const body = await threadRes.text().catch(() => '<unreadable>');
           this.logger.warn(
@@ -227,13 +242,27 @@ export class EngageDataTicksActivity {
     }
   }
 
-  private async _checkXAuthorReplied(
+  private async _syncXMetrics(
+    orgId: string,              // owning org, for the analytics token lookup
     sentReplyId: string,
-    postDbId: string,           // DB UUID of the Post record (for integration lookup)
+    postDbId: string,           // DB UUID of the Post record to write metrics onto
     replyTweetUrl: string,      // https://twitter.com/user/status/<tweetId>
     originalTweetId: string,
     authorUsername: string      // X @username of the original post's author
   ): Promise<void> {
+    // Fetch the reply tweet's metrics through the integration's own OAuth token
+    // (the same path regular posts use), so impression_count and bookmark_count
+    // are captured and the X traffic index + impressions are written back to the
+    // Post. Engage posts are excluded from the global analytics job
+    // (source != 'engage'), so we drive it explicitly here.
+    try {
+      await this._postsService.checkPostAnalytics(orgId, postDbId, Date.now());
+    } catch (err) {
+      this.logger.warn(`X analytics sync failed for post ${postDbId}: ${(err as Error).message}`);
+    }
+
+    // Author-replied detection uses the app-only bearer (conversation search),
+    // which is independent of the per-integration analytics token above.
     const bearerToken = process.env.X_BEARER_TOKEN;
     if (!bearerToken) return;
 

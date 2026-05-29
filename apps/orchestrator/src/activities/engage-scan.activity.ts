@@ -56,6 +56,23 @@ function batchKeywordsForX(keywords: string[]): string[] {
   return batches;
 }
 
+// X enforces the original tweet's reply_settings on API replies. Any restricted
+// value means our reply account almost certainly cannot reply, so such tweets are
+// dropped at scan time rather than surfaced as opportunities the user can only
+// fail to reply to.
+//
+// Per the X API v2 docs the *returned* tweet field uses different strings than the
+// *create-post* request parameter — a documented naming inconsistency:
+//   returned (Data Dictionary): 'everyone' | 'mentioned_users' | 'followers'
+//   request  (Create Post):     'following' | 'mentionedUsers' | 'subscribers' | 'verified'
+// 'everyone' is the only "open to all" value and is identical on both sides, so we
+// whitelist it (and an absent value, which defaults to 'everyone') and drop
+// everything else. A whitelist is deliberate: a blocklist of the request-side
+// strings would let the differently-spelled returned values slip through.
+function isXReplyable(replySettings?: string): boolean {
+  return !replySettings || replySettings.toLowerCase() === 'everyone';
+}
+
 // Max concurrent upserts per phase in _persistOpportunities. The posts array is
 // unbounded (union of all matched posts across keywords/subreddits) and persist
 // runs once per enabled org, so an un-chunked Promise.all can exhaust the Prisma
@@ -308,7 +325,14 @@ export class EngageScanActivity {
     const usersMap = new Map(
       (json.includes?.users ?? []).map((u) => [u.id, u])
     );
-    return (json.data ?? []).map((tweet) => {
+    const tweets = (json.data ?? []).filter((t) => isXReplyable(t.reply_settings));
+    const dropped = (json.data?.length ?? 0) - tweets.length;
+    if (dropped > 0) {
+      this.logger.log(
+        `X keyword "${keyword}": skipped ${dropped} reply-restricted tweet(s)`
+      );
+    }
+    return tweets.map((tweet) => {
       const author = usersMap.get(tweet.author_id);
       return {
         id: `x_${tweet.id}`,
@@ -915,7 +939,14 @@ export class EngageScanActivity {
       }>;
     };
 
-    const posts: RawPost[] = (json.data ?? []).map((tweet) => ({
+    const replyable = (json.data ?? []).filter((t) => isXReplyable(t.reply_settings));
+    const dropped = (json.data?.length ?? 0) - replyable.length;
+    if (dropped > 0) {
+      this.logger.log(
+        `X @${username}: skipped ${dropped} reply-restricted tweet(s)`
+      );
+    }
+    const posts: RawPost[] = replyable.map((tweet) => ({
       id: `x_${tweet.id}`,
       platform: 'x',
       externalPostId: tweet.id,

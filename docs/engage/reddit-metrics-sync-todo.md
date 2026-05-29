@@ -1,5 +1,15 @@
 # TODO: Reddit Manual Reply Metrics Sync
 
+## Status (2026-05-29)
+
+**Items 1–3 implemented.** `engageMetricsSyncWorkflow` → `EngageDataTicksActivity.syncEngageMetrics` (mirrored in `EngageService.resyncEngageMetrics` for `/engage/admin/resync-metrics`) now:
+- parses the comment ID from `releaseURL`,
+- fetches `score` / `num_comments` (prefers authenticated `oauth.reddit.com`, falls back to the public JSON endpoint),
+- writes `Post.impressions = (score+comments)×20`, `Post.trafficScore = score×1 + num_comments×3`, and `Post.analytics` (`score` / `comments` labels),
+- and checks `authorReplied`.
+
+**Item 4 (multi-stage schedule) still open**: the workflow currently runs a **single** sync 24 h after the reply. The 1 h / 24 h / 7-day cadence below is not yet implemented. The on-demand `POST /engage/admin/resync-metrics` endpoint covers manual re-sync in the meantime.
+
 ## Background
 
 Reddit manual reply posts are stored in the `Post` table with:

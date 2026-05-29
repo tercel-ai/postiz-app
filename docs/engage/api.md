@@ -32,6 +32,9 @@
   - [PATCH /sent/:id](#patch-apienagesentid) — edit scheduled reply
   - [PATCH /sent/:id/reply-url](#patch-apienagesentidreply-url) — Reddit URL submission
 - [Dashboard Stats — Dashboard Statistics](#dashboard-stats--dashboard-statistics)
+  - [GET /dashboard-stats](#get-apienagedashboard-stats) — Engage Performance panel
+  - [GET /dashboard/daily-replies](#get-apienagedashboarddaily-replies) — Your Posts overlay
+  - [GET /dashboard/traffic](#get-apienagedashboardtraffic) — Traffic from Engage panel
 - [Scan — Manual Scan Trigger](#scan--manual-scan-trigger)
 - [Error Handling](#error-handling)
 
@@ -1200,10 +1203,12 @@ Retrieve summary statistics for sent records (used for the top of the Sent page 
 {
   "weeklyCount": 23,        // Number sent this week
   "responseRate": 35,       // Response rate (integer percentage, 0-100)
-  "totalImpressions": 48620, // Total X impressions (from Post.impressions)
-  "avgLikes": 18            // Average likes received
+  "totalImpressions": 48620, // Total impressions across all engage posts (Post.impressions)
+  "avgLikes": 18            // Average likes — X like_count / Reddit score, read from Post.analytics
 }
 ```
+
+> `avgLikes` is platform-aware: for X it reads the `Likes` metric, for Reddit the `score` metric, from each reply's `Post.analytics` blob (bounded to the 1,000 most recent replies). `totalImpressions` here is the all-platform sum; the Dashboard panel uses the X-only figure (see `/dashboard-stats`).
 
 ---
 
@@ -1276,20 +1281,100 @@ URL format must match: `reddit.com/r/{subreddit}/comments/{post_id}/{title}/{com
 
 ## Dashboard Stats — Dashboard Statistics
 
+The Engage data surfaces inside the existing Dashboard as three panels (no standalone page). Each panel has its own endpoint below.
+
+> **Data source.** All figures derive from `Post` records with `source = 'engage'`. X reply metrics (`impressions`, `trafficScore`, `analytics`) are populated by `PostsService.checkPostAnalytics` using the integration's OAuth token — the same path regular posts use — so `impression_count` and `bookmark_count` are captured. The X traffic index uses the `x` weights in `traffic.calculator.ts` (`likes×1 + replies×2 + retweets×1.5 + quotes×2 + bookmarks×1.5`), which match the spec's `X_traffic_index`. Reddit replies are synced separately (`impressions = (score+comments)×20`, `trafficScore = score×1 + num_comments×3`). Engage posts are intentionally excluded from the global analytics job and aggregated via `EngageDataTicks` instead.
+
 ### GET `/api/engage/dashboard-stats`
 
-Retrieve Dashboard Engage panel data (returns the same structure as `GET /sent/stats`).
+**Panel ① — Engage Performance.** Four headline metrics plus this week's platform split and best reply.
 
 **Response** `200 OK`
 
 ```json
 {
-  "weeklyCount": 23,
-  "responseRate": 35,
-  "totalImpressions": 48620,
-  "avgLikes": 18
+  "weeklyCount": 23,           // 本周互动条数 — engage replies published since this ISO week's Monday (UTC)
+  "responseRate": 35,          // 响应率 — authorReplied / total, integer percentage 0-100 (all-time)
+  "xImpressions": 48620,       // X 总曝光 — SUM(Post.impressions) over all X engage posts (cumulative)
+  "xTrafficIndex": 1284,       // X 流量指数 — SUM(Post.trafficScore) over all X engage posts, rounded
+  "platformSplit": {           // 平台拆分 — reply counts THIS WEEK per platform
+    "x": 15,
+    "reddit": 8
+  },
+  "bestReply": {               // 本周最佳回复 — most-liked reply this week, or null if no engagement data
+    "opportunityId": "uuid",
+    "platform": "x",
+    "content": "Reply text...",
+    "likes": 142,              // X like_count / Reddit score (from Post.analytics)
+    "url": "https://twitter.com/.../status/123"  // Post.releaseURL, falls back to the original post URL
+  }
 }
 ```
+
+- `bestReply` is `null` when no reply this week has any recorded likes/score yet.
+- `weeklyCount` and `platformSplit` are scoped to the current ISO week; `responseRate`, `xImpressions`, `xTrafficIndex` are cumulative.
+
+---
+
+### GET `/api/engage/dashboard/daily-replies`
+
+**Panel ② — "Your Posts" chart overlay.** Daily engage reply counts over a trailing window, for the lime overlay bars on the existing posts chart.
+
+**Query Params**
+
+| Param | Type | Default | Description |
+|---|---|---|---|
+| `days` | `number` (1–90) | `30` | Size of the trailing window (inclusive of today) |
+
+**Response** `200 OK`
+
+```json
+{
+  "days": 30,
+  "items": [
+    { "date": "2026-04-30", "count": 0, "x": 0, "reddit": 0 },
+    { "date": "2026-05-01", "count": 3, "x": 2, "reddit": 1 }
+    // ... one entry per day, zero-filled, oldest → newest, including today
+  ]
+}
+```
+
+- Buckets are keyed by `Post.publishDate` in UTC (`YYYY-MM-DD`) and seeded for every day in the window so the chart is continuous.
+- Includes **today**, which the daily `EngageDataTicks` aggregate does not yet cover.
+
+---
+
+### GET `/api/engage/dashboard/traffic`
+
+**Panel ③ — "Traffic from Engage".** Total traffic index ("clicks") plus a per-reply breakdown for the progress-bar list.
+
+**Query Params**
+
+| Param | Type | Default | Description |
+|---|---|---|---|
+| `platform` | `string` (`x` \| `reddit`) | — (all) | Restrict the aggregate and list to one platform. Pass `x` for the X-only "X 流量指数汇总". |
+| `limit` | `number` (1–50) | `10` | Number of top-traffic replies to return |
+
+**Response** `200 OK`
+
+```json
+{
+  "totalClicks": 1284,         // Total clicks — SUM(Post.trafficScore) over engage posts (filtered by platform if given)
+  "items": [                   // Top-N replies by trafficScore, descending
+    {
+      "opportunityId": "uuid",
+      "platform": "x",
+      "content": "Reply text...",
+      "clicks": 312,           // this reply's Post.trafficScore, rounded
+      "time": "2026-05-20T10:00:00.000Z",  // Post.publishDate
+      "url": "https://twitter.com/.../status/123"  // Post.releaseURL, falls back to the original post URL
+    }
+  ]
+}
+```
+
+- Only replies whose `Post.trafficScore` is non-null appear in `items`.
+- Omit `platform` to total both X and Reddit; pass `platform=x` for the X-only figure the panel headlines.
 
 ---
 

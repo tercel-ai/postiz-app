@@ -261,6 +261,23 @@ export class EngageService implements OnApplicationBootstrap {
     return this._engageRepository.getSentStats(org.id);
   }
 
+  // ─── Dashboard ────────────────────────────────────────────────────────────
+
+  async getDashboardStats(org: Organization) {
+    return this._engageRepository.getDashboardStats(org.id);
+  }
+
+  async getDashboardDailyReplies(org: Organization, days?: number) {
+    return this._engageRepository.getDashboardDailyReplies(org.id, days);
+  }
+
+  async getDashboardTraffic(
+    org: Organization,
+    opts: { platform?: string; limit?: number }
+  ) {
+    return this._engageRepository.getDashboardTraffic(org.id, opts);
+  }
+
   async submitManualReplyUrl(
     org: Organization,
     sentReplyId: string,
@@ -830,6 +847,120 @@ export class EngageService implements OnApplicationBootstrap {
     }
 
     return { status: anyError ? 'error' : 'signaled' };
+  }
+
+  async resyncEngageMetrics(opts: {
+    orgId?: string;
+    platform?: string;
+    dryRun?: boolean;
+  } = {}): Promise<{ found: number; updated: number; errors: number }> {
+    const { orgId, platform, dryRun = false } = opts;
+    const pending = await this._engageRepository.findPendingEngageMetrics(orgId, platform);
+    let updated = 0;
+    let errors = 0;
+
+    for (const reply of pending) {
+      if (dryRun) continue;
+      try {
+        const p = reply.opportunity.platform;
+        if (p === 'reddit' && reply.post?.releaseURL) {
+          await this._syncRedditMetrics(reply.post.id, reply.post.releaseURL, reply.id, reply.opportunity.authorUsername ?? '');
+          updated++;
+        } else if (p === 'x' && reply.post?.releaseURL) {
+          await this._syncXMetrics(reply.organizationId, reply.id, reply.post.id, reply.post.releaseURL, reply.opportunity.externalPostId ?? '', reply.opportunity.authorUsername ?? '');
+          updated++;
+        }
+      } catch (err) {
+        this.logger.warn(`resyncEngageMetrics: failed for sentReplyId=${reply.id}: ${(err as Error).message}`);
+        errors++;
+      }
+    }
+
+    return { found: pending.length, updated, errors };
+  }
+
+  private async _syncRedditMetrics(postId: string, releaseURL: string, sentReplyId: string, authorUsername: string): Promise<void> {
+    const { getRedditToken, redditAuthHeaders } = await import('@gitroom/nestjs-libraries/engage/reddit-auth');
+    const commentId = releaseURL.match(/\/comments\/[^/]+\/[^/]+\/([a-z0-9]+)\/?/)?.[1] ?? null;
+    if (!commentId) return;
+
+    const token = await getRedditToken();
+    const infoUrl = token
+      ? `https://oauth.reddit.com/api/info?id=t1_${commentId}`
+      : `https://www.reddit.com/api/info.json?id=t1_${commentId}`;
+    const infoHeaders = token ? redditAuthHeaders(token) : { 'User-Agent': 'AISEE-Engage/1.0' };
+
+    const infoRes = await fetch(infoUrl, { headers: infoHeaders });
+    if (!infoRes.ok) return;
+
+    const infoJson = (await infoRes.json()) as { data?: { children?: Array<{ data: { score: number; num_comments: number } }> } };
+    const commentData = infoJson.data?.children?.[0]?.data;
+    if (!commentData) return;
+
+    const today = new Date().toISOString().slice(0, 10);
+    const analytics = [
+      { label: 'score', data: [{ total: String(commentData.score), date: today }], percentageChange: 0 },
+      { label: 'comments', data: [{ total: String(commentData.num_comments), date: today }], percentageChange: 0 },
+    ];
+    // Reddit_traffic_index = score×1 + num_comments×3 (Appendix formula).
+    const trafficScore = commentData.score * 1 + commentData.num_comments * 3;
+    await this._engageRepository.updatePostMetrics(
+      postId,
+      Math.round((commentData.score + commentData.num_comments) * 20),
+      analytics,
+      trafficScore
+    );
+
+    const threadMatch = releaseURL.match(/\/r\/([^/]+)\/comments\/([a-z0-9]+)\//);
+    if (!threadMatch || !authorUsername) return;
+    const [, subreddit, postId_] = threadMatch;
+    const threadToken = await getRedditToken();
+    const threadUrl = threadToken
+      ? `https://oauth.reddit.com/r/${subreddit}/comments/${postId_}?comment=${commentId}&depth=1&limit=25`
+      : `https://www.reddit.com/r/${subreddit}/comments/${postId_}/.json?comment=${commentId}&depth=1&limit=25`;
+    const threadRes = await fetch(threadUrl, { headers: threadToken ? redditAuthHeaders(threadToken) : { 'User-Agent': 'AISEE-Engage/1.0' } });
+    if (!threadRes.ok) return;
+    const threadJson = (await threadRes.json()) as Array<{ data?: { children?: Array<{ data?: { replies?: { data?: { children?: Array<{ data?: { author?: string } }> } } } }> } }>;
+    const childReplies = threadJson[1]?.data?.children?.[0]?.data?.replies?.data?.children ?? [];
+    if (childReplies.some((r) => r.data?.author === authorUsername)) {
+      await this._engageRepository.markAuthorReplied(sentReplyId);
+    }
+  }
+
+  private async _syncXMetrics(orgId: string, sentReplyId: string, postId: string, replyTweetUrl: string, originalTweetId: string, authorUsername: string): Promise<void> {
+    // Fetch the reply tweet's metrics through the integration's own OAuth token
+    // (the same path regular posts use), so impression_count and bookmark_count
+    // are captured and the X traffic index + impressions are written back to the
+    // Post. The engage posts are excluded from the global analytics job
+    // (source != 'engage'), so we drive it explicitly here.
+    try {
+      await this._postsService.checkPostAnalytics(orgId, postId, Date.now());
+    } catch (err) {
+      this.logger.warn(`X analytics sync failed for post ${postId}: ${(err as Error).message}`);
+    }
+
+    // Author-replied detection uses the app-only bearer (conversation search),
+    // which is independent of the per-integration analytics token above.
+    const bearerToken = process.env.X_BEARER_TOKEN;
+    if (!bearerToken) return;
+    const replyTweetId = replyTweetUrl.match(/\/status\/(\d+)/)?.[1];
+    if (!replyTweetId) return;
+
+    const authorRes = await fetch(`https://api.twitter.com/2/users/by/username/${authorUsername}`, { headers: { Authorization: `Bearer ${bearerToken}` } });
+    if (!authorRes.ok) return;
+    const authorJson = (await authorRes.json()) as { data?: { id: string } };
+    const originalAuthorId = authorJson.data?.id;
+    if (!originalAuthorId) return;
+
+    const res = await fetch(
+      `https://api.twitter.com/2/tweets/search/recent?query=conversation_id:${originalTweetId}&tweet.fields=author_id&max_results=50`,
+      { headers: { Authorization: `Bearer ${bearerToken}` } }
+    );
+    if (!res.ok) return;
+    const json = (await res.json()) as { data?: Array<{ id: string; author_id: string }> };
+    if ((json.data ?? []).some((t) => t.author_id === originalAuthorId && BigInt(t.id) > BigInt(replyTweetId))) {
+      await this._engageRepository.markAuthorReplied(sentReplyId);
+    }
   }
 
   // Called by engage.controller after creating an EngageSentReply to start 24h metrics sync.
