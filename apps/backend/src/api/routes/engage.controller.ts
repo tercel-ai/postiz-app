@@ -381,16 +381,16 @@ export class EngageController {
 
   // ─── Send / Schedule Reply (X via Post pipeline) ─────────────────────────
 
-  @ApiOperation({ summary: 'Send an immediate reply to an opportunity via X' })
-  @ApiResponse({ status: 404, description: 'Opportunity not found or already replied' })
-  @Post('/opportunities/:id/reply')
-  sendReply(
+  @ApiOperation({ summary: 'Cancel a scheduled reply and immediately send it' })
+  @ApiResponse({ status: 400, description: 'No scheduled reply found, or post already published' })
+  @Post('/opportunities/:id/send-now')
+  cancelAndSendNow(
     @GetOrgFromRequest() org: Organization,
     @GetUserFromRequest() user: User,
     @Param('id') id: string,
     @Body() body: SendReplyDto
   ) {
-    return this._engageService.sendReply(org, user?.id, id, body);
+    return this._engageService.cancelAndSendNow(org, user?.id, id, body);
   }
 
   @ApiOperation({ summary: 'Schedule a reply to an opportunity for future publishing' })

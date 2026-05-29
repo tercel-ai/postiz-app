@@ -642,6 +642,18 @@ export class EngageRepository {
     }
   }
 
+  // Resets a SCHEDULED opportunity back to NEW so that sendReply can claim it.
+  // Used by cancelAndSendNow after the scheduled post has been deleted.
+  async resetScheduledOpportunity(organizationId: string, opportunityId: string) {
+    const result = await this._oppState.model.engageOpportunityState.updateMany({
+      where: { organizationId, opportunityId, status: 'SCHEDULED' },
+      data: { status: 'NEW' },
+    });
+    if (result.count === 0) {
+      throw new BadRequestException('Opportunity is not in SCHEDULED state');
+    }
+  }
+
   async deletePostById(postId: string) {
     try {
       await this._post.model.post.delete({ where: { id: postId } });
@@ -1079,6 +1091,13 @@ export class EngageRepository {
       include: {
         post: { select: { id: true, content: true, state: true, publishDate: true } },
       },
+    });
+  }
+
+  async getSentReplyByOpportunity(organizationId: string, opportunityId: string) {
+    return this._sentReply.model.engageSentReply.findUnique({
+      where: { organizationId_opportunityId: { organizationId, opportunityId } },
+      include: { post: { select: { id: true, state: true } } },
     });
   }
 

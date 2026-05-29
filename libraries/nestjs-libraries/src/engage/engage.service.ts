@@ -469,6 +469,23 @@ export class EngageService implements OnApplicationBootstrap {
     }
   }
 
+  async cancelAndSendNow(
+    org: Organization,
+    userId: string | undefined,
+    opportunityId: string,
+    body: SendReplyDto
+  ) {
+    const existing = await this._engageRepository.getSentReplyByOpportunity(org.id, opportunityId);
+    if (existing) {
+      if (existing.post.state !== 'QUEUE') {
+        throw new BadRequestException('Scheduled post is no longer pending — cannot cancel');
+      }
+      await this._engageRepository.deletePostById(existing.postId);
+      await this._engageRepository.resetScheduledOpportunity(org.id, opportunityId);
+    }
+    return this.sendReply(org, userId, opportunityId, body);
+  }
+
   async scheduleReply(
     org: Organization,
     userId: string | undefined,

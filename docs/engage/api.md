@@ -21,7 +21,7 @@
 - [Opportunities — Signal Feed](#opportunities--signal-feed)
 - [Draft Generation — AI Draft Generation (SSE)](#draft-generation--ai-draft-generation-sse)
 - [Reply Actions — Send/Schedule/Manual Reply](#reply-actions--sendschedulemanual-reply)
-  - [POST /reply](#post-apienageopportunitiesidreply) — immediate single
+  - [POST /send-now](#post-apienageopportunitiesidsend-now) — immediate single (cancels scheduled if exists)
   - [POST /schedule](#post-apienageopportunitiesidschedule) — scheduled single
   - [POST /batch-schedule](#post-apienageopportunitiesidatch-schedule) — scheduled multi-integration
   - [POST /batch-send](#post-apienageopportunitiesidatch-send) — immediate multi-integration
@@ -945,11 +945,11 @@ while (true) {
 
 ## Reply Actions — Send/Schedule/Manual Reply
 
-### POST `/api/engage/opportunities/:id/reply`
+### POST `/api/engage/opportunities/:id/send-now`
 
-**Send Immediately** X reply (real-time call to X API via OAuth).
+**Send Immediately** — X reply (real-time call to X API via OAuth). If the opportunity already has a scheduled reply in `QUEUE` state, it is automatically cancelled first before sending.
 
-> Internally: Atomic lock of opportunity → Call X API to post tweet → Write EngageSentReply → Trigger 24h metrics sync.
+> Internally: Check for existing scheduled reply → cancel if found → Atomic lock of opportunity → Call X API to post tweet → Write EngageSentReply → Trigger 24h metrics sync.
 
 **Request Body**
 
@@ -965,6 +965,7 @@ while (true) {
 **Response** `200 OK` — Returns `EngageSentReply`
 
 **Errors**
+- `400` — Existing scheduled post is no longer pending (already published or failed)
 - `404` — Opportunity doesn't exist or already replied (concurrency protection)
 - `500` — X API call failed (opportunity status will automatically roll back)
 

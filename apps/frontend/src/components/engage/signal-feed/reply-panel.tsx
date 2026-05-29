@@ -162,7 +162,7 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
     if (!draft || !selectedAccountId) return;
     setSending(true);
     try {
-      const res = await fetch(`/engage/opportunities/${opportunity.id}/reply`, {
+      const res = await fetch(`/engage/opportunities/${opportunity.id}/send-now`, {
         method: 'POST',
         body: JSON.stringify({
           integrationId: selectedAccountId,

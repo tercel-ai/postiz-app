@@ -8,6 +8,11 @@ import { useT } from '@gitroom/react/translation/get.transation.service.client';
 import { useFetch } from '@gitroom/helpers/utils/custom.fetch';
 import dayjs from 'dayjs';
 
+// Module-level so it survives StrictMode's mount→unmount→remount cycle and any
+// component re-render. Each OAuth callback is a fresh full-page navigation, so
+// this starts empty per flow and holds at most a handful of keys.
+const processedAuthCodes = new Set<string>();
+
 export const ContinueIntegration: FC<{
   provider: string;
   searchParams: any;
@@ -19,6 +24,21 @@ export const ContinueIntegration: FC<{
   const [error, setError] = useState(false);
 
   useEffect(() => {
+    // OAuth authorization codes are single-use. React StrictMode (dev) invokes
+    // effects twice, and a re-render with a fresh `searchParams` object identity
+    // re-fires this effect — both would POST /connect with the same code. The
+    // first exchange consumes the code; the second hits the provider with an
+    // already-redeemed code and is rejected (e.g. Reddit returns HTTP 403). The
+    // backend's sequential state guard doesn't catch a concurrent double-fire, so
+    // we dedupe by code here to guarantee exactly one exchange per authorization.
+    const dedupeKey = `${provider}:${searchParams?.state ?? ''}:${
+      searchParams?.code ?? ''
+    }`;
+    if (processedAuthCodes.has(dedupeKey)) {
+      return;
+    }
+    processedAuthCodes.add(dedupeKey);
+
     (async () => {
       const timezone = String(dayjs.tz().utcOffset());
       const modifiedParams = { ...searchParams };
