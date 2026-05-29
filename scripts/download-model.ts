@@ -2,14 +2,19 @@ import Module from 'module';
 import path from 'path';
 
 // Intercept 'sharp' before @xenova/transformers loads it.
-// TypeScript `import` is hoisted, so we use Module._resolveFilename
-// to redirect any require('sharp') to a fake stub we register in cache.
+// We must catch both bare `require('sharp')` and relative subpath requires
+// (e.g. `require('./sharp')` inside sharp/lib/utility.js). The previous
+// request-string-only check missed those. Now we also resolve the path and
+// check whether it lands inside any sharp package directory.
 const SHARP_STUB_ID = path.resolve(__dirname, '__sharp_stub__');
 
 const mockSharp: any = function () {
     return { toFormat: () => ({ toBuffer: () => Promise.resolve(Buffer.alloc(0)) }) };
 };
-mockSharp.cache = false;
+mockSharp.cache = () => {};
+mockSharp.format = () => ({});
+mockSharp.versions = {};
+mockSharp.queue = { on: () => {} };
 
 require.cache[SHARP_STUB_ID] = {
     id: SHARP_STUB_ID,
@@ -21,10 +26,18 @@ require.cache[SHARP_STUB_ID] = {
     parent: null,
 } as any;
 
+const SHARP_RE = /[/\\]node_modules[/\\](?:.*[/\\])?sharp[/\\]/;
+
 const _original = (Module as any)._resolveFilename.bind(Module);
-(Module as any)._resolveFilename = function (request: string, ...rest: any[]) {
-    if (request === 'sharp' || request.endsWith('/sharp')) return SHARP_STUB_ID;
-    return _original(request, ...rest);
+(Module as any)._resolveFilename = function (request: string, parent: any, ...rest: any[]) {
+    // Fast path: request string already looks like sharp
+    if (request === 'sharp' || request.startsWith('sharp/') || SHARP_RE.test(request)) {
+        return SHARP_STUB_ID;
+    }
+    // Slow path: resolve the real path and check if it falls inside a sharp package
+    const resolved: string = _original(request, parent, ...rest);
+    if (SHARP_RE.test(resolved)) return SHARP_STUB_ID;
+    return resolved;
 };
 
 async function download() {
