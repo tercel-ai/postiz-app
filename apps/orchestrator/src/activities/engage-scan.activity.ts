@@ -156,6 +156,9 @@ export class EngageScanActivity {
     ]);
 
     const allRaw = deduplicatePosts([...xPosts, ...redditPosts]);
+    this.logger.log(
+      `Global keyword scan raw yield: X=${xPosts.length}, Reddit=${redditPosts.length}, deduped=${allRaw.length}`
+    );
     if (allRaw.length) {
       await Promise.all(orgContexts.map((ctx) => this._fanOutToOrg(ctx, allRaw)));
     }
@@ -342,13 +345,12 @@ export class EngageScanActivity {
     const usersMap = new Map(
       (json.includes?.users ?? []).map((u) => [u.id, u])
     );
+    const returned = json.data?.length ?? 0;
     const tweets = (json.data ?? []).filter((t) => isXReplyable(t.reply_settings));
-    const dropped = (json.data?.length ?? 0) - tweets.length;
-    if (dropped > 0) {
-      this.logger.log(
-        `X keyword "${keyword}": skipped ${dropped} reply-restricted tweet(s)`
-      );
-    }
+    const dropped = returned - tweets.length;
+    this.logger.log(
+      `X search "${keyword.slice(0, 60)}": ${returned} returned, ${tweets.length} replyable, ${dropped} reply-restricted`
+    );
     return tweets.map((tweet) => {
       const author = usersMap.get(tweet.author_id);
       return {
@@ -646,9 +648,16 @@ export class EngageScanActivity {
         : p
     );
 
-    const scored = orgPosts
+    const matched = orgPosts
       .map((p) => scorePost(p, orgKeywords))
-      .filter((p): p is ScoredPost => p !== null && p.score >= MIN_SCORE);
+      .filter((p): p is ScoredPost => p !== null);
+    const scored = matched.filter((p) => p.score >= MIN_SCORE);
+    this.logger.log(
+      `Fan-out org=${ctx.organizationId}: ${orgPosts.length} raw → ${matched.length} keyword-matched → ${scored.length} scored>=${MIN_SCORE}` +
+        (matched.length && !scored.length
+          ? ` (top score ${Math.max(...matched.map((p) => p.score))})`
+          : '')
+    );
 
     if (scored.length) {
       const classified = await this._classifyIntents(scored);
