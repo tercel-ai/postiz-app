@@ -2,6 +2,7 @@ import { ArrayMaxSize, IsArray, IsEnum, IsIn, IsInt, IsOptional, IsString, Max, 
 import { Transform, Type } from 'class-transformer';
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { State } from '@prisma/client';
+import { VALID_POST_SOURCES, PostSource } from '@gitroom/nestjs-libraries/dtos/posts/post-source';
 
 export const VALID_CHANNELS = [
   'x', 'reddit', 'linkedin', 'linkedin-page', 'instagram',
@@ -63,6 +64,21 @@ export class GetPostsListDto {
   @IsOptional()
   @IsString()
   sourcePostId?: string;
+
+  // Filter by Post.source. Single value ('engage') or comma-separated list
+  // ('calendar,chat'); omitting it returns all sources. Mirrors GetPostsDto.
+  @ApiPropertyOptional({ enum: VALID_POST_SOURCES, isArray: true })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(VALID_POST_SOURCES.length)
+  @IsString({ each: true })
+  @IsIn(VALID_POST_SOURCES as unknown as string[], { each: true })
+  @Transform(({ value }) =>
+    (Array.isArray(value) ? value : [value]).flatMap((v: string) =>
+      v.includes(',') ? v.split(',') : [v]
+    )
+  )
+  source?: PostSource[];
 
   @ApiPropertyOptional({ enum: ['templates', 'timeline'], default: 'timeline' })
   @IsOptional()

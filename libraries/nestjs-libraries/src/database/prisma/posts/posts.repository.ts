@@ -284,6 +284,7 @@ export class PostsRepository {
       // clause with the calendar one. See the long comment in getPosts above
       // for the full rationale.
       ...(query.state ? { state: query.state } : {}),
+      ...(query.source?.length ? { source: { in: query.source } } : {}),
       ...(query.integrationId?.length
         ? { integrationId: { in: query.integrationId } }
         : {}),
@@ -354,6 +355,7 @@ export class PostsRepository {
       ...(query.view === 'templates' ? { sourcePostId: null } : {}),
       ...(query.sourcePostId ? { sourcePostId: query.sourcePostId } : {}),
       ...(query.state ? { state: query.state } : {}),
+      ...(query.source?.length ? { source: { in: query.source } } : {}),
       ...(query.integrationId?.length
         ? { integrationId: { in: query.integrationId } }
         : {}),

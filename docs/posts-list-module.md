@@ -42,6 +42,7 @@ Requires organization-level authentication. The `organizationId` is extracted fr
 | `state` | string | No | — (all states) | Must be a valid `State` enum value | Filter by post status |
 | `integrationId` | string[] | No | — (all integrations) | Array of strings; supports comma-separated | Filter by specific integration account IDs |
 | `channel` | string[] | No | — (all channels) | Array of valid provider identifiers; max 30 items | Filter by platform/channel type |
+| `source` | string[] | No | — (all sources) | Subset of `calendar`, `chat`, `engage`; single or comma-separated | Filter by `Post.source` attribution |
 | `view` | string | No | `timeline` | One of: `templates`, `timeline` | View mode (see below) |
 | `sourcePostId` | string | No | — | Valid post ID | Filter to show only clones of a specific post |
 | `sortBy` | string | No | `publishDate` | One of: `publishDate`, `createdAt`, `updatedAt`, `state` | Field to sort results by |
@@ -222,6 +223,14 @@ GET /posts/list?channel=x
 GET /posts/list?channel=x,reddit,linkedin
 ```
 
+### Filter by source
+
+```
+GET /posts/list?source=engage          → only Engage replies
+GET /posts/list?source=calendar,chat    → standard posts only (exclude Engage)
+GET /posts/list                         → all sources (no restriction)
+```
+
 ### Combined filters with pagination and sorting
 
 ```
@@ -233,7 +242,7 @@ GET /posts/list?state=PUBLISHED&channel=x,instagram&page=2&pageSize=50&sortBy=cr
 ## 7. Filtering Behavior
 
 - All filters are **AND**-based — when multiple filters are provided, posts must match **all** conditions.
-- Within array filters (`integrationId`, `channel`), values are **OR**-based — a post matches if it belongs to **any** of the specified values.
+- Within array filters (`integrationId`, `channel`, `source`), values are **OR**-based — a post matches if it belongs to **any** of the specified values.
 - Omitting a filter means **no restriction** on that dimension (returns all).
 - Deleted posts (`deletedAt` is not null) and child/comment posts (`parentPostId` is not null) are always excluded.
 - If `sourcePostId` is provided, it takes precedence over `view=templates`.
@@ -273,6 +282,7 @@ const where = {
   ...(query.view === 'templates' ? { sourcePostId: null } : {}),
   ...(query.sourcePostId ? { sourcePostId: query.sourcePostId } : {}),
   ...(query.state ? { state: query.state } : {}),
+  ...(query.source?.length ? { source: { in: query.source } } : {}),
   ...(query.integrationId?.length
     ? { integrationId: { in: query.integrationId } }
     : {}),
@@ -282,9 +292,14 @@ const where = {
 };
 ```
 
+> The sibling `locatePostInList` (`GET /posts/list/locate`) mirrors this exact
+> `where` — including the `source` filter — so a located page index stays
+> consistent with the same filters applied to `/posts/list`.
+
 ### Validation
 
 - `channel` values are validated against a whitelist of 30 known provider identifiers (`VALID_CHANNELS`)
+- `source` values are validated against `VALID_POST_SOURCES` (`calendar`, `chat`, `engage`); an unknown value yields `400`
 - Array parameters support both repeated query params (`?channel=x&channel=reddit`) and comma-separated values (`?channel=x,reddit`)
 - `channel` array is capped at 30 items via `@ArrayMaxSize(30)`
 - `view` must be one of `templates` or `timeline` (defaults to `timeline`)

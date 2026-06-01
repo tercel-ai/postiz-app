@@ -17,6 +17,10 @@ import {
   Channel,
   VALID_CHANNELS,
 } from '@gitroom/nestjs-libraries/dtos/posts/get.posts-list.dto';
+import {
+  VALID_POST_SOURCES,
+  PostSource,
+} from '@gitroom/nestjs-libraries/dtos/posts/post-source';
 
 export class LocatePostInListDto {
   @ApiProperty({ description: 'Post id whose page within /posts/list to locate' })
@@ -69,6 +73,21 @@ export class LocatePostInListDto {
   @IsOptional()
   @IsString()
   sourcePostId?: string;
+
+  // Must mirror GetPostsListDto.source so the located page index matches the
+  // index the post occupies under the same /posts/list filters.
+  @ApiPropertyOptional({ enum: VALID_POST_SOURCES, isArray: true })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(VALID_POST_SOURCES.length)
+  @IsString({ each: true })
+  @IsIn(VALID_POST_SOURCES as unknown as string[], { each: true })
+  @Transform(({ value }) =>
+    (Array.isArray(value) ? value : [value]).flatMap((v: string) =>
+      v.includes(',') ? v.split(',') : [v]
+    )
+  )
+  source?: PostSource[];
 
   @ApiPropertyOptional({ enum: ['templates', 'timeline'], default: 'timeline' })
   @IsOptional()
