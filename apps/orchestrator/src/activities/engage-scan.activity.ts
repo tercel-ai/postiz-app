@@ -134,6 +134,11 @@ export class EngageScanActivity {
     if (!globalKeywordTexts.size) return;
 
     const keywords = Array.from(globalKeywordTexts);
+    this.logger.log(
+      `Global keyword scan: ${keywords.length} keyword(s) across ${orgContexts.length} org(s): [${keywords
+        .map((k) => `"${k}"`)
+        .join(', ')}]`
+    );
     const xToken = await this._findAnyXToken(orgContexts);
     if (!xToken) {
       this.logger.warn(
@@ -983,17 +988,58 @@ export class EngageScanActivity {
   // ─── Helpers ──────────────────────────────────────────────────────────────
 
   private async _findAnyXToken(orgContexts: OrgContext[]): Promise<string | null> {
+    this.logger.log(
+      `X token lookup: scanning ${orgContexts.length} enabled org(s) for an engage-enabled X reply account`
+    );
     for (const ctx of orgContexts) {
-      const account = ctx.xReplyAccounts.find((a) => a.engageEnabled);
+      const total = ctx.xReplyAccounts.length;
+      const enabledAccounts = ctx.xReplyAccounts.filter((a) => a.engageEnabled);
+      this.logger.log(
+        `  org=${ctx.organizationId}: ${total} X reply account(s), ${enabledAccounts.length} engage-enabled`
+      );
+      const account = enabledAccounts[0];
       if (!account) continue;
+
       const integration = await this._integration.model.integration.findUnique({
         where: { id: account.integrationId },
-        select: { token: true },
+        select: {
+          token: true,
+          disabled: true,
+          deletedAt: true,
+          refreshNeeded: true,
+          inBetweenSteps: true,
+          providerIdentifier: true,
+        },
       });
-      if (integration?.token) {
-        return this._extractOauthToken(integration.token as string | Record<string, string>);
+      if (!integration) {
+        this.logger.warn(
+          `  org=${ctx.organizationId}: reply-account integration ${account.integrationId} not found (deleted?)`
+        );
+        continue;
+      }
+      this.logger.log(
+        `  org=${ctx.organizationId}: integration=${account.integrationId} provider=${integration.providerIdentifier} ` +
+          `disabled=${integration.disabled} refreshNeeded=${integration.refreshNeeded} ` +
+          `inBetweenSteps=${integration.inBetweenSteps} deleted=${integration.deletedAt != null} hasToken=${!!integration.token}`
+      );
+      if (integration.token) {
+        const extracted = this._extractOauthToken(
+          integration.token as string | Record<string, string>
+        );
+        if (extracted) {
+          this.logger.log(
+            `X token lookup: using token from org=${ctx.organizationId} integration=${account.integrationId}`
+          );
+          return extracted;
+        }
+        this.logger.warn(
+          `  org=${ctx.organizationId}: integration ${account.integrationId} has a token but extraction returned null (unexpected token shape)`
+        );
       }
     }
+    this.logger.warn(
+      'X token lookup: no usable token found — no org has an engage-enabled X reply account with a valid token'
+    );
     return null;
   }
 
