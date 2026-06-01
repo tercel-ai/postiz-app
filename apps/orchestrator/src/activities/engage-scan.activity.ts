@@ -135,6 +135,11 @@ export class EngageScanActivity {
 
     const keywords = Array.from(globalKeywordTexts);
     const xToken = await this._findAnyXToken(orgContexts);
+    if (!xToken) {
+      this.logger.warn(
+        `X global scan skipped: no usable X token across ${orgContexts.length} org(s)`
+      );
+    }
 
     const [xPosts, redditPosts] = await Promise.all([
       xToken ? this._scanXPlatformGlobal(xToken, keywords) : Promise.resolve<RawPost[]>([]),
@@ -272,6 +277,9 @@ export class EngageScanActivity {
         );
       }
     }
+    this.logger.log(
+      `X global scan: ${results.length} post(s) across ${batches.length} batch(es) / ${keywords.length} keyword(s)`
+    );
     return results;
   }
 
