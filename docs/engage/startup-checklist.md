@@ -249,6 +249,17 @@ Engage includes 5 core asynchronous workflows with **different trigger timings**
 | `ENGAGE_CHANNEL_SCAN_INTERVAL_HOURS` | `3` | Reddit monitored subreddit scan |
 | `ENGAGE_TRACKED_SCAN_INTERVAL_HOURS` | `3` | X tracked account scan |
 
+**Scan Tuning Environment Variables** (Optional `.env` config, defaults built-in):
+
+| Variable | Default | Description |
+|---|---|---|
+| `ENGAGE_OPPORTUNITY_TTL_DAYS` | `7` | NEW opportunities older than this are marked EXPIRED |
+| `ENGAGE_MIN_SCORE` | `60` | Minimum total score (0–100) for a scored post to become an opportunity. Lower → more (noisier) opportunities; raise → only strong matches |
+| `ENGAGE_X_SEARCH_DELAY_MS` | `1000` | Inter-request pacing for X keyword search (rate-limit guard) |
+| `ENGAGE_REDDIT_SEARCH_DELAY_MS` | `500` | Inter-request pacing for Reddit keyword search (rate-limit guard) |
+
+> These are read once at orchestrator process start — **restart the orchestrator** for changes to take effect.
+
 **Cold Start Check** (Default Temporal UI: `http://localhost:8233`):
 
 - [ ] **After Cold Start**: `engage-data-ticks`, `engage-keyword-global`, `engage-channel-global`, and `engage-tracked-global` should all appear in the Running list.

@@ -20,9 +20,14 @@ import utc from 'dayjs/plugin/utc';
 dayjs.extend(utc);
 
 const OPPORTUNITY_TTL_DAYS = Number(process.env.ENGAGE_OPPORTUNITY_TTL_DAYS ?? 7);
-const MIN_SCORE = 60;
-const X_SEARCH_DELAY_MS = 1000;
-const REDDIT_SEARCH_DELAY_MS = 500;
+// Minimum total score for a scored post to become an opportunity. Lower it to
+// surface more (noisier) opportunities; raise it to keep only strong matches.
+const MIN_SCORE = Number(process.env.ENGAGE_MIN_SCORE ?? 60);
+// Inter-request pacing for X / Reddit search to stay under rate limits.
+const X_SEARCH_DELAY_MS = Number(process.env.ENGAGE_X_SEARCH_DELAY_MS ?? 1000);
+const REDDIT_SEARCH_DELAY_MS = Number(
+  process.env.ENGAGE_REDDIT_SEARCH_DELAY_MS ?? 500
+);
 
 const REDDIT_BROWSER_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
