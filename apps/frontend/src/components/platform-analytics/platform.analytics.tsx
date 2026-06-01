@@ -12,6 +12,10 @@ import { EngagePerformancePanel } from '@gitroom/frontend/components/engage/dash
 import { TrafficFromEngagePanel } from '@gitroom/frontend/components/engage/dashboard/traffic-from-engage-panel';
 import { DailyEngageRepliesPanel } from '@gitroom/frontend/components/engage/dashboard/daily-engage-replies-panel';
 import { EngageImpressionsPanel } from '@gitroom/frontend/components/engage/dashboard/engage-impressions-panel';
+import { EngageTrafficByPlatformPanel } from '@gitroom/frontend/components/engage/dashboard/engage-traffic-by-platform-panel';
+import { TopEngageSourcesPanel } from '@gitroom/frontend/components/engage/dashboard/top-engage-sources-panel';
+import { EngageCalendarPanel } from '@gitroom/frontend/components/engage/dashboard/engage-calendar-panel';
+import { UpcomingEngageRepliesPanel } from '@gitroom/frontend/components/engage/dashboard/upcoming-engage-replies-panel';
 import { Select } from '@gitroom/react/form/select';
 import { Button } from '@gitroom/react/form/button';
 import { useRouter } from 'next/navigation';
@@ -277,9 +281,19 @@ export const PlatformAnalytics = () => {
       <div className="bg-newBgColorInner flex-1 flex-col flex p-[20px] gap-[12px]">
         <div className="flex flex-col gap-[12px]">
           <EngagePerformancePanel />
-          <EngageImpressionsPanel />
-          <DailyEngageRepliesPanel />
-          <TrafficFromEngagePanel />
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-[12px]">
+            <DailyEngageRepliesPanel />
+            <EngageImpressionsPanel />
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-[12px]">
+            <EngageTrafficByPlatformPanel />
+            <TopEngageSourcesPanel />
+            <TrafficFromEngagePanel />
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-[12px]">
+            <EngageCalendarPanel />
+            <UpcomingEngageRepliesPanel />
+          </div>
         </div>
         {!!options.length && (
           <div className="flex-1 flex flex-col gap-[14px]">

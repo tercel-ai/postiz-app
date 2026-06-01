@@ -431,7 +431,7 @@ inside the requested window.
 
 | Endpoint | Data Source | Returns |
 |----------|------------|---------|
-| `GET /engage/dashboard/summary` | Post + EngageSentReply tables (direct query) | `{ weeklyCount, responseRate, totalImpressions, totalTrafficScore, bestReply, ... }` |
+| `GET /engage/dashboard/summary` | Post + EngageSentReply tables (direct query) | `{ repliesCount, responseRate, totalImpressions, totalTrafficScore, bestReply, ... }` |
 | `GET /engage/dashboard/replies-trend` | EngageSentReply + Post tables (direct query) | `{ days, items: [{ date, count, x, reddit }] }` |
 | `GET /engage/dashboard/traffics` | Post table (direct query) | `{ totalClicks, items: [{ clicks, content, platform, ... }] }` |
 | `GET /engage/dashboard/impressions` | Post table (direct query) | `[{ date, value, platform }]` |

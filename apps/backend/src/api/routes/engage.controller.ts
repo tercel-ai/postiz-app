@@ -459,10 +459,17 @@ export class EngageController {
     return this._engageService.listSentReplies(org, query);
   }
 
-  @ApiOperation({ summary: 'Aggregate stats for sent replies (impressions, response rate)' })
+  @ApiOperation({ summary: 'Aggregate stats for sent replies, scoped by the same date/platform/status filters as /sent (no date = all-time)' })
   @Get('/sent/stats')
-  getSentStats(@GetOrgFromRequest() org: Organization) {
-    return this._engageService.getSentStats(org);
+  getSentStats(
+    @GetOrgFromRequest() org: Organization,
+    @Query() query: ListSentDto
+  ) {
+    return this._engageService.getSentStats(org, {
+      date: query.date,
+      platform: query.platform,
+      status: query.status,
+    });
   }
 
   @ApiOperation({ summary: 'Edit content / schedule of a scheduled (QUEUE) engage reply' })
@@ -499,7 +506,10 @@ export class EngageController {
     @GetOrgFromRequest() org: Organization,
     @Query() query: DashboardSummaryDto
   ) {
-    return this._engageService.getDashboardSummary(org, query.platform);
+    return this._engageService.getDashboardSummary(org, {
+      platform: query.platform,
+      date: query.date,
+    });
   }
 
   // Panel ② "Your Posts" overlay: Engage reply counts bucketed by publish day.
@@ -537,6 +547,21 @@ export class EngageController {
       org,
       (query.period as 'daily' | 'weekly' | 'monthly') || 'daily'
     );
+  }
+
+  // Panel ⑤ "Top engage sources": engage replies grouped by the original post
+  // author (traffic source), ranked by traffic index. Reuses the traffics query
+  // params (optional platform filter + limit).
+  @ApiOperation({ summary: 'Top engage traffic sources grouped by original author (Top engage sources panel)' })
+  @Get('/dashboard/top-sources')
+  getDashboardTopSources(
+    @GetOrgFromRequest() org: Organization,
+    @Query() query: DashboardTrafficsDto
+  ) {
+    return this._engageService.getDashboardTopSources(org, {
+      platform: query.platform,
+      limit: query.limit,
+    });
   }
 
   // ─── Admin: resync metrics ─────────────────────────────────────────────────

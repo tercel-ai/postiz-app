@@ -257,14 +257,20 @@ export class EngageService implements OnApplicationBootstrap {
     return this._engageRepository.getSentReplyById(org.id, id);
   }
 
-  async getSentStats(org: Organization) {
-    return this._engageRepository.getSentStats(org.id);
+  async getSentStats(
+    org: Organization,
+    dto: { date?: 'today' | 'week' | 'month'; platform?: string; status?: string } = {}
+  ) {
+    return this._engageRepository.getSentStats(org.id, dto);
   }
 
   // ─── Dashboard ────────────────────────────────────────────────────────────
 
-  async getDashboardSummary(org: Organization, platform?: string) {
-    return this._engageRepository.getDashboardSummary(org.id, { platform });
+  async getDashboardSummary(
+    org: Organization,
+    opts: { platform?: string; date?: string } = {}
+  ) {
+    return this._engageRepository.getDashboardSummary(org.id, opts);
   }
 
   async getDashboardRepliesTrend(org: Organization, days?: number) {
@@ -283,6 +289,13 @@ export class EngageService implements OnApplicationBootstrap {
     period: 'daily' | 'weekly' | 'monthly' = 'daily'
   ) {
     return this._engageRepository.getDashboardImpressions(org.id, period);
+  }
+
+  async getDashboardTopSources(
+    org: Organization,
+    opts: { platform?: string; limit?: number }
+  ) {
+    return this._engageRepository.getDashboardTopSources(org.id, opts);
   }
 
   async submitManualReplyUrl(

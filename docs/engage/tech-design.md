@@ -594,7 +594,7 @@ export class EngageController {
     @Query() query: ListSentDto  // platform, status, date, page, limit
   ) { ... }
 
-  // Sent page top-4 stats cells (Issued this week / Reply rate / Total Impressions / Avg Likes)
+  // Sent page top-4 stats cells (发出回复 all-time / Reply rate / Total Impressions / Avg Likes)
   @Get('/sent/stats')
   getSentStats(@GetOrgFromRequest() org: Organization) { ... }
   // Returns: SentStatsResult
@@ -740,12 +740,13 @@ export class ListSentDto {
   limit?:     number;
 }
 
-// GET /engage/sent/stats — top-4 cells shown above Sent history list
-// Separate from dashboard stats; scoped to all-time (not just this week)
+// GET /engage/sent/stats — stat cells shown above Sent history list.
+// Scoped by the same date/platform/status filters as /sent (all-time when no date).
 interface SentStatsResult {
-  weeklyCount:       number;   // issued this week: COUNT Post(source='engage') WHERE publishDate >= Mon
+  repliesCount:       number;   // replies in the window (all-time default): COUNT EngageSentReply
   responseRate:      number;   // reply rate: COUNT(authorReplied=true) / total × 100
-  totalImpressions:  number;   // total impressions: SUM(Post.impressions) WHERE source='engage'
+  totalImpressions:  number;   // total impressions: SUM(Post.impressions) over windowed engage posts
+  totalTrafficScore: number;   // total traffic: SUM(Post.trafficScore) over windowed engage posts, rounded
   avgLikes:          number;   // avg likes: AVG of X likes + Reddit score from Post.analytics
 }
 
@@ -1921,7 +1922,7 @@ WHERE state = 'PUBLISHED'
 **① `GET /api/engage/dashboard/summary?platform=x|reddit`** — Engagement Performance panel
 ```typescript
 {
-  weeklyCount:       number,        // Replies — this ISO week, scoped by platform if provided
+  repliesCount:       number,        // Replies — all-time SENT (PUBLISHED), scoped by platform if provided
   responseRate:      number,        // Reply rate — authorReplied / total × 100, scoped by platform if provided
   totalImpressions:  number,        // Total impressions — selected platform or combined
   totalTrafficScore: number,        // Traffic — selected platform or combined, rounded

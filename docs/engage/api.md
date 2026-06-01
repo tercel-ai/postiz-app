@@ -1196,20 +1196,29 @@ Retrieve the list of sent replies (includes original post summary and metrics da
 
 ### GET `/api/engage/sent/stats`
 
-Retrieve summary statistics for sent records (used for the top of the Sent page and Dashboard panels).
+Retrieve summary statistics for sent records (used for the top of the Sent page). **Scoped by the same `date` / `platform` / `status` filters as `GET /sent`** so the stat cards always match the filtered list below them.
+
+**Query Params** (all optional — identical to `/sent`, pagination ignored)
+
+| Param | Type | Description |
+|---|---|---|
+| `date` | `today` \| `week` \| `month` | Publish-date window. **Omit for all-time.** |
+| `platform` | `x` \| `reddit` | Restrict to one platform (via the linked opportunity). |
+| `status` | `published` \| `scheduled` \| `manual` \| `error` | Restrict to a reply lifecycle state. |
 
 **Response** `200 OK`
 
 ```json
 {
-  "weeklyCount": 23,        // Number sent this week
-  "responseRate": 35,       // Response rate (integer percentage, 0-100)
-  "totalImpressions": 48620, // Total impressions across all engage posts (Post.impressions)
-  "avgLikes": 18            // Average likes — X like_count / Reddit score, read from Post.analytics
+  "repliesCount": 23,        // Replies in the selected window (all-time when no date)
+  "responseRate": 35,        // Response rate (integer percentage, 0-100) over the window
+  "totalImpressions": 48620, // SUM(Post.impressions) over the windowed engage posts
+  "totalTrafficScore": 1284, // SUM(Post.trafficScore) over the windowed engage posts, rounded
+  "avgLikes": 18             // Average likes — X like_count / Reddit score, read from Post.analytics
 }
 ```
 
-> `avgLikes` is platform-aware: for X it reads the `Likes` metric, for Reddit the `score` metric, from each reply's `Post.analytics` blob (bounded to the 1,000 most recent replies). `totalImpressions` here is the all-platform sum; the Dashboard panel has its own combined/platform-scoped impression fields (see `/dashboard/summary`).
+> Every field reflects the selected `date`/`platform`/`status` window. With no `date`, the window is all-time (matching `/sent`). `avgLikes` is platform-aware: for X it reads the `Likes` metric, for Reddit the `score` metric, from each reply's `Post.analytics` blob (bounded to the 1,000 most recent replies in the window). The Dashboard panel (`/dashboard/summary`) has its own combined/platform-scoped fields and is unaffected by this change.
 
 ---
 
@@ -1288,7 +1297,7 @@ The Engage data surfaces inside the existing Dashboard as three panels (no stand
 
 ### GET `/api/engage/dashboard/summary`
 
-**Panel ① — Engagement Performance.** Five headline metrics plus this week's platform split and best reply. The panel has platform chips/tabs:
+**Panel ① — Engagement Performance.** Five headline metrics plus all-time platform split and best reply. The panel has platform chips/tabs:
 
 - no `platform` param: combined X + Reddit view
 - `platform=x`: X-only view
@@ -1298,13 +1307,16 @@ The Engage data surfaces inside the existing Dashboard as three panels (no stand
 
 | Param | Type | Default | Description |
 |---|---|---|---|
-| `platform` | `string` (`x` \| `reddit`) | — (all) | Scope the headline cards and best-reply badge to one platform. Omit for the combined panel. |
+| `platform` | `string` (`x` \| `reddit`) | — (all) | Scope the headline cards and best-reply badge to one platform. Empty / omitted = combined. |
+| `date` | `all` \| `day` \| `week` \| `month` | `all` | Date window on `Post.publishDate`. `all` = all-time (no window); `day` = today; `week` = current ISO week; `month` = current calendar month. Empty / unknown = all-time. |
+
+Every metric (`repliesCount`, `responseRate`, `totalImpressions`, `totalTrafficScore`, `totalLikes`, `platformSplit`, `bestReply`) is scoped to the selected `date` window and `platform`.
 
 **Response** `200 OK`
 
 ```json
 {
-  "weeklyCount": 23,             // Replies — replies published since this ISO week's Monday (UTC), scoped by platform if provided
+  "repliesCount": 23,             // Replies — all-time SENT (PUBLISHED) replies, scoped by platform if provided
   "responseRate": 35,            // Reply rate — authorReplied / total, integer percentage 0-100, scoped by platform if provided
   "totalImpressions": 48620,     // Total impressions — SUM(Post.impressions), scoped by platform if provided
   "totalTrafficScore": 1284,     // Traffic — SUM(Post.trafficScore), rounded, scoped by platform if provided
@@ -1315,18 +1327,24 @@ The Engage data surfaces inside the existing Dashboard as three panels (no stand
     "x": 15,
     "reddit": 8
   },
-  "bestReply": {                 // This week's best — most-liked/upvoted reply in the selected scope, or null
+  "bestReply": {                 // Most-liked/upvoted reply in the selected scope, or null
     "opportunityId": "uuid",
     "platform": "x",
     "content": "Reply text...",
     "likes": 142,                // X like_count / Reddit score (from Post.analytics)
-    "url": "https://twitter.com/.../status/123"  // Post.releaseURL, falls back to the original post URL
+    "url": "https://twitter.com/.../status/123",  // Post.releaseURL, falls back to the original post URL
+    "author": {                  // Account info of the original post's author (engagement source)
+      "username": "koraygubur",
+      "displayName": "Koray Gubur",
+      "avatarUrl": "https://.../avatar.jpg"
+    }
   }
 }
 ```
 
-- `bestReply` is `null` when no reply this week in the selected scope has any recorded likes/score yet.
-- `weeklyCount` and `platformSplit` are scoped to the current ISO week; `responseRate`, `totalImpressions`, `totalTrafficScore`, and `totalLikes` are cumulative.
+- `bestReply` is `null` when no sent reply in the selected scope has any recorded likes/score yet.
+- `bestReply.author` carries the original post author's handle/display name/avatar (`displayName` and `avatarUrl` may be `null`).
+- `repliesCount`, `platformSplit`, and `bestReply` count only SENT (`PUBLISHED`) replies — future-scheduled (QUEUE) and errored replies are excluded — within the selected `date` window (all-time by default).
 - In the combined view, `totalLikes` is `X likes + Reddit score`. In the Reddit chip view, the UI label should read "Total upvotes"; in the X chip view, it should read "Total likes".
 
 ---

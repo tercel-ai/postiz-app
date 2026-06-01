@@ -905,11 +905,13 @@ export class EngageRepository {
     return this._sentReply.model.engageSentReply.create({ data });
   }
 
-  async listSentReplies(organizationId: string, dto: ListSentDto) {
-    const page = dto.page ?? 1;
-    const limit = dto.limit ?? 20;
-    const offset = (page - 1) * limit;
-
+  // Shared filter for the sent-reply LIST and STATS so both apply identical
+  // date/platform/status semantics. No `date` → all-time (no publishDate window),
+  // mirroring /engage/sent. Returns both the Post-scoped and SentReply-scoped where.
+  private _buildSentReplyFilter(
+    organizationId: string,
+    dto: { date?: 'today' | 'week' | 'month'; platform?: string; status?: string }
+  ): { postWhere: Prisma.PostWhereInput; sentWhere: Prisma.EngageSentReplyWhereInput } {
     const postWhere: Prisma.PostWhereInput = {
       source: 'engage',
       ...(dto.date === 'today' && {
@@ -933,7 +935,7 @@ export class EngageRepository {
       postWhere.releaseURL = null;
     }
 
-    const where: Prisma.EngageSentReplyWhereInput = {
+    const sentWhere: Prisma.EngageSentReplyWhereInput = {
       organizationId,
       post: postWhere,
       // Apply platform filter via the linked opportunity's platform field
@@ -941,6 +943,16 @@ export class EngageRepository {
         opportunity: { platform: dto.platform },
       }),
     };
+
+    return { postWhere, sentWhere };
+  }
+
+  async listSentReplies(organizationId: string, dto: ListSentDto) {
+    const page = dto.page ?? 1;
+    const limit = dto.limit ?? 20;
+    const offset = (page - 1) * limit;
+
+    const { sentWhere: where } = this._buildSentReplyFilter(organizationId, dto);
 
     const [items, total] = await Promise.all([
       this._sentReply.model.engageSentReply.findMany({
@@ -987,50 +999,51 @@ export class EngageRepository {
     return { items, total, page, limit };
   }
 
-  async getSentStats(organizationId: string) {
-    const weekStart = dayjs.utc().startOf('isoWeek').toDate();
+  // Aggregate stats for sent replies, scoped by the SAME date/platform/status
+  // filters as listSentReplies (no `date` → all-time). repliesCount, responseRate,
+  // totalImpressions and avgLikes all reflect the selected window.
+  async getSentStats(
+    organizationId: string,
+    dto: { date?: 'today' | 'week' | 'month'; platform?: string; status?: string } = {}
+  ) {
+    const { postWhere, sentWhere } = this._buildSentReplyFilter(organizationId, dto);
 
     // Totals and response rate via DB aggregation — no row cap.
-    const [totalAgg, repliedCount, weeklyReplies, impressionsAgg, likeSample] =
-      await Promise.all([
-        this._sentReply.model.engageSentReply.count({
-          where: { organizationId },
-        }),
-        this._sentReply.model.engageSentReply.count({
-          where: { organizationId, authorReplied: true },
-        }),
-        this._sentReply.model.engageSentReply.count({
-          where: {
-            organizationId,
-            post: { is: { source: 'engage', publishDate: { gte: weekStart } } },
-          },
-        }),
-        // Impressions live on Post; sum across the org's engage posts.
-        this._post.model.post.aggregate({
-          where: {
-            organizationId,
-            source: 'engage',
-          },
-          _sum: { impressions: true },
-        }),
-        // Analytics is a JSON column; aggregating inside is database-specific.
-        // Keep a bounded recent sample (1_000 most recent replies) just for the
-        // avgLikes derivation — total/responseRate/impressions are now exact.
-        this._sentReply.model.engageSentReply.findMany({
-          where: { organizationId },
-          orderBy: { createdAt: 'desc' },
-          take: 1_000,
-          select: {
-            post: { select: { analytics: true } },
-            opportunity: { select: { platform: true } },
-          },
-        }),
-      ]);
+    const [total, repliedCount, impressionsAgg, likeSample] = await Promise.all([
+      this._sentReply.model.engageSentReply.count({ where: sentWhere }),
+      this._sentReply.model.engageSentReply.count({
+        where: { ...sentWhere, authorReplied: true },
+      }),
+      // Impressions live on Post; sum across the windowed engage posts. The
+      // platform filter goes through the post→engageSentReply→opportunity link.
+      this._post.model.post.aggregate({
+        where: {
+          organizationId,
+          ...postWhere,
+          ...(dto.platform
+            ? { engageSentReply: { is: { opportunity: { platform: dto.platform } } } }
+            : {}),
+        },
+        _sum: { impressions: true, trafficScore: true },
+      }),
+      // Analytics is a JSON column; aggregating inside is database-specific.
+      // Keep a bounded recent sample (1_000 most recent replies) just for the
+      // avgLikes derivation — total/responseRate/impressions are now exact.
+      this._sentReply.model.engageSentReply.findMany({
+        where: sentWhere,
+        orderBy: { createdAt: 'desc' },
+        take: 1_000,
+        select: {
+          post: { select: { analytics: true } },
+          opportunity: { select: { platform: true } },
+        },
+      }),
+    ]);
 
-    const total = totalAgg;
     const responseRate =
       total > 0 ? Math.round((repliedCount / total) * 100) : 0;
     const totalImpressions = impressionsAgg._sum.impressions ?? 0;
+    const totalTrafficScore = Math.round(impressionsAgg._sum.trafficScore ?? 0);
 
     // 平均获赞 = AVG(X like_count) combined with AVG(Reddit score). Both are read
     // out of the analytics blob via the same platform-aware extractor.
@@ -1045,7 +1058,7 @@ export class EngageRepository {
           )
         : 0;
 
-    return { weeklyCount: weeklyReplies, responseRate, totalImpressions, avgLikes };
+    return { repliesCount: total, responseRate, totalImpressions, totalTrafficScore, avgLikes };
   }
 
   // Pull the "likes" metric out of a Post.analytics JSON blob. X stores it under
@@ -1063,82 +1076,119 @@ export class EngageRepository {
     return Number.isFinite(n) ? n : 0;
   }
 
-  // Dashboard panel ① "Engage Performance": weekly interaction count, response
-  // rate, impressions, traffic index, total likes/upvotes, per-platform split for
-  // the week, and this week's single best reply. Pass platform='x' or 'reddit'
-  // for the UI tab/chip scoped view; omitted means all engage platforms.
+  // Shared engage date window on Post.publishDate. 'all'/empty/undefined → no
+  // window; 'day'/'today' → today; 'week' → ISO week; 'month' → calendar month.
+  private _engageDateWindow(date?: string): { publishDate?: { gte: Date } } {
+    const gte =
+      date === 'day' || date === 'today'
+        ? dayjs.utc().startOf('day').toDate()
+        : date === 'week'
+        ? dayjs.utc().startOf('isoWeek').toDate()
+        : date === 'month'
+        ? dayjs.utc().startOf('month').toDate()
+        : null;
+    return gte ? { publishDate: { gte } } : {};
+  }
+
+  // Dashboard panel ① "Engage Performance": reply count, response rate,
+  // impressions, traffic index, total likes/upvotes, per-platform split, and the
+  // single best reply — all scoped to the optional platform + date window
+  // (default all-time). Pass platform='x'|'reddit' for the UI tab/chip scope.
   async getDashboardSummary(
     organizationId: string,
-    opts: { platform?: string } = {}
+    opts: { platform?: string; date?: string } = {}
   ) {
-    const weekStart = dayjs.utc().startOf('isoWeek').toDate();
     const platform = opts.platform;
     const platformFilter = platform ? { opportunity: { platform } } : {};
-    const weekPostFilter = {
-      is: { source: 'engage', publishDate: { gte: weekStart } },
+    const dateWindow = this._engageDateWindow(opts.date);
+
+    // Reply-count + best-reply metrics: only replies actually SENT (`PUBLISHED`,
+    // excludes future-scheduled QUEUE and errored), within the date window.
+    const sentPostFilter = {
+      is: {
+        source: 'engage',
+        state: 'PUBLISHED',
+        ...dateWindow,
+      } as Prisma.PostWhereInput,
+    };
+    // Window-only filter (any state) for the totals/response-rate scope. With
+    // 'all' this is just the engage source, equivalent to the prior behavior.
+    const windowedPostFilter = {
+      is: { source: 'engage', ...dateWindow } as Prisma.PostWhereInput,
     };
 
     const [
       total,
       repliedCount,
-      weeklyReplies,
-      xWeekly,
-      redditWeekly,
+      sentReplies,
+      xSent,
+      redditSent,
       totalPostAgg,
       xPostAgg,
       replyRows,
-      weekReplyRows,
+      bestReplyRows,
     ] =
       await Promise.all([
         this._sentReply.model.engageSentReply.count({
-          where: { organizationId, ...platformFilter },
+          where: { organizationId, post: windowedPostFilter, ...platformFilter },
         }),
         this._sentReply.model.engageSentReply.count({
-          where: { organizationId, authorReplied: true, ...platformFilter },
+          where: { organizationId, post: windowedPostFilter, authorReplied: true, ...platformFilter },
         }),
         this._sentReply.model.engageSentReply.count({
-          where: { organizationId, post: weekPostFilter, ...platformFilter },
+          where: { organizationId, post: sentPostFilter, ...platformFilter },
         }),
         this._sentReply.model.engageSentReply.count({
-          where: { organizationId, post: weekPostFilter, opportunity: { platform: 'x' } },
+          where: { organizationId, post: sentPostFilter, opportunity: { platform: 'x' } },
         }),
         this._sentReply.model.engageSentReply.count({
-          where: { organizationId, post: weekPostFilter, opportunity: { platform: 'reddit' } },
+          where: { organizationId, post: sentPostFilter, opportunity: { platform: 'reddit' } },
         }),
-        // Headline impressions + traffic for the selected UI scope.
+        // Headline impressions + traffic for the selected UI scope + date window.
         this._post.model.post.aggregate({
           where: {
             organizationId,
             source: 'engage',
+            ...dateWindow,
             ...(platform
               ? { engageSentReply: { is: { opportunity: { platform } } } }
               : {}),
           },
           _sum: { impressions: true, trafficScore: true },
         }),
-        // X-only cumulative impressions + traffic index across all engage X posts.
+        // X-only cumulative impressions + traffic index across engage X posts in window.
         this._post.model.post.aggregate({
           where: {
             organizationId,
             source: 'engage',
+            ...dateWindow,
             engageSentReply: { is: { opportunity: { platform: 'x' } } },
           },
           _sum: { impressions: true, trafficScore: true },
         }),
-        // Likes/upvotes for the selected UI scope. Analytics is JSON, so use
+        // Likes/upvotes for the selected UI scope + window. Analytics is JSON, so use
         // the same platform-aware extractor as sent stats after loading the rows.
         this._sentReply.model.engageSentReply.findMany({
-          where: { organizationId, ...platformFilter },
+          where: { organizationId, post: windowedPostFilter, ...platformFilter },
           select: {
             opportunity: { select: { platform: true } },
             post: { select: { analytics: true } },
           },
         }),
-        // This week's replies (bounded by the week) to pick the single best one.
+        // All sent replies, to pick the single best one (most likes/upvotes).
         this._sentReply.model.engageSentReply.findMany({
-          where: { organizationId, post: weekPostFilter, ...platformFilter },
+          where: { organizationId, post: sentPostFilter, ...platformFilter },
           select: {
-            opportunity: { select: { id: true, platform: true, externalPostUrl: true } },
+            opportunity: {
+              select: {
+                id: true,
+                platform: true,
+                externalPostUrl: true,
+                authorUsername: true,
+                authorDisplayName: true,
+                authorAvatarUrl: true,
+              },
+            },
             post: { select: { content: true, releaseURL: true, analytics: true } },
           },
         }),
@@ -1152,9 +1202,15 @@ export class EngageRepository {
       content: string;
       likes: number;
       url: string | null;
+      // Account info of the original post's author (the engagement source).
+      author: {
+        username: string;
+        displayName: string | null;
+        avatarUrl: string | null;
+      };
     } | null = null;
     let bestLikes = 0;
-    for (const r of weekReplyRows) {
+    for (const r of bestReplyRows) {
       const likes = this._extractLikes(r.post?.analytics, r.opportunity.platform);
       if (likes > bestLikes) {
         bestLikes = likes;
@@ -1164,12 +1220,18 @@ export class EngageRepository {
           content: r.post?.content ?? '',
           likes,
           url: r.post?.releaseURL ?? r.opportunity.externalPostUrl ?? null,
+          author: {
+            username: r.opportunity.authorUsername,
+            displayName: r.opportunity.authorDisplayName ?? null,
+            avatarUrl: r.opportunity.authorAvatarUrl ?? null,
+          },
         };
       }
     }
 
     return {
-      weeklyCount: weeklyReplies,
+      // All-time count of SENT replies (PUBLISHED only).
+      repliesCount: sentReplies,
       responseRate,
       xImpressions: xPostAgg._sum.impressions ?? 0,
       xTrafficIndex: Math.round(xPostAgg._sum.trafficScore ?? 0),
@@ -1179,7 +1241,7 @@ export class EngageRepository {
         (sum, r) => sum + this._extractLikes(r.post?.analytics, r.opportunity.platform),
         0
       ),
-      platformSplit: { x: xWeekly, reddit: redditWeekly },
+      platformSplit: { x: xSent, reddit: redditSent },
       bestReply,
     };
   }
@@ -1337,6 +1399,59 @@ export class EngageRepository {
     const result = Array.from(buckets.values());
     result.sort((a, b) => a.date.localeCompare(b.date) || a.platform.localeCompare(b.platform));
     return result;
+  }
+
+  // Panel ⑤ "Top engage sources" — engage replies aggregated by the ORIGINAL
+  // post author (the traffic source), ranked by traffic index ("clicks").
+  // NOTE: "visitors" from the mockup is not tracked anywhere, so it is omitted.
+  async getDashboardTopSources(
+    organizationId: string,
+    opts: { platform?: string; limit?: number } = {}
+  ) {
+    const limit = opts.limit ?? 10;
+    const platform = opts.platform;
+
+    const rows = await this._sentReply.model.engageSentReply.findMany({
+      where: {
+        organizationId,
+        ...(platform ? { opportunity: { platform } } : {}),
+        post: { is: { source: 'engage', trafficScore: { not: null } } },
+      },
+      select: {
+        opportunity: {
+          select: { platform: true, authorUsername: true, authorAvatarUrl: true },
+        },
+        post: { select: { trafficScore: true } },
+      },
+    });
+
+    const byAuthor = new Map<
+      string,
+      { author: string; avatar: string | null; platform: string; clicks: number; replies: number }
+    >();
+    for (const r of rows) {
+      const p = r.opportunity?.platform ?? 'unknown';
+      const author = r.opportunity?.authorUsername ?? 'unknown';
+      const key = `${p}|${author}`;
+      const clicks = Math.round(r.post?.trafficScore ?? 0);
+      const existing = byAuthor.get(key);
+      if (existing) {
+        existing.clicks += clicks;
+        existing.replies += 1;
+      } else {
+        byAuthor.set(key, {
+          author,
+          avatar: r.opportunity?.authorAvatarUrl ?? null,
+          platform: p,
+          clicks,
+          replies: 1,
+        });
+      }
+    }
+
+    const all = [...byAuthor.values()].sort((a, b) => b.clicks - a.clicks);
+    const totalClicks = all.reduce((s, i) => s + i.clicks, 0);
+    return { totalClicks, items: all.slice(0, limit) };
   }
 
   async updateScheduledReply(

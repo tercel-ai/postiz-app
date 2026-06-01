@@ -734,7 +734,7 @@ The Engage module surfaces three dashboard panels embedded within the Platform A
 │                                                                     │
 │  ┌──────────────────────────────────────────────────────────────┐  │
 │  │  ① EngagePerformancePanel  →  GET /engage/dashboard/summary  │  │
-│  │     • weeklyCount, responseRate, totalImpressions            │  │
+│  │     • repliesCount, responseRate, totalImpressions            │  │
 │  │     • totalTrafficScore, totalLikes                          │  │
 │  │     • platformSplit (x / reddit), bestReply                  │  │
 │  └──────────────────────────────────────────────────────────────┘  │
@@ -772,7 +772,7 @@ The Engage module surfaces three dashboard panels embedded within the Platform A
 
 ```json
 {
-  "weeklyCount": 23,
+  "repliesCount": 23,
   "responseRate": 35,
   "totalImpressions": 48620,
   "totalTrafficScore": 1284,
@@ -792,14 +792,14 @@ The Engage module surfaces three dashboard panels embedded within the Platform A
 
 | Field | Meaning | Scope |
 |-------|---------|-------|
-| `weeklyCount` | Replies published this ISO week | Scoped by `platform` if provided |
+| `repliesCount` | All-time count of SENT (PUBLISHED) replies | Scoped by `platform` if provided |
 | `responseRate` | Percentage of replies where the original author replied back | Cumulative, scoped by platform |
 | `totalImpressions` | SUM(Post.impressions) across all engage posts | Cumulative, scoped by platform |
 | `totalTrafficScore` | SUM(Post.trafficScore) across all engage posts | Cumulative, scoped by platform |
 | `totalLikes` | SUM(X like_count / Reddit score) from Post.analytics | Cumulative, scoped by platform |
 | `xImpressions` / `xTrafficIndex` | X-only cumulative values (always X-scoped) | Legacy fields |
-| `platformSplit` | Reply counts this week per platform | This ISO week only |
-| `bestReply` | Most-liked/upvoted reply this week, or null | This ISO week, scoped by platform |
+| `platformSplit` | SENT reply counts per platform | All-time (PUBLISHED only) |
+| `bestReply` | Most-liked/upvoted SENT reply, or null | All-time, scoped by platform |
 
 ### 8.2 Panel ② — Daily Engage Replies
 

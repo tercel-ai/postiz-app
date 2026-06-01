@@ -5,7 +5,7 @@ import useSWR from 'swr';
 import { useFetch } from '@gitroom/helpers/utils/custom.fetch';
 
 interface EngageStats {
-  weeklyCount: number;
+  repliesCount: number;
   responseRate: number;
   totalImpressions: number;
   totalTrafficScore?: number;
@@ -15,11 +15,12 @@ interface EngageStats {
 export function EngagePerformancePanel() {
   const fetch = useFetch();
 
+  // All-time stats (no date filter) — same endpoint as the Sent page's cards.
   const { data: stats, isLoading } = useSWR(
-    '/engage/dashboard/summary',
+    '/engage/sent/stats',
     async (url) => {
       const res = await fetch(url);
-      if (!res.ok) throw new Error(`engage/dashboard/summary returned ${res.status}`);
+      if (!res.ok) throw new Error(`engage/sent/stats returned ${res.status}`);
       return res.json() as Promise<EngageStats>;
     }
   );
@@ -55,7 +56,7 @@ export function EngagePerformancePanel() {
       {/* 4-cell stats */}
       <div className="grid grid-cols-4 gap-3">
         {[
-          { label: '本周发出', value: stats.weeklyCount },
+          { label: '发出回复', value: stats.repliesCount },
           { label: '回复率', value: `${stats.responseRate}%` },
           { label: '总曝光', value: stats.totalImpressions?.toLocaleString() ?? '0' },
           { label: 'Traffic', value: stats.totalTrafficScore?.toLocaleString() ?? '0' },

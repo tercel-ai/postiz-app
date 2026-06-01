@@ -32,7 +32,7 @@ interface SentReply {
 }
 
 interface Stats {
-  weeklyCount: number;
+  repliesCount: number;
   responseRate: number;
   totalImpressions: number;
   avgLikes: number;
@@ -49,11 +49,22 @@ export function SentList() {
   const [urlSubmitId, setUrlSubmitId] = useState<string | null>(null);
   const [urlInput, setUrlInput] = useState('');
 
-  const { data: stats } = useSWR('/engage/sent/stats', async (url) => {
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`engage/sent/stats returned ${res.status}`);
-    return res.json() as Promise<Stats>;
+  // Stats use the SAME filters as the list (minus pagination), so the cards
+  // reflect exactly what the list below shows. No `date` → all-time.
+  const statsParams = new URLSearchParams({
+    ...(platform && { platform }),
+    ...(status && { status }),
+    ...(date && { date }),
   });
+
+  const { data: stats } = useSWR(
+    `/engage/sent/stats?${statsParams}`,
+    async (url) => {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`engage/sent/stats returned ${res.status}`);
+      return res.json() as Promise<Stats>;
+    }
+  );
 
   const queryParams = new URLSearchParams({
     page: String(page),
@@ -126,7 +137,7 @@ export function SentList() {
       {stats && (
         <div className="grid grid-cols-4 gap-4 mb-6">
           {[
-            { label: '本周发出', value: stats.weeklyCount },
+            { label: '发出回复', value: stats.repliesCount },
             { label: '回复率', value: `${stats.responseRate}%` },
             { label: '总曝光量', value: stats.totalImpressions.toLocaleString() },
             { label: '平均获赞', value: stats.avgLikes },

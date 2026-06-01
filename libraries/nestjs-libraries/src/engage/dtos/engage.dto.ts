@@ -345,10 +345,20 @@ export class ListSentDto {
 
 // Panel ① "Engage Performance" — headline summary stats, optionally scoped to one platform.
 export class DashboardSummaryDto {
+  // Optional platform filter (x | reddit). Empty string / omitted = all platforms.
+  // No @IsIn so an empty `?platform=` (the "All" toggle) is tolerated rather than
+  // rejected — matches ListSentDto / DashboardTrafficsDto. Unknown values simply
+  // match nothing in the query.
   @IsOptional()
   @IsString()
-  @IsIn(['x', 'reddit'])
   platform?: string;
+
+  // Optional date window: 'all' (default) | 'day' (today) | 'week' (ISO week) |
+  // 'month'. Left untyped (no @IsIn) so 'all'/empty is tolerated; unknown values
+  // fall through to all-time in the repository.
+  @IsOptional()
+  @IsString()
+  date?: string;
 }
 
 // Panel ② "Your Posts" overlay — daily Engage reply counts over a trailing window.
