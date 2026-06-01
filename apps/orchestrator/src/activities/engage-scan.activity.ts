@@ -139,6 +139,10 @@ export class EngageScanActivity {
         .map((k) => `"${k}"`)
         .join(', ')}]`
     );
+    // X keyword search token comes from a connected X account in the Integration
+    // table (any posting-capable X account across the enabled orgs), with the
+    // app-only X_BEARER_TOKEN as a fallback. It is NOT tied to EngageXReplyAccount
+    // — reply accounts only decide which user account *sends* replies.
     const xToken = await this._findAnyXToken(orgContexts);
     if (!xToken) {
       this.logger.warn(
@@ -987,58 +991,55 @@ export class EngageScanActivity {
 
   // ─── Helpers ──────────────────────────────────────────────────────────────
 
+  // Find an X access token for global keyword search. Source order:
+  //   1. Any posting-capable X account in the Integration table across the
+  //      enabled orgs (connected, not disabled, not pending refresh/setup).
+  //   2. The app-only X_BEARER_TOKEN env var, as a fallback.
+  // This is independent of EngageXReplyAccount — reply accounts only choose who
+  // *sends* replies, not which token we *read* the firehose with.
   private async _findAnyXToken(orgContexts: OrgContext[]): Promise<string | null> {
-    this.logger.log(
-      `X token lookup: scanning ${orgContexts.length} enabled org(s) for an engage-enabled X reply account`
-    );
-    for (const ctx of orgContexts) {
-      const total = ctx.xReplyAccounts.length;
-      const enabledAccounts = ctx.xReplyAccounts.filter((a) => a.engageEnabled);
-      this.logger.log(
-        `  org=${ctx.organizationId}: ${total} X reply account(s), ${enabledAccounts.length} engage-enabled`
-      );
-      const account = enabledAccounts[0];
-      if (!account) continue;
+    const orgIds = orgContexts.map((c) => c.organizationId);
+    const integration = await this._integration.model.integration.findFirst({
+      where: {
+        organizationId: { in: orgIds },
+        providerIdentifier: 'x',
+        type: 'social',
+        disabled: false,
+        deletedAt: null,
+        inBetweenSteps: false,
+        refreshNeeded: false,
+      },
+      select: { id: true, organizationId: true, token: true },
+      orderBy: { createdAt: 'asc' },
+    });
 
-      const integration = await this._integration.model.integration.findUnique({
-        where: { id: account.integrationId },
-        select: {
-          token: true,
-          disabled: true,
-          deletedAt: true,
-          refreshNeeded: true,
-          inBetweenSteps: true,
-          providerIdentifier: true,
-        },
-      });
-      if (!integration) {
-        this.logger.warn(
-          `  org=${ctx.organizationId}: reply-account integration ${account.integrationId} not found (deleted?)`
-        );
-        continue;
-      }
-      this.logger.log(
-        `  org=${ctx.organizationId}: integration=${account.integrationId} provider=${integration.providerIdentifier} ` +
-          `disabled=${integration.disabled} refreshNeeded=${integration.refreshNeeded} ` +
-          `inBetweenSteps=${integration.inBetweenSteps} deleted=${integration.deletedAt != null} hasToken=${!!integration.token}`
+    if (integration?.token) {
+      const extracted = this._extractOauthToken(
+        integration.token as string | Record<string, string>
       );
-      if (integration.token) {
-        const extracted = this._extractOauthToken(
-          integration.token as string | Record<string, string>
+      if (extracted) {
+        this.logger.log(
+          `X token lookup: using Integration token from integration=${integration.id} org=${integration.organizationId}`
         );
-        if (extracted) {
-          this.logger.log(
-            `X token lookup: using token from org=${ctx.organizationId} integration=${account.integrationId}`
-          );
-          return extracted;
-        }
-        this.logger.warn(
-          `  org=${ctx.organizationId}: integration ${account.integrationId} has a token but extraction returned null (unexpected token shape)`
-        );
+        return extracted;
       }
+      this.logger.warn(
+        `X token lookup: integration ${integration.id} token present but extraction returned null (unexpected shape)`
+      );
+    } else {
+      this.logger.log(
+        `X token lookup: no posting-capable X integration across ${orgIds.length} enabled org(s)`
+      );
     }
+
+    const bearer = process.env.X_BEARER_TOKEN;
+    if (bearer) {
+      this.logger.log('X token lookup: falling back to X_BEARER_TOKEN');
+      return bearer;
+    }
+
     this.logger.warn(
-      'X token lookup: no usable token found — no org has an engage-enabled X reply account with a valid token'
+      'X token lookup: no connected X integration and no X_BEARER_TOKEN configured'
     );
     return null;
   }
@@ -1046,7 +1047,19 @@ export class EngageScanActivity {
   private _extractOauthToken(
     token: string | Record<string, string>
   ): string | null {
-    if (typeof token === 'string') return token;
+    if (typeof token === 'string') {
+      // Token may be stored as a raw string or as a JSON blob.
+      const trimmed = token.trim();
+      if (trimmed.startsWith('{')) {
+        try {
+          const parsed = JSON.parse(trimmed) as Record<string, string>;
+          return parsed.access_token ?? parsed.token ?? null;
+        } catch {
+          return token;
+        }
+      }
+      return token;
+    }
     return token.access_token ?? token.token ?? null;
   }
 }

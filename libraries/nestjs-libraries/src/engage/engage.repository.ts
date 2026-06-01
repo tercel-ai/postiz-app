@@ -84,7 +84,6 @@ export class EngageRepository {
           where: { enabled: true },
           orderBy: { createdAt: 'asc' },
         },
-        xReplyAccounts: { where: { engageEnabled: true } },
       },
     });
   }
