@@ -10,6 +10,7 @@ import {
 import { Transform } from 'class-transformer';
 import { State } from '@prisma/client';
 import { VALID_CHANNELS, Channel } from '@gitroom/nestjs-libraries/dtos/posts/get.posts-list.dto';
+import { VALID_POST_SOURCES, PostSource } from '@gitroom/nestjs-libraries/dtos/posts/post-source';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 export class GetPostsDto {
@@ -37,12 +38,21 @@ export class GetPostsDto {
   @IsEnum(State)
   state?: State;
 
-  // Filter by Post.source, e.g. 'engage' to return only engagement replies
-  // (used by the Engage Calendar / Upcoming Replies panels).
-  @ApiPropertyOptional()
+  // Filter by Post.source. Accepts a single value ('engage') or a
+  // comma-separated list ('calendar,chat'); omitting it returns all sources.
+  // Used by the Engage Calendar / Upcoming Replies panels.
+  @ApiPropertyOptional({ enum: VALID_POST_SOURCES, isArray: true })
   @IsOptional()
-  @IsString()
-  source?: string;
+  @IsArray()
+  @ArrayMaxSize(VALID_POST_SOURCES.length)
+  @IsString({ each: true })
+  @IsIn(VALID_POST_SOURCES as unknown as string[], { each: true })
+  @Transform(({ value }) =>
+    (Array.isArray(value) ? value : [value]).flatMap((v: string) =>
+      v.includes(',') ? v.split(',') : [v]
+    )
+  )
+  source?: PostSource[];
 
   @ApiPropertyOptional({ type: [String] })
   @IsOptional()

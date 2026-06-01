@@ -3,6 +3,7 @@ import { Injectable } from '@nestjs/common';
 import { Post as PostBody } from '@gitroom/nestjs-libraries/dtos/posts/create.post.dto';
 import { APPROVED_SUBMIT_FOR_ORDER, Post, State } from '@prisma/client';
 import { GetPostsDto } from '@gitroom/nestjs-libraries/dtos/posts/get.posts.dto';
+import { PostSource } from '@gitroom/nestjs-libraries/dtos/posts/post-source';
 import { GetPostsListDto } from '@gitroom/nestjs-libraries/dtos/posts/get.posts-list.dto';
 import { LocatePostInListDto } from '@gitroom/nestjs-libraries/dtos/posts/locate.post-in-list.dto';
 import dayjs from 'dayjs';
@@ -521,7 +522,7 @@ export class PostsRepository {
               ],
             }
           : {}),
-        ...(query.source ? { source: query.source } : {}),
+        ...(query.source?.length ? { source: { in: query.source } } : {}),
         ...(query.integrationId?.length
           ? { integrationId: { in: query.integrationId } }
           : {}),
@@ -1550,7 +1551,7 @@ export class PostsRepository {
     body: PostBody,
     tags: { value: string; label: string }[],
     inter?: number,
-    source?: 'calendar' | 'chat' | 'engage'
+    source?: PostSource
   ) {
     const posts: Post[] = [];
     // Reuse existing group when editing, new UUID only for fresh posts.

@@ -586,4 +586,89 @@ describe('EngageRepository — two-table reads', () => {
       expect(sentCount.mock.calls[0][0].where.post.publishDate.gte).toBeInstanceOf(Date);
     });
   });
+
+  describe('createManualXPost', () => {
+    // Manual X reply posts must carry an integration (its OAuth token drives the
+    // metrics sync) and a releaseId parsed from the tweet URL, otherwise
+    // checkPostAnalytics early-returns and impressions/likes/etc. stay null.
+    function buildXRepo() {
+      const integrationFindFirst = vi.fn();
+      const postCreate = vi.fn();
+      const integration = {
+        model: { integration: { findFirst: integrationFindFirst } },
+      } as any;
+      const post = { model: { post: { create: postCreate } } } as any;
+      const repo = new EngageRepository(
+        {} as any, {} as any, {} as any, {} as any, {} as any,
+        {} as any, {} as any, {} as any,
+        integration, // _integration
+        post,         // _post
+        {} as any
+      );
+      return { repo, integrationFindFirst, postCreate };
+    }
+
+    it('validates the integration belongs to the org and is an X account', async () => {
+      const { repo, integrationFindFirst, postCreate } = buildXRepo();
+      integrationFindFirst.mockResolvedValue(null);
+
+      await expect(
+        repo.createManualXPost({
+          organizationId: 'org1',
+          content: 'reply',
+          date: new Date(0),
+          replyUrl: 'https://x.com/u/status/123',
+          integrationId: 'int1',
+        })
+      ).rejects.toThrow('X integration not found');
+
+      expect(integrationFindFirst.mock.calls[0][0].where).toMatchObject({
+        id: 'int1',
+        organizationId: 'org1',
+        providerIdentifier: 'x',
+        deletedAt: null,
+      });
+      expect(postCreate).not.toHaveBeenCalled();
+    });
+
+    it('parses releaseId from the tweet URL and writes an X-typed engage post', async () => {
+      const { repo, integrationFindFirst, postCreate } = buildXRepo();
+      integrationFindFirst.mockResolvedValue({ id: 'int1' });
+      postCreate.mockResolvedValue({ id: 'post1' });
+
+      await repo.createManualXPost({
+        organizationId: 'org1',
+        content: 'reply',
+        date: new Date(0),
+        replyUrl: 'https://x.com/zhngyq310334/status/2061267353544146949?s=20',
+        integrationId: 'int1',
+      });
+
+      const data = postCreate.mock.calls[0][0].data;
+      expect(data.releaseId).toBe('2061267353544146949'); // snowflake parsed, query stripped
+      expect(data.releaseURL).toBe(
+        'https://x.com/zhngyq310334/status/2061267353544146949?s=20'
+      );
+      expect(data.integrationId).toBe('int1'); // scalar FK, enables analytics token lookup
+      expect(JSON.parse(data.settings).__type).toBe('x'); // not 'reddit'
+      expect(data.state).toBe('PUBLISHED');
+      expect(data.source).toBe('engage');
+    });
+
+    it('omits releaseId when the URL has no /status/<id> segment', async () => {
+      const { repo, integrationFindFirst, postCreate } = buildXRepo();
+      integrationFindFirst.mockResolvedValue({ id: 'int1' });
+      postCreate.mockResolvedValue({ id: 'post1' });
+
+      await repo.createManualXPost({
+        organizationId: 'org1',
+        content: 'reply',
+        date: new Date(0),
+        replyUrl: 'https://x.com/zhngyq310334',
+        integrationId: 'int1',
+      });
+
+      expect(postCreate.mock.calls[0][0].data.releaseId).toBeUndefined();
+    });
+  });
 });

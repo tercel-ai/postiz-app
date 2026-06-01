@@ -488,6 +488,12 @@ export class ConfirmManualReplyDto {
   @IsString()
   @MaxLength(2048)
   replyUrl?: string;
+
+  // Required for X manual replies: the X integration whose OAuth token the
+  // metrics sync uses to read the reply tweet's analytics. Ignored for Reddit.
+  @IsOptional()
+  @IsString()
+  integrationId?: string;
 }
 
 export class SubmitManualReplyUrlDto {

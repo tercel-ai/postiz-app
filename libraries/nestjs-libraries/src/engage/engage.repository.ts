@@ -1612,6 +1612,55 @@ export class EngageRepository {
     });
   }
 
+  async createManualXPost(data: {
+    organizationId: string;
+    content: string;
+    date: Date;
+    replyUrl: string;
+    integrationId: string;
+  }) {
+    // Validate the integration belongs to this org and is an X social account.
+    // Unlike Reddit, an X manual post MUST carry an integration: its OAuth token
+    // is what checkPostAnalytics uses to read the reply tweet's metrics.
+    const integration = await this._integration.model.integration.findFirst({
+      where: {
+        id: data.integrationId,
+        organizationId: data.organizationId,
+        providerIdentifier: 'x',
+        deletedAt: null,
+      },
+      select: { id: true },
+    });
+    if (!integration) {
+      throw new NotFoundException('X integration not found for this organization');
+    }
+
+    // Parse the snowflake tweet id from the pasted reply URL into releaseId.
+    // checkPostAnalytics early-returns when releaseId is null, so without this
+    // the metrics sync can never fetch impressions/likes/retweets/etc.
+    const releaseId = data.replyUrl.match(/\/status\/(\d+)/)?.[1];
+
+    const { randomUUID } = await import('crypto');
+    return this._post.model.post.create({
+      data: {
+        organizationId: data.organizationId,
+        content: data.content,
+        publishDate: data.date,
+        state: 'PUBLISHED',
+        source: 'engage',
+        image: '[]',
+        settings: JSON.stringify({ __type: 'x' }),
+        group: randomUUID(),
+        delay: 0,
+        releaseURL: data.replyUrl,
+        ...(releaseId ? { releaseId } : {}),
+        // Scalar FK (not a `connect` relation) to stay in Prisma's unchecked
+        // create form alongside organizationId; ownership is validated above.
+        integrationId: data.integrationId,
+      },
+    });
+  }
+
   // ─── Setup (atomic bulk init) ─────────────────────────────────────────────
 
   async setupEngage(organizationId: string, dto: SetupEngageDto) {

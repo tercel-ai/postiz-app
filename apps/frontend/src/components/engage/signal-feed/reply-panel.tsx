@@ -55,6 +55,12 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
   const [replyUrl, setReplyUrl] = useState('');
   const [copied, setCopied] = useState(false);
 
+  // X manual backfill sub-step — parallel to the auto send/schedule path, for
+  // when the API tier blocks programmatic replies and the user posts by hand.
+  const [xManualStep, setXManualStep] = useState<'draft' | 'url'>('draft');
+
+  const isX = opportunity.platform === 'x';
+
   const abortRef = useRef<AbortController | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
   const previouslyFocusedRef = useRef<HTMLElement | null>(null);
@@ -96,6 +102,16 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
   const removeMention = useCallback((tag: string) => {
     setMentions((prev) => prev.filter((m) => m !== tag));
   }, []);
+
+  const copyDraft = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(draft);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      toaster.show('Copy failed — select & copy manually', 'warning');
+    }
+  }, [draft, toaster]);
 
   const generateDraft = useCallback(async () => {
     if (streaming) {
@@ -228,13 +244,18 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
               strategy,
               brandStrength,
               ...(url ? { replyUrl: url } : {}),
+              // X manual replies need the integration so the metrics sync can
+              // read the tweet's analytics; Reddit ignores it.
+              ...(isX ? { integrationId: selectedAccountId } : {}),
             }),
           }
         );
         if (!res.ok) {
           const message =
             res.status === 400
-              ? 'Invalid Reddit URL format'
+              ? isX
+                ? 'Invalid tweet URL or missing account'
+                : 'Invalid Reddit URL format'
               : 'Failed to record reply — please retry';
           toaster.show(message, 'warning');
           return;
@@ -247,10 +268,9 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
         setSending(false);
       }
     },
-    [draft, opportunity.id, strategy, brandStrength, fetch, toaster, onSent]
+    [draft, opportunity.id, strategy, brandStrength, isX, selectedAccountId, fetch, toaster, onSent]
   );
 
-  const isX = opportunity.platform === 'x';
   const charCount = draft.length;
   const overLimit = isX && charCount > MAX_X_CHARS;
 
@@ -490,6 +510,78 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
                 </button>
               </div>
             </details>
+            {/* Manual backfill — for when the X API tier blocks programmatic
+                replies: post by hand, then register the tweet URL so metrics sync. */}
+            <details
+              className="text-xs text-gray-500"
+              onToggle={() => setXManualStep('draft')}
+            >
+              <summary className="cursor-pointer hover:text-gray-300 transition-colors">
+                ✍️ Replied manually? Backfill it
+              </summary>
+              <div className="mt-2 space-y-2">
+                {xManualStep === 'draft' ? (
+                  <>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={copyDraft}
+                        className={`flex-1 py-2 text-sm rounded-lg transition-colors ${
+                          copied
+                            ? 'bg-green-700 text-white'
+                            : 'bg-[#2d3748] hover:bg-[#374151] text-white'
+                        }`}
+                      >
+                        {copied ? '✓ Copied' : '📋 Copy Draft'}
+                      </button>
+                      <a
+                        href={opportunity.externalPostUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex-1 py-2 text-sm text-center bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors"
+                      >
+                        Open on X ↗
+                      </a>
+                    </div>
+                    <button
+                      onClick={() => setXManualStep('url')}
+                      disabled={!draft}
+                      className="w-full py-2 text-sm bg-green-600 hover:bg-green-700 disabled:bg-gray-700 disabled:text-gray-500 text-white rounded-lg font-medium transition-colors"
+                    >
+                      ✓ I Replied Manually
+                    </button>
+                  </>
+                ) : (
+                  <div className="space-y-2">
+                    <p className="text-xs text-gray-400">
+                      Paste your reply tweet URL to enable metrics tracking:
+                    </p>
+                    <input
+                      type="url"
+                      value={replyUrl}
+                      onChange={(e) => setReplyUrl(e.target.value)}
+                      className="w-full bg-[#1e2536] border border-[#2d3748] text-white rounded-lg px-3 py-2 text-sm"
+                      placeholder="https://x.com/.../status/..."
+                    />
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => setXManualStep('draft')}
+                        disabled={sending}
+                        className="flex-1 py-2 text-sm text-gray-400 border border-[#2d3748] rounded-lg hover:text-white disabled:opacity-50 transition-colors"
+                      >
+                        Back
+                      </button>
+                      <button
+                        onClick={() => handleConfirmReply(replyUrl)}
+                        disabled={sending || !replyUrl || !selectedAccountId}
+                        className="flex-1 py-2 text-sm bg-blue-600 hover:bg-blue-700 disabled:bg-gray-700 text-white rounded-lg font-medium transition-colors"
+                      >
+                        {sending ? 'Saving...' : 'Save URL'}
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </details>
           </>
         ) : (
           // Reddit 3-step flow
@@ -498,18 +590,7 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
               <>
                 <div className="flex items-center gap-2">
                   <button
-                    onClick={async () => {
-                      try {
-                        await navigator.clipboard.writeText(draft);
-                        setCopied(true);
-                        setTimeout(() => setCopied(false), 1500);
-                      } catch {
-                        toaster.show(
-                          'Copy failed — select & copy manually',
-                          'warning'
-                        );
-                      }
-                    }}
+                    onClick={copyDraft}
                     className={`flex-1 py-2 text-sm rounded-lg transition-colors ${
                       copied
                         ? 'bg-green-700 text-white'

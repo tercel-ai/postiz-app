@@ -21,6 +21,10 @@ import {
   EmptySettings,
 } from '@gitroom/nestjs-libraries/dtos/posts/providers-settings/all.providers.settings';
 import { ValidContent } from '@gitroom/helpers/utils/valid.images';
+import {
+  VALID_POST_SOURCES,
+  PostSource,
+} from '@gitroom/nestjs-libraries/dtos/posts/post-source';
 
 export class Integration {
   @IsDefined()
@@ -92,8 +96,8 @@ export class CreatePostDto {
   type: 'draft' | 'schedule' | 'now';
 
   @IsOptional()
-  @IsIn(['calendar', 'chat', 'engage'])
-  source?: 'calendar' | 'chat' | 'engage';
+  @IsIn(VALID_POST_SOURCES as unknown as string[])
+  source?: PostSource;
 
   @IsOptional()
   @IsString()

@@ -444,9 +444,9 @@ Two small additions to make Engage replies flow through the Post pipeline:
 // Add to existing model Post:
 engageSentReply       EngageSentReply?   // back-relation; null for non-Engage posts
 
-// Post.source already exists as String @default("calendar").
-// Add 'engage' as a new valid value (no schema migration needed — it's a String).
-// Existing values: "calendar" | "chat" | "engage"
+// Post.source is a String @default("calendar") (no schema migration needed for
+// new values). Valid values: "calendar" | "chat" | "engage" — enforced in code
+// via the shared VALID_POST_SOURCES constant (dtos/posts/post-source.ts).
 
 // Add to existing XDto (providers-settings/x.dto.ts):
 // reply_to_tweet_id?: string   — the tweet ID to reply to (read by postWorkflowV101)
@@ -1559,10 +1559,20 @@ if (xSettings.reply_to_tweet_id) {
 
 **File 3**: `libraries/nestjs-libraries/src/dtos/posts/create.post.dto.ts`
 
+The valid `Post.source` values live in a single shared constant
+`libraries/nestjs-libraries/src/dtos/posts/post-source.ts`:
+
 ```typescript
+// post-source.ts — single source of truth
+export const VALID_POST_SOURCES = ['calendar', 'chat', 'engage'] as const;
+export type PostSource = (typeof VALID_POST_SOURCES)[number];
+```
+
+```typescript
+// create.post.dto.ts
 @IsOptional()
-@IsIn(['calendar', 'chat', 'engage'])  // add 'engage' — currently only 'calendar'|'chat'
-source?: 'calendar' | 'chat' | 'engage';
+@IsIn(VALID_POST_SOURCES as unknown as string[])
+source?: PostSource;
 ```
 
 ### 7.2 Keyword Search
@@ -1980,18 +1990,39 @@ Buckets keyed by `Post.publishDate` (UTC `YYYY-MM-DD`). Computed directly from s
 
 ### 11.2 Calendar Integration
 
-**No new model, no new API.** The existing calendar query fetches `Post` records. Add source-based filtering:
+**No new model, no new API.** The existing `GET /posts` calendar endpoint
+(`PostsRepository.getPosts` / `GetPostsDto`) gained a `source` query-param
+filter — the Engage Calendar and Upcoming Replies panels reuse it via
+`GET /posts?source=engage`.
+
+`source` accepts a single value (`?source=engage`) **or** a comma-separated
+list (`?source=calendar,chat`); omitting it returns **all** sources. Values are
+validated against `VALID_POST_SOURCES` (`@IsIn(..., { each: true })`), so an
+unknown value yields `400`. The DTO normalises both forms to `PostSource[]` with
+the same comma-splitting `@Transform` used by `channel` / `integrationId`:
 
 ```typescript
-// In existing calendar data fetch — add source filter:
-const posts = await prisma.post.findMany({
-  where: {
-    organizationId,
-    publishDate: { gte: rangeStart, lte: rangeEnd },
-    ...(showEngage ? {} : { NOT: { source: 'engage' } }),
-  },
-});
+// get.posts.dto.ts
+@IsOptional()
+@IsArray()
+@ArrayMaxSize(VALID_POST_SOURCES.length)
+@IsString({ each: true })
+@IsIn(VALID_POST_SOURCES as unknown as string[], { each: true })
+@Transform(({ value }) =>
+  (Array.isArray(value) ? value : [value]).flatMap((v) =>
+    v.includes(',') ? v.split(',') : [v]
+  )
+)
+source?: PostSource[];
 ```
+
+```typescript
+// posts.repository.ts — getPosts where-clause
+...(query.source?.length ? { source: { in: query.source } } : {}),
+```
+
+> Examples: `?source=engage` (Engage panels) · `?source=calendar,chat`
+> (standard posts only, exclude Engage) · _omitted_ (everything).
 
 **Color mapping** (in calendar event renderer, keyed on `post.source` + `post.state`):
 

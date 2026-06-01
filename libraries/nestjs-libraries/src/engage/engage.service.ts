@@ -766,21 +766,52 @@ export class EngageService implements OnApplicationBootstrap {
     opportunityId: string,
     body: ConfirmManualReplyDto
   ) {
-    const { priorStatus } =
+    const { opp, priorStatus } =
       await this._engageRepository.claimOpportunityForReply(
         org.id,
         opportunityId,
         'REPLIED'
       );
 
+    // X manual replies need both the tweet URL (to derive releaseId) and the
+    // posting integration (its OAuth token drives the metrics sync). Validate
+    // up front and release the claim before doing any work, otherwise the
+    // opportunity is left stuck in REPLIED with no recorded reply.
+    if (opp.platform === 'x') {
+      const missing = !body.replyUrl
+        ? 'replyUrl'
+        : !body.integrationId
+        ? 'integrationId'
+        : null;
+      if (missing) {
+        await this._engageRepository.releaseOpportunityClaim(
+          org.id,
+          opportunityId,
+          priorStatus
+        );
+        throw new BadRequestException(
+          `${missing} is required for X manual replies`
+        );
+      }
+    }
+
     let postId: string | undefined;
     try {
-      const post = await this._engageRepository.createManualRedditPost({
-        organizationId: org.id,
-        content: body.draftContent,
-        date: new Date(),
-        replyUrl: body.replyUrl,
-      });
+      const post =
+        opp.platform === 'x'
+          ? await this._engageRepository.createManualXPost({
+              organizationId: org.id,
+              content: body.draftContent,
+              date: new Date(),
+              replyUrl: body.replyUrl!,
+              integrationId: body.integrationId!,
+            })
+          : await this._engageRepository.createManualRedditPost({
+              organizationId: org.id,
+              content: body.draftContent,
+              date: new Date(),
+              replyUrl: body.replyUrl,
+            });
       postId = post.id;
     } catch (err) {
       await this._engageRepository.releaseOpportunityClaim(
@@ -791,7 +822,7 @@ export class EngageService implements OnApplicationBootstrap {
       throw err;
     }
 
-    // Engage shares the regular post quota. Reddit manual path bypasses
+    // Engage shares the regular post quota. The manual reply path bypasses
     // PostsService.createPost, so we trigger the overage check here.
     // Fire-and-forget — billing failures must not break the user-visible flow.
     if (userId) {
@@ -820,7 +851,7 @@ export class EngageService implements OnApplicationBootstrap {
       return sentReply;
     } catch (err) {
       this.logger.error(
-        `confirmManualReply: Reddit reply recorded (postId=${postId}, ` +
+        `confirmManualReply: manual reply recorded (postId=${postId}, ` +
         `opportunityId=${opportunityId}, orgId=${org.id}) but failed to record EngageSentReply.`,
         err instanceof Error ? err.stack : err
       );

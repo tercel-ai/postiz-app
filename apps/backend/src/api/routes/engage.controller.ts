@@ -434,9 +434,9 @@ export class EngageController {
     return this._engageService.batchSendReply(org, user?.id, id, body);
   }
 
-  // ─── Reddit manual reply (2-step) ─────────────────────────────────────────
+  // ─── Manual reply (Reddit + X) ────────────────────────────────────────────
 
-  @ApiOperation({ summary: 'Confirm a manual Reddit reply and record it in the system' })
+  @ApiOperation({ summary: 'Confirm a manual reply (Reddit or X) and record it in the system. X requires replyUrl + integrationId.' })
   @ApiResponse({ status: 404, description: 'Opportunity not found or already replied' })
   @Post('/opportunities/:id/manual-reply')
   confirmManualReply(

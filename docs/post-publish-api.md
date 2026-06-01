@@ -28,7 +28,7 @@ Content-Type: application/json
   "date": "2026-03-30T14:00:00",     // ISO datetime (UTC); ignored for type=now
   "shortLink": false,                  // convert URLs to tracked short links
   "inter": 7,                          // (optional) recurring interval in days
-  "source": "calendar",               // (optional) "calendar" | "chat"
+  "source": "calendar",               // (optional) "calendar" | "chat" | "engage" (default "calendar")
   "order": "...",                      // (optional) unused — accepted by DTO but not read by service
   "tags": [],                          // array of tag objects
   "posts": [ /* Post[] — see below */ ]
