@@ -34,6 +34,10 @@ import {
   UpdateScheduledReplyDto,
 } from '@gitroom/nestjs-libraries/engage/dtos/engage.dto';
 import { getRedditToken, redditAuthHeaders } from '@gitroom/nestjs-libraries/engage/reddit-auth';
+import {
+  redditPublicHeaders,
+  clearRedditLoidCache,
+} from '@gitroom/nestjs-libraries/engage/reddit-loid';
 
 // Anchored at $ to reject trailing query strings / fragments that would otherwise
 // pollute the stored releaseURL (e.g. `?utm_source=...`). Matches spec §12.4.
@@ -322,22 +326,34 @@ export class EngageService implements OnApplicationBootstrap {
     // app-level client_credentials token (getRedditToken) is unavailable for
     // "web app" type apps — Reddit forbids that grant (403) — so it falls back
     // to the public JSON API, which works from a clean (non-blocked) IP.
-    const token = userToken || (await getRedditToken());
+    const appToken = userToken ? null : await getRedditToken();
+    const token = userToken || appToken;
+    this.logger.log(
+      `[redditSearch] query="${query}" normalized="${normalized}" tokenSource=${
+        userToken ? 'user-oauth' : appToken ? 'app-client-credentials' : 'none(public-json)'
+      }`
+    );
 
-    // Build fetch options: OAuth headers when a token is available, public JSON
-    // API otherwise. Reddit's public .json endpoints need no auth (lower rate
-    // limits, sufficient for search). Outbound requests to *.reddit.com are
-    // routed via REDDIT_PROXY when set (see setup-dispatcher.ts).
-    const makeOpts = (t: string | null): RequestInit => ({
-      headers: t
-        ? redditAuthHeaders(t)
-        : {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
-          'Accept': '*/*',
-          'Accept-Language': 'en-US,en;q=0.9',
-        },
-      signal: AbortSignal.timeout(8000),
-    });
+    // Fetch a reddit URL with OAuth headers when a token is available, or the
+    // public .json API otherwise. The public path carries a `loid` cookie that
+    // satisfies Reddit's anti-bot WAF (see reddit-loid.ts) — without it the
+    // .json endpoints return a 403 block page regardless of IP/User-Agent. On a
+    // 403 we drop the cached loid and retry once, so a rotated/flagged id heals
+    // itself. Outbound *.reddit.com requests are routed via REDDIT_PROXY when
+    // set (see setup-dispatcher.ts).
+    const redditFetch = async (url: string): Promise<Response> => {
+      const opts = async (): Promise<RequestInit> => ({
+        headers: token ? redditAuthHeaders(token) : await redditPublicHeaders(),
+        signal: AbortSignal.timeout(8000),
+      });
+      let res = await fetch(url, await opts());
+      if (res.status === 403 && !token) {
+        this.logger.warn(`[redditSearch] 403 with loid — re-minting and retrying once`);
+        clearRedditLoidCache();
+        res = await fetch(url, await opts());
+      }
+      return res;
+    };
 
     const searchBase = token
       ? `https://oauth.reddit.com/subreddits/search`
@@ -363,27 +379,51 @@ export class EngageService implements OnApplicationBootstrap {
     // Primary: subreddit search.
     try {
       const url = `${searchBase}?q=${encodeURIComponent(normalized)}&limit=10&type=sr`;
-      const res = await fetch(url, makeOpts(token));
+      this.logger.log(`[redditSearch] primary GET ${url}`);
+      const res = await redditFetch(url);
+      const raw = await res.text();
+      this.logger.log(
+        `[redditSearch] primary status=${res.status} ok=${res.ok} bodyLen=${raw.length} body=${raw.slice(0, 2000)}`
+      );
       if (res.ok) {
-        const json = (await res.json()) as {
+        const json = JSON.parse(raw) as {
           data?: { children?: Array<{ data: Record<string, unknown> }> };
         };
-        const results = (json?.data?.children ?? []).map((c) => mapSubreddit(c.data));
-        if (results.length) return results;
+        const children = json?.data?.children ?? [];
+        this.logger.log(`[redditSearch] primary parsed children=${children.length}`);
+        const results = children.map((c) => mapSubreddit(c.data));
+        if (results.length) {
+          this.logger.log(`[redditSearch] primary returning ${results.length} result(s)`);
+          return results;
+        }
       }
-    } catch {
+    } catch (err) {
+      this.logger.warn(`[redditSearch] primary failed: ${(err as Error).message}`);
       // fall through to direct lookup
     }
 
     // Fallback: exact subreddit name — handles small/new subreddits absent from search index.
     try {
-      const aboutRes = await fetch(aboutBase(normalized), makeOpts(token));
+      const aboutUrl = aboutBase(normalized);
+      this.logger.log(`[redditSearch] fallback GET ${aboutUrl}`);
+      const aboutRes = await redditFetch(aboutUrl);
+      const raw = await aboutRes.text();
+      this.logger.log(
+        `[redditSearch] fallback status=${aboutRes.status} ok=${aboutRes.ok} bodyLen=${raw.length} body=${raw.slice(0, 2000)}`
+      );
       if (!aboutRes.ok) return [];
-      const about = (await aboutRes.json()) as { data?: Record<string, unknown> };
+      const about = JSON.parse(raw) as { data?: Record<string, unknown> };
       const d = about.data;
-      if (!d || d.subreddit_type === 'private') return [];
+      if (!d || d.subreddit_type === 'private') {
+        this.logger.log(
+          `[redditSearch] fallback no usable data (type=${d?.subreddit_type ?? 'missing'})`
+        );
+        return [];
+      }
+      this.logger.log(`[redditSearch] fallback returning r/${d.display_name}`);
       return [mapSubreddit(d)];
-    } catch {
+    } catch (err) {
+      this.logger.warn(`[redditSearch] fallback failed: ${(err as Error).message}`);
       return [];
     }
   }
@@ -943,7 +983,10 @@ export class EngageService implements OnApplicationBootstrap {
     const infoUrl = token
       ? `https://oauth.reddit.com/api/info?id=t1_${commentId}`
       : `https://www.reddit.com/api/info.json?id=t1_${commentId}`;
-    const infoHeaders = token ? redditAuthHeaders(token) : { 'User-Agent': 'AISEE-Engage/1.0' };
+    // Public .json needs the loid cookie to clear Reddit's anti-bot WAF.
+    const infoHeaders = token
+      ? redditAuthHeaders(token)
+      : await redditPublicHeaders();
 
     const infoRes = await fetch(infoUrl, { headers: infoHeaders });
     if (!infoRes.ok) return;
@@ -973,7 +1016,9 @@ export class EngageService implements OnApplicationBootstrap {
     const threadUrl = threadToken
       ? `https://oauth.reddit.com/r/${subreddit}/comments/${postId_}?comment=${commentId}&depth=1&limit=25`
       : `https://www.reddit.com/r/${subreddit}/comments/${postId_}/.json?comment=${commentId}&depth=1&limit=25`;
-    const threadRes = await fetch(threadUrl, { headers: threadToken ? redditAuthHeaders(threadToken) : { 'User-Agent': 'AISEE-Engage/1.0' } });
+    const threadRes = await fetch(threadUrl, {
+      headers: threadToken ? redditAuthHeaders(threadToken) : await redditPublicHeaders(),
+    });
     if (!threadRes.ok) return;
     const threadJson = (await threadRes.json()) as Array<{ data?: { children?: Array<{ data?: { replies?: { data?: { children?: Array<{ data?: { author?: string } }> } } } }> } }>;
     const childReplies = threadJson[1]?.data?.children?.[0]?.data?.replies?.data?.children ?? [];

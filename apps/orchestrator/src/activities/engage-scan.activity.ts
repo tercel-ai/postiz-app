@@ -14,6 +14,10 @@ import {
 } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
 import { EngageKeyword, Prisma } from '@prisma/client';
 import { getRedditToken, redditAuthHeaders } from '@gitroom/nestjs-libraries/engage/reddit-auth';
+import {
+  redditPublicHeaders,
+  clearRedditLoidCache,
+} from '@gitroom/nestjs-libraries/engage/reddit-loid';
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc';
 
@@ -29,11 +33,11 @@ const REDDIT_SEARCH_DELAY_MS = Number(
   process.env.ENGAGE_REDDIT_SEARCH_DELAY_MS ?? 500
 );
 
-const REDDIT_BROWSER_HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-  'Accept': 'application/json, text/javascript, */*; q=0.01',
-  'Accept-Language': 'en-US,en;q=0.9',
-  'Referer': 'https://www.reddit.com/',
+// Extra headers merged on top of redditPublicHeaders() (which supplies the loid
+// cookie that clears Reddit's anti-bot WAF — see reddit-loid.ts).
+const REDDIT_BROWSER_EXTRA = {
+  Accept: 'application/json, text/javascript, */*; q=0.01',
+  Referer: 'https://www.reddit.com/',
 };
 
 // Derived from the repository method so the type stays in sync automatically.
@@ -483,10 +487,18 @@ export class EngageScanActivity {
 
     try {
       const url = `https://www.reddit.com/search.json?q=${encodeURIComponent(keyword)}&sort=top&t=week&limit=25&type=link`;
-      const res = await fetch(url, {
-        headers: REDDIT_BROWSER_HEADERS,
+      let res = await fetch(url, {
+        headers: await redditPublicHeaders(REDDIT_BROWSER_EXTRA),
         signal: AbortSignal.timeout(8000),
       });
+      if (res.status === 403) {
+        // loid may be rotated/flagged — re-mint and retry once.
+        clearRedditLoidCache();
+        res = await fetch(url, {
+          headers: await redditPublicHeaders(REDDIT_BROWSER_EXTRA),
+          signal: AbortSignal.timeout(8000),
+        });
+      }
       if (!res.ok) {
         this.logger.warn(`Reddit public global search ${res.status} for "${keyword}"`);
         return [];
@@ -542,10 +554,17 @@ export class EngageScanActivity {
     audienceSize: number
   ): Promise<RawPost[]> {
     const url = `https://www.reddit.com/r/${encodeURIComponent(subreddit)}/search.rss?q=${encodeURIComponent(keyword)}&sort=top&t=week&restrict_sr=on`;
-    const res = await fetch(url, {
-      headers: REDDIT_BROWSER_HEADERS,
+    let res = await fetch(url, {
+      headers: await redditPublicHeaders({ ...REDDIT_BROWSER_EXTRA, Accept: 'application/rss+xml, application/xml, text/xml, */*' }),
       signal: AbortSignal.timeout(10_000),
     });
+    if (res.status === 403) {
+      clearRedditLoidCache();
+      res = await fetch(url, {
+        headers: await redditPublicHeaders({ ...REDDIT_BROWSER_EXTRA, Accept: 'application/rss+xml, application/xml, text/xml, */*' }),
+        signal: AbortSignal.timeout(10_000),
+      });
+    }
     if (!res.ok) {
       this.logger.warn(`Reddit RSS ${res.status} for r/${subreddit} "${keyword}"`);
       return [];

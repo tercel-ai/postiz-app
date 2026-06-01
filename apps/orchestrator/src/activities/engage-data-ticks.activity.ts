@@ -7,6 +7,7 @@ import {
 } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
 import { EngageRepository } from '@gitroom/nestjs-libraries/engage/engage.repository';
 import { getRedditToken, redditAuthHeaders } from '@gitroom/nestjs-libraries/engage/reddit-auth';
+import { redditPublicHeaders } from '@gitroom/nestjs-libraries/engage/reddit-loid';
 import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.service';
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc';
@@ -174,9 +175,10 @@ export class EngageDataTicksActivity {
       const infoUrl = token
         ? `https://oauth.reddit.com/api/info?id=t1_${commentId}`
         : `https://www.reddit.com/api/info.json?id=t1_${commentId}`;
+      // Public .json needs the loid cookie to clear Reddit's anti-bot WAF.
       const infoHeaders = token
         ? redditAuthHeaders(token)
-        : { 'User-Agent': 'AISEE-Engage/1.0' };
+        : await redditPublicHeaders();
 
       const infoRes = await fetch(infoUrl, { headers: infoHeaders });
       if (!infoRes.ok) {
@@ -219,7 +221,7 @@ export class EngageDataTicksActivity {
           ? `https://oauth.reddit.com/r/${subreddit}/comments/${postId_}?comment=${commentId}&depth=1&limit=25`
           : `https://www.reddit.com/r/${subreddit}/comments/${postId_}/.json?comment=${commentId}&depth=1&limit=25`;
         const threadRes = await fetch(threadUrl, {
-          headers: threadToken ? redditAuthHeaders(threadToken) : { 'User-Agent': 'AISEE-Engage/1.0' },
+          headers: threadToken ? redditAuthHeaders(threadToken) : await redditPublicHeaders(),
         });
         if (!threadRes.ok) {
           const body = await threadRes.text().catch(() => '<unreadable>');

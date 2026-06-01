@@ -14,6 +14,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { getRedditToken, redditAuthHeaders } from '../reddit-auth';
+import { redditPublicHeaders } from '../reddit-loid';
 import { EngageService } from '../engage.service';
 
 const TIMEOUT = 20_000;
@@ -232,8 +233,10 @@ describe.skipIf(!RUN_LIVE)(`Step 5 — global post search for keyword "${TARGET}
     const url = `https://www.reddit.com/search.json?q=${encodeURIComponent(TARGET)}&sort=new&t=day&limit=10&type=link`;
     console.log('\nGET', url);
 
+    // Carry the loid cookie (redditPublicHeaders) — without it Reddit's anti-bot
+    // WAF returns a 403 block page for raw .json requests. See reddit-loid.ts.
     const res = await fetch(url, {
-      headers: BROWSER_HEADERS_POST,
+      headers: await redditPublicHeaders(BROWSER_HEADERS_POST),
       signal: AbortSignal.timeout(10_000),
     });
 
