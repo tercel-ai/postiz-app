@@ -16,10 +16,10 @@ export function EngagePerformancePanel() {
   const fetch = useFetch();
 
   const { data: stats, isLoading } = useSWR(
-    '/engage/dashboard-stats',
+    '/engage/dashboard/summary',
     async (url) => {
       const res = await fetch(url);
-      if (!res.ok) throw new Error(`engage/dashboard-stats returned ${res.status}`);
+      if (!res.ok) throw new Error(`engage/dashboard/summary returned ${res.status}`);
       return res.json() as Promise<EngageStats>;
     }
   );

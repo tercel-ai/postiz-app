@@ -263,19 +263,26 @@ export class EngageService implements OnApplicationBootstrap {
 
   // ─── Dashboard ────────────────────────────────────────────────────────────
 
-  async getDashboardStats(org: Organization, platform?: string) {
-    return this._engageRepository.getDashboardStats(org.id, { platform });
+  async getDashboardSummary(org: Organization, platform?: string) {
+    return this._engageRepository.getDashboardSummary(org.id, { platform });
   }
 
-  async getDashboardDailyReplies(org: Organization, days?: number) {
-    return this._engageRepository.getDashboardDailyReplies(org.id, days);
+  async getDashboardRepliesTrend(org: Organization, days?: number) {
+    return this._engageRepository.getDashboardRepliesTrend(org.id, days);
   }
 
-  async getDashboardTraffic(
+  async getDashboardTraffics(
     org: Organization,
     opts: { platform?: string; limit?: number }
   ) {
-    return this._engageRepository.getDashboardTraffic(org.id, opts);
+    return this._engageRepository.getDashboardTraffics(org.id, opts);
+  }
+
+  async getDashboardImpressions(
+    org: Organization,
+    period: 'daily' | 'weekly' | 'monthly' = 'daily'
+  ) {
+    return this._engageRepository.getDashboardImpressions(org.id, period);
   }
 
   async submitManualReplyUrl(

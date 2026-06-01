@@ -9,7 +9,13 @@
  *    org-specific averages from the state aggregate
  */
 import { describe, it, expect, vi } from 'vitest';
+import dayjs from 'dayjs';
+import isoWeek from 'dayjs/plugin/isoWeek';
+import utc from 'dayjs/plugin/utc';
 import { EngageRepository } from '../engage.repository';
+
+dayjs.extend(isoWeek);
+dayjs.extend(utc);
 
 function buildRepo() {
   const stateFindMany = vi.fn();
@@ -22,6 +28,7 @@ function buildRepo() {
   const sentCount = vi.fn();
   const sentFindMany = vi.fn();
   const postAggregate = vi.fn();
+  const postFindMany = vi.fn();
 
   const channel = {
     model: { engageMonitoredChannel: { findMany: channelFindMany } },
@@ -43,7 +50,7 @@ function buildRepo() {
     model: { engageSentReply: { count: sentCount, findMany: sentFindMany } },
   } as any;
   const post = {
-    model: { post: { aggregate: postAggregate } },
+    model: { post: { aggregate: postAggregate, findMany: postFindMany } },
   } as any;
 
   // Constructor order: _config, _keyword, _channel, _trackedAccount,
@@ -62,7 +69,7 @@ function buildRepo() {
   return {
     repo, stateFindMany, stateCount, stateAggregate, stateFindFirst,
     oppAggregate, oppFindFirst, channelFindMany,
-    sentCount, sentFindMany, postAggregate,
+    sentCount, sentFindMany, postAggregate, postFindMany,
   };
 }
 
@@ -233,7 +240,7 @@ describe('EngageRepository — two-table reads', () => {
     });
   });
 
-  describe('getDashboardStats (panel ①)', () => {
+  describe('getDashboardSummary (panel ①)', () => {
     it('computes response rate, X-only impressions/traffic, weekly platform split, and best reply', async () => {
       const { repo, sentCount, sentFindMany, postAggregate } = buildRepo();
       // Promise.all order: total, replied, weekly, xWeekly, redditWeekly
@@ -257,7 +264,7 @@ describe('EngageRepository — two-table reads', () => {
         },
       ]);
 
-      const stats = await repo.getDashboardStats('org1');
+      const stats = await repo.getDashboardSummary('org1');
       expect(stats.weeklyCount).toBe(6);
       expect(stats.responseRate).toBe(40); // 4/10
       expect(stats.xImpressions).toBe(1200);
@@ -301,7 +308,7 @@ describe('EngageRepository — two-table reads', () => {
           },
         ]);
 
-      const stats = await repo.getDashboardStats('org1', { platform: 'reddit' });
+      const stats = await repo.getDashboardSummary('org1', { platform: 'reddit' });
 
       expect(stats.weeklyCount).toBe(2);
       expect(stats.responseRate).toBe(80); // 4/5
@@ -327,7 +334,7 @@ describe('EngageRepository — two-table reads', () => {
       postAggregate.mockResolvedValue({ _sum: { impressions: null, trafficScore: null } });
       sentFindMany.mockResolvedValue([]);
 
-      const stats = await repo.getDashboardStats('org1');
+      const stats = await repo.getDashboardSummary('org1');
       expect(stats.responseRate).toBe(0);
       expect(stats.xImpressions).toBe(0);
       expect(stats.xTrafficIndex).toBe(0);
@@ -335,7 +342,7 @@ describe('EngageRepository — two-table reads', () => {
     });
   });
 
-  describe('getDashboardDailyReplies (panel ②)', () => {
+  describe('getDashboardRepliesTrend (panel ②)', () => {
     it('seeds a continuous window and buckets replies by publish day and platform', async () => {
       const { repo, sentFindMany } = buildRepo();
       sentFindMany.mockResolvedValue([
@@ -344,7 +351,7 @@ describe('EngageRepository — two-table reads', () => {
         { opportunity: { platform: 'x' }, post: { publishDate: null } }, // ignored
       ]);
 
-      const res = await repo.getDashboardDailyReplies('org1', 7);
+      const res = await repo.getDashboardRepliesTrend('org1', 7);
       expect(res.days).toBe(7);
       expect(res.items).toHaveLength(7); // zero-filled continuous buckets
       const totals = res.items.reduce(
@@ -355,7 +362,7 @@ describe('EngageRepository — two-table reads', () => {
     });
   });
 
-  describe('getDashboardTraffic (panel ③)', () => {
+  describe('getDashboardTraffics (panel ③)', () => {
     it('returns total traffic index and a per-reply breakdown sorted by traffic', async () => {
       const { repo, sentFindMany, postAggregate } = buildRepo();
       postAggregate.mockResolvedValue({ _sum: { trafficScore: 42.4 } });
@@ -370,7 +377,7 @@ describe('EngageRepository — two-table reads', () => {
         },
       ]);
 
-      const res = await repo.getDashboardTraffic('org1', { limit: 5 });
+      const res = await repo.getDashboardTraffics('org1', { limit: 5 });
       expect(res.totalClicks).toBe(42); // round(42.4)
       expect(res.items).toHaveLength(2);
       expect(res.items[0]).toMatchObject({ opportunityId: 'o1', clicks: 30, url: 'r1' });
@@ -385,12 +392,55 @@ describe('EngageRepository — two-table reads', () => {
       postAggregate.mockResolvedValue({ _sum: { trafficScore: 0 } });
       sentFindMany.mockResolvedValue([]);
 
-      await repo.getDashboardTraffic('org1', { platform: 'x' });
+      await repo.getDashboardTraffics('org1', { platform: 'x' });
       expect(postAggregate.mock.calls[0][0].where.engageSentReply).toEqual({
         is: { opportunity: { platform: 'x' } },
       });
       expect(sentFindMany.mock.calls[0][0].where.opportunity).toEqual({ platform: 'x' });
       expect(sentFindMany.mock.calls[0][0].take).toBe(10); // default limit
+    });
+  });
+
+  describe('getDashboardImpressions (panel ④)', () => {
+    it('buckets impressions by publish day + platform, sums duplicates, drops null dates, sorts', async () => {
+      const { repo, postFindMany } = buildRepo();
+      postFindMany.mockResolvedValue([
+        { impressions: 100, publishDate: new Date('2026-05-20T00:00:00Z'), engageSentReply: { opportunity: { platform: 'x' } } },
+        { impressions: 50, publishDate: new Date('2026-05-20T12:00:00Z'), engageSentReply: { opportunity: { platform: 'x' } } }, // same day+x → 150
+        { impressions: 30, publishDate: new Date('2026-05-20T06:00:00Z'), engageSentReply: { opportunity: { platform: 'reddit' } } },
+        { impressions: 20, publishDate: new Date('2026-05-21T00:00:00Z'), engageSentReply: null }, // no reply → 'unknown'
+        { impressions: 999, publishDate: null, engageSentReply: { opportunity: { platform: 'x' } } }, // dropped (null date)
+      ]);
+
+      const res = await repo.getDashboardImpressions('org1'); // defaults to 'daily'
+
+      // Sorted by date then platform; null-date row excluded.
+      expect(res).toEqual([
+        { date: '2026-05-20', platform: 'reddit', value: 30 },
+        { date: '2026-05-20', platform: 'x', value: 150 },
+        { date: '2026-05-21', platform: 'unknown', value: 20 },
+      ]);
+
+      // Query is scoped to this org's engage posts within a publish-date window.
+      const where = postFindMany.mock.calls[0][0].where;
+      expect(where.organizationId).toBe('org1');
+      expect(where.source).toBe('engage');
+      expect(where.publishDate.gte).toBeInstanceOf(Date);
+    });
+
+    it('collapses same ISO week into one weekly bucket', async () => {
+      const { repo, postFindMany } = buildRepo();
+      // 2026-05-20 (Wed) and 2026-05-22 (Fri) share the same ISO week.
+      postFindMany.mockResolvedValue([
+        { impressions: 10, publishDate: new Date('2026-05-20T00:00:00Z'), engageSentReply: { opportunity: { platform: 'x' } } },
+        { impressions: 5, publishDate: new Date('2026-05-22T00:00:00Z'), engageSentReply: { opportunity: { platform: 'x' } } },
+      ]);
+
+      const res = await repo.getDashboardImpressions('org1', 'weekly');
+
+      // Bucket key = Monday of that ISO week (mirrors the implementation).
+      const monday = dayjs.utc('2026-05-20').isoWeekday(1).format('YYYY-MM-DD');
+      expect(res).toEqual([{ date: monday, platform: 'x', value: 15 }]);
     });
   });
 });

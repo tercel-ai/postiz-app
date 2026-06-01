@@ -10,6 +10,8 @@ import { useFetch } from '@gitroom/helpers/utils/custom.fetch';
 import { RenderAnalytics } from '@gitroom/frontend/components/platform-analytics/render.analytics';
 import { EngagePerformancePanel } from '@gitroom/frontend/components/engage/dashboard/engage-performance-panel';
 import { TrafficFromEngagePanel } from '@gitroom/frontend/components/engage/dashboard/traffic-from-engage-panel';
+import { DailyEngageRepliesPanel } from '@gitroom/frontend/components/engage/dashboard/daily-engage-replies-panel';
+import { EngageImpressionsPanel } from '@gitroom/frontend/components/engage/dashboard/engage-impressions-panel';
 import { Select } from '@gitroom/react/form/select';
 import { Button } from '@gitroom/react/form/button';
 import { useRouter } from 'next/navigation';
@@ -275,6 +277,8 @@ export const PlatformAnalytics = () => {
       <div className="bg-newBgColorInner flex-1 flex-col flex p-[20px] gap-[12px]">
         <div className="flex flex-col gap-[12px]">
           <EngagePerformancePanel />
+          <EngageImpressionsPanel />
+          <DailyEngageRepliesPanel />
           <TrafficFromEngagePanel />
         </div>
         {!!options.length && (

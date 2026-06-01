@@ -521,6 +521,7 @@ export class PostsRepository {
               ],
             }
           : {}),
+        ...(query.source ? { source: query.source } : {}),
         ...(query.integrationId?.length
           ? { integrationId: { in: query.integrationId } }
           : {}),

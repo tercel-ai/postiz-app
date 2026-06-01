@@ -91,10 +91,13 @@ describe('EngageDraftService', () => {
     });
 
     it('should include brand strength instructions in system prompt', () => {
+      // brandStrength=0 → no brand at all, regardless of mentions.
       const brand0Prompt = (service as any)._buildSystemPrompt('x', 'EXPERT_ANSWER', 'help_seeking', 0);
-      expect(brand0Prompt).toContain('Do not mention AISEE');
+      expect(brand0Prompt).toContain('Do not mention any brand name');
 
-      const brand3Prompt = (service as any)._buildSystemPrompt('x', 'EXPERT_ANSWER', 'help_seeking', 3);
+      // brandStrength=3 with a brand mention → proactively introduce that brand.
+      const brand3Prompt = (service as any)._buildSystemPrompt('x', 'EXPERT_ANSWER', 'help_seeking', 3, ['AISEE']);
+      expect(brand3Prompt).toContain('Proactively introduce AISEE');
       expect(brand3Prompt).toContain('invite the person to try it');
     });
 

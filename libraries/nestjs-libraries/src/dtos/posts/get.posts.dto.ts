@@ -37,6 +37,13 @@ export class GetPostsDto {
   @IsEnum(State)
   state?: State;
 
+  // Filter by Post.source, e.g. 'engage' to return only engagement replies
+  // (used by the Engage Calendar / Upcoming Replies panels).
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  source?: string;
+
   @ApiPropertyOptional({ type: [String] })
   @IsOptional()
   @IsArray()

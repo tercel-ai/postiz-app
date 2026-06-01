@@ -343,8 +343,8 @@ export class ListSentDto {
 
 // ─── Dashboard ──────────────────────────────────────────────────────────────
 
-// Panel ① "Engage Performance" — headline stats, optionally scoped to one platform.
-export class DashboardStatsDto {
+// Panel ① "Engage Performance" — headline summary stats, optionally scoped to one platform.
+export class DashboardSummaryDto {
   @IsOptional()
   @IsString()
   @IsIn(['x', 'reddit'])
@@ -352,7 +352,7 @@ export class DashboardStatsDto {
 }
 
 // Panel ② "Your Posts" overlay — daily Engage reply counts over a trailing window.
-export class DashboardDailyDto {
+export class DashboardRepliesTrendDto {
   @IsOptional()
   @Type(() => Number)
   @IsInt()
@@ -361,8 +361,18 @@ export class DashboardDailyDto {
   days?: number;
 }
 
+// Panel ④ "Engage Impressions Trend" — daily/weekly/monthly impressions by platform
+// for engage posts. Response shape matches /dashboard/impressions so the same
+// chart component can consume both.
+export class DashboardImpressionsDto {
+  @IsOptional()
+  @IsString()
+  @IsIn(['daily', 'weekly', 'monthly'])
+  period?: string;
+}
+
 // Panel ③ "Traffic from Engage" — per-reply traffic-index breakdown.
-export class DashboardTrafficDto {
+export class DashboardTrafficsDto {
   @IsOptional()
   @IsString()
   platform?: string;

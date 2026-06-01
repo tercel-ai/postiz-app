@@ -1067,7 +1067,7 @@ export class EngageRepository {
   // rate, impressions, traffic index, total likes/upvotes, per-platform split for
   // the week, and this week's single best reply. Pass platform='x' or 'reddit'
   // for the UI tab/chip scoped view; omitted means all engage platforms.
-  async getDashboardStats(
+  async getDashboardSummary(
     organizationId: string,
     opts: { platform?: string } = {}
   ) {
@@ -1188,7 +1188,7 @@ export class EngageRepository {
   // day they were published, over a trailing window. Every day in the window is
   // seeded so the chart has continuous (zero-filled) buckets. Includes today,
   // which the daily EngageDataTicks aggregate does not yet cover.
-  async getDashboardDailyReplies(organizationId: string, days = 30) {
+  async getDashboardRepliesTrend(organizationId: string, days = 30) {
     const rangeStart = dayjs.utc().subtract(days - 1, 'day').startOf('day').toDate();
 
     const rows = await this._sentReply.model.engageSentReply.findMany({
@@ -1226,7 +1226,7 @@ export class EngageRepository {
   // Dashboard panel ③ "Traffic from Engage": total traffic index (clicks) plus a
   // per-reply breakdown sorted by traffic, for the progress-bar list. Defaults to
   // all engage platforms; pass platform='x' for the X-only "X 流量指数汇总".
-  async getDashboardTraffic(
+  async getDashboardTraffics(
     organizationId: string,
     opts: { platform?: string; limit?: number } = {}
   ) {
@@ -1277,6 +1277,66 @@ export class EngageRepository {
         url: r.post?.releaseURL ?? r.opportunity.externalPostUrl ?? null,
       })),
     };
+  }
+
+  // Panel ④ "Engage Impressions Trend" — impressions by publish date and
+  // platform for engage posts. Period bucketing matches /dashboard/impressions
+  // so the frontend can reuse the same chart component.
+  async getDashboardImpressions(
+    organizationId: string,
+    period: 'daily' | 'weekly' | 'monthly' = 'daily'
+  ) {
+    const sinceDays = period === 'monthly' ? 365 : period === 'weekly' ? 90 : 30;
+    const rangeStart = dayjs.utc().subtract(sinceDays, 'day').startOf('day').toDate();
+
+    const rows = await this._post.model.post.findMany({
+      where: {
+        organizationId,
+        source: 'engage',
+        publishDate: { gte: rangeStart },
+      },
+      select: {
+        impressions: true,
+        publishDate: true,
+        engageSentReply: {
+          select: { opportunity: { select: { platform: true } } },
+        },
+      },
+    });
+
+    const buckets = new Map<
+      string,
+      { date: string; platform: string; value: number }
+    >();
+
+    for (const row of rows) {
+      if (!row.publishDate) continue;
+      const d = dayjs.utc(row.publishDate);
+      let dateKey: string;
+      switch (period) {
+        case 'weekly':
+          dateKey = d.isoWeekday(1).format('YYYY-MM-DD');
+          break;
+        case 'monthly':
+          dateKey = d.format('YYYY-MM');
+          break;
+        default:
+          dateKey = d.format('YYYY-MM-DD');
+      }
+
+      const platform = row.engageSentReply?.opportunity?.platform ?? 'unknown';
+      const key = `${dateKey}|${platform}`;
+      const existing = buckets.get(key);
+      if (existing) {
+        existing.value += row.impressions ?? 0;
+      } else {
+        buckets.set(key, { date: dateKey, platform, value: row.impressions ?? 0 });
+      }
+    }
+
+    const result = Array.from(buckets.values());
+    result.sort((a, b) => a.date.localeCompare(b.date) || a.platform.localeCompare(b.platform));
+    return result;
   }
 
   async updateScheduledReply(

@@ -600,12 +600,12 @@ export class EngageController {
   // Returns: SentStatsResult
 
   // Dashboard stats — three panels (see §11.1)
-  @Get('/dashboard-stats')                  // ① Engagement Performance (?platform=x|reddit)
-  getDashboardStats(@GetOrgFromRequest() org: Organization, @Query() q: DashboardStatsDto) { ... }
-  @Get('/dashboard/daily-replies')          // ② Your Posts overlay (?days=30)
-  getDashboardDailyReplies(@GetOrgFromRequest() org: Organization, @Query() q: DashboardDailyDto) { ... }
-  @Get('/dashboard/traffic')                // ③ Traffic from Engage (?platform&limit)
-  getDashboardTraffic(@GetOrgFromRequest() org: Organization, @Query() q: DashboardTrafficDto) { ... }
+  @Get('/dashboard/summary')                // ① Engagement Performance (?platform=x|reddit)
+  getDashboardSummary(@GetOrgFromRequest() org: Organization, @Query() q: DashboardSummaryDto) { ... }
+  @Get('/dashboard/replies-trend')          // ② Your Posts overlay (?days=30)
+  getDashboardRepliesTrend(@GetOrgFromRequest() org: Organization, @Query() q: DashboardRepliesTrendDto) { ... }
+  @Get('/dashboard/traffics')               // ③ Traffic from Engage (?platform&limit)
+  getDashboardTraffics(@GetOrgFromRequest() org: Organization, @Query() q: DashboardTrafficsDto) { ... }
 
   // Keywords
   @Post('/keywords')
@@ -1918,7 +1918,7 @@ WHERE state = 'PUBLISHED'
 
 **File**: `apps/backend/src/api/routes/engage.controller.ts`. All three read directly from `Post` (`source='engage'`), bypassing DataTicks. Full request/response contracts live in [`api.md`](./api.md#dashboard-stats--dashboard-statistics); summarised here:
 
-**① `GET /api/engage/dashboard-stats?platform=x|reddit`** — Engagement Performance panel
+**① `GET /api/engage/dashboard/summary?platform=x|reddit`** — Engagement Performance panel
 ```typescript
 {
   weeklyCount:       number,        // Replies — this ISO week, scoped by platform if provided
@@ -1938,7 +1938,7 @@ WHERE state = 'PUBLISHED'
 ```
 Omit `platform` for the combined X + Reddit view. Pass `platform=x` or `platform=reddit` when the UI chip is selected; the headline cards and `bestReply` are then scoped to that platform. Reddit labels should render `totalLikes` as total upvotes.
 
-**② `GET /api/engage/dashboard/daily-replies?days=30`** — "Your Posts" overlay
+**② `GET /api/engage/dashboard/replies-trend?days=30`** — "Your Posts" overlay
 ```typescript
 {
   days: number,
@@ -1947,7 +1947,7 @@ Omit `platform` for the combined X + Reddit view. Pass `platform=x` or `platform
 ```
 Buckets keyed by `Post.publishDate` (UTC `YYYY-MM-DD`). Computed directly from sent replies (not `EngageDataTicks`) so today's count is included.
 
-**③ `GET /api/engage/dashboard/traffic?platform=x&limit=10`** — "Traffic from Engage"
+**③ `GET /api/engage/dashboard/traffics?platform=x&limit=10`** — "Traffic from Engage"
 ```typescript
 {
   totalClicks: number,              // SUM(Post.trafficScore) (filtered by platform if given), rounded
@@ -1961,9 +1961,9 @@ Buckets keyed by `Post.publishDate` (UTC `YYYY-MM-DD`). Computed directly from s
 ```
 
 **Frontend** (`apps/frontend/src/app/(app)/(site)/dashboard/page.tsx`):
-- `<EngagePerformancePanel>` ← `/dashboard-stats` (independent panel, doesn't affect existing data).
-- "Your Posts" chart lime overlay bar ← `/dashboard/daily-replies` (per-day reply counts, includes today).
-- "Traffic from Engage" panel ← `/dashboard/traffic` (total + per-reply progress bars).
+- `<EngagePerformancePanel>` ← `/dashboard/summary` (independent panel, doesn't affect existing data).
+- "Your Posts" chart lime overlay bar ← `/dashboard/replies-trend` (per-day reply counts, includes today).
+- "Traffic from Engage" panel ← `/dashboard/traffics` (total + per-reply progress bars).
 
 > The daily `EngageDataTicks` aggregate (`type='replies'|'impressions'|'traffic'`, `timeUnit='day'`) remains the long-horizon trend store, but the live dashboard endpoints query `Post` directly so they include same-day activity.
 

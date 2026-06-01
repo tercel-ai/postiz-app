@@ -719,3 +719,224 @@ Controller                    Service                          Data Source
 9. **Circuit breaker**: Stops API calls to a platform after 2 consecutive failures
 
 </details>
+
+---
+
+## 8. Engage Dashboard Panels
+
+The Engage module surfaces three dashboard panels embedded within the Platform Analytics page. All data is scoped to posts with `source = 'engage'` (replies sent through the Engage signal-feed workflow). Unlike the main dashboard which sources from DataTicks, engage dashboard panels query the `EngageSentReply` and `Post` tables directly — metrics are lightweight counts and aggregates that don't require pre-aggregation.
+
+### Panel Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│  Platform Analytics Page (platform.analytics.tsx)                    │
+│                                                                     │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │  ① EngagePerformancePanel  →  GET /engage/dashboard/summary  │  │
+│  │     • weeklyCount, responseRate, totalImpressions            │  │
+│  │     • totalTrafficScore, totalLikes                          │  │
+│  │     • platformSplit (x / reddit), bestReply                  │  │
+│  └──────────────────────────────────────────────────────────────┘  │
+│                                                                     │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │  ② DailyEngageRepliesPanel → GET /engage/dashboard/          │  │
+│  │                                   daily-replies?days=30      │  │
+│  │     • Daily bar chart (X + Reddit stacked)                   │  │
+│  │     • 30-day trailing window                                 │  │
+│  └──────────────────────────────────────────────────────────────┘  │
+│                                                                     │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │  ③ TrafficFromEngagePanel  →  GET /engage/dashboard/         │  │
+│  │                                   traffic?limit=10            │  │
+│  │     • totalClicks aggregate                                  │  │
+│  │     • Top-5 replies by trafficScore (progress bars)          │  │
+│  └──────────────────────────────────────────────────────────────┘  │
+│                                                                     │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │  ④ EngageImpressionsPanel  →  GET /engage/dashboard/          │  │
+│  │                                   impressions?period=daily    │  │
+│  │     • Multi-line chart (X + Reddit)                          │  │
+│  │     • Impressions by publish date + platform                 │  │
+│  └──────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### 8.1 Panel ① — Engagement Performance
+
+**Endpoint**: `GET /engage/dashboard/summary?platform=x|reddit`
+
+**Business scenario**: At-a-glance view of how Engage replies are performing — weekly volume, response rate, total reach, and traffic metrics. Supports platform filtering via the `platform` query param.
+
+**Response structure**:
+
+```json
+{
+  "weeklyCount": 23,
+  "responseRate": 35,
+  "totalImpressions": 48620,
+  "totalTrafficScore": 1284,
+  "totalLikes": 1650,
+  "xImpressions": 48620,
+  "xTrafficIndex": 1284,
+  "platformSplit": { "x": 15, "reddit": 8 },
+  "bestReply": {
+    "opportunityId": "uuid",
+    "platform": "x",
+    "content": "Reply text...",
+    "likes": 142,
+    "url": "https://twitter.com/.../status/123"
+  }
+}
+```
+
+| Field | Meaning | Scope |
+|-------|---------|-------|
+| `weeklyCount` | Replies published this ISO week | Scoped by `platform` if provided |
+| `responseRate` | Percentage of replies where the original author replied back | Cumulative, scoped by platform |
+| `totalImpressions` | SUM(Post.impressions) across all engage posts | Cumulative, scoped by platform |
+| `totalTrafficScore` | SUM(Post.trafficScore) across all engage posts | Cumulative, scoped by platform |
+| `totalLikes` | SUM(X like_count / Reddit score) from Post.analytics | Cumulative, scoped by platform |
+| `xImpressions` / `xTrafficIndex` | X-only cumulative values (always X-scoped) | Legacy fields |
+| `platformSplit` | Reply counts this week per platform | This ISO week only |
+| `bestReply` | Most-liked/upvoted reply this week, or null | This ISO week, scoped by platform |
+
+### 8.2 Panel ② — Daily Engage Replies
+
+**Endpoint**: `GET /engage/dashboard/replies-trend?days=30`
+
+**Business scenario**: Track daily Engage reply cadence — are we consistently engaging with the community? Renders as a stacked bar chart with X (lime) and Reddit (orange) breakdown.
+
+**Response structure**:
+
+```json
+{
+  "days": 30,
+  "items": [
+    { "date": "2026-04-30", "count": 0, "x": 0, "reddit": 0 },
+    { "date": "2026-05-01", "count": 3, "x": 2, "reddit": 1 }
+  ]
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `date` | UTC date in `YYYY-MM-DD` format |
+| `count` | Total replies published on that day |
+| `x` | X replies on that day |
+| `reddit` | Reddit replies on that day |
+
+- Every day in the window is seeded (zero-filled), so the chart is continuous.
+- Includes today, which the daily `EngageDataTicks` aggregate does not yet cover.
+- Days parameter: 1–90, default 30.
+
+### 8.3 Panel ③ — Traffic from Engage
+
+**Endpoint**: `GET /engage/dashboard/traffics?platform=x|reddit&limit=10`
+
+**Business scenario**: Which Engage replies are driving the most traffic? Shows total traffic index plus a top-N breakdown with progress bars.
+
+**Response structure**:
+
+```json
+{
+  "totalClicks": 1284,
+  "items": [
+    {
+      "opportunityId": "uuid",
+      "platform": "x",
+      "content": "Reply text...",
+      "clicks": 312,
+      "time": "2026-05-20T10:00:00.000Z",
+      "url": "https://twitter.com/.../status/123"
+    }
+  ]
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `totalClicks` | SUM(Post.trafficScore) over all engage posts, scoped by platform |
+| `items[].clicks` | Per-reply Post.trafficScore, rounded |
+| `items[].url` | Post.releaseURL, falls back to the original post URL |
+| `limit` | Number of top-traffic replies to return (1–50, default 10) |
+
+### 8.4 Panel ④ — Engage Impressions Trend
+
+**Endpoint**: `GET /engage/dashboard/impressions?period=daily|weekly|monthly`
+
+**Business scenario**: Track how Engage reply impressions evolve over time across platforms. A multi-line chart shows X (lime) and Reddit (orange) impressions trends.
+
+**Response structure** (matches `/dashboard/impressions` shape):
+
+```json
+[
+  { "date": "2026-05-01", "value": 1500, "platform": "x" },
+  { "date": "2026-05-01", "value": 800, "platform": "reddit" },
+  { "date": "2026-05-02", "value": 2300, "platform": "x" }
+]
+```
+
+| Field | Meaning |
+|-------|---------|
+| `date` | Time bucket — `YYYY-MM-DD` (daily), Monday date (weekly), `YYYY-MM` (monthly) |
+| `value` | SUM(Post.impressions) for engage posts on that platform in that bucket |
+| `platform` | `x` or `reddit` |
+
+- Data sourced directly from `Post.impressions` (written by `engageMetricsSyncWorkflow`), not DataTicks.
+- Lookback: 30 days (daily), 90 days (weekly), 365 days (monthly).
+- No zero-fill — only dates with actual impressions appear; chart.js handles gaps gracefully.
+
+### 8.5 Data Pipeline
+
+Engage dashboard data flows through a dedicated pipeline parallel to the main dashboard:
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│  Temporal Workflow: engageMetricsSyncWorkflow                    │
+│  (triggered per-reply, runs 24h window)                          │
+│                                                                  │
+│  For each sent reply:                                            │
+│    1. X: checkPostAnalytics() via OAuth token                    │
+│       → impressions, trafficScore, analytics written to Post     │
+│    2. Reddit: fetch comment score/num_comments via Reddit API    │
+│       → impressions = (score+comments)×20, traffic = score×1 +   │
+│         comments×3, written to Post                              │
+│    3. Author-replied detection (X: conversation search,          │
+│       Reddit: thread reply scan)                                 │
+└──────────────────────────────────────────────────────────────────┘
+         │
+         ▼  Dashboard panels read directly from Post table
+    ┌─────────────────┬──────────────────┬──────────────────┐
+    │ dashboard/summary│ replies-trend     │ dashboard/traffics│
+    │ SUM(impressions, │ COUNT by publish  │ SUM(trafficScore) │
+    │  trafficScore),  │ date, grouped by  │ top-N by traffic  │
+    │  likes, bestReply│ platform          │                   │
+    └─────────────────┴──────────────────┴──────────────────┘
+```
+
+### 8.6 Key Differences from Main Dashboard
+
+| Aspect | Main Dashboard | Engage Dashboard |
+|--------|---------------|-----------------|
+| Data source | DataTicks (pre-aggregated daily) | Post table (direct query) |
+| Sync trigger | `dataTicksSyncWorkflow` @ UTC 00:05 | `engageMetricsSyncWorkflow` per reply (24h window) |
+| Caching | Redis (1hr TTL, invalidated by sync) | No Redis (data is lightweight counts) |
+| External API calls | Batch per platform during sync | Per-reply at send time + 24h sync |
+| Scope | All Postiz posts | Posts with `source = 'engage'` only |
+
+### 8.7 Files Involved
+
+| Layer | File path |
+|-------|-----------|
+| Frontend — Panel ① | `apps/frontend/src/components/engage/dashboard/engage-performance-panel.tsx` |
+| Frontend — Panel ② | `apps/frontend/src/components/engage/dashboard/daily-engage-replies-panel.tsx` |
+| Frontend — Panel ③ | `apps/frontend/src/components/engage/dashboard/traffic-from-engage-panel.tsx` |
+| Frontend — Panel ④ | `apps/frontend/src/components/engage/dashboard/engage-impressions-panel.tsx` |
+| Frontend — Page | `apps/frontend/src/components/platform-analytics/platform.analytics.tsx` |
+| Backend — Controller | `apps/backend/src/api/routes/engage.controller.ts` |
+| Backend — Service | `libraries/nestjs-libraries/src/engage/engage.service.ts` |
+| Backend — Repository | `libraries/nestjs-libraries/src/engage/engage.repository.ts` |
+| Backend — DTOs | `libraries/nestjs-libraries/src/engage/dtos/engage.dto.ts` |
+| Metrics Sync Workflow | `apps/orchestrator/src/workflows/engage-metrics-sync.workflow.ts` |
+| Engage DataTicks | `apps/orchestrator/src/workflows/engage-data-ticks.workflow.ts` |

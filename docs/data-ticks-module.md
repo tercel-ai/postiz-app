@@ -419,11 +419,24 @@ inside the requested window.
 
 ## Dashboard Endpoints
 
+### Main Dashboard (Post Analytics)
+
 | Endpoint | DataTicks Method | Returns |
 |----------|-----------------|---------|
 | `GET /dashboard/summary` | `getImpressionsSummaryByPlatform()` + `getTrafficSummaryByPlatform()` | `{ impressions_total, traffics_total, ... }` |
 | `GET /dashboard/impressions` | `getImpressionsByPlatform(period)` | Time series: `[{ date, value, platform }]` |
 | `GET /dashboard/traffics` | `getTrafficSummaryByPlatform()` | Summary: `[{ platform, value, percentage }]` |
+
+### Engage Dashboard (Engage Replies)
+
+| Endpoint | Data Source | Returns |
+|----------|------------|---------|
+| `GET /engage/dashboard/summary` | Post + EngageSentReply tables (direct query) | `{ weeklyCount, responseRate, totalImpressions, totalTrafficScore, bestReply, ... }` |
+| `GET /engage/dashboard/replies-trend` | EngageSentReply + Post tables (direct query) | `{ days, items: [{ date, count, x, reddit }] }` |
+| `GET /engage/dashboard/traffics` | Post table (direct query) | `{ totalClicks, items: [{ clicks, content, platform, ... }] }` |
+| `GET /engage/dashboard/impressions` | Post table (direct query) | `[{ date, value, platform }]` |
+
+> **Note**: Engage dashboard endpoints query the `Post` and `EngageSentReply` tables directly (filtered by `source = 'engage'`). Unlike the main dashboard, they do not use the DataTicks pre-aggregation layer. Metrics are synced per-reply by the `engageMetricsSyncWorkflow` Temporal workflow, which fetches post-level analytics 24 hours after a reply is published and writes `impressions` / `trafficScore` / `analytics` back to the Post record.
 
 Common query params: `startDate?`, `endDate?`, `integrationId[]?`, `channel[]?`
 

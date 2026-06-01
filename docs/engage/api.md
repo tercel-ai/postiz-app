@@ -32,9 +32,10 @@
   - [PATCH /sent/:id](#patch-apienagesentid) — edit scheduled reply
   - [PATCH /sent/:id/reply-url](#patch-apienagesentidreply-url) — Reddit URL submission
 - [Dashboard Stats — Dashboard Statistics](#dashboard-stats--dashboard-statistics)
-  - [GET /dashboard-stats](#get-apienagedashboard-stats) — Engage Performance panel
-  - [GET /dashboard/daily-replies](#get-apienagedashboarddaily-replies) — Your Posts overlay
-  - [GET /dashboard/traffic](#get-apienagedashboardtraffic) — Traffic from Engage panel
+  - [GET /dashboard/summary](#get-apienagedashboardsummary) — Engage Performance panel
+  - [GET /dashboard/replies-trend](#get-apienagedashboardreplies-trend) — Your Posts overlay
+  - [GET /dashboard/traffics](#get-apienagedashboardtraffics) — Traffic from Engage panel
+  - [GET /dashboard/impressions](#get-apienagedashboardimpressions) — Engage Impressions Trend
 - [Scan — Manual Scan Trigger](#scan--manual-scan-trigger)
 - [Error Handling](#error-handling)
 
@@ -1208,7 +1209,7 @@ Retrieve summary statistics for sent records (used for the top of the Sent page 
 }
 ```
 
-> `avgLikes` is platform-aware: for X it reads the `Likes` metric, for Reddit the `score` metric, from each reply's `Post.analytics` blob (bounded to the 1,000 most recent replies). `totalImpressions` here is the all-platform sum; the Dashboard panel has its own combined/platform-scoped impression fields (see `/dashboard-stats`).
+> `avgLikes` is platform-aware: for X it reads the `Likes` metric, for Reddit the `score` metric, from each reply's `Post.analytics` blob (bounded to the 1,000 most recent replies). `totalImpressions` here is the all-platform sum; the Dashboard panel has its own combined/platform-scoped impression fields (see `/dashboard/summary`).
 
 ---
 
@@ -1285,7 +1286,7 @@ The Engage data surfaces inside the existing Dashboard as three panels (no stand
 
 > **Data source.** All figures derive from `Post` records with `source = 'engage'`. X reply metrics (`impressions`, `trafficScore`, `analytics`) are populated by `PostsService.checkPostAnalytics` using the integration's OAuth token — the same path regular posts use — so `impression_count` and `bookmark_count` are captured. The X traffic index uses the `x` weights in `traffic.calculator.ts` (`likes×1 + replies×2 + retweets×1.5 + quotes×2 + bookmarks×1.5`), which match the spec's `X_traffic_index`. Reddit replies are synced separately (`impressions = (score+comments)×20`, `trafficScore = score×1 + num_comments×3`). Engage posts are intentionally excluded from the global analytics job and aggregated via `EngageDataTicks` instead.
 
-### GET `/api/engage/dashboard-stats`
+### GET `/api/engage/dashboard/summary`
 
 **Panel ① — Engagement Performance.** Five headline metrics plus this week's platform split and best reply. The panel has platform chips/tabs:
 
@@ -1330,7 +1331,7 @@ The Engage data surfaces inside the existing Dashboard as three panels (no stand
 
 ---
 
-### GET `/api/engage/dashboard/daily-replies`
+### GET `/api/engage/dashboard/replies-trend`
 
 **Panel ② — "Your Posts" chart overlay.** Daily engage reply counts over a trailing window, for the lime overlay bars on the existing posts chart.
 
@@ -1358,7 +1359,7 @@ The Engage data surfaces inside the existing Dashboard as three panels (no stand
 
 ---
 
-### GET `/api/engage/dashboard/traffic`
+### GET `/api/engage/dashboard/traffics`
 
 **Panel ③ — "Traffic from Engage".** Total traffic index ("clicks") plus a per-reply breakdown for the progress-bar list.
 
@@ -1389,6 +1390,35 @@ The Engage data surfaces inside the existing Dashboard as three panels (no stand
 
 - Only replies whose `Post.trafficScore` is non-null appear in `items`.
 - Omit `platform` to total both X and Reddit; pass `platform=x` for the X-only figure the panel headlines.
+
+---
+
+### GET `/api/engage/dashboard/impressions`
+
+**Panel ④ — "Engage Impressions Trend".** Impressions by publish date and platform, bucketed by period. Response shape matches `/dashboard/impressions` so the same chart component can consume both endpoints.
+
+**Query Params**
+
+| Param | Type | Default | Description |
+|---|---|---|---|
+| `period` | `'daily' \| 'weekly' \| 'monthly'` | `daily` | Time aggregation granularity |
+
+Lookback: 30 days (daily), 90 days (weekly), 365 days (monthly).
+
+**Response** `200 OK`
+
+```json
+[
+  { "date": "2026-05-01", "value": 1500, "platform": "x" },
+  { "date": "2026-05-01", "value": 800, "platform": "reddit" },
+  { "date": "2026-05-02", "value": 2300, "platform": "x" }
+]
+```
+
+- `value` is SUM(Post.impressions) for posts with `source = 'engage'` on that platform in that time bucket.
+- Data comes directly from the Post table (written by `engageMetricsSyncWorkflow`), not DataTicks.
+- Only dates with actual impressions appear; no zero-fill is applied. The chart component handles gaps.
+- Weekly period uses ISO week Monday dates; monthly uses YYYY-MM format.
 
 ---
 

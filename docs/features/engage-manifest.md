@@ -89,7 +89,7 @@ Engage spans 8 new Prisma models, 4 Temporal workflows, 25+ API endpoints, a loc
 - `apps/orchestrator/src/workflows/engage-metrics-sync.workflow.ts` — 24h after reply, authorReplied + Reddit metrics
 - **Modify** `libraries/nestjs-libraries/src/database/prisma/data-ticks/data-ticks.service.ts` — add `source NOT IN ('engage')` filter to `getPublishedPostsWithRelease()`
 - `apps/backend/src/api/routes/dashboard.controller.ts` — add `GET /engage-stats` endpoint
-- `apps/backend/src/api/routes/engage.controller.ts` — add `GET /dashboard-stats`
+- `apps/backend/src/api/routes/engage.controller.ts` — add `GET /dashboard/summary`
 
 **Dependencies**: F1, F4  
 **Can run in parallel with**: F6, F7 (frontend does not block analytics)

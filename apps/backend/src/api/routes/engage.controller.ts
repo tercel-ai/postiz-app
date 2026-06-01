@@ -27,9 +27,10 @@ import {
   AddMonitoredChannelDto,
   AddTrackedAccountDto,
   ConfirmManualReplyDto,
-  DashboardDailyDto,
-  DashboardStatsDto,
-  DashboardTrafficDto,
+  DashboardImpressionsDto,
+  DashboardRepliesTrendDto,
+  DashboardSummaryDto,
+  DashboardTrafficsDto,
   GenerateDraftDto,
   ListOpportunitiesDto,
   ListSentDto,
@@ -493,35 +494,49 @@ export class EngageController {
   // Panel ① "Engage Performance": weekly count, response rate, impressions,
   // traffic index, likes/upvotes, per-platform split, and this week's best reply.
   @ApiOperation({ summary: 'Engage Performance panel: headline stats, optional platform filter, platform split, best reply' })
-  @Get('/dashboard-stats')
-  getDashboardStats(
+  @Get('/dashboard/summary')
+  getDashboardSummary(
     @GetOrgFromRequest() org: Organization,
-    @Query() query: DashboardStatsDto
+    @Query() query: DashboardSummaryDto
   ) {
-    return this._engageService.getDashboardStats(org, query.platform);
+    return this._engageService.getDashboardSummary(org, query.platform);
   }
 
   // Panel ② "Your Posts" overlay: Engage reply counts bucketed by publish day.
   @ApiOperation({ summary: 'Daily Engage reply counts over a trailing window (for the Your Posts chart overlay)' })
-  @Get('/dashboard/daily-replies')
-  getDashboardDailyReplies(
+  @Get('/dashboard/replies-trend')
+  getDashboardRepliesTrend(
     @GetOrgFromRequest() org: Organization,
-    @Query() query: DashboardDailyDto
+    @Query() query: DashboardRepliesTrendDto
   ) {
-    return this._engageService.getDashboardDailyReplies(org, query.days);
+    return this._engageService.getDashboardRepliesTrend(org, query.days);
   }
 
   // Panel ③ "Traffic from Engage": total traffic index + per-reply breakdown.
   @ApiOperation({ summary: 'Total Engage traffic index plus per-reply breakdown (Traffic from Engage panel)' })
-  @Get('/dashboard/traffic')
-  getDashboardTraffic(
+  @Get('/dashboard/traffics')
+  getDashboardTraffics(
     @GetOrgFromRequest() org: Organization,
-    @Query() query: DashboardTrafficDto
+    @Query() query: DashboardTrafficsDto
   ) {
-    return this._engageService.getDashboardTraffic(org, {
+    return this._engageService.getDashboardTraffics(org, {
       platform: query.platform,
       limit: query.limit,
     });
+  }
+
+  // Panel ④ "Engage Impressions Trend": impressions by publish date and
+  // platform, bucketed by period. Response shape matches /dashboard/impressions.
+  @ApiOperation({ summary: 'Engage impressions trend by period and platform (daily/weekly/monthly)' })
+  @Get('/dashboard/impressions')
+  getDashboardImpressions(
+    @GetOrgFromRequest() org: Organization,
+    @Query() query: DashboardImpressionsDto
+  ) {
+    return this._engageService.getDashboardImpressions(
+      org,
+      (query.period as 'daily' | 'weekly' | 'monthly') || 'daily'
+    );
   }
 
   // ─── Admin: resync metrics ─────────────────────────────────────────────────
