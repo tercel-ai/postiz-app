@@ -259,7 +259,7 @@ export class EngageService implements OnApplicationBootstrap {
 
   async getSentStats(
     org: Organization,
-    dto: { date?: 'today' | 'week' | 'month'; platform?: string; status?: string } = {}
+    dto: { date?: string; platform?: string; status?: string } = {}
   ) {
     return this._engageRepository.getSentStats(org.id, dto);
   }

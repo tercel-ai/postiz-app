@@ -910,19 +910,14 @@ export class EngageRepository {
   // mirroring /engage/sent. Returns both the Post-scoped and SentReply-scoped where.
   private _buildSentReplyFilter(
     organizationId: string,
-    dto: { date?: 'today' | 'week' | 'month'; platform?: string; status?: string }
+    dto: { date?: string; platform?: string; status?: string }
   ): { postWhere: Prisma.PostWhereInput; sentWhere: Prisma.EngageSentReplyWhereInput } {
+    // Single source of truth for the date→publishDate window (shared with
+    // getDashboardSummary), so /sent, /sent/stats and /dashboard/summary all
+    // accept the same vocabulary (all | day | today | week | month).
     const postWhere: Prisma.PostWhereInput = {
       source: 'engage',
-      ...(dto.date === 'today' && {
-        publishDate: { gte: dayjs.utc().startOf('day').toDate() },
-      }),
-      ...(dto.date === 'week' && {
-        publishDate: { gte: dayjs.utc().startOf('isoWeek').toDate() },
-      }),
-      ...(dto.date === 'month' && {
-        publishDate: { gte: dayjs.utc().startOf('month').toDate() },
-      }),
+      ...this._engageDateWindow(dto.date),
     };
 
     if (dto.status === 'published') {
@@ -1004,7 +999,7 @@ export class EngageRepository {
   // totalImpressions and avgLikes all reflect the selected window.
   async getSentStats(
     organizationId: string,
-    dto: { date?: 'today' | 'week' | 'month'; platform?: string; status?: string } = {}
+    dto: { date?: string; platform?: string; status?: string } = {}
   ) {
     const { postWhere, sentWhere } = this._buildSentReplyFilter(organizationId, dto);
 

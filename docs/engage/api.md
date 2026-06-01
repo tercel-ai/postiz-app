@@ -728,7 +728,7 @@ Retrieve scoring statistics for the Feed (used for the top dashboard).
 
 | Parameter | Type | Description |
 |---|---|---|
-| `date` | `'today' \| 'week' \| 'month'` | Time range, defaults to all |
+| `date` | `all \| day \| today \| week \| month` | Publish-date window, defaults to all (`day`/`today` aliased) |
 | `platform` | `string` | Platform filter, e.g., `'x'` / `'reddit'` |
 
 **Response** `200 OK`
@@ -1123,7 +1123,7 @@ Retrieve the list of sent replies (includes original post summary and metrics da
 |---|---|---|---|
 | `platform` | `string` | — | Platform filter |
 | `status` | `'published' \| 'scheduled' \| 'manual' \| 'error'` | — | Status filter |
-| `date` | `'today' \| 'week' \| 'month'` | — | Time range |
+| `date` | `all \| day \| today \| week \| month` | `all` | Publish-date window (`day`/`today` aliased) |
 | `page` | `number` | `1` | Page number |
 | `limit` | `number` | `20` | Items per page, max 100 |
 
@@ -1203,7 +1203,7 @@ Retrieve summary statistics for sent records (used for the top of the Sent page)
 
 | Param | Type | Description |
 |---|---|---|
-| `date` | `today` \| `week` \| `month` | Publish-date window. **Omit for all-time.** |
+| `date` | `all` \| `day` \| `today` \| `week` \| `month` | Publish-date window. `all` / omitted / unknown = all-time. `day` and `today` are aliases. Same vocabulary as `/dashboard/summary`. |
 | `platform` | `x` \| `reddit` | Restrict to one platform (via the linked opportunity). |
 | `status` | `published` \| `scheduled` \| `manual` \| `error` | Restrict to a reply lifecycle state. |
 

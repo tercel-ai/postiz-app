@@ -571,5 +571,19 @@ describe('EngageRepository — two-table reads', () => {
         releaseURL: { not: null },
       });
     });
+
+    it("date='day' is accepted and windowed (shared vocab with /dashboard/summary)", async () => {
+      const { repo, sentCount, sentFindMany, postAggregate } = buildRepo();
+      sentCount.mockResolvedValue(0);
+      postAggregate.mockResolvedValue({ _sum: { impressions: 0, trafficScore: 0 } });
+      sentFindMany.mockResolvedValue([]);
+
+      // 'day' previously had no effect here (inline mapper only knew 'today');
+      // now both endpoints route through the shared _engageDateWindow.
+      await repo.getSentStats('org1', { date: 'day' });
+
+      expect(sentCount.mock.calls[0][0].where.post.source).toBe('engage');
+      expect(sentCount.mock.calls[0][0].where.post.publishDate.gte).toBeInstanceOf(Date);
+    });
   });
 });

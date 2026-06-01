@@ -322,10 +322,12 @@ export class ListSentDto {
   @IsIn(['published', 'scheduled', 'manual', 'error'])
   status?: string;
 
+  // Date window: all (default/empty) | day | today | week | month. Untyped (no
+  // @IsIn) so it accepts the same vocabulary as /dashboard/summary; the repository
+  // maps it via the shared _engageDateWindow (unknown values → all-time).
   @IsOptional()
   @IsString()
-  @IsIn(['today', 'week', 'month'])
-  date?: 'today' | 'week' | 'month';
+  date?: string;
 
   @IsOptional()
   @Type(() => Number)
