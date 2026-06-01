@@ -36,6 +36,7 @@
   - [GET /dashboard/replies-trend](#get-apienagedashboardreplies-trend) — Your Posts overlay
   - [GET /dashboard/traffics](#get-apienagedashboardtraffics) — Traffic from Engage panel
   - [GET /dashboard/impressions](#get-apienagedashboardimpressions) — Engage Impressions Trend
+  - [GET /dashboard/top-sources](#get-apienagedashboardtop-sources) — Top engage sources panel
 - [Scan — Manual Scan Trigger](#scan--manual-scan-trigger)
 - [Error Handling](#error-handling)
 
@@ -1437,6 +1438,39 @@ Lookback: 30 days (daily), 90 days (weekly), 365 days (monthly).
 - Data comes directly from the Post table (written by `engageMetricsSyncWorkflow`), not DataTicks.
 - Only dates with actual impressions appear; no zero-fill is applied. The chart component handles gaps.
 - Weekly period uses ISO week Monday dates; monthly uses YYYY-MM format.
+
+---
+
+### GET `/api/engage/dashboard/top-sources`
+
+**Panel ⑤ — "Top engage sources".** Engage replies aggregated by the **original post author** (the traffic source), ranked by traffic index ("clicks"). Note: the mockup's "Visitors" metric is not tracked and is omitted.
+
+**Query Params**
+
+| Param | Type | Default | Description |
+|---|---|---|---|
+| `platform` | `string` (`x` \| `reddit`) | — (all) | Restrict to one platform. |
+| `limit` | `number` (1–50) | `10` | Number of top sources to return. |
+
+**Response** `200 OK`
+
+```json
+{
+  "totalClicks": 51,             // SUM(Post.trafficScore) across all sources (not just top-N)
+  "items": [
+    {
+      "author": "koraygubur",    // original post author handle
+      "avatar": "https://.../avatar.jpg",  // author avatar, or null
+      "platform": "x",
+      "clicks": 30,              // SUM(Post.trafficScore) for this author, rounded
+      "replies": 3               // number of replies sent to this author
+    }
+  ]
+}
+```
+
+- Sources are grouped by `(platform, authorUsername)` and sorted by `clicks` descending.
+- "clicks" is the rounded traffic index (weighted engagement), not literal link clicks.
 
 ---
 
