@@ -9,6 +9,30 @@ import { FeedFiltersBar, FeedFilters } from './feed-filters';
 import { OpportunityCard, type Opportunity } from './opportunity-card';
 import { ReplyPanel } from './reply-panel';
 
+type ScanTiming = { lastScanAt: string | null; nextScanAt: string | null };
+type ScanStatus = {
+  lastScanAt: string | null;
+  nextScanAt: string | null;
+  keyword: ScanTiming;
+  channel: ScanTiming;
+  tracked: ScanTiming;
+};
+
+// Compact relative time: "in 5m" (future) / "12m ago" (past) / "—" (null).
+function relTime(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  const ms = new Date(iso).getTime() - Date.now();
+  const mins = Math.max(0, Math.round(Math.abs(ms) / 60000));
+  const unit =
+    mins < 60
+      ? `${mins}m`
+      : mins < 1440
+      ? `${Math.round(mins / 60)}h`
+      : `${Math.round(mins / 1440)}d`;
+  if (mins === 0) return ms >= 0 ? 'now' : 'just now';
+  return ms >= 0 ? `in ${unit}` : `${unit} ago`;
+}
+
 export function SignalFeed() {
   const fetch = useFetch();
 
@@ -173,7 +197,7 @@ export function SignalFeed() {
         toaster.show(msg, 'warning');
         return;
       }
-      toaster.show('Scan triggered — results will appear in ~15 minutes.', 'success');
+      toaster.show('Scan triggered — results will appear shortly.', 'success');
     } catch {
       toaster.show('Failed to trigger scan. Try again later.', 'warning');
     } finally {
@@ -206,6 +230,7 @@ export function SignalFeed() {
 
   const opportunities = data?.items ?? [];
   const total = data?.total ?? 0;
+  const scanStatus = config.scanStatus as ScanStatus | undefined;
   const selectedOpp = selectedId
     ? opportunities.find((o) => o.id === selectedId)
     : null;
@@ -226,10 +251,22 @@ export function SignalFeed() {
 
         {/* Stats bar */}
         <div className="px-6 py-2 text-xs text-gray-500 border-b border-[#1e2536] flex items-center justify-between">
-          <span>
-            {config.lastScanAt
-              ? `${total} opportunities · Last scan: ${new Date(config.lastScanAt).toLocaleString()}`
-              : 'No scan yet'}
+          <span
+            title={
+              scanStatus
+                ? [
+                    `Keyword  last ${relTime(scanStatus.keyword.lastScanAt)} · next ${relTime(scanStatus.keyword.nextScanAt)}`,
+                    `Channel  last ${relTime(scanStatus.channel.lastScanAt)} · next ${relTime(scanStatus.channel.nextScanAt)}`,
+                    `Tracked  last ${relTime(scanStatus.tracked.lastScanAt)} · next ${relTime(scanStatus.tracked.nextScanAt)}`,
+                  ].join('\n')
+                : undefined
+            }
+          >
+            {total} opportunities
+            {scanStatus?.lastScanAt
+              ? ` · Last scan ${relTime(scanStatus.lastScanAt)}`
+              : ' · No scan yet'}
+            {scanStatus?.nextScanAt ? ` · Next scan ${relTime(scanStatus.nextScanAt)}` : ''}
           </span>
           <button
             onClick={openKeywordPicker}
