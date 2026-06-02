@@ -111,41 +111,89 @@ describe('engage-scorer', () => {
     const heatOf = (post: RawPost) =>
       scorePost(post, [makeKeyword('GEO')])!.scoreHeat;
 
-    it('text branch (bluesky): likes*1+replies*3+... → 400 lands in the >300 bucket (18)', () => {
+    it('text branch (bluesky): likes*1+replies*3+... → 400 lands in the >300 bucket (23)', () => {
       // bluesky is not "x" — proves the text branch covers all engagement platforms.
-      expect(heatOf(metricPost('bluesky', { metricLikes: 400 }))).toBe(18);
+      expect(heatOf(metricPost('bluesky', { metricLikes: 400 }))).toBe(23);
     });
 
-    it('video branch (youtube): views are weighted (200k*0.005=1000 → >800 bucket, 26)', () => {
-      expect(heatOf(metricPost('youtube', { metricViews: 200_000 }))).toBe(26);
+    it('video branch (youtube): views are weighted (200k*0.005=1000 → >800 bucket, 33)', () => {
+      expect(heatOf(metricPost('youtube', { metricViews: 200_000 }))).toBe(33);
     });
 
-    it('text branch ignores views entirely (same 200k views on x → base 3)', () => {
+    it('text branch ignores views entirely (same 200k views on x → base 4)', () => {
       // Discriminates video from text: views only count under the video branch.
-      expect(heatOf(metricPost('x', { metricViews: 200_000 }))).toBe(3);
+      expect(heatOf(metricPost('x', { metricViews: 200_000 }))).toBe(4);
     });
 
-    it('network branch (instagram): saves are weighted (300*4=1200 → >1000 bucket, 35)', () => {
-      expect(heatOf(metricPost('instagram', { metricSaves: 300 }))).toBe(35);
+    it('network branch (instagram): saves are weighted (300*4=1200 → >1000 bucket, 45)', () => {
+      expect(heatOf(metricPost('instagram', { metricSaves: 300 }))).toBe(45);
     });
 
-    it('community branch (reddit): score*upvoteRatio+comments*2 → 500 in the >400 bucket (26)', () => {
+    it('community branch (reddit): score*upvoteRatio+comments*2 → 500 in the >400 bucket (33)', () => {
       expect(
         heatOf(metricPost('reddit', { metricScore: 500, metricUpvoteRatio: 1 }))
-      ).toBe(26);
+      ).toBe(33);
     });
 
     it('unknown platform falls through to the community branch', () => {
       // e.g. "discord" is in no case list → default (community) formula.
       expect(
         heatOf(metricPost('discord', { metricScore: 200, metricUpvoteRatio: 1 }))
-      ).toBe(18);
+      ).toBe(23);
     });
 
     it('community branch clamps a heavily-downvoted score to 0 (no negative heat)', () => {
       expect(
         heatOf(metricPost('reddit', { metricScore: -500, metricUpvoteRatio: 1 }))
-      ).toBe(3);
+      ).toBe(4);
+    });
+  });
+
+  describe('scoreAuthority — caps at 15 (spec)', () => {
+    const authOf = (post: RawPost) =>
+      scorePost(post, [makeKeyword('AI')])!.scoreAuthority;
+
+    it('X: >50k followers → 15 (max)', () => {
+      expect(authOf(makePost({ authorFollowers: 60_000 }))).toBe(15);
+    });
+
+    it('X: small/zero followers → base 2', () => {
+      expect(authOf(makePost({ authorFollowers: 500 }))).toBe(2);
+    });
+
+    it('community (reddit): >1M audience → 15 (max)', () => {
+      expect(
+        authOf(makePost({ platform: 'reddit', authorFollowers: 2_000_000 }))
+      ).toBe(15);
+    });
+  });
+
+  describe('scoreRecency — binary 24h (spec)', () => {
+    const recOf = (post: RawPost) =>
+      scorePost(post, [makeKeyword('AI')])!.scoreRecency;
+
+    it('within 24h → 5', () => {
+      expect(recOf(makePost({ postPublishedAt: new Date() }))).toBe(5);
+    });
+
+    it('older than 24h → 0', () => {
+      const old = new Date(Date.now() - 25 * 3_600_000);
+      expect(recOf(makePost({ postPublishedAt: old }))).toBe(0);
+    });
+  });
+
+  describe('重点账户 bonus — scoreTracked', () => {
+    const kw = [makeKeyword('AI')];
+
+    it('no tracked flag → scoreTracked 0', () => {
+      expect(scorePost(makePost(), kw)!.scoreTracked).toBe(0);
+    });
+
+    it('isFromTrackedAccount adds +5', () => {
+      const base = scorePost(makePost(), kw)!.score;
+      const tracked = scorePost(makePost({ isFromTrackedAccount: true }), kw)!;
+      expect(tracked.scoreTracked).toBe(5);
+      expect(tracked.score).toBe(base + 5);
     });
   });
 });

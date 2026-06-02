@@ -61,7 +61,10 @@ export class EngageService implements OnApplicationBootstrap {
   // ─── Config ───────────────────────────────────────────────────────────────
 
   async getConfig(org: Organization) {
-    const config = await this._engageRepository.getOrCreateConfig(org.id);
+    const [config, scanStatus] = await Promise.all([
+      this._engageRepository.getOrCreateConfig(org.id),
+      this._engageRepository.getOrgScanStatus(org.id),
+    ]);
     return {
       ...config,
       scanIntervals: {
@@ -69,6 +72,9 @@ export class EngageService implements OnApplicationBootstrap {
         channelHours: Number(process.env.ENGAGE_CHANNEL_SCAN_INTERVAL_HOURS ?? 3),
         trackedHours: Number(process.env.ENGAGE_TRACKED_SCAN_INTERVAL_HOURS ?? 3),
       },
+      // Per-org last/next scan timing (derived from EngageScanCursor). Overall +
+      // per-type (keyword / channel / tracked). next is derived, never stored.
+      scanStatus,
     };
   }
 

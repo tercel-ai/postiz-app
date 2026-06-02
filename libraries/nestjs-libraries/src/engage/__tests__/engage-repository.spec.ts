@@ -26,6 +26,8 @@ function buildRepo() {
   const oppAggregate = vi.fn();
   const oppFindFirst = vi.fn();
   const channelFindMany = vi.fn();
+  const trackedFindMany = vi.fn();
+  const cursorFindMany = vi.fn();
   const sentCount = vi.fn();
   const sentFindMany = vi.fn();
   const postAggregate = vi.fn();
@@ -33,6 +35,12 @@ function buildRepo() {
 
   const channel = {
     model: { engageMonitoredChannel: { findMany: channelFindMany } },
+  } as any;
+  const trackedAccount = {
+    model: { engageTrackedAccount: { findMany: trackedFindMany } },
+  } as any;
+  const scanCursor = {
+    model: { engageScanCursor: { findMany: cursorFindMany } },
   } as any;
   const opportunity = {
     model: { engageOpportunity: { aggregate: oppAggregate, findFirst: oppFindFirst } },
@@ -55,21 +63,24 @@ function buildRepo() {
   } as any;
 
   // Constructor order: _config, _keyword, _channel, _trackedAccount,
-  // _replyAccount, _opportunity, _oppState, _sentReply, _integration, _post, _tx
+  // _replyAccount, _opportunity, _oppState, _sentReply, _integration, _post,
+  // _tx, _scanCursor
   const repo = new EngageRepository(
     {} as any, {} as any,
-    channel,      // _channel
-    {} as any, {} as any,
-    opportunity,  // _opportunity
-    oppState,     // _oppState
-    sentReply,    // _sentReply
+    channel,        // _channel
+    trackedAccount, // _trackedAccount
     {} as any,
-    post,         // _post
-    {} as any
+    opportunity,    // _opportunity
+    oppState,       // _oppState
+    sentReply,      // _sentReply
+    {} as any,
+    post,           // _post
+    {} as any,
+    scanCursor      // _scanCursor
   );
   return {
     repo, stateFindMany, stateCount, stateAggregate, stateFindFirst,
-    oppAggregate, oppFindFirst, channelFindMany,
+    oppAggregate, oppFindFirst, channelFindMany, trackedFindMany, cursorFindMany,
     sentCount, sentFindMany, postAggregate, postFindMany,
   };
 }
@@ -822,5 +833,97 @@ describe('EngageRepository — two-table reads', () => {
         message: 'Account "elonmusk" already exists',
       });
     });
+  });
+});
+
+describe('EngageRepository.getOrgScanStatus', () => {
+  // Cadence defaults (env unset): keyword 24h, channel/tracked 3h.
+  const H = 3_600_000;
+
+  it('derives keyword next = lastScanStartedAt + cadence; last = lastScannedAt', async () => {
+    const { repo, channelFindMany, trackedFindMany, cursorFindMany } = buildRepo();
+    const started = new Date('2026-06-01T00:00:00Z');
+    const scanned = new Date('2026-06-01T00:05:00Z');
+    channelFindMany.mockResolvedValue([]); // org monitors no subreddits
+    trackedFindMany.mockResolvedValue([]); // org tracks no accounts
+    cursorFindMany.mockImplementation(async ({ where }: any) =>
+      where.scanType === 'keyword'
+        ? [{ lastScanStartedAt: started, lastScannedAt: scanned, cooldownUntil: null }]
+        : []
+    );
+
+    const st = await repo.getOrgScanStatus('org1');
+    expect(st.keyword.lastScanAt).toEqual(scanned);
+    expect(st.keyword.nextScanAt).toEqual(new Date(started.getTime() + 24 * H));
+    // Scoped types the org hasn't configured report null.
+    expect(st.channel).toEqual({ lastScanAt: null, nextScanAt: null });
+    expect(st.tracked).toEqual({ lastScanAt: null, nextScanAt: null });
+    // Overall folds across types.
+    expect(st.lastScanAt).toEqual(scanned);
+    expect(st.nextScanAt).toEqual(new Date(started.getTime() + 24 * H));
+  });
+
+  it('cooldownUntil pushes next scan beyond the cadence', async () => {
+    const { repo, channelFindMany, trackedFindMany, cursorFindMany } = buildRepo();
+    const started = new Date('2026-06-01T00:00:00Z');
+    const cooldown = new Date('2026-06-05T00:00:00Z'); // far past started + 24h
+    channelFindMany.mockResolvedValue([]);
+    trackedFindMany.mockResolvedValue([]);
+    cursorFindMany.mockImplementation(async ({ where }: any) =>
+      where.scanType === 'keyword'
+        ? [{ lastScanStartedAt: started, lastScannedAt: started, cooldownUntil: cooldown }]
+        : []
+    );
+
+    const st = await repo.getOrgScanStatus('org1');
+    expect(st.keyword.nextScanAt).toEqual(cooldown);
+  });
+
+  it('aggregates the org\'s channel cursors: latest last, earliest next', async () => {
+    const { repo, channelFindMany, trackedFindMany, cursorFindMany } = buildRepo();
+    channelFindMany.mockResolvedValue([{ channelId: 'a' }, { channelId: 'b' }]);
+    trackedFindMany.mockResolvedValue([]);
+    const aStart = new Date('2026-06-01T00:00:00Z'); // next = +3h
+    const bStart = new Date('2026-06-01T01:00:00Z'); // next = +3h (later)
+    const aScanned = new Date('2026-06-01T00:10:00Z');
+    const bScanned = new Date('2026-06-01T01:10:00Z'); // latest completion
+    cursorFindMany.mockImplementation(async ({ where }: any) =>
+      where.scanType === 'channel'
+        ? [
+            { lastScanStartedAt: aStart, lastScannedAt: aScanned, cooldownUntil: null },
+            { lastScanStartedAt: bStart, lastScannedAt: bScanned, cooldownUntil: null },
+          ]
+        : []
+    );
+
+    const st = await repo.getOrgScanStatus('org1');
+    expect(st.channel.lastScanAt).toEqual(bScanned); // max of completions
+    expect(st.channel.nextScanAt).toEqual(new Date(aStart.getTime() + 3 * H)); // earliest due
+    // Queried exactly this org's subreddit ids.
+    expect(cursorFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          scanType: 'channel',
+          scanKey: { in: ['a', 'b'] },
+        }),
+      })
+    );
+  });
+
+  it('lowercases tracked usernames for the cursor lookup', async () => {
+    const { repo, channelFindMany, trackedFindMany, cursorFindMany } = buildRepo();
+    channelFindMany.mockResolvedValue([]);
+    trackedFindMany.mockResolvedValue([{ username: 'OpenAI' }, { username: 'Vercel' }]);
+    cursorFindMany.mockResolvedValue([]);
+
+    await repo.getOrgScanStatus('org1');
+    expect(cursorFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          scanType: 'tracked',
+          scanKey: { in: ['openai', 'vercel'] },
+        }),
+      })
+    );
   });
 });

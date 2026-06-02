@@ -1232,6 +1232,41 @@ model EngageSentReply {
   @@index([organizationId])
 }
 
+// Global, org-independent cursor for one scan unit. A "scan unit" is a single
+// upstream fetch: a keyword search, a tracked-account search, or a monitored-
+// channel search. Shared across all orgs (the same keyword/account/channel is
+// fetched once, then fanned out) — so this table is keyed by the unit, never by
+// org. Drives incremental fetching (lastSeen*) and adaptive scheduling
+// (lastScanStartedAt + env cadence → next due; cooldownUntil for rate-limit
+// back-off). See docs/engage/.
+model EngageScanCursor {
+  id                 String    @id @default(uuid())
+
+  // ── Identity: one row per scan unit ──
+  platform           String    // 'x' | 'reddit' | ...
+  scanType           String    // 'keyword' | 'tracked' | 'channel'
+  // keyword text (keyword) | username (tracked) | subreddit id (channel).
+  // For scoped scans the org's keywords are OR-batched into the query at scan
+  // time, so the keyword is NOT part of identity — one fetch per scope.
+  scanKey            String
+
+  // ── Incremental cursor (where the last fetch stopped) ──
+  lastSeenExternalId String?   // X since_id / Reddit fullname of newest seen post
+  lastSeenAt         DateTime? // newest seen post's publish time (Reddit stop cond.)
+
+  // ── Scheduling (next due is DERIVED: lastScanStartedAt + env cadence) ──
+  lastScanStartedAt  DateTime? // when the most recent scan began (anchors next due)
+  lastScannedAt      DateTime? // when the most recent scan completed (display only)
+  cooldownUntil      DateTime? // rate-limit back-off; null when not cooling down
+  status             String    @default("IDLE") // IDLE | SCANNING (single-flight)
+
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  @@unique([platform, scanType, scanKey])
+  @@index([status, scanType, lastScanStartedAt])
+}
+
 model EngageDataTicks {
   organizationId String
   platform       String

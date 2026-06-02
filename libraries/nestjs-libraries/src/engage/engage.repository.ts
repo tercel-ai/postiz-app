@@ -15,12 +15,80 @@ import {
   UpdateTrackedAccountDto,
   ENGAGE_FILTER_ALL,
 } from '@gitroom/nestjs-libraries/engage/dtos/engage.dto';
+import { KEYWORD_GLOBAL_SCAN_KEY } from '@gitroom/nestjs-libraries/engage/scan/platform-scan-adapter';
 import dayjs from 'dayjs';
 import isoWeek from 'dayjs/plugin/isoWeek';
 import utc from 'dayjs/plugin/utc';
 
 dayjs.extend(isoWeek);
 dayjs.extend(utc);
+
+// Scan cadence per type (ms), mirroring the orchestrator's interval env vars.
+// getOrgScanStatus derives "next scan" = lastScanStartedAt + cadence (or
+// cooldownUntil, whichever is later). The activity/workflows own the actual
+// scheduling; this only reports the derived timing to the UI.
+const KEYWORD_CADENCE_MS =
+  Number(process.env.ENGAGE_KEYWORD_SCAN_INTERVAL_HOURS ?? 24) * 3_600_000;
+const CHANNEL_CADENCE_MS =
+  Number(process.env.ENGAGE_CHANNEL_SCAN_INTERVAL_HOURS ?? 3) * 3_600_000;
+const TRACKED_CADENCE_MS =
+  Number(process.env.ENGAGE_TRACKED_SCAN_INTERVAL_HOURS ?? 3) * 3_600_000;
+
+export interface ScanTiming {
+  lastScanAt: Date | null; // most recent successful completion
+  nextScanAt: Date | null; // earliest upcoming scan (derived, not stored)
+}
+
+export interface OrgScanStatus {
+  lastScanAt: Date | null;
+  nextScanAt: Date | null;
+  keyword: ScanTiming; // org-independent global firehose (X + Reddit)
+  channel: ScanTiming; // this org's monitored subreddits
+  tracked: ScanTiming; // this org's tracked accounts
+}
+
+type ScanCursorTiming = {
+  lastScanStartedAt: Date | null;
+  lastScannedAt: Date | null;
+  cooldownUntil: Date | null;
+};
+
+// next = max(lastScanStartedAt + cadence, cooldownUntil). Anchored to scan
+// START (not duration) so scan length never affects the next-due time; a unit
+// never scanned is due now. cooldownUntil pushes it out under rate-limit.
+function deriveNext(row: ScanCursorTiming, cadenceMs: number, now: number): number {
+  const base = row.lastScanStartedAt
+    ? row.lastScanStartedAt.getTime() + cadenceMs
+    : now;
+  const cd = row.cooldownUntil ? row.cooldownUntil.getTime() : 0;
+  return Math.max(base, cd);
+}
+
+function aggregateScan(
+  rows: ScanCursorTiming[],
+  cadenceMs: number,
+  now: number
+): ScanTiming {
+  if (!rows.length) return { lastScanAt: null, nextScanAt: null };
+  const lasts = rows
+    .map((r) => r.lastScannedAt?.getTime())
+    .filter((n): n is number => n != null);
+  const nexts = rows.map((r) => deriveNext(r, cadenceMs, now));
+  return {
+    lastScanAt: lasts.length ? new Date(Math.max(...lasts)) : null,
+    nextScanAt: nexts.length ? new Date(Math.min(...nexts)) : null,
+  };
+}
+
+function maxDate(ds: (Date | null)[]): Date | null {
+  const ts = ds.filter((d): d is Date => d != null).map((d) => d.getTime());
+  return ts.length ? new Date(Math.max(...ts)) : null;
+}
+
+function minDate(ds: (Date | null)[]): Date | null {
+  const ts = ds.filter((d): d is Date => d != null).map((d) => d.getTime());
+  return ts.length ? new Date(Math.min(...ts)) : null;
+}
 
 @Injectable()
 export class EngageRepository {
@@ -35,7 +103,8 @@ export class EngageRepository {
     private _sentReply: PrismaRepository<'engageSentReply'>,
     private _integration: PrismaRepository<'integration'>,
     private _post: PrismaRepository<'post'>,
-    private _tx: PrismaTransaction
+    private _tx: PrismaTransaction,
+    private _scanCursor: PrismaRepository<'engageScanCursor'>
   ) {}
 
   // Runs a create that may hit a unique constraint and converts the resulting
@@ -125,6 +194,68 @@ export class EngageRepository {
       where: { organizationId },
       data: { enabled: false },
     });
+  }
+
+  // Per-org scan timing, derived from the shared EngageScanCursor rows. The
+  // keyword firehose is org-independent (one cursor per platform), while
+  // channel/tracked timing comes from the cursors for THIS org's monitored
+  // subreddits / tracked usernames. "Next scan" is derived (lastScanStartedAt +
+  // env cadence, or cooldownUntil) — never stored — so changing the cadence env
+  // is reflected immediately. A scoped type the org hasn't configured reports
+  // null/null. NOTE: a keyword/subreddit shared with a more aggressive org is
+  // scanned on that org's cadence, so the reported time can be fresher than this
+  // org's own interval — intentional (shared data, always fresher is fine).
+  async getOrgScanStatus(organizationId: string): Promise<OrgScanStatus> {
+    const now = Date.now();
+
+    const [subs, tracked] = await Promise.all([
+      this._channel.model.engageMonitoredChannel.findMany({
+        where: { organizationId, platform: 'reddit', enabled: true },
+        select: { channelId: true },
+      }),
+      this._trackedAccount.model.engageTrackedAccount.findMany({
+        where: { organizationId, enabled: true },
+        select: { username: true },
+      }),
+    ]);
+    const subredditIds = subs.map((s) => s.channelId);
+    const usernames = tracked.map((t) => t.username.toLowerCase());
+
+    const [keywordCursors, channelCursors, trackedCursors] = await Promise.all([
+      this._scanCursor.model.engageScanCursor.findMany({
+        where: { scanType: 'keyword', scanKey: KEYWORD_GLOBAL_SCAN_KEY },
+      }),
+      subredditIds.length
+        ? this._scanCursor.model.engageScanCursor.findMany({
+            where: {
+              platform: 'reddit',
+              scanType: 'channel',
+              scanKey: { in: subredditIds },
+            },
+          })
+        : Promise.resolve([]),
+      usernames.length
+        ? this._scanCursor.model.engageScanCursor.findMany({
+            where: {
+              platform: 'x',
+              scanType: 'tracked',
+              scanKey: { in: usernames },
+            },
+          })
+        : Promise.resolve([]),
+    ]);
+
+    const keyword = aggregateScan(keywordCursors, KEYWORD_CADENCE_MS, now);
+    const channel = aggregateScan(channelCursors, CHANNEL_CADENCE_MS, now);
+    const trackedAgg = aggregateScan(trackedCursors, TRACKED_CADENCE_MS, now);
+
+    return {
+      lastScanAt: maxDate([keyword.lastScanAt, channel.lastScanAt, trackedAgg.lastScanAt]),
+      nextScanAt: minDate([keyword.nextScanAt, channel.nextScanAt, trackedAgg.nextScanAt]),
+      keyword,
+      channel,
+      tracked: trackedAgg,
+    };
   }
 
   // ─── Keywords ──────────────────────────────────────────────────────────────

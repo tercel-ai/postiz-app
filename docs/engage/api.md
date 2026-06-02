@@ -209,7 +209,7 @@ interface EngageOpportunity {
   scoreKeyword: number;     // Keyword score 0-35 (关键词质量)
   scoreHeat: number;        // Heat score 0-45 (平台热度)
   scoreAuthority: number;   // Authority score 0-15 (账号影响力)
-  scoreRecency: number;     // Recency score 0-1: within 24h→1, else→0 (时效性)
+  scoreRecency: number;     // Recency score 0-5: within 24h→5, else→0 (时效性)
   scoreTracked: number;     // Tracked account bonus 0 or 5 (重点账户)
   // Intent
   intentTags: IntentType[];
@@ -807,7 +807,7 @@ Retrieve the list of opportunities (main Signal Feed endpoint).
 
 **UI Reference: Score Level Colors**
 
-Total score max is 105 (scoreKeyword 35 + scoreHeat 45 + scoreAuthority 15 + scoreRecency 1 + scoreTracked 5). Only posts scoring ≥60 are stored.
+Total score max is 105 (scoreKeyword 35 + scoreHeat 45 + scoreAuthority 15 + scoreRecency 5 + scoreTracked 5). Only posts scoring ≥60 are stored.
 
 | Score Range | Level | Recommended Color |
 |---|---|---|
@@ -822,7 +822,7 @@ Total score max is 105 (scoreKeyword 35 + scoreHeat 45 + scoreAuthority 15 + sco
 | `scoreKeyword` | 35 | 关键词质量 — keyword match strength; each hit +15 |
 | `scoreHeat` | 45 | 平台热度 — platform engagement (likes/replies/etc.) |
 | `scoreAuthority` | 15 | 账号影响力 — author follower count / subreddit size |
-| `scoreRecency` | 5 | 时效性 — freshness: 1 if within 24h, else 0 |
+| `scoreRecency` | 5 | 时效性 — freshness: 5 if within 24h, else 0 |
 | `scoreTracked` | 5 | 重点账户 — 5 if author is a tracked account, else 0 |
 | `score` | 105 | 总分 — sum of all dimensions |
 
@@ -1535,15 +1535,15 @@ All error response formats (NestJS default):
 ```
 // Total Score (Only ≥60 enters the Feed)
 total = scoreKeyword(0-35) + scoreHeat(0-45) + scoreAuthority(0-15)
-      + scoreRecency(0-1) + scoreTracked(0 or 5)   // max 105
+      + scoreRecency(0-5) + scoreTracked(0 or 5)   // max 105
 
 // X Heat
 x_heat = likes×1 + replies×3 + retweets×2 + quotes×2
-// Threshold mapping: ≥2000→35, ≥1000→26, ≥300→18, ≥80→9, else→3
+// Threshold mapping: >2000→45, >1000→33, >300→23, >80→12, else→4
 
 // Reddit Heat
 reddit_heat = score × upvote_ratio + num_comments × 2
-// Thresholds: ≥800→35, ≥400→26, ≥100→18, ≥30→9, else→3
+// Thresholds: >800→45, >400→33, >100→23, >30→12, else→4
 
 // X Traffic Index (Used for display on Sent page)
 x_traffic = likes×1.0 + replies×2.0 + retweets×1.5 + quotes×2.0 + bookmarks×1.5

@@ -260,7 +260,7 @@ model EngageOpportunity {
   //                      text(x/threads/mastodon/bluesky), video(youtube/tiktok),
   //                      network(linkedin/instagram/pinterest), community(reddit)
   // scoreAuthority  15   X follower count / subreddit audienceSize; see §9 for per-platform thresholds
-  // scoreRecency     5   within 24h → 1; else → 0
+  // scoreRecency     5   within 24h → 5; else → 0
   scoreHeat             Int       @default(0)
   scoreAuthority        Int       @default(0)
   scoreRecency          Int       @default(0)
@@ -1652,7 +1652,7 @@ async fetchRedditCommentMetrics(commentId: string): Promise<{ score: number; num
 | Keyword Quality | `scoreKeyword` | 35 | `EngageOpportunityState` (per-org) | Each hit +15, capped at 35 (关键词质量) |
 | Platform Heat | `scoreHeat` | 45 | `EngageOpportunity` (global) | Per-platform formula, 4 branches (see below) (平台热度) |
 | Account Authority | `scoreAuthority` | 15 | `EngageOpportunity` (global) | X follower count / subreddit audienceSize; per-platform thresholds (账号影响力) |
-| Recency | `scoreRecency` | 5 | `EngageOpportunity` (global) | within 24h → 1; else → 0 (时效性) |
+| Recency | `scoreRecency` | 5 | `EngageOpportunity` (global) | within 24h → 5; else → 0 (时效性) |
 | Tracked Account | `scoreTracked` | 5 | `EngageOpportunityState` (per-org) | +5 if author is in this org's `EngageTrackedAccount` (重点账户) |
 
 **Score ownership (two-table split):** the OBJECTIVE dimensions (heat / authority / recency) are identical for every org, so they live on the global `EngageOpportunity` row. The SUBJECTIVE dimensions (keyword / tracked) depend on the org's own keyword set and tracked accounts, so they — plus the total `score` (= keyword + tracked + heat + authority + recency, max 105) — live on the per-org `EngageOpportunityState`. The total is recomputed each scan; the feed reads it directly.
@@ -1675,7 +1675,7 @@ interface ScoreBreakdown {
   keyword:   number;  // 0-35 (关键词质量)
   heat:      number;  // 0-45 (平台热度)
   authority: number;  // 0-15 (账号影响力)
-  recency:   number;  // 0 or 1: within 24h→1, else→0 (时效性)
+  recency:   number;  // 0 or 5: within 24h→5, else→0 (时效性)
   tracked:   number;  // 0 or 5 (重点账户)
   // Extensible: future dimensions added here without schema migration.
   // Not indexed — display / offline analysis only.
@@ -1720,13 +1720,13 @@ export function scorePost(post: RawPost, keywords: EngageKeyword[]): ScoredPost 
 
 function computeBreakdown(post: RawPost, hits: EngageKeyword[]): ScoreBreakdown {
   const keyword   = computeKeywordScore(hits);                     // 0-35
-  const heat      = post.platform === 'x'                          // 0-35
+  const heat      = post.platform === 'x'                          // 0-45
     ? computeXHeatScore(post)
     : computeCommunityHeatScore(post);
-  const authority = post.platform === 'x'                          // 0-20
+  const authority = post.platform === 'x'                          // 0-15
     ? computeXAuthorityScore(post.authorFollowers)
     : computeCommunityAuthorityScore(post.authorFollowers);        // audienceSize for Reddit/YT/etc.
-  const recency  = isWithin24Hours(post.publishedAt) ? 1 : 0;     // 0-5 (currently 0|1)
+  const recency  = isWithin24Hours(post.publishedAt) ? 5 : 0;     // 0|5
   const tracked  = post.isFromTrackedAccount ? 5 : 0;             // 0|5
 
   return {
@@ -1749,39 +1749,39 @@ function computeXHeatScore(post: RawPost): number {
   // x_heat = likes×1 + replies×3 + retweets×2 + quotes×2
   const heat = post.metricLikes * 1 + post.metricReplies * 3
              + post.metricRetweets * 2 + post.metricQuotes * 2;
-  if (heat > 2000) return 35;
-  if (heat > 1000) return 26;
-  if (heat >  300) return 18;
-  if (heat >   80) return  9;
-  return 3;
+  if (heat > 2000) return 45;
+  if (heat > 1000) return 33;
+  if (heat >  300) return 23;
+  if (heat >   80) return 12;
+  return 4;
 }
 
 function computeCommunityHeatScore(post: RawPost): number {
   // reddit_heat = score × upvoteRatio + comments × 2  (also used for other community platforms)
   const heat = (post.metricScore ?? 0) * (post.metricUpvoteRatio ?? 1)
              + (post.metricComments ?? 0) * 2;
-  if (heat > 800) return 35;
-  if (heat > 400) return 26;
-  if (heat > 100) return 18;
-  if (heat >  30) return  9;
-  return 3;
+  if (heat > 800) return 45;
+  if (heat > 400) return 33;
+  if (heat > 100) return 23;
+  if (heat >  30) return 12;
+  return 4;
 }
 
 function computeXAuthorityScore(followers: number | null): number {
-  if (!followers) return 3;
-  if (followers > 50_000) return 20;
-  if (followers > 10_000) return 15;
-  if (followers >  1_000) return  8;
-  return 3;
+  if (!followers) return 2;
+  if (followers > 50_000) return 15;
+  if (followers > 10_000) return 11;
+  if (followers >  1_000) return  6;
+  return 2;
 }
 
 function computeCommunityAuthorityScore(audienceSize: number | null): number {
   // Used for Reddit subreddits, YouTube channels, QQ groups, etc.
-  if (!audienceSize) return 3;
-  if (audienceSize > 1_000_000) return 20;
-  if (audienceSize >   100_000) return 15;
-  if (audienceSize >    10_000) return  8;
-  return 3;
+  if (!audienceSize) return 2;
+  if (audienceSize > 1_000_000) return 15;
+  if (audienceSize >   100_000) return 11;
+  if (audienceSize >    10_000) return  6;
+  return 2;
 }
 ```
 

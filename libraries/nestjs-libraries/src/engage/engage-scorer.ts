@@ -132,11 +132,11 @@ function computeTextHeatScore(post: RawPost): number {
     post.metricRetweets * 2 +
     post.metricQuotes * 2 +
     post.metricShares * 2;
-  if (heat > 2000) return 35;
-  if (heat > 1000) return 26;
-  if (heat > 300) return 18;
-  if (heat > 80) return 9;
-  return 3;
+  if (heat > 2000) return 45;
+  if (heat > 1000) return 33;
+  if (heat > 300) return 23;
+  if (heat > 80) return 12;
+  return 4;
 }
 
 // YouTube, TikTok — views-based with engagement weighting
@@ -146,11 +146,11 @@ function computeVideoHeatScore(post: RawPost): number {
     post.metricLikes * 2 +
     post.metricComments * 5 +
     post.metricShares * 3;
-  if (heat > 2000) return 35;
-  if (heat > 800) return 26;
-  if (heat > 200) return 18;
-  if (heat > 50) return 9;
-  return 3;
+  if (heat > 2000) return 45;
+  if (heat > 800) return 33;
+  if (heat > 200) return 23;
+  if (heat > 50) return 12;
+  return 4;
 }
 
 // LinkedIn, Instagram — impression/view weighted
@@ -161,11 +161,11 @@ function computeNetworkHeatScore(post: RawPost): number {
     post.metricComments * 8 +
     post.metricShares * 5 +
     post.metricSaves * 4;
-  if (heat > 1000) return 35;
-  if (heat > 400) return 26;
-  if (heat > 100) return 18;
-  if (heat > 25) return 9;
-  return 3;
+  if (heat > 1000) return 45;
+  if (heat > 400) return 33;
+  if (heat > 100) return 23;
+  if (heat > 25) return 12;
+  return 4;
 }
 
 // Reddit — upvote score + comments
@@ -173,40 +173,35 @@ function computeCommunityHeatScore(post: RawPost): number {
   // Clamp metricScore to 0 — highly downvoted posts should not produce negative heat
   const score = Math.max(post.metricScore ?? 0, 0);
   const heat = score * (post.metricUpvoteRatio ?? 1) + (post.metricComments ?? 0) * 2;
-  if (heat > 800) return 35;
-  if (heat > 400) return 26;
-  if (heat > 100) return 18;
-  if (heat > 30) return 9;
-  return 3;
+  if (heat > 800) return 45;
+  if (heat > 400) return 33;
+  if (heat > 100) return 23;
+  if (heat > 30) return 12;
+  return 4;
 }
 
 // ─── Authority scoring ────────────────────────────────────────────────────────
 
 function computeXAuthorityScore(followers: number | null): number {
-  if (!followers) return 3;
-  if (followers > 50_000) return 20;
-  if (followers > 10_000) return 15;
-  if (followers > 1_000) return 8;
-  return 3;
+  if (!followers) return 2;
+  if (followers > 50_000) return 15;
+  if (followers > 10_000) return 11;
+  if (followers > 1_000) return 6;
+  return 2;
 }
 
 function computeCommunityAuthorityScore(audienceSize: number | null): number {
-  if (!audienceSize) return 3;
-  if (audienceSize > 1_000_000) return 20;
-  if (audienceSize > 100_000) return 15;
-  if (audienceSize > 10_000) return 8;
-  return 3;
+  if (!audienceSize) return 2;
+  if (audienceSize > 1_000_000) return 15;
+  if (audienceSize > 100_000) return 11;
+  if (audienceSize > 10_000) return 6;
+  return 2;
 }
 
 // ─── Recency ──────────────────────────────────────────────────────────────────
 
 function computeRecencyScore(publishedAt: Date): number {
+  // Binary per scoring spec: within 24h → 5, otherwise → 0.
   const ageMs = Date.now() - new Date(publishedAt).getTime();
-  const h = ageMs / 3_600_000; // age in hours
-  if (h < 1)  return 5;
-  if (h < 6)  return 4;
-  if (h < 12) return 3;
-  if (h < 24) return 2;
-  if (h < 48) return 1;
-  return 0;
+  return ageMs < 24 * 3_600_000 ? 5 : 0;
 }

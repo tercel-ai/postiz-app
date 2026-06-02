@@ -185,7 +185,7 @@ Engage uses **two completely separate account concepts** that must not be confla
 | 关键词质量 | `scoreKeyword` | 35 | 每个关键词命中 +15，上限 35 |
 | 平台热度 | `scoreHeat` | 45 | 按平台专属公式计算（见下方） |
 | 账号影响力 | `scoreAuthority` | 15 | 按平台分别用粉丝数 / subreddit 规模计算（见下方） |
-| 时效性 | `scoreRecency` | 5 | 24h 内 → 1；超出 → 0 |
+| 时效性 | `scoreRecency` | 5 | 24h 内 → 5；超出 → 0 |
 | 重点账户 | `scoreTracked` | 5 | 命中重点账户 +5 |
 | **总分** | `score` | **105** | 以上五项之和 |
 
@@ -199,9 +199,9 @@ Engage uses **two completely separate account concepts** that must not be confla
 | Dimension | Field | Max | Logic |
 |---|---|---|---|
 | 关键词质量 Keyword Quality | `scoreKeyword` | 35 | Each hit +15, capped at 35 |
-| 平台热度 Platform Heat | `scoreHeat` | 45 | Per-platform formula; X thresholds at 2000/1000/300/80 → 35/26/18/9/3 pts |
+| 平台热度 Platform Heat | `scoreHeat` | 45 | Per-platform formula; X thresholds at 2000/1000/300/80 → 45/33/23/12/4 pts |
 | 账号影响力 Account Authority | `scoreAuthority` | 15 | X follower count / subreddit audienceSize; per-platform thresholds |
-| 时效性 Recency | `scoreRecency` | 5 | Within 24h → 1; else → 0 |
+| 时效性 Recency | `scoreRecency` | 5 | Within 24h → 5; else → 0 |
 | 重点账户 Tracked Account | `scoreTracked` | 5 | Author is in **追踪账号 (EngageTrackedAccount)** → +5 |
 
 Reddit heat: `reddit_heat = score × upvote_ratio + num_comments × 2`; thresholds 800/400/100/30.
@@ -583,7 +583,7 @@ Engage replies appear in the existing Calendar. No new calendar page.
 
 ```
 // Total score
-total_score = keyword_score(0~35) + heat_score(0~45) + authority_score(0~15) + recency_score(0~1) + tracked_bonus(0~5)
+total_score = keyword_score(0~35) + heat_score(0~45) + authority_score(0~15) + recency_score(0~5) + tracked_bonus(0~5)
 // max 105; ≥60 → enters Feed
 // ≥60 → enters Feed / <60 → discard
 
