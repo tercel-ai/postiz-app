@@ -1227,9 +1227,12 @@ model EngageSentReply {
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
 
-  // A given org replies to a given post at most once; different orgs may each reply.
-  @@unique([organizationId, opportunityId])
+  // An org may reply to the same opportunity more than once (e.g. a batch send
+  // from several of its accounts), so tracking is keyed per-post (postId @unique)
+  // rather than per-opportunity. The composite index keeps the per-opportunity
+  // reads (getOpportunityDetail / getSentReplyByOpportunity) fast.
   @@index([organizationId])
+  @@index([organizationId, opportunityId])
 }
 
 // Global, org-independent cursor for one scan unit. A "scan unit" is a single

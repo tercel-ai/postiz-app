@@ -35,6 +35,11 @@ import {
 } from '@gitroom/nestjs-libraries/engage/dtos/engage.dto';
 import { getRedditToken, redditAuthHeaders } from '@gitroom/nestjs-libraries/engage/reddit-auth';
 import { redditPublicGet } from '@gitroom/nestjs-libraries/engage/reddit-loid';
+import {
+  syncRedditMetrics,
+  syncXMetrics,
+  type MetricsSyncDeps,
+} from '@gitroom/nestjs-libraries/engage/engage-metrics-sync';
 
 // Anchored at $ to reject trailing query strings / fragments that would otherwise
 // pollute the stored releaseURL (e.g. `?utm_source=...`). Matches spec §12.4.
@@ -699,27 +704,31 @@ export class EngageService implements OnApplicationBootstrap {
       throw err;
     }
 
-    // Phase 2: scheduled posts haven't published yet; best-effort record creation.
-    // Log failures but continue — a missing SentReply is recoverable; a missing Post is not.
-    const results: EngageSentReply[] = [];
-    for (let i = 0; i < body.items.length; i++) {
-      const item = body.items[i];
-      try {
-        const reply = await this._engageRepository.createSentReply({
+    // Phase 2: one tracking row per scheduled post. Tracking is keyed per-post,
+    // so the items are independent — isolate failures (a transient DB error on
+    // one must not drop the others) and surface genuine failures via the log.
+    const settled = await Promise.allSettled(
+      body.items.map((item, i) =>
+        this._engageRepository.createSentReply({
           organizationId: org.id,
           opportunityId,
           postId: createdPostIds[i],
           inputData: { strategy: item.strategy, brandStrength: item.brandStrength, mentions: item.mentions },
-        });
-        results.push(reply);
-      } catch (err) {
+        })
+      )
+    );
+    const results: EngageSentReply[] = [];
+    settled.forEach((r, i) => {
+      if (r.status === 'fulfilled') {
+        results.push(r.value);
+      } else {
         this.logger.error(
           `batchScheduleReply: post scheduled (postId=${createdPostIds[i]}, opportunityId=${opportunityId}, ` +
           `orgId=${org.id}) but failed to record EngageSentReply.`,
-          err instanceof Error ? err.stack : err
+          r.reason instanceof Error ? r.reason.stack : r.reason
         );
       }
-    }
+    });
     return results;
   }
 
@@ -777,27 +786,36 @@ export class EngageService implements OnApplicationBootstrap {
       throw err;
     }
 
-    // Phase 2: all X replies are LIVE. Do NOT roll back.
+    // Phase 2: all X replies are LIVE. Do NOT roll back. One tracking row per
+    // post (per-post keying), isolated so one transient failure doesn't drop the
+    // rest. Genuine failures are logged (the reply is live but untracked).
+    const settled = await Promise.allSettled(
+      body.items.map((item, i) =>
+        this._engageRepository
+          .createSentReply({
+            organizationId: org.id,
+            opportunityId,
+            postId: createdPostIds[i],
+            inputData: { strategy: item.strategy, brandStrength: item.brandStrength, mentions: item.mentions },
+          })
+          .then(async (sentReply) => {
+            await this.startMetricsSyncForReply(sentReply.id);
+            return sentReply;
+          })
+      )
+    );
     const results: EngageSentReply[] = [];
-    for (let i = 0; i < body.items.length; i++) {
-      const item = body.items[i];
-      try {
-        const sentReply = await this._engageRepository.createSentReply({
-          organizationId: org.id,
-          opportunityId,
-          postId: createdPostIds[i],
-          inputData: { strategy: item.strategy, brandStrength: item.brandStrength, mentions: item.mentions },
-        });
-        await this.startMetricsSyncForReply(sentReply.id);
-        results.push(sentReply);
-      } catch (err) {
+    settled.forEach((r, i) => {
+      if (r.status === 'fulfilled') {
+        results.push(r.value);
+      } else {
         this.logger.error(
           `batchSendReply: X reply published (postId=${createdPostIds[i]}, opportunityId=${opportunityId}, ` +
           `orgId=${org.id}) but failed to record EngageSentReply.`,
-          err instanceof Error ? err.stack : err
+          r.reason instanceof Error ? r.reason.stack : r.reason
         );
       }
-    }
+    });
     if (results.length === 0) {
       throw new InternalServerErrorException(
         'All replies were published but no tracking records could be created. Contact support to reconcile.'
@@ -954,10 +972,18 @@ export class EngageService implements OnApplicationBootstrap {
       try {
         const p = reply.opportunity.platform;
         if (p === 'reddit' && reply.post?.releaseURL) {
-          await this._syncRedditMetrics(reply.post.id, reply.post.releaseURL, reply.id, reply.opportunity.authorUsername ?? '');
+          await syncRedditMetrics(reply.post.id, reply.post.releaseURL, reply.id, reply.opportunity.authorUsername ?? '', this._metricsSyncDeps());
           updated++;
         } else if (p === 'x' && reply.post?.releaseURL) {
-          await this._syncXMetrics(reply.organizationId, reply.id, reply.post.id, reply.post.releaseURL, reply.opportunity.externalPostId ?? '', reply.opportunity.authorUsername ?? '', !!reply.post.integrationId);
+          await syncXMetrics({
+            orgId: reply.organizationId,
+            sentReplyId: reply.id,
+            postDbId: reply.post.id,
+            replyTweetUrl: reply.post.releaseURL,
+            originalTweetId: reply.opportunity.externalPostId ?? '',
+            authorUsername: reply.opportunity.authorUsername ?? '',
+            hasIntegration: !!reply.post.integrationId,
+          }, this._metricsSyncDeps());
           updated++;
         }
       } catch (err) {
@@ -969,104 +995,17 @@ export class EngageService implements OnApplicationBootstrap {
     return { found: pending.length, updated, errors };
   }
 
-  private async _syncRedditMetrics(postId: string, releaseURL: string, sentReplyId: string, authorUsername: string): Promise<void> {
-    const { getRedditToken, redditAuthHeaders } = await import('@gitroom/nestjs-libraries/engage/reddit-auth');
-    const commentId = releaseURL.match(/\/comments\/[^/]+\/[^/]+\/([a-z0-9]+)\/?/)?.[1] ?? null;
-    if (!commentId) return;
-
-    const token = await getRedditToken();
-    // Token path → oauth (no WAF); public path → redditPublicGet (loid cookie +
-    // tiered proxy: rotate-IP on 403/429, then direct fallback).
-    const fetchReddit = async (url: string, tok: string | null): Promise<{ ok: boolean; text(): Promise<string> }> => {
-      if (tok) {
-        const r = await fetch(url, { headers: redditAuthHeaders(tok) });
-        return { ok: r.ok, text: () => r.text() };
-      }
-      return redditPublicGet(url, {}, { log: (m) => this.logger.warn(m) });
+  /** Sinks for the shared engage-metrics-sync module (see engage-metrics-sync.ts). */
+  private _metricsSyncDeps(): MetricsSyncDeps {
+    return {
+      updatePostMetrics: (postId, impressions, analytics, trafficScore) =>
+        this._engageRepository.updatePostMetrics(postId, impressions, analytics, trafficScore),
+      markAuthorReplied: (sentReplyId) => this._engageRepository.markAuthorReplied(sentReplyId),
+      checkPostAnalytics: (orgId, postId, when) =>
+        this._postsService.checkPostAnalytics(orgId, postId, when),
+      warn: (m) => this.logger.warn(m),
+      log: (m) => this.logger.log(m),
     };
-
-    const infoUrl = token
-      ? `https://oauth.reddit.com/api/info?id=t1_${commentId}`
-      : `https://www.reddit.com/api/info.json?id=t1_${commentId}`;
-
-    const infoRes = await fetchReddit(infoUrl, token);
-    if (!infoRes.ok) return;
-
-    const infoJson = JSON.parse(await infoRes.text()) as { data?: { children?: Array<{ data: { score: number; num_comments: number } }> } };
-    const commentData = infoJson.data?.children?.[0]?.data;
-    if (!commentData) return;
-
-    const today = new Date().toISOString().slice(0, 10);
-    const analytics = [
-      { label: 'score', data: [{ total: String(commentData.score), date: today }], percentageChange: 0 },
-      { label: 'comments', data: [{ total: String(commentData.num_comments), date: today }], percentageChange: 0 },
-    ];
-    // Reddit_traffic_index = score×1 + num_comments×3 (Appendix formula).
-    const trafficScore = commentData.score * 1 + commentData.num_comments * 3;
-    await this._engageRepository.updatePostMetrics(
-      postId,
-      Math.round((commentData.score + commentData.num_comments) * 20),
-      analytics,
-      trafficScore
-    );
-
-    const threadMatch = releaseURL.match(/\/r\/([^/]+)\/comments\/([a-z0-9]+)\//);
-    if (!threadMatch || !authorUsername) return;
-    const [, subreddit, postId_] = threadMatch;
-    const threadToken = await getRedditToken();
-    const threadUrl = threadToken
-      ? `https://oauth.reddit.com/r/${subreddit}/comments/${postId_}?comment=${commentId}&depth=1&limit=25`
-      : `https://www.reddit.com/r/${subreddit}/comments/${postId_}/.json?comment=${commentId}&depth=1&limit=25`;
-    const threadRes = await fetchReddit(threadUrl, threadToken);
-    if (!threadRes.ok) return;
-    const threadJson = JSON.parse(await threadRes.text()) as Array<{ data?: { children?: Array<{ data?: { replies?: { data?: { children?: Array<{ data?: { author?: string } }> } } } }> } }>;
-    const childReplies = threadJson[1]?.data?.children?.[0]?.data?.replies?.data?.children ?? [];
-    if (childReplies.some((r) => r.data?.author === authorUsername)) {
-      await this._engageRepository.markAuthorReplied(sentReplyId);
-    }
-  }
-
-  private async _syncXMetrics(orgId: string, sentReplyId: string, postId: string, replyTweetUrl: string, originalTweetId: string, authorUsername: string, hasIntegration: boolean): Promise<void> {
-    // Fetch the reply tweet's metrics through the integration's own OAuth token
-    // (the same path regular posts use), so impression_count and bookmark_count
-    // are captured and the X traffic index + impressions are written back to the
-    // Post. The engage posts are excluded from the global analytics job
-    // (source != 'engage'), so we drive it explicitly here. When the reply was
-    // recorded without an X account there is no token to authenticate with, so
-    // skip the per-account analytics (the author-replied check below uses the
-    // app-only bearer and still runs).
-    if (hasIntegration) {
-      try {
-        await this._postsService.checkPostAnalytics(orgId, postId, Date.now());
-      } catch (err) {
-        this.logger.warn(`X analytics sync failed for post ${postId}: ${(err as Error).message}`);
-      }
-    } else {
-      this.logger.log(`X reply ${sentReplyId} has no integration — skipping per-account analytics sync`);
-    }
-
-    // Author-replied detection uses the app-only bearer (conversation search),
-    // which is independent of the per-integration analytics token above.
-    const bearerToken = process.env.X_BEARER_TOKEN;
-    if (!bearerToken) return;
-    const replyTweetId = replyTweetUrl.match(/\/status\/(\d+)/)?.[1];
-    if (!replyTweetId) return;
-
-    const authorRes = await fetch(`https://api.twitter.com/2/users/by/username/${authorUsername}`, { headers: { Authorization: `Bearer ${bearerToken}` } });
-    if (!authorRes.ok) return;
-    const authorJson = (await authorRes.json()) as { data?: { id: string } };
-    const originalAuthorId = authorJson.data?.id;
-    if (!originalAuthorId) return;
-
-    const res = await fetch(
-      `https://api.twitter.com/2/tweets/search/recent?query=conversation_id:${originalTweetId}&tweet.fields=author_id&max_results=50`,
-      { headers: { Authorization: `Bearer ${bearerToken}` } }
-    );
-    if (!res.ok) return;
-    const json = (await res.json()) as { data?: Array<{ id: string; author_id: string }> };
-    if ((json.data ?? []).some((t) => t.author_id === originalAuthorId && BigInt(t.id) > BigInt(replyTweetId))) {
-      await this._engageRepository.markAuthorReplied(sentReplyId);
-    }
   }
 
   // Called by engage.controller after creating an EngageSentReply to start 24h metrics sync.

@@ -1000,10 +1000,11 @@ export class EngageRepository {
     const merged = this._merge(row);
 
     if (row.status === 'SCHEDULED' || row.status === 'REPLIED') {
-      const sentReply = await this._sentReply.model.engageSentReply.findUnique({
-        where: {
-          organizationId_opportunityId: { organizationId, opportunityId: id },
-        },
+      // An opportunity may now carry several replies (batch send); surface the
+      // most recent for the detail panel.
+      const sentReply = await this._sentReply.model.engageSentReply.findFirst({
+        where: { organizationId, opportunityId: id },
+        orderBy: { createdAt: 'desc' },
         include: {
           post: {
             select: {
@@ -1064,6 +1065,9 @@ export class EngageRepository {
     postId: string;
     inputData: object;
   }) {
+    // Tracking is keyed per-post (postId is @unique), so a batch that sends N
+    // replies to one opportunity records N rows. There is no per-opportunity
+    // unique to collide on, so this is a plain create.
     return this._sentReply.model.engageSentReply.create({ data });
   }
 
@@ -1625,27 +1629,25 @@ export class EngageRepository {
       throw new BadRequestException('Reply has already been sent — cannot edit');
     }
 
-    const ops: Promise<unknown>[] = [];
-
-    if (data.content !== undefined) {
-      ops.push(
-        this._post.model.post.update({
-          where: { id: reply.postId },
-          data: { content: data.content },
-        })
-      );
+    // Both writes must commit together: a partial commit would leave the
+    // published post content and the stored generation inputData diverged.
+    if (data.content !== undefined || data.inputData !== undefined) {
+      await this._tx.model.$transaction(async (tx) => {
+        if (data.content !== undefined) {
+          await tx.post.update({
+            where: { id: reply.postId },
+            data: { content: data.content },
+          });
+        }
+        if (data.inputData !== undefined) {
+          await tx.engageSentReply.update({
+            where: { id },
+            data: { inputData: data.inputData },
+          });
+        }
+      });
     }
 
-    if (data.inputData !== undefined) {
-      ops.push(
-        this._sentReply.model.engageSentReply.update({
-          where: { id },
-          data: { inputData: data.inputData },
-        })
-      );
-    }
-
-    await Promise.all(ops);
     return this._sentReply.model.engageSentReply.findFirst({
       where: { id },
       include: {
@@ -1655,8 +1657,11 @@ export class EngageRepository {
   }
 
   async getSentReplyByOpportunity(organizationId: string, opportunityId: string) {
-    return this._sentReply.model.engageSentReply.findUnique({
-      where: { organizationId_opportunityId: { organizationId, opportunityId } },
+    // Per-post tracking means an opportunity can have multiple replies; return
+    // the most recent (used by cancelAndSendNow to find a still-pending reply).
+    return this._sentReply.model.engageSentReply.findFirst({
+      where: { organizationId, opportunityId },
+      orderBy: { createdAt: 'desc' },
       include: { post: { select: { id: true, state: true } } },
     });
   }
