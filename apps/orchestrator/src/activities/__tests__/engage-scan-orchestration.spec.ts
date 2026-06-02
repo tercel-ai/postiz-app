@@ -85,7 +85,7 @@ describe('EngageScanActivity._scanUnit (cursor lifecycle)', () => {
         }),
       })
     );
-    expect(out).toHaveLength(1);
+    expect(out.posts).toHaveLength(1);
   });
 
   it('skips a cooling-down unit without calling the adapter', async () => {
@@ -96,7 +96,7 @@ describe('EngageScanActivity._scanUnit (cursor lifecycle)', () => {
 
     const out = await (activity as any)._scanUnit(scanArgs());
 
-    expect(out).toEqual([]);
+    expect(out.posts).toEqual([]);
     expect(updateMany).not.toHaveBeenCalled(); // never claimed
     expect(adapter.searchScoped).not.toHaveBeenCalled();
   });
@@ -107,7 +107,7 @@ describe('EngageScanActivity._scanUnit (cursor lifecycle)', () => {
     (activity as any)._xAdapter = adapter;
 
     const out = await (activity as any)._scanUnit(scanArgs());
-    expect(out).toEqual([]);
+    expect(out.posts).toEqual([]);
     expect(updateMany).not.toHaveBeenCalled();
     expect(adapter.searchScoped).not.toHaveBeenCalled();
   });
@@ -118,7 +118,7 @@ describe('EngageScanActivity._scanUnit (cursor lifecycle)', () => {
     (activity as any)._xAdapter = adapter;
 
     const out = await (activity as any)._scanUnit(scanArgs());
-    expect(out).toEqual([]);
+    expect(out.posts).toEqual([]);
     expect(adapter.searchScoped).not.toHaveBeenCalled();
     expect(update).not.toHaveBeenCalled();
   });
@@ -146,7 +146,7 @@ describe('EngageScanActivity._scanUnit (cursor lifecycle)', () => {
     (activity as any)._xAdapter = adapter;
 
     const out = await (activity as any)._scanUnit(scanArgs());
-    expect(out).toEqual([]);
+    expect(out.posts).toEqual([]);
     // Released to IDLE, cursor untouched.
     expect(update).toHaveBeenCalledWith(
       expect.objectContaining({ where: { id: 'cur1' }, data: { status: 'IDLE' } })
@@ -159,10 +159,39 @@ describe('EngageScanActivity._scanUnit (cursor lifecycle)', () => {
     (activity as any)._xAdapter = adapter;
 
     const out = await (activity as any)._scanUnit(scanArgs({ xPool: new TokenPool([]) }));
-    expect(out).toEqual([]);
+    expect(out.posts).toEqual([]);
     expect(adapter.searchScoped).not.toHaveBeenCalled();
     expect(update).toHaveBeenCalledWith(
       expect.objectContaining({ where: { id: 'cur1' }, data: { status: 'IDLE' } })
     );
+  });
+
+  it('skips a unit scanned within its cadence (not due)', async () => {
+    // keyword cadence defaults to 24h; lastScanStartedAt 1h ago → not due.
+    const recent = new Date(Date.now() - 60 * 60 * 1000);
+    const { activity, updateMany } = build({ ...IDLE_ROW, lastScanStartedAt: recent });
+    const adapter = fakeAdapter({ posts: [], nextCursor: {}, rate: { limited: false } });
+    (activity as any)._xAdapter = adapter;
+
+    const out = await (activity as any)._scanUnit(scanArgs());
+    expect(out.ran).toBe(false);
+    expect(updateMany).not.toHaveBeenCalled(); // cadence gate → never claimed
+    expect(adapter.searchScoped).not.toHaveBeenCalled();
+  });
+
+  it('force bypasses the cadence gate', async () => {
+    const recent = new Date(Date.now() - 60 * 60 * 1000); // well within 24h cadence
+    const { activity, updateMany } = build({ ...IDLE_ROW, lastScanStartedAt: recent });
+    const adapter = fakeAdapter({
+      posts: [],
+      nextCursor: { lastSeenExternalId: '5' },
+      rate: { limited: false },
+    });
+    (activity as any)._xAdapter = adapter;
+
+    const out = await (activity as any)._scanUnit(scanArgs({ force: true }));
+    expect(out.ran).toBe(true);
+    expect(updateMany).toHaveBeenCalled(); // claimed despite the recent scan
+    expect(adapter.searchScoped).toHaveBeenCalled();
   });
 });

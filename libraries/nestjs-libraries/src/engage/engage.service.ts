@@ -427,35 +427,42 @@ export class EngageService implements OnApplicationBootstrap {
     }
   }
 
-  // Ensures the 3 global workflows are running.
-  // Intervals are read from env vars; USE_EXISTING makes this idempotent on every call.
-  //   ENGAGE_KEYWORD_SCAN_INTERVAL_HOURS  (default 24)
-  //   ENGAGE_CHANNEL_SCAN_INTERVAL_HOURS  (default 3)
-  //   ENGAGE_TRACKED_SCAN_INTERVAL_HOURS  (default 3)
+  // Workflow ids of the retired per-type scan workflows. Terminated on boot so
+  // upgrading deployments don't leave them looping into a now-missing workflow
+  // type (their continueAsNew would otherwise fail repeatedly).
+  private static readonly LEGACY_SCAN_WORKFLOW_IDS = [
+    'engage-keyword-global',
+    'engage-channel-global',
+    'engage-tracked-global',
+  ];
+
+  // Ensures the single engage scan ticker is running. The per-type cadence
+  // (keyword 24h / channel 3h / tracked 3h env vars) is enforced inside the
+  // activity; this workflow just ticks. USE_EXISTING makes it idempotent.
+  //   ENGAGE_SCAN_TICK_MINUTES  (default 5)
   private async _ensureGlobalWorkflowsRunning(): Promise<void> {
     const client = this._temporalService.client?.getRawClient();
     if (!client) return;
 
-    const keywordHours = Number(process.env.ENGAGE_KEYWORD_SCAN_INTERVAL_HOURS ?? 24);
-    const channelHours = Number(process.env.ENGAGE_CHANNEL_SCAN_INTERVAL_HOURS ?? 3);
-    const trackedHours = Number(process.env.ENGAGE_TRACKED_SCAN_INTERVAL_HOURS ?? 3);
-
-    const workflows = [
-      { workflowId: 'engage-keyword-global', name: 'engageGlobalKeywordScanWorkflow', args: [false, keywordHours] as unknown[] },
-      { workflowId: 'engage-channel-global', name: 'engageGlobalChannelScanWorkflow', args: [false, channelHours] as unknown[] },
-      { workflowId: 'engage-tracked-global', name: 'engageGlobalTrackedWorkflow', args: [false, trackedHours] as unknown[] },
-    ];
-    for (const { workflowId, name, args } of workflows) {
+    // Best-effort cleanup of the retired fixed-interval workflows.
+    for (const id of EngageService.LEGACY_SCAN_WORKFLOW_IDS) {
       try {
-        await client.workflow?.start(name, {
-          workflowId,
-          taskQueue: 'main',
-          args,
-          workflowIdConflictPolicy: 'USE_EXISTING',
-        });
-      } catch (err) {
-        this.logger.error(`Failed to start ${name}:`, err);
+        await client.workflow?.getHandle(id).terminate('superseded by engage-scan-ticker');
+      } catch {
+        // Not running / already gone — ignore.
       }
+    }
+
+    const tickMinutes = Number(process.env.ENGAGE_SCAN_TICK_MINUTES ?? 5);
+    try {
+      await client.workflow?.start('engageScanTickerWorkflow', {
+        workflowId: 'engage-scan-ticker',
+        taskQueue: 'main',
+        args: [tickMinutes],
+        workflowIdConflictPolicy: 'USE_EXISTING',
+      });
+    } catch (err) {
+      this.logger.error('Failed to start engageScanTickerWorkflow:', err);
     }
   }
 
@@ -905,37 +912,31 @@ export class EngageService implements OnApplicationBootstrap {
     const client = this._temporalService.client?.getRawClient();
     if (!client) return { status: 'no_client' };
 
-    const keywordHours = Number(process.env.ENGAGE_KEYWORD_SCAN_INTERVAL_HOURS ?? 24);
-    const channelHours = Number(process.env.ENGAGE_CHANNEL_SCAN_INTERVAL_HOURS ?? 3);
-    const trackedHours = Number(process.env.ENGAGE_TRACKED_SCAN_INTERVAL_HOURS ?? 3);
+    const tickMinutes = Number(process.env.ENGAGE_SCAN_TICK_MINUTES ?? 5);
 
-    // Signal all 3 workflows; fall back to start if any is not yet running.
-    const targets = [
-      { workflowId: 'engage-keyword-global', signal: 'triggerKeywordScanNow', startName: 'engageGlobalKeywordScanWorkflow', intervalHours: keywordHours },
-      { workflowId: 'engage-channel-global', signal: 'triggerChannelScanNow', startName: 'engageGlobalChannelScanWorkflow', intervalHours: channelHours },
-      { workflowId: 'engage-tracked-global', signal: 'triggerTrackedScanNow', startName: 'engageGlobalTrackedWorkflow', intervalHours: trackedHours },
-    ];
-
-    let anyError = false;
-    for (const { workflowId, signal, startName, intervalHours } of targets) {
+    // Signal the ticker to force an immediate scan of all units; if it isn't
+    // running yet, start it (which itself runs within one tick) and signal.
+    try {
+      await client.workflow.getHandle('engage-scan-ticker').signal('triggerScanNow');
+      return { status: 'signaled' };
+    } catch {
       try {
-        await client.workflow.getHandle(workflowId).signal(signal);
-      } catch {
-        try {
-          await client.workflow.start(startName, {
-            workflowId,
-            taskQueue: 'main',
-            args: [true, intervalHours],
-            workflowIdConflictPolicy: 'USE_EXISTING',
-          });
-        } catch (startErr) {
-          this.logger.error(`triggerImmediateScan: failed to start ${workflowId} (org=${org.id})`, startErr);
-          anyError = true;
-        }
+        await client.workflow.start('engageScanTickerWorkflow', {
+          workflowId: 'engage-scan-ticker',
+          taskQueue: 'main',
+          args: [tickMinutes],
+          workflowIdConflictPolicy: 'USE_EXISTING',
+        });
+        await client.workflow.getHandle('engage-scan-ticker').signal('triggerScanNow');
+        return { status: 'started' };
+      } catch (startErr) {
+        this.logger.error(
+          `triggerImmediateScan: failed to start/signal engage-scan-ticker (org=${org.id})`,
+          startErr
+        );
+        return { status: 'error' };
       }
     }
-
-    return { status: anyError ? 'error' : 'signaled' };
   }
 
   async resyncEngageMetrics(opts: {

@@ -41,6 +41,17 @@ const DEFAULT_COOLDOWN_MS = Number(
   process.env.ENGAGE_SCAN_COOLDOWN_MS ?? 15 * 60 * 1000
 );
 
+// Per-scanType cadence (ms). A single frequent ticker calls runDueScans(); each
+// unit is scanned only when lastScanStartedAt + its cadence has elapsed (unless
+// forced). This is what makes the per-unit cursor/cooldown granularity matter:
+// a rate-limited unit recovers on the next tick after its cooldown, independent
+// of the long keyword cadence. Mirrors the repository's getOrgScanStatus.
+const CADENCE_MS: Record<ScanType, number> = {
+  keyword: Number(process.env.ENGAGE_KEYWORD_SCAN_INTERVAL_HOURS ?? 24) * 3_600_000,
+  channel: Number(process.env.ENGAGE_CHANNEL_SCAN_INTERVAL_HOURS ?? 3) * 3_600_000,
+  tracked: Number(process.env.ENGAGE_TRACKED_SCAN_INTERVAL_HOURS ?? 3) * 3_600_000,
+};
+
 // Max concurrent upserts per phase in _persistOpportunities. The posts array is
 // unbounded (union of all matched posts across keywords/subreddits) and persist
 // runs once per enabled org, so an un-chunked Promise.all can exhaust the Prisma
@@ -128,111 +139,109 @@ export class EngageScanActivity {
     }
   }
 
-  // ─── Scan entry points (cursor-driven, adapter-backed) ───────────────────
+  // ─── Scan entry point (single cadence ticker) ────────────────────────────
   //
-  // Each scan type resolves to one or more scan UNITS — a (platform, scanType,
-  // scanKey) tuple with its own incremental cursor. A unit is fetched once
-  // (keywords OR-batched into the query), deduped, then fanned out to every
-  // enabled org for per-org scoring/persistence.
-
+  // Called every tick by engageScanTickerWorkflow. Builds every scan UNIT — a
+  // (platform, scanType, scanKey) tuple with its own incremental cursor — and
+  // scans only the ones whose per-type cadence has elapsed (or all of them when
+  // `force`, e.g. a user-triggered immediate scan). All collected posts are
+  // deduped and fanned out to every enabled org once. `force` bypasses the
+  // cadence gate but NOT the rate-limit cooldown.
   @ActivityMethod()
-  async runGlobalKeywordScan(): Promise<void> {
+  async runDueScans(force = false): Promise<void> {
     const orgContexts = await this._engageRepository.getAllEnabledOrgContexts();
     if (!orgContexts.length) return;
     const keywords = unionKeywords(orgContexts);
     if (!keywords.length) return;
 
-    this.logger.log(
-      `Keyword scan: ${keywords.length} keyword(s) across ${orgContexts.length} org(s)`
-    );
     const xPool = new TokenPool(await this._collectXTokens(orgContexts));
     const redditToken = await getRedditToken();
 
+    const posts: RawPost[] = [
+      ...(await this._scanKeywordUnits(keywords, xPool, redditToken, force)),
+      ...(await this._scanChannelUnits(orgContexts, keywords, redditToken, force)),
+      ...(await this._scanTrackedUnits(orgContexts, keywords, xPool, force)),
+    ];
+
+    await this._fanOutAndFinalize(orgContexts, posts);
+  }
+
+  // X + Reddit global keyword firehose (one cursor per platform).
+  private async _scanKeywordUnits(
+    keywords: string[],
+    xPool: TokenPool,
+    redditToken: string | null,
+    force: boolean
+  ): Promise<RawPost[]> {
     const posts: RawPost[] = [];
-    posts.push(
-      ...(await this._scanUnit({
-        platform: 'x',
+    for (const platform of ['x', 'reddit'] as const) {
+      const r = await this._scanUnit({
+        platform,
         scanType: 'keyword',
         scanKey: KEYWORD_GLOBAL_SCAN_KEY,
         scope: { type: 'keyword' },
         keywords,
-        xPool,
-      }))
-    );
-    posts.push(
-      ...(await this._scanUnit({
+        force,
+        xPool: platform === 'x' ? xPool : undefined,
+        redditToken: platform === 'reddit' ? redditToken : null,
+      });
+      posts.push(...r.posts);
+    }
+    return posts;
+  }
+
+  // One unit per monitored subreddit (keywords OR-batched, restrict_sr).
+  private async _scanChannelUnits(
+    orgContexts: OrgContext[],
+    keywords: string[],
+    redditToken: string | null,
+    force: boolean
+  ): Promise<RawPost[]> {
+    const posts: RawPost[] = [];
+    const scanned: string[] = [];
+    for (const subreddit of unionSubreddits(orgContexts)) {
+      const r = await this._scanUnit({
         platform: 'reddit',
-        scanType: 'keyword',
-        scanKey: KEYWORD_GLOBAL_SCAN_KEY,
-        scope: { type: 'keyword' },
+        scanType: 'channel',
+        scanKey: subreddit,
+        scope: { type: 'channel', key: subreddit },
         keywords,
         redditToken,
-      }))
-    );
-
-    await this._fanOutAndFinalize(orgContexts, posts);
-  }
-
-  @ActivityMethod()
-  async runGlobalChannelScan(): Promise<void> {
-    const orgContexts = await this._engageRepository.getAllEnabledOrgContexts();
-    if (!orgContexts.length) return;
-    const keywords = unionKeywords(orgContexts);
-    const subreddits = unionSubreddits(orgContexts);
-    if (!keywords.length || !subreddits.length) return;
-
-    const redditToken = await getRedditToken();
-    const posts: RawPost[] = [];
-    for (const subreddit of subreddits) {
-      posts.push(
-        ...(await this._scanUnit({
-          platform: 'reddit',
-          scanType: 'channel',
-          scanKey: subreddit,
-          scope: { type: 'channel', key: subreddit },
-          keywords,
-          redditToken,
-        }))
-      );
+        force,
+      });
+      if (r.ran) scanned.push(subreddit);
+      posts.push(...r.posts);
     }
-
-    await this._fanOutAndFinalize(orgContexts, posts);
-    await this._updateAllChannelsLastScannedAt(
-      orgContexts.map((c) => c.organizationId)
-    );
+    // Bump EngageMonitoredChannel.lastScannedAt only for subreddits we actually
+    // scanned this tick (UI bookkeeping; the cursor is the source of truth).
+    if (scanned.length) await this._markChannelsScanned(scanned);
+    return posts;
   }
 
-  @ActivityMethod()
-  async runGlobalTrackedAccountsScan(): Promise<void> {
-    const orgContexts = await this._engageRepository.getAllEnabledOrgContexts();
-    if (!orgContexts.length) return;
-    const keywords = unionKeywords(orgContexts);
+  // One unit per unique tracked username (from:user + keywords).
+  private async _scanTrackedUnits(
+    orgContexts: OrgContext[],
+    keywords: string[],
+    xPool: TokenPool,
+    force: boolean
+  ): Promise<RawPost[]> {
+    if (!xPool.size) return [];
     const accounts = unionTrackedUsernames(orgContexts);
-    if (!keywords.length || !accounts.size) return;
-
-    const xPool = new TokenPool(await this._collectXTokens(orgContexts));
-    if (!xPool.size) {
-      this.logger.warn(
-        `Tracked scan skipped: no usable X token across ${orgContexts.length} org(s)`
-      );
-      return;
-    }
-
     const posts: RawPost[] = [];
     for (const [username, records] of accounts) {
-      const unitPosts = await this._scanUnit({
+      const r = await this._scanUnit({
         platform: 'x',
         scanType: 'tracked',
         scanKey: username,
         scope: { type: 'tracked', key: username },
         keywords,
         xPool,
+        force,
       });
-      posts.push(...unitPosts);
-      // Refresh profile + lastCheckedAt for every org tracking this username.
-      // The author info rides on any returned post; absent that we still bump
-      // lastCheckedAt so the UI shows the account was polled.
-      const sample = unitPosts[0];
+      posts.push(...r.posts);
+      // Only touch the account bookkeeping if the unit actually ran this tick.
+      if (!r.ran) continue;
+      const sample = r.posts[0];
       const profile = sample
         ? { picture: sample.authorAvatarUrl, displayName: sample.authorDisplayName }
         : undefined;
@@ -240,8 +249,7 @@ export class EngageScanActivity {
         await this._updateTrackedAccountAfterScan(rec.id, profile);
       }
     }
-
-    await this._fanOutAndFinalize(orgContexts, posts);
+    return posts;
   }
 
   // ─── Cursor-driven scan of one unit ──────────────────────────────────────
@@ -252,15 +260,19 @@ export class EngageScanActivity {
     scanKey: string;
     scope: ScanScope;
     keywords: string[];
+    force?: boolean;
     xPool?: TokenPool;
     redditToken?: string | null;
-  }): Promise<RawPost[]> {
+  }): Promise<{ ran: boolean; posts: RawPost[] }> {
     const cursor = await this._claimCursor(
       args.platform,
       args.scanType,
-      args.scanKey
+      args.scanKey,
+      CADENCE_MS[args.scanType],
+      args.force ?? false
     );
-    if (!cursor) return []; // cooling down, or already SCANNING (single-flight)
+    // Not due yet, cooling down, or already SCANNING (single-flight).
+    if (!cursor) return { ran: false, posts: [] };
 
     const adapter = args.platform === 'x' ? this._xAdapter : this._redditAdapter;
     const token =
@@ -272,7 +284,7 @@ export class EngageScanActivity {
         `X ${args.scanType} scan for "${args.scanKey}" skipped: token pool exhausted`
       );
       await this._releaseCursor(cursor.id);
-      return [];
+      return { ran: false, posts: [] };
     }
 
     try {
@@ -307,26 +319,29 @@ export class EngageScanActivity {
       } else {
         await this._completeCursor(cursor.id, result.nextCursor);
       }
-      return result.posts;
+      return { ran: true, posts: result.posts };
     } catch (err) {
       this.logger.warn(
         `Scan unit ${args.platform}/${args.scanType}/${args.scanKey} failed: ${(err as Error).message}`
       );
       await this._releaseCursor(cursor.id);
-      return [];
+      return { ran: false, posts: [] };
     }
   }
 
   // ─── EngageScanCursor lifecycle ──────────────────────────────────────────
 
-  // Ensure the unit's cursor row exists, then skip it if it is cooling down or
-  // already SCANNING, else atomically claim it (IDLE→SCANNING + stamp
+  // Ensure the unit's cursor row exists, then skip it unless it is DUE — not
+  // SCANNING, not cooling down, and (unless `force`) its cadence has elapsed
+  // since lastScanStartedAt. If due, atomically claim it (IDLE→SCANNING + stamp
   // lastScanStartedAt). Returns the pre-claim row (carrying the incremental
-  // cursor) or null when the unit is not due / lost a single-flight race.
+  // cursor) or null when not due / lost a single-flight race.
   private async _claimCursor(
     platform: string,
     scanType: string,
-    scanKey: string
+    scanKey: string,
+    cadenceMs: number,
+    force: boolean
   ) {
     const now = new Date();
     const row = await this._scanCursor.model.engageScanCursor.upsert({
@@ -336,6 +351,14 @@ export class EngageScanActivity {
     });
     if (row.status === 'SCANNING') return null;
     if (row.cooldownUntil && row.cooldownUntil > now) return null;
+    // Cadence gate: skip if it was scanned within its interval (force bypasses).
+    if (
+      !force &&
+      row.lastScanStartedAt &&
+      row.lastScanStartedAt.getTime() + cadenceMs > now.getTime()
+    ) {
+      return null;
+    }
     const claimed = await this._scanCursor.model.engageScanCursor.updateMany({
       where: { id: row.id, status: 'IDLE' },
       data: { status: 'SCANNING', lastScanStartedAt: now },
@@ -632,10 +655,16 @@ export class EngageScanActivity {
     });
   }
 
-  private async _updateAllChannelsLastScannedAt(orgIds: string[]): Promise<void> {
-    if (!orgIds.length) return;
+  // Bump lastScannedAt for the monitored-channel rows (across all orgs) whose
+  // subreddit was actually scanned this tick. Keyed by channelId, not org.
+  private async _markChannelsScanned(subredditIds: string[]): Promise<void> {
+    if (!subredditIds.length) return;
     await this._channel.model.engageMonitoredChannel.updateMany({
-      where: { organizationId: { in: orgIds }, enabled: true },
+      where: {
+        platform: 'reddit',
+        channelId: { in: subredditIds },
+        enabled: true,
+      },
       data: { lastScannedAt: new Date() },
     });
   }
