@@ -71,33 +71,46 @@ export class RedditProvider extends SocialAbstract implements SocialProvider {
   }
 
   async refreshToken(refreshToken: string): Promise<AuthTokenDetails> {
+    const tokenRes = await this.fetch('https://www.reddit.com/api/v1/access_token', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Authorization: `Basic ${Buffer.from(
+          `${process.env.REDDIT_CLIENT_ID}:${process.env.REDDIT_CLIENT_SECRET}`
+        ).toString('base64')}`,
+      },
+      body: new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: refreshToken,
+      }),
+    });
+    // Guard before parsing: a revoked/expired refresh token returns a non-2xx
+    // error body, so destructuring would yield `accessToken: undefined` and the
+    // /me call below would send "Bearer undefined" — masking the real failure.
+    if (!tokenRes.ok) {
+      const body = await tokenRes.text().catch(() => '<unreadable>');
+      throw new Error(
+        `Reddit token refresh failed (HTTP ${tokenRes.status}): ${body.slice(0, 200)}`
+      );
+    }
     const {
       access_token: accessToken,
       refresh_token: newRefreshToken,
       expires_in: expiresIn,
-    } = await (
-      await this.fetch('https://www.reddit.com/api/v1/access_token', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-          Authorization: `Basic ${Buffer.from(
-            `${process.env.REDDIT_CLIENT_ID}:${process.env.REDDIT_CLIENT_SECRET}`
-          ).toString('base64')}`,
-        },
-        body: new URLSearchParams({
-          grant_type: 'refresh_token',
-          refresh_token: refreshToken,
-        }),
-      })
-    ).json();
+    } = await tokenRes.json();
 
-    const { name, id, icon_img } = await (
-      await this.fetch('https://oauth.reddit.com/api/v1/me', {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-        },
-      })
-    ).json();
+    const meRes = await this.fetch('https://oauth.reddit.com/api/v1/me', {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    });
+    if (!meRes.ok) {
+      const body = await meRes.text().catch(() => '<unreadable>');
+      throw new Error(
+        `Reddit identity fetch failed after token refresh (HTTP ${meRes.status}): ${body.slice(0, 200)}`
+      );
+    }
+    const { name, id, icon_img } = await meRes.json();
 
     // Reddit omits refresh_token when the existing token is still valid (RFC 6749 §6).
     // Fall back to the caller-supplied token so we never overwrite it with undefined.
@@ -163,14 +176,19 @@ export class RedditProvider extends SocialAbstract implements SocialProvider {
     // whether the proxy was applied) so a 403 can be diagnosed without guesswork.
     const upstreamServer = tokenRes.headers.get('server') || 'unknown';
     if (process.env.NODE_ENV !== 'production') {
+      // NEVER log the body here: on a 2xx it is the token-exchange JSON and would
+      // leak the access_token / refresh_token. The raw body is logged only on the
+      // !ok branch below, where it is an error payload, not a credential.
       console.debug(
         `[reddit.authenticate] token HTTP ${tokenRes.status} server=${upstreamServer} ` +
-          `proxy=${dispatcher ? 'yes' : 'no'} hasClientId=${!!clientId} hasClientSecret=${!!clientSecret} ` +
-          `body=${bodyText.slice(0, 200)}`
+          `proxy=${dispatcher ? 'yes' : 'no'} hasClientId=${!!clientId} hasClientSecret=${!!clientSecret}`
       );
     }
 
     if (!tokenRes.ok) {
+      if (process.env.NODE_ENV !== 'production') {
+        console.debug(`[reddit.authenticate] token error body=${bodyText.slice(0, 200)}`);
+      }
       const errBody = (() => { try { return JSON.parse(bodyText); } catch { return {}; } })();
       const fromReddit = upstreamServer === 'snooserv';
       const hint = !fromReddit
@@ -321,13 +339,39 @@ export class RedditProvider extends SocialAbstract implements SocialProvider {
         id: string;
         name: string;
         url: string;
-      }>((resolve) => {
+      }>((resolve, reject) => {
+        // Reddit signals a rejected submit (banned subreddit, rule/flair
+        // violation, rate-limit) as { json: { errors: [[code, msg, field]], data: null } }.
+        // Surface those instead of blindly dereferencing data.websocket_url, which
+        // would throw an opaque "Cannot read properties of null" and hide the cause.
+        const errors = all?.json?.errors;
+        if (Array.isArray(errors) && errors.length) {
+          reject(
+            new Error(
+              `Reddit rejected submit to r/${firstPostSettings.value.subreddit}: ${errors
+                .map((e: any) => (Array.isArray(e) ? e.slice(0, 2).join(' — ') : String(e)))
+                .join('; ')}`
+            )
+          );
+          return;
+        }
+
         if (all?.json?.data?.id) {
           resolve(all.json.data);
           return;
         }
 
-        const ws = new WebSocket(all.json.data.websocket_url);
+        const websocketUrl = all?.json?.data?.websocket_url;
+        if (!websocketUrl) {
+          reject(
+            new Error(
+              `Reddit submit to r/${firstPostSettings.value.subreddit} returned neither a post id nor a websocket_url`
+            )
+          );
+          return;
+        }
+
+        const ws = new WebSocket(websocketUrl);
         const timeout = setTimeout(() => {
           ws.close();
           resolve({ id: '', name: '', url: '' });
