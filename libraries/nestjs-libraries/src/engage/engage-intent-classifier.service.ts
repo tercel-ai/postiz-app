@@ -216,7 +216,12 @@ export class EngageIntentClassifierService implements OnModuleInit {
         return {
           intentTags: intentTags.length > 0 ? intentTags : ['discussion' as IntentLabel],
           primaryIntent,
-          intentScore: typeof rawResult.intentScore === 'number' ? rawResult.intentScore : 0,
+          // The score comes from a third-party LLM; clamp to [0,1] and reject
+          // non-finite values (typeof NaN === 'number' would otherwise slip
+          // through and pass the >=0.45 confidence gate downstream).
+          intentScore: Number.isFinite(rawResult.intentScore as number)
+            ? Math.max(0, Math.min(1, rawResult.intentScore as number))
+            : 0,
         };
       }
     } catch (err) {
