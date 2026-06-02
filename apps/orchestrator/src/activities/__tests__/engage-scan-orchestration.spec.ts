@@ -195,3 +195,44 @@ describe('EngageScanActivity._scanUnit (cursor lifecycle)', () => {
     expect(adapter.searchScoped).toHaveBeenCalled();
   });
 });
+
+describe('EngageScanActivity._fanOutAndFinalize (per-org isolation)', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  // Regression for review W7: one org's persist failure must NOT abort the tick
+  // for the other orgs (cursors have already advanced; the activity runs with
+  // maximumAttempts:1, so an aborted tick silently drops opportunities org-wide).
+  it('isolates a single org fan-out failure; still expires + finalizes every org', async () => {
+    const { activity } = build(IDLE_ROW);
+    const orgs = [
+      { organizationId: 'a', keywords: ['x'], trackedAccounts: [] },
+      { organizationId: 'b', keywords: ['x'], trackedAccounts: [] },
+      { organizationId: 'c', keywords: ['x'], trackedAccounts: [] },
+    ] as any[];
+
+    const fanOut = vi
+      .spyOn(activity as any, '_fanOutToOrg')
+      .mockImplementation(async (ctx: any) => {
+        if (ctx.organizationId === 'b') throw new Error('transient persist error');
+      });
+    const expire = vi
+      .spyOn(activity as any, '_expireStaleOpportunities')
+      .mockResolvedValue(undefined);
+    const finalize = vi
+      .spyOn(activity as any, '_finalizeAllOrgs')
+      .mockResolvedValue(undefined);
+
+    const posts = [{ platform: 'x', externalPostId: '1', authorUsername: 'u' }] as any[];
+
+    // Must not throw despite org 'b' rejecting.
+    await expect(
+      (activity as any)._fanOutAndFinalize(orgs, posts)
+    ).resolves.toBeUndefined();
+
+    expect(fanOut).toHaveBeenCalledTimes(3);
+    // Expiry runs once per org regardless of fan-out outcome (no double-call).
+    expect(expire).toHaveBeenCalledTimes(3);
+    // Finalize still runs for the whole set.
+    expect(finalize).toHaveBeenCalledTimes(1);
+  });
+});

@@ -403,13 +403,44 @@ export class EngageScanActivity {
     const deduped = deduplicatePosts(posts);
     this.logger.log(`Scan yield: ${posts.length} raw → ${deduped.length} deduped`);
     if (deduped.length) {
-      await Promise.all(orgContexts.map((ctx) => this._fanOutToOrg(ctx, deduped)));
+      // Isolate per-org: one org's transient persist failure must NOT abort the
+      // tick for every other org. Cursors have already advanced in the scan
+      // phase, and this activity runs with maximumAttempts:1, so an aborted tick
+      // silently drops opportunities org-wide until the next cadence window.
+      this._settleByOrg(
+        await Promise.allSettled(
+          orgContexts.map((ctx) => this._fanOutToOrg(ctx, deduped))
+        ),
+        orgContexts,
+        'fan-out'
+      );
     }
-    // Always expire stale opportunities regardless of scan yield.
-    await Promise.all(
-      orgContexts.map((ctx) => this._expireStaleOpportunities(ctx.organizationId))
+    // Always expire stale opportunities regardless of scan yield — also isolated.
+    this._settleByOrg(
+      await Promise.allSettled(
+        orgContexts.map((ctx) => this._expireStaleOpportunities(ctx.organizationId))
+      ),
+      orgContexts,
+      'expire-stale'
     );
     await this._finalizeAllOrgs(orgContexts);
+  }
+
+  /** Log per-org rejections from an allSettled fan-out without aborting the tick. */
+  private _settleByOrg(
+    results: PromiseSettledResult<unknown>[],
+    orgContexts: OrgContext[],
+    phase: string
+  ): void {
+    results.forEach((r, i) => {
+      if (r.status === 'rejected') {
+        this.logger.error(
+          `Scan ${phase} failed for org=${orgContexts[i].organizationId}: ${
+            r.reason instanceof Error ? r.reason.message : String(r.reason)
+          }`
+        );
+      }
+    });
   }
 
   // ─── Fan-out to a single org ──────────────────────────────────────────────
@@ -445,8 +476,10 @@ export class EngageScanActivity {
       await this._persistOpportunities(ctx.organizationId, classified);
       await this._updateKeywordHitCounts(ctx.organizationId, classified, orgKeywords);
     }
-    // Expiry runs regardless — quiet scans must not leave stale NEW opportunities alive.
-    await this._expireStaleOpportunities(ctx.organizationId);
+    // Note: stale-opportunity expiry runs once per org in _fanOutAndFinalize
+    // (isolated via allSettled), so it is NOT repeated here — keeping it here too
+    // would double the work and, more importantly, couple expiry to fan-out
+    // success when expiry must run even if this org's persist threw.
   }
 
   // ─── Intent classification ────────────────────────────────────────────────
