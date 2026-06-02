@@ -19,6 +19,11 @@ import { Organization, User } from '@prisma/client';
 import { Request, Response } from 'express';
 import { GetOrgFromRequest } from '@gitroom/nestjs-libraries/user/org.from.request';
 import { GetUserFromRequest } from '@gitroom/nestjs-libraries/user/user.from.request';
+import { CheckPolicies } from '@gitroom/backend/services/auth/permissions/permissions.ability';
+import {
+  AuthorizationActions,
+  Sections,
+} from '@gitroom/backend/services/auth/permissions/permission.exception.class';
 import { EngageService } from '@gitroom/nestjs-libraries/engage/engage.service';
 import { EngageDraftService } from '@gitroom/nestjs-libraries/engage/engage-draft.service';
 import {
@@ -567,6 +572,11 @@ export class EngageController {
   // ─── Admin: resync metrics ─────────────────────────────────────────────────
 
   @ApiOperation({ summary: 'Re-fetch Reddit/X metrics for published engage replies with missing stats' })
+  // Org-admin only: this re-fetches external Reddit/X metrics and must not be
+  // triggerable by an ordinary org member. Throttled like the other
+  // external-API endpoints (/scan, /draft) to bound the upstream call volume.
+  @CheckPolicies([AuthorizationActions.Create, Sections.ADMIN])
+  @Throttle({ default: { limit: 5, ttl: 3_600_000 } })
   @Post('/admin/resync-metrics')
   resyncEngageMetrics(
     @GetOrgFromRequest() org: Organization,
