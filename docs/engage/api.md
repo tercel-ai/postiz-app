@@ -98,6 +98,18 @@ interface EngageConfig {
   monitoredChannels: EngageMonitoredChannel[];
   trackedAccounts: EngageTrackedAccount[];
   xReplyAccounts: EngageXReplyAccount[];
+  // Scan scheduling + status (only returned by GET /config)
+  scanIntervals: { keywordHours: number; channelHours: number; trackedHours: number };
+  // Per-org last/next scan time, derived from EngageScanCursor (next is computed:
+  // lastScanStartedAt + cadence, or cooldownUntil — never stored). The keyword
+  // firehose is global; channel/tracked reflect this org's subreddits/accounts.
+  scanStatus: {
+    lastScanAt: string | null;   // overall (max over types)
+    nextScanAt: string | null;   // overall (min over types)
+    keyword: { lastScanAt: string | null; nextScanAt: string | null };
+    channel: { lastScanAt: string | null; nextScanAt: string | null };
+    tracked: { lastScanAt: string | null; nextScanAt: string | null };
+  };
 }
 ```
 
@@ -322,7 +334,7 @@ interface EngageSentReplyWithDetails extends EngageSentReply {
 
 **Response** `200 OK` — Returns the updated `EngageConfig` (with `enabled: true`)
 
-**Side Effect**: Starts the `engageScanWorkflow` and `engageTrackedAccountsWorkflow` Temporal workflows for this organization (idempotent — re-calling is safe).
+**Side Effect**: Ensures the global `engage-scan-ticker` Temporal workflow is running and signals it to scan now (idempotent — re-calling is safe). Scanning is global/cursor-driven, not per-org.
 
 **Errors**
 - `400` — `keywords` is empty or missing
@@ -1478,9 +1490,9 @@ Lookback: 30 days (daily), 90 days (weekly), 365 days (monthly).
 
 ### POST `/api/engage/scan`
 
-Immediately trigger a keyword scan for the current organization, without waiting for the next scheduled UTC 00:30 run.
+Immediately trigger a scan without waiting for the next cadence window.
 
-Internally, this sends a Temporal signal to the running `engageScanWorkflow`. If a scan is already in progress, the signal is buffered and a new scan starts automatically after the current one completes.
+Internally, this sends the `triggerScanNow` signal to the global `engage-scan-ticker` workflow, which wakes immediately and runs **all** scan units (force = bypass the per-type cadence gate, but not the per-unit rate-limit cooldown). If the ticker isn't running yet it is started, then signaled.
 
 **Rate Limit**: Max 5 calls per organization per hour.
 
@@ -1503,7 +1515,7 @@ A JSON array of keyword IDs to scan. Pass an empty array (or omit the body) to s
 **Errors**
 - `429 Too Many Requests` — Rate limit exceeded (5 calls/hour/org)
 
-> **Note**: Results appear in the Signal Feed in approximately 15 minutes. The daily automatic scan at UTC 00:30 is unaffected.
+> **Note**: A forced scan runs on the next ticker wake (≤ `ENGAGE_SCAN_TICK_MINUTES`, default 5 min) and results appear shortly after. The normal per-type cadence (keyword 24h / channel 3h / tracked 3h) is unaffected.
 
 ---
 

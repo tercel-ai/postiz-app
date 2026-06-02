@@ -24,7 +24,7 @@ Add a new **Engage** module that follows a 4-phase workflow: **Discover → Gene
 The module introduces:
 1. A new NestJS `EngageModule` with its own controller, services, and repository layer
 2. Five new Prisma models for engagement data storage
-3. Two new Temporal workflows for async discovery and metrics sync
+3. A single scan-ticker Temporal workflow for incremental discovery, plus the metrics-sync workflow
 4. Five new frontend routes under `/engage`
 5. Non-breaking additions to Dashboard and Calendar
 
@@ -83,10 +83,11 @@ Engage involves two completely separate "account" concepts. Confusing them is a 
       │ Prisma                           │ Temporal Client
 ┌─────▼──────────────┐         ┌─────────▼──────────────────────────────┐
 │  PostgreSQL        │         │  Temporal Orchestrator                  │
-│  Engage models:    │         │  engage-scan.workflow (daily 00:30)     │
-│  Config/Keyword/   │         │    └─ score → classifyIntents           │
-│  Channel/Tracked/  │         │         └─ persistOpportunities         │
-│  Opportunity       │         │  postWorkflowV101 (existing, reused)    │
+│  Engage models:    │         │  engage-scan-ticker.workflow (~5m tick) │
+│  Config/Keyword/   │         │    └─ runDueScans → adapters(X/Reddit)   │
+│  Channel/Tracked/  │         │       → score → classify → persist      │
+│  Opportunity/State │         │  (cursor cadence + cooldown per unit)   │
+│  ScanCursor        │         │  postWorkflowV101 (existing, reused)    │
 │  SentReply (slim)  │         │    └─ sends/schedules Engage Post       │
 │  Post (existing)   │         │  engageDataTicksWorkflow (daily 01:00)  │
 │  ← metrics live   │         │    └─ aggregate → EngageDataTicks       │
@@ -337,6 +338,31 @@ model EngageOpportunityState {
   @@index([opportunityId])
 }
 
+// ── EngageScanCursor: org-independent cursor for one scan unit ─────────────
+// One row per (platform, scanType, scanKey) — a single upstream fetch shared by
+// all orgs (the same keyword/subreddit/account is fetched once, then fanned out).
+// Drives incremental fetching (lastSeen*) and the cadence ticker's scheduling
+// (lastScanStartedAt + per-type cadence → next due; cooldownUntil = rate-limit
+// back-off; status = single-flight). Read by getOrgScanStatus to report per-org
+// last/next scan time. See §5.1.
+model EngageScanCursor {
+  id                 String    @id @default(uuid())
+  platform           String    // 'x' | 'reddit'
+  scanType           String    // 'keyword' | 'tracked' | 'channel'
+  scanKey            String    // keyword '__global__' | username | subreddit id
+  lastSeenExternalId String?   // X since_id / Reddit fullname of newest seen post
+  lastSeenAt         DateTime? // newest seen post's publish time (Reddit stop cond.)
+  lastScanStartedAt  DateTime? // anchors next-due (start + cadence)
+  lastScannedAt      DateTime? // last successful completion (display)
+  cooldownUntil      DateTime? // rate-limit back-off; null when not cooling down
+  status             String    @default("IDLE") // IDLE | SCANNING (single-flight)
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  @@unique([platform, scanType, scanKey])
+  @@index([status, scanType, lastScanStartedAt])
+}
+
 enum EngageOpportunityStatus {
   NEW          // in Feed, not yet acted on
   DISMISSED    // user skipped; hidden from Feed
@@ -395,7 +421,7 @@ model EngageSentReply {
 //   - Reddit Engage posts have no integrationId; DataTicks unique key requires integrationId
 //   - Keeping Engage stats separate avoids polluting the existing Post analytics pipeline
 //
-// Populated by engageDataTicksWorkflow (daily, after engageScanWorkflow).
+// Populated by engageDataTicksWorkflow (daily, after the scan ticker has run).
 // Aggregates: Post WHERE source='engage' + state=PUBLISHED
 //
 // type values (mirrors DataTicks):
@@ -856,197 +882,93 @@ export class EngageModule {}
 
 ## 5. Temporal Workflows
 
-### 5.1 Daily Scan Workflow
+### 5.1 Scan Ticker + Cursor-Driven Units
 
-**Purpose**: Fetch X and Reddit posts matching org keywords every 24 hours.
+**Purpose**: Discover X and Reddit posts matching org keywords. A single global
+ticker scans only the units whose cadence is due, incrementally (never re-fetching
+already-seen posts), and fans the results out to every enabled org.
 
-**File**: `apps/orchestrator/src/workflows/engage-scan.workflow.ts`
+**Files**:
+- `apps/orchestrator/src/workflows/engage-scan-ticker.workflow.ts` — the ticker
+- `apps/orchestrator/src/activities/engage-scan.activity.ts` — `runDueScans`
+- `libraries/nestjs-libraries/src/engage/scan/` — platform adapters + token pool
+
+**Workflow** — one global instance (`workflowId: engage-scan-ticker`):
 
 ```typescript
-// Temporal workflow definition
-export async function engageScanWorkflow(orgId: string): Promise<void> {
-  const config = await fetchEngageConfig(orgId);
-  if (!config.setupCompleted) return;
-
-  const xOpportunities = await scanXPlatform(orgId, config);
-  // scanMonitoredChannels: iterates EngageMonitoredChannel[], dispatches per platform.
-  const channelOpportunities = await scanMonitoredChannels(orgId, config);
-  // NOTE: tracked account posts are NOT fetched here.
-  // They are handled by the separate engageTrackedAccountsWorkflow (every 3h).
-
-  const allRaw = [...xOpportunities, ...channelOpportunities];
-
-  // Step 1: score and filter (intent fields left as placeholder at this stage)
-  const scored = allRaw
-    .map(post => scorePost(post, config.keywords))
-    .filter(p => p.score >= 60);
-
-  // Step 2: batch intent classification via local model (see §6.2)
-  const classified = await classifyIntentsBatch(scored);
-
-  // Step 3: upsert opportunities — same post may appear across multiple daily scans
-  // (hot posts stay on trending for days). upsert updates scoring metrics without
-  // overwriting status/intentTags for opportunities the user has already acted on.
-  await persistOpportunities(orgId, classified);
-  await updateKeywordHitCounts(orgId, classified);
-
-  // Step 4: expire stale NEW opportunities beyond TTL
-  await expireStaleOpportunities(orgId);
-
-  // Step 5: mark scan complete
-  await updateLastScanAt(orgId);
+export async function engageScanTickerWorkflow(tickMinutes = 5): Promise<void> {
+  let force = false;
+  setHandler(triggerScanNowSignal, () => { force = true; });
+  await condition(() => force, tickMinutes * 60 * 1000); // sleep one tick, or wake on signal
+  const runForce = force; force = false;
+  try { await runDueScans(runForce); } catch (err) { log.error('runDueScans failed', { err }); }
+  await continueAsNew(tickMinutes);
 }
 ```
 
-**Schedule**: Registered in orchestrator to run daily at UTC 00:30 per org (staggered to avoid rate limits).
+- Ticks every `ENGAGE_SCAN_TICK_MINUTES` (default 5). `triggerScanNow` forces an
+  immediate scan of all units (the user-facing "Scan Now") — bypasses the cadence
+  gate, NOT the rate-limit cooldown.
+- Replaces the three retired fixed-interval workflows
+  (`engage-keyword/channel/tracked-global`), which `_ensureGlobalWorkflowsRunning`
+  terminates on boot. `retry: { maximumAttempts: 1 }` — hit-count increments are
+  non-idempotent, so the next tick recovers on transient failure rather than retrying.
 
-**Activities**:
+**Scan units**. `runDueScans(force)` builds every unit and scans the due ones:
 
-```typescript
-// X scan: search recent tweets matching each keyword.
-// Authentication: uses OAuth 2.0 user token from the first enabled EngageXReplyAccount.
-// X API v2 /tweets/search/recent supports user-context OAuth 2.0 (180 req/15min).
-// No app-level bearer token needed — user token is sufficient for daily scans.
-// Rate limit headroom: max 20 keyword queries per org << 180 req/15min limit.
-async function scanXPlatform(orgId: string, config: EngageConfig) {
-  // Pick any enabled reply account's OAuth 2.0 token for search auth
-  const searchAccount = config.xReplyAccounts.find(a => a.engageEnabled);
-  if (!searchAccount) return [];  // no enabled X accounts configured
+| scanType | unit (`scanKey`) | query |
+|---|---|---|
+| keyword | one per platform (`__global__`) | OR-batched keywords across all orgs |
+| channel | one per monitored subreddit | OR-batched keywords, `restrict_sr` |
+| tracked | one per unique X username | `from:username (OR-batched keywords)` |
 
-  const oauthToken = await fetchIntegrationToken(searchAccount.integrationId);
-  const results = [];
+All scans are keyword-driven (the union of every org's enabled keywords is
+OR-batched into the query). Each unit owns a row in **`EngageScanCursor`** (§3)
+holding its incremental position + scheduling state — org-independent, since the
+same keyword/subreddit/account is fetched once and fanned out.
 
-  for (const keyword of config.keywords.filter(k => k.enabled)) {
-    // GET https://api.twitter.com/2/tweets/search/recent
-    // ?query={keyword}&max_results=50&tweet.fields=public_metrics,author_id,created_at
-    const tweets = await xApiSearch(keyword.keyword, oauthToken);
-    results.push(...tweets.map(t => mapTweetToOpportunity(t, keyword)));
-    await sleep(1000);  // respect rate limits
-  }
-  return results;
-}
+**Per-unit lifecycle** (`_scanUnit` → `_claimCursor`):
 
-// Iterate over each enabled EngageMonitoredChannel, dispatch by platform.
-// Adding YouTube/QQ/etc. = add a new case here.
-async function scanMonitoredChannels(orgId: string, config: EngageConfig) {
-  const results = [];
-  const activeChannels = config.monitoredChannels.filter(c => c.enabled);
+1. Upsert the cursor row; skip unless **due** — not `SCANNING`, not cooling down,
+   and (unless `force`) `lastScanStartedAt + cadence(scanType) ≤ now`.
+2. Atomically claim it (`IDLE→SCANNING`, stamp `lastScanStartedAt`) — single-flight
+   via a conditional `updateMany`.
+3. Acquire a token from the platform `TokenPool` and call the adapter.
+4. On success → advance the cursor (`lastSeenExternalId`/`lastSeenAt`),
+   `lastScannedAt = now`, clear cooldown. On rate-limit → set `cooldownUntil` and
+   **do not advance** (retry from the same point next tick). On error → release the
+   lock, leave the cursor untouched.
 
-  for (const channel of activeChannels) {
-    switch (channel.platform) {
-      case 'reddit':
-        for (const keyword of config.keywords.filter(k => k.enabled)) {
-          // channelId = subreddit name (e.g. "SEO" for r/SEO)
-          const posts = await redditSearch(channel.channelId, keyword.keyword);
-          results.push(...posts.map(p => mapRedditToOpportunity(p, keyword, channel)));
-          await sleep(500);
-        }
-        // Update lastScannedAt for incremental scanning on next run
-        await updateChannelLastScannedAt(channel.id);
-        break;
+Cadence per type (env): `ENGAGE_KEYWORD_SCAN_INTERVAL_HOURS` (24),
+`ENGAGE_CHANNEL_SCAN_INTERVAL_HOURS` (3), `ENGAGE_TRACKED_SCAN_INTERVAL_HOURS` (3).
+A frequent tick + per-unit cooldown means a rate-limited unit recovers on the next
+tick after its cooldown — independent of the long keyword cadence.
 
-      case 'youtube':
-        // v1.x: search channel videos matching keywords
-        // GET https://www.googleapis.com/youtube/v3/search?channelId={channel.channelId}&q={keyword}
-        break;
+**Platform adapters** (`PlatformScanAdapter.searchScoped`) own all fetch mechanics;
+the activity stays platform-agnostic:
 
-      case 'qq':
-        // v1.x: QQ group message scan via Bot API
-        break;
+- **X** (`x-scan-adapter.ts`): `/2/tweets/search/recent` with `since_id` +
+  `next_token` pagination; `from:username` for the tracked scope; drops
+  reply-restricted tweets; parses `x-rate-limit-*` headers.
+- **Reddit** (`reddit-scan-adapter.ts`): no `since_id`, so TIME-based — `sort=new`
+  + `after` paging, stop when `created_utc ≤ lastSeenAt`; `restrict_sr` for the
+  channel scope; OAuth path first, then the public loid/proxy fallback.
+- **TokenPool** (`token-pool.ts`): LRU rotation across all connected X integration
+  tokens (+ optional `X_BEARER_TOKEN`); parks a token on rate-limit.
 
-      // future: 'discord', 'linkedin', 'hackernews', etc.
-    }
-  }
-  return results;
-}
+After all due units are scanned, posts are deduped and fanned out to every org:
+`scorePost` (per-org keyword/tracked scoring) → intent classify (§6.2) → two-phase
+persist (§3.1) → keyword hit counts → expire stale → `lastScanAt`.
 
-// NOTE: simplified pre-split sketch. The real implementation
-// (engage-scan.activity.ts `_persistOpportunities`) is a TWO-PHASE upsert per the
-// §3.1 two-table model: phase 1 upserts the global EngageOpportunity by
-// [platform, externalPostId] (content + metrics + objective scores); phase 2 upserts
-// per-org EngageOpportunityState by [organizationId, opportunityId] (status, keyword/
-// tracked score). Both phases are chunked. The single-table sketch below is kept only
-// to illustrate the UPSERT/idempotency intent.
-//
-// persistOpportunities uses UPSERT — same post can appear across multiple daily scans.
-// On conflict: update scoring metrics only; do NOT overwrite status or intentTags
-// (user may have already acted on this opportunity).
-async function persistOpportunities(orgId: string, posts: ScoredPost[]) {
-  for (const post of posts) {
-    await prisma.engageOpportunity.upsert({
-      where: { organizationId_platform_externalPostId: {
-        organizationId: orgId, platform: post.platform, externalPostId: post.externalPostId,
-      }},
-      create: { ...post, status: 'NEW' },
-      update: {
-        // Refresh scoring (post may have gained more engagement since last scan)
-        score: post.score,
-        scoreKeyword: post.scoreKeyword, scoreHeat: post.scoreHeat,
-        scoreAuthority: post.scoreAuthority, scoreRecency: post.scoreRecency,
-        scoreTracked: post.scoreTracked,
-        metricLikes: post.metricLikes, metricReplies: post.metricReplies,
-        metricRetweets: post.metricRetweets, metricQuotes: post.metricQuotes,
-        metricScore: post.metricScore, metricUpvoteRatio: post.metricUpvoteRatio,
-        metricComments: post.metricComments,
-        // intentTags/primaryIntent/status intentionally NOT updated — preserve user's state
-      },
-    });
-  }
-}
+> Tracked-account posts are no longer a separate workflow — they are the `tracked`
+> scan units above. The `isFromTrackedAccount` +5 bonus is applied **per-org during
+> fan-out** (an org gets the bonus only if IT tracks that author), so it lives on
+> `EngageOpportunityState`, never the shared global row.
 
-// expireStaleOpportunities: mark old unhandled opportunities as EXPIRED for TTL cleanup.
-// Only NEW status is expired (DISMISSED/REPLIED/SCHEDULED are terminal states, keep them).
-const OPPORTUNITY_TTL_DAYS = 7; // configurable via env
-async function expireStaleOpportunities(orgId: string) {
-  await prisma.engageOpportunity.updateMany({
-    where: {
-      organizationId: orgId,
-      status: 'NEW',
-      createdAt: { lt: subDays(new Date(), OPPORTUNITY_TTL_DAYS) },
-    },
-    data: { status: 'EXPIRED' },
-  });
-}
-
-async function updateLastScanAt(orgId: string) {
-  await prisma.engageConfig.update({
-    where: { organizationId: orgId },
-    data: { lastScanAt: new Date() },
-  });
-}
-```
-
-### 5.2 Tracked Accounts Polling Workflow (every 3h)
-
-**Purpose**: PRD specifies tracked accounts should be checked every 3 hours — much more frequent than the daily scan. Separated to avoid blocking the main scan and to allow independent scheduling.
-
-**File**: `apps/orchestrator/src/workflows/engage-tracked-accounts.workflow.ts`
-
-```typescript
-export async function engageTrackedAccountsWorkflow(orgId: string): Promise<void> {
-  const config = await fetchEngageConfig(orgId);
-  if (!config.setupCompleted) return;
-
-  const results = [];
-  for (const account of config.trackedAccounts.filter(a => a.enabled)) {
-    // GET /2/users/by/username/{username}/tweets?max_results=10
-    // Uses app-level bearer token — no user OAuth required for read
-    const tweets = await xFetchUserTweets(account.username, account.lastCheckedAt);
-    // isFromTrackedAccount=true → scorer applies +5 bonus
-    results.push(...tweets.map(t => mapTweetToOpportunity(t, config.keywords, { ...account, isTrackedAccount: true })));
-    await updateTrackedAccountLastChecked(account.id);
-  }
-
-  const scored = results
-    .map(post => scorePost(post, config.keywords))
-    .filter(p => p !== null && p.score >= 60);
-
-  const classified = await classifyIntentsBatch(scored);
-  await persistOpportunities(orgId, classified);  // same upsert as daily scan
-}
-```
-
-**Schedule**: every 3 hours per org, staggered by `orgIndex * 5min` to avoid burst.
+**Observability**: `EngageRepository.getOrgScanStatus(orgId)` derives per-org
+last/next scan time (overall + per type) from the cursor rows
+(`next = max(lastScanStartedAt + cadence, cooldownUntil)` — derived, never stored),
+exposed via `GET /engage/config` → `scanStatus` and shown in the Signal Feed header.
 
 ---
 
@@ -1056,9 +978,9 @@ export async function engageTrackedAccountsWorkflow(orgId: string): Promise<void
 
 **File**: `apps/orchestrator/src/workflows/engage-data-ticks.workflow.ts`
 
-**Schedule**: Daily at UTC 01:00 (after `engageScanWorkflow` at 00:30, and after `dataTicksSyncWorkflow` at 00:05 so Post.impressions/trafficScore are already fresh).
+**Schedule**: Daily at UTC 01:00 (after `dataTicksSyncWorkflow` at 00:05 so Post.impressions/trafficScore are already fresh; the scan ticker runs continuously so opportunities are already populated).
 
-**Registration**: Registered as a single **global singleton** workflow via `libraries/nestjs-libraries/src/temporal/infinite.workflow.register.ts` — one instance handles ALL organizations in one pass per day. (Unlike the per-org `engageScanWorkflow`, this avoids fan-out for a purely-aggregate task.)
+**Registration**: Registered as a single **global singleton** workflow via `libraries/nestjs-libraries/src/temporal/infinite.workflow.register.ts` — one instance handles ALL organizations in one pass per day — like the scan ticker, a single global workflow rather than per-org fan-out.
 
 ```typescript
 // Workflow signature: no args — global singleton aggregates every org in one pass.
@@ -1171,24 +1093,13 @@ Response: { data: { children: [{ data: { score, num_comments } }] } }
 **File**: `apps/orchestrator/src/app.module.ts` (or equivalent workflow registration)
 
 ```typescript
-// Daily scan activities
-const engageScanActivities = createActivities([
-  scanXPlatform,
-  scanMonitoredChannels,
-  classifyIntentsBatch,         // local NLI model; Haiku fallback for low-confidence
-  persistOpportunities,         // upsert — safe for repeated scans of same posts
-  updateKeywordHitCounts,
-  expireStaleOpportunities,     // TTL cleanup: NEW → EXPIRED after N days
-  updateLastScanAt,
-]);
-
-// Tracked accounts polling activities (every 3h, separate workflow)
-const engageTrackedAccountActivities = createActivities([
-  xFetchUserTweets,
-  updateTrackedAccountLastChecked,
-  classifyIntentsBatch,
-  persistOpportunities,
-]);
+// Scan: a single nestjs-temporal-core @Activity() class (EngageScanActivity)
+// registered as a provider in apps/orchestrator/src/app.module.ts. Its
+// @ActivityMethod runDueScans drives keyword + channel + tracked units in one
+// pass (see §5.1). The engageScanTickerWorkflow that calls it is auto-discovered
+// from workflows/index.ts. (Replaces the retired per-type scan/tracked workflows.)
+//   EngageScanActivity.runDueScans → adapters(X/Reddit) → score → classify →
+//     persist (two-phase) → keyword hit counts → expire stale → lastScanAt
 
 // DataTicks aggregation activities (daily)
 const engageDataTicksActivities = createActivities([
@@ -1444,7 +1355,7 @@ private async claudeFallbackClassify(text: string) {
 #### Temporal Activity
 
 ```typescript
-// In engage-scan.workflow.ts activities:
+// In engage-scan.activity.ts:
 async function classifyIntentsBatch(scored: ScoredPost[]): Promise<ScoredPost[]> {
   const results = await intentClassifier.classifyBatch(
     scored.map(p => ({ id: p.id, content: p.postContent })),
@@ -2086,11 +1997,13 @@ pnpm run prisma-db-push   # db push  →  then chains prisma-db-indexes (engage-
 
 ### 13.2 Temporal Workflow Registration
 
-Three global single-instance scan workflows (keyword / channel / tracked) registered
-in the orchestrator; `EngageService.onApplicationBootstrap` starts them with
-`workflowIdConflictPolicy: USE_EXISTING`. Activity-code changes are picked up on
-worker restart (activities are re-invoked, not replayed), so no non-determinism risk
-from the persistence refactor.
+A single global scan-ticker workflow (`engage-scan-ticker`) registered in the
+orchestrator; `EngageService.onApplicationBootstrap` starts it with
+`workflowIdConflictPolicy: USE_EXISTING` and terminates the three retired per-type
+workflows (`engage-keyword/channel/tracked-global`). Per-type cadence + per-unit
+rate-limit cooldown are enforced inside the activity (§5.1), so the ticker just wakes
+every `ENGAGE_SCAN_TICK_MINUTES` (default 5). Activity-code changes are picked up on
+worker restart (activities are re-invoked, not replayed), so no non-determinism risk.
 
 ### 13.3 Feature Flag (Optional)
 

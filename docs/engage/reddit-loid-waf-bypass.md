@@ -46,7 +46,7 @@ identifier. We mint one cheaply:
 ### Call sites wired up
 
 - `engage.service.ts` — `_searchRedditSubreddits` (search + about), `_syncRedditMetrics` (info + thread)
-- `apps/orchestrator/.../engage-scan.activity.ts` — global `search.json`, per-subreddit `search.rss`
+- `libraries/.../engage/scan/reddit-scan-adapter.ts` — global + per-subreddit `search.json` (`sort=new` + `after` paging; `restrict_sr` for channels). The old per-subreddit `search.rss` fallback was removed.
 - `apps/orchestrator/.../engage-data-ticks.activity.ts` — `info.json`, thread `.json`
 
 OAuth (`oauth.reddit.com`) paths are unchanged — a real token bypasses the WAF

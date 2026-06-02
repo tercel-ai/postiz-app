@@ -17,7 +17,7 @@ SAN FRANCISCO — AISEE today launched Engage, a new module within its Post Agen
 
 "Until now, social media tools only helped you broadcast. Engage helps you *participate*," said the AISEE team. "The fastest-growing accounts on X and Reddit don't just post — they reply strategically. Engage automates the discovery and drafting, so you can focus on building real relationships."
 
-Engage scans X and Reddit every 24 hours, filters thousands of posts down to the highest-relevance opportunities using a proprietary scoring algorithm, and uses Claude AI to generate contextually appropriate replies in three styles. Users can send directly on X via OAuth, while Reddit replies go through a guided manual flow with automated performance tracking.
+Engage continuously scans X and Reddit (keyword firehose every 24h; monitored channels and tracked accounts every 3h) via a single cursor-driven ticker, filters thousands of posts down to the highest-relevance opportunities using a proprietary scoring algorithm, and uses Claude AI to generate contextually appropriate replies in three styles. Users can send directly on X via OAuth, while Reddit replies go through a guided manual flow with automated performance tracking.
 
 Early beta users reported a 3x increase in profile visits within the first week of using Engage.
 
