@@ -40,6 +40,7 @@ import {
   syncXMetrics,
   type MetricsSyncDeps,
 } from '@gitroom/nestjs-libraries/engage/engage-metrics-sync';
+import { checkRedditCommentAccessible } from '@gitroom/nestjs-libraries/engage/reddit-comment';
 
 // Anchored at $ to reject trailing query strings / fragments that would otherwise
 // pollute the stored releaseURL (e.g. `?utm_source=...`). Matches spec §12.4.
@@ -318,6 +319,20 @@ export class EngageService implements OnApplicationBootstrap {
     if (!REDDIT_COMMENT_URL_RE.test(url)) {
       throw new BadRequestException(
         'Invalid Reddit comment URL. Expected: https://www.reddit.com/r/.../comments/.../comment/...'
+      );
+    }
+    // Confirm the comment is real and reachable before persisting, so an invalid
+    // or mistyped link never becomes the stored releaseURL (which metrics sync
+    // and the UI both rely on). Strict: an unverifiable result is also rejected.
+    const check = await checkRedditCommentAccessible(url, (m) => this.logger.warn(m));
+    if (check.status === 'not_found') {
+      throw new BadRequestException(
+        'That Reddit comment could not be found — check the URL points to a real, public comment.'
+      );
+    }
+    if (check.status === 'unverifiable') {
+      throw new BadRequestException(
+        `Could not verify the Reddit comment right now (${check.reason}). Please try again shortly.`
       );
     }
     return this._engageRepository.updateReplyUrl(org.id, sentReplyId, url);

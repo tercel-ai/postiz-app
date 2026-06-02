@@ -96,10 +96,15 @@ export function SentList() {
         body: JSON.stringify({ url: urlInput }),
       });
       if (!res.ok) {
-        const message =
-          res.status === 400
-            ? 'Invalid Reddit URL'
-            : 'Failed to save URL — please retry';
+        // Surface the server's reason on 400 so the user can tell apart an
+        // invalid/not-found URL from a transient "could not verify, retry".
+        let message = 'Failed to save URL — please retry';
+        if (res.status === 400) {
+          message = await res
+            .json()
+            .then((b) => b?.message || 'Invalid Reddit URL')
+            .catch(() => 'Invalid Reddit URL');
+        }
         toaster.show(message, 'warning');
         return;
       }
