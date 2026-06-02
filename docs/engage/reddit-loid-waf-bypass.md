@@ -56,10 +56,50 @@ on its own; `loid` is only for the unauthenticated public fallback.
 
 All outbound `*.reddit.com` traffic (including loid minting) automatically routes
 through the proxy because `setup-dispatcher.ts` installs `HTTPS_PROXY` /
-`REDDIT_PROXY` as undici's **global dispatcher**. Set `REDDIT_PROXY` to send only
-Reddit traffic through a dedicated clean IP and keep the server's own IP off
-Reddit's rate-limit radar. `loid` is not IP-bound, so a rotating residential
-proxy is fine (and helps avoid per-IP throttling at volume).
+`REDDIT_PROXY` as undici's **global dispatcher**. Set `REDDIT_PROXY` (recommended)
+to send only Reddit traffic through a dedicated clean IP and keep the server's own
+IP — and every other integration — off the proxy. `loid` is not IP-bound, so a
+rotating residential proxy is fine (and helps avoid per-IP throttling at volume).
+
+### Tiered proxy strategy (reads)
+
+Public Reddit reads go through `redditPublicGet()` (reddit-loid.ts), which
+implements a three-tier strategy around the rotating proxy:
+
+1. **Proxy unreachable or too slow** (connection error / timeout) → fall back to
+   a **direct** connection immediately. Direct + loid still returns 200, so the
+   feature stays up even if the proxy is down.
+2. **Proxy reachable but this exit IP is blocked** (HTTP 403/429) → retry through
+   the proxy up to `REDDIT_PROXY_MAX_RETRIES` times (default 6), with a flat
+   `REDDIT_PROXY_RETRY_BACKOFF_MS` interval (default 1000ms). Each retry is a
+   fresh connection, so a rotating residential proxy hands out a **new exit IP**;
+   the loid is re-minted once (covers an expired/flagged loid). A non-blocked
+   response (2xx) returns immediately — no further retries.
+3. **Still blocked after all proxy attempts** → fall back to **direct** (the
+   server's own IP + loid clears the WAF).
+
+`redditPublicGet` uses undici's `request()` (not `fetch()` — this undici version
+mishandles a per-call `dispatcher`) with explicit proxy / direct dispatchers, so
+the tier selection is reliable. It returns a trimmed response
+(`{ status, ok, text(), viaDirect }`). Tuning: `REDDIT_PROXY_MAX_RETRIES`,
+`REDDIT_PROXY_RETRY_BACKOFF_MS`.
+
+### loid mint (POST) fallback
+
+The mint is a POST, which can't be retried at the dispatcher layer (fetch wraps
+the body single-use). It's handled in `getRedditLoidCookie()`: undici `request()`
+through the global/proxy dispatcher, and on a connection error one retry on a
+direct `Agent` (each call builds a fresh body).
+
+### Dispatcher-level fallback (provider / oauth path)
+
+`ProxyFallbackDispatcher` (setup-dispatcher.ts) still wraps the global Reddit
+`ProxyAgent` for traffic that does NOT go through `redditPublicGet` — chiefly
+`reddit.provider.ts` posting via `oauth.reddit.com`. It retries no-body requests
+on a direct `Agent` on a connection-level error before any response byte.
+
+Fallbacks trigger only on connection failure/timeout, never on a normal HTTP
+error from a healthy proxy.
 
 ## Fallback if the loid path ever closes
 

@@ -162,7 +162,10 @@ export class PostsService {
     forceRefresh = false
   ): Promise<AnalyticsData[]> {
     const post = await this._postRepository.getPostById(postId, orgId);
-    if (!post || !post.releaseId) {
+    // No integration → no OAuth token to authenticate the analytics call. This
+    // is the engage "manual reply without an X account" case: the reply exists
+    // on-platform but Postiz has no connected account to read its metrics with.
+    if (!post || !post.releaseId || !post.integration) {
       return [];
     }
 

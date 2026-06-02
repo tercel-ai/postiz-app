@@ -34,10 +34,7 @@ import {
   UpdateScheduledReplyDto,
 } from '@gitroom/nestjs-libraries/engage/dtos/engage.dto';
 import { getRedditToken, redditAuthHeaders } from '@gitroom/nestjs-libraries/engage/reddit-auth';
-import {
-  redditPublicHeaders,
-  clearRedditLoidCache,
-} from '@gitroom/nestjs-libraries/engage/reddit-loid';
+import { redditPublicGet } from '@gitroom/nestjs-libraries/engage/reddit-loid';
 
 // Anchored at $ to reject trailing query strings / fragments that would otherwise
 // pollute the stored releaseURL (e.g. `?utm_source=...`). Matches spec §12.4.
@@ -335,24 +332,20 @@ export class EngageService implements OnApplicationBootstrap {
     );
 
     // Fetch a reddit URL with OAuth headers when a token is available, or the
-    // public .json API otherwise. The public path carries a `loid` cookie that
-    // satisfies Reddit's anti-bot WAF (see reddit-loid.ts) — without it the
-    // .json endpoints return a 403 block page regardless of IP/User-Agent. On a
-    // 403 we drop the cached loid and retry once, so a rotated/flagged id heals
-    // itself. Outbound *.reddit.com requests are routed via REDDIT_PROXY when
-    // set (see setup-dispatcher.ts).
-    const redditFetch = async (url: string): Promise<Response> => {
-      const opts = async (): Promise<RequestInit> => ({
-        headers: token ? redditAuthHeaders(token) : await redditPublicHeaders(),
-        signal: AbortSignal.timeout(8000),
-      });
-      let res = await fetch(url, await opts());
-      if (res.status === 403 && !token) {
-        this.logger.warn(`[redditSearch] 403 with loid — re-minting and retrying once`);
-        clearRedditLoidCache();
-        res = await fetch(url, await opts());
+    // public .json API otherwise. The public path uses redditPublicGet, which
+    // carries the loid cookie (clears Reddit's anti-bot WAF) and applies the
+    // tiered proxy strategy: proxy → rotate-IP on 403/429 → direct fallback.
+    const redditFetch = async (
+      url: string
+    ): Promise<{ status: number; ok: boolean; text(): Promise<string> }> => {
+      if (token) {
+        const res = await fetch(url, {
+          headers: redditAuthHeaders(token),
+          signal: AbortSignal.timeout(8000),
+        });
+        return { status: res.status, ok: res.ok, text: () => res.text() };
       }
-      return res;
+      return redditPublicGet(url, {}, { log: (m) => this.logger.warn(m) });
     };
 
     const searchBase = token
@@ -813,26 +806,21 @@ export class EngageService implements OnApplicationBootstrap {
         'REPLIED'
       );
 
-    // X manual replies need both the tweet URL (to derive releaseId) and the
-    // posting integration (its OAuth token drives the metrics sync). Validate
-    // up front and release the claim before doing any work, otherwise the
-    // opportunity is left stuck in REPLIED with no recorded reply.
-    if (opp.platform === 'x') {
-      const missing = !body.replyUrl
-        ? 'replyUrl'
-        : !body.integrationId
-        ? 'integrationId'
-        : null;
-      if (missing) {
-        await this._engageRepository.releaseOpportunityClaim(
-          org.id,
-          opportunityId,
-          priorStatus
-        );
-        throw new BadRequestException(
-          `${missing} is required for X manual replies`
-        );
-      }
+    // X manual replies need the tweet URL (to derive releaseId and store the
+    // reply link). The posting integration is optional: when supplied, its
+    // OAuth token drives the per-account metrics sync (impressions/bookmarks);
+    // when omitted, the reply is still recorded and metrics sync is skipped.
+    // Validate up front and release the claim before doing any work, otherwise
+    // the opportunity is left stuck in REPLIED with no recorded reply.
+    if (opp.platform === 'x' && !body.replyUrl) {
+      await this._engageRepository.releaseOpportunityClaim(
+        org.id,
+        opportunityId,
+        priorStatus
+      );
+      throw new BadRequestException(
+        'replyUrl is required for X manual replies'
+      );
     }
 
     let postId: string | undefined;
@@ -844,7 +832,7 @@ export class EngageService implements OnApplicationBootstrap {
               content: body.draftContent,
               date: new Date(),
               replyUrl: body.replyUrl!,
-              integrationId: body.integrationId!,
+              integrationId: body.integrationId,
             })
           : await this._engageRepository.createManualRedditPost({
               organizationId: org.id,
@@ -962,7 +950,7 @@ export class EngageService implements OnApplicationBootstrap {
           await this._syncRedditMetrics(reply.post.id, reply.post.releaseURL, reply.id, reply.opportunity.authorUsername ?? '');
           updated++;
         } else if (p === 'x' && reply.post?.releaseURL) {
-          await this._syncXMetrics(reply.organizationId, reply.id, reply.post.id, reply.post.releaseURL, reply.opportunity.externalPostId ?? '', reply.opportunity.authorUsername ?? '');
+          await this._syncXMetrics(reply.organizationId, reply.id, reply.post.id, reply.post.releaseURL, reply.opportunity.externalPostId ?? '', reply.opportunity.authorUsername ?? '', !!reply.post.integrationId);
           updated++;
         }
       } catch (err) {
@@ -980,18 +968,24 @@ export class EngageService implements OnApplicationBootstrap {
     if (!commentId) return;
 
     const token = await getRedditToken();
+    // Token path → oauth (no WAF); public path → redditPublicGet (loid cookie +
+    // tiered proxy: rotate-IP on 403/429, then direct fallback).
+    const fetchReddit = async (url: string, tok: string | null): Promise<{ ok: boolean; text(): Promise<string> }> => {
+      if (tok) {
+        const r = await fetch(url, { headers: redditAuthHeaders(tok) });
+        return { ok: r.ok, text: () => r.text() };
+      }
+      return redditPublicGet(url, {}, { log: (m) => this.logger.warn(m) });
+    };
+
     const infoUrl = token
       ? `https://oauth.reddit.com/api/info?id=t1_${commentId}`
       : `https://www.reddit.com/api/info.json?id=t1_${commentId}`;
-    // Public .json needs the loid cookie to clear Reddit's anti-bot WAF.
-    const infoHeaders = token
-      ? redditAuthHeaders(token)
-      : await redditPublicHeaders();
 
-    const infoRes = await fetch(infoUrl, { headers: infoHeaders });
+    const infoRes = await fetchReddit(infoUrl, token);
     if (!infoRes.ok) return;
 
-    const infoJson = (await infoRes.json()) as { data?: { children?: Array<{ data: { score: number; num_comments: number } }> } };
+    const infoJson = JSON.parse(await infoRes.text()) as { data?: { children?: Array<{ data: { score: number; num_comments: number } }> } };
     const commentData = infoJson.data?.children?.[0]?.data;
     if (!commentData) return;
 
@@ -1016,27 +1010,32 @@ export class EngageService implements OnApplicationBootstrap {
     const threadUrl = threadToken
       ? `https://oauth.reddit.com/r/${subreddit}/comments/${postId_}?comment=${commentId}&depth=1&limit=25`
       : `https://www.reddit.com/r/${subreddit}/comments/${postId_}/.json?comment=${commentId}&depth=1&limit=25`;
-    const threadRes = await fetch(threadUrl, {
-      headers: threadToken ? redditAuthHeaders(threadToken) : await redditPublicHeaders(),
-    });
+    const threadRes = await fetchReddit(threadUrl, threadToken);
     if (!threadRes.ok) return;
-    const threadJson = (await threadRes.json()) as Array<{ data?: { children?: Array<{ data?: { replies?: { data?: { children?: Array<{ data?: { author?: string } }> } } } }> } }>;
+    const threadJson = JSON.parse(await threadRes.text()) as Array<{ data?: { children?: Array<{ data?: { replies?: { data?: { children?: Array<{ data?: { author?: string } }> } } } }> } }>;
     const childReplies = threadJson[1]?.data?.children?.[0]?.data?.replies?.data?.children ?? [];
     if (childReplies.some((r) => r.data?.author === authorUsername)) {
       await this._engageRepository.markAuthorReplied(sentReplyId);
     }
   }
 
-  private async _syncXMetrics(orgId: string, sentReplyId: string, postId: string, replyTweetUrl: string, originalTweetId: string, authorUsername: string): Promise<void> {
+  private async _syncXMetrics(orgId: string, sentReplyId: string, postId: string, replyTweetUrl: string, originalTweetId: string, authorUsername: string, hasIntegration: boolean): Promise<void> {
     // Fetch the reply tweet's metrics through the integration's own OAuth token
     // (the same path regular posts use), so impression_count and bookmark_count
     // are captured and the X traffic index + impressions are written back to the
     // Post. The engage posts are excluded from the global analytics job
-    // (source != 'engage'), so we drive it explicitly here.
-    try {
-      await this._postsService.checkPostAnalytics(orgId, postId, Date.now());
-    } catch (err) {
-      this.logger.warn(`X analytics sync failed for post ${postId}: ${(err as Error).message}`);
+    // (source != 'engage'), so we drive it explicitly here. When the reply was
+    // recorded without an X account there is no token to authenticate with, so
+    // skip the per-account analytics (the author-replied check below uses the
+    // app-only bearer and still runs).
+    if (hasIntegration) {
+      try {
+        await this._postsService.checkPostAnalytics(orgId, postId, Date.now());
+      } catch (err) {
+        this.logger.warn(`X analytics sync failed for post ${postId}: ${(err as Error).message}`);
+      }
+    } else {
+      this.logger.log(`X reply ${sentReplyId} has no integration — skipping per-account analytics sync`);
     }
 
     // Author-replied detection uses the app-only bearer (conversation search),

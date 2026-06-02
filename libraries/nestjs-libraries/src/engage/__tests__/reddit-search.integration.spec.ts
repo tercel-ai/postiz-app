@@ -12,12 +12,21 @@
  * success.
  */
 
+// Force the DIRECT path for these live tests: they validate Reddit search/read
+// logic against the real API, not the proxy. A real residential proxy is slow
+// and flaky (rotating IPs, transient blocks), which would make the tiered-retry
+// path (covered separately by reddit-loid-tiered.spec.ts) time out here. Direct +
+// loid is fast and reliable. Must run before reddit-loid resolves its proxy.
+delete process.env.REDDIT_PROXY;
+delete process.env.HTTPS_PROXY;
+delete process.env.HTTP_PROXY;
+
 import { describe, it, expect } from 'vitest';
 import { getRedditToken, redditAuthHeaders } from '../reddit-auth';
 import { redditPublicHeaders } from '../reddit-loid';
 import { EngageService } from '../engage.service';
 
-const TIMEOUT = 20_000;
+const TIMEOUT = 30_000;
 const hasRedditCreds =
   !!process.env.REDDIT_CLIENT_ID && !!process.env.REDDIT_CLIENT_SECRET;
 // Live network tests run when credentials are present (loaded from .env) or

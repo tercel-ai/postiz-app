@@ -14,9 +14,64 @@
 // flagged/rotated id self-heals quickly. Both backend and orchestrator are
 // separate processes — each keeps its own cache.
 
+import { Agent, Dispatcher, ProxyAgent, request } from 'undici';
+
 interface LoidCache {
   cookie: string; // e.g. "loid=000000002fl2...".
   expiresAt: number; // epoch ms
+}
+
+// Direct (no-proxy) dispatcher, and the Reddit proxy dispatcher (from
+// REDDIT_PROXY, falling back to the general proxy). We use undici's request()
+// with an explicit `dispatcher` for all Reddit calls: fetch() in this undici
+// version mishandles a per-call `dispatcher`, while request() honours it
+// reliably. Both are lazy singletons (env is read on first use, after dotenv).
+let _directAgent: Agent | null = null;
+function directAgent(): Agent {
+  if (!_directAgent) _directAgent = new Agent();
+  return _directAgent;
+}
+
+let _proxyAgent: Dispatcher | null = null;
+let _proxyResolved = false;
+function redditProxyAgent(): Dispatcher | null {
+  if (!_proxyResolved) {
+    _proxyResolved = true;
+    const url =
+      process.env.REDDIT_PROXY || process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
+    _proxyAgent = url ? new ProxyAgent(url) : null;
+  }
+  return _proxyAgent;
+}
+
+// Tiered-retry knobs for the proxy → rotate-IP → direct strategy.
+const PROXY_MAX_ATTEMPTS = Math.max(
+  1,
+  Number(process.env.REDDIT_PROXY_MAX_RETRIES ?? 6)
+);
+// Flat interval between proxy retries (each retry is a fresh exit IP).
+const PROXY_RETRY_BACKOFF_MS = Number(
+  process.env.REDDIT_PROXY_RETRY_BACKOFF_MS ?? 1000
+);
+// Statuses that mean "this exit IP is blocked/throttled" — worth rotating IP for.
+const BLOCKED_STATUSES = new Set([403, 429]);
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// Errors that mean "the proxy is unreachable or too slow" — both warrant going
+// direct rather than retrying the proxy. Timeouts are included: a slow proxy
+// won't get faster on retry, so we bail to a direct connection immediately.
+function isConnectionError(err: unknown): boolean {
+  const e = err as { code?: string; cause?: { code?: string }; message?: string };
+  const code = e?.code ?? e?.cause?.code;
+  return (
+    !!code &&
+    [
+      'ECONNREFUSED', 'ENOTFOUND', 'EHOSTUNREACH', 'ENETUNREACH', 'ETIMEDOUT',
+      'ECONNRESET', 'EAI_AGAIN', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_SOCKET',
+      'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT',
+    ].includes(code)
+  );
 }
 
 let _cache: LoidCache | null = null;
@@ -26,14 +81,9 @@ const REFRESH_MS = Number(process.env.REDDIT_LOID_TTL_MS ?? 6 * 60 * 60 * 1000);
 const MINT_UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
-/** Extracts the `loid=...` cookie from a response's Set-Cookie headers. */
-function extractLoid(res: Response): string | null {
-  // undici exposes getSetCookie(); fall back to the single-header form.
-  const setCookies: string[] =
-    typeof (res.headers as { getSetCookie?: () => string[] }).getSetCookie === 'function'
-      ? (res.headers as { getSetCookie: () => string[] }).getSetCookie()
-      : (res.headers.get('set-cookie') ? [res.headers.get('set-cookie') as string] : []);
-
+/** Extracts the `loid=...` cookie from a request()'s set-cookie response header. */
+function extractLoid(setCookie: string | string[] | undefined): string | null {
+  const setCookies = Array.isArray(setCookie) ? setCookie : setCookie ? [setCookie] : [];
   for (const sc of setCookies) {
     if (sc.startsWith('loid=')) {
       const value = sc.split(';')[0]; // "loid=<value>"
@@ -57,18 +107,36 @@ export async function getRedditLoidCookie(): Promise<string | null> {
 
   _inflight = (async () => {
     try {
-      // POST is handled by snooserv behind the WAF; the 403 body is irrelevant —
-      // we only want the loid it sets. No auth header needed.
-      const res = await fetch('https://www.reddit.com/api/v1/access_token', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-          'User-Agent': MINT_UA,
-        },
-        body: 'grant_type=client_credentials',
-        signal: AbortSignal.timeout(10_000),
-      });
-      const loid = extractLoid(res);
+      // POST is handled by snooserv behind the WAF; the response status is
+      // irrelevant (it 401/403s our grant) — we only want the loid it sets. The
+      // primary attempt uses the global dispatcher (proxy when configured); if
+      // the proxy is unreachable, retry once directly so loid (and thus all
+      // reddit reads) survive a dead proxy.
+      const mint = (dispatcher?: Agent) =>
+        request('https://www.reddit.com/api/v1/access_token', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'User-Agent': MINT_UA,
+          },
+          body: 'grant_type=client_credentials',
+          headersTimeout: 10_000,
+          bodyTimeout: 10_000,
+          ...(dispatcher ? { dispatcher } : {}),
+        });
+
+      let res: Awaited<ReturnType<typeof request>>;
+      try {
+        res = await mint();
+      } catch (err) {
+        if (!isConnectionError((err as { cause?: unknown })?.cause ?? err)) throw err;
+        res = await mint(directAgent());
+      }
+
+      const loid = extractLoid(res.headers['set-cookie']);
+      // Drain the body so the connection is released back to the pool.
+      await res.body.text().catch(() => undefined);
+
       if (loid) {
         _cache = { cookie: loid, expiresAt: Date.now() + REFRESH_MS };
         return loid;
@@ -110,4 +178,122 @@ export async function redditPublicHeaders(
   const loid = await getRedditLoidCookie();
   if (loid) headers['Cookie'] = loid;
   return headers;
+}
+
+/** Minimal response shape returned by redditPublicGet (a subset of fetch's Response). */
+export interface RedditResponse {
+  status: number;
+  ok: boolean;
+  /** Resolves the response body as text. */
+  text(): Promise<string>;
+  /** True when the result came from the direct (proxy-bypassing) fallback. */
+  viaDirect: boolean;
+}
+
+/** For tests: lets a caller inject fake dispatchers / header builder / knobs. */
+export interface RedditGetDeps {
+  proxy?: Dispatcher | null;
+  direct?: Dispatcher;
+  log?: (msg: string) => void;
+  buildHeaders?: (extra: Record<string, string>) => Promise<Record<string, string>>;
+  maxAttempts?: number;
+  backoffMs?: number;
+}
+
+async function doGet(
+  url: string,
+  headers: Record<string, string>,
+  dispatcher: Dispatcher
+): Promise<{ status: number; body: string }> {
+  const res = await request(url, {
+    method: 'GET',
+    headers,
+    dispatcher,
+    headersTimeout: 8_000,
+    bodyTimeout: 8_000,
+  });
+  const body = await res.body.text();
+  return { status: res.statusCode, body };
+}
+
+/**
+ * GET a public Reddit URL with a tiered proxy strategy:
+ *
+ *   1. Proxy unreachable (connection error)      → fall back to direct immediately.
+ *   2. Proxy reachable but this exit IP is blocked (403/429) → retry through the
+ *      proxy up to REDDIT_PROXY_MAX_RETRIES times. Each retry is a fresh
+ *      connection, so a rotating residential proxy hands out a new exit IP; the
+ *      loid is re-minted between attempts too.
+ *   3. Still blocked after all proxy attempts     → fall back to direct (the
+ *      server's own IP + loid still clears the WAF).
+ *
+ * When no proxy is configured, this is a single direct request. The returned
+ * object exposes status/ok/text() like a trimmed fetch Response.
+ */
+export async function redditPublicGet(
+  url: string,
+  extra: Record<string, string> = {},
+  deps: RedditGetDeps = {}
+): Promise<RedditResponse> {
+  const proxy = deps.proxy !== undefined ? deps.proxy : redditProxyAgent();
+  const direct = deps.direct ?? directAgent();
+  const log = deps.log ?? ((m: string) => console.warn(m));
+  const buildHeaders = deps.buildHeaders ?? redditPublicHeaders;
+  const maxAttempts = Math.max(1, deps.maxAttempts ?? PROXY_MAX_ATTEMPTS);
+  const backoffMs = deps.backoffMs ?? PROXY_RETRY_BACKOFF_MS;
+
+  const wrap = (r: { status: number; body: string }, viaDirect: boolean): RedditResponse => ({
+    status: r.status,
+    ok: r.status >= 200 && r.status < 300,
+    text: async () => r.body,
+    viaDirect,
+  });
+
+  // No proxy configured → a single direct request (the global default path).
+  if (!proxy) {
+    const headers = await buildHeaders(extra);
+    return wrap(await doGet(url, headers, direct), true);
+  }
+
+  let lastProxy: { status: number; body: string } | null = null;
+  let reminted = false;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const headers = await buildHeaders(extra);
+    try {
+      const r = await doGet(url, headers, proxy);
+      if (!BLOCKED_STATUSES.has(r.status)) {
+        return wrap(r, false); // 2xx, or a non-block status (404/500) — done
+      }
+      // Tier 2: blocked on this IP. Re-mint the loid ONCE (covers an
+      // expired/flagged loid); further retries just rotate the exit IP via a
+      // fresh connection — re-minting every time is wasteful.
+      lastProxy = r;
+      if (!reminted) {
+        clearRedditLoidCache();
+        reminted = true;
+      }
+      log(
+        `[reddit] proxy attempt ${attempt}/${maxAttempts} blocked (HTTP ${r.status}); rotating IP`
+      );
+      if (attempt < maxAttempts) await sleep(backoffMs);
+    } catch (err) {
+      if (isConnectionError((err as { cause?: unknown })?.cause ?? err)) {
+        // Tier 1: proxy unreachable or too slow — stop retrying it, go direct.
+        log(`[reddit] proxy unusable (${(err as { code?: string }).code ?? 'conn error'}); falling back to direct`);
+        break;
+      }
+      throw err; // a non-connection error (e.g. bad URL) — surface it
+    }
+  }
+
+  // Tier 3 (or tier 1 break): direct fallback.
+  try {
+    const headers = await buildHeaders(extra);
+    const r = await doGet(url, headers, direct);
+    return wrap(r, true);
+  } catch (err) {
+    if (lastProxy) return wrap(lastProxy, false); // direct also failed — return last proxy result
+    throw err;
+  }
 }

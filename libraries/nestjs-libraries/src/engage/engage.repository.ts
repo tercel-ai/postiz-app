@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma, EngageOpportunity, EngageOpportunityStatus } from '@prisma/client';
 import { PrismaRepository, PrismaTransaction } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
 import {
@@ -37,6 +37,27 @@ export class EngageRepository {
     private _post: PrismaRepository<'post'>,
     private _tx: PrismaTransaction
   ) {}
+
+  // Runs a create that may hit a unique constraint and converts the resulting
+  // Prisma P2002 into a readable 409 ConflictException instead of letting it
+  // bubble up as a generic 500. `label` describes the duplicated entity, e.g.
+  // `Keyword "nestjs"`.
+  private async _createOrConflict<T>(
+    label: string,
+    op: () => Promise<T>
+  ): Promise<T> {
+    try {
+      return await op();
+    } catch (err) {
+      if (
+        err instanceof Prisma.PrismaClientKnownRequestError &&
+        err.code === 'P2002'
+      ) {
+        throw new ConflictException(`${label} already exists`);
+      }
+      throw err;
+    }
+  }
 
   // ─── Config ────────────────────────────────────────────────────────────────
 
@@ -113,15 +134,18 @@ export class EngageRepository {
     organizationId: string,
     dto: AddKeywordDto
   ) {
-    return this._keyword.model.engageKeyword.create({
-      data: {
-        configId,
-        organizationId,
-        keyword: dto.keyword,
-        type: dto.type ?? null,
-        enabled: dto.enabled ?? true,
-      },
-    });
+    // Unique violation on (configId, keyword) → 409 with a readable message.
+    return this._createOrConflict(`Keyword "${dto.keyword}"`, () =>
+      this._keyword.model.engageKeyword.create({
+        data: {
+          configId,
+          organizationId,
+          keyword: dto.keyword,
+          type: dto.type ?? null,
+          enabled: dto.enabled ?? true,
+        },
+      })
+    );
   }
 
   // Atomic bulk-add — used by the setup wizard so a partial-commit mid-loop
@@ -208,19 +232,24 @@ export class EngageRepository {
     organizationId: string,
     dto: AddMonitoredChannelDto
   ) {
-    return this._channel.model.engageMonitoredChannel.create({
-      data: {
-        configId,
-        organizationId,
-        platform: dto.platform,
-        channelId: dto.channelId,
-        channelName: dto.channelName,
-        audienceSize: dto.audienceSize ?? 0,
-        ...(dto.metadata && {
-          metadata: dto.metadata as Prisma.InputJsonValue,
-        }),
-      },
-    });
+    // Unique violation on (configId, platform, channelId) → 409.
+    return this._createOrConflict(
+      `Channel "${dto.channelName ?? dto.channelId}"`,
+      () =>
+        this._channel.model.engageMonitoredChannel.create({
+          data: {
+            configId,
+            organizationId,
+            platform: dto.platform,
+            channelId: dto.channelId,
+            channelName: dto.channelName,
+            audienceSize: dto.audienceSize ?? 0,
+            ...(dto.metadata && {
+              metadata: dto.metadata as Prisma.InputJsonValue,
+            }),
+          },
+        })
+    );
   }
 
   async listMonitoredChannels(organizationId: string) {
@@ -266,17 +295,20 @@ export class EngageRepository {
     organizationId: string,
     dto: AddTrackedAccountDto
   ) {
-    return this._trackedAccount.model.engageTrackedAccount.create({
-      data: {
-        configId,
-        organizationId,
-        platform: dto.platform ?? 'x',
-        username: dto.username,
-        ...(dto.picture && { picture: dto.picture }),
-        ...(dto.categoryLabel && { categoryLabel: dto.categoryLabel }),
-        ...(dto.enabled !== undefined && { enabled: dto.enabled }),
-      },
-    });
+    // Unique violation on (configId, platform, username) → 409.
+    return this._createOrConflict(`Account "${dto.username}"`, () =>
+      this._trackedAccount.model.engageTrackedAccount.create({
+        data: {
+          configId,
+          organizationId,
+          platform: dto.platform ?? 'x',
+          username: dto.username,
+          ...(dto.picture && { picture: dto.picture }),
+          ...(dto.categoryLabel && { categoryLabel: dto.categoryLabel }),
+          ...(dto.enabled !== undefined && { enabled: dto.enabled }),
+        },
+      })
+    );
   }
 
   async listTrackedAccounts(organizationId: string) {
@@ -1552,7 +1584,7 @@ export class EngageRepository {
         id: true,
         organizationId: true,
         authorReplied: true,
-        post: { select: { id: true, releaseURL: true } },
+        post: { select: { id: true, releaseURL: true, integrationId: true } },
         opportunity: { select: { platform: true, externalPostId: true, authorUsername: true } },
       },
     });
@@ -1616,22 +1648,28 @@ export class EngageRepository {
     content: string;
     date: Date;
     replyUrl: string;
-    integrationId: string;
+    integrationId?: string;
   }) {
-    // Validate the integration belongs to this org and is an X social account.
-    // Unlike Reddit, an X manual post MUST carry an integration: its OAuth token
-    // is what checkPostAnalytics uses to read the reply tweet's metrics.
-    const integration = await this._integration.model.integration.findFirst({
-      where: {
-        id: data.integrationId,
-        organizationId: data.organizationId,
-        providerIdentifier: 'x',
-        deletedAt: null,
-      },
-      select: { id: true },
-    });
-    if (!integration) {
-      throw new NotFoundException('X integration not found for this organization');
+    // The integration is optional. When provided, its OAuth token lets
+    // checkPostAnalytics read the reply tweet's impressions/bookmarks. When
+    // omitted (user replied manually without connecting an X account), the post
+    // is still recorded but the per-account metrics sync is skipped — only the
+    // app-only bearer can later read public metrics (likes/replies/retweets/
+    // quotes), and the author-replied check still runs.
+    if (data.integrationId) {
+      // Validate the integration belongs to this org and is an X social account.
+      const integration = await this._integration.model.integration.findFirst({
+        where: {
+          id: data.integrationId,
+          organizationId: data.organizationId,
+          providerIdentifier: 'x',
+          deletedAt: null,
+        },
+        select: { id: true },
+      });
+      if (!integration) {
+        throw new NotFoundException('X integration not found for this organization');
+      }
     }
 
     // Parse the snowflake tweet id from the pasted reply URL into releaseId.
@@ -1655,7 +1693,8 @@ export class EngageRepository {
         ...(releaseId ? { releaseId } : {}),
         // Scalar FK (not a `connect` relation) to stay in Prisma's unchecked
         // create form alongside organizationId; ownership is validated above.
-        integrationId: data.integrationId,
+        // Omitted when no integration is supplied (column is nullable).
+        ...(data.integrationId ? { integrationId: data.integrationId } : {}),
       },
     });
   }

@@ -7,7 +7,7 @@ import {
 } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
 import { EngageRepository } from '@gitroom/nestjs-libraries/engage/engage.repository';
 import { getRedditToken, redditAuthHeaders } from '@gitroom/nestjs-libraries/engage/reddit-auth';
-import { redditPublicHeaders } from '@gitroom/nestjs-libraries/engage/reddit-loid';
+import { redditPublicGet } from '@gitroom/nestjs-libraries/engage/reddit-loid';
 import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.service';
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc';
@@ -133,7 +133,7 @@ export class EngageDataTicksActivity {
     const reply = await this._engageSentReply.model.engageSentReply.findUnique({
       where: { id: sentReplyId },
       include: {
-        post: { select: { id: true, releaseURL: true, state: true } },
+        post: { select: { id: true, releaseURL: true, state: true, integrationId: true } },
         opportunity: {
           select: {
             platform: true,
@@ -154,7 +154,8 @@ export class EngageDataTicksActivity {
         reply.post.id,
         reply.post.releaseURL,
         reply.opportunity.externalPostId,
-        reply.opportunity.authorUsername  // needed to resolve original author's numeric user ID
+        reply.opportunity.authorUsername,  // needed to resolve original author's numeric user ID
+        !!reply.post.integrationId         // no integration → skip per-account analytics
       );
     }
   }
@@ -172,15 +173,24 @@ export class EngageDataTicksActivity {
       // Fetch our comment's metadata for score/num_comments.
       // Prefer authenticated oauth.reddit.com; fall back to public endpoint.
       const token = await getRedditToken();
+      // Token path → oauth (no WAF); public path → redditPublicGet (loid cookie +
+      // tiered proxy: rotate-IP on 403/429, then direct fallback).
+      const fetchReddit = async (
+        url: string,
+        tok: string | null
+      ): Promise<{ ok: boolean; status: number; text(): Promise<string> }> => {
+        if (tok) {
+          const r = await fetch(url, { headers: redditAuthHeaders(tok) });
+          return { ok: r.ok, status: r.status, text: () => r.text() };
+        }
+        return redditPublicGet(url, {}, { log: (m) => this.logger.warn(m) });
+      };
+
       const infoUrl = token
         ? `https://oauth.reddit.com/api/info?id=t1_${commentId}`
         : `https://www.reddit.com/api/info.json?id=t1_${commentId}`;
-      // Public .json needs the loid cookie to clear Reddit's anti-bot WAF.
-      const infoHeaders = token
-        ? redditAuthHeaders(token)
-        : await redditPublicHeaders();
 
-      const infoRes = await fetch(infoUrl, { headers: infoHeaders });
+      const infoRes = await fetchReddit(infoUrl, token);
       if (!infoRes.ok) {
         const body = await infoRes.text().catch(() => '<unreadable>');
         this.logger.warn(
@@ -188,7 +198,7 @@ export class EngageDataTicksActivity {
         );
         return;
       }
-      const infoJson = (await infoRes.json()) as {
+      const infoJson = JSON.parse(await infoRes.text()) as {
         data?: { children?: Array<{ data: { score: number; num_comments: number } }> };
       };
       const commentData = infoJson.data?.children?.[0]?.data;
@@ -220,16 +230,14 @@ export class EngageDataTicksActivity {
         const threadUrl = threadToken
           ? `https://oauth.reddit.com/r/${subreddit}/comments/${postId_}?comment=${commentId}&depth=1&limit=25`
           : `https://www.reddit.com/r/${subreddit}/comments/${postId_}/.json?comment=${commentId}&depth=1&limit=25`;
-        const threadRes = await fetch(threadUrl, {
-          headers: threadToken ? redditAuthHeaders(threadToken) : await redditPublicHeaders(),
-        });
+        const threadRes = await fetchReddit(threadUrl, threadToken);
         if (!threadRes.ok) {
           const body = await threadRes.text().catch(() => '<unreadable>');
           this.logger.warn(
             `Reddit thread .json returned ${threadRes.status} for r/${subreddit}/${postId_}: ${body.slice(0, 200)}`
           );
         } else {
-          const threadJson = (await threadRes.json()) as Array<{
+          const threadJson = JSON.parse(await threadRes.text()) as Array<{
             data?: { children?: Array<{ data?: { replies?: { data?: { children?: Array<{ data?: { author?: string } }> } } } }> };
           }>;
           const ourComment = threadJson[1]?.data?.children?.[0]?.data;
@@ -250,17 +258,25 @@ export class EngageDataTicksActivity {
     postDbId: string,           // DB UUID of the Post record to write metrics onto
     replyTweetUrl: string,      // https://twitter.com/user/status/<tweetId>
     originalTweetId: string,
-    authorUsername: string      // X @username of the original post's author
+    authorUsername: string,     // X @username of the original post's author
+    hasIntegration: boolean     // whether the Post carries an X integration token
   ): Promise<void> {
     // Fetch the reply tweet's metrics through the integration's own OAuth token
     // (the same path regular posts use), so impression_count and bookmark_count
     // are captured and the X traffic index + impressions are written back to the
     // Post. Engage posts are excluded from the global analytics job
-    // (source != 'engage'), so we drive it explicitly here.
-    try {
-      await this._postsService.checkPostAnalytics(orgId, postDbId, Date.now());
-    } catch (err) {
-      this.logger.warn(`X analytics sync failed for post ${postDbId}: ${(err as Error).message}`);
+    // (source != 'engage'), so we drive it explicitly here. When the reply was
+    // recorded without an X account, there is no token to authenticate with, so
+    // skip the per-account analytics entirely (the author-replied check below
+    // uses the app-only bearer and still runs).
+    if (hasIntegration) {
+      try {
+        await this._postsService.checkPostAnalytics(orgId, postDbId, Date.now());
+      } catch (err) {
+        this.logger.warn(`X analytics sync failed for post ${postDbId}: ${(err as Error).message}`);
+      }
+    } else {
+      this.logger.log(`X reply ${sentReplyId} has no integration — skipping per-account analytics sync`);
     }
 
     // Author-replied detection uses the app-only bearer (conversation search),

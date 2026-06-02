@@ -9,6 +9,7 @@
  *    org-specific averages from the state aggregate
  */
 import { describe, it, expect, vi } from 'vitest';
+import { Prisma } from '@prisma/client';
 import dayjs from 'dayjs';
 import isoWeek from 'dayjs/plugin/isoWeek';
 import utc from 'dayjs/plugin/utc';
@@ -588,9 +589,11 @@ describe('EngageRepository — two-table reads', () => {
   });
 
   describe('createManualXPost', () => {
-    // Manual X reply posts must carry an integration (its OAuth token drives the
-    // metrics sync) and a releaseId parsed from the tweet URL, otherwise
-    // checkPostAnalytics early-returns and impressions/likes/etc. stay null.
+    // Manual X reply posts parse a releaseId from the tweet URL (otherwise
+    // checkPostAnalytics early-returns and impressions/likes/etc. stay null).
+    // The integration is OPTIONAL: when supplied, its OAuth token drives the
+    // per-account metrics sync; when omitted, the post is recorded without an
+    // integration and that sync is skipped.
     function buildXRepo() {
       const integrationFindFirst = vi.fn();
       const postCreate = vi.fn();
@@ -655,6 +658,25 @@ describe('EngageRepository — two-table reads', () => {
       expect(data.source).toBe('engage');
     });
 
+    it('skips integration validation and omits integrationId when none is supplied', async () => {
+      const { repo, integrationFindFirst, postCreate } = buildXRepo();
+      postCreate.mockResolvedValue({ id: 'post1' });
+
+      await repo.createManualXPost({
+        organizationId: 'org1',
+        content: 'reply',
+        date: new Date(0),
+        replyUrl: 'https://x.com/zhngyq310334/status/2061267353544146949',
+        // no integrationId — manual reply posted without a connected X account
+      });
+
+      expect(integrationFindFirst).not.toHaveBeenCalled();
+      const data = postCreate.mock.calls[0][0].data;
+      expect(data.releaseId).toBe('2061267353544146949'); // still parsed
+      expect('integrationId' in data).toBe(false); // FK omitted, column stays null
+      expect(JSON.parse(data.settings).__type).toBe('x');
+    });
+
     it('omits releaseId when the URL has no /status/<id> segment', async () => {
       const { repo, integrationFindFirst, postCreate } = buildXRepo();
       integrationFindFirst.mockResolvedValue({ id: 'int1' });
@@ -669,6 +691,136 @@ describe('EngageRepository — two-table reads', () => {
       });
 
       expect(postCreate.mock.calls[0][0].data.releaseId).toBeUndefined();
+    });
+  });
+
+  describe('addKeyword', () => {
+    // (configId, keyword) is unique. A duplicate insert must surface as a 409
+    // ConflictException with a readable message, not a generic 500.
+    function buildKeywordRepo() {
+      const keywordCreate = vi.fn();
+      const keyword = {
+        model: { engageKeyword: { create: keywordCreate } },
+      } as any;
+      const repo = new EngageRepository(
+        {} as any,
+        keyword, // _keyword
+        {} as any, {} as any, {} as any,
+        {} as any, {} as any, {} as any, {} as any, {} as any,
+        {} as any
+      );
+      return { repo, keywordCreate };
+    }
+
+    it('creates the keyword on the config and org', async () => {
+      const { repo, keywordCreate } = buildKeywordRepo();
+      keywordCreate.mockResolvedValue({ id: 'kw1' });
+
+      await repo.addKeyword('cfg1', 'org1', { keyword: 'nestjs' } as any);
+
+      expect(keywordCreate.mock.calls[0][0].data).toMatchObject({
+        configId: 'cfg1',
+        organizationId: 'org1',
+        keyword: 'nestjs',
+        enabled: true,
+      });
+    });
+
+    it('maps a P2002 unique violation to a 409 ConflictException', async () => {
+      const { repo, keywordCreate } = buildKeywordRepo();
+      const err = new Prisma.PrismaClientKnownRequestError('dup', {
+        code: 'P2002',
+        clientVersion: 'test',
+      });
+      keywordCreate.mockRejectedValue(err);
+
+      await expect(
+        repo.addKeyword('cfg1', 'org1', { keyword: 'nestjs' } as any)
+      ).rejects.toMatchObject({
+        status: 409,
+        message: 'Keyword "nestjs" already exists',
+      });
+    });
+
+    it('rethrows unexpected errors untouched', async () => {
+      const { repo, keywordCreate } = buildKeywordRepo();
+      keywordCreate.mockRejectedValue(new Error('db down'));
+
+      await expect(
+        repo.addKeyword('cfg1', 'org1', { keyword: 'nestjs' } as any)
+      ).rejects.toThrow('db down');
+    });
+  });
+
+  describe('addMonitoredChannel', () => {
+    // (configId, platform, channelId) is unique — duplicate → 409.
+    function buildChannelRepo() {
+      const channelCreate = vi.fn();
+      const channel = {
+        model: { engageMonitoredChannel: { create: channelCreate } },
+      } as any;
+      const repo = new EngageRepository(
+        {} as any, {} as any,
+        channel, // _channel
+        {} as any, {} as any, {} as any, {} as any, {} as any, {} as any,
+        {} as any, {} as any
+      );
+      return { repo, channelCreate };
+    }
+
+    it('maps a P2002 unique violation to a 409 with the channel name', async () => {
+      const { repo, channelCreate } = buildChannelRepo();
+      channelCreate.mockRejectedValue(
+        new Prisma.PrismaClientKnownRequestError('dup', {
+          code: 'P2002',
+          clientVersion: 'test',
+        })
+      );
+
+      await expect(
+        repo.addMonitoredChannel('cfg1', 'org1', {
+          platform: 'reddit',
+          channelId: 't5_x',
+          channelName: 'r/football',
+        } as any)
+      ).rejects.toMatchObject({
+        status: 409,
+        message: 'Channel "r/football" already exists',
+      });
+    });
+  });
+
+  describe('addTrackedAccount', () => {
+    // (configId, platform, username) is unique — duplicate → 409.
+    function buildTrackedRepo() {
+      const trackedCreate = vi.fn();
+      const trackedAccount = {
+        model: { engageTrackedAccount: { create: trackedCreate } },
+      } as any;
+      const repo = new EngageRepository(
+        {} as any, {} as any, {} as any,
+        trackedAccount, // _trackedAccount
+        {} as any, {} as any, {} as any, {} as any, {} as any,
+        {} as any, {} as any
+      );
+      return { repo, trackedCreate };
+    }
+
+    it('maps a P2002 unique violation to a 409 with the username', async () => {
+      const { repo, trackedCreate } = buildTrackedRepo();
+      trackedCreate.mockRejectedValue(
+        new Prisma.PrismaClientKnownRequestError('dup', {
+          code: 'P2002',
+          clientVersion: 'test',
+        })
+      );
+
+      await expect(
+        repo.addTrackedAccount('cfg1', 'org1', { username: 'elonmusk' } as any)
+      ).rejects.toMatchObject({
+        status: 409,
+        message: 'Account "elonmusk" already exists',
+      });
     });
   });
 });
