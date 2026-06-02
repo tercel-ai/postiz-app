@@ -11,13 +11,19 @@
  *   npx ts-node --project scripts/tsconfig.json scripts/engage-scan.ts --targets
  *
  * Flags:
- *   --all       Signal all 3 workflows (keyword + channel + tracked)
- *   --keyword   Signal engage-keyword-global only
- *   --channel   Signal engage-channel-global only
- *   --tracked   Signal engage-tracked-global only
- *   --stats     Print DB stats (opportunities, keywords, workflow status)
+ *   --all       Force an immediate scan of all due units (alias: --scan/--trigger)
+ *   --keyword   (legacy alias) Force a scan — the single ticker forces all units
+ *   --channel   (legacy alias) Force a scan — the single ticker forces all units
+ *   --tracked   (legacy alias) Force a scan — the single ticker forces all units
+ *   --stats     Print DB stats (opportunities, keywords, ticker status)
  *   --watch     After triggering, poll stats every 10s until Ctrl-C
- *   --targets   Show exactly what each workflow will scan (accounts / channels / keywords)
+ *   --targets   Show exactly what the ticker will scan (accounts / channels / keywords)
+ *
+ * NOTE: the per-type workflows (engage-keyword/channel/tracked-global) were
+ * consolidated into ONE cursor-driven ticker (workflowId `engage-scan-ticker`,
+ * signal `triggerScanNow`). It scans every due unit each tick and the signal
+ * forces all of them, so the legacy per-type flags can no longer scope a
+ * single type — they all just force the ticker.
  */
 
 import * as dotenv from 'dotenv';
@@ -29,11 +35,12 @@ import { PrismaClient } from '@prisma/client';
 const address   = process.env.TEMPORAL_ADDRESS   || 'localhost:7233';
 const namespace = process.env.TEMPORAL_NAMESPACE || 'default';
 
-const WORKFLOWS = [
-  { id: 'engage-keyword-global', signal: 'triggerKeywordScanNow',  label: 'Keyword scan  (X + Reddit global)' },
-  { id: 'engage-channel-global', signal: 'triggerChannelScanNow',  label: 'Channel scan  (Reddit subreddits)' },
-  { id: 'engage-tracked-global', signal: 'triggerTrackedScanNow',  label: 'Tracked accs  (X tracked accounts)' },
-];
+// Single cursor-driven scan ticker (see apps/orchestrator/.../engage-scan-ticker.workflow.ts).
+// Started by the backend on bootstrap (EngageService.onApplicationBootstrap →
+// _ensureGlobalWorkflowsRunning, USE_EXISTING). `triggerScanNow` wakes it early
+// and forces every due unit (keyword + channel + tracked).
+const TICKER_ID = 'engage-scan-ticker';
+const TICKER_SIGNAL = 'triggerScanNow';
 
 // ─── DB stats ─────────────────────────────────────────────────────────────────
 
@@ -146,32 +153,28 @@ async function printStats(prisma: PrismaClient) {
 // ─── Workflow status ──────────────────────────────────────────────────────────
 
 async function printWorkflowStatus(client: Client) {
-  console.log('── Workflow Status ────────────────────────────────────');
-  for (const wf of WORKFLOWS) {
-    try {
-      const handle = client.workflow.getHandle(wf.id);
-      const desc = await handle.describe();
-      const status = desc.status.name;
-      const started = desc.startTime ? new Date(desc.startTime).toLocaleString() : '?';
-      console.log(`  ${wf.id.padEnd(26)} ${status.padEnd(12)} started: ${started}`);
-    } catch {
-      console.log(`  ${wf.id.padEnd(26)} NOT FOUND`);
-    }
+  console.log('── Ticker Status ──────────────────────────────────────');
+  try {
+    const desc = await client.workflow.getHandle(TICKER_ID).describe();
+    const started = desc.startTime ? new Date(desc.startTime).toLocaleString() : '?';
+    console.log(`  ${TICKER_ID.padEnd(26)} ${desc.status.name.padEnd(12)} started: ${started}`);
+  } catch {
+    console.log(`  ${TICKER_ID.padEnd(26)} NOT FOUND — backend not booted? (it starts the ticker)`);
   }
   console.log('');
 }
 
 // ─── Signal workflows ─────────────────────────────────────────────────────────
 
-async function triggerScans(client: Client, targets: typeof WORKFLOWS) {
-  console.log('\n── Triggering Scans ───────────────────────────────────');
-  for (const wf of targets) {
-    try {
-      await client.workflow.getHandle(wf.id).signal(wf.signal);
-      console.log(`  ✓ Signaled  ${wf.id}  (${wf.label})`);
-    } catch {
-      console.log(`  ✗ Not found ${wf.id} — workflow not running`);
-    }
+async function triggerScan(client: Client) {
+  console.log('\n── Triggering Scan ────────────────────────────────────');
+  try {
+    await client.workflow.getHandle(TICKER_ID).signal(TICKER_SIGNAL);
+    console.log(`  ✓ Signaled ${TICKER_ID} (${TICKER_SIGNAL}) — forces all due units (keyword + channel + tracked)`);
+  } catch {
+    console.log(`  ✗ ${TICKER_ID} not running.`);
+    console.log(`    The ticker is started by the backend on bootstrap (EngageService.onApplicationBootstrap).`);
+    console.log(`    Ensure the backend app is up, then retry. Do NOT start it from this debug script.`);
   }
   console.log('');
 }
@@ -213,7 +216,7 @@ async function printTargets(prisma: PrismaClient) {
   console.log(' SCAN TARGETS  —  ' + new Date().toLocaleString());
   console.log('═══════════════════════════════════════════════════════');
 
-  console.log(`\n── engage-tracked-global  (${uniqueUsernames.size} unique X account(s)) ──`);
+  console.log(`\n── tracked units — X tracked accounts  (${uniqueUsernames.size} unique X account(s)) ──`);
   if (uniqueUsernames.size === 0) {
     console.log('  (none — workflow will skip immediately)');
   } else {
@@ -222,7 +225,7 @@ async function printTargets(prisma: PrismaClient) {
     }
   }
 
-  console.log(`\n── engage-channel-global  (${uniqueSubreddits.size} unique subreddit(s) × ${uniqueKeywords.size} keyword(s) = ${uniqueSubreddits.size * uniqueKeywords.size} requests) ──`);
+  console.log(`\n── channel units — Reddit subreddits  (${uniqueSubreddits.size} unique subreddit(s) × ${uniqueKeywords.size} keyword(s) = ${uniqueSubreddits.size * uniqueKeywords.size} requests) ──`);
   if (uniqueSubreddits.size === 0) {
     console.log('  (none — workflow will skip immediately)');
   } else {
@@ -231,7 +234,7 @@ async function printTargets(prisma: PrismaClient) {
     }
   }
 
-  console.log(`\n── engage-keyword-global  (${uniqueKeywords.size} unique keyword(s)) ──`);
+  console.log(`\n── keyword units — X + Reddit global  (${uniqueKeywords.size} unique keyword(s)) ──`);
   if (uniqueKeywords.size === 0) {
     console.log('  (none — workflow will skip immediately)');
   } else {
@@ -247,15 +250,13 @@ async function printTargets(prisma: PrismaClient) {
 
 async function main() {
   const args = process.argv.slice(2);
-  const doAll     = args.includes('--all');
-  const doKeyword = args.includes('--keyword') || doAll;
-  const doChannel = args.includes('--channel') || doAll;
-  const doTracked = args.includes('--tracked') || doAll;
-  const doStats   = args.includes('--stats') || (!doKeyword && !doChannel && !doTracked && !args.includes('--targets'));
-  const doWatch   = args.includes('--watch');
+  // The single ticker forces all due units, so every legacy per-type flag now
+  // just triggers one scan. --scan/--trigger are the canonical aliases.
+  const scanFlags = ['--all', '--scan', '--trigger', '--keyword', '--channel', '--tracked'];
+  const doScan    = scanFlags.some((f) => args.includes(f));
   const doTargets = args.includes('--targets');
-
-  const targets = WORKFLOWS.filter((wf, i) => [doKeyword, doChannel, doTracked][i]);
+  const doStats   = args.includes('--stats') || (!doScan && !doTargets);
+  const doWatch   = args.includes('--watch');
 
   console.log(`\nEngage Debug Tool`);
   console.log(`Temporal: ${address}  namespace: ${namespace}`);
@@ -266,8 +267,8 @@ async function main() {
   const prisma = new PrismaClient();
 
   try {
-    if (targets.length > 0) {
-      await triggerScans(client, targets);
+    if (doScan) {
+      await triggerScan(client);
     }
 
     if (doTargets) {
