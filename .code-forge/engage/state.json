@@ -21,7 +21,7 @@
       "id": "T1.2",
       "feature": "engage-f1-schema",
       "title": "Add extensions to Organization, Integration, Post models",
-      "description": "Add back-relations to Organization (engageConfig, engageOpportunities, engageSentReplies), Integration (engageXReplyAccount), and Post (engageSentReply). No new fields \u2014 only Prisma relations.",
+      "description": "Add back-relations to Organization (engageConfig, engageOpportunities, engageSentReplies), Integration (engageXReplyAccount), and Post (engageSentReply). No new fields — only Prisma relations.",
       "status": "completed",
       "tdd": "Verify `prisma validate` passes; check Organization type includes all 3 engage relations",
       "files": [
@@ -133,7 +133,7 @@
       "id": "T3.1",
       "feature": "engage-f3-discovery",
       "title": "Implement engage-scorer.ts with 5-dimension ScoreBreakdown",
-      "description": "scorePost(post, keywords) \u2192 ScoredPost | null. Implements: Layer 1 keyword hard filter, Layer 2 computeBreakdown (keyword+heat+authority+recency+tracked). All 4 dimension scorers: computeKeywordScore, computeXHeatScore, computeCommunityHeatScore, computeXAuthorityScore, computeCommunityAuthorityScore.",
+      "description": "scorePost(post, keywords) → ScoredPost | null. Implements: Layer 1 keyword hard filter, Layer 2 computeBreakdown (keyword+heat+authority+recency+tracked). All 4 dimension scorers: computeKeywordScore, computeXHeatScore, computeCommunityHeatScore, computeXAuthorityScore, computeCommunityAuthorityScore.",
       "status": "completed",
       "tdd": "Unit tests: post with no keyword match returns null; X post with 2500 likes+replies gets heat=35; post from tracked account gets scoreTracked=5; total = sum of dimensions; null followers returns authority=3",
       "files": [
@@ -146,7 +146,7 @@
       "title": "Implement EngageIntentClassifierService (local NLI + Haiku fallback)",
       "description": "OnModuleInit loads Xenova/nli-deberta-v3-small (44MB). classify(text) returns {intentTags, primaryIntent, intentScore}. classifyBatch(posts, concurrency=4). classifyWithFallback: if intentScore < 0.45 falls back to Claude Haiku structured output. Create engage-intent.constants.ts with INTENT_LABELS and INTENT_DEFAULT_STRATEGY.",
       "status": "completed",
-      "tdd": "Unit tests (mock classifier): multi-label output with confidence > 0.4 \u2192 multiple tags; single best label if none exceed threshold; fallback triggers when intentScore < 0.45",
+      "tdd": "Unit tests (mock classifier): multi-label output with confidence > 0.4 → multiple tags; single best label if none exceed threshold; fallback triggers when intentScore < 0.45",
       "files": [
         "libraries/nestjs-libraries/src/engage/engage-intent-classifier.service.ts",
         "libraries/nestjs-libraries/src/engage/engage-intent.constants.ts"
@@ -156,7 +156,7 @@
       "id": "T3.3",
       "feature": "engage-f3-discovery",
       "title": "Implement engageScanWorkflow activities (scanX + scanReddit + persist + expire)",
-      "description": "Activities: scanXPlatform (uses OAuth 2.0 from first enabled EngageXReplyAccount; calls X /tweets/search/recent), scanMonitoredChannels (switch by platform; reddit calls /r/{channelId}/search.json, updates lastScannedAt), persistOpportunities (UPSERT \u2014 updates scores, preserves status/intentTags), expireStaleOpportunities (NEW \u2192 EXPIRED after TTL_DAYS), updateKeywordHitCounts, updateLastScanAt.",
+      "description": "Activities: scanXPlatform (uses OAuth 2.0 from first enabled EngageXReplyAccount; calls X /tweets/search/recent), scanMonitoredChannels (switch by platform; reddit calls /r/{channelId}/search.json, updates lastScannedAt), persistOpportunities (UPSERT — updates scores, preserves status/intentTags), expireStaleOpportunities (NEW → EXPIRED after TTL_DAYS), updateKeywordHitCounts, updateLastScanAt.",
       "status": "completed",
       "tdd": "Integration tests (mocked APIs): duplicate externalPostId upserts correctly; dismissed opportunity status NOT overwritten on rescan; expired opportunities have status=EXPIRED",
       "files": [
@@ -178,7 +178,7 @@
       "id": "T3.5",
       "feature": "engage-f3-discovery",
       "title": "Add Opportunities endpoints to EngageController",
-      "description": "GET /opportunities (with ListOpportunitiesDto filtering: platform, status, intent GIN query, minScore, bookmarked, sortBy/sortOrder, pagination). PATCH /opportunities/:id/dismiss (status\u2192DISMISSED). PATCH /opportunities/:id/bookmark (toggle bookmarked). GET /opportunities/score-stats (returns ScoreStatsResult with distribution, averages, top-by-dimension).",
+      "description": "GET /opportunities (with ListOpportunitiesDto filtering: platform, status, intent GIN query, minScore, bookmarked, sortBy/sortOrder, pagination). PATCH /opportunities/:id/dismiss (status→DISMISSED). PATCH /opportunities/:id/bookmark (toggle bookmarked). GET /opportunities/score-stats (returns ScoreStatsResult with distribution, averages, top-by-dimension).",
       "status": "completed",
       "tdd": "API tests: filter by intent='help_seeking' returns only matching; sortBy='scoreHeat' returns heat-descending; score-stats distribution sums to 100%",
       "files": [
@@ -215,7 +215,7 @@
       "id": "T4.3",
       "feature": "engage-f4-reply",
       "title": "Implement draft generation SSE endpoint",
-      "description": "POST /opportunities/:id/draft \u2192 SSE stream. Sets Content-Type: text/event-stream. Calls EngageDraftService.generateDraft(). Streams data: {text} events, ends with data: [DONE].",
+      "description": "POST /opportunities/:id/draft → SSE stream. Sets Content-Type: text/event-stream. Calls EngageDraftService.generateDraft(). Streams data: {text} events, ends with data: [DONE].",
       "status": "completed",
       "tdd": "Integration test: SSE response contains text chunks ending with [DONE]; unknown opportunity returns 404",
       "files": [
@@ -274,7 +274,7 @@
       "id": "T5.2",
       "feature": "engage-f5-analytics",
       "title": "Implement engageDataTicksWorkflow (daily 01:00 aggregation)",
-      "description": "Fetches Post WHERE source='engage' AND state=PUBLISHED AND publishDate IN yesterday bucket. Aggregates by platform (x, reddit, all): count/impressions/trafficScore. Upserts into EngageDataTicks for each (platform \u00d7 type) combination. Platform is derived from Post.integration.providerIdentifier ?? 'reddit'.",
+      "description": "Fetches Post WHERE source='engage' AND state=PUBLISHED AND publishDate IN yesterday bucket. Aggregates by platform (x, reddit, all): count/impressions/trafficScore. Upserts into EngageDataTicks for each (platform × type) combination. Platform is derived from Post.integration.providerIdentifier ?? 'reddit'.",
       "status": "completed",
       "tdd": "Integration test: after workflow runs, EngageDataTicks has rows for 'x', 'reddit', 'all' platforms; SUM(impressions by platform) == total impressions; value is BigInt",
       "files": [
@@ -285,7 +285,7 @@
       "id": "T5.3",
       "feature": "engage-f5-analytics",
       "title": "Implement engageMetricsSyncWorkflow (authorReplied + Reddit metrics)",
-      "description": "Triggered per EngageSentReply after send; sleeps 24h. X path: checkXAuthorReplied (search conversation for original author reply) \u2192 markAuthorReplied if found. Reddit path: if Post.releaseURL set, fetchRedditCommentMetrics \u2192 write AnalyticsData[] to Post.analytics in existing format (label/data/percentageChange); set impressions = (score+comments)\u00d720; trafficScore computed by traffic.calculator.ts.",
+      "description": "Triggered per EngageSentReply after send; sleeps 24h. X path: checkXAuthorReplied (search conversation for original author reply) → markAuthorReplied if found. Reddit path: if Post.releaseURL set, fetchRedditCommentMetrics → write AnalyticsData[] to Post.analytics in existing format (label/data/percentageChange); set impressions = (score+comments)×20; trafficScore computed by traffic.calculator.ts.",
       "status": "completed",
       "tdd": "Unit test: checkXAuthorReplied returns true when author username appears in conversation; Reddit analytics written in AnalyticsData[] format; trafficScore NOT set manually (deferred to traffic.calculator)",
       "files": [
@@ -298,7 +298,7 @@
       "title": "Add Engage dashboard stats endpoint",
       "description": "Add GET /dashboard/engage-stats to dashboard.controller.ts. Service queries Post WHERE source='engage': weeklyCount, responseRate (authorReplied/total), totalImpressions (SUM Post.impressions), totalTrafficScore (SUM Post.trafficScore), byPlatform breakdown, bestReply (highest trafficScore this week), trafficByReply[] array for Traffic from Engage panel.",
       "status": "completed",
-      "tdd": "Unit test: responseRate = authorReplied count / total \u00d7 100; trafficByReply ordered by trafficScore DESC; byPlatform includes x and reddit keys",
+      "tdd": "Unit test: responseRate = authorReplied count / total × 100; trafficByReply ordered by trafficScore DESC; byPlatform includes x and reddit keys",
       "files": [
         "apps/backend/src/api/routes/dashboard.controller.ts",
         "libraries/nestjs-libraries/src/database/prisma/dashboard/dashboard.service.ts"
@@ -321,7 +321,7 @@
       "id": "T6.2",
       "feature": "engage-f6-feed",
       "title": "Implement setup-wizard.tsx (one-time initial config)",
-      "description": "Two-column layout: keywords (left) + X accounts + channels (right). Keyword section with type badges (CORE/BRAND/COMPETITOR). X reply accounts from /reply-accounts. Monitored channels grid with platform badge + audienceSize. Bottom action bar with real-time summary and '\ud83d\ude80 \u5f00\u59cb\u6293\u53d6\u5e16\u5b50' button. On submit: POST /config with setupCompleted=true, redirect to Signal Feed.",
+      "description": "Two-column layout: keywords (left) + X accounts + channels (right). Keyword section with type badges (CORE/BRAND/COMPETITOR). X reply accounts from /reply-accounts. Monitored channels grid with platform badge + audienceSize. Bottom action bar with real-time summary and '🚀 开始抓取帖子' button. On submit: POST /config with setupCompleted=true, redirect to Signal Feed.",
       "status": "completed",
       "tdd": "Component test: submit button disabled when keyword count=0; real-time banner updates on keyword toggle; Reddit URL validation shown before submit",
       "files": [
@@ -332,9 +332,9 @@
       "id": "T6.3",
       "feature": "engage-f6-feed",
       "title": "Implement opportunity-card.tsx and feed-filters.tsx",
-      "description": "opportunity-card.tsx: left border (black=X, orange=Reddit), platform badge, intent tags, score badge with color grade (85+=deep green, 70+=yellow-green, 60+=orange), author row, 2-line truncated body, keyword tags, engagement metrics, Generate Reply button, bookmark toggle, \u26a1 Auto tag. feed-filters.tsx: platform, minScore (\u226585/\u226570/all), intent, status, date, bookmarked, sort controls.",
+      "description": "opportunity-card.tsx: left border (black=X, orange=Reddit), platform badge, intent tags, score badge with color grade (85+=deep green, 70+=yellow-green, 60+=orange), author row, 2-line truncated body, keyword tags, engagement metrics, Generate Reply button, bookmark toggle, ⚡ Auto tag. feed-filters.tsx: platform, minScore (≥85/≥70/all), intent, status, date, bookmarked, sort controls.",
       "status": "completed",
-      "tdd": "Component test: score 87 renders deep green badge; bookmarked card shows filled star; clicking card calls onSelect; \u26a1 Auto tag visible only when auto-reply enabled",
+      "tdd": "Component test: score 87 renders deep green badge; bookmarked card shows filled star; clicking card calls onSelect; ⚡ Auto tag visible only when auto-reply enabled",
       "files": [
         "apps/frontend/src/components/engage/signal-feed/opportunity-card.tsx",
         "apps/frontend/src/components/engage/signal-feed/feed-filters.tsx"
@@ -344,7 +344,7 @@
       "id": "T6.4",
       "feature": "engage-f6-feed",
       "title": "Implement reply-panel.tsx with SSE draft streaming",
-      "description": "400px right-side drawer. Sections: original post preview (grey card), 3-strategy radio (EXPERT_ANSWER/DATA_BACKED/EMPATHY_LED), AI draft textarea with typewriter SSE streaming, brand-strength slider (0-3), account selector dropdown (EngageXReplyAccount engageEnabled=true only). X actions: Skip, Schedule (inline date picker), Send reply. Reddit actions: 3-step flow (Copy Draft \u2192 I Replied Manually \u2192 Submit URL). Character counter for X (\u2264280).",
+      "description": "400px right-side drawer. Sections: original post preview (grey card), 3-strategy radio (EXPERT_ANSWER/DATA_BACKED/EMPATHY_LED), AI draft textarea with typewriter SSE streaming, brand-strength slider (0-3), account selector dropdown (EngageXReplyAccount engageEnabled=true only). X actions: Skip, Schedule (inline date picker), Send reply. Reddit actions: 3-step flow (Copy Draft → I Replied Manually → Submit URL). Character counter for X (≤280).",
       "status": "completed",
       "tdd": "Component test: strategy change triggers re-generation; character counter turns red at 280; Reddit URL input validates format; account selector shows only engageEnabled accounts (NOT EngageTrackedAccount)",
       "files": [
@@ -390,9 +390,9 @@
       "id": "T8.1",
       "feature": "engage-f8-sent",
       "title": "Implement sent-list.tsx with top-4 stats and filters",
-      "description": "Page reads GET /engage/sent/stats for 4-cell header (weeklyCount, responseRate, totalImpressions, avgLikes). List reads GET /engage/sent with ListSentDto filters. Each row shows: original post snippet, reply text, platform badge, sent timestamp, Post.state badge, \u26a0 warning if Reddit with no URL.",
+      "description": "Page reads GET /engage/sent/stats for 4-cell header (weeklyCount, responseRate, totalImpressions, avgLikes). List reads GET /engage/sent with ListSentDto filters. Each row shows: original post snippet, reply text, platform badge, sent timestamp, Post.state badge, ⚠ warning if Reddit with no URL.",
       "status": "completed",
-      "tdd": "Component test: MANUAL Reddit records (no URL) show \u26a0 \u672a\u63d0\u4ea4\u56de\u590d\u94fe\u63a5 badge; weeklyCount cell updates on filter change; ERROR state shows red badge",
+      "tdd": "Component test: MANUAL Reddit records (no URL) show ⚠ 未提交回复链接 badge; weeklyCount cell updates on filter change; ERROR state shows red badge",
       "files": [
         "apps/frontend/src/app/(app)/(site)/engage/sent/page.tsx",
         "apps/frontend/src/components/engage/sent/sent-list.tsx"
@@ -402,9 +402,9 @@
       "id": "T8.2",
       "feature": "engage-f8-sent",
       "title": "Implement sent-card-x.tsx and sent-card-reddit.tsx",
-      "description": "sent-card-x.tsx: 5 metric cells from Post.analytics \u2014 \ud83d\udc41 impressions (blue), \u2665 likes (red), \ud83d\udd01 retweets (green), \ud83d\udcac replies (olive), \ud83d\udd16 bookmarks (purple). Shows authorReplied badge. sent-card-reddit.tsx: 3 cells \u2014 \u2191 score (red), \ud83d\udcac comments (olive), \ud83d\udc41 est.impressions (blue, labeled '\u4f30\u7b97'). '\u26a0 \u672a\u63d0\u4ea4\u56de\u590d\u94fe\u63a5' warning if Post.releaseURL=null.",
+      "description": "sent-card-x.tsx: 5 metric cells from Post.analytics — 👁 impressions (blue), ♥ likes (red), 🔁 retweets (green), 💬 replies (olive), 🔖 bookmarks (purple). Shows authorReplied badge. sent-card-reddit.tsx: 3 cells — ↑ score (red), 💬 comments (olive), 👁 est.impressions (blue, labeled '估算'). '⚠ 未提交回复链接' warning if Post.releaseURL=null.",
       "status": "completed",
-      "tdd": "Component test: Reddit estimated impressions shows '\u4f30\u7b97' label; X traffic index formula displayed; authorReplied=true shows author reply badge",
+      "tdd": "Component test: Reddit estimated impressions shows '估算' label; X traffic index formula displayed; authorReplied=true shows author reply badge",
       "files": [
         "apps/frontend/src/components/engage/sent/sent-card-x.tsx",
         "apps/frontend/src/components/engage/sent/sent-card-reddit.tsx"
@@ -414,9 +414,9 @@
       "id": "T9.1",
       "feature": "engage-f9-integration",
       "title": "Implement Engage Dashboard panels",
-      "description": "engage-performance-panel.tsx: lime-green border, '\ud83d\udcac Engage' badge, 4 stat cells (weeklyCount/responseRate/totalImpressions/totalTrafficScore), platform split (X N replies \u00b7 Reddit N replies), best reply card, 'View all \u2192' link to /engage/sent. traffic-from-engage-panel.tsx: list of trafficByReply with progress bars, 'Traffic from Engage' header.",
+      "description": "engage-performance-panel.tsx: lime-green border, '💬 Engage' badge, 4 stat cells (weeklyCount/responseRate/totalImpressions/totalTrafficScore), platform split (X N replies · Reddit N replies), best reply card, 'View all →' link to /engage/sent. traffic-from-engage-panel.tsx: list of trafficByReply with progress bars, 'Traffic from Engage' header.",
       "status": "completed",
-      "tdd": "Component test: panel renders with lime border; 'View all \u2192' href='/engage/sent'; progress bar width proportional to trafficTotal",
+      "tdd": "Component test: panel renders with lime border; 'View all →' href='/engage/sent'; progress bar width proportional to trafficTotal",
       "files": [
         "apps/frontend/src/components/engage/dashboard/engage-performance-panel.tsx",
         "apps/frontend/src/components/engage/dashboard/traffic-from-engage-panel.tsx"
@@ -437,7 +437,7 @@
       "id": "T9.3",
       "feature": "engage-f9-integration",
       "title": "Modify Calendar to show Engage events with color coding",
-      "description": "Add showEngage boolean state (default true) to calendar. Add source-based filter: when showEngage=false, exclude Post WHERE source='engage'. Color mapping: source='engage' AND state=PUBLISHED \u2192 amber (#FFF4D0/#D0A040, \ud83d\udcac prefix); QUEUE \u2192 purple (#F0E8FF/#A070D0, \ud83d\udcc5); ERROR \u2192 red (#FFE4E4/#D04040, \u26a0\ufe0f). Add 'Show Engage' toggle to toolbar. Add 'Engage' banner counter (amber dot) showing month total.",
+      "description": "Add showEngage boolean state (default true) to calendar. Add source-based filter: when showEngage=false, exclude Post WHERE source='engage'. Color mapping: source='engage' AND state=PUBLISHED → amber (#FFF4D0/#D0A040, 💬 prefix); QUEUE → purple (#F0E8FF/#A070D0, 📅); ERROR → red (#FFE4E4/#D04040, ⚠️). Add 'Show Engage' toggle to toolbar. Add 'Engage' banner counter (amber dot) showing month total.",
       "status": "completed",
       "tdd": "Component test: 'Show Engage' toggle=false hides Engage events; amber color applied to PUBLISHED Engage posts; banner Engage counter matches POST count WHERE source='engage' this month",
       "files": [
@@ -446,49 +446,46 @@
     }
   ],
   "review": {
-    "date": "2026-05-27T00:00:00.000Z",
-    "rating": "fail",
-    "merge_readiness": "blocked",
-    "total_issues": 42,
+    "date": "2026-06-02T17:20:13+08:00",
+    "rating": "changes_required",
+    "merge_readiness": "fix_required",
+    "total_issues": 15,
     "blockers": 2,
-    "criticals": 5,
-    "warnings": 29,
-    "suggestions": 6,
-    "fixes_verified": 0,
-    "fixes_total": 0,
-    "scope": {
-      "base_commit": "e330ad5f",
-      "files_changed": 73,
-      "loc_reviewed": 8228,
-      "note": "Review of engage module + all associated changes since 2026-05-21 last-review commit"
-    },
-    "top_blockers": [
-      "reddit.provider.ts:160 — OAuth access_token+refresh_token logged verbatim to stdout",
-      "add-engage-tables.sql — two-table split (EngageOpportunity+EngageOpportunityState) has no DDL migration; data loss on upgrade"
-    ],
-    "top_criticals": [
-      "reddit.provider.ts:301 — WebSocket Promise hangs indefinitely (no error/close handler)",
-      "reddit.provider.ts:73 — refreshToken destructuring stores undefined, overwrites valid stored token",
-      "engage-intent-classifier.service.ts:21 — apiKey=ANTHROPIC_KEY but baseURL=OpenRouter; all fallback classification returns 'discussion'",
-      "reply-panel.tsx:136 — SSE error frames parsed as {text}; parsed.text=undefined appended to textarea",
-      "opportunity-card.tsx:75 — outer div onClick with no role/tabIndex/onKeyDown; keyboard inaccessible"
-    ],
+    "criticals": 1,
+    "warnings": 12,
+    "suggestions": 0,
     "health": {
-      "verdict": "inflated,fabricating",
-      "finding_density": 0.51,
-      "critical_share": 0.167,
-      "auto_downgrade_share": 0,
-      "drop_share": 0.5,
-      "loc_reviewed": 8228,
-      "raw_findings_count": 84,
-      "emitted_findings_count": 42,
-      "verdict_annotation": "inflated justified by 2 blockers + 5 criticals; fabricating reflects high gate-drop rate from over-broad pre-gate pool, all emitted findings are grounded"
-    }
+      "verdict": "inflated",
+      "finding_density": 0.14,
+      "critical_share": 0.2,
+      "auto_downgrade_share": 0.0,
+      "drop_share": 0.0,
+      "loc_reviewed": 10350,
+      "top_pre_downgrade": 3,
+      "top_post": 3,
+      "raw_findings_count": 15,
+      "auto_downgrades": {
+        "missing_evidence": 0,
+        "internal_trust_boundary": 0
+      },
+      "drops": {
+        "speculative_phrasing": 0,
+        "warning_no_observable_downside": 0,
+        "warning_unverified_claim": 0,
+        "suggestion_no_concrete_benefit": 0,
+        "suggestion_nitpick": 0,
+        "suggestion_over_budget": 0,
+        "suggestion_consolidated": 0,
+        "orphan_finding": 0,
+        "scratchpad_bypass": 0
+      }
+    },
+    "note": "inflated flag is mechanical: 3 top-severity in 15 total (>10%). Gate-3 verified — all concrete/evidenced."
   },
-  "updated": "2026-05-27T00:00:00.000Z",
+  "updated": "2026-06-02T17:43:29+08:00",
   "fixes": [
     {
-      "bug": "review fixes \u2014 41 issues (3 blockers, 12 criticals, 26 warnings)",
+      "bug": "review fixes — 41 issues (3 blockers, 12 criticals, 26 warnings)",
       "root_cause_level": 1,
       "root_cause": "Code-level issues identified by /code-forge:review",
       "fixed_files": [
@@ -514,7 +511,7 @@
       "fixed_at": "2026-05-21T00:29:42.186Z"
     },
     {
-      "bug": "re-review fixes \u2014 8 issues (1 critical, 7 warnings)",
+      "bug": "re-review fixes — 8 issues (1 critical, 7 warnings)",
       "root_cause_level": 1,
       "root_cause": "Regressions and incomplete fixes identified by /code-forge:review engage",
       "fixed_files": [
@@ -531,7 +528,7 @@
       "fixed_at": "2026-05-21T01:02:30.994Z"
     },
     {
-      "bug": "third re-review fixes \u2014 16 issues (4 critical, 12 warnings)",
+      "bug": "third re-review fixes — 16 issues (4 critical, 12 warnings)",
       "root_cause_level": 1,
       "root_cause": "Code-level issues identified by /code-forge:review engage (transactional race, missing res.ok checks, ReplyPanel state leak, stats truncation, error swallowing, modal a11y, time-input debounce)",
       "fixed_files": [
@@ -558,7 +555,7 @@
       "fixed_at": "2026-05-21T09:45:00.000Z"
     },
     {
-      "bug": "fourth re-review fixes \u2014 5 issues (1 critical regression + 4 warnings)",
+      "bug": "fourth re-review fixes — 5 issues (1 critical regression + 4 warnings)",
       "root_cause_level": 1,
       "root_cause": "Issues discovered by re-review of /code-forge:review engage: latent .id vs .postId bug propagated by prior fix; rollback after live X publish; AUTO_QUEUED status lost on claim release; SWR errors silently swallowed; DeferredTimeInput overwrote in-progress edits",
       "fixed_files": [
@@ -608,12 +605,85 @@
       ],
       "test_results": "416 passed, 6 skipped (1 pre-existing failure in auth.service.spec.ts — not engage-related)",
       "issues_fixed": {
-        "blockers": ["B1: remove OAuth token logging in reddit.provider.ts", "B2: add DDL migration for two-table split"],
-        "criticals": ["C1: WebSocket hang — add error/close handlers", "C2: refreshToken overwrite on OAuth refresh", "C3: dual-provider LLM routing bug in intent classifier", "C4: SSE error frame undefined appended to textarea", "C5: opportunity-card keyboard inaccessibility"],
-        "warnings": ["W2: UpdateKeywordDto accept null type", "W3: XML attribute injection in draft prompt", "W4: stale OpenRouter comment in draft service", "W5: AbortSignal wired to generateDraft", "W6: keyword hit counting uses word-boundary regex", "W7: time-window dedup prevents double-counting on retry", "W8: tracked scan also updates keyword hit counts", "W9: _expireStaleOpportunities always runs", "W10: AbortSignal.timeout on fetch calls", "W11: WebSocket cleanup on close", "W12: correct proxy env var priority", "W13: reddit-auth fetch wrapped in try/catch", "W14: AbortSignal.timeout on token fetch", "W15: openai.service uses full rawModel for OpenRouter", "W16: add LLM_PROVIDER alias for text routing", "W17: replace console.log with Logger in openai.service", "W18: proxy log shows (set)/(none) not actual URL", "W19: SSE endpoint wired to AbortController on req.close", "W20: OpenAPI decorators added to all engage endpoints", "W21: reply-accounts shows providerIdentifier not name", "W22: KeywordPostsPanel throws on !res.ok", "W23: keyword toggle aria-label+aria-pressed", "W24: platform filter buttons aria-pressed", "W25: translate Chinese strings in keyword-manager", "W26: translate Chinese strings in monitored-channel-manager", "W27: translate Chinese strings in tracked-accounts", "W28: _merge uses explicit field selection not ...spread", "W29: mock openai SDK in intent classifier and draft service tests"]
+        "blockers": [
+          "B1: remove OAuth token logging in reddit.provider.ts",
+          "B2: add DDL migration for two-table split"
+        ],
+        "criticals": [
+          "C1: WebSocket hang — add error/close handlers",
+          "C2: refreshToken overwrite on OAuth refresh",
+          "C3: dual-provider LLM routing bug in intent classifier",
+          "C4: SSE error frame undefined appended to textarea",
+          "C5: opportunity-card keyboard inaccessibility"
+        ],
+        "warnings": [
+          "W2: UpdateKeywordDto accept null type",
+          "W3: XML attribute injection in draft prompt",
+          "W4: stale OpenRouter comment in draft service",
+          "W5: AbortSignal wired to generateDraft",
+          "W6: keyword hit counting uses word-boundary regex",
+          "W7: time-window dedup prevents double-counting on retry",
+          "W8: tracked scan also updates keyword hit counts",
+          "W9: _expireStaleOpportunities always runs",
+          "W10: AbortSignal.timeout on fetch calls",
+          "W11: WebSocket cleanup on close",
+          "W12: correct proxy env var priority",
+          "W13: reddit-auth fetch wrapped in try/catch",
+          "W14: AbortSignal.timeout on token fetch",
+          "W15: openai.service uses full rawModel for OpenRouter",
+          "W16: add LLM_PROVIDER alias for text routing",
+          "W17: replace console.log with Logger in openai.service",
+          "W18: proxy log shows (set)/(none) not actual URL",
+          "W19: SSE endpoint wired to AbortController on req.close",
+          "W20: OpenAPI decorators added to all engage endpoints",
+          "W21: reply-accounts shows providerIdentifier not name",
+          "W22: KeywordPostsPanel throws on !res.ok",
+          "W23: keyword toggle aria-label+aria-pressed",
+          "W24: platform filter buttons aria-pressed",
+          "W25: translate Chinese strings in keyword-manager",
+          "W26: translate Chinese strings in monitored-channel-manager",
+          "W27: translate Chinese strings in tracked-accounts",
+          "W28: _merge uses explicit field selection not ...spread",
+          "W29: mock openai SDK in intent classifier and draft service tests"
+        ]
       },
       "doc_updates": [],
       "fixed_at": "2026-05-28T00:00:00.000Z"
+    },
+    {
+      "bug": "review fixes — 15 issues (2 blockers, 1 critical, 12 warnings)",
+      "root_cause_level": 1,
+      "root_cause": "Code/data-model issues identified by /code-forge:review (engage). Headline: per-opportunity unique on EngageSentReply caused silent batch-reply data loss; switched to per-post tracking.",
+      "fixed_files": [
+        "libraries/nestjs-libraries/src/database/prisma/schema.prisma",
+        "libraries/nestjs-libraries/src/database/prisma/migrations/engage-sent-reply-per-post.sql",
+        "libraries/nestjs-libraries/src/engage/engage.service.ts",
+        "libraries/nestjs-libraries/src/engage/engage.repository.ts",
+        "libraries/nestjs-libraries/src/engage/engage-metrics-sync.ts",
+        "libraries/nestjs-libraries/src/engage/engage-intent-classifier.service.ts",
+        "libraries/nestjs-libraries/src/engage/scan/x-scan-adapter.ts",
+        "libraries/nestjs-libraries/src/engage/scan/reddit-scan-adapter.ts",
+        "libraries/nestjs-libraries/src/integrations/social/reddit.provider.ts",
+        "apps/orchestrator/src/activities/engage-scan.activity.ts",
+        "apps/orchestrator/src/activities/engage-data-ticks.activity.ts",
+        "apps/backend/src/api/routes/engage.controller.ts"
+      ],
+      "commits": [
+        "368b15a1",
+        "2025b013",
+        "747d4946",
+        "aaa747b5",
+        "bffeae3d",
+        "adddca37",
+        "3aea9951"
+      ],
+      "doc_updates": [],
+      "tests_added": [
+        "libraries/nestjs-libraries/src/engage/__tests__/engage-batch-reply.spec.ts",
+        "libraries/nestjs-libraries/src/engage/__tests__/engage-intent-score-clamp.spec.ts",
+        "apps/orchestrator/src/activities/__tests__/engage-scan-orchestration.spec.ts (fan-out isolation)"
+      ],
+      "fixed_at": "2026-06-02T17:43:29+08:00"
     }
   ]
 }
