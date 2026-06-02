@@ -1,3 +1,4 @@
+import { describe, it, expect, beforeEach } from 'vitest';
 import { generateKeyPairSync } from 'crypto';
 import { sign } from 'jsonwebtoken';
 import { AuthService } from './auth.service';

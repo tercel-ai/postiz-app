@@ -119,12 +119,11 @@ describe('XProvider — suspended account detection', () => {
   });
 
   describe('handleErrors — pre-existing behavior preserved', () => {
-    // Sanity-check: this fix is strictly additive. We did NOT touch handleErrors,
-    // so suspended bodies still hit the existing generic 403 branch (with the
-    // pre-existing message). This test pins that contract so a future regression
-    // doesn't silently change classification — a separate PR can fix the misleading
-    // 403 message if/when we want to surface the suspended state on the post detail
-    // page as well as in the in-app notification.
+    // Sanity-check: suspended (and other un-branched) 403 bodies fall through to
+    // the generic 403 branch in handleErrors and classify as 'bad-body'. This
+    // test pins that contract so a future regression doesn't silently change the
+    // classification. (Surfacing the suspended state explicitly on the post
+    // detail page would be a separate enhancement.)
     it('suspended bodies still classify as bad-body via the existing 403 branch', () => {
       const body = JSON.stringify({
         code: 403,
@@ -137,8 +136,9 @@ describe('XProvider — suspended account detection', () => {
 
       const result = provider.handleErrors(body);
       expect(result?.type).toBe('bad-body');
-      // Pre-existing (misleading) message — out of scope for this notification fix
-      expect(result?.value).toContain('character limit');
+      // Suspended bodies hit the generic 403 branch (no dedicated sub-branch),
+      // which now returns the accurate "403 Forbidden / permission" message.
+      expect(result?.value).toContain('403 Forbidden');
     });
 
     it('non-suspended 403 unchanged', () => {
@@ -151,7 +151,7 @@ describe('XProvider — suspended account detection', () => {
       });
       const result = provider.handleErrors(body);
       expect(result?.type).toBe('bad-body');
-      expect(result?.value).toContain('character limit');
+      expect(result?.value).toContain('403 Forbidden');
     });
   });
 
