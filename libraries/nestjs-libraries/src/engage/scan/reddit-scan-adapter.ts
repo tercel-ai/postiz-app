@@ -166,7 +166,14 @@ export class RedditScanAdapter implements PlatformScanAdapter {
         return { listing: null, rate };
       }
       if (res.ok) {
-        return { listing: (await res.json()) as RedditListing, rate };
+        try {
+          return { listing: (await res.json()) as RedditListing, rate };
+        } catch (err) {
+          // Guard the parse like the public path below: a malformed 2xx body must
+          // break the loop (preserving collected posts), not abort the scan unit.
+          log.warn(`Reddit OAuth search parse failed: ${(err as Error).message}`);
+          return { listing: null, rate };
+        }
       }
       const body = await res.text().catch(() => '<unreadable>');
       log.warn(`Reddit OAuth search ${res.status}: ${body.slice(0, 160)} — falling back to public`);

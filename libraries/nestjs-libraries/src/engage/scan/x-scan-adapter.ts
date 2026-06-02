@@ -220,7 +220,17 @@ export class XScanAdapter implements PlatformScanAdapter {
       );
       return { json: null, rate };
     }
-    return { json: (await res.json()) as XSearchResponse, rate };
+    try {
+      return { json: (await res.json()) as XSearchResponse, rate };
+    } catch (err) {
+      // A 2xx with a non-JSON body (CDN/gateway interstitial) must not abort the
+      // whole scan unit and discard posts already collected this run. Mirror the
+      // !ok path: break to the next query, preserving partial progress + cursor.
+      log.warn(
+        `X /tweets/search/recent returned an unparseable body for "${query.slice(0, 60)}": ${(err as Error).message}`
+      );
+      return { json: null, rate };
+    }
   }
 }
 
