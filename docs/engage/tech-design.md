@@ -949,7 +949,14 @@ the activity stays platform-agnostic:
 
 - **X** (`x-scan-adapter.ts`): `/2/tweets/search/recent` with `since_id` +
   `next_token` pagination; `from:username` for the tracked scope; drops
-  reply-restricted tweets; parses `x-rate-limit-*` headers.
+  reply-restricted tweets; parses `x-rate-limit-*` headers. A pure **retweet** is
+  resolved to its **original** post (via the `referenced_tweets.id` expansion,
+  returned inline — no extra call): the opportunity gets the original's
+  id/author/text/metrics/reply_settings, so it's a real repliable target by the
+  original author (dropped if the original is deleted/protected). Quotes and
+  replies are kept as-is. The cursor still advances by the top-level result id,
+  not the older original's. Tracked scope adds `-is:retweet` (the account's own
+  posts only).
 - **Reddit** (`reddit-scan-adapter.ts`): no `since_id`, so TIME-based — `sort=new`
   + `after` paging, stop when `created_utc ≤ lastSeenAt`; `restrict_sr` for the
   channel scope; OAuth path first, then the public loid/proxy fallback.

@@ -33,6 +33,10 @@ interface XTweet {
   created_at: string;
   author_id: string;
   reply_settings?: string;
+  referenced_tweets?: Array<{
+    type: 'retweeted' | 'quoted' | 'replied_to';
+    id: string;
+  }>;
   public_metrics?: {
     like_count: number;
     reply_count: number;
@@ -52,7 +56,9 @@ interface XUser {
 
 interface XSearchResponse {
   data?: XTweet[];
-  includes?: { users?: XUser[] };
+  // includes.tweets holds the originals behind referenced_tweets (retweeted/
+  // quoted/replied_to) — returned inline in the same response, no extra calls.
+  includes?: { users?: XUser[]; tweets?: XTweet[] };
   meta?: { next_token?: string; result_count?: number };
 }
 
@@ -103,9 +109,12 @@ export class XScanAdapter implements PlatformScanAdapter {
     }
 
     // Build queries: OR-batch keywords, then (for tracked) restrict to author.
+    // Tracked also drops retweets (`-is:retweet`): we want what the account
+    // itself said (original/quote/reply), not strangers' posts it amplified.
     const prefix = scope.type === 'tracked' ? `from:${scope.key} ` : '';
+    const suffix = scope.type === 'tracked' ? ' -is:retweet' : '';
     const queries = batchKeywordsOr(keywords, X_QUERY_MAX_LEN).map(
-      (b) => `${prefix}${b}`
+      (b) => `${prefix}${b}${suffix}`
     );
 
     const posts: RawPost[] = [];
@@ -141,12 +150,29 @@ export class XScanAdapter implements PlatformScanAdapter {
         if (!json) break; // non-rate error already logged; move to next query
 
         const users = new Map((json.includes?.users ?? []).map((u) => [u.id, u]));
+        // Originals behind referenced_tweets, returned inline in this response.
+        const refById = new Map(
+          (json.includes?.tweets ?? []).map((t) => [t.id, t])
+        );
         for (const tweet of json.data ?? []) {
+          // Cursor ALWAYS tracks the top-level search result (the firehose
+          // stream), never the resolved original — the original's id is older
+          // and would walk the since_id cursor backwards.
           newestId = maxId(newestId, tweet.id);
           const at = new Date(tweet.created_at);
           if (!newestAt || at > newestAt) newestAt = at;
-          if (!isXReplyable(tweet.reply_settings)) continue;
-          posts.push(toRawPost(tweet, users.get(tweet.author_id)));
+
+          // A pure retweet is a pointer, not content: resolve it to the original
+          // post (id/author/text/metrics/reply_settings) so the opportunity is a
+          // real, repliable target by the original author. Quotes and replies are
+          // kept as-is (their own text is fresh, original commentary).
+          const rtId = tweet.referenced_tweets?.find(
+            (r) => r.type === 'retweeted'
+          )?.id;
+          const entity = rtId ? refById.get(rtId) : tweet;
+          if (!entity) continue; // original deleted/protected/unavailable → drop
+          if (!isXReplyable(entity.reply_settings)) continue;
+          posts.push(toRawPost(entity, users.get(entity.author_id)));
         }
         pageToken = json.meta?.next_token;
       } while (pageToken);
@@ -168,9 +194,12 @@ export class XScanAdapter implements PlatformScanAdapter {
     const params = new URLSearchParams({
       query,
       max_results: String(X_MAX_RESULTS),
-      'tweet.fields': 'public_metrics,author_id,created_at,text,reply_settings',
+      'tweet.fields':
+        'public_metrics,author_id,created_at,text,reply_settings,referenced_tweets',
       'user.fields': 'public_metrics,name,username,profile_image_url',
-      expansions: 'author_id',
+      // referenced_tweets.id → originals into includes.tweets;
+      // referenced_tweets.id.author_id → their authors into includes.users.
+      expansions: 'author_id,referenced_tweets.id,referenced_tweets.id.author_id',
     });
     if (sinceId) params.set('since_id', sinceId);
     if (pageToken) params.set('pagination_token', pageToken);

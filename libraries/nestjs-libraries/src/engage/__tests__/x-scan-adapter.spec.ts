@@ -145,4 +145,90 @@ describe('XScanAdapter', () => {
     // Would paginate forever; budget caps it at 2 calls (2 posts).
     expect(out.posts.length).toBe(2);
   });
+
+  it('requests the referenced_tweets expansion (resolve originals inline)', async () => {
+    let seenUrl = '';
+    const fetchImpl = (async (url: string) => {
+      seenUrl = url;
+      return res(200, { data: [], includes: { users: [] } });
+    }) as any;
+    await new XScanAdapter({ fetchImpl }).searchScoped(baseArgs());
+    const u = decodeURIComponent(seenUrl);
+    expect(u).toContain('referenced_tweets.id');
+    expect(u).toContain('referenced_tweets.id.author_id');
+  });
+
+  it('resolves a retweet to its original post; cursor still tracks the RT id', async () => {
+    const rt = tweet('900', 'RT @author: original content', {
+      author_id: 'RTER',
+      referenced_tweets: [{ type: 'retweeted', id: '500' }],
+    });
+    const original = tweet('500', 'original content', { author_id: 'AUTH1' });
+    const fetchImpl = (async () =>
+      res(200, {
+        data: [rt],
+        includes: {
+          users: [
+            { id: 'RTER', username: 'retweeter', name: 'RT' },
+            { id: 'AUTH1', username: 'author', name: 'Author' },
+          ],
+          tweets: [original],
+        },
+      })) as any;
+    const out = await new XScanAdapter({ fetchImpl }).searchScoped(baseArgs());
+    expect(out.posts).toHaveLength(1);
+    expect(out.posts[0].externalPostId).toBe('500'); // original, not the RT
+    expect(out.posts[0].postContent).toBe('original content');
+    expect(out.posts[0].authorUsername).toBe('author'); // original author
+    // Cursor advances by the top-level search result (the RT), not the original.
+    expect(out.nextCursor.lastSeenExternalId).toBe('900');
+  });
+
+  it('drops a retweet whose original is unavailable (deleted/protected)', async () => {
+    const rt = tweet('901', 'RT @x: gone', {
+      author_id: 'RTER',
+      referenced_tweets: [{ type: 'retweeted', id: 'GONE' }],
+    });
+    const fetchImpl = (async () =>
+      res(200, {
+        data: [rt],
+        includes: { users: [{ id: 'RTER', username: 'r', name: 'R' }], tweets: [] },
+      })) as any;
+    const out = await new XScanAdapter({ fetchImpl }).searchScoped(baseArgs());
+    expect(out.posts).toEqual([]);
+    expect(out.nextCursor.lastSeenExternalId).toBe('901'); // cursor still advances
+  });
+
+  it('keeps a quote tweet as-is (does NOT resolve to the quoted original)', async () => {
+    const quote = tweet('902', 'my hot take', {
+      author_id: 'u1',
+      referenced_tweets: [{ type: 'quoted', id: '400' }],
+    });
+    const quoted = tweet('400', 'quoted original', { author_id: 'AUTH2' });
+    const fetchImpl = (async () =>
+      res(200, {
+        data: [quote],
+        includes: {
+          users: [{ id: 'u1', username: 'alice', name: 'Alice' }],
+          tweets: [quoted],
+        },
+      })) as any;
+    const out = await new XScanAdapter({ fetchImpl }).searchScoped(baseArgs());
+    expect(out.posts).toHaveLength(1);
+    expect(out.posts[0].externalPostId).toBe('902'); // the quote tweet itself
+    expect(out.posts[0].postContent).toBe('my hot take');
+    expect(out.posts[0].authorUsername).toBe('alice');
+  });
+
+  it('tracked scope appends -is:retweet to the query', async () => {
+    let seenUrl = '';
+    const fetchImpl = (async (url: string) => {
+      seenUrl = url;
+      return res(200, { data: [], includes: { users: [] } });
+    }) as any;
+    await new XScanAdapter({ fetchImpl }).searchScoped(
+      baseArgs({ scope: { type: 'tracked', key: 'bob' }, keywords: ['AI'] })
+    );
+    expect(decodeURIComponent(seenUrl).replace(/\+/g, ' ')).toContain('-is:retweet');
+  });
 });
