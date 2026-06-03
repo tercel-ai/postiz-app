@@ -20,6 +20,7 @@ import {
   pickXReplyIntegration,
   XReplyResolution,
 } from '@gitroom/nestjs-libraries/engage/resolve-x-reply-integration';
+import { classifyReplyMetric } from '@gitroom/nestjs-libraries/engage/engage-metrics-stats';
 import dayjs from 'dayjs';
 import isoWeek from 'dayjs/plugin/isoWeek';
 import utc from 'dayjs/plugin/utc';
@@ -1843,9 +1844,11 @@ export class EngageRepository {
 
   /**
    * Per-platform snapshot of PUBLISHED engage replies: how many carry metrics,
-   * how many are still missing, X replies still lacking an integration, and the
-   * impression/traffic totals. Powers the /admin/sync-metrics before/after
-   * summary. Engage replies are few, so one findMany + in-memory fold is fine.
+   * how many are still missing — broken down by WHY (no link yet / no
+   * integration / no tweet id / syncable-but-empty) — and the impression/traffic
+   * totals. Powers the /admin/sync-metrics before/after summary. Engage replies
+   * are few, so one findMany + in-memory fold is fine. Classification is shared
+   * with the script via classifyReplyMetric.
    */
   async getEngageMetricsStats(organizationId: string, platform?: string) {
     const rows = await this._sentReply.model.engageSentReply.findMany({
@@ -1855,7 +1858,15 @@ export class EngageRepository {
         post: { source: 'engage', state: 'PUBLISHED' },
       },
       select: {
-        post: { select: { impressions: true, trafficScore: true, integrationId: true } },
+        post: {
+          select: {
+            impressions: true,
+            trafficScore: true,
+            integrationId: true,
+            releaseURL: true,
+            releaseId: true,
+          },
+        },
         opportunity: { select: { platform: true } },
       },
     });
@@ -1866,7 +1877,11 @@ export class EngageRepository {
         published: number;
         withMetrics: number;
         missing: number;
-        missingIntegration: number;
+        // Breakdown of `missing` by blocker:
+        missingNoReleaseURL: number; // needs PATCH /sent/:id/reply-url
+        missingNoIntegration: number; // X — run integration backfill
+        missingNoReleaseId: number; // X — URL has no /status/<id>
+        missingSyncable: number; // ready, but fetch returned nothing (tier/WAF)
         totalImpressions: number;
         totalTrafficScore: number;
       }
@@ -1878,19 +1893,32 @@ export class EngageRepository {
         published: 0,
         withMetrics: 0,
         missing: 0,
-        missingIntegration: 0,
+        missingNoReleaseURL: 0,
+        missingNoIntegration: 0,
+        missingNoReleaseId: 0,
+        missingSyncable: 0,
         totalImpressions: 0,
         totalTrafficScore: 0,
       });
       s.published++;
-      if (r.post?.impressions != null) {
+      const status = classifyReplyMetric({
+        platform: p,
+        impressions: r.post?.impressions,
+        releaseURL: r.post?.releaseURL,
+        releaseId: r.post?.releaseId,
+        integrationId: r.post?.integrationId,
+      });
+      if (status === 'has_metrics') {
         s.withMetrics++;
-        s.totalImpressions += r.post.impressions;
-        s.totalTrafficScore += r.post.trafficScore ?? 0;
+        s.totalImpressions += r.post?.impressions ?? 0;
+        s.totalTrafficScore += r.post?.trafficScore ?? 0;
       } else {
         s.missing++;
+        if (status === 'no_release_url') s.missingNoReleaseURL++;
+        else if (status === 'no_integration') s.missingNoIntegration++;
+        else if (status === 'no_release_id') s.missingNoReleaseId++;
+        else s.missingSyncable++;
       }
-      if (p === 'x' && !r.post?.integrationId) s.missingIntegration++;
     }
     for (const s of Object.values(stats)) s.totalTrafficScore = Math.round(s.totalTrafficScore);
     return stats;

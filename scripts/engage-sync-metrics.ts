@@ -37,6 +37,10 @@ import { DatabaseModule } from '@gitroom/nestjs-libraries/database/prisma/databa
 import { getTemporalModule } from '@gitroom/nestjs-libraries/temporal/temporal.module';
 import { EngageService } from '@gitroom/nestjs-libraries/engage/engage.service';
 import { EngageRepository } from '@gitroom/nestjs-libraries/engage/engage.repository';
+import {
+  classifyReplyMetric,
+  ReplyMetricStatus,
+} from '@gitroom/nestjs-libraries/engage/engage-metrics-stats';
 
 @Module({ imports: [DatabaseModule, getTemporalModule(false)] })
 class ScriptModule {}
@@ -93,17 +97,27 @@ interface PlatformStat {
   published: number;
   withMetrics: number;
   missing: number;
-  missingIntegration: number; // X only — published, null integrationId
+  noReleaseURL: number; // needs PATCH /sent/:id/reply-url
+  noIntegration: number; // X — run integration backfill
+  noReleaseId: number; // X — URL has no /status/<id>
+  syncable: number; // ready, but fetch returned nothing (tier/WAF/pending)
   sumImpressions: number;
   sumTraffic: number;
 }
 
-/** Snapshot of published engage replies grouped by platform. Bounded data set. */
+interface MissingItem {
+  platform: string;
+  status: ReplyMetricStatus;
+  url: string | null;
+}
+
+/** Snapshot of published engage replies grouped by platform, plus the list of
+ *  missing replies tagged with WHY they're missing. Bounded data set. */
 async function collectStats(
   prisma: PrismaClient,
   orgId: string | null,
   platform: 'x' | 'reddit' | null
-): Promise<Record<string, PlatformStat>> {
+): Promise<{ stats: Record<string, PlatformStat>; missing: MissingItem[] }> {
   const rows = await prisma.engageSentReply.findMany({
     where: {
       ...(orgId ? { organizationId: orgId } : {}),
@@ -111,29 +125,50 @@ async function collectStats(
       post: { source: 'engage', state: 'PUBLISHED' },
     },
     select: {
-      post: { select: { impressions: true, trafficScore: true, integrationId: true } },
+      post: {
+        select: {
+          impressions: true,
+          trafficScore: true,
+          integrationId: true,
+          releaseURL: true,
+          releaseId: true,
+        },
+      },
       opportunity: { select: { platform: true } },
     },
   });
 
   const stats: Record<string, PlatformStat> = {};
+  const missing: MissingItem[] = [];
   for (const r of rows) {
     const p = r.opportunity.platform;
     const s = (stats[p] ??= {
       published: 0, withMetrics: 0, missing: 0,
-      missingIntegration: 0, sumImpressions: 0, sumTraffic: 0,
+      noReleaseURL: 0, noIntegration: 0, noReleaseId: 0, syncable: 0,
+      sumImpressions: 0, sumTraffic: 0,
     });
     s.published++;
-    if (r.post?.impressions != null) {
+    const status = classifyReplyMetric({
+      platform: p,
+      impressions: r.post?.impressions,
+      releaseURL: r.post?.releaseURL,
+      releaseId: r.post?.releaseId,
+      integrationId: r.post?.integrationId,
+    });
+    if (status === 'has_metrics') {
       s.withMetrics++;
-      s.sumImpressions += r.post.impressions;
-      s.sumTraffic += r.post.trafficScore ?? 0;
+      s.sumImpressions += r.post?.impressions ?? 0;
+      s.sumTraffic += r.post?.trafficScore ?? 0;
     } else {
       s.missing++;
+      if (status === 'no_release_url') s.noReleaseURL++;
+      else if (status === 'no_integration') s.noIntegration++;
+      else if (status === 'no_release_id') s.noReleaseId++;
+      else s.syncable++;
+      missing.push({ platform: p, status, url: r.post?.releaseURL ?? null });
     }
-    if (p === 'x' && !r.post?.integrationId) s.missingIntegration++;
   }
-  return stats;
+  return { stats, missing };
 }
 
 function printStats(label: string, stats: Record<string, PlatformStat>): void {
@@ -145,11 +180,35 @@ function printStats(label: string, stats: Record<string, PlatformStat>): void {
   }
   for (const p of platforms) {
     const s = stats[p];
+    const blockers = [
+      s.noReleaseURL ? `noURL=${s.noReleaseURL}` : '',
+      s.noIntegration ? `noIntegration=${s.noIntegration}` : '',
+      s.noReleaseId ? `noReleaseId=${s.noReleaseId}` : '',
+      s.syncable ? `syncable=${s.syncable}` : '',
+    ].filter(Boolean).join(' ');
     console.log(
       `  [${p.padEnd(6)}] published=${s.published}  withMetrics=${s.withMetrics}  ` +
-      `missing=${s.missing}` +
-      (p === 'x' ? `  noIntegration=${s.missingIntegration}` : '') +
-      `  Σimpr=${s.sumImpressions}  Σtraffic=${Math.round(s.sumTraffic)}`
+      `missing=${s.missing}${blockers ? ` (${blockers})` : ''}  ` +
+      `Σimpr=${s.sumImpressions}  Σtraffic=${Math.round(s.sumTraffic)}`
+    );
+  }
+}
+
+const BLOCKER_HINT: Record<ReplyMetricStatus, string> = {
+  has_metrics: '',
+  no_release_url: 'add the reply link: PATCH /engage/sent/:id/reply-url',
+  no_integration: 'run integration backfill (default on)',
+  no_release_id: 'reply URL has no /status/<id> — fix the link',
+  syncable: 'ready — fetch returned nothing (X API tier / Reddit WAF / not run yet)',
+};
+
+function printMissing(missing: MissingItem[]): void {
+  if (missing.length === 0) return;
+  console.log(`\n── MISSING breakdown (${missing.length}) ──`);
+  for (const m of missing) {
+    console.log(
+      `  [${m.platform.padEnd(6)}] ${m.status.padEnd(15)} ${m.url ?? '(no url)'}\n` +
+      `           ↳ ${BLOCKER_HINT[m.status]}`
     );
   }
 }
@@ -165,7 +224,9 @@ async function main(): Promise<void> {
 
   const prisma = new PrismaClient();
 
-  printStats('BEFORE', await collectStats(prisma, args.orgId, args.platform));
+  const before = await collectStats(prisma, args.orgId, args.platform);
+  printStats('BEFORE', before.stats);
+  printMissing(before.missing);
 
   if (args.statsOnly) {
     await prisma.$disconnect();
@@ -223,14 +284,27 @@ async function main(): Promise<void> {
     platform: args.platform ?? undefined,
     dryRun: args.dryRun,
   });
-  console.log(
-    `\nResync: found ${result.found} missing-metric repl${result.found === 1 ? 'y' : 'ies'}, ` +
-    `${args.dryRun ? 'would update (run with --execute)' : `updated ${result.updated}, errors ${result.errors}`}`
-  );
+  if (args.dryRun) {
+    console.log(
+      `\nResync: ${result.found} repl${result.found === 1 ? 'y' : 'ies'} with a fetchable link ` +
+      `would be re-fetched (run with --execute).`
+    );
+  } else {
+    console.log(
+      `\nResync: found ${result.found}  →  written ${result.written}, empty ${result.empty}, ` +
+      `unreachable ${result.unreachable}, skipped ${result.skipped}, errors ${result.errors}`
+    );
+    console.log(
+      '  written=metrics landed; empty=API returned nothing (X tier block / deleted); ' +
+      'unreachable=network/WAF; skipped=missing prerequisite.'
+    );
+  }
 
   await app.close();
 
-  printStats(args.dryRun ? 'AFTER (unchanged — dry run)' : 'AFTER', await collectStats(prisma, args.orgId, args.platform));
+  const after = await collectStats(prisma, args.orgId, args.platform);
+  printStats(args.dryRun ? 'AFTER (unchanged — dry run)' : 'AFTER', after.stats);
+  if (!args.dryRun) printMissing(after.missing);
   if (args.dryRun) {
     console.log('\n--- DRY RUN complete. Re-run with --execute to sync. ---');
   }

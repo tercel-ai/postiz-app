@@ -779,29 +779,43 @@ describe('EngageRepository — two-table reads', () => {
       return { repo, sentFindMany };
     }
 
-    it('counts metrics presence and totals per platform', async () => {
+    it('counts metrics presence, per-blocker missing breakdown, and totals per platform', async () => {
       const { repo, sentFindMany } = buildStatsRepo();
+      const url = 'https://x.com/u/status/123';
       sentFindMany.mockResolvedValue([
-        { post: { impressions: 100, trafficScore: 2.4, integrationId: 'i1' }, opportunity: { platform: 'x' } },
-        { post: { impressions: null, trafficScore: null, integrationId: null }, opportunity: { platform: 'x' } },
-        { post: { impressions: null, trafficScore: null, integrationId: 'i2' }, opportunity: { platform: 'x' } },
-        { post: { impressions: 40, trafficScore: 7.6, integrationId: null }, opportunity: { platform: 'reddit' } },
+        // X — one of each bucket
+        { post: { impressions: 100, trafficScore: 2.4, integrationId: 'i1', releaseURL: url, releaseId: '123' }, opportunity: { platform: 'x' } }, // has_metrics
+        { post: { impressions: null, trafficScore: null, integrationId: null, releaseURL: null, releaseId: null }, opportunity: { platform: 'x' } }, // no_release_url
+        { post: { impressions: null, trafficScore: null, integrationId: null, releaseURL: url, releaseId: '123' }, opportunity: { platform: 'x' } }, // no_integration
+        { post: { impressions: null, trafficScore: null, integrationId: 'i2', releaseURL: url, releaseId: null }, opportunity: { platform: 'x' } }, // no_release_id
+        { post: { impressions: null, trafficScore: null, integrationId: 'i2', releaseURL: url, releaseId: '123' }, opportunity: { platform: 'x' } }, // syncable
+        // Reddit — needs only a releaseURL
+        { post: { impressions: 40, trafficScore: 7.6, integrationId: null, releaseURL: 'https://reddit.com/r/x/comments/a/b/c1', releaseId: null }, opportunity: { platform: 'reddit' } }, // has_metrics
+        { post: { impressions: null, trafficScore: null, integrationId: null, releaseURL: null, releaseId: null }, opportunity: { platform: 'reddit' } }, // no_release_url
+        { post: { impressions: null, trafficScore: null, integrationId: null, releaseURL: 'https://reddit.com/r/x/comments/a/b/c2', releaseId: null }, opportunity: { platform: 'reddit' } }, // syncable
       ]);
 
       const stats = await repo.getEngageMetricsStats('org1');
 
       expect(stats.x).toEqual({
-        published: 3,
+        published: 5,
         withMetrics: 1,
-        missing: 2,
-        missingIntegration: 1, // only the published+null-integration X reply
+        missing: 4,
+        missingNoReleaseURL: 1,
+        missingNoIntegration: 1,
+        missingNoReleaseId: 1,
+        missingSyncable: 1,
         totalImpressions: 100,
         totalTrafficScore: 2, // Math.round(2.4)
       });
-      expect(stats.reddit).toMatchObject({
-        published: 1,
+      expect(stats.reddit).toEqual({
+        published: 3,
         withMetrics: 1,
-        missing: 0,
+        missing: 2,
+        missingNoReleaseURL: 1,
+        missingNoIntegration: 0,
+        missingNoReleaseId: 0,
+        missingSyncable: 1,
         totalImpressions: 40,
         totalTrafficScore: 8, // Math.round(7.6)
       });

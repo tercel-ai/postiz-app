@@ -39,15 +39,12 @@ import {
   syncRedditMetrics,
   syncXMetrics,
   type MetricsSyncDeps,
+  type MetricsSyncOutcome,
 } from '@gitroom/nestjs-libraries/engage/engage-metrics-sync';
-import { checkRedditCommentAccessible } from '@gitroom/nestjs-libraries/engage/reddit-comment';
-import { checkXTweetAccessible } from '@gitroom/nestjs-libraries/engage/x-tweet';
 
 // Validate by DOMAIN only, not by full path shape — Reddit/X change their
-// permalink structure over time, and the precise id is extracted (and the
-// target reachability confirmed) downstream by checkRedditCommentAccessible /
-// checkXTweetAccessible (which return not_found when no id can be parsed). So
-// the format gate just needs to confirm the link is on the expected platform.
+// permalink structure over time. The reply URL is only checked for the right
+// platform host; target reachability is not verified (see _validateReplyUrl).
 function hostIsOneOf(url: string, domains: string[]): boolean {
   try {
     const host = new URL(url).hostname.toLowerCase();
@@ -336,9 +333,13 @@ export class EngageService implements OnApplicationBootstrap {
   }
 
   /**
-   * Validate a reply URL against its platform: correct format AND a real,
-   * reachable target (strict — reject not_found AND unverifiable). Shared by the
+   * Validate a reply URL against its platform: correct format only. Shared by the
    * confirm path (only when a URL is supplied) and the backfill path (always).
+   *
+   * Network reachability of the target (Reddit comment / X tweet) is intentionally
+   * NOT checked: the verification fetch goes out through the global proxy
+   * dispatcher, which returns 407 in environments without proxy credentials and
+   * blocks legitimate backfills. We trust the user-supplied link's format instead.
    */
   private async _validateReplyUrl(platform: string, url: string): Promise<void> {
     if (platform === 'reddit') {
@@ -347,40 +348,15 @@ export class EngageService implements OnApplicationBootstrap {
           'Invalid Reddit comment URL — must be a reddit.com link.'
         );
       }
-      this._assertReplyUrlVerified(
-        await checkRedditCommentAccessible(url, (m) => this.logger.warn(m)),
-        'Reddit comment'
-      );
     } else if (platform === 'x') {
       if (!isXUrl(url)) {
         throw new BadRequestException(
           'Invalid X reply URL — must be an x.com or twitter.com link.'
         );
       }
-      this._assertReplyUrlVerified(
-        await checkXTweetAccessible(url, (m) => this.logger.warn(m)),
-        'X reply'
-      );
     } else {
       throw new BadRequestException(
         'Reply-URL backfill is only valid for X or Reddit manual replies'
-      );
-    }
-  }
-
-  /** Strict gate shared by the Reddit/X backfill paths: reject not_found AND unverifiable. */
-  private _assertReplyUrlVerified(
-    check: { status: 'exists' | 'not_found' | 'unverifiable'; reason?: string },
-    label: string
-  ): void {
-    if (check.status === 'not_found') {
-      throw new BadRequestException(
-        `That ${label} could not be found — check the URL points to a real, public ${label.toLowerCase()}.`
-      );
-    }
-    if (check.status === 'unverifiable') {
-      throw new BadRequestException(
-        `Could not verify the ${label} right now (${check.reason}). Please try again shortly.`
       );
     }
   }
@@ -910,9 +886,9 @@ export class EngageService implements OnApplicationBootstrap {
     let postId: string | undefined;
     try {
       // If the user supplied the link now, hold it to the same standard as the
-      // backfill path: validate format + reachability. When omitted, skip the
-      // check entirely ("I'll add the link later"). A failure here is caught
-      // below and releases the claim, so the opportunity isn't stuck in REPLIED.
+      // backfill path: validate format. When omitted, skip the check entirely
+      // ("I'll add the link later"). A failure here is caught below and releases
+      // the claim, so the opportunity isn't stuck in REPLIED.
       if (body.replyUrl) {
         await this._validateReplyUrl(opp.platform, body.replyUrl);
       }
@@ -1021,21 +997,30 @@ export class EngageService implements OnApplicationBootstrap {
     orgId?: string;
     platform?: string;
     dryRun?: boolean;
-  } = {}): Promise<{ found: number; updated: number; errors: number }> {
+  } = {}): Promise<{
+    found: number;
+    updated: number;
+    written: number;
+    empty: number;
+    unreachable: number;
+    skipped: number;
+    errors: number;
+  }> {
     const { orgId, platform, dryRun = false } = opts;
     const pending = await this._engageRepository.findPendingEngageMetrics(orgId, platform);
-    let updated = 0;
-    let errors = 0;
+    // Count REAL outcomes from the shared sync, not attempts — so the caller can
+    // tell "fetched & written" apart from "API returned nothing / WAF blocked".
+    const tally = { written: 0, empty: 0, unreachable: 0, skipped: 0, errors: 0 };
 
     for (const reply of pending) {
       if (dryRun) continue;
       try {
         const p = reply.opportunity.platform;
+        let outcome: MetricsSyncOutcome = 'skipped';
         if (p === 'reddit' && reply.post?.releaseURL) {
-          await syncRedditMetrics(reply.post.id, reply.post.releaseURL, reply.id, reply.opportunity.authorUsername ?? '', this._metricsSyncDeps());
-          updated++;
+          outcome = await syncRedditMetrics(reply.post.id, reply.post.releaseURL, reply.id, reply.opportunity.authorUsername ?? '', this._metricsSyncDeps());
         } else if (p === 'x' && reply.post?.releaseURL) {
-          await syncXMetrics({
+          outcome = await syncXMetrics({
             orgId: reply.organizationId,
             sentReplyId: reply.id,
             postDbId: reply.post.id,
@@ -1044,15 +1029,16 @@ export class EngageService implements OnApplicationBootstrap {
             authorUsername: reply.opportunity.authorUsername ?? '',
             hasIntegration: !!reply.post.integrationId,
           }, this._metricsSyncDeps());
-          updated++;
         }
+        tally[outcome]++;
       } catch (err) {
         this.logger.warn(`resyncEngageMetrics: failed for sentReplyId=${reply.id}: ${(err as Error).message}`);
-        errors++;
+        tally.errors++;
       }
     }
 
-    return { found: pending.length, updated, errors };
+    // `updated` retains its name but now means rows that actually got metrics.
+    return { found: pending.length, updated: tally.written, ...tally };
   }
 
   /**

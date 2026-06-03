@@ -3,7 +3,7 @@ import { EngageService } from '../engage.service';
 
 /**
  * confirmManualReply must hold a supplied reply URL to the same standard as the
- * backfill path (format + reachability), but skip all checks when no URL is
+ * backfill path (platform-host format check), but skip all checks when no URL is
  * given ("I'll add the link later"). A bad URL must release the claim so the
  * opportunity isn't stuck in REPLIED with no record.
  */
