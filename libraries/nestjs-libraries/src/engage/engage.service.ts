@@ -43,15 +43,22 @@ import {
 import { checkRedditCommentAccessible } from '@gitroom/nestjs-libraries/engage/reddit-comment';
 import { checkXTweetAccessible } from '@gitroom/nestjs-libraries/engage/x-tweet';
 
-// Anchored at $ to reject trailing query strings / fragments that would otherwise
-// pollute the stored releaseURL (e.g. `?utm_source=...`). Matches spec §12.4.
-const REDDIT_COMMENT_URL_RE =
-  /^https?:\/\/(www\.)?reddit\.com\/r\/[^/]+\/comments\/[^/]+\/[^/]+\/[a-z0-9]+\/?$/i;
+// Validate by DOMAIN only, not by full path shape — Reddit/X change their
+// permalink structure over time, and the precise id is extracted (and the
+// target reachability confirmed) downstream by checkRedditCommentAccessible /
+// checkXTweetAccessible (which return not_found when no id can be parsed). So
+// the format gate just needs to confirm the link is on the expected platform.
+function hostIsOneOf(url: string, domains: string[]): boolean {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return domains.some((d) => host === d || host.endsWith(`.${d}`));
+  } catch {
+    return false; // not a parseable absolute URL
+  }
+}
 
-// An X reply permalink: x.com / twitter.com /<handle>/status/<snowflake>. A
-// trailing query (e.g. ?s=20) is tolerated — syncXMetrics parses the id out.
-const X_REPLY_URL_RE =
-  /^https?:\/\/(www\.|mobile\.)?(x|twitter)\.com\/[^/]+\/status\/\d+/i;
+const isRedditUrl = (url: string) => hostIsOneOf(url, ['reddit.com']);
+const isXUrl = (url: string) => hostIsOneOf(url, ['x.com', 'twitter.com']);
 
 @Injectable()
 export class EngageService implements OnApplicationBootstrap {
@@ -335,9 +342,9 @@ export class EngageService implements OnApplicationBootstrap {
    */
   private async _validateReplyUrl(platform: string, url: string): Promise<void> {
     if (platform === 'reddit') {
-      if (!REDDIT_COMMENT_URL_RE.test(url)) {
+      if (!isRedditUrl(url)) {
         throw new BadRequestException(
-          'Invalid Reddit comment URL. Expected: https://www.reddit.com/r/.../comments/.../comment/...'
+          'Invalid Reddit comment URL — must be a reddit.com link.'
         );
       }
       this._assertReplyUrlVerified(
@@ -345,9 +352,9 @@ export class EngageService implements OnApplicationBootstrap {
         'Reddit comment'
       );
     } else if (platform === 'x') {
-      if (!X_REPLY_URL_RE.test(url)) {
+      if (!isXUrl(url)) {
         throw new BadRequestException(
-          'Invalid X reply URL. Expected: https://x.com/.../status/...'
+          'Invalid X reply URL — must be an x.com or twitter.com link.'
         );
       }
       this._assertReplyUrlVerified(
