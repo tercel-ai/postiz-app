@@ -1284,55 +1284,21 @@ export class XProvider extends SocialAbstract implements SocialProvider {
 
       const metrics = tweet.data.public_metrics;
 
-      const result: AnalyticsData[] = [];
-
-      if (metrics.impression_count !== undefined) {
-        result.push({
-          label: 'Impressions',
-          percentageChange: 0,
-          data: [{ total: String(metrics.impression_count), date: today }],
-        });
-      }
-
-      if (metrics.like_count !== undefined) {
-        result.push({
-          label: 'Likes',
-          percentageChange: 0,
-          data: [{ total: String(metrics.like_count), date: today }],
-        });
-      }
-
-      if (metrics.retweet_count !== undefined) {
-        result.push({
-          label: 'Retweets',
-          percentageChange: 0,
-          data: [{ total: String(metrics.retweet_count), date: today }],
-        });
-      }
-
-      if (metrics.reply_count !== undefined) {
-        result.push({
-          label: 'Replies',
-          percentageChange: 0,
-          data: [{ total: String(metrics.reply_count), date: today }],
-        });
-      }
-
-      if (metrics.quote_count !== undefined) {
-        result.push({
-          label: 'Quotes',
-          percentageChange: 0,
-          data: [{ total: String(metrics.quote_count), date: today }],
-        });
-      }
-
-      if (metrics.bookmark_count !== undefined) {
-        result.push({
-          label: 'Bookmarks',
-          percentageChange: 0,
-          data: [{ total: String(metrics.bookmark_count), date: today }],
-        });
-      }
+      // Always emit all six metrics so no downstream field is ever missing.
+      // On X, impression_count and bookmark_count are owner-only: when the
+      // querying token is not the tweet's author, the API omits them. We default
+      // those to 0 ("not readable", never estimated), while the public metrics
+      // (likes / retweets / replies / quotes) always carry their real values.
+      // A missing public metric also defaults to 0 purely as a presence guard.
+      const num = (v: number | undefined): string => String(v ?? 0);
+      const result: AnalyticsData[] = [
+        { label: 'Impressions', percentageChange: 0, data: [{ total: num(metrics.impression_count), date: today }] },
+        { label: 'Likes',       percentageChange: 0, data: [{ total: num(metrics.like_count),       date: today }] },
+        { label: 'Retweets',    percentageChange: 0, data: [{ total: num(metrics.retweet_count),    date: today }] },
+        { label: 'Replies',     percentageChange: 0, data: [{ total: num(metrics.reply_count),      date: today }] },
+        { label: 'Quotes',      percentageChange: 0, data: [{ total: num(metrics.quote_count),      date: today }] },
+        { label: 'Bookmarks',   percentageChange: 0, data: [{ total: num(metrics.bookmark_count),   date: today }] },
+      ];
 
       return result;
     } catch (err: any) {

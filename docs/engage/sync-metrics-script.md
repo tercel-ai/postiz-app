@@ -105,5 +105,14 @@ Resync: found 4  →  written 3, empty 1, unreachable 0, skipped 0, errors 0
 - Idempotent: backfill fills only `null` `integrationId`; metrics are upserted.
 - `empty` results for X usually mean the X reply API-tier block (Free/Pay-Per-Use
   tier can't read others' reply metrics) — not a script bug.
+- **`Σ impressions` / bookmarks can read 0 even when likes/replies populate.** On X,
+  `impression_count` and `bookmark_count` are **owner-only** — readable only with the
+  authoring account's token. When the engage reply's resolved integration is not the
+  author (`matchedBy != 'handle'`), `x.provider.postAnalytics` returns the public
+  metrics with real values and **defaults the owner-only pair to `0` (never
+  estimated)**, so every field still has a value. The write-back keeps `impressions`
+  at its last real value rather than overwriting it with a fallback `0`. To get real
+  impressions/bookmarks, connect the **authoring** X account so the reply resolves by
+  handle. See `tech-design.md` → "Owner-only metrics & default values".
 - Related: [reddit-loid-waf-bypass.md](./reddit-loid-waf-bypass.md),
   [reddit-metrics-sync-todo.md](./reddit-metrics-sync-todo.md).

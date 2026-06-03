@@ -252,7 +252,12 @@ export class PostsService {
           .batchUpdatePostAnalytics([
             {
               id: post.id,
-              impressions,
+              // Impressions are owner-only on some platforms (e.g. X): when the
+              // querying token is not the author's, impressions read back as 0.
+              // Never let that fallback 0 clobber a real value captured earlier
+              // by the author's token — only write impressions when > 0. The
+              // trafficScore/analytics snapshot is still refreshed each sync.
+              impressions: impressions > 0 ? impressions : undefined,
               trafficScore: extractedTrafficScore ?? undefined,
               analytics: rawMetrics,
             },
