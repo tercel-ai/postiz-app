@@ -74,6 +74,18 @@ function isConnectionError(err: unknown): boolean {
   );
 }
 
+// undici's ProxyAgent rejects with this when the upstream proxy refuses the
+// CONNECT tunnel — most commonly 407 (Proxy Authentication Required), but any
+// non-200 CONNECT response. The proxy itself is the problem (bad/missing creds,
+// misconfig), so — like a connection error — we bail to a DIRECT connection
+// instead of failing the whole read. Matched by message because undici surfaces
+// it as a plain Error without a stable `code`.
+function isProxyError(err: unknown): boolean {
+  const e = err as { message?: string; cause?: { message?: string } };
+  const msg = `${e?.message ?? ''} ${e?.cause?.message ?? ''}`;
+  return /Proxy response \(\d+\)/i.test(msg) || /HTTP Tunneling/i.test(msg);
+}
+
 let _cache: LoidCache | null = null;
 let _inflight: Promise<string | null> | null = null;
 
@@ -129,7 +141,10 @@ export async function getRedditLoidCookie(): Promise<string | null> {
       try {
         res = await mint();
       } catch (err) {
-        if (!isConnectionError((err as { cause?: unknown })?.cause ?? err)) throw err;
+        const cause = (err as { cause?: unknown })?.cause ?? err;
+        // A dead proxy OR a 407/CONNECT-tunnel rejection both warrant retrying
+        // the mint directly, so loid (and thus all reddit reads) survive it.
+        if (!isConnectionError(cause) && !isProxyError(err)) throw err;
         res = await mint(directAgent());
       }
 
@@ -278,9 +293,13 @@ export async function redditPublicGet(
       );
       if (attempt < maxAttempts) await sleep(backoffMs);
     } catch (err) {
-      if (isConnectionError((err as { cause?: unknown })?.cause ?? err)) {
-        // Tier 1: proxy unreachable or too slow — stop retrying it, go direct.
-        log(`[reddit] proxy unusable (${(err as { code?: string }).code ?? 'conn error'}); falling back to direct`);
+      const cause = (err as { cause?: unknown })?.cause ?? err;
+      if (isConnectionError(cause) || isProxyError(err)) {
+        // Tier 1: proxy unreachable, too slow, or rejecting the CONNECT tunnel
+        // (e.g. 407 auth) — stop retrying it, go direct.
+        log(
+          `[reddit] proxy unusable (${(err as { code?: string }).code ?? (err as Error).message ?? 'proxy error'}); falling back to direct`
+        );
         break;
       }
       throw err; // a non-connection error (e.g. bad URL) — surface it

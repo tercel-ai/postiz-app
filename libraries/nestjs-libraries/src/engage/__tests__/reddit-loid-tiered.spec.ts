@@ -6,7 +6,7 @@ import { describe, it, expect } from 'vitest';
 import { Dispatcher } from 'undici';
 import { redditPublicGet } from '../reddit-loid';
 
-type Plan = (call: number) => { status: number; body?: string } | 'throw';
+type Plan = (call: number) => { status: number; body?: string } | 'throw' | 'throw-proxy';
 
 class FakeDispatcher extends Dispatcher {
   public calls = 0;
@@ -22,6 +22,11 @@ class FakeDispatcher extends Dispatcher {
         const e = new Error('connect ECONNREFUSED 1.2.3.4:15127') as Error & { code?: string };
         e.code = 'ECONNREFUSED';
         h.onError?.(e);
+        return;
+      }
+      if (r === 'throw-proxy') {
+        // undici ProxyAgent's 407 rejection: a plain Error, no stable code.
+        h.onError?.(new Error('Proxy response (407) !== 200 when HTTP Tunneling'));
         return;
       }
       try {
@@ -88,6 +93,17 @@ describe('redditPublicGet — tiered proxy strategy', () => {
     expect(res.status).toBe(200);
     expect(res.viaDirect).toBe(true);
     expect(proxy.calls).toBe(1); // stopped retrying the dead proxy
+    expect(direct.calls).toBe(1);
+  });
+
+  it('tier 1: proxy 407 (CONNECT tunnel rejected) → direct immediately, no proxy retries', async () => {
+    const proxy = new FakeDispatcher(() => 'throw-proxy');
+    const direct = new FakeDispatcher(() => ({ status: 200, body: 'direct-ok' }));
+    const res = await redditPublicGet('https://www.reddit.com/x.json', {}, deps(proxy, direct));
+    expect(res.status).toBe(200);
+    expect(res.viaDirect).toBe(true);
+    expect(await res.text()).toBe('direct-ok');
+    expect(proxy.calls).toBe(1); // did NOT keep retrying the auth-failing proxy
     expect(direct.calls).toBe(1);
   });
 
