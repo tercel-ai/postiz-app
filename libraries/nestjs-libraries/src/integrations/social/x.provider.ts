@@ -1282,25 +1282,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
         return [];
       }
 
-      const metrics = tweet.data.public_metrics;
-
-      // Always emit all six metrics so no downstream field is ever missing.
-      // On X, impression_count and bookmark_count are owner-only: when the
-      // querying token is not the tweet's author, the API omits them. We default
-      // those to 0 ("not readable", never estimated), while the public metrics
-      // (likes / retweets / replies / quotes) always carry their real values.
-      // A missing public metric also defaults to 0 purely as a presence guard.
-      const num = (v: number | undefined): string => String(v ?? 0);
-      const result: AnalyticsData[] = [
-        { label: 'Impressions', percentageChange: 0, data: [{ total: num(metrics.impression_count), date: today }] },
-        { label: 'Likes',       percentageChange: 0, data: [{ total: num(metrics.like_count),       date: today }] },
-        { label: 'Retweets',    percentageChange: 0, data: [{ total: num(metrics.retweet_count),    date: today }] },
-        { label: 'Replies',     percentageChange: 0, data: [{ total: num(metrics.reply_count),      date: today }] },
-        { label: 'Quotes',      percentageChange: 0, data: [{ total: num(metrics.quote_count),      date: today }] },
-        { label: 'Bookmarks',   percentageChange: 0, data: [{ total: num(metrics.bookmark_count),   date: today }] },
-      ];
-
-      return result;
+      return this._buildPublicMetricsAnalytics(tweet.data.public_metrics, today);
     } catch (err: any) {
       if (err?.code === 429 || err?.rateLimit) {
         if (err?.rateLimit?.reset) {
@@ -1325,6 +1307,97 @@ export class XProvider extends SocialAbstract implements SocialProvider {
     }
 
     return [];
+  }
+
+  /**
+   * Map an X `public_metrics` object to our AnalyticsData[] shape. All six metrics
+   * are emitted unconditionally so no downstream field is ever missing; a metric
+   * the API omits defaults to 0 (presence guard — never an estimate). Shared by
+   * the user-token `postAnalytics` and the app-only `postAnalyticsAppOnly` paths.
+   *
+   * Note: impression_count and bookmark_count are part of `public_metrics` and are
+   * returned by ANY valid token (including app-only) — they are NOT owner-only.
+   */
+  private _buildPublicMetricsAnalytics(
+    metrics: {
+      impression_count?: number;
+      like_count?: number;
+      retweet_count?: number;
+      reply_count?: number;
+      quote_count?: number;
+      bookmark_count?: number;
+    },
+    today: string
+  ): AnalyticsData[] {
+    const num = (v: number | undefined): string => String(v ?? 0);
+    return [
+      { label: 'Impressions', percentageChange: 0, data: [{ total: num(metrics.impression_count), date: today }] },
+      { label: 'Likes',       percentageChange: 0, data: [{ total: num(metrics.like_count),       date: today }] },
+      { label: 'Retweets',    percentageChange: 0, data: [{ total: num(metrics.retweet_count),    date: today }] },
+      { label: 'Replies',     percentageChange: 0, data: [{ total: num(metrics.reply_count),      date: today }] },
+      { label: 'Quotes',      percentageChange: 0, data: [{ total: num(metrics.quote_count),      date: today }] },
+      { label: 'Bookmarks',   percentageChange: 0, data: [{ total: num(metrics.bookmark_count),   date: today }] },
+    ];
+  }
+
+  /**
+   * App-only analytics fallback: read a tweet's `public_metrics` with an app-only
+   * bearer minted at runtime from X_API_KEY/X_API_SECRET (client_credentials via
+   * appLogin) — NO user token required. Used by the engage sync when the reply's
+   * own integration token is dead/expired/refreshNeeded. Returns the full metric
+   * set (impression + bookmark included; they are public, not owner-only) or [].
+   *
+   * Caveat: app-only reads share the app's API-tier quota and are subject to the
+   * same global rate-limit short-circuit as the user-token path.
+   */
+  async postAnalyticsAppOnly(postId: string, date: number): Promise<AnalyticsData[]> {
+    if (process.env.DISABLE_X_ANALYTICS) {
+      console.log(`[x] postAnalyticsAppOnly ${postId} empty: DISABLE_X_ANALYTICS is set`);
+      return [];
+    }
+    if (await this._isRateLimited()) {
+      console.warn(`[x] postAnalyticsAppOnly ${postId} empty: rate-limited short-circuit`);
+      return [];
+    }
+    const appKey = process.env.X_API_KEY;
+    const appSecret = process.env.X_API_SECRET;
+    if (!appKey || !appSecret) {
+      console.warn(
+        `[x] postAnalyticsAppOnly ${postId} empty: X_API_KEY/X_API_SECRET not configured`
+      );
+      return [];
+    }
+
+    const today = dayjs().format('YYYY-MM-DD');
+    try {
+      const appClient = await new TwitterApi({ appKey, appSecret }).appLogin();
+      const tweet = await appClient.v2.singleTweet(postId, {
+        'tweet.fields': ['public_metrics', 'created_at'],
+      });
+      if (!tweet?.data?.public_metrics) {
+        console.warn(
+          `[x] postAnalyticsAppOnly ${postId} empty: API returned no public_metrics ` +
+            `(deleted / restricted / tier block). errors=${JSON.stringify(tweet?.errors ?? null)}`
+        );
+        return [];
+      }
+      return this._buildPublicMetricsAnalytics(tweet.data.public_metrics, today);
+    } catch (err: any) {
+      if (err?.code === 429 || err?.rateLimit) {
+        if (err?.rateLimit?.reset) {
+          await this._setRateLimited(err.rateLimit.reset);
+        }
+        console.log(
+          `[x] postAnalyticsAppOnly ${postId} rate limited, reset at ${err?.rateLimit?.reset || 'unknown'}`
+        );
+        return [];
+      }
+      console.warn(
+        `[x] postAnalyticsAppOnly ${postId} empty: unexpected error —`,
+        err?.message || err
+      );
+      return [];
+    }
   }
 
   async accountMetrics(

@@ -105,14 +105,17 @@ Resync: found 4  →  written 3, empty 1, unreachable 0, skipped 0, errors 0
 - Idempotent: backfill fills only `null` `integrationId`; metrics are upserted.
 - `empty` results for X usually mean the X reply API-tier block (Free/Pay-Per-Use
   tier can't read others' reply metrics) — not a script bug.
-- **`Σ impressions` / bookmarks can read 0 even when likes/replies populate.** On X,
-  `impression_count` and `bookmark_count` are **owner-only** — readable only with the
-  authoring account's token. When the engage reply's resolved integration is not the
-  author (`matchedBy != 'handle'`), `x.provider.postAnalytics` returns the public
-  metrics with real values and **defaults the owner-only pair to `0` (never
-  estimated)**, so every field still has a value. The write-back keeps `impressions`
-  at its last real value rather than overwriting it with a fallback `0`. To get real
-  impressions/bookmarks, connect the **authoring** X account so the reply resolves by
-  handle. See `tech-design.md` → "Owner-only metrics & default values".
+- **`empty` for X almost always means a dead integration token, not a tier/owner issue.**
+  `impression_count` and `bookmark_count` are part of `public_metrics` and are returned
+  by ANY valid token (even an app-only bearer) — they are **not** owner-only. So a blank
+  X reply is almost always its attached integration being expired + `refreshNeeded=true`,
+  where the user-token read returns nothing. The engage sync now falls back to an
+  **app-only read** (`PostsService.checkPostAnalyticsAppOnly` → `appLogin` with
+  `X_API_KEY`/`X_API_SECRET`, no user token) that recovers the **full** metric set
+  (impression + bookmark included). If a reply is still `empty` after that, either
+  `X_API_KEY`/`X_API_SECRET` are unset, the app's API tier blocks app-only reads
+  (403/429), or the tweet was deleted/restricted. Use
+  `scripts/engage-diagnose-x-reply.ts` to see the exact path. See `tech-design.md`
+  → "Metric fields & the token fallback chain".
 - Related: [reddit-loid-waf-bypass.md](./reddit-loid-waf-bypass.md),
   [reddit-metrics-sync-todo.md](./reddit-metrics-sync-todo.md).

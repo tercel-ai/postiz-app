@@ -252,11 +252,10 @@ export class PostsService {
           .batchUpdatePostAnalytics([
             {
               id: post.id,
-              // Impressions are owner-only on some platforms (e.g. X): when the
-              // querying token is not the author's, impressions read back as 0.
-              // Never let that fallback 0 clobber a real value captured earlier
-              // by the author's token — only write impressions when > 0. The
-              // trafficScore/analytics snapshot is still refreshed each sync.
+              // Only write impressions when > 0: a transient/partial read that
+              // reports 0 impressions must not clobber a real value captured by
+              // an earlier successful sync. The trafficScore/analytics snapshot
+              // is still refreshed each sync.
               impressions: impressions > 0 ? impressions : undefined,
               trafficScore: extractedTrafficScore ?? undefined,
               analytics: rawMetrics,
@@ -280,6 +279,77 @@ export class PostsService {
     }
 
     return [];
+  }
+
+  /**
+   * App-only analytics fallback for X ENGAGE replies whose own integration token
+   * is dead (expired + refresh failed / refreshNeeded). Reads the reply tweet's
+   * public_metrics via an app-only bearer minted from X_API_KEY/X_API_SECRET (no
+   * user token), then appends Traffic and writes back to the Post using the SAME
+   * machinery as checkPostAnalytics. Returns the analytics array, or [] if the
+   * app-only read yielded nothing.
+   *
+   * Engage-only by design — do NOT route regular posts here. A normal post's
+   * integration IS its author, so a dead token there should prompt the user to
+   * reconnect, not silently fall back to app-level credentials.
+   *
+   * impression_count + bookmark_count are part of public_metrics and ARE returned
+   * by the app-only token (they are not owner-only), so this fallback yields the
+   * full metric set, not a degraded subset.
+   */
+  async checkPostAnalyticsAppOnly(
+    orgId: string,
+    postId: string,
+    date: number
+  ): Promise<AnalyticsData[]> {
+    const post = await this._postRepository.getPostById(postId, orgId);
+    if (!post || !post.releaseId) {
+      return [];
+    }
+    const providerIdentifier = post.integration?.providerIdentifier ?? 'x';
+    if (providerIdentifier !== 'x') {
+      return [];
+    }
+
+    const xProvider = this._integrationManager.getSocialIntegration('x') as {
+      postAnalyticsAppOnly?: (postId: string, date: number) => Promise<AnalyticsData[]>;
+    };
+    if (typeof xProvider?.postAnalyticsAppOnly !== 'function') {
+      return [];
+    }
+
+    const loadAnalytics = await xProvider.postAnalyticsAppOnly(post.releaseId, date);
+    if (!loadAnalytics || loadAnalytics.length === 0) {
+      return [];
+    }
+
+    const trafficScore = computeTrafficScore('x', loadAnalytics);
+    if (trafficScore !== null) {
+      loadAnalytics.push({
+        label: 'Traffic',
+        data: [{ total: String(trafficScore), date: dayjs.utc().format('YYYY-MM-DD') }],
+        percentageChange: 0,
+      });
+    }
+
+    const { impressions, trafficScore: extractedTrafficScore, rawMetrics } =
+      extractMetrics('x', loadAnalytics);
+    if (impressions > 0 || extractedTrafficScore !== null) {
+      this._postRepository
+        .batchUpdatePostAnalytics([
+          {
+            id: post.id,
+            impressions: impressions > 0 ? impressions : undefined,
+            trafficScore: extractedTrafficScore ?? undefined,
+            analytics: rawMetrics,
+          },
+        ])
+        .catch((e) =>
+          console.error(`Post app-only analytics write-back error for ${post.id}:`, e)
+        );
+    }
+
+    return loadAnalytics;
   }
 
   async getStatistics(orgId: string, id: string) {

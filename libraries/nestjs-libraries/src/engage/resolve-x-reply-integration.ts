@@ -2,19 +2,22 @@
  * Resolve which connected X Integration should own a manual engage reply so that
  * PostsService.checkPostAnalytics has a token to read the reply tweet's metrics.
  *
- * Why it matters: X impressions are owner-only (non_public_metrics), so the only
- * way to read them is the AUTHOR'S own token. When an engage reply is recorded
- * without an integration, its Post.integrationId is null, checkPostAnalytics
- * early-returns, and the sent-list shows blank numbers forever. We therefore
- * always try to attach a usable X integration, preferring the actual author:
+ * Why it matters: checkPostAnalytics needs SOME usable token to read the reply
+ * tweet's metrics; when an engage reply is recorded without an integration its
+ * Post.integrationId is null and the sent-list shows blank numbers. We therefore
+ * try to attach a live X integration, preferring the actual author:
  *
  *   1. handle    — Integration.profile (the @username) equals the handle parsed
- *                  from the reply URL → the author's token → FULL metrics
- *                  (impressions + bookmarks + public metrics).
+ *                  from the reply URL → the author's own token.
  *   2. bound     — an engage-enabled X reply account configured for the org.
- *   3. fallback  — any live X integration in the org. Public metrics only
- *                  (likes/retweets/replies/quotes + trafficScore); impressions
- *                  will usually read 0 because the token isn't the author's.
+ *   3. fallback  — any live X integration in the org.
+ *
+ * NOTE: impression_count and bookmark_count are part of X `public_metrics` and
+ * are returned by ANY valid token (the author's, another account's, or even an
+ * app-only bearer) — they are NOT owner-only. So the resolution order is about
+ * having a *live* token at all, not about which token can see which metric: all
+ * three tiers read the full metric set. If the attached token is dead, the
+ * engage sync falls back to an app-only read (PostsService.checkPostAnalyticsAppOnly).
  *
  * The pure functions here are shared by EngageRepository (request path) and the
  * backfill script (scripts/backfill-engage-x-integration.ts) so the resolution
