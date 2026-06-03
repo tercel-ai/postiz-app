@@ -220,6 +220,42 @@ export class RefreshIntegrationService {
     }
 
     if (!refresh || !refresh.accessToken) {
+      // BENIGN CONCURRENT-REFRESH RACE GUARD.
+      // On rotating-refresh-token providers (notably X/Twitter) the refresh
+      // token is SINGLE-USE. When two refreshes run concurrently for the same
+      // integration, the winner consumes + rotates it and saves a fresh token;
+      // the loser then calls the refresh endpoint with the now-stale token and
+      // gets `invalid_grant` — which `isTransientRefreshError` (correctly, in
+      // isolation) classifies as permanent. Without this guard the loser would
+      // flag a perfectly healthy account `refreshNeeded=true` and disconnect it,
+      // even though posting keeps working off the winner's freshly-saved token.
+      //
+      // Before doing the destructive side-effects, re-read the integration: if a
+      // concurrent refresh already advanced `tokenExpiration` (and the account is
+      // not flagged), treat this as a benign race — skip flagging/disconnect and
+      // let the winner's token stand. A genuine revoke (real invalid_grant) does
+      // NOT advance the expiry, so it still falls through to the flag path.
+      let benignRace = false;
+      try {
+        const fresh = await this._integrationService.getByIdForAdmin(integration.id);
+        const prevExp = integration.tokenExpiration
+          ? new Date(integration.tokenExpiration).getTime()
+          : 0;
+        const freshExp = fresh?.tokenExpiration
+          ? new Date(fresh.tokenExpiration).getTime()
+          : 0;
+        benignRace =
+          !!fresh && !fresh.refreshNeeded && freshExp > prevExp && freshExp > Date.now();
+      } catch {
+        // Re-read failed → fall back to the conservative permanent-failure path.
+      }
+      if (benignRace) {
+        console.warn(
+          `[refreshProcess] concurrent-refresh race for integration=${integration.id} provider=${integration.providerIdentifier}: another refresh already rotated the token (tokenExpiration advanced) — skipping refreshNeeded/disconnect.`
+        );
+        return false;
+      }
+
       // The three side effects below MUST all run on a permanent refresh
       // failure, but each can fail independently (DB write timeout,
       // notification service down, etc.). Previously these were chained

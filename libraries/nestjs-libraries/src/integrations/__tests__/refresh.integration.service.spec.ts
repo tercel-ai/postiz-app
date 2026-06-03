@@ -95,6 +95,9 @@ function buildService(overrides: {
   const disconnectChannel = vi.fn().mockResolvedValue(undefined);
   const createOrUpdateIntegration = vi.fn().mockResolvedValue(undefined);
   const setBetweenRefreshSteps = vi.fn().mockResolvedValue(undefined);
+  // Default: re-read finds no concurrent winner, so the benign-race guard is
+  // inert and permanent failures still flag refreshNeeded as before.
+  const getByIdForAdmin = vi.fn().mockResolvedValue(undefined);
 
   const socialProvider: any = {
     refreshToken: overrides.providerRefresh,
@@ -114,6 +117,7 @@ function buildService(overrides: {
     disconnectChannel,
     createOrUpdateIntegration,
     setBetweenRefreshSteps,
+    getByIdForAdmin,
   };
 
   const temporalService: any = {
@@ -134,6 +138,7 @@ function buildService(overrides: {
       disconnectChannel,
       createOrUpdateIntegration,
       setBetweenRefreshSteps,
+      getByIdForAdmin,
     },
   };
 }
@@ -231,6 +236,54 @@ describe('RefreshIntegrationService.refresh', () => {
     expect(mocks.refreshNeeded).toHaveBeenCalledOnce();
     expect(mocks.disconnectChannel).toHaveBeenCalledOnce();
     expect(mocks.informAboutRefreshError).toHaveBeenCalledOnce();
+  });
+
+  it('does NOT flag refreshNeeded on invalid_grant when a concurrent refresh already rotated the token (benign race)', async () => {
+    // X refresh tokens are single-use: the LOSER of a concurrent refresh gets
+    // invalid_grant even though the WINNER already saved a fresh token. The
+    // re-read shows tokenExpiration advanced into the future + refreshNeeded
+    // cleared, so we must NOT flag/disconnect a healthy account.
+    const { svc, mocks } = buildService({
+      providerRefresh: vi
+        .fn()
+        .mockRejectedValue({ response: { status: 400, data: { error: 'invalid_grant' } } }),
+    });
+    mocks.getByIdForAdmin.mockResolvedValue({
+      id: 'int-1',
+      refreshNeeded: false,
+      tokenExpiration: new Date(Date.now() + 3_600_000),
+    });
+
+    const result = await svc.refresh(
+      makeIntegration({ tokenExpiration: new Date(Date.now() - 1_000) })
+    );
+    expect(result).toBe(false);
+
+    expect(mocks.refreshNeeded).not.toHaveBeenCalled();
+    expect(mocks.disconnectChannel).not.toHaveBeenCalled();
+    expect(mocks.informAboutRefreshError).not.toHaveBeenCalled();
+  });
+
+  it('STILL flags refreshNeeded on invalid_grant when the re-read shows no concurrent winner (real revoke)', async () => {
+    // Genuine revoke: tokenExpiration did NOT advance, so the guard stays inert.
+    const { svc, mocks } = buildService({
+      providerRefresh: vi
+        .fn()
+        .mockRejectedValue({ response: { status: 400, data: { error: 'invalid_grant' } } }),
+    });
+    mocks.getByIdForAdmin.mockResolvedValue({
+      id: 'int-1',
+      refreshNeeded: false,
+      tokenExpiration: new Date(Date.now() - 1_000), // unchanged / still expired
+    });
+
+    const result = await svc.refresh(
+      makeIntegration({ tokenExpiration: new Date(Date.now() - 1_000) })
+    );
+    expect(result).toBe(false);
+
+    expect(mocks.refreshNeeded).toHaveBeenCalledOnce();
+    expect(mocks.disconnectChannel).toHaveBeenCalledOnce();
   });
 
   it('marks refreshNeeded + disconnects when provider returns falsy (no token)', async () => {
