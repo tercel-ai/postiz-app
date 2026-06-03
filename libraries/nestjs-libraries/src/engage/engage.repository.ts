@@ -16,6 +16,10 @@ import {
   ENGAGE_FILTER_ALL,
 } from '@gitroom/nestjs-libraries/engage/dtos/engage.dto';
 import { KEYWORD_GLOBAL_SCAN_KEY } from '@gitroom/nestjs-libraries/engage/scan/platform-scan-adapter';
+import {
+  pickXReplyIntegration,
+  XReplyResolution,
+} from '@gitroom/nestjs-libraries/engage/resolve-x-reply-integration';
 import dayjs from 'dayjs';
 import isoWeek from 'dayjs/plugin/isoWeek';
 import utc from 'dayjs/plugin/utc';
@@ -1724,9 +1728,31 @@ export class EngageRepository {
     }
     const releaseId =
       platform === 'x' ? url.match(/\/status\/(\d+)/)?.[1] : undefined;
+
+    // If this X reply was recorded without a connected account, the freshly
+    // supplied URL lets us resolve the author's integration now (handle match)
+    // so metrics sync can finally read it. Only fill when currently null —
+    // never override an account the user explicitly chose at confirm time.
+    let integrationId: string | undefined;
+    if (platform === 'x') {
+      const post = await this._post.model.post.findUnique({
+        where: { id: reply.postId },
+        select: { integrationId: true },
+      });
+      if (!post?.integrationId) {
+        integrationId =
+          (await this.resolveXReplyIntegrationId(organizationId, url))
+            ?.integrationId ?? undefined;
+      }
+    }
+
     return this._post.model.post.update({
       where: { id: reply.postId },
-      data: { releaseURL: url, ...(releaseId ? { releaseId } : {}) },
+      data: {
+        releaseURL: url,
+        ...(releaseId ? { releaseId } : {}),
+        ...(integrationId ? { integrationId } : {}),
+      },
     });
   }
 
@@ -1772,6 +1798,102 @@ export class EngageRepository {
         opportunity: { select: { platform: true, externalPostId: true, authorUsername: true } },
       },
     });
+  }
+
+  /**
+   * Fill Post.integrationId for X engage replies that have none, resolving a
+   * usable X account per reply (author-handle → engage reply account → any live
+   * account; see resolveXReplyIntegrationId). Without an integration,
+   * checkPostAnalytics can't read X metrics. Reddit needs no integration and is
+   * left untouched. Returns what was (or, in dryRun, would be) filled.
+   */
+  async backfillXReplyIntegrations(organizationId: string, dryRun: boolean) {
+    const pending = await this._sentReply.model.engageSentReply.findMany({
+      where: {
+        organizationId,
+        opportunity: { platform: 'x' },
+        post: { source: 'engage', integrationId: null },
+      },
+      select: { post: { select: { id: true, releaseURL: true } } },
+    });
+
+    let filled = 0;
+    let unresolved = 0;
+    const items: Array<{ postId: string; integrationId: string; matchedBy: string }> = [];
+
+    for (const r of pending) {
+      if (!r.post) continue;
+      const pick = await this.resolveXReplyIntegrationId(organizationId, r.post.releaseURL);
+      if (!pick) {
+        unresolved++;
+        continue;
+      }
+      if (!dryRun) {
+        await this._post.model.post.update({
+          where: { id: r.post.id },
+          data: { integrationId: pick.integrationId },
+        });
+      }
+      filled++;
+      items.push({ postId: r.post.id, integrationId: pick.integrationId, matchedBy: pick.matchedBy });
+    }
+
+    return { found: pending.length, filled, unresolved, items };
+  }
+
+  /**
+   * Per-platform snapshot of PUBLISHED engage replies: how many carry metrics,
+   * how many are still missing, X replies still lacking an integration, and the
+   * impression/traffic totals. Powers the /admin/sync-metrics before/after
+   * summary. Engage replies are few, so one findMany + in-memory fold is fine.
+   */
+  async getEngageMetricsStats(organizationId: string, platform?: string) {
+    const rows = await this._sentReply.model.engageSentReply.findMany({
+      where: {
+        organizationId,
+        ...(platform ? { opportunity: { platform } } : {}),
+        post: { source: 'engage', state: 'PUBLISHED' },
+      },
+      select: {
+        post: { select: { impressions: true, trafficScore: true, integrationId: true } },
+        opportunity: { select: { platform: true } },
+      },
+    });
+
+    const stats: Record<
+      string,
+      {
+        published: number;
+        withMetrics: number;
+        missing: number;
+        missingIntegration: number;
+        totalImpressions: number;
+        totalTrafficScore: number;
+      }
+    > = {};
+
+    for (const r of rows) {
+      const p = r.opportunity.platform;
+      const s = (stats[p] ??= {
+        published: 0,
+        withMetrics: 0,
+        missing: 0,
+        missingIntegration: 0,
+        totalImpressions: 0,
+        totalTrafficScore: 0,
+      });
+      s.published++;
+      if (r.post?.impressions != null) {
+        s.withMetrics++;
+        s.totalImpressions += r.post.impressions;
+        s.totalTrafficScore += r.post.trafficScore ?? 0;
+      } else {
+        s.missing++;
+      }
+      if (p === 'x' && !r.post?.integrationId) s.missingIntegration++;
+    }
+    for (const s of Object.values(stats)) s.totalTrafficScore = Math.round(s.totalTrafficScore);
+    return stats;
   }
 
   async updatePostMetrics(
@@ -1827,6 +1949,42 @@ export class EngageRepository {
     });
   }
 
+  /**
+   * Pick the connected X integration that should own a manual engage reply, so
+   * checkPostAnalytics has a token to read its metrics. Order: author-handle
+   * match → engage-enabled reply account → any live X account. See
+   * resolve-x-reply-integration.ts for the rationale (impressions are
+   * owner-only). Returns null when the org has no usable X integration.
+   */
+  async resolveXReplyIntegrationId(
+    organizationId: string,
+    replyUrl?: string | null
+  ): Promise<XReplyResolution | null> {
+    const liveX = await this._integration.model.integration.findMany({
+      where: {
+        organizationId,
+        providerIdentifier: 'x',
+        deletedAt: null,
+        disabled: false,
+      },
+      select: {
+        id: true,
+        profile: true,
+        engageXReplyAccount: { select: { engageEnabled: true } },
+      },
+      orderBy: { updatedAt: 'desc' },
+    });
+
+    return pickXReplyIntegration(
+      liveX.map((i) => ({
+        id: i.id,
+        profile: i.profile,
+        engageEnabled: i.engageXReplyAccount?.engageEnabled ?? false,
+      })),
+      replyUrl
+    );
+  }
+
   async createManualXPost(data: {
     organizationId: string;
     content: string;
@@ -1840,11 +1998,12 @@ export class EngageRepository {
     // is still recorded but the per-account metrics sync is skipped — only the
     // app-only bearer can later read public metrics (likes/replies/retweets/
     // quotes), and the author-replied check still runs.
-    if (data.integrationId) {
+    let integrationId = data.integrationId;
+    if (integrationId) {
       // Validate the integration belongs to this org and is an X social account.
       const integration = await this._integration.model.integration.findFirst({
         where: {
-          id: data.integrationId,
+          id: integrationId,
           organizationId: data.organizationId,
           providerIdentifier: 'x',
           deletedAt: null,
@@ -1854,6 +2013,13 @@ export class EngageRepository {
       if (!integration) {
         throw new NotFoundException('X integration not found for this organization');
       }
+    } else {
+      // No account picked: resolve one so metrics aren't stuck null forever.
+      // Prefer the tweet author's own integration (by handle) so impressions are
+      // readable; else the org's engage reply account; else any live X account.
+      integrationId =
+        (await this.resolveXReplyIntegrationId(data.organizationId, data.replyUrl))
+          ?.integrationId ?? undefined;
     }
 
     // Parse the snowflake tweet id from the pasted reply URL into releaseId.
@@ -1878,9 +2044,9 @@ export class EngageRepository {
         ...(data.replyUrl ? { releaseURL: data.replyUrl } : {}),
         ...(releaseId ? { releaseId } : {}),
         // Scalar FK (not a `connect` relation) to stay in Prisma's unchecked
-        // create form alongside organizationId; ownership is validated above.
-        // Omitted when no integration is supplied (column is nullable).
-        ...(data.integrationId ? { integrationId: data.integrationId } : {}),
+        // create form alongside organizationId; ownership is validated/resolved
+        // above. Omitted only when the org has no usable X account at all.
+        ...(integrationId ? { integrationId } : {}),
       },
     });
   }

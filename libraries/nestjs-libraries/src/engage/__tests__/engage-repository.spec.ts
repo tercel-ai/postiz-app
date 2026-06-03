@@ -628,14 +628,22 @@ describe('EngageRepository — two-table reads', () => {
   describe('createManualXPost', () => {
     // Manual X reply posts parse a releaseId from the tweet URL (otherwise
     // checkPostAnalytics early-returns and impressions/likes/etc. stay null).
-    // The integration is OPTIONAL: when supplied, its OAuth token drives the
-    // per-account metrics sync; when omitted, the post is recorded without an
-    // integration and that sync is skipped.
+    // The integration is auto-resolved: when the caller supplies one it is
+    // validated; when omitted we resolve a usable X account (author-handle
+    // match → engage reply account → any live X account) so the per-account
+    // metrics sync can run. Only when the org has no X account at all does the
+    // post land without an integration.
     function buildXRepo() {
       const integrationFindFirst = vi.fn();
+      const integrationFindMany = vi.fn().mockResolvedValue([]);
       const postCreate = vi.fn();
       const integration = {
-        model: { integration: { findFirst: integrationFindFirst } },
+        model: {
+          integration: {
+            findFirst: integrationFindFirst,
+            findMany: integrationFindMany,
+          },
+        },
       } as any;
       const post = { model: { post: { create: postCreate } } } as any;
       const repo = new EngageRepository(
@@ -645,7 +653,7 @@ describe('EngageRepository — two-table reads', () => {
         post,         // _post
         {} as any
       );
-      return { repo, integrationFindFirst, postCreate };
+      return { repo, integrationFindFirst, integrationFindMany, postCreate };
     }
 
     it('validates the integration belongs to the org and is an X account', async () => {
@@ -695,8 +703,13 @@ describe('EngageRepository — two-table reads', () => {
       expect(data.source).toBe('engage');
     });
 
-    it('skips integration validation and omits integrationId when none is supplied', async () => {
-      const { repo, integrationFindFirst, postCreate } = buildXRepo();
+    it('resolves the author-handle integration when none is supplied', async () => {
+      const { repo, integrationFindFirst, integrationFindMany, postCreate } = buildXRepo();
+      // Org has two live X accounts; the reply tweet's author handle matches one.
+      integrationFindMany.mockResolvedValue([
+        { id: 'other', profile: 'someoneelse', engageXReplyAccount: null },
+        { id: 'author', profile: 'zhngyq310334', engageXReplyAccount: null },
+      ]);
       postCreate.mockResolvedValue({ id: 'post1' });
 
       await repo.createManualXPost({
@@ -704,10 +717,28 @@ describe('EngageRepository — two-table reads', () => {
         content: 'reply',
         date: new Date(0),
         replyUrl: 'https://x.com/zhngyq310334/status/2061267353544146949',
-        // no integrationId — manual reply posted without a connected X account
+        // no integrationId — resolver picks the author's account by handle
       });
 
-      expect(integrationFindFirst).not.toHaveBeenCalled();
+      expect(integrationFindFirst).not.toHaveBeenCalled(); // no explicit id to validate
+      const data = postCreate.mock.calls[0][0].data;
+      expect(data.releaseId).toBe('2061267353544146949');
+      expect(data.integrationId).toBe('author'); // owner token → impressions readable
+      expect(JSON.parse(data.settings).__type).toBe('x');
+    });
+
+    it('omits integrationId only when the org has no usable X account', async () => {
+      const { repo, integrationFindMany, postCreate } = buildXRepo();
+      integrationFindMany.mockResolvedValue([]); // no connected X accounts
+      postCreate.mockResolvedValue({ id: 'post1' });
+
+      await repo.createManualXPost({
+        organizationId: 'org1',
+        content: 'reply',
+        date: new Date(0),
+        replyUrl: 'https://x.com/zhngyq310334/status/2061267353544146949',
+      });
+
       const data = postCreate.mock.calls[0][0].data;
       expect(data.releaseId).toBe('2061267353544146949'); // still parsed
       expect('integrationId' in data).toBe(false); // FK omitted, column stays null
@@ -728,6 +759,136 @@ describe('EngageRepository — two-table reads', () => {
       });
 
       expect(postCreate.mock.calls[0][0].data.releaseId).toBeUndefined();
+    });
+  });
+
+  describe('getEngageMetricsStats', () => {
+    // Folds PUBLISHED engage replies into a per-platform snapshot: published /
+    // withMetrics / missing / missingIntegration (X) / Σimpressions / Σtraffic.
+    function buildStatsRepo() {
+      const sentFindMany = vi.fn();
+      const sentReply = { model: { engageSentReply: { findMany: sentFindMany } } } as any;
+      const repo = new EngageRepository(
+        {} as any, {} as any, {} as any, {} as any, {} as any,
+        {} as any, {} as any,
+        sentReply,    // _sentReply
+        {} as any,    // _integration
+        {} as any,    // _post
+        {} as any, {} as any
+      );
+      return { repo, sentFindMany };
+    }
+
+    it('counts metrics presence and totals per platform', async () => {
+      const { repo, sentFindMany } = buildStatsRepo();
+      sentFindMany.mockResolvedValue([
+        { post: { impressions: 100, trafficScore: 2.4, integrationId: 'i1' }, opportunity: { platform: 'x' } },
+        { post: { impressions: null, trafficScore: null, integrationId: null }, opportunity: { platform: 'x' } },
+        { post: { impressions: null, trafficScore: null, integrationId: 'i2' }, opportunity: { platform: 'x' } },
+        { post: { impressions: 40, trafficScore: 7.6, integrationId: null }, opportunity: { platform: 'reddit' } },
+      ]);
+
+      const stats = await repo.getEngageMetricsStats('org1');
+
+      expect(stats.x).toEqual({
+        published: 3,
+        withMetrics: 1,
+        missing: 2,
+        missingIntegration: 1, // only the published+null-integration X reply
+        totalImpressions: 100,
+        totalTrafficScore: 2, // Math.round(2.4)
+      });
+      expect(stats.reddit).toMatchObject({
+        published: 1,
+        withMetrics: 1,
+        missing: 0,
+        totalImpressions: 40,
+        totalTrafficScore: 8, // Math.round(7.6)
+      });
+    });
+
+    it('scopes to the org and the given platform, filtering to PUBLISHED engage posts', async () => {
+      const { repo, sentFindMany } = buildStatsRepo();
+      sentFindMany.mockResolvedValue([]);
+
+      await repo.getEngageMetricsStats('org1', 'x');
+
+      expect(sentFindMany.mock.calls[0][0].where).toMatchObject({
+        organizationId: 'org1',
+        opportunity: { platform: 'x' },
+        post: { source: 'engage', state: 'PUBLISHED' },
+      });
+    });
+  });
+
+  describe('backfillXReplyIntegrations', () => {
+    // Resolves and fills Post.integrationId for X replies that have none, reusing
+    // resolveXReplyIntegrationId (handle → bound → fallback).
+    function buildBackfillRepo() {
+      const sentFindMany = vi.fn();
+      const integrationFindMany = vi.fn().mockResolvedValue([]);
+      const postUpdate = vi.fn().mockResolvedValue({});
+      const sentReply = { model: { engageSentReply: { findMany: sentFindMany } } } as any;
+      const integration = { model: { integration: { findMany: integrationFindMany } } } as any;
+      const post = { model: { post: { update: postUpdate } } } as any;
+      const repo = new EngageRepository(
+        {} as any, {} as any, {} as any, {} as any, {} as any,
+        {} as any, {} as any,
+        sentReply,    // _sentReply
+        integration,  // _integration
+        post,         // _post
+        {} as any, {} as any
+      );
+      return { repo, sentFindMany, integrationFindMany, postUpdate };
+    }
+
+    it('resolves by author handle and writes integrationId when executing', async () => {
+      const { repo, sentFindMany, integrationFindMany, postUpdate } = buildBackfillRepo();
+      sentFindMany.mockResolvedValue([
+        { post: { id: 'post1', releaseURL: 'https://x.com/zhngyq310334/status/1' } },
+      ]);
+      integrationFindMany.mockResolvedValue([
+        { id: 'author', profile: 'zhngyq310334', engageXReplyAccount: null },
+      ]);
+
+      const res = await repo.backfillXReplyIntegrations('org1', false);
+
+      expect(postUpdate).toHaveBeenCalledWith({
+        where: { id: 'post1' },
+        data: { integrationId: 'author' },
+      });
+      expect(res).toMatchObject({ found: 1, filled: 1, unresolved: 0 });
+      expect(res.items[0]).toEqual({ postId: 'post1', integrationId: 'author', matchedBy: 'handle' });
+    });
+
+    it('does not write in dry-run, but still reports what would be filled', async () => {
+      const { repo, sentFindMany, integrationFindMany, postUpdate } = buildBackfillRepo();
+      sentFindMany.mockResolvedValue([
+        { post: { id: 'post1', releaseURL: 'https://x.com/nobody/status/1' } },
+      ]);
+      integrationFindMany.mockResolvedValue([
+        { id: 'fallback', profile: 'someoneelse', engageXReplyAccount: null },
+      ]);
+
+      const res = await repo.backfillXReplyIntegrations('org1', true);
+
+      expect(postUpdate).not.toHaveBeenCalled();
+      expect(res).toMatchObject({ found: 1, filled: 1, unresolved: 0 });
+      expect(res.items[0].matchedBy).toBe('fallback');
+    });
+
+    it('counts replies as unresolved when the org has no usable X account', async () => {
+      const { repo, sentFindMany, integrationFindMany, postUpdate } = buildBackfillRepo();
+      sentFindMany.mockResolvedValue([
+        { post: { id: 'post1', releaseURL: 'https://x.com/u/status/1' } },
+      ]);
+      integrationFindMany.mockResolvedValue([]); // no X integrations at all
+
+      const res = await repo.backfillXReplyIntegrations('org1', false);
+
+      expect(postUpdate).not.toHaveBeenCalled();
+      expect(res).toMatchObject({ found: 1, filled: 0, unresolved: 1 });
+      expect(res.items).toHaveLength(0);
     });
   });
 

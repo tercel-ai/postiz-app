@@ -589,4 +589,26 @@ export class EngageController {
       dryRun: dryRun === 'true',
     });
   }
+
+  // Org-admin only: one-shot "manual wake-up" — backfill missing X integrations,
+  // resync metrics for replies with null impressions, and return before/after
+  // per-platform stats. Same external-API call budget as /resync-metrics, so it
+  // shares the 5/hour throttle. backfill defaults on; pass backfill=false to skip
+  // and dry_run=true for a read-only preview.
+  @ApiOperation({ summary: 'Manually wake up engage reply-metrics collection and return before/after stats.' })
+  @CheckPolicies([AuthorizationActions.Create, Sections.ADMIN])
+  @Throttle({ default: { limit: 5, ttl: 3_600_000 } })
+  @Post('/admin/sync-metrics')
+  syncEngageMetrics(
+    @GetOrgFromRequest() org: Organization,
+    @Query('platform') platform?: string,
+    @Query('dry_run') dryRun?: string,
+    @Query('backfill') backfill?: string,
+  ) {
+    return this._engageService.syncEngageMetricsWithStats(org, {
+      platform,
+      dryRun: dryRun === 'true',
+      backfill: backfill !== 'false',
+    });
+  }
 }

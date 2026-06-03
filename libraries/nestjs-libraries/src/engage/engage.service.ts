@@ -1055,6 +1055,35 @@ export class EngageService implements OnApplicationBootstrap {
     return { found: pending.length, updated, errors };
   }
 
+  /**
+   * Admin "manual wake-up": backfill missing X integrations, then resync metrics
+   * for every PUBLISHED engage reply whose impressions are still null, returning
+   * a before/after per-platform stats summary. This is the request-time twin of
+   * scripts/engage-sync-metrics.ts. The resync uses the exact shared logic of the
+   * 24h Temporal sync, so the only new behaviour over /admin/resync-metrics is
+   * the integration backfill (so X replies can actually be read) plus the stats.
+   */
+  async syncEngageMetricsWithStats(
+    org: Organization,
+    opts: { platform?: string; dryRun?: boolean; backfill?: boolean } = {}
+  ) {
+    const { platform, dryRun = false, backfill = true } = opts;
+
+    const before = await this._engageRepository.getEngageMetricsStats(org.id, platform);
+
+    // Backfill only matters for X — Reddit metrics never need an integration.
+    const backfillResult =
+      backfill && platform !== 'reddit'
+        ? await this._engageRepository.backfillXReplyIntegrations(org.id, dryRun)
+        : { found: 0, filled: 0, unresolved: 0, items: [] as Array<unknown> };
+
+    const resync = await this.resyncEngageMetrics({ orgId: org.id, platform, dryRun });
+
+    const after = await this._engageRepository.getEngageMetricsStats(org.id, platform);
+
+    return { dryRun, backfill: backfillResult, resync, stats: { before, after } };
+  }
+
   /** Sinks for the shared engage-metrics-sync module (see engage-metrics-sync.ts). */
   private _metricsSyncDeps(): MetricsSyncDeps {
     return {
