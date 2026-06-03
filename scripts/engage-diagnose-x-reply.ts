@@ -30,6 +30,7 @@ process.env.TZ = 'UTC';
 import { NestFactory } from '@nestjs/core';
 import { Module } from '@nestjs/common';
 import { PrismaClient } from '@prisma/client';
+import { TwitterApi } from 'twitter-api-v2';
 import { DatabaseModule } from '@gitroom/nestjs-libraries/database/prisma/database.module';
 import { getTemporalModule } from '@gitroom/nestjs-libraries/temporal/temporal.module';
 import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.service';
@@ -181,40 +182,51 @@ async function main() {
       console.log(`THREW → ${e?.code || ''} ${e?.message || e}`);
     }
 
-    // Read-only probe: what would an app-only-bearer PUBLIC fetch return? This is
-    // the proposed fallback for a dead user token. like/retweet/reply/quote are
-    // public (returned for any tweet); impression_count/bookmark_count are
-    // owner-only and will be absent/0 even here. Proves whether the fallback
-    // yields usable metrics before we wire it into checkPostAnalytics.
-    const bearer = process.env.X_BEARER_TOKEN;
-    if (!bearer) {
-      console.log('public probe: skipped (no X_BEARER_TOKEN in env)');
-    } else if (!post.releaseId) {
+    // Read-only probe: what would an APP-ONLY PUBLIC fetch return (no user token
+    // at all)? This is the proposed last-resort fallback. Prefer a static
+    // X_BEARER_TOKEN; otherwise mint an app-only client at runtime from
+    // X_API_KEY/X_API_SECRET via appLogin() (client_credentials). like/retweet/
+    // reply/quote are public (any tweet); impression_count/bookmark_count are
+    // owner-only and will be absent even here — proving an app-level path can
+    // never recover those. Also reveals whether this app's API TIER allows
+    // app-only reads at all (Free tier returns 403/429).
+    const staticBearer = process.env.X_BEARER_TOKEN;
+    const apiKey = process.env.X_API_KEY;
+    const apiSecret = process.env.X_API_SECRET;
+    if (!post.releaseId) {
       console.log('public probe: skipped (no releaseId)');
+    } else if (!staticBearer && !(apiKey && apiSecret)) {
+      console.log('public probe: skipped (no X_BEARER_TOKEN and no X_API_KEY/X_API_SECRET)');
     } else {
-      process.stdout.write('public probe: app-only bearer GET /2/tweets/:id … ');
       try {
-        const res = await fetch(
-          `https://api.twitter.com/2/tweets/${post.releaseId}?tweet.fields=public_metrics`,
-          { headers: { Authorization: `Bearer ${bearer}` } }
-        );
-        const body = await res.text();
-        if (!res.ok) {
-          console.log(`HTTP ${res.status} → ${body.slice(0, 180)}`);
+        let appClient: TwitterApi;
+        let how: string;
+        if (staticBearer) {
+          appClient = new TwitterApi(staticBearer);
+          how = 'X_BEARER_TOKEN';
         } else {
-          const json = JSON.parse(body);
-          const pm = json?.data?.public_metrics;
-          if (!pm) {
-            console.log(`no public_metrics (errors=${JSON.stringify(json?.errors ?? null)})`);
-          } else {
-            console.log('OK');
-            for (const k of Object.keys(pm)) {
-              console.log(`              ${k.padEnd(18)} = ${pm[k]}`);
-            }
+          appClient = await new TwitterApi({ appKey: apiKey!, appSecret: apiSecret! }).appLogin();
+          how = 'appLogin(X_API_KEY/SECRET)';
+        }
+        process.stdout.write(`public probe: app-only via ${how} → GET /2/tweets/:id … `);
+        const tweet = await appClient.v2.singleTweet(post.releaseId, {
+          'tweet.fields': ['public_metrics'],
+        });
+        const pm = tweet?.data?.public_metrics as unknown as
+          | Record<string, number>
+          | undefined;
+        if (!pm) {
+          console.log(`no public_metrics (errors=${JSON.stringify(tweet?.errors ?? null)})`);
+        } else {
+          console.log('OK — owner-only (impression/bookmark) will be absent below');
+          for (const k of Object.keys(pm)) {
+            console.log(`              ${k.padEnd(18)} = ${pm[k]}`);
           }
         }
       } catch (e: any) {
-        console.log(`THREW → ${e?.message || e}`);
+        console.log(
+          `public probe THREW → code=${e?.code ?? ''} ${e?.data?.detail || e?.message || e}`
+        );
       }
     }
   }
