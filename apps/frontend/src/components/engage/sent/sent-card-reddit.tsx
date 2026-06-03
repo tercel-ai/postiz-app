@@ -12,6 +12,13 @@ interface SentReply {
     publishDate: string;
     impressions?: number;
     analytics?: Array<{ label: string; data: Array<{ total: string }> }>;
+    // Flat, normalized metrics from the API (preferred over parsing `analytics`).
+    metrics?: {
+      upvotes?: number;
+      comments?: number;
+      estReach?: number;
+      trafficScore?: number;
+    };
   };
   opportunity: {
     platform: string;
@@ -42,11 +49,13 @@ export const SentCardReddit: FC<SentCardRedditProps> = ({
   sentReplyId,
 }) => {
   const { post, opportunity } = reply;
+  const m = post.metrics;
 
-  const score = getMetric(post.analytics, /score/i);
-  const comments = getMetric(post.analytics, /comment/i);
-  // estimated impressions = (score + comments) * 20
-  const estImpressions = post.impressions ?? (score + comments) * 20;
+  // Prefer the flat `metrics` object; fall back to parsing `analytics`.
+  const score = m?.upvotes ?? getMetric(post.analytics, /score/i);
+  const comments = m?.comments ?? getMetric(post.analytics, /comment/i);
+  // estimated reach = (upvotes + comments) * 20, or the synced impressions.
+  const estImpressions = m?.estReach ?? post.impressions ?? (score + comments) * 20;
 
   const noUrl = !post.releaseURL;
 

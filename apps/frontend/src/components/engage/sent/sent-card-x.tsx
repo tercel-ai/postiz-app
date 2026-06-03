@@ -14,6 +14,16 @@ interface SentReply {
     impressions?: number;
     trafficScore?: number;
     analytics?: Array<{ label: string; data: Array<{ total: string }> }>;
+    // Flat, normalized metrics from the API (preferred over parsing `analytics`).
+    metrics?: {
+      impressions?: number;
+      likes?: number;
+      retweets?: number;
+      replies?: number;
+      quotes?: number;
+      bookmarks?: number;
+      trafficScore?: number;
+    };
   };
   opportunity: {
     platform: string;
@@ -48,13 +58,16 @@ function stateBadge(state: string) {
 export const SentCardX: FC<SentCardXProps> = ({ reply, sentReplyId, onSubmitUrl }) => {
   const { post, opportunity } = reply;
   const analytics = post.analytics;
+  const m = post.metrics;
   const noUrl = !post.releaseURL;
 
-  const impressions = post.impressions ?? getMetric(analytics, /impression|views/i);
-  const likes = getMetric(analytics, /like|reaction/i);
-  const retweets = getMetric(analytics, /retweet|repost/i);
-  const replies = getMetric(analytics, /reply|comment/i);
-  const bookmarks = getMetric(analytics, /bookmark|save/i);
+  // Prefer the flat `metrics` object; fall back to parsing `analytics` so the
+  // card still works against an older API response.
+  const impressions = m?.impressions ?? post.impressions ?? getMetric(analytics, /impression|views/i);
+  const likes = m?.likes ?? getMetric(analytics, /like|reaction/i);
+  const retweets = m?.retweets ?? getMetric(analytics, /retweet|repost/i);
+  const replies = m?.replies ?? getMetric(analytics, /reply|comment/i);
+  const bookmarks = m?.bookmarks ?? getMetric(analytics, /bookmark|save/i);
 
   return (
     <div className="bg-[#1a2035] rounded-lg p-4 border-l-4 border-l-white">
