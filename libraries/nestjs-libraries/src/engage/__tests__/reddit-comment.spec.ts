@@ -32,6 +32,9 @@ describe('checkRedditCommentAccessible', () => {
     expect(r).toEqual({ status: 'exists' });
     // It queried /api/info for the trailing comment id.
     expect(redditPublicGet.mock.calls[0][0]).toContain('id=t1_def456');
+    expect(redditPublicGet.mock.calls[0][2]).toMatchObject({
+      proxy: null,
+    });
   });
 
   it('accepts Reddit share URLs with query parameters', async () => {
@@ -59,22 +62,33 @@ describe('checkRedditCommentAccessible', () => {
     expect(redditPublicGet).not.toHaveBeenCalled();
   });
 
-  it('returns "unverifiable" on a non-2xx (e.g. WAF 403)', async () => {
+  it('returns "exists" on non-404 4xx responses after parsing a comment id', async () => {
     redditPublicGet.mockResolvedValue(publicResponse(false, 403, ''));
     const r = await checkRedditCommentAccessible(VALID_URL);
-    expect(r).toEqual({ status: 'unverifiable', reason: 'HTTP 403' });
+    expect(r).toEqual({ status: 'exists' });
   });
 
-  it('returns "unverifiable" when the fetch throws (network/timeout)', async () => {
+  it('returns "exists" on proxy auth 407 after parsing a comment id', async () => {
+    redditPublicGet.mockResolvedValue(publicResponse(false, 407, ''));
+    const r = await checkRedditCommentAccessible(VALID_URL);
+    expect(r).toEqual({ status: 'exists' });
+  });
+
+  it('returns "not_found" on HTTP 404', async () => {
+    redditPublicGet.mockResolvedValue(publicResponse(false, 404, ''));
+    const r = await checkRedditCommentAccessible(VALID_URL);
+    expect(r).toEqual({ status: 'not_found' });
+  });
+
+  it('returns "exists" when the fetch throws after parsing a comment id', async () => {
     redditPublicGet.mockRejectedValue(new Error('connect ETIMEDOUT'));
     const r = await checkRedditCommentAccessible(VALID_URL);
-    expect(r.status).toBe('unverifiable');
-    expect((r as any).reason).toContain('ETIMEDOUT');
+    expect(r).toEqual({ status: 'exists' });
   });
 
-  it('returns "unverifiable" on an unparseable body', async () => {
+  it('returns "exists" on an unparseable non-404 response body', async () => {
     redditPublicGet.mockResolvedValue(publicResponse(true, 200, '<html>blocked</html>'));
     const r = await checkRedditCommentAccessible(VALID_URL);
-    expect(r).toEqual({ status: 'unverifiable', reason: 'unparseable response' });
+    expect(r).toEqual({ status: 'exists' });
   });
 });

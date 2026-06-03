@@ -12,21 +12,22 @@ export type RedditCommentCheck =
   | { status: 'unverifiable'; reason: string };
 
 /**
- * Confirm a Reddit comment permalink points to a real, reachable comment by
- * asking Reddit's /api/info for its fullname (t1_<id>). Used to reject invalid
- * backfilled reply URLs before they are persisted.
+ * Confirm a Reddit comment permalink is acceptable by parsing its comment id
+ * and, when possible, asking Reddit's /api/info for its fullname (t1_<id>).
+ * Reddit/proxy/WAF responses can be noisy, so only HTTP 404 is treated as a
+ * hard network-level rejection once the permalink has a parseable comment id.
  *
  * Returns:
- *   - `exists`        — /api/info returned the comment.
+ *   - `exists`        — /api/info returned the comment, or the check did not
+ *                       receive an explicit HTTP 404 after parsing a comment id.
  *   - `not_found`     — id couldn't be parsed, or /api/info returned no thing
  *                       (the comment is deleted/never existed).
- *   - `unverifiable`  — the check itself couldn't complete (network error,
- *                       Reddit WAF 403, timeout, unparseable body). Callers in
- *                       strict mode treat this as a rejection.
+ *   - `unverifiable`  — currently unused for Reddit URL backfill; retained for
+ *                       API compatibility with the X URL checker.
  *
- * Mirrors the metrics-sync fetch path: authenticated oauth.reddit.com when an
- * app token is available, otherwise the public endpoint via redditPublicGet
- * (loid cookie + tiered proxy to clear the anti-bot WAF).
+ * The public path intentionally bypasses configured proxies. Backfilling a
+ * manual Reddit reply URL should not fail because REDDIT_PROXY/HTTPS_PROXY is
+ * missing, blocked, or returning 407.
  */
 export async function checkRedditCommentAccessible(
   url: string,
@@ -53,22 +54,25 @@ export async function checkRedditCommentAccessible(
         headers: redditAuthHeaders(token),
         signal: AbortSignal.timeout(10_000),
       });
-      if (!r.ok) return { status: 'unverifiable', reason: `HTTP ${r.status}` };
+      if (r.status === 404) return { status: 'not_found' };
+      if (!r.ok) return { status: 'exists' };
       body = await r.text();
     } else {
-      const r = await redditPublicGet(infoUrl, {}, { log });
-      if (!r.ok) return { status: 'unverifiable', reason: `HTTP ${r.status}` };
+      const r = await redditPublicGet(infoUrl, {}, { log, proxy: null });
+      if (r.status === 404) return { status: 'not_found' };
+      if (!r.ok) return { status: 'exists' };
       body = await r.text();
     }
   } catch (err) {
-    return { status: 'unverifiable', reason: (err as Error).message };
+    log(`[redditComment] URL check failed after parsing comment id: ${(err as Error).message}`);
+    return { status: 'exists' };
   }
 
   let json: { data?: { children?: Array<{ data?: { id?: string } }> } };
   try {
     json = JSON.parse(body);
   } catch {
-    return { status: 'unverifiable', reason: 'unparseable response' };
+    return { status: 'exists' };
   }
 
   // /api/info returns the thing in `data.children` when it exists, or an empty

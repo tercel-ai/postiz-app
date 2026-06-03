@@ -91,6 +91,17 @@ describe('redditPublicGet — tiered proxy strategy', () => {
     expect(direct.calls).toBe(1);
   });
 
+  it('uses the proxy first by default when a proxy is configured', async () => {
+    const proxy = new FakeDispatcher(() => ({ status: 200, body: 'proxy-ok' }));
+    const direct = new FakeDispatcher(() => ({ status: 200, body: 'direct-ok' }));
+    const res = await redditPublicGet('https://www.reddit.com/x.json', {}, deps(proxy, direct));
+    expect(res.status).toBe(200);
+    expect(res.viaDirect).toBe(false);
+    expect(await res.text()).toBe('proxy-ok');
+    expect(proxy.calls).toBe(1);
+    expect(direct.calls).toBe(0);
+  });
+
   it('passes through a non-block error status (e.g. 404) without rotating or falling back', async () => {
     const proxy = new FakeDispatcher(() => ({ status: 404, body: 'not found' }));
     const direct = new FakeDispatcher(() => ({ status: 200, body: 'direct' }));
