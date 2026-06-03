@@ -33,6 +33,8 @@ import {
   UpdateTrackedAccountDto,
   UpdateScheduledReplyDto,
 } from '@gitroom/nestjs-libraries/engage/dtos/engage.dto';
+import { parseXTweetId } from '@gitroom/nestjs-libraries/engage/x-tweet';
+import { parseRedditCommentId } from '@gitroom/nestjs-libraries/engage/reddit-url';
 import { getRedditToken, redditAuthHeaders } from '@gitroom/nestjs-libraries/engage/reddit-auth';
 import { redditPublicGet } from '@gitroom/nestjs-libraries/engage/reddit-loid';
 import {
@@ -348,10 +350,32 @@ export class EngageService implements OnApplicationBootstrap {
           'Invalid Reddit comment URL — must be a reddit.com link.'
         );
       }
+      // Strict: the URL must contain a parseable comment id. Host-only
+      // validation let truncated links (e.g. .../comments/d) and post-only links
+      // through, which saved a releaseURL whose comment id can't be parsed —
+      // syncRedditMetrics then skips forever and the reply silently never gets
+      // metrics. Reject here so the id is guaranteed present before persisting.
+      if (!parseRedditCommentId(url)) {
+        throw new BadRequestException(
+          'Invalid Reddit comment URL — must link to a specific comment, e.g. ' +
+            'https://www.reddit.com/r/<sub>/comments/<postId>/comment/<commentId>/ ' +
+            '(share params like ?utm_source are fine).'
+        );
+      }
     } else if (platform === 'x') {
       if (!isXUrl(url)) {
         throw new BadRequestException(
           'Invalid X reply URL — must be an x.com or twitter.com link.'
+        );
+      }
+      // Strict: the URL must contain a parseable /status/<id>. Host-only
+      // validation let id-less links through, which saved releaseURL with a
+      // null releaseId — checkPostAnalytics then early-returns and metrics never
+      // sync. Reject here so the id is guaranteed present before persisting.
+      if (!parseXTweetId(url)) {
+        throw new BadRequestException(
+          'Invalid X reply URL — must link to a specific tweet, e.g. ' +
+            'https://x.com/<user>/status/<id> (tracking params like ?s=20 are fine).'
         );
       }
     } else {

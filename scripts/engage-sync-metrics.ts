@@ -41,6 +41,7 @@ import {
   classifyReplyMetric,
   ReplyMetricStatus,
 } from '@gitroom/nestjs-libraries/engage/engage-metrics-stats';
+import { parseXTweetId } from '@gitroom/nestjs-libraries/engage/x-tweet';
 
 @Module({ imports: [DatabaseModule, getTemporalModule(false)] })
 class ScriptModule {}
@@ -240,6 +241,39 @@ async function main(): Promise<void> {
   });
   const engageService = app.get(EngageService, { strict: false });
   const engageRepository = app.get(EngageRepository, { strict: false });
+
+  // Step 0 — backfill X releaseId from releaseURL. Rows saved before the URL was
+  // parsed (or via a path that skipped it) have releaseURL set but releaseId
+  // null; checkPostAnalytics early-returns on null releaseId, so metrics never
+  // sync. Re-parse the id (tracking params like ?s=20 are handled). [X only]
+  if (args.backfill && args.platform !== 'reddit') {
+    const pendingId = await prisma.engageSentReply.findMany({
+      where: {
+        ...(args.orgId ? { organizationId: args.orgId } : {}),
+        opportunity: { platform: 'x' },
+        post: { source: 'engage', releaseId: null, releaseURL: { not: null } },
+      },
+      select: { post: { select: { id: true, releaseURL: true } } },
+    });
+    let idFilled = 0, idUnparseable = 0;
+    for (const r of pendingId) {
+      if (!r.post) continue;
+      const releaseId = parseXTweetId(r.post.releaseURL);
+      if (!releaseId) { idUnparseable++; continue; }
+      if (!args.dryRun) {
+        await prisma.post.update({
+          where: { id: r.post.id },
+          data: { releaseId },
+        });
+      }
+      idFilled++;
+      console.log(`  releaseId [${r.post.id}] ${r.post.releaseURL} -> ${releaseId}`);
+    }
+    console.log(
+      `ReleaseId backfill: ${args.dryRun ? 'would fill' : 'filled'} ${idFilled}, ` +
+      `unparseable (URL has no /status/<id>) ${idUnparseable}`
+    );
+  }
 
   // Step 1 — backfill X integrationId (resolve author/reply-account/any). Only
   // matters for X; Reddit metrics never need an integration.

@@ -1,6 +1,38 @@
-// The reply tweet id is the numeric snowflake in a /status/<id> permalink. The
-// caller has already format-validated the URL, so this only pulls the id.
-const TWEET_ID_RE = /\/status\/(\d+)/;
+// The reply tweet id is the numeric snowflake in a /status/<id> permalink.
+const TWEET_ID_RE = /\/status(?:es)?\/(\d+)/;
+const WEB_STATUS_RE = /\/i\/web\/status\/(\d+)/;
+
+/**
+ * Extract the numeric tweet id from any X/Twitter status URL, the single source
+ * of truth for "what id do we store / query metrics with". Robust to the formats
+ * users actually paste:
+ *   - tracking params / fragments:  .../status/123?s=20&t=ab  ·  .../status/123#x
+ *   - host variants:                x.com · twitter.com · mobile.twitter.com
+ *   - web intent permalinks:        x.com/i/web/status/123
+ *   - missing scheme / whitespace:  "  x.com/u/status/123 "
+ * Returns null when no id is present (e.g. a profile URL) — callers MUST treat
+ * null as "not a valid reply URL", never persist it as a tweet with null id.
+ */
+export function parseXTweetId(url: string | null | undefined): string | null {
+  if (!url) return null;
+  const trimmed = url.trim();
+  // Prefer URL parsing so query/hash are stripped structurally; retry with an
+  // assumed scheme for inputs like "x.com/u/status/123"; finally fall back to a
+  // raw regex over the whole string (the regex stops at `?`, so params are safe).
+  let path = trimmed;
+  try {
+    path = new URL(trimmed).pathname;
+  } catch {
+    try {
+      path = new URL(`https://${trimmed}`).pathname;
+    } catch {
+      path = trimmed;
+    }
+  }
+  return (
+    path.match(WEB_STATUS_RE)?.[1] ?? path.match(TWEET_ID_RE)?.[1] ?? null
+  );
+}
 
 export type XTweetCheck =
   | { status: 'exists' }
@@ -24,7 +56,7 @@ export async function checkXTweetAccessible(
   url: string,
   _log: (m: string) => void = () => {}
 ): Promise<XTweetCheck> {
-  const tweetId = url.match(TWEET_ID_RE)?.[1];
+  const tweetId = parseXTweetId(url);
   if (!tweetId) return { status: 'not_found' };
 
   const bearer = process.env.X_BEARER_TOKEN;

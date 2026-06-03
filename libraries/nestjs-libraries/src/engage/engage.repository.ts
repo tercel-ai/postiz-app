@@ -21,6 +21,7 @@ import {
   XReplyResolution,
 } from '@gitroom/nestjs-libraries/engage/resolve-x-reply-integration';
 import { classifyReplyMetric } from '@gitroom/nestjs-libraries/engage/engage-metrics-stats';
+import { parseXTweetId } from '@gitroom/nestjs-libraries/engage/x-tweet';
 import dayjs from 'dayjs';
 import isoWeek from 'dayjs/plugin/isoWeek';
 import utc from 'dayjs/plugin/utc';
@@ -1728,7 +1729,7 @@ export class EngageRepository {
       );
     }
     const releaseId =
-      platform === 'x' ? url.match(/\/status\/(\d+)/)?.[1] : undefined;
+      platform === 'x' ? parseXTweetId(url) ?? undefined : undefined;
 
     // If this X reply was recorded without a connected account, the freshly
     // supplied URL lets us resolve the author's integration now (handle match)
@@ -2055,7 +2056,7 @@ export class EngageRepository {
     // the metrics sync can never fetch impressions/likes/retweets/etc. When the
     // reply URL is omitted ("I'll add the link later"), both are left null and
     // backfilled later via updateReplyUrl.
-    const releaseId = data.replyUrl?.match(/\/status\/(\d+)/)?.[1];
+    const releaseId = parseXTweetId(data.replyUrl);
 
     const { randomUUID } = await import('crypto');
     return this._post.model.post.create({

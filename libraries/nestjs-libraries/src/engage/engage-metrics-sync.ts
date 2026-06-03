@@ -1,5 +1,6 @@
 import { getRedditToken, redditAuthHeaders } from '@gitroom/nestjs-libraries/engage/reddit-auth';
 import { redditPublicGet } from '@gitroom/nestjs-libraries/engage/reddit-loid';
+import { parseRedditCommentId } from '@gitroom/nestjs-libraries/engage/reddit-url';
 
 /**
  * Shared engage metrics-sync logic, used by BOTH the request-time path
@@ -33,10 +34,6 @@ export interface MetricsSyncDeps {
  */
 export type MetricsSyncOutcome = 'written' | 'empty' | 'unreachable' | 'skipped';
 
-function extractRedditCommentId(url: string): string | null {
-  return url.match(/\/comments\/[^/]+\/[^/]+\/([a-z0-9]+)\/?/)?.[1] ?? null;
-}
-
 export async function syncRedditMetrics(
   postId: string,
   releaseURL: string,
@@ -44,7 +41,7 @@ export async function syncRedditMetrics(
   authorUsername: string,
   deps: MetricsSyncDeps
 ): Promise<MetricsSyncOutcome> {
-  const commentId = extractRedditCommentId(releaseURL);
+  const commentId = parseRedditCommentId(releaseURL);
   if (!commentId) return 'skipped';
 
   let wrote = false;

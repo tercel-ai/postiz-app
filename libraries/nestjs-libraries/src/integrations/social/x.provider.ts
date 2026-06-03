@@ -1246,11 +1246,20 @@ export class XProvider extends SocialAbstract implements SocialProvider {
     postId: string,
     date: number
   ): Promise<AnalyticsData[]> {
+    // Three distinct reasons postAnalytics returns an empty result — logged so
+    // callers (e.g. engage-sync-metrics) can tell "empty" apart from a silent
+    // disable/rate-limit short-circuit without reading code.
     if (process.env.DISABLE_X_ANALYTICS) {
+      console.log(`[x] postAnalytics ${postId} empty: DISABLE_X_ANALYTICS is set`);
       return [];
     }
 
     if (await this._isRateLimited()) {
+      const resetStr = await ioRedis.get(XProvider.RATE_LIMIT_KEY);
+      console.warn(
+        `[x] postAnalytics ${postId} empty: rate-limited short-circuit ` +
+          `(reset epoch ${resetStr ?? 'unknown'})`
+      );
       return [];
     }
 
@@ -1265,6 +1274,11 @@ export class XProvider extends SocialAbstract implements SocialProvider {
       });
 
       if (!tweet?.data?.public_metrics) {
+        console.warn(
+          `[x] postAnalytics ${postId} empty: API returned no public_metrics ` +
+            `(deleted / restricted visibility / tier block). ` +
+            `errors=${JSON.stringify(tweet?.errors ?? null)}`
+        );
         return [];
       }
 
@@ -1338,7 +1352,10 @@ export class XProvider extends SocialAbstract implements SocialProvider {
         this._safeFireSuspendedNotification(integrationId);
         return [];
       }
-      console.log('Error fetching X post analytics:', err);
+      console.warn(
+        `[x] postAnalytics ${postId} empty: unexpected error —`,
+        err?.message || err
+      );
     }
 
     return [];
