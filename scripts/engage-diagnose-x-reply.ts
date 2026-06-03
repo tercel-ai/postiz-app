@@ -180,6 +180,43 @@ async function main() {
     } catch (e: any) {
       console.log(`THREW → ${e?.code || ''} ${e?.message || e}`);
     }
+
+    // Read-only probe: what would an app-only-bearer PUBLIC fetch return? This is
+    // the proposed fallback for a dead user token. like/retweet/reply/quote are
+    // public (returned for any tweet); impression_count/bookmark_count are
+    // owner-only and will be absent/0 even here. Proves whether the fallback
+    // yields usable metrics before we wire it into checkPostAnalytics.
+    const bearer = process.env.X_BEARER_TOKEN;
+    if (!bearer) {
+      console.log('public probe: skipped (no X_BEARER_TOKEN in env)');
+    } else if (!post.releaseId) {
+      console.log('public probe: skipped (no releaseId)');
+    } else {
+      process.stdout.write('public probe: app-only bearer GET /2/tweets/:id … ');
+      try {
+        const res = await fetch(
+          `https://api.twitter.com/2/tweets/${post.releaseId}?tweet.fields=public_metrics`,
+          { headers: { Authorization: `Bearer ${bearer}` } }
+        );
+        const body = await res.text();
+        if (!res.ok) {
+          console.log(`HTTP ${res.status} → ${body.slice(0, 180)}`);
+        } else {
+          const json = JSON.parse(body);
+          const pm = json?.data?.public_metrics;
+          if (!pm) {
+            console.log(`no public_metrics (errors=${JSON.stringify(json?.errors ?? null)})`);
+          } else {
+            console.log('OK');
+            for (const k of Object.keys(pm)) {
+              console.log(`              ${k.padEnd(18)} = ${pm[k]}`);
+            }
+          }
+        }
+      } catch (e: any) {
+        console.log(`THREW → ${e?.message || e}`);
+      }
+    }
   }
 
   await app.close();
