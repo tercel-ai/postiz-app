@@ -1100,44 +1100,14 @@ export class EngageService implements OnApplicationBootstrap {
       updatePostMetrics: (postId, impressions, analytics, trafficScore) =>
         this._engageRepository.updatePostMetrics(postId, impressions, analytics, trafficScore),
       markAuthorReplied: (sentReplyId) => this._engageRepository.markAuthorReplied(sentReplyId),
+      // Shared engage X analytics read with the own-token → app-only fallback
+      // chain (PostsService is the single source of truth; the scheduled Temporal
+      // activity uses the same method so both behave identically).
       checkPostAnalytics: (orgId, postId, when) =>
-        this._checkEngageXAnalytics(orgId, postId, when),
+        this._postsService.checkEngageXAnalyticsWithFallback(orgId, postId, when),
       warn: (m) => this.logger.warn(m),
       log: (m) => this.logger.log(m),
     };
-  }
-
-  /**
-   * Engage X analytics read with a token fallback chain:
-   *   1. the reply's own integration token (author when handle-matched) — full
-   *      metrics; but skipped entirely when that integration is dead
-   *      (refreshNeeded / disabled / deleted) so we don't burn a doomed refresh.
-   *   2. app-only bearer (X_API_KEY/X_API_SECRET) — full metrics incl.
-   *      impression + bookmark (these are public, not owner-only), zero user
-   *      token, works even when the org has no live X account.
-   *
-   * impression/bookmark are real on BOTH paths; the only thing a non-author token
-   * loses is genuinely owner-restricted fields (which engage does not use).
-   */
-  private async _checkEngageXAnalytics(
-    orgId: string,
-    postId: string,
-    when: number
-  ): Promise<unknown> {
-    const ctx = await this._engageRepository.getPostTokenContext(postId);
-    const intg = ctx?.integration;
-    const userTokenViable =
-      !!intg && !intg.refreshNeeded && !intg.disabled && !intg.deletedAt;
-
-    if (userTokenViable) {
-      const primary = await this._postsService.checkPostAnalytics(orgId, postId, when);
-      if (Array.isArray(primary) && primary.length > 0) {
-        return primary;
-      }
-    }
-
-    // Fallback: app-only read (no user token required).
-    return this._postsService.checkPostAnalyticsAppOnly(orgId, postId, when);
   }
 
   // Called by engage.controller after creating an EngageSentReply to start 24h metrics sync.

@@ -352,6 +352,43 @@ export class PostsService {
     return loadAnalytics;
   }
 
+  /**
+   * Engage X analytics read with a token fallback chain. Shared by BOTH the
+   * manual sync (EngageService.resyncEngageMetrics) and the scheduled Temporal
+   * activity (EngageDataTicksActivity.syncEngageMetrics) so they behave
+   * identically:
+   *   1. the reply's own integration token — but only when that integration is
+   *      healthy (not refreshNeeded/disabled/deleted), so a dead token doesn't
+   *      burn a doomed refresh;
+   *   2. app-only fallback (checkPostAnalyticsAppOnly) — full metrics incl.
+   *      impression + bookmark, zero user token, works even with no live account.
+   *
+   * Engage-only: regular posts must keep using checkPostAnalytics directly (a
+   * normal post's integration IS its author — a dead token there means reconnect).
+   */
+  async checkEngageXAnalyticsWithFallback(
+    orgId: string,
+    postId: string,
+    date: number
+  ): Promise<AnalyticsData[]> {
+    const post = await this._postRepository.getPostById(postId, orgId);
+    if (!post || !post.releaseId) {
+      return [];
+    }
+    const intg = post.integration;
+    const userTokenViable =
+      !!intg && !intg.refreshNeeded && !intg.disabled && !intg.deletedAt;
+
+    if (userTokenViable) {
+      const primary = await this.checkPostAnalytics(orgId, postId, date);
+      if (Array.isArray(primary) && primary.length > 0) {
+        return primary;
+      }
+    }
+
+    return this.checkPostAnalyticsAppOnly(orgId, postId, date);
+  }
+
   async getStatistics(orgId: string, id: string) {
     const getPost = await this.getPostsRecursively(id, true, orgId, true);
     const content = getPost.map((p) => p.content);

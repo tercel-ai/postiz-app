@@ -1941,28 +1941,6 @@ export class EngageRepository {
     });
   }
 
-  /**
-   * Token health of a reply Post's attached integration, used by the engage
-   * metrics sync to decide whether the user-token analytics path is worth
-   * attempting before falling back to the app-only read. A null integration or
-   * one flagged refreshNeeded/disabled/deleted means the user token is not
-   * viable — skip straight to the app-only fallback.
-   */
-  async getPostTokenContext(postId: string) {
-    return this._post.model.post.findUnique({
-      where: { id: postId },
-      select: {
-        integration: {
-          select: {
-            refreshNeeded: true,
-            disabled: true,
-            deletedAt: true,
-          },
-        },
-      },
-    });
-  }
-
   async setOpportunityStatus(
     organizationId: string,
     opportunityId: string,

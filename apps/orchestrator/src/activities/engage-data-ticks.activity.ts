@@ -178,8 +178,10 @@ export class EngageDataTicksActivity {
       updatePostMetrics: (postId, impressions, analytics, trafficScore) =>
         this._engageRepository.updatePostMetrics(postId, impressions, analytics, trafficScore),
       markAuthorReplied: (sentReplyId) => this._engageRepository.markAuthorReplied(sentReplyId),
+      // Own-token → app-only fallback, identical to the manual sync path so the
+      // scheduled 24h sync also recovers dead-token X replies.
       checkPostAnalytics: (orgId, postId, when) =>
-        this._postsService.checkPostAnalytics(orgId, postId, when),
+        this._postsService.checkEngageXAnalyticsWithFallback(orgId, postId, when),
       warn: (m) => this.logger.warn(m),
       log: (m) => this.logger.log(m),
     };
