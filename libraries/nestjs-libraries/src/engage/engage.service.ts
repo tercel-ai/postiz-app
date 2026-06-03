@@ -41,11 +41,17 @@ import {
   type MetricsSyncDeps,
 } from '@gitroom/nestjs-libraries/engage/engage-metrics-sync';
 import { checkRedditCommentAccessible } from '@gitroom/nestjs-libraries/engage/reddit-comment';
+import { checkXTweetAccessible } from '@gitroom/nestjs-libraries/engage/x-tweet';
 
 // Anchored at $ to reject trailing query strings / fragments that would otherwise
 // pollute the stored releaseURL (e.g. `?utm_source=...`). Matches spec §12.4.
 const REDDIT_COMMENT_URL_RE =
   /^https?:\/\/(www\.)?reddit\.com\/r\/[^/]+\/comments\/[^/]+\/[^/]+\/[a-z0-9]+\/?$/i;
+
+// An X reply permalink: x.com / twitter.com /<handle>/status/<snowflake>. A
+// trailing query (e.g. ?s=20) is tolerated — syncXMetrics parses the id out.
+const X_REPLY_URL_RE =
+  /^https?:\/\/(www\.|mobile\.)?(x|twitter)\.com\/[^/]+\/status\/\d+/i;
 
 @Injectable()
 export class EngageService implements OnApplicationBootstrap {
@@ -316,26 +322,54 @@ export class EngageService implements OnApplicationBootstrap {
     sentReplyId: string,
     url: string
   ) {
-    if (!REDDIT_COMMENT_URL_RE.test(url)) {
+    // Validate the URL against the reply's own platform, then confirm it is real
+    // and reachable before persisting, so an invalid or mistyped link never
+    // becomes the stored releaseURL (which metrics sync and the UI both rely
+    // on). Strict: an unverifiable result is also rejected.
+    const platform = await this._engageRepository.getSentReplyPlatform(org.id, sentReplyId);
+    if (platform === 'reddit') {
+      if (!REDDIT_COMMENT_URL_RE.test(url)) {
+        throw new BadRequestException(
+          'Invalid Reddit comment URL. Expected: https://www.reddit.com/r/.../comments/.../comment/...'
+        );
+      }
+      this._assertReplyUrlVerified(
+        await checkRedditCommentAccessible(url, (m) => this.logger.warn(m)),
+        'Reddit comment'
+      );
+    } else if (platform === 'x') {
+      if (!X_REPLY_URL_RE.test(url)) {
+        throw new BadRequestException(
+          'Invalid X reply URL. Expected: https://x.com/.../status/...'
+        );
+      }
+      this._assertReplyUrlVerified(
+        await checkXTweetAccessible(url, (m) => this.logger.warn(m)),
+        'X reply'
+      );
+    } else {
       throw new BadRequestException(
-        'Invalid Reddit comment URL. Expected: https://www.reddit.com/r/.../comments/.../comment/...'
+        'Reply-URL backfill is only valid for X or Reddit manual replies'
       );
     }
-    // Confirm the comment is real and reachable before persisting, so an invalid
-    // or mistyped link never becomes the stored releaseURL (which metrics sync
-    // and the UI both rely on). Strict: an unverifiable result is also rejected.
-    const check = await checkRedditCommentAccessible(url, (m) => this.logger.warn(m));
+    return this._engageRepository.updateReplyUrl(org.id, sentReplyId, url);
+  }
+
+  /** Strict gate shared by the Reddit/X backfill paths: reject not_found AND unverifiable. */
+  private _assertReplyUrlVerified(
+    check: { status: 'exists' | 'not_found' | 'unverifiable'; reason?: string },
+    label: string
+  ): void {
     if (check.status === 'not_found') {
       throw new BadRequestException(
-        'That Reddit comment could not be found — check the URL points to a real, public comment.'
+        `That ${label} could not be found — check the URL points to a real, public ${label.toLowerCase()}.`
       );
     }
     if (check.status === 'unverifiable') {
       throw new BadRequestException(
-        `Could not verify the Reddit comment right now (${check.reason}). Please try again shortly.`
+        `Could not verify the ${label} right now (${check.reason}). Please try again shortly.`
       );
     }
-    return this._engageRepository.updateReplyUrl(org.id, sentReplyId, url);
   }
 
   // ─── Private helpers ──────────────────────────────────────────────────────
@@ -852,23 +886,14 @@ export class EngageService implements OnApplicationBootstrap {
         'REPLIED'
       );
 
-    // X manual replies need the tweet URL (to derive releaseId and store the
-    // reply link). The posting integration is optional: when supplied, its
-    // OAuth token drives the per-account metrics sync (impressions/bookmarks);
-    // when omitted, the reply is still recorded and metrics sync is skipped.
-    // Validate up front and release the claim before doing any work, otherwise
-    // the opportunity is left stuck in REPLIED with no recorded reply.
-    if (opp.platform === 'x' && !body.replyUrl) {
-      await this._engageRepository.releaseOpportunityClaim(
-        org.id,
-        opportunityId,
-        priorStatus
-      );
-      throw new BadRequestException(
-        'replyUrl is required for X manual replies'
-      );
-    }
-
+    // The reply URL is optional for both platforms now ("I've posted it — I'll
+    // add the link later"). When omitted the reply is recorded with a null
+    // releaseURL and the opportunity still moves to REPLIED; the user backfills
+    // the link afterwards via PATCH /sent/:id/reply-url, which is when metrics
+    // tracking can begin (X needs the tweet id from the URL). The posting
+    // integration is also optional: when supplied, its OAuth token drives the
+    // per-account metrics sync; when omitted, only the app-only bearer can read
+    // public metrics later.
     let postId: string | undefined;
     try {
       const post =
@@ -877,7 +902,7 @@ export class EngageService implements OnApplicationBootstrap {
               organizationId: org.id,
               content: body.draftContent,
               date: new Date(),
-              replyUrl: body.replyUrl!,
+              replyUrl: body.replyUrl,
               integrationId: body.integrationId,
             })
           : await this._engageRepository.createManualRedditPost({

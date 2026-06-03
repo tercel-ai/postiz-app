@@ -25,6 +25,8 @@ interface SentReply {
 
 interface SentCardXProps {
   reply: SentReply;
+  sentReplyId: string;
+  onSubmitUrl?: (id: string) => void;
 }
 
 function getMetric(
@@ -43,9 +45,10 @@ function stateBadge(state: string) {
   return 'bg-gray-500/20 text-gray-400';
 }
 
-export const SentCardX: FC<SentCardXProps> = ({ reply }) => {
+export const SentCardX: FC<SentCardXProps> = ({ reply, sentReplyId, onSubmitUrl }) => {
   const { post, opportunity } = reply;
   const analytics = post.analytics;
+  const noUrl = !post.releaseURL;
 
   const impressions = post.impressions ?? getMetric(analytics, /impression|views/i);
   const likes = getMetric(analytics, /like|reaction/i);
@@ -65,6 +68,11 @@ export const SentCardX: FC<SentCardXProps> = ({ reply }) => {
         >
           {post.state}
         </span>
+        {noUrl && (
+          <span className="text-xs bg-yellow-500/20 text-yellow-400 px-1.5 py-0.5 rounded">
+            ⚠ 未提交回复链接
+          </span>
+        )}
         {reply.authorReplied && (
           <span className="text-xs bg-purple-500/20 text-purple-400 px-1.5 py-0.5 rounded">
             Author replied ✓
@@ -99,6 +107,15 @@ export const SentCardX: FC<SentCardXProps> = ({ reply }) => {
           </div>
         ))}
       </div>
+
+      {noUrl && onSubmitUrl && (
+        <button
+          onClick={() => onSubmitUrl(sentReplyId)}
+          className="text-xs text-blue-400 hover:text-blue-300 transition-colors mt-2 block"
+        >
+          + Submit reply URL
+        </button>
+      )}
 
       {(() => {
         const raw = post.releaseURL ?? '';

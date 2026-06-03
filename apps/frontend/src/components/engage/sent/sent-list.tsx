@@ -193,7 +193,11 @@ export function SentList() {
       </div>
 
       {/* URL submit modal */}
-      {urlSubmitId && (
+      {urlSubmitId && (() => {
+        // The modal copy adapts to the platform of the reply being backfilled.
+        const editing = replies.find((r) => r.id === urlSubmitId);
+        const isX = (editing?.opportunity.platform ?? 'reddit') === 'x';
+        return (
         <div
           className="fixed inset-0 bg-black/70 flex items-center justify-center z-50"
           onClick={closeModal}
@@ -201,17 +205,21 @@ export function SentList() {
           <div
             role="dialog"
             aria-modal="true"
-            aria-labelledby="reddit-url-modal-title"
+            aria-labelledby="reply-url-modal-title"
             className="bg-[#1a2035] rounded-xl p-6 w-[480px] shadow-2xl"
             onClick={(e) => e.stopPropagation()}
           >
-            <h3 id="reddit-url-modal-title" className="text-white font-semibold mb-4">
-              Submit Reddit Comment URL
+            <h3 id="reply-url-modal-title" className="text-white font-semibold mb-4">
+              {isX ? 'Submit X Reply URL' : 'Submit Reddit Comment URL'}
             </h3>
             <input
               type="url"
               className="w-full bg-[#0f1219] border border-[#2d3748] text-white rounded-lg px-3 py-2 text-sm mb-4"
-              placeholder="https://www.reddit.com/r/.../comments/.../comment/..."
+              placeholder={
+                isX
+                  ? 'https://x.com/.../status/...'
+                  : 'https://www.reddit.com/r/.../comments/.../comment/...'
+              }
               value={urlInput}
               onChange={(e) => setUrlInput(e.target.value)}
               onKeyDown={(e) => {
@@ -235,7 +243,8 @@ export function SentList() {
             </div>
           </div>
         </div>
-      )}
+        );
+      })()}
 
       {/* Reply list */}
       <div className="space-y-3">
@@ -244,18 +253,24 @@ export function SentList() {
             reply.opportunity.platform ??
             reply.post.integration?.providerIdentifier ??
             'x';
+          const onSubmitUrl = (id: string) => {
+            setUrlSubmitId(id);
+            setUrlInput('');
+          };
           return plt === 'reddit' ? (
             <SentCardReddit
               key={reply.id}
               reply={reply}
               sentReplyId={reply.id}
-              onSubmitUrl={(id) => {
-                setUrlSubmitId(id);
-                setUrlInput('');
-              }}
+              onSubmitUrl={onSubmitUrl}
             />
           ) : (
-            <SentCardX key={reply.id} reply={reply} />
+            <SentCardX
+              key={reply.id}
+              reply={reply}
+              sentReplyId={reply.id}
+              onSubmitUrl={onSubmitUrl}
+            />
           );
         })}
 

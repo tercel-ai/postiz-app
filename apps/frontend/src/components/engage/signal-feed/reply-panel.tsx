@@ -553,7 +553,7 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
                 ) : (
                   <div className="space-y-2">
                     <p className="text-xs text-gray-400">
-                      Paste your reply tweet URL to enable metrics tracking:
+                      Paste your X reply URL — aisee will track engagement automatically.
                     </p>
                     <input
                       type="url"
@@ -562,6 +562,9 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
                       className="w-full bg-[#1e2536] border border-[#2d3748] text-white rounded-lg px-3 py-2 text-sm"
                       placeholder="https://x.com/.../status/..."
                     />
+                    <p className="text-[11px] text-gray-500">
+                      Tracking will start once you submit the link above.
+                    </p>
                     <div className="flex gap-2">
                       <button
                         onClick={() => setXManualStep('draft')}
@@ -578,6 +581,15 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
                         {sending ? 'Saving...' : 'Save URL'}
                       </button>
                     </div>
+                    {/* Record the reply now (status → REPLIED) and backfill the
+                        link later from the Sent page. */}
+                    <button
+                      onClick={() => handleConfirmReply()}
+                      disabled={sending || !selectedAccountId}
+                      className="w-full py-2 text-xs text-gray-400 border border-[#2d3748] rounded-lg hover:text-white disabled:opacity-50 transition-colors"
+                    >
+                      I&apos;ve posted it — I&apos;ll add the link later
+                    </button>
                   </div>
                 )}
               </div>

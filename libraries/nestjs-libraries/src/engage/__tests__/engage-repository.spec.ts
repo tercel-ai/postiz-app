@@ -121,6 +121,32 @@ describe('EngageRepository — two-table reads', () => {
       expect(item).not.toHaveProperty('opportunity'); // flattened, not nested
     });
 
+    it('attaches replyLink + sentReplyId from the latest sent reply', async () => {
+      const { repo, stateFindMany, stateCount, sentFindMany } = buildRepo();
+      stateFindMany.mockResolvedValue([STATE_ROW]);
+      stateCount.mockResolvedValue(1);
+      sentFindMany.mockResolvedValue([
+        { id: 'reply-new', opportunityId: 'opp1', post: { releaseURL: 'https://x.com/a/status/1' } },
+      ]);
+
+      const item = (await repo.listOpportunities('org1', {} as any)).items[0] as any;
+      expect(item.sentReplyId).toBe('reply-new');
+      expect(item.replyLink).toBe('https://x.com/a/status/1');
+    });
+
+    it('reports replyLink null when the latest reply has no URL (pending backfill)', async () => {
+      const { repo, stateFindMany, stateCount, sentFindMany } = buildRepo();
+      stateFindMany.mockResolvedValue([STATE_ROW]);
+      stateCount.mockResolvedValue(1);
+      sentFindMany.mockResolvedValue([
+        { id: 'reply-pending', opportunityId: 'opp1', post: { releaseURL: null } },
+      ]);
+
+      const item = (await repo.listOpportunities('org1', {} as any)).items[0] as any;
+      expect(item.sentReplyId).toBe('reply-pending');
+      expect(item.replyLink).toBeNull();
+    });
+
     it('routes an opportunity-owned sort field through the nested relation', async () => {
       const { repo, stateFindMany, stateCount } = buildRepo();
       stateFindMany.mockResolvedValue([]);

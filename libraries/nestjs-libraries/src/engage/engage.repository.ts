@@ -718,7 +718,38 @@ export class EngageRepository {
       this._oppState.model.engageOpportunityState.count({ where }),
     ]);
 
-    return { items: rows.map((r) => this._merge(r)), total, page, limit };
+    // Attach the manual-reply link status so the feed can show "replied, link
+    // pending" and offer a backfill. One bounded query for the page's
+    // opportunities; the latest reply per opportunity wins (per-post tracking
+    // means an opportunity may have several replies). `replyLink` is the stored
+    // Post.releaseURL (null = not yet submitted); `sentReplyId` is what the
+    // backfill endpoint (PATCH /sent/:id/reply-url) needs.
+    const oppIds = rows.map((r) => r.opportunity.id);
+    const replies = oppIds.length
+      ? (await this._sentReply.model.engageSentReply.findMany({
+          where: { organizationId, opportunityId: { in: oppIds } },
+          orderBy: { createdAt: 'desc' },
+          select: { id: true, opportunityId: true, post: { select: { releaseURL: true } } },
+        })) ?? []
+      : [];
+    const latestByOpp = new Map<string, { id: string; replyLink: string | null }>();
+    for (const rep of replies) {
+      if (!latestByOpp.has(rep.opportunityId)) {
+        latestByOpp.set(rep.opportunityId, { id: rep.id, replyLink: rep.post?.releaseURL ?? null });
+      }
+    }
+
+    const items = rows.map((r) => {
+      const merged = this._merge(r);
+      const rep = latestByOpp.get(merged.id);
+      return {
+        ...merged,
+        sentReplyId: rep?.id ?? null,
+        replyLink: rep?.replyLink ?? null,
+      };
+    });
+
+    return { items, total, page, limit };
   }
 
   async dismissOpportunity(organizationId: string, id: string) {
@@ -1676,23 +1707,40 @@ export class EngageRepository {
   }
 
   async updateReplyUrl(organizationId: string, sentReplyId: string, url: string) {
-    // Joining the opportunity here so we can reject non-Reddit replies. Without
-    // this guard a caller can supply any sentReplyId in the org and overwrite an
-    // X reply's tweet URL with a Reddit comment URL, corrupting metrics linkage.
+    // Join the opportunity for its platform: backfill is only meaningful for the
+    // manual-reply platforms (X / Reddit), and for X we also derive releaseId
+    // from the tweet URL so metrics sync can read it. The caller (service) has
+    // already validated the URL matches this platform.
     const reply = await this._sentReply.model.engageSentReply.findFirst({
       where: { id: sentReplyId, organizationId },
       include: { opportunity: { select: { platform: true } } },
     });
     if (!reply) throw new NotFoundException('Sent reply not found');
-    if (reply.opportunity.platform !== 'reddit') {
+    const platform = reply.opportunity.platform;
+    if (platform !== 'reddit' && platform !== 'x') {
       throw new BadRequestException(
-        'Reply-URL submission is only valid for Reddit manual replies'
+        'Reply-URL backfill is only valid for X or Reddit manual replies'
       );
     }
+    const releaseId =
+      platform === 'x' ? url.match(/\/status\/(\d+)/)?.[1] : undefined;
     return this._post.model.post.update({
       where: { id: reply.postId },
-      data: { releaseURL: url },
+      data: { releaseURL: url, ...(releaseId ? { releaseId } : {}) },
     });
+  }
+
+  /** Platform of a sent reply, scoped to the org (for backfill validation). */
+  async getSentReplyPlatform(
+    organizationId: string,
+    sentReplyId: string
+  ): Promise<string> {
+    const reply = await this._sentReply.model.engageSentReply.findFirst({
+      where: { id: sentReplyId, organizationId },
+      select: { opportunity: { select: { platform: true } } },
+    });
+    if (!reply) throw new NotFoundException('Sent reply not found');
+    return reply.opportunity.platform;
   }
 
   async markAuthorReplied(sentReplyId: string) {
@@ -1783,7 +1831,7 @@ export class EngageRepository {
     organizationId: string;
     content: string;
     date: Date;
-    replyUrl: string;
+    replyUrl?: string;
     integrationId?: string;
   }) {
     // The integration is optional. When provided, its OAuth token lets
@@ -1810,8 +1858,10 @@ export class EngageRepository {
 
     // Parse the snowflake tweet id from the pasted reply URL into releaseId.
     // checkPostAnalytics early-returns when releaseId is null, so without this
-    // the metrics sync can never fetch impressions/likes/retweets/etc.
-    const releaseId = data.replyUrl.match(/\/status\/(\d+)/)?.[1];
+    // the metrics sync can never fetch impressions/likes/retweets/etc. When the
+    // reply URL is omitted ("I'll add the link later"), both are left null and
+    // backfilled later via updateReplyUrl.
+    const releaseId = data.replyUrl?.match(/\/status\/(\d+)/)?.[1];
 
     const { randomUUID } = await import('crypto');
     return this._post.model.post.create({
@@ -1825,7 +1875,7 @@ export class EngageRepository {
         settings: JSON.stringify({ __type: 'x' }),
         group: randomUUID(),
         delay: 0,
-        releaseURL: data.replyUrl,
+        ...(data.replyUrl ? { releaseURL: data.replyUrl } : {}),
         ...(releaseId ? { releaseId } : {}),
         // Scalar FK (not a `connect` relation) to stay in Prisma's unchecked
         // create form alongside organizationId; ownership is validated above.
