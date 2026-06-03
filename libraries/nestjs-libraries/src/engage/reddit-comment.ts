@@ -2,8 +2,8 @@ import { getRedditToken, redditAuthHeaders } from './reddit-auth';
 import { redditPublicGet } from './reddit-loid';
 
 // The comment id is the final path segment of a Reddit comment permalink
-// (…/comments/<postId>/<slug>/<commentId>). The caller has already format-
-// validated the URL, so this only needs to pull the trailing id.
+// (…/comments/<postId>/<slug>/<commentId>). Parse from pathname so standard
+// Reddit share URLs with utm query params still resolve to the comment id.
 const COMMENT_ID_RE = /\/comments\/[^/]+\/[^/]+\/([a-z0-9]+)\/?$/i;
 
 export type RedditCommentCheck =
@@ -32,7 +32,13 @@ export async function checkRedditCommentAccessible(
   url: string,
   log: (m: string) => void = () => {}
 ): Promise<RedditCommentCheck> {
-  const commentId = url.match(COMMENT_ID_RE)?.[1];
+  let pathname: string;
+  try {
+    pathname = new URL(url).pathname;
+  } catch {
+    pathname = url;
+  }
+  const commentId = pathname.match(COMMENT_ID_RE)?.[1];
   if (!commentId) return { status: 'not_found' };
 
   const token = await getRedditToken();

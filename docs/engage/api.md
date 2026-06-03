@@ -79,6 +79,17 @@ type IntentType =
   | 'data_share';   // Sharing data
 ```
 
+Canonical `intentTags` values:
+
+| Value | Meaning | Typical signal |
+|---|---|---|
+| `help_seeking` | Seeking help | Questions, "how", "help", "anyone" |
+| `rant` | Ranting or complaining | Frustration, "hate", "tired of", "annoying" |
+| `discussion` | Discussion | Open-ended statement, "thoughts?", "what do you think" |
+| `opinion` | Opinionated | "I think", "hot take", "unpopular opinion" |
+| `comparison` | Comparison | "vs", "compare", "better than", "alternative" |
+| `data_share` | Sharing data | Numbers, percentages, reports, studies |
+
 ---
 
 ## Data Models

@@ -34,6 +34,17 @@ describe('checkRedditCommentAccessible', () => {
     expect(redditPublicGet.mock.calls[0][0]).toContain('id=t1_def456');
   });
 
+  it('accepts Reddit share URLs with query parameters', async () => {
+    redditPublicGet.mockResolvedValue(
+      publicResponse(true, 200, JSON.stringify({ data: { children: [{ data: { id: 't1_opg17xr' } }] } }))
+    );
+    const r = await checkRedditCommentAccessible(
+      'https://www.reddit.com/r/SEO/comments/1skxs73/comment/opg17xr/?utm_source=share&utm_medium=web3x'
+    );
+    expect(r).toEqual({ status: 'exists' });
+    expect(redditPublicGet.mock.calls[0][0]).toContain('id=t1_opg17xr');
+  });
+
   it('returns "not_found" when the comment resolves to no thing (empty children)', async () => {
     redditPublicGet.mockResolvedValue(
       publicResponse(true, 200, JSON.stringify({ data: { children: [] } }))

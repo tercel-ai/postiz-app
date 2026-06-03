@@ -267,6 +267,8 @@ model EngageOpportunity {
   scoreRecency          Int       @default(0)
 
   // ── Intent classification ─────────────────────────────────────────────
+  // Canonical values:
+  // help_seeking | rant | discussion | opinion | comparison | data_share
   intentTags            String[]  // all matched intents (confidence > 0.4)
   primaryIntent         String    @default("discussion")
   intentScore           Float?    // classifier confidence for primaryIntent (0-1)
