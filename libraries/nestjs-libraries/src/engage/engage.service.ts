@@ -322,11 +322,18 @@ export class EngageService implements OnApplicationBootstrap {
     sentReplyId: string,
     url: string
   ) {
-    // Validate the URL against the reply's own platform, then confirm it is real
-    // and reachable before persisting, so an invalid or mistyped link never
-    // becomes the stored releaseURL (which metrics sync and the UI both rely
-    // on). Strict: an unverifiable result is also rejected.
+    // The backfill URL is mandatory here, so always validate format + reachability.
     const platform = await this._engageRepository.getSentReplyPlatform(org.id, sentReplyId);
+    await this._validateReplyUrl(platform, url);
+    return this._engageRepository.updateReplyUrl(org.id, sentReplyId, url);
+  }
+
+  /**
+   * Validate a reply URL against its platform: correct format AND a real,
+   * reachable target (strict — reject not_found AND unverifiable). Shared by the
+   * confirm path (only when a URL is supplied) and the backfill path (always).
+   */
+  private async _validateReplyUrl(platform: string, url: string): Promise<void> {
     if (platform === 'reddit') {
       if (!REDDIT_COMMENT_URL_RE.test(url)) {
         throw new BadRequestException(
@@ -352,7 +359,6 @@ export class EngageService implements OnApplicationBootstrap {
         'Reply-URL backfill is only valid for X or Reddit manual replies'
       );
     }
-    return this._engageRepository.updateReplyUrl(org.id, sentReplyId, url);
   }
 
   /** Strict gate shared by the Reddit/X backfill paths: reject not_found AND unverifiable. */
@@ -896,6 +902,13 @@ export class EngageService implements OnApplicationBootstrap {
     // public metrics later.
     let postId: string | undefined;
     try {
+      // If the user supplied the link now, hold it to the same standard as the
+      // backfill path: validate format + reachability. When omitted, skip the
+      // check entirely ("I'll add the link later"). A failure here is caught
+      // below and releases the claim, so the opportunity isn't stuck in REPLIED.
+      if (body.replyUrl) {
+        await this._validateReplyUrl(opp.platform, body.replyUrl);
+      }
       const post =
         opp.platform === 'x'
           ? await this._engageRepository.createManualXPost({
