@@ -41,3 +41,73 @@ export function classifyReplyMetric(r: ReplyMetricInput): ReplyMetricStatus {
   }
   return 'syncable';
 }
+
+/** One metric series as stored in Post.analytics (the app-wide AnalyticsData shape). */
+interface RawAnalyticsEntry {
+  label: string;
+  data?: Array<{ total?: string | number }>;
+}
+
+/**
+ * Flatten the verbose `Post.analytics` array into a stable, frontend-friendly
+ * metrics object so the UI can read `metrics.bookmarks` directly instead of
+ * regex-matching labels. Always returns the full per-platform key set (every
+ * field present, defaulting to 0) — "return everything, the frontend decides
+ * what to display". Keeps `Post.analytics` untouched for backward compatibility.
+ */
+export interface NormalizedReplyMetrics {
+  trafficScore: number;
+  // X
+  impressions?: number;
+  likes?: number;
+  retweets?: number;
+  replies?: number;
+  quotes?: number;
+  bookmarks?: number;
+  // Reddit
+  upvotes?: number;
+  comments?: number;
+  estReach?: number;
+}
+
+export function normalizeReplyMetrics(
+  platform: string,
+  analytics: unknown,
+  impressions: number | null | undefined,
+  trafficScore: number | null | undefined
+): NormalizedReplyMetrics {
+  const series: RawAnalyticsEntry[] = Array.isArray(analytics)
+    ? (analytics as RawAnalyticsEntry[])
+    : [];
+  const get = (pattern: RegExp): number => {
+    const entry = series.find((a) => typeof a?.label === 'string' && pattern.test(a.label));
+    return Number(entry?.data?.[0]?.total ?? 0);
+  };
+  const traffic = trafficScore ?? 0;
+
+  if (platform === 'x') {
+    return {
+      trafficScore: traffic,
+      impressions: impressions ?? get(/impression|views/i),
+      likes: get(/like|reaction/i),
+      retweets: get(/retweet|repost/i),
+      replies: get(/repl/i),
+      quotes: get(/quote/i),
+      bookmarks: get(/bookmark|save/i),
+    };
+  }
+
+  if (platform === 'reddit') {
+    const upvotes = get(/score|upvote/i);
+    const comments = get(/comment/i);
+    return {
+      trafficScore: traffic,
+      upvotes,
+      comments,
+      // estimated reach = (upvotes + comments) * 20, or the synced impressions.
+      estReach: impressions ?? (upvotes + comments) * 20,
+    };
+  }
+
+  return { trafficScore: traffic, impressions: impressions ?? 0 };
+}

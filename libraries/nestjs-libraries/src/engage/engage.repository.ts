@@ -20,7 +20,7 @@ import {
   pickXReplyIntegration,
   XReplyResolution,
 } from '@gitroom/nestjs-libraries/engage/resolve-x-reply-integration';
-import { classifyReplyMetric } from '@gitroom/nestjs-libraries/engage/engage-metrics-stats';
+import { classifyReplyMetric, normalizeReplyMetrics } from '@gitroom/nestjs-libraries/engage/engage-metrics-stats';
 import { parseXTweetId } from '@gitroom/nestjs-libraries/engage/x-tweet';
 import dayjs from 'dayjs';
 import isoWeek from 'dayjs/plugin/isoWeek';
@@ -1194,7 +1194,27 @@ export class EngageRepository {
       this._sentReply.model.engageSentReply.count({ where }),
     ]);
 
-    return { items, total, page, limit };
+    // Attach a flat, frontend-friendly `metrics` object (every per-platform field
+    // present) derived from the verbose Post.analytics array, so the UI can read
+    // e.g. metrics.bookmarks directly. Post.analytics is kept for compatibility.
+    const itemsWithMetrics = items.map((it) =>
+      it.post
+        ? {
+            ...it,
+            post: {
+              ...it.post,
+              metrics: normalizeReplyMetrics(
+                it.opportunity.platform,
+                it.post.analytics,
+                it.post.impressions,
+                it.post.trafficScore
+              ),
+            },
+          }
+        : it
+    );
+
+    return { items: itemsWithMetrics, total, page, limit };
   }
 
   // Aggregate stats for sent replies, scoped by the SAME date/platform/status
