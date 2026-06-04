@@ -1,0 +1,246 @@
+# Engage Operations Scripts — Runbook
+
+A scenario-organized reference for the 10 `scripts/*engage*` maintenance scripts.
+Each script's own header docstring is the source of truth; this runbook groups them
+by **when you reach for them** and lists the flags/env you actually need.
+
+> Conventions
+> - Most scripts default to a **read-only dry-run** and only mutate with `--execute`
+>   (exceptions called out per script). When in doubt, run dry-run first.
+> - Runner differs per script: some use `ts-node --project scripts/tsconfig.json`,
+>   others use `tsx`. The command shown for each is the correct one.
+> - All read `.env` (via `dotenv`). `DATABASE_URL` is implicitly required by every
+>   script that touches the DB (Prisma); only *extra* env is listed per script.
+> - `NODE_ENV` defaults to `production` and `TZ` to `UTC` where set — day-bucketing
+>   and metric reads assume UTC.
+
+---
+
+## Quick index
+
+| Script | Scenario | Default | Runner |
+|--------|----------|---------|--------|
+| `engage-scan.ts` | Trigger scans / inspect ticker | read-only | ts-node |
+| `engage-sync-metrics.ts` | One-shot "sent list is empty" fix (X+Reddit) | dry-run | ts-node |
+| `sync-engage-metrics.ts` | Reddit/X resync of null-impression replies | dry-run | ts-node |
+| `sync-engage-x-metrics.ts` | X-only live metric fetch / probe | dry-run | ts-node |
+| `backfill-engage-x-integration.ts` | Fill `Post.integrationId` for X replies | dry-run | ts-node |
+| `engage-diagnose-x-reply.ts` | Explain why an X reply has no metrics | read-only | ts-node |
+| `ingest-engage-post.ts` | Manually inject one X post into the pool | **writes** | ts-node |
+| `cleanup-engage-opportunities.ts` | Soft-delete un-repliable opportunities | list/check | tsx |
+| `backfill-engage-data-ticks.ts` | Rebuild `EngageDataTicks` from `Post` | dry-run | ts-node |
+| `terminate-engage-data-ticks.ts` | Stop the running data-ticks workflow | dry-run | tsx |
+
+---
+
+## 1. Scanning & opportunity pool
+
+### `engage-scan.ts` — trigger scans / inspect the ticker
+Debug tool to force the consolidated scan ticker (workflowId `engage-scan-ticker`,
+signal `triggerScanNow`) and inspect DB state. Read-only on the DB; the trigger
+just signals Temporal.
+
+```bash
+npx ts-node --project scripts/tsconfig.json scripts/engage-scan.ts --all      # force scan all due units
+npx ts-node --project scripts/tsconfig.json scripts/engage-scan.ts --stats     # DB stats only, no trigger
+npx ts-node --project scripts/tsconfig.json scripts/engage-scan.ts --stats --watch  # poll stats every 10s
+npx ts-node --project scripts/tsconfig.json scripts/engage-scan.ts --targets   # what the ticker will scan
+```
+
+- **Flags:** `--all` (aliases `--scan` / `--trigger`); legacy `--keyword` / `--channel`
+  / `--tracked` all now just force the whole ticker (per-type scoping was removed when
+  the workflows were consolidated); `--stats`; `--watch`; `--targets`.
+- **Env:** `DATABASE_URL`, `TEMPORAL_ADDRESS` (default `localhost:7233`),
+  `TEMPORAL_NAMESPACE` (default `default`). If a trigger reports nothing, confirm
+  these point at the same cluster the orchestrator deploys to.
+
+### `ingest-engage-post.ts` — manually inject one X post
+Lands a specific tweet in the pool for an org so you can walk the reply/send flow in
+the UI without waiting for a scan. Bypasses the keyword filter and `MIN_SCORE`.
+**Writes immediately — there is no dry-run.** Mirrors the scan's two-phase persist
+(global `EngageOpportunity` + per-org `EngageOpportunityState`).
+
+```bash
+npx ts-node --project scripts/tsconfig.json scripts/ingest-engage-post.ts \
+  --url=https://x.com/user/status/123 --org=<orgId>
+
+# optional overrides
+  --score=90 --status=NEW
+```
+
+- **Flags:** `--url` (req), `--org` (req), `--score`, `--status`.
+- **Env:** `X_BEARER_TOKEN` **or** (`X_API_KEY` + `X_API_SECRET`).
+
+### `cleanup-engage-opportunities.ts` — soft-delete un-repliable opportunities
+Sets `deletedAt = now()` (all repo queries already filter `deletedAt: null`). Useful
+for clearing X opportunities that are reply-restricted (protected / reply-settings).
+
+```bash
+# one specific opportunity
+npx tsx scripts/cleanup-engage-opportunities.ts --id=<opportunityId>
+
+# check reply_settings of all X opportunities via X API (no delete)
+npx tsx scripts/cleanup-engage-opportunities.ts --platform=x --check
+
+# check + delete only the restricted ones
+npx tsx scripts/cleanup-engage-opportunities.ts --platform=x --check --execute
+
+# nuclear: delete ALL X opportunities without checking
+npx tsx scripts/cleanup-engage-opportunities.ts --platform=x --execute
+```
+
+- **Flags:** `--id`, `--platform`, `--check`, `--execute`. Without `--execute` it only
+  lists/checks.
+- **Env:** `X_BEARER_TOKEN` **or** (`X_API_KEY` + `X_API_SECRET`) — only needed for `--check`.
+
+---
+
+## 2. Reply metrics — sync & repair
+
+> Background: X impressions/bookmarks are **owner-only**, so a reply's metrics can only
+> be read through an X integration whose handle matches the reply author. Replies
+> recorded without an `integrationId` therefore show blank numbers forever until the
+> integration is backfilled. The scripts below cover that whole chain.
+
+### `engage-sync-metrics.ts` — the one-shot "sent list is empty" fix ⭐
+The catch-all. Does the full repair in one idempotent pass:
+1. Backfill `Post.integrationId` for X replies that lack one (author-handle → engage
+   reply account → any live X account). *[X only]*
+2. Re-fetch metrics for every published reply with null impressions via the **same**
+   shared logic as the 24h Temporal sync and `POST /engage/admin/resync-metrics`
+   (X → `checkPostAnalytics` OAuth token; Reddit → loid/WAF public fetch).
+3. Print a before/after per-platform stats table.
+
+```bash
+npx ts-node --project scripts/tsconfig.json scripts/engage-sync-metrics.ts --dry-run
+npx ts-node --project scripts/tsconfig.json scripts/engage-sync-metrics.ts --execute
+npx ts-node --project scripts/tsconfig.json scripts/engage-sync-metrics.ts --org <orgId> --execute
+npx ts-node --project scripts/tsconfig.json scripts/engage-sync-metrics.ts --platform x --execute
+npx ts-node --project scripts/tsconfig.json scripts/engage-sync-metrics.ts --stats        # stats only, no DI bootstrap
+npx ts-node --project scripts/tsconfig.json scripts/engage-sync-metrics.ts --no-backfill --execute
+```
+
+- **Flags:** `--dry-run` (default), `--execute`, `--org`, `--platform`, `--stats`, `--no-backfill`.
+- See `sync-metrics-script.md` for the detailed output-format walkthrough.
+
+### `sync-engage-metrics.ts` — Reddit/X resync of null-impression replies
+Narrower than the above: just re-fetches metrics for published replies with null
+impressions (same logic as `POST /engage/admin/resync-metrics`). No integration
+backfill step. Idempotent.
+
+```bash
+npx ts-node --project scripts/tsconfig.json scripts/sync-engage-metrics.ts --dry-run
+npx ts-node --project scripts/tsconfig.json scripts/sync-engage-metrics.ts --execute
+npx ts-node --project scripts/tsconfig.json scripts/sync-engage-metrics.ts --platform reddit --execute
+npx ts-node --project scripts/tsconfig.json scripts/sync-engage-metrics.ts --org <orgId> --execute
+```
+
+- **Flags:** `--dry-run` (default), `--execute`, `--org`, `--platform`.
+- **Env:** `X_BEARER_TOKEN` (X app-only fallback).
+
+### `sync-engage-x-metrics.ts` — X-only live fetch / probe
+Forces a real X metrics fetch via `PostsService.checkPostAnalytics()` (the exact 24h
+sync path) and prints the live breakdown (Replies/Retweets/Likes/Quotes/Bookmarks/
+Impressions). Use it to answer *"can we even read this tweet's stats?"* without waiting
+24h — API-tier blocks surface here as 429/403 instead of silent nulls. **X only**
+(use `sync-engage-metrics.ts` for Reddit).
+
+```bash
+npx ts-node --project scripts/tsconfig.json scripts/sync-engage-x-metrics.ts --org <orgId> --dry-run
+npx ts-node --project scripts/tsconfig.json scripts/sync-engage-x-metrics.ts --id <sentReplyId> --execute
+npx ts-node --project scripts/tsconfig.json scripts/sync-engage-x-metrics.ts --post <postId> --execute
+npx ts-node --project scripts/tsconfig.json scripts/sync-engage-x-metrics.ts --url https://x.com/.../status/123 --execute
+npx ts-node --project scripts/tsconfig.json scripts/sync-engage-x-metrics.ts --org <orgId> --only-missing --execute
+```
+
+- **Flags:** target one of `--id` / `--post` / `--url`, or scope by `--org`; `--only-missing`;
+  `--dry-run` (default) / `--execute`.
+
+### `backfill-engage-x-integration.ts` — fill `Post.integrationId` for X replies
+Fixes X replies recorded with `integrationId = null` so metrics can ever be read.
+Resolution mirrors `EngageRepository.resolveXReplyIntegrationId` exactly (author-handle
+→ engage reply account → any live X account). After running, re-fetch metrics with
+`sync-engage-x-metrics.ts --only-missing`.
+
+```bash
+npx ts-node --project scripts/tsconfig.json scripts/backfill-engage-x-integration.ts --dry-run
+npx ts-node --project scripts/tsconfig.json scripts/backfill-engage-x-integration.ts --execute
+npx ts-node --project scripts/tsconfig.json scripts/backfill-engage-x-integration.ts --org <orgId> --execute
+```
+
+- **Flags:** `--dry-run` (default), `--execute`, `--org`.
+
+### `engage-diagnose-x-reply.ts` — explain why an X reply has no metrics
+**Read-only.** For each matching X reply it prints the full decision chain: Post
+fields, attached integration (handle/expiry/refreshNeeded), `parseXHandle(url)` vs
+`integration.profile` → recomputed `matchedBy` (handle = author token → full metrics;
+bound/fallback = public only), and the live `checkPostAnalytics()` result with the
+inline empty-reason. This is the script to run **before** the repair scripts to know
+*which* fix you need.
+
+```bash
+npx ts-node --project scripts/tsconfig.json scripts/engage-diagnose-x-reply.ts
+npx ts-node --project scripts/tsconfig.json scripts/engage-diagnose-x-reply.ts --url aipartnerup
+npx ts-node --project scripts/tsconfig.json scripts/engage-diagnose-x-reply.ts --url 2061981755566125311
+npx ts-node --project scripts/tsconfig.json scripts/engage-diagnose-x-reply.ts --org <orgId>
+```
+
+- **Filter:** `--url <substring>` (default: all X replies), `--org`.
+- **Env:** `X_BEARER_TOKEN` **or** (`X_API_KEY` + `X_API_SECRET`).
+
+**Typical X-metrics troubleshooting flow:**
+```
+diagnose (read-only)  →  backfill-engage-x-integration (if integrationId null)
+                      →  sync-engage-x-metrics --only-missing  (re-fetch)
+   …or just run engage-sync-metrics --execute, which does all three.
+```
+
+---
+
+## 3. EngageDataTicks aggregate
+
+> `EngageDataTicks` is **write-only** today — the engage dashboard reads the `Post`
+> table directly. The daily `engageDataTicksWorkflow` is gated off by default. These
+> two scripts let you rebuild it on demand and stop the legacy running workflow.
+
+### `backfill-engage-data-ticks.ts` — rebuild the aggregate from `Post`
+Reconstructs `EngageDataTicks` over a date range by replaying what the Temporal
+activity `aggregateDailyEngageTicks` does (replies = exact count; impressions/traffic =
+current cumulative `Post` values bucketed by publish day).
+
+> ⚠️ Fidelity: this yields a *"current totals by publish date"* series (same semantic
+> as the live dashboard), **not** a true as-of-day historical snapshot. The latter can
+> only be captured by running the daily job going forward.
+
+```bash
+npx ts-node --project scripts/tsconfig.json scripts/backfill-engage-data-ticks.ts \
+  --start-date 2026-04-01 --end-date 2026-05-31 --dry-run
+npx ts-node --project scripts/tsconfig.json scripts/backfill-engage-data-ticks.ts \
+  --start-date 2026-04-01 --end-date 2026-05-31 --execute
+```
+
+- **Flags:** `--start-date` / `--end-date` (**both required**, `YYYY-MM-DD`, UTC,
+  inclusive), `--org`, `--platform`, `--type`, `--dry-run` (default) / `--execute`, `--help`.
+
+### `terminate-engage-data-ticks.ts` — stop the running data-ticks workflow
+Gating off registration prevents *new* starts but does not stop an instance already
+running in Temporal. This terminates every Running execution of WorkflowType
+`engageDataTicksWorkflow`. Safe — the table is fully backfillable (above).
+
+```bash
+npx tsx scripts/terminate-engage-data-ticks.ts            # dry-run (default)
+npx tsx scripts/terminate-engage-data-ticks.ts --execute  # actually terminate
+```
+
+- **Flags:** `--execute` (otherwise dry-run).
+- **Env:** `TEMPORAL_ADDRESS` (default `localhost:7233`), `TEMPORAL_NAMESPACE` (default `default`).
+- **Sanity check** if "0 found": confirm you're on the right cluster with
+  `npx tsx scripts/list-running-workflows.ts [--type engageDataTicksWorkflow]`.
+
+---
+
+## See also
+- [`startup-checklist.md`](./startup-checklist.md) — deployment / cold-start / upgrade ops.
+- [`sync-metrics-script.md`](./sync-metrics-script.md) — detailed output walkthrough for `engage-sync-metrics.ts`.
+- [`reddit-loid-waf-bypass.md`](./reddit-loid-waf-bypass.md) — how Reddit public-JSON metric reads clear the WAF.
+- [`tech-design.md`](./tech-design.md) — architecture, data model, workflows.

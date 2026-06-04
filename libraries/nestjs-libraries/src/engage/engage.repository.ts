@@ -584,11 +584,19 @@ export class EngageRepository {
       score: number;
       scoreKeyword: number;
       scoreTracked: number;
+      createdAt: Date;
       opportunity: EngageOpportunity;
     }
   >(state: T) {
-    const { opportunity, status, bookmarked, score, scoreKeyword, scoreTracked } =
-      state;
+    const {
+      opportunity,
+      status,
+      bookmarked,
+      score,
+      scoreKeyword,
+      scoreTracked,
+      createdAt,
+    } = state;
     return {
       // ── Global fields (EngageOpportunity) ──────────────────────────────────
       id: opportunity.id,
@@ -622,7 +630,9 @@ export class EngageRepository {
       metricUpvoteRatio: opportunity.metricUpvoteRatio,
       metricComments: opportunity.metricComments,
       rawData: opportunity.rawData,
-      createdAt: opportunity.createdAt,
+      // Per-org createdAt (when this org first saw the opportunity) — this is
+      // also the column `sortBy=createdAt` orders on, so display and sort match.
+      createdAt,
       updatedAt: opportunity.updatedAt,
       deletedAt: opportunity.deletedAt,
       // ── Per-org fields (EngageOpportunityState) ───────────────────────────
