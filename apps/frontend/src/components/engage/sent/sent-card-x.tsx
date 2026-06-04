@@ -24,6 +24,14 @@ interface SentReply {
       bookmarks?: number;
       trafficScore?: number;
     };
+    // The account that posted the reply (from the reply URL), shown when the reply
+    // wasn't posted through a connected integration.
+    replyAuthor?: {
+      handle: string;
+      id?: string;
+      name?: string;
+      avatarUrl?: string;
+    } | null;
   };
   opportunity: {
     platform: string;
@@ -148,7 +156,30 @@ export const SentCardX: FC<SentCardXProps> = ({ reply, sentReplyId, onSubmitUrl 
       )}
 
       {/* Reply content */}
-      <p className="text-sm text-gray-200 line-clamp-2 mb-3">{post.content}</p>
+      <p className="text-sm text-gray-200 line-clamp-2 mb-2">{post.content}</p>
+
+      {/* Who posted the reply — shown when it came from an account that isn't a
+          connected integration (the author lives in settings.engageAuthor). */}
+      {post.replyAuthor && (
+        <div className="flex items-center gap-1.5 mb-3" title="Replied as">
+          <span className="text-gray-600">↩</span>
+          {post.replyAuthor.avatarUrl && (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={post.replyAuthor.avatarUrl}
+              alt={post.replyAuthor.handle}
+              className="w-4 h-4 rounded-full shrink-0"
+            />
+          )}
+          <span className="text-xs text-gray-400 truncate">
+            Replied as{' '}
+            {post.replyAuthor.name && (
+              <span className="text-gray-300">{post.replyAuthor.name} </span>
+            )}
+            <span className="text-gray-600">@{post.replyAuthor.handle}</span>
+          </span>
+        </div>
+      )}
 
       {/* Metrics */}
       <div className="grid grid-cols-5 gap-2">

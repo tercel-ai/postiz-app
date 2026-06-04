@@ -1,13 +1,13 @@
 /**
- * Backfill Post.integrationId for X engage replies that were recorded without a
- * connected account (Post.integrationId = null). Without an integration,
- * checkPostAnalytics can never read the reply tweet's metrics, so the sent-list
- * shows blank numbers forever.
+ * Backfill Post.integrationId for X engage replies recorded without a connected
+ * account (Post.integrationId = null), ONLY when the reply URL's author handle
+ * matches a live X account in the org — i.e. the reply was genuinely posted by an
+ * account we manage. Replies posted from external accounts are intentionally left
+ * null (their author lives in Post.settings.engageAuthor instead); metrics still
+ * sync via the app-only path.
  *
  * Resolution mirrors EngageRepository.resolveXReplyIntegrationId exactly (shared
- * pure helper): author-handle match → engage-enabled reply account → any live X
- * account. See resolve-x-reply-integration.ts for why handle match matters
- * (X impressions are owner-only).
+ * pure helper): author-handle match only. See resolve-x-reply-integration.ts.
  *
  * After running with --execute, re-fetch metrics:
  *   npx ts-node --project scripts/tsconfig.json scripts/sync-engage-x-metrics.ts --org <id> --only-missing --execute
@@ -116,7 +116,7 @@ async function main(): Promise<void> {
 
     if (!pick) {
       unresolved++;
-      console.log(`  [no-x-account] sentReplyId=${r.id}  url=${r.post.releaseURL ?? 'null'}`);
+      console.log(`  [no-handle-match] sentReplyId=${r.id}  url=${r.post.releaseURL ?? 'null'}`);
       continue;
     }
 
@@ -139,7 +139,7 @@ async function main(): Promise<void> {
 
   console.log(
     `\n${args.dryRun ? 'Would resolve' : 'Resolved'}: ${resolved}, ` +
-    `unresolved (org has no X account): ${unresolved}` +
+    `unresolved (external author / no handle match — left null by design): ${unresolved}` +
     (args.dryRun ? '\n\n--- DRY RUN. Re-run with --execute to write. ---' : `, written: ${written}`)
   );
   if (!args.dryRun && written > 0) {

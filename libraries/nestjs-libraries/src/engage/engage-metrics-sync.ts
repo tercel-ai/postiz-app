@@ -131,7 +131,6 @@ export async function syncXMetrics(
     replyTweetUrl: string;
     originalTweetId: string;
     authorUsername: string;
-    hasIntegration: boolean;
   },
   deps: MetricsSyncDeps
 ): Promise<MetricsSyncOutcome> {
@@ -142,34 +141,28 @@ export async function syncXMetrics(
     replyTweetUrl,
     originalTweetId,
     authorUsername,
-    hasIntegration,
   } = args;
 
   // Metric outcome is decided by the per-account analytics fetch below; the
   // author-replied check afterwards is independent and never changes it.
   let outcome: MetricsSyncOutcome = 'skipped';
 
-  // Fetch the reply tweet's metrics through the integration's own OAuth token
-  // (the same path regular posts use), so impression_count and bookmark_count are
-  // captured and the X traffic index + impressions are written back to the Post.
-  // Engage posts are excluded from the global analytics job (source != 'engage'),
-  // so we drive it explicitly here. With no X account there is no token to
-  // authenticate with, so skip the per-account analytics (the author-replied
-  // check below uses the app-only bearer and still runs).
-  if (hasIntegration) {
-    try {
-      // checkPostAnalytics returns the metric series and persists it back onto
-      // the Post (write-back is internal). A non-empty result means data landed;
-      // an empty array means the X API gave nothing (tier block, no releaseId).
-      const analytics = await deps.checkPostAnalytics(orgId, postDbId, Date.now());
-      outcome = Array.isArray(analytics) && analytics.length > 0 ? 'written' : 'empty';
-    } catch (err) {
-      deps.warn(`X analytics sync failed for post ${postDbId}: ${(err as Error).message}`);
-      outcome = 'unreachable';
-    }
-  } else {
-    deps.log(`X reply ${sentReplyId} has no integration — skipping per-account analytics sync`);
-    outcome = 'skipped';
+  // Fetch the reply tweet's metrics and write impressions/traffic back to the
+  // Post. Engage posts are excluded from the global analytics job
+  // (source != 'engage'), so we drive it explicitly here. deps.checkPostAnalytics
+  // is PostsService.checkEngageXAnalyticsWithFallback — own-token when a connected
+  // account authored the reply, else an app-only bearer read. impression_count and
+  // bookmark_count are public_metrics (NOT owner-only), so the app-only path reads
+  // the full metric set even when Post.integrationId is null. We therefore always
+  // attempt it — a null integration is no longer a reason to skip.
+  try {
+    // A non-empty result means data landed; an empty array means the X API gave
+    // nothing (tier block, no releaseId, or no app-only bearer configured).
+    const analytics = await deps.checkPostAnalytics(orgId, postDbId, Date.now());
+    outcome = Array.isArray(analytics) && analytics.length > 0 ? 'written' : 'empty';
+  } catch (err) {
+    deps.warn(`X analytics sync failed for post ${postDbId}: ${(err as Error).message}`);
+    outcome = 'unreachable';
   }
 
   // Author-replied detection uses the app-only bearer (conversation search),

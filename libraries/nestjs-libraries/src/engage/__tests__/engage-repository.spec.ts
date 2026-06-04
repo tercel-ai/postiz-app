@@ -674,11 +674,10 @@ describe('EngageRepository — two-table reads', () => {
   describe('createManualXPost', () => {
     // Manual X reply posts parse a releaseId from the tweet URL (otherwise
     // checkPostAnalytics early-returns and impressions/likes/etc. stay null).
-    // The integration is auto-resolved: when the caller supplies one it is
-    // validated; when omitted we resolve a usable X account (author-handle
-    // match → engage reply account → any live X account) so the per-account
-    // metrics sync can run. Only when the org has no X account at all does the
-    // post land without an integration.
+    // Integration handling: when the caller supplies one it is validated; when
+    // omitted we attach an account ONLY if the reply URL's author handle matches a
+    // connected account. Otherwise integrationId is left null (the author is
+    // recorded in settings.engageAuthor) — metrics still sync app-only.
     function buildXRepo() {
       const integrationFindFirst = vi.fn();
       const integrationFindMany = vi.fn().mockResolvedValue([]);
@@ -773,7 +772,7 @@ describe('EngageRepository — two-table reads', () => {
       expect(JSON.parse(data.settings).__type).toBe('x');
     });
 
-    it('omits integrationId only when the org has no usable X account', async () => {
+    it('omits integrationId when the org has no usable X account', async () => {
       const { repo, integrationFindMany, postCreate } = buildXRepo();
       integrationFindMany.mockResolvedValue([]); // no connected X accounts
       postCreate.mockResolvedValue({ id: 'post1' });
@@ -789,6 +788,46 @@ describe('EngageRepository — two-table reads', () => {
       expect(data.releaseId).toBe('2061267353544146949'); // still parsed
       expect('integrationId' in data).toBe(false); // FK omitted, column stays null
       expect(JSON.parse(data.settings).__type).toBe('x');
+    });
+
+    it('omits integrationId when no connected account authored the reply (external author)', async () => {
+      const { repo, integrationFindMany, postCreate } = buildXRepo();
+      // Org has live X accounts, but none match the reply tweet's author handle —
+      // the reply was posted from an external account, so we attach nothing rather
+      // than misrepresent authorship with a fallback account.
+      integrationFindMany.mockResolvedValue([
+        { id: 'other', profile: 'someoneelse', engageXReplyAccount: null },
+        { id: 'brand', profile: 'brandhq', engageXReplyAccount: { engageEnabled: true } },
+      ]);
+      postCreate.mockResolvedValue({ id: 'post1' });
+
+      await repo.createManualXPost({
+        organizationId: 'org1',
+        content: 'reply',
+        date: new Date(0),
+        replyUrl: 'https://x.com/externalguy/status/2061267353544146949',
+      });
+
+      const data = postCreate.mock.calls[0][0].data;
+      expect('integrationId' in data).toBe(false); // no handle match → null, no fallback
+    });
+
+    it('persists engageAuthor into settings when supplied', async () => {
+      const { repo, integrationFindMany, postCreate } = buildXRepo();
+      integrationFindMany.mockResolvedValue([]);
+      postCreate.mockResolvedValue({ id: 'post1' });
+
+      await repo.createManualXPost({
+        organizationId: 'org1',
+        content: 'reply',
+        date: new Date(0),
+        replyUrl: 'https://x.com/externalguy/status/2061267353544146949',
+        engageAuthor: { handle: 'externalguy', id: '42', name: 'External Guy' },
+      });
+
+      const settings = JSON.parse(postCreate.mock.calls[0][0].data.settings);
+      expect(settings.__type).toBe('x');
+      expect(settings.engageAuthor).toEqual({ handle: 'externalguy', id: '42', name: 'External Guy' });
     });
 
     it('omits releaseId when the URL has no /status/<id> segment', async () => {
@@ -883,7 +922,8 @@ describe('EngageRepository — two-table reads', () => {
 
   describe('backfillXReplyIntegrations', () => {
     // Resolves and fills Post.integrationId for X replies that have none, reusing
-    // resolveXReplyIntegrationId (handle → bound → fallback).
+    // resolveXReplyIntegrationId (author handle match only; external authors stay
+    // null by design).
     function buildBackfillRepo() {
       const sentFindMany = vi.fn();
       const integrationFindMany = vi.fn().mockResolvedValue([]);
@@ -924,17 +964,17 @@ describe('EngageRepository — two-table reads', () => {
     it('does not write in dry-run, but still reports what would be filled', async () => {
       const { repo, sentFindMany, integrationFindMany, postUpdate } = buildBackfillRepo();
       sentFindMany.mockResolvedValue([
-        { post: { id: 'post1', releaseURL: 'https://x.com/nobody/status/1' } },
+        { post: { id: 'post1', releaseURL: 'https://x.com/someoneelse/status/1' } },
       ]);
       integrationFindMany.mockResolvedValue([
-        { id: 'fallback', profile: 'someoneelse', engageXReplyAccount: null },
+        { id: 'author', profile: 'someoneelse', engageXReplyAccount: null },
       ]);
 
       const res = await repo.backfillXReplyIntegrations('org1', true);
 
       expect(postUpdate).not.toHaveBeenCalled();
       expect(res).toMatchObject({ found: 1, filled: 1, unresolved: 0 });
-      expect(res.items[0].matchedBy).toBe('fallback');
+      expect(res.items[0].matchedBy).toBe('handle');
     });
 
     it('counts replies as unresolved when the org has no usable X account', async () => {
@@ -943,6 +983,23 @@ describe('EngageRepository — two-table reads', () => {
         { post: { id: 'post1', releaseURL: 'https://x.com/u/status/1' } },
       ]);
       integrationFindMany.mockResolvedValue([]); // no X integrations at all
+
+      const res = await repo.backfillXReplyIntegrations('org1', false);
+
+      expect(postUpdate).not.toHaveBeenCalled();
+      expect(res).toMatchObject({ found: 1, filled: 0, unresolved: 1 });
+      expect(res.items).toHaveLength(0);
+    });
+
+    it('leaves external-authored replies unresolved (no handle match → no fallback)', async () => {
+      const { repo, sentFindMany, integrationFindMany, postUpdate } = buildBackfillRepo();
+      sentFindMany.mockResolvedValue([
+        { post: { id: 'post1', releaseURL: 'https://x.com/externalguy/status/1' } },
+      ]);
+      // Org has a live X account, but it isn't the reply's author.
+      integrationFindMany.mockResolvedValue([
+        { id: 'brand', profile: 'brandhq', engageXReplyAccount: { engageEnabled: true } },
+      ]);
 
       const res = await repo.backfillXReplyIntegrations('org1', false);
 

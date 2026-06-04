@@ -21,7 +21,7 @@ import {
   XReplyResolution,
 } from '@gitroom/nestjs-libraries/engage/resolve-x-reply-integration';
 import { classifyReplyMetric, normalizeReplyMetrics } from '@gitroom/nestjs-libraries/engage/engage-metrics-stats';
-import { parseXTweetId } from '@gitroom/nestjs-libraries/engage/x-tweet';
+import { parseXTweetId, XAuthorProfile } from '@gitroom/nestjs-libraries/engage/x-tweet';
 import dayjs from 'dayjs';
 import isoWeek from 'dayjs/plugin/isoWeek';
 import utc from 'dayjs/plugin/utc';
@@ -94,6 +94,21 @@ function maxDate(ds: (Date | null)[]): Date | null {
 function minDate(ds: (Date | null)[]): Date | null {
   const ts = ds.filter((d): d is Date => d != null).map((d) => d.getTime());
   return ts.length ? new Date(Math.min(...ts)) : null;
+}
+
+/**
+ * Pull the reply author (engageAuthor) out of a Post.settings JSON blob. Returns
+ * null when settings is absent/unparseable or carries no engageAuthor — i.e. for
+ * replies posted through a connected integration (their author IS the integration).
+ */
+function parseEngageAuthor(settings: string | null): XAuthorProfile | null {
+  if (!settings) return null;
+  try {
+    const parsed = JSON.parse(settings) as { engageAuthor?: XAuthorProfile };
+    return parsed?.engageAuthor ?? null;
+  } catch {
+    return null;
+  }
 }
 
 @Injectable()
@@ -1180,6 +1195,9 @@ export class EngageRepository {
               impressions: true,
               trafficScore: true,
               analytics: true,
+              // settings carries engageAuthor for manual replies posted from an
+              // account that isn't a connected integration (integrationId=null).
+              settings: true,
               integration: {
                 select: {
                   id: true,
@@ -1234,21 +1252,24 @@ export class EngageRepository {
         ...it.opportunity,
         matchedKeywords: keywordsByOpp.get(it.opportunity.id) ?? [],
       };
-      return it.post
-        ? {
-            ...it,
-            opportunity,
-            post: {
-              ...it.post,
-              metrics: normalizeReplyMetrics(
-                it.opportunity.platform,
-                it.post.analytics,
-                it.post.impressions,
-                it.post.trafficScore
-              ),
-            },
-          }
-        : { ...it, opportunity };
+      if (!it.post) return { ...it, opportunity };
+      // Surface the reply author (the account that posted the reply) as a clean
+      // `replyAuthor` field, and drop the raw `settings` blob from the response.
+      const { settings, ...postRest } = it.post;
+      return {
+        ...it,
+        opportunity,
+        post: {
+          ...postRest,
+          replyAuthor: parseEngageAuthor(settings),
+          metrics: normalizeReplyMetrics(
+            it.opportunity.platform,
+            it.post.analytics,
+            it.post.impressions,
+            it.post.trafficScore
+          ),
+        },
+      };
     });
 
     return { items: itemsWithMetrics, total, page, limit };
@@ -1769,7 +1790,12 @@ export class EngageRepository {
     return reply;
   }
 
-  async updateReplyUrl(organizationId: string, sentReplyId: string, url: string) {
+  async updateReplyUrl(
+    organizationId: string,
+    sentReplyId: string,
+    url: string,
+    engageAuthor?: XAuthorProfile
+  ) {
     // Join the opportunity for its platform: backfill is only meaningful for the
     // manual-reply platforms (X / Reddit), and for X we also derive releaseId
     // from the tweet URL so metrics sync can read it. The caller (service) has
@@ -1793,15 +1819,27 @@ export class EngageRepository {
     // so metrics sync can finally read it. Only fill when currently null —
     // never override an account the user explicitly chose at confirm time.
     let integrationId: string | undefined;
+    let mergedSettings: string | undefined;
     if (platform === 'x') {
       const post = await this._post.model.post.findUnique({
         where: { id: reply.postId },
-        select: { integrationId: true },
+        select: { integrationId: true, settings: true },
       });
       if (!post?.integrationId) {
         integrationId =
           (await this.resolveXReplyIntegrationId(organizationId, url))
             ?.integrationId ?? undefined;
+      }
+      // Record the URL author now that we have the link. Merge into existing
+      // settings so the __type tag (and anything else) is preserved.
+      if (engageAuthor) {
+        let parsed: Record<string, unknown> = { __type: 'x' };
+        try {
+          parsed = { ...parsed, ...(JSON.parse(post?.settings ?? '{}') ?? {}) };
+        } catch {
+          /* keep the {__type:'x'} default on unparseable settings */
+        }
+        mergedSettings = JSON.stringify({ ...parsed, engageAuthor });
       }
     }
 
@@ -1811,6 +1849,7 @@ export class EngageRepository {
         releaseURL: url,
         ...(releaseId ? { releaseId } : {}),
         ...(integrationId ? { integrationId } : {}),
+        ...(mergedSettings ? { settings: mergedSettings } : {}),
       },
     });
   }
@@ -2036,11 +2075,10 @@ export class EngageRepository {
   }
 
   /**
-   * Pick the connected X integration that should own a manual engage reply, so
-   * checkPostAnalytics has a token to read its metrics. Order: author-handle
-   * match → engage-enabled reply account → any live X account. See
-   * resolve-x-reply-integration.ts for the rationale (impressions are
-   * owner-only). Returns null when the org has no usable X integration.
+   * Pick the connected X integration that AUTHORED a manual engage reply: the live
+   * X account whose handle matches the reply URL's author. Returns null when no
+   * connected account authored the reply (external account / unparseable handle) —
+   * see resolve-x-reply-integration.ts for why we no longer attach a fallback.
    */
   async resolveXReplyIntegrationId(
     organizationId: string,
@@ -2077,6 +2115,7 @@ export class EngageRepository {
     date: Date;
     replyUrl?: string;
     integrationId?: string;
+    engageAuthor?: XAuthorProfile;
   }) {
     // The integration is optional. When provided, its OAuth token lets
     // checkPostAnalytics read the reply tweet's impressions/bookmarks. When
@@ -2124,14 +2163,21 @@ export class EngageRepository {
         state: 'PUBLISHED',
         source: 'engage',
         image: '[]',
-        settings: JSON.stringify({ __type: 'x' }),
+        settings: JSON.stringify({
+          __type: 'x',
+          // Records who actually posted the reply (the URL author), which is
+          // independent of integrationId — the latter is set only when a
+          // connected account authored it (see resolve-x-reply-integration.ts).
+          ...(data.engageAuthor ? { engageAuthor: data.engageAuthor } : {}),
+        }),
         group: randomUUID(),
         delay: 0,
         ...(data.replyUrl ? { releaseURL: data.replyUrl } : {}),
         ...(releaseId ? { releaseId } : {}),
         // Scalar FK (not a `connect` relation) to stay in Prisma's unchecked
         // create form alongside organizationId; ownership is validated/resolved
-        // above. Omitted only when the org has no usable X account at all.
+        // above. Left null when no connected account authored the reply — the
+        // author is captured in settings.engageAuthor instead.
         ...(integrationId ? { integrationId } : {}),
       },
     });

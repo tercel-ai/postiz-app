@@ -1,3 +1,5 @@
+import { parseXHandle } from '@gitroom/nestjs-libraries/engage/resolve-x-reply-integration';
+
 // The reply tweet id is the numeric snowflake in a /status/<id> permalink.
 const TWEET_ID_RE = /\/status(?:es)?\/(\d+)/;
 const WEB_STATUS_RE = /\/i\/web\/status\/(\d+)/;
@@ -82,5 +84,57 @@ export async function checkXTweetAccessible(
     return { status: 'not_found' };
   } catch (err) {
     return { status: 'unverifiable', reason: (err as Error).message };
+  }
+}
+
+/**
+ * The author of a manual engage reply, derived from the reply URL. `handle` is the
+ * @username parsed from the permalink; id/name/avatarUrl are best-effort
+ * enrichment from the X API. Persisted to Post.settings.engageAuthor so the reply
+ * author is recorded even when no connected integration authored it.
+ */
+export interface XAuthorProfile {
+  handle: string;
+  id?: string;
+  name?: string;
+  avatarUrl?: string;
+}
+
+/**
+ * Best-effort lookup of a reply URL's author (the @handle in the permalink) via
+ * the X API v2 app-only bearer. Always returns at least `{ handle }` when the URL
+ * has a parseable handle; enriches with id/name/avatarUrl when the bearer is
+ * configured and the lookup succeeds. Returns null only when no handle can be
+ * parsed. Never throws — any enrichment failure degrades to handle-only so the
+ * caller can still record who posted the reply.
+ */
+export async function fetchXAuthorProfile(
+  url: string | null | undefined
+): Promise<XAuthorProfile | null> {
+  const handle = parseXHandle(url);
+  if (!handle) return null;
+
+  const bearer = process.env.X_BEARER_TOKEN;
+  if (!bearer) return { handle };
+
+  try {
+    const res = await fetch(
+      `https://api.twitter.com/2/users/by/username/${handle}?user.fields=profile_image_url,name`,
+      { headers: { Authorization: `Bearer ${bearer}` }, signal: AbortSignal.timeout(10_000) }
+    );
+    if (!res.ok) return { handle };
+    const json = (await res.json()) as {
+      data?: { id?: string; name?: string; profile_image_url?: string };
+    };
+    const d = json.data;
+    if (!d) return { handle };
+    return {
+      handle,
+      ...(d.id ? { id: d.id } : {}),
+      ...(d.name ? { name: d.name } : {}),
+      ...(d.profile_image_url ? { avatarUrl: d.profile_image_url } : {}),
+    };
+  } catch {
+    return { handle };
   }
 }

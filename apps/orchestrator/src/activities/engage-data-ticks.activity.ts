@@ -165,7 +165,6 @@ export class EngageDataTicksActivity {
           replyTweetUrl: reply.post.releaseURL,
           originalTweetId: reply.opportunity.externalPostId,
           authorUsername: reply.opportunity.authorUsername, // resolve original author's numeric user ID
-          hasIntegration: !!reply.post.integrationId,        // no integration → skip per-account analytics
         },
         this._metricsSyncDeps()
       );

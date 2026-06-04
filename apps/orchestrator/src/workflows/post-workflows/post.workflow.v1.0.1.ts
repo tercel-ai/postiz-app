@@ -111,6 +111,15 @@ export async function postWorkflowV101({
     return;
   }
 
+  // Defensive guard: the publish pipeline below dereferences post.integration
+  // unconditionally (token refresh, providerIdentifier, webhooks). A null
+  // integration must never reach here — engage manual replies are created as
+  // PUBLISHED and bypass this workflow, and send/schedule require an integration —
+  // but if one ever does, return rather than throw a TypeError mid-publish.
+  if (!post.integration) {
+    return;
+  }
+
   // sleep until publishDate
   if (!postNow) {
     await sleep(

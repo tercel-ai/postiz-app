@@ -33,7 +33,7 @@ import {
   UpdateTrackedAccountDto,
   UpdateScheduledReplyDto,
 } from '@gitroom/nestjs-libraries/engage/dtos/engage.dto';
-import { parseXTweetId } from '@gitroom/nestjs-libraries/engage/x-tweet';
+import { parseXTweetId, fetchXAuthorProfile } from '@gitroom/nestjs-libraries/engage/x-tweet';
 import { parseRedditCommentId } from '@gitroom/nestjs-libraries/engage/reddit-url';
 import { getRedditToken, redditAuthHeaders } from '@gitroom/nestjs-libraries/engage/reddit-auth';
 import { redditPublicGet } from '@gitroom/nestjs-libraries/engage/reddit-loid';
@@ -331,7 +331,9 @@ export class EngageService implements OnApplicationBootstrap {
     // The backfill URL is mandatory here, so always validate format + reachability.
     const platform = await this._engageRepository.getSentReplyPlatform(org.id, sentReplyId);
     await this._validateReplyUrl(platform, url);
-    return this._engageRepository.updateReplyUrl(org.id, sentReplyId, url);
+    const engageAuthor =
+      platform === 'x' ? (await fetchXAuthorProfile(url)) ?? undefined : undefined;
+    return this._engageRepository.updateReplyUrl(org.id, sentReplyId, url, engageAuthor);
   }
 
   /**
@@ -916,6 +918,12 @@ export class EngageService implements OnApplicationBootstrap {
       if (body.replyUrl) {
         await this._validateReplyUrl(opp.platform, body.replyUrl);
       }
+      // Best-effort: record who posted the reply (the URL author), independent of
+      // which connected account — if any — is attached as integrationId.
+      const engageAuthor =
+        opp.platform === 'x' && body.replyUrl
+          ? (await fetchXAuthorProfile(body.replyUrl)) ?? undefined
+          : undefined;
       const post =
         opp.platform === 'x'
           ? await this._engageRepository.createManualXPost({
@@ -924,6 +932,7 @@ export class EngageService implements OnApplicationBootstrap {
               date: new Date(),
               replyUrl: body.replyUrl,
               integrationId: body.integrationId,
+              engageAuthor,
             })
           : await this._engageRepository.createManualRedditPost({
               organizationId: org.id,
@@ -1051,7 +1060,6 @@ export class EngageService implements OnApplicationBootstrap {
             replyTweetUrl: reply.post.releaseURL,
             originalTweetId: reply.opportunity.externalPostId ?? '',
             authorUsername: reply.opportunity.authorUsername ?? '',
-            hasIntegration: !!reply.post.integrationId,
           }, this._metricsSyncDeps());
         }
         tally[outcome]++;

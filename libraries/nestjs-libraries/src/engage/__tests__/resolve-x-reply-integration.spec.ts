@@ -44,24 +44,15 @@ describe('pickXReplyIntegration', () => {
     expect(r).toEqual({ integrationId: 'x', matchedBy: 'handle' });
   });
 
-  it('falls back to the engage-enabled reply account when no handle match', () => {
-    const r = pickXReplyIntegration([other, bound], 'https://x.com/nobody/status/1');
-    expect(r).toEqual({ integrationId: 'int-bound', matchedBy: 'bound' });
+  it('returns null when no candidate handle matches the author (no fallback)', () => {
+    // The reply was posted from an external account: attaching an unrelated
+    // integration would misrepresent authorship, so we attach nothing.
+    expect(pickXReplyIntegration([other, bound], 'https://x.com/nobody/status/1')).toBeNull();
+    expect(pickXReplyIntegration([other, author], 'https://x.com/nobody/status/1')).toBeNull();
   });
 
-  it('falls back to the first (newest) live account when nothing else matches', () => {
-    const r = pickXReplyIntegration([other, author], 'https://x.com/nobody/status/1');
-    expect(r).toEqual({ integrationId: 'int-other', matchedBy: 'fallback' });
-  });
-
-  it('uses bound/fallback when the reply URL has no parseable handle', () => {
-    expect(pickXReplyIntegration([other, bound], undefined)).toEqual({
-      integrationId: 'int-bound',
-      matchedBy: 'bound',
-    });
-    expect(pickXReplyIntegration([other], undefined)).toEqual({
-      integrationId: 'int-other',
-      matchedBy: 'fallback',
-    });
+  it('returns null when the reply URL has no parseable handle', () => {
+    expect(pickXReplyIntegration([other, bound], undefined)).toBeNull();
+    expect(pickXReplyIntegration([other], undefined)).toBeNull();
   });
 });

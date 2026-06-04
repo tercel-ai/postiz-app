@@ -1,38 +1,38 @@
 /**
- * Resolve which connected X Integration should own a manual engage reply so that
- * PostsService.checkPostAnalytics has a token to read the reply tweet's metrics.
+ * Resolve which connected X Integration should own a manual engage reply.
  *
- * Why it matters: checkPostAnalytics needs SOME usable token to read the reply
- * tweet's metrics; when an engage reply is recorded without an integration its
- * Post.integrationId is null and the sent-list shows blank numbers. We therefore
- * try to attach a live X integration, preferring the actual author:
+ * Policy: attach an integration ONLY when the reply URL's author handle matches a
+ * live X account connected to the org — i.e. the reply was genuinely posted by an
+ * account we manage. In that case Post.integrationId honestly identifies the
+ * author and its OAuth token can read the tweet's metrics.
  *
- *   1. handle    — Integration.profile (the @username) equals the handle parsed
- *                  from the reply URL → the author's own token.
- *   2. bound     — an engage-enabled X reply account configured for the org.
- *   3. fallback  — any live X integration in the org.
- *
- * NOTE: impression_count and bookmark_count are part of X `public_metrics` and
- * are returned by ANY valid token (the author's, another account's, or even an
- * app-only bearer) — they are NOT owner-only. So the resolution order is about
- * having a *live* token at all, not about which token can see which metric: all
- * three tiers read the full metric set. If the attached token is dead, the
- * engage sync falls back to an app-only read (PostsService.checkPostAnalyticsAppOnly).
+ * When the handle does NOT match any connected account (the reply was posted from
+ * an external / non-connected X account), we deliberately return null rather than
+ * attaching an unrelated "fallback" account: a non-author integrationId would be
+ * a lie about who posted the reply. The real author is instead recorded in
+ * Post.settings.engageAuthor (see fetchXAuthorProfile / createManualXPost), and
+ * metrics still sync via the app-only path — impression_count and bookmark_count
+ * are part of X `public_metrics` and are readable by an app-only bearer, NOT
+ * owner-only, so a null integration loses no metric (see
+ * PostsService.checkEngageXAnalyticsWithFallback).
  *
  * The pure functions here are shared by EngageRepository (request path) and the
  * backfill script (scripts/backfill-engage-x-integration.ts) so the resolution
- * order has a single source of truth.
+ * rule has a single source of truth.
  */
 
 export interface XIntegrationCandidate {
   id: string;
   /** X handle (@username, stored without other decoration) — Integration.profile. */
   profile: string | null;
-  /** True when this integration is an engage-enabled X reply account. */
+  /**
+   * @deprecated No longer consulted: resolution now matches on author handle only.
+   * Kept on the interface so existing callers compile without churn.
+   */
   engageEnabled?: boolean;
 }
 
-export type XReplyMatch = 'handle' | 'bound' | 'fallback';
+export type XReplyMatch = 'handle';
 
 export interface XReplyResolution {
   integrationId: string;
@@ -50,24 +50,20 @@ function normalizeHandle(profile: string | null | undefined): string {
 }
 
 /**
- * Pick the best X integration for a reply. `candidates` MUST already be filtered
- * to live X integrations (providerIdentifier='x', not deleted, not disabled) and
- * is expected newest-first so the fallback is the most recently used account.
+ * Pick the X integration that authored a reply. `candidates` MUST already be
+ * filtered to live X integrations (providerIdentifier='x', not deleted, not
+ * disabled). Returns the integration whose handle matches the reply URL's author,
+ * or null when no connected account authored the reply (external account, or a
+ * URL with no parseable handle) — null is the signal to record the author in
+ * Post.settings.engageAuthor instead of attaching an unrelated account.
  */
 export function pickXReplyIntegration(
   candidates: XIntegrationCandidate[],
   replyUrl?: string | null
 ): XReplyResolution | null {
-  if (candidates.length === 0) return null;
-
   const handle = parseXHandle(replyUrl);
-  if (handle) {
-    const byHandle = candidates.find((c) => normalizeHandle(c.profile) === handle);
-    if (byHandle) return { integrationId: byHandle.id, matchedBy: 'handle' };
-  }
+  if (!handle) return null;
 
-  const bound = candidates.find((c) => c.engageEnabled);
-  if (bound) return { integrationId: bound.id, matchedBy: 'bound' };
-
-  return { integrationId: candidates[0].id, matchedBy: 'fallback' };
+  const byHandle = candidates.find((c) => normalizeHandle(c.profile) === handle);
+  return byHandle ? { integrationId: byHandle.id, matchedBy: 'handle' } : null;
 }

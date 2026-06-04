@@ -20,6 +20,14 @@ interface SentReply {
     trafficScore?: number;
     analytics?: Array<{ label: string; data: Array<{ total: string }> }>;
     integration?: { providerIdentifier: string } | null;
+    // The account that posted the reply, derived from the reply URL. Present for
+    // manual replies posted from an account that isn't a connected integration.
+    replyAuthor?: {
+      handle: string;
+      id?: string;
+      name?: string;
+      avatarUrl?: string;
+    } | null;
   };
   opportunity: {
     id: string;
