@@ -19,6 +19,7 @@ export interface Opportunity {
   scoreTracked: number;
   intentTags: string[];
   primaryIntent: string;
+  matchedKeywords?: string[];
   bookmarked: boolean;
   status: string;
   metricLikes: number;
@@ -121,6 +122,21 @@ export const OpportunityCard: FC<OpportunityCardProps> = ({
 
           {/* Content */}
           <p className="text-gray-200 text-sm line-clamp-2">{opp.postContent}</p>
+
+          {/* Matched keywords — why this post surfaced for this org */}
+          {opp.matchedKeywords && opp.matchedKeywords.length > 0 && (
+            <div className="flex flex-wrap items-center gap-1 mt-2">
+              {opp.matchedKeywords.map((kw) => (
+                <span
+                  key={kw}
+                  className="text-xs bg-blue-900/50 text-blue-300 px-1.5 py-0.5 rounded"
+                  title="Matched keyword"
+                >
+                  # {kw}
+                </span>
+              ))}
+            </div>
+          )}
 
           {/* Metrics */}
           <div className="flex items-center gap-4 mt-2 text-xs text-gray-500">

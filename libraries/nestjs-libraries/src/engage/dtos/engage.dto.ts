@@ -229,6 +229,13 @@ export class ListOpportunitiesDto {
   @IsString()
   intent?: string;
 
+  // Restrict to opportunities that matched this exact keyword (text, as the org
+  // configured it). Backed by EngageOpportunityState.matchedKeywords — strictly
+  // within this org's keyword scope.
+  @IsOptional()
+  @IsString()
+  keyword?: string;
+
   @IsOptional()
   @IsString()
   @IsIn(['today', 'week'])

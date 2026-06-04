@@ -25,6 +25,10 @@ interface SentReply {
     externalPostUrl: string;
     postContent: string;
     authorUsername: string;
+    authorDisplayName?: string;
+    authorFollowers?: number | null;
+    authorAvatarUrl?: string | null;
+    matchedKeywords?: string[];
   };
 }
 
@@ -81,10 +85,38 @@ export const SentCardReddit: FC<SentCardRedditProps> = ({
         </span>
       </div>
 
-      {/* Original post */}
+      {/* Original author + post */}
+      <div className="flex items-center gap-2 mb-1">
+        {opportunity.authorAvatarUrl && (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={opportunity.authorAvatarUrl}
+            alt={opportunity.authorUsername}
+            className="w-5 h-5 rounded-full shrink-0"
+          />
+        )}
+        <span className="text-xs text-gray-400 truncate">
+          {opportunity.authorDisplayName || `u/${opportunity.authorUsername}`}
+        </span>
+      </div>
       <p className="text-xs text-gray-500 mb-1 truncate">
-        @{opportunity.authorUsername}: {opportunity.postContent.slice(0, 60)}…
+        {opportunity.postContent.slice(0, 60)}…
       </p>
+
+      {/* Matched keywords — why this opportunity surfaced */}
+      {opportunity.matchedKeywords && opportunity.matchedKeywords.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1 mb-2">
+          {opportunity.matchedKeywords.map((kw) => (
+            <span
+              key={kw}
+              className="text-xs bg-blue-900/50 text-blue-300 px-1.5 py-0.5 rounded"
+              title="Matched keyword"
+            >
+              # {kw}
+            </span>
+          ))}
+        </div>
+      )}
 
       {/* Reply content */}
       <p className="text-sm text-gray-200 line-clamp-2 mb-3">{post.content}</p>

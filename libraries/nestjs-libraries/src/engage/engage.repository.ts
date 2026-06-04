@@ -584,6 +584,7 @@ export class EngageRepository {
       score: number;
       scoreKeyword: number;
       scoreTracked: number;
+      matchedKeywords: string[];
       createdAt: Date;
       opportunity: EngageOpportunity;
     }
@@ -595,6 +596,7 @@ export class EngageRepository {
       score,
       scoreKeyword,
       scoreTracked,
+      matchedKeywords,
       createdAt,
     } = state;
     return {
@@ -641,6 +643,7 @@ export class EngageRepository {
       score,
       scoreKeyword,
       scoreTracked,
+      matchedKeywords,
     };
   }
 
@@ -678,6 +681,7 @@ export class EngageRepository {
       ...(dto.minScoreKeyword !== undefined && {
         scoreKeyword: { gte: dto.minScoreKeyword },
       }),
+      ...(dto.keyword && { matchedKeywords: { has: dto.keyword } }),
       ...(authorsAll && { scoreTracked: { gt: 0 } }),
       opportunity: {
         deletedAt: null,
@@ -1194,6 +1198,8 @@ export class EngageRepository {
               postContent: true,
               authorUsername: true,
               authorDisplayName: true,
+              authorFollowers: true,
+              authorAvatarUrl: true,
             },
           },
         },
@@ -1204,13 +1210,34 @@ export class EngageRepository {
       this._sentReply.model.engageSentReply.count({ where }),
     ]);
 
+    // Attach the keywords this org matched on the opportunity (shown on the sent
+    // card so the user remembers why they replied). matchedKeywords is per-org,
+    // living on EngageOpportunityState — joined here by (organizationId,
+    // opportunityId) rather than via the opportunity, since the SentReply links
+    // to the shared opportunity, not the org's state row. One bounded query.
+    const oppIds = items.map((it) => it.opportunity.id);
+    const states = oppIds.length
+      ? (await this._oppState.model.engageOpportunityState.findMany({
+          where: { organizationId, opportunityId: { in: oppIds } },
+          select: { opportunityId: true, matchedKeywords: true },
+        })) ?? []
+      : [];
+    const keywordsByOpp = new Map(
+      states.map((s) => [s.opportunityId, s.matchedKeywords])
+    );
+
     // Attach a flat, frontend-friendly `metrics` object (every per-platform field
     // present) derived from the verbose Post.analytics array, so the UI can read
     // e.g. metrics.bookmarks directly. Post.analytics is kept for compatibility.
-    const itemsWithMetrics = items.map((it) =>
-      it.post
+    const itemsWithMetrics = items.map((it) => {
+      const opportunity = {
+        ...it.opportunity,
+        matchedKeywords: keywordsByOpp.get(it.opportunity.id) ?? [],
+      };
+      return it.post
         ? {
             ...it,
+            opportunity,
             post: {
               ...it.post,
               metrics: normalizeReplyMetrics(
@@ -1221,8 +1248,8 @@ export class EngageRepository {
               ),
             },
           }
-        : it
-    );
+        : { ...it, opportunity };
+    });
 
     return { items: itemsWithMetrics, total, page, limit };
   }

@@ -604,11 +604,14 @@ export class EngageScanActivity {
               score: post.score,
               scoreKeyword: post.scoreKeyword,
               scoreTracked: post.scoreTracked,
+              matchedKeywords: post.matchedKeywords,
             },
             update: {
               score: post.score,
               scoreKeyword: post.scoreKeyword,
               scoreTracked: post.scoreTracked,
+              // Refresh matched keywords so keyword edits are reflected on re-scan.
+              matchedKeywords: post.matchedKeywords,
               // status / bookmarked NOT updated — preserve user state
             },
           })

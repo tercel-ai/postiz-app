@@ -91,6 +91,7 @@ const STATE_ROW = {
   score: 70,
   scoreKeyword: 30,
   scoreTracked: 5,
+  matchedKeywords: ['react', 'nextjs'],
   opportunity: {
     id: 'opp1',
     platform: 'x',
@@ -118,7 +119,19 @@ describe('EngageRepository — two-table reads', () => {
       expect(item.score).toBe(70);             // from state
       expect(item.scoreHeat).toBe(18);         // from opportunity
       expect(item.intentTags).toEqual(['support']);
+      expect(item.matchedKeywords).toEqual(['react', 'nextjs']); // from state (per-org)
       expect(item).not.toHaveProperty('opportunity'); // flattened, not nested
+    });
+
+    it('filters by an exact matched keyword on the state table', async () => {
+      const { repo, stateFindMany, stateCount } = buildRepo();
+      stateFindMany.mockResolvedValue([]);
+      stateCount.mockResolvedValue(0);
+
+      await repo.listOpportunities('org1', { keyword: 'react' } as any);
+      expect(stateFindMany.mock.calls[0][0].where.matchedKeywords).toEqual({
+        has: 'react',
+      });
     });
 
     it('attaches replyLink + sentReplyId from the latest sent reply', async () => {
@@ -227,6 +240,39 @@ describe('EngageRepository — two-table reads', () => {
       });
       // A specific author is NOT "all tracked" → no scoreTracked filter.
       expect(stateFindMany.mock.calls[0][0].where.scoreTracked).toBeUndefined();
+    });
+  });
+
+  describe('listSentReplies', () => {
+    it('attaches per-org matchedKeywords to each opportunity via the state join', async () => {
+      const { repo, sentFindMany, sentCount, stateFindMany } = buildRepo();
+      sentFindMany.mockResolvedValue([
+        {
+          id: 's1',
+          opportunity: { id: 'o1', platform: 'x' },
+          post: { analytics: [], impressions: 0, trafficScore: 0 },
+        },
+        {
+          id: 's2',
+          opportunity: { id: 'o2', platform: 'reddit' },
+          post: { analytics: [], impressions: 0, trafficScore: 0 },
+        },
+      ]);
+      sentCount.mockResolvedValue(2);
+      // Only o1 has a state row with keywords; o2 falls back to [].
+      stateFindMany.mockResolvedValue([
+        { opportunityId: 'o1', matchedKeywords: ['react', 'nextjs'] },
+      ]);
+
+      const res = await repo.listSentReplies('org1', {} as any);
+      const [a, b] = res.items as any[];
+      expect(a.opportunity.matchedKeywords).toEqual(['react', 'nextjs']);
+      expect(b.opportunity.matchedKeywords).toEqual([]);
+      // The state join is scoped to the org and the page's opportunity ids.
+      expect(stateFindMany.mock.calls[0][0].where).toEqual({
+        organizationId: 'org1',
+        opportunityId: { in: ['o1', 'o2'] },
+      });
     });
   });
 

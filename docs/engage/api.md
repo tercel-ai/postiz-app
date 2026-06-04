@@ -234,6 +234,7 @@ interface EngageOpportunity {
   scoreAuthority: number;   // Authority score 0-15 (账号影响力)
   scoreRecency: number;     // Recency score 0-5: within 24h→5, else→0 (时效性)
   scoreTracked: number;     // Tracked account bonus 0 or 5 (重点账户)
+  matchedKeywords: string[]; // this org's enabled keywords the post hit (per-org; ⊆ the org's keyword set)
   // Intent
   intentTags: IntentType[];
   primaryIntent: IntentType;
@@ -804,6 +805,7 @@ Retrieve the list of opportunities (main Signal Feed endpoint).
 | `platform` | `string` | — | Platform filter: `'x'` / `'reddit'` |
 | `status` | `EngageOpportunityStatus` | — | Status filter |
 | `intent` | `IntentType` | — | Intent filter |
+| `keyword` | `string` | — | Restrict to opportunities that matched this exact keyword (text as configured; per-org via `matchedKeywords`) |
 | `date` | `'today' \| 'week'` | — | Time range |
 | `minScore` | `number` | — | Minimum total score |
 | `minScoreKeyword` | `number` | — | Minimum keyword score |
@@ -1194,7 +1196,10 @@ Retrieve the list of sent replies (includes original post summary and metrics da
         "externalPostUrl": "https://x.com/someuser/status/999",
         "postContent": "What's the best way to use AI for SEO?",
         "authorUsername": "someuser",
-        "authorDisplayName": "Some User"
+        "authorDisplayName": "Some User",
+        "authorFollowers": 4747631,
+        "authorAvatarUrl": "https://pbs.twimg.com/profile_images/.../avatar_400x400.jpg",
+        "matchedKeywords": ["SEO", "AI"]
       }
     }
   ],

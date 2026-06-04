@@ -28,6 +28,9 @@ interface SentReply {
     postContent: string;
     authorUsername: string;
     authorDisplayName?: string;
+    authorFollowers?: number | null;
+    authorAvatarUrl?: string | null;
+    matchedKeywords?: string[];
   };
 }
 

@@ -38,6 +38,11 @@ export interface ScoredPost extends RawPost {
   scoreAuthority: number;
   scoreRecency: number;
   scoreTracked: number;
+  // The org's enabled keywords this post actually hit (text, as configured).
+  // Per-org by construction — scorePost is called with one org's keyword set —
+  // so it stays strictly within that org's keyword scope and is persisted onto
+  // the per-org EngageOpportunityState row (never the shared EngageOpportunity).
+  matchedKeywords: string[];
   intentTags: string[];
   primaryIntent: string;
   intentScore?: number;
@@ -87,6 +92,7 @@ export function scorePost(
     ...post,
     score,
     scoreKeyword,
+    matchedKeywords: hits.map((k) => k.keyword),
     scoreHeat,
     scoreAuthority,
     scoreRecency,

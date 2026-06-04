@@ -306,6 +306,20 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
           <p className="text-sm text-gray-300 line-clamp-3">
             {opportunity.postContent}
           </p>
+          {opportunity.matchedKeywords &&
+            opportunity.matchedKeywords.length > 0 && (
+              <div className="flex flex-wrap items-center gap-1 mt-2">
+                {opportunity.matchedKeywords.map((kw) => (
+                  <span
+                    key={kw}
+                    className="text-xs bg-blue-900/50 text-blue-300 px-1.5 py-0.5 rounded"
+                    title="Matched keyword"
+                  >
+                    # {kw}
+                  </span>
+                ))}
+              </div>
+            )}
         </div>
 
         {/* Strategy selector */}

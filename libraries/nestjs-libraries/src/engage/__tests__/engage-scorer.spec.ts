@@ -87,6 +87,20 @@ describe('engage-scorer', () => {
     });
   });
 
+  describe('matchedKeywords — the enabled keywords actually hit', () => {
+    it('reports only the enabled keywords present in the content', () => {
+      const post = makePost({ postContent: 'Best GEO and SEO tools for 2026' });
+      const result = scorePost(post, [
+        makeKeyword('GEO'),
+        makeKeyword('SEO'),
+        makeKeyword('PPC'), // not in content
+        makeKeyword('disabled', null, false), // disabled → never counts
+      ]);
+      expect(result).not.toBeNull();
+      expect(result!.matchedKeywords).toEqual(['GEO', 'SEO']);
+    });
+  });
+
   describe('scoreHeat — per-platform branch routing', () => {
     // Build a post that hits the keyword "GEO" with every metric explicit (0 by
     // default) so each heat formula reads defined numbers, not undefined → NaN.

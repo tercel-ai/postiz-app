@@ -38,6 +38,7 @@ function makeScoredPost(n: number): ScoredPost {
     metricComments: 3,
     score: 70,
     scoreKeyword: 30,
+    matchedKeywords: ['react', 'nextjs'],
     scoreHeat: 18,
     scoreAuthority: 8,
     scoreRecency: 4,
@@ -105,6 +106,9 @@ describe('EngageScanActivity._persistOpportunities', () => {
     });
     expect(arg.create.status).toBe('NEW');
     expect(arg.create.score).toBe(70);
+    // Matched keywords (per-org) are written on create and refreshed on update.
+    expect(arg.create.matchedKeywords).toEqual(['react', 'nextjs']);
+    expect(arg.update.matchedKeywords).toEqual(['react', 'nextjs']);
     // The update branch must NOT reset status/bookmarked — re-scan would otherwise
     // silently undo a user's dismiss/bookmark.
     expect(arg.update).not.toHaveProperty('status');

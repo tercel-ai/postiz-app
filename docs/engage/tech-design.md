@@ -329,6 +329,7 @@ model EngageOpportunityState {
   score          Int       @default(0)
   scoreKeyword   Int       @default(0)
   scoreTracked   Int       @default(0)
+  matchedKeywords String[]                  // this org's enabled keywords the post hit (per-org; refreshed each re-scan)
 
   createdAt      DateTime  @default(now())  // when THIS org first matched the post (drives TTL/expiry)
   updatedAt      DateTime  @updatedAt

@@ -1200,6 +1200,13 @@ model EngageOpportunityState {
   scoreKeyword   Int       @default(0)
   scoreTracked   Int       @default(0)
 
+  // The org's enabled keywords this post matched at scan time (text, as
+  // configured). Per-org — strictly within this org's keyword scope — so it
+  // lives here, alongside scoreKeyword, not on the shared EngageOpportunity
+  // (whose union of all orgs' keywords would leak words outside this org's set).
+  // Refreshed on every re-scan to track keyword edits.
+  matchedKeywords String[]
+
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
 
