@@ -84,15 +84,21 @@ async function main(): Promise<void> {
   console.log('=== Backfill EngageOpportunityState.matchedKeywords ===\n');
   console.log(`Mode:  ${args.dryRun ? 'DRY RUN (no changes)' : 'EXECUTE'}`);
   console.log(`Org:   ${args.orgId ?? 'all'}`);
-  console.log(`Scope: ${args.all ? 'all rows (recompute)' : 'empty matchedKeywords only'}\n`);
+  console.log(`Scope: ${args.all ? 'all rows (recompute)' : 'rows with no keywords yet (incl. legacy NULL)'}\n`);
 
   const prisma = new PrismaClient();
 
+  // NOTE: we do NOT pre-filter with `matchedKeywords: { isEmpty: true }`. Rows
+  // created before the column existed are SQL NULL (db push added the String[]
+  // nullable, no default), and Prisma's `isEmpty` compiles to a cardinality
+  // predicate that does not match NULL — it would silently skip every legacy
+  // row. Instead we fetch all rows (optionally org-scoped) and decide per-row
+  // using the client value, which Prisma normalizes NULL → [] (so length === 0
+  // catches both NULL and empty {}). For the bounded engage tables this full
+  // scan is fine; it is a one-off backfill.
   const rows = await prisma.engageOpportunityState.findMany({
     where: {
       ...(args.orgId ? { organizationId: args.orgId } : {}),
-      // Default: only rows that have never been filled. --all recomputes every row.
-      ...(args.all ? {} : { matchedKeywords: { isEmpty: true } }),
     },
     select: {
       organizationId: true,
@@ -114,6 +120,13 @@ async function main(): Promise<void> {
     if (!keywordCache.has(r.organizationId)) {
       keywordCache.set(r.organizationId, await enabledKeywords(prisma, r.organizationId));
     }
+    // Skip rows that already carry keywords unless --all forces a recompute.
+    // r.matchedKeywords is [] for both legacy NULL and empty {} (Prisma normalizes).
+    if (!args.all && r.matchedKeywords.length > 0) {
+      unchanged++;
+      continue;
+    }
+
     const keywords = keywordCache.get(r.organizationId)!;
     const content = r.opportunity?.postContent ?? '';
     const hits = keywords.filter((kw) => postMatchesKeyword(content, kw));
