@@ -105,7 +105,11 @@ export function scorePost(
 
 // ─── Keyword scoring ──────────────────────────────────────────────────────────
 
-function postMatchesKeyword(content: string, keyword: string): boolean {
+// Exported so the matchedKeywords backfill script reuses the EXACT same match
+// semantics as live scoring (word-boundary for ASCII, substring for CJK) —
+// re-implementing it in the script would risk drift between scan-time and
+// backfill-time keyword hits.
+export function postMatchesKeyword(content: string, keyword: string): boolean {
   const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   // For ASCII keywords, keep \b boundaries to prevent "AI" matching "rail".
   // For keywords containing any non-ASCII character (CJK, accented, emoji),

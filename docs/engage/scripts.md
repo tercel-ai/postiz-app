@@ -29,6 +29,7 @@ by **when you reach for them** and lists the flags/env you actually need.
 | `ingest-engage-post.ts` | Manually inject one X post into the pool | **writes** | ts-node |
 | `cleanup-engage-opportunities.ts` | Soft-delete un-repliable opportunities | list/check | tsx |
 | `backfill-engage-data-ticks.ts` | Rebuild `EngageDataTicks` from `Post` | dry-run | ts-node |
+| `backfill-engage-matched-keywords.ts` | Fill `EngageOpportunityState.matchedKeywords` for pre-field rows | dry-run | ts-node |
 | `terminate-engage-data-ticks.ts` | Stop the running data-ticks workflow | dry-run | tsx |
 
 ---
@@ -221,6 +222,25 @@ npx ts-node --project scripts/tsconfig.json scripts/backfill-engage-data-ticks.t
 
 - **Flags:** `--start-date` / `--end-date` (**both required**, `YYYY-MM-DD`, UTC,
   inclusive), `--org`, `--platform`, `--type`, `--dry-run` (default) / `--execute`, `--help`.
+
+### `backfill-engage-matched-keywords.ts` — fill `matchedKeywords` for pre-field rows
+`EngageOpportunityState.matchedKeywords` was added after opportunities already
+existed, so old rows default to `[]` and the signal-feed / sent cards render no
+keyword chips for them until a scan re-upserts the row. This script fills them
+now by re-matching each opportunity's `postContent` against its org's **current
+enabled** keywords — reusing `engage-scorer.ts` `postMatchesKeyword` verbatim so
+backfilled hits match scan-time hits. Idempotent; skips rows already correct and
+rows that match no current keyword (left `[]`).
+
+```bash
+npx ts-node --project scripts/tsconfig.json scripts/backfill-engage-matched-keywords.ts --dry-run
+npx ts-node --project scripts/tsconfig.json scripts/backfill-engage-matched-keywords.ts --execute
+npx ts-node --project scripts/tsconfig.json scripts/backfill-engage-matched-keywords.ts --org <orgId> --execute
+npx ts-node --project scripts/tsconfig.json scripts/backfill-engage-matched-keywords.ts --all --execute  # recompute every row, not just empty
+```
+
+- **Flags:** `--org`, `--all` (recompute non-empty rows too), `--dry-run` (default) / `--execute`, `--help`.
+- **Prereq:** the `matchedKeywords` column must exist — run `pnpm run prisma-db-push` first.
 
 ### `terminate-engage-data-ticks.ts` — stop the running data-ticks workflow
 Gating off registration prevents *new* starts but does not stop an instance already
