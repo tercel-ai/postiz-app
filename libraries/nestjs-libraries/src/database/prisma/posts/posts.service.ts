@@ -44,6 +44,13 @@ import { PostOverageService } from '@gitroom/nestjs-libraries/database/prisma/po
 import { PostingTimesV2 } from '@gitroom/nestjs-libraries/dtos/integrations/posting-times.types';
 import { resolveTimeSlotsForDate } from '@gitroom/nestjs-libraries/dtos/integrations/posting-times.utils';
 import { getSocialTaskQueue } from '@gitroom/nestjs-libraries/temporal/task-queue';
+import {
+  parseXHandle,
+} from '@gitroom/nestjs-libraries/engage/resolve-x-reply-integration';
+import {
+  fetchXAuthorProfile,
+  XAuthorProfile,
+} from '@gitroom/nestjs-libraries/engage/x-tweet';
 type PostWithConditionals = Post & {
   integration?: Integration;
   childrenPost: Post[];
@@ -387,6 +394,50 @@ export class PostsService {
     }
 
     return this.checkPostAnalyticsAppOnly(orgId, postId, date);
+  }
+
+  /**
+   * Best-effort lookup of an engage reply's author (the @handle in the reply URL)
+   * for storing in Post.settings.engageAuthor. Prefers an org-connected X account's
+   * OAuth token — refreshing it when expired — so author enrichment (id / name /
+   * avatar) works WITHOUT a global X_BEARER_TOKEN. Falls back, inside
+   * fetchXAuthorProfile, to the app-only bearer and finally to handle-only. Never
+   * throws.
+   *
+   * Engage-only: the org's own connected account is just a credential to read a
+   * PUBLIC profile by username; it is unrelated to who authored the reply.
+   */
+  async fetchEngageXAuthor(
+    orgId: string,
+    replyUrl: string | null | undefined
+  ): Promise<XAuthorProfile | null> {
+    if (!parseXHandle(replyUrl)) return null;
+
+    let token: string | undefined;
+    try {
+      const integrations = await this._integrationService.getIntegrationsList(orgId);
+      const x = (integrations || []).find(
+        (i) =>
+          i.providerIdentifier === 'x' &&
+          !i.disabled &&
+          !i.deletedAt &&
+          !i.refreshNeeded
+      );
+      if (x) {
+        if (x.tokenExpiration && dayjs(x.tokenExpiration).isBefore(dayjs())) {
+          const refreshed = await this._refreshIntegrationService
+            .refresh(x)
+            .catch(() => false as const);
+          token = refreshed && refreshed.accessToken ? refreshed.accessToken : undefined;
+        } else {
+          token = x.token;
+        }
+      }
+    } catch {
+      /* best-effort: fall through to app-only / handle-only */
+    }
+
+    return fetchXAuthorProfile(replyUrl, token);
   }
 
   async getStatistics(orgId: string, id: string) {

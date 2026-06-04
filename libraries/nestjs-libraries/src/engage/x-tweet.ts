@@ -102,19 +102,24 @@ export interface XAuthorProfile {
 
 /**
  * Best-effort lookup of a reply URL's author (the @handle in the permalink) via
- * the X API v2 app-only bearer. Always returns at least `{ handle }` when the URL
- * has a parseable handle; enriches with id/name/avatarUrl when the bearer is
- * configured and the lookup succeeds. Returns null only when no handle can be
- * parsed. Never throws — any enrichment failure degrades to handle-only so the
- * caller can still record who posted the reply.
+ * the X API v2. Always returns at least `{ handle }` when the URL has a parseable
+ * handle; enriches with id/name/avatarUrl when a token is available and the lookup
+ * succeeds. Returns null only when no handle can be parsed. Never throws — any
+ * enrichment failure degrades to handle-only so the caller can still record who
+ * posted the reply.
+ *
+ * `bearerToken` lets callers pass an org-connected account's OAuth token (so the
+ * lookup works without a global X_BEARER_TOKEN); when omitted it falls back to the
+ * app-only bearer env var, and finally to handle-only.
  */
 export async function fetchXAuthorProfile(
-  url: string | null | undefined
+  url: string | null | undefined,
+  bearerToken?: string
 ): Promise<XAuthorProfile | null> {
   const handle = parseXHandle(url);
   if (!handle) return null;
 
-  const bearer = process.env.X_BEARER_TOKEN;
+  const bearer = bearerToken || process.env.X_BEARER_TOKEN;
   if (!bearer) return { handle };
 
   try {

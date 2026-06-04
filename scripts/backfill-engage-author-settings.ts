@@ -3,14 +3,15 @@
  * before the reply author was captured — i.e. Post.integrationId IS NULL (the reply
  * was posted from an account that isn't a connected integration) and the reply URL
  * is known. Reads the author (@handle + best-effort id/name/avatar) from the reply
- * URL via the X API app-only bearer and merges it into Post.settings.engageAuthor,
- * preserving the existing { "__type": "x" } tag.
+ * URL and merges it into Post.settings.engageAuthor, preserving the existing
+ * { "__type": "x" } tag.
  *
- * Author enrichment (id/name/avatarUrl) needs X_BEARER_TOKEN configured; without it
- * the script still records the @handle parsed from the URL (handle-only mode).
+ * Author enrichment (id/name/avatarUrl) uses an ORG-CONNECTED X account's OAuth
+ * token (resolved + refreshed via PostsService.fetchEngageXAuthor), so it works
+ * without a global X_BEARER_TOKEN — the org's own X account is just a credential to
+ * read a public profile by username. Falls back to X_BEARER_TOKEN, then handle-only.
  *
- * Reddit replies are skipped automatically: their URLs carry no author handle, so
- * fetchXAuthorProfile returns null and the row is counted as "no-handle".
+ * Reddit replies are skipped automatically: their URLs carry no author handle.
  *
  * Idempotent: rows that already have settings.engageAuthor are skipped unless
  * --force is passed (re-fetches and overwrites).
@@ -28,8 +29,15 @@ dotenv.config();
 process.env.NODE_ENV = process.env.NODE_ENV || 'production';
 process.env.TZ = 'UTC';
 
+import { NestFactory } from '@nestjs/core';
+import { Module } from '@nestjs/common';
 import { PrismaClient } from '@prisma/client';
-import { fetchXAuthorProfile } from '@gitroom/nestjs-libraries/engage/x-tweet';
+import { DatabaseModule } from '@gitroom/nestjs-libraries/database/prisma/database.module';
+import { getTemporalModule } from '@gitroom/nestjs-libraries/temporal/temporal.module';
+import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.service';
+
+@Module({ imports: [DatabaseModule, getTemporalModule(false)] })
+class ScriptModule {}
 
 interface CliArgs {
   orgId: string | null;
@@ -71,13 +79,7 @@ async function main(): Promise<void> {
   console.log('=== Backfill Engage reply author → Post.settings.engageAuthor ===\n');
   console.log(`Mode:  ${args.dryRun ? 'DRY RUN (no changes)' : 'EXECUTE'}`);
   console.log(`Org:   ${args.orgId ?? 'all'}`);
-  console.log(`Force: ${args.force}`);
-  if (!process.env.X_BEARER_TOKEN) {
-    console.log(
-      'NOTE:  X_BEARER_TOKEN not set — handle-only mode (no id/name/avatar enrichment).'
-    );
-  }
-  console.log('');
+  console.log(`Force: ${args.force}\n`);
 
   const prisma = new PrismaClient();
 
@@ -95,8 +97,15 @@ async function main(): Promise<void> {
 
   console.log(`Found ${pending.length} engage repl${pending.length === 1 ? 'y' : 'ies'} with integrationId=null and a reply URL.\n`);
 
+  // Bootstrap DI so author lookup reuses the production OAuth + token-refresh path.
+  console.log('Bootstrapping NestJS context...\n');
+  const app = await NestFactory.createApplicationContext(ScriptModule, {
+    logger: ['error', 'warn'],
+  });
+  const postsService = app.get(PostsService, { strict: false });
+
   let enrichedFull = 0; // got id/name/avatar
-  let handleOnly = 0;   // got @handle only (no bearer or lookup miss)
+  let handleOnly = 0;   // got @handle only (no usable token / lookup miss)
   let skipped = 0;      // already had engageAuthor (and not --force)
   let noHandle = 0;     // URL had no parseable X handle (e.g. Reddit)
   let written = 0;
@@ -115,7 +124,7 @@ async function main(): Promise<void> {
       continue;
     }
 
-    const author = await fetchXAuthorProfile(p.releaseURL);
+    const author = await postsService.fetchEngageXAuthor(p.organizationId, p.releaseURL);
     if (!author) {
       noHandle++;
       continue;
@@ -148,6 +157,7 @@ async function main(): Promise<void> {
     (args.dryRun ? '\n\n--- DRY RUN. Re-run with --execute to write. ---' : '')
   );
 
+  await app.close();
   await prisma.$disconnect();
 }
 

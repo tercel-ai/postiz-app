@@ -830,6 +830,27 @@ describe('EngageRepository — two-table reads', () => {
       expect(settings.engageAuthor).toEqual({ handle: 'externalguy', id: '42', name: 'External Guy' });
     });
 
+    it('does NOT write engageAuthor when an integration authored the reply (integrationId is source of truth)', async () => {
+      const { repo, integrationFindMany, postCreate } = buildXRepo();
+      // The reply URL's author handle matches a connected account → integrationId set.
+      integrationFindMany.mockResolvedValue([
+        { id: 'author', profile: 'zhngyq310334', engageXReplyAccount: null },
+      ]);
+      postCreate.mockResolvedValue({ id: 'post1' });
+
+      await repo.createManualXPost({
+        organizationId: 'org1',
+        content: 'reply',
+        date: new Date(0),
+        replyUrl: 'https://x.com/zhngyq310334/status/2061267353544146949',
+        engageAuthor: { handle: 'zhngyq310334', id: '7', name: 'ZQ' },
+      });
+
+      const data = postCreate.mock.calls[0][0].data;
+      expect(data.integrationId).toBe('author');
+      expect(JSON.parse(data.settings).engageAuthor).toBeUndefined(); // not duplicated
+    });
+
     it('omits releaseId when the URL has no /status/<id> segment', async () => {
       const { repo, integrationFindFirst, postCreate } = buildXRepo();
       integrationFindFirst.mockResolvedValue({ id: 'int1' });

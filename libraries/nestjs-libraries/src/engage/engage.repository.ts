@@ -1825,14 +1825,19 @@ export class EngageRepository {
         where: { id: reply.postId },
         select: { integrationId: true, settings: true },
       });
-      if (!post?.integrationId) {
+      const alreadyLinked = !!post?.integrationId;
+      if (!alreadyLinked) {
         integrationId =
           (await this.resolveXReplyIntegrationId(organizationId, url))
             ?.integrationId ?? undefined;
       }
-      // Record the URL author now that we have the link. Merge into existing
-      // settings so the __type tag (and anything else) is preserved.
-      if (engageAuthor) {
+      // engageAuthor is only the FALLBACK identity for replies with no connected
+      // account. If the reply already had an integration, or the URL just
+      // handle-matched one, integrationId is the source of truth — leave settings
+      // (and the existing row) untouched. Only record engageAuthor when the reply
+      // ends up with no integration at all.
+      const willHaveIntegration = alreadyLinked || !!integrationId;
+      if (!willHaveIntegration && engageAuthor) {
         let parsed: Record<string, unknown> = { __type: 'x' };
         try {
           parsed = { ...parsed, ...(JSON.parse(post?.settings ?? '{}') ?? {}) };
@@ -2165,10 +2170,12 @@ export class EngageRepository {
         image: '[]',
         settings: JSON.stringify({
           __type: 'x',
-          // Records who actually posted the reply (the URL author), which is
-          // independent of integrationId — the latter is set only when a
-          // connected account authored it (see resolve-x-reply-integration.ts).
-          ...(data.engageAuthor ? { engageAuthor: data.engageAuthor } : {}),
+          // engageAuthor is only a FALLBACK identity for when no connected account
+          // authored the reply. When integrationId is set it IS the source of truth
+          // for who replied, so we don't duplicate the author into settings.
+          ...(!integrationId && data.engageAuthor
+            ? { engageAuthor: data.engageAuthor }
+            : {}),
         }),
         group: randomUUID(),
         delay: 0,
