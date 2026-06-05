@@ -30,6 +30,9 @@ dotenv.config();
 
 process.env.NODE_ENV = process.env.NODE_ENV || 'production';
 process.env.TZ = 'UTC';
+// This script bootstraps the full DI graph (for PostsService) but never classifies
+// intents — skip the ~44MB local NLI model load so startup isn't blocked by it.
+process.env.ENGAGE_DISABLE_LOCAL_NLI = 'true';
 
 import { NestFactory } from '@nestjs/core';
 import { Module } from '@nestjs/common';

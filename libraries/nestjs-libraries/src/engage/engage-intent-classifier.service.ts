@@ -36,6 +36,16 @@ export class EngageIntentClassifierService implements OnModuleInit {
     : null;
 
   async onModuleInit() {
+    // Opt-out for contexts that bootstrap the full DI graph but never classify
+    // (one-off scripts / backfills): skip the ~44MB model load entirely so they
+    // don't pay the download/init cost (or emit the sharp-missing warning). At
+    // runtime classify() then uses the Claude fallback, same as a failed load.
+    if (process.env.ENGAGE_DISABLE_LOCAL_NLI === 'true') {
+      this.logger.log(
+        'Local NLI model disabled via ENGAGE_DISABLE_LOCAL_NLI — classifications use Claude fallback.'
+      );
+      return;
+    }
     try {
       // Dynamic import so webpack/tsc don't bundle it statically.
       // Model files (~44MB) are downloaded on first call and cached in
