@@ -21,7 +21,8 @@ import {
   XReplyResolution,
 } from '@gitroom/nestjs-libraries/engage/resolve-x-reply-integration';
 import { classifyReplyMetric, normalizeReplyMetrics } from '@gitroom/nestjs-libraries/engage/engage-metrics-stats';
-import { parseXTweetId, XAuthorProfile } from '@gitroom/nestjs-libraries/engage/x-tweet';
+import { parseXTweetId } from '@gitroom/nestjs-libraries/engage/x-tweet';
+import { EngageAuthorProfile } from '@gitroom/nestjs-libraries/engage/engage-author';
 import dayjs from 'dayjs';
 import isoWeek from 'dayjs/plugin/isoWeek';
 import utc from 'dayjs/plugin/utc';
@@ -98,17 +99,40 @@ function minDate(ds: (Date | null)[]): Date | null {
 
 /**
  * Pull the reply author (engageAuthor) out of a Post.settings JSON blob. Returns
- * null when settings is absent/unparseable or carries no engageAuthor — i.e. for
- * replies posted through a connected integration (their author IS the integration).
+ * null when settings is absent/unparseable or carries no engageAuthor.
  */
-function parseEngageAuthor(settings: string | null): XAuthorProfile | null {
+function parseEngageAuthor(settings: string | null): EngageAuthorProfile | null {
   if (!settings) return null;
   try {
-    const parsed = JSON.parse(settings) as { engageAuthor?: XAuthorProfile };
+    const parsed = JSON.parse(settings) as { engageAuthor?: EngageAuthorProfile };
     return parsed?.engageAuthor ?? null;
   } catch {
     return null;
   }
+}
+
+/**
+ * Resolve a single, unified `replyAuthor` (who posted the reply) so the frontend
+ * reads one field regardless of source. integrationId is the source of truth: when
+ * a connected account authored the reply, build the author from it; otherwise fall
+ * back to settings.engageAuthor (manual reply from a non-connected account).
+ */
+function resolveReplyAuthor(
+  integration:
+    | { profile: string | null; internalId: string | null; name: string | null; picture: string | null }
+    | null
+    | undefined,
+  settings: string | null
+): EngageAuthorProfile | null {
+  if (integration) {
+    return {
+      handle: (integration.profile ?? '').replace(/^@/, ''),
+      ...(integration.internalId ? { id: integration.internalId } : {}),
+      ...(integration.name ? { name: integration.name } : {}),
+      ...(integration.picture ? { avatarUrl: integration.picture } : {}),
+    };
+  }
+  return parseEngageAuthor(settings);
 }
 
 @Injectable()
@@ -1204,6 +1228,10 @@ export class EngageRepository {
                   name: true,
                   providerIdentifier: true,
                   picture: true,
+                  // profile (@handle) + internalId (numeric X id) let us build a
+                  // unified replyAuthor from the integration when it authored the reply.
+                  profile: true,
+                  internalId: true,
                 },
               },
             },
@@ -1261,7 +1289,7 @@ export class EngageRepository {
         opportunity,
         post: {
           ...postRest,
-          replyAuthor: parseEngageAuthor(settings),
+          replyAuthor: resolveReplyAuthor(it.post.integration, settings),
           metrics: normalizeReplyMetrics(
             it.opportunity.platform,
             it.post.analytics,
@@ -1794,7 +1822,7 @@ export class EngageRepository {
     organizationId: string,
     sentReplyId: string,
     url: string,
-    engageAuthor?: XAuthorProfile
+    engageAuthor?: EngageAuthorProfile
   ) {
     // Join the opportunity for its platform: backfill is only meaningful for the
     // manual-reply platforms (X / Reddit), and for X we also derive releaseId
@@ -1838,14 +1866,16 @@ export class EngageRepository {
       // ends up with no integration at all.
       const willHaveIntegration = alreadyLinked || !!integrationId;
       if (!willHaveIntegration && engageAuthor) {
-        let parsed: Record<string, unknown> = { __type: 'x' };
-        try {
-          parsed = { ...parsed, ...(JSON.parse(post?.settings ?? '{}') ?? {}) };
-        } catch {
-          /* keep the {__type:'x'} default on unparseable settings */
-        }
-        mergedSettings = JSON.stringify({ ...parsed, engageAuthor });
+        mergedSettings = this._mergeEngageAuthor(post?.settings, 'x', engageAuthor);
       }
+    } else if (platform === 'reddit' && engageAuthor) {
+      // Reddit replies never have an integration, so engageAuthor is always the
+      // recorded author. Merge into existing settings to preserve the __type tag.
+      const post = await this._post.model.post.findUnique({
+        where: { id: reply.postId },
+        select: { settings: true },
+      });
+      mergedSettings = this._mergeEngageAuthor(post?.settings, 'reddit', engageAuthor);
     }
 
     return this._post.model.post.update({
@@ -1857,6 +1887,22 @@ export class EngageRepository {
         ...(mergedSettings ? { settings: mergedSettings } : {}),
       },
     });
+  }
+
+  /** Merge engageAuthor into a Post.settings JSON string, preserving __type and any
+   *  other keys; tolerant of null/unparseable input. */
+  private _mergeEngageAuthor(
+    settings: string | null | undefined,
+    type: 'x' | 'reddit',
+    engageAuthor: EngageAuthorProfile
+  ): string {
+    let parsed: Record<string, unknown> = { __type: type };
+    try {
+      parsed = { ...parsed, ...(JSON.parse(settings ?? '{}') ?? {}) };
+    } catch {
+      /* keep the {__type} default on unparseable settings */
+    }
+    return JSON.stringify({ ...parsed, engageAuthor });
   }
 
   /** Platform of a sent reply, scoped to the org (for backfill validation). */
@@ -2060,6 +2106,7 @@ export class EngageRepository {
     content: string;
     date: Date;
     replyUrl?: string;
+    engageAuthor?: EngageAuthorProfile;
   }) {
     const { randomUUID } = await import('crypto');
     return this._post.model.post.create({
@@ -2070,7 +2117,12 @@ export class EngageRepository {
         state: 'PUBLISHED',
         source: 'engage',
         image: '[]',
-        settings: JSON.stringify({ __type: 'reddit' }),
+        // Reddit manual posts never have an integration, so engageAuthor (the
+        // redditor who posted the reply) is the source of truth when known.
+        settings: JSON.stringify({
+          __type: 'reddit',
+          ...(data.engageAuthor ? { engageAuthor: data.engageAuthor } : {}),
+        }),
         group: randomUUID(),
         delay: 0,
         ...(data.replyUrl ? { releaseURL: data.replyUrl } : {}),
@@ -2120,7 +2172,7 @@ export class EngageRepository {
     date: Date;
     replyUrl?: string;
     integrationId?: string;
-    engageAuthor?: XAuthorProfile;
+    engageAuthor?: EngageAuthorProfile;
   }) {
     // The integration is optional. When provided, its OAuth token lets
     // checkPostAnalytics read the reply tweet's impressions/bookmarks. When

@@ -24,8 +24,8 @@ interface SentReply {
       bookmarks?: number;
       trafficScore?: number;
     };
-    // The account that posted the reply (from the reply URL), shown when the reply
-    // wasn't posted through a connected integration.
+    // Unified author of the reply (who posted it): from the posting integration
+    // when one authored it, else from the reply URL (settings.engageAuthor).
     replyAuthor?: {
       handle: string;
       id?: string;
@@ -158,8 +158,8 @@ export const SentCardX: FC<SentCardXProps> = ({ reply, sentReplyId, onSubmitUrl 
       {/* Reply content */}
       <p className="text-sm text-gray-200 line-clamp-2 mb-2">{post.content}</p>
 
-      {/* Who posted the reply — shown when it came from an account that isn't a
-          connected integration (the author lives in settings.engageAuthor). */}
+      {/* Who posted the reply — unified across connected integrations and manual
+          (non-connected) replies; the API resolves replyAuthor from whichever. */}
       {post.replyAuthor && (
         <div className="flex items-center gap-1.5 mb-3" title="Replied as">
           <span className="text-gray-600">↩</span>

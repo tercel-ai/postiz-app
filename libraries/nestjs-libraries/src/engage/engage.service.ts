@@ -34,6 +34,10 @@ import {
   UpdateScheduledReplyDto,
 } from '@gitroom/nestjs-libraries/engage/dtos/engage.dto';
 import { parseXTweetId } from '@gitroom/nestjs-libraries/engage/x-tweet';
+import {
+  fetchRedditAuthorProfile,
+  EngageAuthorProfile,
+} from '@gitroom/nestjs-libraries/engage/engage-author';
 import { parseRedditCommentId } from '@gitroom/nestjs-libraries/engage/reddit-url';
 import { getRedditToken, redditAuthHeaders } from '@gitroom/nestjs-libraries/engage/reddit-auth';
 import { redditPublicGet } from '@gitroom/nestjs-libraries/engage/reddit-loid';
@@ -334,6 +338,8 @@ export class EngageService implements OnApplicationBootstrap {
     const engageAuthor =
       platform === 'x'
         ? (await this._postsService.fetchEngageXAuthor(org.id, url)) ?? undefined
+        : platform === 'reddit'
+        ? (await fetchRedditAuthorProfile(url)) ?? undefined
         : undefined;
     return this._engageRepository.updateReplyUrl(org.id, sentReplyId, url, engageAuthor);
   }
@@ -921,11 +927,17 @@ export class EngageService implements OnApplicationBootstrap {
         await this._validateReplyUrl(opp.platform, body.replyUrl);
       }
       // Best-effort: record who posted the reply (the URL author), independent of
-      // which connected account — if any — is attached as integrationId.
-      const engageAuthor =
-        opp.platform === 'x' && body.replyUrl
-          ? (await this._postsService.fetchEngageXAuthor(org.id, body.replyUrl)) ?? undefined
-          : undefined;
+      // which connected account — if any — is attached as integrationId. X derives
+      // the handle from the URL; Reddit resolves the comment's author via its id.
+      let engageAuthor: EngageAuthorProfile | undefined;
+      if (body.replyUrl) {
+        if (opp.platform === 'x') {
+          engageAuthor =
+            (await this._postsService.fetchEngageXAuthor(org.id, body.replyUrl)) ?? undefined;
+        } else if (opp.platform === 'reddit') {
+          engageAuthor = (await fetchRedditAuthorProfile(body.replyUrl)) ?? undefined;
+        }
+      }
       const post =
         opp.platform === 'x'
           ? await this._engageRepository.createManualXPost({
@@ -941,6 +953,7 @@ export class EngageService implements OnApplicationBootstrap {
               content: body.draftContent,
               date: new Date(),
               replyUrl: body.replyUrl,
+              engageAuthor,
             });
       postId = post.id;
     } catch (err) {

@@ -274,6 +274,67 @@ describe('EngageRepository — two-table reads', () => {
         opportunityId: { in: ['o1', 'o2'] },
       });
     });
+
+    it('exposes a unified replyAuthor: from integration when present, else settings.engageAuthor', async () => {
+      const { repo, sentFindMany, sentCount, stateFindMany } = buildRepo();
+      sentFindMany.mockResolvedValue([
+        {
+          // Connected account authored the reply → replyAuthor comes from integration.
+          id: 's1',
+          opportunity: { id: 'o1', platform: 'x' },
+          post: {
+            analytics: [],
+            impressions: 0,
+            trafficScore: 0,
+            integration: {
+              id: 'int1',
+              name: '0xKyd',
+              providerIdentifier: 'x',
+              picture: 'https://files/0xkyd.jpg',
+              profile: '@0xKyd',
+              internalId: '999',
+            },
+            settings: JSON.stringify({ __type: 'x' }),
+          },
+        },
+        {
+          // External account → replyAuthor comes from settings.engageAuthor.
+          id: 's2',
+          opportunity: { id: 'o2', platform: 'x' },
+          post: {
+            analytics: [],
+            impressions: 0,
+            trafficScore: 0,
+            integration: null,
+            settings: JSON.stringify({
+              __type: 'x',
+              engageAuthor: { handle: 'zhngyq310334', id: '7', name: '张玉琪', avatarUrl: 'https://files/zq.png' },
+            }),
+          },
+        },
+      ]);
+      sentCount.mockResolvedValue(2);
+      stateFindMany.mockResolvedValue([]);
+
+      const res = await repo.listSentReplies('org1', {} as any);
+      const [a, b] = res.items as any[];
+      // From integration: handle de-@'d, id=internalId, name + avatar from picture.
+      expect(a.post.replyAuthor).toEqual({
+        handle: '0xKyd',
+        id: '999',
+        name: '0xKyd',
+        avatarUrl: 'https://files/0xkyd.jpg',
+      });
+      // From settings.engageAuthor.
+      expect(b.post.replyAuthor).toEqual({
+        handle: 'zhngyq310334',
+        id: '7',
+        name: '张玉琪',
+        avatarUrl: 'https://files/zq.png',
+      });
+      // Raw settings is stripped from the response.
+      expect('settings' in a.post).toBe(false);
+    });
   });
 
   describe('getScoreStats', () => {
@@ -865,6 +926,56 @@ describe('EngageRepository — two-table reads', () => {
       });
 
       expect(postCreate.mock.calls[0][0].data.releaseId).toBeUndefined();
+    });
+  });
+
+  describe('createManualRedditPost', () => {
+    function buildRedditRepo() {
+      const postCreate = vi.fn();
+      const post = { model: { post: { create: postCreate } } } as any;
+      const repo = new EngageRepository(
+        {} as any, {} as any, {} as any, {} as any, {} as any,
+        {} as any, {} as any, {} as any, {} as any,
+        post, // _post
+        {} as any
+      );
+      return { repo, postCreate };
+    }
+
+    it('writes a reddit-typed engage post and persists engageAuthor when supplied', async () => {
+      const { repo, postCreate } = buildRedditRepo();
+      postCreate.mockResolvedValue({ id: 'post1' });
+
+      await repo.createManualRedditPost({
+        organizationId: 'org1',
+        content: 'reply',
+        date: new Date(0),
+        replyUrl: 'https://www.reddit.com/r/sub/comments/abc/title/def/',
+        engageAuthor: { handle: 'bigbaffler', id: 't2_9', name: 'Big Baffler', avatarUrl: 'https://x/a.png' },
+      });
+
+      const data = postCreate.mock.calls[0][0].data;
+      expect('integrationId' in data).toBe(false); // reddit never has an integration
+      const settings = JSON.parse(data.settings);
+      expect(settings.__type).toBe('reddit');
+      expect(settings.engageAuthor).toEqual({
+        handle: 'bigbaffler', id: 't2_9', name: 'Big Baffler', avatarUrl: 'https://x/a.png',
+      });
+    });
+
+    it('omits engageAuthor from settings when not supplied', async () => {
+      const { repo, postCreate } = buildRedditRepo();
+      postCreate.mockResolvedValue({ id: 'post1' });
+
+      await repo.createManualRedditPost({
+        organizationId: 'org1',
+        content: 'reply',
+        date: new Date(0),
+      });
+
+      const settings = JSON.parse(postCreate.mock.calls[0][0].data.settings);
+      expect(settings.__type).toBe('reddit');
+      expect(settings.engageAuthor).toBeUndefined();
     });
   });
 

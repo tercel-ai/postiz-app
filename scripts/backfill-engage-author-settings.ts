@@ -6,12 +6,14 @@
  * URL and merges it into Post.settings.engageAuthor, preserving the existing
  * { "__type": "x" } tag.
  *
- * Author enrichment (id/name/avatarUrl) uses an ORG-CONNECTED X account's OAuth
+ * X: author enrichment (id/name/avatarUrl) uses an ORG-CONNECTED X account's OAuth
  * token (resolved + refreshed via PostsService.fetchEngageXAuthor), so it works
  * without a global X_BEARER_TOKEN — the org's own X account is just a credential to
  * read a public profile by username. Falls back to X_BEARER_TOKEN, then handle-only.
  *
- * Reddit replies are skipped automatically: their URLs carry no author handle.
+ * Reddit: the comment URL has no username, so we resolve the comment id, fetch the
+ * comment's `author`, then the user's /about for avatar (fetchRedditAuthorProfile,
+ * via the app-only Reddit token / loid path).
  *
  * Idempotent: rows that already have settings.engageAuthor are skipped unless
  * --force is passed (re-fetches and overwrites).
@@ -35,6 +37,8 @@ import { PrismaClient } from '@prisma/client';
 import { DatabaseModule } from '@gitroom/nestjs-libraries/database/prisma/database.module';
 import { getTemporalModule } from '@gitroom/nestjs-libraries/temporal/temporal.module';
 import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.service';
+import { fetchRedditAuthorProfile } from '@gitroom/nestjs-libraries/engage/engage-author';
+import { parseRedditCommentId } from '@gitroom/nestjs-libraries/engage/reddit-url';
 
 @Module({ imports: [DatabaseModule, getTemporalModule(false)] })
 class ScriptModule {}
@@ -124,7 +128,11 @@ async function main(): Promise<void> {
       continue;
     }
 
-    const author = await postsService.fetchEngageXAuthor(p.organizationId, p.releaseURL);
+    // Reddit comment URLs carry a comment id but no username → resolve via Reddit;
+    // everything else is treated as an X reply (handle parsed from the URL).
+    const author = parseRedditCommentId(p.releaseURL)
+      ? await fetchRedditAuthorProfile(p.releaseURL)
+      : await postsService.fetchEngageXAuthor(p.organizationId, p.releaseURL);
     if (!author) {
       noHandle++;
       continue;
@@ -153,7 +161,7 @@ async function main(): Promise<void> {
     `\n${args.dryRun ? 'Would write' : 'Wrote'}: ${args.dryRun ? enrichedFull + handleOnly : written}` +
     `  (enriched id/name/avatar: ${enrichedFull}, handle-only: ${handleOnly})\n` +
     `Skipped (already had engageAuthor): ${skipped}\n` +
-    `No X handle in URL (e.g. Reddit / profile URL): ${noHandle}` +
+    `Unresolvable author (no comment id / deleted / unreachable): ${noHandle}` +
     (args.dryRun ? '\n\n--- DRY RUN. Re-run with --execute to write. ---' : '')
   );
 

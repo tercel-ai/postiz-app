@@ -19,6 +19,14 @@ interface SentReply {
       estReach?: number;
       trafficScore?: number;
     };
+    // Unified author of the reply (the redditor who posted it), resolved by the API
+    // from the comment's author. Null until the reply URL is known/synced.
+    replyAuthor?: {
+      handle: string;
+      id?: string;
+      name?: string;
+      avatarUrl?: string;
+    } | null;
   };
   opportunity: {
     platform: string;
@@ -119,7 +127,29 @@ export const SentCardReddit: FC<SentCardRedditProps> = ({
       )}
 
       {/* Reply content */}
-      <p className="text-sm text-gray-200 line-clamp-2 mb-3">{post.content}</p>
+      <p className="text-sm text-gray-200 line-clamp-2 mb-2">{post.content}</p>
+
+      {/* Who posted the reply — the redditor resolved from the comment's author. */}
+      {post.replyAuthor && (
+        <div className="flex items-center gap-1.5 mb-3" title="Replied as">
+          <span className="text-gray-600">↩</span>
+          {post.replyAuthor.avatarUrl && (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={post.replyAuthor.avatarUrl}
+              alt={post.replyAuthor.handle}
+              className="w-4 h-4 rounded-full shrink-0"
+            />
+          )}
+          <span className="text-xs text-gray-400 truncate">
+            Replied as{' '}
+            {post.replyAuthor.name && (
+              <span className="text-gray-300">{post.replyAuthor.name} </span>
+            )}
+            <span className="text-gray-600">u/{post.replyAuthor.handle}</span>
+          </span>
+        </div>
+      )}
 
       {/* Metrics */}
       <div className="grid grid-cols-3 gap-2 mb-3">

@@ -47,10 +47,8 @@ import { getSocialTaskQueue } from '@gitroom/nestjs-libraries/temporal/task-queu
 import {
   parseXHandle,
 } from '@gitroom/nestjs-libraries/engage/resolve-x-reply-integration';
-import {
-  fetchXAuthorProfile,
-  XAuthorProfile,
-} from '@gitroom/nestjs-libraries/engage/x-tweet';
+import { fetchXAuthorProfile } from '@gitroom/nestjs-libraries/engage/x-tweet';
+import { EngageAuthorProfile } from '@gitroom/nestjs-libraries/engage/engage-author';
 type PostWithConditionals = Post & {
   integration?: Integration;
   childrenPost: Post[];
@@ -410,7 +408,7 @@ export class PostsService {
   async fetchEngageXAuthor(
     orgId: string,
     replyUrl: string | null | undefined
-  ): Promise<XAuthorProfile | null> {
+  ): Promise<EngageAuthorProfile | null> {
     if (!parseXHandle(replyUrl)) return null;
 
     let token: string | undefined;

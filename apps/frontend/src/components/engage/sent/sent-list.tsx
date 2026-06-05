@@ -19,9 +19,9 @@ interface SentReply {
     impressions?: number;
     trafficScore?: number;
     analytics?: Array<{ label: string; data: Array<{ total: string }> }>;
-    integration?: { providerIdentifier: string } | null;
-    // The account that posted the reply, derived from the reply URL. Present for
-    // manual replies posted from an account that isn't a connected integration.
+    // Unified author of the reply: derived from the posting integration when one
+    // authored it, else from the reply URL (settings.engageAuthor). The single
+    // field the UI reads for "who replied" regardless of source.
     replyAuthor?: {
       handle: string;
       id?: string;
@@ -260,10 +260,7 @@ export function SentList() {
       {/* Reply list */}
       <div className="space-y-3">
         {replies.map((reply) => {
-          const plt =
-            reply.opportunity.platform ??
-            reply.post.integration?.providerIdentifier ??
-            'x';
+          const plt = reply.opportunity.platform ?? 'x';
           const onSubmitUrl = (id: string) => {
             setUrlSubmitId(id);
             setUrlInput('');

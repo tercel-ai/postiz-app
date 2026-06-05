@@ -1,4 +1,5 @@
 import { parseXHandle } from '@gitroom/nestjs-libraries/engage/resolve-x-reply-integration';
+import { EngageAuthorProfile } from '@gitroom/nestjs-libraries/engage/engage-author';
 
 // The reply tweet id is the numeric snowflake in a /status/<id> permalink.
 const TWEET_ID_RE = /\/status(?:es)?\/(\d+)/;
@@ -88,19 +89,6 @@ export async function checkXTweetAccessible(
 }
 
 /**
- * The author of a manual engage reply, derived from the reply URL. `handle` is the
- * @username parsed from the permalink; id/name/avatarUrl are best-effort
- * enrichment from the X API. Persisted to Post.settings.engageAuthor so the reply
- * author is recorded even when no connected integration authored it.
- */
-export interface XAuthorProfile {
-  handle: string;
-  id?: string;
-  name?: string;
-  avatarUrl?: string;
-}
-
-/**
  * Best-effort lookup of a reply URL's author (the @handle in the permalink) via
  * the X API v2. Always returns at least `{ handle }` when the URL has a parseable
  * handle; enriches with id/name/avatarUrl when a token is available and the lookup
@@ -115,7 +103,7 @@ export interface XAuthorProfile {
 export async function fetchXAuthorProfile(
   url: string | null | undefined,
   bearerToken?: string
-): Promise<XAuthorProfile | null> {
+): Promise<EngageAuthorProfile | null> {
   const handle = parseXHandle(url);
   if (!handle) return null;
 
