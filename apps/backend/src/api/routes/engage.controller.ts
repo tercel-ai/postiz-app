@@ -57,7 +57,7 @@ import {
 } from '@gitroom/nestjs-libraries/engage/dtos/engage.dto';
 
 const X_WEIGHTED_CHAR_LIMIT = 260;
-const REDDIT_CHAR_LIMIT = 500;
+const REDDIT_CHAR_LIMIT = 1000;
 
 function normalizeEngagePlatform(platform: string): string {
   const normalized = platform.toLowerCase();
@@ -380,7 +380,8 @@ export class EngageController {
         body.strategy,
         body.brandStrength,
         body.mentions,
-        abortController.signal
+        abortController.signal,
+        body.outputLength
       )) {
         if (abortController.signal.aborted) break;
         draft += chunk;

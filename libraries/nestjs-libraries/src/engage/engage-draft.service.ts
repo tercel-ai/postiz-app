@@ -8,7 +8,7 @@ const STRATEGY_PROMPTS: Record<string, string> = {
   EXPERT_ANSWER:
     'Give expert step-by-step advice. Share actionable frameworks. Be specific and concrete.',
   DATA_BACKED:
-    'Lead with data from scanning 500+ brands. Cite specific numbers and findings.',
+    'Lead with data from scanning 1000+ brands. Cite specific numbers and findings.',
   EMPATHY_LED:
     'Acknowledge the frustration or situation first, then pivot to a concrete insight.',
 };
@@ -41,11 +41,15 @@ const INTENT_PROMPTS: Record<string, string> = {
 };
 
 const X_WEIGHTED_CHAR_LIMIT = 260;
-const REDDIT_CHAR_LIMIT = 500;
+const REDDIT_CHAR_LIMIT = 1000;
 
 function normalizePlatform(platform: string): string {
   const normalized = platform.toLowerCase();
   return normalized === 'twitter' ? 'x' : normalized;
+}
+
+function defaultOutputLimitForPlatform(platform: string): number {
+  return platform === 'reddit' ? REDDIT_CHAR_LIMIT : X_WEIGHTED_CHAR_LIMIT;
 }
 
 @Injectable()
@@ -75,27 +79,29 @@ export class EngageDraftService {
     strategy: string,
     brandStrength: number,
     mentions?: string[],
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    outputLength?: number,
   ): AsyncGenerator<string> {
     const platform = normalizePlatform(opportunity.platform);
+    const outputLimit = outputLength ?? defaultOutputLimitForPlatform(platform);
     const systemPrompt = this._buildSystemPrompt(
       platform,
       strategy,
       opportunity.primaryIntent,
       brandStrength,
+      outputLimit,
       mentions
     );
     const userPrompt = this._buildUserPrompt(opportunity);
 
     if (signal?.aborted) return;
-
     if (platform === 'x') {
       yield* this._generateDraftWithRetryLimit({
         systemPrompt,
         userPrompt,
         platformLabel: 'X',
-        limitDescription: `${X_WEIGHTED_CHAR_LIMIT} Twitter-weighted characters`,
-        isWithinLimit: (draft) => weightedLength(draft) <= X_WEIGHTED_CHAR_LIMIT,
+        limitDescription: `${outputLimit} Twitter-weighted characters`,
+        isWithinLimit: (draft) => weightedLength(draft) <= outputLimit,
         signal,
       });
     } else if (platform === 'reddit') {
@@ -103,11 +109,12 @@ export class EngageDraftService {
         systemPrompt,
         userPrompt,
         platformLabel: 'Reddit',
-        limitDescription: `${REDDIT_CHAR_LIMIT} characters`,
-        isWithinLimit: (draft) => draft.length <= REDDIT_CHAR_LIMIT,
+        limitDescription: `${outputLimit} characters`,
+        isWithinLimit: (draft) => draft.length <= outputLimit,
         signal,
       });
     } else {
+      console.log('No limit set, using default.');
       yield await this._generateRaw(systemPrompt, userPrompt, signal);
     }
   }
@@ -239,14 +246,16 @@ Your previous draft exceeded the ${platformLabel} character limit. Rewrite it as
     strategy: string,
     primaryIntent: string,
     brandStrength: number,
-    mentions?: string[]
+    outputLimit?: number,
+    mentions?: string[],
   ): string {
+    const resolvedOutputLimit = outputLimit ?? defaultOutputLimitForPlatform(platform);
     const charLimit =
       platform === 'x'
-        ? 'under 260 Twitter-weighted characters (CJK/emoji count as 2, URLs as 23 — leave a safety margin)'
+        ? `under ${resolvedOutputLimit} Twitter-weighted characters (CJK/emoji count as 2, URLs as 23 — leave a safety margin)`
         : platform === 'reddit'
-          ? 'under 500 characters'
-          : 'up to 500 words';
+          ? `under ${resolvedOutputLimit} characters`
+          : `up to ${resolvedOutputLimit} characters`;
     const strategyInstruction =
       STRATEGY_PROMPTS[strategy] ?? STRATEGY_PROMPTS['EXPERT_ANSWER'];
     const brandInstruction = buildBrandInstruction(brandStrength, mentions);

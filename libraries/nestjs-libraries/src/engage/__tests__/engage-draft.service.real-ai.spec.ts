@@ -72,7 +72,7 @@ maybeDescribe('EngageDraftService real AI', () => {
   );
 
   it(
-    'generates a real Reddit draft and keeps output within 500 characters',
+    'generates a real Reddit draft and keeps output within 1000 characters',
     async () => {
       expect(
         process.env.OPENROUTER_API_KEY ||
@@ -108,7 +108,7 @@ maybeDescribe('EngageDraftService real AI', () => {
 
       expect(draft.length).toBeGreaterThan(0);
       expect(draft).not.toContain('<original_post');
-      expect(draft.length).toBeLessThanOrEqual(500);
+      expect(draft.length).toBeLessThanOrEqual(1000);
     },
     60_000
   );

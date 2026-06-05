@@ -444,6 +444,12 @@ export class GenerateDraftDto {
   @MaxLength(100, { each: true })
   @ArrayMaxSize(20)
   mentions?: string[];
+
+  @IsOptional()
+  @IsInt()
+  @Min(2)
+  @Type(() => Number)
+  outputLength?: number;
 }
 
 // ─── Reply Sending ────────────────────────────────────────────────────────────

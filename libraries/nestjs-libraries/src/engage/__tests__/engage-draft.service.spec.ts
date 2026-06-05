@@ -66,7 +66,7 @@ describe('EngageDraftService', () => {
       expect(xPrompt).toContain('under 260 Twitter-weighted characters');
 
       const redditPrompt = (service as any)._buildSystemPrompt('reddit', 'EXPERT_ANSWER', 'help_seeking', 1);
-      expect(redditPrompt).toContain('under 500 characters');
+      expect(redditPrompt).toContain('under 1000 characters');
     });
 
     it('should restate the platform character limit as an IMPORTANT final instruction', () => {
@@ -77,7 +77,7 @@ describe('EngageDraftService', () => {
 
       const redditPrompt = (service as any)._buildSystemPrompt('reddit', 'EXPERT_ANSWER', 'help_seeking', 1);
       expect(redditPrompt).toContain(
-        'IMPORTANT: The final reply must stay under 500 characters.'
+        'IMPORTANT: The final reply must stay under 1000 characters.'
       );
     });
 
@@ -86,7 +86,7 @@ describe('EngageDraftService', () => {
       expect(expertPrompt).toContain('expert step-by-step advice');
 
       const dataPrompt = (service as any)._buildSystemPrompt('x', 'DATA_BACKED', 'help_seeking', 1);
-      expect(dataPrompt).toContain('Lead with data from scanning 500+ brands');
+      expect(dataPrompt).toContain('Lead with data from scanning 1000+ brands');
     });
 
     it('should include brand strength instructions in system prompt', () => {
@@ -95,7 +95,7 @@ describe('EngageDraftService', () => {
       expect(brand0Prompt).toContain('Do not mention any brand name');
 
       // brandStrength=3 with a brand mention → proactively introduce that brand.
-      const brand3Prompt = (service as any)._buildSystemPrompt('x', 'EXPERT_ANSWER', 'help_seeking', 3, ['AISEE']);
+      const brand3Prompt = (service as any)._buildSystemPrompt('x', 'EXPERT_ANSWER', 'help_seeking', 3, 260, ['AISEE']);
       expect(brand3Prompt).toContain('Proactively introduce AISEE');
       expect(brand3Prompt).toContain('invite the person to try it');
     });
@@ -321,10 +321,10 @@ describe('EngageDraftService', () => {
       expect(generateRaw).toHaveBeenCalledTimes(1);
     });
 
-    it('should throw for Reddit drafts over 500 characters without regenerating', async () => {
+    it('should throw for Reddit drafts over 1000 characters without regenerating', async () => {
       const generateRaw = vi
         .spyOn(service as any, '_generateRaw')
-        .mockResolvedValue('r'.repeat(501));
+        .mockResolvedValue('r'.repeat(1001));
       const mockOpportunity: Partial<EngageOpportunity> = {
         platform: 'reddit',
         primaryIntent: 'help_seeking',
@@ -344,7 +344,7 @@ describe('EngageDraftService', () => {
       };
 
       await expect(consume()).rejects.toThrow(
-        'Generated Reddit draft exceeded 500 characters.'
+        'Generated Reddit draft exceeded 1000 characters.'
       );
       expect(generateRaw).toHaveBeenCalledTimes(1);
     });
