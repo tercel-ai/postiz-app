@@ -130,11 +130,21 @@ async function main(): Promise<void> {
 
     // Reddit comment URLs carry a comment id but no username → resolve via Reddit;
     // everything else is treated as an X reply (handle parsed from the URL).
-    const author = parseRedditCommentId(p.releaseURL)
+    const isReddit = !!parseRedditCommentId(p.releaseURL);
+    const looksReddit = /reddit\.com/i.test(p.releaseURL ?? '');
+    const author = isReddit
       ? await fetchRedditAuthorProfile(p.releaseURL)
       : await postsService.fetchEngageXAuthor(p.organizationId, p.releaseURL);
     if (!author) {
       noHandle++;
+      // Diagnose why: Reddit post-URL (no comment id) vs comment unreachable/deleted
+      // vs X URL with no parseable handle.
+      const reason = isReddit
+        ? 'reddit comment unreachable/deleted'
+        : looksReddit
+        ? 'reddit URL has no comment id (post link, not a comment?)'
+        : 'no X handle in URL';
+      console.log(`  [unresolved] post=${p.id}  (${reason})  url=${p.releaseURL?.slice(0, 70)}`);
       continue;
     }
 
