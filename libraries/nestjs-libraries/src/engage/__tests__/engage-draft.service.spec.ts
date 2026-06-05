@@ -220,6 +220,56 @@ describe('EngageDraftService', () => {
       );
     });
 
+    it('should treat twitter platform aliases as X for weighted limit enforcement', async () => {
+      const generateRaw = vi
+        .spyOn(service as any, '_generateRaw')
+        .mockResolvedValueOnce('x'.repeat(261))
+        .mockResolvedValueOnce('Short complete reply.');
+      const mockOpportunity: Partial<EngageOpportunity> = {
+        platform: 'twitter',
+        primaryIntent: 'help_seeking',
+        authorUsername: 'testuser',
+        postContent: 'How do I do X?',
+      };
+
+      const chunks = [];
+      for await (const chunk of service.generateDraft(
+        mockOpportunity as EngageOpportunity,
+        'EXPERT_ANSWER',
+        1
+      )) {
+        chunks.push(chunk);
+      }
+
+      expect(chunks.join('')).toBe('Short complete reply.');
+      expect(generateRaw).toHaveBeenCalledTimes(2);
+    });
+
+    it('should treat uppercase X platform values as X for weighted limit enforcement', async () => {
+      const generateRaw = vi
+        .spyOn(service as any, '_generateRaw')
+        .mockResolvedValueOnce('x'.repeat(261))
+        .mockResolvedValueOnce('Short complete reply.');
+      const mockOpportunity: Partial<EngageOpportunity> = {
+        platform: 'X',
+        primaryIntent: 'help_seeking',
+        authorUsername: 'testuser',
+        postContent: 'How do I do X?',
+      };
+
+      const chunks = [];
+      for await (const chunk of service.generateDraft(
+        mockOpportunity as EngageOpportunity,
+        'EXPERT_ANSWER',
+        1
+      )) {
+        chunks.push(chunk);
+      }
+
+      expect(chunks.join('')).toBe('Short complete reply.');
+      expect(generateRaw).toHaveBeenCalledTimes(2);
+    });
+
     it('should throw for X when the retry draft still exceeds the weighted limit', async () => {
       vi.spyOn(service as any, '_generateRaw')
         .mockResolvedValueOnce('x'.repeat(261))

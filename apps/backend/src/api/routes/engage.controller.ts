@@ -26,6 +26,7 @@ import {
 } from '@gitroom/backend/services/auth/permissions/permission.exception.class';
 import { EngageService } from '@gitroom/nestjs-libraries/engage/engage.service';
 import { EngageDraftService } from '@gitroom/nestjs-libraries/engage/engage-draft.service';
+import { weightedLength } from '@gitroom/helpers/utils/count.length';
 import {
   AddKeywordDto,
   AddKeywordsBulkDto,
@@ -54,6 +55,26 @@ import {
   UpdateTrackedAccountDto,
   UpdateScheduledReplyDto,
 } from '@gitroom/nestjs-libraries/engage/dtos/engage.dto';
+
+const X_WEIGHTED_CHAR_LIMIT = 260;
+const REDDIT_CHAR_LIMIT = 500;
+
+function normalizeEngagePlatform(platform: string): string {
+  const normalized = platform.toLowerCase();
+  return normalized === 'twitter' ? 'x' : normalized;
+}
+
+function assertDraftWithinPlatformLimit(platform: string, draft: string) {
+  const normalized = normalizeEngagePlatform(platform);
+  if (normalized === 'x' && weightedLength(draft) > X_WEIGHTED_CHAR_LIMIT) {
+    throw new Error(
+      `Generated X draft exceeded ${X_WEIGHTED_CHAR_LIMIT} Twitter-weighted characters.`
+    );
+  }
+  if (normalized === 'reddit' && draft.length > REDDIT_CHAR_LIMIT) {
+    throw new Error(`Generated Reddit draft exceeded ${REDDIT_CHAR_LIMIT} characters.`);
+  }
+}
 
 @ApiTags('Engage')
 @Controller('/engage')
@@ -353,6 +374,7 @@ export class EngageController {
     try {
       // Only generate drafts for actionable opportunities (not REPLIED/DISMISSED/EXPIRED).
       const opportunity = await this._engageService.getOpportunityForReply(org, id);
+      let draft = '';
       for await (const chunk of this._engageDraftService.generateDraft(
         opportunity,
         body.strategy,
@@ -361,7 +383,11 @@ export class EngageController {
         abortController.signal
       )) {
         if (abortController.signal.aborted) break;
-        res.write(`data: ${JSON.stringify({ text: chunk })}\n\n`);
+        draft += chunk;
+      }
+      if (!abortController.signal.aborted) {
+        assertDraftWithinPlatformLimit(opportunity.platform, draft);
+        res.write(`data: ${JSON.stringify({ text: draft })}\n\n`);
       }
       if (!abortController.signal.aborted) {
         res.write(`data: [DONE]\n\n`);

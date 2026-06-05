@@ -43,6 +43,11 @@ const INTENT_PROMPTS: Record<string, string> = {
 const X_WEIGHTED_CHAR_LIMIT = 260;
 const REDDIT_CHAR_LIMIT = 500;
 
+function normalizePlatform(platform: string): string {
+  const normalized = platform.toLowerCase();
+  return normalized === 'twitter' ? 'x' : normalized;
+}
+
 @Injectable()
 export class EngageDraftService {
   // Use OpenAI-compatible SDK for OpenRouter; fall back to Anthropic SDK for
@@ -72,8 +77,9 @@ export class EngageDraftService {
     mentions?: string[],
     signal?: AbortSignal
   ): AsyncGenerator<string> {
+    const platform = normalizePlatform(opportunity.platform);
     const systemPrompt = this._buildSystemPrompt(
-      opportunity.platform,
+      platform,
       strategy,
       opportunity.primaryIntent,
       brandStrength,
@@ -83,7 +89,7 @@ export class EngageDraftService {
 
     if (signal?.aborted) return;
 
-    if (opportunity.platform === 'x') {
+    if (platform === 'x') {
       yield* this._generateDraftWithRetryLimit({
         systemPrompt,
         userPrompt,
@@ -92,7 +98,7 @@ export class EngageDraftService {
         isWithinLimit: (draft) => weightedLength(draft) <= X_WEIGHTED_CHAR_LIMIT,
         signal,
       });
-    } else if (opportunity.platform === 'reddit') {
+    } else if (platform === 'reddit') {
       yield* this._generateDraftWithSingleLimitCheck({
         systemPrompt,
         userPrompt,
