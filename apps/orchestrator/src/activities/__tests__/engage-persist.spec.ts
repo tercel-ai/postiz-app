@@ -68,7 +68,8 @@ function buildActivity() {
     opportunity,   // _opportunity
     oppState,      // _oppState
     {} as any, {} as any, {} as any, {} as any,
-    {} as any      // _scanCursor (unused by _persistOpportunities)
+    {} as any,     // _scanCursor (unused by _persistOpportunities)
+    {} as any
   );
   return { activity, oppUpsert, stateUpsert };
 }

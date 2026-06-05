@@ -16,7 +16,8 @@ function build(row: any, claimCount = 1) {
   const activity = new EngageScanActivity(
     {} as any, {} as any, {} as any, {} as any, {} as any,
     {} as any, {} as any, {} as any, {} as any,
-    cursorRepo as any
+    cursorRepo as any,
+    {} as any
   );
   return { activity, upsert, updateMany, update };
 }
@@ -24,7 +25,7 @@ function build(row: any, claimCount = 1) {
 const IDLE_ROW = {
   id: 'cur1',
   status: 'IDLE',
-  cooldownUntil: null,
+  cooldownUntil: null as Date | null,
   lastSeenExternalId: '100',
   lastSeenAt: new Date('2026-01-01T00:00:00Z'),
 };
@@ -234,5 +235,318 @@ describe('EngageScanActivity._fanOutAndFinalize (per-org isolation)', () => {
     expect(expire).toHaveBeenCalledTimes(3);
     // Finalize still runs for the whole set.
     expect(finalize).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('EngageScanActivity keyword initial scans', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('lazily creates missing reddit initial scan rows for enabled keywords', async () => {
+    const { activity } = build(IDLE_ROW);
+    const createMany = vi.fn().mockResolvedValue({ count: 2 });
+    (activity as any)._keywordInitialScan = {
+      model: { engageKeywordInitialScan: { createMany } },
+    };
+
+    await (activity as any)._ensureMissingKeywordInitialScans([
+      {
+        organizationId: 'org1',
+        keywords: [
+          { id: 'kw1', keyword: 'storage' },
+          { id: 'kw2', keyword: 'AI PC' },
+        ],
+      },
+    ]);
+
+    expect(createMany).toHaveBeenCalledWith({
+      data: [
+        {
+          organizationId: 'org1',
+          keywordId: 'kw1',
+          keyword: 'storage',
+          platform: 'reddit',
+          status: 'PENDING',
+        },
+        {
+          organizationId: 'org1',
+          keywordId: 'kw2',
+          keyword: 'AI PC',
+          platform: 'reddit',
+          status: 'PENDING',
+        },
+      ],
+      skipDuplicates: true,
+    });
+  });
+
+  it('claims a pending reddit keyword initial scan, fans out posts, then marks it DONE', async () => {
+    const { activity } = build(IDLE_ROW);
+    const initialFindMany = vi.fn().mockResolvedValue([
+      {
+        id: 'init1',
+        organizationId: 'org1',
+        keywordId: 'kw1',
+        keyword: 'storage',
+        platform: 'reddit',
+        status: 'PENDING',
+        keywordRef: {
+          id: 'kw1',
+          organizationId: 'org1',
+          keyword: 'storage',
+          enabled: true,
+        },
+      },
+    ]);
+    const initialUpdateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const initialUpdate = vi.fn().mockResolvedValue({});
+    (activity as any)._keywordInitialScan = {
+      model: {
+        engageKeywordInitialScan: {
+          findMany: initialFindMany,
+          updateMany: initialUpdateMany,
+          update: initialUpdate,
+        },
+      },
+    };
+    const post = {
+      platform: 'reddit',
+      externalPostId: 'p1',
+      authorUsername: 'u',
+      postContent: 'storage issue',
+    } as any;
+    const adapter = {
+      platform: 'reddit',
+      caps: {} as any,
+      searchScoped: vi.fn().mockResolvedValue({
+        posts: [post],
+        nextCursor: {},
+        rate: { limited: false },
+      }),
+    };
+    (activity as any)._redditAdapter = adapter;
+    const fanOut = vi
+      .spyOn(activity as any, '_fanOutToOrg')
+      .mockResolvedValue(undefined);
+
+    await (activity as any)._runPendingKeywordInitialScans(
+      [
+        {
+          organizationId: 'org1',
+          keywords: [{ id: 'kw1', keyword: 'storage', enabled: true }],
+          trackedAccounts: [],
+        },
+      ],
+      'reddit-token'
+    );
+
+    expect(initialFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          platform: 'reddit',
+          organizationId: { in: ['org1'] },
+        }),
+      })
+    );
+    expect(initialUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: 'init1',
+          OR: expect.arrayContaining([{ status: 'PENDING' }]),
+        }),
+        data: expect.objectContaining({
+          status: 'RUNNING',
+          keyword: 'storage',
+          attempts: { increment: 1 },
+        }),
+      })
+    );
+    expect(adapter.searchScoped).toHaveBeenCalledWith(
+      expect.objectContaining({
+        scope: { type: 'keyword' },
+        keywords: ['storage'],
+        token: 'reddit-token',
+        cursor: expect.objectContaining({ lastSeenAt: expect.any(Date) }),
+      })
+    );
+    expect(fanOut).toHaveBeenCalledWith(
+      expect.objectContaining({ organizationId: 'org1' }),
+      [post]
+    );
+    expect(initialUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'init1' },
+        data: expect.objectContaining({
+          status: 'DONE',
+          completedAt: expect.any(Date),
+          error: null,
+        }),
+      })
+    );
+  });
+
+  it('keeps a rate-limited keyword initial scan retryable instead of marking it DONE', async () => {
+    const { activity } = build(IDLE_ROW);
+    const initialFindMany = vi.fn().mockResolvedValue([
+      {
+        id: 'init1',
+        organizationId: 'org1',
+        keywordId: 'kw1',
+        keyword: 'storage',
+        platform: 'reddit',
+        status: 'PENDING',
+        keywordRef: {
+          id: 'kw1',
+          organizationId: 'org1',
+          keyword: 'storage',
+          enabled: true,
+        },
+      },
+    ]);
+    const initialUpdateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const initialUpdate = vi.fn().mockResolvedValue({});
+    (activity as any)._keywordInitialScan = {
+      model: {
+        engageKeywordInitialScan: {
+          findMany: initialFindMany,
+          updateMany: initialUpdateMany,
+          update: initialUpdate,
+        },
+      },
+    };
+    const post = {
+      platform: 'reddit',
+      externalPostId: 'p1',
+      authorUsername: 'u',
+      postContent: 'storage issue',
+    } as any;
+    (activity as any)._redditAdapter = {
+      platform: 'reddit',
+      caps: {} as any,
+      searchScoped: vi.fn().mockResolvedValue({
+        posts: [post],
+        nextCursor: {},
+        rate: { limited: true, retryAfterMs: 60_000 },
+      }),
+    };
+    const fanOut = vi
+      .spyOn(activity as any, '_fanOutToOrg')
+      .mockResolvedValue(undefined);
+
+    await (activity as any)._runPendingKeywordInitialScans(
+      [
+        {
+          organizationId: 'org1',
+          keywords: [{ id: 'kw1', keyword: 'storage', enabled: true }],
+          trackedAccounts: [],
+        },
+      ],
+      null
+    );
+
+    expect(fanOut).toHaveBeenCalledWith(
+      expect.objectContaining({ organizationId: 'org1' }),
+      [post]
+    );
+    expect(initialUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'init1' },
+        data: expect.objectContaining({
+          status: 'FAILED',
+          error: expect.stringContaining('rate-limited'),
+        }),
+      })
+    );
+    expect(initialUpdate).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: 'DONE' }),
+      })
+    );
+  });
+
+  it('reclaims a stale RUNNING keyword initial scan lease', async () => {
+    const { activity } = build(IDLE_ROW);
+    const staleStartedAt = new Date(Date.now() - 60 * 60 * 1000);
+    const initialFindMany = vi.fn().mockResolvedValue([
+      {
+        id: 'init1',
+        organizationId: 'org1',
+        keywordId: 'kw1',
+        keyword: 'storage',
+        platform: 'reddit',
+        status: 'RUNNING',
+        attempts: 1,
+        startedAt: staleStartedAt,
+        keywordRef: {
+          id: 'kw1',
+          organizationId: 'org1',
+          keyword: 'storage',
+          enabled: true,
+        },
+      },
+    ]);
+    const initialUpdateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const initialUpdate = vi.fn().mockResolvedValue({});
+    (activity as any)._keywordInitialScan = {
+      model: {
+        engageKeywordInitialScan: {
+          findMany: initialFindMany,
+          updateMany: initialUpdateMany,
+          update: initialUpdate,
+        },
+      },
+    };
+    (activity as any)._redditAdapter = {
+      platform: 'reddit',
+      caps: {} as any,
+      searchScoped: vi.fn().mockResolvedValue({
+        posts: [],
+        nextCursor: {},
+        rate: { limited: false },
+      }),
+    };
+    vi.spyOn(activity as any, '_fanOutToOrg').mockResolvedValue(undefined);
+
+    await (activity as any)._runPendingKeywordInitialScans(
+      [
+        {
+          organizationId: 'org1',
+          keywords: [{ id: 'kw1', keyword: 'storage', enabled: true }],
+          trackedAccounts: [],
+        },
+      ],
+      null
+    );
+
+    expect(initialFindMany.mock.calls[0][0].where.OR).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          status: 'RUNNING',
+          startedAt: expect.objectContaining({ lt: expect.any(Date) }),
+        }),
+      ])
+    );
+    expect(initialUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: 'init1',
+          OR: expect.arrayContaining([
+            expect.objectContaining({
+              status: 'RUNNING',
+              startedAt: expect.objectContaining({ lt: expect.any(Date) }),
+            }),
+          ]),
+        }),
+        data: expect.objectContaining({
+          status: 'RUNNING',
+          attempts: { increment: 1 },
+        }),
+      })
+    );
+    expect(initialUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'init1' },
+        data: expect.objectContaining({ status: 'DONE' }),
+      })
+    );
   });
 });

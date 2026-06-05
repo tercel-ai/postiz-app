@@ -21,6 +21,7 @@ by **when you reach for them** and lists the flags/env you actually need.
 | Script | Scenario | Default | Runner |
 |--------|----------|---------|--------|
 | `engage-scan.ts` | Trigger scans / inspect ticker | read-only | ts-node |
+| `engage-realtime-scan.ts` | Directly probe platform scan results for one org | read-only | ts-node |
 | `engage-sync-metrics.ts` | One-shot "sent list is empty" fix (X+Reddit) | dry-run | ts-node |
 | `sync-engage-metrics.ts` | Reddit/X resync of null-impression replies | dry-run | ts-node |
 | `sync-engage-x-metrics.ts` | X-only live metric fetch / probe | dry-run | ts-node |
@@ -54,6 +55,43 @@ npx ts-node --project scripts/tsconfig.json scripts/engage-scan.ts --targets   #
 - **Env:** `DATABASE_URL`, `TEMPORAL_ADDRESS` (default `localhost:7233`),
   `TEMPORAL_NAMESPACE` (default `default`). If a trigger reports nothing, confirm
   these point at the same cluster the orchestrator deploys to.
+
+### `engage-realtime-scan.ts` — direct platform scan diagnostic
+Read-only diagnostic for answering "did the platform return posts, did this org's
+keywords match, did score pass `ENGAGE_MIN_SCORE`, and is the opportunity already
+in DB?" It calls the same scan adapters as the orchestrator and installs the same
+Reddit proxy dispatcher (`REDDIT_PROXY`, falling back to `HTTPS_PROXY` /
+`HTTP_PROXY` where applicable).
+
+```bash
+npx ts-node --project scripts/tsconfig.json scripts/engage-realtime-scan.ts \
+  --org <orgId> --platform reddit
+
+# Compare with production incremental cursor semantics
+npx ts-node --project scripts/tsconfig.json scripts/engage-realtime-scan.ts \
+  --org <orgId> --platform reddit --use-cursor
+
+# Focus on one keyword
+npx ts-node --project scripts/tsconfig.json scripts/engage-realtime-scan.ts \
+  --org <orgId> --platform reddit --keyword "storage"
+```
+
+- **Flags:** `--org` / `--orgId` (required), `--platform reddit|x|all`,
+  `--scope all|keyword|channel|tracked`, `--keyword`, `--max-calls`, `--use-cursor`,
+  `--token` (X override), `--json`.
+- **Env:** `DATABASE_URL`; Reddit uses `REDDIT_CLIENT_ID` / `REDDIT_CLIENT_SECRET`
+  when available and otherwise falls back to public Reddit reads. Reddit traffic
+  follows `REDDIT_PROXY || HTTPS_PROXY || HTTP_PROXY` via the same global dispatcher
+  used by the orchestrator.
+- **Important:** default mode uses an empty diagnostic cursor. That is useful for
+  seeing what a new-keyword catch-up would find, but it is not the same as the
+  workflow's shared `EngageScanCursor`. Add `--use-cursor` to reproduce workflow
+  incremental behavior.
+
+If default mode returns `WOULD_SURFACE` rows but `--use-cursor` returns none, the
+likely cause is shared-cursor history: the keyword was added after the global
+cursor had already advanced. The ticker's `EngageKeywordInitialScan` catch-up path
+is designed to close that gap for newly added/re-enabled keywords.
 
 ### `ingest-engage-post.ts` — manually inject one X post
 Lands a specific tweet in the pool for an org so you can walk the reply/send flow in

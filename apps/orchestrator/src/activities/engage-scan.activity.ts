@@ -40,6 +40,24 @@ const SCAN_MAX_CALLS = Number(process.env.ENGAGE_SCAN_MAX_CALLS ?? 5);
 const DEFAULT_COOLDOWN_MS = Number(
   process.env.ENGAGE_SCAN_COOLDOWN_MS ?? 15 * 60 * 1000
 );
+const INITIAL_SCAN_MAX_UNITS = Number(
+  process.env.ENGAGE_KEYWORD_INITIAL_SCAN_MAX_UNITS ?? 5
+);
+const INITIAL_SCAN_MAX_CALLS = Number(
+  process.env.ENGAGE_KEYWORD_INITIAL_SCAN_MAX_CALLS ?? 3
+);
+const INITIAL_SCAN_LOOKBACK_HOURS = Number(
+  process.env.ENGAGE_KEYWORD_INITIAL_SCAN_LOOKBACK_HOURS ?? 24
+);
+const INITIAL_SCAN_MAX_ATTEMPTS = Number(
+  process.env.ENGAGE_KEYWORD_INITIAL_SCAN_MAX_ATTEMPTS ?? 3
+);
+const INITIAL_SCAN_RETRY_MS = Number(
+  process.env.ENGAGE_KEYWORD_INITIAL_SCAN_RETRY_MS ?? 15 * 60 * 1000
+);
+const INITIAL_SCAN_STALE_MS = Number(
+  process.env.ENGAGE_KEYWORD_INITIAL_SCAN_STALE_MS ?? 30 * 60 * 1000
+);
 
 // Per-scanType cadence (ms). A single frequent ticker calls runDueScans(); each
 // unit is scanned only when lastScanStartedAt + its cadence has elapsed (unless
@@ -128,7 +146,8 @@ export class EngageScanActivity {
     private _trackedAccount: PrismaRepository<'engageTrackedAccount'>,
     private _channel: PrismaRepository<'engageMonitoredChannel'>,
     private _tx: PrismaTransaction,
-    private _scanCursor: PrismaRepository<'engageScanCursor'>
+    private _scanCursor: PrismaRepository<'engageScanCursor'>,
+    private _keywordInitialScan: PrismaRepository<'engageKeywordInitialScan'>
   ) {}
 
   private _heartbeat(progress?: unknown): void {
@@ -157,6 +176,9 @@ export class EngageScanActivity {
     const xPool = new TokenPool(await this._collectXTokens(orgContexts));
     const redditToken = await getRedditToken();
 
+    await this._ensureMissingKeywordInitialScans(orgContexts);
+    await this._runPendingKeywordInitialScans(orgContexts, redditToken);
+
     const posts: RawPost[] = [
       ...(await this._scanKeywordUnits(keywords, xPool, redditToken, force)),
       ...(await this._scanChannelUnits(orgContexts, keywords, redditToken, force)),
@@ -164,6 +186,163 @@ export class EngageScanActivity {
     ];
 
     await this._fanOutAndFinalize(orgContexts, posts);
+  }
+
+  // ─── Keyword initial scan catch-up ───────────────────────────────────────
+  //
+  // Initial scans are one-shot keyword catch-up jobs, not durable incremental
+  // cursors. Keep their state separate from EngageScanCursor: this table needs
+  // DONE/FAILED/attempts/error semantics, while EngageScanCursor owns ongoing
+  // position and cadence. RUNNING rows use startedAt as a lease; stale leases are
+  // reclaimable so a crashed worker cannot strand a keyword forever.
+
+  private async _runPendingKeywordInitialScans(
+    orgContexts: OrgContext[],
+    redditToken: string | null
+  ): Promise<void> {
+    if (!this._keywordInitialScan) return;
+    const orgById = new Map(orgContexts.map((ctx) => [ctx.organizationId, ctx]));
+    const retryBefore = new Date(Date.now() - INITIAL_SCAN_RETRY_MS);
+    const staleBefore = new Date(Date.now() - INITIAL_SCAN_STALE_MS);
+    const rows = await this._keywordInitialScan.model.engageKeywordInitialScan.findMany({
+      where: {
+        platform: 'reddit',
+        organizationId: { in: Array.from(orgById.keys()) },
+        OR: [
+          { status: 'PENDING' },
+          {
+            status: 'FAILED',
+            attempts: { lt: INITIAL_SCAN_MAX_ATTEMPTS },
+            updatedAt: { lt: retryBefore },
+          },
+          {
+            status: 'RUNNING',
+            startedAt: { lt: staleBefore },
+          },
+        ],
+        keywordRef: { enabled: true, config: { enabled: true } },
+      },
+      include: { keywordRef: true },
+      orderBy: { createdAt: 'asc' },
+      take: INITIAL_SCAN_MAX_UNITS,
+    });
+    if (!rows.length) return;
+
+    for (const row of rows) {
+      if (
+        row.status === 'RUNNING' &&
+        row.attempts >= INITIAL_SCAN_MAX_ATTEMPTS
+      ) {
+        await this._keywordInitialScan.model.engageKeywordInitialScan.updateMany({
+          where: {
+            id: row.id,
+            status: 'RUNNING',
+            startedAt: { lt: staleBefore },
+          },
+          data: {
+            status: 'FAILED',
+            error: `Initial scan exceeded ${INITIAL_SCAN_MAX_ATTEMPTS} attempt(s) and the last RUNNING lease became stale`,
+          },
+        });
+        continue;
+      }
+
+      const claimed = await this._keywordInitialScan.model.engageKeywordInitialScan.updateMany({
+        where: {
+          id: row.id,
+          OR: [
+            { status: 'PENDING' },
+            {
+              status: 'FAILED',
+              attempts: { lt: INITIAL_SCAN_MAX_ATTEMPTS },
+              updatedAt: { lt: retryBefore },
+            },
+            {
+              status: 'RUNNING',
+              startedAt: { lt: staleBefore },
+            },
+          ],
+        },
+        data: {
+          status: 'RUNNING',
+          startedAt: new Date(),
+          completedAt: null,
+          error: null,
+          keyword: row.keywordRef.keyword,
+          attempts: { increment: 1 },
+        },
+      });
+      if (claimed.count !== 1) continue;
+
+      try {
+        const ctx = orgById.get(row.organizationId);
+        if (!ctx) throw new Error(`org context ${row.organizationId} not enabled`);
+        const lookback = new Date(
+          Date.now() - INITIAL_SCAN_LOOKBACK_HOURS * 3_600_000
+        );
+        const result = await this._redditAdapter.searchScoped({
+          scope: { type: 'keyword' },
+          keywords: [row.keywordRef.keyword],
+          cursor: { lastSeenAt: lookback },
+          budget: { maxCalls: INITIAL_SCAN_MAX_CALLS },
+          token: redditToken,
+          log: {
+            log: (m) => this.logger.log(`[initial-scan] ${m}`),
+            warn: (m) => this.logger.warn(`[initial-scan] ${m}`),
+          },
+          heartbeat: (p) =>
+            this._heartbeat({
+              stage: 'keyword_initial_scan',
+              keywordId: row.keywordId,
+              platform: row.platform,
+              progress: p,
+            }),
+        });
+        await this._fanOutToOrg(ctx, deduplicatePosts(result.posts));
+        if (result.rate.limited) {
+          const retryAfter = result.rate.retryAfterMs
+            ? `; retryAfterMs=${result.rate.retryAfterMs}`
+            : '';
+          throw new Error(`Initial keyword scan rate-limited${retryAfter}`);
+        }
+        await this._keywordInitialScan.model.engageKeywordInitialScan.update({
+          where: { id: row.id },
+          data: {
+            status: 'DONE',
+            completedAt: new Date(),
+            error: null,
+          },
+        });
+      } catch (err) {
+        await this._keywordInitialScan.model.engageKeywordInitialScan.update({
+          where: { id: row.id },
+          data: {
+            status: 'FAILED',
+            error: (err as Error).message.slice(0, 1000),
+          },
+        });
+      }
+    }
+  }
+
+  private async _ensureMissingKeywordInitialScans(
+    orgContexts: OrgContext[]
+  ): Promise<void> {
+    if (!this._keywordInitialScan) return;
+    const rows = orgContexts.flatMap((ctx) =>
+      ctx.keywords.map((kw) => ({
+        organizationId: ctx.organizationId,
+        keywordId: kw.id,
+        keyword: kw.keyword,
+        platform: 'reddit',
+        status: 'PENDING',
+      }))
+    );
+    if (!rows.length) return;
+    await this._keywordInitialScan.model.engageKeywordInitialScan.createMany({
+      data: rows,
+      skipDuplicates: true,
+    });
   }
 
   // X + Reddit global keyword firehose (one cursor per platform).

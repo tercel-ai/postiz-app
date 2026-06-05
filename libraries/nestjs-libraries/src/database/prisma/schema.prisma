@@ -1052,9 +1052,31 @@ model EngageKeyword {
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
 
+  initialScans EngageKeywordInitialScan[]
+
   @@unique([configId, keyword])
   @@index([organizationId])
   @@index([configId, enabled])
+}
+
+model EngageKeywordInitialScan {
+  id             String    @id @default(uuid())
+  organizationId String
+  keywordId      String
+  keywordRef     EngageKeyword @relation(fields: [keywordId], references: [id], onDelete: Cascade)
+  platform       String
+  keyword        String
+  status         String    @default("PENDING") // PENDING | RUNNING | DONE | FAILED
+  startedAt      DateTime?
+  completedAt    DateTime?
+  error          String?
+  attempts       Int       @default(0)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@unique([keywordId, platform])
+  @@index([status, platform, createdAt])
+  @@index([organizationId, platform])
 }
 
 model EngageMonitoredChannel {

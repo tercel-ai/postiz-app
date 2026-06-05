@@ -249,6 +249,23 @@ Engage includes 5 core asynchronous workflows with **different trigger timings**
 | `ENGAGE_CHANNEL_SCAN_INTERVAL_HOURS` | `3` | Reddit monitored subreddit scan |
 | `ENGAGE_TRACKED_SCAN_INTERVAL_HOURS` | `3` | X tracked account scan |
 
+**Keyword Initial Scan Environment Variables** (Optional `.env` config, defaults built-in):
+
+When a keyword is newly added or re-enabled, Engage creates a per-platform
+`EngageKeywordInitialScan` row. The ticker processes these rows before the
+normal shared-cursor scan, using a single-keyword Reddit catch-up query so new
+keywords do not wait up to the 24h global keyword cadence and do not miss recent
+posts that are already behind the shared `reddit/keyword/__global__` cursor.
+
+| Variable | Default | Description |
+|---|---:|---|
+| `ENGAGE_KEYWORD_INITIAL_SCAN_MAX_UNITS` | `5` | Maximum pending keyword initial-scan rows processed per ticker activity |
+| `ENGAGE_KEYWORD_INITIAL_SCAN_MAX_CALLS` | `3` | Maximum upstream Reddit calls per keyword initial scan |
+| `ENGAGE_KEYWORD_INITIAL_SCAN_LOOKBACK_HOURS` | `24` | Recent-history window to catch up for a newly added/re-enabled keyword |
+| `ENGAGE_KEYWORD_INITIAL_SCAN_MAX_ATTEMPTS` | `3` | Maximum attempts before a repeatedly failing initial scan stays `FAILED` |
+| `ENGAGE_KEYWORD_INITIAL_SCAN_RETRY_MS` | `900000` | Retry delay for `FAILED` initial scans that still have attempts remaining |
+| `ENGAGE_KEYWORD_INITIAL_SCAN_STALE_MS` | `1800000` | Stale `RUNNING` lease timeout; allows recovery if a worker dies mid-scan |
+
 **Scan Tuning Environment Variables** (Optional `.env` config, defaults built-in):
 
 | Variable | Default | Description |

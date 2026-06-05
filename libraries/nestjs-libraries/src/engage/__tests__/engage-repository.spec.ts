@@ -1171,6 +1171,28 @@ describe('EngageRepository — two-table reads', () => {
         keyword: 'nestjs',
         enabled: true,
       });
+      expect(keywordCreate.mock.calls[0][0].data.initialScans.create).toEqual([
+        {
+          organizationId: 'org1',
+          platform: 'reddit',
+          keyword: 'nestjs',
+          status: 'PENDING',
+        },
+      ]);
+    });
+
+    it('does not create an initial scan for a disabled keyword', async () => {
+      const { repo, keywordCreate } = buildKeywordRepo();
+      keywordCreate.mockResolvedValue({ id: 'kw1' });
+
+      await repo.addKeyword('cfg1', 'org1', {
+        keyword: 'nestjs',
+        enabled: false,
+      } as any);
+
+      expect(keywordCreate.mock.calls[0][0].data).not.toHaveProperty(
+        'initialScans'
+      );
     });
 
     it('maps a P2002 unique violation to a 409 ConflictException', async () => {
@@ -1196,6 +1218,77 @@ describe('EngageRepository — two-table reads', () => {
       await expect(
         repo.addKeyword('cfg1', 'org1', { keyword: 'nestjs' } as any)
       ).rejects.toThrow('db down');
+    });
+  });
+
+  describe('updateKeyword initial scan reset', () => {
+    it('resets platform initial scans when a disabled keyword is re-enabled', async () => {
+      const keywordFindFirst = vi.fn().mockResolvedValue({
+        id: 'kw1',
+        organizationId: 'org1',
+        keyword: 'storage',
+        enabled: false,
+      });
+      const keywordUpdate = vi.fn().mockResolvedValue({
+        id: 'kw1',
+        organizationId: 'org1',
+        keyword: 'storage',
+        enabled: true,
+      });
+      const initialUpsert = vi.fn().mockResolvedValue({});
+      const repo = new EngageRepository(
+        {} as any,
+        { model: { engageKeyword: { findFirst: keywordFindFirst, update: keywordUpdate } } } as any,
+        {} as any, {} as any, {} as any,
+        {} as any, {} as any, {} as any, {} as any, {} as any,
+        {} as any,
+        {} as any,
+        { model: { engageKeywordInitialScan: { upsert: initialUpsert } } } as any
+      );
+
+      await repo.updateKeyword('org1', 'kw1', { enabled: true } as any);
+
+      expect(initialUpsert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { keywordId_platform: { keywordId: 'kw1', platform: 'reddit' } },
+          update: expect.objectContaining({
+            status: 'PENDING',
+            startedAt: null,
+            completedAt: null,
+            error: null,
+            attempts: 0,
+          }),
+        })
+      );
+    });
+
+    it('does not reset initial scans for type-only updates', async () => {
+      const keywordFindFirst = vi.fn().mockResolvedValue({
+        id: 'kw1',
+        organizationId: 'org1',
+        keyword: 'storage',
+        enabled: true,
+      });
+      const keywordUpdate = vi.fn().mockResolvedValue({
+        id: 'kw1',
+        organizationId: 'org1',
+        keyword: 'storage',
+        enabled: true,
+      });
+      const initialUpsert = vi.fn().mockResolvedValue({});
+      const repo = new EngageRepository(
+        {} as any,
+        { model: { engageKeyword: { findFirst: keywordFindFirst, update: keywordUpdate } } } as any,
+        {} as any, {} as any, {} as any,
+        {} as any, {} as any, {} as any, {} as any, {} as any,
+        {} as any,
+        {} as any,
+        { model: { engageKeywordInitialScan: { upsert: initialUpsert } } } as any
+      );
+
+      await repo.updateKeyword('org1', 'kw1', { type: 'BRAND' } as any);
+
+      expect(initialUpsert).not.toHaveBeenCalled();
     });
   });
 

@@ -46,4 +46,7 @@ X and Reddit. This is the entry point to all Engage docs.
   whose handle matches the reply author; otherwise only public metrics are visible.
 - The per-type scan workflows were consolidated into **one** cursor-driven ticker
   (`engage-scan-ticker`, signal `triggerScanNow`).
+- Newly added or re-enabled keywords use **`EngageKeywordInitialScan`** catch-up
+  rows before joining the shared global cursor, so users do not wait for the 24h
+  keyword cadence or miss recent posts already behind `reddit/keyword/__global__`.
 - Reddit public-JSON metric reads require a `loid` cookie to clear the WAF.

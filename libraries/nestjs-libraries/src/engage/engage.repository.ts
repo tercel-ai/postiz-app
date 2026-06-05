@@ -40,6 +40,7 @@ const CHANNEL_CADENCE_MS =
   Number(process.env.ENGAGE_CHANNEL_SCAN_INTERVAL_HOURS ?? 3) * 3_600_000;
 const TRACKED_CADENCE_MS =
   Number(process.env.ENGAGE_TRACKED_SCAN_INTERVAL_HOURS ?? 3) * 3_600_000;
+const INITIAL_SCAN_PLATFORMS = ['reddit'] as const;
 
 export interface ScanTiming {
   lastScanAt: Date | null; // most recent successful completion
@@ -149,7 +150,8 @@ export class EngageRepository {
     private _integration: PrismaRepository<'integration'>,
     private _post: PrismaRepository<'post'>,
     private _tx: PrismaTransaction,
-    private _scanCursor: PrismaRepository<'engageScanCursor'>
+    private _scanCursor: PrismaRepository<'engageScanCursor'>,
+    private _keywordInitialScan: PrismaRepository<'engageKeywordInitialScan'>
   ) {}
 
   // Runs a create that may hit a unique constraint and converts the resulting
@@ -183,7 +185,10 @@ export class EngageRepository {
       create: { organizationId, enabled: false },
       update: {},
       include: {
-        keywords: { orderBy: { createdAt: 'asc' } },
+        keywords: {
+          orderBy: { createdAt: 'asc' },
+          include: { initialScans: { orderBy: { platform: 'asc' } } },
+        },
         monitoredChannels: { orderBy: { createdAt: 'asc' } },
         trackedAccounts: { orderBy: { createdAt: 'asc' } },
         xReplyAccounts: {
@@ -319,6 +324,16 @@ export class EngageRepository {
           keyword: dto.keyword,
           type: dto.type ?? null,
           enabled: dto.enabled ?? true,
+          ...((dto.enabled ?? true) && {
+            initialScans: {
+              create: INITIAL_SCAN_PLATFORMS.map((platform) => ({
+                organizationId,
+                platform,
+                keyword: dto.keyword,
+                status: 'PENDING',
+              })),
+            },
+          }),
         },
       })
     );
@@ -340,10 +355,12 @@ export class EngageRepository {
       type: kw.type ?? null,
       enabled: kw.enabled ?? true,
     }));
-    return this._keyword.model.engageKeyword.createMany({
+    const result = await this._keyword.model.engageKeyword.createMany({
       data,
       skipDuplicates: true,
     });
+    await this._ensureInitialScansForEnabledKeywords(configId, organizationId);
+    return result;
   }
 
   async updateKeyword(
@@ -355,13 +372,73 @@ export class EngageRepository {
       where: { id, organizationId },
     });
     if (!kw) throw new NotFoundException('Keyword not found');
-    return this._keyword.model.engageKeyword.update({
+    const shouldResetInitialScan =
+      dto.enabled === true && kw.enabled === false;
+    const updated = await this._keyword.model.engageKeyword.update({
       where: { id },
       data: {
         ...(dto.type !== undefined && { type: dto.type }),
         ...(dto.enabled !== undefined && { enabled: dto.enabled }),
       },
     });
+    if (shouldResetInitialScan) {
+      await this._resetInitialScansForKeyword(
+        updated.id,
+        organizationId,
+        updated.keyword
+      );
+    }
+    return updated;
+  }
+
+  private async _ensureInitialScansForEnabledKeywords(
+    configId: string,
+    organizationId: string
+  ): Promise<void> {
+    const keywords = await this._keyword.model.engageKeyword.findMany({
+      where: { configId, organizationId, enabled: true },
+      select: { id: true, keyword: true },
+    });
+    if (!keywords.length) return;
+    await this._keywordInitialScan.model.engageKeywordInitialScan.createMany({
+      data: keywords.flatMap((kw) =>
+        INITIAL_SCAN_PLATFORMS.map((platform) => ({
+          organizationId,
+          keywordId: kw.id,
+          keyword: kw.keyword,
+          platform,
+          status: 'PENDING',
+        }))
+      ),
+      skipDuplicates: true,
+    });
+  }
+
+  private async _resetInitialScansForKeyword(
+    keywordId: string,
+    organizationId: string,
+    keyword: string
+  ): Promise<void> {
+    for (const platform of INITIAL_SCAN_PLATFORMS) {
+      await this._keywordInitialScan.model.engageKeywordInitialScan.upsert({
+        where: { keywordId_platform: { keywordId, platform } },
+        create: {
+          organizationId,
+          keywordId,
+          keyword,
+          platform,
+          status: 'PENDING',
+        },
+        update: {
+          keyword,
+          status: 'PENDING',
+          startedAt: null,
+          completedAt: null,
+          error: null,
+          attempts: 0,
+        },
+      });
+    }
   }
 
   async deleteKeyword(organizationId: string, id: string) {
@@ -2298,6 +2375,29 @@ export class EngageRepository {
           })),
           skipDuplicates: true,
         });
+        const enabledKeywords = await tx.engageKeyword.findMany({
+          where: {
+            configId: config.id,
+            organizationId,
+            enabled: true,
+            keyword: { in: dto.keywords.map((kw) => kw.keyword) },
+          },
+          select: { id: true, keyword: true },
+        });
+        if (enabledKeywords.length) {
+          await tx.engageKeywordInitialScan.createMany({
+            data: enabledKeywords.flatMap((kw) =>
+              INITIAL_SCAN_PLATFORMS.map((platform) => ({
+                organizationId,
+                keywordId: kw.id,
+                keyword: kw.keyword,
+                platform,
+                status: 'PENDING',
+              }))
+            ),
+            skipDuplicates: true,
+          });
+        }
       }
 
       if (dto.monitoredChannels?.length) {

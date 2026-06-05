@@ -148,9 +148,38 @@ model EngageKeyword {
   createdAt             DateTime  @default(now())
   updatedAt             DateTime  @updatedAt
 
+  initialScans          EngageKeywordInitialScan[]
+
   @@unique([configId, keyword])               // prevent duplicate keywords per org
   @@index([organizationId])
   @@index([configId, enabled])
+}
+
+// Per-keyword/per-platform current initial-scan state. This is NOT a historical
+// job log and NOT an incremental cursor. It exists because the shared global
+// keyword cursor (`reddit/keyword/__global__`) is efficient for steady-state
+// future posts, but cannot backfill recent posts for a keyword that was added
+// after the global cursor had already advanced. A newly added/re-enabled keyword
+// gets a PENDING row; the ticker performs a single-keyword catch-up scan for a
+// bounded lookback window, then marks it DONE/FAILED.
+model EngageKeywordInitialScan {
+  id             String    @id @default(uuid())
+  organizationId String    // immutable denormalization for org/platform status reads
+  keywordId      String
+  keywordRef     EngageKeyword @relation(fields: [keywordId], references: [id], onDelete: Cascade)
+  platform       String    // "reddit" today; future: "x", "youtube", ...
+  keyword        String    // snapshot refreshed when the keyword is re-enabled/edited
+  status         String    @default("PENDING") // PENDING | RUNNING | DONE | FAILED
+  startedAt      DateTime? // RUNNING lease start; stale rows are reclaimable
+  completedAt    DateTime?
+  error          String?
+  attempts       Int       @default(0)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@unique([keywordId, platform])
+  @@index([status, platform, createdAt])
+  @@index([organizationId, platform])
 }
 
 // Keyword types stored as String — no migration needed when adding new types.
@@ -929,6 +958,39 @@ All scans are keyword-driven (the union of every org's enabled keywords is
 OR-batched into the query). Each unit owns a row in **`EngageScanCursor`** (§3)
 holding its incremental position + scheduling state — org-independent, since the
 same keyword/subreddit/account is fetched once and fanned out.
+
+**Keyword initial scans**. The global keyword cursor is intentionally shared, so
+it is only correct while the keyword set is stable. When a user adds or
+re-enables a keyword, recent posts for that keyword may already be behind the
+shared `reddit/keyword/__global__` cursor and would otherwise never be revisited.
+To close that gap, keyword writes create or reset an **`EngageKeywordInitialScan`**
+row per supported platform. At the beginning of each ticker activity,
+`runDueScans`:
+
+1. lazily creates missing initial-scan rows for enabled keywords (upgrade safety);
+2. claims up to `ENGAGE_KEYWORD_INITIAL_SCAN_MAX_UNITS` pending Reddit rows;
+3. runs a single-keyword Reddit catch-up query with an empty/time lookback cursor;
+4. fans the results out only to that keyword's org through the same scoring and
+   persistence path as normal scans; and
+5. marks the row `DONE` or `FAILED`.
+
+Initial scans do **not** advance or reset `EngageScanCursor`. After the catch-up
+is complete, the keyword participates in the normal shared global cursor for
+future posts. The initial-scan table is kept separate from `EngageScanCursor`
+because it has one-shot job semantics (`DONE`/`FAILED`, attempts, error, stale
+RUNNING lease recovery), while `EngageScanCursor` represents ongoing incremental
+position and cadence.
+
+Initial scan env:
+
+| Variable | Default | Purpose |
+|---|---:|---|
+| `ENGAGE_KEYWORD_INITIAL_SCAN_MAX_UNITS` | `5` | Pending initial-scan rows processed per ticker activity |
+| `ENGAGE_KEYWORD_INITIAL_SCAN_MAX_CALLS` | `3` | Upstream calls per keyword catch-up |
+| `ENGAGE_KEYWORD_INITIAL_SCAN_LOOKBACK_HOURS` | `24` | Recent-history window for new/re-enabled keywords |
+| `ENGAGE_KEYWORD_INITIAL_SCAN_MAX_ATTEMPTS` | `3` | Attempts before a row remains `FAILED` |
+| `ENGAGE_KEYWORD_INITIAL_SCAN_RETRY_MS` | `900000` | Retry delay for failed rows |
+| `ENGAGE_KEYWORD_INITIAL_SCAN_STALE_MS` | `1800000` | RUNNING lease timeout for worker-crash recovery |
 
 **Per-unit lifecycle** (`_scanUnit` → `_claimCursor`):
 
