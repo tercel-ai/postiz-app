@@ -1256,7 +1256,10 @@ export class EngageDraftService {
   async *generateDraft(
     opportunity: EngageOpportunity,
     strategy: string,
-    brandStrength: number
+    brandStrength: number,
+    mentions?: string[],
+    signal?: AbortSignal,
+    outputLength?: number  // target reply length; defaults per platform
   ): AsyncGenerator<string> {
     const systemPrompt = this.buildSystemPrompt(opportunity.platform, strategy, opportunity.primaryIntent, brandStrength);
     const userPrompt = this.buildUserPrompt(opportunity);
@@ -1282,7 +1285,10 @@ export class EngageDraftService {
     primaryIntent: string,
     brandStrength: number
   ): string {
-    const charLimit = platform === 'x' ? 'under 280 characters' : 'up to 500 words';
+    // X aims for 260 Twitter-weighted chars; Reddit aims for `outputLength` (default 1000).
+    // These are generation TARGETS — the hard rejection cap is enforced after generation:
+    // X retries once then throws; Reddit accepts up to max(outputLength, 2000), throws above.
+    const charLimit = platform === 'x' ? 'under 260 Twitter-weighted characters' : `under ${outputLength ?? 1000} characters`;
     const strategyInstruction = STRATEGY_PROMPTS[strategy];
     const brandInstruction = BRAND_PROMPTS[brandStrength];
     // Fallback to 'discussion' prompt if an unknown/future intent tag is passed
@@ -1516,7 +1522,10 @@ async generateDraft(
   for await (const chunk of this._engageDraftService.generateDraft(
     opportunity,
     body.strategy,
-    body.brandStrength
+    body.brandStrength,
+    body.mentions,
+    abortController.signal,
+    body.outputLength
   )) {
     res.write(`data: ${JSON.stringify({ text: chunk })}\n\n`);
   }
@@ -1890,14 +1899,20 @@ These are **NOT** the `EngageTrackedAccount` (external accounts). Never mix the 
 ### 10.5 Reply Panel — Streaming Draft
 
 ```typescript
-async function generateDraft(opportunityId: string, strategy: string, brandStrength: number) {
+async function generateDraft(
+  opportunityId: string,
+  strategy: string,
+  brandStrength: number,
+  mentions?: string[],
+  outputLength?: number  // optional target reply length
+) {
   setDraft('');
   setGenerating(true);
   
   const resp = await fetch(`/api/engage/opportunities/${opportunityId}/draft`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ strategy, brandStrength }),
+    body: JSON.stringify({ strategy, brandStrength, mentions, outputLength }),
   });
 
   const reader = resp.body!.getReader();

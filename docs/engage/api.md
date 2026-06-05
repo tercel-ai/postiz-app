@@ -912,9 +912,29 @@ Stream the generation of an AI reply draft. Response is Server-Sent Events (`tex
 ```json
 {
   "strategy": "EXPERT_ANSWER",  // Required: 'EXPERT_ANSWER' | 'DATA_BACKED' | 'EMPATHY_LED'
-  "brandStrength": 1            // Required: 0-3 integer
+  "brandStrength": 1,           // Required: 0-3 integer
+  "mentions": ["AISEE"],        // Optional: brand names to weave in (max 20)
+  "outputLength": 1000          // Optional: target reply length (chars); omit to use platform default
 }
 ```
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `strategy` | `string` | ✓ | `EXPERT_ANSWER` / `DATA_BACKED` / `EMPATHY_LED` |
+| `brandStrength` | `number` (0–3) | ✓ | Brand emphasis level (see table below) |
+| `mentions` | `string[]` (max 20) | | Brand names the model may mention (used when `brandStrength` ≥ 2) |
+| `outputLength` | `integer` (≥ 2) | | Target reply length fed into the prompt. Omitted → platform default (X = 260 weighted chars, Reddit = 1000 chars) |
+
+**Output length & character limits**
+
+`outputLength` is the **target** the model is instructed to aim for — it is not the hard rejection threshold:
+
+| Platform | Default target | Hard cap (draft rejected above this) |
+|---|---|---|
+| X / Twitter | 260 Twitter-weighted chars | `outputLength` (with one automatic retry if the first draft overshoots) |
+| Reddit | 1000 chars | `max(outputLength, 2000)` — drafts of 1000–2000 chars are accepted; only above 2000 fails |
+
+> Reddit's real limit is ~10000 chars, so a 2000-char reply always posts fine. Keeping the target at 1000 favors concise, natural replies while tolerating a slight overshoot instead of failing the whole generation. A Reddit draft over the hard cap fails with `generation_failed` and is **not** retried (unlike X).
 
 **Strategy Descriptions**
 
