@@ -259,6 +259,51 @@ npx tsx scripts/terminate-engage-data-ticks.ts --execute  # actually terminate
 
 ---
 
+## 4. Proxy diagnostics
+
+### `test-proxy.ts` — verify an HTTP proxy path
+Checks a proxy with undici's `ProxyAgent`, which is the same HTTP stack used by
+the Reddit/Engage server code. Use this when `curl -x` works but Node-side proxy
+traffic looks intermittent.
+
+By default it:
+- reads the proxy from the first arg, `HTTPS_PROXY`, or `HTTP_PROXY`;
+- normalizes both `http://user:pass@host:port` and panel-style
+  `host:port:user:pass`;
+- tests only the proxy path (direct checks are opt-in);
+- uses IPv4-first DNS to match the common fast `curl -4 -x` comparison;
+- probes multiple exit-IP services for multiple rounds and prints elapsed time,
+  HTTP status, and connection error codes.
+
+```bash
+# default: 2 rounds across api.ipify.org, ifconfig.me, and icanhazip.com
+pnpm exec ts-node --transpile-only scripts/test-proxy.ts "http://user:pass@host:port"
+
+# compare proxy vs direct from the same process
+pnpm exec ts-node --transpile-only scripts/test-proxy.ts "http://user:pass@host:port" --direct
+
+# stress the proxy path and match curl's IPv4-only check
+pnpm exec ts-node --transpile-only scripts/test-proxy.ts "http://user:pass@host:port" --rounds 5
+curl -4 -x "http://user:pass@host:port" https://api.ipify.org?format=json
+
+# isolate one target service or loosen DNS family behavior
+pnpm exec ts-node --transpile-only scripts/test-proxy.ts "http://user:pass@host:port" --target https://api.ipify.org?format=json
+pnpm exec ts-node --transpile-only scripts/test-proxy.ts "http://user:pass@host:port" --any-family
+```
+
+- **Flags:** `--direct`, `--rounds <n>` (default 2), `--timeout <ms>` (default
+  10000), `--target <url>`, `--ipv6`, `--any-family`.
+- **Env:** `HTTPS_PROXY` or `HTTP_PROXY` if no proxy URL is passed. For Reddit-only
+  routing, pass `REDDIT_PROXY` explicitly or run
+  `REDDIT_PROXY=... pnpm exec ts-node --transpile-only scripts/test-proxy.ts "$REDDIT_PROXY"`.
+- **Interpretation:** if `curl -4 -x` is consistently fast but this script fails
+  with `ENOTFOUND`, `ETIMEDOUT`, `ECONNRESET`, or `UND_ERR_*`, the problem is in
+  Node/undici's path to the proxy or the proxy tunnel, not in the direct network.
+  If only one exit-IP target fails, treat it as target-service flakiness rather
+  than a proxy outage.
+
+---
+
 ## See also
 - [`startup-checklist.md`](./startup-checklist.md) — deployment / cold-start / upgrade ops.
 - [`sync-metrics-script.md`](./sync-metrics-script.md) — detailed output walkthrough for `engage-sync-metrics.ts`.

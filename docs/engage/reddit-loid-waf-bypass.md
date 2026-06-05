@@ -113,4 +113,8 @@ the browser only as an occasional cookie-minter, then reuse the cookie with plai
 
 - `scripts/diagnose-reddit-search.ts` — token-acquisition + search matrix (direct/proxy, grants, UAs).
 - `scripts/test-reddit-playwright.mjs` — proves the browser path; `HEADFUL=1` to watch.
-- `scripts/test-proxy.ts` — verifies a proxy URL is reachable and prints the exit IP.
+- `scripts/test-proxy.ts` — verifies the undici/Node proxy path, printing exit IP,
+  elapsed time, HTTP status, and connection error codes across multiple targets.
+  Use `--direct` for a same-process direct comparison and compare with
+  `curl -4 -x "<proxy>" https://api.ipify.org?format=json` when curl is fast but
+  Node-side proxy traffic looks intermittent.
