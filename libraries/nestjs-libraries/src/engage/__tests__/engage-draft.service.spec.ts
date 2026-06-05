@@ -82,6 +82,18 @@ describe('EngageDraftService', () => {
       expect(redditPrompt).toContain('up to 500 words');
     });
 
+    it('should restate the platform character limit as an IMPORTANT final instruction', () => {
+      const xPrompt = (service as any)._buildSystemPrompt('x', 'EXPERT_ANSWER', 'help_seeking', 1);
+      expect(xPrompt).toContain(
+        'IMPORTANT: The final reply must stay under 260 Twitter-weighted characters'
+      );
+
+      const redditPrompt = (service as any)._buildSystemPrompt('reddit', 'EXPERT_ANSWER', 'help_seeking', 1);
+      expect(redditPrompt).toContain(
+        'IMPORTANT: The final reply must stay up to 500 words.'
+      );
+    });
+
     it('should include strategy instructions in system prompt', () => {
       const expertPrompt = (service as any)._buildSystemPrompt('x', 'EXPERT_ANSWER', 'help_seeking', 1);
       expect(expertPrompt).toContain('expert step-by-step advice');
