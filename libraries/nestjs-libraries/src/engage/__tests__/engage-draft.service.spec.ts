@@ -166,7 +166,73 @@ describe('EngageDraftService', () => {
         chunks.push(chunk);
       }
 
-      expect(chunks).toEqual(['Hello ', 'world!']);
+      expect(chunks.join('')).toBe('Hello world!');
+    });
+
+    it('should cut X drafts at the last useful sentence boundary before the limit', async () => {
+      async function* source() {
+        yield 'First complete sentence. ';
+        yield 'Second sentence is too long ' + 'x'.repeat(120);
+      }
+
+      const chunks = [];
+      for await (const chunk of (service as any)._applyXCharLimit(source(), 80)) {
+        chunks.push(chunk);
+      }
+
+      expect(chunks.join('')).toBe('First complete sentence. ');
+    });
+
+    it('should cut X drafts at Chinese sentence punctuation before the limit', async () => {
+      async function* source() {
+        yield '第一句完整。第二句会很长很长很长很长很长很长很长很长';
+      }
+
+      const chunks = [];
+      for await (const chunk of (service as any)._applyXCharLimit(source(), 30)) {
+        chunks.push(chunk);
+      }
+
+      expect(chunks.join('')).toBe('第一句完整。');
+    });
+
+    it('should fall back to hard X weighted truncation when no natural boundary exists', async () => {
+      async function* source() {
+        yield 'a'.repeat(100);
+      }
+
+      const chunks = [];
+      for await (const chunk of (service as any)._applyXCharLimit(source(), 20)) {
+        chunks.push(chunk);
+      }
+
+      expect(chunks.join('')).toBe('a'.repeat(20));
+    });
+
+    it('should cut X drafts at the last comma when no sentence boundary exists', async () => {
+      async function* source() {
+        yield 'First clause, second clause keeps going ' + 'x'.repeat(80);
+      }
+
+      const chunks = [];
+      for await (const chunk of (service as any)._applyXCharLimit(source(), 45)) {
+        chunks.push(chunk);
+      }
+
+      expect(chunks.join('')).toBe('First clause, ');
+    });
+
+    it('should cut X drafts at a word boundary when no punctuation boundary exists', async () => {
+      async function* source() {
+        yield 'alpha beta gamma delta epsilon';
+      }
+
+      const chunks = [];
+      for await (const chunk of (service as any)._applyXCharLimit(source(), 18)) {
+        chunks.push(chunk);
+      }
+
+      expect(chunks.join('')).toBe('alpha beta gamma');
     });
   });
 });

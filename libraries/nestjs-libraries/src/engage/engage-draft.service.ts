@@ -40,6 +40,10 @@ const INTENT_PROMPTS: Record<string, string> = {
     'The person shared data. Expand with related data or implications.',
 };
 
+const SENTENCE_END_RE = /[.!?。！？](?:["'”’)\]}】》」』]*)\s*/g;
+const PAUSE_END_RE = /[,，](?:["'”’)\]}】》」』]*)\s*/g;
+const WORD_BOUNDARY_RE = /\s+\S*$/;
+
 @Injectable()
 export class EngageDraftService {
   // Use OpenAI-compatible SDK for OpenRouter; fall back to Anthropic SDK for
@@ -98,26 +102,84 @@ export class EngageDraftService {
     }
   }
 
-  // Stream chunks until the Twitter weighted length reaches the limit.
-  // Uses twitter-text's actual weighted counting (CJK/emoji = 2 units, URLs = 23).
+  // Stream complete sentence chunks until the Twitter weighted length reaches
+  // the limit. Uses twitter-text's actual weighted counting (CJK/emoji = 2
+  // units, URLs = 23), and prefers cutting at sentence punctuation so the
+  // final draft stays readable.
   private async *_applyXCharLimit(
     source: AsyncGenerator<string>,
     limit: number
   ): AsyncGenerator<string> {
-    let accumulated = '';
+    let buffered = '';
+    let emittedEnd = 0;
+
     for await (const chunk of source) {
-      const next = accumulated + chunk;
+      const next = buffered + chunk;
       if (weightedLength(next) <= limit) {
-        accumulated = next;
-        yield chunk;
+        buffered = next;
+        const sentenceEnd = this._lastSentenceBoundaryEnd(buffered, buffered.length);
+        if (sentenceEnd > emittedEnd) {
+          yield buffered.slice(emittedEnd, sentenceEnd);
+          emittedEnd = sentenceEnd;
+        }
       } else {
-        // Find the last valid UTF-16 code unit position within the limit
-        const { end } = textSlicer('x', limit, next);
-        const remainder = next.slice(accumulated.length, end);
+        const end = this._naturalXCutEnd(next, limit);
+        const remainder = next.slice(emittedEnd, end);
         if (remainder) yield remainder;
-        break;
+        return;
       }
     }
+
+    if (buffered.length > emittedEnd) {
+      yield buffered.slice(emittedEnd);
+    }
+  }
+
+  private _naturalXCutEnd(text: string, limit: number): number {
+    const { end } = textSlicer('x', limit, text);
+    const hardEnd = Math.min(end + 1, text.length);
+    const sentenceEnd = this._lastSentenceBoundaryEnd(text, hardEnd);
+
+    if (sentenceEnd) {
+      return sentenceEnd;
+    }
+
+    const pauseEnd = this._lastBoundaryEnd(PAUSE_END_RE, text, hardEnd);
+    if (pauseEnd) {
+      return pauseEnd;
+    }
+
+    const wordEnd = this._lastWordBoundaryEnd(text, hardEnd);
+    return wordEnd || hardEnd;
+  }
+
+  private _lastSentenceBoundaryEnd(text: string, maxEnd: number): number {
+    return this._lastBoundaryEnd(SENTENCE_END_RE, text, maxEnd);
+  }
+
+  private _lastBoundaryEnd(
+    boundaryRe: RegExp,
+    text: string,
+    maxEnd: number
+  ): number {
+    boundaryRe.lastIndex = 0;
+
+    let end = 0;
+    let match: RegExpExecArray | null;
+    while ((match = boundaryRe.exec(text)) !== null) {
+      if (boundaryRe.lastIndex > maxEnd) {
+        break;
+      }
+      end = boundaryRe.lastIndex;
+    }
+
+    return end;
+  }
+
+  private _lastWordBoundaryEnd(text: string, maxEnd: number): number {
+    const hardSlice = text.slice(0, maxEnd);
+    const match = hardSlice.match(WORD_BOUNDARY_RE);
+    return match?.index ? match.index : 0;
   }
 
   private async *_streamViaOpenRouter(
