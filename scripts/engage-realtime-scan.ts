@@ -32,6 +32,7 @@ dotenv.config();
 process.env.NODE_ENV = process.env.NODE_ENV || 'production';
 process.env.TZ = 'UTC';
 
+import { setupHttpDispatcher } from '@gitroom/helpers/proxy/setup-dispatcher';
 import { PrismaClient, EngageKeyword } from '@prisma/client';
 import {
   RawPost,
@@ -49,6 +50,11 @@ import {
   ScanType,
 } from '@gitroom/nestjs-libraries/engage/scan/platform-scan-adapter';
 
+// Match apps/orchestrator/src/main.ts: route Reddit traffic through REDDIT_PROXY
+// with direct fallback for replayable reads, and use HTTPS_PROXY/HTTP_PROXY for
+// non-Reddit traffic when configured.
+setupHttpDispatcher();
+
 type PlatformArg = 'reddit' | 'x' | 'all';
 type ScopeArg = 'all' | ScanType;
 
@@ -61,6 +67,13 @@ interface CliArgs {
   useCursor: boolean;
   token: string | null;
   json: boolean;
+}
+
+interface RedditTokenInfo {
+  token: string | null;
+  clientIdSet: boolean;
+  clientSecretSet: boolean;
+  proxyUrl: string | null;
 }
 
 interface ScanUnit {
@@ -188,6 +201,22 @@ function maskDbUrl(url: string | undefined): string {
   return (url ?? '').replace(/:\/\/[^@]+@/, '://***@');
 }
 
+function redditProxyUrl(): string | null {
+  return process.env.REDDIT_PROXY || process.env.HTTPS_PROXY || process.env.HTTP_PROXY || null;
+}
+
+function maskProxyUrl(url: string | null): string {
+  if (!url) return '(none)';
+  try {
+    const u = new URL(url);
+    if (u.password) u.password = '***';
+    if (u.username) u.username = '***';
+    return u.toString();
+  } catch {
+    return url;
+  }
+}
+
 function extractOauthToken(token: string | Record<string, string>): string | null {
   if (typeof token === 'string') {
     const trimmed = token.trim();
@@ -233,6 +262,15 @@ async function collectXToken(
     return { token: process.env.X_BEARER_TOKEN, source: 'X_BEARER_TOKEN' };
   }
   return { token: null, source: 'none' };
+}
+
+async function collectRedditToken(): Promise<RedditTokenInfo> {
+  return {
+    token: await getRedditToken(),
+    clientIdSet: Boolean(process.env.REDDIT_CLIENT_ID),
+    clientSecretSet: Boolean(process.env.REDDIT_CLIENT_SECRET),
+    proxyUrl: redditProxyUrl(),
+  };
 }
 
 async function cursorFor(
@@ -551,18 +589,34 @@ async function main(): Promise<void> {
     }
 
     const [redditToken, xToken] = await Promise.all([
-      args.platform === 'reddit' || args.platform === 'all' ? getRedditToken() : Promise.resolve(null),
+      args.platform === 'reddit' || args.platform === 'all'
+        ? collectRedditToken()
+        : Promise.resolve({
+            token: null,
+            clientIdSet: false,
+            clientSecretSet: false,
+            proxyUrl: redditProxyUrl(),
+          }),
       args.platform === 'x' || args.platform === 'all' ? collectXToken(prisma, args.orgId, args.token) : Promise.resolve({ token: null, source: 'none' }),
     ]);
 
-    console.log(`reddit token: ${redditToken ? 'yes' : 'no (adapter will try public fallback)'}`);
+    console.log(
+      `reddit token: ${
+        redditToken.token
+          ? 'yes'
+          : `no (${redditToken.clientIdSet ? 'REDDIT_CLIENT_ID set' : 'REDDIT_CLIENT_ID missing'}, ${
+              redditToken.clientSecretSet ? 'REDDIT_CLIENT_SECRET set' : 'REDDIT_CLIENT_SECRET missing'
+            }; adapter will try public fallback)`
+      }`
+    );
+    console.log(`reddit proxy: ${maskProxyUrl(redditToken.proxyUrl)}`);
     console.log(`x token     : ${xToken.token ? xToken.source : 'none'}`);
 
     const posts: RawPost[] = [];
     for (const unit of units) {
       posts.push(
         ...(await scanUnit(prisma, unit, config.keywords.map((kw) => kw.keyword), args, {
-          reddit: redditToken,
+          reddit: redditToken.token,
           x: xToken.token,
         }))
       );

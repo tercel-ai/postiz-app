@@ -1950,6 +1950,41 @@ export class EngageRepository {
   }
 
   /**
+   * Engage replies whose metrics should be RE-FETCHED on the daily schedule:
+   * every PUBLISHED engage reply published within the last `sinceDays` days,
+   * REGARDLESS of whether impressions are already set. This is what makes engage
+   * metrics keep updating daily (mirroring the calendar DataTicks lookback)
+   * instead of freezing after the first non-null fetch (the `findPendingEngageMetrics`
+   * path only ever picks `impressions: null` rows, so a synced row never updates).
+   * The `impressions > 0` write guard in PostsService keeps a transient empty/0
+   * read from clobbering a previously good value.
+   */
+  async findEngageRepliesInWindow(sinceDays: number, orgId?: string, platform?: string) {
+    const cutoff = dayjs.utc().subtract(sinceDays, 'day').startOf('day').toDate();
+    return this._sentReply.model.engageSentReply.findMany({
+      where: {
+        ...(orgId ? { organizationId: orgId } : {}),
+        post: {
+          source: 'engage',
+          state: 'PUBLISHED',
+          releaseURL: { not: null },
+          publishDate: { gte: cutoff },
+        },
+        ...(platform
+          ? { opportunity: { platform } }
+          : {}),
+      },
+      select: {
+        id: true,
+        organizationId: true,
+        authorReplied: true,
+        post: { select: { id: true, releaseURL: true, integrationId: true } },
+        opportunity: { select: { platform: true, externalPostId: true, authorUsername: true } },
+      },
+    });
+  }
+
+  /**
    * Fill Post.integrationId for X engage replies that have none, resolving a
    * usable X account per reply (author-handle → engage reply account → any live
    * account; see resolveXReplyIntegrationId). Without an integration,

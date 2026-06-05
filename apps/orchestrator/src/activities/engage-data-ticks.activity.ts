@@ -10,6 +10,7 @@ import {
   syncRedditMetrics,
   syncXMetrics,
   type MetricsSyncDeps,
+  type MetricsSyncOutcome,
 } from '@gitroom/nestjs-libraries/engage/engage-metrics-sync';
 import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.service';
 import dayjs from 'dayjs';
@@ -169,6 +170,74 @@ export class EngageDataTicksActivity {
         this._metricsSyncDeps()
       );
     }
+  }
+
+  /**
+   * Daily re-fetch of engage reply metrics for every PUBLISHED reply published
+   * within the last `ENGAGE_METRICS_RESYNC_DAYS` days (default 30, mirroring the
+   * calendar DataTicks lookback). Unlike the per-reply 24h sync + admin "fill
+   * missing" path — which only touch `impressions: null` rows and therefore
+   * freeze a reply's metrics after the first non-null fetch — this re-polls the
+   * whole window so impressions/traffic keep growing day over day. Runs before
+   * aggregateDailyEngageTicks so the dashboard (which reads Post directly) and
+   * the daily EngageDataTicks roll-up both see fresh values. Idempotent: each
+   * call just re-reads public_metrics; PostsService's `impressions > 0` write
+   * guard prevents a transient empty read from clobbering good data.
+   */
+  @ActivityMethod()
+  async resyncRecentEngageMetrics(): Promise<void> {
+    const sinceDays = Number(process.env.ENGAGE_METRICS_RESYNC_DAYS) || 30;
+    const replies = await this._engageRepository.findEngageRepliesInWindow(sinceDays);
+    const deps = this._metricsSyncDeps();
+
+    const tally: Record<MetricsSyncOutcome | 'failed', number> = {
+      written: 0,
+      empty: 0,
+      unreachable: 0,
+      skipped: 0,
+      failed: 0,
+    };
+
+    for (const reply of replies) {
+      if (!reply.post?.releaseURL) continue;
+      this._heartbeat({ stage: 'resync', reply: reply.id });
+      try {
+        let outcome: MetricsSyncOutcome = 'skipped';
+        if (reply.opportunity.platform === 'reddit') {
+          outcome = await syncRedditMetrics(
+            reply.post.id,
+            reply.post.releaseURL,
+            reply.id,
+            reply.opportunity.authorUsername ?? '',
+            deps
+          );
+        } else if (reply.opportunity.platform === 'x') {
+          outcome = await syncXMetrics(
+            {
+              orgId: reply.organizationId,
+              sentReplyId: reply.id,
+              postDbId: reply.post.id,
+              replyTweetUrl: reply.post.releaseURL,
+              originalTweetId: reply.opportunity.externalPostId ?? '',
+              authorUsername: reply.opportunity.authorUsername ?? '',
+            },
+            deps
+          );
+        }
+        tally[outcome]++;
+      } catch (err) {
+        tally.failed++;
+        this.logger.warn(
+          `resyncRecentEngageMetrics: failed for reply ${reply.id}: ${(err as Error).message}`
+        );
+      }
+    }
+
+    this.logger.log(
+      `EngageMetrics daily resync (last ${sinceDays}d): ${replies.length} replies — ` +
+        `written=${tally.written} empty=${tally.empty} unreachable=${tally.unreachable} ` +
+        `skipped=${tally.skipped} failed=${tally.failed}`
+    );
   }
 
   /** Sinks for the shared engage-metrics-sync module (see engage-metrics-sync.ts). */
