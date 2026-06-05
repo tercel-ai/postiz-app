@@ -228,6 +228,7 @@ export class EngageScanActivity {
     });
     if (!rows.length) return;
 
+    const claimedRows: typeof rows = [];
     for (const row of rows) {
       if (
         row.status === 'RUNNING' &&
@@ -273,55 +274,98 @@ export class EngageScanActivity {
         },
       });
       if (claimed.count !== 1) continue;
+      claimedRows.push(row);
+    }
+    if (!claimedRows.length) return;
 
-      try {
-        const ctx = orgById.get(row.organizationId);
-        if (!ctx) throw new Error(`org context ${row.organizationId} not enabled`);
-        const lookback = new Date(
-          Date.now() - INITIAL_SCAN_LOOKBACK_HOURS * 3_600_000
-        );
-        const result = await this._redditAdapter.searchScoped({
-          scope: { type: 'keyword' },
-          keywords: [row.keywordRef.keyword],
-          cursor: { lastSeenAt: lookback },
-          budget: { maxCalls: INITIAL_SCAN_MAX_CALLS },
-          token: redditToken,
-          log: {
-            log: (m) => this.logger.log(`[initial-scan] ${m}`),
-            warn: (m) => this.logger.warn(`[initial-scan] ${m}`),
-          },
-          heartbeat: (p) =>
-            this._heartbeat({
-              stage: 'keyword_initial_scan',
-              keywordId: row.keywordId,
-              platform: row.platform,
-              progress: p,
-            }),
-        });
-        await this._fanOutToOrg(ctx, deduplicatePosts(result.posts));
-        if (result.rate.limited) {
-          const retryAfter = result.rate.retryAfterMs
-            ? `; retryAfterMs=${result.rate.retryAfterMs}`
-            : '';
-          throw new Error(`Initial keyword scan rate-limited${retryAfter}`);
+    const claimedIds = claimedRows.map((row) => row.id);
+    const claimedOrgIds = Array.from(
+      new Set(claimedRows.map((row) => row.organizationId))
+    );
+    const claimedKeywords = Array.from(
+      new Set(claimedRows.map((row) => row.keywordRef.keyword))
+    );
+
+    try {
+      const lookback = new Date(
+        Date.now() - INITIAL_SCAN_LOOKBACK_HOURS * 3_600_000
+      );
+      const result = await this._redditAdapter.searchScoped({
+        scope: { type: 'keyword' },
+        keywords: claimedKeywords,
+        cursor: { lastSeenAt: lookback },
+        budget: { maxCalls: INITIAL_SCAN_MAX_CALLS },
+        token: redditToken,
+        log: {
+          log: (m) => this.logger.log(`[initial-scan] ${m}`),
+          warn: (m) => this.logger.warn(`[initial-scan] ${m}`),
+        },
+        heartbeat: (p) =>
+          this._heartbeat({
+            stage: 'keyword_initial_scan',
+            keywordIds: claimedRows.map((row) => row.keywordId),
+            platform: 'reddit',
+            progress: p,
+          }),
+      });
+
+      const posts = deduplicatePosts(result.posts);
+      const failedOrgIds: string[] = [];
+      for (const orgId of claimedOrgIds) {
+        const ctx = orgById.get(orgId);
+        if (!ctx) {
+          failedOrgIds.push(orgId);
+          continue;
         }
-        await this._keywordInitialScan.model.engageKeywordInitialScan.update({
-          where: { id: row.id },
+        try {
+          await this._fanOutToOrg(ctx, posts);
+        } catch (err) {
+          failedOrgIds.push(orgId);
+          this.logger.warn(
+            `[initial-scan] fan-out failed for org=${orgId}: ${(err as Error).message}`
+          );
+        }
+      }
+
+      if (result.rate.limited) {
+        const retryAfter = result.rate.retryAfterMs
+          ? `; retryAfterMs=${result.rate.retryAfterMs}`
+          : '';
+        throw new Error(`Initial keyword scan rate-limited${retryAfter}`);
+      }
+
+      const completedAt = new Date();
+      const failedIds = claimedRows
+        .filter((row) => failedOrgIds.includes(row.organizationId))
+        .map((row) => row.id);
+      const doneIds = claimedIds.filter((id) => !failedIds.includes(id));
+      if (doneIds.length) {
+        await this._keywordInitialScan.model.engageKeywordInitialScan.updateMany({
+          where: { id: { in: doneIds } },
           data: {
             status: 'DONE',
-            completedAt: new Date(),
+            completedAt,
             error: null,
           },
         });
-      } catch (err) {
-        await this._keywordInitialScan.model.engageKeywordInitialScan.update({
-          where: { id: row.id },
+      }
+      if (failedIds.length) {
+        await this._keywordInitialScan.model.engageKeywordInitialScan.updateMany({
+          where: { id: { in: failedIds } },
           data: {
             status: 'FAILED',
-            error: (err as Error).message.slice(0, 1000),
+            error: 'Initial keyword scan fan-out failed for this org',
           },
         });
       }
+    } catch (err) {
+      await this._keywordInitialScan.model.engageKeywordInitialScan.updateMany({
+        where: { id: { in: claimedIds } },
+        data: {
+          status: 'FAILED',
+          error: (err as Error).message.slice(0, 1000),
+        },
+      });
     }
   }
 

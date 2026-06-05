@@ -279,7 +279,7 @@ describe('EngageScanActivity keyword initial scans', () => {
     });
   });
 
-  it('claims a pending reddit keyword initial scan, fans out posts, then marks it DONE', async () => {
+  it('claims pending reddit keyword initial scans, scans them in one batch, then marks them DONE', async () => {
     const { activity } = build(IDLE_ROW);
     const initialFindMany = vi.fn().mockResolvedValue([
       {
@@ -296,15 +296,27 @@ describe('EngageScanActivity keyword initial scans', () => {
           enabled: true,
         },
       },
+      {
+        id: 'init2',
+        organizationId: 'org1',
+        keywordId: 'kw2',
+        keyword: 'AI PC',
+        platform: 'reddit',
+        status: 'PENDING',
+        keywordRef: {
+          id: 'kw2',
+          organizationId: 'org1',
+          keyword: 'AI PC',
+          enabled: true,
+        },
+      },
     ]);
     const initialUpdateMany = vi.fn().mockResolvedValue({ count: 1 });
-    const initialUpdate = vi.fn().mockResolvedValue({});
     (activity as any)._keywordInitialScan = {
       model: {
         engageKeywordInitialScan: {
           findMany: initialFindMany,
           updateMany: initialUpdateMany,
-          update: initialUpdate,
         },
       },
     };
@@ -332,7 +344,10 @@ describe('EngageScanActivity keyword initial scans', () => {
       [
         {
           organizationId: 'org1',
-          keywords: [{ id: 'kw1', keyword: 'storage', enabled: true }],
+          keywords: [
+            { id: 'kw1', keyword: 'storage', enabled: true },
+            { id: 'kw2', keyword: 'AI PC', enabled: true },
+          ],
           trackedAccounts: [],
         },
       ],
@@ -363,7 +378,7 @@ describe('EngageScanActivity keyword initial scans', () => {
     expect(adapter.searchScoped).toHaveBeenCalledWith(
       expect.objectContaining({
         scope: { type: 'keyword' },
-        keywords: ['storage'],
+        keywords: ['storage', 'AI PC'],
         token: 'reddit-token',
         cursor: expect.objectContaining({ lastSeenAt: expect.any(Date) }),
       })
@@ -372,9 +387,10 @@ describe('EngageScanActivity keyword initial scans', () => {
       expect.objectContaining({ organizationId: 'org1' }),
       [post]
     );
-    expect(initialUpdate).toHaveBeenCalledWith(
+    expect(adapter.searchScoped).toHaveBeenCalledTimes(1);
+    expect(initialUpdateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { id: 'init1' },
+        where: { id: { in: ['init1', 'init2'] } },
         data: expect.objectContaining({
           status: 'DONE',
           completedAt: expect.any(Date),
@@ -403,13 +419,11 @@ describe('EngageScanActivity keyword initial scans', () => {
       },
     ]);
     const initialUpdateMany = vi.fn().mockResolvedValue({ count: 1 });
-    const initialUpdate = vi.fn().mockResolvedValue({});
     (activity as any)._keywordInitialScan = {
       model: {
         engageKeywordInitialScan: {
           findMany: initialFindMany,
           updateMany: initialUpdateMany,
-          update: initialUpdate,
         },
       },
     };
@@ -447,16 +461,16 @@ describe('EngageScanActivity keyword initial scans', () => {
       expect.objectContaining({ organizationId: 'org1' }),
       [post]
     );
-    expect(initialUpdate).toHaveBeenCalledWith(
+    expect(initialUpdateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { id: 'init1' },
+        where: { id: { in: ['init1'] } },
         data: expect.objectContaining({
           status: 'FAILED',
           error: expect.stringContaining('rate-limited'),
         }),
       })
     );
-    expect(initialUpdate).not.toHaveBeenCalledWith(
+    expect(initialUpdateMany).not.toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({ status: 'DONE' }),
       })
@@ -485,13 +499,11 @@ describe('EngageScanActivity keyword initial scans', () => {
       },
     ]);
     const initialUpdateMany = vi.fn().mockResolvedValue({ count: 1 });
-    const initialUpdate = vi.fn().mockResolvedValue({});
     (activity as any)._keywordInitialScan = {
       model: {
         engageKeywordInitialScan: {
           findMany: initialFindMany,
           updateMany: initialUpdateMany,
-          update: initialUpdate,
         },
       },
     };
@@ -542,9 +554,9 @@ describe('EngageScanActivity keyword initial scans', () => {
         }),
       })
     );
-    expect(initialUpdate).toHaveBeenCalledWith(
+    expect(initialUpdateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { id: 'init1' },
+        where: { id: { in: ['init1'] } },
         data: expect.objectContaining({ status: 'DONE' }),
       })
     );
