@@ -13,11 +13,18 @@ function logRealDraft(platform: string, draft: string, lengthLabel: string, leng
     ? process.env.OPENROUTER_TEXT_MODEL ?? 'anthropic/claude-sonnet-4-6'
     : 'claude-sonnet-4-6';
 
-  console.info(`\n[EngageDraftService real AI: ${platform}]`);
-  console.info(`provider=${provider}`);
-  console.info(`model=${model}`);
-  console.info(`${lengthLabel}=${length}`);
-  console.info(`draft=${draft}\n`);
+  process.stdout.write(
+    [
+      '',
+      `[EngageDraftService real AI: ${platform}]`,
+      `provider=${provider}`,
+      `model=${model}`,
+      `${lengthLabel}=${length}`,
+      `draft=${draft}`,
+      '',
+      '',
+    ].join('\n')
+  );
 }
 
 maybeDescribe('EngageDraftService real AI', () => {
