@@ -141,6 +141,32 @@ describe('EngageScanActivity._scanUnit (cursor lifecycle)', () => {
     expect(call.data).not.toHaveProperty('lastSeenExternalId');
   });
 
+  it('releases the cursor without advancing when call budget is exhausted with backlog remaining', async () => {
+    const { activity, update } = build(IDLE_ROW);
+    const adapter = fakeAdapter({
+      posts: [{ externalPostId: 'x1' } as any],
+      nextCursor: { lastSeenExternalId: '999' },
+      rate: { limited: false },
+      backlogRemaining: true,
+    });
+    (activity as any)._xAdapter = adapter;
+
+    const out = await (activity as any)._scanUnit(scanArgs());
+
+    expect(out).toEqual({
+      ran: true,
+      posts: [{ externalPostId: 'x1' }],
+    });
+    expect(update).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: 'cur1' }, data: { status: 'IDLE' } })
+    );
+    expect(update).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ lastSeenExternalId: '999' }),
+      })
+    );
+  });
+
   it('releases the SCANNING lock when the adapter throws', async () => {
     const { activity, update } = build(IDLE_ROW);
     const adapter = { platform: 'x', caps: {} as any, searchScoped: vi.fn().mockRejectedValue(new Error('boom')) };
@@ -239,24 +265,39 @@ describe('EngageScanActivity._fanOutAndFinalize (per-org isolation)', () => {
 });
 
 describe('EngageScanActivity keyword initial scans', () => {
+  const initialSettings = {
+    enabledPlatforms: ['reddit'],
+    lookbackHours: 24,
+    maxAttempts: 3,
+    retryMs: 15 * 60 * 1000,
+    staleMs: 30 * 60 * 1000,
+    budget: {
+      reddit: { maxUnits: 10, maxCalls: 2 },
+      x: { maxUnits: 5, maxCalls: 1 },
+    },
+  };
+
   beforeEach(() => vi.clearAllMocks());
 
-  it('lazily creates missing reddit initial scan rows for enabled keywords', async () => {
+  it('lazily creates missing initial scan rows for enabled platforms', async () => {
     const { activity } = build(IDLE_ROW);
     const createMany = vi.fn().mockResolvedValue({ count: 2 });
     (activity as any)._keywordInitialScan = {
       model: { engageKeywordInitialScan: { createMany } },
     };
 
-    await (activity as any)._ensureMissingKeywordInitialScans([
-      {
-        organizationId: 'org1',
-        keywords: [
-          { id: 'kw1', keyword: 'storage' },
-          { id: 'kw2', keyword: 'AI PC' },
-        ],
-      },
-    ]);
+    await (activity as any)._ensureMissingKeywordInitialScans(
+      [
+        {
+          organizationId: 'org1',
+          keywords: [
+            { id: 'kw1', keyword: 'storage' },
+            { id: 'kw2', keyword: 'AI PC' },
+          ],
+        },
+      ],
+      ['reddit', 'x']
+    );
 
     expect(createMany).toHaveBeenCalledWith({
       data: [
@@ -269,14 +310,58 @@ describe('EngageScanActivity keyword initial scans', () => {
         },
         {
           organizationId: 'org1',
+          keywordId: 'kw1',
+          keyword: 'storage',
+          platform: 'x',
+          status: 'PENDING',
+        },
+        {
+          organizationId: 'org1',
           keywordId: 'kw2',
           keyword: 'AI PC',
           platform: 'reddit',
           status: 'PENDING',
         },
+        {
+          organizationId: 'org1',
+          keywordId: 'kw2',
+          keyword: 'AI PC',
+          platform: 'x',
+          status: 'PENDING',
+        },
       ],
       skipDuplicates: true,
     });
+  });
+
+  it('loads initial scan config from Settings with env/default fallback', async () => {
+    const { activity } = build(IDLE_ROW);
+    (activity as any)._settingsService = {
+      listByPrefix: vi.fn().mockResolvedValue([
+        {
+          key: 'engage.keyword_initial_scan.enabled_platforms',
+          value: ['reddit', 'x'],
+        },
+        {
+          key: 'engage.keyword_initial_scan.reddit.max_units',
+          value: 12,
+        },
+        {
+          key: 'engage.keyword_initial_scan.x.max_calls',
+          value: 2,
+        },
+      ]),
+    };
+
+    await expect((activity as any)._loadInitialScanSettings()).resolves.toEqual(
+      expect.objectContaining({
+        enabledPlatforms: ['reddit', 'x'],
+        budget: {
+          reddit: { maxUnits: 12, maxCalls: 2 },
+          x: { maxUnits: 5, maxCalls: 2 },
+        },
+      })
+    );
   });
 
   it('claims pending reddit keyword initial scans, scans them in one batch, then marks them DONE', async () => {
@@ -351,7 +436,9 @@ describe('EngageScanActivity keyword initial scans', () => {
           trackedAccounts: [],
         },
       ],
-      'reddit-token'
+      'reddit-token',
+      {} as any,
+      initialSettings
     );
 
     expect(initialFindMany).toHaveBeenCalledWith(
@@ -454,7 +541,9 @@ describe('EngageScanActivity keyword initial scans', () => {
           trackedAccounts: [],
         },
       ],
-      null
+      null,
+      {} as any,
+      initialSettings
     );
 
     expect(fanOut).toHaveBeenCalledWith(
@@ -472,6 +561,180 @@ describe('EngageScanActivity keyword initial scans', () => {
     );
     expect(initialUpdateMany).not.toHaveBeenCalledWith(
       expect.objectContaining({
+        data: expect.objectContaining({ status: 'DONE' }),
+      })
+    );
+  });
+
+  it('keeps a budget-exhausted keyword initial scan retryable after fan-out', async () => {
+    const { activity } = build(IDLE_ROW);
+    const initialFindMany = vi.fn().mockResolvedValue([
+      {
+        id: 'init1',
+        organizationId: 'org1',
+        keywordId: 'kw1',
+        keyword: 'storage',
+        platform: 'reddit',
+        status: 'PENDING',
+        keywordRef: {
+          id: 'kw1',
+          organizationId: 'org1',
+          keyword: 'storage',
+          enabled: true,
+        },
+      },
+    ]);
+    const initialUpdateMany = vi.fn().mockResolvedValue({ count: 1 });
+    (activity as any)._keywordInitialScan = {
+      model: {
+        engageKeywordInitialScan: {
+          findMany: initialFindMany,
+          updateMany: initialUpdateMany,
+        },
+      },
+    };
+    const post = {
+      platform: 'reddit',
+      externalPostId: 'p1',
+      authorUsername: 'u',
+      postContent: 'storage issue',
+    } as any;
+    (activity as any)._redditAdapter = {
+      platform: 'reddit',
+      caps: {} as any,
+      searchScoped: vi.fn().mockResolvedValue({
+        posts: [post],
+        nextCursor: { lastSeenExternalId: 'later' },
+        rate: { limited: false },
+        backlogRemaining: true,
+      }),
+    };
+    const fanOut = vi
+      .spyOn(activity as any, '_fanOutToOrg')
+      .mockResolvedValue(undefined);
+
+    await (activity as any)._runPendingKeywordInitialScans(
+      [
+        {
+          organizationId: 'org1',
+          keywords: [{ id: 'kw1', keyword: 'storage', enabled: true }],
+          trackedAccounts: [],
+        },
+      ],
+      null,
+      {} as any,
+      initialSettings
+    );
+
+    expect(fanOut).toHaveBeenCalledWith(
+      expect.objectContaining({ organizationId: 'org1' }),
+      [post]
+    );
+    expect(initialUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: { in: ['init1'] } },
+        data: expect.objectContaining({
+          status: 'FAILED',
+          error: expect.stringContaining('backlog remains'),
+        }),
+      })
+    );
+    expect(initialUpdateMany).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: 'DONE' }),
+      })
+    );
+  });
+
+  it('runs X keyword initial scans with empty cursor and X-specific budget', async () => {
+    const { activity } = build(IDLE_ROW);
+    const initialFindMany = vi.fn().mockResolvedValue([
+      {
+        id: 'init-x1',
+        organizationId: 'org1',
+        keywordId: 'kw1',
+        keyword: 'AI PC',
+        platform: 'x',
+        status: 'PENDING',
+        keywordRef: {
+          id: 'kw1',
+          organizationId: 'org1',
+          keyword: 'AI PC',
+          enabled: true,
+        },
+      },
+    ]);
+    const initialUpdateMany = vi.fn().mockResolvedValue({ count: 1 });
+    (activity as any)._keywordInitialScan = {
+      model: {
+        engageKeywordInitialScan: {
+          findMany: initialFindMany,
+          updateMany: initialUpdateMany,
+        },
+      },
+    };
+    const post = {
+      platform: 'x',
+      externalPostId: 'tweet-1',
+      authorUsername: 'u',
+      postContent: 'AI PC news',
+    } as any;
+    const adapter = {
+      platform: 'x',
+      caps: {} as any,
+      searchScoped: vi.fn().mockResolvedValue({
+        posts: [post],
+        nextCursor: {},
+        rate: { limited: false, remaining: 10 },
+      }),
+    };
+    (activity as any)._xAdapter = adapter;
+    const fanOut = vi
+      .spyOn(activity as any, '_fanOutToOrg')
+      .mockResolvedValue(undefined);
+    const xPool = {
+      size: 1,
+      available: vi.fn().mockReturnValue(1),
+      acquire: vi.fn().mockReturnValue('x-token'),
+      report: vi.fn(),
+    };
+
+    await (activity as any)._runPendingKeywordInitialScans(
+      [
+        {
+          organizationId: 'org1',
+          keywords: [{ id: 'kw1', keyword: 'AI PC', enabled: true }],
+          trackedAccounts: [],
+        },
+      ],
+      null,
+      xPool,
+      {
+        ...initialSettings,
+        enabledPlatforms: ['x'],
+      }
+    );
+
+    expect(adapter.searchScoped).toHaveBeenCalledWith(
+      expect.objectContaining({
+        scope: { type: 'keyword' },
+        keywords: ['AI PC'],
+        cursor: {},
+        budget: { maxCalls: 1 },
+        token: 'x-token',
+      })
+    );
+    expect(xPool.report).toHaveBeenCalledWith('x-token', {
+      limited: false,
+      remaining: 10,
+    });
+    expect(fanOut).toHaveBeenCalledWith(
+      expect.objectContaining({ organizationId: 'org1' }),
+      [post]
+    );
+    expect(initialUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: { in: ['init-x1'] } },
         data: expect.objectContaining({ status: 'DONE' }),
       })
     );
@@ -526,7 +789,9 @@ describe('EngageScanActivity keyword initial scans', () => {
           trackedAccounts: [],
         },
       ],
-      null
+      null,
+      {} as any,
+      initialSettings
     );
 
     expect(initialFindMany.mock.calls[0][0].where.OR).toEqual(

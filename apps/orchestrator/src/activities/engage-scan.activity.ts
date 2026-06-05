@@ -12,6 +12,7 @@ import {
   PrismaRepository,
   PrismaTransaction,
 } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
+import { SettingsService } from '@gitroom/nestjs-libraries/database/prisma/settings/settings.service';
 import { EngageKeyword, Prisma } from '@prisma/client';
 import { getRedditToken } from '@gitroom/nestjs-libraries/engage/reddit-auth';
 import { XScanAdapter } from '@gitroom/nestjs-libraries/engage/scan/x-scan-adapter';
@@ -40,24 +41,17 @@ const SCAN_MAX_CALLS = Number(process.env.ENGAGE_SCAN_MAX_CALLS ?? 5);
 const DEFAULT_COOLDOWN_MS = Number(
   process.env.ENGAGE_SCAN_COOLDOWN_MS ?? 15 * 60 * 1000
 );
-const INITIAL_SCAN_MAX_UNITS = Number(
-  process.env.ENGAGE_KEYWORD_INITIAL_SCAN_MAX_UNITS ?? 5
-);
-const INITIAL_SCAN_MAX_CALLS = Number(
-  process.env.ENGAGE_KEYWORD_INITIAL_SCAN_MAX_CALLS ?? 3
-);
-const INITIAL_SCAN_LOOKBACK_HOURS = Number(
-  process.env.ENGAGE_KEYWORD_INITIAL_SCAN_LOOKBACK_HOURS ?? 24
-);
-const INITIAL_SCAN_MAX_ATTEMPTS = Number(
-  process.env.ENGAGE_KEYWORD_INITIAL_SCAN_MAX_ATTEMPTS ?? 3
-);
-const INITIAL_SCAN_RETRY_MS = Number(
-  process.env.ENGAGE_KEYWORD_INITIAL_SCAN_RETRY_MS ?? 15 * 60 * 1000
-);
-const INITIAL_SCAN_STALE_MS = Number(
-  process.env.ENGAGE_KEYWORD_INITIAL_SCAN_STALE_MS ?? 30 * 60 * 1000
-);
+const INITIAL_SCAN_PLATFORMS = ['reddit', 'x'] as const;
+type InitialScanPlatform = (typeof INITIAL_SCAN_PLATFORMS)[number];
+const INITIAL_SCAN_SETTINGS_PREFIX = 'engage.keyword_initial_scan.';
+type InitialScanRuntimeSettings = {
+  enabledPlatforms: InitialScanPlatform[];
+  lookbackHours: number;
+  maxAttempts: number;
+  retryMs: number;
+  staleMs: number;
+  budget: Record<InitialScanPlatform, { maxUnits: number; maxCalls: number }>;
+};
 
 // Per-scanType cadence (ms). A single frequent ticker calls runDueScans(); each
 // unit is scanned only when lastScanStartedAt + its cadence has elapsed (unless
@@ -119,14 +113,87 @@ function unionTrackedUsernames(
   ctxs: OrgContext[]
 ): Map<string, Array<{ id: string; orgId: string }>> {
   const m = new Map<string, Array<{ id: string; orgId: string }>>();
-  for (const c of ctxs)
+  for (const c of ctxs) {
     for (const a of c.trackedAccounts) {
       const key = a.username.toLowerCase();
       const arr = m.get(key) ?? [];
       arr.push({ id: a.id, orgId: c.organizationId });
       m.set(key, arr);
     }
+  }
   return m;
+}
+
+function settingRaw(
+  settings: Map<string, unknown>,
+  key: string
+): unknown | undefined {
+  return settings.has(key) ? settings.get(key) : undefined;
+}
+
+function numberSetting(
+  settings: Map<string, unknown>,
+  key: string,
+  envNames: string[],
+  fallback: number
+): number {
+  const raw = settingRaw(settings, key);
+  const candidate = raw ?? envNames.map((name) => process.env[name]).find(Boolean);
+  const value = Number(candidate ?? fallback);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function parseInitialScanPlatforms(raw: unknown): InitialScanPlatform[] {
+  const values = Array.isArray(raw)
+    ? raw
+    : typeof raw === 'string'
+      ? raw.split(',')
+      : INITIAL_SCAN_PLATFORMS;
+  const enabled = values
+    .map((value) => String(value).trim().toLowerCase())
+    .filter((value): value is InitialScanPlatform =>
+      INITIAL_SCAN_PLATFORMS.includes(value as InitialScanPlatform)
+    );
+  return Array.from(new Set(enabled));
+}
+
+function envPlatformPrefix(platform: string): string {
+  return platform.replace(/[^a-z0-9]/gi, '_').toUpperCase();
+}
+
+function defaultPlatformBudget(
+  platform: InitialScanPlatform
+): { maxUnits: number; maxCalls: number } {
+  if (platform === 'reddit') return { maxUnits: 10, maxCalls: 2 };
+  return { maxUnits: 5, maxCalls: 1 };
+}
+
+function platformInitialScanBudget(
+  settings: Map<string, unknown>,
+  platform: InitialScanPlatform
+): { maxUnits: number; maxCalls: number } {
+  const defaults = defaultPlatformBudget(platform);
+  const envPrefix = envPlatformPrefix(platform);
+  return {
+    maxUnits: numberSetting(
+      settings,
+      `engage.keyword_initial_scan.${platform}.max_units`,
+      [
+        `ENGAGE_${envPrefix}_KEYWORD_INITIAL_SCAN_MAX_UNITS`,
+        'ENGAGE_KEYWORD_INITIAL_SCAN_MAX_UNITS',
+      ],
+      defaults.maxUnits
+    ),
+    maxCalls: numberSetting(
+      settings,
+      `engage.keyword_initial_scan.${platform}.max_calls`,
+      [
+        `ENGAGE_${envPrefix}_KEYWORD_INITIAL_SCAN_MAX_CALLS`,
+        'ENGAGE_KEYWORD_INITIAL_SCAN_MAX_CALLS',
+      ],
+      defaults.maxCalls
+    ),
+  };
 }
 
 @Injectable()
@@ -147,8 +214,9 @@ export class EngageScanActivity {
     private _channel: PrismaRepository<'engageMonitoredChannel'>,
     private _tx: PrismaTransaction,
     private _scanCursor: PrismaRepository<'engageScanCursor'>,
-    private _keywordInitialScan: PrismaRepository<'engageKeywordInitialScan'>
-  ) {}
+    private _keywordInitialScan: PrismaRepository<'engageKeywordInitialScan'>,
+    private _settingsService?: SettingsService
+  ) { }
 
   private _heartbeat(progress?: unknown): void {
     try {
@@ -175,9 +243,18 @@ export class EngageScanActivity {
 
     const xPool = new TokenPool(await this._collectXTokens(orgContexts));
     const redditToken = await getRedditToken();
+    const initialScanSettings = await this._loadInitialScanSettings();
 
-    await this._ensureMissingKeywordInitialScans(orgContexts);
-    await this._runPendingKeywordInitialScans(orgContexts, redditToken);
+    await this._ensureMissingKeywordInitialScans(
+      orgContexts,
+      initialScanSettings.enabledPlatforms
+    );
+    await this._runPendingKeywordInitialScans(
+      orgContexts,
+      redditToken,
+      xPool,
+      initialScanSettings
+    );
 
     const posts: RawPost[] = [
       ...(await this._scanKeywordUnits(keywords, xPool, redditToken, force)),
@@ -196,23 +273,95 @@ export class EngageScanActivity {
   // position and cadence. RUNNING rows use startedAt as a lease; stale leases are
   // reclaimable so a crashed worker cannot strand a keyword forever.
 
+  private async _loadInitialScanSettings(): Promise<InitialScanRuntimeSettings> {
+    const records = this._settingsService
+      ? await this._settingsService.listByPrefix(INITIAL_SCAN_SETTINGS_PREFIX)
+      : [];
+    const settings = new Map<string, unknown>(
+      records.map((record: any) => [
+        record.key,
+        record.value ?? record.default ?? undefined,
+      ])
+    );
+    const platformsRaw =
+      settingRaw(settings, 'engage.keyword_initial_scan.enabled_platforms') ??
+      process.env.ENGAGE_KEYWORD_INITIAL_SCAN_PLATFORMS;
+    const enabledPlatforms = parseInitialScanPlatforms(platformsRaw);
+    const budget = Object.fromEntries(
+      enabledPlatforms.map((platform) => [
+        platform,
+        platformInitialScanBudget(settings, platform),
+      ])
+    ) as Record<InitialScanPlatform, { maxUnits: number; maxCalls: number }>;
+    return {
+      enabledPlatforms,
+      lookbackHours: numberSetting(
+        settings,
+        'engage.keyword_initial_scan.lookback_hours',
+        ['ENGAGE_KEYWORD_INITIAL_SCAN_LOOKBACK_HOURS'],
+        24
+      ),
+      maxAttempts: numberSetting(
+        settings,
+        'engage.keyword_initial_scan.max_attempts',
+        ['ENGAGE_KEYWORD_INITIAL_SCAN_MAX_ATTEMPTS'],
+        3
+      ),
+      retryMs: numberSetting(
+        settings,
+        'engage.keyword_initial_scan.retry_ms',
+        ['ENGAGE_KEYWORD_INITIAL_SCAN_RETRY_MS'],
+        15 * 60 * 1000
+      ),
+      staleMs: numberSetting(
+        settings,
+        'engage.keyword_initial_scan.stale_ms',
+        ['ENGAGE_KEYWORD_INITIAL_SCAN_STALE_MS'],
+        30 * 60 * 1000
+      ),
+      budget,
+    };
+  }
+
   private async _runPendingKeywordInitialScans(
     orgContexts: OrgContext[],
-    redditToken: string | null
+    redditToken: string | null,
+    xPool: TokenPool,
+    settings: InitialScanRuntimeSettings
+  ): Promise<void> {
+    for (const platform of settings.enabledPlatforms) {
+      await this._runPendingPlatformKeywordInitialScans(
+        platform,
+        orgContexts,
+        redditToken,
+        xPool,
+        settings
+      );
+    }
+  }
+
+  private async _runPendingPlatformKeywordInitialScans(
+    platform: InitialScanPlatform,
+    orgContexts: OrgContext[],
+    redditToken: string | null,
+    xPool: TokenPool,
+    settings: InitialScanRuntimeSettings
   ): Promise<void> {
     if (!this._keywordInitialScan) return;
+    if (platform === 'x' && (!xPool.size || xPool.available() <= 0)) return;
     const orgById = new Map(orgContexts.map((ctx) => [ctx.organizationId, ctx]));
-    const retryBefore = new Date(Date.now() - INITIAL_SCAN_RETRY_MS);
-    const staleBefore = new Date(Date.now() - INITIAL_SCAN_STALE_MS);
+    const retryBefore = new Date(Date.now() - settings.retryMs);
+    const staleBefore = new Date(Date.now() - settings.staleMs);
+    const budget = settings.budget[platform];
     const rows = await this._keywordInitialScan.model.engageKeywordInitialScan.findMany({
       where: {
-        platform: 'reddit',
+        platform,
         organizationId: { in: Array.from(orgById.keys()) },
         OR: [
           { status: 'PENDING' },
           {
             status: 'FAILED',
-            attempts: { lt: INITIAL_SCAN_MAX_ATTEMPTS },
+            attempts: { lt: settings.maxAttempts },
             updatedAt: { lt: retryBefore },
           },
           {
@@ -224,7 +373,7 @@ export class EngageScanActivity {
       },
       include: { keywordRef: true },
       orderBy: { createdAt: 'asc' },
-      take: INITIAL_SCAN_MAX_UNITS,
+      take: budget.maxUnits,
     });
     if (!rows.length) return;
 
@@ -232,7 +381,7 @@ export class EngageScanActivity {
     for (const row of rows) {
       if (
         row.status === 'RUNNING' &&
-        row.attempts >= INITIAL_SCAN_MAX_ATTEMPTS
+        row.attempts >= settings.maxAttempts
       ) {
         await this._keywordInitialScan.model.engageKeywordInitialScan.updateMany({
           where: {
@@ -242,7 +391,7 @@ export class EngageScanActivity {
           },
           data: {
             status: 'FAILED',
-            error: `Initial scan exceeded ${INITIAL_SCAN_MAX_ATTEMPTS} attempt(s) and the last RUNNING lease became stale`,
+            error: `Initial scan exceeded ${settings.maxAttempts} attempt(s) and the last RUNNING lease became stale`,
           },
         });
         continue;
@@ -255,7 +404,7 @@ export class EngageScanActivity {
             { status: 'PENDING' },
             {
               status: 'FAILED',
-              attempts: { lt: INITIAL_SCAN_MAX_ATTEMPTS },
+              attempts: { lt: settings.maxAttempts },
               updatedAt: { lt: retryBefore },
             },
             {
@@ -287,15 +436,28 @@ export class EngageScanActivity {
     );
 
     try {
+      const token = platform === 'x' ? xPool.acquire() : redditToken;
+      if (platform === 'x' && !token) {
+        await this._keywordInitialScan.model.engageKeywordInitialScan.updateMany({
+          where: { id: { in: claimedIds } },
+          data: {
+            status: 'PENDING',
+            startedAt: null,
+            error: 'X initial scan skipped: token pool exhausted',
+          },
+        });
+        return;
+      }
       const lookback = new Date(
-        Date.now() - INITIAL_SCAN_LOOKBACK_HOURS * 3_600_000
+        Date.now() - settings.lookbackHours * 3_600_000
       );
-      const result = await this._redditAdapter.searchScoped({
+      const adapter = platform === 'x' ? this._xAdapter : this._redditAdapter;
+      const result = await adapter.searchScoped({
         scope: { type: 'keyword' },
         keywords: claimedKeywords,
-        cursor: { lastSeenAt: lookback },
-        budget: { maxCalls: INITIAL_SCAN_MAX_CALLS },
-        token: redditToken,
+        cursor: platform === 'reddit' ? { lastSeenAt: lookback } : {},
+        budget: { maxCalls: budget.maxCalls },
+        token,
         log: {
           log: (m) => this.logger.log(`[initial-scan] ${m}`),
           warn: (m) => this.logger.warn(`[initial-scan] ${m}`),
@@ -304,10 +466,13 @@ export class EngageScanActivity {
           this._heartbeat({
             stage: 'keyword_initial_scan',
             keywordIds: claimedRows.map((row) => row.keywordId),
-            platform: 'reddit',
+            platform,
             progress: p,
           }),
       });
+      if (platform === 'x' && token) {
+        xPool.report(token, result.rate);
+      }
 
       const posts = deduplicatePosts(result.posts);
       const failedOrgIds: string[] = [];
@@ -331,7 +496,12 @@ export class EngageScanActivity {
         const retryAfter = result.rate.retryAfterMs
           ? `; retryAfterMs=${result.rate.retryAfterMs}`
           : '';
-        throw new Error(`Initial keyword scan rate-limited${retryAfter}`);
+        throw new Error(`${platform} initial keyword scan rate-limited${retryAfter}`);
+      }
+      if (result.backlogRemaining) {
+        throw new Error(
+          `${platform} initial keyword scan hit call budget; backlog remains`
+        );
       }
 
       const completedAt = new Date();
@@ -370,17 +540,20 @@ export class EngageScanActivity {
   }
 
   private async _ensureMissingKeywordInitialScans(
-    orgContexts: OrgContext[]
+    orgContexts: OrgContext[],
+    enabledPlatforms: InitialScanPlatform[]
   ): Promise<void> {
     if (!this._keywordInitialScan) return;
     const rows = orgContexts.flatMap((ctx) =>
-      ctx.keywords.map((kw) => ({
-        organizationId: ctx.organizationId,
-        keywordId: kw.id,
-        keyword: kw.keyword,
-        platform: 'reddit',
-        status: 'PENDING',
-      }))
+      ctx.keywords.flatMap((kw) =>
+        enabledPlatforms.map((platform) => ({
+          organizationId: ctx.organizationId,
+          keywordId: kw.id,
+          keyword: kw.keyword,
+          platform,
+          status: 'PENDING',
+        }))
+      )
     );
     if (!rows.length) return;
     await this._keywordInitialScan.model.engageKeywordInitialScan.createMany({
@@ -539,6 +712,11 @@ export class EngageScanActivity {
         this.logger.warn(
           `${args.platform} ${args.scanType} "${args.scanKey}" rate-limited; cooling down until ${until.toISOString()}`
         );
+      } else if (result.backlogRemaining) {
+        await this._releaseCursor(cursor.id);
+        this.logger.warn(
+          `${args.platform} ${args.scanType} "${args.scanKey}" hit call budget; backlog remains`
+        );
       } else {
         await this._completeCursor(cursor.id, result.nextCursor);
       }
@@ -658,8 +836,7 @@ export class EngageScanActivity {
     results.forEach((r, i) => {
       if (r.status === 'rejected') {
         this.logger.error(
-          `Scan ${phase} failed for org=${orgContexts[i].organizationId}: ${
-            r.reason instanceof Error ? r.reason.message : String(r.reason)
+          `Scan ${phase} failed for org=${orgContexts[i].organizationId}: ${r.reason instanceof Error ? r.reason.message : String(r.reason)
           }`
         );
       }
@@ -689,9 +866,9 @@ export class EngageScanActivity {
     const scored = matched.filter((p) => p.score >= MIN_SCORE);
     this.logger.log(
       `Fan-out org=${ctx.organizationId}: ${orgPosts.length} raw → ${matched.length} keyword-matched → ${scored.length} scored>=${MIN_SCORE}` +
-        (matched.length && !scored.length
-          ? ` (top score ${Math.max(...matched.map((p) => p.score))})`
-          : '')
+      (matched.length && !scored.length
+        ? ` (top score ${Math.max(...matched.map((p) => p.score))})`
+        : '')
     );
 
     if (scored.length) {
@@ -739,65 +916,65 @@ export class EngageScanActivity {
     const opportunities: Array<{ id: string }> = [];
     for (const batch of chunk(posts, PERSIST_BATCH_SIZE)) {
       const persisted = await Promise.all(
-      batch.map((post) =>
-        this._opportunity.model.engageOpportunity.upsert({
-          where: {
-            platform_externalPostId: {
+        batch.map((post) =>
+          this._opportunity.model.engageOpportunity.upsert({
+            where: {
+              platform_externalPostId: {
+                platform: post.platform,
+                externalPostId: post.externalPostId,
+              },
+            },
+            create: {
               platform: post.platform,
               externalPostId: post.externalPostId,
+              externalPostUrl: post.externalPostUrl,
+              channelId: post.channelId ?? null,
+              channelName: post.channelName ?? null,
+              authorUsername: post.authorUsername,
+              authorDisplayName: post.authorDisplayName ?? null,
+              authorFollowers: post.authorFollowers ?? null,
+              authorAvatarUrl: post.authorAvatarUrl ?? null,
+              postContent: post.postContent,
+              postPublishedAt: post.postPublishedAt,
+              scoreHeat: post.scoreHeat,
+              scoreAuthority: post.scoreAuthority,
+              scoreRecency: post.scoreRecency,
+              intentTags: post.intentTags,
+              primaryIntent: post.primaryIntent,
+              intentScore: post.intentScore ?? null,
+              metricLikes: post.metricLikes,
+              metricReplies: post.metricReplies,
+              metricRetweets: post.metricRetweets,
+              metricQuotes: post.metricQuotes,
+              metricBookmarks: post.metricBookmarks ?? 0,
+              metricViews: post.metricViews ?? 0,
+              metricShares: post.metricShares ?? 0,
+              metricSaves: post.metricSaves ?? 0,
+              metricScore: post.metricScore,
+              metricUpvoteRatio: post.metricUpvoteRatio ?? null,
+              metricComments: post.metricComments,
+              rawData: post.rawData != null ? (post.rawData as Prisma.InputJsonValue) : null,
             },
-          },
-          create: {
-            platform: post.platform,
-            externalPostId: post.externalPostId,
-            externalPostUrl: post.externalPostUrl,
-            channelId: post.channelId ?? null,
-            channelName: post.channelName ?? null,
-            authorUsername: post.authorUsername,
-            authorDisplayName: post.authorDisplayName ?? null,
-            authorFollowers: post.authorFollowers ?? null,
-            authorAvatarUrl: post.authorAvatarUrl ?? null,
-            postContent: post.postContent,
-            postPublishedAt: post.postPublishedAt,
-            scoreHeat: post.scoreHeat,
-            scoreAuthority: post.scoreAuthority,
-            scoreRecency: post.scoreRecency,
-            intentTags: post.intentTags,
-            primaryIntent: post.primaryIntent,
-            intentScore: post.intentScore ?? null,
-            metricLikes: post.metricLikes,
-            metricReplies: post.metricReplies,
-            metricRetweets: post.metricRetweets,
-            metricQuotes: post.metricQuotes,
-            metricBookmarks: post.metricBookmarks ?? 0,
-            metricViews: post.metricViews ?? 0,
-            metricShares: post.metricShares ?? 0,
-            metricSaves: post.metricSaves ?? 0,
-            metricScore: post.metricScore,
-            metricUpvoteRatio: post.metricUpvoteRatio ?? null,
-            metricComments: post.metricComments,
-            rawData: post.rawData != null ? (post.rawData as Prisma.InputJsonValue) : null,
-          },
-          update: {
-            scoreHeat: post.scoreHeat,
-            scoreAuthority: post.scoreAuthority,
-            scoreRecency: post.scoreRecency,
-            metricLikes: post.metricLikes,
-            metricReplies: post.metricReplies,
-            metricRetweets: post.metricRetweets,
-            metricQuotes: post.metricQuotes,
-            metricBookmarks: post.metricBookmarks ?? 0,
-            metricViews: post.metricViews ?? 0,
-            metricShares: post.metricShares ?? 0,
-            metricSaves: post.metricSaves ?? 0,
-            metricScore: post.metricScore,
-            metricUpvoteRatio: post.metricUpvoteRatio ?? null,
-            metricComments: post.metricComments,
-            // intentTags / primaryIntent NOT updated — preserve original classification
-          },
-          select: { id: true },
-        })
-      )
+            update: {
+              scoreHeat: post.scoreHeat,
+              scoreAuthority: post.scoreAuthority,
+              scoreRecency: post.scoreRecency,
+              metricLikes: post.metricLikes,
+              metricReplies: post.metricReplies,
+              metricRetweets: post.metricRetweets,
+              metricQuotes: post.metricQuotes,
+              metricBookmarks: post.metricBookmarks ?? 0,
+              metricViews: post.metricViews ?? 0,
+              metricShares: post.metricShares ?? 0,
+              metricSaves: post.metricSaves ?? 0,
+              metricScore: post.metricScore,
+              metricUpvoteRatio: post.metricUpvoteRatio ?? null,
+              metricComments: post.metricComments,
+              // intentTags / primaryIntent NOT updated — preserve original classification
+            },
+            select: { id: true },
+          })
+        )
       );
       opportunities.push(...persisted);
     }

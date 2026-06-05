@@ -67,6 +67,10 @@ export interface ScanResult {
   posts: RawPost[];
   nextCursor: ScanCursor;
   rate: RateLimitInfo;
+  // True when the adapter stopped because budget.maxCalls was exhausted before
+  // it could exhaust all pages/batches. Callers may persist returned posts, but
+  // must keep the scan retryable instead of treating the cursor/job as complete.
+  backlogRemaining?: boolean;
 }
 
 export interface ScanLogger {

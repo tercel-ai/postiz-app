@@ -245,6 +245,7 @@ Engage includes 5 core asynchronous workflows with **different trigger timings**
 
 | Variable | Default | Description |
 |---|---|---|
+| `ENGAGE_SCAN_TICK_MINUTES` | `5` | Engage scan ticker wake interval; restart/terminate-start the ticker for changes to affect an already running workflow |
 | `ENGAGE_KEYWORD_SCAN_INTERVAL_HOURS` | `24` | Global keyword search (X + Reddit) |
 | `ENGAGE_CHANNEL_SCAN_INTERVAL_HOURS` | `3` | Reddit monitored subreddit scan |
 | `ENGAGE_TRACKED_SCAN_INTERVAL_HOURS` | `3` | X tracked account scan |
@@ -253,18 +254,74 @@ Engage includes 5 core asynchronous workflows with **different trigger timings**
 
 When a keyword is newly added or re-enabled, Engage creates a per-platform
 `EngageKeywordInitialScan` row. The ticker processes these rows before the
-normal shared-cursor scan, using a single-keyword Reddit catch-up query so new
+normal shared-cursor scan, batching claimed rows into one platform OR catch-up query so new
 keywords do not wait up to the 24h global keyword cadence and do not miss recent
-posts that are already behind the shared `reddit/keyword/__global__` cursor.
+posts that are already behind the shared platform keyword cursor.
 
-| Variable | Default | Description |
-|---|---:|---|
-| `ENGAGE_KEYWORD_INITIAL_SCAN_MAX_UNITS` | `5` | Maximum pending keyword initial-scan rows processed per ticker activity |
-| `ENGAGE_KEYWORD_INITIAL_SCAN_MAX_CALLS` | `3` | Maximum upstream Reddit calls per keyword initial scan |
-| `ENGAGE_KEYWORD_INITIAL_SCAN_LOOKBACK_HOURS` | `24` | Recent-history window to catch up for a newly added/re-enabled keyword |
-| `ENGAGE_KEYWORD_INITIAL_SCAN_MAX_ATTEMPTS` | `3` | Maximum attempts before a repeatedly failing initial scan stays `FAILED` |
-| `ENGAGE_KEYWORD_INITIAL_SCAN_RETRY_MS` | `900000` | Retry delay for `FAILED` initial scans that still have attempts remaining |
-| `ENGAGE_KEYWORD_INITIAL_SCAN_STALE_MS` | `1800000` | Stale `RUNNING` lease timeout; allows recovery if a worker dies mid-scan |
+These values are read from the **Settings** table on every `runDueScans` activity,
+so platform-specific tuning changes do not require an orchestrator restart. Env
+vars remain fallback/bootstrap defaults only.
+
+| Settings key | Env fallback | Default | Description |
+|---|---|---:|---|
+| `engage.keyword_initial_scan.enabled_platforms` | `ENGAGE_KEYWORD_INITIAL_SCAN_PLATFORMS` | `["reddit","x"]` | Platforms with active initial-scan execution |
+| `engage.keyword_initial_scan.lookback_hours` | `ENGAGE_KEYWORD_INITIAL_SCAN_LOOKBACK_HOURS` | `24` | Recent-history window for time-based platforms such as Reddit |
+| `engage.keyword_initial_scan.max_attempts` | `ENGAGE_KEYWORD_INITIAL_SCAN_MAX_ATTEMPTS` | `3` | Maximum attempts before a repeatedly failing row stays `FAILED` |
+| `engage.keyword_initial_scan.retry_ms` | `ENGAGE_KEYWORD_INITIAL_SCAN_RETRY_MS` | `900000` | Retry delay for `FAILED` rows that still have attempts remaining |
+| `engage.keyword_initial_scan.stale_ms` | `ENGAGE_KEYWORD_INITIAL_SCAN_STALE_MS` | `1800000` | Stale `RUNNING` lease timeout; allows recovery if a worker dies mid-scan |
+| `engage.keyword_initial_scan.reddit.max_units` | `ENGAGE_REDDIT_KEYWORD_INITIAL_SCAN_MAX_UNITS`, then `ENGAGE_KEYWORD_INITIAL_SCAN_MAX_UNITS` | `10` | Reddit rows claimed per activity and OR-batched into a catch-up scan |
+| `engage.keyword_initial_scan.reddit.max_calls` | `ENGAGE_REDDIT_KEYWORD_INITIAL_SCAN_MAX_CALLS`, then `ENGAGE_KEYWORD_INITIAL_SCAN_MAX_CALLS` | `2` | Reddit upstream call budget per initial-scan batch |
+| `engage.keyword_initial_scan.x.max_units` | `ENGAGE_X_KEYWORD_INITIAL_SCAN_MAX_UNITS`, then `ENGAGE_KEYWORD_INITIAL_SCAN_MAX_UNITS` | `5` | X rows claimed per activity and OR-batched into a catch-up scan |
+| `engage.keyword_initial_scan.x.max_calls` | `ENGAGE_X_KEYWORD_INITIAL_SCAN_MAX_CALLS`, then `ENGAGE_KEYWORD_INITIAL_SCAN_MAX_CALLS` | `1` | X upstream call budget per initial-scan batch |
+
+Future platform keys follow the same pattern:
+`engage.keyword_initial_scan.<platform>.max_units` and
+`engage.keyword_initial_scan.<platform>.max_calls`.
+
+When an adapter exhausts `<platform>.max_calls` before exhausting all pages or
+OR-batches, fetched posts are still persisted, but the claimed initial-scan rows
+must remain retryable instead of being marked `DONE`. Increase `max_calls` only
+when repeated retries cannot drain normal backlog within the desired delay.
+
+Naming/case rules:
+
+- Settings **keys must be lowercase** and dot-separated, e.g.
+  `engage.keyword_initial_scan.reddit.max_units`.
+- The `<platform>` segment in Settings keys must be lowercase (`reddit`, `x`).
+  Do not use `Reddit`, `REDDIT`, or `X` in key names.
+- Values inside `engage.keyword_initial_scan.enabled_platforms` are normalized to
+  lowercase by the scanner, so `["REDDIT", "X"]` works, but write
+  `["reddit", "x"]` for consistency.
+- Env fallback names remain uppercase, e.g.
+  `ENGAGE_REDDIT_KEYWORD_INITIAL_SCAN_MAX_UNITS`.
+
+Example Settings rows:
+
+| key | type | value |
+|---|---|---|
+| `engage.keyword_initial_scan.enabled_platforms` | `array` | `["reddit", "x"]` |
+| `engage.keyword_initial_scan.reddit.max_units` | `number` | `10` |
+| `engage.keyword_initial_scan.reddit.max_calls` | `number` | `2` |
+| `engage.keyword_initial_scan.x.max_units` | `number` | `5` |
+| `engage.keyword_initial_scan.x.max_calls` | `number` | `1` |
+
+SQL example:
+
+```sql
+INSERT INTO "Settings" ("id", "key", "type", "value", "default_value", "createdAt", "updatedAt")
+VALUES
+  (gen_random_uuid(), 'engage.keyword_initial_scan.enabled_platforms', 'array', '["reddit","x"]'::jsonb, '["reddit","x"]'::jsonb, NOW(), NOW()),
+  (gen_random_uuid(), 'engage.keyword_initial_scan.reddit.max_units', 'number', '10'::jsonb, '10'::jsonb, NOW(), NOW()),
+  (gen_random_uuid(), 'engage.keyword_initial_scan.reddit.max_calls', 'number', '2'::jsonb, '2'::jsonb, NOW(), NOW()),
+  (gen_random_uuid(), 'engage.keyword_initial_scan.x.max_units', 'number', '5'::jsonb, '5'::jsonb, NOW(), NOW()),
+  (gen_random_uuid(), 'engage.keyword_initial_scan.x.max_calls', 'number', '1'::jsonb, '1'::jsonb, NOW(), NOW())
+ON CONFLICT ("key") DO UPDATE
+SET
+  "type" = EXCLUDED."type",
+  "value" = EXCLUDED."value",
+  "default_value" = EXCLUDED."default_value",
+  "updatedAt" = NOW();
+```
 
 **Scan Tuning Environment Variables** (Optional `.env` config, defaults built-in):
 

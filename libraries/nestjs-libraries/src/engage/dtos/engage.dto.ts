@@ -236,6 +236,27 @@ export class ListOpportunitiesDto {
   @IsString()
   keyword?: string;
 
+  // Multi-keyword variant of `keyword`: keep opportunities that matched ANY of
+  // these exact keywords (OR). Same per-org scope as `keyword`, backed by
+  // EngageOpportunityState.matchedKeywords. Accepts BOTH forms (and a mix):
+  //   repeated params  ?keywords=a&keywords=b
+  //   comma-separated  ?keywords=a,b
+  // Each value is split on commas and trimmed; empties are dropped. A keyword
+  // that legitimately contains a comma must use the repeated-param form.
+  @IsOptional()
+  @Transform(({ value }) =>
+    value === undefined || value === null
+      ? value
+      : (Array.isArray(value) ? value : [value])
+          .flatMap((v) => String(v).split(','))
+          .map((v) => v.trim())
+          .filter((v) => v !== '')
+  )
+  @IsArray()
+  @ArrayMaxSize(50)
+  @IsString({ each: true })
+  keywords?: string[];
+
   @IsOptional()
   @IsString()
   @IsIn(['today', 'week'])

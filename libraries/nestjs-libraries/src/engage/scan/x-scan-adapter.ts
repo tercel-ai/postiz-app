@@ -130,7 +130,12 @@ export class XScanAdapter implements PlatformScanAdapter {
           log.warn(
             `X scan hit call budget (${budget.maxCalls}); stopping with backlog remaining`
           );
-          return { posts, nextCursor: cursorFrom(newestId, newestAt), rate };
+          return {
+            posts,
+            nextCursor: cursorFrom(newestId, newestAt),
+            rate,
+            backlogRemaining: true,
+          };
         }
         args.heartbeat?.({ stage: 'x_search', query: query.slice(0, 60), pageToken });
 

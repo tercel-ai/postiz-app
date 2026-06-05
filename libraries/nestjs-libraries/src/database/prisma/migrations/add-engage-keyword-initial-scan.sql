@@ -44,12 +44,13 @@ SELECT
   md5(random()::text || clock_timestamp()::text || k."id"),
   k."organizationId",
   k."id",
-  'reddit',
+  p."platform",
   k."keyword",
   'PENDING',
   0,
   CURRENT_TIMESTAMP,
   CURRENT_TIMESTAMP
 FROM "EngageKeyword" k
+CROSS JOIN (VALUES ('reddit'), ('x')) AS p("platform")
 WHERE k."enabled" = true
 ON CONFLICT ("keywordId", "platform") DO NOTHING;

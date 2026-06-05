@@ -968,11 +968,15 @@ row per supported platform. At the beginning of each ticker activity,
 `runDueScans`:
 
 1. lazily creates missing initial-scan rows for enabled keywords (upgrade safety);
-2. claims up to `ENGAGE_KEYWORD_INITIAL_SCAN_MAX_UNITS` pending Reddit rows;
-3. runs a single-keyword Reddit catch-up query with an empty/time lookback cursor;
-4. fans the results out only to that keyword's org through the same scoring and
+2. reads Settings keys under `engage.keyword_initial_scan.*`;
+3. processes enabled platforms in priority order (`reddit`, then `x` today);
+4. claims up to `<platform>.max_units` pending rows per platform;
+5. runs one OR-batched catch-up query for the claimed keywords (`reddit` uses a
+   bounded lookback cursor; `x` uses an empty `since_id` cursor against recent search);
+6. fans the results out to the claimed orgs through the same scoring and
    persistence path as normal scans; and
-5. marks the row `DONE` or `FAILED`.
+7. marks the row `DONE` only when the adapter exhausted the page/batch backlog,
+   otherwise leaves it retryable as `FAILED`.
 
 Initial scans do **not** advance or reset `EngageScanCursor`. After the catch-up
 is complete, the keyword participates in the normal shared global cursor for
@@ -981,16 +985,50 @@ because it has one-shot job semantics (`DONE`/`FAILED`, attempts, error, stale
 RUNNING lease recovery), while `EngageScanCursor` represents ongoing incremental
 position and cadence.
 
-Initial scan env:
+If an adapter hits `<platform>.max_calls` before exhausting all pages/batches, it
+returns `backlogRemaining=true`. The activity still persists and fans out the
+posts already fetched, but it must not mark the initial-scan rows `DONE`. The
+rows remain retryable under `retry_ms`/`max_attempts`, preventing a partial
+catch-up from permanently hiding older posts in the lookback/recent-search
+window.
 
-| Variable | Default | Purpose |
+Initial scan settings are stored in the Settings table and read on every
+`runDueScans` activity. Env vars are fallback/bootstrap defaults only, so tuning
+platform budgets does not require an orchestrator restart.
+
+| Settings key | Default | Purpose |
 |---|---:|---|
-| `ENGAGE_KEYWORD_INITIAL_SCAN_MAX_UNITS` | `5` | Pending initial-scan rows processed per ticker activity |
-| `ENGAGE_KEYWORD_INITIAL_SCAN_MAX_CALLS` | `3` | Upstream calls per keyword catch-up |
-| `ENGAGE_KEYWORD_INITIAL_SCAN_LOOKBACK_HOURS` | `24` | Recent-history window for new/re-enabled keywords |
-| `ENGAGE_KEYWORD_INITIAL_SCAN_MAX_ATTEMPTS` | `3` | Attempts before a row remains `FAILED` |
-| `ENGAGE_KEYWORD_INITIAL_SCAN_RETRY_MS` | `900000` | Retry delay for failed rows |
-| `ENGAGE_KEYWORD_INITIAL_SCAN_STALE_MS` | `1800000` | RUNNING lease timeout for worker-crash recovery |
+| `engage.keyword_initial_scan.enabled_platforms` | `["reddit","x"]` | Platforms with active initial-scan execution |
+| `engage.keyword_initial_scan.lookback_hours` | `24` | Recent-history window for time-based platforms |
+| `engage.keyword_initial_scan.max_attempts` | `3` | Attempts before a row remains `FAILED` |
+| `engage.keyword_initial_scan.retry_ms` | `900000` | Retry delay for failed rows |
+| `engage.keyword_initial_scan.stale_ms` | `1800000` | RUNNING lease timeout for worker-crash recovery |
+| `engage.keyword_initial_scan.reddit.max_units` | `10` | Reddit rows claimed and OR-batched per activity |
+| `engage.keyword_initial_scan.reddit.max_calls` | `2` | Reddit upstream call budget per initial-scan batch |
+| `engage.keyword_initial_scan.x.max_units` | `5` | X rows claimed and OR-batched per activity |
+| `engage.keyword_initial_scan.x.max_calls` | `1` | X upstream call budget per initial-scan batch |
+
+Future platform budgets follow `engage.keyword_initial_scan.<platform>.max_units`
+and `engage.keyword_initial_scan.<platform>.max_calls`.
+
+Settings key names are case-sensitive by convention and must be lowercase:
+`engage.keyword_initial_scan.reddit.max_units`, not
+`engage.keyword_initial_scan.REDDIT.max_units`. Platform values in
+`enabled_platforms` are normalized to lowercase by the scanner, but should be
+written lowercase (`["reddit", "x"]`) for consistency. Env fallback variables
+remain uppercase.
+
+Concrete Settings examples:
+
+```json
+{
+  "engage.keyword_initial_scan.enabled_platforms": ["reddit", "x"],
+  "engage.keyword_initial_scan.reddit.max_units": 10,
+  "engage.keyword_initial_scan.reddit.max_calls": 2,
+  "engage.keyword_initial_scan.x.max_units": 5,
+  "engage.keyword_initial_scan.x.max_calls": 1
+}
+```
 
 **Per-unit lifecycle** (`_scanUnit` → `_claimCursor`):
 
@@ -999,10 +1037,12 @@ Initial scan env:
 2. Atomically claim it (`IDLE→SCANNING`, stamp `lastScanStartedAt`) — single-flight
    via a conditional `updateMany`.
 3. Acquire a token from the platform `TokenPool` and call the adapter.
-4. On success → advance the cursor (`lastSeenExternalId`/`lastSeenAt`),
-   `lastScannedAt = now`, clear cooldown. On rate-limit → set `cooldownUntil` and
-   **do not advance** (retry from the same point next tick). On error → release the
-   lock, leave the cursor untouched.
+4. On success with no backlog → advance the cursor
+   (`lastSeenExternalId`/`lastSeenAt`), `lastScannedAt = now`, clear cooldown. On
+   rate-limit → set `cooldownUntil` and **do not advance** (retry from the same
+   point next tick). On call-budget exhaustion with adapter-reported backlog →
+   release the lock and **do not advance**. On error → release the lock, leave the
+   cursor untouched.
 
 Cadence per type (env): `ENGAGE_KEYWORD_SCAN_INTERVAL_HOURS` (24),
 `ENGAGE_CHANNEL_SCAN_INTERVAL_HOURS` (3), `ENGAGE_TRACKED_SCAN_INTERVAL_HOURS` (3).

@@ -62,6 +62,16 @@ function hostIsOneOf(url: string, domains: string[]): boolean {
 
 const isRedditUrl = (url: string) => hostIsOneOf(url, ['reddit.com']);
 const isXUrl = (url: string) => hostIsOneOf(url, ['x.com', 'twitter.com']);
+const DEFAULT_SCAN_TICK_MINUTES = 5;
+
+function engageScanTickMinutes(): number {
+  const value = Number(
+    process.env.ENGAGE_SCAN_TICK_MINUTES ?? DEFAULT_SCAN_TICK_MINUTES
+  );
+  return Number.isFinite(value) && value > 0
+    ? value
+    : DEFAULT_SCAN_TICK_MINUTES;
+}
 
 @Injectable()
 export class EngageService implements OnApplicationBootstrap {
@@ -530,7 +540,7 @@ export class EngageService implements OnApplicationBootstrap {
       }
     }
 
-    const tickMinutes = Number(process.env.ENGAGE_SCAN_TICK_MINUTES ?? 5);
+    const tickMinutes = engageScanTickMinutes();
     try {
       await client.workflow?.start('engageScanTickerWorkflow', {
         workflowId: 'engage-scan-ticker',
@@ -1014,7 +1024,7 @@ export class EngageService implements OnApplicationBootstrap {
     const client = this._temporalService.client?.getRawClient();
     if (!client) return { status: 'no_client' };
 
-    const tickMinutes = Number(process.env.ENGAGE_SCAN_TICK_MINUTES ?? 5);
+    const tickMinutes = engageScanTickMinutes();
 
     // Signal the ticker to force an immediate scan of all units; if it isn't
     // running yet, start it (which itself runs within one tick) and signal.

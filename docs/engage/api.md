@@ -806,6 +806,7 @@ Retrieve the list of opportunities (main Signal Feed endpoint).
 | `status` | `EngageOpportunityStatus` | — | Status filter |
 | `intent` | `IntentType` | — | Intent filter |
 | `keyword` | `string` | — | Restrict to opportunities that matched this exact keyword (text as configured; per-org via `matchedKeywords`) |
+| `keywords` | `string[]` | — | Multi-keyword variant of `keyword`: keep opportunities that matched **any** of these exact keywords (OR). Same per-org scope (`matchedKeywords`). Accepts repeated params `?keywords=react&keywords=nextjs` **or** comma-separated `?keywords=react,nextjs` (both forms, and a mix, are supported; values are split on commas and trimmed). Combinable with `keyword` (the two sets are unioned). Max 50. |
 | `date` | `'today' \| 'week'` | — | Time range |
 | `minScore` | `number` | — | Minimum total score |
 | `minScoreKeyword` | `number` | — | Minimum keyword score |
@@ -818,6 +819,29 @@ Retrieve the list of opportunities (main Signal Feed endpoint).
 | `sortOrder` | `'asc' \| 'desc'` | `'desc'` | Sort direction |
 | `page` | `number` | `1` | Page number |
 | `limit` | `number` | `20` | Items per page, max 100 |
+
+**Keyword filtering examples**
+
+```text
+# Single keyword (exact match on this org's matchedKeywords)
+GET /api/engage/opportunities?keyword=GEO%20SEO
+
+# Multiple keywords, OR — either form works (and a mix of the two):
+#   repeated param:
+GET /api/engage/opportunities?keywords=GEO%20SEO&keywords=AISEE&keywords=SurferSEO
+#   comma-separated (split + trimmed server-side):
+GET /api/engage/opportunities?keywords=GEO%20SEO,AISEE,SurferSEO
+
+# Combine with other filters (keyword set is AND-ed with platform/status/etc.)
+GET /api/engage/opportunities?keywords=GEO%20SEO,AISEE&platform=x&minScore=70
+```
+
+> `keyword` and `keywords` are exact matches against the keywords this org
+> configured and the post hit at scan time (`EngageOpportunityState.matchedKeywords`),
+> **not** a free-text search of the post body. For free-text content preview, use
+> `GET /api/engage/keywords/:id/posts`. Passing both `keyword` and `keywords`
+> unions the two into a single OR set. A keyword that legitimately contains a
+> comma must be sent via the repeated-param form (commas are split otherwise).
 
 **Response** `200 OK`
 

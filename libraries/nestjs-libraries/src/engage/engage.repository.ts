@@ -40,7 +40,7 @@ const CHANNEL_CADENCE_MS =
   Number(process.env.ENGAGE_CHANNEL_SCAN_INTERVAL_HOURS ?? 3) * 3_600_000;
 const TRACKED_CADENCE_MS =
   Number(process.env.ENGAGE_TRACKED_SCAN_INTERVAL_HOURS ?? 3) * 3_600_000;
-const INITIAL_SCAN_PLATFORMS = ['reddit'] as const;
+const INITIAL_SCAN_PLATFORMS = ['reddit', 'x'] as const;
 
 export interface ScanTiming {
   lastScanAt: Date | null; // most recent successful completion
@@ -797,7 +797,16 @@ export class EngageRepository {
       ...(dto.minScoreKeyword !== undefined && {
         scoreKeyword: { gte: dto.minScoreKeyword },
       }),
-      ...(dto.keyword && { matchedKeywords: { has: dto.keyword } }),
+      // Keyword filter — exact match against this org's matchedKeywords. `keyword`
+      // (single) and `keywords` (multi) union into one OR set (hasSome), so either
+      // or both params work and a match on any listed keyword keeps the row.
+      ...((() => {
+        const set = [
+          ...(dto.keyword ? [dto.keyword] : []),
+          ...(dto.keywords ?? []),
+        ];
+        return set.length ? { matchedKeywords: { hasSome: set } } : {};
+      })()),
       ...(authorsAll && { scoreTracked: { gt: 0 } }),
       opportunity: {
         deletedAt: null,

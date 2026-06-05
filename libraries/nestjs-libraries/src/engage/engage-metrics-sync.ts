@@ -71,21 +71,56 @@ export async function syncRedditMetrics(
       return 'unreachable';
     }
     const infoJson = JSON.parse(await infoRes.text()) as {
-      data?: { children?: Array<{ data: { score: number; num_comments: number } }> };
+      data?: { children?: Array<{ data: { score?: number; num_comments?: number } }> };
     };
     const commentData = infoJson.data?.children?.[0]?.data;
     if (!commentData) return 'empty';
 
+    const score = Number(commentData.score ?? 0);
+    const safeScore = Number.isFinite(score) ? score : 0;
+
+    // Reddit's t1 comment object exposes `score`, but not the post-level
+    // `num_comments` field. For a reply, "comments" means direct child replies
+    // under our comment, fetched from the comment thread when available.
+    let safeComments = Number(commentData.num_comments ?? 0);
+    safeComments = Number.isFinite(safeComments) ? safeComments : 0;
+
+    const threadMatch = releaseURL.match(/\/r\/([^/]+)\/comments\/([a-z0-9]+)\//);
+    let childReplies: Array<{ data?: { author?: string }; kind?: string }> = [];
+    if (threadMatch) {
+      try {
+        const [, subreddit, threadId] = threadMatch;
+        const threadToken = await getRedditToken();
+        const threadUrl = threadToken
+          ? `https://oauth.reddit.com/r/${subreddit}/comments/${threadId}?comment=${commentId}&depth=1&limit=25`
+          : `https://www.reddit.com/r/${subreddit}/comments/${threadId}/.json?comment=${commentId}&depth=1&limit=25`;
+        const threadRes = await fetchReddit(threadUrl, threadToken);
+        if (threadRes.ok) {
+          const threadJson = JSON.parse(await threadRes.text()) as Array<{
+            data?: { children?: Array<{ data?: { replies?: { data?: { children?: Array<{ data?: { author?: string }; kind?: string }> } } } }> };
+          }>;
+          childReplies =
+            threadJson[1]?.data?.children?.[0]?.data?.replies?.data?.children ?? [];
+          safeComments = childReplies.filter((r) => r.kind !== 'more').length;
+        } else {
+          const body = await threadRes.text().catch(() => '<unreadable>');
+          deps.warn(`Reddit thread .json returned ${threadRes.status} for r/${subreddit}/${threadId}: ${body.slice(0, 200)}`);
+        }
+      } catch (err) {
+        deps.warn(`Reddit child-reply count failed for t1_${commentId}: ${(err as Error).message}`);
+      }
+    }
+
     const today = new Date().toISOString().slice(0, 10);
     const analytics = [
-      { label: 'score', data: [{ total: String(commentData.score), date: today }], percentageChange: 0 },
-      { label: 'comments', data: [{ total: String(commentData.num_comments), date: today }], percentageChange: 0 },
+      { label: 'score', data: [{ total: String(safeScore), date: today }], percentageChange: 0 },
+      { label: 'comments', data: [{ total: String(safeComments), date: today }], percentageChange: 0 },
     ];
     // Reddit_traffic_index = score×1 + num_comments×3 (Appendix formula).
-    const trafficScore = commentData.score * 1 + commentData.num_comments * 3;
+    const trafficScore = safeScore * 1 + safeComments * 3;
     await deps.updatePostMetrics(
       postId,
-      Math.round((commentData.score + commentData.num_comments) * 20),
+      Math.round((safeScore + safeComments) * 20),
       analytics,
       trafficScore
     );
@@ -93,25 +128,8 @@ export async function syncRedditMetrics(
     // Metrics are persisted from here on — the author-replied check below is
     // best-effort and must not downgrade the outcome if it fails.
 
-    // Did the original post author reply to our comment? Fetch the comment thread.
-    const threadMatch = releaseURL.match(/\/r\/([^/]+)\/comments\/([a-z0-9]+)\//);
-    if (!threadMatch || !authorUsername) return 'written';
-    const [, subreddit, threadId] = threadMatch;
-    const threadToken = await getRedditToken();
-    const threadUrl = threadToken
-      ? `https://oauth.reddit.com/r/${subreddit}/comments/${threadId}?comment=${commentId}&depth=1&limit=25`
-      : `https://www.reddit.com/r/${subreddit}/comments/${threadId}/.json?comment=${commentId}&depth=1&limit=25`;
-    const threadRes = await fetchReddit(threadUrl, threadToken);
-    if (!threadRes.ok) {
-      const body = await threadRes.text().catch(() => '<unreadable>');
-      deps.warn(`Reddit thread .json returned ${threadRes.status} for r/${subreddit}/${threadId}: ${body.slice(0, 200)}`);
-      return 'written';
-    }
-    const threadJson = JSON.parse(await threadRes.text()) as Array<{
-      data?: { children?: Array<{ data?: { replies?: { data?: { children?: Array<{ data?: { author?: string } }> } } } }> };
-    }>;
-    const childReplies =
-      threadJson[1]?.data?.children?.[0]?.data?.replies?.data?.children ?? [];
+    // Did the original post author reply to our comment?
+    if (!authorUsername) return 'written';
     if (childReplies.some((r) => r.data?.author === authorUsername)) {
       await deps.markAuthorReplied(sentReplyId);
     }

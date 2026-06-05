@@ -130,8 +130,46 @@ describe('EngageRepository — two-table reads', () => {
 
       await repo.listOpportunities('org1', { keyword: 'react' } as any);
       expect(stateFindMany.mock.calls[0][0].where.matchedKeywords).toEqual({
-        has: 'react',
+        hasSome: ['react'],
       });
+    });
+
+    it('filters by multiple matched keywords (OR) via hasSome', async () => {
+      const { repo, stateFindMany, stateCount } = buildRepo();
+      stateFindMany.mockResolvedValue([]);
+      stateCount.mockResolvedValue(0);
+
+      await repo.listOpportunities('org1', {
+        keywords: ['react', 'nextjs'],
+      } as any);
+      expect(stateFindMany.mock.calls[0][0].where.matchedKeywords).toEqual({
+        hasSome: ['react', 'nextjs'],
+      });
+    });
+
+    it('unions single `keyword` and multi `keywords` into one OR set', async () => {
+      const { repo, stateFindMany, stateCount } = buildRepo();
+      stateFindMany.mockResolvedValue([]);
+      stateCount.mockResolvedValue(0);
+
+      await repo.listOpportunities('org1', {
+        keyword: 'react',
+        keywords: ['nextjs', 'vue'],
+      } as any);
+      expect(stateFindMany.mock.calls[0][0].where.matchedKeywords).toEqual({
+        hasSome: ['react', 'nextjs', 'vue'],
+      });
+    });
+
+    it('omits the keyword filter entirely when none is given', async () => {
+      const { repo, stateFindMany, stateCount } = buildRepo();
+      stateFindMany.mockResolvedValue([]);
+      stateCount.mockResolvedValue(0);
+
+      await repo.listOpportunities('org1', {} as any);
+      expect(stateFindMany.mock.calls[0][0].where).not.toHaveProperty(
+        'matchedKeywords'
+      );
     });
 
     it('attaches replyLink + sentReplyId from the latest sent reply', async () => {
@@ -1178,6 +1216,12 @@ describe('EngageRepository — two-table reads', () => {
           keyword: 'nestjs',
           status: 'PENDING',
         },
+        {
+          organizationId: 'org1',
+          platform: 'x',
+          keyword: 'nestjs',
+          status: 'PENDING',
+        },
       ]);
     });
 
@@ -1251,6 +1295,18 @@ describe('EngageRepository — two-table reads', () => {
       expect(initialUpsert).toHaveBeenCalledWith(
         expect.objectContaining({
           where: { keywordId_platform: { keywordId: 'kw1', platform: 'reddit' } },
+          update: expect.objectContaining({
+            status: 'PENDING',
+            startedAt: null,
+            completedAt: null,
+            error: null,
+            attempts: 0,
+          }),
+        })
+      );
+      expect(initialUpsert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { keywordId_platform: { keywordId: 'kw1', platform: 'x' } },
           update: expect.objectContaining({
             status: 'PENDING',
             startedAt: null,

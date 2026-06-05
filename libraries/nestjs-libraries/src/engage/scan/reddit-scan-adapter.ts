@@ -92,7 +92,12 @@ export class RedditScanAdapter implements PlatformScanAdapter {
       do {
         if (callsUsed >= budget.maxCalls) {
           log.warn(`Reddit scan hit call budget (${budget.maxCalls}); backlog remains`);
-          return { posts, nextCursor: cur(newestId, newestAt), rate };
+          return {
+            posts,
+            nextCursor: cur(newestId, newestAt),
+            rate,
+            backlogRemaining: true,
+          };
         }
         args.heartbeat?.({
           stage: 'reddit_search',

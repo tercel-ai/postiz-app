@@ -81,7 +81,8 @@ export function normalizeReplyMetrics(
     : [];
   const get = (pattern: RegExp): number => {
     const entry = series.find((a) => typeof a?.label === 'string' && pattern.test(a.label));
-    return Number(entry?.data?.[0]?.total ?? 0);
+    const value = Number(entry?.data?.[0]?.total ?? 0);
+    return Number.isFinite(value) ? value : 0;
   };
   const traffic = trafficScore ?? 0;
 

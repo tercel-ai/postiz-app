@@ -72,6 +72,19 @@ describe('normalizeReplyMetrics', () => {
     expect(normalizeReplyMetrics('reddit', reddit, 500, 19).estReach).toBe(500);
   });
 
+  it('treats malformed Reddit numeric totals as zero', () => {
+    const reddit = [
+      { label: 'score', data: [{ total: '23' }] },
+      { label: 'comments', data: [{ total: 'undefined' }] },
+    ];
+    expect(normalizeReplyMetrics('reddit', reddit, null, null)).toEqual({
+      trafficScore: 0,
+      upvotes: 23,
+      comments: 0,
+      estReach: 460,
+    });
+  });
+
   it('every field is present (0-default) and never throws on null/garbage analytics', () => {
     const x = normalizeReplyMetrics('x', null, null, null);
     expect(x).toEqual({
