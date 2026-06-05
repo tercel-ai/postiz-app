@@ -11,6 +11,8 @@ export interface Opportunity {
   authorDisplayName?: string;
   postContent: string;
   postPublishedAt: string;
+  // Per-org first-seen time; this is the column "Sort by Newest" orders on.
+  createdAt: string;
   score: number;
   scoreHeat: number;
   scoreKeyword: number;
@@ -117,6 +119,12 @@ export const OpportunityCard: FC<OpportunityCardProps> = ({
             )}
             <span className="text-xs text-gray-500 ml-auto">
               @{opp.authorUsername} · {relativeTime(opp.postPublishedAt)}
+              {opp.createdAt && (
+                <span className="text-gray-600" title="When this opportunity was first scanned (sort field)">
+                  {' '}
+                  · found {relativeTime(opp.createdAt)}
+                </span>
+              )}
             </span>
           </div>
 
