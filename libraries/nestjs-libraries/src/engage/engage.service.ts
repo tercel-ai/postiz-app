@@ -1045,6 +1045,13 @@ export class EngageService implements OnApplicationBootstrap {
     orgId?: string;
     platform?: string;
     dryRun?: boolean;
+    /**
+     * When set, re-fetch EVERY published engage reply from the last `sinceDays`
+     * days regardless of whether impressions are already set (full re-poll,
+     * same selection the daily Temporal job uses). When omitted, keep the
+     * legacy "fill missing" behaviour (only `impressions: null` rows).
+     */
+    sinceDays?: number;
   } = {}): Promise<{
     found: number;
     updated: number;
@@ -1054,8 +1061,11 @@ export class EngageService implements OnApplicationBootstrap {
     skipped: number;
     errors: number;
   }> {
-    const { orgId, platform, dryRun = false } = opts;
-    const pending = await this._engageRepository.findPendingEngageMetrics(orgId, platform);
+    const { orgId, platform, dryRun = false, sinceDays } = opts;
+    const pending =
+      sinceDays != null
+        ? await this._engageRepository.findEngageRepliesInWindow(sinceDays, orgId, platform)
+        : await this._engageRepository.findPendingEngageMetrics(orgId, platform);
     // Count REAL outcomes from the shared sync, not attempts — so the caller can
     // tell "fetched & written" apart from "API returned nothing / WAF blocked".
     const tally = { written: 0, empty: 0, unreachable: 0, skipped: 0, errors: 0 };

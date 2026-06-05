@@ -5,10 +5,15 @@
  *   1. Backfill Post.integrationId for X replies that have none, by resolving a
  *      usable X account (author-handle → engage reply account → any live account).
  *      Without it, checkPostAnalytics can't read X metrics.            [X only]
- *   2. Re-fetch metrics for every PUBLISHED engage reply whose impressions are
- *      still null — via EngageService.resyncEngageMetrics, the SAME shared logic
- *      the 24h Temporal sync and POST /engage/admin/resync-metrics use
+ *   2. Re-fetch metrics via EngageService.resyncEngageMetrics, the SAME shared
+ *      logic the daily Temporal job and POST /engage/admin/resync-metrics use
  *      (X → checkPostAnalytics OAuth token; Reddit → loid/WAF public fetch).
+ *      - default:            only replies whose impressions are still null (fill missing)
+ *      - --since-days <N>/--all: FULL re-poll — re-fetch every reply published in
+ *        the last N days (default 30), refreshing already-synced rows too. Use
+ *        this to manually force-refresh metrics (e.g. likes that landed after the
+ *        first fetch). The `impressions > 0` write guard keeps a transient empty
+ *        read from clobbering good values.
  *   3. Print a before/after stats table (per platform: published / with-metrics /
  *      missing / Σ impressions / Σ traffic).
  *
@@ -20,6 +25,8 @@
  *   npx ts-node --project scripts/tsconfig.json scripts/engage-sync-metrics.ts --execute
  *   npx ts-node --project scripts/tsconfig.json scripts/engage-sync-metrics.ts --org <orgId> --execute
  *   npx ts-node --project scripts/tsconfig.json scripts/engage-sync-metrics.ts --platform x --execute
+ *   npx ts-node --project scripts/tsconfig.json scripts/engage-sync-metrics.ts --all --execute            # full re-poll, last 30d
+ *   npx ts-node --project scripts/tsconfig.json scripts/engage-sync-metrics.ts --since-days 7 --execute   # full re-poll, last 7d
  *   npx ts-node --project scripts/tsconfig.json scripts/engage-sync-metrics.ts --stats     # stats only, no sync
  *   npx ts-node --project scripts/tsconfig.json scripts/engage-sync-metrics.ts --no-backfill --execute
  */
@@ -52,6 +59,7 @@ interface CliArgs {
   backfill: boolean;
   statsOnly: boolean;
   dryRun: boolean;
+  sinceDays: number | null;
 }
 
 function parseArgs(): CliArgs {
@@ -62,6 +70,7 @@ function parseArgs(): CliArgs {
     backfill: true,
     statsOnly: false,
     dryRun: true,
+    sinceDays: null,
   };
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {
@@ -75,6 +84,17 @@ function parseArgs(): CliArgs {
         out.platform = p;
         break;
       }
+      // Full re-poll: re-fetch EVERY published reply from the last N days, not
+      // just impressions=null rows. This is the manual twin of the daily job —
+      // use it to force-refresh already-synced replies (e.g. late likes).
+      case '--since-days': {
+        const n = Number(args[++i]);
+        if (!Number.isFinite(n) || n <= 0) { console.error('--since-days requires a positive number'); process.exit(1); }
+        out.sinceDays = n;
+        break;
+      }
+      // Convenience alias: full re-poll over the default 30-day window.
+      case '--all': out.sinceDays = 30; break;
       case '--no-backfill': out.backfill = false; break;
       case '--stats': out.statsOnly = true; break;
       case '--execute': out.dryRun = false; break;
@@ -82,7 +102,10 @@ function parseArgs(): CliArgs {
       case '--help':
         console.log(
           'Usage: engage-sync-metrics.ts [--org <id>] [--platform x|reddit] ' +
-          '[--no-backfill] [--stats] [--dry-run|--execute]'
+          '[--since-days <N> | --all] [--no-backfill] [--stats] [--dry-run|--execute]\n' +
+          '  default          re-fetch only replies with NULL impressions (fill missing)\n' +
+          '  --since-days <N>  full re-poll: re-fetch ALL replies published in the last N days\n' +
+          '  --all            full re-poll over the last 30 days'
         );
         process.exit(0);
         break;
@@ -311,12 +334,18 @@ async function main(): Promise<void> {
     );
   }
 
-  // Step 2 — re-fetch metrics for replies with null impressions (X + Reddit),
-  // using the exact shared logic of the 24h Temporal sync.
+  // Step 2 — re-fetch metrics using the exact shared logic of the 24h Temporal
+  // sync. Default: only replies with null impressions (fill missing). With
+  // --since-days/--all: full re-poll of every reply in the window, refreshing
+  // already-synced rows too.
+  if (args.sinceDays != null) {
+    console.log(`\nFull re-poll mode: re-fetching ALL replies published in the last ${args.sinceDays} days.`);
+  }
   const result = await engageService.resyncEngageMetrics({
     orgId: args.orgId ?? undefined,
     platform: args.platform ?? undefined,
     dryRun: args.dryRun,
+    sinceDays: args.sinceDays ?? undefined,
   });
   if (args.dryRun) {
     console.log(
