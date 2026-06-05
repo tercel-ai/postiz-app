@@ -41,7 +41,11 @@ const INTENT_PROMPTS: Record<string, string> = {
 };
 
 const X_WEIGHTED_CHAR_LIMIT = 260;
-const REDDIT_CHAR_LIMIT = 1000;
+// Reddit replies aim for 1000 chars (the soft target we instruct the model with),
+// but Reddit itself allows ~10000, so we only reject above a 2000-char hard ceiling.
+// This tolerates a slight overshoot instead of failing the whole generation.
+const REDDIT_TARGET_CHAR_LIMIT = 1000;
+const REDDIT_HARD_CHAR_LIMIT = 2000;
 
 function normalizePlatform(platform: string): string {
   const normalized = platform.toLowerCase();
@@ -49,7 +53,7 @@ function normalizePlatform(platform: string): string {
 }
 
 function defaultOutputLimitForPlatform(platform: string): number {
-  return platform === 'reddit' ? REDDIT_CHAR_LIMIT : X_WEIGHTED_CHAR_LIMIT;
+  return platform === 'reddit' ? REDDIT_TARGET_CHAR_LIMIT : X_WEIGHTED_CHAR_LIMIT;
 }
 
 @Injectable()
@@ -105,12 +109,15 @@ export class EngageDraftService {
         signal,
       });
     } else if (platform === 'reddit') {
+      // The prompt targets `outputLimit` (default 1000), but we only reject above
+      // the hard ceiling so a small overshoot still produces a usable reply.
+      const hardLimit = Math.max(outputLimit, REDDIT_HARD_CHAR_LIMIT);
       yield* this._generateDraftWithSingleLimitCheck({
         systemPrompt,
         userPrompt,
         platformLabel: 'Reddit',
-        limitDescription: `${outputLimit} characters`,
-        isWithinLimit: (draft) => draft.length <= outputLimit,
+        limitDescription: `${hardLimit} characters`,
+        isWithinLimit: (draft) => draft.length <= hardLimit,
         signal,
       });
     } else {

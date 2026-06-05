@@ -297,7 +297,7 @@ describe('EngageDraftService', () => {
       );
     });
 
-    it('should return Reddit drafts when they are within the 500 character limit', async () => {
+    it('should return Reddit drafts when they are within the 2000 character hard limit', async () => {
       const generateRaw = vi
         .spyOn(service as any, '_generateRaw')
         .mockResolvedValue('r'.repeat(300) + ' still generated');
@@ -321,10 +321,36 @@ describe('EngageDraftService', () => {
       expect(generateRaw).toHaveBeenCalledTimes(1);
     });
 
-    it('should throw for Reddit drafts over 1000 characters without regenerating', async () => {
+    it('should accept Reddit drafts that overshoot the 1000 target but stay within 2000', async () => {
+      // The prompt targets 1000, but a slight overshoot up to the 2000 hard cap
+      // is tolerated instead of failing the whole generation.
       const generateRaw = vi
         .spyOn(service as any, '_generateRaw')
-        .mockResolvedValue('r'.repeat(1001));
+        .mockResolvedValue('r'.repeat(1500));
+      const mockOpportunity: Partial<EngageOpportunity> = {
+        platform: 'reddit',
+        primaryIntent: 'help_seeking',
+        authorUsername: 'testuser',
+        postContent: 'How do I do X?',
+      };
+
+      const chunks = [];
+      for await (const chunk of service.generateDraft(
+        mockOpportunity as EngageOpportunity,
+        'EXPERT_ANSWER',
+        1
+      )) {
+        chunks.push(chunk);
+      }
+
+      expect(chunks).toEqual(['r'.repeat(1500)]);
+      expect(generateRaw).toHaveBeenCalledTimes(1);
+    });
+
+    it('should throw for Reddit drafts over the 2000 character hard limit without regenerating', async () => {
+      const generateRaw = vi
+        .spyOn(service as any, '_generateRaw')
+        .mockResolvedValue('r'.repeat(2001));
       const mockOpportunity: Partial<EngageOpportunity> = {
         platform: 'reddit',
         primaryIntent: 'help_seeking',
@@ -344,7 +370,7 @@ describe('EngageDraftService', () => {
       };
 
       await expect(consume()).rejects.toThrow(
-        'Generated Reddit draft exceeded 1000 characters.'
+        'Generated Reddit draft exceeded 2000 characters.'
       );
       expect(generateRaw).toHaveBeenCalledTimes(1);
     });

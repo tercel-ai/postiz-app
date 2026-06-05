@@ -57,22 +57,35 @@ import {
 } from '@gitroom/nestjs-libraries/engage/dtos/engage.dto';
 
 const X_WEIGHTED_CHAR_LIMIT = 260;
-const REDDIT_CHAR_LIMIT = 1000;
+// Soft target the model aims for vs. the hard ceiling we actually reject above.
+// Keep these in sync with engage-draft.service.ts.
+const REDDIT_TARGET_CHAR_LIMIT = 1000;
+const REDDIT_HARD_CHAR_LIMIT = 2000;
 
 function normalizeEngagePlatform(platform: string): string {
   const normalized = platform.toLowerCase();
   return normalized === 'twitter' ? 'x' : normalized;
 }
 
-function assertDraftWithinPlatformLimit(platform: string, draft: string) {
+function assertDraftWithinPlatformLimit(
+  platform: string,
+  draft: string,
+  outputLength?: number
+) {
   const normalized = normalizeEngagePlatform(platform);
   if (normalized === 'x' && weightedLength(draft) > X_WEIGHTED_CHAR_LIMIT) {
     throw new Error(
       `Generated X draft exceeded ${X_WEIGHTED_CHAR_LIMIT} Twitter-weighted characters.`
     );
   }
-  if (normalized === 'reddit' && draft.length > REDDIT_CHAR_LIMIT) {
-    throw new Error(`Generated Reddit draft exceeded ${REDDIT_CHAR_LIMIT} characters.`);
+  if (normalized === 'reddit') {
+    const hardLimit = Math.max(
+      outputLength ?? REDDIT_TARGET_CHAR_LIMIT,
+      REDDIT_HARD_CHAR_LIMIT
+    );
+    if (draft.length > hardLimit) {
+      throw new Error(`Generated Reddit draft exceeded ${hardLimit} characters.`);
+    }
   }
 }
 
@@ -387,7 +400,7 @@ export class EngageController {
         draft += chunk;
       }
       if (!abortController.signal.aborted) {
-        assertDraftWithinPlatformLimit(opportunity.platform, draft);
+        assertDraftWithinPlatformLimit(opportunity.platform, draft, body.outputLength);
         res.write(`data: ${JSON.stringify({ text: draft })}\n\n`);
       }
       if (!abortController.signal.aborted) {
