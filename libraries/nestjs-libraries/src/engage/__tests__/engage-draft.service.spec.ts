@@ -3,18 +3,8 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { EngageDraftService } from '../engage-draft.service';
 import { EngageOpportunity } from '@prisma/client';
 
-// Shared mock stream — two text chunks followed by a stop event.
-const mockStream = {
-  [Symbol.asyncIterator]: async function* () {
-    yield {
-      type: 'content_block_delta',
-      delta: { type: 'text_delta', text: 'Hello ' },
-    };
-    yield {
-      type: 'content_block_delta',
-      delta: { type: 'text_delta', text: 'world!' },
-    };
-  },
+const mockAnthropicResponse = {
+  content: [{ type: 'text', text: 'Hello world!' }],
 };
 
 // Mock Anthropic — prevents live API calls when ANTHROPIC_API_KEY is set
@@ -23,7 +13,7 @@ vi.mock('@anthropic-ai/sdk', () => {
     default: vi.fn().mockImplementation(() => {
       return {
         messages: {
-          create: vi.fn().mockResolvedValue(mockStream),
+          create: vi.fn().mockResolvedValue(mockAnthropicResponse),
         },
       };
     }),
@@ -34,17 +24,14 @@ vi.mock('@anthropic-ai/sdk', () => {
 // The service picks OpenRouter when OPENROUTER_API_KEY is present, so we must mock openai
 // here to stop vitest (which loads .env via dotenv/config) from hitting the real API.
 vi.mock('openai', () => {
-  const fakeStream = {
-    [Symbol.asyncIterator]: async function* () {
-      yield { choices: [{ delta: { content: 'Hello ' } }] };
-      yield { choices: [{ delta: { content: 'world!' } }] };
-    },
+  const fakeResponse = {
+    choices: [{ message: { content: 'Hello world!' } }],
   };
   return {
     default: vi.fn().mockImplementation(() => ({
       chat: {
         completions: {
-          create: vi.fn().mockResolvedValue(fakeStream),
+          create: vi.fn().mockResolvedValue(fakeResponse),
         },
       },
     })),
@@ -79,7 +66,7 @@ describe('EngageDraftService', () => {
       expect(xPrompt).toContain('under 260 Twitter-weighted characters');
 
       const redditPrompt = (service as any)._buildSystemPrompt('reddit', 'EXPERT_ANSWER', 'help_seeking', 1);
-      expect(redditPrompt).toContain('up to 500 words');
+      expect(redditPrompt).toContain('under 500 characters');
     });
 
     it('should restate the platform character limit as an IMPORTANT final instruction', () => {
@@ -90,7 +77,7 @@ describe('EngageDraftService', () => {
 
       const redditPrompt = (service as any)._buildSystemPrompt('reddit', 'EXPERT_ANSWER', 'help_seeking', 1);
       expect(redditPrompt).toContain(
-        'IMPORTANT: The final reply must stay up to 500 words.'
+        'IMPORTANT: The final reply must stay under 500 characters.'
       );
     });
 
@@ -159,7 +146,7 @@ describe('EngageDraftService', () => {
   });
 
   describe('Draft Generation', () => {
-    it('should stream chunks of text from Claude', async () => {
+    it('should generate text from the configured provider', async () => {
       const mockOpportunity: Partial<EngageOpportunity> = {
         platform: 'x',
         primaryIntent: 'help_seeking',
@@ -181,70 +168,135 @@ describe('EngageDraftService', () => {
       expect(chunks.join('')).toBe('Hello world!');
     });
 
-    it('should cut X drafts at the last useful sentence boundary before the limit', async () => {
-      async function* source() {
-        yield 'First complete sentence. ';
-        yield 'Second sentence is too long ' + 'x'.repeat(120);
-      }
+    it('should return the first X draft when it is within the weighted limit', async () => {
+      const generateRaw = vi
+        .spyOn(service as any, '_generateRaw')
+        .mockResolvedValue('A concise complete reply.');
+      const mockOpportunity: Partial<EngageOpportunity> = {
+        platform: 'x',
+        primaryIntent: 'help_seeking',
+        authorUsername: 'testuser',
+        postContent: 'How do I do X?',
+      };
 
       const chunks = [];
-      for await (const chunk of (service as any)._applyXCharLimit(source(), 80)) {
+      for await (const chunk of service.generateDraft(
+        mockOpportunity as EngageOpportunity,
+        'EXPERT_ANSWER',
+        1
+      )) {
         chunks.push(chunk);
       }
 
-      expect(chunks.join('')).toBe('First complete sentence. ');
+      expect(chunks.join('')).toBe('A concise complete reply.');
+      expect(generateRaw).toHaveBeenCalledTimes(1);
     });
 
-    it('should cut X drafts at Chinese sentence punctuation before the limit', async () => {
-      async function* source() {
-        yield '第一句完整。第二句会很长很长很长很长很长很长很长很长';
-      }
+    it('should retry X draft generation once when the first draft exceeds the weighted limit', async () => {
+      const generateRaw = vi
+        .spyOn(service as any, '_generateRaw')
+        .mockResolvedValueOnce('x'.repeat(261))
+        .mockResolvedValueOnce('Short complete reply.');
+      const mockOpportunity: Partial<EngageOpportunity> = {
+        platform: 'x',
+        primaryIntent: 'help_seeking',
+        authorUsername: 'testuser',
+        postContent: 'How do I do X?',
+      };
 
       const chunks = [];
-      for await (const chunk of (service as any)._applyXCharLimit(source(), 30)) {
+      for await (const chunk of service.generateDraft(
+        mockOpportunity as EngageOpportunity,
+        'EXPERT_ANSWER',
+        1
+      )) {
         chunks.push(chunk);
       }
 
-      expect(chunks.join('')).toBe('第一句完整。');
+      expect(chunks.join('')).toBe('Short complete reply.');
+      expect(generateRaw).toHaveBeenCalledTimes(2);
+      expect(generateRaw.mock.calls[1][0]).toContain(
+        'Your previous draft exceeded the X character limit'
+      );
     });
 
-    it('should fall back to hard X weighted truncation when no natural boundary exists', async () => {
-      async function* source() {
-        yield 'a'.repeat(100);
-      }
+    it('should throw for X when the retry draft still exceeds the weighted limit', async () => {
+      vi.spyOn(service as any, '_generateRaw')
+        .mockResolvedValueOnce('x'.repeat(261))
+        .mockResolvedValueOnce('x'.repeat(261));
+      const mockOpportunity: Partial<EngageOpportunity> = {
+        platform: 'x',
+        primaryIntent: 'help_seeking',
+        authorUsername: 'testuser',
+        postContent: 'How do I do X?',
+      };
 
-      const chunks = [];
-      for await (const chunk of (service as any)._applyXCharLimit(source(), 20)) {
-        chunks.push(chunk);
-      }
+      const consume = async () => {
+        const chunks = [];
+        for await (const chunk of service.generateDraft(
+          mockOpportunity as EngageOpportunity,
+          'EXPERT_ANSWER',
+          1
+        )) {
+          chunks.push(chunk);
+        }
+      };
 
-      expect(chunks.join('')).toBe('a'.repeat(20));
+      await expect(consume()).rejects.toThrow(
+        'Generated X draft exceeded 260 Twitter-weighted characters after retry.'
+      );
     });
 
-    it('should cut X drafts at the last comma when no sentence boundary exists', async () => {
-      async function* source() {
-        yield 'First clause, second clause keeps going ' + 'x'.repeat(80);
-      }
+    it('should return Reddit drafts when they are within the 500 character limit', async () => {
+      const generateRaw = vi
+        .spyOn(service as any, '_generateRaw')
+        .mockResolvedValue('r'.repeat(300) + ' still generated');
+      const mockOpportunity: Partial<EngageOpportunity> = {
+        platform: 'reddit',
+        primaryIntent: 'help_seeking',
+        authorUsername: 'testuser',
+        postContent: 'How do I do X?',
+      };
 
       const chunks = [];
-      for await (const chunk of (service as any)._applyXCharLimit(source(), 45)) {
+      for await (const chunk of service.generateDraft(
+        mockOpportunity as EngageOpportunity,
+        'EXPERT_ANSWER',
+        1
+      )) {
         chunks.push(chunk);
       }
 
-      expect(chunks.join('')).toBe('First clause, ');
+      expect(chunks).toEqual(['r'.repeat(300) + ' still generated']);
+      expect(generateRaw).toHaveBeenCalledTimes(1);
     });
 
-    it('should cut X drafts at a word boundary when no punctuation boundary exists', async () => {
-      async function* source() {
-        yield 'alpha beta gamma delta epsilon';
-      }
+    it('should throw for Reddit drafts over 500 characters without regenerating', async () => {
+      const generateRaw = vi
+        .spyOn(service as any, '_generateRaw')
+        .mockResolvedValue('r'.repeat(501));
+      const mockOpportunity: Partial<EngageOpportunity> = {
+        platform: 'reddit',
+        primaryIntent: 'help_seeking',
+        authorUsername: 'testuser',
+        postContent: 'How do I do X?',
+      };
 
-      const chunks = [];
-      for await (const chunk of (service as any)._applyXCharLimit(source(), 18)) {
-        chunks.push(chunk);
-      }
+      const consume = async () => {
+        const chunks = [];
+        for await (const chunk of service.generateDraft(
+          mockOpportunity as EngageOpportunity,
+          'EXPERT_ANSWER',
+          1
+        )) {
+          chunks.push(chunk);
+        }
+      };
 
-      expect(chunks.join('')).toBe('alpha beta gamma');
+      await expect(consume()).rejects.toThrow(
+        'Generated Reddit draft exceeded 500 characters.'
+      );
+      expect(generateRaw).toHaveBeenCalledTimes(1);
     });
   });
 });

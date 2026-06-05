@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import OpenAI from 'openai';
 import Anthropic from '@anthropic-ai/sdk';
 import { EngageOpportunity } from '@prisma/client';
-import { textSlicer, weightedLength } from '@gitroom/helpers/utils/count.length';
+import { weightedLength } from '@gitroom/helpers/utils/count.length';
 
 const STRATEGY_PROMPTS: Record<string, string> = {
   EXPERT_ANSWER:
@@ -40,9 +40,8 @@ const INTENT_PROMPTS: Record<string, string> = {
     'The person shared data. Expand with related data or implications.',
 };
 
-const SENTENCE_END_RE = /[.!?。！？](?:["'”’)\]}】》」』]*)\s*/g;
-const PAUSE_END_RE = /[,，](?:["'”’)\]}】》」』]*)\s*/g;
-const WORD_BOUNDARY_RE = /\s+\S*$/;
+const X_WEIGHTED_CHAR_LIMIT = 260;
+const REDDIT_CHAR_LIMIT = 500;
 
 @Injectable()
 export class EngageDraftService {
@@ -84,146 +83,149 @@ export class EngageDraftService {
 
     if (signal?.aborted) return;
 
-    let rawStream: AsyncGenerator<string>;
-    if (this.useOpenRouter && this.openRouterClient) {
-      rawStream = this._streamViaOpenRouter(systemPrompt, userPrompt, signal);
-    } else if (this.anthropicClient) {
-      rawStream = this._streamViaAnthropic(systemPrompt, userPrompt, signal);
-    } else {
-      throw new Error(
-        'No LLM provider configured. Set OPENROUTER_API_KEY or ANTHROPIC_API_KEY.'
-      );
-    }
-
     if (opportunity.platform === 'x') {
-      yield* this._applyXCharLimit(rawStream, 260);
+      yield* this._generateDraftWithRetryLimit({
+        systemPrompt,
+        userPrompt,
+        platformLabel: 'X',
+        limitDescription: `${X_WEIGHTED_CHAR_LIMIT} Twitter-weighted characters`,
+        isWithinLimit: (draft) => weightedLength(draft) <= X_WEIGHTED_CHAR_LIMIT,
+        signal,
+      });
+    } else if (opportunity.platform === 'reddit') {
+      yield* this._generateDraftWithSingleLimitCheck({
+        systemPrompt,
+        userPrompt,
+        platformLabel: 'Reddit',
+        limitDescription: `${REDDIT_CHAR_LIMIT} characters`,
+        isWithinLimit: (draft) => draft.length <= REDDIT_CHAR_LIMIT,
+        signal,
+      });
     } else {
-      yield* rawStream;
+      yield await this._generateRaw(systemPrompt, userPrompt, signal);
     }
   }
 
-  // Stream complete sentence chunks until the Twitter weighted length reaches
-  // the limit. Uses twitter-text's actual weighted counting (CJK/emoji = 2
-  // units, URLs = 23), and prefers cutting at sentence punctuation so the
-  // final draft stays readable.
-  private async *_applyXCharLimit(
-    source: AsyncGenerator<string>,
-    limit: number
-  ): AsyncGenerator<string> {
-    let buffered = '';
-    let emittedEnd = 0;
+  private async *_generateDraftWithSingleLimitCheck(options: {
+    systemPrompt: string;
+    userPrompt: string;
+    platformLabel: string;
+    limitDescription: string;
+    isWithinLimit: (draft: string) => boolean;
+    signal?: AbortSignal;
+  }): AsyncGenerator<string> {
+    const {
+      systemPrompt,
+      userPrompt,
+      platformLabel,
+      limitDescription,
+      isWithinLimit,
+      signal,
+    } = options;
 
-    for await (const chunk of source) {
-      const next = buffered + chunk;
-      if (weightedLength(next) <= limit) {
-        buffered = next;
-        const sentenceEnd = this._lastSentenceBoundaryEnd(buffered, buffered.length);
-        if (sentenceEnd > emittedEnd) {
-          yield buffered.slice(emittedEnd, sentenceEnd);
-          emittedEnd = sentenceEnd;
-        }
-      } else {
-        const end = this._naturalXCutEnd(next, limit);
-        const remainder = next.slice(emittedEnd, end);
-        if (remainder) yield remainder;
-        return;
-      }
+    const draft = await this._generateRaw(systemPrompt, userPrompt, signal);
+    if (isWithinLimit(draft)) {
+      yield draft;
+      return;
     }
 
-    if (buffered.length > emittedEnd) {
-      yield buffered.slice(emittedEnd);
-    }
+    throw new Error(`Generated ${platformLabel} draft exceeded ${limitDescription}.`);
   }
 
-  private _naturalXCutEnd(text: string, limit: number): number {
-    const { end } = textSlicer('x', limit, text);
-    const hardEnd = Math.min(end + 1, text.length);
-    const sentenceEnd = this._lastSentenceBoundaryEnd(text, hardEnd);
+  private async *_generateDraftWithRetryLimit(options: {
+    systemPrompt: string;
+    userPrompt: string;
+    platformLabel: string;
+    limitDescription: string;
+    isWithinLimit: (draft: string) => boolean;
+    signal?: AbortSignal;
+  }): AsyncGenerator<string> {
+    const {
+      systemPrompt,
+      userPrompt,
+      platformLabel,
+      limitDescription,
+      isWithinLimit,
+      signal,
+    } = options;
 
-    if (sentenceEnd) {
-      return sentenceEnd;
-    }
-
-    const pauseEnd = this._lastBoundaryEnd(PAUSE_END_RE, text, hardEnd);
-    if (pauseEnd) {
-      return pauseEnd;
-    }
-
-    const wordEnd = this._lastWordBoundaryEnd(text, hardEnd);
-    return wordEnd || hardEnd;
-  }
-
-  private _lastSentenceBoundaryEnd(text: string, maxEnd: number): number {
-    return this._lastBoundaryEnd(SENTENCE_END_RE, text, maxEnd);
-  }
-
-  private _lastBoundaryEnd(
-    boundaryRe: RegExp,
-    text: string,
-    maxEnd: number
-  ): number {
-    boundaryRe.lastIndex = 0;
-
-    let end = 0;
-    let match: RegExpExecArray | null;
-    while ((match = boundaryRe.exec(text)) !== null) {
-      if (boundaryRe.lastIndex > maxEnd) {
-        break;
-      }
-      end = boundaryRe.lastIndex;
+    const firstDraft = await this._generateRaw(systemPrompt, userPrompt, signal);
+    if (isWithinLimit(firstDraft)) {
+      yield firstDraft;
+      return;
     }
 
-    return end;
+    if (signal?.aborted) return;
+
+    const retrySystemPrompt = `${systemPrompt}
+
+Your previous draft exceeded the ${platformLabel} character limit. Rewrite it as one complete, natural reply that is ${limitDescription} or fewer. Do not truncate mid-thought.`;
+    const retryDraft = await this._generateRaw(retrySystemPrompt, userPrompt, signal);
+    if (isWithinLimit(retryDraft)) {
+      yield retryDraft;
+      return;
+    }
+
+    throw new Error(
+      `Generated ${platformLabel} draft exceeded ${limitDescription} after retry.`
+    );
   }
 
-  private _lastWordBoundaryEnd(text: string, maxEnd: number): number {
-    const hardSlice = text.slice(0, maxEnd);
-    const match = hardSlice.match(WORD_BOUNDARY_RE);
-    return match?.index ? match.index : 0;
-  }
-
-  private async *_streamViaOpenRouter(
+  private async _generateRaw(
     systemPrompt: string,
     userPrompt: string,
     signal?: AbortSignal
-  ): AsyncGenerator<string> {
-    const stream = await this.openRouterClient!.chat.completions.create({
+  ): Promise<string> {
+    if (this.useOpenRouter && this.openRouterClient) {
+      return this._generateViaOpenRouter(systemPrompt, userPrompt, signal);
+    }
+    if (this.anthropicClient) {
+      return this._generateViaAnthropic(systemPrompt, userPrompt, signal);
+    }
+    throw new Error(
+      'No LLM provider configured. Set OPENROUTER_API_KEY or ANTHROPIC_API_KEY.'
+    );
+  }
+
+  private async _generateViaOpenRouter(
+    systemPrompt: string,
+    userPrompt: string,
+    signal?: AbortSignal
+  ): Promise<string> {
+    const response = await this.openRouterClient!.chat.completions.create({
       model: this.openRouterModel,
       max_tokens: 400,
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt },
       ],
-      stream: true,
     }, { signal });
 
-    for await (const chunk of stream) {
-      const text = chunk.choices[0]?.delta?.content;
-      if (text) yield text;
-    }
+    const content = response.choices[0]?.message?.content;
+    return Array.isArray(content)
+      ? content
+          .map((part) => ('text' in part ? part.text : ''))
+          .join('')
+          .trim()
+      : (content ?? '').trim();
   }
 
-  private async *_streamViaAnthropic(
+  private async _generateViaAnthropic(
     systemPrompt: string,
     userPrompt: string,
     signal?: AbortSignal
-  ): AsyncGenerator<string> {
-    const stream = await this.anthropicClient!.messages.create({
+  ): Promise<string> {
+    const response = await this.anthropicClient!.messages.create({
       model: 'claude-sonnet-4-6',
       max_tokens: 400,
       system: systemPrompt,
       messages: [{ role: 'user', content: userPrompt }],
-      stream: true,
     }, { signal });
 
-    for await (const event of stream) {
-      if (
-        event.type === 'content_block_delta' &&
-        event.delta.type === 'text_delta'
-      ) {
-        yield event.delta.text;
-      }
-    }
+    return response.content
+      .map((block) => (block.type === 'text' ? block.text : ''))
+      .join('')
+      .trim();
   }
 
   private _buildSystemPrompt(
@@ -236,7 +238,9 @@ export class EngageDraftService {
     const charLimit =
       platform === 'x'
         ? 'under 260 Twitter-weighted characters (CJK/emoji count as 2, URLs as 23 — leave a safety margin)'
-        : 'up to 500 words';
+        : platform === 'reddit'
+          ? 'under 500 characters'
+          : 'up to 500 words';
     const strategyInstruction =
       STRATEGY_PROMPTS[strategy] ?? STRATEGY_PROMPTS['EXPERT_ANSWER'];
     const brandInstruction = buildBrandInstruction(brandStrength, mentions);
