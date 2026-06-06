@@ -23,15 +23,21 @@ async function redditGet(
   publicUrl: string,
   token: string | null,
   log: (m: string) => void
-): Promise<{ ok: boolean; text(): Promise<string> } | null> {
-  try {
-    if (token) {
+): Promise<{ ok: boolean; status?: number; text(): Promise<string> } | null> {
+  if (token) {
+    try {
       const r = await fetch(oauthUrl, { headers: redditAuthHeaders(token) });
-      return { ok: r.ok, text: () => r.text() };
+      if (r.ok) return { ok: true, status: r.status, text: () => r.text() };
+      log(`Reddit OAuth author lookup returned ${r.status}; retrying via public JSON`);
+    } catch (err) {
+      log(`Reddit OAuth author lookup failed; retrying via public JSON: ${(err as Error).message}`);
     }
+  }
+  try {
     const r = await redditPublicGet(publicUrl, {}, { log });
-    return { ok: r.ok, text: () => r.text() };
-  } catch {
+    return { ok: r.ok, status: r.status, text: () => r.text() };
+  } catch (err) {
+    log(`Reddit public author lookup failed: ${(err as Error).message}`);
     return null;
   }
 }

@@ -261,9 +261,9 @@ export function SentList() {
       <div className="space-y-3">
         {replies.map((reply) => {
           const plt = reply.opportunity.platform ?? 'x';
-          const onSubmitUrl = (id: string) => {
+          const onSubmitUrl = (id: string, existingUrl?: string) => {
             setUrlSubmitId(id);
-            setUrlInput('');
+            setUrlInput(existingUrl ?? '');
           };
           return plt === 'reddit' ? (
             <SentCardReddit

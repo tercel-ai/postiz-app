@@ -349,8 +349,15 @@ export class EngageService implements OnApplicationBootstrap {
       platform === 'x'
         ? (await this._postsService.fetchEngageXAuthor(org.id, url)) ?? undefined
         : platform === 'reddit'
-        ? (await fetchRedditAuthorProfile(url)) ?? undefined
+        ? (await fetchRedditAuthorProfile(url, (message) =>
+            this.logger.warn(`submitManualReplyUrl: ${message}`)
+          )) ?? undefined
         : undefined;
+    if (platform === 'reddit' && !engageAuthor) {
+      this.logger.warn(
+        `submitManualReplyUrl: could not resolve Reddit reply author for sentReplyId=${sentReplyId}`
+      );
+    }
     return this._engageRepository.updateReplyUrl(org.id, sentReplyId, url, engageAuthor);
   }
 
@@ -945,7 +952,15 @@ export class EngageService implements OnApplicationBootstrap {
           engageAuthor =
             (await this._postsService.fetchEngageXAuthor(org.id, body.replyUrl)) ?? undefined;
         } else if (opp.platform === 'reddit') {
-          engageAuthor = (await fetchRedditAuthorProfile(body.replyUrl)) ?? undefined;
+          engageAuthor =
+            (await fetchRedditAuthorProfile(body.replyUrl, (message) =>
+              this.logger.warn(`confirmManualReply: ${message}`)
+            )) ?? undefined;
+          if (!engageAuthor) {
+            this.logger.warn(
+              `confirmManualReply: could not resolve Reddit reply author for opportunityId=${opportunityId}`
+            );
+          }
         }
       }
       const post =

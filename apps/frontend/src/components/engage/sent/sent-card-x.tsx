@@ -56,7 +56,7 @@ function formatFollowers(n?: number | null): string | null {
 interface SentCardXProps {
   reply: SentReply;
   sentReplyId: string;
-  onSubmitUrl?: (id: string) => void;
+  onSubmitUrl?: (id: string, existingUrl?: string) => void;
 }
 
 function getMetric(
