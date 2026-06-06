@@ -941,7 +941,7 @@ Stream the generation of an AI reply draft. Response is Server-Sent Events (`tex
 | strategy | Use Case | Generation Style |
 |---|---|---|
 | `EXPERT_ANSWER` | Help-seeking, Discussion | Expert step-by-step advice |
-| `DATA_BACKED` | Any type | Data-driven, cites specific numbers |
+| `DATA_BACKED` | Any type | Conversational reply optionally supported by an observation or metric from the original post |
 | `EMPATHY_LED` | Help-seeking, Ranting | Empathize first, then provide insights |
 
 **Brand Strength Descriptions**

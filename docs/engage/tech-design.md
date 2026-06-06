@@ -1315,7 +1315,7 @@ Write a reply to this post.`;
 // Mirrors the INTENT_PROMPTS pattern: no enum dependency.
 const STRATEGY_PROMPTS: Record<string, string> = {
   EXPERT_ANSWER: 'Give expert step-by-step advice. Share actionable frameworks. Be specific and concrete.',
-  DATA_BACKED:   'Lead with data from scanning 500+ brands. Cite specific numbers and findings.',
+  DATA_BACKED:   'Keep the reply conversational. When relevant, support one point with an observation or metric from the original post; never invent statistics.',
   EMPATHY_LED:   'Acknowledge the frustration or situation first, then pivot to a concrete insight.',
 };
 

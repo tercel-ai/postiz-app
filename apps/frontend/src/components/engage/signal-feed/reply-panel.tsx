@@ -19,7 +19,7 @@ interface ReplyPanelProps {
 
 const STRATEGIES = [
   { value: 'EXPERT_ANSWER', label: 'Expert Answer', desc: 'Actionable, step-by-step advice' },
-  { value: 'DATA_BACKED', label: 'Data Backed', desc: 'Lead with data and findings' },
+  { value: 'DATA_BACKED', label: 'Data Backed', desc: 'Add a relevant concrete observation' },
   { value: 'EMPATHY_LED', label: 'Empathy Led', desc: 'Acknowledge first, then insight' },
 ];
 
@@ -410,11 +410,11 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
                 setMentionInput('');
               }
             }}
-            placeholder="e.g. AI, ai agent, llm — press Enter to add"
+            placeholder="e.g. AISEE — press Enter to add"
             className="w-full bg-[#1e2536] border border-[#2d3748] text-white rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-500 placeholder-gray-600"
           />
           <p className="text-xs text-gray-600 mt-1">
-            Topics/entities the AI will naturally weave into the reply
+            Brand names the AI may mention when relevant
           </p>
         </div>
 
