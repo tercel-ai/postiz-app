@@ -3,6 +3,7 @@ import { ApiTags } from '@nestjs/swagger';
 import { SuperAdmin } from '@gitroom/backend/services/auth/admin/super-admin.decorator';
 import { PostsRepository } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.repository';
 import { IntegrationRepository } from '@gitroom/nestjs-libraries/database/prisma/integrations/integration.repository';
+import { EngageRepository } from '@gitroom/nestjs-libraries/engage/engage.repository';
 
 @ApiTags('Admin')
 @Controller('/admin/diagnostics')
@@ -10,7 +11,8 @@ import { IntegrationRepository } from '@gitroom/nestjs-libraries/database/prisma
 export class AdminDiagnosticsController {
   constructor(
     private _postsRepository: PostsRepository,
-    private _integrationRepository: IntegrationRepository
+    private _integrationRepository: IntegrationRepository,
+    private _engageRepository: EngageRepository
   ) {}
 
   /**
@@ -244,18 +246,157 @@ export class AdminDiagnosticsController {
   }
 
   /**
+   * GET /admin/diagnostics/engage-scan-cursors
+   *
+   * Finds EngageScanCursor rows stuck in SCANNING state for more than 2 hours.
+   * A stuck cursor means the Temporal workflow that owns the scan exited without
+   * resetting it, blocking all future scans for that platform/scanType/scanKey.
+   */
+  @Get('/engage-scan-cursors')
+  async checkEngageScanCursors() {
+    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    const stuckCursors = await this._engageRepository.findStuckScanCursors(twoHoursAgo);
+
+    return {
+      checkedAt: new Date().toISOString(),
+      stuckCursors: stuckCursors.map((c) => ({
+        id: c.id,
+        platform: c.platform,
+        scanType: c.scanType,
+        scanKey: c.scanKey,
+        lastScanStartedAt: c.lastScanStartedAt,
+        lastScannedAt: c.lastScannedAt,
+        stuckHours: c.lastScanStartedAt
+          ? +((Date.now() - new Date(c.lastScanStartedAt).getTime()) / (60 * 60 * 1000)).toFixed(1)
+          : null,
+      })),
+      summary: {
+        count: stuckCursors.length,
+        healthy: stuckCursors.length === 0,
+      },
+    };
+  }
+
+  /**
+   * GET /admin/diagnostics/engage-failed-scans
+   *
+   * Finds EngageKeywordInitialScan rows that are FAILED or stuck in RUNNING
+   * for more than 1 hour. Failed initial scans mean the org's keyword never
+   * got a historical backfill, so users see no opportunities for that keyword.
+   */
+  @Get('/engage-failed-scans')
+  async checkEngageFailedScans() {
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+    const failedScans = await this._engageRepository.findFailedKeywordScans(oneHourAgo);
+
+    const failedCount = failedScans.filter((s) => s.status === 'FAILED').length;
+    const stuckCount = failedScans.filter((s) => s.status === 'RUNNING').length;
+
+    return {
+      checkedAt: new Date().toISOString(),
+      failedScans: failedScans.map((s) => ({
+        id: s.id,
+        organizationId: s.organizationId,
+        keyword: s.keyword,
+        platform: s.platform,
+        status: s.status,
+        startedAt: s.startedAt,
+        attempts: s.attempts,
+        error: s.error,
+      })),
+      summary: {
+        total: failedScans.length,
+        failedCount,
+        stuckCount,
+        healthy: failedScans.length === 0,
+      },
+    };
+  }
+
+  /**
+   * GET /admin/diagnostics/engage-dead-reply-accounts
+   *
+   * Finds EngageXReplyAccount rows with engageEnabled=true but whose linked
+   * Integration has refreshNeeded=true or disabled=true. These accounts will
+   * silently fail to send or auto-reply without any user-visible error.
+   */
+  @Get('/engage-dead-reply-accounts')
+  async checkEngageDeadReplyAccounts() {
+    const deadAccounts = await this._engageRepository.findDeadReplyAccounts();
+
+    return {
+      checkedAt: new Date().toISOString(),
+      deadReplyAccounts: deadAccounts.map((a) => ({
+        id: a.id,
+        organizationId: a.organizationId,
+        integrationId: a.integrationId,
+        autoReplyEnabled: a.autoReplyEnabled,
+        integration: {
+          id: a.integration.id,
+          name: a.integration.name,
+          provider: a.integration.providerIdentifier,
+          refreshNeeded: a.integration.refreshNeeded,
+          disabled: a.integration.disabled,
+        },
+      })),
+      summary: {
+        count: deadAccounts.length,
+        autoReplyAffected: deadAccounts.filter((a) => a.autoReplyEnabled).length,
+        healthy: deadAccounts.length === 0,
+      },
+    };
+  }
+
+  /**
+   * GET /admin/diagnostics/engage-reply-errors
+   *
+   * Finds EngageSentReply rows whose linked Post has state=ERROR within the
+   * last 7 days. These represent replies the user believes were sent (the
+   * opportunity shows REPLIED) but that actually failed at the publish layer.
+   */
+  @Get('/engage-reply-errors')
+  async checkEngageReplyErrors() {
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const replyErrors = await this._engageRepository.findEngageReplyErrors(sevenDaysAgo);
+
+    return {
+      checkedAt: new Date().toISOString(),
+      replyErrors: replyErrors.map((r) => ({
+        id: r.id,
+        organizationId: r.organizationId,
+        opportunityId: r.opportunityId,
+        postId: r.postId,
+        createdAt: r.createdAt,
+        platform: r.opportunity.platform,
+        externalPostUrl: r.opportunity.externalPostUrl,
+        postError: r.post.error,
+        postCreatedAt: r.post.createdAt,
+      })),
+      summary: {
+        count: replyErrors.length,
+        healthy: replyErrors.length === 0,
+      },
+    };
+  }
+
+  /**
    * GET /admin/diagnostics/overview
    *
    * Aggregated health check across all diagnostics.
    */
   @Get('/overview')
   async overview() {
-    const [recurring, stuck, integrations, errors] = await Promise.all([
-      this.checkRecurringPosts(),
-      this.checkStuckPosts(),
-      this.checkIntegrations(),
-      this.checkErrorPosts(),
-    ]);
+    const [recurring, stuck, integrations, errors, scanCursors, failedScans, deadReplyAccounts, replyErrors] =
+      await Promise.all([
+        this.checkRecurringPosts(),
+        this.checkStuckPosts(),
+        this.checkIntegrations(),
+        this.checkErrorPosts(),
+        this.checkEngageScanCursors(),
+        this.checkEngageFailedScans(),
+        this.checkEngageDeadReplyAccounts(),
+        this.checkEngageReplyErrors(),
+      ]);
 
     return {
       checkedAt: new Date().toISOString(),
@@ -263,11 +404,27 @@ export class AdminDiagnosticsController {
         recurring.summary.healthy &&
         stuck.summary.healthy &&
         integrations.summary.healthy &&
-        errors.summary.healthy,
+        errors.summary.healthy &&
+        scanCursors.summary.healthy &&
+        failedScans.summary.healthy &&
+        deadReplyAccounts.summary.healthy &&
+        replyErrors.summary.healthy,
       recurringPosts: recurring.summary,
       stuckPosts: stuck.summary,
       integrations: integrations.summary,
       errorPosts: errors.summary,
+      engageScans: {
+        stuckCursors: scanCursors.summary.count,
+        failedKeywordScans: failedScans.summary.total,
+        stuckKeywordScans: failedScans.summary.stuckCount,
+        healthy: scanCursors.summary.healthy && failedScans.summary.healthy,
+      },
+      engageReplies: {
+        deadReplyAccounts: deadReplyAccounts.summary.count,
+        autoReplyAffected: deadReplyAccounts.summary.autoReplyAffected,
+        replyErrors: replyErrors.summary.count,
+        healthy: deadReplyAccounts.summary.healthy && replyErrors.summary.healthy,
+      },
     };
   }
 }

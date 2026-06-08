@@ -2459,6 +2459,93 @@ export class EngageRepository {
     });
   }
 
+  // ─── Admin diagnostics ───────────────────────────────────────────────────
+
+  async findStuckScanCursors(before: Date) {
+    return this._scanCursor.model.engageScanCursor.findMany({
+      where: {
+        status: 'SCANNING',
+        lastScanStartedAt: { lt: before },
+      },
+      select: {
+        id: true,
+        platform: true,
+        scanType: true,
+        scanKey: true,
+        lastScanStartedAt: true,
+        lastScannedAt: true,
+      },
+      orderBy: { lastScanStartedAt: 'asc' },
+    });
+  }
+
+  async findFailedKeywordScans(stuckBefore: Date) {
+    return this._keywordInitialScan.model.engageKeywordInitialScan.findMany({
+      where: {
+        OR: [
+          { status: 'FAILED' },
+          { status: 'RUNNING', startedAt: { lt: stuckBefore } },
+        ],
+      },
+      select: {
+        id: true,
+        organizationId: true,
+        keyword: true,
+        platform: true,
+        status: true,
+        startedAt: true,
+        attempts: true,
+        error: true,
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+  }
+
+  async findDeadReplyAccounts() {
+    return this._replyAccount.model.engageXReplyAccount.findMany({
+      where: {
+        engageEnabled: true,
+        integration: {
+          OR: [{ refreshNeeded: true }, { disabled: true }],
+        },
+      },
+      select: {
+        id: true,
+        organizationId: true,
+        integrationId: true,
+        autoReplyEnabled: true,
+        integration: {
+          select: {
+            id: true,
+            name: true,
+            providerIdentifier: true,
+            refreshNeeded: true,
+            disabled: true,
+          },
+        },
+      },
+      orderBy: { organizationId: 'asc' },
+    });
+  }
+
+  async findEngageReplyErrors(since: Date) {
+    return this._sentReply.model.engageSentReply.findMany({
+      where: {
+        post: { state: 'ERROR', createdAt: { gte: since } },
+      },
+      select: {
+        id: true,
+        organizationId: true,
+        opportunityId: true,
+        postId: true,
+        createdAt: true,
+        post: { select: { id: true, state: true, error: true, createdAt: true } },
+        opportunity: { select: { externalPostUrl: true, platform: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+
   // ─── Private helpers ──────────────────────────────────────────────────────
 
   private async _getConfigId(organizationId: string): Promise<string> {
