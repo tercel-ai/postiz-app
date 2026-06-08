@@ -1808,12 +1808,15 @@ export class EngageRepository {
     return result;
   }
 
-  // Panel ⑤ "Top engage sources" — top engage replies ranked by the engagement
-  // metric that matters per platform: X by likes, Reddit by upvotes (descending).
-  // Returns a per-reply list shaped like /sent (opportunity author + post.metrics)
-  // rather than an author rollup, so the panel can show each top-performing reply.
-  // likes/upvotes live inside Post.analytics (extracted by normalizeReplyMetrics),
-  // not as a sortable column, so we fetch the candidate set and rank in memory.
+  // Panel ⑤ "Top engage sources" — top engage replies ranked by the per-platform
+  // engagement metric: X by likes, Reddit by upvotes (descending). Deliberately
+  // kept SEPARATE from /sent (listSentReplies): the panel only needs the reply
+  // itself + the posting account + metrics, so this query skips the original-post
+  // (opportunity) author fields and the per-org matchedKeywords join that /sent
+  // carries. likes/upvotes live inside Post.analytics (extracted by
+  // normalizeReplyMetrics), not as a sortable column, so we fetch the published
+  // candidate set and rank in memory. With no platform filter each item ranks by
+  // its own metric, so a mixed list still sorts sensibly.
   async getDashboardTopSources(
     organizationId: string,
     opts: { platform?: string; limit?: number } = {}
@@ -1829,18 +1832,9 @@ export class EngageRepository {
       },
       select: {
         id: true,
-        opportunity: {
-          select: {
-            id: true,
-            platform: true,
-            externalPostUrl: true,
-            postContent: true,
-            authorUsername: true,
-            authorDisplayName: true,
-            authorFollowers: true,
-            authorAvatarUrl: true,
-          },
-        },
+        // Only the platform is needed (to pick the ranking metric) and the
+        // external URL as a link fallback — no original-post author fields.
+        opportunity: { select: { platform: true, externalPostUrl: true } },
         post: {
           select: {
             id: true,
@@ -1850,8 +1844,8 @@ export class EngageRepository {
             impressions: true,
             trafficScore: true,
             analytics: true,
-            // settings carries engageAuthor for manual replies posted from an
-            // account that isn't a connected integration (integrationId=null).
+            // settings carries engageAuthor for manual replies; integration is
+            // the connected account — together they resolve the reply author.
             settings: true,
             integration: {
               select: {
@@ -1868,9 +1862,7 @@ export class EngageRepository {
       },
     });
 
-    // Rank key per platform: Reddit → upvotes, everything else (X) → likes. When
-    // no platform filter is set, each item picks its own key so a mixed list still
-    // sorts sensibly (Reddit rows by upvotes, X rows by likes).
+    // Reddit → upvotes, everything else (X) → likes; missing metrics rank as 0.
     const rankValue = (p: string, metrics: { likes?: number; upvotes?: number }) =>
       p === 'reddit' ? metrics.upvotes ?? 0 : metrics.likes ?? 0;
 
@@ -1884,13 +1876,13 @@ export class EngageRepository {
       );
       return {
         id: r.id,
-        opportunity: r.opportunity,
+        platform: p,
         post: {
           id: r.post?.id ?? null,
           content: r.post?.content ?? '',
           releaseURL: r.post?.releaseURL ?? r.opportunity?.externalPostUrl ?? null,
           publishDate: r.post?.publishDate ?? null,
-          // The account that posted the reply (avatar + @handle), mirroring /sent.
+          // The account that posted the reply (avatar + @handle), as in /sent.
           replyAuthor: resolveReplyAuthor(r.post?.integration ?? null, r.post?.settings ?? null),
           metrics,
         },
@@ -1899,7 +1891,7 @@ export class EngageRepository {
     });
 
     items.sort((a, b) => b.metric - a.metric);
-    return { items: items.slice(0, limit) };
+    return { items: items.slice(0, limit), total: items.length };
   }
 
   async updateScheduledReply(

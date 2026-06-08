@@ -564,9 +564,9 @@ describe('EngageRepository — two-table reads', () => {
         { opportunity: { platform: 'x' }, post: { publishDate: null } }, // ignored
       ]);
 
-      const res = await repo.getDashboardRepliesTrend('org1', 7);
-      expect(res.days).toBe(7);
-      expect(res.items).toHaveLength(7); // zero-filled continuous buckets
+      const res = await repo.getDashboardRepliesTrend('org1', 'daily');
+      expect(res.period).toBe('daily');
+      expect(res.items).toHaveLength(30); // daily → 30 zero-filled continuous buckets
       const totals = res.items.reduce(
         (a, b) => ({ count: a.count + b.count, x: a.x + b.x, reddit: a.reddit + b.reddit }),
         { count: 0, x: 0, reddit: 0 }
@@ -710,15 +710,22 @@ describe('EngageRepository — two-table reads', () => {
       expect(res.items.map((i) => i.id)).toEqual(['s2', 's3']); // top 2 by likes
     });
 
-    it('scopes to a platform', async () => {
+    it('scopes to a platform and fetches a lean select (no original-post author fields)', async () => {
       const { repo, sentFindMany } = buildRepo();
       sentFindMany.mockResolvedValue([]);
 
       await repo.getDashboardTopSources('org1', { platform: 'reddit', limit: 3 });
 
-      expect(sentFindMany.mock.calls[0][0].where.opportunity).toEqual({ platform: 'reddit' });
-      expect(sentFindMany.mock.calls[0][0].where.post).toEqual({
+      const call = sentFindMany.mock.calls[0][0];
+      expect(call.where.opportunity).toEqual({ platform: 'reddit' });
+      expect(call.where.post).toEqual({
         is: { source: 'engage', trafficScore: { not: null } },
+      });
+      // Split from /sent: only platform + url from the opportunity, never the
+      // original-post author fields, and no matchedKeywords join.
+      expect(call.select.opportunity.select).toEqual({
+        platform: true,
+        externalPostUrl: true,
       });
     });
   });

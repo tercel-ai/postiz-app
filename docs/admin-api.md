@@ -173,7 +173,9 @@ Response:
   "recurringPosts": { "recurringPostsCount": 5, "prematureCount": 1, "duplicateCount": 0, "missedCount": 0, "healthy": false },
   "stuckPosts": { "count": 0, "healthy": true },
   "integrations": { "total": 1, "refreshNeeded": 1, "inBetweenSteps": 0, "disabled": 0, "healthy": false },
-  "errorPosts": { "count": 3, "healthy": false }
+  "errorPosts": { "count": 3, "healthy": false },
+  "engageScans": { "stuckCursors": 1, "failedKeywordScans": 2, "stuckKeywordScans": 0, "healthy": false },
+  "engageReplies": { "deadReplyAccounts": 1, "autoReplyAffected": 1, "replyErrors": 0, "healthy": false }
 }
 ```
 
@@ -198,6 +200,30 @@ Lists unhealthy integrations (`refreshNeeded`, `inBetweenSteps`, or `disabled`) 
 #### GET /admin/diagnostics/error-posts
 
 Lists posts with ERROR state from the last 7 days, including error details. Covers both non-recurring errors and recurring clone errors.
+
+#### GET /admin/diagnostics/engage-scan-cursors
+
+Finds `EngageScanCursor` rows stuck in `SCANNING` status for more than 2 hours. A stuck cursor blocks all future scans for that `platform`/`scanType`/`scanKey` combination — the Temporal workflow that owns the scan exited without resetting it.
+
+Response includes `stuckCursors[]` with `platform`, `scanType`, `scanKey`, `lastScanStartedAt`, `lastScannedAt`, and `stuckHours`.
+
+#### GET /admin/diagnostics/engage-failed-scans
+
+Finds `EngageKeywordInitialScan` rows with `status=FAILED`, or `status=RUNNING` with `startedAt` more than 1 hour ago. Failed initial scans mean the org's keyword never received a historical backfill, so users see no opportunities for that keyword without manual intervention.
+
+Response includes `failedScans[]` with `organizationId`, `keyword`, `platform`, `status`, `attempts`, and `error`. Summary includes separate `failedCount` and `stuckCount`.
+
+#### GET /admin/diagnostics/engage-dead-reply-accounts
+
+Finds `EngageXReplyAccount` rows with `engageEnabled=true` but whose linked `Integration` has `refreshNeeded=true` or `disabled=true`. These accounts silently fail to send replies or run auto-replies.
+
+Response includes `deadReplyAccounts[]` with integration details. Summary includes `autoReplyAffected` (accounts where `autoReplyEnabled=true`).
+
+#### GET /admin/diagnostics/engage-reply-errors
+
+Finds `EngageSentReply` rows from the last 7 days whose linked `Post` is in `ERROR` state. These are replies the user believes were sent (opportunity shows `REPLIED`) but that failed at the publish layer.
+
+Response includes `replyErrors[]` with `organizationId`, `opportunityId`, `postId`, `platform`, `externalPostUrl`, and `postError`.
 
 ---
 
@@ -269,6 +295,7 @@ Manually trigger a backfill of daily statistics (DataTicks) for a specific date 
 - `apps/backend/src/admin-api/routes/admin-dashboard.controller.ts`
 - `apps/backend/src/admin-api/routes/admin-settings.controller.ts`
 - `apps/backend/src/admin-api/routes/admin-diagnostics.controller.ts`
+- `libraries/nestjs-libraries/src/engage/engage.repository.ts` (diagnostic query methods: `findStuckScanCursors`, `findFailedKeywordScans`, `findDeadReplyAccounts`, `findEngageReplyErrors`)
 - `libraries/nestjs-libraries/src/dtos/admin/ai-pricing.dto.ts`
 - `libraries/nestjs-libraries/src/dtos/admin/settings-body.dto.ts`
 - `libraries/nestjs-libraries/src/dtos/admin/settings-query.dto.ts`

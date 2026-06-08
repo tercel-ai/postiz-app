@@ -180,14 +180,11 @@ export class AdminSettingsController {
       );
     }
     const existing = await this._settingsService.get(key);
-    if (existing === null) {
-      throw new HttpException(`Setting "${key}" not found, use POST to create`, 404);
-    }
     await this._settingsService.set(key, body.value, {
       type: body.type,
       description: body.description,
     });
-    return { key, updated: true };
+    return { key, created: existing === null, updated: existing !== null };
   }
 
   @Delete('/settings/:key')
