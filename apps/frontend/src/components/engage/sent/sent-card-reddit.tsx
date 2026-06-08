@@ -42,7 +42,7 @@ interface SentReply {
 
 interface SentCardRedditProps {
   reply: SentReply;
-  onSubmitUrl?: (id: string) => void;
+  onSubmitUrl?: (id: string, existingUrl?: string) => void;
   sentReplyId: string;
 }
 
@@ -173,6 +173,14 @@ export const SentCardReddit: FC<SentCardRedditProps> = ({
           className="text-xs text-blue-400 hover:text-blue-300 transition-colors"
         >
           + Submit reply URL
+        </button>
+      )}
+      {!noUrl && !post.replyAuthor && onSubmitUrl && (
+        <button
+          onClick={() => onSubmitUrl(sentReplyId, post.releaseURL ?? undefined)}
+          className="text-xs text-yellow-400 hover:text-yellow-300 transition-colors mr-3"
+        >
+          Retry reply author
         </button>
       )}
       {post.releaseURL && (
