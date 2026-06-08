@@ -161,18 +161,13 @@ function envPlatformPrefix(platform: string): string {
   return platform.replace(/[^a-z0-9]/gi, '_').toUpperCase();
 }
 
-function defaultPlatformBudget(
-  platform: InitialScanPlatform
-): { maxUnits: number; maxCalls: number } {
-  if (platform === 'reddit') return { maxUnits: 10, maxCalls: 2 };
-  return { maxUnits: 5, maxCalls: 1 };
-}
+const DEFAULT_INITIAL_SCAN_MAX_UNITS = 10;
+const DEFAULT_INITIAL_SCAN_MAX_CALLS = 5;
 
 function platformInitialScanBudget(
   settings: Map<string, unknown>,
   platform: InitialScanPlatform
 ): { maxUnits: number; maxCalls: number } {
-  const defaults = defaultPlatformBudget(platform);
   const envPrefix = envPlatformPrefix(platform);
   return {
     maxUnits: numberSetting(
@@ -182,7 +177,7 @@ function platformInitialScanBudget(
         `ENGAGE_${envPrefix}_KEYWORD_INITIAL_SCAN_MAX_UNITS`,
         'ENGAGE_KEYWORD_INITIAL_SCAN_MAX_UNITS',
       ],
-      defaults.maxUnits
+      DEFAULT_INITIAL_SCAN_MAX_UNITS
     ),
     maxCalls: numberSetting(
       settings,
@@ -191,7 +186,7 @@ function platformInitialScanBudget(
         `ENGAGE_${envPrefix}_KEYWORD_INITIAL_SCAN_MAX_CALLS`,
         'ENGAGE_KEYWORD_INITIAL_SCAN_MAX_CALLS',
       ],
-      defaults.maxCalls
+      DEFAULT_INITIAL_SCAN_MAX_CALLS
     ),
   };
 }

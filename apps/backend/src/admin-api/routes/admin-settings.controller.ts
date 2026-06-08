@@ -116,6 +116,93 @@ export class AdminSettingsController {
     return { key, deleted: true };
   }
 
+  // ============ Engage initial-scan effective budget ============
+
+  /**
+   * GET /admin/settings/engage-initial-scan-budget
+   *
+   * Returns the currently effective budget values for each platform's keyword
+   * initial scan, resolved through the same priority chain the orchestrator uses:
+   *   admin settings DB → platform env var → generic env var → hardcoded constant
+   *
+   * Also returns the per-key source so the UI can show where each value came from.
+   */
+  @Get('/settings/engage-initial-scan-budget')
+  async getEngageInitialScanBudget() {
+    const PREFIX = 'engage.keyword_initial_scan.';
+    const DEFAULT_MAX_UNITS = 10;
+    const DEFAULT_MAX_CALLS = 5;
+
+    const dbRows = await this._settingsService.listByPrefix(PREFIX);
+    const db = new Map<string, unknown>(dbRows.map((r: any) => [r.key, r.value]));
+
+    const resolve = (
+      dbKey: string,
+      envSpecific: string,
+      envGeneric: string,
+      fallback: number
+    ): { value: number; source: 'db' | 'env' | 'default' } => {
+      if (db.has(dbKey)) {
+        const v = Number(db.get(dbKey));
+        if (Number.isFinite(v) && v > 0) return { value: v, source: 'db' };
+      }
+      const fromEnv = process.env[envSpecific] ?? process.env[envGeneric];
+      if (fromEnv) {
+        const v = Number(fromEnv);
+        if (Number.isFinite(v) && v > 0) return { value: v, source: 'env' };
+      }
+      return { value: fallback, source: 'default' };
+    };
+
+    const platforms = ['x', 'reddit'] as const;
+    const result: Record<string, any> = {};
+    for (const platform of platforms) {
+      const envPrefix = platform.toUpperCase();
+      result[platform] = {
+        maxUnits: resolve(
+          `${PREFIX}${platform}.max_units`,
+          `ENGAGE_${envPrefix}_KEYWORD_INITIAL_SCAN_MAX_UNITS`,
+          'ENGAGE_KEYWORD_INITIAL_SCAN_MAX_UNITS',
+          DEFAULT_MAX_UNITS
+        ),
+        maxCalls: resolve(
+          `${PREFIX}${platform}.max_calls`,
+          `ENGAGE_${envPrefix}_KEYWORD_INITIAL_SCAN_MAX_CALLS`,
+          'ENGAGE_KEYWORD_INITIAL_SCAN_MAX_CALLS',
+          DEFAULT_MAX_CALLS
+        ),
+      };
+    }
+
+    // Also resolve shared settings
+    const resolveShared = (
+      dbKey: string,
+      envGeneric: string,
+      fallback: number
+    ): { value: number; source: 'db' | 'env' | 'default' } => {
+      if (db.has(dbKey)) {
+        const v = Number(db.get(dbKey));
+        if (Number.isFinite(v) && v > 0) return { value: v, source: 'db' };
+      }
+      const fromEnv = process.env[envGeneric];
+      if (fromEnv) {
+        const v = Number(fromEnv);
+        if (Number.isFinite(v) && v > 0) return { value: v, source: 'env' };
+      }
+      return { value: fallback, source: 'default' };
+    };
+
+    return {
+      platforms: result,
+      shared: {
+        lookbackHours: resolveShared(`${PREFIX}lookback_hours`, 'ENGAGE_KEYWORD_INITIAL_SCAN_LOOKBACK_HOURS', 24),
+        maxAttempts:   resolveShared(`${PREFIX}max_attempts`,   'ENGAGE_KEYWORD_INITIAL_SCAN_MAX_ATTEMPTS',   3),
+        retryMs:       resolveShared(`${PREFIX}retry_ms`,       'ENGAGE_KEYWORD_INITIAL_SCAN_RETRY_MS',       900_000),
+        staleMs:       resolveShared(`${PREFIX}stale_ms`,       'ENGAGE_KEYWORD_INITIAL_SCAN_STALE_MS',       1_800_000),
+      },
+    };
+  }
+
   // ============ AI Pricing ============
 
   @Get('/ai-pricing')
