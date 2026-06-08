@@ -1808,9 +1808,12 @@ export class EngageRepository {
     return result;
   }
 
-  // Panel ⑤ "Top engage sources" — engage replies aggregated by the ORIGINAL
-  // post author (the traffic source), ranked by traffic index ("clicks").
-  // NOTE: "visitors" from the mockup is not tracked anywhere, so it is omitted.
+  // Panel ⑤ "Top engage sources" — top engage replies ranked by the engagement
+  // metric that matters per platform: X by likes, Reddit by upvotes (descending).
+  // Returns a per-reply list shaped like /sent (opportunity author + post.metrics)
+  // rather than an author rollup, so the panel can show each top-performing reply.
+  // likes/upvotes live inside Post.analytics (extracted by normalizeReplyMetrics),
+  // not as a sortable column, so we fetch the candidate set and rank in memory.
   async getDashboardTopSources(
     organizationId: string,
     opts: { platform?: string; limit?: number } = {}
@@ -1825,40 +1828,78 @@ export class EngageRepository {
         post: { is: { source: 'engage', trafficScore: { not: null } } },
       },
       select: {
+        id: true,
         opportunity: {
-          select: { platform: true, authorUsername: true, authorAvatarUrl: true },
+          select: {
+            id: true,
+            platform: true,
+            externalPostUrl: true,
+            postContent: true,
+            authorUsername: true,
+            authorDisplayName: true,
+            authorFollowers: true,
+            authorAvatarUrl: true,
+          },
         },
-        post: { select: { trafficScore: true } },
+        post: {
+          select: {
+            id: true,
+            content: true,
+            releaseURL: true,
+            publishDate: true,
+            impressions: true,
+            trafficScore: true,
+            analytics: true,
+            // settings carries engageAuthor for manual replies posted from an
+            // account that isn't a connected integration (integrationId=null).
+            settings: true,
+            integration: {
+              select: {
+                id: true,
+                name: true,
+                providerIdentifier: true,
+                picture: true,
+                profile: true,
+                internalId: true,
+              },
+            },
+          },
+        },
       },
     });
 
-    const byAuthor = new Map<
-      string,
-      { author: string; avatar: string | null; platform: string; clicks: number; replies: number }
-    >();
-    for (const r of rows) {
-      const p = r.opportunity?.platform ?? 'unknown';
-      const author = r.opportunity?.authorUsername ?? 'unknown';
-      const key = `${p}|${author}`;
-      const clicks = Math.round(r.post?.trafficScore ?? 0);
-      const existing = byAuthor.get(key);
-      if (existing) {
-        existing.clicks += clicks;
-        existing.replies += 1;
-      } else {
-        byAuthor.set(key, {
-          author,
-          avatar: r.opportunity?.authorAvatarUrl ?? null,
-          platform: p,
-          clicks,
-          replies: 1,
-        });
-      }
-    }
+    // Rank key per platform: Reddit → upvotes, everything else (X) → likes. When
+    // no platform filter is set, each item picks its own key so a mixed list still
+    // sorts sensibly (Reddit rows by upvotes, X rows by likes).
+    const rankValue = (p: string, metrics: { likes?: number; upvotes?: number }) =>
+      p === 'reddit' ? metrics.upvotes ?? 0 : metrics.likes ?? 0;
 
-    const all = [...byAuthor.values()].sort((a, b) => b.clicks - a.clicks);
-    const totalClicks = all.reduce((s, i) => s + i.clicks, 0);
-    return { totalClicks, items: all.slice(0, limit) };
+    const items = rows.map((r) => {
+      const p = r.opportunity?.platform ?? 'unknown';
+      const metrics = normalizeReplyMetrics(
+        p,
+        r.post?.analytics,
+        r.post?.impressions,
+        r.post?.trafficScore
+      );
+      return {
+        id: r.id,
+        opportunity: r.opportunity,
+        post: {
+          id: r.post?.id ?? null,
+          content: r.post?.content ?? '',
+          releaseURL: r.post?.releaseURL ?? r.opportunity?.externalPostUrl ?? null,
+          publishDate: r.post?.publishDate ?? null,
+          // The account that posted the reply (avatar + @handle), mirroring /sent.
+          replyAuthor: resolveReplyAuthor(r.post?.integration ?? null, r.post?.settings ?? null),
+          metrics,
+        },
+        metric: rankValue(p, metrics),
+      };
+    });
+
+    items.sort((a, b) => b.metric - a.metric);
+    return { items: items.slice(0, limit) };
   }
 
   async updateScheduledReply(

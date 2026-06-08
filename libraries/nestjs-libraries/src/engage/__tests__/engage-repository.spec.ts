@@ -658,24 +658,59 @@ describe('EngageRepository — two-table reads', () => {
   });
 
   describe('getDashboardTopSources (panel ⑤)', () => {
-    it('aggregates clicks per original author, ranks desc, totals across all', async () => {
+    // Build a Post.analytics series the way the metrics sync stores it.
+    const xAnalytics = (likes: number) => [
+      { label: 'likes', data: [{ total: String(likes) }] },
+    ];
+    const redditAnalytics = (upvotes: number) => [
+      { label: 'score', data: [{ total: String(upvotes) }] },
+    ];
+
+    it('ranks replies by likes (X) / upvotes (Reddit), each item by its own key, desc', async () => {
       const { repo, sentFindMany } = buildRepo();
       sentFindMany.mockResolvedValue([
-        { opportunity: { platform: 'x', authorUsername: 'alice', authorAvatarUrl: 'a.png' }, post: { trafficScore: 30 } },
-        { opportunity: { platform: 'x', authorUsername: 'alice', authorAvatarUrl: 'a.png' }, post: { trafficScore: 12 } }, // alice → 42
-        { opportunity: { platform: 'x', authorUsername: 'bob', authorAvatarUrl: null }, post: { trafficScore: 5 } },
+        {
+          id: 's1',
+          opportunity: { id: 'o1', platform: 'x', authorUsername: 'alice', authorAvatarUrl: 'a.png' },
+          post: { id: 'p1', content: 'cx', releaseURL: 'rx', analytics: xAnalytics(7), integration: { profile: '@me', picture: 'm.png' }, settings: null },
+        },
+        {
+          id: 's2',
+          opportunity: { id: 'o2', platform: 'reddit', authorUsername: 'bob', authorAvatarUrl: null },
+          post: { id: 'p2', content: 'cr', releaseURL: 'rr', analytics: redditAnalytics(20), integration: null, settings: null },
+        },
+        {
+          id: 's3',
+          opportunity: { id: 'o3', platform: 'x', authorUsername: 'carol', authorAvatarUrl: null },
+          post: { id: 'p3', content: 'cx2', releaseURL: 'rx2', analytics: xAnalytics(3), integration: null, settings: null },
+        },
       ]);
 
       const res = await repo.getDashboardTopSources('org1', { limit: 10 });
 
-      expect(res.totalClicks).toBe(47); // 42 + 5
-      expect(res.items).toEqual([
-        { author: 'alice', avatar: 'a.png', platform: 'x', clicks: 42, replies: 2 },
-        { author: 'bob', avatar: null, platform: 'x', clicks: 5, replies: 1 },
-      ]);
+      // reddit/20 > x/7 > x/3 — each ranked by its own platform metric.
+      expect(res.items.map((i) => i.id)).toEqual(['s2', 's1', 's3']);
+      expect(res.items[0].metric).toBe(20); // upvotes
+      expect(res.items[1].metric).toBe(7); // likes
+      // reply-author (the posting account) is surfaced for the panel.
+      expect(res.items[1].post.replyAuthor).toMatchObject({ handle: 'me', avatarUrl: 'm.png' });
+      expect(res.items[1].post.metrics.likes).toBe(7);
     });
 
-    it('scopes to a platform and applies the limit', async () => {
+    it('respects the limit after ranking', async () => {
+      const { repo, sentFindMany } = buildRepo();
+      sentFindMany.mockResolvedValue([
+        { id: 's1', opportunity: { platform: 'x', authorUsername: 'a' }, post: { analytics: xAnalytics(1), integration: null, settings: null } },
+        { id: 's2', opportunity: { platform: 'x', authorUsername: 'b' }, post: { analytics: xAnalytics(9), integration: null, settings: null } },
+        { id: 's3', opportunity: { platform: 'x', authorUsername: 'c' }, post: { analytics: xAnalytics(5), integration: null, settings: null } },
+      ]);
+
+      const res = await repo.getDashboardTopSources('org1', { limit: 2 });
+
+      expect(res.items.map((i) => i.id)).toEqual(['s2', 's3']); // top 2 by likes
+    });
+
+    it('scopes to a platform', async () => {
       const { repo, sentFindMany } = buildRepo();
       sentFindMany.mockResolvedValue([]);
 

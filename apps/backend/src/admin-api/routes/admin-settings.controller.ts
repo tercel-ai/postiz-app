@@ -108,7 +108,8 @@ export class AdminSettingsController {
       return { value: fallback, source: 'default' };
     };
 
-    const platforms = ['x', 'reddit'] as const;
+    const platforms = (process.env.ENGAGE_SUPPORTED_PLATFORMS ?? 'x,reddit')
+      .split(',').map((p) => p.trim().toLowerCase()).filter(Boolean);
     const result: Record<string, any> = {};
     for (const platform of platforms) {
       const envPrefix = platform.toUpperCase();
