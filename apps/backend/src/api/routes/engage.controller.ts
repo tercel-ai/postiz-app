@@ -566,8 +566,7 @@ export class EngageController {
   ) {
     return this._engageService.getDashboardRepliesTrend(
       org,
-      query.period as 'daily' | 'weekly' | 'monthly' | undefined,
-      query.days
+      query.period as 'daily' | 'weekly' | 'monthly' | undefined
     );
   }
 

@@ -1446,7 +1446,6 @@ Every metric (`repliesCount`, `responseRate`, `totalImpressions`, `totalTrafficS
 | Param | Type | Default | Description |
 |---|---|---|---|
 | `period` | `'daily' \| 'weekly' \| 'monthly'` | `daily` | Time aggregation granularity |
-| `days` | `number` (1–90) | `30` | Legacy trailing-window size; ignored when `period` is set |
 
 Lookback: 30 days (daily), 12 weeks (weekly), 12 months (monthly).
 

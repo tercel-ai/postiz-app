@@ -314,10 +314,9 @@ export class EngageService implements OnApplicationBootstrap {
 
   async getDashboardRepliesTrend(
     org: Organization,
-    period?: 'daily' | 'weekly' | 'monthly',
-    days?: number
+    period?: 'daily' | 'weekly' | 'monthly'
   ) {
-    return this._engageRepository.getDashboardRepliesTrend(org.id, period, days);
+    return this._engageRepository.getDashboardRepliesTrend(org.id, period);
   }
 
   async getDashboardTraffics(

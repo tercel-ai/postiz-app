@@ -446,14 +446,6 @@ export class DashboardRepliesTrendDto {
   @IsString()
   @IsIn(['daily', 'weekly', 'monthly'])
   period?: string;
-
-  // Legacy: trailing-days window. Ignored when period is set.
-  @IsOptional()
-  @Type(() => Number)
-  @IsInt()
-  @Min(1)
-  @Max(90)
-  days?: number;
 }
 
 // Panel ④ "Engage Impressions Trend" — daily/weekly/monthly impressions by platform

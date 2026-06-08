@@ -1620,12 +1620,10 @@ export class EngageRepository {
   }
 
   // Dashboard panel ② "Your Posts" overlay: Engage reply counts bucketed by
-  // period (daily/weekly/monthly). Falls back to legacy `days` window when
-  // period is omitted.
+  // period (daily/weekly/monthly).
   async getDashboardRepliesTrend(
     organizationId: string,
-    period: 'daily' | 'weekly' | 'monthly' | undefined,
-    legacyDays = 30
+    period: 'daily' | 'weekly' | 'monthly' = 'daily'
   ) {
     let rangeStart: Date;
     if (period === 'monthly') {
@@ -1633,9 +1631,7 @@ export class EngageRepository {
     } else if (period === 'weekly') {
       rangeStart = dayjs.utc().subtract(11, 'week').isoWeekday(1).startOf('day').toDate();
     } else {
-      // daily (default) or legacy days-based
-      const days = period ? 30 : legacyDays;
-      rangeStart = dayjs.utc().subtract(days - 1, 'day').startOf('day').toDate();
+      rangeStart = dayjs.utc().subtract(29, 'day').startOf('day').toDate();
     }
 
     const rows = await this._sentReply.model.engageSentReply.findMany({
@@ -1666,9 +1662,8 @@ export class EngageRepository {
         buckets.set(d, { date: d, count: 0, x: 0, reddit: 0 });
       }
     } else {
-      const days = period ? 30 : legacyDays;
-      for (let i = 0; i < days; i++) {
-        const d = dayjs.utc().subtract(days - 1 - i, 'day').format('YYYY-MM-DD');
+      for (let i = 29; i >= 0; i--) {
+        const d = dayjs.utc().subtract(i, 'day').format('YYYY-MM-DD');
         buckets.set(d, { date: d, count: 0, x: 0, reddit: 0 });
       }
     }
