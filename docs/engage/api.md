@@ -802,46 +802,61 @@ Retrieve the list of opportunities (main Signal Feed endpoint).
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `platform` | `string` | — | Platform filter: `'x'` / `'reddit'` |
-| `status` | `EngageOpportunityStatus` | — | Status filter |
-| `intent` | `IntentType` | — | Intent filter |
+| `platform` | `string \| string[]` | — | Platform filter. Multi-value (OR): `?platform=x&platform=reddit` or `?platform=x,reddit`. Max 20. |
+| `status` | `EngageOpportunityStatus \| EngageOpportunityStatus[]` | — | Status filter. Multi-value (OR): repeated params or comma-separated. Max 20. |
+| `intent` | `IntentType \| IntentType[]` | — | Intent filter. Multi-value (OR): repeated params or comma-separated. Max 20. |
 | `keyword` | `string` | — | Restrict to opportunities that matched this exact keyword (text as configured; per-org via `matchedKeywords`) |
-| `keywords` | `string[]` | — | Multi-keyword variant of `keyword`: keep opportunities that matched **any** of these exact keywords (OR). Same per-org scope (`matchedKeywords`). Accepts repeated params `?keywords=react&keywords=nextjs` **or** comma-separated `?keywords=react,nextjs` (both forms, and a mix, are supported; values are split on commas and trimmed). Combinable with `keyword` (the two sets are unioned). Max 50. |
+| `keywords` | `string[]` | — | Multi-keyword variant of `keyword`: keep opportunities that matched **any** of these exact keywords (OR). Same per-org scope (`matchedKeywords`). Accepts repeated params `?keywords=react&keywords=nextjs` **or** comma-separated `?keywords=react,nextjs`. Combinable with `keyword` (the two sets are unioned). Max 50. |
 | `date` | `'today' \| 'week'` | — | Time range |
 | `minScore` | `number` | — | Minimum total score |
 | `minScoreKeyword` | `number` | — | Minimum keyword score |
 | `minScoreHeat` | `number` | — | Minimum heat score |
 | `minScoreAuthority` | `number` | — | Minimum authority score |
-| `channels` | `string` | — | `'__all__'` = posts from any of the org's enabled monitored channels; or a specific channel id (e.g. subreddit `'SEO'`) |
-| `authors` | `string` | — | `'__all__'` = posts from any tracked account (= old `trackedOnly`); or a specific author username (case-insensitive) |
+| `channels` | `string \| string[]` | — | Channel id filter. Multi-value (OR): `?channels=SEO&channels=TECH` or `?channels=SEO,TECH`. Omit for no filter. Max 50. |
+| `authors` | `string \| string[]` | — | Author username filter (case-insensitive). Multi-value (OR): repeated params or comma-separated. Omit for no filter. Max 50. |
 | `bookmarked` | `boolean` | — | Only show bookmarked |
 | `sortBy` | `string` | `'score'` | Sort field: `score` / `scoreKeyword` / `scoreHeat` / `scoreAuthority` / `scoreRecency` / `scoreTracked` / `createdAt` |
 | `sortOrder` | `'asc' \| 'desc'` | `'desc'` | Sort direction |
 | `page` | `number` | `1` | Page number |
 | `limit` | `number` | `20` | Items per page, max 100 |
 
-**Keyword filtering examples**
+> All multi-value parameters accept two equivalent forms (and a mix):
+> - Repeated params: `?platform=x&platform=reddit`
+> - Comma-separated: `?platform=x,reddit`
+>
+> Values are split on commas and trimmed server-side. If a value legitimately
+> contains a comma, use the repeated-param form.
+
+**Filter examples**
 
 ```text
-# Single keyword (exact match on this org's matchedKeywords)
+# Single keyword
 GET /api/engage/opportunities?keyword=GEO%20SEO
 
-# Multiple keywords, OR — either form works (and a mix of the two):
-#   repeated param:
-GET /api/engage/opportunities?keywords=GEO%20SEO&keywords=AISEE&keywords=SurferSEO
-#   comma-separated (split + trimmed server-side):
+# Multiple keywords (OR)
 GET /api/engage/opportunities?keywords=GEO%20SEO,AISEE,SurferSEO
 
-# Combine with other filters (keyword set is AND-ed with platform/status/etc.)
-GET /api/engage/opportunities?keywords=GEO%20SEO,AISEE&platform=x&minScore=70
+# Multiple platforms (OR)
+GET /api/engage/opportunities?platform=x,reddit
+
+# Multiple statuses (OR)
+GET /api/engage/opportunities?status=NEW&status=AUTO_QUEUED
+
+# Multiple channels (OR)
+GET /api/engage/opportunities?channels=SEO,TECH
+
+# Multiple authors (OR)
+GET /api/engage/opportunities?authors=alice,bob
+
+# Combined — all active conditions are AND-ed together
+GET /api/engage/opportunities?keywords=GEO%20SEO,AISEE&platform=x&status=NEW,AUTO_QUEUED&minScore=70
 ```
 
 > `keyword` and `keywords` are exact matches against the keywords this org
 > configured and the post hit at scan time (`EngageOpportunityState.matchedKeywords`),
 > **not** a free-text search of the post body. For free-text content preview, use
 > `GET /api/engage/keywords/:id/posts`. Passing both `keyword` and `keywords`
-> unions the two into a single OR set. A keyword that legitimately contains a
-> comma must be sent via the repeated-param form (commas are split otherwise).
+> unions the two into a single OR set.
 
 **Response** `200 OK`
 

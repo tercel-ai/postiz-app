@@ -20,10 +20,6 @@ import { EngageOpportunityStatus } from '@prisma/client';
 
 const VALID_STRATEGIES = ['EXPERT_ANSWER', 'DATA_BACKED', 'EMPATHY_LED'] as const;
 
-// Sentinel for the `channels` / `authors` opportunity filters meaning
-// "all of this org's configured channels / tracked accounts".
-export const ENGAGE_FILTER_ALL = '__all__';
-
 // Keyword types must match the literals the scorer strict-equals (engage-scorer.ts
 // computeKeywordScore). Without this enum, lowercase / mis-cased values silently
 // store but never receive the +5/+3 brand/competitor bonus.
@@ -217,17 +213,50 @@ export class UpdateReplyAccountDto {
 // ─── Opportunities ────────────────────────────────────────────────────────────
 
 export class ListOpportunitiesDto {
+  // Multi-value: repeated params (?platform=x&platform=y) or comma-separated (?platform=x,y)
   @IsOptional()
-  @IsString()
-  platform?: string;
+  @Transform(({ value }) =>
+    value === undefined || value === null
+      ? value
+      : (Array.isArray(value) ? value : [value])
+          .flatMap((v) => String(v).split(','))
+          .map((v) => v.trim())
+          .filter((v) => v !== '')
+  )
+  @IsArray()
+  @ArrayMaxSize(20)
+  @IsString({ each: true })
+  platform?: string[];
 
+  // Multi-value: repeated params or comma-separated
   @IsOptional()
-  @IsEnum(EngageOpportunityStatus)
-  status?: EngageOpportunityStatus;
+  @Transform(({ value }) =>
+    value === undefined || value === null
+      ? value
+      : (Array.isArray(value) ? value : [value])
+          .flatMap((v) => String(v).split(','))
+          .map((v) => v.trim())
+          .filter((v) => v !== '')
+  )
+  @IsArray()
+  @ArrayMaxSize(20)
+  @IsEnum(EngageOpportunityStatus, { each: true })
+  status?: EngageOpportunityStatus[];
 
+  // Multi-value: repeated params or comma-separated
   @IsOptional()
-  @IsString()
-  intent?: string;
+  @Transform(({ value }) =>
+    value === undefined || value === null
+      ? value
+      : (Array.isArray(value) ? value : [value])
+          .flatMap((v) => String(v).split(','))
+          .map((v) => v.trim())
+          .filter((v) => v !== '')
+  )
+  @IsArray()
+  @ArrayMaxSize(20)
+  @IsString({ each: true })
+  intent?: string[];
 
   // Restrict to opportunities that matched this exact keyword (text, as the org
   // configured it). Backed by EngageOpportunityState.matchedKeywords — strictly
@@ -286,17 +315,37 @@ export class ListOpportunitiesDto {
   @Min(0)
   minScoreAuthority?: number;
 
-  // Channel filter. `__all__` (ENGAGE_FILTER_ALL) = all of this org's enabled
-  // monitored channels; any other value = that specific channel id (e.g. "SEO").
+  // Channel filter. Multi-value: repeated params or comma-separated.
+  // Omit or leave empty for no filter; specific values = those channel ids (e.g. ["SEO", "TECH"]).
   @IsOptional()
-  @IsString()
-  channels?: string;
+  @Transform(({ value }) =>
+    value === undefined || value === null
+      ? value
+      : (Array.isArray(value) ? value : [value])
+          .flatMap((v) => String(v).split(','))
+          .map((v) => v.trim())
+          .filter((v) => v !== '')
+  )
+  @IsArray()
+  @ArrayMaxSize(50)
+  @IsString({ each: true })
+  channels?: string[];
 
-  // Author filter. `__all__` = posts from any of this org's tracked accounts
-  // (i.e. scoreTracked > 0); any other value = that specific author username.
+  // Author filter. Multi-value: repeated params or comma-separated.
+  // Omit or leave empty for no filter; specific values = those author usernames.
   @IsOptional()
-  @IsString()
-  authors?: string;
+  @Transform(({ value }) =>
+    value === undefined || value === null
+      ? value
+      : (Array.isArray(value) ? value : [value])
+          .flatMap((v) => String(v).split(','))
+          .map((v) => v.trim())
+          .filter((v) => v !== '')
+  )
+  @IsArray()
+  @ArrayMaxSize(50)
+  @IsString({ each: true })
+  authors?: string[];
 
   @IsOptional()
   @Transform(({ value }) =>

@@ -228,56 +228,45 @@ describe('EngageRepository — two-table reads', () => {
       expect(stateFindMany.mock.calls[0][0].where.opportunity.deletedAt).toBeNull();
     });
 
-    it('authors=__all__ filters scoreTracked on the state table', async () => {
+    it('channels=[<specific>] filters those channel ids on the opportunity', async () => {
       const { repo, stateFindMany, stateCount } = buildRepo();
       stateFindMany.mockResolvedValue([]);
       stateCount.mockResolvedValue(0);
 
-      await repo.listOpportunities('org1', { authors: '__all__' } as any);
-      expect(stateFindMany.mock.calls[0][0].where.scoreTracked).toEqual({ gt: 0 });
-      // "all tracked" must NOT add an authorUsername filter on the opportunity.
-      expect(stateFindMany.mock.calls[0][0].where.opportunity.authorUsername).toBeUndefined();
+      await repo.listOpportunities('org1', { channels: ['SEO'] } as any);
+      expect(stateFindMany.mock.calls[0][0].where.opportunity.channelId).toEqual({ in: ['SEO'] });
     });
 
-    it('channels=<specific> filters the specific channel on the opportunity', async () => {
-      const { repo, stateFindMany, stateCount, channelFindMany } = buildRepo();
-      stateFindMany.mockResolvedValue([]);
-      stateCount.mockResolvedValue(0);
-
-      await repo.listOpportunities('org1', { channels: 'SEO' } as any);
-      expect(stateFindMany.mock.calls[0][0].where.opportunity.channelId).toBe('SEO');
-      // A specific channel must NOT trigger the org-channel-set lookup.
-      expect(channelFindMany).not.toHaveBeenCalled();
-    });
-
-    it('channels=__all__ restricts to the org enabled monitored-channel set', async () => {
-      const { repo, stateFindMany, stateCount, channelFindMany } = buildRepo();
-      channelFindMany.mockResolvedValue([{ channelId: 'SEO' }, { channelId: 'marketing' }]);
-      stateFindMany.mockResolvedValue([]);
-      stateCount.mockResolvedValue(0);
-
-      await repo.listOpportunities('org1', { channels: '__all__' } as any);
-      expect(channelFindMany.mock.calls[0][0].where).toEqual({
-        organizationId: 'org1',
-        enabled: true,
-      });
-      expect(stateFindMany.mock.calls[0][0].where.opportunity.channelId).toEqual({
-        in: ['SEO', 'marketing'],
-      });
-    });
-
-    it('authors=<specific> filters authorUsername case-insensitively on the opportunity', async () => {
+    it('channels=[multiple] filters all listed channel ids', async () => {
       const { repo, stateFindMany, stateCount } = buildRepo();
       stateFindMany.mockResolvedValue([]);
       stateCount.mockResolvedValue(0);
 
-      await repo.listOpportunities('org1', { authors: 'BobSmith' } as any);
-      expect(stateFindMany.mock.calls[0][0].where.opportunity.authorUsername).toEqual({
-        equals: 'BobSmith',
-        mode: 'insensitive',
-      });
-      // A specific author is NOT "all tracked" → no scoreTracked filter.
-      expect(stateFindMany.mock.calls[0][0].where.scoreTracked).toBeUndefined();
+      await repo.listOpportunities('org1', { channels: ['SEO', 'TECH'] } as any);
+      expect(stateFindMany.mock.calls[0][0].where.opportunity.channelId).toEqual({ in: ['SEO', 'TECH'] });
+    });
+
+    it('authors=[<specific>] filters authorUsername case-insensitively via OR', async () => {
+      const { repo, stateFindMany, stateCount } = buildRepo();
+      stateFindMany.mockResolvedValue([]);
+      stateCount.mockResolvedValue(0);
+
+      await repo.listOpportunities('org1', { authors: ['BobSmith'] } as any);
+      expect(stateFindMany.mock.calls[0][0].where.opportunity.OR).toEqual([
+        { authorUsername: { equals: 'BobSmith', mode: 'insensitive' } },
+      ]);
+    });
+
+    it('authors=[multiple] filters all listed authors via OR', async () => {
+      const { repo, stateFindMany, stateCount } = buildRepo();
+      stateFindMany.mockResolvedValue([]);
+      stateCount.mockResolvedValue(0);
+
+      await repo.listOpportunities('org1', { authors: ['Alice', 'Bob'] } as any);
+      expect(stateFindMany.mock.calls[0][0].where.opportunity.OR).toEqual([
+        { authorUsername: { equals: 'Alice', mode: 'insensitive' } },
+        { authorUsername: { equals: 'Bob', mode: 'insensitive' } },
+      ]);
     });
   });
 

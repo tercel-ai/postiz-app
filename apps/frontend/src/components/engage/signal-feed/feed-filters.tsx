@@ -3,18 +3,14 @@
 import { FC } from 'react';
 import clsx from 'clsx';
 
-// Sentinel matching the backend ENGAGE_FILTER_ALL: "all of this org's configured
-// channels / tracked accounts" (vs '' = no filter, or a specific id/username).
-export const FILTER_ALL = '__all__';
-
 export interface FeedFilters {
   platform?: string;
   minScore?: number;
   intent?: string;
   status?: string;
   bookmarked?: boolean;
-  channels?: string;   // '' | '__all__' | <channelId>
-  authors?: string;    // '' | '__all__' | <username>
+  channels?: string;
+  authors?: string;
   sortBy?: string;
   sortOrder?: 'asc' | 'desc';
 }
@@ -129,7 +125,6 @@ export const FeedFiltersBar: FC<FeedFiltersProps> = ({
           title="Filter by monitored channel"
         >
           <option value="">Any channel</option>
-          <option value={FILTER_ALL}>All monitored channels</option>
           {channelOptions.map((o) => (
             <option key={o.value} value={o.value}>
               {o.label}
@@ -147,7 +142,6 @@ export const FeedFiltersBar: FC<FeedFiltersProps> = ({
           title="Filter by tracked account"
         >
           <option value="">Any author</option>
-          <option value={FILTER_ALL}>All tracked accounts</option>
           {authorOptions.map((o) => (
             <option key={o.value} value={o.value}>
               {o.label}

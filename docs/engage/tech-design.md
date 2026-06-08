@@ -756,10 +756,10 @@ export class ConfirmManualReplyDto {
 // Uses body: { url: string } on PATCH /sent/:id/reply-url (already defined above)
 
 export class ListOpportunitiesDto {
-  // ── Basic filters ──────────────────────────────────────────────────────
-  platform?: string;    // 'x' | 'reddit' | 'youtube' | ...
-  status?: EngageOpportunityStatus;
-  intent?: string;      // filter: intentTags contains this value
+  // ── Basic filters — all multi-value (OR); accepts repeated params or comma-separated ──
+  platform?: string[];  // e.g. ['x', 'reddit']; omit = no filter; max 20
+  status?: EngageOpportunityStatus[];  // OR across statuses; max 20
+  intent?: string[];    // OR across intentTags values; max 20
   date?: 'today' | 'week';
 
   // ── Per-dimension score filters (min threshold) ────────────────────────
@@ -769,15 +769,11 @@ export class ListOpportunitiesDto {
   minScoreAuthority?: number;  // account influence
   bookmarked?:        boolean; // true = only bookmarked; false = only non-bookmarked; omit = all
 
-  // ── Source filters (channel / author) ──────────────────────────────────
-  // Each accepts the sentinel ENGAGE_FILTER_ALL ('__all__') or a specific value.
-  // channels='__all__' → posts from any of this org's enabled monitored channels
-  // channels='SEO'     → that specific channel id (e.g. subreddit)
-  // authors='__all__'  → posts from any tracked account (maps to scoreTracked > 0)
-  // authors='elonmusk' → that specific author username (case-insensitive)
-  // (Replaced the former `trackedOnly` boolean: authors='__all__' is its equivalent.)
-  channels?: string;
-  authors?:  string;
+  // ── Source filters — multi-value (OR); omit = no filter ───────────────
+  // channels: specific channel ids (e.g. ['SEO', 'TECH']); omit = all channels
+  // authors:  specific author usernames, case-insensitive (e.g. ['alice', 'bob']); omit = all authors
+  channels?: string[];  // max 50
+  authors?:  string[];  // max 50
 
   // ── Sorting ────────────────────────────────────────────────────────────
   // Default: score DESC (highest total first)
