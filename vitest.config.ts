@@ -15,6 +15,7 @@ export default defineConfig({
         'libraries/react-shared-libraries/src'
       ),
       '@gitroom/plugins': path.resolve(__dirname, 'libraries/plugins/src'),
+      '@gitroom/extension': path.resolve(__dirname, 'apps/extension/src'),
     },
   },
   test: {

@@ -16,20 +16,17 @@ const localize = false;
 
 const merge = isDev ? devManifest : ({} as ManifestV3Export);
 const { matches, ...rest } = manifest?.content_scripts?.[0] || {};
+const frontendUrl = import.meta.env?.FRONTEND_URL || process?.env?.FRONTEND_URL;
+const frontendMatch = frontendUrl ? `${frontendUrl.replace(/\/$/, '')}/*` : undefined;
+const providerMatches = ProviderList.map((p) => `${p.baseUrl}/*`);
 
 export const baseManifest = {
   ...manifest,
-  host_permissions: [
-    ...ProviderList.map((p) => p.baseUrl + '/'),
-    import.meta.env?.FRONTEND_URL || process?.env?.FRONTEND_URL + '/*',
-  ],
+  host_permissions: [...providerMatches, ...(frontendMatch ? [frontendMatch] : [])],
   permissions: [...(manifest.permissions || [])],
   content_scripts: [
     {
-      matches: ProviderList.reduce(
-        (all, p) => [...all, p.baseUrl + '/*'],
-        [import.meta.env?.FRONTEND_URL || process?.env?.FRONTEND_URL + '/*']
-      ),
+      matches: [...providerMatches, ...(frontendMatch ? [frontendMatch] : [])],
       ...rest,
     },
   ],

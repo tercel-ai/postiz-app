@@ -10,6 +10,10 @@ import {
 import { ProviderList } from '@gitroom/extension/providers/provider.list';
 import { createPortal } from 'react-dom';
 import { ActionComponent } from '@gitroom/extension/pages/content/elements/action.component';
+import {
+  installBrowserAssistedReplyBridge,
+  installXBrowserAssistedReplyRunner,
+} from '@gitroom/extension/pages/content/browser-assisted-reply';
 
 // Define a type to track elements with their action types
 interface ActionElement {
@@ -28,6 +32,11 @@ export const MainContentInner: FC = (props) => {
     return ProviderList.find((p) => {
       return p.baseUrl.indexOf(new URL(window.location.href).hostname) > -1;
     });
+  }, []);
+
+  useEffect(() => {
+    installBrowserAssistedReplyBridge();
+    installXBrowserAssistedReplyRunner();
   }, []);
 
   useEffect(() => {

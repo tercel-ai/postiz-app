@@ -113,6 +113,29 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
     }
   }, [draft, toaster]);
 
+  const openWithExtension = useCallback(() => {
+    if (!draft || !isX) return;
+
+    window.postMessage(
+      {
+        source: 'postiz',
+        action: 'postiz:extension-task',
+        task: {
+          platform: 'x',
+          type: 'reply',
+          opportunityId: opportunity.id,
+          externalPostUrl: opportunity.externalPostUrl,
+          draftContent: draft,
+        },
+      },
+      window.location.origin
+    );
+    toaster.show(
+      'Sent to the Postiz extension. If X does not open, use Open on X.',
+      'success'
+    );
+  }, [draft, isX, opportunity.externalPostUrl, opportunity.id, toaster]);
+
   const generateDraft = useCallback(async () => {
     if (streaming) {
       abortRef.current?.abort();
@@ -536,6 +559,13 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
               <div className="mt-2 space-y-2">
                 {xManualStep === 'draft' ? (
                   <>
+                    <button
+                      onClick={openWithExtension}
+                      disabled={!draft}
+                      className="w-full py-2 text-sm bg-purple-600 hover:bg-purple-700 disabled:bg-gray-700 disabled:text-gray-500 text-white rounded-lg font-medium transition-colors"
+                    >
+                      Open with Postiz Extension
+                    </button>
                     <div className="flex items-center gap-2">
                       <button
                         onClick={copyDraft}

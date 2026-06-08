@@ -21,6 +21,12 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
     });
   }
 
+  if (request.action === 'openTab') {
+    chrome.tabs.create({ url: request.url }, function (tab) {
+      sendResponse({ success: true, tabId: tab?.id });
+    });
+  }
+
   if (request.action === 'loadCookie') {
     chrome.cookies.get(
       {

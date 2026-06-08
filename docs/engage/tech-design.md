@@ -1532,7 +1532,7 @@ async generateDraft(
 
 ---
 
-## 7. X API Integration
+## 7. X API and Browser-Assisted X Replies
 
 ### 7.1 Sending a Reply via Post Pipeline
 
@@ -1610,6 +1610,27 @@ export type PostSource = (typeof VALID_POST_SOURCES)[number];
 @IsIn(VALID_POST_SOURCES as unknown as string[])
 source?: PostSource;
 ```
+
+### 7.1.1 Browser-Assisted Reply Fallback
+
+Some X API access tiers reject replies to other users' posts even when the user can reply manually in the browser. Engage therefore supports a browser-assisted fallback that uses the user's local Postiz browser extension session instead of storing platform cookies or attempting server-side browser automation.
+
+Phase 1 is intentionally semi-automated:
+
+1. The Reply Panel sends a `postiz:extension-task` window message with `{ platform: 'x', type: 'reply', externalPostUrl, draftContent }`.
+2. The extension content script running on the Postiz frontend stores the pending task in `chrome.storage.local` and opens the X post URL in a normal browser tab.
+3. The extension content script running on X reads the pending task, opens the reply composer when needed, and inserts the draft into X's contenteditable composer.
+4. The user performs the final platform action by clicking X's Reply button.
+5. Engage status and metrics tracking continue to use the existing manual-reply flow: the user records the reply URL through `/engage/opportunities/:id/manual-reply` or the Sent page URL backfill UI.
+
+Non-goals for this phase:
+
+- No server-side platform cookie collection.
+- No hidden automatic final-submit click.
+- No database task queue or new Engage state transition.
+- No replacement of the existing X API send/schedule path.
+
+This design keeps the first release compatible with the existing Engage state model while removing the most repetitive manual steps. A later phase can add a durable browser task queue and automatic release URL capture once the extension behavior is stable across X DOM changes.
 
 ### 7.2 Keyword Search
 
@@ -1932,6 +1953,26 @@ async function generateDraft(
   setGenerating(false);
 }
 ```
+
+### 10.6 Reply Panel — Browser-Assisted X Reply
+
+For X opportunities, the manual backfill block exposes an extension-assisted action when the user has a draft:
+
+```typescript
+window.postMessage({
+  source: 'postiz',
+  action: 'postiz:extension-task',
+  task: {
+    platform: 'x',
+    type: 'reply',
+    opportunityId,
+    externalPostUrl,
+    draftContent,
+  },
+}, window.location.origin);
+```
+
+The frontend treats this as a best-effort local automation request. If no extension handles the message, the existing Copy Draft + Open on X controls remain the fallback. The extension must validate the message origin and task shape before storing it.
 
 ---
 
