@@ -1439,28 +1439,32 @@ Every metric (`repliesCount`, `responseRate`, `totalImpressions`, `totalTrafficS
 
 ### GET `/api/engage/dashboard/replies-trend`
 
-**Panel ② — "Your Posts" chart overlay.** Daily engage reply counts over a trailing window, for the lime overlay bars on the existing posts chart.
+**Panel ② — "Your Posts" chart overlay.** Engage reply counts bucketed by period, for the lime overlay bars on the existing posts chart.
 
 **Query Params**
 
 | Param | Type | Default | Description |
 |---|---|---|---|
-| `days` | `number` (1–90) | `30` | Size of the trailing window (inclusive of today) |
+| `period` | `'daily' \| 'weekly' \| 'monthly'` | `daily` | Time aggregation granularity |
+| `days` | `number` (1–90) | `30` | Legacy trailing-window size; ignored when `period` is set |
+
+Lookback: 30 days (daily), 12 weeks (weekly), 12 months (monthly).
 
 **Response** `200 OK`
 
 ```json
 {
-  "days": 30,
+  "period": "daily",
   "items": [
     { "date": "2026-04-30", "count": 0, "x": 0, "reddit": 0 },
     { "date": "2026-05-01", "count": 3, "x": 2, "reddit": 1 }
-    // ... one entry per day, zero-filled, oldest → newest, including today
+    // ... one entry per bucket, zero-filled, oldest → newest
   ]
 }
 ```
 
-- Buckets are keyed by `Post.publishDate` in UTC (`YYYY-MM-DD`) and seeded for every day in the window so the chart is continuous.
+- Date format: `YYYY-MM-DD` (daily/weekly — ISO week Monday), `YYYY-MM` (monthly).
+- Buckets are pre-seeded for every slot in the window so the chart is continuous with no gaps.
 - Includes **today**, which the daily `EngageDataTicks` aggregate does not yet cover.
 
 ---
@@ -1524,7 +1528,7 @@ Lookback: 30 days (daily), 90 days (weekly), 365 days (monthly).
 - `value` is SUM(Post.impressions) for posts with `source = 'engage'` on that platform in that time bucket.
 - Data comes directly from the Post table (written by `engageMetricsSyncWorkflow`), not DataTicks.
 - Only dates with actual impressions appear; no zero-fill is applied. The chart component handles gaps.
-- Weekly period uses ISO week Monday dates; monthly uses YYYY-MM format.
+- Date format: `YYYY-MM-DD` (daily/weekly — ISO week Monday), `YYYY-MM` (monthly).
 
 ---
 

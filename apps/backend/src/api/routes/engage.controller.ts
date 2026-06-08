@@ -564,7 +564,11 @@ export class EngageController {
     @GetOrgFromRequest() org: Organization,
     @Query() query: DashboardRepliesTrendDto
   ) {
-    return this._engageService.getDashboardRepliesTrend(org, query.days);
+    return this._engageService.getDashboardRepliesTrend(
+      org,
+      query.period as 'daily' | 'weekly' | 'monthly' | undefined,
+      query.days
+    );
   }
 
   // Panel ③ "Traffic from Engage": total traffic index + per-reply breakdown.

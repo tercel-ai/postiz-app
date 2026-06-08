@@ -1619,12 +1619,24 @@ export class EngageRepository {
     };
   }
 
-  // Dashboard panel ② "Your Posts" overlay: Engage reply counts bucketed by the
-  // day they were published, over a trailing window. Every day in the window is
-  // seeded so the chart has continuous (zero-filled) buckets. Includes today,
-  // which the daily EngageDataTicks aggregate does not yet cover.
-  async getDashboardRepliesTrend(organizationId: string, days = 30) {
-    const rangeStart = dayjs.utc().subtract(days - 1, 'day').startOf('day').toDate();
+  // Dashboard panel ② "Your Posts" overlay: Engage reply counts bucketed by
+  // period (daily/weekly/monthly). Falls back to legacy `days` window when
+  // period is omitted.
+  async getDashboardRepliesTrend(
+    organizationId: string,
+    period: 'daily' | 'weekly' | 'monthly' | undefined,
+    legacyDays = 30
+  ) {
+    let rangeStart: Date;
+    if (period === 'monthly') {
+      rangeStart = dayjs.utc().subtract(11, 'month').startOf('month').toDate();
+    } else if (period === 'weekly') {
+      rangeStart = dayjs.utc().subtract(11, 'week').isoWeekday(1).startOf('day').toDate();
+    } else {
+      // daily (default) or legacy days-based
+      const days = period ? 30 : legacyDays;
+      rangeStart = dayjs.utc().subtract(days - 1, 'day').startOf('day').toDate();
+    }
 
     const rows = await this._sentReply.model.engageSentReply.findMany({
       where: {
@@ -1641,21 +1653,48 @@ export class EngageRepository {
       string,
       { date: string; count: number; x: number; reddit: number }
     >();
-    for (let i = 0; i < days; i++) {
-      const d = dayjs.utc().subtract(days - 1 - i, 'day').format('YYYY-MM-DD');
-      buckets.set(d, { date: d, count: 0, x: 0, reddit: 0 });
+
+    // Pre-seed continuous buckets so chart has zero-filled slots.
+    if (period === 'monthly') {
+      for (let i = 11; i >= 0; i--) {
+        const d = dayjs.utc().subtract(i, 'month').format('YYYY-MM');
+        buckets.set(d, { date: d, count: 0, x: 0, reddit: 0 });
+      }
+    } else if (period === 'weekly') {
+      for (let i = 11; i >= 0; i--) {
+        const d = dayjs.utc().subtract(i, 'week').isoWeekday(1).format('YYYY-MM-DD');
+        buckets.set(d, { date: d, count: 0, x: 0, reddit: 0 });
+      }
+    } else {
+      const days = period ? 30 : legacyDays;
+      for (let i = 0; i < days; i++) {
+        const d = dayjs.utc().subtract(days - 1 - i, 'day').format('YYYY-MM-DD');
+        buckets.set(d, { date: d, count: 0, x: 0, reddit: 0 });
+      }
     }
+
     for (const r of rows) {
       if (!r.post?.publishDate) continue;
-      const d = dayjs.utc(r.post.publishDate).format('YYYY-MM-DD');
-      const b = buckets.get(d);
+      const d = dayjs.utc(r.post.publishDate);
+      let dateKey: string;
+      switch (period) {
+        case 'monthly':
+          dateKey = d.format('YYYY-MM');
+          break;
+        case 'weekly':
+          dateKey = d.isoWeekday(1).format('YYYY-MM-DD');
+          break;
+        default:
+          dateKey = d.format('YYYY-MM-DD');
+      }
+      const b = buckets.get(dateKey);
       if (!b) continue;
       b.count++;
       if (r.opportunity.platform === 'reddit') b.reddit++;
       else b.x++;
     }
 
-    return { days, items: [...buckets.values()] };
+    return { period: period ?? 'daily', items: [...buckets.values()] };
   }
 
   // Dashboard panel ③ "Traffic from Engage": total traffic index (clicks) plus a

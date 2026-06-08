@@ -440,8 +440,14 @@ export class DashboardSummaryDto {
   date?: string;
 }
 
-// Panel ② "Your Posts" overlay — daily Engage reply counts over a trailing window.
+// Panel ② "Your Posts" overlay — Engage reply counts bucketed by period.
 export class DashboardRepliesTrendDto {
+  @IsOptional()
+  @IsString()
+  @IsIn(['daily', 'weekly', 'monthly'])
+  period?: string;
+
+  // Legacy: trailing-days window. Ignored when period is set.
   @IsOptional()
   @Type(() => Number)
   @IsInt()
