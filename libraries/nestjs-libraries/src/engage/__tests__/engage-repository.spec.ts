@@ -204,9 +204,10 @@ describe('EngageRepository — two-table reads', () => {
       stateCount.mockResolvedValue(0);
 
       await repo.listOpportunities('org1', { sortBy: 'scoreHeat', sortOrder: 'desc' } as any);
-      expect(stateFindMany.mock.calls[0][0].orderBy).toEqual({
-        opportunity: { scoreHeat: 'desc' },
-      });
+      expect(stateFindMany.mock.calls[0][0].orderBy).toEqual([
+        { opportunity: { scoreHeat: 'desc' } },
+        { createdAt: 'desc' },
+      ]);
     });
 
     it('routes a state-owned sort field as a top-level column', async () => {
@@ -215,7 +216,19 @@ describe('EngageRepository — two-table reads', () => {
       stateCount.mockResolvedValue(0);
 
       await repo.listOpportunities('org1', { sortBy: 'score', sortOrder: 'desc' } as any);
-      expect(stateFindMany.mock.calls[0][0].orderBy).toEqual({ score: 'desc' });
+      expect(stateFindMany.mock.calls[0][0].orderBy).toEqual([
+        { score: 'desc' },
+        { createdAt: 'desc' },
+      ]);
+    });
+
+    it('omits the tiebreaker when the primary sort is already createdAt', async () => {
+      const { repo, stateFindMany, stateCount } = buildRepo();
+      stateFindMany.mockResolvedValue([]);
+      stateCount.mockResolvedValue(0);
+
+      await repo.listOpportunities('org1', { sortBy: 'createdAt', sortOrder: 'desc' } as any);
+      expect(stateFindMany.mock.calls[0][0].orderBy).toEqual({ createdAt: 'desc' });
     });
 
     it('scopes the query to the org via the state table', async () => {
