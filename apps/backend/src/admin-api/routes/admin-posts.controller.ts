@@ -32,6 +32,7 @@ export class AdminPostsController {
       state: query.state,
       integrationId: query.integrationId,
       channel: query.channel,
+      source: query.source,
       sortBy: query.sortBy,
       sortOrder: query.sortOrder,
     });

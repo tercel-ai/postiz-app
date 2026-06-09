@@ -30,6 +30,31 @@ function displayToUnit(display: 'day' | 'week' | 'month'): 'day' | 'isoWeek' | '
   return 'month';
 }
 
+/**
+ * Flatten a stored `Post.analytics` value (an AnalyticsData[] of
+ * `{ label, data: [{ total, date }] }`) into a plain `{ label: number }` map,
+ * taking each metric's latest `total`. Returns null when there is no analytics
+ * payload. Used by the admin list to expose metrics as key/value pairs without
+ * making callers walk the nested array. Example outputs:
+ *   Reddit → { score: 1, comments: 0 }
+ *   X      → { Impressions: 100, Likes: 2, Retweets: 0, Replies: 1, ... }
+ */
+function flattenAnalytics(analytics: unknown): Record<string, number> | null {
+  if (!Array.isArray(analytics)) return null;
+  const out: Record<string, number> = {};
+  for (const entry of analytics as Array<{
+    label?: unknown;
+    data?: Array<{ total?: string | number }>;
+  }>) {
+    if (!entry || typeof entry.label !== 'string') continue;
+    const data = Array.isArray(entry.data) ? entry.data : [];
+    const last = data[data.length - 1];
+    const n = Number(last?.total);
+    out[entry.label] = Number.isFinite(n) ? n : 0;
+  }
+  return out;
+}
+
 @Injectable()
 export class PostsRepository {
   constructor(
@@ -133,8 +158,8 @@ export class PostsRepository {
     });
   }
 
-  getPostByIdForAdmin(id: string) {
-    return this._post.model.post.findUnique({
+  async getPostByIdForAdmin(id: string) {
+    const post = await this._post.model.post.findUnique({
       where: { id, deletedAt: null },
       select: {
         id: true,
@@ -151,6 +176,10 @@ export class PostsRepository {
         delay: true,
         intervalInDays: true,
         organizationId: true,
+        source: true,
+        impressions: true,
+        trafficScore: true,
+        analytics: true,
         tags: { select: { tag: true } },
         integration: {
           select: {
@@ -174,6 +203,10 @@ export class PostsRepository {
         },
       },
     });
+    if (!post) return post;
+    // Same flattening as the admin list: expose metrics as a { label: value }
+    // map alongside the raw `analytics` array. See flattenAnalytics.
+    return { ...post, metrics: flattenAnalytics(post.analytics) };
   }
 
   async getAllPostsList(query: GetPostsListDto & { organizationId?: string | string[] }) {
@@ -198,6 +231,7 @@ export class PostsRepository {
       ...(query.channel?.length
         ? { integration: { providerIdentifier: { in: query.channel } } }
         : {}),
+      ...(query.source?.length ? { source: { in: query.source } } : {}),
     };
 
     const [results, total] = await Promise.all([
@@ -214,6 +248,10 @@ export class PostsRepository {
           state: true,
           group: true,
           organizationId: true,
+          source: true,
+          impressions: true,
+          trafficScore: true,
+          analytics: true,
           tags: {
             select: { tag: true },
           },
@@ -247,6 +285,11 @@ export class PostsRepository {
     return {
       results: results.map(({ organization, ...item }) => ({
         ...item,
+        // `item.analytics` is the raw stored AnalyticsData[]; `metrics` is the
+        // same data flattened into a { label: value } map so callers get plain
+        // key/value pairs (Reddit { score: 1, comments: 0 }, X { Impressions:
+        // 100, Likes: 2, ... }) without walking the nested array.
+        metrics: flattenAnalytics(item.analytics),
         organization: {
           id: organization.id,
           name: organization.name,

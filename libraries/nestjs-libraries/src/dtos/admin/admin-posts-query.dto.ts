@@ -2,6 +2,7 @@ import { ArrayMaxSize, IsArray, IsEnum, IsIn, IsInt, IsOptional, IsString, Max, 
 import { Transform, Type } from 'class-transformer';
 import { State } from '@prisma/client';
 import { VALID_CHANNELS, Channel } from '../posts/get.posts-list.dto';
+import { VALID_POST_SOURCES, PostSource } from '../posts/post-source';
 
 export class AdminPostsQueryDto {
   @IsOptional()
@@ -50,6 +51,20 @@ export class AdminPostsQueryDto {
     )
   )
   channel?: Channel[];
+
+  // Filter by Post.source. Single value ('engage') or comma-separated
+  // ('calendar,chat'); omitting it returns all sources. Mirrors GetPostsListDto.
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(VALID_POST_SOURCES.length)
+  @IsString({ each: true })
+  @IsIn(VALID_POST_SOURCES as unknown as string[], { each: true })
+  @Transform(({ value }) =>
+    (Array.isArray(value) ? value : [value]).flatMap((v: string) =>
+      v.includes(',') ? v.split(',') : [v]
+    )
+  )
+  source?: PostSource[];
 
   @IsOptional()
   @IsIn(['publishDate', 'createdAt', 'updatedAt', 'state'])
