@@ -222,13 +222,16 @@ describe('EngageRepository — two-table reads', () => {
       ]);
     });
 
-    it('omits the tiebreaker when the primary sort is already createdAt', async () => {
+    it('breaks createdAt-sorted ties by highest score', async () => {
       const { repo, stateFindMany, stateCount } = buildRepo();
       stateFindMany.mockResolvedValue([]);
       stateCount.mockResolvedValue(0);
 
       await repo.listOpportunities('org1', { sortBy: 'createdAt', sortOrder: 'desc' } as any);
-      expect(stateFindMany.mock.calls[0][0].orderBy).toEqual({ createdAt: 'desc' });
+      expect(stateFindMany.mock.calls[0][0].orderBy).toEqual([
+        { createdAt: 'desc' },
+        { score: 'desc' },
+      ]);
     });
 
     it('scopes the query to the org via the state table', async () => {

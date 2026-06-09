@@ -834,12 +834,14 @@ export class EngageRepository {
     const primaryOrderBy = oppSortFields.has(sortBy)
       ? { opportunity: { [sortBy]: sortOrder } }
       : { [sortBy]: sortOrder };
-    // Apply a stable tiebreaker so equal primary-sort values (e.g. tied scores)
-    // fall back to newest-first. Skip when the primary sort is already createdAt.
-    const orderBy =
+    // Apply a stable tiebreaker so equal primary-sort values fall back to a
+    // deterministic order: createdAt-sorted lists break ties by highest score,
+    // every other sort breaks ties by newest-first.
+    const tiebreaker =
       sortBy === 'createdAt'
-        ? primaryOrderBy
-        : [primaryOrderBy, { createdAt: 'desc' as const }];
+        ? { score: 'desc' as const }
+        : { createdAt: 'desc' as const };
+    const orderBy = [primaryOrderBy, tiebreaker];
 
     const [rows, total] = await Promise.all([
       this._oppState.model.engageOpportunityState.findMany({
