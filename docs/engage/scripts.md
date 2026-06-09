@@ -27,6 +27,7 @@ by **when you reach for them** and lists the flags/env you actually need.
 | `sync-engage-x-metrics.ts` | X-only live metric fetch / probe | dry-run | ts-node |
 | `backfill-engage-x-integration.ts` | Fill `Post.integrationId` for X replies | dry-run | ts-node |
 | `engage-diagnose-x-reply.ts` | Explain why an X reply has no metrics | read-only | ts-node |
+| `engage-fetch-raw.ts` | Raw fetch of ONE post's reply (回帖) + original (原帖) data via shared workflow funcs | read-only | ts-node |
 | `ingest-engage-post.ts` | Manually inject one X post into the pool | **writes** | ts-node |
 | `cleanup-engage-opportunities.ts` | Soft-delete un-repliable opportunities | list/check | tsx |
 | `backfill-engage-data-ticks.ts` | Rebuild `EngageDataTicks` from `Post` | dry-run | ts-node |
