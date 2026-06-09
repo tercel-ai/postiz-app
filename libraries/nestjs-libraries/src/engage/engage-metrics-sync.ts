@@ -91,9 +91,16 @@ export async function syncRedditMetrics(
       try {
         const [, subreddit, threadId] = threadMatch;
         const threadToken = await getRedditToken();
+        // depth MUST be >= 2: with `comment=<id>` the target comment is the tree
+        // root (level 1), so its OWN direct replies live at level 2. depth=1 only
+        // returns the comment itself with its replies collapsed into a "more"
+        // continuation stub (count=0) — which made safeComments always 0 and broke
+        // the author-replied check for every reply that actually had replies.
+        // limit=100 keeps a comment with many direct replies from overflowing into
+        // a "more" stub (we only count the first level, so depth=2 is enough).
         const threadUrl = threadToken
-          ? `https://oauth.reddit.com/r/${subreddit}/comments/${threadId}?comment=${commentId}&depth=1&limit=25`
-          : `https://www.reddit.com/r/${subreddit}/comments/${threadId}/.json?comment=${commentId}&depth=1&limit=25`;
+          ? `https://oauth.reddit.com/r/${subreddit}/comments/${threadId}?comment=${commentId}&depth=2&limit=100`
+          : `https://www.reddit.com/r/${subreddit}/comments/${threadId}/.json?comment=${commentId}&depth=2&limit=100`;
         const threadRes = await fetchReddit(threadUrl, threadToken);
         if (threadRes.ok) {
           const threadJson = JSON.parse(await threadRes.text()) as Array<{

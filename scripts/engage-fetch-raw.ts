@@ -58,7 +58,7 @@ import {
   type MetricsSyncOutcome,
 } from '@gitroom/nestjs-libraries/engage/engage-metrics-sync';
 import { getRedditToken, redditAuthHeaders } from '@gitroom/nestjs-libraries/engage/reddit-auth';
-import { redditPublicGet } from '@gitroom/nestjs-libraries/engage/reddit-loid';
+import { redditPublicGet, clearRedditLoidCache } from '@gitroom/nestjs-libraries/engage/reddit-loid';
 import { parseRedditCommentId } from '@gitroom/nestjs-libraries/engage/reddit-url';
 import { parseXTweetId } from '@gitroom/nestjs-libraries/engage/x-tweet';
 
@@ -68,13 +68,14 @@ class ScriptModule {}
 interface CliArgs {
   postId: string | null;
   sentReplyId: string | null;
+  url: string | null;
   doReply: boolean;
   write: boolean;
 }
 
 function parseArgs(): CliArgs {
   const args = process.argv.slice(2);
-  const out: CliArgs = { postId: null, sentReplyId: null, doReply: true, write: false };
+  const out: CliArgs = { postId: null, sentReplyId: null, url: null, doReply: true, write: false };
   const need = (i: number, flag: string): string => {
     const v = args[i];
     if (!v) { console.error(`${flag} requires a value`); process.exit(1); }
@@ -84,10 +85,15 @@ function parseArgs(): CliArgs {
     switch (args[i]) {
       case '--post': out.postId = need(++i, '--post'); break;
       case '--reply': case '--id': out.sentReplyId = need(++i, '--reply'); break;
+      case '--url': out.url = need(++i, '--url'); break;
       case '--no-reply': out.doReply = false; break;
       case '--write': out.write = true; break;
       case '--help':
-        console.log('Usage: engage-fetch-raw.ts (--post <postId> | --reply <sentReplyId>) [--no-reply] [--write]');
+        console.log(
+          'Usage: engage-fetch-raw.ts (--post <id> | --reply <id> | --url <postUrl>) [--no-reply] [--write]\n' +
+          '  --url tests the RAW platform interface directly — no DB, no Nest. Accepts a\n' +
+          '        Reddit post/comment URL or an X status URL (also a t1_/t3_ fullname).'
+        );
         process.exit(0);
         break;
       default:
@@ -95,11 +101,48 @@ function parseArgs(): CliArgs {
         process.exit(1);
     }
   }
-  if (!out.postId && !out.sentReplyId) {
-    console.error('Specify --post <postId> or --reply <sentReplyId>');
+  if (!out.postId && !out.sentReplyId && !out.url) {
+    console.error('Specify --post <postId> | --reply <sentReplyId> | --url <postUrl>');
     process.exit(1);
   }
   return out;
+}
+
+/**
+ * --url mode: hit the RAW platform interface for an arbitrary URL, no DB / no
+ * NestJS. Reddit → /api/info for the comment (t1) and/or post (t3) in the URL;
+ * X → singleTweet for the status id. Use it on the server to audit raw fields
+ * when you have no matching local engage row.
+ */
+async function probeUrl(rawUrl: string): Promise<void> {
+  console.log(`=== RAW interface probe (no DB) ===\n  url = ${rawUrl}\n`);
+
+  // X status URL or tweet id.
+  const tweetId = parseXTweetId(rawUrl);
+  if (tweetId || /^\d{6,}$/.test(rawUrl.trim())) {
+    const id = tweetId ?? rawUrl.trim();
+    const client = await getAppOnlyXClient();
+    if (client) await rawXTweet(client, id, 'tweet');
+    return;
+  }
+
+  // Reddit fullname passed directly (t1_xxx / t3_xxx).
+  const fullname = rawUrl.trim().match(/^(t[13]_[a-z0-9]+)$/i)?.[1];
+  if (fullname) { await rawRedditInfo(fullname, fullname.startsWith('t1') ? 'comment' : 'post'); return; }
+
+  // Reddit URL → derive subreddit, comment (t1) and/or post (t3) ids.
+  const subreddit = rawUrl.match(/\/r\/([^/]+)\//)?.[1];
+  const commentId = parseRedditCommentId(rawUrl);
+  const threadId = rawUrl.match(/\/comments\/([a-z0-9]+)\b/)?.[1];
+  if (commentId) {
+    await rawRedditInfo(`t1_${commentId}`, 'REPLY comment (回帖)');
+    // The "how many replied to us" count — the second fetch the workflow makes.
+    if (subreddit && threadId) await rawRedditChildReplies(subreddit, threadId, commentId);
+  }
+  if (threadId) await rawRedditInfo(`t3_${threadId}`, 'ORIGINAL post (原帖)');
+  if (!commentId && !threadId && !tweetId) {
+    console.log('  ⚠ Unrecognized URL — expected a Reddit /comments/… link or an X /status/… link.');
+  }
 }
 
 function dump(label: string, value: unknown): void {
@@ -140,38 +183,158 @@ async function rawXTweet(client: TwitterApi, tweetId: string, what: string): Pro
   }
 }
 
-/** Raw Reddit /api/info read for a fullname (t1_<comment> or t3_<post>). */
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Raw Reddit /api/info read for a fullname (t1_<comment> or t3_<post>).
+ * Dumps the FULL untouched response so you can audit every field Reddit returns
+ * vs. what we extract (score / num_comments). Prefers the OAuth path (no WAF)
+ * when REDDIT_CLIENT_ID/SECRET are set; otherwise the public loid path, retried
+ * with a fresh loid on a 403/timeout (the Cloudflare WAF is intermittent).
+ */
+async function fetchRedditRaw(
+  publicUrl: string,
+  oauthUrl: string
+): Promise<{ status: number; body: string; viaOAuth: boolean } | null> {
+  const token = await getRedditToken();
+  const url = token ? oauthUrl : publicUrl;
+  console.log(`  ${token ? 'OAuth (no WAF)' : 'public (loid/WAF — flaky)'} GET ${url}`);
+  const MAX = token ? 1 : 4;
+  let body = '';
+  let status = 0;
+  for (let attempt = 1; attempt <= MAX; attempt++) {
+    try {
+      if (token) {
+        const r = await fetch(url, { headers: redditAuthHeaders(token) });
+        status = r.status; body = await r.text();
+      } else {
+        if (attempt > 1) clearRedditLoidCache(); // re-mint loid between tries
+        const r = await redditPublicGet(url, {}, { log: (m) => console.warn(`  ${m}`) });
+        status = r.status; body = await r.text();
+      }
+    } catch (err: any) {
+      console.log(`  attempt ${attempt}/${MAX} → ERROR: ${err?.message || err}`);
+      if (attempt < MAX) { await sleep(1500); continue; }
+      return null;
+    }
+    if (status >= 200 && status < 300) return { status, body, viaOAuth: !!token };
+    console.log(`  attempt ${attempt}/${MAX} → HTTP ${status}${status === 403 ? ' (WAF block)' : ''}`);
+    if (attempt < MAX) { await sleep(1500); continue; }
+    console.log(`  body (first 300): ${body.slice(0, 300)}`);
+    return null;
+  }
+  return null;
+}
+
 async function rawRedditInfo(fullname: string, what: string): Promise<void> {
   console.log(`\n── RAW Reddit ${what} (${fullname}) ──`);
-  try {
-    const token = await getRedditToken();
-    const url = token
-      ? `https://oauth.reddit.com/api/info?id=${fullname}`
-      : `https://www.reddit.com/api/info.json?id=${fullname}`;
-    console.log(`  ${token ? 'OAuth' : 'public(loid/WAF)'} GET ${url}`);
-    const res = token
-      ? await fetch(url, { headers: redditAuthHeaders(token) }).then((r) => ({
-          ok: r.ok, status: r.status, text: () => r.text(),
-        }))
-      : await redditPublicGet(url, {}, { log: (m) => console.warn(`  ${m}`) });
-    console.log(`  → HTTP ${res.status}`);
-    const body = await res.text();
-    if (!res.ok) { console.log(`  body: ${body.slice(0, 500)}`); return; }
-    const json = JSON.parse(body);
-    const data = json?.data?.children?.[0]?.data;
-    if (!data) { console.log('  → empty (deleted / not found).'); return; }
-    dump('  thing.data', data);
-    console.log(
-      `  KEY → score=${data.score} ups=${data.ups} num_comments=${data.num_comments ?? '(n/a for t1)'} ` +
-      `removed=${data.removed ?? '?'} author=${data.author}`
-    );
-  } catch (err: any) {
-    console.log(`  → ERROR: ${err?.message || err}`);
+  const res = await fetchRedditRaw(
+    `https://www.reddit.com/api/info.json?id=${fullname}`,
+    `https://oauth.reddit.com/api/info?id=${fullname}`
+  );
+  if (!res) return;
+  console.log(`  → HTTP ${res.status} OK`);
+  let json: any;
+  try { json = JSON.parse(res.body); }
+  catch { console.log(`  → non-JSON body (first 300): ${res.body.slice(0, 300)}`); return; }
+
+  const data = json?.data?.children?.[0]?.data;
+  if (!data) {
+    console.log('  → empty Listing (deleted / not found). Full response:');
+    dump('  raw', json);
+    return;
   }
+  // FULL field dump — every key Reddit returned for this thing.
+  dump('  FULL thing.data', data);
+  console.log(`  thing.kind = ${json.data.children[0].kind}  (t1=comment, t3=post)`);
+  console.log(`  field count = ${Object.keys(data).length}`);
+  console.log(
+    `  WE EXTRACT → score=${data.score}  num_comments=${data.num_comments ?? '(n/a — t1 comments come from the thread fetch)'}\n` +
+    `  context     ups=${data.ups} downs=${data.downs} upvote_ratio=${data.upvote_ratio ?? '-'} ` +
+    `removed=${data.removed ?? '?'} removed_by_category=${data.removed_by_category ?? '-'} ` +
+    `locked=${data.locked ?? '-'} author=${data.author}`
+  );
+}
+
+/**
+ * "How many people replied to OUR comment?" — the answer /api/info CANNOT give
+ * (it returns replies:""). This is the SECOND fetch syncRedditMetrics makes: the
+ * comment-tree endpoint with ?comment=<id>&depth=1, whose `replies` Listing holds
+ * the direct child comments. We count exactly as the workflow does:
+ *   childReplies.filter(r => r.kind !== 'more').length
+ * Note depth=1 loads direct replies; deeper / overflow replies appear as a `more`
+ * node (count shown) and are intentionally NOT counted.
+ */
+/** Recursively count t1 descendants and flag any unexpanded "more" stubs. */
+function countReplyTree(children: Array<{ kind?: string; data?: any }>): {
+  direct: number;
+  total: number;
+  moreStubs: number;
+  directNodes: Array<{ author?: string; score?: number; body?: string }>;
+} {
+  const directNodes = children
+    .filter((c) => c.kind === 't1')
+    .map((c) => ({ author: c.data?.author, score: c.data?.score, body: c.data?.body }));
+  let total = 0;
+  let moreStubs = 0;
+  const walk = (nodes: Array<{ kind?: string; data?: any }>): void => {
+    for (const n of nodes) {
+      if (n.kind === 'more') { moreStubs++; continue; }
+      if (n.kind !== 't1') continue;
+      total++;
+      const sub = n.data?.replies;
+      if (sub && sub !== '' && sub.data?.children) walk(sub.data.children);
+    }
+  };
+  walk(children);
+  return { direct: directNodes.length, total, moreStubs, directNodes };
+}
+
+async function rawRedditChildReplies(
+  subreddit: string,
+  threadId: string,
+  commentId: string
+): Promise<void> {
+  console.log(`\n── RAW Reddit CHILD REPLIES under t1_${commentId} (thread fetch — depth=10) ──`);
+  // depth must be >= 2 to load the target comment's OWN replies: with comment=<id>
+  // the comment is the root (level 1), so its direct replies live at level 2.
+  // Production syncRedditMetrics uses depth=1 — which is why it under-counts to 0.
+  const res = await fetchRedditRaw(
+    `https://www.reddit.com/r/${subreddit}/comments/${threadId}/.json?comment=${commentId}&depth=10&limit=100`,
+    `https://oauth.reddit.com/r/${subreddit}/comments/${threadId}?comment=${commentId}&depth=10&limit=100`
+  );
+  if (!res) return;
+  let thread: any;
+  try { thread = JSON.parse(res.body); }
+  catch { console.log(`  → non-JSON body (first 300): ${res.body.slice(0, 300)}`); return; }
+
+  const node = thread?.[1]?.data?.children?.[0]?.data;
+  const repliesField = node?.replies;
+  if (!repliesField || repliesField === '') {
+    console.log('  → replies: "" — Reddit reports NO replies under this comment.');
+    console.log('  DIRECT replies = 0');
+    return;
+  }
+  const children: Array<{ kind?: string; data?: any }> = repliesField?.data?.children ?? [];
+  const { direct, total, moreStubs, directNodes } = countReplyTree(children);
+  directNodes.forEach((c, i) =>
+    console.log(`    ${i + 1}. u/${c.author}  score=${c.score}  "${String(c.body ?? '').slice(0, 70).replace(/\s+/g, ' ')}"`)
+  );
+  console.log(`  DIRECT replies (people who replied to us): ${direct}`);
+  console.log(`  TOTAL descendants (whole sub-thread): ${total}` + (moreStubs ? `  (${moreStubs} "more" stub(s) still unexpanded)` : ''));
+  console.log(`  ⚠ production syncRedditMetrics uses depth=1 → it would count ${0} here (BUG: should be ${direct}).`);
 }
 
 async function main(): Promise<void> {
   const args = parseArgs();
+
+  // --url mode: pure raw-interface probe, no DB / no NestJS. Returns early.
+  if (args.url) {
+    await probeUrl(args.url);
+    console.log('\n=== Done ===');
+    return;
+  }
+
   const prisma = new PrismaClient();
 
   console.log('=== Engage RAW Fetch Diagnostic ===\n');
@@ -300,10 +463,13 @@ async function main(): Promise<void> {
     }
   }
 
-  // ---- 2) ORIGINAL (原帖): independent raw probe (no shared by-id method) ----
-  console.log('\n\n########## 2) ORIGINAL (原帖) — independent raw probe ##########');
-  console.log('No shared "fetch original by id" method — stored metrics refresh only when a re-scan re-surfaces this post.');
-  console.log('This reads the SAME fields directly to check the original is still reachable.\n');
+  // ---- 2) RAW probe — dump untouched platform JSON for reply + original ------
+  // For X the reply is already covered by Section 1's analytics; here we only
+  // probe the original. For Reddit we dump BOTH the reply comment (t1) and the
+  // original post (t3) raw, so you can audit every field vs. our extraction.
+  console.log('\n\n########## 2) RAW JSON probe (audit every field) ##########');
+  console.log('Original metrics have no shared by-id refetch — they refresh only when a re-scan re-surfaces the post.');
+  console.log('This dumps the untouched platform response so you can verify what we extract.\n');
 
   if (opportunity.platform === 'x') {
     const originalTweetId = opportunity.externalPostId;
@@ -311,9 +477,18 @@ async function main(): Promise<void> {
     if (client && originalTweetId) await rawXTweet(client, originalTweetId, 'ORIGINAL (原帖)');
     else if (!originalTweetId) console.log('  ⚠ No opportunity.externalPostId.');
   } else if (opportunity.platform === 'reddit') {
+    // Reply comment (t1) — the SAME object syncRedditMetrics reads for score/comments.
+    const replyCommentId = parseRedditCommentId(post.releaseURL);
+    const subreddit = (post.releaseURL || opportunity.externalPostUrl || '').match(/\/r\/([^/]+)\//)?.[1];
     const threadId =
       (post.releaseURL || opportunity.externalPostUrl || '').match(/\/comments\/([a-z0-9]+)\//)?.[1] ??
       opportunity.externalPostId?.replace(/^t3_/, '');
+    if (replyCommentId) {
+      await rawRedditInfo(`t1_${replyCommentId}`, 'REPLY comment (回帖)');
+      if (subreddit && threadId) await rawRedditChildReplies(subreddit, threadId, replyCommentId);
+    } else console.log('  ⚠ Could not parse reply comment id from releaseURL.');
+
+    // Original post (t3).
     if (threadId) await rawRedditInfo(`t3_${threadId}`, 'ORIGINAL post (原帖)');
     else console.log('  ⚠ Could not determine original thread (t3) id.');
   }

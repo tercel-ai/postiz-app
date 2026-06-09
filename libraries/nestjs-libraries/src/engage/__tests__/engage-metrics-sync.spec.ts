@@ -75,7 +75,7 @@ describe('syncRedditMetrics', () => {
   it('uses direct child replies as Reddit comment count', async () => {
     const updatePostMetrics = vi.fn(async () => undefined);
     const markAuthorReplied = vi.fn(async () => undefined);
-    vi.stubGlobal('fetch', vi.fn()
+    const fetchMock = vi.fn()
       .mockResolvedValueOnce({
         ok: true,
         status: 200,
@@ -108,7 +108,8 @@ describe('syncRedditMetrics', () => {
             },
           },
         ]),
-      }));
+      });
+    vi.stubGlobal('fetch', fetchMock);
 
     await syncRedditMetrics(
       'post-1',
@@ -134,5 +135,11 @@ describe('syncRedditMetrics', () => {
       11
     );
     expect(markAuthorReplied).toHaveBeenCalledWith('reply-1');
+
+    // The thread fetch MUST use depth>=2: with comment=<id> the target comment is
+    // the tree root, so its direct replies only load at level 2. depth=1 collapses
+    // them into a "more" stub, zeroing the comment count and breaking author detection.
+    const threadUrl = String(fetchMock.mock.calls[1]?.[0] ?? '');
+    expect(threadUrl).toMatch(/[?&]depth=([2-9]|\d{2,})\b/);
   });
 });

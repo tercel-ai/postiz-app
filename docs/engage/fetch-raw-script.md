@@ -91,6 +91,13 @@ npx ts-node --project scripts/tsconfig.json scripts/engage-fetch-raw.ts --post <
 
 # Skip the reply path, only probe whether the original is still reachable
 npx ts-node --project scripts/tsconfig.json scripts/engage-fetch-raw.ts --post <postId> --no-reply
+
+# RAW interface probe by URL — NO DB, NO NestJS. Use on the server when you have
+# no matching local engage row; just paste a Reddit or X URL (or a t1_/t3_ id).
+npx ts-node --project scripts/tsconfig.json scripts/engage-fetch-raw.ts \
+  --url 'https://www.reddit.com/r/aeo/comments/1qp0oc9/comment/oqff4cc/'
+npx ts-node --project scripts/tsconfig.json scripts/engage-fetch-raw.ts --url t3_1qp0oc9
+npx ts-node --project scripts/tsconfig.json scripts/engage-fetch-raw.ts --url 'https://x.com/u/status/123'
 ```
 
 ## Flags
@@ -99,6 +106,7 @@ npx ts-node --project scripts/tsconfig.json scripts/engage-fetch-raw.ts --post <
 |------|---------|--------|
 | `--post <id>` | — | Target by `Post` id (the reply). One of `--post`/`--reply` is required. |
 | `--reply <id>` (alias `--id`) | — | Target by `EngageSentReply` id. |
+| `--url <postUrl>` | — | **No-DB raw probe.** Reddit `/comments/…` or X `/status/…` URL (or a `t1_`/`t3_` fullname). Dumps the untouched interface response without touching the DB or DI — ideal on a box with no matching local row. |
 | `--no-reply` | reply on | Skip Section 1; only run the original raw probe. |
 | `--write` | **off** | Persist the reply metrics (Reddit `updatePostMetrics` + `markAuthorReplied`). Read-only otherwise. |
 | `--help` | — | Print usage and exit. |
@@ -140,6 +148,32 @@ DB context:
 
 ---
 
+## Reddit reply child-reply count (`comments`) — depth matters
+
+For a Reddit **reply**, `score` comes from `/api/info` but the **comment count**
+(how many people replied to *us*) does NOT: `/api/info` returns `replies: ""`.
+`syncRedditMetrics` makes a **second** call to the comment-tree endpoint
+(`/r/<sub>/comments/<thread>?comment=<id>&depth=N`) and counts the direct child
+replies.
+
+**This depth must be ≥ 2.** With `comment=<id>` the target comment is the tree
+*root* (level 1), so its own replies live at level 2. `depth=1` returns only the
+comment with its replies collapsed into a `more` continuation stub — which made
+`comments` always 0 and silently broke the original-author-replied detection
+(`markAuthorReplied`) for every reply that actually had replies. Fixed to
+`depth=2&limit=100`. The `--url` probe fetches `depth=10` and prints the real
+direct/total reply counts so you can audit any reply by hand:
+
+```
+── RAW Reddit CHILD REPLIES under t1_<id> (thread fetch — depth=10) ──
+    1. u/KingDerrick18  score=1  "Hundred percent, are you using any tools..."
+  DIRECT replies (people who replied to us): 1
+```
+
+Caveats that still apply: the thread fetch shares the public WAF path, so a 403
+falls back to `comments=0`; and replies beyond `limit`/deeper than the requested
+depth stay behind `more` stubs (we count only the first level, by design).
+
 ## Notes
 
 - **Read-only by default.** Section 2 (original probe) never writes. Section 1's
@@ -156,6 +190,17 @@ DB context:
 - **No copied logic for the reply.** Section 1 imports and runs the production
   `syncXMetrics`/`syncRedditMetrics`, so its behavior is guaranteed identical to
   the 24h Temporal job and `POST /engage/admin/resync-metrics`.
+- **Reddit has no real impressions.** `view_count` is always `null`; the reply's
+  `impressions` is the synthetic `(score + comments) × 20` proxy, NOT a view
+  count. `trafficScore = score×1 + comments×3`. Don't read Reddit "impressions"
+  as reach.
+- **Reddit `authorFollowers` is the subreddit's subscriber count**, not the
+  author's followers — Reddit post listings carry no per-author follower field
+  (`reddit-scan-adapter.ts` maps `subreddit_subscribers`). It feeds
+  `scoreAuthority`, so Reddit "authority" effectively means subreddit size.
+- **Reddit fuzzes vote scores.** A post/comment `score` can wobble ±1–few between
+  reads (anti-scraping); a stored value differing slightly from a live read is
+  vote fuzzing, not a sync bug.
 - Related: [sync-metrics-script.md](./sync-metrics-script.md),
   [reddit-loid-waf-bypass.md](./reddit-loid-waf-bypass.md),
   `scripts/engage-diagnose-x-reply.ts`, and `tech-design.md` →
