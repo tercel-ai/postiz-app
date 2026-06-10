@@ -87,6 +87,17 @@ describe('RedditScanAdapter', () => {
     expect(url).not.toContain('restrict_sr');
   });
 
+  it('does NOT use subreddit_subscribers as authorFollowers (enriched later)', async () => {
+    // subreddit size is not the author's followers; the real per-author count is
+    // fetched during fan-out. The listing-derived RawPost must leave it undefined,
+    // while keeping the subreddit size reachable via rawData.
+    const fetchImpl = (async () =>
+      oauthRes(200, listing([child('a', 3000)]))) as any;
+    const out = await new RedditScanAdapter({ fetchImpl }).searchScoped(baseArgs());
+    expect(out.posts[0].authorFollowers).toBeUndefined();
+    expect((out.posts[0].rawData as any).subreddit_subscribers).toBe(1000);
+  });
+
   it('stops at the cursor timestamp (sort=new descending)', async () => {
     // Page is newest→oldest; lastSeenAt = 2000s. Posts at 3000/2500 are new,
     // 1500 is already-seen → must stop there and not paginate further.

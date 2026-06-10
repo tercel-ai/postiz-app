@@ -13,6 +13,7 @@ export const AiseeBusinessType = {
   // Once KieAI reports usage info, use this type in media.service.ts generateVideo().
   VIDEO_GEN: 'video_gen',  // video generate
   POST_OVERAGE: 'post_overage', // post beyond the subscription limit
+  ENGAGE_REPLY: 'engage_reply', // engage reply-draft generation (priced by length)
 } as const;
 
 export type AiseeBusinessType =

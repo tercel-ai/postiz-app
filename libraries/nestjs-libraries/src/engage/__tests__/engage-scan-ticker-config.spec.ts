@@ -30,6 +30,7 @@ describe('EngageService scan ticker config', () => {
       {} as any,
       { client: { getRawClient: () => client } } as any,
       {} as any,
+      {} as any,
       {} as any
     );
     return { service, start, signal };

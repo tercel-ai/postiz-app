@@ -41,6 +41,7 @@ import {
   scorePost,
 } from '@gitroom/nestjs-libraries/engage/engage-scorer';
 import { getRedditToken } from '@gitroom/nestjs-libraries/engage/reddit-auth';
+import { getRedditUserAbout } from '@gitroom/nestjs-libraries/engage/engage-author';
 import { RedditScanAdapter } from '@gitroom/nestjs-libraries/engage/scan/reddit-scan-adapter';
 import { XScanAdapter } from '@gitroom/nestjs-libraries/engage/scan/x-scan-adapter';
 import {
@@ -463,18 +464,56 @@ async function loadExistingStates(
   return map;
 }
 
-function analyzePosts(
+async function analyzePosts(
   posts: RawPost[],
   keywords: EngageKeyword[],
   states: Map<string, AnalyzedPost['state']>,
-  tracked: Array<{ username: string }>
-): AnalyzedPost[] {
+  tracked: Array<{ username: string }>,
+  monitored: Array<{ platform: string; channelId: string }>
+): Promise<AnalyzedPost[]> {
   const trackedNames = new Set(tracked.map((a) => a.username.toLowerCase()));
+  const monitoredSubreddits = new Set(
+    monitored.filter((c) => c.platform === 'reddit').map((c) => c.channelId.toLowerCase())
+  );
+
+  // Enrich Reddit author followers (real per-author count) for keyword-matching
+  // posts, deduped + cached — mirrors the production fan-out enrichment.
+  const matchesKeyword = (post: RawPost) =>
+    keywords.some((kw) => kw.enabled && postMatchesKeyword(post.postContent, kw.keyword));
+  const redditAuthors = [
+    ...new Set(
+      posts
+        .filter(
+          (p) =>
+            p.platform === 'reddit' &&
+            p.authorFollowers == null &&
+            p.authorUsername &&
+            p.authorUsername !== '[deleted]' &&
+            matchesKeyword(p)
+        )
+        .map((p) => p.authorUsername)
+    ),
+  ];
+  const followersByAuthor = new Map<string, number>();
+  await Promise.all(
+    redditAuthors.map(async (author) => {
+      const about = await getRedditUserAbout(author, (m) => console.warn(`  author ${author}: ${m}`));
+      if (typeof about?.followers === 'number') followersByAuthor.set(author, about.followers);
+    })
+  );
+
   return posts.map((post) => {
-    const marked =
-      post.platform === 'x' && trackedNames.has(post.authorUsername.toLowerCase())
-        ? { ...post, isFromTrackedAccount: true }
+    const followers = followersByAuthor.get(post.authorUsername);
+    const enriched: RawPost =
+      post.platform === 'reddit' && followers !== undefined
+        ? { ...post, authorFollowers: followers }
         : post;
+    const isTracked =
+      (enriched.platform === 'x' && trackedNames.has(enriched.authorUsername.toLowerCase())) ||
+      (enriched.platform === 'reddit' &&
+        !!enriched.channelId &&
+        monitoredSubreddits.has(enriched.channelId.toLowerCase()));
+    const marked = isTracked ? { ...enriched, isFromTrackedAccount: true } : enriched;
     return {
       post: marked,
       matchedKeywords: keywords
@@ -554,7 +593,7 @@ async function main(): Promise<void> {
         monitoredChannels: {
           where: { enabled: true, platform: 'reddit' },
           orderBy: { channelId: 'asc' },
-          select: { channelId: true, channelName: true, audienceSize: true },
+          select: { platform: true, channelId: true, channelName: true, audienceSize: true },
         },
         trackedAccounts: {
           where: { enabled: true, platform: 'x' },
@@ -624,7 +663,13 @@ async function main(): Promise<void> {
 
     const deduped = dedupePosts(posts);
     const states = await loadExistingStates(prisma, args.orgId, deduped);
-    const analyzed = analyzePosts(deduped, config.keywords, states, config.trackedAccounts);
+    const analyzed = await analyzePosts(
+      deduped,
+      config.keywords,
+      states,
+      config.trackedAccounts,
+      config.monitoredChannels
+    );
 
     const keywordMatched = analyzed.filter((p) => p.scored).length;
     const passScore = analyzed.filter((p) => (p.scored?.score ?? 0) >= MIN_SCORE).length;

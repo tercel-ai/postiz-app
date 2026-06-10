@@ -184,9 +184,9 @@ Engage uses **two completely separate account concepts** that must not be confla
 |---|---|---|---|
 | 关键词质量 | `scoreKeyword` | 35 | 每个关键词命中 +15，上限 35 |
 | 平台热度 | `scoreHeat` | 45 | 按平台专属公式计算（见下方） |
-| 账号影响力 | `scoreAuthority` | 15 | 按平台分别用粉丝数 / subreddit 规模计算（见下方） |
+| 账号影响力 | `scoreAuthority` | 15 | 发帖作者本人粉丝数（所有平台统一；Reddit 取 u/&lt;name&gt; 关注者数）|
 | 时效性 | `scoreRecency` | 5 | 24h 内 → 5；超出 → 0 |
-| 重点账户 | `scoreTracked` | 5 | 命中重点账户 +5 |
+| 重点账户/频道 | `scoreTracked` | 5 | 命中重点账户（X）或监控版块（Reddit）+5 |
 | **总分** | `score` | **105** | 以上五项之和 |
 
 **Layer 1: Keyword Hard Filter** (must pass)
@@ -200,9 +200,9 @@ Engage uses **two completely separate account concepts** that must not be confla
 |---|---|---|---|
 | 关键词质量 Keyword Quality | `scoreKeyword` | 35 | Each hit +15, capped at 35 |
 | 平台热度 Platform Heat | `scoreHeat` | 45 | Per-platform formula; X thresholds at 2000/1000/300/80 → 45/33/23/12/4 pts |
-| 账号影响力 Account Authority | `scoreAuthority` | 15 | X follower count / subreddit audienceSize; per-platform thresholds |
+| 账号影响力 Account Authority | `scoreAuthority` | 15 | Post author's real follower count, all platforms (Reddit = u/&lt;name&gt; profile subscribers). Thresholds 50k/10k/1k → 15/11/6, else 2 |
 | 时效性 Recency | `scoreRecency` | 5 | Within 24h → 5; else → 0 |
-| 重点账户 Tracked Account | `scoreTracked` | 5 | Author is in **追踪账号 (EngageTrackedAccount)** → +5 |
+| 重点账户/频道 Tracked Source | `scoreTracked` | 5 | Author is in **追踪账号 (EngageTrackedAccount, X)** OR post is in a **监控版块 (EngageMonitoredChannel, Reddit)** → +5 |
 
 Reddit heat: `reddit_heat = score × upvote_ratio + num_comments × 2`; thresholds 800/400/100/30.
 
@@ -375,7 +375,7 @@ If URL not submitted: Sent record shows "⚠ No reply URL submitted — tracking
 
 #### Block 4: Tracked Accounts (追踪账号)
 
-> These are **external third-party X accounts** — NOT the user's own accounts. Stored in the new `EngageTrackedAccount` table. When these accounts post new content on X, their posts are automatically pushed into Signal Feed as opportunities (checked every 3 hours). Posts from tracked accounts also receive a **+5 score bonus** in the scoring algorithm.
+> These are **external third-party X accounts** — NOT the user's own accounts. Stored in the new `EngageTrackedAccount` table. When these accounts post new content on X, their posts are automatically pushed into Signal Feed as opportunities (checked every 3 hours). Posts from tracked accounts also receive a **+5 score bonus** in the scoring algorithm. The Reddit equivalent is a **监控版块 (EngageMonitoredChannel)**: a post landing in one of the org's monitored subreddits earns the same **+5 `scoreTracked` bonus** (the subreddit's *size* no longer affects the score — authority now comes from the post author's own followers).
 
 | Requirement | Details |
 |---|---|

@@ -15,6 +15,7 @@ import {
   UpdateTrackedAccountDto,
 } from '@gitroom/nestjs-libraries/engage/dtos/engage.dto';
 import { KEYWORD_GLOBAL_SCAN_KEY } from '@gitroom/nestjs-libraries/engage/scan/platform-scan-adapter';
+import { DEFAULT_SCAN_INTERVAL_HOURS } from '@gitroom/nestjs-libraries/engage/engage-entitlement.service';
 import {
   pickXReplyIntegration,
   XReplyResolution,
@@ -29,16 +30,11 @@ import utc from 'dayjs/plugin/utc';
 dayjs.extend(isoWeek);
 dayjs.extend(utc);
 
-// Scan cadence per type (ms), mirroring the orchestrator's interval env vars.
 // getOrgScanStatus derives "next scan" = lastScanStartedAt + cadence (or
 // cooldownUntil, whichever is later). The activity/workflows own the actual
-// scheduling; this only reports the derived timing to the UI.
-const KEYWORD_CADENCE_MS =
-  Number(process.env.ENGAGE_KEYWORD_SCAN_INTERVAL_HOURS ?? 24) * 3_600_000;
-const CHANNEL_CADENCE_MS =
-  Number(process.env.ENGAGE_CHANNEL_SCAN_INTERVAL_HOURS ?? 3) * 3_600_000;
-const TRACKED_CADENCE_MS =
-  Number(process.env.ENGAGE_TRACKED_SCAN_INTERVAL_HOURS ?? 3) * 3_600_000;
+// scheduling; this only reports the derived timing to the UI. Cadence is the
+// org's plan scan_interval_hours, passed in by the caller (single interval for
+// keyword/channel/tracked alike); falls back to DEFAULT_SCAN_INTERVAL_HOURS.
 const INITIAL_SCAN_PLATFORMS = ['reddit', 'x'] as const;
 
 export interface ScanTiming {
@@ -254,8 +250,15 @@ export class EngageRepository {
   // null/null. NOTE: a keyword/subreddit shared with a more aggressive org is
   // scanned on that org's cadence, so the reported time can be fresher than this
   // org's own interval — intentional (shared data, always fresher is fine).
-  async getOrgScanStatus(organizationId: string): Promise<OrgScanStatus> {
+  async getOrgScanStatus(
+    organizationId: string,
+    scanIntervalHours: number = DEFAULT_SCAN_INTERVAL_HOURS
+  ): Promise<OrgScanStatus> {
     const now = Date.now();
+    const cadenceMs =
+      (Number.isFinite(scanIntervalHours) && scanIntervalHours > 0
+        ? scanIntervalHours
+        : DEFAULT_SCAN_INTERVAL_HOURS) * 3_600_000;
 
     const [subs, tracked] = await Promise.all([
       this._channel.model.engageMonitoredChannel.findMany({
@@ -271,8 +274,13 @@ export class EngageRepository {
     const usernames = tracked.map((t) => t.username.toLowerCase());
 
     const [keywordCursors, channelCursors, trackedCursors] = await Promise.all([
+      // Keyword firehose is bucketed by interval (__global__:<hours>); match all
+      // buckets so the timing reflects whichever bucket scanned most recently.
       this._scanCursor.model.engageScanCursor.findMany({
-        where: { scanType: 'keyword', scanKey: KEYWORD_GLOBAL_SCAN_KEY },
+        where: {
+          scanType: 'keyword',
+          scanKey: { startsWith: `${KEYWORD_GLOBAL_SCAN_KEY}:` },
+        },
       }),
       subredditIds.length
         ? this._scanCursor.model.engageScanCursor.findMany({
@@ -294,9 +302,9 @@ export class EngageRepository {
         : Promise.resolve([]),
     ]);
 
-    const keyword = aggregateScan(keywordCursors, KEYWORD_CADENCE_MS, now);
-    const channel = aggregateScan(channelCursors, CHANNEL_CADENCE_MS, now);
-    const trackedAgg = aggregateScan(trackedCursors, TRACKED_CADENCE_MS, now);
+    const keyword = aggregateScan(keywordCursors, cadenceMs, now);
+    const channel = aggregateScan(channelCursors, cadenceMs, now);
+    const trackedAgg = aggregateScan(trackedCursors, cadenceMs, now);
 
     return {
       lastScanAt: maxDate([keyword.lastScanAt, channel.lastScanAt, trackedAgg.lastScanAt]),
@@ -2030,6 +2038,44 @@ export class EngageRepository {
         ...(integrationId ? { integrationId } : {}),
         ...(mergedSettings ? { settings: mergedSettings } : {}),
       },
+    });
+  }
+
+  /**
+   * Patch ONLY settings.engageAuthor for a sent reply's post — the slow,
+   * display-only author/avatar enrichment that the confirm + backfill paths now
+   * resolve in the background (the URL is saved synchronously; this fills the
+   * author once Reddit/X finally answers). Honours the same FALLBACK rule as
+   * updateReplyUrl: for X, record engageAuthor ONLY when the post has no connected
+   * integration (the integration is the source of truth); for Reddit, always
+   * record it. No-ops (returns undefined) when the reply/post is gone or the
+   * platform isn't a manual-reply platform — a background enrich must never throw.
+   */
+  async updateReplyAuthor(
+    organizationId: string,
+    sentReplyId: string,
+    engageAuthor: EngageAuthorProfile
+  ) {
+    const reply = await this._sentReply.model.engageSentReply.findFirst({
+      where: { id: sentReplyId, organizationId },
+      include: { opportunity: { select: { platform: true } } },
+    });
+    if (!reply) return undefined;
+    const platform = reply.opportunity.platform;
+    if (platform !== 'reddit' && platform !== 'x') return undefined;
+
+    const post = await this._post.model.post.findUnique({
+      where: { id: reply.postId },
+      select: { integrationId: true, settings: true },
+    });
+    if (!post) return undefined;
+    // X: a connected integration is the source of truth — leave settings untouched.
+    if (platform === 'x' && post.integrationId) return undefined;
+
+    const mergedSettings = this._mergeEngageAuthor(post.settings, platform, engageAuthor);
+    return this._post.model.post.update({
+      where: { id: reply.postId },
+      data: { settings: mergedSettings },
     });
   }
 

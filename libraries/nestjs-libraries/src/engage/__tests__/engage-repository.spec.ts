@@ -1064,6 +1064,75 @@ describe('EngageRepository — two-table reads', () => {
     });
   });
 
+  describe('updateReplyAuthor (background author/avatar enrichment)', () => {
+    function buildAuthorRepo() {
+      const sentFindFirst = vi.fn();
+      const postFindUnique = vi.fn();
+      const postUpdate = vi.fn(async (a: any) => a);
+      const sentReply = { model: { engageSentReply: { findFirst: sentFindFirst } } } as any;
+      const post = {
+        model: { post: { findUnique: postFindUnique, update: postUpdate } },
+      } as any;
+      const repo = new EngageRepository(
+        {} as any, {} as any, {} as any, {} as any, {} as any,
+        {} as any, {} as any,
+        sentReply,    // _sentReply (index 7)
+        {} as any,    // _integration (index 8)
+        post,         // _post (index 9)
+        {} as any, {} as any
+      );
+      return { repo, sentFindFirst, postFindUnique, postUpdate };
+    }
+
+    const author = { handle: 'benppoulton', id: 't2_1', name: 'Ben Poulton', avatarUrl: 'https://x/a.jpg' };
+
+    it('reddit: always merges engageAuthor into settings, preserving __type', async () => {
+      const { repo, sentFindFirst, postFindUnique, postUpdate } = buildAuthorRepo();
+      sentFindFirst.mockResolvedValue({ postId: 'post1', opportunity: { platform: 'reddit' } });
+      postFindUnique.mockResolvedValue({ integrationId: null, settings: '{"__type":"reddit"}' });
+
+      await repo.updateReplyAuthor('org1', 'reply1', author);
+
+      const data = postUpdate.mock.calls[0][0].data;
+      const settings = JSON.parse(data.settings);
+      expect(settings.__type).toBe('reddit');
+      expect(settings.engageAuthor).toEqual(author);
+      // Only settings is touched — never the URL/id.
+      expect(Object.keys(data)).toEqual(['settings']);
+    });
+
+    it('x WITHOUT an integration: records engageAuthor (the fallback identity)', async () => {
+      const { repo, sentFindFirst, postFindUnique, postUpdate } = buildAuthorRepo();
+      sentFindFirst.mockResolvedValue({ postId: 'post1', opportunity: { platform: 'x' } });
+      postFindUnique.mockResolvedValue({ integrationId: null, settings: '{"__type":"x"}' });
+
+      await repo.updateReplyAuthor('org1', 'reply1', author);
+
+      expect(JSON.parse(postUpdate.mock.calls[0][0].data.settings).engageAuthor).toEqual(author);
+    });
+
+    it('x WITH a connected integration: no-op (integration is source of truth)', async () => {
+      const { repo, sentFindFirst, postFindUnique, postUpdate } = buildAuthorRepo();
+      sentFindFirst.mockResolvedValue({ postId: 'post1', opportunity: { platform: 'x' } });
+      postFindUnique.mockResolvedValue({ integrationId: 'int1', settings: '{"__type":"x"}' });
+
+      const out = await repo.updateReplyAuthor('org1', 'reply1', author);
+
+      expect(out).toBeUndefined();
+      expect(postUpdate).not.toHaveBeenCalled();
+    });
+
+    it('missing reply: no-op (a background enrich must never throw)', async () => {
+      const { repo, sentFindFirst, postUpdate } = buildAuthorRepo();
+      sentFindFirst.mockResolvedValue(null);
+
+      const out = await repo.updateReplyAuthor('org1', 'gone', author);
+
+      expect(out).toBeUndefined();
+      expect(postUpdate).not.toHaveBeenCalled();
+    });
+  });
+
   describe('getEngageMetricsStats', () => {
     // Folds PUBLISHED engage replies into a per-platform snapshot: published /
     // withMetrics / missing / missingIntegration (X) / Σimpressions / Σtraffic.
@@ -1469,7 +1538,8 @@ describe('EngageRepository — two-table reads', () => {
 });
 
 describe('EngageRepository.getOrgScanStatus', () => {
-  // Cadence defaults (env unset): keyword 24h, channel/tracked 3h.
+  // Cadence is the org's single plan scan_interval_hours (keyword/channel/tracked
+  // alike). With no interval passed it falls back to DEFAULT_SCAN_INTERVAL_HOURS = 24h.
   const H = 3_600_000;
 
   it('derives keyword next = lastScanStartedAt + cadence; last = lastScannedAt', async () => {
@@ -1515,8 +1585,8 @@ describe('EngageRepository.getOrgScanStatus', () => {
     const { repo, channelFindMany, trackedFindMany, cursorFindMany } = buildRepo();
     channelFindMany.mockResolvedValue([{ channelId: 'a' }, { channelId: 'b' }]);
     trackedFindMany.mockResolvedValue([]);
-    const aStart = new Date('2026-06-01T00:00:00Z'); // next = +3h
-    const bStart = new Date('2026-06-01T01:00:00Z'); // next = +3h (later)
+    const aStart = new Date('2026-06-01T00:00:00Z'); // next = +24h
+    const bStart = new Date('2026-06-01T01:00:00Z'); // next = +24h (later)
     const aScanned = new Date('2026-06-01T00:10:00Z');
     const bScanned = new Date('2026-06-01T01:10:00Z'); // latest completion
     cursorFindMany.mockImplementation(async ({ where }: any) =>
@@ -1530,7 +1600,7 @@ describe('EngageRepository.getOrgScanStatus', () => {
 
     const st = await repo.getOrgScanStatus('org1');
     expect(st.channel.lastScanAt).toEqual(bScanned); // max of completions
-    expect(st.channel.nextScanAt).toEqual(new Date(aStart.getTime() + 3 * H)); // earliest due
+    expect(st.channel.nextScanAt).toEqual(new Date(aStart.getTime() + 24 * H)); // earliest due
     // Queried exactly this org's subreddit ids.
     expect(cursorFindMany).toHaveBeenCalledWith(
       expect.objectContaining({

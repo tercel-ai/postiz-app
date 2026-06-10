@@ -208,7 +208,7 @@ async function fetchRedditRaw(
         const r = await fetch(url, { headers: redditAuthHeaders(token) });
         status = r.status; body = await r.text();
       } else {
-        if (attempt > 1) clearRedditLoidCache(); // re-mint loid between tries
+        if (attempt > 1) await clearRedditLoidCache(); // re-mint loid between tries
         const r = await redditPublicGet(url, {}, { log: (m) => console.warn(`  ${m}`) });
         status = r.status; body = await r.text();
       }

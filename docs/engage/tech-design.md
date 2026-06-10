@@ -201,7 +201,7 @@ model EngageMonitoredChannel {
   platform              String    // "reddit" | "youtube" | "qq" | "discord" | ...
   channelId             String    // platform-native identifier
   channelName           String    // display name shown in UI
-  audienceSize          Int       @default(0)  // members/subscribers — used in authority scoring
+  audienceSize          Int       @default(0)  // members/subscribers — DISPLAY ONLY (no longer feeds authority scoring; a post in a monitored subreddit grants scoreTracked +5 instead)
   enabled               Boolean   @default(true)
   lastScannedAt         DateTime? // last time this channel was scanned; used for incremental fetch
   metadata              Json?     // platform-specific extras ({ url, description, iconUrl })
@@ -280,7 +280,7 @@ model EngageOpportunity {
   channelName           String?   // display name: "r/SEO", "Channel Title", etc.
   authorUsername        String
   authorDisplayName     String?
-  authorFollowers       Int?      // X followers; for community platforms: audienceSize of the channel
+  authorFollowers       Int?      // post author's real follower count, all platforms (Reddit = u/<name> profile subscribers, fetched per-author during scan)
   authorAvatarUrl       String?
   postContent           String
   postPublishedAt       DateTime
@@ -289,7 +289,7 @@ model EngageOpportunity {
   // scoreHeat       45   per-platform engagement; 4 branches (see §9):
   //                      text(x/threads/mastodon/bluesky), video(youtube/tiktok),
   //                      network(linkedin/instagram/pinterest), community(reddit)
-  // scoreAuthority  15   X follower count / subreddit audienceSize; see §9 for per-platform thresholds
+  // scoreAuthority  15   post author's real follower count (all platforms); see §9 for thresholds
   // scoreRecency     5   within 24h → 5; else → 0
   scoreHeat             Int       @default(0)
   scoreAuthority        Int       @default(0)
@@ -345,7 +345,8 @@ model EngageOpportunity {
 //
 // Dimension      Max   Formula / thresholds
 // scoreKeyword    35   each keyword hit +15, capped at 35 (关键词质量)
-// scoreTracked     5   post author is in this org's EngageTrackedAccount → +5 (重点账户)
+// scoreTracked     5   X: author is in this org's EngageTrackedAccount; Reddit: post is in
+//                      one of this org's EngageMonitoredChannel subreddits → +5 (重点账户/频道)
 // score          105   = scoreKeyword + scoreTracked + opportunity.(scoreHeat+scoreAuthority+scoreRecency)
 model EngageOpportunityState {
   organizationId String
@@ -1040,10 +1041,11 @@ Concrete Settings examples:
    release the lock and **do not advance**. On error → release the lock, leave the
    cursor untouched.
 
-Cadence per type (env): `ENGAGE_KEYWORD_SCAN_INTERVAL_HOURS` (24),
-`ENGAGE_CHANNEL_SCAN_INTERVAL_HOURS` (3), `ENGAGE_TRACKED_SCAN_INTERVAL_HOURS` (3).
-A frequent tick + per-unit cooldown means a rate-limited unit recovers on the next
-tick after its cooldown — independent of the long keyword cadence.
+Cadence is **per unit**, derived from the owning orgs' plan `scan_interval_hours`
+(see §5.2), not a fixed per-type env value. `_scanUnit` receives an explicit
+`cadenceMs`; `_claimCursor` skips a unit until `lastScanStartedAt + cadenceMs` has
+elapsed. A frequent tick + per-unit cooldown means a rate-limited unit recovers on
+the next tick after its cooldown — independent of the (longer) base cadence.
 
 **Platform adapters** (`PlatformScanAdapter.searchScoped`) own all fetch mechanics;
 the activity stays platform-agnostic:
@@ -1073,10 +1075,68 @@ persist (§3.1) → keyword hit counts → expire stale → `lastScanAt`.
 > fan-out** (an org gets the bonus only if IT tracks that author), so it lives on
 > `EngageOpportunityState`, never the shared global row.
 
-**Observability**: `EngageRepository.getOrgScanStatus(orgId)` derives per-org
-last/next scan time (overall + per type) from the cursor rows
+**Observability**: `EngageRepository.getOrgScanStatus(orgId, scanIntervalHours)`
+derives per-org last/next scan time (overall + per type) from the cursor rows
 (`next = max(lastScanStartedAt + cadence, cooldownUntil)` — derived, never stored),
-exposed via `GET /engage/config` → `scanStatus` and shown in the Signal Feed header.
+using the org's own plan interval as the cadence. Exposed via `GET /engage/config`
+→ `scanStatus` and shown in the Signal Feed header.
+
+---
+
+### 5.2 Per-Plan Scan Cadence (interval grouping)
+
+The plan entitlement `scan_interval_hours` (Starter/Developer 24h, Pro 6h; default
+24h — see §15) controls how often a unit is scanned. Scans stay **global and
+unit-based** (one shared cursor per `(platform, scanType, scanKey)`); we do not
+schedule per org. Instead each unit's **effective cadence = the MIN
+`scan_interval_hours` across every org that contributes it** — "whoever scans most
+often wins". Shared data is always safe to refresh sooner, so an org riding on a
+unit kept fresh by a higher tier simply benefits.
+
+The interval is a **single value per org**, applied uniformly to keyword, channel,
+and tracked units (it replaced the old per-type env cadences of 24/3/3h). At the
+top of `runDueScans`, `_orgIntervalHours(orgContexts)` resolves each enabled org's
+interval once (cached in `EngageEntitlementService`, 5-min TTL); a missing
+entitlement service or billing-off falls back to `DEFAULT_SCAN_INTERVAL_HOURS` (24).
+
+Grouping differs by the unit's natural granularity:
+
+| Unit | Granularity | Grouping | Effective cadence |
+| --- | --- | --- | --- |
+| **keyword** | one union firehose | **bucketed by interval** — `scanKey = __global__:<hours>` | the bucket's hours |
+| **channel** | per-subreddit | already per-key | `min` over orgs monitoring that subreddit |
+| **tracked** | per-username | already per-key | `min` over orgs tracking that username |
+
+- **channel / tracked** are already per-key units (independent cursors), so we just
+  take the `min` interval per key: `minMerge(map, channelId|username, hoursOf(org))`,
+  then scan each at `hoursToMs(min)`.
+- **keyword** is the hard case: the firehose scans the **union** of all keywords in
+  one query (a single `__global__` cursor historically). Taking a single global min
+  would drag *every* keyword to 6h the moment one Pro org exists — wasting API
+  budget. So keywords are **partitioned into interval buckets**: each keyword's
+  bucket = the `min` interval across the orgs that enabled it; each bucket is scanned
+  as its own unit keyed `__global__:<hours>` (× `{x, reddit}`) with its own cursor.
+  - A keyword lands in exactly **one** bucket → buckets are disjoint, no double-scan.
+  - `ai` shared by Pro(6h) + Starter(24h) → 6h bucket (Starter benefits).
+  - `ml` Starter-only → 24h bucket, **not** dragged onto the 6h cadence ← the budget
+    saving the bucketing exists for.
+
+`getOrgScanStatus` queries keyword cursors by `scanKey startsWith '__global__:'` to
+cover all buckets.
+
+> **Upgrade note (legacy cursor).** Before bucketing, the keyword firehose used a
+> single bare `__global__` cursor. After upgrade that row matches neither the new
+> writer (emits `__global__:<hours>`) nor the reader (`startsWith '__global__:'`),
+> so it is orphaned: each bucket starts from a null cursor and re-scans once over
+> the recent, `SCAN_MAX_CALLS`-bounded window (X has no `since_id`; upserts dedup
+> on `platform_externalPostId`, so no full-history storm), and keyword timing
+> self-corrects on the next due tick. This is intentional and self-healing. To
+> preserve the old incremental position instead, run a one-off
+> `UPDATE "EngageScanCursor" SET "scanKey"='__global__:24' WHERE "scanType"='keyword' AND "scanKey"='__global__'`.
+
+Implementation: `engage-scan.activity.ts` (`_orgIntervalHours`,
+`_scanKeywordUnits` bucketing, `_scanChannelUnits`/`_scanTrackedUnits` per-key min,
+`_scanUnit`/`_claimCursor` take `cadenceMs`). Tests: `engage-scan-interval.spec.ts`.
 
 ---
 
@@ -1708,11 +1768,11 @@ async fetchRedditCommentMetrics(commentId: string): Promise<{ score: number; num
 |---|---|---|---|---|
 | Keyword Quality | `scoreKeyword` | 35 | `EngageOpportunityState` (per-org) | Each hit +15, capped at 35 (关键词质量) |
 | Platform Heat | `scoreHeat` | 45 | `EngageOpportunity` (global) | Per-platform formula, 4 branches (see below) (平台热度) |
-| Account Authority | `scoreAuthority` | 15 | `EngageOpportunity` (global) | X follower count / subreddit audienceSize; per-platform thresholds (账号影响力) |
+| Account Authority | `scoreAuthority` | 15 | `EngageOpportunity` (global) | Post author's real follower count, all platforms (Reddit = u/&lt;name&gt; profile subscribers); thresholds 50k/10k/1k (账号影响力) |
 | Recency | `scoreRecency` | 5 | `EngageOpportunity` (global) | within 24h → 5; else → 0 (时效性) |
-| Tracked Account | `scoreTracked` | 5 | `EngageOpportunityState` (per-org) | +5 if author is in this org's `EngageTrackedAccount` (重点账户) |
+| Tracked Source | `scoreTracked` | 5 | `EngageOpportunityState` (per-org) | +5 if author is in this org's `EngageTrackedAccount` (X) OR post is in one of this org's `EngageMonitoredChannel` subreddits (Reddit) (重点账户/频道) |
 
-**Score ownership (two-table split):** the OBJECTIVE dimensions (heat / authority / recency) are identical for every org, so they live on the global `EngageOpportunity` row. The SUBJECTIVE dimensions (keyword / tracked) depend on the org's own keyword set and tracked accounts, so they — plus the total `score` (= keyword + tracked + heat + authority + recency, max 105) — live on the per-org `EngageOpportunityState`. The total is recomputed each scan; the feed reads it directly.
+**Score ownership (two-table split):** the OBJECTIVE dimensions (heat / authority / recency) are identical for every org, so they live on the global `EngageOpportunity` row — including authority, which is now the post author's own follower count (an objective, org-independent fact). The SUBJECTIVE dimensions (keyword / tracked) depend on the org's own keyword set, tracked accounts, and monitored subreddits, so they — plus the total `score` (= keyword + tracked + heat + authority + recency, max 105) — live on the per-org `EngageOpportunityState`. "Is this subreddit in *my* monitored list" is inherently per-org, which is why the Reddit +5 belongs to `scoreTracked`, not authority. The total is recomputed each scan; the feed reads it directly.
 
 **Platform Heat branches** (`scoreHeat`, all 0–45, bucketed):
 
@@ -1780,10 +1840,10 @@ function computeBreakdown(post: RawPost, hits: EngageKeyword[]): ScoreBreakdown 
   const heat      = post.platform === 'x'                          // 0-45
     ? computeXHeatScore(post)
     : computeCommunityHeatScore(post);
-  const authority = post.platform === 'x'                          // 0-15
-    ? computeXAuthorityScore(post.authorFollowers)
-    : computeCommunityAuthorityScore(post.authorFollowers);        // audienceSize for Reddit/YT/etc.
+  const authority = computeAuthorAuthorityScore(post.authorFollowers); // 0-15, post author's real followers (all platforms)
   const recency  = isWithin24Hours(post.publishedAt) ? 5 : 0;     // 0|5
+  // +5 when the post is from a tracked source: an X tracked account, OR a Reddit
+  // post in one of the org's monitored subreddits (flag set during fan-out).
   const tracked  = post.isFromTrackedAccount ? 5 : 0;             // 0|5
 
   return {
@@ -1824,23 +1884,23 @@ function computeCommunityHeatScore(post: RawPost): number {
   return 4;
 }
 
-function computeXAuthorityScore(followers: number | null): number {
+function computeAuthorAuthorityScore(followers: number | null): number {
+  // Post author's real follower count — all platforms. X uses public_metrics
+  // followers; Reddit uses the author's u/<name> profile subscribers (fetched
+  // per-author during scan, cached). Most redditors have ~0 → floor of 2.
   if (!followers) return 2;
   if (followers > 50_000) return 15;
   if (followers > 10_000) return 11;
   if (followers >  1_000) return  6;
   return 2;
 }
-
-function computeCommunityAuthorityScore(audienceSize: number | null): number {
-  // Used for Reddit subreddits, YouTube channels, QQ groups, etc.
-  if (!audienceSize) return 2;
-  if (audienceSize > 1_000_000) return 15;
-  if (audienceSize >   100_000) return 11;
-  if (audienceSize >    10_000) return  6;
-  return 2;
-}
 ```
+
+> **Note (authority vs. community size):** earlier revisions scored Reddit authority
+> from the *subreddit's* member count (`audienceSize`). That was dropped: authority is
+> the **author's** influence, and "this subreddit matters to me" is now the per-org
+> `scoreTracked` +5 (monitored subreddit). `EngageMonitoredChannel.audienceSize` is
+> retained for display only and no longer feeds scoring.
 
 ---
 
@@ -2217,7 +2277,100 @@ If gradual rollout is desired, gate behind `org.features.engage` flag. Set to `t
 
 ---
 
-## 15. Open Questions
+## 15. Subscription Entitlements & Credits
+
+Engage is gated by the user's subscription plan. **Plans live in `aisee-core`**
+(codes `starter` / `developer` / `pro`; monthly credits 1000 / 4000 / 10000) and
+carry **no** engage-specific limits — those are defined on the Postiz side and the
+backend enforces them (the frontend disables entrypoints for UX but can be bypassed,
+so every check is server-side).
+
+### 15.1 Limit configuration (Settings, admin-tunable, no redeploy)
+
+Engage limits live in the global `Settings` table as JSON (same pattern as
+`post_send_overage_cost` / `ai_model_pricing`), seeded on boot via
+`EngageEntitlementService.onModuleInit` and editable through `/admin/settings`:
+
+- **`engage_entitlements`** — plan code → limits. `null` = unlimited.
+
+  | Field | Starter | Developer | Pro |
+  | --- | --- | --- | --- |
+  | `keywordsMax` | 3 | 10 | 30 |
+  | `priorityAccountsMax` | 0 | 10 | `null` |
+  | `subredditsMax` | 1 | 5 | 15 |
+  | `scanIntervalHours` | 24 | 24 | 6 |
+  | `replyMonthlyCap` | 10 | `null` | `null` |
+
+- **`engage_reply_credits`** — `{ base, multipliers: { short, medium, long } }`.
+  `cost = round(base × multiplier)`. Defaults: base 2, ×1.0/1.5/2.5 → **2 / 3 / 5**.
+
+### 15.2 Plan resolution
+
+`EngageEntitlementService` resolves the org's plan via
+`UsersService.getUserLimits()` (which calls aisee `/user-credit-package/uid/{userId}`)
+and maps the returned display `name` ("Pro Plan (Monthly)", …) to a code with
+`normalizePlanName` (substring match). Rules:
+
+- billing disabled (`getUserLimits → null`, self-hosted) → **unlimited** entitlement;
+- unrecognised plan name → fall back to **`starter`** (most restrictive — over-block
+  an anomaly rather than grant Pro for free);
+- resolution is cached per org (5-min TTL) to bound aisee round-trips (the scan tick
+  resolves every enabled org).
+
+### 15.3 Hard limit enforcement
+
+`EngageService` calls the asserts before mutating:
+
+- `assertCanActivate(org, type, count)` on add (keyword / keyword-bulk / subreddit /
+  tracked) — counts currently **enabled** rows; throws `ForbiddenException`
+  (`code: engage_limit_reached`) when `current + count > max`. Starter tracked = 0 ⇒
+  always blocked.
+- `assertCanEnable(org, type, id)` on the enable toggle — enforces only on a
+  disabled → enabled transition (re-enabling / unknown id is a no-op, never
+  double-counts).
+- `scanIntervalHours` is **not** accepted from the client; it drives scan cadence
+  (§5.2).
+
+### 15.4 Reply-draft credits (the only charging action)
+
+Generating a reply draft is the sole credit-charging action (regenerate counts as a
+new charge; scan / browse / filter / track / history / manual send never charge).
+Fixed cost by length, deducted through the shared Aisee pipeline
+(`AiseeCreditService.deductAndConfirm`, `businessType = engage_reply`).
+
+`GenerateDraftDto.length` (`short` | `medium` | `long`, default `medium`) drives both
+the cost and the generation target. The SSE endpoint `POST /opportunities/:id/draft`:
+
+1. **Pre-flight (before any model call)** — `assertCanGenerateReply(org, length)`
+   checks: monthly cap not reached (Starter hard-stops at 10 even with credits — an
+   upgrade hook, no overflow), then balance ≥ cost. On block it emits an SSE error
+   frame (`engage_reply_cap_reached` / `engage_insufficient_credits`) and **does not
+   generate**.
+2. **Charge on success** — after a complete, non-aborted, within-limit draft, deduct
+   the fixed cost (best-effort: a billing hiccup must not fail an already-produced
+   draft). Failure / timeout / abort → **no charge**.
+
+**Monthly-cap counter** = count of `BillingRecord` rows with `businessType =
+engage_reply` since the billing `periodStart` (each generation, incl. regenerate, is
+one row; failures write no row, so they don't count). When no period is known, the
+window is the start of the calendar month (UTC).
+
+### 15.5 Read API for the frontend
+
+The frontend needs the resolved limits + live usage to disable entrypoints and show
+usage. `EngageEntitlementService.getEntitlementSummary(orgId)` returns
+`{ plan, limits, usage: { keywords, trackedAccounts, subreddits, repliesThisPeriod }, replyCredits: { short, medium, long } }`,
+embedded under `entitlement` in the **`GET /engage/config`** response (the keyword
+manager and signal feed already fetch `/engage/config`, so they get it for free; to
+refresh usage after generating a reply, revalidate that same key — no separate
+endpoint). Server-side asserts remain the source of truth — this is UX only.
+
+Implementation: `engage-entitlement.service.ts`, wired in `engage.service.ts` /
+`engage.controller.ts`. Tests: `engage-entitlement.service.spec.ts`.
+
+---
+
+## 16. Open Questions
 
 | Question | Owner | Deadline |
 |---|---|---|

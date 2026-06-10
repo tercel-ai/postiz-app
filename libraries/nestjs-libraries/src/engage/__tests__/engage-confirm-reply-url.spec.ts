@@ -15,7 +15,11 @@ describe('EngageService.confirmManualReply — URL verification gating', () => {
   let createReddit: ReturnType<typeof vi.fn>;
   let release: ReturnType<typeof vi.fn>;
   let createSentReply: ReturnType<typeof vi.fn>;
+  let updateReplyAuthor: ReturnType<typeof vi.fn>;
+  let fetchEngageXAuthor: ReturnType<typeof vi.fn>;
   let service: EngageService;
+
+  const flush = () => new Promise((r) => setImmediate(r));
 
   beforeEach(() => {
     claim = vi.fn(async () => ({ opp: { platform: 'x', externalPostId: 't1' }, priorStatus: 'NEW' }));
@@ -23,6 +27,8 @@ describe('EngageService.confirmManualReply — URL verification gating', () => {
     createReddit = vi.fn(async () => ({ id: 'post-1' }));
     release = vi.fn(async () => undefined);
     createSentReply = vi.fn(async () => ({ id: 'reply-1' }));
+    updateReplyAuthor = vi.fn(async () => undefined);
+    fetchEngageXAuthor = vi.fn(async () => ({ handle: 'benppoulton', id: 't2_1', name: 'Ben' }));
 
     const repo = {
       claimOpportunityForReply: claim,
@@ -30,9 +36,11 @@ describe('EngageService.confirmManualReply — URL verification gating', () => {
       createManualRedditPost: createReddit,
       releaseOpportunityClaim: release,
       createSentReply,
+      updateReplyAuthor,
     } as any;
+    const postsService = { fetchEngageXAuthor } as any;
     // No temporal client → startMetricsSyncForReply is a no-op.
-    service = new EngageService(repo, { client: undefined } as any, {} as any, {} as any);
+    service = new EngageService(repo, { client: undefined } as any, postsService, {} as any, {} as any);
   });
 
   const body = (over: Record<string, unknown> = {}) => ({
@@ -49,6 +57,41 @@ describe('EngageService.confirmManualReply — URL verification gating', () => {
     expect(createX.mock.calls[0][0].replyUrl).toBeUndefined();
     expect(createSentReply).toHaveBeenCalledTimes(1);
     expect(release).not.toHaveBeenCalled();
+  });
+
+  it('with a URL: creates the post WITHOUT engageAuthor, then enriches in the background', async () => {
+    await service.confirmManualReply(
+      org,
+      undefined,
+      'opp-1',
+      body({ replyUrl: 'https://x.com/benppoulton/status/123' })
+    );
+    // Post is created WITHOUT the author baked in — it is not resolved on the
+    // critical path; createManualXPost never receives an engageAuthor.
+    expect(createX).toHaveBeenCalledTimes(1);
+    expect(createX.mock.calls[0][0].engageAuthor).toBeUndefined();
+
+    await flush(); // let the fire-and-forget enrichment settle
+
+    // Resolved from the URL and persisted out of band against the sent reply id.
+    expect(fetchEngageXAuthor).toHaveBeenCalledWith('org-1', 'https://x.com/benppoulton/status/123');
+    expect(updateReplyAuthor).toHaveBeenCalledWith('org-1', 'reply-1', {
+      handle: 'benppoulton',
+      id: 't2_1',
+      name: 'Ben',
+    });
+  });
+
+  it('does NOT enrich when the author cannot be resolved (stays handle-less, no throw)', async () => {
+    fetchEngageXAuthor.mockResolvedValue(null);
+    await service.confirmManualReply(
+      org,
+      undefined,
+      'opp-1',
+      body({ replyUrl: 'https://x.com/benppoulton/status/123' })
+    );
+    await flush();
+    expect(updateReplyAuthor).not.toHaveBeenCalled();
   });
 
   it('rejects a malformed X URL and releases the claim (no record created)', async () => {

@@ -36,7 +36,7 @@ const RUN_LIVE = hasRedditCreds || process.env.RUN_REDDIT_LIVE === '1';
 const TARGET = 'football'; // the subreddit the user tried to find
 
 function buildService(): EngageService {
-  return new EngageService({} as any, {} as any, {} as any, {} as any);
+  return new EngageService({} as any, {} as any, {} as any, {} as any, {} as any);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

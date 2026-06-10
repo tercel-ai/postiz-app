@@ -497,6 +497,14 @@ export class GenerateDraftDto {
   @Min(2)
   @Type(() => Number)
   outputLength?: number;
+
+  // Reply length tier — the credit-pricing dimension (Short/Medium/Long →
+  // base × multiplier). Also drives the generation target when outputLength is
+  // not given explicitly. Defaults to 'medium' server-side when omitted.
+  @IsOptional()
+  @IsString()
+  @IsIn(['short', 'medium', 'long'])
+  length?: 'short' | 'medium' | 'long';
 }
 
 // ─── Reply Sending ────────────────────────────────────────────────────────────

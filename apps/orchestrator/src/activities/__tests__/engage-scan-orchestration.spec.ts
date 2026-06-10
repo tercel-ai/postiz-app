@@ -2,6 +2,13 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { EngageScanActivity } from '../engage-scan.activity';
 import { TokenPool } from '@gitroom/nestjs-libraries/engage/scan/token-pool';
 import type { ScanResult } from '@gitroom/nestjs-libraries/engage/scan/platform-scan-adapter';
+import { getRedditUserAbout } from '@gitroom/nestjs-libraries/engage/engage-author';
+
+// The Reddit author /about lookup hits Redis + network; stub it so _fanOutToOrg
+// enrichment is deterministic.
+vi.mock('@gitroom/nestjs-libraries/engage/engage-author', () => ({
+  getRedditUserAbout: vi.fn().mockResolvedValue({ followers: 0 }),
+}));
 
 // Builds an activity wired to a fake EngageScanCursor repo. `row` is what the
 // claim upsert returns; `claimCount` is what the IDLE→SCANNING updateMany
@@ -41,6 +48,7 @@ function scanArgs(over: Record<string, unknown> = {}) {
     scanKey: '__global__',
     scope: { type: 'keyword' },
     keywords: ['AI'],
+    cadenceMs: 24 * 3_600_000,
     xPool: new TokenPool(['tkn']),
     ...over,
   };
@@ -825,5 +833,81 @@ describe('EngageScanActivity keyword initial scans', () => {
         data: expect.objectContaining({ status: 'DONE' }),
       })
     );
+  });
+});
+
+describe('EngageScanActivity._fanOutToOrg (Reddit monitored subreddit +5 & followers)', () => {
+  // A reddit RawPost that easily clears MIN_SCORE on heat alone (so scoreTracked,
+  // not the gate, is what the assertions turn on).
+  function redditPost(over: Record<string, unknown> = {}) {
+    return {
+      id: 'reddit_p1',
+      platform: 'reddit',
+      externalPostId: 'p1',
+      externalPostUrl: 'https://www.reddit.com/r/ClaudeAI/comments/p1/',
+      channelId: 'ClaudeAI',
+      channelName: 'r/ClaudeAI',
+      authorUsername: 'redditor',
+      postContent: 'a post about AI tooling',
+      postPublishedAt: new Date(),
+      metricLikes: 0, metricReplies: 0, metricRetweets: 0, metricQuotes: 0,
+      metricBookmarks: 0, metricViews: 0, metricShares: 0, metricSaves: 0,
+      metricScore: 5000, metricUpvoteRatio: 1, metricComments: 0,
+      ...over,
+    } as any;
+  }
+
+  function orgCtx(over: Record<string, unknown> = {}) {
+    return {
+      organizationId: 'o1',
+      keywords: [{ keyword: 'AI', type: null, enabled: true }],
+      trackedAccounts: [],
+      monitoredChannels: [{ platform: 'reddit', channelId: 'ClaudeAI', enabled: true }],
+      ...over,
+    } as any;
+  }
+
+  // Drive _fanOutToOrg with the heavy collaborators stubbed; capture the
+  // ScoredPost[] handed to persistence.
+  async function run(ctx: any, posts: any[]) {
+    const { activity } = build(IDLE_ROW);
+    const persisted: any[] = [];
+    vi.spyOn(activity as any, '_classifyIntents').mockImplementation(async (p: any) => p);
+    vi.spyOn(activity as any, '_persistOpportunities').mockImplementation(
+      (async (_org: string, p: any[]) => { persisted.push(...p); }) as any
+    );
+    vi.spyOn(activity as any, '_updateKeywordHitCounts').mockResolvedValue(undefined);
+    await (activity as any)._fanOutToOrg(ctx, posts);
+    return persisted;
+  }
+
+  beforeEach(() => {
+    (getRedditUserAbout as any).mockClear();
+    (getRedditUserAbout as any).mockResolvedValue({ followers: 0 });
+  });
+
+  it('keyword post in a monitored subreddit earns scoreTracked +5', async () => {
+    const persisted = await run(orgCtx(), [redditPost()]);
+    const out = persisted.find((p) => p.externalPostId === 'p1');
+    expect(out).toBeDefined();
+    expect(out.scoreTracked).toBe(5);
+    expect(out.score).toBe(
+      out.scoreKeyword + out.scoreHeat + out.scoreAuthority + out.scoreRecency + 5
+    );
+  });
+
+  it('keyword post in a NON-monitored subreddit earns no bonus', async () => {
+    const persisted = await run(orgCtx(), [redditPost({ channelId: 'SomeOtherSub' })]);
+    const out = persisted.find((p) => p.externalPostId === 'p1');
+    expect(out.scoreTracked).toBe(0);
+  });
+
+  it('enriches authorFollowers from the cached /about lookup → authority', async () => {
+    (getRedditUserAbout as any).mockResolvedValue({ followers: 60_000 });
+    const persisted = await run(orgCtx(), [redditPost()]);
+    const out = persisted.find((p) => p.externalPostId === 'p1');
+    expect(getRedditUserAbout).toHaveBeenCalledWith('redditor', expect.any(Function));
+    expect(out.authorFollowers).toBe(60_000);
+    expect(out.scoreAuthority).toBe(15); // 60k > 50k on the follower curve
   });
 });

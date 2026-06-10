@@ -218,7 +218,10 @@ function toRawPost(p: Record<string, unknown>): RawPost {
     channelId: subreddit,
     channelName: `r/${subreddit}`,
     authorUsername: p.author as string,
-    authorFollowers: (p.subreddit_subscribers as number) ?? 0,
+    // Real author follower count is enriched per-author during fan-out (a separate
+    // /user/<name>/about lookup); the search listing only carries subreddit size,
+    // which is NOT the author's followers. `subreddit_subscribers` stays in rawData.
+    authorFollowers: undefined,
     postContent: `${p.title as string}${p.selftext ? '\n' + (p.selftext as string) : ''}`.trim(),
     postPublishedAt: new Date(((p.created_utc as number) ?? 0) * 1000),
     metricLikes: 0,

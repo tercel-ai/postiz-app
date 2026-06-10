@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Delete,
+  ForbiddenException,
   Get,
   Logger,
   NotFoundException,
@@ -65,6 +66,26 @@ const REDDIT_HARD_CHAR_LIMIT = 2000;
 function normalizeEngagePlatform(platform: string): string {
   const normalized = platform.toLowerCase();
   return normalized === 'twitter' ? 'x' : normalized;
+}
+
+// Length tier → generation target. Used only when the client doesn't pass an
+// explicit outputLength; the model clamps to the platform ceiling regardless.
+const LENGTH_TARGETS: Record<
+  'short' | 'medium' | 'long',
+  { x: number; reddit: number }
+> = {
+  short: { x: 120, reddit: 400 },
+  medium: { x: 200, reddit: REDDIT_TARGET_CHAR_LIMIT },
+  long: { x: 255, reddit: 1800 },
+};
+
+function outputLengthForLength(
+  platform: string,
+  length: 'short' | 'medium' | 'long'
+): number {
+  const normalized = normalizeEngagePlatform(platform);
+  const target = LENGTH_TARGETS[length];
+  return normalized === 'x' ? target.x : target.reddit;
 }
 
 function assertDraftWithinPlatformLimit(
@@ -384,9 +405,27 @@ export class EngageController {
     const abortController = new AbortController();
     req.on('close', () => abortController.abort());
 
+    // Length tier drives both the credit cost and (when outputLength is omitted)
+    // the generation target. Defaults to 'medium' when the client omits it.
+    const length = body.length ?? 'medium';
+
+    // The reservation written at precheck. Held so we can release it (uncount it)
+    // on any failure/abort after it was taken.
+    let reservation: { cost: number; taskId: string } | null = null;
+
     try {
       // Only generate drafts for actionable opportunities (not REPLIED/DISMISSED/EXPIRED).
       const opportunity = await this._engageService.getOpportunityForReply(org, id);
+
+      // Pre-flight gate (spec §3.3): monthly cap + credit balance must clear
+      // BEFORE any model call, and the cap-ledger row is written up front so the
+      // cap holds against concurrent requests. A block ends the stream without
+      // generating (no reservation is taken).
+      reservation = await this._engageService.reserveReplyGeneration(org, length, id);
+
+      const outputLength =
+        body.outputLength ?? outputLengthForLength(opportunity.platform, length);
+
       let draft = '';
       for await (const chunk of this._engageDraftService.generateDraft(
         opportunity,
@@ -394,21 +433,59 @@ export class EngageController {
         body.brandStrength,
         body.mentions,
         abortController.signal,
-        body.outputLength
+        outputLength
       )) {
         if (abortController.signal.aborted) break;
         draft += chunk;
       }
-      if (!abortController.signal.aborted) {
-        assertDraftWithinPlatformLimit(opportunity.platform, draft, body.outputLength);
+      if (abortController.signal.aborted) {
+        // Client gone mid-stream — uncount the reservation; nothing delivered.
+        await this._engageService.releaseReplyGeneration(reservation.taskId);
+      } else {
+        assertDraftWithinPlatformLimit(opportunity.platform, draft, outputLength);
+        // Settle only after a successful, non-aborted generation (spec §3.3).
+        // Best-effort: a billing hiccup must not fail an already-produced draft —
+        // the reservation stays counted (status reserved/unbilled) so the cap holds.
+        try {
+          await this._engageService.settleReplyGeneration(org, reservation.taskId, length, reservation.cost);
+        } catch (billErr) {
+          this.logger.error(
+            `Reply credit settle failed for opportunity ${id} (org ${org.id})`,
+            billErr instanceof Error ? billErr.stack : billErr
+          );
+        }
         res.write(`data: ${JSON.stringify({ text: draft })}\n\n`);
-      }
-      if (!abortController.signal.aborted) {
         res.write(`data: [DONE]\n\n`);
       }
     } catch (err) {
+      // Generation failed/aborted after the reservation was taken — uncount it.
+      if (reservation) {
+        await this._engageService
+          .releaseReplyGeneration(reservation.taskId)
+          .catch(() => undefined);
+      }
       if ((err as Error)?.name === 'AbortError') {
         // Client disconnected — no-op; connection is already closed
+        return;
+      }
+      // Entitlement/credit blocks surface the precise reason (cap reached,
+      // insufficient credits, …) so the UI can prompt an upgrade / top-up.
+      if (err instanceof ForbiddenException) {
+        if (!res.writableEnded) {
+          const response = err.getResponse();
+          const payload =
+            typeof response === 'object' && response !== null
+              ? (response as Record<string, unknown>)
+              : { message: response };
+          res.write(
+            `data: ${JSON.stringify({
+              error: (payload.code as string) ?? 'forbidden',
+              detail: payload,
+            })}\n\n`
+          );
+          res.write(`data: [DONE]\n\n`);
+        }
+        if (!res.writableEnded) res.end();
         return;
       }
       this.logger.error(

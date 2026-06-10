@@ -175,10 +175,21 @@ describe('engage-scorer', () => {
       expect(authOf(makePost({ authorFollowers: 500 }))).toBe(2);
     });
 
-    it('community (reddit): >1M audience → 15 (max)', () => {
+    it('reddit uses the SAME author-follower curve as X (not subreddit size)', () => {
+      // 60k author followers → 15 on the follower curve. Under the old
+      // subreddit-size curve 60k mapped to 6, so this pins the new semantics.
       expect(
-        authOf(makePost({ platform: 'reddit', authorFollowers: 2_000_000 }))
+        authOf(makePost({ platform: 'reddit', authorFollowers: 60_000 }))
       ).toBe(15);
+    });
+
+    it('reddit: typical ~0-follower author → base 2', () => {
+      expect(
+        authOf(makePost({ platform: 'reddit', authorFollowers: 0 }))
+      ).toBe(2);
+      expect(
+        authOf(makePost({ platform: 'reddit', authorFollowers: undefined }))
+      ).toBe(2);
     });
   });
 

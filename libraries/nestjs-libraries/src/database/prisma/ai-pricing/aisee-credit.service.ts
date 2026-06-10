@@ -206,6 +206,85 @@ export class AiseeCreditService {
   }
 
   /**
+   * Charge an already-created (reserved) BillingRecord on Aisee, UPDATING that
+   * row in place rather than inserting a new one. The caller owns the row's
+   * lifecycle — e.g. a usage reservation written before the work, where the row
+   * doubles as a quota ledger and must already exist (and already be counted) by
+   * charge time. Unlike deductWithItems this never creates a row.
+   *
+   * On a delivered-work charge that the Aisee call rejects or that throws, the
+   * row is marked 'unbilled' (still a real, counted reservation) rather than
+   * 'failed' — so a billing-backend outage cannot silently un-count delivered
+   * work. Throws on a transport error after marking the row, so the caller can
+   * log; success/skip return normally.
+   */
+  async deductReserved(opts: {
+    userId: string;
+    taskId: string;
+    description: string;
+    costItems: AiseeCostItem[];
+  }): Promise<AiseeDeductResponse> {
+    const totalAmount = this.sumDecimalStrings(
+      opts.costItems.map((item) => item.amount)
+    );
+
+    if (isInternalBilling()) {
+      await this._billingRecord.model.billingRecord
+        .update({ where: { taskId: opts.taskId }, data: { status: 'internal' } })
+        .catch(() => undefined);
+      return { success: true, skipped: true };
+    }
+
+    const aiseeUserId = await this.resolveOwnerUserId(opts.userId);
+
+    let deduction: AiseeDeductResponse;
+    try {
+      deduction = await this.aiseeClient.deductCredits({
+        userId: aiseeUserId,
+        amount: totalAmount,
+        taskId: opts.taskId,
+        description: opts.description,
+        data: {
+          business_type: AiseeBusinessType.ENGAGE_REPLY,
+          cost_items: opts.costItems,
+        },
+      });
+    } catch (err) {
+      // Transport failure: keep the reservation counted (unbilled), then rethrow.
+      await this._billingRecord.model.billingRecord
+        .update({
+          where: { taskId: opts.taskId },
+          data: { status: 'unbilled', error: (err as Error)?.message?.slice(0, 500) },
+        })
+        .catch(() => undefined);
+      throw err;
+    }
+
+    await this._billingRecord.model.billingRecord
+      .update({
+        where: { taskId: opts.taskId },
+        data:
+          deduction.success && !deduction.skipped
+            ? {
+                status: 'success',
+                transactionId: deduction.transactionId,
+                remainingBalance: deduction.remainingBalance,
+                debtAmount: deduction.debtAmount,
+              }
+            : deduction.skipped
+            ? { status: 'skipped' }
+            : { status: 'unbilled', error: deduction.error },
+      })
+      .catch(() => undefined);
+
+    if (deduction.success && !deduction.skipped && deduction.transactionId) {
+      this.fireConfirm(opts.taskId, 'success');
+    }
+
+    return deduction;
+  }
+
+  /**
    * Confirm a previously deducted transaction as failed — triggers refund on Aisee side.
    */
   async confirmFailed(taskId: string): Promise<void> {

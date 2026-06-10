@@ -54,7 +54,8 @@ describe('EngageService batch reply — per-post tracking', () => {
       engageRepository,
       temporalService,
       postsService,
-      overageService
+      overageService,
+      {} as any
     );
   });
 

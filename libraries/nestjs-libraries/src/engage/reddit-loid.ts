@@ -15,6 +15,8 @@
 // separate processes — each keeps its own cache.
 
 import { Agent, Dispatcher, ProxyAgent, request } from 'undici';
+import { hostname } from 'os';
+import { ioRedis } from '@gitroom/nestjs-libraries/redis/redis.service';
 
 interface LoidCache {
   cookie: string; // e.g. "loid=000000002fl2...".
@@ -90,8 +92,49 @@ let _cache: LoidCache | null = null;
 let _inflight: Promise<string | null> | null = null;
 
 const REFRESH_MS = Number(process.env.REDDIT_LOID_TTL_MS ?? 6 * 60 * 60 * 1000); // 6h
+const REFRESH_SECONDS = Math.max(1, Math.floor(REFRESH_MS / 1000));
 const MINT_UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+
+// ── L2: per-server shared loid cache (Redis) ───────────────────────────────
+// The in-memory _cache above is L1 (per process). This is L2: a host-scoped copy
+// in Redis so every process on this server shares ONE loid instead of each
+// cold-minting its own. Keyed by hostname() → per-server isolation: a loid that
+// gets flagged on one host re-mints there without disturbing the rest of the
+// fleet. When REDIS_URL is unset, ioRedis is an in-memory stub and this layer is
+// effectively a no-op (the L1 behaviour is preserved). Every call is wrapped so a
+// Redis outage degrades to L1-only — never throws into the read path.
+const LOID_REDIS_KEY = `postiz:reddit:loid:${hostname()}`;
+
+async function readSharedLoid(): Promise<LoidCache | null> {
+  try {
+    const raw = await ioRedis.get(LOID_REDIS_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw as string) as LoidCache;
+    if (parsed?.cookie && parsed.expiresAt > Date.now()) return parsed;
+    return null;
+  } catch {
+    return null; // Redis unavailable → behave as L1-only
+  }
+}
+
+async function writeSharedLoid(entry: LoidCache): Promise<void> {
+  try {
+    // EX REFRESH_SECONDS so a stale shared loid self-expires even if no process
+    // ever hits a 403 to evict it (the proactive upper bound).
+    await ioRedis.set(LOID_REDIS_KEY, JSON.stringify(entry), 'EX', REFRESH_SECONDS);
+  } catch {
+    /* Redis unavailable → L1 still serves this process */
+  }
+}
+
+async function deleteSharedLoid(): Promise<void> {
+  try {
+    await ioRedis.del(LOID_REDIS_KEY);
+  } catch {
+    /* Redis unavailable → nothing shared to drop */
+  }
+}
 
 /** Extracts the `loid=...` cookie from a request()'s set-cookie response header. */
 function extractLoid(setCookie: string | string[] | undefined): string | null {
@@ -115,10 +158,24 @@ export async function getRedditLoidCookie(): Promise<string | null> {
   if (_cache && _cache.expiresAt > Date.now()) {
     return _cache.cookie;
   }
+  // L2: the per-server shared copy — lets a freshly started/restarted process
+  // reuse the host's existing loid instead of paying a cold mint.
+  const shared = await readSharedLoid();
+  if (shared) {
+    _cache = shared;
+    return shared.cookie;
+  }
   if (_inflight) return _inflight;
 
   _inflight = (async () => {
     try {
+      // Re-check L2 inside the mint section: another process on this host may have
+      // minted while we waited — adopt theirs rather than minting a duplicate.
+      const raced = await readSharedLoid();
+      if (raced) {
+        _cache = raced;
+        return raced.cookie;
+      }
       // POST is handled by snooserv behind the WAF; the response status is
       // irrelevant (it 401/403s our grant) — we only want the loid it sets. The
       // primary attempt uses the global dispatcher (proxy when configured); if
@@ -153,7 +210,9 @@ export async function getRedditLoidCookie(): Promise<string | null> {
       await res.body.text().catch(() => undefined);
 
       if (loid) {
-        _cache = { cookie: loid, expiresAt: Date.now() + REFRESH_MS };
+        const entry: LoidCache = { cookie: loid, expiresAt: Date.now() + REFRESH_MS };
+        _cache = entry;
+        await writeSharedLoid(entry); // share the fresh loid with the rest of this host
         return loid;
       }
       return null;
@@ -168,12 +227,18 @@ export async function getRedditLoidCookie(): Promise<string | null> {
 }
 
 /**
- * Drops the cached loid so the next getRedditLoidCookie() re-mints. Call this
- * when a request still returns 403 despite carrying the cookie (the id may have
- * been rotated or flagged).
+ * Drops BOTH cache layers so the next getRedditLoidCookie() re-mints. Call this
+ * when a request still returns 403 despite carrying the cookie (the id was
+ * rotated/flagged by Reddit BEFORE its TTL elapsed — a value Redis still holds).
+ *
+ * Evicting L2 (the shared Redis key) is REQUIRED, not optional: if only L1 were
+ * cleared, the very next getRedditLoidCookie() would read the still-cached bad
+ * loid back from L2 and loop on 403 forever. Awaiting the DEL guarantees the
+ * subsequent re-mint misses both layers and fetches a genuinely fresh loid.
  */
-export function clearRedditLoidCache(): void {
+export async function clearRedditLoidCache(): Promise<void> {
   _cache = null;
+  await deleteSharedLoid();
 }
 
 /**
@@ -285,7 +350,9 @@ export async function redditPublicGet(
       // fresh connection — re-minting every time is wasteful.
       lastProxy = r;
       if (!reminted) {
-        clearRedditLoidCache();
+        // Await: the DEL must land before the next buildHeaders() re-reads L2, or
+        // it would pull the just-flagged loid straight back out of Redis.
+        await clearRedditLoidCache();
         reminted = true;
       }
       log(

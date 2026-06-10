@@ -5,14 +5,20 @@ import { EngageRepository } from '@gitroom/nestjs-libraries/engage/engage.reposi
 import { EngageIntentClassifierService } from '@gitroom/nestjs-libraries/engage/engage-intent-classifier.service';
 import {
   scorePost,
+  postMatchesKeyword,
   RawPost,
   ScoredPost,
 } from '@gitroom/nestjs-libraries/engage/engage-scorer';
+import { getRedditUserAbout } from '@gitroom/nestjs-libraries/engage/engage-author';
 import {
   PrismaRepository,
   PrismaTransaction,
 } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
 import { SettingsService } from '@gitroom/nestjs-libraries/database/prisma/settings/settings.service';
+import {
+  EngageEntitlementService,
+  DEFAULT_SCAN_INTERVAL_HOURS,
+} from '@gitroom/nestjs-libraries/engage/engage-entitlement.service';
 import { EngageKeyword, Prisma } from '@prisma/client';
 import { getRedditToken } from '@gitroom/nestjs-libraries/engage/reddit-auth';
 import { XScanAdapter } from '@gitroom/nestjs-libraries/engage/scan/x-scan-adapter';
@@ -53,16 +59,19 @@ type InitialScanRuntimeSettings = {
   budget: Record<InitialScanPlatform, { maxUnits: number; maxCalls: number }>;
 };
 
-// Per-scanType cadence (ms). A single frequent ticker calls runDueScans(); each
-// unit is scanned only when lastScanStartedAt + its cadence has elapsed (unless
-// forced). This is what makes the per-unit cursor/cooldown granularity matter:
-// a rate-limited unit recovers on the next tick after its cooldown, independent
-// of the long keyword cadence. Mirrors the repository's getOrgScanStatus.
-const CADENCE_MS: Record<ScanType, number> = {
-  keyword: Number(process.env.ENGAGE_KEYWORD_SCAN_INTERVAL_HOURS ?? 24) * 3_600_000,
-  channel: Number(process.env.ENGAGE_CHANNEL_SCAN_INTERVAL_HOURS ?? 3) * 3_600_000,
-  tracked: Number(process.env.ENGAGE_TRACKED_SCAN_INTERVAL_HOURS ?? 3) * 3_600_000,
-};
+// Scan cadence is per UNIT, derived from the owning orgs' plan entitlement
+// (scan_interval_hours): each unit's effective interval = the MIN across every
+// org that contributes it ("whoever scans most often wins" — shared data is
+// always fine to refresh sooner). A single frequent ticker calls runDueScans();
+// each unit is scanned only when lastScanStartedAt + its cadence has elapsed
+// (unless forced), so a rate-limited unit recovers on the next tick after its
+// cooldown, independent of the long base cadence. The keyword firehose is
+// bucketed by interval so Starter/Developer-only keywords (24h) aren't dragged
+// onto the Pro 6h cadence. Falls back to DEFAULT_SCAN_INTERVAL_HOURS when no
+// entitlement applies (self-hosted / billing off).
+function hoursToMs(hours: number): number {
+  return (Number.isFinite(hours) && hours > 0 ? hours : DEFAULT_SCAN_INTERVAL_HOURS) * 3_600_000;
+}
 
 // Max concurrent upserts per phase in _persistOpportunities. The posts array is
 // unbounded (union of all matched posts across keywords/subreddits) and persist
@@ -97,15 +106,6 @@ function unionKeywords(ctxs: OrgContext[]): string[] {
   return Array.from(s);
 }
 
-// Union of all monitored Reddit subreddit ids across orgs.
-function unionSubreddits(ctxs: OrgContext[]): string[] {
-  const s = new Set<string>();
-  for (const c of ctxs)
-    for (const ch of c.monitoredChannels)
-      if (ch.platform === 'reddit') s.add(ch.channelId);
-  return Array.from(s);
-}
-
 // Map of lowercased tracked username → the account records (with their org)
 // across all orgs, so each unique username is fetched once and the result
 // updates every org that tracks it.
@@ -122,6 +122,13 @@ function unionTrackedUsernames(
     }
   }
   return m;
+}
+
+// Accumulate the minimum interval-hours per key across the orgs that contribute
+// it. Used to bucket keyword units and set per-unit channel/tracked cadence.
+function minMerge(map: Map<string, number>, key: string, hours: number): void {
+  const cur = map.get(key);
+  map.set(key, cur === undefined ? hours : Math.min(cur, hours));
 }
 
 function settingRaw(
@@ -210,7 +217,8 @@ export class EngageScanActivity {
     private _tx: PrismaTransaction,
     private _scanCursor: PrismaRepository<'engageScanCursor'>,
     private _keywordInitialScan: PrismaRepository<'engageKeywordInitialScan'>,
-    private _settingsService?: SettingsService
+    private _settingsService?: SettingsService,
+    private _entitlement?: EngageEntitlementService
   ) { }
 
   private _heartbeat(progress?: unknown): void {
@@ -251,13 +259,47 @@ export class EngageScanActivity {
       initialScanSettings
     );
 
+    // Resolve each org's plan scan interval once, then derive per-unit cadence.
+    const intervalByOrg = await this._orgIntervalHours(orgContexts);
+
     const posts: RawPost[] = [
-      ...(await this._scanKeywordUnits(keywords, xPool, redditToken, force)),
-      ...(await this._scanChannelUnits(orgContexts, keywords, redditToken, force)),
-      ...(await this._scanTrackedUnits(orgContexts, keywords, xPool, force)),
+      ...(await this._scanKeywordUnits(orgContexts, intervalByOrg, xPool, redditToken, force)),
+      ...(await this._scanChannelUnits(orgContexts, intervalByOrg, keywords, redditToken, force)),
+      ...(await this._scanTrackedUnits(orgContexts, intervalByOrg, keywords, xPool, force)),
     ];
 
     await this._fanOutAndFinalize(orgContexts, posts);
+  }
+
+  // ─── Per-plan scan cadence ───────────────────────────────────────────────
+  //
+  // Resolve each enabled org's scan_interval_hours from its plan entitlement.
+  // Cached inside EngageEntitlementService, so this is cheap across a tick. When
+  // the entitlement service is absent (unit tests / billing off) every org falls
+  // back to DEFAULT_SCAN_INTERVAL_HOURS, preserving the legacy single-cadence
+  // behaviour.
+  private async _orgIntervalHours(
+    ctxs: OrgContext[]
+  ): Promise<Map<string, number>> {
+    const m = new Map<string, number>();
+    for (const c of ctxs) {
+      let hours = DEFAULT_SCAN_INTERVAL_HOURS;
+      if (this._entitlement) {
+        try {
+          hours = await this._entitlement.getScanIntervalHours(c.organizationId);
+        } catch (err) {
+          this.logger.warn(
+            `Scan interval lookup failed for org=${c.organizationId}; using ${DEFAULT_SCAN_INTERVAL_HOURS}h: ${(err as Error).message}`
+          );
+        }
+      }
+      m.set(c.organizationId, hours);
+    }
+    return m;
+  }
+
+  private _orgHours(intervalByOrg: Map<string, number>, orgId: string): number {
+    return intervalByOrg.get(orgId) ?? DEFAULT_SCAN_INTERVAL_HOURS;
   }
 
   // ─── Keyword initial scan catch-up ───────────────────────────────────────
@@ -557,46 +599,89 @@ export class EngageScanActivity {
     });
   }
 
-  // X + Reddit global keyword firehose (one cursor per platform).
+  // X + Reddit keyword firehose, bucketed by scan interval. Each keyword lands in
+  // the bucket of its MIN owning-org interval, so a keyword shared with a Pro org
+  // (6h) is scanned at 6h while Starter/Developer-only keywords stay at 24h. One
+  // cursor per (platform, bucket), keyed __global__:<hours>.
   private async _scanKeywordUnits(
-    keywords: string[],
+    orgContexts: OrgContext[],
+    intervalByOrg: Map<string, number>,
     xPool: TokenPool,
     redditToken: string | null,
     force: boolean
   ): Promise<RawPost[]> {
+    // keyword text → min interval hours across orgs that enabled it.
+    const minByKeyword = new Map<string, number>();
+    for (const c of orgContexts) {
+      const hours = this._orgHours(intervalByOrg, c.organizationId);
+      for (const k of c.keywords) minMerge(minByKeyword, k.keyword, hours);
+    }
+    // Group keywords into interval buckets.
+    const buckets = new Map<number, string[]>();
+    for (const [keyword, hours] of minByKeyword) {
+      const arr = buckets.get(hours) ?? [];
+      arr.push(keyword);
+      buckets.set(hours, arr);
+    }
+
     const posts: RawPost[] = [];
-    for (const platform of ['x', 'reddit'] as const) {
-      const r = await this._scanUnit({
-        platform,
-        scanType: 'keyword',
-        scanKey: KEYWORD_GLOBAL_SCAN_KEY,
-        scope: { type: 'keyword' },
-        keywords,
-        force,
-        xPool: platform === 'x' ? xPool : undefined,
-        redditToken: platform === 'reddit' ? redditToken : null,
-      });
-      posts.push(...r.posts);
+    for (const [hours, bucketKeywords] of buckets) {
+      if (!bucketKeywords.length) continue;
+      const cadenceMs = hoursToMs(hours);
+      for (const platform of ['x', 'reddit'] as const) {
+        const r = await this._scanUnit({
+          platform,
+          scanType: 'keyword',
+          // Bucketed key. NOTE: this replaced a single bare `__global__` cursor.
+          // On upgrade, any pre-existing bare-`__global__` keyword cursor row is
+          // orphaned (no writer/reader references it again); each new bucket
+          // starts from a null cursor and re-scans once within the recent,
+          // SCAN_MAX_CALLS-bounded window (no full-history storm — X has no
+          // since_id, upserts dedup on platform_externalPostId). Self-healing;
+          // intentional. To preserve the old incremental position instead, run a
+          // one-off: UPDATE "EngageScanCursor" SET "scanKey"='__global__:24'
+          //          WHERE "scanType"='keyword' AND "scanKey"='__global__';
+          scanKey: `${KEYWORD_GLOBAL_SCAN_KEY}:${hours}`,
+          scope: { type: 'keyword' },
+          keywords: bucketKeywords,
+          cadenceMs,
+          force,
+          xPool: platform === 'x' ? xPool : undefined,
+          redditToken: platform === 'reddit' ? redditToken : null,
+        });
+        posts.push(...r.posts);
+      }
     }
     return posts;
   }
 
-  // One unit per monitored subreddit (keywords OR-batched, restrict_sr).
+  // One unit per monitored subreddit (keywords OR-batched, restrict_sr). Cadence
+  // = min interval across the orgs monitoring that subreddit.
   private async _scanChannelUnits(
     orgContexts: OrgContext[],
+    intervalByOrg: Map<string, number>,
     keywords: string[],
     redditToken: string | null,
     force: boolean
   ): Promise<RawPost[]> {
+    const minBySubreddit = new Map<string, number>();
+    for (const c of orgContexts) {
+      const hours = this._orgHours(intervalByOrg, c.organizationId);
+      for (const ch of c.monitoredChannels) {
+        if (ch.platform === 'reddit') minMerge(minBySubreddit, ch.channelId, hours);
+      }
+    }
+
     const posts: RawPost[] = [];
     const scanned: string[] = [];
-    for (const subreddit of unionSubreddits(orgContexts)) {
+    for (const [subreddit, hours] of minBySubreddit) {
       const r = await this._scanUnit({
         platform: 'reddit',
         scanType: 'channel',
         scanKey: subreddit,
         scope: { type: 'channel', key: subreddit },
         keywords,
+        cadenceMs: hoursToMs(hours),
         redditToken,
         force,
       });
@@ -609,15 +694,25 @@ export class EngageScanActivity {
     return posts;
   }
 
-  // One unit per unique tracked username (from:user + keywords).
+  // One unit per unique tracked username (from:user + keywords). Cadence = min
+  // interval across the orgs tracking that username.
   private async _scanTrackedUnits(
     orgContexts: OrgContext[],
+    intervalByOrg: Map<string, number>,
     keywords: string[],
     xPool: TokenPool,
     force: boolean
   ): Promise<RawPost[]> {
     if (!xPool.size) return [];
     const accounts = unionTrackedUsernames(orgContexts);
+    // username (lowercased) → min interval hours across tracking orgs.
+    const minByUsername = new Map<string, number>();
+    for (const c of orgContexts) {
+      const hours = this._orgHours(intervalByOrg, c.organizationId);
+      for (const a of c.trackedAccounts) {
+        minMerge(minByUsername, a.username.toLowerCase(), hours);
+      }
+    }
     const posts: RawPost[] = [];
     for (const [username, records] of accounts) {
       const r = await this._scanUnit({
@@ -626,6 +721,9 @@ export class EngageScanActivity {
         scanKey: username,
         scope: { type: 'tracked', key: username },
         keywords,
+        cadenceMs: hoursToMs(
+          minByUsername.get(username) ?? DEFAULT_SCAN_INTERVAL_HOURS
+        ),
         xPool,
         force,
       });
@@ -651,6 +749,8 @@ export class EngageScanActivity {
     scanKey: string;
     scope: ScanScope;
     keywords: string[];
+    /** Effective cadence for this unit (derived from owning orgs' plan). */
+    cadenceMs: number;
     force?: boolean;
     xPool?: TokenPool;
     redditToken?: string | null;
@@ -659,7 +759,7 @@ export class EngageScanActivity {
       args.platform,
       args.scanType,
       args.scanKey,
-      CADENCE_MS[args.scanType],
+      args.cadenceMs,
       args.force ?? false
     );
     // Not due yet, cooling down, or already SCANNING (single-flight).
@@ -847,13 +947,31 @@ export class EngageScanActivity {
     const trackedUsernames = new Set(
       ctx.trackedAccounts.map((a) => a.username.toLowerCase())
     );
-
-    // Mark X posts from this org's tracked accounts so the scorer adds the +5 bonus.
-    const orgPosts = allRaw.map((p) =>
-      p.platform === 'x' && trackedUsernames.has(p.authorUsername.toLowerCase())
-        ? { ...p, isFromTrackedAccount: true }
-        : p
+    // Subreddits this org monitors → a Reddit post landing in one earns the +5
+    // tracked bonus (重点频道命中), parallel to X tracked accounts. Fires regardless
+    // of scan path (keyword OR channel scan) because channelId is the subreddit on
+    // every Reddit RawPost.
+    const monitoredSubreddits = new Set(
+      ctx.monitoredChannels
+        .filter((c) => c.platform === 'reddit')
+        .map((c) => c.channelId.toLowerCase())
     );
+
+    // Mark posts from this org's tracked sources so the scorer adds the +5 bonus.
+    const orgPosts = allRaw.map((p) => {
+      const tracked =
+        (p.platform === 'x' &&
+          trackedUsernames.has(p.authorUsername.toLowerCase())) ||
+        (p.platform === 'reddit' &&
+          !!p.channelId &&
+          monitoredSubreddits.has(p.channelId.toLowerCase()));
+      return tracked ? { ...p, isFromTrackedAccount: true } : p;
+    });
+
+    // Enrich Reddit posts with the author's REAL follower count (drives authority).
+    // Only for keyword-matching posts (skip ones that will be dropped) and deduped
+    // by author; the L1+L2 cache makes this ≤1 /about per author per TTL fleet-wide.
+    await this._enrichRedditAuthorFollowers(orgPosts, orgKeywords);
 
     const matched = orgPosts
       .map((p) => scorePost(p, orgKeywords))
@@ -875,6 +993,55 @@ export class EngageScanActivity {
     // (isolated via allSettled), so it is NOT repeated here — keeping it here too
     // would double the work and, more importantly, couple expiry to fan-out
     // success when expiry must run even if this org's persist threw.
+  }
+
+  /**
+   * Fill `authorFollowers` on keyword-matching Reddit posts with the author's real
+   * follower count (u/<name> profile subscribers). Reddit search listings don't
+   * carry author profile data, so this is a per-author /user/<name>/about lookup —
+   * deduped by author and served from the L1+L2 cache (getRedditUserAbout), so the
+   * network cost is at most one request per author per TTL across the fleet.
+   * Mutates posts in place (authorFollowers is objective/global). Best-effort:
+   * authors that fail to resolve stay undefined → authority floor of 2.
+   */
+  private async _enrichRedditAuthorFollowers(
+    posts: RawPost[],
+    keywords: OrgContext['keywords']
+  ): Promise<void> {
+    const targets = posts.filter(
+      (p) =>
+        p.platform === 'reddit' &&
+        p.authorFollowers == null &&
+        !!p.authorUsername &&
+        p.authorUsername !== '[deleted]' &&
+        keywords.some((k) => k.enabled && postMatchesKeyword(p.postContent, k.keyword))
+    );
+    if (!targets.length) return;
+
+    const uniqueAuthors = [...new Set(targets.map((p) => p.authorUsername))];
+    const followersByAuthor = new Map<string, number>();
+    await Promise.all(
+      uniqueAuthors.map(async (author) => {
+        try {
+          const about = await getRedditUserAbout(author, (m) =>
+            this.logger.warn(`reddit author followers (${author}): ${m}`)
+          );
+          if (typeof about?.followers === 'number') {
+            followersByAuthor.set(author, about.followers);
+          }
+        } catch (err) {
+          this.logger.warn(
+            `reddit author followers lookup failed for ${author}: ${
+              err instanceof Error ? err.message : String(err)
+            }`
+          );
+        }
+      })
+    );
+    for (const p of targets) {
+      const f = followersByAuthor.get(p.authorUsername);
+      if (f !== undefined) p.authorFollowers = f;
+    }
   }
 
   // ─── Intent classification ────────────────────────────────────────────────
@@ -951,6 +1118,9 @@ export class EngageScanActivity {
               rawData: post.rawData != null ? (post.rawData as Prisma.InputJsonValue) : null,
             },
             update: {
+              // authorFollowers is enriched per-author and may have been null on a
+              // prior scan (WAF/deleted) — refresh it so authority self-heals.
+              authorFollowers: post.authorFollowers ?? null,
               scoreHeat: post.scoreHeat,
               scoreAuthority: post.scoreAuthority,
               scoreRecency: post.scoreRecency,

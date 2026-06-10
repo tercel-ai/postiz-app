@@ -52,6 +52,7 @@ import { PostReleaseService } from '@gitroom/nestjs-libraries/database/prisma/po
 import { PostOverageService } from '@gitroom/nestjs-libraries/database/prisma/posts/post-overage.service';
 import { EngageRepository } from '@gitroom/nestjs-libraries/engage/engage.repository';
 import { EngageService } from '@gitroom/nestjs-libraries/engage/engage.service';
+import { EngageEntitlementService } from '@gitroom/nestjs-libraries/engage/engage-entitlement.service';
 import { EngageIntentClassifierService } from '@gitroom/nestjs-libraries/engage/engage-intent-classifier.service';
 import { EngageDraftService } from '@gitroom/nestjs-libraries/engage/engage-draft.service';
 
@@ -115,6 +116,7 @@ import { EngageDraftService } from '@gitroom/nestjs-libraries/engage/engage-draf
     PostOverageService,
     EngageRepository,
     EngageService,
+    EngageEntitlementService,
     EngageIntentClassifierService,
     EngageDraftService,
   ],

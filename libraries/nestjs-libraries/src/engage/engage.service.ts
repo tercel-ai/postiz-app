@@ -13,6 +13,10 @@ import { EngageRepository } from '@gitroom/nestjs-libraries/engage/engage.reposi
 import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.service';
 import { PostOverageService } from '@gitroom/nestjs-libraries/database/prisma/posts/post-overage.service';
 import {
+  EngageEntitlementService,
+  ReplyLength,
+} from '@gitroom/nestjs-libraries/engage/engage-entitlement.service';
+import {
   AddKeywordDto,
   AddKeywordsBulkDto,
   AddMonitoredChannelDto,
@@ -81,7 +85,8 @@ export class EngageService implements OnApplicationBootstrap {
     private _engageRepository: EngageRepository,
     private _temporalService: TemporalService,
     private _postsService: PostsService,
-    private _postOverageService: PostOverageService
+    private _postOverageService: PostOverageService,
+    private _entitlementService: EngageEntitlementService
   ) { }
 
   // Auto-start global workflows on every app boot so pnpm dev / Docker restart
@@ -93,16 +98,24 @@ export class EngageService implements OnApplicationBootstrap {
   // ─── Config ───────────────────────────────────────────────────────────────
 
   async getConfig(org: Organization) {
+    const entitlement = await this._entitlementService.getEntitlementSummary(org.id);
+    const scanIntervalHours = entitlement.limits.scanIntervalHours;
     const [config, scanStatus] = await Promise.all([
       this._engageRepository.getOrCreateConfig(org.id),
-      this._engageRepository.getOrgScanStatus(org.id),
+      this._engageRepository.getOrgScanStatus(org.id, scanIntervalHours),
     ]);
     return {
       ...config,
+      // Plan limits + current usage + reply pricing, so the frontend can disable
+      // entrypoints and show usage. Backend asserts remain the source of truth.
+      entitlement,
+      // Single per-plan scan cadence applied to keyword/channel/tracked alike.
+      // Legacy per-type keys kept for frontend compatibility (all equal now).
       scanIntervals: {
-        keywordHours: Number(process.env.ENGAGE_KEYWORD_SCAN_INTERVAL_HOURS ?? 24),
-        channelHours: Number(process.env.ENGAGE_CHANNEL_SCAN_INTERVAL_HOURS ?? 3),
-        trackedHours: Number(process.env.ENGAGE_TRACKED_SCAN_INTERVAL_HOURS ?? 3),
+        scanIntervalHours,
+        keywordHours: scanIntervalHours,
+        channelHours: scanIntervalHours,
+        trackedHours: scanIntervalHours,
       },
       // Per-org last/next scan timing (derived from EngageScanCursor). Overall +
       // per-type (keyword / channel / tracked). next is derived, never stored.
@@ -139,16 +152,25 @@ export class EngageService implements OnApplicationBootstrap {
   // ─── Keywords ─────────────────────────────────────────────────────────────
 
   async addKeyword(org: Organization, dto: AddKeywordDto) {
+    await this._entitlementService.assertCanActivate(org.id, 'keyword', 1);
     const config = await this._engageRepository.getOrCreateConfig(org.id);
     return this._engageRepository.addKeyword(config.id, org.id, dto);
   }
 
   async addKeywordsBulk(org: Organization, dto: AddKeywordsBulkDto) {
+    await this._entitlementService.assertCanActivate(
+      org.id,
+      'keyword',
+      dto.keywords.length
+    );
     const config = await this._engageRepository.getOrCreateConfig(org.id);
     return this._engageRepository.addKeywordsBulk(config.id, org.id, dto);
   }
 
   async updateKeyword(org: Organization, id: string, dto: UpdateKeywordDto) {
+    if (dto.enabled === true) {
+      await this._entitlementService.assertCanEnable(org.id, 'keyword', id);
+    }
     return this._engageRepository.updateKeyword(org.id, id, dto);
   }
 
@@ -167,6 +189,7 @@ export class EngageService implements OnApplicationBootstrap {
   }
 
   async addMonitoredChannel(org: Organization, dto: AddMonitoredChannelDto) {
+    await this._entitlementService.assertCanActivate(org.id, 'subreddit', 1);
     const config = await this._engageRepository.getOrCreateConfig(org.id);
     return this._engageRepository.addMonitoredChannel(
       config.id,
@@ -180,6 +203,9 @@ export class EngageService implements OnApplicationBootstrap {
     id: string,
     dto: UpdateMonitoredChannelDto
   ) {
+    if (dto.enabled === true) {
+      await this._entitlementService.assertCanEnable(org.id, 'subreddit', id);
+    }
     return this._engageRepository.updateMonitoredChannel(org.id, id, dto);
   }
 
@@ -202,6 +228,7 @@ export class EngageService implements OnApplicationBootstrap {
   }
 
   async addTrackedAccount(org: Organization, dto: AddTrackedAccountDto) {
+    await this._entitlementService.assertCanActivate(org.id, 'tracked', 1);
     const config = await this._engageRepository.getOrCreateConfig(org.id);
     return this._engageRepository.addTrackedAccount(config.id, org.id, dto);
   }
@@ -211,6 +238,9 @@ export class EngageService implements OnApplicationBootstrap {
     id: string,
     dto: UpdateTrackedAccountDto
   ) {
+    if (dto.enabled === true) {
+      await this._entitlementService.assertCanEnable(org.id, 'tracked', id);
+    }
     return this._engageRepository.updateTrackedAccount(org.id, id, dto);
   }
 
@@ -264,6 +294,46 @@ export class EngageService implements OnApplicationBootstrap {
 
   async getOpportunityForReply(org: Organization, id: string) {
     return this._engageRepository.getOpportunityForReply(org.id, id);
+  }
+
+  // ─── Reply-draft billing (the only credit-charging action in engage) ───────
+
+  /**
+   * Reserve a reply generation before any model call: monthly cap + credit
+   * balance, writing the cap-ledger row up front. Throws ForbiddenException
+   * (typed code) when blocked. Returns the length-based cost AND the reservation
+   * taskId — the caller MUST later settle (success) or release (failure/abort).
+   */
+  async reserveReplyGeneration(
+    org: Organization,
+    length: ReplyLength,
+    opportunityId: string
+  ) {
+    return this._entitlementService.reserveReplyGeneration(
+      org.id,
+      length,
+      opportunityId
+    );
+  }
+
+  /** Settle a reserved reply after a successful generation (charges credits). */
+  async settleReplyGeneration(
+    org: Organization,
+    taskId: string,
+    length: ReplyLength,
+    cost: number
+  ): Promise<void> {
+    await this._entitlementService.settleReplyGeneration(
+      org.id,
+      taskId,
+      length,
+      cost
+    );
+  }
+
+  /** Release a reservation when generation failed/aborted (uncounts it). */
+  async releaseReplyGeneration(taskId: string): Promise<void> {
+    await this._entitlementService.releaseReplyGeneration(taskId);
   }
 
   // ─── Sent Replies ─────────────────────────────────────────────────────────
@@ -348,20 +418,52 @@ export class EngageService implements OnApplicationBootstrap {
     // The backfill URL is mandatory here, so always validate format + reachability.
     const platform = await this._engageRepository.getSentReplyPlatform(org.id, sentReplyId);
     await this._validateReplyUrl(platform, url);
-    const engageAuthor =
-      platform === 'x'
-        ? (await this._postsService.fetchEngageXAuthor(org.id, url)) ?? undefined
-        : platform === 'reddit'
-        ? (await fetchRedditAuthorProfile(url, (message) =>
-            this.logger.warn(`submitManualReplyUrl: ${message}`)
-          )) ?? undefined
-        : undefined;
-    if (platform === 'reddit' && !engageAuthor) {
-      this.logger.warn(
-        `submitManualReplyUrl: could not resolve Reddit reply author for sentReplyId=${sentReplyId}`
-      );
-    }
-    return this._engageRepository.updateReplyUrl(org.id, sentReplyId, url, engageAuthor);
+    // Save the URL immediately: metrics sync only needs the parseable id from the
+    // URL (and X's integration resolution, both done in updateReplyUrl), NOT the
+    // author. The author/avatar lookup is slow (1–2 Reddit hops behind a WAF) and
+    // display-only, so resolve + persist it out of band — a slow/failing lookup
+    // must never block saving the reply URL.
+    const result = await this._engageRepository.updateReplyUrl(org.id, sentReplyId, url);
+    this._storeReplyAuthorInBackground(org.id, sentReplyId, platform, url);
+    return result;
+  }
+
+  /**
+   * Resolve the reply's author (handle + avatar/name) and persist it to
+   * settings.engageAuthor — OUT OF BAND, fire-and-forget. The lookup is slow
+   * (Reddit: comment→author then author→/about, each behind the loid/WAF path) and
+   * purely cosmetic, so callers save the URL first and invoke this without
+   * awaiting. Never throws — failures are logged and the reply keeps its URL with
+   * no author (the replies list simply shows no avatar/name until a later retry).
+   */
+  private _storeReplyAuthorInBackground(
+    orgId: string,
+    sentReplyId: string,
+    platform: string,
+    url: string
+  ): void {
+    void (async () => {
+      let engageAuthor: EngageAuthorProfile | null = null;
+      if (platform === 'x') {
+        engageAuthor = (await this._postsService.fetchEngageXAuthor(orgId, url)) ?? null;
+      } else if (platform === 'reddit') {
+        engageAuthor = await fetchRedditAuthorProfile(url, (message) =>
+          this.logger.warn(`storeReplyAuthor: ${message}`)
+        );
+      }
+      if (!engageAuthor) {
+        this.logger.warn(
+          `storeReplyAuthor: could not resolve ${platform} reply author for sentReplyId=${sentReplyId}`
+        );
+        return;
+      }
+      await this._engageRepository.updateReplyAuthor(orgId, sentReplyId, engageAuthor);
+    })().catch((err) =>
+      this.logger.error(
+        `storeReplyAuthor: background author enrichment failed for sentReplyId=${sentReplyId}:`,
+        err instanceof Error ? err.stack : err
+      )
+    );
   }
 
   /**
@@ -946,26 +1048,10 @@ export class EngageService implements OnApplicationBootstrap {
       if (body.replyUrl) {
         await this._validateReplyUrl(opp.platform, body.replyUrl);
       }
-      // Best-effort: record who posted the reply (the URL author), independent of
-      // which connected account — if any — is attached as integrationId. X derives
-      // the handle from the URL; Reddit resolves the comment's author via its id.
-      let engageAuthor: EngageAuthorProfile | undefined;
-      if (body.replyUrl) {
-        if (opp.platform === 'x') {
-          engageAuthor =
-            (await this._postsService.fetchEngageXAuthor(org.id, body.replyUrl)) ?? undefined;
-        } else if (opp.platform === 'reddit') {
-          engageAuthor =
-            (await fetchRedditAuthorProfile(body.replyUrl, (message) =>
-              this.logger.warn(`confirmManualReply: ${message}`)
-            )) ?? undefined;
-          if (!engageAuthor) {
-            this.logger.warn(
-              `confirmManualReply: could not resolve Reddit reply author for opportunityId=${opportunityId}`
-            );
-          }
-        }
-      }
+      // The reply author (handle + avatar) is recorded out of band after the
+      // EngageSentReply exists — see _storeReplyAuthorInBackground below. Resolving
+      // it here would make the user wait on 1–2 slow Reddit hops just to confirm a
+      // reply, so the post is created without it and enriched asynchronously.
       const post =
         opp.platform === 'x'
           ? await this._engageRepository.createManualXPost({
@@ -974,14 +1060,12 @@ export class EngageService implements OnApplicationBootstrap {
               date: new Date(),
               replyUrl: body.replyUrl,
               integrationId: body.integrationId,
-              engageAuthor,
             })
           : await this._engageRepository.createManualRedditPost({
               organizationId: org.id,
               content: body.draftContent,
               date: new Date(),
               replyUrl: body.replyUrl,
-              engageAuthor,
             });
       postId = post.id;
     } catch (err) {
@@ -1018,6 +1102,11 @@ export class EngageService implements OnApplicationBootstrap {
         postId,
         inputData: { strategy: body.strategy, brandStrength: body.brandStrength },
       });
+      // Now that the reply row exists, resolve + persist its author out of band.
+      // Only when a URL was supplied — without one there's nothing to look up.
+      if (body.replyUrl) {
+        this._storeReplyAuthorInBackground(org.id, sentReply.id, opp.platform, body.replyUrl);
+      }
       await this.startMetricsSyncForReply(sentReply.id);
       return sentReply;
     } catch (err) {
