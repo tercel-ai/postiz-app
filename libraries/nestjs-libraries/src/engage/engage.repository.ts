@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma, EngageOpportunity, EngageOpportunityStatus } from '@prisma/client';
 import { PrismaRepository, PrismaTransaction } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
 import {
@@ -36,6 +36,38 @@ dayjs.extend(utc);
 // org's plan scan_interval_hours, passed in by the caller (single interval for
 // keyword/channel/tracked alike); falls back to DEFAULT_SCAN_INTERVAL_HOURS.
 const INITIAL_SCAN_PLATFORMS = ['reddit', 'x'] as const;
+
+// Only NEW/AUTO_QUEUED opportunities can be replied to. Every other status is a
+// terminal/non-actionable state — map each to a precise, human-readable reason
+// (code + message) so the reply gate can tell the user *why* generation is
+// blocked instead of a generic 404. The gate trusts this persisted status; it
+// never recomputes expiry from the post's age.
+const NON_ACTIONABLE_REPLY_REASONS: Record<
+  EngageOpportunityStatus,
+  { code: string; message: string } | null
+> = {
+  NEW: null,
+  AUTO_QUEUED: null,
+  EXPIRED: {
+    code: 'engage_opportunity_expired',
+    message:
+      'This opportunity has expired and can no longer be replied to. It dropped out of the actionable feed because it is no longer fresh.',
+  },
+  REPLIED: {
+    code: 'engage_opportunity_replied',
+    message: 'You have already replied to this opportunity.',
+  },
+  SCHEDULED: {
+    code: 'engage_opportunity_scheduled',
+    message:
+      'A reply to this opportunity is already scheduled. Cancel the scheduled reply before generating a new draft.',
+  },
+  DISMISSED: {
+    code: 'engage_opportunity_dismissed',
+    message:
+      'This opportunity was dismissed. Restore it from the feed before replying.',
+  },
+};
 
 export interface ScanTiming {
   lastScanAt: Date | null; // most recent successful completion
@@ -1277,8 +1309,16 @@ export class EngageRepository {
       },
       include: { opportunity: true },
     });
-    if (!row || !['NEW', 'AUTO_QUEUED'].includes(row.status)) {
-      throw new NotFoundException('Opportunity not found or already replied');
+    if (!row) {
+      throw new NotFoundException('Opportunity not found');
+    }
+    // Gate purely on the persisted status — never recompute expiry from the
+    // post's age here. Every non-actionable status (EXPIRED/REPLIED/SCHEDULED/
+    // DISMISSED) surfaces its own precise reason so the UI can tell the user why
+    // generation is blocked, instead of a generic 404.
+    const blockReason = NON_ACTIONABLE_REPLY_REASONS[row.status];
+    if (blockReason) {
+      throw new ForbiddenException(blockReason);
     }
     return this._merge(row);
   }

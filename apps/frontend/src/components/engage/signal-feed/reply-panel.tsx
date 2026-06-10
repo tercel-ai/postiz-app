@@ -172,9 +172,20 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
           const data = line.slice(6).trim();
           if (data === '[DONE]') { done_signal = true; break; }
           try {
-            const parsed = JSON.parse(data) as { text?: string; error?: string };
+            const parsed = JSON.parse(data) as {
+              text?: string;
+              error?: string;
+              detail?: { message?: string };
+            };
             if (parsed.error) {
-              toaster.show(`Generation error: ${parsed.error}`, 'warning');
+              // Gate blocks (expired opportunity, monthly cap, insufficient
+              // credits) carry a human-readable reason in `detail.message` —
+              // prefer it so the user sees *why* generation was refused, not
+              // just the raw error code.
+              toaster.show(
+                parsed.detail?.message ?? `Generation error: ${parsed.error}`,
+                'warning'
+              );
               done_signal = true;
               break;
             }

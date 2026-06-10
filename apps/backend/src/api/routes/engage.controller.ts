@@ -383,8 +383,8 @@ export class EngageController {
   // Claude Sonnet streaming completion; without a cap an authenticated user
   // can replay the request and bleed Anthropic spend.
   @ApiOperation({ summary: 'Stream an AI-generated reply draft via SSE (text/event-stream)' })
-  @ApiResponse({ status: 200, description: 'SSE stream of text chunks; ends with [DONE]' })
-  @ApiResponse({ status: 404, description: 'Opportunity not found or already replied' })
+  @ApiResponse({ status: 200, description: 'SSE stream of text chunks; ends with [DONE]. Non-actionable statuses (expired/replied/scheduled/dismissed) end the stream with a typed error frame carrying a human-readable reason.' })
+  @ApiResponse({ status: 404, description: 'Opportunity not found' })
   @ApiResponse({ status: 429, description: 'Rate limit exceeded (20/hour)' })
   @Throttle({ default: { limit: 20, ttl: 3_600_000 } })
   @Post('/opportunities/:id/draft')
@@ -468,8 +468,9 @@ export class EngageController {
         // Client disconnected — no-op; connection is already closed
         return;
       }
-      // Entitlement/credit blocks surface the precise reason (cap reached,
-      // insufficient credits, …) so the UI can prompt an upgrade / top-up.
+      // Gate blocks surface the precise reason (opportunity expired, monthly
+      // cap reached, insufficient credits, …) so the UI can show why generation
+      // was refused and prompt the right next step (upgrade / top-up).
       if (err instanceof ForbiddenException) {
         if (!res.writableEnded) {
           const response = err.getResponse();

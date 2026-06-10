@@ -23,6 +23,7 @@ function buildRepo() {
   const stateCount = vi.fn();
   const stateAggregate = vi.fn();
   const stateFindFirst = vi.fn();
+  const stateFindUnique = vi.fn();
   const oppAggregate = vi.fn();
   const oppFindFirst = vi.fn();
   const channelFindMany = vi.fn();
@@ -52,6 +53,7 @@ function buildRepo() {
         count: stateCount,
         aggregate: stateAggregate,
         findFirst: stateFindFirst,
+        findUnique: stateFindUnique,
       },
     },
   } as any;
@@ -79,7 +81,7 @@ function buildRepo() {
     scanCursor      // _scanCursor
   );
   return {
-    repo, stateFindMany, stateCount, stateAggregate, stateFindFirst,
+    repo, stateFindMany, stateCount, stateAggregate, stateFindFirst, stateFindUnique,
     oppAggregate, oppFindFirst, channelFindMany, trackedFindMany, cursorFindMany,
     sentCount, sentFindMany, postAggregate, postFindMany,
   };
@@ -1627,5 +1629,54 @@ describe('EngageRepository.getOrgScanStatus', () => {
         }),
       })
     );
+  });
+
+  describe('getOpportunityForReply — status gate (no time-based expiry)', () => {
+    it('returns the merged opportunity for an actionable NEW row', async () => {
+      const { repo, stateFindUnique } = buildRepo();
+      stateFindUnique.mockResolvedValue({ ...STATE_ROW, status: 'NEW' });
+
+      const opp = (await repo.getOpportunityForReply('org1', 'opp1')) as any;
+      expect(opp.id).toBe('opp1');
+      expect(opp.status).toBe('NEW');
+    });
+
+    it('allows an AUTO_QUEUED row', async () => {
+      const { repo, stateFindUnique } = buildRepo();
+      stateFindUnique.mockResolvedValue({ ...STATE_ROW, status: 'AUTO_QUEUED' });
+
+      const opp = (await repo.getOpportunityForReply('org1', 'opp1')) as any;
+      expect(opp.id).toBe('opp1');
+    });
+
+    it.each([
+      ['EXPIRED', 'engage_opportunity_expired', 'expired'],
+      ['REPLIED', 'engage_opportunity_replied', 'already replied'],
+      ['SCHEDULED', 'engage_opportunity_scheduled', 'already scheduled'],
+      ['DISMISSED', 'engage_opportunity_dismissed', 'dismissed'],
+    ])(
+      'blocks a %s row with a typed reason instead of a generic 404',
+      async (status, code, reasonFragment) => {
+        const { repo, stateFindUnique } = buildRepo();
+        stateFindUnique.mockResolvedValue({ ...STATE_ROW, status });
+
+        await expect(repo.getOpportunityForReply('org1', 'opp1')).rejects.toMatchObject({
+          // ForbiddenException — surfaced as a typed code + human reason so the
+          // UI can tell the user why generation is blocked.
+          response: {
+            code,
+            message: expect.stringContaining(reasonFragment),
+          },
+        });
+      }
+    );
+
+    it('404s only a genuinely missing row', async () => {
+      const { repo, stateFindUnique } = buildRepo();
+      stateFindUnique.mockResolvedValue(null);
+      await expect(repo.getOpportunityForReply('org1', 'missing')).rejects.toThrow(
+        'Opportunity not found'
+      );
+    });
   });
 });

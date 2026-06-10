@@ -96,6 +96,33 @@ describe('EngageController.generateDraft — billing contract', () => {
     expect(frames.join('')).toContain('engage_reply_cap_reached');
   });
 
+  it('blocks an EXPIRED opportunity before reserving/generating, emitting the reason frame', async () => {
+    const generateDraft = vi.fn(async function* () {
+      yield 'should not run';
+    });
+    const { controller, engageService } = build({
+      getOpportunityForReply: vi.fn(async () => {
+        throw new ForbiddenException({
+          code: 'engage_opportunity_expired',
+          message: 'This opportunity has expired and can no longer be replied to.',
+        });
+      }),
+      generateDraft,
+    });
+    const { res, frames } = makeRes();
+    const { req } = makeReq();
+
+    await controller.generateDraft(ORG, 'opp1', BODY, req, res);
+
+    // Status gate runs before billing — no reservation taken, nothing generated.
+    expect(engageService.reserveReplyGeneration).not.toHaveBeenCalled();
+    expect(generateDraft).not.toHaveBeenCalled();
+    expect(engageService.releaseReplyGeneration).not.toHaveBeenCalled();
+    // The typed code AND the human reason reach the client.
+    expect(frames.join('')).toContain('engage_opportunity_expired');
+    expect(frames.join('')).toContain('can no longer be replied to');
+  });
+
   it('releases the reservation (uncounts it) and does not settle when the client aborts mid-stream', async () => {
     const { triggerClose, req } = makeReq();
     // Abort on the first iteration, before any chunk is consumed.
