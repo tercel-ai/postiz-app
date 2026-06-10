@@ -1,29 +1,25 @@
 /**
- * Backfill Reddit opportunities after the `authorFollowers` semantics change.
+ * One-off migration for the Reddit `authorFollowers` → `channelFollowers` rename.
  *
- * Reddit rows persisted under the old design stored the SUBREDDIT member count in
- * `EngageOpportunity.authorFollowers` and derived `scoreAuthority` from it (subreddit
- * size). The new design makes `authorFollowers` the POST AUTHOR's real follower count
- * (u/<name> profile subscribers) and moves the subreddit signal into the per-org
- * `scoreTracked` +5 (monitored subreddit). This script migrates existing rows:
+ * Reddit opportunities persisted before the rename stored the SUBREDDIT member count
+ * in `EngageOpportunity.authorFollowers`. The field is now split:
+ *   - `channelFollowers` = community/channel audience size (drives Reddit authority)
+ *   - `authorFollowers`  = the post author's real followers (X only; null on Reddit)
  *
- *   For each reddit EngageOpportunity:
- *     1. re-fetch the author's real followers via getRedditUserAbout (cached /about)
- *     2. set authorFollowers = real followers; scoreAuthority = computeAuthorAuthorityScore(followers)
- *   For each of its EngageOpportunityState rows (per org):
- *     3. scoreTracked = +5 if the opportunity's subreddit is in THAT org's enabled
- *        EngageMonitoredChannel set, else 0
- *     4. score = scoreKeyword + scoreHeat + scoreAuthority + scoreRecency + scoreTracked
+ * This script, for each reddit opportunity, MOVES the value:
+ *   channelFollowers := authorFollowers ;  authorFollowers := null
+ * `scoreAuthority` is UNCHANGED — it was already computed from the subreddit size,
+ * and channelFollowers now holds that same value through the same community curve.
  *
- * Opportunities whose author cannot be resolved (Reddit WAF / [deleted]) are SKIPPED
- * (not half-migrated) and counted — re-run to retry (the L1/L2 cache + retries help).
- *
- * Match/score semantics reuse engage-scorer.ts so backfilled scores equal scan-time scores.
+ * It also applies the new monitored-subreddit +5: for each per-org state whose
+ * subreddit is in that org's enabled EngageMonitoredChannel set, sets scoreTracked=5
+ * and recomputes the total `score` (= scoreKeyword + scoreHeat + scoreAuthority +
+ * scoreRecency + scoreTracked). No Reddit network calls — pure DB, fast & idempotent.
  *
  * Usage:
- *   npx ts-node --project scripts/tsconfig.json scripts/backfill-engage-reddit-author-followers.ts --dry-run
- *   npx ts-node --project scripts/tsconfig.json scripts/backfill-engage-reddit-author-followers.ts --execute
- *   npx ts-node --project scripts/tsconfig.json scripts/backfill-engage-reddit-author-followers.ts --org <orgId> --execute
+ *   npx ts-node --project scripts/tsconfig.json scripts/backfill-engage-reddit-channel-followers.ts --dry-run
+ *   npx ts-node --project scripts/tsconfig.json scripts/backfill-engage-reddit-channel-followers.ts --execute
+ *   npx ts-node --project scripts/tsconfig.json scripts/backfill-engage-reddit-channel-followers.ts --org <orgId> --execute
  */
 
 import * as dotenv from 'dotenv';
@@ -33,9 +29,6 @@ process.env.NODE_ENV = process.env.NODE_ENV || 'production';
 process.env.TZ = 'UTC';
 
 import { PrismaClient } from '@prisma/client';
-import { computeAuthorAuthorityScore } from '@gitroom/nestjs-libraries/engage/engage-scorer';
-import { getRedditUserAbout } from '@gitroom/nestjs-libraries/engage/engage-author';
-import { ioRedis } from '@gitroom/nestjs-libraries/redis/redis.service';
 
 interface CliArgs {
   orgId: string | null;
@@ -55,7 +48,7 @@ function parseArgs(): CliArgs {
       case '--execute': dryRun = false; break;
       case '--dry-run': dryRun = true; break;
       case '--help':
-        console.log('Usage: backfill-engage-reddit-author-followers.ts [--org <id>] [--dry-run|--execute]');
+        console.log('Usage: backfill-engage-reddit-channel-followers.ts [--org <id>] [--dry-run|--execute]');
         process.exit(0);
         break;
       default:
@@ -86,7 +79,7 @@ async function monitoredSubreddits(
 async function main(): Promise<void> {
   const args = parseArgs();
 
-  console.log('=== Backfill Reddit authorFollowers + scoreAuthority + scoreTracked ===\n');
+  console.log('=== Backfill Reddit authorFollowers → channelFollowers (+ monitored +5) ===\n');
   console.log(`Mode: ${args.dryRun ? 'DRY RUN (no changes)' : 'EXECUTE'}`);
   console.log(`Org:  ${args.orgId ?? 'all'}\n`);
 
@@ -100,8 +93,8 @@ async function main(): Promise<void> {
     select: {
       id: true,
       channelId: true,
-      authorUsername: true,
       authorFollowers: true,
+      channelFollowers: true,
       scoreHeat: true,
       scoreAuthority: true,
       scoreRecency: true,
@@ -121,45 +114,32 @@ async function main(): Promise<void> {
   console.log(`Found ${opps.length} reddit opportunit${opps.length === 1 ? 'y' : 'ies'} to process.\n`);
 
   const monitoredCache = new Map<string, Set<string>>();
-  let oppsUpdated = 0;
+  let oppsMoved = 0;
   let statesUpdated = 0;
-  let skippedUnresolved = 0;
 
   for (const opp of opps) {
-    const about = await getRedditUserAbout(opp.authorUsername, () => undefined);
-    if (!about) {
-      skippedUnresolved++;
-      console.log(`  SKIP u/${opp.authorUsername} (unresolved — WAF/deleted); re-run to retry`);
-      continue;
-    }
-    const followers = about.followers;
-    const newAuthority = computeAuthorAuthorityScore(followers);
-
-    // 1+2: opportunity authorFollowers + authority
-    const oppChanged =
-      (opp.authorFollowers ?? null) !== (followers ?? null) ||
-      opp.scoreAuthority !== newAuthority;
-    if (oppChanged) {
+    // 1) Move authorFollowers → channelFollowers (idempotent: skip if already moved).
+    if (opp.authorFollowers !== null) {
+      const targetChannel = opp.channelFollowers ?? opp.authorFollowers;
       console.log(
-        `  opp=${opp.id.slice(0, 8)} r/${opp.channelId} u/${opp.authorUsername}: ` +
-        `followers ${opp.authorFollowers ?? 'null'}→${followers ?? 'null'}, authority ${opp.scoreAuthority}→${newAuthority}`
+        `  opp=${opp.id.slice(0, 8)} r/${opp.channelId}: authorFollowers ${opp.authorFollowers}→null, channelFollowers ${opp.channelFollowers ?? 'null'}→${targetChannel}`
       );
       if (!args.dryRun) {
         await prisma.engageOpportunity.update({
           where: { id: opp.id },
-          data: { authorFollowers: followers, scoreAuthority: newAuthority },
+          data: { channelFollowers: targetChannel, authorFollowers: null },
         });
       }
-      oppsUpdated++;
+      oppsMoved++;
     }
 
-    // 3+4: per-org state tracked + total
+    // 2) Apply monitored-subreddit +5 per org and recompute the total score.
     const subreddit = (opp.channelId ?? '').toLowerCase();
     for (const st of opp.states) {
       const monitored = await monitoredSubreddits(prisma, monitoredCache, st.organizationId);
       const newTracked = subreddit && monitored.has(subreddit) ? 5 : 0;
       const newScore =
-        st.scoreKeyword + opp.scoreHeat + newAuthority + opp.scoreRecency + newTracked;
+        st.scoreKeyword + opp.scoreHeat + opp.scoreAuthority + opp.scoreRecency + newTracked;
       if (st.scoreTracked !== newTracked || st.score !== newScore) {
         console.log(
           `    state[${st.organizationId.slice(0, 8)}]: tracked ${st.scoreTracked}→${newTracked}, score ${st.score}→${newScore}`
@@ -181,19 +161,15 @@ async function main(): Promise<void> {
   }
 
   console.log(
-    `\n${args.dryRun ? 'Would update' : 'Updated'}: ${oppsUpdated} opportunit${oppsUpdated === 1 ? 'y' : 'ies'}, ` +
-    `${statesUpdated} state row${statesUpdated === 1 ? '' : 's'}; skipped (unresolved): ${skippedUnresolved}` +
+    `\n${args.dryRun ? 'Would move' : 'Moved'}: ${oppsMoved} opportunit${oppsMoved === 1 ? 'y' : 'ies'}; ` +
+    `${args.dryRun ? 'would update' : 'updated'} ${statesUpdated} state row${statesUpdated === 1 ? '' : 's'}` +
     (args.dryRun ? '\n\n--- DRY RUN. Re-run with --execute to write. ---' : '')
   );
 
   await prisma.$disconnect();
 }
 
-main()
-  .catch((err) => {
-    console.error('Fatal error:', err);
-    process.exitCode = 1;
-  })
-  .finally(() => {
-    void (ioRedis as { quit?: () => Promise<unknown> }).quit?.();
-  });
+main().catch((err) => {
+  console.error('Fatal error:', err);
+  process.exit(1);
+});

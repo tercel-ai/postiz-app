@@ -1148,8 +1148,13 @@ model EngageOpportunity {
   externalPostUrl  String
   channelId        String?
   channelName      String?
+  // Community/channel audience size (e.g. Reddit subreddit_subscribers). Drives
+  // scoreAuthority on community platforms. Null on platforms without a channel (X).
+  channelFollowers Int?
   authorUsername   String
   authorDisplayName String?
+  // Post author's real follower count (X). Null on platforms where it isn't
+  // collected (Reddit — authority uses channelFollowers instead).
   authorFollowers  Int?
   authorAvatarUrl  String?
   postContent      String

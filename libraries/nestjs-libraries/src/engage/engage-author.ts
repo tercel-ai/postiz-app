@@ -1,7 +1,6 @@
 import { parseRedditCommentId } from '@gitroom/nestjs-libraries/engage/reddit-url';
 import { getRedditToken, redditAuthHeaders } from '@gitroom/nestjs-libraries/engage/reddit-auth';
 import { redditPublicGet } from '@gitroom/nestjs-libraries/engage/reddit-loid';
-import { ioRedis } from '@gitroom/nestjs-libraries/redis/redis.service';
 
 /**
  * The author of an engage reply (who actually posted it), persisted to
@@ -14,112 +13,6 @@ export interface EngageAuthorProfile {
   id?: string;
   name?: string;
   avatarUrl?: string;
-}
-
-/**
- * Parsed Reddit `/user/<name>/about` profile. `followers` is the count of accounts
- * subscribed to the user's u/<name> profile subreddit (`data.subreddit.subscribers`)
- * — Reddit's real per-user follower number, which for most redditors is ~0. Null
- * when /about is unreachable or the field is absent.
- */
-export interface RedditUserAbout {
-  id?: string;        // t2_<id>
-  name?: string;      // display name (subreddit.title)
-  avatarUrl?: string;
-  followers: number | null;
-}
-
-// ── Reddit author /about cache (L1 in-process + L2 per-server Redis) ──────────
-// Author profiles change slowly; a scan wave can reference the same author across
-// many posts and across orgs/workers. L1 dedupes within a process; L2 shares the
-// fetch across every process on the host. Keyed by lowercase username (global —
-// author followers are objective, not org-scoped). Mirrors the loid L1+L2 pattern;
-// when REDIS_URL is unset, ioRedis is an in-memory stub and L2 degrades to L1-only.
-const AUTHOR_TTL_MS = Number(process.env.ENGAGE_REDDIT_AUTHOR_TTL_MS ?? 6 * 60 * 60 * 1000); // 6h
-const AUTHOR_TTL_SECONDS = Math.max(1, Math.floor(AUTHOR_TTL_MS / 1000));
-const authorKey = (username: string) => `postiz:reddit:author:${username.toLowerCase()}`;
-
-const _authorL1 = new Map<string, { value: RedditUserAbout; expiresAt: number }>();
-
-async function readAuthorL2(username: string): Promise<RedditUserAbout | null> {
-  try {
-    const raw = await ioRedis.get(authorKey(username));
-    return raw ? (JSON.parse(raw as string) as RedditUserAbout) : null;
-  } catch {
-    return null; // Redis unavailable → behave as L1-only
-  }
-}
-
-async function writeAuthorL2(username: string, value: RedditUserAbout): Promise<void> {
-  try {
-    await ioRedis.set(authorKey(username), JSON.stringify(value), 'EX', AUTHOR_TTL_SECONDS);
-  } catch {
-    /* Redis unavailable → L1 still serves this process */
-  }
-}
-
-/** Test-only: clear the in-process L1 author cache. */
-export function _clearRedditAuthorL1(): void {
-  _authorL1.clear();
-}
-
-/**
- * Cached fetch of a Reddit user's /about profile (incl. real follower count).
- * Returns null only on hard failure (unreachable / unparseable) — a successful
- * fetch with no follower field still resolves to `{ followers: null, ... }` and is
- * cached, so we don't re-hit Reddit's WAF for the same author within the TTL.
- */
-export async function getRedditUserAbout(
-  username: string,
-  log: (m: string) => void = () => {}
-): Promise<RedditUserAbout | null> {
-  if (!username || username === '[deleted]') return null;
-
-  const l1 = _authorL1.get(username.toLowerCase());
-  if (l1 && l1.expiresAt > Date.now()) return l1.value;
-
-  const l2 = await readAuthorL2(username);
-  if (l2) {
-    _authorL1.set(username.toLowerCase(), { value: l2, expiresAt: Date.now() + AUTHOR_TTL_MS });
-    return l2;
-  }
-
-  const token = await getRedditToken();
-  const aboutRes = await redditGet(
-    `https://oauth.reddit.com/user/${username}/about`,
-    `https://www.reddit.com/user/${username}/about.json`,
-    token,
-    log
-  );
-  if (!aboutRes?.ok) return null;
-
-  let profile: RedditUserAbout;
-  try {
-    const about = JSON.parse(await aboutRes.text()) as {
-      data?: {
-        id?: string;
-        icon_img?: string;
-        snoovatar_img?: string;
-        subreddit?: { title?: string; subscribers?: number };
-      };
-    };
-    const d = about.data;
-    // Reddit serves icon_img with HTML-escaped & in the query string.
-    const rawAvatar = (d?.snoovatar_img || d?.icon_img || '').replace(/&amp;/g, '&');
-    const name = d?.subreddit?.title?.trim();
-    profile = {
-      id: d?.id ? `t2_${d.id}` : undefined,
-      name: name || undefined,
-      avatarUrl: rawAvatar || undefined,
-      followers: typeof d?.subreddit?.subscribers === 'number' ? d.subreddit.subscribers : null,
-    };
-  } catch {
-    return null; // unparseable /about → hard failure, do not cache
-  }
-
-  _authorL1.set(username.toLowerCase(), { value: profile, expiresAt: Date.now() + AUTHOR_TTL_MS });
-  await writeAuthorL2(username, profile);
-  return profile;
 }
 
 /** GET a Reddit JSON endpoint via the app-only token (oauth host, no WAF) when
@@ -190,13 +83,33 @@ export async function fetchRedditAuthorProfile(
 
   const profile: EngageAuthorProfile = { handle: author };
 
-  // 2) author → avatar + display name (best-effort; handle-only if it fails).
-  // Shares the cached /about lookup with the scan-time post-author follower path.
-  const about = await getRedditUserAbout(author, log);
-  if (about) {
-    if (about.id) profile.id = about.id;
-    if (about.name) profile.name = about.name;
-    if (about.avatarUrl) profile.avatarUrl = about.avatarUrl;
+  // 2) author → avatar + display name (best-effort; handle-only if it fails)
+  const aboutRes = await redditGet(
+    `https://oauth.reddit.com/user/${author}/about`,
+    `https://www.reddit.com/user/${author}/about.json`,
+    token,
+    log
+  );
+  if (aboutRes?.ok) {
+    try {
+      const about = JSON.parse(await aboutRes.text()) as {
+        data?: {
+          id?: string;
+          icon_img?: string;
+          snoovatar_img?: string;
+          subreddit?: { title?: string };
+        };
+      };
+      const d = about.data;
+      // Reddit serves icon_img with HTML-escaped & in the query string.
+      const rawAvatar = (d?.snoovatar_img || d?.icon_img || '').replace(/&amp;/g, '&');
+      const name = d?.subreddit?.title?.trim();
+      if (d?.id) profile.id = `t2_${d.id}`;
+      if (name) profile.name = name;
+      if (rawAvatar) profile.avatarUrl = rawAvatar;
+    } catch {
+      /* keep handle-only on unparseable /about */
+    }
   }
 
   return profile;

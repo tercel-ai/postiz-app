@@ -11,7 +11,8 @@ export interface RawPost {
   channelName?: string;
   authorUsername: string;
   authorDisplayName?: string;
-  authorFollowers?: number; // post author's real follower count (all platforms)
+  authorFollowers?: number;  // post author's real follower count (X); null on Reddit
+  channelFollowers?: number; // community/channel audience size (Reddit subreddit_subscribers)
   authorAvatarUrl?: string;
   postContent: string;
   postPublishedAt: Date;
@@ -80,11 +81,13 @@ export function scorePost(
         return computeCommunityHeatScore(post); // reddit and others
     }
   })();
-  // Authority reflects the POST AUTHOR's own following on every platform. Reddit
-  // author followers (u/<name> profile subscribers) are fetched per-author during
-  // scan; for most redditors this is ~0 → floor of 2. The "this community matters
-  // to me" signal lives in scoreTracked (+5 for a monitored subreddit), not here.
-  const scoreAuthority = computeAuthorAuthorityScore(post.authorFollowers ?? null);
+  // Authority: X-family uses the post author's real follower count; community
+  // platforms (Reddit/etc.) use the CHANNEL audience size (subreddit_subscribers),
+  // which the scan listing carries for free — no per-author lookup. The "this
+  // community is on my monitored list" signal is separate (scoreTracked +5).
+  const scoreAuthority = ['x', 'threads', 'mastodon', 'bluesky'].includes(post.platform)
+    ? computeXAuthorityScore(post.authorFollowers ?? null)
+    : computeCommunityAuthorityScore(post.channelFollowers ?? null);
   const scoreRecency = computeRecencyScore(post.postPublishedAt);
   const scoreTracked = post.isFromTrackedAccount ? 5 : 0;
   const score =
@@ -194,15 +197,22 @@ function computeCommunityHeatScore(post: RawPost): number {
 
 // ─── Authority scoring ────────────────────────────────────────────────────────
 
-// Account authority from the post author's real follower count. Used for all
-// platforms — X follower counts and Reddit u/<name> profile subscribers share the
-// same individual-influence semantics, so they share one curve. Exported so the
-// Reddit-author-followers backfill recomputes authority with identical thresholds.
-export function computeAuthorAuthorityScore(followers: number | null): number {
+// X-family account authority — the post author's own follower count.
+function computeXAuthorityScore(followers: number | null): number {
   if (!followers) return 2;
   if (followers > 50_000) return 15;
   if (followers > 10_000) return 11;
   if (followers > 1_000) return 6;
+  return 2;
+}
+
+// Community-platform authority — the CHANNEL audience size (Reddit subreddit
+// members, YouTube subscribers, etc.), not the individual author's followers.
+function computeCommunityAuthorityScore(audienceSize: number | null): number {
+  if (!audienceSize) return 2;
+  if (audienceSize > 1_000_000) return 15;
+  if (audienceSize > 100_000) return 11;
+  if (audienceSize > 10_000) return 6;
   return 2;
 }
 

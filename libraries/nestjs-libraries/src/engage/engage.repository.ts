@@ -730,6 +730,7 @@ export class EngageRepository {
       externalPostUrl: opportunity.externalPostUrl,
       channelId: opportunity.channelId,
       channelName: opportunity.channelName,
+      channelFollowers: opportunity.channelFollowers,
       authorUsername: opportunity.authorUsername,
       authorDisplayName: opportunity.authorDisplayName,
       authorFollowers: opportunity.authorFollowers,

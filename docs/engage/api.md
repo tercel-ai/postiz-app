@@ -221,17 +221,18 @@ interface EngageOpportunity {
   externalPostUrl: string;
   channelId: string | null;    // Reddit: subreddit name; X: null
   channelName: string | null;
+  channelFollowers: number | null; // Reddit: subreddit audience size (drives authority); X: null
   authorUsername: string | null;
   authorDisplayName: string | null;
   authorAvatarUrl: string | null;
-  authorFollowers: number | null; // post author's real followers, all platforms (Reddit = u/<name> profile subscribers; null if unresolved)
+  authorFollowers: number | null; // X: post author's real followers; Reddit: null (not collected)
   postContent: string;
   postPublishedAt: string;
   // Scoring (0-105) — heat/authority/recency are global; keyword/tracked/total per-org
   score: number;
   scoreKeyword: number;     // Keyword score 0-35 (关键词质量)
   scoreHeat: number;        // Heat score 0-45 (平台热度)
-  scoreAuthority: number;   // Authority score 0-15 — post author's followers (账号影响力)
+  scoreAuthority: number;   // Authority 0-15 — X: author followers; Reddit: channelFollowers (账号影响力)
   scoreRecency: number;     // Recency score 0-5: within 24h→5, else→0 (时效性)
   scoreTracked: number;     // 0 or 5: X tracked account OR Reddit monitored subreddit (重点账户/频道)
   matchedKeywords: string[]; // this org's enabled keywords the post hit (per-org; ⊆ the org's keyword set)
@@ -885,7 +886,7 @@ Total score max is 105 (scoreKeyword 35 + scoreHeat 45 + scoreAuthority 15 + sco
 |---|---|---|
 | `scoreKeyword` | 35 | 关键词质量 — keyword match strength; each hit +15 |
 | `scoreHeat` | 45 | 平台热度 — platform engagement (likes/replies/etc.) |
-| `scoreAuthority` | 15 | 账号影响力 — post author's real follower count (all platforms) |
+| `scoreAuthority` | 15 | 账号影响力 — X: author follower count; Reddit: subreddit audience size (channelFollowers) |
 | `scoreRecency` | 5 | 时效性 — freshness: 5 if within 24h, else 0 |
 | `scoreTracked` | 5 | 重点账户/频道 — 5 if X tracked account OR Reddit monitored subreddit, else 0 |
 | `score` | 105 | 总分 — sum of all dimensions |

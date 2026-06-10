@@ -5,11 +5,9 @@ import { EngageRepository } from '@gitroom/nestjs-libraries/engage/engage.reposi
 import { EngageIntentClassifierService } from '@gitroom/nestjs-libraries/engage/engage-intent-classifier.service';
 import {
   scorePost,
-  postMatchesKeyword,
   RawPost,
   ScoredPost,
 } from '@gitroom/nestjs-libraries/engage/engage-scorer';
-import { getRedditUserAbout } from '@gitroom/nestjs-libraries/engage/engage-author';
 import {
   PrismaRepository,
   PrismaTransaction,
@@ -968,11 +966,6 @@ export class EngageScanActivity {
       return tracked ? { ...p, isFromTrackedAccount: true } : p;
     });
 
-    // Enrich Reddit posts with the author's REAL follower count (drives authority).
-    // Only for keyword-matching posts (skip ones that will be dropped) and deduped
-    // by author; the L1+L2 cache makes this ≤1 /about per author per TTL fleet-wide.
-    await this._enrichRedditAuthorFollowers(orgPosts, orgKeywords);
-
     const matched = orgPosts
       .map((p) => scorePost(p, orgKeywords))
       .filter((p): p is ScoredPost => p !== null);
@@ -993,55 +986,6 @@ export class EngageScanActivity {
     // (isolated via allSettled), so it is NOT repeated here — keeping it here too
     // would double the work and, more importantly, couple expiry to fan-out
     // success when expiry must run even if this org's persist threw.
-  }
-
-  /**
-   * Fill `authorFollowers` on keyword-matching Reddit posts with the author's real
-   * follower count (u/<name> profile subscribers). Reddit search listings don't
-   * carry author profile data, so this is a per-author /user/<name>/about lookup —
-   * deduped by author and served from the L1+L2 cache (getRedditUserAbout), so the
-   * network cost is at most one request per author per TTL across the fleet.
-   * Mutates posts in place (authorFollowers is objective/global). Best-effort:
-   * authors that fail to resolve stay undefined → authority floor of 2.
-   */
-  private async _enrichRedditAuthorFollowers(
-    posts: RawPost[],
-    keywords: OrgContext['keywords']
-  ): Promise<void> {
-    const targets = posts.filter(
-      (p) =>
-        p.platform === 'reddit' &&
-        p.authorFollowers == null &&
-        !!p.authorUsername &&
-        p.authorUsername !== '[deleted]' &&
-        keywords.some((k) => k.enabled && postMatchesKeyword(p.postContent, k.keyword))
-    );
-    if (!targets.length) return;
-
-    const uniqueAuthors = [...new Set(targets.map((p) => p.authorUsername))];
-    const followersByAuthor = new Map<string, number>();
-    await Promise.all(
-      uniqueAuthors.map(async (author) => {
-        try {
-          const about = await getRedditUserAbout(author, (m) =>
-            this.logger.warn(`reddit author followers (${author}): ${m}`)
-          );
-          if (typeof about?.followers === 'number') {
-            followersByAuthor.set(author, about.followers);
-          }
-        } catch (err) {
-          this.logger.warn(
-            `reddit author followers lookup failed for ${author}: ${
-              err instanceof Error ? err.message : String(err)
-            }`
-          );
-        }
-      })
-    );
-    for (const p of targets) {
-      const f = followersByAuthor.get(p.authorUsername);
-      if (f !== undefined) p.authorFollowers = f;
-    }
   }
 
   // ─── Intent classification ────────────────────────────────────────────────
@@ -1092,6 +1036,7 @@ export class EngageScanActivity {
               externalPostUrl: post.externalPostUrl,
               channelId: post.channelId ?? null,
               channelName: post.channelName ?? null,
+              channelFollowers: post.channelFollowers ?? null,
               authorUsername: post.authorUsername,
               authorDisplayName: post.authorDisplayName ?? null,
               authorFollowers: post.authorFollowers ?? null,
@@ -1118,9 +1063,8 @@ export class EngageScanActivity {
               rawData: post.rawData != null ? (post.rawData as Prisma.InputJsonValue) : null,
             },
             update: {
-              // authorFollowers is enriched per-author and may have been null on a
-              // prior scan (WAF/deleted) — refresh it so authority self-heals.
-              authorFollowers: post.authorFollowers ?? null,
+              // Refresh the channel audience size so authority tracks subreddit growth.
+              channelFollowers: post.channelFollowers ?? null,
               scoreHeat: post.scoreHeat,
               scoreAuthority: post.scoreAuthority,
               scoreRecency: post.scoreRecency,

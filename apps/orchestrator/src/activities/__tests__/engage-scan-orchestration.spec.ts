@@ -2,13 +2,6 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { EngageScanActivity } from '../engage-scan.activity';
 import { TokenPool } from '@gitroom/nestjs-libraries/engage/scan/token-pool';
 import type { ScanResult } from '@gitroom/nestjs-libraries/engage/scan/platform-scan-adapter';
-import { getRedditUserAbout } from '@gitroom/nestjs-libraries/engage/engage-author';
-
-// The Reddit author /about lookup hits Redis + network; stub it so _fanOutToOrg
-// enrichment is deterministic.
-vi.mock('@gitroom/nestjs-libraries/engage/engage-author', () => ({
-  getRedditUserAbout: vi.fn().mockResolvedValue({ followers: 0 }),
-}));
 
 // Builds an activity wired to a fake EngageScanCursor repo. `row` is what the
 // claim upsert returns; `claimCount` is what the IDLE→SCANNING updateMany
@@ -881,11 +874,6 @@ describe('EngageScanActivity._fanOutToOrg (Reddit monitored subreddit +5 & follo
     return persisted;
   }
 
-  beforeEach(() => {
-    (getRedditUserAbout as any).mockClear();
-    (getRedditUserAbout as any).mockResolvedValue({ followers: 0 });
-  });
-
   it('keyword post in a monitored subreddit earns scoreTracked +5', async () => {
     const persisted = await run(orgCtx(), [redditPost()]);
     const out = persisted.find((p) => p.externalPostId === 'p1');
@@ -902,12 +890,10 @@ describe('EngageScanActivity._fanOutToOrg (Reddit monitored subreddit +5 & follo
     expect(out.scoreTracked).toBe(0);
   });
 
-  it('enriches authorFollowers from the cached /about lookup → authority', async () => {
-    (getRedditUserAbout as any).mockResolvedValue({ followers: 60_000 });
-    const persisted = await run(orgCtx(), [redditPost()]);
+  it('Reddit authority comes from channelFollowers (subreddit size), not a per-author fetch', async () => {
+    const persisted = await run(orgCtx(), [redditPost({ channelFollowers: 2_000_000 })]);
     const out = persisted.find((p) => p.externalPostId === 'p1');
-    expect(getRedditUserAbout).toHaveBeenCalledWith('redditor', expect.any(Function));
-    expect(out.authorFollowers).toBe(60_000);
-    expect(out.scoreAuthority).toBe(15); // 60k > 50k on the follower curve
+    expect(out.scoreAuthority).toBe(15); // 2M subreddit → top community-authority bucket
+    expect(out.authorFollowers).toBeUndefined(); // no author-follower lookup happened
   });
 });

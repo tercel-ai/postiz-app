@@ -175,20 +175,16 @@ describe('engage-scorer', () => {
       expect(authOf(makePost({ authorFollowers: 500 }))).toBe(2);
     });
 
-    it('reddit uses the SAME author-follower curve as X (not subreddit size)', () => {
-      // 60k author followers → 15 on the follower curve. Under the old
-      // subreddit-size curve 60k mapped to 6, so this pins the new semantics.
+    it('community (reddit): authority from channelFollowers (subreddit size), >1M → 15', () => {
       expect(
-        authOf(makePost({ platform: 'reddit', authorFollowers: 60_000 }))
+        authOf(makePost({ platform: 'reddit', channelFollowers: 2_000_000 }))
       ).toBe(15);
     });
 
-    it('reddit: typical ~0-follower author → base 2', () => {
+    it('community (reddit): author followers are IGNORED — only channelFollowers drives it', () => {
+      // A Reddit post with a huge authorFollowers but no channel size → floor 2.
       expect(
-        authOf(makePost({ platform: 'reddit', authorFollowers: 0 }))
-      ).toBe(2);
-      expect(
-        authOf(makePost({ platform: 'reddit', authorFollowers: undefined }))
+        authOf(makePost({ platform: 'reddit', authorFollowers: 9_000_000 }))
       ).toBe(2);
     });
   });

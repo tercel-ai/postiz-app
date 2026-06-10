@@ -201,7 +201,7 @@ model EngageMonitoredChannel {
   platform              String    // "reddit" | "youtube" | "qq" | "discord" | ...
   channelId             String    // platform-native identifier
   channelName           String    // display name shown in UI
-  audienceSize          Int       @default(0)  // members/subscribers — DISPLAY ONLY (no longer feeds authority scoring; a post in a monitored subreddit grants scoreTracked +5 instead)
+  audienceSize          Int       @default(0)  // channel's stored member/subscriber count (display/reference); per-post authority uses EngageOpportunity.channelFollowers
   enabled               Boolean   @default(true)
   lastScannedAt         DateTime? // last time this channel was scanned; used for incremental fetch
   metadata              Json?     // platform-specific extras ({ url, description, iconUrl })
@@ -280,7 +280,8 @@ model EngageOpportunity {
   channelName           String?   // display name: "r/SEO", "Channel Title", etc.
   authorUsername        String
   authorDisplayName     String?
-  authorFollowers       Int?      // post author's real follower count, all platforms (Reddit = u/<name> profile subscribers, fetched per-author during scan)
+  channelFollowers      Int?      // community/channel audience size (Reddit subreddit_subscribers); drives scoreAuthority on community platforms
+  authorFollowers       Int?      // post author's real follower count (X); null on Reddit (no cheap per-author source)
   authorAvatarUrl       String?
   postContent           String
   postPublishedAt       DateTime
@@ -289,7 +290,7 @@ model EngageOpportunity {
   // scoreHeat       45   per-platform engagement; 4 branches (see §9):
   //                      text(x/threads/mastodon/bluesky), video(youtube/tiktok),
   //                      network(linkedin/instagram/pinterest), community(reddit)
-  // scoreAuthority  15   post author's real follower count (all platforms); see §9 for thresholds
+  // scoreAuthority  15   X: post author follower count; Reddit/community: channelFollowers (subreddit size); see §9
   // scoreRecency     5   within 24h → 5; else → 0
   scoreHeat             Int       @default(0)
   scoreAuthority        Int       @default(0)
@@ -1768,11 +1769,11 @@ async fetchRedditCommentMetrics(commentId: string): Promise<{ score: number; num
 |---|---|---|---|---|
 | Keyword Quality | `scoreKeyword` | 35 | `EngageOpportunityState` (per-org) | Each hit +15, capped at 35 (关键词质量) |
 | Platform Heat | `scoreHeat` | 45 | `EngageOpportunity` (global) | Per-platform formula, 4 branches (see below) (平台热度) |
-| Account Authority | `scoreAuthority` | 15 | `EngageOpportunity` (global) | Post author's real follower count, all platforms (Reddit = u/&lt;name&gt; profile subscribers); thresholds 50k/10k/1k (账号影响力) |
+| Account Authority | `scoreAuthority` | 15 | `EngageOpportunity` (global) | X: post author follower count (50k/10k/1k). Reddit/community: `channelFollowers` subreddit audience size (1M/100k/10k) (账号影响力) |
 | Recency | `scoreRecency` | 5 | `EngageOpportunity` (global) | within 24h → 5; else → 0 (时效性) |
 | Tracked Source | `scoreTracked` | 5 | `EngageOpportunityState` (per-org) | +5 if author is in this org's `EngageTrackedAccount` (X) OR post is in one of this org's `EngageMonitoredChannel` subreddits (Reddit) (重点账户/频道) |
 
-**Score ownership (two-table split):** the OBJECTIVE dimensions (heat / authority / recency) are identical for every org, so they live on the global `EngageOpportunity` row — including authority, which is now the post author's own follower count (an objective, org-independent fact). The SUBJECTIVE dimensions (keyword / tracked) depend on the org's own keyword set, tracked accounts, and monitored subreddits, so they — plus the total `score` (= keyword + tracked + heat + authority + recency, max 105) — live on the per-org `EngageOpportunityState`. "Is this subreddit in *my* monitored list" is inherently per-org, which is why the Reddit +5 belongs to `scoreTracked`, not authority. The total is recomputed each scan; the feed reads it directly.
+**Score ownership (two-table split):** the OBJECTIVE dimensions (heat / authority / recency) are identical for every org, so they live on the global `EngageOpportunity` row — authority uses the post author's followers (X) or the subreddit's audience size `channelFollowers` (Reddit), both org-independent facts. The SUBJECTIVE dimensions (keyword / tracked) depend on the org's own keyword set, tracked accounts, and monitored subreddits, so they — plus the total `score` (= keyword + tracked + heat + authority + recency, max 105) — live on the per-org `EngageOpportunityState`. "Is this subreddit in *my* monitored list" is inherently per-org, which is why the Reddit +5 is a separate `scoreTracked` signal, orthogonal to the (objective) subreddit-size authority. The total is recomputed each scan; the feed reads it directly.
 
 **Platform Heat branches** (`scoreHeat`, all 0–45, bucketed):
 
@@ -1840,7 +1841,9 @@ function computeBreakdown(post: RawPost, hits: EngageKeyword[]): ScoreBreakdown 
   const heat      = post.platform === 'x'                          // 0-45
     ? computeXHeatScore(post)
     : computeCommunityHeatScore(post);
-  const authority = computeAuthorAuthorityScore(post.authorFollowers); // 0-15, post author's real followers (all platforms)
+  const authority = post.platform === 'x'                          // 0-15
+    ? computeXAuthorityScore(post.authorFollowers)
+    : computeCommunityAuthorityScore(post.channelFollowers);        // subreddit size for Reddit/community
   const recency  = isWithin24Hours(post.publishedAt) ? 5 : 0;     // 0|5
   // +5 when the post is from a tracked source: an X tracked account, OR a Reddit
   // post in one of the org's monitored subreddits (flag set during fan-out).
@@ -1884,23 +1887,34 @@ function computeCommunityHeatScore(post: RawPost): number {
   return 4;
 }
 
-function computeAuthorAuthorityScore(followers: number | null): number {
-  // Post author's real follower count — all platforms. X uses public_metrics
-  // followers; Reddit uses the author's u/<name> profile subscribers (fetched
-  // per-author during scan, cached). Most redditors have ~0 → floor of 2.
+function computeXAuthorityScore(followers: number | null): number {
+  // X-family: the post author's own follower count.
   if (!followers) return 2;
   if (followers > 50_000) return 15;
   if (followers > 10_000) return 11;
   if (followers >  1_000) return  6;
   return 2;
 }
+
+function computeCommunityAuthorityScore(audienceSize: number | null): number {
+  // Reddit/community: the CHANNEL audience size (channelFollowers =
+  // subreddit_subscribers), carried for free in the scan listing — no per-author
+  // lookup. Reddit per-user followers (~0 for most) are NOT used here.
+  if (!audienceSize) return 2;
+  if (audienceSize > 1_000_000) return 15;
+  if (audienceSize >   100_000) return 11;
+  if (audienceSize >    10_000) return  6;
+  return 2;
+}
 ```
 
-> **Note (authority vs. community size):** earlier revisions scored Reddit authority
-> from the *subreddit's* member count (`audienceSize`). That was dropped: authority is
-> the **author's** influence, and "this subreddit matters to me" is now the per-org
-> `scoreTracked` +5 (monitored subreddit). `EngageMonitoredChannel.audienceSize` is
-> retained for display only and no longer feeds scoring.
+> **Note (authority vs. monitored +5):** Reddit `scoreAuthority` reflects the
+> *subreddit's* audience size (`channelFollowers`) — objective community reach. Whether
+> that subreddit is on *this org's* monitored list is a separate, per-org signal worth
+> `scoreTracked` +5 (an in-memory check, no extra request). The two are orthogonal: a
+> big subreddit you don't monitor still scores high authority; a small subreddit you do
+> monitor still gets +5. Fetching real Reddit per-author followers was rejected — it
+> needs a `/user/<name>/about` call per author, too slow/risky at scan scale.
 
 ---
 

@@ -218,10 +218,10 @@ function toRawPost(p: Record<string, unknown>): RawPost {
     channelId: subreddit,
     channelName: `r/${subreddit}`,
     authorUsername: p.author as string,
-    // Real author follower count is enriched per-author during fan-out (a separate
-    // /user/<name>/about lookup); the search listing only carries subreddit size,
-    // which is NOT the author's followers. `subreddit_subscribers` stays in rawData.
+    // Reddit has no meaningful per-author follower count in search results; leave it
+    // null. Community authority is driven by the subreddit's audience size below.
     authorFollowers: undefined,
+    channelFollowers: (p.subreddit_subscribers as number) ?? 0,
     postContent: `${p.title as string}${p.selftext ? '\n' + (p.selftext as string) : ''}`.trim(),
     postPublishedAt: new Date(((p.created_utc as number) ?? 0) * 1000),
     metricLikes: 0,

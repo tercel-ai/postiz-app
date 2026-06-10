@@ -1,8 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fetchRedditAuthorProfile, _clearRedditAuthorL1 } from '../engage-author';
+import { fetchRedditAuthorProfile } from '../engage-author';
 import { getRedditToken } from '../reddit-auth';
 import { redditPublicGet } from '../reddit-loid';
-import { ioRedis } from '@gitroom/nestjs-libraries/redis/redis.service';
 
 vi.mock('../reddit-auth', () => ({
   getRedditToken: vi.fn(),
@@ -17,12 +16,6 @@ describe('fetchRedditAuthorProfile', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     vi.mocked(getRedditToken).mockResolvedValue('token');
-    // The /about lookup is now served through the L1+L2 author cache. Force a
-    // guaranteed cache MISS so the network-fallback path is exercised
-    // deterministically regardless of any real Redis (L2) state.
-    _clearRedditAuthorL1();
-    vi.spyOn(ioRedis, 'get').mockResolvedValue(null);
-    vi.spyOn(ioRedis, 'set').mockResolvedValue('OK' as never);
   });
 
   it('falls back to public JSON when Reddit OAuth rejects the author lookup', async () => {
