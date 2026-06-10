@@ -32,6 +32,7 @@ by **when you reach for them** and lists the flags/env you actually need.
 | `cleanup-engage-opportunities.ts` | Soft-delete un-repliable opportunities | list/check | tsx |
 | `backfill-engage-data-ticks.ts` | Rebuild `EngageDataTicks` from `Post` | dry-run | ts-node |
 | `backfill-engage-matched-keywords.ts` | Fill `EngageOpportunityState.matchedKeywords` for pre-field rows | dry-run | ts-node |
+| `backfill-engage-reddit-channel-followers.ts` | Move Reddit `authorFollowers`→`channelFollowers` + apply monitored-subreddit `scoreTracked +5` | dry-run | ts-node |
 | `terminate-engage-data-ticks.ts` | Stop the running data-ticks workflow | dry-run | tsx |
 
 ---

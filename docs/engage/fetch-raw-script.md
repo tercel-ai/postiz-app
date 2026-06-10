@@ -194,10 +194,11 @@ depth stay behind `more` stubs (we count only the first level, by design).
   `impressions` is the synthetic `(score + comments) × 20` proxy, NOT a view
   count. `trafficScore = score×1 + comments×3`. Don't read Reddit "impressions"
   as reach.
-- **Reddit `authorFollowers` is the subreddit's subscriber count**, not the
-  author's followers — Reddit post listings carry no per-author follower field
-  (`reddit-scan-adapter.ts` maps `subreddit_subscribers`). It feeds
-  `scoreAuthority`, so Reddit "authority" effectively means subreddit size.
+- **Reddit subreddit size lives in `channelFollowers`, not `authorFollowers`.**
+  Reddit listings carry no per-author follower field, so `authorFollowers` is null
+  on Reddit; `reddit-scan-adapter.ts` maps `subreddit_subscribers` into
+  `channelFollowers`, which feeds `scoreAuthority` — Reddit "authority" effectively
+  means subreddit size. (`authorFollowers` is the real author count on X only.)
 - **Reddit fuzzes vote scores.** A post/comment `score` can wobble ±1–few between
   reads (anti-scraping); a stored value differing slightly from a live read is
   vote fuzzing, not a sync bug.
