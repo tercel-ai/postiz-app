@@ -9,6 +9,8 @@ export interface Opportunity {
   externalPostUrl: string;
   authorUsername: string;
   authorDisplayName?: string;
+  // Subreddit avatar (Reddit only); null for other platforms or unmonitored channels.
+  channelAvatar?: string | null;
   postContent: string;
   postPublishedAt: string;
   // Per-org first-seen time; this is the column "Sort by Newest" orders on.

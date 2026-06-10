@@ -863,25 +863,63 @@ export class EngageRepository {
       this._oppState.model.engageOpportunityState.count({ where }),
     ]);
 
-    // Attach the manual-reply link status so the feed can show "replied, link
-    // pending" and offer a backfill. One bounded query for the page's
-    // opportunities; the latest reply per opportunity wins (per-post tracking
-    // means an opportunity may have several replies). `replyLink` is the stored
-    // Post.releaseURL (null = not yet submitted); `sentReplyId` is what the
-    // backfill endpoint (PATCH /sent/:id/reply-url) needs.
+    // Both lookups below depend only on `rows`, not on each other, so fan them
+    // out in one round trip.
     const oppIds = rows.map((r) => r.opportunity.id);
-    const replies = oppIds.length
-      ? (await this._sentReply.model.engageSentReply.findMany({
-          where: { organizationId, opportunityId: { in: oppIds } },
-          orderBy: { createdAt: 'desc' },
-          select: { id: true, opportunityId: true, post: { select: { releaseURL: true } } },
-        })) ?? []
-      : [];
+    // Subreddit avatars live on the monitored channel's metadata
+    // (`metadata.avatar`), keyed by this org's (platform=reddit, channelId).
+    // Only Reddit rows carry a channel avatar; every other platform resolves to
+    // null. One bounded query for the channels referenced by the current page.
+    const redditChannelIds = [
+      ...new Set(
+        rows
+          .filter((r) => r.opportunity.platform === 'reddit' && r.opportunity.channelId)
+          .map((r) => r.opportunity.channelId)
+      ),
+    ];
+
+    const [replies, channels] = await Promise.all([
+      oppIds.length
+        ? this._sentReply.model.engageSentReply
+            .findMany({
+              where: { organizationId, opportunityId: { in: oppIds } },
+              orderBy: { createdAt: 'desc' },
+              select: { id: true, opportunityId: true, post: { select: { releaseURL: true } } },
+            })
+            .then((r) => r ?? [])
+        : Promise.resolve([]),
+      redditChannelIds.length
+        ? this._channel.model.engageMonitoredChannel.findMany({
+            where: {
+              organizationId,
+              platform: 'reddit',
+              channelId: { in: redditChannelIds },
+            },
+            select: { channelId: true, metadata: true },
+          })
+        : Promise.resolve([]),
+    ]);
+
+    // The manual-reply link status lets the feed show "replied, link pending"
+    // and offer a backfill. The latest reply per opportunity wins (per-post
+    // tracking means an opportunity may have several replies). `replyLink` is
+    // the stored Post.releaseURL (null = not yet submitted); `sentReplyId` is
+    // what the backfill endpoint (PATCH /sent/:id/reply-url) needs.
     const latestByOpp = new Map<string, { id: string; replyLink: string | null }>();
     for (const rep of replies) {
       if (!latestByOpp.has(rep.opportunityId)) {
         latestByOpp.set(rep.opportunityId, { id: rep.id, replyLink: rep.post?.releaseURL ?? null });
       }
+    }
+
+    const channelAvatarById = new Map<string, string | null>();
+    for (const ch of channels) {
+      const meta = ch.metadata as Record<string, unknown> | null;
+      const avatar =
+        meta && typeof meta === 'object' && typeof meta.avatar === 'string'
+          ? (meta.avatar as string)
+          : null;
+      channelAvatarById.set(ch.channelId, avatar);
     }
 
     const items = rows.map((r) => {
@@ -891,6 +929,7 @@ export class EngageRepository {
         ...merged,
         sentReplyId: rep?.id ?? null,
         replyLink: rep?.replyLink ?? null,
+        channelAvatar: channelAvatarById.get(merged.channelId) ?? null,
       };
     });
 
