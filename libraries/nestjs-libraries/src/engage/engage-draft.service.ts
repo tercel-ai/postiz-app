@@ -79,7 +79,9 @@ export class EngageDraftService {
     : null;
 
   async *generateDraft(
-    opportunity: EngageOpportunity,
+    // rawData is not read here and is no longer exposed by the repository's
+    // merged opportunity shape, so accept the opportunity without it.
+    opportunity: Omit<EngageOpportunity, 'rawData'>,
     strategy: string,
     brandStrength: number,
     mentions?: string[],
@@ -300,7 +302,7 @@ IMPORTANT: The final reply must stay ${charLimit}.`;
     return maxLen == null ? sanitized : sanitized.slice(0, maxLen);
   }
 
-  private _buildUserPrompt(opportunity: EngageOpportunity): string {
+  private _buildUserPrompt(opportunity: Omit<EngageOpportunity, 'rawData'>): string {
     const author = this._sanitizeForPrompt(opportunity.authorUsername ?? '', 100)
       .replace(/[&"<>]/g, (c) => ({ '&': '&amp;', '"': '&quot;', '<': '&lt;', '>': '&gt;' }[c]!));
     const content = this._sanitizeForPrompt(opportunity.postContent ?? '')
