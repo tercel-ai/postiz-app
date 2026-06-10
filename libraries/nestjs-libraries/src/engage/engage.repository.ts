@@ -755,7 +755,9 @@ export class EngageRepository {
       metricScore: opportunity.metricScore,
       metricUpvoteRatio: opportunity.metricUpvoteRatio,
       metricComments: opportunity.metricComments,
-      rawData: opportunity.rawData,
+      // rawData (full platform JSON payload) is intentionally NOT exposed: no
+      // client or downstream service reads it, and returning it per item bloats
+      // every _merge-based response (notably the paginated opportunities list).
       // Per-org createdAt (when this org first saw the opportunity) — this is
       // also the column `sortBy=createdAt` orders on, so display and sort match.
       createdAt,
