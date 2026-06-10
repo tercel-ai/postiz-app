@@ -12,6 +12,7 @@ import { createPortal } from 'react-dom';
 import { ActionComponent } from '@gitroom/extension/pages/content/elements/action.component';
 import {
   installBrowserAssistedReplyBridge,
+  installEngageReplyBridge,
   installXBrowserAssistedReplyRunner,
 } from '@gitroom/extension/pages/content/browser-assisted-reply';
 
@@ -36,6 +37,7 @@ export const MainContentInner: FC = (props) => {
 
   useEffect(() => {
     installBrowserAssistedReplyBridge();
+    installEngageReplyBridge();
     installXBrowserAssistedReplyRunner();
   }, []);
 

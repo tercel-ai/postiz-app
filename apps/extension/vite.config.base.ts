@@ -20,10 +20,21 @@ const frontendUrl = import.meta.env?.FRONTEND_URL || process?.env?.FRONTEND_URL;
 const frontendMatch = frontendUrl ? `${frontendUrl.replace(/\/$/, '')}/*` : undefined;
 const providerMatches = ProviderList.map((p) => `${p.baseUrl}/*`);
 
+// Hosts the background fetches directly (with the user's session cookies) to
+// post in-browser replies. No content script runs on these — background only.
+const replyHostPermissions = [
+  'https://www.reddit.com/*',
+  'https://*.reddit.com/*',
+];
+
 export const baseManifest = {
   ...manifest,
-  host_permissions: [...providerMatches, ...(frontendMatch ? [frontendMatch] : [])],
-  permissions: [...(manifest.permissions || [])],
+  host_permissions: [
+    ...providerMatches,
+    ...replyHostPermissions,
+    ...(frontendMatch ? [frontendMatch] : []),
+  ],
+  permissions: [...(manifest.permissions || []), 'scripting'],
   content_scripts: [
     {
       matches: [...providerMatches, ...(frontendMatch ? [frontendMatch] : [])],

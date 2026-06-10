@@ -1,4 +1,5 @@
 import { fetchRequestUtil } from '@gitroom/extension/utils/request.util';
+import { handlePostReply } from './post-reply';
 
 const isDevelopment = process.env.NODE_ENV === 'development';
 
@@ -7,6 +8,16 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
     fetchRequestUtil(request).then((response) => {
       sendResponse(response);
     });
+  }
+
+  // In-browser reply (Option A). payload: { platform, url, text, opportunityId? }
+  if (request.action === 'postReply') {
+    handlePostReply(request.payload)
+      .then(sendResponse)
+      .catch((e) =>
+        sendResponse({ ok: false, error: String(e?.message || e) })
+      );
+    return true;
   }
 
   if (request.action === 'loadStorage') {

@@ -127,6 +127,60 @@ export function installBrowserAssistedReplyBridge() {
   });
 }
 
+/**
+ * Generic Engage → extension bridge (Option A). The Postiz page posts:
+ *   window.postMessage({
+ *     source: 'postiz',
+ *     action: 'postiz:engage-reply',
+ *     payload: { platform: 'reddit', url, text, opportunityId }
+ *   }, window.location.origin)
+ *
+ * The background performs the in-browser reply and we post the result back so
+ * the page can show success and record the permalink.
+ */
+export function installEngageReplyBridge() {
+  window.addEventListener('message', async (event) => {
+    if (event.source !== window) return;
+    if (event.origin !== window.location.origin) return;
+
+    const data = event.data as
+      | { source?: string; action?: string; payload?: unknown }
+      | undefined;
+    if (!data || data.source !== 'postiz') return;
+    if (data.action !== 'postiz:engage-reply') return;
+
+    const payload = data.payload as Record<string, unknown> | undefined;
+    if (
+      !payload ||
+      !isNonEmptyString(payload.platform) ||
+      !isNonEmptyString(payload.url) ||
+      !isNonEmptyString(payload.text)
+    ) {
+      return;
+    }
+
+    let result: unknown;
+    try {
+      result = await chrome.runtime.sendMessage({
+        action: 'postReply',
+        payload,
+      });
+    } catch (e: any) {
+      result = { ok: false, error: String(e?.message || e) };
+    }
+
+    window.postMessage(
+      {
+        source: 'postiz-extension',
+        action: 'postiz:engage-reply-result',
+        opportunityId: payload.opportunityId,
+        result,
+      },
+      window.location.origin
+    );
+  });
+}
+
 export function installXBrowserAssistedReplyRunner() {
   if (!isXHost(window.location.hostname)) return;
 
