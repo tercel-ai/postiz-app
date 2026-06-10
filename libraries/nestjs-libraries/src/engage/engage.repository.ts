@@ -890,8 +890,13 @@ export class EngageRepository {
         : Promise.resolve([]),
       redditChannelIds.length
         ? this._channel.model.engageMonitoredChannel.findMany({
+            // The subreddit avatar is a global property of the subreddit, not
+            // per-org, so match on (platform, channelId) only. Scoping by
+            // organizationId would miss the avatar whenever this org's own
+            // channel row lacks the cached metadata — e.g. the post surfaced via
+            // keyword scan for a subreddit this org doesn't monitor but another
+            // org does, or this org's row was added without the search metadata.
             where: {
-              organizationId,
               platform: 'reddit',
               channelId: { in: redditChannelIds },
             },
@@ -919,7 +924,11 @@ export class EngageRepository {
         meta && typeof meta === 'object' && typeof meta.avatar === 'string'
           ? (meta.avatar as string)
           : null;
-      channelAvatarById.set(ch.channelId, avatar);
+      // Several orgs may track the same subreddit; keep the first non-null
+      // avatar so a metadata-less row never clobbers a good one.
+      if (avatar !== null || !channelAvatarById.has(ch.channelId)) {
+        channelAvatarById.set(ch.channelId, avatar);
+      }
     }
 
     const items = rows.map((r) => {
