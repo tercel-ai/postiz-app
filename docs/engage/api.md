@@ -19,6 +19,8 @@
 - [Tracked Accounts — Tracked Accounts](#tracked-accounts--tracked-accounts)
 - [Reply Accounts — Reply Accounts](#reply-accounts--reply-accounts)
 - [Opportunities — Signal Feed](#opportunities--signal-feed)
+  - [GET /opportunities](#get-apienageopportunities) — paginated signal feed
+  - [GET /opportunities/locate](#get-apienageopportunitieslocate) — locate the page of an opportunityId within /opportunities
 - [Draft Generation — AI Draft Generation (SSE)](#draft-generation--ai-draft-generation-sse)
   - [POST /opportunities/:id/draft](#post-apienageopportunitiesiddraft) — stream an AI draft (not persisted)
   - [POST /opportunities/:id/save-draft](#post-apienageopportunitiesidsave-draft) — save an unpublished working draft (DRAFT)
@@ -34,6 +36,7 @@
   - [DELETE /extension-replies](#delete-apienageextension-replies) — clear history (all | 1d | 1w | 1m)
 - [Sent Replies — Sent Records](#sent-replies--sent-records)
   - [GET /sent](#get-apienagesent) — paginated list (`status` rollups: `settled` = live+scheduled, `awaiting` = draft+manual+error)
+  - [GET /sent/locate](#get-apienagesentlocate) — locate the page of a sentReplyId within /sent
   - [GET /sent/stats](#get-apienagesentstats) — aggregate stats
   - [PATCH /sent/:id](#patch-apienagesentid) — edit scheduled reply
   - [PATCH /sent/:id/reply-url](#patch-apienagesentidreply-url) — Reddit URL submission
@@ -917,6 +920,56 @@ Total score max is 105 (scoreKeyword 35 + scoreHeat 45 + scoreAuthority 15 + sco
 
 ---
 
+### GET `/api/engage/opportunities/locate`
+
+Locate which page a given opportunity lives on within `/opportunities`, using **the same filters and sort**. Use this to jump directly to the right page when linking to or reopening a specific opportunity.
+
+**Query Params**
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `opportunityId` | `string` | **required** | `item.id` from `/opportunities` response (`EngageOpportunity.id`) |
+| `limit` | `number` | `20` | Page size — must match the `limit` you pass to `/opportunities`, max 100 |
+| All `/opportunities` filter params | — | — | `platform`, `status`, `intent`, `keyword`, `keywords`, `date`, `minScore`, `minScoreKeyword`, `minScoreHeat`, `minScoreAuthority`, `channels`, `authors`, `bookmarked`, `sortBy`, `sortOrder` — must match the active list filters exactly |
+
+**Response** `200 OK`
+
+```json
+// Found — opportunity is visible under the current filters
+{
+  "found": true,
+  "page": 3,
+  "position": 41,
+  "total": 150,
+  "limit": 20,
+  "totalPages": 8
+}
+
+// Not found — opportunity does not exist or is excluded by the filters
+{
+  "found": false,
+  "page": null,
+  "position": null,
+  "total": 150,
+  "limit": 20,
+  "totalPages": 8
+}
+```
+
+**Usage pattern** — navigate to a specific opportunity:
+
+```js
+const { found, page } = await fetch(
+  `/api/engage/opportunities/locate?opportunityId=${id}&sortBy=score&limit=20`
+).then(r => r.json());
+
+if (found) {
+  // load /opportunities?sortBy=score&limit=20&page=${page} and scroll to id
+}
+```
+
+---
+
 ### PATCH `/api/engage/opportunities/:id/dismiss`
 
 Dismiss an opportunity (only valid for `NEW` / `AUTO_QUEUED` states).
@@ -1325,7 +1378,7 @@ Retrieve the list of sent replies (includes original post summary and metrics da
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `platform` | `string` | — | Platform filter |
-| `status` | `'published' \| 'scheduled' \| 'manual' \| 'error' \| 'settled' \| 'awaiting'` | — | Status filter (see table below). `settled` and `awaiting` are combined rollups. |
+| `status` | `'published' \| 'scheduled' \| 'manual' \| 'error' \| 'draft' \| 'settled' \| 'awaiting'` | — | Status filter (see table below). `settled` and `awaiting` are combined rollups. |
 | `date` | `all \| day \| today \| week \| month` | `all` | Publish-date window (`day`/`today` aliased) |
 | `page` | `number` | `1` | Page number |
 | `limit` | `number` | `20` | Items per page, max 100 |
@@ -1338,10 +1391,11 @@ Retrieve the list of sent replies (includes original post summary and metrics da
 | `scheduled` | `state=QUEUE` (queued for a future auto-publish) |
 | `manual` | `state=PUBLISHED` && `releaseURL=null` (posted/copied, link not yet backfilled) |
 | `error` | `state=ERROR` (publishing failed; the generated draft is preserved) |
+| `draft` | `state=DRAFT` (saved working copy, never sent; see `POST /opportunities/:id/save-draft`) |
 | `settled` | `published` **OR** `scheduled` — no further action needed (live, or will auto-fire) |
-| `awaiting` | `state=DRAFT` (saved working copy, never sent) **OR** `manual` **OR** `error` — has content but not yet live. Replaces the former `GET /awaiting-review` endpoint; **the only filter that surfaces `DRAFT` working-copies** (see `POST /opportunities/:id/save-draft`). |
+| `awaiting` | `draft` **OR** `manual` **OR** `error` — has content but not yet live |
 
-> **DRAFT working-copies:** a saved draft is a `Post(state=DRAFT)` (see `POST /opportunities/:id/save-draft`). It is **not** a sent reply, so it is excluded from the default `/sent` list ("All"), from `/sent/stats`, and from every dashboard reply count — it appears **only** under `status=awaiting`. Distinguish the three `awaiting` sub-cases by `post.state` (`DRAFT` / `PUBLISHED`+no `releaseURL` / `ERROR`).
+> **DRAFT working-copies:** a saved draft is a `Post(state=DRAFT)` (see `POST /opportunities/:id/save-draft`). Omitting `status` returns **all** states including `DRAFT`. Use `status=awaiting` to target only the "needs action" bucket (`DRAFT` + `manual` + `error`). Distinguish the three `awaiting` sub-cases by `post.state` (`DRAFT` / `PUBLISHED`+no `releaseURL` / `ERROR`).
 
 **Response** `200 OK`
 
@@ -1411,6 +1465,46 @@ Retrieve the list of sent replies (includes original post summary and metrics da
 | `ERROR` | Failed to send |
 
 **Special Handling for Reddit Manual Replies**: When `post.releaseURL` is `null`, it means the user has not yet submitted the Reddit comment URL; they should be prompted to provide it.
+
+---
+
+### GET `/api/engage/sent/locate`
+
+Locate which page a given sent reply lives on within `/sent`, using **the same filters**. Use this to jump directly to the right page when navigating back to a specific reply.
+
+**Query Params**
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `sentReplyId` | `string` | **required** | `item.id` from `/sent` response (`EngageSentReply.id`) |
+| `limit` | `number` | `20` | Page size — must match the `limit` you pass to `/sent`, max 100 |
+| `platform` | `string` | — | Must match the active filter |
+| `status` | `'published' \| 'scheduled' \| 'manual' \| 'error' \| 'draft' \| 'settled' \| 'awaiting'` | — | Must match the active filter |
+| `date` | `string` | — | Must match the active filter |
+
+**Response** `200 OK`
+
+```json
+// Found
+{
+  "found": true,
+  "page": 2,
+  "position": 23,
+  "total": 58,
+  "limit": 20,
+  "totalPages": 3
+}
+
+// Not found — reply does not exist or is excluded by the filters
+{
+  "found": false,
+  "page": null,
+  "position": null,
+  "total": 58,
+  "limit": 20,
+  "totalPages": 3
+}
+```
 
 ---
 

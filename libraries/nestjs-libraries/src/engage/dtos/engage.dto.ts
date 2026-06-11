@@ -530,7 +530,7 @@ export class LocateSentReplyDto {
 
   @IsOptional()
   @IsString()
-  @IsIn(['published', 'scheduled', 'manual', 'error', 'settled', 'awaiting'])
+  @IsIn(['published', 'scheduled', 'manual', 'error', 'draft', 'settled', 'awaiting'])
   status?: string;
 
   @IsOptional()
@@ -571,7 +571,7 @@ export class ListSentDto {
   //                (ERROR). Folds in the former GET /engage/awaiting-review endpoint.
   @IsOptional()
   @IsString()
-  @IsIn(['published', 'scheduled', 'manual', 'error', 'settled', 'awaiting'])
+  @IsIn(['published', 'scheduled', 'manual', 'error', 'draft', 'settled', 'awaiting'])
   status?: string;
 
   // Date window: all (default/empty) | day | today | week | month. Untyped (no

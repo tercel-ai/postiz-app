@@ -1598,6 +1598,7 @@ export class EngageRepository {
       postWhere.releaseURL = { not: null };
     } else if (dto.status === 'scheduled') postWhere.state = 'QUEUE';
     else if (dto.status === 'error') postWhere.state = 'ERROR';
+    else if (dto.status === 'draft') postWhere.state = 'DRAFT';
     else if (dto.status === 'manual') {
       postWhere.state = 'PUBLISHED';
       postWhere.releaseURL = null;
@@ -1621,12 +1622,8 @@ export class EngageRepository {
         { state: 'PUBLISHED', releaseURL: { not: null } },
         { state: 'QUEUE' },
       ];
-    } else {
-      // No status filter ("All"): exclude unsent DRAFT working-copies — a draft is
-      // not a sent reply and belongs only in the `awaiting` bucket. Keeps /sent and
-      // /sent/stats (incl. the response-rate denominator) free of drafts.
-      postWhere.state = { not: 'DRAFT' };
     }
+    // No status filter = return all states including DRAFT.
 
     const sentWhere: Prisma.EngageSentReplyWhereInput = {
       organizationId,
