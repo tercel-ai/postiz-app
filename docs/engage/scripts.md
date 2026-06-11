@@ -1,6 +1,6 @@
 # Engage Operations Scripts — Runbook
 
-A scenario-organized reference for the 10 `scripts/*engage*` maintenance scripts.
+A scenario-organized reference for the `scripts/*engage*` maintenance scripts.
 Each script's own header docstring is the source of truth; this runbook groups them
 by **when you reach for them** and lists the flags/env you actually need.
 
@@ -23,8 +23,6 @@ by **when you reach for them** and lists the flags/env you actually need.
 | `engage-scan.ts` | Trigger scans / inspect ticker | read-only | ts-node |
 | `engage-realtime-scan.ts` | Directly probe platform scan results for one org | read-only | ts-node |
 | `engage-sync-metrics.ts` | One-shot "sent list is empty" fix (X+Reddit) | dry-run | ts-node |
-| `sync-engage-metrics.ts` | Reddit/X resync of null-impression replies | dry-run | ts-node |
-| `sync-engage-x-metrics.ts` | X-only live metric fetch / probe | dry-run | ts-node |
 | `backfill-engage-x-integration.ts` | Fill `Post.integrationId` for X replies | dry-run | ts-node |
 | `engage-diagnose-x-reply.ts` | Explain why an X reply has no metrics | read-only | ts-node |
 | `engage-fetch-raw.ts` | Raw fetch of ONE post's reply (回帖) + original (原帖) data via shared workflow funcs | read-only | ts-node |
@@ -32,8 +30,6 @@ by **when you reach for them** and lists the flags/env you actually need.
 | `cleanup-engage-opportunities.ts` | Soft-delete un-repliable opportunities | list/check | tsx |
 | `backfill-engage-data-ticks.ts` | Rebuild `EngageDataTicks` from `Post` | dry-run | ts-node |
 | `backfill-engage-matched-keywords.ts` | Fill `EngageOpportunityState.matchedKeywords` for pre-field rows | dry-run | ts-node |
-| `backfill-engage-reddit-channel-followers.ts` | Move Reddit `authorFollowers`→`channelFollowers` + apply monitored-subreddit `scoreTracked +5` | dry-run | ts-node |
-| `terminate-engage-data-ticks.ts` | Stop the running data-ticks workflow | dry-run | tsx |
 
 ---
 
@@ -164,44 +160,11 @@ npx ts-node --project scripts/tsconfig.json scripts/engage-sync-metrics.ts --no-
 - **Flags:** `--dry-run` (default), `--execute`, `--org`, `--platform`, `--stats`, `--no-backfill`.
 - See `sync-metrics-script.md` for the detailed output-format walkthrough.
 
-### `sync-engage-metrics.ts` — Reddit/X resync of null-impression replies
-Narrower than the above: just re-fetches metrics for published replies with null
-impressions (same logic as `POST /engage/admin/resync-metrics`). No integration
-backfill step. Idempotent.
-
-```bash
-npx ts-node --project scripts/tsconfig.json scripts/sync-engage-metrics.ts --dry-run
-npx ts-node --project scripts/tsconfig.json scripts/sync-engage-metrics.ts --execute
-npx ts-node --project scripts/tsconfig.json scripts/sync-engage-metrics.ts --platform reddit --execute
-npx ts-node --project scripts/tsconfig.json scripts/sync-engage-metrics.ts --org <orgId> --execute
-```
-
-- **Flags:** `--dry-run` (default), `--execute`, `--org`, `--platform`.
-- **Env:** `X_BEARER_TOKEN` (X app-only fallback).
-
-### `sync-engage-x-metrics.ts` — X-only live fetch / probe
-Forces a real X metrics fetch via `PostsService.checkPostAnalytics()` (the exact 24h
-sync path) and prints the live breakdown (Replies/Retweets/Likes/Quotes/Bookmarks/
-Impressions). Use it to answer *"can we even read this tweet's stats?"* without waiting
-24h — API-tier blocks surface here as 429/403 instead of silent nulls. **X only**
-(use `sync-engage-metrics.ts` for Reddit).
-
-```bash
-npx ts-node --project scripts/tsconfig.json scripts/sync-engage-x-metrics.ts --org <orgId> --dry-run
-npx ts-node --project scripts/tsconfig.json scripts/sync-engage-x-metrics.ts --id <sentReplyId> --execute
-npx ts-node --project scripts/tsconfig.json scripts/sync-engage-x-metrics.ts --post <postId> --execute
-npx ts-node --project scripts/tsconfig.json scripts/sync-engage-x-metrics.ts --url https://x.com/.../status/123 --execute
-npx ts-node --project scripts/tsconfig.json scripts/sync-engage-x-metrics.ts --org <orgId> --only-missing --execute
-```
-
-- **Flags:** target one of `--id` / `--post` / `--url`, or scope by `--org`; `--only-missing`;
-  `--dry-run` (default) / `--execute`.
-
 ### `backfill-engage-x-integration.ts` — fill `Post.integrationId` for X replies
 Fixes X replies recorded with `integrationId = null` so metrics can ever be read.
 Resolution mirrors `EngageRepository.resolveXReplyIntegrationId` exactly (author-handle
 → engage reply account → any live X account). After running, re-fetch metrics with
-`sync-engage-x-metrics.ts --only-missing`.
+`engage-sync-metrics.ts --execute`.
 
 ```bash
 npx ts-node --project scripts/tsconfig.json scripts/backfill-engage-x-integration.ts --dry-run
@@ -232,8 +195,8 @@ npx ts-node --project scripts/tsconfig.json scripts/engage-diagnose-x-reply.ts -
 **Typical X-metrics troubleshooting flow:**
 ```
 diagnose (read-only)  →  backfill-engage-x-integration (if integrationId null)
-                      →  sync-engage-x-metrics --only-missing  (re-fetch)
-   …or just run engage-sync-metrics --execute, which does all three.
+                      →  engage-sync-metrics --execute  (backfill + re-fetch in one)
+   …or just run engage-sync-metrics --execute directly, which does all three.
 ```
 
 ---
@@ -242,7 +205,7 @@ diagnose (read-only)  →  backfill-engage-x-integration (if integrationId null)
 
 > `EngageDataTicks` is **write-only** today — the engage dashboard reads the `Post`
 > table directly. The daily `engageDataTicksWorkflow` is gated off by default. These
-> two scripts let you rebuild it on demand and stop the legacy running workflow.
+> scripts let you rebuild it on demand if needed.
 
 ### `backfill-engage-data-ticks.ts` — rebuild the aggregate from `Post`
 Reconstructs `EngageDataTicks` over a date range by replaying what the Temporal
@@ -281,21 +244,6 @@ npx ts-node --project scripts/tsconfig.json scripts/backfill-engage-matched-keyw
 
 - **Flags:** `--org`, `--all` (recompute non-empty rows too), `--dry-run` (default) / `--execute`, `--help`.
 - **Prereq:** the `matchedKeywords` column must exist — run `pnpm run prisma-db-push` first.
-
-### `terminate-engage-data-ticks.ts` — stop the running data-ticks workflow
-Gating off registration prevents *new* starts but does not stop an instance already
-running in Temporal. This terminates every Running execution of WorkflowType
-`engageDataTicksWorkflow`. Safe — the table is fully backfillable (above).
-
-```bash
-npx tsx scripts/terminate-engage-data-ticks.ts            # dry-run (default)
-npx tsx scripts/terminate-engage-data-ticks.ts --execute  # actually terminate
-```
-
-- **Flags:** `--execute` (otherwise dry-run).
-- **Env:** `TEMPORAL_ADDRESS` (default `localhost:7233`), `TEMPORAL_NAMESPACE` (default `default`).
-- **Sanity check** if "0 found": confirm you're on the right cluster with
-  `npx tsx scripts/list-running-workflows.ts [--type engageDataTicksWorkflow]`.
 
 ---
 

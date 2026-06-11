@@ -30,13 +30,11 @@ X and Reddit. This is the entry point to all Engage docs.
 | Force a scan / check ticker state | `engage-scan.ts` |
 | Fix an empty "sent" list (metrics + integration) | `engage-sync-metrics.ts` ⭐ |
 | Figure out why one X reply has no metrics | `engage-diagnose-x-reply.ts` (read-only) |
-| Re-fetch X metrics for one reply / probe API tier | `sync-engage-x-metrics.ts` |
-| Re-fetch Reddit/X metrics for null-impression replies | `sync-engage-metrics.ts` |
+| Probe metrics for one specific reply (X or Reddit) | `engage-fetch-raw.ts` |
 | Backfill `Post.integrationId` on X replies | `backfill-engage-x-integration.ts` |
 | Drop un-repliable opportunities | `cleanup-engage-opportunities.ts` |
 | Manually seed one tweet into the pool | `ingest-engage-post.ts` |
 | Rebuild `EngageDataTicks` from `Post` | `backfill-engage-data-ticks.ts` |
-| Stop the running data-ticks workflow | `terminate-engage-data-ticks.ts` |
 
 ## Key architectural facts to know before operating
 

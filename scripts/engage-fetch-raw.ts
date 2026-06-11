@@ -168,14 +168,23 @@ async function rawXTweet(client: TwitterApi, tweetId: string, what: string): Pro
   console.log(`\n── RAW X ${what} (id=${tweetId}) ──`);
   try {
     const tweet = await client.v2.singleTweet(tweetId, {
-      'tweet.fields': ['public_metrics', 'created_at', 'author_id', 'conversation_id'],
+      'tweet.fields': ['text', 'public_metrics', 'created_at', 'author_id', 'conversation_id'],
     });
-    if (tweet?.data?.public_metrics) dump('  data', tweet.data);
-    else console.log('  → No public_metrics (deleted / restricted / tier block).');
+    if (tweet?.data) {
+      if (tweet.data.text) {
+        console.log(`\n  ▶ TWEET TEXT (推文内容):\n  ${tweet.data.text}`);
+      }
+      dump('  data', tweet.data);
+    } else {
+      console.log('  → No data returned (deleted / restricted / tier block).');
+    }
     if (tweet?.errors) dump('  errors', tweet.errors);
   } catch (err: any) {
     if (err?.code === 429 || err?.rateLimit) {
-      console.log(`  → RATE-LIMITED (429). rateLimit=${JSON.stringify(err?.rateLimit ?? {})}`);
+      const rl = err?.rateLimit ?? {};
+      const isQuota = typeof rl.remaining === 'number' && rl.remaining < 10;
+      console.log(`  → 429 ${isQuota ? 'QUOTA EXHAUSTED' : '(access-level block — quota NOT exhausted, likely protected account / suspension / tier restriction)'}`);
+      console.log(`     rateLimit = ${JSON.stringify(rl)}`);
     } else {
       console.log(`  → ERROR ${err?.code ?? ''}: ${err?.message || err}`);
       if (err?.data) dump('  err.data', err.data);
@@ -246,7 +255,8 @@ async function rawRedditInfo(fullname: string, what: string): Promise<void> {
   }
   // FULL field dump — every key Reddit returned for this thing.
   dump('  FULL thing.data', data);
-  console.log(`  thing.kind = ${json.data.children[0].kind}  (t1=comment, t3=post)`);
+  const kind: string = json.data.children[0].kind;
+  console.log(`  thing.kind = ${kind}  (t1=comment, t3=post)`);
   console.log(`  field count = ${Object.keys(data).length}`);
   console.log(
     `  WE EXTRACT → score=${data.score}  num_comments=${data.num_comments ?? '(n/a — t1 comments come from the thread fetch)'}\n` +
@@ -254,6 +264,14 @@ async function rawRedditInfo(fullname: string, what: string): Promise<void> {
     `removed=${data.removed ?? '?'} removed_by_category=${data.removed_by_category ?? '-'} ` +
     `locked=${data.locked ?? '-'} author=${data.author}`
   );
+  // Highlight the actual post/comment content so it's easy to spot.
+  if (kind === 't1' && data.body) {
+    console.log(`\n  ▶ COMMENT BODY (回帖正文):\n${data.body.slice(0, 500)}${data.body.length > 500 ? '\n  …(truncated)' : ''}`);
+  } else if (kind === 't3') {
+    console.log(`\n  ▶ POST TITLE  (原帖标题): ${data.title ?? '(none)'}`);
+    if (data.selftext) console.log(`  ▶ POST BODY   (原帖正文):\n${data.selftext.slice(0, 500)}${data.selftext.length > 500 ? '\n  …(truncated)' : ''}`);
+    else console.log(`  ▶ POST BODY   (原帖正文): (empty — link post or removed)`);
+  }
 }
 
 /**
@@ -351,7 +369,7 @@ async function main(): Promise<void> {
         select: {
           id: true, releaseId: true, releaseURL: true,
           impressions: true, trafficScore: true, integrationId: true,
-          state: true, source: true,
+          state: true, source: true, content: true,
         },
       },
       opportunity: {
@@ -382,6 +400,7 @@ async function main(): Promise<void> {
   console.log(`  post.releaseId = ${post.releaseId ?? 'NULL'}`);
   console.log(`  post.releaseURL= ${post.releaseURL ?? 'NULL'}   (← 回帖 reply URL)`);
   console.log(`  integrationId  = ${post.integrationId ?? 'NULL'}`);
+  console.log(`  post.content   = ${(post.content ?? '').slice(0, 200)}${(post.content ?? '').length > 200 ? '…' : ''}   (← 我们发出去的回帖文本)`);
   console.log(`  stored(reply)  = impressions=${post.impressions ?? 'null'} trafficScore=${post.trafficScore ?? 'null'}`);
   console.log(`  opp.externalId = ${opportunity.externalPostId ?? 'NULL'}   (← 原帖 original id)`);
   console.log(`  opp.url        = ${opportunity.externalPostUrl ?? 'NULL'}`);
