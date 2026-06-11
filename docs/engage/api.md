@@ -20,6 +20,8 @@
 - [Reply Accounts — Reply Accounts](#reply-accounts--reply-accounts)
 - [Opportunities — Signal Feed](#opportunities--signal-feed)
 - [Draft Generation — AI Draft Generation (SSE)](#draft-generation--ai-draft-generation-sse)
+  - [POST /opportunities/:id/draft](#post-apienageopportunitiesiddraft) — stream an AI draft (not persisted)
+  - [POST /opportunities/:id/save-draft](#post-apienageopportunitiesidsave-draft) — save an unpublished working draft (DRAFT)
 - [Reply Actions — Send/Schedule/Manual Reply](#reply-actions--sendschedulemanual-reply)
   - [POST /send-now](#post-apienageopportunitiesidsend-now) — immediate single (cancels scheduled if exists)
   - [POST /schedule](#post-apienageopportunitiesidschedule) — scheduled single
@@ -31,7 +33,7 @@
   - [GET /extension-replies](#get-apienageextension-replies) — paginated history
   - [DELETE /extension-replies](#delete-apienageextension-replies) — clear history (all | 1d | 1w | 1m)
 - [Sent Replies — Sent Records](#sent-replies--sent-records)
-  - [GET /sent](#get-apienagesent) — paginated list (`status` rollups: `settled` = live+scheduled, `awaiting` = generated-but-unpublished)
+  - [GET /sent](#get-apienagesent) — paginated list (`status` rollups: `settled` = live+scheduled, `awaiting` = draft+manual+error)
   - [GET /sent/stats](#get-apienagesentstats) — aggregate stats
   - [PATCH /sent/:id](#patch-apienagesentid) — edit scheduled reply
   - [PATCH /sent/:id/reply-url](#patch-apienagesentidreply-url) — Reddit URL submission
@@ -286,7 +288,7 @@ interface EngageSentReplyWithDetails extends EngageSentReply {
   post: {
     id: string;
     content: string;
-    state: string;         // 'PUBLISHED' | 'QUEUE' | 'ERROR'
+    state: string;         // 'PUBLISHED' | 'QUEUE' | 'ERROR' | 'DRAFT' (DRAFT only via ?status=awaiting)
     releaseURL: string | null; // X tweet URL or Reddit comment URL
     publishDate: string;
     impressions: number;
@@ -969,7 +971,7 @@ Stream the generation of an AI reply draft. Response is Server-Sent Events (`tex
 
 | Platform | Default target | Hard cap (draft rejected above this) |
 |---|---|---|
-| X / Twitter | 260 Twitter-weighted chars | `outputLength` (with one automatic retry if the first draft overshoots) |
+| X / Twitter | 260 Twitter-weighted chars | `max(outputLength, 280)` — i.e. X's exact 280-weighted max (one automatic retry if the first draft overshoots) |
 | Reddit | 1000 chars | `max(outputLength, 2000)` — drafts of 1000–2000 chars are accepted; only above 2000 fails |
 
 > Reddit's real limit is ~10000 chars, so a 2000-char reply always posts fine. Keeping the target at 1000 favors concise, natural replies while tolerating a slight overshoot instead of failing the whole generation. A Reddit draft over the hard cap fails with `generation_failed` and is **not** retried (unlike X).
@@ -1052,6 +1054,32 @@ while (true) {
   }
 }
 ```
+
+---
+
+### POST `/api/engage/opportunities/:id/save-draft`
+
+Save (upsert) an **unpublished working draft** reply for an opportunity — **one DRAFT per opportunity**. The content may be AI-generated, AI-then-edited, or **fully hand-typed**: the save is decoupled from generation (the SSE `/draft` endpoint above does *not* persist anything, and a manually-typed reply never calls it).
+
+Stored as a `Post(state=DRAFT, source=engage)` + `EngageSentReply`, so it surfaces in `GET /sent?status=awaiting`. It is deliberately **lightweight** — unlike send/schedule/manual it does **NOT**:
+- claim the opportunity (it stays actionable in the signal feed),
+- charge reply credits (generation already did, if used),
+- create a real post or sync metrics.
+
+When the opportunity is later sent / scheduled / manually replied, the leftover DRAFT is **automatically deleted** (the claim obsoletes it).
+
+**Request Body**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `draftContent` | `string` (max 4000) | ✓ | The reply text to save |
+| `strategy` | `EXPERT_ANSWER \| DATA_BACKED \| EMPATHY_LED` | ✓ | Generation strategy (stored in `inputData`) |
+| `brandStrength` | `number` 0–3 | ✓ | Brand strength (stored in `inputData`) |
+| `mentions` | `string[]` (≤20) | — | Optional brand mentions (stored in `inputData`) |
+
+**Response** `200 OK` — Returns the upserted `EngageSentReply` (with its `Post`, `state=DRAFT`).
+
+**Errors**: `404` opportunity not found · `403` opportunity no longer actionable (expired / replied / scheduled / dismissed).
 
 ---
 
@@ -1311,7 +1339,9 @@ Retrieve the list of sent replies (includes original post summary and metrics da
 | `manual` | `state=PUBLISHED` && `releaseURL=null` (posted/copied, link not yet backfilled) |
 | `error` | `state=ERROR` (publishing failed; the generated draft is preserved) |
 | `settled` | `published` **OR** `scheduled` — no further action needed (live, or will auto-fire) |
-| `awaiting` | `manual` **OR** `error` — generated + saved but not yet live (replaces the former `GET /awaiting-review` endpoint) |
+| `awaiting` | `state=DRAFT` (saved working copy, never sent) **OR** `manual` **OR** `error` — has content but not yet live. Replaces the former `GET /awaiting-review` endpoint; **the only filter that surfaces `DRAFT` working-copies** (see `POST /opportunities/:id/save-draft`). |
+
+> **DRAFT working-copies:** a saved draft is a `Post(state=DRAFT)` (see `POST /opportunities/:id/save-draft`). It is **not** a sent reply, so it is excluded from the default `/sent` list ("All"), from `/sent/stats`, and from every dashboard reply count — it appears **only** under `status=awaiting`. Distinguish the three `awaiting` sub-cases by `post.state` (`DRAFT` / `PUBLISHED`+no `releaseURL` / `ERROR`).
 
 **Response** `200 OK`
 

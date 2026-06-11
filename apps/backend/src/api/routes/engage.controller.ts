@@ -41,6 +41,7 @@ import {
   GenerateDraftDto,
   ListOpportunitiesDto,
   ListSentDto,
+  SaveDraftDto,
   SaveEngageConfigDto,
   SetupEngageDto,
   BatchScheduleReplyDto,
@@ -57,9 +58,12 @@ import {
   UpdateScheduledReplyDto,
 } from '@gitroom/nestjs-libraries/engage/dtos/engage.dto';
 
-const X_WEIGHTED_CHAR_LIMIT = 260;
-// Soft target the model aims for vs. the hard ceiling we actually reject above.
+// Soft target the model aims for vs. the hard ceiling we actually reject above
+// (X: 260 target / 280 ceiling = X's exact max — weightedLength uses official
+// twitter-text weighting, so no safety margin needed; Reddit: 1000 / 2000).
 // Keep these in sync with engage-draft.service.ts.
+const X_WEIGHTED_CHAR_LIMIT = 260;
+const X_HARD_CHAR_LIMIT = 280;
 const REDDIT_TARGET_CHAR_LIMIT = 1000;
 const REDDIT_HARD_CHAR_LIMIT = 2000;
 
@@ -94,10 +98,15 @@ function assertDraftWithinPlatformLimit(
   outputLength?: number
 ) {
   const normalized = normalizeEngagePlatform(platform);
-  if (normalized === 'x' && weightedLength(draft) > X_WEIGHTED_CHAR_LIMIT) {
-    throw new Error(
-      `Generated X draft exceeded ${X_WEIGHTED_CHAR_LIMIT} Twitter-weighted characters.`
-    );
+  if (normalized === 'x') {
+    // Mirror the draft service: reject only above the hard ceiling, with the
+    // requested target as the soft floor of that ceiling.
+    const hardLimit = Math.max(outputLength ?? X_WEIGHTED_CHAR_LIMIT, X_HARD_CHAR_LIMIT);
+    if (weightedLength(draft) > hardLimit) {
+      throw new Error(
+        `Generated X draft exceeded ${hardLimit} Twitter-weighted characters.`
+      );
+    }
   }
   if (normalized === 'reddit') {
     const hardLimit = Math.max(
@@ -504,6 +513,20 @@ export class EngageController {
     } finally {
       if (!res.writableEnded) res.end();
     }
+  }
+
+  // ─── Save Draft (unpublished working copy) ───────────────────────────────
+
+  @ApiOperation({ summary: 'Save (upsert) an unpublished working draft reply for an opportunity — one DRAFT per opportunity. Content may be AI-generated, edited, or hand-typed. Surfaces in GET /sent?status=awaiting (Post.state=DRAFT). Does NOT claim the opportunity, charge credits, or sync metrics.' })
+  @ApiResponse({ status: 404, description: 'Opportunity not found' })
+  @ApiResponse({ status: 403, description: 'Opportunity is no longer actionable (expired / replied / scheduled / dismissed)' })
+  @Post('/opportunities/:id/save-draft')
+  saveDraft(
+    @GetOrgFromRequest() org: Organization,
+    @Param('id') id: string,
+    @Body() body: SaveDraftDto
+  ) {
+    return this._engageService.saveDraft(org, id, body);
   }
 
   // ─── Send / Schedule Reply (X via Post pipeline) ─────────────────────────

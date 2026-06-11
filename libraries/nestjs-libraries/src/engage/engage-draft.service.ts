@@ -40,7 +40,15 @@ const INTENT_PROMPTS: Record<string, string> = {
     'The person shared data. Expand with related data or implications.',
 };
 
+// X soft target we instruct the model with (also the default when no length tier is
+// given), vs. the hard ceiling we actually reject above — mirroring the Reddit
+// target/hard split below. The model aims for X_WEIGHTED_CHAR_LIMIT but an overshoot
+// up to X_HARD_CHAR_LIMIT is accepted instead of failing the whole generation.
+// X_HARD_CHAR_LIMIT is X's exact max (280): weightedLength() uses the official
+// twitter-text weighting (helpers/utils/count.length.ts), so the count is precise
+// and needs no safety margin. Keep both in sync with engage.controller.ts.
 const X_WEIGHTED_CHAR_LIMIT = 260;
+const X_HARD_CHAR_LIMIT = 280;
 // Reddit replies aim for 1000 chars (the soft target we instruct the model with),
 // but Reddit itself allows ~10000, so we only reject above a 2000-char hard ceiling.
 // This tolerates a slight overshoot instead of failing the whole generation.
@@ -102,12 +110,19 @@ export class EngageDraftService {
 
     if (signal?.aborted) return;
     if (platform === 'x') {
+      // The prompt TARGETS `outputLimit` (the requested length), but we only
+      // HARD-REJECT above the X ceiling (X_HARD_CHAR_LIMIT) — NOT the requested
+      // target — mirroring the Reddit target/hard split below. A short target
+      // (e.g. 65) must not fail the whole generation when the model returns a
+      // slightly longer but still platform-valid reply; the model rarely hits a
+      // tight target exactly, and a usable reply beats a hard error.
+      const hardLimit = Math.max(outputLimit, X_HARD_CHAR_LIMIT);
       yield* this._generateDraftWithRetryLimit({
         systemPrompt,
         userPrompt,
         platformLabel: 'X',
-        limitDescription: `${outputLimit} Twitter-weighted characters`,
-        isWithinLimit: (draft) => weightedLength(draft) <= outputLimit,
+        limitDescription: `${hardLimit} Twitter-weighted characters`,
+        isWithinLimit: (draft) => weightedLength(draft) <= hardLimit,
         signal,
       });
     } else if (platform === 'reddit') {

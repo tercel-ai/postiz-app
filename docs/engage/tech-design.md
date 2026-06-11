@@ -638,7 +638,7 @@ export class EngageController {
     // Internally: Post.releaseURL = url
   ) { ... }
 
-  // AI draft generation
+  // AI draft generation (SSE; NOT persisted — streamed to the client only)
   @Post('/opportunities/:id/draft')
   generateDraft(
     @GetOrgFromRequest() org: Organization,
@@ -647,14 +647,28 @@ export class EngageController {
     @Res() res: Response
   ) { ... }  // SSE streaming response
 
+  // Save (upsert) an unpublished working draft — one DRAFT per opportunity. Content
+  // may be AI-generated, edited, or HAND-TYPED (decoupled from generation). Stored as
+  // a Post(state=DRAFT)+EngageSentReply; surfaces only in /sent?status=awaiting. Does
+  // NOT claim the opportunity, charge credits, or sync metrics. The leftover DRAFT is
+  // auto-deleted when the opportunity is later sent/scheduled/manually replied.
+  @Post('/opportunities/:id/save-draft')
+  saveDraft(
+    @GetOrgFromRequest() org: Organization,
+    @Param('id') id: string,
+    @Body() body: SaveDraftDto
+  ) { ... }
+
   // Sent history list. Four granular Post states plus two combined "rollup"
   // status values (no separate endpoint — the old /awaiting-review was folded in):
   //   published = state=PUBLISHED && releaseURL!=null   (live)
   //   scheduled = state=QUEUE                           (queued, will auto-fire)
   //   manual    = state=PUBLISHED && releaseURL=null    (link not backfilled yet)
   //   error     = state=ERROR                           (publish failed, draft kept)
-  //   settled   = published OR scheduled   (已处理 — no further action needed)
-  //   awaiting  = manual OR error          (待处理 — generated but not yet live)
+  //   draft     = state=DRAFT                           (saved working copy, never sent)
+  //   settled   = published OR scheduled        (已处理 — no further action needed)
+  //   awaiting  = draft OR manual OR error      (待处理 — has content, not yet live)
+  // DRAFT is excluded everywhere except status=awaiting (not a sent reply).
   @Get('/sent')
   listSentReplies(
     @GetOrgFromRequest() org: Organization,
@@ -797,7 +811,7 @@ export class ListOpportunitiesDto {
 // ── SENT LIST + STATS DTOs ────────────────────────────────────────────────
 export class ListSentDto {
   platform?:  string;                  // filter by platform (x | reddit | ...)
-  status?:    string;                  // 'published' | 'scheduled' | 'manual' | 'error'
+  status?:    string;                  // 'published' | 'scheduled' | 'manual' | 'error' | 'settled' | 'awaiting'
   date?:      'today' | 'week' | 'month';
   page?:      number;
   limit?:     number;

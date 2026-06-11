@@ -24,6 +24,7 @@ function buildRepo() {
   const stateAggregate = vi.fn();
   const stateFindFirst = vi.fn();
   const stateFindUnique = vi.fn();
+  const stateUpdateMany = vi.fn();
   const oppAggregate = vi.fn();
   const oppFindFirst = vi.fn();
   const channelFindMany = vi.fn();
@@ -34,8 +35,14 @@ function buildRepo() {
   // listOpportunities' `.then((r) => r ?? [])`) don't NPE when a test doesn't
   // care about them. Tests that assert on sent replies override this.
   const sentFindMany = vi.fn().mockResolvedValue([]);
+  const sentFindFirst = vi.fn();
+  const sentCreate = vi.fn();
+  const sentUpdate = vi.fn();
   const postAggregate = vi.fn();
   const postFindMany = vi.fn();
+  const postCreate = vi.fn();
+  const postUpdate = vi.fn();
+  const postDeleteMany = vi.fn();
 
   const channel = {
     model: { engageMonitoredChannel: { findMany: channelFindMany } },
@@ -57,6 +64,7 @@ function buildRepo() {
         aggregate: stateAggregate,
         findFirst: stateFindFirst,
         findUnique: stateFindUnique,
+        updateMany: stateUpdateMany,
       },
     },
   } as any;
@@ -65,12 +73,34 @@ function buildRepo() {
       engageSentReply: {
         count: sentCount,
         findMany: sentFindMany,
+        findFirst: sentFindFirst,
+        create: sentCreate,
+        update: sentUpdate,
       },
     },
   } as any;
   const post = {
-    model: { post: { aggregate: postAggregate, findMany: postFindMany } },
+    model: {
+      post: {
+        aggregate: postAggregate,
+        findMany: postFindMany,
+        create: postCreate,
+        update: postUpdate,
+        deleteMany: postDeleteMany,
+      },
+    },
   } as any;
+  // Interactive-transaction client: $transaction(cb) runs cb with a `tx` exposing the
+  // model accessors. upsertDraft routes its writes through here — wire the SAME mock
+  // fns so assertions on sentFindFirst/postCreate/sentCreate/etc. still capture the
+  // tx-scoped calls.
+  const txTransaction = vi.fn(async (cb: any) =>
+    cb({
+      engageSentReply: { findFirst: sentFindFirst, create: sentCreate, update: sentUpdate },
+      post: { create: postCreate, update: postUpdate, deleteMany: postDeleteMany },
+    })
+  );
+  const tx = { model: { $transaction: txTransaction } } as any;
 
   // Constructor order: _config, _keyword, _channel, _trackedAccount,
   // _replyAccount, _opportunity, _oppState, _sentReply, _integration, _post,
@@ -85,13 +115,14 @@ function buildRepo() {
     sentReply,      // _sentReply
     {} as any,
     post,           // _post
-    {} as any,
+    tx,             // _tx
     scanCursor      // _scanCursor
   );
   return {
     repo, stateFindMany, stateCount, stateAggregate, stateFindFirst, stateFindUnique,
-    oppAggregate, oppFindFirst, channelFindMany, trackedFindMany, cursorFindMany,
-    sentCount, sentFindMany, postAggregate, postFindMany,
+    stateUpdateMany, oppAggregate, oppFindFirst, channelFindMany, trackedFindMany,
+    cursorFindMany, sentCount, sentFindMany, sentFindFirst, sentCreate, sentUpdate,
+    postAggregate, postFindMany, postCreate, postUpdate, postDeleteMany, txTransaction,
   };
 }
 
@@ -193,6 +224,9 @@ describe('EngageRepository — two-table reads', () => {
       const item = (await repo.listOpportunities('org1', {} as any)).items[0] as any;
       expect(item.sentReplyId).toBe('reply-new');
       expect(item.replyLink).toBe('https://x.com/a/status/1');
+      // The feed's reply-link lookup must EXCLUDE unsent DRAFT working-copies, so a
+      // saved draft never makes an opportunity look "already replied".
+      expect(sentFindMany.mock.calls[0][0].where.post).toEqual({ state: { not: 'DRAFT' } });
     });
 
     it('reports replyLink null when the latest reply has no URL (pending backfill)', async () => {
@@ -560,10 +594,10 @@ describe('EngageRepository — two-table reads', () => {
       expect(sentWhere.source).toBe('engage');
       expect(sentWhere.state).toBe('PUBLISHED');
       expect(sentWhere.publishDate.gte).toBeInstanceOf(Date);
-      // responseRate denominator (1st count) → any state, but windowed.
+      // responseRate denominator (1st count) → any SENT state (drafts excluded), windowed.
       const totalWhere = sentCount.mock.calls[0][0].where.post.is;
       expect(totalWhere.publishDate.gte).toBeInstanceOf(Date);
-      expect(totalWhere.state).toBeUndefined();
+      expect(totalWhere.state).toEqual({ not: 'DRAFT' });
       // Headline impressions aggregate (1st aggregate) is windowed too.
       expect(postAggregate.mock.calls[0][0].where.publishDate.gte).toBeInstanceOf(Date);
     });
@@ -772,8 +806,11 @@ describe('EngageRepository — two-table reads', () => {
         totalTrafficScore: 286, // round(286.4)
         avgLikes: 0,
       });
-      // All-time: the post filter is just the engage source, no date window.
-      expect(sentCount.mock.calls[0][0].where.post).toEqual({ source: 'engage' });
+      // All-time: engage source, no date window, and unsent drafts excluded.
+      expect(sentCount.mock.calls[0][0].where.post).toEqual({
+        source: 'engage',
+        state: { not: 'DRAFT' },
+      });
       expect(sentCount.mock.calls[0][0].where.post.publishDate).toBeUndefined();
     });
 
@@ -1695,7 +1732,7 @@ describe('EngageRepository.getOrgScanStatus', () => {
   //   `settled`  = published (PUBLISHED + releaseURL) OR scheduled (QUEUE) —
   //                "no further action needed". The exact complement of `awaiting`.
   describe('combined status filters (awaiting / settled)', () => {
-    it('status=awaiting OR-combines the two unpublished buckets', async () => {
+    it('status=awaiting OR-combines DRAFT + the two unpublished buckets', async () => {
       const { repo, sentFindMany, sentCount, stateFindMany } = buildRepo();
       sentFindMany.mockResolvedValue([]);
       sentCount.mockResolvedValue(0);
@@ -1704,12 +1741,24 @@ describe('EngageRepository.getOrgScanStatus', () => {
 
       const where = sentFindMany.mock.calls[0][0].where;
       expect(where.post.OR).toEqual([
+        { state: 'DRAFT' },
         { state: 'PUBLISHED', releaseURL: null },
         { state: 'ERROR' },
       ]);
       expect(where.post.source).toBe('engage');
       // No rows → skip the matchedKeywords join entirely.
       expect(stateFindMany).not.toHaveBeenCalled();
+    });
+
+    it('no status filter ("All") excludes unsent DRAFT working-copies', async () => {
+      const { repo, sentFindMany, sentCount } = buildRepo();
+      sentFindMany.mockResolvedValue([]);
+      sentCount.mockResolvedValue(0);
+
+      await repo.listSentReplies('org1', {} as any);
+
+      const where = sentFindMany.mock.calls[0][0].where;
+      expect(where.post).toEqual({ source: 'engage', state: { not: 'DRAFT' } });
     });
 
     it('status=settled OR-combines published(live) + scheduled', async () => {
@@ -1738,10 +1787,114 @@ describe('EngageRepository.getOrgScanStatus', () => {
       expect(sentCount.mock.calls[0][0].where.post).toMatchObject({
         source: 'engage',
         OR: [
+          { state: 'DRAFT' },
           { state: 'PUBLISHED', releaseURL: null },
           { state: 'ERROR' },
         ],
       });
+    });
+  });
+
+  describe('upsertDraft (save-draft)', () => {
+    it('creates a Post(state=DRAFT, source=engage) + EngageSentReply when none exists', async () => {
+      const { repo, sentFindFirst, postCreate, sentCreate, postUpdate, txTransaction } = buildRepo();
+      sentFindFirst.mockResolvedValue(null); // no existing draft
+      postCreate.mockResolvedValue({ id: 'post-d' });
+      sentCreate.mockResolvedValue({ id: 'reply-d', postId: 'post-d' });
+
+      await repo.upsertDraft('org1', 'opp1', {
+        platform: 'x',
+        content: 'my draft reply',
+        inputData: { strategy: 'EXPERT_ANSWER', brandStrength: 1 },
+      });
+
+      // Atomic: the lookup + both writes run inside ONE transaction (no orphan Post
+      // on partial failure).
+      expect(txTransaction).toHaveBeenCalledTimes(1);
+
+      // The lookup is scoped to this org+opportunity AND DRAFT state.
+      expect(sentFindFirst.mock.calls[0][0].where).toEqual({
+        organizationId: 'org1',
+        opportunityId: 'opp1',
+        post: { state: 'DRAFT' },
+      });
+      // A DRAFT engage Post is created (not published, no claim).
+      expect(postCreate.mock.calls[0][0].data).toMatchObject({
+        organizationId: 'org1',
+        content: 'my draft reply',
+        state: 'DRAFT',
+        source: 'engage',
+      });
+      // Linked to a fresh EngageSentReply; no in-place update on the create path.
+      expect(sentCreate.mock.calls[0][0].data).toMatchObject({
+        organizationId: 'org1',
+        opportunityId: 'opp1',
+        postId: 'post-d',
+      });
+      expect(postUpdate).not.toHaveBeenCalled();
+    });
+
+    it('updates the existing draft in place (no second Post created)', async () => {
+      const { repo, sentFindFirst, postUpdate, sentUpdate, postCreate, sentCreate } = buildRepo();
+      sentFindFirst.mockResolvedValue({ id: 'reply-d', postId: 'post-d' });
+      postUpdate.mockResolvedValue({ id: 'post-d' });
+      sentUpdate.mockResolvedValue({ id: 'reply-d' });
+
+      await repo.upsertDraft('org1', 'opp1', {
+        platform: 'reddit',
+        content: 'edited draft',
+        inputData: { strategy: 'DATA_BACKED', brandStrength: 2 },
+      });
+
+      expect(postUpdate.mock.calls[0][0]).toMatchObject({
+        where: { id: 'post-d' },
+        data: { content: 'edited draft' },
+      });
+      expect(sentUpdate.mock.calls[0][0]).toMatchObject({ where: { id: 'reply-d' } });
+      // Upsert — never creates a second draft.
+      expect(postCreate).not.toHaveBeenCalled();
+      expect(sentCreate).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('draft cleanup on a committed reply', () => {
+    it('createSentReply deletes any leftover DRAFT for the opportunity', async () => {
+      const { repo, sentCreate, sentFindMany, postDeleteMany } = buildRepo();
+      sentCreate.mockResolvedValue({ id: 'reply-1' });
+      // A saved draft exists for this opportunity.
+      sentFindMany.mockResolvedValue([{ postId: 'post-d' }]);
+
+      await repo.createSentReply({
+        organizationId: 'org1',
+        opportunityId: 'opp1',
+        postId: 'post-real',
+        inputData: {},
+      });
+
+      // The DRAFT lookup is scoped to org+opportunity+DRAFT; its Post is deleted
+      // (cascades to the EngageSentReply).
+      expect(sentFindMany.mock.calls[0][0].where).toEqual({
+        organizationId: 'org1',
+        opportunityId: 'opp1',
+        post: { state: 'DRAFT' },
+      });
+      expect(postDeleteMany.mock.calls[0][0]).toEqual({
+        where: { id: { in: ['post-d'] } },
+      });
+    });
+
+    it('claimOpportunityForReply does NOT delete drafts (a rolled-back publish keeps the draft)', async () => {
+      const { repo, stateFindUnique, stateUpdateMany, postDeleteMany } = buildRepo();
+      stateFindUnique
+        .mockResolvedValueOnce({ status: 'NEW' })
+        .mockResolvedValueOnce({ ...STATE_ROW, status: 'REPLIED' });
+      stateUpdateMany.mockResolvedValue({ count: 1 });
+
+      await repo.claimOpportunityForReply('org1', 'opp1', 'REPLIED');
+
+      // Cleanup moved to createSentReply (post-commit), so the claim itself must not
+      // touch drafts — otherwise a failed publish would lose the saved draft.
+      expect(postDeleteMany).not.toHaveBeenCalled();
     });
   });
 });

@@ -29,6 +29,7 @@ import {
   BatchScheduleReplyDto,
   BatchSendReplyDto,
   ScheduleReplyDto,
+  SaveDraftDto,
   ScoreStatsDto,
   SendReplyDto,
   UpdateKeywordDto,
@@ -294,6 +295,30 @@ export class EngageService implements OnApplicationBootstrap {
 
   async getOpportunityForReply(org: Organization, id: string) {
     return this._engageRepository.getOpportunityForReply(org.id, id);
+  }
+
+  // Persist an unpublished working draft (AI-generated, edited, or hand-typed) for
+  // an opportunity — one DRAFT per opportunity, upserted. Decoupled from generation
+  // so a manually-typed reply is saved too. Unlike send/schedule/manual it does NOT
+  // claim the opportunity (it stays actionable in the feed), charge credits, or sync
+  // metrics; it just stores the content as a Post(state=DRAFT)+EngageSentReply so it
+  // surfaces in GET /sent?status=awaiting.
+  async saveDraft(org: Organization, opportunityId: string, dto: SaveDraftDto) {
+    // Gate on actionable status (same as draft generation): no drafts for an
+    // expired/replied/scheduled/dismissed opportunity. Throws Forbidden otherwise.
+    const opportunity = await this._engageRepository.getOpportunityForReply(
+      org.id,
+      opportunityId
+    );
+    return this._engageRepository.upsertDraft(org.id, opportunityId, {
+      platform: opportunity.platform,
+      content: dto.draftContent,
+      inputData: {
+        strategy: dto.strategy,
+        brandStrength: dto.brandStrength,
+        mentions: dto.mentions,
+      },
+    });
   }
 
   // ─── Reply-draft billing (the only credit-charging action in engage) ───────

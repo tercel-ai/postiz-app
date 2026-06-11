@@ -916,7 +916,10 @@ export class EngageRepository {
       oppIds.length
         ? this._sentReply.model.engageSentReply
             .findMany({
-              where: { organizationId, opportunityId: { in: oppIds } },
+              // Exclude unsent DRAFT working-copies: a saved draft must NOT make the
+              // signal feed show "replied / link pending" for an opportunity the user
+              // hasn't actually replied to yet.
+              where: { organizationId, opportunityId: { in: oppIds }, post: { state: { not: 'DRAFT' } } },
               orderBy: { createdAt: 'desc' },
               select: { id: true, opportunityId: true, post: { select: { releaseURL: true } } },
             })
@@ -1043,6 +1046,82 @@ export class EngageRepository {
     });
     if (!row) throw new NotFoundException('Opportunity not found');
     return { opp: this._merge(row), priorStatus };
+  }
+
+  // Delete any saved working DRAFT reply for an opportunity. Deleting the Post
+  // cascades to its EngageSentReply (onDelete: Cascade). No-op when none exist.
+  private async _deleteDraftsForOpportunity(
+    organizationId: string,
+    opportunityId: string
+  ): Promise<void> {
+    const drafts = await this._sentReply.model.engageSentReply.findMany({
+      where: { organizationId, opportunityId, post: { state: 'DRAFT' } },
+      select: { postId: true },
+    });
+    if (!drafts.length) return;
+    await this._post.model.post.deleteMany({
+      where: { id: { in: drafts.map((d) => d.postId) } },
+    });
+  }
+
+  // Upsert the single working DRAFT reply for an opportunity. Stored as a
+  // Post(state=DRAFT, source=engage) + EngageSentReply so it flows through the same
+  // machinery as sent replies and surfaces in /sent?status=awaiting — but it is NOT
+  // a sent reply: no releaseURL, it never claims the opportunity, and every
+  // "sent reply" count/analytic excludes DRAFT (only `awaiting` includes it).
+  async upsertDraft(
+    organizationId: string,
+    opportunityId: string,
+    data: { platform: string; content: string; inputData: object }
+  ) {
+    const { randomUUID } = await import('crypto');
+    // Atomic: the existing-draft lookup and the Post + EngageSentReply writes run in
+    // ONE transaction, so a mid-write failure can never leave an orphan DRAFT Post
+    // without its tracking row. (A read-committed transaction does NOT by itself stop
+    // two concurrent saves from both seeing no draft and inserting two — that needs a
+    // DB-level partial unique index, deliberately skipped to avoid a migration; the
+    // realistic trigger is a double-click, which the client should debounce.)
+    return this._tx.model.$transaction(async (tx) => {
+      const existing = await tx.engageSentReply.findFirst({
+        where: { organizationId, opportunityId, post: { state: 'DRAFT' } },
+        select: { id: true, postId: true },
+      });
+
+      if (existing) {
+        await tx.post.update({
+          where: { id: existing.postId },
+          data: { content: data.content },
+        });
+        return tx.engageSentReply.update({
+          where: { id: existing.id },
+          data: { inputData: data.inputData as Prisma.InputJsonValue },
+          include: { post: { select: { id: true, content: true, state: true } } },
+        });
+      }
+
+      const post = await tx.post.create({
+        data: {
+          organizationId,
+          content: data.content,
+          publishDate: new Date(),
+          state: 'DRAFT',
+          source: 'engage',
+          image: '[]',
+          settings: JSON.stringify({ __type: data.platform === 'x' ? 'x' : 'reddit' }),
+          group: randomUUID(),
+          delay: 0,
+        },
+      });
+      return tx.engageSentReply.create({
+        data: {
+          organizationId,
+          opportunityId,
+          postId: post.id,
+          inputData: data.inputData as Prisma.InputJsonValue,
+        },
+        include: { post: { select: { id: true, content: true, state: true } } },
+      });
+    });
   }
 
   // Rollback helper — restores an opportunity to its prior status after a failed
@@ -1334,7 +1413,17 @@ export class EngageRepository {
     // Tracking is keyed per-post (postId is @unique), so a batch that sends N
     // replies to one opportunity records N rows. There is no per-opportunity
     // unique to collide on, so this is a plain create.
-    return this._sentReply.model.engageSentReply.create({ data });
+    const reply = await this._sentReply.model.engageSentReply.create({ data });
+    // A committed real reply obsoletes any saved working DRAFT for this opportunity.
+    // Done HERE (after the reply row exists) rather than at claim time so a FAILED
+    // publish — which rolls the claim back — leaves the saved draft intact. Best-
+    // effort: the reply is already live/scheduled, so a cleanup failure must not fail
+    // the flow.
+    await this._deleteDraftsForOpportunity(
+      data.organizationId,
+      data.opportunityId
+    ).catch(() => undefined);
+    return reply;
   }
 
   // Shared filter for the sent-reply LIST and STATS so both apply identical
@@ -1361,24 +1450,30 @@ export class EngageRepository {
       postWhere.state = 'PUBLISHED';
       postWhere.releaseURL = null;
     } else if (dto.status === 'awaiting') {
-      // "Awaiting review": generated + saved but not yet live — manual
-      // link-pending (PUBLISHED with no releaseURL) OR a failed publish (ERROR).
-      // OR-combines the two unpublished buckets in one query (replaces the former
-      // GET /engage/awaiting-review endpoint). The OR ANDs with source=engage and
-      // the date window above.
+      // "Awaiting review": has content but not yet live — a saved working DRAFT
+      // (generated/typed but never sent), manual link-pending (PUBLISHED with no
+      // releaseURL), OR a failed publish (ERROR). This is the ONLY filter that
+      // surfaces DRAFT working-copies; the OR ANDs with source=engage + the date
+      // window above. (Replaces the former GET /engage/awaiting-review endpoint.)
       postWhere.OR = [
+        { state: 'DRAFT' },
         { state: 'PUBLISHED', releaseURL: null },
         { state: 'ERROR' },
       ];
     } else if (dto.status === 'settled') {
       // "Settled" (已处理): no further user action needed — published & live
       // (PUBLISHED with a releaseURL) OR scheduled to auto-fire (QUEUE). The exact
-      // complement of `awaiting` over the four states; the OR ANDs with
-      // source=engage and the date window above.
+      // complement of `awaiting` over the four sent/attempted states; the OR ANDs
+      // with source=engage and the date window above.
       postWhere.OR = [
         { state: 'PUBLISHED', releaseURL: { not: null } },
         { state: 'QUEUE' },
       ];
+    } else {
+      // No status filter ("All"): exclude unsent DRAFT working-copies — a draft is
+      // not a sent reply and belongs only in the `awaiting` bucket. Keeps /sent and
+      // /sent/stats (incl. the response-rate denominator) free of drafts.
+      postWhere.state = { not: 'DRAFT' };
     }
 
     const sentWhere: Prisma.EngageSentReplyWhereInput = {
@@ -1610,10 +1705,11 @@ export class EngageRepository {
         ...dateWindow,
       } as Prisma.PostWhereInput,
     };
-    // Window-only filter (any state) for the totals/response-rate scope. With
-    // 'all' this is just the engage source, equivalent to the prior behavior.
+    // Window filter for the totals/response-rate scope: any SENT/attempted state
+    // but NOT unsent DRAFT working-copies (a draft is not a reply, so it must not
+    // inflate the response-rate denominator).
     const windowedPostFilter = {
-      is: { source: 'engage', ...dateWindow } as Prisma.PostWhereInput,
+      is: { source: 'engage', state: { not: 'DRAFT' }, ...dateWindow } as Prisma.PostWhereInput,
     };
 
     const [
@@ -1763,7 +1859,9 @@ export class EngageRepository {
     const rows = await this._sentReply.model.engageSentReply.findMany({
       where: {
         organizationId,
-        post: { is: { source: 'engage', publishDate: { gte: rangeStart } } },
+        // Exclude unsent DRAFT working-copies — they are not replies and must not be
+        // counted in the replies-per-day trend.
+        post: { is: { source: 'engage', state: { not: 'DRAFT' }, publishDate: { gte: rangeStart } } },
       },
       select: {
         opportunity: { select: { platform: true } },
@@ -1888,6 +1986,8 @@ export class EngageRepository {
       where: {
         organizationId,
         source: 'engage',
+        // Exclude unsent DRAFT working-copies (no impressions; not a published post).
+        state: { not: 'DRAFT' },
         publishDate: { gte: rangeStart },
       },
       select: {

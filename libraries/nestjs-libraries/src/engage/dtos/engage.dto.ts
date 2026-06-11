@@ -597,6 +597,34 @@ export class SubmitManualReplyUrlDto {
   url: string;
 }
 
+// Persist an unpublished working draft for an opportunity (one DRAFT per
+// opportunity, upserted). Content may be AI-generated, AI-then-edited, or fully
+// hand-typed — the save is decoupled from generation. Surfaces in
+// GET /sent?status=awaiting (Post.state=DRAFT); does not claim the opportunity,
+// charge credits, or sync metrics.
+export class SaveDraftDto {
+  @IsString()
+  @MaxLength(4000)
+  draftContent: string;
+
+  @IsString()
+  @IsIn(VALID_STRATEGIES)
+  strategy: string;
+
+  @IsInt()
+  @Min(0)
+  @Max(3)
+  @Type(() => Number)
+  brandStrength: number;
+
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  @MaxLength(100, { each: true })
+  @ArrayMaxSize(20)
+  mentions?: string[];
+}
+
 export class UpdateScheduledReplyDto {
   @IsOptional()
   @IsString()

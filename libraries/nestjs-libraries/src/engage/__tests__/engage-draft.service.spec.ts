@@ -215,10 +215,54 @@ describe('EngageDraftService', () => {
       expect(generateRaw).toHaveBeenCalledTimes(1);
     });
 
+    it('accepts an X draft that overshoots a short requested target but stays within the 280 ceiling (no retry, no throw)', async () => {
+      // Regression for "Generated X draft exceeded 65 Twitter-weighted characters
+      // after retry": a short requested target (outputLength=65) is a SOFT target —
+      // the model is instructed to aim for it, but a longer-but-still-valid (<=280)
+      // reply must be accepted rather than hard-failing the generation.
+      const generateRaw = vi
+        .spyOn(service as any, '_generateRaw')
+        .mockResolvedValue('x'.repeat(120)); // 120 weighted: > 65 target, <= 280 ceiling
+      const mockOpportunity: Partial<EngageOpportunity> = {
+        platform: 'x',
+        primaryIntent: 'help_seeking',
+        authorUsername: 'testuser',
+        postContent: 'How do I do X?',
+      };
+
+      const chunks = [];
+      for await (const chunk of service.generateDraft(
+        mockOpportunity as EngageOpportunity,
+        'EXPERT_ANSWER',
+        1,
+        undefined,
+        undefined,
+        65 // outputLength: short target
+      )) {
+        chunks.push(chunk);
+      }
+
+      expect(chunks.join('')).toBe('x'.repeat(120));
+      expect(generateRaw).toHaveBeenCalledTimes(1); // accepted on first try, no retry
+    });
+
+    it('still instructs the model to aim for the short requested target', async () => {
+      // The reject threshold relaxes to the 280 ceiling, but the system prompt must
+      // still TARGET the requested length so the model writes short by default.
+      const prompt = (service as any)._buildSystemPrompt(
+        'x',
+        'EXPERT_ANSWER',
+        'help_seeking',
+        1,
+        65
+      );
+      expect(prompt).toContain('under 65 Twitter-weighted characters');
+    });
+
     it('should retry X draft generation once when the first draft exceeds the weighted limit', async () => {
       const generateRaw = vi
         .spyOn(service as any, '_generateRaw')
-        .mockResolvedValueOnce('x'.repeat(261))
+        .mockResolvedValueOnce('x'.repeat(281))
         .mockResolvedValueOnce('Short complete reply.');
       const mockOpportunity: Partial<EngageOpportunity> = {
         platform: 'x',
@@ -246,7 +290,7 @@ describe('EngageDraftService', () => {
     it('should treat twitter platform aliases as X for weighted limit enforcement', async () => {
       const generateRaw = vi
         .spyOn(service as any, '_generateRaw')
-        .mockResolvedValueOnce('x'.repeat(261))
+        .mockResolvedValueOnce('x'.repeat(281))
         .mockResolvedValueOnce('Short complete reply.');
       const mockOpportunity: Partial<EngageOpportunity> = {
         platform: 'twitter',
@@ -271,7 +315,7 @@ describe('EngageDraftService', () => {
     it('should treat uppercase X platform values as X for weighted limit enforcement', async () => {
       const generateRaw = vi
         .spyOn(service as any, '_generateRaw')
-        .mockResolvedValueOnce('x'.repeat(261))
+        .mockResolvedValueOnce('x'.repeat(281))
         .mockResolvedValueOnce('Short complete reply.');
       const mockOpportunity: Partial<EngageOpportunity> = {
         platform: 'X',
@@ -295,8 +339,8 @@ describe('EngageDraftService', () => {
 
     it('should throw for X when the retry draft still exceeds the weighted limit', async () => {
       vi.spyOn(service as any, '_generateRaw')
-        .mockResolvedValueOnce('x'.repeat(261))
-        .mockResolvedValueOnce('x'.repeat(261));
+        .mockResolvedValueOnce('x'.repeat(281))
+        .mockResolvedValueOnce('x'.repeat(281));
       const mockOpportunity: Partial<EngageOpportunity> = {
         platform: 'x',
         primaryIntent: 'help_seeking',
@@ -316,7 +360,7 @@ describe('EngageDraftService', () => {
       };
 
       await expect(consume()).rejects.toThrow(
-        'Generated X draft exceeded 260 Twitter-weighted characters after retry.'
+        'Generated X draft exceeded 280 Twitter-weighted characters after retry.'
       );
     });
 
