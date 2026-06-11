@@ -26,9 +26,12 @@
   - [POST /batch-schedule](#post-apienageopportunitiesidatch-schedule) — scheduled multi-integration
   - [POST /batch-send](#post-apienageopportunitiesidatch-send) — immediate multi-integration
   - [POST /manual-reply](#post-apienageopportunitiesidanual-reply) — Reddit manual
+- [Browser-Extension Replies — Standalone In-Browser Replies](#browser-extension-replies--standalone-in-browser-replies)
+  - [POST /extension-replies](#post-apienageextension-replies) — record an extension reply
+  - [GET /extension-replies](#get-apienageextension-replies) — paginated history
+  - [DELETE /extension-replies](#delete-apienageextension-replies) — clear history (all | 1d | 1w | 1m)
 - [Sent Replies — Sent Records](#sent-replies--sent-records)
-  - [GET /sent](#get-apienagesent) — paginated list
-  - [GET /awaiting-review](#get-apienageawaiting-review) — generated-but-unpublished replies
+  - [GET /sent](#get-apienagesent) — paginated list (`status` rollups: `settled` = live+scheduled, `awaiting` = generated-but-unpublished)
   - [GET /sent/stats](#get-apienagesentstats) — aggregate stats
   - [PATCH /sent/:id](#patch-apienagesentid) — edit scheduled reply
   - [PATCH /sent/:id/reply-url](#patch-apienagesentidreply-url) — Reddit URL submission
@@ -304,6 +307,24 @@ interface EngageSentReplyWithDetails extends EngageSentReply {
     authorUsername: string | null;
     authorDisplayName: string | null;
   };
+}
+```
+
+### EngageExtensionReply
+
+Standalone in-browser replies logged by the Postiz browser extension (Option A). Unlike `EngageSentReply`, these are **not** bound to an `EngageOpportunity` or a `Post` — the extension replies to an arbitrary Reddit/X URL using the user's own browser session and reports the result back.
+
+```typescript
+interface EngageExtensionReply {
+  id: string;
+  organizationId: string;
+  platform: string;          // 'reddit' | 'x'
+  targetUrl: string;         // the post/tweet that was replied to
+  content: string;           // reply text
+  permalink: string | null;  // URL of the posted reply (Reddit comment / X status)
+  postId: string | null;     // reddit fullname (t1_/t3_) or X tweet rest_id
+  status: string;            // 'sent' | 'pending' | 'failed' (default 'sent')
+  createdAt: string;
 }
 ```
 
@@ -1197,6 +1218,74 @@ while (true) {
 
 ---
 
+## Browser-Extension Replies — Standalone In-Browser Replies
+
+Reply history logged by the Postiz browser extension (in-browser **Option A**): the extension replies to an arbitrary Reddit/X URL through the user's own browser session and reports the result back here. These records are standalone — **not** tied to an `EngageOpportunity` or a `Post` (see [`EngageExtensionReply`](#engageextensionreply)).
+
+---
+
+### POST `/api/engage/extension-replies`
+
+Record a reply posted via the browser extension.
+
+**Request Body**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `platform` | `'reddit' \| 'x'` | ✓ | Platform the reply was posted on |
+| `targetUrl` | `string` (max 2000) | ✓ | URL of the post/tweet that was replied to |
+| `content` | `string` (max 10000) | ✓ | The reply text |
+| `permalink` | `string` (max 2000) | — | URL of the posted reply (Reddit comment / X status) |
+| `postId` | `string` (max 200) | — | Reddit fullname (`t1_`/`t3_`) or X tweet `rest_id` |
+| `status` | `'sent' \| 'pending' \| 'failed'` | — | Defaults to `sent` |
+
+**Response** `200 OK` — Returns the created `EngageExtensionReply`.
+
+---
+
+### GET `/api/engage/extension-replies`
+
+Paginated list of browser-extension replies, newest first.
+
+**Query Params**
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `platform` | `'reddit' \| 'x'` | — | Optional platform filter |
+| `page` | `number` | `1` | Page number |
+| `limit` | `number` | `20` | Items per page, max 100 |
+
+**Response** `200 OK`
+
+```json
+{
+  "items": [ /* EngageExtensionReply[], newest first */ ],
+  "total": 12,
+  "page": 1,
+  "limit": 20
+}
+```
+
+---
+
+### DELETE `/api/engage/extension-replies`
+
+Clear browser-extension reply history. Deletes all rows, or only those older than the given window.
+
+**Query Params**
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `olderThan` | `'all' \| '1d' \| '1w' \| '1m'` | ✓ | `all` clears everything; `1d`/`1w`/`1m` clear rows older than 1 day / week / month |
+
+**Response** `200 OK`
+
+```json
+{ "deleted": 7 }
+```
+
+---
+
 ## Sent Replies — Sent Records
 
 ### GET `/api/engage/sent`
@@ -1208,10 +1297,21 @@ Retrieve the list of sent replies (includes original post summary and metrics da
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `platform` | `string` | — | Platform filter |
-| `status` | `'published' \| 'scheduled' \| 'manual' \| 'error'` | — | Status filter |
+| `status` | `'published' \| 'scheduled' \| 'manual' \| 'error' \| 'settled' \| 'awaiting'` | — | Status filter (see table below). `settled` and `awaiting` are combined rollups. |
 | `date` | `all \| day \| today \| week \| month` | `all` | Publish-date window (`day`/`today` aliased) |
 | `page` | `number` | `1` | Page number |
 | `limit` | `number` | `20` | Items per page, max 100 |
+
+**Status filter meanings** — the four granular states plus two combined rollups that partition them into "no action needed" vs "needs action":
+
+| status | Post condition |
+|---|---|
+| `published` | `state=PUBLISHED` && `releaseURL != null` (published & live) |
+| `scheduled` | `state=QUEUE` (queued for a future auto-publish) |
+| `manual` | `state=PUBLISHED` && `releaseURL=null` (posted/copied, link not yet backfilled) |
+| `error` | `state=ERROR` (publishing failed; the generated draft is preserved) |
+| `settled` | `published` **OR** `scheduled` — no further action needed (live, or will auto-fire) |
+| `awaiting` | `manual` **OR** `error` — generated + saved but not yet live (replaces the former `GET /awaiting-review` endpoint) |
 
 **Response** `200 OK`
 
@@ -1284,76 +1384,6 @@ Retrieve the list of sent replies (includes original post summary and metrics da
 
 ---
 
-### GET `/api/engage/awaiting-review`
-
-The **"Awaiting review"** list: replies the user has **generated + saved but not yet published**. A flat, newest-first page with **one item per saved reply** (no grouping — the original "‹ 1/2 ›" multi-version card was dropped). Each item carries the original post, its author (handle + avatar), the platform, the generated reply `content`, and the `inputData` used to generate it.
-
-> Only **saved** replies appear here. AI drafts streamed from `POST /opportunities/:id/draft` are **not** persisted, so a draft the user never sent/copied will not show up. This list reuses the same `EngageSentReply` + `Post` storage as `/sent` — it is just the "saved but not live" slice of it.
-
-**Query Params**
-
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `platform` | `x \| reddit` | — | Platform filter (via the linked opportunity) |
-| `status` | `'manual' \| 'error'` | both | Which unpublished states to include. Repeatable (`?status=manual&status=error`) or a single value. Omitted = both. |
-| `page` | `number` | `1` | Page number |
-| `limit` | `number` | `20` | Items per page, max 100 |
-
-**Status meanings** (the `status` filter ↔ each item's `status` field):
-
-| status | Post condition | Meaning |
-|---|---|---|
-| `manual` | `state=PUBLISHED` && `releaseURL=null` | User posted the reply on the platform (or copied the draft) but hasn't backfilled its link yet — the canonical "Awaiting review" case. |
-| `error` | `state=ERROR` | Publishing failed; the generated draft is preserved on the post. |
-
-**Response** `200 OK`
-
-```json
-{
-  "items": [
-    {
-      "sentReplyId": "sent-reply-uuid",
-      "opportunityId": "opp-uuid",
-      "platform": "x",
-      "postContent": "What's the best way to use AI for SEO?",
-      "externalPostUrl": "https://x.com/someuser/status/999",
-      "postPublishedAt": "2026-06-09T00:00:00.000Z",
-      "author": {
-        "username": "someuser",
-        "displayName": "Some User",
-        "avatarUrl": "https://pbs.twimg.com/profile_images/.../avatar_400x400.jpg",
-        "followers": 4747631
-      },
-      "matchedKeywords": ["SEO", "AI"],
-      "postId": "post-uuid",
-      "content": "Great point! Here's what I'd add…",
-      "inputData": {
-        "strategy": "EXPERT_ANSWER",
-        "brandStrength": 1
-      },
-      "status": "manual",
-      "replyAuthor": {
-        "handle": "mycompany_x",
-        "id": "1490000000000000000",
-        "name": "My Company",
-        "avatarUrl": "https://pbs.twimg.com/profile_images/.../me_400x400.jpg"
-      },
-      "createdAt": "2026-06-09T11:00:00.000Z",
-      "updatedAt": "2026-06-09T11:00:00.000Z"
-    }
-  ],
-  "total": 5,
-  "page": 1,
-  "limit": 20
-}
-```
-
-> - **`content`** is the generated reply text (from `Post.content`); **`inputData`** is the generation metadata saved at reply time (`strategy`, `brandStrength`, and optionally `mentions`).
-> - **`author`** is the *original poster* (who to reply to); **`replyAuthor`** is the account that posted/will post the reply (resolved from the connected integration, or `settings.engageAuthor` for accounts that aren't a connected integration). `replyAuthor` may be `null` when neither is known.
-> - **`total`** counts saved replies in the filtered set (not opportunities). Default ordering is `createdAt` descending.
-
----
-
 ### GET `/api/engage/sent/stats`
 
 Retrieve summary statistics for sent records (used for the top of the Sent page). **Scoped by the same `date` / `platform` / `status` filters as `GET /sent`** so the stat cards always match the filtered list below them.
@@ -1364,7 +1394,7 @@ Retrieve summary statistics for sent records (used for the top of the Sent page)
 |---|---|---|
 | `date` | `all` \| `day` \| `today` \| `week` \| `month` | Publish-date window. `all` / omitted / unknown = all-time. `day` and `today` are aliases. Same vocabulary as `/dashboard/summary`. |
 | `platform` | `x` \| `reddit` | Restrict to one platform (via the linked opportunity). |
-| `status` | `published` \| `scheduled` \| `manual` \| `error` | Restrict to a reply lifecycle state. |
+| `status` | `published` \| `scheduled` \| `manual` \| `error` \| `settled` \| `awaiting` | Restrict to a reply lifecycle state. Same values as `/sent` (incl. the `settled` / `awaiting` rollups). |
 
 **Response** `200 OK`
 

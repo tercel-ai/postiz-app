@@ -647,23 +647,18 @@ export class EngageController {
     @Res() res: Response
   ) { ... }  // SSE streaming response
 
-  // Sent history list
+  // Sent history list. Four granular Post states plus two combined "rollup"
+  // status values (no separate endpoint — the old /awaiting-review was folded in):
+  //   published = state=PUBLISHED && releaseURL!=null   (live)
+  //   scheduled = state=QUEUE                           (queued, will auto-fire)
+  //   manual    = state=PUBLISHED && releaseURL=null    (link not backfilled yet)
+  //   error     = state=ERROR                           (publish failed, draft kept)
+  //   settled   = published OR scheduled   (已处理 — no further action needed)
+  //   awaiting  = manual OR error          (待处理 — generated but not yet live)
   @Get('/sent')
   listSentReplies(
     @GetOrgFromRequest() org: Organization,
-    @Query() query: ListSentDto  // platform, status, date, page, limit
-  ) { ... }
-
-  // "Awaiting review" list — generated + saved but NOT yet published replies.
-  // Flat, newest-first, one item per saved reply (no grouping/versions). Slices
-  // the same EngageSentReply+Post store as /sent to the "saved but not live" rows:
-  //   manual = Post.state=PUBLISHED && releaseURL=null   (link not backfilled yet)
-  //   error  = Post.state=ERROR                          (publish failed, draft kept)
-  // Each item: original post + author(handle+avatar) + platform + content + inputData.
-  @Get('/awaiting-review')
-  listAwaitingReview(
-    @GetOrgFromRequest() org: Organization,
-    @Query() query: ListAwaitingReviewDto  // platform, status('manual'|'error')[], page, limit
+    @Query() query: ListSentDto  // platform, status(published|scheduled|manual|error|settled|awaiting), date, page, limit
   ) { ... }
 
   // Sent page top-4 stats cells (发出回复 all-time / Reply rate / Total Impressions / Avg Likes)
@@ -1704,6 +1699,8 @@ Non-goals for this phase:
 - No replacement of the existing X API send/schedule path.
 
 This design keeps the first release compatible with the existing Engage state model while removing the most repetitive manual steps. A later phase can add a durable browser task queue and automatic release URL capture once the extension behavior is stable across X DOM changes.
+
+> **Update (Option A — implemented):** the extension now also supports a standalone path where it posts the reply through the user's own browser session (Reddit/X) and logs the result back to a dedicated **`EngageExtensionReply`** history table via `POST /engage/extension-replies` (with `GET` for the paginated history and `DELETE` to clear it — see `api.md`). These rows are **standalone**: not bound to an `EngageOpportunity` or `Post`, and they do not introduce a new Engage opportunity-state transition, so the non-goals above still hold for the opportunity/Sent pipeline. This history is separate from the opportunity-bound `/manual-reply` flow in step 5.
 
 ### 7.2 Keyword Search
 

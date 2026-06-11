@@ -64,6 +64,9 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
   const abortRef = useRef<AbortController | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
   const previouslyFocusedRef = useRef<HTMLElement | null>(null);
+  // The EngageSentReply id of the "URL pending" record created right before we
+  // hand a draft to the extension, so the extension's result can backfill it.
+  const pendingReplyIdRef = useRef<string | null>(null);
 
   // Abort any in-progress stream when the panel unmounts
   useEffect(() => {
@@ -113,28 +116,114 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
     }
   }, [draft, toaster]);
 
-  const openWithExtension = useCallback(() => {
-    if (!draft || !isX) return;
+  // Closed loop: create a "sent, URL pending" record, hand the draft to the
+  // extension to post in-browser, then backfill the returned permalink onto that
+  // record. Works for both X and Reddit. The backfill happens in the message
+  // listener below (keyed off pendingReplyIdRef).
+  const replyViaExtension = useCallback(async () => {
+    if (!draft) return;
+    setSending(true);
+    try {
+      const res = await fetch(
+        `/engage/opportunities/${opportunity.id}/manual-reply`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            draftContent: draft,
+            strategy,
+            brandStrength,
+            // X needs the integration so metrics sync can read the tweet later.
+            ...(isX ? { integrationId: selectedAccountId } : {}),
+          }),
+        }
+      );
+      if (!res.ok) {
+        toaster.show('Failed to record reply — please retry', 'warning');
+        return;
+      }
+      const sentReply = await res.json();
+      pendingReplyIdRef.current = sentReply?.id ?? null;
 
-    window.postMessage(
-      {
-        source: 'postiz',
-        action: 'postiz:extension-task',
-        task: {
-          platform: 'x',
-          type: 'reply',
-          opportunityId: opportunity.id,
-          externalPostUrl: opportunity.externalPostUrl,
-          draftContent: draft,
+      window.postMessage(
+        {
+          source: 'postiz',
+          action: 'postiz:engage-reply',
+          payload: {
+            platform: opportunity.platform,
+            url: opportunity.externalPostUrl,
+            text: draft,
+            opportunityId: opportunity.id,
+          },
         },
-      },
-      window.location.origin
-    );
-    toaster.show(
-      'Sent to the Postiz extension. If X does not open, use Open on X.',
-      'success'
-    );
-  }, [draft, isX, opportunity.externalPostUrl, opportunity.id, toaster]);
+        window.location.origin
+      );
+      toaster.show('Posting via the Postiz extension…', 'success');
+    } catch {
+      toaster.show('Failed to record reply — please retry', 'warning');
+    } finally {
+      setSending(false);
+    }
+  }, [
+    draft,
+    isX,
+    selectedAccountId,
+    opportunity.id,
+    opportunity.platform,
+    opportunity.externalPostUrl,
+    strategy,
+    brandStrength,
+    fetch,
+    toaster,
+  ]);
+
+  // Receive the extension's post result and backfill the permalink onto the
+  // pending record via PATCH /engage/sent/:id/reply-url.
+  useEffect(() => {
+    const onMessage = async (e: MessageEvent) => {
+      if (e.source !== window || e.origin !== window.location.origin) return;
+      const data: any = e.data;
+      if (!data || data.source !== 'postiz-extension') return;
+      if (data.action !== 'postiz:engage-reply-result') return;
+      if (data.opportunityId && data.opportunityId !== opportunity.id) return;
+
+      const result = data.result;
+      const sentReplyId = pendingReplyIdRef.current;
+      pendingReplyIdRef.current = null;
+
+      if (result?.ok && result.permalink && sentReplyId) {
+        try {
+          const res = await fetch(`/engage/sent/${sentReplyId}/reply-url`, {
+            method: 'PATCH',
+            body: JSON.stringify({ url: result.permalink }),
+          });
+          toaster.show(
+            res.ok
+              ? 'Reply posted & link recorded!'
+              : 'Posted, but link not recorded — backfill manually',
+            res.ok ? 'success' : 'warning'
+          );
+        } catch {
+          toaster.show(
+            'Posted, but link not recorded — backfill manually',
+            'warning'
+          );
+        }
+      } else if (result?.ok) {
+        toaster.show(
+          'Reply posted. Add the link manually to enable metrics.',
+          'warning'
+        );
+      } else {
+        toaster.show(
+          result?.error || 'Extension could not post — try manually',
+          'warning'
+        );
+      }
+      onSent();
+    };
+    window.addEventListener('message', onMessage);
+    return () => window.removeEventListener('message', onMessage);
+  }, [opportunity.id, fetch, toaster, onSent]);
 
   const generateDraft = useCallback(async () => {
     if (streaming) {
@@ -571,11 +660,11 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
                 {xManualStep === 'draft' ? (
                   <>
                     <button
-                      onClick={openWithExtension}
-                      disabled={!draft}
+                      onClick={replyViaExtension}
+                      disabled={!draft || sending}
                       className="w-full py-2 text-sm bg-purple-600 hover:bg-purple-700 disabled:bg-gray-700 disabled:text-gray-500 text-white rounded-lg font-medium transition-colors"
                     >
-                      Open with Postiz Extension
+                      Post via Postiz Extension
                     </button>
                     <div className="flex items-center gap-2">
                       <button
@@ -655,6 +744,13 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
           <>
             {redditStep === 'draft' && (
               <>
+                <button
+                  onClick={replyViaExtension}
+                  disabled={!draft || sending}
+                  className="w-full py-2 text-sm bg-purple-600 hover:bg-purple-700 disabled:bg-gray-700 disabled:text-gray-500 text-white rounded-lg font-medium transition-colors"
+                >
+                  Post via Postiz Extension
+                </button>
                 <div className="flex items-center gap-2">
                   <button
                     onClick={copyDraft}

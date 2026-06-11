@@ -190,6 +190,10 @@ export function SentList() {
           <option value="scheduled">Scheduled</option>
           <option value="manual">Manual</option>
           <option value="error">Error</option>
+          {/* Combined rollups: settled = published(live) + scheduled; awaiting =
+              manual link-pending + failed publishes (generated but not yet live). */}
+          <option value="settled">Settled</option>
+          <option value="awaiting">Awaiting review</option>
         </select>
         <select
           value={date}
