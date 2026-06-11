@@ -420,6 +420,46 @@ export class ListSentDto {
   limit?: number;
 }
 
+// ─── Awaiting Review ──────────────────────────────────────────────────────────
+
+// Replies the user has GENERATED + saved but not yet published — a flat,
+// newest-first list, one item per saved reply. "Not published" maps to the
+// saved-but-not-live Post states:
+//   - 'manual': Post.state=PUBLISHED && releaseURL=null — the user posted the
+//     reply on the platform (or copied the draft) but hasn't backfilled its link.
+//   - 'error':  Post.state=ERROR — publishing failed; the generated draft is kept.
+export class ListAwaitingReviewDto {
+  // Optional platform filter (x | reddit). Omitted/empty = all platforms. No
+  // @IsIn so an empty `?platform=` ("All" toggle) is tolerated, matching ListSentDto.
+  @IsOptional()
+  @IsString()
+  platform?: string;
+
+  // Which unpublished states to include. Omitted = both ('manual' + 'error').
+  // Accepts a single value (?status=manual) or repeats (?status=manual&status=error);
+  // the Transform normalizes either form to an array.
+  @IsOptional()
+  @Transform(({ value }) =>
+    value === undefined ? undefined : Array.isArray(value) ? value : [value]
+  )
+  @IsArray()
+  @IsIn(['manual', 'error'], { each: true })
+  status?: string[];
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  page?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(100)
+  limit?: number;
+}
+
 // ─── Dashboard ──────────────────────────────────────────────────────────────
 
 // Panel ① "Engage Performance" — headline summary stats, optionally scoped to one platform.

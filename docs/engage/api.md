@@ -28,6 +28,7 @@
   - [POST /manual-reply](#post-apienageopportunitiesidanual-reply) — Reddit manual
 - [Sent Replies — Sent Records](#sent-replies--sent-records)
   - [GET /sent](#get-apienagesent) — paginated list
+  - [GET /awaiting-review](#get-apienageawaiting-review) — generated-but-unpublished replies
   - [GET /sent/stats](#get-apienagesentstats) — aggregate stats
   - [PATCH /sent/:id](#patch-apienagesentid) — edit scheduled reply
   - [PATCH /sent/:id/reply-url](#patch-apienagesentidreply-url) — Reddit URL submission
@@ -1280,6 +1281,76 @@ Retrieve the list of sent replies (includes original post summary and metrics da
 | `ERROR` | Failed to send |
 
 **Special Handling for Reddit Manual Replies**: When `post.releaseURL` is `null`, it means the user has not yet submitted the Reddit comment URL; they should be prompted to provide it.
+
+---
+
+### GET `/api/engage/awaiting-review`
+
+The **"Awaiting review"** list: replies the user has **generated + saved but not yet published**. A flat, newest-first page with **one item per saved reply** (no grouping — the original "‹ 1/2 ›" multi-version card was dropped). Each item carries the original post, its author (handle + avatar), the platform, the generated reply `content`, and the `inputData` used to generate it.
+
+> Only **saved** replies appear here. AI drafts streamed from `POST /opportunities/:id/draft` are **not** persisted, so a draft the user never sent/copied will not show up. This list reuses the same `EngageSentReply` + `Post` storage as `/sent` — it is just the "saved but not live" slice of it.
+
+**Query Params**
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `platform` | `x \| reddit` | — | Platform filter (via the linked opportunity) |
+| `status` | `'manual' \| 'error'` | both | Which unpublished states to include. Repeatable (`?status=manual&status=error`) or a single value. Omitted = both. |
+| `page` | `number` | `1` | Page number |
+| `limit` | `number` | `20` | Items per page, max 100 |
+
+**Status meanings** (the `status` filter ↔ each item's `status` field):
+
+| status | Post condition | Meaning |
+|---|---|---|
+| `manual` | `state=PUBLISHED` && `releaseURL=null` | User posted the reply on the platform (or copied the draft) but hasn't backfilled its link yet — the canonical "Awaiting review" case. |
+| `error` | `state=ERROR` | Publishing failed; the generated draft is preserved on the post. |
+
+**Response** `200 OK`
+
+```json
+{
+  "items": [
+    {
+      "sentReplyId": "sent-reply-uuid",
+      "opportunityId": "opp-uuid",
+      "platform": "x",
+      "postContent": "What's the best way to use AI for SEO?",
+      "externalPostUrl": "https://x.com/someuser/status/999",
+      "postPublishedAt": "2026-06-09T00:00:00.000Z",
+      "author": {
+        "username": "someuser",
+        "displayName": "Some User",
+        "avatarUrl": "https://pbs.twimg.com/profile_images/.../avatar_400x400.jpg",
+        "followers": 4747631
+      },
+      "matchedKeywords": ["SEO", "AI"],
+      "postId": "post-uuid",
+      "content": "Great point! Here's what I'd add…",
+      "inputData": {
+        "strategy": "EXPERT_ANSWER",
+        "brandStrength": 1
+      },
+      "status": "manual",
+      "replyAuthor": {
+        "handle": "mycompany_x",
+        "id": "1490000000000000000",
+        "name": "My Company",
+        "avatarUrl": "https://pbs.twimg.com/profile_images/.../me_400x400.jpg"
+      },
+      "createdAt": "2026-06-09T11:00:00.000Z",
+      "updatedAt": "2026-06-09T11:00:00.000Z"
+    }
+  ],
+  "total": 5,
+  "page": 1,
+  "limit": 20
+}
+```
+
+> - **`content`** is the generated reply text (from `Post.content`); **`inputData`** is the generation metadata saved at reply time (`strategy`, `brandStrength`, and optionally `mentions`).
+> - **`author`** is the *original poster* (who to reply to); **`replyAuthor`** is the account that posted/will post the reply (resolved from the connected integration, or `settings.engageAuthor` for accounts that aren't a connected integration). `replyAuthor` may be `null` when neither is known.
+> - **`total`** counts saved replies in the filtered set (not opportunities). Default ordering is `createdAt` descending.
 
 ---
 

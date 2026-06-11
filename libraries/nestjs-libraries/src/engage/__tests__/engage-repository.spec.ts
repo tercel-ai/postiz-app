@@ -30,7 +30,10 @@ function buildRepo() {
   const trackedFindMany = vi.fn();
   const cursorFindMany = vi.fn();
   const sentCount = vi.fn();
-  const sentFindMany = vi.fn();
+  // Default to an empty result so read paths that join sent replies (e.g.
+  // listOpportunities' `.then((r) => r ?? [])`) don't NPE when a test doesn't
+  // care about them. Tests that assert on sent replies override this.
+  const sentFindMany = vi.fn().mockResolvedValue([]);
   const postAggregate = vi.fn();
   const postFindMany = vi.fn();
 
@@ -58,7 +61,12 @@ function buildRepo() {
     },
   } as any;
   const sentReply = {
-    model: { engageSentReply: { count: sentCount, findMany: sentFindMany } },
+    model: {
+      engageSentReply: {
+        count: sentCount,
+        findMany: sentFindMany,
+      },
+    },
   } as any;
   const post = {
     model: { post: { aggregate: postAggregate, findMany: postFindMany } },
@@ -1677,6 +1685,127 @@ describe('EngageRepository.getOrgScanStatus', () => {
       await expect(repo.getOpportunityForReply('org1', 'missing')).rejects.toThrow(
         'Opportunity not found'
       );
+    });
+  });
+
+  describe('listAwaitingReview', () => {
+    const OPP = {
+      id: 'opp1',
+      platform: 'x',
+      externalPostUrl: 'https://x.com/a/status/1',
+      postContent: 'Anyone else seeing AI Overviews tank traffic?',
+      postPublishedAt: new Date('2026-06-09T00:00:00Z'),
+      authorUsername: 'ccbala',
+      authorDisplayName: 'CC Bala',
+      authorFollowers: 1200,
+      authorAvatarUrl: 'https://img/ccbala.png',
+    };
+    // A manual reply posted from a connected integration — replyAuthor resolves
+    // from the integration.
+    const REPLY = {
+      id: 'reply-1',
+      opportunityId: 'opp1',
+      inputData: { strategy: 'EXPERT_ANSWER', brandStrength: 1 },
+      createdAt: new Date('2026-06-09T11:00:00Z'),
+      updatedAt: new Date('2026-06-09T11:00:00Z'),
+      post: {
+        id: 'post-1',
+        content: 'Here is my take on your reply…',
+        state: 'PUBLISHED',
+        settings: null,
+        integration: {
+          id: 'int1', name: 'ccbakala', providerIdentifier: 'x',
+          picture: 'https://img/me.png', profile: '@ccbakala', internalId: '999',
+        },
+      },
+    };
+
+    it('returns one flat item per saved reply with the post, author and generated content', async () => {
+      const h = buildRepo();
+      h.sentFindMany.mockResolvedValue([{ ...REPLY, opportunity: OPP }]);
+      h.sentCount.mockResolvedValue(1);
+      h.stateFindMany.mockResolvedValue([
+        { opportunityId: 'opp1', matchedKeywords: ['seo', 'ai overviews'] },
+      ]);
+
+      const res = await h.repo.listAwaitingReview('org1', {} as any);
+      expect(res.total).toBe(1);
+      expect(res.items).toHaveLength(1);
+
+      const item = res.items[0] as any;
+      expect(item.sentReplyId).toBe('reply-1');
+      expect(item.opportunityId).toBe('opp1');
+      expect(item.platform).toBe('x');
+      // Original post + its author (handle + avatar).
+      expect(item.postContent).toBe(OPP.postContent);
+      expect(item.author).toEqual({
+        username: 'ccbala',
+        displayName: 'CC Bala',
+        avatarUrl: 'https://img/ccbala.png',
+        followers: 1200,
+      });
+      expect(item.matchedKeywords).toEqual(['seo', 'ai overviews']);
+      // The generated reply itself: content + inputData + status.
+      expect(item.content).toBe('Here is my take on your reply…');
+      expect(item.inputData).toEqual({ strategy: 'EXPERT_ANSWER', brandStrength: 1 });
+      expect(item.status).toBe('manual');
+      // replyAuthor resolved from the connected integration (handle stripped of @).
+      expect(item.replyAuthor).toMatchObject({ handle: 'ccbakala', avatarUrl: 'https://img/me.png' });
+      // No grouping / versions on the flat shape.
+      expect(item).not.toHaveProperty('versions');
+    });
+
+    it('defaults to both manual + error states; tags an ERROR reply as "error"', async () => {
+      const h = buildRepo();
+      h.sentFindMany.mockResolvedValue([
+        { ...REPLY, post: { ...REPLY.post, state: 'ERROR' }, opportunity: OPP },
+      ]);
+      h.sentCount.mockResolvedValue(1);
+      h.stateFindMany.mockResolvedValue([]);
+
+      const res = await h.repo.listAwaitingReview('org1', {} as any);
+      expect((res.items[0] as any).status).toBe('error');
+      // Default OR covers manual (PUBLISHED + null link) AND error (ERROR).
+      const where = h.sentFindMany.mock.calls[0][0].where;
+      expect(where.post.OR).toEqual([
+        { state: 'PUBLISHED', releaseURL: null },
+        { state: 'ERROR' },
+      ]);
+      expect(where.post.source).toBe('engage');
+    });
+
+    it('honors an explicit single status and a platform filter', async () => {
+      const h = buildRepo();
+      h.sentFindMany.mockResolvedValue([]);
+      h.sentCount.mockResolvedValue(0);
+
+      const res = await h.repo.listAwaitingReview('org1', {
+        status: ['manual'],
+        platform: 'reddit',
+      } as any);
+      expect(res.items).toEqual([]);
+      expect(res.total).toBe(0);
+
+      const where = h.sentFindMany.mock.calls[0][0].where;
+      expect(where.post.OR).toEqual([{ state: 'PUBLISHED', releaseURL: null }]);
+      expect(where.opportunity).toEqual({ platform: 'reddit' });
+      // No rows → skip the matchedKeywords join entirely.
+      expect(h.stateFindMany).not.toHaveBeenCalled();
+    });
+
+    it('paginates via skip/take and counts via count()', async () => {
+      const h = buildRepo();
+      h.sentFindMany.mockResolvedValue([{ ...REPLY, opportunity: OPP }]);
+      h.sentCount.mockResolvedValue(7);
+      h.stateFindMany.mockResolvedValue([]);
+
+      const res = await h.repo.listAwaitingReview('org1', { page: 3, limit: 2 } as any);
+      expect(res.total).toBe(7);
+      expect(res.page).toBe(3);
+      expect(res.limit).toBe(2);
+      const call = h.sentFindMany.mock.calls[0][0];
+      expect(call.skip).toBe(4);
+      expect(call.take).toBe(2);
     });
   });
 });

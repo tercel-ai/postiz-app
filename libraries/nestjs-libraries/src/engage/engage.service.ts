@@ -22,6 +22,7 @@ import {
   AddMonitoredChannelDto,
   AddTrackedAccountDto,
   ConfirmManualReplyDto,
+  ListAwaitingReviewDto,
   ListOpportunitiesDto,
   ListSentDto,
   SaveEngageConfigDto,
@@ -340,6 +341,12 @@ export class EngageService implements OnApplicationBootstrap {
 
   async listSentReplies(org: Organization, dto: ListSentDto) {
     return this._engageRepository.listSentReplies(org.id, dto);
+  }
+
+  // Replies generated + saved but not yet published (manual link-pending and/or
+  // failed) — a flat, newest-first list, one item per saved reply.
+  async listAwaitingReview(org: Organization, dto: ListAwaitingReviewDto) {
+    return this._engageRepository.listAwaitingReview(org.id, dto);
   }
 
   async updateScheduledReply(org: Organization, id: string, dto: UpdateScheduledReplyDto) {

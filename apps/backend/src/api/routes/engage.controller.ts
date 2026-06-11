@@ -39,6 +39,7 @@ import {
   DashboardSummaryDto,
   DashboardTrafficsDto,
   GenerateDraftDto,
+  ListAwaitingReviewDto,
   ListOpportunitiesDto,
   ListSentDto,
   SaveEngageConfigDto,
@@ -580,6 +581,15 @@ export class EngageController {
     @Query() query: ListSentDto
   ) {
     return this._engageService.listSentReplies(org, query);
+  }
+
+  @ApiOperation({ summary: 'Flat list of replies generated + saved but not yet published (manual link-pending and/or failed): generated reply content + inputData, original post, original poster (handle + avatar) and platform' })
+  @Get('/awaiting-review')
+  listAwaitingReview(
+    @GetOrgFromRequest() org: Organization,
+    @Query() query: ListAwaitingReviewDto
+  ) {
+    return this._engageService.listAwaitingReview(org, query);
   }
 
   @ApiOperation({ summary: 'Aggregate stats for sent replies, scoped by the same date/platform/status filters as /sent (no date = all-time)' })

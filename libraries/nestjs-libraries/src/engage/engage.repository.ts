@@ -6,6 +6,7 @@ import {
   AddKeywordsBulkDto,
   AddMonitoredChannelDto,
   AddTrackedAccountDto,
+  ListAwaitingReviewDto,
   ListOpportunitiesDto,
   ListSentDto,
   SetupEngageDto,
@@ -1477,6 +1478,125 @@ export class EngageRepository {
     });
 
     return { items: itemsWithMetrics, total, page, limit };
+  }
+
+  // Post-state filter for "generated but not published" replies. Mirrors the
+  // _buildSentReplyFilter vocabulary but OR-combines the unpublished states so a
+  // single query can surface both manual-link-pending and failed replies.
+  private _buildAwaitingReviewPostOr(statuses: string[]): Prisma.PostWhereInput[] {
+    const or: Prisma.PostWhereInput[] = [];
+    // Manual reply recorded, link not yet backfilled → the "Awaiting review" card.
+    if (statuses.includes('manual')) or.push({ state: 'PUBLISHED', releaseURL: null });
+    // Publish failed; the generated draft is preserved on the ERROR post.
+    if (statuses.includes('error')) or.push({ state: 'ERROR' });
+    return or;
+  }
+
+  // List replies the user has generated + saved but not yet published — a flat,
+  // newest-first page with ONE item per saved reply. Each item carries the
+  // original post + author + platform, the generated reply content + inputData,
+  // its status ('manual' link-pending | 'error'), and the resolved reply author.
+  async listAwaitingReview(organizationId: string, dto: ListAwaitingReviewDto) {
+    const page = dto.page ?? 1;
+    const limit = dto.limit ?? 20;
+    const offset = (page - 1) * limit;
+
+    const statuses = dto.status?.length ? dto.status : ['manual', 'error'];
+    const where: Prisma.EngageSentReplyWhereInput = {
+      organizationId,
+      post: { source: 'engage', OR: this._buildAwaitingReviewPostOr(statuses) },
+      ...(dto.platform && { opportunity: { platform: dto.platform } }),
+    };
+
+    const [rows, total] = await Promise.all([
+      this._sentReply.model.engageSentReply.findMany({
+        where,
+        include: {
+          post: {
+            select: {
+              id: true,
+              content: true,
+              state: true,
+              // settings carries engageAuthor for manual replies posted from an
+              // account that isn't a connected integration (integrationId=null).
+              settings: true,
+              integration: {
+                select: {
+                  id: true,
+                  name: true,
+                  providerIdentifier: true,
+                  picture: true,
+                  profile: true,
+                  internalId: true,
+                },
+              },
+            },
+          },
+          opportunity: {
+            select: {
+              id: true,
+              platform: true,
+              externalPostUrl: true,
+              postContent: true,
+              postPublishedAt: true,
+              authorUsername: true,
+              authorDisplayName: true,
+              authorFollowers: true,
+              authorAvatarUrl: true,
+            },
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+        skip: offset,
+        take: limit,
+      }),
+      this._sentReply.model.engageSentReply.count({ where }),
+    ]);
+
+    // matchedKeywords is per-org (on the state row), joined by (org, opportunity)
+    // — the SentReply links to the shared opportunity, not the org's state row.
+    const oppIds = rows.map((r) => r.opportunity.id);
+    const states = oppIds.length
+      ? await this._oppState.model.engageOpportunityState.findMany({
+          where: { organizationId, opportunityId: { in: oppIds } },
+          select: { opportunityId: true, matchedKeywords: true },
+        })
+      : [];
+    const keywordsByOpp = new Map(
+      states.map((s) => [s.opportunityId, s.matchedKeywords])
+    );
+
+    const items = rows.map((r) => {
+      const opp = r.opportunity;
+      const { settings, integration, ...postRest } = r.post;
+      return {
+        sentReplyId: r.id,
+        opportunityId: opp.id,
+        platform: opp.platform,
+        // Original post + its author (handle + avatar).
+        postContent: opp.postContent,
+        externalPostUrl: opp.externalPostUrl,
+        postPublishedAt: opp.postPublishedAt,
+        author: {
+          username: opp.authorUsername,
+          displayName: opp.authorDisplayName,
+          avatarUrl: opp.authorAvatarUrl,
+          followers: opp.authorFollowers,
+        },
+        matchedKeywords: keywordsByOpp.get(opp.id) ?? [],
+        // The generated reply itself.
+        postId: postRest.id,
+        content: postRest.content,
+        inputData: r.inputData,
+        // 'error' when publishing failed; otherwise a manual reply awaiting its link.
+        status: postRest.state === 'ERROR' ? 'error' : 'manual',
+        replyAuthor: resolveReplyAuthor(integration, settings),
+        createdAt: r.createdAt,
+        updatedAt: r.updatedAt,
+      };
+    });
+
+    return { items, total, page, limit };
   }
 
   // Aggregate stats for sent replies, scoped by the SAME date/platform/status

@@ -654,6 +654,18 @@ export class EngageController {
     @Query() query: ListSentDto  // platform, status, date, page, limit
   ) { ... }
 
+  // "Awaiting review" list — generated + saved but NOT yet published replies.
+  // Flat, newest-first, one item per saved reply (no grouping/versions). Slices
+  // the same EngageSentReply+Post store as /sent to the "saved but not live" rows:
+  //   manual = Post.state=PUBLISHED && releaseURL=null   (link not backfilled yet)
+  //   error  = Post.state=ERROR                          (publish failed, draft kept)
+  // Each item: original post + author(handle+avatar) + platform + content + inputData.
+  @Get('/awaiting-review')
+  listAwaitingReview(
+    @GetOrgFromRequest() org: Organization,
+    @Query() query: ListAwaitingReviewDto  // platform, status('manual'|'error')[], page, limit
+  ) { ... }
+
   // Sent page top-4 stats cells (发出回复 all-time / Reply rate / Total Impressions / Avg Likes)
   @Get('/sent/stats')
   getSentStats(@GetOrgFromRequest() org: Organization) { ... }
