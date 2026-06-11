@@ -8,6 +8,8 @@ import {
   AddTrackedAccountDto,
   ListOpportunitiesDto,
   ListSentDto,
+  LocateOpportunityDto,
+  LocateSentReplyDto,
   SetupEngageDto,
   UpdateKeywordDto,
   UpdateMonitoredChannelDto,
@@ -884,7 +886,11 @@ export class EngageRepository {
       sortBy === 'createdAt'
         ? { score: 'desc' as const }
         : { createdAt: 'desc' as const };
-    const orderBy = [primaryOrderBy, tiebreaker];
+    // Stable tiebreaker so `locateOpportunity` can reproduce the exact page
+    // index for rows sharing the same primary + secondary sort values.
+    // EngageOpportunityState has composite PK (organizationId+opportunityId),
+    // so opportunityId is the per-org unique discriminator.
+    const orderBy = [primaryOrderBy, tiebreaker, { opportunityId: 'desc' as const }];
 
     const [rows, total] = await Promise.all([
       this._oppState.model.engageOpportunityState.findMany({
@@ -980,6 +986,152 @@ export class EngageRepository {
     });
 
     return { items, total, page, limit };
+  }
+
+  async locateOpportunity(organizationId: string, dto: LocateOpportunityDto) {
+    const limit = dto.limit ?? 20;
+
+    // Mirror the `where` from `listOpportunities` exactly.
+    const where: Prisma.EngageOpportunityStateWhereInput = {
+      organizationId,
+      ...(dto.status?.length && { status: { in: dto.status } }),
+      ...(dto.bookmarked !== undefined && { bookmarked: dto.bookmarked }),
+      ...(dto.minScore !== undefined && { score: { gte: dto.minScore } }),
+      ...(dto.minScoreKeyword !== undefined && {
+        scoreKeyword: { gte: dto.minScoreKeyword },
+      }),
+      ...((() => {
+        const set = [
+          ...(dto.keyword ? [dto.keyword] : []),
+          ...(dto.keywords ?? []),
+        ];
+        return set.length ? { matchedKeywords: { hasSome: set } } : {};
+      })()),
+      opportunity: {
+        deletedAt: null,
+        ...(dto.platform?.length && { platform: { in: dto.platform } }),
+        ...(dto.channels?.length && { channelId: { in: dto.channels } }),
+        ...(dto.authors?.length && {
+          OR: dto.authors.map((a) => ({
+            authorUsername: { equals: a, mode: 'insensitive' as const },
+          })),
+        }),
+        ...(dto.intent?.length && { intentTags: { hasSome: dto.intent } }),
+        ...(dto.minScoreHeat !== undefined && {
+          scoreHeat: { gte: dto.minScoreHeat },
+        }),
+        ...(dto.minScoreAuthority !== undefined && {
+          scoreAuthority: { gte: dto.minScoreAuthority },
+        }),
+        ...(dto.date === 'today' && {
+          postPublishedAt: { gte: dayjs.utc().startOf('day').toDate() },
+        }),
+        ...(dto.date === 'week' && {
+          postPublishedAt: { gte: dayjs.utc().startOf('isoWeek').toDate() },
+        }),
+      },
+    };
+
+    const stateSortFields = new Set([
+      'score',
+      'scoreKeyword',
+      'scoreTracked',
+      'createdAt',
+    ]);
+    const oppSortFields = new Set([
+      'scoreHeat',
+      'scoreAuthority',
+      'scoreRecency',
+    ]);
+    const sortBy =
+      dto.sortBy && (stateSortFields.has(dto.sortBy) || oppSortFields.has(dto.sortBy))
+        ? dto.sortBy
+        : 'score';
+    const sortOrder = dto.sortOrder ?? 'desc';
+    const isOppField = oppSortFields.has(sortBy);
+
+    // Find the target state row — must pass all the same filters as listOpportunities.
+    // EngageOpportunityState uses a composite PK (organizationId + opportunityId), so
+    // dto.opportunityId is the opportunityId.
+    const target = await this._oppState.model.engageOpportunityState.findFirst({
+      where: { ...where, opportunityId: dto.opportunityId },
+    });
+
+    if (!target) {
+      const total = await this._oppState.model.engageOpportunityState.count({
+        where,
+      });
+      return {
+        found: false as const,
+        page: null as number | null,
+        position: null as number | null,
+        total,
+        limit,
+        totalPages: Math.ceil(total / limit),
+      };
+    }
+
+    // For opp-table sort fields, fetch the value from the linked opportunity row.
+    let sortValue: unknown;
+    if (isOppField) {
+      const opp = await this._opportunity.model.engageOpportunity.findFirst({
+        where: { id: target.opportunityId },
+        select: { scoreHeat: true, scoreAuthority: true, scoreRecency: true },
+      });
+      sortValue = opp ? (opp as Record<string, unknown>)[sortBy] : null;
+    } else {
+      sortValue = (target as Record<string, unknown>)[sortBy];
+    }
+
+    // Tiebreaker mirrors listOpportunities: createdAt sort → score desc, else → createdAt desc.
+    const tbField = sortBy === 'createdAt' ? 'score' : 'createdAt';
+    const tbValue = (target as Record<string, unknown>)[tbField];
+
+    const cmp = sortOrder === 'desc' ? ('gt' as const) : ('lt' as const);
+    const baseOpp = (where.opportunity ?? {}) as Prisma.EngageOpportunityWhereInput;
+
+    // Build "strictly before" condition for the primary sort field.
+    const precedingByValueWhere: Prisma.EngageOpportunityStateWhereInput = isOppField
+      ? { ...where, opportunity: { ...baseOpp, [sortBy]: { [cmp]: sortValue } } }
+      : { ...where, [sortBy]: { [cmp]: sortValue } };
+
+    // Equal primary value.
+    const equalPrimaryWhere: Prisma.EngageOpportunityStateWhereInput = isOppField
+      ? { ...where, opportunity: { ...baseOpp, [sortBy]: sortValue } }
+      : { ...where, [sortBy]: sortValue };
+
+    // Stable 3rd tiebreaker: opportunityId desc (mirrors listOpportunities orderBy).
+    const [precedingByValue, precedingByTie, precedingByOppId, total] =
+      await Promise.all([
+        this._oppState.model.engageOpportunityState.count({
+          where: precedingByValueWhere,
+        }),
+        // Equal primary, strictly better tiebreaker (always desc).
+        this._oppState.model.engageOpportunityState.count({
+          where: { ...equalPrimaryWhere, [tbField]: { gt: tbValue } },
+        }),
+        // Equal primary, equal tiebreaker, opportunityId comes before target (desc).
+        this._oppState.model.engageOpportunityState.count({
+          where: {
+            ...equalPrimaryWhere,
+            [tbField]: tbValue,
+            opportunityId: { gt: target.opportunityId },
+          },
+        }),
+        this._oppState.model.engageOpportunityState.count({ where }),
+      ]);
+
+    const position = precedingByValue + precedingByTie + precedingByOppId + 1;
+    const page = Math.ceil(position / limit);
+
+    return {
+      found: true as const,
+      page,
+      position,
+      total,
+      limit,
+      totalPages: Math.ceil(total / limit),
+    };
   }
 
   async dismissOpportunity(organizationId: string, id: string) {
@@ -1539,7 +1691,9 @@ export class EngageRepository {
             },
           },
         },
-        orderBy: { createdAt: 'desc' },
+        // Stable tiebreaker so `locateSentReply` can reproduce the exact page
+        // index for replies sharing the same createdAt.
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         skip: offset,
         take: limit,
       }),
@@ -1591,6 +1745,58 @@ export class EngageRepository {
     });
 
     return { items: itemsWithMetrics, total, page, limit };
+  }
+
+  async locateSentReply(organizationId: string, dto: LocateSentReplyDto) {
+    const limit = dto.limit ?? 20;
+
+    // Mirror the `where` from `listSentReplies` exactly.
+    const { sentWhere: where } = this._buildSentReplyFilter(organizationId, dto);
+
+    const target = await this._sentReply.model.engageSentReply.findFirst({
+      where: { ...where, id: dto.sentReplyId },
+      select: { id: true, createdAt: true },
+    });
+
+    if (!target) {
+      const total = await this._sentReply.model.engageSentReply.count({ where });
+      return {
+        found: false as const,
+        page: null as number | null,
+        position: null as number | null,
+        total,
+        limit,
+        totalPages: Math.ceil(total / limit),
+      };
+    }
+
+    const [precedingByCreatedAt, precedingById, total] = await Promise.all([
+      // Replies with strictly newer createdAt come before target in desc order.
+      this._sentReply.model.engageSentReply.count({
+        where: { ...where, createdAt: { gt: target.createdAt } },
+      }),
+      // Ties on createdAt: id desc, so higher id = earlier in list.
+      this._sentReply.model.engageSentReply.count({
+        where: {
+          ...where,
+          createdAt: target.createdAt,
+          id: { gt: target.id },
+        },
+      }),
+      this._sentReply.model.engageSentReply.count({ where }),
+    ]);
+
+    const position = precedingByCreatedAt + precedingById + 1;
+    const page = Math.ceil(position / limit);
+
+    return {
+      found: true as const,
+      page,
+      position,
+      total,
+      limit,
+      totalPages: Math.ceil(total / limit),
+    };
   }
 
   // Aggregate stats for sent replies, scoped by the SAME date/platform/status

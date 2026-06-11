@@ -376,6 +376,175 @@ export class ListOpportunitiesDto {
   limit?: number;
 }
 
+export class LocateOpportunityDto {
+  @IsString()
+  opportunityId!: string;
+
+  @IsOptional()
+  @Transform(({ value }) =>
+    value === undefined || value === null
+      ? value
+      : (Array.isArray(value) ? value : [value])
+          .flatMap((v) => String(v).split(','))
+          .map((v) => v.trim())
+          .filter((v) => v !== '')
+  )
+  @IsArray()
+  @ArrayMaxSize(20)
+  @IsString({ each: true })
+  platform?: string[];
+
+  @IsOptional()
+  @Transform(({ value }) =>
+    value === undefined || value === null
+      ? value
+      : (Array.isArray(value) ? value : [value])
+          .flatMap((v) => String(v).split(','))
+          .map((v) => v.trim())
+          .filter((v) => v !== '')
+  )
+  @IsArray()
+  @ArrayMaxSize(20)
+  @IsEnum(EngageOpportunityStatus, { each: true })
+  status?: EngageOpportunityStatus[];
+
+  @IsOptional()
+  @Transform(({ value }) =>
+    value === undefined || value === null
+      ? value
+      : (Array.isArray(value) ? value : [value])
+          .flatMap((v) => String(v).split(','))
+          .map((v) => v.trim())
+          .filter((v) => v !== '')
+  )
+  @IsArray()
+  @ArrayMaxSize(20)
+  @IsString({ each: true })
+  intent?: string[];
+
+  @IsOptional()
+  @IsString()
+  keyword?: string;
+
+  @IsOptional()
+  @Transform(({ value }) =>
+    value === undefined || value === null
+      ? value
+      : (Array.isArray(value) ? value : [value])
+          .flatMap((v) => String(v).split(','))
+          .map((v) => v.trim())
+          .filter((v) => v !== '')
+  )
+  @IsArray()
+  @ArrayMaxSize(50)
+  @IsString({ each: true })
+  keywords?: string[];
+
+  @IsOptional()
+  @IsString()
+  @IsIn(['today', 'week'])
+  date?: 'today' | 'week';
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  minScore?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  minScoreKeyword?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  minScoreHeat?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  minScoreAuthority?: number;
+
+  @IsOptional()
+  @Transform(({ value }) =>
+    value === undefined || value === null
+      ? value
+      : (Array.isArray(value) ? value : [value])
+          .flatMap((v) => String(v).split(','))
+          .map((v) => v.trim())
+          .filter((v) => v !== '')
+  )
+  @IsArray()
+  @ArrayMaxSize(50)
+  @IsString({ each: true })
+  channels?: string[];
+
+  @IsOptional()
+  @Transform(({ value }) =>
+    value === undefined || value === null
+      ? value
+      : (Array.isArray(value) ? value : [value])
+          .flatMap((v) => String(v).split(','))
+          .map((v) => v.trim())
+          .filter((v) => v !== '')
+  )
+  @IsArray()
+  @ArrayMaxSize(50)
+  @IsString({ each: true })
+  authors?: string[];
+
+  @IsOptional()
+  @Transform(({ value }) =>
+    value === 'true' ? true : value === 'false' ? false : value
+  )
+  @IsBoolean()
+  bookmarked?: boolean;
+
+  @IsOptional()
+  @IsString()
+  sortBy?: string;
+
+  @IsOptional()
+  @IsIn(['asc', 'desc'])
+  sortOrder?: 'asc' | 'desc';
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(100)
+  limit?: number;
+}
+
+export class LocateSentReplyDto {
+  @IsString()
+  sentReplyId!: string;
+
+  @IsOptional()
+  @IsString()
+  platform?: string;
+
+  @IsOptional()
+  @IsString()
+  @IsIn(['published', 'scheduled', 'manual', 'error', 'settled', 'awaiting'])
+  status?: string;
+
+  @IsOptional()
+  @IsString()
+  date?: string;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(100)
+  limit?: number;
+}
+
 export class ScoreStatsDto {
   @IsOptional()
   @IsString()

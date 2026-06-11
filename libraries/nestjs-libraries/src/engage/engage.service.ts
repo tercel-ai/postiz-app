@@ -24,6 +24,8 @@ import {
   ConfirmManualReplyDto,
   ListOpportunitiesDto,
   ListSentDto,
+  LocateOpportunityDto,
+  LocateSentReplyDto,
   SaveEngageConfigDto,
   SetupEngageDto,
   BatchScheduleReplyDto,
@@ -365,6 +367,14 @@ export class EngageService implements OnApplicationBootstrap {
 
   async listSentReplies(org: Organization, dto: ListSentDto) {
     return this._engageRepository.listSentReplies(org.id, dto);
+  }
+
+  async locateOpportunity(org: Organization, dto: LocateOpportunityDto) {
+    return this._engageRepository.locateOpportunity(org.id, dto);
+  }
+
+  async locateSentReply(org: Organization, dto: LocateSentReplyDto) {
+    return this._engageRepository.locateSentReply(org.id, dto);
   }
 
   async updateScheduledReply(org: Organization, id: string, dto: UpdateScheduledReplyDto) {

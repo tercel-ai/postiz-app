@@ -41,6 +41,8 @@ import {
   GenerateDraftDto,
   ListOpportunitiesDto,
   ListSentDto,
+  LocateOpportunityDto,
+  LocateSentReplyDto,
   SaveDraftDto,
   SaveEngageConfigDto,
   SetupEngageDto,
@@ -347,6 +349,15 @@ export class EngageController {
     return this._engageService.getScoreStats(org, query);
   }
 
+  @ApiOperation({ summary: 'Locate the page of a given opportunityStateId within /opportunities using the same filters and sort. Returns null page when the opportunity does not match the filters.' })
+  @Get('/opportunities/locate')
+  locateOpportunity(
+    @GetOrgFromRequest() org: Organization,
+    @Query() query: LocateOpportunityDto
+  ) {
+    return this._engageService.locateOpportunity(org, query);
+  }
+
   @ApiOperation({ summary: 'Paginated list of signal-feed opportunities for this org' })
   @Get('/opportunities')
   listOpportunities(
@@ -595,6 +606,15 @@ export class EngageController {
   }
 
   // ─── Sent Replies ─────────────────────────────────────────────────────────
+
+  @ApiOperation({ summary: 'Locate the page of a given sentReplyId within /sent using the same filters. Returns null page when the reply does not match the filters.' })
+  @Get('/sent/locate')
+  locateSentReply(
+    @GetOrgFromRequest() org: Organization,
+    @Query() query: LocateSentReplyDto
+  ) {
+    return this._engageService.locateSentReply(org, query);
+  }
 
   @ApiOperation({ summary: "Paginated list of Engage replies. Optional status filter: published | scheduled | manual | error, plus two rollups — settled (published + scheduled) and awaiting (manual link-pending + failed publishes; generated but not yet live)" })
   @Get('/sent')
