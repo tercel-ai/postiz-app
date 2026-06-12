@@ -180,6 +180,14 @@ function installCreateTweetInterceptor(): void {
       const userLegacy = user?.legacy;
       const screenName =
         userLegacy?.screen_name || user?.core?.screen_name || '';
+      // X moved the avatar around across API versions: newer responses use
+      // `result.avatar.image_url`, older ones `legacy.profile_image_url_https`.
+      let avatarUrl: string | undefined =
+        user?.avatar?.image_url ||
+        userLegacy?.profile_image_url_https ||
+        undefined;
+      // The default variant is the tiny `_normal` (48px); upscale to 400px.
+      if (avatarUrl) avatarUrl = avatarUrl.replace('_normal.', '_400x400.');
       if (restId) {
         w.__postizCreatedTweet = {
           rest_id: String(restId),
@@ -189,7 +197,7 @@ function installCreateTweetInterceptor(): void {
                 handle: String(screenName),
                 id: user?.rest_id ? String(user.rest_id) : undefined,
                 name: userLegacy?.name || user?.core?.name || undefined,
-                avatarUrl: userLegacy?.profile_image_url_https || undefined,
+                avatarUrl,
               }
             : undefined,
         };

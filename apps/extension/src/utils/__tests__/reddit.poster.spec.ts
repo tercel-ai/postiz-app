@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   resolveRedditThingId,
   parseRedditCommentThing,
+  parseRedditAuthorFromThing,
 } from '@gitroom/extension/utils/reddit.poster';
 
 describe('resolveRedditThingId', () => {
@@ -66,5 +67,22 @@ describe('parseRedditCommentThing', () => {
 
   it('returns empty object for a null thing', () => {
     expect(parseRedditCommentThing(null)).toEqual({});
+  });
+});
+
+describe('parseRedditAuthorFromThing', () => {
+  it('extracts author handle + fullname from the comment HTML', () => {
+    const thing = {
+      content:
+        '<div data-author="Consistent_Habit_436" data-author-fullname="t2_bb3z4twq">…</div>',
+    };
+    expect(parseRedditAuthorFromThing(thing)).toEqual({
+      handle: 'Consistent_Habit_436',
+      id: 't2_bb3z4twq',
+    });
+  });
+
+  it('returns undefined when no author is present', () => {
+    expect(parseRedditAuthorFromThing({ content: '<div>no author</div>' })).toBeUndefined();
   });
 });

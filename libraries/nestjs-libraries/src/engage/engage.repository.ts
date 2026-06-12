@@ -143,9 +143,10 @@ function parseEngageAuthor(settings: string | null): EngageAuthorProfile | null 
 
 /**
  * Resolve a single, unified `replyAuthor` (who posted the reply) so the frontend
- * reads one field regardless of source. integrationId is the source of truth: when
- * a connected account authored the reply, build the author from it; otherwise fall
- * back to settings.engageAuthor (manual reply from a non-connected account).
+ * reads one field regardless of source. settings.engageAuthor is the source of
+ * truth — it records who ACTUALLY posted (e.g. the browser extension's in-browser
+ * X session under Option A, which can differ from the selected integration). Only
+ * when no engageAuthor is recorded do we fall back to the connected integration.
  */
 function resolveReplyAuthor(
   integration:
@@ -154,6 +155,9 @@ function resolveReplyAuthor(
     | undefined,
   settings: string | null
 ): EngageAuthorProfile | null {
+  const fromSettings = parseEngageAuthor(settings);
+  if (fromSettings) return fromSettings;
+
   if (integration) {
     return {
       handle: (integration.profile ?? '').replace(/^@/, ''),
@@ -162,7 +166,7 @@ function resolveReplyAuthor(
       ...(integration.picture ? { avatarUrl: integration.picture } : {}),
     };
   }
-  return parseEngageAuthor(settings);
+  return null;
 }
 
 @Injectable()
