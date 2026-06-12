@@ -163,14 +163,14 @@ function fillXReplyInPage(
 /**
  * Runs in the page's MAIN world (so it can see X's own network calls). Patches
  * window.fetch + XHR to capture the GraphQL CreateTweet response and stash the
- * new tweet's rest_id + author screen_name on window.__postizCreatedTweet.
+ * new tweet's rest_id + author screen_name on window.__aiseeCreatedTweet.
  * Must be installed BEFORE the Reply button is clicked. Self-contained.
  */
 function installCreateTweetInterceptor(): void {
   const w = window as any;
-  if (w.__postizInterceptorInstalled) return;
-  w.__postizInterceptorInstalled = true;
-  w.__postizCreatedTweet = null;
+  if (w.__aiseeInterceptorInstalled) return;
+  w.__aiseeInterceptorInstalled = true;
+  w.__aiseeCreatedTweet = null;
 
   const extract = (json: any) => {
     try {
@@ -189,7 +189,7 @@ function installCreateTweetInterceptor(): void {
       // The default variant is the tiny `_normal` (48px); upscale to 400px.
       if (avatarUrl) avatarUrl = avatarUrl.replace('_normal.', '_400x400.');
       if (restId) {
-        w.__postizCreatedTweet = {
+        w.__aiseeCreatedTweet = {
           rest_id: String(restId),
           screen_name: String(screenName),
           author: screenName
@@ -230,15 +230,15 @@ function installCreateTweetInterceptor(): void {
   const OrigOpen = XMLHttpRequest.prototype.open;
   const OrigSend = XMLHttpRequest.prototype.send;
   XMLHttpRequest.prototype.open = function (this: any, ...a: any[]) {
-    this.__postizUrl = a[1];
+    this.__aiseeUrl = a[1];
     return OrigOpen.apply(this, a as any);
   };
   XMLHttpRequest.prototype.send = function (this: any, ...a: any[]) {
     this.addEventListener('load', function (this: any) {
       try {
         if (
-          typeof this.__postizUrl === 'string' &&
-          this.__postizUrl.indexOf('CreateTweet') !== -1
+          typeof this.__aiseeUrl === 'string' &&
+          this.__aiseeUrl.indexOf('CreateTweet') !== -1
         ) {
           extract(JSON.parse(this.responseText));
         }
@@ -259,7 +259,7 @@ function readCapturedTweet(): Promise<{
   return new Promise((resolve) => {
     const start = Date.now();
     const tick = () => {
-      const v = (window as any).__postizCreatedTweet;
+      const v = (window as any).__aiseeCreatedTweet;
       if (v && v.rest_id) return resolve(v);
       if (Date.now() - start > 6_000) return resolve(null);
       setTimeout(tick, 200);
@@ -273,7 +273,7 @@ export async function postXReply(input: XReplyInput): Promise<ReplyResult> {
   if (!text) return { ok: false, error: 'Reply text is empty' };
 
   const statusUrl = buildXStatusUrl(input.url);
-  console.log('[postiz][x] input url:', input.url, '→ statusUrl:', statusUrl);
+  console.log('[aisee][x] input url:', input.url, '→ statusUrl:', statusUrl);
   if (!statusUrl) {
     return { ok: false, error: 'Could not parse an X status URL from the input' };
   }
@@ -282,15 +282,15 @@ export async function postXReply(input: XReplyInput): Promise<ReplyResult> {
   try {
     const tab = await chrome.tabs.create({ url: statusUrl, active: true });
     tabId = tab.id ?? undefined;
-    console.log('[postiz][x] opened tab', tabId);
+    console.log('[aisee][x] opened tab', tabId);
   } catch (e: any) {
-    console.error('[postiz][x] tabs.create failed', e);
+    console.error('[aisee][x] tabs.create failed', e);
     return { ok: false, error: `Failed to open X tab: ${e?.message || e}` };
   }
   if (tabId == null) return { ok: false, error: 'Failed to open X tab' };
 
   await waitForTabComplete(tabId, 15_000);
-  console.log('[postiz][x] tab load complete, injecting…');
+  console.log('[aisee][x] tab load complete, injecting…');
 
   const autoSubmit = input.autoSubmit !== false;
 
@@ -312,7 +312,7 @@ export async function postXReply(input: XReplyInput): Promise<ReplyResult> {
       args: [text, autoSubmit],
     });
     const status = injection?.result;
-    console.log('[postiz][x] injection result:', status);
+    console.log('[aisee][x] injection result:', status);
 
     if (status === 'sent') {
       // 3) Read the captured tweet id/permalink (MAIN world). Falls back to
@@ -334,9 +334,9 @@ export async function postXReply(input: XReplyInput): Promise<ReplyResult> {
             : `https://x.com/i/web/status/${captured.rest_id}`;
         }
         author = captured?.author;
-        console.log('[postiz][x] captured tweet:', captured);
+        console.log('[aisee][x] captured tweet:', captured);
       } catch (e) {
-        console.error('[postiz][x] capture read failed', e);
+        console.error('[aisee][x] capture read failed', e);
       }
       return { ok: true, message: 'Reply sent on X.', permalink, postId, author };
     }
@@ -356,7 +356,7 @@ export async function postXReply(input: XReplyInput): Promise<ReplyResult> {
         'Opened the tweet but could not find the reply box (X DOM may have changed). Reply manually.',
     };
   } catch (e: any) {
-    console.error('[postiz][x] executeScript failed', e);
+    console.error('[aisee][x] executeScript failed', e);
     return { ok: false, error: `X injection failed: ${e?.message || e}` };
   }
 }

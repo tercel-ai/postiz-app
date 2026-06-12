@@ -44,7 +44,7 @@ async function backfillReplyUrl(
   const token =
     payload.token || (await readAuthToken(payload.frontendOrigin || ''));
   if (!token) {
-    console.warn('[postiz] backfill skipped: no token (localStorage or cookie)');
+    console.warn('[aisee] backfill skipped: no token (localStorage or cookie)');
     return false;
   }
 
@@ -65,10 +65,10 @@ async function backfillReplyUrl(
         }),
       }
     );
-    console.log('[postiz] backfill status', res.status);
+    console.log('[aisee] backfill status', res.status);
     return res.ok;
   } catch (e) {
-    console.error('[postiz] backfill failed', e);
+    console.error('[aisee] backfill failed', e);
     return false;
   }
 }

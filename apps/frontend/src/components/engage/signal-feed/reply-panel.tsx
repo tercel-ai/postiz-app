@@ -4,6 +4,7 @@ import { FC, useState, useCallback, useRef, useEffect } from 'react';
 import { useFetch } from '@gitroom/helpers/utils/custom.fetch';
 import { useToaster } from '@gitroom/react/toaster/toaster';
 import { useVariables } from '@gitroom/react/helpers/variable.context';
+import { EXTENSION_MESSAGE } from '@gitroom/helpers/extension/brand';
 import type { Opportunity } from './opportunity-card';
 
 interface ReplyPanelProps {
@@ -144,8 +145,8 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
 
       window.postMessage(
         {
-          source: 'postiz',
-          action: 'postiz:engage-reply',
+          source: EXTENSION_MESSAGE.source,
+          action: EXTENSION_MESSAGE.engageReply,
           payload: {
             platform: opportunity.platform,
             url: opportunity.externalPostUrl,
@@ -157,7 +158,7 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
         },
         window.location.origin
       );
-      toaster.show('Posting via the Postiz extension…', 'success');
+      toaster.show('Posting via the browser extension…', 'success');
     } catch {
       toaster.show('Failed to record reply — please retry', 'warning');
     } finally {
@@ -183,8 +184,8 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
     const onMessage = (e: MessageEvent) => {
       if (e.source !== window || e.origin !== window.location.origin) return;
       const data: any = e.data;
-      if (!data || data.source !== 'postiz-extension') return;
-      if (data.action !== 'postiz:engage-reply-result') return;
+      if (!data || data.source !== EXTENSION_MESSAGE.resultSource) return;
+      if (data.action !== EXTENSION_MESSAGE.engageReplyResult) return;
       if (data.opportunityId && data.opportunityId !== opportunity.id) return;
 
       const result = data.result;

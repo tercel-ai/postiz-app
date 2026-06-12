@@ -7,6 +7,7 @@ import {
   loadHistory,
   ClearRange,
   ReplyHistoryItem,
+  STORAGE_KEY,
 } from '@gitroom/extension/utils/reply.history';
 
 export default function Popup() {
@@ -21,8 +22,8 @@ export default function Popup() {
       changes: { [k: string]: chrome.storage.StorageChange },
       area: string
     ) => {
-      if (area === 'local' && changes['postiz_reply_history']) {
-        const next = changes['postiz_reply_history'].newValue;
+      if (area === 'local' && changes[STORAGE_KEY]) {
+        const next = changes[STORAGE_KEY].newValue;
         setHistory(Array.isArray(next) ? next : []);
       }
     };
@@ -43,8 +44,8 @@ export default function Popup() {
   return (
     <div className="pz">
       <div className="pz-header">
-        <div className="pz-logo">P</div>
-        <div className="pz-title">Postiz · Reply</div>
+        <div className="pz-logo">A</div>
+        <div className="pz-title">Aisee · Reply</div>
         <div className="pz-sub">in-browser</div>
       </div>
       <ComposeForm onSubmitted={handleSubmitted} />

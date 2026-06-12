@@ -122,7 +122,7 @@ async function fetchRedditSession(): Promise<{
 // reply. Invalidated when the `reddit_session` cookie changes (account switch /
 // re-login) or after a TTL. A stale modhash is caught at post time (retry).
 
-const SESSION_CACHE_KEY = 'postiz_reddit_session';
+const SESSION_CACHE_KEY = 'aisee_reddit_session';
 const SESSION_TTL_MS = 10 * 60 * 1000;
 
 interface RedditSession {

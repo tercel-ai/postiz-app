@@ -10,11 +10,7 @@ import {
 import { ProviderList } from '@gitroom/extension/providers/provider.list';
 import { createPortal } from 'react-dom';
 import { ActionComponent } from '@gitroom/extension/pages/content/elements/action.component';
-import {
-  installBrowserAssistedReplyBridge,
-  installEngageReplyBridge,
-  installXBrowserAssistedReplyRunner,
-} from '@gitroom/extension/pages/content/browser-assisted-reply';
+import { installEngageReplyBridge } from '@gitroom/extension/pages/content/browser-assisted-reply';
 
 // Feature flag: the legacy in-page overlay modal (clicking X/LinkedIn's
 // post/reply button opens a Postiz scheduling iframe over the native composer).
@@ -46,9 +42,7 @@ export const MainContentInner: FC = (props) => {
   }, []);
 
   useEffect(() => {
-    installBrowserAssistedReplyBridge();
     installEngageReplyBridge();
-    installXBrowserAssistedReplyRunner();
   }, []);
 
   useEffect(() => {

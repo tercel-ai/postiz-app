@@ -34,34 +34,37 @@ SPA re-renders. Clicking an overlay opens an iframe pointed at
 Postiz `auth` cookie for authentication
 (`src/pages/content/elements/action.component.tsx`).
 
-### 2. Browser-assisted reply (Engage → X)
+### 2. In-browser Engage reply (closed loop)
+
+The Engage reply panel hands a draft to the extension, which posts it through the
+user's own browser session (bypassing the blocked X API tier / missing Reddit
+key), captures the resulting permalink + author, and backfills them onto the
+Engage record — no new backend table.
 
 ```
-Engage reply panel                Extension content script           X.com tab
-(reply-panel.tsx)                 (browser-assisted-reply.ts)
-─────────────────                 ────────────────────────           ─────────
-window.postMessage(               window 'message' listener
-  source: 'postiz',        ──▶    validates task, saves it to
-  action:                         chrome.storage, asks the
-  'postiz:extension-task',        background worker to open tab  ──▶  new tab
-  task: { platform:'x',                                               opens the
-    type:'reply', ... })                                              tweet URL
-                                  runner re-reads the pending
-                                  task on the X tab, opens the   ──▶  reply box
-                                  reply composer and fills the        pre-filled
-                                  draft text
+Engage reply panel                 Extension                          Platform
+(reply-panel.tsx)                  (bridge → background)
+─────────────────                  ─────────────────────              ────────
+1. POST manual-reply (no URL)
+   → sentReplyId
+2. window.postMessage(             installEngageReplyBridge()  ──▶
+   source: EXTENSION_MESSAGE.source,  forwards to background `postReply`
+   action: …engageReply,
+   {platform,url,text,             background posts in-browser   ──▶  Reddit / X
+    sentReplyId,backendBase})        captures permalink + author
+                                     PATCH /engage/sent/:id/reply-url
+   ◀── postMessage result ────────   (permalink, backfilled, author)
 ```
 
-- The web app trigger lives in
-  `apps/frontend/src/components/engage/signal-feed/reply-panel.tsx`
-  (`openWithExtension`). It posts the message only for X reply opportunities.
-- `installBrowserAssistedReplyBridge()` listens for that message, persists the
-  task under `postiz:pending-browser-assisted-task`, and tells the background
-  service worker (`src/pages/background/index.ts`) to open the tweet.
-- `installXBrowserAssistedReplyRunner()` runs on `x.com` tabs, waits for the
-  reply composer (`[data-testid="tweetTextarea_0"]`), fills the draft via
-  `insertText`, then clears the stored task. **It does not auto-submit** — you
-  review and click *Reply* yourself.
+- Protocol strings live ONCE in `libraries/helpers/src/extension/brand.ts`
+  (`EXTENSION_MESSAGE`), imported by both the web app and the extension so the
+  handshake can never drift — change `EXTENSION_BRAND` to rebrand.
+- Reddit posts via background `fetch(credentials:'include')`; X opens a tab and
+  uses `chrome.scripting.executeScript` (X's strict CSP blocks content scripts),
+  auto-submits, and reads the new tweet from the captured `CreateTweet` response.
+- The background reads the auth token (localStorage `access_token`, else the
+  `auth` cookie) and PATCHes the reply URL itself, so the loop completes even if
+  the Engage tab loses focus.
 
 ---
 
@@ -141,7 +144,7 @@ Declared in `manifest.json` / `vite.config.base.ts`:
 | Permission | Why |
 | --- | --- |
 | `cookies` | Read the Postiz `auth` cookie from `FRONTEND_URL` to authenticate the modal / API calls. |
-| `storage` | Persist the pending browser-assisted reply task. |
+| `storage` | Persist local reply history + the cached Reddit session. |
 | `tabs` | Open the target tweet in a new tab. |
 | `activeTab` | Inspect the active tab URL in the popup. |
 | `host_permissions` | Provider hosts (`x.com`, `linkedin.com`) + your `FRONTEND_URL`. |
@@ -183,7 +186,7 @@ apps/extension/
 └── src/
     ├── pages/
     │   ├── background/       # service worker: http, storage, cookies, openTab
-    │   ├── content/          # injected UI + browser-assisted reply bridge
+    │   ├── content/          # injected UI + Engage reply bridge
     │   ├── popup/            # toolbar popup (login/provider status)
     │   ├── options/          # options page
     │   └── panel/            # devtools-style panel
@@ -193,6 +196,6 @@ apps/extension/
 
 ## Tests
 
-`src/pages/content/__tests__/browser-assisted-reply.spec.ts` covers the task
-validation, URL normalization, composer lookup and fill logic. Run the
-repo test suite to execute it.
+`src/utils/__tests__/reddit.poster.spec.ts` covers Reddit URL → thing-id parsing
+and author/permalink extraction from the comment response. Run with
+`npx vitest run` inside `apps/extension`.

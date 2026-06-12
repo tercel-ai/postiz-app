@@ -12,14 +12,14 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
 
   // In-browser reply (Option A). payload: { platform, url, text, opportunityId? }
   if (request.action === 'postReply') {
-    console.log('[postiz] postReply received', request.payload);
+    console.log('[aisee] postReply received', request.payload);
     handlePostReply(request.payload)
       .then((res) => {
-        console.log('[postiz] postReply result', res);
+        console.log('[aisee] postReply result', res);
         sendResponse(res);
       })
       .catch((e) => {
-        console.error('[postiz] postReply error', e);
+        console.error('[aisee] postReply error', e);
         sendResponse({ ok: false, error: String(e?.message || e) });
       });
     return true;

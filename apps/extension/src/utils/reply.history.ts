@@ -20,7 +20,7 @@ export interface ReplyHistoryItem {
   createdAt: number; // epoch ms
 }
 
-const STORAGE_KEY = 'postiz_reply_history';
+export const STORAGE_KEY = 'aisee_reply_history';
 const MAX_ITEMS = 500; // cap local storage growth
 
 export async function loadHistory(): Promise<ReplyHistoryItem[]> {
