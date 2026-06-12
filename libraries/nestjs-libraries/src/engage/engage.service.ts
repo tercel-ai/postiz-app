@@ -448,18 +448,26 @@ export class EngageService implements OnApplicationBootstrap {
   async submitManualReplyUrl(
     org: Organization,
     sentReplyId: string,
-    url: string
+    url: string,
+    author?: EngageAuthorProfile
   ) {
     // The backfill URL is mandatory here, so always validate format + reachability.
     const platform = await this._engageRepository.getSentReplyPlatform(org.id, sentReplyId);
     await this._validateReplyUrl(platform, url);
-    // Save the URL immediately: metrics sync only needs the parseable id from the
-    // URL (and X's integration resolution, both done in updateReplyUrl), NOT the
-    // author. The author/avatar lookup is slow (1–2 Reddit hops behind a WAF) and
-    // display-only, so resolve + persist it out of band — a slow/failing lookup
-    // must never block saving the reply URL.
-    const result = await this._engageRepository.updateReplyUrl(org.id, sentReplyId, url);
-    this._storeReplyAuthorInBackground(org.id, sentReplyId, platform, url);
+    // Save the URL immediately. When the caller already supplies the real poster
+    // (e.g. the browser extension captured it from X's CreateTweet response), pass
+    // it straight through so it's recorded synchronously — and skip the slow
+    // out-of-band lookup. Otherwise resolve the author out of band (Reddit scrape /
+    // X API), which is slow + display-only and must never block saving the URL.
+    const result = await this._engageRepository.updateReplyUrl(
+      org.id,
+      sentReplyId,
+      url,
+      author
+    );
+    if (!author) {
+      this._storeReplyAuthorInBackground(org.id, sentReplyId, platform, url);
+    }
     return result;
   }
 

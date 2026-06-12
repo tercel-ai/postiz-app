@@ -1,18 +1,301 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+/* Self-contained popup styles — intentionally NOT relying on Tailwind, whose
+   v3/v4 mix doesn't reliably generate utilities for the extension build. */
+
+:root {
+  --pz-accent: #612bd3;
+  --pz-accent-hover: #4f22b0;
+  --pz-bg: #ffffff;
+  --pz-fg: #1f2430;
+  --pz-muted: #8a909c;
+  --pz-border: #e6e8ee;
+  --pz-soft: #f5f6fa;
+}
+
+* {
+  box-sizing: border-box;
+}
 
 body {
-  width: 360px;
+  width: 380px;
   height: auto;
   margin: 0;
-  padding: 5px;
-  box-sizing: border-box;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
-    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
-    sans-serif;
+  padding: 0;
+  background: var(--pz-bg);
+  color: var(--pz-fg);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Helvetica Neue',
+    Arial, sans-serif;
+  font-size: 13px;
+  line-height: 1.45;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
 
-  position: relative;
+.pz {
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── Header ─────────────────────────────────────────────── */
+.pz-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--pz-border);
+}
+.pz-logo {
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  background: var(--pz-accent);
+  color: #fff;
+  font-weight: 700;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.pz-title {
+  font-weight: 600;
+  font-size: 14px;
+}
+.pz-sub {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--pz-muted);
+}
+
+/* ── Compose form ───────────────────────────────────────── */
+.pz-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+}
+.pz-row {
+  display: flex;
+  gap: 8px;
+}
+.pz-field {
+  width: 100%;
+  font: inherit;
+  color: var(--pz-fg);
+  background: var(--pz-bg);
+  border: 1px solid var(--pz-border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.pz-field:focus {
+  border-color: var(--pz-accent);
+  box-shadow: 0 0 0 3px rgba(97, 43, 211, 0.12);
+}
+.pz-select {
+  flex: 0 0 96px;
+  cursor: pointer;
+}
+.pz-input {
+  flex: 1;
+}
+.pz-textarea {
+  resize: vertical;
+  min-height: 78px;
+}
+.pz-field::placeholder {
+  color: var(--pz-muted);
+}
+
+.pz-btn {
+  appearance: none;
+  border: none;
+  cursor: pointer;
+  width: 100%;
+  padding: 10px;
+  border-radius: 8px;
+  background: var(--pz-accent);
+  color: #fff;
+  font: inherit;
+  font-weight: 600;
+  transition: background 0.15s, opacity 0.15s;
+}
+.pz-btn:hover:not(:disabled) {
+  background: var(--pz-accent-hover);
+}
+.pz-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* ── Result banner ──────────────────────────────────────── */
+.pz-result {
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+}
+.pz-result-title {
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+.pz-result.ok {
+  background: #e7f6ec;
+  color: #1a7f37;
+}
+.pz-result.pending {
+  background: #fff7e6;
+  color: #92400e;
+}
+.pz-result.fail {
+  background: #fcebec;
+  color: #b91c1c;
+}
+.pz-result a {
+  color: inherit;
+  word-break: break-all;
+}
+
+/* ── History ────────────────────────────────────────────── */
+.pz-divider {
+  height: 1px;
+  background: var(--pz-border);
+}
+.pz-history {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px 14px;
+}
+.pz-history-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.pz-history-title {
+  font-weight: 600;
+  font-size: 12px;
+  color: #5b616e;
+}
+.pz-clear {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.pz-clear-label {
+  font-size: 11px;
+  color: var(--pz-muted);
+  margin-right: 2px;
+}
+.pz-clear-btn {
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  padding: 3px 7px;
+  border-radius: 6px;
+  border: 1px solid var(--pz-border);
+  background: var(--pz-bg);
+  color: #5b616e;
+  transition: background 0.15s, border-color 0.15s;
+}
+.pz-clear-btn:hover {
+  background: var(--pz-soft);
+  border-color: #d4d7e0;
+}
+
+.pz-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 300px;
+  overflow-y: auto;
+}
+.pz-empty {
+  text-align: center;
+  color: var(--pz-muted);
+  font-size: 12px;
+  padding: 16px 0;
+}
+
+.pz-item {
+  border: 1px solid var(--pz-border);
+  border-radius: 9px;
+  padding: 9px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: var(--pz-bg);
+}
+.pz-item-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.pz-badge {
+  font-size: 10px;
+  font-weight: 700;
+  color: #fff;
+  padding: 2px 6px;
+  border-radius: 5px;
+  letter-spacing: 0.02em;
+}
+.pz-badge.reddit {
+  background: #ff4500;
+}
+.pz-badge.x {
+  background: #0f1419;
+}
+.pz-status {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 5px;
+}
+.pz-status.sent {
+  background: #e7f6ec;
+  color: #1a7f37;
+}
+.pz-status.pending {
+  background: #fff7e6;
+  color: #92400e;
+}
+.pz-status.failed {
+  background: #fcebec;
+  color: #b91c1c;
+}
+.pz-time {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--pz-muted);
+}
+.pz-content {
+  font-size: 12px;
+  color: #353b48;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+}
+.pz-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.pz-link {
+  font-size: 11px;
+  color: var(--pz-accent);
+  text-decoration: none;
+}
+.pz-link:hover {
+  text-decoration: underline;
+}
+.pz-link.muted {
+  color: var(--pz-muted);
+}
+.pz-postid {
+  font-size: 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--pz-muted);
+  word-break: break-all;
 }

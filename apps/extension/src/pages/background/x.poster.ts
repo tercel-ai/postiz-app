@@ -176,14 +176,22 @@ function installCreateTweetInterceptor(): void {
     try {
       const r = json?.data?.create_tweet?.tweet_results?.result;
       const restId = r?.rest_id || r?.legacy?.id_str;
+      const user = r?.core?.user_results?.result;
+      const userLegacy = user?.legacy;
       const screenName =
-        r?.core?.user_results?.result?.legacy?.screen_name ||
-        r?.core?.user_results?.result?.core?.screen_name ||
-        '';
+        userLegacy?.screen_name || user?.core?.screen_name || '';
       if (restId) {
         w.__postizCreatedTweet = {
           rest_id: String(restId),
           screen_name: String(screenName),
+          author: screenName
+            ? {
+                handle: String(screenName),
+                id: user?.rest_id ? String(user.rest_id) : undefined,
+                name: userLegacy?.name || user?.core?.name || undefined,
+                avatarUrl: userLegacy?.profile_image_url_https || undefined,
+              }
+            : undefined,
         };
       }
     } catch (e) {
@@ -238,6 +246,7 @@ function installCreateTweetInterceptor(): void {
 function readCapturedTweet(): Promise<{
   rest_id: string;
   screen_name: string;
+  author?: { handle: string; id?: string; name?: string; avatarUrl?: string };
 } | null> {
   return new Promise((resolve) => {
     const start = Date.now();
@@ -302,6 +311,7 @@ export async function postXReply(input: XReplyInput): Promise<ReplyResult> {
       //    undefined on timeout so the history row is still recorded.
       let permalink: string | undefined;
       let postId: string | undefined;
+      let author: ReplyResult['author'];
       try {
         const [cap] = await chrome.scripting.executeScript({
           target: { tabId },
@@ -315,11 +325,12 @@ export async function postXReply(input: XReplyInput): Promise<ReplyResult> {
             ? `https://x.com/${captured.screen_name}/status/${captured.rest_id}`
             : `https://x.com/i/web/status/${captured.rest_id}`;
         }
+        author = captured?.author;
         console.log('[postiz][x] captured tweet:', captured);
       } catch (e) {
         console.error('[postiz][x] capture read failed', e);
       }
-      return { ok: true, message: 'Reply sent on X.', permalink, postId };
+      return { ok: true, message: 'Reply sent on X.', permalink, postId, author };
     }
     if (status === 'filled') {
       return {

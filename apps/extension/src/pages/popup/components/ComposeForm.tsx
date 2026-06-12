@@ -53,24 +53,18 @@ export const ComposeForm: FC<{
   }, [platform, url, text, onSubmitted]);
 
   const disabled = sending || !url.trim() || !text.trim();
+  const resultClass = !result?.ok ? 'fail' : result.pending ? 'pending' : 'ok';
+  const resultTitle = !result?.ok
+    ? '❌ Failed'
+    : result.pending
+    ? '📝 Filled — awaiting send'
+    : '✅ Posted';
 
   return (
-    <div className="flex flex-col gap-2">
-      <div className="flex items-center gap-2">
-        <div
-          className="h-6 w-6 rounded-md flex items-center justify-center text-white text-xs font-bold"
-          style={{ backgroundColor: '#612bd3' }}
-        >
-          P
-        </div>
-        <div className="text-sm font-semibold leading-tight">
-          Postiz · Reply
-        </div>
-      </div>
-
-      <div className="flex gap-2">
+    <div className="pz-form">
+      <div className="pz-row">
         <select
-          className="border border-gray-300 rounded-md px-2 py-1.5 text-sm bg-white"
+          className="pz-field pz-select"
           value={platform}
           onChange={(e) => setPlatform(e.target.value as Platform)}
         >
@@ -78,7 +72,7 @@ export const ComposeForm: FC<{
           <option value="x">X</option>
         </select>
         <input
-          className="flex-1 border border-gray-300 rounded-md px-2 py-1.5 text-sm"
+          className="pz-field pz-input"
           placeholder={
             platform === 'reddit'
               ? 'reddit.com/r/…/comments/<id>/…'
@@ -90,51 +84,26 @@ export const ComposeForm: FC<{
       </div>
 
       <textarea
-        className="border border-gray-300 rounded-md px-2 py-1.5 text-sm resize-none"
-        rows={3}
+        className="pz-field pz-textarea"
         placeholder="Your reply…"
         value={text}
         onChange={(e) => setText(e.target.value)}
       />
 
-      <button
-        className="rounded-md px-3 py-2 text-white text-sm font-medium transition-opacity disabled:opacity-40"
-        style={{ backgroundColor: '#612bd3' }}
-        disabled={disabled}
-        onClick={submit}
-      >
-        {sending
-          ? 'Sending…'
-          : platform === 'x'
-          ? 'Post reply on X'
-          : 'Post reply'}
+      <button className="pz-btn" disabled={disabled} onClick={submit}>
+        {sending ? 'Posting…' : platform === 'x' ? 'Post reply on X' : 'Post reply'}
       </button>
 
       {result && (
-        <div
-          className="text-xs rounded-md px-2 py-1.5"
-          style={{
-            backgroundColor: !result.ok
-              ? '#fcebec'
-              : result.pending
-              ? '#fff7e6'
-              : '#e7f6ec',
-            color: !result.ok
-              ? '#b91c1c'
-              : result.pending
-              ? '#92400e'
-              : '#1a7f37',
-          }}
-        >
-          <div className="font-medium">
-            {!result.ok
-              ? '❌ Failed'
-              : result.pending
-              ? '📝 Filled — awaiting your send'
-              : '✅ Posted'}
-          </div>
+        <div className={`pz-result ${resultClass}`}>
+          <div className="pz-result-title">{resultTitle}</div>
           {(result.message || result.error) && (
-            <div className="break-all">{result.message || result.error}</div>
+            <div>{result.message || result.error}</div>
+          )}
+          {result.permalink && (
+            <a href={result.permalink} target="_blank" rel="noreferrer">
+              {result.permalink}
+            </a>
           )}
         </div>
       )}

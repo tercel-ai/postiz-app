@@ -10,6 +10,14 @@ export interface ReplyResult {
   permalink?: string;
   // Platform id of the published reply: Reddit fullname (t1_/t3_) or X tweet rest_id.
   postId?: string;
+  // The ACTUAL poster (the in-browser session). For X we capture it from the
+  // CreateTweet response; recorded server-side as Post.settings.engageAuthor.
+  author?: {
+    handle: string;
+    id?: string;
+    name?: string;
+    avatarUrl?: string;
+  };
   // Human-readable next step / hint shown in the UI.
   message?: string;
   error?: string;

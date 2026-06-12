@@ -30,10 +30,11 @@ function readAuthToken(frontendOrigin: string): Promise<string | undefined> {
   });
 }
 
-/** Closed-loop backfill: PATCH the permalink onto the Engage sent-reply record. */
+/** Closed-loop backfill: PATCH the permalink (+ real author) onto the record. */
 async function backfillReplyUrl(
   payload: PostReplyPayload,
-  permalink: string
+  permalink: string,
+  author?: ReplyResult['author']
 ): Promise<boolean> {
   const base = payload.backendBase?.replace(/\/$/, '');
   if (!base || !payload.sentReplyId) return false;
@@ -56,7 +57,12 @@ async function backfillReplyUrl(
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ url: permalink }),
+        // author = the actual in-browser poster (X). Recorded as engageAuthor so
+        // the record reflects who really posted, not the selected integration.
+        body: JSON.stringify({
+          url: permalink,
+          ...(author ? { author } : {}),
+        }),
       }
     );
     console.log('[postiz] backfill status', res.status);
@@ -85,7 +91,11 @@ export async function handlePostReply(
     payload.sentReplyId &&
     payload.backendBase
   ) {
-    const backfilled = await backfillReplyUrl(payload, result.permalink);
+    const backfilled = await backfillReplyUrl(
+      payload,
+      result.permalink,
+      result.author
+    );
     return { ...result, backfilled };
   }
 

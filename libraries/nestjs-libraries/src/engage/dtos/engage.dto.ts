@@ -760,10 +760,38 @@ export class ConfirmManualReplyDto {
   integrationId?: string;
 }
 
+export class EngageAuthorDto {
+  @IsString()
+  @MaxLength(100)
+  handle: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  id?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  name?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(2048)
+  avatarUrl?: string;
+}
+
 export class SubmitManualReplyUrlDto {
   @IsString()
   @MaxLength(2048)
   url: string;
+
+  // The actual poster (e.g. captured by the browser extension from X's
+  // CreateTweet response). Stored as Post.settings.engageAuthor.
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => EngageAuthorDto)
+  author?: EngageAuthorDto;
 }
 
 // Persist an unpublished working draft for an opportunity (one DRAFT per

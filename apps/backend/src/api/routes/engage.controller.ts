@@ -650,16 +650,16 @@ export class EngageController {
     return this._engageService.updateScheduledReply(org, id, body);
   }
 
-  @ApiOperation({ summary: 'Submit the Reddit comment URL for a manual reply' })
+  @ApiOperation({ summary: 'Submit the reply URL (+ optional author) for a manual reply (X or Reddit)' })
   @ApiResponse({ status: 404, description: 'Sent reply not found' })
-  @ApiResponse({ status: 400, description: 'Only valid for Reddit manual replies' })
+  @ApiResponse({ status: 400, description: 'Only valid for X or Reddit manual replies' })
   @Patch('/sent/:id/reply-url')
   submitManualReplyUrl(
     @GetOrgFromRequest() org: Organization,
     @Param('id') id: string,
     @Body() body: SubmitManualReplyUrlDto
   ) {
-    return this._engageService.submitManualReplyUrl(org, id, body.url);
+    return this._engageService.submitManualReplyUrl(org, id, body.url, body.author);
   }
 
   // ─── Dashboard Stats ──────────────────────────────────────────────────────

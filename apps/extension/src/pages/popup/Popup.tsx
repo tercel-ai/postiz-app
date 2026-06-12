@@ -14,6 +14,20 @@ export default function Popup() {
 
   useEffect(() => {
     loadHistory().then(setHistory);
+
+    // Live-refresh when the background / bridge writes a new reply while the
+    // popup is open (e.g. an Engage reply posted from the page).
+    const onChanged = (
+      changes: { [k: string]: chrome.storage.StorageChange },
+      area: string
+    ) => {
+      if (area === 'local' && changes['postiz_reply_history']) {
+        const next = changes['postiz_reply_history'].newValue;
+        setHistory(Array.isArray(next) ? next : []);
+      }
+    };
+    chrome.storage.onChanged.addListener(onChanged);
+    return () => chrome.storage.onChanged.removeListener(onChanged);
   }, []);
 
   const handleSubmitted = useCallback(async (item: ReplyHistoryItem) => {
@@ -27,9 +41,14 @@ export default function Popup() {
   }, []);
 
   return (
-    <div className="flex flex-col gap-2" style={{ width: '100%' }}>
+    <div className="pz">
+      <div className="pz-header">
+        <div className="pz-logo">P</div>
+        <div className="pz-title">Postiz · Reply</div>
+        <div className="pz-sub">in-browser</div>
+      </div>
       <ComposeForm onSubmitted={handleSubmitted} />
-      <div className="h-px bg-gray-200" />
+      <div className="pz-divider" />
       <HistoryList items={history} onClear={handleClear} />
     </div>
   );

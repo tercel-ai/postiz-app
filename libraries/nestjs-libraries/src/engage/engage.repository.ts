@@ -2424,13 +2424,12 @@ export class EngageRepository {
           (await this.resolveXReplyIntegrationId(organizationId, url))
             ?.integrationId ?? undefined;
       }
-      // engageAuthor is only the FALLBACK identity for replies with no connected
-      // account. If the reply already had an integration, or the URL just
-      // handle-matched one, integrationId is the source of truth — leave settings
-      // (and the existing row) untouched. Only record engageAuthor when the reply
-      // ends up with no integration at all.
-      const willHaveIntegration = alreadyLinked || !!integrationId;
-      if (!willHaveIntegration && engageAuthor) {
+      // Record the actual poster when supplied. The browser extension (Option A)
+      // posts as the logged-in X session, which can differ from the selected
+      // integration — that real author is ground truth, so store it in settings
+      // even when an integration is linked. Without an explicit author we keep the
+      // old behavior (integration is the source of truth; settings untouched).
+      if (engageAuthor) {
         mergedSettings = this._mergeEngageAuthor(post?.settings, 'x', engageAuthor);
       }
     } else if (platform === 'reddit' && engageAuthor) {

@@ -1,5 +1,6 @@
 import { fetchStorage } from '@gitroom/extension/utils/load.storage';
 import { saveStorage } from '@gitroom/extension/utils/save.storage';
+import { appendHistory } from '@gitroom/extension/utils/reply.history';
 
 export const BROWSER_ASSISTED_TASK_STORAGE_KEY =
   'postiz:pending-browser-assisted-task';
@@ -183,6 +184,31 @@ export function installEngageReplyBridge() {
       });
     } catch (e: any) {
       result = { ok: false, error: String(e?.message || e) };
+    }
+
+    // Record this Engage reply in the popup's local history (same list the
+    // debug window shows), so it isn't limited to debug-window submissions.
+    try {
+      const r = result as {
+        ok?: boolean;
+        pending?: boolean;
+        permalink?: string;
+        postId?: string;
+      };
+      await appendHistory({
+        id:
+          (crypto as any)?.randomUUID?.() ??
+          `${Date.now()}-${Math.round(Math.random() * 1e6)}`,
+        platform: String(payload.platform) as 'reddit' | 'x',
+        targetUrl: String(payload.url),
+        content: String(payload.text),
+        permalink: r?.permalink,
+        postId: r?.postId,
+        status: !r?.ok ? 'failed' : r?.pending ? 'pending' : 'sent',
+        createdAt: Date.now(),
+      });
+    } catch {
+      /* history is best-effort */
     }
 
     window.postMessage(
