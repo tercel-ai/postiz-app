@@ -3,6 +3,7 @@
 import { FC, useState, useCallback, useRef, useEffect } from 'react';
 import { useFetch } from '@gitroom/helpers/utils/custom.fetch';
 import { useToaster } from '@gitroom/react/toaster/toaster';
+import { useVariables } from '@gitroom/react/helpers/variable.context';
 import type { Opportunity } from './opportunity-card';
 
 interface ReplyPanelProps {
@@ -33,6 +34,7 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
 }) => {
   const fetch = useFetch();
   const toaster = useToaster();
+  const { backendUrl } = useVariables();
 
   const enabledAccounts = replyAccounts.filter(
     (a) => a.engageXReplyAccount?.engageEnabled !== false
@@ -64,9 +66,6 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
   const abortRef = useRef<AbortController | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
   const previouslyFocusedRef = useRef<HTMLElement | null>(null);
-  // The EngageSentReply id of the "URL pending" record created right before we
-  // hand a draft to the extension, so the extension's result can backfill it.
-  const pendingReplyIdRef = useRef<string | null>(null);
 
   // Abort any in-progress stream when the panel unmounts
   useEffect(() => {
@@ -116,10 +115,10 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
     }
   }, [draft, toaster]);
 
-  // Closed loop: create a "sent, URL pending" record, hand the draft to the
-  // extension to post in-browser, then backfill the returned permalink onto that
-  // record. Works for both X and Reddit. The backfill happens in the message
-  // listener below (keyed off pendingReplyIdRef).
+  // Closed loop: create a "sent, URL pending" record, then hand the draft +
+  // sentReplyId + backendBase to the extension. The extension posts in-browser
+  // AND backfills the permalink itself (PATCH /engage/sent/:id/reply-url) using
+  // the auth cookie — so the loop completes even if this tab loses focus.
   const replyViaExtension = useCallback(async () => {
     if (!draft) return;
     setSending(true);
@@ -142,7 +141,6 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
         return;
       }
       const sentReply = await res.json();
-      pendingReplyIdRef.current = sentReply?.id ?? null;
 
       window.postMessage(
         {
@@ -153,6 +151,8 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
             url: opportunity.externalPostUrl,
             text: draft,
             opportunityId: opportunity.id,
+            sentReplyId: sentReply?.id,
+            backendBase: backendUrl,
           },
         },
         window.location.origin
@@ -172,14 +172,15 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
     opportunity.externalPostUrl,
     strategy,
     brandStrength,
+    backendUrl,
     fetch,
     toaster,
   ]);
 
-  // Receive the extension's post result and backfill the permalink onto the
-  // pending record via PATCH /engage/sent/:id/reply-url.
+  // The extension backfills the permalink itself; here we just surface the
+  // outcome and refresh the feed.
   useEffect(() => {
-    const onMessage = async (e: MessageEvent) => {
+    const onMessage = (e: MessageEvent) => {
       if (e.source !== window || e.origin !== window.location.origin) return;
       const data: any = e.data;
       if (!data || data.source !== 'postiz-extension') return;
@@ -187,27 +188,14 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
       if (data.opportunityId && data.opportunityId !== opportunity.id) return;
 
       const result = data.result;
-      const sentReplyId = pendingReplyIdRef.current;
-      pendingReplyIdRef.current = null;
 
-      if (result?.ok && result.permalink && sentReplyId) {
-        try {
-          const res = await fetch(`/engage/sent/${sentReplyId}/reply-url`, {
-            method: 'PATCH',
-            body: JSON.stringify({ url: result.permalink }),
-          });
-          toaster.show(
-            res.ok
-              ? 'Reply posted & link recorded!'
-              : 'Posted, but link not recorded — backfill manually',
-            res.ok ? 'success' : 'warning'
-          );
-        } catch {
-          toaster.show(
-            'Posted, but link not recorded — backfill manually',
-            'warning'
-          );
-        }
+      if (result?.ok && result.backfilled) {
+        toaster.show('Reply posted & link recorded!', 'success');
+      } else if (result?.ok && result.permalink) {
+        toaster.show(
+          'Posted, but link not recorded — backfill manually',
+          'warning'
+        );
       } else if (result?.ok) {
         toaster.show(
           'Reply posted. Add the link manually to enable metrics.',
@@ -613,6 +601,15 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
                 {sending ? 'Sending...' : 'Send Reply'}
               </button>
             </div>
+            {/* In-browser reply via the extension — the reliable path while the
+                X API reply tier is blocked. Posts as the user + auto-backfills. */}
+            <button
+              onClick={replyViaExtension}
+              disabled={!draft || overLimit || sending}
+              className="w-full py-2 text-sm bg-purple-600 hover:bg-purple-700 disabled:bg-gray-700 disabled:text-gray-500 text-white rounded-lg font-medium transition-colors"
+            >
+              Post via Postiz Extension
+            </button>
             {/* Schedule option */}
             <details className="text-xs text-gray-500">
               <summary className="cursor-pointer hover:text-gray-300 transition-colors">
@@ -659,13 +656,6 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
               <div className="mt-2 space-y-2">
                 {xManualStep === 'draft' ? (
                   <>
-                    <button
-                      onClick={replyViaExtension}
-                      disabled={!draft || sending}
-                      className="w-full py-2 text-sm bg-purple-600 hover:bg-purple-700 disabled:bg-gray-700 disabled:text-gray-500 text-white rounded-lg font-medium transition-colors"
-                    >
-                      Post via Postiz Extension
-                    </button>
                     <div className="flex items-center gap-2">
                       <button
                         onClick={copyDraft}

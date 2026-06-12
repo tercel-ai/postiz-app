@@ -12,11 +12,16 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
 
   // In-browser reply (Option A). payload: { platform, url, text, opportunityId? }
   if (request.action === 'postReply') {
+    console.log('[postiz] postReply received', request.payload);
     handlePostReply(request.payload)
-      .then(sendResponse)
-      .catch((e) =>
-        sendResponse({ ok: false, error: String(e?.message || e) })
-      );
+      .then((res) => {
+        console.log('[postiz] postReply result', res);
+        sendResponse(res);
+      })
+      .catch((e) => {
+        console.error('[postiz] postReply error', e);
+        sendResponse({ ok: false, error: String(e?.message || e) });
+      });
     return true;
   }
 

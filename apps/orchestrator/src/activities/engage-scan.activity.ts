@@ -772,7 +772,9 @@ export class EngageScanActivity {
       this.logger.warn(
         `X ${args.scanType} scan for "${args.scanKey}" skipped: token pool exhausted`
       );
-      await this._releaseCursor(cursor.id);
+      // Reset lastScanStartedAt so the cadence gate doesn't treat a skipped scan
+      // as a completed one — next tick will retry as soon as tokens are available.
+      await this._releaseCursor(cursor.id, { resetStartedAt: true });
       return { ran: false, posts: [] };
     }
 
@@ -881,10 +883,16 @@ export class EngageScanActivity {
     });
   }
 
-  private async _releaseCursor(id: string): Promise<void> {
+  private async _releaseCursor(
+    id: string,
+    opts: { resetStartedAt?: boolean } = {}
+  ): Promise<void> {
     await this._scanCursor.model.engageScanCursor.update({
       where: { id },
-      data: { status: 'IDLE' },
+      data: {
+        status: 'IDLE',
+        ...(opts.resetStartedAt && { lastScanStartedAt: null }),
+      },
     });
   }
 

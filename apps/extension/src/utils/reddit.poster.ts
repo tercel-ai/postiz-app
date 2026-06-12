@@ -38,6 +38,35 @@ export function resolveRedditThingId(url: string): string | null {
   return null;
 }
 
+/**
+ * Extract the new comment's permalink + fullname from a /api/comment response
+ * thing. Reddit's old endpoint returns one of TWO shapes:
+ *  - structured JSON: { name: 't1_xxx', permalink: '/r/.../xxx/' }
+ *  - HTML-render:     { id: 't1_xxx', content: '<div ... data-permalink="/r/.../xxx/" ...>' }
+ */
+export function parseRedditCommentThing(
+  thing: any
+): { permalink?: string; postId?: string } {
+  if (!thing) return {};
+
+  // fullname: structured uses `name`; HTML-render carries it in `id` (t1_…).
+  const postId: string | undefined = thing.name || thing.id || undefined;
+
+  let permalink: string | undefined;
+  if (typeof thing.permalink === 'string' && thing.permalink) {
+    permalink = `${REDDIT_BASE}${thing.permalink}`;
+  } else {
+    const html: string =
+      (typeof thing.content === 'string' && thing.content) ||
+      (typeof thing.contentHTML === 'string' && thing.contentHTML) ||
+      '';
+    const match = html.match(/data-permalink="([^"]+)"/);
+    if (match) permalink = `${REDDIT_BASE}${match[1]}`;
+  }
+
+  return { permalink, postId };
+}
+
 /** Read the logged-in user's modhash + username from the session cookie. */
 async function fetchRedditSession(): Promise<{ modhash: string; name: string }> {
   const res = await fetch(`${REDDIT_BASE}/api/me.json`, {
@@ -112,13 +141,12 @@ export async function postRedditComment(
     }
 
     const thing = data?.json?.data?.things?.[0]?.data;
-    const permalink = thing?.permalink
-      ? `${REDDIT_BASE}${thing.permalink}`
-      : undefined;
+    const { permalink, postId } = parseRedditCommentThing(thing);
 
     return {
       ok: true,
       permalink,
+      postId,
       message: 'Comment posted to Reddit.',
       detail: data,
     };

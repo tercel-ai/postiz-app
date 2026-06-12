@@ -132,11 +132,13 @@ export function installBrowserAssistedReplyBridge() {
  *   window.postMessage({
  *     source: 'postiz',
  *     action: 'postiz:engage-reply',
- *     payload: { platform: 'reddit', url, text, opportunityId }
+ *     payload: { platform, url, text, opportunityId, sentReplyId, backendBase }
  *   }, window.location.origin)
  *
- * The background performs the in-browser reply and we post the result back so
- * the page can show success and record the permalink.
+ * The background posts the reply in-browser and (when sentReplyId + backendBase
+ * are present) backfills the permalink onto the sent-reply record itself, so the
+ * loop completes without the page. We add frontendOrigin so the background knows
+ * which origin to read the auth cookie from.
  */
 export function installEngageReplyBridge() {
   window.addEventListener('message', async (event) => {
@@ -159,11 +161,25 @@ export function installEngageReplyBridge() {
       return;
     }
 
+    // Resolve the auth token from BOTH frontends: the aisee frontend keeps it in
+    // localStorage('access_token'); postiz's own frontend uses the httpOnly
+    // `auth` cookie (read in the background via frontendOrigin when absent here).
+    let token: string | undefined;
+    try {
+      token = window.localStorage.getItem('access_token') || undefined;
+    } catch {
+      token = undefined;
+    }
+
     let result: unknown;
     try {
       result = await chrome.runtime.sendMessage({
         action: 'postReply',
-        payload,
+        payload: {
+          ...payload,
+          token,
+          frontendOrigin: window.location.origin,
+        },
       });
     } catch (e: any) {
       result = { ok: false, error: String(e?.message || e) };

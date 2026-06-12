@@ -27,17 +27,41 @@ const replyHostPermissions = [
   'https://*.reddit.com/*',
 ];
 
+// Postiz BACKEND API origins the background fetches to backfill the reply URL
+// (token-authenticated, via the auth cookie). Background only — no content
+// script. Covers local + LAN dev + the aisee dev/prod APIs.
+const backendApiHosts = [
+  'http://localhost:3000/*',
+  'http://192.168.110.98:3000/*',
+  'https://api-post-dev.aisee.live/*',
+  'https://api-post.aisee.live/*',
+];
+
+// Postiz FRONTEND origins: the extension reads the `auth` cookie here AND runs
+// the engage bridge content script here (so the page can postMessage to the
+// extension). These need BOTH host_permissions and content_scripts.matches.
+const postizAppHosts = [
+  'https://app-dev.aisee.live/*',
+  'https://app.aisee.live/*',
+];
+
 export const baseManifest = {
   ...manifest,
   host_permissions: [
     ...providerMatches,
     ...replyHostPermissions,
+    ...backendApiHosts,
+    ...postizAppHosts,
     ...(frontendMatch ? [frontendMatch] : []),
   ],
   permissions: [...(manifest.permissions || []), 'scripting'],
   content_scripts: [
     {
-      matches: [...providerMatches, ...(frontendMatch ? [frontendMatch] : [])],
+      matches: [
+        ...providerMatches,
+        ...postizAppHosts,
+        ...(frontendMatch ? [frontendMatch] : []),
+      ],
       ...rest,
     },
   ],

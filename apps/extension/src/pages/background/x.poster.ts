@@ -15,6 +15,9 @@ import { ReplyResult } from '@gitroom/extension/utils/reply.types';
 export interface XReplyInput {
   url: string;
   text: string;
+  // When false, fill the composer but let the user click Reply on X.
+  // Defaults to true: the extension's submit IS the confirmation, so we send.
+  autoSubmit?: boolean;
 }
 
 /** Normalize any tweet URL to a canonical https://x.com/<user>/status/<id> form. */
@@ -66,10 +69,14 @@ function waitForTabComplete(tabId: number, timeoutMs: number): Promise<void> {
 
 /**
  * Runs INSIDE the x.com page (serialized by executeScript — must be fully
- * self-contained, no outer-scope references). Opens the reply composer if
- * needed, waits for it, and inserts the draft text. Returns true on success.
+ * self-contained, no outer-scope references). Opens the reply composer, fills
+ * the draft, and (when autoSubmit) clicks X's own Reply button so X's JS signs
+ * and sends the request. Returns 'sent' | 'filled' | 'not_found'.
  */
-function fillXReplyInPage(text: string): Promise<boolean> {
+function fillXReplyInPage(
+  text: string,
+  autoSubmit: boolean
+): Promise<'sent' | 'filled' | 'not_found'> {
   const findComposer = (): HTMLElement | null =>
     document.querySelector<HTMLElement>(
       '[data-testid="tweetTextarea_0"][contenteditable="true"]'
@@ -81,26 +88,26 @@ function fillXReplyInPage(text: string): Promise<boolean> {
       'div[role="textbox"][contenteditable="true"]'
     );
 
-  const waitFor = (
+  const findSendButton = (): HTMLElement | null =>
+    document.querySelector<HTMLElement>(
+      '[data-testid="tweetButtonInline"]'
+    ) ?? document.querySelector<HTMLElement>('[data-testid="tweetButton"]');
+
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  // Poll-based wait that also catches attribute changes (e.g. the send button
+  // flipping from aria-disabled="true" to enabled once text is present).
+  const waitFor = async (
     find: () => HTMLElement | null,
     timeoutMs: number
   ): Promise<HTMLElement | null> => {
-    const existing = find();
-    if (existing) return Promise.resolve(existing);
-    return new Promise((resolve) => {
-      const timeout = window.setTimeout(() => {
-        observer.disconnect();
-        resolve(null);
-      }, timeoutMs);
-      const observer = new MutationObserver(() => {
-        const el = find();
-        if (!el) return;
-        window.clearTimeout(timeout);
-        observer.disconnect();
-        resolve(el);
-      });
-      observer.observe(document.body, { childList: true, subtree: true });
-    });
+    const start = Date.now();
+    for (;;) {
+      const el = find();
+      if (el) return el;
+      if (Date.now() - start > timeoutMs) return null;
+      await sleep(150);
+    }
   };
 
   return (async () => {
@@ -112,7 +119,7 @@ function fillXReplyInPage(text: string): Promise<boolean> {
     }
 
     const composer = await waitFor(findComposer, 10_000);
-    if (!composer) return false;
+    if (!composer) return 'not_found';
 
     composer.focus();
     const selection = window.getSelection();
@@ -132,8 +139,116 @@ function fillXReplyInPage(text: string): Promise<boolean> {
         data: text,
       })
     );
-    return true;
+
+    if (!autoSubmit) return 'filled';
+
+    // Wait for the send button to exist AND become enabled, then click it.
+    const sendButton = await waitFor(() => {
+      const btn = findSendButton();
+      if (!btn) return null;
+      const disabled =
+        btn.getAttribute('aria-disabled') === 'true' ||
+        (btn as HTMLButtonElement).disabled === true;
+      return disabled ? null : btn;
+    }, 6_000);
+
+    if (!sendButton) return 'filled';
+
+    sendButton.click();
+    await sleep(1_500); // give X time to fire the request
+    return 'sent';
   })();
+}
+
+/**
+ * Runs in the page's MAIN world (so it can see X's own network calls). Patches
+ * window.fetch + XHR to capture the GraphQL CreateTweet response and stash the
+ * new tweet's rest_id + author screen_name on window.__postizCreatedTweet.
+ * Must be installed BEFORE the Reply button is clicked. Self-contained.
+ */
+function installCreateTweetInterceptor(): void {
+  const w = window as any;
+  if (w.__postizInterceptorInstalled) return;
+  w.__postizInterceptorInstalled = true;
+  w.__postizCreatedTweet = null;
+
+  const extract = (json: any) => {
+    try {
+      const r = json?.data?.create_tweet?.tweet_results?.result;
+      const restId = r?.rest_id || r?.legacy?.id_str;
+      const screenName =
+        r?.core?.user_results?.result?.legacy?.screen_name ||
+        r?.core?.user_results?.result?.core?.screen_name ||
+        '';
+      if (restId) {
+        w.__postizCreatedTweet = {
+          rest_id: String(restId),
+          screen_name: String(screenName),
+        };
+      }
+    } catch (e) {
+      /* ignore */
+    }
+  };
+
+  const origFetch = w.fetch;
+  w.fetch = function (...args: any[]) {
+    return origFetch.apply(this, args).then((res: Response) => {
+      try {
+        const first = args[0];
+        const url = typeof first === 'string' ? first : first?.url;
+        if (typeof url === 'string' && url.indexOf('CreateTweet') !== -1) {
+          res
+            .clone()
+            .json()
+            .then(extract)
+            .catch(() => {});
+        }
+      } catch (e) {
+        /* ignore */
+      }
+      return res;
+    });
+  };
+
+  const OrigOpen = XMLHttpRequest.prototype.open;
+  const OrigSend = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.open = function (this: any, ...a: any[]) {
+    this.__postizUrl = a[1];
+    return OrigOpen.apply(this, a as any);
+  };
+  XMLHttpRequest.prototype.send = function (this: any, ...a: any[]) {
+    this.addEventListener('load', function (this: any) {
+      try {
+        if (
+          typeof this.__postizUrl === 'string' &&
+          this.__postizUrl.indexOf('CreateTweet') !== -1
+        ) {
+          extract(JSON.parse(this.responseText));
+        }
+      } catch (e) {
+        /* ignore */
+      }
+    });
+    return OrigSend.apply(this, a as any);
+  };
+}
+
+/** Runs in MAIN world: poll for the captured tweet (~6s) and return it. */
+function readCapturedTweet(): Promise<{
+  rest_id: string;
+  screen_name: string;
+} | null> {
+  return new Promise((resolve) => {
+    const start = Date.now();
+    const tick = () => {
+      const v = (window as any).__postizCreatedTweet;
+      if (v && v.rest_id) return resolve(v);
+      if (Date.now() - start > 6_000) return resolve(null);
+      setTimeout(tick, 200);
+    };
+    tick();
+  });
 }
 
 export async function postXReply(input: XReplyInput): Promise<ReplyResult> {
@@ -141,6 +256,7 @@ export async function postXReply(input: XReplyInput): Promise<ReplyResult> {
   if (!text) return { ok: false, error: 'Reply text is empty' };
 
   const statusUrl = buildXStatusUrl(input.url);
+  console.log('[postiz][x] input url:', input.url, '→ statusUrl:', statusUrl);
   if (!statusUrl) {
     return { ok: false, error: 'Could not parse an X status URL from the input' };
   }
@@ -149,26 +265,69 @@ export async function postXReply(input: XReplyInput): Promise<ReplyResult> {
   try {
     const tab = await chrome.tabs.create({ url: statusUrl, active: true });
     tabId = tab.id ?? undefined;
+    console.log('[postiz][x] opened tab', tabId);
   } catch (e: any) {
+    console.error('[postiz][x] tabs.create failed', e);
     return { ok: false, error: `Failed to open X tab: ${e?.message || e}` };
   }
   if (tabId == null) return { ok: false, error: 'Failed to open X tab' };
 
   await waitForTabComplete(tabId, 15_000);
+  console.log('[postiz][x] tab load complete, injecting…');
+
+  const autoSubmit = input.autoSubmit !== false;
 
   try {
+    // 1) MAIN-world interceptor must be active before the Reply click fires the
+    //    CreateTweet request.
+    if (autoSubmit) {
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        world: 'MAIN',
+        func: installCreateTweetInterceptor,
+      });
+    }
+
+    // 2) Fill (+ click) in the ISOLATED world.
     const [injection] = await chrome.scripting.executeScript({
       target: { tabId },
       func: fillXReplyInPage,
-      args: [text],
+      args: [text, autoSubmit],
     });
+    const status = injection?.result;
+    console.log('[postiz][x] injection result:', status);
 
-    if (injection?.result) {
+    if (status === 'sent') {
+      // 3) Read the captured tweet id/permalink (MAIN world). Falls back to
+      //    undefined on timeout so the history row is still recorded.
+      let permalink: string | undefined;
+      let postId: string | undefined;
+      try {
+        const [cap] = await chrome.scripting.executeScript({
+          target: { tabId },
+          world: 'MAIN',
+          func: readCapturedTweet,
+        });
+        const captured = cap?.result;
+        if (captured?.rest_id) {
+          postId = captured.rest_id;
+          permalink = captured.screen_name
+            ? `https://x.com/${captured.screen_name}/status/${captured.rest_id}`
+            : `https://x.com/i/web/status/${captured.rest_id}`;
+        }
+        console.log('[postiz][x] captured tweet:', captured);
+      } catch (e) {
+        console.error('[postiz][x] capture read failed', e);
+      }
+      return { ok: true, message: 'Reply sent on X.', permalink, postId };
+    }
+    if (status === 'filled') {
       return {
         ok: true,
         pending: true,
-        message:
-          'Draft filled into the X reply box. Review it, then click Reply on X to send.',
+        message: autoSubmit
+          ? 'Draft filled but the Reply button stayed disabled — review and click Reply on X.'
+          : 'Draft filled into the X reply box. Review it, then click Reply on X to send.',
       };
     }
 
@@ -178,6 +337,7 @@ export async function postXReply(input: XReplyInput): Promise<ReplyResult> {
         'Opened the tweet but could not find the reply box (X DOM may have changed). Reply manually.',
     };
   } catch (e: any) {
+    console.error('[postiz][x] executeScript failed', e);
     return { ok: false, error: `X injection failed: ${e?.message || e}` };
   }
 }
