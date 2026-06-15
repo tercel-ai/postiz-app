@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { ComposeForm } from '@gitroom/extension/pages/popup/components/ComposeForm';
 import { HistoryList } from '@gitroom/extension/pages/popup/components/HistoryList';
 import { LoginForm } from '@gitroom/extension/pages/popup/components/LoginForm';
-import { AuthUser } from '@gitroom/extension/utils/auth.service';
+import { AuthUser, ACCESS_KEY } from '@gitroom/extension/utils/auth.service';
 import {
   appendHistory,
   clearHistory,
@@ -22,6 +22,23 @@ export default function Popup() {
       .sendMessage({ action: 'auth:state' })
       .then((r) => setUser(r?.user ?? null))
       .catch(() => setUser(null));
+
+    // Stay live while open: if the background clears or sets the bridged session
+    // after our initial snapshot (e.g. the content-script bridge pushes an empty
+    // token once a logging-out tab finishes navigating), reflect it immediately
+    // instead of waiting for another click.
+    const onSession = (
+      changes: { [k: string]: chrome.storage.StorageChange },
+      area: string
+    ) => {
+      if (area !== 'session' || !changes[ACCESS_KEY]) return;
+      const next = changes[ACCESS_KEY].newValue as
+        | { user?: AuthUser }
+        | undefined;
+      setUser(next?.user ?? null);
+    };
+    chrome.storage.onChanged.addListener(onSession);
+    return () => chrome.storage.onChanged.removeListener(onSession);
   }, []);
 
   const handleLogout = useCallback(async () => {

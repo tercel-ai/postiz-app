@@ -74,7 +74,7 @@ async function resolveAuthBase(): Promise<string> {
   return resolvedAuthBase;
 }
 
-const ACCESS_KEY = 'aisee_access'; // chrome.storage.session
+export const ACCESS_KEY = 'aisee_access'; // chrome.storage.session
 const REFRESH_ALARM = 'aisee-token-refresh';
 // 20 days — comfortably inside the 30-day refresh-token window, and each fire
 // rotates the refresh token so the session rolls forward while installed.

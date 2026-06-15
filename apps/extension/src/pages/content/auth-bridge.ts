@@ -94,13 +94,24 @@ export function installAuthBridge(): void {
     }
   };
 
-  // Extension-initiated logout asks the page to drop its token, then reloads.
   try {
-    chrome.runtime.onMessage.addListener((request) => {
+    chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
+      // Extension-initiated logout asks the page to drop its token, then reloads.
       if (request?.action === 'auth:clear') {
         clearPageToken();
         last = '';
+        return undefined; // sync, no response
       }
+      // Popup "check on open": the background asks this tab for its live page token
+      // (the SAME reader the bridge pushes with — reliable for the aisee
+      // localStorage `access_token` the background can't read itself) so a browser
+      // login/logout reflects when the user clicks the extension icon, without
+      // waiting for a focus/storage event or a page refresh.
+      if (request?.action === 'auth:read') {
+        sendResponse({ token: readPageToken() });
+        return true; // keep the message channel open for sendResponse
+      }
+      return undefined;
     });
   } catch {
     /* ignore */

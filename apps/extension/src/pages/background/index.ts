@@ -91,6 +91,87 @@ function logoutFrontendTabs(): void {
   }
 }
 
+// The exact origins where the auth bridge (bridge.ts) is injected, read from the
+// built manifest so the probe always targets the SAME tabs the bridge runs in.
+// `FRONTEND_TAB_MATCHES` above is a hand-maintained list used for reload/logout
+// nudges; it can drift from the build-time `content_scripts.matches` (which come
+// from `.env` FRONTEND_URL + postizAppHosts). Deriving the probe list from the
+// manifest avoids querying the wrong tab set (which would silently return "no
+// frontend tab" and leave a stale session).
+function bridgeTabMatches(): string[] {
+  try {
+    const cs = chrome.runtime.getManifest().content_scripts || [];
+    const bridge = cs.find((s) =>
+      (s.js || []).some((j) => /bridge/.test(j))
+    );
+    if (bridge?.matches?.length) return bridge.matches;
+  } catch {
+    /* fall through to the hand-maintained list */
+  }
+  return FRONTEND_TAB_MATCHES;
+}
+
+const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// One probe round: ask every open frontend tab's content-script auth bridge for
+// its live page session token (the aisee localStorage `access_token`, which the
+// background cannot read itself). The bridge answers with the SAME reader it
+// pushes with (`readPageToken`), so login and logout stay consistent — a direct
+// `executeScript` localStorage read proved unreliable here (it missed the
+// aisee-agent token and wrongly cleared the session).
+//
+// Resolves to: a non-empty token (logged in), '' (a tab answered logged-out),
+// 'no-tab' (no frontend tab open), or 'no-answer' (tabs open but none replied in
+// time — content script still loading, e.g. right after a logout redirect).
+type ProbeResult = string | 'no-tab' | 'no-answer';
+function probeOnce(): Promise<ProbeResult> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (v: ProbeResult) => {
+      if (settled) return;
+      settled = true;
+      resolve(v);
+    };
+    setTimeout(() => done('no-answer'), 300);
+    try {
+      chrome.tabs.query({ url: bridgeTabMatches() }, (tabs) => {
+        const list = (tabs || []).filter((t) => t.id != null);
+        if (!list.length) return done('no-tab');
+        let pending = list.length;
+        let sawEmpty = false;
+        for (const tab of list) {
+          chrome.tabs.sendMessage(tab.id!, { action: 'auth:read' }, (resp) => {
+            void chrome.runtime.lastError; // tab without the bridge / not loaded
+            const token = resp?.token;
+            if (typeof token === 'string' && token) return done(token); // logged in wins
+            if (resp && token === '') sawEmpty = true; // bridge answered: logged out
+            if (--pending === 0) done(sawEmpty ? '' : 'no-answer');
+          });
+        }
+      });
+    } catch {
+      done('no-answer');
+    }
+  });
+}
+
+// Reconcile the cached session with the live browser session by probing open
+// frontend tabs. Retries a few times when tabs are open but no bridge has
+// answered yet — right after a logout *redirect* the new page's content script
+// has not registered its `auth:read` handler on the first click, which otherwise
+// left the stale session until a second click. Retrying lets a single click
+// reflect the real state; the popup's session-storage listener is the final
+// backstop for anything that lands later.
+async function reconcileBrowserSession(): Promise<void> {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const r = await probeOnce();
+    if (r === 'no-tab') return; // nothing to reconcile against
+    if (r === '') return void (await bootstrapFromFrontendToken('')); // logged out
+    if (r !== 'no-answer') return void (await bootstrapFromFrontendToken(r)); // logged in
+    await delay(150); // tabs open but bridge not ready yet — let it load, retry
+  }
+}
+
 // Re-arm the 20-day token-refresh alarm on SW/browser startup (alarms are
 // cleared on extension reload/update) and run the silent refresh when it fires.
 chrome.runtime.onStartup?.addListener(() => void reArmRefreshAlarmIfLoggedIn());
@@ -127,7 +208,11 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
     return true;
   }
   if (request.action === 'auth:state') {
-    getAuthUser()
+    // Active re-check on popup open: reconcile the cache with the live browser
+    // session first, so a browser logout (or login) reflects on the next click
+    // without needing a page refresh.
+    reconcileBrowserSession()
+      .then(() => getAuthUser())
       .then((user) => sendResponse({ ok: true, user }))
       .catch(() => sendResponse({ ok: true, user: null }));
     return true;
