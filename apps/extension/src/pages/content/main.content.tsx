@@ -10,16 +10,14 @@ import {
 import { ProviderList } from '@gitroom/extension/providers/provider.list';
 import { createPortal } from 'react-dom';
 import { ActionComponent } from '@gitroom/extension/pages/content/elements/action.component';
-import { installEngageReplyBridge } from '@gitroom/extension/pages/content/browser-assisted-reply';
-import { installAuthBridge } from '@gitroom/extension/pages/content/auth-bridge';
 
 // Feature flag: the legacy in-page overlay modal (clicking X/LinkedIn's
 // post/reply button opens a Postiz scheduling iframe over the native composer).
 // Disabled because it does not work on X anyway — X's strict CSP blocks the
 // content script from injecting, and the http modal iframe is blocked by
 // mixed-content/frame-src on https sites — and it is unrelated to the reply
-// feature. Flip to true to re-enable. The reply bridges below are independent
-// of this flag and remain active.
+// feature. Flip to true to re-enable. The reply bridges run independently in
+// the CSS-free app content script.
 const ENABLE_INPAGE_MODAL = false;
 
 // Define a type to track elements with their action types
@@ -40,11 +38,6 @@ export const MainContentInner: FC = (props) => {
     return ProviderList.find((p) => {
       return p.baseUrl.indexOf(new URL(window.location.href).hostname) > -1;
     });
-  }, []);
-
-  useEffect(() => {
-    installEngageReplyBridge();
-    installAuthBridge();
   }, []);
 
   useEffect(() => {

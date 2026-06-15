@@ -15,7 +15,8 @@ const isDev = process.env.NODE_ENV === 'development';
 const localize = false;
 
 const merge = isDev ? devManifest : ({} as ManifestV3Export);
-const { matches, ...rest } = manifest?.content_scripts?.[0] || {};
+const { matches, ...providerContentScript } =
+  manifest?.content_scripts?.[0] || {};
 const frontendUrl = import.meta.env?.FRONTEND_URL || process?.env?.FRONTEND_URL;
 const frontendMatch = frontendUrl ? `${frontendUrl.replace(/\/$/, '')}/*` : undefined;
 const providerMatches = ProviderList.map((p) => `${p.baseUrl}/*`);
@@ -83,8 +84,12 @@ export const baseManifest = {
   permissions: [...(manifest.permissions || []), 'scripting', 'alarms'],
   content_scripts: [
     {
-      matches: uniq([...providerMatches, ...postizAppHosts, frontendMatch]),
-      ...rest,
+      matches: uniq(providerMatches),
+      ...providerContentScript,
+    },
+    {
+      matches: uniq([...postizAppHosts, frontendMatch]),
+      js: ['src/pages/content/bridge.ts'],
     },
   ],
   version: pkg.version,
