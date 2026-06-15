@@ -93,6 +93,10 @@ interface AccessState {
   accessToken: string;
   expiresAt: number; // unix seconds
   user?: AuthUser;
+  // True when bridged from a browser tab (content-script auth bridge / frontend
+  // cookie) rather than an explicit extension login. Such a session is dropped
+  // when the page logs out; an explicit login is not.
+  fromFrontend?: boolean;
 }
 
 /** SHA-1 hex of the raw password (the API contract). */
@@ -156,12 +160,95 @@ function decodeJwt(token: string): any {
   }
 }
 
-/** Minimal user derived from the access-token JWT (sub + email) — used when the
- *  session is bootstrapped from the shared refresh cookie (website login). */
+/** Minimal user derived from a session JWT — used when the session is
+ *  bootstrapped from a shared cookie rather than an explicit extension login.
+ *  Handles both token shapes:
+ *    - aisee access token: { sub, email, username }
+ *    - postiz `auth` cookie (signJWT(User)): { id, email, name }
+ *  Returns undefined when the payload carries no identity (so a foreign `auth`
+ *  cookie that merely happens to be a JWT is not mistaken for a session). */
 function deriveUserFromToken(token: string): AuthUser | undefined {
   const p = decodeJwt(token);
-  if (!p?.sub) return undefined;
-  return { id: String(p.sub), email: String(p.email || ''), username: p.username };
+  if (!p) return undefined;
+  const id = p.sub ?? p.id;
+  const email = p.email ?? '';
+  const username = p.username ?? p.name ?? p.displayName;
+  if (!id && !email && !username) return undefined;
+  return {
+    id: String(id ?? ''),
+    email: String(email),
+    username: username ? String(username) : undefined,
+  };
+}
+
+/**
+ * Frontend origins to probe for the `auth` cookie: every http(s) host the
+ * extension was granted (read from the manifest at runtime, so it tracks the
+ * baked host_permissions in dev and prod without a hardcoded list).
+ */
+function frontendCookieOrigins(): string[] {
+  try {
+    const hp = (chrome.runtime.getManifest().host_permissions || []) as string[];
+    return Array.from(
+      new Set(
+        hp
+          .map((p) => p.replace(/\*$/, '').replace(/\/$/, ''))
+          .filter((o) => /^https?:\/\//.test(o))
+      )
+    );
+  } catch {
+    return [];
+  }
+}
+
+/** Read the `auth` cookie at an explicit origin URL (with port). */
+function getAuthCookie(url: string): Promise<string | undefined> {
+  return new Promise((resolve) => {
+    try {
+      chrome.cookies.get({ url, name: 'auth' }, (c) => {
+        void chrome.runtime.lastError;
+        resolve(c?.value || undefined);
+      });
+    } catch {
+      resolve(undefined);
+    }
+  });
+}
+
+/**
+ * Browser→extension login bridge: derive a session from a frontend `auth`
+ * cookie. Logging into apps/frontend (postiz) proxies to aisee_auth server-side,
+ * so the browser only receives the postiz `auth` cookie — never the aisee_auth
+ * refresh_token cookie. The popup must recognise that cookie as a live session,
+ * exactly as the in-browser reply flow already does.
+ *
+ * IMPORTANT: probes each granted origin with `cookies.get({url})` rather than
+ * `cookies.getAll({name})`. Host permissions carry a PORT (e.g. :4200) while
+ * cookies are portless, so getAll cannot reconcile the two and silently returns
+ * nothing for IP/port origins — whereas get({url}) matches by the full URL and
+ * works (the reply backfill relies on the same call). NOT persisted by the
+ * caller, so a browser logout reflects immediately.
+ */
+async function readFrontendAuthSession(): Promise<AccessState | null> {
+  const now = Math.floor(Date.now() / 1000);
+  for (const origin of frontendCookieOrigins()) {
+    const value = await getAuthCookie(origin);
+    if (!value) continue;
+    const user = deriveUserFromToken(value);
+    if (!user) continue; // not an aisee/postiz session JWT
+    // postiz signJWT(User) carries no `exp` → rely on cookie presence; the aisee
+    // access token does carry `exp`.
+    const claims = decodeJwt(value);
+    const exp = Number(claims?.exp) || 0;
+    if (exp && exp - now <= EXPIRY_SKEW_SECONDS) continue; // expired token
+    alog('frontend auth cookie → session', {
+      origin,
+      who: user.email || user.username || user.id,
+    });
+    return { accessToken: value, expiresAt: exp || now + 3600, user };
+  }
+  alog('readFrontendAuthSession: no aisee/postiz `auth` cookie on any granted origin');
+  return null;
 }
 
 // Defensive: accept {access_data:{access_token,expires_at}} or {access_token,expires_at}.
@@ -264,32 +351,127 @@ async function refresh(): Promise<string | null> {
   return refreshing;
 }
 
-/** A non-expired access token, refreshing silently if needed. null = re-login. */
-export async function getValidAccessToken(): Promise<string | null> {
+/**
+ * Resolve the current session, bootstrapping from the browser where possible so
+ * that logging in on EITHER side logs in both. Resolution order:
+ *   1. A non-expired locally-cached session (explicit extension login / a prior
+ *      refresh).
+ *   2. A silent refresh against the shared aisee_auth refresh_token cookie
+ *      (aisee-app login sets this client-side). Persisted by refresh().
+ *   3. A frontend `auth` cookie (postiz apps/frontend login sets only this).
+ *      Deliberately NOT persisted, so a browser logout reflects immediately.
+ * Returns null only when there is no session on any of these — i.e. genuinely
+ * logged out everywhere.
+ */
+async function resolveSession(): Promise<AccessState | null> {
   const cur = await loadAccess();
   const now = Math.floor(Date.now() / 1000);
   if (cur?.accessToken && cur.expiresAt - now > EXPIRY_SKEW_SECONDS) {
-    alog('getValidAccessToken: cached token still valid', cur.expiresAt - now, 's left');
-    return cur.accessToken;
+    alog('resolveSession: cached token still valid', cur.expiresAt - now, 's left');
+    return cur;
   }
-  alog('getValidAccessToken: stale/absent → refresh', { has: !!cur?.accessToken, expiresAt: cur?.expiresAt, now });
-  return refresh();
+  alog('resolveSession: stale/absent → refresh', {
+    has: !!cur?.accessToken,
+    expiresAt: cur?.expiresAt,
+    now,
+  });
+  if (await refresh()) {
+    const after = await loadAccess();
+    if (after?.accessToken) return after;
+  }
+  // Last resort: the postiz frontend session cookie (browser→extension bridge).
+  return readFrontendAuthSession();
+}
+
+/** A non-expired access token, refreshing silently if needed. null = re-login. */
+export async function getValidAccessToken(): Promise<string | null> {
+  return (await resolveSession())?.accessToken ?? null;
 }
 
 /**
- * Current logged-in user (or null), for the popup to render login state. This
- * BOOTSTRAPS from the shared refresh_token cookie: if there's no local session
- * but the user logged in on the website (shared `.aisee.live` cookie), a silent
- * refresh establishes the extension session too — so login on either side logs
- * in both.
+ * Current logged-in user (or null), for the popup to render login state. Shares
+ * resolveSession() with getValidAccessToken so the popup reflects a browser
+ * login made on either frontend (aisee-app via the refresh cookie, or postiz
+ * apps/frontend via the `auth` cookie) without a separate extension login.
  */
 export async function getAuthUser(): Promise<AuthUser | null> {
-  const token = await getValidAccessToken();
-  if (!token) return null;
-  return (await loadAccess())?.user ?? null;
+  return (await resolveSession())?.user ?? null;
 }
 
-/** Log out: revoke server-side, clear the cookie, token, and refresh alarm. */
+/**
+ * Browser→extension bootstrap from a page token pushed by the content-script
+ * auth bridge — the aisee localStorage `access_token` (which the background
+ * cannot read itself) or the postiz `auth` cookie. Lets the popup reflect a
+ * browser login that never established an extension session of its own. An empty
+ * token means the page logged out → drop a previously bridged session (but never
+ * an explicit extension login, which has its own refresh-token-backed session).
+ */
+export async function bootstrapFromFrontendToken(token?: string): Promise<void> {
+  const cur = await loadAccess();
+  const now = Math.floor(Date.now() / 1000);
+
+  if (!token) {
+    if (cur?.fromFrontend) {
+      alog('bootstrap: page logged out → clearing bridged session');
+      await clearAccess();
+    }
+    return;
+  }
+
+  const user = deriveUserFromToken(token);
+  if (!user) {
+    alog('bootstrap: token has no identity claims → ignored');
+    return;
+  }
+  const claims = decodeJwt(token);
+  const exp = Number(claims?.exp) || 0;
+  if (exp && exp - now <= EXPIRY_SKEW_SECONDS) {
+    alog('bootstrap: token expired → ignored');
+    return;
+  }
+  // Never clobber a live explicit extension login.
+  if (
+    cur?.accessToken &&
+    !cur.fromFrontend &&
+    cur.expiresAt - now > EXPIRY_SKEW_SECONDS
+  ) {
+    return;
+  }
+  alog('bootstrap: bridged frontend session', {
+    who: user.email || user.username || user.id,
+  });
+  await saveAccess({
+    accessToken: token,
+    expiresAt: exp || now + 3600,
+    user,
+    fromFrontend: true,
+  });
+}
+
+/**
+ * Clear the frontend `auth` session cookie on every granted origin so a popup
+ * logout actually ends the browser session — otherwise the next popup open would
+ * re-detect the still-present cookie and show logged-in again. Uses the same
+ * explicit-origin probe as readFrontendAuthSession (getAll misses port origins),
+ * and only removes cookies that decode to OUR session JWT. */
+async function clearFrontendAuthCookies(): Promise<void> {
+  for (const origin of frontendCookieOrigins()) {
+    const value = await getAuthCookie(origin);
+    if (!value || !deriveUserFromToken(value)) continue; // not ours — leave it
+    await new Promise<void>((resolve) => {
+      try {
+        chrome.cookies.remove({ url: origin, name: 'auth' }, () => {
+          void chrome.runtime.lastError;
+          resolve();
+        });
+      } catch {
+        resolve();
+      }
+    });
+  }
+}
+
+/** Log out: revoke server-side, clear the cookies, token, and refresh alarm. */
 export async function logout(): Promise<void> {
   const base = await resolveAuthBase();
   alog('logout: revoking at', base);
@@ -313,6 +495,9 @@ export async function logout(): Promise<void> {
       resolve();
     }
   });
+  // Also drop the postiz frontend `auth` cookie(s) so the popup's cookie-based
+  // bootstrap doesn't immediately resurrect the session after logout.
+  await clearFrontendAuthCookies();
   await clearAccess();
   await chrome.alarms.clear(REFRESH_ALARM);
 }

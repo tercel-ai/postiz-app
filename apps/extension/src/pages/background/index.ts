@@ -4,6 +4,7 @@ import {
   login,
   logout,
   getAuthUser,
+  bootstrapFromFrontendToken,
   handleAuthAlarm,
   reArmRefreshAlarmIfLoggedIn,
 } from '@gitroom/extension/utils/auth.service';
@@ -69,10 +70,20 @@ function logoutFrontendTabs(): void {
   try {
     chrome.tabs.query({ url: FRONTEND_TAB_MATCHES }, (tabs) => {
       for (const tab of tabs || []) {
-        if (tab.id) {
+        if (!tab.id) continue;
+        // Ask the content-script auth bridge to drop the page's session token
+        // (aisee localStorage `access_token` / non-httpOnly `auth` cookie) so the
+        // reload below lands logged-out instead of re-bootstrapping the session.
+        try {
+          chrome.tabs.sendMessage(tab.id, { action: 'auth:clear' }, () => {
+            // Swallow "no receiver" for tabs without the content script.
+            void chrome.runtime.lastError;
+            chrome.tabs.reload(tab.id!);
+          });
+        } catch {
           chrome.tabs.reload(tab.id);
-          console.log('[aisee-auth] logout-reloading frontend tab', tab.id);
         }
+        console.log('[aisee-auth] logout-reloading frontend tab', tab.id);
       }
     });
   } catch (e) {
@@ -119,6 +130,15 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
     getAuthUser()
       .then((user) => sendResponse({ ok: true, user }))
       .catch(() => sendResponse({ ok: true, user: null }));
+    return true;
+  }
+  // Content-script auth bridge: a frontend tab pushes its current page token
+  // (aisee localStorage `access_token` or postiz `auth` cookie) so the popup
+  // reflects the browser login; an empty token means the page logged out.
+  if (request.action === 'auth:bootstrap') {
+    bootstrapFromFrontendToken(request.token)
+      .then(() => sendResponse({ ok: true }))
+      .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
     return true;
   }
 
