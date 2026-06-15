@@ -202,6 +202,62 @@ export class AuthService {
     return { addedOrg, jwt: accessToken };
   }
 
+  /**
+   * SSO bootstrap: given the aisee_auth refresh_token (from the shared cookie),
+   * fetch a fresh access token via the sso's non-rotating `GET /access-token`,
+   * lazily ensure the local user/org exists (the extension logs in to the sso
+   * directly and never created a postiz user), and return the access token to be
+   * set as the `auth` cookie. Used by `POST /auth/token-refresh` so a session
+   * established on the extension (or another aisee app) also logs the user into
+   * apps/frontend. Non-rotating, so it doesn't disturb the shared refresh cookie.
+   */
+  async refreshSession(refreshToken: string): Promise<{ jwt: string }> {
+    const result = await this._ssoClient.accessToken(refreshToken);
+    const accessToken = result.access_data.access_token;
+
+    // user id/email: prefer the sso payload, else decode the access-token JWT.
+    let ssoUserId = result.user?.id;
+    let email = result.user?.email;
+    if (!ssoUserId) {
+      const claims = this.decodeJwtClaims(accessToken);
+      ssoUserId = claims?.sub;
+      email = email || claims?.email;
+    }
+
+    if (ssoUserId) {
+      const localUser = await this._userService.getUserById(ssoUserId);
+      if (!localUser) {
+        this.logger.warn(
+          `Local user not found during sso bootstrap (id=${ssoUserId}), creating lazily`
+        );
+        await this._organizationService.createOrgAndUserWithId(
+          ssoUserId,
+          email || `${ssoUserId}@sso.local`
+        );
+      }
+    }
+
+    return { jwt: accessToken };
+  }
+
+  /** Decode a JWT payload without verifying (it was already signed by the sso). */
+  private decodeJwtClaims(
+    token: string
+  ): { sub?: string; email?: string } | null {
+    try {
+      const part = token.split('.')[1];
+      if (!part) return null;
+      const json = Buffer.from(
+        part.replace(/-/g, '+').replace(/_/g, '/'),
+        'base64'
+      ).toString('utf8');
+      const obj = JSON.parse(json);
+      return { sub: obj.sub, email: obj.email };
+    } catch {
+      return null;
+    }
+  }
+
   public getOrgFromCookie(cookie?: string) {
     if (!cookie) {
       return false;

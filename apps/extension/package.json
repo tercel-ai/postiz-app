@@ -1,11 +1,15 @@
 {
   "name": "aisee-extension",
   "version": "1.0.3",
+  "private": true,
   "description": "A simple chrome & firefox extension template with Vite, React, TypeScript and Tailwind CSS.",
   "scripts": {
     "build": "rm -rf dist && vite build --config vite.config.chrome.ts && zip -r extension.zip dist",
     "build:chrome": "vite build --config vite.config.chrome.ts",
     "build:firefox": "vite build --config vite.config.firefox.ts",
+    "build:prod": "rm -rf dist extension.zip && cross-env EXTENSION_ENV=production FRONTEND_URL=https://app.aisee.live NEXT_PUBLIC_BACKEND_URL=https://api-post.aisee.live AUTH_URL=https://api-auth.aisee.live vite build --config vite.config.chrome.ts && zip -r extension.zip dist",
+    "pack-ext": "bash scripts/pack.sh",
+    "prepack": "echo '\\n[aisee-extension] Do NOT use \"npm pack\" — it ships unbuilt source (no manifest version, wont Load unpacked). Run: npm run pack-ext\\n' && exit 1",
     "dev": "rm -rf dist && dotenv -e ../../.env -- vite build --config vite.config.chrome.ts --mode development --watch",
     "dev:chrome": "nodemon --config nodemon.chrome.json",
     "dev:firefox": "nodemon --config nodemon.firefox.json"

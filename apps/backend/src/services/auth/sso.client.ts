@@ -103,6 +103,37 @@ export class SsoClient {
     return data;
   }
 
+  /**
+   * Exchange a refresh_token for a fresh access token via the sso's
+   * `GET /access-token`. Unlike `/token-refresh`, this does NOT rotate the
+   * refresh token — important because the refresh_token cookie is shared (the
+   * browser extension reads the same host-only cookie), so rotating here would
+   * invalidate the token the extension is still using. The sso reads the token
+   * from the Cookie header only.
+   */
+  async accessToken(refreshToken: string): Promise<SSOTokenResponse> {
+    const url = `${this.getBaseUrl()}/access-token`;
+    this.logger.log('Fetching access token via sso (non-rotating)');
+
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+        Cookie: `refresh_token=${refreshToken}`,
+      },
+    });
+
+    const data = await res.json();
+
+    if (!res.ok || !data.success) {
+      const detail =
+        data.detail || data.message || 'Access token fetch failed at sso';
+      throw new Error(detail);
+    }
+
+    return data;
+  }
+
   async logout(refreshToken: string): Promise<void> {
     const url = `${this.getBaseUrl()}/logout`;
     this.logger.log('Logging out via sso');

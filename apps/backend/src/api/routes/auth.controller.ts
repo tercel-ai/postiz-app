@@ -177,6 +177,51 @@ export class AuthController {
     }
   }
 
+  // SSO bootstrap: exchange the shared aisee_auth refresh_token cookie for a
+  // fresh `auth` cookie, so a session established on the extension (or another
+  // aisee app) also logs the user into apps/frontend. Called by the frontend
+  // middleware when there's a refresh_token cookie but no `auth` cookie yet.
+  // Non-rotating (uses the sso's GET /access-token), so the shared refresh
+  // cookie the extension relies on is left untouched.
+  @Post('/token-refresh')
+  async tokenRefresh(
+    @Req() req: Request,
+    @Body() body: { refresh_token?: string },
+    @Res({ passthrough: false }) response: Response
+  ) {
+    try {
+      const refreshToken = req?.cookies?.refresh_token || body?.refresh_token;
+      if (!refreshToken) {
+        response.status(401).json({ refreshed: false });
+        return;
+      }
+
+      const { jwt } = await this._authService.refreshSession(refreshToken);
+
+      response.cookie('auth', jwt, {
+        domain: getCookieUrlFromDomain(process.env.FRONTEND_URL!),
+        ...(!process.env.NOT_SECURED
+          ? {
+              secure: true,
+              httpOnly: true,
+              sameSite: 'none',
+            }
+          : {}),
+        expires: new Date(Date.now() + 1000 * 60 * 60 * 24 * 365),
+      });
+
+      if (process.env.NOT_SECURED) {
+        response.header('auth', jwt);
+      }
+
+      // The frontend middleware sets the cookie itself from this value (it can't
+      // forward a Set-Cookie from an internal fetch), so echo the token back.
+      response.status(200).json({ refreshed: true, auth: jwt });
+    } catch (e: any) {
+      response.status(401).json({ refreshed: false, error: e.message });
+    }
+  }
+
   @Post('/forgot')
   async forgot(@Body() body: ForgotPasswordDto) {
     try {

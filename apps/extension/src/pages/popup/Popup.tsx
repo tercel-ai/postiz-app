@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { ComposeForm } from '@gitroom/extension/pages/popup/components/ComposeForm';
 import { HistoryList } from '@gitroom/extension/pages/popup/components/HistoryList';
+import { LoginForm } from '@gitroom/extension/pages/popup/components/LoginForm';
+import { AuthUser } from '@gitroom/extension/utils/auth.service';
 import {
   appendHistory,
   clearHistory,
@@ -12,6 +14,20 @@ import {
 
 export default function Popup() {
   const [history, setHistory] = useState<ReplyHistoryItem[]>([]);
+  // undefined = checking, null = logged out, object = logged in
+  const [user, setUser] = useState<AuthUser | null | undefined>(undefined);
+
+  useEffect(() => {
+    chrome.runtime
+      .sendMessage({ action: 'auth:state' })
+      .then((r) => setUser(r?.user ?? null))
+      .catch(() => setUser(null));
+  }, []);
+
+  const handleLogout = useCallback(async () => {
+    await chrome.runtime.sendMessage({ action: 'auth:logout' });
+    setUser(null);
+  }, []);
 
   useEffect(() => {
     loadHistory().then(setHistory);
@@ -41,16 +57,54 @@ export default function Popup() {
     setHistory(next);
   }, []);
 
+  if (user === undefined) return null; // still checking auth
+
   return (
     <div className="pz">
       <div className="pz-header">
         <div className="pz-logo">A</div>
         <div className="pz-title">Aisee · Reply</div>
-        <div className="pz-sub">in-browser</div>
+        {user ? (
+          <div
+            style={{
+              marginLeft: 'auto',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              minWidth: 0,
+            }}
+          >
+            <span
+              className="pz-sub"
+              title={user.email}
+              style={{
+                marginLeft: 0,
+                maxWidth: 160,
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {user.username || user.email}
+            </span>
+            <button className="pz-clear-btn" onClick={handleLogout}>
+              Log out
+            </button>
+          </div>
+        ) : (
+          <div className="pz-sub">in-browser</div>
+        )}
       </div>
-      <ComposeForm onSubmitted={handleSubmitted} />
-      <div className="pz-divider" />
-      <HistoryList items={history} onClear={handleClear} />
+
+      {user ? (
+        <>
+          <ComposeForm onSubmitted={handleSubmitted} />
+          <div className="pz-divider" />
+          <HistoryList items={history} onClear={handleClear} />
+        </>
+      ) : (
+        <LoginForm onLoggedIn={setUser} />
+      )}
     </div>
   );
 }

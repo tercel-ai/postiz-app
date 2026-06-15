@@ -4,6 +4,7 @@
 import { postRedditComment } from '@gitroom/extension/utils/reddit.poster';
 import { postXReply } from './x.poster';
 import { PostReplyPayload, ReplyResult } from '@gitroom/extension/utils/reply.types';
+import { getValidAccessToken } from '@gitroom/extension/utils/auth.service';
 
 async function postByPlatform(payload: PostReplyPayload): Promise<ReplyResult> {
   switch (payload.platform) {
@@ -39,12 +40,16 @@ async function backfillReplyUrl(
   const base = payload.backendBase?.replace(/\/$/, '');
   if (!base || !payload.sentReplyId) return false;
 
-  // Prefer the token the page passed (aisee frontend: localStorage access_token);
-  // otherwise fall back to the postiz `auth` cookie on the frontend origin.
+  // Token priority:
+  //  1) token the page passed (aisee frontend: localStorage access_token)
+  //  2) the extension's own logged-in session (works with NO website open)
+  //  3) the postiz `auth` cookie on the frontend origin (legacy)
   const token =
-    payload.token || (await readAuthToken(payload.frontendOrigin || ''));
+    payload.token ||
+    (await getValidAccessToken()) ||
+    (await readAuthToken(payload.frontendOrigin || ''));
   if (!token) {
-    console.warn('[aisee] backfill skipped: no token (localStorage or cookie)');
+    console.warn('[aisee] backfill skipped: no token (page / login / cookie)');
     return false;
   }
 

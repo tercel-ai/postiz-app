@@ -20,6 +20,12 @@ const frontendUrl = import.meta.env?.FRONTEND_URL || process?.env?.FRONTEND_URL;
 const frontendMatch = frontendUrl ? `${frontendUrl.replace(/\/$/, '')}/*` : undefined;
 const providerMatches = ProviderList.map((p) => `${p.baseUrl}/*`);
 
+// Production store build (EXTENSION_ENV=production, via `npm run build:prod`)
+// ships ONLY production origins — no localhost / LAN / dev hosts, which would
+// otherwise read as suspicious during Chrome Web Store review and serve no
+// purpose in a released build.
+const isProdRelease = process.env.EXTENSION_ENV === 'production';
+
 // Hosts the background fetches directly (with the user's session cookies) to
 // post in-browser replies. No content script runs on these — background only.
 const replyHostPermissions = [
@@ -27,41 +33,57 @@ const replyHostPermissions = [
   'https://*.reddit.com/*',
 ];
 
-// Postiz BACKEND API origins the background fetches to backfill the reply URL
-// (token-authenticated, via the auth cookie). Background only — no content
-// script. Covers local + LAN dev + the aisee dev/prod APIs.
-const backendApiHosts = [
-  'http://localhost:3000/*',
-  'http://192.168.110.98:3000/*',
-  'https://api-post-dev.aisee.live/*',
-  'https://api-post.aisee.live/*',
-];
+// Backend API origins the background fetches to backfill the reply URL
+// (token-authenticated). Background only — no content script.
+const backendApiHosts = isProdRelease
+  ? ['https://api-post.aisee.live/*']
+  : [
+      'http://localhost:3000/*',
+      'http://192.168.110.98:3000/*',
+      'https://api-post-dev.aisee.live/*',
+      'https://api-post.aisee.live/*',
+    ];
 
-// Postiz FRONTEND origins: the extension reads the `auth` cookie here AND runs
-// the engage bridge content script here (so the page can postMessage to the
+// aisee_auth origins the background calls for login / token-refresh / logout,
+// and reads the refresh_token cookie from. Background only.
+const authHosts = isProdRelease
+  ? ['https://api-auth.aisee.live/*']
+  : [
+      'http://localhost:9001/*',
+      'http://192.168.110.98:9001/*',
+      'https://api-auth-dev.aisee.live/*',
+      'https://api-auth.aisee.live/*',
+    ];
+
+// Frontend (web app) origins: the extension reads the `auth` cookie here AND
+// runs the engage bridge content script here (so the page can postMessage to the
 // extension). These need BOTH host_permissions and content_scripts.matches.
-const postizAppHosts = [
-  'https://app-dev.aisee.live/*',
-  'https://app.aisee.live/*',
-];
+const postizAppHosts = isProdRelease
+  ? ['https://app.aisee.live/*']
+  : [
+      'http://localhost:3001/*', // aisee-agent local dev (3001 to avoid the postiz backend on :3000)
+      'https://app-dev.aisee.live/*',
+      'https://app.aisee.live/*',
+    ];
+
+// dedupe — app.aisee.live can appear via both postizAppHosts and frontendMatch.
+const uniq = (arr: (string | undefined)[]) =>
+  Array.from(new Set(arr.filter((v): v is string => !!v)));
 
 export const baseManifest = {
   ...manifest,
-  host_permissions: [
+  host_permissions: uniq([
     ...providerMatches,
     ...replyHostPermissions,
     ...backendApiHosts,
+    ...authHosts,
     ...postizAppHosts,
-    ...(frontendMatch ? [frontendMatch] : []),
-  ],
-  permissions: [...(manifest.permissions || []), 'scripting'],
+    frontendMatch,
+  ]),
+  permissions: [...(manifest.permissions || []), 'scripting', 'alarms'],
   content_scripts: [
     {
-      matches: [
-        ...providerMatches,
-        ...postizAppHosts,
-        ...(frontendMatch ? [frontendMatch] : []),
-      ],
+      matches: uniq([...providerMatches, ...postizAppHosts, frontendMatch]),
       ...rest,
     },
   ],
@@ -82,7 +104,7 @@ export const baseBuildOptions: BuildOptions = {
 };
 
 export default defineConfig({
-  envPrefix: ['NEXT_PUBLIC_', 'FRONTEND_URL'],
+  envPrefix: ['NEXT_PUBLIC_', 'FRONTEND_URL', 'AUTH_URL', 'EXTENSION_ENV'],
   plugins: [
     tailwindcss(),
     tsconfigPaths(),

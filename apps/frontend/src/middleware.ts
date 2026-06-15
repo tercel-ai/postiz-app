@@ -62,6 +62,53 @@ export async function middleware(request: NextRequest) {
     return response;
   }
 
+  // SSO bootstrap: a session may already exist via the shared aisee_auth
+  // refresh_token cookie (set by the browser extension or another aisee app)
+  // without a postiz `auth` cookie yet. Mint one from it so login on any surface
+  // logs the user into apps/frontend too. Uses the backend's non-rotating
+  // exchange, so it does NOT disturb the refresh cookie the extension relies on.
+  const refreshToken = request.cookies.get('refresh_token')?.value;
+  if (
+    !authCookie &&
+    refreshToken &&
+    !nextUrl.searchParams.has('_ssob')
+  ) {
+    // Runs on /auth pages too: if a login tab is reloaded (e.g. the extension
+    // just logged in and refreshed it) and a refresh_token cookie exists, mint
+    // `auth` and let the user in instead of leaving them on the login screen.
+    try {
+      const backend =
+        process.env.BACKEND_INTERNAL_URL || process.env.NEXT_PUBLIC_BACKEND_URL;
+      const res = await fetch(`${backend}/auth/token-refresh`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Cookie: `refresh_token=${refreshToken}`,
+        },
+      });
+      if (res.ok) {
+        const data: any = await res.json().catch(() => ({}));
+        if (data?.auth) {
+          // One-shot guard (`_ssob`) so a cookie that fails to stick can't loop.
+          const dest = new URL(nextUrl.href);
+          dest.searchParams.set('_ssob', '1');
+          const redirect = NextResponse.redirect(dest);
+          redirect.cookies.set('auth', data.auth, {
+            path: '/',
+            ...(!process.env.NOT_SECURED
+              ? { secure: true, httpOnly: true, sameSite: false }
+              : {}),
+            domain: getCookieUrlFromDomain(process.env.FRONTEND_URL!),
+            expires: new Date(Date.now() + 1000 * 60 * 60 * 24 * 365),
+          });
+          return redirect;
+        }
+      }
+    } catch {
+      /* bootstrap failed — fall through to the normal /auth redirect */
+    }
+  }
+
   const org = nextUrl.searchParams.get('org');
   const url = new URL(nextUrl).search;
   if (nextUrl.href.indexOf('/auth') === -1 && !authCookie) {
