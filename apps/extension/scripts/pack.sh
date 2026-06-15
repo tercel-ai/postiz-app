@@ -35,24 +35,24 @@ npx dotenv -e "$ENV_FILE" -- vite build --config vite.config.chrome.ts
 
 VERSION="$(node -p "require('./package.json').version")"
 STAMP="$(date +%Y%m%d-%H%M)"
-FOLDER="aisee-extension-v${VERSION}"
-OUT="${FOLDER}-${STAMP}.zip"
+OUT="aisee-extension-v${VERSION}-${STAMP}.zip"
 
-# Zip a named copy of dist/ so the unzipped folder is clearly labelled (Load
-# unpacked needs a folder, not the zip itself).
-rm -rf "$FOLDER" "$OUT"
-cp -r dist "$FOLDER"
-zip -rq "$OUT" "$FOLDER"
-rm -rf "$FOLDER"
+# Zip the CONTENTS of dist/ so manifest.json sits at the archive root. Chrome's
+# built-in ZipFileInstaller (chrome://extensions drag-drop, Developer mode on)
+# unzips to a temp dir and expects manifest.json at the top level — a wrapping
+# folder makes it fail with "Could not unzip extension for install".
+rm -f "$OUT"
+( cd dist && zip -rqX "../$OUT" . )
 
 echo ""
 echo "✅ $(pwd)/$OUT"
 echo ""
-echo "⚠️  只发这个 zip(里面是构建好的 dist)。别用 'npm pack' 的 tgz —"
-echo "    那是源码包,解压成 package/ 文件夹、manifest 没 version,装不了。"
+echo "⚠️  只发这个 zip(里面是构建好的 dist,manifest.json 在根目录)。别用"
+echo "    'npm pack' 的 tgz — 那是源码包,解压成 package/、manifest 没 version,装不了。"
 echo ""
-echo "发给同事,让他:"
-echo "  1) 解压 $OUT(得到文件夹 $FOLDER)"
-echo "  2) 打开 chrome://extensions,右上角开启「开发者模式」"
-echo "  3) 点「加载已解压的扩展程序」,选 $FOLDER 文件夹"
-echo "  4) 用 ${FRONTEND:-该前端地址} 登录后即可使用(需能访问对应后端)"
+echo "发给同事,让他【免解压】直接装:"
+echo "  1) 打开 chrome://extensions,右上角开启「开发者模式」(必须先开)"
+echo "  2) 把 $OUT 直接拖到该页面 → Chrome 自动解包安装"
+echo "  3) 用 ${FRONTEND:-该前端地址} 登录后即可使用(需能访问对应后端)"
+echo ""
+echo "  (兜底:若某版本 Chrome 不支持拖 zip,则解压后用「加载已解压的扩展程序」选文件夹)"
