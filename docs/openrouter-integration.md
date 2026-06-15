@@ -20,6 +20,10 @@ OPENROUTER_IMAGE_MODEL="google/gemini-3.1-flash-image-preview"
 
 # Model for text generation — post creation, prompt enhancement, etc. (default: openai/gpt-5.1)
 OPENROUTER_TEXT_MODEL="openai/gpt-5.1"
+
+# Fallback used by Engage draft generation when the selected model is unavailable
+# in the server's region (default: openrouter/auto)
+OPENROUTER_TEXT_FALLBACK_MODEL="openrouter/auto"
 ```
 
 ## Configuration Scenarios
@@ -125,5 +129,6 @@ As part of this integration, a bug was fixed in both `LocalStorage` and `Cloudfl
 | `OPENROUTER_API_KEY is required...` | Set `OPENROUTER_API_KEY` in your `.env` when using `IMAGE_PROVIDER=openrouter` |
 | `OpenRouter image generation failed (401)` | Check your API key is valid and has credits |
 | `OpenRouter response did not contain an image` | Your `OPENROUTER_IMAGE_MODEL` may not support image generation. Use a model with `modalities: ["image"]` support. |
+| `This model is not available in your region` | Engage draft generation retries with `OPENROUTER_TEXT_FALLBACK_MODEL` (default: `openrouter/auto`). Set it to a specific region-available model if needed. |
 | `generatePosts` fails with `n` parameter error | Some models don't support `n > 1`. Switch `OPENROUTER_TEXT_MODEL` to `openai/gpt-4.1` which supports it. |
 | Structured output errors | Ensure your `OPENROUTER_TEXT_MODEL` supports JSON schema `response_format`. GPT-5.1 and Claude models do. |

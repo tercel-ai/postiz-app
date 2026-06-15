@@ -169,6 +169,45 @@ describe('EngageDraftService', () => {
   });
 
   describe('Draft Generation', () => {
+    it('retries region-blocked OpenRouter models with the fallback model', async () => {
+      const create = vi
+        .fn()
+        .mockRejectedValueOnce(
+          Object.assign(new Error('403 This model is not available in your region.'), {
+            status: 403,
+          })
+        )
+        .mockResolvedValueOnce({
+          choices: [{ message: { content: 'Fallback draft' } }],
+        });
+      (service as any).openRouterClient = {
+        chat: { completions: { create } },
+      };
+
+      const result = await (service as any)._generateViaOpenRouter(
+        'system prompt',
+        'user prompt'
+      );
+
+      expect(result).toBe('Fallback draft');
+      expect(create).toHaveBeenCalledTimes(2);
+      expect(create.mock.calls[0][0].model).toBe((service as any).openRouterModel);
+      expect(create.mock.calls[1][0].model).toBe('openrouter/auto');
+    });
+
+    it('does not retry unrelated OpenRouter authorization failures', async () => {
+      const error = Object.assign(new Error('403 Invalid API key.'), { status: 403 });
+      const create = vi.fn().mockRejectedValue(error);
+      (service as any).openRouterClient = {
+        chat: { completions: { create } },
+      };
+
+      await expect(
+        (service as any)._generateViaOpenRouter('system prompt', 'user prompt')
+      ).rejects.toBe(error);
+      expect(create).toHaveBeenCalledTimes(1);
+    });
+
     it('should generate text from the configured provider', async () => {
       const mockOpportunity: Partial<EngageOpportunity> = {
         platform: 'x',

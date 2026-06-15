@@ -2,13 +2,17 @@
    v3/v4 mix doesn't reliably generate utilities for the extension build. */
 
 :root {
-  --pz-accent: #612bd3;
-  --pz-accent-hover: #4f22b0;
+  --pz-accent: #c7ff18;
+  --pz-accent-hover: #b5f000;
+  --pz-accent-soft: #efffc0;
+  --pz-ink: #171817;
   --pz-bg: #ffffff;
-  --pz-fg: #1f2430;
-  --pz-muted: #8a909c;
-  --pz-border: #e6e8ee;
-  --pz-soft: #f5f6fa;
+  --pz-fg: #242623;
+  --pz-muted: #747970;
+  --pz-border: #dfe3da;
+  --pz-soft: #f6f8f2;
+  --pz-danger: #b42318;
+  --pz-danger-soft: #fff0ed;
 }
 
 * {
@@ -22,8 +26,7 @@ body {
   padding: 0;
   background: var(--pz-bg);
   color: var(--pz-fg);
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Helvetica Neue',
-    Arial, sans-serif;
+  font-family: 'Avenir Next', Avenir, 'Segoe UI', sans-serif;
   font-size: 13px;
   line-height: 1.45;
   -webkit-font-smoothing: antialiased;
@@ -40,24 +43,29 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 12px 14px;
+  padding: 14px;
   border-bottom: 1px solid var(--pz-border);
 }
 .pz-logo {
-  width: 24px;
-  height: 24px;
-  border-radius: 7px;
+  width: 26px;
+  height: 26px;
+  border: 1.5px solid var(--pz-ink);
+  border-radius: 8px;
   background: var(--pz-accent);
-  color: #fff;
-  font-weight: 700;
+  color: var(--pz-ink);
+  font-family: Georgia, 'Times New Roman', serif;
+  font-weight: 600;
   font-size: 13px;
   display: flex;
   align-items: center;
   justify-content: center;
 }
 .pz-title {
-  font-weight: 600;
-  font-size: 14px;
+  color: var(--pz-ink);
+  font-family: Georgia, 'Times New Roman', serif;
+  font-weight: 500;
+  font-size: 16px;
+  letter-spacing: 0.01em;
 }
 .pz-sub {
   margin-left: auto;
@@ -69,8 +77,8 @@ body {
 .pz-form {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 14px;
+  gap: 12px;
+  padding: 16px 14px;
 }
 .pz-row {
   display: flex;
@@ -81,15 +89,15 @@ body {
   font: inherit;
   color: var(--pz-fg);
   background: var(--pz-bg);
-  border: 1px solid var(--pz-border);
-  border-radius: 8px;
-  padding: 8px 10px;
+  border: 1.5px solid var(--pz-ink);
+  border-radius: 10px;
+  padding: 9px 11px;
   outline: none;
-  transition: border-color 0.15s, box-shadow 0.15s;
+  transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;
 }
 .pz-field:focus {
-  border-color: var(--pz-accent);
-  box-shadow: 0 0 0 3px rgba(97, 43, 211, 0.12);
+  border-color: var(--pz-ink);
+  box-shadow: 0 0 0 4px var(--pz-accent);
 }
 .pz-select {
   flex: 0 0 96px;
@@ -103,34 +111,40 @@ body {
   min-height: 78px;
 }
 .pz-field::placeholder {
-  color: var(--pz-muted);
+  color: #91968d;
 }
 
 .pz-btn {
   appearance: none;
-  border: none;
+  border: 1.5px solid var(--pz-accent);
   cursor: pointer;
   width: 100%;
-  padding: 10px;
-  border-radius: 8px;
+  padding: 11px;
+  border-radius: 10px;
   background: var(--pz-accent);
-  color: #fff;
+  color: var(--pz-ink);
   font: inherit;
   font-weight: 600;
-  transition: background 0.15s, opacity 0.15s;
+  letter-spacing: 0.01em;
+  transition: background 0.15s, border-color 0.15s, transform 0.15s;
 }
 .pz-btn:hover:not(:disabled) {
   background: var(--pz-accent-hover);
+  border-color: var(--pz-ink);
+  transform: translateY(-1px);
 }
 .pz-btn:disabled {
-  opacity: 0.45;
+  border-color: var(--pz-accent-soft);
+  background: var(--pz-accent-soft);
+  color: #a6aa9f;
   cursor: not-allowed;
 }
 
 /* ── Result banner ──────────────────────────────────────── */
 .pz-result {
-  border-radius: 8px;
-  padding: 8px 10px;
+  border: 1px solid var(--pz-border);
+  border-radius: 10px;
+  padding: 9px 10px;
   font-size: 12px;
 }
 .pz-result-title {
@@ -138,16 +152,18 @@ body {
   margin-bottom: 2px;
 }
 .pz-result.ok {
-  background: #e7f6ec;
-  color: #1a7f37;
+  border-color: #b3dc32;
+  background: var(--pz-accent-soft);
+  color: #354600;
 }
 .pz-result.pending {
   background: #fff7e6;
   color: #92400e;
 }
 .pz-result.fail {
-  background: #fcebec;
-  color: #b91c1c;
+  border-color: #f1b7af;
+  background: var(--pz-danger-soft);
+  color: var(--pz-danger);
 }
 .pz-result a {
   color: inherit;
@@ -171,9 +187,10 @@ body {
   gap: 8px;
 }
 .pz-history-title {
-  font-weight: 600;
-  font-size: 12px;
-  color: #5b616e;
+  color: var(--pz-ink);
+  font-family: Georgia, 'Times New Roman', serif;
+  font-weight: 500;
+  font-size: 14px;
 }
 .pz-clear {
   margin-left: auto;
@@ -191,15 +208,16 @@ body {
   font-size: 11px;
   cursor: pointer;
   padding: 3px 7px;
-  border-radius: 6px;
-  border: 1px solid var(--pz-border);
+  border-radius: 7px;
+  border: 1px solid var(--pz-ink);
   background: var(--pz-bg);
-  color: #5b616e;
-  transition: background 0.15s, border-color 0.15s;
+  color: var(--pz-ink);
+  transition: background 0.15s, border-color 0.15s, transform 0.15s;
 }
 .pz-clear-btn:hover {
-  background: var(--pz-soft);
-  border-color: #d4d7e0;
+  background: var(--pz-accent);
+  border-color: var(--pz-ink);
+  transform: translateY(-1px);
 }
 
 .pz-list {
@@ -218,8 +236,8 @@ body {
 
 .pz-item {
   border: 1px solid var(--pz-border);
-  border-radius: 9px;
-  padding: 9px 10px;
+  border-radius: 11px;
+  padding: 10px;
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -233,16 +251,17 @@ body {
 .pz-badge {
   font-size: 10px;
   font-weight: 700;
-  color: #fff;
+  color: var(--pz-ink);
   padding: 2px 6px;
   border-radius: 5px;
   letter-spacing: 0.02em;
 }
 .pz-badge.reddit {
-  background: #ff4500;
+  background: var(--pz-accent);
 }
 .pz-badge.x {
-  background: #0f1419;
+  background: var(--pz-ink);
+  color: #fff;
 }
 .pz-status {
   font-size: 10px;
@@ -251,16 +270,16 @@ body {
   border-radius: 5px;
 }
 .pz-status.sent {
-  background: #e7f6ec;
-  color: #1a7f37;
+  background: var(--pz-accent-soft);
+  color: #354600;
 }
 .pz-status.pending {
   background: #fff7e6;
   color: #92400e;
 }
 .pz-status.failed {
-  background: #fcebec;
-  color: #b91c1c;
+  background: var(--pz-danger-soft);
+  color: var(--pz-danger);
 }
 .pz-time {
   margin-left: auto;
@@ -269,7 +288,7 @@ body {
 }
 .pz-content {
   font-size: 12px;
-  color: #353b48;
+  color: var(--pz-fg);
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
@@ -284,7 +303,8 @@ body {
 }
 .pz-link {
   font-size: 11px;
-  color: var(--pz-accent);
+  color: #506b00;
+  font-weight: 600;
   text-decoration: none;
 }
 .pz-link:hover {

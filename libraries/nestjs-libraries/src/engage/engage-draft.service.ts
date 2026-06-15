@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import OpenAI from 'openai';
 import Anthropic from '@anthropic-ai/sdk';
 import { EngageOpportunity } from '@prisma/client';
@@ -66,11 +66,15 @@ function defaultOutputLimitForPlatform(platform: string): number {
 
 @Injectable()
 export class EngageDraftService {
+  private readonly logger = new Logger(EngageDraftService.name);
+
   // Use OpenAI-compatible SDK for OpenRouter; fall back to Anthropic SDK for
   // direct Anthropic API keys.
   private readonly useOpenRouter = !!process.env.OPENROUTER_API_KEY;
   private readonly openRouterModel =
     process.env.OPENROUTER_TEXT_MODEL ?? 'anthropic/claude-sonnet-4-6';
+  private readonly openRouterFallbackModel =
+    process.env.OPENROUTER_TEXT_FALLBACK_MODEL ?? 'openrouter/auto';
 
   private readonly openRouterClient: OpenAI | null = this.useOpenRouter
     ? new OpenAI({
@@ -229,14 +233,37 @@ Your previous draft exceeded the ${platformLabel} character limit. Rewrite it as
     userPrompt: string,
     signal?: AbortSignal
   ): Promise<string> {
-    const response = await this.openRouterClient!.chat.completions.create({
-      model: this.openRouterModel,
-      max_tokens: 400,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt },
-      ],
-    }, { signal });
+    const generate = (model: string) =>
+      this.openRouterClient!.chat.completions.create({
+        model,
+        max_tokens: 400,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+      }, { signal });
+
+    let response;
+    try {
+      response = await generate(this.openRouterModel);
+    } catch (error) {
+      const isRegionBlocked =
+        typeof error === 'object' &&
+        error !== null &&
+        'status' in error &&
+        error.status === 403 &&
+        error instanceof Error &&
+        error.message.toLowerCase().includes('not available in your region');
+
+      if (!isRegionBlocked || this.openRouterFallbackModel === this.openRouterModel) {
+        throw error;
+      }
+
+      this.logger.warn(
+        `OpenRouter model ${this.openRouterModel} is unavailable in this region; retrying with ${this.openRouterFallbackModel}.`
+      );
+      response = await generate(this.openRouterFallbackModel);
+    }
 
     const content = response.choices[0]?.message?.content;
     return Array.isArray(content)
