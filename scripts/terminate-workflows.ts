@@ -151,9 +151,11 @@ async function main() {
     console.log(`Done. Terminated ${totalTerminated} workflow(s).`);
     console.log('');
     console.log('Auto-restart on boot (InfiniteWorkflowRegister + EngageService.onApplicationBootstrap):');
-    console.log('  missingPostWorkflow, dataTicksSyncWorkflow, refreshWorkflowRecoveryWorkflow,');
-    console.log('  engageDataTicksWorkflow, engageGlobalKeywordScanWorkflow,');
-    console.log('  engageGlobalChannelScanWorkflow, engageGlobalTrackedWorkflow');
+    console.log('  missingPostWorkflow, refreshWorkflowRecoveryWorkflow,');
+    console.log('  engageGlobalKeywordScanWorkflow, engageGlobalChannelScanWorkflow, engageGlobalTrackedWorkflow');
+    console.log('Gated by env (not auto-restarted unless flag is set):');
+    console.log('  dataTicksSyncWorkflow (POST_ANALYSE_ENABLE=true)');
+    console.log('  engageDataTicksWorkflow (ENGAGE_DATA_TICKS=true)');
     console.log('NOT auto-restarted:');
     console.log('  refreshTokenWorkflow, autoPostWorkflow, digestEmailWorkflow, sendEmailWorkflow');
   }
