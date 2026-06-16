@@ -14,6 +14,7 @@ export const AiseeBusinessType = {
   VIDEO_GEN: 'video_gen',  // video generate
   POST_OVERAGE: 'post_overage', // post beyond the subscription limit
   ENGAGE_REPLY: 'engage_reply', // engage reply-draft generation (priced by length)
+  POST_ANALYTICS: 'post_analytics', // post analytics monitoring per integration per run
 } as const;
 
 export type AiseeBusinessType =

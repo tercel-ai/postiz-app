@@ -147,6 +147,26 @@ describe('EngageEntitlementService.getEntitlement', () => {
   });
 });
 
+describe('EngageEntitlementService.getMetricsWindowDays', () => {
+  it('returns the per-plan ceiling: starter 7 / developer 14 / pro 30', async () => {
+    expect(await build({ limits: STARTER_LIMITS }).service.getMetricsWindowDays('o')).toBe(7);
+    expect(await build({ limits: DEV_LIMITS }).service.getMetricsWindowDays('o')).toBe(14);
+    expect(await build({ limits: PRO_LIMITS }).service.getMetricsWindowDays('o')).toBe(30);
+  });
+
+  it('falls back to the generous default (30) when billing is disabled', async () => {
+    expect(await build({ limits: null }).service.getMetricsWindowDays('o')).toBe(30);
+  });
+
+  it('honours an admin override from the settings store', async () => {
+    const { service } = build({
+      limits: PRO_LIMITS,
+      settings: { [ENGAGE_ENTITLEMENTS_KEY]: { pro: { metricsWindowDaysMax: 60 } } },
+    });
+    expect(await service.getMetricsWindowDays('o')).toBe(60);
+  });
+});
+
 describe('EngageEntitlementService.getScanIntervalHours', () => {
   it('returns 6h for Pro and 24h for Starter/Developer', async () => {
     expect(await build({ limits: PRO_LIMITS }).service.getScanIntervalHours('o')).toBe(6);

@@ -53,6 +53,14 @@ export interface EngageEntitlement {
   scanIntervalHours: number;
   /** Max reply drafts generated per billing period (null = unlimited). */
   replyMonthlyCap: number | null;
+  /**
+   * Plan ceiling (in days) for how far back a post stays under metrics
+   * monitoring after it is published. The effective window is
+   * `min(user override, metricsWindowDaysMax)`; a user cannot monitor beyond
+   * this cap. Not nullable — an unbounded window would defeat the demand-driven
+   * fetch design (it would pull every historical post).
+   */
+  metricsWindowDaysMax: number;
 }
 
 export type EngageEntitlementMap = Record<EngagePlanCode, EngageEntitlement>;
@@ -72,6 +80,7 @@ const DEFAULT_ENTITLEMENTS: EngageEntitlementMap = {
     subredditsMax: 1,
     scanIntervalHours: 24,
     replyMonthlyCap: 10,
+    metricsWindowDaysMax: 7,
   },
   developer: {
     keywordsMax: 10,
@@ -79,6 +88,7 @@ const DEFAULT_ENTITLEMENTS: EngageEntitlementMap = {
     subredditsMax: 5,
     scanIntervalHours: 24,
     replyMonthlyCap: null,
+    metricsWindowDaysMax: 14,
   },
   pro: {
     keywordsMax: 30,
@@ -86,6 +96,7 @@ const DEFAULT_ENTITLEMENTS: EngageEntitlementMap = {
     subredditsMax: 15,
     scanIntervalHours: 6,
     replyMonthlyCap: null,
+    metricsWindowDaysMax: 30,
   },
 };
 
@@ -102,6 +113,10 @@ const FALLBACK_PLAN_CODE: EngagePlanCode = 'starter';
 // Default scan cadence when no entitlement applies (self-hosted / billing off).
 export const DEFAULT_SCAN_INTERVAL_HOURS = 24;
 
+// Metrics-monitoring window used when no plan cap applies (self-hosted / billing
+// off): the most generous tier, since there is no plan to bound it.
+export const DEFAULT_METRICS_WINDOW_DAYS = 30;
+
 // Fully-unlimited entitlement used when billing is disabled (self-hosted). No
 // hard caps; scan cadence falls back to the default.
 const UNLIMITED_ENTITLEMENT: EngageEntitlement = {
@@ -110,6 +125,7 @@ const UNLIMITED_ENTITLEMENT: EngageEntitlement = {
   subredditsMax: null,
   scanIntervalHours: DEFAULT_SCAN_INTERVAL_HOURS,
   replyMonthlyCap: null,
+  metricsWindowDaysMax: DEFAULT_METRICS_WINDOW_DAYS,
 };
 
 interface ResolvedPlan {
@@ -155,7 +171,7 @@ export class EngageEntitlementService implements OnModuleInit {
     await this._seedIfMissing(
       ENGAGE_ENTITLEMENTS_KEY,
       DEFAULT_ENTITLEMENTS,
-      'Per-plan engage limits (keywords/accounts/subreddits/scan interval/reply cap). null = unlimited.'
+      'Per-plan engage limits (keywords/accounts/subreddits/scan interval/reply cap/metrics window days). null = unlimited.'
     );
     await this._seedIfMissing(
       ENGAGE_REPLY_CREDITS_KEY,
@@ -317,6 +333,20 @@ export class EngageEntitlementService implements OnModuleInit {
     return Number.isFinite(hours) && hours > 0
       ? hours
       : DEFAULT_SCAN_INTERVAL_HOURS;
+  }
+
+  /**
+   * Effective metrics-monitoring window (days) for this org: posts published
+   * within this many days stay under monitoring; older ones fall out. Currently
+   * the plan ceiling; once a per-org user override lands (Organization.data),
+   * this becomes `min(userOverride, planMax)` — clamping is intentional so an
+   * over-set override (or a plan downgrade) is bounded at read time, never at
+   * write time.
+   */
+  async getMetricsWindowDays(orgId: string): Promise<number> {
+    const entitlement = await this.getEntitlement(orgId);
+    const max = entitlement.metricsWindowDaysMax;
+    return Number.isFinite(max) && max > 0 ? max : DEFAULT_METRICS_WINDOW_DAYS;
   }
 
   // ─── Hard limit checks (server-side; the frontend can be bypassed) ─────────

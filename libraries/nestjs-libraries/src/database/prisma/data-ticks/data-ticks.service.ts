@@ -17,6 +17,10 @@ import {
 import { extractMetrics, stripSyntheticMetrics } from '@gitroom/nestjs-libraries/integrations/social/analytics.utils';
 import { PostsRepository } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.repository';
 import { timer } from '@gitroom/helpers/utils/timer';
+import {
+  PostAnalyticsCreditService,
+  PostAnalyticsCreditsConfig,
+} from './post-analytics-credit.service';
 
 dayjs.extend(utc);
 dayjs.extend(isoWeek);
@@ -38,7 +42,8 @@ export class DataTicksService {
     private _postsService: PostsService,
     private _integrationManager: IntegrationManager,
     private _refreshIntegrationService: RefreshIntegrationService,
-    private _postsRepository: PostsRepository
+    private _postsRepository: PostsRepository,
+    private _postAnalyticsCredit: PostAnalyticsCreditService
   ) {}
 
   /**
@@ -110,6 +115,9 @@ export class DataTicksService {
     orgId: string,
     dayStart: Date
   ): Promise<number> {
+    // Load credit config once per org sync (single Settings read, amortized).
+    const analyticsCreditsConfig = await this._postAnalyticsCredit.loadConfig();
+
     // Calculate lookback relative to now so the repository query works for backfill too.
     const daysFromNow = Math.max(
       ANALYTICS_LOOKBACK_DAYS,
@@ -206,6 +214,7 @@ export class DataTicksService {
         );
       }
 
+      const prevPostsAnalyzed = accum.postsAnalyzed;
       for (const [, metrics] of postAnalytics) {
         // Strip synthetic metrics (e.g. Traffic appended by checkPostAnalytics)
         // before counting, so only real platform data drives postsAnalyzed.
@@ -218,6 +227,18 @@ export class DataTicksService {
         if (trafficScore !== null) {
           accum.traffic += trafficScore;
         }
+      }
+
+      // Deduct credits when the integration returned real analytics data.
+      // Fire-and-forget: billing failures are logged inside the service and
+      // never propagate here so analytics sync is not affected.
+      if (accum.postsAnalyzed > prevPostsAnalyzed) {
+        void this._postAnalyticsCredit.deductForIntegration(
+          orgId,
+          platform,
+          intId,
+          analyticsCreditsConfig
+        );
       }
     }
 

@@ -47,6 +47,7 @@ import { ErrorsRepository } from '@gitroom/nestjs-libraries/database/prisma/erro
 import { ErrorsService } from '@gitroom/nestjs-libraries/database/prisma/errors/errors.service';
 import { DataTicksRepository } from '@gitroom/nestjs-libraries/database/prisma/data-ticks/data-ticks.repository';
 import { DataTicksService } from '@gitroom/nestjs-libraries/database/prisma/data-ticks/data-ticks.service';
+import { PostAnalyticsCreditService } from '@gitroom/nestjs-libraries/database/prisma/data-ticks/post-analytics-credit.service';
 import { PostReleaseRepository } from '@gitroom/nestjs-libraries/database/prisma/post-releases/post-release.repository';
 import { PostReleaseService } from '@gitroom/nestjs-libraries/database/prisma/post-releases/post-release.service';
 import { PostOverageService } from '@gitroom/nestjs-libraries/database/prisma/posts/post-overage.service';
@@ -111,6 +112,7 @@ import { EngageDraftService } from '@gitroom/nestjs-libraries/engage/engage-draf
     ErrorsService,
     DataTicksRepository,
     DataTicksService,
+    PostAnalyticsCreditService,
     PostReleaseRepository,
     PostReleaseService,
     PostOverageService,

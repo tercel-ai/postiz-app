@@ -101,13 +101,16 @@ Temporal Workflow (daily @ UTC 00:05)
        └─ DataTicksService.syncDailyTicks()
             ├─ Get all active integrations grouped by org
             └─ For each org → _syncOrgDailyTicks():
+                 ├─ Load post_analytics_credits config (Settings, once per org)
                  ├─ Fetch published posts (last 30+ days) with releaseId
                  ├─ Group posts by integration
                  ├─ For each integration with posts:
                  │    ├─ Call batchPostAnalytics() or per-post postAnalytics()
                  │    ├─ Strip synthetic metrics (e.g., 'Traffic' label)
                  │    ├─ Extract impressions (sum exposure metrics)
-                 │    └─ Compute traffic score (weighted formula)
+                 │    ├─ Compute traffic score (weighted formula)
+                 │    └─ If postsAnalyzed increased → deduct analytics credits
+                 │         (fire-and-forget; failures logged, never block sync)
                  ├─ Upsert DataTicks records (impressions + traffic)
                  │   (real rows when postsAnalyzed > 0;
                  │    carry-forward rows for failed integrations — see below)
@@ -145,6 +148,77 @@ A paper trail is kept in log lines prefixed with `[DataTicks] clamp`.
 - Platform APIs return lifetime cumulative totals per post
 - Refreshes expired tokens before API calls
 - For recurring posts (`intervalInDays > 0`), each send creates a cloned Post with its own `releaseId`. The original stays `QUEUE` without a `releaseId`, so `getPublishedPostsWithRelease` naturally picks up only the clones — no duplicates
+
+---
+
+## Credit Deduction
+
+Post analytics monitoring supports optional credit deduction, configured via the Settings table. Deductions are charged **per integration per daily sync run** — when at least one post returns real analytics data.
+
+### Settings Key: `post_analytics_credits`
+
+Initialized automatically on startup by `PostAnalyticsCreditService.onModuleInit()` if the key doesn't exist.
+
+```json
+{
+  "enabled": false,
+  "default": 1,
+  "perPlatform": {
+    "x": 2,
+    "youtube": 2,
+    "linkedin": 1
+  }
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `false` | Whether credit deduction is active. **Must be explicitly set to `true`** to start billing — no deduction happens when `false` (or when the key is missing). |
+| `default` | number | `1` | Credits deducted per integration per analytics run for platforms not listed in `perPlatform`. |
+| `perPlatform` | object | `{}` | Per-provider overrides, keyed by `providerIdentifier` (e.g. `"x"`, `"linkedin"`, `"youtube"`). Value = credits for that platform. |
+
+### Deduction Flow
+
+```
+_syncOrgDailyTicks()
+  ├─ PostAnalyticsCreditService.loadConfig()          (Settings read, once per org)
+  ├─ for each integration with postsAnalyzed > 0:
+  │    └─ PostAnalyticsCreditService.deductForIntegration(orgId, platform, integrationId, config)
+  │         ├─ config.enabled === false  → return (no-op)
+  │         ├─ cost = config.perPlatform[platform] ?? config.default
+  │         ├─ cost <= 0               → return (no-op)
+  │         └─ AiseeCreditService.deductAndConfirm()
+  │                taskId:        postiz_analytics_{integrationId}_{random}
+  │                businessType:  post_analytics
+  │                relatedId:     integrationId
+  │                amount:        cost credits
+  └─ (errors caught and logged; analytics sync continues regardless)
+```
+
+### Behavior Notes
+
+- **Default is off**: `enabled` defaults to `false`. If Settings key is missing (first boot before seed), `loadConfig()` also returns `enabled: false`. No credits are deducted until an admin explicitly sets `enabled: true`.
+- **Billing granularity**: one deduction per integration per sync run, not per post. An integration with 20 posts in the lookback window still costs one deduction.
+- **Carry-forward rows** (no posts in lookback, `postsAnalyzed = 0`) are **not** billed.
+- **Fire-and-forget**: deduction failures are logged but never throw, so a billing outage cannot block data collection.
+- **Idempotency**: each deduction uses `postiz_analytics_{integrationId}_{random}` — a fresh random suffix per run, so re-runs (e.g. backfill) each create a separate charge. If idempotent backfill billing is needed, use a deterministic suffix like `{integrationId}_{date}`.
+
+### Admin Configuration
+
+Update via the Settings admin UI or direct DB:
+
+```sql
+-- Enable billing with defaults
+UPDATE "Settings" SET value = '{"enabled": true, "default": 1, "perPlatform": {}}'
+WHERE key = 'post_analytics_credits';
+
+-- Platform-specific pricing
+UPDATE "Settings"
+SET value = '{"enabled": true, "default": 1, "perPlatform": {"x": 2, "youtube": 2, "tiktok": 1}}'
+WHERE key = 'post_analytics_credits';
+```
+
+---
 
 ### Admin Backfill
 
@@ -463,6 +537,7 @@ All dashboard queries use Redis cache with TTL:
 | Prisma Schema | `libraries/nestjs-libraries/src/database/prisma/schema.prisma` |
 | DataTicksService | `libraries/nestjs-libraries/src/database/prisma/data-ticks/data-ticks.service.ts` |
 | DataTicksRepository | `libraries/nestjs-libraries/src/database/prisma/data-ticks/data-ticks.repository.ts` |
+| PostAnalyticsCreditService | `libraries/nestjs-libraries/src/database/prisma/data-ticks/post-analytics-credit.service.ts` |
 | Traffic Calculator | `libraries/nestjs-libraries/src/integrations/social/traffic.calculator.ts` |
 | Dashboard Service | `libraries/nestjs-libraries/src/database/prisma/dashboard/dashboard.service.ts` |
 | Dashboard Controller | `apps/backend/src/api/routes/dashboard.controller.ts` |

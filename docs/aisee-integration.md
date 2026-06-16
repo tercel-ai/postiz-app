@@ -149,6 +149,7 @@ Initialized automatically on application startup by `PostOverageService.onModule
 - `libraries/nestjs-libraries/src/database/prisma/posts/post-overage.service.ts`
 - `libraries/nestjs-libraries/src/database/prisma/posts/posts.service.ts` — `createPost()` calls `deductIfOverage`
 - `apps/backend/src/services/auth/permissions/permissions.service.ts`
+- `libraries/nestjs-libraries/src/database/prisma/data-ticks/post-analytics-credit.service.ts` — analytics credit deduction (per integration per daily run)
 
 ## AiseeClient
 
@@ -251,6 +252,7 @@ All Postiz operations use the format `postiz_{label}_{random}` as the task_id fo
 | **Agent post generation** | Agent workflow | `ai_copywriting` | `post_gen` | null | Aisee only | Same |
 | **Video generation** | `POST /media/generate-video` | `video_gen` | — | — | Subscription useCredit() | **TODO**: Aisee (pending KieAI) |
 | **Post overage** | `POST /posts/` (when count > limit) | `post_overage` | — | postId | N/A | Aisee credits (fixed cost from Settings) |
+| **Post analytics monitoring** | Daily Temporal cron (UTC 00:05), per integration | `post_analytics` | — | integrationId | Aisee credits (when `enabled=true` in Settings) | Same |
 
 ## AiseeCreditService
 
