@@ -1234,6 +1234,14 @@ model EngageOpportunityState {
   // Refreshed on every re-scan to track keyword edits.
   matchedKeywords String[]
 
+  // Append-only audit log of every AI reply draft this org generated for this
+  // opportunity. Each successful generation pushes one entry (content + input
+  // params + the credits charged + the BillingRecord.taskId it links to), so a
+  // user who regenerates several times keeps every version. Per-org because both
+  // the content and its billing are org-scoped. Never truncated — reply versions
+  // are few per opportunity. Shape: GenerationHistoryEntry[] (engage.repository.ts).
+  generationHistory Json?
+
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
 

@@ -1,6 +1,10 @@
 'use client';
 
 import { FC } from 'react';
+import {
+  GenerationHistory,
+  GenerationHistoryEntry,
+} from './generation-history';
 
 interface SentReply {
   id: string;
@@ -37,6 +41,7 @@ interface SentReply {
     authorFollowers?: number | null;
     authorAvatarUrl?: string | null;
     matchedKeywords?: string[];
+    generationHistory?: GenerationHistoryEntry[];
   };
 }
 
@@ -165,6 +170,9 @@ export const SentCardReddit: FC<SentCardRedditProps> = ({
           </div>
         ))}
       </div>
+
+      {/* Past AI generations for this opportunity (collapsed by default) */}
+      <GenerationHistory history={opportunity.generationHistory} />
 
       {/* URL actions */}
       {noUrl && onSubmitUrl && (

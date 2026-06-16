@@ -56,6 +56,9 @@ function buildRepo() {
   const opportunity = {
     model: { engageOpportunity: { aggregate: oppAggregate, findFirst: oppFindFirst } },
   } as any;
+  // appendGenerationHistory runs an atomic jsonb concat via $executeRaw on the
+  // oppState client, so the mock exposes it alongside the model accessors.
+  const stateExecuteRaw = vi.fn().mockResolvedValue(1);
   const oppState = {
     model: {
       engageOpportunityState: {
@@ -66,6 +69,7 @@ function buildRepo() {
         findUnique: stateFindUnique,
         updateMany: stateUpdateMany,
       },
+      $executeRaw: stateExecuteRaw,
     },
   } as any;
   const sentReply = {
@@ -120,9 +124,10 @@ function buildRepo() {
   );
   return {
     repo, stateFindMany, stateCount, stateAggregate, stateFindFirst, stateFindUnique,
-    stateUpdateMany, oppAggregate, oppFindFirst, channelFindMany, trackedFindMany,
-    cursorFindMany, sentCount, sentFindMany, sentFindFirst, sentCreate, sentUpdate,
-    postAggregate, postFindMany, postCreate, postUpdate, postDeleteMany, txTransaction,
+    stateUpdateMany, stateExecuteRaw, oppAggregate, oppFindFirst, channelFindMany,
+    trackedFindMany, cursorFindMany, sentCount, sentFindMany, sentFindFirst, sentCreate,
+    sentUpdate, postAggregate, postFindMany, postCreate, postUpdate, postDeleteMany,
+    txTransaction,
   };
 }
 
@@ -359,6 +364,49 @@ describe('EngageRepository — two-table reads', () => {
       expect(stateFindMany.mock.calls[0][0].where).toEqual({
         organizationId: 'org1',
         opportunityId: { in: ['o1', 'o2'] },
+      });
+    });
+
+    it('attaches per-org generationHistory (newest-first) from the state join', async () => {
+      const { repo, sentFindMany, sentCount, stateFindMany } = buildRepo();
+      sentFindMany.mockResolvedValue([
+        {
+          id: 's1',
+          opportunity: { id: 'o1', platform: 'x' },
+          post: { analytics: [], impressions: 0, trafficScore: 0 },
+        },
+        {
+          id: 's2',
+          opportunity: { id: 'o2', platform: 'reddit' },
+          post: { analytics: [], impressions: 0, trafficScore: 0 },
+        },
+      ]);
+      sentCount.mockResolvedValue(2);
+      // o1 has two generations stored oldest-first; o2 has none (null column).
+      stateFindMany.mockResolvedValue([
+        {
+          opportunityId: 'o1',
+          matchedKeywords: [],
+          generationHistory: [
+            { content: 'first', length: 'medium', cost: 3, billingTaskId: 't1', createdAt: '2026-06-16T00:00:00Z' },
+            { content: 'second', length: 'long', cost: 5, billingTaskId: 't2', createdAt: '2026-06-16T01:00:00Z' },
+          ],
+        },
+        { opportunityId: 'o2', matchedKeywords: [], generationHistory: null },
+      ]);
+
+      const res = await repo.listSentReplies('org1', {} as any);
+      const [a, b] = res.items as any[];
+      // Reversed → newest generation first.
+      expect(a.opportunity.generationHistory.map((g: any) => g.content)).toEqual([
+        'second',
+        'first',
+      ]);
+      // null column / missing state → empty array, never undefined.
+      expect(b.opportunity.generationHistory).toEqual([]);
+      // The state select pulls generationHistory alongside matchedKeywords.
+      expect(stateFindMany.mock.calls[0][0].select).toMatchObject({
+        generationHistory: true,
       });
     });
 
@@ -1792,6 +1840,31 @@ describe('EngageRepository.getOrgScanStatus', () => {
           { state: 'ERROR' },
         ],
       });
+    });
+  });
+
+  describe('appendGenerationHistory', () => {
+    it('issues an atomic jsonb concat scoped to the org + opportunity', async () => {
+      const { repo, stateExecuteRaw } = buildRepo();
+      const entry = {
+        content: 'a generated reply',
+        length: 'medium' as const,
+        cost: 3,
+        strategy: 'EXPERT_ANSWER',
+        brandStrength: 1,
+        billingTaskId: 'postiz_engage_reply_opp1_123_abcd',
+        createdAt: '2026-06-16T00:00:00Z',
+      };
+
+      await repo.appendGenerationHistory('org1', 'opp1', entry);
+
+      // One raw UPDATE; the tagged-template params carry the serialized entry +
+      // org/opportunity scope so two concurrent generations can't clobber.
+      expect(stateExecuteRaw).toHaveBeenCalledTimes(1);
+      const params = stateExecuteRaw.mock.calls[0].slice(1);
+      expect(params).toContain('org1');
+      expect(params).toContain('opp1');
+      expect(params).toContain(JSON.stringify([entry]));
     });
   });
 

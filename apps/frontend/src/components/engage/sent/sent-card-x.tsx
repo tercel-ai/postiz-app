@@ -1,6 +1,10 @@
 'use client';
 
 import { FC } from 'react';
+import {
+  GenerationHistory,
+  GenerationHistoryEntry,
+} from './generation-history';
 
 interface SentReply {
   id: string;
@@ -42,6 +46,7 @@ interface SentReply {
     authorFollowers?: number | null;
     authorAvatarUrl?: string | null;
     matchedKeywords?: string[];
+    generationHistory?: GenerationHistoryEntry[];
   };
 }
 
@@ -197,6 +202,9 @@ export const SentCardX: FC<SentCardXProps> = ({ reply, sentReplyId, onSubmitUrl 
           </div>
         ))}
       </div>
+
+      {/* Past AI generations for this opportunity (collapsed by default) */}
+      <GenerationHistory history={opportunity.generationHistory} />
 
       {noUrl && onSubmitUrl && (
         <button

@@ -6,6 +6,7 @@ import { useFetch } from '@gitroom/helpers/utils/custom.fetch';
 import { useToaster } from '@gitroom/react/toaster/toaster';
 import { SentCardX } from './sent-card-x';
 import { SentCardReddit } from './sent-card-reddit';
+import type { GenerationHistoryEntry } from './generation-history';
 
 interface SentReply {
   id: string;
@@ -39,6 +40,9 @@ interface SentReply {
     authorFollowers?: number | null;
     authorAvatarUrl?: string | null;
     matchedKeywords?: string[];
+    // Full version history of AI-generated reply drafts for this opportunity
+    // (newest-first). Present when the user generated at least once.
+    generationHistory?: GenerationHistoryEntry[];
   };
 }
 

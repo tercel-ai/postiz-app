@@ -1,6 +1,6 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma, EngageOpportunity, EngageOpportunityStatus } from '@prisma/client';
-import { PrismaRepository, PrismaTransaction } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
+import { PrismaRepository, PrismaTransaction, PrismaService } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
 import {
   AddKeywordDto,
   AddKeywordsBulkDto,
@@ -74,6 +74,30 @@ const NON_ACTIONABLE_REPLY_REASONS: Record<
 export interface ScanTiming {
   lastScanAt: Date | null; // most recent successful completion
   nextScanAt: Date | null; // earliest upcoming scan (derived, not stored)
+}
+
+// One entry in EngageOpportunityState.generationHistory — a single AI reply draft
+// the org generated for the opportunity. Appended on every successful generation
+// (the user may regenerate many times), so the whole array is the version history.
+// `billingTaskId` links to the BillingRecord (taskId) charged for THIS generation,
+// closing the audit loop between "what was generated" and "what was billed".
+export interface GenerationHistoryEntry {
+  content: string;
+  length: 'short' | 'medium' | 'long';
+  cost: number; // credits charged for this generation (flat per-length fee)
+  strategy: string;
+  brandStrength: number;
+  mentions?: string[];
+  billingTaskId: string; // → BillingRecord.taskId
+  createdAt: string; // ISO timestamp
+}
+
+// Coerce the stored generationHistory Json (null | unknown[]) into a clean,
+// newest-first GenerationHistoryEntry[]. Tolerant of legacy/malformed rows: a
+// non-array stored value yields [] rather than throwing in a list response.
+function normalizeGenerationHistory(value: unknown): GenerationHistoryEntry[] {
+  if (!Array.isArray(value)) return [];
+  return (value as GenerationHistoryEntry[]).slice().reverse();
 }
 
 export interface OrgScanStatus {
@@ -1280,6 +1304,30 @@ export class EngageRepository {
     });
   }
 
+  // Append one AI-generation entry to the opportunity's per-org generationHistory
+  // (every successful generation is kept, so the user can review/re-use any past
+  // version). Implemented as an atomic jsonb concat (COALESCE(...,'[]') || entry)
+  // so two near-simultaneous generations can't clobber each other via a
+  // read-modify-write race. No-op (0 rows) when no state row exists for the org —
+  // best-effort; an actionable opportunity always has one, but losing an audit
+  // entry must never fail an already-delivered draft.
+  async appendGenerationHistory(
+    organizationId: string,
+    opportunityId: string,
+    entry: GenerationHistoryEntry
+  ): Promise<void> {
+    // `model` is typed to the model accessor only, but the runtime object is the
+    // full PrismaClient — cast to reach $executeRaw for the atomic jsonb concat.
+    await (this._oppState.model as unknown as PrismaService).$executeRaw`
+      UPDATE "EngageOpportunityState"
+      SET "generationHistory" =
+            COALESCE("generationHistory", '[]'::jsonb) || ${JSON.stringify([entry])}::jsonb,
+          "updatedAt" = NOW()
+      WHERE "organizationId" = ${organizationId}
+        AND "opportunityId" = ${opportunityId}
+    `;
+  }
+
   // Rollback helper — restores an opportunity to its prior status after a failed
   // post-claim operation. Best-effort; never throws.
   async releaseOpportunityClaim(
@@ -1710,11 +1758,24 @@ export class EngageRepository {
     const states = oppIds.length
       ? (await this._oppState.model.engageOpportunityState.findMany({
           where: { organizationId, opportunityId: { in: oppIds } },
-          select: { opportunityId: true, matchedKeywords: true },
+          select: {
+            opportunityId: true,
+            matchedKeywords: true,
+            // The org's full version history of AI-generated reply drafts for this
+            // opportunity — returned so the frontend can show past generations.
+            generationHistory: true,
+          },
         })) ?? []
       : [];
     const keywordsByOpp = new Map(
       states.map((s) => [s.opportunityId, s.matchedKeywords])
+    );
+    // newest-first so the UI lists the most recent generation at the top.
+    const historyByOpp = new Map(
+      states.map((s) => [
+        s.opportunityId,
+        normalizeGenerationHistory(s.generationHistory),
+      ])
     );
 
     // Attach a flat, frontend-friendly `metrics` object (every per-platform field
@@ -1724,6 +1785,7 @@ export class EngageRepository {
       const opportunity = {
         ...it.opportunity,
         matchedKeywords: keywordsByOpp.get(it.opportunity.id) ?? [],
+        generationHistory: historyByOpp.get(it.opportunity.id) ?? [],
       };
       if (!it.post) return { ...it, opportunity };
       // Surface the reply author (the account that posted the reply) as a clean

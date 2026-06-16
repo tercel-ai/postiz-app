@@ -9,7 +9,10 @@ import {
 } from '@nestjs/common';
 import { EngageSentReply, Organization } from '@prisma/client';
 import { TemporalService } from 'nestjs-temporal-core';
-import { EngageRepository } from '@gitroom/nestjs-libraries/engage/engage.repository';
+import {
+  EngageRepository,
+  GenerationHistoryEntry,
+} from '@gitroom/nestjs-libraries/engage/engage.repository';
 import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.service';
 import { PostOverageService } from '@gitroom/nestjs-libraries/database/prisma/posts/post-overage.service';
 import {
@@ -321,6 +324,22 @@ export class EngageService implements OnApplicationBootstrap {
         mentions: dto.mentions,
       },
     });
+  }
+
+  // Append one AI-generation entry to the opportunity's per-org version history
+  // (every successful generation is kept so the user can review past versions).
+  // Best-effort at the call site — losing an audit entry must not fail a draft
+  // that was already produced and charged.
+  async recordGeneration(
+    org: Organization,
+    opportunityId: string,
+    entry: GenerationHistoryEntry
+  ): Promise<void> {
+    await this._engageRepository.appendGenerationHistory(
+      org.id,
+      opportunityId,
+      entry
+    );
   }
 
   // ─── Reply-draft billing (the only credit-charging action in engage) ───────

@@ -474,6 +474,28 @@ export class EngageController {
             billErr instanceof Error ? billErr.stack : billErr
           );
         }
+        // Persist THIS generation to the opportunity's per-org version history so
+        // a user who regenerates several times keeps every draft (linked to the
+        // BillingRecord taskId charged for it). Best-effort: a generation that was
+        // produced and charged must still be delivered even if the audit write
+        // fails — never let it break the SSE response.
+        try {
+          await this._engageService.recordGeneration(org, id, {
+            content: draft,
+            length,
+            cost: reservation.cost,
+            strategy: body.strategy,
+            brandStrength: body.brandStrength,
+            mentions: body.mentions,
+            billingTaskId: reservation.taskId,
+            createdAt: new Date().toISOString(),
+          });
+        } catch (histErr) {
+          this.logger.error(
+            `Reply generation history write failed for opportunity ${id} (org ${org.id})`,
+            histErr instanceof Error ? histErr.stack : histErr
+          );
+        }
         res.write(`data: ${JSON.stringify({ text: draft })}\n\n`);
         res.write(`data: [DONE]\n\n`);
       }

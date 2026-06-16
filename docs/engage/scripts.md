@@ -30,6 +30,7 @@ by **when you reach for them** and lists the flags/env you actually need.
 | `cleanup-engage-opportunities.ts` | Soft-delete un-repliable opportunities | list/check | tsx |
 | `backfill-engage-data-ticks.ts` | Rebuild `EngageDataTicks` from `Post` | dry-run | ts-node |
 | `backfill-engage-matched-keywords.ts` | Fill `EngageOpportunityState.matchedKeywords` for pre-field rows | dry-run | ts-node |
+| `backfill-engage-generation-history.ts` | Seed `EngageOpportunityState.generationHistory` from sent/saved replies + `engage_reply` charges | dry-run | ts-node |
 
 ---
 

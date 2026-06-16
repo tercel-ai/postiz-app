@@ -45,6 +45,7 @@ function build(overrides: Record<string, any> = {}) {
     reserveReplyGeneration: vi.fn(async () => ({ cost: 3, taskId: 't1' })),
     settleReplyGeneration: vi.fn(async () => undefined),
     releaseReplyGeneration: vi.fn(async () => undefined),
+    recordGeneration: vi.fn(async () => undefined),
     ...overrides,
   };
   const draftService = {
@@ -73,6 +74,37 @@ describe('EngageController.generateDraft — billing contract', () => {
     expect(engageService.releaseReplyGeneration).not.toHaveBeenCalled();
     expect(frames.join('')).toContain('hello world');
     expect(frames.join('')).toContain('[DONE]');
+
+    // Every successful generation is persisted to the opportunity's version
+    // history, linked to the BillingRecord taskId charged for it.
+    expect(engageService.recordGeneration).toHaveBeenCalledTimes(1);
+    const [org, oppId, entry] = engageService.recordGeneration.mock.calls[0];
+    expect(org).toBe(ORG);
+    expect(oppId).toBe('opp1');
+    expect(entry).toMatchObject({
+      content: 'hello world',
+      length: 'medium',
+      cost: 3,
+      strategy: 'EXPERT_ANSWER',
+      brandStrength: 1,
+      billingTaskId: 't1',
+    });
+    expect(typeof entry.createdAt).toBe('string');
+  });
+
+  it('does NOT record history when the client aborts mid-stream (nothing delivered)', async () => {
+    const { triggerClose, req } = makeReq();
+    const generateDraft = async function* () {
+      triggerClose();
+      yield 'partial';
+    };
+    const { controller, engageService } = build({ generateDraft });
+    const { res } = makeRes();
+
+    await controller.generateDraft(ORG, 'opp1', BODY, req, res);
+    await flush();
+
+    expect(engageService.recordGeneration).not.toHaveBeenCalled();
   });
 
   it('blocks at the cap WITHOUT generating or charging, emitting the typed error frame', async () => {
