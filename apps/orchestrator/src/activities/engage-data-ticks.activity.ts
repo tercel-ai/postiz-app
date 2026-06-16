@@ -27,7 +27,6 @@ export class EngageDataTicksActivity {
     private _engageRepository: EngageRepository,
     private _post: PrismaRepository<'post'>,
     private _engageDataTicks: PrismaRepository<'engageDataTicks'>,
-    private _engageSentReply: PrismaRepository<'engageSentReply'>,
     private _tx: PrismaTransaction,
     private _postsService: PostsService
   ) {}
@@ -130,46 +129,6 @@ export class EngageDataTicksActivity {
     this.logger.log(
       `EngageDataTicks: aggregated ${posts.length} posts for ${byOrgPlatform.size} orgs`
     );
-  }
-
-  @ActivityMethod()
-  async syncEngageMetrics(sentReplyId: string): Promise<void> {
-    const reply = await this._engageSentReply.model.engageSentReply.findUnique({
-      where: { id: sentReplyId },
-      include: {
-        post: { select: { id: true, releaseURL: true, state: true, integrationId: true } },
-        opportunity: {
-          select: {
-            platform: true,
-            externalPostId: true,
-            authorUsername: true,
-          },
-        },
-      },
-    });
-    if (!reply || !reply.post) return;
-
-    if (reply.opportunity.platform === 'reddit' && reply.post.releaseURL) {
-      await syncRedditMetrics(
-        reply.post.id,
-        reply.post.releaseURL,
-        reply.id,
-        reply.opportunity.authorUsername,
-        this._metricsSyncDeps()
-      );
-    } else if (reply.opportunity.platform === 'x' && reply.post.releaseURL) {
-      await syncXMetrics(
-        {
-          orgId: reply.organizationId,
-          sentReplyId: reply.id,
-          postDbId: reply.post.id,
-          replyTweetUrl: reply.post.releaseURL,
-          originalTweetId: reply.opportunity.externalPostId,
-          authorUsername: reply.opportunity.authorUsername, // resolve original author's numeric user ID
-        },
-        this._metricsSyncDeps()
-      );
-    }
   }
 
   /**

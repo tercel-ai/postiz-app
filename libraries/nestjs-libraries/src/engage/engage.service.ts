@@ -822,8 +822,6 @@ export class EngageService implements OnApplicationBootstrap {
         postId,
         inputData: { strategy: body.strategy, brandStrength: body.brandStrength, mentions: body.mentions },
       });
-      // 24h metrics sync — best-effort; the inner method swallows + logs.
-      await this.startMetricsSyncForReply(sentReply.id);
       return sentReply;
     } catch (err) {
       this.logger.error(
@@ -1077,10 +1075,7 @@ export class EngageService implements OnApplicationBootstrap {
             postId: createdPostIds[i],
             inputData: { strategy: item.strategy, brandStrength: item.brandStrength, mentions: item.mentions },
           })
-          .then(async (sentReply) => {
-            await this.startMetricsSyncForReply(sentReply.id);
-            return sentReply;
-          })
+          .then(async (sentReply) => sentReply)
       )
     );
     const results: EngageSentReply[] = [];
@@ -1192,7 +1187,6 @@ export class EngageService implements OnApplicationBootstrap {
       if (body.replyUrl) {
         this._storeReplyAuthorInBackground(org.id, sentReply.id, opp.platform, body.replyUrl);
       }
-      await this.startMetricsSyncForReply(sentReply.id);
       return sentReply;
     } catch (err) {
       this.logger.error(
@@ -1345,19 +1339,4 @@ export class EngageService implements OnApplicationBootstrap {
     };
   }
 
-  // Called by engage.controller after creating an EngageSentReply to start 24h metrics sync.
-  async startMetricsSyncForReply(sentReplyId: string): Promise<void> {
-    const client = this._temporalService.client?.getRawClient();
-    if (!client) return;
-    try {
-      await client.workflow?.start('engageMetricsSyncWorkflow', {
-        workflowId: `engage-metrics-${sentReplyId}`,
-        taskQueue: 'main',
-        args: [sentReplyId],
-        workflowIdConflictPolicy: 'USE_EXISTING',
-      });
-    } catch (err) {
-      this.logger.warn(`Failed to start engageMetricsSyncWorkflow for reply ${sentReplyId}:`, err);
-    }
-  }
 }
