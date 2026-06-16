@@ -315,7 +315,7 @@ export class EngageService implements OnApplicationBootstrap {
       org.id,
       opportunityId
     );
-    return this._engageRepository.upsertDraft(org.id, opportunityId, {
+    const saved = await this._engageRepository.upsertDraft(org.id, opportunityId, {
       platform: opportunity.platform,
       content: dto.draftContent,
       inputData: {
@@ -324,6 +324,23 @@ export class EngageService implements OnApplicationBootstrap {
         mentions: dto.mentions,
       },
     });
+
+    // Also record this save as a 'manual' version in generationHistory so the
+    // version history is complete (AI + hand-typed/edited), each tagged by source.
+    // Deduped against the latest entry (saving an unchanged AI draft won't dup it).
+    // Best-effort: a history hiccup must not fail the save itself.
+    await this._engageRepository
+      .recordManualGeneration(org.id, opportunityId, {
+        source: 'manual',
+        content: dto.draftContent,
+        strategy: dto.strategy,
+        brandStrength: dto.brandStrength,
+        ...(dto.mentions?.length ? { mentions: dto.mentions } : {}),
+        createdAt: new Date().toISOString(),
+      })
+      .catch(() => undefined);
+
+    return saved;
   }
 
   // Append one AI-generation entry to the opportunity's per-org version history

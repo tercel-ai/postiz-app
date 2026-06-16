@@ -82,6 +82,7 @@ describe('EngageController.generateDraft — billing contract', () => {
     expect(org).toBe(ORG);
     expect(oppId).toBe('opp1');
     expect(entry).toMatchObject({
+      source: 'ai',
       content: 'hello world',
       length: 'medium',
       cost: 3,

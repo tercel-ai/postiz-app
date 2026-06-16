@@ -1847,6 +1847,7 @@ describe('EngageRepository.getOrgScanStatus', () => {
     it('issues an atomic jsonb concat scoped to the org + opportunity', async () => {
       const { repo, stateExecuteRaw } = buildRepo();
       const entry = {
+        source: 'ai' as const,
         content: 'a generated reply',
         length: 'medium' as const,
         cost: 3,
@@ -1865,6 +1866,50 @@ describe('EngageRepository.getOrgScanStatus', () => {
       expect(params).toContain('org1');
       expect(params).toContain('opp1');
       expect(params).toContain(JSON.stringify([entry]));
+    });
+  });
+
+  describe('recordManualGeneration (manual draft versions, deduped)', () => {
+    const manualEntry = {
+      source: 'manual' as const,
+      content: 'hand-typed reply',
+      strategy: 'EXPERT_ANSWER',
+      brandStrength: 0,
+      createdAt: '2026-06-16T00:00:00Z',
+    };
+
+    it('appends a manual entry when the content differs from the latest', async () => {
+      const { repo, stateFindUnique, stateExecuteRaw } = buildRepo();
+      stateFindUnique.mockResolvedValue({
+        generationHistory: [{ source: 'ai', content: 'an older AI draft' }],
+      });
+
+      const wrote = await repo.recordManualGeneration('org1', 'opp1', manualEntry);
+
+      expect(wrote).toBe(true);
+      expect(stateExecuteRaw).toHaveBeenCalledTimes(1);
+    });
+
+    it('skips (no append) when the content matches the most-recent entry', async () => {
+      const { repo, stateFindUnique, stateExecuteRaw } = buildRepo();
+      stateFindUnique.mockResolvedValue({
+        generationHistory: [{ source: 'ai', content: 'hand-typed reply' }],
+      });
+
+      const wrote = await repo.recordManualGeneration('org1', 'opp1', manualEntry);
+
+      expect(wrote).toBe(false);
+      expect(stateExecuteRaw).not.toHaveBeenCalled();
+    });
+
+    it('returns false without writing when no state row exists', async () => {
+      const { repo, stateFindUnique, stateExecuteRaw } = buildRepo();
+      stateFindUnique.mockResolvedValue(null);
+
+      const wrote = await repo.recordManualGeneration('org1', 'opp1', manualEntry);
+
+      expect(wrote).toBe(false);
+      expect(stateExecuteRaw).not.toHaveBeenCalled();
     });
   });
 

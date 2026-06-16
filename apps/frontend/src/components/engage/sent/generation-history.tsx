@@ -5,14 +5,17 @@ import { FC, useState } from 'react';
 // One past AI-generated reply draft for an opportunity (newest-first from the API).
 // Mirrors the backend GenerationHistoryEntry (engage.repository.ts).
 export interface GenerationHistoryEntry {
+  // 'ai' = a charged AI generation; 'manual' = hand-typed/saved (backfill only).
+  source?: 'ai' | 'manual';
   content: string;
-  length: 'short' | 'medium' | 'long';
-  cost: number;
   strategy: string;
   brandStrength: number;
   mentions?: string[];
-  billingTaskId: string;
   createdAt: string;
+  // AI-only — absent on hand-typed 'manual' entries.
+  length?: 'short' | 'medium' | 'long';
+  cost?: number;
+  billingTaskId?: string;
 }
 
 const LENGTH_LABEL: Record<string, string> = {
@@ -44,19 +47,35 @@ export const GenerationHistory: FC<{ history?: GenerationHistoryEntry[] }> = ({
         <div className="mt-2 space-y-2 border-l border-[#2d3748] pl-3">
           {history.map((entry, i) => (
             <div
-              key={entry.billingTaskId || i}
+              key={entry.billingTaskId ?? entry.createdAt ?? i}
               className="bg-[#0f1219] rounded-lg p-2.5"
             >
               <div className="flex items-center gap-2 mb-1">
                 <span className="text-xs text-gray-500">
                   #{history.length - i}
                 </span>
-                <span className="text-xs bg-blue-900/40 text-blue-300 px-1.5 py-0.5 rounded">
-                  {LENGTH_LABEL[entry.length] ?? entry.length}
-                </span>
-                <span className="text-xs text-gray-500" title="本次生成扣除的额度">
-                  −{entry.cost} 额度
-                </span>
+                {/* Provenance: AI generation vs hand-typed (legacy backfill). */}
+                {entry.source === 'manual' ? (
+                  <span className="text-xs bg-gray-700/60 text-gray-300 px-1.5 py-0.5 rounded">
+                    手动
+                  </span>
+                ) : (
+                  <span className="text-xs bg-green-900/40 text-green-300 px-1.5 py-0.5 rounded">
+                    AI
+                  </span>
+                )}
+                {/* length tier is AI-only; absent on manual entries. */}
+                {entry.length && (
+                  <span className="text-xs bg-blue-900/40 text-blue-300 px-1.5 py-0.5 rounded">
+                    {LENGTH_LABEL[entry.length] ?? entry.length}
+                  </span>
+                )}
+                {/* Manual entries were never charged — only show cost for AI ones. */}
+                {entry.source !== 'manual' && entry.cost != null && (
+                  <span className="text-xs text-gray-500" title="本次生成扣除的额度">
+                    −{entry.cost} 额度
+                  </span>
+                )}
                 <span className="text-xs text-gray-600 ml-auto">
                   {new Date(entry.createdAt).toLocaleString()}
                 </span>

@@ -481,6 +481,7 @@ export class EngageController {
         // fails — never let it break the SSE response.
         try {
           await this._engageService.recordGeneration(org, id, {
+            source: 'ai',
             content: draft,
             length,
             cost: reservation.cost,

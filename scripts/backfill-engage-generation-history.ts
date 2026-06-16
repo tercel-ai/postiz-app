@@ -10,25 +10,37 @@
  *   cost / taskId) but carry NO content.
  *
  * This script therefore seeds one history entry per EngageSentReply (sent,
- * scheduled, manual, error, or saved DRAFT — every row that has real content),
- * enriching each with a matching engage_reply BillingRecord:
+ * scheduled, manual, error, or saved DRAFT — every row that has real content), and
+ * TAGS each with its provenance so AI and hand-typed versions are distinguishable:
+ *   - source='ai'     ← reply matched to an engage_reply charge (a real, paid AI
+ *                        generation); takes length/cost/billingTaskId/time from it.
+ *   - source='manual' ← reply with no matching charge (hand-typed / hand-saved);
+ *                        cost 0, synthetic `backfill_<sentReplyId>` taskId.
  *   - content / strategy / brandStrength / mentions  ← EngageSentReply (+ inputData)
- *   - length / cost / billingTaskId / createdAt       ← matched BillingRecord
- * Most historical opportunities are 1 reply ↔ 1 charge, so the pairing is exact.
- * When a reply has no matching charge, the entry still keeps the real content
- * (cost 0, a synthetic `backfill_<sentReplyId>` taskId). Paid generations whose
- * content is unrecoverable (charges with no sent/saved reply) are COUNTED and
- * REPORTED, never fabricated.
+ * (Only generateDraft writes an engage_reply charge — save-draft and manual replies
+ * never do — so "has a charge" is the reliable AI signal in legacy data.) Most
+ * historical opportunities are 1 reply ↔ 1 charge, so the pairing is exact. Paid
+ * generations whose content is unrecoverable (charges with no sent/saved reply) are
+ * COUNTED and REPORTED, never fabricated.
  *
  * Entries are written oldest-first (the storage contract — the read reverses to
- * newest-first). Idempotent: only fills rows whose generationHistory is NULL/empty
- * (so replies captured after the feature shipped are untouched). `--all` overwrites.
+ * newest-first) and stamped `backfilled: true`. Re-runnable and self-protecting:
+ * default mode fills empty rows AND re-backfills already-populated rows, but SKIPS
+ * any row holding a LIVE ai entry (source='ai' without the backfill marker) — a
+ * generated-but-unsent draft that lives only in generationHistory and would be lost
+ * by an overwrite. Pure-backfill rows and rows that only added live MANUAL saves
+ * (always reconstructible from EngageSentReply) are safely rebuilt. `--all` forces
+ * an overwrite of every row, including ones with live ai entries.
+ *
+ * NOTE: rows written by an OLDER version of this script lack the `backfilled` marker,
+ * so default mode treats them as live-ai and skips them — use `--all` once to
+ * re-sync those into the current format.
  *
  * Usage:
  *   npx ts-node --project scripts/tsconfig.json scripts/backfill-engage-generation-history.ts --dry-run
  *   npx ts-node --project scripts/tsconfig.json scripts/backfill-engage-generation-history.ts --execute
  *   npx ts-node --project scripts/tsconfig.json scripts/backfill-engage-generation-history.ts --org <orgId> --execute
- *   npx ts-node --project scripts/tsconfig.json scripts/backfill-engage-generation-history.ts --all --execute   # overwrite non-empty rows
+ *   npx ts-node --project scripts/tsconfig.json scripts/backfill-engage-generation-history.ts --all --execute   # force overwrite (incl. live ai)
  */
 
 import * as dotenv from 'dotenv';
@@ -121,32 +133,63 @@ function readBillingLength(data: Prisma.JsonValue): GenerationHistoryEntry['leng
 }
 
 /**
- * Build the oldest-first generationHistory for one opportunity by zipping its
- * (time-sorted) sent replies against its (time-sorted) engage_reply charges. One
- * entry per reply (the unit with content); the i-th reply pairs with the i-th
- * charge when present. Returns the entries plus how many charges were left
- * unpaired (paid generations whose content is unrecoverable).
+ * Build the oldest-first generationHistory for one opportunity. One entry per sent/
+ * saved reply (the unit with real content). Each engage_reply charge (a real, paid
+ * AI generation) is matched to its NEAREST-in-time reply (greedy, each charge claims
+ * one reply): a matched reply is tagged source='ai' and enriched with the charge's
+ * length/cost/taskId; an unmatched reply is hand-typed → source='manual' (cost 0,
+ * synthetic taskId). Nearest-by-time beats index-zip when a manual reply is
+ * interleaved with an AI one. Returns the entries plus how many charges claimed no
+ * reply (paid generations whose content is unrecoverable — reported, never seeded).
  */
 function buildEntries(
   replies: SentReplyRow[],
   billing: BillingRow[]
 ): { entries: GenerationHistoryEntry[]; unrecoverableCharges: number } {
+  // Greedily assign each charge to its closest unclaimed reply by createdAt.
+  const chargeForReply = new Map<number, BillingRow>();
+  const claimed = new Set<number>();
+  let matchedCharges = 0;
+  for (const charge of billing) {
+    let best = -1;
+    let bestDist = Infinity;
+    for (let i = 0; i < replies.length; i++) {
+      if (claimed.has(i)) continue;
+      const dist = Math.abs(replies[i].createdAt.getTime() - charge.createdAt.getTime());
+      if (dist < bestDist) { bestDist = dist; best = i; }
+    }
+    if (best >= 0) { claimed.add(best); chargeForReply.set(best, charge); matchedCharges++; }
+    // else: no reply left to attach → content unrecoverable (counted below).
+  }
+
   const entries: GenerationHistoryEntry[] = replies.map((reply, i) => {
-    const charge = billing[i]; // undefined when there are fewer charges than replies
+    const charge = chargeForReply.get(i);
     const { strategy, brandStrength, mentions } = readInputData(reply.inputData);
     return {
+      source: charge ? 'ai' : 'manual',
       content: reply.post?.content ?? '',
-      length: charge ? readBillingLength(charge.data) : DEFAULT_LENGTH,
-      cost: charge ? Math.max(0, Number(charge.amount) || 0) : 0,
       strategy,
       brandStrength,
       ...(mentions ? { mentions } : {}),
-      billingTaskId: charge ? charge.taskId : `backfill_${reply.id}`,
+      // length/cost/billingTaskId are AI-only (charge-backed); manual entries have
+      // no charge, so they carry none of them.
+      ...(charge
+        ? {
+            length: readBillingLength(charge.data),
+            cost: Math.max(0, Number(charge.amount) || 0),
+            billingTaskId: charge.taskId,
+          }
+        : {}),
       createdAt: (charge?.createdAt ?? reply.post?.publishDate ?? reply.createdAt).toISOString(),
+      // Mark as backfill-produced so a later default-mode re-run can safely
+      // overwrite this row without clobbering any live-generated entry.
+      backfilled: true,
     };
   });
-  const unrecoverableCharges = Math.max(0, billing.length - replies.length);
-  return { entries, unrecoverableCharges };
+  // Stored oldest-first (the read reverses to newest-first). 'ai' entries carry the
+  // charge time, 'manual' the reply time, so re-sort to a single timeline.
+  entries.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  return { entries, unrecoverableCharges: billing.length - matchedCharges };
 }
 
 async function main(): Promise<void> {
@@ -155,7 +198,7 @@ async function main(): Promise<void> {
   console.log('=== Backfill EngageOpportunityState.generationHistory ===\n');
   console.log(`Mode:  ${args.dryRun ? 'DRY RUN (no changes)' : 'EXECUTE'}`);
   console.log(`Org:   ${args.orgId ?? 'all'}`);
-  console.log(`Scope: ${args.all ? 'all rows (overwrite)' : 'rows with empty/NULL generationHistory'}\n`);
+  console.log(`Scope: ${args.all ? 'all rows (force overwrite, incl. live ai)' : 'empty rows + pure-backfill/manual rows (skips rows with a live ai entry)'}\n`);
 
   const prisma = new PrismaClient();
 
@@ -190,9 +233,10 @@ async function main(): Promise<void> {
   );
 
   let filled = 0;       // state rows we (would) write
-  let skippedNonEmpty = 0; // already has history (and not --all)
+  let skippedLiveAi = 0;   // populated with a live (non-backfill) ai entry — protected
   let skippedNoState = 0;  // no EngageOpportunityState row to write onto
-  let entriesWritten = 0;  // total history entries seeded
+  let aiEntries = 0;       // entries tagged source='ai' (charge-backed)
+  let manualEntries = 0;   // entries tagged source='manual' (hand-typed)
   let unrecoverable = 0;   // paid generations with no recoverable content
 
   for (const groupReplies of groups.values()) {
@@ -208,10 +252,18 @@ async function main(): Promise<void> {
       skippedNoState++;
       continue;
     }
-    const existing = state.generationHistory;
-    const hasHistory = Array.isArray(existing) && existing.length > 0;
-    if (hasHistory && !args.all) {
-      skippedNonEmpty++;
+    // Default mode safely re-backfills a POPULATED row too — but only when it holds
+    // no LIVE ai entry. A live 'ai' draft (source='ai' without the backfill marker)
+    // exists ONLY here (generated, not yet sent → no EngageSentReply to rebuild it
+    // from), so overwriting would lose it; such rows are skipped unless --all forces
+    // it. Pure-backfill rows and rows that only added live MANUAL saves (always
+    // reconstructible from EngageSentReply) are safe to rebuild.
+    const existing = Array.isArray(state.generationHistory)
+      ? (state.generationHistory as unknown as GenerationHistoryEntry[])
+      : [];
+    const hasLiveAi = existing.some((e) => e?.source === 'ai' && !e.backfilled);
+    if (hasLiveAi && !args.all) {
+      skippedLiveAi++;
       continue;
     }
 
@@ -230,12 +282,15 @@ async function main(): Promise<void> {
 
     const { entries, unrecoverableCharges } = buildEntries(groupReplies, billing);
     unrecoverable += unrecoverableCharges;
+    const ai = entries.filter((e) => e.source === 'ai').length;
+    const manual = entries.length - ai;
+    aiEntries += ai;
+    manualEntries += manual;
 
     filled++;
-    entriesWritten += entries.length;
     console.log(
       `  [${organizationId.slice(0, 8)}] opp=${opportunityId.slice(0, 8)}  ` +
-      `-> ${entries.length} entr${entries.length === 1 ? 'y' : 'ies'}` +
+      `-> ${entries.length} entr${entries.length === 1 ? 'y' : 'ies'} (${ai} ai, ${manual} manual)` +
       (unrecoverableCharges ? `  (+${unrecoverableCharges} charge(s) w/o recoverable content)` : '')
     );
 
@@ -247,10 +302,11 @@ async function main(): Promise<void> {
     }
   }
 
+  const entriesWritten = aiEntries + manualEntries;
   console.log(
     `\n${args.dryRun ? 'Would fill' : 'Filled'}: ${filled} opportunit${filled === 1 ? 'y' : 'ies'} ` +
-    `(${entriesWritten} entr${entriesWritten === 1 ? 'y' : 'ies'}), ` +
-    `already-populated: ${skippedNonEmpty}, no-state-row: ${skippedNoState}.\n` +
+    `(${entriesWritten} entr${entriesWritten === 1 ? 'y' : 'ies'}: ${aiEntries} ai, ${manualEntries} manual), ` +
+    `skipped (live ai, protected): ${skippedLiveAi}, no-state-row: ${skippedNoState}.\n` +
     `Paid generations with unrecoverable content (reported, not seeded): ${unrecoverable}.` +
     (args.dryRun ? '\n\n--- DRY RUN. Re-run with --execute to write. ---' : '')
   );

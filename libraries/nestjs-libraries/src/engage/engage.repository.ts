@@ -82,14 +82,26 @@ export interface ScanTiming {
 // `billingTaskId` links to the BillingRecord (taskId) charged for THIS generation,
 // closing the audit loop between "what was generated" and "what was billed".
 export interface GenerationHistoryEntry {
+  // Provenance of this entry's content: 'ai' = produced by a charged generateDraft
+  // call (the live path always writes 'ai'); 'manual' = hand-typed / hand-saved with
+  // no AI charge (only ever produced by the historical backfill, which infers it from
+  // the absence of an engage_reply BillingRecord). Lets the UI label each version.
+  source: 'ai' | 'manual';
   content: string;
-  length: 'short' | 'medium' | 'long';
-  cost: number; // credits charged for this generation (flat per-length fee)
   strategy: string;
   brandStrength: number;
   mentions?: string[];
-  billingTaskId: string; // → BillingRecord.taskId
   createdAt: string; // ISO timestamp
+  // AI-only fields — absent on 'manual' entries (hand-typed work has no length
+  // tier and is NEVER charged, so it has no BillingRecord). `billingTaskId` present
+  // ⟺ a real engage_reply charge exists (the audit link to BillingRecord.taskId).
+  length?: 'short' | 'medium' | 'long';
+  cost?: number; // credits charged for this generation
+  billingTaskId?: string; // → BillingRecord.taskId
+  // Set ONLY by the historical backfill script; absent on live entries. Lets a
+  // re-run tell its own reconstructed rows apart from live-generated ones (a live
+  // 'ai' draft lives only here, so it must not be clobbered by a re-backfill).
+  backfilled?: boolean;
 }
 
 // Coerce the stored generationHistory Json (null | unknown[]) into a clean,
@@ -1326,6 +1338,32 @@ export class EngageRepository {
       WHERE "organizationId" = ${organizationId}
         AND "opportunityId" = ${opportunityId}
     `;
+  }
+
+  // Record a hand-typed/edited draft as a 'manual' version in generationHistory so
+  // the version history is complete (AI + manual), each tagged by source. Deduped:
+  // skips the append when the content matches the most-recent entry — saving an
+  // unchanged AI draft, or an autosave, must not spawn a duplicate version. Returns
+  // whether an entry was actually appended. Best-effort read-modify-write: save-draft
+  // is a deliberate single-user action, so the dedup read racing a concurrent write
+  // is negligible (and the append itself is still the atomic concat).
+  async recordManualGeneration(
+    organizationId: string,
+    opportunityId: string,
+    entry: GenerationHistoryEntry
+  ): Promise<boolean> {
+    const state = await this._oppState.model.engageOpportunityState.findUnique({
+      where: { organizationId_opportunityId: { organizationId, opportunityId } },
+      select: { generationHistory: true },
+    });
+    if (!state) return false; // no per-org row to store onto
+    const history = Array.isArray(state.generationHistory)
+      ? (state.generationHistory as unknown as GenerationHistoryEntry[])
+      : [];
+    const last = history[history.length - 1];
+    if (last && last.content === entry.content) return false; // unchanged → skip
+    await this.appendGenerationHistory(organizationId, opportunityId, entry);
+    return true;
   }
 
   // Rollback helper — restores an opportunity to its prior status after a failed
