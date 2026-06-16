@@ -377,6 +377,12 @@ export class EngageService implements OnApplicationBootstrap {
     return this._engageRepository.locateSentReply(org.id, dto);
   }
 
+  // Poll target for the in-browser extension reply loop: returns once the
+  // extension has backfilled the permalink (replyUrl non-null).
+  async getSentReplyStatus(org: Organization, sentReplyId: string) {
+    return this._engageRepository.getSentReplyStatus(org.id, sentReplyId);
+  }
+
   async updateScheduledReply(org: Organization, id: string, dto: UpdateScheduledReplyDto) {
     if (dto.scheduledAt !== undefined) {
       if (new Date(dto.scheduledAt) <= new Date()) {

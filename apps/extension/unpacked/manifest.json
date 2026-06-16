@@ -1,0 +1,112 @@
+{
+  "manifest_version": 3,
+  "name": "Aisee",
+  "description": "Your ultimate social media scheduling tool",
+  "options_ui": {
+    "page": "src/pages/options/index.html"
+  },
+  "action": {
+    "default_popup": "src/pages/popup/index.html",
+    "default_icon": {
+      "32": "icon-32.png"
+    }
+  },
+  "icons": {
+    "128": "icon-128.png"
+  },
+  "permissions": [
+    "activeTab",
+    "cookies",
+    "storage",
+    "tabs",
+    "scripting",
+    "alarms"
+  ],
+  "content_scripts": [
+    {
+      "js": [
+        "assets/index.tsx-loader-DP8wwvJS.js"
+      ],
+      "matches": [
+        "https://x.com/*",
+        "https://www.linkedin.com/*"
+      ],
+      "css": [
+        "contentStyle.css",
+        "assets/index-_v61Kqty.css"
+      ]
+    },
+    {
+      "js": [
+        "assets/bridge.ts-loader-O8mrmW7L.js"
+      ],
+      "matches": [
+        "http://localhost:3001/*",
+        "https://app-dev.aisee.live/*",
+        "https://app.aisee.live/*",
+        "http://192.168.110.98:4200/*"
+      ]
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "matches": [],
+      "resources": [
+        "contentStyle.css",
+        "icon-128.png",
+        "icon-32.png"
+      ],
+      "use_dynamic_url": false
+    },
+    {
+      "matches": [
+        "https://www.linkedin.com/*",
+        "https://x.com/*"
+      ],
+      "resources": [
+        "assets/client-DWrRtCjU.js",
+        "assets/index-aMqAp4xB.js",
+        "assets/brand-Bqb5pXvv.js",
+        "assets/index.tsx-CT0IrlJD.js"
+      ],
+      "use_dynamic_url": false
+    },
+    {
+      "matches": [
+        "http://192.168.110.98:4200/*",
+        "http://localhost:3001/*",
+        "https://app-dev.aisee.live/*",
+        "https://app.aisee.live/*"
+      ],
+      "resources": [
+        "assets/reply.history-CfLyHO5y.js",
+        "assets/brand-Bqb5pXvv.js",
+        "assets/bridge.ts-BgsZPVjw.js"
+      ],
+      "use_dynamic_url": false
+    }
+  ],
+  "host_permissions": [
+    "https://x.com/*",
+    "https://www.linkedin.com/*",
+    "https://www.reddit.com/*",
+    "https://*.reddit.com/*",
+    "http://localhost:3000/*",
+    "http://192.168.110.98:3000/*",
+    "https://api-post-dev.aisee.live/*",
+    "https://api-post.aisee.live/*",
+    "http://localhost:9001/*",
+    "http://192.168.110.98:9001/*",
+    "https://api-auth-dev.aisee.live/*",
+    "https://api-auth.aisee.live/*",
+    "http://localhost:3001/*",
+    "https://app-dev.aisee.live/*",
+    "https://app.aisee.live/*",
+    "http://192.168.110.98:4200/*"
+  ],
+  "version": "1.0.3",
+  "background": {
+    "service_worker": "service-worker-loader.js",
+    "type": "module"
+  }
+}

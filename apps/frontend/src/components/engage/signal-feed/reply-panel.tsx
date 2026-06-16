@@ -5,6 +5,7 @@ import { useFetch } from '@gitroom/helpers/utils/custom.fetch';
 import { useToaster } from '@gitroom/react/toaster/toaster';
 import { useVariables } from '@gitroom/react/helpers/variable.context';
 import { EXTENSION_MESSAGE } from '@gitroom/helpers/extension/brand';
+import { useReplyPosting } from './use-reply-posting';
 import type { Opportunity } from './opportunity-card';
 
 interface ReplyPanelProps {
@@ -116,6 +117,42 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
     }
   }, [draft, toaster]);
 
+  // Track the in-browser extension reply so the panel reflects a definite
+  // outcome instead of leaving the button live: the extension reports back (fast
+  // path) and/or we poll the sent reply until its permalink is backfilled. On a
+  // timeout we settle to "processing" — never a failure — so the user isn't
+  // tempted to re-post and create a duplicate reply.
+  const { begin: beginPosting, posting } = useReplyPosting(
+    opportunity.id,
+    useCallback(
+      (resolution) => {
+        if (resolution.status === 'success') {
+          const m = resolution.message;
+          if (m && m.ok && m.permalink && !m.backfilled) {
+            toaster.show('Posted, but link not recorded — backfill manually', 'warning');
+          } else if (m && m.ok && !m.backfilled && !m.permalink) {
+            toaster.show('Reply posted. Add the link manually to enable metrics.', 'warning');
+          } else {
+            toaster.show('Reply posted & link recorded!', 'success');
+          }
+          onSent();
+        } else if (resolution.status === 'processing') {
+          toaster.show(
+            'Still posting — check the Sent list shortly for the result',
+            'warning'
+          );
+          onSent();
+        } else {
+          toaster.show(
+            resolution.error || 'Extension could not post — try manually',
+            'warning'
+          );
+        }
+      },
+      [toaster, onSent]
+    )
+  );
+
   // Closed loop: create a "sent, URL pending" record, then hand the draft +
   // sentReplyId + backendBase to the extension. The extension posts in-browser
   // AND backfills the permalink itself (PATCH /engage/sent/:id/reply-url) using
@@ -158,6 +195,9 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
         },
         window.location.origin
       );
+      // Enter the "posting" wait — keeps the button disabled until the extension
+      // confirms (message or polled backfill) or the timeout settles it.
+      if (sentReply?.id) beginPosting(sentReply.id);
       toaster.show('Posting via the browser extension…', 'success');
     } catch {
       toaster.show('Failed to record reply — please retry', 'warning');
@@ -176,43 +216,8 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
     backendUrl,
     fetch,
     toaster,
+    beginPosting,
   ]);
-
-  // The extension backfills the permalink itself; here we just surface the
-  // outcome and refresh the feed.
-  useEffect(() => {
-    const onMessage = (e: MessageEvent) => {
-      if (e.source !== window || e.origin !== window.location.origin) return;
-      const data: any = e.data;
-      if (!data || data.source !== EXTENSION_MESSAGE.resultSource) return;
-      if (data.action !== EXTENSION_MESSAGE.engageReplyResult) return;
-      if (data.opportunityId && data.opportunityId !== opportunity.id) return;
-
-      const result = data.result;
-
-      if (result?.ok && result.backfilled) {
-        toaster.show('Reply posted & link recorded!', 'success');
-      } else if (result?.ok && result.permalink) {
-        toaster.show(
-          'Posted, but link not recorded — backfill manually',
-          'warning'
-        );
-      } else if (result?.ok) {
-        toaster.show(
-          'Reply posted. Add the link manually to enable metrics.',
-          'warning'
-        );
-      } else {
-        toaster.show(
-          result?.error || 'Extension could not post — try manually',
-          'warning'
-        );
-      }
-      onSent();
-    };
-    window.addEventListener('message', onMessage);
-    return () => window.removeEventListener('message', onMessage);
-  }, [opportunity.id, fetch, toaster, onSent]);
 
   const generateDraft = useCallback(async () => {
     if (streaming) {
@@ -606,10 +611,10 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
                 X API reply tier is blocked. Posts as the user + auto-backfills. */}
             <button
               onClick={replyViaExtension}
-              disabled={!draft || overLimit || sending}
+              disabled={!draft || overLimit || sending || posting}
               className="w-full py-2 text-sm bg-purple-600 hover:bg-purple-700 disabled:bg-gray-700 disabled:text-gray-500 text-white rounded-lg font-medium transition-colors"
             >
-              Post via Postiz Extension
+              {posting ? 'Posting…' : 'Post via Postiz Extension'}
             </button>
             {/* Schedule option */}
             <details className="text-xs text-gray-500">
@@ -737,10 +742,10 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
               <>
                 <button
                   onClick={replyViaExtension}
-                  disabled={!draft || sending}
+                  disabled={!draft || sending || posting}
                   className="w-full py-2 text-sm bg-purple-600 hover:bg-purple-700 disabled:bg-gray-700 disabled:text-gray-500 text-white rounded-lg font-medium transition-colors"
                 >
-                  Post via Postiz Extension
+                  {posting ? 'Posting…' : 'Post via Postiz Extension'}
                 </button>
                 <div className="flex items-center gap-2">
                   <button

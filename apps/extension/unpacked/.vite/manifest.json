@@ -1,0 +1,105 @@
+{
+  "../../../../../../../@crx/manifest": {
+    "file": "assets/crx-manifest.js-CA_11hHq.js",
+    "name": "crx-manifest.js",
+    "src": "../../../../../../../@crx/manifest",
+    "isEntry": true
+  },
+  "_auth.service-Cgk0YjdS.js": {
+    "file": "assets/auth.service-Cgk0YjdS.js",
+    "name": "auth.service"
+  },
+  "_brand-Bqb5pXvv.js": {
+    "file": "assets/brand-Bqb5pXvv.js",
+    "name": "brand"
+  },
+  "_bridge.ts-loader-O8mrmW7L.js": {
+    "file": "assets/bridge.ts-loader-O8mrmW7L.js",
+    "src": "_bridge.ts-loader-O8mrmW7L.js"
+  },
+  "_client-DWrRtCjU.js": {
+    "file": "assets/client-DWrRtCjU.js",
+    "name": "client"
+  },
+  "_index-aMqAp4xB.js": {
+    "file": "assets/index-aMqAp4xB.js",
+    "name": "index",
+    "imports": [
+      "_client-DWrRtCjU.js"
+    ]
+  },
+  "_index.tsx-loader-DP8wwvJS.js": {
+    "file": "assets/index.tsx-loader-DP8wwvJS.js",
+    "src": "_index.tsx-loader-DP8wwvJS.js"
+  },
+  "_modulepreload-polyfill-B5Qt9EMX.js": {
+    "file": "assets/modulepreload-polyfill-B5Qt9EMX.js",
+    "name": "modulepreload-polyfill"
+  },
+  "_reply.history-CfLyHO5y.js": {
+    "file": "assets/reply.history-CfLyHO5y.js",
+    "name": "reply.history"
+  },
+  "src/pages/background/index.ts": {
+    "file": "assets/index.ts-B3WbGcm8.js",
+    "name": "index.ts",
+    "src": "src/pages/background/index.ts",
+    "isEntry": true,
+    "imports": [
+      "_auth.service-Cgk0YjdS.js"
+    ]
+  },
+  "src/pages/content/bridge.ts": {
+    "file": "assets/bridge.ts-BgsZPVjw.js",
+    "name": "bridge.ts",
+    "src": "src/pages/content/bridge.ts",
+    "isEntry": true,
+    "imports": [
+      "_reply.history-CfLyHO5y.js",
+      "_brand-Bqb5pXvv.js"
+    ]
+  },
+  "src/pages/content/index.tsx": {
+    "file": "assets/index.tsx-CT0IrlJD.js",
+    "name": "index.tsx",
+    "src": "src/pages/content/index.tsx",
+    "isEntry": true,
+    "imports": [
+      "_client-DWrRtCjU.js",
+      "_index-aMqAp4xB.js",
+      "_brand-Bqb5pXvv.js"
+    ],
+    "css": [
+      "assets/index-_v61Kqty.css"
+    ]
+  },
+  "src/pages/options/index.html": {
+    "file": "assets/index.html-Cs1LF_cH.js",
+    "name": "index.html",
+    "src": "src/pages/options/index.html",
+    "isEntry": true,
+    "imports": [
+      "_modulepreload-polyfill-B5Qt9EMX.js",
+      "_client-DWrRtCjU.js"
+    ],
+    "css": [
+      "assets/index-tNvtlvL0.css"
+    ]
+  },
+  "src/pages/popup/index.html": {
+    "file": "assets/index.html-Bq1pHKUA.js",
+    "name": "index.html",
+    "src": "src/pages/popup/index.html",
+    "isEntry": true,
+    "imports": [
+      "_modulepreload-polyfill-B5Qt9EMX.js",
+      "_client-DWrRtCjU.js",
+      "_index-aMqAp4xB.js",
+      "_auth.service-Cgk0YjdS.js",
+      "_reply.history-CfLyHO5y.js"
+    ],
+    "css": [
+      "assets/index-C9EykCz2.css"
+    ]
+  }
+}

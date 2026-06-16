@@ -2524,6 +2524,23 @@ export class EngageRepository {
     return reply.opportunity.platform;
   }
 
+  // Lightweight status of a single sent reply — for the frontends to poll while
+  // an in-browser extension reply posts + self-backfills its permalink. Success
+  // is signalled by `replyUrl` (Post.releaseURL) flipping non-null; the Post is
+  // already PUBLISHED at creation time, so state alone can't be the signal.
+  async getSentReplyStatus(organizationId: string, sentReplyId: string) {
+    const reply = await this._sentReply.model.engageSentReply.findFirst({
+      where: { id: sentReplyId, organizationId },
+      select: { id: true, post: { select: { state: true, releaseURL: true } } },
+    });
+    if (!reply) throw new NotFoundException('Sent reply not found');
+    return {
+      id: reply.id,
+      state: reply.post?.state ?? null,
+      replyUrl: reply.post?.releaseURL ?? null,
+    };
+  }
+
   async markAuthorReplied(sentReplyId: string) {
     return this._sentReply.model.engageSentReply.update({
       where: { id: sentReplyId },

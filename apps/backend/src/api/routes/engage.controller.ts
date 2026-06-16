@@ -638,6 +638,16 @@ export class EngageController {
     });
   }
 
+  @ApiOperation({ summary: 'Lightweight status of one sent reply — for the frontends to poll while an in-browser extension reply posts and self-backfills. Returns { id, state, replyUrl }; replyUrl flips non-null on success.' })
+  @ApiResponse({ status: 404, description: 'Sent reply not found' })
+  @Get('/sent/:id/status')
+  getSentReplyStatus(
+    @GetOrgFromRequest() org: Organization,
+    @Param('id') id: string
+  ) {
+    return this._engageService.getSentReplyStatus(org, id);
+  }
+
   @ApiOperation({ summary: 'Edit content / schedule of a scheduled (QUEUE) engage reply' })
   @ApiResponse({ status: 400, description: 'Reply already sent, or scheduledAt is not in the future' })
   @ApiResponse({ status: 404, description: 'Sent reply not found' })
