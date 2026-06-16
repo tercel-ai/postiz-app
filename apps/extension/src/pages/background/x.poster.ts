@@ -268,6 +268,29 @@ function readCapturedTweet(): Promise<{
   });
 }
 
+// Grace period before auto-closing a sent tab: let any trailing in-flight X
+// requests settle so closing never races / aborts the actual send.
+const TAB_CLOSE_GRACE_MS = 1500;
+const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/** Best-effort: bring a possibly-background tab to the foreground. */
+async function focusTab(tabId: number): Promise<void> {
+  try {
+    await chrome.tabs.update(tabId, { active: true });
+  } catch (e) {
+    console.warn('[aisee][x] focusTab failed', e);
+  }
+}
+
+/** Best-effort: close the tab once the reply is sent (nothing left to show). */
+async function closeTab(tabId: number): Promise<void> {
+  try {
+    await chrome.tabs.remove(tabId);
+  } catch (e) {
+    console.warn('[aisee][x] closeTab failed', e);
+  }
+}
+
 export async function postXReply(input: XReplyInput): Promise<ReplyResult> {
   const text = (input.text || '').trim();
   if (!text) return { ok: false, error: 'Reply text is empty' };
@@ -278,11 +301,24 @@ export async function postXReply(input: XReplyInput): Promise<ReplyResult> {
     return { ok: false, error: 'Could not parse an X status URL from the input' };
   }
 
+  // autoSubmit (default true): the extension clicks X's own Reply button, so the
+  // whole round-trip can run in a BACKGROUND tab the user never has to look at —
+  // it's auto-closed on success. When false, the user must review + click Reply
+  // themselves, so open the tab focused. If background automation can't finish on
+  // its own (composer not found / send button disabled / injection error), we
+  // bring the tab to the foreground so the user can complete it — we never strand
+  // an invisible tab, so the worst case matches the old always-foreground flow.
+  const autoSubmit = input.autoSubmit !== false;
+
   let tabId: number | undefined;
   try {
-    const tab = await chrome.tabs.create({ url: statusUrl, active: true });
+    const tab = await chrome.tabs.create({ url: statusUrl, active: !autoSubmit });
     tabId = tab.id ?? undefined;
-    console.log('[aisee][x] opened tab', tabId);
+    console.log(
+      '[aisee][x] opened tab',
+      tabId,
+      autoSubmit ? '(background)' : '(foreground)'
+    );
   } catch (e: any) {
     console.error('[aisee][x] tabs.create failed', e);
     return { ok: false, error: `Failed to open X tab: ${e?.message || e}` };
@@ -291,8 +327,6 @@ export async function postXReply(input: XReplyInput): Promise<ReplyResult> {
 
   await waitForTabComplete(tabId, 15_000);
   console.log('[aisee][x] tab load complete, injecting…');
-
-  const autoSubmit = input.autoSubmit !== false;
 
   try {
     // 1) MAIN-world interceptor must be active before the Reply click fires the
@@ -320,6 +354,7 @@ export async function postXReply(input: XReplyInput): Promise<ReplyResult> {
       let permalink: string | undefined;
       let postId: string | undefined;
       let author: ReplyResult['author'];
+      let confirmed = false;
       try {
         const [cap] = await chrome.scripting.executeScript({
           target: { tabId },
@@ -328,6 +363,7 @@ export async function postXReply(input: XReplyInput): Promise<ReplyResult> {
         });
         const captured = cap?.result;
         if (captured?.rest_id) {
+          confirmed = true;
           postId = captured.rest_id;
           permalink = captured.screen_name
             ? `https://x.com/${captured.screen_name}/status/${captured.rest_id}`
@@ -338,9 +374,24 @@ export async function postXReply(input: XReplyInput): Promise<ReplyResult> {
       } catch (e) {
         console.error('[aisee][x] capture read failed', e);
       }
+      if (confirmed) {
+        // The CreateTweet response was intercepted → the reply is durably posted
+        // server-side. Wait a short grace period for any trailing requests, THEN
+        // close — so the auto-close never aborts a still-in-flight send.
+        await wait(TAB_CLOSE_GRACE_MS);
+        await closeTab(tabId);
+      } else {
+        // Reply was clicked but we never saw the CreateTweet response, so we
+        // can't be sure it posted. Don't risk closing a tab whose request may
+        // still be in flight — surface it instead so the user can confirm.
+        await focusTab(tabId);
+      }
       return { ok: true, message: 'Reply sent on X.', permalink, postId, author };
     }
     if (status === 'filled') {
+      // The composer is filled but X still needs a human click. Surface the tab
+      // (it may have been opened in the background) so the user can finish.
+      await focusTab(tabId);
       return {
         ok: true,
         pending: true,
@@ -350,6 +401,9 @@ export async function postXReply(input: XReplyInput): Promise<ReplyResult> {
       };
     }
 
+    // Couldn't drive the composer — bring the tab forward so the user can reply
+    // by hand instead of being left with nothing.
+    await focusTab(tabId);
     return {
       ok: false,
       error:
@@ -357,6 +411,8 @@ export async function postXReply(input: XReplyInput): Promise<ReplyResult> {
     };
   } catch (e: any) {
     console.error('[aisee][x] executeScript failed', e);
+    // Don't strand an invisible broken tab — bring it forward so the user can act.
+    await focusTab(tabId);
     return { ok: false, error: `X injection failed: ${e?.message || e}` };
   }
 }
