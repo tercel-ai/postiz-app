@@ -13,17 +13,20 @@ export class InfiniteWorkflowRegister implements OnModuleInit {
       // Start infinite workflows with USE_EXISTING to avoid restarting already running ones
       const infiniteWorkflows = [
         { workflowId: 'missing-post-workflow', name: 'missingPostWorkflow' },
-        { workflowId: 'data-ticks-sync-workflow', name: 'dataTicksSyncWorkflow' },
         { workflowId: 'refresh-workflow-recovery', name: 'refreshWorkflowRecoveryWorkflow' },
+        // Post analytics sync: disabled by default; set POST_ANALYSE_ENABLE=true to enable.
+        ...(process.env.POST_ANALYSE_ENABLE === 'true'
+          ? [{ workflowId: 'data-ticks-sync-workflow', name: 'dataTicksSyncWorkflow' }]
+          : []),
         // Engage: daily aggregation of EngageDataTicks (all orgs, global singleton).
         // DISABLED by default — EngageDataTicks is currently write-only (the dashboard
         // endpoints read the Post table directly for same-day freshness), so this job
         // produces no read value. The aggregate is a pure derivation of Post keyed by
         // publishDate and is fully backfillable on demand via
-        // scripts/backfill-engage-data-ticks.ts. Set ENGAGE_DATA_TICKS=on to re-enable
+        // scripts/backfill-engage-data-ticks.ts. Set ENGAGE_DATA_TICKS=true to re-enable
         // (only needed once historical Post rows are pruned, or a true long-horizon
         // retention store is required).
-        ...(process.env.ENGAGE_DATA_TICKS === 'on'
+        ...(process.env.ENGAGE_DATA_TICKS === 'true'
           ? [{ workflowId: 'engage-data-ticks-workflow', name: 'engageDataTicksWorkflow' }]
           : []),
       ];
