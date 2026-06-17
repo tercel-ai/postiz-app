@@ -1,8 +1,5 @@
 import React, { FC } from 'react';
-import {
-  ClearRange,
-  ReplyHistoryItem,
-} from '@gitroom/extension/utils/reply.history';
+import { ReplyHistoryItem } from '@gitroom/extension/utils/reply.history';
 
 const PLATFORM_LABEL: Record<string, string> = { reddit: 'Reddit', x: 'X' };
 
@@ -57,31 +54,17 @@ const HistoryItemRow: FC<{ item: ReplyHistoryItem }> = ({ item }) => (
 
 export const HistoryList: FC<{
   items: ReplyHistoryItem[];
-  onClear: (range: ClearRange) => void;
-}> = ({ items, onClear }) => {
-  const clearButtons: { range: ClearRange; label: string }[] = [
-    { range: '1d', label: '>1d' },
-    { range: '1w', label: '>1w' },
-    { range: '1m', label: '>1m' },
-    { range: 'all', label: 'All' },
-  ];
-
+  onClearPage: () => void;
+}> = ({ items, onClearPage }) => {
   return (
     <div className="pz-history">
       <div className="pz-history-head">
         <div className="pz-history-title">History ({items.length})</div>
-        <div className="pz-clear">
-          <span className="pz-clear-label">clear</span>
-          {clearButtons.map((b) => (
-            <button
-              key={b.range}
-              className="pz-clear-btn"
-              onClick={() => onClear(b.range)}
-            >
-              {b.label}
-            </button>
-          ))}
-        </div>
+        {items.length > 0 && (
+          <button className="pz-clear-btn" onClick={onClearPage}>
+            Clear ›
+          </button>
+        )}
       </div>
 
       {items.length === 0 ? (

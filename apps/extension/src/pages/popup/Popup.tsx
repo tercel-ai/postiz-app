@@ -1,10 +1,9 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { ComposeForm } from '@gitroom/extension/pages/popup/components/ComposeForm';
 import { HistoryList } from '@gitroom/extension/pages/popup/components/HistoryList';
+import { ClearHistoryPage } from '@gitroom/extension/pages/popup/components/ClearHistoryPage';
 import { LoginForm } from '@gitroom/extension/pages/popup/components/LoginForm';
 import { AuthUser, ACCESS_KEY } from '@gitroom/extension/utils/auth.service';
 import {
-  appendHistory,
   clearHistory,
   loadHistory,
   ClearRange,
@@ -14,6 +13,7 @@ import {
 
 export default function Popup() {
   const [history, setHistory] = useState<ReplyHistoryItem[]>([]);
+  const [view, setView] = useState<'main' | 'clear'>('main');
   // undefined = checking, null = logged out, object = logged in
   const [user, setUser] = useState<AuthUser | null | undefined>(undefined);
 
@@ -64,17 +64,22 @@ export default function Popup() {
     return () => chrome.storage.onChanged.removeListener(onChanged);
   }, []);
 
-  const handleSubmitted = useCallback(async (item: ReplyHistoryItem) => {
-    const next = await appendHistory(item);
-    setHistory(next);
-  }, []);
-
   const handleClear = useCallback(async (range: ClearRange) => {
     const next = await clearHistory(range);
     setHistory(next);
   }, []);
 
   if (user === undefined) return null; // still checking auth
+
+  if (view === 'clear') {
+    return (
+      <ClearHistoryPage
+        items={history}
+        onClear={handleClear}
+        onBack={() => setView('main')}
+      />
+    );
+  }
 
   return (
     <div className="pz">
@@ -114,13 +119,9 @@ export default function Popup() {
       </div>
 
       {user ? (
-        <>
-          <ComposeForm onSubmitted={handleSubmitted} />
-          <div className="pz-divider" />
-          <HistoryList items={history} onClear={handleClear} />
-        </>
+        <HistoryList items={history} onClearPage={() => setView('clear')} />
       ) : (
-        <LoginForm onLoggedIn={setUser} />
+        <LoginForm />
       )}
     </div>
   );

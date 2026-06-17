@@ -100,6 +100,27 @@ npm run build:firefox
 
 The output goes to `apps/extension/dist/`.
 
+### Packaging for distribution (shareable zip)
+
+`pack-ext` builds the extension and creates a zip that a colleague can drag-drop
+straight into `chrome://extensions` (no manual unzip needed):
+
+```bash
+# Default — reads FRONTEND_URL from repo-root .env, login button opens FRONTEND_URL/sign-in
+pnpm pack-ext
+
+# Override login URL for a specific environment
+LOGIN_URL=https://yourdomain.com/sign-in pnpm pack-ext
+LOGIN_URL=https://yourdomain.com/sign-in pnpm pack-ext
+```
+
+The `LOGIN_URL` env prefix is passed through to Vite at build time
+(`import.meta.env.LOGIN_URL`). If omitted, the login button falls back to
+`FRONTEND_URL + '/sign-in'` from the `.env` file.
+
+The output zip is named `aisee-extension-v{VERSION}-{TIMESTAMP}.zip` and sits
+in `apps/extension/`.
+
 ### Development (hot reload)
 
 ```bash
@@ -152,6 +173,15 @@ Declared in `manifest.json` / `vite.config.base.ts`:
 ---
 
 ## Usage (end user)
+
+### Sign in
+
+Click the extension icon to open the popup. If you are not signed in, a
+**Sign in** button is shown — click it to open the Aisee web app sign-in page
+in a new tab. After you sign in there, the extension picks up the session
+automatically (no need to enter credentials in the popup).
+
+> Signing out of the web app also signs out the extension, and vice-versa.
 
 ### Open the Postiz scheduler from X / LinkedIn
 
