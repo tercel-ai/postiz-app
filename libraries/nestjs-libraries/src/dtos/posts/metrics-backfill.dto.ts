@@ -29,6 +29,7 @@ class AnalyticsDataDto {
   label: string;
 
   @IsArray()
+  @ArrayMaxSize(64) // bound an external (extension) body — well above any real series
   @ValidateNested({ each: true })
   @Type(() => AnalyticsPointDto)
   data: AnalyticsPointDto[];
@@ -43,6 +44,7 @@ class MetricsBackfillItemDto {
   postId: string;
 
   @IsArray()
+  @ArrayMaxSize(32) // one entry per metric label — bounds the extension body
   @ValidateNested({ each: true })
   @Type(() => AnalyticsDataDto)
   analytics: AnalyticsDataDto[];
