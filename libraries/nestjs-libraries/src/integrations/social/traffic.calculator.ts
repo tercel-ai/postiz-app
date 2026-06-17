@@ -100,6 +100,19 @@ const FALLBACK_WEIGHTS: Record<string, number> = {
 };
 
 /**
+ * Coerce a metric `total` to a finite number, mapping NaN/Infinity to 0. Metric
+ * totals can arrive as non-numeric strings (e.g. DOM-scraped "N/A" / "1,234"
+ * forwarded by the extension, or a provider sentinel); a raw `Number(...)` would
+ * yield NaN, which propagates through the score and is then rejected by the
+ * Prisma Float column, failing the whole write. Guarding at the source immunizes
+ * every caller (backfill, OAuth sync, data-ticks).
+ */
+export function toFiniteMetric(value: unknown): number {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : 0;
+}
+
+/**
  * Compute a Traffic score from post analytics metrics using
  * per-platform weighted formulas.
  *
@@ -122,7 +135,7 @@ export function computeTrafficScore(
 
     hasMatch = true;
     for (const point of metric.data) {
-      score += Number(point.total || 0) * weight;
+      score += toFiniteMetric(point.total) * weight;
     }
   }
 

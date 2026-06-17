@@ -1,5 +1,8 @@
 import { AnalyticsData } from '@gitroom/nestjs-libraries/integrations/social/social.integrations.interface';
-import { computeTrafficScore } from '@gitroom/nestjs-libraries/integrations/social/traffic.calculator';
+import {
+  computeTrafficScore,
+  toFiniteMetric,
+} from '@gitroom/nestjs-libraries/integrations/social/traffic.calculator';
 
 /**
  * Per-platform mapping: which API label(s) represent total impressions/exposure.
@@ -45,7 +48,7 @@ export function extractMetrics(
   for (const metric of rawMetrics) {
     if (isImpressionsLabel(platform, metric.label)) {
       for (const point of metric.data) {
-        impressions += Number(point.total || 0);
+        impressions += toFiniteMetric(point.total);
       }
     }
   }
