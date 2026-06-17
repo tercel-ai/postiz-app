@@ -32,6 +32,7 @@ by **when you reach for them** and lists the flags/env you actually need.
 | `backfill-engage-matched-keywords.ts` | Fill `EngageOpportunityState.matchedKeywords` for pre-field rows | dry-run | ts-node |
 | `backfill-engage-generation-history.ts` | Seed `EngageOpportunityState.generationHistory` from sent/saved replies + `engage_reply` charges | dry-run | ts-node |
 | `backfill-engage-opportunity-states.ts` | Back-attribute existing global opportunities → per-org `EngageOpportunityState` for orgs that subscribed before the extension scan path | dry-run | ts-node |
+| `upgrade-engage.ts` | Idempotent upgrade init: verify new columns + seed `engage_scan_pacing` if missing (demand-fetch / paced-scan release) | seed-if-missing | ts-node |
 
 ---
 
