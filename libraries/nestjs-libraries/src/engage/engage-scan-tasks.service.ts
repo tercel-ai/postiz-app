@@ -237,11 +237,18 @@ export class EngageScanTasksService {
    */
   private _deriveCursor(
     posts: RawPost[],
-    clientCursor?: { lastSeenExternalId?: string | null; lastSeenAt?: Date | null }
+    clientCursor?: { lastSeenExternalId?: string | null; lastSeenAt?: Date | null },
+    now: number = Date.now()
   ): { lastSeenExternalId: string | null; lastSeenAt: Date | null } {
-    if (posts.length) {
-      let newest = posts[0];
-      for (const p of posts) {
+    // Only NON-FUTURE posts may advance the cursor. The shared global cursor is
+    // resumed from `lastSeenExternalId`/`lastSeenAt`; a forged future-dated post
+    // (client-controlled postPublishedAt) would otherwise jump the cursor past
+    // real data and make every other org's next incremental scan skip genuine
+    // posts. Future-dated entries are ignored entirely (id AND timestamp).
+    const eligible = posts.filter((p) => p.postPublishedAt.getTime() <= now);
+    if (eligible.length) {
+      let newest = eligible[0];
+      for (const p of eligible) {
         if (p.postPublishedAt > newest.postPublishedAt) newest = p;
       }
       return {
@@ -249,6 +256,7 @@ export class EngageScanTasksService {
         lastSeenAt: newest.postPublishedAt,
       };
     }
+    // No eligible (non-future) posts → do not advance from posts.
     return {
       lastSeenExternalId: clientCursor?.lastSeenExternalId ?? null,
       lastSeenAt: clientCursor?.lastSeenAt ?? null,

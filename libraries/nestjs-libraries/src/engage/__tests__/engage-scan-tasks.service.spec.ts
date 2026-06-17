@@ -104,13 +104,14 @@ describe('EngageScanTasksService.sync — ingest completed', () => {
   });
 
   it('fans out to subscribers, derives cursor from posts, then completes by token', async () => {
-    const newest = new Date('2026-06-17T12:00:00.000Z');
+    // Clearly-past dates so the future-clamp (W1) never filters them.
+    const newest = new Date('2020-01-02T12:00:00.000Z');
     const { svc, engageRepo, ingest, lease } = build({
       unitByToken: { id: 'cur1', platform: 'reddit', scanType: 'keyword', scanKey: 'ai' },
       subscribers: [{ organizationId: 'o1' }, { organizationId: 'o2' }],
     });
     const posts = [
-      { externalPostId: 't3_old', postPublishedAt: new Date('2026-06-17T10:00:00.000Z') },
+      { externalPostId: 't3_old', postPublishedAt: new Date('2020-01-01T10:00:00.000Z') },
       { externalPostId: 't3_new', postPublishedAt: newest },
     ];
     const res = await svc.sync('org1', {
@@ -124,5 +125,22 @@ describe('EngageScanTasksService.sync — ingest completed', () => {
     const [token, cursor] = lease.completeByToken.mock.calls[0];
     expect(token).toBe('tok_abc');
     expect(cursor).toEqual({ lastSeenExternalId: 't3_new', lastSeenAt: newest });
+  });
+
+  it('ignores a future-dated post when deriving the cursor (W1 — no cross-org poisoning)', async () => {
+    const past = new Date('2020-01-01T10:00:00.000Z');
+    const future = new Date('2099-01-01T00:00:00.000Z');
+    const { svc, lease } = build({
+      unitByToken: { id: 'cur1', platform: 'reddit', scanType: 'keyword', scanKey: 'ai' },
+      subscribers: [{ organizationId: 'o1' }],
+    });
+    const posts = [
+      { externalPostId: 't3_real', postPublishedAt: past },
+      { externalPostId: 't3_forged', postPublishedAt: future },
+    ];
+    await svc.sync('org1', { completed: { taskId: 'tok_abc', posts } as any });
+    const [, cursor] = lease.completeByToken.mock.calls[0];
+    // The forged future post must NOT become the cursor (id or timestamp).
+    expect(cursor).toEqual({ lastSeenExternalId: 't3_real', lastSeenAt: past });
   });
 });
