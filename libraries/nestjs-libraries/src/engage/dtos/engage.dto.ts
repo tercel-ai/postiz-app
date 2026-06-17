@@ -58,6 +58,16 @@ export class SetupEngageDto {
 // ─── Keywords ─────────────────────────────────────────────────────────────────
 
 export class AddKeywordDto {
+  // Trim + collapse internal whitespace at the boundary so the stored keyword is
+  // canonical. The global scan unit key normalises the same way
+  // (normalizeKeyword), and getOrgContextsForUnit's SQL `equals insensitive`
+  // pre-filter runs against the RAW stored value — a padded/double-spaced
+  // keyword (" AI ", "machine  learning") would otherwise never match its own
+  // normalised unit key and the subscribing org would be silently dropped from
+  // fan-out. Case is preserved for display (the SQL match is case-insensitive).
+  @Transform(({ value }) =>
+    typeof value === 'string' ? value.trim().replace(/\s+/g, ' ') : value
+  )
   @IsString()
   @MinLength(1)
   @MaxLength(100)

@@ -360,10 +360,12 @@ export class EngageRepository {
    * that subscribes to it (keyword enabled / subreddit monitored / author
    * tracked), so one fetch benefits everyone (cross-org dedup).
    *
-   * For keyword, the unit key is the NORMALIZED keyword while EngageKeyword
-   * stores the raw text, so we match case-insensitively in SQL then filter
-   * exactly by normalizeKeyword in code (whitespace/case variants collapse to
-   * one unit). Keywords are expected trimmed at write time.
+   * For keyword, the unit key is the NORMALIZED keyword. Keywords are
+   * trim+collapse normalised at write time (AddKeywordDto), so a stored value
+   * differs from its normalised key only in CASE — hence the SQL
+   * `equals … insensitive` pre-filter is sufficient, and the in-code
+   * normalizeKeyword filter is a belt-and-braces guard for any legacy rows
+   * persisted before write-time normalisation existed.
    */
   async getOrgContextsForUnit(
     platform: string,
