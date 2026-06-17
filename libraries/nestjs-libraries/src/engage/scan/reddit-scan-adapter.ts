@@ -1,4 +1,5 @@
 import { RawPost } from '../engage-scorer';
+import { applyPageDelay } from './scan-pacing';
 import { redditAuthHeaders } from '../reddit-auth';
 import { redditPublicGet } from '../reddit-loid';
 import {
@@ -98,6 +99,12 @@ export class RedditScanAdapter implements PlatformScanAdapter {
             rate,
             backlogRemaining: true,
           };
+        }
+        // Space consecutive page fetches per the configured pacing (no delay on
+        // the very first call). Reddit's public path is WAF-sensitive, so this
+        // matters even server-side.
+        if (callsUsed > 0) {
+          await applyPageDelay(budget);
         }
         args.heartbeat?.({
           stage: 'reddit_search',

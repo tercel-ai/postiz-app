@@ -1,4 +1,5 @@
 import { RawPost } from '../engage-scorer';
+import { applyPageDelay } from './scan-pacing';
 import {
   AdapterCaps,
   PlatformScanAdapter,
@@ -136,6 +137,11 @@ export class XScanAdapter implements PlatformScanAdapter {
             rate,
             backlogRemaining: true,
           };
+        }
+        // Space consecutive page fetches per the configured pacing (no delay on
+        // the very first call). jitter de-regularises the cadence.
+        if (callsUsed > 0) {
+          await applyPageDelay(budget);
         }
         args.heartbeat?.({ stage: 'x_search', query: query.slice(0, 60), pageToken });
 

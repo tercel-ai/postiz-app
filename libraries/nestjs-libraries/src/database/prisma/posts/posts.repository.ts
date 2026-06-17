@@ -2001,4 +2001,71 @@ export class PostsRepository {
       },
     });
   }
+
+  /**
+   * Of the given candidate post ids (what the user is currently viewing), return
+   * only those DUE for a metrics fetch: owned by the org, published, still inside
+   * the monitoring window (`publishDate >= windowStart`), and either never
+   * fetched or last fetched before `intervalCutoff`. This is the server-side
+   * "visible ∩ due" gate behind the demand-driven extension fetch.
+   */
+  getDueMetricsPosts(
+    organizationId: string,
+    ids: string[],
+    windowStart: Date,
+    intervalCutoff: Date
+  ) {
+    return this._post.model.post.findMany({
+      where: {
+        id: { in: ids },
+        organizationId,
+        deletedAt: null,
+        state: State.PUBLISHED,
+        publishDate: { gte: windowStart },
+        OR: [
+          { lastMetricsFetchAt: null },
+          { lastMetricsFetchAt: { lt: intervalCutoff } },
+        ],
+      },
+      select: {
+        id: true,
+        source: true,
+        publishDate: true,
+        lastMetricsFetchAt: true,
+        releaseURL: true,
+        integrationId: true,
+        integration: {
+          select: { id: true, name: true, providerIdentifier: true },
+        },
+      },
+    });
+  }
+
+  /**
+   * Resolve the platform (providerIdentifier) for each org-owned post id. Used
+   * by the metrics backfill to derive the platform server-side — never trusting
+   * a platform the extension claims — so traffic weights and impression labels
+   * are applied authoritatively. Posts not owned by the org are simply absent.
+   */
+  getPostsProviderByIds(organizationId: string, ids: string[]) {
+    return this._post.model.post.findMany({
+      where: { id: { in: ids }, organizationId, deletedAt: null },
+      select: {
+        id: true,
+        integration: { select: { providerIdentifier: true } },
+      },
+    });
+  }
+
+  /**
+   * Stamp `lastMetricsFetchAt = now` for the given org-owned posts — called by
+   * the backfill path once the extension returns metrics, so the interval gate
+   * holds and the same posts are not re-fetched until the interval elapses.
+   */
+  markMetricsFetched(organizationId: string, ids: string[], now: Date) {
+    return this._post.model.post.updateMany({
+      where: { id: { in: ids }, organizationId },
+      data: { lastMetricsFetchAt: now },
+    });
+  }
 }

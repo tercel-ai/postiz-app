@@ -11,6 +11,7 @@ import {
 } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 import { SettingsService } from '@gitroom/nestjs-libraries/database/prisma/settings/settings.service';
+import { EngageScanConfigService } from '@gitroom/nestjs-libraries/engage/engage-scan-config.service';
 import { AiPricingService } from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/ai-pricing.service';
 import { UpdateAiPricingDto } from '@gitroom/nestjs-libraries/dtos/admin/ai-pricing.dto';
 import { ListSettingsQueryDto } from '@gitroom/nestjs-libraries/dtos/admin/settings-query.dto';
@@ -36,7 +37,8 @@ function safePageSize(val?: string): number {
 export class AdminSettingsController {
   constructor(
     private _settingsService: SettingsService,
-    private _aiPricingService: AiPricingService
+    private _aiPricingService: AiPricingService,
+    private _engageScanConfigService: EngageScanConfigService
   ) {}
 
   // ============ Settings CRUD ============
@@ -137,6 +139,10 @@ export class AdminSettingsController {
         retryMs:       resolveShared(`${PREFIX}retry_ms`,       'ENGAGE_KEYWORD_INITIAL_SCAN_RETRY_MS',       900_000),
         staleMs:       resolveShared(`${PREFIX}stale_ms`,       'ENGAGE_KEYWORD_INITIAL_SCAN_STALE_MS',       1_800_000),
       },
+      // Pagination pacing (page caps + inter-page/inter-unit delays + jitter +
+      // per-session cap), split by workflow vs extension path. Stored under the
+      // `engage_scan_pacing` settings key; edit it via PUT /admin/settings/:key.
+      pacing: await this._engageScanConfigService.getPacing(),
     };
   }
 

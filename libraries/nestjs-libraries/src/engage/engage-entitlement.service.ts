@@ -24,6 +24,11 @@ dayjs.extend(utc);
 export const ENGAGE_ENTITLEMENTS_KEY = 'engage_entitlements';
 export const ENGAGE_REPLY_CREDITS_KEY = 'engage_reply_credits';
 
+// Key under Organization.data holding the org's user-set metrics-monitoring
+// window (days). Cross-module: governs both own-post analytics and engage
+// (opportunities/sent) monitoring, so it lives org-level, not in EngageConfig.
+export const ORG_DATA_METRICS_WINDOW_KEY = 'metricsWindowDays';
+
 // Reply-cap reservation lifecycle, stored as BillingRecord.status. The cap is
 // the count of engage_reply rows whose status is NOT 'released': a reservation
 // is written BEFORE generation (so concurrent requests see it and the cap holds
@@ -61,6 +66,12 @@ export interface EngageEntitlement {
    * fetch design (it would pull every historical post).
    */
   metricsWindowDaysMax: number;
+  /**
+   * Minimum spacing (hours) between two metrics fetches for the same post — the
+   * dedup gate behind the demand-driven extension fetch ("don't re-pull what was
+   * pulled recently"). Lower = fresher (higher tiers refresh more often).
+   */
+  metricsFetchIntervalHours: number;
 }
 
 export type EngageEntitlementMap = Record<EngagePlanCode, EngageEntitlement>;
@@ -81,6 +92,7 @@ const DEFAULT_ENTITLEMENTS: EngageEntitlementMap = {
     scanIntervalHours: 24,
     replyMonthlyCap: 10,
     metricsWindowDaysMax: 7,
+    metricsFetchIntervalHours: 24,
   },
   developer: {
     keywordsMax: 10,
@@ -89,6 +101,7 @@ const DEFAULT_ENTITLEMENTS: EngageEntitlementMap = {
     scanIntervalHours: 24,
     replyMonthlyCap: null,
     metricsWindowDaysMax: 14,
+    metricsFetchIntervalHours: 12,
   },
   pro: {
     keywordsMax: 30,
@@ -97,6 +110,7 @@ const DEFAULT_ENTITLEMENTS: EngageEntitlementMap = {
     scanIntervalHours: 6,
     replyMonthlyCap: null,
     metricsWindowDaysMax: 30,
+    metricsFetchIntervalHours: 6,
   },
 };
 
@@ -117,6 +131,10 @@ export const DEFAULT_SCAN_INTERVAL_HOURS = 24;
 // off): the most generous tier, since there is no plan to bound it.
 export const DEFAULT_METRICS_WINDOW_DAYS = 30;
 
+// Metrics fetch spacing when no plan applies (self-hosted / billing off): the
+// most generous (most frequent) tier.
+export const DEFAULT_METRICS_FETCH_INTERVAL_HOURS = 6;
+
 // Fully-unlimited entitlement used when billing is disabled (self-hosted). No
 // hard caps; scan cadence falls back to the default.
 const UNLIMITED_ENTITLEMENT: EngageEntitlement = {
@@ -126,6 +144,7 @@ const UNLIMITED_ENTITLEMENT: EngageEntitlement = {
   scanIntervalHours: DEFAULT_SCAN_INTERVAL_HOURS,
   replyMonthlyCap: null,
   metricsWindowDaysMax: DEFAULT_METRICS_WINDOW_DAYS,
+  metricsFetchIntervalHours: DEFAULT_METRICS_FETCH_INTERVAL_HOURS,
 };
 
 interface ResolvedPlan {
@@ -164,6 +183,7 @@ export class EngageEntitlementService implements OnModuleInit {
     private readonly _trackedAccount: PrismaRepository<'engageTrackedAccount'>,
     private readonly _channel: PrismaRepository<'engageMonitoredChannel'>,
     private readonly _billingRecord: PrismaRepository<'billingRecord'>,
+    private readonly _organization: PrismaRepository<'organization'>,
     private readonly _tx: PrismaTransaction
   ) {}
 
@@ -171,7 +191,7 @@ export class EngageEntitlementService implements OnModuleInit {
     await this._seedIfMissing(
       ENGAGE_ENTITLEMENTS_KEY,
       DEFAULT_ENTITLEMENTS,
-      'Per-plan engage limits (keywords/accounts/subreddits/scan interval/reply cap/metrics window days). null = unlimited.'
+      'Per-plan engage limits (keywords/accounts/subreddits/scan interval/reply cap/metrics window days/metrics fetch interval). null = unlimited.'
     );
     await this._seedIfMissing(
       ENGAGE_REPLY_CREDITS_KEY,
@@ -337,16 +357,91 @@ export class EngageEntitlementService implements OnModuleInit {
 
   /**
    * Effective metrics-monitoring window (days) for this org: posts published
-   * within this many days stay under monitoring; older ones fall out. Currently
-   * the plan ceiling; once a per-org user override lands (Organization.data),
-   * this becomes `min(userOverride, planMax)` — clamping is intentional so an
-   * over-set override (or a plan downgrade) is bounded at read time, never at
-   * write time.
+   * within this many days stay under monitoring; older ones fall out.
+   *
+   * `effective = min(userOverride ?? planMax, planMax)`. Clamping at READ time is
+   * intentional — an over-set override or a later plan downgrade is bounded here,
+   * so the stored override never has to be rewritten when the plan changes.
    */
   async getMetricsWindowDays(orgId: string): Promise<number> {
+    const { effective } = await this.getMetricsWindowSetting(orgId);
+    return effective;
+  }
+
+  /**
+   * Full metrics-window read model for a settings UI: the plan ceiling (`max`),
+   * the raw user override if any (`override`), and the resolved `effective`
+   * window actually applied (`min(override ?? max, max)`).
+   */
+  async getMetricsWindowSetting(orgId: string): Promise<{
+    effective: number;
+    max: number;
+    override: number | null;
+  }> {
     const entitlement = await this.getEntitlement(orgId);
-    const max = entitlement.metricsWindowDaysMax;
-    return Number.isFinite(max) && max > 0 ? max : DEFAULT_METRICS_WINDOW_DAYS;
+    const rawMax = entitlement.metricsWindowDaysMax;
+    const max =
+      Number.isFinite(rawMax) && rawMax > 0 ? rawMax : DEFAULT_METRICS_WINDOW_DAYS;
+    const override = await this._readWindowOverride(orgId);
+    const effective = override === null ? max : Math.min(override, max);
+    return { effective, max, override };
+  }
+
+  /**
+   * Persist the org's user-set monitoring window (days) into Organization.data.
+   * The raw value is stored as-is (read-modify-write to preserve other keys);
+   * the plan ceiling is applied at read time, not here. `days` must be a
+   * positive integer. Returns the updated setting (effective/max/override).
+   */
+  async setMetricsWindowOverride(
+    orgId: string,
+    days: number
+  ): Promise<{ effective: number; max: number; override: number | null }> {
+    if (!Number.isInteger(days) || days <= 0) {
+      throw new ForbiddenException({
+        code: 'engage_invalid_metrics_window',
+        message: 'Monitoring window must be a positive whole number of days.',
+      });
+    }
+    const current = await this._readOrgData(orgId);
+    await this._organization.model.organization.update({
+      where: { id: orgId },
+      data: { data: { ...current, [ORG_DATA_METRICS_WINDOW_KEY]: days } },
+    });
+    return this.getMetricsWindowSetting(orgId);
+  }
+
+  /**
+   * Minimum spacing (hours) between two metrics fetches of the same post for
+   * this org — the dedup gate for demand-driven fetching. Falls back to the
+   * generous default when no plan applies.
+   */
+  async getMetricsFetchIntervalHours(orgId: string): Promise<number> {
+    const entitlement = await this.getEntitlement(orgId);
+    const hours = entitlement.metricsFetchIntervalHours;
+    return Number.isFinite(hours) && hours > 0
+      ? hours
+      : DEFAULT_METRICS_FETCH_INTERVAL_HOURS;
+  }
+
+  /** Raw Organization.data object (empty when unset). */
+  private async _readOrgData(orgId: string): Promise<Record<string, unknown>> {
+    const row = await this._organization.model.organization.findUnique({
+      where: { id: orgId },
+      select: { data: true },
+    });
+    const data = row?.data;
+    return data && typeof data === 'object' && !Array.isArray(data)
+      ? (data as Record<string, unknown>)
+      : {};
+  }
+
+  /** The stored window override (positive int) or null when unset/invalid. */
+  private async _readWindowOverride(orgId: string): Promise<number | null> {
+    const value = (await this._readOrgData(orgId))[ORG_DATA_METRICS_WINDOW_KEY];
+    return typeof value === 'number' && Number.isInteger(value) && value > 0
+      ? value
+      : null;
   }
 
   // ─── Hard limit checks (server-side; the frontend can be bypassed) ─────────

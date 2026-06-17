@@ -17,7 +17,9 @@ import {
   EngageEntitlementService,
   DEFAULT_SCAN_INTERVAL_HOURS,
 } from '@gitroom/nestjs-libraries/engage/engage-entitlement.service';
-import { EngageKeyword, Prisma } from '@prisma/client';
+import { EngageScanConfigService } from '@gitroom/nestjs-libraries/engage/engage-scan-config.service';
+import { EngageScanIngestService } from '@gitroom/nestjs-libraries/engage/engage-scan-ingest.service';
+import { EngageKeyword } from '@prisma/client';
 import { getRedditToken } from '@gitroom/nestjs-libraries/engage/reddit-auth';
 import { XScanAdapter } from '@gitroom/nestjs-libraries/engage/scan/x-scan-adapter';
 import { RedditScanAdapter } from '@gitroom/nestjs-libraries/engage/scan/reddit-scan-adapter';
@@ -71,20 +73,8 @@ function hoursToMs(hours: number): number {
   return (Number.isFinite(hours) && hours > 0 ? hours : DEFAULT_SCAN_INTERVAL_HOURS) * 3_600_000;
 }
 
-// Max concurrent upserts per phase in _persistOpportunities. The posts array is
-// unbounded (union of all matched posts across keywords/subreddits) and persist
-// runs once per enabled org, so an un-chunked Promise.all can exhaust the Prisma
-// connection pool on a busy scan. Chunking caps in-flight queries.
-const PERSIST_BATCH_SIZE = 25;
-
 // Derived from the repository method so the type stays in sync automatically.
 type OrgContext = Awaited<ReturnType<EngageRepository['getAllEnabledOrgContexts']>>[number];
-
-function chunk<T>(arr: T[], size: number): T[][] {
-  const out: T[][] = [];
-  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
-  return out;
-}
 
 function deduplicatePosts(posts: RawPost[]): RawPost[] {
   const seen = new Set<string>();
@@ -216,8 +206,34 @@ export class EngageScanActivity {
     private _scanCursor: PrismaRepository<'engageScanCursor'>,
     private _keywordInitialScan: PrismaRepository<'engageKeywordInitialScan'>,
     private _settingsService?: SettingsService,
-    private _entitlement?: EngageEntitlementService
+    private _entitlement?: EngageEntitlementService,
+    private _scanConfig?: EngageScanConfigService
   ) { }
+
+  /**
+   * Build a scan budget for the WORKFLOW path: keep the existing call cap but
+   * take the MIN with the configured maxPages (tighter cap wins), and attach the
+   * per-page delay/jitter pacing. Falls back to a bare maxCalls (no delay) when
+   * the config service isn't wired or a read fails — pacing must never break a
+   * scan.
+   */
+  private async _pacingBudget(
+    platform: 'x' | 'reddit',
+    phase: 'initial' | 'incremental',
+    maxCalls: number
+  ): Promise<{ maxCalls: number; pageDelayMs?: number; jitterMs?: number }> {
+    if (!this._scanConfig) return { maxCalls };
+    try {
+      const p = await this._scanConfig.getPagePacing('workflow', platform, phase);
+      return {
+        maxCalls: Math.max(1, Math.min(maxCalls, p.maxPages)),
+        pageDelayMs: p.pageDelayMs,
+        jitterMs: p.jitterMs,
+      };
+    } catch {
+      return { maxCalls };
+    }
+  }
 
   private _heartbeat(progress?: unknown): void {
     try {
@@ -491,7 +507,7 @@ export class EngageScanActivity {
         scope: { type: 'keyword' },
         keywords: claimedKeywords,
         cursor: platform === 'reddit' ? { lastSeenAt: lookback } : {},
-        budget: { maxCalls: budget.maxCalls },
+        budget: await this._pacingBudget(platform, 'initial', budget.maxCalls),
         token,
         log: {
           log: (m) => this.logger.log(`[initial-scan] ${m}`),
@@ -786,7 +802,7 @@ export class EngageScanActivity {
           lastSeenExternalId: cursor.lastSeenExternalId,
           lastSeenAt: cursor.lastSeenAt,
         },
-        budget: { maxCalls: SCAN_MAX_CALLS },
+        budget: await this._pacingBudget(args.platform, 'incremental', SCAN_MAX_CALLS),
         token,
         log: {
           log: (m) => this.logger.log(m),
@@ -998,20 +1014,24 @@ export class EngageScanActivity {
 
   // ─── Intent classification ────────────────────────────────────────────────
 
-  private async _classifyIntents(
-    scored: ScoredPost[]
-  ): Promise<ScoredPost[]> {
-    const batchInput = scored.map((p) => ({
-      id: p.id,
-      content: p.postContent,
-    }));
-    const results = await this._intentClassifier.classifyBatch(batchInput);
-    return scored.map((p) => ({
-      ...p,
-      intentTags: results[p.id]?.intentTags ?? ['discussion'],
-      primaryIntent: results[p.id]?.primaryIntent ?? 'discussion',
-      intentScore: results[p.id]?.intentScore ?? 0,
-    }));
+  // The post-scoring ingest pipeline (intent classify → two-table persist →
+  // keyword hit counts) is owned by the SHARED EngageScanIngestService so the
+  // workflow and the extension scan-ingest endpoint write through one path.
+  // Built lazily from the activity's own injected repos so construction (and the
+  // unit tests that build this activity directly) stay unchanged.
+  private _ingestService?: EngageScanIngestService;
+  private get _ingest(): EngageScanIngestService {
+    return (this._ingestService ??= new EngageScanIngestService(
+      this._opportunity,
+      this._oppState,
+      this._keyword,
+      this._intentClassifier,
+      this._tx
+    ));
+  }
+
+  private _classifyIntents(scored: ScoredPost[]): Promise<ScoredPost[]> {
+    return this._ingest.classifyIntents(scored);
   }
 
   // ─── Persistence ──────────────────────────────────────────────────────────
@@ -1023,166 +1043,17 @@ export class EngageScanActivity {
     if (!posts.length) return;
     this._heartbeat({ stage: 'persist_opportunities', count: posts.length });
 
-    // Phase 1 — upsert the global post rows (shared across all orgs). Content +
-    // objective metrics/scores; status/keyword-score are org-specific (phase 2).
-    // Idempotent: re-scan refreshes metrics without touching per-org state.
-    // Chunked to bound concurrent upserts (see PERSIST_BATCH_SIZE).
-    const opportunities: Array<{ id: string }> = [];
-    for (const batch of chunk(posts, PERSIST_BATCH_SIZE)) {
-      const persisted = await Promise.all(
-        batch.map((post) =>
-          this._opportunity.model.engageOpportunity.upsert({
-            where: {
-              platform_externalPostId: {
-                platform: post.platform,
-                externalPostId: post.externalPostId,
-              },
-            },
-            create: {
-              platform: post.platform,
-              externalPostId: post.externalPostId,
-              externalPostUrl: post.externalPostUrl,
-              channelId: post.channelId ?? null,
-              channelName: post.channelName ?? null,
-              channelFollowers: post.channelFollowers ?? null,
-              authorUsername: post.authorUsername,
-              authorDisplayName: post.authorDisplayName ?? null,
-              authorFollowers: post.authorFollowers ?? null,
-              authorAvatarUrl: post.authorAvatarUrl ?? null,
-              postContent: post.postContent,
-              postPublishedAt: post.postPublishedAt,
-              scoreHeat: post.scoreHeat,
-              scoreAuthority: post.scoreAuthority,
-              scoreRecency: post.scoreRecency,
-              intentTags: post.intentTags,
-              primaryIntent: post.primaryIntent,
-              intentScore: post.intentScore ?? null,
-              metricLikes: post.metricLikes,
-              metricReplies: post.metricReplies,
-              metricRetweets: post.metricRetweets,
-              metricQuotes: post.metricQuotes,
-              metricBookmarks: post.metricBookmarks ?? 0,
-              metricViews: post.metricViews ?? 0,
-              metricShares: post.metricShares ?? 0,
-              metricSaves: post.metricSaves ?? 0,
-              metricScore: post.metricScore,
-              metricUpvoteRatio: post.metricUpvoteRatio ?? null,
-              metricComments: post.metricComments,
-              rawData: post.rawData != null ? (post.rawData as Prisma.InputJsonValue) : null,
-            },
-            update: {
-              // Refresh the channel audience size so authority tracks subreddit growth.
-              channelFollowers: post.channelFollowers ?? null,
-              scoreHeat: post.scoreHeat,
-              scoreAuthority: post.scoreAuthority,
-              scoreRecency: post.scoreRecency,
-              metricLikes: post.metricLikes,
-              metricReplies: post.metricReplies,
-              metricRetweets: post.metricRetweets,
-              metricQuotes: post.metricQuotes,
-              metricBookmarks: post.metricBookmarks ?? 0,
-              metricViews: post.metricViews ?? 0,
-              metricShares: post.metricShares ?? 0,
-              metricSaves: post.metricSaves ?? 0,
-              metricScore: post.metricScore,
-              metricUpvoteRatio: post.metricUpvoteRatio ?? null,
-              metricComments: post.metricComments,
-              // intentTags / primaryIntent NOT updated — preserve original classification
-            },
-            select: { id: true },
-          })
-        )
-      );
-      opportunities.push(...persisted);
-    }
-
-    // Phase 2 — upsert this org's per-post state. Total score is recomputed every
-    // scan (heat/authority/recency may have shifted on the global row); status and
-    // bookmark are preserved across re-scans. opportunities[i] aligns with posts[i]
-    // because phase 1 pushed results in order. Chunked like phase 1.
-    const stateInputs = posts.map((post, i) => ({
-      post,
-      opportunityId: opportunities[i].id,
-    }));
-    for (const batch of chunk(stateInputs, PERSIST_BATCH_SIZE)) {
-      await Promise.all(
-        batch.map(({ post, opportunityId }) =>
-          this._oppState.model.engageOpportunityState.upsert({
-            where: {
-              organizationId_opportunityId: {
-                organizationId: orgId,
-                opportunityId,
-              },
-            },
-            create: {
-              organizationId: orgId,
-              opportunityId,
-              status: 'NEW',
-              score: post.score,
-              scoreKeyword: post.scoreKeyword,
-              scoreTracked: post.scoreTracked,
-              matchedKeywords: post.matchedKeywords,
-            },
-            update: {
-              score: post.score,
-              scoreKeyword: post.scoreKeyword,
-              scoreTracked: post.scoreTracked,
-              // Refresh matched keywords so keyword edits are reflected on re-scan.
-              matchedKeywords: post.matchedKeywords,
-              // status / bookmarked NOT updated — preserve user state
-            },
-          })
-        )
-      );
-    }
+    // Delegated to the shared EngageScanIngestService (one write path for the
+    // workflow and the extension scan-ingest endpoint).
+    await this._ingest.persistOpportunities(orgId, posts);
   }
 
-  private async _updateKeywordHitCounts(
+  private _updateKeywordHitCounts(
     orgId: string,
     posts: ScoredPost[],
     keywords: EngageKeyword[]
   ): Promise<void> {
-    const hitMap = new Map<string, number>();
-    for (const post of posts) {
-      for (const kw of keywords) {
-        // Use word-boundary regex for consistency with engage-scorer.ts.
-        // .includes() was a substring match — "react" would match "overreacting".
-        const pattern = new RegExp(`\\b${kw.keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
-        if (kw.enabled && pattern.test(post.postContent)) {
-          hitMap.set(kw.id, (hitMap.get(kw.id) ?? 0) + 1);
-        }
-      }
-    }
-    if (!hitMap.size) return;
-
-    // Guard against double-counting on Temporal retry: skip keywords whose
-    // lastCountedAt is within the last 5 minutes (matching the initial retry
-    // backoff). Combined with maximumAttempts:1 on the activity this prevents
-    // most double-count scenarios without a schema change.
-    const recentCutoff = new Date(Date.now() - 5 * 60 * 1000);
-    const kwIds = Array.from(hitMap.keys());
-    const existing = await this._keyword.model.engageKeyword.findMany({
-      where: { id: { in: kwIds } },
-      select: { id: true, lastCountedAt: true },
-    });
-    const alreadyCounted = new Set(
-      existing.filter((k) => k.lastCountedAt && k.lastCountedAt > recentCutoff).map((k) => k.id)
-    );
-
-    const now = new Date();
-    const ops = Array.from(hitMap, ([kwId, hits]) => {
-      if (alreadyCounted.has(kwId)) return null;
-      return this._keyword.model.engageKeyword.update({
-        where: { id: kwId },
-        data: {
-          weeklyHitCount: { increment: hits },
-          totalHitCount: { increment: hits },
-          lastCountedAt: now,
-        },
-      });
-    }).filter((op): op is NonNullable<typeof op> => op !== null);
-
-    if (ops.length) await this._tx.model.$transaction(ops);
+    return this._ingest.updateKeywordHitCounts(orgId, posts, keywords);
   }
 
   private async _expireStaleOpportunities(orgId: string): Promise<void> {

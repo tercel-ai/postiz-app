@@ -1404,4 +1404,96 @@ export class PostsService {
   ) {
     return this._postRepository.createComment(orgId, userId, postId, comment);
   }
+
+  /**
+   * Resolve which of the candidate (currently-viewed) post ids are DUE for a
+   * metrics fetch, given the org's effective monitoring window (days) and fetch
+   * interval (hours). Translates the policy values into concrete date cutoffs
+   * and delegates the filtered query to the repository.
+   */
+  getDueMetricsPosts(
+    orgId: string,
+    ids: string[],
+    windowDays: number,
+    intervalHours: number
+  ) {
+    if (!ids?.length) {
+      return Promise.resolve([]);
+    }
+    const now = dayjs.utc();
+    const windowStart = now.subtract(windowDays, 'day').toDate();
+    const intervalCutoff = now.subtract(intervalHours, 'hour').toDate();
+    return this._postRepository.getDueMetricsPosts(
+      orgId,
+      ids,
+      windowStart,
+      intervalCutoff
+    );
+  }
+
+  /** Stamp the given org-owned posts as fetched-now (backfill dedup gate). */
+  markMetricsFetched(orgId: string, ids: string[]) {
+    if (!ids?.length) {
+      return Promise.resolve({ count: 0 });
+    }
+    return this._postRepository.markMetricsFetched(orgId, ids, dayjs.utc().toDate());
+  }
+
+  /**
+   * Write back post metrics fetched by the browser extension (demand-driven
+   * path). For each org-owned post, the platform is resolved server-side (never
+   * trusting the caller) and the SAME pipeline as `checkPostAnalytics` is run:
+   * `extractMetrics` derives impressions + the weighted Traffic score and the
+   * raw snapshot, which are persisted; impressions are only overwritten when
+   * positive so a partial read never clobbers an earlier real value. Every
+   * org-owned post in the batch is then stamped fetched (dedup gate holds even
+   * when a post legitimately has zero metrics).
+   */
+  async backfillMetrics(
+    orgId: string,
+    items: { postId: string; analytics: AnalyticsData[] }[]
+  ): Promise<{ updated: string[]; stamped: string[] }> {
+    if (!items?.length) {
+      return { updated: [], stamped: [] };
+    }
+    const ids = items.map((i) => i.postId);
+    const posts = await this._postRepository.getPostsProviderByIds(orgId, ids);
+    const providerById = new Map(
+      posts.map((p) => [p.id, p.integration?.providerIdentifier])
+    );
+
+    const updates: Array<{
+      id: string;
+      impressions?: number;
+      trafficScore?: number;
+      analytics?: any;
+    }> = [];
+    const stamped: string[] = [];
+
+    for (const item of items) {
+      const platform = providerById.get(item.postId);
+      // Not org-owned, or no connected integration to attribute a platform to →
+      // skip silently (auth boundary; also nothing to weight metrics against).
+      if (!platform) {
+        continue;
+      }
+      stamped.push(item.postId);
+      const { impressions, trafficScore, rawMetrics } = extractMetrics(
+        platform,
+        item.analytics ?? []
+      );
+      if (impressions > 0 || trafficScore !== null) {
+        updates.push({
+          id: item.postId,
+          impressions: impressions > 0 ? impressions : undefined,
+          trafficScore: trafficScore ?? undefined,
+          analytics: rawMetrics,
+        });
+      }
+    }
+
+    await this._postRepository.batchUpdatePostAnalytics(updates);
+    await this.markMetricsFetched(orgId, stamped);
+    return { updated: updates.map((u) => u.id), stamped };
+  }
 }

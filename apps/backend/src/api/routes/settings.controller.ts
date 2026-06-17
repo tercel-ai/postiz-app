@@ -3,8 +3,10 @@ import { GetOrgFromRequest } from '@gitroom/nestjs-libraries/user/org.from.reque
 import { Organization } from '@prisma/client';
 import { CheckPolicies } from '@gitroom/backend/services/auth/permissions/permissions.ability';
 import { OrganizationService } from '@gitroom/nestjs-libraries/database/prisma/organizations/organization.service';
+import { EngageEntitlementService } from '@gitroom/nestjs-libraries/engage/engage-entitlement.service';
 import { AddTeamMemberDto } from '@gitroom/nestjs-libraries/dtos/settings/add.team.member.dto';
 import { ShortlinkPreferenceDto } from '@gitroom/nestjs-libraries/dtos/settings/shortlink-preference.dto';
+import { MetricsWindowDto } from '@gitroom/nestjs-libraries/dtos/settings/metrics-window.dto';
 import { ApiTags } from '@nestjs/swagger';
 import { AuthorizationActions, Sections } from '@gitroom/backend/services/auth/permissions/permission.exception.class';
 
@@ -12,7 +14,8 @@ import { AuthorizationActions, Sections } from '@gitroom/backend/services/auth/p
 @Controller('/settings')
 export class SettingsController {
   constructor(
-    private _organizationService: OrganizationService
+    private _organizationService: OrganizationService,
+    private _engageEntitlement: EngageEntitlementService
   ) {}
 
   @Get('/team')
@@ -62,6 +65,28 @@ export class SettingsController {
     return this._organizationService.updateShortlinkPreference(
       org.id,
       body.shortlink
+    );
+  }
+
+  /**
+   * Metrics-monitoring window for this org: how many days a published post
+   * stays under analytics monitoring (own posts + engage). Returns the resolved
+   * effective window, the plan ceiling, and the raw user override (if set).
+   */
+  @Get('/metrics-window')
+  async getMetricsWindow(@GetOrgFromRequest() org: Organization) {
+    return this._engageEntitlement.getMetricsWindowSetting(org.id);
+  }
+
+  @Post('/metrics-window')
+  @CheckPolicies([AuthorizationActions.Create, Sections.ADMIN])
+  async updateMetricsWindow(
+    @GetOrgFromRequest() org: Organization,
+    @Body() body: MetricsWindowDto
+  ) {
+    return this._engageEntitlement.setMetricsWindowOverride(
+      org.id,
+      body.metricsWindowDays
     );
   }
 }

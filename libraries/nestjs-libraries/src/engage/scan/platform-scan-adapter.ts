@@ -47,6 +47,12 @@ export interface ScanCursor {
 // across all internal batches/pages for this unit this run.
 export interface ScanBudget {
   maxCalls: number;
+  // Pacing between consecutive page fetches within this unit. The wait before
+  // each page AFTER the first is `pageDelayMs + random(0..jitterMs)`. Both
+  // default to 0 (no delay) when omitted — back-compat with callers that only
+  // set maxCalls. The first page is never delayed.
+  pageDelayMs?: number;
+  jitterMs?: number;
 }
 
 // Normalised rate-limit feedback, parsed from platform-specific response

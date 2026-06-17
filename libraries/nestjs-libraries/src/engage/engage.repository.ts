@@ -18,6 +18,7 @@ import {
 } from '@gitroom/nestjs-libraries/engage/dtos/engage.dto';
 import { KEYWORD_GLOBAL_SCAN_KEY } from '@gitroom/nestjs-libraries/engage/scan/platform-scan-adapter';
 import { DEFAULT_SCAN_INTERVAL_HOURS } from '@gitroom/nestjs-libraries/engage/engage-entitlement.service';
+import { normalizeKeyword } from '@gitroom/nestjs-libraries/engage/engage-scan-lease.service';
 import {
   pickXReplyIntegration,
   XReplyResolution,
@@ -295,6 +296,124 @@ export class EngageRepository {
         },
       },
     });
+  }
+
+  /** One org's enabled engage context (keywords/channels/tracked) for unit
+   * enumeration. Null when the org has no enabled engage config. */
+  async getEnabledOrgContext(organizationId: string) {
+    return this._config.model.engageConfig.findFirst({
+      where: { organizationId, enabled: true },
+      include: {
+        keywords: { where: { enabled: true }, orderBy: { createdAt: 'asc' } },
+        monitoredChannels: { where: { enabled: true }, orderBy: { createdAt: 'asc' } },
+        trackedAccounts: { where: { enabled: true }, orderBy: { createdAt: 'asc' } },
+      },
+    });
+  }
+
+  /**
+   * Recent non-deleted global opportunities on the given platforms, newest
+   * first, capped. Source for back-attributing existing opportunities to a newly
+   * subscribed org (no platform fetch). `since` bounds it to the monitoring
+   * window; `limit` bounds the re-score cost.
+   */
+  async getRecentGlobalOpportunities(
+    platforms: string[],
+    since: Date,
+    limit: number
+  ) {
+    return this._opportunity.model.engageOpportunity.findMany({
+      where: {
+        platform: { in: platforms },
+        deletedAt: null,
+        postPublishedAt: { gte: since },
+      },
+      orderBy: { postPublishedAt: 'desc' },
+      take: limit,
+      select: {
+        id: true, platform: true, externalPostId: true, externalPostUrl: true,
+        channelId: true, channelName: true, channelFollowers: true,
+        authorUsername: true, authorDisplayName: true, authorFollowers: true,
+        authorAvatarUrl: true, postContent: true, postPublishedAt: true,
+        metricLikes: true, metricReplies: true, metricRetweets: true,
+        metricQuotes: true, metricBookmarks: true, metricViews: true,
+        metricShares: true, metricSaves: true, metricScore: true,
+        metricUpvoteRatio: true, metricComments: true,
+      },
+    });
+  }
+
+  /** Resolve a SCANNING scan cursor by its lease token (the extension's taskId).
+   * Returns the unit identity needed to fan out; null when the token is
+   * invalid/expired/rotated. */
+  async findScanCursorByToken(leaseToken: string) {
+    return this._scanCursor.model.engageScanCursor.findFirst({
+      where: { leaseToken, status: 'SCANNING' },
+      select: { id: true, platform: true, scanType: true, scanKey: true },
+    });
+  }
+
+  /**
+   * Org contexts SUBSCRIBED to one global scan unit — i.e. the orgs a freshly
+   * scanned unit should fan out to. Used by the extension scan-ingest endpoint:
+   * the browser scans a unit once, and the server scores+persists for every org
+   * that subscribes to it (keyword enabled / subreddit monitored / author
+   * tracked), so one fetch benefits everyone (cross-org dedup).
+   *
+   * For keyword, the unit key is the NORMALIZED keyword while EngageKeyword
+   * stores the raw text, so we match case-insensitively in SQL then filter
+   * exactly by normalizeKeyword in code (whitespace/case variants collapse to
+   * one unit). Keywords are expected trimmed at write time.
+   */
+  async getOrgContextsForUnit(
+    platform: string,
+    scanType: 'keyword' | 'channel' | 'tracked',
+    scanKey: string
+  ) {
+    const include = {
+      keywords: { where: { enabled: true }, orderBy: { createdAt: 'asc' as const } },
+      monitoredChannels: { where: { enabled: true }, orderBy: { createdAt: 'asc' as const } },
+      trackedAccounts: { where: { enabled: true }, orderBy: { createdAt: 'asc' as const } },
+    };
+
+    if (scanType === 'channel') {
+      return this._config.model.engageConfig.findMany({
+        where: {
+          enabled: true,
+          monitoredChannels: { some: { enabled: true, platform, channelId: scanKey } },
+        },
+        include,
+      });
+    }
+
+    if (scanType === 'tracked') {
+      return this._config.model.engageConfig.findMany({
+        where: {
+          enabled: true,
+          trackedAccounts: {
+            some: {
+              enabled: true,
+              platform,
+              username: { equals: scanKey, mode: 'insensitive' },
+            },
+          },
+        },
+        include,
+      });
+    }
+
+    const configs = await this._config.model.engageConfig.findMany({
+      where: {
+        enabled: true,
+        keywords: {
+          some: { enabled: true, keyword: { equals: scanKey, mode: 'insensitive' } },
+        },
+      },
+      include,
+    });
+    return configs.filter((c) =>
+      c.keywords.some((k) => k.enabled && normalizeKeyword(k.keyword) === scanKey)
+    );
   }
 
   async saveConfig(

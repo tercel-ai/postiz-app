@@ -26,6 +26,11 @@ import {
   Sections,
 } from '@gitroom/backend/services/auth/permissions/permission.exception.class';
 import { EngageService } from '@gitroom/nestjs-libraries/engage/engage.service';
+import { EngageScanTasksService } from '@gitroom/nestjs-libraries/engage/engage-scan-tasks.service';
+import {
+  EngageScanSyncDto,
+  scanIngestPostToRawPost,
+} from '@gitroom/nestjs-libraries/dtos/engage/scan-ingest.dto';
 import { EngageDraftService } from '@gitroom/nestjs-libraries/engage/engage-draft.service';
 import { weightedLength } from '@gitroom/helpers/utils/count.length';
 import {
@@ -128,8 +133,39 @@ export class EngageController {
 
   constructor(
     private _engageService: EngageService,
-    private _engageDraftService: EngageDraftService
+    private _engageDraftService: EngageDraftService,
+    private _scanTasksService: EngageScanTasksService
   ) {}
+
+  // ─── Extension scan loop ──────────────────────────────────────────────────
+
+  @ApiOperation({
+    summary:
+      'Extension scan loop: ingest a completed unit (optional) and claim the next batch of due units',
+  })
+  @Post('/scan-tasks/ingest')
+  async scanTasksIngest(
+    @GetOrgFromRequest() org: Organization,
+    @Body() body: EngageScanSyncDto
+  ) {
+    const completed = body.completed
+      ? {
+          taskId: body.completed.taskId,
+          posts: (body.completed.posts ?? []).map(scanIngestPostToRawPost),
+          nextCursor: body.completed.nextCursor
+            ? {
+                lastSeenExternalId:
+                  body.completed.nextCursor.lastSeenExternalId ?? null,
+                lastSeenAt: body.completed.nextCursor.lastSeenAt
+                  ? new Date(body.completed.nextCursor.lastSeenAt)
+                  : null,
+              }
+            : undefined,
+          exhausted: body.completed.exhausted,
+        }
+      : undefined;
+    return this._scanTasksService.sync(org.id, { completed, want: body.want });
+  }
 
   // ─── Config ───────────────────────────────────────────────────────────────
 

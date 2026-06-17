@@ -21,6 +21,10 @@ export const EXTENSION_MESSAGE = {
   engageReplyResult: `${EXTENSION_BRAND}:engage-reply-result`,
   /** legacy page → extension: open X and fill a draft (dormant) */
   extensionTask: `${EXTENSION_BRAND}:extension-task`,
+  /** page → extension: presence probe */
+  ping: `${EXTENSION_BRAND}:ping`,
+  /** extension → page: presence acknowledgement */
+  pong: `${EXTENSION_BRAND}:pong`,
 } as const;
 
 /** Content-script root container id — unique per brand so two extensions on the

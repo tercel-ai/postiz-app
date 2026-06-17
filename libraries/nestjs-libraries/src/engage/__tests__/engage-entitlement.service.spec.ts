@@ -49,6 +49,7 @@ function build(opts: {
   trackedCount?: number;
   channelCount?: number;
   billingCount?: number;
+  orgData?: Record<string, unknown> | null;
 }) {
   const billingRecord = {
     count: vi.fn(async () => opts.billingCount ?? 0),
@@ -56,6 +57,13 @@ function build(opts: {
     update: vi.fn(async () => ({})),
   };
   const billing = { model: { billingRecord } } as any;
+  const organizationModel = {
+    findUnique: vi.fn(async () => ({
+      data: opts.orgData === undefined ? null : opts.orgData,
+    })),
+    update: vi.fn(async ({ data }: any) => data),
+  };
+  const organization = { model: { organization: organizationModel } } as any;
   // PrismaTransaction mock: run the interactive callback with a tx exposing the
   // same billingRecord mock (count + create), mirroring the real Prisma client.
   const tx = {
@@ -66,6 +74,7 @@ function build(opts: {
     aisee,
     billing,
     billingRecord,
+    organizationModel,
     service: new EngageEntitlementService(
       settingsMock(opts.settings),
       usersMock(opts.limits),
@@ -74,6 +83,7 @@ function build(opts: {
       repoMock('engageTrackedAccount', opts.trackedCount ?? 0),
       repoMock('engageMonitoredChannel', opts.channelCount ?? 0),
       billing,
+      organization,
       tx
     ),
   };
@@ -148,7 +158,7 @@ describe('EngageEntitlementService.getEntitlement', () => {
 });
 
 describe('EngageEntitlementService.getMetricsWindowDays', () => {
-  it('returns the per-plan ceiling: starter 7 / developer 14 / pro 30', async () => {
+  it('returns the per-plan ceiling when no user override is set: starter 7 / developer 14 / pro 30', async () => {
     expect(await build({ limits: STARTER_LIMITS }).service.getMetricsWindowDays('o')).toBe(7);
     expect(await build({ limits: DEV_LIMITS }).service.getMetricsWindowDays('o')).toBe(14);
     expect(await build({ limits: PRO_LIMITS }).service.getMetricsWindowDays('o')).toBe(30);
@@ -158,12 +168,76 @@ describe('EngageEntitlementService.getMetricsWindowDays', () => {
     expect(await build({ limits: null }).service.getMetricsWindowDays('o')).toBe(30);
   });
 
-  it('honours an admin override from the settings store', async () => {
+  it('honours an admin plan-ceiling override from the settings store', async () => {
     const { service } = build({
       limits: PRO_LIMITS,
       settings: { [ENGAGE_ENTITLEMENTS_KEY]: { pro: { metricsWindowDaysMax: 60 } } },
     });
     expect(await service.getMetricsWindowDays('o')).toBe(60);
+  });
+
+  it('applies a user override below the plan ceiling verbatim', async () => {
+    // Pro ceiling 30, user wants 10 → 10
+    const { service } = build({ limits: PRO_LIMITS, orgData: { metricsWindowDays: 10 } });
+    expect(await service.getMetricsWindowDays('o')).toBe(10);
+  });
+
+  it('clamps a user override above the plan ceiling at read time', async () => {
+    // Starter ceiling 7, user set 30 → clamped to 7 (no rewrite needed on downgrade)
+    const { service } = build({ limits: STARTER_LIMITS, orgData: { metricsWindowDays: 30 } });
+    const setting = await service.getMetricsWindowSetting('o');
+    expect(setting).toEqual({ effective: 7, max: 7, override: 30 });
+  });
+
+  it('ignores a non-positive / non-integer stored override', async () => {
+    const { service } = build({ limits: DEV_LIMITS, orgData: { metricsWindowDays: 0 } });
+    expect(await service.getMetricsWindowDays('o')).toBe(14);
+  });
+});
+
+describe('EngageEntitlementService.getMetricsFetchIntervalHours', () => {
+  it('returns the per-plan cadence: starter 24 / developer 12 / pro 6', async () => {
+    expect(await build({ limits: STARTER_LIMITS }).service.getMetricsFetchIntervalHours('o')).toBe(24);
+    expect(await build({ limits: DEV_LIMITS }).service.getMetricsFetchIntervalHours('o')).toBe(12);
+    expect(await build({ limits: PRO_LIMITS }).service.getMetricsFetchIntervalHours('o')).toBe(6);
+  });
+
+  it('falls back to the generous default (6h) when billing is disabled', async () => {
+    expect(await build({ limits: null }).service.getMetricsFetchIntervalHours('o')).toBe(6);
+  });
+
+  it('honours an admin override from the settings store', async () => {
+    const { service } = build({
+      limits: STARTER_LIMITS,
+      settings: { [ENGAGE_ENTITLEMENTS_KEY]: { starter: { metricsFetchIntervalHours: 48 } } },
+    });
+    expect(await service.getMetricsFetchIntervalHours('o')).toBe(48);
+  });
+});
+
+describe('EngageEntitlementService.setMetricsWindowOverride', () => {
+  it('persists the raw value into Organization.data (merging, not clobbering)', async () => {
+    const { service, organizationModel } = build({
+      limits: PRO_LIMITS,
+      orgData: { somethingElse: true },
+    });
+    const res = await service.setMetricsWindowOverride('o', 20);
+    expect(organizationModel.update).toHaveBeenCalledWith({
+      where: { id: 'o' },
+      data: { data: { somethingElse: true, metricsWindowDays: 20 } },
+    });
+    // findUnique mock still returns the old orgData, so effective reflects the
+    // stored (pre-update) override here — the merge assertion above is the point.
+    expect(res.max).toBe(30);
+  });
+
+  it('rejects a zero / negative / fractional window', async () => {
+    const { service } = build({ limits: PRO_LIMITS });
+    await expect(service.setMetricsWindowOverride('o', 0)).rejects.toMatchObject({
+      response: { code: 'engage_invalid_metrics_window' },
+    });
+    await expect(service.setMetricsWindowOverride('o', -5)).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(service.setMetricsWindowOverride('o', 1.5)).rejects.toBeInstanceOf(ForbiddenException);
   });
 });
 

@@ -54,6 +54,10 @@ import { PostOverageService } from '@gitroom/nestjs-libraries/database/prisma/po
 import { EngageRepository } from '@gitroom/nestjs-libraries/engage/engage.repository';
 import { EngageService } from '@gitroom/nestjs-libraries/engage/engage.service';
 import { EngageEntitlementService } from '@gitroom/nestjs-libraries/engage/engage-entitlement.service';
+import { EngageScanConfigService } from '@gitroom/nestjs-libraries/engage/engage-scan-config.service';
+import { EngageScanLeaseService } from '@gitroom/nestjs-libraries/engage/engage-scan-lease.service';
+import { EngageScanIngestService } from '@gitroom/nestjs-libraries/engage/engage-scan-ingest.service';
+import { EngageScanTasksService } from '@gitroom/nestjs-libraries/engage/engage-scan-tasks.service';
 import { EngageIntentClassifierService } from '@gitroom/nestjs-libraries/engage/engage-intent-classifier.service';
 import { EngageDraftService } from '@gitroom/nestjs-libraries/engage/engage-draft.service';
 
@@ -119,6 +123,10 @@ import { EngageDraftService } from '@gitroom/nestjs-libraries/engage/engage-draf
     EngageRepository,
     EngageService,
     EngageEntitlementService,
+    EngageScanConfigService,
+    EngageScanLeaseService,
+    EngageScanIngestService,
+    EngageScanTasksService,
     EngageIntentClassifierService,
     EngageDraftService,
   ],

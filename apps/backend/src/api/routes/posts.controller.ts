@@ -10,6 +10,9 @@ import {
   Res,
 } from '@nestjs/common';
 import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.service';
+import { EngageEntitlementService } from '@gitroom/nestjs-libraries/engage/engage-entitlement.service';
+import { MetricsDueDto } from '@gitroom/nestjs-libraries/dtos/posts/metrics-due.dto';
+import { MetricsBackfillDto } from '@gitroom/nestjs-libraries/dtos/posts/metrics-backfill.dto';
 import { PostReleaseService } from '@gitroom/nestjs-libraries/database/prisma/post-releases/post-release.service';
 import { GetOrgFromRequest } from '@gitroom/nestjs-libraries/user/org.from.request';
 import { Organization, User } from '@prisma/client';
@@ -40,8 +43,49 @@ export class PostsController {
     private _postsService: PostsService,
     private _postReleaseService: PostReleaseService,
     private _agentGraphService: AgentGraphService,
-    private _shortLinkService: ShortLinkService
+    private _shortLinkService: ShortLinkService,
+    private _engageEntitlement: EngageEntitlementService
   ) {}
+
+  /**
+   * Demand-driven metrics fetch gate for the browser extension. The extension
+   * sends the post ids it is currently viewing (one page); the server resolves
+   * the org's effective monitoring window + fetch interval and returns ONLY the
+   * subset due for a refresh — the "visible ∩ due" intersection. Covers own
+   * posts and engage replies alike (both are Post rows).
+   */
+  @Post('/metrics/due')
+  async getDueMetrics(
+    @GetOrgFromRequest() org: Organization,
+    @Body() body: MetricsDueDto
+  ) {
+    const [windowDays, intervalHours] = await Promise.all([
+      this._engageEntitlement.getMetricsWindowDays(org.id),
+      this._engageEntitlement.getMetricsFetchIntervalHours(org.id),
+    ]);
+    const due = await this._postsService.getDueMetricsPosts(
+      org.id,
+      body.ids,
+      windowDays,
+      intervalHours
+    );
+    return { windowDays, intervalHours, due };
+  }
+
+  /**
+   * Write-back for the demand-driven fetch: the extension returns the metrics it
+   * read from the platform for the viewed posts. The server resolves each post's
+   * platform from ownership, runs the same extract/traffic pipeline as the
+   * OAuth analytics sync, persists impressions/traffic/snapshot, and stamps
+   * `lastMetricsFetchAt` so the interval gate holds.
+   */
+  @Post('/metrics/backfill')
+  async backfillMetrics(
+    @GetOrgFromRequest() org: Organization,
+    @Body() body: MetricsBackfillDto
+  ) {
+    return this._postsService.backfillMetrics(org.id, body.items as any);
+  }
 
   @Get('/:id/statistics')
   async getStatistics(
