@@ -140,25 +140,6 @@ export class EngageScanLeaseService {
     };
   }
 
-  /** Finish a scan: advance the incremental cursor and release the lease. */
-  async complete(
-    id: string,
-    next: { lastSeenExternalId?: string | null; lastSeenAt?: Date | null },
-    now: Date = new Date()
-  ): Promise<void> {
-    await this._scanCursor.model.engageScanCursor.update({
-      where: { id },
-      data: {
-        status: 'IDLE',
-        lastScannedAt: now,
-        lastSeenExternalId: next.lastSeenExternalId ?? null,
-        lastSeenAt: next.lastSeenAt ?? null,
-        cooldownUntil: null,
-        leaseToken: null,
-      },
-    });
-  }
-
   /**
    * Complete a lease the EXTENSION holds, identified by its `leaseToken` (the
    * client never learns the cursor id). Atomically requires the token to match
@@ -194,30 +175,4 @@ export class EngageScanLeaseService {
     return res.count === 1;
   }
 
-  /** Back off this unit until `until` after a rate-limit, releasing the lease. */
-  async cooldown(id: string, until: Date): Promise<void> {
-    await this._scanCursor.model.engageScanCursor.update({
-      where: { id },
-      data: { status: 'IDLE', cooldownUntil: until, leaseToken: null },
-    });
-  }
-
-  /**
-   * Release the lease without advancing the cursor (skipped/aborted). With
-   * `resetStartedAt`, also clear lastScanStartedAt so the cadence gate does not
-   * count this as a completed scan — the unit becomes due again immediately.
-   */
-  async release(
-    id: string,
-    opts: { resetStartedAt?: boolean } = {}
-  ): Promise<void> {
-    await this._scanCursor.model.engageScanCursor.update({
-      where: { id },
-      data: {
-        status: 'IDLE',
-        leaseToken: null,
-        ...(opts.resetStartedAt && { lastScanStartedAt: null }),
-      },
-    });
-  }
 }
