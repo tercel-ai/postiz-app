@@ -115,17 +115,40 @@ export class EngageScanTasksService {
     const posts = completed.posts ?? [];
     const nextCursor = this._deriveCursor(posts, completed.nextCursor);
 
-    const ctxs = await this._engageRepo.getOrgContextsForUnit(
-      unit.platform,
-      unit.scanType as 'keyword' | 'channel' | 'tracked',
-      unit.scanKey
-    );
-    let accepted = 0;
-    for (const ctx of ctxs) {
-      accepted += await this._ingest.ingestForOrg(ctx as any, posts);
+    let ctxs;
+    try {
+      ctxs = await this._engageRepo.getOrgContextsForUnit(
+        unit.platform,
+        unit.scanType as 'keyword' | 'channel' | 'tracked',
+        unit.scanKey
+      );
+    } catch (err) {
+      // Could not even resolve subscribers — release WITHOUT advancing so the
+      // unit is retried, rather than stranding the shared lease for the TTL.
+      this.logger.error(
+        `Scan ingest: subscriber resolution failed for ${unit.platform}/${unit.scanType}/${unit.scanKey}: ${(err as Error).message}`
+      );
+      await this._lease.releaseByToken(completed.taskId).catch(() => undefined);
+      return 0;
     }
 
-    await this._lease.completeByToken(completed.taskId, nextCursor);
+    // Isolate per org: one org's transient ingest failure (LLM/DB) must NOT abort
+    // the whole fan-out or strand the SHARED global lease — others still persist,
+    // and the cursor still advances + releases below.
+    let accepted = 0;
+    for (const ctx of ctxs) {
+      try {
+        accepted += await this._ingest.ingestForOrg(ctx as any, posts);
+      } catch (err) {
+        this.logger.error(
+          `Scan ingest fan-out failed for org=${(ctx as any).organizationId}: ${(err as Error).message}`
+        );
+      }
+    }
+
+    await this._lease
+      .completeByToken(completed.taskId, nextCursor)
+      .catch(() => undefined);
     return accepted;
   }
 

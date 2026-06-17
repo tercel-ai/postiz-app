@@ -17,6 +17,7 @@ function build(opts: {
   const lease = {
     claim: vi.fn(async () => (opts.claimResults ?? [])[claimCall++] ?? null),
     completeByToken: vi.fn(async () => true),
+    releaseByToken: vi.fn(async () => true),
   };
   const ingest = { ingestForOrg: vi.fn(async () => 3) };
   const config = { getPacing: vi.fn(async () => DEFAULT_SCAN_PACING) };
@@ -125,6 +126,33 @@ describe('EngageScanTasksService.sync — ingest completed', () => {
     const [token, cursor] = lease.completeByToken.mock.calls[0];
     expect(token).toBe('tok_abc');
     expect(cursor).toEqual({ lastSeenExternalId: 't3_new', lastSeenAt: newest });
+  });
+
+  it('isolates a per-org ingest failure and STILL completes the lease (W2)', async () => {
+    const { svc, ingest, lease } = build({
+      unitByToken: { id: 'cur1', platform: 'reddit', scanType: 'keyword', scanKey: 'ai' },
+      subscribers: [{ organizationId: 'o1' }, { organizationId: 'o2' }],
+    });
+    ingest.ingestForOrg.mockRejectedValueOnce(new Error('LLM down')); // o1 throws
+    const res = await svc.sync('org1', {
+      completed: { taskId: 'tok_abc', posts: [] } as any,
+    });
+    expect(ingest.ingestForOrg).toHaveBeenCalledTimes(2); // o2 still attempted
+    expect(res.accepted).toBe(3); // only o2 counted
+    expect(lease.completeByToken).toHaveBeenCalledTimes(1); // lease NOT stranded
+  });
+
+  it('releases (without advancing) when subscriber resolution throws (W2)', async () => {
+    const { svc, engageRepo, lease } = build({
+      unitByToken: { id: 'cur1', platform: 'reddit', scanType: 'keyword', scanKey: 'ai' },
+    });
+    engageRepo.getOrgContextsForUnit.mockRejectedValueOnce(new Error('DB down'));
+    const res = await svc.sync('org1', {
+      completed: { taskId: 'tok_abc', posts: [] } as any,
+    });
+    expect(res.accepted).toBe(0);
+    expect(lease.releaseByToken).toHaveBeenCalledWith('tok_abc');
+    expect(lease.completeByToken).not.toHaveBeenCalled(); // cursor not advanced
   });
 
   it('ignores a future-dated post when deriving the cursor (W1 — no cross-org poisoning)', async () => {
