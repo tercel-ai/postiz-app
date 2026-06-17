@@ -31,6 +31,7 @@ by **when you reach for them** and lists the flags/env you actually need.
 | `backfill-engage-data-ticks.ts` | Rebuild `EngageDataTicks` from `Post` | dry-run | ts-node |
 | `backfill-engage-matched-keywords.ts` | Fill `EngageOpportunityState.matchedKeywords` for pre-field rows | dry-run | ts-node |
 | `backfill-engage-generation-history.ts` | Seed `EngageOpportunityState.generationHistory` from sent/saved replies + `engage_reply` charges | dry-run | ts-node |
+| `backfill-engage-opportunity-states.ts` | Back-attribute existing global opportunities → per-org `EngageOpportunityState` for orgs that subscribed before the extension scan path | dry-run | ts-node |
 
 ---
 
@@ -245,6 +246,27 @@ npx ts-node --project scripts/tsconfig.json scripts/backfill-engage-matched-keyw
 
 - **Flags:** `--org`, `--all` (recompute non-empty rows too), `--dry-run` (default) / `--execute`, `--help`.
 - **Prereq:** the `matchedKeywords` column must exist — run `pnpm run prisma-db-push` first.
+
+### `backfill-engage-opportunity-states.ts` — back-attribute existing opportunities to old subscribers
+In the extension scan path a unit is fetched once globally and fanned out to every
+subscribing org. Orgs that already had keywords/subreddits/tracked accounts *before*
+the global opportunities were collected have no per-org `EngageOpportunityState` for
+them, and an incremental scan won't surface those older posts. This script re-scores
+recent global opportunities against each org's **current** enabled keywords/scope and
+writes only the per-org state — exactly `EngageScanTasksService.backfillFromExisting`
+run across all enabled orgs (no platform fetch, no global re-write). Idempotent;
+`status`/`bookmark` preserved by the upsert.
+
+```bash
+npx ts-node --project scripts/tsconfig.json scripts/backfill-engage-opportunity-states.ts --dry-run
+npx ts-node --project scripts/tsconfig.json scripts/backfill-engage-opportunity-states.ts --execute
+npx ts-node --project scripts/tsconfig.json scripts/backfill-engage-opportunity-states.ts --org <orgId> --execute
+npx ts-node --project scripts/tsconfig.json scripts/backfill-engage-opportunity-states.ts --execute --window-days 30 --limit 1000 --concurrency 4
+```
+
+- **Flags:** `--org`, `--window-days` (default per-plan metrics window), `--limit` (per-org cap, default 1000), `--concurrency` (default 4), `--dry-run` (default) / `--execute`.
+- **Prereq:** run `prisma db push` first (needs `EngageScanCursor.leaseToken` etc.). Bootstraps a Nest context to reuse `EngageScanTasksService`.
+- **See:** `docs/engage/extension-demand-driven-fetch.md`.
 
 ---
 
