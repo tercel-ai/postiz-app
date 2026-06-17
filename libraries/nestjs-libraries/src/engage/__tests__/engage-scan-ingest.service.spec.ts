@@ -71,6 +71,18 @@ describe('EngageScanIngestService.persistOpportunities', () => {
     expect(arg.create).not.toHaveProperty('status');
   });
 
+  it('dedups duplicate (platform,externalPostId) within one batch → single global upsert (W3)', async () => {
+    const { svc, oppUpsert, stateUpsert } = build();
+    const dup1 = makeScoredPost(1);
+    const dup2 = { ...makeScoredPost(1), metricScore: 999 }; // same id, newer metrics
+    await svc.persistOpportunities('org1', [dup1, dup2]);
+    // one global upsert (not two concurrent upserts on the same unique key)
+    expect(oppUpsert).toHaveBeenCalledTimes(1);
+    expect(stateUpsert).toHaveBeenCalledTimes(1);
+    // last-write-wins: the newer metrics are persisted
+    expect(oppUpsert.mock.calls[0][0].create.metricScore).toBe(999);
+  });
+
   it('upserts per-org state NEW on create, aligned to its post id', async () => {
     const { svc, stateUpsert } = build();
     await svc.persistOpportunities('org1', [makeScoredPost(1)]);

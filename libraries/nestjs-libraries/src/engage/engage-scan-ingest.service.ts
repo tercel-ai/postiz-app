@@ -243,9 +243,21 @@ export class EngageScanIngestService {
    */
   async persistOpportunities(
     orgId: string,
-    posts: ScoredPost[]
+    rawPosts: ScoredPost[]
   ): Promise<void> {
-    if (!posts.length) return;
+    if (!rawPosts.length) return;
+
+    // Dedup by the GLOBAL natural key so the same post id appearing twice in one
+    // unit's yield (overlapping pages on X since_id / Reddit `after`) does not
+    // fire two concurrent upserts on the same @@unique([platform,externalPostId])
+    // row in one Promise.all batch (a Postgres ON CONFLICT race → P2002 that
+    // aborts the whole org persist). Last write wins (freshest metrics). Also
+    // keeps phase-2 index alignment trivially 1:1.
+    const byKey = new Map<string, ScoredPost>();
+    for (const p of rawPosts) {
+      byKey.set(`${p.platform}:${p.externalPostId}`, p);
+    }
+    const posts = Array.from(byKey.values());
 
     const opportunities: Array<{ id: string }> = [];
     for (const batch of chunk(posts, PERSIST_BATCH_SIZE)) {
