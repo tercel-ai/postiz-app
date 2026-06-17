@@ -204,6 +204,14 @@ describe('EngageScanIngestService.attributeExisting', () => {
     expect(arg.create.status).toBe('NEW');
   });
 
+  it('returns the count of states actually written, not scored candidates (W4)', async () => {
+    const { svc, stateUpsert } = build();
+    // two matching opportunities → two state writes → count 2
+    const n = await svc.attributeExisting(ctx, [oppRow(), oppRow({ id: 'opp2', externalPostId: 't3_2' })]);
+    expect(n).toBe(stateUpsert.mock.calls.length); // count == actual writes
+    expect(n).toBe(2);
+  });
+
   it('skips opportunities that do not match the org keywords', async () => {
     const { svc, stateUpsert } = build();
     const n = await svc.attributeExisting(ctx, [oppRow({ postContent: 'totally unrelated' })]);

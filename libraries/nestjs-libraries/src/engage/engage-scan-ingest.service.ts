@@ -182,15 +182,20 @@ export class EngageScanIngestService {
       opportunities.map((o) => [`${o.platform}:${o.externalPostId}`, o.id])
     );
     const scored = this.scoreForOrg(opportunities.map(opportunityToRawPost), ctx);
-    if (!scored.length) return 0;
+    // Only rows whose opportunity id resolves are actually written; the returned
+    // count must reflect writes, not scored candidates (it surfaces as the
+    // backfill total), so filter up front and count the filtered set.
+    const writable = scored.filter((post) =>
+      idByExternal.has(`${post.platform}:${post.externalPostId}`)
+    );
+    if (!writable.length) return 0;
 
-    for (const batch of chunk(scored, PERSIST_BATCH_SIZE)) {
+    for (const batch of chunk(writable, PERSIST_BATCH_SIZE)) {
       await Promise.all(
         batch.map((post) => {
           const opportunityId = idByExternal.get(
             `${post.platform}:${post.externalPostId}`
-          );
-          if (!opportunityId) return Promise.resolve(undefined);
+          )!;
           return this._oppState.model.engageOpportunityState.upsert({
             where: {
               organizationId_opportunityId: {
@@ -218,7 +223,7 @@ export class EngageScanIngestService {
         })
       );
     }
-    return scored.length;
+    return writable.length;
   }
 
   /** Attach intent tags/primary/score to each scored post (batched LLM call). */
