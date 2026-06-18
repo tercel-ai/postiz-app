@@ -16,6 +16,11 @@ export type ScanPath = 'workflow' | 'extension';
 export interface PagePacing {
   /** Hard cap on pages (≈ upstream calls) per scan unit per run. */
   maxPages: number;
+  /** Items requested per page. Smaller = more human-like + smaller ingest
+   * payload (Reddit web search uses 25; X SearchTimeline ~20). Currently
+   * consumed by the extension executor only; workflow adapters page on their
+   * own internal sizes. */
+  pageSize: number;
   /** Minimum wait between two page fetches. */
   pageDelayMs: number;
   /** Extra random wait (0..jitterMs) added on top of pageDelayMs per page. */
@@ -52,22 +57,22 @@ export interface EngageScanPacing {
 export const DEFAULT_SCAN_PACING: EngageScanPacing = {
   workflow: {
     x: {
-      initial: { maxPages: 5, pageDelayMs: 300, jitterMs: 300 },
-      incremental: { maxPages: 5, pageDelayMs: 300, jitterMs: 300 },
+      initial: { maxPages: 5, pageSize: 20, pageDelayMs: 300, jitterMs: 300 },
+      incremental: { maxPages: 5, pageSize: 20, pageDelayMs: 300, jitterMs: 300 },
     },
     reddit: {
-      initial: { maxPages: 5, pageDelayMs: 1200, jitterMs: 600 },
-      incremental: { maxPages: 5, pageDelayMs: 1200, jitterMs: 600 },
+      initial: { maxPages: 5, pageSize: 25, pageDelayMs: 1200, jitterMs: 600 },
+      incremental: { maxPages: 5, pageSize: 25, pageDelayMs: 1200, jitterMs: 600 },
     },
   },
   extension: {
     x: {
-      initial: { maxPages: 3, pageDelayMs: 8000, jitterMs: 60000 },
-      incremental: { maxPages: 1, pageDelayMs: 8000, jitterMs: 60000 },
+      initial: { maxPages: 3, pageSize: 20, pageDelayMs: 8000, jitterMs: 60000 },
+      incremental: { maxPages: 1, pageSize: 20, pageDelayMs: 8000, jitterMs: 60000 },
     },
     reddit: {
-      initial: { maxPages: 3, pageDelayMs: 5000, jitterMs: 60000 },
-      incremental: { maxPages: 1, pageDelayMs: 5000, jitterMs: 60000 },
+      initial: { maxPages: 3, pageSize: 25, pageDelayMs: 5000, jitterMs: 60000 },
+      incremental: { maxPages: 1, pageSize: 25, pageDelayMs: 5000, jitterMs: 60000 },
     },
     interUnit: { delayMs: 60000, jitterMs: 60000 },
     session: { hourlyRequestCap: 60 },
@@ -131,6 +136,7 @@ export function mergePacing(
 
   const mergePage = (b: PagePacing, o?: Partial<PagePacing>): PagePacing => ({
     maxPages: num(o?.maxPages, b.maxPages),
+    pageSize: num(o?.pageSize, b.pageSize),
     pageDelayMs: num(o?.pageDelayMs, b.pageDelayMs, true),
     jitterMs: num(o?.jitterMs, b.jitterMs, true),
   });

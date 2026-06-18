@@ -19,6 +19,8 @@ export interface ScanTaskCursor {
 /** Pacing the extension MUST honour, resolved server-side per task. */
 export interface ScanTaskPacing {
   maxPages: number;
+  /** Items requested per page (Reddit limit / X count). */
+  pageSize: number;
   pageDelayMs: number;
   pageJitterMs: number;
   interUnitDelayMs: number;

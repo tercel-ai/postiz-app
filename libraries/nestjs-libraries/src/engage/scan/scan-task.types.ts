@@ -31,6 +31,8 @@ export interface ScanTaskCursor {
 export interface ScanTaskPacing {
   /** Hard cap on pages this run. */
   maxPages: number;
+  /** Items requested per page (e.g. Reddit limit / X count). */
+  pageSize: number;
   /** Floor wait between pages; actual = pageDelayMs + random(0..pageJitterMs). */
   pageDelayMs: number;
   pageJitterMs: number;

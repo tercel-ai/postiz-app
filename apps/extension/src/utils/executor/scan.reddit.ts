@@ -17,10 +17,11 @@ import {
 import { applyDelay } from './pacing';
 
 const REDDIT_BASE = 'https://www.reddit.com';
-// Page size. Reddit's web search loads 25 at a time, so 25 mimics a human
-// browsing (limit=100 is a scraper tell → more anti-bot risk) AND keeps the
-// per-page ingest payload small. Deeper history still comes from maxPages.
-const REDDIT_LIMIT = 25;
+// Page size now comes from server pacing (task.pacing.pageSize, admin-tunable in
+// engage_scan_pacing). Reddit's web search loads 25 at a time, so a small size
+// mimics a human (limit=100 is a scraper tell → anti-bot risk) AND keeps the
+// ingest payload small. This is the fallback if the server omits it (old build).
+const REDDIT_LIMIT_FALLBACK = 25;
 
 interface RedditChild {
   data: Record<string, any>;
@@ -31,14 +32,15 @@ interface RedditListing {
 
 /** Build the page URL for a task + pagination cursor. */
 function buildUrl(task: EngageScanTask, after?: string): string {
+  const limit = task.pacing.pageSize || REDDIT_LIMIT_FALLBACK;
   const afterParam = after ? `&after=${encodeURIComponent(after)}` : '';
   if (task.scanType === 'keyword') {
     const q = encodeURIComponent(task.scanKey);
-    return `${REDDIT_BASE}/search.json?q=${q}&sort=new&limit=${REDDIT_LIMIT}&type=link${afterParam}`;
+    return `${REDDIT_BASE}/search.json?q=${q}&sort=new&limit=${limit}&type=link${afterParam}`;
   }
   // channel scope = keyword-free "scope firehose"; keyword matching is server-side.
   const sub = encodeURIComponent(task.scanKey);
-  return `${REDDIT_BASE}/r/${sub}/new.json?limit=${REDDIT_LIMIT}${afterParam}`;
+  return `${REDDIT_BASE}/r/${sub}/new.json?limit=${limit}${afterParam}`;
 }
 
 function toIngestPost(p: Record<string, any>): ScanIngestPost {

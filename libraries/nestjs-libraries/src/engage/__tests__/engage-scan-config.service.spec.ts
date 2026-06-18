@@ -38,6 +38,7 @@ describe('EngageScanConfigService.getPagePacing', () => {
     const svc = new EngageScanConfigService(settingsMock());
     expect(await svc.getPagePacing('extension', 'x', 'initial')).toEqual({
       maxPages: 3,
+      pageSize: 20,
       pageDelayMs: 8000,
       jitterMs: 60000,
     });
@@ -47,6 +48,7 @@ describe('EngageScanConfigService.getPagePacing', () => {
     const svc = new EngageScanConfigService(settingsMock());
     expect(await svc.getPagePacing('workflow', 'x', 'initial')).toEqual({
       maxPages: 5,
+      pageSize: 20,
       pageDelayMs: 300,
       jitterMs: 300,
     });
@@ -66,7 +68,12 @@ describe('EngageScanConfigService.getPagePacing', () => {
     expect(x.jitterMs).toBe(60000); // default preserved
     // a sibling platform stays at its default
     const reddit = await svc.getPagePacing('extension', 'reddit', 'initial');
-    expect(reddit).toEqual({ maxPages: 3, pageDelayMs: 5000, jitterMs: 60000 });
+    expect(reddit).toEqual({
+      maxPages: 3,
+      pageSize: 25,
+      pageDelayMs: 5000,
+      jitterMs: 60000,
+    });
   });
 });
 

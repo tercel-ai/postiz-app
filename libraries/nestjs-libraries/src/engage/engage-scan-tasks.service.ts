@@ -242,6 +242,7 @@ export class EngageScanTasksService {
       },
       pacing: {
         maxPages: page.maxPages,
+        pageSize: page.pageSize,
         pageDelayMs: page.pageDelayMs,
         pageJitterMs: page.jitterMs,
         interUnitDelayMs: pacing.extension.interUnit.delayMs,

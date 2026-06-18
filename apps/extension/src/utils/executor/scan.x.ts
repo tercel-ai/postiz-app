@@ -17,7 +17,10 @@ import { applyDelay } from './pacing';
 import { xGraphqlGet, X_SEARCH_FEATURES } from './x.graphql';
 import { parseTweetResult, newerId, isNewerThan } from './x.parse';
 
-const X_COUNT = 20;
+// Page size comes from server pacing (task.pacing.pageSize, admin-tunable). X's
+// SearchTimeline serves ~20 per page for a real browsing session; this is the
+// fallback if the server omits it (old build).
+const X_COUNT_FALLBACK = 20;
 
 function buildRawQuery(task: EngageScanTask): string {
   if (task.scanType === 'tracked') {
@@ -103,7 +106,7 @@ export async function scanX(
 
     const variables: Record<string, unknown> = {
       rawQuery,
-      count: X_COUNT,
+      count: pacing.pageSize || X_COUNT_FALLBACK,
       querySource: 'typed_query',
       product: 'Latest',
     };
