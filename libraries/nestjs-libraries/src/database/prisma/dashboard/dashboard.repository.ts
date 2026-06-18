@@ -107,6 +107,32 @@ export class DashboardRepository {
       }));
   }
 
+  async getTrafficTotal(
+    orgId: string,
+    integrationId?: string[],
+    channel?: string[],
+    startDate?: Date,
+    endDate?: Date
+  ): Promise<number> {
+    const where: Prisma.PostWhereInput = {
+      organizationId: orgId,
+      deletedAt: null,
+      parentPostId: null,
+      source: { notIn: ['engage'] },
+      trafficScore: { not: null },
+      ...(integrationId?.length && { integrationId: { in: integrationId } }),
+      ...(channel?.length && { integration: { providerIdentifier: { in: channel } } }),
+    };
+    if (startDate || endDate) {
+      where.publishDate = {
+        ...(startDate && { gte: startDate }),
+        ...(endDate && { lte: endDate }),
+      };
+    }
+    const agg = await this._post.model.post.aggregate({ where, _sum: { trafficScore: true } });
+    return agg._sum.trafficScore ?? 0;
+  }
+
   getPublishedPostsWithRelease(orgId: string, sinceDays: number, integrationId?: string[], channel?: string[]) {
     return this._post.model.post.findMany({
       where: {

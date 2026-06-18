@@ -135,6 +135,8 @@ export class DashboardService {
     const impressionsByPlatform = Array.from(platformImpressionsMap.entries()).map(([platform, value]) => ({ platform, value }));
     const impressionsTotal = impressionsByPlatform.reduce((sum, p) => sum + p.value, 0);
 
+    const trafficAgg = await this._dashboardRepository.getTrafficTotal(org.id, integrationId, channel, normalizedStart, normalizedEnd);
+
     const result = {
       channel_count: channelCount,
       channel_connected_count: channelConnectedCount,
@@ -143,6 +145,7 @@ export class DashboardService {
       ),
       impressions_total: impressionsTotal,
       impressions_by_platform: impressionsByPlatform,
+      traffics_total: Math.round(trafficAgg),
       posts_stats: stats,
       published_this_period: publishedThisPeriod,
       ...(postSendLimit !== undefined ? { post_send_limit: postSendLimit } : {}),
