@@ -81,12 +81,13 @@ export class DashboardService {
       }
     }
 
-    const [channelCount, channelConnectedCount, integrations, postStats, postImpressionsByIntegration, publishedThisPeriod] = await Promise.all([
+    const [channelCount, channelConnectedCount, integrations, postStats, impressionsByPlatform, trafficAgg, publishedThisPeriod] = await Promise.all([
       this._dashboardRepository.getChannelCount(org.id, integrationId, channel),
       this._dashboardRepository.getChannelCount(org.id, integrationId, channel, false),
       this._dashboardRepository.getActiveIntegrations(org.id, integrationId, channel),
       this._dashboardRepository.getPostsStats(org.id, normalizedStart, normalizedEnd, integrationId, channel),
-      this._dashboardRepository.getImpressionsByIntegration(org.id, integrationId, channel, normalizedStart, normalizedEnd),
+      this._dashboardRepository.getImpressionsByPlatform(org.id, integrationId, channel, normalizedStart, normalizedEnd),
+      this._dashboardRepository.getTrafficTotal(org.id, integrationId, channel, normalizedStart, normalizedEnd),
       this._postsService.countPostsFromDay(org.id, periodStart),
     ]);
 
@@ -120,22 +121,10 @@ export class DashboardService {
     const channelsByPlatform = new Map<string, number>();
     for (const integration of integrations) {
       const platform = integration.providerIdentifier;
-      channelsByPlatform.set(
-        platform,
-        (channelsByPlatform.get(platform) || 0) + 1
-      );
+      channelsByPlatform.set(platform, (channelsByPlatform.get(platform) || 0) + 1);
     }
 
-    const integrationPlatformMap = new Map(integrations.map((i) => [i.id, i.providerIdentifier]));
-    const platformImpressionsMap = new Map<string, number>();
-    for (const { integrationId: intId, impressions } of postImpressionsByIntegration) {
-      const platform = integrationPlatformMap.get(intId) ?? 'unknown';
-      platformImpressionsMap.set(platform, (platformImpressionsMap.get(platform) ?? 0) + impressions);
-    }
-    const impressionsByPlatform = Array.from(platformImpressionsMap.entries()).map(([platform, value]) => ({ platform, value }));
     const impressionsTotal = impressionsByPlatform.reduce((sum, p) => sum + p.value, 0);
-
-    const trafficAgg = await this._dashboardRepository.getTrafficTotal(org.id, integrationId, channel, normalizedStart, normalizedEnd);
 
     const result = {
       channel_count: channelCount,

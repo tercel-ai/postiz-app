@@ -72,13 +72,13 @@ export class DashboardRepository {
     return stats;
   }
 
-  async getImpressionsByIntegration(
+  async getImpressionsByPlatform(
     orgId: string,
     integrationId?: string[],
     channel?: string[],
     startDate?: Date,
     endDate?: Date
-  ): Promise<{ integrationId: string; impressions: number }[]> {
+  ): Promise<{ platform: string; value: number }[]> {
     const where: Prisma.PostWhereInput = {
       organizationId: orgId,
       deletedAt: null,
@@ -99,12 +99,22 @@ export class DashboardRepository {
       where,
       _sum: { impressions: true },
     });
-    return rows
-      .filter((r) => r.integrationId != null)
-      .map((r) => ({
-        integrationId: r.integrationId!,
-        impressions: r._sum.impressions ?? 0,
-      }));
+    const validRows = rows.filter((r) => r.integrationId != null);
+    if (!validRows.length) return [];
+
+    const integrationIds = validRows.map((r) => r.integrationId!);
+    const integrationRecords = await this._integration.model.integration.findMany({
+      where: { id: { in: integrationIds } },
+      select: { id: true, providerIdentifier: true },
+    });
+    const platformMap = new Map(integrationRecords.map((i) => [i.id, i.providerIdentifier]));
+
+    const byPlatform = new Map<string, number>();
+    for (const row of validRows) {
+      const platform = platformMap.get(row.integrationId!) ?? 'unknown';
+      byPlatform.set(platform, (byPlatform.get(platform) ?? 0) + (row._sum.impressions ?? 0));
+    }
+    return Array.from(byPlatform.entries()).map(([platform, value]) => ({ platform, value }));
   }
 
   async getTrafficTotal(
