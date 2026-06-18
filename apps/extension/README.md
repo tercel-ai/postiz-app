@@ -121,6 +121,31 @@ The `LOGIN_URL` env prefix is passed through to Vite at build time
 The output zip is named `aisee-extension-v{VERSION}-{TIMESTAMP}.zip` and sits
 in `apps/extension/`.
 
+By default the pack build **keeps `console.debug(...)`** so testers can watch the
+scan-ingest / metrics flows in the extension devtools. Pass `--strip-debug` to
+remove those calls (same stripping the store release gets):
+
+```bash
+bash scripts/pack.sh --strip-debug            # drop console.debug
+bash scripts/pack.sh /path/.env --strip-debug # flags/path in any order
+bash scripts/pack.sh --help                   # show usage
+```
+
+### Stripping `console.debug` from a build
+
+`console.debug(...)` calls are removed from the bundle when `STRIP_DEBUG` is set
+(presence = on — any value works) or `EXTENSION_ENV=production`. `console.log` /
+`warn` / `error` are always kept. This is wired via `esbuild.pure` in
+`vite.config.base.ts`, so it only takes effect on minified (non-dev) builds.
+
+| Build | `console.debug` |
+| --- | --- |
+| `npm run build` / `build:chrome` / `dev:*` | kept |
+| `pack-ext` (default) | kept |
+| `pack-ext --strip-debug` | stripped |
+| `STRIP_DEBUG=1 vite build …` | stripped |
+| `npm run build:prod` (store release) | stripped |
+
 ### Development (hot reload)
 
 ```bash

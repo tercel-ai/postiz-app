@@ -8,8 +8,14 @@
 # to reach that backend, and log in to that same FRONTEND_URL origin.
 #
 # Usage:
-#   bash scripts/pack.sh                 # uses ../../.env
-#   bash scripts/pack.sh /path/to/.env   # uses a different env file
+#   bash scripts/pack.sh                       # uses ../../.env, keeps console.debug
+#   bash scripts/pack.sh /path/to/.env         # uses a different env file
+#   bash scripts/pack.sh --strip-debug         # drop console.debug from the build
+#   bash scripts/pack.sh /path/.env --strip-debug
+#
+# By default the pack build KEEPS console.debug so coworkers can watch the
+# scan-ingest / metrics flows in the extension devtools. Pass --strip-debug to
+# ship a clean build with those calls removed (same stripping as build:prod).
 #
 # The coworker then: unzips → chrome://extensions → enable Developer mode →
 # "Load unpacked" → select the unzipped folder.
@@ -18,7 +24,23 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."   # → apps/extension
 
-ENV_FILE="${1:-../../.env}"
+# Parse args in any order: a positional path = env file, --strip-debug = toggle.
+ENV_FILE=""
+STRIP_DEBUG="false"
+for arg in "$@"; do
+  case "$arg" in
+    --strip-debug)    STRIP_DEBUG="true" ;;
+    --no-strip-debug) STRIP_DEBUG="false" ;;
+    -h|--help)
+      grep -E '^#( |$)' "$0" | sed 's/^# \{0,1\}//'
+      exit 0 ;;
+    -*)
+      echo "✗ unknown option: $arg" >&2
+      exit 1 ;;
+    *)                ENV_FILE="$arg" ;;
+  esac
+done
+ENV_FILE="${ENV_FILE:-../../.env}"
 
 if [ ! -f "$ENV_FILE" ]; then
   echo "✗ env file not found: $ENV_FILE" >&2
@@ -29,9 +51,14 @@ FRONTEND="$(grep -E '^FRONTEND_URL=' "$ENV_FILE" | head -1 | cut -d= -f2- | tr -
 
 echo "▶ building extension with env: $ENV_FILE"
 echo "  FRONTEND_URL = ${FRONTEND:-(unset)}"
+echo "  strip console.debug = $STRIP_DEBUG"
 
 rm -rf dist
-npx dotenv -e "$ENV_FILE" -- vite build --config vite.config.chrome.ts
+if [ "$STRIP_DEBUG" = "true" ]; then
+  STRIP_DEBUG=1 npx dotenv -e "$ENV_FILE" -- vite build --config vite.config.chrome.ts
+else
+  npx dotenv -e "$ENV_FILE" -- vite build --config vite.config.chrome.ts
+fi
 
 VERSION="$(node -p "require('./package.json').version")"
 STAMP="$(date +%Y%m%d-%H%M)"

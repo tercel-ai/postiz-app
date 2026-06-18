@@ -27,6 +27,12 @@ const providerMatches = ProviderList.map((p) => `${p.baseUrl}/*`);
 // purpose in a released build.
 const isProdRelease = process.env.EXTENSION_ENV === 'production';
 
+// Strip `console.debug(...)` calls from the bundle. Always on for the store
+// release; otherwise opt-in by setting STRIP_DEBUG at all (presence = on, e.g.
+// `STRIP_DEBUG=1 vite build` or `pack.sh --strip-debug`). `esbuild.pure` marks
+// the call side-effect-free so minification drops it, keeping log/warn/error.
+const stripDebug = isProdRelease || !!process.env.STRIP_DEBUG;
+
 // Hosts the background fetches directly (with the user's session cookies) to
 // post in-browser replies. No content script runs on these — background only.
 const replyHostPermissions = [
@@ -110,6 +116,7 @@ export const baseBuildOptions: BuildOptions = {
 
 export default defineConfig({
   envPrefix: ['NEXT_PUBLIC_', 'FRONTEND_URL', 'AUTH_URL', 'EXTENSION_ENV', 'LOGIN_URL'],
+  esbuild: stripDebug ? { pure: ['console.debug'] } : {},
   plugins: [
     tailwindcss(),
     tsconfigPaths(),
