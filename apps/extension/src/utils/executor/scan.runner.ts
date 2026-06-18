@@ -15,6 +15,7 @@ import {
 } from './executor.types';
 import { scanReddit } from './scan.reddit';
 import { scanX } from './scan.x';
+import { X_EXECUTOR_ENABLED } from './flags';
 import { applyDelay, remainingHourlyBudget, tryConsumeHourly } from './pacing';
 
 const SCAN_ENDPOINT = '/engage/scan-tasks/ingest';
@@ -44,7 +45,15 @@ let scanInFlight = false;
 async function scanOne(task: EngageScanTask): Promise<ScanRunResult> {
   const gate = () => tryConsumeHourly(task.pacing.hourlyRequestCap);
   if (task.platform === 'reddit') return scanReddit(task, gate);
-  if (task.platform === 'x') return scanX(task, gate);
+  if (task.platform === 'x') {
+    // X is account-risky and OFF by default (see flags.ts). Refuse the task
+    // WITHOUT touching x.com; mark exhausted so the backend stops re-leasing it.
+    if (!X_EXECUTOR_ENABLED) {
+      console.warn('[aisee][scan] X disabled (ENGAGE_X_ENABLED!=true) — skipping');
+      return { posts: [], nextCursor: task.cursor, exhausted: true };
+    }
+    return scanX(task, gate);
+  }
   console.warn('[aisee][scan] unknown platform', task.platform);
   return { posts: [], nextCursor: task.cursor, exhausted: true };
 }

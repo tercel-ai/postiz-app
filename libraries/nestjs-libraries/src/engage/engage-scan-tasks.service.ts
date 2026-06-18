@@ -192,6 +192,12 @@ export class EngageScanTasksService {
       scanKey: string;
     }[] = [];
 
+    // ENGAGE_SUPPORTED_PLATFORMS is a hard allowlist that gates EVERY unit type
+    // (keyword/channel/tracked), so an operator can fully kill a platform — e.g.
+    // `ENGAGE_SUPPORTED_PLATFORMS=reddit` to stop all X scanning (X via the
+    // user's personal session is anti-automation-risky) without a code change.
+    const supported = new Set<ScanTaskPlatform>(SCAN_PLATFORMS);
+
     for (const kw of ctx.keywords) {
       if (!kw.enabled) continue;
       const scanKey = normalizeKeyword(kw.keyword);
@@ -201,7 +207,10 @@ export class EngageScanTasksService {
       }
     }
     for (const c of ctx.monitoredChannels) {
-      if (c.platform === 'x' || c.platform === 'reddit') {
+      if (
+        (c.platform === 'x' || c.platform === 'reddit') &&
+        supported.has(c.platform)
+      ) {
         units.push({
           platform: c.platform,
           scanType: 'channel',
@@ -210,7 +219,10 @@ export class EngageScanTasksService {
       }
     }
     for (const a of ctx.trackedAccounts) {
-      if (a.platform === 'x' || a.platform === 'reddit') {
+      if (
+        (a.platform === 'x' || a.platform === 'reddit') &&
+        supported.has(a.platform)
+      ) {
         units.push({
           platform: a.platform,
           scanType: 'tracked',

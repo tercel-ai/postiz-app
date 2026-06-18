@@ -131,6 +131,12 @@ file, and bare `pnpm pack-ext` (no profile) falls back to the repo-root `.env`
 The `LOGIN_URL` in each profile is passed to Vite at build time
 (`import.meta.env.LOGIN_URL`); if omitted it falls back to `FRONTEND_URL + '/sign-in'`.
 
+**X scanning is OFF by default.** The X scan + metrics path uses the user's
+personal x.com session (anti-automation risk — it has temp-limited real
+accounts). The executor refuses all X work unless built with `ENGAGE_X_ENABLED=true`
+(`flags.ts`). Reddit is unaffected. To opt in: `ENGAGE_X_ENABLED=true pnpm pack-ext:dev`
+(and also allow X server-side via `ENGAGE_SUPPORTED_PLATFORMS`).
+
 The output zip is named `aisee-extension-v{VERSION}-{TIMESTAMP}.zip` and sits
 in `apps/extension/`.
 

@@ -10,6 +10,7 @@ import { DueMetricsResponse, MetricsBackfillItem } from './executor.types';
 import { applyDelay, tryConsumeHourly } from './pacing';
 import { fetchRedditMetrics } from './metrics.reddit';
 import { fetchXMetrics } from './metrics.x';
+import { X_EXECUTOR_ENABLED } from './flags';
 
 const DUE_ENDPOINT = '/posts/metrics/due';
 const BACKFILL_ENDPOINT = '/posts/metrics/backfill';
@@ -78,6 +79,9 @@ export async function runMetrics(ids: string[]): Promise<MetricsRunSummary> {
       const platform = post.integration?.providerIdentifier;
       const url = post.releaseURL;
       if (!platform || !url) continue;
+      // X metrics go through the personal x.com session — OFF by default (see
+      // flags.ts). Skip before consuming any budget / hitting x.com.
+      if (platform === 'x' && !X_EXECUTOR_ENABLED) continue;
 
       if (!(await tryConsumeHourly(METRICS_HOURLY_CAP))) {
         summary.stoppedReason = 'cap';
