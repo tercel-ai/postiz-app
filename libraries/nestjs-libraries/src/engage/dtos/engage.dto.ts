@@ -121,6 +121,10 @@ export class AddMonitoredChannelDto {
   audienceSize?: number;
 
   @IsOptional()
+  @IsBoolean()
+  enabled?: boolean;
+
+  @IsOptional()
   metadata?: Record<string, unknown>;
 }
 

@@ -698,6 +698,7 @@ export class EngageRepository {
             platform: dto.platform,
             channelId: dto.channelId,
             channelName: dto.channelName,
+            enabled: dto.enabled ?? false,
             audienceSize: dto.audienceSize ?? 0,
             ...(dto.metadata && {
               metadata: dto.metadata as Prisma.InputJsonValue,
