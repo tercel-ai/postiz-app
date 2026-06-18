@@ -175,4 +175,55 @@ export class EngageScanLeaseService {
     return res.count === 1;
   }
 
+  // ─── Id-based lifecycle (synchronous WORKFLOW path) ────────────────────────
+  // The workflow holds the cursor row for the duration of one activity, so it
+  // completes/cools/releases by id (no rotating token needed). It shares this
+  // service's `claim` — and thus its stale-SCANNING reclaim — so a crashed
+  // worker's lease self-heals instead of stranding the unit forever.
+
+  /** Finish a scan: advance the incremental cursor and release the lease. */
+  async complete(
+    id: string,
+    next: { lastSeenExternalId?: string | null; lastSeenAt?: Date | null },
+    now: Date = new Date()
+  ): Promise<void> {
+    await this._scanCursor.model.engageScanCursor.update({
+      where: { id },
+      data: {
+        status: 'IDLE',
+        lastScannedAt: now,
+        lastSeenExternalId: next.lastSeenExternalId ?? null,
+        lastSeenAt: next.lastSeenAt ?? null,
+        cooldownUntil: null,
+        leaseToken: null,
+      },
+    });
+  }
+
+  /** Back off this unit until `until` after a rate-limit, releasing the lease. */
+  async cooldown(id: string, until: Date): Promise<void> {
+    await this._scanCursor.model.engageScanCursor.update({
+      where: { id },
+      data: { status: 'IDLE', cooldownUntil: until, leaseToken: null },
+    });
+  }
+
+  /**
+   * Release the lease without advancing the cursor (skipped/aborted). With
+   * `resetStartedAt`, also clear lastScanStartedAt so the cadence gate does not
+   * count this as a completed scan — the unit becomes due again immediately.
+   */
+  async release(
+    id: string,
+    opts: { resetStartedAt?: boolean } = {}
+  ): Promise<void> {
+    await this._scanCursor.model.engageScanCursor.update({
+      where: { id },
+      data: {
+        status: 'IDLE',
+        leaseToken: null,
+        ...(opts.resetStartedAt && { lastScanStartedAt: null }),
+      },
+    });
+  }
 }

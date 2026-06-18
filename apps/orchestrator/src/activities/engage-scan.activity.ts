@@ -19,6 +19,7 @@ import {
 } from '@gitroom/nestjs-libraries/engage/engage-entitlement.service';
 import { EngageScanConfigService } from '@gitroom/nestjs-libraries/engage/engage-scan-config.service';
 import { EngageScanIngestService } from '@gitroom/nestjs-libraries/engage/engage-scan-ingest.service';
+import { EngageScanLeaseService } from '@gitroom/nestjs-libraries/engage/engage-scan-lease.service';
 import { EngageKeyword } from '@prisma/client';
 import { getRedditToken } from '@gitroom/nestjs-libraries/engage/reddit-auth';
 import { XScanAdapter } from '@gitroom/nestjs-libraries/engage/scan/x-scan-adapter';
@@ -769,14 +770,14 @@ export class EngageScanActivity {
     xPool?: TokenPool;
     redditToken?: string | null;
   }): Promise<{ ran: boolean; posts: RawPost[] }> {
-    const cursor = await this._claimCursor(
-      args.platform,
-      args.scanType,
-      args.scanKey,
-      args.cadenceMs,
-      args.force ?? false
-    );
-    // Not due yet, cooling down, or already SCANNING (single-flight).
+    const cursor = await this._lease.claim({
+      platform: args.platform,
+      scanType: args.scanType,
+      scanKey: args.scanKey,
+      cadenceMs: args.cadenceMs,
+      force: args.force ?? false,
+    });
+    // Not due yet, cooling down, actively leased, or lost a single-flight race.
     if (!cursor) return { ran: false, posts: [] };
 
     const adapter = args.platform === 'x' ? this._xAdapter : this._redditAdapter;
@@ -790,7 +791,7 @@ export class EngageScanActivity {
       );
       // Reset lastScanStartedAt so the cadence gate doesn't treat a skipped scan
       // as a completed one — next tick will retry as soon as tokens are available.
-      await this._releaseCursor(cursor.id, { resetStartedAt: true });
+      await this._lease.release(cursor.id, { resetStartedAt: true });
       return { ran: false, posts: [] };
     }
 
@@ -819,97 +820,40 @@ export class EngageScanActivity {
           Date.now() + (result.rate.retryAfterMs ?? DEFAULT_COOLDOWN_MS)
         );
         // Do NOT advance the cursor — retry from the same point after cool-down.
-        await this._cooldownCursor(cursor.id, until);
+        await this._lease.cooldown(cursor.id, until);
         this.logger.warn(
           `${args.platform} ${args.scanType} "${args.scanKey}" rate-limited; cooling down until ${until.toISOString()}`
         );
       } else if (result.backlogRemaining) {
-        await this._releaseCursor(cursor.id);
+        await this._lease.release(cursor.id);
         this.logger.warn(
           `${args.platform} ${args.scanType} "${args.scanKey}" hit call budget; backlog remains`
         );
       } else {
-        await this._completeCursor(cursor.id, result.nextCursor);
+        await this._lease.complete(cursor.id, result.nextCursor);
       }
       return { ran: true, posts: result.posts };
     } catch (err) {
       this.logger.warn(
         `Scan unit ${args.platform}/${args.scanType}/${args.scanKey} failed: ${(err as Error).message}`
       );
-      await this._releaseCursor(cursor.id);
+      await this._lease.release(cursor.id);
       return { ran: false, posts: [] };
     }
   }
 
   // ─── EngageScanCursor lifecycle ──────────────────────────────────────────
-
-  // Ensure the unit's cursor row exists, then skip it unless it is DUE — not
-  // SCANNING, not cooling down, and (unless `force`) its cadence has elapsed
-  // since lastScanStartedAt. If due, atomically claim it (IDLE→SCANNING + stamp
-  // lastScanStartedAt). Returns the pre-claim row (carrying the incremental
-  // cursor) or null when not due / lost a single-flight race.
-  private async _claimCursor(
-    platform: string,
-    scanType: string,
-    scanKey: string,
-    cadenceMs: number,
-    force: boolean
-  ) {
-    const now = new Date();
-    const row = await this._scanCursor.model.engageScanCursor.upsert({
-      where: { platform_scanType_scanKey: { platform, scanType, scanKey } },
-      create: { platform, scanType, scanKey, status: 'IDLE' },
-      update: {},
-    });
-    if (row.status === 'SCANNING') return null;
-    if (row.cooldownUntil && row.cooldownUntil > now) return null;
-    // Cadence gate: skip if it was scanned within its interval (force bypasses).
-    if (
-      !force &&
-      row.lastScanStartedAt &&
-      row.lastScanStartedAt.getTime() + cadenceMs > now.getTime()
-    ) {
-      return null;
-    }
-    const claimed = await this._scanCursor.model.engageScanCursor.updateMany({
-      where: { id: row.id, status: 'IDLE' },
-      data: { status: 'SCANNING', lastScanStartedAt: now },
-    });
-    if (claimed.count !== 1) return null; // lost a concurrent single-flight race
-    return row;
-  }
-
-  private async _completeCursor(id: string, next: ScanCursor): Promise<void> {
-    await this._scanCursor.model.engageScanCursor.update({
-      where: { id },
-      data: {
-        status: 'IDLE',
-        lastScannedAt: new Date(),
-        lastSeenExternalId: next.lastSeenExternalId ?? null,
-        lastSeenAt: next.lastSeenAt ?? null,
-        cooldownUntil: null,
-      },
-    });
-  }
-
-  private async _cooldownCursor(id: string, until: Date): Promise<void> {
-    await this._scanCursor.model.engageScanCursor.update({
-      where: { id },
-      data: { status: 'IDLE', cooldownUntil: until },
-    });
-  }
-
-  private async _releaseCursor(
-    id: string,
-    opts: { resetStartedAt?: boolean } = {}
-  ): Promise<void> {
-    await this._scanCursor.model.engageScanCursor.update({
-      where: { id },
-      data: {
-        status: 'IDLE',
-        ...(opts.resetStartedAt && { lastScanStartedAt: null }),
-      },
-    });
+  // The cursor claim/complete/cooldown/release is owned by the SHARED
+  // EngageScanLeaseService (one implementation for the workflow and the
+  // extension scan path). Built lazily from this activity's own injected
+  // scan-cursor repo so construction (and the unit tests that build this
+  // activity directly) stay unchanged. Using the shared `claim` gives the
+  // workflow the stale-SCANNING reclaim it previously lacked: a worker that
+  // crashes mid-scan no longer strands the unit in SCANNING forever — the lease
+  // self-heals after SCAN_LEASE_TTL_MS.
+  private _leaseService?: EngageScanLeaseService;
+  private get _lease(): EngageScanLeaseService {
+    return (this._leaseService ??= new EngageScanLeaseService(this._scanCursor));
   }
 
   // ─── Fan-out + finalize (shared by every scan type) ──────────────────────

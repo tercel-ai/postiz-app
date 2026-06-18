@@ -112,6 +112,44 @@ describe('EngageScanLeaseService.claim', () => {
 });
 
 
+describe('EngageScanLeaseService id-based lifecycle (workflow path)', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('complete advances the cursor, clears the token, and releases', async () => {
+    const { svc, engageScanCursor } = build({ ...base });
+    await svc.complete('c1', { lastSeenExternalId: 't3_x', lastSeenAt: NOW }, NOW);
+    const data = engageScanCursor.update.mock.calls[0][0].data;
+    expect(data).toMatchObject({
+      status: 'IDLE',
+      lastSeenExternalId: 't3_x',
+      lastSeenAt: NOW,
+      cooldownUntil: null,
+      leaseToken: null,
+    });
+  });
+
+  it('cooldown releases the lease with a back-off', async () => {
+    const until = new Date(NOW.getTime() + 900_000);
+    const { svc, engageScanCursor } = build({ ...base });
+    await svc.cooldown('c1', until);
+    expect(engageScanCursor.update.mock.calls[0][0].data).toEqual({
+      status: 'IDLE',
+      cooldownUntil: until,
+      leaseToken: null,
+    });
+  });
+
+  it('release with resetStartedAt makes the unit due again immediately', async () => {
+    const { svc, engageScanCursor } = build({ ...base });
+    await svc.release('c1', { resetStartedAt: true });
+    expect(engageScanCursor.update.mock.calls[0][0].data).toEqual({
+      status: 'IDLE',
+      leaseToken: null,
+      lastScanStartedAt: null,
+    });
+  });
+});
+
 describe('EngageScanLeaseService.completeByToken (session binding)', () => {
   beforeEach(() => vi.clearAllMocks());
 

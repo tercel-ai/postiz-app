@@ -63,10 +63,10 @@ describe('EngageScanActivity._scanUnit (cursor lifecycle)', () => {
     const out = await (activity as any)._scanUnit(scanArgs());
 
     expect(upsert).toHaveBeenCalledTimes(1);
-    // Claim: IDLE→SCANNING + lastScanStartedAt.
+    // Claim: IDLE→SCANNING + lastScanStartedAt (atomic CAS via the shared lease).
     expect(updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { id: 'cur1', status: 'IDLE' },
+        where: expect.objectContaining({ id: 'cur1' }),
         data: expect.objectContaining({ status: 'SCANNING' }),
       })
     );
@@ -104,7 +104,12 @@ describe('EngageScanActivity._scanUnit (cursor lifecycle)', () => {
   });
 
   it('skips a unit already SCANNING (single-flight)', async () => {
-    const { activity, updateMany } = build({ ...IDLE_ROW, status: 'SCANNING' });
+    // Freshly leased (recent lastScanStartedAt) → actively held, not stale.
+    const { activity, updateMany } = build({
+      ...IDLE_ROW,
+      status: 'SCANNING',
+      lastScanStartedAt: new Date(),
+    });
     const adapter = fakeAdapter({ posts: [], nextCursor: {}, rate: { limited: false } });
     (activity as any)._xAdapter = adapter;
 
@@ -159,7 +164,7 @@ describe('EngageScanActivity._scanUnit (cursor lifecycle)', () => {
       posts: [{ externalPostId: 'x1' }],
     });
     expect(update).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { id: 'cur1' }, data: { status: 'IDLE' } })
+      expect.objectContaining({ where: { id: 'cur1' }, data: expect.objectContaining({ status: 'IDLE' }) })
     );
     expect(update).not.toHaveBeenCalledWith(
       expect.objectContaining({
@@ -177,7 +182,7 @@ describe('EngageScanActivity._scanUnit (cursor lifecycle)', () => {
     expect(out.posts).toEqual([]);
     // Released to IDLE, cursor untouched.
     expect(update).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { id: 'cur1' }, data: { status: 'IDLE' } })
+      expect.objectContaining({ where: { id: 'cur1' }, data: expect.objectContaining({ status: 'IDLE' }) })
     );
   });
 
@@ -190,7 +195,7 @@ describe('EngageScanActivity._scanUnit (cursor lifecycle)', () => {
     expect(out.posts).toEqual([]);
     expect(adapter.searchScoped).not.toHaveBeenCalled();
     expect(update).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { id: 'cur1' }, data: { status: 'IDLE' } })
+      expect.objectContaining({ where: { id: 'cur1' }, data: expect.objectContaining({ status: 'IDLE' }) })
     );
   });
 

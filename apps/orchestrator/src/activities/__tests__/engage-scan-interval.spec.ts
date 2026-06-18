@@ -105,37 +105,56 @@ describe('EngageScanActivity keyword bucketing by scan interval', () => {
   });
 });
 
-describe('EngageScanActivity._claimCursor with bucketed keyword key', () => {
+describe('EngageScanActivity cursor claim with bucketed keyword key (shared lease)', () => {
   it('upserts the cursor under the composite __global__:<hours> key and claims it when due', async () => {
     const row = {
       id: 'cur6',
+      platform: 'x',
+      scanType: 'keyword',
+      scanKey: '__global__:6',
       status: 'IDLE',
       cooldownUntil: null as Date | null,
       lastScanStartedAt: null as Date | null,
     };
     const { activity, upsert, updateMany } = buildWithCursor(row);
 
-    const claimed = await (activity as any)._claimCursor('x', 'keyword', '__global__:6', 6 * H, false);
+    const claimed = await (activity as any)._lease.claim({
+      platform: 'x',
+      scanType: 'keyword',
+      scanKey: '__global__:6',
+      cadenceMs: 6 * H,
+      force: false,
+    });
 
     expect(upsert).toHaveBeenCalledWith(
       expect.objectContaining({
         where: { platform_scanType_scanKey: { platform: 'x', scanType: 'keyword', scanKey: '__global__:6' } },
       })
     );
-    expect(updateMany).toHaveBeenCalledTimes(1); // IDLE → SCANNING claim
-    expect(claimed).toBe(row);
+    expect(updateMany).toHaveBeenCalledTimes(1); // IDLE → SCANNING claim (CAS)
+    expect(claimed?.id).toBe('cur6');
+    expect(claimed?.leaseToken).toMatch(/^[0-9a-f]{48}$/);
   });
 
   it('skips a bucket scanned within its cadence (not due — no claim)', async () => {
     const row = {
       id: 'cur24',
+      platform: 'x',
+      scanType: 'keyword',
+      scanKey: '__global__:24',
       status: 'IDLE',
       cooldownUntil: null as Date | null,
       lastScanStartedAt: new Date(),
     };
     const { activity, updateMany } = buildWithCursor(row);
 
-    const claimed = await (activity as any)._claimCursor('x', 'keyword', '__global__:24', 24 * H, false);
+    const claimed = await (activity as any)._lease.claim({
+      platform: 'x',
+      scanType: 'keyword',
+      scanKey: '__global__:24',
+      cadenceMs: 24 * H,
+      force: false,
+    });
 
     expect(claimed).toBeNull();
     expect(updateMany).not.toHaveBeenCalled();
