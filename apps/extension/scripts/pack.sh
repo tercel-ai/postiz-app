@@ -48,10 +48,17 @@ if [ ! -f "$ENV_FILE" ]; then
 fi
 
 FRONTEND="$(grep -E '^FRONTEND_URL=' "$ENV_FILE" | head -1 | cut -d= -f2- | tr -d '"' || true)"
+# Backend API base — the executor (scan/metrics loops) fetches here. Must be the
+# api-post* host paired with FRONTEND_URL's app* host, NOT the frontend itself.
+BACKEND="$(grep -E '^NEXT_PUBLIC_BACKEND_URL=' "$ENV_FILE" | head -1 | cut -d= -f2- | tr -d '"' || true)"
 
 echo "▶ building extension with env: $ENV_FILE"
-echo "  FRONTEND_URL = ${FRONTEND:-(unset)}"
+echo "  FRONTEND_URL            = ${FRONTEND:-(unset)}"
+echo "  NEXT_PUBLIC_BACKEND_URL = ${BACKEND:-(unset)}"
 echo "  strip console.debug = $STRIP_DEBUG"
+if [ -z "$BACKEND" ]; then
+  echo "  ⚠ NEXT_PUBLIC_BACKEND_URL is unset — scan/metrics loops will fail to fetch" >&2
+fi
 
 rm -rf dist
 if [ "$STRIP_DEBUG" = "true" ]; then

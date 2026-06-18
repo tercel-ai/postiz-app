@@ -1,7 +1,8 @@
 // Authenticated calls from the service worker to the Postiz backend. Reuses the
 // same transport as the rest of the extension (`fetchRequestUtil`, which
-// prepends FRONTEND_URL — the backend API base — and tolerates empty bodies)
-// and the auth session resolver (silent-refreshing access token).
+// prepends NEXT_PUBLIC_BACKEND_URL — the backend API base (api-post*), NOT the
+// FRONTEND_URL web app — and tolerates empty bodies) and the auth session
+// resolver (silent-refreshing access token).
 
 import { fetchRequestUtil } from '@gitroom/extension/utils/request.util';
 import { getValidAccessToken } from '@gitroom/extension/utils/auth.service';
