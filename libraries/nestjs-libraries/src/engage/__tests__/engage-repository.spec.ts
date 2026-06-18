@@ -256,6 +256,8 @@ describe('EngageRepository — two-table reads', () => {
       expect(stateFindMany.mock.calls[0][0].orderBy).toEqual([
         { opportunity: { scoreHeat: 'desc' } },
         { createdAt: 'desc' },
+        // Final unique-key tiebreaker for stable pagination (locateOpportunity).
+        { opportunityId: 'desc' },
       ]);
     });
 
@@ -268,6 +270,7 @@ describe('EngageRepository — two-table reads', () => {
       expect(stateFindMany.mock.calls[0][0].orderBy).toEqual([
         { score: 'desc' },
         { createdAt: 'desc' },
+        { opportunityId: 'desc' },
       ]);
     });
 
@@ -280,6 +283,7 @@ describe('EngageRepository — two-table reads', () => {
       expect(stateFindMany.mock.calls[0][0].orderBy).toEqual([
         { createdAt: 'desc' },
         { score: 'desc' },
+        { opportunityId: 'desc' },
       ]);
     });
 

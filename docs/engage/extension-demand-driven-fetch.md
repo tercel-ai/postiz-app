@@ -174,9 +174,76 @@ persist extraction preserved behavior.
    populate-on-add. Backend-only; **no UI change**.
 4. **Frontend-triggered workflow** (fallback when no extension): deferred — see
    `docs/engage/frontend-triggered-workflow-todo.md`.
-5. **Extension-side implementation** (build X GraphQL / Reddit `.json` requests,
-   normalise to `RawPost`, honor pacing, drive the `/scan-tasks/ingest` loop) is
-   frontend work, out of this backend scope.
+5. **Extension-side implementation** — ✅ **DONE** (see below). Builds X internal
+   GraphQL / Reddit `.json` requests with the user's session, normalises to the
+   ingest shape, honors pacing, and drives both loops.
+
+---
+
+## Extension executor (apps/extension)
+
+The executor lives in `apps/extension/src/utils/executor/` and runs in the
+service worker. The backend stays the scheduler; this is the "how to fetch" half.
+
+| File | Role |
+|---|---|
+| `executor.types.ts` | client mirrors of the backend contracts (scan task / ingest / due / backfill) |
+| `api.ts` | authed backend call (`getValidAccessToken` + `fetchRequestUtil`) |
+| `pacing.ts` | jittered delays + persisted rolling-hour request cap |
+| `scan.reddit.ts` | Reddit scan via session `.json` (keyword=`/search.json`, channel=`/r/<sub>/new.json` firehose) |
+| `scan.x.ts` + `x.graphql.ts` + `x.parse.ts` | X scan via internal GraphQL `SearchTimeline` (bearer + `ct0`) |
+| `scan.runner.ts` | drives the `/engage/scan-tasks/ingest` chained loop (one unit per round-trip, `want:1`) |
+| `metrics.reddit.ts` / `metrics.x.ts` | per-post live metrics → `AnalyticsData` (labels match `traffic.calculator`) |
+| `metrics.runner.ts` | drives `/posts/metrics/due` → fetch → `/posts/metrics/backfill` |
+| `scheduler.ts` | periodic `chrome.alarms` scan (15 min), armed on login / cleared on logout |
+
+**Triggers**
+- **Automatic**: the `aisee-engage-scan` alarm (15 min) drives Track B whenever a
+  session exists. Armed on popup login, website session bootstrap, and SW startup.
+- **Manual** (SW or popup console — for debugging without waiting for the alarm):
+  ```js
+  chrome.runtime.sendMessage({ action: 'engage:scan' })                       // Track B
+  chrome.runtime.sendMessage({ action: 'engage:metrics', ids: ['<postId>'] }) // Track A
+  ```
+  Both resolve to `{ ok, summary }`.
+
+**X is best-effort**: the internal GraphQL `queryId`s + feature flags in
+`x.graphql.ts` are undocumented and X rotates them — a stale value returns
+404/400 and the X path logs + yields empty *without breaking* Reddit or the loop.
+Update `X_QUERIES` / `X_SEARCH_FEATURES` when X changes them. Reddit is reliable
+(session clears the WAF).
+
+**Track A still needs an id source for autonomous runs**: the alarm only drives
+the scan; metrics is view-scoped, so it runs from explicit ids (the manual
+trigger today; a frontend page push — the deferred option below — would feed it
+the visible post ids automatically).
+
+### TODO — frontend-page-driven metrics push (deferred)
+
+Goal: when a user views a posts/engage page, the page tells the extension which
+post ids are on screen so Track A runs hands-free (no manual console, no alarm
+id-guessing). Mechanism: page → `bridge.ts` content script → `runtime.sendMessage`
+`{ action: 'engage:metrics', ids }` (the SW handler already exists).
+
+Not trivial — open questions to settle before building:
+- **Which surfaces push?** engage signal-feed, the posts list, the dashboard —
+  each has a different id source and lifecycle. Both frontends (apps/frontend +
+  aisee-agent) need wiring.
+- **Which ids?** Postiz internal `Post.id` (the page already has these), NOT
+  platform ids. Cap 100 per `/metrics/due` call.
+- **Visible vs loaded?** IntersectionObserver for truly-visible rows vs the whole
+  page; how to handle infinite scroll / pagination without re-pushing everything.
+- **Throttle/dedup**: debounce scroll, dedup ids, and avoid re-firing for posts
+  already fetched this view (backend interval gate is the backstop, but don't
+  spam `/due`).
+- **Gating**: only push when `useExtensionDetected()` is true AND logged in;
+  otherwise fall back to the server workflow (deferred — see
+  `frontend-triggered-workflow-todo.md`).
+- **Protocol**: reuse the `EXTENSION_MESSAGE` brand/handshake; add a page→ext
+  message kind rather than ad-hoc strings, and decide if the page wants a
+  result/ack back (e.g. to show "metrics refreshed").
+- **Trigger timing**: on mount, on tab focus/visibility regain, on page change —
+  mirror the patterns already in `use-extension-detected.ts`.
 
 ## Related
 - `docs/engage/tech-design.md` — scan architecture, `EngageScanCursor`.

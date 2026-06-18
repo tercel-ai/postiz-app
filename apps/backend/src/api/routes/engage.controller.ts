@@ -731,6 +731,25 @@ export class EngageController {
     return this._engageService.submitManualReplyUrl(org, id, body.url, body.author);
   }
 
+  @ApiOperation({ summary: "Extension publish-on-success callback: backfill the reply URL, flip the saved DRAFT to PUBLISHED, claim the opportunity, and charge — the only place the extension reply path bills. Idempotent for an already-published reply." })
+  @ApiResponse({ status: 404, description: 'Sent reply not found' })
+  @ApiResponse({ status: 400, description: 'Only valid for X or Reddit replies' })
+  @Patch('/sent/:id/publish-reply')
+  publishExtensionReply(
+    @GetOrgFromRequest() org: Organization,
+    @GetUserFromRequest() user: User,
+    @Param('id') id: string,
+    @Body() body: SubmitManualReplyUrlDto
+  ) {
+    return this._engageService.publishExtensionReply(
+      org,
+      user?.id,
+      id,
+      body.url,
+      body.author
+    );
+  }
+
   // ─── Dashboard Stats ──────────────────────────────────────────────────────
 
   // Panel ① "Engage Performance": weekly count, response rate, impressions,

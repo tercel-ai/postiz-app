@@ -33,9 +33,9 @@ describe('submitManualReplyUrl — URL saved first, author enriched in backgroun
 
     await service.submitManualReplyUrl(org, 'reply-1', url);
 
-    // updateReplyUrl is called with exactly (org, id, url) — no author arg.
-    expect(updateReplyUrl).toHaveBeenCalledWith('org-1', 'reply-1', url);
-    expect(updateReplyUrl.mock.calls[0]).toHaveLength(3);
+    // updateReplyUrl is called with NO resolved author (4th arg is undefined) —
+    // the URL is saved immediately and the slow author lookup runs out of band.
+    expect(updateReplyUrl).toHaveBeenCalledWith('org-1', 'reply-1', url, undefined);
   });
 
   it('resolves the author out of band and persists it via updateReplyAuthor', async () => {

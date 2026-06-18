@@ -72,6 +72,41 @@ export class DashboardRepository {
     return stats;
   }
 
+  async getImpressionsByIntegration(
+    orgId: string,
+    integrationId?: string[],
+    channel?: string[],
+    startDate?: Date,
+    endDate?: Date
+  ): Promise<{ integrationId: string; impressions: number }[]> {
+    const where: Prisma.PostWhereInput = {
+      organizationId: orgId,
+      deletedAt: null,
+      parentPostId: null,
+      source: { notIn: ['engage'] },
+      impressions: { not: null },
+      ...(integrationId?.length && { integrationId: { in: integrationId } }),
+      ...(channel?.length && { integration: { providerIdentifier: { in: channel } } }),
+    };
+    if (startDate || endDate) {
+      where.publishDate = {
+        ...(startDate && { gte: startDate }),
+        ...(endDate && { lte: endDate }),
+      };
+    }
+    const rows = await this._post.model.post.groupBy({
+      by: ['integrationId'],
+      where,
+      _sum: { impressions: true },
+    });
+    return rows
+      .filter((r) => r.integrationId != null)
+      .map((r) => ({
+        integrationId: r.integrationId!,
+        impressions: r._sum.impressions ?? 0,
+      }));
+  }
+
   getPublishedPostsWithRelease(orgId: string, sinceDays: number, integrationId?: string[], channel?: string[]) {
     return this._post.model.post.findMany({
       where: {

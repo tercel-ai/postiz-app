@@ -514,6 +514,93 @@ export class EngageService implements OnApplicationBootstrap {
   }
 
   /**
+   * Extension publish-on-success callback. Unlike confirmManualReply (which
+   * optimistically creates a PUBLISHED post + charges at confirm time), the
+   * extension flow saves a DRAFT first (save-draft) and commits NOTHING until the
+   * browser confirms the reply actually posted. This is that commit point:
+   *   1. backfill the permalink (releaseURL/releaseId/integration/author) AND flip
+   *      the post DRAFT→PUBLISHED in one write;
+   *   2. claim the opportunity → REPLIED (best-effort: the reply is already live,
+   *      so a non-actionable opportunity must not lose the record);
+   *   3. charge here, and ONLY here, on confirmed success (idempotent by postId).
+   * Idempotent: a duplicate/late callback for an already-published reply no-ops
+   * (no re-charge, no re-claim) — the releaseURL is the success marker.
+   */
+  async publishExtensionReply(
+    org: Organization,
+    userId: string | undefined,
+    sentReplyId: string,
+    url: string,
+    author?: EngageAuthorProfile
+  ) {
+    const ctx = await this._engageRepository.getSentReplyContext(org.id, sentReplyId);
+    if (!ctx) throw new NotFoundException('Sent reply not found');
+
+    // Already published with a URL → a repeat success callback. No-op so we never
+    // double-charge or re-claim.
+    if (ctx.state === 'PUBLISHED' && ctx.releaseURL) {
+      return {
+        id: sentReplyId,
+        state: 'PUBLISHED',
+        replyUrl: ctx.releaseURL,
+        alreadyPublished: true,
+      };
+    }
+    if (ctx.platform !== 'x' && ctx.platform !== 'reddit') {
+      throw new BadRequestException(
+        'Publish is only valid for X or Reddit replies'
+      );
+    }
+
+    // Same format validation as the manual backfill path.
+    await this._validateReplyUrl(ctx.platform, url);
+
+    // Backfill URL + (X) releaseId/integration + author AND flip DRAFT→PUBLISHED.
+    await this._engageRepository.updateReplyUrl(org.id, sentReplyId, url, author, {
+      markPublished: true,
+    });
+
+    // The reply is live on the platform; recording it wins over claim bookkeeping.
+    try {
+      await this._engageRepository.claimOpportunityForReply(
+        org.id,
+        ctx.opportunityId,
+        'REPLIED'
+      );
+    } catch (err) {
+      this.logger.warn(
+        `publishExtensionReply: could not claim opportunity ${ctx.opportunityId} ` +
+          `(already replied/expired?): ${err instanceof Error ? err.message : err}`
+      );
+    }
+
+    // Charge ONLY now, on confirmed success. Fire-and-forget — billing must not
+    // break the user-visible publish — and idempotent by postId (taskId).
+    if (userId) {
+      this._postOverageService
+        .deductIfOverage(org.id, userId, ctx.postId, 'engage')
+        .catch((err) =>
+          this.logger.error(
+            `publishExtensionReply: deductIfOverage failed for postId=${ctx.postId}:`,
+            err
+          )
+        );
+    } else {
+      this.logger.warn(
+        `publishExtensionReply: skipping deductIfOverage for postId=${ctx.postId} — no userId`
+      );
+    }
+
+    // The extension usually supplies the real poster (X CreateTweet capture);
+    // when it doesn't, resolve it out of band like the manual backfill path.
+    if (!author) {
+      this._storeReplyAuthorInBackground(org.id, sentReplyId, ctx.platform, url);
+    }
+
+    return { id: sentReplyId, state: 'PUBLISHED', replyUrl: url };
+  }
+
+  /**
    * Resolve the reply's author (handle + avatar/name) and persist it to
    * settings.engageAuthor — OUT OF BAND, fire-and-forget. The lookup is slow
    * (Reddit: comment→author then author→/about, each behind the loid/WAF path) and

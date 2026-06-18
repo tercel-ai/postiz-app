@@ -5,6 +5,7 @@ import { postRedditComment } from '@gitroom/extension/utils/reddit.poster';
 import { postXReply } from './x.poster';
 import { PostReplyPayload, ReplyResult } from '@gitroom/extension/utils/reply.types';
 import { getValidAccessToken } from '@gitroom/extension/utils/auth.service';
+import { notifyReply } from '@gitroom/extension/utils/notify';
 
 async function postByPlatform(payload: PostReplyPayload): Promise<ReplyResult> {
   switch (payload.platform) {
@@ -54,8 +55,11 @@ async function backfillReplyUrl(
   }
 
   try {
+    // publish-reply (not reply-url): besides backfilling the permalink this flips
+    // the saved DRAFT to PUBLISHED, claims the opportunity, and charges — the
+    // commit point for the extension flow (nothing was committed at send time).
     const res = await fetch(
-      `${base}/engage/sent/${payload.sentReplyId}/reply-url`,
+      `${base}/engage/sent/${payload.sentReplyId}/publish-reply`,
       {
         method: 'PATCH',
         headers: {
@@ -90,6 +94,7 @@ export async function handlePostReply(
   // Closed loop: if this came from Engage (sentReplyId + backendBase) and we
   // captured a permalink, backfill it onto the record from the background so the
   // loop completes even if the Engage tab is no longer focused.
+  let finalResult = result;
   if (
     result.ok &&
     result.permalink &&
@@ -101,8 +106,18 @@ export async function handlePostReply(
       result.permalink,
       result.author
     );
-    return { ...result, backfilled };
+    finalResult = { ...result, backfilled };
   }
 
-  return result;
+  // Proactively notify the outcome (success + failure). The page toast only fires
+  // when the Engage tab is open; this background notification is the reliable
+  // signal — especially for X, which posts in a background tab.
+  notifyReply({
+    ok: !!finalResult.ok,
+    pending: finalResult.pending,
+    platform: payload.platform,
+    error: finalResult.error,
+  });
+
+  return finalResult;
 }

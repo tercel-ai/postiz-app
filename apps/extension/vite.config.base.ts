@@ -87,7 +87,12 @@ export const baseManifest = {
     ...postizAppHosts,
     frontendMatch,
   ]),
-  permissions: [...(manifest.permissions || []), 'scripting', 'alarms'],
+  permissions: [
+    ...(manifest.permissions || []),
+    'scripting',
+    'alarms',
+    'notifications',
+  ],
   content_scripts: [
     {
       matches: uniq(providerMatches),

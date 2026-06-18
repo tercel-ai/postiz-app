@@ -1834,8 +1834,13 @@ export class EngageRepository {
         { state: 'PUBLISHED', releaseURL: { not: null } },
         { state: 'QUEUE' },
       ];
+    } else {
+      // No status filter = "All" sent replies, but EXCLUDE unsent DRAFT
+      // working-copies — a saved draft is not a sent reply. DRAFT surfaces ONLY
+      // under status=awaiting, keeping /sent and /sent/stats consistent with the
+      // dashboards (which also exclude DRAFT).
+      postWhere.state = { not: 'DRAFT' };
     }
-    // No status filter = return all states including DRAFT.
 
     const sentWhere: Prisma.EngageSentReplyWhereInput = {
       organizationId,
@@ -2253,18 +2258,26 @@ export class EngageRepository {
       }
     }
 
+    const xImpressions = xPostAgg._sum.impressions ?? 0;
+    const totalImpressions = totalPostAgg._sum.impressions ?? 0;
+    const redditImpressions = Math.max(0, totalImpressions - xImpressions);
+
     return {
       // All-time count of SENT replies (PUBLISHED only).
       repliesCount: sentReplies,
       responseRate,
-      xImpressions: xPostAgg._sum.impressions ?? 0,
+      xImpressions,
       xTrafficIndex: Math.round(xPostAgg._sum.trafficScore ?? 0),
-      totalImpressions: totalPostAgg._sum.impressions ?? 0,
+      totalImpressions,
       totalTrafficScore: Math.round(totalPostAgg._sum.trafficScore ?? 0),
       totalLikes: replyRows.reduce(
         (sum, r) => sum + this._extractLikes(r.post?.analytics, r.opportunity.platform),
         0
       ),
+      impressionsByPlatform: [
+        { platform: 'x', value: xImpressions },
+        { platform: 'reddit', value: redditImpressions },
+      ],
       platformSplit: { x: xSent, reddit: redditSent },
       bestReply,
     };
@@ -2613,7 +2626,12 @@ export class EngageRepository {
     organizationId: string,
     sentReplyId: string,
     url: string,
-    engageAuthor?: EngageAuthorProfile
+    engageAuthor?: EngageAuthorProfile,
+    // When markPublished is set (extension publish-on-success path), also flip the
+    // post DRAFT→PUBLISHED in the same write. The human manual-paste path leaves it
+    // unset: its post is already PUBLISHED (created so by confirmManualReply), so a
+    // backfill there only fills the URL.
+    opts: { markPublished?: boolean } = {}
   ) {
     // Join the opportunity for its platform: backfill is only meaningful for the
     // manual-reply platforms (X / Reddit), and for X we also derive releaseId
@@ -2675,8 +2693,35 @@ export class EngageRepository {
         ...(releaseId ? { releaseId } : {}),
         ...(integrationId ? { integrationId } : {}),
         ...(mergedSettings ? { settings: mergedSettings } : {}),
+        ...(opts.markPublished ? { state: 'PUBLISHED' as const } : {}),
       },
     });
+  }
+
+  // Lightweight read for the extension publish-on-success path: enough to decide
+  // idempotency (already published?), validate the platform, claim the
+  // opportunity, and attribute billing to the post. Returns null when the reply
+  // doesn't belong to this org.
+  async getSentReplyContext(organizationId: string, sentReplyId: string) {
+    const reply = await this._sentReply.model.engageSentReply.findFirst({
+      where: { id: sentReplyId, organizationId },
+      select: {
+        id: true,
+        postId: true,
+        opportunityId: true,
+        post: { select: { state: true, releaseURL: true } },
+        opportunity: { select: { platform: true } },
+      },
+    });
+    if (!reply) return null;
+    return {
+      sentReplyId: reply.id,
+      postId: reply.postId,
+      opportunityId: reply.opportunityId,
+      state: reply.post?.state ?? null,
+      releaseURL: reply.post?.releaseURL ?? null,
+      platform: reply.opportunity?.platform ?? null,
+    };
   }
 
   /**

@@ -153,25 +153,21 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
     )
   );
 
-  // Closed loop: create a "sent, URL pending" record, then hand the draft +
-  // sentReplyId + backendBase to the extension. The extension posts in-browser
-  // AND backfills the permalink itself (PATCH /engage/sent/:id/reply-url) using
-  // the auth cookie — so the loop completes even if this tab loses focus.
+  // Closed loop: persist the CURRENT draft text (save-draft → one DRAFT Post +
+  // EngageSentReply, upserted) to get a record id, then hand the draft +
+  // sentReplyId + backendBase to the extension. Saving here guarantees the text
+  // that gets posted == the text in the DB. Nothing is claimed/charged yet —
+  // the extension commits that on success via PATCH /engage/sent/:id/publish-reply
+  // (flip DRAFT→PUBLISHED + claim + charge), so a failed post leaves only a DRAFT.
   const replyViaExtension = useCallback(async () => {
     if (!draft) return;
     setSending(true);
     try {
       const res = await fetch(
-        `/engage/opportunities/${opportunity.id}/manual-reply`,
+        `/engage/opportunities/${opportunity.id}/save-draft`,
         {
           method: 'POST',
-          body: JSON.stringify({
-            draftContent: draft,
-            strategy,
-            brandStrength,
-            // X needs the integration so metrics sync can read the tweet later.
-            ...(isX ? { integrationId: selectedAccountId } : {}),
-          }),
+          body: JSON.stringify({ draftContent: draft, strategy, brandStrength }),
         }
       );
       if (!res.ok) {
@@ -206,8 +202,6 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
     }
   }, [
     draft,
-    isX,
-    selectedAccountId,
     opportunity.id,
     opportunity.platform,
     opportunity.externalPostUrl,

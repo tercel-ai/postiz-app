@@ -8,6 +8,13 @@ import {
   handleAuthAlarm,
   reArmRefreshAlarmIfLoggedIn,
 } from '@gitroom/extension/utils/auth.service';
+import { runScanLoop } from '@gitroom/extension/utils/executor/scan.runner';
+import { runMetrics } from '@gitroom/extension/utils/executor/metrics.runner';
+import {
+  ensureEngageScanAlarm,
+  clearEngageScanAlarm,
+  handleEngageAlarm,
+} from '@gitroom/extension/utils/executor/scheduler';
 
 const isDevelopment = process.env.NODE_ENV === 'development';
 
@@ -174,10 +181,22 @@ async function reconcileBrowserSession(): Promise<void> {
 
 // Re-arm the 20-day token-refresh alarm on SW/browser startup (alarms are
 // cleared on extension reload/update) and run the silent refresh when it fires.
-chrome.runtime.onStartup?.addListener(() => void reArmRefreshAlarmIfLoggedIn());
-chrome.runtime.onInstalled?.addListener(() => void reArmRefreshAlarmIfLoggedIn());
-void reArmRefreshAlarmIfLoggedIn();
-chrome.alarms.onAlarm.addListener((alarm) => void handleAuthAlarm(alarm.name));
+// Also (re)arm the periodic engage-scan alarm so the executor keeps fetching
+// across SW restarts whenever a session exists.
+function reArmAlarms(): void {
+  void reArmRefreshAlarmIfLoggedIn();
+  void ensureEngageScanAlarm();
+}
+chrome.runtime.onStartup?.addListener(reArmAlarms);
+chrome.runtime.onInstalled?.addListener(reArmAlarms);
+reArmAlarms();
+chrome.alarms.onAlarm.addListener((alarm) => {
+  // Engage-scan alarm is handled by the executor; everything else (token
+  // refresh) by the auth handler — names never collide.
+  void handleEngageAlarm(alarm.name).then((handled) => {
+    if (!handled) void handleAuthAlarm(alarm.name);
+  });
+});
 
 chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
   if (request.action === 'makeHttpRequest') {
@@ -193,6 +212,8 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
         sendResponse({ ok: true, user });
         // Refresh cookie is now set on this host → pull any open login tabs in.
         enterFrontendAuthTabs();
+        // Session exists → start the background engage scan.
+        void ensureEngageScanAlarm();
       })
       .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
     return true;
@@ -203,7 +224,26 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
         sendResponse({ ok: true });
         // Shared refresh token is now revoked + removed → log the websites out too.
         logoutFrontendTabs();
+        // No session → stop background fetches.
+        void clearEngageScanAlarm();
       })
+      .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
+    return true;
+  }
+
+  // ─── Engage executor (demand-driven scan + metrics) ───────────────────────
+  // Manual / programmatic triggers. From the SW or popup console:
+  //   chrome.runtime.sendMessage({ action: 'engage:scan' })
+  //   chrome.runtime.sendMessage({ action: 'engage:metrics', ids: ['<postId>'] })
+  if (request.action === 'engage:scan') {
+    runScanLoop()
+      .then((summary) => sendResponse({ ok: true, summary }))
+      .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
+    return true;
+  }
+  if (request.action === 'engage:metrics') {
+    runMetrics(Array.isArray(request.ids) ? request.ids : [])
+      .then((summary) => sendResponse({ ok: true, summary }))
       .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
     return true;
   }
@@ -222,7 +262,13 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
   // reflects the browser login; an empty token means the page logged out.
   if (request.action === 'auth:bootstrap') {
     bootstrapFromFrontendToken(request.token)
-      .then(() => sendResponse({ ok: true }))
+      .then(() => {
+        sendResponse({ ok: true });
+        // A non-empty token means the browser is logged in → ensure the scan
+        // alarm; an empty token (logout) → clear it.
+        if (request.token) void ensureEngageScanAlarm();
+        else void clearEngageScanAlarm();
+      })
       .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
     return true;
   }
