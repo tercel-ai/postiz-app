@@ -2,20 +2,25 @@
 #
 # Build a shareable "Load unpacked" zip of the extension for coworkers.
 #
-# It builds with the env from the repo-root .env (FRONTEND_URL /
-# NEXT_PUBLIC_BACKEND_URL), so the build points at whatever backend that .env
-# configures (e.g. the LAN dev server at 192.168.110.98). Coworkers must be able
-# to reach that backend, and log in to that same FRONTEND_URL origin.
+# Pick a target with a PROFILE — local | dev | prod — so the whole URL set
+# (FRONTEND_URL / NEXT_PUBLIC_BACKEND_URL / AUTH_URL / LOGIN_URL) moves together
+# and login agrees with the scan/metrics executor's backend. Profiles live in
+# scripts/env/<profile>.env (committed, no secrets).
+#
+#   local → this machine's LAN stack (192.168.110.98:*)
+#   dev   → *-dev.aisee.live
+#   prod  → *.aisee.live (store release: prod-only host_permissions + strip debug)
 #
 # Usage:
-#   bash scripts/pack.sh                       # uses ../../.env, keeps console.debug
-#   bash scripts/pack.sh /path/to/.env         # uses a different env file
-#   bash scripts/pack.sh --strip-debug         # drop console.debug from the build
-#   bash scripts/pack.sh /path/.env --strip-debug
+#   bash scripts/pack.sh dev                    # build against the dev stack
+#   bash scripts/pack.sh local --strip-debug    # LAN stack, drop console.debug
+#   bash scripts/pack.sh prod                   # store release
+#   bash scripts/pack.sh /path/to/.env          # explicit env file (back-compat)
+#   bash scripts/pack.sh                        # falls back to ../../.env (warns)
 #
 # By default the pack build KEEPS console.debug so coworkers can watch the
 # scan-ingest / metrics flows in the extension devtools. Pass --strip-debug to
-# ship a clean build with those calls removed (same stripping as build:prod).
+# ship a clean build with those calls removed. The `prod` profile always strips.
 #
 # The coworker then: unzips → chrome://extensions → enable Developer mode →
 # "Load unpacked" → select the unzipped folder.
@@ -24,8 +29,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."   # → apps/extension
 
-# Parse args in any order: a positional path = env file, --strip-debug = toggle.
-ENV_FILE=""
+# Parse args in any order: a positional = profile name OR an env-file path;
+# --strip-debug = toggle.
+ENV_ARG=""
 STRIP_DEBUG="false"
 for arg in "$@"; do
   case "$arg" in
@@ -37,10 +43,22 @@ for arg in "$@"; do
     -*)
       echo "✗ unknown option: $arg" >&2
       exit 1 ;;
-    *)                ENV_FILE="$arg" ;;
+    *)                ENV_ARG="$arg" ;;
   esac
 done
-ENV_FILE="${ENV_FILE:-../../.env}"
+
+# Resolve the env file: a known profile name maps to scripts/env/<name>.env;
+# anything else is treated as a literal path; empty falls back to repo-root .env.
+case "$ENV_ARG" in
+  local|dev|prod)
+    ENV_FILE="scripts/env/${ENV_ARG}.env" ;;
+  "")
+    ENV_FILE="../../.env"
+    echo "⚠ no profile given — falling back to $ENV_FILE (this machine's env, likely LOCAL)." >&2
+    echo "  Prefer: pack-ext:local | pack-ext:dev | pack-ext:prod" >&2 ;;
+  *)
+    ENV_FILE="$ENV_ARG" ;;
+esac
 
 if [ ! -f "$ENV_FILE" ]; then
   echo "✗ env file not found: $ENV_FILE" >&2

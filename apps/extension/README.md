@@ -103,20 +103,33 @@ The output goes to `apps/extension/dist/`.
 ### Packaging for distribution (shareable zip)
 
 `pack-ext` builds the extension and creates a zip that a colleague can drag-drop
-straight into `chrome://extensions` (no manual unzip needed):
+straight into `chrome://extensions` (no manual unzip needed).
+
+**Pick a profile** so the whole URL set (frontend + backend + auth + login) moves
+together — login then agrees with the scan/metrics executor's backend. Profiles
+live in `scripts/env/<profile>.env` (committed, no secrets):
 
 ```bash
-# Default — reads FRONTEND_URL from repo-root .env, login button opens FRONTEND_URL/sign-in
-pnpm pack-ext
-
-# Override login URL for a specific environment
-LOGIN_URL=https://yourdomain.com/sign-in pnpm pack-ext
-LOGIN_URL=https://yourdomain.com/sign-in pnpm pack-ext
+pnpm pack-ext:local   # this machine's LAN stack (192.168.110.98:*)
+pnpm pack-ext:dev     # *-dev.aisee.live
+pnpm pack-ext:prod    # *.aisee.live (store release: prod-only hosts + strip debug)
 ```
 
-The `LOGIN_URL` env prefix is passed through to Vite at build time
-(`import.meta.env.LOGIN_URL`). If omitted, the login button falls back to
-`FRONTEND_URL + '/sign-in'` from the `.env` file.
+| Profile | `FRONTEND_URL` | `NEXT_PUBLIC_BACKEND_URL` | `AUTH_URL` |
+| --- | --- | --- | --- |
+| `local` | `http://192.168.110.98:3001` | `http://192.168.110.98:3000` | `http://192.168.110.98:9001` |
+| `dev` | `https://app-dev.aisee.live` | `https://api-post-dev.aisee.live` | `https://api-auth-dev.aisee.live` |
+| `prod` | `https://app.aisee.live` | `https://api-post.aisee.live` | `https://api-auth.aisee.live` |
+
+> ⚠️ The backend host is the executor's fetch base — it must be the `api-post*`
+> host paired with the frontend, **not** the `app*` frontend itself.
+
+Back-compat: `bash scripts/pack.sh /path/to/.env` still accepts an explicit env
+file, and bare `pnpm pack-ext` (no profile) falls back to the repo-root `.env`
+(this machine's env — it warns, since that is usually the LOCAL stack).
+
+The `LOGIN_URL` in each profile is passed to Vite at build time
+(`import.meta.env.LOGIN_URL`); if omitted it falls back to `FRONTEND_URL + '/sign-in'`.
 
 The output zip is named `aisee-extension-v{VERSION}-{TIMESTAMP}.zip` and sits
 in `apps/extension/`.

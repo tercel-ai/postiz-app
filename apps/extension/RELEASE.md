@@ -1,17 +1,26 @@
 # Aisee Extension — Build, Share & Release
 
-Three build flavours, picked by **which backend/hosts the build targets**.
+Build flavours, picked by **which backend/hosts the build targets**. Each
+`pack-ext:*` profile is a committed env set (`scripts/env/<profile>.env`) so the
+frontend + backend + auth + login URLs always move together.
 
 | Command | Use for | Hosts baked in |
 | --- | --- | --- |
-| `npm run pack-ext` | **Share with coworkers** for `Load unpacked` (test the latest against the LAN/dev backend) | all (local + LAN + dev + prod) |
+| `npm run pack-ext:local` | Share against this machine's **LAN** stack | `192.168.110.98:*` (+ all dev hosts in host_permissions) |
+| `npm run pack-ext:dev` | Share against the **dev** cloud stack | `*-dev.aisee.live` (+ all dev hosts) |
+| `npm run pack-ext:prod` | Same payload as the store build, as a `Load unpacked` zip | **prod only** (`app.aisee.live`, `api-post.aisee.live`) |
 | `npm run dev` | Your own local dev (watch + auto-rebuild) | all |
-| `npm run build:prod` | **Chrome Web Store** upload (Unlisted → Public) | **prod only** (`app.aisee.live`, `api-post.aisee.live`) |
+| `npm run build:prod` | **Chrome Web Store** upload (Unlisted → Public) | **prod only** |
 
-The dev/LAN builds read `FRONTEND_URL` + `NEXT_PUBLIC_BACKEND_URL` from the repo-root
-`.env`. `build:prod` hardcodes the production domains and sets `EXTENSION_ENV=production`,
-which makes `vite.config.base.ts` drop all `localhost` / `192.168.*` / `*-dev` hosts (those
-read as suspicious during store review and are useless in a release).
+`pack-ext:{local,dev,prod}` read their URL set from `scripts/env/<profile>.env`
+— NOT from the repo-root `.env` (which is whatever this machine happens to run,
+usually the LOCAL stack). `prod` (and `build:prod`) set `EXTENSION_ENV=production`,
+which makes `vite.config.base.ts` drop all `localhost` / `192.168.*` / `*-dev`
+hosts (those read as suspicious during store review and are useless in a release).
+
+> The backend host (`NEXT_PUBLIC_BACKEND_URL`) is the scan/metrics executor's
+> fetch base. It must be the `api-post*` host paired with the frontend — if a
+> profile points it at the `app*` frontend, the scan loop 404s / fails to fetch.
 
 ---
 
@@ -19,8 +28,9 @@ read as suspicious during store review and are useless in a release).
 
 ```bash
 cd apps/extension
-npm run pack-ext                       # uses ../../.env (currently the LAN backend)
-# or: bash scripts/pack.sh /path/to/other.env
+npm run pack-ext:dev                    # dev cloud stack (api-post-dev.aisee.live)
+npm run pack-ext:local                  # this machine's LAN stack (192.168.110.98)
+# or: bash scripts/pack.sh /path/to/other.env   # explicit env file (back-compat)
 ```
 
 Produces `aisee-extension-v<version>-<timestamp>.zip`. Send it; the coworker:
@@ -34,9 +44,8 @@ Produces `aisee-extension-v<version>-<timestamp>.zip`. Send it; the coworker:
 > Reloading after a new build: drop in the new folder and click the reload icon, or remove
 > and re-add. There is no auto-update for unpacked installs.
 
-Caveat: `npm run pack-ext` defaults to the **LAN** backend (`192.168.110.98`). Coworkers off the
-LAN can't use it — point `.env` at a reachable backend first, or have them use the Unlisted
-store build (Section B).
+Caveat: `pack-ext:local` targets the **LAN** backend (`192.168.110.98`). Coworkers off the
+LAN can't use it — give them `pack-ext:dev` (or the Unlisted store build, Section B) instead.
 
 ---
 
