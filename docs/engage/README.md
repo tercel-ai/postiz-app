@@ -10,6 +10,7 @@ X and Reddit. This is the entry point to all Engage docs.
 | [`prd.md`](./prd.md) | Product | Requirements, goals, scope of the Engage module. |
 | [`tech-design.md`](./tech-design.md) | **Dev** | Architecture, the 5 Prisma models, Temporal workflows, scan/reply/metrics design. The authoritative engineering reference. |
 | [`api.md`](./api.md) | Dev / Integrators | All `/engage/*` REST endpoints with request/response shapes. |
+| [`config-response-reference.md`](./config-response-reference.md) | Dev / Frontend | Field-by-field reference for `GET /engage/config` — plan limits, usage, reply credits, scan timing. |
 | [`startup-checklist.md`](./startup-checklist.md) | **Ops** | Cold-start & upgrade deployment, env vars, Prisma schema push, Temporal workflow registration, smoke test. |
 | [`scripts.md`](./scripts.md) | **Ops / Dev** | Runbook for the 10 maintenance scripts, grouped by scenario (scanning, metrics repair, data-ticks). |
 | [`sync-metrics-script.md`](./sync-metrics-script.md) | Ops | Detailed output walkthrough for `engage-sync-metrics.ts`. |
