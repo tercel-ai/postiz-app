@@ -79,6 +79,13 @@ async function start() {
     json({ limit: '50mb' })(req, res, next);
   });
 
+  // The extension scan loop posts a batch of scraped posts per unit; with long
+  // Reddit selftext a batch can exceed the default 100kb body limit (→ 413).
+  // The executor already pages small (human-like), so 1mb is a safe ceiling.
+  app.use('/engage/scan-tasks/ingest', (req: any, res: any, next: any) => {
+    json({ limit: '5mb' })(req, res, next);
+  });
+
   app.use(cookieParser());
   app.useGlobalFilters(new SubscriptionExceptionFilter());
   app.useGlobalFilters(new HttpExceptionFilter());

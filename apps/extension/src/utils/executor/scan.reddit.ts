@@ -17,7 +17,10 @@ import {
 import { applyDelay } from './pacing';
 
 const REDDIT_BASE = 'https://www.reddit.com';
-const REDDIT_LIMIT = 100;
+// Page size. Reddit's web search loads 25 at a time, so 25 mimics a human
+// browsing (limit=100 is a scraper tell → more anti-bot risk) AND keeps the
+// per-page ingest payload small. Deeper history still comes from maxPages.
+const REDDIT_LIMIT = 25;
 
 interface RedditChild {
   data: Record<string, any>;
