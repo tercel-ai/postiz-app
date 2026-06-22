@@ -11,6 +11,9 @@
  *                           scheduled posts — terminating it would cause those posts to
  *                           never be published. Everything else auto-restarts on boot.
  *   --only-posts            Only terminate postWorkflowV101 + infra workflows
+ *   --types=t1,t2           Only terminate these exact workflow types (precise targeting).
+ *                           Bypasses the built-in lists — e.g.
+ *                           --types=engageScanTickerWorkflow to stop just the engage ticker.
  *   --task-queues=q1,q2     Only terminate postWorkflowV101 on these task queues
  *   --namespace=<ns>        Temporal namespace (default: $TEMPORAL_NAMESPACE or 'default')
  *   --address=<host:port>   Temporal address (default: $TEMPORAL_ADDRESS or 'localhost:7233')
@@ -34,6 +37,10 @@ const INFRA_WORKFLOW_TYPES = [
   'dataTicksSyncWorkflow',
   'refreshWorkflowRecoveryWorkflow',
   'engageDataTicksWorkflow',
+  // Current single engage scan ticker (replaced the three per-type workflows
+  // below). Auto-restarts on orchestrator boot + when an org enables engage.
+  'engageScanTickerWorkflow',
+  // Retired per-type scan workflows — kept so older deployments still get cleaned.
   'engageGlobalKeywordScanWorkflow',
   'engageGlobalChannelScanWorkflow',
   'engageGlobalTrackedWorkflow',
@@ -94,18 +101,24 @@ async function main() {
   const argNamespace = process.argv.find((a) => a.startsWith('--namespace='))?.split('=')[1];
   const argAddress = process.argv.find((a) => a.startsWith('--address='))?.split('=')[1];
   const argTaskQueues = process.argv.find((a) => a.startsWith('--task-queues='))?.split('=')[1];
+  const argTypes = process.argv.find((a) => a.startsWith('--types='))?.split('=')[1];
 
   const address = argAddress || process.env.TEMPORAL_ADDRESS || 'localhost:7233';
   const namespace = argNamespace || process.env.TEMPORAL_NAMESPACE || 'default';
   const taskQueues = argTaskQueues
     ? argTaskQueues.split(',').map((q) => q.trim()).filter(Boolean)
     : null;
+  const explicitTypes = argTypes
+    ? argTypes.split(',').map((t) => t.trim()).filter(Boolean)
+    : null;
 
   console.log('=== Terminate Temporal Workflows ===\n');
   console.log(`Mode:       ${dryRun ? 'DRY RUN (pass --execute to terminate)' : 'EXECUTE'}`);
   console.log(
     `Scope:      ${
-      allMode
+      explicitTypes
+        ? `explicit types [${explicitTypes.join(', ')}]`
+        : allMode
         ? 'ALL except postWorkflowV101 (safe: everything else auto-restarts)'
         : taskQueues
         ? `postWorkflowV101 on task queues [${taskQueues.join(', ')}]`
@@ -124,7 +137,15 @@ async function main() {
   const reason = 'Orchestrator redeploy — restart with new code';
   let totalTerminated = 0;
 
-  if (allMode) {
+  if (explicitTypes) {
+    // Precise targeting: terminate only the exact types named, ignoring the
+    // built-in lists. Lets you stop a single workflow (e.g. the engage ticker)
+    // without the broad blast radius of --all.
+    for (const workflowType of explicitTypes) {
+      const query = `WorkflowType='${workflowType}' AND ExecutionStatus='Running'`;
+      totalTerminated += await terminateByQuery(client, query, workflowType, dryRun, reason);
+    }
+  } else if (allMode) {
     // Query everything running, skip postWorkflowV101
     const excludeClause = POST_WORKFLOW_TYPES.map((t) => `WorkflowType!='${t}'`).join(' AND ');
     const query = `ExecutionStatus='Running' AND ${excludeClause}`;
@@ -152,7 +173,7 @@ async function main() {
     console.log('');
     console.log('Auto-restart on boot (InfiniteWorkflowRegister + EngageService.onApplicationBootstrap):');
     console.log('  missingPostWorkflow, refreshWorkflowRecoveryWorkflow,');
-    console.log('  engageGlobalKeywordScanWorkflow, engageGlobalChannelScanWorkflow, engageGlobalTrackedWorkflow');
+    console.log('  engageScanTickerWorkflow (also re-started when an org enables engage / triggers a scan)');
     console.log('Gated by env (not auto-restarted unless flag is set):');
     console.log('  dataTicksSyncWorkflow (POST_ANALYSE_ENABLE=true)');
     console.log('  engageDataTicksWorkflow (ENGAGE_DATA_TICKS=true)');
