@@ -220,6 +220,57 @@ describe('XScanAdapter', () => {
     expect(out.posts[0].authorUsername).toBe('alice');
   });
 
+  it('merges multiple tracked usernames into one (from:a OR from:b) query', async () => {
+    const urls: string[] = [];
+    const fetchImpl = (async (url: string) => {
+      urls.push(url);
+      return res(200, { data: [], includes: { users: [] } });
+    }) as any;
+    await new XScanAdapter({ fetchImpl }).searchScoped(
+      baseArgs({
+        scope: { type: 'tracked', keys: ['alice', 'bob', 'carol'] },
+        keywords: ['AI'],
+      })
+    );
+    // A small bucket of accounts collapses to ONE query, not one per account.
+    expect(urls.length).toBe(1);
+    const q = decodeURIComponent(urls[0]).replace(/\+/g, ' ');
+    expect(q).toContain('(from:alice OR from:bob OR from:carol) AI');
+    expect(q).toContain('-is:retweet');
+  });
+
+  it('attributes merged tracked results to each author', async () => {
+    const fetchImpl = (async () =>
+      res(200, {
+        data: [tweet('10', 'from alice', { author_id: 'ua' }), tweet('9', 'from bob', { author_id: 'ub' })],
+        includes: {
+          users: [
+            { id: 'ua', username: 'alice', name: 'Alice' },
+            { id: 'ub', username: 'bob', name: 'Bob' },
+          ],
+        },
+      })) as any;
+    const out = await new XScanAdapter({ fetchImpl }).searchScoped(
+      baseArgs({ scope: { type: 'tracked', keys: ['alice', 'bob'] }, keywords: ['AI'] })
+    );
+    expect(out.posts.map((p) => p.authorUsername).sort()).toEqual(['alice', 'bob']);
+  });
+
+  it('still supports a single tracked username via scope.key (back-compat)', async () => {
+    let seenUrl = '';
+    const fetchImpl = (async (url: string) => {
+      seenUrl = url;
+      return res(200, { data: [], includes: { users: [] } });
+    }) as any;
+    await new XScanAdapter({ fetchImpl }).searchScoped(
+      baseArgs({ scope: { type: 'tracked', key: 'bob' }, keywords: ['AI'] })
+    );
+    const q = decodeURIComponent(seenUrl).replace(/\+/g, ' ');
+    // Single author keeps the un-parenthesised `from:bob AI` form.
+    expect(q).toContain('from:bob AI');
+    expect(q).not.toContain('(from:bob)');
+  });
+
   it('tracked scope appends -is:retweet to the query', async () => {
     let seenUrl = '';
     const fetchImpl = (async (url: string) => {

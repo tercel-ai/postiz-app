@@ -27,6 +27,7 @@ import { RedditScanAdapter } from '@gitroom/nestjs-libraries/engage/scan/reddit-
 import { TokenPool } from '@gitroom/nestjs-libraries/engage/scan/token-pool';
 import {
   KEYWORD_GLOBAL_SCAN_KEY,
+  TRACKED_GLOBAL_SCAN_KEY,
   PlatformScanAdapter,
   ScanCursor,
   ScanScope,
@@ -72,6 +73,27 @@ type InitialScanRuntimeSettings = {
 // entitlement applies (self-hosted / billing off).
 function hoursToMs(hours: number): number {
   return (Number.isFinite(hours) && hours > 0 ? hours : DEFAULT_SCAN_INTERVAL_HOURS) * 3_600_000;
+}
+
+// X scanning kill switch for the orchestrator (workflow) path. Historically only
+// the extension path honoured ENGAGE_SUPPORTED_PLATFORMS, so setting it to
+// `reddit` silently left this workflow still hitting the X API. This unifies the
+// two: X is OFF when ENGAGE_X_SCAN_ENABLED=false (explicit per-platform toggle)
+// OR when ENGAGE_SUPPORTED_PLATFORMS is set and does not list 'x'. When off,
+// every X unit (keyword bucket / tracked / initial scan) is skipped; Reddit is
+// unaffected. Protects the X account from automation-risk rate-limiting.
+export function xScanEnabled(): boolean {
+  if ((process.env.ENGAGE_X_SCAN_ENABLED ?? '').trim().toLowerCase() === 'false') {
+    return false;
+  }
+  const allow = process.env.ENGAGE_SUPPORTED_PLATFORMS;
+  if (allow && allow.trim()) {
+    const set = new Set(
+      allow.split(',').map((p) => p.trim().toLowerCase()).filter(Boolean)
+    );
+    if (!set.has('x')) return false;
+  }
+  return true;
 }
 
 // Derived from the repository method so the type stays in sync automatically.
@@ -259,9 +281,24 @@ export class EngageScanActivity {
     const keywords = unionKeywords(orgContexts);
     if (!keywords.length) return;
 
-    const xPool = new TokenPool(await this._collectXTokens(orgContexts));
+    // X kill switch: when X scanning is disabled, never collect X tokens (so the
+    // pool is empty) and drop 'x' from every platform list below. Reddit keeps
+    // running untouched.
+    const xEnabled = xScanEnabled();
+    if (!xEnabled) {
+      this.logger.log(
+        'X scanning disabled (ENGAGE_X_SCAN_ENABLED=false or ENGAGE_SUPPORTED_PLATFORMS excludes x); scanning Reddit only'
+      );
+    }
+    const xPool = new TokenPool(
+      xEnabled ? await this._collectXTokens(orgContexts) : []
+    );
     const redditToken = await getRedditToken();
     const initialScanSettings = await this._loadInitialScanSettings();
+    if (!xEnabled) {
+      initialScanSettings.enabledPlatforms =
+        initialScanSettings.enabledPlatforms.filter((p) => p !== 'x');
+    }
 
     await this._ensureMissingKeywordInitialScans(
       orgContexts,
@@ -278,9 +315,11 @@ export class EngageScanActivity {
     const intervalByOrg = await this._orgIntervalHours(orgContexts);
 
     const posts: RawPost[] = [
-      ...(await this._scanKeywordUnits(orgContexts, intervalByOrg, xPool, redditToken, force)),
+      ...(await this._scanKeywordUnits(orgContexts, intervalByOrg, xPool, redditToken, force, xEnabled)),
       ...(await this._scanChannelUnits(orgContexts, intervalByOrg, keywords, redditToken, force)),
-      ...(await this._scanTrackedUnits(orgContexts, intervalByOrg, keywords, xPool, force)),
+      ...(xEnabled
+        ? await this._scanTrackedUnits(orgContexts, intervalByOrg, keywords, xPool, force)
+        : []),
     ];
 
     await this._fanOutAndFinalize(orgContexts, posts);
@@ -623,7 +662,8 @@ export class EngageScanActivity {
     intervalByOrg: Map<string, number>,
     xPool: TokenPool,
     redditToken: string | null,
-    force: boolean
+    force: boolean,
+    xEnabled = true
   ): Promise<RawPost[]> {
     // keyword text → min interval hours across orgs that enabled it.
     const minByKeyword = new Map<string, number>();
@@ -643,7 +683,10 @@ export class EngageScanActivity {
     for (const [hours, bucketKeywords] of buckets) {
       if (!bucketKeywords.length) continue;
       const cadenceMs = hoursToMs(hours);
-      for (const platform of ['x', 'reddit'] as const) {
+      const platforms: ReadonlyArray<'x' | 'reddit'> = xEnabled
+        ? ['x', 'reddit']
+        : ['reddit'];
+      for (const platform of platforms) {
         const r = await this._scanUnit({
           platform,
           scanType: 'keyword',
@@ -709,8 +752,14 @@ export class EngageScanActivity {
     return posts;
   }
 
-  // One unit per unique tracked username (from:user + keywords). Cadence = min
-  // interval across the orgs tracking that username.
+  // Tracked accounts are bucketed by cadence (like keywords) and the usernames
+  // in each bucket are MERGED into one `(from:a OR from:b) (kw...)` X search, so
+  // a bucket of N accounts costs a few API calls per cadence window instead of
+  // one call per account — the previous design ran one unit per username and was
+  // the bulk of the X API load (and rate-limit/anti-automation risk). One cursor
+  // per (interval) bucket, keyed `__tracked__:<hours>`; the X since_id is global
+  // to the merged stream so a single cursor is correct. Post→account attribution
+  // (avatar/display-name) is recovered from each tweet's author at ingest time.
   private async _scanTrackedUnits(
     orgContexts: OrgContext[],
     intervalByOrg: Map<string, number>,
@@ -720,6 +769,7 @@ export class EngageScanActivity {
   ): Promise<RawPost[]> {
     if (!xPool.size) return [];
     const accounts = unionTrackedUsernames(orgContexts);
+    if (!accounts.size) return [];
     // username (lowercased) → min interval hours across tracking orgs.
     const minByUsername = new Map<string, number>();
     for (const c of orgContexts) {
@@ -728,32 +778,64 @@ export class EngageScanActivity {
         minMerge(minByUsername, a.username.toLowerCase(), hours);
       }
     }
+    // Group usernames into interval buckets (mirrors _scanKeywordUnits).
+    const buckets = new Map<number, string[]>();
+    for (const [username, hours] of minByUsername) {
+      const arr = buckets.get(hours) ?? [];
+      arr.push(username);
+      buckets.set(hours, arr);
+    }
+
     const posts: RawPost[] = [];
-    for (const [username, records] of accounts) {
+    for (const [hours, usernames] of buckets) {
+      if (!usernames.length) continue;
       const r = await this._scanUnit({
         platform: 'x',
         scanType: 'tracked',
-        scanKey: username,
-        scope: { type: 'tracked', key: username },
+        scanKey: `${TRACKED_GLOBAL_SCAN_KEY}:${hours}`,
+        scope: { type: 'tracked', keys: usernames },
         keywords,
-        cadenceMs: hoursToMs(
-          minByUsername.get(username) ?? DEFAULT_SCAN_INTERVAL_HOURS
-        ),
+        cadenceMs: hoursToMs(hours),
         xPool,
         force,
       });
       posts.push(...r.posts);
       // Only touch the account bookkeeping if the unit actually ran this tick.
       if (!r.ran) continue;
-      const sample = r.posts[0];
-      const profile = sample
-        ? { picture: sample.authorAvatarUrl, displayName: sample.authorDisplayName }
-        : undefined;
+      await this._updateTrackedAccountsFromPosts(usernames, accounts, r.posts);
+    }
+    return posts;
+  }
+
+  // After a merged tracked-bucket scan, bump lastCheckedAt for every account in
+  // the bucket (we did query them all) and refresh avatar/display-name for the
+  // accounts that actually authored a post this run — matched by author handle.
+  private async _updateTrackedAccountsFromPosts(
+    usernames: string[],
+    accounts: Map<string, Array<{ id: string; orgId: string }>>,
+    posts: RawPost[]
+  ): Promise<void> {
+    // author handle (lowercased) → first seen profile this run.
+    const profileByUser = new Map<
+      string,
+      { picture?: string; displayName?: string }
+    >();
+    for (const p of posts) {
+      const u = p.authorUsername?.toLowerCase();
+      if (!u || profileByUser.has(u)) continue;
+      profileByUser.set(u, {
+        picture: p.authorAvatarUrl,
+        displayName: p.authorDisplayName,
+      });
+    }
+    for (const username of usernames) {
+      const records = accounts.get(username);
+      if (!records) continue;
+      const profile = profileByUser.get(username);
       for (const rec of records) {
         await this._updateTrackedAccountAfterScan(rec.id, profile);
       }
     }
-    return posts;
   }
 
   // ─── Cursor-driven scan of one unit ──────────────────────────────────────

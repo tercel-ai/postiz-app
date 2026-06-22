@@ -15,6 +15,11 @@ import {
 // X v2 recent-search OR queries: 512-char hard cap, keep headroom for the
 // `from:user ` prefix and parentheses.
 const X_QUERY_MAX_LEN = 460;
+// For merged tracked scans the query is `(from:a OR from:b) (kw...) -is:retweet`.
+// Reserve a slice of the 512-char budget for the author clause so the author and
+// keyword clauses jointly stay under the limit (200 authors-clause + 260 keyword
+// -clause + space + suffix ≈ 473 < 512).
+const X_AUTHOR_CLAUSE_MAX_LEN = 200;
 // recent search returns at most 100 results per page.
 const X_MAX_RESULTS = 100;
 const X_SEARCH_URL = 'https://api.twitter.com/2/tweets/search/recent';
@@ -104,19 +109,46 @@ export class XScanAdapter implements PlatformScanAdapter {
       log.warn('X scan skipped: no token provided');
       return empty;
     }
-    if (scope.type === 'tracked' && !scope.key) {
-      log.warn('X tracked scan skipped: scope.key (username) missing');
+    // Tracked may carry one (scope.key) or many (scope.keys) usernames; both
+    // collapse to a single author list here.
+    const authors =
+      scope.type === 'tracked'
+        ? (scope.keys?.length ? scope.keys : scope.key ? [scope.key] : [])
+        : [];
+    if (scope.type === 'tracked' && !authors.length) {
+      log.warn('X tracked scan skipped: no username(s) in scope');
       return empty;
     }
 
-    // Build queries: OR-batch keywords, then (for tracked) restrict to author.
-    // Tracked also drops retweets (`-is:retweet`): we want what the account
-    // itself said (original/quote/reply), not strangers' posts it amplified.
-    const prefix = scope.type === 'tracked' ? `from:${scope.key} ` : '';
+    // Build queries. Tracked scans restrict to authors AND drop retweets
+    // (`-is:retweet`): we want what the accounts themselves said, not strangers'
+    // posts they amplified. Authors are OR-batched into `(from:a OR from:b)`
+    // clauses so one cadence-bucket of accounts costs a few calls, not one per
+    // account. Keywords are OR-batched within the remaining length budget, and
+    // every (authorClause × keywordBatch) pair becomes one query.
     const suffix = scope.type === 'tracked' ? ' -is:retweet' : '';
-    const queries = batchKeywordsOr(keywords, X_QUERY_MAX_LEN).map(
-      (b) => `${prefix}${b}${suffix}`
-    );
+    const authorClauses =
+      scope.type === 'tracked'
+        ? batchKeywordsOr(
+            authors.map((u) => `from:${u}`),
+            X_AUTHOR_CLAUSE_MAX_LEN
+          )
+        : [''];
+    const keywordMaxLen =
+      scope.type === 'tracked'
+        ? X_QUERY_MAX_LEN - X_AUTHOR_CLAUSE_MAX_LEN
+        : X_QUERY_MAX_LEN;
+    const keywordBatches = batchKeywordsOr(keywords, keywordMaxLen);
+    const queries: string[] = [];
+    for (const authorClause of authorClauses) {
+      for (const keywordBatch of keywordBatches) {
+        queries.push(
+          authorClause
+            ? `${authorClause} ${keywordBatch}${suffix}`
+            : `${keywordBatch}`
+        );
+      }
+    }
 
     const posts: RawPost[] = [];
     let newestId = sinceId;

@@ -28,7 +28,18 @@ export interface ScanScope {
   // 'tracked' → username (no leading @); 'channel' → subreddit id (no "r/").
   // 'keyword' → undefined (whole-platform search).
   key?: string;
+  // 'tracked' (X) may carry MULTIPLE usernames so the adapter merges them into
+  // batched `(from:a OR from:b) (kw...)` queries — one bucket of accounts costs a
+  // few API calls instead of one call per account. `key` stays for the single
+  // -scope cases (channel) and back-compat with single-account tracked scans.
+  keys?: string[];
 }
+
+// Sentinel scanKey prefix for the bucketed tracked-account firehose. Like the
+// keyword buckets, all tracked usernames sharing a cadence are merged into one
+// cursor row keyed `__tracked__:<hours>` (scanType='tracked'), distinct from the
+// keyword `__global__:<hours>` rows.
+export const TRACKED_GLOBAL_SCAN_KEY = '__tracked__';
 
 // Where the previous fetch stopped. Mirrors the persisted EngageScanCursor
 // columns; the adapter reads it to fetch only what is new and returns the

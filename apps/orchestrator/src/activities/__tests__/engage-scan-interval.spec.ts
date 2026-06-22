@@ -1,5 +1,5 @@
-import { describe, it, expect, vi } from 'vitest';
-import { EngageScanActivity } from '../engage-scan.activity';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { EngageScanActivity, xScanEnabled } from '../engage-scan.activity';
 import { TokenPool } from '@gitroom/nestjs-libraries/engage/scan/token-pool';
 
 // Bare activity; we drive the private scan helpers directly and stub _scanUnit
@@ -31,9 +31,19 @@ function buildWithCursor(row: any, claimCount = 1) {
 const H = 3_600_000;
 
 function captureScanUnit(activity: EngageScanActivity) {
-  const calls: Array<{ scanKey: string; cadenceMs: number; keywords: string[] }> = [];
+  const calls: Array<{
+    scanKey: string;
+    cadenceMs: number;
+    keywords: string[];
+    scope?: any;
+  }> = [];
   (activity as any)._scanUnit = vi.fn(async (args: any) => {
-    calls.push({ scanKey: args.scanKey, cadenceMs: args.cadenceMs, keywords: args.keywords });
+    calls.push({
+      scanKey: args.scanKey,
+      cadenceMs: args.cadenceMs,
+      keywords: args.keywords,
+      scope: args.scope,
+    });
     return { ran: true, posts: [] };
   });
   return calls;
@@ -158,6 +168,90 @@ describe('EngageScanActivity cursor claim with bucketed keyword key (shared leas
 
     expect(claimed).toBeNull();
     expect(updateMany).not.toHaveBeenCalled();
+  });
+});
+
+describe('xScanEnabled (X kill switch)', () => {
+  const saved = {
+    enabled: process.env.ENGAGE_X_SCAN_ENABLED,
+    platforms: process.env.ENGAGE_SUPPORTED_PLATFORMS,
+  };
+  afterEach(() => {
+    process.env.ENGAGE_X_SCAN_ENABLED = saved.enabled;
+    process.env.ENGAGE_SUPPORTED_PLATFORMS = saved.platforms;
+    if (saved.enabled === undefined) delete process.env.ENGAGE_X_SCAN_ENABLED;
+    if (saved.platforms === undefined) delete process.env.ENGAGE_SUPPORTED_PLATFORMS;
+  });
+
+  it('defaults to enabled when nothing is set', () => {
+    delete process.env.ENGAGE_X_SCAN_ENABLED;
+    delete process.env.ENGAGE_SUPPORTED_PLATFORMS;
+    expect(xScanEnabled()).toBe(true);
+  });
+
+  it('is disabled by the explicit ENGAGE_X_SCAN_ENABLED=false toggle', () => {
+    delete process.env.ENGAGE_SUPPORTED_PLATFORMS;
+    process.env.ENGAGE_X_SCAN_ENABLED = 'false';
+    expect(xScanEnabled()).toBe(false);
+  });
+
+  it('is disabled when ENGAGE_SUPPORTED_PLATFORMS excludes x (shared with extension)', () => {
+    delete process.env.ENGAGE_X_SCAN_ENABLED;
+    process.env.ENGAGE_SUPPORTED_PLATFORMS = 'reddit';
+    expect(xScanEnabled()).toBe(false);
+  });
+
+  it('stays enabled when the allowlist includes x', () => {
+    delete process.env.ENGAGE_X_SCAN_ENABLED;
+    process.env.ENGAGE_SUPPORTED_PLATFORMS = 'x,reddit';
+    expect(xScanEnabled()).toBe(true);
+  });
+});
+
+describe('EngageScanActivity tracked-account bucketing + merge', () => {
+  it('merges tracked usernames into one bucket unit per cadence (not one per account)', async () => {
+    const activity = buildActivity();
+    const calls = captureScanUnit(activity);
+    (activity as any)._updateTrackedAccountsFromPosts = vi
+      .fn()
+      .mockResolvedValue(undefined);
+
+    // Pro org tracks alice+bob (6h); Starter tracks carol (24h). alice/bob land
+    // in the 6h bucket as ONE merged unit; carol is a 24h bucket on her own.
+    const orgContexts = [
+      {
+        organizationId: 'pro',
+        trackedAccounts: [{ username: 'Alice' }, { username: 'BOB' }],
+      },
+      {
+        organizationId: 'starter',
+        trackedAccounts: [{ username: 'carol' }],
+      },
+    ] as any;
+    const intervalByOrg = new Map([
+      ['pro', 6],
+      ['starter', 24],
+    ]);
+
+    await (activity as any)._scanTrackedUnits(
+      orgContexts,
+      intervalByOrg,
+      ['ai'],
+      new TokenPool(['tok']),
+      false
+    );
+
+    // 2 cadence buckets → 2 units total (NOT 3 accounts → 3 units).
+    expect(calls).toHaveLength(2);
+
+    const sixHour = calls.find((c) => c.cadenceMs === 6 * H)!;
+    expect(sixHour.scanKey).toBe('__tracked__:6');
+    expect(sixHour.scope.type).toBe('tracked');
+    expect([...sixHour.scope.keys].sort()).toEqual(['alice', 'bob']); // lowercased + merged
+
+    const dayLong = calls.find((c) => c.cadenceMs === 24 * H)!;
+    expect(dayLong.scanKey).toBe('__tracked__:24');
+    expect(dayLong.scope.keys).toEqual(['carol']);
   });
 });
 
