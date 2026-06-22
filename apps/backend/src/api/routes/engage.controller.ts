@@ -374,6 +374,15 @@ export class EngageController {
     return this._engageService.triggerImmediateScan(org, keywordIds);
   }
 
+  @ApiOperation({
+    summary:
+      'Page-visit trigger: fire-and-forget kick of this org\'s DUE scan (keywords/tracked/channels) + page-1 /sent metrics. Returns { status, coldStart, nextRefreshAt }; the client caches nextRefreshAt and skips calling again until then. Execution timing stays with the existing due gate.',
+  })
+  @Post('/refresh-on-visit')
+  refreshOnVisit(@GetOrgFromRequest() org: Organization) {
+    return this._engageService.refreshOnVisit(org);
+  }
+
   // ─── Opportunities ────────────────────────────────────────────────────────
 
   @ApiOperation({ summary: 'Score distribution and top-opportunity stats for this org' })

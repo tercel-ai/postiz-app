@@ -83,6 +83,24 @@ function engageScanTickMinutes(): number {
     : DEFAULT_SCAN_TICK_MINUTES;
 }
 
+// Page-visit trigger (`refreshOnVisit`). Mirrors /sent page 1.
+const REFRESH_SENT_PAGE_SIZE = 20;
+// Floor for the returned `nextRefreshAt` AND the in-memory scan-signal debounce:
+// the client caches nextRefreshAt and won't re-call before it, so this is the
+// minimum spacing between effective triggers regardless of how fast a user
+// browses (also stops a 0-interval plan from inviting hammering).
+const DEFAULT_REFRESH_FLOOR_SECONDS = 60;
+
+function engageRefreshFloorMs(): number {
+  const value = Number(
+    process.env.ENGAGE_REFRESH_FLOOR_SECONDS ?? DEFAULT_REFRESH_FLOOR_SECONDS
+  );
+  return (
+    (Number.isFinite(value) && value > 0 ? value : DEFAULT_REFRESH_FLOOR_SECONDS) *
+    1000
+  );
+}
+
 @Injectable()
 export class EngageService implements OnApplicationBootstrap {
   private readonly logger = new Logger(EngageService.name);
@@ -1322,6 +1340,149 @@ export class EngageService implements OnApplicationBootstrap {
         return { status: 'error' };
       }
     }
+  }
+
+  // Per-org, in-memory debounce for the scan signal so rapid multi-tab visits
+  // don't spam the ticker before it has had a chance to advance the cursors (the
+  // cursor cadence is the durable gate; this only smooths the signal-to-run gap).
+  private readonly _lastScanSignalAt = new Map<string, number>();
+
+  private _shouldSignalScan(orgId: string, now: number): boolean {
+    const last = this._lastScanSignalAt.get(orgId) ?? 0;
+    if (now - last < engageRefreshFloorMs()) return false;
+    this._lastScanSignalAt.set(orgId, now);
+    return true;
+  }
+
+  /** Start the existing per-reply metrics-sync workflow for each due reply. */
+  private _kickMetricsSync(sentReplyIds: string[]): void {
+    const client = this._temporalService.client?.getRawClient();
+    if (!client) return;
+    for (const id of sentReplyIds) {
+      client.workflow
+        .start('engageMetricsSyncWorkflow', {
+          workflowId: `engage-metrics-${id}`,
+          taskQueue: 'main',
+          args: [id],
+          workflowIdConflictPolicy: 'USE_EXISTING',
+        })
+        .catch((err) =>
+          this.logger.warn(
+            `refreshOnVisit: metrics sync start failed (sentReply=${id}): ${
+              (err as Error)?.message ?? err
+            }`
+          )
+        );
+    }
+  }
+
+  /**
+   * Page-visit trigger. The frontend fires this fire-and-forget on every Engage
+   * page visit; this method only *requests* work — the existing due gates decide
+   * whether anything actually runs:
+   *
+   *  - Scan (keywords / tracked / channels): signals the scan ticker, which
+   *    claims only units past their per-plan cadence (`EngageScanCursor`).
+   *  - Metrics (page-1 `/engage/sent` posts): starts the per-reply metrics-sync
+   *    workflow for posts past `metricsFetchIntervalHours`, optimistically
+   *    stamping `lastMetricsFetchAt` so a repeat visit doesn't re-fire while the
+   *    async sync runs (the sync workflow does not stamp the gate itself).
+   *
+   * Returns `nextRefreshAt` — the soonest a future visit could do real work —
+   * which the client caches so it can skip the call entirely until then. Because
+   * due-ness is gate-derived, a once-a-week visitor runs immediately on entry, a
+   * brand-new org (cold start, no cursors) runs its first scan, and a several-
+   * times-a-day visitor mostly no-ops — all from the SAME interval gate.
+   */
+  async refreshOnVisit(org: Organization): Promise<{
+    status: 'accepted' | 'throttled';
+    coldStart: boolean;
+    nextRefreshAt: string;
+  }> {
+    const now = Date.now();
+
+    const [scanIntervalHours, metricsWindowDays, metricsIntervalHours] =
+      await Promise.all([
+        this._entitlementService.getScanIntervalHours(org.id),
+        this._entitlementService.getMetricsWindowDays(org.id),
+        this._entitlementService.getMetricsFetchIntervalHours(org.id),
+      ]);
+
+    // ── Scan side: per-unit cadence gate (EngageScanCursor) ──────────────────
+    const scanStatus = await this._engageRepository.getOrgScanStatus(
+      org.id,
+      scanIntervalHours
+    );
+    // No cursors yet → never scanned → empty feed. The visit kicks the first scan.
+    const coldStart = scanStatus.lastScanAt == null;
+    const scanNextMs = scanStatus.nextScanAt
+      ? scanStatus.nextScanAt.getTime()
+      : now;
+    const scanDue = scanNextMs <= now;
+
+    // ── Metrics side: page-1 /engage/sent, lastMetricsFetchAt gate ───────────
+    const windowStartMs = now - metricsWindowDays * 86_400_000;
+    const intervalMs = metricsIntervalHours * 3_600_000;
+    const sent = await this._engageRepository.getRecentSentForRefresh(
+      org.id,
+      REFRESH_SENT_PAGE_SIZE
+    );
+    const dueSentReplyIds: string[] = [];
+    const duePostIds: string[] = [];
+    let metricsNextMs: number | null = null;
+    for (const row of sent) {
+      const post = row.post;
+      if (!post || post.state !== 'PUBLISHED') continue;
+      if (!post.publishDate || post.publishDate.getTime() < windowStartMs)
+        continue;
+      const lastMs = post.lastMetricsFetchAt
+        ? post.lastMetricsFetchAt.getTime()
+        : null;
+      const isDue = lastMs == null || lastMs < now - intervalMs;
+      // Due rows are about to be stamped now → their next-due is now + interval.
+      const nextMs = isDue ? now + intervalMs : (lastMs as number) + intervalMs;
+      metricsNextMs =
+        metricsNextMs == null ? nextMs : Math.min(metricsNextMs, nextMs);
+      if (isDue) {
+        dueSentReplyIds.push(row.id);
+        duePostIds.push(post.id);
+      }
+    }
+    const metricsDue = dueSentReplyIds.length > 0;
+
+    // ── Kick (fire-and-forget) — never block the page ────────────────────────
+    if (scanDue && this._shouldSignalScan(org.id, now)) {
+      this.triggerImmediateScan(org).catch((err) =>
+        this.logger.warn(
+          `refreshOnVisit: scan trigger failed (org=${org.id}): ${
+            (err as Error)?.message ?? err
+          }`
+        )
+      );
+    }
+    if (metricsDue) {
+      // Stamp BEFORE the async sync so repeat visits within the interval no-op.
+      this._postsService
+        .markMetricsFetched(org.id, duePostIds)
+        .catch(() => undefined);
+      this._kickMetricsSync(dueSentReplyIds);
+    }
+
+    // ── nextRefreshAt: soonest a future visit could do real work, floored ────
+    const rawNextMs = Math.min(
+      scanNextMs,
+      metricsNextMs == null ? Number.POSITIVE_INFINITY : metricsNextMs
+    );
+    const nextRefreshMs = Math.max(
+      Number.isFinite(rawNextMs) ? rawNextMs : now,
+      now + engageRefreshFloorMs()
+    );
+
+    return {
+      status: scanDue || metricsDue ? 'accepted' : 'throttled',
+      coldStart,
+      nextRefreshAt: new Date(nextRefreshMs).toISOString(),
+    };
   }
 
   async resyncEngageMetrics(opts: {

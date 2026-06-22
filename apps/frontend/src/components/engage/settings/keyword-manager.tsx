@@ -4,6 +4,7 @@ import { useState, useCallback } from 'react';
 import useSWR from 'swr';
 import { useFetch } from '@gitroom/helpers/utils/custom.fetch';
 import { useToaster } from '@gitroom/react/toaster/toaster';
+import { invalidateEngageRefresh } from '@gitroom/frontend/components/engage/signal-feed/use-engage-visit-refresh';
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
 
@@ -159,6 +160,8 @@ export function KeywordManager() {
       }
       setInput('');
       mutate();
+      // New/changed scan unit is due now — let the next /engage visit re-trigger.
+      invalidateEngageRefresh();
     } catch {
       toaster.show('Failed to add keyword (may be duplicate)', 'warning');
     }
@@ -176,6 +179,7 @@ export function KeywordManager() {
           return;
         }
         mutate();
+        invalidateEngageRefresh();
       } catch {
         toaster.show('Failed to update keyword', 'warning');
       }

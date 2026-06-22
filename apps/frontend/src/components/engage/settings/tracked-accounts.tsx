@@ -4,6 +4,7 @@ import { useState, useCallback } from 'react';
 import useSWR from 'swr';
 import { useFetch } from '@gitroom/helpers/utils/custom.fetch';
 import { useToaster } from '@gitroom/react/toaster/toaster';
+import { invalidateEngageRefresh } from '@gitroom/frontend/components/engage/signal-feed/use-engage-visit-refresh';
 
 interface TrackedAccount {
   id: string;
@@ -45,6 +46,8 @@ export function TrackedAccounts() {
       setUsername('');
       setCategory('');
       mutate();
+      // New scan unit is due now — let the next /engage visit re-trigger.
+      invalidateEngageRefresh();
       toaster.show('Account added', 'success');
     } catch {
       toaster.show('Failed (may already exist)', 'warning');
@@ -79,6 +82,7 @@ export function TrackedAccounts() {
           return;
         }
         mutate();
+        invalidateEngageRefresh();
       } catch {
         toaster.show('Failed to update account', 'warning');
       }

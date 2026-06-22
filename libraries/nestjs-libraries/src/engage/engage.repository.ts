@@ -1986,6 +1986,35 @@ export class EngageRepository {
     return { items: itemsWithMetrics, total, page, limit };
   }
 
+  /**
+   * Page-1 sent replies for the page-visit refresh trigger. Same `where`/order as
+   * `listSentReplies` (no filters → all), capped at one page, but returns ONLY the
+   * post timing the metrics gate needs (id, state, publishDate, lastMetricsFetchAt)
+   * — no analytics hydration. The caller decides due-ness and `nextRefreshAt`.
+   */
+  async getRecentSentForRefresh(organizationId: string, limit: number) {
+    const { sentWhere } = this._buildSentReplyFilter(
+      organizationId,
+      {} as ListSentDto
+    );
+    return this._sentReply.model.engageSentReply.findMany({
+      where: sentWhere,
+      select: {
+        id: true,
+        post: {
+          select: {
+            id: true,
+            state: true,
+            publishDate: true,
+            lastMetricsFetchAt: true,
+          },
+        },
+      },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: limit,
+    });
+  }
+
   async locateSentReply(organizationId: string, dto: LocateSentReplyDto) {
     const limit = dto.limit ?? 20;
 

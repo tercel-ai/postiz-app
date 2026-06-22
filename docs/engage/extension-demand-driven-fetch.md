@@ -1,5 +1,14 @@
 # Extension Demand-Driven Data Fetch — design & changelog
 
+> **⚠️ STATUS (2026-06-22): Extension X (Twitter) path SUSPENDED.**
+> Scanning/fetching X through the extension's personal browser session triggered
+> account rate-limiting / temp-restriction (stale GraphQL `queryId` 404s look
+> bot-like). The X executor path is paused until a safer approach exists. **The
+> extension is Reddit-only for now** — set `ENGAGE_SUPPORTED_PLATFORMS=reddit`
+> (full kill switch across all unit types). Reddit session `.json` fetching
+> remains active. The Track A / Track B designs below stand; only the X executor
+> is on hold.
+
 Moves data fetching from the backend Temporal workflow toward the **browser
 extension**, which uses the user's own logged-in session to bypass the Reddit
 WAF and the X API tier limits that block server-side fetching.

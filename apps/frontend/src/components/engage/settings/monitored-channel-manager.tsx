@@ -4,6 +4,7 @@ import { useState, useCallback } from 'react';
 import useSWR from 'swr';
 import { useFetch } from '@gitroom/helpers/utils/custom.fetch';
 import { useToaster } from '@gitroom/react/toaster/toaster';
+import { invalidateEngageRefresh } from '@gitroom/frontend/components/engage/signal-feed/use-engage-visit-refresh';
 
 const PLATFORM_COLORS: Record<string, string> = {
   reddit: 'bg-orange-500/20 text-orange-400',
@@ -89,6 +90,8 @@ export function MonitoredChannelManager() {
           return;
         }
         mutate();
+        // New scan unit is due now — let the next /engage visit re-trigger.
+        invalidateEngageRefresh();
         setShowAdd(false);
         setSearchResults([]);
         setSearchQuery('');
@@ -112,6 +115,7 @@ export function MonitoredChannelManager() {
           return;
         }
         mutate();
+        invalidateEngageRefresh();
       } catch {
         toaster.show('Failed to update channel', 'warning');
       }

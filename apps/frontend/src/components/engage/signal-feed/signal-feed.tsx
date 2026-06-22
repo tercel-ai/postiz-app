@@ -8,6 +8,7 @@ import { SetupWizard } from '../setup-wizard/setup-wizard';
 import { FeedFiltersBar, FeedFilters } from './feed-filters';
 import { OpportunityCard, type Opportunity } from './opportunity-card';
 import { ReplyPanel } from './reply-panel';
+import { useEngageVisitRefresh } from './use-engage-visit-refresh';
 
 type ScanTiming = { lastScanAt: string | null; nextScanAt: string | null };
 type ScanStatus = {
@@ -119,6 +120,17 @@ export function SignalFeed() {
       page: number;
       limit: number;
     }>;
+  });
+
+  // Page-visit trigger: on entry & tab-focus, kick this org's DUE scan/metrics
+  // (the server's due gate decides what actually runs). Skips the call entirely
+  // until the cached nextRefreshAt passes. Revalidate the feed after a kick so a
+  // cold/first-visit feed fills in without a manual refresh.
+  const { coldStart } = useEngageVisitRefresh(config?.organizationId, {
+    onAccepted: () => {
+      mutate();
+      [3000, 8000, 15000].forEach((d) => window.setTimeout(() => mutate(), d));
+    },
   });
 
   const handleDismiss = useCallback(
@@ -328,10 +340,14 @@ export function SignalFeed() {
             </div>
           ) : opportunities.length === 0 ? (
             <div className="text-center py-16 text-gray-500">
-              <p className="text-4xl mb-3">🔍</p>
-              <p className="text-sm">No opportunities yet.</p>
+              <p className="text-4xl mb-3">{coldStart ? '✨' : '🔍'}</p>
+              <p className="text-sm">
+                {coldStart ? 'Building your feed…' : 'No opportunities yet.'}
+              </p>
               <p className="text-xs mt-1">
-                First scan is running — results appear in ~15 minutes. Ongoing scans run daily at 00:30 UTC.
+                {coldStart
+                  ? 'Your first scan just started — opportunities will appear here shortly.'
+                  : 'First scan is running — results appear in ~15 minutes. Ongoing scans run daily at 00:30 UTC.'}
               </p>
             </div>
           ) : (
