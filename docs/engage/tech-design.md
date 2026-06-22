@@ -969,9 +969,9 @@ export async function engageScanTickerWorkflow(tickMinutes = 5): Promise<void> {
 
 | scanType | unit (`scanKey`) | query |
 |---|---|---|
-| keyword | one per platform (`__global__`) | OR-batched keywords across all orgs |
+| keyword | one per platform per interval bucket (`__global__:<hours>`) | OR-batched keywords across all orgs |
 | channel | one per monitored subreddit | OR-batched keywords, `restrict_sr` |
-| tracked | one per unique X username | `from:username (OR-batched keywords)` |
+| tracked | one per interval bucket (`__tracked__:<hours>`), usernames **merged** | `(from:a OR from:b …) (OR-batched keywords) -is:retweet` |
 
 All scans are keyword-driven (the union of every org's enabled keywords is
 OR-batched into the query). Each unit owns a row in **`EngageScanCursor`** (§3)
@@ -1073,7 +1073,9 @@ the next tick after its cooldown — independent of the (longer) base cadence.
 the activity stays platform-agnostic:
 
 - **X** (`x-scan-adapter.ts`): `/2/tweets/search/recent` with `since_id` +
-  `next_token` pagination; `from:username` for the tracked scope; drops
+  `next_token` pagination; `(from:a OR from:b …)` for the (merged) tracked scope —
+  `scope.keys` carries the bucket's usernames, `scope.key` still accepted for a
+  single account; drops
   reply-restricted tweets; parses `x-rate-limit-*` headers. A pure **retweet** is
   resolved to its **original** post (via the `referenced_tweets.id` expansion,
   returned inline — no extra call): the opportunity gets the original's
@@ -1127,11 +1129,19 @@ Grouping differs by the unit's natural granularity:
 | --- | --- | --- | --- |
 | **keyword** | one union firehose | **bucketed by interval** — `scanKey = __global__:<hours>` | the bucket's hours |
 | **channel** | per-subreddit | already per-key | `min` over orgs monitoring that subreddit |
-| **tracked** | per-username | already per-key | `min` over orgs tracking that username |
+| **tracked** | union of X usernames | **bucketed by interval + merged** — `scanKey = __tracked__:<hours>` | the bucket's hours |
 
-- **channel / tracked** are already per-key units (independent cursors), so we just
-  take the `min` interval per key: `minMerge(map, channelId|username, hoursOf(org))`,
-  then scan each at `hoursToMs(min)`.
+- **channel** is already a per-key unit (independent cursor), so we just take the
+  `min` interval per key: `minMerge(map, channelId, hoursOf(org))`, then scan each at
+  `hoursToMs(min)`.
+- **tracked** is bucketed like keywords (each username's bucket = `min` interval
+  across the orgs tracking it), but additionally the usernames in a bucket are
+  **merged into one X query** `(from:a OR from:b …) (kw…) -is:retweet` instead of one
+  `from:user` search per account. This cut the dominant share of X API load: ~N
+  tracked accounts went from ~N searches per cadence to a few batched calls (authors
+  and keywords are each OR-batched within the 512-char query limit). The X `since_id`
+  is global to the merged stream, so one cursor per bucket is correct; each returned
+  tweet's author handle re-attributes avatar/display-name back to its account.
 - **keyword** is the hard case: the firehose scans the **union** of all keywords in
   one query (a single `__global__` cursor historically). Taking a single global min
   would drag *every* keyword to 6h the moment one Pro org exists — wasting API
@@ -1155,6 +1165,15 @@ cover all buckets.
 > self-corrects on the next due tick. This is intentional and self-healing. To
 > preserve the old incremental position instead, run a one-off
 > `UPDATE "EngageScanCursor" SET "scanKey"='__global__:24' WHERE "scanType"='keyword' AND "scanKey"='__global__'`.
+
+> **Upgrade note (tracked merge).** Tracked scanning previously used one cursor
+> per username (`scanKey = <username>`). After the merge it emits
+> `__tracked__:<hours>` bucket cursors, orphaning the per-username rows — same
+> self-healing behaviour as the keyword migration (new buckets start from null and
+> re-scan once over the bounded recent window; dedup on `platform_externalPostId`).
+> The orphaned per-username rows are harmless but can be removed with
+> `scripts/cleanup-engage-cursors.ts --orphan-tracked --execute` (run **after**
+> deploying the merge so the new bucket rows exist).
 
 Implementation: `engage-scan.activity.ts` (`_orgIntervalHours`,
 `_scanKeywordUnits` bucketing, `_scanChannelUnits`/`_scanTrackedUnits` per-key min,

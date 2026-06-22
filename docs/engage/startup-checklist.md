@@ -250,6 +250,30 @@ Engage includes 5 core asynchronous workflows with **different trigger timings**
 | `ENGAGE_CHANNEL_SCAN_INTERVAL_HOURS` | `3` | Reddit monitored subreddit scan |
 | `ENGAGE_TRACKED_SCAN_INTERVAL_HOURS` | `3` | X tracked account scan |
 
+**Platform Kill Switches** (Optional `.env` config):
+
+X scanning on the **orchestrator (server) path** — `engageScanTickerWorkflow` →
+`runDueScans`, which reads X via OAuth tokens + proxy, distinct from the
+extension's browser-session path — is **enabled by default**. It is gated by
+`xScanEnabled()` in `apps/orchestrator/src/activities/engage-scan.activity.ts`,
+which honours two env vars:
+
+| Variable | Default | Effect on X scanning (orchestrator path) |
+|---|---|---|
+| `ENGAGE_X_SCAN_ENABLED` | _unset_ → **enabled** | Set to the literal `false` to disable X (keyword bucket + tracked + X initial scan all skipped). Any other value, or unset, leaves X **enabled**. Opt-out, not opt-in. |
+| `ENGAGE_SUPPORTED_PLATFORMS` | _unset_ → `x,reddit` | Shared with the extension path. When set and it does **not** list `x` (e.g. `reddit`), X scanning is disabled on **both** the orchestrator and the extension. |
+
+X is OFF when **either** `ENGAGE_X_SCAN_ENABLED=false` **or**
+`ENGAGE_SUPPORTED_PLATFORMS` excludes `x`. With nothing set, X scans (default
+enabled) — chosen for backward compatibility so an upgrade never silently stops
+X. Reddit is unaffected by both switches. Changes require an orchestrator restart
+(or terminate + auto-restart of the ticker) to take effect.
+
+> Note: only the literal string `false` disables `ENGAGE_X_SCAN_ENABLED`; `0`,
+> `no`, `off` are treated as enabled. The extension also has its own
+> **build-time** `ENGAGE_X_ENABLED` flag (default OFF) covering its scan +
+> metrics runners — separate from these runtime server-side switches.
+
 **Keyword Initial Scan Environment Variables** (Optional `.env` config, defaults built-in):
 
 When a keyword is newly added or re-enabled, Engage creates a per-platform

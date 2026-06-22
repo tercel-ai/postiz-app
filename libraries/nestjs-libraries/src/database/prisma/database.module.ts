@@ -43,6 +43,7 @@ import { SettingsService } from '@gitroom/nestjs-libraries/database/prisma/setti
 import { AiPricingService } from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/ai-pricing.service';
 import { AiseeClient } from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/aisee.client';
 import { AiseeCreditService } from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/aisee-credit.service';
+import { ApiUsageService } from '@gitroom/nestjs-libraries/database/prisma/api-usage/api-usage.service';
 import { ErrorsRepository } from '@gitroom/nestjs-libraries/database/prisma/errors/errors.repository';
 import { ErrorsService } from '@gitroom/nestjs-libraries/database/prisma/errors/errors.service';
 import { DataTicksRepository } from '@gitroom/nestjs-libraries/database/prisma/data-ticks/data-ticks.repository';
@@ -112,6 +113,7 @@ import { EngageDraftService } from '@gitroom/nestjs-libraries/engage/engage-draf
     AiPricingService,
     AiseeClient,
     AiseeCreditService,
+    ApiUsageService,
     ErrorsRepository,
     ErrorsService,
     DataTicksRepository,

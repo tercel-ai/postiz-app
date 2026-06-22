@@ -40,6 +40,17 @@ dayjs.extend(utc);
 // keyword/channel/tracked alike); falls back to DEFAULT_SCAN_INTERVAL_HOURS.
 const INITIAL_SCAN_PLATFORMS = ['reddit', 'x'] as const;
 
+// Default minimum score for the opportunities feed (list/locate) when the caller
+// omits `minScore`. Deliberately SEPARATE from the ingest gate ENGAGE_MIN_SCORE
+// (engage-scan-ingest.service.ts): that gate controls what gets persisted (now
+// 0 = persist everything, e.g. for full cost accounting), while this is the
+// display quality bar. Defaults to 60 to preserve the pre-change feed behaviour
+// (when the ingest gate was 60, the unfiltered feed effectively showed >=60).
+// Pass minScore=0 explicitly to surface everything.
+const LIST_DEFAULT_MIN_SCORE = Number(
+  process.env.ENGAGE_LIST_DEFAULT_MIN_SCORE ?? 60
+);
+
 // Only NEW/AUTO_QUEUED opportunities can be replied to. Every other status is a
 // terminal/non-actionable state — map each to a precise, human-readable reason
 // (code + message) so the reply gate can tell the user *why* generation is
@@ -698,7 +709,7 @@ export class EngageRepository {
             platform: dto.platform,
             channelId: dto.channelId,
             channelName: dto.channelName,
-            enabled: dto.enabled ?? false,
+            enabled: dto.enabled ?? true,
             audienceSize: dto.audienceSize ?? 0,
             ...(dto.metadata && {
               metadata: dto.metadata as Prisma.InputJsonValue,
@@ -982,7 +993,7 @@ export class EngageRepository {
       organizationId,
       ...(dto.status?.length && { status: { in: dto.status } }),
       ...(dto.bookmarked !== undefined && { bookmarked: dto.bookmarked }),
-      ...(dto.minScore !== undefined && { score: { gte: dto.minScore } }),
+      score: { gte: dto.minScore ?? LIST_DEFAULT_MIN_SCORE },
       ...(dto.minScoreKeyword !== undefined && {
         scoreKeyword: { gte: dto.minScoreKeyword },
       }),
@@ -1158,7 +1169,7 @@ export class EngageRepository {
       organizationId,
       ...(dto.status?.length && { status: { in: dto.status } }),
       ...(dto.bookmarked !== undefined && { bookmarked: dto.bookmarked }),
-      ...(dto.minScore !== undefined && { score: { gte: dto.minScore } }),
+      score: { gte: dto.minScore ?? LIST_DEFAULT_MIN_SCORE },
       ...(dto.minScoreKeyword !== undefined && {
         scoreKeyword: { gte: dto.minScoreKeyword },
       }),

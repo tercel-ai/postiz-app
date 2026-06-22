@@ -1,6 +1,10 @@
 import { RawPost } from '../engage-scorer';
 import { applyPageDelay } from './scan-pacing';
 import {
+  recordApiUsage,
+  X_USAGE,
+} from '@gitroom/nestjs-libraries/database/prisma/api-usage/api-usage.service';
+import {
   AdapterCaps,
   PlatformScanAdapter,
   RateLimitInfo,
@@ -191,6 +195,10 @@ export class XScanAdapter implements PlatformScanAdapter {
           return { posts, nextCursor: cursorFrom(newestId, newestAt), rate };
         }
         if (!json) break; // non-rate error already logged; move to next query
+
+        // Cost telemetry: X bills per RETURNED record (data[]), before our
+        // replyable/retweet filtering below. Count the raw response, not posts.
+        recordApiUsage('x', X_USAGE.POSTS_READ, (json.data ?? []).length);
 
         const users = new Map((json.includes?.users ?? []).map((u) => [u.id, u]));
         // Originals behind referenced_tweets, returned inline in this response.

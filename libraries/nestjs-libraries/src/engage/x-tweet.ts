@@ -1,5 +1,9 @@
 import { parseXHandle } from '@gitroom/nestjs-libraries/engage/resolve-x-reply-integration';
 import { EngageAuthorProfile } from '@gitroom/nestjs-libraries/engage/engage-author';
+import {
+  recordApiUsage,
+  X_USAGE,
+} from '@gitroom/nestjs-libraries/database/prisma/api-usage/api-usage.service';
 
 // The reply tweet id is the numeric snowflake in a /status/<id> permalink.
 const TWEET_ID_RE = /\/status(?:es)?\/(\d+)/;
@@ -79,7 +83,10 @@ export async function checkXTweetAccessible(
     } catch {
       return { status: 'unverifiable', reason: 'unparseable response' };
     }
-    if (json.data?.id) return { status: 'exists' };
+    if (json.data?.id) {
+      recordApiUsage('x', X_USAGE.POSTS_READ, 1); // 1 returned record
+      return { status: 'exists' };
+    }
     // X returns HTTP 200 with an `errors` array (and no `data`) for a tweet that
     // is deleted, protected, or never existed.
     return { status: 'not_found' };
@@ -121,6 +128,7 @@ export async function fetchXAuthorProfile(
     };
     const d = json.data;
     if (!d) return { handle };
+    recordApiUsage('x', X_USAGE.USER_READ, 1); // 1 returned user record
     return {
       handle,
       ...(d.id ? { id: d.id } : {}),

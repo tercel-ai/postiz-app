@@ -1335,3 +1335,22 @@ model EngageDataTicks {
   @@index([organizationId, platform, type, timeUnit])
   @@index([organizationId, type, statisticsTime])
 }
+
+// Internal API-usage / cost telemetry (NOT user-facing). One row per
+// (day, platform, category): a running per-day counter incremented via atomic
+// upsert. `quantity` is RECORDS for read categories (X bills per returned
+// resource) or REQUESTS for write categories (X bills per request) — which one
+// is implied by the category (see api-usage.service price map). Prices live in
+// code/Settings, never in this table, so cost = SUM(quantity) * price computed
+// at report time and re-priceable without backfill. Deliberately global (no org
+// / integration) to keep cardinality tiny (~platforms * categories rows/day).
+model ApiUsageTick {
+  date      DateTime // day bucket (UTC midnight)
+  platform  String // 'x' | 'reddit' | ...
+  category  String // platform-scoped billing category
+  quantity  BigInt   @default(0)
+  updatedAt DateTime @updatedAt
+
+  @@unique([date, platform, category])
+  @@index([date])
+}

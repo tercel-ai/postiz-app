@@ -26,6 +26,10 @@ import { Tool } from '@gitroom/nestjs-libraries/integrations/tool.decorator';
 import { mergeAdditionalSettings, parseAdditionalSettings } from '@gitroom/nestjs-libraries/database/prisma/integrations/additional-settings.utils';
 import { Rules } from '@gitroom/nestjs-libraries/chat/rules.description.decorator';
 import {
+  recordApiUsage,
+  X_USAGE,
+} from '@gitroom/nestjs-libraries/database/prisma/api-usage/api-usage.service';
+import {
   ioRedis,
   notifyOncePerCooldown,
 } from '@gitroom/nestjs-libraries/redis/redis.service';
@@ -281,12 +285,16 @@ export class XProvider extends SocialAbstract implements SocialProvider {
   ) {
     const client = this.buildClient(integration.token);
 
-    if (
-      (await client.v2.tweetLikedBy(id)).meta.result_count >=
-      +fields.likesAmount
-    ) {
+    const likedByRepost = await client.v2.tweetLikedBy(id);
+    recordApiUsage(
+      'x',
+      X_USAGE.LIKE_MUTE_BLOCK,
+      likedByRepost.meta?.result_count ?? 0
+    );
+    if (likedByRepost.meta.result_count >= +fields.likesAmount) {
       await timer(2000);
       await client.v2.retweet(integration.internalId, id);
+      recordApiUsage('x', X_USAGE.INTERACTION_OTHER, 1); // retweet write
       return true;
     }
 
@@ -318,6 +326,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
 
     try {
       await client.v2.retweet(userId, postId);
+      recordApiUsage('x', X_USAGE.INTERACTION_OTHER, 1); // retweet write
     } catch (err) {
       /** nothing **/
     }
@@ -355,16 +364,20 @@ export class XProvider extends SocialAbstract implements SocialProvider {
   ) {
     const client = this.buildClient(integration.token);
 
-    if (
-      (await client.v2.tweetLikedBy(id)).meta.result_count >=
-      +fields.likesAmount
-    ) {
+    const likedByPlug = await client.v2.tweetLikedBy(id);
+    recordApiUsage(
+      'x',
+      X_USAGE.LIKE_MUTE_BLOCK,
+      likedByPlug.meta?.result_count ?? 0
+    );
+    if (likedByPlug.meta.result_count >= +fields.likesAmount) {
       await timer(2000);
 
       await client.v2.tweet({
         text: stripHtmlValidation('normal', fields.post, true),
         reply: { in_reply_to_tweet_id: id },
       });
+      recordApiUsage('x', X_USAGE.REPLY_QUOTE, 1); // auto-plug reply write
       return true;
     }
 
@@ -474,6 +487,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
         'media.fields': ['url', 'preview_image_url', 'type'],
       });
 
+      if (tweet?.data?.id) recordApiUsage('x', X_USAGE.POSTS_READ, 1);
       const author = tweet.includes?.users?.[0];
       const media = tweet.includes?.media?.map((m: any) => ({
         type: m.type,
@@ -549,6 +563,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
       throw err;
     }
     const { data } = result;
+    recordApiUsage('x', X_USAGE.OWNED_READ, 1); // v2.me — own account read
     return {
       id: data.id,
       username: data.username,
@@ -579,6 +594,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
         end_time: until,
         max_results: 20,
       });
+      recordApiUsage('x', X_USAGE.POSTS_READ, tweets.data?.data?.length ?? 0);
       if (!tweets.data?.data?.length) return null;
 
       const normalize = (s: string) =>
@@ -963,6 +979,10 @@ export class XProvider extends SocialAbstract implements SocialProvider {
         : originalMessage;
 
     let tweetId: string;
+    // Cost tier: X bills "Post: Create with URL" higher than a plain create. By
+    // return time firstPost.message already reflects URL-append mode (mutated
+    // above); the native-quote path keeps the original text (no URL entity).
+    let postedHadUrl = /https?:\/\//i.test(firstPost.message);
     try {
       // @ts-ignore
       const { data }: { data: { id: string } } = await this.runInConcurrent(
@@ -1013,6 +1033,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
             text: messageWithQuoteUrl,
           });
           tweetId = data.id;
+          postedHadUrl = true; // URL-append fallback always carries the quote URL
         } catch (retryErr: any) {
           console.error(
             `[x] v2 URL-append retry also failed for post ${firstPost.id}. Error:`,
@@ -1034,6 +1055,13 @@ export class XProvider extends SocialAbstract implements SocialProvider {
         throw err;
       }
     }
+
+    // Write cost telemetry: one Create request (per-request billing).
+    recordApiUsage(
+      'x',
+      postedHadUrl ? X_USAGE.POST_CREATE_URL : X_USAGE.POST_CREATE,
+      1
+    );
 
     return [
       {
@@ -1099,6 +1127,9 @@ export class XProvider extends SocialAbstract implements SocialProvider {
       throw err;
     }
 
+    // Write cost telemetry: a reply is one Create (reply) request.
+    recordApiUsage('x', X_USAGE.REPLY_QUOTE, 1);
+
     return [
       {
         postId: tweetId,
@@ -1128,6 +1159,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
       max_results: 100,
       ...(token ? { pagination_token: token } : {}),
     });
+    recordApiUsage('x', X_USAGE.POSTS_READ, tweets.data?.data?.length ?? 0);
 
     return [
       ...tweets.data.data,
@@ -1182,6 +1214,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
           'tweet.fields': ['public_metrics'],
         }
       );
+      recordApiUsage('x', X_USAGE.POSTS_READ, data.data?.length ?? 0);
 
       const metrics = data.data.reduce(
         (all, current) => {
@@ -1272,6 +1305,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
       const tweet = await client.v2.singleTweet(postId, {
         'tweet.fields': ['public_metrics', 'created_at'],
       });
+      if (tweet?.data?.id) recordApiUsage('x', X_USAGE.POSTS_READ, 1);
 
       if (!tweet?.data?.public_metrics) {
         console.warn(
@@ -1374,6 +1408,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
       const tweet = await appClient.v2.singleTweet(postId, {
         'tweet.fields': ['public_metrics', 'created_at'],
       });
+      if (tweet?.data?.id) recordApiUsage('x', X_USAGE.POSTS_READ, 1);
       if (!tweet?.data?.public_metrics) {
         console.warn(
           `[x] postAnalyticsAppOnly ${postId} empty: API returned no public_metrics ` +
@@ -1418,6 +1453,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
       const { data } = await client.v2.me({
         'user.fields': ['public_metrics'],
       });
+      recordApiUsage('x', X_USAGE.OWNED_READ, 1); // v2.me — own account read
 
       const metrics = data.public_metrics;
       if (!metrics) {
@@ -1476,6 +1512,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
         const data = await client.v2.tweets(chunk, {
           'tweet.fields': ['public_metrics'],
         });
+        recordApiUsage('x', X_USAGE.POSTS_READ, data?.data?.length ?? 0);
 
         if (!data?.data?.length) continue;
         for (const tweet of data.data) {
@@ -1560,6 +1597,8 @@ export class XProvider extends SocialAbstract implements SocialProvider {
       const data = await client.v2.userByUsername(d.query, {
         'user.fields': ['username', 'name', 'profile_image_url'],
       });
+      if (data?.data?.id || data?.data?.username)
+        recordApiUsage('x', X_USAGE.USER_READ, 1);
 
       if (!data?.data?.username) {
         return [];
@@ -1603,6 +1642,8 @@ export class XProvider extends SocialAbstract implements SocialProvider {
       });
 
       const user = result?.data;
+      if (user?.id || user?.username)
+        recordApiUsage('x', X_USAGE.USER_READ, 1);
       if (!user?.username) {
         return { notFound: true as const };
       }

@@ -1,6 +1,10 @@
 import { getRedditToken, redditAuthHeaders } from '@gitroom/nestjs-libraries/engage/reddit-auth';
 import { redditPublicGet } from '@gitroom/nestjs-libraries/engage/reddit-loid';
 import { parseRedditCommentId } from '@gitroom/nestjs-libraries/engage/reddit-url';
+import {
+  recordApiUsage,
+  X_USAGE,
+} from '@gitroom/nestjs-libraries/database/prisma/api-usage/api-usage.service';
 
 /**
  * Shared engage metrics-sync logic, used by BOTH the request-time path
@@ -210,6 +214,7 @@ export async function syncXMetrics(
     const authorJson = (await authorRes.json()) as { data?: { id: string } };
     const originalAuthorId = authorJson.data?.id;
     if (!originalAuthorId) return outcome;
+    recordApiUsage('x', X_USAGE.USER_READ, 1); // 1 returned user record
 
     const res = await fetch(
       `https://api.twitter.com/2/tweets/search/recent?query=conversation_id:${originalTweetId}&tweet.fields=author_id&max_results=50`,
@@ -221,6 +226,7 @@ export async function syncXMetrics(
       return outcome;
     }
     const json = (await res.json()) as { data?: Array<{ id: string; author_id: string }> };
+    recordApiUsage('x', X_USAGE.POSTS_READ, (json.data ?? []).length); // returned records
     // Did the ORIGINAL AUTHOR specifically reply AFTER our reply?
     if (
       (json.data ?? []).some(
