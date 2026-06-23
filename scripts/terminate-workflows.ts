@@ -44,6 +44,11 @@ const INFRA_WORKFLOW_TYPES = [
   'engageGlobalKeywordScanWorkflow',
   'engageGlobalChannelScanWorkflow',
   'engageGlobalTrackedWorkflow',
+  // Retired event-driven metrics workflow (removed in 31ae17d8). Old deployments
+  // started one engage-metrics-<sentReplyId> instance per reply; their Workflow
+  // Task initialization now fails ("no such function") and retries forever. Kept
+  // here so any redeploy terminates the orphaned executions.
+  'engageMetricsSyncWorkflow',
 ];
 
 // On-demand workflows — started by application logic, NOT auto-restarted.
