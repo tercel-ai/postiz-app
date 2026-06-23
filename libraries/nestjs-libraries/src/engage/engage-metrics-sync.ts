@@ -240,3 +240,59 @@ export async function syncXMetrics(
   }
   return outcome;
 }
+
+/**
+ * Minimal reply shape needed to dispatch a per-reply metrics sync. Every caller
+ * (event-driven `refreshMetricsForPosts`, admin `resyncEngageMetrics`, daily
+ * `resyncRecentEngageMetrics`) selects at least these fields, so they can all
+ * share one dispatch path instead of copying the reddit/x branch + arg-build.
+ */
+export interface ReplyMetricsSyncTarget {
+  id: string;
+  organizationId: string;
+  post: { id: string; releaseURL: string | null } | null;
+  opportunity: {
+    platform: string;
+    externalPostId?: string | null;
+    authorUsername?: string | null;
+  };
+}
+
+/**
+ * Single source of truth for "given one engage reply, fetch its metrics on the
+ * right platform". Returns `skipped` when the reply has no release URL or an
+ * unrecognised platform. Callers keep their own try/catch, tally, heartbeat, and
+ * logging concerns — this owns only the platform branch + argument construction,
+ * which previously lived (verbatim) in three places.
+ */
+export async function dispatchReplyMetricsSync(
+  reply: ReplyMetricsSyncTarget,
+  deps: MetricsSyncDeps
+): Promise<MetricsSyncOutcome> {
+  const releaseURL = reply.post?.releaseURL;
+  if (!reply.post || !releaseURL) return 'skipped';
+
+  if (reply.opportunity.platform === 'reddit') {
+    return syncRedditMetrics(
+      reply.post.id,
+      releaseURL,
+      reply.id,
+      reply.opportunity.authorUsername ?? '',
+      deps
+    );
+  }
+  if (reply.opportunity.platform === 'x') {
+    return syncXMetrics(
+      {
+        orgId: reply.organizationId,
+        sentReplyId: reply.id,
+        postDbId: reply.post.id,
+        replyTweetUrl: releaseURL,
+        originalTweetId: reply.opportunity.externalPostId ?? '',
+        authorUsername: reply.opportunity.authorUsername ?? '',
+      },
+      deps
+    );
+  }
+  return 'skipped';
+}

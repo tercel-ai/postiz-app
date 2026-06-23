@@ -624,9 +624,11 @@ export class PostActivity {
   }
 
   // Called by the post workflow after a scheduled engage reply is published.
-  // Transitions the opportunity state from SCHEDULED → REPLIED and starts the
-  // 24h metrics sync workflow. Both steps are best-effort; failures are logged
-  // but must not roll back the post's PUBLISHED state.
+  // Transitions the opportunity state from SCHEDULED → REPLIED. Metrics are NOT
+  // synced here: under the event-driven model they refresh on demand the next
+  // time someone opens /engage/sent ("no views → no update"), so an on-publish
+  // fetch would do work nobody is looking at. Best-effort; a failure here must
+  // not roll back the post's PUBLISHED state.
   @ActivityMethod()
   async syncEngageOnPublish(postId: string): Promise<void> {
     const sentReply = await this._engageSentReply.model.engageSentReply.findUnique({
@@ -642,18 +644,5 @@ export class PostActivity {
       },
       data: { status: 'REPLIED' },
     });
-
-    const client = this._temporalService.client?.getRawClient();
-    if (!client) return;
-    try {
-      await client.workflow.start('engageMetricsSyncWorkflow', {
-        workflowId: `engage-metrics-${sentReply.id}`,
-        taskQueue: 'main',
-        args: [sentReply.id],
-        workflowIdConflictPolicy: 'USE_EXISTING',
-      });
-    } catch (err) {
-      console.error(`[syncEngageOnPublish] failed to start metrics sync for sentReply=${sentReply.id}:`, err);
-    }
   }
 }

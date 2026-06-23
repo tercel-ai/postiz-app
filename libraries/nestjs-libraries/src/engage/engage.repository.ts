@@ -1986,35 +1986,6 @@ export class EngageRepository {
     return { items: itemsWithMetrics, total, page, limit };
   }
 
-  /**
-   * Page-1 sent replies for the page-visit refresh trigger. Same `where`/order as
-   * `listSentReplies` (no filters → all), capped at one page, but returns ONLY the
-   * post timing the metrics gate needs (id, state, publishDate, lastMetricsFetchAt)
-   * — no analytics hydration. The caller decides due-ness and `nextRefreshAt`.
-   */
-  async getRecentSentForRefresh(organizationId: string, limit: number) {
-    const { sentWhere } = this._buildSentReplyFilter(
-      organizationId,
-      {} as ListSentDto
-    );
-    return this._sentReply.model.engageSentReply.findMany({
-      where: sentWhere,
-      select: {
-        id: true,
-        post: {
-          select: {
-            id: true,
-            state: true,
-            publishDate: true,
-            lastMetricsFetchAt: true,
-          },
-        },
-      },
-      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-      take: limit,
-    });
-  }
-
   async locateSentReply(organizationId: string, dto: LocateSentReplyDto) {
     const limit = dto.limit ?? 20;
 
@@ -2910,6 +2881,46 @@ export class EngageRepository {
         authorReplied: true,
         post: { select: { id: true, releaseURL: true, integrationId: true } },
         opportunity: { select: { platform: true, externalPostId: true, authorUsername: true } },
+      },
+    });
+  }
+
+  /**
+   * Event-driven metrics refresh: the replies for an explicit set of post ids
+   * (the posts the client is currently looking at on /engage/sent). Returns BOTH
+   * the metrics gate fields (publishDate, lastMetricsFetchAt) the caller needs to
+   * decide due-ness AND the sync fields (releaseURL, opportunity) syncX/syncReddit
+   * need — so a single fetch drives the whole "refresh what the user can see"
+   * path. Scoped to this org's PUBLISHED engage replies with a release URL.
+   */
+  async findEngageRepliesByPostIds(organizationId: string, postIds: string[]) {
+    if (postIds.length === 0) return [];
+    return this._sentReply.model.engageSentReply.findMany({
+      where: {
+        organizationId,
+        postId: { in: postIds },
+        post: {
+          source: 'engage',
+          state: 'PUBLISHED',
+          releaseURL: { not: null },
+        },
+      },
+      select: {
+        id: true,
+        organizationId: true,
+        authorReplied: true,
+        post: {
+          select: {
+            id: true,
+            releaseURL: true,
+            integrationId: true,
+            publishDate: true,
+            lastMetricsFetchAt: true,
+          },
+        },
+        opportunity: {
+          select: { platform: true, externalPostId: true, authorUsername: true },
+        },
       },
     });
   }

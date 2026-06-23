@@ -24,6 +24,16 @@ dayjs.extend(utc);
 export const ENGAGE_ENTITLEMENTS_KEY = 'engage_entitlements';
 export const ENGAGE_REPLY_CREDITS_KEY = 'engage_reply_credits';
 
+// Global toggle for the background "keep metrics fresh even if nobody is
+// looking" path. When true, the daily engageDataTicksWorkflow re-polls metrics
+// for every reply in the lookback window. When false (default), metrics refresh
+// ONLY on page-visit events (refreshOnVisit) — "no views → no update". Read
+// per-run via an activity so an admin flip takes effect on the next daily cycle
+// without a worker restart.
+export const ENGAGE_PERIODIC_METRICS_ENABLED_KEY =
+  'engage_periodic_metrics_enabled';
+export const ENGAGE_PERIODIC_METRICS_ENABLED_DEFAULT = false;
+
 // Key under Organization.data holding the org's user-set metrics-monitoring
 // window (days). Cross-module: governs both own-post analytics and engage
 // (opportunities/sent) monitoring, so it lives org-level, not in EngageConfig.

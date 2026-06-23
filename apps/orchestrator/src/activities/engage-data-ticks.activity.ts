@@ -7,12 +7,16 @@ import {
 } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
 import { EngageRepository } from '@gitroom/nestjs-libraries/engage/engage.repository';
 import {
-  syncRedditMetrics,
-  syncXMetrics,
+  dispatchReplyMetricsSync,
   type MetricsSyncDeps,
   type MetricsSyncOutcome,
 } from '@gitroom/nestjs-libraries/engage/engage-metrics-sync';
 import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.service';
+import { SettingsService } from '@gitroom/nestjs-libraries/database/prisma/settings/settings.service';
+import {
+  ENGAGE_PERIODIC_METRICS_ENABLED_DEFAULT,
+  ENGAGE_PERIODIC_METRICS_ENABLED_KEY,
+} from '@gitroom/nestjs-libraries/engage/engage-entitlement.service';
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc';
 
@@ -28,8 +32,37 @@ export class EngageDataTicksActivity {
     private _post: PrismaRepository<'post'>,
     private _engageDataTicks: PrismaRepository<'engageDataTicks'>,
     private _tx: PrismaTransaction,
-    private _postsService: PostsService
+    private _postsService: PostsService,
+    private _settings: SettingsService
   ) {}
+
+  /**
+   * Global toggle gate for the daily background metrics path. Read fresh on
+   * every workflow cycle so an admin flip in /admin/settings takes effect on the
+   * next run without a worker restart. Defaults to disabled — the product runs
+   * event-driven ("no views → no update") unless an admin opts into periodic
+   * refresh.
+   */
+  @ActivityMethod()
+  async isPeriodicMetricsEnabled(): Promise<boolean> {
+    // Fail closed: ANY read error (settings outage, malformed value) defaults to
+    // disabled. A settings problem must never silently re-enable the background
+    // X/Reddit fetch the product deliberately turned off. Keeping the try/catch
+    // HERE (not only in the workflow) makes the safety property unit-testable.
+    try {
+      const enabled = await this._settings.get<boolean>(
+        ENGAGE_PERIODIC_METRICS_ENABLED_KEY
+      );
+      return enabled ?? ENGAGE_PERIODIC_METRICS_ENABLED_DEFAULT;
+    } catch (err) {
+      this.logger.warn(
+        `isPeriodicMetricsEnabled: settings read failed, defaulting to disabled: ${
+          (err as Error).message
+        }`
+      );
+      return ENGAGE_PERIODIC_METRICS_ENABLED_DEFAULT;
+    }
+  }
 
   private _heartbeat(progress?: unknown): void {
     try {
@@ -161,28 +194,7 @@ export class EngageDataTicksActivity {
       if (!reply.post?.releaseURL) continue;
       this._heartbeat({ stage: 'resync', reply: reply.id });
       try {
-        let outcome: MetricsSyncOutcome = 'skipped';
-        if (reply.opportunity.platform === 'reddit') {
-          outcome = await syncRedditMetrics(
-            reply.post.id,
-            reply.post.releaseURL,
-            reply.id,
-            reply.opportunity.authorUsername ?? '',
-            deps
-          );
-        } else if (reply.opportunity.platform === 'x') {
-          outcome = await syncXMetrics(
-            {
-              orgId: reply.organizationId,
-              sentReplyId: reply.id,
-              postDbId: reply.post.id,
-              replyTweetUrl: reply.post.releaseURL,
-              originalTweetId: reply.opportunity.externalPostId ?? '',
-              authorUsername: reply.opportunity.authorUsername ?? '',
-            },
-            deps
-          );
-        }
+        const outcome = await dispatchReplyMetricsSync(reply, deps);
         tally[outcome]++;
       } catch (err) {
         tally.failed++;

@@ -15,13 +15,12 @@ const PING_MAX_ATTEMPTS = 16; // ~4s of retries before concluding "not found"
 /**
  * Probes whether the aisee browser extension is installed and active on this
  * origin. Returns:
- *   null  — probe in-flight (haven't concluded yet)
- *   true  — extension replied; it's present
- *   false — no reply within the retry window (but we keep listening, so this can
- *           still flip to true if a pong arrives later)
+ *   detected  — null (probe in-flight) | true (present) | false (not found)
+ *   version   — installed extension version string, or null if not yet known
  */
-export function useExtensionDetected(): boolean | null {
+export function useExtensionDetected(): { detected: boolean | null; version: string | null } {
   const [detected, setDetected] = useState<boolean | null>(null);
+  const [version, setVersion] = useState<string | null>(null);
   const detectedRef = useRef(false);
 
   useEffect(() => {
@@ -42,9 +41,10 @@ export function useExtensionDetected(): boolean | null {
 
     function onMessage(e: MessageEvent) {
       if (e.source !== window || e.origin !== window.location.origin) return;
-      const data = e.data as { source?: string; action?: string } | undefined;
+      const data = e.data as { source?: string; action?: string; version?: string } | undefined;
       if (data?.source !== EXTENSION_MESSAGE.resultSource) return;
       if (data?.action !== EXTENSION_MESSAGE.pong) return;
+      if (data.version) setVersion(data.version);
       if (detectedRef.current) return;
       detectedRef.current = true;
       if (retryTimer) clearTimeout(retryTimer);
@@ -86,5 +86,5 @@ export function useExtensionDetected(): boolean | null {
     };
   }, []);
 
-  return detected;
+  return { detected, version };
 }

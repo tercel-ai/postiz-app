@@ -21,6 +21,7 @@ import { makeId } from '@gitroom/nestjs-libraries/services/make.is';
 import { getCookieUrlFromDomain } from '@gitroom/helpers/subdomain/subdomain.management';
 import { AgentGraphInsertService } from '@gitroom/nestjs-libraries/agent/agent.graph.insert.service';
 import { Nowpayments } from '@gitroom/nestjs-libraries/crypto/nowpayments';
+import { SettingsService } from '@gitroom/nestjs-libraries/database/prisma/settings/settings.service';
 import { Readable, pipeline } from 'stream';
 import { promisify } from 'util';
 
@@ -34,8 +35,19 @@ export class PublicController {
     private _trackService: TrackService,
     private _agentGraphInsertService: AgentGraphInsertService,
     private _postsService: PostsService,
-    private _nowpayments: Nowpayments
+    private _nowpayments: Nowpayments,
+    private _settingsService: SettingsService
   ) {}
+
+  @Get('/extension/latest')
+  async getExtensionLatest() {
+    const [chrome, firefox] = await Promise.all([
+      this._settingsService.get<Record<string, string>>('extension.chrome'),
+      this._settingsService.get<Record<string, string>>('extension.firefox'),
+    ]);
+    return { chrome: chrome ?? null, firefox: firefox ?? null };
+  }
+
   @Post('/agent')
   async createAgent(@Body() body: { text: string; apiKey: string }) {
     if (

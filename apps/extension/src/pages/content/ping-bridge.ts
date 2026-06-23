@@ -14,7 +14,11 @@ export function installPingBridge(): void {
     if (!data || data.source !== EXTENSION_MESSAGE.source) return;
     if (data.action !== EXTENSION_MESSAGE.ping) return;
     window.postMessage(
-      { source: EXTENSION_MESSAGE.resultSource, action: EXTENSION_MESSAGE.pong },
+      {
+        source: EXTENSION_MESSAGE.resultSource,
+        action: EXTENSION_MESSAGE.pong,
+        version: chrome.runtime.getManifest().version,
+      },
       e.origin
     );
   });

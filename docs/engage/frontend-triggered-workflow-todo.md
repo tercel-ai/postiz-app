@@ -7,9 +7,19 @@
 > it never relied on the extension's X session anyway — but it also cannot bypass the
 > X free-tier limit. Scope this work to **Reddit + OAuth-reachable metrics** for now.
 
-**Status:** Implemented — backend `POST /engage/refresh-on-visit` + both frontends (apps/frontend per-page hook, aisee-agent site-wide handler). Only cold-start pacing expedite remains. See "Implementation" below.
-**Scope:** opportunity scanning *and* own-post metrics fetching.
-**Depends on:** the demand-driven "due gate" (already built for metrics; planned for scan).
+> **⚠️ UPDATE (2026-06-23): scan and metrics are now SPLIT into two endpoints.**
+> `POST /engage/refresh-on-visit` is **scan-only**. Metrics moved to a dedicated
+> event-driven endpoint `POST /engage/sent/metrics/refresh` to which the client
+> sends the **exact post ids it is showing** (any sort/filter/page) — the server
+> no longer guesses "page 1". The daily background resync is now **opt-in** behind
+> the `engage_periodic_metrics_enabled` setting (default OFF — "no views → no
+> update"). The removed symbols below (`getRecentSentForRefresh`,
+> `engageMetricsSyncWorkflow`) no longer exist. See the rewritten "Implementation"
+> section. Canonical: [[engage-event-driven-metrics]].
+
+**Status:** Implemented — backend `POST /engage/refresh-on-visit` (scan) + `POST /engage/sent/metrics/refresh` (metrics) + both frontends (apps/frontend per-page hook + sent-list metrics hook, aisee-agent site-wide handler).
+**Scope:** opportunity scanning *and* own-post metrics fetching (now via separate endpoints).
+**Depends on:** the demand-driven "due gate" (`lastMetricsFetchAt` for metrics; `EngageScanCursor` cadence for scan).
 
 ## Idea
 
@@ -91,30 +101,41 @@ ticker signal and the per-reply metrics-sync workflow — see below.
 
 ## Implementation (backend, landed)
 
-Single endpoint `POST /engage/refresh-on-visit` — `EngageController.refreshOnVisit`
-→ `EngageService.refreshOnVisit(org)`. It is **trigger-only**; both fetches reuse
-existing primitives rather than a new server fetch path:
+**Two endpoints** (scan and metrics split, see the 2026-06-23 update banner above).
 
-- **Scan** — reads the per-unit due gate via `EngageRepository.getOrgScanStatus`
-  (already derives `nextScanAt` = min next-due across keyword / channel / tracked
-  cursors, bucketed by plan cadence). If anything is due it signals the existing
-  `engage-scan-ticker` (`triggerImmediateScan`), debounced per org in-memory by
-  the floor window so rapid multi-tab visits don't spam the ticker.
-- **Metrics** — `EngageRepository.getRecentSentForRefresh` pulls page-1 `/sent`
-  (same order, `take = 20`) with just post timing. Posts in the monitoring window
-  past `metricsFetchIntervalHours` are due → it **optimistically stamps**
-  `lastMetricsFetchAt` (`PostsService.markMetricsFetched`) so a repeat visit
-  no-ops while the async sync runs, then starts the per-reply
-  `engageMetricsSyncWorkflow` for each (the sync workflow does NOT stamp the gate
-  itself, hence the optimistic stamp here).
+### Scan — `POST /engage/refresh-on-visit` → `EngageService.refreshOnVisit(org)`
+Trigger-only; reuses existing primitives rather than a new server fetch path:
+
+- Reads the per-unit due gate via `EngageRepository.getOrgScanStatus` (derives
+  `nextScanAt` = min next-due across keyword / channel / tracked cursors, bucketed
+  by plan cadence). If anything is due it signals the existing `engage-scan-ticker`
+  (`triggerImmediateScan`), debounced per org in-memory by the floor window so
+  rapid multi-tab visits don't spam the ticker.
 - **`coldStart`** = `getOrgScanStatus().lastScanAt == null` (no cursors → empty feed).
-- **`nextRefreshAt`** = `max( min(scanNextDue, metricsNextDue), now + floor )`.
-  Floor = `ENGAGE_REFRESH_FLOOR_SECONDS` (default 60s), which also gates the
-  in-memory scan-signal debounce. Due rows count as `now + interval` (they're
-  stamped this call), so the value is the true post-trigger next-due.
-- **`status`** = `accepted` when scan or metrics was due, else `throttled`.
+- **`nextRefreshAt`** = `max( scanNextDue, now + floor )`. Floor =
+  `ENGAGE_REFRESH_FLOOR_SECONDS` (default 60s).
+- **`status`** = `accepted` when scan was due, else `throttled`.
 
-Tests: `engage-refresh-on-visit.spec.ts` (cold-start / frequent-no-op / due-metrics).
+### Metrics — `POST /engage/sent/metrics/refresh` → `EngageService.refreshMetricsForPosts(org, postIds)`
+Event-driven: the client sends the exact post ids it is showing (`RefreshMetricsDto`,
+1–100). The server fetches those replies via `EngageRepository.findEngageRepliesByPostIds`
+(org-scoped, PUBLISHED, releaseURL non-null), gates each by the monitoring window +
+`metricsFetchIntervalHours` (`Post.lastMetricsFetchAt`), **optimistically stamps**
+`markMetricsFetched` **before** a fire-and-forget in-process fetch
+(`_runMetricsSyncForReplies` → `dispatchReplyMetricsSync` → `syncRedditMetrics`/`syncXMetrics`).
+Returns `{ accepted, throttled, nextRefreshAt }`; the client polls `GET /sent/:id/status`
+for the accepted ids (or re-reads the list). This is the ONLY metrics path when
+periodic refresh is disabled (the default).
+
+### Optional periodic background refresh
+The daily `engageDataTicksWorkflow` is gated on the `engage_periodic_metrics_enabled`
+setting (admin-configurable, default OFF), read each cycle via the fail-closed
+`EngageDataTicksActivity.isPeriodicMetricsEnabled()` activity. When disabled the whole
+resync+aggregate body is skipped (the workflow just `continueAsNew`s).
+
+Tests: `engage-refresh-on-visit.spec.ts` (scan-only refreshOnVisit + refreshMetricsForPosts
+gating), `dispatch-reply-metrics-sync.spec.ts` (platform routing), and
+`engage-periodic-metrics-toggle.spec.ts` (fail-closed toggle).
 Cold-start pacing expedite (skip jitter on the first run) is NOT yet wired — the
 trigger makes the first scan run *now*, but it runs at normal pacing.
 

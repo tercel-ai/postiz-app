@@ -7,6 +7,7 @@ import { useToaster } from '@gitroom/react/toaster/toaster';
 import { SentCardX } from './sent-card-x';
 import { SentCardReddit } from './sent-card-reddit';
 import type { GenerationHistoryEntry } from './generation-history';
+import { useEngageMetricsRefresh } from './use-engage-metrics-refresh';
 
 interface SentReply {
   id: string;
@@ -134,6 +135,14 @@ export function SentList() {
 
   const replies = data?.items ?? [];
   const total = data?.total ?? 0;
+
+  // Event-driven metrics: refresh the metrics of the PUBLISHED posts currently on
+  // screen (this page / filter / sort). The server gates by the per-plan interval,
+  // so this is cheap on repeat views and only fetches what's actually due.
+  const visiblePublishedPostIds = replies
+    .filter((r) => r.post.state === 'PUBLISHED')
+    .map((r) => r.post.id);
+  useEngageMetricsRefresh(visiblePublishedPostIds, mutate);
 
   const closeModal = useCallback(() => {
     setUrlSubmitId(null);

@@ -48,6 +48,7 @@ import {
   ListSentDto,
   LocateOpportunityDto,
   LocateSentReplyDto,
+  RefreshMetricsDto,
   SaveDraftDto,
   SaveEngageConfigDto,
   SetupEngageDto,
@@ -376,11 +377,23 @@ export class EngageController {
 
   @ApiOperation({
     summary:
-      'Page-visit trigger: fire-and-forget kick of this org\'s DUE scan (keywords/tracked/channels) + page-1 /sent metrics. Returns { status, coldStart, nextRefreshAt }; the client caches nextRefreshAt and skips calling again until then. Execution timing stays with the existing due gate.',
+      'Page-visit trigger: fire-and-forget kick of this org\'s DUE scan (keywords/tracked/channels). Returns { status, coldStart, nextRefreshAt }; the client caches nextRefreshAt and skips calling again until then. Metrics are NOT handled here — refresh them via POST /sent/metrics/refresh with the post ids on screen.',
   })
   @Post('/refresh-on-visit')
   refreshOnVisit(@GetOrgFromRequest() org: Organization) {
     return this._engageService.refreshOnVisit(org);
+  }
+
+  @ApiOperation({
+    summary:
+      'Event-driven metrics refresh: the client posts the exact post ids it is showing on /engage/sent (any sort/filter/page). The server refreshes only those PUBLISHED, in-window, and past their per-plan metrics interval — then fire-and-forgets the X/Reddit fetch. Returns { accepted, throttled, nextRefreshAt }; poll GET /sent/:id/status for the accepted ids.',
+  })
+  @Post('/sent/metrics/refresh')
+  refreshSentMetrics(
+    @GetOrgFromRequest() org: Organization,
+    @Body() body: RefreshMetricsDto
+  ) {
+    return this._engageService.refreshMetricsForPosts(org, body.postIds);
   }
 
   // ─── Opportunities ────────────────────────────────────────────────────────

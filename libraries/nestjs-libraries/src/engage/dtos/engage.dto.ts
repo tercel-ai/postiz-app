@@ -609,6 +609,18 @@ export class ListSentDto {
   limit?: number;
 }
 
+// Event-driven metrics refresh: the client posts the exact post ids it is
+// currently showing on /engage/sent (any sort/filter/page). The server gates
+// each by the per-plan metrics interval and refreshes only the due ones. Capped
+// at 100 ids — one page is far smaller, and the service hard-caps regardless.
+export class RefreshMetricsDto {
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(100)
+  @IsString({ each: true })
+  postIds: string[];
+}
+
 // ─── Dashboard ──────────────────────────────────────────────────────────────
 
 // Panel ① "Engage Performance" — headline summary stats, optionally scoped to one platform.

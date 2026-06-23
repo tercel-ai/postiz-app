@@ -52,10 +52,8 @@ import { parseRedditCommentId } from '@gitroom/nestjs-libraries/engage/reddit-ur
 import { getRedditToken, redditAuthHeaders } from '@gitroom/nestjs-libraries/engage/reddit-auth';
 import { redditPublicGet } from '@gitroom/nestjs-libraries/engage/reddit-loid';
 import {
-  syncRedditMetrics,
-  syncXMetrics,
+  dispatchReplyMetricsSync,
   type MetricsSyncDeps,
-  type MetricsSyncOutcome,
 } from '@gitroom/nestjs-libraries/engage/engage-metrics-sync';
 
 // Validate by DOMAIN only, not by full path shape — Reddit/X change their
@@ -83,8 +81,10 @@ function engageScanTickMinutes(): number {
     : DEFAULT_SCAN_TICK_MINUTES;
 }
 
-// Page-visit trigger (`refreshOnVisit`). Mirrors /sent page 1.
-const REFRESH_SENT_PAGE_SIZE = 20;
+// Event-driven metrics refresh (`refreshMetricsForPosts`): hard cap on how many
+// client-supplied post ids one request may refresh, bounding external API work
+// (X tier-rate risk) even if a caller sends an oversized page.
+const REFRESH_METRICS_MAX_POSTS = 100;
 // Floor for the returned `nextRefreshAt` AND the in-memory scan-signal debounce:
 // the client caches nextRefreshAt and won't re-call before it, so this is the
 // minimum spacing between effective triggers regardless of how fast a user
@@ -1354,45 +1354,19 @@ export class EngageService implements OnApplicationBootstrap {
     return true;
   }
 
-  /** Start the existing per-reply metrics-sync workflow for each due reply. */
-  private _kickMetricsSync(sentReplyIds: string[]): void {
-    const client = this._temporalService.client?.getRawClient();
-    if (!client) return;
-    for (const id of sentReplyIds) {
-      client.workflow
-        .start('engageMetricsSyncWorkflow', {
-          workflowId: `engage-metrics-${id}`,
-          taskQueue: 'main',
-          args: [id],
-          workflowIdConflictPolicy: 'USE_EXISTING',
-        })
-        .catch((err) =>
-          this.logger.warn(
-            `refreshOnVisit: metrics sync start failed (sentReply=${id}): ${
-              (err as Error)?.message ?? err
-            }`
-          )
-        );
-    }
-  }
-
   /**
-   * Page-visit trigger. The frontend fires this fire-and-forget on every Engage
-   * page visit; this method only *requests* work — the existing due gates decide
-   * whether anything actually runs:
+   * Page-visit trigger for the SCAN side only (keywords / tracked / channels).
+   * The frontend fires this fire-and-forget on every Engage visit; it only
+   * *requests* a scan — the per-unit cadence gate (`EngageScanCursor`) decides
+   * whether the scan ticker actually claims any unit. Metrics are NOT handled
+   * here: they refresh purely on demand via `refreshMetricsForPosts`, driven by
+   * the exact post ids the client has on screen ("no views → no update").
    *
-   *  - Scan (keywords / tracked / channels): signals the scan ticker, which
-   *    claims only units past their per-plan cadence (`EngageScanCursor`).
-   *  - Metrics (page-1 `/engage/sent` posts): starts the per-reply metrics-sync
-   *    workflow for posts past `metricsFetchIntervalHours`, optimistically
-   *    stamping `lastMetricsFetchAt` so a repeat visit doesn't re-fire while the
-   *    async sync runs (the sync workflow does not stamp the gate itself).
-   *
-   * Returns `nextRefreshAt` — the soonest a future visit could do real work —
-   * which the client caches so it can skip the call entirely until then. Because
-   * due-ness is gate-derived, a once-a-week visitor runs immediately on entry, a
-   * brand-new org (cold start, no cursors) runs its first scan, and a several-
-   * times-a-day visitor mostly no-ops — all from the SAME interval gate.
+   * Returns `nextRefreshAt` — the soonest a future visit could run a scan —
+   * which the client caches so it can skip the call until then. Due-ness is
+   * gate-derived: a once-a-week visitor scans immediately on entry, a brand-new
+   * org (cold start, no cursors) runs its first scan, and a frequent visitor
+   * mostly no-ops — all from the SAME interval gate.
    */
   async refreshOnVisit(org: Organization): Promise<{
     status: 'accepted' | 'throttled';
@@ -1400,13 +1374,9 @@ export class EngageService implements OnApplicationBootstrap {
     nextRefreshAt: string;
   }> {
     const now = Date.now();
-
-    const [scanIntervalHours, metricsWindowDays, metricsIntervalHours] =
-      await Promise.all([
-        this._entitlementService.getScanIntervalHours(org.id),
-        this._entitlementService.getMetricsWindowDays(org.id),
-        this._entitlementService.getMetricsFetchIntervalHours(org.id),
-      ]);
+    const scanIntervalHours = await this._entitlementService.getScanIntervalHours(
+      org.id
+    );
 
     // ── Scan side: per-unit cadence gate (EngageScanCursor) ──────────────────
     const scanStatus = await this._engageRepository.getOrgScanStatus(
@@ -1420,36 +1390,6 @@ export class EngageService implements OnApplicationBootstrap {
       : now;
     const scanDue = scanNextMs <= now;
 
-    // ── Metrics side: page-1 /engage/sent, lastMetricsFetchAt gate ───────────
-    const windowStartMs = now - metricsWindowDays * 86_400_000;
-    const intervalMs = metricsIntervalHours * 3_600_000;
-    const sent = await this._engageRepository.getRecentSentForRefresh(
-      org.id,
-      REFRESH_SENT_PAGE_SIZE
-    );
-    const dueSentReplyIds: string[] = [];
-    const duePostIds: string[] = [];
-    let metricsNextMs: number | null = null;
-    for (const row of sent) {
-      const post = row.post;
-      if (!post || post.state !== 'PUBLISHED') continue;
-      if (!post.publishDate || post.publishDate.getTime() < windowStartMs)
-        continue;
-      const lastMs = post.lastMetricsFetchAt
-        ? post.lastMetricsFetchAt.getTime()
-        : null;
-      const isDue = lastMs == null || lastMs < now - intervalMs;
-      // Due rows are about to be stamped now → their next-due is now + interval.
-      const nextMs = isDue ? now + intervalMs : (lastMs as number) + intervalMs;
-      metricsNextMs =
-        metricsNextMs == null ? nextMs : Math.min(metricsNextMs, nextMs);
-      if (isDue) {
-        dueSentReplyIds.push(row.id);
-        duePostIds.push(post.id);
-      }
-    }
-    const metricsDue = dueSentReplyIds.length > 0;
-
     // ── Kick (fire-and-forget) — never block the page ────────────────────────
     if (scanDue && this._shouldSignalScan(org.id, now)) {
       this.triggerImmediateScan(org).catch((err) =>
@@ -1460,29 +1400,134 @@ export class EngageService implements OnApplicationBootstrap {
         )
       );
     }
-    if (metricsDue) {
-      // Stamp BEFORE the async sync so repeat visits within the interval no-op.
-      this._postsService
-        .markMetricsFetched(org.id, duePostIds)
-        .catch(() => undefined);
-      this._kickMetricsSync(dueSentReplyIds);
-    }
 
-    // ── nextRefreshAt: soonest a future visit could do real work, floored ────
-    const rawNextMs = Math.min(
-      scanNextMs,
-      metricsNextMs == null ? Number.POSITIVE_INFINITY : metricsNextMs
-    );
-    const nextRefreshMs = Math.max(
-      Number.isFinite(rawNextMs) ? rawNextMs : now,
-      now + engageRefreshFloorMs()
-    );
-
+    const nextRefreshMs = Math.max(scanNextMs, now + engageRefreshFloorMs());
     return {
-      status: scanDue || metricsDue ? 'accepted' : 'throttled',
+      status: scanDue ? 'accepted' : 'throttled',
       coldStart,
       nextRefreshAt: new Date(nextRefreshMs).toISOString(),
     };
+  }
+
+  /**
+   * Event-driven metrics refresh for the posts the client is currently viewing
+   * on /engage/sent. The client sends the post ids on screen (any sort / filter
+   * / page — the server never guesses the set), and the server refreshes only
+   * those that are PUBLISHED, inside the monitoring window, and past their
+   * per-plan metrics interval (`lastMetricsFetchAt` gate). The gate is stamped
+   * optimistically BEFORE the async fetch so repeat requests within the interval
+   * no-op. The real X/Reddit fetch runs fire-and-forget — this returns
+   * immediately with the sentReplyIds whose fetch was kicked (`accepted`, poll
+   * `/sent/:id/status`) vs skipped (`throttled`). This is the ONLY metrics path
+   * when periodic refresh is disabled (the default).
+   */
+  async refreshMetricsForPosts(
+    org: Organization,
+    postIds: string[]
+  ): Promise<{
+    accepted: string[];
+    throttled: string[];
+    nextRefreshAt: string;
+  }> {
+    const now = Date.now();
+    const capped = postIds.slice(0, REFRESH_METRICS_MAX_POSTS);
+    if (capped.length === 0) {
+      return {
+        accepted: [],
+        throttled: [],
+        nextRefreshAt: new Date(now + engageRefreshFloorMs()).toISOString(),
+      };
+    }
+
+    const [metricsWindowDays, metricsIntervalHours] = await Promise.all([
+      this._entitlementService.getMetricsWindowDays(org.id),
+      this._entitlementService.getMetricsFetchIntervalHours(org.id),
+    ]);
+    const windowStartMs = now - metricsWindowDays * 86_400_000;
+    const intervalMs = metricsIntervalHours * 3_600_000;
+
+    const rows = await this._engageRepository.findEngageRepliesByPostIds(
+      org.id,
+      capped
+    );
+
+    const dueRows: typeof rows = [];
+    const duePostIds: string[] = [];
+    const throttled: string[] = [];
+    let metricsNextMs: number | null = null;
+    for (const row of rows) {
+      const post = row.post;
+      // Out of the monitoring window → never refreshed on demand.
+      if (!post?.publishDate || post.publishDate.getTime() < windowStartMs) {
+        throttled.push(row.id);
+        continue;
+      }
+      const lastMs = post.lastMetricsFetchAt
+        ? post.lastMetricsFetchAt.getTime()
+        : null;
+      const isDue = lastMs == null || lastMs < now - intervalMs;
+      // Due rows are about to be stamped now → their next-due is now + interval.
+      const nextMs = isDue ? now + intervalMs : (lastMs as number) + intervalMs;
+      metricsNextMs =
+        metricsNextMs == null ? nextMs : Math.min(metricsNextMs, nextMs);
+      if (isDue) {
+        dueRows.push(row);
+        duePostIds.push(post.id);
+      } else {
+        throttled.push(row.id);
+      }
+    }
+
+    if (duePostIds.length > 0) {
+      // Stamp BEFORE the async fetch so a repeat request within the interval
+      // no-ops while the fire-and-forget sync is still running.
+      await this._postsService
+        .markMetricsFetched(org.id, duePostIds)
+        .catch(() => undefined);
+      this._runMetricsSyncForReplies(dueRows).catch((err) =>
+        this.logger.warn(
+          `refreshMetricsForPosts: sync failed (org=${org.id}): ${
+            (err as Error)?.message ?? err
+          }`
+        )
+      );
+    }
+
+    const nextRefreshMs = Math.max(
+      metricsNextMs == null ? now : metricsNextMs,
+      now + engageRefreshFloorMs()
+    );
+    return {
+      accepted: dueRows.map((r) => r.id),
+      throttled,
+      nextRefreshAt: new Date(nextRefreshMs).toISOString(),
+    };
+  }
+
+  /**
+   * Real, in-process X/Reddit metrics fetch for a set of replies — the event-
+   * driven executor (replaces the never-registered `engageMetricsSyncWorkflow`).
+   * Runs serially to bound external API concurrency (X tier-rate risk). Each
+   * reply's failure is isolated; the gate was already stamped by the caller, so
+   * a failure just leaves that value stale until the next visit past the interval.
+   */
+  private async _runMetricsSyncForReplies(
+    rows: Awaited<
+      ReturnType<EngageRepository['findEngageRepliesByPostIds']>
+    >
+  ): Promise<void> {
+    const deps = this._metricsSyncDeps();
+    for (const row of rows) {
+      try {
+        await dispatchReplyMetricsSync(row, deps);
+      } catch (err) {
+        this.logger.warn(
+          `_runMetricsSyncForReplies: failed for sentReplyId=${row.id}: ${
+            (err as Error).message
+          }`
+        );
+      }
+    }
   }
 
   async resyncEngageMetrics(opts: {
@@ -1517,20 +1562,7 @@ export class EngageService implements OnApplicationBootstrap {
     for (const reply of pending) {
       if (dryRun) continue;
       try {
-        const p = reply.opportunity.platform;
-        let outcome: MetricsSyncOutcome = 'skipped';
-        if (p === 'reddit' && reply.post?.releaseURL) {
-          outcome = await syncRedditMetrics(reply.post.id, reply.post.releaseURL, reply.id, reply.opportunity.authorUsername ?? '', this._metricsSyncDeps());
-        } else if (p === 'x' && reply.post?.releaseURL) {
-          outcome = await syncXMetrics({
-            orgId: reply.organizationId,
-            sentReplyId: reply.id,
-            postDbId: reply.post.id,
-            replyTweetUrl: reply.post.releaseURL,
-            originalTweetId: reply.opportunity.externalPostId ?? '',
-            authorUsername: reply.opportunity.authorUsername ?? '',
-          }, this._metricsSyncDeps());
-        }
+        const outcome = await dispatchReplyMetricsSync(reply, this._metricsSyncDeps());
         tally[outcome]++;
       } catch (err) {
         this.logger.warn(`resyncEngageMetrics: failed for sentReplyId=${reply.id}: ${(err as Error).message}`);
