@@ -32,14 +32,26 @@ export const API_PRICE_USD: Record<string, Record<string, number>> = {
     [X_USAGE.OWNED_READ]: 0.001, // Owned Reads / record
     [X_USAGE.POST_CREATE]: 0.015, // Post: Create / request
     [X_USAGE.POST_CREATE_URL]: 0.2, // Post: Create with URL / request
-    [X_USAGE.REPLY_QUOTE]: 0.01, // Summoned reply / quote / request
-    [X_USAGE.INTERACTION_OTHER]: 0.01, // Other interactions (DM, list mgmt) / request
+    [X_USAGE.REPLY_QUOTE]: 0.01, // Post Create (summoned reply/quote) / request
+    [X_USAGE.INTERACTION_OTHER]: 0.015, // User Interaction Create (retweet, etc.) / request
   },
   // reddit: { ... }  // fill in when Reddit cost tracking is added
 };
 
 export function priceFor(platform: string, category: string): number {
   return API_PRICE_USD[platform]?.[category] ?? 0;
+}
+
+/**
+ * True when `userId` is the X account that owns this developer app
+ * (env X_APP_OWNER_USER_ID). Reads of the owner's OWN data are billed by X at
+ * the discounted "Owned Reads" rate, so call sites that read a connected
+ * account's own data use this to pick owned_read vs the standard read category.
+ * Always false when the env is unset (no owner configured → nothing is owned).
+ */
+export function isXAppOwner(userId?: string | number | null): boolean {
+  const owner = process.env.X_APP_OWNER_USER_ID;
+  return !!owner && userId != null && String(userId) === owner;
 }
 
 // UTC midnight bucket for `date`. Stable per calendar day so upserts collapse to
@@ -127,30 +139,39 @@ export class ApiUsageService {
   }
 
   /**
-   * Per-day cost trend over [from, to) (UTC). Groups by (date, platform,
-   * category), prices each bucket, then rolls categories up into one total per
-   * day so the admin UI can draw a cost line. Internal/admin use.
+   * Per-day, per-category cost trend over [from, to) (UTC). Returns one row per
+   * (date, platform, category) so the admin UI can either sum across categories
+   * (the "All" line) or filter to one category (the X-style dropdown). Sorted by
+   * date asc. Internal/admin use.
    */
   async reportDaily(
     from: Date,
     to: Date
-  ): Promise<{ date: string; quantity: number; costUsd: number }[]> {
+  ): Promise<
+    {
+      date: string;
+      platform: string;
+      category: string;
+      quantity: number;
+      costUsd: number;
+    }[]
+  > {
     const rows = await this._prisma.apiUsageTick.groupBy({
       by: ['date', 'platform', 'category'],
       where: { date: { gte: dayBucket(from), lt: dayBucket(to) } },
       _sum: { quantity: true },
     });
-    const byDate = new Map<string, { quantity: number; costUsd: number }>();
-    for (const r of rows) {
-      const key = r.date.toISOString().slice(0, 10); // YYYY-MM-DD
-      const quantity = Number(r._sum.quantity ?? BigInt(0));
-      const cur = byDate.get(key) ?? { quantity: 0, costUsd: 0 };
-      cur.quantity += quantity;
-      cur.costUsd += quantity * priceFor(r.platform, r.category);
-      byDate.set(key, cur);
-    }
-    return [...byDate.entries()]
-      .map(([date, v]) => ({ date, ...v }))
+    return rows
+      .map((r) => {
+        const quantity = Number(r._sum.quantity ?? BigInt(0));
+        return {
+          date: r.date.toISOString().slice(0, 10), // YYYY-MM-DD
+          platform: r.platform,
+          category: r.category,
+          quantity,
+          costUsd: quantity * priceFor(r.platform, r.category),
+        };
+      })
       .sort((a, b) => (a.date < b.date ? -1 : 1));
   }
 }

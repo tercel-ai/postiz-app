@@ -27,6 +27,7 @@ import { mergeAdditionalSettings, parseAdditionalSettings } from '@gitroom/nestj
 import { Rules } from '@gitroom/nestjs-libraries/chat/rules.description.decorator';
 import {
   recordApiUsage,
+  isXAppOwner,
   X_USAGE,
 } from '@gitroom/nestjs-libraries/database/prisma/api-usage/api-usage.service';
 import {
@@ -563,7 +564,9 @@ export class XProvider extends SocialAbstract implements SocialProvider {
       throw err;
     }
     const { data } = result;
-    recordApiUsage('x', X_USAGE.OWNED_READ, 1); // v2.me — own account read
+    // GET /2/users/me is NOT an owned-read endpoint (owned reads are the
+    // /2/users/{id}/* collection endpoints) → always a User read.
+    recordApiUsage('x', X_USAGE.USER_READ, 1);
     return {
       id: data.id,
       username: data.username,
@@ -594,7 +597,12 @@ export class XProvider extends SocialAbstract implements SocialProvider {
         end_time: until,
         max_results: 20,
       });
-      recordApiUsage('x', X_USAGE.POSTS_READ, tweets.data?.data?.length ?? 0);
+      // Reading this account's own timeline → owned-read when it's the app owner.
+      recordApiUsage(
+        'x',
+        isXAppOwner(userId) ? X_USAGE.OWNED_READ : X_USAGE.POSTS_READ,
+        tweets.data?.data?.length ?? 0
+      );
       if (!tweets.data?.data?.length) return null;
 
       const normalize = (s: string) =>
@@ -1159,7 +1167,12 @@ export class XProvider extends SocialAbstract implements SocialProvider {
       max_results: 100,
       ...(token ? { pagination_token: token } : {}),
     });
-    recordApiUsage('x', X_USAGE.POSTS_READ, tweets.data?.data?.length ?? 0);
+    // Own-timeline read → owned-read when `id` is the app owner.
+    recordApiUsage(
+      'x',
+      isXAppOwner(id) ? X_USAGE.OWNED_READ : X_USAGE.POSTS_READ,
+      tweets.data?.data?.length ?? 0
+    );
 
     return [
       ...tweets.data.data,
@@ -1214,6 +1227,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
           'tweet.fields': ['public_metrics'],
         }
       );
+      // GET /2/tweets is not an owned-read endpoint → always Posts read.
       recordApiUsage('x', X_USAGE.POSTS_READ, data.data?.length ?? 0);
 
       const metrics = data.data.reduce(
@@ -1305,6 +1319,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
       const tweet = await client.v2.singleTweet(postId, {
         'tweet.fields': ['public_metrics', 'created_at'],
       });
+      // GET /2/tweets/{id} is not an owned-read endpoint → always Posts read.
       if (tweet?.data?.id) recordApiUsage('x', X_USAGE.POSTS_READ, 1);
 
       if (!tweet?.data?.public_metrics) {
@@ -1453,7 +1468,8 @@ export class XProvider extends SocialAbstract implements SocialProvider {
       const { data } = await client.v2.me({
         'user.fields': ['public_metrics'],
       });
-      recordApiUsage('x', X_USAGE.OWNED_READ, 1); // v2.me — own account read
+      // GET /2/users/me — User read (not an owned-read endpoint).
+      recordApiUsage('x', X_USAGE.USER_READ, 1);
 
       const metrics = data.public_metrics;
       if (!metrics) {
@@ -1512,6 +1528,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
         const data = await client.v2.tweets(chunk, {
           'tweet.fields': ['public_metrics'],
         });
+        // GET /2/tweets is not an owned-read endpoint → always Posts read.
         recordApiUsage('x', X_USAGE.POSTS_READ, data?.data?.length ?? 0);
 
         if (!data?.data?.length) continue;
