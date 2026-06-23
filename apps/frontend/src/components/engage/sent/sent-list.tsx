@@ -65,8 +65,11 @@ export function SentList() {
   const [urlSubmitId, setUrlSubmitId] = useState<string | null>(null);
   const [urlInput, setUrlInput] = useState('');
 
-  // Stats use the SAME filters as the list (minus pagination), so the cards
-  // reflect exactly what the list below shows. No `date` → all-time.
+  // Stats use the same platform/status/date filters as the list (minus
+  // pagination). One intentional divergence: in the no-status "All" view the list
+  // also shows saved DRAFT working-copies, but the stat cards ("发出回复" etc.) count
+  // SENT replies only — a never-sent draft has no impressions and isn't a reply that
+  // went out. No `date` → all-time.
   const statsParams = new URLSearchParams({
     ...(platform && { platform }),
     ...(status && { status }),
@@ -112,16 +115,15 @@ export function SentList() {
         body: JSON.stringify({ url: urlInput }),
       });
       if (!res.ok) {
-        // Surface the server's reason on 400 so the user can tell apart an
-        // invalid/not-found URL from a transient "could not verify, retry".
-        let message = 'Failed to save URL — please retry';
-        if (res.status === 400) {
-          message = await res
-            .json()
-            .then((b) => b?.message || 'Invalid Reddit URL')
-            .catch(() => 'Invalid Reddit URL');
-        }
-        toaster.show(message, 'warning');
+        // Surface the server's specific reason whenever it sends one: a 400 here
+        // can be an invalid URL format OR the state guard ("This reply is still a
+        // draft — send it before submitting its link."). Fall back to a generic
+        // retry hint only when the body carries no message.
+        const serverMessage = await res
+          .json()
+          .then((b) => (typeof b?.message === 'string' ? b.message : ''))
+          .catch(() => '');
+        toaster.show(serverMessage || 'Failed to save URL — please retry', 'warning');
         return;
       }
       toaster.show('URL saved', 'success');

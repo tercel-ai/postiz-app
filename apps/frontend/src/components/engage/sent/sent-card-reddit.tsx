@@ -75,6 +75,12 @@ export const SentCardReddit: FC<SentCardRedditProps> = ({
   const estImpressions = m?.estReach ?? post.impressions ?? (score + comments) * 20;
 
   const noUrl = !post.releaseURL;
+  // Only a posted reply (PUBLISHED) awaiting its permalink should offer the link
+  // backfill — DRAFT/QUEUE/ERROR must not (the backend rejects them with a 400).
+  // Gates both the warning badge and the "+ Submit reply URL" button so they stay
+  // in sync with the server guard. The "Retry reply author" button below is for
+  // replies that already HAVE a URL, so it keeps its own `!noUrl` condition.
+  const linkPending = post.state === 'PUBLISHED' && noUrl;
 
   return (
     <div className="bg-[#1a2035] rounded-lg p-4 border-l-4 border-l-orange-500">
@@ -83,7 +89,7 @@ export const SentCardReddit: FC<SentCardRedditProps> = ({
         <span className="text-xs bg-orange-900 text-orange-300 px-1.5 py-0.5 rounded uppercase font-medium">
           Reddit
         </span>
-        {noUrl && (
+        {linkPending && (
           <span className="text-xs bg-yellow-500/20 text-yellow-400 px-1.5 py-0.5 rounded">
             ⚠ 未提交回复链接
           </span>
@@ -175,7 +181,7 @@ export const SentCardReddit: FC<SentCardRedditProps> = ({
       <GenerationHistory history={opportunity.generationHistory} />
 
       {/* URL actions */}
-      {noUrl && onSubmitUrl && (
+      {linkPending && onSubmitUrl && (
         <button
           onClick={() => onSubmitUrl(sentReplyId)}
           className="text-xs text-blue-400 hover:text-blue-300 transition-colors"

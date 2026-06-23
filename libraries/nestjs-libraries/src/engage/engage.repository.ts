@@ -1351,8 +1351,20 @@ export class EngageRepository {
       },
       select: { status: true },
     });
-    if (!existing || !['NEW', 'AUTO_QUEUED'].includes(existing.status)) {
-      throw new NotFoundException('Opportunity not found or already replied');
+    // Give each failure its OWN status code so the frontend can tell them apart,
+    // mirroring getOpportunityForReply (the generateDraft gate):
+    //   • genuinely missing per-org state row → 404 Not Found
+    //   • exists but no longer actionable (replied / scheduled / dismissed /
+    //     expired) → 403 Forbidden carrying the precise {code, message} reason
+    // The old single "Opportunity not found or already replied" 404 hid "you already
+    // replied to this" behind the same code, so the UI could only show a generic
+    // error and couldn't surface the real reason.
+    if (!existing) {
+      throw new NotFoundException('Opportunity not found');
+    }
+    const blockReason = NON_ACTIONABLE_REPLY_REASONS[existing.status];
+    if (blockReason) {
+      throw new ForbiddenException(blockReason);
     }
     const priorStatus = existing.status as 'NEW' | 'AUTO_QUEUED';
 
@@ -1361,7 +1373,7 @@ export class EngageRepository {
       data: { status: claimStatus },
     });
     if (result.count === 0) {
-      throw new NotFoundException('Opportunity already claimed by another request');
+      throw new ConflictException('Opportunity already claimed by another request');
     }
     const row = await this._oppState.model.engageOpportunityState.findUnique({
       where: {
@@ -1804,9 +1816,18 @@ export class EngageRepository {
   // Shared filter for the sent-reply LIST and STATS so both apply identical
   // date/platform/status semantics. No `date` → all-time (no publishDate window),
   // mirroring /engage/sent. Returns both the Post-scoped and SentReply-scoped where.
+  //
+  // `includeDrafts` ONLY affects the no-status ("All") branch: the LIST passes true
+  // so the default feed shows saved DRAFT working-copies too (otherwise `awaiting`
+  // could return MORE rows than the unfiltered list, since DRAFTs live only there —
+  // confusing). STATS leaves it false because the cards are "发出回复" (sent-reply)
+  // performance — a never-sent draft has no impressions, drags down the response
+  // rate, and isn't a reply that went out. All explicit status filters are
+  // unaffected (each pins its own state).
   private _buildSentReplyFilter(
     organizationId: string,
-    dto: { date?: string; platform?: string; status?: string }
+    dto: { date?: string; platform?: string; status?: string },
+    opts: { includeDrafts?: boolean } = {}
   ): { postWhere: Prisma.PostWhereInput; sentWhere: Prisma.EngageSentReplyWhereInput } {
     // Single source of truth for the date→publishDate window (shared with
     // getDashboardSummary), so /sent, /sent/stats and /dashboard/summary all
@@ -1845,11 +1866,13 @@ export class EngageRepository {
         { state: 'PUBLISHED', releaseURL: { not: null } },
         { state: 'QUEUE' },
       ];
-    } else {
-      // No status filter = "All" sent replies, but EXCLUDE unsent DRAFT
-      // working-copies — a saved draft is not a sent reply. DRAFT surfaces ONLY
-      // under status=awaiting, keeping /sent and /sent/stats consistent with the
-      // dashboards (which also exclude DRAFT).
+    } else if (!opts.includeDrafts) {
+      // No status filter, STATS scope = "All" SENT replies: exclude unsent DRAFT
+      // working-copies — a saved draft is not a sent reply, so it must not pollute
+      // the "发出回复" / response-rate / impression cards (and the dashboards, which
+      // also exclude DRAFT). The LIST scope passes includeDrafts:true and skips this
+      // branch entirely, so the default feed shows every engage item (incl. DRAFT)
+      // and `awaiting`/`settled` stay subsets of it.
       postWhere.state = { not: 'DRAFT' };
     }
 
@@ -1870,7 +1893,12 @@ export class EngageRepository {
     const limit = dto.limit ?? 20;
     const offset = (page - 1) * limit;
 
-    const { sentWhere: where } = this._buildSentReplyFilter(organizationId, dto);
+    // The list shows DRAFT working-copies in the default "All" view too, so
+    // `awaiting` (which always includes DRAFT) can never return more rows than the
+    // unfiltered list.
+    const { sentWhere: where } = this._buildSentReplyFilter(organizationId, dto, {
+      includeDrafts: true,
+    });
 
     const [items, total] = await Promise.all([
       this._sentReply.model.engageSentReply.findMany({
@@ -1989,8 +2017,11 @@ export class EngageRepository {
   async locateSentReply(organizationId: string, dto: LocateSentReplyDto) {
     const limit = dto.limit ?? 20;
 
-    // Mirror the `where` from `listSentReplies` exactly.
-    const { sentWhere: where } = this._buildSentReplyFilter(organizationId, dto);
+    // Mirror the `where` from `listSentReplies` exactly — including DRAFT in the
+    // "All" view, so a draft row can be located on the same page the list shows it.
+    const { sentWhere: where } = this._buildSentReplyFilter(organizationId, dto, {
+      includeDrafts: true,
+    });
 
     const target = await this._sentReply.model.engageSentReply.findFirst({
       where: { ...where, id: dto.sentReplyId },
@@ -2038,9 +2069,12 @@ export class EngageRepository {
     };
   }
 
-  // Aggregate stats for sent replies, scoped by the SAME date/platform/status
+  // Aggregate stats for sent replies, scoped by the same date/platform/status
   // filters as listSentReplies (no `date` → all-time). repliesCount, responseRate,
-  // totalImpressions and avgLikes all reflect the selected window.
+  // totalImpressions and avgLikes all reflect the selected window. NOTE: unlike the
+  // list, the no-status ("All") scope here EXCLUDES DRAFT (includeDrafts defaults
+  // false) — these are "发出回复" / sent-reply performance numbers, and a never-sent
+  // draft has no impressions and would deflate the response rate.
   async getSentStats(
     organizationId: string,
     dto: { date?: string; platform?: string; status?: string } = {}
@@ -2790,18 +2824,6 @@ export class EngageRepository {
   }
 
   /** Platform of a sent reply, scoped to the org (for backfill validation). */
-  async getSentReplyPlatform(
-    organizationId: string,
-    sentReplyId: string
-  ): Promise<string> {
-    const reply = await this._sentReply.model.engageSentReply.findFirst({
-      where: { id: sentReplyId, organizationId },
-      select: { opportunity: { select: { platform: true } } },
-    });
-    if (!reply) throw new NotFoundException('Sent reply not found');
-    return reply.opportunity.platform;
-  }
-
   // Lightweight status of a single sent reply — for the frontends to poll while
   // an in-browser extension reply posts + self-backfills its permalink. Success
   // is signalled by `replyUrl` (Post.releaseURL) flipping non-null; the Post is

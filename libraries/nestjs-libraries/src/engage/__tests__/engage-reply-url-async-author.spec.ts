@@ -15,7 +15,16 @@ describe('submitManualReplyUrl — URL saved first, author enriched in backgroun
     const updateReplyUrl = vi.fn(async () => ({ id: 'post-1' }));
     const updateReplyAuthor = vi.fn(async () => undefined);
     const repo = {
-      getSentReplyPlatform: vi.fn(async () => 'x'),
+      // submitManualReplyUrl now loads state + platform in one read and only
+      // backfills a PUBLISHED reply awaiting its link.
+      getSentReplyContext: vi.fn(async () => ({
+        sentReplyId: 'reply-1',
+        postId: 'post-1',
+        opportunityId: 'opp-1',
+        state: 'PUBLISHED',
+        releaseURL: null,
+        platform: 'x',
+      })),
       updateReplyUrl,
       updateReplyAuthor,
     } as any;
@@ -56,5 +65,35 @@ describe('submitManualReplyUrl — URL saved first, author enriched in backgroun
     await flush();
 
     expect(updateReplyAuthor).not.toHaveBeenCalled();
+  });
+
+  it('rejects backfilling a DRAFT reply with a 400 and never writes the URL', async () => {
+    const updateReplyUrl = vi.fn(async () => ({ id: 'post-1' }));
+    const repo = {
+      getSentReplyContext: vi.fn(async () => ({
+        sentReplyId: 'reply-1',
+        postId: 'post-1',
+        opportunityId: 'opp-1',
+        state: 'DRAFT',
+        releaseURL: null,
+        platform: 'x',
+      })),
+      updateReplyUrl,
+    } as any;
+    const service = new EngageService(repo, { client: undefined } as any, {} as any, {} as any, {} as any);
+
+    await expect(service.submitManualReplyUrl(org, 'reply-1', url)).rejects.toMatchObject({
+      status: 400,
+    });
+    expect(updateReplyUrl).not.toHaveBeenCalled();
+  });
+
+  it('returns 404 when the sent reply does not exist', async () => {
+    const repo = { getSentReplyContext: vi.fn(async () => null) } as any;
+    const service = new EngageService(repo, { client: undefined } as any, {} as any, {} as any, {} as any);
+
+    await expect(service.submitManualReplyUrl(org, 'missing', url)).rejects.toMatchObject({
+      status: 404,
+    });
   });
 });

@@ -85,6 +85,12 @@ export const SentCardX: FC<SentCardXProps> = ({ reply, sentReplyId, onSubmitUrl 
   const analytics = post.analytics;
   const m = post.metrics;
   const noUrl = !post.releaseURL;
+  // The reply-link backfill is ONLY valid for a posted reply (PUBLISHED) whose
+  // permalink is still pending. A DRAFT hasn't been sent, QUEUE will auto-fire, and
+  // ERROR failed — none of them should show the "submit link" affordance (the
+  // backend now rejects those with a 400). `linkPending` gates both the warning
+  // badge and the submit button so the two stay in sync with the server guard.
+  const linkPending = post.state === 'PUBLISHED' && noUrl;
 
   // Prefer the flat `metrics` object; fall back to parsing `analytics` so the
   // card still works against an older API response.
@@ -106,7 +112,7 @@ export const SentCardX: FC<SentCardXProps> = ({ reply, sentReplyId, onSubmitUrl 
         >
           {post.state}
         </span>
-        {noUrl && (
+        {linkPending && (
           <span className="text-xs bg-yellow-500/20 text-yellow-400 px-1.5 py-0.5 rounded">
             ⚠ 未提交回复链接
           </span>
@@ -206,7 +212,7 @@ export const SentCardX: FC<SentCardXProps> = ({ reply, sentReplyId, onSubmitUrl 
       {/* Past AI generations for this opportunity (collapsed by default) */}
       <GenerationHistory history={opportunity.generationHistory} />
 
-      {noUrl && onSubmitUrl && (
+      {linkPending && onSubmitUrl && (
         <button
           onClick={() => onSubmitUrl(sentReplyId)}
           className="text-xs text-blue-400 hover:text-blue-300 transition-colors mt-2 block"

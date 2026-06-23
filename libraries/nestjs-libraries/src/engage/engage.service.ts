@@ -511,8 +511,29 @@ export class EngageService implements OnApplicationBootstrap {
     url: string,
     author?: EngageAuthorProfile
   ) {
+    // Load state + platform in one read. The manual backfill is ONLY meaningful for
+    // a reply that was already posted (PUBLISHED) but whose permalink is still
+    // pending. A DRAFT working-copy was never sent; QUEUE will auto-fire later; an
+    // ERROR publish failed — attaching a link to any of them would mint a record
+    // that looks "live" without ever having been published (and, for X, kick off a
+    // metrics sync against a tweet that doesn't exist). Guard with an explicit 400
+    // so the frontend can tell the user exactly why, instead of silently corrupting
+    // the row. The extension publish-on-success path intentionally backfills a DRAFT
+    // and flips it PUBLISHED in one write — but it goes through publishExtensionReply
+    // (updateReplyUrl with markPublished), never here, so this guard can't break it.
+    const ctx = await this._engageRepository.getSentReplyContext(org.id, sentReplyId);
+    if (!ctx) throw new NotFoundException('Sent reply not found');
+    if (ctx.state !== 'PUBLISHED') {
+      throw new BadRequestException(
+        ctx.state === 'DRAFT'
+          ? 'This reply is still a draft — send it before submitting its link.'
+          : `Cannot attach a reply link to a ${String(
+              ctx.state ?? 'unknown'
+            ).toLowerCase()} reply — only a posted reply awaiting its link can be backfilled.`
+      );
+    }
+    const platform = ctx.platform ?? '';
     // The backfill URL is mandatory here, so always validate format + reachability.
-    const platform = await this._engageRepository.getSentReplyPlatform(org.id, sentReplyId);
     await this._validateReplyUrl(platform, url);
     // Save the URL immediately. When the caller already supplies the real poster
     // (e.g. the browser extension captured it from X's CreateTweet response), pass

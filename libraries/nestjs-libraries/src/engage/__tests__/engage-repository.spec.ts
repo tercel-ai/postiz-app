@@ -1802,7 +1802,7 @@ describe('EngageRepository.getOrgScanStatus', () => {
       expect(stateFindMany).not.toHaveBeenCalled();
     });
 
-    it('no status filter ("All") excludes unsent DRAFT working-copies', async () => {
+    it('no status filter ("All") LIST includes DRAFT (no state exclusion) so awaiting can never exceed it', async () => {
       const { repo, sentFindMany, sentCount } = buildRepo();
       sentFindMany.mockResolvedValue([]);
       sentCount.mockResolvedValue(0);
@@ -1810,7 +1810,25 @@ describe('EngageRepository.getOrgScanStatus', () => {
       await repo.listSentReplies('org1', {} as any);
 
       const where = sentFindMany.mock.calls[0][0].where;
-      expect(where.post).toEqual({ source: 'engage', state: { not: 'DRAFT' } });
+      // The list passes includeDrafts:true, so the "All" view applies NO state
+      // filter — every engage item (incl. DRAFT working-copies) is returned.
+      expect(where.post).toEqual({ source: 'engage' });
+    });
+
+    it('no status filter ("All") STATS still excludes DRAFT (sent-reply performance only)', async () => {
+      const { repo, sentCount, sentFindMany, postAggregate } = buildRepo();
+      sentCount.mockResolvedValue(0);
+      postAggregate.mockResolvedValue({ _sum: { impressions: 0, trafficScore: 0 } });
+      sentFindMany.mockResolvedValue([]);
+
+      await repo.getSentStats('org1', {});
+
+      // Stats keep includeDrafts:false → a never-sent draft must not pollute the
+      // "发出回复" / response-rate / impression cards.
+      expect(sentCount.mock.calls[0][0].where.post).toEqual({
+        source: 'engage',
+        state: { not: 'DRAFT' },
+      });
     });
 
     it('status=settled OR-combines published(live) + scheduled', async () => {

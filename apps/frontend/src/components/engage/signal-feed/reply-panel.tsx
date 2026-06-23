@@ -362,13 +362,22 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
           }
         );
         if (!res.ok) {
-          const message =
+          // Prefer the server's specific reason so the user sees WHY it failed:
+          //   403 → typed non-actionable reason (e.g. "You have already replied to
+          //         this opportunity."); 409 → claimed by a concurrent request;
+          //   400 → bad URL / missing account. Fall back to a client-side hint only
+          //   when the body carries no message.
+          const serverMessage = await res
+            .json()
+            .then((b) => (typeof b?.message === 'string' ? b.message : ''))
+            .catch(() => '');
+          const fallback =
             res.status === 400
               ? isX
                 ? 'Invalid tweet URL or missing account'
                 : 'Invalid Reddit URL format'
               : 'Failed to record reply — please retry';
-          toaster.show(message, 'warning');
+          toaster.show(serverMessage || fallback, 'warning');
           return;
         }
         toaster.show(url ? 'Reply recorded with URL!' : 'Reply recorded!', 'success');

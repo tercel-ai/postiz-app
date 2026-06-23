@@ -636,7 +636,9 @@ export class EngageController {
   }
 
   @ApiOperation({ summary: 'Schedule a reply to an opportunity for future publishing' })
-  @ApiResponse({ status: 404, description: 'Opportunity not found or already replied' })
+  @ApiResponse({ status: 404, description: 'Opportunity not found' })
+  @ApiResponse({ status: 403, description: 'Opportunity is no longer actionable (replied / scheduled / dismissed / expired) — carries a typed { code, message } reason' })
+  @ApiResponse({ status: 409, description: 'Opportunity was just claimed by another concurrent request' })
   @Post('/opportunities/:id/schedule')
   scheduleReply(
     @GetOrgFromRequest() org: Organization,
@@ -649,7 +651,9 @@ export class EngageController {
 
   @ApiOperation({ summary: 'Schedule replies from multiple integrations at different times in one request' })
   @ApiResponse({ status: 400, description: 'Any scheduledAt is not in the future, or items array is invalid' })
-  @ApiResponse({ status: 404, description: 'Opportunity not found or already replied' })
+  @ApiResponse({ status: 404, description: 'Opportunity not found' })
+  @ApiResponse({ status: 403, description: 'Opportunity is no longer actionable (replied / scheduled / dismissed / expired) — carries a typed { code, message } reason' })
+  @ApiResponse({ status: 409, description: 'Opportunity was just claimed by another concurrent request' })
   @Post('/opportunities/:id/batch-schedule')
   batchScheduleReply(
     @GetOrgFromRequest() org: Organization,
@@ -661,7 +665,9 @@ export class EngageController {
   }
 
   @ApiOperation({ summary: 'Send replies from multiple integrations immediately in one request' })
-  @ApiResponse({ status: 404, description: 'Opportunity not found or already replied' })
+  @ApiResponse({ status: 404, description: 'Opportunity not found' })
+  @ApiResponse({ status: 403, description: 'Opportunity is no longer actionable (replied / scheduled / dismissed / expired) — carries a typed { code, message } reason' })
+  @ApiResponse({ status: 409, description: 'Opportunity was just claimed by another concurrent request' })
   @Post('/opportunities/:id/batch-send')
   batchSendReply(
     @GetOrgFromRequest() org: Organization,
@@ -675,7 +681,9 @@ export class EngageController {
   // ─── Manual reply (Reddit + X) ────────────────────────────────────────────
 
   @ApiOperation({ summary: 'Confirm a manual reply (Reddit or X) and record it in the system. X requires replyUrl + integrationId.' })
-  @ApiResponse({ status: 404, description: 'Opportunity not found or already replied' })
+  @ApiResponse({ status: 404, description: 'Opportunity not found' })
+  @ApiResponse({ status: 403, description: 'Opportunity is no longer actionable (replied / scheduled / dismissed / expired) — carries a typed { code, message } reason' })
+  @ApiResponse({ status: 409, description: 'Opportunity was just claimed by another concurrent request' })
   @Post('/opportunities/:id/manual-reply')
   confirmManualReply(
     @GetOrgFromRequest() org: Organization,
@@ -743,7 +751,7 @@ export class EngageController {
 
   @ApiOperation({ summary: 'Submit the reply URL (+ optional author) for a manual reply (X or Reddit)' })
   @ApiResponse({ status: 404, description: 'Sent reply not found' })
-  @ApiResponse({ status: 400, description: 'Only valid for X or Reddit manual replies' })
+  @ApiResponse({ status: 400, description: 'Invalid URL format, not an X/Reddit reply, or the reply is not a posted reply awaiting its link (e.g. still a DRAFT)' })
   @Patch('/sent/:id/reply-url')
   submitManualReplyUrl(
     @GetOrgFromRequest() org: Organization,
