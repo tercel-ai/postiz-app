@@ -289,13 +289,13 @@ export class XProvider extends SocialAbstract implements SocialProvider {
     const likedByRepost = await client.v2.tweetLikedBy(id);
     recordApiUsage(
       'x',
-      X_USAGE.LIKE_MUTE_BLOCK,
+      X_USAGE.LIKE_READ,
       likedByRepost.meta?.result_count ?? 0
     );
     if (likedByRepost.meta.result_count >= +fields.likesAmount) {
       await timer(2000);
       await client.v2.retweet(integration.internalId, id);
-      recordApiUsage('x', X_USAGE.INTERACTION_OTHER, 1); // retweet write
+      recordApiUsage('x', X_USAGE.USER_INTERACTION_CREATE, 1); // retweet write
       return true;
     }
 
@@ -327,7 +327,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
 
     try {
       await client.v2.retweet(userId, postId);
-      recordApiUsage('x', X_USAGE.INTERACTION_OTHER, 1); // retweet write
+      recordApiUsage('x', X_USAGE.USER_INTERACTION_CREATE, 1); // retweet write
     } catch (err) {
       /** nothing **/
     }
@@ -368,7 +368,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
     const likedByPlug = await client.v2.tweetLikedBy(id);
     recordApiUsage(
       'x',
-      X_USAGE.LIKE_MUTE_BLOCK,
+      X_USAGE.LIKE_READ,
       likedByPlug.meta?.result_count ?? 0
     );
     if (likedByPlug.meta.result_count >= +fields.likesAmount) {
@@ -378,7 +378,12 @@ export class XProvider extends SocialAbstract implements SocialProvider {
         text: stripHtmlValidation('normal', fields.post, true),
         reply: { in_reply_to_tweet_id: id },
       });
-      recordApiUsage('x', X_USAGE.REPLY_QUOTE, 1); // auto-plug reply write
+      // Auto-plug reply: normal Post Create (URL-aware tier).
+      recordApiUsage(
+        'x',
+        /https?:\/\//i.test(fields.post) ? X_USAGE.POST_CREATE_URL : X_USAGE.POST_CREATE,
+        1
+      );
       return true;
     }
 
@@ -1135,8 +1140,15 @@ export class XProvider extends SocialAbstract implements SocialProvider {
       throw err;
     }
 
-    // Write cost telemetry: a reply is one Create (reply) request.
-    recordApiUsage('x', X_USAGE.REPLY_QUOTE, 1);
+    // Write cost telemetry: a reply is a normal Post Create (not "summoned");
+    // a link in the text bumps it to the higher with-URL tier.
+    recordApiUsage(
+      'x',
+      /https?:\/\//i.test(commentPost.message)
+        ? X_USAGE.POST_CREATE_URL
+        : X_USAGE.POST_CREATE,
+      1
+    );
 
     return [
       {

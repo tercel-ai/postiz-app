@@ -9,31 +9,60 @@ export type ApiUsagePlatform = 'x' | 'reddit';
 
 // X category keys — keep stable; they are persisted in ApiUsageTick.category.
 export const X_USAGE = {
+  // ── reads (billed per returned resource) ──
   POSTS_READ: 'posts_read',
   USER_READ: 'user_read',
-  DM_FOLLOW_READ: 'dm_follow_read',
-  LIST_SPACE_ETC: 'list_space_etc',
-  LIKE_MUTE_BLOCK: 'like_mute_block',
   OWNED_READ: 'owned_read',
+  LIKE_READ: 'like_read',
+  MUTE_READ: 'mute_read',
+  BLOCK_READ: 'block_read',
+  DM_EVENT_READ: 'dm_event_read',
+  FOLLOWING_FOLLOWERS_READ: 'following_followers_read',
+  LIST_READ: 'list_read',
+  SPACE_READ: 'space_read',
+  COMMUNITY_READ: 'community_read',
+  NOTE_READ: 'note_read',
+  PROFILE_UPDATE_READ: 'profile_update_read',
+  // ── writes (billed per request) ──
   POST_CREATE: 'post_create',
   POST_CREATE_URL: 'post_create_url',
-  REPLY_QUOTE: 'reply_quote',
-  INTERACTION_OTHER: 'interaction_other',
+  POST_CREATE_SUMMONED: 'post_create_summoned',
+  USER_INTERACTION_CREATE: 'user_interaction_create',
+  DM_INTERACTION_CREATE: 'dm_interaction_create',
+  INTERACTION_DELETE: 'interaction_delete',
+  LIST_CREATE: 'list_create',
+  TRENDS: 'trends',
 } as const;
 
 // USD per unit (record for reads, request for writes).
 export const API_PRICE_USD: Record<string, Record<string, number>> = {
+  // Full mirror of https://docs.x.com/x-api/getting-started/pricing. Categories
+  // without a recorder yet are kept here so a future call site is never silently
+  // priced at $0 (priceFor falls back to 0 only for genuinely unknown keys).
   x: {
-    [X_USAGE.POSTS_READ]: 0.005, // Posts: Read / record
-    [X_USAGE.USER_READ]: 0.01, // User: Read / record
-    [X_USAGE.DM_FOLLOW_READ]: 0.01, // DM Event / Following / Followers / record
-    [X_USAGE.LIST_SPACE_ETC]: 0.005, // List / Space / Community / Note / record
-    [X_USAGE.LIKE_MUTE_BLOCK]: 0.001, // Like / Mute / Block / record
-    [X_USAGE.OWNED_READ]: 0.001, // Owned Reads / record
-    [X_USAGE.POST_CREATE]: 0.015, // Post: Create / request
-    [X_USAGE.POST_CREATE_URL]: 0.2, // Post: Create with URL / request
-    [X_USAGE.REPLY_QUOTE]: 0.01, // Post Create (summoned reply/quote) / request
-    [X_USAGE.INTERACTION_OTHER]: 0.015, // User Interaction Create (retweet, etc.) / request
+    // reads — per resource
+    [X_USAGE.POSTS_READ]: 0.005, // Posts
+    [X_USAGE.USER_READ]: 0.01, // User
+    [X_USAGE.OWNED_READ]: 0.001, // Owned Reads (your own /2/users/{id}/* data)
+    [X_USAGE.LIKE_READ]: 0.001, // Like
+    [X_USAGE.MUTE_READ]: 0.001, // Mute
+    [X_USAGE.BLOCK_READ]: 0.001, // Block
+    [X_USAGE.DM_EVENT_READ]: 0.01, // DM Event
+    [X_USAGE.FOLLOWING_FOLLOWERS_READ]: 0.01, // Following / Followers
+    [X_USAGE.LIST_READ]: 0.005, // List
+    [X_USAGE.SPACE_READ]: 0.005, // Space
+    [X_USAGE.COMMUNITY_READ]: 0.005, // Community
+    [X_USAGE.NOTE_READ]: 0.005, // Note
+    [X_USAGE.PROFILE_UPDATE_READ]: 0.005, // Profile Update
+    // writes — per request
+    [X_USAGE.POST_CREATE]: 0.015, // Post: Create
+    [X_USAGE.POST_CREATE_URL]: 0.2, // Post: Create (with URL)
+    [X_USAGE.POST_CREATE_SUMMONED]: 0.01, // Post: Create (summoned)
+    [X_USAGE.USER_INTERACTION_CREATE]: 0.015, // User Interaction Create (retweet/like/follow)
+    [X_USAGE.DM_INTERACTION_CREATE]: 0.015, // DM Interaction Create
+    [X_USAGE.INTERACTION_DELETE]: 0.01, // Interaction Delete
+    [X_USAGE.LIST_CREATE]: 0.01, // List Create
+    [X_USAGE.TRENDS]: 0.01, // Trends
   },
   // reddit: { ... }  // fill in when Reddit cost tracking is added
 };
@@ -41,6 +70,7 @@ export const API_PRICE_USD: Record<string, Record<string, number>> = {
 export function priceFor(platform: string, category: string): number {
   return API_PRICE_USD[platform]?.[category] ?? 0;
 }
+
 
 /**
  * True when `userId` is the X account that owns this developer app
