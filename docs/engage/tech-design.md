@@ -430,7 +430,7 @@ model EngageSentReply {
   post           Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
 
   // Engage-specific metadata — everything else is in Post
-  strategy       String           // "EXPERT_ANSWER" | "DATA_BACKED" | "EMPATHY_LED" | future
+  strategy       String           // STRATEGY_PROMPTS key: EXPERT_ANSWER | DATA_BACKED | EMPATHY_LED | CONTRARIAN | QUESTION_LED | QUICK_TAKE | AMPLIFY
   brandStrength  Int      @default(1)   // 0-3: brand mention level used when generating draft
   authorReplied  Boolean  @default(false) // did the original post author reply to our reply?
 
@@ -754,9 +754,11 @@ export class EngageController {
 
 ```typescript
 export class GenerateDraftDto {
-  // strategy is a plain string — not bound to a TS enum.
-  // v1.0 values: 'EXPERT_ANSWER' | 'DATA_BACKED' | 'EMPATHY_LED'
-  // Future values added in STRATEGY_PROMPTS without DTO changes.
+  // strategy is a plain string (no Prisma enum), but the DTO whitelists it with
+  // @IsIn(VALID_STRATEGIES). Values: EXPERT_ANSWER | DATA_BACKED | EMPATHY_LED |
+  // CONTRARIAN | QUESTION_LED | QUICK_TAKE | AMPLIFY. Adding a new strategy means
+  // adding it to BOTH STRATEGY_PROMPTS (engage-draft.service.ts) and
+  // VALID_STRATEGIES (engage.dto.ts) — the @IsIn guard rejects unknown keys (400).
   strategy: string;
   brandStrength: number;  // 0-3
 }
@@ -1413,11 +1415,17 @@ Write a reply to this post.`;
 }
 
 // Keyed by string strategy name — add new strategies here without schema migration.
-// Mirrors the INTENT_PROMPTS pattern: no enum dependency.
+// Mirrors the INTENT_PROMPTS pattern: no enum dependency. NOTE: keep this in sync
+// with VALID_STRATEGIES in engage.dto.ts — the @IsIn DTO guard rejects any key
+// missing there (400) before the request reaches this map's EXPERT_ANSWER fallback.
 const STRATEGY_PROMPTS: Record<string, string> = {
   EXPERT_ANSWER: 'Give expert step-by-step advice. Share actionable frameworks. Be specific and concrete.',
-  DATA_BACKED:   'Keep the reply conversational. When relevant, support one point with an observation or metric from the original post; never invent statistics.',
-  EMPATHY_LED:   'Acknowledge the frustration or situation first, then pivot to a concrete insight.',
+  DATA_BACKED:   'Quote the post\'s own number and say what it directly implies; never assert an unstated fact, and frame uncertainty as a question.',
+  EMPATHY_LED:   'Name the specific feeling the person voiced using a concrete detail, then pivot to one concrete insight.',
+  CONTRARIAN:    'Counter the post\'s actual claim with reasoning; skip it if there is no real claim to push against.',
+  QUESTION_LED:  'Reply with one genuine, open question that springs from a specific detail; never hint at the answer.',
+  QUICK_TAKE:    'Fire back ONE single-sentence quip (~25 words) that grabs a specific detail and flips it — a joke or jab, not advice.',
+  AMPLIFY:       'Agree with the post\'s specific point in a few words, then add the one underrated angle that pushes it further.',
 };
 
 const BRAND_PROMPTS: Record<number, string> = {

@@ -73,7 +73,14 @@ type EngageOpportunityStatus =
   | 'EXPIRED';    // Expired
 
 // AI Draft Strategy
-type ReplyStrategy = 'EXPERT_ANSWER' | 'DATA_BACKED' | 'EMPATHY_LED';
+type ReplyStrategy =
+  | 'EXPERT_ANSWER'
+  | 'DATA_BACKED'
+  | 'EMPATHY_LED'
+  | 'CONTRARIAN'
+  | 'QUESTION_LED'
+  | 'QUICK_TAKE'
+  | 'AMPLIFY';
 
 // Keyword Type
 type KeywordType = 'CORE' | 'BRAND' | 'COMPETITOR';
@@ -1004,7 +1011,7 @@ Stream the generation of an AI reply draft. Response is Server-Sent Events (`tex
 
 ```json
 {
-  "strategy": "EXPERT_ANSWER",  // Required: 'EXPERT_ANSWER' | 'DATA_BACKED' | 'EMPATHY_LED'
+  "strategy": "EXPERT_ANSWER",  // Required: ReplyStrategy (see type def above)
   "brandStrength": 1,           // Required: 0-3 integer
   "mentions": ["AISEE"],        // Optional: brand names to weave in (max 20)
   "outputLength": 1000          // Optional: target reply length (chars); omit to use platform default
@@ -1013,7 +1020,7 @@ Stream the generation of an AI reply draft. Response is Server-Sent Events (`tex
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `strategy` | `string` | ✓ | `EXPERT_ANSWER` / `DATA_BACKED` / `EMPATHY_LED` |
+| `strategy` | `ReplyStrategy` | ✓ | One of the 7 strategy keys (see Strategy Descriptions) |
 | `brandStrength` | `number` (0–3) | ✓ | Brand emphasis level (see table below) |
 | `mentions` | `string[]` (max 20) | | Brand names the model may mention (used when `brandStrength` ≥ 2) |
 | `outputLength` | `integer` (≥ 2) | | Target reply length fed into the prompt. Omitted → platform default (X = 260 weighted chars, Reddit = 1000 chars) |
@@ -1036,6 +1043,10 @@ Stream the generation of an AI reply draft. Response is Server-Sent Events (`tex
 | `EXPERT_ANSWER` | Help-seeking, Discussion | Expert step-by-step advice |
 | `DATA_BACKED` | Any type | Conversational reply optionally supported by an observation or metric from the original post |
 | `EMPATHY_LED` | Help-seeking, Ranting | Empathize first, then provide insights |
+| `CONTRARIAN` | Opinion, Discussion | Counter the post's specific claim with reasoning |
+| `QUESTION_LED` | Discussion, Data-share | Ask one genuine, open question from a specific detail |
+| `QUICK_TAKE` | Rant, Opinion | One sharp single-sentence quip that flips a detail |
+| `AMPLIFY` | Opinion, Data-share | Agree, then add the one underrated angle |
 
 **Brand Strength Descriptions**
 
@@ -1126,7 +1137,7 @@ When the opportunity is later sent / scheduled / manually replied, the leftover 
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `draftContent` | `string` (max 4000) | ✓ | The reply text to save |
-| `strategy` | `EXPERT_ANSWER \| DATA_BACKED \| EMPATHY_LED` | ✓ | Generation strategy (stored in `inputData`) |
+| `strategy` | `ReplyStrategy` | ✓ | Generation strategy (stored in `inputData`) |
 | `brandStrength` | `number` 0–3 | ✓ | Brand strength (stored in `inputData`) |
 | `mentions` | `string[]` (≤20) | — | Optional brand mentions (stored in `inputData`) |
 
@@ -1222,7 +1233,7 @@ When the opportunity is later sent / scheduled / manually replied, the leftover 
 | `items` | `array` | ✓ | 1–20 items |
 | `items[].integrationId` | `string` | ✓ | Integration ID (from GET /reply-accounts) |
 | `items[].draftContent` | `string` | ✓ | Reply content, max 4000 chars |
-| `items[].strategy` | `string` | ✓ | `EXPERT_ANSWER` / `DATA_BACKED` / `EMPATHY_LED` |
+| `items[].strategy` | `ReplyStrategy` | ✓ | One of the 7 strategy keys (see Strategy Descriptions) |
 | `items[].brandStrength` | `number` | ✓ | 0–3 |
 | `items[].scheduledAt` | `string` | ✓ | ISO date string, must be in the future |
 
@@ -1266,7 +1277,7 @@ When the opportunity is later sent / scheduled / manually replied, the leftover 
 | `items` | `array` | ✓ | 1–20 items |
 | `items[].integrationId` | `string` | ✓ | Integration ID (from GET /reply-accounts) |
 | `items[].draftContent` | `string` | ✓ | Reply content, max 4000 chars |
-| `items[].strategy` | `string` | ✓ | `EXPERT_ANSWER` / `DATA_BACKED` / `EMPATHY_LED` |
+| `items[].strategy` | `ReplyStrategy` | ✓ | One of the 7 strategy keys (see Strategy Descriptions) |
 | `items[].brandStrength` | `number` | ✓ | 0–3 |
 
 **Response** `200 OK` — Returns `EngageSentReply[]`. May be shorter than `items` if individual SentReply recording fails (individual failures are logged). Returns `500` only if all recording fails.
@@ -1454,7 +1465,7 @@ Retrieve the list of sent replies (includes original post summary and metrics da
 }
 ```
 
-> `inputData` contains the generation metadata saved at reply time. Use it to pre-populate the edit form for scheduled replies. Fields: `strategy` (`EXPERT_ANSWER` | `DATA_BACKED` | `EMPATHY_LED`), `brandStrength` (0–3), `mentions` (optional string array).
+> `inputData` contains the generation metadata saved at reply time. Use it to pre-populate the edit form for scheduled replies. Fields: `strategy` (`ReplyStrategy`), `brandStrength` (0–3), `mentions` (optional string array).
 
 **`post.state` Meanings**
 
@@ -1548,7 +1559,7 @@ Edit a **scheduled** (QUEUE) engage reply. All fields are optional; supply only 
 |---|---|---|
 | `content` | `string` (max 4000) | New reply text — written to `Post.content`, read by Temporal at publish time |
 | `scheduledAt` | `string` (ISO date) | New publish time — must be in the future; restarts the Temporal timer with claim-gate protection |
-| `strategy` | `'EXPERT_ANSWER' \| 'DATA_BACKED' \| 'EMPATHY_LED'` | Updated generation strategy — stored in `inputData` |
+| `strategy` | `ReplyStrategy` | Updated generation strategy — stored in `inputData` |
 | `brandStrength` | `number` (0–3) | Updated brand strength — stored in `inputData` |
 | `mentions` | `string[]` (max 20) | Updated mention list — stored in `inputData` |
 

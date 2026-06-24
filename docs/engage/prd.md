@@ -267,13 +267,17 @@ Reddit heat: `reddit_heat = score × upvote_ratio + num_comments × 2`; threshol
 - Grey-background card showing: author, timestamp, full body
 - Read-only, for context before replying
 
-**Reply Strategy (3 options, radio)**
+**Reply Strategy (7 options, radio)**
 
 | Strategy | Best For | Core Prompt Instruction |
 |---|---|---|
 | Expert Answer | Help-seeking, Discussion | "Give expert step-by-step advice, share actionable frameworks" |
-| Data-backed | Any | "Lead with data from scanning 500+ brands, cite specific numbers" |
+| Data-backed | Any | "Quote the post's own number and say what it directly implies" |
 | Empathy-led | Help-seeking, Vent | "Acknowledge frustration first, then pivot to a concrete insight" |
+| Contrarian | Opinion, Discussion | "Counter the post's actual claim with reasoning" |
+| Question-led | Discussion, Data-share | "Ask one genuine, open question from a specific detail" |
+| Quick Take | Vent, Opinion | "Fire back one single-sentence quip that flips a detail" |
+| Amplify | Opinion, Data-share | "Agree, then add the one underrated angle that pushes it further" |
 
 Strategy change → immediately triggers re-generation.
 

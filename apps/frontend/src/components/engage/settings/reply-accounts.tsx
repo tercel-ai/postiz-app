@@ -42,7 +42,15 @@ const DeferredTimeInput: FC<{
   );
 };
 
-const STRATEGIES = ['EXPERT_ANSWER', 'DATA_BACKED', 'EMPATHY_LED'];
+const STRATEGIES = [
+  'EXPERT_ANSWER',
+  'DATA_BACKED',
+  'EMPATHY_LED',
+  'CONTRARIAN',
+  'QUESTION_LED',
+  'QUICK_TAKE',
+  'AMPLIFY',
+];
 const TIMEZONES = [
   'Asia/Shanghai',
   'Asia/Tokyo',

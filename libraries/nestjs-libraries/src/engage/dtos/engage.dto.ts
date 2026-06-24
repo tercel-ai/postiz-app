@@ -18,7 +18,18 @@ import {
 import { Transform, Type } from 'class-transformer';
 import { EngageOpportunityStatus } from '@prisma/client';
 
-const VALID_STRATEGIES = ['EXPERT_ANSWER', 'DATA_BACKED', 'EMPATHY_LED'] as const;
+// Must stay in sync with STRATEGY_PROMPTS in engage-draft.service.ts. The service
+// falls back to EXPERT_ANSWER for unknown keys, but @IsIn rejects values missing
+// here at the controller boundary (400) before they ever reach the service.
+const VALID_STRATEGIES = [
+  'EXPERT_ANSWER',
+  'DATA_BACKED',
+  'EMPATHY_LED',
+  'CONTRARIAN',
+  'QUESTION_LED',
+  'QUICK_TAKE',
+  'AMPLIFY',
+] as const;
 
 // Keyword types must match the literals the scorer strict-equals (engage-scorer.ts
 // computeKeywordScore). Without this enum, lowercase / mis-cased values silently

@@ -24,6 +24,10 @@ const STRATEGIES = [
   { value: 'EXPERT_ANSWER', label: 'Expert Answer', desc: 'Actionable, step-by-step advice' },
   { value: 'DATA_BACKED', label: 'Data Backed', desc: 'Add a relevant concrete observation' },
   { value: 'EMPATHY_LED', label: 'Empathy Led', desc: 'Acknowledge first, then insight' },
+  { value: 'CONTRARIAN', label: 'Contrarian', desc: "Counter the post's specific claim" },
+  { value: 'QUESTION_LED', label: 'Question Led', desc: 'Ask one genuine, open question' },
+  { value: 'QUICK_TAKE', label: 'Quick Take', desc: 'One sharp single-sentence quip' },
+  { value: 'AMPLIFY', label: 'Amplify', desc: 'Agree, then add an underrated angle' },
 ];
 
 const MAX_X_CHARS = 260;
