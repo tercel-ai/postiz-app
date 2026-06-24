@@ -414,6 +414,36 @@ describe('EngageRepository — two-table reads', () => {
       });
     });
 
+    it('attaches per-org opportunity status from the state join (null when no state row)', async () => {
+      const { repo, sentFindMany, sentCount, stateFindMany } = buildRepo();
+      sentFindMany.mockResolvedValue([
+        {
+          id: 's1',
+          opportunity: { id: 'o1', platform: 'x' },
+          post: { analytics: [], impressions: 0, trafficScore: 0 },
+        },
+        {
+          id: 's2',
+          opportunity: { id: 'o2', platform: 'reddit' },
+          post: { analytics: [], impressions: 0, trafficScore: 0 },
+        },
+      ]);
+      sentCount.mockResolvedValue(2);
+      // Only o1 has a state row; o2 has no row → status falls back to null.
+      stateFindMany.mockResolvedValue([
+        { opportunityId: 'o1', matchedKeywords: [], status: 'REPLIED' },
+      ]);
+
+      const res = await repo.listSentReplies('org1', {} as any);
+      const [a, b] = res.items as any[];
+      expect(a.opportunity.status).toBe('REPLIED');
+      expect(b.opportunity.status).toBeNull();
+      // The state select pulls status alongside matchedKeywords/generationHistory.
+      expect(stateFindMany.mock.calls[0][0].select).toMatchObject({
+        status: true,
+      });
+    });
+
     it('exposes a unified replyAuthor: from integration when present, else settings.engageAuthor', async () => {
       const { repo, sentFindMany, sentCount, stateFindMany } = buildRepo();
       sentFindMany.mockResolvedValue([

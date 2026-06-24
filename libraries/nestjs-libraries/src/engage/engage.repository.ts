@@ -1965,6 +1965,9 @@ export class EngageRepository {
           select: {
             opportunityId: true,
             matchedKeywords: true,
+            // Per-org lifecycle status of the opportunity (NEW/REPLIED/SCHEDULED/…),
+            // surfaced on the sent card so the frontend can reflect the org's state.
+            status: true,
             // The org's full version history of AI-generated reply drafts for this
             // opportunity — returned so the frontend can show past generations.
             generationHistory: true,
@@ -1974,6 +1977,8 @@ export class EngageRepository {
     const keywordsByOpp = new Map(
       states.map((s) => [s.opportunityId, s.matchedKeywords])
     );
+    // Per-org opportunity status, attached to the opportunity object below.
+    const statusByOpp = new Map(states.map((s) => [s.opportunityId, s.status]));
     // newest-first so the UI lists the most recent generation at the top.
     const historyByOpp = new Map(
       states.map((s) => [
@@ -1988,6 +1993,7 @@ export class EngageRepository {
     const itemsWithMetrics = items.map((it) => {
       const opportunity = {
         ...it.opportunity,
+        status: statusByOpp.get(it.opportunity.id) ?? null,
         matchedKeywords: keywordsByOpp.get(it.opportunity.id) ?? [],
         generationHistory: historyByOpp.get(it.opportunity.id) ?? [],
       };
