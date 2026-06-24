@@ -2,7 +2,7 @@ import { IUploadProvider } from './upload.interface';
 import { mkdirSync, unlink, writeFileSync } from 'fs';
 // @ts-ignore
 import mime from 'mime';
-import { extname } from 'path';
+import { dirname, extname, join } from 'path';
 import axios from 'axios';
 
 export class LocalStorage implements IUploadProvider {
@@ -86,6 +86,18 @@ export class LocalStorage implements IUploadProvider {
       console.error('Error uploading file to Local Storage:', err);
       throw err;
     }
+  }
+
+  async uploadBuffer(
+    key: string,
+    buffer: Buffer,
+    _contentType: string
+  ): Promise<string> {
+    const filePath = join(this.uploadDirectory, key);
+    mkdirSync(dirname(filePath), { recursive: true });
+    writeFileSync(filePath, buffer);
+
+    return `${process.env.FRONTEND_URL}/uploads/${key}`;
   }
 
   async removeFile(filePath: string): Promise<void> {

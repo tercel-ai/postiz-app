@@ -129,6 +129,24 @@ class CloudflareStorage implements IUploadProvider {
     }
   }
 
+  async uploadBuffer(
+    key: string,
+    buffer: Buffer,
+    contentType: string
+  ): Promise<string> {
+    const command = new PutObjectCommand({
+      Bucket: this._bucketName,
+      ACL: 'public-read',
+      Key: key,
+      Body: buffer,
+      ContentType: contentType,
+    });
+
+    await this._client.send(command);
+
+    return `${this._uploadUrl}/${key}`;
+  }
+
   // Implement the removeFile method from IUploadProvider
   async removeFile(filePath: string): Promise<void> {
     // const fileName = filePath.split('/').pop(); // Extract the filename from the path

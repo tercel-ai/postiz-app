@@ -2823,7 +2823,6 @@ export class EngageRepository {
     return JSON.stringify({ ...parsed, engageAuthor });
   }
 
-  /** Platform of a sent reply, scoped to the org (for backfill validation). */
   // Lightweight status of a single sent reply — for the frontends to poll while
   // an in-browser extension reply posts + self-backfills its permalink. Success
   // is signalled by `replyUrl` (Post.releaseURL) flipping non-null; the Post is

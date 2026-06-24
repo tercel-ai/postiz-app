@@ -2036,5 +2036,38 @@ describe('EngageRepository.getOrgScanStatus', () => {
       // touch drafts — otherwise a failed publish would lose the saved draft.
       expect(postDeleteMany).not.toHaveBeenCalled();
     });
+
+    it('claimOpportunityForReply throws 403 with a typed reason for a non-actionable status (already replied)', async () => {
+      const { repo, stateFindUnique, stateUpdateMany } = buildRepo();
+      stateFindUnique.mockResolvedValueOnce({ status: 'REPLIED' });
+
+      await expect(
+        repo.claimOpportunityForReply('org1', 'opp1', 'REPLIED')
+      ).rejects.toMatchObject({
+        status: 403,
+        response: { code: 'engage_opportunity_replied' },
+      });
+      // Rejected at the status gate — the CAS update must never run.
+      expect(stateUpdateMany).not.toHaveBeenCalled();
+    });
+
+    it('claimOpportunityForReply throws 409 when a concurrent request won the claim (CAS count=0)', async () => {
+      const { repo, stateFindUnique, stateUpdateMany } = buildRepo();
+      stateFindUnique.mockResolvedValueOnce({ status: 'NEW' });
+      stateUpdateMany.mockResolvedValue({ count: 0 });
+
+      await expect(
+        repo.claimOpportunityForReply('org1', 'opp1', 'REPLIED')
+      ).rejects.toMatchObject({ status: 409 });
+    });
+
+    it('claimOpportunityForReply throws 404 only when the per-org state row is genuinely missing', async () => {
+      const { repo, stateFindUnique } = buildRepo();
+      stateFindUnique.mockResolvedValueOnce(null);
+
+      await expect(
+        repo.claimOpportunityForReply('org1', 'missing', 'REPLIED')
+      ).rejects.toMatchObject({ status: 404 });
+    });
   });
 });

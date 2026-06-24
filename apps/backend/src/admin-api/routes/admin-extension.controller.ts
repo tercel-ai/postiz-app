@@ -10,9 +10,8 @@ import { ApiTags } from '@nestjs/swagger';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { SuperAdmin } from '@gitroom/backend/services/auth/admin/super-admin.decorator';
 import { SettingsService } from '@gitroom/nestjs-libraries/database/prisma/settings/settings.service';
+import { UploadFactory } from '@gitroom/nestjs-libraries/upload/upload.factory';
 import AdmZip from 'adm-zip';
-import { mkdirSync, writeFileSync } from 'fs';
-import { join } from 'path';
 
 type Platform = 'chrome' | 'firefox';
 const PLATFORMS: Platform[] = ['chrome', 'firefox'];
@@ -61,17 +60,13 @@ export class AdminExtensionController {
 
     const version = this._readVersionFromZip(file.buffer);
 
-    const uploadDir = process.env.UPLOAD_DIRECTORY;
-    if (!uploadDir) {
-      throw new BadRequestException('UPLOAD_DIRECTORY is not configured');
-    }
-    const extDir = join(uploadDir, 'extensions');
-    mkdirSync(extDir, { recursive: true });
-
     const filename = extensionFilename(platform, version);
-    writeFileSync(join(extDir, filename), file.buffer);
-
-    const downloadUrl = `${process.env.FRONTEND_URL}/uploads/extensions/${filename}`;
+    const storage = UploadFactory.createStorage();
+    const downloadUrl = await storage.uploadBuffer(
+      `extensions/${filename}`,
+      file.buffer,
+      'application/zip'
+    );
     const meta = { version, downloadUrl, releasedAt: new Date().toISOString() };
 
     await this._settingsService.set(settingKey(platform), meta, {

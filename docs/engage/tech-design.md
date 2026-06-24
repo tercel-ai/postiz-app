@@ -649,7 +649,8 @@ export class EngageController {
 
   // Save (upsert) an unpublished working draft — one DRAFT per opportunity. Content
   // may be AI-generated, edited, or HAND-TYPED (decoupled from generation). Stored as
-  // a Post(state=DRAFT)+EngageSentReply; surfaces only in /sent?status=awaiting. Does
+  // a Post(state=DRAFT)+EngageSentReply; surfaces in the default /sent ("All") list
+  // and in /sent?status=awaiting (but NOT in settled / /sent/stats). Does
   // NOT claim the opportunity, charge credits, or sync metrics. The leftover DRAFT is
   // auto-deleted when the opportunity is later sent/scheduled/manually replied.
   @Post('/opportunities/:id/save-draft')
@@ -668,7 +669,10 @@ export class EngageController {
   //   draft     = state=DRAFT                           (saved working copy, never sent)
   //   settled   = published OR scheduled        (已处理 — no further action needed)
   //   awaiting  = draft OR manual OR error      (待处理 — has content, not yet live)
-  // DRAFT is excluded everywhere except status=awaiting (not a sent reply).
+  // The default "All" list (no status) INCLUDES DRAFT so awaiting is always a subset
+  // of it. DRAFT is excluded from status=settled, from /sent/stats (a never-sent
+  // draft has no impressions and would deflate the response-rate cards), and from the
+  // dashboards — but NOT from the "All" list.
   @Get('/sent')
   listSentReplies(
     @GetOrgFromRequest() org: Organization,
