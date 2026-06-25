@@ -102,6 +102,15 @@ export const baseManifest = {
       matches: uniq([...postizAppHosts, frontendMatch]),
       js: ['src/pages/content/bridge.ts'],
     },
+    // MAIN-world, document_start interceptor on x.com: installs the fetch/XHR
+    // capture (x-capture.ts) BEFORE X's own scripts run, so the page's own
+    // UserTweets / SearchTimeline / TweetResultByRestId responses can be read.
+    {
+      matches: ['https://x.com/*', 'https://twitter.com/*'],
+      js: ['src/pages/content/x-capture.ts'],
+      run_at: 'document_start',
+      world: 'MAIN',
+    } as any,
   ],
   version: pkg.version,
   ...merge,

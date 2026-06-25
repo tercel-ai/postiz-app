@@ -10,7 +10,13 @@
 // undocumented and X rotates them; a stale value yields 404 (bad queryId) or
 // 400 (missing feature). Everything here fails GRACEFULLY (logs + returns null)
 // so a broken X path never crashes the scan/metrics loop or the Reddit path.
-// When X changes them, update X_QUERIES + X_SEARCH_FEATURES below.
+//
+// To survive rotation WITHOUT a code change, queryId/features are resolved at
+// runtime (resolveXOperation, ported from OpenCLI's approach) from the
+// community-maintained fa0311/twitter-openapi placeholder map, cached in
+// chrome.storage.session, and only fall back to the hardcoded X_QUERIES /
+// X_SEARCH_FEATURES below when the lookup fails. Update the constants only as a
+// last-resort offline fallback.
 
 // Public web-app bearer. Stable for years; shared by all unauthenticated &
 // session web requests (the per-user identity comes from the cookies).
@@ -41,6 +47,143 @@ async function getCt0(): Promise<string | null> {
   }
 }
 
+// ─── Dynamic queryId / features resolution (ported from OpenCLI) ──────────────
+//
+// X rotates the per-operation queryId + features set. Resolving them at runtime
+// from fa0311/twitter-openapi (which tracks the rotation) means search/metrics
+// self-heal instead of 404ing until a human ships new constants. Resolved values
+// are cached per operation in chrome.storage.session, so a healthy session pays
+// the network lookup at most once per TTL and survives SW suspend/resume.
+
+const PLACEHOLDER_URL =
+  'https://raw.githubusercontent.com/fa0311/twitter-openapi/refs/heads/main/src/config/placeholder.json';
+const OP_CACHE_PREFIX = 'aisee_x_op_';
+const OP_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6h
+
+export interface XOperation {
+  queryId: string;
+  features?: Record<string, boolean>;
+  fieldToggles?: Record<string, boolean>;
+}
+
+/**
+ * Coerce X's two flag shapes into a `{ name: true }` map: `featureSwitches`
+ * arrives as a `string[]`, `features`/`fieldToggles` as `{ name: boolean }`.
+ */
+export function flagsFrom(value: unknown): Record<string, boolean> {
+  if (Array.isArray(value)) {
+    return Object.fromEntries(
+      value
+        .filter((k): k is string => typeof k === 'string' && !!k)
+        .map((k) => [k, true])
+    );
+  }
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      (
+        Object.entries(value as Record<string, unknown>).filter(
+          ([k, v]) => typeof k === 'string' && !!k && typeof v === 'boolean'
+        ) as [string, boolean][]
+      )
+    );
+  }
+  return {};
+}
+
+/** Parse one operation entry from the placeholder map. Null if unusable. */
+export function parsePlaceholderEntry(entry: any): XOperation | null {
+  if (!entry || typeof entry.queryId !== 'string' || !entry.queryId) return null;
+  const features = flagsFrom(entry.features ?? entry.featureSwitches);
+  const fieldToggles = flagsFrom(entry.fieldToggles);
+  return {
+    queryId: entry.queryId,
+    features: Object.keys(features).length ? features : undefined,
+    fieldToggles: Object.keys(fieldToggles).length ? fieldToggles : undefined,
+  };
+}
+
+async function readCachedOp(operation: string): Promise<XOperation | null> {
+  try {
+    const key = OP_CACHE_PREFIX + operation;
+    const stored = await chrome.storage.session.get([key]);
+    const c = stored?.[key];
+    if (
+      c &&
+      typeof c.queryId === 'string' &&
+      typeof c.at === 'number' &&
+      Date.now() - c.at < OP_CACHE_TTL_MS
+    ) {
+      return {
+        queryId: c.queryId,
+        features: c.features,
+        fieldToggles: c.fieldToggles,
+      };
+    }
+  } catch {
+    // storage unavailable — treat as cache miss
+  }
+  return null;
+}
+
+async function writeCachedOp(operation: string, op: XOperation): Promise<void> {
+  try {
+    await chrome.storage.session.set({
+      [OP_CACHE_PREFIX + operation]: { ...op, at: Date.now() },
+    });
+  } catch {
+    // best-effort cache; ignore write failures
+  }
+}
+
+async function fetchPlaceholderOp(operation: string): Promise<XOperation | null> {
+  try {
+    // Public JSON (ACAO:*), so no x.com traffic and no extra host permission.
+    const res = await fetch(PLACEHOLDER_URL, {
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return parsePlaceholderEntry(data?.[operation]);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Resolve the live queryId (+ features/fieldToggles) for an operation, backed by
+ * a session cache and the hardcoded fallback. NEVER throws.
+ */
+export async function resolveXOperation(
+  operation: keyof typeof X_QUERIES
+): Promise<XOperation> {
+  const cached = await readCachedOp(operation);
+  if (cached) return cached;
+  const fresh = await fetchPlaceholderOp(operation);
+  if (fresh) {
+    await writeCachedOp(operation, fresh);
+    return fresh;
+  }
+  return { queryId: X_QUERIES[operation] }; // offline fallback
+}
+
+// ─── Global X request serializer ─────────────────────────────────────────────
+//
+// Every internal-GraphQL call to x.com (search paging AND metrics) is chained
+// here so at most ONE request to x.com is in flight at any moment. Keyword scans
+// therefore never overlap — not even with a concurrent metrics fetch. A burst of
+// parallel requests is exactly the machine-gun pattern X's anti-automation flags,
+// so single-flight serialization is a deliberate account-safety measure.
+let xRequestChain: Promise<unknown> = Promise.resolve();
+export function serializeXRequest<T>(run: () => Promise<T>): Promise<T> {
+  const next = xRequestChain.then(run, run);
+  // Swallow rejection on the chain tail so one failure can't poison the next.
+  xRequestChain = next.then(
+    () => undefined,
+    () => undefined
+  );
+  return next;
+}
+
 /**
  * Issue an authenticated GET GraphQL call. Returns the parsed `data` object, or
  * null on any failure (no session, missing ct0, non-2xx, unparseable body).
@@ -59,45 +202,54 @@ export async function xGraphqlGet<T = any>(
     return null;
   }
 
+  // Live queryId/features (self-heals across X rotation; hardcoded fallback on
+  // any failure). Dynamic features win when present — they track X's current set
+  // per operation; the caller-supplied `params.features` is the offline fallback.
+  const op = await resolveXOperation(operation);
+  const features = op.features ?? params.features;
+  const fieldToggles = op.fieldToggles ?? params.fieldToggles;
+
   const qs = new URLSearchParams();
   qs.set('variables', JSON.stringify(params.variables));
-  if (params.features) qs.set('features', JSON.stringify(params.features));
-  if (params.fieldToggles)
-    qs.set('fieldToggles', JSON.stringify(params.fieldToggles));
+  if (features) qs.set('features', JSON.stringify(features));
+  if (fieldToggles) qs.set('fieldToggles', JSON.stringify(fieldToggles));
 
-  const url = `${X_GRAPHQL_BASE}/${X_QUERIES[operation]}/${operation}?${qs.toString()}`;
-  try {
-    const res = await fetch(url, {
-      method: 'GET',
-      credentials: 'include',
-      headers: {
-        Authorization: `Bearer ${X_WEB_BEARER}`,
-        'x-csrf-token': ct0,
-        'x-twitter-active-user': 'yes',
-        'x-twitter-auth-type': 'OAuth2Session',
-        'x-twitter-client-language': 'en',
-        'content-type': 'application/json',
-        Accept: '*/*',
-      },
-      signal: AbortSignal.timeout(15_000),
-    });
-    if (res.status === 429) {
-      console.warn(`[aisee][x] ${operation} rate-limited (429)`);
+  const url = `${X_GRAPHQL_BASE}/${op.queryId}/${operation}?${qs.toString()}`;
+  // Single-flight: chain through serializeXRequest so no two x.com calls overlap.
+  return serializeXRequest(async () => {
+    try {
+      const res = await fetch(url, {
+        method: 'GET',
+        credentials: 'include',
+        headers: {
+          Authorization: `Bearer ${X_WEB_BEARER}`,
+          'x-csrf-token': ct0,
+          'x-twitter-active-user': 'yes',
+          'x-twitter-auth-type': 'OAuth2Session',
+          'x-twitter-client-language': 'en',
+          'content-type': 'application/json',
+          Accept: '*/*',
+        },
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (res.status === 429) {
+        console.warn(`[aisee][x] ${operation} rate-limited (429)`);
+        return null;
+      }
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        console.warn(
+          `[aisee][x] ${operation} ${res.status} (queryId/features may be stale): ${body.slice(0, 200)}`
+        );
+        return null;
+      }
+      const json = await res.json();
+      return (json?.data ?? null) as T | null;
+    } catch (e) {
+      console.warn(`[aisee][x] ${operation} fetch failed`, e);
       return null;
     }
-    if (!res.ok) {
-      const body = await res.text().catch(() => '');
-      console.warn(
-        `[aisee][x] ${operation} ${res.status} (queryId/features may be stale): ${body.slice(0, 200)}`
-      );
-      return null;
-    }
-    const json = await res.json();
-    return (json?.data ?? null) as T | null;
-  } catch (e) {
-    console.warn(`[aisee][x] ${operation} fetch failed`, e);
-    return null;
-  }
+  });
 }
 
 // A reasonably complete SearchTimeline feature set. X 400s on MISSING features,

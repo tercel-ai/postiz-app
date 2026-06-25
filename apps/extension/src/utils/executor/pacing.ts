@@ -3,6 +3,8 @@
 // account is catastrophic). All delays carry jitter so the rhythm never looks
 // automated, and an hourly request cap bounds total volume per browser.
 
+import type { ScanTaskPacing } from './executor.types';
+
 export const sleep = (ms: number): Promise<void> =>
   new Promise((r) => setTimeout(r, ms));
 
@@ -63,4 +65,19 @@ export async function tryConsumeHourly(cap: number): Promise<boolean> {
   win.push(Date.now());
   await writeWindow(win);
   return true;
+}
+
+// ─── Inter-keyword spacing ────────────────────────────────────────────────────
+//
+// The gap the runner waits BEFORE scanning the next unit (keyword). X searches
+// one keyword per round-trip with no pagination, so it reuses pageDelay/pageJitter
+// as the inter-keyword gap; every other platform keeps interUnitDelay/Jitter.
+export function selectUnitDelay(
+  platform: string,
+  pacing: ScanTaskPacing
+): { baseMs: number; jitterMs: number } {
+  if (platform === 'x') {
+    return { baseMs: pacing.pageDelayMs, jitterMs: pacing.pageJitterMs };
+  }
+  return { baseMs: pacing.interUnitDelayMs, jitterMs: pacing.interUnitJitterMs };
 }

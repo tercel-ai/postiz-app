@@ -11,6 +11,10 @@ import {
 import { runScanLoop } from '@gitroom/extension/utils/executor/scan.runner';
 import { runMetrics } from '@gitroom/extension/utils/executor/metrics.runner';
 import {
+  debugSearchKeyword,
+  debugFetchTweet,
+} from '@gitroom/extension/utils/executor/x.debug';
+import {
   ensureEngageScanAlarm,
   clearEngageScanAlarm,
   handleEngageAlarm,
@@ -285,6 +289,20 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
         console.error('[aisee] postReply error', e);
         sendResponse({ ok: false, error: String(e?.message || e) });
       });
+    return true;
+  }
+
+  // ─── X collection debug (Options page) — NO backend, tab+interceptor only ──
+  if (request.action === 'xdebug:search') {
+    debugSearchKeyword(request.keyword, request.limit)
+      .then((tweets) => sendResponse({ ok: true, tweets }))
+      .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
+    return true;
+  }
+  if (request.action === 'xdebug:tweet') {
+    debugFetchTweet(request.id)
+      .then((tweet) => sendResponse({ ok: true, tweet }))
+      .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
     return true;
   }
 

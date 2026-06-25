@@ -3,9 +3,12 @@
 //   keyword scope  → search the firehose for the keyword
 //   tracked scope  → `from:<username>` restricted search
 //   (no channel scope — X has no community concept here)
-// Incremental: SearchTimeline returns newest-first; we page via the bottom
-// cursor up to pacing.maxPages and stop once a tweet is not newer than the
-// cursor's lastSeenExternalId (since_id semantics).
+// Single-page incremental: SearchTimeline returns newest-first. Each keyword is
+// searched ONCE per round-trip — no pagination (maxPages is intentionally NOT
+// used for X, to keep request volume minimal for account safety). since_id
+// semantics still apply: collection stops at the first tweet not newer than the
+// cursor's lastSeenExternalId. The spacing BETWEEN keywords is applied by the
+// runner via pageDelay/pageJitter (see selectUnitDelay in pacing.ts).
 
 import {
   EngageScanTask,
@@ -13,7 +16,6 @@ import {
   ScanRunResult,
   ScanTaskCursor,
 } from './executor.types';
-import { applyDelay } from './pacing';
 import { xGraphqlGet, X_SEARCH_FEATURES } from './x.graphql';
 import { parseTweetResult, newerId, isNewerThan } from './x.parse';
 
@@ -22,12 +24,16 @@ import { parseTweetResult, newerId, isNewerThan } from './x.parse';
 // fallback if the server omits it (old build).
 const X_COUNT_FALLBACK = 20;
 
-function buildRawQuery(task: EngageScanTask): string {
+// Exactly ONE keyword (or one tracked handle) per query — scanKey is never split,
+// OR-joined, or batched with other units. Combined with the global single-flight
+// serializer in x.graphql (serializeXRequest) and the runner's `scanInFlight`
+// guard + `want:1` leasing, this guarantees one keyword is searched at a time.
+export function buildRawQuery(task: EngageScanTask): string {
   if (task.scanType === 'tracked') {
     // The account's own posts (original/quote/reply), not what it retweeted.
     return `from:${task.scanKey} -filter:retweets`;
   }
-  return task.scanKey; // keyword firehose
+  return task.scanKey; // single keyword, firehose
 }
 
 interface SearchEntry {
@@ -79,8 +85,11 @@ function toIngestPost(
 }
 
 /**
- * Scan one X unit. `gate` consumes one hourly-budget token per page fetch and
- * returns false when the cap is hit (the scan stops, backlog remains).
+ * Scan one X unit: ONE SearchTimeline request for the keyword (single page, no
+ * pagination). `gate` consumes one hourly-budget token. If the cap is hit the
+ * scan is skipped and the cursor is preserved (exhausted=false, backlog remains).
+ * On a successful fetch the round is complete (exhausted=true) — the next keyword
+ * is paced by the runner via pageDelay/pageJitter.
  */
 export async function scanX(
   task: EngageScanTask,
@@ -93,53 +102,38 @@ export async function scanX(
   const posts: ScanIngestPost[] = [];
   let newestId: string | undefined = sinceId;
   let newestAtMs = cursor.lastSeenAt ? new Date(cursor.lastSeenAt).getTime() : 0;
-  let pageCursor: string | undefined;
-  let exhausted = true;
-  let reachedSeen = false;
 
-  for (let page = 0; page < Math.max(1, pacing.maxPages); page++) {
-    if (!(await gate())) {
-      exhausted = false; // hourly cap hit; backlog remains
-      break;
-    }
-    if (page > 0) await applyDelay(pacing.pageDelayMs, pacing.pageJitterMs);
+  // Hourly cap reached → fetch nothing, keep the cursor, leave the backlog.
+  if (!(await gate())) {
+    return { posts, nextCursor: cursor, exhausted: false };
+  }
 
-    const variables: Record<string, unknown> = {
-      rawQuery,
-      count: pacing.pageSize || X_COUNT_FALLBACK,
-      querySource: 'typed_query',
-      product: 'Latest',
-    };
-    if (pageCursor) variables.cursor = pageCursor;
+  const variables: Record<string, unknown> = {
+    rawQuery,
+    count: pacing.pageSize || X_COUNT_FALLBACK,
+    querySource: 'typed_query',
+    product: 'Latest',
+  };
 
-    const data = await xGraphqlGet('SearchTimeline', {
-      variables,
-      features: X_SEARCH_FEATURES,
-    });
-    if (!data) {
-      // 404/400/429/parse error already logged; preserve partial progress.
-      exhausted = false;
-      break;
-    }
+  const data = await xGraphqlGet('SearchTimeline', {
+    variables,
+    features: X_SEARCH_FEATURES,
+  });
+  if (!data) {
+    // 404/400/429/parse error already logged; keep the cursor, retry next round.
+    return { posts, nextCursor: cursor, exhausted: false };
+  }
 
-    const { results, bottomCursor } = readPage(data);
-    if (!results.length) break; // no more tweets
-
-    for (const result of results) {
-      const t = parseTweetResult(result);
-      if (!t) continue;
-      if (!isNewerThan(t.id, sinceId)) {
-        reachedSeen = true; // newest-first → the rest are older/seen
-        break;
-      }
-      newestId = newerId(newestId, t.id);
-      const atMs = new Date(t.createdAt).getTime();
-      if (atMs > newestAtMs) newestAtMs = atMs;
-      posts.push(toIngestPost(t));
-    }
-
-    pageCursor = bottomCursor;
-    if (reachedSeen || !pageCursor) break;
+  // newest-first: collect until the first tweet we've already seen (since_id).
+  const { results } = readPage(data);
+  for (const result of results) {
+    const t = parseTweetResult(result);
+    if (!t) continue;
+    if (!isNewerThan(t.id, sinceId)) break; // the rest are older/already seen
+    newestId = newerId(newestId, t.id);
+    const atMs = new Date(t.createdAt).getTime();
+    if (atMs > newestAtMs) newestAtMs = atMs;
+    posts.push(toIngestPost(t));
   }
 
   const nextCursor: ScanTaskCursor = {
@@ -147,5 +141,5 @@ export async function scanX(
     lastSeenAt:
       newestAtMs > 0 ? new Date(newestAtMs).toISOString() : cursor.lastSeenAt,
   };
-  return { posts, nextCursor, exhausted };
+  return { posts, nextCursor, exhausted: true };
 }

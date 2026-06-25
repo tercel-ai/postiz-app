@@ -16,7 +16,12 @@ import {
 import { scanReddit } from './scan.reddit';
 import { scanX } from './scan.x';
 import { X_EXECUTOR_ENABLED } from './flags';
-import { applyDelay, remainingHourlyBudget, tryConsumeHourly } from './pacing';
+import {
+  applyDelay,
+  remainingHourlyBudget,
+  selectUnitDelay,
+  tryConsumeHourly,
+} from './pacing';
 
 const SCAN_ENDPOINT = '/engage/scan-tasks/ingest';
 // Safety bound on units processed in one drive (the loop also self-terminates
@@ -131,10 +136,10 @@ export async function runScanLoop(): Promise<ScanRunSummary> {
         break;
       }
       if (summary.units > 0) {
-        await applyDelay(
-          task.pacing.interUnitDelayMs,
-          task.pacing.interUnitJitterMs
-        );
+        // Inter-keyword spacing. X reuses pageDelay/pageJitter (it has no
+        // pagination — see scan.x.ts); other platforms use interUnit*.
+        const { baseMs, jitterMs } = selectUnitDelay(task.platform, task.pacing);
+        await applyDelay(baseMs, jitterMs);
       }
 
       const result = await scanOne(task);

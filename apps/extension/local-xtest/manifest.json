@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "X Collect Local Test",
+  "version": "0.0.1",
+  "description": "Standalone local test: collect X data via a background tab + document_start interceptor. No backend, no build step.",
+  "permissions": ["tabs", "scripting"],
+  "host_permissions": ["https://x.com/*", "https://twitter.com/*"],
+  "background": { "service_worker": "background.js" },
+  "options_page": "options.html",
+  "content_scripts": [
+    {
+      "matches": ["https://x.com/*", "https://twitter.com/*"],
+      "js": ["x-capture.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    }
+  ]
+}
