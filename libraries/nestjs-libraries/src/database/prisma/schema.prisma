@@ -1354,3 +1354,50 @@ model ApiUsageTick {
   @@unique([date, platform, category])
   @@index([date])
 }
+
+// Business-semantic API-usage telemetry. Complements ApiUsageTick (X official
+// billing granularity) by re-classifying the SAME recorded units under a
+// business purpose (bizCategory: post_publish / engage_reply / engage_scan /
+// post_metrics / engage_metrics / user_lookup / ...) and the owning org.
+// Populated automatically: recordApiUsage also writes a row here whenever a
+// business context is active (runWithBizUsage wraps the business entry points,
+// so every nested X/Reddit call inherits the purpose). Keeps the X billing
+// `category` alongside `bizCategory` so cost = SUM(quantity) * priceFor(platform,
+// category) stays computable PER business purpose. organizationId '' means
+// "no org / system-level job" (kept non-null so upserts merge — Prisma treats
+// NULLs as distinct in unique keys).
+model ApiBizUsageTick {
+  date           DateTime // day bucket (UTC midnight)
+  organizationId String // '' = system / no org
+  platform       String // 'x' | 'reddit' | ...
+  bizCategory    String // business purpose of the call
+  category       String // X billing category (mirrors ApiUsageTick.category)
+  quantity       BigInt   @default(0)
+  updatedAt      DateTime @updatedAt
+
+  @@unique([date, organizationId, platform, bizCategory, category])
+  @@index([date])
+  @@index([organizationId, date])
+}
+
+// Engage opportunity score distribution, per org/platform/day. `phase`
+// separates 'scanned' (every keyword-matched scored post, BEFORE the
+// ENGAGE_MIN_SCORE gate) from 'persisted' (the subset actually stored as
+// opportunities, score >= ENGAGE_MIN_SCORE). `bucket` is a fixed,
+// non-overlapping score band: '0-50' | '50-60' | '60-70' | '70-85' | '85-100'
+// (the top band is a catch-all that also covers 101-105, the scorer's true
+// max). Lets us report how many valid posts each quality tier yields without
+// scanning Post/EngageOpportunity rows.
+model EngageScoreTick {
+  date           DateTime // day bucket (UTC midnight)
+  organizationId String
+  platform       String // 'x' | 'reddit' | ...
+  phase          String // 'scanned' | 'persisted'
+  bucket         String // score band (non-overlapping)
+  quantity       BigInt   @default(0)
+  updatedAt      DateTime @updatedAt
+
+  @@unique([date, organizationId, platform, phase, bucket])
+  @@index([date])
+  @@index([organizationId, date])
+}

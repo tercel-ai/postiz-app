@@ -55,6 +55,10 @@ import {
   dispatchReplyMetricsSync,
   type MetricsSyncDeps,
 } from '@gitroom/nestjs-libraries/engage/engage-metrics-sync';
+import {
+  BIZ_USAGE,
+  runWithBizUsage,
+} from '@gitroom/nestjs-libraries/database/prisma/api-usage/api-usage.service';
 
 // Validate by DOMAIN only, not by full path shape — Reddit/X change their
 // permalink structure over time. The reply URL is only checked for the right
@@ -653,7 +657,9 @@ export class EngageService implements OnApplicationBootstrap {
     platform: string,
     url: string
   ): void {
-    void (async () => {
+    void runWithBizUsage(
+      { organizationId: orgId, bizCategory: BIZ_USAGE.ENGAGE_AUTHOR_ENRICH },
+      async () => {
       let engageAuthor: EngageAuthorProfile | null = null;
       if (platform === 'x') {
         engageAuthor = (await this._postsService.fetchEngageXAuthor(orgId, url)) ?? null;
@@ -669,7 +675,8 @@ export class EngageService implements OnApplicationBootstrap {
         return;
       }
       await this._engageRepository.updateReplyAuthor(orgId, sentReplyId, engageAuthor);
-    })().catch((err) =>
+      }
+    ).catch((err) =>
       this.logger.error(
         `storeReplyAuthor: background author enrichment failed for sentReplyId=${sentReplyId}:`,
         err instanceof Error ? err.stack : err
@@ -1540,7 +1547,13 @@ export class EngageService implements OnApplicationBootstrap {
     const deps = this._metricsSyncDeps();
     for (const row of rows) {
       try {
-        await dispatchReplyMetricsSync(row, deps);
+        await runWithBizUsage(
+          {
+            organizationId: row.organizationId,
+            bizCategory: BIZ_USAGE.ENGAGE_METRICS,
+          },
+          () => dispatchReplyMetricsSync(row, deps)
+        );
       } catch (err) {
         this.logger.warn(
           `_runMetricsSyncForReplies: failed for sentReplyId=${row.id}: ${
@@ -1583,7 +1596,13 @@ export class EngageService implements OnApplicationBootstrap {
     for (const reply of pending) {
       if (dryRun) continue;
       try {
-        const outcome = await dispatchReplyMetricsSync(reply, this._metricsSyncDeps());
+        const outcome = await runWithBizUsage(
+          {
+            organizationId: reply.organizationId,
+            bizCategory: BIZ_USAGE.ENGAGE_METRICS,
+          },
+          () => dispatchReplyMetricsSync(reply, this._metricsSyncDeps())
+        );
         tally[outcome]++;
       } catch (err) {
         this.logger.warn(`resyncEngageMetrics: failed for sentReplyId=${reply.id}: ${(err as Error).message}`);

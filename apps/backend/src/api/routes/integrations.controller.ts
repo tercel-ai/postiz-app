@@ -16,6 +16,10 @@ import { Request } from 'express';
 import { ioRedis } from '@gitroom/nestjs-libraries/redis/redis.service';
 import { ConnectIntegrationDto } from '@gitroom/nestjs-libraries/dtos/integrations/connect.integration.dto';
 import { IntegrationManager } from '@gitroom/nestjs-libraries/integrations/integration.manager';
+import {
+  BIZ_USAGE,
+  runWithBizUsage,
+} from '@gitroom/nestjs-libraries/database/prisma/api-usage/api-usage.service';
 import { IntegrationService } from '@gitroom/nestjs-libraries/database/prisma/integrations/integration.service';
 import { GetOrgFromRequest } from '@gitroom/nestjs-libraries/user/org.from.request';
 import { Organization, User } from '@prisma/client';
@@ -409,7 +413,11 @@ export class IntegrationsController {
 
     let newList: any[] | { none: true } = [];
     try {
-      newList = (await this.functionIntegration(org, body)) || [];
+      newList =
+        (await runWithBizUsage(
+          { organizationId: org.id, bizCategory: BIZ_USAGE.MENTION_SCAN },
+          () => this.functionIntegration(org, body)
+        )) || [];
     } catch (err) {
       console.log(err);
     }
@@ -487,11 +495,15 @@ export class IntegrationsController {
     let currentToken = getIntegration.token;
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        const result = await integrationProvider.fetchUserByUsername(
-          currentToken,
-          { username: body.username },
-          getIntegration.internalId,
-          { ...getIntegration, token: currentToken }
+        const result = await runWithBizUsage(
+          { organizationId: org.id, bizCategory: BIZ_USAGE.USER_LOOKUP },
+          () =>
+            integrationProvider.fetchUserByUsername(
+              currentToken,
+              { username: body.username },
+              getIntegration.internalId,
+              { ...getIntegration, token: currentToken }
+            )
         );
 
         if (result && 'supported' in result && result.supported === false) {

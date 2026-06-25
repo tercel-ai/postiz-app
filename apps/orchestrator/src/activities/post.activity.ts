@@ -27,6 +27,19 @@ import {
 } from '@gitroom/nestjs-libraries/temporal/temporal.search.attribute';
 import { getSocialTaskQueue } from '@gitroom/nestjs-libraries/temporal/task-queue';
 import { PrismaRepository } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
+import {
+  BIZ_USAGE,
+  runWithBizUsage,
+} from '@gitroom/nestjs-libraries/database/prisma/api-usage/api-usage.service';
+
+// A publish/comment activity serves either an active calendar post or an engage
+// reply; the Post.source field (set at creation) is the discriminator that
+// drives business-usage attribution for every X/Reddit call it makes.
+function publishBizCategory(posts: Post[]): string {
+  return posts[0]?.source === 'engage'
+    ? BIZ_USAGE.ENGAGE_REPLY
+    : BIZ_USAGE.POST_PUBLISH;
+}
 
 @Injectable()
 @Activity()
@@ -162,31 +175,38 @@ export class PostActivity {
       posts
     );
 
-    return getIntegration.comment(
-      integration.internalId,
-      postId,
-      lastPostId,
-      integration.token,
-      await Promise.all(
-        (newPosts || []).map(async (p) => ({
-          id: p.id,
-          message: stripHtmlValidation(
-            getIntegration.editor,
-            p.content,
-            true,
-            false,
-            !/<\/?[a-z][\s\S]*>/i.test(p.content),
-            getIntegration.mentionFormat
+    return runWithBizUsage(
+      {
+        organizationId: integration.organizationId,
+        bizCategory: publishBizCategory(posts),
+      },
+      async () =>
+        getIntegration.comment(
+          integration.internalId,
+          postId,
+          lastPostId,
+          integration.token,
+          await Promise.all(
+            (newPosts || []).map(async (p) => ({
+              id: p.id,
+              message: stripHtmlValidation(
+                getIntegration.editor,
+                p.content,
+                true,
+                false,
+                !/<\/?[a-z][\s\S]*>/i.test(p.content),
+                getIntegration.mentionFormat
+              ),
+              settings: JSON.parse(p.settings || '{}'),
+              media: await this._postService.updateMedia(
+                p.id,
+                JSON.parse(p.image || '[]'),
+                getIntegration?.convertToJPEG || false
+              ),
+            }))
           ),
-          settings: JSON.parse(p.settings || '{}'),
-          media: await this._postService.updateMedia(
-            p.id,
-            JSON.parse(p.image || '[]'),
-            getIntegration?.convertToJPEG || false
-          ),
-        }))
-      ),
-      integration
+          integration
+        )
     );
   }
 
@@ -201,29 +221,36 @@ export class PostActivity {
       posts
     );
 
-    return getIntegration.post(
-      integration.internalId,
-      integration.token,
-      await Promise.all(
-        (newPosts || []).map(async (p) => ({
-          id: p.id,
-          message: stripHtmlValidation(
-            getIntegration.editor,
-            p.content,
-            true,
-            false,
-            !/<\/?[a-z][\s\S]*>/i.test(p.content),
-            getIntegration.mentionFormat
+    return runWithBizUsage(
+      {
+        organizationId: integration.organizationId,
+        bizCategory: publishBizCategory(posts),
+      },
+      async () =>
+        getIntegration.post(
+          integration.internalId,
+          integration.token,
+          await Promise.all(
+            (newPosts || []).map(async (p) => ({
+              id: p.id,
+              message: stripHtmlValidation(
+                getIntegration.editor,
+                p.content,
+                true,
+                false,
+                !/<\/?[a-z][\s\S]*>/i.test(p.content),
+                getIntegration.mentionFormat
+              ),
+              settings: JSON.parse(p.settings || '{}'),
+              media: await this._postService.updateMedia(
+                p.id,
+                JSON.parse(p.image || '[]'),
+                getIntegration?.convertToJPEG || false
+              ),
+            }))
           ),
-          settings: JSON.parse(p.settings || '{}'),
-          media: await this._postService.updateMedia(
-            p.id,
-            JSON.parse(p.image || '[]'),
-            getIntegration?.convertToJPEG || false
-          ),
-        }))
-      ),
-      integration
+          integration
+        )
     );
   }
 
@@ -348,20 +375,27 @@ export class PostActivity {
       getIntegration.mentionFormat
     );
 
-    return getIntegration.comment!(
-      integration.internalId,
-      mainPostId,
-      lastCommentId,
-      integration.token,
-      [
-        {
-          id: `finisher-${mainPostId}`,
-          message: message + '\n' + releaseURL,
-          settings: {},
-          media: [],
-        },
-      ],
-      integration
+    return runWithBizUsage(
+      {
+        organizationId: integration.organizationId,
+        bizCategory: BIZ_USAGE.POST_PUBLISH,
+      },
+      () =>
+        getIntegration.comment!(
+          integration.internalId,
+          mainPostId,
+          lastCommentId,
+          integration.token,
+          [
+            {
+              id: `finisher-${mainPostId}`,
+              message: message + '\n' + releaseURL,
+              settings: {},
+              media: [],
+            },
+          ],
+          integration
+        )
     );
   }
 

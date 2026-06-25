@@ -20,6 +20,10 @@ import { ioRedis } from '@gitroom/nestjs-libraries/redis/redis.service';
 import { RefreshToken } from '@gitroom/nestjs-libraries/integrations/social.abstract';
 import { UploadFactory } from '@gitroom/nestjs-libraries/upload/upload.factory';
 import { PlugDto } from '@gitroom/nestjs-libraries/dtos/plugs/plug.dto';
+import {
+  BIZ_USAGE,
+  runWithBizUsage,
+} from '@gitroom/nestjs-libraries/database/prisma/api-usage/api-usage.service';
 import { difference, uniq } from 'lodash';
 import { PostingTimesV2 } from '@gitroom/nestjs-libraries/dtos/integrations/posting-times.types';
 import {
@@ -723,12 +727,16 @@ export class IntegrationService {
       getIntegration.providerIdentifier
     );
 
-    // @ts-ignore
-    await getSocialIntegration?.[getAllInternalPlugs.methodName]?.(
-      getIntegration,
-      originalIntegration,
-      data.post,
-      data.information
+    await runWithBizUsage(
+      { organizationId: data.orgId, bizCategory: BIZ_USAGE.AUTO_PLUG },
+      async () =>
+        // @ts-ignore
+        getSocialIntegration?.[getAllInternalPlugs.methodName]?.(
+          getIntegration,
+          originalIntegration,
+          data.post,
+          data.information
+        )
     );
 
     return;
@@ -750,14 +758,21 @@ export class IntegrationService {
       getPlugById.integration.providerIdentifier
     );
 
-    // @ts-ignore
-    const process = await integration[getPlugById.plugFunction](
-      getPlugById.integration,
-      data.postId,
-      JSON.parse(getPlugById.data).reduce((all: any, current: any) => {
-        all[current.name] = current.value;
-        return all;
-      }, {})
+    const process = await runWithBizUsage(
+      {
+        organizationId: getPlugById.integration.organizationId,
+        bizCategory: BIZ_USAGE.AUTO_REPOST,
+      },
+      async () =>
+        // @ts-ignore
+        integration[getPlugById.plugFunction](
+          getPlugById.integration,
+          data.postId,
+          JSON.parse(getPlugById.data).reduce((all: any, current: any) => {
+            all[current.name] = current.value;
+            return all;
+          }, {})
+        )
     );
 
     if (process) {

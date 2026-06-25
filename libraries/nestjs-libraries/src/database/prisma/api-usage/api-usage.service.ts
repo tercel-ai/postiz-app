@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
 
@@ -33,6 +34,49 @@ export const X_USAGE = {
   LIST_CREATE: 'list_create',
   TRENDS: 'trends',
 } as const;
+
+// ─── Business-semantic categories ───────────────────────────────────────────
+// Orthogonal to the X billing `category` above: the SAME billed unit is also
+// classified by what business action triggered it. Threaded via runWithBizUsage
+// at the business entry points (the deep provider calls inherit it), then
+// persisted in ApiBizUsageTick(date, org, platform, bizCategory, category).
+// Platform-agnostic on purpose — engage scan/reply/metrics apply to Reddit too.
+export const BIZ_USAGE = {
+  POST_PUBLISH: 'post_publish', // active publishing (Post.source = 'calendar')
+  ENGAGE_REPLY: 'engage_reply', // engage reply (Post.source = 'engage')
+  POST_METRICS: 'post_metrics', // metrics monitoring for active posts
+  ENGAGE_METRICS: 'engage_metrics', // metrics monitoring for engage replies
+  ENGAGE_SCAN: 'engage_scan', // engage opportunity discovery scan
+  USER_LOOKUP: 'user_lookup', // standalone user-info query
+  ENGAGE_AUTHOR_ENRICH: 'engage_author_enrich', // reply author profile/avatar
+  AUTO_REPOST: 'auto_repost', // auto-repost automation
+  AUTO_PLUG: 'auto_plug', // auto-plug automation
+  ACCOUNT_METRICS: 'account_metrics', // account-level (not per-post) metrics
+  MENTION_SCAN: 'mention_scan', // mention monitoring
+} as const;
+
+export type BizCategory = (typeof BIZ_USAGE)[keyof typeof BIZ_USAGE];
+
+// Fixed, non-overlapping engage score bands. Lower-exclusive / upper-inclusive
+// except the first (0-inclusive). The top band is a catch-all that also covers
+// 101-105 (the scorer's true max), so no scored post is ever dropped.
+export const ENGAGE_SCORE_BUCKETS = [
+  '0-50',
+  '50-60',
+  '60-70',
+  '70-85',
+  '85-100',
+] as const;
+export type EngageScoreBucket = (typeof ENGAGE_SCORE_BUCKETS)[number];
+export type EngageScorePhase = 'scanned' | 'persisted';
+
+export function engageScoreBucket(score: number): EngageScoreBucket {
+  if (score <= 50) return '0-50';
+  if (score <= 60) return '50-60';
+  if (score <= 70) return '60-70';
+  if (score <= 85) return '70-85';
+  return '85-100'; // catch-all: 85 < score (incl. 86-105)
+}
 
 // USD per unit (record for reads, request for writes).
 export const API_PRICE_USD: Record<string, Record<string, number>> = {
@@ -112,7 +156,8 @@ export class ApiUsageService {
     platform: string,
     category: string,
     quantity: number,
-    when: Date = new Date()
+    when: Date = new Date(),
+    biz?: BizUsageContext
   ): Promise<void> {
     if (!quantity || quantity <= 0) return;
     const date = dayBucket(when);
@@ -129,6 +174,94 @@ export class ApiUsageService {
           err
         )}`
       );
+    }
+
+    // Mirror the same unit under its business purpose when a context is active.
+    // Independent of the cost upsert above: a failure in one must not skip the
+    // other, and either may legitimately be unwired in some processes.
+    if (biz?.bizCategory) {
+      const organizationId = biz.organizationId ?? '';
+      try {
+        await this._prisma.apiBizUsageTick.upsert({
+          where: {
+            date_organizationId_platform_bizCategory_category: {
+              date,
+              organizationId,
+              platform,
+              bizCategory: biz.bizCategory,
+              category,
+            },
+          },
+          create: {
+            date,
+            organizationId,
+            platform,
+            bizCategory: biz.bizCategory,
+            category,
+            quantity: BigInt(quantity),
+          },
+          update: { quantity: { increment: BigInt(quantity) } },
+        });
+      } catch (err) {
+        this._logger.warn(
+          `apiBizUsage record failed (${platform}/${biz.bizCategory}/${category} +${quantity}): ${String(
+            err
+          )}`
+        );
+      }
+    }
+  }
+
+  /**
+   * Record an engage score distribution for one org/platform/phase: bucket the
+   * raw scores and increment per-band counters. Fire-and-forget by contract —
+   * never throws, never blocks the scan/ingest. `phase` separates 'scanned'
+   * (every keyword-matched scored post) from 'persisted' (the >= MIN_SCORE
+   * subset stored as opportunities).
+   */
+  async recordScores(
+    organizationId: string,
+    platform: string,
+    phase: EngageScorePhase,
+    scores: number[],
+    when: Date = new Date()
+  ): Promise<void> {
+    if (!scores.length) return;
+    const counts = new Map<string, number>();
+    for (const s of scores) {
+      const bucket = engageScoreBucket(s);
+      counts.set(bucket, (counts.get(bucket) ?? 0) + 1);
+    }
+    const date = dayBucket(when);
+    for (const [bucket, quantity] of counts) {
+      try {
+        await this._prisma.engageScoreTick.upsert({
+          where: {
+            date_organizationId_platform_phase_bucket: {
+              date,
+              organizationId,
+              platform,
+              phase,
+              bucket,
+            },
+          },
+          create: {
+            date,
+            organizationId,
+            platform,
+            phase,
+            bucket,
+            quantity: BigInt(quantity),
+          },
+          update: { quantity: { increment: BigInt(quantity) } },
+        });
+      } catch (err) {
+        this._logger.warn(
+          `engageScore record failed (${organizationId}/${platform}/${phase}/${bucket} +${quantity}): ${String(
+            err
+          )}`
+        );
+      }
     }
   }
 
@@ -204,6 +337,87 @@ export class ApiUsageService {
       })
       .sort((a, b) => (a.date < b.date ? -1 : 1));
   }
+
+  /**
+   * Business-purpose cost report over [from, to) (UTC), grouped by
+   * org+platform+bizCategory+category, with USD cost reusing the X price map.
+   * Pass `organizationId` to scope to one org (omit for all orgs / system).
+   * Internal/admin use.
+   */
+  async reportBiz(
+    from: Date,
+    to: Date,
+    organizationId?: string
+  ): Promise<{
+    items: {
+      organizationId: string;
+      platform: string;
+      bizCategory: string;
+      category: string;
+      quantity: number;
+      costUsd: number;
+    }[];
+    totalUsd: number;
+  }> {
+    const rows = await this._prisma.apiBizUsageTick.groupBy({
+      by: ['organizationId', 'platform', 'bizCategory', 'category'],
+      where: {
+        date: { gte: dayBucket(from), lt: dayBucket(to) },
+        ...(organizationId != null ? { organizationId } : {}),
+      },
+      _sum: { quantity: true },
+    });
+    const items = rows.map((r) => {
+      const quantity = Number(r._sum.quantity ?? BigInt(0));
+      return {
+        organizationId: r.organizationId,
+        platform: r.platform,
+        bizCategory: r.bizCategory,
+        category: r.category,
+        quantity,
+        costUsd: quantity * priceFor(r.platform, r.category),
+      };
+    });
+    return {
+      items,
+      totalUsd: items.reduce((s, i) => s + i.costUsd, 0),
+    };
+  }
+
+  /**
+   * Engage score distribution over [from, to) (UTC), grouped by
+   * org+platform+phase+bucket. Pass `organizationId` to scope to one org.
+   * Internal/admin use.
+   */
+  async reportScores(
+    from: Date,
+    to: Date,
+    organizationId?: string
+  ): Promise<
+    {
+      organizationId: string;
+      platform: string;
+      phase: string;
+      bucket: string;
+      quantity: number;
+    }[]
+  > {
+    const rows = await this._prisma.engageScoreTick.groupBy({
+      by: ['organizationId', 'platform', 'phase', 'bucket'],
+      where: {
+        date: { gte: dayBucket(from), lt: dayBucket(to) },
+        ...(organizationId != null ? { organizationId } : {}),
+      },
+      _sum: { quantity: true },
+    });
+    return rows.map((r) => ({
+      organizationId: r.organizationId,
+      platform: r.platform,
+      phase: r.phase,
+      bucket: r.bucket,
+      quantity: Number(r._sum.quantity ?? BigInt(0)),
+    }));
+  }
 }
 
 // ─── Process-wide recorder for DI-less call sites ───────────────────────────
@@ -218,11 +432,52 @@ function setApiUsageRecorder(svc: ApiUsageService): void {
   _recorder = svc;
 }
 
+// ─── Business-purpose context (AsyncLocalStorage) ───────────────────────────
+// The business entry points (controllers, Temporal activities) wrap their work
+// in `runWithBizUsage`; every X/Reddit call made within that async scope — no
+// matter how deep in the provider — has its recorded units automatically also
+// attributed to (organizationId, bizCategory) via getBizUsageContext below.
+// This keeps the deep recordApiUsage call sites untouched. Works within a single
+// process/call stack only (which is exactly where a provider call executes).
+export interface BizUsageContext {
+  organizationId?: string; // '' / undefined ⇒ stored as '' (system / no org)
+  bizCategory: string; // one of BIZ_USAGE
+}
+
+const _bizContext = new AsyncLocalStorage<BizUsageContext>();
+
+/** Run `fn` with a business-usage context active for all nested API calls. */
+export function runWithBizUsage<T>(ctx: BizUsageContext, fn: () => T): T {
+  return _bizContext.run(ctx, fn);
+}
+
+/** The business-usage context active on the current async stack, if any. */
+export function getBizUsageContext(): BizUsageContext | undefined {
+  return _bizContext.getStore();
+}
+
 export function recordApiUsage(
   platform: string,
   category: string,
   quantity: number
 ): void {
+  // Capture the business context synchronously at the call site (still inside
+  // the runWithBizUsage scope) before the async record() detaches it.
+  const biz = getBizUsageContext();
   // Fire-and-forget: do not await, do not surface errors to the caller.
-  void _recorder?.record(platform, category, quantity);
+  void _recorder?.record(platform, category, quantity, undefined, biz);
+}
+
+/**
+ * Record an engage score distribution (DI-less entry point, mirrors
+ * recordApiUsage). Buckets `scores` and increments per-band counters for the
+ * given org/platform/phase. Safe no-op before the recorder is constructed.
+ */
+export function recordEngageScores(
+  organizationId: string,
+  platform: string,
+  phase: EngageScorePhase,
+  scores: number[]
+): void {
+  void _recorder?.recordScores(organizationId, platform, phase, scores);
 }

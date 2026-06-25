@@ -10,6 +10,10 @@ import {
   scorePost,
 } from '@gitroom/nestjs-libraries/engage/engage-scorer';
 import { EngageIntentClassifierService } from '@gitroom/nestjs-libraries/engage/engage-intent-classifier.service';
+import {
+  EngageScorePhase,
+  recordEngageScores,
+} from '@gitroom/nestjs-libraries/database/prisma/api-usage/api-usage.service';
 
 // Max concurrent upserts per phase. The posts array is unbounded (a scan unit's
 // full yield), so an un-chunked Promise.all can exhaust the Prisma pool.
@@ -125,6 +129,16 @@ export class EngageScanIngestService {
    * keywords), this is where the per-org keyword match happens server-side.
    */
   scoreForOrg(posts: RawPost[], ctx: OrgScanContext): ScoredPost[] {
+    return this.scoreAllForOrg(posts, ctx).filter((p) => p.score >= MIN_SCORE);
+  }
+
+  /**
+   * Score a scan unit's posts WITHOUT the MIN_SCORE gate: every keyword-matched
+   * post (scorePost non-null), regardless of total score. The gated subset is
+   * `scoreForOrg`. Exposed so ingest can record the full 'scanned' score
+   * distribution before the gate drops low-quality posts.
+   */
+  scoreAllForOrg(posts: RawPost[], ctx: OrgScanContext): ScoredPost[] {
     if (!ctx.keywords.length) return [];
 
     const trackedUsernames = new Set(
@@ -147,7 +161,30 @@ export class EngageScanIngestService {
         return tracked ? { ...p, isFromTrackedAccount: true } : p;
       })
       .map((p) => scorePost(p, ctx.keywords))
-      .filter((p): p is ScoredPost => p !== null && p.score >= MIN_SCORE);
+      .filter((p): p is ScoredPost => p !== null);
+  }
+
+  /**
+   * Record the engage score distribution for one phase, grouped by platform (a
+   * scan unit is normally single-platform, but back-attribution may mix). Each
+   * scored post's total score is bucketed into a fixed non-overlapping band.
+   * Fire-and-forget telemetry — never blocks ingest.
+   */
+  private recordScoreDistribution(
+    organizationId: string,
+    phase: EngageScorePhase,
+    scored: ScoredPost[]
+  ): void {
+    if (!scored.length) return;
+    const byPlatform = new Map<string, number[]>();
+    for (const p of scored) {
+      const list = byPlatform.get(p.platform) ?? [];
+      list.push(p.score);
+      byPlatform.set(p.platform, list);
+    }
+    for (const [platform, scores] of byPlatform) {
+      recordEngageScores(organizationId, platform, phase, scores);
+    }
   }
 
   /**
@@ -157,8 +194,13 @@ export class EngageScanIngestService {
    * the per-org keyword gate so channel/tracked firehose noise is dropped here.
    */
   async ingestForOrg(ctx: OrgScanContext, posts: RawPost[]): Promise<number> {
-    const scored = this.scoreForOrg(posts, ctx);
+    // Score everything first so the 'scanned' distribution captures posts that
+    // the MIN_SCORE gate will drop (the low buckets), then gate for persistence.
+    const allScored = this.scoreAllForOrg(posts, ctx);
+    this.recordScoreDistribution(ctx.organizationId, 'scanned', allScored);
+    const scored = allScored.filter((p) => p.score >= MIN_SCORE);
     if (!scored.length) return 0;
+    this.recordScoreDistribution(ctx.organizationId, 'persisted', scored);
     const classified = await this.classifyIntents(scored);
     await this.persistOpportunities(ctx.organizationId, classified);
     await this.updateKeywordHitCounts(ctx.organizationId, classified, ctx.keywords);

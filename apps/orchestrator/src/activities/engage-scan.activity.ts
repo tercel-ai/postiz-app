@@ -26,6 +26,10 @@ import {
 } from '@gitroom/nestjs-libraries/engage/engage-scan-lease.service';
 import { EngageKeyword } from '@prisma/client';
 import { getRedditToken } from '@gitroom/nestjs-libraries/engage/reddit-auth';
+import {
+  BIZ_USAGE,
+  runWithBizUsage,
+} from '@gitroom/nestjs-libraries/database/prisma/api-usage/api-usage.service';
 import { XScanAdapter } from '@gitroom/nestjs-libraries/engage/scan/x-scan-adapter';
 import { RedditScanAdapter } from '@gitroom/nestjs-libraries/engage/scan/reddit-scan-adapter';
 import { TokenPool } from '@gitroom/nestjs-libraries/engage/scan/token-pool';
@@ -585,28 +589,36 @@ export class EngageScanActivity {
         Date.now() - settings.lookbackHours * 3_600_000
       );
       const adapter = platform === 'x' ? this._xAdapter : this._redditAdapter;
-      const result = await adapter.searchScoped({
-        scope: { type: 'keyword' },
-        keywords: claimedKeywords,
-        cursor: platform === 'reddit' ? { lastSeenAt: lookback } : {},
-        budget: await this._pacingBudget(platform, 'initial', budget.maxCalls),
-        // X has no time-cursor here (cursor:{}), so bound the lookback via the
-        // adapter's start_time floor — mirrors Reddit's `lastSeenAt: lookback`.
-        freshnessWindowMs:
-          platform === 'x' ? settings.lookbackHours * 3_600_000 : undefined,
-        token,
-        log: {
-          log: (m) => this.logger.log(`[initial-scan] ${m}`),
-          warn: (m) => this.logger.warn(`[initial-scan] ${m}`),
-        },
-        heartbeat: (p) =>
-          this._heartbeat({
-            stage: 'keyword_initial_scan',
-            keywordIds: claimedRows.map((row) => row.keywordId),
-            platform,
-            progress: p,
-          }),
-      });
+      // Scan API cost is a SHARED/system cost: one search serves every org that
+      // subscribes to these keywords (the per-org value is the score
+      // distribution recorded in EngageScoreTick during fan-out). So attribute
+      // it to org '' (system), not to any single org.
+      const result = await runWithBizUsage(
+        { bizCategory: BIZ_USAGE.ENGAGE_SCAN },
+        async () =>
+          adapter.searchScoped({
+            scope: { type: 'keyword' },
+            keywords: claimedKeywords,
+            cursor: platform === 'reddit' ? { lastSeenAt: lookback } : {},
+            budget: await this._pacingBudget(platform, 'initial', budget.maxCalls),
+            // X has no time-cursor here (cursor:{}), so bound the lookback via the
+            // adapter's start_time floor — mirrors Reddit's `lastSeenAt: lookback`.
+            freshnessWindowMs:
+              platform === 'x' ? settings.lookbackHours * 3_600_000 : undefined,
+            token,
+            log: {
+              log: (m) => this.logger.log(`[initial-scan] ${m}`),
+              warn: (m) => this.logger.warn(`[initial-scan] ${m}`),
+            },
+            heartbeat: (p) =>
+              this._heartbeat({
+                stage: 'keyword_initial_scan',
+                keywordIds: claimedRows.map((row) => row.keywordId),
+                platform,
+                progress: p,
+              }),
+          })
+      );
       if (platform === 'x' && token) {
         xPool.report(token, result.rate);
       }
@@ -923,27 +935,37 @@ export class EngageScanActivity {
     }
 
     try {
-      const result = await adapter.searchScoped({
-        scope: args.scope,
-        keywords: args.keywords,
-        cursor: {
-          lastSeenExternalId: cursor.lastSeenExternalId,
-          lastSeenAt: cursor.lastSeenAt,
-        },
-        budget: await this._pacingBudget(args.platform, 'incremental', SCAN_MAX_CALLS),
-        // Freshness cap per platform (X via start_time, Reddit via its sort=new
-        // stop line); undefined ⇒ adapter keeps legacy (uncapped) behaviour.
-        freshnessWindowMs:
-          args.platform === 'x'
-            ? this._xFreshnessWindowMs
-            : this._redditFreshnessWindowMs,
-        token,
-        log: {
-          log: (m) => this.logger.log(m),
-          warn: (m) => this.logger.warn(m),
-        },
-        heartbeat: (p) => this._heartbeat(p),
-      });
+      // Shared/system scan cost (one unit serves all subscribing orgs); see the
+      // initial-scan note above. org '' = system.
+      const result = await runWithBizUsage(
+        { bizCategory: BIZ_USAGE.ENGAGE_SCAN },
+        async () =>
+          adapter.searchScoped({
+            scope: args.scope,
+            keywords: args.keywords,
+            cursor: {
+              lastSeenExternalId: cursor.lastSeenExternalId,
+              lastSeenAt: cursor.lastSeenAt,
+            },
+            budget: await this._pacingBudget(
+              args.platform,
+              'incremental',
+              SCAN_MAX_CALLS
+            ),
+            // Freshness cap per platform (X via start_time, Reddit via its sort=new
+            // stop line); undefined ⇒ adapter keeps legacy (uncapped) behaviour.
+            freshnessWindowMs:
+              args.platform === 'x'
+                ? this._xFreshnessWindowMs
+                : this._redditFreshnessWindowMs,
+            token,
+            log: {
+              log: (m) => this.logger.log(m),
+              warn: (m) => this.logger.warn(m),
+            },
+            heartbeat: (p) => this._heartbeat(p),
+          })
+      );
       if (args.platform === 'x' && token && args.xPool) {
         args.xPool.report(token, result.rate);
       }

@@ -21,6 +21,10 @@ import {
   PostAnalyticsCreditService,
   PostAnalyticsCreditsConfig,
 } from './post-analytics-credit.service';
+import {
+  BIZ_USAGE,
+  runWithBizUsage,
+} from '@gitroom/nestjs-libraries/database/prisma/api-usage/api-usage.service';
 
 dayjs.extend(utc);
 dayjs.extend(isoWeek);
@@ -95,7 +99,12 @@ export class DataTicksService {
 
     for (const [orgId] of integrationsByOrg) {
       try {
-        const count = await this._syncOrgDailyTicks(orgId, date.toDate());
+        // Active-post metrics monitoring: engage replies are excluded from this
+        // global analytics job, so everything here is post_metrics for `orgId`.
+        const count = await runWithBizUsage(
+          { organizationId: orgId, bizCategory: BIZ_USAGE.POST_METRICS },
+          () => this._syncOrgDailyTicks(orgId, date.toDate())
+        );
         totalUpserted += count;
       } catch (err) {
         totalErrors++;
@@ -594,9 +603,12 @@ export class DataTicksService {
       token = refreshed.accessToken;
     }
 
-    const metrics = await provider.accountMetrics(
-      integration.internalId,
-      token
+    const metrics = await runWithBizUsage(
+      {
+        organizationId: integration.organizationId,
+        bizCategory: BIZ_USAGE.ACCOUNT_METRICS,
+      },
+      () => provider.accountMetrics!(integration.internalId, token)
     );
     if (!metrics || Object.keys(metrics).length === 0) return null;
 
