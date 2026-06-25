@@ -19,15 +19,17 @@ import {
 } from '@gitroom/nestjs-libraries/engage/engage-entitlement.service';
 import { EngageScanConfigService } from '@gitroom/nestjs-libraries/engage/engage-scan-config.service';
 import { EngageScanIngestService } from '@gitroom/nestjs-libraries/engage/engage-scan-ingest.service';
-import { EngageScanLeaseService } from '@gitroom/nestjs-libraries/engage/engage-scan-lease.service';
+import {
+  EngageScanLeaseService,
+  normalizeKeyword,
+  normalizeUsername,
+} from '@gitroom/nestjs-libraries/engage/engage-scan-lease.service';
 import { EngageKeyword } from '@prisma/client';
 import { getRedditToken } from '@gitroom/nestjs-libraries/engage/reddit-auth';
 import { XScanAdapter } from '@gitroom/nestjs-libraries/engage/scan/x-scan-adapter';
 import { RedditScanAdapter } from '@gitroom/nestjs-libraries/engage/scan/reddit-scan-adapter';
 import { TokenPool } from '@gitroom/nestjs-libraries/engage/scan/token-pool';
 import {
-  KEYWORD_GLOBAL_SCAN_KEY,
-  TRACKED_GLOBAL_SCAN_KEY,
   PlatformScanAdapter,
   ScanCursor,
   ScanScope,
@@ -75,6 +77,26 @@ function hoursToMs(hours: number): number {
   return (Number.isFinite(hours) && hours > 0 ? hours : DEFAULT_SCAN_INTERVAL_HOURS) * 3_600_000;
 }
 
+// Tracked-account activity backoff. Per-account scanning is cheap but costs N
+// calls/tick, so a DORMANT account (no post SEEN in a while — derived from its
+// own cursor's lastSeenAt, no schema column) is scanned less often: the cadence
+// multiplier grows with dormancy, capped at 4×. A brand-new account (null
+// lastSeenAt) uses the base cadence so it establishes a baseline promptly. This
+// is what cuts the redundant re-fetching of quiet accounts.
+const TRACKED_DORMANT_2X_MS = 2 * 86_400_000; // quiet ≥ 2 days → 2× cadence
+const TRACKED_DORMANT_4X_MS = 7 * 86_400_000; // quiet ≥ 7 days → 4× cadence
+function trackedBackoffCadenceMs(
+  baseMs: number,
+  lastSeenAt: Date | null,
+  now: Date
+): number {
+  if (!lastSeenAt) return baseMs;
+  const dormantMs = now.getTime() - lastSeenAt.getTime();
+  if (dormantMs >= TRACKED_DORMANT_4X_MS) return baseMs * 4;
+  if (dormantMs >= TRACKED_DORMANT_2X_MS) return baseMs * 2;
+  return baseMs;
+}
+
 // X scanning kill switch for the orchestrator (workflow) path. Historically only
 // the extension path honoured ENGAGE_SUPPORTED_PLATFORMS, so setting it to
 // `reddit` silently left this workflow still hitting the X API. This unifies the
@@ -117,16 +139,17 @@ function unionKeywords(ctxs: OrgContext[]): string[] {
   return Array.from(s);
 }
 
-// Map of lowercased tracked username → the account records (with their org)
-// across all orgs, so each unique username is fetched once and the result
-// updates every org that tracks it.
+// Map of NORMALIZED tracked username → the account records (with their org)
+// across all orgs, so each unique account is fetched once and the result updates
+// every org that tracks it. Keyed identically to the per-account scan unit
+// (normalizeUsername) so attribution lookups line up.
 function unionTrackedUsernames(
   ctxs: OrgContext[]
 ): Map<string, Array<{ id: string; orgId: string }>> {
   const m = new Map<string, Array<{ id: string; orgId: string }>>();
   for (const c of ctxs) {
     for (const a of c.trackedAccounts) {
-      const key = a.username.toLowerCase();
+      const key = normalizeUsername('x', a.username);
       const arr = m.get(key) ?? [];
       arr.push({ id: a.id, orgId: c.organizationId });
       m.set(key, arr);
@@ -180,7 +203,11 @@ function envPlatformPrefix(platform: string): string {
 }
 
 const DEFAULT_INITIAL_SCAN_MAX_UNITS = 10;
-const DEFAULT_INITIAL_SCAN_MAX_CALLS = 5;
+// One page by default (no pagination). Overridable per platform via
+// `engage.keyword_initial_scan.<platform>.max_calls`. Per-keyword units mean a
+// hot keyword no longer needs extra pages to avoid starving others — its own
+// newest page within the freshness window is enough.
+const DEFAULT_INITIAL_SCAN_MAX_CALLS = 1;
 
 function platformInitialScanBudget(
   settings: Map<string, unknown>,
@@ -215,6 +242,12 @@ export class EngageScanActivity {
   private readonly logger = new Logger(EngageScanActivity.name);
   private readonly _xAdapter: PlatformScanAdapter = new XScanAdapter();
   private readonly _redditAdapter: PlatformScanAdapter = new RedditScanAdapter();
+  // Freshness windows (ms) per platform, resolved once per tick in runDueScans.
+  // Caps how far back a scan looks (now - window) on first scan / long gaps; the
+  // adapters apply it (X via start_time, Reddit via its sort=new stop line).
+  // Undefined when the platform is disabled or the config service is absent.
+  private _xFreshnessWindowMs?: number;
+  private _redditFreshnessWindowMs?: number;
 
   constructor(
     private _engageRepository: EngageRepository,
@@ -310,6 +343,15 @@ export class EngageScanActivity {
       xPool,
       initialScanSettings
     );
+
+    // Resolve the freshness windows once for this tick (settings → env → 24h).
+    this._xFreshnessWindowMs =
+      xEnabled && this._scanConfig
+        ? await this._scanConfig.getFreshnessWindowMs('x')
+        : undefined;
+    this._redditFreshnessWindowMs = this._scanConfig
+      ? await this._scanConfig.getFreshnessWindowMs('reddit')
+      : undefined;
 
     // Resolve each org's plan scan interval once, then derive per-unit cadence.
     const intervalByOrg = await this._orgIntervalHours(orgContexts);
@@ -548,6 +590,10 @@ export class EngageScanActivity {
         keywords: claimedKeywords,
         cursor: platform === 'reddit' ? { lastSeenAt: lookback } : {},
         budget: await this._pacingBudget(platform, 'initial', budget.maxCalls),
+        // X has no time-cursor here (cursor:{}), so bound the lookback via the
+        // adapter's start_time floor — mirrors Reddit's `lastSeenAt: lookback`.
+        freshnessWindowMs:
+          platform === 'x' ? settings.lookbackHours * 3_600_000 : undefined,
         token,
         log: {
           log: (m) => this.logger.log(`[initial-scan] ${m}`),
@@ -653,10 +699,20 @@ export class EngageScanActivity {
     });
   }
 
-  // X + Reddit keyword firehose, bucketed by scan interval. Each keyword lands in
-  // the bucket of its MIN owning-org interval, so a keyword shared with a Pro org
-  // (6h) is scanned at 6h while Starter/Developer-only keywords stay at 24h. One
-  // cursor per (platform, bucket), keyed __global__:<hours>.
+  // X + Reddit keyword firehose, ONE unit PER KEYWORD (not OR-merged). Each
+  // keyword is its own global scan unit keyed by its normalized form, so it
+  // shares a single cursor across orgs AND with the extension path (whoever
+  // scans first advances it for everyone). This is what kills cross-keyword
+  // starvation: a hot keyword can no longer eat a low-volume keyword's page
+  // budget, because every keyword paginates on its own cursor + budget. Cadence
+  // = MIN interval across the orgs that enabled that keyword (a keyword shared
+  // with a Pro 6h org scans at 6h; Starter-only keywords stay at 24h).
+  //
+  // Migration note: this replaces the old bucketed `__global__:<hours>` cursor.
+  // On upgrade those bucket rows are orphaned (nothing references them again);
+  // each per-keyword cursor starts from null and re-scans once within the
+  // freshness window (bounded by SCAN_MAX_CALLS + start_time), so no full-history
+  // storm. Self-healing; intentional.
   private async _scanKeywordUnits(
     orgContexts: OrgContext[],
     intervalByOrg: Map<string, number>,
@@ -665,43 +721,31 @@ export class EngageScanActivity {
     force: boolean,
     xEnabled = true
   ): Promise<RawPost[]> {
-    // keyword text → min interval hours across orgs that enabled it.
+    // normalized keyword (= the global per-keyword cursor key) → min interval
+    // hours across the orgs that enabled it. Normalising collapses "AI"/" ai "
+    // to one unit, matching the extension path's keying.
     const minByKeyword = new Map<string, number>();
     for (const c of orgContexts) {
       const hours = this._orgHours(intervalByOrg, c.organizationId);
-      for (const k of c.keywords) minMerge(minByKeyword, k.keyword, hours);
-    }
-    // Group keywords into interval buckets.
-    const buckets = new Map<number, string[]>();
-    for (const [keyword, hours] of minByKeyword) {
-      const arr = buckets.get(hours) ?? [];
-      arr.push(keyword);
-      buckets.set(hours, arr);
+      for (const k of c.keywords) {
+        const scanKey = normalizeKeyword(k.keyword);
+        if (scanKey) minMerge(minByKeyword, scanKey, hours);
+      }
     }
 
+    const platforms: ReadonlyArray<'x' | 'reddit'> = xEnabled
+      ? ['x', 'reddit']
+      : ['reddit'];
     const posts: RawPost[] = [];
-    for (const [hours, bucketKeywords] of buckets) {
-      if (!bucketKeywords.length) continue;
+    for (const [keyword, hours] of minByKeyword) {
       const cadenceMs = hoursToMs(hours);
-      const platforms: ReadonlyArray<'x' | 'reddit'> = xEnabled
-        ? ['x', 'reddit']
-        : ['reddit'];
       for (const platform of platforms) {
         const r = await this._scanUnit({
           platform,
           scanType: 'keyword',
-          // Bucketed key. NOTE: this replaced a single bare `__global__` cursor.
-          // On upgrade, any pre-existing bare-`__global__` keyword cursor row is
-          // orphaned (no writer/reader references it again); each new bucket
-          // starts from a null cursor and re-scans once within the recent,
-          // SCAN_MAX_CALLS-bounded window (no full-history storm — X has no
-          // since_id, upserts dedup on platform_externalPostId). Self-healing;
-          // intentional. To preserve the old incremental position instead, run a
-          // one-off: UPDATE "EngageScanCursor" SET "scanKey"='__global__:24'
-          //          WHERE "scanType"='keyword' AND "scanKey"='__global__';
-          scanKey: `${KEYWORD_GLOBAL_SCAN_KEY}:${hours}`,
+          scanKey: keyword,
           scope: { type: 'keyword' },
-          keywords: bucketKeywords,
+          keywords: [keyword],
           cadenceMs,
           force,
           xPool: platform === 'x' ? xPool : undefined,
@@ -752,14 +796,16 @@ export class EngageScanActivity {
     return posts;
   }
 
-  // Tracked accounts are bucketed by cadence (like keywords) and the usernames
-  // in each bucket are MERGED into one `(from:a OR from:b) (kw...)` X search, so
-  // a bucket of N accounts costs a few API calls per cadence window instead of
-  // one call per account — the previous design ran one unit per username and was
-  // the bulk of the X API load (and rate-limit/anti-automation risk). One cursor
-  // per (interval) bucket, keyed `__tracked__:<hours>`; the X since_id is global
-  // to the merged stream so a single cursor is correct. Post→account attribution
-  // (avatar/display-name) is recovered from each tweet's author at ingest time.
+  // Tracked accounts: ONE unit PER account (not OR-merged), keyed by the
+  // normalized username so the cursor is shared across orgs AND with the
+  // extension path. This kills the merged-bucket starvation (a high-volume
+  // account could push the shared since_id past a quiet account's posts) and the
+  // 512-char author-clause split that starved later batches. Each account runs
+  // `from:<account> (kw...)` on its own cursor + 1-page budget; tracked is
+  // X-only (Reddit has no tracked scope). Cadence = MIN interval across the orgs
+  // tracking it. Migration: old `__tracked__:<hours>` bucket cursors are orphaned
+  // on upgrade (self-healing; per-account cursors re-scan once within the
+  // freshness window). Post→account attribution is recovered at ingest time.
   private async _scanTrackedUnits(
     orgContexts: OrgContext[],
     intervalByOrg: Map<string, number>,
@@ -770,58 +816,54 @@ export class EngageScanActivity {
     if (!xPool.size) return [];
     const accounts = unionTrackedUsernames(orgContexts);
     if (!accounts.size) return [];
-    // username (lowercased) → min interval hours across tracking orgs.
+    // normalized username (= per-account cursor key) → min interval hours.
     const minByUsername = new Map<string, number>();
     for (const c of orgContexts) {
       const hours = this._orgHours(intervalByOrg, c.organizationId);
       for (const a of c.trackedAccounts) {
-        minMerge(minByUsername, a.username.toLowerCase(), hours);
+        minMerge(minByUsername, normalizeUsername('x', a.username), hours);
       }
-    }
-    // Group usernames into interval buckets (mirrors _scanKeywordUnits).
-    const buckets = new Map<number, string[]>();
-    for (const [username, hours] of minByUsername) {
-      const arr = buckets.get(hours) ?? [];
-      arr.push(username);
-      buckets.set(hours, arr);
     }
 
     const posts: RawPost[] = [];
-    for (const [hours, usernames] of buckets) {
-      if (!usernames.length) continue;
+    for (const [username, hours] of minByUsername) {
       const r = await this._scanUnit({
         platform: 'x',
         scanType: 'tracked',
-        scanKey: `${TRACKED_GLOBAL_SCAN_KEY}:${hours}`,
-        scope: { type: 'tracked', keys: usernames },
+        scanKey: username,
+        scope: { type: 'tracked', key: username },
         keywords,
         cadenceMs: hoursToMs(hours),
+        // Back off dormant accounts (scanned less often the longer they've been
+        // quiet), keyed off this account's own cursor lastSeenAt.
+        cadenceFn: (row, now) =>
+          trackedBackoffCadenceMs(hoursToMs(hours), row.lastSeenAt, now),
         xPool,
         force,
       });
       posts.push(...r.posts);
       // Only touch the account bookkeeping if the unit actually ran this tick.
       if (!r.ran) continue;
-      await this._updateTrackedAccountsFromPosts(usernames, accounts, r.posts);
+      await this._updateTrackedAccountsFromPosts([username], accounts, r.posts);
     }
     return posts;
   }
 
-  // After a merged tracked-bucket scan, bump lastCheckedAt for every account in
-  // the bucket (we did query them all) and refresh avatar/display-name for the
-  // accounts that actually authored a post this run — matched by author handle.
+  // After a tracked scan, bump lastCheckedAt for the scanned account(s) and
+  // refresh avatar/display-name for any that actually authored a post this run —
+  // matched by author handle, normalized the same way as the unit key.
   private async _updateTrackedAccountsFromPosts(
     usernames: string[],
     accounts: Map<string, Array<{ id: string; orgId: string }>>,
     posts: RawPost[]
   ): Promise<void> {
-    // author handle (lowercased) → first seen profile this run.
+    // normalized author handle → first seen profile this run.
     const profileByUser = new Map<
       string,
       { picture?: string; displayName?: string }
     >();
     for (const p of posts) {
-      const u = p.authorUsername?.toLowerCase();
+      const u = p.authorUsername ? normalizeUsername('x', p.authorUsername) : '';
       if (!u || profileByUser.has(u)) continue;
       profileByUser.set(u, {
         picture: p.authorAvatarUrl,
@@ -846,8 +888,10 @@ export class EngageScanActivity {
     scanKey: string;
     scope: ScanScope;
     keywords: string[];
-    /** Effective cadence for this unit (derived from owning orgs' plan). */
+    /** Base cadence for this unit (derived from owning orgs' plan). */
     cadenceMs: number;
+    /** Optional per-unit dynamic cadence (e.g. dormant-account backoff). */
+    cadenceFn?: (row: { lastSeenAt: Date | null }, now: Date) => number;
     force?: boolean;
     xPool?: TokenPool;
     redditToken?: string | null;
@@ -857,6 +901,7 @@ export class EngageScanActivity {
       scanType: args.scanType,
       scanKey: args.scanKey,
       cadenceMs: args.cadenceMs,
+      cadenceFn: args.cadenceFn,
       force: args.force ?? false,
     });
     // Not due yet, cooling down, actively leased, or lost a single-flight race.
@@ -886,6 +931,12 @@ export class EngageScanActivity {
           lastSeenAt: cursor.lastSeenAt,
         },
         budget: await this._pacingBudget(args.platform, 'incremental', SCAN_MAX_CALLS),
+        // Freshness cap per platform (X via start_time, Reddit via its sort=new
+        // stop line); undefined ⇒ adapter keeps legacy (uncapped) behaviour.
+        freshnessWindowMs:
+          args.platform === 'x'
+            ? this._xFreshnessWindowMs
+            : this._redditFreshnessWindowMs,
         token,
         log: {
           log: (m) => this.logger.log(m),
@@ -907,9 +958,16 @@ export class EngageScanActivity {
           `${args.platform} ${args.scanType} "${args.scanKey}" rate-limited; cooling down until ${until.toISOString()}`
         );
       } else if (result.backlogRemaining) {
-        await this._lease.release(cursor.id);
+        // Budget exhausted with more pages available. Under 1-page incremental
+        // pacing, NOT advancing would re-fetch the SAME newest page every cadence
+        // (the cursor never moves) and a hot unit would never progress — wasteful
+        // and stuck. Advance to the newest seen so the unit always moves forward;
+        // the unscanned middle of this window is intentionally bounded by the
+        // per-unit budget + freshness window (newest-first is what engagement
+        // wants anyway). Rate-limit (above) still does NOT advance.
+        await this._lease.complete(cursor.id, result.nextCursor);
         this.logger.warn(
-          `${args.platform} ${args.scanType} "${args.scanKey}" hit call budget; backlog remains`
+          `${args.platform} ${args.scanType} "${args.scanKey}" hit call budget; advanced cursor to newest (backlog dropped)`
         );
       } else {
         await this._lease.complete(cursor.id, result.nextCursor);

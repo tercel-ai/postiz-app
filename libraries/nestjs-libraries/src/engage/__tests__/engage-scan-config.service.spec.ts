@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import {
   EngageScanConfigService,
   ENGAGE_SCAN_PACING_KEY,
+  ENGAGE_SCAN_FRESHNESS_KEY,
   DEFAULT_SCAN_PACING,
   mergePacing,
 } from '../engage-scan-config.service';
@@ -25,11 +26,55 @@ describe('EngageScanConfigService.onModuleInit', () => {
     );
   });
 
-  it('does not overwrite an existing value', async () => {
-    const settings = settingsMock({ [ENGAGE_SCAN_PACING_KEY]: { workflow: {} } });
+  it('does not overwrite existing values', async () => {
+    // Both seeded keys present → onModuleInit must not write either.
+    const settings = settingsMock({
+      [ENGAGE_SCAN_PACING_KEY]: { workflow: {} },
+      [ENGAGE_SCAN_FRESHNESS_KEY]: { x: 24, reddit: 24 },
+    });
     const svc = new EngageScanConfigService(settings);
     await svc.onModuleInit();
     expect(settings.set).not.toHaveBeenCalled();
+  });
+
+  it('seeds the default freshness window when its key is missing', async () => {
+    // Pacing exists, freshness missing → only the freshness key is seeded.
+    const settings = settingsMock({ [ENGAGE_SCAN_PACING_KEY]: { workflow: {} } });
+    const svc = new EngageScanConfigService(settings);
+    await svc.onModuleInit();
+    expect(settings.set).toHaveBeenCalledWith(
+      ENGAGE_SCAN_FRESHNESS_KEY,
+      { x: 24, reddit: 24 },
+      expect.objectContaining({ type: 'object' })
+    );
+  });
+});
+
+describe('EngageScanConfigService.getFreshnessWindowMs', () => {
+  it('defaults to 24h per platform (ms)', async () => {
+    const svc = new EngageScanConfigService(settingsMock());
+    expect(await svc.getFreshnessWindowMs('x')).toBe(24 * 3_600_000);
+    expect(await svc.getFreshnessWindowMs('reddit')).toBe(24 * 3_600_000);
+  });
+
+  it('honours a stored per-platform override; sibling stays default', async () => {
+    const svc = new EngageScanConfigService(
+      settingsMock({ [ENGAGE_SCAN_FRESHNESS_KEY]: { x: 72 } })
+    );
+    expect(await svc.getFreshnessWindowMs('x')).toBe(72 * 3_600_000);
+    expect(await svc.getFreshnessWindowMs('reddit')).toBe(24 * 3_600_000);
+  });
+
+  it('falls back to the env var when nothing is stored', async () => {
+    const prev = process.env.ENGAGE_X_SCAN_WINDOW_HOURS;
+    process.env.ENGAGE_X_SCAN_WINDOW_HOURS = '6';
+    try {
+      const svc = new EngageScanConfigService(settingsMock());
+      expect(await svc.getFreshnessWindowMs('x')).toBe(6 * 3_600_000);
+    } finally {
+      if (prev === undefined) delete process.env.ENGAGE_X_SCAN_WINDOW_HOURS;
+      else process.env.ENGAGE_X_SCAN_WINDOW_HOURS = prev;
+    }
   });
 });
 

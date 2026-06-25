@@ -283,3 +283,78 @@ describe('XScanAdapter', () => {
     expect(decodeURIComponent(seenUrl).replace(/\+/g, ' ')).toContain('-is:retweet');
   });
 });
+
+describe('XScanAdapter freshness window (start_time = max(cursor, now-window))', () => {
+  const H = 3_600_000;
+
+  it('cursor WITHIN window: keeps since_id, sends no start_time', async () => {
+    let seenUrl = '';
+    const fetchImpl = (async (url: string) => {
+      seenUrl = url;
+      return res(200, { data: [], includes: USERS });
+    }) as any;
+    await new XScanAdapter({ fetchImpl }).searchScoped(
+      baseArgs({
+        cursor: { lastSeenExternalId: '300', lastSeenAt: new Date(Date.now() - 2 * H) },
+        freshnessWindowMs: 24 * H,
+      })
+    );
+    // max picked the cursor → incremental via since_id, no start_time floor.
+    expect(seenUrl).toContain('since_id=300');
+    expect(seenUrl).not.toContain('start_time=');
+  });
+
+  it('cursor BEYOND window: drops since_id, sends start_time, keeps persisted cursor', async () => {
+    let seenUrl = '';
+    const fetchImpl = (async (url: string) => {
+      seenUrl = url;
+      return res(200, { data: [], includes: USERS });
+    }) as any;
+    const out = await new XScanAdapter({ fetchImpl }).searchScoped(
+      baseArgs({
+        cursor: { lastSeenExternalId: '300', lastSeenAt: new Date(Date.now() - 48 * H) },
+        freshnessWindowMs: 24 * H,
+      })
+    );
+    // max picked now-window → floor via start_time; stale since_id dropped from
+    // the REQUEST (else X precedence walks past the window). Persisted cursor id
+    // is preserved when the run returns nothing newer.
+    expect(seenUrl).not.toContain('since_id=');
+    expect(seenUrl).toContain('start_time=');
+    expect(out.nextCursor.lastSeenExternalId).toBe('300');
+  });
+
+  it('client cutoff drops posts older than the window; cursor still advances over all seen', async () => {
+    const fresh = tweet('1000', 'AI now', {
+      created_at: new Date(Date.now() - 1 * H).toISOString(),
+    });
+    const stale = tweet('999', 'AI old', {
+      created_at: new Date(Date.now() - 48 * H).toISOString(),
+    });
+    const fetchImpl = (async () => res(200, { data: [fresh, stale], includes: USERS })) as any;
+    const out = await new XScanAdapter({ fetchImpl }).searchScoped(
+      baseArgs({
+        cursor: { lastSeenExternalId: '300', lastSeenAt: new Date(Date.now() - 2 * H) },
+        freshnessWindowMs: 24 * H,
+      })
+    );
+    expect(out.posts.map((p) => p.externalPostId)).toEqual(['1000']); // stale dropped
+    expect(out.nextCursor.lastSeenExternalId).toBe('1000'); // cursor over ALL seen
+  });
+
+  it('no freshnessWindowMs ⇒ legacy behaviour (no start_time, no cutoff)', async () => {
+    let seenUrl = '';
+    const old = tweet('999', 'AI old', {
+      created_at: new Date(Date.now() - 72 * H).toISOString(),
+    });
+    const fetchImpl = (async (url: string) => {
+      seenUrl = url;
+      return res(200, { data: [old], includes: USERS });
+    }) as any;
+    const out = await new XScanAdapter({ fetchImpl }).searchScoped(
+      baseArgs({ cursor: { lastSeenExternalId: '300' } })
+    );
+    expect(seenUrl).not.toContain('start_time=');
+    expect(out.posts.map((p) => p.externalPostId)).toEqual(['999']); // not cut off
+  });
+});

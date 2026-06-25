@@ -49,13 +49,13 @@ function captureScanUnit(activity: EngageScanActivity) {
   return calls;
 }
 
-describe('EngageScanActivity keyword bucketing by scan interval', () => {
-  it('buckets each keyword by the MIN interval across owning orgs', async () => {
+describe('EngageScanActivity per-keyword scan units (by scan interval)', () => {
+  it('scans each keyword as its own unit at the MIN interval across owning orgs', async () => {
     const activity = buildActivity();
     const calls = captureScanUnit(activity);
 
-    // Pro org (6h) and a Starter org (24h). "ai" is shared → lands in the 6h
-    // bucket; "ml" is Starter-only → 24h bucket.
+    // Pro org (6h) and a Starter org (24h). "ai" is shared → its own unit at the
+    // MIN 6h; "ml" is Starter-only → its own unit at 24h.
     const orgContexts = [
       { organizationId: 'pro', keywords: [{ keyword: 'ai' }] },
       { organizationId: 'starter', keywords: [{ keyword: 'ai' }, { keyword: 'ml' }] },
@@ -73,7 +73,7 @@ describe('EngageScanActivity keyword bucketing by scan interval', () => {
       false
     );
 
-    // 2 buckets × 2 platforms = 4 units.
+    // 2 keywords × 2 platforms = 4 units.
     expect(calls).toHaveLength(4);
 
     const sixHour = calls.filter((c) => c.cadenceMs === 6 * H);
@@ -82,11 +82,11 @@ describe('EngageScanActivity keyword bucketing by scan interval', () => {
     expect(dayLong).toHaveLength(2);
 
     for (const c of sixHour) {
-      expect(c.scanKey).toBe('__global__:6');
+      expect(c.scanKey).toBe('ai'); // per-keyword cursor key (normalized)
       expect(c.keywords).toEqual(['ai']);
     }
     for (const c of dayLong) {
-      expect(c.scanKey).toBe('__global__:24');
+      expect(c.scanKey).toBe('ml');
       expect(c.keywords).toEqual(['ml']);
     }
   });
@@ -107,10 +107,11 @@ describe('EngageScanActivity keyword bucketing by scan interval', () => {
       false
     );
 
-    expect(calls).toHaveLength(2); // 1 bucket × 2 platforms
+    expect(calls).toHaveLength(2); // 1 keyword × 2 platforms
     for (const c of calls) {
       expect(c.cadenceMs).toBe(24 * H);
-      expect(c.scanKey).toBe('__global__:24');
+      expect(c.scanKey).toBe('seo');
+      expect(c.keywords).toEqual(['seo']);
     }
   });
 });
@@ -208,16 +209,16 @@ describe('xScanEnabled (X kill switch)', () => {
   });
 });
 
-describe('EngageScanActivity tracked-account bucketing + merge', () => {
-  it('merges tracked usernames into one bucket unit per cadence (not one per account)', async () => {
+describe('EngageScanActivity per-account tracked units', () => {
+  it('scans each tracked account as its own unit at the MIN interval (not OR-merged)', async () => {
     const activity = buildActivity();
     const calls = captureScanUnit(activity);
     (activity as any)._updateTrackedAccountsFromPosts = vi
       .fn()
       .mockResolvedValue(undefined);
 
-    // Pro org tracks alice+bob (6h); Starter tracks carol (24h). alice/bob land
-    // in the 6h bucket as ONE merged unit; carol is a 24h bucket on her own.
+    // Pro tracks Alice+BOB (6h); Starter tracks carol (24h). Each account is its
+    // own unit keyed by its normalized username — no OR-merge, no shared cursor.
     const orgContexts = [
       {
         organizationId: 'pro',
@@ -241,17 +242,17 @@ describe('EngageScanActivity tracked-account bucketing + merge', () => {
       false
     );
 
-    // 2 cadence buckets → 2 units total (NOT 3 accounts → 3 units).
-    expect(calls).toHaveLength(2);
+    // 3 accounts → 3 units (was 2 merged buckets).
+    expect(calls).toHaveLength(3);
+    const byKey = Object.fromEntries(calls.map((c) => [c.scanKey, c]));
 
-    const sixHour = calls.find((c) => c.cadenceMs === 6 * H)!;
-    expect(sixHour.scanKey).toBe('__tracked__:6');
-    expect(sixHour.scope.type).toBe('tracked');
-    expect([...sixHour.scope.keys].sort()).toEqual(['alice', 'bob']); // lowercased + merged
-
-    const dayLong = calls.find((c) => c.cadenceMs === 24 * H)!;
-    expect(dayLong.scanKey).toBe('__tracked__:24');
-    expect(dayLong.scope.keys).toEqual(['carol']);
+    // Normalized username = the per-account cursor key; single-key tracked scope.
+    expect(byKey['alice'].cadenceMs).toBe(6 * H);
+    expect(byKey['alice'].scope).toEqual({ type: 'tracked', key: 'alice' });
+    expect(byKey['alice'].keywords).toEqual(['ai']); // keywords still OR-filtered per account
+    expect(byKey['bob'].cadenceMs).toBe(6 * H);
+    expect(byKey['carol'].cadenceMs).toBe(24 * H);
+    expect(byKey['carol'].scope.key).toBe('carol');
   });
 });
 

@@ -4,6 +4,18 @@ import { SettingsService } from '@gitroom/nestjs-libraries/database/prisma/setti
 // ─── Settings key (admin-configurable via /admin/settings, no redeploy) ───────
 export const ENGAGE_SCAN_PACING_KEY = 'engage_scan_pacing';
 
+// Freshness window (hours) per platform: a scan never surfaces a post older than
+// `now - hours`. Used as the `start_time` floor on a first scan / long gap and as
+// a client-side cutoff. Admin-configurable; env fallback per platform. X only for
+// now (Reddit TBD), but stored per-platform so Reddit can opt in without a schema
+// change. Resolution order: stored setting → env → default.
+export const ENGAGE_SCAN_FRESHNESS_KEY = 'engage_scan_freshness_hours';
+export interface ScanFreshnessHours {
+  x: number;
+  reddit: number;
+}
+export const DEFAULT_SCAN_FRESHNESS_HOURS: ScanFreshnessHours = { x: 24, reddit: 24 };
+
 export type ScanPlatform = 'x' | 'reddit';
 export type ScanPhase = 'initial' | 'incremental';
 export type ScanPath = 'workflow' | 'extension';
@@ -56,13 +68,17 @@ export interface EngageScanPacing {
 // Extension: seconds-scale + ~1min jitter; X stricter than Reddit on automation.
 export const DEFAULT_SCAN_PACING: EngageScanPacing = {
   workflow: {
+    // Incremental defaults to ONE page (no pagination): with per-keyword units +
+    // since_id + the freshness window, a single newest page covers the increment;
+    // pagination only risked one unit hogging the call budget. Bump per platform
+    // via the engage_scan_pacing setting if a unit legitimately needs more.
     x: {
       initial: { maxPages: 5, pageSize: 20, pageDelayMs: 300, jitterMs: 300 },
-      incremental: { maxPages: 5, pageSize: 20, pageDelayMs: 300, jitterMs: 300 },
+      incremental: { maxPages: 1, pageSize: 20, pageDelayMs: 300, jitterMs: 300 },
     },
     reddit: {
       initial: { maxPages: 5, pageSize: 25, pageDelayMs: 1200, jitterMs: 600 },
-      incremental: { maxPages: 5, pageSize: 25, pageDelayMs: 1200, jitterMs: 600 },
+      incremental: { maxPages: 1, pageSize: 25, pageDelayMs: 1200, jitterMs: 600 },
     },
   },
   extension: {
@@ -102,6 +118,37 @@ export class EngageScanConfigService implements OnModuleInit {
       });
       this.logger.log(`Seeded default ${ENGAGE_SCAN_PACING_KEY}`);
     }
+
+    const freshness = await this._settings.get(ENGAGE_SCAN_FRESHNESS_KEY);
+    if (freshness === null || freshness === undefined) {
+      await this._settings.set(ENGAGE_SCAN_FRESHNESS_KEY, DEFAULT_SCAN_FRESHNESS_HOURS, {
+        type: 'object',
+        description:
+          'Engage scan freshness window in hours per platform — caps how far back a scan looks (start_time = now - hours) on first scan / long gaps, plus a client-side cutoff. X honoured today; Reddit TBD.',
+        defaultValue: DEFAULT_SCAN_FRESHNESS_HOURS,
+      });
+      this.logger.log(`Seeded default ${ENGAGE_SCAN_FRESHNESS_KEY}`);
+    }
+  }
+
+  /**
+   * Resolve the freshness window (ms) for a platform: stored setting → env
+   * (`ENGAGE_X_SCAN_WINDOW_HOURS` / `ENGAGE_REDDIT_SCAN_WINDOW_HOURS`) → default.
+   * Returned in ms so callers pass it straight to the adapter's freshnessWindowMs.
+   */
+  async getFreshnessWindowMs(platform: ScanPlatform): Promise<number> {
+    const stored = await this._settings.get<Partial<ScanFreshnessHours>>(
+      ENGAGE_SCAN_FRESHNESS_KEY
+    );
+    const envName =
+      platform === 'x'
+        ? 'ENGAGE_X_SCAN_WINDOW_HOURS'
+        : 'ENGAGE_REDDIT_SCAN_WINDOW_HOURS';
+    const envH = Number(process.env[envName]);
+    const fallback =
+      Number.isFinite(envH) && envH > 0 ? envH : DEFAULT_SCAN_FRESHNESS_HOURS[platform];
+    const hours = num(stored?.[platform], fallback);
+    return hours * 3_600_000;
   }
 
   /** Effective pacing config: stored value deep-merged onto the defaults. */

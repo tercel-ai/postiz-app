@@ -101,7 +101,29 @@ export class XScanAdapter implements PlatformScanAdapter {
   async searchScoped(args: SearchScopedArgs): Promise<ScanResult> {
     const { scope, keywords, cursor, budget, token } = args;
     const log = resolveLogger(args.log);
-    const sinceId = cursor.lastSeenExternalId ?? undefined;
+    const now = Date.now();
+
+    // Freshness window (optional): never surface a post older than the window.
+    //  • start_time = now - window  → the API lower bound, used on a first scan
+    //    or after a gap longer than the window.
+    //  • when the cursor is OLDER than the window, DROP since_id for the request:
+    //    X gives since_id precedence over start_time, so a stale since_id would
+    //    walk us back past the window and resurface stale posts — beyond the
+    //    window we want the start_time floor instead. The PERSISTED cursor is
+    //    unaffected (newestId below still seeds from cursor.lastSeenExternalId).
+    //  • a client-side cutoff (in the loop) is the final guarantee regardless of
+    //    how X resolves since_id vs start_time.
+    let querySinceId = cursor.lastSeenExternalId ?? undefined;
+    let startTime: string | undefined;
+    let cutoffMs: number | undefined;
+    if (args.freshnessWindowMs != null && args.freshnessWindowMs > 0) {
+      cutoffMs = now - args.freshnessWindowMs;
+      if (!cursor.lastSeenAt || cursor.lastSeenAt.getTime() < cutoffMs) {
+        querySinceId = undefined;
+        startTime = isoSecondsUtc(cutoffMs);
+      }
+    }
+
     const empty: ScanResult = {
       posts: [],
       nextCursor: { ...cursor },
@@ -155,7 +177,7 @@ export class XScanAdapter implements PlatformScanAdapter {
     }
 
     const posts: RawPost[] = [];
-    let newestId = sinceId;
+    let newestId = cursor.lastSeenExternalId ?? undefined;
     let newestAt: Date | null = cursor.lastSeenAt ?? null;
     let rate: RateLimitInfo = { limited: false };
     let callsUsed = 0;
@@ -183,7 +205,8 @@ export class XScanAdapter implements PlatformScanAdapter {
 
         const { json, rate: pageRate } = await this._fetchPage(
           query,
-          sinceId,
+          querySinceId,
+          startTime,
           pageToken,
           token,
           log
@@ -213,6 +236,11 @@ export class XScanAdapter implements PlatformScanAdapter {
           const at = new Date(tweet.created_at);
           if (!newestAt || at > newestAt) newestAt = at;
 
+          // Freshness floor: never surface a post older than the window, even if
+          // X returned one (boundary / since_id-vs-start_time precedence). The
+          // cursor already advanced above, so this only drops it from results.
+          if (cutoffMs != null && at.getTime() < cutoffMs) continue;
+
           // A pure retweet is a pointer, not content: resolve it to the original
           // post (id/author/text/metrics/reply_settings) so the opportunity is a
           // real, repliable target by the original author. Quotes and replies are
@@ -238,6 +266,7 @@ export class XScanAdapter implements PlatformScanAdapter {
   private async _fetchPage(
     query: string,
     sinceId: string | undefined,
+    startTime: string | undefined,
     pageToken: string | undefined,
     token: string,
     log: ReturnType<typeof resolveLogger>
@@ -253,6 +282,7 @@ export class XScanAdapter implements PlatformScanAdapter {
       expansions: 'author_id,referenced_tweets.id,referenced_tweets.id.author_id',
     });
     if (sinceId) params.set('since_id', sinceId);
+    if (startTime) params.set('start_time', startTime);
     if (pageToken) params.set('pagination_token', pageToken);
 
     const res = await this._fetch(`${X_SEARCH_URL}?${params}`, {
@@ -287,6 +317,12 @@ export class XScanAdapter implements PlatformScanAdapter {
 
 function cursorFrom(id: string | undefined, at: Date | null) {
   return { lastSeenExternalId: id ?? null, lastSeenAt: at };
+}
+
+// X wants second-granularity RFC3339 (`YYYY-MM-DDTHH:mm:ssZ`), not the
+// millisecond form (`...sss Z`) that Date#toISOString emits — strip the millis.
+function isoSecondsUtc(ms: number): string {
+  return new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
 }
 
 function toRawPost(tweet: XTweet, author?: XUser): RawPost {

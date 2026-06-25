@@ -147,7 +147,7 @@ describe('EngageScanActivity._scanUnit (cursor lifecycle)', () => {
     expect(call.data).not.toHaveProperty('lastSeenExternalId');
   });
 
-  it('releases the cursor without advancing when call budget is exhausted with backlog remaining', async () => {
+  it('advances the cursor to newest on backlog (1-page pacing must progress, not re-fetch the same page)', async () => {
     const { activity, update } = build(IDLE_ROW);
     const adapter = fakeAdapter({
       posts: [{ externalPostId: 'x1' } as any],
@@ -163,12 +163,12 @@ describe('EngageScanActivity._scanUnit (cursor lifecycle)', () => {
       ran: true,
       posts: [{ externalPostId: 'x1' }],
     });
+    // Cursor IS advanced to the newest seen (complete), so a budget-capped hot
+    // unit moves forward each cadence instead of re-fetching the same page.
     expect(update).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { id: 'cur1' }, data: expect.objectContaining({ status: 'IDLE' }) })
-    );
-    expect(update).not.toHaveBeenCalledWith(
       expect.objectContaining({
-        data: expect.objectContaining({ lastSeenExternalId: '999' }),
+        where: { id: 'cur1' },
+        data: expect.objectContaining({ status: 'IDLE', lastSeenExternalId: '999' }),
       })
     );
   });

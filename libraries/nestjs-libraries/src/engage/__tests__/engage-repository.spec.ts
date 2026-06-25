@@ -30,6 +30,9 @@ function buildRepo() {
   const channelFindMany = vi.fn();
   const trackedFindMany = vi.fn();
   const cursorFindMany = vi.fn();
+  // Default to no keywords so tests that don't care about keyword status don't
+  // trip the new per-keyword cursor lookup in getOrgScanStatus.
+  const keywordFindMany = vi.fn().mockResolvedValue([]);
   const sentCount = vi.fn();
   // Default to an empty result so read paths that join sent replies (e.g.
   // listOpportunities' `.then((r) => r ?? [])`) don't NPE when a test doesn't
@@ -52,6 +55,9 @@ function buildRepo() {
   } as any;
   const scanCursor = {
     model: { engageScanCursor: { findMany: cursorFindMany } },
+  } as any;
+  const keyword = {
+    model: { engageKeyword: { findMany: keywordFindMany } },
   } as any;
   const opportunity = {
     model: { engageOpportunity: { aggregate: oppAggregate, findFirst: oppFindFirst } },
@@ -110,7 +116,8 @@ function buildRepo() {
   // _replyAccount, _opportunity, _oppState, _sentReply, _integration, _post,
   // _tx, _scanCursor
   const repo = new EngageRepository(
-    {} as any, {} as any,
+    {} as any,      // _config
+    keyword,        // _keyword
     channel,        // _channel
     trackedAccount, // _trackedAccount
     {} as any,
@@ -125,7 +132,7 @@ function buildRepo() {
   return {
     repo, stateFindMany, stateCount, stateAggregate, stateFindFirst, stateFindUnique,
     stateUpdateMany, stateExecuteRaw, oppAggregate, oppFindFirst, channelFindMany,
-    trackedFindMany, cursorFindMany, sentCount, sentFindMany, sentFindFirst, sentCreate,
+    trackedFindMany, cursorFindMany, keywordFindMany, sentCount, sentFindMany, sentFindFirst, sentCreate,
     sentUpdate, postAggregate, postFindMany, postCreate, postUpdate, postDeleteMany,
     txTransaction,
   };
@@ -1666,17 +1673,40 @@ describe('EngageRepository — two-table reads', () => {
   });
 });
 
+describe('EngageRepository.addTrackedAccount validation', () => {
+  it('rejects a username that could shape the from: search query', async () => {
+    const { repo } = buildRepo();
+    await expect(
+      repo.addTrackedAccount('cfg1', 'org1', {
+        username: 'evil) OR is:verified',
+        platform: 'x',
+      } as any)
+    ).rejects.toThrow(/Invalid x username/);
+  });
+
+  it('rejects an over-long X handle (>15 chars)', async () => {
+    const { repo } = buildRepo();
+    await expect(
+      repo.addTrackedAccount('cfg1', 'org1', {
+        username: 'thishandleistoolong',
+        platform: 'x',
+      } as any)
+    ).rejects.toThrow(/Invalid/);
+  });
+});
+
 describe('EngageRepository.getOrgScanStatus', () => {
   // Cadence is the org's single plan scan_interval_hours (keyword/channel/tracked
   // alike). With no interval passed it falls back to DEFAULT_SCAN_INTERVAL_HOURS = 24h.
   const H = 3_600_000;
 
   it('derives keyword next = lastScanStartedAt + cadence; last = lastScannedAt', async () => {
-    const { repo, channelFindMany, trackedFindMany, cursorFindMany } = buildRepo();
+    const { repo, channelFindMany, trackedFindMany, cursorFindMany, keywordFindMany } = buildRepo();
     const started = new Date('2026-06-01T00:00:00Z');
     const scanned = new Date('2026-06-01T00:05:00Z');
     channelFindMany.mockResolvedValue([]); // org monitors no subreddits
     trackedFindMany.mockResolvedValue([]); // org tracks no accounts
+    keywordFindMany.mockResolvedValue([{ keyword: 'ai' }]); // org has one keyword
     cursorFindMany.mockImplementation(async ({ where }: any) =>
       where.scanType === 'keyword'
         ? [{ lastScanStartedAt: started, lastScannedAt: scanned, cooldownUntil: null }]
@@ -1695,11 +1725,12 @@ describe('EngageRepository.getOrgScanStatus', () => {
   });
 
   it('cooldownUntil pushes next scan beyond the cadence', async () => {
-    const { repo, channelFindMany, trackedFindMany, cursorFindMany } = buildRepo();
+    const { repo, channelFindMany, trackedFindMany, cursorFindMany, keywordFindMany } = buildRepo();
     const started = new Date('2026-06-01T00:00:00Z');
     const cooldown = new Date('2026-06-05T00:00:00Z'); // far past started + 24h
     channelFindMany.mockResolvedValue([]);
     trackedFindMany.mockResolvedValue([]);
+    keywordFindMany.mockResolvedValue([{ keyword: 'ai' }]);
     cursorFindMany.mockImplementation(async ({ where }: any) =>
       where.scanType === 'keyword'
         ? [{ lastScanStartedAt: started, lastScannedAt: started, cooldownUntil: cooldown }]

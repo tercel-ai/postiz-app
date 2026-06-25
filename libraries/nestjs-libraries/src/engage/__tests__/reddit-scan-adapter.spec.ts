@@ -180,3 +180,59 @@ describe('parseRedditRateLimit', () => {
     expect(r.retryAfterMs).toBe(120_000);
   });
 });
+
+describe('RedditScanAdapter freshness window (stop line = max(cursor, now-window))', () => {
+  const nowSec = Math.floor(Date.now() / 1000);
+  const H = 3600;
+
+  it('empty cursor: stops at now-window, drops posts older than the window', async () => {
+    const fresh = child('fresh', nowSec - 1 * H); // 1h ago — within 24h
+    const stale = child('stale', nowSec - 48 * H); // 48h ago — beyond 24h
+    const fetchImpl = (async () =>
+      oauthRes(200, listing([fresh, stale]))) as any; // sort=new: newest first
+    const out = await new RedditScanAdapter({ fetchImpl }).searchScoped(
+      baseArgs({ cursor: {}, freshnessWindowMs: 24 * H * 1000 })
+    );
+    expect(out.posts.map((p) => p.externalPostId)).toEqual(['fresh']);
+  });
+
+  it('cursor MORE recent than the window wins (incremental unchanged)', async () => {
+    const fresh = child('fresh', nowSec - 1 * H); // newer than the 2h cursor
+    const mid = child('mid', nowSec - 5 * H); // older than cursor, within window
+    const fetchImpl = (async () => oauthRes(200, listing([fresh, mid]))) as any;
+    const out = await new RedditScanAdapter({ fetchImpl }).searchScoped(
+      baseArgs({
+        cursor: { lastSeenAt: new Date(Date.now() - 2 * H * 1000) },
+        freshnessWindowMs: 24 * H * 1000,
+      })
+    );
+    // max(2h-ago, 24h-ago) = 2h-ago → stop at the cursor; `mid` is below it.
+    expect(out.posts.map((p) => p.externalPostId)).toEqual(['fresh']);
+  });
+
+  it('cursor OLDER than the window: capped at now-window, not the stale cursor', async () => {
+    const fresh = child('fresh', nowSec - 1 * H);
+    const mid = child('mid', nowSec - 12 * H); // within 24h
+    const beyond = child('beyond', nowSec - 48 * H); // 48h: newer than 72h cursor, beyond window
+    const fetchImpl = (async () =>
+      oauthRes(200, listing([fresh, mid, beyond]))) as any;
+    const out = await new RedditScanAdapter({ fetchImpl }).searchScoped(
+      baseArgs({
+        cursor: { lastSeenAt: new Date(Date.now() - 72 * H * 1000) },
+        freshnessWindowMs: 24 * H * 1000,
+      })
+    );
+    // max(72h-ago, 24h-ago) = 24h-ago → `beyond` (48h) is dropped despite the
+    // stale 72h cursor that would otherwise have allowed it.
+    expect(out.posts.map((p) => p.externalPostId)).toEqual(['fresh', 'mid']);
+  });
+
+  it('no freshnessWindowMs ⇒ legacy behaviour (no cutoff)', async () => {
+    const old = child('old', nowSec - 72 * H);
+    const fetchImpl = (async () => oauthRes(200, listing([old]))) as any;
+    const out = await new RedditScanAdapter({ fetchImpl }).searchScoped(
+      baseArgs({ cursor: {} })
+    );
+    expect(out.posts.map((p) => p.externalPostId)).toEqual(['old']); // not cut off
+  });
+});

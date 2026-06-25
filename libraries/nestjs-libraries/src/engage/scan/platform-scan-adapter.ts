@@ -17,29 +17,21 @@ import { RawPost } from '../engage-scorer';
 
 export type ScanType = 'keyword' | 'tracked' | 'channel';
 
-// Sentinel scanKey for the org-independent global keyword firehose. The whole
-// firehose is one incremental stream per platform, so it is one cursor row per
-// platform (not one per keyword) — shared by the scanner (writer) and
-// getOrgScanStatus (reader).
-export const KEYWORD_GLOBAL_SCAN_KEY = '__global__';
+// NOTE: keyword/tracked scan units are now keyed PER keyword (normalizeKeyword)
+// and PER account (normalizeUsername), not by the old bucketed `__global__:<h>` /
+// `__tracked__:<h>` sentinels (removed). Legacy bucket cursor rows are orphaned
+// on upgrade and cleaned up by a one-off DELETE — see engage scan memory.
 
 export interface ScanScope {
   type: ScanType;
   // 'tracked' → username (no leading @); 'channel' → subreddit id (no "r/").
   // 'keyword' → undefined (whole-platform search).
   key?: string;
-  // 'tracked' (X) may carry MULTIPLE usernames so the adapter merges them into
-  // batched `(from:a OR from:b) (kw...)` queries — one bucket of accounts costs a
-  // few API calls instead of one call per account. `key` stays for the single
-  // -scope cases (channel) and back-compat with single-account tracked scans.
+  // 'tracked' MAY carry multiple usernames (`keys`) so the adapter can OR-batch
+  // `(from:a OR from:b) (kw...)`. The current workflow scans tracked PER account
+  // (single `key`); `keys` stays for callers that still batch.
   keys?: string[];
 }
-
-// Sentinel scanKey prefix for the bucketed tracked-account firehose. Like the
-// keyword buckets, all tracked usernames sharing a cadence are merged into one
-// cursor row keyed `__tracked__:<hours>` (scanType='tracked'), distinct from the
-// keyword `__global__:<hours>` rows.
-export const TRACKED_GLOBAL_SCAN_KEY = '__tracked__';
 
 // Where the previous fetch stopped. Mirrors the persisted EngageScanCursor
 // columns; the adapter reads it to fetch only what is new and returns the
@@ -102,6 +94,12 @@ export interface SearchScopedArgs {
   keywords: string[];
   cursor: ScanCursor;
   budget: ScanBudget;
+  // Freshness window in ms (optional). When set, the scan never surfaces a post
+  // older than `now - freshnessWindowMs`. The adapter uses it as the `start_time`
+  // floor on a first scan / long gap (and drops a stale cursor that would walk
+  // past it), plus a client-side cutoff as the final guarantee. Omitted ⇒ no cap
+  // (legacy behaviour). Currently honoured by the X adapter; Reddit is TBD.
+  freshnessWindowMs?: number;
   // Platform access token. X: bearer/OAuth user token. Reddit: app OAuth token,
   // or null to use the public (loid/proxy) path. The caller resolves this
   // (e.g. from a TokenPool) so the adapter stays stateless.

@@ -16,9 +16,12 @@ import {
   UpdateReplyAccountDto,
   UpdateTrackedAccountDto,
 } from '@gitroom/nestjs-libraries/engage/dtos/engage.dto';
-import { KEYWORD_GLOBAL_SCAN_KEY } from '@gitroom/nestjs-libraries/engage/scan/platform-scan-adapter';
 import { DEFAULT_SCAN_INTERVAL_HOURS } from '@gitroom/nestjs-libraries/engage/engage-entitlement.service';
-import { normalizeKeyword } from '@gitroom/nestjs-libraries/engage/engage-scan-lease.service';
+import {
+  normalizeKeyword,
+  normalizeUsername,
+  isValidUsername,
+} from '@gitroom/nestjs-libraries/engage/engage-scan-lease.service';
 import {
   pickXReplyIntegration,
   XReplyResolution,
@@ -466,7 +469,7 @@ export class EngageRepository {
         ? scanIntervalHours
         : DEFAULT_SCAN_INTERVAL_HOURS) * 3_600_000;
 
-    const [subs, tracked] = await Promise.all([
+    const [subs, tracked, keywords] = await Promise.all([
       this._channel.model.engageMonitoredChannel.findMany({
         where: { organizationId, platform: 'reddit', enabled: true },
         select: { channelId: true },
@@ -475,19 +478,29 @@ export class EngageRepository {
         where: { organizationId, enabled: true },
         select: { username: true },
       }),
+      this._keyword.model.engageKeyword.findMany({
+        where: { organizationId, enabled: true },
+        select: { keyword: true },
+      }),
     ]);
     const subredditIds = subs.map((s) => s.channelId);
-    const usernames = tracked.map((t) => t.username.toLowerCase());
+    // Tracked accounts are scanned as per-account X units keyed by their
+    // normalized username (matching the writer + extension), so look up cursors
+    // by those keys.
+    const usernames = tracked.map((t) => normalizeUsername('x', t.username));
+    // Keywords are scanned as per-keyword global units keyed by their normalized
+    // form (shared across orgs + the extension path), so look up THIS org's
+    // keyword cursors by those keys — mirroring the channel/tracked lookups.
+    const keywordKeys = Array.from(
+      new Set(keywords.map((k) => normalizeKeyword(k.keyword)).filter(Boolean))
+    );
 
     const [keywordCursors, channelCursors, trackedCursors] = await Promise.all([
-      // Keyword firehose is bucketed by interval (__global__:<hours>); match all
-      // buckets so the timing reflects whichever bucket scanned most recently.
-      this._scanCursor.model.engageScanCursor.findMany({
-        where: {
-          scanType: 'keyword',
-          scanKey: { startsWith: `${KEYWORD_GLOBAL_SCAN_KEY}:` },
-        },
-      }),
+      keywordKeys.length
+        ? this._scanCursor.model.engageScanCursor.findMany({
+            where: { scanType: 'keyword', scanKey: { in: keywordKeys } },
+          })
+        : Promise.resolve([]),
       subredditIds.length
         ? this._scanCursor.model.engageScanCursor.findMany({
             where: {
@@ -762,6 +775,15 @@ export class EngageRepository {
     organizationId: string,
     dto: AddTrackedAccountDto
   ) {
+    const platform = dto.platform ?? 'x';
+    // Reject usernames that aren't a plain handle BEFORE they can reach the
+    // `from:<username>` search query — a crafted value (parens/operators/spaces)
+    // could otherwise shape the X search. Validate the normalized form.
+    if (!isValidUsername(platform, normalizeUsername(platform, dto.username))) {
+      throw new BadRequestException(
+        `Invalid ${platform} username "${dto.username}": use a plain handle (letters, digits, _${platform === 'reddit' ? ', -' : ''}).`
+      );
+    }
     // Unique violation on (configId, platform, username) → 409.
     return this._createOrConflict(`Account "${dto.username}"`, () =>
       this._trackedAccount.model.engageTrackedAccount.create({

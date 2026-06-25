@@ -65,8 +65,10 @@ describe('EngageDraftService', () => {
       const xPrompt = (service as any)._buildSystemPrompt('x', 'EXPERT_ANSWER', 'help_seeking', 1);
       expect(xPrompt).toContain('under 260 Twitter-weighted characters');
 
+      // Reddit prompt targets the SAFETY_MARGIN-adjusted length (1000 * 0.85 = 850),
+      // not the raw 1000 — the hard reject still uses 2000.
       const redditPrompt = (service as any)._buildSystemPrompt('reddit', 'EXPERT_ANSWER', 'help_seeking', 1);
-      expect(redditPrompt).toContain('under 1000 characters');
+      expect(redditPrompt).toContain('under 850 characters');
     });
 
     it('should restate the platform character limit as an IMPORTANT final instruction', () => {
@@ -77,7 +79,7 @@ describe('EngageDraftService', () => {
 
       const redditPrompt = (service as any)._buildSystemPrompt('reddit', 'EXPERT_ANSWER', 'help_seeking', 1);
       expect(redditPrompt).toContain(
-        'IMPORTANT: The final reply must stay under 1000 characters.'
+        'IMPORTANT: The final reply must stay under 850 characters'
       );
     });
 
@@ -86,9 +88,9 @@ describe('EngageDraftService', () => {
       expect(expertPrompt).toContain('expert step-by-step advice');
 
       const dataPrompt = (service as any)._buildSystemPrompt('x', 'DATA_BACKED', 'help_seeking', 1);
-      expect(dataPrompt).toContain('Keep the reply conversational');
-      expect(dataPrompt).toContain('a metric already present in the original post');
-      expect(dataPrompt).toContain('Do not turn the reply into a data analysis');
+      expect(dataPrompt).toContain("Quote the post's own number");
+      expect(dataPrompt).toContain('never assert a specific unstated fact');
+      expect(dataPrompt).toContain('frame it as a question, not a claim');
     });
 
     it('should prioritize relevance, grounding, and the original post language', () => {

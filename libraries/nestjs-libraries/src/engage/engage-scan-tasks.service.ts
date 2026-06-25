@@ -3,6 +3,7 @@ import { EngageRepository } from '@gitroom/nestjs-libraries/engage/engage.reposi
 import {
   EngageScanLeaseService,
   normalizeKeyword,
+  normalizeUsername,
   ScanCursorSnapshot,
 } from '@gitroom/nestjs-libraries/engage/engage-scan-lease.service';
 import { EngageScanIngestService } from '@gitroom/nestjs-libraries/engage/engage-scan-ingest.service';
@@ -226,7 +227,9 @@ export class EngageScanTasksService {
         units.push({
           platform: a.platform,
           scanType: 'tracked',
-          scanKey: a.username,
+          // Normalized so this shares ONE cursor with the workflow writer + the
+          // status reader (they all key tracked accounts via normalizeUsername).
+          scanKey: normalizeUsername(a.platform, a.username),
         });
       }
     }

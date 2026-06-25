@@ -80,7 +80,26 @@ export class RedditScanAdapter implements PlatformScanAdapter {
       return empty;
     }
 
-    const stopBefore = cursor.lastSeenAt ? cursor.lastSeenAt.getTime() : null;
+    // Stop line for the sort=new descending scan. Two inputs:
+    //   • the incremental cursor (don't re-fetch what we've seen), and
+    //   • the freshness floor `now - window` (don't surface stale posts on a
+    //     first scan / long gap).
+    // Take the LATER (max) of the two — the more recent floor wins, mirroring the
+    // X adapter's `start_time = max(cursor, now-window)`. Reddit has no
+    // start_time param, but it pages sort=new and breaks on the first post at/
+    // older than this line, so the stop line IS the freshness cutoff — no
+    // separate client-side filter needed.
+    const cutoffMs =
+      args.freshnessWindowMs != null && args.freshnessWindowMs > 0
+        ? Date.now() - args.freshnessWindowMs
+        : null;
+    const lastSeenMs = cursor.lastSeenAt ? cursor.lastSeenAt.getTime() : null;
+    const stopBefore =
+      lastSeenMs == null
+        ? cutoffMs
+        : cutoffMs == null
+          ? lastSeenMs
+          : Math.max(lastSeenMs, cutoffMs);
     const posts: RawPost[] = [];
     let newestAt = cursor.lastSeenAt ?? null;
     let newestId = cursor.lastSeenExternalId ?? null;
