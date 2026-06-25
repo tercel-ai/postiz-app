@@ -1107,7 +1107,14 @@ export class EngageScanActivity {
         : '')
     );
 
+    // Score-distribution telemetry (EngageScoreTick), mirroring ingestForOrg so
+    // the workflow scan populates it too. 'scanned' = every keyword-matched post
+    // (incl. below the gate → the low buckets); recorded even when nothing
+    // reaches MIN_SCORE so an empty-yield window is still visible.
+    this._ingest.recordScoreDistribution(ctx.organizationId, 'scanned', matched);
+
     if (scored.length) {
+      this._ingest.recordScoreDistribution(ctx.organizationId, 'persisted', scored);
       const classified = await this._classifyIntents(scored);
       await this._persistOpportunities(ctx.organizationId, classified);
       await this._updateKeywordHitCounts(ctx.organizationId, classified, orgKeywords);

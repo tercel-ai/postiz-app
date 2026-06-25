@@ -169,8 +169,14 @@ export class EngageScanIngestService {
    * scan unit is normally single-platform, but back-attribution may mix). Each
    * scored post's total score is bucketed into a fixed non-overlapping band.
    * Fire-and-forget telemetry — never blocks ingest.
+   *
+   * Public so BOTH write paths feed EngageScoreTick through one bucketing impl:
+   * the extension scan-ingest path (via ingestForOrg, below) and the Temporal
+   * workflow fan-out (engage-scan.activity `_fanOutToOrg`, which scores inline
+   * and does NOT route through ingestForOrg). The two paths are disjoint, so
+   * this never double-counts.
    */
-  private recordScoreDistribution(
+  recordScoreDistribution(
     organizationId: string,
     phase: EngageScorePhase,
     scored: ScoredPost[]
