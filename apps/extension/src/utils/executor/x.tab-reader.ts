@@ -87,6 +87,9 @@ async function navigateAndCapture(
   op: string
 ): Promise<unknown | null> {
   const since = Date.now();
+  // NOTE: waitForTabComplete may resolve on a stale 'complete'; the capture poll
+  // below (bounded by CAPTURE_TIMEOUT_MS) is what actually waits for X's request,
+  // so an early/late tab-complete affects only latency, not correctness.
   try {
     await chrome.tabs.update(tabId, { url });
   } catch (e) {

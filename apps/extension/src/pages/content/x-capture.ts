@@ -41,6 +41,8 @@ export function installXReadInterceptor(): void {
   w.__aiseeXCaptureInstalled = true;
   w.__aiseeXCaptured = w.__aiseeXCaptured || {};
 
+  // Substring match. Assumes no captured op name is a substring of another
+  // (true for the current set); revisit if a new op overlaps an existing one.
   const opFromUrl = (url: string): string | null => {
     for (const op of AISEE_CAPTURED_OPS) {
       if (url.indexOf(op) !== -1) return op;

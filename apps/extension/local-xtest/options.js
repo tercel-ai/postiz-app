@@ -14,7 +14,8 @@ function tweetEl(t) {
   var meta = document.createElement('div');
   meta.className = 'meta';
   var a = document.createElement('a');
-  a.href = 'https://x.com/' + t.authorUsername + '/status/' + t.id;
+  a.href =
+    'https://x.com/' + encodeURIComponent(t.authorUsername) + '/status/' + encodeURIComponent(t.id);
   a.target = '_blank';
   a.rel = 'noreferrer';
   a.textContent = '@' + t.authorUsername;

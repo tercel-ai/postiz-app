@@ -14,6 +14,7 @@
   w.__aiseeXCaptureInstalled = true;
   w.__aiseeXCaptured = w.__aiseeXCaptured || {};
 
+  // Substring match; assumes no op name is a substring of another (true today).
   function opFromUrl(url) {
     for (var i = 0; i < OPS.length; i++) {
       if (url.indexOf(OPS[i]) !== -1) return OPS[i];

@@ -1,3 +1,10 @@
+// ⚠️ STATUS: STAGED — NOT YET WIRED. Nothing imports this module yet (the live
+// debug path in x.debug.ts uses SearchTimeline / TweetDetail, not UserTweets). It
+// is the building block for the real "scrape a fixed list of users" flow: wire it
+// by having the scan runner open one openXReadTab() per run and call
+// collectUserRecent(session, username, sinceId, limit) per user. Until then it is
+// intentionally dead code, covered by x-collect.spec.ts.
+//
 // Collect a list-user's recent tweets the safe way: drive the logged-in x.com UI
 // in a background tab, navigate to the user's profile, and let X's OWN web app
 // fire UserTweets — then read the response the document-start interceptor
