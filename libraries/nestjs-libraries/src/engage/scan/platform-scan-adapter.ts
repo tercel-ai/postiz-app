@@ -100,6 +100,11 @@ export interface SearchScopedArgs {
   // past it), plus a client-side cutoff as the final guarantee. Omitted ⇒ no cap
   // (legacy behaviour). Currently honoured by the X adapter; Reddit is TBD.
   freshnessWindowMs?: number;
+  // Items requested per call (X `max_results`). Optional; the adapter falls back
+  // to its own default and clamps to the platform's valid range. The caller
+  // resolves it from settings (engage.keyword_x_scan_max_results) so the value is
+  // admin-tunable without a redeploy. Honoured by the X adapter; Reddit ignores.
+  maxResults?: number;
   // Platform access token. X: bearer/OAuth user token. Reddit: app OAuth token,
   // or null to use the public (loid/proxy) path. The caller resolves this
   // (e.g. from a TokenPool) so the adapter stays stateless.

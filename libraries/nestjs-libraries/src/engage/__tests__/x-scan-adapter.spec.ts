@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { XScanAdapter } from '../scan/x-scan-adapter';
+import { XScanAdapter, clampXMaxResults } from '../scan/x-scan-adapter';
 import type { SearchScopedArgs } from '../scan/platform-scan-adapter';
 
 // Minimal fetch Response stub.
@@ -356,5 +356,62 @@ describe('XScanAdapter freshness window (start_time = max(cursor, now-window))',
     );
     expect(seenUrl).not.toContain('start_time=');
     expect(out.posts.map((p) => p.externalPostId)).toEqual(['999']); // not cut off
+  });
+});
+
+describe('clampXMaxResults', () => {
+  it('clamps into X\'s [10, 100] range, rounds, and defaults on junk', () => {
+    expect(clampXMaxResults(50)).toBe(50);
+    expect(clampXMaxResults(10)).toBe(10);
+    expect(clampXMaxResults(100)).toBe(100);
+    expect(clampXMaxResults(3)).toBe(10); // below floor → 10
+    expect(clampXMaxResults(500)).toBe(100); // above ceiling → 100
+    expect(clampXMaxResults(33.6)).toBe(34); // rounded
+    expect(clampXMaxResults(null)).toBe(10); // default
+    expect(clampXMaxResults(undefined)).toBe(10);
+    expect(clampXMaxResults(Number.NaN)).toBe(10);
+  });
+});
+
+describe('XScanAdapter max_results (per-call page size)', () => {
+  // Capture the max_results query param the adapter actually sends to X.
+  function capture() {
+    const urls: string[] = [];
+    const fetchImpl = (async (url: string) => {
+      urls.push(url);
+      return res(200, { data: [], includes: USERS, meta: { result_count: 0 } });
+    }) as any;
+    return {
+      fetchImpl,
+      maxResults: () => new URL(urls[0]).searchParams.get('max_results'),
+    };
+  }
+
+  it('defaults to 10 when no maxResults is passed', async () => {
+    const c = capture();
+    await new XScanAdapter({ fetchImpl: c.fetchImpl }).searchScoped(baseArgs());
+    expect(c.maxResults()).toBe('10');
+  });
+
+  it('honours an explicit maxResults (settings-resolved value)', async () => {
+    const c = capture();
+    await new XScanAdapter({ fetchImpl: c.fetchImpl }).searchScoped(
+      baseArgs({ maxResults: 50 })
+    );
+    expect(c.maxResults()).toBe('50');
+  });
+
+  it('clamps an out-of-range maxResults to the X API ceiling/floor', async () => {
+    const hi = capture();
+    await new XScanAdapter({ fetchImpl: hi.fetchImpl }).searchScoped(
+      baseArgs({ maxResults: 500 })
+    );
+    expect(hi.maxResults()).toBe('100');
+
+    const lo = capture();
+    await new XScanAdapter({ fetchImpl: lo.fetchImpl }).searchScoped(
+      baseArgs({ maxResults: 3 })
+    );
+    expect(lo.maxResults()).toBe('10');
   });
 });

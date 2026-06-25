@@ -277,6 +277,24 @@ export class EngageScanActivity {
    * the config service isn't wired or a read fails — pacing must never break a
    * scan.
    */
+  /**
+   * Per-call page size (X `max_results`) for a scan, resolved from settings
+   * (engage.keyword_x_scan_max_results → env → default). X only — Reddit pages on
+   * its own size and ignores this. Undefined when not X or when scan config is
+   * unavailable (e.g. unit tests build the activity without it), so the adapter
+   * falls back to its own default. Never throws — telemetry-grade config read.
+   */
+  private async _xMaxResults(
+    platform: 'x' | 'reddit'
+  ): Promise<number | undefined> {
+    if (platform !== 'x' || !this._scanConfig) return undefined;
+    try {
+      return await this._scanConfig.getXScanMaxResults();
+    } catch {
+      return undefined;
+    }
+  }
+
   private async _pacingBudget(
     platform: 'x' | 'reddit',
     phase: 'initial' | 'incremental',
@@ -601,6 +619,8 @@ export class EngageScanActivity {
             keywords: claimedKeywords,
             cursor: platform === 'reddit' ? { lastSeenAt: lookback } : {},
             budget: await this._pacingBudget(platform, 'initial', budget.maxCalls),
+            // Per-call page size (X max_results), settings-resolved; Reddit ignores.
+            maxResults: await this._xMaxResults(platform),
             // X has no time-cursor here (cursor:{}), so bound the lookback via the
             // adapter's start_time floor — mirrors Reddit's `lastSeenAt: lookback`.
             freshnessWindowMs:
@@ -952,6 +972,8 @@ export class EngageScanActivity {
               'incremental',
               SCAN_MAX_CALLS
             ),
+            // Per-call page size (X max_results), settings-resolved; Reddit ignores.
+            maxResults: await this._xMaxResults(args.platform),
             // Freshness cap per platform (X via start_time, Reddit via its sort=new
             // stop line); undefined ⇒ adapter keeps legacy (uncapped) behaviour.
             freshnessWindowMs:

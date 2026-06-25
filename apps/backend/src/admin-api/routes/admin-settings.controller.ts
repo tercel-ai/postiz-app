@@ -143,6 +143,10 @@ export class AdminSettingsController {
       // per-session cap), split by workflow vs extension path. Stored under the
       // `engage_scan_pacing` settings key; edit it via PUT /admin/settings/:key.
       pacing: await this._engageScanConfigService.getPacing(),
+      // Per-call page size for X keyword scans (X `max_results`), with its source.
+      // Stored under the `engage.keyword_x_scan_max_results` settings key; edit it
+      // via PUT /admin/settings/:key. Clamped to X's valid [10, 100] range.
+      xScanMaxResults: await this._engageScanConfigService.resolveXScanMaxResults(),
     };
   }
 

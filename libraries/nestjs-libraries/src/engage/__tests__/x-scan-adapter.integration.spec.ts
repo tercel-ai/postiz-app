@@ -142,7 +142,7 @@ describe.skipIf(!CAN_AUTH)('XScanAdapter (REAL X API — from:account keyword)',
           scope: { type: 'tracked', key: account },
           keywords,
           cursor: {}, // no since_id → full recent (≤7 day) window
-          budget: { maxCalls: 1 }, // one page, max_results=100
+          budget: { maxCalls: 1 }, // one page; maxResults omitted → adapter default (10)
           token,
           log: {
             log: (m) => console.log(`[${account}|${kwLabel}] ${m}`),

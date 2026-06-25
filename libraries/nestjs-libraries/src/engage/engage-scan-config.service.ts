@@ -1,5 +1,9 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { SettingsService } from '@gitroom/nestjs-libraries/database/prisma/settings/settings.service';
+import {
+  clampXMaxResults,
+  X_MAX_RESULTS,
+} from '@gitroom/nestjs-libraries/engage/scan/x-scan-adapter';
 
 // ─── Settings key (admin-configurable via /admin/settings, no redeploy) ───────
 export const ENGAGE_SCAN_PACING_KEY = 'engage_scan_pacing';
@@ -15,6 +19,14 @@ export interface ScanFreshnessHours {
   reddit: number;
 }
 export const DEFAULT_SCAN_FRESHNESS_HOURS: ScanFreshnessHours = { x: 24, reddit: 24 };
+
+// Per-call page size for X keyword scans (X `max_results`). Resolution order:
+// stored setting → env (ENGAGE_X_SCAN_MAX_RESULTS) → default. The default (10)
+// lives on the X adapter; X bills per returned record, so this stays low unless
+// an admin opts into bigger pages. Clamped to X's valid [10, 100] range.
+export const ENGAGE_X_SCAN_MAX_RESULTS_KEY = 'engage.keyword_x_scan_max_results';
+export const ENGAGE_X_SCAN_MAX_RESULTS_ENV = 'ENGAGE_X_SCAN_MAX_RESULTS';
+export type SettingSource = 'db' | 'env' | 'default';
 
 export type ScanPlatform = 'x' | 'reddit';
 export type ScanPhase = 'initial' | 'incremental';
@@ -167,6 +179,35 @@ export class EngageScanConfigService implements OnModuleInit {
   ): Promise<PagePacing> {
     const pacing = await this.getPacing();
     return pacing[path][platform][phase];
+  }
+
+  /**
+   * Resolve the effective X scan `max_results` (per-call page size) WITH its
+   * source, mirroring the resolution the orchestrator uses:
+   *   stored setting (engage.keyword_x_scan_max_results)
+   *     → env (ENGAGE_X_SCAN_MAX_RESULTS)
+   *     → default (X_MAX_RESULTS = 10)
+   * Always clamped to X's valid [10, 100] range. `source` lets the admin UI show
+   * where the live value came from (same shape as the initial-scan-budget API).
+   */
+  async resolveXScanMaxResults(): Promise<{ value: number; source: SettingSource }> {
+    const stored = await this._settings.get(ENGAGE_X_SCAN_MAX_RESULTS_KEY);
+    if (stored !== null && stored !== undefined) {
+      const n = Number(stored);
+      if (Number.isFinite(n) && n > 0) {
+        return { value: clampXMaxResults(n), source: 'db' };
+      }
+    }
+    const env = Number(process.env[ENGAGE_X_SCAN_MAX_RESULTS_ENV]);
+    if (Number.isFinite(env) && env > 0) {
+      return { value: clampXMaxResults(env), source: 'env' };
+    }
+    return { value: clampXMaxResults(X_MAX_RESULTS), source: 'default' };
+  }
+
+  /** Effective X scan `max_results` value only (orchestrator hot path). */
+  async getXScanMaxResults(): Promise<number> {
+    return (await this.resolveXScanMaxResults()).value;
   }
 }
 

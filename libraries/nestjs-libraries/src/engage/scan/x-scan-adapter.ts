@@ -24,8 +24,20 @@ const X_QUERY_MAX_LEN = 460;
 // keyword clauses jointly stay under the limit (200 authors-clause + 260 keyword
 // -clause + space + suffix ≈ 473 < 512).
 const X_AUTHOR_CLAUSE_MAX_LEN = 200;
-// recent search returns at most 100 results per page.
-const X_MAX_RESULTS = 100;
+// X recent search `max_results` accepts 10..100 (API floor/ceiling). DEFAULT is
+// the per-call request size when the caller doesn't pass one; admin-tunable via
+// the engage.keyword_x_scan_max_results setting, resolved upstream and passed in
+// as SearchScopedArgs.maxResults. Kept LOW by default because X bills per
+// returned record — a bigger page only helps busy keywords / initial scans.
+export const X_MAX_RESULTS = 10; // default request size
+export const X_MAX_RESULTS_FLOOR = 10; // X API minimum
+export const X_MAX_RESULTS_CEILING = 100; // X API maximum
+
+/** Clamp a requested page size into X's valid [10, 100] range (X 400s otherwise). */
+export function clampXMaxResults(n: number | null | undefined): number {
+  if (n == null || !Number.isFinite(n)) return X_MAX_RESULTS;
+  return Math.min(X_MAX_RESULTS_CEILING, Math.max(X_MAX_RESULTS_FLOOR, Math.round(n)));
+}
 const X_SEARCH_URL = 'https://api.twitter.com/2/tweets/search/recent';
 
 // X enforces the original tweet's reply_settings on API replies. Only
@@ -89,7 +101,9 @@ export class XScanAdapter implements PlatformScanAdapter {
     pagination: true,
     channelScoped: false,
     trackedScoped: true,
-    maxPerCall: X_MAX_RESULTS,
+    // Platform hard ceiling (what X CAN return per call), not the configured
+    // default request size — the latter is per-call via SearchScopedArgs.maxResults.
+    maxPerCall: X_MAX_RESULTS_CEILING,
   };
 
   private readonly _fetch: typeof fetch;
@@ -102,6 +116,9 @@ export class XScanAdapter implements PlatformScanAdapter {
     const { scope, keywords, cursor, budget, token } = args;
     const log = resolveLogger(args.log);
     const now = Date.now();
+    // Per-call page size: caller-supplied (settings-resolved) or the default,
+    // clamped into X's valid [10, 100] range so the API never 400s.
+    const maxResults = clampXMaxResults(args.maxResults);
 
     // Freshness window (optional): never surface a post older than the window.
     //  • start_time = now - window  → the API lower bound, used on a first scan
@@ -209,6 +226,7 @@ export class XScanAdapter implements PlatformScanAdapter {
           startTime,
           pageToken,
           token,
+          maxResults,
           log
         );
         callsUsed++;
@@ -269,11 +287,12 @@ export class XScanAdapter implements PlatformScanAdapter {
     startTime: string | undefined,
     pageToken: string | undefined,
     token: string,
+    maxResults: number,
     log: ReturnType<typeof resolveLogger>
   ): Promise<{ json: XSearchResponse | null; rate: RateLimitInfo }> {
     const params = new URLSearchParams({
       query,
-      max_results: String(X_MAX_RESULTS),
+      max_results: String(maxResults),
       'tweet.fields':
         'public_metrics,author_id,created_at,text,reply_settings,referenced_tweets',
       'user.fields': 'public_metrics,name,username,profile_image_url',
