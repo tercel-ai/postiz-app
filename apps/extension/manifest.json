@@ -2,9 +2,7 @@
   "manifest_version": 3,
   "name": "Aisee",
   "description": "Your ultimate social media scheduling tool",
-  "options_ui": {
-    "page": "src/pages/options/index.html"
-  },
+  "options_page": "src/pages/options/index.html",
   "action": {
     "default_popup": "src/pages/popup/index.html",
     "default_icon": {

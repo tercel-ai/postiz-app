@@ -57,7 +57,10 @@ export async function syncRedditMetrics(
       tok: string | null
     ): Promise<{ ok: boolean; status: number; text(): Promise<string> }> => {
       if (tok) {
-        const r = await fetch(url, { headers: redditAuthHeaders(tok) });
+        const r = await fetch(url, {
+          headers: redditAuthHeaders(tok),
+          signal: AbortSignal.timeout(15_000),
+        });
         return { ok: r.ok, status: r.status, text: () => r.text() };
       }
       return redditPublicGet(url, {}, { log: deps.warn });
@@ -203,7 +206,7 @@ export async function syncXMetrics(
   try {
     const authorRes = await fetch(
       `https://api.twitter.com/2/users/by/username/${authorUsername}`,
-      { headers: { Authorization: `Bearer ${bearerToken}` } }
+      { headers: { Authorization: `Bearer ${bearerToken}` }, signal: AbortSignal.timeout(15_000) }
     );
     if (!authorRes.ok) {
       const body = await authorRes.text().catch(() => '<unreadable>');
@@ -217,7 +220,7 @@ export async function syncXMetrics(
 
     const res = await fetch(
       `https://api.twitter.com/2/tweets/search/recent?query=conversation_id:${originalTweetId}&tweet.fields=author_id&max_results=50`,
-      { headers: { Authorization: `Bearer ${bearerToken}` } }
+      { headers: { Authorization: `Bearer ${bearerToken}` }, signal: AbortSignal.timeout(15_000) }
     );
     if (!res.ok) {
       const body = await res.text().catch(() => '<unreadable>');
