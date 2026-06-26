@@ -122,11 +122,35 @@ export class EngageService implements OnApplicationBootstrap {
       this._engageRepository.getOrCreateConfig(org.id),
       this._engageRepository.getOrgScanStatus(org.id, scanIntervalHours),
     ]);
+    // Per-type added/active/max so the frontend renders "active / added / cap"
+    // without re-deriving it. `added` = total rows (incl. disabled), straight off
+    // the already-loaded config lists (no extra query); `active` reuses the
+    // enabled-only counts in entitlement.usage; `max` is the plan cap (null =
+    // unlimited, 0 = feature hidden). subreddits mirrors usage.subreddits, which
+    // counts ALL monitored channels (no platform filter) — keep them aligned.
+    const counts = {
+      keywords: {
+        added: config.keywords.length,
+        active: entitlement.usage.keywords,
+        max: entitlement.limits.keywordsMax,
+      },
+      trackedAccounts: {
+        added: config.trackedAccounts.length,
+        active: entitlement.usage.trackedAccounts,
+        max: entitlement.limits.priorityAccountsMax,
+      },
+      subreddits: {
+        added: config.monitoredChannels.length,
+        active: entitlement.usage.subreddits,
+        max: entitlement.limits.subredditsMax,
+      },
+    };
     return {
       ...config,
       // Plan limits + current usage + reply pricing, so the frontend can disable
       // entrypoints and show usage. Backend asserts remain the source of truth.
-      entitlement,
+      // `entitlement.counts` adds per-type added/active/max for the UI.
+      entitlement: { ...entitlement, counts },
       // Single per-plan scan cadence applied to keyword/channel/tracked alike.
       // Legacy per-type keys kept for frontend compatibility (all equal now).
       scanIntervals: {
