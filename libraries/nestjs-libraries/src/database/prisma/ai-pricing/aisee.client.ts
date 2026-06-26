@@ -68,6 +68,13 @@ export interface AiseeDeductRequest {
   /** Idempotency key, e.g. "postiz_{postId}" */
   taskId: string;
   description: string;
+  /**
+   * Source-service / business-module identifier stored in Transaction.channel.
+   * Defaults to AiseeClient.CHANNEL ('postiz'). Engage deductions pass
+   * AiseeClient.ENGAGE_CHANNEL ('engage') so credit consumption can be
+   * attributed to the engage module vs the post module in the ledger.
+   */
+  channel?: string;
   /** Related business entity ID (e.g. threadId, mediaId) — stored in Transaction.related_id column */
   relatedId?: string;
   /**
@@ -126,6 +133,8 @@ export class AiseeClient {
   private readonly logger = new Logger(AiseeClient.name);
 
   static readonly CHANNEL = 'postiz';
+  /** Channel value for engage-module deductions (post vs engage attribution). */
+  static readonly ENGAGE_CHANNEL = 'engage';
 
   private _cachedToken: string | null = null;
   private _tokenExpiresAt = 0;
@@ -261,7 +270,7 @@ export class AiseeClient {
         amount: req.amount,
         task_id: req.taskId,
         description: req.description,
-        channel: AiseeClient.CHANNEL,
+        channel: req.channel || AiseeClient.CHANNEL,
         related_id: req.relatedId || undefined,
         data: req.data || undefined,
       };

@@ -79,6 +79,30 @@ export class AiseeCreditService {
   }
 
   /**
+   * Resolve the Aisee transaction `channel` (business-module attribution) for a
+   * deduction. Engage consumption is tagged 'engage' so it can be distinguished
+   * from post consumption ('postiz') in the aisee-core transactions ledger:
+   *   - ENGAGE_REPLY                              → engage
+   *   - POST_OVERAGE with data.source === 'engage' → engage (overage on an engage post)
+   *   - everything else                            → postiz
+   */
+  static resolveChannel(
+    businessType: AiseeBusinessType,
+    data?: Record<string, unknown>
+  ): string {
+    if (businessType === AiseeBusinessType.ENGAGE_REPLY) {
+      return AiseeClient.ENGAGE_CHANNEL;
+    }
+    if (
+      businessType === AiseeBusinessType.POST_OVERAGE &&
+      data?.source === 'engage'
+    ) {
+      return AiseeClient.ENGAGE_CHANNEL;
+    }
+    return AiseeClient.CHANNEL;
+  }
+
+  /**
    * Resolve the owner (SUPERADMIN or ADMIN) user ID for an organization.
    * Aisee bills by user, not by organization.
    * Cached for 5 minutes to avoid repeated DB lookups within a single flow.
@@ -244,6 +268,7 @@ export class AiseeCreditService {
         amount: totalAmount,
         taskId: opts.taskId,
         description: opts.description,
+        channel: AiseeClient.ENGAGE_CHANNEL,
         data: {
           business_type: AiseeBusinessType.ENGAGE_REPLY,
           cost_items: opts.costItems,
@@ -452,6 +477,7 @@ export class AiseeCreditService {
       taskId: opts.taskId,
       description: opts.description,
       relatedId: opts.relatedId,
+      channel: AiseeCreditService.resolveChannel(opts.businessType, opts.data),
       data: {
         business_type: opts.businessType,
         sub_type: subType,
