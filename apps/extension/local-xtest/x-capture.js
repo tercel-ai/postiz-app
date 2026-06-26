@@ -13,6 +13,7 @@
   if (w.__aiseeXCaptureInstalled) return;
   w.__aiseeXCaptureInstalled = true;
   w.__aiseeXCaptured = w.__aiseeXCaptured || {};
+  console.log('[xtest:capture] installed on', location.href);
 
   // Substring match; assumes no op name is a substring of another (true today).
   function opFromUrl(url) {
@@ -24,6 +25,7 @@
   function stash(op, data) {
     try {
       w.__aiseeXCaptured[op] = { op: op, at: Date.now(), data: data };
+      console.log('[xtest:capture] stashed', op);
     } catch (e) {}
   }
 

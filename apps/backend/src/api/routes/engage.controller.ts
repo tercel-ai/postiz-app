@@ -386,7 +386,7 @@ export class EngageController {
 
   @ApiOperation({
     summary:
-      'Event-driven metrics refresh: the client posts the exact post ids it is showing on /engage/sent (any sort/filter/page). The server refreshes only those PUBLISHED, in-window, and past their per-plan metrics interval — then fire-and-forgets the X/Reddit fetch. Returns { accepted, throttled, nextRefreshAt }; poll GET /sent/:id/status for the accepted ids.',
+      'Event-driven metrics refresh: the client posts the exact post ids it is showing on /engage/sent (any sort/filter/page). The server refreshes only those PUBLISHED, in-window, and past their per-plan metrics interval — then fire-and-forgets the X/Reddit fetch. Returns { accepted, throttled, nextRefreshAt }. When `accepted` is non-empty a fetch was kicked; re-read GET /sent to surface the new impressions/trafficScore once it lands (NOT GET /sent/:id/status — that returns state/replyUrl only, no metrics).',
   })
   @Post('/sent/metrics/refresh')
   refreshSentMetrics(

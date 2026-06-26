@@ -140,11 +140,16 @@ export function SentList() {
 
   // Event-driven metrics: refresh the metrics of the PUBLISHED posts currently on
   // screen (this page / filter / sort). The server gates by the per-plan interval,
-  // so this is cheap on repeat views and only fetches what's actually due.
-  const visiblePublishedPostIds = replies
-    .filter((r) => r.post.state === 'PUBLISHED')
-    .map((r) => r.post.id);
-  useEngageMetricsRefresh(visiblePublishedPostIds, mutate);
+  // so this is cheap on repeat views and only fetches what's actually due. The
+  // metrics signature lets the hook poll the list until a server-side fetch lands
+  // (values change) rather than blindly re-reading a fixed number of times.
+  const visiblePublished = replies.filter((r) => r.post.state === 'PUBLISHED');
+  const visiblePublishedPostIds = visiblePublished.map((r) => r.post.id);
+  const visibleMetricsSignature = visiblePublished
+    .map((r) => `${r.post.id}:${r.post.impressions ?? ''}:${r.post.trafficScore ?? ''}`)
+    .sort()
+    .join('|');
+  useEngageMetricsRefresh(visiblePublishedPostIds, visibleMetricsSignature, mutate);
 
   const closeModal = useCallback(() => {
     setUrlSubmitId(null);

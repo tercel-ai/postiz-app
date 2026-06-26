@@ -2,6 +2,11 @@
 // X's OWN page fires the GraphQL request, reads what x-capture.js intercepted,
 // parses it, and returns it to the Options page. No backend, no server API.
 
+function log() {
+  var args = ['[xtest:bg]'].concat([].slice.call(arguments));
+  console.log.apply(console, args);
+}
+
 // ── parse (ported from x.parse.ts) ───────────────────────────────────────────
 function unwrapTweet(result) {
   if (!result) return null;
@@ -112,20 +117,28 @@ async function readCaptured(tabId, op, sinceMs) {
     });
     return (res && res[0] && res[0].result) || null;
   } catch (e) {
-    console.warn('[xtest] readCaptured failed', e);
+    console.warn('[xtest:bg] readCaptured failed', e);
     return null;
   }
 }
 async function navigateAndCapture(tabId, url, op) {
   var since = Date.now();
+  log('navigate', { tabId: tabId, op: op, url: url });
   await chrome.tabs.update(tabId, { url: url });
   await waitForTabComplete(tabId, 15000);
+  log('tab load complete (or 15s timeout), polling for capture…', { op: op });
   var deadline = Date.now() + 10000;
+  var polls = 0;
   while (Date.now() < deadline) {
+    polls++;
     var data = await readCaptured(tabId, op, since);
-    if (data != null) return data;
+    if (data != null) {
+      log('captured', { op: op, polls: polls, waitMs: Date.now() - since });
+      return data;
+    }
     await sleep(250);
   }
+  console.warn('[xtest:bg] capture TIMEOUT', { op: op, polls: polls, waitMs: Date.now() - since });
   return null;
 }
 async function withTab(fn) {
@@ -133,47 +146,56 @@ async function withTab(fn) {
   var tab = await chrome.tabs.create({ url: 'about:blank', active: false });
   tabId = tab && tab.id;
   if (tabId == null) throw new Error('could not open background tab');
+  log('opened background tab', { tabId: tabId });
   try {
     return await fn(tabId);
   } finally {
-    try { await chrome.tabs.remove(tabId); } catch (e) {}
+    try { await chrome.tabs.remove(tabId); log('closed background tab', { tabId: tabId }); } catch (e) {}
   }
 }
 
 async function debugSearch(keyword, limit) {
   var kw = String(keyword || '').trim();
   if (!kw) return [];
+  log('debugSearch', { keyword: kw, limit: limit });
   return withTab(async function (tabId) {
     var url = 'https://x.com/search?q=' + encodeURIComponent(kw) + '&f=live&src=typed_query';
     var resp = await navigateAndCapture(tabId, url, 'SearchTimeline');
     if (resp == null) return [];
     var data = (resp && resp.data) || resp;
-    return parseSearchList(data).slice(0, Math.max(0, limit || 20));
+    var parsed = parseSearchList(data);
+    log('parsed search', { total: parsed.length, returning: Math.min(parsed.length, Math.max(0, limit || 20)) });
+    return parsed.slice(0, Math.max(0, limit || 20));
   });
 }
 async function debugTweet(idOrUrl) {
   var id = extractTweetId(idOrUrl);
+  log('debugTweet', { input: idOrUrl, extractedId: id });
   if (!id) return null;
   return withTab(async function (tabId) {
     var resp = await navigateAndCapture(tabId, 'https://x.com/i/web/status/' + id, 'TweetDetail');
     if (resp == null) return null;
     var data = (resp && resp.data) || resp;
-    return parseTweetDetailFocal(data, id);
+    var parsed = parseTweetDetailFocal(data, id);
+    log('parsed tweet', { found: !!parsed, id: parsed && parsed.id });
+    return parsed;
   });
 }
 
 // ── message handler ──────────────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
   if (request && request.action === 'xdebug:search') {
+    log('◆ message: xdebug:search', request);
     debugSearch(request.keyword, request.limit)
-      .then(function (tweets) { sendResponse({ ok: true, tweets: tweets }); })
-      .catch(function (e) { sendResponse({ ok: false, error: String((e && e.message) || e) }); });
+      .then(function (tweets) { log('◆ reply: search', { count: tweets.length }); sendResponse({ ok: true, tweets: tweets }); })
+      .catch(function (e) { console.error('[xtest:bg] search failed', e); sendResponse({ ok: false, error: String((e && e.message) || e) }); });
     return true;
   }
   if (request && request.action === 'xdebug:tweet') {
+    log('◆ message: xdebug:tweet', request);
     debugTweet(request.id)
-      .then(function (tweet) { sendResponse({ ok: true, tweet: tweet }); })
-      .catch(function (e) { sendResponse({ ok: false, error: String((e && e.message) || e) }); });
+      .then(function (tweet) { log('◆ reply: tweet', { found: !!tweet }); sendResponse({ ok: true, tweet: tweet }); })
+      .catch(function (e) { console.error('[xtest:bg] tweet failed', e); sendResponse({ ok: false, error: String((e && e.message) || e) }); });
     return true;
   }
 });
