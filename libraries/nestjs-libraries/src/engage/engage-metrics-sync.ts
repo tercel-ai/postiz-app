@@ -7,12 +7,11 @@ import {
 } from '@gitroom/nestjs-libraries/database/prisma/api-usage/api-usage.service';
 
 /**
- * Shared engage metrics-sync logic, used by BOTH the request-time path
- * (EngageService.resyncEngageMetrics) and the scheduled Temporal activity
- * (EngageDataTicksActivity.syncEngageMetrics). It previously existed as two
- * ~80-line copies that had already drifted in error-handling depth; this is the
- * single guarded implementation. Sinks are injected so each caller supplies its
- * own repository / posts-service / logger.
+ * Shared engage metrics-sync logic for the demand-driven (event-driven) reply-
+ * metrics refresh — EngageService.refreshMetricsForPosts and any manual/admin
+ * resync. It previously existed as two ~80-line copies that had already drifted
+ * in error-handling depth; this is the single guarded implementation. Sinks are
+ * injected so each caller supplies its own repository / posts-service / logger.
  */
 export interface MetricsSyncDeps {
   updatePostMetrics(

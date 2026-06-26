@@ -432,6 +432,48 @@ export class EngageRepository {
     );
   }
 
+  /**
+   * Per-keyword ACTIVATED-subscriber counts across all orgs. "Activated" means
+   * the keyword actually runs: EngageConfig.enabled = true AND
+   * EngageKeyword.enabled = true. Merely ADDING a keyword to a disabled config,
+   * or disabling the keyword, does NOT count. Keys are NORMALIZED
+   * (normalizeKeyword), so case/whitespace variants of the same keyword collapse
+   * into one row — matching the global scan-unit key. `activatedOrgs` is the
+   * distinct org count (engage is per-org); `variants` lists the raw spellings
+   * that mapped in. Sorted by activatedOrgs desc. Deliberately a LIVE query, not
+   * a persisted counter, so it never drifts as orgs enable/disable. Super-admin
+   * / global use only.
+   */
+  async getKeywordActivationStats(): Promise<
+    Array<{ keyword: string; activatedOrgs: number; variants: string[] }>
+  > {
+    const rows = await this._keyword.model.engageKeyword.findMany({
+      where: { enabled: true, config: { enabled: true } },
+      select: { keyword: true, organizationId: true },
+    });
+    // Group by normalized key → distinct orgs + the raw spellings seen.
+    const byKey = new Map<
+      string,
+      { orgs: Set<string>; variants: Set<string> }
+    >();
+    for (const r of rows) {
+      const key = normalizeKeyword(r.keyword);
+      if (!key) continue;
+      let entry = byKey.get(key);
+      if (!entry) {
+        entry = { orgs: new Set(), variants: new Set() };
+        byKey.set(key, entry);
+      }
+      entry.orgs.add(r.organizationId);
+      entry.variants.add(r.keyword);
+    }
+    return Array.from(byKey, ([keyword, { orgs, variants }]) => ({
+      keyword,
+      activatedOrgs: orgs.size,
+      variants: Array.from(variants),
+    })).sort((a, b) => b.activatedOrgs - a.activatedOrgs);
+  }
+
   async saveConfig(
     organizationId: string,
     data: Partial<{ enabled: boolean; lastScanAt: Date }>

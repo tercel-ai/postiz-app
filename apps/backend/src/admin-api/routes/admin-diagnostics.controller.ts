@@ -314,6 +314,29 @@ export class AdminDiagnosticsController {
   }
 
   /**
+   * GET /admin/diagnostics/engage-keyword-subscribers
+   *
+   * Per-keyword ACTIVATED-subscriber counts: how many orgs have each keyword
+   * actually running (EngageConfig.enabled AND EngageKeyword.enabled), keyed by
+   * the normalized keyword so case/whitespace variants collapse. "Activated",
+   * not merely "added" — a keyword on a disabled config, or a disabled keyword,
+   * is excluded. Live query; reflects the current enable/disable state exactly.
+   */
+  @Get('/engage-keyword-subscribers')
+  async checkEngageKeywordSubscribers() {
+    const items = await this._engageRepository.getKeywordActivationStats();
+
+    return {
+      checkedAt: new Date().toISOString(),
+      items, // [{ keyword, activatedOrgs, variants }]
+      summary: {
+        distinctKeywords: items.length,
+        totalActivations: items.reduce((s, i) => s + i.activatedOrgs, 0),
+      },
+    };
+  }
+
+  /**
    * GET /admin/diagnostics/engage-dead-reply-accounts
    *
    * Finds EngageXReplyAccount rows with engageEnabled=true but whose linked

@@ -2131,4 +2131,46 @@ describe('EngageRepository.getOrgScanStatus', () => {
       ).rejects.toMatchObject({ status: 404 });
     });
   });
+
+  describe('getKeywordActivationStats', () => {
+    it('queries only ACTIVATED rows: enabled keyword on an enabled config', async () => {
+      const { repo, keywordFindMany } = buildRepo();
+      keywordFindMany.mockResolvedValueOnce([]);
+
+      await repo.getKeywordActivationStats();
+
+      expect(keywordFindMany).toHaveBeenCalledWith({
+        where: { enabled: true, config: { enabled: true } },
+        select: { keyword: true, organizationId: true },
+      });
+    });
+
+    it('groups by normalized keyword, counts DISTINCT orgs, keeps raw variants, sorts desc', async () => {
+      const { repo, keywordFindMany } = buildRepo();
+      // 'AI' / 'ai' / 'Ai' all normalize to 'ai'. org1 appears under two case
+      // variants → must be counted ONCE. variants keeps the raw spellings.
+      keywordFindMany.mockResolvedValueOnce([
+        { keyword: 'AI', organizationId: 'org1' },
+        { keyword: 'ai', organizationId: 'org2' },
+        { keyword: 'Ai', organizationId: 'org1' },
+        { keyword: 'React', organizationId: 'org3' },
+      ]);
+
+      const stats = await repo.getKeywordActivationStats();
+
+      expect(stats).toEqual([
+        { keyword: 'ai', activatedOrgs: 2, variants: ['AI', 'ai', 'Ai'] },
+        { keyword: 'react', activatedOrgs: 1, variants: ['React'] },
+      ]);
+    });
+
+    it('drops blank-normalizing keywords and returns [] when nothing is activated', async () => {
+      const { repo, keywordFindMany } = buildRepo();
+      keywordFindMany.mockResolvedValueOnce([
+        { keyword: '   ', organizationId: 'org1' }, // normalizes to '' → skipped
+      ]);
+
+      expect(await repo.getKeywordActivationStats()).toEqual([]);
+    });
+  });
 });

@@ -358,10 +358,9 @@ export class PostsService {
   }
 
   /**
-   * Engage X analytics read with a token fallback chain. Shared by BOTH the
-   * manual sync (EngageService.resyncEngageMetrics) and the scheduled Temporal
-   * activity (EngageDataTicksActivity.syncEngageMetrics) so they behave
-   * identically:
+   * Engage X analytics read with a token fallback chain. Used by the demand-
+   * driven reply-metrics sync (EngageService.refreshMetricsForPosts) and any
+   * manual/admin resync, so they behave identically:
    *   1. the reply's own integration token — but only when that integration is
    *      healthy (not refreshNeeded/disabled/deleted), so a dead token doesn't
    *      burn a doomed refresh;
@@ -1440,16 +1439,18 @@ export class PostsService {
   }
 
   /**
-   * Write back post metrics fetched by the browser extension (demand-driven
-   * path). For each org-owned post, the platform is resolved server-side (never
-   * trusting the caller) and the SAME pipeline as `checkPostAnalytics` is run:
-   * `extractMetrics` derives impressions + the weighted Traffic score and the
-   * raw snapshot, which are persisted; impressions are only overwritten when
+   * Ingest post metrics fetched by the browser extension (demand-driven path).
+   * This is a pure DATA SUBMISSION — the extension read the metrics on the
+   * user's own session client-side; the server makes NO provider API call, it
+   * only persists. For each org-owned post, the platform is resolved server-side
+   * (never trusting the caller) and the SAME pipeline as `checkPostAnalytics` is
+   * run: `extractMetrics` derives impressions + the weighted Traffic score and
+   * the raw snapshot, which are persisted; impressions are only overwritten when
    * positive so a partial read never clobbers an earlier real value. Every
    * org-owned post in the batch is then stamped fetched (dedup gate holds even
    * when a post legitimately has zero metrics).
    */
-  async backfillMetrics(
+  async ingestMetrics(
     orgId: string,
     items: { postId: string; analytics: AnalyticsData[] }[]
   ): Promise<{ updated: string[]; stamped: string[] }> {
@@ -1494,6 +1495,11 @@ export class PostsService {
 
     await this._postRepository.batchUpdatePostAnalytics(updates);
     await this.markMetricsFetched(orgId, stamped);
+    // NOTE: no API-usage/cost telemetry here on purpose. This endpoint is a pure
+    // DATA SUBMISSION — the browser extension already read the metrics on the
+    // user's own session client-side, so the backend makes NO social-provider
+    // API call and incurs NO app API cost. API-cost stats track backend provider
+    // calls only; counting client-submitted data here would misattribute cost.
     return { updated: updates.map((u) => u.id), stamped };
   }
 }

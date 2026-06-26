@@ -74,16 +74,6 @@ function hostIsOneOf(url: string, domains: string[]): boolean {
 
 const isRedditUrl = (url: string) => hostIsOneOf(url, ['reddit.com']);
 const isXUrl = (url: string) => hostIsOneOf(url, ['x.com', 'twitter.com']);
-const DEFAULT_SCAN_TICK_MINUTES = 5;
-
-function engageScanTickMinutes(): number {
-  const value = Number(
-    process.env.ENGAGE_SCAN_TICK_MINUTES ?? DEFAULT_SCAN_TICK_MINUTES
-  );
-  return Number.isFinite(value) && value > 0
-    ? value
-    : DEFAULT_SCAN_TICK_MINUTES;
-}
 
 // Event-driven metrics refresh (`refreshMetricsForPosts`): hard cap on how many
 // client-supplied post ids one request may refresh, bounding external API work
@@ -844,38 +834,48 @@ export class EngageService implements OnApplicationBootstrap {
     }
   }
 
-  // Workflow ids of the retired per-type scan workflows. Terminated on boot so
-  // upgrading deployments don't leave them looping into a now-missing workflow
-  // type (their continueAsNew would otherwise fail repeatedly).
+  // Workflow ids of retired scan workflows. Terminated on boot so upgrading
+  // deployments don't leave them looping into now-incompatible code.
+  //  • engage-keyword/channel/tracked-global — the old per-type workflows.
+  //  • engage-scan-ticker — the old 5-minute *periodic* ticker. Its history has
+  //    a sleep timer the new (event-driven, timer-less) workflow no longer
+  //    schedules, so replaying it under the new code would throw a
+  //    non-determinism error. We terminate it and run the new logic under a
+  //    fresh id (SCAN_WORKFLOW_ID below) instead.
   private static readonly LEGACY_SCAN_WORKFLOW_IDS = [
     'engage-keyword-global',
     'engage-channel-global',
     'engage-tracked-global',
+    'engage-scan-ticker',
   ];
 
-  // Ensures the single engage scan ticker is running. The per-type cadence
-  // (keyword 24h / channel 3h / tracked 3h env vars) is enforced inside the
-  // activity; this workflow just ticks. USE_EXISTING makes it idempotent.
-  //   ENGAGE_SCAN_TICK_MINUTES  (default 5)
+  // Current scan-executor workflow id. Bumped from 'engage-scan-ticker' when the
+  // workflow went from periodic to purely event-driven (breaking history change).
+  private static readonly SCAN_WORKFLOW_ID = 'engage-scan-ticker-v2';
+
+  // Ensures the single engage scan executor exists so it can receive wake
+  // signals. It is PURELY EVENT-DRIVEN — no periodic tick; it just waits for a
+  // page-visit / setup signal and scans the units that are due. The per-unit
+  // cadence is enforced inside the activity. USE_EXISTING makes this idempotent.
   private async _ensureGlobalWorkflowsRunning(): Promise<void> {
     const client = this._temporalService.client?.getRawClient();
     if (!client) return;
 
-    // Best-effort cleanup of the retired fixed-interval workflows.
+    // Best-effort cleanup of retired scan workflows (incl. the old periodic
+    // ticker, whose history is incompatible with the new event-driven code).
     for (const id of EngageService.LEGACY_SCAN_WORKFLOW_IDS) {
       try {
-        await client.workflow?.getHandle(id).terminate('superseded by engage-scan-ticker');
+        await client.workflow?.getHandle(id).terminate('superseded by engage-scan-ticker-v2');
       } catch {
         // Not running / already gone — ignore.
       }
     }
 
-    const tickMinutes = engageScanTickMinutes();
     try {
       await client.workflow?.start('engageScanTickerWorkflow', {
-        workflowId: 'engage-scan-ticker',
+        workflowId: EngageService.SCAN_WORKFLOW_ID,
         taskQueue: 'main',
-        args: [tickMinutes],
+        args: [],
         workflowIdConflictPolicy: 'USE_EXISTING',
       });
     } catch (err) {
@@ -1336,33 +1336,51 @@ export class EngageService implements OnApplicationBootstrap {
     }
   }
 
+  // FORCE scan: bypass the per-unit cadence gate and scan all units now. For
+  // explicit user actions (engage setup / enable) where an immediate first scan
+  // is expected. Page visits use triggerDueScan (cadence-respecting) instead.
   async triggerImmediateScan(
     org: Organization,
     _keywordIds: string[] = []
   ): Promise<{ status: 'signaled' | 'started' | 'no_client' | 'error' }> {
+    return this._signalScanExecutor(org, 'triggerScanNow', 'triggerImmediateScan');
+  }
+
+  // DUE scan (non-force): wake the executor to scan only units whose per-unit
+  // cadence is due. The page-visit trigger uses this so a frequent visitor
+  // mostly no-ops at the lease layer ("check first, scan only if due").
+  async triggerDueScan(
+    org: Organization
+  ): Promise<{ status: 'signaled' | 'started' | 'no_client' | 'error' }> {
+    return this._signalScanExecutor(org, 'triggerDueScan', 'triggerDueScan');
+  }
+
+  // Signal the global scan executor; start it first (idempotent) if it isn't
+  // running yet, then signal. The executor is event-driven — no interval args.
+  private async _signalScanExecutor(
+    org: Organization,
+    signalName: 'triggerScanNow' | 'triggerDueScan',
+    logLabel: string
+  ): Promise<{ status: 'signaled' | 'started' | 'no_client' | 'error' }> {
     const client = this._temporalService.client?.getRawClient();
     if (!client) return { status: 'no_client' };
 
-    const tickMinutes = engageScanTickMinutes();
-
-    // Signal the ticker to force an immediate scan of all units; if it isn't
-    // running yet, start it (which itself runs within one tick) and signal.
     try {
-      await client.workflow.getHandle('engage-scan-ticker').signal('triggerScanNow');
+      await client.workflow.getHandle(EngageService.SCAN_WORKFLOW_ID).signal(signalName);
       return { status: 'signaled' };
     } catch {
       try {
         await client.workflow.start('engageScanTickerWorkflow', {
-          workflowId: 'engage-scan-ticker',
+          workflowId: EngageService.SCAN_WORKFLOW_ID,
           taskQueue: 'main',
-          args: [tickMinutes],
+          args: [],
           workflowIdConflictPolicy: 'USE_EXISTING',
         });
-        await client.workflow.getHandle('engage-scan-ticker').signal('triggerScanNow');
+        await client.workflow.getHandle(EngageService.SCAN_WORKFLOW_ID).signal(signalName);
         return { status: 'started' };
       } catch (startErr) {
         this.logger.error(
-          `triggerImmediateScan: failed to start/signal engage-scan-ticker (org=${org.id})`,
+          `${logLabel}: failed to start/signal ${EngageService.SCAN_WORKFLOW_ID} (org=${org.id})`,
           startErr
         );
         return { status: 'error' };
@@ -1419,8 +1437,10 @@ export class EngageService implements OnApplicationBootstrap {
     const scanDue = scanNextMs <= now;
 
     // ── Kick (fire-and-forget) — never block the page ────────────────────────
+    // Non-force: the executor scans only units whose per-unit cadence is due, so
+    // a frequent visitor mostly no-ops at the lease layer (no wasted API calls).
     if (scanDue && this._shouldSignalScan(org.id, now)) {
-      this.triggerImmediateScan(org).catch((err) =>
+      this.triggerDueScan(org).catch((err) =>
         this.logger.warn(
           `refreshOnVisit: scan trigger failed (org=${org.id}): ${
             (err as Error)?.message ?? err

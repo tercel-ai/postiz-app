@@ -1,19 +1,20 @@
 // Drives the demand-driven post-metrics track:
 //   POST /posts/metrics/due       → the subset of viewed posts due for a refresh
 //   fetch each with the session    → AnalyticsData per platform
-//   POST /posts/metrics/backfill   → server reuses extractMetrics + traffic
+//   POST /posts/metrics/ingest     → submit fetched metrics; server reuses
+//                                    extractMetrics + traffic (pure data submit)
 // View-scoped by design: the caller supplies the post ids currently in view
 // (or, for debugging, any ids). The server enforces the window ∩ interval gate.
 
 import { backendCall, NotAuthenticatedError } from './api';
-import { DueMetricsResponse, MetricsBackfillItem } from './executor.types';
+import { DueMetricsResponse, MetricsIngestItem } from './executor.types';
 import { applyDelay, tryConsumeHourly } from './pacing';
 import { fetchRedditMetrics } from './metrics.reddit';
 import { fetchXMetrics } from './metrics.x';
 import { X_EXECUTOR_ENABLED } from './flags';
 
 const DUE_ENDPOINT = '/posts/metrics/due';
-const BACKFILL_ENDPOINT = '/posts/metrics/backfill';
+const INGEST_ENDPOINT = '/posts/metrics/ingest';
 
 // Metrics GETs hit x.com / reddit.com with the personal session too, so they
 // share a paced, capped cadence (no per-task pacing is sent for this track).
@@ -24,7 +25,7 @@ const METRICS_INTER_POST_JITTER_MS = 3_000;
 export interface MetricsRunSummary {
   due: number;
   fetched: number;
-  backfilled: number;
+  ingested: number;
   stoppedReason: 'ok' | 'cap' | 'error' | 'not-authenticated' | 'no-ids';
 }
 
@@ -34,7 +35,7 @@ export async function runMetrics(ids: string[]): Promise<MetricsRunSummary> {
   const summary: MetricsRunSummary = {
     due: 0,
     fetched: 0,
-    backfilled: 0,
+    ingested: 0,
     stoppedReason: 'ok',
   };
   const clean = Array.from(
@@ -72,7 +73,7 @@ export async function runMetrics(ids: string[]): Promise<MetricsRunSummary> {
 
     const posts = due.due ?? [];
     summary.due = posts.length;
-    const items: MetricsBackfillItem[] = [];
+    const items: MetricsIngestItem[] = [];
 
     for (let i = 0; i < posts.length; i++) {
       const post = posts[i];
@@ -108,18 +109,18 @@ export async function runMetrics(ids: string[]): Promise<MetricsRunSummary> {
     if (items.length) {
       try {
         const resp = await backendCall<{ updated: string[]; stamped: string[] }>(
-          BACKFILL_ENDPOINT,
+          INGEST_ENDPOINT,
           'POST',
           { items }
         );
         if (resp.ok) {
-          summary.backfilled = resp.data?.updated?.length ?? items.length;
+          summary.ingested = resp.data?.updated?.length ?? items.length;
         } else {
-          console.warn('[aisee][metrics] backfill HTTP', resp.status, resp.data);
+          console.warn('[aisee][metrics] ingest HTTP', resp.status, resp.data);
           summary.stoppedReason = 'error';
         }
       } catch (e) {
-        console.warn('[aisee][metrics] backfill failed', e);
+        console.warn('[aisee][metrics] ingest failed', e);
         summary.stoppedReason = 'error';
       }
     }

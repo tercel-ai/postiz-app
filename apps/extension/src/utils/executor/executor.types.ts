@@ -4,7 +4,7 @@
 // and posts back normalised data. These shapes mirror, field for field:
 //   - libraries/.../engage/scan/scan-task.types.ts        (EngageScanTask, pacing)
 //   - libraries/.../dtos/engage/scan-ingest.dto.ts        (ScanIngestPostDto)
-//   - libraries/.../dtos/posts/metrics-due/backfill.dto.ts
+//   - libraries/.../dtos/posts/metrics-due.dto.ts, metrics-ingest.dto.ts
 // Keep them in sync if the backend contract changes.
 
 export type ScanTaskPlatform = 'x' | 'reddit';
@@ -116,7 +116,7 @@ export interface DueMetricsResponse {
 }
 
 /** AnalyticsData point/series — mirrors the backend social analytics shape so
- *  the same extractMetrics / traffic pipeline consumes the backfill. */
+ *  the same extractMetrics / traffic pipeline consumes the ingested metrics. */
 export interface AnalyticsPoint {
   total: number | string;
   date: string; // ISO 8601
@@ -127,7 +127,7 @@ export interface AnalyticsSeries {
   percentageChange?: number;
 }
 
-export interface MetricsBackfillItem {
+export interface MetricsIngestItem {
   postId: string;
   analytics: AnalyticsSeries[];
 }

@@ -68,12 +68,12 @@ describe('PostsService.markMetricsFetched', () => {
   });
 });
 
-describe('PostsService.backfillMetrics', () => {
+describe('PostsService.ingestMetrics', () => {
   beforeEach(() => vi.clearAllMocks());
 
   it('no-ops on empty items', async () => {
     const { svc, repo } = makeService();
-    expect(await svc.backfillMetrics('org-1', [])).toEqual({ updated: [], stamped: [] });
+    expect(await svc.ingestMetrics('org-1', [])).toEqual({ updated: [], stamped: [] });
     expect(repo.getPostsProviderByIds).not.toHaveBeenCalled();
   });
 
@@ -86,7 +86,7 @@ describe('PostsService.backfillMetrics', () => {
       { label: 'likes', data: [{ total: '10', date: '2026-06-17' }], percentageChange: 0 },
       { label: 'replies', data: [{ total: '5', date: '2026-06-17' }], percentageChange: 0 },
     ];
-    const res = await svc.backfillMetrics('org-1', [{ postId: 'p1', analytics } as any]);
+    const res = await svc.ingestMetrics('org-1', [{ postId: 'p1', analytics } as any]);
 
     expect(res.stamped).toEqual(['p1']);
     expect(res.updated).toEqual(['p1']);
@@ -103,7 +103,7 @@ describe('PostsService.backfillMetrics', () => {
 
   it('skips posts the org does not own (platform unresolved) — no stamp, no write', async () => {
     const { svc, repo } = makeService({ providers: [] }); // p1 not owned
-    const res = await svc.backfillMetrics('org-1', [
+    const res = await svc.ingestMetrics('org-1', [
       { postId: 'p1', analytics: [{ label: 'impressions', data: [{ total: '5', date: 'd' }], percentageChange: 0 }] } as any,
     ]);
     expect(res).toEqual({ updated: [], stamped: [] });
@@ -115,7 +115,7 @@ describe('PostsService.backfillMetrics', () => {
     const { svc, repo } = makeService({
       providers: [{ id: 'p1', integration: { providerIdentifier: 'x' } }],
     });
-    const res = await svc.backfillMetrics('org-1', [{ postId: 'p1', analytics: [] } as any]);
+    const res = await svc.ingestMetrics('org-1', [{ postId: 'p1', analytics: [] } as any]);
     expect(res.stamped).toEqual(['p1']);
     expect(res.updated).toEqual([]);
     expect(repo.batchUpdatePostAnalytics).toHaveBeenCalledWith([]);

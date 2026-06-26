@@ -362,9 +362,12 @@ describe('EngageScanActivity keyword initial scans', () => {
     await expect((activity as any)._loadInitialScanSettings()).resolves.toEqual(
       expect.objectContaining({
         enabledPlatforms: ['reddit', 'x'],
+        // Unset fields fall to the current defaults: maxUnits 10, maxCalls 1.
+        // Here reddit.max_units (12) and x.max_calls (2) are overridden in
+        // Settings; reddit.max_calls and x.max_units take the defaults.
         budget: {
-          reddit: { maxUnits: 12, maxCalls: 2 },
-          x: { maxUnits: 5, maxCalls: 2 },
+          reddit: { maxUnits: 12, maxCalls: 1 },
+          x: { maxUnits: 10, maxCalls: 2 },
         },
       })
     );

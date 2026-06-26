@@ -12,7 +12,7 @@ import {
 import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.service';
 import { EngageEntitlementService } from '@gitroom/nestjs-libraries/engage/engage-entitlement.service';
 import { MetricsDueDto } from '@gitroom/nestjs-libraries/dtos/posts/metrics-due.dto';
-import { MetricsBackfillDto } from '@gitroom/nestjs-libraries/dtos/posts/metrics-backfill.dto';
+import { MetricsIngestDto } from '@gitroom/nestjs-libraries/dtos/posts/metrics-ingest.dto';
 import { PostReleaseService } from '@gitroom/nestjs-libraries/database/prisma/post-releases/post-release.service';
 import { GetOrgFromRequest } from '@gitroom/nestjs-libraries/user/org.from.request';
 import { Organization, User } from '@prisma/client';
@@ -73,18 +73,34 @@ export class PostsController {
   }
 
   /**
-   * Write-back for the demand-driven fetch: the extension returns the metrics it
-   * read from the platform for the viewed posts. The server resolves each post's
-   * platform from ownership, runs the same extract/traffic pipeline as the
-   * OAuth analytics sync, persists impressions/traffic/snapshot, and stamps
-   * `lastMetricsFetchAt` so the interval gate holds.
+   * Ingest for the demand-driven fetch: the extension submits the metrics it
+   * read from the platform (on the user's own session) for the viewed posts.
+   * Pure data submission — the server makes NO provider API call; it resolves
+   * each post's platform from ownership, runs the same extract/traffic pipeline
+   * as the OAuth analytics sync, persists impressions/traffic/snapshot, and
+   * stamps `lastMetricsFetchAt` so the interval gate holds. Named `ingest` to
+   * match `/engage/scan-tasks/ingest` (same concept: extension submits fetched
+   * data, server only persists).
+   */
+  @Post('/metrics/ingest')
+  async ingestMetrics(
+    @GetOrgFromRequest() org: Organization,
+    @Body() body: MetricsIngestDto
+  ) {
+    return this._postsService.ingestMetrics(org.id, body.items as any);
+  }
+
+  /**
+   * @deprecated Legacy alias of POST /metrics/ingest, kept only so already-
+   * deployed browser extensions (which still POST to /metrics/backfill) keep
+   * working until they update. Remove once old extension builds are phased out.
    */
   @Post('/metrics/backfill')
-  async backfillMetrics(
+  async ingestMetricsLegacy(
     @GetOrgFromRequest() org: Organization,
-    @Body() body: MetricsBackfillDto
+    @Body() body: MetricsIngestDto
   ) {
-    return this._postsService.backfillMetrics(org.id, body.items as any);
+    return this._postsService.ingestMetrics(org.id, body.items as any);
   }
 
   @Get('/:id/statistics')

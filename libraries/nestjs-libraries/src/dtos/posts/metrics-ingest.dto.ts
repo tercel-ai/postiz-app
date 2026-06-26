@@ -39,7 +39,7 @@ class AnalyticsDataDto {
   percentageChange?: number;
 }
 
-class MetricsBackfillItemDto {
+class MetricsIngestItemDto {
   @IsString()
   postId: string;
 
@@ -51,16 +51,18 @@ class MetricsBackfillItemDto {
 }
 
 /**
- * Extension → server write-back of metrics it fetched for the posts the user is
- * viewing. The platform for each post is resolved server-side from ownership, so
+ * Extension → server submission of metrics it fetched for the posts the user is
+ * viewing. This is a pure DATA SUBMISSION: the extension read the metrics on the
+ * user's own session client-side; the server only persists them (no provider API
+ * call). The platform for each post is resolved server-side from ownership, so
  * the body carries only post id + raw metric series. Capped to keep the batch
  * aligned with one viewed page.
  */
-export class MetricsBackfillDto {
+export class MetricsIngestDto {
   @IsArray()
   @ArrayNotEmpty()
   @ArrayMaxSize(100)
   @ValidateNested({ each: true })
-  @Type(() => MetricsBackfillItemDto)
-  items: MetricsBackfillItemDto[];
+  @Type(() => MetricsIngestItemDto)
+  items: MetricsIngestItemDto[];
 }

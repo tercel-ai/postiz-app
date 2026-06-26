@@ -66,6 +66,19 @@ interface XTweet {
     quote_count: number;
     bookmark_count: number;
   };
+  // Archival/filtering fields — requested into rawData, not promoted to columns.
+  lang?: string;
+  possibly_sensitive?: boolean;
+  conversation_id?: string;
+  // note_tweet carries the full text of a >280-char tweet (`text` is truncated).
+  note_tweet?: { text?: string; entities?: Record<string, unknown> };
+  // entities: urls / hashtags / mentions / annotations parsed by X.
+  entities?: Record<string, unknown>;
+  // context_annotations: X-detected topics/entities (domain + entity pairs).
+  context_annotations?: Array<{
+    domain?: { id: string; name: string; description?: string };
+    entity?: { id: string; name: string; description?: string };
+  }>;
 }
 
 interface XUser {
@@ -293,8 +306,14 @@ export class XScanAdapter implements PlatformScanAdapter {
     const params = new URLSearchParams({
       query,
       max_results: String(maxResults),
+      // Archival/filtering fields land in rawData (the full tweet is stored
+      // verbatim on EngageOpportunity.rawData): lang (language filtering),
+      // context_annotations (X topic/entity tags), entities (urls/hashtags/
+      // mentions), conversation_id (thread grouping), note_tweet (>280-char full
+      // text — `text` is truncated), possibly_sensitive (content gating). Not
+      // promoted to columns; queryable only via rawData for now.
       'tweet.fields':
-        'public_metrics,author_id,created_at,text,reply_settings,referenced_tweets',
+        'public_metrics,author_id,created_at,text,reply_settings,referenced_tweets,lang,context_annotations,entities,conversation_id,note_tweet,possibly_sensitive',
       'user.fields': 'public_metrics,name,username,profile_image_url',
       // referenced_tweets.id → originals into includes.tweets;
       // referenced_tweets.id.author_id → their authors into includes.users.
