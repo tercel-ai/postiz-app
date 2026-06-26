@@ -59,7 +59,6 @@ function TweetRow({ t }: { t: Tweet }) {
 
 export default function Options() {
   const [keyword, setKeyword] = useState('');
-  const [limit, setLimit] = useState(20);
   const [searchBusy, setSearchBusy] = useState(false);
   const [searchErr, setSearchErr] = useState<string | null>(null);
   const [searchResults, setSearchResults] = useState<Tweet[]>([]);
@@ -81,7 +80,6 @@ export default function Options() {
       const resp = await sendMessage<SearchResp>({
         action: 'xdebug:search',
         keyword,
-        limit,
       });
       if (!resp.ok) throw new Error(resp.error || 'failed');
       setSearchResults(resp.tweets ?? []);
@@ -131,14 +129,6 @@ export default function Options() {
             onChange={(e) => setKeyword(e.target.value)}
             placeholder="输入关键字，例如 openai"
             onKeyDown={(e) => e.key === 'Enter' && runSearch()}
-          />
-          <input
-            type="number"
-            value={limit}
-            min={1}
-            max={50}
-            title="返回条数"
-            onChange={(e) => setLimit(Number(e.target.value) || 20)}
           />
           <button onClick={runSearch} disabled={searchBusy || !keyword.trim()}>
             {searchBusy ? '搜索中…' : '搜索'}

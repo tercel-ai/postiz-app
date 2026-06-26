@@ -63,8 +63,7 @@ export function extractTweetId(input: string): string {
 
 /** Keyword search via X's own SearchTimeline (Latest tab). */
 export async function debugSearchKeyword(
-  keyword: string,
-  limit = 20
+  keyword: string
 ): Promise<ParsedTweet[]> {
   const kw = String(keyword || '').trim();
   if (!kw) return [];
@@ -78,7 +77,7 @@ export async function debugSearchKeyword(
     const resp = await session.navigateAndCapture(url, 'SearchTimeline');
     if (resp == null) return [];
     const data = (resp as { data?: unknown }).data ?? resp;
-    return parseSearchList(data).slice(0, Math.max(0, limit));
+    return parseSearchList(data);
   } finally {
     await session.close();
   }

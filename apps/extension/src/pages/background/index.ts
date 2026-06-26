@@ -294,7 +294,7 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
 
   // ─── X collection debug (Options page) — NO backend, tab+interceptor only ──
   if (request.action === 'xdebug:search') {
-    debugSearchKeyword(request.keyword, request.limit)
+    debugSearchKeyword(request.keyword)
       .then((tweets) => sendResponse({ ok: true, tweets }))
       .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
     return true;
