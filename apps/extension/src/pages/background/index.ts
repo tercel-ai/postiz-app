@@ -14,9 +14,9 @@ import {
   debugSearchKeyword,
   debugFetchTweet,
   debugSearchAccountKeywords,
+  debugScanTaskX,
 } from '@gitroom/extension/utils/executor/x.debug';
 import { backendCall } from '@gitroom/extension/utils/executor/api';
-import { scanX } from '@gitroom/extension/utils/executor/scan.x';
 import { scanReddit } from '@gitroom/extension/utils/executor/scan.reddit';
 import {
   ensureEngageScanAlarm,
@@ -333,12 +333,25 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
     return true;
   }
   if (request.action === 'engage:execute-task') {
-    // Debug mode: always allow requests (gate always returns true — no hourly cap
-    // enforcement so the user can run any task freely in the Options panel).
     const gate = () => Promise.resolve(true);
     const task = request.task;
-    (task.platform === 'x' ? scanX(task, gate) : scanReddit(task, gate))
+    // X: use the tab + interceptor path (full browser fingerprint, same as
+    // sections ①②③ in the Options page). Direct GraphQL calls from the service
+    // worker bypass the session cookies and look bot-like to X's anti-abuse systems.
+    // Reddit: scanReddit uses public .json — no session / fingerprint issue.
+    // Cap to 1 page regardless of phase (initial normally allows 3) — the debug
+    // panel is for sampling, not a full baseline sweep.
+    const debugTask = { ...task, pacing: { ...task.pacing, maxPages: 1 } };
+    (task.platform === 'x' ? debugScanTaskX(task) : scanReddit(debugTask, gate))
       .then((result) => sendResponse({ ok: true, result }))
+      .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
+    return true;
+  }
+  if (request.action === 'engage:release-task') {
+    // Debug: release a stuck lease (scan failed, cursor still SCANNING).
+    // After release, use force=true in claim to bypass cadence and immediately re-scan.
+    backendCall('/engage/scan-tasks/release', 'POST', { taskId: request.taskId })
+      .then((r: any) => sendResponse({ ok: r.ok, released: r.data?.released ?? false }))
       .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
     return true;
   }

@@ -168,6 +168,20 @@ export class EngageController {
     return this._scanTasksService.sync(org.id, { completed, want: body.want });
   }
 
+  @ApiOperation({
+    summary:
+      'Debug: release a held scan-task lease so the unit can be re-claimed. ' +
+      'Resets status → IDLE without advancing the cursor; use force-claim afterwards to bypass cadence.',
+  })
+  @Post('/scan-tasks/release')
+  async scanTasksRelease(
+    @Body() body: { taskId: string }
+  ) {
+    if (!body?.taskId) return { released: false };
+    const released = await this._scanTasksService.releaseTask(body.taskId);
+    return { released };
+  }
+
   // ─── Config ───────────────────────────────────────────────────────────────
 
   @ApiOperation({ summary: 'Get Engage config and keywords/channels/accounts for this org' })

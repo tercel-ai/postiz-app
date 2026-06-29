@@ -119,6 +119,16 @@ export class EngageScanTasksService {
     return this._ingest.attributeExisting(ctx as any, opportunities as any);
   }
 
+  /**
+   * Debug/admin: release a held lease by token WITHOUT advancing the cursor,
+   * so the unit can be immediately re-claimed (combined with force=true to bypass
+   * cadence). Safe to call on a stale or failed scan — if the token is invalid
+   * or already released, returns false (no-op).
+   */
+  async releaseTask(taskId: string): Promise<boolean> {
+    return this._lease.releaseByToken(taskId);
+  }
+
   /** Complete (if any) + claim next batch. Bootstrap = call with no `completed`. */
   async sync(
     orgId: string,

@@ -95,11 +95,11 @@ export const DEFAULT_SCAN_PACING: EngageScanPacing = {
   },
   extension: {
     x: {
-      initial: { maxPages: 3, pageSize: 20, pageDelayMs: 8000, jitterMs: 60000 },
+      initial: { maxPages: 1, pageSize: 20, pageDelayMs: 8000, jitterMs: 60000 },
       incremental: { maxPages: 1, pageSize: 20, pageDelayMs: 8000, jitterMs: 60000 },
     },
     reddit: {
-      initial: { maxPages: 3, pageSize: 25, pageDelayMs: 5000, jitterMs: 60000 },
+      initial: { maxPages: 1, pageSize: 25, pageDelayMs: 5000, jitterMs: 60000 },
       incremental: { maxPages: 1, pageSize: 25, pageDelayMs: 5000, jitterMs: 60000 },
     },
     interUnit: { delayMs: 60000, jitterMs: 60000 },

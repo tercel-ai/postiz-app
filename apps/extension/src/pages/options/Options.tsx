@@ -245,6 +245,20 @@ function EngageScanPanel() {
     } catch (e: any) { patch(t.taskId, { status: 'err', err: String(e?.message || e) }); }
   }
 
+  async function releaseTask(t: ScanTask) {
+    patch(t.taskId, { status: 'idle', err: null, posts: [] });
+    try {
+      await sendMessage<{ ok: boolean; released?: boolean }>({ action: 'engage:release-task', taskId: t.taskId });
+      // Remove the task from the list; user should re-claim (with force=true if cadence blocks).
+      setTasks((prev) => prev.filter((x) => x.taskId !== t.taskId));
+      setStates((prev) => { const n = { ...prev }; delete n[t.taskId]; return n; });
+    } catch (_) {
+      // Even if release fails server-side, remove locally so user can re-claim.
+      setTasks((prev) => prev.filter((x) => x.taskId !== t.taskId));
+      setStates((prev) => { const n = { ...prev }; delete n[t.taskId]; return n; });
+    }
+  }
+
   async function ingestTask(t: ScanTask) {
     const st = states[t.taskId];
     if (!st || st.status !== 'done') return;
@@ -333,7 +347,9 @@ function EngageScanPanel() {
               )];
             }
             return cursors.map((cur) => {
-              const due = cur.nextScanAt ? new Date(cur.nextScanAt).getTime() <= Date.now() : true;
+              // Never-completed scan (lastScannedAt null = claimed but failed) is always due,
+              // regardless of nextScanAt which is anchored to lastScanStartedAt.
+              const due = !cur.lastScannedAt || (cur.nextScanAt ? new Date(cur.nextScanAt).getTime() <= Date.now() : true);
               const platLabel = cur.platform === 'x' ? '𝕏' : cur.platform === 'reddit' ? 'r/' : cur.platform;
               return (
                 <div key={kw.id + ':' + cur.platform} className="eng-status-row">
@@ -428,7 +444,16 @@ function EngageScanPanel() {
                 {st.status === 'ingesting' && <button disabled className="eng-btn-ingest">入库中…</button>}
                 {st.status === 'ingested' && <span className="eng-badge-ok">✓ 已入库 · accepted: {st.accepted}</span>}
               </div>
-              {st.err && <div className="xdbg-err" style={{ marginTop: 4 }}>{st.err}</div>}
+              {st.status === 'err' && (
+                <div style={{ marginTop: 6, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                  <div className="xdbg-err" style={{ margin: 0, flex: 1 }}>{st.err}</div>
+                  <button onClick={() => releaseTask(t)}
+                    style={{ padding: '3px 10px', border: 0, borderRadius: 5, background: '#f97316', color: '#fff', fontSize: 12, cursor: 'pointer', flexShrink: 0 }}>
+                    释放锁定
+                  </button>
+                  <span style={{ fontSize: 11, color: '#888' }}>释放后勾选强制领取重新领取</span>
+                </div>
+              )}
               {(st.status === 'done' || st.status === 'ingested') && (
                 <div className="eng-task-results">
                   <div className="xdbg-count">共 {st.posts.length} 条 · exhausted: {String(st.exhausted)}</div>
@@ -547,7 +572,7 @@ export default function Options() {
   };
 
   return (
-    <div className="container xdbg">
+    <div className="xdbg">
       <style>{XDBG_CSS}</style>
       <h1>X 采集调试</h1>
       <p className="xdbg-hint">

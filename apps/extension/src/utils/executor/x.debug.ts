@@ -11,6 +11,7 @@
 
 import { ParsedTweet, parseTweetResult, unwrapTweet } from './x.parse';
 import { openXReadTab, readViaProfile, readXOnce } from './x.tab-reader';
+import { EngageScanTask, ScanIngestPost, ScanRunResult } from './executor.types';
 
 /** Pull every parseable tweet out of a list of timeline instructions. */
 function tweetsFromInstructions(instructions: any[]): ParsedTweet[] {
@@ -128,6 +129,79 @@ export async function debugSearchAccountKeywords(
   if (resp == null) return [];
   const data = (resp as { data?: unknown }).data ?? resp;
   return parseSearchList(data);
+}
+
+/** Convert a ParsedTweet to the normalised ScanIngestPost shape expected by the backend. */
+function parsedTweetToPost(t: ParsedTweet): ScanIngestPost {
+  return {
+    platform: 'x',
+    externalPostId: t.id,
+    externalPostUrl: `https://x.com/${t.authorUsername}/status/${t.id}`,
+    authorUsername: t.authorUsername,
+    postContent: t.text,
+    postPublishedAt: t.createdAt,
+    authorDisplayName: t.authorDisplayName,
+    authorAvatarUrl: t.authorAvatarUrl,
+    authorFollowers: t.authorFollowers,
+    metricLikes: t.likes,
+    metricReplies: t.replies,
+    metricRetweets: t.retweets,
+    metricQuotes: t.quotes,
+    metricBookmarks: t.bookmarks,
+    metricViews: t.views,
+  };
+}
+
+/**
+ * Debug panel "execute scan" for X: uses the same tab + interceptor path as
+ * sections ①②③ (full browser fingerprint, NO direct GraphQL API calls).
+ *
+ * - keyword  → plain x.com search tab
+ * - tracked  → two-step navigation: profile page → search URL (same as
+ *              debugSearchAccountKeywords), with a natural linger before close
+ */
+export async function debugScanTaskX(task: EngageScanTask): Promise<ScanRunResult> {
+  const query = task.rawQuery ?? (
+    task.scanType === 'tracked'
+      ? `from:${task.scanKey} -filter:retweets`
+      : task.scanKey
+  );
+
+  const searchUrl =
+    'https://x.com/search?q=' + encodeURIComponent(query) + '&src=typed_query';
+
+  let tweets: ParsedTweet[];
+
+  if (task.scanType === 'tracked') {
+    // Two-step navigation: visit the account's profile first so the search
+    // request carries a realistic Referer and tab history.
+    const profileUrl = `https://x.com/${task.scanKey}`;
+    const resp = await readViaProfile(profileUrl, searchUrl, 'SearchTimeline');
+    const data = (resp as { data?: unknown } | null)?.data ?? resp;
+    tweets = data ? parseSearchList(data) : [];
+  } else {
+    // Keyword or channel: single tab, direct search navigation.
+    const session = await openXReadTab();
+    if (!session) throw new Error('Could not open a background x.com tab');
+    try {
+      const resp = await session.navigateAndCapture(searchUrl, 'SearchTimeline');
+      const data = (resp as { data?: unknown } | null)?.data ?? resp;
+      tweets = data ? parseSearchList(data) : [];
+    } finally {
+      await session.close();
+    }
+  }
+
+  const posts = tweets.map(parsedTweetToPost);
+
+  // Cursor: newest seen post (SearchTimeline is newest-first).
+  const newest = posts[0];
+  const nextCursor = {
+    lastSeenExternalId: newest?.externalPostId ?? task.cursor.lastSeenExternalId,
+    lastSeenAt: newest?.postPublishedAt ?? task.cursor.lastSeenAt,
+  };
+
+  return { posts, nextCursor, exhausted: true };
 }
 
 /** Fetch a single tweet's data via X's own TweetDetail (status page). */
