@@ -14,6 +14,7 @@ export default function EngageLayout({
   const tabs = [
     { label: 'Signal Feed', href: '/engage' },
     { label: 'Sent', href: '/engage/sent' },
+    { label: 'Scan Automation', href: '/engage/automation' },
     { label: 'Settings', href: '/engage/settings' },
   ];
 

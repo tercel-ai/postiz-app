@@ -1,5 +1,5 @@
 // ⚠️ STATUS: STAGED — NOT YET WIRED. Nothing imports this module yet (the live
-// debug path in x.debug.ts uses SearchTimeline / TweetDetail, not UserTweets). It
+// the Options collection path uses SearchTimeline / TweetDetail, not UserTweets). It
 // is the building block for the real "scrape a fixed list of users" flow: wire it
 // by having the scan runner open one openXReadTab() per run and call
 // collectUserRecent(session, username, sinceId, limit) per user. Until then it is

@@ -1,4 +1,4 @@
-// Debug helpers for Reddit in the Options page — parallel to x.debug.ts but
+// Browser-session Reddit collection helpers used by the Options page.
 // using Reddit's public .json API with the user's session cookies (credentials:
 // 'include'). No tab/interceptor needed; Reddit's WAF is cleared by the loid
 // cookie that the browser carries automatically.
@@ -6,7 +6,7 @@
 import { ScanIngestPost } from './executor.types';
 
 const REDDIT_BASE = 'https://www.reddit.com';
-const DEBUG_LIMIT = 25;
+const COLLECTION_LIMIT = 25;
 
 function toPost(p: Record<string, any>): ScanIngestPost {
   const sub = String(p.subreddit ?? '');
@@ -46,12 +46,12 @@ async function rFetch(url: string): Promise<any> {
 }
 
 /** ① Keyword search across all of Reddit (sort=new). */
-export async function debugSearchRedditKeyword(
+export async function scanRedditKeyword(
   keyword: string
 ): Promise<ScanIngestPost[]> {
   const q = encodeURIComponent(keyword);
   const data = await rFetch(
-    `${REDDIT_BASE}/search.json?q=${q}&sort=new&limit=${DEBUG_LIMIT}&type=link`
+    `${REDDIT_BASE}/search.json?q=${q}&sort=new&limit=${COLLECTION_LIMIT}&type=link`
   );
   const children: any[] = data?.data?.children ?? [];
   return children
@@ -66,7 +66,7 @@ export async function debugSearchRedditKeyword(
  *  - Full URL:  https://www.reddit.com/r/sub/comments/ID/title/
  *  - Short ID:  abc123  (Reddit post ID without t3_ prefix)
  */
-export async function debugFetchRedditPost(
+export async function fetchRedditPost(
   urlOrId: string
 ): Promise<ScanIngestPost | null> {
   let apiUrl: string;
@@ -91,12 +91,12 @@ export async function debugFetchRedditPost(
  * Since Reddit search has no `from:user` operator, we fetch submitted.json and
  * apply a client-side keyword filter (same as the backend does for channel scans).
  */
-export async function debugSearchRedditUser(
+export async function scanRedditUser(
   username: string,
   keywords: string[]
 ): Promise<ScanIngestPost[]> {
   const data = await rFetch(
-    `${REDDIT_BASE}/user/${encodeURIComponent(username)}/submitted.json?sort=new&limit=${DEBUG_LIMIT}`
+    `${REDDIT_BASE}/user/${encodeURIComponent(username)}/submitted.json?sort=new&limit=${COLLECTION_LIMIT}`
   );
   const children: any[] = data?.data?.children ?? [];
   let posts = children

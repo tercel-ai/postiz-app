@@ -11,18 +11,19 @@ import {
 import { runScanLoop } from '@gitroom/extension/utils/executor/scan.runner';
 import { runMetrics } from '@gitroom/extension/utils/executor/metrics.runner';
 import {
-  debugSearchKeyword,
-  debugFetchTweet,
-  debugSearchAccountKeywords,
-  debugScanTaskX,
-} from '@gitroom/extension/utils/executor/x.debug';
+  scanXKeywordFromPage,
+  fetchXPostFromPage,
+  scanXAccountFromPage,
+} from '@gitroom/extension/utils/executor/x.collect';
 import {
-  debugSearchRedditKeyword,
-  debugFetchRedditPost,
-  debugSearchRedditUser,
-} from '@gitroom/extension/utils/executor/reddit.debug';
+  scanRedditKeyword,
+  fetchRedditPost,
+  scanRedditUser,
+} from '@gitroom/extension/utils/executor/reddit.collect';
 import { backendCall } from '@gitroom/extension/utils/executor/api';
 import { scanReddit } from '@gitroom/extension/utils/executor/scan.reddit';
+import { scanX } from '@gitroom/extension/utils/executor/scan.x';
+import { ENGAGE_EXTENSION_ACTION } from '@gitroom/extension/utils/executor/actions';
 import {
   ensureEngageScanAlarm,
   clearEngageScanAlarm,
@@ -248,13 +249,13 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
   // Manual / programmatic triggers. From the SW or popup console:
   //   chrome.runtime.sendMessage({ action: 'engage:scan' })
   //   chrome.runtime.sendMessage({ action: 'engage:metrics', ids: ['<postId>'] })
-  if (request.action === 'engage:scan') {
+  if (request.action === ENGAGE_EXTENSION_ACTION.runScan) {
     runScanLoop()
       .then((summary) => sendResponse({ ok: true, summary }))
       .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
     return true;
   }
-  if (request.action === 'engage:metrics') {
+  if (request.action === ENGAGE_EXTENSION_ACTION.runMetrics) {
     runMetrics(Array.isArray(request.ids) ? request.ids : [])
       .then((summary) => sendResponse({ ok: true, summary }))
       .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
@@ -301,35 +302,35 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
     return true;
   }
 
-  // ─── X collection debug (Options page) — NO backend, tab+interceptor only ──
-  if (request.action === 'xdebug:search') {
-    debugSearchKeyword(request.keyword)
+  // ─── X browser-page collection (Options page) ────────────────────────────
+  if (request.action === ENGAGE_EXTENSION_ACTION.scanXKeyword) {
+    scanXKeywordFromPage(request.keyword)
       .then((tweets) => sendResponse({ ok: true, tweets }))
       .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
     return true;
   }
-  if (request.action === 'xdebug:tweet') {
-    debugFetchTweet(request.id)
+  if (request.action === ENGAGE_EXTENSION_ACTION.fetchXPost) {
+    fetchXPostFromPage(request.id)
       .then((tweet) => sendResponse({ ok: true, tweet }))
       .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
     return true;
   }
-  if (request.action === 'xdebug:search-account-kw') {
-    debugSearchAccountKeywords(request.account, request.keywords ?? [])
+  if (request.action === ENGAGE_EXTENSION_ACTION.scanXAccount) {
+    scanXAccountFromPage(request.account, request.keywords ?? [])
       .then((tweets) => sendResponse({ ok: true, tweets }))
       .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
     return true;
   }
 
-  // ─── Debug direct ingest (Options page ①②③ — bypass scan-task lease) ──────
-  if (request.action === 'debug:ingest-posts') {
-    backendCall('/engage/debug/ingest', 'POST', { posts: request.posts })
+  // ─── Collected-post ingestion (Options page ①②③) ─────────────────────────
+  if (request.action === ENGAGE_EXTENSION_ACTION.ingestCollectedPosts) {
+    backendCall('/engage/scan-posts/ingest', 'POST', { posts: request.posts })
       .then((r: any) => sendResponse({ ok: r.ok, accepted: r.data?.accepted ?? 0, keywordMatched: r.data?.keywordMatched, reason: r.data?.reason }))
       .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
     return true;
   }
 
-  if (request.action === 'debug:sync-metrics') {
+  if (request.action === ENGAGE_EXTENSION_ACTION.syncCollectedMetrics) {
     backendCall('/posts/sync-metrics', 'POST', {
       platform: request.platform,
       externalPostId: request.externalPostId,
@@ -340,34 +341,34 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
     return true;
   }
 
-  // ─── Reddit collection debug (Options page) — direct fetch, no tab needed ─
-  if (request.action === 'rdebug:search') {
-    debugSearchRedditKeyword(request.keyword)
+  // ─── Reddit browser-session collection (Options page) ────────────────────
+  if (request.action === ENGAGE_EXTENSION_ACTION.scanRedditKeyword) {
+    scanRedditKeyword(request.keyword)
       .then((posts) => sendResponse({ ok: true, posts }))
       .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
     return true;
   }
-  if (request.action === 'rdebug:post') {
-    debugFetchRedditPost(request.urlOrId)
+  if (request.action === ENGAGE_EXTENSION_ACTION.fetchRedditPost) {
+    fetchRedditPost(request.urlOrId)
       .then((post) => sendResponse({ ok: true, post }))
       .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
     return true;
   }
-  if (request.action === 'rdebug:user') {
-    debugSearchRedditUser(request.username, request.keywords ?? [])
+  if (request.action === ENGAGE_EXTENSION_ACTION.scanRedditUser) {
+    scanRedditUser(request.username, request.keywords ?? [])
       .then((posts) => sendResponse({ ok: true, posts }))
       .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
     return true;
   }
 
-  // ─── Engage Scan Debug (Section ④, Options page) ─────────────────────────
-  if (request.action === 'engage:load-config') {
+  // ─── Engage scan automation management (Options page) ───────────────────
+  if (request.action === ENGAGE_EXTENSION_ACTION.loadConfig) {
     backendCall('/engage/config', 'GET')
       .then((r) => sendResponse({ ok: r.ok, data: r.data }))
       .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
     return true;
   }
-  if (request.action === 'engage:claim-tasks') {
+  if (request.action === ENGAGE_EXTENSION_ACTION.claimTasks) {
     const want = Math.min(Math.max(1, request.want ?? 3), 5);
     backendCall('/engage/scan-tasks/ingest', 'POST', { want, force: request.force ?? false })
       .then((r: any) =>
@@ -376,30 +377,28 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
       .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
     return true;
   }
-  if (request.action === 'engage:execute-task') {
+  if (request.action === ENGAGE_EXTENSION_ACTION.executeTask) {
     const gate = () => Promise.resolve(true);
     const task = request.task;
-    // X: use the tab + interceptor path (full browser fingerprint, same as
-    // sections ①②③ in the Options page). Direct GraphQL calls from the service
-    // worker bypass the session cookies and look bot-like to X's anti-abuse systems.
-    // Reddit: scanReddit uses public .json — no session / fingerprint issue.
+    // Options and the alarm runner use the same production scanners so their
+    // request fingerprints, cursor handling and parsing cannot drift apart.
     // Cap to 1 page regardless of phase (initial normally allows 3) — the debug
     // panel is for sampling, not a full baseline sweep.
-    const debugTask = { ...task, pacing: { ...task.pacing, maxPages: 1 } };
-    (task.platform === 'x' ? debugScanTaskX(task) : scanReddit(debugTask, gate))
+    const scanTask = { ...task, pacing: { ...task.pacing, maxPages: 1 } };
+    (task.platform === 'x' ? scanX(scanTask, gate) : scanReddit(scanTask, gate))
       .then((result) => sendResponse({ ok: true, result }))
       .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
     return true;
   }
-  if (request.action === 'engage:release-task') {
-    // Debug: release a stuck lease (scan failed, cursor still SCANNING).
+  if (request.action === ENGAGE_EXTENSION_ACTION.releaseTask) {
+    // Release a stuck lease (scan failed, cursor still SCANNING).
     // After release, use force=true in claim to bypass cadence and immediately re-scan.
     backendCall('/engage/scan-tasks/release', 'POST', { taskId: request.taskId })
       .then((r: any) => sendResponse({ ok: r.ok, released: r.data?.released ?? false }))
       .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
     return true;
   }
-  if (request.action === 'engage:ingest-task') {
+  if (request.action === ENGAGE_EXTENSION_ACTION.ingestTask) {
     // Complete the task + claim next (want:1 is the minimum the backend allows).
     // The caller reads nextTasks from the response and shows them in the UI.
     backendCall('/engage/scan-tasks/ingest', 'POST', {

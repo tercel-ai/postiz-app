@@ -120,7 +120,7 @@ export class EngageScanTasksService {
   }
 
   /**
-   * Debug/admin: release a held lease by token WITHOUT advancing the cursor,
+   * Release a held lease by token WITHOUT advancing the cursor,
    * so the unit can be immediately re-claimed (combined with force=true to bypass
    * cadence). Safe to call on a stale or failed scan — if the token is invalid
    * or already released, returns false (no-op).
@@ -130,11 +130,10 @@ export class EngageScanTasksService {
   }
 
   /**
-   * Debug/admin: ingest raw posts directly, bypassing the lease/cursor system.
-   * Useful for the Options-page search sections (①②③) where results are collected
-   * without a claimed scan task. Fan-out and scoring are identical to the normal path.
+   * Ingest posts collected outside a claimed scan task. Fan-out and scoring are
+   * identical to the normal path.
    */
-  async debugIngest(
+  async ingestCollectedPosts(
     orgId: string,
     posts: RawPost[]
   ): Promise<{ accepted: number; keywordMatched: number; scoreFiltered: number; reason?: string }> {
@@ -147,7 +146,7 @@ export class EngageScanTasksService {
     const allScored = this._ingest.scoreAllForOrg(posts, ctx as any);
     const minScore = Number(process.env.ENGAGE_MIN_SCORE ?? 60);
     const scored = allScored.filter((p) => p.score >= minScore);
-    this.logger.log(`[ingest-dbg] posts=${posts.length} keywordMatched=${allScored.length} scoreFiltered=${allScored.length - scored.length} minScore=${minScore} keywords=[${ctx.keywords.map((k) => k.keyword).join(', ')}]`);
+    this.logger.log(`[collected-ingest] posts=${posts.length} keywordMatched=${allScored.length} scoreFiltered=${allScored.length - scored.length} minScore=${minScore} keywords=[${ctx.keywords.map((k) => k.keyword).join(', ')}]`);
     if (!scored.length) {
       const reason = allScored.length === 0
         ? `no posts matched any keyword (configured: ${ctx.keywords.map((k) => k.keyword).join(', ')})`
@@ -178,7 +177,7 @@ export class EngageScanTasksService {
    * cursor (server-DERIVED, not trusting the client) and release the lease.
    */
   private async ingestCompleted(completed: CompletedUnitInput): Promise<number> {
-    this.logger.log(`[ingest-dbg] ingestCompleted called, taskId=${completed.taskId}, posts=${completed.posts?.length ?? 0}`);
+    this.logger.log(`[scan-ingest] ingestCompleted called, taskId=${completed.taskId}, posts=${completed.posts?.length ?? 0}`);
     const unit = await this._engageRepo.findScanCursorByToken(completed.taskId);
     if (!unit) {
       // Invalid / expired / rotated token, or the lease was reclaimed — ignore.
@@ -197,7 +196,7 @@ export class EngageScanTasksService {
         unit.scanKey
       );
       this.logger.log(
-        `[ingest-dbg] unit=${unit.platform}/${unit.scanType}/${unit.scanKey} posts=${posts.length} ctxs=${ctxs.length}`
+        `[scan-ingest] unit=${unit.platform}/${unit.scanType}/${unit.scanKey} posts=${posts.length} ctxs=${ctxs.length}`
       );
     } catch (err) {
       // Could not even resolve subscribers — release WITHOUT advancing so the

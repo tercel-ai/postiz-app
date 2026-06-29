@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import '@gitroom/extension/pages/options/Options.css';
+import { ENGAGE_EXTENSION_ACTION } from '@gitroom/extension/utils/executor/actions';
 
 interface Tweet {
   id: string;
@@ -238,7 +239,7 @@ function EngageScanPanel() {
   async function loadConfig() {
     setCfgBusy(true); setCfgErr(null);
     try {
-      const r = await sendMessage<{ ok: boolean; data?: EngageConfig; error?: string }>({ action: 'engage:load-config' });
+      const r = await sendMessage<{ ok: boolean; data?: EngageConfig; error?: string }>({ action: ENGAGE_EXTENSION_ACTION.loadConfig });
       if (!r.ok) throw new Error(r.error || 'failed');
       const data = r.data!;
       setConfig(data);
@@ -252,7 +253,7 @@ function EngageScanPanel() {
   async function claimTasks() {
     setClaimBusy(true); setClaimErr(null);
     try {
-      const r = await sendMessage<{ ok: boolean; tasks?: ScanTask[]; error?: string }>({ action: 'engage:claim-tasks', want: wantN, force });
+      const r = await sendMessage<{ ok: boolean; tasks?: ScanTask[]; error?: string }>({ action: ENGAGE_EXTENSION_ACTION.claimTasks, want: wantN, force });
       if (!r.ok) throw new Error(r.error || 'failed');
       const all = r.tasks ?? [];
       const filtered = platform === 'both' ? all : all.filter((t) => t.platform === platform);
@@ -272,7 +273,7 @@ function EngageScanPanel() {
   async function executeTask(t: ScanTask) {
     patch(t.taskId, { status: 'running', posts: [], err: null });
     try {
-      const r = await sendMessage<{ ok: boolean; result?: ScanRunResult; error?: string }>({ action: 'engage:execute-task', task: t });
+      const r = await sendMessage<{ ok: boolean; result?: ScanRunResult; error?: string }>({ action: ENGAGE_EXTENSION_ACTION.executeTask, task: t });
       if (!r.ok) throw new Error(r.error || 'failed');
       const res = r.result!;
       await saveCache(cacheKey(t), t.taskId, res);
@@ -283,7 +284,7 @@ function EngageScanPanel() {
   async function releaseTask(t: ScanTask) {
     patch(t.taskId, { status: 'idle', err: null, posts: [] });
     try {
-      await sendMessage<{ ok: boolean; released?: boolean }>({ action: 'engage:release-task', taskId: t.taskId });
+      await sendMessage<{ ok: boolean; released?: boolean }>({ action: ENGAGE_EXTENSION_ACTION.releaseTask, taskId: t.taskId });
       // Remove the task from the list; user should re-claim (with force=true if cadence blocks).
       setTasks((prev) => prev.filter((x) => x.taskId !== t.taskId));
       setStates((prev) => { const n = { ...prev }; delete n[t.taskId]; return n; });
@@ -300,7 +301,7 @@ function EngageScanPanel() {
     patch(t.taskId, { status: 'ingesting', err: null });
     try {
       const r = await sendMessage<{ ok: boolean; accepted?: number; nextTasks?: ScanTask[]; error?: string }>({
-        action: 'engage:ingest-task', taskId: t.taskId,
+        action: ENGAGE_EXTENSION_ACTION.ingestTask, taskId: t.taskId,
         posts: st.posts, nextCursor: st.nextCursor ?? undefined, exhausted: st.exhausted,
       });
       if (!r.ok) throw new Error(r.error || 'failed');
@@ -602,7 +603,7 @@ export default function Options() {
     setBusy(true); setResult(null);
     try {
       const r = await sendMessage<{ ok: boolean; accepted?: number; keywordMatched?: number; reason?: string; error?: string }>({
-        action: 'debug:ingest-posts', posts,
+        action: ENGAGE_EXTENSION_ACTION.ingestCollectedPosts, posts,
       });
       if (!r.ok) throw new Error(r.error || 'ingest failed');
       setResult({ accepted: r.accepted ?? 0, keywordMatched: r.keywordMatched, reason: r.reason });
@@ -620,7 +621,7 @@ export default function Options() {
     setBusy(true); setResult(null);
     try {
       const r = await sendMessage<{ ok: boolean; updated?: boolean; error?: string }>({
-        action: 'debug:sync-metrics', platform, externalPostId, metrics,
+        action: ENGAGE_EXTENSION_ACTION.syncCollectedMetrics, platform, externalPostId, metrics,
       });
       if (!r.ok) throw new Error(r.error || 'sync failed');
       setResult({ accepted: r.updated ? 1 : 0, reason: r.updated ? undefined : 'no Post found with matching releaseURL' });
@@ -633,7 +634,7 @@ export default function Options() {
     if (!keyword.trim()) return;
     setSearchBusy(true); setSearchErr(null); setSearchResults([]); setSearched(false);
     try {
-      const resp = await sendMessage<SearchResp>({ action: 'xdebug:search', keyword });
+      const resp = await sendMessage<SearchResp>({ action: ENGAGE_EXTENSION_ACTION.scanXKeyword, keyword });
       if (!resp.ok) throw new Error(resp.error || 'failed');
       setSearchResults(resp.tweets ?? []); setSearched(true);
     } catch (e: any) { setSearchErr(String(e?.message || e)); }
@@ -644,7 +645,7 @@ export default function Options() {
     if (!tweetId.trim()) return;
     setTweetBusy(true); setTweetErr(null); setTweet(null); setFetched(false);
     try {
-      const resp = await sendMessage<TweetResp>({ action: 'xdebug:tweet', id: tweetId });
+      const resp = await sendMessage<TweetResp>({ action: ENGAGE_EXTENSION_ACTION.fetchXPost, id: tweetId });
       if (!resp.ok) throw new Error(resp.error || 'failed');
       setTweet(resp.tweet ?? null); setFetched(true);
     } catch (e: any) { setTweetErr(String(e?.message || e)); }
@@ -660,7 +661,7 @@ export default function Options() {
     setAkQuery(`from:${handle} (${kwClause})`);
     try {
       const resp = await sendMessage<AccountKwResp>({
-        action: 'xdebug:search-account-kw', account: handle, keywords: kws,
+        action: ENGAGE_EXTENSION_ACTION.scanXAccount, account: handle, keywords: kws,
       });
       if (!resp.ok) throw new Error(resp.error || 'failed');
       setAkResults(resp.tweets ?? []); setAkSearched(true);
@@ -673,7 +674,7 @@ export default function Options() {
     if (!keyword.trim()) return;
     setSearchBusy(true); setSearchErr(null); setRSearchResults([]); setSearched(false);
     try {
-      const resp = await sendMessage<RedditSearchResp>({ action: 'rdebug:search', keyword });
+      const resp = await sendMessage<RedditSearchResp>({ action: ENGAGE_EXTENSION_ACTION.scanRedditKeyword, keyword });
       if (!resp.ok) throw new Error(resp.error || 'failed');
       setRSearchResults(resp.posts ?? []); setSearched(true);
     } catch (e: any) { setSearchErr(String(e?.message || e)); }
@@ -684,7 +685,7 @@ export default function Options() {
     if (!rPostUrlOrId.trim()) return;
     setRPostBusy(true); setRPostErr(null); setRPost(null); setRPostFetched(false);
     try {
-      const resp = await sendMessage<RedditPostResp>({ action: 'rdebug:post', urlOrId: rPostUrlOrId.trim() });
+      const resp = await sendMessage<RedditPostResp>({ action: ENGAGE_EXTENSION_ACTION.fetchRedditPost, urlOrId: rPostUrlOrId.trim() });
       if (!resp.ok) throw new Error(resp.error || 'failed');
       setRPost(resp.post ?? null); setRPostFetched(true);
     } catch (e: any) { setRPostErr(String(e?.message || e)); }
@@ -697,7 +698,7 @@ export default function Options() {
     if (!uname) return;
     setRUserBusy(true); setRUserErr(null); setRUserResults([]); setRUserSearched(false);
     try {
-      const resp = await sendMessage<RedditSearchResp>({ action: 'rdebug:user', username: uname, keywords: kws });
+      const resp = await sendMessage<RedditSearchResp>({ action: ENGAGE_EXTENSION_ACTION.scanRedditUser, username: uname, keywords: kws });
       if (!resp.ok) throw new Error(resp.error || 'failed');
       setRUserResults(resp.posts ?? []); setRUserSearched(true);
     } catch (e: any) { setRUserErr(String(e?.message || e)); }

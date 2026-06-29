@@ -1,0 +1,17 @@
+export const ENGAGE_EXTENSION_ACTION = {
+  runScan: 'engage:scan',
+  runMetrics: 'engage:metrics',
+  scanXKeyword: 'engage:scan-x-keyword',
+  fetchXPost: 'engage:fetch-x-post',
+  scanXAccount: 'engage:scan-x-account',
+  scanRedditKeyword: 'engage:scan-reddit-keyword',
+  fetchRedditPost: 'engage:fetch-reddit-post',
+  scanRedditUser: 'engage:scan-reddit-user',
+  ingestCollectedPosts: 'engage:ingest-collected-posts',
+  syncCollectedMetrics: 'engage:sync-collected-metrics',
+  loadConfig: 'engage:load-config',
+  claimTasks: 'engage:claim-tasks',
+  executeTask: 'engage:execute-task',
+  releaseTask: 'engage:release-task',
+  ingestTask: 'engage:ingest-task',
+} as const;

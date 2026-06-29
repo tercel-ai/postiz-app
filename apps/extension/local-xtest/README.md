@@ -21,7 +21,7 @@ tab-session logic) is a **hand-maintained mirror** of the TypeScript source unde
 | ---------------------------- | ---------------------------------------- |
 | `x-capture.js`               | `src/pages/content/x-capture.ts`         |
 | `background.js` (tab session)| `src/utils/executor/x.tab-reader.ts`     |
-| `background.js` (parsing)    | `src/utils/executor/x.parse.ts` + `x.debug.ts` |
+| `background.js` (parsing)    | `src/utils/executor/x.parse.ts` + `x.collect.ts` |
 
 They can DRIFT. Treat this folder as disposable: it exists only to verify the
 mechanism. The TypeScript versions are the source of truth for the real build.

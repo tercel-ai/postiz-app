@@ -7,7 +7,7 @@ import {
   parseSearchList,
   parseTweetDetailFocal,
   extractTweetId,
-} from '@gitroom/extension/utils/executor/x.debug';
+} from '@gitroom/extension/utils/executor/x.collect';
 
 // A minimal tweet_results.result node that parseTweetResult accepts.
 function tweetNode(id: string, screen = 'alice', over: any = {}) {

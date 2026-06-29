@@ -19,6 +19,10 @@ export const EXTENSION_MESSAGE = {
   resultSource: `${EXTENSION_BRAND}-extension`, // 'aisee-extension'
   /** extension → page: reply result (carries permalink + backfilled flag) */
   engageReplyResult: `${EXTENSION_BRAND}:engage-reply-result`,
+  /** page → extension: run the authenticated user's due Engage scan loop */
+  engageScan: `${EXTENSION_BRAND}:engage-scan`,
+  /** extension → page: completed scan-loop summary or error */
+  engageScanResult: `${EXTENSION_BRAND}:engage-scan-result`,
   /** legacy page → extension: open X and fill a draft (dormant) */
   extensionTask: `${EXTENSION_BRAND}:extension-task`,
   /** page → extension: presence probe */

@@ -72,8 +72,34 @@ export function parseTweetResult(result: any): ParsedTweet | null {
   };
 }
 
+/** Parse tweet entries from any X timeline instruction list. */
+export function parseTimelineTweets(instructions: any[]): ParsedTweet[] {
+  const tweets: ParsedTweet[] = [];
+  const push = (result: any) => {
+    const parsed = parseTweetResult(result);
+    if (parsed) tweets.push(parsed);
+  };
+  for (const instruction of instructions ?? []) {
+    for (const entry of instruction?.entries ?? []) {
+      const id: string = entry?.entryId ?? '';
+      const content = entry?.content;
+      if (id.startsWith('tweet-')) {
+        push(content?.itemContent?.tweet_results?.result);
+      } else if (Array.isArray(content?.items)) {
+        for (const item of content.items) {
+          push(item?.item?.itemContent?.tweet_results?.result);
+        }
+      }
+    }
+  }
+  return tweets;
+}
+
 /** Compare two numeric-string tweet ids without precision loss; larger = newer. */
-export function newerId(a?: string | null, b?: string | null): string | undefined {
+export function newerId(
+  a?: string | null,
+  b?: string | null
+): string | undefined {
   if (a == null) return b ?? undefined;
   if (b == null) return a ?? undefined;
   try {

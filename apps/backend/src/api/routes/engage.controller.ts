@@ -166,12 +166,16 @@ export class EngageController {
           exhausted: body.completed.exhausted,
         }
       : undefined;
-    return this._scanTasksService.sync(org.id, { completed, want: body.want });
+    return this._scanTasksService.sync(org.id, {
+      completed,
+      want: body.want,
+      force: body.force,
+    });
   }
 
   @ApiOperation({
     summary:
-      'Debug: release a held scan-task lease so the unit can be re-claimed. ' +
+      'Release a held scan-task lease so the unit can be re-claimed. ' +
       'Resets status → IDLE without advancing the cursor; use force-claim afterwards to bypass cadence.',
   })
   @Post('/scan-tasks/release')
@@ -185,16 +189,15 @@ export class EngageController {
 
   @ApiOperation({
     summary:
-      'Debug: ingest raw posts directly without a lease/cursor — for the Options page ' +
-      'search sections (①②③) where results are collected outside the normal scan-task flow.',
+      'Ingest posts collected by the extension outside a claimed scan task.',
   })
-  @Post('/debug/ingest')
-  async debugIngest(
+  @Post('/scan-posts/ingest')
+  async ingestScanPosts(
     @GetOrgFromRequest() org: Organization,
     @Body() body: { posts?: any[] }
   ) {
     const posts = (body?.posts ?? []).map(scanIngestPostToRawPost);
-    const result = await this._scanTasksService.debugIngest(org.id, posts);
+    const result = await this._scanTasksService.ingestCollectedPosts(org.id, posts);
     return result;
   }
 
