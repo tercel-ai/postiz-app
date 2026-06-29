@@ -161,6 +161,7 @@ export class EngageScanTasksService {
    * cursor (server-DERIVED, not trusting the client) and release the lease.
    */
   private async ingestCompleted(completed: CompletedUnitInput): Promise<number> {
+    this.logger.log(`[ingest-dbg] ingestCompleted called, taskId=${completed.taskId}, posts=${completed.posts?.length ?? 0}`);
     const unit = await this._engageRepo.findScanCursorByToken(completed.taskId);
     if (!unit) {
       // Invalid / expired / rotated token, or the lease was reclaimed — ignore.
@@ -178,8 +179,8 @@ export class EngageScanTasksService {
         unit.scanType as 'keyword' | 'channel' | 'tracked',
         unit.scanKey
       );
-      this.logger.debug(
-        `[ingest] unit=${unit.platform}/${unit.scanType}/${unit.scanKey} posts=${posts.length} ctxs=${ctxs.length}`
+      this.logger.log(
+        `[ingest-dbg] unit=${unit.platform}/${unit.scanType}/${unit.scanKey} posts=${posts.length} ctxs=${ctxs.length}`
       );
     } catch (err) {
       // Could not even resolve subscribers — release WITHOUT advancing so the
