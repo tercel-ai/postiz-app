@@ -149,7 +149,7 @@ export class EngageController {
     @GetOrgFromRequest() org: Organization,
     @Body() body: EngageScanSyncDto
   ) {
-    console.log('[ingest-ctrl] body.completed=', !!body.completed, 'posts=', body.completed?.posts?.length ?? 0, 'taskId=', body.completed?.taskId?.slice(0,8));
+    console.log('[ingest-ctrl] completed=', JSON.stringify(body.completed)?.slice(0, 200));
     const completed = body.completed
       ? {
           taskId: body.completed.taskId,
