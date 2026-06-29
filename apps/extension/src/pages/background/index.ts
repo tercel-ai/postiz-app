@@ -329,6 +329,17 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
     return true;
   }
 
+  if (request.action === 'debug:sync-metrics') {
+    backendCall('/engage/debug/sync-metrics', 'POST', {
+      platform: request.platform,
+      externalPostId: request.externalPostId,
+      metrics: request.metrics,
+    })
+      .then((r: any) => sendResponse({ ok: r.ok, updated: r.data?.updated ?? false }))
+      .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
+    return true;
+  }
+
   // ─── Reddit collection debug (Options page) — direct fetch, no tab needed ─
   if (request.action === 'rdebug:search') {
     debugSearchRedditKeyword(request.keyword)

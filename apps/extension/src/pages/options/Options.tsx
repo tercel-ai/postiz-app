@@ -610,6 +610,24 @@ export default function Options() {
     finally { setBusy(false); }
   }
 
+  async function syncPostMetrics(
+    platform: string,
+    externalPostId: string,
+    metrics: Record<string, number>,
+    setBusy: (v: boolean) => void,
+    setResult: (v: { accepted: number; keywordMatched?: number; reason?: string } | null) => void
+  ) {
+    setBusy(true); setResult(null);
+    try {
+      const r = await sendMessage<{ ok: boolean; updated?: boolean; error?: string }>({
+        action: 'debug:sync-metrics', platform, externalPostId, metrics,
+      });
+      if (!r.ok) throw new Error(r.error || 'sync failed');
+      setResult({ accepted: r.updated ? 1 : 0, reason: r.updated ? undefined : 'no matching EngageOpportunity found' });
+    } catch (e: any) { setResult({ accepted: -1, reason: String(e?.message || e) }); }
+    finally { setBusy(false); }
+  }
+
   // ─── X handlers ──────────────────────────────────────────────────────────
   const runSearch = async () => {
     if (!keyword.trim()) return;
@@ -778,12 +796,16 @@ export default function Options() {
             {tweet && (
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 10 }}>
                 <button className="xdbg-ingest-btn" disabled={ing2Busy}
-                  onClick={() => ingestPosts([tweetToIngestPost(tweet)], setIng2Busy, setIng2Result)}>
-                  {ing2Busy ? '入库中…' : '入库'}
+                  onClick={() => syncPostMetrics('x', tweet.id, {
+                    metricLikes: tweet.likes, metricReplies: tweet.replies,
+                    metricRetweets: tweet.retweets, metricQuotes: tweet.quotes,
+                    metricBookmarks: tweet.bookmarks, metricViews: tweet.views,
+                  }, setIng2Busy, setIng2Result)}>
+                  {ing2Busy ? '同步中…' : '同步指标'}
                 </button>
                 {ing2Result && (
                   <span className="xdbg-ingest-result" title={ing2Result.reason}>
-                    {ing2Result.accepted >= 0 ? `已入库 ${ing2Result.accepted} 条${ing2Result.keywordMatched !== undefined ? ` (关键词匹配 ${ing2Result.keywordMatched})` : ''}` : '入库失败'}
+                    {ing2Result.accepted >= 0 ? (ing2Result.accepted > 0 ? '已更新指标' : '未找到记录') : '同步失败'}
                     {ing2Result.reason && <div className="xdbg-ingest-reason">{ing2Result.reason}</div>}
                   </span>
                 )}
@@ -812,12 +834,16 @@ export default function Options() {
             {rPost && (
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 10 }}>
                 <button className="xdbg-ingest-btn" disabled={ing2Busy}
-                  onClick={() => ingestPosts([redditToIngestPost(rPost)], setIng2Busy, setIng2Result)}>
-                  {ing2Busy ? '入库中…' : '获取'}
+                  onClick={() => syncPostMetrics('reddit', rPost.externalPostId, {
+                    metricScore: rPost.metricScore ?? 0,
+                    metricComments: rPost.metricComments ?? 0,
+                    metricUpvoteRatio: rPost.metricUpvoteRatio,
+                  }, setIng2Busy, setIng2Result)}>
+                  {ing2Busy ? '同步中…' : '同步指标'}
                 </button>
                 {ing2Result && (
                   <span className="xdbg-ingest-result" title={ing2Result.reason}>
-                    {ing2Result.accepted >= 0 ? `已入库 ${ing2Result.accepted} 条${ing2Result.keywordMatched !== undefined ? ` (关键词匹配 ${ing2Result.keywordMatched})` : ''}` : '入库失败'}
+                    {ing2Result.accepted >= 0 ? (ing2Result.accepted > 0 ? '已更新指标' : '未找到记录') : '同步失败'}
                     {ing2Result.reason && <div className="xdbg-ingest-reason">{ing2Result.reason}</div>}
                   </span>
                 )}

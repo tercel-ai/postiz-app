@@ -198,6 +198,16 @@ export class EngageController {
     return result;
   }
 
+  @ApiOperation({ summary: 'Debug: write extension-fetched metrics directly into an existing EngageOpportunity row (by platform+externalPostId). No re-fetch; idempotent upsert.' })
+  @Post('/debug/sync-metrics')
+  async debugSyncMetrics(
+    @GetOrgFromRequest() _org: Organization,
+    @Body() body: { platform: string; externalPostId: string; metrics: Record<string, number> }
+  ) {
+    const updated = await this._engageService.debugSyncMetrics(body.platform, body.externalPostId, body.metrics ?? {});
+    return { updated };
+  }
+
   // ─── Config ───────────────────────────────────────────────────────────────
 
   @ApiOperation({ summary: 'Get Engage config and keywords/channels/accounts for this org' })
