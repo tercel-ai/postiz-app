@@ -29,11 +29,12 @@ export class EngageIntentClassifierService implements OnModuleInit {
         baseURL: 'https://openrouter.ai/api/v1',
       })
     : null;
-  private readonly _anthropicClient: Anthropic | null = !this._useOpenRouter
-    ? new Anthropic({
-        apiKey: process.env.ANTHROPIC_API_KEY ?? process.env.CLAUDE_API_KEY ?? '',
-      })
-    : null;
+  private readonly _anthropicClient: Anthropic | null =
+    !this._useOpenRouter && (process.env.ANTHROPIC_API_KEY || process.env.CLAUDE_API_KEY)
+      ? new Anthropic({
+          apiKey: process.env.ANTHROPIC_API_KEY || process.env.CLAUDE_API_KEY || '',
+        })
+      : null;
 
   async onModuleInit() {
     // Opt-out for contexts that bootstrap the full DI graph but never classify
@@ -184,8 +185,11 @@ export class EngageIntentClassifierService implements OnModuleInit {
           },
         });
         const content = response.choices[0]?.message?.content ?? '';
+        // Some models wrap the JSON in a markdown code fence (```json ... ```)
+        // even when instructed to respond with JSON only. Strip the fence first.
+        const stripped = content.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '').trim();
         try {
-          rawResult = JSON.parse(content);
+          rawResult = JSON.parse(stripped);
         } catch {
           // non-JSON response — fall through to default
         }
