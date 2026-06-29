@@ -330,7 +330,7 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
   }
 
   if (request.action === 'debug:sync-metrics') {
-    backendCall('/engage/debug/sync-metrics', 'POST', {
+    backendCall('/posts/sync-metrics', 'POST', {
       platform: request.platform,
       externalPostId: request.externalPostId,
       metrics: request.metrics,

@@ -3529,29 +3529,4 @@ export class EngageRepository {
     return config.id;
   }
 
-  async syncOpportunityMetrics(
-    platform: string,
-    externalPostId: string,
-    metrics: Record<string, number>
-  ): Promise<boolean> {
-    const pick = (key: string) =>
-      typeof metrics[key] === 'number' ? metrics[key] : undefined;
-    const data: Record<string, number> = {};
-    const map: Record<string, string> = {
-      metricLikes: 'likes', metricReplies: 'replies', metricRetweets: 'retweets',
-      metricQuotes: 'quotes', metricBookmarks: 'bookmarks', metricViews: 'views',
-      metricShares: 'shares', metricSaves: 'saves', metricComments: 'comments',
-      metricScore: 'score',
-    };
-    for (const [field, key] of Object.entries(map)) {
-      const v = pick(key) ?? pick(field);
-      if (v !== undefined) data[field] = v;
-    }
-    if (!Object.keys(data).length) return false;
-    const result = await this._opportunity.model.engageOpportunity.updateMany({
-      where: { platform, externalPostId },
-      data,
-    });
-    return result.count > 0;
-  }
 }

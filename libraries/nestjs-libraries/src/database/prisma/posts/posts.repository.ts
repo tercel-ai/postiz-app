@@ -2068,4 +2068,44 @@ export class PostsRepository {
       data: { lastMetricsFetchAt: now },
     });
   }
+
+  async syncPostMetrics(
+    orgId: string,
+    externalPostId: string,
+    metrics: Record<string, number>
+  ): Promise<{ updated: boolean }> {
+    // Find Post whose releaseURL contains the tweet/reddit-post id.
+    // X: https://x.com/user/status/{id}  Reddit: https://reddit.com/r/sub/comments/{id}/...
+    const post = await this._post.model.post.findFirst({
+      where: { organizationId: orgId, releaseURL: { contains: externalPostId } },
+      select: { id: true },
+    });
+    if (!post) return { updated: false };
+
+    const pick = (key: string) =>
+      typeof metrics[key] === 'number' ? metrics[key] : undefined;
+
+    const analytics: Record<string, number> = {};
+    const map: Record<string, string> = {
+      metricLikes: 'likes', metricReplies: 'replies', metricRetweets: 'retweets',
+      metricQuotes: 'quotes', metricBookmarks: 'bookmarks', metricViews: 'views',
+      metricShares: 'shares', metricSaves: 'saves', metricComments: 'comments',
+      metricScore: 'score',
+    };
+    for (const [field, key] of Object.entries(map)) {
+      const v = pick(key) ?? pick(field);
+      if (v !== undefined) analytics[field] = v;
+    }
+
+    const viewCount = pick('metricViews') ?? pick('views');
+    await this._post.model.post.update({
+      where: { id: post.id },
+      data: {
+        impressions: viewCount !== undefined ? viewCount : undefined,
+        analytics: Object.keys(analytics).length ? (analytics as any) : undefined,
+        lastMetricsFetchAt: new Date(),
+      },
+    });
+    return { updated: true };
+  }
 }

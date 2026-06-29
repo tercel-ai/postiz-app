@@ -1502,4 +1502,20 @@ export class PostsService {
     // calls only; counting client-submitted data here would misattribute cost.
     return { updated: updates.map((u) => u.id), stamped };
   }
+
+  /**
+   * Sync extension-fetched metrics directly into a Post (matched by releaseURL
+   * containing the external post id). No re-fetch; client-side data only.
+   */
+  async syncPostMetrics(
+    orgId: string,
+    platform: string,
+    externalPostId: string,
+    metrics: Record<string, number>
+  ): Promise<{ updated: boolean }> {
+    if (!platform || !externalPostId || !metrics || !Object.keys(metrics).length) {
+      return { updated: false };
+    }
+    return this._postRepository.syncPostMetrics(orgId, externalPostId, metrics);
+  }
 }

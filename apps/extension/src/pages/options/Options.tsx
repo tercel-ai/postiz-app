@@ -623,7 +623,7 @@ export default function Options() {
         action: 'debug:sync-metrics', platform, externalPostId, metrics,
       });
       if (!r.ok) throw new Error(r.error || 'sync failed');
-      setResult({ accepted: r.updated ? 1 : 0, reason: r.updated ? undefined : 'no matching EngageOpportunity found' });
+      setResult({ accepted: r.updated ? 1 : 0, reason: r.updated ? undefined : 'no Post found with matching releaseURL' });
     } catch (e: any) { setResult({ accepted: -1, reason: String(e?.message || e) }); }
     finally { setBusy(false); }
   }

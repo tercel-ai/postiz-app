@@ -1728,24 +1728,5 @@ export class EngageService implements OnApplicationBootstrap {
   }
 
 
-  /**
-   * Debug: write extension-fetched metrics directly into an existing
-   * EngageOpportunity row (matched by platform + externalPostId). No re-fetch;
-   * idempotent — only the provided metric fields are upserted.
-   */
-  async debugSyncMetrics(
-    platform: string,
-    externalPostId: string,
-    metrics: Record<string, number>
-  ): Promise<boolean> {
-    if (!platform || !externalPostId || !metrics || !Object.keys(metrics).length) {
-      return false;
-    }
-    return this._engageRepository.syncOpportunityMetrics(
-      platform,
-      externalPostId,
-      metrics
-    );
-  }
 
 }

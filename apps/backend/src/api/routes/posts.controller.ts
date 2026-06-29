@@ -341,4 +341,18 @@ export class PostsController {
   ) {
     return this._postsService.separatePosts(body.content, body.len);
   }
+
+  @Post('/sync-metrics')
+  async syncPostMetrics(
+    @GetOrgFromRequest() org: Organization,
+    @Body() body: { platform: string; externalPostId: string; metrics: Record<string, number> }
+  ) {
+    const result = await this._postsService.syncPostMetrics(
+      org.id,
+      body.platform,
+      body.externalPostId,
+      body.metrics ?? {}
+    );
+    return result;
+  }
 }
