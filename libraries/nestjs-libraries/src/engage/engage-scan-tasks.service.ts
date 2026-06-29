@@ -178,6 +178,9 @@ export class EngageScanTasksService {
         unit.scanType as 'keyword' | 'channel' | 'tracked',
         unit.scanKey
       );
+      this.logger.debug(
+        `[ingest] unit=${unit.platform}/${unit.scanType}/${unit.scanKey} posts=${posts.length} ctxs=${ctxs.length}`
+      );
     } catch (err) {
       // Could not even resolve subscribers — release WITHOUT advancing so the
       // unit is retried, rather than stranding the shared lease for the TTL.
