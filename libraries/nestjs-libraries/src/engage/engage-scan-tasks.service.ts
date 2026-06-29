@@ -135,8 +135,10 @@ export class EngageScanTasksService {
    * without a claimed scan task. Fan-out and scoring are identical to the normal path.
    */
   async debugIngest(orgId: string, posts: RawPost[]): Promise<number> {
+    this.logger.log(`[ingest-dbg] debugIngest called, orgId=${orgId}, posts=${posts.length}`);
     if (!posts.length) return 0;
     const ctx = await this._engageRepo.getEnabledOrgContext(orgId);
+    this.logger.log(`[ingest-dbg] debugIngest orgId=${orgId} ctx=${ctx?.id}`);
     if (!ctx) return 0;
     return this._ingest.ingestForOrg(ctx as any, posts);
   }
