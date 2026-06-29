@@ -16,6 +16,11 @@ import {
   debugSearchAccountKeywords,
   debugScanTaskX,
 } from '@gitroom/extension/utils/executor/x.debug';
+import {
+  debugSearchRedditKeyword,
+  debugFetchRedditPost,
+  debugSearchRedditUser,
+} from '@gitroom/extension/utils/executor/reddit.debug';
 import { backendCall } from '@gitroom/extension/utils/executor/api';
 import { scanReddit } from '@gitroom/extension/utils/executor/scan.reddit';
 import {
@@ -312,6 +317,26 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
   if (request.action === 'xdebug:search-account-kw') {
     debugSearchAccountKeywords(request.account, request.keywords ?? [])
       .then((tweets) => sendResponse({ ok: true, tweets }))
+      .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
+    return true;
+  }
+
+  // ─── Reddit collection debug (Options page) — direct fetch, no tab needed ─
+  if (request.action === 'rdebug:search') {
+    debugSearchRedditKeyword(request.keyword)
+      .then((posts) => sendResponse({ ok: true, posts }))
+      .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
+    return true;
+  }
+  if (request.action === 'rdebug:post') {
+    debugFetchRedditPost(request.urlOrId)
+      .then((post) => sendResponse({ ok: true, post }))
+      .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
+    return true;
+  }
+  if (request.action === 'rdebug:user') {
+    debugSearchRedditUser(request.username, request.keywords ?? [])
+      .then((posts) => sendResponse({ ok: true, posts }))
       .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
     return true;
   }

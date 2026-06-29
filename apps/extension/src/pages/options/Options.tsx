@@ -63,6 +63,41 @@ interface AccountKwResp {
   error?: string;
 }
 
+interface RedditPost {
+  platform: 'reddit';
+  externalPostId: string;
+  externalPostUrl: string;
+  authorUsername: string;
+  channelId?: string;
+  channelName?: string;
+  postContent: string;
+  postPublishedAt: string;
+  metricScore?: number;
+  metricComments?: number;
+  metricUpvoteRatio?: number;
+}
+interface RedditSearchResp { ok: boolean; posts?: RedditPost[]; error?: string }
+interface RedditPostResp  { ok: boolean; post?: RedditPost | null; error?: string }
+
+function RedditPostRow({ p }: { p: RedditPost }) {
+  return (
+    <div className="xdbg-row">
+      <div className="xdbg-meta">
+        <a href={p.externalPostUrl} target="_blank" rel="noreferrer">
+          u/{p.authorUsername}
+          {p.channelName && <span style={{ color: '#999', marginLeft: 6, fontWeight: 400 }}> · {p.channelName}</span>}
+        </a>
+        <span className="xdbg-date">{new Date(p.postPublishedAt).toLocaleString('zh-CN')}</span>
+      </div>
+      <div className="xdbg-text">{p.postContent.slice(0, 300)}{p.postContent.length > 300 ? '…' : ''}</div>
+      <div className="xdbg-stats">
+        ▲ {p.metricScore ?? 0} · 💬 {p.metricComments ?? 0}
+        {p.metricUpvoteRatio != null && ` · ${Math.round(p.metricUpvoteRatio * 100)}% 赞同`}
+      </div>
+    </div>
+  );
+}
+
 // ─── Section ④ types ────────────────────────────────────────────────────────
 
 interface InitialScan { platform: string; status: string; completedAt: string | null; error?: string | null }
@@ -478,17 +513,29 @@ function EngageScanPanel() {
 }
 
 export default function Options() {
+  // Platform switcher (X / Reddit) — shared across sections ①②③
+  const [debugPlatform, setDebugPlatform] = useState<'x' | 'reddit'>('x');
+
+  // ① keyword search
   const [keyword, setKeyword] = useState('');
   const [searchBusy, setSearchBusy] = useState(false);
   const [searchErr, setSearchErr] = useState<string | null>(null);
   const [searchResults, setSearchResults] = useState<Tweet[]>([]);
+  const [rSearchResults, setRSearchResults] = useState<RedditPost[]>([]);
   const [searched, setSearched] = useState(false);
 
+  // ② single post fetch
   const [tweetId, setTweetId] = useState('');
   const [tweetBusy, setTweetBusy] = useState(false);
   const [tweetErr, setTweetErr] = useState<string | null>(null);
   const [tweet, setTweet] = useState<Tweet | null>(null);
   const [fetched, setFetched] = useState(false);
+  // ② Reddit: post URL or ID
+  const [rPostUrlOrId, setRPostUrlOrId] = useState('');
+  const [rPostBusy, setRPostBusy] = useState(false);
+  const [rPostErr, setRPostErr] = useState<string | null>(null);
+  const [rPost, setRPost] = useState<RedditPost | null>(null);
+  const [rPostFetched, setRPostFetched] = useState(false);
 
   // ③ account + keywords combined search
   const [akAccount, setAkAccount] = useState('');
@@ -498,179 +545,255 @@ export default function Options() {
   const [akResults, setAkResults] = useState<Tweet[]>([]);
   const [akSearched, setAkSearched] = useState(false);
   const [akQuery, setAkQuery] = useState('');
+  // ③ Reddit: user + optional keywords
+  const [rUserName, setRUserName] = useState('');
+  const [rUserKeywords, setRUserKeywords] = useState('');
+  const [rUserBusy, setRUserBusy] = useState(false);
+  const [rUserErr, setRUserErr] = useState<string | null>(null);
+  const [rUserResults, setRUserResults] = useState<RedditPost[]>([]);
+  const [rUserSearched, setRUserSearched] = useState(false);
 
+  // ─── X handlers ──────────────────────────────────────────────────────────
   const runSearch = async () => {
     if (!keyword.trim()) return;
-    setSearchBusy(true);
-    setSearchErr(null);
-    setSearchResults([]);
-    setSearched(false);
+    setSearchBusy(true); setSearchErr(null); setSearchResults([]); setSearched(false);
     try {
-      const resp = await sendMessage<SearchResp>({
-        action: 'xdebug:search',
-        keyword,
-      });
+      const resp = await sendMessage<SearchResp>({ action: 'xdebug:search', keyword });
       if (!resp.ok) throw new Error(resp.error || 'failed');
-      setSearchResults(resp.tweets ?? []);
-      setSearched(true);
-    } catch (e: any) {
-      setSearchErr(String(e?.message || e));
-    } finally {
-      setSearchBusy(false);
-    }
+      setSearchResults(resp.tweets ?? []); setSearched(true);
+    } catch (e: any) { setSearchErr(String(e?.message || e)); }
+    finally { setSearchBusy(false); }
   };
 
   const runTweet = async () => {
     if (!tweetId.trim()) return;
-    setTweetBusy(true);
-    setTweetErr(null);
-    setTweet(null);
-    setFetched(false);
+    setTweetBusy(true); setTweetErr(null); setTweet(null); setFetched(false);
     try {
-      const resp = await sendMessage<TweetResp>({
-        action: 'xdebug:tweet',
-        id: tweetId,
-      });
+      const resp = await sendMessage<TweetResp>({ action: 'xdebug:tweet', id: tweetId });
       if (!resp.ok) throw new Error(resp.error || 'failed');
-      setTweet(resp.tweet ?? null);
-      setFetched(true);
-    } catch (e: any) {
-      setTweetErr(String(e?.message || e));
-    } finally {
-      setTweetBusy(false);
-    }
+      setTweet(resp.tweet ?? null); setFetched(true);
+    } catch (e: any) { setTweetErr(String(e?.message || e)); }
+    finally { setTweetBusy(false); }
   };
 
   const runAccountKw = async () => {
     const handle = akAccount.replace(/^@/, '').trim();
-    const kws = akKeywords
-      .split(',')
-      .map((k) => k.trim())
-      .filter(Boolean);
+    const kws = akKeywords.split(',').map((k) => k.trim()).filter(Boolean);
     if (!handle || !kws.length) return;
-    setAkBusy(true);
-    setAkErr(null);
-    setAkResults([]);
-    setAkSearched(false);
-    // Preview the effective query
+    setAkBusy(true); setAkErr(null); setAkResults([]); setAkSearched(false);
     const kwClause = kws.map((k) => (k.includes(' ') ? `"${k}"` : k)).join(' OR ');
     setAkQuery(`from:${handle} (${kwClause})`);
     try {
       const resp = await sendMessage<AccountKwResp>({
-        action: 'xdebug:search-account-kw',
-        account: handle,
-        keywords: kws,
+        action: 'xdebug:search-account-kw', account: handle, keywords: kws,
       });
       if (!resp.ok) throw new Error(resp.error || 'failed');
-      setAkResults(resp.tweets ?? []);
-      setAkSearched(true);
-    } catch (e: any) {
-      setAkErr(String(e?.message || e));
-    } finally {
-      setAkBusy(false);
-    }
+      setAkResults(resp.tweets ?? []); setAkSearched(true);
+    } catch (e: any) { setAkErr(String(e?.message || e)); }
+    finally { setAkBusy(false); }
   };
+
+  // ─── Reddit handlers ──────────────────────────────────────────────────────
+  const runRedditSearch = async () => {
+    if (!keyword.trim()) return;
+    setSearchBusy(true); setSearchErr(null); setRSearchResults([]); setSearched(false);
+    try {
+      const resp = await sendMessage<RedditSearchResp>({ action: 'rdebug:search', keyword });
+      if (!resp.ok) throw new Error(resp.error || 'failed');
+      setRSearchResults(resp.posts ?? []); setSearched(true);
+    } catch (e: any) { setSearchErr(String(e?.message || e)); }
+    finally { setSearchBusy(false); }
+  };
+
+  const runRedditPost = async () => {
+    if (!rPostUrlOrId.trim()) return;
+    setRPostBusy(true); setRPostErr(null); setRPost(null); setRPostFetched(false);
+    try {
+      const resp = await sendMessage<RedditPostResp>({ action: 'rdebug:post', urlOrId: rPostUrlOrId.trim() });
+      if (!resp.ok) throw new Error(resp.error || 'failed');
+      setRPost(resp.post ?? null); setRPostFetched(true);
+    } catch (e: any) { setRPostErr(String(e?.message || e)); }
+    finally { setRPostBusy(false); }
+  };
+
+  const runRedditUser = async () => {
+    const uname = rUserName.replace(/^u\//, '').trim();
+    const kws = rUserKeywords.split(',').map((k) => k.trim()).filter(Boolean);
+    if (!uname) return;
+    setRUserBusy(true); setRUserErr(null); setRUserResults([]); setRUserSearched(false);
+    try {
+      const resp = await sendMessage<RedditSearchResp>({ action: 'rdebug:user', username: uname, keywords: kws });
+      if (!resp.ok) throw new Error(resp.error || 'failed');
+      setRUserResults(resp.posts ?? []); setRUserSearched(true);
+    } catch (e: any) { setRUserErr(String(e?.message || e)); }
+    finally { setRUserBusy(false); }
+  };
+
+  const isX = debugPlatform === 'x';
 
   return (
     <div className="xdbg">
       <style>{XDBG_CSS}</style>
-      <h1>X 采集调试</h1>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 4 }}>
+        <h1 style={{ margin: 0 }}>采集调试</h1>
+        <div className="xdbg-platform-tabs">
+          <button
+            className={isX ? 'xdbg-tab-active' : 'xdbg-tab'}
+            onClick={() => setDebugPlatform('x')}
+          >𝕏 Twitter</button>
+          <button
+            className={!isX ? 'xdbg-tab-active' : 'xdbg-tab'}
+            onClick={() => setDebugPlatform('reddit')}
+          >Reddit</button>
+        </div>
+      </div>
       <p className="xdbg-hint">
-        在后台标签页里让 x.com 自己发请求并拦截响应（需已登录 x.com）。
-        全程不经过任何服务器 API。
+        {isX
+          ? '在后台标签页里让 x.com 自己发请求并拦截响应（需已登录 x.com）。'
+          : '使用浏览器 session cookie 直接请求 Reddit 公开 API（需已登录 Reddit）。'}
       </p>
 
+      {/* ① keyword search */}
       <section className="xdbg-card">
-        <h2>① 关键字搜索（SearchTimeline）</h2>
+        <h2>① 关键字搜索（{isX ? 'SearchTimeline' : 'search.json sort=new'}）</h2>
         <div className="xdbg-controls">
           <input
             value={keyword}
             onChange={(e) => setKeyword(e.target.value)}
-            placeholder="输入关键字，例如 openai"
-            onKeyDown={(e) => e.key === 'Enter' && runSearch()}
+            placeholder={isX ? '输入关键字，例如 openai' : '输入关键字，例如 openai'}
+            onKeyDown={(e) => e.key === 'Enter' && (isX ? runSearch() : runRedditSearch())}
           />
-          <button onClick={runSearch} disabled={searchBusy || !keyword.trim()}>
+          <button onClick={isX ? runSearch : runRedditSearch} disabled={searchBusy || !keyword.trim()}>
             {searchBusy ? '搜索中…' : '搜索'}
           </button>
         </div>
         {searchErr && <div className="xdbg-err">错误：{searchErr}</div>}
         {searched && !searchErr && (
-          <div className="xdbg-count">共 {searchResults.length} 条</div>
+          <div className="xdbg-count">共 {isX ? searchResults.length : rSearchResults.length} 条</div>
         )}
         <div className="xdbg-list">
-          {searchResults.map((t) => (
-            <TweetRow key={t.id} t={t} />
-          ))}
+          {isX
+            ? searchResults.map((t) => <TweetRow key={t.id} t={t} />)
+            : rSearchResults.map((p) => <RedditPostRow key={p.externalPostId} p={p} />)}
         </div>
       </section>
 
+      {/* ② single post fetch */}
       <section className="xdbg-card">
-        <h2>② 按帖子 ID 取数（TweetDetail）</h2>
-        <div className="xdbg-controls">
-          <input
-            value={tweetId}
-            onChange={(e) => setTweetId(e.target.value)}
-            placeholder="帖子数字 ID 或粘贴链接"
-            onKeyDown={(e) => e.key === 'Enter' && runTweet()}
-          />
-          <button onClick={runTweet} disabled={tweetBusy || !tweetId.trim()}>
-            {tweetBusy ? '获取中…' : '获取'}
-          </button>
-        </div>
-        {tweetErr && <div className="xdbg-err">错误：{tweetErr}</div>}
-        {fetched && !tweetErr && !tweet && (
-          <div className="xdbg-count">未取到数据（ID 无效或拦截超时）</div>
+        {isX ? (
+          <>
+            <h2>② 按帖子 ID 取数（TweetDetail）</h2>
+            <div className="xdbg-controls">
+              <input
+                value={tweetId}
+                onChange={(e) => setTweetId(e.target.value)}
+                placeholder="帖子数字 ID 或粘贴链接"
+                onKeyDown={(e) => e.key === 'Enter' && runTweet()}
+              />
+              <button onClick={runTweet} disabled={tweetBusy || !tweetId.trim()}>
+                {tweetBusy ? '获取中…' : '获取'}
+              </button>
+            </div>
+            {tweetErr && <div className="xdbg-err">错误：{tweetErr}</div>}
+            {fetched && !tweetErr && !tweet && (
+              <div className="xdbg-count">未取到数据（ID 无效或拦截超时）</div>
+            )}
+            <div className="xdbg-list">{tweet && <TweetRow t={tweet} />}</div>
+          </>
+        ) : (
+          <>
+            <h2>② 按帖子 URL 或 ID 取数</h2>
+            <div className="xdbg-controls">
+              <input
+                value={rPostUrlOrId}
+                onChange={(e) => setRPostUrlOrId(e.target.value)}
+                placeholder="帖子完整 URL 或短 ID，例如 abc123"
+                onKeyDown={(e) => e.key === 'Enter' && runRedditPost()}
+              />
+              <button onClick={runRedditPost} disabled={rPostBusy || !rPostUrlOrId.trim()}>
+                {rPostBusy ? '获取中…' : '获取'}
+              </button>
+            </div>
+            {rPostErr && <div className="xdbg-err">错误：{rPostErr}</div>}
+            {rPostFetched && !rPostErr && !rPost && (
+              <div className="xdbg-count">未取到数据（URL/ID 无效）</div>
+            )}
+            <div className="xdbg-list">{rPost && <RedditPostRow p={rPost} />}</div>
+          </>
         )}
-        <div className="xdbg-list">{tweet && <TweetRow t={tweet} />}</div>
       </section>
 
+      {/* ③ account / user + keywords */}
       <section className="xdbg-card">
-        <h2>③ 账号 + 关键词搜索（from:account keywords）</h2>
-        <p className="xdbg-hint" style={{ marginBottom: 10 }}>
-          组合查询：搜索某账号发的、包含指定关键词的推文。
-          多个关键词用英文逗号分隔，例如{' '}
-          <code>xspace, xai</code>。
-        </p>
-        <div className="xdbg-controls" style={{ flexWrap: 'wrap', gap: 8 }}>
-          <input
-            value={akAccount}
-            onChange={(e) => setAkAccount(e.target.value)}
-            placeholder="X 账号，例如 elonmusk"
-            style={{ flex: '1 1 160px', minWidth: 120 }}
-            onKeyDown={(e) => e.key === 'Enter' && runAccountKw()}
-          />
-          <input
-            value={akKeywords}
-            onChange={(e) => setAkKeywords(e.target.value)}
-            placeholder="关键词（逗号分隔），例如 xspace, xai"
-            style={{ flex: '2 1 240px', minWidth: 180 }}
-            onKeyDown={(e) => e.key === 'Enter' && runAccountKw()}
-          />
-          <button
-            onClick={runAccountKw}
-            disabled={
-              akBusy ||
-              !akAccount.replace(/^@/, '').trim() ||
-              !akKeywords.trim()
-            }
-          >
-            {akBusy ? '搜索中…' : '搜索'}
-          </button>
-        </div>
-        {akQuery && (
-          <div className="xdbg-query-preview">
-            查询（Top）：<code>{akQuery}</code>
-          </div>
+        {isX ? (
+          <>
+            <h2>③ 账号 + 关键词搜索（from:account keywords）</h2>
+            <p className="xdbg-hint" style={{ marginBottom: 10 }}>
+              组合查询：搜索某账号发的、包含指定关键词的推文。多个关键词用英文逗号分隔，例如 <code>xspace, xai</code>。
+            </p>
+            <div className="xdbg-controls" style={{ flexWrap: 'wrap', gap: 8 }}>
+              <input
+                value={akAccount}
+                onChange={(e) => setAkAccount(e.target.value)}
+                placeholder="X 账号，例如 elonmusk"
+                style={{ flex: '1 1 160px', minWidth: 120 }}
+                onKeyDown={(e) => e.key === 'Enter' && runAccountKw()}
+              />
+              <input
+                value={akKeywords}
+                onChange={(e) => setAkKeywords(e.target.value)}
+                placeholder="关键词（逗号分隔），例如 xspace, xai"
+                style={{ flex: '2 1 240px', minWidth: 180 }}
+                onKeyDown={(e) => e.key === 'Enter' && runAccountKw()}
+              />
+              <button
+                onClick={runAccountKw}
+                disabled={akBusy || !akAccount.replace(/^@/, '').trim() || !akKeywords.trim()}
+              >
+                {akBusy ? '搜索中…' : '搜索'}
+              </button>
+            </div>
+            {akQuery && (
+              <div className="xdbg-query-preview">查询（Top）：<code>{akQuery}</code></div>
+            )}
+            {akErr && <div className="xdbg-err">错误：{akErr}</div>}
+            {akSearched && !akErr && <div className="xdbg-count">共 {akResults.length} 条</div>}
+            <div className="xdbg-list">
+              {akResults.map((t) => <TweetRow key={t.id} t={t} />)}
+            </div>
+          </>
+        ) : (
+          <>
+            <h2>③ 用户最近帖子（user/submitted + 关键词过滤）</h2>
+            <p className="xdbg-hint" style={{ marginBottom: 10 }}>
+              拉取指定用户的最近投稿，可选关键词做客户端过滤（逗号分隔）。
+            </p>
+            <div className="xdbg-controls" style={{ flexWrap: 'wrap', gap: 8 }}>
+              <input
+                value={rUserName}
+                onChange={(e) => setRUserName(e.target.value)}
+                placeholder="Reddit 用户名，例如 spez"
+                style={{ flex: '1 1 160px', minWidth: 120 }}
+                onKeyDown={(e) => e.key === 'Enter' && runRedditUser()}
+              />
+              <input
+                value={rUserKeywords}
+                onChange={(e) => setRUserKeywords(e.target.value)}
+                placeholder="关键词（可选，逗号分隔）"
+                style={{ flex: '2 1 240px', minWidth: 180 }}
+                onKeyDown={(e) => e.key === 'Enter' && runRedditUser()}
+              />
+              <button onClick={runRedditUser} disabled={rUserBusy || !rUserName.replace(/^u\//, '').trim()}>
+                {rUserBusy ? '搜索中…' : '搜索'}
+              </button>
+            </div>
+            {rUserErr && <div className="xdbg-err">错误：{rUserErr}</div>}
+            {rUserSearched && !rUserErr && <div className="xdbg-count">共 {rUserResults.length} 条</div>}
+            <div className="xdbg-list">
+              {rUserResults.map((p) => <RedditPostRow key={p.externalPostId} p={p} />)}
+            </div>
+          </>
         )}
-        {akErr && <div className="xdbg-err">错误：{akErr}</div>}
-        {akSearched && !akErr && (
-          <div className="xdbg-count">共 {akResults.length} 条</div>
-        )}
-        <div className="xdbg-list">
-          {akResults.map((t) => (
-            <TweetRow key={t.id} t={t} />
-          ))}
-        </div>
       </section>
 
       <EngageScanPanel />
@@ -701,6 +824,9 @@ const XDBG_CSS = `
 .xdbg-stats { color: #555; font-size: 12px; }
 .xdbg-query-preview { margin-top: 10px; font-size: 12px; color: #555; }
 .xdbg-query-preview code { background: #f3f4f6; padding: 2px 6px; border-radius: 4px; font-family: monospace; word-break: break-all; }
+.xdbg-platform-tabs { display: flex; gap: 4px; }
+.xdbg-tab, .xdbg-tab-active { padding: 4px 14px; border-radius: 20px; border: 1px solid #ccc; font-size: 13px; cursor: pointer; background: #fff; color: #555; }
+.xdbg-tab-active { background: #1d9bf0; border-color: #1d9bf0; color: #fff; font-weight: 600; }
 
 /* ── Section ④ Engage Scan Panel ── */
 /* Status table (per-unit scan history) */
