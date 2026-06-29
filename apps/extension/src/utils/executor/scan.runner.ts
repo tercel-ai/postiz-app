@@ -91,6 +91,7 @@ async function ingest(
 }
 
 export async function runScanLoop(): Promise<ScanRunSummary> {
+  console.log('[aisee][scan] runScanLoop start', new Date().toISOString());
   const summary: ScanRunSummary = {
     units: 0,
     posts: 0,
@@ -98,6 +99,7 @@ export async function runScanLoop(): Promise<ScanRunSummary> {
     stoppedReason: 'idle',
   };
   if (scanInFlight) {
+    console.log('[aisee][scan] runScanLoop skipped — already in flight');
     summary.stoppedReason = 'busy';
     return summary;
   }

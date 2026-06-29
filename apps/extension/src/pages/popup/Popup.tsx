@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { HistoryList } from '@gitroom/extension/pages/popup/components/HistoryList';
 import { ClearHistoryPage } from '@gitroom/extension/pages/popup/components/ClearHistoryPage';
 import { LoginForm } from '@gitroom/extension/pages/popup/components/LoginForm';
+import { EngageScanPanel } from '@gitroom/extension/pages/popup/components/ScanPanel';
 import { AuthUser, ACCESS_KEY } from '@gitroom/extension/utils/auth.service';
 import {
   clearHistory,
@@ -13,7 +14,7 @@ import {
 
 export default function Popup() {
   const [history, setHistory] = useState<ReplyHistoryItem[]>([]);
-  const [view, setView] = useState<'main' | 'clear'>('main');
+  const [view, setView] = useState<'main' | 'clear' | 'scan'>('main');
   // undefined = checking, null = logged out, object = logged in
   const [user, setUser] = useState<AuthUser | null | undefined>(undefined);
 
@@ -81,6 +82,20 @@ export default function Popup() {
     );
   }
 
+  if (view === 'scan') {
+    return (
+      <div className="pz">
+        <div className="pz-header">
+          <button className="pz-back-btn" onClick={() => setView('main')}>←</button>
+          <div className="pz-title" style={{ fontSize: 14 }}>Scan Automation</div>
+        </div>
+        <div style={{ padding: '12px 14px', overflowY: 'auto', maxHeight: 560 }}>
+          <EngageScanPanel />
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="pz">
       <div className="pz-header">
@@ -109,6 +124,13 @@ export default function Popup() {
             >
               {user.email}
             </span>
+            <button
+              className="pz-clear-btn"
+              title="Scan automation panel"
+              onClick={() => setView('scan')}
+            >
+              ⚙
+            </button>
             <button className="pz-clear-btn" onClick={handleLogout}>
               Log out
             </button>

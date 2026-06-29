@@ -250,6 +250,7 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
   //   chrome.runtime.sendMessage({ action: 'engage:scan' })
   //   chrome.runtime.sendMessage({ action: 'engage:metrics', ids: ['<postId>'] })
   if (request.action === ENGAGE_EXTENSION_ACTION.runScan) {
+    console.log('[aisee][scan] manual runScan triggered', new Date().toISOString());
     runScanLoop()
       .then((summary) => sendResponse({ ok: true, summary }))
       .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
@@ -370,6 +371,7 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
   }
   if (request.action === ENGAGE_EXTENSION_ACTION.claimTasks) {
     const want = Math.min(Math.max(1, request.want ?? 3), 5);
+    console.log('[aisee][scan] claimTasks', { want, force: request.force });
     backendCall('/engage/scan-tasks/ingest', 'POST', { want, force: request.force ?? false })
       .then((r: any) =>
         sendResponse({ ok: r.ok, tasks: r.data?.nextTasks ?? [], accepted: 0 })
@@ -380,6 +382,7 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
   if (request.action === ENGAGE_EXTENSION_ACTION.executeTask) {
     const gate = () => Promise.resolve(true);
     const task = request.task;
+    console.log('[aisee][scan] executeTask', task?.platform, task?.scanType, task?.scanKey);
     // Options and the alarm runner use the same production scanners so their
     // request fingerprints, cursor handling and parsing cannot drift apart.
     // Cap to 1 page regardless of phase (initial normally allows 3) — the debug
@@ -399,6 +402,7 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
     return true;
   }
   if (request.action === ENGAGE_EXTENSION_ACTION.ingestTask) {
+    console.log('[aisee][scan] ingestTask', request.taskId, { posts: request.posts?.length, exhausted: request.exhausted });
     // Complete the task + claim next (want:1 is the minimum the backend allows).
     // The caller reads nextTasks from the response and shows them in the UI.
     backendCall('/engage/scan-tasks/ingest', 'POST', {

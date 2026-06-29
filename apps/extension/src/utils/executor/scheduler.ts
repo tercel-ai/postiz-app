@@ -42,6 +42,8 @@ export async function clearEngageScanAlarm(): Promise<void> {
 /** Returns true when the alarm was this module's (so the caller can stop). */
 export async function handleEngageAlarm(name: string): Promise<boolean> {
   if (name !== ENGAGE_SCAN_ALARM) return false;
-  await runScanLoop();
+  console.log('[aisee][scan] alarm fired — starting scheduled scan', new Date().toISOString());
+  const summary = await runScanLoop();
+  console.log('[aisee][scan] scheduled scan done', summary);
   return true;
 }
