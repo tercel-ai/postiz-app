@@ -324,7 +324,7 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
   // ─── Debug direct ingest (Options page ①②③ — bypass scan-task lease) ──────
   if (request.action === 'debug:ingest-posts') {
     backendCall('/engage/debug/ingest', 'POST', { posts: request.posts })
-      .then((r: any) => sendResponse({ ok: r.ok, accepted: r.data?.accepted ?? 0 }))
+      .then((r: any) => sendResponse({ ok: r.ok, accepted: r.data?.accepted ?? 0, keywordMatched: r.data?.keywordMatched, reason: r.data?.reason }))
       .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
     return true;
   }

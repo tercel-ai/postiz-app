@@ -134,13 +134,28 @@ export class EngageScanTasksService {
    * Useful for the Options-page search sections (①②③) where results are collected
    * without a claimed scan task. Fan-out and scoring are identical to the normal path.
    */
-  async debugIngest(orgId: string, posts: RawPost[]): Promise<number> {
-    this.logger.log(`[ingest-dbg] debugIngest called, orgId=${orgId}, posts=${posts.length}`);
-    if (!posts.length) return 0;
+  async debugIngest(
+    orgId: string,
+    posts: RawPost[]
+  ): Promise<{ accepted: number; keywordMatched: number; scoreFiltered: number; reason?: string }> {
+    if (!posts.length) return { accepted: 0, keywordMatched: 0, scoreFiltered: 0, reason: 'no posts' };
     const ctx = await this._engageRepo.getEnabledOrgContext(orgId);
-    this.logger.log(`[ingest-dbg] debugIngest orgId=${orgId} ctx=${ctx?.id}`);
-    if (!ctx) return 0;
-    return this._ingest.ingestForOrg(ctx as any, posts);
+    if (!ctx) return { accepted: 0, keywordMatched: 0, scoreFiltered: 0, reason: 'no engage config found for org' };
+    if (!ctx.keywords.length) {
+      return { accepted: 0, keywordMatched: 0, scoreFiltered: 0, reason: 'org has no enabled keywords configured' };
+    }
+    const allScored = this._ingest.scoreAllForOrg(posts, ctx as any);
+    const minScore = Number(process.env.ENGAGE_MIN_SCORE ?? 60);
+    const scored = allScored.filter((p) => p.score >= minScore);
+    this.logger.log(`[ingest-dbg] posts=${posts.length} keywordMatched=${allScored.length} scoreFiltered=${allScored.length - scored.length} minScore=${minScore} keywords=[${ctx.keywords.map((k) => k.keyword).join(', ')}]`);
+    if (!scored.length) {
+      const reason = allScored.length === 0
+        ? `no posts matched any keyword (configured: ${ctx.keywords.map((k) => k.keyword).join(', ')})`
+        : `all ${allScored.length} matched posts scored below MIN_SCORE=${minScore}`;
+      return { accepted: 0, keywordMatched: allScored.length, scoreFiltered: allScored.length - scored.length, reason };
+    }
+    const accepted = await this._ingest.ingestForOrg(ctx as any, posts);
+    return { accepted, keywordMatched: allScored.length, scoreFiltered: allScored.length - scored.length };
   }
 
   /** Complete (if any) + claim next batch. Bootstrap = call with no `completed`. */

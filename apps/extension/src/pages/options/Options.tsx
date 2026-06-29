@@ -587,25 +587,25 @@ export default function Options() {
 
   // Ingest state: one slot per section (①②③)
   const [ing1Busy, setIng1Busy] = useState(false);
-  const [ing1Result, setIng1Result] = useState<{ accepted: number } | null>(null);
+  const [ing1Result, setIng1Result] = useState<{ accepted: number; keywordMatched?: number; reason?: string } | null>(null);
   const [ing2Busy, setIng2Busy] = useState(false);
-  const [ing2Result, setIng2Result] = useState<{ accepted: number } | null>(null);
+  const [ing2Result, setIng2Result] = useState<{ accepted: number; keywordMatched?: number; reason?: string } | null>(null);
   const [ing3Busy, setIng3Busy] = useState(false);
-  const [ing3Result, setIng3Result] = useState<{ accepted: number } | null>(null);
+  const [ing3Result, setIng3Result] = useState<{ accepted: number; keywordMatched?: number; reason?: string } | null>(null);
 
   async function ingestPosts(
     posts: object[],
     setBusy: (v: boolean) => void,
-    setResult: (v: { accepted: number } | null) => void
+    setResult: (v: { accepted: number; keywordMatched?: number; reason?: string } | null) => void
   ) {
     if (!posts.length) return;
     setBusy(true); setResult(null);
     try {
-      const r = await sendMessage<{ ok: boolean; accepted?: number; error?: string }>({
+      const r = await sendMessage<{ ok: boolean; accepted?: number; keywordMatched?: number; reason?: string; error?: string }>({
         action: 'debug:ingest-posts', posts,
       });
       if (!r.ok) throw new Error(r.error || 'ingest failed');
-      setResult({ accepted: r.accepted ?? 0 });
+      setResult({ accepted: r.accepted ?? 0, keywordMatched: r.keywordMatched, reason: r.reason });
     } catch (e: any) { setResult({ accepted: -1 }); console.error('[aisee][debug-ingest]', e); }
     finally { setBusy(false); }
   }
@@ -738,8 +738,11 @@ export default function Options() {
                 </button>
               )}
               {ing1Result && (
-                <span className="xdbg-ingest-result">
-                  {ing1Result.accepted >= 0 ? `已入库 ${ing1Result.accepted} 条` : '入库失败'}
+                <span className="xdbg-ingest-result" title={ing1Result.reason}>
+                  {ing1Result.accepted >= 0
+                    ? `已入库 ${ing1Result.accepted} 条${ing1Result.keywordMatched !== undefined ? ` (关键词匹配 ${ing1Result.keywordMatched})` : ''}${ing1Result.reason ? ' ⚠️' : ''}`
+                    : '入库失败'}
+                  {ing1Result.reason && <div className="xdbg-ingest-reason">{ing1Result.reason}</div>}
                 </span>
               )}
             </div>
@@ -779,8 +782,9 @@ export default function Options() {
                   {ing2Busy ? '入库中…' : '入库'}
                 </button>
                 {ing2Result && (
-                  <span className="xdbg-ingest-result">
-                    {ing2Result.accepted >= 0 ? `已入库 ${ing2Result.accepted} 条` : '入库失败'}
+                  <span className="xdbg-ingest-result" title={ing2Result.reason}>
+                    {ing2Result.accepted >= 0 ? `已入库 ${ing2Result.accepted} 条${ing2Result.keywordMatched !== undefined ? ` (关键词匹配 ${ing2Result.keywordMatched})` : ''}` : '入库失败'}
+                    {ing2Result.reason && <div className="xdbg-ingest-reason">{ing2Result.reason}</div>}
                   </span>
                 )}
               </div>
@@ -812,8 +816,9 @@ export default function Options() {
                   {ing2Busy ? '入库中…' : '获取'}
                 </button>
                 {ing2Result && (
-                  <span className="xdbg-ingest-result">
-                    {ing2Result.accepted >= 0 ? `已入库 ${ing2Result.accepted} 条` : '入库失败'}
+                  <span className="xdbg-ingest-result" title={ing2Result.reason}>
+                    {ing2Result.accepted >= 0 ? `已入库 ${ing2Result.accepted} 条${ing2Result.keywordMatched !== undefined ? ` (关键词匹配 ${ing2Result.keywordMatched})` : ''}` : '入库失败'}
+                    {ing2Result.reason && <div className="xdbg-ingest-reason">{ing2Result.reason}</div>}
                   </span>
                 )}
               </div>
@@ -867,8 +872,9 @@ export default function Options() {
                   </button>
                 )}
                 {ing3Result && (
-                  <span className="xdbg-ingest-result">
-                    {ing3Result.accepted >= 0 ? `已入库 ${ing3Result.accepted} 条` : '入库失败'}
+                  <span className="xdbg-ingest-result" title={ing3Result.reason}>
+                    {ing3Result.accepted >= 0 ? `已入库 ${ing3Result.accepted} 条${ing3Result.keywordMatched !== undefined ? ` (关键词匹配 ${ing3Result.keywordMatched})` : ''}` : '入库失败'}
+                    {ing3Result.reason && <div className="xdbg-ingest-reason">{ing3Result.reason}</div>}
                   </span>
                 )}
               </div>
@@ -913,8 +919,9 @@ export default function Options() {
                   </button>
                 )}
                 {ing3Result && (
-                  <span className="xdbg-ingest-result">
-                    {ing3Result.accepted >= 0 ? `已入库 ${ing3Result.accepted} 条` : '入库失败'}
+                  <span className="xdbg-ingest-result" title={ing3Result.reason}>
+                    {ing3Result.accepted >= 0 ? `已入库 ${ing3Result.accepted} 条${ing3Result.keywordMatched !== undefined ? ` (关键词匹配 ${ing3Result.keywordMatched})` : ''}` : '入库失败'}
+                    {ing3Result.reason && <div className="xdbg-ingest-reason">{ing3Result.reason}</div>}
                   </span>
                 )}
               </div>
@@ -960,6 +967,7 @@ const XDBG_CSS = `
 .xdbg-ingest-btn { padding: 4px 14px; border: 0; border-radius: 8px; background: #16a34a; color: #fff; font-size: 13px; cursor: pointer; flex-shrink: 0; }
 .xdbg-ingest-btn:disabled { background: #86efac; cursor: default; }
 .xdbg-ingest-result { font-size: 12px; color: #16a34a; }
+.xdbg-ingest-reason { font-size: 11px; color: #b45309; margin-top: 2px; }
 
 /* ── Section ④ Engage Scan Panel ── */
 /* Status table (per-unit scan history) */

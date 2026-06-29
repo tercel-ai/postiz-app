@@ -194,8 +194,8 @@ export class EngageController {
     @Body() body: { posts?: any[] }
   ) {
     const posts = (body?.posts ?? []).map(scanIngestPostToRawPost);
-    const accepted = await this._scanTasksService.debugIngest(org.id, posts);
-    return { accepted };
+    const result = await this._scanTasksService.debugIngest(org.id, posts);
+    return result;
   }
 
   // ─── Config ───────────────────────────────────────────────────────────────
