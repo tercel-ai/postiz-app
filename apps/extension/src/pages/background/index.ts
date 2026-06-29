@@ -321,6 +321,14 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
     return true;
   }
 
+  // ─── Debug direct ingest (Options page ①②③ — bypass scan-task lease) ──────
+  if (request.action === 'debug:ingest-posts') {
+    backendCall('/engage/debug/ingest', 'POST', { posts: request.posts })
+      .then((r: any) => sendResponse({ ok: r.ok, accepted: r.data?.accepted ?? 0 }))
+      .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
+    return true;
+  }
+
   // ─── Reddit collection debug (Options page) — direct fetch, no tab needed ─
   if (request.action === 'rdebug:search') {
     debugSearchRedditKeyword(request.keyword)

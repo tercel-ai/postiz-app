@@ -312,6 +312,8 @@ function EngageScanPanel() {
         setTasks((prev) => [...prev, ...incoming]);
         setStates((prev) => { const np = { ...prev }; for (const nt of incoming) np[nt.taskId] = defaultState(); return np; });
       }
+      // Refresh scan-cursor times from server so status table reflects the new lastScannedAt.
+      void loadConfig();
     } catch (e: any) { patch(t.taskId, { status: 'err', err: String(e?.message || e) }); }
   }
 
@@ -512,6 +514,36 @@ function EngageScanPanel() {
   );
 }
 
+// Convert X Tweet display type → ScanIngestPost for backend ingestion
+function tweetToIngestPost(t: Tweet): object {
+  return {
+    platform: 'x',
+    externalPostId: t.id,
+    externalPostUrl: `https://x.com/${t.authorUsername}/status/${t.id}`,
+    authorUsername: t.authorUsername,
+    postContent: t.text,
+    postPublishedAt: t.createdAt,
+    metricLikes: t.likes, metricReplies: t.replies, metricRetweets: t.retweets,
+    metricQuotes: t.quotes, metricBookmarks: t.bookmarks, metricViews: t.views,
+  };
+}
+// Convert Reddit display type → ScanIngestPost (already close; just rename fields)
+function redditToIngestPost(p: RedditPost): object {
+  return {
+    platform: 'reddit',
+    externalPostId: p.externalPostId,
+    externalPostUrl: p.externalPostUrl,
+    authorUsername: p.authorUsername,
+    channelId: p.channelId,
+    channelName: p.channelName,
+    postContent: p.postContent,
+    postPublishedAt: p.postPublishedAt,
+    metricScore: p.metricScore,
+    metricComments: p.metricComments,
+    metricUpvoteRatio: p.metricUpvoteRatio,
+  };
+}
+
 export default function Options() {
   // Platform switcher (X / Reddit) — shared across sections ①②③
   const [debugPlatform, setDebugPlatform] = useState<'x' | 'reddit'>('x');
@@ -552,6 +584,31 @@ export default function Options() {
   const [rUserErr, setRUserErr] = useState<string | null>(null);
   const [rUserResults, setRUserResults] = useState<RedditPost[]>([]);
   const [rUserSearched, setRUserSearched] = useState(false);
+
+  // Ingest state: one slot per section (①②③)
+  const [ing1Busy, setIng1Busy] = useState(false);
+  const [ing1Result, setIng1Result] = useState<{ accepted: number } | null>(null);
+  const [ing2Busy, setIng2Busy] = useState(false);
+  const [ing2Result, setIng2Result] = useState<{ accepted: number } | null>(null);
+  const [ing3Busy, setIng3Busy] = useState(false);
+  const [ing3Result, setIng3Result] = useState<{ accepted: number } | null>(null);
+
+  async function ingestPosts(
+    posts: object[],
+    setBusy: (v: boolean) => void,
+    setResult: (v: { accepted: number } | null) => void
+  ) {
+    if (!posts.length) return;
+    setBusy(true); setResult(null);
+    try {
+      const r = await sendMessage<{ ok: boolean; accepted?: number; error?: string }>({
+        action: 'debug:ingest-posts', posts,
+      });
+      if (!r.ok) throw new Error(r.error || 'ingest failed');
+      setResult({ accepted: r.accepted ?? 0 });
+    } catch (e: any) { setResult({ accepted: -1 }); console.error('[aisee][debug-ingest]', e); }
+    finally { setBusy(false); }
+  }
 
   // ─── X handlers ──────────────────────────────────────────────────────────
   const runSearch = async () => {
@@ -668,9 +725,26 @@ export default function Options() {
           </button>
         </div>
         {searchErr && <div className="xdbg-err">错误：{searchErr}</div>}
-        {searched && !searchErr && (
-          <div className="xdbg-count">共 {isX ? searchResults.length : rSearchResults.length} 条</div>
-        )}
+        {searched && !searchErr && (() => {
+          const count = isX ? searchResults.length : rSearchResults.length;
+          const posts = isX ? searchResults.map(tweetToIngestPost) : rSearchResults.map(redditToIngestPost);
+          return (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 10 }}>
+              <div className="xdbg-count" style={{ margin: 0 }}>共 {count} 条</div>
+              {count > 0 && (
+                <button className="xdbg-ingest-btn" disabled={ing1Busy}
+                  onClick={() => ingestPosts(posts, setIng1Busy, setIng1Result)}>
+                  {ing1Busy ? '入库中…' : '入库'}
+                </button>
+              )}
+              {ing1Result && (
+                <span className="xdbg-ingest-result">
+                  {ing1Result.accepted >= 0 ? `已入库 ${ing1Result.accepted} 条` : '入库失败'}
+                </span>
+              )}
+            </div>
+          );
+        })()}
         <div className="xdbg-list">
           {isX
             ? searchResults.map((t) => <TweetRow key={t.id} t={t} />)
@@ -698,6 +772,19 @@ export default function Options() {
             {fetched && !tweetErr && !tweet && (
               <div className="xdbg-count">未取到数据（ID 无效或拦截超时）</div>
             )}
+            {tweet && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 10 }}>
+                <button className="xdbg-ingest-btn" disabled={ing2Busy}
+                  onClick={() => ingestPosts([tweetToIngestPost(tweet)], setIng2Busy, setIng2Result)}>
+                  {ing2Busy ? '入库中…' : '入库'}
+                </button>
+                {ing2Result && (
+                  <span className="xdbg-ingest-result">
+                    {ing2Result.accepted >= 0 ? `已入库 ${ing2Result.accepted} 条` : '入库失败'}
+                  </span>
+                )}
+              </div>
+            )}
             <div className="xdbg-list">{tweet && <TweetRow t={tweet} />}</div>
           </>
         ) : (
@@ -717,6 +804,19 @@ export default function Options() {
             {rPostErr && <div className="xdbg-err">错误：{rPostErr}</div>}
             {rPostFetched && !rPostErr && !rPost && (
               <div className="xdbg-count">未取到数据（URL/ID 无效）</div>
+            )}
+            {rPost && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 10 }}>
+                <button className="xdbg-ingest-btn" disabled={ing2Busy}
+                  onClick={() => ingestPosts([redditToIngestPost(rPost)], setIng2Busy, setIng2Result)}>
+                  {ing2Busy ? '入库中…' : '获取'}
+                </button>
+                {ing2Result && (
+                  <span className="xdbg-ingest-result">
+                    {ing2Result.accepted >= 0 ? `已入库 ${ing2Result.accepted} 条` : '入库失败'}
+                  </span>
+                )}
+              </div>
             )}
             <div className="xdbg-list">{rPost && <RedditPostRow p={rPost} />}</div>
           </>
@@ -757,7 +857,22 @@ export default function Options() {
               <div className="xdbg-query-preview">查询（Top）：<code>{akQuery}</code></div>
             )}
             {akErr && <div className="xdbg-err">错误：{akErr}</div>}
-            {akSearched && !akErr && <div className="xdbg-count">共 {akResults.length} 条</div>}
+            {akSearched && !akErr && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 10 }}>
+                <div className="xdbg-count" style={{ margin: 0 }}>共 {akResults.length} 条</div>
+                {akResults.length > 0 && (
+                  <button className="xdbg-ingest-btn" disabled={ing3Busy}
+                    onClick={() => ingestPosts(akResults.map(tweetToIngestPost), setIng3Busy, setIng3Result)}>
+                    {ing3Busy ? '入库中…' : '入库'}
+                  </button>
+                )}
+                {ing3Result && (
+                  <span className="xdbg-ingest-result">
+                    {ing3Result.accepted >= 0 ? `已入库 ${ing3Result.accepted} 条` : '入库失败'}
+                  </span>
+                )}
+              </div>
+            )}
             <div className="xdbg-list">
               {akResults.map((t) => <TweetRow key={t.id} t={t} />)}
             </div>
@@ -788,7 +903,22 @@ export default function Options() {
               </button>
             </div>
             {rUserErr && <div className="xdbg-err">错误：{rUserErr}</div>}
-            {rUserSearched && !rUserErr && <div className="xdbg-count">共 {rUserResults.length} 条</div>}
+            {rUserSearched && !rUserErr && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 10 }}>
+                <div className="xdbg-count" style={{ margin: 0 }}>共 {rUserResults.length} 条</div>
+                {rUserResults.length > 0 && (
+                  <button className="xdbg-ingest-btn" disabled={ing3Busy}
+                    onClick={() => ingestPosts(rUserResults.map(redditToIngestPost), setIng3Busy, setIng3Result)}>
+                    {ing3Busy ? '入库中…' : '入库'}
+                  </button>
+                )}
+                {ing3Result && (
+                  <span className="xdbg-ingest-result">
+                    {ing3Result.accepted >= 0 ? `已入库 ${ing3Result.accepted} 条` : '入库失败'}
+                  </span>
+                )}
+              </div>
+            )}
             <div className="xdbg-list">
               {rUserResults.map((p) => <RedditPostRow key={p.externalPostId} p={p} />)}
             </div>
@@ -827,6 +957,9 @@ const XDBG_CSS = `
 .xdbg-platform-tabs { display: flex; gap: 4px; }
 .xdbg-tab, .xdbg-tab-active { padding: 4px 14px; border-radius: 20px; border: 1px solid #ccc; font-size: 13px; cursor: pointer; background: #fff; color: #555; }
 .xdbg-tab-active { background: #1d9bf0; border-color: #1d9bf0; color: #fff; font-weight: 600; }
+.xdbg-ingest-btn { padding: 4px 14px; border: 0; border-radius: 8px; background: #16a34a; color: #fff; font-size: 13px; cursor: pointer; flex-shrink: 0; }
+.xdbg-ingest-btn:disabled { background: #86efac; cursor: default; }
+.xdbg-ingest-result { font-size: 12px; color: #16a34a; }
 
 /* ── Section ④ Engage Scan Panel ── */
 /* Status table (per-unit scan history) */

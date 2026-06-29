@@ -182,6 +182,21 @@ export class EngageController {
     return { released };
   }
 
+  @ApiOperation({
+    summary:
+      'Debug: ingest raw posts directly without a lease/cursor — for the Options page ' +
+      'search sections (①②③) where results are collected outside the normal scan-task flow.',
+  })
+  @Post('/debug/ingest')
+  async debugIngest(
+    @GetOrgFromRequest() org: Organization,
+    @Body() body: { posts?: any[] }
+  ) {
+    const posts = (body?.posts ?? []).map(scanIngestPostToRawPost);
+    const accepted = await this._scanTasksService.debugIngest(org.id, posts);
+    return { accepted };
+  }
+
   // ─── Config ───────────────────────────────────────────────────────────────
 
   @ApiOperation({ summary: 'Get Engage config and keywords/channels/accounts for this org' })

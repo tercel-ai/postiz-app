@@ -129,6 +129,18 @@ export class EngageScanTasksService {
     return this._lease.releaseByToken(taskId);
   }
 
+  /**
+   * Debug/admin: ingest raw posts directly, bypassing the lease/cursor system.
+   * Useful for the Options-page search sections (①②③) where results are collected
+   * without a claimed scan task. Fan-out and scoring are identical to the normal path.
+   */
+  async debugIngest(orgId: string, posts: RawPost[]): Promise<number> {
+    if (!posts.length) return 0;
+    const ctx = await this._engageRepo.getEnabledOrgContext(orgId);
+    if (!ctx) return 0;
+    return this._ingest.ingestForOrg(ctx as any, posts);
+  }
+
   /** Complete (if any) + claim next batch. Bootstrap = call with no `completed`. */
   async sync(
     orgId: string,
