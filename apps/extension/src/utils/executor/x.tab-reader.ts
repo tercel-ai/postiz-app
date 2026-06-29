@@ -167,6 +167,12 @@ export async function openXReadTab(): Promise<XReadTab | null> {
  *      not just listens to the event, so patching the getter is required to
  *      unblock deferred SearchTimeline requests in background tabs.
  */
+// How long to linger on the search page after capturing the response, in ms.
+// A real user takes ~1-3 s to glance at results before closing/navigating.
+// Closing immediately after capture looks bot-like in session-duration signals.
+const POST_CAPTURE_LINGER_MIN_MS = 1_500;
+const POST_CAPTURE_LINGER_JITTER_MS = 1_500; // uniform [1500, 3000) ms
+
 export async function readViaProfile(
   profileUrl: string,
   searchUrl: string,
@@ -239,7 +245,18 @@ export async function readViaProfile(
     const deadline = Date.now() + CAPTURE_TIMEOUT_MS;
     while (Date.now() < deadline) {
       const data = await readCaptured(id, op, since);
-      if (data != null) return data;
+      if (data != null) {
+        // Linger on the page before closing — a real user takes a moment to
+        // scan the results before navigating away. Instant-close is a
+        // recognisable bot signal in session-duration heuristics.
+        if (!opts.keepOpen) {
+          const linger =
+            POST_CAPTURE_LINGER_MIN_MS +
+            Math.floor(Math.random() * POST_CAPTURE_LINGER_JITTER_MS);
+          await sleep(linger);
+        }
+        return data;
+      }
       await sleep(CAPTURE_POLL_MS);
     }
     console.warn('[aisee][x-read] readViaProfile: capture timed out for', op);

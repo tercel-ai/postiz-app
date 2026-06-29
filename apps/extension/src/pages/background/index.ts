@@ -15,6 +15,9 @@ import {
   debugFetchTweet,
   debugSearchAccountKeywords,
 } from '@gitroom/extension/utils/executor/x.debug';
+import { backendCall } from '@gitroom/extension/utils/executor/api';
+import { scanX } from '@gitroom/extension/utils/executor/scan.x';
+import { scanReddit } from '@gitroom/extension/utils/executor/scan.reddit';
 import {
   ensureEngageScanAlarm,
   clearEngageScanAlarm,
@@ -309,6 +312,55 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
   if (request.action === 'xdebug:search-account-kw') {
     debugSearchAccountKeywords(request.account, request.keywords ?? [])
       .then((tweets) => sendResponse({ ok: true, tweets }))
+      .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
+    return true;
+  }
+
+  // ─── Engage Scan Debug (Section ④, Options page) ─────────────────────────
+  if (request.action === 'engage:load-config') {
+    backendCall('/engage/config', 'GET')
+      .then((r) => sendResponse({ ok: r.ok, data: r.data }))
+      .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
+    return true;
+  }
+  if (request.action === 'engage:claim-tasks') {
+    const want = Math.min(Math.max(1, request.want ?? 3), 5);
+    backendCall('/engage/scan-tasks/ingest', 'POST', { want })
+      .then((r: any) =>
+        sendResponse({ ok: r.ok, tasks: r.data?.nextTasks ?? [], accepted: 0 })
+      )
+      .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
+    return true;
+  }
+  if (request.action === 'engage:execute-task') {
+    // Debug mode: always allow requests (gate always returns true — no hourly cap
+    // enforcement so the user can run any task freely in the Options panel).
+    const gate = () => Promise.resolve(true);
+    const task = request.task;
+    (task.platform === 'x' ? scanX(task, gate) : scanReddit(task, gate))
+      .then((result) => sendResponse({ ok: true, result }))
+      .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
+    return true;
+  }
+  if (request.action === 'engage:ingest-task') {
+    // Complete the task + claim next (want:1 is the minimum the backend allows).
+    // The caller reads nextTasks from the response and shows them in the UI.
+    backendCall('/engage/scan-tasks/ingest', 'POST', {
+      completed: {
+        taskId: request.taskId,
+        posts: request.posts,
+        nextCursor: request.nextCursor ?? null,
+        exhausted: request.exhausted ?? true,
+      },
+      want: 1,
+    })
+      .then((r: any) =>
+        sendResponse({
+          ok: r.ok,
+          accepted: r.data?.accepted ?? 0,
+          nextTasks: r.data?.nextTasks ?? [],
+        })
+      )
       .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
     return true;
   }

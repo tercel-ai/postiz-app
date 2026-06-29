@@ -63,6 +63,248 @@ interface AccountKwResp {
   error?: string;
 }
 
+// ─── Section ④ types ────────────────────────────────────────────────────────
+
+interface EngageCfgKeyword { id: string; keyword: string; enabled: boolean }
+interface EngageCfgChannel { id: string; platform: string; channelId: string; channelName: string; enabled: boolean }
+interface EngageCfgAccount { id: string; username: string; enabled: boolean }
+interface EngageConfig {
+  keywords: EngageCfgKeyword[];
+  monitoredChannels: EngageCfgChannel[];
+  trackedAccounts: EngageCfgAccount[];
+  entitlement?: { limits?: { scanIntervalHours?: number } };
+  scanIntervals?: { scanIntervalHours?: number };
+}
+
+interface ScanTask {
+  taskId: string;
+  platform: 'x' | 'reddit';
+  scanType: 'keyword' | 'channel' | 'tracked';
+  scanKey: string;
+  cursor: { lastSeenExternalId: string | null; lastSeenAt: string | null };
+  pacing: { maxPages: number; pageSize: number; pageDelayMs: number; pageJitterMs: number; interUnitDelayMs: number; interUnitJitterMs: number; hourlyRequestCap: number };
+  rawQuery?: string;
+}
+
+interface ScanPost {
+  platform: string; externalPostId: string; externalPostUrl: string;
+  authorUsername: string; postContent: string; postPublishedAt: string;
+  [key: string]: unknown;
+}
+interface ScanRunResult {
+  posts: ScanPost[];
+  nextCursor: { lastSeenExternalId: string | null; lastSeenAt: string | null };
+  exhausted: boolean;
+}
+
+type TaskStatus = 'idle' | 'running' | 'done' | 'ingesting' | 'ingested' | 'err';
+interface TaskState {
+  status: TaskStatus; posts: ScanPost[];
+  nextCursor: { lastSeenExternalId: string | null; lastSeenAt: string | null } | null;
+  exhausted: boolean; accepted: number | null; err: string | null;
+}
+
+const cacheKey = (t: ScanTask) => `engage_debug:${t.platform}:${t.scanType}:${t.scanKey}`;
+const loadCache = (key: string): Promise<{ taskId: string; result: ScanRunResult } | null> =>
+  new Promise((res) => chrome.storage.local.get([key], (r) => res(r[key] ?? null)));
+const saveCache = (key: string, taskId: string, result: ScanRunResult): Promise<void> =>
+  new Promise((res) => chrome.storage.local.set({ [key]: { taskId, result } }, () => res()));
+const clearCache = (key: string): Promise<void> =>
+  new Promise((res) => chrome.storage.local.remove([key], () => res()));
+
+function taskLabel(t: ScanTask) {
+  const p = t.platform === 'x' ? '𝕏' : 'Reddit';
+  const tp = t.scanType === 'keyword' ? '关键词' : t.scanType === 'channel' ? '频道' : '账号';
+  return `${p} · ${tp} · ${t.rawQuery ?? t.scanKey}`;
+}
+
+function defaultState(): TaskState {
+  return { status: 'idle', posts: [], nextCursor: null, exhausted: true, accepted: null, err: null };
+}
+
+function EngageScanPanel() {
+  const [platform, setPlatform] = React.useState<'x' | 'reddit' | 'both'>('both');
+  const [wantN, setWantN] = React.useState(3);
+  const [config, setConfig] = React.useState<EngageConfig | null>(null);
+  const [cfgBusy, setCfgBusy] = React.useState(false);
+  const [cfgErr, setCfgErr] = React.useState<string | null>(null);
+  const [tasks, setTasks] = React.useState<ScanTask[]>([]);
+  const [claimBusy, setClaimBusy] = React.useState(false);
+  const [claimErr, setClaimErr] = React.useState<string | null>(null);
+  const [states, setStates] = React.useState<Record<string, TaskState>>({});
+
+  const patch = (taskId: string, p: Partial<TaskState>) =>
+    setStates((prev) => ({ ...prev, [taskId]: { ...(prev[taskId] ?? defaultState()), ...p } }));
+
+  async function loadConfig() {
+    setCfgBusy(true); setCfgErr(null);
+    try {
+      const r = await sendMessage<{ ok: boolean; data?: EngageConfig; error?: string }>({ action: 'engage:load-config' });
+      if (!r.ok) throw new Error(r.error || 'failed');
+      setConfig(r.data ?? null);
+    } catch (e: any) { setCfgErr(String(e?.message || e)); }
+    finally { setCfgBusy(false); }
+  }
+
+  async function claimTasks() {
+    setClaimBusy(true); setClaimErr(null);
+    try {
+      const r = await sendMessage<{ ok: boolean; tasks?: ScanTask[]; error?: string }>({ action: 'engage:claim-tasks', want: wantN });
+      if (!r.ok) throw new Error(r.error || 'failed');
+      const all = r.tasks ?? [];
+      const filtered = platform === 'both' ? all : all.filter((t) => t.platform === platform);
+      const nextStates: Record<string, TaskState> = {};
+      for (const t of filtered) {
+        const cached = await loadCache(cacheKey(t));
+        nextStates[t.taskId] = cached && cached.taskId === t.taskId
+          ? { ...defaultState(), status: 'done', posts: cached.result.posts, nextCursor: cached.result.nextCursor, exhausted: cached.result.exhausted }
+          : defaultState();
+      }
+      setTasks(filtered);
+      setStates(nextStates);
+    } catch (e: any) { setClaimErr(String(e?.message || e)); }
+    finally { setClaimBusy(false); }
+  }
+
+  async function executeTask(t: ScanTask) {
+    patch(t.taskId, { status: 'running', posts: [], err: null });
+    try {
+      const r = await sendMessage<{ ok: boolean; result?: ScanRunResult; error?: string }>({ action: 'engage:execute-task', task: t });
+      if (!r.ok) throw new Error(r.error || 'failed');
+      const res = r.result!;
+      await saveCache(cacheKey(t), t.taskId, res);
+      patch(t.taskId, { status: 'done', posts: res.posts, nextCursor: res.nextCursor, exhausted: res.exhausted });
+    } catch (e: any) { patch(t.taskId, { status: 'err', err: String(e?.message || e) }); }
+  }
+
+  async function ingestTask(t: ScanTask) {
+    const st = states[t.taskId];
+    if (!st || st.status !== 'done') return;
+    patch(t.taskId, { status: 'ingesting', err: null });
+    try {
+      const r = await sendMessage<{ ok: boolean; accepted?: number; nextTasks?: ScanTask[]; error?: string }>({
+        action: 'engage:ingest-task', taskId: t.taskId,
+        posts: st.posts, nextCursor: st.nextCursor ?? undefined, exhausted: st.exhausted,
+      });
+      if (!r.ok) throw new Error(r.error || 'failed');
+      await clearCache(cacheKey(t));
+      patch(t.taskId, { status: 'ingested', accepted: r.accepted ?? 0 });
+      // Append newly-claimed tasks from the backend response (next in the loop).
+      const incoming = (r.nextTasks ?? []).filter((nt) => !tasks.some((e) => e.taskId === nt.taskId));
+      if (incoming.length) {
+        setTasks((prev) => [...prev, ...incoming]);
+        setStates((prev) => { const np = { ...prev }; for (const nt of incoming) np[nt.taskId] = defaultState(); return np; });
+      }
+    } catch (e: any) { patch(t.taskId, { status: 'err', err: String(e?.message || e) }); }
+  }
+
+  const intervalHours = config?.scanIntervals?.scanIntervalHours ?? config?.entitlement?.limits?.scanIntervalHours ?? null;
+  const visChannels = platform === 'both' ? (config?.monitoredChannels ?? []) : (config?.monitoredChannels ?? []).filter((c) => c.platform === platform);
+  const visAccounts = platform !== 'reddit' ? (config?.trackedAccounts ?? []) : [];
+
+  return (
+    <section className="xdbg-card">
+      <h2>④ Engage 扫描管理（端到端调试）</h2>
+      <p className="xdbg-hint" style={{ marginBottom: 10 }}>
+        从后端领取待扫描任务 → 执行扫描 → 结果保存本地 → 手动入库。已过 cadence 冷却的单元才会被返回，天然防重扫。
+      </p>
+
+      <div className="xdbg-controls" style={{ flexWrap: 'wrap', gap: 8 }}>
+        <span style={{ fontSize: 13, color: '#555' }}>平台：</span>
+        {(['x', 'reddit', 'both'] as const).map((p) => (
+          <button key={p} onClick={() => setPlatform(p)}
+            style={{ padding: '4px 12px', background: platform === p ? '#1d9bf0' : '#eee', color: platform === p ? '#fff' : '#333', border: 0, borderRadius: 6, cursor: 'pointer', fontSize: 13 }}>
+            {p === 'x' ? '𝕏 X' : p === 'reddit' ? 'Reddit' : '全部'}
+          </button>
+        ))}
+        <button onClick={loadConfig} disabled={cfgBusy} style={{ marginLeft: 'auto', padding: '4px 14px', fontSize: 13, cursor: 'pointer' }}>
+          {cfgBusy ? '加载中…' : '读取配置'}
+        </button>
+      </div>
+
+      {cfgErr && <div className="xdbg-err">配置错误：{cfgErr}</div>}
+      {config && (
+        <div className="eng-config-box">
+          {intervalHours != null && <div className="eng-cfg-row"><span className="eng-cfg-label">扫描间隔</span><span>{intervalHours}h</span></div>}
+          <div className="eng-cfg-row">
+            <span className="eng-cfg-label">关键词</span>
+            <span>{config.keywords.filter((k) => k.enabled).map((k) => k.keyword).join('、') || '—'}</span>
+          </div>
+          {(platform === 'x' || platform === 'both') && (
+            <div className="eng-cfg-row">
+              <span className="eng-cfg-label">追踪账号 (X)</span>
+              <span>{visAccounts.filter((a) => a.enabled).map((a) => `@${a.username}`).join('、') || '—'}</span>
+            </div>
+          )}
+          {(platform === 'reddit' || platform === 'both') && (
+            <div className="eng-cfg-row">
+              <span className="eng-cfg-label">Reddit 频道</span>
+              <span>{visChannels.filter((c) => c.enabled).map((c) => c.channelName || c.channelId).join('、') || '—'}</span>
+            </div>
+          )}
+        </div>
+      )}
+
+      <div className="xdbg-controls" style={{ marginTop: 14, gap: 8 }}>
+        <label style={{ fontSize: 13, color: '#555' }}>领取数量：</label>
+        <input type="number" value={wantN} min={1} max={5}
+          onChange={(e) => setWantN(Math.min(5, Math.max(1, Number(e.target.value))))}
+          style={{ width: 52 }} />
+        <button onClick={claimTasks} disabled={claimBusy}>
+          {claimBusy ? '领取中…' : '领取待扫描任务'}
+        </button>
+      </div>
+      {claimErr && <div className="xdbg-err">领取失败：{claimErr}</div>}
+      {tasks.length === 0 && !claimBusy && (
+        <div className="xdbg-count" style={{ marginTop: 8 }}>暂无任务（全部在 cadence 冷却期内，或尚未领取）</div>
+      )}
+
+      <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
+        {tasks.map((t) => {
+          const st = states[t.taskId] ?? defaultState();
+          return (
+            <div key={t.taskId} className="eng-task-row">
+              <div className="eng-task-label">{taskLabel(t)}</div>
+              <div className="eng-task-meta">
+                <code className="eng-task-id">{t.taskId.slice(0, 14)}…</code>
+                {t.cursor.lastSeenAt && <span style={{ marginLeft: 8, color: '#999' }}>cursor: {new Date(t.cursor.lastSeenAt).toLocaleString()}</span>}
+              </div>
+              <div className="eng-task-actions">
+                <button onClick={() => executeTask(t)}
+                  disabled={st.status === 'running' || st.status === 'ingesting' || st.status === 'ingested'}
+                  className="eng-btn-run">
+                  {st.status === 'running' ? '扫描中…' : st.status === 'done' ? '重新扫描' : '执行扫描'}
+                </button>
+                {st.status === 'done' && (
+                  <button onClick={() => ingestTask(t)} className="eng-btn-ingest">入库（{st.posts.length} 条）</button>
+                )}
+                {st.status === 'ingesting' && <button disabled className="eng-btn-ingest">入库中…</button>}
+                {st.status === 'ingested' && <span className="eng-badge-ok">✓ 已入库 · accepted: {st.accepted}</span>}
+              </div>
+              {st.err && <div className="xdbg-err" style={{ marginTop: 4 }}>{st.err}</div>}
+              {(st.status === 'done' || st.status === 'ingested') && (
+                <div className="eng-task-results">
+                  <div className="xdbg-count">共 {st.posts.length} 条 · exhausted: {String(st.exhausted)}</div>
+                  <div className="eng-post-list">
+                    {st.posts.slice(0, 8).map((p) => (
+                      <div key={p.externalPostId} className="eng-post-row">
+                        <a href={p.externalPostUrl} target="_blank" rel="noreferrer">@{p.authorUsername}</a>
+                        <span className="xdbg-date">{new Date(p.postPublishedAt).toLocaleString()}</span>
+                        <div className="eng-post-text">{p.postContent.slice(0, 120)}{p.postContent.length > 120 ? '…' : ''}</div>
+                      </div>
+                    ))}
+                    {st.posts.length > 8 && <div className="xdbg-count">…还有 {st.posts.length - 8} 条</div>}
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 export default function Options() {
   const [keyword, setKeyword] = useState('');
   const [searchBusy, setSearchBusy] = useState(false);
@@ -215,20 +457,20 @@ export default function Options() {
         <p className="xdbg-hint" style={{ marginBottom: 10 }}>
           组合查询：搜索某账号发的、包含指定关键词的推文。
           多个关键词用英文逗号分隔，例如{' '}
-          <code>apcore-cli, apcore-mcp</code>。
+          <code>xspace, xai</code>。
         </p>
         <div className="xdbg-controls" style={{ flexWrap: 'wrap', gap: 8 }}>
           <input
             value={akAccount}
             onChange={(e) => setAkAccount(e.target.value)}
-            placeholder="X 账号，例如 aiperceivable"
+            placeholder="X 账号，例如 elonmusk"
             style={{ flex: '1 1 160px', minWidth: 120 }}
             onKeyDown={(e) => e.key === 'Enter' && runAccountKw()}
           />
           <input
             value={akKeywords}
             onChange={(e) => setAkKeywords(e.target.value)}
-            placeholder="关键词（逗号分隔），例如 apcore-cli, apcore-mcp"
+            placeholder="关键词（逗号分隔），例如 xspace, xai"
             style={{ flex: '2 1 240px', minWidth: 180 }}
             onKeyDown={(e) => e.key === 'Enter' && runAccountKw()}
           />
@@ -258,6 +500,8 @@ export default function Options() {
           ))}
         </div>
       </section>
+
+      <EngageScanPanel />
     </div>
   );
 }
@@ -280,9 +524,29 @@ const XDBG_CSS = `
 .xdbg-row { border: 1px solid #eee; border-radius: 8px; padding: 10px 12px; }
 .xdbg-meta { display: flex; justify-content: space-between; font-size: 13px; }
 .xdbg-meta a { color: #1d9bf0; text-decoration: none; font-weight: 600; }
-.xdbg-date { color: #999; }
+.xdbg-date { color: #999; font-size: 12px; }
 .xdbg-text { margin: 6px 0; font-size: 14px; white-space: pre-wrap; word-break: break-word; }
 .xdbg-stats { color: #555; font-size: 12px; }
 .xdbg-query-preview { margin-top: 10px; font-size: 12px; color: #555; }
 .xdbg-query-preview code { background: #f3f4f6; padding: 2px 6px; border-radius: 4px; font-family: monospace; word-break: break-all; }
+
+/* ── Section ④ Engage Scan Panel ── */
+.eng-config-box { margin-top: 12px; background: #f8f9fa; border-radius: 8px; padding: 10px 14px; display: flex; flex-direction: column; gap: 5px; }
+.eng-cfg-row { display: flex; gap: 10px; font-size: 13px; }
+.eng-cfg-label { color: #888; min-width: 90px; flex-shrink: 0; }
+.eng-task-row { border: 1px solid #dde; border-radius: 8px; padding: 12px; display: flex; flex-direction: column; gap: 6px; }
+.eng-task-label { font-size: 14px; font-weight: 600; color: #222; }
+.eng-task-meta { font-size: 12px; color: #888; }
+.eng-task-id { font-family: monospace; font-size: 11px; background: #f3f4f6; padding: 1px 5px; border-radius: 3px; }
+.eng-task-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.eng-btn-run { padding: 5px 14px; border: 0; border-radius: 6px; background: #1d9bf0; color: #fff; font-size: 13px; cursor: pointer; }
+.eng-btn-run:disabled { background: #9bd2f5; cursor: default; }
+.eng-btn-ingest { padding: 5px 14px; border: 0; border-radius: 6px; background: #16a34a; color: #fff; font-size: 13px; cursor: pointer; }
+.eng-btn-ingest:disabled { background: #86efac; cursor: default; }
+.eng-badge-ok { font-size: 13px; color: #16a34a; font-weight: 600; }
+.eng-task-results { margin-top: 6px; border-top: 1px solid #eee; padding-top: 8px; }
+.eng-post-list { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.eng-post-row { background: #f8f9fa; border-radius: 6px; padding: 8px 10px; font-size: 13px; }
+.eng-post-row a { color: #1d9bf0; text-decoration: none; font-weight: 600; margin-right: 8px; }
+.eng-post-text { margin-top: 4px; color: #333; white-space: pre-wrap; word-break: break-word; font-size: 12px; line-height: 1.4; }
 `;

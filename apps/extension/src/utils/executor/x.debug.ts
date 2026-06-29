@@ -122,9 +122,9 @@ export async function debugSearchAccountKeywords(
     encodeURIComponent(rawQuery) +
     '&src=typed_query';
 
-  const resp = await readViaProfile(profileUrl, searchUrl, 'SearchTimeline', {
-    keepOpen: true, // leave tab open so the caller can inspect the page
-  });
+  // keepOpen defaults to false — the tab closes after a natural linger delay
+  // (1.5-3 s) so the session duration doesn't look like an instant bot hit.
+  const resp = await readViaProfile(profileUrl, searchUrl, 'SearchTimeline');
   if (resp == null) return [];
   const data = (resp as { data?: unknown }).data ?? resp;
   return parseSearchList(data);

@@ -31,11 +31,10 @@ import type { ScanResult } from '../scan/platform-scan-adapter';
 //      NOT fail the test — A/B/C still prove the integration path works.
 
 const CASES: { account: string; keywords: string[] }[] = [
-  { account: 'aipartnerup', keywords: ['apcore'] },
   { account: 'aiperceivable', keywords: ['apcore'] },
   // Multi-keyword OR: NOTE `apcore-cli` is unquoted — X may parse the hyphen as
   // the exclude operator (`apcore -cli`). This case exists to observe that live.
-  { account: 'aipartnerup', keywords: ['apcore', 'apcore-cli'] },
+  { account: 'elonmusk', keywords: ['xspace', 'xai'] },
 ];
 
 const HAS_BEARER = !!process.env.X_BEARER_TOKEN;
@@ -219,14 +218,14 @@ describe.skipIf(!CAN_AUTH)('XScanAdapter (REAL X API — from:account keyword)',
 // ─── start_time freshness window (raw search/recent) ──────────────────────────
 //
 // Demonstrates that `start_time` (oldest, inclusive) narrows the result to a
-// fresh window. We query `from:aiperceivable -is:retweet` at three windows and
+// fresh window. We query `from:elonmusk -is:retweet` at three windows and
 // expect a strict subset relation: 3h ⊆ 24h ⊆ 7d (no start_time). This is the
 // behaviour we'd wire into XScanAdapter as the freshness cap (alongside since_id).
-describe.skipIf(!CAN_AUTH)('search/recent start_time window (from:aiperceivable)', () => {
+describe.skipIf(!CAN_AUTH)('search/recent start_time window (from:elonmusk)', () => {
   it(
     '3h ⊆ 24h ⊆ 7d (no start_time), all HTTP 200',
     async () => {
-      const query = 'from:aiperceivable -is:retweet';
+      const query = 'from:elonmusk -is:retweet';
       const now = Date.now();
       const start3h = isoSeconds(now - 3 * 3_600_000);
       const start24h = isoSeconds(now - 24 * 3_600_000);
