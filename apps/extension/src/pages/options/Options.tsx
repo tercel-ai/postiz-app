@@ -57,6 +57,12 @@ function TweetRow({ t }: { t: Tweet }) {
   );
 }
 
+interface AccountKwResp {
+  ok: boolean;
+  tweets?: Tweet[];
+  error?: string;
+}
+
 export default function Options() {
   const [keyword, setKeyword] = useState('');
   const [searchBusy, setSearchBusy] = useState(false);
@@ -69,6 +75,15 @@ export default function Options() {
   const [tweetErr, setTweetErr] = useState<string | null>(null);
   const [tweet, setTweet] = useState<Tweet | null>(null);
   const [fetched, setFetched] = useState(false);
+
+  // ③ account + keywords combined search
+  const [akAccount, setAkAccount] = useState('');
+  const [akKeywords, setAkKeywords] = useState('');
+  const [akBusy, setAkBusy] = useState(false);
+  const [akErr, setAkErr] = useState<string | null>(null);
+  const [akResults, setAkResults] = useState<Tweet[]>([]);
+  const [akSearched, setAkSearched] = useState(false);
+  const [akQuery, setAkQuery] = useState('');
 
   const runSearch = async () => {
     if (!keyword.trim()) return;
@@ -109,6 +124,36 @@ export default function Options() {
       setTweetErr(String(e?.message || e));
     } finally {
       setTweetBusy(false);
+    }
+  };
+
+  const runAccountKw = async () => {
+    const handle = akAccount.replace(/^@/, '').trim();
+    const kws = akKeywords
+      .split(',')
+      .map((k) => k.trim())
+      .filter(Boolean);
+    if (!handle || !kws.length) return;
+    setAkBusy(true);
+    setAkErr(null);
+    setAkResults([]);
+    setAkSearched(false);
+    // Preview the effective query
+    const kwClause = kws.map((k) => (k.includes(' ') ? `"${k}"` : k)).join(' OR ');
+    setAkQuery(`from:${handle} (${kwClause})`);
+    try {
+      const resp = await sendMessage<AccountKwResp>({
+        action: 'xdebug:search-account-kw',
+        account: handle,
+        keywords: kws,
+      });
+      if (!resp.ok) throw new Error(resp.error || 'failed');
+      setAkResults(resp.tweets ?? []);
+      setAkSearched(true);
+    } catch (e: any) {
+      setAkErr(String(e?.message || e));
+    } finally {
+      setAkBusy(false);
     }
   };
 
@@ -164,6 +209,55 @@ export default function Options() {
         )}
         <div className="xdbg-list">{tweet && <TweetRow t={tweet} />}</div>
       </section>
+
+      <section className="xdbg-card">
+        <h2>③ 账号 + 关键词搜索（from:account keywords）</h2>
+        <p className="xdbg-hint" style={{ marginBottom: 10 }}>
+          组合查询：搜索某账号发的、包含指定关键词的推文。
+          多个关键词用英文逗号分隔，例如{' '}
+          <code>apcore-cli, apcore-mcp</code>。
+        </p>
+        <div className="xdbg-controls" style={{ flexWrap: 'wrap', gap: 8 }}>
+          <input
+            value={akAccount}
+            onChange={(e) => setAkAccount(e.target.value)}
+            placeholder="X 账号，例如 aiperceivable"
+            style={{ flex: '1 1 160px', minWidth: 120 }}
+            onKeyDown={(e) => e.key === 'Enter' && runAccountKw()}
+          />
+          <input
+            value={akKeywords}
+            onChange={(e) => setAkKeywords(e.target.value)}
+            placeholder="关键词（逗号分隔），例如 apcore-cli, apcore-mcp"
+            style={{ flex: '2 1 240px', minWidth: 180 }}
+            onKeyDown={(e) => e.key === 'Enter' && runAccountKw()}
+          />
+          <button
+            onClick={runAccountKw}
+            disabled={
+              akBusy ||
+              !akAccount.replace(/^@/, '').trim() ||
+              !akKeywords.trim()
+            }
+          >
+            {akBusy ? '搜索中…' : '搜索'}
+          </button>
+        </div>
+        {akQuery && (
+          <div className="xdbg-query-preview">
+            查询（Top）：<code>{akQuery}</code>
+          </div>
+        )}
+        {akErr && <div className="xdbg-err">错误：{akErr}</div>}
+        {akSearched && !akErr && (
+          <div className="xdbg-count">共 {akResults.length} 条</div>
+        )}
+        <div className="xdbg-list">
+          {akResults.map((t) => (
+            <TweetRow key={t.id} t={t} />
+          ))}
+        </div>
+      </section>
     </div>
   );
 }
@@ -189,4 +283,6 @@ const XDBG_CSS = `
 .xdbg-date { color: #999; }
 .xdbg-text { margin: 6px 0; font-size: 14px; white-space: pre-wrap; word-break: break-word; }
 .xdbg-stats { color: #555; font-size: 12px; }
+.xdbg-query-preview { margin-top: 10px; font-size: 12px; color: #555; }
+.xdbg-query-preview code { background: #f3f4f6; padding: 2px 6px; border-radius: 4px; font-family: monospace; word-break: break-all; }
 `;

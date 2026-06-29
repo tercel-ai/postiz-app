@@ -109,6 +109,12 @@ async function navigateAndCapture(
 export interface XReadTab {
   /** Navigate to `url` and return X's own captured response for `op` (or null). */
   navigateAndCapture(url: string, op: string): Promise<unknown | null>;
+  /**
+   * Navigate to `url` and wait for the tab to finish loading, WITHOUT polling
+   * for a capture. Use this for "warm-up" hops (e.g. visiting a profile page
+   * to seed the tab's navigation history before a real capture step).
+   */
+  navigate(url: string): Promise<void>;
   /** Close the underlying background tab. */
   close(): Promise<void>;
 }
@@ -128,11 +134,119 @@ export async function openXReadTab(): Promise<XReadTab | null> {
   }
   if (tabId == null) return null;
   const id = tabId;
+
+  async function navigateOnly(url: string): Promise<void> {
+    try {
+      await chrome.tabs.update(id, { url });
+    } catch (e) {
+      console.warn('[aisee][x-read] navigate failed', e);
+      return;
+    }
+    await waitForTabComplete(id, TAB_LOAD_TIMEOUT_MS);
+  }
+
   return {
     navigateAndCapture: (url: string, op: string) =>
       navigateAndCapture(id, url, op),
+    navigate: navigateOnly,
     close: () => closeTab(id),
   };
+}
+
+/**
+ * Two-step read that mimics organic browsing:
+ *   1. Navigate to `profileUrl` (full page load) — seeds the tab's history
+ *      and HTTP Referer for the subsequent search request.
+ *   2. Navigate to `searchUrl` via chrome.tabs.update (NOT executeScript).
+ *      Using chrome.tabs.update ensures the tab is in 'loading' state when
+ *      the promise resolves, so waitForTabComplete never misses the 'complete'
+ *      event (race-free). Chrome sets Referer = profileUrl automatically for
+ *      same-origin navigations triggered this way.
+ *   3. After the search page loads, override document.visibilityState before
+ *      dispatching visibility events — X reads the property via its getter,
+ *      not just listens to the event, so patching the getter is required to
+ *      unblock deferred SearchTimeline requests in background tabs.
+ */
+export async function readViaProfile(
+  profileUrl: string,
+  searchUrl: string,
+  op: string,
+  opts: { keepOpen?: boolean } = {}
+): Promise<unknown | null> {
+  let tabId: number | undefined;
+  try {
+    const tab = await chrome.tabs.create({ url: 'about:blank', active: false });
+    tabId = tab.id ?? undefined;
+  } catch (e) {
+    console.warn('[aisee][x-read] readViaProfile: tabs.create failed', e);
+    return null;
+  }
+  if (tabId == null) return null;
+  const id = tabId;
+
+  try {
+    // ── Step 1: visit the account's profile page ─────────────────────────
+    try {
+      await chrome.tabs.update(id, { url: profileUrl });
+    } catch (e) {
+      console.warn('[aisee][x-read] profile nav failed', e);
+      return null;
+    }
+    await waitForTabComplete(id, TAB_LOAD_TIMEOUT_MS);
+
+    // ── Step 2: navigate to search URL ───────────────────────────────────
+    // chrome.tabs.update guarantees the tab enters 'loading' before the
+    // promise resolves → waitForTabComplete attaches its listener before the
+    // tab reaches 'complete', avoiding the race where a fast-loading cached
+    // page fires 'complete' before the listener is registered.
+    const since = Date.now();
+    try {
+      await chrome.tabs.update(id, { url: searchUrl });
+    } catch (e) {
+      console.warn('[aisee][x-read] search nav failed', e);
+      return null;
+    }
+    await waitForTabComplete(id, TAB_LOAD_TIMEOUT_MS);
+
+    // ── Step 3: override visibility + nudge deferred requests ────────────
+    // X reads document.visibilityState via its getter (not just via events),
+    // so redefining the getter to always return 'visible' is required before
+    // dispatching visibilitychange — otherwise the dispatch is a no-op.
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId: id },
+        world: 'MAIN',
+        func: () => {
+          try {
+            Object.defineProperty(document, 'visibilityState', {
+              get: () => 'visible',
+              configurable: true,
+            });
+            Object.defineProperty(document, 'hidden', {
+              get: () => false,
+              configurable: true,
+            });
+          } catch (_) {}
+          document.dispatchEvent(new Event('visibilitychange'));
+          window.dispatchEvent(new Event('focus'));
+        },
+      });
+    } catch (_) {
+      // Non-fatal; poll still runs.
+    }
+
+    // ── Step 4: poll for the captured GraphQL response ────────────────────
+    const deadline = Date.now() + CAPTURE_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      const data = await readCaptured(id, op, since);
+      if (data != null) return data;
+      await sleep(CAPTURE_POLL_MS);
+    }
+    console.warn('[aisee][x-read] readViaProfile: capture timed out for', op);
+    return null;
+  } finally {
+    if (!opts.keepOpen) await closeTab(id);
+  }
 }
 
 /**

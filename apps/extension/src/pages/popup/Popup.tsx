@@ -107,7 +107,7 @@ export default function Popup() {
                 whiteSpace: 'nowrap',
               }}
             >
-              {user.username || user.email}
+              {user.email}
             </span>
             <button className="pz-clear-btn" onClick={handleLogout}>
               Log out

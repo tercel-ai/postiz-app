@@ -56,6 +56,14 @@ export interface EngageScanTask {
   scanKey: string;
   cursor: ScanTaskCursor;
   pacing: ScanTaskPacing;
+  /**
+   * Optional pre-built platform search query. When present the extension uses
+   * it verbatim instead of deriving the query from (scanType, scanKey). The
+   * backend sets this for combined queries, e.g. `from:account (kw1 OR kw2)
+   * -filter:retweets` for a tracked account narrowed to the org's keywords.
+   * The cursor key is unchanged — rawQuery is ephemeral, built at claim time.
+   */
+  rawQuery?: string;
 }
 
 export interface EngageScanTasksResponse {

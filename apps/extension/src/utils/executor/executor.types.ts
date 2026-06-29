@@ -36,6 +36,13 @@ export interface EngageScanTask {
   scanKey: string; // normalised keyword | subreddit | username
   cursor: ScanTaskCursor;
   pacing: ScanTaskPacing;
+  /**
+   * Optional pre-built search query. When present the extension uses it
+   * verbatim instead of deriving the query from (scanType, scanKey). Set by
+   * the backend for combined queries, e.g. `from:account (kw1 OR kw2)
+   * -filter:retweets` for a tracked X account narrowed to org keywords.
+   */
+  rawQuery?: string;
 }
 
 /** One normalised post the extension fetched — mirrors ScanIngestPostDto. */

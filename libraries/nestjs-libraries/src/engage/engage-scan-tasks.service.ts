@@ -20,6 +20,39 @@ import {
   ScanTaskType,
 } from '@gitroom/nestjs-libraries/engage/scan/scan-task.types';
 
+// X SearchTimeline query budget. Keep under 512 (X hard cap); leave headroom
+// for the `from:username ` prefix (~20 chars) and ` -filter:retweets` suffix.
+const X_TRACKED_KW_QUERY_MAX = 460;
+
+/**
+ * Build `from:username (kw1 OR kw2 ...) -filter:retweets` for a tracked X
+ * account combined with org keywords. Keywords are included in order until the
+ * combined query would exceed X_TRACKED_KW_QUERY_MAX characters. Returns
+ * undefined when the keyword list is empty or nothing fits in the budget.
+ */
+export function buildTrackedKeywordQuery(
+  username: string,
+  keywords: string[]
+): string | undefined {
+  if (!keywords.length) return undefined;
+  const prefix = `from:${username} `;
+  const kwBudget = X_TRACKED_KW_QUERY_MAX - prefix.length - 2; // 2 for '(' ')'
+  if (kwBudget <= 0) return undefined;
+
+  const parts: string[] = [];
+  let usedLen = 0;
+  for (const kw of keywords) {
+    // Quote multi-word keywords; single tokens stay bare.
+    const token = kw.includes(' ') ? `"${kw}"` : kw;
+    const add = parts.length === 0 ? token : ` OR ${token}`;
+    if (usedLen + add.length > kwBudget) break;
+    parts.push(token);
+    usedLen += add.length;
+  }
+  if (!parts.length) return undefined;
+  return `${prefix}(${parts.join(' OR ')})`;
+}
+
 // Platforms the extension can scan. Keyword units fan out to each (a keyword has
 // no platform of its own); channel/tracked carry their own platform.
 const SCAN_PLATFORMS: ScanTaskPlatform[] = (
@@ -166,6 +199,12 @@ export class EngageScanTasksService {
     const pacing = await this._config.getPacing();
     const units = this._enumerateUnits(ctx);
 
+    // Active normalised keywords for building combined tracked+keyword queries.
+    const activeKeywords = ctx.keywords
+      .filter((k) => k.enabled)
+      .map((k) => normalizeKeyword(k.keyword))
+      .filter(Boolean);
+
     const tasks: EngageScanTask[] = [];
     for (const u of units) {
       if (tasks.length >= want) break;
@@ -175,7 +214,7 @@ export class EngageScanTasksService {
         scanKey: u.scanKey,
         cadenceMs,
       });
-      if (snap) tasks.push(this._buildTask(snap, pacing));
+      if (snap) tasks.push(this._buildTask(snap, pacing, activeKeywords));
     }
     return tasks;
   }
@@ -239,13 +278,30 @@ export class EngageScanTasksService {
   /** Build the client instruction from a claimed snapshot + pacing config. */
   private _buildTask(
     snap: ScanCursorSnapshot,
-    pacing: EngageScanPacing
+    pacing: EngageScanPacing,
+    orgKeywords: string[] = []
   ): EngageScanTask {
     const platform = snap.platform as ScanPlatform;
     // First scan of a unit (no cursor yet) does the deeper "initial" lookback.
     const phase =
       snap.lastSeenExternalId || snap.lastSeenAt ? 'incremental' : 'initial';
     const page = pacing.extension[platform][phase];
+
+    // For X tracked units: narrow the query to org keywords so the extension
+    // does `from:account (kw1 OR kw2) -filter:retweets` rather than fetching
+    // all of the account's posts and relying on server-side keyword matching.
+    // This cuts irrelevant data and reduces request volume (account safety).
+    // The combined rawQuery is ephemeral — built at claim time from current
+    // keywords. The cursor key (x/tracked/username) is unchanged.
+    let rawQuery: string | undefined;
+    if (
+      snap.scanType === 'tracked' &&
+      snap.platform === 'x' &&
+      orgKeywords.length
+    ) {
+      rawQuery = buildTrackedKeywordQuery(snap.scanKey, orgKeywords);
+    }
+
     return {
       taskId: snap.leaseToken, // the client only ever sees the rotating token
       platform: snap.platform as ScanTaskPlatform,
@@ -264,6 +320,7 @@ export class EngageScanTasksService {
         interUnitJitterMs: pacing.extension.interUnit.jitterMs,
         hourlyRequestCap: pacing.extension.session.hourlyRequestCap,
       },
+      rawQuery,
     };
   }
 

@@ -29,6 +29,9 @@ const X_COUNT_FALLBACK = 20;
 // serializer in x.graphql (serializeXRequest) and the runner's `scanInFlight`
 // guard + `want:1` leasing, this guarantees one keyword is searched at a time.
 export function buildRawQuery(task: EngageScanTask): string {
+  // Backend may pre-build a combined query (e.g. `from:account (kw1 OR kw2)
+  // -filter:retweets`) and send it as rawQuery. Use it verbatim when present.
+  if (task.rawQuery) return task.rawQuery;
   if (task.scanType === 'tracked') {
     // The account's own posts (original/quote/reply), not what it retweeted.
     return `from:${task.scanKey} -filter:retweets`;
