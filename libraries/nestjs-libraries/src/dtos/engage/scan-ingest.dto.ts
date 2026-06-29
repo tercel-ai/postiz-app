@@ -91,6 +91,9 @@ export class EngageScanSyncDto {
   completed?: EngageScanIngestDto;
 
   @IsOptional() @IsInt() @Min(1) @Max(5) want?: number;
+
+  /** Debug/admin: bypass the cadence gate and claim units that are still in cooldown. */
+  @IsOptional() @IsBoolean() force?: boolean;
 }
 
 /** Map one normalised ingest post to the scorer's RawPost (metrics default 0). */

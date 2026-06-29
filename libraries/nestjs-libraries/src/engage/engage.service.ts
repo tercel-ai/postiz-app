@@ -55,6 +55,7 @@ import {
   dispatchReplyMetricsSync,
   type MetricsSyncDeps,
 } from '@gitroom/nestjs-libraries/engage/engage-metrics-sync';
+import { normalizeKeyword } from '@gitroom/nestjs-libraries/engage/engage-scan-lease.service';
 import {
   BIZ_USAGE,
   runWithBizUsage,
@@ -118,10 +119,32 @@ export class EngageService implements OnApplicationBootstrap {
   async getConfig(org: Organization) {
     const entitlement = await this._entitlementService.getEntitlementSummary(org.id);
     const scanIntervalHours = entitlement.limits.scanIntervalHours;
+    const cadenceMs = scanIntervalHours * 3_600_000;
     const [config, scanStatus] = await Promise.all([
       this._engageRepository.getOrCreateConfig(org.id),
       this._engageRepository.getOrgScanStatus(org.id, scanIntervalHours),
     ]);
+
+    // Per-keyword per-platform scan times (from EngageScanCursor). Queried after
+    // config so we know the keyword list; empty map when no keywords configured.
+    const keywordKeys = Array.from(
+      new Set(
+        config.keywords
+          .filter((k) => k.enabled)
+          .map((k) => normalizeKeyword(k.keyword))
+          .filter(Boolean)
+      )
+    );
+    const kwCursors = await this._engageRepository.getKeywordCursors(
+      keywordKeys,
+      cadenceMs
+    );
+    // Decorate each keyword with its per-platform scan cursor times.
+    const keywords = config.keywords.map((kw) => {
+      const key = normalizeKeyword(kw.keyword);
+      return { ...kw, scanCursors: kwCursors[key] ?? [] };
+    });
+
     // Per-type added/active/max so the frontend renders "active / added / cap"
     // without re-deriving it. `added` = total rows (incl. disabled), straight off
     // the already-loaded config lists (no extra query); `active` reuses the
@@ -147,6 +170,7 @@ export class EngageService implements OnApplicationBootstrap {
     };
     return {
       ...config,
+      keywords,
       // Plan limits + current usage + reply pricing, so the frontend can disable
       // entrypoints and show usage. Backend asserts remain the source of truth.
       // `entitlement.counts` adds per-type added/active/max for the UI.

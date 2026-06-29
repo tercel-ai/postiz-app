@@ -65,16 +65,48 @@ interface AccountKwResp {
 
 // ─── Section ④ types ────────────────────────────────────────────────────────
 
-interface EngageCfgKeyword { id: string; keyword: string; enabled: boolean }
-interface EngageCfgChannel { id: string; platform: string; channelId: string; channelName: string; enabled: boolean }
-interface EngageCfgAccount { id: string; username: string; enabled: boolean }
+interface InitialScan { platform: string; status: string; completedAt: string | null; error?: string | null }
+interface KeywordScanCursor { platform: string; lastScannedAt: string | null; nextScanAt: string | null }
+interface EngageCfgKeyword {
+  id: string; keyword: string; enabled: boolean;
+  weeklyHitCount?: number; totalHitCount?: number;
+  lastCountedAt?: string | null;
+  initialScans?: InitialScan[];
+  /** Per-platform incremental scan cursor times (from EngageScanCursor). Added by backend in getConfig. */
+  scanCursors?: KeywordScanCursor[];
+}
+interface EngageCfgChannel {
+  id: string; platform: string; channelId: string; channelName: string; enabled: boolean;
+  lastScannedAt?: string | null;
+  audienceSize?: number;
+}
+interface EngageCfgAccount {
+  id: string; username: string; enabled: boolean;
+  platform?: string;
+  lastCheckedAt?: string | null;
+  displayName?: string;
+}
 interface EngageConfig {
   keywords: EngageCfgKeyword[];
   monitoredChannels: EngageCfgChannel[];
   trackedAccounts: EngageCfgAccount[];
-  entitlement?: { limits?: { scanIntervalHours?: number } };
-  scanIntervals?: { scanIntervalHours?: number };
+  entitlement?: { limits?: { scanIntervalHours?: number }; plan?: string };
+  scanIntervals?: { scanIntervalHours?: number; keywordHours?: number; channelHours?: number; trackedHours?: number };
+  scanStatus?: {
+    lastScanAt: string | null; nextScanAt: string | null;
+    keyword?: { lastScanAt: string | null; nextScanAt: string | null };
+    channel?:  { lastScanAt: string | null; nextScanAt: string | null };
+    tracked?:  { lastScanAt: string | null; nextScanAt: string | null };
+  };
 }
+
+// Local-cache for config (server → local, survives Options page reload)
+const CONFIG_CACHE_KEY = 'engage_debug_config_cache';
+interface ConfigCache { data: EngageConfig; syncedAt: number }
+const loadConfigCache = (): Promise<ConfigCache | null> =>
+  new Promise((res) => chrome.storage.local.get([CONFIG_CACHE_KEY], (r) => res(r[CONFIG_CACHE_KEY] ?? null)));
+const saveConfigCache = (data: EngageConfig): Promise<void> =>
+  new Promise((res) => chrome.storage.local.set({ [CONFIG_CACHE_KEY]: { data, syncedAt: Date.now() } }, () => res()));
 
 interface ScanTask {
   taskId: string;
@@ -112,6 +144,29 @@ const saveCache = (key: string, taskId: string, result: ScanRunResult): Promise<
 const clearCache = (key: string): Promise<void> =>
   new Promise((res) => chrome.storage.local.remove([key], () => res()));
 
+// Helpers
+function fmtTime(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  const now = Date.now();
+  const diffMs = d.getTime() - now;
+  const absSec = Math.abs(diffMs / 1000);
+  if (absSec < 60) return diffMs < 0 ? '刚刚' : '即刻';
+  const absMins = Math.floor(absSec / 60);
+  if (absMins < 60) return (diffMs < 0 ? '-' : '+') + absMins + 'm';
+  const absHrs = Math.floor(absMins / 60);
+  if (absHrs < 48) return (diffMs < 0 ? '-' : '+') + absHrs + 'h';
+  return d.toLocaleDateString();
+}
+function fmtAbs(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  return new Date(iso).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+}
+function nextDue(lastAt: string | null | undefined, intervalHours: number): string | null {
+  if (!lastAt) return null;
+  return new Date(new Date(lastAt).getTime() + intervalHours * 3_600_000).toISOString();
+}
+
 function taskLabel(t: ScanTask) {
   const p = t.platform === 'x' ? '𝕏' : 'Reddit';
   const tp = t.scanType === 'keyword' ? '关键词' : t.scanType === 'channel' ? '频道' : '账号';
@@ -125,13 +180,22 @@ function defaultState(): TaskState {
 function EngageScanPanel() {
   const [platform, setPlatform] = React.useState<'x' | 'reddit' | 'both'>('both');
   const [wantN, setWantN] = React.useState(3);
+  const [force, setForce] = React.useState(false);
   const [config, setConfig] = React.useState<EngageConfig | null>(null);
+  const [syncedAt, setSyncedAt] = React.useState<number | null>(null);
   const [cfgBusy, setCfgBusy] = React.useState(false);
   const [cfgErr, setCfgErr] = React.useState<string | null>(null);
   const [tasks, setTasks] = React.useState<ScanTask[]>([]);
   const [claimBusy, setClaimBusy] = React.useState(false);
   const [claimErr, setClaimErr] = React.useState<string | null>(null);
   const [states, setStates] = React.useState<Record<string, TaskState>>({});
+
+  // On mount: load config from local cache (server sync on user request)
+  React.useEffect(() => {
+    loadConfigCache().then((cached) => {
+      if (cached) { setConfig(cached.data); setSyncedAt(cached.syncedAt); }
+    });
+  }, []);
 
   const patch = (taskId: string, p: Partial<TaskState>) =>
     setStates((prev) => ({ ...prev, [taskId]: { ...(prev[taskId] ?? defaultState()), ...p } }));
@@ -141,7 +205,11 @@ function EngageScanPanel() {
     try {
       const r = await sendMessage<{ ok: boolean; data?: EngageConfig; error?: string }>({ action: 'engage:load-config' });
       if (!r.ok) throw new Error(r.error || 'failed');
-      setConfig(r.data ?? null);
+      const data = r.data!;
+      setConfig(data);
+      // Persist to local cache so future opens don't need a server round-trip
+      await saveConfigCache(data);
+      setSyncedAt(Date.now());
     } catch (e: any) { setCfgErr(String(e?.message || e)); }
     finally { setCfgBusy(false); }
   }
@@ -149,7 +217,7 @@ function EngageScanPanel() {
   async function claimTasks() {
     setClaimBusy(true); setClaimErr(null);
     try {
-      const r = await sendMessage<{ ok: boolean; tasks?: ScanTask[]; error?: string }>({ action: 'engage:claim-tasks', want: wantN });
+      const r = await sendMessage<{ ok: boolean; tasks?: ScanTask[]; error?: string }>({ action: 'engage:claim-tasks', want: wantN, force });
       if (!r.ok) throw new Error(r.error || 'failed');
       const all = r.tasks ?? [];
       const filtered = platform === 'both' ? all : all.filter((t) => t.platform === platform);
@@ -198,18 +266,27 @@ function EngageScanPanel() {
     } catch (e: any) { patch(t.taskId, { status: 'err', err: String(e?.message || e) }); }
   }
 
-  const intervalHours = config?.scanIntervals?.scanIntervalHours ?? config?.entitlement?.limits?.scanIntervalHours ?? null;
-  const visChannels = platform === 'both' ? (config?.monitoredChannels ?? []) : (config?.monitoredChannels ?? []).filter((c) => c.platform === platform);
-  const visAccounts = platform !== 'reddit' ? (config?.trackedAccounts ?? []) : [];
+  const intervalHours = config?.scanIntervals?.scanIntervalHours ?? config?.entitlement?.limits?.scanIntervalHours ?? 24;
+  const chHours    = config?.scanIntervals?.channelHours   ?? intervalHours;
+  const trHours    = config?.scanIntervals?.trackedHours   ?? intervalHours;
+
+  const allChannels  = (config?.monitoredChannels ?? []).filter((c) => c.enabled);
+  const visChannels  = platform === 'both' ? allChannels : allChannels.filter((c) => c.platform === platform);
+  const visAccounts  = platform !== 'reddit'
+    ? (config?.trackedAccounts ?? []).filter((a) => a.enabled)
+    : [];
+  const activeKws    = (config?.keywords ?? []).filter((k) => k.enabled);
+
+  const syncAgo = syncedAt
+    ? Math.round((Date.now() - syncedAt) / 60000) + ' 分钟前'
+    : null;
 
   return (
     <section className="xdbg-card">
       <h2>④ Engage 扫描管理（端到端调试）</h2>
-      <p className="xdbg-hint" style={{ marginBottom: 10 }}>
-        从后端领取待扫描任务 → 执行扫描 → 结果保存本地 → 手动入库。已过 cadence 冷却的单元才会被返回，天然防重扫。
-      </p>
 
-      <div className="xdbg-controls" style={{ flexWrap: 'wrap', gap: 8 }}>
+      {/* ── 顶栏：平台过滤 + 同步按钮 ── */}
+      <div className="xdbg-controls" style={{ flexWrap: 'wrap', gap: 8, marginBottom: 10 }}>
         <span style={{ fontSize: 13, color: '#555' }}>平台：</span>
         {(['x', 'reddit', 'both'] as const).map((p) => (
           <button key={p} onClick={() => setPlatform(p)}
@@ -217,46 +294,116 @@ function EngageScanPanel() {
             {p === 'x' ? '𝕏 X' : p === 'reddit' ? 'Reddit' : '全部'}
           </button>
         ))}
-        <button onClick={loadConfig} disabled={cfgBusy} style={{ marginLeft: 'auto', padding: '4px 14px', fontSize: 13, cursor: 'pointer' }}>
-          {cfgBusy ? '加载中…' : '读取配置'}
-        </button>
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
+          {syncAgo && <span style={{ fontSize: 12, color: '#999' }}>上次同步：{syncAgo}</span>}
+          <button onClick={loadConfig} disabled={cfgBusy}
+            style={{ padding: '4px 14px', fontSize: 13, cursor: 'pointer', border: 0, borderRadius: 6, background: '#f3f4f6', color: '#333' }}>
+            {cfgBusy ? '同步中…' : config ? '重新同步' : '从服务器同步配置'}
+          </button>
+        </div>
       </div>
 
-      {cfgErr && <div className="xdbg-err">配置错误：{cfgErr}</div>}
+      {cfgErr && <div className="xdbg-err">同步失败：{cfgErr}</div>}
+      {!config && !cfgBusy && (
+        <div className="xdbg-count">尚无本地缓存 — 点击"从服务器同步配置"加载。</div>
+      )}
+
+      {/* ── 扫描状态表 ── */}
       {config && (
-        <div className="eng-config-box">
-          {intervalHours != null && <div className="eng-cfg-row"><span className="eng-cfg-label">扫描间隔</span><span>{intervalHours}h</span></div>}
-          <div className="eng-cfg-row">
-            <span className="eng-cfg-label">关键词</span>
-            <span>{config.keywords.filter((k) => k.enabled).map((k) => k.keyword).join('、') || '—'}</span>
+        <div className="eng-status-table">
+          <div className="eng-status-hdr">
+            <span>扫描单元</span><span>上次扫描</span><span>下次到期</span><span>状态</span>
           </div>
-          {(platform === 'x' || platform === 'both') && (
-            <div className="eng-cfg-row">
-              <span className="eng-cfg-label">追踪账号 (X)</span>
-              <span>{visAccounts.filter((a) => a.enabled).map((a) => `@${a.username}`).join('、') || '—'}</span>
-            </div>
-          )}
-          {(platform === 'reddit' || platform === 'both') && (
-            <div className="eng-cfg-row">
-              <span className="eng-cfg-label">Reddit 频道</span>
-              <span>{visChannels.filter((c) => c.enabled).map((c) => c.channelName || c.channelId).join('、') || '—'}</span>
-            </div>
-          )}
+
+          {/* Keywords — one row per keyword × platform */}
+          {activeKws.flatMap((kw) => {
+            const cursors = kw.scanCursors ?? [];
+            if (!cursors.length) {
+              // No cursor yet (never scanned) — show one placeholder row
+              return [(
+                <div key={kw.id + ':unseen'} className="eng-status-row">
+                  <span className="eng-unit-name">
+                    <span className="eng-badge-platform">KW</span> {kw.keyword}
+                    {kw.weeklyHitCount != null && <span style={{ color: '#999', marginLeft: 6, fontSize: 11 }}>周 {kw.weeklyHitCount} 次</span>}
+                  </span>
+                  <span className="eng-time-cell">—</span>
+                  <span className="eng-time-cell">—</span>
+                  <span className="eng-badge-due">待扫</span>
+                </div>
+              )];
+            }
+            return cursors.map((cur) => {
+              const due = cur.nextScanAt ? new Date(cur.nextScanAt).getTime() <= Date.now() : true;
+              const platLabel = cur.platform === 'x' ? '𝕏' : cur.platform === 'reddit' ? 'r/' : cur.platform;
+              return (
+                <div key={kw.id + ':' + cur.platform} className="eng-status-row">
+                  <span className="eng-unit-name">
+                    <span className="eng-badge-platform">{platLabel}</span> {kw.keyword}
+                    {kw.weeklyHitCount != null && <span style={{ color: '#999', marginLeft: 6, fontSize: 11 }}>周 {kw.weeklyHitCount} 次</span>}
+                  </span>
+                  <span className="eng-time-cell">{fmtAbs(cur.lastScannedAt)}</span>
+                  <span className="eng-time-cell">{fmtAbs(cur.nextScanAt)}</span>
+                  <span className={due ? 'eng-badge-due' : 'eng-badge-cool'}>{due ? '待扫' : fmtTime(cur.nextScanAt)}</span>
+                </div>
+              );
+            });
+          })}
+
+          {/* Tracked accounts */}
+          {visAccounts.map((a) => {
+            const last = a.lastCheckedAt ?? null;
+            const nd   = nextDue(last, trHours);
+            const due  = nd ? new Date(nd).getTime() <= Date.now() : true;
+            return (
+              <div key={a.id} className="eng-status-row">
+                <span className="eng-unit-name">
+                  <span className="eng-badge-platform">𝕏</span> @{a.username}
+                </span>
+                <span className="eng-time-cell">{fmtAbs(last)}</span>
+                <span className="eng-time-cell">{nd ? fmtAbs(nd) : '—'}</span>
+                <span className={due ? 'eng-badge-due' : 'eng-badge-cool'}>{due ? '待扫' : fmtTime(nd)}</span>
+              </div>
+            );
+          })}
+
+          {/* Monitored channels */}
+          {visChannels.map((c) => {
+            const last = c.lastScannedAt ?? null;
+            const nd   = nextDue(last, chHours);
+            const due  = nd ? new Date(nd).getTime() <= Date.now() : true;
+            return (
+              <div key={c.id} className="eng-status-row">
+                <span className="eng-unit-name">
+                  <span className="eng-badge-platform">r/</span> {c.channelName || c.channelId}
+                  {c.audienceSize != null && <span style={{ color: '#999', marginLeft: 6, fontSize: 11 }}>{(c.audienceSize / 1000).toFixed(0)}k</span>}
+                </span>
+                <span className="eng-time-cell">{fmtAbs(last)}</span>
+                <span className="eng-time-cell">{nd ? fmtAbs(nd) : '—'}</span>
+                <span className={due ? 'eng-badge-due' : 'eng-badge-cool'}>{due ? '待扫' : fmtTime(nd)}</span>
+              </div>
+            );
+          })}
         </div>
       )}
 
-      <div className="xdbg-controls" style={{ marginTop: 14, gap: 8 }}>
+      <div className="xdbg-controls" style={{ marginTop: 14, gap: 8, flexWrap: 'wrap' }}>
         <label style={{ fontSize: 13, color: '#555' }}>领取数量：</label>
         <input type="number" value={wantN} min={1} max={5}
           onChange={(e) => setWantN(Math.min(5, Math.max(1, Number(e.target.value))))}
           style={{ width: 52 }} />
+        <label style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 13, color: force ? '#c00' : '#555', cursor: 'pointer' }}>
+          <input type="checkbox" checked={force} onChange={(e) => setForce(e.target.checked)} />
+          强制领取（忽略 cadence 冷却）
+        </label>
         <button onClick={claimTasks} disabled={claimBusy}>
           {claimBusy ? '领取中…' : '领取待扫描任务'}
         </button>
       </div>
       {claimErr && <div className="xdbg-err">领取失败：{claimErr}</div>}
       {tasks.length === 0 && !claimBusy && (
-        <div className="xdbg-count" style={{ marginTop: 8 }}>暂无任务（全部在 cadence 冷却期内，或尚未领取）</div>
+        <div className="xdbg-count" style={{ marginTop: 8 }}>
+          暂无任务。{force ? '已启用强制模式，仍无任务说明配置为空。' : '可能全部在 cadence 冷却期内 — 勾选"强制领取"后重试。'}
+        </div>
       )}
 
       <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -531,9 +678,18 @@ const XDBG_CSS = `
 .xdbg-query-preview code { background: #f3f4f6; padding: 2px 6px; border-radius: 4px; font-family: monospace; word-break: break-all; }
 
 /* ── Section ④ Engage Scan Panel ── */
-.eng-config-box { margin-top: 12px; background: #f8f9fa; border-radius: 8px; padding: 10px 14px; display: flex; flex-direction: column; gap: 5px; }
-.eng-cfg-row { display: flex; gap: 10px; font-size: 13px; }
-.eng-cfg-label { color: #888; min-width: 90px; flex-shrink: 0; }
+/* Status table (per-unit scan history) */
+.eng-status-table { margin-top: 12px; border: 1px solid #e3e6ea; border-radius: 8px; overflow: hidden; font-size: 13px; }
+.eng-status-hdr { display: grid; grid-template-columns: 1fr 130px 130px 80px; gap: 0; background: #f3f4f6; padding: 6px 12px; font-weight: 600; color: #555; font-size: 12px; border-bottom: 1px solid #e3e6ea; }
+.eng-status-row { display: grid; grid-template-columns: 1fr 130px 130px 80px; gap: 0; padding: 7px 12px; border-bottom: 1px solid #f0f0f0; align-items: center; }
+.eng-status-row:last-child { border-bottom: 0; }
+.eng-status-row:hover { background: #fafafa; }
+.eng-unit-name { display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 500; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.eng-badge-platform { font-size: 10px; font-weight: 700; background: #e8f0fe; color: #3b5bdb; border-radius: 4px; padding: 1px 5px; flex-shrink: 0; font-family: monospace; }
+.eng-time-cell { color: #666; font-size: 12px; }
+.eng-badge-due { font-size: 12px; font-weight: 600; color: #dc2626; background: #fee2e2; border-radius: 4px; padding: 1px 7px; display: inline-block; }
+.eng-badge-cool { font-size: 12px; color: #16a34a; background: #dcfce7; border-radius: 4px; padding: 1px 7px; display: inline-block; }
+/* Task execution rows */
 .eng-task-row { border: 1px solid #dde; border-radius: 8px; padding: 12px; display: flex; flex-direction: column; gap: 6px; }
 .eng-task-label { font-size: 14px; font-weight: 600; color: #222; }
 .eng-task-meta { font-size: 12px; color: #888; }

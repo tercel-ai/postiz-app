@@ -576,6 +576,47 @@ export class EngageRepository {
     };
   }
 
+  /**
+   * Per-keyword per-platform scan cursor times for this org's active keywords.
+   * Returns a map: normalizedKey → array of { platform, lastScannedAt, lastScanStartedAt, cooldownUntil }.
+   * Used by getConfig to annotate each keyword with its actual scan history.
+   */
+  async getKeywordCursors(
+    keywordKeys: string[],
+    cadenceMs: number,
+    now: number = Date.now()
+  ): Promise<
+    Record<
+      string,
+      { platform: string; lastScannedAt: Date | null; nextScanAt: Date | null }[]
+    >
+  > {
+    if (!keywordKeys.length) return {};
+    const rows = await this._scanCursor.model.engageScanCursor.findMany({
+      where: { scanType: 'keyword', scanKey: { in: keywordKeys } },
+      select: {
+        platform: true,
+        scanKey: true,
+        lastScannedAt: true,
+        lastScanStartedAt: true,
+        cooldownUntil: true,
+      },
+    });
+    const out: Record<
+      string,
+      { platform: string; lastScannedAt: Date | null; nextScanAt: Date | null }[]
+    > = {};
+    for (const row of rows) {
+      const next = new Date(deriveNext(row, cadenceMs, now));
+      (out[row.scanKey] ??= []).push({
+        platform: row.platform,
+        lastScannedAt: row.lastScannedAt,
+        nextScanAt: next,
+      });
+    }
+    return out;
+  }
+
   // ─── Keywords ──────────────────────────────────────────────────────────────
 
   async addKeyword(

@@ -325,7 +325,7 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
   }
   if (request.action === 'engage:claim-tasks') {
     const want = Math.min(Math.max(1, request.want ?? 3), 5);
-    backendCall('/engage/scan-tasks/ingest', 'POST', { want })
+    backendCall('/engage/scan-tasks/ingest', 'POST', { want, force: request.force ?? false })
       .then((r: any) =>
         sendResponse({ ok: r.ok, tasks: r.data?.nextTasks ?? [], accepted: 0 })
       )

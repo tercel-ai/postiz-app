@@ -122,14 +122,14 @@ export class EngageScanTasksService {
   /** Complete (if any) + claim next batch. Bootstrap = call with no `completed`. */
   async sync(
     orgId: string,
-    body: { completed?: CompletedUnitInput; want?: number }
+    body: { completed?: CompletedUnitInput; want?: number; force?: boolean }
   ): Promise<{ accepted: number; nextTasks: EngageScanTask[] }> {
     let accepted = 0;
     if (body.completed) {
       accepted = await this.ingestCompleted(body.completed);
     }
     const want = Math.min(Math.max(1, body.want ?? DEFAULT_WANT), MAX_WANT);
-    const nextTasks = await this.claimNext(orgId, want);
+    const nextTasks = await this.claimNext(orgId, want, { force: body.force });
     return { accepted, nextTasks };
   }
 
@@ -189,7 +189,8 @@ export class EngageScanTasksService {
   /** Enumerate this org's due units, claim up to `want`, build instructions. */
   private async claimNext(
     orgId: string,
-    want: number
+    want: number,
+    opts: { force?: boolean } = {}
   ): Promise<EngageScanTask[]> {
     const ctx = await this._engageRepo.getEnabledOrgContext(orgId);
     if (!ctx) return [];
@@ -213,6 +214,7 @@ export class EngageScanTasksService {
         scanType: u.scanType,
         scanKey: u.scanKey,
         cadenceMs,
+        force: opts.force,
       });
       if (snap) tasks.push(this._buildTask(snap, pacing, activeKeywords));
     }
