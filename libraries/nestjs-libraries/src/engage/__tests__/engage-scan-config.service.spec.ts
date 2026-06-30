@@ -3,6 +3,9 @@ import {
   EngageScanConfigService,
   ENGAGE_SCAN_PACING_KEY,
   ENGAGE_SCAN_FRESHNESS_KEY,
+  ENGAGE_TOUCH_SWITCH_KEY,
+  ENGAGE_TOUCH_X_SWITCH_KEY,
+  ENGAGE_TOUCH_REDDIT_SWITCH_KEY,
   DEFAULT_SCAN_PACING,
   mergePacing,
 } from '../engage-scan-config.service';
@@ -27,10 +30,13 @@ describe('EngageScanConfigService.onModuleInit', () => {
   });
 
   it('does not overwrite existing values', async () => {
-    // Both seeded keys present → onModuleInit must not write either.
+    // All seeded keys present → onModuleInit must not write any of them.
     const settings = settingsMock({
       [ENGAGE_SCAN_PACING_KEY]: { workflow: {} },
       [ENGAGE_SCAN_FRESHNESS_KEY]: { x: 24, reddit: 24 },
+      [ENGAGE_TOUCH_SWITCH_KEY]: true,
+      [ENGAGE_TOUCH_X_SWITCH_KEY]: true,
+      [ENGAGE_TOUCH_REDDIT_SWITCH_KEY]: true,
     });
     const svc = new EngageScanConfigService(settings);
     await svc.onModuleInit();
@@ -79,10 +85,10 @@ describe('EngageScanConfigService.getFreshnessWindowMs', () => {
 });
 
 describe('EngageScanConfigService.getPagePacing', () => {
-  it('returns the seeded defaults: extension X initial = 3 pages / 8s / 60s jitter', async () => {
+  it('returns the seeded defaults: extension X initial = 1 page / 8s / 60s jitter', async () => {
     const svc = new EngageScanConfigService(settingsMock());
     expect(await svc.getPagePacing('extension', 'x', 'initial')).toEqual({
-      maxPages: 3,
+      maxPages: 1,
       pageSize: 20,
       pageDelayMs: 8000,
       jitterMs: 60000,
@@ -114,7 +120,7 @@ describe('EngageScanConfigService.getPagePacing', () => {
     // a sibling platform stays at its default
     const reddit = await svc.getPagePacing('extension', 'reddit', 'initial');
     expect(reddit).toEqual({
-      maxPages: 3,
+      maxPages: 1,
       pageSize: 25,
       pageDelayMs: 5000,
       jitterMs: 60000,
@@ -135,7 +141,7 @@ describe('mergePacing (leaf guards)', () => {
     const merged = mergePacing(DEFAULT_SCAN_PACING, {
       extension: { reddit: { initial: { maxPages: 0 } } } as any,
     });
-    expect(merged.extension.reddit.initial.maxPages).toBe(3); // 0 rejected → default
+    expect(merged.extension.reddit.initial.maxPages).toBe(1); // 0 rejected → default
   });
 
   it('keeps extension safety knobs and allows overriding them', () => {

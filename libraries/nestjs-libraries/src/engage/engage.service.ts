@@ -56,6 +56,7 @@ import {
   type MetricsSyncDeps,
 } from '@gitroom/nestjs-libraries/engage/engage-metrics-sync';
 import { normalizeKeyword } from '@gitroom/nestjs-libraries/engage/engage-scan-lease.service';
+import { EngageScanConfigService } from '@gitroom/nestjs-libraries/engage/engage-scan-config.service';
 import {
   BIZ_USAGE,
   runWithBizUsage,
@@ -105,7 +106,8 @@ export class EngageService implements OnApplicationBootstrap {
     private _temporalService: TemporalService,
     private _postsService: PostsService,
     private _postOverageService: PostOverageService,
-    private _entitlementService: EngageEntitlementService
+    private _entitlementService: EngageEntitlementService,
+    private _scanConfig?: EngageScanConfigService
   ) { }
 
   // Auto-start global workflows on every app boot so pnpm dev / Docker restart
@@ -1410,6 +1412,12 @@ export class EngageService implements OnApplicationBootstrap {
     signalName: 'triggerScanNow' | 'triggerDueScan',
     logLabel: string
   ): Promise<{ status: 'signaled' | 'started' | 'no_client' | 'error' }> {
+    const touchEnabled = !this._scanConfig || await this._scanConfig.isTouchEnabled().catch(() => true);
+    if (!touchEnabled) {
+      this.logger.log(`${logLabel}: backend scan disabled (engage_touch_switch=false) — skipping signal`);
+      return { status: 'signaled' };
+    }
+
     const client = this._temporalService.client?.getRawClient();
     if (!client) return { status: 'no_client' };
 

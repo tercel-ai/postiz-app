@@ -336,23 +336,41 @@ export class EngageScanActivity {
     const keywords = unionKeywords(orgContexts);
     if (!keywords.length) return;
 
-    // X kill switch: when X scanning is disabled, never collect X tokens (so the
-    // pool is empty) and drop 'x' from every platform list below. Reddit keeps
-    // running untouched.
+    // X kill switch: env var / ENGAGE_SUPPORTED_PLATFORMS.
     const xEnabled = xScanEnabled();
     if (!xEnabled) {
       this.logger.log(
         'X scanning disabled (ENGAGE_X_SCAN_ENABLED=false or ENGAGE_SUPPORTED_PLATFORMS excludes x); scanning Reddit only'
       );
     }
+
+    // DB-level backend scan switches — admin can flip these via /admin/settings
+    // without a redeploy. Defaults to true (enabled) when the setting is absent
+    // or when _scanConfig is not wired (e.g. unit tests). The env-var kill switch
+    // (xEnabled) is ANDed in: if env already disabled X, touch_x cannot re-enable it.
+    const xTouchOn = !this._scanConfig || await this._scanConfig.isTouchEnabled('x').catch(() => true);
+    const redditTouchOn = !this._scanConfig || await this._scanConfig.isTouchEnabled('reddit').catch(() => true);
+    if (!xTouchOn && xEnabled) {
+      this.logger.log('X backend scan disabled (engage_touch_x_switch=false)');
+    }
+    if (!redditTouchOn) {
+      this.logger.log('Reddit backend scan disabled (engage_touch_reddit_switch=false)');
+    }
+    const xActive = xEnabled && xTouchOn;
+    const redditActive = redditTouchOn;
+
     const xPool = new TokenPool(
-      xEnabled ? await this._collectXTokens(orgContexts) : []
+      xActive ? await this._collectXTokens(orgContexts) : []
     );
     const redditToken = await getRedditToken();
     const initialScanSettings = await this._loadInitialScanSettings();
-    if (!xEnabled) {
+    if (!xActive) {
       initialScanSettings.enabledPlatforms =
         initialScanSettings.enabledPlatforms.filter((p) => p !== 'x');
+    }
+    if (!redditActive) {
+      initialScanSettings.enabledPlatforms =
+        initialScanSettings.enabledPlatforms.filter((p) => p !== 'reddit');
     }
 
     await this._ensureMissingKeywordInitialScans(
@@ -361,17 +379,17 @@ export class EngageScanActivity {
     );
     await this._runPendingKeywordInitialScans(
       orgContexts,
-      redditToken,
+      redditActive ? redditToken : null,
       xPool,
       initialScanSettings
     );
 
     // Resolve the freshness windows once for this tick (settings → env → 24h).
     this._xFreshnessWindowMs =
-      xEnabled && this._scanConfig
+      xActive && this._scanConfig
         ? await this._scanConfig.getFreshnessWindowMs('x')
         : undefined;
-    this._redditFreshnessWindowMs = this._scanConfig
+    this._redditFreshnessWindowMs = redditActive && this._scanConfig
       ? await this._scanConfig.getFreshnessWindowMs('reddit')
       : undefined;
 
@@ -379,9 +397,11 @@ export class EngageScanActivity {
     const intervalByOrg = await this._orgIntervalHours(orgContexts);
 
     const posts: RawPost[] = [
-      ...(await this._scanKeywordUnits(orgContexts, intervalByOrg, xPool, redditToken, force, xEnabled)),
-      ...(await this._scanChannelUnits(orgContexts, intervalByOrg, keywords, redditToken, force)),
-      ...(xEnabled
+      ...(await this._scanKeywordUnits(orgContexts, intervalByOrg, xPool, redditActive ? redditToken : null, force, xActive, redditActive)),
+      ...(redditActive
+        ? await this._scanChannelUnits(orgContexts, intervalByOrg, keywords, redditToken, force)
+        : []),
+      ...(xActive
         ? await this._scanTrackedUnits(orgContexts, intervalByOrg, keywords, xPool, force)
         : []),
     ];
@@ -751,7 +771,8 @@ export class EngageScanActivity {
     xPool: TokenPool,
     redditToken: string | null,
     force: boolean,
-    xEnabled = true
+    xEnabled = true,
+    redditEnabled = true
   ): Promise<RawPost[]> {
     // normalized keyword (= the global per-keyword cursor key) → min interval
     // hours across the orgs that enabled it. Normalising collapses "AI"/" ai "
@@ -765,9 +786,10 @@ export class EngageScanActivity {
       }
     }
 
-    const platforms: ReadonlyArray<'x' | 'reddit'> = xEnabled
-      ? ['x', 'reddit']
-      : ['reddit'];
+    const platforms: ReadonlyArray<'x' | 'reddit'> = [
+      ...(xEnabled ? (['x'] as const) : []),
+      ...(redditEnabled ? (['reddit'] as const) : []),
+    ];
     const posts: RawPost[] = [];
     for (const [keyword, hours] of minByKeyword) {
       const cadenceMs = hoursToMs(hours);

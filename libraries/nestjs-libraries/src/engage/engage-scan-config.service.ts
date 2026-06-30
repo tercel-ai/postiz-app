@@ -28,6 +28,14 @@ export const ENGAGE_X_SCAN_MAX_RESULTS_KEY = 'engage.keyword_x_scan_max_results'
 export const ENGAGE_X_SCAN_MAX_RESULTS_ENV = 'ENGAGE_X_SCAN_MAX_RESULTS';
 export type SettingSource = 'db' | 'env' | 'default';
 
+// Backend ("touch") scan switches — allow disabling server-side Temporal scan
+// per platform so the browser extension can be the sole executor.
+// All default to true (backend scan ON); set to false via /admin/settings to
+// hand off that platform's scanning to the extension.
+export const ENGAGE_TOUCH_SWITCH_KEY = 'engage_touch_switch';
+export const ENGAGE_TOUCH_X_SWITCH_KEY = 'engage_touch_x_switch';
+export const ENGAGE_TOUCH_REDDIT_SWITCH_KEY = 'engage_touch_reddit_switch';
+
 export type ScanPlatform = 'x' | 'reddit';
 export type ScanPhase = 'initial' | 'incremental';
 export type ScanPath = 'workflow' | 'extension';
@@ -141,6 +149,39 @@ export class EngageScanConfigService implements OnModuleInit {
       });
       this.logger.log(`Seeded default ${ENGAGE_SCAN_FRESHNESS_KEY}`);
     }
+
+    for (const [key, description] of [
+      [ENGAGE_TOUCH_SWITCH_KEY, 'Global backend ("touch") scan switch. Set to false to disable all server-side Temporal scanning and hand off to the browser extension.'],
+      [ENGAGE_TOUCH_X_SWITCH_KEY, 'X backend scan switch. Set to false to disable only X scanning in the Temporal workflow (extension takes over X).'],
+      [ENGAGE_TOUCH_REDDIT_SWITCH_KEY, 'Reddit backend scan switch. Set to false to disable only Reddit scanning in the Temporal workflow (extension takes over Reddit).'],
+    ] as const) {
+      const existing = await this._settings.get(key);
+      if (existing === null || existing === undefined) {
+        await this._settings.set(key, true, {
+          type: 'boolean',
+          description,
+          defaultValue: true,
+        });
+        this.logger.log(`Seeded default ${key}`);
+      }
+    }
+  }
+
+  /**
+   * Returns false if the global backend scan is disabled, OR if the specified
+   * platform's backend scan is disabled. Defaults to true (enabled) if the
+   * setting has not been created yet.
+   */
+  async isTouchEnabled(platform?: ScanPlatform): Promise<boolean> {
+    const global = await this._settings.get<boolean>(ENGAGE_TOUCH_SWITCH_KEY);
+    if (global === false) return false;
+    if (platform) {
+      const key =
+        platform === 'x' ? ENGAGE_TOUCH_X_SWITCH_KEY : ENGAGE_TOUCH_REDDIT_SWITCH_KEY;
+      const platformOn = await this._settings.get<boolean>(key);
+      if (platformOn === false) return false;
+    }
+    return true;
   }
 
   /**
