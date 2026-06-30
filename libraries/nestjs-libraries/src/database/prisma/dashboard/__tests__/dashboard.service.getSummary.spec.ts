@@ -15,6 +15,8 @@ function createMocks() {
       getChannelCount: vi.fn().mockResolvedValue(2),
       getActiveIntegrations: vi.fn().mockResolvedValue([]),
       getPostsStats: vi.fn().mockResolvedValue([]),
+      getImpressionsByPlatform: vi.fn().mockResolvedValue([]),
+      getTrafficTotal: vi.fn().mockResolvedValue(0),
     },
     postsService: {
       countPostsFromDay: vi.fn().mockResolvedValue(0),

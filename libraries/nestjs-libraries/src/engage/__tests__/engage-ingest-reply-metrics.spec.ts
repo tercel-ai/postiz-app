@@ -100,8 +100,9 @@ describe('ingestReplyMetrics — persist extension-scraped reply metrics', () =>
       expect.any(Array),
       31
     );
-    expect(markMetricsFetched).toHaveBeenCalledWith('org-1', ['p1']);
+    expect(markMetricsFetched).toHaveBeenCalledWith('org-1', ['p1'], expect.any(Date));
     expect(res).toMatchObject({ id: 'r1', postId: 'p1', impressions: 1000, trafficScore: 31 });
+    expect(res.lastMetricsFetchAt).toBeInstanceOf(Date);
     expect(res.metrics).toMatchObject({ impressions: 1000, likes: 10, bookmarks: 6 });
   });
 

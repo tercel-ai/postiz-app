@@ -84,7 +84,7 @@ export async function runMetrics(ids: string[]): Promise<MetricsRunSummary> {
       // flags.ts). Skip before consuming any budget / hitting x.com.
       if (platform === 'x' && !X_EXECUTOR_ENABLED) continue;
 
-      if (!(await tryConsumeHourly(METRICS_HOURLY_CAP))) {
+      if (!(await tryConsumeHourly(METRICS_HOURLY_CAP, platform))) {
         summary.stoppedReason = 'cap';
         break;
       }

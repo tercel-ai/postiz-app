@@ -1845,6 +1845,7 @@ export class EngageRepository {
               impressions: true,
               trafficScore: true,
               analytics: true,
+              lastMetricsFetchAt: true,
               integration: {
                 select: {
                   id: true,
@@ -2019,6 +2020,7 @@ export class EngageRepository {
               impressions: true,
               trafficScore: true,
               analytics: true,
+              lastMetricsFetchAt: true,
               // settings carries engageAuthor for manual replies posted from an
               // account that isn't a connected integration (integrationId=null).
               settings: true,

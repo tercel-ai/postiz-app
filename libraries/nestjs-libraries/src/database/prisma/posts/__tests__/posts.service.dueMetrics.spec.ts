@@ -73,7 +73,7 @@ describe('PostsService.ingestMetrics', () => {
 
   it('no-ops on empty items', async () => {
     const { svc, repo } = makeService();
-    expect(await svc.ingestMetrics('org-1', [])).toEqual({ updated: [], stamped: [] });
+    expect(await svc.ingestMetrics('org-1', [])).toEqual({ updated: [], stamped: [], results: [] });
     expect(repo.getPostsProviderByIds).not.toHaveBeenCalled();
   });
 
@@ -90,6 +90,16 @@ describe('PostsService.ingestMetrics', () => {
 
     expect(res.stamped).toEqual(['p1']);
     expect(res.updated).toEqual(['p1']);
+    expect(res.results).toEqual([
+      expect.objectContaining({
+        postId: 'p1',
+        impressions: 1000,
+        trafficScore: 20,
+        analytics,
+        metrics: { impressions: 1000, likes: 10, replies: 5 },
+        lastMetricsFetchAt: expect.any(Date),
+      }),
+    ]);
     const update = repo.batchUpdatePostAnalytics.mock.calls[0][0][0];
     expect(update.id).toBe('p1');
     expect(update.impressions).toBe(1000);
@@ -106,7 +116,7 @@ describe('PostsService.ingestMetrics', () => {
     const res = await svc.ingestMetrics('org-1', [
       { postId: 'p1', analytics: [{ label: 'impressions', data: [{ total: '5', date: 'd' }], percentageChange: 0 }] } as any,
     ]);
-    expect(res).toEqual({ updated: [], stamped: [] });
+    expect(res).toEqual({ updated: [], stamped: [], results: [] });
     // stamped is empty → the service short-circuits before touching the repo
     expect(repo.markMetricsFetched).not.toHaveBeenCalled();
   });

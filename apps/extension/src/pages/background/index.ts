@@ -21,6 +21,7 @@ import {
   scanRedditUser,
 } from '@gitroom/extension/utils/executor/reddit.collect';
 import { fetchReplyMetrics } from '@gitroom/extension/utils/executor/metrics.reply';
+import { fetchPostMetrics } from '@gitroom/extension/utils/executor/metrics.page';
 import { reapOrphanXReadTab } from '@gitroom/extension/utils/executor/x.tab-reader';
 import { backendCall } from '@gitroom/extension/utils/executor/api';
 import { scanReddit } from '@gitroom/extension/utils/executor/scan.reddit';
@@ -264,6 +265,16 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
   if (request.action === ENGAGE_EXTENSION_ACTION.runMetrics) {
     runMetrics(Array.isArray(request.ids) ? request.ids : [])
       .then((summary) => sendResponse({ ok: true, summary }))
+      .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
+    return true;
+  }
+  if (request.action === ENGAGE_EXTENSION_ACTION.fetchPostMetrics) {
+    fetchPostMetrics(request.platform, request.releaseURL)
+      .then((analytics) =>
+        analytics?.length
+          ? sendResponse({ ok: true, analytics })
+          : sendResponse({ ok: false, error: 'No post metrics found' })
+      )
       .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
     return true;
   }

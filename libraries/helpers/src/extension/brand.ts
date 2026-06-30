@@ -27,6 +27,10 @@ export const EXTENSION_MESSAGE = {
   engageMetrics: `${EXTENSION_BRAND}:engage-metrics`,
   /** extension → page: scraped reply metrics result (carries raw counters or error) */
   engageMetricsResult: `${EXTENSION_BRAND}:engage-metrics-result`,
+  /** page → extension: scrape one regular published post's current metrics */
+  postMetrics: `${EXTENSION_BRAND}:post-metrics`,
+  /** extension → page: regular post metrics shaped for /posts/metrics/ingest */
+  postMetricsResult: `${EXTENSION_BRAND}:post-metrics-result`,
   /** legacy page → extension: open X and fill a draft (dormant) */
   extensionTask: `${EXTENSION_BRAND}:extension-task`,
   /** page → extension: presence probe */

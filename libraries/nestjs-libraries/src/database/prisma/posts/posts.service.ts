@@ -1431,11 +1431,11 @@ export class PostsService {
   }
 
   /** Stamp the given org-owned posts as fetched-now (backfill dedup gate). */
-  markMetricsFetched(orgId: string, ids: string[]) {
+  markMetricsFetched(orgId: string, ids: string[], fetchedAt = dayjs.utc().toDate()) {
     if (!ids?.length) {
       return Promise.resolve({ count: 0 });
     }
-    return this._postRepository.markMetricsFetched(orgId, ids, dayjs.utc().toDate());
+    return this._postRepository.markMetricsFetched(orgId, ids, fetchedAt);
   }
 
   /**
@@ -1453,9 +1453,20 @@ export class PostsService {
   async ingestMetrics(
     orgId: string,
     items: { postId: string; analytics: AnalyticsData[] }[]
-  ): Promise<{ updated: string[]; stamped: string[] }> {
+  ): Promise<{
+    updated: string[];
+    stamped: string[];
+    results: Array<{
+      postId: string;
+      impressions: number;
+      trafficScore: number | null;
+      analytics: AnalyticsData[];
+      metrics: Record<string, number>;
+      lastMetricsFetchAt: Date;
+    }>;
+  }> {
     if (!items?.length) {
-      return { updated: [], stamped: [] };
+      return { updated: [], stamped: [], results: [] };
     }
     const ids = items.map((i) => i.postId);
     const posts = await this._postRepository.getPostsProviderByIds(orgId, ids);
@@ -1470,6 +1481,15 @@ export class PostsService {
       analytics?: any;
     }> = [];
     const stamped: string[] = [];
+    const lastMetricsFetchAt = dayjs.utc().toDate();
+    const results: Array<{
+      postId: string;
+      impressions: number;
+      trafficScore: number | null;
+      analytics: AnalyticsData[];
+      metrics: Record<string, number>;
+      lastMetricsFetchAt: Date;
+    }> = [];
 
     for (const item of items) {
       const platform = providerById.get(item.postId);
@@ -1483,6 +1503,21 @@ export class PostsService {
         platform,
         item.analytics ?? []
       );
+      const metrics = Object.fromEntries(
+        rawMetrics.map((metric) => {
+          const latest = metric.data[metric.data.length - 1];
+          const value = Number(latest?.total);
+          return [metric.label, Number.isFinite(value) ? value : 0];
+        })
+      );
+      results.push({
+        postId: item.postId,
+        impressions,
+        trafficScore,
+        analytics: rawMetrics,
+        metrics,
+        lastMetricsFetchAt,
+      });
       if (impressions > 0 || trafficScore !== null) {
         updates.push({
           id: item.postId,
@@ -1494,13 +1529,13 @@ export class PostsService {
     }
 
     await this._postRepository.batchUpdatePostAnalytics(updates);
-    await this.markMetricsFetched(orgId, stamped);
+    await this.markMetricsFetched(orgId, stamped, lastMetricsFetchAt);
     // NOTE: no API-usage/cost telemetry here on purpose. This endpoint is a pure
     // DATA SUBMISSION — the browser extension already read the metrics on the
     // user's own session client-side, so the backend makes NO social-provider
     // API call and incurs NO app API cost. API-cost stats track backend provider
     // calls only; counting client-submitted data here would misattribute cost.
-    return { updated: updates.map((u) => u.id), stamped };
+    return { updated: updates.map((u) => u.id), stamped, results };
   }
 
   /**

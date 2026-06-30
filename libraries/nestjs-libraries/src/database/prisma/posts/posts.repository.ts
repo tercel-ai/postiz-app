@@ -359,6 +359,8 @@ export class PostsRepository {
           sourcePostId: true,
           impressions: true,
           trafficScore: true,
+          lastMetricsFetchAt: true,
+          analytics: true,
           tags: {
             select: {
               tag: true,

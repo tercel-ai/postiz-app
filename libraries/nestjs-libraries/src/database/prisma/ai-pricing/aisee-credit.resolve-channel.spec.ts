@@ -1,3 +1,4 @@
+import { describe, expect, it } from 'vitest';
 import { AiseeCreditService } from './aisee-credit.service';
 import { AiseeClient, AiseeBusinessType } from './aisee.client';
 

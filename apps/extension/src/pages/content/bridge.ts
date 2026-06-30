@@ -3,9 +3,11 @@ import { installEngageReplyBridge } from '@gitroom/extension/pages/content/brows
 import { installPingBridge } from '@gitroom/extension/pages/content/ping-bridge';
 import { installEngageScanBridge } from '@gitroom/extension/pages/content/engage-scan-bridge';
 import { installEngageMetricsBridge } from '@gitroom/extension/pages/content/engage-metrics-bridge';
+import { installPostMetricsBridge } from '@gitroom/extension/pages/content/post-metrics-bridge';
 
 installPingBridge();
 installEngageScanBridge();
 installEngageMetricsBridge();
+installPostMetricsBridge();
 installEngageReplyBridge();
 installAuthBridge();

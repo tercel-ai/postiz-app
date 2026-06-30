@@ -73,6 +73,14 @@ function createMocks() {
     postsRepository: {
       batchUpdatePostAnalytics: vi.fn().mockResolvedValue(undefined),
     },
+    postAnalyticsCredit: {
+      loadConfig: vi.fn().mockResolvedValue({
+        enabled: false,
+        default: 0,
+        perPlatform: {},
+      }),
+      deductForIntegration: vi.fn().mockResolvedValue(undefined),
+    },
     failingProvider,
   };
 }
@@ -85,6 +93,7 @@ function createService(mocks: ReturnType<typeof createMocks>) {
     mocks.integrationManager as any,
     mocks.refreshIntegrationService as any,
     mocks.postsRepository as any,
+    mocks.postAnalyticsCredit as any,
   );
 }
 

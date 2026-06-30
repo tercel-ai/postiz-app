@@ -1655,8 +1655,9 @@ export class EngageService implements OnApplicationBootstrap {
     );
     // Stamp lastMetricsFetchAt so the demand-driven server pull treats this as
     // freshly synced and won't immediately re-fetch over the extension's data.
+    const lastMetricsFetchAt = new Date();
     await this._postsService
-      .markMetricsFetched(org.id, [ctx.postId])
+      .markMetricsFetched(org.id, [ctx.postId], lastMetricsFetchAt)
       .catch(() => undefined);
 
     const metrics = normalizeReplyMetrics(
@@ -1671,6 +1672,7 @@ export class EngageService implements OnApplicationBootstrap {
       impressions: built.impressions,
       trafficScore: built.trafficScore,
       metrics,
+      lastMetricsFetchAt,
     };
   }
 

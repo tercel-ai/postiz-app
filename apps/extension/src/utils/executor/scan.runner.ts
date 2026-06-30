@@ -48,7 +48,7 @@ export interface ScanRunSummary {
 let scanInFlight = false;
 
 async function scanOne(task: EngageScanTask): Promise<ScanRunResult> {
-  const gate = () => tryConsumeHourly(task.pacing.hourlyRequestCap);
+  const gate = () => tryConsumeHourly(task.pacing.hourlyRequestCap, task.platform);
   if (task.platform === 'reddit') return scanReddit(task, gate);
   if (task.platform === 'x') {
     // X is account-risky and OFF by default (see flags.ts). Refuse the task
@@ -133,7 +133,7 @@ export async function runScanLoop(): Promise<ScanRunSummary> {
       }
       const task = tasks[0];
 
-      if ((await remainingHourlyBudget(task.pacing.hourlyRequestCap)) <= 0) {
+      if ((await remainingHourlyBudget(task.pacing.hourlyRequestCap, task.platform)) <= 0) {
         summary.stoppedReason = 'cap'; // claimed unit will be reclaimed on TTL
         break;
       }

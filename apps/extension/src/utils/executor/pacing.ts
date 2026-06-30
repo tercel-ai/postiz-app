@@ -33,21 +33,30 @@ export async function applyDelay(baseMs: number, jitterMs: number): Promise<void
 const CAP_KEY = 'aisee_engage_fetch_window';
 const HOUR_MS = 60 * 60 * 1000;
 
-async function readWindow(): Promise<number[]> {
+function capKey(scope: string): string {
+  const clean = String(scope || 'shared').replace(/[^a-z0-9_-]/gi, '_');
+  return `${CAP_KEY}:${clean}`;
+}
+
+async function readWindow(scope: string): Promise<number[]> {
   const cutoff = Date.now() - HOUR_MS;
-  const stored = await chrome.storage.session.get([CAP_KEY]);
-  const arr: number[] = Array.isArray(stored?.[CAP_KEY]) ? stored[CAP_KEY] : [];
+  const key = capKey(scope);
+  const stored = await chrome.storage.session.get([key]);
+  const arr: number[] = Array.isArray(stored?.[key]) ? stored[key] : [];
   return arr.filter((t) => typeof t === 'number' && t > cutoff);
 }
 
-async function writeWindow(times: number[]): Promise<void> {
-  await chrome.storage.session.set({ [CAP_KEY]: times });
+async function writeWindow(scope: string, times: number[]): Promise<void> {
+  await chrome.storage.session.set({ [capKey(scope)]: times });
 }
 
 /** How many fetches are still allowed in the current rolling hour given `cap`. */
-export async function remainingHourlyBudget(cap: number): Promise<number> {
+export async function remainingHourlyBudget(
+  cap: number,
+  scope = 'shared'
+): Promise<number> {
   if (!Number.isFinite(cap) || cap <= 0) return Number.POSITIVE_INFINITY;
-  const win = await readWindow();
+  const win = await readWindow(scope);
   return Math.max(0, cap - win.length);
 }
 
@@ -55,15 +64,18 @@ export async function remainingHourlyBudget(cap: number): Promise<number> {
  * Record one fetch if it keeps us within `cap` for the rolling hour. Returns
  * true when the fetch is allowed (and was recorded), false when the cap is hit.
  */
-export async function tryConsumeHourly(cap: number): Promise<boolean> {
+export async function tryConsumeHourly(
+  cap: number,
+  scope = 'shared'
+): Promise<boolean> {
   if (!Number.isFinite(cap) || cap <= 0) return true; // unbounded
-  const win = await readWindow();
+  const win = await readWindow(scope);
   if (win.length >= cap) {
-    await writeWindow(win); // persist the pruned window
+    await writeWindow(scope, win); // persist the pruned window
     return false;
   }
   win.push(Date.now());
-  await writeWindow(win);
+  await writeWindow(scope, win);
   return true;
 }
 

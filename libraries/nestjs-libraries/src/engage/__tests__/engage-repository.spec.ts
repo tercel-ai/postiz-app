@@ -347,6 +347,19 @@ describe('EngageRepository — two-table reads', () => {
   });
 
   describe('listSentReplies', () => {
+    it('selects lastMetricsFetchAt on every returned post', async () => {
+      const { repo, sentFindMany, sentCount, stateFindMany } = buildRepo();
+      sentFindMany.mockResolvedValue([]);
+      sentCount.mockResolvedValue(0);
+      stateFindMany.mockResolvedValue([]);
+
+      await repo.listSentReplies('org1', {} as any);
+
+      expect(
+        sentFindMany.mock.calls[0][0].include.post.select.lastMetricsFetchAt
+      ).toBe(true);
+    });
+
     it('attaches per-org matchedKeywords to each opportunity via the state join', async () => {
       const { repo, sentFindMany, sentCount, stateFindMany } = buildRepo();
       sentFindMany.mockResolvedValue([
