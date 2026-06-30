@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { HistoryList } from '@gitroom/extension/pages/popup/components/HistoryList';
 import { ClearHistoryPage } from '@gitroom/extension/pages/popup/components/ClearHistoryPage';
 import { LoginForm } from '@gitroom/extension/pages/popup/components/LoginForm';
-import { EngageScanPanel } from '@gitroom/extension/pages/popup/components/ScanPanel';
+import { EngageScanPanel, checkPlatformLogin } from '@gitroom/extension/pages/popup/components/ScanPanel';
 import { AuthUser, ACCESS_KEY } from '@gitroom/extension/utils/auth.service';
 import {
   clearHistory,
@@ -17,6 +17,8 @@ export default function Popup() {
   const [view, setView] = useState<'main' | 'clear' | 'scan'>('main');
   // undefined = checking, null = logged out, object = logged in
   const [user, setUser] = useState<AuthUser | null | undefined>(undefined);
+  // null = still checking, true/false = result
+  const [platformLogin, setPlatformLogin] = useState<{ x: boolean | null; reddit: boolean | null }>({ x: null, reddit: null });
 
   useEffect(() => {
     chrome.runtime
@@ -41,6 +43,14 @@ export default function Popup() {
     chrome.storage.onChanged.addListener(onSession);
     return () => chrome.storage.onChanged.removeListener(onSession);
   }, []);
+
+  // Only check platform login after Aisee auth is confirmed — keeps the
+  // cookies IPC calls off the critical path for initial popup rendering.
+  useEffect(() => {
+    if (!user) return;
+    Promise.all([checkPlatformLogin('x'), checkPlatformLogin('reddit')])
+      .then(([x, reddit]) => setPlatformLogin({ x, reddit }));
+  }, [user]);
 
   const handleLogout = useCallback(async () => {
     await chrome.runtime.sendMessage({ action: 'auth:logout' });
@@ -139,6 +149,30 @@ export default function Popup() {
           <div className="pz-sub">in-browser</div>
         )}
       </div>
+
+      {user && (platformLogin.x === null || platformLogin.reddit === null) && (
+        <div className="pz-platform-checking">Checking platform logins…</div>
+      )}
+      {user && (platformLogin.x === false || platformLogin.reddit === false) && (
+        <div className="pz-platform-warn">
+          {platformLogin.x === false && (
+            <div className="pz-platform-warn-row">
+              <span className="pz-platform-warn-label">𝕏 not logged in — scans won't run</span>
+              <button className="pz-platform-login-btn" onClick={() => chrome.tabs.create({ url: 'https://x.com/i/flow/login' })}>
+                Log in ↗
+              </button>
+            </div>
+          )}
+          {platformLogin.reddit === false && (
+            <div className="pz-platform-warn-row">
+              <span className="pz-platform-warn-label">Reddit not logged in — scans won't run</span>
+              <button className="pz-platform-login-btn" onClick={() => chrome.tabs.create({ url: 'https://www.reddit.com/login/' })}>
+                Log in ↗
+              </button>
+            </div>
+          )}
+        </div>
+      )}
 
       {user ? (
         <HistoryList items={history} onClearPage={() => setView('clear')} />

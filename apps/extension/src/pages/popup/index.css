@@ -170,6 +170,52 @@ body {
   word-break: break-all;
 }
 
+/* ── Platform login status ──────────────────────────────── */
+.pz-platform-checking {
+  padding: 6px 14px;
+  font-size: 11px;
+  color: var(--pz-muted);
+  border-bottom: 1px solid var(--pz-border);
+}
+
+/* ── Platform login warning ─────────────────────────────── */
+.pz-platform-warn {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 9px 14px;
+  background: var(--pz-danger-soft);
+  border-bottom: 1px solid #ffd0c0;
+}
+.pz-platform-warn-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.pz-platform-warn-label {
+  flex: 1;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--pz-danger);
+}
+.pz-platform-login-btn {
+  appearance: none;
+  padding: 3px 10px;
+  border: 1.5px solid var(--pz-ink);
+  border-radius: 6px;
+  background: var(--pz-accent);
+  color: var(--pz-ink);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s;
+}
+.pz-platform-login-btn:hover {
+  background: var(--pz-accent-hover);
+}
+
 /* ── History ────────────────────────────────────────────── */
 .pz-divider {
   height: 1px;

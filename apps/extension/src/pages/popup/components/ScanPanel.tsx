@@ -126,24 +126,22 @@ function getCookie(url: string, name: string): Promise<chrome.cookies.Cookie | n
   return new Promise((resolve) => chrome.cookies.get({ url, name }, (c) => resolve(c ?? null)));
 }
 
-async function checkPlatformLogin(platform: 'x' | 'reddit'): Promise<boolean> {
+export async function checkPlatformLogin(platform: 'x' | 'reddit'): Promise<boolean> {
   if (platform === 'x') {
     return !!(
       (await getCookie('https://x.com', 'auth_token')) ??
       (await getCookie('https://twitter.com', 'auth_token'))
     );
   }
-  return !!(
-    (await getCookie('https://www.reddit.com', 'reddit_session')) ??
-    (await getCookie('https://www.reddit.com', 'token_v2'))
-  );
+  // reddit_session is cleared on Reddit logout; token_v2 persists after logout
+  // and is therefore NOT a reliable login indicator. Check reddit_session only.
+  return !!(await getCookie('https://www.reddit.com', 'reddit_session'));
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export function EngageScanPanel() {
   const [platform, setPlatform] = React.useState<'x' | 'reddit' | 'both'>('both');
-  const [wantN, setWantN] = React.useState(3);
   const [force, setForce] = React.useState(false);
   const [config, setConfig] = React.useState<EngageConfig | null>(null);
   const [syncedAt, setSyncedAt] = React.useState<number | null>(null);
@@ -153,17 +151,10 @@ export function EngageScanPanel() {
   const [claimBusy, setClaimBusy] = React.useState(false);
   const [claimErr, setClaimErr] = React.useState<string | null>(null);
   const [states, setStates] = React.useState<Record<string, TaskState>>({});
-  const [loginStatus, setLoginStatus] = React.useState<{ x: boolean | null; reddit: boolean | null }>({ x: null, reddit: null });
-
   React.useEffect(() => {
     loadConfigCache().then((cached) => {
       if (cached) { setConfig(cached.data); setSyncedAt(cached.syncedAt); }
     });
-  }, []);
-
-  React.useEffect(() => {
-    refreshLoginStatus();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const patch = (taskId: string, p: Partial<TaskState>) =>
@@ -185,7 +176,7 @@ export function EngageScanPanel() {
   async function claimTasks() {
     setClaimBusy(true); setClaimErr(null);
     try {
-      const r = await sendMessage<{ ok: boolean; tasks?: ScanTask[]; error?: string }>({ action: ENGAGE_EXTENSION_ACTION.claimTasks, want: wantN, force });
+      const r = await sendMessage<{ ok: boolean; tasks?: ScanTask[]; error?: string }>({ action: ENGAGE_EXTENSION_ACTION.claimTasks, want: 1, force });
       if (!r.ok) throw new Error(r.error || 'failed');
       const all = r.tasks ?? [];
       const filtered = platform === 'both' ? all : all.filter((t) => t.platform === platform);
@@ -243,12 +234,6 @@ export function EngageScanPanel() {
     } catch (e: any) { patch(t.taskId, { status: 'err', err: String(e?.message || e) }); }
   }
 
-  function refreshLoginStatus() {
-    setLoginStatus({ x: null, reddit: null });
-    Promise.all([checkPlatformLogin('x'), checkPlatformLogin('reddit')])
-      .then(([x, reddit]) => setLoginStatus({ x, reddit }));
-  }
-
   const intervalHours = config?.scanIntervals?.scanIntervalHours ?? config?.entitlement?.limits?.scanIntervalHours ?? 24;
   const chHours = config?.scanIntervals?.channelHours ?? intervalHours;
   const trHours = config?.scanIntervals?.trackedHours ?? intervalHours;
@@ -276,26 +261,6 @@ export function EngageScanPanel() {
         </button>
       </div>
       {cfgErr && <div className="sc-err">{cfgErr}</div>}
-
-      {/* Login status */}
-      <div className="sc-login-row">
-        {(['x', 'reddit'] as const).map((p) => {
-          const ls = loginStatus[p];
-          const label = p === 'x' ? '𝕏' : 'Reddit';
-          const loginUrl = p === 'x' ? 'https://x.com/i/flow/login' : 'https://www.reddit.com/login/';
-          if (ls === null) return <div key={p} className="sc-login-chip checking">{label} …</div>;
-          if (ls) return <div key={p} className="sc-login-chip ok">{label} ✓</div>;
-          return (
-            <div key={p} className="sc-login-chip warn">
-              <span>{label} 未登录</span>
-              <button className="sc-login-link-btn" onClick={() => chrome.tabs.create({ url: loginUrl })}>
-                去登录 ↗
-              </button>
-            </div>
-          );
-        })}
-        <button className="sc-login-refresh-btn" onClick={refreshLoginStatus} title="刷新登录状态">↻</button>
-      </div>
 
       {/* Status table */}
       {config ? (
@@ -358,10 +323,6 @@ export function EngageScanPanel() {
 
       {/* Claim controls */}
       <div className="sc-claim-bar">
-        <label className="sc-label">领取数量</label>
-        <input type="number" value={wantN} min={1} max={5}
-          onChange={(e) => setWantN(Math.min(5, Math.max(1, Number(e.target.value))))}
-          className="sc-num" />
         <label className="sc-force-lbl">
           <input type="checkbox" checked={force} onChange={(e) => setForce(e.target.checked)} />
           强制
