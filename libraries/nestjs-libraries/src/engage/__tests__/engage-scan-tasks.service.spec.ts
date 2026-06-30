@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { EngageScanTasksService } from '../engage-scan-tasks.service';
+import {
+  EngageScanTasksService,
+  buildTrackedKeywordQuery,
+  buildRedditChannelKeywordQuery,
+} from '../engage-scan-tasks.service';
 import { DEFAULT_SCAN_PACING } from '../engage-scan-config.service';
 
 function build(opts: {
@@ -170,5 +174,77 @@ describe('EngageScanTasksService.sync — ingest completed', () => {
     const [, cursor] = lease.completeByToken.mock.calls[0];
     // The forged future post must NOT become the cursor (id or timestamp).
     expect(cursor).toEqual({ lastSeenExternalId: 't3_real', lastSeenAt: past });
+  });
+});
+
+describe('buildTrackedKeywordQuery', () => {
+  it('returns undefined for empty keyword list', () => {
+    expect(buildTrackedKeywordQuery('elonmusk', [])).toBeUndefined();
+  });
+
+  it('builds correct from:account (kw) query for a single keyword', () => {
+    expect(buildTrackedKeywordQuery('sama', ['openai'])).toBe(
+      'from:sama (openai)'
+    );
+  });
+
+  it('joins multiple keywords with OR', () => {
+    expect(buildTrackedKeywordQuery('sama', ['openai', 'claude', 'gpt'])).toBe(
+      'from:sama (openai OR claude OR gpt)'
+    );
+  });
+
+  it('quotes multi-word keywords', () => {
+    expect(buildTrackedKeywordQuery('sama', ['open source', 'claude ai'])).toBe(
+      'from:sama ("open source" OR "claude ai")'
+    );
+  });
+
+  it('truncates keywords that would exceed the 460-char budget', () => {
+    const manyKws = Array.from({ length: 100 }, (_, i) => `keyword${i}`);
+    const result = buildTrackedKeywordQuery('user', manyKws);
+    expect(result).toBeDefined();
+    expect(result!.length).toBeLessThanOrEqual(460);
+    expect(result).toMatch(/^from:user \(/);
+  });
+
+  it('returns undefined when username alone exceeds budget', () => {
+    const longUser = 'u'.repeat(450);
+    const result = buildTrackedKeywordQuery(longUser, ['openai']);
+    expect(result).toBeUndefined();
+  });
+});
+
+describe('buildRedditChannelKeywordQuery', () => {
+  it('returns undefined for empty keyword list', () => {
+    expect(buildRedditChannelKeywordQuery([])).toBeUndefined();
+  });
+
+  it('returns a single keyword as-is', () => {
+    expect(buildRedditChannelKeywordQuery(['openai'])).toBe('openai');
+  });
+
+  it('joins multiple keywords with OR', () => {
+    expect(buildRedditChannelKeywordQuery(['openai', 'claude', 'gpt'])).toBe(
+      'openai OR claude OR gpt'
+    );
+  });
+
+  it('quotes multi-word keywords', () => {
+    expect(buildRedditChannelKeywordQuery(['open source', 'large language model'])).toBe(
+      '"open source" OR "large language model"'
+    );
+  });
+
+  it('truncates keywords that would exceed the 480-char budget', () => {
+    const manyKws = Array.from({ length: 100 }, (_, i) => `keyword${i}`);
+    const result = buildRedditChannelKeywordQuery(manyKws);
+    expect(result).toBeDefined();
+    expect(result!.length).toBeLessThanOrEqual(480);
+  });
+
+  it('produces a query usable as a Reddit search q param (no from: prefix)', () => {
+    const result = buildRedditChannelKeywordQuery(['openai', 'claude']);
+    expect(result).not.toMatch(/^from:/);
   });
 });

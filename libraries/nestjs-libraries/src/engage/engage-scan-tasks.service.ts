@@ -23,6 +23,8 @@ import {
 // X SearchTimeline query budget. Keep under 512 (X hard cap); leave headroom
 // for the `from:username ` prefix (~20 chars) and ` -filter:retweets` suffix.
 const X_TRACKED_KW_QUERY_MAX = 460;
+// Reddit search `q` cap mirrors REDDIT_QUERY_MAX_LEN in reddit-scan-adapter.ts.
+const REDDIT_CHANNEL_QUERY_MAX = 480;
 
 /**
  * Build `from:username (kw1 OR kw2 ...) -filter:retweets` for a tracked X
@@ -51,6 +53,28 @@ export function buildTrackedKeywordQuery(
   }
   if (!parts.length) return undefined;
   return `${prefix}(${parts.join(' OR ')})`;
+}
+
+/**
+ * Build `kw1 OR kw2 OR ...` for a Reddit subreddit channel scan. Used as the
+ * `q` parameter in `/r/{sub}/search?q=...&restrict_sr=on&sort=new` so the
+ * extension only fetches keyword-relevant posts instead of the full /new feed.
+ * Returns undefined when no keywords fit in the budget.
+ */
+export function buildRedditChannelKeywordQuery(
+  keywords: string[]
+): string | undefined {
+  if (!keywords.length) return undefined;
+  const parts: string[] = [];
+  let usedLen = 0;
+  for (const kw of keywords) {
+    const token = kw.includes(' ') ? `"${kw}"` : kw;
+    const add = parts.length === 0 ? token : ` OR ${token}`;
+    if (usedLen + add.length > REDDIT_CHANNEL_QUERY_MAX) break;
+    parts.push(token);
+    usedLen += add.length;
+  }
+  return parts.length ? parts.join(' OR ') : undefined;
 }
 
 // Platforms the extension can scan. Keyword units fan out to each (a keyword has
@@ -335,15 +359,18 @@ export class EngageScanTasksService {
     // does `from:account (kw1 OR kw2) -filter:retweets` rather than fetching
     // all of the account's posts and relying on server-side keyword matching.
     // This cuts irrelevant data and reduces request volume (account safety).
-    // The combined rawQuery is ephemeral — built at claim time from current
-    // keywords. The cursor key (x/tracked/username) is unchanged.
+    //
+    // For Reddit channel units: narrow `/r/{sub}/new.json` to a keyword search
+    // via `/r/{sub}/search?q=(kw1 OR kw2)&restrict_sr=on&sort=new` so the
+    // extension only pulls keyword-relevant posts instead of the full firehose.
+    //
+    // Both rawQuerys are ephemeral — built at claim time from current keywords.
+    // The cursor key (scanKey) is unchanged.
     let rawQuery: string | undefined;
-    if (
-      snap.scanType === 'tracked' &&
-      snap.platform === 'x' &&
-      orgKeywords.length
-    ) {
+    if (snap.scanType === 'tracked' && snap.platform === 'x' && orgKeywords.length) {
       rawQuery = buildTrackedKeywordQuery(snap.scanKey, orgKeywords);
+    } else if (snap.scanType === 'channel' && snap.platform === 'reddit' && orgKeywords.length) {
+      rawQuery = buildRedditChannelKeywordQuery(orgKeywords);
     }
 
     return {

@@ -38,8 +38,14 @@ function buildUrl(task: EngageScanTask, after?: string): string {
     const q = encodeURIComponent(task.scanKey);
     return `${REDDIT_BASE}/search.json?q=${q}&sort=new&limit=${limit}&type=link${afterParam}`;
   }
-  // channel scope = keyword-free "scope firehose"; keyword matching is server-side.
   const sub = encodeURIComponent(task.scanKey);
+  if (task.rawQuery) {
+    // Keyword-filtered channel scan: mirrors backend RedditScanAdapter channelScoped path.
+    // rawQuery = "kw1 OR kw2 OR ..." built by the backend at claim time from org keywords.
+    const q = encodeURIComponent(task.rawQuery);
+    return `${REDDIT_BASE}/r/${sub}/search.json?q=${q}&restrict_sr=on&sort=new&limit=${limit}&type=link${afterParam}`;
+  }
+  // Fallback: no org keywords configured — full subreddit feed, server-side keyword filter.
   return `${REDDIT_BASE}/r/${sub}/new.json?limit=${limit}${afterParam}`;
 }
 
