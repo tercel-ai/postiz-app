@@ -13,6 +13,7 @@
 
 import { fetchXPostFromPage } from './x.collect';
 import { fetchRedditReplyMetrics } from './reddit.collect';
+import { DEFAULT_HOURLY_FETCH_CAP, tryConsumeHourly } from './pacing';
 
 export interface ReplyMetricsResult {
   platform: 'x' | 'reddit';
@@ -42,6 +43,14 @@ export async function fetchReplyMetrics(
 ): Promise<ReplyMetricsResult | null> {
   const url = String(releaseURL || '').trim();
   if (!url) return null;
+  if (platform !== 'x' && platform !== 'reddit') return null;
+
+  // Engage reply metrics draw from the SAME per-platform hourly budget as
+  // calendar post metrics and opportunity scans — otherwise this path could
+  // overshoot the account-safety cap the other two respect.
+  if (!(await tryConsumeHourly(DEFAULT_HOURLY_FETCH_CAP, platform))) {
+    throw new Error(`Hourly ${platform} metrics limit reached`);
+  }
 
   if (platform === 'x') {
     const tweet = await fetchXPostFromPage(url);

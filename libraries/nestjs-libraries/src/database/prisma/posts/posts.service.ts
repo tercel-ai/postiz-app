@@ -1473,6 +1473,14 @@ export class PostsService {
     const providerById = new Map(
       posts.map((p) => [p.id, p.integration?.providerIdentifier])
     );
+    // Currently persisted values, so a fresh read that declines to overwrite
+    // (zero impressions / null traffic) can echo the stored value instead of 0.
+    const persistedById = new Map(
+      posts.map((p) => [
+        p.id,
+        { impressions: p.impressions ?? 0, trafficScore: p.trafficScore ?? null },
+      ])
+    );
 
     const updates: Array<{
       id: string;
@@ -1510,10 +1518,20 @@ export class PostsService {
           return [metric.label, Number.isFinite(value) ? value : 0];
         })
       );
+      // Mirror the persistence rule below: impressions are only overwritten when
+      // positive and trafficScore only when present, so a transient zero/partial
+      // read never clobbers an earlier real value. The response must echo the
+      // same EFFECTIVE value we keep on disk, otherwise the UI shows 0 until the
+      // next reload restores the old value.
+      const persisted = persistedById.get(item.postId);
+      const effectiveImpressions =
+        impressions > 0 ? impressions : persisted?.impressions ?? 0;
+      const effectiveTrafficScore =
+        trafficScore !== null ? trafficScore : persisted?.trafficScore ?? null;
       results.push({
         postId: item.postId,
-        impressions,
-        trafficScore,
+        impressions: effectiveImpressions,
+        trafficScore: effectiveTrafficScore,
         analytics: rawMetrics,
         metrics,
         lastMetricsFetchAt,

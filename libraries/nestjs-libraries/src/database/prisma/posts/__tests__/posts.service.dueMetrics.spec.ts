@@ -130,4 +130,28 @@ describe('PostsService.ingestMetrics', () => {
     expect(res.updated).toEqual([]);
     expect(repo.batchUpdatePostAnalytics).toHaveBeenCalledWith([]);
   });
+
+  it('echoes the persisted value when a zero read declines to overwrite it', async () => {
+    // A transient zero read must NOT report impressions: 0 to the UI while the
+    // DB keeps the earlier positive value — otherwise the UI flickers to 0 and
+    // the next reload restores the old value.
+    const { svc, repo } = makeService({
+      providers: [
+        {
+          id: 'p1',
+          impressions: 1234,
+          trafficScore: 56,
+          integration: { providerIdentifier: 'x' },
+        },
+      ],
+    });
+    const res = await svc.ingestMetrics('org-1', [{ postId: 'p1', analytics: [] } as any]);
+
+    // Nothing persisted (zero read), but the response reflects the stored value.
+    expect(res.updated).toEqual([]);
+    expect(repo.batchUpdatePostAnalytics).toHaveBeenCalledWith([]);
+    expect(res.results[0]).toEqual(
+      expect.objectContaining({ postId: 'p1', impressions: 1234, trafficScore: 56 })
+    );
+  });
 });

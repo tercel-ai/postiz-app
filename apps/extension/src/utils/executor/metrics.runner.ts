@@ -8,19 +8,19 @@
 
 import { backendCall, NotAuthenticatedError } from './api';
 import { DueMetricsResponse, MetricsIngestItem } from './executor.types';
-import { applyDelay, tryConsumeHourly } from './pacing';
+import {
+  applyDelay,
+  DEFAULT_HOURLY_FETCH_CAP,
+  METRICS_INTER_POST_DELAY_MS,
+  METRICS_INTER_POST_JITTER_MS,
+  tryConsumeHourly,
+} from './pacing';
 import { fetchRedditMetrics } from './metrics.reddit';
 import { fetchXMetrics } from './metrics.x';
 import { X_EXECUTOR_ENABLED } from './flags';
 
 const DUE_ENDPOINT = '/posts/metrics/due';
 const INGEST_ENDPOINT = '/posts/metrics/ingest';
-
-// Metrics GETs hit x.com / reddit.com with the personal session too, so they
-// share a paced, capped cadence (no per-task pacing is sent for this track).
-const METRICS_HOURLY_CAP = 60;
-const METRICS_INTER_POST_DELAY_MS = 2_000;
-const METRICS_INTER_POST_JITTER_MS = 3_000;
 
 export interface MetricsRunSummary {
   due: number;
@@ -84,7 +84,7 @@ export async function runMetrics(ids: string[]): Promise<MetricsRunSummary> {
       // flags.ts). Skip before consuming any budget / hitting x.com.
       if (platform === 'x' && !X_EXECUTOR_ENABLED) continue;
 
-      if (!(await tryConsumeHourly(METRICS_HOURLY_CAP, platform))) {
+      if (!(await tryConsumeHourly(DEFAULT_HOURLY_FETCH_CAP, platform))) {
         summary.stoppedReason = 'cap';
         break;
       }

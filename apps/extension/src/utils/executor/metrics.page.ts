@@ -1,9 +1,11 @@
 import { AnalyticsSeries } from './executor.types';
 import { fetchRedditMetrics } from './metrics.reddit';
-import { tryConsumeHourly } from './pacing';
+import {
+  DEFAULT_HOURLY_FETCH_CAP,
+  spaceConsecutiveFetches,
+  tryConsumeHourly,
+} from './pacing';
 import { fetchXPostFromPage } from './x.collect';
-
-const METRICS_HOURLY_CAP = 60;
 
 function point(total: number): AnalyticsSeries['data'] {
   return [{ total, date: new Date().toISOString() }];
@@ -16,9 +18,12 @@ export async function fetchPostMetrics(
 ): Promise<AnalyticsSeries[] | null> {
   const url = String(releaseURL || '').trim();
   if ((platform !== 'x' && platform !== 'reddit') || !url) return null;
-  if (!(await tryConsumeHourly(METRICS_HOURLY_CAP, platform))) {
+  if (!(await tryConsumeHourly(DEFAULT_HOURLY_FETCH_CAP, platform))) {
     throw new Error(`Hourly ${platform} metrics limit reached`);
   }
+  // Space consecutive page-driven fetches like the batch runner does, so a busy
+  // calendar view does not fire back-to-back requests at machine cadence.
+  await spaceConsecutiveFetches(platform);
 
   if (platform === 'reddit') return fetchRedditMetrics(url);
 

@@ -1,14 +1,20 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { fetchXPostFromPage, fetchRedditMetrics, tryConsumeHourly } = vi.hoisted(() => ({
-  fetchXPostFromPage: vi.fn(),
-  fetchRedditMetrics: vi.fn(),
-  tryConsumeHourly: vi.fn(),
-}));
+const { fetchXPostFromPage, fetchRedditMetrics, tryConsumeHourly, spaceConsecutiveFetches } =
+  vi.hoisted(() => ({
+    fetchXPostFromPage: vi.fn(),
+    fetchRedditMetrics: vi.fn(),
+    tryConsumeHourly: vi.fn(),
+    spaceConsecutiveFetches: vi.fn(),
+  }));
 
 vi.mock('../x.collect', () => ({ fetchXPostFromPage }));
 vi.mock('../metrics.reddit', () => ({ fetchRedditMetrics }));
-vi.mock('../pacing', () => ({ tryConsumeHourly }));
+vi.mock('../pacing', () => ({
+  tryConsumeHourly,
+  spaceConsecutiveFetches,
+  DEFAULT_HOURLY_FETCH_CAP: 60,
+}));
 
 import { fetchPostMetrics } from '../metrics.page';
 
@@ -16,6 +22,7 @@ describe('fetchPostMetrics', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     tryConsumeHourly.mockResolvedValue(true);
+    spaceConsecutiveFetches.mockResolvedValue(undefined);
   });
 
   it('reads X through the real page collector and returns ingest-shaped analytics', async () => {

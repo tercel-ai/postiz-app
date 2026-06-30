@@ -2054,6 +2054,11 @@ export class PostsRepository {
       where: { id: { in: ids }, organizationId, deletedAt: null },
       select: {
         id: true,
+        // Currently persisted values — so the ingest response can echo the
+        // effective stored value when a fresh read declines to overwrite it
+        // (a transient zero read must not flicker the UI back to 0).
+        impressions: true,
+        trafficScore: true,
         integration: { select: { providerIdentifier: true } },
       },
     });

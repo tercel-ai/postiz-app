@@ -45,13 +45,23 @@ a per-post interval so already-fetched data is not re-pulled.
 ### Flow
 ```
 user opens posts page → extension sends visible post ids
-  POST /posts/metrics/due      → { windowDays, intervalHours, due[] }   (within window ∩ past interval)
+  POST /posts/metrics/due     → { windowDays, intervalHours, due[] }   (within window ∩ past interval)
   extension fetches metrics with the browser session
-  POST /posts/metrics/backfill → { updated[], stamped[] }              (same extract/traffic pipeline as checkPostAnalytics)
+  POST /posts/metrics/ingest  → { updated[], stamped[], results[] }    (same extract/traffic pipeline as checkPostAnalytics)
 ```
-Backfill resolves each post's platform server-side (never trusting the client),
-reuses `extractMetrics` + `batchUpdatePostAnalytics`, and stamps
+`/metrics/ingest` resolves each post's platform server-side (never trusting the
+client), reuses `extractMetrics` + `batchUpdatePostAnalytics`, and stamps
 `Post.lastMetricsFetchAt` (the dedup gate; stamped even for zero-metric posts).
+Its `results[]` echo the **effective persisted** impressions/traffic, so a
+transient zero read never flips the UI to 0. The same path also serves engage
+reply metrics (`PATCH /engage/sent/:id/metrics`), which share the executor's
+per-platform hourly budget. (`POST /posts/metrics/backfill` remains only as a
+deprecated alias for already-deployed extension builds.)
+
+> The engage path is **demand-driven, not view-prefetched**: clicking a reply's
+> "Engagements" runs a server-authoritative `/posts/metrics/due` check first, so
+> collapsing and reopening a reply does not re-fetch within the interval. There
+> is no separate "page bridge" — the page calls the extension directly.
 
 ---
 

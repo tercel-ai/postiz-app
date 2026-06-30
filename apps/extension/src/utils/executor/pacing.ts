@@ -23,6 +23,36 @@ export async function applyDelay(baseMs: number, jitterMs: number): Promise<void
   if (ms > 0) await sleep(ms);
 }
 
+// Inter-post spacing shared by the alarm batch runner and the page-driven path,
+// so a flagged-account cadence looks the same regardless of what triggered it.
+export const METRICS_INTER_POST_DELAY_MS = 2_000;
+export const METRICS_INTER_POST_JITTER_MS = 3_000;
+
+// Records the last fetch time per scope so consecutive page-driven fetches are
+// spaced like the batch runner's between-post delay — WITHOUT penalizing an
+// isolated request whose gap has already elapsed.
+const lastFetchAt = new Map<string, number>();
+
+/**
+ * Sleep only for the portion of the inter-post gap that has not yet elapsed
+ * since the previous fetch on this scope, then record now. The first fetch (or
+ * one after a long idle) returns immediately; a burst gets spaced out.
+ */
+export async function spaceConsecutiveFetches(scope = 'shared'): Promise<void> {
+  const now = Date.now();
+  const last = lastFetchAt.get(scope);
+  if (last !== undefined) {
+    const target = jitteredDelayMs(
+      METRICS_INTER_POST_DELAY_MS,
+      METRICS_INTER_POST_JITTER_MS
+    );
+    const elapsed = now - last;
+    const remaining = target - elapsed;
+    if (remaining > 0) await sleep(remaining);
+  }
+  lastFetchAt.set(scope, Date.now());
+}
+
 // ─── Hourly request cap (rolling 60-min window, persisted) ────────────────────
 //
 // Persisted in chrome.storage.session so it survives SW suspend/resume within a
@@ -33,9 +63,38 @@ export async function applyDelay(baseMs: number, jitterMs: number): Promise<void
 const CAP_KEY = 'aisee_engage_fetch_window';
 const HOUR_MS = 60 * 60 * 1000;
 
+// Default per-platform hourly fetch cap, shared by ALL demand-driven fetch paths
+// (opportunity scan, calendar post metrics, engage reply metrics) so they draw
+// from one budget per platform scope instead of separate, accidentally larger
+// allowances. Scan tasks may still pass their own configured cap.
+export const DEFAULT_HOURLY_FETCH_CAP = 60;
+
 function capKey(scope: string): string {
   const clean = String(scope || 'shared').replace(/[^a-z0-9_-]/gi, '_');
   return `${CAP_KEY}:${clean}`;
+}
+
+// Per-scope serialization. chrome.storage is async, so a naive read-check-write
+// in tryConsumeHourly races: two concurrent callers can both read a window that
+// is one-below-cap, both decide there is room, and both write — overshooting the
+// cap. Chaining each scope's reservations onto a single promise makes the
+// read→decide→write sequence atomic with respect to other reservations for the
+// same scope.
+const reservationChains = new Map<string, Promise<unknown>>();
+
+function withScopeLock<T>(scope: string, fn: () => Promise<T>): Promise<T> {
+  const prev = reservationChains.get(scope) ?? Promise.resolve();
+  // Swallow the previous result/error so one caller's failure can't reject the
+  // next; each caller still observes its own fn() outcome below.
+  const run = prev.then(fn, fn);
+  reservationChains.set(
+    scope,
+    run.then(
+      () => undefined,
+      () => undefined
+    )
+  );
+  return run;
 }
 
 async function readWindow(scope: string): Promise<number[]> {
@@ -64,19 +123,21 @@ export async function remainingHourlyBudget(
  * Record one fetch if it keeps us within `cap` for the rolling hour. Returns
  * true when the fetch is allowed (and was recorded), false when the cap is hit.
  */
-export async function tryConsumeHourly(
+export function tryConsumeHourly(
   cap: number,
   scope = 'shared'
 ): Promise<boolean> {
-  if (!Number.isFinite(cap) || cap <= 0) return true; // unbounded
-  const win = await readWindow(scope);
-  if (win.length >= cap) {
-    await writeWindow(scope, win); // persist the pruned window
-    return false;
-  }
-  win.push(Date.now());
-  await writeWindow(scope, win);
-  return true;
+  if (!Number.isFinite(cap) || cap <= 0) return Promise.resolve(true); // unbounded
+  return withScopeLock(scope, async () => {
+    const win = await readWindow(scope);
+    if (win.length >= cap) {
+      await writeWindow(scope, win); // persist the pruned window
+      return false;
+    }
+    win.push(Date.now());
+    await writeWindow(scope, win);
+    return true;
+  });
 }
 
 // ─── Inter-keyword spacing ────────────────────────────────────────────────────

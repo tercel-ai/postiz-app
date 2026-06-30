@@ -106,6 +106,24 @@ describe('ingestReplyMetrics — persist extension-scraped reply metrics', () =>
     expect(res.metrics).toMatchObject({ impressions: 1000, likes: 10, bookmarks: 6 });
   });
 
+  it('returns lastMetricsFetchAt=null when the stamp fails to persist', async () => {
+    // If the dedup stamp did not land, the client must not believe the interval
+    // gate advanced — otherwise it would suppress a needed re-fetch.
+    const { service } = build(xCtx);
+    (service as any)._postsService.markMetricsFetched = vi.fn(async () => {
+      throw new Error('db down');
+    });
+
+    const res = await service.ingestReplyMetrics(org, 'r1', {
+      platform: 'x',
+      impressions: 1000,
+    });
+
+    expect(res.lastMetricsFetchAt).toBeNull();
+    // Metrics themselves still persisted — only the stamp report is withheld.
+    expect(res).toMatchObject({ id: 'r1', postId: 'p1', impressions: 1000 });
+  });
+
   it('throws when the reply is not found', async () => {
     const { service } = build(null);
     await expect(

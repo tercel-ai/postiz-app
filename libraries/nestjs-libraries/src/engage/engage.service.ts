@@ -1655,10 +1655,14 @@ export class EngageService implements OnApplicationBootstrap {
     );
     // Stamp lastMetricsFetchAt so the demand-driven server pull treats this as
     // freshly synced and won't immediately re-fetch over the extension's data.
-    const lastMetricsFetchAt = new Date();
-    await this._postsService
-      .markMetricsFetched(org.id, [ctx.postId], lastMetricsFetchAt)
-      .catch(() => undefined);
+    // Only report the stamp to the caller if it actually persisted — otherwise
+    // the client would believe the interval gate advanced when it did not and
+    // suppress a needed re-fetch.
+    const stampedAt = new Date();
+    const stampOk = await this._postsService
+      .markMetricsFetched(org.id, [ctx.postId], stampedAt)
+      .then(() => true)
+      .catch(() => false);
 
     const metrics = normalizeReplyMetrics(
       ctx.platform,
@@ -1672,7 +1676,7 @@ export class EngageService implements OnApplicationBootstrap {
       impressions: built.impressions,
       trafficScore: built.trafficScore,
       metrics,
-      lastMetricsFetchAt,
+      lastMetricsFetchAt: stampOk ? stampedAt : null,
     };
   }
 
