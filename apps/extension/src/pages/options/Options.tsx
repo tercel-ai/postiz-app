@@ -89,12 +89,12 @@ function RedditPostRow({ p }: { p: RedditPost }) {
           u/{p.authorUsername}
           {p.channelName && <span style={{ color: '#999', marginLeft: 6, fontWeight: 400 }}> · {p.channelName}</span>}
         </a>
-        <span className="xdbg-date">{new Date(p.postPublishedAt).toLocaleString('zh-CN')}</span>
+        <span className="xdbg-date">{new Date(p.postPublishedAt).toLocaleString('en-US')}</span>
       </div>
       <div className="xdbg-text">{p.postContent.slice(0, 300)}{p.postContent.length > 300 ? '…' : ''}</div>
       <div className="xdbg-stats">
         ▲ {p.metricScore ?? 0} · 💬 {p.metricComments ?? 0}
-        {p.metricUpvoteRatio != null && ` · ${Math.round(p.metricUpvoteRatio * 100)}% 赞同`}
+        {p.metricUpvoteRatio != null && ` · ${Math.round(p.metricUpvoteRatio * 100)}% upvoted`}
       </div>
     </div>
   );
@@ -298,7 +298,7 @@ export default function Options() {
     <div className="xdbg">
       <style>{XDBG_CSS}</style>
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 4 }}>
-        <h1 style={{ margin: 0 }}>采集调试</h1>
+        <h1 style={{ margin: 0 }}>Collection Debug</h1>
         <div className="xdbg-platform-tabs">
           <button
             className={isX ? 'xdbg-tab-active' : 'xdbg-tab'}
@@ -312,42 +312,42 @@ export default function Options() {
       </div>
       <p className="xdbg-hint">
         {isX
-          ? '在后台标签页里让 x.com 自己发请求并拦截响应（需已登录 x.com）。'
-          : '使用浏览器 session cookie 直接请求 Reddit 公开 API（需已登录 Reddit）。'}
+          ? 'Intercepts x.com requests via a background tab (requires X login).'
+          : 'Fetches Reddit public API using browser session cookies (requires Reddit login).'}
       </p>
 
       {/* ① keyword search */}
       <section className="xdbg-card">
-        <h2>① 关键字搜索（{isX ? 'SearchTimeline' : 'search.json sort=new'}）</h2>
+        <h2>① Keyword Search ({isX ? 'SearchTimeline' : 'search.json sort=new'})</h2>
         <div className="xdbg-controls">
           <input
             value={keyword}
             onChange={(e) => setKeyword(e.target.value)}
-            placeholder={isX ? '输入关键字，例如 openai' : '输入关键字，例如 openai'}
+            placeholder="Enter keyword, e.g. openai"
             onKeyDown={(e) => e.key === 'Enter' && (isX ? runSearch() : runRedditSearch())}
           />
           <button onClick={isX ? runSearch : runRedditSearch} disabled={searchBusy || !keyword.trim()}>
-            {searchBusy ? '搜索中…' : '搜索'}
+            {searchBusy ? 'Searching…' : 'Search'}
           </button>
         </div>
-        {searchErr && <div className="xdbg-err">错误：{searchErr}</div>}
+        {searchErr && <div className="xdbg-err">Error: {searchErr}</div>}
         {searched && !searchErr && (() => {
           const count = isX ? searchResults.length : rSearchResults.length;
           const posts = isX ? searchResults.map(tweetToIngestPost) : rSearchResults.map(redditToIngestPost);
           return (
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 10 }}>
-              <div className="xdbg-count" style={{ margin: 0 }}>共 {count} 条</div>
+              <div className="xdbg-count" style={{ margin: 0 }}>{count} result{count !== 1 ? 's' : ''}</div>
               {count > 0 && (
                 <button className="xdbg-ingest-btn" disabled={ing1Busy}
                   onClick={() => ingestPosts(posts, setIng1Busy, setIng1Result)}>
-                  {ing1Busy ? '入库中…' : '入库'}
+                  {ing1Busy ? 'Ingesting…' : 'Ingest'}
                 </button>
               )}
               {ing1Result && (
                 <span className="xdbg-ingest-result" title={ing1Result.reason}>
                   {ing1Result.accepted >= 0
-                    ? `已入库 ${ing1Result.accepted} 条${ing1Result.keywordMatched !== undefined ? ` (关键词匹配 ${ing1Result.keywordMatched})` : ''}${ing1Result.reason ? ' ⚠️' : ''}`
-                    : '入库失败'}
+                    ? `Ingested ${ing1Result.accepted}${ing1Result.keywordMatched !== undefined ? ` (keyword matched ${ing1Result.keywordMatched})` : ''}${ing1Result.reason ? ' ⚠️' : ''}`
+                    : 'Ingest failed'}
                   {ing1Result.reason && <div className="xdbg-ingest-reason">{ing1Result.reason}</div>}
                 </span>
               )}
@@ -365,21 +365,21 @@ export default function Options() {
       <section className="xdbg-card">
         {isX ? (
           <>
-            <h2>② 按帖子 ID 取数（TweetDetail）</h2>
+            <h2>② Fetch by Post ID (TweetDetail)</h2>
             <div className="xdbg-controls">
               <input
                 value={tweetId}
                 onChange={(e) => setTweetId(e.target.value)}
-                placeholder="帖子数字 ID 或粘贴链接"
+                placeholder="Numeric post ID or paste URL"
                 onKeyDown={(e) => e.key === 'Enter' && runTweet()}
               />
               <button onClick={runTweet} disabled={tweetBusy || !tweetId.trim()}>
-                {tweetBusy ? '获取中…' : '获取'}
+                {tweetBusy ? 'Fetching…' : 'Fetch'}
               </button>
             </div>
-            {tweetErr && <div className="xdbg-err">错误：{tweetErr}</div>}
+            {tweetErr && <div className="xdbg-err">Error: {tweetErr}</div>}
             {fetched && !tweetErr && !tweet && (
-              <div className="xdbg-count">未取到数据（ID 无效或拦截超时）</div>
+              <div className="xdbg-count">No data returned (invalid ID or intercept timeout)</div>
             )}
             {tweet && (
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 10 }}>
@@ -389,11 +389,11 @@ export default function Options() {
                     metricRetweets: tweet.retweets, metricQuotes: tweet.quotes,
                     metricBookmarks: tweet.bookmarks, metricViews: tweet.views,
                   }, setIng2Busy, setIng2Result)}>
-                  {ing2Busy ? '同步中…' : '同步指标'}
+                  {ing2Busy ? 'Syncing…' : 'Sync Metrics'}
                 </button>
                 {ing2Result && (
                   <span className="xdbg-ingest-result" title={ing2Result.reason}>
-                    {ing2Result.accepted >= 0 ? (ing2Result.accepted > 0 ? '已更新指标' : '未找到记录') : '同步失败'}
+                    {ing2Result.accepted >= 0 ? (ing2Result.accepted > 0 ? 'Metrics updated' : 'Record not found') : 'Sync failed'}
                     {ing2Result.reason && <div className="xdbg-ingest-reason">{ing2Result.reason}</div>}
                   </span>
                 )}
@@ -403,21 +403,21 @@ export default function Options() {
           </>
         ) : (
           <>
-            <h2>② 按帖子 URL 或 ID 取数</h2>
+            <h2>② Fetch by Post URL or ID</h2>
             <div className="xdbg-controls">
               <input
                 value={rPostUrlOrId}
                 onChange={(e) => setRPostUrlOrId(e.target.value)}
-                placeholder="帖子完整 URL 或短 ID，例如 abc123"
+                placeholder="Full post URL or short ID, e.g. abc123"
                 onKeyDown={(e) => e.key === 'Enter' && runRedditPost()}
               />
               <button onClick={runRedditPost} disabled={rPostBusy || !rPostUrlOrId.trim()}>
-                {rPostBusy ? '获取中…' : '获取'}
+                {rPostBusy ? 'Fetching…' : 'Fetch'}
               </button>
             </div>
-            {rPostErr && <div className="xdbg-err">错误：{rPostErr}</div>}
+            {rPostErr && <div className="xdbg-err">Error: {rPostErr}</div>}
             {rPostFetched && !rPostErr && !rPost && (
-              <div className="xdbg-count">未取到数据（URL/ID 无效）</div>
+              <div className="xdbg-count">No data returned (invalid URL/ID)</div>
             )}
             {rPost && (
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 10 }}>
@@ -427,11 +427,11 @@ export default function Options() {
                     metricComments: rPost.metricComments ?? 0,
                     metricUpvoteRatio: rPost.metricUpvoteRatio,
                   }, setIng2Busy, setIng2Result)}>
-                  {ing2Busy ? '同步中…' : '同步指标'}
+                  {ing2Busy ? 'Syncing…' : 'Sync Metrics'}
                 </button>
                 {ing2Result && (
                   <span className="xdbg-ingest-result" title={ing2Result.reason}>
-                    {ing2Result.accepted >= 0 ? (ing2Result.accepted > 0 ? '已更新指标' : '未找到记录') : '同步失败'}
+                    {ing2Result.accepted >= 0 ? (ing2Result.accepted > 0 ? 'Metrics updated' : 'Record not found') : 'Sync failed'}
                     {ing2Result.reason && <div className="xdbg-ingest-reason">{ing2Result.reason}</div>}
                   </span>
                 )}
@@ -446,22 +446,22 @@ export default function Options() {
       <section className="xdbg-card">
         {isX ? (
           <>
-            <h2>③ 账号 + 关键词搜索（from:account keywords）</h2>
+            <h2>③ Account + Keyword Search (from:account keywords)</h2>
             <p className="xdbg-hint" style={{ marginBottom: 10 }}>
-              组合查询：搜索某账号发的、包含指定关键词的推文。多个关键词用英文逗号分隔，例如 <code>xspace, xai</code>。
+              Combined query: find tweets from a specific account containing the given keywords. Separate multiple keywords with commas, e.g. <code>xspace, xai</code>.
             </p>
             <div className="xdbg-controls" style={{ flexWrap: 'wrap', gap: 8 }}>
               <input
                 value={akAccount}
                 onChange={(e) => setAkAccount(e.target.value)}
-                placeholder="X 账号，例如 elonmusk"
+                placeholder="X account, e.g. elonmusk"
                 style={{ flex: '1 1 160px', minWidth: 120 }}
                 onKeyDown={(e) => e.key === 'Enter' && runAccountKw()}
               />
               <input
                 value={akKeywords}
                 onChange={(e) => setAkKeywords(e.target.value)}
-                placeholder="关键词（逗号分隔），例如 xspace, xai"
+                placeholder="Keywords (comma-separated), e.g. xspace, xai"
                 style={{ flex: '2 1 240px', minWidth: 180 }}
                 onKeyDown={(e) => e.key === 'Enter' && runAccountKw()}
               />
@@ -469,25 +469,25 @@ export default function Options() {
                 onClick={runAccountKw}
                 disabled={akBusy || !akAccount.replace(/^@/, '').trim() || !akKeywords.trim()}
               >
-                {akBusy ? '搜索中…' : '搜索'}
+                {akBusy ? 'Searching…' : 'Search'}
               </button>
             </div>
             {akQuery && (
-              <div className="xdbg-query-preview">查询（Top）：<code>{akQuery}</code></div>
+              <div className="xdbg-query-preview">Query (Top): <code>{akQuery}</code></div>
             )}
-            {akErr && <div className="xdbg-err">错误：{akErr}</div>}
+            {akErr && <div className="xdbg-err">Error: {akErr}</div>}
             {akSearched && !akErr && (
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 10 }}>
-                <div className="xdbg-count" style={{ margin: 0 }}>共 {akResults.length} 条</div>
+                <div className="xdbg-count" style={{ margin: 0 }}>{akResults.length} result{akResults.length !== 1 ? 's' : ''}</div>
                 {akResults.length > 0 && (
                   <button className="xdbg-ingest-btn" disabled={ing3Busy}
                     onClick={() => ingestPosts(akResults.map(tweetToIngestPost), setIng3Busy, setIng3Result)}>
-                    {ing3Busy ? '入库中…' : '入库'}
+                    {ing3Busy ? 'Ingesting…' : 'Ingest'}
                   </button>
                 )}
                 {ing3Result && (
                   <span className="xdbg-ingest-result" title={ing3Result.reason}>
-                    {ing3Result.accepted >= 0 ? `已入库 ${ing3Result.accepted} 条${ing3Result.keywordMatched !== undefined ? ` (关键词匹配 ${ing3Result.keywordMatched})` : ''}` : '入库失败'}
+                    {ing3Result.accepted >= 0 ? `Ingested ${ing3Result.accepted}${ing3Result.keywordMatched !== undefined ? ` (keyword matched ${ing3Result.keywordMatched})` : ''}` : 'Ingest failed'}
                     {ing3Result.reason && <div className="xdbg-ingest-reason">{ing3Result.reason}</div>}
                   </span>
                 )}
@@ -499,42 +499,42 @@ export default function Options() {
           </>
         ) : (
           <>
-            <h2>③ 用户最近帖子（user/submitted + 关键词过滤）</h2>
+            <h2>③ Recent User Posts (user/submitted + keyword filter)</h2>
             <p className="xdbg-hint" style={{ marginBottom: 10 }}>
-              拉取指定用户的最近投稿，可选关键词做客户端过滤（逗号分隔）。
+              Fetch recent posts from a specific user with optional client-side keyword filtering (comma-separated).
             </p>
             <div className="xdbg-controls" style={{ flexWrap: 'wrap', gap: 8 }}>
               <input
                 value={rUserName}
                 onChange={(e) => setRUserName(e.target.value)}
-                placeholder="Reddit 用户名，例如 spez"
+                placeholder="Reddit username, e.g. spez"
                 style={{ flex: '1 1 160px', minWidth: 120 }}
                 onKeyDown={(e) => e.key === 'Enter' && runRedditUser()}
               />
               <input
                 value={rUserKeywords}
                 onChange={(e) => setRUserKeywords(e.target.value)}
-                placeholder="关键词（可选，逗号分隔）"
+                placeholder="Keywords (optional, comma-separated)"
                 style={{ flex: '2 1 240px', minWidth: 180 }}
                 onKeyDown={(e) => e.key === 'Enter' && runRedditUser()}
               />
               <button onClick={runRedditUser} disabled={rUserBusy || !rUserName.replace(/^u\//, '').trim()}>
-                {rUserBusy ? '搜索中…' : '搜索'}
+                {rUserBusy ? 'Searching…' : 'Search'}
               </button>
             </div>
-            {rUserErr && <div className="xdbg-err">错误：{rUserErr}</div>}
+            {rUserErr && <div className="xdbg-err">Error: {rUserErr}</div>}
             {rUserSearched && !rUserErr && (
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 10 }}>
-                <div className="xdbg-count" style={{ margin: 0 }}>共 {rUserResults.length} 条</div>
+                <div className="xdbg-count" style={{ margin: 0 }}>{rUserResults.length} result{rUserResults.length !== 1 ? 's' : ''}</div>
                 {rUserResults.length > 0 && (
                   <button className="xdbg-ingest-btn" disabled={ing3Busy}
                     onClick={() => ingestPosts(rUserResults.map(redditToIngestPost), setIng3Busy, setIng3Result)}>
-                    {ing3Busy ? '入库中…' : '入库'}
+                    {ing3Busy ? 'Ingesting…' : 'Ingest'}
                   </button>
                 )}
                 {ing3Result && (
                   <span className="xdbg-ingest-result" title={ing3Result.reason}>
-                    {ing3Result.accepted >= 0 ? `已入库 ${ing3Result.accepted} 条${ing3Result.keywordMatched !== undefined ? ` (关键词匹配 ${ing3Result.keywordMatched})` : ''}` : '入库失败'}
+                    {ing3Result.accepted >= 0 ? `Ingested ${ing3Result.accepted}${ing3Result.keywordMatched !== undefined ? ` (keyword matched ${ing3Result.keywordMatched})` : ''}` : 'Ingest failed'}
                     {ing3Result.reason && <div className="xdbg-ingest-reason">{ing3Result.reason}</div>}
                   </span>
                 )}

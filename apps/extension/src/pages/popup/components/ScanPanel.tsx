@@ -96,7 +96,7 @@ function fmtTime(iso: string | null | undefined): string {
   const d = new Date(iso);
   const diffMs = d.getTime() - Date.now();
   const absSec = Math.abs(diffMs / 1000);
-  if (absSec < 60) return diffMs < 0 ? '刚刚' : '即刻';
+  if (absSec < 60) return diffMs < 0 ? 'just now' : 'now';
   const absMins = Math.floor(absSec / 60);
   if (absMins < 60) return (diffMs < 0 ? '-' : '+') + absMins + 'm';
   const absHrs = Math.floor(absMins / 60);
@@ -105,7 +105,7 @@ function fmtTime(iso: string | null | undefined): string {
 }
 function fmtAbs(iso: string | null | undefined): string {
   if (!iso) return '—';
-  return new Date(iso).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+  return new Date(iso).toLocaleString('en-US', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
 }
 function nextDue(lastAt: string | null | undefined, intervalHours: number): string | null {
   if (!lastAt) return null;
@@ -251,13 +251,13 @@ export function EngageScanPanel() {
       <div className="sc-toolbar">
         {(['x', 'reddit', 'both'] as const).map((p) => (
           <button key={p} className={`sc-tab${platform === p ? ' sc-tab-active' : ''}`} onClick={() => setPlatform(p)}>
-            {p === 'x' ? '𝕏' : p === 'reddit' ? 'Reddit' : '全部'}
+            {p === 'x' ? '𝕏' : p === 'reddit' ? 'Reddit' : 'All'}
           </button>
         ))}
         <div style={{ flex: 1 }} />
         {syncAgo && <span className="sc-muted">{syncAgo}</span>}
         <button className="sc-sync-btn" onClick={loadConfig} disabled={cfgBusy}>
-          {cfgBusy ? '同步中…' : config ? '重新同步' : '同步配置'}
+          {cfgBusy ? 'Syncing…' : config ? 'Re-sync' : 'Sync Config'}
         </button>
       </div>
       {cfgErr && <div className="sc-err">{cfgErr}</div>}
@@ -266,7 +266,7 @@ export function EngageScanPanel() {
       {config ? (
         <div className="sc-table">
           <div className="sc-thead">
-            <span>扫描单元</span><span>上次</span><span>状态</span>
+            <span>Scan Unit</span><span>Last</span><span>Status</span>
           </div>
           {activeKws.flatMap((kw) => {
             const cursors = kw.scanCursors ?? [];
@@ -274,7 +274,7 @@ export function EngageScanPanel() {
               <div key={kw.id + ':unseen'} className="sc-row">
                 <span className="sc-unit"><span className="sc-bp">KW</span>{kw.keyword}</span>
                 <span className="sc-t">—</span>
-                <span className="sc-due">待扫</span>
+                <span className="sc-due">Pending</span>
               </div>
             )];
             return cursors.map((cur) => {
@@ -284,7 +284,7 @@ export function EngageScanPanel() {
                 <div key={kw.id + ':' + cur.platform} className="sc-row">
                   <span className="sc-unit"><span className="sc-bp">{pl}</span>{kw.keyword}</span>
                   <span className="sc-t">{fmtAbs(cur.lastScannedAt)}</span>
-                  <span className={due ? 'sc-due' : 'sc-cool'}>{due ? '待扫' : fmtTime(cur.nextScanAt)}</span>
+                  <span className={due ? 'sc-due' : 'sc-cool'}>{due ? 'Pending' : fmtTime(cur.nextScanAt)}</span>
                 </div>
               );
             });
@@ -297,7 +297,7 @@ export function EngageScanPanel() {
               <div key={a.id} className="sc-row">
                 <span className="sc-unit"><span className="sc-bp">𝕏</span>@{a.username}</span>
                 <span className="sc-t">{fmtAbs(last)}</span>
-                <span className={due ? 'sc-due' : 'sc-cool'}>{due ? '待扫' : fmtTime(nd)}</span>
+                <span className={due ? 'sc-due' : 'sc-cool'}>{due ? 'Pending' : fmtTime(nd)}</span>
               </div>
             );
           })}
@@ -309,32 +309,32 @@ export function EngageScanPanel() {
               <div key={c.id} className="sc-row">
                 <span className="sc-unit"><span className="sc-bp">r/</span>{c.channelName || c.channelId}</span>
                 <span className="sc-t">{fmtAbs(last)}</span>
-                <span className={due ? 'sc-due' : 'sc-cool'}>{due ? '待扫' : fmtTime(nd)}</span>
+                <span className={due ? 'sc-due' : 'sc-cool'}>{due ? 'Pending' : fmtTime(nd)}</span>
               </div>
             );
           })}
           {activeKws.length + visAccounts.length + visChannels.length === 0 && (
-            <div className="sc-empty">无扫描单元（当前平台过滤下）</div>
+            <div className="sc-empty">No scan units (for current platform filter)</div>
           )}
         </div>
       ) : (
-        !cfgBusy && <div className="sc-empty">点击"同步配置"加载扫描单元。</div>
+        !cfgBusy && <div className="sc-empty">Click "Sync Config" to load scan units.</div>
       )}
 
       {/* Claim controls */}
       <div className="sc-claim-bar">
         <label className="sc-force-lbl">
           <input type="checkbox" checked={force} onChange={(e) => setForce(e.target.checked)} />
-          强制
+          Force
         </label>
         <button className="sc-claim-btn" onClick={claimTasks} disabled={claimBusy}>
-          {claimBusy ? '领取中…' : '领取任务'}
+          {claimBusy ? 'Claiming…' : 'Claim Tasks'}
         </button>
       </div>
       {claimErr && <div className="sc-err">{claimErr}</div>}
       {tasks.length === 0 && !claimBusy && (
         <div className="sc-empty" style={{ marginTop: 4 }}>
-          {force ? '强制模式下仍无任务，配置可能为空。' : '暂无任务，或全在冷却期（勾选"强制"重试）。'}
+          {force ? 'No tasks even in force mode — config may be empty.' : 'No tasks available, or all on cooldown (check "Force" to retry).'}
         </div>
       )}
 
@@ -349,17 +349,17 @@ export function EngageScanPanel() {
                 <button className="sc-btn-run"
                   disabled={st.status === 'running' || st.status === 'ingesting' || st.status === 'ingested'}
                   onClick={() => executeTask(t)}>
-                  {st.status === 'running' ? '扫描中…' : st.status === 'done' ? '重扫' : '执行'}
+                  {st.status === 'running' ? 'Scanning…' : st.status === 'done' ? 'Re-scan' : 'Run'}
                 </button>
                 {st.status === 'done' && (
                   <button className="sc-btn-ingest" onClick={() => ingestTask(t)}>
-                    入库({st.posts.length})
+                    Ingest ({st.posts.length})
                   </button>
                 )}
-                {st.status === 'ingesting' && <button disabled className="sc-btn-ingest">入库中…</button>}
+                {st.status === 'ingesting' && <button disabled className="sc-btn-ingest">Ingesting…</button>}
                 {st.status === 'ingested' && <span className="sc-ok">✓ {st.accepted}</span>}
                 {st.status === 'err' && (
-                  <button className="sc-btn-release" onClick={() => releaseTask(t)}>释放锁</button>
+                  <button className="sc-btn-release" onClick={() => releaseTask(t)}>Release Lock</button>
                 )}
               </div>
               {st.status === 'err' && <div className="sc-err sc-task-err">{st.err}</div>}
@@ -368,11 +368,11 @@ export function EngageScanPanel() {
                   {st.posts.slice(0, 5).map((p) => (
                     <div key={p.externalPostId} className="sc-post">
                       <a href={p.externalPostUrl} target="_blank" rel="noreferrer">@{p.authorUsername}</a>
-                      <span className="sc-post-time">{new Date(p.postPublishedAt).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}</span>
+                      <span className="sc-post-time">{new Date(p.postPublishedAt).toLocaleString('en-US', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}</span>
                       <div className="sc-post-text">{p.postContent.slice(0, 100)}{p.postContent.length > 100 ? '…' : ''}</div>
                     </div>
                   ))}
-                  {st.posts.length > 5 && <div className="sc-muted">…还有 {st.posts.length - 5} 条</div>}
+                  {st.posts.length > 5 && <div className="sc-muted">…and {st.posts.length - 5} more</div>}
                 </div>
               )}
             </div>
