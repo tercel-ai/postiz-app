@@ -396,16 +396,16 @@ export class EngageController {
 
   // 5 manual triggers per org per hour — prevents API abuse while allowing
   // legitimate re-scans after adding new keywords.
-  @ApiOperation({ summary: 'Manually trigger an immediate keyword/channel scan' })
+  // Uses triggerDueScan (not force): newly added units (null cursor) are
+  // always "due" so they scan immediately; units still in cooldown are
+  // skipped. Force-scan is reserved for first-time setup (saveConfig /
+  // setupEngage) where nothing has a cursor yet.
+  @ApiOperation({ summary: 'Trigger a due-only keyword/channel scan (new units scan immediately, cooldown-respecting)' })
   @ApiResponse({ status: 429, description: 'Rate limit exceeded (5/hour)' })
   @Throttle({ default: { limit: 5, ttl: 3_600_000 } })
   @Post('/scan')
-  triggerScan(
-    @GetOrgFromRequest() org: Organization,
-    @Body(new ParseArrayPipe({ items: String, optional: true }))
-    keywordIds: string[]
-  ) {
-    return this._engageService.triggerImmediateScan(org, keywordIds);
+  triggerScan(@GetOrgFromRequest() org: Organization) {
+    return this._engageService.triggerDueScan(org);
   }
 
   @ApiOperation({
