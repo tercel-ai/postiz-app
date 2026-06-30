@@ -20,6 +20,8 @@ import {
   fetchRedditPost,
   scanRedditUser,
 } from '@gitroom/extension/utils/executor/reddit.collect';
+import { fetchReplyMetrics } from '@gitroom/extension/utils/executor/metrics.reply';
+import { reapOrphanXReadTab } from '@gitroom/extension/utils/executor/x.tab-reader';
 import { backendCall } from '@gitroom/extension/utils/executor/api';
 import { scanReddit } from '@gitroom/extension/utils/executor/scan.reddit';
 import { scanX } from '@gitroom/extension/utils/executor/scan.x';
@@ -200,6 +202,9 @@ async function reconcileBrowserSession(): Promise<void> {
 function reArmAlarms(): void {
   void reArmRefreshAlarmIfLoggedIn();
   void ensureEngageScanAlarm();
+  // The shared X read-tab's idle-close timer lives in this worker; if a prior
+  // worker was killed mid-idle its tab would linger, so reap it on startup.
+  void reapOrphanXReadTab();
 }
 chrome.runtime.onStartup?.addListener(reArmAlarms);
 chrome.runtime.onInstalled?.addListener(reArmAlarms);
@@ -358,6 +363,18 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
   if (request.action === ENGAGE_EXTENSION_ACTION.scanRedditUser) {
     scanRedditUser(request.username, request.keywords ?? [])
       .then((posts) => sendResponse({ ok: true, posts }))
+      .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
+    return true;
+  }
+
+  // ─── On-demand reply-metrics scrape (Replies page "Engagements") ─────────
+  if (request.action === ENGAGE_EXTENSION_ACTION.fetchReplyMetrics) {
+    fetchReplyMetrics(request.platform, request.releaseURL)
+      .then((metrics) =>
+        metrics
+          ? sendResponse({ ok: true, metrics })
+          : sendResponse({ ok: false, error: 'No metrics found for this reply' })
+      )
       .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
     return true;
   }

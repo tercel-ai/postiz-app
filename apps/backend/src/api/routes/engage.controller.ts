@@ -49,6 +49,7 @@ import {
   LocateOpportunityDto,
   LocateSentReplyDto,
   RefreshMetricsDto,
+  IngestReplyMetricsDto,
   SaveDraftDto,
   SaveEngageConfigDto,
   SetupEngageDto,
@@ -811,6 +812,18 @@ export class EngageController {
       body.url,
       body.author
     );
+  }
+
+  @ApiOperation({ summary: "Persist extension-scraped metrics for one published reply. The browser extension reads the reply's own page (X TweetDetail / Reddit comment .json) and posts the raw public counters here; the server computes impressions/traffic and returns the normalized metrics so the page can update the card in place." })
+  @ApiResponse({ status: 404, description: 'Sent reply not found' })
+  @ApiResponse({ status: 400, description: 'Not an X/Reddit reply, platform mismatch, or the reply has no published post to attach metrics to' })
+  @Patch('/sent/:id/metrics')
+  ingestReplyMetrics(
+    @GetOrgFromRequest() org: Organization,
+    @Param('id') id: string,
+    @Body() body: IngestReplyMetricsDto
+  ) {
+    return this._engageService.ingestReplyMetrics(org, id, body);
   }
 
   // ─── Dashboard Stats ──────────────────────────────────────────────────────

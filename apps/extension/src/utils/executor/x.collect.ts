@@ -10,7 +10,7 @@
 // (x-capture.ts) to be active (registered via the manifest content_script).
 
 import { ParsedTweet, parseTimelineTweets } from './x.parse';
-import { openXReadTab, readViaProfile, readXOnce } from './x.tab-reader';
+import { openXReadTab, readViaProfile, readXShared } from './x.tab-reader';
 import { parseSearchList } from './scan.x';
 
 // Kept as a compatibility export for existing parser tests and debug callers.
@@ -104,13 +104,19 @@ export async function scanXAccountFromPage(
   return parseSearchList(data);
 }
 
-/** Fetch a single tweet's data via X's own TweetDetail (status page). */
+/**
+ * Fetch a single tweet's data via X's own TweetDetail (status page).
+ *
+ * Uses the shared warm read tab (readXShared): refreshing several replies in a
+ * row reuses one background tab instead of opening/closing one per read. X's own
+ * JS still fires the TweetDetail request, so the real fingerprint is preserved.
+ */
 export async function fetchXPostFromPage(
   idOrUrl: string
 ): Promise<ParsedTweet | null> {
   const id = extractTweetId(idOrUrl);
   if (!id) return null;
-  const resp = await readXOnce(
+  const resp = await readXShared(
     'https://x.com/i/web/status/' + id,
     'TweetDetail'
   );

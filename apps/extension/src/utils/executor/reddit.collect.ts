@@ -85,6 +85,75 @@ export async function fetchRedditPost(
   return toPost(postData);
 }
 
+// The Reddit comment id is the base36 token in a comment permalink:
+//   /r/<sub>/comments/<postId>/<slug-or-"comment">/<commentId>/
+// Mirrors the backend's parseRedditCommentId (reddit-url.ts) so the same URL
+// resolves to the same id on both sides. Returns null when the URL points at a
+// post (no comment segment) — nothing to read metrics for.
+const COMMENT_ID_RE = /\/comments\/[^/]+\/[^/]+\/([a-z0-9]+)\/?/;
+function parseRedditCommentId(url: string): string | null {
+  let path = url.trim();
+  try {
+    path = new URL(path).pathname;
+  } catch {
+    try {
+      path = new URL(`https://${path}`).pathname;
+    } catch {
+      /* fall back to the raw string */
+    }
+  }
+  return path.match(COMMENT_ID_RE)?.[1] ?? null;
+}
+
+/**
+ * Fetch OUR posted reply's metrics — the comment's score and the number of
+ * direct child replies under it. A reply is a comment (t1_), not a post (t3_),
+ * so this reads the comment thread, NOT fetchRedditPost. Mirrors the backend's
+ * syncRedditMetrics public path (browser session cookies clear the WAF, so no
+ * loid/proxy juggling is needed here).
+ *
+ * @param releaseURL  The reply's permalink (comment URL we backfilled on send).
+ * @returns { score, comments } or null when the URL has no comment id.
+ */
+export async function fetchRedditReplyMetrics(
+  releaseURL: string
+): Promise<{ score: number; comments: number } | null> {
+  const commentId = parseRedditCommentId(releaseURL);
+  if (!commentId) return null;
+
+  // Comment-level score lives on the t1 object via /api/info.
+  const infoJson = await rFetch(
+    `${REDDIT_BASE}/api/info.json?id=t1_${commentId}`
+  );
+  const commentData = infoJson?.data?.children?.[0]?.data;
+  if (!commentData) return null;
+  const score =
+    typeof commentData.score === 'number' ? commentData.score : 0;
+
+  // "comments" for a reply means its direct child replies. The t1 object does
+  // not carry that count, so read the comment subtree. depth MUST be >= 2: with
+  // comment=<id> the target comment is the tree root (level 1), so its own
+  // direct replies live at level 2 (depth=1 collapses them into a "more" stub).
+  let comments = 0;
+  const threadMatch = releaseURL.match(/\/r\/([^/]+)\/comments\/([a-z0-9]+)\//);
+  if (threadMatch) {
+    try {
+      const [, subreddit, threadId] = threadMatch;
+      const threadJson = await rFetch(
+        `${REDDIT_BASE}/r/${subreddit}/comments/${threadId}/.json?comment=${commentId}&depth=2&limit=100`
+      );
+      const childReplies: any[] =
+        threadJson?.[1]?.data?.children?.[0]?.data?.replies?.data?.children ??
+        [];
+      comments = childReplies.filter((r) => r.kind !== 'more').length;
+    } catch {
+      // Best-effort: a thread fetch failure leaves comments at 0; score still wrote.
+    }
+  }
+
+  return { score, comments };
+}
+
 /**
  * ③ Fetch a Reddit user's recent submissions, optionally filtered by keywords.
  *

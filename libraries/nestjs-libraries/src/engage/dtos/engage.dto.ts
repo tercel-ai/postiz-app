@@ -7,6 +7,7 @@ import {
   IsEnum,
   IsIn,
   IsInt,
+  IsNumber,
   IsOptional,
   IsString,
   Max,
@@ -630,6 +631,50 @@ export class RefreshMetricsDto {
   @ArrayMaxSize(100)
   @IsString({ each: true })
   postIds: string[];
+}
+
+// Extension-sourced metrics for ONE published reply. The browser extension
+// scrapes the reply's own page (X TweetDetail / Reddit comment .json) and posts
+// the raw public counters here; the server computes impressions/traffic and
+// persists them. Only the platform's own counter set is sent — unknown fields
+// are ignored, missing ones default to 0 server-side.
+export class IngestReplyMetricsDto {
+  @IsIn(['x', 'reddit'])
+  platform: 'x' | 'reddit';
+
+  // X public_metrics
+  @IsOptional()
+  @IsNumber()
+  impressions?: number;
+
+  @IsOptional()
+  @IsNumber()
+  likes?: number;
+
+  @IsOptional()
+  @IsNumber()
+  replies?: number;
+
+  @IsOptional()
+  @IsNumber()
+  retweets?: number;
+
+  @IsOptional()
+  @IsNumber()
+  quotes?: number;
+
+  @IsOptional()
+  @IsNumber()
+  bookmarks?: number;
+
+  // Reddit comment counters
+  @IsOptional()
+  @IsNumber()
+  score?: number;
+
+  @IsOptional()
+  @IsNumber()
+  comments?: number;
 }
 
 // ─── Dashboard ──────────────────────────────────────────────────────────────

@@ -5,6 +5,7 @@ import {
   recordApiUsage,
   X_USAGE,
 } from '@gitroom/nestjs-libraries/database/prisma/api-usage/api-usage.service';
+import { computeTrafficScore } from '@gitroom/nestjs-libraries/integrations/social/traffic.calculator';
 
 /**
  * Shared engage metrics-sync logic for the demand-driven (event-driven) reply-
@@ -297,4 +298,85 @@ export async function dispatchReplyMetricsSync(
     );
   }
   return 'skipped';
+}
+
+/**
+ * Raw reply metrics as scraped by the browser extension from the reply's OWN
+ * page — X via TweetDetail (status page), Reddit via the comment .json. The
+ * extension cannot (and must not) compute the weighted Traffic index; it only
+ * forwards the public counters. buildReplyMetricsFromRaw turns these into the
+ * persisted Post shape (impressions + analytics + trafficScore) using the EXACT
+ * same formulas as the server-side OAuth/public sync, so an extension-sourced
+ * refresh is indistinguishable from a backend-sourced one downstream.
+ */
+export interface RawReplyMetrics {
+  platform: 'x' | 'reddit';
+  // X public_metrics
+  impressions?: number;
+  likes?: number;
+  replies?: number;
+  retweets?: number;
+  quotes?: number;
+  bookmarks?: number;
+  // Reddit comment counters
+  score?: number;
+  comments?: number;
+}
+
+export interface BuiltReplyMetrics {
+  impressions: number;
+  trafficScore: number;
+  analytics: Array<{
+    label: string;
+    data: Array<{ total: string; date: string }>;
+    percentageChange: number;
+  }>;
+}
+
+/**
+ * Turn extension-scraped raw counters into the persisted Post metrics shape.
+ * X labels (impressions/likes/replies/retweets/quotes/bookmarks) and the Reddit
+ * formula (impressions = (score+comments)×20, traffic = score×1 + comments×3)
+ * mirror syncXMetrics/syncRedditMetrics so normalizeReplyMetrics reads them back
+ * identically. Non-finite inputs coerce to 0 (Prisma Float columns reject NaN).
+ */
+export function buildReplyMetricsFromRaw(
+  raw: RawReplyMetrics
+): BuiltReplyMetrics {
+  const today = new Date().toISOString().slice(0, 10);
+  const num = (v: unknown): number => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 0;
+  };
+  const entry = (label: string, value: number) => ({
+    label,
+    data: [{ total: String(value), date: today }],
+    percentageChange: 0,
+  });
+
+  if (raw.platform === 'reddit') {
+    const score = num(raw.score);
+    const comments = num(raw.comments);
+    return {
+      impressions: Math.round((score + comments) * 20),
+      // Reddit_traffic_index = score×1 + num_comments×3 (Appendix formula).
+      trafficScore: score * 1 + comments * 3,
+      analytics: [entry('score', score), entry('comments', comments)],
+    };
+  }
+
+  const impressions = num(raw.impressions);
+  const analytics = [
+    entry('impressions', impressions),
+    entry('likes', num(raw.likes)),
+    entry('replies', num(raw.replies)),
+    entry('retweets', num(raw.retweets)),
+    entry('quotes', num(raw.quotes)),
+    entry('bookmarks', num(raw.bookmarks)),
+  ];
+  // X_traffic_index uses the per-platform weighted formula (impressions are not
+  // weighted, matching the spec); computeTrafficScore returns null when no label
+  // matches, which only happens for an all-empty set → 0.
+  const trafficScore = computeTrafficScore('x', analytics) ?? 0;
+  return { impressions, trafficScore, analytics };
 }

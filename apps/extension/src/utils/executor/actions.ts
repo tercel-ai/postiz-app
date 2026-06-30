@@ -7,6 +7,7 @@ export const ENGAGE_EXTENSION_ACTION = {
   scanRedditKeyword: 'engage:scan-reddit-keyword',
   fetchRedditPost: 'engage:fetch-reddit-post',
   scanRedditUser: 'engage:scan-reddit-user',
+  fetchReplyMetrics: 'engage:fetch-reply-metrics',
   ingestCollectedPosts: 'engage:ingest-collected-posts',
   syncCollectedMetrics: 'engage:sync-collected-metrics',
   loadConfig: 'engage:load-config',

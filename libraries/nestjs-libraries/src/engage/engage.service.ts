@@ -53,8 +53,11 @@ import { getRedditToken, redditAuthHeaders } from '@gitroom/nestjs-libraries/eng
 import { redditPublicGet } from '@gitroom/nestjs-libraries/engage/reddit-loid';
 import {
   dispatchReplyMetricsSync,
+  buildReplyMetricsFromRaw,
   type MetricsSyncDeps,
+  type RawReplyMetrics,
 } from '@gitroom/nestjs-libraries/engage/engage-metrics-sync';
+import { normalizeReplyMetrics } from '@gitroom/nestjs-libraries/engage/engage-metrics-stats';
 import { normalizeKeyword } from '@gitroom/nestjs-libraries/engage/engage-scan-lease.service';
 import { EngageScanConfigService } from '@gitroom/nestjs-libraries/engage/engage-scan-config.service';
 import {
@@ -1605,6 +1608,69 @@ export class EngageService implements OnApplicationBootstrap {
       accepted: dueRows.map((r) => r.id),
       throttled,
       nextRefreshAt: new Date(nextRefreshMs).toISOString(),
+    };
+  }
+
+  /**
+   * Persist metrics for ONE published reply that the browser extension scraped
+   * from the reply's own page (X TweetDetail / Reddit comment .json) and handed
+   * back to the page. Unlike refreshMetricsForPosts (server pulls via OAuth /
+   * public APIs), here the EXTENSION is the fetcher and the server only normalises
+   * + stores — but the persisted shape is identical, so the list/dashboard read
+   * it back exactly the same way. Returns the canonical normalized metrics so the
+   * page can update the card in place without re-fetching the list.
+   */
+  async ingestReplyMetrics(
+    org: Organization,
+    sentReplyId: string,
+    raw: RawReplyMetrics
+  ) {
+    const ctx = await this._engageRepository.getSentReplyContext(
+      org.id,
+      sentReplyId
+    );
+    if (!ctx) throw new NotFoundException('Sent reply not found');
+    if (ctx.platform !== 'x' && ctx.platform !== 'reddit') {
+      throw new BadRequestException(
+        'Metrics ingest is only valid for X or Reddit replies'
+      );
+    }
+    if (raw.platform !== ctx.platform) {
+      throw new BadRequestException('Metrics platform mismatch for this reply');
+    }
+    // The reply must be a live, linked post; otherwise there is nothing whose
+    // metrics these counters describe (a DRAFT/ERROR/no-URL reply was never sent).
+    if (ctx.state !== 'PUBLISHED' || !ctx.releaseURL) {
+      throw new BadRequestException(
+        'This reply has no published post to attach metrics to'
+      );
+    }
+
+    const built = buildReplyMetricsFromRaw({ ...raw, platform: ctx.platform });
+    await this._engageRepository.updatePostMetrics(
+      ctx.postId,
+      built.impressions,
+      built.analytics,
+      built.trafficScore
+    );
+    // Stamp lastMetricsFetchAt so the demand-driven server pull treats this as
+    // freshly synced and won't immediately re-fetch over the extension's data.
+    await this._postsService
+      .markMetricsFetched(org.id, [ctx.postId])
+      .catch(() => undefined);
+
+    const metrics = normalizeReplyMetrics(
+      ctx.platform,
+      built.analytics,
+      built.impressions,
+      built.trafficScore
+    );
+    return {
+      id: sentReplyId,
+      postId: ctx.postId,
+      impressions: built.impressions,
+      trafficScore: built.trafficScore,
+      metrics,
     };
   }
 

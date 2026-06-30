@@ -282,3 +282,131 @@ export async function readXOnce(
     await session.close();
   }
 }
+
+// ── Shared warm read tab (reused across by-id reads to avoid tab churn) ──────
+//
+// Opening a fresh background tab per read is wasteful when the user refreshes
+// several replies in a row. We keep ONE background tab warm and navigate it per
+// read — X's own JS still fires the GraphQL, so the real fingerprint
+// (x-client-transaction-id / Referer / sec-fetch) is preserved exactly as a
+// one-off read. It opens lazily on the first read and auto-closes after an idle
+// gap. MV3 service workers can be killed before the idle timer fires, so we also
+// record the tab id in chrome.storage.session and reap any orphan on the next
+// worker start (reapOrphanXReadTab, called from the background entry point).
+
+const SHARED_TAB_IDLE_MS = 45_000;
+const SHARED_TAB_STORAGE_KEY = 'aisee_x_read_tab_id';
+
+let sharedTabId: number | null = null;
+let sharedIdleTimer: ReturnType<typeof setTimeout> | null = null;
+// Serialise reads: one tab can only capture one op at a time, so concurrent
+// callers queue on this chain instead of clobbering each other's navigation.
+let sharedChain: Promise<unknown> = Promise.resolve();
+let removalListenerAttached = false;
+
+async function rememberSharedTab(id: number | null): Promise<void> {
+  try {
+    if (id == null) await chrome.storage.session.remove(SHARED_TAB_STORAGE_KEY);
+    else await chrome.storage.session.set({ [SHARED_TAB_STORAGE_KEY]: id });
+  } catch {
+    // storage.session unavailable → orphan reaping degrades, reads still work.
+  }
+}
+
+function attachRemovalListener(): void {
+  if (removalListenerAttached) return;
+  removalListenerAttached = true;
+  try {
+    chrome.tabs.onRemoved.addListener((closedId) => {
+      if (closedId !== sharedTabId) return;
+      // The user (or the browser) closed our warm tab → drop the singleton so
+      // the next read lazily opens a fresh one.
+      sharedTabId = null;
+      if (sharedIdleTimer) {
+        clearTimeout(sharedIdleTimer);
+        sharedIdleTimer = null;
+      }
+      void rememberSharedTab(null);
+    });
+  } catch {
+    // onRemoved unavailable in this context — non-fatal.
+  }
+}
+
+async function tabExists(id: number): Promise<boolean> {
+  try {
+    await chrome.tabs.get(id);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Close a read tab orphaned by a previous (terminated) service worker. Call once
+ * on worker startup: the idle-close timer lives in the worker, so if the worker
+ * is killed mid-idle the tab would otherwise linger forever.
+ */
+export async function reapOrphanXReadTab(): Promise<void> {
+  try {
+    const stored = await chrome.storage.session.get(SHARED_TAB_STORAGE_KEY);
+    const id = stored?.[SHARED_TAB_STORAGE_KEY];
+    if (typeof id !== 'number') return;
+    // Don't kill a tab this (already-running) worker is actively reusing.
+    if (id !== sharedTabId) await closeTab(id);
+    await rememberSharedTab(null);
+  } catch {
+    // Nothing stored / storage unavailable — nothing to reap.
+  }
+}
+
+function scheduleSharedIdleClose(): void {
+  if (sharedIdleTimer) clearTimeout(sharedIdleTimer);
+  sharedIdleTimer = setTimeout(() => {
+    sharedIdleTimer = null;
+    const id = sharedTabId;
+    sharedTabId = null;
+    void rememberSharedTab(null);
+    if (id != null) void closeTab(id);
+  }, SHARED_TAB_IDLE_MS);
+}
+
+async function ensureSharedTab(): Promise<number | null> {
+  attachRemovalListener();
+  if (sharedTabId != null && (await tabExists(sharedTabId))) return sharedTabId;
+  sharedTabId = null;
+  try {
+    const tab = await chrome.tabs.create({ url: 'about:blank', active: false });
+    sharedTabId = tab.id ?? null;
+  } catch (e) {
+    console.warn('[aisee][x-read] shared tabs.create failed', e);
+    return null;
+  }
+  await rememberSharedTab(sharedTabId);
+  return sharedTabId;
+}
+
+/**
+ * By-id read on the shared warm tab — reused across calls so refreshing several
+ * replies in a row doesn't open/close a tab each time. Serialised; degrades to a
+ * one-off tab if the shared tab can't be created; reschedules the idle-close
+ * after every read so the tab disappears once the user stops refreshing.
+ */
+export async function readXShared(
+  url: string,
+  op: string
+): Promise<unknown | null> {
+  const run = sharedChain.then(async () => {
+    const id = await ensureSharedTab();
+    if (id == null) return readXOnce(url, op);
+    try {
+      return await navigateAndCapture(id, url, op);
+    } finally {
+      scheduleSharedIdleClose();
+    }
+  });
+  // Keep the chain alive even if this read rejects, so a failure doesn't wedge
+  // every queued read behind it.
+  sharedChain = run.catch(() => undefined);
+  return run;
+}

@@ -23,6 +23,10 @@ export const EXTENSION_MESSAGE = {
   engageScan: `${EXTENSION_BRAND}:engage-scan`,
   /** extension → page: completed scan-loop summary or error */
   engageScanResult: `${EXTENSION_BRAND}:engage-scan-result`,
+  /** page → extension: scrape one published reply's own metrics (by release URL) */
+  engageMetrics: `${EXTENSION_BRAND}:engage-metrics`,
+  /** extension → page: scraped reply metrics result (carries raw counters or error) */
+  engageMetricsResult: `${EXTENSION_BRAND}:engage-metrics-result`,
   /** legacy page → extension: open X and fill a draft (dormant) */
   extensionTask: `${EXTENSION_BRAND}:extension-task`,
   /** page → extension: presence probe */
