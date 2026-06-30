@@ -116,7 +116,7 @@ body {
 
 .pz-btn {
   appearance: none;
-  border: 1.5px solid var(--pz-accent);
+  border: 1.5px solid var(--pz-ink);
   cursor: pointer;
   width: 100%;
   padding: 11px;
@@ -134,7 +134,7 @@ body {
   transform: translateY(-1px);
 }
 .pz-btn:disabled {
-  border-color: var(--pz-accent-soft);
+  border-color: #d0d7c8;
   background: var(--pz-accent-soft);
   color: #a6aa9f;
   cursor: not-allowed;
@@ -248,8 +248,8 @@ body {
 }
 .pz-filter-btn.active {
   border-color: var(--pz-ink);
-  background: var(--pz-ink);
-  color: var(--pz-accent);
+  background: var(--pz-accent);
+  color: var(--pz-ink);
 }
 .pz-filter-btn:disabled {
   opacity: 0.35;

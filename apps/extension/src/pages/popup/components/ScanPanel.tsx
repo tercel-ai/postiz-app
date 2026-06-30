@@ -120,6 +120,25 @@ function defaultState(): TaskState {
   return { status: 'idle', posts: [], nextCursor: null, exhausted: true, accepted: null, err: null };
 }
 
+// ─── Cookie / login helpers ───────────────────────────────────────────────────
+
+function getCookie(url: string, name: string): Promise<chrome.cookies.Cookie | null> {
+  return new Promise((resolve) => chrome.cookies.get({ url, name }, (c) => resolve(c ?? null)));
+}
+
+async function checkPlatformLogin(platform: 'x' | 'reddit'): Promise<boolean> {
+  if (platform === 'x') {
+    return !!(
+      (await getCookie('https://x.com', 'auth_token')) ??
+      (await getCookie('https://twitter.com', 'auth_token'))
+    );
+  }
+  return !!(
+    (await getCookie('https://www.reddit.com', 'reddit_session')) ??
+    (await getCookie('https://www.reddit.com', 'token_v2'))
+  );
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export function EngageScanPanel() {
@@ -134,11 +153,17 @@ export function EngageScanPanel() {
   const [claimBusy, setClaimBusy] = React.useState(false);
   const [claimErr, setClaimErr] = React.useState<string | null>(null);
   const [states, setStates] = React.useState<Record<string, TaskState>>({});
+  const [loginStatus, setLoginStatus] = React.useState<{ x: boolean | null; reddit: boolean | null }>({ x: null, reddit: null });
 
   React.useEffect(() => {
     loadConfigCache().then((cached) => {
       if (cached) { setConfig(cached.data); setSyncedAt(cached.syncedAt); }
     });
+  }, []);
+
+  React.useEffect(() => {
+    refreshLoginStatus();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const patch = (taskId: string, p: Partial<TaskState>) =>
@@ -218,6 +243,12 @@ export function EngageScanPanel() {
     } catch (e: any) { patch(t.taskId, { status: 'err', err: String(e?.message || e) }); }
   }
 
+  function refreshLoginStatus() {
+    setLoginStatus({ x: null, reddit: null });
+    Promise.all([checkPlatformLogin('x'), checkPlatformLogin('reddit')])
+      .then(([x, reddit]) => setLoginStatus({ x, reddit }));
+  }
+
   const intervalHours = config?.scanIntervals?.scanIntervalHours ?? config?.entitlement?.limits?.scanIntervalHours ?? 24;
   const chHours = config?.scanIntervals?.channelHours ?? intervalHours;
   const trHours = config?.scanIntervals?.trackedHours ?? intervalHours;
@@ -245,6 +276,26 @@ export function EngageScanPanel() {
         </button>
       </div>
       {cfgErr && <div className="sc-err">{cfgErr}</div>}
+
+      {/* Login status */}
+      <div className="sc-login-row">
+        {(['x', 'reddit'] as const).map((p) => {
+          const ls = loginStatus[p];
+          const label = p === 'x' ? '𝕏' : 'Reddit';
+          const loginUrl = p === 'x' ? 'https://x.com/i/flow/login' : 'https://www.reddit.com/login/';
+          if (ls === null) return <div key={p} className="sc-login-chip checking">{label} …</div>;
+          if (ls) return <div key={p} className="sc-login-chip ok">{label} ✓</div>;
+          return (
+            <div key={p} className="sc-login-chip warn">
+              <span>{label} 未登录</span>
+              <button className="sc-login-link-btn" onClick={() => chrome.tabs.create({ url: loginUrl })}>
+                去登录 ↗
+              </button>
+            </div>
+          );
+        })}
+        <button className="sc-login-refresh-btn" onClick={refreshLoginStatus} title="刷新登录状态">↻</button>
+      </div>
 
       {/* Status table */}
       {config ? (
@@ -375,46 +426,64 @@ export function EngageScanPanel() {
 
 const SCAN_CSS = `
 .sc-toolbar { display:flex; align-items:center; gap:6px; margin-bottom:10px; flex-wrap:wrap; }
-.sc-tab { padding:3px 10px; border:1px solid #ccc; border-radius:20px; background:#fff; color:#555; font-size:12px; cursor:pointer; }
-.sc-tab-active { background:#1d9bf0; border-color:#1d9bf0; color:#fff; font-weight:600; }
-.sc-sync-btn { padding:4px 10px; border:0; border-radius:6px; background:#f3f4f6; color:#333; font-size:12px; cursor:pointer; }
+.sc-tab { padding:3px 10px; border:1.5px solid #d0d0d0; border-radius:20px; background:#fff; color:#555; font-size:12px; cursor:pointer; transition:border-color 0.12s,background 0.12s,color 0.12s; }
+.sc-tab:hover:not(.sc-tab-active) { border-color:#171817; color:#171817; }
+.sc-tab-active { background:#c7ff18; border-color:#171817; color:#171817; font-weight:600; }
+.sc-sync-btn { padding:4px 10px; border:1.5px solid #d0d0d0; border-radius:6px; background:#fff; color:#333; font-size:12px; cursor:pointer; transition:border-color 0.12s,background 0.12s; }
+.sc-sync-btn:hover:not(:disabled) { border-color:#171817; background:#f6f8f2; }
 .sc-sync-btn:disabled { color:#aaa; cursor:default; }
 .sc-muted { font-size:11px; color:#999; }
-.sc-err { color:#c00; font-size:12px; margin:4px 0; }
+.sc-err { color:#b42318; font-size:12px; margin:4px 0; }
 .sc-empty { color:#888; font-size:12px; padding:8px 0; }
 
 .sc-table { border:1px solid #e3e6ea; border-radius:8px; overflow:hidden; font-size:12px; margin-bottom:10px; }
-.sc-thead { display:grid; grid-template-columns:1fr 80px 60px; background:#f3f4f6; padding:5px 10px; font-weight:600; color:#666; font-size:11px; border-bottom:1px solid #e3e6ea; }
+.sc-thead { display:grid; grid-template-columns:1fr 80px 60px; background:#f6f8f2; padding:5px 10px; font-weight:600; color:#555; font-size:11px; border-bottom:1px solid #e3e6ea; }
 .sc-row { display:grid; grid-template-columns:1fr 80px 60px; padding:6px 10px; border-bottom:1px solid #f0f0f0; align-items:center; }
 .sc-row:last-child { border-bottom:0; }
-.sc-row:hover { background:#fafafa; }
+.sc-row:hover { background:#fafdf4; }
 .sc-unit { display:flex; align-items:center; gap:5px; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
-.sc-bp { font-size:10px; font-weight:700; background:#e8f0fe; color:#3b5bdb; border-radius:3px; padding:1px 4px; flex-shrink:0; }
+.sc-bp { font-size:10px; font-weight:700; background:#efffc0; color:#354600; border-radius:3px; padding:1px 4px; flex-shrink:0; }
 .sc-t { color:#777; font-size:11px; }
-.sc-due { font-size:11px; font-weight:600; color:#dc2626; background:#fee2e2; border-radius:4px; padding:1px 5px; }
-.sc-cool { font-size:11px; color:#16a34a; background:#dcfce7; border-radius:4px; padding:1px 5px; }
+.sc-due { font-size:11px; font-weight:600; color:#b42318; background:#fff0ed; border-radius:4px; padding:1px 5px; }
+.sc-cool { font-size:11px; color:#354600; background:#efffc0; border-radius:4px; padding:1px 5px; }
 
 .sc-claim-bar { display:flex; align-items:center; gap:6px; margin:10px 0 4px; flex-wrap:wrap; }
 .sc-label { font-size:12px; color:#555; }
-.sc-num { width:44px; padding:4px 6px; border:1px solid #ccc; border-radius:6px; font-size:12px; }
+.sc-num { width:44px; padding:4px 6px; border:1.5px solid #d0d0d0; border-radius:6px; font-size:12px; outline:none; }
+.sc-num:focus { border-color:#171817; box-shadow:0 0 0 3px #efffc0; }
 .sc-force-lbl { display:flex; align-items:center; gap:3px; font-size:12px; color:#555; cursor:pointer; }
-.sc-claim-btn { padding:5px 12px; border:0; border-radius:6px; background:#1d9bf0; color:#fff; font-size:12px; cursor:pointer; margin-left:auto; }
-.sc-claim-btn:disabled { background:#9bd2f5; cursor:default; }
+.sc-claim-btn { padding:5px 14px; border:1.5px solid #171817; border-radius:6px; background:#c7ff18; color:#171817; font-size:12px; font-weight:600; cursor:pointer; margin-left:auto; transition:background 0.12s,transform 0.12s; }
+.sc-claim-btn:hover:not(:disabled) { background:#b5f000; transform:translateY(-1px); }
+.sc-claim-btn:disabled { background:#efffc0; border-color:#d0d7c8; color:#a6aa9f; cursor:default; }
 
 .sc-tasks { display:flex; flex-direction:column; gap:8px; margin-top:8px; }
-.sc-task { border:1px solid #dde; border-radius:8px; padding:10px; display:flex; flex-direction:column; gap:5px; }
-.sc-task-label { font-size:13px; font-weight:600; color:#222; }
+.sc-task { border:1px solid #dfe3da; border-radius:8px; padding:10px; display:flex; flex-direction:column; gap:5px; background:#fff; }
+.sc-task-label { font-size:13px; font-weight:600; color:#171817; }
 .sc-task-actions { display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
-.sc-btn-run { padding:4px 10px; border:0; border-radius:5px; background:#1d9bf0; color:#fff; font-size:12px; cursor:pointer; }
-.sc-btn-run:disabled { background:#9bd2f5; cursor:default; }
-.sc-btn-ingest { padding:4px 10px; border:0; border-radius:5px; background:#16a34a; color:#fff; font-size:12px; cursor:pointer; }
-.sc-btn-ingest:disabled { background:#86efac; cursor:default; }
-.sc-btn-release { padding:4px 10px; border:0; border-radius:5px; background:#f97316; color:#fff; font-size:12px; cursor:pointer; }
-.sc-ok { font-size:12px; color:#16a34a; font-weight:600; }
+.sc-btn-run { padding:4px 12px; border:1.5px solid #171817; border-radius:5px; background:#c7ff18; color:#171817; font-size:12px; font-weight:600; cursor:pointer; transition:background 0.12s; }
+.sc-btn-run:hover:not(:disabled) { background:#b5f000; }
+.sc-btn-run:disabled { background:#efffc0; border-color:#d0d7c8; color:#a6aa9f; cursor:default; }
+.sc-btn-ingest { padding:4px 12px; border:1.5px solid #171817; border-radius:5px; background:#171817; color:#c7ff18; font-size:12px; font-weight:600; cursor:pointer; transition:opacity 0.12s; }
+.sc-btn-ingest:hover:not(:disabled) { opacity:0.85; }
+.sc-btn-ingest:disabled { background:#747970; border-color:#747970; color:#ccc; cursor:default; }
+.sc-btn-release { padding:4px 12px; border:1.5px solid #b42318; border-radius:5px; background:#fff0ed; color:#b42318; font-size:12px; font-weight:600; cursor:pointer; }
+.sc-btn-release:hover { background:#ffe4e0; }
+.sc-ok { font-size:12px; color:#354600; font-weight:600; }
 .sc-task-err { margin:0; }
-.sc-posts { margin-top:4px; border-top:1px solid #eee; padding-top:6px; display:flex; flex-direction:column; gap:5px; }
-.sc-post { background:#f8f9fa; border-radius:5px; padding:6px 8px; font-size:12px; }
-.sc-post a { color:#1d9bf0; text-decoration:none; font-weight:600; margin-right:6px; }
-.sc-post-time { color:#999; font-size:11px; }
+.sc-posts { margin-top:4px; border-top:1px solid #dfe3da; padding-top:6px; display:flex; flex-direction:column; gap:5px; }
+.sc-post { background:#f6f8f2; border-radius:5px; padding:6px 8px; font-size:12px; border:1px solid #dfe3da; }
+.sc-post a { color:#506b00; text-decoration:none; font-weight:600; margin-right:6px; }
+.sc-post a:hover { text-decoration:underline; }
+.sc-post-time { color:#747970; font-size:11px; }
 .sc-post-text { margin-top:3px; color:#333; white-space:pre-wrap; word-break:break-word; font-size:11px; line-height:1.4; }
+
+.sc-login-row { display:flex; align-items:center; gap:6px; margin-bottom:10px; flex-wrap:wrap; }
+.sc-login-chip { display:inline-flex; align-items:center; gap:5px; padding:3px 9px; border-radius:6px; font-size:11px; font-weight:600; border:1px solid transparent; }
+.sc-login-chip.ok { background:#efffc0; color:#354600; border-color:#b3dc32; }
+.sc-login-chip.warn { background:#fff0ed; color:#b42318; border-color:#ffd0c0; gap:7px; }
+.sc-login-chip.checking { background:#f6f8f2; color:#747970; border-color:#dfe3da; }
+.sc-login-link-btn { padding:2px 8px; border:1.5px solid #171817; border-radius:4px; background:#c7ff18; color:#171817; font-size:11px; font-weight:600; cursor:pointer; line-height:1.5; transition:background 0.12s; }
+.sc-login-link-btn:hover { background:#b5f000; }
+.sc-login-refresh-btn { padding:2px 7px; border:1.5px solid #dfe3da; border-radius:5px; background:#fff; color:#747970; font-size:13px; cursor:pointer; margin-left:auto; transition:border-color 0.12s,color 0.12s; }
+.sc-login-refresh-btn:hover { border-color:#171817; color:#171817; }
 `;
