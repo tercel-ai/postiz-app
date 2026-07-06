@@ -36,6 +36,15 @@ export function parseTweetResult(result: any): ParsedTweet | null {
   const id = t?.rest_id ?? legacy?.id_str;
   if (!t || !legacy || !id) return null;
 
+  // The publish time MUST come from the tweet itself. A missing/unparseable
+  // created_at used to fall back to `new Date()`, which silently stamped the
+  // SCAN moment as the publish time — corrupting recency scoring and the feed's
+  // date on every affected opportunity. We never fabricate it: an undateable
+  // tweet is treated as unparseable and dropped, consistent with returning null
+  // for anything we can't reliably read.
+  const createdAtMs = legacy.created_at ? Date.parse(legacy.created_at) : NaN;
+  if (!Number.isFinite(createdAtMs)) return null;
+
   const user = t?.core?.user_results?.result;
   const uLegacy = user?.legacy;
   const screenName = uLegacy?.screen_name ?? user?.core?.screen_name ?? '';
@@ -56,9 +65,7 @@ export function parseTweetResult(result: any): ParsedTweet | null {
   return {
     id: String(id),
     text: String(text),
-    createdAt: legacy.created_at
-      ? new Date(legacy.created_at).toISOString()
-      : new Date().toISOString(),
+    createdAt: new Date(createdAtMs).toISOString(),
     authorUsername: String(screenName || ''),
     authorDisplayName: name ? String(name) : undefined,
     authorAvatarUrl: avatar || undefined,

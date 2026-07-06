@@ -49,7 +49,17 @@ function buildUrl(task: EngageScanTask, after?: string): string {
   return `${REDDIT_BASE}/r/${sub}/new.json?limit=${limit}${afterParam}`;
 }
 
-function toIngestPost(p: Record<string, any>): ScanIngestPost {
+// Reddit `created_utc` (epoch SECONDS) → ms, or null when absent/invalid. The
+// publish time MUST come from the post itself: an earlier `|| 0` fallback stamped
+// 1970 (and any now()-style fallback would stamp the scan moment), both of which
+// corrupt recency scoring and the feed's date. Undateable posts are dropped, never
+// fabricated.
+function redditCreatedAtMs(p: Record<string, any>): number | null {
+  const sec = Number(p.created_utc);
+  return Number.isFinite(sec) && sec > 0 ? sec * 1000 : null;
+}
+
+function toIngestPost(p: Record<string, any>, atMs: number): ScanIngestPost {
   const subreddit = String(p.subreddit ?? '');
   const title = String(p.title ?? '');
   const selftext = p.selftext ? String(p.selftext) : '';
@@ -65,9 +75,7 @@ function toIngestPost(p: Record<string, any>): ScanIngestPost {
     channelFollowers:
       typeof p.subreddit_subscribers === 'number' ? p.subreddit_subscribers : 0,
     postContent: `${title}${selftext ? '\n' + selftext : ''}`.trim(),
-    postPublishedAt: new Date(
-      ((Number(p.created_utc) || 0) as number) * 1000
-    ).toISOString(),
+    postPublishedAt: new Date(atMs).toISOString(),
     metricScore: typeof p.score === 'number' ? p.score : 0,
     metricUpvoteRatio:
       typeof p.upvote_ratio === 'number' ? p.upvote_ratio : undefined,
@@ -131,7 +139,8 @@ export async function scanReddit(
     for (const child of children) {
       const p = child.data;
       if (p.subreddit_type === 'private') continue;
-      const atMs = (Number(p.created_utc) || 0) * 1000;
+      const atMs = redditCreatedAtMs(p);
+      if (atMs == null) continue; // undateable → drop, never fabricate a publish time
       if (stopBefore != null && atMs <= stopBefore) {
         reachedSeen = true; // sort=new descending → everything after is older
         break;
@@ -143,7 +152,7 @@ export async function scanReddit(
         newestAtMs = atMs;
       }
       if (atMs > newestAtMs) newestAtMs = atMs;
-      posts.push(toIngestPost(p));
+      posts.push(toIngestPost(p, atMs));
     }
 
     after = listing?.data?.after ?? undefined;

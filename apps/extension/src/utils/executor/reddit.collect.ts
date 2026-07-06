@@ -8,7 +8,17 @@ import { ScanIngestPost } from './executor.types';
 const REDDIT_BASE = 'https://www.reddit.com';
 const COLLECTION_LIMIT = 25;
 
-function toPost(p: Record<string, any>): ScanIngestPost {
+// Reddit `created_utc` (epoch SECONDS) → ms, or null when absent/invalid. The
+// publish time MUST come from the post itself — we never fabricate one (a `0`→1970
+// fallback corrupts the stored publish date), so an undateable post is dropped.
+function redditCreatedAtMs(p: Record<string, any>): number | null {
+  const sec = Number(p.created_utc);
+  return Number.isFinite(sec) && sec > 0 ? sec * 1000 : null;
+}
+
+function toPost(p: Record<string, any>): ScanIngestPost | null {
+  const atMs = redditCreatedAtMs(p);
+  if (atMs == null) return null; // undateable → drop, never fabricate a publish time
   const sub = String(p.subreddit ?? '');
   const title = String(p.title ?? '');
   const body = p.selftext ? String(p.selftext) : '';
@@ -22,9 +32,7 @@ function toPost(p: Record<string, any>): ScanIngestPost {
     channelFollowers:
       typeof p.subreddit_subscribers === 'number' ? p.subreddit_subscribers : 0,
     postContent: `${title}${body ? '\n' + body : ''}`.trim(),
-    postPublishedAt: new Date(
-      (Number(p.created_utc) || 0) * 1000
-    ).toISOString(),
+    postPublishedAt: new Date(atMs).toISOString(),
     metricScore: typeof p.score === 'number' ? p.score : 0,
     metricUpvoteRatio:
       typeof p.upvote_ratio === 'number' ? p.upvote_ratio : undefined,
@@ -56,7 +64,8 @@ export async function scanRedditKeyword(
   const children: any[] = data?.data?.children ?? [];
   return children
     .filter((c) => c.data?.subreddit_type !== 'private')
-    .map((c) => toPost(c.data));
+    .map((c) => toPost(c.data))
+    .filter((p): p is ScanIngestPost => p !== null);
 }
 
 /**
@@ -170,7 +179,8 @@ export async function scanRedditUser(
   const children: any[] = data?.data?.children ?? [];
   let posts = children
     .filter((c) => c.data?.subreddit_type !== 'private')
-    .map((c) => toPost(c.data));
+    .map((c) => toPost(c.data))
+    .filter((p): p is ScanIngestPost => p !== null);
 
   if (keywords.length) {
     const lkws = keywords.map((k) => k.toLowerCase());
