@@ -373,7 +373,7 @@ function toRawPost(tweet: XTweet, author?: XUser): RawPost {
     authorDisplayName: author?.name,
     authorAvatarUrl: author?.profile_image_url?.replace('_normal', '_400x400'),
     authorFollowers: author?.public_metrics?.followers_count,
-    postContent: tweet.text,
+    postContent: tweet.note_tweet?.text ?? tweet.text,
     postPublishedAt: new Date(tweet.created_at),
     metricLikes: tweet.public_metrics?.like_count ?? 0,
     metricReplies: tweet.public_metrics?.reply_count ?? 0,

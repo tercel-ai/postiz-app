@@ -414,4 +414,29 @@ describe('XScanAdapter max_results (per-call page size)', () => {
     );
     expect(lo.maxResults()).toBe('10');
   });
+
+  it('uses note_tweet.text as postContent for long-form tweets (>280 chars)', async () => {
+    const fullText = 'A'.repeat(300);
+    const truncatedText = 'A'.repeat(280) + '… https://t.co/shortlink';
+    const fetchImpl = (async () =>
+      res(200, {
+        data: [
+          tweet('999', truncatedText, {
+            note_tweet: { text: fullText },
+          }),
+        ],
+        includes: USERS,
+      })) as any;
+    const out = await new XScanAdapter({ fetchImpl }).searchScoped(baseArgs());
+    expect(out.posts).toHaveLength(1);
+    expect(out.posts[0].postContent).toBe(fullText);
+  });
+
+  it('falls back to tweet.text when note_tweet is absent', async () => {
+    const text = 'Short tweet without note_tweet';
+    const fetchImpl = (async () =>
+      res(200, { data: [tweet('998', text)], includes: USERS })) as any;
+    const out = await new XScanAdapter({ fetchImpl }).searchScoped(baseArgs());
+    expect(out.posts[0].postContent).toBe(text);
+  });
 });
