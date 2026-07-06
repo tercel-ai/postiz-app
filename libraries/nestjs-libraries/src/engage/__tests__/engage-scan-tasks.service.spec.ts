@@ -6,11 +6,28 @@ import {
 } from '../engage-scan-tasks.service';
 import { DEFAULT_SCAN_PACING } from '../engage-scan-config.service';
 
+// DEFAULT_SCAN_PACING deliberately keeps extension initial === incremental for
+// both platforms (account safety caps the extension at 1 page regardless of
+// phase) — asserting `pacing.maxPages` against DEFAULT_SCAN_PACING cannot
+// distinguish the two phases. Tests that need to prove WHICH phase was chosen
+// use this override, where the two differ, instead.
+const DISTINCT_PHASE_PACING = {
+  ...DEFAULT_SCAN_PACING,
+  extension: {
+    ...DEFAULT_SCAN_PACING.extension,
+    x: {
+      initial: { maxPages: 5, pageSize: 20, pageDelayMs: 8000, jitterMs: 60000 },
+      incremental: { maxPages: 1, pageSize: 20, pageDelayMs: 8000, jitterMs: 60000 },
+    },
+  },
+};
+
 function build(opts: {
   orgContext?: any;
   unitByToken?: any;
   subscribers?: any[];
   claimResults?: any[];
+  pacing?: any;
 } = {}) {
   let claimCall = 0;
   const engageRepo = {
@@ -24,7 +41,10 @@ function build(opts: {
     releaseByToken: vi.fn(async () => true),
   };
   const ingest = { ingestForOrg: vi.fn(async () => 3) };
-  const config = { getPacing: vi.fn(async () => DEFAULT_SCAN_PACING) };
+  const config = {
+    getPacing: vi.fn(async () => opts.pacing ?? DEFAULT_SCAN_PACING),
+    getFreshnessWindowMs: vi.fn(async () => 24 * 3_600_000),
+  };
   const entitlement = { getScanIntervalHours: vi.fn(async () => 6) };
 
   const svc = new EngageScanTasksService(
@@ -34,7 +54,7 @@ function build(opts: {
     config as any,
     entitlement as any
   );
-  return { svc, engageRepo, lease, ingest };
+  return { svc, engageRepo, lease, ingest, config };
 }
 
 function snap(over: any = {}) {
@@ -77,6 +97,77 @@ describe('EngageScanTasksService.sync — claim (bootstrap)', () => {
     );
     expect(res.nextTasks[1].pacing.hourlyRequestCap).toBe(
       DEFAULT_SCAN_PACING.extension.session.hourlyRequestCap
+    );
+  });
+
+  it('reactivates a dormant unit to the "initial" (deeper) phase when its cursor is older than the freshness window', async () => {
+    // Uses DISTINCT_PHASE_PACING: under the real DEFAULT_SCAN_PACING, extension
+    // initial and incremental maxPages are numerically identical (both capped
+    // at 1 for account safety), so asserting against the default would pass
+    // whether or not the phase logic ran at all.
+    const { svc, config } = build({
+      pacing: DISTINCT_PHASE_PACING,
+      orgContext: {
+        keywords: [{ keyword: 'world cup', enabled: true }],
+        monitoredChannels: [],
+        trackedAccounts: [],
+      },
+      claimResults: [
+        snap({
+          platform: 'x',
+          lastSeenExternalId: '2071350323029975545',
+          lastSeenAt: new Date(Date.now() - 8 * 24 * 3_600_000), // 8 days stale
+        }),
+      ],
+    });
+    const res = await svc.sync('org1', { want: 1 });
+    expect(config.getFreshnessWindowMs).toHaveBeenCalledWith('x');
+    expect(res.nextTasks[0].pacing.maxPages).toBe(
+      DISTINCT_PHASE_PACING.extension.x.initial.maxPages
+    );
+  });
+
+  it('keeps a unit on the "incremental" (single-page) phase when its cursor is within the freshness window', async () => {
+    const { svc } = build({
+      pacing: DISTINCT_PHASE_PACING,
+      orgContext: {
+        keywords: [{ keyword: 'world cup', enabled: true }],
+        monitoredChannels: [],
+        trackedAccounts: [],
+      },
+      claimResults: [
+        snap({
+          platform: 'x',
+          lastSeenExternalId: '2071350323029975545',
+          lastSeenAt: new Date(Date.now() - 3_600_000), // 1 hour ago
+        }),
+      ],
+    });
+    const res = await svc.sync('org1', { want: 1 });
+    expect(res.nextTasks[0].pacing.maxPages).toBe(
+      DISTINCT_PHASE_PACING.extension.x.incremental.maxPages
+    );
+  });
+
+  it('treats a cursor with a timestamp but no id (or vice versa) as unverifiable and reactivates to "initial" rather than trusting it', async () => {
+    const { svc } = build({
+      pacing: DISTINCT_PHASE_PACING,
+      orgContext: {
+        keywords: [{ keyword: 'world cup', enabled: true }],
+        monitoredChannels: [],
+        trackedAccounts: [],
+      },
+      claimResults: [
+        snap({
+          platform: 'x',
+          lastSeenExternalId: '2071350323029975545',
+          lastSeenAt: null, // half-set cursor — freshness can't be verified
+        }),
+      ],
+    });
+    const res = await svc.sync('org1', { want: 1 });
+    expect(res.nextTasks[0].pacing.maxPages).toBe(
+      DISTINCT_PHASE_PACING.extension.x.initial.maxPages
     );
   });
 

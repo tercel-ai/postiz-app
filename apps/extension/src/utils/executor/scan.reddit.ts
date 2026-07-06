@@ -135,28 +135,38 @@ export async function scanReddit(
     const children = listing?.data?.children ?? [];
     if (!children.length) break; // genuinely no more
 
-    let reachedSeen = false;
+    // Filter each item independently rather than breaking at the first stale
+    // one: `sort=new` is usually strictly descending, but stickied posts (and
+    // any other out-of-order edge case) can interleave an old post between
+    // newer ones. A missed break condition must never cost us real posts —
+    // duplicates against already-ingested posts are harmless (backend upserts
+    // on (platform, externalPostId)). This is separate from the PAGINATION
+    // decision below: hitting a stale item still means we've caught up to
+    // already-seen data, so further pages would be even older — no reason to
+    // pay for another request.
+    let sawStale = false;
     for (const child of children) {
       const p = child.data;
       if (p.subreddit_type === 'private') continue;
       const atMs = redditCreatedAtMs(p);
       if (atMs == null) continue; // undateable → drop, never fabricate a publish time
       if (stopBefore != null && atMs <= stopBefore) {
-        reachedSeen = true; // sort=new descending → everything after is older
-        break;
+        sawStale = true;
+        continue; // already seen/older — drop, but keep scanning the rest of this page
       }
-      // First (newest) item overall → capture cursor head.
-      if (!firstSeen) {
-        firstSeen = true;
+      // Track the newest kept item's id TOGETHER with its timestamp — updating
+      // only one of the pair on a later, chronologically-newer item would
+      // desync the persisted (id, time) cursor.
+      if (!firstSeen || atMs > newestAtMs) {
         newestId = String(p.name ?? p.id ?? newestId ?? '');
         newestAtMs = atMs;
       }
-      if (atMs > newestAtMs) newestAtMs = atMs;
+      firstSeen = true;
       posts.push(toIngestPost(p, atMs));
     }
 
     after = listing?.data?.after ?? undefined;
-    if (reachedSeen || !after) break; // caught up, or no further pages
+    if (sawStale || !after) break; // caught up to already-seen data, or no further pages
   }
 
   const nextCursor: ScanTaskCursor = {

@@ -104,7 +104,7 @@ describe('scanX real-page execution', () => {
 
     expect(openXReadTab).toHaveBeenCalledOnce();
     expect(navigateAndCapture).toHaveBeenCalledWith(
-      'https://x.com/search?q=artificial%20intelligence&src=typed_query',
+      'https://x.com/search?q=artificial%20intelligence&f=live&src=typed_query',
       'SearchTimeline'
     );
     expect(close).toHaveBeenCalledOnce();
@@ -154,6 +154,26 @@ describe('scanX real-page execution', () => {
       lastSeenExternalId: '30',
       lastSeenAt: '2025-06-18T12:00:00.000Z',
     });
+  });
+
+  it('still collects a newer tweet ranked BELOW an old one (non-chronological order, e.g. Top-tab relevance ranking)', async () => {
+    // '10' (old, below cursor) is listed first, '30' (genuinely new) second —
+    // a naive "break at the first non-newer tweet" would stop at '10' and
+    // silently miss '30'.
+    navigateAndCapture.mockResolvedValue(searchResponse('10', '30'));
+
+    const result = await scanX(
+      task({
+        cursor: {
+          lastSeenExternalId: '20',
+          lastSeenAt: '2025-06-17T12:00:00.000Z',
+        },
+      }),
+      async () => true
+    );
+
+    expect(result.posts.map((post) => post.externalPostId)).toEqual(['30']);
+    expect(result.nextCursor.lastSeenExternalId).toBe('30');
   });
 
   it('does not open an X tab when the hourly request gate rejects the scan', async () => {

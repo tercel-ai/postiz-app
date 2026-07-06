@@ -5,8 +5,10 @@
 //   (no channel scope — X has no community concept here)
 // The page's own JavaScript creates the request, preserving native browser
 // fingerprints (x-client-transaction-id, Referer, sec-fetch and page context).
-// SearchTimeline returns newest-first; collection stops at the first tweet not
-// newer than the cursor's lastSeenExternalId.
+// SearchTimeline order is not guaranteed strictly chronological (the Top tab
+// used for tracked scans ranks by engagement) — every tweet is filtered
+// independently against the cursor's lastSeenExternalId, not cut off at the
+// first miss.
 
 import {
   EngageScanTask,
@@ -14,7 +16,7 @@ import {
   ScanRunResult,
   ScanTaskCursor,
 } from './executor.types';
-import { ParsedTweet, isNewerThan, parseTimelineTweets } from './x.parse';
+import { ParsedTweet, isNewerThan, newerId, parseTimelineTweets } from './x.parse';
 import { openXReadTab, readViaProfile } from './x.tab-reader';
 
 // Exactly ONE keyword (or one tracked handle) per query — scanKey is never split,
@@ -75,9 +77,16 @@ export async function scanX(
     return { posts: [], nextCursor: cursor, exhausted: false };
   }
 
+  // Keyword scans use the Live (chronological) tab: the default Top tab ranks
+  // by engagement, so a viral old tweet can rank above genuinely new ones and
+  // break the "search results are newest-first" assumption the cursor cutoff
+  // below relies on. Tracked scans keep the default Top tab — an account's own
+  // posts are sparse enough that Live often returns nothing (see x.collect.ts).
+  const liveParam = task.scanType === 'tracked' ? '' : '&f=live';
   const searchUrl =
     'https://x.com/search?q=' +
     encodeURIComponent(rawQuery) +
+    liveParam +
     '&src=typed_query';
   let response: unknown | null;
   if (task.scanType === 'tracked') {
@@ -103,16 +112,22 @@ export async function scanX(
 
   const data = (response as { data?: unknown }).data ?? response;
   const tweets = parseSearchList(data);
+  // Filter rather than break: SearchTimeline order is not guaranteed strictly
+  // chronological (Top tab isn't; Live tab can still interleave), so a tweet's
+  // position in the response must not decide whether later ones are dropped.
+  // Duplicates against already-ingested posts are harmless — the backend
+  // upserts on (platform, externalPostId).
   const posts: ScanIngestPost[] = [];
-
+  let newestId = cursor.lastSeenExternalId ?? undefined;
   for (const t of tweets) {
-    if (!isNewerThan(t.id, sinceId)) break; // the rest are older/already seen
+    if (!isNewerThan(t.id, sinceId)) continue; // older/already seen — drop
     posts.push(toIngestPost(t));
+    newestId = newerId(newestId, t.id);
   }
 
-  const newest = posts[0];
+  const newest = posts.find((p) => p.externalPostId === newestId);
   const nextCursor: ScanTaskCursor = {
-    lastSeenExternalId: newest?.externalPostId ?? cursor.lastSeenExternalId,
+    lastSeenExternalId: newestId ?? cursor.lastSeenExternalId,
     lastSeenAt: newest?.postPublishedAt ?? cursor.lastSeenAt,
   };
   return { posts, nextCursor, exhausted: true };

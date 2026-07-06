@@ -282,7 +282,7 @@ export class EngageScanTasksService {
         cadenceMs,
         force: opts.force,
       });
-      if (snap) tasks.push(this._buildTask(snap, pacing, activeKeywords));
+      if (snap) tasks.push(await this._buildTask(snap, pacing, activeKeywords));
     }
     return tasks;
   }
@@ -344,15 +344,33 @@ export class EngageScanTasksService {
   }
 
   /** Build the client instruction from a claimed snapshot + pacing config. */
-  private _buildTask(
+  private async _buildTask(
     snap: ScanCursorSnapshot,
     pacing: EngageScanPacing,
     orgKeywords: string[] = []
-  ): EngageScanTask {
+  ): Promise<EngageScanTask> {
     const platform = snap.platform as ScanPlatform;
     // First scan of a unit (no cursor yet) does the deeper "initial" lookback.
-    const phase =
-      snap.lastSeenExternalId || snap.lastSeenAt ? 'incremental' : 'initial';
+    // A unit that HAS a cursor but hasn't been scanned within the freshness
+    // window (e.g. the extension was offline for days) is just as uninformed
+    // as a brand-new one — a single incremental page can't close that gap, so
+    // treat it as "initial" again rather than silently under-scanning it.
+    const hasCursor = Boolean(snap.lastSeenExternalId || snap.lastSeenAt);
+    let phase: 'initial' | 'incremental' = hasCursor ? 'incremental' : 'initial';
+    if (hasCursor) {
+      // A cursor with no timestamp (should not normally happen, but the two
+      // fields are independently nullable) can't be proven fresh — treat it
+      // the same as stale rather than silently trusting it.
+      const freshnessMs = snap.lastSeenAt
+        ? await this._config.getFreshnessWindowMs(platform)
+        : 0;
+      const staleMs = snap.lastSeenAt
+        ? Date.now() - snap.lastSeenAt.getTime()
+        : Infinity;
+      if (staleMs > freshnessMs) {
+        phase = 'initial';
+      }
+    }
     const page = pacing.extension[platform][phase];
 
     // For X tracked units: narrow the query to org keywords so the extension

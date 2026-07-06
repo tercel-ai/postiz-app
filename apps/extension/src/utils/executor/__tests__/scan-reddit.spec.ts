@@ -77,3 +77,69 @@ describe('scanReddit — publish time never fabricated', () => {
     expect(posts.every((p) => new Date(p.postPublishedAt).getUTCFullYear() > 2000)).toBe(true);
   });
 });
+
+describe('scanReddit — filters stale posts instead of stopping at the first one', () => {
+  it('still collects a newer post listed AFTER an older one on the same page (e.g. a stickied post out of order)', async () => {
+    const cursorAt = 1_750_000_000; // 2025-06-15T…Z
+    vi.stubGlobal(
+      'fetch',
+      mockFetchOnce([
+        child({ id: 'stale', name: 't3_stale', created_utc: cursorAt - 100 }), // older than cursor, listed first
+        child({ id: 'fresh', name: 't3_fresh', created_utc: cursorAt + 100 }), // newer, listed second
+      ])
+    );
+
+    const { posts, nextCursor } = await scanReddit(
+      task({
+        cursor: {
+          lastSeenExternalId: 't3_cursor',
+          lastSeenAt: new Date(cursorAt * 1000).toISOString(),
+        },
+      }),
+      gateOpen
+    );
+
+    expect(posts.map((p) => p.externalPostId)).toEqual(['fresh']);
+    expect(nextCursor.lastSeenExternalId).toBe('t3_fresh');
+  });
+
+  it('stops paginating once it hits a stale item, even if the page also had new ones (does not fetch a wasted extra page)', async () => {
+    const cursorAt = 1_750_000_000; // 2025-06-15T…Z
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        data: {
+          after: 'page2-token', // more pages ARE available…
+          children: [
+            child({ id: 'fresh', name: 't3_fresh', created_utc: cursorAt + 100 }),
+            child({ id: 'stale', name: 't3_stale', created_utc: cursorAt - 100 }),
+          ],
+        },
+      }),
+    }));
+    vi.stubGlobal('fetch', fetchMock as any);
+
+    const { posts } = await scanReddit(
+      task({
+        pacing: {
+          maxPages: 5, // initial-phase budget — would keep paginating if not for the stale hit
+          pageSize: 25,
+          pageDelayMs: 0,
+          pageJitterMs: 0,
+          interUnitDelayMs: 0,
+          interUnitJitterMs: 0,
+          hourlyRequestCap: 60,
+        },
+        cursor: {
+          lastSeenExternalId: 't3_cursor',
+          lastSeenAt: new Date(cursorAt * 1000).toISOString(),
+        },
+      }),
+      gateOpen
+    );
+
+    expect(posts.map((p) => p.externalPostId)).toEqual(['fresh']);
+    expect(fetchMock).toHaveBeenCalledTimes(1); // … but page 2 is never fetched
+  });
+});
