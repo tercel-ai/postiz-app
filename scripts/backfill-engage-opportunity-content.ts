@@ -30,12 +30,19 @@
  * A row updates only when the recovered full body is non-empty AND differs from
  * the stored value; unreachable/deleted tweets are left untouched.
  *
+ * Targeting: --url (alias --id) takes one or more X status URLs or bare tweet ids
+ * (comma-separated). Exactly those rows are re-checked regardless of --since and
+ * the t.co suffix heuristic — for repairing a specific known-truncated post.
+ *
  * Usage:
  *   npx ts-node --project scripts/tsconfig.json scripts/backfill-engage-opportunity-content.ts
  *   npx ts-node --project scripts/tsconfig.json scripts/backfill-engage-opportunity-content.ts --since 2026-06-22
  *   npx ts-node --project scripts/tsconfig.json scripts/backfill-engage-opportunity-content.ts --execute
  *   npx ts-node --project scripts/tsconfig.json scripts/backfill-engage-opportunity-content.ts --no-api          # free repairs only
  *   npx ts-node --project scripts/tsconfig.json scripts/backfill-engage-opportunity-content.ts --all --limit 500
+ *   # target one post by URL (bypasses --since / suffix filter), then write:
+ *   npx ts-node --project scripts/tsconfig.json scripts/backfill-engage-opportunity-content.ts --url https://x.com/suganthan/status/2070096832311762988
+ *   npx ts-node --project scripts/tsconfig.json scripts/backfill-engage-opportunity-content.ts --id 2070096832311762988,2073884340153405788 --execute
  */
 import * as dotenv from 'dotenv';
 dotenv.config();
@@ -68,6 +75,18 @@ function preview(s: string, max = 80): string {
 // tweets that merely end in a link are also caught, but the recovered body then
 // equals postContent → no update.
 const TRUNCATED_SUFFIX = /https:\/\/t\.co\/\w+\s*$/;
+
+/** Extract a numeric tweet id from a raw id or any X status URL. */
+function extractTweetId(input: string): string {
+  const s = String(input || '').trim();
+  const m = s.match(/status(?:es)?\/(\d+)/) || s.match(/(\d{6,})/);
+  return m ? m[1] : '';
+}
+/** Resolve --url/--id (comma-separated URLs or ids) to unique tweet ids. */
+function resolveTargetIds(raw: string): string[] {
+  const ids = raw.split(',').map(extractTweetId).filter(Boolean);
+  return Array.from(new Set(ids));
+}
 
 interface Row {
   id: string;
@@ -134,27 +153,57 @@ async function main() {
   const noApi = flag('no-api');
   const limit = Number(arg('limit')) || undefined;
 
+  // Target mode: --url/--id pins specific rows (comma-separated status URLs or ids),
+  // bypassing --since and the t.co suffix heuristic.
+  const urlArg = arg('url') ?? arg('id');
+  const targetIds = urlArg ? resolveTargetIds(urlArg) : null;
+  if (urlArg && (!targetIds || !targetIds.length)) {
+    console.error(
+      `--url/--id "${urlArg}" yielded no tweet id (expected a status URL or numeric id).`
+    );
+    process.exit(1);
+  }
+
   console.log(
-    `Backfill postContent + rawData (X) | since=${sinceStr} ` +
-      `mode=${all ? 'ALL x rows' : 'suspect (ends in t.co link)'} ` +
-      `api-fallback=${noApi ? 'OFF' : 'ON'} ` +
+    `Backfill postContent + rawData (X) | ` +
+      (targetIds
+        ? `target=${targetIds.length} id(s) [${targetIds.slice(0, 5).join(', ')}` +
+          `${targetIds.length > 5 ? '…' : ''}]`
+        : `since=${sinceStr} mode=${all ? 'ALL x rows' : 'suspect (ends in t.co link)'}`) +
+      ` api-fallback=${noApi ? 'OFF' : 'ON'} ` +
       `${execute ? 'EXECUTE (writes)' : 'DRY-RUN'}${limit ? ` limit=${limit}` : ''}`
   );
 
   const rows = (await prisma.engageOpportunity.findMany({
-    where: { deletedAt: null, platform: 'x', createdAt: { gte: since } },
+    where: targetIds
+      ? { deletedAt: null, platform: 'x', externalPostId: { in: targetIds } }
+      : { deletedAt: null, platform: 'x', createdAt: { gte: since } },
     select: { id: true, externalPostId: true, postContent: true, rawData: true },
     orderBy: { createdAt: 'asc' },
     ...(limit ? { take: limit } : {}),
   })) as Row[];
 
-  const candidates = all
-    ? rows
-    : rows.filter((r) => TRUNCATED_SUFFIX.test(r.postContent));
+  // Target mode (and --all) re-checks every matched row; otherwise apply the
+  // t.co suffix heuristic to limit re-checks.
+  const candidates =
+    targetIds || all
+      ? rows
+      : rows.filter((r) => TRUNCATED_SUFFIX.test(r.postContent));
 
-  console.log(
-    `Scanned ${rows.length} X rows since ${sinceStr}; ${candidates.length} candidate(s) to re-check.\n`
-  );
+  if (targetIds) {
+    const missing = targetIds.filter(
+      (id) => !rows.some((r) => r.externalPostId === id)
+    );
+    console.log(
+      `Matched ${rows.length}/${targetIds.length} id(s); ${candidates.length} to re-check.` +
+        (missing.length ? ` Not found: ${missing.join(', ')}` : '') +
+        '\n'
+    );
+  } else {
+    console.log(
+      `Scanned ${rows.length} X rows since ${sinceStr}; ${candidates.length} candidate(s) to re-check.\n`
+    );
+  }
   if (!candidates.length) {
     console.log('Nothing to do.');
     return;
