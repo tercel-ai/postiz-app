@@ -27,6 +27,10 @@ export interface EngageScanAutomationConfig {
     channelName?: string;
     enabled: boolean;
     lastScannedAt?: string | null;
+    // Real EngageScanCursor timing (source of truth). Present when the unit has a
+    // cursor; the legacy lastScannedAt is a per-row bookkeeping field only the
+    // workflow writes, so prefer this.
+    scanCursor?: { lastScannedAt: string | null; nextScanAt: string | null } | null;
   }>;
   trackedAccounts?: Array<{
     id: string;
@@ -34,6 +38,7 @@ export interface EngageScanAutomationConfig {
     username: string;
     enabled: boolean;
     lastCheckedAt?: string | null;
+    scanCursor?: { lastScannedAt: string | null; nextScanAt: string | null } | null;
   }>;
   scanIntervals?: { scanIntervalHours?: number };
   scanStatus?: {
@@ -101,8 +106,11 @@ export function buildScanUnitRows(
 
   for (const channel of config.monitoredChannels ?? []) {
     if (!channel.enabled) continue;
-    const lastScannedAt = channel.lastScannedAt ?? null;
-    const nextScanAt = nextFrom(lastScannedAt, interval);
+    // Prefer the real cursor; fall back to the legacy per-row field + derived next.
+    const lastScannedAt =
+      channel.scanCursor?.lastScannedAt ?? channel.lastScannedAt ?? null;
+    const nextScanAt =
+      channel.scanCursor?.nextScanAt ?? nextFrom(lastScannedAt, interval);
     rows.push({
       id: channel.id,
       platform: channel.platform,
@@ -110,14 +118,16 @@ export function buildScanUnitRows(
       label: channel.channelName || channel.channelId,
       lastScannedAt,
       nextScanAt,
-      due: isDue(nextScanAt, now),
+      due: !lastScannedAt || isDue(nextScanAt, now),
     });
   }
 
   for (const account of config.trackedAccounts ?? []) {
     if (!account.enabled) continue;
-    const lastScannedAt = account.lastCheckedAt ?? null;
-    const nextScanAt = nextFrom(lastScannedAt, interval);
+    const lastScannedAt =
+      account.scanCursor?.lastScannedAt ?? account.lastCheckedAt ?? null;
+    const nextScanAt =
+      account.scanCursor?.nextScanAt ?? nextFrom(lastScannedAt, interval);
     rows.push({
       id: account.id,
       platform: account.platform ?? 'x',
@@ -125,7 +135,7 @@ export function buildScanUnitRows(
       label: `@${account.username}`,
       lastScannedAt,
       nextScanAt,
-      due: isDue(nextScanAt, now),
+      due: !lastScannedAt || isDue(nextScanAt, now),
     });
   }
 

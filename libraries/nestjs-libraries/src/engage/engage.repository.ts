@@ -617,6 +617,97 @@ export class EngageRepository {
     return out;
   }
 
+  /**
+   * Per-channel scan cursor times for this org's monitored subreddits. Mirrors
+   * getKeywordCursors so the config API reports the SAME source of truth
+   * (EngageScanCursor) for channels as for keywords — NOT the per-row
+   * EngageMonitoredChannel.lastScannedAt bookkeeping field, which only the
+   * workflow writes (so a unit advanced by the extension scan path left it stale
+   * and the UI showed an old "last scanned" while the cursor was fresh).
+   * Keyed by the caller's original `${platform}:${channelId}`.
+   */
+  async getChannelCursors(
+    channels: { platform: string; channelId: string }[],
+    cadenceMs: number,
+    now: number = Date.now()
+  ): Promise<
+    Record<string, { lastScannedAt: Date | null; nextScanAt: Date | null }>
+  > {
+    if (!channels.length) return {};
+    const keys = Array.from(new Set(channels.map((c) => c.channelId)));
+    const rows = await this._scanCursor.model.engageScanCursor.findMany({
+      where: { scanType: 'channel', scanKey: { in: keys } },
+      select: {
+        platform: true,
+        scanKey: true,
+        lastScannedAt: true,
+        lastScanStartedAt: true,
+        cooldownUntil: true,
+      },
+    });
+    const out: Record<
+      string,
+      { lastScannedAt: Date | null; nextScanAt: Date | null }
+    > = {};
+    for (const row of rows) {
+      out[`${row.platform}:${row.scanKey}`] = {
+        lastScannedAt: row.lastScannedAt,
+        nextScanAt: new Date(deriveNext(row, cadenceMs, now)),
+      };
+    }
+    return out;
+  }
+
+  /**
+   * Per-account scan cursor times for this org's tracked accounts. Same rationale
+   * as getChannelCursors: report EngageScanCursor truth, not the workflow-only
+   * EngageTrackedAccount.lastCheckedAt. The cursor scanKey is the NORMALIZED
+   * username; normalisation is done here so the caller (getConfig) can key by the
+   * ORIGINAL `${platform}:${username}` and needs no normaliser of its own.
+   */
+  async getTrackedCursors(
+    accounts: { platform: string; username: string }[],
+    cadenceMs: number,
+    now: number = Date.now()
+  ): Promise<
+    Record<string, { lastScannedAt: Date | null; nextScanAt: Date | null }>
+  > {
+    if (!accounts.length) return {};
+    const keys = Array.from(
+      new Set(accounts.map((a) => normalizeUsername(a.platform ?? 'x', a.username)))
+    );
+    const rows = await this._scanCursor.model.engageScanCursor.findMany({
+      where: { scanType: 'tracked', scanKey: { in: keys } },
+      select: {
+        platform: true,
+        scanKey: true,
+        lastScannedAt: true,
+        lastScanStartedAt: true,
+        cooldownUntil: true,
+      },
+    });
+    const byNorm = new Map<
+      string,
+      { lastScannedAt: Date | null; nextScanAt: Date | null }
+    >();
+    for (const row of rows) {
+      byNorm.set(`${row.platform}:${row.scanKey}`, {
+        lastScannedAt: row.lastScannedAt,
+        nextScanAt: new Date(deriveNext(row, cadenceMs, now)),
+      });
+    }
+    const out: Record<
+      string,
+      { lastScannedAt: Date | null; nextScanAt: Date | null }
+    > = {};
+    for (const a of accounts) {
+      const platform = a.platform ?? 'x';
+      const hit = byNorm.get(`${platform}:${normalizeUsername(platform, a.username)}`);
+      if (hit) out[`${platform}:${a.username}`] = hit;
+    }
+    return out;
+  }
+
   // ─── Keywords ──────────────────────────────────────────────────────────────
 
   async addKeyword(

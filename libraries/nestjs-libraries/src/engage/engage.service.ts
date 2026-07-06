@@ -150,6 +150,46 @@ export class EngageService implements OnApplicationBootstrap {
       return { ...kw, scanCursors: kwCursors[key] ?? [] };
     });
 
+    // Decorate channels / tracked accounts with their REAL EngageScanCursor
+    // last/next scan, exactly like keywords. Previously they carried only the
+    // per-row bookkeeping field (EngageMonitoredChannel.lastScannedAt /
+    // EngageTrackedAccount.lastCheckedAt), which ONLY the workflow writes — so a
+    // unit advanced by the extension scan path showed a stale "last scanned"
+    // while its shared cursor was fresh. scanCursor is the single source of truth
+    // the frontends read; the legacy field is overwritten with it for back-compat.
+    const [channelCursors, trackedCursors] = await Promise.all([
+      this._engageRepository.getChannelCursors(
+        config.monitoredChannels.map((c) => ({
+          platform: c.platform,
+          channelId: c.channelId,
+        })),
+        cadenceMs
+      ),
+      this._engageRepository.getTrackedCursors(
+        config.trackedAccounts.map((a) => ({
+          platform: a.platform,
+          username: a.username,
+        })),
+        cadenceMs
+      ),
+    ]);
+    const monitoredChannels = config.monitoredChannels.map((ch) => {
+      const cur = channelCursors[`${ch.platform}:${ch.channelId}`] ?? null;
+      return {
+        ...ch,
+        lastScannedAt: cur?.lastScannedAt ?? ch.lastScannedAt ?? null,
+        scanCursor: cur,
+      };
+    });
+    const trackedAccounts = config.trackedAccounts.map((a) => {
+      const cur = trackedCursors[`${a.platform}:${a.username}`] ?? null;
+      return {
+        ...a,
+        lastCheckedAt: cur?.lastScannedAt ?? a.lastCheckedAt ?? null,
+        scanCursor: cur,
+      };
+    });
+
     // Per-type added/active/max so the frontend renders "active / added / cap"
     // without re-deriving it. `added` = total rows (incl. disabled), straight off
     // the already-loaded config lists (no extra query); `active` reuses the
@@ -176,6 +216,8 @@ export class EngageService implements OnApplicationBootstrap {
     return {
       ...config,
       keywords,
+      monitoredChannels,
+      trackedAccounts,
       // Plan limits + current usage + reply pricing, so the frontend can disable
       // entrypoints and show usage. Backend asserts remain the source of truth.
       // `entitlement.counts` adds per-type added/active/max for the UI.

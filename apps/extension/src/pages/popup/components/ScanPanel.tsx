@@ -10,15 +10,20 @@ interface EngageCfgKeyword {
   weeklyHitCount?: number;
   scanCursors?: KeywordScanCursor[];
 }
+interface ScanCursorTiming { lastScannedAt: string | null; nextScanAt: string | null }
 interface EngageCfgChannel {
   id: string; platform: string; channelId: string; channelName: string; enabled: boolean;
   lastScannedAt?: string | null;
   audienceSize?: number;
+  // Real EngageScanCursor timing (source of truth); prefer over lastScannedAt,
+  // which is a per-row field only the workflow writes.
+  scanCursor?: ScanCursorTiming | null;
 }
 interface EngageCfgAccount {
   id: string; username: string; enabled: boolean;
   platform?: string;
   lastCheckedAt?: string | null;
+  scanCursor?: ScanCursorTiming | null;
 }
 export interface EngageConfig {
   keywords: EngageCfgKeyword[];
@@ -290,9 +295,9 @@ export function EngageScanPanel() {
             });
           })}
           {visAccounts.map((a) => {
-            const last = a.lastCheckedAt ?? null;
-            const nd = nextDue(last, trHours);
-            const due = nd ? new Date(nd).getTime() <= Date.now() : true;
+            const last = a.scanCursor?.lastScannedAt ?? a.lastCheckedAt ?? null;
+            const nd = a.scanCursor?.nextScanAt ?? nextDue(last, trHours);
+            const due = !last || (nd ? new Date(nd).getTime() <= Date.now() : true);
             return (
               <div key={a.id} className="sc-row">
                 <span className="sc-unit"><span className="sc-bp">𝕏</span>@{a.username}</span>
@@ -302,9 +307,9 @@ export function EngageScanPanel() {
             );
           })}
           {visChannels.map((c) => {
-            const last = c.lastScannedAt ?? null;
-            const nd = nextDue(last, chHours);
-            const due = nd ? new Date(nd).getTime() <= Date.now() : true;
+            const last = c.scanCursor?.lastScannedAt ?? c.lastScannedAt ?? null;
+            const nd = c.scanCursor?.nextScanAt ?? nextDue(last, chHours);
+            const due = !last || (nd ? new Date(nd).getTime() <= Date.now() : true);
             return (
               <div key={c.id} className="sc-row">
                 <span className="sc-unit"><span className="sc-bp">r/</span>{c.channelName || c.channelId}</span>
