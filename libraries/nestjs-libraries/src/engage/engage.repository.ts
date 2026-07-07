@@ -1161,8 +1161,7 @@ export class EngageRepository {
       // rawData (full platform JSON payload) is intentionally NOT exposed: no
       // client or downstream service reads it, and returning it per item bloats
       // every _merge-based response (notably the paginated opportunities list).
-      // Per-org createdAt (when this org first saw the opportunity) — this is
-      // also the column `sortBy=createdAt` orders on, so display and sort match.
+      // Per-org createdAt (when this org first saw the opportunity).
       createdAt,
       updatedAt: opportunity.updatedAt,
       deletedAt: opportunity.deletedAt,
@@ -1176,6 +1175,33 @@ export class EngageRepository {
     };
   }
 
+  // Shared by listOpportunities/locateOpportunity so their postPublishedAt
+  // window can't drift out of sync. Two independent ways to set the lower
+  // bound: the `date` calendar preset (today/week, UTC day/isoWeek start), or
+  // an exact `startDate` instant, which takes priority if both are given —
+  // callers doing a rolling window (e.g. "last 24h") need hour precision that
+  // `date` can't express. `endDate` is the exact upper-bound instant, applied
+  // as-is with no rounding: pass a full timestamp for a precise cutoff, or a
+  // bare date for its UTC midnight.
+  private _postPublishedAtFilter(dto: {
+    date?: 'today' | 'week';
+    startDate?: string;
+    endDate?: string;
+  }): Prisma.DateTimeFilter | undefined {
+    const filter: Prisma.DateTimeFilter = {};
+    if (dto.startDate) {
+      filter.gte = dayjs.utc(dto.startDate).toDate();
+    } else if (dto.date === 'today') {
+      filter.gte = dayjs.utc().startOf('day').toDate();
+    } else if (dto.date === 'week') {
+      filter.gte = dayjs.utc().startOf('isoWeek').toDate();
+    }
+    if (dto.endDate) {
+      filter.lte = dayjs.utc(dto.endDate).toDate();
+    }
+    return Object.keys(filter).length ? filter : undefined;
+  }
+
   async listOpportunities(organizationId: string, dto: ListOpportunitiesDto) {
     const page = dto.page ?? 1;
     const limit = dto.limit ?? 20;
@@ -1183,6 +1209,7 @@ export class EngageRepository {
 
     const channelSpecific = dto.channels?.length ? dto.channels : undefined;
     const authorSpecificList = dto.authors?.length ? dto.authors : undefined;
+    const postPublishedAtFilter = this._postPublishedAtFilter(dto);
 
     // State-table filters (per-org) + nested opportunity filters (global).
     const where: Prisma.EngageOpportunityStateWhereInput = {
@@ -1219,12 +1246,7 @@ export class EngageRepository {
         ...(dto.minScoreAuthority !== undefined && {
           scoreAuthority: { gte: dto.minScoreAuthority },
         }),
-        ...(dto.date === 'today' && {
-          postPublishedAt: { gte: dayjs.utc().startOf('day').toDate() },
-        }),
-        ...(dto.date === 'week' && {
-          postPublishedAt: { gte: dayjs.utc().startOf('isoWeek').toDate() },
-        }),
+        ...(postPublishedAtFilter && { postPublishedAt: postPublishedAtFilter }),
       },
     };
 
@@ -1233,12 +1255,12 @@ export class EngageRepository {
       'score',
       'scoreKeyword',
       'scoreTracked',
-      'createdAt',
     ]);
     const oppSortFields = new Set([
       'scoreHeat',
       'scoreAuthority',
       'scoreRecency',
+      'postPublishedAt',
     ]);
     const sortBy =
       dto.sortBy && (stateSortFields.has(dto.sortBy) || oppSortFields.has(dto.sortBy))
@@ -1249,12 +1271,12 @@ export class EngageRepository {
       ? { opportunity: { [sortBy]: sortOrder } }
       : { [sortBy]: sortOrder };
     // Apply a stable tiebreaker so equal primary-sort values fall back to a
-    // deterministic order: createdAt-sorted lists break ties by highest score,
-    // every other sort breaks ties by newest-first.
+    // deterministic order: postPublishedAt-sorted lists break ties by highest
+    // score, every other sort breaks ties by newest-published-first.
     const tiebreaker =
-      sortBy === 'createdAt'
+      sortBy === 'postPublishedAt'
         ? { score: 'desc' as const }
-        : { createdAt: 'desc' as const };
+        : { opportunity: { postPublishedAt: 'desc' as const } };
     // Stable tiebreaker so `locateOpportunity` can reproduce the exact page
     // index for rows sharing the same primary + secondary sort values.
     // EngageOpportunityState has composite PK (organizationId+opportunityId),
@@ -1359,6 +1381,7 @@ export class EngageRepository {
 
   async locateOpportunity(organizationId: string, dto: LocateOpportunityDto) {
     const limit = dto.limit ?? 20;
+    const postPublishedAtFilter = this._postPublishedAtFilter(dto);
 
     // Mirror the `where` from `listOpportunities` exactly.
     const where: Prisma.EngageOpportunityStateWhereInput = {
@@ -1392,12 +1415,7 @@ export class EngageRepository {
         ...(dto.minScoreAuthority !== undefined && {
           scoreAuthority: { gte: dto.minScoreAuthority },
         }),
-        ...(dto.date === 'today' && {
-          postPublishedAt: { gte: dayjs.utc().startOf('day').toDate() },
-        }),
-        ...(dto.date === 'week' && {
-          postPublishedAt: { gte: dayjs.utc().startOf('isoWeek').toDate() },
-        }),
+        ...(postPublishedAtFilter && { postPublishedAt: postPublishedAtFilter }),
       },
     };
 
@@ -1405,12 +1423,12 @@ export class EngageRepository {
       'score',
       'scoreKeyword',
       'scoreTracked',
-      'createdAt',
     ]);
     const oppSortFields = new Set([
       'scoreHeat',
       'scoreAuthority',
       'scoreRecency',
+      'postPublishedAt',
     ]);
     const sortBy =
       dto.sortBy && (stateSortFields.has(dto.sortBy) || oppSortFields.has(dto.sortBy))
@@ -1440,34 +1458,68 @@ export class EngageRepository {
       };
     }
 
-    // For opp-table sort fields, fetch the value from the linked opportunity row.
-    let sortValue: unknown;
-    if (isOppField) {
-      const opp = await this._opportunity.model.engageOpportunity.findFirst({
-        where: { id: target.opportunityId },
-        select: { scoreHeat: true, scoreAuthority: true, scoreRecency: true },
-      });
-      sortValue = opp ? (opp as Record<string, unknown>)[sortBy] : null;
-    } else {
-      sortValue = (target as Record<string, unknown>)[sortBy];
-    }
+    // Tiebreaker mirrors listOpportunities: postPublishedAt sort → score desc,
+    // else → postPublishedAt desc. `score` lives on the state row; `postPublishedAt`
+    // lives on the linked opportunity.
+    const tbField = sortBy === 'postPublishedAt' ? 'score' : 'postPublishedAt';
+    const tbIsOppField = tbField === 'postPublishedAt';
 
-    // Tiebreaker mirrors listOpportunities: createdAt sort → score desc, else → createdAt desc.
-    const tbField = sortBy === 'createdAt' ? 'score' : 'createdAt';
-    const tbValue = (target as Record<string, unknown>)[tbField];
+    // Fetch the linked opportunity once, whenever the primary sort field or the
+    // tiebreaker needs a value that lives there instead of on the state row.
+    const opp =
+      isOppField || tbIsOppField
+        ? await this._opportunity.model.engageOpportunity.findFirst({
+            where: { id: target.opportunityId },
+            select: {
+              scoreHeat: true,
+              scoreAuthority: true,
+              scoreRecency: true,
+              postPublishedAt: true,
+            },
+          })
+        : null;
+
+    const sortValue = isOppField
+      ? opp
+        ? (opp as Record<string, unknown>)[sortBy]
+        : null
+      : (target as Record<string, unknown>)[sortBy];
+    const tbValue = tbIsOppField
+      ? opp
+        ? (opp as Record<string, unknown>)[tbField]
+        : null
+      : (target as Record<string, unknown>)[tbField];
 
     const cmp = sortOrder === 'desc' ? ('gt' as const) : ('lt' as const);
     const baseOpp = (where.opportunity ?? {}) as Prisma.EngageOpportunityWhereInput;
 
+    // Merge a field condition into `base`, routing it onto the nested
+    // `opportunity` relation when the field lives there instead of on the
+    // state row — and preserving whatever `opportunity` filter is already on
+    // `base` (e.g. the primary sort's own condition), rather than overwriting it.
+    const withField = (
+      base: Prisma.EngageOpportunityStateWhereInput,
+      field: string,
+      isOpp: boolean,
+      condition: unknown
+    ): Prisma.EngageOpportunityStateWhereInput =>
+      isOpp
+        ? {
+            ...base,
+            opportunity: {
+              ...((base.opportunity as Prisma.EngageOpportunityWhereInput) ?? baseOpp),
+              [field]: condition,
+            },
+          }
+        : { ...base, [field]: condition };
+
     // Build "strictly before" condition for the primary sort field.
-    const precedingByValueWhere: Prisma.EngageOpportunityStateWhereInput = isOppField
-      ? { ...where, opportunity: { ...baseOpp, [sortBy]: { [cmp]: sortValue } } }
-      : { ...where, [sortBy]: { [cmp]: sortValue } };
+    const precedingByValueWhere = withField(where, sortBy, isOppField, {
+      [cmp]: sortValue,
+    });
 
     // Equal primary value.
-    const equalPrimaryWhere: Prisma.EngageOpportunityStateWhereInput = isOppField
-      ? { ...where, opportunity: { ...baseOpp, [sortBy]: sortValue } }
-      : { ...where, [sortBy]: sortValue };
+    const equalPrimaryWhere = withField(where, sortBy, isOppField, sortValue);
 
     // Stable 3rd tiebreaker: opportunityId desc (mirrors listOpportunities orderBy).
     const [precedingByValue, precedingByTie, precedingByOppId, total] =
@@ -1477,13 +1529,12 @@ export class EngageRepository {
         }),
         // Equal primary, strictly better tiebreaker (always desc).
         this._oppState.model.engageOpportunityState.count({
-          where: { ...equalPrimaryWhere, [tbField]: { gt: tbValue } },
+          where: withField(equalPrimaryWhere, tbField, tbIsOppField, { gt: tbValue }),
         }),
         // Equal primary, equal tiebreaker, opportunityId comes before target (desc).
         this._oppState.model.engageOpportunityState.count({
           where: {
-            ...equalPrimaryWhere,
-            [tbField]: tbValue,
+            ...withField(equalPrimaryWhere, tbField, tbIsOppField, tbValue),
             opportunityId: { gt: target.opportunityId },
           },
         }),

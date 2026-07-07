@@ -842,7 +842,9 @@ Retrieve the list of opportunities (main Signal Feed endpoint).
 | `intent` | `IntentType \| IntentType[]` | — | Intent filter. Multi-value (OR): repeated params or comma-separated. Max 20. |
 | `keyword` | `string` | — | Restrict to opportunities that matched this exact keyword (text as configured; per-org via `matchedKeywords`) |
 | `keywords` | `string[]` | — | Multi-keyword variant of `keyword`: keep opportunities that matched **any** of these exact keywords (OR). Same per-org scope (`matchedKeywords`). Accepts repeated params `?keywords=react&keywords=nextjs` **or** comma-separated `?keywords=react,nextjs`. Combinable with `keyword` (the two sets are unioned). Max 50. |
-| `date` | `'today' \| 'week'` | — | Time range |
+| `date` | `'today' \| 'week'` | — | Calendar-preset lower bound on `postPublishedAt` (UTC day/isoWeek start) |
+| `startDate` | `string` (ISO datetime) | — | Exact lower bound on `postPublishedAt`, no rounding. Takes priority over `date` when both are given — use for rolling windows (e.g. "last 24h") that need hour precision. |
+| `endDate` | `string` (ISO datetime) | — | Exact upper bound on `postPublishedAt`, no rounding. Combines with `date`/`startDate` to form a window. |
 | `minScore` | `number` | — | Minimum total score |
 | `minScoreKeyword` | `number` | — | Minimum keyword score |
 | `minScoreHeat` | `number` | — | Minimum heat score |
@@ -850,7 +852,7 @@ Retrieve the list of opportunities (main Signal Feed endpoint).
 | `channels` | `string \| string[]` | — | Channel id filter. Multi-value (OR): `?channels=SEO&channels=TECH` or `?channels=SEO,TECH`. Omit for no filter. Max 50. |
 | `authors` | `string \| string[]` | — | Author username filter (case-insensitive). Multi-value (OR): repeated params or comma-separated. Omit for no filter. Max 50. |
 | `bookmarked` | `boolean` | — | Only show bookmarked |
-| `sortBy` | `string` | `'score'` | Sort field: `score` / `scoreKeyword` / `scoreHeat` / `scoreAuthority` / `scoreRecency` / `scoreTracked` / `createdAt` |
+| `sortBy` | `string` | `'score'` | Sort field: `score` / `scoreKeyword` / `scoreHeat` / `scoreAuthority` / `scoreRecency` / `scoreTracked` / `postPublishedAt` |
 | `sortOrder` | `'asc' \| 'desc'` | `'desc'` | Sort direction |
 | `page` | `number` | `1` | Page number |
 | `limit` | `number` | `20` | Items per page, max 100 |
@@ -937,7 +939,7 @@ Locate which page a given opportunity lives on within `/opportunities`, using **
 |---|---|---|---|
 | `opportunityId` | `string` | **required** | `item.id` from `/opportunities` response (`EngageOpportunity.id`) |
 | `limit` | `number` | `20` | Page size — must match the `limit` you pass to `/opportunities`, max 100 |
-| All `/opportunities` filter params | — | — | `platform`, `status`, `intent`, `keyword`, `keywords`, `date`, `minScore`, `minScoreKeyword`, `minScoreHeat`, `minScoreAuthority`, `channels`, `authors`, `bookmarked`, `sortBy`, `sortOrder` — must match the active list filters exactly |
+| All `/opportunities` filter params | — | — | `platform`, `status`, `intent`, `keyword`, `keywords`, `date`, `startDate`, `endDate`, `minScore`, `minScoreKeyword`, `minScoreHeat`, `minScoreAuthority`, `channels`, `authors`, `bookmarked`, `sortBy`, `sortOrder` — must match the active list filters exactly |
 
 **Response** `200 OK`
 

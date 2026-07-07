@@ -58,7 +58,7 @@ const SORT_OPTIONS = [
   { label: 'Recency', value: 'scoreRecency' },
   { label: 'Keyword', value: 'scoreKeyword' },
   { label: 'Tracked', value: 'scoreTracked' },
-  { label: 'Newest', value: 'createdAt' },
+  { label: 'Newest', value: 'postPublishedAt' },
 ];
 
 export const FeedFiltersBar: FC<FeedFiltersProps> = ({

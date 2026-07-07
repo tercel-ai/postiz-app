@@ -789,7 +789,9 @@ export class ListOpportunitiesDto {
   platform?: string[];  // e.g. ['x', 'reddit']; omit = no filter; max 20
   status?: EngageOpportunityStatus[];  // OR across statuses; max 20
   intent?: string[];    // OR across intentTags values; max 20
-  date?: 'today' | 'week';
+  date?:      'today' | 'week'; // calendar-preset lower bound on postPublishedAt (UTC day/isoWeek start)
+  startDate?: string;            // ISO datetime; exact lower bound, no rounding — takes priority over `date`
+  endDate?:   string;            // ISO datetime; exact upper bound, no rounding
 
   // ── Per-dimension score filters (min threshold) ────────────────────────
   minScore?:          number;  // total composite score
@@ -806,7 +808,7 @@ export class ListOpportunitiesDto {
 
   // ── Sorting ────────────────────────────────────────────────────────────
   // Default: score DESC (highest total first)
-  sortBy?:    'score' | 'scoreKeyword' | 'scoreHeat' | 'scoreAuthority' | 'scoreRecency' | 'scoreTracked' | 'createdAt';
+  sortBy?:    'score' | 'scoreKeyword' | 'scoreHeat' | 'scoreAuthority' | 'scoreRecency' | 'scoreTracked' | 'postPublishedAt';
   sortOrder?: 'asc' | 'desc';
 
   // ── Pagination ─────────────────────────────────────────────────────────

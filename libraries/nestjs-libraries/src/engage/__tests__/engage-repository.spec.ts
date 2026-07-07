@@ -225,6 +225,87 @@ describe('EngageRepository — two-table reads', () => {
       );
     });
 
+    it('applies a postPublishedAt lower bound when date=today', async () => {
+      const { repo, stateFindMany, stateCount } = buildRepo();
+      stateFindMany.mockResolvedValue([]);
+      stateCount.mockResolvedValue(0);
+
+      await repo.listOpportunities('org1', { date: 'today' } as any);
+      const oppWhere = stateFindMany.mock.calls[0][0].where.opportunity;
+      expect(oppWhere.postPublishedAt.gte).toBeInstanceOf(Date);
+      expect(oppWhere.postPublishedAt.lte).toBeUndefined();
+    });
+
+    it('applies an exact postPublishedAt upper bound when endDate is given, with no rounding', async () => {
+      const { repo, stateFindMany, stateCount } = buildRepo();
+      stateFindMany.mockResolvedValue([]);
+      stateCount.mockResolvedValue(0);
+
+      await repo.listOpportunities('org1', {
+        endDate: '2026-06-30T10:15:00.000Z',
+      } as any);
+      const oppWhere = stateFindMany.mock.calls[0][0].where.opportunity;
+      expect(oppWhere.postPublishedAt).toEqual({
+        lte: dayjs.utc('2026-06-30T10:15:00.000Z').toDate(),
+      });
+    });
+
+    it('applies an exact postPublishedAt lower bound when startDate is given', async () => {
+      const { repo, stateFindMany, stateCount } = buildRepo();
+      stateFindMany.mockResolvedValue([]);
+      stateCount.mockResolvedValue(0);
+
+      await repo.listOpportunities('org1', {
+        startDate: '2026-06-27T10:15:00.000Z',
+      } as any);
+      const oppWhere = stateFindMany.mock.calls[0][0].where.opportunity;
+      expect(oppWhere.postPublishedAt).toEqual({
+        gte: dayjs.utc('2026-06-27T10:15:00.000Z').toDate(),
+      });
+    });
+
+    it('lets startDate take priority over date when both are given', async () => {
+      const { repo, stateFindMany, stateCount } = buildRepo();
+      stateFindMany.mockResolvedValue([]);
+      stateCount.mockResolvedValue(0);
+
+      await repo.listOpportunities('org1', {
+        date: 'week',
+        startDate: '2026-06-27T10:15:00.000Z',
+      } as any);
+      const oppWhere = stateFindMany.mock.calls[0][0].where.opportunity;
+      expect(oppWhere.postPublishedAt.gte).toEqual(
+        dayjs.utc('2026-06-27T10:15:00.000Z').toDate()
+      );
+    });
+
+    it('combines startDate (lower bound) and endDate (upper bound) into one rolling window', async () => {
+      const { repo, stateFindMany, stateCount } = buildRepo();
+      stateFindMany.mockResolvedValue([]);
+      stateCount.mockResolvedValue(0);
+
+      await repo.listOpportunities('org1', {
+        startDate: '2026-06-27T10:15:00.000Z',
+        endDate: '2026-06-30T10:15:00.000Z',
+      } as any);
+      const oppWhere = stateFindMany.mock.calls[0][0].where.opportunity;
+      expect(oppWhere.postPublishedAt).toEqual({
+        gte: dayjs.utc('2026-06-27T10:15:00.000Z').toDate(),
+        lte: dayjs.utc('2026-06-30T10:15:00.000Z').toDate(),
+      });
+    });
+
+    it('omits postPublishedAt entirely when none of date/startDate/endDate is given', async () => {
+      const { repo, stateFindMany, stateCount } = buildRepo();
+      stateFindMany.mockResolvedValue([]);
+      stateCount.mockResolvedValue(0);
+
+      await repo.listOpportunities('org1', {} as any);
+      expect(stateFindMany.mock.calls[0][0].where.opportunity).not.toHaveProperty(
+        'postPublishedAt'
+      );
+    });
+
     it('attaches replyLink + sentReplyId from the latest sent reply', async () => {
       const { repo, stateFindMany, stateCount, sentFindMany } = buildRepo();
       stateFindMany.mockResolvedValue([STATE_ROW]);
@@ -262,7 +343,7 @@ describe('EngageRepository — two-table reads', () => {
       await repo.listOpportunities('org1', { sortBy: 'scoreHeat', sortOrder: 'desc' } as any);
       expect(stateFindMany.mock.calls[0][0].orderBy).toEqual([
         { opportunity: { scoreHeat: 'desc' } },
-        { createdAt: 'desc' },
+        { opportunity: { postPublishedAt: 'desc' } },
         // Final unique-key tiebreaker for stable pagination (locateOpportunity).
         { opportunityId: 'desc' },
       ]);
@@ -276,19 +357,19 @@ describe('EngageRepository — two-table reads', () => {
       await repo.listOpportunities('org1', { sortBy: 'score', sortOrder: 'desc' } as any);
       expect(stateFindMany.mock.calls[0][0].orderBy).toEqual([
         { score: 'desc' },
-        { createdAt: 'desc' },
+        { opportunity: { postPublishedAt: 'desc' } },
         { opportunityId: 'desc' },
       ]);
     });
 
-    it('breaks createdAt-sorted ties by highest score', async () => {
+    it('breaks postPublishedAt-sorted ties by highest score', async () => {
       const { repo, stateFindMany, stateCount } = buildRepo();
       stateFindMany.mockResolvedValue([]);
       stateCount.mockResolvedValue(0);
 
-      await repo.listOpportunities('org1', { sortBy: 'createdAt', sortOrder: 'desc' } as any);
+      await repo.listOpportunities('org1', { sortBy: 'postPublishedAt', sortOrder: 'desc' } as any);
       expect(stateFindMany.mock.calls[0][0].orderBy).toEqual([
-        { createdAt: 'desc' },
+        { opportunity: { postPublishedAt: 'desc' } },
         { score: 'desc' },
         { opportunityId: 'desc' },
       ]);

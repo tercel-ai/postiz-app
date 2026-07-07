@@ -317,6 +317,20 @@ export class ListOpportunitiesDto {
   @IsIn(['today', 'week'])
   date?: 'today' | 'week';
 
+  // Exact lower bound on postPublishedAt (an instant, not a calendar preset).
+  // Takes priority over `date` when both are given — use this for rolling
+  // windows (e.g. "last 24h") that need hour precision `date` can't express.
+  @IsOptional()
+  @IsDateString()
+  startDate?: string;
+
+  // Exact upper bound on postPublishedAt, applied as-is with no rounding:
+  // pass a full timestamp for a precise cutoff, or a bare date for its UTC
+  // midnight. Combines with `date`/`startDate` to form a window.
+  @IsOptional()
+  @IsDateString()
+  endDate?: string;
+
   @IsOptional()
   @Type(() => Number)
   @IsInt()
@@ -470,6 +484,20 @@ export class LocateOpportunityDto {
   @IsString()
   @IsIn(['today', 'week'])
   date?: 'today' | 'week';
+
+  // Exact lower bound on postPublishedAt (an instant, not a calendar preset).
+  // Takes priority over `date` when both are given — use this for rolling
+  // windows (e.g. "last 24h") that need hour precision `date` can't express.
+  @IsOptional()
+  @IsDateString()
+  startDate?: string;
+
+  // Exact upper bound on postPublishedAt, applied as-is with no rounding:
+  // pass a full timestamp for a precise cutoff, or a bare date for its UTC
+  // midnight. Combines with `date`/`startDate` to form a window.
+  @IsOptional()
+  @IsDateString()
+  endDate?: string;
 
   @IsOptional()
   @Type(() => Number)
