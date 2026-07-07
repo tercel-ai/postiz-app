@@ -31,6 +31,12 @@ export const EXTENSION_MESSAGE = {
   postMetrics: `${EXTENSION_BRAND}:post-metrics`,
   /** extension → page: regular post metrics shaped for /posts/metrics/ingest */
   postMetricsResult: `${EXTENSION_BRAND}:post-metrics-result`,
+  /** page → extension: run the due-metrics batch (POST /posts/metrics/due →
+   *  session-fetch → /ingest) for the post ids currently visible on screen —
+   *  own posts and Engage replies alike, batched sibling of postMetrics */
+  postsMetricsRefresh: `${EXTENSION_BRAND}:posts-metrics-refresh`,
+  /** extension → page: run summary ({due, fetched, ingested, stoppedReason}) for the posts-metrics-refresh request */
+  postsMetricsRefreshResult: `${EXTENSION_BRAND}:posts-metrics-refresh-result`,
   /** legacy page → extension: open X and fill a draft (dormant) */
   extensionTask: `${EXTENSION_BRAND}:extension-task`,
   /** page → extension: presence probe */
