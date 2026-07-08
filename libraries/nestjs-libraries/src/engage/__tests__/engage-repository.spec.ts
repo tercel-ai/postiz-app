@@ -28,6 +28,7 @@ function buildRepo() {
   const oppAggregate = vi.fn();
   const oppFindFirst = vi.fn();
   const channelFindMany = vi.fn();
+  const channelFindFirst = vi.fn();
   const trackedFindMany = vi.fn();
   const cursorFindMany = vi.fn();
   // Default to no keywords so tests that don't care about keyword status don't
@@ -48,7 +49,7 @@ function buildRepo() {
   const postDeleteMany = vi.fn();
 
   const channel = {
-    model: { engageMonitoredChannel: { findMany: channelFindMany } },
+    model: { engageMonitoredChannel: { findMany: channelFindMany, findFirst: channelFindFirst } },
   } as any;
   const trackedAccount = {
     model: { engageTrackedAccount: { findMany: trackedFindMany } },
@@ -132,6 +133,7 @@ function buildRepo() {
   return {
     repo, stateFindMany, stateCount, stateAggregate, stateFindFirst, stateFindUnique,
     stateUpdateMany, stateExecuteRaw, oppAggregate, oppFindFirst, channelFindMany,
+    channelFindFirst,
     trackedFindMany, cursorFindMany, keywordFindMany, sentCount, sentFindMany, sentFindFirst, sentCreate,
     sentUpdate, postAggregate, postFindMany, postCreate, postUpdate, postDeleteMany,
     txTransaction,
@@ -427,6 +429,61 @@ describe('EngageRepository — two-table reads', () => {
     });
   });
 
+  describe('getOpportunityById', () => {
+    it('returns the same flat item shape as listOpportunities, including latest non-draft reply fields', async () => {
+      const { repo, stateFindUnique, sentFindFirst } = buildRepo();
+      stateFindUnique.mockResolvedValue(STATE_ROW);
+      sentFindFirst.mockResolvedValue({
+        id: 'reply-new',
+        post: { releaseURL: 'https://x.com/a/status/1' },
+      });
+
+      const item = (await repo.getOpportunityById('org1', 'opp1')) as any;
+
+      expect(item.id).toBe('opp1');
+      expect(item.status).toBe('NEW');
+      expect(item.bookmarked).toBe(true);
+      expect(item.score).toBe(70);
+      expect(item.scoreHeat).toBe(18);
+      expect(item.matchedKeywords).toEqual(['react', 'nextjs']);
+      expect(item).not.toHaveProperty('opportunity');
+      expect(item.sentReplyId).toBe('reply-new');
+      expect(item.replyLink).toBe('https://x.com/a/status/1');
+      expect(item.channelAvatar).toBeNull();
+      expect(sentFindFirst.mock.calls[0][0].where).toEqual({
+        organizationId: 'org1',
+        opportunityId: 'opp1',
+        post: { state: { not: 'DRAFT' } },
+      });
+    });
+
+    it('attaches a reddit channel avatar using the same field name as listOpportunities', async () => {
+      const { repo, stateFindUnique, sentFindFirst, channelFindFirst } = buildRepo();
+      stateFindUnique.mockResolvedValue({
+        ...STATE_ROW,
+        opportunity: {
+          ...STATE_ROW.opportunity,
+          platform: 'reddit',
+          channelId: 'SEO',
+        },
+      });
+      sentFindFirst.mockResolvedValue(null);
+      channelFindFirst.mockResolvedValue({
+        metadata: { avatar: 'https://styles.redditmedia.com/avatar.png' },
+      });
+
+      const item = (await repo.getOpportunityById('org1', 'opp1')) as any;
+
+      expect(item.channelAvatar).toBe('https://styles.redditmedia.com/avatar.png');
+      expect(item.sentReplyId).toBeNull();
+      expect(item.replyLink).toBeNull();
+      expect(channelFindFirst.mock.calls[0][0].where).toEqual({
+        platform: 'reddit',
+        channelId: 'SEO',
+      });
+    });
+  });
+
   describe('listSentReplies', () => {
     it('selects lastMetricsFetchAt on every returned post', async () => {
       const { repo, sentFindMany, sentCount, stateFindMany } = buildRepo();
@@ -604,6 +661,106 @@ describe('EngageRepository — two-table reads', () => {
       });
       // Raw settings is stripped from the response.
       expect('settings' in a.post).toBe(false);
+    });
+  });
+
+  describe('getSentReplyItemById', () => {
+    it('returns the same decorated item shape as listSentReplies', async () => {
+      const { repo, sentFindFirst, stateFindUnique } = buildRepo();
+      sentFindFirst.mockResolvedValue({
+        id: 'sent1',
+        organizationId: 'org1',
+        opportunityId: 'opp1',
+        createdAt: new Date('2026-07-01T00:00:00.000Z'),
+        inputData: { strategy: 'helpful' },
+        post: {
+          id: 'post1',
+          content: 'reply text',
+          state: 'PUBLISHED',
+          releaseURL: 'https://x.com/me/status/2',
+          publishDate: new Date('2026-07-01T01:00:00.000Z'),
+          impressions: 10,
+          trafficScore: 3,
+          analytics: [],
+          lastMetricsFetchAt: null,
+          integration: {
+            id: 'int1',
+            name: '0xKyd',
+            providerIdentifier: 'x',
+            picture: 'https://files/0xkyd.jpg',
+            profile: '@0xKyd',
+            internalId: '999',
+          },
+          settings: JSON.stringify({ __type: 'x' }),
+        },
+        opportunity: {
+          id: 'opp1',
+          platform: 'x',
+          externalPostUrl: 'https://x.com/author/status/1',
+          postContent: 'original post',
+          authorUsername: 'author',
+          authorDisplayName: 'Author',
+          authorFollowers: 100,
+          authorAvatarUrl: 'https://files/author.jpg',
+          postPublishedAt: new Date('2026-07-01T00:30:00.000Z'),
+        },
+      });
+      stateFindUnique.mockResolvedValue({
+        matchedKeywords: ['react'],
+        status: 'REPLIED',
+        generationHistory: [
+          { content: 'first', length: 'medium', cost: 3, billingTaskId: 't1', createdAt: '2026-07-01T00:00:00Z' },
+          { content: 'second', length: 'long', cost: 5, billingTaskId: 't2', createdAt: '2026-07-01T00:10:00Z' },
+        ],
+      });
+
+      const item = (await repo.getSentReplyItemById('org1', 'sent1')) as any;
+
+      expect(item.id).toBe('sent1');
+      expect(item.opportunity).toMatchObject({
+        id: 'opp1',
+        status: 'REPLIED',
+        matchedKeywords: ['react'],
+      });
+      expect(item.opportunity.generationHistory.map((g: any) => g.content)).toEqual([
+        'second',
+        'first',
+      ]);
+      expect(item.post.replyAuthor).toEqual({
+        handle: '0xKyd',
+        id: '999',
+        name: '0xKyd',
+        avatarUrl: 'https://files/0xkyd.jpg',
+      });
+      expect(item.post.metrics).toBeDefined();
+      expect('settings' in item.post).toBe(false);
+      expect(sentFindFirst.mock.calls[0][0].where).toEqual({
+        id: 'sent1',
+        organizationId: 'org1',
+      });
+      expect(stateFindUnique.mock.calls[0][0].where).toEqual({
+        organizationId_opportunityId: {
+          organizationId: 'org1',
+          opportunityId: 'opp1',
+        },
+      });
+    });
+
+    it('falls back to empty opportunity decorations when the org state row is missing', async () => {
+      const { repo, sentFindFirst, stateFindUnique } = buildRepo();
+      sentFindFirst.mockResolvedValue({
+        id: 'sent1',
+        opportunity: { id: 'opp1', platform: 'reddit' },
+        post: { analytics: [], impressions: 0, trafficScore: 0, integration: null, settings: null },
+      });
+      stateFindUnique.mockResolvedValue(null);
+
+      const item = (await repo.getSentReplyItemById('org1', 'sent1')) as any;
+
+      expect(item.opportunity.status).toBeNull();
+      expect(item.opportunity.matchedKeywords).toEqual([]);
+      expect(item.opportunity.generationHistory).toEqual([]);
+      expect(item.post.replyAuthor).toBeNull();
     });
   });
 

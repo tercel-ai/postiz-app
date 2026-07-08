@@ -459,14 +459,14 @@ export class EngageController {
     return this._engageService.listOpportunities(org, query);
   }
 
-  @ApiOperation({ summary: 'Get full detail for a single opportunity; includes sentReply when status is SCHEDULED or REPLIED' })
+  @ApiOperation({ summary: 'Get a single signal-feed opportunity by id; response shape matches one item from /opportunities' })
   @ApiResponse({ status: 404, description: 'Opportunity not found' })
   @Get('/opportunities/:id')
-  getOpportunityDetail(
+  getOpportunityById(
     @GetOrgFromRequest() org: Organization,
     @Param('id') id: string
   ) {
-    return this._engageService.getOpportunityDetail(org, id);
+    return this._engageService.getOpportunityById(org, id);
   }
 
   @ApiOperation({ summary: 'Dismiss an opportunity (moves it to DISMISSED status)' })
@@ -769,6 +769,16 @@ export class EngageController {
     @Param('id') id: string
   ) {
     return this._engageService.getSentReplyStatus(org, id);
+  }
+
+  @ApiOperation({ summary: 'Get a single sent reply by id; response shape matches one item from /sent' })
+  @ApiResponse({ status: 404, description: 'Sent reply not found' })
+  @Get('/sent/:id')
+  getSentReplyById(
+    @GetOrgFromRequest() org: Organization,
+    @Param('id') id: string
+  ) {
+    return this._engageService.getSentReplyItemById(org, id);
   }
 
   @ApiOperation({ summary: 'Edit content / schedule of a scheduled (QUEUE) engage reply' })

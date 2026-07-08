@@ -526,6 +526,10 @@ export class EngageService implements OnApplicationBootstrap {
     return this._engageRepository.getSentReplyStatus(org.id, sentReplyId);
   }
 
+  async getSentReplyItemById(org: Organization, sentReplyId: string) {
+    return this._engageRepository.getSentReplyItemById(org.id, sentReplyId);
+  }
+
   async updateScheduledReply(org: Organization, id: string, dto: UpdateScheduledReplyDto) {
     if (dto.scheduledAt !== undefined) {
       if (new Date(dto.scheduledAt) <= new Date()) {

@@ -20,6 +20,7 @@
 - [Reply Accounts — Reply Accounts](#reply-accounts--reply-accounts)
 - [Opportunities — Signal Feed](#opportunities--signal-feed)
   - [GET /opportunities](#get-apienageopportunities) — paginated signal feed
+  - [GET /opportunities/:id](#get-apienageopportunitiesid) — single signal-feed item
   - [GET /opportunities/locate](#get-apienageopportunitieslocate) — locate the page of an opportunityId within /opportunities
 - [Draft Generation — AI Draft Generation (SSE)](#draft-generation--ai-draft-generation-sse)
   - [POST /opportunities/:id/draft](#post-apienageopportunitiesiddraft) — stream an AI draft (not persisted)
@@ -36,6 +37,7 @@
   - [DELETE /extension-replies](#delete-apienageextension-replies) — clear history (all | 1d | 1w | 1m)
 - [Sent Replies — Sent Records](#sent-replies--sent-records)
   - [GET /sent](#get-apienagesent) — paginated list (`status` rollups: `settled` = live+scheduled, `awaiting` = draft+manual+error; `awaiting-draft` / `awaiting-expired` / `awaiting-link` sub-filter the Awaiting-review tabs)
+  - [GET /sent/:id](#get-apienagesentid) — single sent reply item
   - [GET /sent/locate](#get-apienagesentlocate) — locate the page of a sentReplyId within /sent
   - [GET /sent/stats](#get-apienagesentstats) — aggregate stats
   - [PATCH /sent/:id](#patch-apienagesentid) — edit scheduled reply
@@ -929,6 +931,46 @@ Total score max is 105 (scoreKeyword 35 + scoreHeat 45 + scoreAuthority 15 + sco
 
 ---
 
+### GET `/api/engage/opportunities/:id`
+
+Retrieve one opportunity by `id`.
+
+The response is the same shape as one object from `GET /api/engage/opportunities`
+`items[]`, including `sentReplyId`, `replyLink`, and `channelAvatar`.
+
+**Path Params**
+
+| Parameter | Type | Description |
+|---|---|---|
+| `id` | `string` | `item.id` from `/opportunities` response (`EngageOpportunity.id`) |
+
+**Response** `200 OK`
+
+```json
+{
+  "id": "opp-uuid",
+  "platform": "x",
+  "externalPostId": "post-id",
+  "externalPostUrl": "https://x.com/user/status/post-id",
+  "status": "NEW",
+  "bookmarked": false,
+  "score": 85,
+  "scoreKeyword": 35,
+  "scoreHeat": 30,
+  "scoreAuthority": 10,
+  "scoreRecency": 5,
+  "scoreTracked": 5,
+  "matchedKeywords": ["GEO SEO"],
+  "sentReplyId": null,
+  "replyLink": null,
+  "channelAvatar": null
+}
+```
+
+Returns `404` when the opportunity does not exist for the current organization.
+
+---
+
 ### GET `/api/engage/opportunities/locate`
 
 Locate which page a given opportunity lives on within `/opportunities`, using **the same filters and sort**. Use this to jump directly to the right page when linking to or reopening a specific opportunity.
@@ -1481,6 +1523,81 @@ Retrieve the list of sent replies (includes original post summary and metrics da
 | `ERROR` | Failed to send |
 
 **Special Handling for Reddit Manual Replies**: When `post.releaseURL` is `null`, it means the user has not yet submitted the Reddit comment URL; they should be prompted to provide it.
+
+---
+
+### GET `/api/engage/sent/:id`
+
+Retrieve one sent reply by `id`.
+
+The response is the same shape as one object from `GET /api/engage/sent`
+`items[]`, including decorated `opportunity.status`, `opportunity.matchedKeywords`,
+`opportunity.generationHistory`, `post.replyAuthor`, and `post.metrics`.
+
+**Path Params**
+
+| Parameter | Type | Description |
+|---|---|---|
+| `id` | `string` | `item.id` from `/sent` response (`EngageSentReply.id`) |
+
+**Response** `200 OK`
+
+```json
+{
+  "id": "sent-reply-uuid",
+  "organizationId": "...",
+  "opportunityId": "opp-uuid",
+  "postId": "post-uuid",
+  "inputData": {
+    "strategy": "EXPERT_ANSWER",
+    "brandStrength": 1,
+    "mentions": ["competitor_brand"]
+  },
+  "authorReplied": false,
+  "createdAt": "...",
+  "updatedAt": "...",
+  "post": {
+    "id": "post-uuid",
+    "content": "Great point! Here's what I...",
+    "state": "PUBLISHED",
+    "releaseURL": "https://x.com/user/status/123456",
+    "replyAuthor": {
+      "handle": "user",
+      "id": "123",
+      "name": "User",
+      "avatarUrl": "https://..."
+    },
+    "metrics": {
+      "likes": 42,
+      "replies": 3,
+      "retweets": 8,
+      "quotes": 0,
+      "bookmarks": 0,
+      "views": 1240,
+      "score": 0,
+      "comments": 0,
+      "shares": 0,
+      "saves": 0,
+      "upvoteRatio": null
+    }
+  },
+  "opportunity": {
+    "id": "opp-uuid",
+    "platform": "x",
+    "externalPostUrl": "https://x.com/someuser/status/999",
+    "postContent": "What's the best way to use AI for SEO?",
+    "authorUsername": "someuser",
+    "authorDisplayName": "Some User",
+    "authorFollowers": 4747631,
+    "authorAvatarUrl": "https://pbs.twimg.com/profile_images/.../avatar_400x400.jpg",
+    "status": "REPLIED",
+    "matchedKeywords": ["SEO", "AI"],
+    "generationHistory": []
+  }
+}
+```
+
+Returns `404` when the sent reply does not exist for the current organization.
 
 ---
 

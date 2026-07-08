@@ -1956,7 +1956,41 @@ export class EngageRepository {
       include: { opportunity: true },
     });
     if (!row) throw new NotFoundException('Opportunity not found');
-    return this._merge(row);
+
+    const merged = this._merge(row);
+    const [sentReply, channel] = await Promise.all([
+      this._sentReply.model.engageSentReply.findFirst({
+        where: {
+          organizationId,
+          opportunityId: id,
+          post: { state: { not: 'DRAFT' } },
+        },
+        orderBy: { createdAt: 'desc' },
+        select: { id: true, post: { select: { releaseURL: true } } },
+      }),
+      row.opportunity.platform === 'reddit' && row.opportunity.channelId
+        ? this._channel.model.engageMonitoredChannel.findFirst({
+            where: {
+              platform: 'reddit',
+              channelId: row.opportunity.channelId,
+            },
+            select: { metadata: true },
+          })
+        : Promise.resolve(null),
+    ]);
+
+    const metadata = channel?.metadata as Record<string, unknown> | null | undefined;
+    const channelAvatar =
+      metadata && typeof metadata === 'object' && typeof metadata.avatar === 'string'
+        ? metadata.avatar
+        : null;
+
+    return {
+      ...merged,
+      sentReplyId: sentReply?.id ?? null,
+      replyLink: sentReply?.post?.releaseURL ?? null,
+      channelAvatar,
+    };
   }
 
   async getOpportunityDetail(organizationId: string, id: string) {
@@ -2953,6 +2987,90 @@ export class EngageRepository {
     });
     if (!reply) throw new NotFoundException('Sent reply not found');
     return reply;
+  }
+
+  async getSentReplyItemById(organizationId: string, id: string) {
+    const reply = await this._sentReply.model.engageSentReply.findFirst({
+      where: { id, organizationId },
+      include: {
+        post: {
+          select: {
+            id: true,
+            content: true,
+            state: true,
+            releaseURL: true,
+            publishDate: true,
+            impressions: true,
+            trafficScore: true,
+            analytics: true,
+            lastMetricsFetchAt: true,
+            settings: true,
+            integration: {
+              select: {
+                id: true,
+                name: true,
+                providerIdentifier: true,
+                picture: true,
+                profile: true,
+                internalId: true,
+              },
+            },
+          },
+        },
+        opportunity: {
+          select: {
+            id: true,
+            platform: true,
+            externalPostUrl: true,
+            postContent: true,
+            authorUsername: true,
+            authorDisplayName: true,
+            authorFollowers: true,
+            authorAvatarUrl: true,
+            postPublishedAt: true,
+          },
+        },
+      },
+    });
+    if (!reply) throw new NotFoundException('Sent reply not found');
+
+    const state = await this._oppState.model.engageOpportunityState.findUnique({
+      where: {
+        organizationId_opportunityId: {
+          organizationId,
+          opportunityId: reply.opportunity.id,
+        },
+      },
+      select: {
+        matchedKeywords: true,
+        status: true,
+        generationHistory: true,
+      },
+    });
+
+    const opportunity = {
+      ...reply.opportunity,
+      status: state?.status ?? null,
+      matchedKeywords: state?.matchedKeywords ?? [],
+      generationHistory: normalizeGenerationHistory(state?.generationHistory),
+    };
+    if (!reply.post) return { ...reply, opportunity };
+
+    const { settings, ...postRest } = reply.post;
+    return {
+      ...reply,
+      opportunity,
+      post: {
+        ...postRest,
+        replyAuthor: resolveReplyAuthor(reply.post.integration, settings),
+        metrics: normalizeReplyMetrics(
+          reply.opportunity.platform,
+          reply.post.analytics,
+          reply.post.impressions,
+          reply.post.trafficScore
+        ),
+      },
+    };
   }
 
   async updateReplyUrl(
