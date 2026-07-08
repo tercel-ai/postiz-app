@@ -38,6 +38,27 @@ const VALID_STRATEGIES = [
 export const KEYWORD_TYPES = ['CORE', 'BRAND', 'COMPETITOR'] as const;
 export type KeywordType = (typeof KEYWORD_TYPES)[number] | null;
 
+// Shared by ListSentDto and LocateSentReplyDto so /sent and /sent/locate accept
+// the exact same status vocabulary. Four granular states (published/scheduled/
+// manual/error) + 'draft' (raw Post.state=DRAFT, expired or not) + two top-level
+// rollups (settled/awaiting), plus three 'awaiting' sub-filters that back the
+// Awaiting-review tabs: awaiting-draft (still-actionable DRAFT), awaiting-expired
+// (DRAFT whose opportunity aged out — EngageOpportunityState.status=EXPIRED for
+// this org), and awaiting-link (manual link-pending OR failed publish — both need
+// the user to act before the reply counts as sent).
+export const SENT_STATUS_VALUES = [
+  'published',
+  'scheduled',
+  'manual',
+  'error',
+  'draft',
+  'settled',
+  'awaiting',
+  'awaiting-draft',
+  'awaiting-expired',
+  'awaiting-link',
+] as const;
+
 // ─── Config ───────────────────────────────────────────────────────────────────
 
 export class SaveEngageConfigDto {
@@ -584,7 +605,7 @@ export class LocateSentReplyDto {
 
   @IsOptional()
   @IsString()
-  @IsIn(['published', 'scheduled', 'manual', 'error', 'draft', 'settled', 'awaiting'])
+  @IsIn(SENT_STATUS_VALUES)
   status?: string;
 
   @IsOptional()
@@ -620,12 +641,20 @@ export class ListSentDto {
   // Two combined "rollup" values complement the four granular states:
   //   'settled'  = no further action needed: published (live) OR scheduled (will
   //                auto-fire). = published (PUBLISHED + releaseURL) OR QUEUE.
-  //   'awaiting' = needs user action / generated but not yet live: manual
-  //                link-pending (PUBLISHED + no releaseURL) OR a failed publish
-  //                (ERROR). Folds in the former GET /engage/awaiting-review endpoint.
+  //   'awaiting' = needs user action / generated but not yet live: a saved DRAFT,
+  //                manual link-pending (PUBLISHED + no releaseURL), OR a failed
+  //                publish (ERROR). Folds in the former GET /engage/awaiting-review
+  //                endpoint.
+  // Three more sub-filters of 'awaiting' back the Awaiting-review tabs (All /
+  // Drafts / Awaiting link / Expired):
+  //   'awaiting-draft'   = DRAFT, opportunity still actionable for this org.
+  //   'awaiting-expired' = DRAFT, opportunity's EngageOpportunityState.status for
+  //                        this org is EXPIRED (aged out — read-only).
+  //   'awaiting-link'    = manual link-pending OR failed publish (the two states
+  //                        that need the user to act, minus DRAFT).
   @IsOptional()
   @IsString()
-  @IsIn(['published', 'scheduled', 'manual', 'error', 'draft', 'settled', 'awaiting'])
+  @IsIn(SENT_STATUS_VALUES)
   status?: string;
 
   // Date window: all (default/empty) | day | today | week | month. Untyped (no

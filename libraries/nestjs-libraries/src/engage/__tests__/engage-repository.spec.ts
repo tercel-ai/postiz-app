@@ -1045,6 +1045,71 @@ describe('EngageRepository — two-table reads', () => {
       expect(sentCount.mock.calls[0][0].where.post.source).toBe('engage');
       expect(sentCount.mock.calls[0][0].where.post.publishDate.gte).toBeInstanceOf(Date);
     });
+
+    it('status=awaiting-draft: DRAFT posts whose opportunity is not EXPIRED for this org', async () => {
+      const { repo, sentCount, sentFindMany, postAggregate } = buildRepo();
+      sentCount.mockResolvedValue(0);
+      postAggregate.mockResolvedValue({ _sum: { impressions: 0 } });
+      sentFindMany.mockResolvedValue([]);
+
+      await repo.getSentStats('org1', { status: 'awaiting-draft' });
+
+      const where = sentCount.mock.calls[0][0].where;
+      expect(where.post).toMatchObject({ source: 'engage', state: 'DRAFT' });
+      expect(where.opportunity).toEqual({
+        states: { some: { organizationId: 'org1', status: { not: 'EXPIRED' } } },
+      });
+    });
+
+    it('status=awaiting-expired: DRAFT posts whose opportunity IS EXPIRED for this org', async () => {
+      const { repo, sentCount, sentFindMany, postAggregate } = buildRepo();
+      sentCount.mockResolvedValue(0);
+      postAggregate.mockResolvedValue({ _sum: { impressions: 0 } });
+      sentFindMany.mockResolvedValue([]);
+
+      await repo.getSentStats('org1', { status: 'awaiting-expired' });
+
+      const where = sentCount.mock.calls[0][0].where;
+      expect(where.post).toMatchObject({ source: 'engage', state: 'DRAFT' });
+      expect(where.opportunity).toEqual({
+        states: { some: { organizationId: 'org1', status: 'EXPIRED' } },
+      });
+    });
+
+    it('status=awaiting-expired + platform: merges the platform filter into the same opportunity where', async () => {
+      const { repo, sentCount, sentFindMany, postAggregate } = buildRepo();
+      sentCount.mockResolvedValue(0);
+      postAggregate.mockResolvedValue({ _sum: { impressions: 0 } });
+      sentFindMany.mockResolvedValue([]);
+
+      await repo.getSentStats('org1', { status: 'awaiting-expired', platform: 'x' });
+
+      const where = sentCount.mock.calls[0][0].where;
+      expect(where.opportunity).toEqual({
+        platform: 'x',
+        states: { some: { organizationId: 'org1', status: 'EXPIRED' } },
+      });
+    });
+
+    it('status=awaiting-link: manual link-pending (PUBLISHED, no releaseURL) OR a failed publish (ERROR)', async () => {
+      const { repo, sentCount, sentFindMany, postAggregate } = buildRepo();
+      sentCount.mockResolvedValue(0);
+      postAggregate.mockResolvedValue({ _sum: { impressions: 0 } });
+      sentFindMany.mockResolvedValue([]);
+
+      await repo.getSentStats('org1', { status: 'awaiting-link' });
+
+      const where = sentCount.mock.calls[0][0].where;
+      expect(where.post).toMatchObject({
+        source: 'engage',
+        OR: [
+          { state: 'PUBLISHED', releaseURL: null },
+          { state: 'ERROR' },
+        ],
+      });
+      // No opportunity-state narrowing needed here — unlike awaiting-draft/-expired.
+      expect(where.opportunity).toBeUndefined();
+    });
   });
 
   describe('createManualXPost', () => {

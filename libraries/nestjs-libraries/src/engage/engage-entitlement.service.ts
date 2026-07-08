@@ -46,6 +46,7 @@ const RELEASED_STATUS = 'released';
 const SERIALIZATION_FAILURE_CODE = 'P2034';
 
 export type EngagePlanCode = 'starter' | 'developer' | 'pro';
+const ENGAGE_PLAN_CODES: readonly EngagePlanCode[] = ['starter', 'developer', 'pro'];
 export type ReplyLength = 'short' | 'medium' | 'long';
 
 /**
@@ -157,6 +158,16 @@ interface ResolvedPlan {
   code: EngagePlanCode | null;
   /** Billing-period start; null when billing off or package missing. */
   periodStart: Date | null;
+  /**
+   * true when `code` is FALLBACK_PLAN_CODE applied because the real plan
+   * couldn't be resolved (aisee API failure, no/expired package, or an
+   * unrecognised plan name) — NOT because the org is actually on that plan.
+   * Internal callers (getEntitlement, reply-cap checks) should keep using
+   * `code` as-is for conservative limit enforcement; anything exposed to a
+   * caller as a factual "your plan is X" label must check this first instead
+   * of presenting the fallback code as a real plan.
+   */
+  degraded?: boolean;
 }
 
 /**
@@ -252,8 +263,13 @@ export class EngageEntitlementService implements OnModuleInit {
   }
 
   /**
-   * Normalise an aisee plan display name ("Starter Plan (Monthly)", "pro", …)
-   * to an engage plan code. Returns null when nothing matches.
+   * Fuzzy fallback: normalise an aisee plan DISPLAY name ("Starter Plan
+   * (Monthly)", "pro", …) to an engage plan code by substring match. Only used
+   * when the aisee record predates the exact `plan` field (see
+   * AiseeUserCreditPackage.plan) — prefer that exact code when present, since
+   * matching free text can misfire (e.g. a differently-named future plan, or
+   * a non-subscription product whose name happens to contain "pro").
+   * Returns null when nothing matches.
    */
   static normalizePlanName(name: string | undefined | null): EngagePlanCode | null {
     if (!name) return null;
@@ -289,17 +305,25 @@ export class EngageEntitlementService implements OnModuleInit {
     }
 
     const name = 'name' in limits ? limits.name : undefined;
+    const rawPlan = 'plan' in limits ? limits.plan : undefined;
     const periodStart =
       'periodStart' in limits && limits.periodStart
         ? new Date(limits.periodStart)
         : null;
 
-    const code = EngageEntitlementService.normalizePlanName(name);
+    // Prefer the exact base-tier code aisee-core derives itself from
+    // product_code (e.g. "developer-month" -> "developer") — only fall back
+    // to fuzzy-matching the free-text display name for older records that
+    // predate this field.
+    const code =
+      (rawPlan && (ENGAGE_PLAN_CODES as readonly string[]).includes(rawPlan)
+        ? (rawPlan as EngagePlanCode)
+        : null) ?? EngageEntitlementService.normalizePlanName(name);
     if (!code) {
       this.logger.warn(
         `Unrecognised plan name "${name}" for org=${orgId}; applying "${FALLBACK_PLAN_CODE}" limits`
       );
-      return { code: FALLBACK_PLAN_CODE, periodStart };
+      return { code: FALLBACK_PLAN_CODE, periodStart, degraded: true };
     }
     return { code, periodStart };
   }
@@ -321,7 +345,13 @@ export class EngageEntitlementService implements OnModuleInit {
    * (§15.3) remain the source of truth; this is only for UX.
    */
   async getEntitlementSummary(orgId: string): Promise<{
+    /** Real resolved plan, or null when unknown (self-hosted, OR the plan
+     *  couldn't be resolved — see `degraded`). Never the fallback code. */
     plan: EngagePlanCode | null;
+    /** true when `plan` is null because resolution failed (aisee API error,
+     *  no/expired package, unrecognised name) — NOT because billing is off.
+     *  `limits` still enforces FALLBACK_PLAN_CODE regardless of this flag. */
+    degraded: boolean;
     limits: EngageEntitlement;
     usage: {
       keywords: number;
@@ -344,7 +374,10 @@ export class EngageEntitlementService implements OnModuleInit {
         this.getAllReplyCosts(),
       ]);
     return {
-      plan: plan.code,
+      // Never surface FALLBACK_PLAN_CODE as if it were the org's real plan —
+      // callers that need a "your plan is X" label must not be lied to.
+      plan: plan.degraded ? null : plan.code,
+      degraded: plan.degraded ?? false,
       limits,
       usage: { keywords, trackedAccounts, subreddits, repliesThisPeriod },
       replyCredits,

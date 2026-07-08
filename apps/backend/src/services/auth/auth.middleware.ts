@@ -49,7 +49,17 @@ export class AuthMiddleware implements NestMiddleware {
         // SSO token (sub = User.id)
         user = await this._userService.getUserById(payload.sub);
 
-        // Lazy creation fallback if local user doesn't exist
+        // A local record may already exist under a different id — a native
+        // signup, a seeded/demo account, or a user bridged before this id
+        // convention existed. Reuse it instead of creating a duplicate,
+        // which would violate the (email, providerName) unique constraint.
+        // Safe because aisee_auth is the authoritative identity provider:
+        // its verified JWT asserting ownership of `email` is what SSO trusts.
+        if (!user && payload.email) {
+          user = await this._userService.getUserByEmail(payload.email);
+        }
+
+        // Lazy creation fallback if local user doesn't exist at all
         if (!user && payload.email) {
           this.logger.warn(
             `SSO JWT valid but local user not found (id=${payload.sub}), creating lazily`

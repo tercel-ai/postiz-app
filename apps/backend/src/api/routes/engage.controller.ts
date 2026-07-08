@@ -739,7 +739,7 @@ export class EngageController {
     return this._engageService.locateSentReply(org, query);
   }
 
-  @ApiOperation({ summary: "Paginated list of Engage replies. Optional status filter: published | scheduled | manual | error, plus two rollups — settled (published + scheduled) and awaiting (manual link-pending + failed publishes; generated but not yet live)" })
+  @ApiOperation({ summary: "Paginated list of Engage replies. Optional status filter: published | scheduled | manual | error | draft, plus rollups — settled (published + scheduled) and awaiting (draft + manual link-pending + failed publishes) — and awaiting's own sub-filters for the Awaiting-review tabs: awaiting-draft (still-actionable draft), awaiting-expired (draft whose opportunity aged out), awaiting-link (link-pending or failed publish)" })
   @Get('/sent')
   listSentReplies(
     @GetOrgFromRequest() org: Organization,

@@ -35,7 +35,7 @@
   - [GET /extension-replies](#get-apienageextension-replies) — paginated history
   - [DELETE /extension-replies](#delete-apienageextension-replies) — clear history (all | 1d | 1w | 1m)
 - [Sent Replies — Sent Records](#sent-replies--sent-records)
-  - [GET /sent](#get-apienagesent) — paginated list (`status` rollups: `settled` = live+scheduled, `awaiting` = draft+manual+error)
+  - [GET /sent](#get-apienagesent) — paginated list (`status` rollups: `settled` = live+scheduled, `awaiting` = draft+manual+error; `awaiting-draft` / `awaiting-expired` / `awaiting-link` sub-filter the Awaiting-review tabs)
   - [GET /sent/locate](#get-apienagesentlocate) — locate the page of a sentReplyId within /sent
   - [GET /sent/stats](#get-apienagesentstats) — aggregate stats
   - [PATCH /sent/:id](#patch-apienagesentid) — edit scheduled reply
@@ -1391,12 +1391,12 @@ Retrieve the list of sent replies (includes original post summary and metrics da
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `platform` | `string` | — | Platform filter |
-| `status` | `'published' \| 'scheduled' \| 'manual' \| 'error' \| 'draft' \| 'settled' \| 'awaiting'` | — | Status filter (see table below). `settled` and `awaiting` are combined rollups. |
+| `status` | `'published' \| 'scheduled' \| 'manual' \| 'error' \| 'draft' \| 'settled' \| 'awaiting' \| 'awaiting-draft' \| 'awaiting-expired' \| 'awaiting-link'` | — | Status filter (see table below). `settled` and `awaiting` are combined rollups; `awaiting-draft` / `awaiting-expired` / `awaiting-link` are sub-filters of `awaiting` that back the Awaiting-review tabs (Drafts / Expired / Awaiting link). |
 | `date` | `all \| day \| today \| week \| month` | `all` | Publish-date window (`day`/`today` aliased) |
 | `page` | `number` | `1` | Page number |
 | `limit` | `number` | `20` | Items per page, max 100 |
 
-**Status filter meanings** — the four granular states plus two combined rollups that partition them into "no action needed" vs "needs action":
+**Status filter meanings** — the four granular states plus two combined rollups that partition them into "no action needed" vs "needs action", plus three sub-filters of `awaiting`:
 
 | status | Post condition |
 |---|---|
@@ -1407,8 +1407,11 @@ Retrieve the list of sent replies (includes original post summary and metrics da
 | `draft` | `state=DRAFT` (saved working copy, never sent; see `POST /opportunities/:id/save-draft`) |
 | `settled` | `published` **OR** `scheduled` — no further action needed (live, or will auto-fire) |
 | `awaiting` | `draft` **OR** `manual` **OR** `error` — has content but not yet live |
+| `awaiting-draft` | `draft` **AND** this org's `EngageOpportunityState.status != EXPIRED` — the "Drafts" tab: still-actionable saved drafts |
+| `awaiting-expired` | `draft` **AND** this org's `EngageOpportunityState.status == EXPIRED` — the "Expired" tab: the draft's source post aged out of the actionable feed (read-only) |
+| `awaiting-link` | `manual` **OR** `error` — the "Awaiting link" tab: needs the user to submit a reply link or retry a failed publish |
 
-> **DRAFT working-copies:** a saved draft is a `Post(state=DRAFT)` (see `POST /opportunities/:id/save-draft`). Omitting `status` returns **all** states including `DRAFT`. Use `status=awaiting` to target only the "needs action" bucket (`DRAFT` + `manual` + `error`). Distinguish the three `awaiting` sub-cases by `post.state` (`DRAFT` / `PUBLISHED`+no `releaseURL` / `ERROR`).
+> **DRAFT working-copies:** a saved draft is a `Post(state=DRAFT)` (see `POST /opportunities/:id/save-draft`). Omitting `status` returns **all** states including `DRAFT`. Use `status=awaiting` to target the whole "needs action" bucket (`DRAFT` + `manual` + `error`), or one of `awaiting-draft` / `awaiting-expired` / `awaiting-link` to target a single Awaiting-review tab directly (no client-side triage of `post.state` needed). `EXPIRED` is a **per-org** status living on `EngageOpportunityState`, not a `Post` field — the same shared opportunity can be `EXPIRED` for one org's draft and still active for another's.
 
 **Response** `200 OK`
 
@@ -1492,7 +1495,7 @@ Locate which page a given sent reply lives on within `/sent`, using **the same f
 | `sentReplyId` | `string` | **required** | `item.id` from `/sent` response (`EngageSentReply.id`) |
 | `limit` | `number` | `20` | Page size — must match the `limit` you pass to `/sent`, max 100 |
 | `platform` | `string` | — | Must match the active filter |
-| `status` | `'published' \| 'scheduled' \| 'manual' \| 'error' \| 'draft' \| 'settled' \| 'awaiting'` | — | Must match the active filter |
+| `status` | `'published' \| 'scheduled' \| 'manual' \| 'error' \| 'draft' \| 'settled' \| 'awaiting' \| 'awaiting-draft' \| 'awaiting-expired' \| 'awaiting-link'` | — | Must match the active filter |
 | `date` | `string` | — | Must match the active filter |
 
 **Response** `200 OK`
@@ -1531,7 +1534,7 @@ Retrieve summary statistics for sent records (used for the top of the Sent page)
 |---|---|---|
 | `date` | `all` \| `day` \| `today` \| `week` \| `month` | Publish-date window. `all` / omitted / unknown = all-time. `day` and `today` are aliases. Same vocabulary as `/dashboard/summary`. |
 | `platform` | `x` \| `reddit` | Restrict to one platform (via the linked opportunity). |
-| `status` | `published` \| `scheduled` \| `manual` \| `error` \| `settled` \| `awaiting` | Restrict to a reply lifecycle state. Same values as `/sent` (incl. the `settled` / `awaiting` rollups). |
+| `status` | `published` \| `scheduled` \| `manual` \| `error` \| `draft` \| `settled` \| `awaiting` \| `awaiting-draft` \| `awaiting-expired` \| `awaiting-link` | Restrict to a reply lifecycle state. Same values as `/sent` (incl. the `settled` / `awaiting` rollups and the three `awaiting-*` sub-filters). |
 
 **Response** `200 OK`
 

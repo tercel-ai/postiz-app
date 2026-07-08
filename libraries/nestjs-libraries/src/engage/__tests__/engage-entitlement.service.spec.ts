@@ -155,6 +155,20 @@ describe('EngageEntitlementService.getEntitlement', () => {
     expect(ent.keywordsMax).toBe(3);
     expect(ent.scanIntervalHours).toBe(24);
   });
+
+  it('prefers the exact aisee-derived plan code over the display name when both are present', async () => {
+    // A misleading/unparseable `name` must not matter when `plan` is exact.
+    const { service } = build({ limits: { ...PRO_LIMITS, name: 'Something Unrelated', plan: 'developer' } });
+    const ent = await service.getEntitlement('org1');
+    expect(ent.keywordsMax).toBe(10);
+    expect(ent.scanIntervalHours).toBe(24);
+  });
+
+  it('ignores an unrecognised `plan` value and falls back to the display name', async () => {
+    const { service } = build({ limits: { ...PRO_LIMITS, name: 'Pro Plan (Monthly)', plan: 'enterprise' } });
+    const ent = await service.getEntitlement('org1');
+    expect(ent.keywordsMax).toBe(30);
+  });
 });
 
 describe('EngageEntitlementService.getMetricsWindowDays', () => {
@@ -350,7 +364,17 @@ describe('EngageEntitlementService.getEntitlementSummary', () => {
     const { service } = build({ limits: null });
     const summary = await service.getEntitlementSummary('org1');
     expect(summary.plan).toBeNull();
+    expect(summary.degraded).toBe(false);
     expect(summary.limits.keywordsMax).toBeNull();
+  });
+
+  it('reports a null plan with degraded=true for an unrecognised name — never lies that the org is on Starter', async () => {
+    const { service } = build({ limits: { ...PRO_LIMITS, name: 'Mystery Tier' } });
+    const summary = await service.getEntitlementSummary('org1');
+    expect(summary.plan).toBeNull();
+    expect(summary.degraded).toBe(true);
+    // Limits still fail-closed to Starter internally, independent of the display plan.
+    expect(summary.limits.keywordsMax).toBe(3);
   });
 });
 

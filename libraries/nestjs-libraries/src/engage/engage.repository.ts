@@ -2085,6 +2085,12 @@ export class EngageRepository {
       ...this._engageDateWindow(dto.date),
     };
 
+    // Narrows the linked EngageOpportunity beyond the plain platform filter.
+    // Only 'awaiting-draft' / 'awaiting-expired' set this — they key off this
+    // org's EngageOpportunityState.status (EXPIRED = the draft's source post aged
+    // out of the actionable feed and can no longer be turned into a real reply).
+    let opportunityWhere: Prisma.EngageOpportunityWhereInput | undefined;
+
     if (dto.status === 'published') {
       postWhere.state = 'PUBLISHED';
       postWhere.releaseURL = { not: null };
@@ -2102,6 +2108,28 @@ export class EngageRepository {
       // window above. (Replaces the former GET /engage/awaiting-review endpoint.)
       postWhere.OR = [
         { state: 'DRAFT' },
+        { state: 'PUBLISHED', releaseURL: null },
+        { state: 'ERROR' },
+      ];
+    } else if (dto.status === 'awaiting-draft') {
+      // Awaiting-review tab "Drafts": a saved working DRAFT whose source
+      // opportunity is still actionable for this org.
+      postWhere.state = 'DRAFT';
+      opportunityWhere = {
+        states: { some: { organizationId, status: { not: 'EXPIRED' } } },
+      };
+    } else if (dto.status === 'awaiting-expired') {
+      // Awaiting-review tab "Expired": a saved working DRAFT whose source
+      // opportunity aged out of the actionable feed for this org — read-only.
+      postWhere.state = 'DRAFT';
+      opportunityWhere = {
+        states: { some: { organizationId, status: 'EXPIRED' } },
+      };
+    } else if (dto.status === 'awaiting-link') {
+      // Awaiting-review tab "Awaiting link": needs the user to act before the
+      // reply counts as sent — a manual link-pending publish (PUBLISHED with no
+      // releaseURL) OR a failed publish attempt (ERROR).
+      postWhere.OR = [
         { state: 'PUBLISHED', releaseURL: null },
         { state: 'ERROR' },
       ];
@@ -2127,9 +2155,13 @@ export class EngageRepository {
     const sentWhere: Prisma.EngageSentReplyWhereInput = {
       organizationId,
       post: postWhere,
-      // Apply platform filter via the linked opportunity's platform field
-      ...(dto.platform && {
-        opportunity: { platform: dto.platform },
+      // Apply platform filter via the linked opportunity's platform field, merged
+      // with the EXPIRED-state sub-filter above when both are present.
+      ...((dto.platform || opportunityWhere) && {
+        opportunity: {
+          ...(dto.platform && { platform: dto.platform }),
+          ...opportunityWhere,
+        },
       }),
     };
 
@@ -2190,6 +2222,7 @@ export class EngageRepository {
               authorDisplayName: true,
               authorFollowers: true,
               authorAvatarUrl: true,
+              postPublishedAt: true,
             },
           },
         },

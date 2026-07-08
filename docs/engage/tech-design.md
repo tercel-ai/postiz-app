@@ -661,22 +661,31 @@ export class EngageController {
   ) { ... }
 
   // Sent history list. Four granular Post states plus two combined "rollup"
-  // status values (no separate endpoint — the old /awaiting-review was folded in):
-  //   published = state=PUBLISHED && releaseURL!=null   (live)
-  //   scheduled = state=QUEUE                           (queued, will auto-fire)
-  //   manual    = state=PUBLISHED && releaseURL=null    (link not backfilled yet)
-  //   error     = state=ERROR                           (publish failed, draft kept)
-  //   draft     = state=DRAFT                           (saved working copy, never sent)
-  //   settled   = published OR scheduled        (已处理 — no further action needed)
-  //   awaiting  = draft OR manual OR error      (待处理 — has content, not yet live)
+  // status values (no separate endpoint — the old /awaiting-review was folded in),
+  // plus three sub-filters of `awaiting` that back the Awaiting-review tabs:
+  //   published       = state=PUBLISHED && releaseURL!=null   (live)
+  //   scheduled       = state=QUEUE                           (queued, will auto-fire)
+  //   manual          = state=PUBLISHED && releaseURL=null    (link not backfilled yet)
+  //   error           = state=ERROR                           (publish failed, draft kept)
+  //   draft           = state=DRAFT                           (saved working copy, never sent)
+  //   settled         = published OR scheduled        (已处理 — no further action needed)
+  //   awaiting        = draft OR manual OR error      (待处理 — has content, not yet live)
+  //   awaiting-draft  = draft AND this org's EngageOpportunityState.status != EXPIRED
+  //                     (Awaiting-review tab "Drafts": still-actionable)
+  //   awaiting-expired = draft AND this org's EngageOpportunityState.status == EXPIRED
+  //                     (Awaiting-review tab "Expired": source post aged out, read-only)
+  //   awaiting-link   = manual OR error   (Awaiting-review tab "Awaiting link": needs
+  //                     a submitted reply link or a retry after a failed publish)
   // The default "All" list (no status) INCLUDES DRAFT so awaiting is always a subset
   // of it. DRAFT is excluded from status=settled, from /sent/stats (a never-sent
   // draft has no impressions and would deflate the response-rate cards), and from the
-  // dashboards — but NOT from the "All" list.
+  // dashboards — but NOT from the "All" list. EXPIRED lives on EngageOpportunityState
+  // (per-org), not on Post — the same shared opportunity can be EXPIRED for one org's
+  // draft while still active for another org's.
   @Get('/sent')
   listSentReplies(
     @GetOrgFromRequest() org: Organization,
-    @Query() query: ListSentDto  // platform, status(published|scheduled|manual|error|settled|awaiting), date, page, limit
+    @Query() query: ListSentDto  // platform, status(published|scheduled|manual|error|draft|settled|awaiting|awaiting-draft|awaiting-expired|awaiting-link), date, page, limit
   ) { ... }
 
   // Sent page top-4 stats cells (发出回复 all-time / Reply rate / Total Impressions / Avg Likes)
@@ -819,7 +828,7 @@ export class ListOpportunitiesDto {
 // ── SENT LIST + STATS DTOs ────────────────────────────────────────────────
 export class ListSentDto {
   platform?:  string;                  // filter by platform (x | reddit | ...)
-  status?:    string;                  // 'published' | 'scheduled' | 'manual' | 'error' | 'settled' | 'awaiting'
+  status?:    string;                  // 'published' | 'scheduled' | 'manual' | 'error' | 'draft' | 'settled' | 'awaiting' | 'awaiting-draft' | 'awaiting-expired' | 'awaiting-link'
   date?:      'today' | 'week' | 'month';
   page?:      number;
   limit?:     number;

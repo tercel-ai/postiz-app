@@ -397,6 +397,14 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
       .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
     return true;
   }
+
+  // ─── Subscription plan (Popup header badge) ──────────────────────────────
+  if (request.action === ENGAGE_EXTENSION_ACTION.loadSubscription) {
+    backendCall('/user/subscription', 'GET')
+      .then((r) => sendResponse({ ok: r.ok, data: r.data }))
+      .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
+    return true;
+  }
   if (request.action === ENGAGE_EXTENSION_ACTION.claimTasks) {
     const want = Math.min(Math.max(1, request.want ?? 3), 5);
     console.log('[aisee][scan] claimTasks', { want, force: request.force });

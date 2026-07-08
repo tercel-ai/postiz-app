@@ -122,6 +122,14 @@ export interface AiseeUserCreditPackage {
   periodStart: string;
   periodEnd: string;
   name: string;
+  /**
+   * Normalised base tier code (e.g. "developer"), derived by aisee-core itself
+   * from product_code ("developer-month" -> "developer") and stored on the
+   * subscription record — see payment_service.py / subscription_service.py.
+   * More reliable than parsing `name`; undefined on older records that predate
+   * this field.
+   */
+  plan?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -220,6 +228,7 @@ export class AiseeClient {
 
   async getUserCreditPackage(userId: string): Promise<AiseeUserCreditPackage | null> {
     if (!this.enabled) {
+      this.logger.warn('Not configured, skipping credit package query');
       return null;
     }
 
@@ -245,6 +254,7 @@ export class AiseeClient {
         periodStart: data.period_start,
         periodEnd: data.period_end,
         name: data.name,
+        plan: typeof data?.data?.plan === 'string' ? data.data.plan : undefined,
       };
     } catch (error) {
       this.logger.error(`getUserCreditPackage error for user=${userId}:`, error);

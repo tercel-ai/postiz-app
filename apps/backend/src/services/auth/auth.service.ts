@@ -178,6 +178,17 @@ export class AuthService {
 
     // Check local user exists (lazy creation fallback)
     let localUser = await this._userService.getUserById(ssoUserId);
+
+    // A local record may already exist under a different id — a native
+    // signup, a seeded/demo account, or a user bridged before this id
+    // convention existed. Reuse it instead of creating a duplicate, which
+    // would violate the (email, providerName) unique constraint. Safe
+    // because aisee_auth is the authoritative identity provider: it already
+    // verified this login and asserts ownership of `body.email`.
+    if (!localUser) {
+      localUser = await this._userService.getUserByEmail(body.email);
+    }
+
     if (!localUser) {
       this.logger.warn(
         `Local user not found during login (id=${ssoUserId}), creating lazily`
