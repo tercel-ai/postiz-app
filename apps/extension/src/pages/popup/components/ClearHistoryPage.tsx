@@ -31,8 +31,10 @@ export const ClearHistoryPage: FC<{
   return (
     <div className="pz">
       <div className="pz-header">
-        <button className="pz-back-btn" onClick={onBack}>←</button>
-        <div className="pz-title">Clear History</div>
+        <div className="pz-header-row">
+          <button className="pz-back-btn" onClick={onBack}>←</button>
+          <div className="pz-title">Clear History</div>
+        </div>
       </div>
 
       <div className="pz-clear-page">

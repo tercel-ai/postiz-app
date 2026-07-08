@@ -141,8 +141,10 @@ export default function Popup() {
     return (
       <div className="pz">
         <div className="pz-header">
-          <button className="pz-back-btn" onClick={() => setView('main')}>←</button>
-          <div className="pz-title" style={{ fontSize: 14 }}>Scan Automation</div>
+          <div className="pz-header-row">
+            <button className="pz-back-btn" onClick={() => setView('main')}>←</button>
+            <div className="pz-title" style={{ fontSize: 14 }}>Scan Automation</div>
+          </div>
         </div>
         <div style={{ padding: '12px 14px', overflowY: 'auto', maxHeight: 560 }}>
           <EngageScanPanel />
@@ -154,24 +156,34 @@ export default function Popup() {
   return (
     <div className="pz">
       <div className="pz-header">
-        <div className="pz-logo">A</div>
-        <div className="pz-title">Aisee · Reply</div>
-        {user ? (
-          <div
-            style={{
-              marginLeft: 'auto',
-              display: 'flex',
-              alignItems: 'center',
-              gap: 8,
-              minWidth: 0,
-            }}
-          >
+        <div className="pz-header-row">
+          <img className="pz-logo" src="/icon-32.png" alt="Aisee" />
+          <div className="pz-title">Aisee</div>
+          {user ? (
+            <div className="pz-header-actions">
+              <button
+                className="pz-clear-btn"
+                title="Scan automation panel"
+                onClick={() => setView('scan')}
+              >
+                ⚙
+              </button>
+              <button className="pz-clear-btn" onClick={handleLogout}>
+                Log out
+              </button>
+            </div>
+          ) : (
+            <div className="pz-sub" style={{ marginLeft: 'auto' }}>in-browser</div>
+          )}
+        </div>
+        {user && (
+          <div className="pz-header-account">
             <span
               className="pz-sub"
               title={user.email}
               style={{
-                marginLeft: 0,
-                maxWidth: 120,
+                flex: 1,
+                minWidth: 0,
                 overflow: 'hidden',
                 textOverflow: 'ellipsis',
                 whiteSpace: 'nowrap',
@@ -179,25 +191,10 @@ export default function Popup() {
             >
               {user.email}
             </span>
-            <span
-              className="pz-plan-badge"
-              title={planName || 'Free'}
-            >
+            <span className="pz-plan-badge" title={planName || 'Free'}>
               {planName || 'Free'}
             </span>
-            <button
-              className="pz-clear-btn"
-              title="Scan automation panel"
-              onClick={() => setView('scan')}
-            >
-              ⚙
-            </button>
-            <button className="pz-clear-btn" onClick={handleLogout}>
-              Log out
-            </button>
           </div>
-        ) : (
-          <div className="pz-sub">in-browser</div>
         )}
       </div>
 

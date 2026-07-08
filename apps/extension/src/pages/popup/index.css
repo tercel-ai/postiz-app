@@ -41,35 +41,44 @@ body {
 /* ── Header ─────────────────────────────────────────────── */
 .pz-header {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 14px;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 14px;
   border-bottom: 1px solid var(--pz-border);
 }
-.pz-logo {
-  width: 26px;
-  height: 26px;
-  border: 1.5px solid var(--pz-ink);
-  border-radius: 8px;
-  background: var(--pz-accent);
-  color: var(--pz-ink);
-  font-family: Georgia, 'Times New Roman', serif;
-  font-weight: 600;
-  font-size: 13px;
+.pz-header-row {
   display: flex;
   align-items: center;
-  justify-content: center;
+  gap: 8px;
+}
+.pz-header-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.pz-header-account {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.pz-logo {
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  display: block;
+  object-fit: contain;
 }
 .pz-title {
   color: var(--pz-ink);
   font-family: Georgia, 'Times New Roman', serif;
   font-weight: 500;
-  font-size: 16px;
+  font-size: 15px;
   letter-spacing: 0.01em;
 }
 .pz-plan-badge {
   flex-shrink: 0;
-  max-width: 90px;
+  max-width: 160px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -82,7 +91,6 @@ body {
   padding: 2px 8px;
 }
 .pz-sub {
-  margin-left: auto;
   font-size: 11px;
   color: var(--pz-muted);
 }
