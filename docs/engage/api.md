@@ -22,6 +22,7 @@
   - [GET /opportunities](#get-apienageopportunities) — paginated signal feed
   - [GET /opportunities/:id](#get-apienageopportunitiesid) — single signal-feed item
   - [GET /opportunities/locate](#get-apienageopportunitieslocate) — locate the page of an opportunityId within /opportunities
+  - [GET /opportunities/counts](#get-apienageopportunitiescounts) — total/byStatus/byPlatform counts for /opportunities
 - [Draft Generation — AI Draft Generation (SSE)](#draft-generation--ai-draft-generation-sse)
   - [POST /opportunities/:id/draft](#post-apienageopportunitiesiddraft) — stream an AI draft (not persisted)
   - [POST /opportunities/:id/save-draft](#post-apienageopportunitiesidsave-draft) — save an unpublished working draft (DRAFT)
@@ -40,6 +41,7 @@
   - [GET /sent/:id](#get-apienagesentid) — single sent reply item
   - [GET /sent/locate](#get-apienagesentlocate) — locate the page of a sentReplyId within /sent
   - [GET /sent/stats](#get-apienagesentstats) — aggregate stats
+  - [GET /sent/counts](#get-apienagesentcounts) — total/byPlatform/settled-awaiting-rollup counts for /sent
   - [PATCH /sent/:id](#patch-apienagesentid) — edit scheduled reply
   - [PATCH /sent/:id/reply-url](#patch-apienagesentidreply-url) — Reddit URL submission
 - [Dashboard Stats — Dashboard Statistics](#dashboard-stats--dashboard-statistics)
@@ -828,6 +830,45 @@ Retrieve scoring statistics for the Feed (used for the top dashboard).
 ```
 
 > When no data: `total: 0`, other fields are 0 / `null`.
+
+---
+
+### GET `/api/engage/opportunities/counts`
+
+Total + byStatus + byPlatform counts for `/opportunities`, scoped by the same filters minus `platform`/`status` (those two become the breakdown axes, not a further narrowing) and `sortBy`/`sortOrder`/`page`/`limit` (a counts response has no rows to sort or paginate). Use this instead of firing several `GET /opportunities?platform=x&limit=1` calls just to read `.total` for tab/platform badges — that N+1 pattern used to run a full `findMany` + `count` per call.
+
+**Query Params** (all optional — same scoping filters as `/opportunities`, minus `platform`/`status`/`sortBy`/`sortOrder`/`page`/`limit`)
+
+| Parameter | Type | Description |
+|---|---|---|
+| `keyword` | `string` | Same as `/opportunities` |
+| `keywords` | `string[]` | Same as `/opportunities` |
+| `intent` | `IntentType \| IntentType[]` | Same as `/opportunities` |
+| `date` | `'today' \| 'week'` | Same as `/opportunities` |
+| `startDate` / `endDate` | `string` (ISO datetime) | Same as `/opportunities` |
+| `minScore` / `minScoreKeyword` / `minScoreHeat` / `minScoreAuthority` | `number` | Same as `/opportunities` |
+| `channels` | `string \| string[]` | Same as `/opportunities` |
+| `authors` | `string \| string[]` | Same as `/opportunities` |
+| `bookmarked` | `boolean` | Same as `/opportunities` |
+
+**Response** `200 OK`
+
+```json
+{
+  "total": 142,
+  "byStatus": {
+    "NEW": 98,
+    "DISMISSED": 12,
+    "REPLIED": 20,
+    "SCHEDULED": 4,
+    "AUTO_QUEUED": 6,
+    "EXPIRED": 2
+  },
+  "byPlatform": { "x": 90, "reddit": 52 }
+}
+```
+
+> `byStatus` always has all six `EngageOpportunityStatus` keys present (0 when empty), so the UI can render fixed tab badges without existence checks. `byPlatform` currently only has `x`/`reddit` — the two supported platforms.
 
 ---
 
@@ -1666,6 +1707,29 @@ Retrieve summary statistics for sent records (used for the top of the Sent page)
 ```
 
 > Every field reflects the selected `date`/`platform`/`status` window. With no `date`, the window is all-time (matching `/sent`). `avgLikes` is platform-aware: for X it reads the `Likes` metric, for Reddit the `score` metric, from each reply's `Post.analytics` blob (bounded to the 1,000 most recent replies in the window). The Dashboard panel (`/dashboard/summary`) has its own combined/platform-scoped fields and is unaffected by this change.
+
+---
+
+### GET `/api/engage/sent/counts`
+
+Total + byPlatform + settled/awaiting rollup counts for `/sent`, replacing several `GET /sent?platform=x&limit=1` calls just to read `.total` for platform/tab badges.
+
+**Query Params** (all optional)
+
+| Param | Type | Description |
+|---|---|---|
+| `date` | `all` \| `day` \| `today` \| `week` \| `month` | Same vocabulary as `/sent`/`/sent/stats`. Scopes both `total`/`byPlatform` **and** `rollups`. |
+| `status` | Same values as `/sent` | Scopes `total`/`byPlatform` only. **`rollups` always recomputes settled/awaiting from `date` alone**, ignoring this param — the tab badges need their own totals regardless of which status tab is currently active. |
+
+**Response** `200 OK`
+
+```json
+{
+  "total": 340,
+  "byPlatform": { "x": 210, "reddit": 130 },
+  "rollups": { "settled": 280, "awaiting": 60 }
+}
+```
 
 ---
 
