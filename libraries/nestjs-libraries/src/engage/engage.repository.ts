@@ -2541,6 +2541,11 @@ export class EngageRepository {
   // `rollups` always recomputes settled/awaiting from `date` alone (ignoring
   // any passed-in `status`) since those badges need their own totals
   // regardless of which status tab is currently active.
+  //
+  // `awaitingBreakdown` (drafts/link/expired) only fires when `status=awaiting`
+  // — it backs the Awaiting-review page's own Drafts / Awaiting link / Expired
+  // sub-tab badges, which are only ever visible while that page is open, so the
+  // three extra counts stay off the hot path for every other status scope.
   async getSentCounts(
     organizationId: string,
     dto: { date?: string; status?: string } = {}
@@ -2567,15 +2572,47 @@ export class EngageRepository {
       { includeDrafts: true }
     );
 
-    const [total, x, reddit, settled, awaiting] = await Promise.all([
-      this._sentReply.model.engageSentReply.count({ where: sentWhere }),
-      this._sentReply.model.engageSentReply.count({ where: injectPlatform('x') }),
-      this._sentReply.model.engageSentReply.count({ where: injectPlatform('reddit') }),
-      this._sentReply.model.engageSentReply.count({ where: settledWhere }),
-      this._sentReply.model.engageSentReply.count({ where: awaitingWhere }),
-    ]);
+    const wantsAwaitingBreakdown = dto.status === 'awaiting';
+    const { sentWhere: awaitingDraftWhere } = this._buildSentReplyFilter(
+      organizationId,
+      { date: dto.date, status: 'awaiting-draft' },
+      { includeDrafts: true }
+    );
+    const { sentWhere: awaitingLinkWhere } = this._buildSentReplyFilter(
+      organizationId,
+      { date: dto.date, status: 'awaiting-link' },
+      { includeDrafts: true }
+    );
+    const { sentWhere: awaitingExpiredWhere } = this._buildSentReplyFilter(
+      organizationId,
+      { date: dto.date, status: 'awaiting-expired' },
+      { includeDrafts: true }
+    );
 
-    return { total, byPlatform: { x, reddit }, rollups: { settled, awaiting } };
+    const [total, x, reddit, settled, awaiting, drafts, link, expired] =
+      await Promise.all([
+        this._sentReply.model.engageSentReply.count({ where: sentWhere }),
+        this._sentReply.model.engageSentReply.count({ where: injectPlatform('x') }),
+        this._sentReply.model.engageSentReply.count({ where: injectPlatform('reddit') }),
+        this._sentReply.model.engageSentReply.count({ where: settledWhere }),
+        this._sentReply.model.engageSentReply.count({ where: awaitingWhere }),
+        wantsAwaitingBreakdown
+          ? this._sentReply.model.engageSentReply.count({ where: awaitingDraftWhere })
+          : Promise.resolve(0),
+        wantsAwaitingBreakdown
+          ? this._sentReply.model.engageSentReply.count({ where: awaitingLinkWhere })
+          : Promise.resolve(0),
+        wantsAwaitingBreakdown
+          ? this._sentReply.model.engageSentReply.count({ where: awaitingExpiredWhere })
+          : Promise.resolve(0),
+      ]);
+
+    return {
+      total,
+      byPlatform: { x, reddit },
+      rollups: { settled, awaiting },
+      ...(wantsAwaitingBreakdown && { awaitingBreakdown: { drafts, link, expired } }),
+    };
   }
 
   // Pull the "likes" metric out of a Post.analytics JSON blob. X stores it under

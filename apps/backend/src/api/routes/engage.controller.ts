@@ -771,7 +771,7 @@ export class EngageController {
     });
   }
 
-  @ApiOperation({ summary: 'Total + byPlatform counts for /sent scoped by date/status, plus a settled/awaiting rollup (always recomputed from date alone, ignoring status) for tab badges — replaces N separate limit=1 /sent calls' })
+  @ApiOperation({ summary: 'Total + byPlatform counts for /sent scoped by date/status, plus a settled/awaiting rollup (always recomputed from date alone, ignoring status) for tab badges, and — only when status=awaiting — an awaitingBreakdown (drafts/link/expired) for the Awaiting-review page sub-tabs — replaces N separate limit=1 /sent calls' })
   @Get('/sent/counts')
   getSentCounts(
     @GetOrgFromRequest() org: Organization,

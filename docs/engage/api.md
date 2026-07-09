@@ -1718,10 +1718,10 @@ Total + byPlatform + settled/awaiting rollup counts for `/sent`, replacing sever
 
 | Param | Type | Description |
 |---|---|---|
-| `date` | `all` \| `day` \| `today` \| `week` \| `month` | Same vocabulary as `/sent`/`/sent/stats`. Scopes both `total`/`byPlatform` **and** `rollups`. |
-| `status` | Same values as `/sent` | Scopes `total`/`byPlatform` only. **`rollups` always recomputes settled/awaiting from `date` alone**, ignoring this param — the tab badges need their own totals regardless of which status tab is currently active. |
+| `date` | `all` \| `day` \| `today` \| `week` \| `month` | Same vocabulary as `/sent`/`/sent/stats`. Scopes `total`/`byPlatform`, `rollups`, **and** `awaitingBreakdown`. |
+| `status` | Same values as `/sent` | Scopes `total`/`byPlatform` only. **`rollups` always recomputes settled/awaiting from `date` alone**, ignoring this param — the tab badges need their own totals regardless of which status tab is currently active. `awaitingBreakdown` is only computed (and only present in the response) **when `status=awaiting`** — it backs the Awaiting-review page's own Drafts / Awaiting link / Expired sub-tab badges. |
 
-**Response** `200 OK`
+**Response** `200 OK` (`status` omitted or not `awaiting`)
 
 ```json
 {
@@ -1730,6 +1730,19 @@ Total + byPlatform + settled/awaiting rollup counts for `/sent`, replacing sever
   "rollups": { "settled": 280, "awaiting": 60 }
 }
 ```
+
+**Response** `200 OK` (`status=awaiting`)
+
+```json
+{
+  "total": 60,
+  "byPlatform": { "x": 40, "reddit": 20 },
+  "rollups": { "settled": 280, "awaiting": 60 },
+  "awaitingBreakdown": { "drafts": 25, "link": 30, "expired": 5 }
+}
+```
+
+`awaitingBreakdown` mirrors the `awaiting-draft` / `awaiting-link` / `awaiting-expired` sub-filters documented on `GET /sent` above — `drafts` = still-actionable saved draft, `link` = manual link-pending or failed publish, `expired` = draft whose source opportunity aged out.
 
 ---
 

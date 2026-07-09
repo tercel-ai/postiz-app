@@ -1269,6 +1269,76 @@ describe('EngageRepository — two-table reads', () => {
     });
   });
 
+  describe('getSentCounts', () => {
+    it('status omitted: skips the three awaiting sub-counts and omits awaitingBreakdown', async () => {
+      const { repo, sentCount } = buildRepo();
+      // total, x, reddit, settled, awaiting — the three awaiting sub-counts are
+      // never called (Promise.resolve(0) stands in), so only 5 count() calls fire.
+      sentCount
+        .mockResolvedValueOnce(340) // total
+        .mockResolvedValueOnce(210) // x
+        .mockResolvedValueOnce(130) // reddit
+        .mockResolvedValueOnce(280) // settled
+        .mockResolvedValueOnce(60); // awaiting
+
+      const res = await repo.getSentCounts('org1', {});
+
+      expect(res).toEqual({
+        total: 340,
+        byPlatform: { x: 210, reddit: 130 },
+        rollups: { settled: 280, awaiting: 60 },
+      });
+      expect(res).not.toHaveProperty('awaitingBreakdown');
+      expect(sentCount).toHaveBeenCalledTimes(5);
+    });
+
+    it('status=awaiting: adds awaitingBreakdown (drafts/link/expired) from the three sub-filters', async () => {
+      const { repo, sentCount } = buildRepo();
+      sentCount
+        .mockResolvedValueOnce(60) // total (scoped by status=awaiting)
+        .mockResolvedValueOnce(40) // x
+        .mockResolvedValueOnce(20) // reddit
+        .mockResolvedValueOnce(280) // settled rollup
+        .mockResolvedValueOnce(60) // awaiting rollup
+        .mockResolvedValueOnce(25) // awaiting-draft
+        .mockResolvedValueOnce(30) // awaiting-link
+        .mockResolvedValueOnce(5); // awaiting-expired
+
+      const res = await repo.getSentCounts('org1', { status: 'awaiting' });
+
+      expect(res).toEqual({
+        total: 60,
+        byPlatform: { x: 40, reddit: 20 },
+        rollups: { settled: 280, awaiting: 60 },
+        awaitingBreakdown: { drafts: 25, link: 30, expired: 5 },
+      });
+      expect(sentCount).toHaveBeenCalledTimes(8);
+
+      // The three sub-counts key off the same status filters as getSentStats'
+      // awaiting-draft/-link/-expired branches.
+      const draftWhere = sentCount.mock.calls[5][0].where;
+      expect(draftWhere.post).toMatchObject({ source: 'engage', state: 'DRAFT' });
+      expect(draftWhere.opportunity).toEqual({
+        states: { some: { organizationId: 'org1', status: { not: 'EXPIRED' } } },
+      });
+
+      const linkWhere = sentCount.mock.calls[6][0].where;
+      expect(linkWhere.post).toMatchObject({
+        source: 'engage',
+        OR: [
+          { state: 'PUBLISHED', releaseURL: null },
+          { state: 'ERROR' },
+        ],
+      });
+
+      const expiredWhere = sentCount.mock.calls[7][0].where;
+      expect(expiredWhere.post).toMatchObject({ source: 'engage', state: 'DRAFT' });
+      expect(expiredWhere.opportunity).toEqual({
+        states: { some: { organizationId: 'org1', status: 'EXPIRED' } },
+      });
+    });
+  });
+
   describe('createManualXPost', () => {
     // Manual X reply posts parse a releaseId from the tweet URL (otherwise
     // checkPostAnalytics early-returns and impressions/likes/etc. stay null).

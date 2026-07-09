@@ -44,7 +44,6 @@ import utc from 'dayjs/plugin/utc';
 
 dayjs.extend(utc);
 
-const OPPORTUNITY_TTL_DAYS = Number(process.env.ENGAGE_OPPORTUNITY_TTL_DAYS ?? 7);
 // Minimum total score for a scored post to become an opportunity. Lower it to
 // surface more (noisier) opportunities; raise it to keep only strong matches.
 const MIN_SCORE = Number(process.env.ENGAGE_MIN_SCORE ?? 60);
@@ -1214,12 +1213,28 @@ export class EngageScanActivity {
   }
 
   private async _expireStaleOpportunities(orgId: string): Promise<void> {
-    const cutoff = dayjs.utc().subtract(OPPORTUNITY_TTL_DAYS, 'day').toDate();
+    const ttlDays = await this._opportunityTtlDays();
+    const cutoff = dayjs.utc().subtract(ttlDays, 'day').toDate();
     // createdAt on the state row = when this org first matched the post.
     await this._oppState.model.engageOpportunityState.updateMany({
       where: { organizationId: orgId, status: 'NEW', createdAt: { lt: cutoff } },
       data: { status: 'EXPIRED' },
     });
+  }
+
+  // Opportunity TTL (days), resolved from settings → env → default. Falls back
+  // to the raw env-or-default when the config service isn't wired (e.g. unit
+  // tests build the activity without it) — never throws.
+  private async _opportunityTtlDays(): Promise<number> {
+    if (this._scanConfig) {
+      try {
+        return await this._scanConfig.getOpportunityTtlDays();
+      } catch {
+        // fall through to the env/default fallback below
+      }
+    }
+    const envDays = Number(process.env.ENGAGE_OPPORTUNITY_TTL_DAYS);
+    return Number.isFinite(envDays) && envDays > 0 ? envDays : 7;
   }
 
   private async _updateTrackedAccountAfterScan(

@@ -28,6 +28,15 @@ export const ENGAGE_X_SCAN_MAX_RESULTS_KEY = 'engage.keyword_x_scan_max_results'
 export const ENGAGE_X_SCAN_MAX_RESULTS_ENV = 'ENGAGE_X_SCAN_MAX_RESULTS';
 export type SettingSource = 'db' | 'env' | 'default';
 
+// Opportunity TTL (days): how long a NEW-status opportunity stays actionable
+// before the scan tick's stale sweep marks it EXPIRED. Measured from
+// EngageOpportunityState.createdAt (when the org first matched the post), not
+// the post's own publish time. Resolution order: stored setting → env
+// (ENGAGE_OPPORTUNITY_TTL_DAYS) → default. Seeded on first boot so the admin
+// UI can edit it via PUT /admin/settings/:key immediately.
+export const ENGAGE_OPPORTUNITY_TTL_DAYS_KEY = 'engage_opportunity_ttl_days';
+export const DEFAULT_OPPORTUNITY_TTL_DAYS = 7;
+
 // Backend ("touch") scan switches — allow disabling server-side Temporal scan
 // per platform so the browser extension can be the sole executor.
 // All default to true (backend scan ON); set to false via /admin/settings to
@@ -150,6 +159,17 @@ export class EngageScanConfigService implements OnModuleInit {
       this.logger.log(`Seeded default ${ENGAGE_SCAN_FRESHNESS_KEY}`);
     }
 
+    const opportunityTtl = await this._settings.get(ENGAGE_OPPORTUNITY_TTL_DAYS_KEY);
+    if (opportunityTtl === null || opportunityTtl === undefined) {
+      await this._settings.set(ENGAGE_OPPORTUNITY_TTL_DAYS_KEY, DEFAULT_OPPORTUNITY_TTL_DAYS, {
+        type: 'number',
+        description:
+          'Days a NEW engage opportunity stays actionable before the scan tick marks it EXPIRED, measured from EngageOpportunityState.createdAt (when this org first matched the post).',
+        defaultValue: DEFAULT_OPPORTUNITY_TTL_DAYS,
+      });
+      this.logger.log(`Seeded default ${ENGAGE_OPPORTUNITY_TTL_DAYS_KEY}`);
+    }
+
     for (const [key, description] of [
       [ENGAGE_TOUCH_SWITCH_KEY, 'Global backend ("touch") scan switch. Set to false to disable all server-side Temporal scanning and hand off to the browser extension.'],
       [ENGAGE_TOUCH_X_SWITCH_KEY, 'X backend scan switch. Set to false to disable only X scanning in the Temporal workflow (extension takes over X).'],
@@ -249,6 +269,27 @@ export class EngageScanConfigService implements OnModuleInit {
   /** Effective X scan `max_results` value only (orchestrator hot path). */
   async getXScanMaxResults(): Promise<number> {
     return (await this.resolveXScanMaxResults()).value;
+  }
+
+  /**
+   * Resolve the opportunity TTL (days) WITH its source: stored setting → env
+   * (ENGAGE_OPPORTUNITY_TTL_DAYS) → default. `source` lets the admin UI show
+   * where the live value came from (same shape as resolveXScanMaxResults).
+   */
+  async resolveOpportunityTtlDays(): Promise<{ value: number; source: SettingSource }> {
+    const stored = await this._settings.get(ENGAGE_OPPORTUNITY_TTL_DAYS_KEY);
+    if (stored !== null && stored !== undefined) {
+      const n = Number(stored);
+      if (Number.isFinite(n) && n > 0) return { value: n, source: 'db' };
+    }
+    const env = Number(process.env.ENGAGE_OPPORTUNITY_TTL_DAYS);
+    if (Number.isFinite(env) && env > 0) return { value: env, source: 'env' };
+    return { value: DEFAULT_OPPORTUNITY_TTL_DAYS, source: 'default' };
+  }
+
+  /** Effective opportunity TTL (days) only (orchestrator hot path). */
+  async getOpportunityTtlDays(): Promise<number> {
+    return (await this.resolveOpportunityTtlDays()).value;
   }
 }
 
