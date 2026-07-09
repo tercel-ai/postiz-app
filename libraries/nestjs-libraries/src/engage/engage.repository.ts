@@ -10,6 +10,7 @@ import {
   ListSentDto,
   LocateOpportunityDto,
   LocateSentReplyDto,
+  OpportunityCountsDto,
   SetupEngageDto,
   UpdateKeywordDto,
   UpdateMonitoredChannelDto,
@@ -1379,6 +1380,83 @@ export class EngageRepository {
     return { items, total, page, limit };
   }
 
+  // Single round trip replacing what the frontend used to do with N separate
+  // `listOpportunities({ platform: 'x', limit: 1 })`-style calls just to read
+  // `.total` for a tab/platform badge. Mirrors listOpportunities' scoping
+  // filters (channels/authors/keywords/date/minScore*/bookmarked/intent) but
+  // omits `platform`/`status`/pagination/sort — those are the two dimensions
+  // broken down below, not a further narrowing.
+  async getOpportunityCounts(organizationId: string, dto: OpportunityCountsDto) {
+    const channelSpecific = dto.channels?.length ? dto.channels : undefined;
+    const authorSpecificList = dto.authors?.length ? dto.authors : undefined;
+    const postPublishedAtFilter = this._postPublishedAtFilter(dto);
+
+    // Declared with its own explicit type so it can be spread again below to
+    // inject `platform` — spreading `where.opportunity` directly would widen to
+    // the field's declared union type (EngageOpportunityWhereInput |
+    // EngageOpportunityScalarRelationFilter) and no longer accept `platform`.
+    const oppFilter: Prisma.EngageOpportunityWhereInput = {
+      deletedAt: null,
+      ...(channelSpecific && { channelId: { in: channelSpecific } }),
+      ...(authorSpecificList?.length && {
+        OR: authorSpecificList.map((a) => ({
+          authorUsername: { equals: a, mode: 'insensitive' as const },
+        })),
+      }),
+      ...(dto.intent?.length && { intentTags: { hasSome: dto.intent } }),
+      ...(dto.minScoreHeat !== undefined && {
+        scoreHeat: { gte: dto.minScoreHeat },
+      }),
+      ...(dto.minScoreAuthority !== undefined && {
+        scoreAuthority: { gte: dto.minScoreAuthority },
+      }),
+      ...(postPublishedAtFilter && { postPublishedAt: postPublishedAtFilter }),
+    };
+
+    const where: Prisma.EngageOpportunityStateWhereInput = {
+      organizationId,
+      ...(dto.bookmarked !== undefined && { bookmarked: dto.bookmarked }),
+      score: { gte: dto.minScore ?? LIST_DEFAULT_MIN_SCORE },
+      ...(dto.minScoreKeyword !== undefined && {
+        scoreKeyword: { gte: dto.minScoreKeyword },
+      }),
+      ...((() => {
+        const set = [
+          ...(dto.keyword ? [dto.keyword] : []),
+          ...(dto.keywords ?? []),
+        ];
+        return set.length ? { matchedKeywords: { hasSome: set } } : {};
+      })()),
+      opportunity: oppFilter,
+    };
+
+    // `status` lives on EngageOpportunityState itself, so it groups in one
+    // query. `platform` lives on the joined EngageOpportunity, which Prisma's
+    // groupBy can't traverse — two scoped counts stand in for that breakdown,
+    // same pattern as getSentStats/getSentCounts below.
+    const [total, statusGroups, x, reddit] = await Promise.all([
+      this._oppState.model.engageOpportunityState.count({ where }),
+      this._oppState.model.engageOpportunityState.groupBy({
+        by: ['status'],
+        where,
+        _count: { _all: true },
+      }),
+      this._oppState.model.engageOpportunityState.count({
+        where: { ...where, opportunity: { ...oppFilter, platform: 'x' } },
+      }),
+      this._oppState.model.engageOpportunityState.count({
+        where: { ...where, opportunity: { ...oppFilter, platform: 'reddit' } },
+      }),
+    ]);
+
+    const byStatus = Object.fromEntries(
+      Object.values(EngageOpportunityStatus).map((s) => [s, 0])
+    ) as Record<EngageOpportunityStatus, number>;
+    for (const g of statusGroups) byStatus[g.status] = g._count._all;
+
+    return { total, byStatus, byPlatform: { x, reddit } };
+  }
+
   async locateOpportunity(organizationId: string, dto: LocateOpportunityDto) {
     const limit = dto.limit ?? 20;
     const postPublishedAtFilter = this._postPublishedAtFilter(dto);
@@ -2454,6 +2532,50 @@ export class EngageRepository {
         : 0;
 
     return { repliesCount: total, responseRate, totalImpressions, totalTrafficScore, avgLikes };
+  }
+
+  // Single round trip replacing the frontend's `listSentReplies({ platform,
+  // limit: 1 })` x3 (for the x/reddit tab badges) plus a further x3 for the
+  // all/settled/awaiting rollup badges. `byPlatform` respects the passed-in
+  // `status` scope (mirrors fetchSentPlatformCounts' per-tab platform split);
+  // `rollups` always recomputes settled/awaiting from `date` alone (ignoring
+  // any passed-in `status`) since those badges need their own totals
+  // regardless of which status tab is currently active.
+  async getSentCounts(
+    organizationId: string,
+    dto: { date?: string; status?: string } = {}
+  ) {
+    const { sentWhere } = this._buildSentReplyFilter(organizationId, dto, {
+      includeDrafts: true,
+    });
+    const injectPlatform = (platform: string): Prisma.EngageSentReplyWhereInput => ({
+      ...sentWhere,
+      opportunity: {
+        ...(sentWhere.opportunity as Prisma.EngageOpportunityWhereInput | undefined),
+        platform,
+      },
+    });
+
+    const { sentWhere: settledWhere } = this._buildSentReplyFilter(
+      organizationId,
+      { date: dto.date, status: 'settled' },
+      { includeDrafts: true }
+    );
+    const { sentWhere: awaitingWhere } = this._buildSentReplyFilter(
+      organizationId,
+      { date: dto.date, status: 'awaiting' },
+      { includeDrafts: true }
+    );
+
+    const [total, x, reddit, settled, awaiting] = await Promise.all([
+      this._sentReply.model.engageSentReply.count({ where: sentWhere }),
+      this._sentReply.model.engageSentReply.count({ where: injectPlatform('x') }),
+      this._sentReply.model.engageSentReply.count({ where: injectPlatform('reddit') }),
+      this._sentReply.model.engageSentReply.count({ where: settledWhere }),
+      this._sentReply.model.engageSentReply.count({ where: awaitingWhere }),
+    ]);
+
+    return { total, byPlatform: { x, reddit }, rollups: { settled, awaiting } };
   }
 
   // Pull the "likes" metric out of a Post.analytics JSON blob. X stores it under

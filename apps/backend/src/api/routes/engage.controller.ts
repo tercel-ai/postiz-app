@@ -48,6 +48,7 @@ import {
   ListSentDto,
   LocateOpportunityDto,
   LocateSentReplyDto,
+  OpportunityCountsDto,
   RefreshMetricsDto,
   IngestReplyMetricsDto,
   SaveDraftDto,
@@ -441,6 +442,15 @@ export class EngageController {
     return this._engageService.getScoreStats(org, query);
   }
 
+  @ApiOperation({ summary: 'Total + byStatus + byPlatform counts for /opportunities, scoped by the same filters minus platform/status/pagination — replaces doing N separate limit=1 list calls just to read totals for tab/platform badges' })
+  @Get('/opportunities/counts')
+  getOpportunityCounts(
+    @GetOrgFromRequest() org: Organization,
+    @Query() query: OpportunityCountsDto
+  ) {
+    return this._engageService.getOpportunityCounts(org, query);
+  }
+
   @ApiOperation({ summary: 'Locate the page of a given opportunityStateId within /opportunities using the same filters and sort. Returns null page when the opportunity does not match the filters.' })
   @Get('/opportunities/locate')
   locateOpportunity(
@@ -757,6 +767,18 @@ export class EngageController {
     return this._engageService.getSentStats(org, {
       date: query.date,
       platform: query.platform,
+      status: query.status,
+    });
+  }
+
+  @ApiOperation({ summary: 'Total + byPlatform counts for /sent scoped by date/status, plus a settled/awaiting rollup (always recomputed from date alone, ignoring status) for tab badges — replaces N separate limit=1 /sent calls' })
+  @Get('/sent/counts')
+  getSentCounts(
+    @GetOrgFromRequest() org: Organization,
+    @Query() query: ListSentDto
+  ) {
+    return this._engageService.getSentCounts(org, {
+      date: query.date,
       status: query.status,
     });
   }
