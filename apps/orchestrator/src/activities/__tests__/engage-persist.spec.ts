@@ -57,10 +57,22 @@ function buildActivity() {
   oppUpsert.mockImplementation(async (args: any) => ({
     id: `opp_${args.where.platform_externalPostId.externalPostId}`,
   }));
+  const oppFindFirst = vi.fn();
+  oppFindFirst.mockResolvedValue(null);
+  const oppUpdate = vi.fn();
+  oppUpdate.mockImplementation(async (args: any) => ({ id: args.where.id }));
   const stateUpsert = vi.fn();
   stateUpsert.mockResolvedValue({});
 
-  const opportunity = { model: { engageOpportunity: { upsert: oppUpsert } } } as any;
+  const opportunity = {
+    model: {
+      engageOpportunity: {
+        findFirst: oppFindFirst,
+        upsert: oppUpsert,
+        update: oppUpdate,
+      },
+    },
+  } as any;
   const oppState = { model: { engageOpportunityState: { upsert: stateUpsert } } } as any;
 
   const activity = new EngageScanActivity(
@@ -71,7 +83,7 @@ function buildActivity() {
     {} as any,     // _scanCursor (unused by _persistOpportunities)
     {} as any
   );
-  return { activity, oppUpsert, stateUpsert };
+  return { activity, oppFindFirst, oppUpsert, oppUpdate, stateUpsert };
 }
 
 describe('EngageScanActivity._persistOpportunities', () => {

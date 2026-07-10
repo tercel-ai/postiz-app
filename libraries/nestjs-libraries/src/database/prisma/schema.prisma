@@ -1195,6 +1195,7 @@ model EngageOpportunity {
   sentReplies      EngageSentReply[]
 
   @@unique([platform, externalPostId])
+  @@index([platform, externalPostUrl])
   @@index([createdAt])
   @@index([deletedAt])
   @@index([postPublishedAt])

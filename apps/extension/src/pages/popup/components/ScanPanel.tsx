@@ -1,5 +1,6 @@
 import React from 'react';
 import { ENGAGE_EXTENSION_ACTION } from '@gitroom/extension/utils/executor/actions';
+import { shouldAutoSyncConfigCache } from './scan-config-cache';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -156,10 +157,18 @@ export function EngageScanPanel() {
   const [claimBusy, setClaimBusy] = React.useState(false);
   const [claimErr, setClaimErr] = React.useState<string | null>(null);
   const [states, setStates] = React.useState<Record<string, TaskState>>({});
+  const autoSyncStartedRef = React.useRef(false);
   React.useEffect(() => {
+    let alive = true;
     loadConfigCache().then((cached) => {
+      if (!alive) return;
       if (cached) { setConfig(cached.data); setSyncedAt(cached.syncedAt); }
+      if (!autoSyncStartedRef.current && shouldAutoSyncConfigCache(cached)) {
+        autoSyncStartedRef.current = true;
+        void loadConfig();
+      }
     });
+    return () => { alive = false; };
   }, []);
 
   const patch = (taskId: string, p: Partial<TaskState>) =>

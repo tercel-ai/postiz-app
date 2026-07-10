@@ -14,3 +14,6 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
 CREATE INDEX IF NOT EXISTS "EngageOpportunity_postContent_trgm_idx"
   ON "EngageOpportunity" USING GIN ("postContent" gin_trgm_ops);
+
+CREATE INDEX IF NOT EXISTS "EngageOpportunity_platform_externalPostUrl_idx"
+  ON "EngageOpportunity"("platform", "externalPostUrl");

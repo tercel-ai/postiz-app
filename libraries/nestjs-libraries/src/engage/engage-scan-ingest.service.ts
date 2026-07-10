@@ -23,6 +23,41 @@ const PERSIST_BATCH_SIZE = 25;
 // in sync with the orchestrator's ENGAGE_MIN_SCORE.
 const MIN_SCORE = Number(process.env.ENGAGE_MIN_SCORE ?? 60);
 
+function xStatusFromUrl(url: string): { username: string; id: string } | null {
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.replace(/^www\./, '').toLowerCase();
+    if (host !== 'x.com' && host !== 'twitter.com') return null;
+    const match = parsed.pathname.match(/^\/([^/]+)\/status(?:es)?\/(\d+)/);
+    if (!match) return null;
+    return { username: match[1], id: match[2] };
+  } catch {
+    return null;
+  }
+}
+
+export function normalizeExternalPostUrl(platform: string, url: string): string {
+  if (platform !== 'x') return url;
+  const status = xStatusFromUrl(url);
+  if (!status) return url;
+  return `https://x.com/${status.username}/status/${status.id}`;
+}
+
+export function normalizeExternalPost<T extends Pick<ScoredPost, 'platform' | 'externalPostId' | 'externalPostUrl'>>(
+  post: T
+): T {
+  const externalPostUrl = normalizeExternalPostUrl(
+    post.platform,
+    post.externalPostUrl
+  );
+  const status = post.platform === 'x' ? xStatusFromUrl(externalPostUrl) : null;
+  return {
+    ...post,
+    externalPostId: status?.id ?? post.externalPostId,
+    externalPostUrl,
+  };
+}
+
 /**
  * The per-org subscription context needed to score a scan unit's posts: the
  * org's enabled keywords (the hard keyword filter + keyword score) and its
@@ -299,87 +334,118 @@ export class EngageScanIngestService {
     rawPosts: ScoredPost[]
   ): Promise<void> {
     if (!rawPosts.length) return;
+    const normalizedPosts = rawPosts.map(normalizeExternalPost);
 
-    // Dedup by the GLOBAL natural key so the same post id appearing twice in one
+    // Dedup by the GLOBAL natural key so the same post id/URL appearing twice in one
     // unit's yield (overlapping pages on X since_id / Reddit `after`) does not
     // fire two concurrent upserts on the same @@unique([platform,externalPostId])
     // row in one Promise.all batch (a Postgres ON CONFLICT race → P2002 that
     // aborts the whole org persist). Last write wins (freshest metrics). Also
-    // keeps phase-2 index alignment trivially 1:1.
+    // keeps phase-2 index alignment trivially 1:1. The URL key catches plugin
+    // share URLs whose query params or ids differ while still pointing at the
+    // same platform post.
     const byKey = new Map<string, ScoredPost>();
-    for (const p of rawPosts) {
-      byKey.set(`${p.platform}:${p.externalPostId}`, p);
+    const byId = new Map<string, string>();
+    const byUrl = new Map<string, string>();
+    for (const p of normalizedPosts) {
+      const idKey = `${p.platform}:${p.externalPostId}`;
+      const urlKey = `${p.platform}:${p.externalPostUrl}`;
+      const existingKey = byUrl.get(urlKey) ?? byId.get(idKey);
+      if (existingKey) byKey.delete(existingKey);
+      byKey.set(urlKey, p);
+      byId.set(idKey, urlKey);
+      byUrl.set(urlKey, urlKey);
     }
     const posts = Array.from(byKey.values());
 
     const opportunities: Array<{ id: string }> = [];
     for (const batch of chunk(posts, PERSIST_BATCH_SIZE)) {
       const persisted = await Promise.all(
-        batch.map((post) =>
-          this._opportunity.model.engageOpportunity.upsert({
+        batch.map(async (post) => {
+          const create = {
+            platform: post.platform,
+            externalPostId: post.externalPostId,
+            externalPostUrl: post.externalPostUrl,
+            channelId: post.channelId ?? null,
+            channelName: post.channelName ?? null,
+            channelFollowers: post.channelFollowers ?? null,
+            authorUsername: post.authorUsername,
+            authorDisplayName: post.authorDisplayName ?? null,
+            authorFollowers: post.authorFollowers ?? null,
+            authorAvatarUrl: post.authorAvatarUrl ?? null,
+            postContent: post.postContent,
+            postPublishedAt: post.postPublishedAt,
+            scoreHeat: post.scoreHeat,
+            scoreAuthority: post.scoreAuthority,
+            scoreRecency: post.scoreRecency,
+            intentTags: post.intentTags,
+            primaryIntent: post.primaryIntent,
+            intentScore: post.intentScore ?? null,
+            metricLikes: post.metricLikes,
+            metricReplies: post.metricReplies,
+            metricRetweets: post.metricRetweets,
+            metricQuotes: post.metricQuotes,
+            metricBookmarks: post.metricBookmarks ?? 0,
+            metricViews: post.metricViews ?? 0,
+            metricShares: post.metricShares ?? 0,
+            metricSaves: post.metricSaves ?? 0,
+            metricScore: post.metricScore,
+            metricUpvoteRatio: post.metricUpvoteRatio ?? null,
+            metricComments: post.metricComments,
+            rawData:
+              post.rawData != null
+                ? (post.rawData as Prisma.InputJsonValue)
+                : null,
+          };
+          const update = {
+            // Store the canonical URL, and refresh the channel audience size so
+            // authority tracks growth.
+            externalPostUrl: post.externalPostUrl,
+            channelFollowers: post.channelFollowers ?? null,
+            scoreHeat: post.scoreHeat,
+            scoreAuthority: post.scoreAuthority,
+            scoreRecency: post.scoreRecency,
+            metricLikes: post.metricLikes,
+            metricReplies: post.metricReplies,
+            metricRetweets: post.metricRetweets,
+            metricQuotes: post.metricQuotes,
+            metricBookmarks: post.metricBookmarks ?? 0,
+            metricViews: post.metricViews ?? 0,
+            metricShares: post.metricShares ?? 0,
+            metricSaves: post.metricSaves ?? 0,
+            metricScore: post.metricScore,
+            metricUpvoteRatio: post.metricUpvoteRatio ?? null,
+            metricComments: post.metricComments,
+            // intentTags / primaryIntent NOT updated — preserve original classification
+          };
+          const existingByUrl =
+            await this._opportunity.model.engageOpportunity.findFirst({
+              where: {
+                platform: post.platform,
+                externalPostUrl: post.externalPostUrl,
+              },
+              select: { id: true },
+            });
+          if (existingByUrl) {
+            return this._opportunity.model.engageOpportunity.update({
+              where: { id: existingByUrl.id },
+              data: update,
+              select: { id: true },
+            });
+          }
+
+          return this._opportunity.model.engageOpportunity.upsert({
             where: {
               platform_externalPostId: {
                 platform: post.platform,
                 externalPostId: post.externalPostId,
               },
             },
-            create: {
-              platform: post.platform,
-              externalPostId: post.externalPostId,
-              externalPostUrl: post.externalPostUrl,
-              channelId: post.channelId ?? null,
-              channelName: post.channelName ?? null,
-              channelFollowers: post.channelFollowers ?? null,
-              authorUsername: post.authorUsername,
-              authorDisplayName: post.authorDisplayName ?? null,
-              authorFollowers: post.authorFollowers ?? null,
-              authorAvatarUrl: post.authorAvatarUrl ?? null,
-              postContent: post.postContent,
-              postPublishedAt: post.postPublishedAt,
-              scoreHeat: post.scoreHeat,
-              scoreAuthority: post.scoreAuthority,
-              scoreRecency: post.scoreRecency,
-              intentTags: post.intentTags,
-              primaryIntent: post.primaryIntent,
-              intentScore: post.intentScore ?? null,
-              metricLikes: post.metricLikes,
-              metricReplies: post.metricReplies,
-              metricRetweets: post.metricRetweets,
-              metricQuotes: post.metricQuotes,
-              metricBookmarks: post.metricBookmarks ?? 0,
-              metricViews: post.metricViews ?? 0,
-              metricShares: post.metricShares ?? 0,
-              metricSaves: post.metricSaves ?? 0,
-              metricScore: post.metricScore,
-              metricUpvoteRatio: post.metricUpvoteRatio ?? null,
-              metricComments: post.metricComments,
-              rawData:
-                post.rawData != null
-                  ? (post.rawData as Prisma.InputJsonValue)
-                  : null,
-            },
-            update: {
-              // Refresh the channel audience size so authority tracks growth.
-              channelFollowers: post.channelFollowers ?? null,
-              scoreHeat: post.scoreHeat,
-              scoreAuthority: post.scoreAuthority,
-              scoreRecency: post.scoreRecency,
-              metricLikes: post.metricLikes,
-              metricReplies: post.metricReplies,
-              metricRetweets: post.metricRetweets,
-              metricQuotes: post.metricQuotes,
-              metricBookmarks: post.metricBookmarks ?? 0,
-              metricViews: post.metricViews ?? 0,
-              metricShares: post.metricShares ?? 0,
-              metricSaves: post.metricSaves ?? 0,
-              metricScore: post.metricScore,
-              metricUpvoteRatio: post.metricUpvoteRatio ?? null,
-              metricComments: post.metricComments,
-              // intentTags / primaryIntent NOT updated — preserve original classification
-            },
+            create,
+            update,
             select: { id: true },
-          })
-        )
+          });
+        })
       );
       opportunities.push(...persisted);
     }

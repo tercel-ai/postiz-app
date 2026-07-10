@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { EngageScanIngestService } from '../engage-scan-ingest.service';
+import {
+  EngageScanIngestService,
+  normalizeExternalPost,
+  normalizeExternalPostUrl,
+} from '../engage-scan-ingest.service';
 
 function makeScoredPost(n: number): any {
   return {
@@ -31,23 +35,47 @@ function makeScoredPost(n: number): any {
 }
 
 function build() {
+  const oppFindFirst = vi.fn(async () => null);
   const oppUpsert = vi.fn(async (args: any) => ({
     id: `opp_${args.where.platform_externalPostId.externalPostId}`,
   }));
+  const oppUpdate = vi.fn(async (args: any) => ({ id: args.where.id }));
   const stateUpsert = vi.fn(async () => ({}));
   const kwFindMany = vi.fn(async () => []);
   const kwUpdate = vi.fn(async () => ({}));
   const txRun = vi.fn(async (ops: any[]) => ops);
 
   const svc = new EngageScanIngestService(
-    { model: { engageOpportunity: { upsert: oppUpsert } } } as any,
+    { model: { engageOpportunity: { findFirst: oppFindFirst, upsert: oppUpsert, update: oppUpdate } } } as any,
     { model: { engageOpportunityState: { upsert: stateUpsert } } } as any,
     { model: { engageKeyword: { findMany: kwFindMany, update: kwUpdate } } } as any,
     { classifyBatch: vi.fn(async () => ({})) } as any,
     { model: { $transaction: txRun } } as any
   );
-  return { svc, oppUpsert, stateUpsert, kwFindMany, kwUpdate, txRun };
+  return { svc, oppFindFirst, oppUpsert, oppUpdate, stateUpsert, kwFindMany, kwUpdate, txRun };
 }
+
+describe('engage scan post canonicalization', () => {
+  it('strips X status tracking params and normalizes twitter.com to x.com', () => {
+    expect(
+      normalizeExternalPostUrl(
+        'x',
+        'https://twitter.com/elonmusk/status/2075259819154341957?s=20'
+      )
+    ).toBe('https://x.com/elonmusk/status/2075259819154341957');
+  });
+
+  it('uses the X status id from the URL as the stable externalPostId', () => {
+    expect(
+      normalizeExternalPost({
+        ...makeScoredPost(1),
+        platform: 'x',
+        externalPostId: 'unstable-share-id',
+        externalPostUrl: 'https://x.com/elonmusk/status/2075259819154341957?s=20',
+      }).externalPostId
+    ).toBe('2075259819154341957');
+  });
+});
 
 describe('EngageScanIngestService.persistOpportunities', () => {
   beforeEach(() => vi.clearAllMocks());
@@ -81,6 +109,66 @@ describe('EngageScanIngestService.persistOpportunities', () => {
     expect(stateUpsert).toHaveBeenCalledTimes(1);
     // last-write-wins: the newer metrics are persisted
     expect(oppUpsert.mock.calls[0][0].create.metricScore).toBe(999);
+  });
+
+  it('dedups duplicate X share URLs within one batch after canonicalization', async () => {
+    const { svc, oppUpsert, stateUpsert } = build();
+    const first = {
+      ...makeScoredPost(1),
+      platform: 'x',
+      externalPostId: 'share-a',
+      externalPostUrl: 'https://x.com/elonmusk/status/2075259819154341957?s=20',
+    };
+    const second = {
+      ...makeScoredPost(2),
+      platform: 'x',
+      externalPostId: 'share-b',
+      externalPostUrl: 'https://twitter.com/elonmusk/status/2075259819154341957?ref_src=twsrc%5Etfw',
+      metricScore: 999,
+    };
+
+    await svc.persistOpportunities('org1', [first, second]);
+
+    expect(oppUpsert).toHaveBeenCalledTimes(1);
+    expect(stateUpsert).toHaveBeenCalledTimes(1);
+    expect(oppUpsert.mock.calls[0][0].where.platform_externalPostId).toEqual({
+      platform: 'x',
+      externalPostId: '2075259819154341957',
+    });
+    expect(oppUpsert.mock.calls[0][0].create.externalPostUrl).toBe(
+      'https://x.com/elonmusk/status/2075259819154341957'
+    );
+    expect(oppUpsert.mock.calls[0][0].create.metricScore).toBe(999);
+  });
+
+  it('updates an existing global post found by normalized platform+externalPostUrl', async () => {
+    const { svc, oppFindFirst, oppUpsert, oppUpdate, stateUpsert } = build();
+    oppFindFirst.mockResolvedValueOnce({ id: 'opp_existing' });
+
+    await svc.persistOpportunities('org1', [
+      {
+        ...makeScoredPost(1),
+        platform: 'x',
+        externalPostId: '2075259819154341957',
+        externalPostUrl: 'https://x.com/elonmusk/status/2075259819154341957?s=20',
+      },
+    ]);
+
+    expect(oppFindFirst).toHaveBeenCalledWith({
+      where: {
+        platform: 'x',
+        externalPostUrl: 'https://x.com/elonmusk/status/2075259819154341957',
+      },
+      select: { id: true },
+    });
+    expect(oppUpsert).not.toHaveBeenCalled();
+    expect(oppUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: 'opp_existing' } })
+    );
+    expect(stateUpsert.mock.calls[0][0].where.organizationId_opportunityId).toEqual({
+      organizationId: 'org1',
+      opportunityId: 'opp_existing',
+    });
   });
 
   it('upserts per-org state NEW on create, aligned to its post id', async () => {
