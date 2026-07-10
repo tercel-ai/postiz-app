@@ -1083,6 +1083,11 @@ export class EngageScanActivity {
       );
     }
     // Always expire stale opportunities regardless of scan yield — also isolated.
+    // This is only an immediate-freshness convenience for orgs this tick
+    // happens to touch; it does NOT cover orgs scanned exclusively via the
+    // extension path or otherwise never hitting this code path. The durable,
+    // system-wide sweep is EngageHousekeepingActivity's hourly cron (see
+    // engage-housekeeping-cron.workflow.ts), which is the source of truth.
     this._settleByOrg(
       await Promise.allSettled(
         orgContexts.map((ctx) => this._expireStaleOpportunities(ctx.organizationId))

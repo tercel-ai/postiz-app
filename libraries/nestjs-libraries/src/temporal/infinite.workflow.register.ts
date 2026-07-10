@@ -16,10 +16,17 @@ export class InfiniteWorkflowRegister implements OnModuleInit {
       // here. The former daily aggregators (dataTicksSyncWorkflow /
       // engageDataTicksWorkflow) were removed; their capabilities remain on
       // demand via the admin endpoints (DataTicksService.syncDailyTicks) and
-      // scripts/backfill-engage-data-ticks.ts.
+      // scripts/backfill-engage-data-ticks.ts. engageHousekeepingCronWorkflow
+      // below is the one deliberate exception: it only does cheap, all-DB
+      // hygiene (no upstream API calls), so a plain wall-clock tick is correct
+      // there (and it bounds its own event history via continueAsNew).
       const infiniteWorkflows = [
         { workflowId: 'missing-post-workflow', name: 'missingPostWorkflow' },
         { workflowId: 'refresh-workflow-recovery', name: 'refreshWorkflowRecoveryWorkflow' },
+        // Hourly engage DB-housekeeping cron (currently: engage opportunity TTL
+        // expiry). Add new engage maintenance jobs to EngageHousekeepingActivity's
+        // registry rather than adding another workflow here.
+        { workflowId: 'engage-housekeeping-cron', name: 'engageHousekeepingCronWorkflow' },
       ];
 
       for (const wf of infiniteWorkflows) {

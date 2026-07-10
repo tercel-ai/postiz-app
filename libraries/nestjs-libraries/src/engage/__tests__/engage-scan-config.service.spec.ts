@@ -6,6 +6,7 @@ import {
   ENGAGE_TOUCH_SWITCH_KEY,
   ENGAGE_TOUCH_X_SWITCH_KEY,
   ENGAGE_TOUCH_REDDIT_SWITCH_KEY,
+  ENGAGE_OPPORTUNITY_TTL_DAYS_KEY,
   DEFAULT_SCAN_PACING,
   mergePacing,
 } from '../engage-scan-config.service';
@@ -37,6 +38,7 @@ describe('EngageScanConfigService.onModuleInit', () => {
       [ENGAGE_TOUCH_SWITCH_KEY]: true,
       [ENGAGE_TOUCH_X_SWITCH_KEY]: true,
       [ENGAGE_TOUCH_REDDIT_SWITCH_KEY]: true,
+      [ENGAGE_OPPORTUNITY_TTL_DAYS_KEY]: 7,
     });
     const svc = new EngageScanConfigService(settings);
     await svc.onModuleInit();

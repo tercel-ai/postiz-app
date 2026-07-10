@@ -5,3 +5,4 @@ export * from './missing.post.workflow';
 export * from './send.email.workflow';
 export * from './refresh.token.workflow';
 export * from './engage-scan-ticker.workflow';
+export * from './engage-housekeeping-cron.workflow';

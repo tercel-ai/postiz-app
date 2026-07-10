@@ -29,11 +29,13 @@ export const ENGAGE_X_SCAN_MAX_RESULTS_ENV = 'ENGAGE_X_SCAN_MAX_RESULTS';
 export type SettingSource = 'db' | 'env' | 'default';
 
 // Opportunity TTL (days): how long a NEW-status opportunity stays actionable
-// before the scan tick's stale sweep marks it EXPIRED. Measured from
-// EngageOpportunityState.createdAt (when the org first matched the post), not
-// the post's own publish time. Resolution order: stored setting → env
-// (ENGAGE_OPPORTUNITY_TTL_DAYS) → default. Seeded on first boot so the admin
-// UI can edit it via PUT /admin/settings/:key immediately.
+// before EngageHousekeepingActivity's hourly cron marks it EXPIRED (an opportunistic
+// per-org sweep also runs inline during an active scan tick, but the cron is
+// the durable, system-wide sweep). Measured from EngageOpportunityState.createdAt
+// (when the org first matched the post), not the post's own publish time.
+// Resolution order: stored setting → env (ENGAGE_OPPORTUNITY_TTL_DAYS) →
+// default. Seeded on first boot so the admin UI can edit it via
+// PUT /admin/settings/:key immediately.
 export const ENGAGE_OPPORTUNITY_TTL_DAYS_KEY = 'engage_opportunity_ttl_days';
 export const DEFAULT_OPPORTUNITY_TTL_DAYS = 7;
 
