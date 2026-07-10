@@ -98,7 +98,10 @@ npm run build:chrome
 npm run build:firefox
 ```
 
-The output goes to `apps/extension/dist/`.
+Chrome output goes to `apps/extension/dist/`; Firefox output goes to
+`apps/extension/dist_firefox/`. Note `build:firefox` does **not** load any env
+file by default (unlike `dev`/`pack-ext`) — set `FRONTEND_URL` etc. in your
+shell first, or use `pack-ext:firefox:*` below, which loads a profile for you.
 
 ### Packaging for distribution (shareable zip)
 
@@ -114,6 +117,18 @@ pnpm pack-ext:local   # this machine's LAN stack (192.168.110.98:*)
 pnpm pack-ext:dev     # *-dev.aisee.live
 pnpm pack-ext:prod    # *.aisee.live (store release: prod-only hosts + strip debug)
 ```
+
+Same profiles, Firefox target (outputs a `Load Temporary Add-on` zip instead —
+see [Firefox](#firefox) above for how the recipient loads it):
+
+```bash
+pnpm pack-ext:firefox:local
+pnpm pack-ext:firefox:dev
+pnpm pack-ext:firefox:prod
+```
+
+Or pass `--browser=firefox` to `bash scripts/pack.sh` directly (works with any
+profile/env-file argument, e.g. `bash scripts/pack.sh dev --browser=firefox`).
 
 | Profile | `FRONTEND_URL` | `NEXT_PUBLIC_BACKEND_URL` | `AUTH_URL` |
 | --- | --- | --- | --- |
@@ -196,7 +211,11 @@ extension in the browser. Dev builds use the icons/manifest from
 1. Build (`npm run build:firefox`).
 2. Open `about:debugging#/runtime/this-firefox`.
 3. Click **Load Temporary Add-on…** and pick any file inside
-   `apps/extension/dist/` (e.g. the manifest).
+   `apps/extension/dist_firefox/` (e.g. the manifest).
+
+This is a **temporary** install — Firefox unloads it on restart. There's no
+permanent/self-signed path wired up in this repo yet (would need
+`browser_specific_settings.gecko.id` in the manifest plus Mozilla signing).
 
 After loading, the extension reloads automatically while `dev:*` is running.
 

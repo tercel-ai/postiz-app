@@ -15,6 +15,12 @@ export default mergeConfig(
           background: {
             scripts: ['src/pages/background/index.ts'],
           },
+          browser_specific_settings: {
+            gecko: {
+              id: 'aisee@aisee.live',
+              strict_min_version: '128.0',
+            },
+          },
         } as ManifestV3Export,
         browser: 'firefox',
         contentScripts: {

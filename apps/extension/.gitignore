@@ -385,3 +385,4 @@ public/manifest.json
 # build artifacts
 extension.zip
 aisee-extension-v*.zip
+dist_firefox

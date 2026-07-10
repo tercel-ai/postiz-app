@@ -1,21 +1,34 @@
 {
   "name": "aisee-extension",
-  "version": "1.2.5",
+  "version": "1.2.7",
   "private": true,
   "description": "A simple chrome & firefox extension template with Vite, React, TypeScript and Tailwind CSS.",
   "scripts": {
     "build": "rm -rf dist && vite build --config vite.config.chrome.ts && zip -r extension.zip dist",
     "build:chrome": "vite build --config vite.config.chrome.ts",
     "build:firefox": "vite build --config vite.config.firefox.ts",
+    "build:firefox:local": "dotenv -e scripts/env/local.env -- vite build --config vite.config.firefox.ts",
+    "build:firefox:dev": "dotenv -e scripts/env/dev.env -- vite build --config vite.config.firefox.ts",
+    "build:firefox:prod": "dotenv -e scripts/env/prod.env -- vite build --config vite.config.firefox.ts",
     "build:prod": "rm -rf dist extension.zip && cross-env EXTENSION_ENV=production FRONTEND_URL=https://app.aisee.live NEXT_PUBLIC_BACKEND_URL=https://api-post.aisee.live AUTH_URL=https://api-auth.aisee.live vite build --config vite.config.chrome.ts && zip -r extension.zip dist",
     "pack-ext": "bash scripts/pack.sh",
     "pack-ext:local": "bash scripts/pack.sh local",
     "pack-ext:dev": "bash scripts/pack.sh dev",
     "pack-ext:prod": "bash scripts/pack.sh prod",
+    "pack-ext:firefox:local": "bash scripts/pack.sh local --browser=firefox",
+    "pack-ext:firefox:dev": "bash scripts/pack.sh dev --browser=firefox",
+    "pack-ext:firefox:prod": "bash scripts/pack.sh prod --browser=firefox",
+    "sign:firefox": "dotenv -e ../../.env -- bash -c 'web-ext sign --source-dir dist_firefox --channel unlisted --api-key \"$FIREFOX_JWT_USER\" --api-secret \"$FIREFOX_JWT_SECRET\" && NAME=$(node -p \"require(\\\"./package.json\\\").name\") && VERSION=$(node -p \"require(\\\"./package.json\\\").version\") && XPI=$(ls -t web-ext-artifacts/*.xpi 2>/dev/null | head -1) && [ -n \"$XPI\" ] && mv \"$XPI\" \"${NAME}-${VERSION}-firefox.xpi\" && echo \"✅ Renamed to ${NAME}-${VERSION}-firefox.xpi\"'",
+    "sign:firefox:local": "pnpm run build:firefox:local && pnpm run sign:firefox",
+    "sign:firefox:dev": "pnpm run build:firefox:dev && pnpm run sign:firefox",
+    "sign:firefox:prod": "pnpm run build:firefox:prod && pnpm run sign:firefox",
     "prepack": "echo '\\n[aisee-extension] Do NOT use \"npm pack\" — it ships unbuilt source (no manifest version, wont Load unpacked). Run: npm run pack-ext\\n' && exit 1",
     "dev": "rm -rf dist && dotenv -e ../../.env -- vite build --config vite.config.chrome.ts --mode development --watch",
     "dev:chrome": "nodemon --config nodemon.chrome.json",
     "dev:firefox": "nodemon --config nodemon.firefox.json"
   },
-  "type": "module"
+  "type": "module",
+  "devDependencies": {
+    "web-ext": "^10.4.0"
+  }
 }
