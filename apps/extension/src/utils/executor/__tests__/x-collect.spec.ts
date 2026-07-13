@@ -36,6 +36,18 @@ const tweetEntry = (id: string, node: any) => ({
   entryId: 'tweet-' + id,
   content: { itemContent: { tweet_results: { result: node } } },
 });
+const searchResultEntry = (id: string) => ({
+  entryId: 'tweet-' + id,
+  content: {
+    entryType: 'TimelineTimelineItem',
+    clientEventInfo: { component: 'result', element: 'tweet' },
+    itemContent: {
+      __typename: 'TimelineTweet',
+      itemType: 'TimelineTweet',
+      tweet_results: { result: tweetNode(id) },
+    },
+  },
+});
 const cursorEntry = (value: string) => ({
   entryId: 'cursor-bottom-1',
   content: { cursorType: 'Bottom', value },
@@ -134,12 +146,66 @@ describe('parseSearchList', () => {
         search_timeline: {
           timeline: {
             instructions: [
-              { entries: [tweetEntry('7', tweetNode('7')), cursorEntry('C')] },
+              { entries: [searchResultEntry('7'), cursorEntry('C')] },
             ],
           },
         },
       },
     };
+    expect(parseSearchList(data).map((t) => t.id)).toEqual(['7']);
+  });
+
+  it('keeps only official result tweet entries from the Top timeline', () => {
+    const nonResultTweet = {
+      entryId: 'tweet-8',
+      content: {
+        entryType: 'TimelineTimelineItem',
+        clientEventInfo: { component: 'conversation', element: 'tweet' },
+        itemContent: {
+          __typename: 'TimelineTweet',
+          itemType: 'TimelineTweet',
+          tweet_results: { result: tweetNode('8') },
+        },
+      },
+    };
+    const module = {
+      entryId: 'search-grid-0',
+      content: {
+        items: [
+          {
+            item: {
+              itemContent: { tweet_results: { result: tweetNode('9') } },
+            },
+          },
+        ],
+      },
+    };
+    const frame = {
+      entryId: 'frame-JetfuelTopTabFrame',
+      content: {
+        entryType: 'TimelineTimelineItem',
+        itemContent: { __typename: 'TimelineFrame', itemType: 'TimelineFrame' },
+      },
+    };
+    const data = {
+      search_by_raw_query: {
+        search_timeline: {
+          timeline: {
+            instructions: [
+              {
+                entries: [
+                  frame,
+                  searchResultEntry('7'),
+                  nonResultTweet,
+                  module,
+                ],
+              },
+            ],
+          },
+        },
+      },
+    };
+
     expect(parseSearchList(data).map((t) => t.id)).toEqual(['7']);
   });
 

@@ -6,7 +6,7 @@
 // The page's own JavaScript creates the request, preserving native browser
 // fingerprints (x-client-transaction-id, Referer, sec-fetch and page context).
 // SearchTimeline order is not guaranteed strictly chronological (the Top tab
-// used for tracked scans ranks by engagement) — every tweet is filtered
+// ranks by relevance and engagement) — every tweet is filtered
 // independently against the cursor's lastSeenExternalId, not cut off at the
 // first miss.
 
@@ -16,7 +16,7 @@ import {
   ScanRunResult,
   ScanTaskCursor,
 } from './executor.types';
-import { ParsedTweet, isNewerThan, newerId, parseTimelineTweets } from './x.parse';
+import { ParsedTweet, isNewerThan, newerId, parseTweetResult } from './x.parse';
 import { openXReadTab, readViaProfile } from './x.tab-reader';
 
 // Exactly ONE keyword (or one tracked handle) per query — scanKey is never split,
@@ -33,11 +33,28 @@ export function buildRawQuery(task: EngageScanTask): string {
   return task.scanKey; // single keyword, firehose
 }
 
-/** Pull every parseable tweet out of a SearchTimeline payload. */
+/** Parse only tweet cards that X marks as actual search results. */
 export function parseSearchList(data: any): ParsedTweet[] {
   const instructions =
     data?.search_by_raw_query?.search_timeline?.timeline?.instructions ?? [];
-  return parseTimelineTweets(instructions);
+  const tweets: ParsedTweet[] = [];
+  for (const instruction of instructions) {
+    for (const entry of instruction?.entries ?? []) {
+      const content = entry?.content;
+      const itemContent = content?.itemContent;
+      const isSearchResult =
+        String(entry?.entryId ?? '').startsWith('tweet-') &&
+        content?.entryType === 'TimelineTimelineItem' &&
+        content?.clientEventInfo?.component === 'result' &&
+        content?.clientEventInfo?.element === 'tweet' &&
+        itemContent?.__typename === 'TimelineTweet' &&
+        itemContent?.itemType === 'TimelineTweet';
+      if (!isSearchResult) continue;
+      const tweet = parseTweetResult(itemContent?.tweet_results?.result);
+      if (tweet) tweets.push(tweet);
+    }
+  }
+  return tweets;
 }
 
 function toIngestPost(t: ParsedTweet): ScanIngestPost {
@@ -77,16 +94,9 @@ export async function scanX(
     return { posts: [], nextCursor: cursor, exhausted: false };
   }
 
-  // Keyword scans use the Live (chronological) tab: the default Top tab ranks
-  // by engagement, so a viral old tweet can rank above genuinely new ones and
-  // break the "search results are newest-first" assumption the cursor cutoff
-  // below relies on. Tracked scans keep the default Top tab — an account's own
-  // posts are sparse enough that Live often returns nothing (see x.collect.ts).
-  const liveParam = task.scanType === 'tracked' ? '' : '&f=live';
   const searchUrl =
     'https://x.com/search?q=' +
     encodeURIComponent(rawQuery) +
-    liveParam +
     '&src=typed_query';
   let response: unknown | null;
   if (task.scanType === 'tracked') {

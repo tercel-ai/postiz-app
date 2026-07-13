@@ -1,7 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { EngageScanTask } from '../executor.types';
 
-const { navigateAndCapture, close, openXReadTab, readViaProfile } = vi.hoisted(
+const {
+  navigateAndCapture,
+  close,
+  openXReadTab,
+  readViaProfile,
+} = vi.hoisted(
   () => {
     const navigateAndCapture = vi.fn();
     const close = vi.fn();
@@ -75,7 +80,16 @@ function searchResponse(...ids: string[]) {
                 entries: ids.map((id) => ({
                   entryId: `tweet-${id}`,
                   content: {
-                    itemContent: { tweet_results: { result: tweet(id) } },
+                    entryType: 'TimelineTimelineItem',
+                    clientEventInfo: {
+                      component: 'result',
+                      element: 'tweet',
+                    },
+                    itemContent: {
+                      __typename: 'TimelineTweet',
+                      itemType: 'TimelineTweet',
+                      tweet_results: { result: tweet(id) },
+                    },
                   },
                 })),
               },
@@ -99,12 +113,12 @@ describe('scanX real-page execution', () => {
     });
   });
 
-  it('runs a keyword scan through an x.com tab and captured SearchTimeline response', async () => {
+  it('runs a keyword scan through x.com Top SearchTimeline results', async () => {
     const result = await scanX(task(), async () => true);
 
     expect(openXReadTab).toHaveBeenCalledOnce();
     expect(navigateAndCapture).toHaveBeenCalledWith(
-      'https://x.com/search?q=artificial%20intelligence&f=live&src=typed_query',
+      'https://x.com/search?q=artificial%20intelligence&src=typed_query',
       'SearchTimeline'
     );
     expect(close).toHaveBeenCalledOnce();
