@@ -4,6 +4,7 @@ import {
   IsArray,
   IsBoolean,
   IsDateString,
+  IsIn,
   IsInt,
   IsNumber,
   IsOptional,
@@ -79,6 +80,12 @@ export class EngageScanIngestDto {
   @IsOptional() @IsBoolean() exhausted?: boolean;
 }
 
+export class ScanUnitSelectorDto {
+  @IsIn(['x', 'reddit']) platform: 'x' | 'reddit';
+  @IsIn(['keyword', 'channel', 'tracked']) scanType: 'keyword' | 'channel' | 'tracked';
+  @IsString() scanKey: string;
+}
+
 /**
  * Request body for POST /engage/scan-tasks/ingest. `completed` is the unit just
  * scanned (absent on the first/bootstrap call); `want` caps how many next units
@@ -94,6 +101,13 @@ export class EngageScanSyncDto {
 
   /** Debug/admin: bypass the cadence gate and claim units that are still in cooldown. */
   @IsOptional() @IsBoolean() force?: boolean;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(100)
+  @ValidateNested({ each: true })
+  @Type(() => ScanUnitSelectorDto)
+  selectedUnits?: ScanUnitSelectorDto[];
 }
 
 /** Map one normalised ingest post to the scorer's RawPost (metrics default 0). */

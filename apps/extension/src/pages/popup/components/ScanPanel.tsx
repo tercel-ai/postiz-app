@@ -49,6 +49,19 @@ export interface ScanTask {
   pacing: { maxPages: number; pageSize: number; pageDelayMs: number; pageJitterMs: number; interUnitDelayMs: number; interUnitJitterMs: number; hourlyRequestCap: number };
   rawQuery?: string;
 }
+export interface ScanUnitSelector {
+  platform: 'x' | 'reddit';
+  scanType: 'keyword' | 'channel' | 'tracked';
+  scanKey: string;
+}
+export interface SelectableScanUnit extends ScanUnitSelector {
+  id: string;
+  badge: string;
+  label: string;
+  lastScannedAt: string | null;
+  nextScanAt: string | null;
+  due: boolean;
+}
 
 interface ScanPost {
   platform: string; externalPostId: string; externalPostUrl: string;
@@ -122,6 +135,101 @@ function taskLabel(t: ScanTask) {
   const tp = t.scanType === 'keyword' ? 'KW' : t.scanType === 'channel' ? 'CH' : 'AC';
   return `${p} ${tp} · ${t.rawQuery ?? t.scanKey}`;
 }
+export function scanUnitSelectorKey(u: ScanUnitSelector): string {
+  return `${u.platform}:${u.scanType}:${u.scanKey}`;
+}
+function normalizeScanKeyword(keyword: string): string {
+  return keyword.trim().toLowerCase().replace(/\s+/g, ' ');
+}
+function normalizeScanUsername(platform: string, username: string): string {
+  const trimmed = username.trim();
+  if (platform === 'x' || platform === 'reddit') {
+    return trimmed.replace(/^@/, '').replace(/^\/?u\//i, '').toLowerCase();
+  }
+  return trimmed;
+}
+function visiblePlatforms(filter: 'x' | 'reddit' | 'both'): Array<'x' | 'reddit'> {
+  return filter === 'both' ? ['x', 'reddit'] : [filter];
+}
+function platformBadge(platform: 'x' | 'reddit', scanType: ScanUnitSelector['scanType']): string {
+  const p = platform === 'x' ? '𝕏' : 'r/';
+  const tp = scanType === 'keyword' ? 'KW' : scanType === 'channel' ? 'CH' : 'AC';
+  return `${p} ${tp}`;
+}
+function isDue(lastScannedAt: string | null | undefined, nextScanAt: string | null | undefined, now: number): boolean {
+  return !lastScannedAt || (nextScanAt ? new Date(nextScanAt).getTime() <= now : true);
+}
+export function buildSelectableScanUnits(
+  config: EngageConfig | null,
+  platformFilter: 'x' | 'reddit' | 'both',
+  now: number = Date.now()
+): SelectableScanUnit[] {
+  if (!config) return [];
+  const units: SelectableScanUnit[] = [];
+  const platforms = visiblePlatforms(platformFilter);
+  const intervalHours = config.scanIntervals?.scanIntervalHours ?? config.entitlement?.limits?.scanIntervalHours ?? 24;
+  const chHours = config.scanIntervals?.channelHours ?? intervalHours;
+  const trHours = config.scanIntervals?.trackedHours ?? intervalHours;
+
+  for (const kw of config.keywords.filter((k) => k.enabled)) {
+    const scanKey = normalizeScanKeyword(kw.keyword);
+    if (!scanKey) continue;
+    for (const platform of platforms) {
+      const cur = (kw.scanCursors ?? []).find((c) => c.platform === platform);
+      const unit: ScanUnitSelector = { platform, scanType: 'keyword', scanKey };
+      units.push({
+        ...unit,
+        id: scanUnitSelectorKey(unit),
+        badge: platformBadge(platform, 'keyword'),
+        label: kw.keyword.trim(),
+        lastScannedAt: cur?.lastScannedAt ?? null,
+        nextScanAt: cur?.nextScanAt ?? null,
+        due: isDue(cur?.lastScannedAt, cur?.nextScanAt, now),
+      });
+    }
+  }
+
+  if (platformFilter !== 'reddit') {
+    for (const account of config.trackedAccounts.filter((a) => a.enabled && (!a.platform || a.platform === 'x'))) {
+      const lastScannedAt = account.scanCursor?.lastScannedAt ?? account.lastCheckedAt ?? null;
+      const nextScanAt = account.scanCursor?.nextScanAt ?? nextDue(lastScannedAt, trHours);
+      const unit: ScanUnitSelector = {
+        platform: 'x',
+        scanType: 'tracked',
+        scanKey: normalizeScanUsername('x', account.username),
+      };
+      units.push({
+        ...unit,
+        id: scanUnitSelectorKey(unit),
+        badge: platformBadge('x', 'tracked'),
+        label: account.username.startsWith('@') ? account.username : `@${account.username}`,
+        lastScannedAt,
+        nextScanAt,
+        due: isDue(lastScannedAt, nextScanAt, now),
+      });
+    }
+  }
+
+  for (const channel of config.monitoredChannels.filter((c) => c.enabled)) {
+    if (channel.platform !== 'x' && channel.platform !== 'reddit') continue;
+    if (platformFilter !== 'both' && channel.platform !== platformFilter) continue;
+    const platform = channel.platform;
+    const lastScannedAt = channel.scanCursor?.lastScannedAt ?? channel.lastScannedAt ?? null;
+    const nextScanAt = channel.scanCursor?.nextScanAt ?? nextDue(lastScannedAt, chHours);
+    const unit: ScanUnitSelector = { platform, scanType: 'channel', scanKey: channel.channelId };
+    units.push({
+      ...unit,
+      id: scanUnitSelectorKey(unit),
+      badge: platformBadge(platform, 'channel'),
+      label: channel.channelName || channel.channelId,
+      lastScannedAt,
+      nextScanAt,
+      due: isDue(lastScannedAt, nextScanAt, now),
+    });
+  }
+
+  return units;
+}
 function defaultState(): TaskState {
   return { status: 'idle', posts: [], nextCursor: null, exhausted: true, accepted: null, err: null };
 }
@@ -148,7 +256,6 @@ export async function checkPlatformLogin(platform: 'x' | 'reddit'): Promise<bool
 
 export function EngageScanPanel() {
   const [platform, setPlatform] = React.useState<'x' | 'reddit' | 'both'>('both');
-  const [force, setForce] = React.useState(false);
   const [config, setConfig] = React.useState<EngageConfig | null>(null);
   const [syncedAt, setSyncedAt] = React.useState<number | null>(null);
   const [cfgBusy, setCfgBusy] = React.useState(false);
@@ -156,6 +263,7 @@ export function EngageScanPanel() {
   const [tasks, setTasks] = React.useState<ScanTask[]>([]);
   const [claimBusy, setClaimBusy] = React.useState(false);
   const [claimErr, setClaimErr] = React.useState<string | null>(null);
+  const [selectedUnitKeys, setSelectedUnitKeys] = React.useState<Set<string>>(() => new Set());
   const [states, setStates] = React.useState<Record<string, TaskState>>({});
   const autoSyncStartedRef = React.useRef(false);
   React.useEffect(() => {
@@ -174,6 +282,28 @@ export function EngageScanPanel() {
   const patch = (taskId: string, p: Partial<TaskState>) =>
     setStates((prev) => ({ ...prev, [taskId]: { ...(prev[taskId] ?? defaultState()), ...p } }));
 
+  const selectableUnits = React.useMemo(
+    () => buildSelectableScanUnits(config, platform),
+    [config, platform]
+  );
+
+  React.useEffect(() => {
+    const visible = new Set(selectableUnits.map((u) => u.id));
+    setSelectedUnitKeys((prev) => {
+      const next = new Set([...prev].filter((id) => visible.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [selectableUnits]);
+
+  function toggleSelectedUnit(unitId: string, checked: boolean) {
+    setSelectedUnitKeys((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(unitId);
+      else next.delete(unitId);
+      return next;
+    });
+  }
+
   async function loadConfig() {
     setCfgBusy(true); setCfgErr(null);
     try {
@@ -188,9 +318,20 @@ export function EngageScanPanel() {
   }
 
   async function claimTasks() {
+    const selectedUnits = selectableUnits
+      .filter((u) => selectedUnitKeys.has(u.id))
+      .map(({ platform, scanType, scanKey }) => ({ platform, scanType, scanKey }));
+    if (!selectedUnits.length) {
+      setClaimErr('Select at least one scan unit first.');
+      return;
+    }
     setClaimBusy(true); setClaimErr(null);
     try {
-      const r = await sendMessage<{ ok: boolean; tasks?: ScanTask[]; error?: string }>({ action: ENGAGE_EXTENSION_ACTION.claimTasks, want: 1, force });
+      const r = await sendMessage<{ ok: boolean; tasks?: ScanTask[]; error?: string }>({
+        action: ENGAGE_EXTENSION_ACTION.claimTasks,
+        want: selectedUnits.length,
+        selectedUnits,
+      });
       if (!r.ok) throw new Error(r.error || 'failed');
       const all = r.tasks ?? [];
       const filtered = platform === 'both' ? all : all.filter((t) => t.platform === platform);
@@ -248,13 +389,6 @@ export function EngageScanPanel() {
     } catch (e: any) { patch(t.taskId, { status: 'err', err: String(e?.message || e) }); }
   }
 
-  const intervalHours = config?.scanIntervals?.scanIntervalHours ?? config?.entitlement?.limits?.scanIntervalHours ?? 24;
-  const chHours = config?.scanIntervals?.channelHours ?? intervalHours;
-  const trHours = config?.scanIntervals?.trackedHours ?? intervalHours;
-  const allChannels  = (config?.monitoredChannels ?? []).filter((c) => c.enabled);
-  const visChannels  = platform === 'both' ? allChannels : allChannels.filter((c) => c.platform === platform);
-  const visAccounts  = platform !== 'reddit' ? (config?.trackedAccounts ?? []).filter((a) => a.enabled) : [];
-  const activeKws    = (config?.keywords ?? []).filter((k) => k.enabled);
   const syncAgo = syncedAt ? Math.round((Date.now() - syncedAt) / 60000) + 'm ago' : null;
 
   return (
@@ -280,54 +414,23 @@ export function EngageScanPanel() {
       {config ? (
         <div className="sc-table">
           <div className="sc-thead">
-            <span>Scan Unit</span><span>Last</span><span>Status</span>
+            <span></span><span>Scan Unit</span><span>Last</span><span>Status</span>
           </div>
-          {activeKws.flatMap((kw) => {
-            const cursors = kw.scanCursors ?? [];
-            if (!cursors.length) return [(
-              <div key={kw.id + ':unseen'} className="sc-row">
-                <span className="sc-unit"><span className="sc-bp">KW</span>{kw.keyword}</span>
-                <span className="sc-t">—</span>
-                <span className="sc-due">Pending</span>
-              </div>
-            )];
-            return cursors.map((cur) => {
-              const due = !cur.lastScannedAt || (cur.nextScanAt ? new Date(cur.nextScanAt).getTime() <= Date.now() : true);
-              const pl = cur.platform === 'x' ? '𝕏' : 'r/';
-              return (
-                <div key={kw.id + ':' + cur.platform} className="sc-row">
-                  <span className="sc-unit"><span className="sc-bp">{pl}</span>{kw.keyword}</span>
-                  <span className="sc-t">{fmtAbs(cur.lastScannedAt)}</span>
-                  <span className={due ? 'sc-due' : 'sc-cool'}>{due ? 'Pending' : fmtTime(cur.nextScanAt)}</span>
-                </div>
-              );
-            });
-          })}
-          {visAccounts.map((a) => {
-            const last = a.scanCursor?.lastScannedAt ?? a.lastCheckedAt ?? null;
-            const nd = a.scanCursor?.nextScanAt ?? nextDue(last, trHours);
-            const due = !last || (nd ? new Date(nd).getTime() <= Date.now() : true);
-            return (
-              <div key={a.id} className="sc-row">
-                <span className="sc-unit"><span className="sc-bp">𝕏</span>@{a.username}</span>
-                <span className="sc-t">{fmtAbs(last)}</span>
-                <span className={due ? 'sc-due' : 'sc-cool'}>{due ? 'Pending' : fmtTime(nd)}</span>
-              </div>
-            );
-          })}
-          {visChannels.map((c) => {
-            const last = c.scanCursor?.lastScannedAt ?? c.lastScannedAt ?? null;
-            const nd = c.scanCursor?.nextScanAt ?? nextDue(last, chHours);
-            const due = !last || (nd ? new Date(nd).getTime() <= Date.now() : true);
-            return (
-              <div key={c.id} className="sc-row">
-                <span className="sc-unit"><span className="sc-bp">r/</span>{c.channelName || c.channelId}</span>
-                <span className="sc-t">{fmtAbs(last)}</span>
-                <span className={due ? 'sc-due' : 'sc-cool'}>{due ? 'Pending' : fmtTime(nd)}</span>
-              </div>
-            );
-          })}
-          {activeKws.length + visAccounts.length + visChannels.length === 0 && (
+          {selectableUnits.map((unit) => (
+            <label key={unit.id} className="sc-row sc-row-select">
+              <span className="sc-check">
+                <input
+                  type="checkbox"
+                  checked={selectedUnitKeys.has(unit.id)}
+                  onChange={(e) => toggleSelectedUnit(unit.id, e.target.checked)}
+                />
+              </span>
+              <span className="sc-unit"><span className="sc-bp">{unit.badge}</span>{unit.label}</span>
+              <span className="sc-t">{fmtAbs(unit.lastScannedAt)}</span>
+              <span className={unit.due ? 'sc-due' : 'sc-cool'}>{unit.due ? 'Pending' : fmtTime(unit.nextScanAt)}</span>
+            </label>
+          ))}
+          {selectableUnits.length === 0 && (
             <div className="sc-empty">No scan units (for current platform filter)</div>
           )}
         </div>
@@ -337,18 +440,15 @@ export function EngageScanPanel() {
 
       {/* Claim controls */}
       <div className="sc-claim-bar">
-        <label className="sc-force-lbl">
-          <input type="checkbox" checked={force} onChange={(e) => setForce(e.target.checked)} />
-          Force
-        </label>
-        <button className="sc-claim-btn" onClick={claimTasks} disabled={claimBusy}>
+        <span className="sc-muted">{selectedUnitKeys.size} selected</span>
+        <button className="sc-claim-btn" onClick={claimTasks} disabled={claimBusy || selectedUnitKeys.size === 0}>
           {claimBusy ? 'Claiming…' : 'Claim Tasks'}
         </button>
       </div>
       {claimErr && <div className="sc-err">{claimErr}</div>}
       {tasks.length === 0 && !claimBusy && (
         <div className="sc-empty" style={{ marginTop: 4 }}>
-          {force ? 'No tasks even in force mode — config may be empty.' : 'No tasks available, or all on cooldown (check "Force" to retry).'}
+          Select one or more scan units, then claim tasks.
         </div>
       )}
 
@@ -412,10 +512,13 @@ const SCAN_CSS = `
 .sc-empty { color:#888; font-size:12px; padding:8px 0; }
 
 .sc-table { border:1px solid #e3e6ea; border-radius:8px; overflow:hidden; font-size:12px; margin-bottom:10px; }
-.sc-thead { display:grid; grid-template-columns:1fr 80px 60px; background:#f6f8f2; padding:5px 10px; font-weight:600; color:#555; font-size:11px; border-bottom:1px solid #e3e6ea; }
-.sc-row { display:grid; grid-template-columns:1fr 80px 60px; padding:6px 10px; border-bottom:1px solid #f0f0f0; align-items:center; }
+.sc-thead { display:grid; grid-template-columns:24px 1fr 80px 60px; background:#f6f8f2; padding:5px 10px; font-weight:600; color:#555; font-size:11px; border-bottom:1px solid #e3e6ea; }
+.sc-row { display:grid; grid-template-columns:24px 1fr 80px 60px; padding:6px 10px; border-bottom:1px solid #f0f0f0; align-items:center; }
 .sc-row:last-child { border-bottom:0; }
 .sc-row:hover { background:#fafdf4; }
+.sc-row-select { cursor:pointer; }
+.sc-check { display:flex; align-items:center; }
+.sc-check input { margin:0; cursor:pointer; }
 .sc-unit { display:flex; align-items:center; gap:5px; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
 .sc-bp { font-size:10px; font-weight:700; background:#efffc0; color:#354600; border-radius:3px; padding:1px 4px; flex-shrink:0; }
 .sc-t { color:#777; font-size:11px; }
@@ -426,7 +529,6 @@ const SCAN_CSS = `
 .sc-label { font-size:12px; color:#555; }
 .sc-num { width:44px; padding:4px 6px; border:1.5px solid #d0d0d0; border-radius:6px; font-size:12px; outline:none; }
 .sc-num:focus { border-color:#171817; box-shadow:0 0 0 3px #efffc0; }
-.sc-force-lbl { display:flex; align-items:center; gap:3px; font-size:12px; color:#555; cursor:pointer; }
 .sc-claim-btn { padding:5px 14px; border:1.5px solid #171817; border-radius:6px; background:#c7ff18; color:#171817; font-size:12px; font-weight:600; cursor:pointer; margin-left:auto; transition:background 0.12s,transform 0.12s; }
 .sc-claim-btn:hover:not(:disabled) { background:#b5f000; transform:translateY(-1px); }
 .sc-claim-btn:disabled { background:#efffc0; border-color:#d0d7c8; color:#a6aa9f; cursor:default; }

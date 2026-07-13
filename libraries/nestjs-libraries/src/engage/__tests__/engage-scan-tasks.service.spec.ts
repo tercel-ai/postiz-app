@@ -184,6 +184,61 @@ describe('EngageScanTasksService.sync — claim (bootstrap)', () => {
     expect(res.nextTasks).toHaveLength(1);
     expect(lease.claim).toHaveBeenCalledTimes(1); // stopped early
   });
+
+  it('claims only selected units and treats manual selection as a forced claim', async () => {
+    const { svc, lease } = build({
+      orgContext: {
+        keywords: [{ keyword: 'AI', enabled: true }],
+        monitoredChannels: [{ platform: 'reddit', channelId: 'LocalLLM' }],
+        trackedAccounts: [{ platform: 'x', username: '@Alice' }],
+      },
+      claimResults: [
+        snap({ platform: 'reddit', scanType: 'keyword', scanKey: 'ai', leaseToken: 'tokKw' }),
+        snap({ platform: 'x', scanType: 'tracked', scanKey: 'alice', leaseToken: 'tokAcct' }),
+      ],
+    });
+
+    const res = await svc.sync('org1', {
+      want: 2,
+      selectedUnits: [
+        { platform: 'reddit', scanType: 'keyword', scanKey: 'ai' },
+        { platform: 'x', scanType: 'tracked', scanKey: 'alice' },
+      ],
+    } as any);
+
+    expect(res.nextTasks.map((t) => t.taskId)).toEqual(['tokKw', 'tokAcct']);
+    expect(lease.claim).toHaveBeenCalledTimes(2);
+    expect(lease.claim.mock.calls.map(([args]) => ({
+      platform: args.platform,
+      scanType: args.scanType,
+      scanKey: args.scanKey,
+      force: args.force,
+    }))).toEqual([
+      { platform: 'reddit', scanType: 'keyword', scanKey: 'ai', force: true },
+      { platform: 'x', scanType: 'tracked', scanKey: 'alice', force: true },
+    ]);
+  });
+
+  it('does not claim selected units outside the org config', async () => {
+    const { svc, lease } = build({
+      orgContext: {
+        keywords: [{ keyword: 'AI', enabled: true }],
+        monitoredChannels: [],
+        trackedAccounts: [],
+      },
+      claimResults: [snap({ leaseToken: 'tokUnexpected' })],
+    });
+
+    const res = await svc.sync('org1', {
+      want: 1,
+      selectedUnits: [
+        { platform: 'reddit', scanType: 'channel', scanKey: 'not-in-config' },
+      ],
+    } as any);
+
+    expect(res.nextTasks).toEqual([]);
+    expect(lease.claim).not.toHaveBeenCalled();
+  });
 });
 
 describe('EngageScanTasksService.sync — ingest completed', () => {

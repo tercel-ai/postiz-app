@@ -172,13 +172,14 @@ export class EngageController {
       completed,
       want: body.want,
       force: body.force,
+      selectedUnits: body.selectedUnits,
     });
   }
 
   @ApiOperation({
     summary:
       'Release a held scan-task lease so the unit can be re-claimed. ' +
-      'Resets status → IDLE without advancing the cursor; use force-claim afterwards to bypass cadence.',
+      'Resets status → IDLE without advancing the cursor; select and claim the unit afterwards to bypass cadence.',
   })
   @Post('/scan-tasks/release')
   async scanTasksRelease(

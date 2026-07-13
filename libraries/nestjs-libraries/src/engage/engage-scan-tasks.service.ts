@@ -98,6 +98,12 @@ export interface CompletedUnitInput {
   exhausted?: boolean;
 }
 
+export interface ScanUnitSelector {
+  platform: ScanTaskPlatform;
+  scanType: ScanTaskType;
+  scanKey: string;
+}
+
 /**
  * Drives the extension scan loop: a single entry point that (optionally)
  * INGESTS a completed unit's posts and then CLAIMS the next batch of due units
@@ -145,9 +151,9 @@ export class EngageScanTasksService {
 
   /**
    * Release a held lease by token WITHOUT advancing the cursor,
-   * so the unit can be immediately re-claimed (combined with force=true to bypass
-   * cadence). Safe to call on a stale or failed scan — if the token is invalid
-   * or already released, returns false (no-op).
+   * so the unit can be immediately re-claimed by selecting it in the extension.
+   * Safe to call on a stale or failed scan — if the token is invalid or already
+   * released, returns false (no-op).
    */
   async releaseTask(taskId: string): Promise<boolean> {
     return this._lease.releaseByToken(taskId);
@@ -184,14 +190,17 @@ export class EngageScanTasksService {
   /** Complete (if any) + claim next batch. Bootstrap = call with no `completed`. */
   async sync(
     orgId: string,
-    body: { completed?: CompletedUnitInput; want?: number; force?: boolean }
+    body: { completed?: CompletedUnitInput; want?: number; force?: boolean; selectedUnits?: ScanUnitSelector[] }
   ): Promise<{ accepted: number; nextTasks: EngageScanTask[] }> {
     let accepted = 0;
     if (body.completed) {
       accepted = await this.ingestCompleted(body.completed);
     }
     const want = Math.min(Math.max(1, body.want ?? DEFAULT_WANT), MAX_WANT);
-    const nextTasks = await this.claimNext(orgId, want, { force: body.force });
+    const nextTasks = await this.claimNext(orgId, want, {
+      force: body.force,
+      selectedUnits: body.selectedUnits,
+    });
     return { accepted, nextTasks };
   }
 
@@ -256,7 +265,7 @@ export class EngageScanTasksService {
   private async claimNext(
     orgId: string,
     want: number,
-    opts: { force?: boolean } = {}
+    opts: { force?: boolean; selectedUnits?: ScanUnitSelector[] } = {}
   ): Promise<EngageScanTask[]> {
     const ctx = await this._engageRepo.getEnabledOrgContext(orgId);
     if (!ctx) return [];
@@ -264,7 +273,12 @@ export class EngageScanTasksService {
     const cadenceMs =
       (await this._entitlement.getScanIntervalHours(orgId)) * 3_600_000;
     const pacing = await this._config.getPacing();
-    const units = this._enumerateUnits(ctx);
+    const selectedUnitSet = Array.isArray(opts.selectedUnits)
+      ? new Set(opts.selectedUnits.map((u) => this._selectorKey(u)))
+      : null;
+    const units = selectedUnitSet
+      ? this._enumerateUnits(ctx).filter((u) => selectedUnitSet.has(this._selectorKey(u)))
+      : this._enumerateUnits(ctx);
 
     // Active normalised keywords for building combined tracked+keyword queries.
     const activeKeywords = ctx.keywords
@@ -280,11 +294,15 @@ export class EngageScanTasksService {
         scanType: u.scanType,
         scanKey: u.scanKey,
         cadenceMs,
-        force: opts.force,
+        force: opts.force || Boolean(selectedUnitSet),
       });
       if (snap) tasks.push(await this._buildTask(snap, pacing, activeKeywords));
     }
     return tasks;
+  }
+
+  private _selectorKey(u: ScanUnitSelector): string {
+    return `${u.platform}:${u.scanType}:${u.scanKey}`;
   }
 
   /** Org config → flat list of global scan units (keyword × platform, channel,

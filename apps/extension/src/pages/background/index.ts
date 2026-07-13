@@ -24,6 +24,7 @@ import { fetchReplyMetrics } from '@gitroom/extension/utils/executor/metrics.rep
 import { fetchPostMetrics } from '@gitroom/extension/utils/executor/metrics.page';
 import { reapOrphanXReadTab } from '@gitroom/extension/utils/executor/x.tab-reader';
 import { backendCall } from '@gitroom/extension/utils/executor/api';
+import { buildClaimTasksPayload } from '@gitroom/extension/utils/executor/claim-tasks.payload';
 import { scanReddit } from '@gitroom/extension/utils/executor/scan.reddit';
 import { scanX } from '@gitroom/extension/utils/executor/scan.x';
 import { ENGAGE_EXTENSION_ACTION } from '@gitroom/extension/utils/executor/actions';
@@ -407,8 +408,9 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
   }
   if (request.action === ENGAGE_EXTENSION_ACTION.claimTasks) {
     const want = Math.min(Math.max(1, request.want ?? 3), 5);
-    console.log('[aisee][scan] claimTasks', { want, force: request.force });
-    backendCall('/engage/scan-tasks/ingest', 'POST', { want, force: request.force ?? false })
+    const selectedUnits = Array.isArray(request.selectedUnits) ? request.selectedUnits : undefined;
+    console.log('[aisee][scan] claimTasks', { want, selectedUnits: selectedUnits?.length ?? 0 });
+    backendCall('/engage/scan-tasks/ingest', 'POST', buildClaimTasksPayload({ want, selectedUnits }))
       .then((r: any) =>
         sendResponse({ ok: r.ok, tasks: r.data?.nextTasks ?? [], accepted: 0 })
       )
@@ -431,7 +433,7 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
   }
   if (request.action === ENGAGE_EXTENSION_ACTION.releaseTask) {
     // Release a stuck lease (scan failed, cursor still SCANNING).
-    // After release, use force=true in claim to bypass cadence and immediately re-scan.
+    // After release, select the unit and claim it again to immediately re-scan.
     backendCall('/engage/scan-tasks/release', 'POST', { taskId: request.taskId })
       .then((r: any) => sendResponse({ ok: r.ok, released: r.data?.released ?? false }))
       .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
