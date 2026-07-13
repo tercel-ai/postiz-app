@@ -106,9 +106,47 @@ async function navigateAndCapture(
   return null;
 }
 
+/**
+ * Scroll an already-loaded X page to trigger the next timeline request, then
+ * poll for a fresh captured response to `op`. Returns null when no new response
+ * appears within the normal capture timeout.
+ */
+async function scrollAndCapture(
+  tabId: number,
+  op: string
+): Promise<unknown | null> {
+  const since = Date.now();
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      world: 'MAIN',
+      func: () => {
+        window.scrollBy({
+          top: Math.max(window.innerHeight * 1.5, 900),
+          left: 0,
+          behavior: 'smooth',
+        });
+        window.dispatchEvent(new WheelEvent('wheel', { deltaY: 900 }));
+      },
+    });
+  } catch (e) {
+    console.warn('[aisee][x-read] scroll failed', e);
+    return null;
+  }
+  const deadline = Date.now() + CAPTURE_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const data = await readCaptured(tabId, op, since);
+    if (data != null) return data;
+    await sleep(CAPTURE_POLL_MS);
+  }
+  return null;
+}
+
 export interface XReadTab {
   /** Navigate to `url` and return X's own captured response for `op` (or null). */
   navigateAndCapture(url: string, op: string): Promise<unknown | null>;
+  /** Scroll the current X page and return the next captured response for `op`. */
+  scrollAndCapture(op: string): Promise<unknown | null>;
   /**
    * Navigate to `url` and wait for the tab to finish loading, WITHOUT polling
    * for a capture. Use this for "warm-up" hops (e.g. visiting a profile page
@@ -148,6 +186,7 @@ export async function openXReadTab(): Promise<XReadTab | null> {
   return {
     navigateAndCapture: (url: string, op: string) =>
       navigateAndCapture(id, url, op),
+    scrollAndCapture: (op: string) => scrollAndCapture(id, op),
     navigate: navigateOnly,
     close: () => closeTab(id),
   };

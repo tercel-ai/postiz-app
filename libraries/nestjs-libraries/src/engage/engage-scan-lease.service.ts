@@ -109,6 +109,25 @@ export interface ClaimArgs {
   now?: Date;
 }
 
+export interface ReleaseByUnitArgs {
+  platform: string;
+  scanType: string;
+  scanKey: string;
+  /** Also clear rate-limit backoff. Defaults to false for safer debug release. */
+  clearCooldown?: boolean;
+}
+
+export interface ReleaseByUnitResult {
+  found: boolean;
+  released: boolean;
+  platform: string;
+  scanType: string;
+  scanKey: string;
+  previousStatus?: string;
+  status?: string;
+  reason?: 'cursor not found' | 'not scanning' | 'release race lost';
+}
+
 /**
  * Atomic, lease-aware claim/complete/release for a GLOBAL scan unit
  * (`EngageScanCursor`), shared by the workflow and the extension scan path.
@@ -239,6 +258,83 @@ export class EngageScanLeaseService {
       data: { status: 'IDLE', leaseToken: null },
     });
     return res.count === 1;
+  }
+
+  /**
+   * Admin/debug release by global scan unit identity. This intentionally does
+   * not advance cursor fields; it only clears the active lease so the unit can
+   * be claimed again. The caller must provide already-normalized scanKey.
+   */
+  async releaseByUnit(args: ReleaseByUnitArgs): Promise<ReleaseByUnitResult> {
+    const identity = {
+      platform: args.platform,
+      scanType: args.scanType,
+      scanKey: args.scanKey,
+    };
+    const row = await this._scanCursor.model.engageScanCursor.findUnique({
+      where: { platform_scanType_scanKey: identity },
+      select: {
+        id: true,
+        platform: true,
+        scanType: true,
+        scanKey: true,
+        status: true,
+      },
+    });
+
+    if (!row) {
+      return {
+        found: false,
+        released: false,
+        ...identity,
+        reason: 'cursor not found',
+      };
+    }
+
+    const current = {
+      platform: row.platform,
+      scanType: row.scanType,
+      scanKey: row.scanKey,
+      previousStatus: row.status,
+      status: row.status,
+    };
+
+    if (row.status !== 'SCANNING') {
+      return {
+        found: true,
+        released: false,
+        ...current,
+        reason: 'not scanning',
+      };
+    }
+
+    const data: {
+      status: 'IDLE';
+      leaseToken: null;
+      cooldownUntil?: null;
+    } = { status: 'IDLE', leaseToken: null };
+    if (args.clearCooldown) data.cooldownUntil = null;
+
+    const res = await this._scanCursor.model.engageScanCursor.updateMany({
+      where: { id: row.id, status: 'SCANNING' },
+      data,
+    });
+
+    if (res.count !== 1) {
+      return {
+        found: true,
+        released: false,
+        ...current,
+        reason: 'release race lost',
+      };
+    }
+
+    return {
+      found: true,
+      released: true,
+      ...current,
+      status: 'IDLE',
+    };
   }
 
   // ─── Id-based lifecycle (synchronous WORKFLOW path) ────────────────────────

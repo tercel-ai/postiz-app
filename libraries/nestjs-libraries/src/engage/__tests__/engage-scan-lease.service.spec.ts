@@ -10,6 +10,7 @@ import {
 function build(row: any, mutateCount = 1) {
   const engageScanCursor = {
     upsert: vi.fn(async () => row),
+    findUnique: vi.fn(async () => row),
     updateMany: vi.fn(async () => ({ count: mutateCount })),
     update: vi.fn(async () => ({})),
   };
@@ -209,6 +210,87 @@ describe('EngageScanLeaseService.completeByToken (session binding)', () => {
   it('releaseByToken returns false when the token no longer owns the lease', async () => {
     const { svc } = build({ ...base }, 0);
     expect(await svc.releaseByToken('wrong')).toBe(false);
+  });
+});
+
+describe('EngageScanLeaseService.releaseByUnit (admin debug)', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('releases a SCANNING cursor by global unit without advancing the cursor', async () => {
+    const row = {
+      ...base,
+      status: 'SCANNING',
+      leaseToken: 'tok123',
+      cooldownUntil: new Date(NOW.getTime() + 60_000),
+    };
+    const { svc, engageScanCursor } = build(row);
+
+    const result = await svc.releaseByUnit({
+      platform: 'reddit',
+      scanType: 'keyword',
+      scanKey: 'ai',
+    });
+
+    expect(result).toEqual({
+      found: true,
+      released: true,
+      previousStatus: 'SCANNING',
+      status: 'IDLE',
+      platform: 'reddit',
+      scanType: 'keyword',
+      scanKey: 'ai',
+    });
+    expect(engageScanCursor.updateMany).toHaveBeenCalledWith({
+      where: { id: 'c1', status: 'SCANNING' },
+      data: { status: 'IDLE', leaseToken: null },
+    });
+  });
+
+  it('can clear cooldown when explicitly requested', async () => {
+    const { svc, engageScanCursor } = build({ ...base, status: 'SCANNING' });
+
+    await svc.releaseByUnit({
+      platform: 'reddit',
+      scanType: 'keyword',
+      scanKey: 'ai',
+      clearCooldown: true,
+    });
+
+    expect(engageScanCursor.updateMany.mock.calls[0][0].data).toEqual({
+      status: 'IDLE',
+      leaseToken: null,
+      cooldownUntil: null,
+    });
+  });
+
+  it('reports not scanning without mutating an IDLE cursor', async () => {
+    const { svc, engageScanCursor } = build({ ...base, status: 'IDLE' });
+
+    await expect(
+      svc.releaseByUnit({ platform: 'reddit', scanType: 'keyword', scanKey: 'ai' })
+    ).resolves.toMatchObject({
+      found: true,
+      released: false,
+      previousStatus: 'IDLE',
+      status: 'IDLE',
+      reason: 'not scanning',
+    });
+    expect(engageScanCursor.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('reports cursor not found', async () => {
+    const { svc } = build(null);
+
+    await expect(
+      svc.releaseByUnit({ platform: 'reddit', scanType: 'keyword', scanKey: 'ai' })
+    ).resolves.toEqual({
+      found: false,
+      released: false,
+      platform: 'reddit',
+      scanType: 'keyword',
+      scanKey: 'ai',
+      reason: 'cursor not found',
+    });
   });
 });
 

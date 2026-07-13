@@ -1,9 +1,27 @@
-import { Controller, Get } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Post } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 import { SuperAdmin } from '@gitroom/backend/services/auth/admin/super-admin.decorator';
 import { PostsRepository } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.repository';
 import { IntegrationRepository } from '@gitroom/nestjs-libraries/database/prisma/integrations/integration.repository';
 import { EngageRepository } from '@gitroom/nestjs-libraries/engage/engage.repository';
+import {
+  EngageScanLeaseService,
+  normalizeKeyword,
+  normalizeUsername,
+} from '@gitroom/nestjs-libraries/engage/engage-scan-lease.service';
+
+type ReleaseScanCursorBody = {
+  platform?: string;
+  scanType?: string;
+  scanKey?: string;
+  clearCooldown?: boolean;
+};
+
+function normalizeDebugScanKey(platform: string, scanType: string, scanKey: string): string {
+  if (scanType === 'keyword') return normalizeKeyword(scanKey);
+  if (scanType === 'tracked') return normalizeUsername(platform, scanKey);
+  return scanKey.trim();
+}
 
 @ApiTags('Admin')
 @Controller('/admin/diagnostics')
@@ -12,7 +30,8 @@ export class AdminDiagnosticsController {
   constructor(
     private _postsRepository: PostsRepository,
     private _integrationRepository: IntegrationRepository,
-    private _engageRepository: EngageRepository
+    private _engageRepository: EngageRepository,
+    private _engageScanLeaseService: EngageScanLeaseService
   ) {}
 
   /**
@@ -275,6 +294,42 @@ export class AdminDiagnosticsController {
         healthy: stuckCursors.length === 0,
       },
     };
+  }
+
+  /**
+   * POST /admin/diagnostics/engage-scan-cursors/release
+   *
+   * Debug-only global release for an EngageScanCursor lease. This does not
+   * advance cursor fields; it only clears a fresh/stuck SCANNING lease so the
+   * same platform/scanType/scanKey unit can be claimed again.
+   */
+  @Post('/engage-scan-cursors/release')
+  async releaseEngageScanCursor(@Body() body: ReleaseScanCursorBody) {
+    const platform = String(body?.platform ?? '').trim().toLowerCase();
+    const scanType = String(body?.scanType ?? '').trim().toLowerCase();
+    const rawScanKey = String(body?.scanKey ?? '').trim();
+
+    if (!['x', 'reddit'].includes(platform)) {
+      throw new BadRequestException('platform must be one of: x, reddit');
+    }
+    if (!['keyword', 'tracked', 'channel'].includes(scanType)) {
+      throw new BadRequestException('scanType must be one of: keyword, tracked, channel');
+    }
+    if (!rawScanKey) {
+      throw new BadRequestException('scanKey is required');
+    }
+
+    const scanKey = normalizeDebugScanKey(platform, scanType, rawScanKey);
+    if (!scanKey) {
+      throw new BadRequestException('scanKey is invalid after normalization');
+    }
+
+    return this._engageScanLeaseService.releaseByUnit({
+      platform,
+      scanType,
+      scanKey,
+      clearCooldown: body?.clearCooldown === true,
+    });
   }
 
   /**

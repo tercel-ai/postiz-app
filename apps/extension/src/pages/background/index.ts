@@ -423,10 +423,9 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
     console.log('[aisee][scan] executeTask', task?.platform, task?.scanType, task?.scanKey);
     // Options and the alarm runner use the same production scanners so their
     // request fingerprints, cursor handling and parsing cannot drift apart.
-    // Cap to 1 page regardless of phase (initial normally allows 3) — the debug
-    // panel is for sampling, not a full baseline sweep.
-    const scanTask = { ...task, pacing: { ...task.pacing, maxPages: 1 } };
-    (task.platform === 'x' ? scanX(scanTask, gate) : scanReddit(scanTask, gate))
+    // Honour the server-resolved pacing exactly: the debug panel is used to
+    // validate production task behaviour, including X maxPages scrolling.
+    (task.platform === 'x' ? scanX(task, gate) : scanReddit(task, gate))
       .then((result) => sendResponse({ ok: true, result }))
       .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
     return true;

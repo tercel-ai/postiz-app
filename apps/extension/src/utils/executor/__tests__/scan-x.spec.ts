@@ -3,17 +3,20 @@ import type { EngageScanTask } from '../executor.types';
 
 const {
   navigateAndCapture,
+  scrollAndCapture,
   close,
   openXReadTab,
   readViaProfile,
 } = vi.hoisted(
   () => {
     const navigateAndCapture = vi.fn();
+    const scrollAndCapture = vi.fn();
     const close = vi.fn();
     return {
       navigateAndCapture,
+      scrollAndCapture,
       close,
-      openXReadTab: vi.fn(async () => ({ navigateAndCapture, close })),
+      openXReadTab: vi.fn(async () => ({ navigateAndCapture, scrollAndCapture, close })),
       readViaProfile: vi.fn(),
     };
   }
@@ -111,6 +114,7 @@ describe('scanX real-page execution', () => {
         },
       },
     });
+    scrollAndCapture.mockResolvedValue(null);
   });
 
   it('runs a keyword scan through x.com Top SearchTimeline results', async () => {
@@ -188,6 +192,36 @@ describe('scanX real-page execution', () => {
 
     expect(result.posts.map((post) => post.externalPostId)).toEqual(['30']);
     expect(result.nextCursor.lastSeenExternalId).toBe('30');
+  });
+
+  it('uses maxPages to collect additional keyword SearchTimeline responses via scrolling', async () => {
+    navigateAndCapture.mockResolvedValue(searchResponse('30', '20'));
+    scrollAndCapture
+      .mockResolvedValueOnce(searchResponse('40', '20'))
+      .mockResolvedValueOnce(searchResponse('50'));
+
+    const result = await scanX(
+      task({
+        pacing: {
+          ...task().pacing,
+          maxPages: 3,
+          pageDelayMs: 0,
+          pageJitterMs: 0,
+        },
+      }),
+      async () => true
+    );
+
+    expect(navigateAndCapture).toHaveBeenCalledOnce();
+    expect(scrollAndCapture).toHaveBeenCalledTimes(2);
+    expect(scrollAndCapture).toHaveBeenNthCalledWith(1, 'SearchTimeline');
+    expect(result.posts.map((post) => post.externalPostId)).toEqual([
+      '30',
+      '20',
+      '40',
+      '50',
+    ]);
+    expect(result.nextCursor.lastSeenExternalId).toBe('50');
   });
 
   it('does not open an X tab when the hourly request gate rejects the scan', async () => {

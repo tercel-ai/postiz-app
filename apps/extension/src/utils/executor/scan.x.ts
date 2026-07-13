@@ -16,6 +16,7 @@ import {
   ScanRunResult,
   ScanTaskCursor,
 } from './executor.types';
+import { applyDelay } from './pacing';
 import { ParsedTweet, isNewerThan, newerId, parseTweetResult } from './x.parse';
 import { openXReadTab, readViaProfile } from './x.tab-reader';
 
@@ -89,8 +90,20 @@ export async function scanX(
   const { cursor } = task;
   const sinceId = cursor.lastSeenExternalId ?? undefined;
   const rawQuery = buildRawQuery(task);
+  console.debug('[aisee][scan][x] start', {
+    scanType: task.scanType,
+    scanKey: task.scanKey,
+    rawQuery,
+    sinceId: sinceId ?? null,
+    cursorLastSeenAt: cursor.lastSeenAt,
+    maxPages: task.pacing.maxPages,
+  });
 
   if (!(await gate())) {
+    console.debug('[aisee][scan][x] skipped by hourly gate', {
+      scanType: task.scanType,
+      scanKey: task.scanKey,
+    });
     return { posts: [], nextCursor: cursor, exhausted: false };
   }
 
@@ -98,30 +111,64 @@ export async function scanX(
     'https://x.com/search?q=' +
     encodeURIComponent(rawQuery) +
     '&src=typed_query';
-  let response: unknown | null;
+  const responses: unknown[] = [];
+  let exhausted = true;
   if (task.scanType === 'tracked') {
-    response = await readViaProfile(
+    const response = await readViaProfile(
       `https://x.com/${task.scanKey}`,
       searchUrl,
       'SearchTimeline'
     );
+    if (response != null) responses.push(response);
   } else {
     const session = await openXReadTab();
     if (!session) {
+      console.debug('[aisee][scan][x] no readable X tab', {
+        scanType: task.scanType,
+        scanKey: task.scanKey,
+      });
       return { posts: [], nextCursor: cursor, exhausted: false };
     }
     try {
-      response = await session.navigateAndCapture(searchUrl, 'SearchTimeline');
+      const first = await session.navigateAndCapture(searchUrl, 'SearchTimeline');
+      if (first != null) responses.push(first);
+      if (first != null) {
+        const maxPages = Math.max(1, Math.floor(task.pacing.maxPages || 1));
+        for (let page = 1; page < maxPages; page++) {
+          await applyDelay(task.pacing.pageDelayMs, task.pacing.pageJitterMs);
+          if (!(await gate())) {
+            exhausted = false;
+            console.debug('[aisee][scan][x] stopped by hourly gate during pagination', {
+              scanType: task.scanType,
+              scanKey: task.scanKey,
+              page,
+            });
+            break;
+          }
+          const next = await session.scrollAndCapture('SearchTimeline');
+          if (next == null) break;
+          responses.push(next);
+        }
+      }
     } finally {
       await session.close();
     }
   }
-  if (response == null) {
+  if (!responses.length) {
+    console.debug('[aisee][scan][x] no SearchTimeline capture', {
+      scanType: task.scanType,
+      scanKey: task.scanKey,
+    });
     return { posts: [], nextCursor: cursor, exhausted: false };
   }
 
-  const data = (response as { data?: unknown }).data ?? response;
-  const tweets = parseSearchList(data);
+  const pageTweetCounts: number[] = [];
+  const tweets = responses.flatMap((response) => {
+    const data = (response as { data?: unknown }).data ?? response;
+    const parsed = parseSearchList(data);
+    pageTweetCounts.push(parsed.length);
+    return parsed;
+  });
   // Filter rather than break: SearchTimeline order is not guaranteed strictly
   // chronological (Top tab isn't; Live tab can still interleave), so a tweet's
   // position in the response must not decide whether later ones are dropped.
@@ -129,8 +176,19 @@ export async function scanX(
   // upserts on (platform, externalPostId).
   const posts: ScanIngestPost[] = [];
   let newestId = cursor.lastSeenExternalId ?? undefined;
+  const seen = new Set<string>();
+  let duplicateCount = 0;
+  let cursorFilteredCount = 0;
   for (const t of tweets) {
-    if (!isNewerThan(t.id, sinceId)) continue; // older/already seen — drop
+    if (seen.has(t.id)) {
+      duplicateCount += 1;
+      continue;
+    }
+    seen.add(t.id);
+    if (!isNewerThan(t.id, sinceId)) {
+      cursorFilteredCount += 1;
+      continue;
+    } // older/already seen — drop
     posts.push(toIngestPost(t));
     newestId = newerId(newestId, t.id);
   }
@@ -140,5 +198,18 @@ export async function scanX(
     lastSeenExternalId: newestId ?? cursor.lastSeenExternalId,
     lastSeenAt: newest?.postPublishedAt ?? cursor.lastSeenAt,
   };
-  return { posts, nextCursor, exhausted: true };
+  console.debug('[aisee][scan][x] complete', {
+    scanType: task.scanType,
+    scanKey: task.scanKey,
+    captures: responses.length,
+    pageTweetCounts,
+    parsedTweets: tweets.length,
+    uniqueTweets: seen.size,
+    duplicateCount,
+    cursorFilteredCount,
+    posts: posts.length,
+    nextCursor,
+    exhausted,
+  });
+  return { posts, nextCursor, exhausted };
 }
