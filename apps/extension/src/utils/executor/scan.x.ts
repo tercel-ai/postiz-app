@@ -90,12 +90,14 @@ export async function scanX(
   const { cursor } = task;
   const sinceId = cursor.lastSeenExternalId ?? undefined;
   const rawQuery = buildRawQuery(task);
+  const cursorFilterEnabled = task.scanType !== 'keyword';
   console.debug('[aisee][scan][x] start', {
     scanType: task.scanType,
     scanKey: task.scanKey,
     rawQuery,
     sinceId: sinceId ?? null,
     cursorLastSeenAt: cursor.lastSeenAt,
+    cursorFilterEnabled,
     maxPages: task.pacing.maxPages,
   });
 
@@ -185,7 +187,7 @@ export async function scanX(
       continue;
     }
     seen.add(t.id);
-    if (!isNewerThan(t.id, sinceId)) {
+    if (cursorFilterEnabled && !isNewerThan(t.id, sinceId)) {
       cursorFilteredCount += 1;
       continue;
     } // older/already seen — drop
@@ -207,6 +209,7 @@ export async function scanX(
     uniqueTweets: seen.size,
     duplicateCount,
     cursorFilteredCount,
+    cursorFilterEnabled,
     posts: posts.length,
     nextCursor,
     exhausted,

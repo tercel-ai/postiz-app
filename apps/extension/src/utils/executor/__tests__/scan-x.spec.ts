@@ -154,11 +154,33 @@ describe('scanX real-page execution', () => {
     expect(result.posts.map((post) => post.externalPostId)).toEqual(['30']);
   });
 
-  it('keeps only posts newer than the cursor and advances to the newest capture', async () => {
+  it('does not cursor-filter keyword Top results because relevant older posts can surface later', async () => {
     navigateAndCapture.mockResolvedValue(searchResponse('30', '20', '10'));
 
     const result = await scanX(
       task({
+        cursor: {
+          lastSeenExternalId: '20',
+          lastSeenAt: '2025-06-17T12:00:00.000Z',
+        },
+      }),
+      async () => true
+    );
+
+    expect(result.posts.map((post) => post.externalPostId)).toEqual(['30', '20', '10']);
+    expect(result.nextCursor).toEqual({
+      lastSeenExternalId: '30',
+      lastSeenAt: '2025-06-18T12:00:00.000Z',
+    });
+  });
+
+  it('keeps only posts newer than the cursor for tracked scans', async () => {
+    readViaProfile.mockResolvedValue(searchResponse('30', '20', '10'));
+
+    const result = await scanX(
+      task({
+        scanType: 'tracked',
+        scanKey: 'alice',
         cursor: {
           lastSeenExternalId: '20',
           lastSeenAt: '2025-06-17T12:00:00.000Z',
@@ -174,14 +196,16 @@ describe('scanX real-page execution', () => {
     });
   });
 
-  it('still collects a newer tweet ranked BELOW an old one (non-chronological order, e.g. Top-tab relevance ranking)', async () => {
+  it('still collects a newer tweet ranked BELOW an old one when cursor filtering is enabled', async () => {
     // '10' (old, below cursor) is listed first, '30' (genuinely new) second —
     // a naive "break at the first non-newer tweet" would stop at '10' and
     // silently miss '30'.
-    navigateAndCapture.mockResolvedValue(searchResponse('10', '30'));
+    readViaProfile.mockResolvedValue(searchResponse('10', '30'));
 
     const result = await scanX(
       task({
+        scanType: 'tracked',
+        scanKey: 'alice',
         cursor: {
           lastSeenExternalId: '20',
           lastSeenAt: '2025-06-17T12:00:00.000Z',
