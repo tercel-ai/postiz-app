@@ -58,7 +58,7 @@ export class UsersService {
 
   async getUserLimits(userId: string): Promise<
     | { postChannelLimit: number; postSendLimit: number }
-    | { postChannelLimit: number; postSendLimit: number; periodStart: string; periodEnd: string; name: string; interval: string; plan?: string }
+    | { postChannelLimit: number; postSendLimit: number; periodStart: string; periodEnd: string; name: string; status: string; interval: string; plan?: string }
     | null
   > {
     if (!this._aiseeClient.enabled) {
@@ -79,15 +79,7 @@ export class UsersService {
       return { postChannelLimit: 0, postSendLimit: 0 };
     }
 
-    return {
-      postChannelLimit: pkg.postChannelLimit,
-      postSendLimit: pkg.postSendLimit,
-      periodStart: pkg.periodStart,
-      periodEnd: pkg.periodEnd,
-      name: pkg.name,
-      interval: pkg.interval,
-      plan: pkg.plan,
-    };
+    return pkg;
   }
 
 }
