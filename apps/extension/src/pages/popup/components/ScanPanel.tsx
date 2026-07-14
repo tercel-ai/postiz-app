@@ -294,7 +294,21 @@ export function EngageScanPanel() {
   // reads the latest values even mid-await, instead of a stale render closure.
   const tasksRef = React.useRef<ScanTask[]>([]);
   const statesRef = React.useRef<Record<string, TaskState>>({});
-  const autoStopRef = React.useRef(false);
+  // Generation counter for the auto-run loop: every runAutoAll() call bumps it
+  // and captures its own value. A loop checks "is my generation still current"
+  // instead of a plain stop flag, so (a) Stop can unlock the UI immediately
+  // even if a call is hung, and (b) a stale/zombie loop that eventually wakes
+  // up from a hung await always notices it's been superseded and no-ops,
+  // instead of racing a fresh run or getting the UI permanently stuck.
+  const runGenRef = React.useRef(0);
+  // Set true by the rehydrate effect when there's unfinished work to resume;
+  // consumed by the effect below on the next real render — NOT called inline
+  // from rehydrate itself, because back-to-back setState calls in one tick
+  // only apply the *first* one synchronously (React's eager-update fast path).
+  // Reading statesRef.current for the others before a real render happens
+  // sees stale data — which previously made an already-ingested task look
+  // unfinished and get silently re-run.
+  const pendingAutoResumeRef = React.useRef(false);
   const applyTasks = (updater: (prev: ScanTask[]) => ScanTask[]) =>
     setTasks((prev) => (tasksRef.current = updater(prev)));
   const applyStates = (updater: (prev: Record<string, TaskState>) => Record<string, TaskState>) =>
@@ -319,9 +333,24 @@ export function EngageScanPanel() {
     loadSessionCache().then((cached) => {
       if (!alive) return;
       if (cached && Date.now() - cached.savedAt <= SESSION_CACHE_TTL_MS) {
+        // 'running'/'ingesting' are transient, in-flight markers — if the popup
+        // was torn down mid-phase, they'd otherwise look "not started yet" and
+        // trigger a wasted (or unsafe) re-scan instead of resuming correctly.
+        const resumedStates: Record<string, TaskState> = {};
+        for (const [taskId, s] of Object.entries(cached.states)) {
+          resumedStates[taskId] =
+            s.status === 'ingesting'
+              ? { ...s, status: 'done' } // posts already captured — resume by re-ingesting only
+              : s.status === 'running'
+              ? { ...s, status: 'err', err: 'Interrupted — click Retry to resume' }
+              : s;
+        }
         applyTasks(() => cached.tasks);
-        applyStates(() => cached.states);
+        applyStates(() => resumedStates);
         setSelectedUnitKeys(new Set(cached.selectedUnitKeys));
+        // Flag for the effect below — don't decide "unfinished?" here, since
+        // states just queued above isn't guaranteed to have landed yet.
+        if (cached.tasks.length > 0) pendingAutoResumeRef.current = true;
       } else if (cached) {
         void clearSessionCache();
       }
@@ -329,6 +358,19 @@ export function EngageScanPanel() {
     });
     return () => { alive = false; };
   }, []);
+
+  // Auto-continue instead of waiting for a manual "Run All" click — a popup
+  // reopen (or an in-popup view switch) shouldn't require the user to notice
+  // unfinished work and re-trigger it themselves. Gated on a flag set only by
+  // the rehydrate effect above, so a normal manual Claim Tasks (which also
+  // changes tasks/states) never auto-starts a run — only a resumed session does.
+  React.useEffect(() => {
+    if (!pendingAutoResumeRef.current) return;
+    pendingAutoResumeRef.current = false;
+    if (tasks.some((t) => states[t.taskId]?.status !== 'ingested')) {
+      void runAutoAll();
+    }
+  }, [tasks, states]);
 
   // Persist on every change, once rehydration has run (guards against the
   // initial empty-state render clobbering a cache entry still being loaded).
@@ -479,29 +521,36 @@ export function EngageScanPanel() {
   /** Runs every claimed, not-yet-ingested task serially via runOrResume, with
    *  a jittered gap between tasks (each task's own pacing config — the same
    *  values the server-driven executor uses). Stops on the first failure so
-   *  errors stay visible instead of getting buried under an unattended loop. */
+   *  errors stay visible instead of getting buried under an unattended loop.
+   *  Every call starts a new generation, which supersedes any prior call —
+   *  see runGenRef above for why that matters more than a plain stop flag. */
   async function runAutoAll() {
-    if (autoRunning) return;
+    const myGen = ++runGenRef.current;
     setAutoRunning(true);
-    autoStopRef.current = false;
     try {
       for (let i = 0; i < tasksRef.current.length; i++) {
-        if (autoStopRef.current) break;
+        if (runGenRef.current !== myGen) return;
         const t = tasksRef.current[i];
         if (statesRef.current[t.taskId]?.status === 'ingested') continue;
         const ok = await runOrResume(t);
+        if (runGenRef.current !== myGen) return; // stopped/superseded mid-task
         if (!ok) break;
-        if (i < tasksRef.current.length - 1 && !autoStopRef.current) {
+        if (i < tasksRef.current.length - 1) {
           await applyDelay(t.pacing.interUnitDelayMs, t.pacing.interUnitJitterMs);
+          if (runGenRef.current !== myGen) return;
         }
       }
     } finally {
-      setAutoRunning(false);
+      if (runGenRef.current === myGen) setAutoRunning(false);
     }
   }
 
+  /** Stops the loop and unlocks the UI immediately — doesn't wait for an
+   *  in-flight sendMessage to resolve (which may never happen, e.g. a dead
+   *  background worker), so a hung call can't leave the panel unusable. */
   function stopAutoAll() {
-    autoStopRef.current = true;
+    runGenRef.current++;
+    setAutoRunning(false);
   }
 
   const syncAgo = syncedAt ? Math.round((Date.now() - syncedAt) / 60000) + 'm ago' : null;
@@ -592,7 +641,7 @@ export function EngageScanPanel() {
             <button
               className="sc-claim-btn"
               onClick={runAutoAll}
-              disabled={tasks.every((t) => states[t.taskId]?.status === 'ingested')}
+              disabled={claimBusy || tasks.every((t) => states[t.taskId]?.status === 'ingested')}
             >
               Run All
             </button>
@@ -610,7 +659,7 @@ export function EngageScanPanel() {
               <div className="sc-task-actions">
                 {st.status !== 'ingested' && (
                   <button className="sc-btn-run"
-                    disabled={st.status === 'running' || st.status === 'ingesting' || autoRunning}
+                    disabled={st.status === 'running' || st.status === 'ingesting' || autoRunning || claimBusy}
                     onClick={() => runOrResume(t)}>
                     {st.status === 'running' ? 'Scanning…'
                       : st.status === 'ingesting' ? 'Ingesting…'
