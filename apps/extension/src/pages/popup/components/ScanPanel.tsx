@@ -3,6 +3,12 @@ import { ENGAGE_EXTENSION_ACTION } from '@gitroom/extension/utils/executor/actio
 import { applyDelay } from '@gitroom/extension/utils/executor/pacing';
 import { shouldAutoSyncConfigCache } from './scan-config-cache';
 
+// Manually claiming/running scan tasks is a debug-only capability (bypasses
+// the normal background-scheduled executor) — the production store build only
+// ships the read-only scan status view. Same EXTENSION_ENV check as
+// auth.service.ts's IS_PROD, so dev/internal builds keep the full debug panel.
+const CAN_MANUALLY_CLAIM = import.meta.env?.EXTENSION_ENV !== 'production';
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface InitialScan { platform: string; status: string; completedAt: string | null; error?: string | null }
@@ -288,6 +294,7 @@ export function EngageScanPanel() {
   const [selectedUnitKeys, setSelectedUnitKeys] = React.useState<Set<string>>(() => new Set());
   const [states, setStates] = React.useState<Record<string, TaskState>>({});
   const [autoRunning, setAutoRunning] = React.useState(false);
+  const [waitingNextId, setWaitingNextId] = React.useState<string | null>(null);
   const autoSyncStartedRef = React.useRef(false);
   const hydratedRef = React.useRef(false);
   // Mirror tasks/states synchronously so the auto-run loop (below) always
@@ -328,8 +335,18 @@ export function EngageScanPanel() {
   }, []);
 
   // Rehydrate claimed tasks/states/selection from the last session, if fresh.
+  // Guarded on CAN_MANUALLY_CLAIM too, not just the JSX below: a prod build
+  // has no Stop/Release Lock UI at all, so silently restoring + auto-resuming
+  // a stale claim from a dev-build session (same browser profile, e.g. after
+  // a rebuild) would run scans with no visible way to stop them. Prod just
+  // drops any such leftover cache instead.
   React.useEffect(() => {
     let alive = true;
+    if (!CAN_MANUALLY_CLAIM) {
+      void clearSessionCache();
+      hydratedRef.current = true;
+      return;
+    }
     loadSessionCache().then((cached) => {
       if (!alive) return;
       if (cached && Date.now() - cached.savedAt <= SESSION_CACHE_TTL_MS) {
@@ -536,12 +553,18 @@ export function EngageScanPanel() {
         if (runGenRef.current !== myGen) return; // stopped/superseded mid-task
         if (!ok) break;
         if (i < tasksRef.current.length - 1) {
+          // Purely a UI hint (not persisted) — during the jittered gap, show
+          // which task is up next instead of a disabled "Run" indistinguishable
+          // from "hasn't been reached yet at all".
+          const upcoming = tasksRef.current.slice(i + 1).find((nt) => statesRef.current[nt.taskId]?.status !== 'ingested');
+          setWaitingNextId(upcoming?.taskId ?? null);
           await applyDelay(t.pacing.interUnitDelayMs, t.pacing.interUnitJitterMs);
+          setWaitingNextId(null);
           if (runGenRef.current !== myGen) return;
         }
       }
     } finally {
-      if (runGenRef.current === myGen) setAutoRunning(false);
+      if (runGenRef.current === myGen) { setAutoRunning(false); setWaitingNextId(null); }
     }
   }
 
@@ -579,33 +602,44 @@ export function EngageScanPanel() {
         <div className="sc-table">
           <div className="sc-thead">
             <span className="sc-check">
-              <input
-                type="checkbox"
-                checked={selectableUnits.length > 0 && selectableUnits.every((u) => selectedUnitKeys.has(u.id))}
-                ref={(el) => {
-                  if (!el) return;
-                  const allSelected = selectableUnits.length > 0 && selectableUnits.every((u) => selectedUnitKeys.has(u.id));
-                  el.indeterminate = !allSelected && selectableUnits.some((u) => selectedUnitKeys.has(u.id));
-                }}
-                onChange={(e) => setSelectedUnitKeys(e.target.checked ? new Set(selectableUnits.map((u) => u.id)) : new Set())}
-              />
+              {CAN_MANUALLY_CLAIM && (
+                <input
+                  type="checkbox"
+                  checked={selectableUnits.length > 0 && selectableUnits.every((u) => selectedUnitKeys.has(u.id))}
+                  ref={(el) => {
+                    if (!el) return;
+                    const allSelected = selectableUnits.length > 0 && selectableUnits.every((u) => selectedUnitKeys.has(u.id));
+                    el.indeterminate = !allSelected && selectableUnits.some((u) => selectedUnitKeys.has(u.id));
+                  }}
+                  onChange={(e) => setSelectedUnitKeys(e.target.checked ? new Set(selectableUnits.map((u) => u.id)) : new Set())}
+                />
+              )}
             </span>
             <span>Scan Unit</span><span>Last</span><span>Status</span>
           </div>
-          {selectableUnits.map((unit) => (
-            <label key={unit.id} className="sc-row sc-row-select">
-              <span className="sc-check">
-                <input
-                  type="checkbox"
-                  checked={selectedUnitKeys.has(unit.id)}
-                  onChange={(e) => toggleSelectedUnit(unit.id, e.target.checked)}
-                />
-              </span>
-              <span className="sc-unit"><span className="sc-bp">{unit.badge}</span>{unit.label}</span>
-              <span className="sc-t">{fmtAbs(unit.lastScannedAt)}</span>
-              <span className={unit.due ? 'sc-due' : 'sc-cool'}>{unit.due ? 'Pending' : fmtTime(unit.nextScanAt)}</span>
-            </label>
-          ))}
+          {selectableUnits.map((unit) => {
+            const row = (
+              <>
+                <span className="sc-check">
+                  {CAN_MANUALLY_CLAIM && (
+                    <input
+                      type="checkbox"
+                      checked={selectedUnitKeys.has(unit.id)}
+                      onChange={(e) => toggleSelectedUnit(unit.id, e.target.checked)}
+                    />
+                  )}
+                </span>
+                <span className="sc-unit"><span className="sc-bp">{unit.badge}</span>{unit.label}</span>
+                <span className="sc-t">{fmtAbs(unit.lastScannedAt)}</span>
+                <span className={unit.due ? 'sc-due' : 'sc-cool'}>{unit.due ? 'Pending' : fmtTime(unit.nextScanAt)}</span>
+              </>
+            );
+            return CAN_MANUALLY_CLAIM ? (
+              <label key={unit.id} className="sc-row sc-row-select">{row}</label>
+            ) : (
+              <div key={unit.id} className="sc-row">{row}</div>
+            );
+          })}
           {selectableUnits.length === 0 && (
             <div className="sc-empty">No scan units (for current platform filter)</div>
           )}
@@ -614,82 +648,92 @@ export function EngageScanPanel() {
         !cfgBusy && <div className="sc-empty">Click "Sync Config" to load scan units.</div>
       )}
 
-      {/* Claim controls */}
-      <div className="sc-claim-bar">
-        <span className="sc-muted">{selectedUnitKeys.size} selected</span>
-        <button className="sc-claim-btn" onClick={claimTasks} disabled={claimBusy || selectedUnitKeys.size === 0}>
-          {claimBusy ? 'Claiming…' : 'Claim Tasks'}
-        </button>
-      </div>
-      {claimErr && <div className="sc-err">{claimErr}</div>}
-      {tasks.length === 0 && !claimBusy && (
-        <div className="sc-empty" style={{ marginTop: 4 }}>
-          Select one or more scan units, then claim tasks.
-        </div>
-      )}
-
-      {/* Run all claimed tasks: scan + ingest each, serially, with a jittered
-          gap between them. Stops at the first error instead of racing ahead. */}
-      {tasks.length > 0 && (
-        <div className="sc-claim-bar">
-          <span className="sc-muted">
-            {tasks.filter((t) => states[t.taskId]?.status === 'ingested').length}/{tasks.length} ingested
-          </span>
-          {autoRunning ? (
-            <button className="sc-btn-release" onClick={stopAutoAll}>Stop</button>
-          ) : (
-            <button
-              className="sc-claim-btn"
-              onClick={runAutoAll}
-              disabled={claimBusy || tasks.every((t) => states[t.taskId]?.status === 'ingested')}
-            >
-              Run All
+      {/* Manual claim/run: debug-only (see CAN_MANUALLY_CLAIM above). End
+          users get the read-only status table above and nothing past here —
+          the production build never populates `tasks` in the first place, but
+          this also guards a stale dev-build session-cache entry from ever
+          rendering claim/run controls after a prod rebuild. */}
+      {CAN_MANUALLY_CLAIM && (
+        <>
+          {/* Claim controls */}
+          <div className="sc-claim-bar">
+            <span className="sc-muted">{selectedUnitKeys.size} selected</span>
+            <button className="sc-claim-btn" onClick={claimTasks} disabled={claimBusy || selectedUnitKeys.size === 0}>
+              {claimBusy ? 'Claiming…' : 'Claim Tasks'}
             </button>
+          </div>
+          {claimErr && <div className="sc-err">{claimErr}</div>}
+          {tasks.length === 0 && !claimBusy && (
+            <div className="sc-empty" style={{ marginTop: 4 }}>
+              Select one or more scan units, then claim tasks.
+            </div>
           )}
-        </div>
-      )}
 
-      {/* Task rows */}
-      <div className="sc-tasks">
-        {tasks.map((t) => {
-          const st = states[t.taskId] ?? defaultState();
-          return (
-            <div key={t.taskId} className="sc-task">
-              <div className="sc-task-label">{taskLabel(t)}</div>
-              <div className="sc-task-actions">
-                {st.status !== 'ingested' && (
-                  <button className="sc-btn-run"
-                    disabled={st.status === 'running' || st.status === 'ingesting' || autoRunning || claimBusy}
-                    onClick={() => runOrResume(t)}>
-                    {st.status === 'running' ? 'Scanning…'
-                      : st.status === 'ingesting' ? 'Ingesting…'
-                      : st.status === 'err' && st.posts.length > 0 ? 'Retry Ingest'
-                      : st.status === 'err' ? 'Retry'
-                      : 'Run'}
-                  </button>
-                )}
-                {st.status === 'ingested' && <span className="sc-ok">✓ {st.accepted}</span>}
-                {st.status === 'err' && (
-                  <button className="sc-btn-release" onClick={() => releaseTask(t)}>Release Lock</button>
-                )}
-              </div>
-              {st.status === 'err' && <div className="sc-err sc-task-err">{st.err}</div>}
-              {st.posts.length > 0 && (
-                <div className="sc-posts">
-                  {st.posts.slice(0, 5).map((p) => (
-                    <div key={p.externalPostId} className="sc-post">
-                      <a href={p.externalPostUrl} target="_blank" rel="noreferrer">@{p.authorUsername}</a>
-                      <span className="sc-post-time">{new Date(p.postPublishedAt).toLocaleString('en-US', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}</span>
-                      <div className="sc-post-text">{p.postContent.slice(0, 100)}{p.postContent.length > 100 ? '…' : ''}</div>
-                    </div>
-                  ))}
-                  {st.posts.length > 5 && <div className="sc-muted">…and {st.posts.length - 5} more</div>}
-                </div>
+          {/* Run all claimed tasks: scan + ingest each, serially, with a jittered
+              gap between them. Stops at the first error instead of racing ahead. */}
+          {tasks.length > 0 && (
+            <div className="sc-claim-bar">
+              <span className="sc-muted">
+                {tasks.filter((t) => states[t.taskId]?.status === 'ingested').length}/{tasks.length} ingested
+              </span>
+              {autoRunning ? (
+                <button className="sc-btn-release" onClick={stopAutoAll}>Stop</button>
+              ) : (
+                <button
+                  className="sc-claim-btn"
+                  onClick={runAutoAll}
+                  disabled={claimBusy || tasks.every((t) => states[t.taskId]?.status === 'ingested')}
+                >
+                  Run All
+                </button>
               )}
             </div>
-          );
-        })}
-      </div>
+          )}
+
+          {/* Task rows */}
+          <div className="sc-tasks">
+            {tasks.map((t) => {
+              const st = states[t.taskId] ?? defaultState();
+              return (
+                <div key={t.taskId} className="sc-task">
+                  <div className="sc-task-label">{taskLabel(t)}</div>
+                  <div className="sc-task-actions">
+                    {st.status !== 'ingested' && (
+                      <button className="sc-btn-run"
+                        disabled={st.status === 'running' || st.status === 'ingesting' || autoRunning || claimBusy}
+                        onClick={() => runOrResume(t)}>
+                        {st.status === 'running' ? 'Scanning…'
+                          : st.status === 'ingesting' ? 'Ingesting…'
+                          : st.status === 'err' && st.posts.length > 0 ? 'Retry Ingest'
+                          : st.status === 'err' ? 'Retry'
+                          : waitingNextId === t.taskId ? 'Waiting…'
+                          : 'Run'}
+                      </button>
+                    )}
+                    {st.status === 'ingested' && <span className="sc-ok">✓ {st.accepted}</span>}
+                    {st.status === 'err' && (
+                      <button className="sc-btn-release" onClick={() => releaseTask(t)}>Release Lock</button>
+                    )}
+                  </div>
+                  {st.status === 'err' && <div className="sc-err sc-task-err">{st.err}</div>}
+                  {st.posts.length > 0 && (
+                    <div className="sc-posts">
+                      {st.posts.slice(0, 5).map((p) => (
+                        <div key={p.externalPostId} className="sc-post">
+                          <a href={p.externalPostUrl} target="_blank" rel="noreferrer">@{p.authorUsername}</a>
+                          <span className="sc-post-time">{new Date(p.postPublishedAt).toLocaleString('en-US', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}</span>
+                          <div className="sc-post-text">{p.postContent.slice(0, 100)}{p.postContent.length > 100 ? '…' : ''}</div>
+                        </div>
+                      ))}
+                      {st.posts.length > 5 && <div className="sc-muted">…and {st.posts.length - 5} more</div>}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </>
+      )}
     </div>
   );
 }

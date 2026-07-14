@@ -1,8 +1,9 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
-import Panel from '@pages/panel/Panel';
-import '@pages/panel/index.css';
-import '@assets/styles/tailwind.css';
+import '@gitroom/extension/pages/popup/index.css';
+import './index.css';
+import '@gitroom/extension/assets/styles/tailwind.css';
+import Panel from '@gitroom/extension/pages/panel/Panel';
 
 function init() {
   const rootContainer = document.querySelector('#__root');

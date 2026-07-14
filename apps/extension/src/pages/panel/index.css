@@ -1,0 +1,8 @@
+/* Overrides popup/index.css's `body { width: 380px }` — that fixed width
+   exists so Chrome auto-sizes the *popup* window to fit; a side panel's
+   width is set by the browser/user instead, so the layout must be fluid. */
+body {
+  width: auto;
+  min-width: 0;
+  overflow-x: hidden;
+}

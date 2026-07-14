@@ -18,6 +18,12 @@ export default mergeConfig(
             service_worker: 'src/pages/background/index.ts',
             type: 'module',
           },
+          // Chrome-only: Firefox has a different, incompatible sidebar_action
+          // API, so this stays out of baseManifest (shared with vite.config.firefox.ts).
+          side_panel: {
+            default_path: 'src/pages/panel/index.html',
+          },
+          permissions: [...(((baseManifest as any).permissions as string[] | undefined) || []), 'sidePanel'],
         } as ManifestV3Export,
         browser: 'chrome',
         contentScripts: {
