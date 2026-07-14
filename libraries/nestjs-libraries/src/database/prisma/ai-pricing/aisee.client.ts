@@ -255,7 +255,7 @@ export class AiseeClient {
         periodStart: data.period_start,
         periodEnd: data.period_end,
         name: data.name,
-        status: pkg.status,
+        status: data.status,
         plan: typeof data?.data?.plan === 'string' ? data.data.plan : undefined,
       };
     } catch (error) {
