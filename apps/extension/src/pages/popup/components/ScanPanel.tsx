@@ -1,5 +1,6 @@
 import React from 'react';
 import { ENGAGE_EXTENSION_ACTION } from '@gitroom/extension/utils/executor/actions';
+import { applyDelay } from '@gitroom/extension/utils/executor/pacing';
 import { shouldAutoSyncConfigCache } from './scan-config-cache';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -97,6 +98,27 @@ const saveCache = (key: string, taskId: string, result: ScanRunResult): Promise<
   new Promise((res) => chrome.storage.local.set({ [key]: { taskId, result } }, () => res()));
 const clearCache = (key: string): Promise<void> =>
   new Promise((res) => chrome.storage.local.remove([key], () => res()));
+
+// Persists the in-progress claimed-task session (tasks/states/selection) so
+// navigating within the popup — or closing and reopening it, since popups have
+// no side_panel and the whole page is torn down on blur — doesn't wipe claimed
+// scan progress. TTL is a UI-only safety net, not a lease: the backend's
+// SCAN_LEASE_TTL_MS is 5 min, so a bit more slack is fine here since a stale
+// entry just surfaces as a normal 'err' state (Release Lock) on the next action.
+const SESSION_CACHE_KEY = 'engage_scan_session_cache';
+const SESSION_CACHE_TTL_MS = 15 * 60 * 1000;
+interface ScanSessionCache {
+  tasks: ScanTask[];
+  states: Record<string, TaskState>;
+  selectedUnitKeys: string[];
+  savedAt: number;
+}
+const loadSessionCache = (): Promise<ScanSessionCache | null> =>
+  new Promise((res) => chrome.storage.local.get([SESSION_CACHE_KEY], (r) => res(r[SESSION_CACHE_KEY] ?? null)));
+const saveSessionCache = (cache: Omit<ScanSessionCache, 'savedAt'>): Promise<void> =>
+  new Promise((res) => chrome.storage.local.set({ [SESSION_CACHE_KEY]: { ...cache, savedAt: Date.now() } }, () => res()));
+const clearSessionCache = (): Promise<void> =>
+  new Promise((res) => chrome.storage.local.remove([SESSION_CACHE_KEY], () => res()));
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
 
@@ -265,7 +287,19 @@ export function EngageScanPanel() {
   const [claimErr, setClaimErr] = React.useState<string | null>(null);
   const [selectedUnitKeys, setSelectedUnitKeys] = React.useState<Set<string>>(() => new Set());
   const [states, setStates] = React.useState<Record<string, TaskState>>({});
+  const [autoRunning, setAutoRunning] = React.useState(false);
   const autoSyncStartedRef = React.useRef(false);
+  const hydratedRef = React.useRef(false);
+  // Mirror tasks/states synchronously so the auto-run loop (below) always
+  // reads the latest values even mid-await, instead of a stale render closure.
+  const tasksRef = React.useRef<ScanTask[]>([]);
+  const statesRef = React.useRef<Record<string, TaskState>>({});
+  const autoStopRef = React.useRef(false);
+  const applyTasks = (updater: (prev: ScanTask[]) => ScanTask[]) =>
+    setTasks((prev) => (tasksRef.current = updater(prev)));
+  const applyStates = (updater: (prev: Record<string, TaskState>) => Record<string, TaskState>) =>
+    setStates((prev) => (statesRef.current = updater(prev)));
+
   React.useEffect(() => {
     let alive = true;
     loadConfigCache().then((cached) => {
@@ -279,8 +313,36 @@ export function EngageScanPanel() {
     return () => { alive = false; };
   }, []);
 
+  // Rehydrate claimed tasks/states/selection from the last session, if fresh.
+  React.useEffect(() => {
+    let alive = true;
+    loadSessionCache().then((cached) => {
+      if (!alive) return;
+      if (cached && Date.now() - cached.savedAt <= SESSION_CACHE_TTL_MS) {
+        applyTasks(() => cached.tasks);
+        applyStates(() => cached.states);
+        setSelectedUnitKeys(new Set(cached.selectedUnitKeys));
+      } else if (cached) {
+        void clearSessionCache();
+      }
+      hydratedRef.current = true;
+    });
+    return () => { alive = false; };
+  }, []);
+
+  // Persist on every change, once rehydration has run (guards against the
+  // initial empty-state render clobbering a cache entry still being loaded).
+  React.useEffect(() => {
+    if (!hydratedRef.current) return;
+    if (tasks.length === 0) {
+      void clearSessionCache();
+      return;
+    }
+    void saveSessionCache({ tasks, states, selectedUnitKeys: [...selectedUnitKeys] });
+  }, [tasks, states, selectedUnitKeys]);
+
   const patch = (taskId: string, p: Partial<TaskState>) =>
-    setStates((prev) => ({ ...prev, [taskId]: { ...(prev[taskId] ?? defaultState()), ...p } }));
+    applyStates((prev) => ({ ...prev, [taskId]: { ...(prev[taskId] ?? defaultState()), ...p } }));
 
   const selectableUnits = React.useMemo(
     () => buildSelectableScanUnits(config, platform),
@@ -342,13 +404,19 @@ export function EngageScanPanel() {
           ? { ...defaultState(), status: 'done', posts: cached.result.posts, nextCursor: cached.result.nextCursor, exhausted: cached.result.exhausted }
           : defaultState();
       }
-      setTasks(filtered);
-      setStates(nextStates);
+      applyTasks(() => filtered);
+      applyStates(() => nextStates);
     } catch (e: any) { setClaimErr(String(e?.message || e)); }
     finally { setClaimBusy(false); }
   }
 
-  async function executeTask(t: ScanTask) {
+  // ─── Scan + ingest, unified ────────────────────────────────────────────────
+  // Single/multi-task and manual/auto flows all funnel through runOrResume so
+  // behavior stays consistent regardless of how it was triggered: a fresh task
+  // scans then ingests; a task with a cached-but-unsent scan just ingests; a
+  // task whose ingest alone failed retries only the ingest (no wasted re-scan).
+
+  async function runScanPhase(t: ScanTask): Promise<ScanRunResult | null> {
     patch(t.taskId, { status: 'running', posts: [], err: null });
     try {
       const r = await sendMessage<{ ok: boolean; result?: ScanRunResult; error?: string }>({ action: ENGAGE_EXTENSION_ACTION.executeTask, task: t });
@@ -356,7 +424,47 @@ export function EngageScanPanel() {
       const res = r.result!;
       await saveCache(cacheKey(t), t.taskId, res);
       patch(t.taskId, { status: 'done', posts: res.posts, nextCursor: res.nextCursor, exhausted: res.exhausted });
-    } catch (e: any) { patch(t.taskId, { status: 'err', err: String(e?.message || e) }); }
+      return res;
+    } catch (e: any) {
+      patch(t.taskId, { status: 'err', err: String(e?.message || e) });
+      return null;
+    }
+  }
+
+  async function runIngestPhase(t: ScanTask, res: ScanRunResult): Promise<boolean> {
+    patch(t.taskId, { status: 'ingesting', err: null });
+    try {
+      const r = await sendMessage<{ ok: boolean; accepted?: number; nextTasks?: ScanTask[]; error?: string }>({
+        action: ENGAGE_EXTENSION_ACTION.ingestTask, taskId: t.taskId,
+        posts: res.posts, nextCursor: res.nextCursor ?? undefined, exhausted: res.exhausted,
+      });
+      if (!r.ok) throw new Error(r.error || 'failed');
+      await clearCache(cacheKey(t));
+      patch(t.taskId, { status: 'ingested', accepted: r.accepted ?? 0 });
+      const incoming = (r.nextTasks ?? []).filter((nt) => !tasksRef.current.some((e) => e.taskId === nt.taskId));
+      if (incoming.length) {
+        applyTasks((prev) => [...prev, ...incoming]);
+        applyStates((prev) => { const np = { ...prev }; for (const nt of incoming) np[nt.taskId] = defaultState(); return np; });
+      }
+      void loadConfig();
+      return true;
+    } catch (e: any) {
+      patch(t.taskId, { status: 'err', err: String(e?.message || e) });
+      return false;
+    }
+  }
+
+  /** The one entry point for "make progress on this task": resumes from
+   *  wherever it left off (fresh scan, cached scan pending ingest, or a failed
+   *  ingest) instead of branching per caller. */
+  async function runOrResume(t: ScanTask): Promise<boolean> {
+    const st = statesRef.current[t.taskId];
+    if (st && st.posts.length > 0 && (st.status === 'done' || st.status === 'err')) {
+      return runIngestPhase(t, { posts: st.posts, nextCursor: st.nextCursor ?? { lastSeenExternalId: null, lastSeenAt: null }, exhausted: st.exhausted });
+    }
+    const res = await runScanPhase(t);
+    if (!res) return false;
+    return runIngestPhase(t, res);
   }
 
   async function releaseTask(t: ScanTask) {
@@ -364,29 +472,36 @@ export function EngageScanPanel() {
     try {
       await sendMessage<{ ok: boolean }>({ action: ENGAGE_EXTENSION_ACTION.releaseTask, taskId: t.taskId });
     } catch (_) { /* ignore */ }
-    setTasks((prev) => prev.filter((x) => x.taskId !== t.taskId));
-    setStates((prev) => { const n = { ...prev }; delete n[t.taskId]; return n; });
+    applyTasks((prev) => prev.filter((x) => x.taskId !== t.taskId));
+    applyStates((prev) => { const n = { ...prev }; delete n[t.taskId]; return n; });
   }
 
-  async function ingestTask(t: ScanTask) {
-    const st = states[t.taskId];
-    if (!st || st.status !== 'done') return;
-    patch(t.taskId, { status: 'ingesting', err: null });
+  /** Runs every claimed, not-yet-ingested task serially via runOrResume, with
+   *  a jittered gap between tasks (each task's own pacing config — the same
+   *  values the server-driven executor uses). Stops on the first failure so
+   *  errors stay visible instead of getting buried under an unattended loop. */
+  async function runAutoAll() {
+    if (autoRunning) return;
+    setAutoRunning(true);
+    autoStopRef.current = false;
     try {
-      const r = await sendMessage<{ ok: boolean; accepted?: number; nextTasks?: ScanTask[]; error?: string }>({
-        action: ENGAGE_EXTENSION_ACTION.ingestTask, taskId: t.taskId,
-        posts: st.posts, nextCursor: st.nextCursor ?? undefined, exhausted: st.exhausted,
-      });
-      if (!r.ok) throw new Error(r.error || 'failed');
-      await clearCache(cacheKey(t));
-      patch(t.taskId, { status: 'ingested', accepted: r.accepted ?? 0 });
-      const incoming = (r.nextTasks ?? []).filter((nt) => !tasks.some((e) => e.taskId === nt.taskId));
-      if (incoming.length) {
-        setTasks((prev) => [...prev, ...incoming]);
-        setStates((prev) => { const np = { ...prev }; for (const nt of incoming) np[nt.taskId] = defaultState(); return np; });
+      for (let i = 0; i < tasksRef.current.length; i++) {
+        if (autoStopRef.current) break;
+        const t = tasksRef.current[i];
+        if (statesRef.current[t.taskId]?.status === 'ingested') continue;
+        const ok = await runOrResume(t);
+        if (!ok) break;
+        if (i < tasksRef.current.length - 1 && !autoStopRef.current) {
+          await applyDelay(t.pacing.interUnitDelayMs, t.pacing.interUnitJitterMs);
+        }
       }
-      void loadConfig();
-    } catch (e: any) { patch(t.taskId, { status: 'err', err: String(e?.message || e) }); }
+    } finally {
+      setAutoRunning(false);
+    }
+  }
+
+  function stopAutoAll() {
+    autoStopRef.current = true;
   }
 
   const syncAgo = syncedAt ? Math.round((Date.now() - syncedAt) / 60000) + 'm ago' : null;
@@ -414,7 +529,19 @@ export function EngageScanPanel() {
       {config ? (
         <div className="sc-table">
           <div className="sc-thead">
-            <span></span><span>Scan Unit</span><span>Last</span><span>Status</span>
+            <span className="sc-check">
+              <input
+                type="checkbox"
+                checked={selectableUnits.length > 0 && selectableUnits.every((u) => selectedUnitKeys.has(u.id))}
+                ref={(el) => {
+                  if (!el) return;
+                  const allSelected = selectableUnits.length > 0 && selectableUnits.every((u) => selectedUnitKeys.has(u.id));
+                  el.indeterminate = !allSelected && selectableUnits.some((u) => selectedUnitKeys.has(u.id));
+                }}
+                onChange={(e) => setSelectedUnitKeys(e.target.checked ? new Set(selectableUnits.map((u) => u.id)) : new Set())}
+              />
+            </span>
+            <span>Scan Unit</span><span>Last</span><span>Status</span>
           </div>
           {selectableUnits.map((unit) => (
             <label key={unit.id} className="sc-row sc-row-select">
@@ -452,6 +579,27 @@ export function EngageScanPanel() {
         </div>
       )}
 
+      {/* Run all claimed tasks: scan + ingest each, serially, with a jittered
+          gap between them. Stops at the first error instead of racing ahead. */}
+      {tasks.length > 0 && (
+        <div className="sc-claim-bar">
+          <span className="sc-muted">
+            {tasks.filter((t) => states[t.taskId]?.status === 'ingested').length}/{tasks.length} ingested
+          </span>
+          {autoRunning ? (
+            <button className="sc-btn-release" onClick={stopAutoAll}>Stop</button>
+          ) : (
+            <button
+              className="sc-claim-btn"
+              onClick={runAutoAll}
+              disabled={tasks.every((t) => states[t.taskId]?.status === 'ingested')}
+            >
+              Run All
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Task rows */}
       <div className="sc-tasks">
         {tasks.map((t) => {
@@ -460,24 +608,24 @@ export function EngageScanPanel() {
             <div key={t.taskId} className="sc-task">
               <div className="sc-task-label">{taskLabel(t)}</div>
               <div className="sc-task-actions">
-                <button className="sc-btn-run"
-                  disabled={st.status === 'running' || st.status === 'ingesting' || st.status === 'ingested'}
-                  onClick={() => executeTask(t)}>
-                  {st.status === 'running' ? 'Scanning…' : st.status === 'done' ? 'Re-scan' : 'Run'}
-                </button>
-                {st.status === 'done' && (
-                  <button className="sc-btn-ingest" onClick={() => ingestTask(t)}>
-                    Ingest ({st.posts.length})
+                {st.status !== 'ingested' && (
+                  <button className="sc-btn-run"
+                    disabled={st.status === 'running' || st.status === 'ingesting' || autoRunning}
+                    onClick={() => runOrResume(t)}>
+                    {st.status === 'running' ? 'Scanning…'
+                      : st.status === 'ingesting' ? 'Ingesting…'
+                      : st.status === 'err' && st.posts.length > 0 ? 'Retry Ingest'
+                      : st.status === 'err' ? 'Retry'
+                      : 'Run'}
                   </button>
                 )}
-                {st.status === 'ingesting' && <button disabled className="sc-btn-ingest">Ingesting…</button>}
                 {st.status === 'ingested' && <span className="sc-ok">✓ {st.accepted}</span>}
                 {st.status === 'err' && (
                   <button className="sc-btn-release" onClick={() => releaseTask(t)}>Release Lock</button>
                 )}
               </div>
               {st.status === 'err' && <div className="sc-err sc-task-err">{st.err}</div>}
-              {(st.status === 'done' || st.status === 'ingested') && st.posts.length > 0 && (
+              {st.posts.length > 0 && (
                 <div className="sc-posts">
                   {st.posts.slice(0, 5).map((p) => (
                     <div key={p.externalPostId} className="sc-post">
