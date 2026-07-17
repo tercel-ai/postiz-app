@@ -334,6 +334,11 @@ export class PostsRepository {
       ...(query.channel?.length
         ? { integration: { providerIdentifier: { in: query.channel } } }
         : {}),
+      // Opaque aisee-core products.id. Omitting it returns every post the
+      // caller can already see (legacy, non-project behavior preserved
+      // during migration — project-scoped-post-engage-design.md §8/§11).
+      ...(query.projectId ? { projectId: query.projectId } : {}),
+      ...(query.operationPlanId ? { operationPlanId: query.operationPlanId } : {}),
     };
 
     const [results, total] = await Promise.all([
@@ -407,6 +412,10 @@ export class PostsRepository {
       ...(query.channel?.length
         ? { integration: { providerIdentifier: { in: query.channel } } }
         : {}),
+      // Must mirror getPostsList's projectId/operationPlanId clauses exactly
+      // — see the "Mirror the where from getPostsList" note above.
+      ...(query.projectId ? { projectId: query.projectId } : {}),
+      ...(query.operationPlanId ? { operationPlanId: query.operationPlanId } : {}),
     };
 
     const sortBy = query.sortBy!;
@@ -581,6 +590,11 @@ export class PostsRepository {
             },
           }
           : {}),
+        // Opaque aisee-core products.id. Omitting it returns every post in
+        // the org (legacy, non-project calendar behavior preserved during
+        // migration — project-scoped-post-engage-design.md §8/§11).
+        ...(query.projectId ? { projectId: query.projectId } : {}),
+        ...(query.operationPlanId ? { operationPlanId: query.operationPlanId } : {}),
       },
       select: {
         id: true,
@@ -779,12 +793,17 @@ export class PostsRepository {
     id: string,
     includeIntegration = false,
     orgId?: string,
-    isFirst?: boolean
+    isFirst?: boolean,
+    projectId?: string
   ) {
     return this._post.model.post.findUnique({
       where: {
         id,
         ...(orgId ? { organizationId: orgId } : {}),
+        // Same authorization posture as organizationId above (§8: "404 or
+        // the established authorization-safe response for records
+        // belonging to another project").
+        ...(projectId ? { projectId } : {}),
         deletedAt: null,
       },
       include: {
@@ -877,6 +896,10 @@ export class PostsRepository {
         delay: originalPost.delay,
         organizationId: originalPost.organizationId,
         integrationId: originalPost.integrationId,
+        // A recurring post's future cycles stay attributed to the same
+        // project/plan as the template they were cloned from.
+        projectId: originalPost.projectId,
+        operationPlanId: originalPost.operationPlanId,
         publishDate: cyclePublishDate,
         state: 'QUEUE',
         releaseId: claimToken,
@@ -970,6 +993,10 @@ export class PostsRepository {
         delay: originalPost.delay,
         organizationId: originalPost.organizationId,
         integrationId: originalPost.integrationId,
+        // A release clone stays attributed to the same project/plan as the
+        // post it was cloned from.
+        projectId: originalPost.projectId,
+        operationPlanId: originalPost.operationPlanId,
         publishDate: originalPost.publishDate,
         state: data.state,
         releaseId: data.releaseId,
@@ -1598,7 +1625,8 @@ export class PostsRepository {
     body: PostBody,
     tags: { value: string; label: string }[],
     inter?: number,
-    source?: PostSource
+    source?: PostSource,
+    projectId?: string
   ) {
     const posts: Post[] = [];
     // Reuse existing group when editing, new UUID only for fresh posts.
@@ -1646,6 +1674,16 @@ export class PostsRepository {
             id: orgId,
           },
         },
+        // Opaque aisee-core products.id, attribution set at creation time
+        // (default null = legacy, non-project post). Unlike source/etc.
+        // above, an update only touches it when the caller explicitly
+        // passes one — omitting projectId on an edit must not silently
+        // clear an existing post's project attribution.
+        ...(type === 'create'
+          ? { projectId: projectId ?? null }
+          : projectId !== undefined
+            ? { projectId }
+            : {}),
       });
 
       posts.push(

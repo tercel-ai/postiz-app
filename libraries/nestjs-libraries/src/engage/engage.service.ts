@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ForbiddenException,
   HttpException,
   Injectable,
   InternalServerErrorException,
@@ -9,12 +10,28 @@ import {
 } from '@nestjs/common';
 import { EngageSentReply, Organization } from '@prisma/client';
 import { TemporalService } from 'nestjs-temporal-core';
+import dayjs from 'dayjs';
+import utc from 'dayjs/plugin/utc';
 import {
   EngageRepository,
   GenerationHistoryEntry,
 } from '@gitroom/nestjs-libraries/engage/engage.repository';
 import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.service';
 import { PostOverageService } from '@gitroom/nestjs-libraries/database/prisma/posts/post-overage.service';
+import { SettingsService } from '@gitroom/nestjs-libraries/database/prisma/settings/settings.service';
+import { OperationPlanRepository } from '@gitroom/nestjs-libraries/database/prisma/operation-plan/operation-plan.repository';
+import {
+  OPERATION_PLAN_ALLOWED_PLATFORMS_KEY,
+  OPERATION_PLAN_MAX_DURATION_DAYS_KEY,
+} from '@gitroom/nestjs-libraries/database/prisma/operation-plan/operation-plan.service';
+
+dayjs.extend(utc);
+
+// §6.1: "the sending account hit its own per-account daily cap." No dedicated
+// capacity table — the cap VALUE is a Settings config; "sends so far" is a
+// live COUNT (EngageRepository.countAccountSentRepliesToday).
+export const ENGAGE_REPLY_ACCOUNT_DAILY_CAP_KEY = 'engage_reply_account_daily_cap';
+const DEFAULT_REPLY_ACCOUNT_DAILY_CAP = 50;
 import {
   EngageEntitlementService,
   ReplyLength,
@@ -111,23 +128,63 @@ export class EngageService implements OnApplicationBootstrap {
     private _postsService: PostsService,
     private _postOverageService: PostOverageService,
     private _entitlementService: EngageEntitlementService,
-    private _scanConfig?: EngageScanConfigService
+    private _scanConfig?: EngageScanConfigService,
+    // Optional (like _scanConfig) so existing tests that construct
+    // EngageService directly don't all need updating — production wiring via
+    // DatabaseModule always provides both. §6.1/§6 pacing checks no-op (never
+    // block a send) when either is absent, matching _scanConfig's own
+    // never-throws fallback posture elsewhere in this file.
+    private _operationPlanRepository?: OperationPlanRepository,
+    private _settingsService?: SettingsService
   ) { }
 
   // Auto-start global workflows on every app boot so pnpm dev / Docker restart
   // never leaves the system in a state where no workflow is running.
   async onApplicationBootstrap() {
+    await this._seedDefaultSettings();
     await this._ensureGlobalWorkflowsRunning();
+  }
+
+  // Seed engage Settings knobs that otherwise live only as code-level fallbacks
+  // and never surface in the admin Settings UI until someone sets them once.
+  // Insert-if-absent only — never overwrite an operator's configured value, and
+  // never let a settings failure block boot.
+  private async _seedDefaultSettings() {
+    if (!this._settingsService) return;
+    try {
+      const existing = await this._settingsService.get<number>(
+        ENGAGE_REPLY_ACCOUNT_DAILY_CAP_KEY
+      );
+      if (existing === null || existing === undefined) {
+        await this._settingsService.set(
+          ENGAGE_REPLY_ACCOUNT_DAILY_CAP_KEY,
+          DEFAULT_REPLY_ACCOUNT_DAILY_CAP,
+          {
+            type: 'number',
+            description:
+              'Max engage replies a single connected account may send per UTC day (0 = uncapped). Send-time pacing cap (§6.1).',
+            defaultValue: DEFAULT_REPLY_ACCOUNT_DAILY_CAP,
+          }
+        );
+      }
+    } catch (err) {
+      this.logger.error(
+        `Failed to seed default setting ${ENGAGE_REPLY_ACCOUNT_DAILY_CAP_KEY}:`,
+        err
+      );
+    }
   }
 
   // ─── Config ───────────────────────────────────────────────────────────────
 
-  async getConfig(org: Organization) {
+  async getConfig(org: Organization, projectId?: string | null) {
     const entitlement = await this._entitlementService.getEntitlementSummary(org.id);
     const scanIntervalHours = entitlement.limits.scanIntervalHours;
     const cadenceMs = scanIntervalHours * 3_600_000;
     const [config, scanStatus] = await Promise.all([
-      this._engageRepository.getOrCreateConfig(org.id),
+      this._engageRepository.getOrCreateConfig(org.id, projectId),
+      // getOrgScanStatus stays org-scoped (not yet project-aware) — a known,
+      // separately-flagged gap, not a regression introduced here.
       this._engageRepository.getOrgScanStatus(org.id, scanIntervalHours),
     ]);
 
@@ -234,13 +291,64 @@ export class EngageService implements OnApplicationBootstrap {
       // Per-org last/next scan timing (derived from EngageScanCursor). Overall +
       // per-type (keyword / channel / tracked). next is derived, never stored.
       scanStatus,
+      // Admin-configured operation-plan limits, surfaced here so a plan-creation
+      // UI can bound its date range / platform picker from the same call. Only
+      // the client-relevant knobs — `operation_plan.platform_cadence` is
+      // deliberately NOT exposed: it steers the generator's editorial strategy
+      // and no client has a use for it.
+      operationPlan: await this._getOperationPlanConfig(org.id),
     };
   }
 
+  /**
+   * Global operation-plan knobs a client needs to build a valid create request.
+   *
+   * `allowedPlatforms` is the RESOLVED, ready-to-use list — not the raw
+   * `operation_plan.allowed_platforms` setting. The setting's empty value means
+   * "no extra restriction" server-side, which is useless to a UI (it can't
+   * render a picker from `[]`). So we return what the server would actually
+   * accept: connected integrations ∩ allowlist (or just connected when the
+   * allowlist is empty) — exactly the two gates `_validateInput` applies. That
+   * keeps the picker and the validation in lockstep, and makes an empty array
+   * mean something true and useful: "no platform is available" (nothing
+   * connected, or the allowlist excludes everything connected).
+   */
+  private async _getOperationPlanConfig(organizationId: string): Promise<{
+    maxDurationDays: number;
+    allowedPlatforms: string[];
+  }> {
+    const fallback = { maxDurationDays: 30, allowedPlatforms: [] as string[] };
+    if (!this._settingsService) return fallback;
+    try {
+      const [maxDays, allowedRaw, connected] = await Promise.all([
+        this._settingsService.get<number>(OPERATION_PLAN_MAX_DURATION_DAYS_KEY),
+        this._settingsService.get(OPERATION_PLAN_ALLOWED_PLATFORMS_KEY),
+        this._operationPlanRepository?.getConnectedPlatforms(organizationId) ?? Promise.resolve([]),
+      ]);
+      const allowlist = Array.isArray(allowedRaw)
+        ? allowedRaw.filter((p): p is string => typeof p === 'string' && p.trim().length > 0)
+        : [];
+      const allowSet = new Set(allowlist);
+      return {
+        maxDurationDays: Number.isFinite(Number(maxDays)) ? Number(maxDays) : fallback.maxDurationDays,
+        allowedPlatforms: allowlist.length
+          ? connected.filter((p) => allowSet.has(p))
+          : connected,
+      };
+    } catch (err) {
+      // Config is decoration on this endpoint — never fail the whole Engage
+      // page because a Settings read hiccuped.
+      this.logger.error('Failed to read operation-plan settings for /engage/config:', err);
+      return fallback;
+    }
+  }
+
   async saveConfig(org: Organization, dto: SaveEngageConfigDto) {
-    const result = await this._engageRepository.saveConfig(org.id, {
-      ...(dto.enabled !== undefined && { enabled: dto.enabled }),
-    });
+    const result = await this._engageRepository.saveConfig(
+      org.id,
+      { ...(dto.enabled !== undefined && { enabled: dto.enabled }) },
+      dto.projectId
+    );
     if (dto.enabled) {
       await this._ensureGlobalWorkflowsRunning();
       this.triggerImmediateScan(org).catch((err) =>
@@ -251,7 +359,7 @@ export class EngageService implements OnApplicationBootstrap {
   }
 
   async setupEngage(org: Organization, dto: SetupEngageDto) {
-    const result = await this._engageRepository.setupEngage(org.id, dto);
+    const result = await this._engageRepository.setupEngage(org.id, dto, dto.projectId);
     await this._ensureGlobalWorkflowsRunning();
     this.triggerImmediateScan(org).catch((err) =>
       this.logger.warn(`Immediate scan trigger failed for org ${org.id}:`, err)
@@ -259,15 +367,15 @@ export class EngageService implements OnApplicationBootstrap {
     return result;
   }
 
-  async resetConfig(org: Organization) {
-    return this._engageRepository.resetConfig(org.id);
+  async resetConfig(org: Organization, projectId?: string | null) {
+    return this._engageRepository.resetConfig(org.id, projectId);
   }
 
   // ─── Keywords ─────────────────────────────────────────────────────────────
 
   async addKeyword(org: Organization, dto: AddKeywordDto) {
     await this._entitlementService.assertCanActivate(org.id, 'keyword', 1);
-    const config = await this._engageRepository.getOrCreateConfig(org.id);
+    const config = await this._engageRepository.getOrCreateConfig(org.id, dto.projectId);
     return this._engageRepository.addKeyword(config.id, org.id, dto);
   }
 
@@ -277,7 +385,7 @@ export class EngageService implements OnApplicationBootstrap {
       'keyword',
       dto.keywords.length
     );
-    const config = await this._engageRepository.getOrCreateConfig(org.id);
+    const config = await this._engageRepository.getOrCreateConfig(org.id, dto.projectId);
     return this._engageRepository.addKeywordsBulk(config.id, org.id, dto);
   }
 
@@ -298,13 +406,13 @@ export class EngageService implements OnApplicationBootstrap {
 
   // ─── Monitored Channels ───────────────────────────────────────────────────
 
-  async listMonitoredChannels(org: Organization) {
-    return this._engageRepository.listMonitoredChannels(org.id);
+  async listMonitoredChannels(org: Organization, projectId?: string | null) {
+    return this._engageRepository.listMonitoredChannels(org.id, projectId);
   }
 
   async addMonitoredChannel(org: Organization, dto: AddMonitoredChannelDto) {
     await this._entitlementService.assertCanActivate(org.id, 'subreddit', 1);
-    const config = await this._engageRepository.getOrCreateConfig(org.id);
+    const config = await this._engageRepository.getOrCreateConfig(org.id, dto.projectId);
     return this._engageRepository.addMonitoredChannel(
       config.id,
       org.id,
@@ -337,13 +445,13 @@ export class EngageService implements OnApplicationBootstrap {
 
   // ─── Tracked Accounts ─────────────────────────────────────────────────────
 
-  async listTrackedAccounts(org: Organization) {
-    return this._engageRepository.listTrackedAccounts(org.id);
+  async listTrackedAccounts(org: Organization, projectId?: string | null) {
+    return this._engageRepository.listTrackedAccounts(org.id, projectId);
   }
 
   async addTrackedAccount(org: Organization, dto: AddTrackedAccountDto) {
     await this._entitlementService.assertCanActivate(org.id, 'tracked', 1);
-    const config = await this._engageRepository.getOrCreateConfig(org.id);
+    const config = await this._engageRepository.getOrCreateConfig(org.id, dto.projectId);
     return this._engageRepository.addTrackedAccount(config.id, org.id, dto);
   }
 
@@ -364,8 +472,8 @@ export class EngageService implements OnApplicationBootstrap {
 
   // ─── Reply Accounts ───────────────────────────────────────────────────────
 
-  async listReplyAccounts(org: Organization) {
-    return this._engageRepository.listXIntegrationsWithReplySettings(org.id);
+  async listReplyAccounts(org: Organization, projectId?: string | null) {
+    return this._engageRepository.listXIntegrationsWithReplySettings(org.id, projectId);
   }
 
   async updateReplyAccountSettings(
@@ -376,7 +484,8 @@ export class EngageService implements OnApplicationBootstrap {
     return this._engageRepository.updateReplyAccount(
       org.id,
       integrationId,
-      dto
+      dto,
+      dto.projectId
     );
   }
 
@@ -386,32 +495,32 @@ export class EngageService implements OnApplicationBootstrap {
     return this._engageRepository.listOpportunities(org.id, dto);
   }
 
-  async dismissOpportunity(org: Organization, id: string) {
-    return this._engageRepository.dismissOpportunity(org.id, id);
+  async dismissOpportunity(org: Organization, id: string, projectId?: string | null) {
+    return this._engageRepository.dismissOpportunity(org.id, id, projectId);
   }
 
-  async toggleBookmark(org: Organization, id: string) {
-    return this._engageRepository.toggleBookmark(org.id, id);
+  async toggleBookmark(org: Organization, id: string, projectId?: string | null) {
+    return this._engageRepository.toggleBookmark(org.id, id, projectId);
   }
 
   async getScoreStats(org: Organization, dto: ScoreStatsDto) {
-    return this._engageRepository.getScoreStats(org.id, dto.date, dto.platform);
+    return this._engageRepository.getScoreStats(org.id, dto.date, dto.platform, dto.projectId);
   }
 
   async getOpportunityCounts(org: Organization, dto: OpportunityCountsDto) {
     return this._engageRepository.getOpportunityCounts(org.id, dto);
   }
 
-  async getOpportunityById(org: Organization, id: string) {
-    return this._engageRepository.getOpportunityById(org.id, id);
+  async getOpportunityById(org: Organization, id: string, projectId?: string | null) {
+    return this._engageRepository.getOpportunityById(org.id, id, projectId);
   }
 
-  async getOpportunityDetail(org: Organization, id: string) {
-    return this._engageRepository.getOpportunityDetail(org.id, id);
+  async getOpportunityDetail(org: Organization, id: string, projectId?: string | null) {
+    return this._engageRepository.getOpportunityDetail(org.id, id, projectId);
   }
 
-  async getOpportunityForReply(org: Organization, id: string) {
-    return this._engageRepository.getOpportunityForReply(org.id, id);
+  async getOpportunityForReply(org: Organization, id: string, projectId?: string | null) {
+    return this._engageRepository.getOpportunityForReply(org.id, id, projectId);
   }
 
   // Persist an unpublished working draft (AI-generated, edited, or hand-typed) for
@@ -425,7 +534,8 @@ export class EngageService implements OnApplicationBootstrap {
     // expired/replied/scheduled/dismissed opportunity. Throws Forbidden otherwise.
     const opportunity = await this._engageRepository.getOpportunityForReply(
       org.id,
-      opportunityId
+      opportunityId,
+      dto.projectId
     );
     const saved = await this._engageRepository.upsertDraft(org.id, opportunityId, {
       platform: opportunity.platform,
@@ -435,7 +545,7 @@ export class EngageService implements OnApplicationBootstrap {
         brandStrength: dto.brandStrength,
         mentions: dto.mentions,
       },
-    });
+    }, dto.projectId);
 
     // Also record this save as a 'manual' version in generationHistory so the
     // version history is complete (AI + hand-typed/edited), each tagged by source.
@@ -449,7 +559,7 @@ export class EngageService implements OnApplicationBootstrap {
         brandStrength: dto.brandStrength,
         ...(dto.mentions?.length ? { mentions: dto.mentions } : {}),
         createdAt: new Date().toISOString(),
-      })
+      }, dto.projectId)
       .catch(() => undefined);
 
     return saved;
@@ -462,12 +572,14 @@ export class EngageService implements OnApplicationBootstrap {
   async recordGeneration(
     org: Organization,
     opportunityId: string,
-    entry: GenerationHistoryEntry
+    entry: GenerationHistoryEntry,
+    projectId?: string
   ): Promise<void> {
     await this._engageRepository.appendGenerationHistory(
       org.id,
       opportunityId,
-      entry
+      entry,
+      projectId
     );
   }
 
@@ -577,35 +689,37 @@ export class EngageService implements OnApplicationBootstrap {
 
   async getDashboardSummary(
     org: Organization,
-    opts: { platform?: string; date?: string } = {}
+    opts: { projectId?: string; platform?: string; date?: string } = {}
   ) {
     return this._engageRepository.getDashboardSummary(org.id, opts);
   }
 
   async getDashboardRepliesTrend(
     org: Organization,
-    period?: 'daily' | 'weekly' | 'monthly'
+    period?: 'daily' | 'weekly' | 'monthly',
+    projectId?: string
   ) {
-    return this._engageRepository.getDashboardRepliesTrend(org.id, period);
+    return this._engageRepository.getDashboardRepliesTrend(org.id, period, projectId);
   }
 
   async getDashboardTraffics(
     org: Organization,
-    opts: { platform?: string; limit?: number }
+    opts: { projectId?: string; platform?: string; limit?: number }
   ) {
     return this._engageRepository.getDashboardTraffics(org.id, opts);
   }
 
   async getDashboardImpressions(
     org: Organization,
-    period: 'daily' | 'weekly' | 'monthly' = 'daily'
+    period: 'daily' | 'weekly' | 'monthly' = 'daily',
+    projectId?: string
   ) {
-    return this._engageRepository.getDashboardImpressions(org.id, period);
+    return this._engageRepository.getDashboardImpressions(org.id, period, projectId);
   }
 
   async getDashboardTopSources(
     org: Organization,
-    opts: { platform?: string; limit?: number }
+    opts: { projectId?: string; platform?: string; limit?: number }
   ) {
     return this._engageRepository.getDashboardTopSources(org.id, opts);
   }
@@ -994,6 +1108,235 @@ export class EngageService implements OnApplicationBootstrap {
     }
   }
 
+  // ─── Reply pacing gate (§6/§6.1) ───────────────────────────────────────────
+  //
+  // Independent of, and additional to, EngageEntitlementService's monthly
+  // reply-GENERATION credit cap (§6.2) — that gate runs at draft-generation
+  // time and governs LLM-cost admission; this one runs at SEND time and
+  // governs pacing. A reply passes both, and neither substitutes for the
+  // other. Called from inside each send/schedule flow's existing claim→
+  // publish try/catch, right before the platform-side publish call, so a
+  // blocked send hits the SAME rollback path (release the claim) as any
+  // other pre-publish failure — never a change to that error-handling shape.
+
+  /**
+   * Throws ForbiddenException if the request would exceed any of: the project's
+   * active-plan daily reply TARGET (`targetRepliesPerDay`), a per-keyword target
+   * (`keywordTargets[keyword]`) for any keyword this reply matched, an optional
+   * extra safety cap (`dailyHardCap`/`hardCapRepliesPerDay`, tighter of the two
+   * wins), or an account's per-account daily cap. No-ops (never blocks) if
+   * OperationPlanRepository/SettingsService weren't wired in (test
+   * construction) — see the constructor note.
+   *
+   * `matchedKeywords` is the claimed opportunity's send-time keyword snapshot;
+   * every request in a call targets the same opportunity, so one array covers
+   * the whole batch.
+   */
+  private async _assertReplyPacing(
+    organizationId: string,
+    projectId: string | null | undefined,
+    platform: string,
+    matchedKeywords: string[],
+    requests: Array<{ integrationId: string; at: Date }>
+  ): Promise<void> {
+    const projectGroups = new Map<string, { start: Date; end: Date; count: number }>();
+    const accountGroups = new Map<
+      string,
+      { integrationId: string; start: Date; end: Date; count: number }
+    >();
+    for (const request of requests) {
+      const start = dayjs.utc(request.at).startOf('day');
+      const end = start.add(1, 'day');
+      const dayKey = start.toISOString();
+      const projectGroup = projectGroups.get(dayKey);
+      if (projectGroup) projectGroup.count += 1;
+      else projectGroups.set(dayKey, { start: start.toDate(), end: end.toDate(), count: 1 });
+
+      const accountKey = `${request.integrationId}:${dayKey}`;
+      const accountGroup = accountGroups.get(accountKey);
+      if (accountGroup) accountGroup.count += 1;
+      else {
+        accountGroups.set(accountKey, {
+          integrationId: request.integrationId,
+          start: start.toDate(),
+          end: end.toDate(),
+          count: 1,
+        });
+      }
+    }
+    await Promise.all([
+      ...Array.from(projectGroups.values()).map((group) =>
+        this._assertProjectDailyTarget(
+          organizationId,
+          projectId,
+          platform,
+          matchedKeywords,
+          group.start,
+          group.end,
+          group.count
+        )
+      ),
+      ...Array.from(accountGroups.values()).map((group) =>
+        this._assertAccountDailyCap(
+          group.integrationId,
+          group.start,
+          group.end,
+          group.count
+        )
+      ),
+    ]);
+  }
+
+  private async _assertProjectDailyTarget(
+    organizationId: string,
+    projectId: string | null | undefined,
+    platform: string,
+    matchedKeywords: string[],
+    dayStart: Date,
+    dayEnd: Date,
+    requested: number
+  ): Promise<void> {
+    // No project context → no plan can exist for it → no target to enforce
+    // (§3.4: "a project with no active plan has no daily target").
+    if (!projectId || !this._operationPlanRepository) return;
+
+    const plan = await this._operationPlanRepository.getActivePlan(
+      organizationId,
+      projectId,
+      dayStart
+    );
+    if (!plan) return;
+
+    const policies = (plan.planPayload as { engagePolicies?: Array<{
+      platform: string;
+      enabled: boolean;
+      targetRepliesPerDay?: number;
+      // Per-day overrides of targetRepliesPerDay, keyed by UTC "YYYY-MM-DD"
+      // (operation-plan generation emits these so a plan can pace weekdays and
+      // weekends differently). Absent/unmatched dates fall back to the default.
+      dailyTargets?: Array<{ date: string; target: number }>;
+      keywordTargets?: Record<string, number>;
+      // Optional extra safety ceiling — NOT emitted by operation-plan generation
+      // (§3.4: "the operation-plan API does not generate or return a dailyHardCap"),
+      // but honored as a tighter override if a plan carries one.
+      dailyHardCap?: number;
+      hardCapRepliesPerDay?: number;
+    }> } | null)?.engagePolicies;
+    const policy = policies?.find((p) => p?.platform === platform && p?.enabled);
+    if (!policy) return;
+
+    // This day's target: a `dailyTargets` entry for the exact UTC date wins,
+    // else the policy default. A 0 override is meaningful ("send nothing this
+    // day"), so check for presence, not truthiness.
+    const dayKey = dayjs.utc(dayStart).format('YYYY-MM-DD');
+    const override = policy.dailyTargets?.find((d) => d?.date === dayKey);
+    const dailyTarget =
+      override && typeof override.target === 'number'
+        ? override.target
+        : policy.targetRepliesPerDay;
+
+    // Aggregate daily ceiling: the day's target is the primary cap; an optional
+    // dailyHardCap tightens it further. Enforce the tighter of whichever exist.
+    // A target of exactly 0 means "no replies today" — enforce it rather than
+    // letting the `> 0` filter drop it into "uncapped".
+    if (dailyTarget === 0) {
+      throw new ForbiddenException({
+        code: 'engage_daily_hard_cap_reached',
+        message: `This project's plan sets a 0 reply target for ${platform} on ${dayKey}.`,
+        hardCap: 0,
+        sentToday: 0,
+        requested,
+      });
+    }
+    const caps = [
+      dailyTarget,
+      policy.dailyHardCap ?? policy.hardCapRepliesPerDay,
+    ].filter((c): c is number => typeof c === 'number' && c > 0);
+    const effectiveCap = caps.length ? Math.min(...caps) : undefined;
+
+    // Per-keyword sub-targets that apply to THIS reply (only keywords it matched).
+    const keywordTargets = policy.keywordTargets ?? {};
+    const applicableKeywords = matchedKeywords.filter(
+      (k) => typeof keywordTargets[k] === 'number' && keywordTargets[k] > 0
+    );
+
+    if (effectiveCap === undefined && applicableKeywords.length === 0) return;
+
+    await Promise.all([
+      // Aggregate target/hard-cap check.
+      (async () => {
+        if (effectiveCap === undefined) return;
+        const sentToday = await this._engageRepository.countProjectSentRepliesToday(
+          organizationId,
+          projectId,
+          platform,
+          dayStart,
+          dayEnd
+        );
+        if (sentToday + requested > effectiveCap) {
+          throw new ForbiddenException({
+            code: 'engage_daily_hard_cap_reached',
+            message: `This project would exceed its daily reply target for ${platform} (${effectiveCap}).`,
+            hardCap: effectiveCap,
+            sentToday,
+            requested,
+          });
+        }
+      })(),
+      // Per-keyword target checks — one live count per applicable keyword.
+      ...applicableKeywords.map(async (keyword) => {
+        const target = keywordTargets[keyword];
+        const sentToday =
+          await this._engageRepository.countProjectKeywordSentRepliesToday(
+            organizationId,
+            projectId,
+            platform,
+            keyword,
+            dayStart,
+            dayEnd
+          );
+        if (sentToday + requested > target) {
+          throw new ForbiddenException({
+            code: 'engage_daily_keyword_target_reached',
+            message: `This project would exceed its daily reply target for keyword "${keyword}" on ${platform} (${target}).`,
+            keyword,
+            target,
+            sentToday,
+            requested,
+          });
+        }
+      }),
+    ]);
+  }
+
+  private async _assertAccountDailyCap(
+    integrationId: string,
+    dayStart: Date,
+    dayEnd: Date,
+    requested: number
+  ): Promise<void> {
+    if (!this._settingsService) return;
+    const cap =
+      (await this._settingsService.get<number>(ENGAGE_REPLY_ACCOUNT_DAILY_CAP_KEY)) ??
+      DEFAULT_REPLY_ACCOUNT_DAILY_CAP;
+    if (!cap || cap <= 0) return; // 0/unset = uncapped
+
+    const sentToday = await this._engageRepository.countAccountSentRepliesToday(
+      integrationId,
+      dayStart,
+      dayEnd
+    );
+    if (sentToday + requested > cap) {
+      throw new ForbiddenException({
+        code: 'engage_account_daily_cap_reached',
+        message: `This account has reached its daily reply cap (${cap}).`,
+        cap,
+        sentToday,
+        requested,
+      });
+    }
+  }
+
   // ─── Reply transactional flows ────────────────────────────────────────────
   //
   // These three methods own the multi-step claim → publish → sentReply → sync
@@ -1013,18 +1356,29 @@ export class EngageService implements OnApplicationBootstrap {
       await this._engageRepository.claimOpportunityForReply(
         org.id,
         opportunityId,
-        'REPLIED'
+        'REPLIED',
+        body.projectId
       );
 
     // Phase 1 — invoke the post pipeline. type='now' BLOCKS until X publish
     // completes; a failure means the reply never reached X. Full rollback safe.
     let postId: string | undefined;
     try {
+      // §6/§6.1 pacing gate — a blocked send hits this same catch/rollback.
+      await this._assertReplyPacing(
+        org.id,
+        body.projectId,
+        opportunity.platform,
+        opportunity.matchedKeywords ?? [],
+        [{ integrationId: body.integrationId, at: new Date() }]
+      );
+
       const created = await this._postsService.createPost(
         org.id,
         {
           type: 'now',
           source: 'engage',
+          projectId: body.projectId,
           tags: [],
           shortLink: false,
           date: new Date().toISOString(),
@@ -1053,7 +1407,8 @@ export class EngageService implements OnApplicationBootstrap {
       await this._engageRepository.releaseOpportunityClaim(
         org.id,
         opportunityId,
-        priorStatus
+        priorStatus,
+        body.projectId
       );
       throw err;
     }
@@ -1062,9 +1417,11 @@ export class EngageService implements OnApplicationBootstrap {
     try {
       const sentReply = await this._engageRepository.createSentReply({
         organizationId: org.id,
+        projectId: body.projectId,
         opportunityId,
         postId,
         inputData: { strategy: body.strategy, brandStrength: body.brandStrength, mentions: body.mentions },
+        matchedKeywords: opportunity.matchedKeywords,
       });
       return sentReply;
     } catch (err) {
@@ -1094,7 +1451,11 @@ export class EngageService implements OnApplicationBootstrap {
         throw new BadRequestException('Scheduled post is no longer pending — cannot cancel');
       }
       await this._engageRepository.deletePostById(existing.postId);
-      await this._engageRepository.resetScheduledOpportunity(org.id, opportunityId);
+      await this._engageRepository.resetScheduledOpportunity(
+        org.id,
+        opportunityId,
+        body.projectId
+      );
     }
     return this.sendReply(org, userId, opportunityId, body);
   }
@@ -1113,17 +1474,27 @@ export class EngageService implements OnApplicationBootstrap {
       await this._engageRepository.claimOpportunityForReply(
         org.id,
         opportunityId,
-        'SCHEDULED'
+        'SCHEDULED',
+        body.projectId
       );
 
     // Scheduled posts publish at a future time — full rollback on failure is safe.
     let postId: string | undefined;
     try {
+      await this._assertReplyPacing(
+        org.id,
+        body.projectId,
+        opportunity.platform,
+        opportunity.matchedKeywords ?? [],
+        [{ integrationId: body.integrationId, at: new Date(body.scheduledAt) }]
+      );
+
       const created = await this._postsService.createPost(
         org.id,
         {
           type: 'schedule',
           source: 'engage',
+          projectId: body.projectId,
           tags: [],
           shortLink: false,
           date: body.scheduledAt,
@@ -1149,9 +1520,11 @@ export class EngageService implements OnApplicationBootstrap {
 
       return await this._engageRepository.createSentReply({
         organizationId: org.id,
+        projectId: body.projectId,
         opportunityId,
         postId,
         inputData: { strategy: body.strategy, brandStrength: body.brandStrength, mentions: body.mentions },
+        matchedKeywords: opportunity.matchedKeywords,
       });
       // metrics sync is started after the scheduled post actually publishes
       // (the post workflow triggers it via engage-metrics-sync-on-publish).
@@ -1160,7 +1533,8 @@ export class EngageService implements OnApplicationBootstrap {
       await this._engageRepository.releaseOpportunityClaim(
         org.id,
         opportunityId,
-        priorStatus
+        priorStatus,
+        body.projectId
       );
       throw err;
     }
@@ -1182,17 +1556,30 @@ export class EngageService implements OnApplicationBootstrap {
       await this._engageRepository.claimOpportunityForReply(
         org.id,
         opportunityId,
-        'SCHEDULED'
+        'SCHEDULED',
+        body.projectId
       );
 
     const createdPostIds: string[] = [];
     try {
+      await this._assertReplyPacing(
+        org.id,
+        body.projectId,
+        opportunity.platform,
+        opportunity.matchedKeywords ?? [],
+        body.items.map((item) => ({
+          integrationId: item.integrationId,
+          at: new Date(item.scheduledAt),
+        }))
+      );
+
       for (const item of body.items) {
         const created = await this._postsService.createPost(
           org.id,
           {
             type: 'schedule',
             source: 'engage',
+            projectId: body.projectId,
             tags: [],
             shortLink: false,
             date: item.scheduledAt,
@@ -1221,7 +1608,12 @@ export class EngageService implements OnApplicationBootstrap {
       for (const postId of createdPostIds) {
         await this._engageRepository.deletePostById(postId);
       }
-      await this._engageRepository.releaseOpportunityClaim(org.id, opportunityId, priorStatus);
+      await this._engageRepository.releaseOpportunityClaim(
+        org.id,
+        opportunityId,
+        priorStatus,
+        body.projectId
+      );
       throw err;
     }
 
@@ -1232,9 +1624,11 @@ export class EngageService implements OnApplicationBootstrap {
       body.items.map((item, i) =>
         this._engageRepository.createSentReply({
           organizationId: org.id,
+          projectId: body.projectId,
           opportunityId,
           postId: createdPostIds[i],
           inputData: { strategy: item.strategy, brandStrength: item.brandStrength, mentions: item.mentions },
+          matchedKeywords: opportunity.matchedKeywords,
         })
       )
     );
@@ -1263,18 +1657,28 @@ export class EngageService implements OnApplicationBootstrap {
       await this._engageRepository.claimOpportunityForReply(
         org.id,
         opportunityId,
-        'REPLIED'
+        'REPLIED',
+        body.projectId
       );
 
     const now = new Date().toISOString();
     const createdPostIds: string[] = [];
     try {
+      await this._assertReplyPacing(
+        org.id,
+        body.projectId,
+        opportunity.platform,
+        opportunity.matchedKeywords ?? [],
+        body.items.map((item) => ({ integrationId: item.integrationId, at: new Date() }))
+      );
+
       for (const item of body.items) {
         const created = await this._postsService.createPost(
           org.id,
           {
             type: 'now',
             source: 'engage',
+            projectId: body.projectId,
             tags: [],
             shortLink: false,
             date: now,
@@ -1303,7 +1707,12 @@ export class EngageService implements OnApplicationBootstrap {
       for (const postId of createdPostIds) {
         await this._engageRepository.deletePostById(postId);
       }
-      await this._engageRepository.releaseOpportunityClaim(org.id, opportunityId, priorStatus);
+      await this._engageRepository.releaseOpportunityClaim(
+        org.id,
+        opportunityId,
+        priorStatus,
+        body.projectId
+      );
       throw err;
     }
 
@@ -1315,9 +1724,11 @@ export class EngageService implements OnApplicationBootstrap {
         this._engageRepository
           .createSentReply({
             organizationId: org.id,
+            projectId: body.projectId,
             opportunityId,
             postId: createdPostIds[i],
             inputData: { strategy: item.strategy, brandStrength: item.brandStrength, mentions: item.mentions },
+            matchedKeywords: opportunity.matchedKeywords,
           })
           .then(async (sentReply) => sentReply)
       )
@@ -1348,11 +1759,17 @@ export class EngageService implements OnApplicationBootstrap {
     opportunityId: string,
     body: ConfirmManualReplyDto
   ) {
+    // No _assertReplyPacing gate here (unlike sendReply/scheduleReply/batch*):
+    // the reply was already sent manually, outside Postiz, before this call —
+    // blocking the CONFIRMATION doesn't undo an already-sent reply, it only
+    // loses the tracking record. This call still counts toward future pacing
+    // checks via the recorded EngageSentReply below.
     const { opp, priorStatus } =
       await this._engageRepository.claimOpportunityForReply(
         org.id,
         opportunityId,
-        'REPLIED'
+        'REPLIED',
+        body.projectId
       );
 
     // The reply URL is optional for both platforms now ("I've posted it — I'll
@@ -1384,19 +1801,22 @@ export class EngageService implements OnApplicationBootstrap {
               date: new Date(),
               replyUrl: body.replyUrl,
               integrationId: body.integrationId,
+              projectId: body.projectId,
             })
           : await this._engageRepository.createManualRedditPost({
               organizationId: org.id,
               content: body.draftContent,
               date: new Date(),
               replyUrl: body.replyUrl,
+              projectId: body.projectId,
             });
       postId = post.id;
     } catch (err) {
       await this._engageRepository.releaseOpportunityClaim(
         org.id,
         opportunityId,
-        priorStatus
+        priorStatus,
+        body.projectId
       );
       throw err;
     }
@@ -1422,9 +1842,11 @@ export class EngageService implements OnApplicationBootstrap {
     try {
       const sentReply = await this._engageRepository.createSentReply({
         organizationId: org.id,
+        projectId: body.projectId,
         opportunityId,
         postId,
         inputData: { strategy: body.strategy, brandStrength: body.brandStrength },
+        matchedKeywords: opp.matchedKeywords,
       });
       // Now that the reply row exists, resolve + persist its author out of band.
       // Only when a URL was supplied — without one there's nothing to look up.

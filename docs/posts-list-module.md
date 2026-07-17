@@ -15,6 +15,7 @@ Features:
 - Filter posts by channel/platform type (X, Reddit, LinkedIn, Instagram, etc.)
 - Filter posts by specific integration account IDs
 - Filter posts by source post (get all sends of a specific recurring post)
+- Filter by Aisee project and operation plan for campaign views
 - Sort results by publish date, creation date, update date, or status
 
 This is the primary endpoint for building post management UIs such as list views, tables, and dashboards.
@@ -43,6 +44,8 @@ Requires organization-level authentication. The `organizationId` is extracted fr
 | `integrationId` | string[] | No | — (all integrations) | Array of strings; supports comma-separated | Filter by specific integration account IDs |
 | `channel` | string[] | No | — (all channels) | Array of valid provider identifiers; max 30 items | Filter by platform/channel type |
 | `source` | string[] | No | — (all sources) | Subset of `calendar`, `chat`, `engage`; single or comma-separated | Filter by `Post.source` attribution |
+| `projectId` | string | No | — (all projects and legacy posts) | Opaque Aisee product id | Filter to posts attributed to one Aisee project |
+| `operationPlanId` | string | No | — (all plans) | Valid `OperationPlan.id` | Filter to posts generated under one operation plan |
 | `view` | string | No | `timeline` | One of: `templates`, `timeline` | View mode (see below) |
 | `sourcePostId` | string | No | — | Valid post ID | Filter to show only clones of a specific post |
 | `sortBy` | string | No | `publishDate` | One of: `publishDate`, `createdAt`, `updatedAt`, `state` | Field to sort results by |
@@ -231,6 +234,14 @@ GET /posts/list?source=calendar,chat    → standard posts only (exclude Engage)
 GET /posts/list                         → all sources (no restriction)
 ```
 
+### Filter by Aisee project or operation plan
+
+```
+GET /posts/list?projectId=product_123
+GET /posts/list?operationPlanId=plan_123
+GET /posts/list?projectId=product_123&operationPlanId=plan_123&source=engage
+```
+
 ### Combined filters with pagination and sorting
 
 ```
@@ -246,6 +257,7 @@ GET /posts/list?state=PUBLISHED&channel=x,instagram&page=2&pageSize=50&sortBy=cr
 - Omitting a filter means **no restriction** on that dimension (returns all).
 - Deleted posts (`deletedAt` is not null) and child/comment posts (`parentPostId` is not null) are always excluded.
 - If `sourcePostId` is provided, it takes precedence over `view=templates`.
+- `projectId` and `operationPlanId` are regular AND filters. `projectId` is also useful for project-scoped manual posts that do not have an `operationPlanId`.
 
 **Example**: `?state=PUBLISHED&channel=x,reddit` returns posts that are PUBLISHED **AND** belong to either X or Reddit (including clones of recurring posts).
 
@@ -283,6 +295,8 @@ const where = {
   ...(query.sourcePostId ? { sourcePostId: query.sourcePostId } : {}),
   ...(query.state ? { state: query.state } : {}),
   ...(query.source?.length ? { source: { in: query.source } } : {}),
+  ...(query.projectId ? { projectId: query.projectId } : {}),
+  ...(query.operationPlanId ? { operationPlanId: query.operationPlanId } : {}),
   ...(query.integrationId?.length
     ? { integrationId: { in: query.integrationId } }
     : {}),
@@ -293,7 +307,7 @@ const where = {
 ```
 
 > The sibling `locatePostInList` (`GET /posts/list/locate`) mirrors this exact
-> `where` — including the `source` filter — so a located page index stays
+> `where` — including `source`, `projectId`, and `operationPlanId` — so a located page index stays
 > consistent with the same filters applied to `/posts/list`.
 
 ### Validation

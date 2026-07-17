@@ -4,6 +4,7 @@ import { ApiModule } from '@gitroom/backend/api/api.module';
 import { APP_GUARD } from '@nestjs/core';
 import { PoliciesGuard } from '@gitroom/backend/services/auth/permissions/permissions.guard';
 import { SuperAdminGuard } from '@gitroom/backend/services/auth/admin/super-admin.guard';
+import { ProjectAuthGuard } from '@gitroom/backend/services/auth/projects/project-auth.guard';
 import { PublicApiModule } from '@gitroom/backend/public-api/public.api.module';
 import { AdminApiModule } from '@gitroom/backend/admin-api/admin.api.module';
 import { ThrottlerBehindProxyGuard } from '@gitroom/nestjs-libraries/throttler/throttler.provider';
@@ -18,6 +19,7 @@ import { getTemporalModule } from '@gitroom/nestjs-libraries/temporal/temporal.m
 import { TemporalRegisterMissingSearchAttributesModule } from '@gitroom/nestjs-libraries/temporal/temporal.register';
 import { InfiniteWorkflowRegisterModule } from '@gitroom/nestjs-libraries/temporal/infinite.workflow.register';
 import { EngageModule } from '@gitroom/backend/engage/engage.module';
+import { OperationPlanModule } from '@gitroom/backend/operation-plan/operation-plan.module';
 
 @Global()
 @Module({
@@ -26,6 +28,7 @@ import { EngageModule } from '@gitroom/backend/engage/engage.module';
     DatabaseModule,
     ApiModule,
     EngageModule,
+    OperationPlanModule,
     PublicApiModule,
     AdminApiModule,
     AgentModule,
@@ -56,6 +59,10 @@ import { EngageModule } from '@gitroom/backend/engage/engage.module';
     {
       provide: APP_GUARD,
       useClass: SuperAdminGuard,
+    },
+    {
+      provide: APP_GUARD,
+      useClass: ProjectAuthGuard,
     },
   ],
   exports: [

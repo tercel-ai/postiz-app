@@ -28,6 +28,7 @@ Content-Type: application/json
   "date": "2026-03-30T14:00:00",     // ISO datetime (UTC); ignored for type=now
   "shortLink": false,                  // convert URLs to tracked short links
   "inter": 7,                          // (optional) recurring interval in days
+  "projectId": "product_123",          // (optional) Aisee project scope
   "source": "calendar",               // (optional) "calendar" | "chat" | "engage" (default "calendar")
   "order": "...",                      // (optional) unused — accepted by DTO but not read by service
   "tags": [],                          // array of tag objects
@@ -42,6 +43,10 @@ Content-Type: application/json
 | `now` | Posts immediately. Request blocks until all accounts succeed or fail (up to 60s). Errors returned as HTTP 400. |
 | `schedule` | Saved to DB and handed to Temporal. Request returns immediately. Errors saved to DB only. |
 | `draft` | Saved to DB, no workflow started. `posts` array is optional. |
+
+### Project attribution
+
+`projectId` is optional and stores the opaque Aisee product id on every created `Post`. Omit it for legacy non-project posts. Operation-plan materialization also writes `operationPlanId` server-side; regular `POST /posts` callers do not supply that field.
 
 ### `Post` object
 

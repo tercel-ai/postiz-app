@@ -33,6 +33,20 @@ export class GetPostsDto {
   @IsString()
   customer?: string;
 
+  // Opaque aisee-core products.id. Omitting it returns every post the caller
+  // can already see (legacy, non-project behavior preserved during migration
+  // — project-scoped-post-engage-design.md §8/§11).
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  projectId?: string;
+
+  // Filter to only the posts generated under one OperationPlan.
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  operationPlanId?: string;
+
   @ApiPropertyOptional({ enum: State })
   @IsOptional()
   @IsEnum(State)

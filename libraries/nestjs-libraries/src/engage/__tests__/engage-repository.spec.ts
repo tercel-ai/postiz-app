@@ -377,13 +377,14 @@ describe('EngageRepository — two-table reads', () => {
       ]);
     });
 
-    it('scopes the query to the org via the state table', async () => {
+    it('scopes the query to the org and project via the state table', async () => {
       const { repo, stateFindMany, stateCount } = buildRepo();
       stateFindMany.mockResolvedValue([]);
       stateCount.mockResolvedValue(0);
 
-      await repo.listOpportunities('org1', {} as any);
+      await repo.listOpportunities('org1', { projectId: 'project-1' } as any);
       expect(stateFindMany.mock.calls[0][0].where.organizationId).toBe('org1');
+      expect(stateFindMany.mock.calls[0][0].where.projectId).toBe('project-1');
       expect(stateFindMany.mock.calls[0][0].where.opportunity.deletedAt).toBeNull();
     });
 
@@ -431,8 +432,8 @@ describe('EngageRepository — two-table reads', () => {
 
   describe('getOpportunityById', () => {
     it('returns the same flat item shape as listOpportunities, including latest non-draft reply fields', async () => {
-      const { repo, stateFindUnique, sentFindFirst } = buildRepo();
-      stateFindUnique.mockResolvedValue(STATE_ROW);
+      const { repo, stateFindFirst, sentFindFirst } = buildRepo();
+      stateFindFirst.mockResolvedValue(STATE_ROW);
       sentFindFirst.mockResolvedValue({
         id: 'reply-new',
         post: { releaseURL: 'https://x.com/a/status/1' },
@@ -458,8 +459,8 @@ describe('EngageRepository — two-table reads', () => {
     });
 
     it('attaches a reddit channel avatar using the same field name as listOpportunities', async () => {
-      const { repo, stateFindUnique, sentFindFirst, channelFindFirst } = buildRepo();
-      stateFindUnique.mockResolvedValue({
+      const { repo, stateFindFirst, sentFindFirst, channelFindFirst } = buildRepo();
+      stateFindFirst.mockResolvedValue({
         ...STATE_ROW,
         opportunity: {
           ...STATE_ROW.opportunity,
@@ -525,6 +526,7 @@ describe('EngageRepository — two-table reads', () => {
       // The state join is scoped to the org and the page's opportunity ids.
       expect(stateFindMany.mock.calls[0][0].where).toEqual({
         organizationId: 'org1',
+        projectId: null,
         opportunityId: { in: ['o1', 'o2'] },
       });
     });
@@ -666,7 +668,7 @@ describe('EngageRepository — two-table reads', () => {
 
   describe('getSentReplyItemById', () => {
     it('returns the same decorated item shape as listSentReplies', async () => {
-      const { repo, sentFindFirst, stateFindUnique } = buildRepo();
+      const { repo, sentFindFirst, stateFindFirst } = buildRepo();
       sentFindFirst.mockResolvedValue({
         id: 'sent1',
         organizationId: 'org1',
@@ -705,7 +707,7 @@ describe('EngageRepository — two-table reads', () => {
           postPublishedAt: new Date('2026-07-01T00:30:00.000Z'),
         },
       });
-      stateFindUnique.mockResolvedValue({
+      stateFindFirst.mockResolvedValue({
         matchedKeywords: ['react'],
         status: 'REPLIED',
         generationHistory: [
@@ -738,22 +740,21 @@ describe('EngageRepository — two-table reads', () => {
         id: 'sent1',
         organizationId: 'org1',
       });
-      expect(stateFindUnique.mock.calls[0][0].where).toEqual({
-        organizationId_opportunityId: {
-          organizationId: 'org1',
-          opportunityId: 'opp1',
-        },
+      expect(stateFindFirst.mock.calls[0][0].where).toEqual({
+        organizationId: 'org1',
+        projectId: null,
+        opportunityId: 'opp1',
       });
     });
 
     it('falls back to empty opportunity decorations when the org state row is missing', async () => {
-      const { repo, sentFindFirst, stateFindUnique } = buildRepo();
+      const { repo, sentFindFirst, stateFindFirst } = buildRepo();
       sentFindFirst.mockResolvedValue({
         id: 'sent1',
         opportunity: { id: 'opp1', platform: 'reddit' },
         post: { analytics: [], impressions: 0, trafficScore: 0, integration: null, settings: null },
       });
-      stateFindUnique.mockResolvedValue(null);
+      stateFindFirst.mockResolvedValue(null);
 
       const item = (await repo.getSentReplyItemById('org1', 'sent1')) as any;
 
@@ -1130,6 +1131,75 @@ describe('EngageRepository — two-table reads', () => {
     });
   });
 
+  // Every dashboard panel accepts an optional projectId. When supplied it filters
+  // on Post.projectId (folded into the related `post.is` for EngageSentReply
+  // queries, or the top-level where for direct Post queries). When omitted, no
+  // projectId key is added at all — preserving the legacy org-wide behavior
+  // asserted by the toEqual() checks above.
+  describe('dashboard projectId scoping', () => {
+    it('summary: threads projectId into the sent-reply post filter and the post aggregates', async () => {
+      const { repo, sentCount, sentFindMany, postAggregate } = buildRepo();
+      sentCount.mockResolvedValue(0);
+      postAggregate.mockResolvedValue({ _sum: { impressions: 0, trafficScore: 0 } });
+      sentFindMany.mockResolvedValue([]);
+
+      await repo.getDashboardSummary('org1', { projectId: 'proj-1' });
+
+      // Sent-reply counts scope via the related Post.projectId.
+      expect(sentCount.mock.calls[2][0].where.post.is.projectId).toBe('proj-1');
+      // Both direct Post aggregates carry projectId on their own where.
+      expect(postAggregate.mock.calls[0][0].where.projectId).toBe('proj-1');
+      expect(postAggregate.mock.calls[1][0].where.projectId).toBe('proj-1');
+    });
+
+    it('replies-trend: filters the sent-reply query by Post.projectId', async () => {
+      const { repo, sentFindMany } = buildRepo();
+      sentFindMany.mockResolvedValue([]);
+
+      await repo.getDashboardRepliesTrend('org1', 'daily', 'proj-1');
+
+      expect(sentFindMany.mock.calls[0][0].where.post.is.projectId).toBe('proj-1');
+    });
+
+    it('traffics: filters both the aggregate and the per-reply list', async () => {
+      const { repo, sentFindMany, postAggregate } = buildRepo();
+      postAggregate.mockResolvedValue({ _sum: { trafficScore: 0 } });
+      sentFindMany.mockResolvedValue([]);
+
+      await repo.getDashboardTraffics('org1', { projectId: 'proj-1' });
+
+      expect(postAggregate.mock.calls[0][0].where.projectId).toBe('proj-1');
+      expect(sentFindMany.mock.calls[0][0].where.post.is.projectId).toBe('proj-1');
+    });
+
+    it('impressions: filters the direct Post query by projectId', async () => {
+      const { repo, postFindMany } = buildRepo();
+      postFindMany.mockResolvedValue([]);
+
+      await repo.getDashboardImpressions('org1', 'daily', 'proj-1');
+
+      expect(postFindMany.mock.calls[0][0].where.projectId).toBe('proj-1');
+    });
+
+    it('top-sources: filters the sent-reply query by Post.projectId', async () => {
+      const { repo, sentFindMany } = buildRepo();
+      sentFindMany.mockResolvedValue([]);
+
+      await repo.getDashboardTopSources('org1', { projectId: 'proj-1' });
+
+      expect(sentFindMany.mock.calls[0][0].where.post.is.projectId).toBe('proj-1');
+    });
+
+    it('omitting projectId adds no projectId key (legacy org-wide behavior)', async () => {
+      const { repo, postFindMany } = buildRepo();
+      postFindMany.mockResolvedValue([]);
+
+      await repo.getDashboardImpressions('org1', 'daily');
+
+      expect('projectId' in postFindMany.mock.calls[0][0].where).toBe(false);
+    });
+  });
+
   describe('getSentStats (date/platform/status filter alignment)', () => {
     it('no date → all-time: repliesCount = total, no publishDate window', async () => {
       const { repo, sentCount, sentFindMany, postAggregate } = buildRepo();
@@ -1214,7 +1284,7 @@ describe('EngageRepository — two-table reads', () => {
       const where = sentCount.mock.calls[0][0].where;
       expect(where.post).toMatchObject({ source: 'engage', state: 'DRAFT' });
       expect(where.opportunity).toEqual({
-        states: { some: { organizationId: 'org1', status: { not: 'EXPIRED' } } },
+        states: { some: { organizationId: 'org1', projectId: null, status: { not: 'EXPIRED' } } },
       });
     });
 
@@ -1229,7 +1299,7 @@ describe('EngageRepository — two-table reads', () => {
       const where = sentCount.mock.calls[0][0].where;
       expect(where.post).toMatchObject({ source: 'engage', state: 'DRAFT' });
       expect(where.opportunity).toEqual({
-        states: { some: { organizationId: 'org1', status: 'EXPIRED' } },
+        states: { some: { organizationId: 'org1', projectId: null, status: 'EXPIRED' } },
       });
     });
 
@@ -1244,7 +1314,7 @@ describe('EngageRepository — two-table reads', () => {
       const where = sentCount.mock.calls[0][0].where;
       expect(where.opportunity).toEqual({
         platform: 'x',
-        states: { some: { organizationId: 'org1', status: 'EXPIRED' } },
+        states: { some: { organizationId: 'org1', projectId: null, status: 'EXPIRED' } },
       });
     });
 
@@ -1319,7 +1389,7 @@ describe('EngageRepository — two-table reads', () => {
       const draftWhere = sentCount.mock.calls[5][0].where;
       expect(draftWhere.post).toMatchObject({ source: 'engage', state: 'DRAFT' });
       expect(draftWhere.opportunity).toEqual({
-        states: { some: { organizationId: 'org1', status: { not: 'EXPIRED' } } },
+        states: { some: { organizationId: 'org1', projectId: null, status: { not: 'EXPIRED' } } },
       });
 
       const linkWhere = sentCount.mock.calls[6][0].where;
@@ -1334,7 +1404,7 @@ describe('EngageRepository — two-table reads', () => {
       const expiredWhere = sentCount.mock.calls[7][0].where;
       expect(expiredWhere.post).toMatchObject({ source: 'engage', state: 'DRAFT' });
       expect(expiredWhere.opportunity).toEqual({
-        states: { some: { organizationId: 'org1', status: 'EXPIRED' } },
+        states: { some: { organizationId: 'org1', projectId: null, status: 'EXPIRED' } },
       });
     });
   });
@@ -1420,8 +1490,8 @@ describe('EngageRepository — two-table reads', () => {
       const { repo, integrationFindFirst, integrationFindMany, postCreate } = buildXRepo();
       // Org has two live X accounts; the reply tweet's author handle matches one.
       integrationFindMany.mockResolvedValue([
-        { id: 'other', profile: 'someoneelse', engageXReplyAccount: null },
-        { id: 'author', profile: 'zhngyq310334', engageXReplyAccount: null },
+        { id: 'other', profile: 'someoneelse', engageXReplyAccounts: [] },
+        { id: 'author', profile: 'zhngyq310334', engageXReplyAccounts: [] },
       ]);
       postCreate.mockResolvedValue({ id: 'post1' });
 
@@ -1464,8 +1534,8 @@ describe('EngageRepository — two-table reads', () => {
       // the reply was posted from an external account, so we attach nothing rather
       // than misrepresent authorship with a fallback account.
       integrationFindMany.mockResolvedValue([
-        { id: 'other', profile: 'someoneelse', engageXReplyAccount: null },
-        { id: 'brand', profile: 'brandhq', engageXReplyAccount: { engageEnabled: true } },
+        { id: 'other', profile: 'someoneelse', engageXReplyAccounts: [] },
+        { id: 'brand', profile: 'brandhq', engageXReplyAccounts: [{ engageEnabled: true }] },
       ]);
       postCreate.mockResolvedValue({ id: 'post1' });
 
@@ -1502,7 +1572,7 @@ describe('EngageRepository — two-table reads', () => {
       const { repo, integrationFindMany, postCreate } = buildXRepo();
       // The reply URL's author handle matches a connected account → integrationId set.
       integrationFindMany.mockResolvedValue([
-        { id: 'author', profile: 'zhngyq310334', engageXReplyAccount: null },
+        { id: 'author', profile: 'zhngyq310334', engageXReplyAccounts: [] },
       ]);
       postCreate.mockResolvedValue({ id: 'post1' });
 
@@ -1533,6 +1603,23 @@ describe('EngageRepository — two-table reads', () => {
       });
 
       expect(postCreate.mock.calls[0][0].data.releaseId).toBeUndefined();
+    });
+
+    it('writes projectId onto the X engage post when supplied', async () => {
+      const { repo, integrationFindFirst, postCreate } = buildXRepo();
+      integrationFindFirst.mockResolvedValue({ id: 'int1' });
+      postCreate.mockResolvedValue({ id: 'post1' });
+
+      await repo.createManualXPost({
+        organizationId: 'org1',
+        content: 'reply',
+        date: new Date(0),
+        replyUrl: 'https://x.com/u/status/123',
+        integrationId: 'int1',
+        projectId: 'proj-1',
+      });
+
+      expect(postCreate.mock.calls[0][0].data.projectId).toBe('proj-1');
     });
   });
 
@@ -1583,6 +1670,108 @@ describe('EngageRepository — two-table reads', () => {
       const settings = JSON.parse(postCreate.mock.calls[0][0].data.settings);
       expect(settings.__type).toBe('reddit');
       expect(settings.engageAuthor).toBeUndefined();
+    });
+
+    it('writes projectId when supplied, and omits it otherwise', async () => {
+      const { repo, postCreate } = buildRedditRepo();
+      postCreate.mockResolvedValue({ id: 'post1' });
+
+      await repo.createManualRedditPost({
+        organizationId: 'org1',
+        content: 'reply',
+        date: new Date(0),
+        projectId: 'proj-1',
+      });
+      expect(postCreate.mock.calls[0][0].data.projectId).toBe('proj-1');
+
+      await repo.createManualRedditPost({
+        organizationId: 'org1',
+        content: 'reply',
+        date: new Date(0),
+      });
+      expect('projectId' in postCreate.mock.calls[1][0].data).toBe(false);
+    });
+  });
+
+  describe('countProjectKeywordSentRepliesToday', () => {
+    it('narrows the count to replies whose matchedKeywords contains the keyword, same window/state as the aggregate count', async () => {
+      const count = vi.fn(async () => 3);
+      const sentReply = { model: { engageSentReply: { count } } } as any;
+      const repo = new EngageRepository(
+        {} as any, {} as any, {} as any, {} as any, {} as any,
+        {} as any, {} as any,
+        sentReply, // _sentReply
+        {} as any, {} as any, {} as any
+      );
+      const since = new Date('2026-07-16T00:00:00Z');
+      const until = new Date('2026-07-17T00:00:00Z');
+
+      const n = await repo.countProjectKeywordSentRepliesToday(
+        'org1', 'proj-1', 'x', 'react', since, until
+      );
+
+      expect(n).toBe(3);
+      const where = count.mock.calls[0][0].where;
+      expect(where.organizationId).toBe('org1');
+      expect(where.projectId).toBe('proj-1');
+      expect(where.matchedKeywords).toEqual({ has: 'react' });
+      expect(where.opportunity).toEqual({ platform: 'x' });
+      expect(where.post.publishDate).toEqual({ gte: since, lt: until });
+      expect(where.post.state).toEqual({ in: ['QUEUE', 'PUBLISHED'] });
+    });
+  });
+
+  describe('resolveOrCreateKeywordIds', () => {
+    function buildRepo(existing: Array<{ id: string; keyword: string }>) {
+      const findMany = vi.fn().mockResolvedValue(existing);
+      const findFirst = vi.fn();
+      const keyword = { model: { engageKeyword: { findMany, findFirst } } } as any;
+      const repo = new EngageRepository(
+        {} as any, // _config
+        keyword, // _keyword
+        {} as any, {} as any, {} as any, {} as any, {} as any, {} as any,
+        {} as any, {} as any, {} as any, {} as any, {} as any
+      );
+      return { repo, findMany, findFirst };
+    }
+
+    it('resolves existing ids (normalized) and creates missing keywords, keyed by original text', async () => {
+      const { repo } = buildRepo([{ id: 'kw-ai', keyword: 'AI' }]);
+      vi.spyOn(repo, 'getOrCreateConfig').mockResolvedValue({ id: 'cfg-1' } as any);
+      const addKeyword = vi
+        .spyOn(repo, 'addKeyword')
+        .mockImplementation(async (_c: any, _o: any, dto: any) => ({ id: `new-${dto.keyword}` } as any));
+
+      const result = await repo.resolveOrCreateKeywordIds('org1', 'proj-1', ['AI', 'apcore', 'ai']);
+
+      // 'AI' and 'ai' both collapse (normalizeKeyword) to the existing kw-ai;
+      // only 'apcore' is created; the result preserves each original spelling.
+      expect(result).toEqual({ AI: 'kw-ai', ai: 'kw-ai', apcore: 'new-apcore' });
+      expect(addKeyword).toHaveBeenCalledTimes(1);
+      expect(addKeyword).toHaveBeenCalledWith('cfg-1', 'org1', { keyword: 'apcore' });
+    });
+
+    it('skips blank inputs and does not touch config/keywords when nothing usable is passed', async () => {
+      const { repo, findMany } = buildRepo([]);
+      const getCfg = vi.spyOn(repo, 'getOrCreateConfig');
+
+      const result = await repo.resolveOrCreateKeywordIds('org1', null, ['', '   ', '']);
+
+      expect(result).toEqual({});
+      expect(getCfg).not.toHaveBeenCalled();
+      expect(findMany).not.toHaveBeenCalled();
+    });
+
+    it('re-reads the row on a create race instead of dropping the keyword', async () => {
+      const { repo, findFirst } = buildRepo([]);
+      vi.spyOn(repo, 'getOrCreateConfig').mockResolvedValue({ id: 'cfg-1' } as any);
+      // addKeyword loses the unique race and throws; the row now exists.
+      vi.spyOn(repo, 'addKeyword').mockRejectedValue(new Error('Keyword already exists'));
+      findFirst.mockResolvedValue({ id: 'kw-raced', keyword: 'apcore' });
+
+      const result = await repo.resolveOrCreateKeywordIds('org1', 'proj-1', ['apcore']);
+
+      expect(result).toEqual({ apcore: 'kw-raced' });
     });
   });
 
@@ -1756,7 +1945,7 @@ describe('EngageRepository — two-table reads', () => {
         { post: { id: 'post1', releaseURL: 'https://x.com/zhngyq310334/status/1' } },
       ]);
       integrationFindMany.mockResolvedValue([
-        { id: 'author', profile: 'zhngyq310334', engageXReplyAccount: null },
+        { id: 'author', profile: 'zhngyq310334', engageXReplyAccounts: [] },
       ]);
 
       const res = await repo.backfillXReplyIntegrations('org1', false);
@@ -1775,7 +1964,7 @@ describe('EngageRepository — two-table reads', () => {
         { post: { id: 'post1', releaseURL: 'https://x.com/someoneelse/status/1' } },
       ]);
       integrationFindMany.mockResolvedValue([
-        { id: 'author', profile: 'someoneelse', engageXReplyAccount: null },
+        { id: 'author', profile: 'someoneelse', engageXReplyAccounts: [] },
       ]);
 
       const res = await repo.backfillXReplyIntegrations('org1', true);
@@ -1806,7 +1995,7 @@ describe('EngageRepository — two-table reads', () => {
       ]);
       // Org has a live X account, but it isn't the reply's author.
       integrationFindMany.mockResolvedValue([
-        { id: 'brand', profile: 'brandhq', engageXReplyAccount: { engageEnabled: true } },
+        { id: 'brand', profile: 'brandhq', engageXReplyAccounts: [{ engageEnabled: true }] },
       ]);
 
       const res = await repo.backfillXReplyIntegrations('org1', false);
@@ -2059,6 +2248,97 @@ describe('EngageRepository — two-table reads', () => {
   });
 });
 
+describe('EngageRepository projectId scoping (config-family)', () => {
+  it('listMonitoredChannels defaults to the legacy null-project scope when projectId is omitted', async () => {
+    const { repo, channelFindMany } = buildRepo();
+    channelFindMany.mockResolvedValue([]);
+
+    await repo.listMonitoredChannels('org-1');
+
+    expect(channelFindMany.mock.calls[0][0].where).toEqual({
+      organizationId: 'org-1',
+      config: { projectId: null },
+    });
+  });
+
+  it('listMonitoredChannels scopes to a given project via the config relation', async () => {
+    const { repo, channelFindMany } = buildRepo();
+    channelFindMany.mockResolvedValue([]);
+
+    await repo.listMonitoredChannels('org-1', 'proj-1');
+
+    expect(channelFindMany.mock.calls[0][0].where).toEqual({
+      organizationId: 'org-1',
+      config: { projectId: 'proj-1' },
+    });
+  });
+
+  it('listTrackedAccounts defaults to the legacy null-project scope when projectId is omitted', async () => {
+    const { repo, trackedFindMany } = buildRepo();
+    trackedFindMany.mockResolvedValue([]);
+
+    await repo.listTrackedAccounts('org-1');
+
+    expect(trackedFindMany.mock.calls[0][0].where).toEqual({
+      organizationId: 'org-1',
+      config: { projectId: null },
+    });
+  });
+
+  it('listTrackedAccounts scopes to a given project via the config relation', async () => {
+    const { repo, trackedFindMany } = buildRepo();
+    trackedFindMany.mockResolvedValue([]);
+
+    await repo.listTrackedAccounts('org-1', 'proj-1');
+
+    expect(trackedFindMany.mock.calls[0][0].where).toEqual({
+      organizationId: 'org-1',
+      config: { projectId: 'proj-1' },
+    });
+  });
+});
+
+describe('EngageRepository.createSentReply projectId/matchedKeywords', () => {
+  it('writes projectId=null and matchedKeywords=[] when omitted (legacy call shape)', async () => {
+    const { repo, sentCreate } = buildRepo();
+    sentCreate.mockResolvedValue({ id: 'reply-1' });
+
+    await repo.createSentReply({
+      organizationId: 'org-1',
+      opportunityId: 'opp-1',
+      postId: 'post-1',
+      inputData: {},
+    });
+
+    expect(sentCreate.mock.calls[0][0].data).toMatchObject({
+      organizationId: 'org-1',
+      projectId: null,
+      opportunityId: 'opp-1',
+      postId: 'post-1',
+      matchedKeywords: [],
+    });
+  });
+
+  it('writes the given projectId and matchedKeywords through untouched', async () => {
+    const { repo, sentCreate } = buildRepo();
+    sentCreate.mockResolvedValue({ id: 'reply-1' });
+
+    await repo.createSentReply({
+      organizationId: 'org-1',
+      projectId: 'proj-1',
+      opportunityId: 'opp-1',
+      postId: 'post-1',
+      inputData: {},
+      matchedKeywords: ['react', 'nextjs'],
+    });
+
+    expect(sentCreate.mock.calls[0][0].data).toMatchObject({
+      projectId: 'proj-1',
+      matchedKeywords: ['react', 'nextjs'],
+    });
+  });
+});
+
 describe('EngageRepository.addTrackedAccount validation', () => {
   it('rejects a username that could shape the from: search query', async () => {
     const { repo } = buildRepo();
@@ -2177,8 +2457,8 @@ describe('EngageRepository.getOrgScanStatus', () => {
 
   describe('getOpportunityForReply — status gate (no time-based expiry)', () => {
     it('returns the merged opportunity for an actionable NEW row', async () => {
-      const { repo, stateFindUnique } = buildRepo();
-      stateFindUnique.mockResolvedValue({ ...STATE_ROW, status: 'NEW' });
+      const { repo, stateFindFirst } = buildRepo();
+      stateFindFirst.mockResolvedValue({ ...STATE_ROW, status: 'NEW' });
 
       const opp = (await repo.getOpportunityForReply('org1', 'opp1')) as any;
       expect(opp.id).toBe('opp1');
@@ -2186,8 +2466,8 @@ describe('EngageRepository.getOrgScanStatus', () => {
     });
 
     it('allows an AUTO_QUEUED row', async () => {
-      const { repo, stateFindUnique } = buildRepo();
-      stateFindUnique.mockResolvedValue({ ...STATE_ROW, status: 'AUTO_QUEUED' });
+      const { repo, stateFindFirst } = buildRepo();
+      stateFindFirst.mockResolvedValue({ ...STATE_ROW, status: 'AUTO_QUEUED' });
 
       const opp = (await repo.getOpportunityForReply('org1', 'opp1')) as any;
       expect(opp.id).toBe('opp1');
@@ -2201,8 +2481,8 @@ describe('EngageRepository.getOrgScanStatus', () => {
     ])(
       'blocks a %s row with a typed reason instead of a generic 404',
       async (status, code, reasonFragment) => {
-        const { repo, stateFindUnique } = buildRepo();
-        stateFindUnique.mockResolvedValue({ ...STATE_ROW, status });
+        const { repo, stateFindFirst } = buildRepo();
+        stateFindFirst.mockResolvedValue({ ...STATE_ROW, status });
 
         await expect(repo.getOpportunityForReply('org1', 'opp1')).rejects.toMatchObject({
           // ForbiddenException — surfaced as a typed code + human reason so the
@@ -2216,8 +2496,8 @@ describe('EngageRepository.getOrgScanStatus', () => {
     );
 
     it('404s only a genuinely missing row', async () => {
-      const { repo, stateFindUnique } = buildRepo();
-      stateFindUnique.mockResolvedValue(null);
+      const { repo, stateFindFirst } = buildRepo();
+      stateFindFirst.mockResolvedValue(null);
       await expect(repo.getOpportunityForReply('org1', 'missing')).rejects.toThrow(
         'Opportunity not found'
       );
@@ -2348,8 +2628,8 @@ describe('EngageRepository.getOrgScanStatus', () => {
     };
 
     it('appends a manual entry when the content differs from the latest', async () => {
-      const { repo, stateFindUnique, stateExecuteRaw } = buildRepo();
-      stateFindUnique.mockResolvedValue({
+      const { repo, stateFindFirst, stateExecuteRaw } = buildRepo();
+      stateFindFirst.mockResolvedValue({
         generationHistory: [{ source: 'ai', content: 'an older AI draft' }],
       });
 
@@ -2360,8 +2640,8 @@ describe('EngageRepository.getOrgScanStatus', () => {
     });
 
     it('skips (no append) when the content matches the most-recent entry', async () => {
-      const { repo, stateFindUnique, stateExecuteRaw } = buildRepo();
-      stateFindUnique.mockResolvedValue({
+      const { repo, stateFindFirst, stateExecuteRaw } = buildRepo();
+      stateFindFirst.mockResolvedValue({
         generationHistory: [{ source: 'ai', content: 'hand-typed reply' }],
       });
 
@@ -2372,8 +2652,8 @@ describe('EngageRepository.getOrgScanStatus', () => {
     });
 
     it('returns false without writing when no state row exists', async () => {
-      const { repo, stateFindUnique, stateExecuteRaw } = buildRepo();
-      stateFindUnique.mockResolvedValue(null);
+      const { repo, stateFindFirst, stateExecuteRaw } = buildRepo();
+      stateFindFirst.mockResolvedValue(null);
 
       const wrote = await repo.recordManualGeneration('org1', 'opp1', manualEntry);
 
@@ -2402,6 +2682,7 @@ describe('EngageRepository.getOrgScanStatus', () => {
       // The lookup is scoped to this org+opportunity AND DRAFT state.
       expect(sentFindFirst.mock.calls[0][0].where).toEqual({
         organizationId: 'org1',
+        projectId: null,
         opportunityId: 'opp1',
         post: { state: 'DRAFT' },
       });
@@ -2462,6 +2743,7 @@ describe('EngageRepository.getOrgScanStatus', () => {
       // (cascades to the EngageSentReply).
       expect(sentFindMany.mock.calls[0][0].where).toEqual({
         organizationId: 'org1',
+        projectId: null,
         opportunityId: 'opp1',
         post: { state: 'DRAFT' },
       });
@@ -2471,8 +2753,8 @@ describe('EngageRepository.getOrgScanStatus', () => {
     });
 
     it('claimOpportunityForReply does NOT delete drafts (a rolled-back publish keeps the draft)', async () => {
-      const { repo, stateFindUnique, stateUpdateMany, postDeleteMany } = buildRepo();
-      stateFindUnique
+      const { repo, stateFindFirst, stateUpdateMany, postDeleteMany } = buildRepo();
+      stateFindFirst
         .mockResolvedValueOnce({ status: 'NEW' })
         .mockResolvedValueOnce({ ...STATE_ROW, status: 'REPLIED' });
       stateUpdateMany.mockResolvedValue({ count: 1 });
@@ -2485,8 +2767,8 @@ describe('EngageRepository.getOrgScanStatus', () => {
     });
 
     it('claimOpportunityForReply throws 403 with a typed reason for a non-actionable status (already replied)', async () => {
-      const { repo, stateFindUnique, stateUpdateMany } = buildRepo();
-      stateFindUnique.mockResolvedValueOnce({ status: 'REPLIED' });
+      const { repo, stateFindFirst, stateUpdateMany } = buildRepo();
+      stateFindFirst.mockResolvedValueOnce({ status: 'REPLIED' });
 
       await expect(
         repo.claimOpportunityForReply('org1', 'opp1', 'REPLIED')
@@ -2499,8 +2781,8 @@ describe('EngageRepository.getOrgScanStatus', () => {
     });
 
     it('claimOpportunityForReply throws 409 when a concurrent request won the claim (CAS count=0)', async () => {
-      const { repo, stateFindUnique, stateUpdateMany } = buildRepo();
-      stateFindUnique.mockResolvedValueOnce({ status: 'NEW' });
+      const { repo, stateFindFirst, stateUpdateMany } = buildRepo();
+      stateFindFirst.mockResolvedValueOnce({ status: 'NEW' });
       stateUpdateMany.mockResolvedValue({ count: 0 });
 
       await expect(
@@ -2509,8 +2791,8 @@ describe('EngageRepository.getOrgScanStatus', () => {
     });
 
     it('claimOpportunityForReply throws 404 only when the per-org state row is genuinely missing', async () => {
-      const { repo, stateFindUnique } = buildRepo();
-      stateFindUnique.mockResolvedValueOnce(null);
+      const { repo, stateFindFirst } = buildRepo();
+      stateFindFirst.mockResolvedValueOnce(null);
 
       await expect(
         repo.claimOpportunityForReply('org1', 'missing', 'REPLIED')

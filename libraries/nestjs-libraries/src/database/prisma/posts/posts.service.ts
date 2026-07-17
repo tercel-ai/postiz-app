@@ -503,13 +503,15 @@ export class PostsService {
     id: string,
     includeIntegration = false,
     orgId?: string,
-    isFirst?: boolean
+    isFirst?: boolean,
+    projectId?: string
   ): Promise<PostWithConditionals[]> {
     const post = await this._postRepository.getPost(
       id,
       includeIntegration,
       orgId,
-      isFirst
+      isFirst,
+      projectId
     );
 
     if (!post) {
@@ -523,7 +525,8 @@ export class PostsService {
             post?.childrenPost?.[0]?.id,
             false,
             orgId,
-            false
+            false,
+            projectId
           )
         : []),
     ];
@@ -689,8 +692,19 @@ export class PostsService {
     ];
   }
 
-  async getPost(orgId: string, id: string, convertToJPEG = false) {
-    const posts = await this.getPostsRecursively(id, true, orgId, true);
+  async getPost(
+    orgId: string,
+    id: string,
+    convertToJPEG = false,
+    projectId?: string
+  ) {
+    const posts = await this.getPostsRecursively(
+      id,
+      true,
+      orgId,
+      true,
+      projectId
+    );
     const list = {
       group: posts?.[0]?.group,
       posts: await Promise.all(
@@ -956,7 +970,8 @@ export class PostsService {
         post,
         body.tags,
         body.inter,
-        body.source
+        body.source,
+        body.projectId
       );
 
       if (!posts?.length) {

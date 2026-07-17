@@ -40,6 +40,14 @@ function build() {
     id: `opp_${args.where.platform_externalPostId.externalPostId}`,
   }));
   const oppUpdate = vi.fn(async (args: any) => ({ id: args.where.id }));
+  // projectId defaults to null in every test below (the legacy, pre-project
+  // config) — a nullable column can't back a compound-unique upsert
+  // (Postgres NULL != NULL), so state writes go through findFirst + create/
+  // update, not upsert. stateUpsert is exercised separately by the
+  // projectId-not-null tests.
+  const stateFindFirst = vi.fn(async () => null);
+  const stateCreate = vi.fn(async (args: any) => ({ id: 'new-state-id', ...args.data }));
+  const stateUpdate = vi.fn(async (args: any) => ({ id: args.where.id }));
   const stateUpsert = vi.fn(async () => ({}));
   const kwFindMany = vi.fn(async () => []);
   const kwUpdate = vi.fn(async () => ({}));
@@ -47,12 +55,33 @@ function build() {
 
   const svc = new EngageScanIngestService(
     { model: { engageOpportunity: { findFirst: oppFindFirst, upsert: oppUpsert, update: oppUpdate } } } as any,
-    { model: { engageOpportunityState: { upsert: stateUpsert } } } as any,
+    {
+      model: {
+        engageOpportunityState: {
+          findFirst: stateFindFirst,
+          create: stateCreate,
+          update: stateUpdate,
+          upsert: stateUpsert,
+        },
+      },
+    } as any,
     { model: { engageKeyword: { findMany: kwFindMany, update: kwUpdate } } } as any,
     { classifyBatch: vi.fn(async () => ({})) } as any,
     { model: { $transaction: txRun } } as any
   );
-  return { svc, oppFindFirst, oppUpsert, oppUpdate, stateUpsert, kwFindMany, kwUpdate, txRun };
+  return {
+    svc,
+    oppFindFirst,
+    oppUpsert,
+    oppUpdate,
+    stateFindFirst,
+    stateCreate,
+    stateUpdate,
+    stateUpsert,
+    kwFindMany,
+    kwUpdate,
+    txRun,
+  };
 }
 
 describe('engage scan post canonicalization', () => {
@@ -82,13 +111,13 @@ describe('EngageScanIngestService.persistOpportunities', () => {
 
   it('no-ops on empty posts', async () => {
     const { svc, oppUpsert } = build();
-    await svc.persistOpportunities('org1', []);
+    await svc.persistOpportunities('org1', null, []);
     expect(oppUpsert).not.toHaveBeenCalled();
   });
 
   it('upserts the global post by [platform, externalPostId] without per-org columns', async () => {
     const { svc, oppUpsert } = build();
-    await svc.persistOpportunities('org1', [makeScoredPost(1)]);
+    await svc.persistOpportunities('org1', null, [makeScoredPost(1)]);
     const arg = oppUpsert.mock.calls[0][0];
     expect(arg.where.platform_externalPostId).toEqual({
       platform: 'reddit',
@@ -100,19 +129,19 @@ describe('EngageScanIngestService.persistOpportunities', () => {
   });
 
   it('dedups duplicate (platform,externalPostId) within one batch → single global upsert (W3)', async () => {
-    const { svc, oppUpsert, stateUpsert } = build();
+    const { svc, oppUpsert, stateCreate } = build();
     const dup1 = makeScoredPost(1);
     const dup2 = { ...makeScoredPost(1), metricScore: 999 }; // same id, newer metrics
-    await svc.persistOpportunities('org1', [dup1, dup2]);
+    await svc.persistOpportunities('org1', null, [dup1, dup2]);
     // one global upsert (not two concurrent upserts on the same unique key)
     expect(oppUpsert).toHaveBeenCalledTimes(1);
-    expect(stateUpsert).toHaveBeenCalledTimes(1);
+    expect(stateCreate).toHaveBeenCalledTimes(1);
     // last-write-wins: the newer metrics are persisted
     expect(oppUpsert.mock.calls[0][0].create.metricScore).toBe(999);
   });
 
   it('dedups duplicate X share URLs within one batch after canonicalization', async () => {
-    const { svc, oppUpsert, stateUpsert } = build();
+    const { svc, oppUpsert, stateCreate } = build();
     const first = {
       ...makeScoredPost(1),
       platform: 'x',
@@ -127,10 +156,10 @@ describe('EngageScanIngestService.persistOpportunities', () => {
       metricScore: 999,
     };
 
-    await svc.persistOpportunities('org1', [first, second]);
+    await svc.persistOpportunities('org1', null, [first, second]);
 
     expect(oppUpsert).toHaveBeenCalledTimes(1);
-    expect(stateUpsert).toHaveBeenCalledTimes(1);
+    expect(stateCreate).toHaveBeenCalledTimes(1);
     expect(oppUpsert.mock.calls[0][0].where.platform_externalPostId).toEqual({
       platform: 'x',
       externalPostId: '2075259819154341957',
@@ -142,10 +171,10 @@ describe('EngageScanIngestService.persistOpportunities', () => {
   });
 
   it('updates an existing global post found by normalized platform+externalPostUrl', async () => {
-    const { svc, oppFindFirst, oppUpsert, oppUpdate, stateUpsert } = build();
+    const { svc, oppFindFirst, oppUpsert, oppUpdate, stateFindFirst, stateCreate } = build();
     oppFindFirst.mockResolvedValueOnce({ id: 'opp_existing' });
 
-    await svc.persistOpportunities('org1', [
+    await svc.persistOpportunities('org1', null, [
       {
         ...makeScoredPost(1),
         platform: 'x',
@@ -165,22 +194,40 @@ describe('EngageScanIngestService.persistOpportunities', () => {
     expect(oppUpdate).toHaveBeenCalledWith(
       expect.objectContaining({ where: { id: 'opp_existing' } })
     );
-    expect(stateUpsert.mock.calls[0][0].where.organizationId_opportunityId).toEqual({
-      organizationId: 'org1',
-      opportunityId: 'opp_existing',
+    expect(stateFindFirst).toHaveBeenCalledWith({
+      where: { organizationId: 'org1', projectId: null, opportunityId: 'opp_existing' },
+      select: { id: true },
     });
+    expect(stateCreate.mock.calls[0][0].data).toEqual(
+      expect.objectContaining({ organizationId: 'org1', projectId: null, opportunityId: 'opp_existing' })
+    );
   });
 
   it('upserts per-org state NEW on create, aligned to its post id', async () => {
-    const { svc, stateUpsert } = build();
-    await svc.persistOpportunities('org1', [makeScoredPost(1)]);
+    const { svc, stateCreate } = build();
+    await svc.persistOpportunities('org1', null, [makeScoredPost(1)]);
+    const arg = stateCreate.mock.calls[0][0].data;
+    expect(arg.organizationId).toBe('org1');
+    expect(arg.projectId).toBeNull();
+    expect(arg.opportunityId).toBe('opp_t3_1');
+    expect(arg.status).toBe('NEW');
+    expect(arg.score).toBe(70);
+    expect(arg.isCurrentlyMatched).toBe(true);
+  });
+
+  it('upserts per-project state via the compound key when projectId is set (not findFirst+create)', async () => {
+    const { svc, stateUpsert, stateFindFirst, stateCreate } = build();
+    await svc.persistOpportunities('org1', 'proj-1', [makeScoredPost(1)]);
+    expect(stateFindFirst).not.toHaveBeenCalled();
+    expect(stateCreate).not.toHaveBeenCalled();
+    expect(stateUpsert).toHaveBeenCalledTimes(1);
     const arg = stateUpsert.mock.calls[0][0];
-    expect(arg.where.organizationId_opportunityId).toEqual({
+    expect(arg.where.organizationId_projectId_opportunityId).toEqual({
       organizationId: 'org1',
+      projectId: 'proj-1',
       opportunityId: 'opp_t3_1',
     });
-    expect(arg.create.status).toBe('NEW');
-    expect(arg.create.score).toBe(70);
+    expect(arg.create.projectId).toBe('proj-1');
   });
 });
 
@@ -202,6 +249,7 @@ function rawPost(over: any = {}): any {
 
 const ctx = {
   organizationId: 'org1',
+  projectId: null,
   keywords: [{ id: 'k1', keyword: 'react', type: null, enabled: true }],
   trackedAccounts: [],
   monitoredChannels: [{ platform: 'reddit', channelId: 'webdev' }],
@@ -240,11 +288,11 @@ describe('EngageScanIngestService.ingestForOrg', () => {
   });
 
   it('scores → persists → counts for a matching post', async () => {
-    const { svc, oppUpsert, stateUpsert } = build();
+    const { svc, oppUpsert, stateCreate } = build();
     const n = await svc.ingestForOrg(ctx, [rawPost()]);
     expect(n).toBe(1);
     expect(oppUpsert).toHaveBeenCalledTimes(1);
-    expect(stateUpsert).toHaveBeenCalledTimes(1);
+    expect(stateCreate).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -274,37 +322,40 @@ describe('EngageScanIngestService.attributeExisting', () => {
   beforeEach(() => vi.clearAllMocks());
 
   it('no-ops on empty input', async () => {
-    const { svc, stateUpsert } = build();
+    const { svc, stateCreate } = build();
     expect(await svc.attributeExisting(ctx, [])).toBe(0);
-    expect(stateUpsert).not.toHaveBeenCalled();
+    expect(stateCreate).not.toHaveBeenCalled();
   });
 
   it('re-scores existing opportunities and writes ONLY per-org state (no global upsert)', async () => {
-    const { svc, oppUpsert, stateUpsert } = build();
+    const { svc, oppUpsert, stateFindFirst, stateCreate } = build();
     const n = await svc.attributeExisting(ctx, [oppRow()]);
     expect(n).toBe(1);
     expect(oppUpsert).not.toHaveBeenCalled(); // global row untouched
-    const arg = stateUpsert.mock.calls[0][0];
-    expect(arg.where.organizationId_opportunityId).toEqual({
-      organizationId: 'org1',
-      opportunityId: 'opp1',
+    expect(stateFindFirst).toHaveBeenCalledWith({
+      where: { organizationId: 'org1', projectId: null, opportunityId: 'opp1' },
+      select: { id: true },
     });
-    expect(arg.create.status).toBe('NEW');
+    const arg = stateCreate.mock.calls[0][0].data;
+    expect(arg.organizationId).toBe('org1');
+    expect(arg.projectId).toBeNull();
+    expect(arg.opportunityId).toBe('opp1');
+    expect(arg.status).toBe('NEW');
   });
 
   it('returns the count of states actually written, not scored candidates (W4)', async () => {
-    const { svc, stateUpsert } = build();
+    const { svc, stateCreate } = build();
     // two matching opportunities → two state writes → count 2
     const n = await svc.attributeExisting(ctx, [oppRow(), oppRow({ id: 'opp2', externalPostId: 't3_2' })]);
-    expect(n).toBe(stateUpsert.mock.calls.length); // count == actual writes
+    expect(n).toBe(stateCreate.mock.calls.length); // count == actual writes
     expect(n).toBe(2);
   });
 
   it('skips opportunities that do not match the org keywords', async () => {
-    const { svc, stateUpsert } = build();
+    const { svc, stateCreate } = build();
     const n = await svc.attributeExisting(ctx, [oppRow({ postContent: 'totally unrelated' })]);
     expect(n).toBe(0);
-    expect(stateUpsert).not.toHaveBeenCalled();
+    expect(stateCreate).not.toHaveBeenCalled();
   });
 });
 

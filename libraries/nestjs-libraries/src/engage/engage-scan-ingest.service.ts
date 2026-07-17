@@ -59,13 +59,22 @@ export function normalizeExternalPost<T extends Pick<ScoredPost, 'platform' | 'e
 }
 
 /**
- * The per-org subscription context needed to score a scan unit's posts: the
- * org's enabled keywords (the hard keyword filter + keyword score) and its
- * tracked accounts / monitored subreddits (the +tracked bonus). Structurally a
- * subset of EngageConfig-with-relations, so a Prisma org context satisfies it.
+ * The per-project subscription context needed to score a scan unit's posts:
+ * one project's enabled keywords (the hard keyword filter + keyword score)
+ * and its tracked accounts / monitored subreddits (the +tracked bonus).
+ * Structurally a subset of EngageConfig-with-relations, so a Prisma
+ * project/org context satisfies it.
+ *
+ * projectId is nullable during migration (project-scoped-post-engage-
+ * design.md §11) — a legacy EngageConfig row with no projectId yet still
+ * produces exactly one context, same as before this field existed. Once an
+ * org has multiple EngageConfig rows (multiple projects), each yields its
+ * OWN context here — this is what makes fan-out per-project rather than
+ * per-org (§5 step 4: "one EngageOpportunityState per matched project").
  */
 export interface OrgScanContext {
   organizationId: string;
+  projectId: string | null;
   keywords: Pick<EngageKeyword, 'id' | 'keyword' | 'type' | 'enabled'>[];
   trackedAccounts: { platform: string; username: string }[];
   monitoredChannels: { platform: string; channelId: string }[];
@@ -243,9 +252,72 @@ export class EngageScanIngestService {
     if (!scored.length) return 0;
     this.recordScoreDistribution(ctx.organizationId, 'persisted', scored);
     const classified = await this.classifyIntents(scored);
-    await this.persistOpportunities(ctx.organizationId, classified);
+    await this.persistOpportunities(ctx.organizationId, ctx.projectId, classified);
     await this.updateKeywordHitCounts(ctx.organizationId, classified, ctx.keywords);
     return scored.length;
+  }
+
+  /**
+   * Upsert one project's EngageOpportunityState row. Branches on projectId
+   * because a nullable column can never satisfy a compound-unique `where`
+   * (Postgres NULL != NULL) — the surrogate `id` + unique INDEX schema
+   * (project-scoped-post-engage-design.md §3.3) trades away an atomic
+   * upsert-by-null-key so legacy (projectId=null) and per-project rows can
+   * coexist during migration. For projectId=null this is find-then-write, not
+   * a single atomic statement: two concurrent first-discoveries of the same
+   * opportunity for the same still-unmigrated org could each insert a row.
+   * Accepted, same tolerance as other transient-migration races in the design
+   * doc (§3.4) — collapses away once projectId is required (§11 step 8).
+   */
+  private async _upsertOpportunityState(
+    organizationId: string,
+    projectId: string | null,
+    opportunityId: string,
+    values: {
+      score: number;
+      scoreKeyword: number;
+      scoreTracked: number;
+      matchedKeywords: string[];
+    }
+  ) {
+    const updateData = {
+      score: values.score,
+      scoreKeyword: values.scoreKeyword,
+      scoreTracked: values.scoreTracked,
+      // Refresh matched keywords so keyword edits reflect on re-scan.
+      matchedKeywords: values.matchedKeywords,
+      isCurrentlyMatched: values.matchedKeywords.length > 0,
+      // status / bookmarked NOT updated — preserve user state
+    };
+    const createData = {
+      organizationId,
+      projectId,
+      opportunityId,
+      status: 'NEW' as const,
+      ...updateData,
+    };
+
+    if (projectId != null) {
+      return this._oppState.model.engageOpportunityState.upsert({
+        where: {
+          organizationId_projectId_opportunityId: { organizationId, projectId, opportunityId },
+        },
+        create: createData,
+        update: updateData,
+      });
+    }
+
+    const existing = await this._oppState.model.engageOpportunityState.findFirst({
+      where: { organizationId, projectId: null, opportunityId },
+      select: { id: true },
+    });
+    if (existing) {
+      return this._oppState.model.engageOpportunityState.update({
+        where: { id: existing.id },
+        data: updateData,
+      });
+    }
+    return this._oppState.model.engageOpportunityState.create({ data: createData });
   }
 
   /**
@@ -279,30 +351,12 @@ export class EngageScanIngestService {
           const opportunityId = idByExternal.get(
             `${post.platform}:${post.externalPostId}`
           )!;
-          return this._oppState.model.engageOpportunityState.upsert({
-            where: {
-              organizationId_opportunityId: {
-                organizationId: ctx.organizationId,
-                opportunityId,
-              },
-            },
-            create: {
-              organizationId: ctx.organizationId,
-              opportunityId,
-              status: 'NEW',
-              score: post.score,
-              scoreKeyword: post.scoreKeyword,
-              scoreTracked: post.scoreTracked,
-              matchedKeywords: post.matchedKeywords,
-            },
-            update: {
-              score: post.score,
-              scoreKeyword: post.scoreKeyword,
-              scoreTracked: post.scoreTracked,
-              matchedKeywords: post.matchedKeywords,
-              // status / bookmarked preserved
-            },
-          });
+          return this._upsertOpportunityState(
+            ctx.organizationId,
+            ctx.projectId,
+            opportunityId,
+            post
+          );
         })
       );
     }
@@ -322,15 +376,18 @@ export class EngageScanIngestService {
   }
 
   /**
-   * Two-phase persist for one org:
-   *   Phase 1 — upsert the GLOBAL post row (shared across orgs): content +
-   *             objective metrics/scores. Idempotent; re-scan refreshes metrics.
-   *   Phase 2 — upsert this org's per-post STATE: total/keyword/tracked score +
-   *             matched keywords. status/bookmark are preserved across re-scans.
+   * Two-phase persist for one project:
+   *   Phase 1 — upsert the GLOBAL post row (shared across every org/project):
+   *             content + objective metrics/scores. Idempotent; re-scan
+   *             refreshes metrics.
+   *   Phase 2 — upsert this project's per-post STATE: total/keyword/tracked
+   *             score + matched keywords. status/bookmark are preserved
+   *             across re-scans.
    * opportunities[i] aligns with posts[i] because phase 1 pushes in order.
    */
   async persistOpportunities(
     orgId: string,
+    projectId: string | null,
     rawPosts: ScoredPost[]
   ): Promise<void> {
     if (!rawPosts.length) return;
@@ -457,28 +514,7 @@ export class EngageScanIngestService {
     for (const batch of chunk(stateInputs, PERSIST_BATCH_SIZE)) {
       await Promise.all(
         batch.map(({ post, opportunityId }) =>
-          this._oppState.model.engageOpportunityState.upsert({
-            where: {
-              organizationId_opportunityId: { organizationId: orgId, opportunityId },
-            },
-            create: {
-              organizationId: orgId,
-              opportunityId,
-              status: 'NEW',
-              score: post.score,
-              scoreKeyword: post.scoreKeyword,
-              scoreTracked: post.scoreTracked,
-              matchedKeywords: post.matchedKeywords,
-            },
-            update: {
-              score: post.score,
-              scoreKeyword: post.scoreKeyword,
-              scoreTracked: post.scoreTracked,
-              // Refresh matched keywords so keyword edits reflect on re-scan.
-              matchedKeywords: post.matchedKeywords,
-              // status / bookmarked NOT updated — preserve user state
-            },
-          })
+          this._upsertOpportunityState(orgId, projectId, opportunityId, post)
         )
       );
     }

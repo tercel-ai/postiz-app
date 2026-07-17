@@ -65,6 +65,20 @@ export class GetPostsListDto {
   @IsString()
   sourcePostId?: string;
 
+  // Opaque aisee-core products.id. Omitting it returns every post the caller
+  // can already see (legacy, non-project behavior preserved during migration
+  // — project-scoped-post-engage-design.md §8/§11).
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  projectId?: string;
+
+  // Filter to only the posts generated under one OperationPlan.
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  operationPlanId?: string;
+
   // Filter by Post.source. Single value ('engage') or comma-separated list
   // ('calendar,chat'); omitting it returns all sources. Mirrors GetPostsDto.
   @ApiPropertyOptional({ enum: VALID_POST_SOURCES, isArray: true })

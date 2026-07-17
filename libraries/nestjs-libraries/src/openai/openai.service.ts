@@ -652,4 +652,55 @@ export class OpenaiService {
 
     return [];
   }
+
+  /**
+   * `maxTokens` caps the completion. Long structured outputs (e.g. a multi-week
+   * operation plan) otherwise hit the provider's default output limit and come
+   * back as TRUNCATED JSON, which surfaces as an opaque "Unterminated string in
+   * JSON" from the SDK's parser. Pass a generous budget for big schemas.
+   */
+  async generateStructuredText<T>(
+    systemPrompt: string,
+    userPrompt: string,
+    schema: z.ZodType<T>,
+    schemaName: string,
+    maxTokens?: number
+  ): Promise<{ data: T; usage: AiUsageInfo }> {
+    const { client, model, servicer, provider } = this.getTextClient();
+    const response = await client.chat.completions.parse({
+      model,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ],
+      response_format: zodResponseFormat(schema, schemaName),
+      ...(maxTokens ? { max_tokens: maxTokens } : {}),
+    });
+    // A truncated completion (finish_reason=length) yields unparseable JSON;
+    // say so plainly instead of leaking a JSON syntax error from the parser.
+    if (response.choices[0]?.finish_reason === 'length') {
+      throw new Error(
+        `AI response for ${schemaName} was truncated (hit the output token limit). ` +
+        `Raise maxTokens or narrow the request.`
+      );
+    }
+    const data = response.choices[0].message.parsed;
+    if (!data) throw new Error(`AI response did not contain a valid ${schemaName}`);
+    const usage: AiUsageInfo = {
+      servicer,
+      provider,
+      model,
+      type: 'text',
+      billing_mode: 'per_token',
+      method: 'generateStructuredText',
+      usage: {
+        prompt_tokens: response.usage?.prompt_tokens ?? 0,
+        completion_tokens: response.usage?.completion_tokens ?? 0,
+        total_tokens: response.usage?.total_tokens ?? 0,
+        cached_prompt_tokens: response.usage?.prompt_tokens_details?.cached_tokens ?? 0,
+      },
+    };
+    logAiUsage(usage);
+    return { data, usage };
+  }
 }

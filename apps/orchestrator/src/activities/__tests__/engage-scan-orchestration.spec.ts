@@ -373,7 +373,7 @@ describe('EngageScanActivity keyword initial scans', () => {
     );
   });
 
-  it('claims pending reddit keyword initial scans, scans them in one batch, then marks them DONE', async () => {
+  it('fans an initial scan out to sibling project configs in the same organization', async () => {
     const { activity } = build(IDLE_ROW);
     const initialFindMany = vi.fn().mockResolvedValue([
       {
@@ -385,6 +385,7 @@ describe('EngageScanActivity keyword initial scans', () => {
         status: 'PENDING',
         keywordRef: {
           id: 'kw1',
+          configId: 'config1',
           organizationId: 'org1',
           keyword: 'storage',
           enabled: true,
@@ -399,6 +400,7 @@ describe('EngageScanActivity keyword initial scans', () => {
         status: 'PENDING',
         keywordRef: {
           id: 'kw2',
+          configId: 'config2',
           organizationId: 'org1',
           keyword: 'AI PC',
           enabled: true,
@@ -437,11 +439,17 @@ describe('EngageScanActivity keyword initial scans', () => {
     await (activity as any)._runPendingKeywordInitialScans(
       [
         {
+          id: 'config1',
           organizationId: 'org1',
-          keywords: [
-            { id: 'kw1', keyword: 'storage', enabled: true },
-            { id: 'kw2', keyword: 'AI PC', enabled: true },
-          ],
+          projectId: 'project1',
+          keywords: [{ id: 'kw1', keyword: 'storage', enabled: true }],
+          trackedAccounts: [],
+        },
+        {
+          id: 'config2',
+          organizationId: 'org1',
+          projectId: 'project2',
+          keywords: [{ id: 'kw2', keyword: 'AI PC', enabled: true }],
           trackedAccounts: [],
         },
       ],
@@ -479,8 +487,13 @@ describe('EngageScanActivity keyword initial scans', () => {
         cursor: expect.objectContaining({ lastSeenAt: expect.any(Date) }),
       })
     );
+    expect(fanOut).toHaveBeenCalledTimes(2);
     expect(fanOut).toHaveBeenCalledWith(
-      expect.objectContaining({ organizationId: 'org1' }),
+      expect.objectContaining({ organizationId: 'org1', projectId: 'project1' }),
+      [post]
+    );
+    expect(fanOut).toHaveBeenCalledWith(
+      expect.objectContaining({ organizationId: 'org1', projectId: 'project2' }),
       [post]
     );
     expect(adapter.searchScoped).toHaveBeenCalledTimes(1);
@@ -861,6 +874,7 @@ describe('EngageScanActivity._fanOutToOrg (Reddit monitored subreddit +5 & follo
   function orgCtx(over: Record<string, unknown> = {}) {
     return {
       organizationId: 'o1',
+      projectId: null,
       keywords: [{ keyword: 'AI', type: null, enabled: true }],
       trackedAccounts: [],
       monitoredChannels: [{ platform: 'reddit', channelId: 'ClaudeAI', enabled: true }],
@@ -875,7 +889,7 @@ describe('EngageScanActivity._fanOutToOrg (Reddit monitored subreddit +5 & follo
     const persisted: any[] = [];
     vi.spyOn(activity as any, '_classifyIntents').mockImplementation(async (p: any) => p);
     vi.spyOn(activity as any, '_persistOpportunities').mockImplementation(
-      (async (_org: string, p: any[]) => { persisted.push(...p); }) as any
+      (async (_org: string, _projectId: string | null, p: any[]) => { persisted.push(...p); }) as any
     );
     vi.spyOn(activity as any, '_updateKeywordHitCounts').mockResolvedValue(undefined);
     await (activity as any)._fanOutToOrg(ctx, posts);

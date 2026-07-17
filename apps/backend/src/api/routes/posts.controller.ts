@@ -254,8 +254,12 @@ export class PostsController {
   }
 
   @Get('/:id')
-  getPost(@GetOrgFromRequest() org: Organization, @Param('id') id: string) {
-    return this._postsService.getPost(org.id, id);
+  getPost(
+    @GetOrgFromRequest() org: Organization,
+    @Param('id') id: string,
+    @Query('projectId') projectId?: string
+  ) {
+    return this._postsService.getPost(org.id, id, false, projectId);
   }
 
   @Post('/')

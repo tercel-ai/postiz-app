@@ -1,7 +1,7 @@
 # Engage Module — Frontend API Reference
 
 **Version**: 1.0  
-**Date**: 2026-05-22  
+**Date**: 2026-07-16
 **Base Path**: `/api/engage`  
 **Auth**: All endpoints require a valid session cookie (same as existing Post Agent APIs).
 
@@ -61,6 +61,13 @@
 - Pagination parameters: `page` (default 1), `limit` (default 20, max 100).
 - Time fields are ISO 8601 strings (UTC).
 - `id` fields are UUID strings.
+- `projectId` is an opaque Aisee product id. When supplied, reads/writes are scoped to that project. Omitting it preserves the legacy organization-wide/null-project behavior during migration.
+
+### Project-Scoped Requests
+
+The following endpoints accept `projectId` as a query parameter: `GET /config`, `POST /config/reset`, `GET /monitored-channels`, `GET /tracked-accounts`, `GET /reply-accounts`, `GET /opportunities/score-stats`, `GET /opportunities/counts`, `GET /opportunities`, `GET /opportunities/:id`, `PATCH /opportunities/:id/dismiss`, `PATCH /opportunities/:id/bookmark`, `GET /opportunities/locate`, `GET /sent`, `GET /sent/locate`, `GET /sent/stats`, `GET /sent/counts`, `GET /dashboard/summary`, `GET /dashboard/replies-trend`, `GET /dashboard/traffics`, `GET /dashboard/impressions`, and `GET /dashboard/top-sources`.
+
+Mutation endpoints that create project-owned config or reply records accept `projectId` in the JSON body: `POST /setup`, `POST /config`, `POST /keywords`, `POST /keywords/bulk`, `POST /monitored-channels`, `POST /tracked-accounts`, `POST /opportunities/:id/draft`, `POST /opportunities/:id/save-draft`, `POST /opportunities/:id/send-now`, `POST /opportunities/:id/schedule`, `POST /opportunities/:id/batch-send`, `POST /opportunities/:id/batch-schedule`, and `POST /opportunities/:id/manual-reply`.
 
 ---
 
@@ -141,8 +148,23 @@ interface EngageConfig {
     channel: { lastScanAt: string | null; nextScanAt: string | null };
     tracked: { lastScanAt: string | null; nextScanAt: string | null };
   };
+  // Admin-configured operation-plan limits (only returned by GET /config), so a
+  // plan-creation UI can bound its date range / platform picker from this same
+  // call. Global admin Settings, NOT per-org config — see
+  // docs/operation-plan-api.md § Admin Settings.
+  operationPlan: {
+    maxDurationDays: number;    // operation_plan.max_duration_days (default 30)
+    // RESOLVED, ready-to-use list — see the note below. NOT the raw setting.
+    allowedPlatforms: string[];
+  };
 }
 ```
+
+> **`allowedPlatforms` is resolved, not raw.** It is `connected integrations ∩ operation_plan.allowed_platforms` (or simply every connected platform when that allowlist is empty) — i.e. exactly the set `POST /projects/:projectId/operation-plans` will accept, since it applies both gates. Render the platform picker straight from this list and it can never offer something the server rejects.
+>
+> Because it is resolved, an **empty array means "no platform is available"** (nothing connected, or the allowlist excludes everything connected) — a real, actionable state. It never means "everything", even though the underlying setting's empty value does mean "no extra restriction" server-side.
+
+> `operationPlan` deliberately omits `operation_plan.platform_cadence`: that key steers the generator's editorial strategy (posting rhythm / AI-citation weight) and no client has a use for it. The block degrades to the backend defaults (`30` / `[]`) if the Settings rows are unset or unreadable — a settings hiccup never fails the Engage page.
 
 ### EngageKeyword
 
@@ -358,6 +380,7 @@ interface EngageExtensionReply {
 
 ```json
 {
+  "projectId": "product_123",
   "keywords": [
     { "keyword": "GEO SEO" },
     { "keyword": "AISEE", "type": "BRAND" },
@@ -379,6 +402,7 @@ interface EngageExtensionReply {
 
 | Field | Required | Description |
 |---|---|---|
+| `projectId` | No | Project scope for the created config/keywords/channels/accounts. Omit for legacy null-project config. |
 | `keywords` | **Yes** (1–100 items) | Keywords to monitor. `type` optional (`CORE`/`BRAND`/`COMPETITOR`). Duplicates skipped. |
 | `monitoredChannels` | No | Channels to scan. Duplicates (`platform+channelId`) skipped. |
 | `trackedAccounts` | No | External accounts to track. Duplicates (`platform+username`) skipped. |
@@ -398,6 +422,12 @@ interface EngageExtensionReply {
 
 Retrieve the Engage configuration for the current organization (including all keywords, channels, tracked accounts, and reply accounts).  
 The first call will automatically create a default configuration (`enabled: false`).
+
+**Query Params**
+
+| Parameter | Type | Description |
+|---|---|---|
+| `projectId` | string | Optional project scope. Omit for the legacy null-project config. |
 
 **Response** `200 OK`
 
@@ -428,7 +458,8 @@ Update configuration fields. Does not perform bulk writes to related tables — 
 
 ```json
 {
-  "enabled": true   // Optional — setting true also starts Temporal workflows (idempotent)
+  "enabled": true,
+  "projectId": "product_123"
 }
 ```
 
@@ -439,6 +470,12 @@ Update configuration fields. Does not perform bulk writes to related tables — 
 ### POST `/api/engage/config/reset`
 
 Reset `enabled` to `false` (re-enter Setup Wizard). Does not delete existing keywords or channels.
+
+**Query Params**
+
+| Parameter | Type | Description |
+|---|---|---|
+| `projectId` | string | Optional project scope. |
 
 **Response** `200 OK` — Returns the updated `EngageConfig`
 
@@ -456,7 +493,8 @@ Add a single keyword.
 {
   "keyword": "GEO SEO",      // Required, 1-100 characters
   "type": "CORE",            // Optional, default 'CORE'. Enums: 'CORE' | 'BRAND' | 'COMPETITOR'
-  "enabled": true            // Optional, default true
+  "enabled": true,           // Optional, default true
+  "projectId": "product_123" // Optional project scope
 }
 ```
 
@@ -472,6 +510,7 @@ Bulk add keywords (atomic operation). Duplicate keywords are automatically skipp
 
 ```json
 {
+  "projectId": "product_123",
   "keywords": [
     { "keyword": "AI SEO", "type": "CORE", "enabled": true },
     { "keyword": "AISEE", "type": "BRAND", "enabled": true },
@@ -555,6 +594,12 @@ global discovered posts that match the keyword text.
 
 Retrieve all monitored channels for the current organization.
 
+**Query Params**
+
+| Parameter | Type | Description |
+|---|---|---|
+| `projectId` | string | Optional project scope. |
+
 **Response** `200 OK` — `EngageMonitoredChannel[]`
 
 ```json
@@ -622,7 +667,8 @@ Add a monitored channel. `channelId` + `platform` must be unique; duplicate addi
   "channelId": "SEO",          // Required, subreddit name (without r/)
   "channelName": "r/SEO",      // Required, display name
   "audienceSize": 1200000,     // Optional
-  "metadata": {}               // Optional, any JSON
+  "metadata": {},              // Optional, any JSON
+  "projectId": "product_123"   // Optional project scope
 }
 ```
 
@@ -668,6 +714,12 @@ Delete a monitored channel (historical Feed records are preserved).
 
 Retrieve all tracked accounts.
 
+**Query Params**
+
+| Parameter | Type | Description |
+|---|---|---|
+| `projectId` | string | Optional project scope. |
+
 **Response** `200 OK` — `EngageTrackedAccount[]`
 
 ---
@@ -682,7 +734,8 @@ Add a tracked account.
 {
   "username": "randfish",       // Required, 1-50 characters, without @ prefix
   "platform": "x",             // Optional, default 'x'
-  "categoryLabel": "GEO Expert"   // Optional, max 100 characters
+  "categoryLabel": "GEO Expert", // Optional, max 100 characters
+  "projectId": "product_123"     // Optional project scope
 }
 ```
 
@@ -726,6 +779,12 @@ Delete a tracked account (historical Feed records are preserved).
 ### GET `/api/engage/reply-accounts`
 
 Retrieve all available X accounts and their Engage configurations.
+
+**Query Params**
+
+| Parameter | Type | Description |
+|---|---|---|
+| `projectId` | string | Optional project scope for Engage reply-account settings. |
 
 **Response** `200 OK` — `Integration[]` (with nested `engageXReplyAccount`)
 
@@ -791,6 +850,7 @@ Retrieve scoring statistics for the Feed (used for the top dashboard).
 
 | Parameter | Type | Description |
 |---|---|---|
+| `projectId` | `string` | Optional project scope |
 | `date` | `all \| day \| today \| week \| month` | Publish-date window, defaults to all (`day`/`today` aliased) |
 | `platform` | `string` | Platform filter, e.g., `'x'` / `'reddit'` |
 
@@ -841,6 +901,7 @@ Total + byStatus + byPlatform counts for `/opportunities`, scoped by the same fi
 
 | Parameter | Type | Description |
 |---|---|---|
+| `projectId` | `string` | Optional project scope |
 | `keyword` | `string` | Same as `/opportunities` |
 | `keywords` | `string[]` | Same as `/opportunities` |
 | `intent` | `IntentType \| IntentType[]` | Same as `/opportunities` |
@@ -880,6 +941,7 @@ Retrieve the list of opportunities (main Signal Feed endpoint).
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
+| `projectId` | `string` | — | Optional project scope |
 | `platform` | `string \| string[]` | — | Platform filter. Multi-value (OR): `?platform=x&platform=reddit` or `?platform=x,reddit`. Max 20. |
 | `status` | `EngageOpportunityStatus \| EngageOpportunityStatus[]` | — | Status filter. Multi-value (OR): repeated params or comma-separated. Max 20. |
 | `intent` | `IntentType \| IntentType[]` | — | Intent filter. Multi-value (OR): repeated params or comma-separated. Max 20. |
@@ -927,6 +989,9 @@ GET /api/engage/opportunities?channels=SEO,TECH
 
 # Multiple authors (OR)
 GET /api/engage/opportunities?authors=alice,bob
+
+# Project-scoped feed
+GET /api/engage/opportunities?projectId=product_123&status=NEW
 
 # Combined — all active conditions are AND-ed together
 GET /api/engage/opportunities?keywords=GEO%20SEO,AISEE&platform=x&status=NEW,AUTO_QUEUED&minScore=70
@@ -985,6 +1050,12 @@ The response is the same shape as one object from `GET /api/engage/opportunities
 |---|---|---|
 | `id` | `string` | `item.id` from `/opportunities` response (`EngageOpportunity.id`) |
 
+**Query Params**
+
+| Parameter | Type | Description |
+|---|---|---|
+| `projectId` | `string` | Optional project scope. Required to disambiguate a project-owned opportunity state from the legacy null-project state. |
+
 **Response** `200 OK`
 
 ```json
@@ -1021,6 +1092,7 @@ Locate which page a given opportunity lives on within `/opportunities`, using **
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `opportunityId` | `string` | **required** | `item.id` from `/opportunities` response (`EngageOpportunity.id`) |
+| `projectId` | `string` | — | Optional project scope. Must match the active `/opportunities` filter. |
 | `limit` | `number` | `20` | Page size — must match the `limit` you pass to `/opportunities`, max 100 |
 | All `/opportunities` filter params | — | — | `platform`, `status`, `intent`, `keyword`, `keywords`, `date`, `startDate`, `endDate`, `minScore`, `minScoreKeyword`, `minScoreHeat`, `minScoreAuthority`, `channels`, `authors`, `bookmarked`, `sortBy`, `sortOrder` — must match the active list filters exactly |
 
@@ -1099,7 +1171,8 @@ Stream the generation of an AI reply draft. Response is Server-Sent Events (`tex
   "strategy": "EXPERT_ANSWER",  // Required: ReplyStrategy (see type def above)
   "brandStrength": 1,           // Required: 0-3 integer
   "mentions": ["AISEE"],        // Optional: brand names to weave in (max 20)
-  "outputLength": 1000          // Optional: target reply length (chars); omit to use platform default
+  "outputLength": 1000,         // Optional: target reply length (chars); omit to use platform default
+  "projectId": "product_123"    // Optional project scope
 }
 ```
 
@@ -1109,6 +1182,7 @@ Stream the generation of an AI reply draft. Response is Server-Sent Events (`tex
 | `brandStrength` | `number` (0–3) | ✓ | Brand emphasis level (see table below) |
 | `mentions` | `string[]` (max 20) | | Brand names the model may mention (used when `brandStrength` ≥ 2) |
 | `outputLength` | `integer` (≥ 2) | | Target reply length fed into the prompt. Omitted → platform default (X = 260 weighted chars, Reddit = 1000 chars) |
+| `projectId` | `string` | | Optional project scope |
 
 **Output length & character limits**
 
@@ -1225,6 +1299,7 @@ When the opportunity is later sent / scheduled / manually replied, the leftover 
 | `strategy` | `ReplyStrategy` | ✓ | Generation strategy (stored in `inputData`) |
 | `brandStrength` | `number` 0–3 | ✓ | Brand strength (stored in `inputData`) |
 | `mentions` | `string[]` (≤20) | — | Optional brand mentions (stored in `inputData`) |
+| `projectId` | `string` | — | Optional project scope |
 
 **Response** `200 OK` — Returns the upserted `EngageSentReply` (with its `Post`, `state=DRAFT`).
 
@@ -1247,7 +1322,8 @@ When the opportunity is later sent / scheduled / manually replied, the leftover 
   "integrationId": "integration-uuid",  // Required, from Integration.id of GET /reply-accounts
   "draftContent": "Great point! Here's what I...",  // Required, max 4000 chars (Please keep within 280 for X)
   "strategy": "EXPERT_ANSWER",          // Required
-  "brandStrength": 1                    // Required, 0-3
+  "brandStrength": 1,                   // Required, 0-3
+  "projectId": "product_123"            // Optional project scope
 }
 ```
 
@@ -1255,6 +1331,10 @@ When the opportunity is later sent / scheduled / manually replied, the leftover 
 
 **Errors**
 - `400` — Existing scheduled post is no longer pending (already published or failed)
+- `403` — **Pacing gate (§6/§6.1)** — blocked BEFORE the send; the opportunity claim is rolled back. The JSON `code` distinguishes the cause (see [Reply pacing 403s](#reply-pacing-403s)):
+  - `engage_daily_hard_cap_reached` — the project's active-plan daily reply ceiling for this platform (the tighter of `targetRepliesPerDay` and an optional `dailyHardCap`) would be exceeded.
+  - `engage_daily_keyword_target_reached` — a per-keyword daily target (`keywordTargets[keyword]`) for one of the opportunity's matched keywords would be exceeded.
+  - `engage_account_daily_cap_reached` — the sending account's per-account daily cap (`engage_reply_account_daily_cap` Setting, default 50) would be exceeded.
 - `404` — Opportunity doesn't exist or already replied (concurrency protection)
 - `500` — X API call failed (opportunity status will automatically roll back)
 
@@ -1272,7 +1352,8 @@ When the opportunity is later sent / scheduled / manually replied, the leftover 
   "draftContent": "Great point! Here's what I...",
   "strategy": "EXPERT_ANSWER",
   "brandStrength": 1,
-  "scheduledAt": "2026-05-23T10:00:00.000Z"  // Required, ISO string, must be in the future
+  "scheduledAt": "2026-05-23T10:00:00.000Z",
+  "projectId": "product_123"
 }
 ```
 
@@ -1280,6 +1361,7 @@ When the opportunity is later sent / scheduled / manually replied, the leftover 
 
 **Errors**
 - `400` — `scheduledAt` is not in the future
+- `403` — Reply pacing gate — same three `code`s as [`/send-now`](#reply-pacing-403s); the day counted is the reply's **scheduled publish day**, so scheduling for a future day checks that day's target, not today's.
 - `404` — Opportunity doesn't exist or already replied
 
 ---
@@ -1294,6 +1376,7 @@ When the opportunity is later sent / scheduled / manually replied, the leftover 
 
 ```json
 {
+  "projectId": "product_123",
   "items": [
     {
       "integrationId": "integration-uuid-A",
@@ -1315,6 +1398,7 @@ When the opportunity is later sent / scheduled / manually replied, the leftover 
 
 | Field | Type | Required | Description |
 |---|---|---|---|
+| `projectId` | `string` | — | Optional project scope for the whole batch |
 | `items` | `array` | ✓ | 1–20 items |
 | `items[].integrationId` | `string` | ✓ | Integration ID (from GET /reply-accounts) |
 | `items[].draftContent` | `string` | ✓ | Reply content, max 4000 chars |
@@ -1326,6 +1410,7 @@ When the opportunity is later sent / scheduled / manually replied, the leftover 
 
 **Errors**
 - `400` — Any `scheduledAt` is not in the future, or array is empty / exceeds 20 items
+- `403` — Reply pacing gate — same three `code`s as [`/send-now`](#reply-pacing-403s). The **whole batch** is checked before any post is created (every distinct item counts toward the caps), and all rolled back on a block.
 - `404` — Opportunity doesn't exist or already replied
 
 ---
@@ -1340,6 +1425,7 @@ When the opportunity is later sent / scheduled / manually replied, the leftover 
 
 ```json
 {
+  "projectId": "product_123",
   "items": [
     {
       "integrationId": "integration-uuid-A",
@@ -1359,6 +1445,7 @@ When the opportunity is later sent / scheduled / manually replied, the leftover 
 
 | Field | Type | Required | Description |
 |---|---|---|---|
+| `projectId` | `string` | — | Optional project scope for the whole batch |
 | `items` | `array` | ✓ | 1–20 items |
 | `items[].integrationId` | `string` | ✓ | Integration ID (from GET /reply-accounts) |
 | `items[].draftContent` | `string` | ✓ | Reply content, max 4000 chars |
@@ -1368,6 +1455,7 @@ When the opportunity is later sent / scheduled / manually replied, the leftover 
 **Response** `200 OK` — Returns `EngageSentReply[]`. May be shorter than `items` if individual SentReply recording fails (individual failures are logged). Returns `500` only if all recording fails.
 
 **Errors**
+- `403` — Reply pacing gate — same three `code`s as [`/send-now`](#reply-pacing-403s). The **whole batch** is checked before any send; a block rolls back every post and releases the claim.
 - `404` — Opportunity doesn't exist or already replied
 - `500` — All X API calls failed (posts rolled back, claim released); or all posts published but zero records could be created
 
@@ -1385,13 +1473,30 @@ When the opportunity is later sent / scheduled / manually replied, the leftover 
 {
   "draftContent": "Here is my reply...",  // Required, max 4000 characters
   "strategy": "EXPERT_ANSWER",            // Required
-  "brandStrength": 1                      // Required, 0-3
+  "brandStrength": 1,                     // Required, 0-3
+  "projectId": "product_123"              // Optional project scope
 }
 ```
 
 **Response** `200 OK` — Returns `EngageSentReply`
 
 > After calling this endpoint, the record enters the Sent list with status "⚠ No reply URL submitted" until the URL is provided.
+
+> **Not** subject to the reply pacing gate: the reply was already posted manually outside Postiz before this call, so blocking the confirmation would only lose the tracking record, not un-send anything. The confirmed reply still counts toward future pacing checks (it writes a normal `EngageSentReply` with `projectId` + `matchedKeywords`).
+
+---
+
+### Reply pacing 403s
+
+The send/schedule/batch endpoints above run a **send-time pacing gate (§6/§6.1)** just before the platform publish. A block throws `403` with a JSON `code` and is fully rolled back (claim released, any created posts deleted). It is independent of the monthly reply-**generation** credit cap (`EngageEntitlementService`, enforced at draft time).
+
+| `code` | Meaning | Source of the limit |
+|---|---|---|
+| `engage_daily_hard_cap_reached` | Project's daily reply ceiling for the platform would be exceeded. Response carries `hardCap`, `sentToday`, `requested`. | The tighter of the active `OperationPlan`'s `planPayload.engagePolicies[].targetRepliesPerDay` and an optional `dailyHardCap`/`hardCapRepliesPerDay`. No active plan / no matching enabled policy → no cap. |
+| `engage_daily_keyword_target_reached` | A per-keyword daily target for one of the opportunity's matched keywords would be exceeded. Response carries `keyword`, `target`, `sentToday`, `requested`. | `planPayload.engagePolicies[].keywordTargets[keyword]` (`Record<keywordId, number>`). Only keywords the opportunity actually matched are checked. |
+| `engage_account_daily_cap_reached` | The sending account's per-account daily cap would be exceeded. Response carries `cap`, `sentToday`, `requested`. Checked for every distinct account in a batch. | `engage_reply_account_daily_cap` Setting (default `50`; `0`/unset = uncapped), seeded on boot. |
+
+"Today" is a UTC day, counted by the reply's **publish day** (`Post.publishDate`, states `QUEUE`+`PUBLISHED`) — so a reply scheduled for a future day counts toward that day, keeping the check consistent with how each request is grouped by its scheduled time.
 
 ---
 
@@ -1473,6 +1578,7 @@ Retrieve the list of sent replies (includes original post summary and metrics da
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
+| `projectId` | `string` | — | Optional project scope |
 | `platform` | `string` | — | Platform filter |
 | `status` | `'published' \| 'scheduled' \| 'manual' \| 'error' \| 'draft' \| 'settled' \| 'awaiting' \| 'awaiting-draft' \| 'awaiting-expired' \| 'awaiting-link'` | — | Status filter (see table below). `settled` and `awaiting` are combined rollups; `awaiting-draft` / `awaiting-expired` / `awaiting-link` are sub-filters of `awaiting` that back the Awaiting-review tabs (Drafts / Expired / Awaiting link). |
 | `date` | `all \| day \| today \| week \| month` | `all` | Publish-date window (`day`/`today` aliased) |
@@ -1651,6 +1757,7 @@ Locate which page a given sent reply lives on within `/sent`, using **the same f
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `sentReplyId` | `string` | **required** | `item.id` from `/sent` response (`EngageSentReply.id`) |
+| `projectId` | `string` | — | Optional project scope. Must match the active `/sent` filter. |
 | `limit` | `number` | `20` | Page size — must match the `limit` you pass to `/sent`, max 100 |
 | `platform` | `string` | — | Must match the active filter |
 | `status` | `'published' \| 'scheduled' \| 'manual' \| 'error' \| 'draft' \| 'settled' \| 'awaiting' \| 'awaiting-draft' \| 'awaiting-expired' \| 'awaiting-link'` | — | Must match the active filter |
@@ -1690,6 +1797,7 @@ Retrieve summary statistics for sent records (used for the top of the Sent page)
 
 | Param | Type | Description |
 |---|---|---|
+| `projectId` | `string` | Optional project scope. |
 | `date` | `all` \| `day` \| `today` \| `week` \| `month` | Publish-date window. `all` / omitted / unknown = all-time. `day` and `today` are aliases. Same vocabulary as `/dashboard/summary`. |
 | `platform` | `x` \| `reddit` | Restrict to one platform (via the linked opportunity). |
 | `status` | `published` \| `scheduled` \| `manual` \| `error` \| `draft` \| `settled` \| `awaiting` \| `awaiting-draft` \| `awaiting-expired` \| `awaiting-link` | Restrict to a reply lifecycle state. Same values as `/sent` (incl. the `settled` / `awaiting` rollups and the three `awaiting-*` sub-filters). |
@@ -1718,6 +1826,7 @@ Total + byPlatform + settled/awaiting rollup counts for `/sent`, replacing sever
 
 | Param | Type | Description |
 |---|---|---|
+| `projectId` | `string` | Optional project scope. |
 | `date` | `all` \| `day` \| `today` \| `week` \| `month` | Same vocabulary as `/sent`/`/sent/stats`. Scopes `total`/`byPlatform`, `rollups`, **and** `awaitingBreakdown`. |
 | `status` | Same values as `/sent` | Scopes `total`/`byPlatform` only. **`rollups` always recomputes settled/awaiting from `date` alone**, ignoring this param — the tab badges need their own totals regardless of which status tab is currently active. `awaitingBreakdown` is only computed (and only present in the response) **when `status=awaiting`** — it backs the Awaiting-review page's own Drafts / Awaiting link / Expired sub-tab badges. |
 
@@ -1815,7 +1924,7 @@ URL format must match: `reddit.com/r/{subreddit}/comments/{post_id}/{title}/{com
 
 ## Dashboard Stats — Dashboard Statistics
 
-The Engage data surfaces inside the existing Dashboard as three panels (no standalone page). Each panel has its own endpoint below.
+The Engage data surfaces inside the existing Dashboard as five panels (no standalone page). Each panel has its own endpoint below.
 
 > **Data source.** All figures derive from `Post` records with `source = 'engage'`. X reply metrics (`impressions`, `trafficScore`, `analytics`) are populated by `PostsService.checkPostAnalytics` using the integration's OAuth token — the same path regular posts use — so `impression_count` and `bookmark_count` are captured. The X traffic index uses the `x` weights in `traffic.calculator.ts` (`likes×1 + replies×2 + retweets×1.5 + quotes×2 + bookmarks×1.5`), which match the spec's `X_traffic_index`. Reddit replies are synced separately (`impressions = (score+comments)×20`, `trafficScore = score×1 + num_comments×3`). Engage posts are intentionally excluded from the global analytics job and aggregated via `EngageDataTicks` instead.
 
@@ -1831,6 +1940,7 @@ The Engage data surfaces inside the existing Dashboard as three panels (no stand
 
 | Param | Type | Default | Description |
 |---|---|---|---|
+| `projectId` | `string` | — (org-wide) | Optional project scope. Set = restrict every stat to posts/replies attributed to this project (`Post.projectId`); omitted = organization-wide (legacy behavior). |
 | `platform` | `string` (`x` \| `reddit`) | — (all) | Scope the headline cards and best-reply badge to one platform. Empty / omitted = combined. |
 | `date` | `all` \| `day` \| `week` \| `month` | `all` | Date window on `Post.publishDate`. `all` = all-time (no window); `day` = today; `week` = current ISO week; `month` = current calendar month. Empty / unknown = all-time. |
 
@@ -1881,6 +1991,7 @@ Every metric (`repliesCount`, `responseRate`, `totalImpressions`, `totalTrafficS
 
 | Param | Type | Default | Description |
 |---|---|---|---|
+| `projectId` | `string` | — (org-wide) | Optional project scope (`Post.projectId`); omitted = organization-wide. |
 | `period` | `'daily' \| 'weekly' \| 'monthly'` | `daily` | Time aggregation granularity |
 
 Lookback: 30 days (daily), 12 weeks (weekly), 12 months (monthly).
@@ -1912,6 +2023,7 @@ Lookback: 30 days (daily), 12 weeks (weekly), 12 months (monthly).
 
 | Param | Type | Default | Description |
 |---|---|---|---|
+| `projectId` | `string` | — (org-wide) | Optional project scope (`Post.projectId`); omitted = organization-wide. |
 | `platform` | `string` (`x` \| `reddit`) | — (all) | Restrict the aggregate and list to one platform. Pass `x` for the X-only "X 流量指数汇总". |
 | `limit` | `number` (1–50) | `10` | Number of top-traffic replies to return |
 
@@ -1946,6 +2058,7 @@ Lookback: 30 days (daily), 12 weeks (weekly), 12 months (monthly).
 
 | Param | Type | Default | Description |
 |---|---|---|---|
+| `projectId` | `string` | — (org-wide) | Optional project scope (`Post.projectId`); omitted = organization-wide. |
 | `period` | `'daily' \| 'weekly' \| 'monthly'` | `daily` | Time aggregation granularity |
 
 Lookback: 30 days (daily), 90 days (weekly), 365 days (monthly).
@@ -1969,34 +2082,57 @@ Lookback: 30 days (daily), 90 days (weekly), 365 days (monthly).
 
 ### GET `/api/engage/dashboard/top-sources`
 
-**Panel ⑤ — "Top engage sources".** Engage replies aggregated by the **original post author** (the traffic source), ranked by traffic index ("clicks"). Note: the mockup's "Visitors" metric is not tracked and is omitted.
+**Panel ⑤ — "Top engage sources".** The organization's best-performing individual engage replies, ranked by the per-platform engagement metric — **X by likes, Reddit by upvotes**, descending. Each item is one sent reply (not a per-author aggregate); the surfaced account is the **reply author** (the connected posting account), and the metrics are that reply's own stats.
 
 **Query Params**
 
 | Param | Type | Default | Description |
 |---|---|---|---|
+| `projectId` | `string` | — (org-wide) | Optional project scope (`Post.projectId`); omitted = organization-wide. |
 | `platform` | `string` (`x` \| `reddit`) | — (all) | Restrict to one platform. |
-| `limit` | `number` (1–50) | `10` | Number of top sources to return. |
+| `limit` | `number` (1–50) | `10` | Number of top replies to return (applied **after** ranking). |
+
+Candidate set = sent replies whose `Post.trafficScore` is non-null. Ranking metric per item: `likes` for X, `upvotes` for Reddit (a missing metric ranks as `0`). With no `platform` filter, a mixed X + Reddit list still sorts sensibly because each item ranks by its own platform's key.
 
 **Response** `200 OK`
 
 ```json
 {
-  "totalClicks": 51,             // SUM(Post.trafficScore) across all sources (not just top-N)
   "items": [
     {
-      "author": "koraygubur",    // original post author handle
-      "avatar": "https://.../avatar.jpg",  // author avatar, or null
-      "platform": "x",
-      "clicks": 30,              // SUM(Post.trafficScore) for this author, rounded
-      "replies": 3               // number of replies sent to this author
+      "id": "sent-reply-uuid",          // EngageSentReply id
+      "platform": "x",                  // 'x' | 'reddit' | 'unknown'
+      "post": {
+        "id": "post-uuid",              // Post.id, or null
+        "content": "Reply text...",
+        "releaseURL": "https://twitter.com/.../status/123",  // Post.releaseURL, falls back to the original post URL, or null
+        "publishDate": "2026-05-20T10:00:00.000Z",           // Post.publishDate, or null
+        "replyAuthor": {                // the connected account that posted the reply, or null
+          "handle": "myhandle",         // '@' stripped
+          "id": "internal-id",          // optional
+          "name": "My Account",         // optional
+          "avatarUrl": "https://.../avatar.jpg"  // optional
+        },
+        "metrics": {                    // this reply's own normalized metrics (platform-shaped)
+          "trafficScore": 30,
+          "impressions": 1200,
+          "likes": 7,                   // X: likes/retweets/replies/quotes/bookmarks
+          "retweets": 1,
+          "replies": 0,
+          "quotes": 0,
+          "bookmarks": 2
+        }
+      },
+      "metric": 7                       // the ranking value (X likes / Reddit upvotes)
     }
-  ]
+  ],
+  "total": 42                           // size of the candidate set before the limit slice
 }
 ```
 
-- Sources are grouped by `(platform, authorUsername)` and sorted by `clicks` descending.
-- "clicks" is the rounded traffic index (weighted engagement), not literal link clicks.
+- `metrics` is platform-shaped: X replies carry `{ trafficScore, impressions, likes, retweets, replies, quotes, bookmarks }`; Reddit replies carry `{ trafficScore, upvotes, comments, estReach }` instead.
+- `replyAuthor` is resolved from the reply's stored `engageAuthor` settings first, then the connected integration; `id`/`name`/`avatarUrl` are present only when known. It is the account that **sent** the reply, not the original post's author.
+- `total` is the count of eligible replies (non-null `trafficScore`) before the `limit` slice — not a sum of any metric.
 
 ---
 
@@ -2048,6 +2184,7 @@ All error response formats (NestJS default):
 | HTTP Status Code | Meaning |
 |---|---|
 | `400 Bad Request` | Parameter validation failed, invalid URL format, scheduledAt is not in the future |
+| `403 Forbidden` | Opportunity no longer actionable (save-draft); or a reply pacing cap reached on send/schedule/batch — see [Reply pacing 403s](#reply-pacing-403s) for the JSON `code`s |
 | `404 Not Found` | Resource doesn't exist, doesn't belong to current organization, opportunity already in a final state |
 | `429 Too Many Requests` | Draft generation rate limit exceeded (20 calls/hour/user); or scan trigger rate limit exceeded (5 calls/hour/org) |
 | `500 Internal Server Error` | X API call failed, database exception |

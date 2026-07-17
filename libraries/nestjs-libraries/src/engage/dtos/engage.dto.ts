@@ -66,6 +66,12 @@ export class SaveEngageConfigDto {
   @IsOptional()
   @IsBoolean()
   enabled?: boolean;
+
+  // Opaque aisee-core products.id. Omit for the legacy, single (null-project)
+  // config (project-scoped-post-engage-design.md §8/§11).
+  @IsOptional()
+  @IsString()
+  projectId?: string;
 }
 
 export class SetupEngageDto {
@@ -87,6 +93,10 @@ export class SetupEngageDto {
   @ValidateNested({ each: true })
   @Type(() => AddTrackedAccountDto)
   trackedAccounts?: AddTrackedAccountDto[];
+
+  @IsOptional()
+  @IsString()
+  projectId?: string;
 }
 
 // ─── Keywords ─────────────────────────────────────────────────────────────────
@@ -115,6 +125,13 @@ export class AddKeywordDto {
   @IsOptional()
   @IsBoolean()
   enabled?: boolean;
+
+  // Only meaningful on the standalone POST /keywords call — SetupEngageDto/
+  // AddKeywordsBulkDto read projectId from their OWN top level, not from
+  // each nested keyword item.
+  @IsOptional()
+  @IsString()
+  projectId?: string;
 }
 
 export class UpdateKeywordDto {
@@ -134,6 +151,10 @@ export class AddKeywordsBulkDto {
   @ValidateNested({ each: true })
   @Type(() => AddKeywordDto)
   keywords: AddKeywordDto[];
+
+  @IsOptional()
+  @IsString()
+  projectId?: string;
 }
 
 // ─── Monitored Channels ───────────────────────────────────────────────────────
@@ -160,6 +181,11 @@ export class AddMonitoredChannelDto {
 
   @IsOptional()
   metadata?: Record<string, unknown>;
+
+  // Only meaningful on the standalone POST /monitored-channels call.
+  @IsOptional()
+  @IsString()
+  projectId?: string;
 }
 
 export class UpdateMonitoredChannelDto {
@@ -212,6 +238,11 @@ export class AddTrackedAccountDto {
   @IsOptional()
   @IsBoolean()
   enabled?: boolean; // default true (Prisma schema default)
+
+  // Only meaningful on the standalone POST /tracked-accounts call.
+  @IsOptional()
+  @IsString()
+  projectId?: string;
 }
 
 export class UpdateTrackedAccountDto {
@@ -256,11 +287,23 @@ export class UpdateReplyAccountDto {
   @IsOptional()
   @IsString()
   defaultStrategy?: string;
+
+  // Disambiguates which project's reply-account row to update, now that an
+  // integration may have one row per project (UNIQUE(configId,integrationId),
+  // not a global UNIQUE(integrationId) — project-scoped-post-engage-
+  // design.md §3.1).
+  @IsOptional()
+  @IsString()
+  projectId?: string;
 }
 
 // ─── Opportunities ────────────────────────────────────────────────────────────
 
 export class ListOpportunitiesDto {
+  @IsOptional()
+  @IsString()
+  projectId?: string;
+
   // Multi-value: repeated params (?platform=x&platform=y) or comma-separated (?platform=x,y)
   @IsOptional()
   @Transform(({ value }) =>
@@ -456,6 +499,10 @@ export class OpportunityCountsDto extends OmitType(ListOpportunitiesDto, [
 ] as const) {}
 
 export class LocateOpportunityDto {
+  @IsOptional()
+  @IsString()
+  projectId?: string;
+
   @IsString()
   opportunityId!: string;
 
@@ -614,6 +661,10 @@ export class LocateOpportunityDto {
 }
 
 export class LocateSentReplyDto {
+  @IsOptional()
+  @IsString()
+  projectId?: string;
+
   @IsString()
   sentReplyId!: string;
 
@@ -641,6 +692,10 @@ export class LocateSentReplyDto {
 export class ScoreStatsDto {
   @IsOptional()
   @IsString()
+  projectId?: string;
+
+  @IsOptional()
+  @IsString()
   @IsIn(['today', 'week', 'month'])
   date?: 'today' | 'week' | 'month';
 
@@ -652,6 +707,10 @@ export class ScoreStatsDto {
 // ─── Sent ─────────────────────────────────────────────────────────────────────
 
 export class ListSentDto {
+  @IsOptional()
+  @IsString()
+  projectId?: string;
+
   @IsOptional()
   @IsString()
   platform?: string;
@@ -756,6 +815,12 @@ export class IngestReplyMetricsDto {
 
 // Panel ① "Engage Performance" — headline summary stats, optionally scoped to one platform.
 export class DashboardSummaryDto {
+  // Optional project scope. Omitted = organization-wide (legacy behavior); set =
+  // restrict every headline stat to posts/replies attributed to this project.
+  @IsOptional()
+  @IsString()
+  projectId?: string;
+
   // Optional platform filter (x | reddit). Empty string / omitted = all platforms.
   // No @IsIn so an empty `?platform=` (the "All" toggle) is tolerated rather than
   // rejected — matches ListSentDto / DashboardTrafficsDto. Unknown values simply
@@ -774,6 +839,11 @@ export class DashboardSummaryDto {
 
 // Panel ② "Your Posts" overlay — Engage reply counts bucketed by period.
 export class DashboardRepliesTrendDto {
+  // Optional project scope; omitted = organization-wide (legacy behavior).
+  @IsOptional()
+  @IsString()
+  projectId?: string;
+
   @IsOptional()
   @IsString()
   @IsIn(['daily', 'weekly', 'monthly'])
@@ -784,6 +854,11 @@ export class DashboardRepliesTrendDto {
 // for engage posts. Response shape matches /dashboard/impressions so the same
 // chart component can consume both.
 export class DashboardImpressionsDto {
+  // Optional project scope; omitted = organization-wide (legacy behavior).
+  @IsOptional()
+  @IsString()
+  projectId?: string;
+
   @IsOptional()
   @IsString()
   @IsIn(['daily', 'weekly', 'monthly'])
@@ -792,6 +867,12 @@ export class DashboardImpressionsDto {
 
 // Panel ③ "Traffic from Engage" — per-reply traffic-index breakdown.
 export class DashboardTrafficsDto {
+  // Optional project scope; omitted = organization-wide (legacy behavior).
+  // Reused by both /dashboard/traffics and /dashboard/top-sources.
+  @IsOptional()
+  @IsString()
+  projectId?: string;
+
   @IsOptional()
   @IsString()
   platform?: string;
@@ -807,6 +888,10 @@ export class DashboardTrafficsDto {
 // ─── Draft Generation ─────────────────────────────────────────────────────────
 
 export class GenerateDraftDto {
+  @IsOptional()
+  @IsString()
+  projectId?: string;
+
   @IsString()
   @IsIn(VALID_STRATEGIES)
   strategy: string;
@@ -865,6 +950,10 @@ export class SendReplyDto {
   @MaxLength(100, { each: true })
   @ArrayMaxSize(20)
   mentions?: string[];
+
+  @IsOptional()
+  @IsString()
+  projectId?: string;
 }
 
 export class ScheduleReplyDto extends SendReplyDto {
@@ -879,6 +968,12 @@ export class BatchSendReplyDto {
   @ArrayMinSize(1)
   @ArrayMaxSize(20)
   items: SendReplyDto[];
+
+  // One project for the whole batch — not read from each item's own
+  // (inherited) projectId field.
+  @IsOptional()
+  @IsString()
+  projectId?: string;
 }
 
 export class BatchScheduleReplyDto {
@@ -888,6 +983,10 @@ export class BatchScheduleReplyDto {
   @ArrayMinSize(1)
   @ArrayMaxSize(20)
   items: ScheduleReplyDto[];
+
+  @IsOptional()
+  @IsString()
+  projectId?: string;
 }
 
 export class ConfirmManualReplyDto {
@@ -915,6 +1014,10 @@ export class ConfirmManualReplyDto {
   @IsOptional()
   @IsString()
   integrationId?: string;
+
+  @IsOptional()
+  @IsString()
+  projectId?: string;
 }
 
 export class EngageAuthorDto {
@@ -957,6 +1060,10 @@ export class SubmitManualReplyUrlDto {
 // GET /sent?status=awaiting (Post.state=DRAFT); does not claim the opportunity,
 // charge credits, or sync metrics.
 export class SaveDraftDto {
+  @IsOptional()
+  @IsString()
+  projectId?: string;
+
   @IsString()
   @MaxLength(4000)
   draftContent: string;

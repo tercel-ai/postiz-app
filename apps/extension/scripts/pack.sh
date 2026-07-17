@@ -125,8 +125,6 @@ fi
 VERSION="$(node -p "require('./package.json').version")"
 STAMP="$(date +%Y%m%d-%H%M)"
 OUT="aisee-extension-v${VERSION}-${BROWSER}-${STAMP}.zip"
-
-# Zip the CONTENTS of $BUILD_DIR so manifest.json sits at the archive root.
 # Chrome's built-in ZipFileInstaller (chrome://extensions drag-drop, Developer
 # mode on) unzips to a temp dir and expects manifest.json at the top level — a
 # wrapping folder makes it fail with "Could not unzip extension for install".

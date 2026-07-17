@@ -9,44 +9,45 @@ datasource db {
 }
 
 model Organization {
-  id                String              @id @default(uuid())
-  name              String
-  description       String?
-  apiKey            String?
-  paymentId         String?
-  data              Json?
-  createdAt         DateTime            @default(now())
-  updatedAt         DateTime            @updatedAt
-  allowTrial        Boolean             @default(false)
-  isTrailing        Boolean             @default(false)
-  shortlink         ShortLinkPreference @default(ASK)
-  autoPost          AutoPost[]
-  Comments          Comments[]
-  credits           Credits[]
-  customers         Customer[]
-  errors            Errors[]
-  github            GitHub[]
-  Integration       Integration[]
-  media             Media[]
-  buyerOrganization MessagesGroup[]
-  notifications     Notifications[]
-  plugs             Plugs[]
-  post              Post[]              @relation("organization")
-  submittedPost     Post[]              @relation("submittedForOrg")
-  sets              Sets[]
-  signatures        Signatures[]
-  subscription      Subscription?
-  tags              Tags[]
-  thirdParty        ThirdParty[]
-  usedCodes         UsedCodes[]
-  users             UserOrganization[]
-  webhooks          Webhooks[]
-  dataTicks         DataTicks[]
-  postReleases      PostRelease[]
-  billingRecords    BillingRecord[]
-  engageConfig      EngageConfig?
+  id                      String                   @id @default(uuid())
+  name                    String
+  description             String?
+  apiKey                  String?
+  paymentId               String?
+  data                    Json?
+  createdAt               DateTime                 @default(now())
+  updatedAt               DateTime                 @updatedAt
+  allowTrial              Boolean                  @default(false)
+  isTrailing              Boolean                  @default(false)
+  shortlink               ShortLinkPreference      @default(ASK)
+  autoPost                AutoPost[]
+  Comments                Comments[]
+  credits                 Credits[]
+  customers               Customer[]
+  errors                  Errors[]
+  github                  GitHub[]
+  Integration             Integration[]
+  media                   Media[]
+  buyerOrganization       MessagesGroup[]
+  notifications           Notifications[]
+  plugs                   Plugs[]
+  post                    Post[]                   @relation("organization")
+  submittedPost           Post[]                   @relation("submittedForOrg")
+  sets                    Sets[]
+  signatures              Signatures[]
+  subscription            Subscription?
+  tags                    Tags[]
+  thirdParty              ThirdParty[]
+  usedCodes               UsedCodes[]
+  users                   UserOrganization[]
+  webhooks                Webhooks[]
+  dataTicks               DataTicks[]
+  postReleases            PostRelease[]
+  billingRecords          BillingRecord[]
+  engageConfigs           EngageConfig[]
   engageOpportunityStates EngageOpportunityState[]
-  engageSentReplies   EngageSentReply[]
+  engageSentReplies       EngageSentReply[]
+  operationPlans          OperationPlan[]
 }
 
 model Tags {
@@ -111,6 +112,7 @@ model User {
   organizations         UserOrganization[]
   sendSuccessEmails     Boolean            @default(true)
   sendFailureEmails     Boolean            @default(true)
+
   @@unique([email, providerName])
   @@index([lastReadNotifications])
   @@index([inviteId])
@@ -281,40 +283,40 @@ model Credits {
 /// The record is created BEFORE calling Aisee so that its id (postizBillingId)
 /// can be sent to Aisee for cross-system reconciliation.
 model BillingRecord {
-  id              String       @id @default(uuid())
-  organizationId  String
+  id               String       @id @default(uuid())
+  organizationId   String
   /// Aisee transaction ID returned after successful deduction
-  transactionId   String?
+  transactionId    String?
   /// Idempotency key sent to Aisee (postiz_{label}_{random})
-  taskId          String       @unique
+  taskId           String       @unique
   /// Total cost in Aisee credits (decimal string)
-  amount          String
+  amount           String
   /// ai_copywriting | image_gen | video_gen
-  businessType    String
+  businessType     String
   /// Fine-grained sub-type: chat | post_gen | image | video
-  subType         String?
-  description     String
+  subType          String?
+  description      String
   /// JSON-serialised AiseeCostItem[] breakdown
-  costItems       String       @default("[]")
+  costItems        String       @default("[]")
   /// Optional related entity ID for business context (e.g. post ID, media ID)
-  relatedId       String?
+  relatedId        String?
   /// Flexible business context JSON (prompt, generation params, associated entities)
-  data            Json?
+  data             Json?
   /// pending  → record created, Aisee call not yet made
   /// success  → Aisee deduction confirmed
   /// failed   → Aisee deduction failed or refunded
   /// skipped  → Aisee not configured (self-hosted)
   /// internal → BILL_TYPE=internal, subscription billing, no Aisee call
-  status          String       @default("pending")
+  status           String       @default("pending")
   /// Remaining balance returned by Aisee after deduction
   remainingBalance String?
   /// Non-null when user balance went negative
-  debtAmount      String?
+  debtAmount       String?
   /// Error message if deduction failed
-  error           String?
-  createdAt       DateTime     @default(now())
-  updatedAt       DateTime     @updatedAt
-  organization    Organization @relation(fields: [organizationId], references: [id])
+  error            String?
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+  organization     Organization @relation(fields: [organizationId], references: [id])
 
   @@index([organizationId])
   @@index([createdAt])
@@ -386,7 +388,7 @@ model Integration {
   posts                 Post[]
   dataTicks             DataTicks[]
   postReleases          PostRelease[]
-  engageXReplyAccount   EngageXReplyAccount?
+  engageXReplyAccounts  EngageXReplyAccount[]
 
   @@unique([organizationId, internalId])
   @@index([rootInternalId])
@@ -456,7 +458,7 @@ model Post {
   submittedForOrganizationId String?
   approvedSubmitForOrder     APPROVED_SUBMIT_FOR_ORDER @default(NO)
   lastMessageId              String?
-  source                     String    @default("calendar")
+  source                     String                    @default("calendar")
   intervalInDays             Int?
   error                      String?
   sourcePostId               String?
@@ -464,6 +466,28 @@ model Post {
   trafficScore               Float?
   analytics                  Json?
   lastMetricsFetchAt         DateTime?
+  // Operation-plan / campaign attribution (aisee-live-geo-growth-plan.md
+  // §5). Only two real columns are added:
+  //   projectId       — the project-scoping filter (also used by manually-created
+  //                     project posts that have no operationPlanId); must be an
+  //                     indexable column, never buried in settings.
+  //   operationPlanId — links a generated post to its source OperationPlan.
+  // contentItems[].platforms[].id is reserved as this Post.id, not stored in a
+  // separate operationPlanContentId column. Other campaign metadata (campaignId,
+  // contentId, themeKey) is attribution/display data, not a query key, and lives
+  // inside the existing Post.settings JSON string (alongside e.g. engageAuthor).
+  // taskId is not stored at all: it is reachable via operationPlanId ->
+  // OperationPlan.taskId. durationDays likewise derives from OperationPlan.startsAt
+  // /endsAt, and sourceScore (the source opportunity/analysis score) is pure
+  // provenance nothing reads — it stays only in OperationPlan.planPayload, not
+  // copied onto Post at all.
+  //
+  // Consequence: idempotent materialization is enforced by Post.id. Re-running
+  // plan creation/reconciliation skips already-created posts for the same
+  // operationPlanId and rejects a reused generated post id owned by another plan
+  // or organization. No extra uniqueness column is needed.
+  projectId                  String?
+  operationPlanId            String?
   createdAt                  DateTime                  @default(now())
   updatedAt                  DateTime                  @updatedAt
   deletedAt                  DateTime?
@@ -482,7 +506,9 @@ model Post {
   tags                       TagsPosts[]
   releases                   PostRelease[]
   engageSentReply            EngageSentReply?
+  operationPlan              OperationPlan?            @relation(fields: [operationPlanId], references: [id])
 
+  @@index([projectId])
   @@index([group])
   @@index([deletedAt])
   @@index([publishDate])
@@ -501,6 +527,61 @@ model Post {
   @@index([source])
   @@index([organizationId, state, publishDate])
   @@index([lastMetricsFetchAt])
+  @@index([operationPlanId])
+}
+
+enum OperationPlanStatus {
+  GENERATING
+  BILLING_PENDING
+  READY
+  BILLING_FAILED
+  FAILED
+}
+
+// The billable, immutable-once-generated business artifact for an AI-generated
+// operation plan (aisee-live-geo-growth-plan.md §5). planPayload is the
+// full generation-time JSON snapshot (contentItems + engagePolicies + warnings).
+// contentItems materialize into DRAFT Post rows after READY billing confirmation (§6); engagePolicies
+// (the daily reply targets) are read directly from planPayload at execution
+// time — there is no separate reply-policy table (see §3.4 note below).
+//
+// No aiseeUserId column: billing calls resolve the org's Aisee user on demand
+// via AiseeCreditService.resolveOwnerUserId(organizationId), matching every
+// other billing-related table in this codebase. No idempotencyKey column:
+// taskId already serves that role (see UNIQUE below). No durationDays column:
+// derivable from startsAt/endsAt (also preserved, unparsed, in planPayload).
+// No billingTaskId column: it is the deterministic string `operation_plan:${id}`,
+// computed wherever needed rather than stored.
+model OperationPlan {
+  id                   String              @id @default(uuid())
+  organizationId       String
+  organization         Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  projectId            String
+  taskId               String
+  sourceTaskVersion    String?
+  platforms            String[]
+  generatorVersion     String
+  campaignId           String
+  startsAt             DateTime
+  endsAt               DateTime
+  status               OperationPlanStatus @default(GENERATING)
+  planPayload          Json
+  // Plan-level goal summary shown on the plan page: { title, description,
+  // baselineScore (from the source analysis total_score), targetScore
+  // (LLM-estimated post-campaign score) }. Nullable for legacy rows.
+  data                 Json?
+  sourceResultHash     String
+  billingTransactionId String?
+  creditAmount         String?
+  errorCode            String?
+  createdAt            DateTime            @default(now())
+  updatedAt            DateTime            @updatedAt
+
+  posts Post[]
+
+  @@unique([organizationId, taskId])
+  @@index([organizationId, projectId])
+  @@index([campaignId])
 }
 
 model Notifications {
@@ -1027,34 +1108,44 @@ model PostRelease {
 // ENGAGE MODULE MODELS
 // ─────────────────────────────────────────────────────────────────────────────
 
+// projectId is nullable during migration (existing rows keep projectId = NULL
+// until backfilled — see docs/project-scoped-post-engage-design.md §11). Postgres
+// unique indexes treat NULLs as distinct, so multiple legacy (organizationId,
+// NULL) rows are not caught by @@unique alone; the backfill step is responsible
+// for collapsing them to one legacy/default project per org before projectId
+// becomes required.
 model EngageConfig {
-  id             String    @id @default(uuid())
-  organizationId String    @unique
+  id             String       @id @default(uuid())
+  organizationId String
+  projectId      String?
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  enabled        Boolean   @default(false)
+  enabled        Boolean      @default(false)
   lastScanAt     DateTime?
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
 
   keywords          EngageKeyword[]
   monitoredChannels EngageMonitoredChannel[]
   trackedAccounts   EngageTrackedAccount[]
   xReplyAccounts    EngageXReplyAccount[]
+
+  @@unique([organizationId, projectId])
+  @@index([organizationId])
 }
 
 model EngageKeyword {
-  id             String    @id @default(uuid())
+  id             String       @id @default(uuid())
   configId       String
   config         EngageConfig @relation(fields: [configId], references: [id], onDelete: Cascade)
   organizationId String
   keyword        String
   type           String?
-  enabled        Boolean   @default(true)
-  weeklyHitCount Int       @default(0)
-  totalHitCount  Int       @default(0)
+  enabled        Boolean      @default(true)
+  weeklyHitCount Int          @default(0)
+  totalHitCount  Int          @default(0)
   lastCountedAt  DateTime?
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
 
   initialScans EngageKeywordInitialScan[]
 
@@ -1064,19 +1155,19 @@ model EngageKeyword {
 }
 
 model EngageKeywordInitialScan {
-  id             String    @id @default(uuid())
+  id             String        @id @default(uuid())
   organizationId String
   keywordId      String
   keywordRef     EngageKeyword @relation(fields: [keywordId], references: [id], onDelete: Cascade)
   platform       String
   keyword        String
-  status         String    @default("PENDING") // PENDING | RUNNING | DONE | FAILED
+  status         String        @default("PENDING") // PENDING | RUNNING | DONE | FAILED
   startedAt      DateTime?
   completedAt    DateTime?
   error          String?
-  attempts       Int       @default(0)
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
+  attempts       Int           @default(0)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
 
   @@unique([keywordId, platform])
   @@index([status, platform, createdAt])
@@ -1084,19 +1175,19 @@ model EngageKeywordInitialScan {
 }
 
 model EngageMonitoredChannel {
-  id             String    @id @default(uuid())
+  id             String       @id @default(uuid())
   configId       String
   config         EngageConfig @relation(fields: [configId], references: [id], onDelete: Cascade)
   organizationId String
   platform       String
   channelId      String
   channelName    String
-  audienceSize   Int       @default(0)
-  enabled        Boolean   @default(true)
+  audienceSize   Int          @default(0)
+  enabled        Boolean      @default(true)
   lastScannedAt  DateTime?
   metadata       Json?
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
 
   @@unique([configId, platform, channelId])
   @@index([organizationId])
@@ -1104,95 +1195,110 @@ model EngageMonitoredChannel {
 }
 
 model EngageTrackedAccount {
-  id             String    @id @default(uuid())
+  id             String       @id @default(uuid())
   configId       String
   config         EngageConfig @relation(fields: [configId], references: [id], onDelete: Cascade)
   organizationId String
-  platform       String    @default("x")
+  platform       String       @default("x")
   username       String
   displayName    String?
   picture        String?
   categoryLabel  String?
-  enabled        Boolean   @default(true)
+  enabled        Boolean      @default(true)
   lastCheckedAt  DateTime?
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
 
   @@unique([configId, platform, username])
   @@index([organizationId, enabled])
 }
 
+// integrationId is intentionally NOT globally unique: the same integration may
+// now serve multiple projects' EngageConfig rows. Cross-project duplicate-reply
+// prevention is NOT enforced at the database level in this version — see the
+// EngageReplyClaim TODO note near the end of this file.
 model EngageXReplyAccount {
-  id                  String    @id @default(uuid())
-  configId            String
-  config              EngageConfig @relation(fields: [configId], references: [id], onDelete: Cascade)
-  organizationId      String
-  integrationId       String    @unique
-  integration         Integration @relation(fields: [integrationId], references: [id], onDelete: Cascade)
-  engageEnabled       Boolean   @default(true)
-  autoReplyEnabled    Boolean   @default(false)
-  autoReplyTimeStart  String?
-  autoReplyTimeEnd    String?
-  autoReplyTimezone   String?
-  defaultStrategy     String    @default("EXPERT_ANSWER")
-  createdAt           DateTime  @default(now())
-  updatedAt           DateTime  @updatedAt
+  id                 String       @id @default(uuid())
+  configId           String
+  config             EngageConfig @relation(fields: [configId], references: [id], onDelete: Cascade)
+  organizationId     String
+  integrationId      String
+  integration        Integration  @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  engageEnabled      Boolean      @default(true)
+  autoReplyEnabled   Boolean      @default(false)
+  autoReplyTimeStart String?
+  autoReplyTimeEnd   String?
+  autoReplyTimezone  String?
+  defaultStrategy    String       @default("EXPERT_ANSWER")
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
 
   @@unique([configId, integrationId])
   @@index([organizationId, engageEnabled])
+  @@index([integrationId])
 }
 
 // Global post table — one row per (platform, externalPostId), shared across all
 // orgs. Holds immutable content + objective metrics/scores. Per-org mutable state
 // (status, bookmark, keyword/tracked scores) lives in EngageOpportunityState.
 model EngageOpportunity {
-  id               String    @id @default(uuid())
-  platform         String
-  externalPostId   String
-  externalPostUrl  String
-  channelId        String?
-  channelName      String?
+  id                String   @id @default(uuid())
+  platform          String
+  // Stable platform ID (X tweet id / Reddit fullname). Always present — dedup is
+  // the @@unique([platform, externalPostId]) below. There is no alias/merge
+  // fallback for missing or ambiguous IDs (an earlier draft added
+  // EngageOpportunityIdentity/Discovery + a mergedIntoId pointer for that; cut —
+  // both platforms reliably return a stable id, matching how the pre-project
+  // system already deduped).
+  externalPostId    String
+  externalPostUrl   String
+  channelId         String?
+  channelName       String?
   // Community/channel audience size (e.g. Reddit subreddit_subscribers). Drives
   // scoreAuthority on community platforms. Null on platforms without a channel (X).
-  channelFollowers Int?
-  authorUsername   String
+  channelFollowers  Int?
+  authorUsername    String
   authorDisplayName String?
   // Post author's real follower count (X). Null on platforms where it isn't
   // collected (Reddit — authority uses channelFollowers instead).
-  authorFollowers  Int?
-  authorAvatarUrl  String?
-  postContent      String
-  postPublishedAt  DateTime
+  authorFollowers   Int?
+  authorAvatarUrl   String?
+  postContent       String
+  postPublishedAt   DateTime
 
   // Objective scores — identical for every org viewing this post.
-  scoreHeat        Int       @default(0)
-  scoreAuthority   Int       @default(0)
-  scoreRecency     Int       @default(0)
+  scoreHeat      Int @default(0)
+  scoreAuthority Int @default(0)
+  scoreRecency   Int @default(0)
 
-  intentTags       String[]
-  primaryIntent    String    @default("discussion")
-  intentScore      Float?
+  intentTags    String[]
+  primaryIntent String   @default("discussion")
+  intentScore   Float?
 
-  metricLikes      Int       @default(0)
-  metricReplies    Int       @default(0)
-  metricRetweets   Int       @default(0)
-  metricQuotes     Int       @default(0)
-  metricBookmarks  Int       @default(0)
-  metricViews      Int       @default(0)
-  metricShares     Int       @default(0)
-  metricSaves      Int       @default(0)
-  metricScore      Int       @default(0)
+  metricLikes       Int    @default(0)
+  metricReplies     Int    @default(0)
+  metricRetweets    Int    @default(0)
+  metricQuotes      Int    @default(0)
+  metricBookmarks   Int    @default(0)
+  metricViews       Int    @default(0)
+  metricShares      Int    @default(0)
+  metricSaves       Int    @default(0)
+  metricScore       Int    @default(0)
   metricUpvoteRatio Float?
-  metricComments   Int       @default(0)
+  metricComments    Int    @default(0)
 
-  rawData          Json?
+  rawData Json?
 
-  createdAt        DateTime  @default(now())
-  updatedAt        DateTime  @updatedAt
-  deletedAt        DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
 
-  states           EngageOpportunityState[]
-  sentReplies      EngageSentReply[]
+  states      EngageOpportunityState[]
+  sentReplies EngageSentReply[]
+  // Trigram index on postContent for keyword ILIKE previews (getKeywordPosts).
+  // `db push` cannot create a pg_trgm/gin_trgm_ops index, so it is created by
+  // ./engage-indexes.sql, run automatically after push via the "prisma-db-push"
+  // npm script (which chains "prisma-db-indexes").
 
   @@unique([platform, externalPostId])
   @@index([platform, externalPostUrl])
@@ -1201,10 +1307,6 @@ model EngageOpportunity {
   @@index([postPublishedAt])
   // GIN index for intentTags @> ARRAY[...] (Prisma: { has: tag }).
   @@index([intentTags], type: Gin)
-  // Trigram index on postContent for keyword ILIKE previews (getKeywordPosts).
-  // `db push` cannot create a pg_trgm/gin_trgm_ops index, so it is created by
-  // ./engage-indexes.sql, run automatically after push via the "prisma-db-push"
-  // npm script (which chains "prisma-db-indexes").
 }
 
 enum EngageOpportunityStatus {
@@ -1216,63 +1318,97 @@ enum EngageOpportunityStatus {
   EXPIRED
 }
 
-// Per-org mutable state for a global opportunity. Created at scan time when a
-// post matches the org's keywords. Total `score` = scoreKeyword + scoreTracked +
+// Per-project mutable state for a global opportunity. Created at scan time when a
+// post matches a project's keywords. Total `score` = scoreKeyword + scoreTracked +
 // opportunity.(scoreHeat + scoreAuthority + scoreRecency); recomputed each scan.
+//
+// projectId is nullable during migration, same rationale as EngageConfig.projectId.
+// Because a primary key cannot contain a nullable column, identity is enforced via
+// a surrogate `id` + @@unique([organizationId, projectId, opportunityId]) instead
+// of the composite PRIMARY KEY the design doc describes as the end state — Postgres
+// unique indexes (unlike PKs) tolerate multiple NULL projectId rows, which is what
+// lets a legacy (projectId = NULL) row and new per-project rows coexist during
+// backfill. Collapse to a true composite PK once projectId is required (§11 step 8).
 model EngageOpportunityState {
+  id             String            @id @default(dbgenerated("gen_random_uuid()"))
   organizationId String
-  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  organization   Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  projectId      String?
   opportunityId  String
   opportunity    EngageOpportunity @relation(fields: [opportunityId], references: [id], onDelete: Cascade)
 
-  status         EngageOpportunityStatus @default(NEW)
-  bookmarked     Boolean   @default(false)
+  status     EngageOpportunityStatus @default(NEW)
+  bookmarked Boolean                 @default(false)
 
-  score          Int       @default(0)
-  scoreKeyword   Int       @default(0)
-  scoreTracked   Int       @default(0)
+  score        Int @default(0)
+  scoreKeyword Int @default(0)
+  scoreTracked Int @default(0)
 
-  // The org's enabled keywords this post matched at scan time (text, as
-  // configured). Per-org — strictly within this org's keyword scope — so it
-  // lives here, alongside scoreKeyword, not on the shared EngageOpportunity
-  // (whose union of all orgs' keywords would leak words outside this org's set).
-  // Refreshed on every re-scan to track keyword edits.
-  matchedKeywords String[]
+  // The project's enabled keywords this post matched at scan time (text, as
+  // configured). Project-scoped — strictly within this project's keyword scope —
+  // so it lives here, alongside scoreKeyword, not on the shared EngageOpportunity
+  // (whose union of all projects' keywords would leak words outside this project's
+  // set). Rewritten wholesale on every re-scan from the current enabled keyword
+  // set (stateless recompute — no per-hit ledger). Also the single source for
+  // per-keyword supply analytics: "how many currently-matched opportunities does
+  // keyword k have" is a COUNT over this table; it must not be summed as
+  // opportunity counts (§6: one opportunity matching three keywords still
+  // contributes at most one unit to a project plan).
+  matchedKeywords    String[]
+  // Whether at least one keyword currently still matches (an opportunity can fall
+  // out of match when keywords are edited/disabled), so eligibleCount (§6) is a
+  // single-table COUNT without inspecting the array.
+  isCurrentlyMatched Boolean  @default(true)
 
-  // Append-only audit log of every AI reply draft this org generated for this
+  // Append-only audit log of every AI reply draft this project generated for this
   // opportunity. Each successful generation pushes one entry (content + input
   // params + the credits charged + the BillingRecord.taskId it links to), so a
-  // user who regenerates several times keeps every version. Per-org because both
-  // the content and its billing are org-scoped. Never truncated — reply versions
-  // are few per opportunity. Shape: GenerationHistoryEntry[] (engage.repository.ts).
+  // user who regenerates several times keeps every version. Project-scoped because
+  // both the content and its billing are project-scoped. Never truncated — reply
+  // versions are few per opportunity. Shape: GenerationHistoryEntry[] (engage.repository.ts).
   generationHistory Json?
 
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  @@id([organizationId, opportunityId])
+  @@unique([organizationId, projectId, opportunityId])
   @@index([organizationId, status])
   @@index([organizationId, score])
   @@index([organizationId, bookmarked])
   @@index([opportunityId])
+  @@index([organizationId, projectId])
 }
 
 model EngageSentReply {
-  id             String    @id @default(uuid())
+  id             String       @id @default(uuid())
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  // Nullable during migration, same rationale as EngageConfig.projectId (§11).
+  // Drives daily reply-count checks by direct COUNT(*) against this table
+  // (organizationId, projectId, platform, createdAt) instead of a maintained
+  // counter — see the §3.4 target/capacity note near OperationPlan.
+  projectId      String?
 
-  opportunityId  String
-  opportunity    EngageOpportunity @relation(fields: [opportunityId], references: [id])
+  opportunityId String
+  opportunity   EngageOpportunity @relation(fields: [opportunityId], references: [id])
 
-  postId         String    @unique
-  post           Post      @relation(fields: [postId], references: [id], onDelete: Cascade)
+  postId String @unique
+  post   Post   @relation(fields: [postId], references: [id], onDelete: Cascade)
 
-  inputData      Json
-  authorReplied  Boolean   @default(false)
+  inputData       Json
+  authorReplied   Boolean  @default(false)
+  // Snapshot, at send time, of which keyword(s) this opportunity matched for this
+  // project — copied from EngageOpportunityState.matchedKeywords, already known at
+  // send time. Unlike that field (a live array rewritten every re-scan), this is a
+  // permanent historical fact ("why this reply was sent") and is never updated
+  // afterward, even if the keyword is later renamed or disabled. Lets per-keyword
+  // daily reply counts (against the planPayload keyword targets, §3.4) be a
+  // single-table COUNT(*)/unnest query on this table. Stored as the same values
+  // EngageOpportunityState.matchedKeywords holds, so the two are comparable.
+  matchedKeywords String[] @default([])
 
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   // An org may reply to the same opportunity more than once (e.g. a batch send
   // from several of its accounts), so tracking is keyed per-post (postId @unique)
@@ -1280,6 +1416,7 @@ model EngageSentReply {
   // reads (getOpportunityDetail / getSentReplyByOpportunity) fast.
   @@index([organizationId])
   @@index([organizationId, opportunityId])
+  @@index([organizationId, projectId, createdAt])
 }
 
 // Global, org-independent cursor for one scan unit. A "scan unit" is a single
@@ -1290,37 +1427,77 @@ model EngageSentReply {
 // (lastScanStartedAt + env cadence → next due; cooldownUntil for rate-limit
 // back-off). See docs/engage/.
 model EngageScanCursor {
-  id                 String    @id @default(uuid())
+  id String @id @default(uuid())
 
   // ── Identity: one row per scan unit ──
-  platform           String    // 'x' | 'reddit' | ...
-  scanType           String    // 'keyword' | 'tracked' | 'channel'
+  platform String // 'x' | 'reddit' | ...
+  scanType String // 'keyword' | 'tracked' | 'channel'
   // keyword text (keyword) | username (tracked) | subreddit id (channel).
   // For scoped scans the org's keywords are OR-batched into the query at scan
   // time, so the keyword is NOT part of identity — one fetch per scope.
-  scanKey            String
+  scanKey  String
 
   // ── Incremental cursor (where the last fetch stopped) ──
-  lastSeenExternalId String?   // X since_id / Reddit fullname of newest seen post
+  lastSeenExternalId String? // X since_id / Reddit fullname of newest seen post
   lastSeenAt         DateTime? // newest seen post's publish time (Reddit stop cond.)
 
   // ── Scheduling (next due is DERIVED: lastScanStartedAt + env cadence) ──
-  lastScanStartedAt  DateTime? // when the most recent scan began (anchors next due)
-  lastScannedAt      DateTime? // when the most recent scan completed (display only)
-  cooldownUntil      DateTime? // rate-limit back-off; null when not cooling down
-  status             String    @default("IDLE") // IDLE | SCANNING (single-flight)
+  lastScanStartedAt DateTime? // when the most recent scan began (anchors next due)
+  lastScannedAt     DateTime? // when the most recent scan completed (display only)
+  cooldownUntil     DateTime? // rate-limit back-off; null when not cooling down
+  status            String    @default("IDLE") // IDLE | SCANNING (single-flight)
   // Per-claim secret handed to the extension as its task handle. Rotates on
   // every claim and is cleared on complete/release, so a leaked/old token cannot
   // complete a lease it no longer owns (session binding for the async path).
-  leaseToken         String?
+  leaseToken        String?
 
-  createdAt          DateTime  @default(now())
-  updatedAt          DateTime  @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@unique([platform, scanType, scanKey])
   @@index([status, scanType, lastScanStartedAt])
   @@index([leaseToken])
 }
+
+// ── §3.4 Reply targets & per-account cap — no dedicated tables ───────────────
+//
+// EngageReplyPolicy (per-(project, platform) dailyTarget/keywordTargets) is
+// NOT a table. The daily reply target is a
+// concept this project introduced — the pre-project Engage had no daily target,
+// only a monthly cap (EngageEntitlementService.replyMonthlyCap) — and it is
+// produced entirely by operation-plan generation, so it lives inside the
+// immutable OperationPlan.planPayload (engagePolicies, plus any day-varying
+// keyword breakdown). "Today's target" reads planPayload for the project's
+// active (READY, startsAt<=today<=endsAt) plan; a project with no active plan
+// simply has no daily target (unchanged from today's behavior). Editing targets
+// = re-planning (a new OperationPlan), which is already how approved plans
+// change. "Today's completed count" is a direct COUNT(*) against EngageSentReply
+// (organizationId, projectId, platform, createdAt) — see EngageSentReply.projectId.
+//
+// The per-account daily send cap (don't let one integration exceed its safe
+// per-platform limit) is also NOT a table. The cap VALUE is a Settings config
+// (like the other engage entitlements/settings), and "how many has account X
+// sent today" is a live COUNT of that integration's engage replies in the
+// window (EngageSentReply -> Post.integrationId). An earlier draft added
+// EngageIntegrationCapacityBucket + EngageReplyAllocationSlot to pre-allocate
+// and fair-split a shared account's quota across projects; cut — that only adds
+// (a) fair cross-project splitting instead of first-come-first-served, and
+// (b) exact race-free enforcement instead of the same tolerated slight overshoot
+// accepted for the daily target above. Neither is needed until multiple projects
+// actively contend for one account (not live today; effectively one project per
+// org). Build dedicated capacity tables only if that contention appears.
+
+// ── §3.5 Reply arbitration and recovery — DEFERRED (TODO) ───────────────────
+//
+// EngageReplyClaim / EngageReplyAttempt (UNIQUE(integrationId, opportunityId)
+// claim-before-send + fencing/reconciliation, see project-scoped-post-engage-
+// design.md §7) are intentionally NOT implemented in this version. Decision:
+// duplicate-send from a lost/ambiguous outcome is rare under current operational
+// behavior (nothing auto-retries today — see docs/project-scoped-post-engage-
+// design.md §7 note), and both tables are transient/intermediate send-state
+// records with no historical data to backfill, so adding them later never
+// requires touching already-sent EngageSentReply/Post rows. Build when the
+// observed duplicate-send rate justifies it.
 
 model EngageDataTicks {
   organizationId String
@@ -1328,9 +1505,9 @@ model EngageDataTicks {
   type           String
   timeUnit       String
   statisticsTime DateTime
-  value          BigInt    @default(0)
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
+  value          BigInt   @default(0)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 
   @@unique([organizationId, platform, type, timeUnit, statisticsTime])
   @@index([organizationId, platform, type, timeUnit])

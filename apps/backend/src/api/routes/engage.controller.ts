@@ -208,8 +208,11 @@ export class EngageController {
 
   @ApiOperation({ summary: 'Get Engage config and keywords/channels/accounts for this org' })
   @Get('/config')
-  getConfig(@GetOrgFromRequest() org: Organization) {
-    return this._engageService.getConfig(org);
+  getConfig(
+    @GetOrgFromRequest() org: Organization,
+    @Query('projectId') projectId?: string
+  ) {
+    return this._engageService.getConfig(org, projectId);
   }
 
   @ApiOperation({ summary: 'Update Engage config (enable/disable)' })
@@ -223,8 +226,11 @@ export class EngageController {
 
   @ApiOperation({ summary: 'Reset Engage config to disabled state' })
   @Post('/config/reset')
-  resetConfig(@GetOrgFromRequest() org: Organization) {
-    return this._engageService.resetConfig(org);
+  resetConfig(
+    @GetOrgFromRequest() org: Organization,
+    @Query('projectId') projectId?: string
+  ) {
+    return this._engageService.resetConfig(org, projectId);
   }
 
   @ApiOperation({ summary: 'Atomic bulk setup: create config + keywords + channels + tracked accounts' })
@@ -291,8 +297,11 @@ export class EngageController {
 
   @ApiOperation({ summary: 'List monitored channels for this org' })
   @Get('/monitored-channels')
-  listMonitoredChannels(@GetOrgFromRequest() org: Organization) {
-    return this._engageService.listMonitoredChannels(org);
+  listMonitoredChannels(
+    @GetOrgFromRequest() org: Organization,
+    @Query('projectId') projectId?: string
+  ) {
+    return this._engageService.listMonitoredChannels(org, projectId);
   }
 
   @ApiOperation({ summary: 'Add a channel to monitor (Reddit subreddit, etc.)' })
@@ -338,8 +347,11 @@ export class EngageController {
 
   @ApiOperation({ summary: 'List external X accounts tracked by this org' })
   @Get('/tracked-accounts')
-  listTrackedAccounts(@GetOrgFromRequest() org: Organization) {
-    return this._engageService.listTrackedAccounts(org);
+  listTrackedAccounts(
+    @GetOrgFromRequest() org: Organization,
+    @Query('projectId') projectId?: string
+  ) {
+    return this._engageService.listTrackedAccounts(org, projectId);
   }
 
   @ApiOperation({ summary: 'Add an external X account to track' })
@@ -376,8 +388,11 @@ export class EngageController {
 
   @ApiOperation({ summary: "List this org's X integrations with Engage reply settings" })
   @Get('/reply-accounts')
-  listReplyAccounts(@GetOrgFromRequest() org: Organization) {
-    return this._engageService.listReplyAccounts(org);
+  listReplyAccounts(
+    @GetOrgFromRequest() org: Organization,
+    @Query('projectId') projectId?: string
+  ) {
+    return this._engageService.listReplyAccounts(org, projectId);
   }
 
   @ApiOperation({ summary: 'Update reply account settings (auto-reply window, strategy)' })
@@ -475,9 +490,10 @@ export class EngageController {
   @Get('/opportunities/:id')
   getOpportunityById(
     @GetOrgFromRequest() org: Organization,
-    @Param('id') id: string
+    @Param('id') id: string,
+    @Query('projectId') projectId?: string
   ) {
-    return this._engageService.getOpportunityById(org, id);
+    return this._engageService.getOpportunityById(org, id, projectId);
   }
 
   @ApiOperation({ summary: 'Dismiss an opportunity (moves it to DISMISSED status)' })
@@ -485,9 +501,10 @@ export class EngageController {
   @Patch('/opportunities/:id/dismiss')
   dismissOpportunity(
     @GetOrgFromRequest() org: Organization,
-    @Param('id') id: string
+    @Param('id') id: string,
+    @Query('projectId') projectId?: string
   ) {
-    return this._engageService.dismissOpportunity(org, id);
+    return this._engageService.dismissOpportunity(org, id, projectId);
   }
 
   @ApiOperation({ summary: 'Toggle bookmark on an opportunity' })
@@ -495,9 +512,10 @@ export class EngageController {
   @Patch('/opportunities/:id/bookmark')
   toggleBookmark(
     @GetOrgFromRequest() org: Organization,
-    @Param('id') id: string
+    @Param('id') id: string,
+    @Query('projectId') projectId?: string
   ) {
-    return this._engageService.toggleBookmark(org, id);
+    return this._engageService.toggleBookmark(org, id, projectId);
   }
 
   // ─── Draft Generation (SSE) ───────────────────────────────────────────────
@@ -538,7 +556,11 @@ export class EngageController {
 
     try {
       // Only generate drafts for actionable opportunities (not REPLIED/DISMISSED/EXPIRED).
-      const opportunity = await this._engageService.getOpportunityForReply(org, id);
+      const opportunity = await this._engageService.getOpportunityForReply(
+        org,
+        id,
+        body.projectId
+      );
 
       // Pre-flight gate (spec §3.3): monthly cap + credit balance must clear
       // BEFORE any model call, and the cap-ledger row is written up front so the
@@ -593,7 +615,7 @@ export class EngageController {
             mentions: body.mentions,
             billingTaskId: reservation.taskId,
             createdAt: new Date().toISOString(),
-          });
+          }, body.projectId);
         } catch (histErr) {
           this.logger.error(
             `Reply generation history write failed for opportunity ${id} (org ${org.id})`,
@@ -870,6 +892,7 @@ export class EngageController {
     @Query() query: DashboardSummaryDto
   ) {
     return this._engageService.getDashboardSummary(org, {
+      projectId: query.projectId,
       platform: query.platform,
       date: query.date,
     });
@@ -884,7 +907,8 @@ export class EngageController {
   ) {
     return this._engageService.getDashboardRepliesTrend(
       org,
-      query.period as 'daily' | 'weekly' | 'monthly' | undefined
+      query.period as 'daily' | 'weekly' | 'monthly' | undefined,
+      query.projectId
     );
   }
 
@@ -896,6 +920,7 @@ export class EngageController {
     @Query() query: DashboardTrafficsDto
   ) {
     return this._engageService.getDashboardTraffics(org, {
+      projectId: query.projectId,
       platform: query.platform,
       limit: query.limit,
     });
@@ -911,7 +936,8 @@ export class EngageController {
   ) {
     return this._engageService.getDashboardImpressions(
       org,
-      (query.period as 'daily' | 'weekly' | 'monthly') || 'daily'
+      (query.period as 'daily' | 'weekly' | 'monthly') || 'daily',
+      query.projectId
     );
   }
 
@@ -925,6 +951,7 @@ export class EngageController {
     @Query() query: DashboardTrafficsDto
   ) {
     return this._engageService.getDashboardTopSources(org, {
+      projectId: query.projectId,
       platform: query.platform,
       limit: query.limit,
     });

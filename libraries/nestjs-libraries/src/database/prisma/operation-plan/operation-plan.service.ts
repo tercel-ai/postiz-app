@@ -1,0 +1,1030 @@
+import {
+  BadRequestException,
+  ConflictException,
+  HttpException,
+  HttpStatus,
+  Injectable,
+  Logger,
+  NotFoundException,
+  OnApplicationBootstrap,
+  ServiceUnavailableException,
+} from '@nestjs/common';
+import dayjs from 'dayjs';
+import utc from 'dayjs/plugin/utc';
+import { OperationPlan } from '@prisma/client';
+import { OperationPlanRepository } from './operation-plan.repository';
+import { AiseeClient, AiseeBusinessType } from '../ai-pricing/aisee.client';
+import { AiseeCreditService } from '../ai-pricing/aisee-credit.service';
+import { SettingsService } from '../settings/settings.service';
+import { OpenaiService } from '@gitroom/nestjs-libraries/openai/openai.service';
+import { EngageRepository } from '@gitroom/nestjs-libraries/engage/engage.repository';
+import { weightedLength } from '@gitroom/helpers/utils/count.length';
+import { createHash, randomUUID } from 'crypto';
+import { z } from 'zod';
+
+dayjs.extend(utc);
+
+// planPayload.engagePolicies[].keywordTargets shape (project-scoped-post-
+// engage-design.md §3.4: "Record<keywordId, number>", per-platform daily
+// target; an empty object means no per-keyword breakdown to report here).
+interface EngagePolicy {
+  platform: string;
+  themeTitle?: string;
+  enabled: boolean;
+  targetRepliesPerDay?: number;
+  dailyTargets?: Array<{ date: string; target: number }>;
+  keywordTargets?: Record<string, number>;
+}
+
+// A generated policy after its keywordTargets LIST (the generation-schema shape,
+// forced by OpenAI Structured Outputs' no-dynamic-keys rule) has been folded
+// into the Record shape that gets persisted and returned.
+type PersistedEngagePolicy = {
+  platform: string;
+  themeTitle: string;
+  targetRepliesPerDay: number;
+  dailyTargets: Array<{ date: string; target: number }>;
+  enabled: boolean;
+  keywordTargets: Record<string, number>;
+};
+
+// One entry per calendar day in [startsAt, endsAt]; each day is an array with
+// one item PER PLATFORM (a plan can span x/linkedin/instagram, each with its
+// own policy). Keyword pacing stays as explicit fields (not compact
+// "actual/target" strings) so API consumers do not parse presentation text.
+export type ReplyPacingByDay = Record<string, Array<{
+  platform: string;
+  themeTitle?: string;
+  // The aggregate reply target for THIS platform on THIS day — the policy's
+  // `dailyTargets` override when one exists, else `targetRepliesPerDay`.
+  targetRepliesPerDay?: number;
+  keywords: Array<{
+    keywordId: string;
+    keyword: string;
+    actualReplies: number;
+    targetReplies: number;
+  }>;
+}>>;
+
+export interface CreateOperationPlanInput {
+  taskId: string;
+  startAt: string;
+  endAt: string;
+  platforms: string[];
+  // Optional curated Engage keyword set. Non-empty → used verbatim; omitted or
+  // empty → fall back to the task's product_snapshot.keywords.
+  keywords?: string[];
+}
+
+// Output budget for plan generation. A ~30-day plan carries publish-ready
+// content per day per platform, so the completion is long; the provider's
+// default cap truncates it into invalid JSON.
+const OPERATION_PLAN_MAX_TOKENS = 32000;
+
+// ── Settings keys (admin-editable; seeded on boot so they appear in the UI) ──
+export const OPERATION_PLAN_MAX_DURATION_DAYS_KEY = 'operation_plan.max_duration_days';
+export const OPERATION_PLAN_ALLOWED_PLATFORMS_KEY = 'operation_plan.allowed_platforms';
+export const OPERATION_PLAN_PLATFORM_CADENCE_KEY = 'operation_plan.platform_cadence';
+
+const DEFAULT_MAX_DURATION_DAYS = 30;
+
+// An allowlist that can only NARROW the platform set, never widen it: a plan
+// platform must still resolve to a connected Integration (twice — here and at
+// materialization), so listing e.g. "medium" would NOT make Medium publishable.
+// Empty/absent = no extra restriction (every connected platform is allowed).
+const DEFAULT_ALLOWED_PLATFORMS: string[] = [];
+
+// Per-platform publishing rhythm fed to the generator as INPUT, so it stops
+// guessing content counts. Free-form strings on purpose — this mirrors the
+// human "platform playbook" (frequency + how strongly AI systems cite that
+// channel), which is editorial guidance, not a machine rule.
+type PlatformCadence = { cadence?: string; citationWeight?: string; notes?: string };
+const DEFAULT_PLATFORM_CADENCE: Record<string, PlatformCadence> = {
+  x: {
+    cadence: '1 post per weekday, lighter on weekends; 1-2 threads per week',
+    citationWeight: 'medium — Grok reads X directly; threads split into data points are more quotable',
+  },
+  linkedin: {
+    cadence: '3-4 posts per week',
+    citationWeight: 'medium — B2B authority signal',
+  },
+  instagram: {
+    cadence: '3-5 posts per week',
+    citationWeight: 'low — rarely cited as a text source',
+  },
+};
+
+// Hard per-platform content ceilings for generated posts. Without these the
+// model happily writes 400-char "tweets" that can never publish — the plan
+// would materialize DRAFT Posts doomed to fail at release time. X is measured
+// with twitter-text WEIGHTED counting (every URL counts as 23 regardless of its
+// real length; CJK/emoji count 2), matching EngageDraftService's ceiling.
+const PLATFORM_CONTENT_LIMITS: Record<string, number> = {
+  x: 280,
+  bluesky: 300,
+  threads: 500,
+  mastodon: 500,
+  instagram: 2200,
+  linkedin: 3000,
+};
+const DEFAULT_CONTENT_LIMIT = 3000;
+
+// What we INSTRUCT the model to stay within — deliberately BELOW the hard
+// ceiling above, and the gap is the whole point.
+//
+// The model treats a stated budget as a soft aim and DRIFTS past it: with 240
+// declared (twice — prompt head and tail), measured runs came back at 0/13 over
+// 240 (max 239) and 7/16 over 240 (max 260). The 40-char gap to X's real 280 is
+// sized to absorb that drift, and it did: 0/29 posts exceeded 280.
+//
+// So do NOT "tidy" this by making the target the hard limit (a 260-char post is
+// perfectly publishable — rejecting it would throw away an entire paid
+// generation over nothing), and do NOT close the gap by raising the target to
+// 280 (drift would then land above X's real ceiling and the plan WOULD fail).
+// Same soft-target/hard-ceiling split as EngageDraftService (260/280).
+const PLATFORM_CONTENT_TARGETS: Record<string, number> = {
+  x: 240,
+};
+const targetFor = (platform: string): number =>
+  PLATFORM_CONTENT_TARGETS[platform] ??
+  PLATFORM_CONTENT_LIMITS[platform] ??
+  DEFAULT_CONTENT_LIMIT;
+
+const GeneratedPlanSchema = z.object({
+  goal: z.object({
+    title: z.string().min(1),
+    description: z.string().min(1),
+    // Realistic post-campaign target score (0-100). baselineScore is injected
+    // by the backend from the source analysis, not produced by the LLM.
+    targetScore: z.number().min(0).max(100),
+  }).strict(),
+  contentItems: z.array(z.object({
+    contentId: z.string().min(1),
+    utcDate: z.string().datetime(),
+    themeKey: z.string().min(1),
+    themeTitle: z.string().min(1),
+    platforms: z.array(z.object({
+      id: z.string().uuid(),
+      platform: z.string().min(1),
+      content: z.string().min(1),
+      // OpenAI Structured Outputs constraints (both learned the hard way — a
+      // violation is a 400 from the provider, not a local error):
+      //  1. every field must be REQUIRED; optionality is `.nullable()`, never
+      //     `.optional()` (a bare `.optional()` makes zodResponseFormat throw).
+      //  2. only a fixed set of string `format`s is allowed (date-time, time,
+      //     date, duration, email, hostname, ipv4, ipv6, uuid) — `.url()` emits
+      //     `format: "uri"`, which is REJECTED. Keep it a plain string.
+      media: z.array(
+        z.object({ url: z.string().min(1), altText: z.string().nullable() }).strict()
+      ).nullable(),
+    }).strict()).min(1),
+  }).strict()),
+  engagePolicies: z.array(z.object({
+    platform: z.string().min(1),
+    themeTitle: z.string().min(1),
+    // The DEFAULT daily reply target — used for any date not overridden by
+    // `dailyTargets` below.
+    targetRepliesPerDay: z.number().int().min(0),
+    // Per-day overrides keyed by concrete UTC date (YYYY-MM-DD). This is what
+    // makes "weekday 5 / weekend 3" expressible — a single scalar could not.
+    // Deliberately dated, NOT week-numbered: the week is derivable from the
+    // date + the plan's startsAt, so storing it would duplicate state.
+    // `.date()` emits JSON-schema `format: "date"`, which OpenAI Structured
+    // Outputs accepts (unlike `uri`).
+    dailyTargets: z.array(z.object({
+      date: z.string().date(),
+      target: z.number().int().min(0),
+    }).strict()),
+    // A LIST, not a Record: OpenAI Structured Outputs rejects dynamic-key
+    // objects (`z.record()` emits `additionalProperties: {...}` with no fixed
+    // `properties`, which is invalid_json_schema). The service folds this list
+    // into the persisted `Record<EngageKeyword.id, number>` shape.
+    keywordTargets: z.array(z.object({
+      keyword: z.string().min(1),
+      target: z.number().int().min(0),
+    }).strict()),
+    enabled: z.boolean(),
+  }).strict()),
+  warnings: z.array(z.string()),
+}).strict();
+
+@Injectable()
+export class OperationPlanService implements OnApplicationBootstrap {
+  private readonly logger = new Logger(OperationPlanService.name);
+
+  constructor(
+    private _repo: OperationPlanRepository,
+    private _aiseeClient?: AiseeClient,
+    private _creditService?: AiseeCreditService,
+    private _settingsService?: SettingsService,
+    private _openaiService?: OpenaiService,
+    // Optional (like the others) so unit tests can construct the service with
+    // fewer deps. Used only on the real persist path to map generated
+    // keywordTargets from keyword TEXT to EngageKeyword.id (get-or-create).
+    private _engageRepository?: EngageRepository
+  ) {}
+
+  // Seed the admin-editable knobs so they exist as rows (with description +
+  // default) and therefore show up in the admin Settings UI. Insert-if-absent
+  // only — never clobber an operator's configured value — and never let a
+  // settings failure block boot.
+  async onApplicationBootstrap(): Promise<void> {
+    if (!this._settingsService) return;
+    const seeds: Array<{ key: string; value: unknown; type: string; description: string }> = [
+      {
+        key: OPERATION_PLAN_MAX_DURATION_DAYS_KEY,
+        value: DEFAULT_MAX_DURATION_DAYS,
+        type: 'number',
+        description:
+          'Maximum operation-plan length in whole days. A longer requested range is rejected with DURATION_EXCEEDS_MAX.',
+      },
+      {
+        key: OPERATION_PLAN_ALLOWED_PLATFORMS_KEY,
+        value: DEFAULT_ALLOWED_PLATFORMS,
+        type: 'json',
+        description:
+          'Allowlist of platforms an operation plan may use, e.g. ["x","linkedin"]. Empty = no extra restriction. ' +
+          'This can only NARROW the set: a platform must still have a connected integration, so listing a channel ' +
+          'without one (e.g. "medium") does NOT make it publishable.',
+      },
+      {
+        key: OPERATION_PLAN_PLATFORM_CADENCE_KEY,
+        value: DEFAULT_PLATFORM_CADENCE,
+        type: 'json',
+        description:
+          'Per-platform publishing rhythm fed to the plan generator, e.g. ' +
+          '{"x":{"cadence":"1 post/weekday","citationWeight":"medium","notes":"..."}}. ' +
+          'Steers how much content it writes per platform instead of letting it guess.',
+      },
+    ];
+    for (const seed of seeds) {
+      try {
+        const existing = await this._settingsService.get(seed.key);
+        if (existing === null || existing === undefined) {
+          await this._settingsService.set(seed.key, seed.value, {
+            type: seed.type,
+            description: seed.description,
+            defaultValue: seed.value,
+          });
+        }
+      } catch (err) {
+        this.logger.error(`Failed to seed default setting ${seed.key}:`, err);
+      }
+    }
+  }
+
+  async create(
+    organizationId: string,
+    projectId: string,
+    input: CreateOperationPlanInput,
+    options: { dryRun?: boolean } = {}
+  ) {
+    if (!this._aiseeClient || !this._creditService || !this._settingsService || !this._openaiService) {
+      throw new ServiceUnavailableException({
+        code: 'OPERATION_PLAN_UNAVAILABLE',
+        message: 'Operation plan generation is unavailable',
+      });
+    }
+    const { start, end, durationDays, platforms } = await this._validateInput(
+      organizationId,
+      input
+    );
+    const taskLookup = await this._aiseeClient.getTaskDetail(input.taskId);
+    if ('reason' in taskLookup) {
+      if (taskLookup.reason === 'unavailable') {
+        throw new ServiceUnavailableException({
+          code: 'AISEE_UNAVAILABLE',
+          message: 'The analysis service is unavailable',
+        });
+      }
+      throw new NotFoundException({ code: 'TASK_NOT_FOUND', message: 'Task not found' });
+    }
+    const ownerUserId = await this._creditService.resolveOwnerUserId(organizationId);
+    const task = taskLookup.task;
+    if (task.productId !== projectId || task.userId !== ownerUserId) {
+      throw new NotFoundException({ code: 'TASK_NOT_FOUND', message: 'Task not found' });
+    }
+    const readyStatuses = new Set(['completed', 'complete', 'success', 'succeeded', 'done']);
+    const usableResult =
+      typeof task.result === 'string'
+        ? task.result.trim().length > 0
+        : Array.isArray(task.result)
+          ? task.result.length > 0
+          : !!task.result && typeof task.result === 'object' && Object.keys(task.result).length > 0;
+    if (!readyStatuses.has(task.status.toLowerCase()) || !usableResult) {
+      throw new ConflictException({ code: 'TASK_NOT_READY', message: 'Task is not ready' });
+    }
+
+    const existing = await this._repo.findByTaskId(organizationId, input.taskId);
+    if (existing) {
+      const same = existing.projectId === projectId &&
+        existing.startsAt.getTime() === start.getTime() &&
+        existing.endsAt.getTime() === end.getTime() &&
+        [...existing.platforms].sort().join('\0') === [...platforms].sort().join('\0');
+      if (!same) {
+        throw new ConflictException({
+          code: 'TASK_ALREADY_PLANNED',
+          message: 'This task already has an operation plan with different parameters',
+        });
+      }
+      // Dry-run must stay read-only: surface the already-persisted plan as a
+      // preview without reconciling billing or (re)materializing any Post.
+      if (options.dryRun) {
+        return { ...this._toRecord(existing), dryRun: true };
+      }
+      if (existing.status === 'BILLING_PENDING') {
+        return this._reconcilePending(existing);
+      }
+      if (existing.status === 'READY') {
+        await this._repo.materializePlanPosts(existing, existing.planPayload);
+      }
+      return this._toRecord(existing);
+    }
+
+    if (!(await this._creditService.hasCredits(organizationId))) {
+      throw new HttpException({
+        statusCode: HttpStatus.PAYMENT_REQUIRED,
+        code: 'INSUFFICIENT_CREDIT',
+        message: 'Insufficient credits',
+      }, HttpStatus.PAYMENT_REQUIRED);
+    }
+
+    // Engage keyword set for the plan's reply policies, by priority:
+    //   1. caller-curated `input.keywords` (verbatim, when non-empty)
+    //   2. the AI-analyzed `result.code_web_analyzer.keywords` (semantic,
+    //      analysis-derived — preferred over the SEO/brand snapshot tags)
+    //   3. `product_snapshot.keywords` (short SEO/brand tags, last-resort)
+    // The generator keys keywordTargets from this exact list (mapped to
+    // EngageKeyword.id on the persist path).
+    const analyzerKeywords = this._asKeywordArray(
+      (task.result as { code_web_analyzer?: { keywords?: unknown } })
+        ?.code_web_analyzer?.keywords
+    );
+    const snapshotKeywords = this._asKeywordArray(
+      (task.productSnapshot as { keywords?: unknown })?.keywords
+    );
+    const effectiveKeywords =
+      input.keywords && input.keywords.length
+        ? input.keywords
+        : analyzerKeywords.length
+          ? analyzerKeywords
+          : snapshotKeywords;
+
+    // Baseline analysis score (0-100) — the aggregate total_score of the source
+    // task. Fed to the generator to anchor a realistic targetScore, and stored
+    // on the plan's `data` for display. Nested under result.result in the aisee
+    // payload; fall back to a top-level total_score.
+    const baselineScore = this._extractBaselineScore(task.result);
+
+    // Admin-configured publishing rhythm per platform (P2-10). Fed to the
+    // generator as input so content counts follow the team's real playbook
+    // instead of the model's guess. Only the requested platforms are sent.
+    const cadenceConfig = await this._getPlatformCadence();
+    const platformPlaybook = platforms.reduce<Record<string, PlatformCadence>>((all, platform) => {
+      const entry = cadenceConfig[platform];
+      if (entry && (entry.cadence || entry.citationWeight || entry.notes)) all[platform] = entry;
+      return all;
+    }, {});
+
+    // Per-platform length budget, stated TWICE in the prompt (opening + closing).
+    // The first live run ignored a single mid-prompt mention and produced 20/20
+    // unpublishable posts; repeating the constraint at both ends is what makes
+    // long-output models actually hold the line.
+    const limitLines = platforms.map(
+      (p) =>
+        `    • ${p}: max ${targetFor(p)} characters` +
+        (p === 'x'
+          ? ` (X WEIGHTED counting: every URL counts as 23 characters regardless of its real length; CJK characters and emoji count as 2 each. X's own ceiling is ${PLATFORM_CONTENT_LIMITS['x']} — ${targetFor('x')} is your budget, so you have margin.)`
+          : '')
+    );
+
+    const generation = await this._openaiService.generateStructuredText(
+      [
+        'You are an operations planner. Generate a practical, UTC-dated operation plan from the supplied analysis result for a single project. Use ONLY the requested platforms, and keep every content utcDate within the requested [startAt, endAt] range.',
+        '',
+        '### CHARACTER LIMITS — THE #1 CONSTRAINT (repeated at the end; obey both) ###',
+        'Every `contentItems[].platforms[].content` MUST fit its platform budget. Over-budget content is REJECTED and the whole plan fails. Count BEFORE you write, and write to the budget — do not draft long and hope.',
+        ...limitLines,
+        '',
+        'GOAL',
+        '- Produce a `goal` object: a short campaign `title`; a 1-2 sentence `description` of the strategy; and a `targetScore` (0-100) — a REALISTIC analysis score achievable by endAt. targetScore MUST be >= the provided baselineScore and <= 100; scale the uplift to the range length and to how much headroom the weakest dimensions have (do not promise 90 in two weeks from a low baseline).',
+        '',
+        'WEEK STRUCTURE',
+        '- Treat the range as ISO calendar weeks w1..wN (w1 and the final week may be partial). Give each week a coherent phase and progress them foundation -> distribution -> density -> consolidation as the range length allows.',
+        '- Encode the week as a stable token in themeKey (e.g. "w1:foundations") and prefix themeTitle with the week+phase (e.g. "W1 - Foundations: ...") — do NOT invent new fields, reuse themeKey/themeTitle.',
+        '',
+        'CADENCE',
+        '- Derive content counts from the actual dates, never a fixed template. Weight activity toward workdays (Mon-Fri) over weekends (Sat-Sun): more/heavier items on weekdays, lighter on weekends.',
+        ...(Object.keys(platformPlaybook).length
+          ? [
+              '- FOLLOW the per-platform playbook in `platformPlaybook` (posting frequency + how strongly AI systems cite that channel). It is the team\'s configured rhythm — match its cadence rather than inventing your own volume, and lean into the higher-citation channels.',
+            ]
+          : []),
+        '- For each requested platform set `targetRepliesPerDay` to a sustainable WEEKDAY-level reply count — it is the default for any day you do not override.',
+        '- Then express the weekday/weekend rhythm concretely in `dailyTargets`: one { date, target } per date in the range that should differ from the default (typically the weekends — a lower target). Dates are UTC "YYYY-MM-DD" and MUST fall inside [startAt, endAt]; do not repeat a date. Omit a date to leave it at `targetRepliesPerDay`. Return an empty list only if every day genuinely has the same target.',
+        '',
+        'SCORE-DRIVEN SELECTION',
+        '- Read the analysis result and prioritise the weakest / lowest-scoring dimensions and platforms (largest gap to target = highest priority); do NOT spread effort evenly. Bias each theme toward closing a specific weak spot and reflect that gap in themeTitle.',
+        '',
+        'CONTENT RULES',
+        '- Each content item: a stable machine themeKey plus a human-readable themeTitle. Each platform entry: a UUID id (used as the materialized Post.id), the platform, and concise publish-ready content. themeTitle materializes into Post.title; themeKey is kept as Post.settings.themeKey.',
+        '- Respect the character budgets declared at the top (and repeated below). This is a hard gate, not a style note.',
+        '- Write PLAIN TEXT for X: no Markdown. `**bold**`, headings and backticks are NOT rendered — they appear literally as asterisks. Plain prose, line breaks and simple bullets ("•") only.',
+        '- Hashtags: a hashtag ENDS at the first space, so a multi-word tag silently breaks — "#MCP protocol" renders as the tag "#MCP" followed by the loose word "protocol". Never hashtag a multi-word keyword: either write it as plain prose (preferred — keywords belong in the sentence, not bolted on as tags) or close it up into one word ("#MCPprotocol"). Use at most 1-2 hashtags, and only single-word ones.',
+        '- Prefer content AI systems can cite: concrete data points and answer-style framing. For owned/blog channels, reference the project\'s own canonical URL. "Build-in-public" (sharing real, specific progress/metrics) tends to be the most citable. Keep copy concise and publish-ready.',
+        '',
+        'ENGAGE POLICIES',
+        '- Each policy needs a human-readable themeTitle and keywordTargets: a LIST of { keyword, target } where `keyword` is the VERBATIM keyword text and `target` is that keyword\'s daily reply count. The sum of all `target` values must not exceed targetRepliesPerDay. Use ONLY keywords from the provided `keywords` list — do not invent keywords outside it, and do not repeat a keyword. The backend maps each keyword to its EngageKeyword id on save. If `keywords` is empty, return an empty keywordTargets list. Omit legacy keyword text arrays and daily hard caps.',
+        '',
+        'Use warnings[] to flag any infeasibility (range too short for the intended cadence, a requested platform with weak supply, etc.).',
+        '',
+        '### FINAL REMINDER — CHARACTER LIMITS (same rule as the top) ###',
+        'Before returning, re-check EVERY content string against its budget:',
+        ...limitLines,
+        'Any single over-budget string fails the entire plan. If a post does not fit, CUT it down — shorten the prose, drop a bullet, or drop a link. Never exceed the budget.',
+      ].join('\n'),
+      JSON.stringify({
+        projectId,
+        range: { startAt: start.toISOString(), endAt: end.toISOString(), durationDays },
+        platforms,
+        platformPlaybook,
+        keywords: effectiveKeywords,
+        baselineScore,
+        analysisResult: task.result,
+        productSnapshot: task.productSnapshot,
+        sourceUrl: task.url,
+      }),
+      GeneratedPlanSchema,
+      'operation_plan',
+      // A multi-week plan (content for every day x platform + engage policies)
+      // is a large structured output; the provider's default cap truncates it
+      // mid-JSON. Budget generously — plan generation is a one-off, billed call.
+      OPERATION_PLAN_MAX_TOKENS
+    );
+    this._validateGeneratedPlan(generation.data, platforms, start, end);
+
+    const generatorVersion = 'operation-plan-v1';
+    const campaignId = randomUUID();
+
+    // Plan-level goal summary for the `data` column. targetScore is clamped to
+    // [baselineScore, 100] as a guard against the LLM promising a score below
+    // the baseline or above the ceiling.
+    const targetScore = Math.min(
+      100,
+      Math.max(baselineScore ?? 0, generation.data.goal.targetScore)
+    );
+    const planData = {
+      title: generation.data.goal.title,
+      description: generation.data.goal.description,
+      baselineScore,
+      targetScore,
+    };
+
+    // Dry-run/preview: return the generated + validated plan WITHOUT persisting,
+    // billing, or materializing any Post. Lets callers eyeball the plan (and its
+    // estimated token usage) before committing credits + DB rows. Everything up
+    // to here is read-only except the LLM generation call itself (real token
+    // cost to us, but NO user-credit deduction).
+    if (options.dryRun) {
+      return {
+        id: null as string | null,
+        projectId,
+        taskId: input.taskId,
+        sourceTaskVersion: task.version ?? undefined,
+        campaignId,
+        durationDays,
+        platforms,
+        generatorVersion,
+        status: 'PREVIEW',
+        startsAt: start.toISOString(),
+        endsAt: end.toISOString(),
+        data: planData,
+        contentItems: generation.data.contentItems,
+        // Preview keeps keyword TEXT keys (no EngageKeyword rows are created).
+        engagePolicies: this._foldKeywordTargets(
+          generation.data.engagePolicies,
+          (keyword) => keyword
+        ),
+        warnings: generation.data.warnings ?? [],
+        dryRun: true,
+        estimatedUsage: generation.usage,
+      };
+    }
+
+    // Real path only: map each policy's keywordTargets from keyword TEXT (what
+    // the LLM produced) to EngageKeyword.id (get-or-create), so downstream
+    // pacing/overview can key by EngageKeyword.id as the design requires (§3.4).
+    // Dry-run already returned above with text keys, having created nothing.
+    const engagePolicies = await this._mapKeywordTargetsToIds(
+      organizationId,
+      projectId,
+      generation.data.engagePolicies
+    );
+    const planPayload = {
+      ...generation.data,
+      engagePolicies,
+      campaignId,
+      generatorVersion,
+      durationDays,
+    };
+    const plan = await this._repo.create({
+      organizationId,
+      projectId,
+      taskId: input.taskId,
+      sourceTaskVersion: task.version,
+      platforms,
+      generatorVersion,
+      campaignId,
+      startsAt: start,
+      endsAt: end,
+      status: 'BILLING_PENDING',
+      planPayload,
+      data: planData,
+      sourceResultHash: createHash('sha256').update(JSON.stringify(task.result)).digest('hex'),
+    });
+
+    let billed;
+    try {
+      billed = await this._creditService.deductUsageAndConfirm(
+        {
+          userId: organizationId,
+          taskId: `operation_plan:${plan.id}`,
+          businessType: AiseeBusinessType.OPERATION_PLAN,
+          description: `Generate operation plan for project ${projectId}`,
+          relatedId: plan.id,
+          data: { projectId, sourceTaskId: input.taskId },
+        },
+        generation.usage
+      );
+    } catch {
+      // Confirmation may have succeeded remotely even when the response was lost.
+      // Keep BILLING_PENDING so reconciliation can retry the idempotent billing task.
+      return this._toRecord(plan);
+    }
+    if (billed.deduction && !billed.deduction.success && !billed.deduction.skipped) {
+      return this._toRecord(await this._repo.updateStatus(plan.id, {
+        status: 'BILLING_FAILED',
+        errorCode: 'CREDIT_DEDUCTION_FAILED',
+      }));
+    }
+    const creditAmount = billed.costItems.length
+      ? billed.costItems.reduce((sum, item) => sum + Number(item.amount), 0).toFixed(6)
+      : '0.000000';
+    const readyPlan = await this._repo.updateStatus(plan.id, {
+      status: 'READY',
+      billingTransactionId: billed.deduction?.transactionId ?? null,
+      creditAmount,
+      errorCode: null,
+    });
+    await this._repo.materializePlanPosts(readyPlan, planPayload);
+    return this._toRecord(readyPlan);
+  }
+
+  private async _validateInput(organizationId: string, input: CreateOperationPlanInput) {
+    if (!input.taskId || !Array.isArray(input.platforms) || !input.platforms.length) {
+      throw new BadRequestException('taskId and at least one platform are required');
+    }
+    if (!input.startAt?.endsWith('Z') || !input.endAt?.endsWith('Z')) {
+      throw new BadRequestException('startAt and endAt must be UTC ISO 8601 instants');
+    }
+    const start = new Date(input.startAt);
+    const end = new Date(input.endAt);
+    if (!Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime()) || end <= start) {
+      throw new BadRequestException('endAt must be after startAt');
+    }
+    if (start <= new Date()) throw new BadRequestException('startAt must be in the future');
+    const durationDays = dayjs.utc(end).startOf('day').diff(dayjs.utc(start).startOf('day'), 'day') + 1;
+    const maxDays =
+      (await this._settingsService!.get<number>(OPERATION_PLAN_MAX_DURATION_DAYS_KEY)) ??
+      DEFAULT_MAX_DURATION_DAYS;
+    if (durationDays > maxDays) {
+      throw new BadRequestException({ code: 'DURATION_EXCEEDS_MAX', maxDays });
+    }
+    const platforms = [...new Set(input.platforms.map((value) => value.trim()).filter(Boolean))];
+    const connected = new Set(await this._repo.getConnectedPlatforms(organizationId));
+    const invalid = platforms.filter((platform) => !connected.has(platform));
+    if (invalid.length) {
+      throw new BadRequestException({ code: 'PLATFORM_NOT_CONNECTED', platforms: invalid });
+    }
+    // Admin allowlist — narrows the connected set, never widens it (a platform
+    // with no integration still can't be published to). Empty/absent/malformed
+    // = no extra restriction, so a bad Settings value can't lock everyone out.
+    const allowed = this._asKeywordArray(
+      await this._settingsService!.get(OPERATION_PLAN_ALLOWED_PLATFORMS_KEY)
+    );
+    if (allowed.length) {
+      const allowSet = new Set(allowed);
+      const disallowed = platforms.filter((platform) => !allowSet.has(platform));
+      if (disallowed.length) {
+        throw new BadRequestException({
+          code: 'PLATFORM_NOT_ALLOWED',
+          message:
+            `Platform(s) ${disallowed.join(', ')} are not permitted for operation plans ` +
+            `(allowed: ${allowed.join(', ')}).`,
+          platforms: disallowed,
+          allowed,
+        });
+      }
+    }
+    return { start, end, durationDays, platforms };
+  }
+
+  private _validateGeneratedPlan(
+    plan: z.infer<typeof GeneratedPlanSchema>,
+    requestedPlatforms: string[],
+    start: Date,
+    end: Date
+  ) {
+    const allowed = new Set(requestedPlatforms);
+    const postIds = new Set<string>();
+    // Compare by UTC CALENDAR DAY, not instant: the range is a day-inclusive
+    // window (durationDays is a startOf('day') diff + 1), so an item dated
+    // `endAt`'s day at any time (e.g. 2026-08-14T10:00Z for endAt
+    // 2026-08-14T00:00Z) is in range — an instant comparison would reject it.
+    const firstDay = dayjs.utc(start).startOf('day');
+    const lastDay = dayjs.utc(end).startOf('day');
+    for (const item of plan.contentItems) {
+      const day = dayjs.utc(item.utcDate).startOf('day');
+      if (day.isBefore(firstDay) || day.isAfter(lastDay)) {
+        throw new BadRequestException(
+          `Generated plan has content dated ${item.utcDate} outside the requested range ` +
+          `[${firstDay.format('YYYY-MM-DD')}, ${lastDay.format('YYYY-MM-DD')}]`
+        );
+      }
+      for (const platformItem of item.platforms) {
+        if (postIds.has(platformItem.id)) {
+          throw new BadRequestException(
+            `Generated plan reused Post id ${platformItem.id}`
+          );
+        }
+        postIds.add(platformItem.id);
+        if (!allowed.has(platformItem.platform)) {
+          throw new BadRequestException(
+            `Generated plan used platform "${platformItem.platform}", which was not requested ` +
+            `(allowed: ${requestedPlatforms.join(', ')})`
+          );
+        }
+        const limit =
+          PLATFORM_CONTENT_LIMITS[platformItem.platform] ?? DEFAULT_CONTENT_LIMIT;
+        const length = this._contentLength(platformItem.platform, platformItem.content);
+        if (length > limit) {
+          throw new BadRequestException(
+            `Generated ${platformItem.platform} content for ${item.contentId} is ${length} ` +
+            `characters, over the ${limit} limit — it could never publish`
+          );
+        }
+      }
+    }
+    for (const policy of plan.engagePolicies) {
+      const keywordTargetTotal = policy.keywordTargets.reduce(
+        (sum, item) => sum + item.target,
+        0
+      );
+      if (!allowed.has(policy.platform)) {
+        throw new BadRequestException(
+          `Generated Engage policy targets platform "${policy.platform}", which was not requested ` +
+          `(allowed: ${requestedPlatforms.join(', ')})`
+        );
+      }
+      if (keywordTargetTotal > policy.targetRepliesPerDay) {
+        throw new BadRequestException(
+          `Generated Engage policy for "${policy.platform}" has keyword targets summing to ` +
+          `${keywordTargetTotal}, which exceeds targetRepliesPerDay=${policy.targetRepliesPerDay}`
+        );
+      }
+      // Per-day overrides must land on real days of THIS plan, once each —
+      // otherwise the pacing gate would silently never apply them.
+      const seenDates = new Set<string>();
+      for (const { date, target } of policy.dailyTargets ?? []) {
+        // Plain regex + isValid instead of dayjs strict parsing — this file only
+        // loads the `utc` plugin, not `customParseFormat`.
+        const day = dayjs.utc(date);
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !day.isValid()) {
+          throw new BadRequestException(
+            `Generated Engage policy for "${policy.platform}" has an invalid dailyTargets date "${date}" (expected YYYY-MM-DD)`
+          );
+        }
+        if (day.isBefore(firstDay) || day.isAfter(lastDay)) {
+          throw new BadRequestException(
+            `Generated Engage policy for "${policy.platform}" has a dailyTargets date ${date} outside ` +
+            `the requested range [${firstDay.format('YYYY-MM-DD')}, ${lastDay.format('YYYY-MM-DD')}]`
+          );
+        }
+        if (seenDates.has(date)) {
+          throw new BadRequestException(
+            `Generated Engage policy for "${policy.platform}" repeats dailyTargets date ${date}`
+          );
+        }
+        seenDates.add(date);
+        if (!Number.isInteger(target) || target < 0) {
+          throw new BadRequestException(
+            `Generated Engage policy for "${policy.platform}" has an invalid dailyTargets target ${target} for ${date}`
+          );
+        }
+      }
+    }
+  }
+
+  // Aggregate baseline analysis score (0-100). The aisee payload nests it at
+  // result.result.total_score; fall back to a top-level total_score. Rounded to
+  // 2 decimals; null when absent/unparseable.
+  private _extractBaselineScore(result: unknown): number | null {
+    const r = result as
+      | { result?: { total_score?: unknown }; total_score?: unknown }
+      | null;
+    const raw = r?.result?.total_score ?? r?.total_score;
+    const n = Number(raw);
+    return Number.isFinite(n) ? Math.round(n * 100) / 100 : null;
+  }
+
+  // X counts weighted characters (twitter-text), not raw length — a URL is 23
+  // no matter how long it really is. Every other platform is a plain count.
+  private _contentLength(platform: string, content: string): number {
+    return platform === 'x' ? weightedLength(content) : content.length;
+  }
+
+  // Admin-configured per-platform rhythm. Falls back to the built-in defaults
+  // when unset; a malformed Settings value must not break generation, so
+  // anything non-object degrades to the defaults rather than throwing.
+  private async _getPlatformCadence(): Promise<Record<string, PlatformCadence>> {
+    try {
+      const raw = await this._settingsService?.get(OPERATION_PLAN_PLATFORM_CADENCE_KEY);
+      if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+        return raw as Record<string, PlatformCadence>;
+      }
+    } catch (err) {
+      this.logger.error(`Failed to read ${OPERATION_PLAN_PLATFORM_CADENCE_KEY}:`, err);
+    }
+    return DEFAULT_PLATFORM_CADENCE;
+  }
+
+  // Coerce an unknown value to a clean string[] (non-empty trimmed strings),
+  // else []. Used to read keyword arrays out of the loosely-typed task payload.
+  private _asKeywordArray(value: unknown): string[] {
+    return Array.isArray(value)
+      ? value.filter((k): k is string => typeof k === 'string' && k.trim().length > 0)
+      : [];
+  }
+
+  // Generated policies (keywordTargets as a LIST) → the persisted/preview shape
+  // (keywordTargets as a Record). `keyFor` picks each entry's Record key:
+  // identity for the dry-run preview (keyword text), or the resolved
+  // EngageKeyword.id on the persist path. Entries whose key can't be resolved
+  // are dropped; entries collapsing to the same key sum their targets (e.g.
+  // "AI"/"ai" normalize to one keyword id).
+  private _foldKeywordTargets(
+    policies: z.infer<typeof GeneratedPlanSchema>['engagePolicies'],
+    keyFor: (keyword: string) => string | undefined
+  ): PersistedEngagePolicy[] {
+    return policies.map((policy) => {
+      const keywordTargets: Record<string, number> = {};
+      for (const { keyword, target } of policy.keywordTargets ?? []) {
+        const key = keyFor(keyword);
+        if (!key) continue;
+        keywordTargets[key] = (keywordTargets[key] ?? 0) + target;
+      }
+      return {
+        platform: policy.platform,
+        themeTitle: policy.themeTitle,
+        targetRepliesPerDay: policy.targetRepliesPerDay,
+        dailyTargets: (policy.dailyTargets ?? []).map((d) => ({
+          date: d.date,
+          target: d.target,
+        })),
+        enabled: policy.enabled,
+        keywordTargets,
+      };
+    });
+  }
+
+  // Persist path: fold the generated keywordTargets list into
+  // Record<EngageKeyword.id, number>, creating any keyword that doesn't exist
+  // yet. Falls back to text keys when EngageRepository wasn't wired in
+  // (unit-test construction).
+  private async _mapKeywordTargetsToIds(
+    organizationId: string,
+    projectId: string,
+    policies: z.infer<typeof GeneratedPlanSchema>['engagePolicies']
+  ): Promise<PersistedEngagePolicy[]> {
+    const texts = [
+      ...new Set(
+        policies.flatMap((policy) => (policy.keywordTargets ?? []).map((t) => t.keyword))
+      ),
+    ];
+    if (!this._engageRepository || !texts.length) {
+      return this._foldKeywordTargets(policies, (keyword) => keyword);
+    }
+    const textToId = await this._engageRepository.resolveOrCreateKeywordIds(
+      organizationId,
+      projectId,
+      texts
+    );
+    return this._foldKeywordTargets(policies, (keyword) => textToId[keyword]);
+  }
+
+  private _toRecord(plan: OperationPlan) {
+    const payload = plan.planPayload as {
+      contentItems?: unknown[];
+      engagePolicies?: unknown[];
+      warnings?: string[];
+    };
+    return {
+      id: plan.id,
+      projectId: plan.projectId,
+      taskId: plan.taskId,
+      sourceTaskVersion: plan.sourceTaskVersion ?? undefined,
+      campaignId: plan.campaignId,
+      durationDays: dayjs.utc(plan.endsAt).startOf('day').diff(dayjs.utc(plan.startsAt).startOf('day'), 'day') + 1,
+      platforms: plan.platforms,
+      generatorVersion: plan.generatorVersion,
+      status: plan.status,
+      startsAt: plan.startsAt.toISOString(),
+      endsAt: plan.endsAt.toISOString(),
+      data: plan.data ?? null,
+      contentItems: payload.contentItems ?? [],
+      engagePolicies: payload.engagePolicies ?? [],
+      billingTransactionId: plan.billingTransactionId ?? undefined,
+      creditAmount: plan.creditAmount ?? undefined,
+      warnings: payload.warnings ?? [],
+    };
+  }
+
+  private async _reconcilePending(plan: OperationPlan) {
+    let billed;
+    try {
+      billed = await this._creditService!.reconcileAwaitedDeduction({
+        userId: plan.organizationId,
+        taskId: `operation_plan:${plan.id}`,
+        businessType: AiseeBusinessType.OPERATION_PLAN,
+        description: `Generate operation plan for project ${plan.projectId}`,
+        relatedId: plan.id,
+        data: { projectId: plan.projectId, sourceTaskId: plan.taskId },
+      });
+    } catch {
+      return this._toRecord(plan);
+    }
+    if (!billed) return this._toRecord(plan);
+    if (!billed.deduction.success && !billed.deduction.skipped) {
+      return this._toRecord(await this._repo.updateStatus(plan.id, {
+        status: 'BILLING_FAILED',
+        errorCode: 'CREDIT_DEDUCTION_FAILED',
+      }));
+    }
+    const creditAmount = billed.costItems.reduce(
+      (sum, item) => sum + Number(item.amount),
+      0
+    ).toFixed(6);
+    const readyPlan = await this._repo.updateStatus(plan.id, {
+      status: 'READY',
+      billingTransactionId: billed.deduction.transactionId ?? null,
+      creditAmount,
+      errorCode: null,
+    });
+    await this._repo.materializePlanPosts(readyPlan, readyPlan.planPayload);
+    return this._toRecord(readyPlan);
+  }
+
+  async getOverview(organizationId: string, planId: string) {
+    const plan = await this._repo.getById(planId, organizationId);
+    const [posts, engageStats] = await Promise.all([
+      this._repo.getPostsForPlan(plan.id, organizationId),
+      this._getReplyPacingByDay(plan),
+    ]);
+
+    return {
+      plan: {
+        id: plan.id,
+        projectId: plan.projectId,
+        taskId: plan.taskId,
+        campaignId: plan.campaignId,
+        platforms: plan.platforms,
+        status: plan.status,
+        startsAt: plan.startsAt,
+        endsAt: plan.endsAt,
+        data: plan.data ?? null,
+      },
+      posts,
+      engageStats,
+    };
+  }
+
+  async reconcileBillingPending(limit = 50): Promise<void> {
+    if (!this._creditService) return;
+    const plans = await this._repo.findBillingPending(limit);
+    await Promise.allSettled(plans.map((plan) => this._reconcilePending(plan)));
+  }
+
+  private async _getReplyPacingByDay(plan: OperationPlan): Promise<ReplyPacingByDay> {
+    const payload = plan.planPayload as { engagePolicies?: EngagePolicy[] } | null;
+    const enabledPolicies = (
+      Array.isArray(payload?.engagePolicies) ? payload!.engagePolicies : []
+    ).filter(
+      (p) => p?.enabled && p.keywordTargets && Object.keys(p.keywordTargets).length
+    );
+    if (!enabledPolicies.length) return {};
+
+    // Resolve every keywordId (across all platform policies) to its text once.
+    // matchedKeywords on EngageSentReply stores keyword TEXT, not id — see
+    // schema.prisma's EngageOpportunityState.matchedKeywords comment.
+    const allKeywordIds = [
+      ...new Set(enabledPolicies.flatMap((p) => Object.keys(p.keywordTargets ?? {}))),
+    ];
+    const keywordRows = await this._repo.resolveKeywordTexts(allKeywordIds);
+    const textById = new Map(keywordRows.map((k) => [k.id, k.keyword]));
+
+    // Per-platform target lists. Drop any keywordId that no longer resolves
+    // (keyword deleted since the plan was generated) rather than leaking a raw
+    // uuid to the frontend; drop a platform entirely if none of its keywords
+    // survive.
+    type Target = { keywordId: string; keyword: string; targetReplies: number };
+    const platformPolicies = enabledPolicies
+      .map((policy) => {
+        const targets: Target[] = Object.entries(policy.keywordTargets ?? {})
+          .map(([keywordId, count]) => {
+            const keyword = textById.get(keywordId);
+            const targetReplies = Number(count);
+            return keyword && Number.isFinite(targetReplies)
+              ? { keywordId, keyword, targetReplies }
+              : null;
+          })
+          .filter((t): t is Target => t !== null);
+        return {
+          platform: policy.platform,
+          themeTitle: policy.themeTitle?.trim() || undefined,
+          targets,
+          targetRepliesPerDay: policy.targetRepliesPerDay,
+          // Indexed for the per-day lookup below; a 0 override is meaningful,
+          // so resolve by presence rather than truthiness.
+          dailyTargetByDate: new Map(
+            (policy.dailyTargets ?? [])
+              .filter((d) => typeof d?.date === 'string' && typeof d?.target === 'number')
+              .map((d) => [d.date, d.target])
+          ),
+        };
+      })
+      .filter((p) => p.targets.length);
+    if (!platformPolicies.length) return {};
+
+    const replies = await this._repo.getSentRepliesInRange(
+      plan.organizationId,
+      plan.projectId,
+      plan.startsAt,
+      plan.endsAt
+    );
+
+    const days: string[] = [];
+    for (
+      let d = dayjs.utc(plan.startsAt).startOf('day');
+      !d.isAfter(plan.endsAt);
+      d = d.add(1, 'day')
+    ) {
+      days.push(d.format('YYYY-MM-DD'));
+    }
+
+    // Pre-seed every (day, platform, keyword) triple at 0 so the frontend gets
+    // a complete grid instead of sparse/missing entries.
+    const actualByDay = new Map<string, Map<string, Map<string, number>>>(
+      days.map((day) => [
+        day,
+        new Map(
+          platformPolicies.map((pp) => [
+            pp.platform,
+            new Map(pp.targets.map((t) => [t.keyword, 0])),
+          ])
+        ),
+      ])
+    );
+    for (const reply of replies) {
+      const day = dayjs.utc(reply.post.publishDate).format('YYYY-MM-DD');
+      const platform = reply.opportunity?.platform;
+      if (!platform) continue;
+      const counts = actualByDay.get(day)?.get(platform);
+      if (!counts) continue; // outside the range, or a platform with no policy
+      for (const keyword of reply.matchedKeywords) {
+        if (counts.has(keyword)) counts.set(keyword, counts.get(keyword)! + 1);
+      }
+    }
+
+    const result: ReplyPacingByDay = {};
+    for (const day of days) {
+      const byPlatform = actualByDay.get(day)!;
+      result[day] = platformPolicies.map((pp) => {
+        const counts = byPlatform.get(pp.platform)!;
+        return {
+          platform: pp.platform,
+          themeTitle: pp.themeTitle,
+          targetRepliesPerDay: pp.dailyTargetByDate.has(day)
+            ? pp.dailyTargetByDate.get(day)
+            : pp.targetRepliesPerDay,
+          keywords: pp.targets.map((t) => ({
+            keywordId: t.keywordId,
+            keyword: t.keyword,
+            actualReplies: counts.get(t.keyword) ?? 0,
+            targetReplies: t.targetReplies,
+          })),
+        };
+      });
+    }
+    return result;
+  }
+}

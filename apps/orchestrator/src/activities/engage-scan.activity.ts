@@ -523,14 +523,17 @@ export class EngageScanActivity {
   ): Promise<void> {
     if (!this._keywordInitialScan) return;
     if (platform === 'x' && (!xPool.size || xPool.available() <= 0)) return;
-    const orgById = new Map(orgContexts.map((ctx) => [ctx.organizationId, ctx]));
+    const contextByConfigId = new Map(orgContexts.map((ctx) => [ctx.id, ctx]));
+    const organizationIds = Array.from(
+      new Set(orgContexts.map((ctx) => ctx.organizationId))
+    );
     const retryBefore = new Date(Date.now() - settings.retryMs);
     const staleBefore = new Date(Date.now() - settings.staleMs);
     const budget = settings.budget[platform];
     const rows = await this._keywordInitialScan.model.engageKeywordInitialScan.findMany({
       where: {
         platform,
-        organizationId: { in: Array.from(orgById.keys()) },
+        organizationId: { in: organizationIds },
         OR: [
           { status: 'PENDING' },
           {
@@ -602,8 +605,8 @@ export class EngageScanActivity {
     if (!claimedRows.length) return;
 
     const claimedIds = claimedRows.map((row) => row.id);
-    const claimedOrgIds = Array.from(
-      new Set(claimedRows.map((row) => row.organizationId))
+    const claimedConfigIds = Array.from(
+      new Set(claimedRows.map((row) => row.keywordRef.configId))
     );
     const claimedKeywords = Array.from(
       new Set(claimedRows.map((row) => row.keywordRef.keyword))
@@ -663,19 +666,19 @@ export class EngageScanActivity {
       }
 
       const posts = deduplicatePosts(result.posts);
-      const failedOrgIds: string[] = [];
-      for (const orgId of claimedOrgIds) {
-        const ctx = orgById.get(orgId);
+      const failedConfigIds: string[] = [];
+      for (const configId of claimedConfigIds) {
+        const ctx = contextByConfigId.get(configId);
         if (!ctx) {
-          failedOrgIds.push(orgId);
+          failedConfigIds.push(configId);
           continue;
         }
         try {
           await this._fanOutToOrg(ctx, posts);
         } catch (err) {
-          failedOrgIds.push(orgId);
+          failedConfigIds.push(configId);
           this.logger.warn(
-            `[initial-scan] fan-out failed for org=${orgId}: ${(err as Error).message}`
+            `[initial-scan] fan-out failed for config=${configId}, org=${ctx.organizationId}, project=${ctx.projectId ?? 'legacy'}: ${(err as Error).message}`
           );
         }
       }
@@ -694,7 +697,7 @@ export class EngageScanActivity {
 
       const completedAt = new Date();
       const failedIds = claimedRows
-        .filter((row) => failedOrgIds.includes(row.organizationId))
+        .filter((row) => failedConfigIds.includes(row.keywordRef.configId))
         .map((row) => row.id);
       const doneIds = claimedIds.filter((id) => !failedIds.includes(id));
       if (doneIds.length) {
@@ -712,7 +715,7 @@ export class EngageScanActivity {
           where: { id: { in: failedIds } },
           data: {
             status: 'FAILED',
-            error: 'Initial keyword scan fan-out failed for this org',
+            error: 'Initial keyword scan fan-out failed for this project configuration',
           },
         });
       }
@@ -1090,7 +1093,9 @@ export class EngageScanActivity {
     // engage-housekeeping-cron.workflow.ts), which is the source of truth.
     this._settleByOrg(
       await Promise.allSettled(
-        orgContexts.map((ctx) => this._expireStaleOpportunities(ctx.organizationId))
+        orgContexts.map((ctx) =>
+          this._expireStaleOpportunities(ctx.organizationId, ctx.projectId)
+        )
       ),
       orgContexts,
       'expire-stale'
@@ -1164,7 +1169,7 @@ export class EngageScanActivity {
     if (scored.length) {
       this._ingest.recordScoreDistribution(ctx.organizationId, 'persisted', scored);
       const classified = await this._classifyIntents(scored);
-      await this._persistOpportunities(ctx.organizationId, classified);
+      await this._persistOpportunities(ctx.organizationId, ctx.projectId, classified);
       await this._updateKeywordHitCounts(ctx.organizationId, classified, orgKeywords);
     }
     // Note: stale-opportunity expiry runs once per org in _fanOutAndFinalize
@@ -1199,6 +1204,7 @@ export class EngageScanActivity {
 
   private async _persistOpportunities(
     orgId: string,
+    projectId: string | null,
     posts: ScoredPost[]
   ): Promise<void> {
     if (!posts.length) return;
@@ -1206,7 +1212,7 @@ export class EngageScanActivity {
 
     // Delegated to the shared EngageScanIngestService (one write path for the
     // workflow and the extension scan-ingest endpoint).
-    await this._ingest.persistOpportunities(orgId, posts);
+    await this._ingest.persistOpportunities(orgId, projectId, posts);
   }
 
   private _updateKeywordHitCounts(
@@ -1217,12 +1223,20 @@ export class EngageScanActivity {
     return this._ingest.updateKeywordHitCounts(orgId, posts, keywords);
   }
 
-  private async _expireStaleOpportunities(orgId: string): Promise<void> {
+  private async _expireStaleOpportunities(
+    orgId: string,
+    projectId: string | null
+  ): Promise<void> {
     const ttlDays = await this._opportunityTtlDays();
     const cutoff = dayjs.utc().subtract(ttlDays, 'day').toDate();
-    // createdAt on the state row = when this org first matched the post.
+    // createdAt on the state row = when this project first matched the post.
     await this._oppState.model.engageOpportunityState.updateMany({
-      where: { organizationId: orgId, status: 'NEW', createdAt: { lt: cutoff } },
+      where: {
+        organizationId: orgId,
+        projectId,
+        status: 'NEW',
+        createdAt: { lt: cutoff },
+      },
       data: { status: 'EXPIRED' },
     });
   }
@@ -1274,7 +1288,11 @@ export class EngageScanActivity {
     const now = new Date();
     await Promise.all(
       orgContexts.map((ctx) =>
-        this._engageRepository.saveConfig(ctx.organizationId, { lastScanAt: now })
+        this._engageRepository.saveConfig(
+          ctx.organizationId,
+          { lastScanAt: now },
+          ctx.projectId
+        )
       )
     );
   }

@@ -133,9 +133,9 @@ export class EngageScanTasksService {
    */
   async backfillFromExisting(
     orgId: string,
-    opts: { windowDays?: number; limit?: number } = {}
+    opts: { windowDays?: number; limit?: number; projectId?: string | null } = {}
   ): Promise<number> {
-    const ctx = await this._engageRepo.getEnabledOrgContext(orgId);
+    const ctx = await this._engageRepo.getEnabledOrgContext(orgId, opts.projectId ?? null);
     if (!ctx) return 0;
 
     const windowDays = opts.windowDays ?? (await this._entitlement.getMetricsWindowDays(orgId));

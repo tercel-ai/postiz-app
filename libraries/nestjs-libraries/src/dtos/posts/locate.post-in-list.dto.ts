@@ -74,6 +74,18 @@ export class LocatePostInListDto {
   @IsString()
   sourcePostId?: string;
 
+  // Must mirror GetPostsListDto.projectId/operationPlanId — see the note on
+  // `where` below.
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  projectId?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  operationPlanId?: string;
+
   // Must mirror GetPostsListDto.source so the located page index matches the
   // index the post occupies under the same /posts/list filters.
   @ApiPropertyOptional({ enum: VALID_POST_SOURCES, isArray: true })

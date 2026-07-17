@@ -262,34 +262,54 @@ export class EngageRepository {
 
   // ─── Config ────────────────────────────────────────────────────────────────
 
-  async getOrCreateConfig(organizationId: string) {
-    // Atomic upsert: two concurrent first-call requests would otherwise both
-    // miss findUnique and race on create → Prisma P2002 unique violation.
-    return this._config.model.engageConfig.upsert({
-      where: { organizationId },
-      create: { organizationId, enabled: false },
-      update: {},
-      include: {
-        keywords: {
-          orderBy: { createdAt: 'asc' },
-          include: { initialScans: { orderBy: { platform: 'asc' } } },
-        },
-        monitoredChannels: { orderBy: { createdAt: 'asc' } },
-        trackedAccounts: { orderBy: { createdAt: 'asc' } },
-        xReplyAccounts: {
-          include: {
-            integration: {
-              select: {
-                id: true,
-                name: true,
-                providerIdentifier: true,
-                picture: true,
-              },
+  async getOrCreateConfig(organizationId: string, projectId: string | null = null) {
+    const include = {
+      keywords: {
+        orderBy: { createdAt: 'asc' as const },
+        include: { initialScans: { orderBy: { platform: 'asc' as const } } },
+      },
+      monitoredChannels: { orderBy: { createdAt: 'asc' as const } },
+      trackedAccounts: { orderBy: { createdAt: 'asc' as const } },
+      xReplyAccounts: {
+        include: {
+          integration: {
+            select: {
+              id: true,
+              name: true,
+              providerIdentifier: true,
+              picture: true,
             },
           },
-          orderBy: { createdAt: 'asc' },
         },
+        orderBy: { createdAt: 'asc' as const },
       },
+    };
+
+    if (projectId != null) {
+      // Atomic upsert: two concurrent first-call requests would otherwise both
+      // miss findFirst and race on create → Prisma P2002 unique violation.
+      return this._config.model.engageConfig.upsert({
+        where: { organizationId_projectId: { organizationId, projectId } },
+        create: { organizationId, projectId, enabled: false },
+        update: {},
+        include,
+      });
+    }
+
+    // Legacy null-project row: a nullable column can never satisfy a
+    // compound-unique upsert (Postgres NULL != NULL) — same accepted
+    // transient-migration race as EngageScanIngestService's
+    // _upsertOpportunityState (collapses away once projectId is required,
+    // §11 step 8). Not a behavior change today: this is the only path any
+    // current caller exercises (none pass a real projectId yet).
+    const existing = await this._config.model.engageConfig.findFirst({
+      where: { organizationId, projectId: null },
+      include,
+    });
+    if (existing) return existing;
+    return this._config.model.engageConfig.create({
+      data: { organizationId, projectId: null, enabled: false },
+      include,
     });
   }
 
@@ -313,11 +333,20 @@ export class EngageRepository {
     });
   }
 
-  /** One org's enabled engage context (keywords/channels/tracked) for unit
-   * enumeration. Null when the org has no enabled engage config. */
-  async getEnabledOrgContext(organizationId: string) {
+  /**
+   * One project's enabled engage context (keywords/channels/tracked) for unit
+   * enumeration. Null when that project has no enabled engage config.
+   *
+   * projectId defaults to null (the legacy, pre-project config row) because
+   * every current caller — the browser-extension scan-ingest endpoints — is
+   * still org-scoped end to end, not yet project-scoped (§14 step 6). An org
+   * with more than one project's config enabled would only ever surface the
+   * null-project one here; that is unchanged behavior, not a regression this
+   * step introduces.
+   */
+  async getEnabledOrgContext(organizationId: string, projectId: string | null = null) {
     return this._config.model.engageConfig.findFirst({
-      where: { organizationId, enabled: true },
+      where: { organizationId, projectId, enabled: true },
       include: {
         keywords: { where: { enabled: true }, orderBy: { createdAt: 'asc' } },
         monitoredChannels: { where: { enabled: true }, orderBy: { createdAt: 'asc' } },
@@ -477,18 +506,49 @@ export class EngageRepository {
 
   async saveConfig(
     organizationId: string,
-    data: Partial<{ enabled: boolean; lastScanAt: Date }>
+    data: Partial<{ enabled: boolean; lastScanAt: Date }>,
+    projectId: string | null = null
   ) {
-    return this._config.model.engageConfig.upsert({
-      where: { organizationId },
-      create: { organizationId, ...data },
-      update: data,
+    if (projectId != null) {
+      return this._config.model.engageConfig.upsert({
+        where: { organizationId_projectId: { organizationId, projectId } },
+        create: { organizationId, projectId, ...data },
+        update: data,
+      });
+    }
+    // Legacy null-project row — see getOrCreateConfig's note (nullable column
+    // can't back a compound-unique upsert).
+    const existing = await this._config.model.engageConfig.findFirst({
+      where: { organizationId, projectId: null },
+      select: { id: true },
+    });
+    if (existing) {
+      return this._config.model.engageConfig.update({
+        where: { id: existing.id },
+        data,
+      });
+    }
+    return this._config.model.engageConfig.create({
+      data: { organizationId, projectId: null, ...data },
     });
   }
 
-  async resetConfig(organizationId: string) {
+  async resetConfig(organizationId: string, projectId: string | null = null) {
+    if (projectId != null) {
+      return this._config.model.engageConfig.update({
+        where: { organizationId_projectId: { organizationId, projectId } },
+        data: { enabled: false },
+      });
+    }
+    const existing = await this._config.model.engageConfig.findFirst({
+      where: { organizationId, projectId: null },
+      select: { id: true },
+    });
+    if (!existing) {
+      throw new NotFoundException('Engage config not found');
+    }
     return this._config.model.engageConfig.update({
-      where: { organizationId },
+      where: { id: existing.id },
       data: { enabled: false },
     });
   }
@@ -764,6 +824,78 @@ export class EngageRepository {
     return result;
   }
 
+  /**
+   * Map keyword TEXTS to their `EngageKeyword.id` for a project, creating any
+   * that don't exist yet. Lets operation-plan generation key
+   * `engagePolicies[].keywordTargets` by real `EngageKeyword.id` instead of raw
+   * text (the plan's upstream analysis only knows keyword text). Ensures the
+   * project's `EngageConfig` exists first.
+   *
+   * Matching is by `normalizeKeyword` (case/whitespace-insensitive), so "AI"
+   * and "ai" collapse to one row. Returns a map keyed by the ORIGINAL input
+   * text → the resolved/created id; blank inputs are skipped. Newly created
+   * keywords go through `addKeyword`, so they get the same initial-scan seeding
+   * and (configId, keyword) conflict handling as a manual add — i.e. this WRITES
+   * rows (and enqueues initial scans); do not call it on a read-only/preview
+   * path.
+   */
+  async resolveOrCreateKeywordIds(
+    organizationId: string,
+    projectId: string | null,
+    keywords: string[]
+  ): Promise<Record<string, string>> {
+    // Dedup inputs by normalized form; keep the first raw spelling to create with.
+    const normToRaw = new Map<string, string>();
+    for (const raw of keywords ?? []) {
+      const text = (raw ?? '').trim();
+      if (!text) continue;
+      const norm = normalizeKeyword(text);
+      if (!norm || normToRaw.has(norm)) continue;
+      normToRaw.set(norm, text);
+    }
+    if (!normToRaw.size) return {};
+
+    const config = await this.getOrCreateConfig(organizationId, projectId);
+    const configId = config.id;
+
+    // Existing keywords under this config, indexed by normalized form.
+    const existing = await this._keyword.model.engageKeyword.findMany({
+      where: { configId, organizationId },
+      select: { id: true, keyword: true },
+    });
+    const normToId = new Map<string, string>();
+    for (const row of existing) normToId.set(normalizeKeyword(row.keyword), row.id);
+
+    for (const [norm, text] of normToRaw) {
+      if (normToId.has(norm)) continue;
+      try {
+        const created = await this.addKeyword(configId, organizationId, {
+          keyword: text,
+        } as AddKeywordDto);
+        normToId.set(norm, created.id);
+      } catch {
+        // Lost a concurrent create race (P2002 → ConflictException); the row
+        // now exists, so re-read it by its normalized text.
+        const row = await this._keyword.model.engageKeyword.findFirst({
+          where: { configId, organizationId, keyword: { equals: text, mode: 'insensitive' } },
+          select: { id: true, keyword: true },
+        });
+        if (row) normToId.set(normalizeKeyword(row.keyword), row.id);
+      }
+    }
+
+    // Key the result by the ORIGINAL input text (post-trim), preserving each
+    // caller-supplied spelling even when several collapse to one id.
+    const out: Record<string, string> = {};
+    for (const raw of keywords ?? []) {
+      const text = (raw ?? '').trim();
+      if (!text) continue;
+      const id = normToId.get(normalizeKeyword(text));
+      if (id) out[text] = id;
+    }
+    return out;
+  }
+
   async updateKeyword(
     organizationId: string,
     id: string,
@@ -907,9 +1039,9 @@ export class EngageRepository {
     );
   }
 
-  async listMonitoredChannels(organizationId: string) {
+  async listMonitoredChannels(organizationId: string, projectId: string | null = null) {
     return this._channel.model.engageMonitoredChannel.findMany({
-      where: { organizationId },
+      where: { organizationId, config: { projectId } },
       orderBy: { createdAt: 'asc' },
     });
   }
@@ -975,9 +1107,9 @@ export class EngageRepository {
     );
   }
 
-  async listTrackedAccounts(organizationId: string) {
+  async listTrackedAccounts(organizationId: string, projectId: string | null = null) {
     return this._trackedAccount.model.engageTrackedAccount.findMany({
-      where: { organizationId },
+      where: { organizationId, config: { projectId } },
       orderBy: { createdAt: 'asc' },
     });
   }
@@ -1031,8 +1163,11 @@ export class EngageRepository {
     return integration?.token ?? null;
   }
 
-  async listXIntegrationsWithReplySettings(organizationId: string) {
-    return this._integration.model.integration.findMany({
+  async listXIntegrationsWithReplySettings(
+    organizationId: string,
+    projectId: string | null = null
+  ) {
+    const integrations = await this._integration.model.integration.findMany({
       where: {
         organizationId,
         providerIdentifier: 'x',
@@ -1040,15 +1175,30 @@ export class EngageRepository {
         disabled: false,
         type: 'social',
       },
-      include: { engageXReplyAccount: true },
+      // engageXReplyAccount(s) is plural now: the same integration may carry
+      // one reply-settings row per project (configId,integrationId) — a
+      // global UNIQUE(integrationId) no longer exists (project-scoped-post-
+      // engage-design.md §3.1). Scoped to THIS project's config so the
+      // response still surfaces at most one row per integration, matching
+      // the shape every caller of this method already expects.
+      include: {
+        engageXReplyAccounts: {
+          where: { config: { organizationId, projectId } },
+        },
+      },
       orderBy: { createdAt: 'asc' },
     });
+    return integrations.map(({ engageXReplyAccounts, ...integration }) => ({
+      ...integration,
+      engageXReplyAccount: engageXReplyAccounts[0] ?? null,
+    }));
   }
 
   async updateReplyAccount(
     organizationId: string,
     integrationId: string,
-    dto: UpdateReplyAccountDto
+    dto: UpdateReplyAccountDto,
+    projectId: string | null = null
   ) {
     // Verify the integration belongs to this org before upserting engage settings
     const integration = await this._integration.model.integration.findFirst({
@@ -1057,9 +1207,9 @@ export class EngageRepository {
     });
     if (!integration) throw new NotFoundException('Integration not found');
 
-    const configId = await this._getConfigId(organizationId);
+    const configId = await this._getConfigId(organizationId, projectId);
     return this._replyAccount.model.engageXReplyAccount.upsert({
-      where: { integrationId },
+      where: { configId_integrationId: { configId, integrationId } },
       create: {
         configId,
         organizationId,
@@ -1215,6 +1365,7 @@ export class EngageRepository {
     // State-table filters (per-org) + nested opportunity filters (global).
     const where: Prisma.EngageOpportunityStateWhereInput = {
       organizationId,
+      projectId: dto.projectId ?? null,
       ...(dto.status?.length && { status: { in: dto.status } }),
       ...(dto.bookmarked !== undefined && { bookmarked: dto.bookmarked }),
       score: { gte: dto.minScore ?? LIST_DEFAULT_MIN_SCORE },
@@ -1317,7 +1468,12 @@ export class EngageRepository {
               // Exclude unsent DRAFT working-copies: a saved draft must NOT make the
               // signal feed show "replied / link pending" for an opportunity the user
               // hasn't actually replied to yet.
-              where: { organizationId, opportunityId: { in: oppIds }, post: { state: { not: 'DRAFT' } } },
+              where: {
+                organizationId,
+                projectId: dto.projectId ?? null,
+                opportunityId: { in: oppIds },
+                post: { state: { not: 'DRAFT' } },
+              },
               orderBy: { createdAt: 'desc' },
               select: { id: true, opportunityId: true, post: { select: { releaseURL: true } } },
             })
@@ -1415,6 +1571,7 @@ export class EngageRepository {
 
     const where: Prisma.EngageOpportunityStateWhereInput = {
       organizationId,
+      projectId: dto.projectId ?? null,
       ...(dto.bookmarked !== undefined && { bookmarked: dto.bookmarked }),
       score: { gte: dto.minScore ?? LIST_DEFAULT_MIN_SCORE },
       ...(dto.minScoreKeyword !== undefined && {
@@ -1464,6 +1621,7 @@ export class EngageRepository {
     // Mirror the `where` from `listOpportunities` exactly.
     const where: Prisma.EngageOpportunityStateWhereInput = {
       organizationId,
+      projectId: dto.projectId ?? null,
       ...(dto.status?.length && { status: { in: dto.status } }),
       ...(dto.bookmarked !== undefined && { bookmarked: dto.bookmarked }),
       score: { gte: dto.minScore ?? LIST_DEFAULT_MIN_SCORE },
@@ -1632,12 +1790,13 @@ export class EngageRepository {
     };
   }
 
-  async dismissOpportunity(organizationId: string, id: string) {
+  async dismissOpportunity(organizationId: string, id: string, projectId?: string | null) {
     // Atomic: only dismiss actionable opportunities. Replied/scheduled rows are protected.
-    // `id` is the opportunity id; status lives on this org's state row.
+    // `id` is the opportunity id; status lives on this org's (+project's) state row.
     const result = await this._oppState.model.engageOpportunityState.updateMany({
       where: {
         organizationId,
+        projectId: projectId ?? null,
         opportunityId: id,
         status: { in: ['NEW', 'AUTO_QUEUED'] },
       },
@@ -1646,10 +1805,11 @@ export class EngageRepository {
     if (result.count === 0) {
       throw new NotFoundException('Opportunity not found or no longer actionable');
     }
-    const row = await this._oppState.model.engageOpportunityState.findUnique({
-      where: {
-        organizationId_opportunityId: { organizationId, opportunityId: id },
-      },
+    // Not findUnique: projectId is nullable, and a nullable column can never
+    // satisfy a compound-unique lookup (Postgres NULL != NULL) — see the
+    // schema comment on EngageOpportunityState's surrogate id.
+    const row = await this._oppState.model.engageOpportunityState.findFirst({
+      where: { organizationId, projectId: projectId ?? null, opportunityId: id },
       include: { opportunity: true },
     });
     return row ? this._merge(row) : null;
@@ -1665,15 +1825,15 @@ export class EngageRepository {
   async claimOpportunityForReply(
     organizationId: string,
     id: string,
-    claimStatus: 'REPLIED' | 'SCHEDULED'
+    claimStatus: 'REPLIED' | 'SCHEDULED',
+    projectId?: string | null
   ) {
     // Read prior status (snapshot for rollback). The followup updateMany is conditional
     // on this exact status — if a concurrent claimer flipped it between the read and
     // the update, the conditional update yields count=0 and we throw.
-    const existing = await this._oppState.model.engageOpportunityState.findUnique({
-      where: {
-        organizationId_opportunityId: { organizationId, opportunityId: id },
-      },
+    // Not findUnique: projectId is nullable — see dismissOpportunity's note.
+    const existing = await this._oppState.model.engageOpportunityState.findFirst({
+      where: { organizationId, projectId: projectId ?? null, opportunityId: id },
       select: { status: true },
     });
     // Give each failure its OWN status code so the frontend can tell them apart,
@@ -1694,16 +1854,14 @@ export class EngageRepository {
     const priorStatus = existing.status as 'NEW' | 'AUTO_QUEUED';
 
     const result = await this._oppState.model.engageOpportunityState.updateMany({
-      where: { organizationId, opportunityId: id, status: priorStatus },
+      where: { organizationId, projectId: projectId ?? null, opportunityId: id, status: priorStatus },
       data: { status: claimStatus },
     });
     if (result.count === 0) {
       throw new ConflictException('Opportunity already claimed by another request');
     }
-    const row = await this._oppState.model.engageOpportunityState.findUnique({
-      where: {
-        organizationId_opportunityId: { organizationId, opportunityId: id },
-      },
+    const row = await this._oppState.model.engageOpportunityState.findFirst({
+      where: { organizationId, projectId: projectId ?? null, opportunityId: id },
       include: { opportunity: true },
     });
     if (!row) throw new NotFoundException('Opportunity not found');
@@ -1714,10 +1872,16 @@ export class EngageRepository {
   // cascades to its EngageSentReply (onDelete: Cascade). No-op when none exist.
   private async _deleteDraftsForOpportunity(
     organizationId: string,
-    opportunityId: string
+    opportunityId: string,
+    projectId?: string | null
   ): Promise<void> {
     const drafts = await this._sentReply.model.engageSentReply.findMany({
-      where: { organizationId, opportunityId, post: { state: 'DRAFT' } },
+      where: {
+        organizationId,
+        projectId: projectId ?? null,
+        opportunityId,
+        post: { state: 'DRAFT' },
+      },
       select: { postId: true },
     });
     if (!drafts.length) return;
@@ -1734,7 +1898,8 @@ export class EngageRepository {
   async upsertDraft(
     organizationId: string,
     opportunityId: string,
-    data: { platform: string; content: string; inputData: object }
+    data: { platform: string; content: string; inputData: object },
+    projectId?: string | null
   ) {
     const { randomUUID } = await import('crypto');
     // Atomic: the existing-draft lookup and the Post + EngageSentReply writes run in
@@ -1745,7 +1910,12 @@ export class EngageRepository {
     // realistic trigger is a double-click, which the client should debounce.)
     return this._tx.model.$transaction(async (tx) => {
       const existing = await tx.engageSentReply.findFirst({
-        where: { organizationId, opportunityId, post: { state: 'DRAFT' } },
+        where: {
+          organizationId,
+          projectId: projectId ?? null,
+          opportunityId,
+          post: { state: 'DRAFT' },
+        },
         select: { id: true, postId: true },
       });
 
@@ -1764,6 +1934,7 @@ export class EngageRepository {
       const post = await tx.post.create({
         data: {
           organizationId,
+          projectId: projectId ?? null,
           content: data.content,
           publishDate: new Date(),
           state: 'DRAFT',
@@ -1777,6 +1948,7 @@ export class EngageRepository {
       return tx.engageSentReply.create({
         data: {
           organizationId,
+          projectId: projectId ?? null,
           opportunityId,
           postId: post.id,
           inputData: data.inputData as Prisma.InputJsonValue,
@@ -1796,10 +1968,12 @@ export class EngageRepository {
   async appendGenerationHistory(
     organizationId: string,
     opportunityId: string,
-    entry: GenerationHistoryEntry
+    entry: GenerationHistoryEntry,
+    projectId?: string | null
   ): Promise<void> {
     // `model` is typed to the model accessor only, but the runtime object is the
     // full PrismaClient — cast to reach $executeRaw for the atomic jsonb concat.
+    // IS NOT DISTINCT FROM (not =) so a nullable projectId still matches NULL rows.
     await (this._oppState.model as unknown as PrismaService).$executeRaw`
       UPDATE "EngageOpportunityState"
       SET "generationHistory" =
@@ -1807,6 +1981,7 @@ export class EngageRepository {
           "updatedAt" = NOW()
       WHERE "organizationId" = ${organizationId}
         AND "opportunityId" = ${opportunityId}
+        AND "projectId" IS NOT DISTINCT FROM ${projectId ?? null}
     `;
   }
 
@@ -1820,10 +1995,11 @@ export class EngageRepository {
   async recordManualGeneration(
     organizationId: string,
     opportunityId: string,
-    entry: GenerationHistoryEntry
+    entry: GenerationHistoryEntry,
+    projectId?: string | null
   ): Promise<boolean> {
-    const state = await this._oppState.model.engageOpportunityState.findUnique({
-      where: { organizationId_opportunityId: { organizationId, opportunityId } },
+    const state = await this._oppState.model.engageOpportunityState.findFirst({
+      where: { organizationId, projectId: projectId ?? null, opportunityId },
       select: { generationHistory: true },
     });
     if (!state) return false; // no per-org row to store onto
@@ -1832,7 +2008,7 @@ export class EngageRepository {
       : [];
     const last = history[history.length - 1];
     if (last && last.content === entry.content) return false; // unchanged → skip
-    await this.appendGenerationHistory(organizationId, opportunityId, entry);
+    await this.appendGenerationHistory(organizationId, opportunityId, entry, projectId);
     return true;
   }
 
@@ -1841,11 +2017,12 @@ export class EngageRepository {
   async releaseOpportunityClaim(
     organizationId: string,
     id: string,
-    priorStatus: 'NEW' | 'AUTO_QUEUED' = 'NEW'
+    priorStatus: 'NEW' | 'AUTO_QUEUED' = 'NEW',
+    projectId?: string | null
   ) {
     try {
       await this._oppState.model.engageOpportunityState.updateMany({
-        where: { organizationId, opportunityId: id },
+        where: { organizationId, projectId: projectId ?? null, opportunityId: id },
         data: { status: priorStatus },
       });
     } catch {
@@ -1855,9 +2032,13 @@ export class EngageRepository {
 
   // Resets a SCHEDULED opportunity back to NEW so that sendReply can claim it.
   // Used by cancelAndSendNow after the scheduled post has been deleted.
-  async resetScheduledOpportunity(organizationId: string, opportunityId: string) {
+  async resetScheduledOpportunity(
+    organizationId: string,
+    opportunityId: string,
+    projectId?: string | null
+  ) {
     const result = await this._oppState.model.engageOpportunityState.updateMany({
-      where: { organizationId, opportunityId, status: 'SCHEDULED' },
+      where: { organizationId, projectId: projectId ?? null, opportunityId, status: 'SCHEDULED' },
       data: { status: 'NEW' },
     });
     if (result.count === 0) {
@@ -1873,17 +2054,15 @@ export class EngageRepository {
     }
   }
 
-  async toggleBookmark(organizationId: string, id: string) {
-    const row = await this._oppState.model.engageOpportunityState.findUnique({
-      where: {
-        organizationId_opportunityId: { organizationId, opportunityId: id },
-      },
+  async toggleBookmark(organizationId: string, id: string, projectId?: string | null) {
+    const row = await this._oppState.model.engageOpportunityState.findFirst({
+      where: { organizationId, projectId: projectId ?? null, opportunityId: id },
     });
     if (!row) throw new NotFoundException('Opportunity not found');
+    // Update by the resolved surrogate id — projectId is nullable so it can't
+    // back a compound-unique `where` (see dismissOpportunity's note).
     const updated = await this._oppState.model.engageOpportunityState.update({
-      where: {
-        organizationId_opportunityId: { organizationId, opportunityId: id },
-      },
+      where: { id: row.id },
       data: { bookmarked: !row.bookmarked },
       include: { opportunity: true },
     });
@@ -1893,7 +2072,8 @@ export class EngageRepository {
   async getScoreStats(
     organizationId: string,
     date?: 'today' | 'week' | 'month',
-    platform?: string
+    platform?: string,
+    projectId?: string | null
   ) {
     // Date/platform filters live on the global opportunity; per-org membership is
     // expressed via the state relation. Two aggregates: org-specific scores from
@@ -1913,11 +2093,12 @@ export class EngageRepository {
     };
     const stateWhere: Prisma.EngageOpportunityStateWhereInput = {
       organizationId,
+      projectId: projectId ?? null,
       opportunity: oppFilter,
     };
     const oppWhere: Prisma.EngageOpportunityWhereInput = {
       ...oppFilter,
-      states: { some: { organizationId } },
+      states: { some: { organizationId, projectId: projectId ?? null } },
     };
 
     const round1 = (n: number | null | undefined) =>
@@ -2026,11 +2207,9 @@ export class EngageRepository {
     };
   }
 
-  async getOpportunityById(organizationId: string, id: string) {
-    const row = await this._oppState.model.engageOpportunityState.findUnique({
-      where: {
-        organizationId_opportunityId: { organizationId, opportunityId: id },
-      },
+  async getOpportunityById(organizationId: string, id: string, projectId?: string | null) {
+    const row = await this._oppState.model.engageOpportunityState.findFirst({
+      where: { organizationId, projectId: projectId ?? null, opportunityId: id },
       include: { opportunity: true },
     });
     if (!row) throw new NotFoundException('Opportunity not found');
@@ -2071,11 +2250,9 @@ export class EngageRepository {
     };
   }
 
-  async getOpportunityDetail(organizationId: string, id: string) {
-    const row = await this._oppState.model.engageOpportunityState.findUnique({
-      where: {
-        organizationId_opportunityId: { organizationId, opportunityId: id },
-      },
+  async getOpportunityDetail(organizationId: string, id: string, projectId?: string | null) {
+    const row = await this._oppState.model.engageOpportunityState.findFirst({
+      where: { organizationId, projectId: projectId ?? null, opportunityId: id },
       include: { opportunity: true },
     });
     if (!row) throw new NotFoundException('Opportunity not found');
@@ -2128,11 +2305,9 @@ export class EngageRepository {
     return { ...merged, sentReply: null };
   }
 
-  async getOpportunityForReply(organizationId: string, id: string) {
-    const row = await this._oppState.model.engageOpportunityState.findUnique({
-      where: {
-        organizationId_opportunityId: { organizationId, opportunityId: id },
-      },
+  async getOpportunityForReply(organizationId: string, id: string, projectId?: string | null) {
+    const row = await this._oppState.model.engageOpportunityState.findFirst({
+      where: { organizationId, projectId: projectId ?? null, opportunityId: id },
       include: { opportunity: true },
     });
     if (!row) {
@@ -2153,14 +2328,29 @@ export class EngageRepository {
 
   async createSentReply(data: {
     organizationId: string;
+    projectId?: string | null;
     opportunityId: string;
     postId: string;
     inputData: object;
+    // Send-time snapshot of which keyword(s) this opportunity matched for
+    // this project — copied from EngageOpportunityState.matchedKeywords by
+    // the caller (schema.prisma's EngageSentReply.matchedKeywords comment).
+    // Never recomputed here.
+    matchedKeywords?: string[];
   }) {
     // Tracking is keyed per-post (postId is @unique), so a batch that sends N
     // replies to one opportunity records N rows. There is no per-opportunity
     // unique to collide on, so this is a plain create.
-    const reply = await this._sentReply.model.engageSentReply.create({ data });
+    const reply = await this._sentReply.model.engageSentReply.create({
+      data: {
+        organizationId: data.organizationId,
+        projectId: data.projectId ?? null,
+        opportunityId: data.opportunityId,
+        postId: data.postId,
+        inputData: data.inputData as Prisma.InputJsonValue,
+        matchedKeywords: data.matchedKeywords ?? [],
+      },
+    });
     // A committed real reply obsoletes any saved working DRAFT for this opportunity.
     // Done HERE (after the reply row exists) rather than at claim time so a FAILED
     // publish — which rolls the claim back — leaves the saved draft intact. Best-
@@ -2168,9 +2358,81 @@ export class EngageRepository {
     // the flow.
     await this._deleteDraftsForOpportunity(
       data.organizationId,
-      data.opportunityId
+      data.opportunityId,
+      data.projectId
     ).catch(() => undefined);
     return reply;
+  }
+
+  // §6.1 per-account daily send cap: live count of one integration's sent
+  // replies since `since` (the caller passes today's UTC start). No
+  // dedicated capacity table — the cap VALUE lives in Settings, this is just
+  // the "how many so far" half (project-scoped-post-engage-design.md §3.4).
+  async countAccountSentRepliesToday(
+    integrationId: string,
+    since: Date,
+    until?: Date
+  ): Promise<number> {
+    return this._sentReply.model.engageSentReply.count({
+      where: {
+        post: {
+          integrationId,
+          publishDate: { gte: since, ...(until && { lt: until }) },
+          state: { in: ['QUEUE', 'PUBLISHED'] },
+        },
+      },
+    });
+  }
+
+  // §6 project daily target gate: live count of this project's sent replies
+  // on one platform since `since`. `qualifiedReplyCount` in the design doc's
+  // formulas — always a live COUNT, never a maintained counter.
+  async countProjectSentRepliesToday(
+    organizationId: string,
+    projectId: string,
+    platform: string,
+    since: Date,
+    until?: Date
+  ): Promise<number> {
+    return this._sentReply.model.engageSentReply.count({
+      where: {
+        organizationId,
+        projectId,
+        post: {
+          publishDate: { gte: since, ...(until && { lt: until }) },
+          state: { in: ['QUEUE', 'PUBLISHED'] },
+        },
+        opportunity: { platform },
+      },
+    });
+  }
+
+  // §3.4/§6 per-keyword daily target gate: same window/state semantics as
+  // countProjectSentRepliesToday, additionally narrowed to replies whose
+  // send-time `matchedKeywords` snapshot contains `keyword`. A reply matching
+  // three keywords counts toward each of their three per-keyword tallies (the
+  // `has` array filter is the single-table `unnest` the design's §3.3bis calls
+  // for) — it still counts as one unit toward the aggregate target above.
+  async countProjectKeywordSentRepliesToday(
+    organizationId: string,
+    projectId: string,
+    platform: string,
+    keyword: string,
+    since: Date,
+    until?: Date
+  ): Promise<number> {
+    return this._sentReply.model.engageSentReply.count({
+      where: {
+        organizationId,
+        projectId,
+        matchedKeywords: { has: keyword },
+        post: {
+          publishDate: { gte: since, ...(until && { lt: until }) },
+          state: { in: ['QUEUE', 'PUBLISHED'] },
+        },
+        opportunity: { platform },
+      },
+    });
   }
 
   // Shared filter for the sent-reply LIST and STATS so both apply identical
@@ -2186,7 +2448,7 @@ export class EngageRepository {
   // unaffected (each pins its own state).
   private _buildSentReplyFilter(
     organizationId: string,
-    dto: { date?: string; platform?: string; status?: string },
+    dto: { date?: string; platform?: string; status?: string; projectId?: string },
     opts: { includeDrafts?: boolean } = {}
   ): { postWhere: Prisma.PostWhereInput; sentWhere: Prisma.EngageSentReplyWhereInput } {
     // Single source of truth for the date→publishDate window (shared with
@@ -2228,14 +2490,22 @@ export class EngageRepository {
       // opportunity is still actionable for this org.
       postWhere.state = 'DRAFT';
       opportunityWhere = {
-        states: { some: { organizationId, status: { not: 'EXPIRED' } } },
+        states: {
+          some: {
+            organizationId,
+            projectId: dto.projectId ?? null,
+            status: { not: 'EXPIRED' },
+          },
+        },
       };
     } else if (dto.status === 'awaiting-expired') {
       // Awaiting-review tab "Expired": a saved working DRAFT whose source
       // opportunity aged out of the actionable feed for this org — read-only.
       postWhere.state = 'DRAFT';
       opportunityWhere = {
-        states: { some: { organizationId, status: 'EXPIRED' } },
+        states: {
+          some: { organizationId, projectId: dto.projectId ?? null, status: 'EXPIRED' },
+        },
       };
     } else if (dto.status === 'awaiting-link') {
       // Awaiting-review tab "Awaiting link": needs the user to act before the
@@ -2266,6 +2536,7 @@ export class EngageRepository {
 
     const sentWhere: Prisma.EngageSentReplyWhereInput = {
       organizationId,
+      projectId: dto.projectId ?? null,
       post: postWhere,
       // Apply platform filter via the linked opportunity's platform field, merged
       // with the EXPIRED-state sub-filter above when both are present.
@@ -2355,7 +2626,11 @@ export class EngageRepository {
     const oppIds = items.map((it) => it.opportunity.id);
     const states = oppIds.length
       ? (await this._oppState.model.engageOpportunityState.findMany({
-          where: { organizationId, opportunityId: { in: oppIds } },
+          where: {
+            organizationId,
+            projectId: dto.projectId ?? null,
+            opportunityId: { in: oppIds },
+          },
           select: {
             opportunityId: true,
             matchedKeywords: true,
@@ -2650,11 +2925,16 @@ export class EngageRepository {
   // (default all-time). Pass platform='x'|'reddit' for the UI tab/chip scope.
   async getDashboardSummary(
     organizationId: string,
-    opts: { platform?: string; date?: string } = {}
+    opts: { projectId?: string; platform?: string; date?: string } = {}
   ) {
     const platform = opts.platform;
     const platformFilter = platform ? { opportunity: { platform } } : {};
     const dateWindow = this._engageDateWindow(opts.date);
+    // Optional project scope. Folded into the related Post filter (Post.projectId)
+    // so every EngageSentReply query below inherits it via `post.is`; the two
+    // direct Post aggregates apply it on their own top-level where. Omitted =
+    // organization-wide (legacy behavior).
+    const projectFilter = opts.projectId ? { projectId: opts.projectId } : {};
 
     // Reply-count + best-reply metrics: only replies actually SENT (`PUBLISHED`,
     // excludes future-scheduled QUEUE and errored), within the date window.
@@ -2663,13 +2943,19 @@ export class EngageRepository {
         source: 'engage',
         state: 'PUBLISHED',
         ...dateWindow,
+        ...projectFilter,
       } as Prisma.PostWhereInput,
     };
     // Window filter for the totals/response-rate scope: any SENT/attempted state
     // but NOT unsent DRAFT working-copies (a draft is not a reply, so it must not
     // inflate the response-rate denominator).
     const windowedPostFilter = {
-      is: { source: 'engage', state: { not: 'DRAFT' }, ...dateWindow } as Prisma.PostWhereInput,
+      is: {
+        source: 'engage',
+        state: { not: 'DRAFT' },
+        ...dateWindow,
+        ...projectFilter,
+      } as Prisma.PostWhereInput,
     };
 
     const [
@@ -2705,6 +2991,7 @@ export class EngageRepository {
             organizationId,
             source: 'engage',
             ...dateWindow,
+            ...projectFilter,
             ...(platform
               ? { engageSentReply: { is: { opportunity: { platform } } } }
               : {}),
@@ -2717,6 +3004,7 @@ export class EngageRepository {
             organizationId,
             source: 'engage',
             ...dateWindow,
+            ...projectFilter,
             engageSentReply: { is: { opportunity: { platform: 'x' } } },
           },
           _sum: { impressions: true, trafficScore: true },
@@ -2813,7 +3101,8 @@ export class EngageRepository {
   // period (daily/weekly/monthly).
   async getDashboardRepliesTrend(
     organizationId: string,
-    period: 'daily' | 'weekly' | 'monthly' = 'daily'
+    period: 'daily' | 'weekly' | 'monthly' = 'daily',
+    projectId?: string
   ) {
     let rangeStart: Date;
     if (period === 'monthly') {
@@ -2828,8 +3117,16 @@ export class EngageRepository {
       where: {
         organizationId,
         // Exclude unsent DRAFT working-copies — they are not replies and must not be
-        // counted in the replies-per-day trend.
-        post: { is: { source: 'engage', state: { not: 'DRAFT' }, publishDate: { gte: rangeStart } } },
+        // counted in the replies-per-day trend. Optional project scope via
+        // Post.projectId; omitted = organization-wide.
+        post: {
+          is: {
+            source: 'engage',
+            state: { not: 'DRAFT' },
+            publishDate: { gte: rangeStart },
+            ...(projectId ? { projectId } : {}),
+          },
+        },
       },
       select: {
         opportunity: { select: { platform: true } },
@@ -2889,16 +3186,18 @@ export class EngageRepository {
   // all engage platforms; pass platform='x' for the X-only "X 流量指数汇总".
   async getDashboardTraffics(
     organizationId: string,
-    opts: { platform?: string; limit?: number } = {}
+    opts: { projectId?: string; platform?: string; limit?: number } = {}
   ) {
     const limit = opts.limit ?? 10;
     const platform = opts.platform;
+    const projectId = opts.projectId;
 
     const [agg, items] = await Promise.all([
       this._post.model.post.aggregate({
         where: {
           organizationId,
           source: 'engage',
+          ...(projectId ? { projectId } : {}),
           ...(platform
             ? { engageSentReply: { is: { opportunity: { platform } } } }
             : {}),
@@ -2909,7 +3208,13 @@ export class EngageRepository {
         where: {
           organizationId,
           ...(platform ? { opportunity: { platform } } : {}),
-          post: { is: { source: 'engage', trafficScore: { not: null } } },
+          post: {
+            is: {
+              source: 'engage',
+              trafficScore: { not: null },
+              ...(projectId ? { projectId } : {}),
+            },
+          },
         },
         select: {
           opportunity: { select: { id: true, platform: true, externalPostUrl: true } },
@@ -2945,7 +3250,8 @@ export class EngageRepository {
   // so the frontend can reuse the same chart component.
   async getDashboardImpressions(
     organizationId: string,
-    period: 'daily' | 'weekly' | 'monthly' = 'daily'
+    period: 'daily' | 'weekly' | 'monthly' = 'daily',
+    projectId?: string
   ) {
     const sinceDays = period === 'monthly' ? 365 : period === 'weekly' ? 90 : 30;
     const rangeStart = dayjs.utc().subtract(sinceDays, 'day').startOf('day').toDate();
@@ -2957,6 +3263,8 @@ export class EngageRepository {
         // Exclude unsent DRAFT working-copies (no impressions; not a published post).
         state: { not: 'DRAFT' },
         publishDate: { gte: rangeStart },
+        // Optional project scope via Post.projectId; omitted = organization-wide.
+        ...(projectId ? { projectId } : {}),
       },
       select: {
         impressions: true,
@@ -3013,16 +3321,23 @@ export class EngageRepository {
   // its own metric, so a mixed list still sorts sensibly.
   async getDashboardTopSources(
     organizationId: string,
-    opts: { platform?: string; limit?: number } = {}
+    opts: { projectId?: string; platform?: string; limit?: number } = {}
   ) {
     const limit = opts.limit ?? 10;
     const platform = opts.platform;
+    const projectId = opts.projectId;
 
     const rows = await this._sentReply.model.engageSentReply.findMany({
       where: {
         organizationId,
         ...(platform ? { opportunity: { platform } } : {}),
-        post: { is: { source: 'engage', trafficScore: { not: null } } },
+        post: {
+          is: {
+            source: 'engage',
+            trafficScore: { not: null },
+            ...(projectId ? { projectId } : {}),
+          },
+        },
       },
       select: {
         id: true,
@@ -3193,12 +3508,15 @@ export class EngageRepository {
     });
     if (!reply) throw new NotFoundException('Sent reply not found');
 
-    const state = await this._oppState.model.engageOpportunityState.findUnique({
+    // Scope the state lookup to the SAME project this reply was sent under
+    // (reply.projectId is the send-time snapshot — the authoritative source
+    // here, not a caller-supplied value). findFirst, not findUnique: a
+    // nullable projectId can't back a compound-unique lookup.
+    const state = await this._oppState.model.engageOpportunityState.findFirst({
       where: {
-        organizationId_opportunityId: {
-          organizationId,
-          opportunityId: reply.opportunity.id,
-        },
+        organizationId,
+        projectId: reply.projectId ?? null,
+        opportunityId: reply.opportunity.id,
       },
       select: {
         matchedKeywords: true,
@@ -3650,25 +3968,13 @@ export class EngageRepository {
     });
   }
 
-  async setOpportunityStatus(
-    organizationId: string,
-    opportunityId: string,
-    status: 'REPLIED' | 'SCHEDULED' | 'DISMISSED' | 'AUTO_QUEUED' | 'EXPIRED'
-  ) {
-    return this._oppState.model.engageOpportunityState.update({
-      where: {
-        organizationId_opportunityId: { organizationId, opportunityId },
-      },
-      data: { status },
-    });
-  }
-
   async createManualRedditPost(data: {
     organizationId: string;
     content: string;
     date: Date;
     replyUrl?: string;
     engageAuthor?: EngageAuthorProfile;
+    projectId?: string | null;
   }) {
     const { randomUUID } = await import('crypto');
     return this._post.model.post.create({
@@ -3688,6 +3994,10 @@ export class EngageRepository {
         group: randomUUID(),
         delay: 0,
         ...(data.replyUrl ? { releaseURL: data.replyUrl } : {}),
+        // Project attribution, so the manual reply's Post row is filtered/counted
+        // by project like every other engage post (matches the EngageSentReply
+        // row's projectId written by confirmManualReply).
+        ...(data.projectId ? { projectId: data.projectId } : {}),
         // integrationId intentionally omitted: Reddit manual posts have no integration
       },
     });
@@ -3701,7 +4011,8 @@ export class EngageRepository {
    */
   async resolveXReplyIntegrationId(
     organizationId: string,
-    replyUrl?: string | null
+    replyUrl?: string | null,
+    projectId: string | null = null
   ): Promise<XReplyResolution | null> {
     const liveX = await this._integration.model.integration.findMany({
       where: {
@@ -3713,7 +4024,13 @@ export class EngageRepository {
       select: {
         id: true,
         profile: true,
-        engageXReplyAccount: { select: { engageEnabled: true } },
+        // Plural now — see listXIntegrationsWithReplySettings's note (a
+        // global UNIQUE(integrationId) no longer exists). Scoped to THIS
+        // project's config so at most one row comes back per integration.
+        engageXReplyAccounts: {
+          where: { config: { organizationId, projectId } },
+          select: { engageEnabled: true },
+        },
       },
       orderBy: { updatedAt: 'desc' },
     });
@@ -3722,7 +4039,7 @@ export class EngageRepository {
       liveX.map((i) => ({
         id: i.id,
         profile: i.profile,
-        engageEnabled: i.engageXReplyAccount?.engageEnabled ?? false,
+        engageEnabled: i.engageXReplyAccounts[0]?.engageEnabled ?? false,
       })),
       replyUrl
     );
@@ -3735,6 +4052,7 @@ export class EngageRepository {
     replyUrl?: string;
     integrationId?: string;
     engageAuthor?: EngageAuthorProfile;
+    projectId?: string | null;
   }) {
     // The integration is optional. When provided, its OAuth token lets
     // checkPostAnalytics read the reply tweet's impressions/bookmarks. When
@@ -3795,6 +4113,8 @@ export class EngageRepository {
         delay: 0,
         ...(data.replyUrl ? { releaseURL: data.replyUrl } : {}),
         ...(releaseId ? { releaseId } : {}),
+        // Project attribution — see createManualRedditPost's note.
+        ...(data.projectId ? { projectId: data.projectId } : {}),
         // Scalar FK (not a `connect` relation) to stay in Prisma's unchecked
         // create form alongside organizationId; ownership is validated/resolved
         // above. Left null when no connected account authored the reply — the
@@ -3806,13 +4126,34 @@ export class EngageRepository {
 
   // ─── Setup (atomic bulk init) ─────────────────────────────────────────────
 
-  async setupEngage(organizationId: string, dto: SetupEngageDto) {
+  async setupEngage(
+    organizationId: string,
+    dto: SetupEngageDto,
+    projectId: string | null = null
+  ) {
     return this._tx.model.$transaction(async (tx) => {
-      const config = await tx.engageConfig.upsert({
-        where: { organizationId },
-        create: { organizationId, enabled: true },
-        update: { enabled: true },
-      });
+      const config =
+        projectId != null
+          ? await tx.engageConfig.upsert({
+              where: { organizationId_projectId: { organizationId, projectId } },
+              create: { organizationId, projectId, enabled: true },
+              update: { enabled: true },
+            })
+          : // Legacy null-project row — see getOrCreateConfig's note (nullable
+            // column can't back a compound-unique upsert).
+            await (async () => {
+              const existing = await tx.engageConfig.findFirst({
+                where: { organizationId, projectId: null },
+              });
+              return existing
+                ? tx.engageConfig.update({
+                    where: { id: existing.id },
+                    data: { enabled: true },
+                  })
+                : tx.engageConfig.create({
+                    data: { organizationId, projectId: null, enabled: true },
+                  });
+            })();
 
       if (dto.keywords?.length) {
         await tx.engageKeyword.createMany({
@@ -3972,9 +4313,12 @@ export class EngageRepository {
 
   // ─── Private helpers ──────────────────────────────────────────────────────
 
-  private async _getConfigId(organizationId: string): Promise<string> {
-    const config = await this._config.model.engageConfig.findUnique({
-      where: { organizationId },
+  private async _getConfigId(
+    organizationId: string,
+    projectId: string | null = null
+  ): Promise<string> {
+    const config = await this._config.model.engageConfig.findFirst({
+      where: { organizationId, projectId },
     });
     if (!config)
       throw new NotFoundException(

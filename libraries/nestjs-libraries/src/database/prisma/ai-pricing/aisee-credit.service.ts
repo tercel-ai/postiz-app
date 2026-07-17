@@ -185,6 +185,67 @@ export class AiseeCreditService {
     return { result, costItems: [costItem], deduction };
   }
 
+  async executeWithAwaitedBilling<T>(
+    opts: AiseeCreditExecOptions,
+    llmCall: () => Promise<{ result: T; usage: AiUsageInfo }>
+  ): Promise<AiseeCreditExecResult<T>> {
+    const hasBalance = await this.hasCredits(opts.userId);
+    if (!hasBalance) throw new Error('Insufficient credits');
+    const { result, usage } = await llmCall();
+    const cost = await this.aiPricingService.calculateCost(usage);
+    const costItem = this.costResultToItem(cost);
+    if (!costItem) return { result, costItems: [], deduction: null };
+    const deduction = await this.deductWithItems(opts, [costItem], true);
+    return { result, costItems: [costItem], deduction };
+  }
+
+  async deductUsageAndConfirm(
+    opts: AiseeCreditExecOptions,
+    usage: AiUsageInfo
+  ): Promise<{ deduction: AiseeDeductResponse | null; costItems: AiseeCostItem[] }> {
+    const cost = await this.aiPricingService.calculateCost(usage);
+    const costItem = this.costResultToItem(cost);
+    if (!costItem) return { deduction: null, costItems: [] };
+    return {
+      deduction: await this.deductWithItems(opts, [costItem], true),
+      costItems: [costItem],
+    };
+  }
+
+  async reconcileAwaitedDeduction(opts: AiseeCreditExecOptions): Promise<{
+    deduction: AiseeDeductResponse;
+    costItems: AiseeCostItem[];
+  } | null> {
+    const record = await this._billingRecord.model.billingRecord.findUnique({
+      where: { taskId: opts.taskId },
+      select: { transactionId: true, costItems: true },
+    });
+    if (!record) return null;
+    let costItems: AiseeCostItem[];
+    try {
+      costItems = JSON.parse(record.costItems) as AiseeCostItem[];
+    } catch {
+      return null;
+    }
+    if (record.transactionId) {
+      const confirmation = await this.aiseeClient.confirmDeduction({
+        taskId: opts.taskId,
+        status: 'success',
+      });
+      if (!confirmation.success) {
+        throw new Error(confirmation.error || 'Credit deduction confirmation failed');
+      }
+      return {
+        deduction: { success: true, transactionId: record.transactionId },
+        costItems,
+      };
+    }
+    return {
+      deduction: await this.deductWithItems(opts, costItems, true),
+      costItems,
+    };
+  }
+
   /**
    * Execute a multi-step AI operation (text + image in one post) with combined billing.
    *
@@ -425,7 +486,8 @@ export class AiseeCreditService {
    */
   private async deductWithItems(
     opts: AiseeCreditExecOptions,
-    costItems: AiseeCostItem[]
+    costItems: AiseeCostItem[],
+    awaitConfirmation = false
   ): Promise<AiseeDeductResponse> {
     const totalAmount = this.sumDecimalStrings(
       costItems.map((item) => item.amount)
@@ -489,14 +551,14 @@ export class AiseeCreditService {
 
     // Step 4: Update local record with Aisee response.
     if (recordId) {
-      this.updateBillingRecord(recordId, deduction).catch(
-        (dbErr) => {
+      const update = this.updateBillingRecord(recordId, deduction);
+      if (awaitConfirmation) await update;
+      else update.catch((dbErr) => {
           this.logger.error(
             `Failed to update BillingRecord id=${recordId} for task=${opts.taskId}:`,
             dbErr
           );
-        }
-      );
+        });
     }
 
     if (!deduction.success && !deduction.skipped) {
@@ -507,7 +569,17 @@ export class AiseeCreditService {
 
     // Step 5: Fire-and-forget confirm on success
     if (deduction.success && !deduction.skipped && deduction.transactionId) {
-      this.fireConfirm(opts.taskId, 'success');
+      if (awaitConfirmation) {
+        const confirmation = await this.aiseeClient.confirmDeduction({
+          taskId: opts.taskId,
+          status: 'success',
+        });
+        if (!confirmation.success) {
+          throw new Error(confirmation.error || 'Credit deduction confirmation failed');
+        }
+      } else {
+        this.fireConfirm(opts.taskId, 'success');
+      }
     }
 
     return deduction;

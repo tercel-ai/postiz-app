@@ -95,6 +95,14 @@ export class CreatePostDto {
   @IsIn(['draft', 'schedule', 'now'])
   type: 'draft' | 'schedule' | 'now';
 
+  // Opaque aisee-core products.id. Omit for a legacy, non-project post
+  // (project-scoped-post-engage-design.md §8/§11 — must keep working during
+  // migration). ProjectAuthGuard has already authorized this value against
+  // the caller's organization by the time this DTO is validated.
+  @IsOptional()
+  @IsString()
+  projectId?: string;
+
   @IsOptional()
   @IsIn(VALID_POST_SOURCES as unknown as string[])
   source?: PostSource;

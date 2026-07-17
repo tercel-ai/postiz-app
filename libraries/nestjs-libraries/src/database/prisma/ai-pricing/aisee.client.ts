@@ -15,6 +15,7 @@ export const AiseeBusinessType = {
   POST_OVERAGE: 'post_overage', // post beyond the subscription limit
   ENGAGE_REPLY: 'engage_reply', // engage reply-draft generation (priced by length)
   POST_ANALYTICS: 'post_analytics', // post analytics monitoring per integration per run
+  OPERATION_PLAN: 'operation_plan', // project operation-plan generation
 } as const;
 
 export type AiseeBusinessType =
@@ -114,6 +115,39 @@ export interface AiseeCreditBalance {
   bonus: number;
   total: number;
 }
+
+export interface AiseeProduct {
+  id: string;
+  userId: string;
+  status: string;
+}
+
+/**
+ * `ok: false, reason: 'unavailable'` covers both "Aisee not configured" and
+ * transport/5xx failures — callers must treat both as "cannot validate right
+ * now", not as "project doesn't exist" (project-scoped-post-engage-design.md
+ * §4: fail closed rather than silently treating an outage as a 404).
+ */
+export type AiseeProductLookup =
+  | { ok: true; product: AiseeProduct }
+  | { ok: false; reason: 'not_found' }
+  | { ok: false; reason: 'unavailable' };
+
+export interface AiseeTaskDetail {
+  id: string;
+  userId: string;
+  productId: string;
+  status: string;
+  result: unknown;
+  productSnapshot: unknown;
+  url?: string;
+  version?: string;
+  type?: string;
+}
+
+export type AiseeTaskLookup =
+  | { ok: true; task: AiseeTaskDetail }
+  | { ok: false; reason: 'not_found' | 'unavailable' };
 
 export interface AiseeUserCreditPackage {
   postSendLimit: number;
@@ -387,6 +421,89 @@ export class AiseeClient {
         success: false,
         error: error instanceof Error ? error.message : String(error),
       };
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // GET /product/{product_id}  — resolve a projectId's owning user for
+  // project-scoped Post/Engage authorization (project-scoped-post-engage-
+  // design.md §4). Aisee's own ownership check on this route is bypassed for
+  // our internal-JWT caller (is_super_user=true), so the returned userId MUST
+  // still be compared against the organization's resolved owner by the caller
+  // (ProjectValidationService) — this method only fetches, it does not
+  // authorize.
+  // -------------------------------------------------------------------------
+
+  async getProduct(productId: string): Promise<AiseeProductLookup> {
+    if (!this.enabled) {
+      return { ok: false, reason: 'unavailable' };
+    }
+
+    try {
+      const url = `${this.baseUrl}/product/${encodeURIComponent(productId)}`;
+      const response = await fetch(url, { headers: this.authHeaders });
+
+      if (response.status === 404) {
+        return { ok: false, reason: 'not_found' };
+      }
+
+      if (!response.ok) {
+        const errorBody = await response.text().catch(() => '');
+        this.logger.error(
+          `getProduct failed: ${response.status} | body=${errorBody}`
+        );
+        return { ok: false, reason: 'unavailable' };
+      }
+
+      const data = await response.json();
+      return {
+        ok: true,
+        product: {
+          id: data.id,
+          userId: data.user_id,
+          status: data.status,
+        },
+      };
+    } catch (error) {
+      this.logger.error(`getProduct error for productId=${productId}:`, error);
+      return { ok: false, reason: 'unavailable' };
+    }
+  }
+
+  async getTaskDetail(taskId: string): Promise<AiseeTaskLookup> {
+    if (!this.enabled) return { ok: false, reason: 'unavailable' };
+    try {
+      const response = await fetch(
+        `${this.baseUrl}/task/detail/${encodeURIComponent(taskId)}`,
+        { headers: this.authHeaders }
+      );
+      if (response.status === 404) return { ok: false, reason: 'not_found' };
+      if (!response.ok) {
+        this.logger.error(`getTaskDetail failed: ${response.status} for task=${taskId}`);
+        return { ok: false, reason: 'unavailable' };
+      }
+      const data = await response.json();
+      return {
+        ok: true,
+        task: {
+          id: data.id,
+          userId: data.user_id,
+          productId: data.product_id,
+          status: data.status,
+          result: data.result,
+          productSnapshot: data.product_snapshot,
+          url: data.url,
+          // `version_name` is the analysis revision (e.g. "12.0"); the aisee
+          // payload uses that field, so include it in the fallback chain — it
+          // becomes OperationPlan.sourceTaskVersion (audit/provenance only,
+          // unrelated to Engage).
+          version: data.version ?? data.task_version ?? data.version_name,
+          type: data.type ?? data.task_type,
+        },
+      };
+    } catch (error) {
+      this.logger.error(`getTaskDetail error for task=${taskId}:`, error);
+      return { ok: false, reason: 'unavailable' };
     }
   }
 
