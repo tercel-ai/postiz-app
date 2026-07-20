@@ -745,14 +745,11 @@ export class OperationPlanService implements OnApplicationBootstrap {
       throw new BadRequestException({ code: 'DURATION_EXCEEDS_MAX', maxDays });
     }
     const platforms = [...new Set(input.platforms.map((value) => value.trim()).filter(Boolean))];
-    const connected = new Set(await this._repo.getConnectedPlatforms(organizationId));
-    const invalid = platforms.filter((platform) => !connected.has(platform));
-    if (invalid.length) {
-      throw new BadRequestException({ code: 'PLATFORM_NOT_CONNECTED', platforms: invalid });
-    }
-    // Admin allowlist — narrows the connected set, never widens it (a platform
-    // with no integration still can't be published to). Empty/absent/malformed
-    // = no extra restriction, so a bad Settings value can't lock everyone out.
+    // Publishing is by platform (a plugin reads Post.settings.__type), NOT by an
+    // OAuth integration, so a platform need not have a connected account at plan
+    // time — materializePlanPosts creates the Post with a null integrationId and
+    // the plugin picks it up by platform. The admin allowlist below is therefore
+    // the only platform gate.
     const allowed = this._asKeywordArray(
       await this._settingsService!.get(OPERATION_PLAN_ALLOWED_PLATFORMS_KEY)
     );

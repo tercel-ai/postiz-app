@@ -272,4 +272,57 @@ describe('OperationPlanRepository', () => {
       skipDuplicates: true,
     });
   });
+
+  it('materializePlanPosts creates a null-integration draft when the platform has no OAuth account', async () => {
+    const postFindMany = vi.fn().mockResolvedValue([]);
+    const postCreateMany = vi.fn().mockResolvedValue({ count: 1 });
+    // No integration rows — the org has not connected a reddit account.
+    const integrationFindMany = vi.fn().mockResolvedValue([]);
+    const repo = createRepo({ postFindMany, postCreateMany, integrationFindMany });
+
+    await repo.materializePlanPosts(
+      {
+        id: 'plan-1',
+        organizationId: 'org-1',
+        projectId: 'proj-1',
+        campaignId: 'campaign-1',
+      } as any,
+      {
+        contentItems: [
+          {
+            contentId: 'D01',
+            utcDate: '2030-01-01T00:00:00.000Z',
+            themeKey: 'positioning',
+            themeTitle: 'Reddit theme',
+            platforms: [
+              {
+                id: '33333333-3333-4333-8333-333333333333',
+                platform: 'reddit',
+                content: 'Reddit post text',
+                media: [],
+              },
+            ],
+          },
+        ],
+      }
+    );
+
+    // Post is still created; integrationId is null and the platform lives in
+    // settings.__type so the by-platform plugin can pick it up.
+    expect(postCreateMany).toHaveBeenCalledWith({
+      data: [
+        expect.objectContaining({
+          id: '33333333-3333-4333-8333-333333333333',
+          integrationId: null,
+          settings: JSON.stringify({
+            __type: 'reddit',
+            campaignId: 'campaign-1',
+            contentId: 'D01',
+            themeKey: 'positioning',
+          }),
+        }),
+      ],
+      skipDuplicates: true,
+    });
+  });
 });

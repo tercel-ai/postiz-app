@@ -242,13 +242,11 @@ export class OperationPlanRepository {
     const postsToCreate = platformPosts
       .filter(({ post }) => !existingById.has(post.id))
       .map(({ item, post }) => {
-        const integrationId = integrationByPlatform.get(post.platform);
-        if (!integrationId) {
-          throw new ConflictException({
-            code: 'OPERATION_PLAN_PLATFORM_NOT_CONNECTED',
-            platform: post.platform,
-          });
-        }
+        // integrationId is optional: publishing is by platform (the plugin reads
+        // settings.__type), so a platform without an OAuth integration still gets
+        // a DRAFT post with a null integrationId. When an integration exists we
+        // attach it, so OAuth-based publishing is unaffected.
+        const integrationId = integrationByPlatform.get(post.platform) ?? null;
         return {
           id: post.id,
           state: 'DRAFT' as const,

@@ -942,6 +942,25 @@ describe('OperationPlanService.create', () => {
     expect(repo.create).toHaveBeenCalled();
   });
 
+  it('accepts a platform with no connected account (publishing is by platform, not OAuth)', async () => {
+    const { repo, service } = createGenerationDependencies({
+      contentItems: [],
+      engagePolicies: [],
+      warnings: [],
+    });
+    // 'reddit' is NOT in the getConnectedPlatforms mock (['x']). With the
+    // connectivity gate removed it must still be accepted — the plugin publishes
+    // by platform, and materialize creates the post with a null integrationId.
+    const result = await service.create('org-1', 'proj-1', {
+      taskId: 'task-1',
+      startAt: '2030-01-01T00:00:00.000Z',
+      endAt: '2030-01-02T00:00:00.000Z',
+      platforms: ['reddit'],
+    });
+    expect(result.status).toBe('GENERATING');
+    expect(repo.create).toHaveBeenCalled();
+  });
+
   // P2-10: the configured playbook is an INPUT to generation.
   it('feeds the Settings platform cadence for the requested platforms into the prompt', async () => {
     const { openaiService, settingsService, service } = createGenerationDependencies({
