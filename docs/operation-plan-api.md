@@ -15,6 +15,8 @@ Content-Type: application/json
 
 Creates or returns the operation plan for one completed Aisee task. `taskId` is the idempotency key for the organization: a retry with the same `taskId`, `projectId`, date range, and platform set returns the same plan without regenerating content or charging again.
 
+**Generation is asynchronous.** On the real (non-`dryRun`) path the endpoint persists a stub row and returns it **immediately** with `status: "GENERATING"` and empty content (`contentItems`, `engagePolicies`, `data` not yet filled). LLM generation and billing then run in a background job that advances the row `GENERATING → BILLING_PENDING → READY` (or a terminal failure). Clients take the returned `id` and **poll [`GET /operation-plans/{id}`](#get-operation-plan-overview)** until `status` reaches a terminal state — do not treat the POST response as the finished plan. (`dryRun` is the exception: it runs generation inline and returns the finished preview in one call.)
+
 ### Path Params
 
 | Parameter | Type | Required | Description |
@@ -36,7 +38,7 @@ Creates or returns the operation plan for one completed Aisee task. `taskId` is 
 | `taskId` | string | Yes | Aisee analysis task id. The task must belong to the organization owner's mapped Aisee user and be completed with a usable result. |
 | `startAt` | string | Yes | UTC ISO 8601 instant. Must be in the future. |
 | `endAt` | string | Yes | UTC ISO 8601 instant. Must be after `startAt`. |
-| `platforms` | string[] | Yes | Non-empty list of requested platforms. Every platform must have a connected, non-disabled integration in the organization. |
+| `platforms` | string[] | Yes | Non-empty list of requested platforms. Each must pass the `operation_plan.allowed_platforms` admin allowlist (empty allowlist = no restriction). A connected OAuth integration is **not** required — publishing is by-platform via the plugin, so a platform without an integration still yields DRAFT posts with a null `integrationId`. |
 | `keywords` | string[] | No | Curated Engage keyword set for the plan's reply policies. When non-empty, these are used verbatim as the candidate keywords. When omitted or empty, the generator falls back — in priority order — to the AI-analyzed `result.code_web_analyzer.keywords` (semantic, analysis-derived), then to `product_snapshot.keywords` (short SEO/brand tags). Each keyword the generator actually targets is created as an `EngageKeyword` on the persist path (see the `keywordTargets` note below). |
 
 ```json
@@ -51,7 +53,31 @@ Creates or returns the operation plan for one completed Aisee task. `taskId` is 
 
 ### Response
 
-`200 OK`
+`201 Created`
+
+**Immediate response (new task).** The background job has not run yet, so content is empty and `status` is `GENERATING`:
+
+```json
+{
+  "id": "operation-plan-uuid",
+  "projectId": "aisee-product-id",
+  "taskId": "c3a923d7-fce1-4a02-bac2-98e25fb626b7",
+  "sourceTaskVersion": "v1",
+  "campaignId": "campaign-uuid",
+  "durationDays": 28,
+  "platforms": ["x", "linkedin", "instagram"],
+  "generatorVersion": "operation-plan-v1",
+  "status": "GENERATING",
+  "startsAt": "2026-07-20T00:00:00.000Z",
+  "endsAt": "2026-08-16T00:00:00.000Z",
+  "data": {},
+  "contentItems": [],
+  "engagePolicies": [],
+  "warnings": []
+}
+```
+
+**Completed shape.** Once the background job reaches `READY`, the same fields are populated. You get this exact (flat) shape by **re-POSTing the same `taskId`** — the request is idempotent and returns the existing plan in whatever status it currently holds, so a repeat POST of an already-finished task returns the full plan below directly. (To *poll* for readiness use `GET /operation-plans/{id}`, which returns a different `{ plan, posts, engageStats }` envelope — see [Get Operation Plan Overview](#get-operation-plan-overview) — not this flat record.)
 
 ```json
 {
@@ -120,21 +146,33 @@ Creates or returns the operation plan for one completed Aisee task. `taskId` is 
 
 ### Status Values
 
-| Status | Meaning |
-|---|---|
-| `GENERATING` | Generation has started but is not complete. |
-| `BILLING_PENDING` | Plan is persisted; billing confirmation is being retried or reconciled. |
-| `READY` | Plan is generated and billing is confirmed or skipped. |
-| `BILLING_FAILED` | Generation succeeded but credit deduction failed. |
-| `FAILED` | Plan generation failed. |
+The real (non-`dryRun`) path is a background state machine. The POST returns synchronously in `GENERATING`; every later transition happens off-request and is observed by polling `GET /operation-plans/{id}`.
+
+```
+GENERATING ──▶ BILLING_PENDING ──▶ READY        (happy path)
+    │                  │
+    │                  └──────────▶ BILLING_FAILED   (credit deduction rejected)
+    └─────────────────────────────▶ FAILED           (generation failed)
+```
+
+| Status | Terminal? | Meaning | What to do |
+|---|---|---|---|
+| `GENERATING` | no | Stub persisted; LLM generation is running (or a crashed worker's row is awaiting the sweeper). Content fields are empty. This is what a fresh POST returns. | Keep polling. |
+| `BILLING_PENDING` | no | Generation finished and the plan is persisted; credit confirmation is in flight (or awaiting reconciliation after a lost response). Content is populated; `billingTransactionId`/`creditAmount` are not yet set. | Keep polling. |
+| `READY` | **yes** | Plan generated **and** billing confirmed (or skipped). `contentItems`/`engagePolicies`/`data` populated; DRAFT `Post` rows materialized. | Render the plan. |
+| `BILLING_FAILED` | **yes** | Generation succeeded but credit deduction was rejected (e.g. insufficient credit at confirm time). `errorCode: CREDIT_DEDUCTION_FAILED`. | Stop polling; surface a billing error. |
+| `FAILED` | **yes** | Generation itself failed (LLM/validation error). `errorCode: GENERATION_FAILED`. Aisee is notified directly so `product.result.operation_plan_status` is flipped to `failed`. | Stop polling; surface a generation error. |
+
+> **Durability.** A `GENERATING` row whose worker crashed mid-run is re-driven by the generation sweeper (`resumeStuckGenerations`, every ~interval, rows untouched > `OPERATION_PLAN_GENERATION_STALE_MS`); a `BILLING_PENDING` row whose confirmation was lost is retried by `reconcileBillingPending`. Both are idempotent on the plan id, so a slow row is never double-billed. In practice a stuck row still converges to a terminal state without a new POST.
 
 ### Errors
+
+These are **synchronous** rejections raised during request validation (task resolution, allowlist, duration, credit pre-check) — the request fails and **no plan row is created**. Once the endpoint has returned a `GENERATING` stub, later failures are **not** HTTP errors: they surface as a terminal `status` (`FAILED` / `BILLING_FAILED`) on the polled plan (see [Status Values](#status-values)).
 
 | Status | Code | Meaning |
 |---|---|---|
 | `400` | `DURATION_EXCEEDS_MAX` | Requested range exceeds the configured maximum duration. |
-| `400` | `PLATFORM_NOT_CONNECTED` | One or more requested platforms are not connected for the organization. |
-| `400` | `PLATFORM_NOT_ALLOWED` | One or more requested platforms are connected but excluded by the `operation_plan.allowed_platforms` admin allowlist. |
+| `400` | `PLATFORM_NOT_ALLOWED` | One or more requested platforms are excluded by the `operation_plan.allowed_platforms` admin allowlist. |
 | `400` | n/a | `taskId`, `startAt`, `endAt`, or `platforms` failed validation. |
 | `402` | `INSUFFICIENT_CREDIT` | The organization cannot be charged for generation. |
 | `404` | `TASK_NOT_FOUND` | Task is missing, belongs to a different Aisee user, or belongs to a different project. |
@@ -208,6 +246,8 @@ Returns the persisted plan summary, every `Post` generated under the plan, and t
 
 `plan.data` is the plan-level goal summary (see the `data` note under Create). It is `null` for legacy plans created before this field existed.
 
+> **While the plan is still generating.** This endpoint always returns `200` — it does not 404 or block on an in-flight plan. Until `plan.status` reaches `READY`, the plan is a stub: `data` is `{}`, `posts` is `[]`, and `engageStats` is `{}` (content, DRAFT posts, and pacing are only filled in once the plan is `READY`). **`plan.status === "READY"` is the only reliable readiness signal — never infer readiness from whether `posts`/`data` are empty**, or you will treat a `GENERATING` plan as an empty one.
+
 `engageStats` is keyed by UTC date; **each day is an array with one entry per platform** (a plan can span x/linkedin/instagram, each with its own Engage policy). Each entry carries that platform's `themeTitle`, the **resolved** `targetRepliesPerDay` for that day (the policy's `dailyTargets` override when one exists, else the default), and a `keywords` array — every keyword item has the persisted `EngageKeyword.id`, display text, actual replies sent on that platform that UTC day, and the configured target. `actualReplies` counts replies whose linked `Post.publishDate` falls on that UTC date **and** whose opportunity is on that platform. A keyword configured under two platforms appears once per platform (not summed).
 
 ### Errors
@@ -226,9 +266,9 @@ Seeded on backend boot (`OperationPlanService.onApplicationBootstrap`, insert-if
 | `operation_plan.allowed_platforms` | json (string[]) | `[]` | Allowlist of platforms a plan may use. **Empty = no extra restriction.** Violations → `400 PLATFORM_NOT_ALLOWED`. |
 | `operation_plan.platform_cadence` | json | per-platform defaults | Publishing rhythm fed to the generator as **input** (`platformPlaybook`), so content volume follows the team's playbook instead of the model's guess. |
 
-> **Clients read these from `GET /engage/config`.** Its response carries an `operationPlan: { maxDurationDays, allowedPlatforms }` block so a plan-creation UI can bound its date range and platform picker without an extra request. There, `allowedPlatforms` is **resolved** — `connected ∩ allowlist` (or every connected platform when the allowlist is empty), i.e. exactly what this endpoint will accept — so an empty array there means "no platform available", not "no restriction". `platform_cadence` is **not** exposed — it is generator-only steering.
+> **Clients read these from `GET /engage/config`.** Its response carries an `operationPlan: { maxDurationDays, allowedPlatforms }` block so a plan-creation UI can bound its date range and platform picker without an extra request. There, `allowedPlatforms` is **resolved** — `connected ∩ allowlist` (or every connected platform when the allowlist is empty). `platform_cadence` is **not** exposed — it is generator-only steering.
 
-> **The allowlist can only NARROW, never widen.** A plan platform must resolve to a connected `Integration` — checked at input validation *and* again at materialization. Listing a channel with no integration (e.g. `medium`) does **not** make it publishable; such channels need an operational-task carrier, which this version does not have (see `operation-plan-generation-gap.md` §3 P0-2/P3).
+> **Picker vs. what POST accepts — they diverge.** `GET /engage/config` still intersects the allowlist with **connected** integrations, so its `allowedPlatforms` only surfaces platforms that have an OAuth account. The create endpoint, however, **no longer requires a connection** — it gates on the allowlist alone (publishing is by-platform via the plugin; unconnected platforms materialize DRAFT posts with a null `integrationId`). So POST will accept an allowlisted-but-unconnected platform that the config-driven picker would not have offered. If you want the plan to cover an unconnected channel, request it directly on the POST body. (The `_getOperationPlanConfig` comment claiming the picker matches "exactly the two gates `_validateInput` applies" is stale after the connection check was removed.)
 
 `platform_cadence` shape — all fields optional free-form prose (it is editorial guidance, not a machine rule); only the **requested** platforms are forwarded, and a platform with all fields empty is skipped:
 
@@ -263,7 +303,7 @@ End-to-end recipe for exercising generation against a real Aisee task. The order
 
 ### 1. Preview the plan (`dryRun`) — free, zero writes
 
-Confirm `projectId` is the task's **`product_id`** (not the user id), and that every requested platform has a connected integration.
+Confirm `projectId` is the task's **`product_id`** (not the user id), and that every requested platform passes the `operation_plan.allowed_platforms` allowlist (a connected integration is not required — see the `platforms` field note).
 
 ```bash
 curl -sS -X POST \
@@ -289,17 +329,18 @@ Expect `201` with `"dryRun": true`, `"status": "PREVIEW"`, `"id": null`. The LLM
 
 Iterate freely: re-running a dry-run costs tokens but never credits or rows.
 
-### 2. Commit the plan — **bills credits, writes rows**
+### 2. Commit the plan — **async: bills credits, writes rows**
 
-Same request without `?dryRun=true`. Side effects, in order:
+Same request without `?dryRun=true`. The endpoint returns **immediately** with `201` and `"status": "GENERATING"` (empty content); generation + billing run in the background. Background side effects, in order:
 
-1. `OperationPlan` row written as `BILLING_PENDING` (**before** billing, so a lost confirmation is recoverable — see `reconcileBillingPending`);
-2. credits deducted via Aisee `/credit/deduct` (+ confirm);
-3. status → `READY`, `billingTransactionId` + `creditAmount` set;
-4. every keyword in `keywordTargets` is **get-or-created** as an `EngageKeyword` (this also seeds its initial scan) and the keys are rewritten to `EngageKeyword.id`;
-5. `contentItems` materialize into DRAFT `Post` rows.
+1. `OperationPlan` stub written as `GENERATING` up front, so the id is returned immediately;
+2. LLM generation runs; on success the row is filled in and advanced to `BILLING_PENDING` (**before** billing, so a lost confirmation is recoverable — see `reconcileBillingPending`);
+3. credits deducted via Aisee `/credit/deduct` (+ confirm);
+4. status → `READY`, `billingTransactionId` + `creditAmount` set;
+5. every keyword in `keywordTargets` is **get-or-created** as an `EngageKeyword` (this also seeds its initial scan) and the keys are rewritten to `EngageKeyword.id`;
+6. `contentItems` materialize into DRAFT `Post` rows.
 
-Expect `201` with `"status": "READY"` and a non-null `billingTransactionId`.
+Expect the initial `201` to carry `"status": "GENERATING"`. **Poll `GET /operation-plans/{planId}` (step 3)** until `plan.status` is `READY` (with a non-null `billingTransactionId`) or a terminal failure (`FAILED` / `BILLING_FAILED`).
 
 ### 3. Verify
 
@@ -323,7 +364,8 @@ To generate a genuinely new plan, use a different source task — or delete the 
 | Symptom | Cause |
 |---|---|
 | `404 TASK_NOT_FOUND` | `projectId` isn't the task's `product_id`, or the task's `user_id` isn't the org owner's Aisee user. |
-| `400 PLATFORM_NOT_CONNECTED` | A requested platform has no connected, non-disabled integration. |
-| `400 ... outside the requested range` / `... over the N limit` / `... not requested` | The generator broke a contract; the message names the offending item. Re-run — or tighten the prompt if it repeats. |
+| `400 PLATFORM_NOT_ALLOWED` | A requested platform is excluded by the `operation_plan.allowed_platforms` allowlist. (A missing OAuth integration is no longer an error — the plan still generates and posts get a null `integrationId`.) |
+| plan stuck in `GENERATING` / lands on `FAILED` | Generation failures are now **async**: the POST returns `GENERATING`, then the background job fails the row (`FAILED` + `errorCode: GENERATION_FAILED`). Check backend logs for the generation error; a crashed worker's row is re-driven by the generation sweeper. |
+| `400 ... outside the requested range` / `... over the N limit` / `... not requested` | The generator broke a contract; the message names the offending item. Historically a synchronous `400`; now these validation failures fail the background row as `FAILED`. Re-run — or tighten the prompt if it repeats. |
 | `500` + `Unterminated string in JSON` | The completion was truncated. `OPERATION_PLAN_MAX_TOKENS` is the budget; a very long range needs more. |
 | `500` + `Provider returned error` / `invalid_json_schema` | The generation schema violated OpenAI Structured Outputs (every field must be required — use `.nullable()`, never bare `.optional()`; no dynamic-key `z.record()`; only date-time/time/date/duration/email/hostname/ipv4/ipv6/uuid string formats — `.url()` emits the rejected `uri`). The unit test *"generation schema is OpenAI structured-outputs compatible"* guards all three. |
