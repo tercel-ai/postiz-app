@@ -664,18 +664,29 @@ export class OpenaiService {
     userPrompt: string,
     schema: z.ZodType<T>,
     schemaName: string,
-    maxTokens?: number
+    maxTokens?: number,
+    // Per-call bound on the provider request. Omitted → the SDK defaults apply
+    // (600s timeout, 2 retries, and it retries on its own timeout, so a stuck
+    // request can run ~30min). Callers that run this in the background should
+    // pass an explicit, tighter bound.
+    requestOptions?: { timeoutMs?: number; maxRetries?: number }
   ): Promise<{ data: T; usage: AiUsageInfo }> {
     const { client, model, servicer, provider } = this.getTextClient();
-    const response = await client.chat.completions.parse({
-      model,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt },
-      ],
-      response_format: zodResponseFormat(schema, schemaName),
-      ...(maxTokens ? { max_tokens: maxTokens } : {}),
-    });
+    const response = await client.chat.completions.parse(
+      {
+        model,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+        response_format: zodResponseFormat(schema, schemaName),
+        ...(maxTokens ? { max_tokens: maxTokens } : {}),
+      },
+      {
+        ...(requestOptions?.timeoutMs != null ? { timeout: requestOptions.timeoutMs } : {}),
+        ...(requestOptions?.maxRetries != null ? { maxRetries: requestOptions.maxRetries } : {}),
+      }
+    );
     // A truncated completion (finish_reason=length) yields unparseable JSON;
     // say so plainly instead of leaking a JSON syntax error from the parser.
     if (response.choices[0]?.finish_reason === 'length') {

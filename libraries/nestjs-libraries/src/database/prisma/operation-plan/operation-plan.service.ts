@@ -13,10 +13,10 @@ import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc';
 import { OperationPlan } from '@prisma/client';
 import { OperationPlanRepository } from './operation-plan.repository';
-import { AiseeClient, AiseeBusinessType } from '../ai-pricing/aisee.client';
+import { AiseeClient, AiseeBusinessType, AiseeTaskDetail } from '../ai-pricing/aisee.client';
 import { AiseeCreditService } from '../ai-pricing/aisee-credit.service';
 import { SettingsService } from '../settings/settings.service';
-import { OpenaiService } from '@gitroom/nestjs-libraries/openai/openai.service';
+import { OpenaiService, AiUsageInfo } from '@gitroom/nestjs-libraries/openai/openai.service';
 import { EngageRepository } from '@gitroom/nestjs-libraries/engage/engage.repository';
 import { weightedLength } from '@gitroom/helpers/utils/count.length';
 import { createHash, randomUUID } from 'crypto';
@@ -80,6 +80,14 @@ export interface CreateOperationPlanInput {
 // content per day per platform, so the completion is long; the provider's
 // default cap truncates it into invalid JSON.
 const OPERATION_PLAN_MAX_TOKENS = 32000;
+
+// Bound the background generation call. The SDK default (600s timeout, 2 retries,
+// retried on timeout → ~30min worst case) is too loose now that generation runs
+// off the request lifecycle: a stuck request older than the sweeper's staleMs
+// would be re-driven concurrently. Worst case here is (maxRetries + 1) × timeout
+// = 2 × 8min = 16min, kept safely below the default staleMs (20min).
+const OPERATION_PLAN_GEN_TIMEOUT_MS = Number(process.env.OPERATION_PLAN_GEN_TIMEOUT_MS) || 480_000;
+const OPERATION_PLAN_GEN_MAX_RETRIES = Number(process.env.OPERATION_PLAN_GEN_MAX_RETRIES ?? 1);
 
 // ── Settings keys (admin-editable; seeded on boot so they appear in the UI) ──
 export const OPERATION_PLAN_MAX_DURATION_DAYS_KEY = 'operation_plan.max_duration_days';
@@ -207,6 +215,33 @@ const GeneratedPlanSchema = z.object({
   }).strict()),
   warnings: z.array(z.string()),
 }).strict();
+
+// Everything the generation step needs, resolved synchronously up front so it
+// can run either inline (dry-run preview) or in the background job (real path)
+// off the same inputs. `task` carries the source analysis; `effectiveKeywords`
+// and `platformPlaybook` are the already-resolved generator inputs.
+interface PlanGenerationContext {
+  start: Date;
+  end: Date;
+  durationDays: number;
+  platforms: string[];
+  task: AiseeTaskDetail;
+  baselineScore: number | null;
+  effectiveKeywords: string[];
+  platformPlaybook: Record<string, PlatformCadence>;
+}
+
+// The generated-and-validated plan plus its display summary — the shared output
+// of _generatePlanArtifacts, consumed by both the preview and the persist path.
+interface PlanArtifacts {
+  generation: { data: z.infer<typeof GeneratedPlanSchema>; usage: AiUsageInfo };
+  planData: {
+    title: string;
+    description: string;
+    baselineScore: number | null;
+    targetScore: number;
+  };
+}
 
 @Injectable()
 export class OperationPlanService implements OnApplicationBootstrap {
@@ -349,42 +384,107 @@ export class OperationPlanService implements OnApplicationBootstrap {
       }, HttpStatus.PAYMENT_REQUIRED);
     }
 
-    // Engage keyword set for the plan's reply policies, by priority:
-    //   1. caller-curated `input.keywords` (verbatim, when non-empty)
-    //   2. the AI-analyzed `result.code_web_analyzer.keywords` (semantic,
-    //      analysis-derived — preferred over the SEO/brand snapshot tags)
-    //   3. `product_snapshot.keywords` (short SEO/brand tags, last-resort)
-    // The generator keys keywordTargets from this exact list (mapped to
-    // EngageKeyword.id on the persist path).
-    const analyzerKeywords = this._asKeywordArray(
-      (task.result as { code_web_analyzer?: { keywords?: unknown } })
-        ?.code_web_analyzer?.keywords
-    );
-    const snapshotKeywords = this._asKeywordArray(
-      (task.productSnapshot as { keywords?: unknown })?.keywords
-    );
-    const effectiveKeywords =
-      input.keywords && input.keywords.length
-        ? input.keywords
-        : analyzerKeywords.length
-          ? analyzerKeywords
-          : snapshotKeywords;
-
-    // Baseline analysis score (0-100) — the aggregate total_score of the source
-    // task. Fed to the generator to anchor a realistic targetScore, and stored
-    // on the plan's `data` for display. Nested under result.result in the aisee
-    // payload; fall back to a top-level total_score.
+    // Generation inputs, resolved synchronously so both the dry-run preview and
+    // the background job run off identical data:
+    //   - baselineScore: aggregate total_score of the source task (0-100), fed
+    //     to the generator to anchor a realistic targetScore and stored on
+    //     `data` for display. Nested under result.result; falls back to a
+    //     top-level total_score.
+    //   - effectiveKeywords: the Engage keyword set (curated → analyzer →
+    //     snapshot; see _resolveEffectiveKeywords).
+    //   - platformPlaybook: admin-configured publishing rhythm for the
+    //     requested platforms (see _buildPlatformPlaybook).
     const baselineScore = this._extractBaselineScore(task.result);
+    const effectiveKeywords = this._resolveEffectiveKeywords(task, input.keywords);
+    const platformPlaybook = await this._buildPlatformPlaybook(platforms);
+    const ctx: PlanGenerationContext = {
+      start,
+      end,
+      durationDays,
+      platforms,
+      task,
+      baselineScore,
+      effectiveKeywords,
+      platformPlaybook,
+    };
 
-    // Admin-configured publishing rhythm per platform (P2-10). Fed to the
-    // generator as input so content counts follow the team's real playbook
-    // instead of the model's guess. Only the requested platforms are sent.
-    const cadenceConfig = await this._getPlatformCadence();
-    const platformPlaybook = platforms.reduce<Record<string, PlatformCadence>>((all, platform) => {
-      const entry = cadenceConfig[platform];
-      if (entry && (entry.cadence || entry.citationWeight || entry.notes)) all[platform] = entry;
-      return all;
-    }, {});
+    // Dry-run/preview: generate + validate SYNCHRONOUSLY and return the plan
+    // WITHOUT persisting, billing, or materializing any Post. Lets callers
+    // eyeball the plan (and its estimated token usage) before committing credits
+    // + DB rows. Everything here is read-only except the LLM generation call
+    // itself (real token cost to us, but NO user-credit deduction).
+    if (options.dryRun) {
+      const { generation, planData } = await this._generatePlanArtifacts(projectId, ctx);
+      return {
+        id: null as string | null,
+        projectId,
+        taskId: input.taskId,
+        sourceTaskVersion: task.version ?? undefined,
+        campaignId: randomUUID(),
+        durationDays,
+        platforms,
+        generatorVersion: 'operation-plan-v1',
+        status: 'PREVIEW',
+        startsAt: start.toISOString(),
+        endsAt: end.toISOString(),
+        data: planData,
+        contentItems: generation.data.contentItems,
+        // Preview keeps keyword TEXT keys (no EngageKeyword rows are created).
+        engagePolicies: this._foldKeywordTargets(
+          generation.data.engagePolicies,
+          (keyword) => keyword
+        ),
+        warnings: generation.data.warnings ?? [],
+        dryRun: true,
+        estimatedUsage: generation.usage,
+      };
+    }
+
+    // Real path: persist a GENERATING stub NOW so we can return the plan id
+    // immediately, then generate + bill in the background. Callers poll the
+    // returned id for status transitions (GENERATING → BILLING_PENDING → READY).
+    const plan = await this._repo.create({
+      organizationId,
+      projectId,
+      taskId: input.taskId,
+      sourceTaskVersion: task.version,
+      platforms,
+      generatorVersion: 'operation-plan-v1',
+      campaignId: randomUUID(),
+      startsAt: start,
+      endsAt: end,
+      status: 'GENERATING',
+      // Stub payloads — filled in by _generateAndBill once generation finishes
+      // (planPayload is NON-nullable, so it cannot be left unset).
+      planPayload: {},
+      data: {},
+      sourceResultHash: createHash('sha256').update(JSON.stringify(task.result)).digest('hex'),
+    });
+
+    // Fire-and-forget: generation + billing run off the request lifecycle. A
+    // failure is logged and (for stuck rows) retried by the generation sweeper;
+    // it must never reject into the caller. Mirrors EngageService's
+    // triggerImmediateScan(...).catch(...) pattern.
+    this._generateAndBill(plan.id, organizationId, projectId, input, ctx).catch((error) =>
+      this.logger.error(
+        `Operation plan background generation failed for plan ${plan.id}:`,
+        error instanceof Error ? error.stack : error
+      )
+    );
+
+    // Return immediately with the persisted stub (status GENERATING, id present).
+    return { ...this._toRecord(plan) };
+  }
+
+  // Generate the plan via the LLM, validate it, and build the display summary.
+  // Shared by the dry-run preview and the background persist path so the (large)
+  // generation prompt lives in exactly one place. Read-only apart from the
+  // billed generation call; throws on an invalid/over-budget plan.
+  private async _generatePlanArtifacts(
+    projectId: string,
+    ctx: PlanGenerationContext
+  ): Promise<PlanArtifacts> {
+    const { start, end, durationDays, platforms, task, baselineScore, effectiveKeywords, platformPlaybook } = ctx;
 
     // Per-platform length budget, stated TWICE in the prompt (opening + closing).
     // The first live run ignored a single mid-prompt mention and produced 20/20
@@ -398,7 +498,7 @@ export class OperationPlanService implements OnApplicationBootstrap {
           : '')
     );
 
-    const generation = await this._openaiService.generateStructuredText(
+    const generation = await this._openaiService!.generateStructuredText(
       [
         'You are an operations planner. Generate a practical, UTC-dated operation plan from the supplied analysis result for a single project. Use ONLY the requested platforms, and keep every content utcDate within the requested [startAt, endAt] range.',
         '',
@@ -459,12 +559,12 @@ export class OperationPlanService implements OnApplicationBootstrap {
       // A multi-week plan (content for every day x platform + engage policies)
       // is a large structured output; the provider's default cap truncates it
       // mid-JSON. Budget generously — plan generation is a one-off, billed call.
-      OPERATION_PLAN_MAX_TOKENS
+      OPERATION_PLAN_MAX_TOKENS,
+      // Explicit bound so a stuck provider request can't outlive the sweeper's
+      // staleMs and get re-driven concurrently.
+      { timeoutMs: OPERATION_PLAN_GEN_TIMEOUT_MS, maxRetries: OPERATION_PLAN_GEN_MAX_RETRIES }
     );
     this._validateGeneratedPlan(generation.data, platforms, start, end);
-
-    const generatorVersion = 'operation-plan-v1';
-    const campaignId = randomUUID();
 
     // Plan-level goal summary for the `data` column. targetScore is clamped to
     // [baselineScore, 100] as a guard against the LLM promising a score below
@@ -479,42 +579,56 @@ export class OperationPlanService implements OnApplicationBootstrap {
       baselineScore,
       targetScore,
     };
+    return { generation, planData };
+  }
 
-    // Dry-run/preview: return the generated + validated plan WITHOUT persisting,
-    // billing, or materializing any Post. Lets callers eyeball the plan (and its
-    // estimated token usage) before committing credits + DB rows. Everything up
-    // to here is read-only except the LLM generation call itself (real token
-    // cost to us, but NO user-credit deduction).
-    if (options.dryRun) {
-      return {
-        id: null as string | null,
-        projectId,
-        taskId: input.taskId,
-        sourceTaskVersion: task.version ?? undefined,
-        campaignId,
-        durationDays,
-        platforms,
-        generatorVersion,
-        status: 'PREVIEW',
-        startsAt: start.toISOString(),
-        endsAt: end.toISOString(),
-        data: planData,
-        contentItems: generation.data.contentItems,
-        // Preview keeps keyword TEXT keys (no EngageKeyword rows are created).
-        engagePolicies: this._foldKeywordTargets(
-          generation.data.engagePolicies,
-          (keyword) => keyword
-        ),
-        warnings: generation.data.warnings ?? [],
-        dryRun: true,
-        estimatedUsage: generation.usage,
-      };
+  // Background job for the real (non-dry-run) path: generate the plan, fold its
+  // keyword targets to EngageKeyword ids, write them onto the GENERATING stub
+  // row (→ BILLING_PENDING), then run billing VERBATIM (→ READY, materialize
+  // posts). Idempotent on the plan id, so the generation sweeper can re-drive a
+  // stuck row through the same method. Never throws: generation failures mark the
+  // row FAILED, billing failures fall through to BILLING_PENDING/BILLING_FAILED
+  // for the reconciliation service to retry.
+  //
+  // Generation duration is NOT stored as a column; it is derivable as
+  // (updatedAt - createdAt) on a terminal row: createdAt is stamped when the
+  // GENERATING stub is persisted and updatedAt when this job reaches
+  // READY/FAILED. Nothing updates the row after a terminal status
+  // (materializePlanPosts touches only Post rows; the sweeper/reconciliation
+  // touch only GENERATING/BILLING_PENDING rows), so the delta is stable. Caveat:
+  // for a row recovered by the sweeper or by billing reconciliation, the delta
+  // also includes the wait before recovery, not just active generation time.
+  private async _generateAndBill(
+    planId: string,
+    organizationId: string,
+    projectId: string,
+    input: CreateOperationPlanInput,
+    ctx: PlanGenerationContext
+  ): Promise<void> {
+    let artifacts: PlanArtifacts;
+    try {
+      artifacts = await this._generatePlanArtifacts(projectId, ctx);
+    } catch (error) {
+      this.logger.error(
+        `Operation plan generation failed for plan ${planId}:`,
+        error instanceof Error ? error.stack : error
+      );
+      await this._repo.updateStatus(planId, { status: 'FAILED', errorCode: 'GENERATION_FAILED' });
+      // Generation failure never bills, so Aisee gets no signal from the
+      // credit-deduct confirm callback (which covers success). Push the terminal
+      // failure directly so the product's plan status does not stay "generating".
+      this._aiseeClient?.notifyOperationPlanStatus(projectId, planId, 'failed');
+      return;
     }
+    const { generation, planData } = artifacts;
 
-    // Real path only: map each policy's keywordTargets from keyword TEXT (what
-    // the LLM produced) to EngageKeyword.id (get-or-create), so downstream
-    // pacing/overview can key by EngageKeyword.id as the design requires (§3.4).
-    // Dry-run already returned above with text keys, having created nothing.
+    // Read back the stub for its persisted campaignId/generatorVersion so the
+    // payload matches the row (and so a sweeper-resumed row reuses its originals).
+    const stub = await this._repo.getById(planId, organizationId);
+
+    // Map each policy's keywordTargets from keyword TEXT (what the LLM produced)
+    // to EngageKeyword.id (get-or-create), so downstream pacing/overview can key
+    // by EngageKeyword.id as the design requires (§3.4).
     const engagePolicies = await this._mapKeywordTargetsToIds(
       organizationId,
       projectId,
@@ -523,29 +637,19 @@ export class OperationPlanService implements OnApplicationBootstrap {
     const planPayload = {
       ...generation.data,
       engagePolicies,
-      campaignId,
-      generatorVersion,
-      durationDays,
+      campaignId: stub.campaignId,
+      generatorVersion: stub.generatorVersion,
+      durationDays: ctx.durationDays,
     };
-    const plan = await this._repo.create({
-      organizationId,
-      projectId,
-      taskId: input.taskId,
-      sourceTaskVersion: task.version,
-      platforms,
-      generatorVersion,
-      campaignId,
-      startsAt: start,
-      endsAt: end,
-      status: 'BILLING_PENDING',
+    const plan = await this._repo.completeGeneration(planId, {
       planPayload,
       data: planData,
-      sourceResultHash: createHash('sha256').update(JSON.stringify(task.result)).digest('hex'),
+      status: 'BILLING_PENDING',
     });
 
     let billed;
     try {
-      billed = await this._creditService.deductUsageAndConfirm(
+      billed = await this._creditService!.deductUsageAndConfirm(
         {
           userId: organizationId,
           taskId: `operation_plan:${plan.id}`,
@@ -559,13 +663,14 @@ export class OperationPlanService implements OnApplicationBootstrap {
     } catch {
       // Confirmation may have succeeded remotely even when the response was lost.
       // Keep BILLING_PENDING so reconciliation can retry the idempotent billing task.
-      return this._toRecord(plan);
+      return;
     }
     if (billed.deduction && !billed.deduction.success && !billed.deduction.skipped) {
-      return this._toRecord(await this._repo.updateStatus(plan.id, {
+      await this._repo.updateStatus(plan.id, {
         status: 'BILLING_FAILED',
         errorCode: 'CREDIT_DEDUCTION_FAILED',
-      }));
+      });
+      return;
     }
     const creditAmount = billed.costItems.length
       ? billed.costItems.reduce((sum, item) => sum + Number(item.amount), 0).toFixed(6)
@@ -577,7 +682,46 @@ export class OperationPlanService implements OnApplicationBootstrap {
       errorCode: null,
     });
     await this._repo.materializePlanPosts(readyPlan, planPayload);
-    return this._toRecord(readyPlan);
+  }
+
+  // Engage keyword set for the plan's reply policies, by priority:
+  //   1. caller-curated `inputKeywords` (verbatim, when non-empty)
+  //   2. the AI-analyzed `result.code_web_analyzer.keywords` (semantic,
+  //      analysis-derived — preferred over the SEO/brand snapshot tags)
+  //   3. `product_snapshot.keywords` (short SEO/brand tags, last-resort)
+  // The generator keys keywordTargets from this exact list (mapped to
+  // EngageKeyword.id on the persist path).
+  private _resolveEffectiveKeywords(
+    task: AiseeTaskDetail,
+    inputKeywords?: string[]
+  ): string[] {
+    const analyzerKeywords = this._asKeywordArray(
+      (task.result as { code_web_analyzer?: { keywords?: unknown } })
+        ?.code_web_analyzer?.keywords
+    );
+    const snapshotKeywords = this._asKeywordArray(
+      (task.productSnapshot as { keywords?: unknown })?.keywords
+    );
+    return inputKeywords && inputKeywords.length
+      ? inputKeywords
+      : analyzerKeywords.length
+        ? analyzerKeywords
+        : snapshotKeywords;
+  }
+
+  // Admin-configured publishing rhythm for the requested platforms (P2-10). Fed
+  // to the generator as input so content counts follow the team's real playbook
+  // instead of the model's guess. Only the requested platforms are included, and
+  // only when they carry non-empty guidance.
+  private async _buildPlatformPlaybook(
+    platforms: string[]
+  ): Promise<Record<string, PlatformCadence>> {
+    const cadenceConfig = await this._getPlatformCadence();
+    return platforms.reduce<Record<string, PlatformCadence>>((all, platform) => {
+      const entry = cadenceConfig[platform];
+      if (entry && (entry.cadence || entry.citationWeight || entry.notes)) all[platform] = entry;
+      return all;
+    }, {});
   }
 
   private async _validateInput(organizationId: string, input: CreateOperationPlanInput) {
@@ -912,6 +1056,61 @@ export class OperationPlanService implements OnApplicationBootstrap {
     if (!this._creditService) return;
     const plans = await this._repo.findBillingPending(limit);
     await Promise.allSettled(plans.map((plan) => this._reconcilePending(plan)));
+  }
+
+  // Re-drive GENERATING rows whose background job never finished (worker crash,
+  // interrupted deploy). Called on an interval by the generation sweeper. Each
+  // row is re-run through _generateAndBill, which is idempotent on the plan id,
+  // so a row that merely finished slowly is not double-billed (its billing task
+  // key `operation_plan:${id}` dedupes remotely).
+  async resumeStuckGenerations(olderThanMs = 600_000, limit = 20): Promise<void> {
+    if (!this._aiseeClient || !this._creditService || !this._settingsService || !this._openaiService) {
+      return;
+    }
+    const plans = await this._repo.findStuckGenerating(olderThanMs, limit);
+    await Promise.allSettled(plans.map((plan) => this._resumeGeneration(plan)));
+  }
+
+  // Rebuild the generation context for a stuck row from its persisted fields and
+  // the source task, then re-run the background job. The original curated
+  // `input.keywords` is not stored, so effectiveKeywords is recomputed from the
+  // task (analyzer → snapshot) — the same fallback a request without curated
+  // keywords would take.
+  private async _resumeGeneration(plan: OperationPlan): Promise<void> {
+    const taskLookup = await this._aiseeClient!.getTaskDetail(plan.taskId);
+    if ('reason' in taskLookup) {
+      // Source task gone or the analysis service is down; leave the row for a
+      // later tick (or manual triage) rather than failing it on a transient miss.
+      this.logger.warn(
+        `Skipping stuck operation plan ${plan.id}: task ${plan.taskId} lookup returned ${taskLookup.reason}`
+      );
+      return;
+    }
+    const task = taskLookup.task;
+    const durationDays =
+      dayjs.utc(plan.endsAt).startOf('day').diff(dayjs.utc(plan.startsAt).startOf('day'), 'day') + 1;
+    const ctx: PlanGenerationContext = {
+      start: plan.startsAt,
+      end: plan.endsAt,
+      durationDays,
+      platforms: plan.platforms,
+      task,
+      baselineScore: this._extractBaselineScore(task.result),
+      effectiveKeywords: this._resolveEffectiveKeywords(task),
+      platformPlaybook: await this._buildPlatformPlaybook(plan.platforms),
+    };
+    await this._generateAndBill(
+      plan.id,
+      plan.organizationId,
+      plan.projectId,
+      {
+        taskId: plan.taskId,
+        startAt: plan.startsAt.toISOString(),
+        endAt: plan.endsAt.toISOString(),
+        platforms: plan.platforms,
+      },
+      ctx
+    );
   }
 
   private async _getReplyPacingByDay(plan: OperationPlan): Promise<ReplyPacingByDay> {

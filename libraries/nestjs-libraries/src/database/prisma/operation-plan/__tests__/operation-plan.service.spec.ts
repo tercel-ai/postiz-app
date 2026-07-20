@@ -262,10 +262,24 @@ describe('OperationPlanService.create', () => {
         durationDays: 2,
       },
     };
+    // The GENERATING stub create() persists synchronously up front. The
+    // background job reads it back (getById) for its campaignId/generatorVersion,
+    // so the stub carries both.
+    const generatingStub = {
+      ...basePlan,
+      status: 'GENERATING',
+      planPayload: {},
+      data: {},
+    };
     const repo = {
       getConnectedPlatforms: vi.fn().mockResolvedValue(['x']),
       findByTaskId: vi.fn().mockResolvedValue(null),
-      create: vi.fn().mockResolvedValue({ ...basePlan, status: 'BILLING_PENDING' }),
+      findStuckGenerating: vi.fn().mockResolvedValue([]),
+      create: vi.fn().mockResolvedValue(generatingStub),
+      getById: vi.fn().mockResolvedValue(generatingStub),
+      completeGeneration: vi
+        .fn()
+        .mockResolvedValue({ ...basePlan, status: 'BILLING_PENDING' }),
       updateStatus: vi.fn().mockResolvedValue({
         ...basePlan,
         status: 'READY',
@@ -287,6 +301,7 @@ describe('OperationPlanService.create', () => {
           version: 'v1',
         },
       }),
+      notifyOperationPlanStatus: vi.fn(),
     };
     const creditService = {
       resolveOwnerUserId: vi.fn().mockResolvedValue('owner-1'),
@@ -326,26 +341,60 @@ describe('OperationPlanService.create', () => {
     return { repo, creditService, openaiService, engageRepository, aiseeClient, settingsService, service };
   }
 
-  it('validates the task, persists BILLING_PENDING, awaits billing, then marks READY', async () => {
+  // create() (real path) spawns _generateAndBill fire-and-forget and returns the
+  // GENERATING stub immediately. Spying on it (spyOn calls the original through)
+  // lets a test await the SAME background promise so assertions observe the final
+  // persisted state. `background` is undefined on the dry-run/idempotency paths,
+  // where no background job is spawned.
+  async function createAndSettle(
+    service: OperationPlanService,
+    input: any,
+    options?: { dryRun?: boolean }
+  ) {
+    const spy = vi.spyOn(service as any, '_generateAndBill');
+    const result = await service.create('org-1', 'proj-1', input, options);
+    const background = spy.mock.results[0]?.value as Promise<void> | undefined;
+    return { result, background };
+  }
+
+  it('persists a GENERATING stub and returns immediately, then generates + bills in the background (BILLING_PENDING -> READY + materialize)', async () => {
     const { repo, creditService, service } = createGenerationDependencies({
       contentItems: [],
       engagePolicies: [],
       warnings: [],
     });
 
-    const result = await service.create('org-1', 'proj-1', {
+    const { result, background } = await createAndSettle(service, {
       taskId: 'task-1',
       startAt: '2030-01-01T00:00:00.000Z',
       endAt: '2030-01-02T00:00:00.000Z',
       platforms: ['x'],
     });
 
+    // The row is persisted as GENERATING with stub payloads, and returned right
+    // away — billing has NOT happened by the time create() resolves.
     expect(repo.create).toHaveBeenCalledWith(expect.objectContaining({
       organizationId: 'org-1',
       projectId: 'proj-1',
-      status: 'BILLING_PENDING',
+      status: 'GENERATING',
+      planPayload: {},
+      data: {},
     }));
-    expect(repo.create.mock.invocationCallOrder[0]).toBeLessThan(
+    expect(result.status).toBe('GENERATING');
+    expect(result.id).toBe('plan-1');
+    expect(creditService.deductUsageAndConfirm).not.toHaveBeenCalled();
+
+    // Drive the background job to completion.
+    await background;
+
+    // It fills the stub in (-> BILLING_PENDING), bills, then marks READY and
+    // materializes — the create() row is UPDATED, never a second create().
+    expect(repo.create).toHaveBeenCalledTimes(1);
+    expect(repo.completeGeneration).toHaveBeenCalledWith(
+      'plan-1',
+      expect.objectContaining({ status: 'BILLING_PENDING' })
+    );
+    expect(repo.completeGeneration.mock.invocationCallOrder[0]).toBeLessThan(
       creditService.deductUsageAndConfirm.mock.invocationCallOrder[0]
     );
     expect(repo.updateStatus).toHaveBeenCalledWith(
@@ -356,7 +405,42 @@ describe('OperationPlanService.create', () => {
       expect.objectContaining({ id: 'plan-1', status: 'READY' }),
       expect.objectContaining({ contentItems: [] })
     );
-    expect(result.status).toBe('READY');
+  });
+
+  it('marks the plan FAILED (GENERATION_FAILED) and does not bill when generation fails', async () => {
+    const { repo, creditService, openaiService, aiseeClient, service } = createGenerationDependencies({
+      contentItems: [],
+      engagePolicies: [],
+      warnings: [],
+    });
+    openaiService.generateStructuredText.mockRejectedValue(new Error('provider 500'));
+
+    const { result, background } = await createAndSettle(service, {
+      taskId: 'task-1',
+      startAt: '2030-01-01T00:00:00.000Z',
+      endAt: '2030-01-02T00:00:00.000Z',
+      platforms: ['x'],
+    });
+
+    // The request is still accepted — the failure surfaces on the row, not the
+    // response — and the background job never throws out.
+    expect(result.status).toBe('GENERATING');
+    await expect(background).resolves.toBeUndefined();
+
+    expect(repo.updateStatus).toHaveBeenCalledWith('plan-1', {
+      status: 'FAILED',
+      errorCode: 'GENERATION_FAILED',
+    });
+    expect(repo.completeGeneration).not.toHaveBeenCalled();
+    expect(creditService.deductUsageAndConfirm).not.toHaveBeenCalled();
+    expect(repo.materializePlanPosts).not.toHaveBeenCalled();
+    // Generation failure never bills, so Aisee is notified directly (no billing
+    // confirm callback fires on this path).
+    expect(aiseeClient.notifyOperationPlanStatus).toHaveBeenCalledWith(
+      'proj-1',
+      'plan-1',
+      'failed'
+    );
   });
 
   it('requires post ids, display theme titles, and executable keyword targets in the generation contract', async () => {
@@ -455,7 +539,7 @@ describe('OperationPlanService.create', () => {
     }).success).toBe(false);
   });
 
-  it('does not swallow post materialization failures after billing succeeds', async () => {
+  it('does not swallow post materialization failures inside the background job (rejects out of _generateAndBill after billing succeeds)', async () => {
     const { repo, service } = createGenerationDependencies({
       contentItems: [],
       engagePolicies: [],
@@ -463,12 +547,18 @@ describe('OperationPlanService.create', () => {
     });
     repo.materializePlanPosts.mockRejectedValue(new Error('post id conflict'));
 
-    await expect(service.create('org-1', 'proj-1', {
+    const { result, background } = await createAndSettle(service, {
       taskId: 'task-1',
       startAt: '2030-01-01T00:00:00.000Z',
       endAt: '2030-01-02T00:00:00.000Z',
       platforms: ['x'],
-    })).rejects.toThrow('post id conflict');
+    });
+
+    // create() itself still resolves (the failure is off the request path), but
+    // the background job must surface it rather than swallow it — billing already
+    // succeeded and the plan is READY, so a materialization failure is a real bug.
+    expect(result.status).toBe('GENERATING');
+    await expect(background).rejects.toThrow('post id conflict');
   });
 
   it('dryRun returns the generated preview and does NOT persist, bill, or materialize anything', async () => {
@@ -592,7 +682,9 @@ describe('OperationPlanService.create', () => {
 
   // Live generation produced 20/20 "tweets" of 315-439 weighted chars — every
   // one unpublishable on X. Without this gate the plan would persist DRAFT
-  // Posts doomed to fail at release time.
+  // Posts doomed to fail at release time. _validateGeneratedPlan runs in the
+  // shared generation step, so the preview (dryRun) path enforces it
+  // synchronously — the deterministic way to assert the exact rejection message.
   it('rejects generated content that exceeds the platform character limit (X weighted)', async () => {
     const longTweet = 'a'.repeat(281);
     const { repo, service } = createGenerationDependencies({
@@ -621,7 +713,7 @@ describe('OperationPlanService.create', () => {
       startAt: '2030-01-01T00:00:00.000Z',
       endAt: '2030-01-02T00:00:00.000Z',
       platforms: ['x'],
-    })).rejects.toThrow(/281 characters, over the 280 limit/);
+    }, { dryRun: true })).rejects.toThrow(/281 characters, over the 280 limit/);
     expect(repo.create).not.toHaveBeenCalled();
   });
 
@@ -652,14 +744,21 @@ describe('OperationPlanService.create', () => {
       warnings: [],
     });
 
-    await service.create('org-1', 'proj-1', {
+    const { background } = await createAndSettle(service, {
       taskId: 'task-1',
       startAt: '2030-01-01T00:00:00.000Z',
       endAt: '2030-01-02T00:00:00.000Z',
       platforms: ['x'],
     });
+    await background;
 
-    expect(repo.create).toHaveBeenCalled(); // accepted: weighted length is under 280
+    // Accepted: weighted length is under 280, so generation completed and the
+    // row advanced to BILLING_PENDING rather than FAILED.
+    expect(repo.completeGeneration).toHaveBeenCalled();
+    expect(repo.updateStatus).not.toHaveBeenCalledWith(
+      'plan-1',
+      expect.objectContaining({ status: 'FAILED' })
+    );
   });
 
   it('declares the X character budget (240, under the 280 ceiling) TWICE — at the top and the bottom of the prompt', async () => {
@@ -714,14 +813,17 @@ describe('OperationPlanService.create', () => {
       warnings: [],
     });
 
-    await service.create('org-1', 'proj-1', {
+    const { background } = await createAndSettle(service, {
       taskId: 'task-1',
       startAt: '2030-01-01T00:00:00.000Z',
       endAt: '2030-01-02T00:00:00.000Z',
       platforms: ['x'],
     });
+    await background;
 
-    const policy = repo.create.mock.calls[0][0].planPayload.engagePolicies[0];
+    // The generated payload is written on completeGeneration (the stub create()
+    // persisted first carried empty payloads).
+    const policy = repo.completeGeneration.mock.calls[0][1].planPayload.engagePolicies[0];
     expect(policy.targetRepliesPerDay).toBe(6); // default for un-overridden days
     expect(policy.dailyTargets).toEqual([{ date: '2030-01-02', target: 3 }]);
   });
@@ -742,12 +844,14 @@ describe('OperationPlanService.create', () => {
       warnings: [],
     });
 
+    // Validation is shared with the persist path; the preview enforces it
+    // synchronously, which is the deterministic way to assert the message.
     await expect(service.create('org-1', 'proj-1', {
       taskId: 'task-1',
       startAt: '2030-01-01T00:00:00.000Z',
       endAt: '2030-01-02T00:00:00.000Z',
       platforms: ['x'],
-    })).rejects.toThrow(/dailyTargets date 2030-02-15 outside the requested range/);
+    }, { dryRun: true })).rejects.toThrow(/dailyTargets date 2030-02-15 outside the requested range/);
     expect(repo.create).not.toHaveBeenCalled();
   });
 
@@ -775,7 +879,7 @@ describe('OperationPlanService.create', () => {
       startAt: '2030-01-01T00:00:00.000Z',
       endAt: '2030-01-02T00:00:00.000Z',
       platforms: ['x'],
-    })).rejects.toThrow(/repeats dailyTargets date 2030-01-02/);
+    }, { dryRun: true })).rejects.toThrow(/repeats dailyTargets date 2030-01-02/);
   });
 
   it('tells the generator to express the weekday/weekend rhythm via dated dailyTargets', async () => {
@@ -1023,20 +1127,22 @@ describe('OperationPlanService.create', () => {
       'AI search': 'kw-2',
     });
 
-    await service.create('org-1', 'proj-1', {
+    const { background } = await createAndSettle(service, {
       taskId: 'task-1',
       startAt: '2030-01-01T00:00:00.000Z',
       endAt: '2030-01-02T00:00:00.000Z',
       platforms: ['x'],
     });
+    await background;
 
     expect(engageRepository.resolveOrCreateKeywordIds).toHaveBeenCalledWith(
       'org-1',
       'proj-1',
       ['GEO', 'AI search']
     );
-    // planPayload persisted to the DB carries EngageKeyword.id keys, not text.
-    const persisted = repo.create.mock.calls[0][0].planPayload;
+    // planPayload persisted to the DB (via completeGeneration) carries
+    // EngageKeyword.id keys, not text.
+    const persisted = repo.completeGeneration.mock.calls[0][1].planPayload;
     expect(persisted.engagePolicies[0].keywordTargets).toEqual({ 'kw-1': 3, 'kw-2': 2 });
   });
 
@@ -1061,14 +1167,15 @@ describe('OperationPlanService.create', () => {
       },
     });
 
-    await service.create('org-1', 'proj-1', {
+    const { background } = await createAndSettle(service, {
       taskId: 'task-1',
       startAt: '2030-01-01T00:00:00.000Z',
       endAt: '2030-01-02T00:00:00.000Z',
       platforms: ['x'],
     });
+    await background;
 
-    expect(repo.create.mock.calls[0][0].data).toEqual({
+    expect(repo.completeGeneration.mock.calls[0][1].data).toEqual({
       title: 'GEO push',
       description: 'Attack the weakest gaps',
       baselineScore: 48.03, // rounded to 2dp
@@ -1084,14 +1191,15 @@ describe('OperationPlanService.create', () => {
       warnings: [],
     });
 
-    await service.create('org-1', 'proj-1', {
+    const { background } = await createAndSettle(service, {
       taskId: 'task-1',
       startAt: '2030-01-01T00:00:00.000Z',
       endAt: '2030-01-02T00:00:00.000Z',
       platforms: ['x'],
     });
+    await background;
 
-    expect(repo.create.mock.calls[0][0].data.targetScore).toBe(100);
+    expect(repo.completeGeneration.mock.calls[0][1].data.targetScore).toBe(100);
   });
 
   it('dryRun returns the goal data (baselineScore null when the task has no total_score)', async () => {
@@ -1182,5 +1290,88 @@ describe('OperationPlanService.create', () => {
     expect(openaiService.generateStructuredText).not.toHaveBeenCalled();
     expect(repo.materializePlanPosts).not.toHaveBeenCalled();
     expect(creditService.deductUsageAndConfirm).not.toHaveBeenCalled();
+  });
+
+  it('short-circuits an already-planned task (same params): returns the existing plan, no second create/generation/billing', async () => {
+    const { repo, creditService, openaiService, service } = createGenerationDependencies({
+      contentItems: [],
+      engagePolicies: [],
+      warnings: [],
+    });
+    repo.findByTaskId.mockResolvedValue({
+      id: 'plan-1',
+      organizationId: 'org-1',
+      projectId: 'proj-1',
+      taskId: 'task-1',
+      campaignId: 'campaign-1',
+      platforms: ['x'],
+      generatorVersion: 'operation-plan-v1',
+      status: 'READY',
+      startsAt: new Date('2030-01-01T00:00:00.000Z'),
+      endsAt: new Date('2030-01-02T00:00:00.000Z'),
+      planPayload: { contentItems: [], engagePolicies: [], warnings: [] },
+      sourceTaskVersion: null,
+      billingTransactionId: 'txn-1',
+      creditAmount: '1.250000',
+      errorCode: null,
+    });
+
+    const { result, background } = await createAndSettle(service, {
+      taskId: 'task-1',
+      startAt: '2030-01-01T00:00:00.000Z',
+      endAt: '2030-01-02T00:00:00.000Z',
+      platforms: ['x'],
+    });
+
+    expect(result.id).toBe('plan-1');
+    expect(background).toBeUndefined(); // no background job spawned
+    expect(repo.create).not.toHaveBeenCalled();
+    expect(openaiService.generateStructuredText).not.toHaveBeenCalled();
+    expect(creditService.deductUsageAndConfirm).not.toHaveBeenCalled();
+  });
+
+  it('resumeStuckGenerations re-drives a stuck GENERATING row through generation + billing in place (no second create, same billing key)', async () => {
+    const { repo, creditService, service } = createGenerationDependencies({
+      contentItems: [],
+      engagePolicies: [],
+      warnings: [],
+    });
+    const stuck = {
+      id: 'plan-1',
+      organizationId: 'org-1',
+      projectId: 'proj-1',
+      taskId: 'task-1',
+      campaignId: 'campaign-1',
+      generatorVersion: 'operation-plan-v1',
+      platforms: ['x'],
+      status: 'GENERATING',
+      startsAt: new Date('2030-01-01T00:00:00.000Z'),
+      endsAt: new Date('2030-01-02T00:00:00.000Z'),
+      planPayload: {},
+      data: {},
+    };
+    repo.findStuckGenerating.mockResolvedValue([stuck]);
+
+    // resumeStuckGenerations awaits every row's generation+billing internally.
+    await service.resumeStuckGenerations();
+
+    expect(repo.findStuckGenerating).toHaveBeenCalled();
+    // The stuck row is advanced in place — never a second create().
+    expect(repo.create).not.toHaveBeenCalled();
+    expect(repo.completeGeneration).toHaveBeenCalledWith(
+      'plan-1',
+      expect.objectContaining({ status: 'BILLING_PENDING' })
+    );
+    // Same billing key (the plan id) as the original attempt, so remote billing
+    // dedupes rather than double-charging.
+    expect(creditService.deductUsageAndConfirm).toHaveBeenCalledWith(
+      expect.objectContaining({ taskId: 'operation_plan:plan-1', relatedId: 'plan-1' }),
+      expect.anything()
+    );
+    expect(repo.updateStatus).toHaveBeenCalledWith(
+      'plan-1',
+      expect.objectContaining({ status: 'READY' })
+    );
+    expect(repo.materializePlanPosts).toHaveBeenCalled();
   });
 });

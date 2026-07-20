@@ -523,6 +523,32 @@ export class AiseeClient {
     );
   }
 
+  // -------------------------------------------------------------------------
+  // POST /post-agent/operation-plan/callback — push a terminal plan status
+  // -------------------------------------------------------------------------
+
+  // Notify Aisee of a terminal operation-plan outcome. Only needed for the
+  // generation-failure path: that path never bills, so Aisee gets no signal from
+  // the credit-deduct confirm callback (which covers success). Fire-and-forget —
+  // a lost notification just leaves Aisee's status stale until a later sweep.
+  notifyOperationPlanStatus(
+    projectId: string,
+    planId: string,
+    status: 'success' | 'failed'
+  ): void {
+    if (!this.enabled) return;
+
+    fetch(`${this.baseUrl}/post-agent/operation-plan/callback`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...this.authHeaders },
+      body: JSON.stringify({ project_id: projectId, plan_id: planId, status }),
+    }).catch((err) =>
+      this.logger.warn(
+        `[notifyOperationPlanStatus] Failed to notify plan ${planId}: ${err.message}`
+      )
+    );
+  }
+
   /**
    * Build a unique task_id: postiz_{label}_{random}
    * The random suffix prevents collisions when Date.now() overlaps.

@@ -58,6 +58,20 @@ export class OperationPlanRepository {
     });
   }
 
+  // GENERATING rows whose background generation appears stuck — untouched for
+  // longer than `olderThanMs` (a crashed/interrupted worker never advanced them
+  // past the stub). Mirrors findBillingPending so the generation sweeper can
+  // re-drive them idempotently. `updatedAt` is the freshness signal: it is set
+  // on the initial persist and bumped again when generation completes.
+  findStuckGenerating(olderThanMs: number, limit = 20) {
+    const threshold = new Date(Date.now() - olderThanMs);
+    return this._operationPlan.model.operationPlan.findMany({
+      where: { status: 'GENERATING', updatedAt: { lt: threshold } },
+      orderBy: { updatedAt: 'asc' },
+      take: limit,
+    });
+  }
+
   create(data: Prisma.OperationPlanUncheckedCreateInput) {
     return this._operationPlan.model.operationPlan.create({ data });
   }
@@ -72,6 +86,29 @@ export class OperationPlanRepository {
     }
   ) {
     return this._operationPlan.model.operationPlan.update({ where: { id }, data });
+  }
+
+  // Write the generated artifacts onto the existing GENERATING stub row and
+  // advance it to BILLING_PENDING in one update — the background job persisted a
+  // placeholder ({} planPayload/data) up front to return an id immediately, and
+  // this fills it in once generation finishes. Distinct from updateStatus, which
+  // only touches billing/status columns and never the (large) JSON payloads.
+  completeGeneration(
+    id: string,
+    fields: {
+      planPayload: Prisma.InputJsonValue;
+      data: Prisma.InputJsonValue;
+      status: 'BILLING_PENDING';
+    }
+  ) {
+    return this._operationPlan.model.operationPlan.update({
+      where: { id },
+      data: {
+        planPayload: fields.planPayload,
+        data: fields.data,
+        status: fields.status,
+      },
+    });
   }
 
   async getConnectedPlatforms(organizationId: string): Promise<string[]> {

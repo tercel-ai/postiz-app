@@ -1,9 +1,11 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { NotFoundException } from '@nestjs/common';
 import { OperationPlanRepository } from '../operation-plan.repository';
 
 function createRepo(overrides: {
   planFindFirst?: any;
+  planFindMany?: any;
+  planUpdate?: any;
   postFindMany?: any;
   postCreateMany?: any;
   sentReplyFindMany?: any;
@@ -11,7 +13,15 @@ function createRepo(overrides: {
   integrationFindMany?: any;
 }) {
   return new OperationPlanRepository(
-    { model: { operationPlan: { findFirst: overrides.planFindFirst ?? vi.fn() } } } as any,
+    {
+      model: {
+        operationPlan: {
+          findFirst: overrides.planFindFirst ?? vi.fn(),
+          findMany: overrides.planFindMany ?? vi.fn().mockResolvedValue([]),
+          update: overrides.planUpdate ?? vi.fn(),
+        },
+      },
+    } as any,
     {
       model: {
         post: {
@@ -39,6 +49,48 @@ function createRepo(overrides: {
 }
 
 describe('OperationPlanRepository', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('findStuckGenerating selects GENERATING rows older than the threshold, oldest first, capped by limit', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2030-01-01T00:10:00.000Z'));
+    const planFindMany = vi.fn().mockResolvedValue([]);
+    const repo = createRepo({ planFindMany });
+
+    await repo.findStuckGenerating(600_000, 10); // 10 minutes stale
+
+    expect(planFindMany).toHaveBeenCalledWith({
+      where: {
+        status: 'GENERATING',
+        updatedAt: { lt: new Date('2030-01-01T00:00:00.000Z') }, // now - 600s
+      },
+      orderBy: { updatedAt: 'asc' },
+      take: 10,
+    });
+  });
+
+  it('completeGeneration writes planPayload + data + status onto the row by id', async () => {
+    const planUpdate = vi.fn().mockResolvedValue({ id: 'plan-1', status: 'BILLING_PENDING' });
+    const repo = createRepo({ planUpdate });
+
+    await repo.completeGeneration('plan-1', {
+      planPayload: { contentItems: [], engagePolicies: [] },
+      data: { title: 'T', targetScore: 70 },
+      status: 'BILLING_PENDING',
+    });
+
+    expect(planUpdate).toHaveBeenCalledWith({
+      where: { id: 'plan-1' },
+      data: {
+        planPayload: { contentItems: [], engagePolicies: [] },
+        data: { title: 'T', targetScore: 70 },
+        status: 'BILLING_PENDING',
+      },
+    });
+  });
+
   it('getById scopes the lookup to organizationId', async () => {
     const planFindFirst = vi.fn().mockResolvedValue({ id: 'plan-1' });
     const repo = createRepo({ planFindFirst });
