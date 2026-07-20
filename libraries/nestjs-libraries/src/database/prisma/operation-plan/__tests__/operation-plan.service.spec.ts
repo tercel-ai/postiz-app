@@ -685,9 +685,9 @@ describe('OperationPlanService.create', () => {
   // Posts doomed to fail at release time. _validateGeneratedPlan runs in the
   // shared generation step, so the preview (dryRun) path enforces it
   // synchronously — the deterministic way to assert the exact rejection message.
-  it('rejects generated content that exceeds the platform character limit (X weighted)', async () => {
+  it('trims generated content over the platform ceiling instead of failing the plan (X weighted)', async () => {
     const longTweet = 'a'.repeat(281);
-    const { repo, service } = createGenerationDependencies({
+    const { service } = createGenerationDependencies({
       contentItems: [
         {
           contentId: 'D01',
@@ -708,13 +708,59 @@ describe('OperationPlanService.create', () => {
       warnings: [],
     });
 
-    await expect(service.create('org-1', 'proj-1', {
+    // Not rejected: the over-budget post is trimmed to fit rather than throwing
+    // away the whole generation.
+    const result = await service.create('org-1', 'proj-1', {
       taskId: 'task-1',
       startAt: '2030-01-01T00:00:00.000Z',
       endAt: '2030-01-02T00:00:00.000Z',
       platforms: ['x'],
-    }, { dryRun: true })).rejects.toThrow(/281 characters, over the 280 limit/);
-    expect(repo.create).not.toHaveBeenCalled();
+    }, { dryRun: true });
+
+    const trimmed = result.contentItems[0].platforms[0].content;
+    // 281 plain-ASCII chars weigh 281 (> 280); trimmed to within the 280 ceiling
+    // (twitter-text's valid cut point, ~279-280) and shorter than the original.
+    expect(trimmed.length).toBeLessThanOrEqual(280);
+    expect(trimmed.length).toBeGreaterThan(270);
+    expect(trimmed.length).toBeLessThan(longTweet.length);
+  });
+
+  it('trims to a word boundary and never mid-word when over the ceiling', async () => {
+    // 47 words of "lorem " = 282 chars incl. trailing space; over 280.
+    const longTweet = ('lorem '.repeat(47)).trim();
+    const { service } = createGenerationDependencies({
+      contentItems: [
+        {
+          contentId: 'D01',
+          utcDate: '2030-01-01T00:00:00.000Z',
+          themeKey: 'k',
+          themeTitle: 't',
+          platforms: [
+            {
+              id: '11111111-1111-4111-8111-111111111111',
+              platform: 'x',
+              content: longTweet,
+              media: null,
+            },
+          ],
+        },
+      ],
+      engagePolicies: [],
+      warnings: [],
+    });
+
+    const result = await service.create('org-1', 'proj-1', {
+      taskId: 'task-1',
+      startAt: '2030-01-01T00:00:00.000Z',
+      endAt: '2030-01-02T00:00:00.000Z',
+      platforms: ['x'],
+    }, { dryRun: true });
+
+    const trimmed = result.contentItems[0].platforms[0].content;
+    expect(trimmed.length).toBeLessThanOrEqual(280);
+    // Ends on a complete word (no trailing partial token / whitespace).
+    expect(trimmed).toBe(trimmed.trimEnd());
+    expect(trimmed.endsWith('lorem')).toBe(true);
   });
 
   it('counts X content by twitter-text weighting, so a URL costs 23 not its real length', async () => {

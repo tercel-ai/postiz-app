@@ -18,7 +18,7 @@ import { AiseeCreditService } from '../ai-pricing/aisee-credit.service';
 import { SettingsService } from '../settings/settings.service';
 import { OpenaiService, AiUsageInfo } from '@gitroom/nestjs-libraries/openai/openai.service';
 import { EngageRepository } from '@gitroom/nestjs-libraries/engage/engage.repository';
-import { weightedLength } from '@gitroom/helpers/utils/count.length';
+import { weightedLength, textSlicer } from '@gitroom/helpers/utils/count.length';
 import { createHash, randomUUID } from 'crypto';
 import { z } from 'zod';
 
@@ -564,6 +564,9 @@ export class OperationPlanService implements OnApplicationBootstrap {
       // staleMs and get re-driven concurrently.
       { timeoutMs: OPERATION_PLAN_GEN_TIMEOUT_MS, maxRetries: OPERATION_PLAN_GEN_MAX_RETRIES }
     );
+    // Trim any over-ceiling content to fit BEFORE validating, so a single
+    // over-budget string can't throw away the whole (paid) generation.
+    this._enforceContentLimits(generation.data);
     this._validateGeneratedPlan(generation.data, platforms, start, end);
 
     // Plan-level goal summary for the `data` column. targetScore is clamped to
@@ -768,6 +771,42 @@ export class OperationPlanService implements OnApplicationBootstrap {
       }
     }
     return { start, end, durationDays, platforms };
+  }
+
+  // Trim any generated content over its platform ceiling instead of failing the
+  // whole (paid) plan. Mechanical + weighted-aware — textSlicer gives the exact
+  // X-weighted cut point (URLs=23, emoji/CJK=2); other platforms use a plain
+  // char slice. This GUARANTEES the limit (an LLM rewrite cannot) and, since
+  // materialized posts are DRAFTs pending human approval, a boundary trim is a
+  // safe salvage. Mutates the plan in place so the trimmed text is what persists.
+  private _enforceContentLimits(plan: z.infer<typeof GeneratedPlanSchema>): void {
+    for (const item of plan.contentItems) {
+      for (const platformItem of item.platforms) {
+        const limit =
+          PLATFORM_CONTENT_LIMITS[platformItem.platform] ?? DEFAULT_CONTENT_LIMIT;
+        if (this._contentLength(platformItem.platform, platformItem.content) <= limit) {
+          continue;
+        }
+        const trimmed = this._trimToLimit(platformItem.platform, platformItem.content, limit);
+        this.logger.warn(
+          `Operation plan content ${item.contentId} (${platformItem.platform}) exceeded the ` +
+          `${limit} limit; trimmed to fit.`
+        );
+        platformItem.content = trimmed;
+      }
+    }
+  }
+
+  private _trimToLimit(platform: string, content: string, limit: number): string {
+    // X: weighted-aware cut point; other platforms: plain char index.
+    const end = platform === 'x' ? textSlicer('x', limit, content).end : limit;
+    let trimmed = content.slice(0, end);
+    // Avoid a mid-word cut: if we sliced inside a word, back up to the last space.
+    if (end < content.length && !/\s/.test(content.charAt(end))) {
+      const lastSpace = trimmed.lastIndexOf(' ');
+      if (lastSpace > 0) trimmed = trimmed.slice(0, lastSpace);
+    }
+    return trimmed.trimEnd();
   }
 
   private _validateGeneratedPlan(
