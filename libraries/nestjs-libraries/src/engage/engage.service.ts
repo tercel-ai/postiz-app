@@ -296,44 +296,44 @@ export class EngageService implements OnApplicationBootstrap {
       // the client-relevant knobs — `operation_plan.platform_cadence` is
       // deliberately NOT exposed: it steers the generator's editorial strategy
       // and no client has a use for it.
-      operationPlan: await this._getOperationPlanConfig(org.id),
+      operationPlan: await this._getOperationPlanConfig(),
     };
   }
 
   /**
    * Global operation-plan knobs a client needs to build a valid create request.
    *
-   * `allowedPlatforms` is the RESOLVED, ready-to-use list — not the raw
-   * `operation_plan.allowed_platforms` setting. The setting's empty value means
-   * "no extra restriction" server-side, which is useless to a UI (it can't
-   * render a picker from `[]`). So we return what the server would actually
-   * accept: connected integrations ∩ allowlist (or just connected when the
-   * allowlist is empty) — exactly the two gates `_validateInput` applies. That
-   * keeps the picker and the validation in lockstep, and makes an empty array
-   * mean something true and useful: "no platform is available" (nothing
-   * connected, or the allowlist excludes everything connected).
+   * `allowedPlatforms` is the raw `operation_plan.allowed_platforms` allowlist,
+   * returned verbatim — it is the ONLY platform gate the create endpoint applies
+   * (publishing is by-platform via the plugin, so a platform needs no connected
+   * integration; see OperationPlanService._validateInput). Returning the
+   * allowlist as-is keeps the picker in lockstep with what POST accepts when a
+   * list is configured.
+   *
+   * An empty allowlist means the admin has NOT scoped platforms: the create
+   * endpoint is then unrestricted, but a UI cannot render a picker from
+   * "anything", so this returns `[]` — configure the allowlist to drive the
+   * picker. (Deliberately NOT intersected with connected integrations: an
+   * unconnected platform is still plannable, so filtering by connection would
+   * hide platforms POST would accept.)
    */
-  private async _getOperationPlanConfig(organizationId: string): Promise<{
+  private async _getOperationPlanConfig(): Promise<{
     maxDurationDays: number;
     allowedPlatforms: string[];
   }> {
     const fallback = { maxDurationDays: 30, allowedPlatforms: [] as string[] };
     if (!this._settingsService) return fallback;
     try {
-      const [maxDays, allowedRaw, connected] = await Promise.all([
+      const [maxDays, allowedRaw] = await Promise.all([
         this._settingsService.get<number>(OPERATION_PLAN_MAX_DURATION_DAYS_KEY),
         this._settingsService.get(OPERATION_PLAN_ALLOWED_PLATFORMS_KEY),
-        this._operationPlanRepository?.getConnectedPlatforms(organizationId) ?? Promise.resolve([]),
       ]);
       const allowlist = Array.isArray(allowedRaw)
         ? allowedRaw.filter((p): p is string => typeof p === 'string' && p.trim().length > 0)
         : [];
-      const allowSet = new Set(allowlist);
       return {
         maxDurationDays: Number.isFinite(Number(maxDays)) ? Number(maxDays) : fallback.maxDurationDays,
-        allowedPlatforms: allowlist.length
-          ? connected.filter((p) => allowSet.has(p))
-          : connected,
+        allowedPlatforms: allowlist,
       };
     } catch (err) {
       // Config is decoration on this endpoint — never fail the whole Engage

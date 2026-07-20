@@ -6,10 +6,11 @@ import { EngageService } from '@gitroom/nestjs-libraries/engage/engage.service';
  * so a plan-creation UI can bound its date range / platform picker from the
  * same call it already makes.
  *
- * `allowedPlatforms` is the RESOLVED list (connected ∩ allowlist), not the raw
- * setting: the setting's `[]` means "no extra restriction" server-side, which a
- * UI cannot render. Resolving it here keeps the picker and `_validateInput` in
- * lockstep.
+ * `allowedPlatforms` is the raw `operation_plan.allowed_platforms` allowlist,
+ * returned verbatim — it is the ONLY platform gate the create endpoint applies
+ * (an unconnected platform is still plannable, so it is NOT intersected with
+ * connected integrations). An empty allowlist yields `[]`: POST is unrestricted
+ * then, but a picker cannot enumerate "anything".
  *
  * `operation_plan.platform_cadence` is deliberately NOT exposed — it steers the
  * generator's editorial strategy and no client has a use for it.
@@ -59,7 +60,40 @@ describe('EngageService.getConfig — operationPlan block', () => {
     return { service, getConnectedPlatforms };
   }
 
-  it('with no allowlist configured, returns every CONNECTED platform (not an empty array)', async () => {
+  it('returns the allowlist verbatim (only platform gate the create endpoint applies)', async () => {
+    const { service } = buildService({
+      settingsGet: async (key) => {
+        if (key === 'operation_plan.allowed_platforms') return ['x', 'instagram', 'reddit'];
+        if (key === 'operation_plan.max_duration_days') return 14;
+        return undefined;
+      },
+    });
+
+    const res: any = await service.getConfig(org);
+
+    expect(res.operationPlan).toEqual({
+      maxDurationDays: 14,
+      allowedPlatforms: ['x', 'instagram', 'reddit'],
+    });
+  });
+
+  it('does NOT intersect the allowlist with connected platforms (unconnected platforms are still plannable)', async () => {
+    const { service, getConnectedPlatforms } = buildService({
+      connected: ['x'],
+      settingsGet: async (key) =>
+        key === 'operation_plan.allowed_platforms' ? ['x', 'reddit'] : undefined,
+    });
+
+    const res: any = await service.getConfig(org);
+
+    // reddit is allowlisted but not connected — still offered, because POST
+    // accepts it (materializes a DRAFT post with a null integrationId).
+    expect(res.operationPlan.allowedPlatforms).toEqual(['x', 'reddit']);
+    // The connection lookup is no longer consulted at all.
+    expect(getConnectedPlatforms).not.toHaveBeenCalled();
+  });
+
+  it('returns an empty list when no allowlist is configured (picker cannot render "unrestricted")', async () => {
     const { service } = buildService({
       connected: ['x', 'linkedin', 'mastodon'],
       settingsGet: async (key) =>
@@ -68,47 +102,21 @@ describe('EngageService.getConfig — operationPlan block', () => {
 
     const res: any = await service.getConfig(org);
 
-    // The raw setting is [] ("no restriction"), but the client gets the usable list.
-    expect(res.operationPlan.allowedPlatforms).toEqual(['x', 'linkedin', 'mastodon']);
-  });
-
-  it('intersects the allowlist with connected platforms', async () => {
-    const { service } = buildService({
-      connected: ['x', 'linkedin', 'mastodon'],
-      settingsGet: async (key) => {
-        if (key === 'operation_plan.allowed_platforms') return ['x', 'instagram'];
-        if (key === 'operation_plan.max_duration_days') return 14;
-        return undefined;
-      },
-    });
-
-    const res: any = await service.getConfig(org);
-
-    // instagram is allowlisted but NOT connected → not offered (the server would
-    // reject it with PLATFORM_NOT_CONNECTED anyway).
-    expect(res.operationPlan).toEqual({ maxDurationDays: 14, allowedPlatforms: ['x'] });
-  });
-
-  it('returns an empty list when nothing is connected — a true "no platform available"', async () => {
-    const { service } = buildService({
-      connected: [],
-      settingsGet: async () => undefined,
-    });
-
-    const res: any = await service.getConfig(org);
+    // Raw setting [] means "no restriction" server-side; the picker gets [] and
+    // the admin must configure the allowlist to populate it.
     expect(res.operationPlan.allowedPlatforms).toEqual([]);
   });
 
-  it('returns an empty list when the allowlist excludes everything connected', async () => {
+  it('drops blank/non-string allowlist entries', async () => {
     const { service } = buildService({
-      connected: ['x'],
       settingsGet: async (key) =>
-        key === 'operation_plan.allowed_platforms' ? ['linkedin'] : undefined,
+        key === 'operation_plan.allowed_platforms'
+          ? ['x', '  ', '', 'reddit', 123 as any]
+          : undefined,
     });
 
     const res: any = await service.getConfig(org);
-    // Consistent with the server: requesting x would 400 PLATFORM_NOT_ALLOWED.
-    expect(res.operationPlan.allowedPlatforms).toEqual([]);
+    expect(res.operationPlan.allowedPlatforms).toEqual(['x', 'reddit']);
   });
 
   it('never exposes platform_cadence (generator-only editorial strategy)', async () => {
