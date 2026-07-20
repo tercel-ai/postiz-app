@@ -316,6 +316,8 @@ describe('OperationPlanService.create', () => {
         data: generatedPlan,
         usage: { usage: { total_tokens: 100 } },
       }),
+      // Default identity: only exercised when OPERATION_SHRINK_MODEL is set.
+      shrinkToLimit: vi.fn(async (content: string) => content),
     };
     const engageRepository = {
       // Default: echo each keyword text to a synthetic id ("GEO" -> "id-GEO").
@@ -761,6 +763,120 @@ describe('OperationPlanService.create', () => {
     // Ends on a complete word (no trailing partial token / whitespace).
     expect(trimmed).toBe(trimmed.trimEnd());
     expect(trimmed.endsWith('lorem')).toBe(true);
+  });
+
+  it('uses the LLM shrink (targeting the soft budget) when OPERATION_SHRINK_MODEL is set', async () => {
+    vi.stubEnv('OPERATION_SHRINK_MODEL', 'anthropic/claude-haiku-4.5');
+    try {
+      const { openaiService, service } = createGenerationDependencies({
+        contentItems: [
+          {
+            contentId: 'D01',
+            utcDate: '2030-01-01T00:00:00.000Z',
+            themeKey: 'k',
+            themeTitle: 't',
+            platforms: [
+              { id: '11111111-1111-4111-8111-111111111111', platform: 'x', content: 'a'.repeat(300), media: null },
+            ],
+          },
+        ],
+        engagePolicies: [],
+        warnings: [],
+      });
+      // Haiku returns a coherent, in-budget rewrite → used verbatim, no trim.
+      const rewrite = 'Concise rewrite that fits the budget.';
+      openaiService.shrinkToLimit.mockResolvedValue(rewrite);
+
+      const result = await service.create('org-1', 'proj-1', {
+        taskId: 'task-1',
+        startAt: '2030-01-01T00:00:00.000Z',
+        endAt: '2030-01-02T00:00:00.000Z',
+        platforms: ['x'],
+      }, { dryRun: true });
+
+      expect(openaiService.shrinkToLimit).toHaveBeenCalledWith(
+        'a'.repeat(300),
+        240, // soft target for x
+        expect.objectContaining({ model: 'anthropic/claude-haiku-4.5' })
+      );
+      expect(result.contentItems[0].platforms[0].content).toBe(rewrite);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('reuses OPENROUTER_INTENT_MODEL for the shrink when no dedicated model is set', async () => {
+    vi.stubEnv('OPERATION_SHRINK_MODEL', '');
+    vi.stubEnv('OPENROUTER_INTENT_MODEL', 'anthropic/claude-haiku-4.5');
+    try {
+      const { openaiService, service } = createGenerationDependencies({
+        contentItems: [
+          {
+            contentId: 'D01',
+            utcDate: '2030-01-01T00:00:00.000Z',
+            themeKey: 'k',
+            themeTitle: 't',
+            platforms: [
+              { id: '11111111-1111-4111-8111-111111111111', platform: 'x', content: 'a'.repeat(300), media: null },
+            ],
+          },
+        ],
+        engagePolicies: [],
+        warnings: [],
+      });
+      openaiService.shrinkToLimit.mockResolvedValue('Concise rewrite.');
+
+      await service.create('org-1', 'proj-1', {
+        taskId: 'task-1',
+        startAt: '2030-01-01T00:00:00.000Z',
+        endAt: '2030-01-02T00:00:00.000Z',
+        platforms: ['x'],
+      }, { dryRun: true });
+
+      expect(openaiService.shrinkToLimit).toHaveBeenCalledWith(
+        'a'.repeat(300),
+        240,
+        expect.objectContaining({ model: 'anthropic/claude-haiku-4.5' })
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('falls back to the mechanical trim when the LLM shrink still exceeds the ceiling', async () => {
+    vi.stubEnv('OPERATION_SHRINK_MODEL', 'anthropic/claude-haiku-4.5');
+    try {
+      const { openaiService, service } = createGenerationDependencies({
+        contentItems: [
+          {
+            contentId: 'D01',
+            utcDate: '2030-01-01T00:00:00.000Z',
+            themeKey: 'k',
+            themeTitle: 't',
+            platforms: [
+              { id: '11111111-1111-4111-8111-111111111111', platform: 'x', content: 'a'.repeat(300), media: null },
+            ],
+          },
+        ],
+        engagePolicies: [],
+        warnings: [],
+      });
+      // Haiku overshoots (still 290 > 280) → mechanical trim guarantees the limit.
+      openaiService.shrinkToLimit.mockResolvedValue('a'.repeat(290));
+
+      const result = await service.create('org-1', 'proj-1', {
+        taskId: 'task-1',
+        startAt: '2030-01-01T00:00:00.000Z',
+        endAt: '2030-01-02T00:00:00.000Z',
+        platforms: ['x'],
+      }, { dryRun: true });
+
+      const content = result.contentItems[0].platforms[0].content;
+      expect(openaiService.shrinkToLimit).toHaveBeenCalled();
+      expect(content.length).toBeLessThanOrEqual(280);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it('counts X content by twitter-text weighting, so a URL costs 23 not its real length', async () => {

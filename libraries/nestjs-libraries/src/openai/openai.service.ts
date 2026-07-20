@@ -714,4 +714,39 @@ export class OpenaiService {
     logAiUsage(usage);
     return { data, usage };
   }
+
+  // Rewrite a single piece of content to fit within `maxChars`, preserving the
+  // meaning/CTA (unlike a mechanical trim, which can cut mid-thought). `model`
+  // lets callers route this to a cheaper model than the main generation. Best
+  // effort: the LLM does not guarantee the limit, so callers MUST re-check and
+  // apply a mechanical fallback. Returns the original text on any parse failure.
+  async shrinkToLimit(
+    content: string,
+    maxChars: number,
+    opts?: { model?: string; timeoutMs?: number; maxRetries?: number }
+  ): Promise<string> {
+    const { client, model: defaultModel } = this.getTextClient();
+    const model = opts?.model || defaultModel;
+    const response = await client.chat.completions.parse(
+      {
+        model,
+        messages: [
+          {
+            role: 'system',
+            content:
+              `You shorten a single social media post to AT MOST ${maxChars} characters. ` +
+              `Preserve the meaning, key facts and any call-to-action; keep it natural and ` +
+              `publish-ready. Return ONLY the shortened post text — no quotes, no commentary.`,
+          },
+          { role: 'user', content },
+        ],
+        response_format: zodResponseFormat(z.object({ post: z.string() }), 'shrunk_post'),
+      },
+      {
+        ...(opts?.timeoutMs != null ? { timeout: opts.timeoutMs } : {}),
+        ...(opts?.maxRetries != null ? { maxRetries: opts.maxRetries } : {}),
+      }
+    );
+    return response.choices[0]?.message.parsed?.post || content;
+  }
 }

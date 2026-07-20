@@ -564,9 +564,9 @@ export class OperationPlanService implements OnApplicationBootstrap {
       // staleMs and get re-driven concurrently.
       { timeoutMs: OPERATION_PLAN_GEN_TIMEOUT_MS, maxRetries: OPERATION_PLAN_GEN_MAX_RETRIES }
     );
-    // Trim any over-ceiling content to fit BEFORE validating, so a single
+    // Shorten any over-ceiling content to fit BEFORE validating, so a single
     // over-budget string can't throw away the whole (paid) generation.
-    this._enforceContentLimits(generation.data);
+    await this._enforceContentLimits(generation.data);
     this._validateGeneratedPlan(generation.data, platforms, start, end);
 
     // Plan-level goal summary for the `data` column. targetScore is clamped to
@@ -773,26 +773,59 @@ export class OperationPlanService implements OnApplicationBootstrap {
     return { start, end, durationDays, platforms };
   }
 
-  // Trim any generated content over its platform ceiling instead of failing the
-  // whole (paid) plan. Mechanical + weighted-aware — textSlicer gives the exact
-  // X-weighted cut point (URLs=23, emoji/CJK=2); other platforms use a plain
-  // char slice. This GUARANTEES the limit (an LLM rewrite cannot) and, since
-  // materialized posts are DRAFTs pending human approval, a boundary trim is a
-  // safe salvage. Mutates the plan in place so the trimmed text is what persists.
-  private _enforceContentLimits(plan: z.infer<typeof GeneratedPlanSchema>): void {
+  // Shorten any generated content over its platform ceiling instead of failing
+  // the whole (paid) plan. Two-stage:
+  //   1. Preferred (opt-in via OPERATION_SHRINK_MODEL): a cheap-model LLM
+  //      rewrite to the SOFT target, which keeps the post coherent. The LLM does
+  //      not guarantee the limit, so its output is re-checked.
+  //   2. Guarantee: a mechanical, weighted-aware trim (textSlicer) of whatever is
+  //      still over the HARD ceiling — or of the original when the LLM is
+  //      disabled/fails. Since materialized posts are DRAFTs pending human
+  //      approval, a boundary trim is a safe last resort.
+  // Mutates the plan in place so the shortened text is what persists.
+  private async _enforceContentLimits(plan: z.infer<typeof GeneratedPlanSchema>): Promise<void> {
+    // Shrink model: a dedicated override, else reuse OPENROUTER_INTENT_MODEL —
+    // the same cheap/fast model the engage intent classifier already uses
+    // (defaults to Haiku). Neither set → LLM shrink is off (mechanical only).
+    const shrinkModel =
+      process.env.OPERATION_SHRINK_MODEL || process.env.OPENROUTER_INTENT_MODEL;
     for (const item of plan.contentItems) {
       for (const platformItem of item.platforms) {
         const limit =
           PLATFORM_CONTENT_LIMITS[platformItem.platform] ?? DEFAULT_CONTENT_LIMIT;
-        if (this._contentLength(platformItem.platform, platformItem.content) <= limit) {
+        const original = platformItem.content;
+        if (this._contentLength(platformItem.platform, original) <= limit) {
           continue;
         }
-        const trimmed = this._trimToLimit(platformItem.platform, platformItem.content, limit);
+
+        let content = original;
+        if (shrinkModel && this._openaiService) {
+          const target = PLATFORM_CONTENT_TARGETS[platformItem.platform] ?? limit;
+          try {
+            content = await this._openaiService.shrinkToLimit(original, target, {
+              model: shrinkModel,
+              timeoutMs: OPERATION_PLAN_GEN_TIMEOUT_MS,
+              maxRetries: OPERATION_PLAN_GEN_MAX_RETRIES,
+            });
+          } catch (error) {
+            this.logger.warn(
+              `Operation plan shrink for ${item.contentId} (${platformItem.platform}) failed; ` +
+              `falling back to mechanical trim. ${error instanceof Error ? error.message : error}`
+            );
+            content = original;
+          }
+        }
+
+        // Guarantee the ceiling — the LLM may overshoot or be disabled.
+        if (this._contentLength(platformItem.platform, content) > limit) {
+          content = this._trimToLimit(platformItem.platform, content, limit);
+        }
+
         this.logger.warn(
           `Operation plan content ${item.contentId} (${platformItem.platform}) exceeded the ` +
-          `${limit} limit; trimmed to fit.`
+          `${limit} limit; shortened to fit.`
         );
-        platformItem.content = trimmed;
+        platformItem.content = content;
       }
     }
   }
