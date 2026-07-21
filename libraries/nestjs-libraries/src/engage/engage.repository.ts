@@ -858,6 +858,22 @@ export class EngageRepository {
     const config = await this.getOrCreateConfig(organizationId, projectId);
     const configId = config.id;
 
+    // Activate the config so the plan's keywords actually run. getOrCreateConfig
+    // CREATES a new project config DISABLED (the general engage config-family
+    // APIs want an explicit opt-in), but an operation plan's keywords are meant
+    // to scan/reply immediately — and the run gate is
+    // `EngageConfig.enabled = true AND EngageKeyword.enabled = true`, so a
+    // disabled config would leave every (enabled) plan keyword dormant. This is
+    // the ONLY caller of resolveOrCreateKeywordIds (operation-plan generation),
+    // so enabling here never affects a config the user manages elsewhere. Only
+    // write when actually flipping, to avoid a needless update on re-drives.
+    if (!config.enabled) {
+      await this._config.model.engageConfig.update({
+        where: { id: configId },
+        data: { enabled: true },
+      });
+    }
+
     // Existing keywords under this config, indexed by normalized form.
     const existing = await this._keyword.model.engageKeyword.findMany({
       where: { configId, organizationId },

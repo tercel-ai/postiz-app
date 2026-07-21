@@ -1726,18 +1726,20 @@ describe('EngageRepository — two-table reads', () => {
       const findMany = vi.fn().mockResolvedValue(existing);
       const findFirst = vi.fn();
       const keyword = { model: { engageKeyword: { findMany, findFirst } } } as any;
+      const configUpdate = vi.fn().mockResolvedValue({});
+      const config = { model: { engageConfig: { update: configUpdate } } } as any;
       const repo = new EngageRepository(
-        {} as any, // _config
+        config, // _config
         keyword, // _keyword
         {} as any, {} as any, {} as any, {} as any, {} as any, {} as any,
         {} as any, {} as any, {} as any, {} as any, {} as any
       );
-      return { repo, findMany, findFirst };
+      return { repo, findMany, findFirst, configUpdate };
     }
 
     it('resolves existing ids (normalized) and creates missing keywords, keyed by original text', async () => {
       const { repo } = buildRepo([{ id: 'kw-ai', keyword: 'AI' }]);
-      vi.spyOn(repo, 'getOrCreateConfig').mockResolvedValue({ id: 'cfg-1' } as any);
+      vi.spyOn(repo, 'getOrCreateConfig').mockResolvedValue({ id: 'cfg-1', enabled: true } as any);
       const addKeyword = vi
         .spyOn(repo, 'addKeyword')
         .mockImplementation(async (_c: any, _o: any, dto: any) => ({ id: `new-${dto.keyword}` } as any));
@@ -1764,7 +1766,7 @@ describe('EngageRepository — two-table reads', () => {
 
     it('re-reads the row on a create race instead of dropping the keyword', async () => {
       const { repo, findFirst } = buildRepo([]);
-      vi.spyOn(repo, 'getOrCreateConfig').mockResolvedValue({ id: 'cfg-1' } as any);
+      vi.spyOn(repo, 'getOrCreateConfig').mockResolvedValue({ id: 'cfg-1', enabled: true } as any);
       // addKeyword loses the unique race and throws; the row now exists.
       vi.spyOn(repo, 'addKeyword').mockRejectedValue(new Error('Keyword already exists'));
       findFirst.mockResolvedValue({ id: 'kw-raced', keyword: 'apcore' });
@@ -1772,6 +1774,29 @@ describe('EngageRepository — two-table reads', () => {
       const result = await repo.resolveOrCreateKeywordIds('org1', 'proj-1', ['apcore']);
 
       expect(result).toEqual({ apcore: 'kw-raced' });
+    });
+
+    it('activates a disabled config so the plan keywords actually run (config enabled:false → true)', async () => {
+      const { repo, configUpdate } = buildRepo([{ id: 'kw-ai', keyword: 'AI' }]);
+      // getOrCreateConfig returns a freshly-created, DISABLED project config.
+      vi.spyOn(repo, 'getOrCreateConfig').mockResolvedValue({ id: 'cfg-1', enabled: false } as any);
+
+      await repo.resolveOrCreateKeywordIds('org1', 'proj-1', ['AI']);
+
+      // The config is flipped enabled so its (enabled) keywords pass the run gate.
+      expect(configUpdate).toHaveBeenCalledWith({
+        where: { id: 'cfg-1' },
+        data: { enabled: true },
+      });
+    });
+
+    it('leaves an already-enabled config untouched (no needless write on re-drive)', async () => {
+      const { repo, configUpdate } = buildRepo([{ id: 'kw-ai', keyword: 'AI' }]);
+      vi.spyOn(repo, 'getOrCreateConfig').mockResolvedValue({ id: 'cfg-1', enabled: true } as any);
+
+      await repo.resolveOrCreateKeywordIds('org1', 'proj-1', ['AI']);
+
+      expect(configUpdate).not.toHaveBeenCalled();
     });
   });
 
