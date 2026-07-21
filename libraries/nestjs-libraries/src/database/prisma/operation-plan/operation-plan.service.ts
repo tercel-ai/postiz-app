@@ -125,23 +125,25 @@ const DEFAULT_PLATFORM_CADENCE: Record<string, PlatformCadence> = {
   },
 };
 
-// Hard per-platform content ceilings for generated posts. Without these the
-// model happily writes 400-char "tweets" that can never publish — the plan
-// would materialize DRAFT Posts doomed to fail at release time. X is measured
-// with twitter-text WEIGHTED counting (every URL counts as 23 regardless of its
-// real length; CJK/emoji count 2), matching EngageDraftService's ceiling.
-const PLATFORM_CONTENT_LIMITS: Record<string, number> = {
-  x: 280,
-  bluesky: 300,
-  threads: 500,
-  mastodon: 500,
-  instagram: 2200,
-  linkedin: 3000,
-};
 const DEFAULT_CONTENT_LIMIT = 3000;
 
+// Hard per-platform content ceiling for generated posts — content over this can
+// never publish (the plan would materialize DRAFT Posts doomed to fail at
+// release). The SINGLE SOURCE OF TRUTH is each provider's own `maxLength()` (the
+// exact ceiling the publisher enforces), so this never drifts as providers are
+// added/changed and it automatically covers every provider AND its variants
+// (linkedin-page, mastodon-custom, instagram-standalone inherit their base's
+// maxLength). Unknown/unregistered platform → DEFAULT_CONTENT_LIMIT. X's
+// maxLength takes an isTwitterPremium flag; we omit it → the conservative
+// non-premium 280, measured with twitter-text WEIGHTED counting (every URL
+// counts as 23 regardless of real length; CJK/emoji count 2), matching
+// EngageDraftService's ceiling and _contentLength() below.
+const hardLimitFor = (platform: string): number =>
+  socialIntegrationList.find((p) => p.identifier === platform)?.maxLength() ??
+  DEFAULT_CONTENT_LIMIT;
+
 // What we INSTRUCT the model to stay within — deliberately BELOW the hard
-// ceiling above, and the gap is the whole point.
+// ceiling, and the gap is the whole point.
 //
 // The model treats a stated budget as a soft aim and DRIFTS past it: with 240
 // declared (twice — prompt head and tail), measured runs came back at 0/13 over
@@ -153,13 +155,22 @@ const DEFAULT_CONTENT_LIMIT = 3000;
 // generation over nothing), and do NOT close the gap by raising the target to
 // 280 (drift would then land above X's real ceiling and the plan WOULD fail).
 // Same soft-target/hard-ceiling split as EngageDraftService (260/280).
+//
+// Only X needs a hand-tuned soft target. For every other platform the soft
+// budget is its hard limit, but CAPPED at MAX_CONTENT_TARGET so a platform with
+// a huge ceiling (facebook 63206, blog providers 100000, listmonk 100000000)
+// does not invite a novel — a marketing-plan post stays concise. The cap equals
+// the largest real target under the previous hardcoded table (linkedin 3000),
+// so the six originally-tuned platforms are unchanged.
+const MAX_CONTENT_TARGET = 3000;
 const PLATFORM_CONTENT_TARGETS: Record<string, number> = {
   x: 240,
 };
 const targetFor = (platform: string): number =>
-  PLATFORM_CONTENT_TARGETS[platform] ??
-  PLATFORM_CONTENT_LIMITS[platform] ??
-  DEFAULT_CONTENT_LIMIT;
+  Math.min(
+    PLATFORM_CONTENT_TARGETS[platform] ?? hardLimitFor(platform),
+    MAX_CONTENT_TARGET
+  );
 
 // Whether a platform can publish a native thread — sourced from the provider's
 // `comment` capability (the SAME flag the publisher checks via isCommentable),
@@ -547,7 +558,7 @@ export class OperationPlanService implements OnApplicationBootstrap {
       (p) =>
         `    • ${p}: max ${targetFor(p)} characters` +
         (p === 'x'
-          ? ` (X WEIGHTED counting: every URL counts as 23 characters regardless of its real length; CJK characters and emoji count as 2 each. X's own ceiling is ${PLATFORM_CONTENT_LIMITS['x']} — ${targetFor('x')} is your budget, so you have margin.)`
+          ? ` (X WEIGHTED counting: every URL counts as 23 characters regardless of its real length; CJK characters and emoji count as 2 each. X's own ceiling is ${hardLimitFor('x')} — ${targetFor('x')} is your budget, so you have margin.)`
           : '')
     );
 
@@ -972,7 +983,7 @@ export class OperationPlanService implements OnApplicationBootstrap {
     label: string,
     shrinkModel: string | undefined
   ): Promise<{ content: string; usage: AiUsageInfo | null }> {
-    const limit = PLATFORM_CONTENT_LIMITS[platform] ?? DEFAULT_CONTENT_LIMIT;
+    const limit = hardLimitFor(platform);
     if (this._contentLength(platform, original) <= limit) {
       return { content: original, usage: null };
     }
@@ -980,7 +991,7 @@ export class OperationPlanService implements OnApplicationBootstrap {
     let content = original;
     let usage: AiUsageInfo | null = null;
     if (shrinkModel && this._openaiService) {
-      const target = PLATFORM_CONTENT_TARGETS[platform] ?? limit;
+      const target = targetFor(platform);
       try {
         const shrunk = await this._openaiService.shrinkToLimit(original, target, {
           model: shrinkModel,
@@ -1071,8 +1082,7 @@ export class OperationPlanService implements OnApplicationBootstrap {
             `(allowed: ${requestedPlatforms.join(', ')})`
           );
         }
-        const limit =
-          PLATFORM_CONTENT_LIMITS[platformItem.platform] ?? DEFAULT_CONTENT_LIMIT;
+        const limit = hardLimitFor(platformItem.platform);
         // Validate the anchor and every thread part identically: each becomes
         // its own Post row, so all ids must be globally unique and all content
         // must fit the platform ceiling.

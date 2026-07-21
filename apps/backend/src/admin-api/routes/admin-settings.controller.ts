@@ -12,6 +12,7 @@ import {
 import { ApiTags } from '@nestjs/swagger';
 import { SettingsService } from '@gitroom/nestjs-libraries/database/prisma/settings/settings.service';
 import { EngageScanConfigService } from '@gitroom/nestjs-libraries/engage/engage-scan-config.service';
+import { IntegrationManager } from '@gitroom/nestjs-libraries/integrations/integration.manager';
 import { AiPricingService } from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/ai-pricing.service';
 import { UpdateAiPricingDto } from '@gitroom/nestjs-libraries/dtos/admin/ai-pricing.dto';
 import { ListSettingsQueryDto } from '@gitroom/nestjs-libraries/dtos/admin/settings-query.dto';
@@ -38,8 +39,24 @@ export class AdminSettingsController {
   constructor(
     private _settingsService: SettingsService,
     private _aiPricingService: AiPricingService,
-    private _engageScanConfigService: EngageScanConfigService
+    private _engageScanConfigService: EngageScanConfigService,
+    private _integrationManager: IntegrationManager
   ) {}
+
+  // ============ Social providers ============
+
+  /**
+   * GET /admin/social-providers
+   *
+   * The full list of registered social providers ({ identifier, name }) — the
+   * single source of truth behind admin pickers such as the operation-plan
+   * platform allowlist. Sourced from the provider registry so it never drifts
+   * from what the backend actually implements.
+   */
+  @Get('/social-providers')
+  listSocialProviders() {
+    return this._integrationManager.getSocialProviderList();
+  }
 
   // ============ Settings CRUD ============
 

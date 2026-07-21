@@ -1136,6 +1136,29 @@ describe('OperationPlanService.create', () => {
     expect(systemPrompt).toMatch(/PLAIN TEXT for X: no Markdown/);
   });
 
+  it('sources per-platform character limits from each provider maxLength() (capped soft target)', async () => {
+    const { openaiService, service } = createGenerationDependencies({
+      contentItems: [],
+      engagePolicies: [],
+      warnings: [],
+    });
+
+    await service.create('org-1', 'proj-1', {
+      taskId: 'task-1',
+      startAt: '2030-01-01T00:00:00.000Z',
+      endAt: '2030-01-02T00:00:00.000Z',
+      // pinterest maxLength=500 (< cap) → target 500; reddit maxLength=10000 and
+      // facebook 63206 (> MAX_CONTENT_TARGET 3000) → both capped to 3000. None of
+      // these were in the old hardcoded 6-platform table.
+      platforms: ['pinterest', 'reddit', 'facebook'],
+    });
+
+    const systemPrompt: string = openaiService.generateStructuredText.mock.calls[0][0];
+    expect(systemPrompt).toContain('pinterest: max 500 characters');
+    expect(systemPrompt).toContain('reddit: max 3000 characters');
+    expect(systemPrompt).toContain('facebook: max 3000 characters');
+  });
+
   // P2(9): a single scalar target could not express the reference plan's
   // "weekday 5 / weekend 3" rhythm. dailyTargets carries it, keyed by concrete
   // UTC date (no week abstraction — the week is derivable from the date).

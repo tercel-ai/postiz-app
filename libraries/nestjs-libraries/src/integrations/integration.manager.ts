@@ -157,6 +157,16 @@ export class IntegrationManager {
   getAllowedSocialsIntegrations() {
     return socialIntegrationList.map((p) => p.identifier);
   }
+  // Lean {identifier, name} list of every registered social provider — for admin
+  // pickers (e.g. the operation-plan platform allowlist in aisee-manage) that
+  // need the full provider set from a single source of truth instead of a
+  // hardcoded subset that drifts as providers are added/removed.
+  getSocialProviderList() {
+    return socialIntegrationList.map((p) => ({
+      identifier: p.identifier,
+      name: p.name,
+    }));
+  }
   getSocialIntegration(integration: string): SocialProvider {
     return socialIntegrationList.find((i) => i.identifier === integration)!;
   }
