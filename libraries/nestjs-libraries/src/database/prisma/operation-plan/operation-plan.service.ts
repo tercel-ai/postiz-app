@@ -409,18 +409,23 @@ export class OperationPlanService implements OnApplicationBootstrap {
       throw new ConflictException({ code: 'TASK_NOT_READY', message: 'Task is not ready' });
     }
 
-    const existing = await this._repo.findByTaskId(organizationId, input.taskId);
+    // A task may now own MULTIPLE plans — one per distinct parameter set. This
+    // POST endpoint always CREATES a new plan; it only short-circuits to an
+    // existing one for idempotency, i.e. when EVERY parameter (project, window,
+    // platforms) matches an already-persisted plan (retry-safety, no double
+    // bill). A request whose parameters differ finds no match here and falls
+    // through to generate a brand-new plan that coexists with the earlier ones.
+    // (Previously a task was capped at one plan and a differing-parameter request
+    // was rejected with TASK_ALREADY_PLANNED — that guard has been removed.)
+    const existingPlans = await this._repo.findManyByTaskId(organizationId, input.taskId);
+    const existing = existingPlans.find(
+      (plan) =>
+        plan.projectId === projectId &&
+        plan.startsAt.getTime() === start.getTime() &&
+        plan.endsAt.getTime() === end.getTime() &&
+        [...plan.platforms].sort().join('\0') === [...platforms].sort().join('\0')
+    );
     if (existing) {
-      const same = existing.projectId === projectId &&
-        existing.startsAt.getTime() === start.getTime() &&
-        existing.endsAt.getTime() === end.getTime() &&
-        [...existing.platforms].sort().join('\0') === [...platforms].sort().join('\0');
-      if (!same) {
-        throw new ConflictException({
-          code: 'TASK_ALREADY_PLANNED',
-          message: 'This task already has an operation plan with different parameters',
-        });
-      }
       // Dry-run must stay read-only: surface the already-persisted plan as a
       // preview without reconciling billing or (re)materializing any Post.
       if (options.dryRun) {

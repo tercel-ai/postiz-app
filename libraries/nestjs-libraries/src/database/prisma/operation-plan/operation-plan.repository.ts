@@ -53,8 +53,11 @@ export class OperationPlanRepository {
     return plan;
   }
 
-  findByTaskId(organizationId: string, taskId: string) {
-    return this._operationPlan.model.operationPlan.findFirst({
+  // A task may own multiple plans (one per distinct parameter set), so this
+  // returns ALL of them; the service picks the one whose parameters match the
+  // request (idempotent reuse) or falls through to create a brand-new plan.
+  findManyByTaskId(organizationId: string, taskId: string) {
+    return this._operationPlan.model.operationPlan.findMany({
       where: { organizationId, taskId },
     });
   }

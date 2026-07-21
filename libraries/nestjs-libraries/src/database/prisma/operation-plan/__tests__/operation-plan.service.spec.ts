@@ -273,7 +273,7 @@ describe('OperationPlanService.create', () => {
     };
     const repo = {
       getConnectedPlatforms: vi.fn().mockResolvedValue(['x']),
-      findByTaskId: vi.fn().mockResolvedValue(null),
+      findManyByTaskId: vi.fn().mockResolvedValue([]),
       findStuckGenerating: vi.fn().mockResolvedValue([]),
       create: vi.fn().mockResolvedValue(generatingStub),
       getById: vi.fn().mockResolvedValue(generatingStub),
@@ -1643,7 +1643,7 @@ describe('OperationPlanService.create', () => {
       engagePolicies: [],
       warnings: [],
     });
-    repo.findByTaskId.mockResolvedValue({
+    repo.findManyByTaskId.mockResolvedValue([{
       id: 'plan-1',
       organizationId: 'org-1',
       projectId: 'proj-1',
@@ -1659,7 +1659,7 @@ describe('OperationPlanService.create', () => {
       billingTransactionId: 'txn-1',
       creditAmount: '1.250000',
       errorCode: null,
-    });
+    }]);
 
     const result = await service.create('org-1', 'proj-1', {
       taskId: 'task-1',
@@ -1682,7 +1682,7 @@ describe('OperationPlanService.create', () => {
       engagePolicies: [],
       warnings: [],
     });
-    repo.findByTaskId.mockResolvedValue({
+    repo.findManyByTaskId.mockResolvedValue([{
       id: 'plan-1',
       organizationId: 'org-1',
       projectId: 'proj-1',
@@ -1698,7 +1698,7 @@ describe('OperationPlanService.create', () => {
       billingTransactionId: 'txn-1',
       creditAmount: '1.250000',
       errorCode: null,
-    });
+    }]);
 
     const { result, background } = await createAndSettle(service, {
       taskId: 'task-1',
@@ -1712,6 +1712,47 @@ describe('OperationPlanService.create', () => {
     expect(repo.create).not.toHaveBeenCalled();
     expect(openaiService.generateStructuredText).not.toHaveBeenCalled();
     expect(creditService.deductUsageAndConfirm).not.toHaveBeenCalled();
+  });
+
+  it('creates a BRAND-NEW plan when the task already has a plan but with different params (no short-circuit)', async () => {
+    const { repo, service } = createGenerationDependencies({
+      contentItems: [],
+      engagePolicies: [],
+      warnings: [],
+    });
+    // An existing plan for the SAME task, but with a DIFFERENT window/platforms.
+    // It must NOT be reused — the request has different parameters, so a new plan
+    // is generated and coexists with this one.
+    repo.findManyByTaskId.mockResolvedValue([{
+      id: 'plan-old',
+      organizationId: 'org-1',
+      projectId: 'proj-1',
+      taskId: 'task-1',
+      campaignId: 'campaign-old',
+      platforms: ['reddit'],
+      generatorVersion: 'operation-plan-v1',
+      status: 'READY',
+      startsAt: new Date('2029-01-01T00:00:00.000Z'),
+      endsAt: new Date('2029-01-02T00:00:00.000Z'),
+      planPayload: { contentItems: [], engagePolicies: [], warnings: [] },
+      sourceTaskVersion: null,
+      billingTransactionId: 'txn-old',
+      creditAmount: '1.250000',
+      errorCode: null,
+    }]);
+
+    const { result, background } = await createAndSettle(service, {
+      taskId: 'task-1',
+      startAt: '2030-01-01T00:00:00.000Z',
+      endAt: '2030-01-02T00:00:00.000Z',
+      platforms: ['x'],
+    });
+    await background;
+
+    // A fresh GENERATING stub is created (not the old plan-old returned).
+    expect(repo.create).toHaveBeenCalledTimes(1);
+    expect(result.id).toBe('plan-1');
+    expect(result.id).not.toBe('plan-old');
   });
 
   it('resumeStuckGenerations re-drives a stuck GENERATING row through generation + billing in place (no second create, same billing key)', async () => {

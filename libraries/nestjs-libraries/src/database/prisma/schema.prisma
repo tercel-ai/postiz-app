@@ -579,7 +579,13 @@ model OperationPlan {
 
   posts Post[]
 
-  @@unique([organizationId, taskId])
+  // A task may have MULTIPLE operation plans (one per distinct parameter set:
+  // project / start / end / platforms). The former @@unique([organizationId,
+  // taskId]) one-plan-per-task guard was intentionally dropped so re-planning a
+  // task with different parameters creates a brand-new plan; same-parameter
+  // idempotency is enforced in code (OperationPlanService.create). Kept as a
+  // plain index for the by-task lookup.
+  @@index([organizationId, taskId])
   @@index([organizationId, projectId])
   @@index([campaignId])
 }
