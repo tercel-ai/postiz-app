@@ -34,17 +34,19 @@ export class MastodonCustomProvider extends MastodonProvider {
       client_secret,
     };
   }
-  override async generateAuthUrl(
-    refresh?: string,
-    external?: ClientInformation
-  ) {
+  // Signature must match SocialProvider.generateAuthUrl: the caller
+  // (integrations.controller) invokes it as generateAuthUrl(clientInformation),
+  // passing the ClientInformation resolved from externalUrl(). There is no
+  // `refresh` argument at the call site — the refresh id is round-tripped
+  // separately via Redis (`refresh:${state}`), so the dynamic auth URL never
+  // needs to embed it.
+  override async generateAuthUrl(external?: ClientInformation) {
     const state = makeId(6);
     const url = this.generateUrlDynamic(
       external?.instanceUrl!,
       state,
       external?.client_id!,
-      process.env.FRONTEND_URL!,
-      refresh
+      process.env.FRONTEND_URL!
     );
 
     return {
