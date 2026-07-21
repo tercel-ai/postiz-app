@@ -760,7 +760,19 @@ export class OperationPlanService implements OnApplicationBootstrap {
           businessType: AiseeBusinessType.OPERATION_PLAN,
           description: `Generate operation plan for project ${projectId}`,
           relatedId: plan.id,
-          data: { projectId, sourceTaskId: input.taskId },
+          // Passed through to Aisee on BOTH the deduct and the confirm callback,
+          // so aisee-core can write this plan's id/status into the product result
+          // off the credit event (no separate operation-plan callback needed).
+          // plan_status is derived from the confirm `status` — success→ready,
+          // failed→failed — not carried here (this dict is built pre-billing and
+          // can't know the outcome yet). `bizType` gates it: only operation-plan
+          // billing carries it, so post/agent billing stays untouched.
+          data: {
+            bizType: 'operation_plan',
+            projectId,
+            planId: plan.id,
+            sourceTaskId: input.taskId,
+          },
         },
         // The full LLM cost: main generation + every shrink call, each priced by
         // its own model and billed as one multi-item transaction.
@@ -1299,7 +1311,14 @@ export class OperationPlanService implements OnApplicationBootstrap {
         businessType: AiseeBusinessType.OPERATION_PLAN,
         description: `Generate operation plan for project ${plan.projectId}`,
         relatedId: plan.id,
-        data: { projectId: plan.projectId, sourceTaskId: plan.taskId },
+        // Same passthrough as _generateAndBill so the reconcile path also lets
+        // aisee-core write the plan id/status into the product result.
+        data: {
+          bizType: 'operation_plan',
+          projectId: plan.projectId,
+          planId: plan.id,
+          sourceTaskId: plan.taskId,
+        },
       });
     } catch {
       return this._toRecord(plan);

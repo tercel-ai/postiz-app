@@ -1874,7 +1874,17 @@ describe('OperationPlanService.create', () => {
     // Same billing key (the plan id) as the original attempt, so remote billing
     // dedupes rather than double-charging.
     expect(creditService.deductUsageAndConfirm).toHaveBeenCalledWith(
-      expect.objectContaining({ taskId: 'operation_plan:plan-1', relatedId: 'plan-1' }),
+      expect.objectContaining({
+        taskId: 'operation_plan:plan-1',
+        relatedId: 'plan-1',
+        // Carried through to Aisee on BOTH deduct and the confirm callback so
+        // aisee-core can write this plan's id/status into the product result.
+        data: expect.objectContaining({
+          bizType: 'operation_plan',
+          projectId: 'proj-1',
+          planId: 'plan-1',
+        }),
+      }),
       expect.anything()
     );
     expect(repo.updateStatus).toHaveBeenCalledWith(
