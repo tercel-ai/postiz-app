@@ -227,7 +227,7 @@ These are **synchronous** rejections raised during request validation (task reso
 GET /operation-plans/{id}
 ```
 
-Returns the persisted plan summary, every `Post` generated under the plan, and the Engage reply pacing grid for the plan's date range. The lookup is organization-scoped.
+Returns the persisted plan summary, every `Post` generated under the plan, the Engage reply pacing grid for the plan's date range, the plan's Engage reply targets (`engagePolicies`), and the flat list of keywords those policies reference (`engageKeywords`). The lookup is organization-scoped.
 
 ### Path Params
 
@@ -280,7 +280,24 @@ Returns the persisted plan summary, every `Post` generated under the plan, and t
         ]
       }
     ]
-  }
+  },
+  "engagePolicies": [
+    {
+      "platform": "x",
+      "themeTitle": "Helpful answers for GEO questions",
+      "targetRepliesPerDay": 5,
+      "dailyTargets": [
+        { "date": "2026-07-25", "target": 3 },
+        { "date": "2026-07-26", "target": 3 }
+      ],
+      "keywordTargets": {
+        "GEO": 3,
+        "AI search": 2
+      },
+      "enabled": true
+    }
+  ],
+  "engageKeywords": ["GEO", "AI search"]
 }
 ```
 
@@ -289,6 +306,10 @@ Returns the persisted plan summary, every `Post` generated under the plan, and t
 > **While the plan is still generating.** This endpoint always returns `200` — it does not 404 or block on an in-flight plan. Until `plan.status` reaches `READY`, the plan is a stub: `data` is `{}`, `posts` is `[]`, and `engageStats` is `{}` (content, DRAFT posts, and pacing are only filled in once the plan is `READY`). **`plan.status === "READY"` is the only reliable readiness signal — never infer readiness from whether `posts`/`data` are empty**, or you will treat a `GENERATING` plan as an empty one.
 
 `engageStats` is keyed by UTC date; **each day is an array with one entry per platform** (a plan can span x/linkedin/instagram, each with its own Engage policy). Each entry carries that platform's `themeTitle`, the **resolved** `targetRepliesPerDay` for that day (the policy's `dailyTargets` override when one exists, else the default), and a `keywords` array — every keyword item has the persisted `EngageKeyword.id`, display text, actual replies sent on that platform that UTC day, and the configured target. `actualReplies` counts replies whose linked `Post.publishDate` falls on that UTC date **and** whose opportunity is on that platform. A keyword configured under two platforms appears once per platform (not summed).
+
+`engagePolicies` is the plan's Engage reply **targets** (the configuration behind `engageStats`), one entry per platform policy. Unlike the persisted `planPayload` — where `keywordTargets` is keyed by `EngageKeyword.id` — the overview **re-keys `keywordTargets` by keyword TEXT** so consumers never see raw ids; a keyword id that no longer resolves (the `EngageKeyword` was deleted since the plan was generated) is dropped from `keywordTargets` rather than leaked as a bare uuid. Every policy is returned including disabled ones, each carrying its own `enabled` flag, `targetRepliesPerDay` default, and `dailyTargets` overrides (see the pacing note under [Create](#create-operation-plan)). This array is `[]` when the plan has no `engagePolicies` yet (e.g. still `GENERATING`).
+
+`engageKeywords` is the flat, de-duplicated list of the keyword **texts** referenced across all `engagePolicies` — a convenience for rendering the plan's keyword set without walking every policy's `keywordTargets`. It is `[]` when there are no resolvable keywords.
 
 ### Errors
 

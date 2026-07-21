@@ -236,6 +236,90 @@ describe('OperationPlanService.getOverview', () => {
     expect(result.posts).toEqual([{ id: 'post-1' }]);
     expect(mocks.getPostsForPlan).toHaveBeenCalledWith('plan-1', 'org-1');
   });
+
+  it('returns empty engagePolicies/engageKeywords when the plan has no engagePolicies', async () => {
+    mocks.getById.mockResolvedValue(makePlan());
+
+    const result = await service.getOverview('org-1', 'plan-1');
+
+    expect(result.engagePolicies).toEqual([]);
+    expect(result.engageKeywords).toEqual([]);
+  });
+
+  it('re-keys engagePolicies.keywordTargets from keyword id to text and returns a flat engageKeywords list', async () => {
+    mocks.getById.mockResolvedValue(
+      makePlan({
+        planPayload: {
+          engagePolicies: [
+            {
+              platform: 'x',
+              themeTitle: 'Helpful answers for GEO questions',
+              enabled: true,
+              targetRepliesPerDay: 5,
+              dailyTargets: [
+                { date: '2026-07-25', target: 3 },
+                { date: '2026-07-26', target: 3 },
+              ],
+              keywordTargets: { 'kw-geo': 3, 'kw-ai-search': 2 },
+            },
+          ],
+        },
+      })
+    );
+    mocks.resolveKeywordTexts.mockResolvedValue([
+      { id: 'kw-geo', keyword: 'geo' },
+      { id: 'kw-ai-search', keyword: 'ai search' },
+    ]);
+
+    const result = await service.getOverview('org-1', 'plan-1');
+
+    expect(result.engagePolicies).toEqual([
+      {
+        platform: 'x',
+        themeTitle: 'Helpful answers for GEO questions',
+        enabled: true,
+        targetRepliesPerDay: 5,
+        dailyTargets: [
+          { date: '2026-07-25', target: 3 },
+          { date: '2026-07-26', target: 3 },
+        ],
+        // keyword ids swapped for their text — no raw uuids leak to the API.
+        keywordTargets: { geo: 3, 'ai search': 2 },
+      },
+    ]);
+    expect(result.engageKeywords).toEqual(['geo', 'ai search']);
+  });
+
+  it('keeps a disabled policy in engagePolicies but drops keyword ids that no longer resolve', async () => {
+    mocks.getById.mockResolvedValue(
+      makePlan({
+        planPayload: {
+          engagePolicies: [
+            {
+              platform: 'x',
+              enabled: false,
+              keywordTargets: { 'kw-geo': 3, 'kw-deleted': 9 },
+            },
+          ],
+        },
+      })
+    );
+    mocks.resolveKeywordTexts.mockResolvedValue([{ id: 'kw-geo', keyword: 'geo' }]);
+
+    const result = await service.getOverview('org-1', 'plan-1');
+
+    expect(result.engagePolicies).toEqual([
+      {
+        platform: 'x',
+        themeTitle: undefined,
+        enabled: false,
+        targetRepliesPerDay: undefined,
+        dailyTargets: undefined,
+        keywordTargets: { geo: 3 }, // kw-deleted dropped
+      },
+    ]);
+    expect(result.engageKeywords).toEqual(['geo']);
+  });
 });
 
 describe('OperationPlanService.create', () => {

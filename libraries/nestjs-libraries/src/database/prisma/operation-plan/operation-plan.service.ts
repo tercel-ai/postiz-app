@@ -1327,9 +1327,10 @@ export class OperationPlanService implements OnApplicationBootstrap {
 
   async getOverview(organizationId: string, planId: string) {
     const plan = await this._repo.getById(planId, organizationId);
-    const [posts, engageStats] = await Promise.all([
+    const [posts, engageStats, engageView] = await Promise.all([
       this._repo.getPostsForPlan(plan.id, organizationId),
       this._getReplyPacingByDay(plan),
+      this._getEngagePoliciesView(plan),
     ]);
 
     return {
@@ -1346,6 +1347,11 @@ export class OperationPlanService implements OnApplicationBootstrap {
       },
       posts,
       engageStats,
+      // The plan's engagement targets, with keywordTargets keyed by keyword TEXT
+      // (not the internal keyword id persisted in planPayload) plus a flat list
+      // of the keyword texts referenced by those policies.
+      engagePolicies: engageView.engagePolicies,
+      engageKeywords: engageView.engageKeywords,
     };
   }
 
@@ -1523,5 +1529,56 @@ export class OperationPlanService implements OnApplicationBootstrap {
       });
     }
     return result;
+  }
+
+  // The plan's engagePolicies as persisted, but with each policy's keywordTargets
+  // re-keyed from the internal keyword id to the keyword TEXT — the raw ids in
+  // planPayload are meaningless to API consumers. Any id that no longer resolves
+  // (keyword deleted since generation) is dropped rather than leaked as a bare
+  // uuid. Also returns a flat list of the referenced keyword texts.
+  private async _getEngagePoliciesView(plan: OperationPlan): Promise<{
+    engagePolicies: Array<{
+      platform: string;
+      themeTitle?: string;
+      targetRepliesPerDay?: number;
+      dailyTargets?: Array<{ date: string; target: number }>;
+      keywordTargets: Record<string, number>;
+      enabled: boolean;
+    }>;
+    engageKeywords: string[];
+  }> {
+    const payload = plan.planPayload as { engagePolicies?: EngagePolicy[] } | null;
+    const policies = Array.isArray(payload?.engagePolicies)
+      ? payload!.engagePolicies
+      : [];
+    if (!policies.length) return { engagePolicies: [], engageKeywords: [] };
+
+    const allKeywordIds = [
+      ...new Set(policies.flatMap((p) => Object.keys(p.keywordTargets ?? {}))),
+    ];
+    const keywordRows = await this._repo.resolveKeywordTexts(allKeywordIds);
+    const textById = new Map(keywordRows.map((k) => [k.id, k.keyword]));
+
+    const engagePolicies = policies.map((p) => {
+      const keywordTargets: Record<string, number> = {};
+      for (const [keywordId, count] of Object.entries(p.keywordTargets ?? {})) {
+        const keyword = textById.get(keywordId);
+        const target = Number(count);
+        if (keyword && Number.isFinite(target)) keywordTargets[keyword] = target;
+      }
+      return {
+        platform: p.platform,
+        themeTitle: p.themeTitle?.trim() || undefined,
+        targetRepliesPerDay: p.targetRepliesPerDay,
+        dailyTargets: p.dailyTargets,
+        keywordTargets,
+        enabled: !!p.enabled,
+      };
+    });
+
+    return {
+      engagePolicies,
+      engageKeywords: keywordRows.map((k) => k.keyword),
+    };
   }
 }
