@@ -317,7 +317,11 @@ describe('OperationPlanService.create', () => {
         usage: { usage: { total_tokens: 100 } },
       }),
       // Default identity: only exercised when OPERATION_SHRINK_MODEL is set.
-      shrinkToLimit: vi.fn(async (content: string) => content),
+      // Returns the { post, usage } shape so shrink tokens can be accumulated.
+      shrinkToLimit: vi.fn(async (content: string) => ({
+        post: content,
+        usage: { usage: { total_tokens: 5 } },
+      })),
     };
     const engageRepository = {
       // Default: echo each keyword text to a synthetic id ("GEO" -> "id-GEO").
@@ -445,6 +449,99 @@ describe('OperationPlanService.create', () => {
     );
   });
 
+  it('caps an over-long generated thread to MAX_THREAD_PARTS before persisting', async () => {
+    const part = (n: number) => ({
+      id: `2222222${n}-2222-4222-8222-222222222222`,
+      content: `Reply ${n}`,
+      media: null,
+    });
+    const { repo, service } = createGenerationDependencies({
+      goal: { title: 'g', description: 'd', targetScore: 60 },
+      contentItems: [
+        {
+          contentId: 'D01',
+          utcDate: '2030-01-01T00:00:00.000Z',
+          themeKey: 'k',
+          themeTitle: 'T',
+          platforms: [
+            {
+              id: '11111111-1111-4111-8111-111111111111',
+              platform: 'x',
+              content: 'Anchor',
+              media: null,
+              // Five follow-up parts — over the default max of 3.
+              thread: [part(1), part(2), part(3), part(4), part(5)],
+            },
+          ],
+        },
+      ],
+      engagePolicies: [],
+      warnings: [],
+    });
+
+    const { background } = await createAndSettle(service, {
+      taskId: 'task-1',
+      startAt: '2030-01-01T00:00:00.000Z',
+      endAt: '2030-01-02T00:00:00.000Z',
+      platforms: ['x'],
+    });
+    await background;
+
+    const persisted = repo.completeGeneration.mock.calls[0][1].planPayload;
+    const thread = persisted.contentItems[0].platforms[0].thread;
+    // Truncated to the first 3 parts, order preserved; the anchor is untouched.
+    expect(thread).toHaveLength(3);
+    expect(thread.map((t: any) => t.content)).toEqual(['Reply 1', 'Reply 2', 'Reply 3']);
+    expect(persisted.contentItems[0].platforms[0].content).toBe('Anchor');
+  });
+
+  it('honours a Settings-configured thread cap (operation_plan.max_thread_parts)', async () => {
+    const part = (n: number) => ({
+      id: `2222222${n}-2222-4222-8222-222222222222`,
+      content: `Reply ${n}`,
+      media: null,
+    });
+    const { repo, settingsService, service } = createGenerationDependencies({
+      goal: { title: 'g', description: 'd', targetScore: 60 },
+      contentItems: [
+        {
+          contentId: 'D01',
+          utcDate: '2030-01-01T00:00:00.000Z',
+          themeKey: 'k',
+          themeTitle: 'T',
+          platforms: [
+            {
+              id: '11111111-1111-4111-8111-111111111111',
+              platform: 'x',
+              content: 'Anchor',
+              media: null,
+              thread: [part(1), part(2), part(3)],
+            },
+          ],
+        },
+      ],
+      engagePolicies: [],
+      warnings: [],
+    });
+    // Admin lowered the cap to 1 follow-up part.
+    settingsService.get.mockImplementation(async (key: string) =>
+      key === 'operation_plan.max_thread_parts' ? 1 : undefined
+    );
+
+    const { background } = await createAndSettle(service, {
+      taskId: 'task-1',
+      startAt: '2030-01-01T00:00:00.000Z',
+      endAt: '2030-01-02T00:00:00.000Z',
+      platforms: ['x'],
+    });
+    await background;
+
+    const persisted = repo.completeGeneration.mock.calls[0][1].planPayload;
+    const thread = persisted.contentItems[0].platforms[0].thread;
+    expect(thread).toHaveLength(1);
+    expect(thread[0].content).toBe('Reply 1');
+  });
+
   it('requires post ids, display theme titles, and executable keyword targets in the generation contract', async () => {
     const generatedPlan = {
       goal: { title: 'GEO push', description: 'Close the weakest gaps', targetScore: 72 },
@@ -460,8 +557,9 @@ describe('OperationPlanService.create', () => {
               platform: 'x',
               content: 'Publish-ready content',
               // Required-but-nullable: OpenAI structured outputs forbids bare
-              // `.optional()`, so "no media" is an explicit null.
+              // `.optional()`, so "no media" / "no thread" are explicit nulls.
               media: null,
+              thread: null,
             },
           ],
         },
@@ -494,6 +592,24 @@ describe('OperationPlanService.create', () => {
 
     const schema = openaiService.generateStructuredText.mock.calls[0][2];
     expect(schema.safeParse(generatedPlan).success).toBe(true);
+    // A platform entry may carry an optional native thread: an ordered list of
+    // follow-up posts, each with its own UUID id and required-but-nullable media.
+    expect(schema.safeParse({
+      ...generatedPlan,
+      contentItems: [
+        {
+          ...generatedPlan.contentItems[0],
+          platforms: [
+            {
+              ...generatedPlan.contentItems[0].platforms[0],
+              thread: [
+                { id: '33333333-3333-4333-8333-333333333333', content: 'Reply 2', media: null },
+              ],
+            },
+          ],
+        },
+      ],
+    }).success).toBe(true);
     expect(schema.safeParse({
       ...generatedPlan,
       engagePolicies: [
@@ -588,7 +704,16 @@ describe('OperationPlanService.create', () => {
     expect(result.status).toBe('PREVIEW');
     expect(result.durationDays).toBe(2);
     expect(result.warnings).toEqual(['heads up']);
-    expect(result.estimatedUsage).toEqual({ usage: { total_tokens: 100 } });
+    // _sumUsages normalizes to the full token shape (only the main generation
+    // usage here — no shrink fired in this dry-run).
+    expect(result.estimatedUsage).toEqual({
+      usage: {
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        total_tokens: 100,
+        cached_prompt_tokens: 0,
+      },
+    });
   });
 
   it('dryRun still enforces the generation contract (invalid plan rejected, still writes nothing)', async () => {
@@ -785,7 +910,10 @@ describe('OperationPlanService.create', () => {
       });
       // Haiku returns a coherent, in-budget rewrite → used verbatim, no trim.
       const rewrite = 'Concise rewrite that fits the budget.';
-      openaiService.shrinkToLimit.mockResolvedValue(rewrite);
+      openaiService.shrinkToLimit.mockResolvedValue({
+        post: rewrite,
+        usage: { usage: { total_tokens: 8 } },
+      });
 
       const result = await service.create('org-1', 'proj-1', {
         taskId: 'task-1',
@@ -824,7 +952,10 @@ describe('OperationPlanService.create', () => {
         engagePolicies: [],
         warnings: [],
       });
-      openaiService.shrinkToLimit.mockResolvedValue('Concise rewrite.');
+      openaiService.shrinkToLimit.mockResolvedValue({
+        post: 'Concise rewrite.',
+        usage: { usage: { total_tokens: 8 } },
+      });
 
       await service.create('org-1', 'proj-1', {
         taskId: 'task-1',
@@ -862,7 +993,10 @@ describe('OperationPlanService.create', () => {
         warnings: [],
       });
       // Haiku overshoots (still 290 > 280) → mechanical trim guarantees the limit.
-      openaiService.shrinkToLimit.mockResolvedValue('a'.repeat(290));
+      openaiService.shrinkToLimit.mockResolvedValue({
+        post: 'a'.repeat(290),
+        usage: { usage: { total_tokens: 8 } },
+      });
 
       const result = await service.create('org-1', 'proj-1', {
         taskId: 'task-1',
@@ -874,6 +1008,52 @@ describe('OperationPlanService.create', () => {
       const content = result.contentItems[0].platforms[0].content;
       expect(openaiService.shrinkToLimit).toHaveBeenCalled();
       expect(content.length).toBeLessThanOrEqual(280);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('bills the shrink LLM tokens alongside the main generation (multi-usage transaction)', async () => {
+    vi.stubEnv('OPERATION_SHRINK_MODEL', 'anthropic/claude-haiku-4.5');
+    try {
+      const { repo, creditService, openaiService, service } = createGenerationDependencies({
+        goal: { title: 'g', description: 'd', targetScore: 60 },
+        contentItems: [
+          {
+            contentId: 'D01',
+            utcDate: '2030-01-01T00:00:00.000Z',
+            themeKey: 'k',
+            themeTitle: 't',
+            platforms: [
+              // Over the X ceiling → triggers exactly one shrink call.
+              { id: '11111111-1111-4111-8111-111111111111', platform: 'x', content: 'a'.repeat(300), media: null },
+            ],
+          },
+        ],
+        engagePolicies: [],
+        warnings: [],
+      });
+      openaiService.shrinkToLimit.mockResolvedValue({
+        post: 'Concise rewrite that fits.',
+        usage: { usage: { total_tokens: 42 } },
+      });
+
+      const { background } = await createAndSettle(service, {
+        taskId: 'task-1',
+        startAt: '2030-01-01T00:00:00.000Z',
+        endAt: '2030-01-02T00:00:00.000Z',
+        platforms: ['x'],
+      });
+      await background;
+
+      // Billing receives an ARRAY: the main generation usage AND the shrink usage,
+      // so shrink tokens are never dropped and each is priced by its own model.
+      expect(repo.materializePlanPosts).toHaveBeenCalled();
+      const billedUsages = creditService.deductUsageAndConfirm.mock.calls[0][1];
+      expect(Array.isArray(billedUsages)).toBe(true);
+      expect(billedUsages).toHaveLength(2);
+      expect(billedUsages[0].usage.total_tokens).toBe(100); // main generation
+      expect(billedUsages[1].usage.total_tokens).toBe(42);  // shrink call
     } finally {
       vi.unstubAllEnvs();
     }

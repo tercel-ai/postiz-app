@@ -201,14 +201,24 @@ export class AiseeCreditService {
 
   async deductUsageAndConfirm(
     opts: AiseeCreditExecOptions,
-    usage: AiUsageInfo
+    usage: AiUsageInfo | AiUsageInfo[]
   ): Promise<{ deduction: AiseeDeductResponse | null; costItems: AiseeCostItem[] }> {
-    const cost = await this.aiPricingService.calculateCost(usage);
-    const costItem = this.costResultToItem(cost);
-    if (!costItem) return { deduction: null, costItems: [] };
+    // Accept one or many usage records: an operation (e.g. an operation plan) may
+    // span multiple LLM calls — a main generation plus per-post shrink calls,
+    // possibly on different models. Each is priced separately (correct per-model
+    // cost) and billed as ONE transaction via cost_items, mirroring
+    // executeMultiStepWithBilling. Zero-token records price to no item and drop out.
+    const usages = Array.isArray(usage) ? usage : [usage];
+    const costItems: AiseeCostItem[] = [];
+    for (const single of usages) {
+      const cost = await this.aiPricingService.calculateCost(single);
+      const costItem = this.costResultToItem(cost);
+      if (costItem) costItems.push(costItem);
+    }
+    if (!costItems.length) return { deduction: null, costItems: [] };
     return {
-      deduction: await this.deductWithItems(opts, [costItem], true),
-      costItems: [costItem],
+      deduction: await this.deductWithItems(opts, costItems, true),
+      costItems,
     };
   }
 

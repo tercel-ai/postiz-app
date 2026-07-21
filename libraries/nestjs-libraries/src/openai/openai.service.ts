@@ -724,8 +724,8 @@ export class OpenaiService {
     content: string,
     maxChars: number,
     opts?: { model?: string; timeoutMs?: number; maxRetries?: number }
-  ): Promise<string> {
-    const { client, model: defaultModel } = this.getTextClient();
+  ): Promise<{ post: string; usage: AiUsageInfo }> {
+    const { client, model: defaultModel, servicer, provider } = this.getTextClient();
     const model = opts?.model || defaultModel;
     const response = await client.chat.completions.parse(
       {
@@ -747,6 +747,26 @@ export class OpenaiService {
         ...(opts?.maxRetries != null ? { maxRetries: opts.maxRetries } : {}),
       }
     );
-    return response.choices[0]?.message.parsed?.post || content;
+    // Return usage so callers can accumulate it — a plan generation may fire
+    // many shrink calls (one per over-budget post / thread part), and those
+    // tokens must be billed, not silently dropped. The shrink model may differ
+    // from the main generation model, so keep it a SEPARATE usage record for
+    // correct per-model pricing rather than merging token counts.
+    const usage: AiUsageInfo = {
+      servicer,
+      provider,
+      model,
+      type: 'text',
+      billing_mode: 'per_token',
+      method: 'shrinkToLimit',
+      usage: {
+        prompt_tokens: response.usage?.prompt_tokens ?? 0,
+        completion_tokens: response.usage?.completion_tokens ?? 0,
+        total_tokens: response.usage?.total_tokens ?? 0,
+        cached_prompt_tokens: response.usage?.prompt_tokens_details?.cached_tokens ?? 0,
+      },
+    };
+    logAiUsage(usage);
+    return { post: response.choices[0]?.message.parsed?.post || content, usage };
   }
 }

@@ -2,6 +2,12 @@ import { ConflictException, Injectable, NotFoundException } from '@nestjs/common
 import { PrismaRepository } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
 import { OperationPlan, Prisma } from '@prisma/client';
 
+type GeneratedThreadPart = {
+  id: string;
+  content: string;
+  media?: { url: string; altText?: string | null }[] | null;
+};
+
 type GeneratedPlatformPost = {
   id: string;
   platform: string;
@@ -9,6 +15,9 @@ type GeneratedPlatformPost = {
   // Nullable (not optional) to match the generation schema — OpenAI Structured
   // Outputs requires every field present, with null for "absent".
   media?: { url: string; altText?: string | null }[] | null;
+  // Ordered follow-up posts published as a native reply-chain under `content`.
+  // null/empty = a single post. See the generation schema's `thread` field.
+  thread?: GeneratedThreadPart[] | null;
 };
 
 type GeneratedContentItem = {
@@ -150,6 +159,10 @@ export class OperationPlanRepository {
         releaseURL: true,
         group: true,
         settings: true,
+        // Thread parts share the anchor's group but carry a parentPostId chain;
+        // exposing it lets the overview nest a thread instead of listing its
+        // parts as separate top-level posts. null = a standalone/anchor post.
+        parentPostId: true,
         integration: {
           select: {
             id: true,
@@ -201,14 +214,33 @@ export class OperationPlanRepository {
   async materializePlanPosts(plan: OperationPlan, planPayload: unknown) {
     const payload = planPayload as GeneratedPlanPayload | null;
     const contentItems = Array.isArray(payload?.contentItems) ? payload!.contentItems : [];
-    const platformPosts = contentItems.flatMap((item) =>
-      item.platforms.map((post) => ({ item, post }))
+    // Expand every platform post into a chain: the anchor (parentPostId=null)
+    // followed by its thread parts, each linked to the PREVIOUS node's id. This
+    // mirrors the main editor (createOrUpdatePost) and is exactly what the
+    // publisher walks — getPostsRecursively follows childrenPost[0] down the
+    // chain, so a star (all parts pointing at the anchor) would drop every part
+    // after the first. Ids come from the payload (stable across re-runs), so the
+    // createMany stays idempotent. The anchor is emitted before its children, so
+    // the self-referencing FK is satisfied within the single INSERT.
+    const materializedPosts = contentItems.flatMap((item) =>
+      item.platforms.flatMap((post) => {
+        const chain = [
+          { id: post.id, content: post.content, media: post.media, parentPostId: null as string | null },
+          ...(post.thread ?? []).map((part, index, parts) => ({
+            id: part.id,
+            content: part.content,
+            media: part.media,
+            parentPostId: index === 0 ? post.id : parts[index - 1].id,
+          })),
+        ];
+        return chain.map((node) => ({ item, platform: post.platform, node }));
+      })
     );
-    if (!platformPosts.length) {
+    if (!materializedPosts.length) {
       return { count: 0 };
     }
 
-    const postIds = [...new Set(platformPosts.map(({ post }) => post.id))];
+    const postIds = [...new Set(materializedPosts.map(({ node }) => node.id))];
     const existingPosts = await this._post.model.post.findMany({
       where: { id: { in: postIds } },
       select: { id: true, organizationId: true, operationPlanId: true },
@@ -224,7 +256,7 @@ export class OperationPlanRepository {
       });
     }
 
-    const platforms = [...new Set(platformPosts.map(({ post }) => post.platform))];
+    const platforms = [...new Set(materializedPosts.map(({ platform }) => platform))];
     const integrations = await this._integration!.model.integration.findMany({
       where: {
         organizationId: plan.organizationId,
@@ -239,32 +271,34 @@ export class OperationPlanRepository {
       integrations.map((integration) => [integration.providerIdentifier, integration.id])
     );
 
-    const postsToCreate = platformPosts
-      .filter(({ post }) => !existingById.has(post.id))
-      .map(({ item, post }) => {
+    const postsToCreate = materializedPosts
+      .filter(({ node }) => !existingById.has(node.id))
+      .map(({ item, platform, node }) => {
         // integrationId is optional: publishing is by platform (the plugin reads
         // settings.__type), so a platform without an OAuth integration still gets
         // a DRAFT post with a null integrationId. When an integration exists we
         // attach it, so OAuth-based publishing is unaffected.
-        const integrationId = integrationByPlatform.get(post.platform) ?? null;
+        const integrationId = integrationByPlatform.get(platform) ?? null;
         return {
-          id: post.id,
+          id: node.id,
+          // parentPostId chains thread parts to the anchor; null on the anchor.
+          parentPostId: node.parentPostId,
           state: 'DRAFT' as const,
           publishDate: new Date(item.utcDate),
           organizationId: plan.organizationId,
           integrationId,
-          content: post.content,
+          content: node.content,
           delay: 0,
           group: `${plan.id}:${item.contentId}`,
           title: item.themeTitle,
           description: null,
           settings: JSON.stringify({
-            __type: post.platform,
+            __type: platform,
             campaignId: payload?.campaignId ?? plan.campaignId,
             contentId: item.contentId,
             themeKey: item.themeKey,
           }),
-          image: JSON.stringify(post.media ?? []),
+          image: JSON.stringify(node.media ?? []),
           source: 'calendar',
           projectId: plan.projectId,
           operationPlanId: plan.id,

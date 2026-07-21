@@ -273,6 +273,89 @@ describe('OperationPlanRepository', () => {
     });
   });
 
+  it('materializePlanPosts expands a thread into a chained anchor + children (parentPostId links to the PREVIOUS part)', async () => {
+    const postFindMany = vi.fn().mockResolvedValue([]);
+    const postCreateMany = vi.fn().mockResolvedValue({ count: 3 });
+    const integrationFindMany = vi.fn().mockResolvedValue([
+      { id: 'integration-x', providerIdentifier: 'x' },
+    ]);
+    const repo = createRepo({ postFindMany, postCreateMany, integrationFindMany });
+
+    await repo.materializePlanPosts(
+      {
+        id: 'plan-1',
+        organizationId: 'org-1',
+        projectId: 'proj-1',
+        campaignId: 'campaign-1',
+      } as any,
+      {
+        contentItems: [
+          {
+            contentId: 'D01',
+            utcDate: '2030-01-01T00:00:00.000Z',
+            themeKey: 'positioning',
+            themeTitle: 'AI search positioning',
+            platforms: [
+              {
+                id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+                platform: 'x',
+                content: 'Anchor tweet',
+                media: [],
+                thread: [
+                  { id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', content: 'Reply 2', media: null },
+                  { id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', content: 'Reply 3', media: null },
+                ],
+              },
+            ],
+          },
+        ],
+      }
+    );
+
+    // Every part is looked up for idempotency, anchor first then the chain.
+    expect(postFindMany).toHaveBeenCalledWith({
+      where: {
+        id: {
+          in: [
+            'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+            'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+            'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+          ],
+        },
+      },
+      select: { id: true, organizationId: true, operationPlanId: true },
+    });
+    // Anchor has no parent; each reply chains to the PREVIOUS part's id (a chain,
+    // not a star), so getPostsRecursively walks the whole thread. All parts share
+    // the anchor's group and carry the same publish metadata.
+    expect(postCreateMany).toHaveBeenCalledWith({
+      data: [
+        expect.objectContaining({
+          id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+          parentPostId: null,
+          content: 'Anchor tweet',
+          group: 'plan-1:D01',
+          integrationId: 'integration-x',
+        }),
+        expect.objectContaining({
+          id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+          parentPostId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+          content: 'Reply 2',
+          group: 'plan-1:D01',
+          integrationId: 'integration-x',
+        }),
+        expect.objectContaining({
+          id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+          parentPostId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+          content: 'Reply 3',
+          group: 'plan-1:D01',
+          integrationId: 'integration-x',
+        }),
+      ],
+      skipDuplicates: true,
+    });
+  });
+
   it('materializePlanPosts creates a null-integration draft when the platform has no OAuth account', async () => {
     const postFindMany = vi.fn().mockResolvedValue([]);
     const postCreateMany = vi.fn().mockResolvedValue({ count: 1 });

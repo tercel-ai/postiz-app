@@ -29,7 +29,7 @@ Creates or returns the operation plan for one completed Aisee task. `taskId` is 
 |---|---|---|---|
 | `dryRun` | `"true"` \| `"1"` | off | **Preview mode.** Runs input validation, task resolution, and LLM generation + plan validation, then returns the generated plan **without** billing, persistence, or Post materialization. Use it to eyeball generation quality (and estimated token usage) before committing credits + DB rows. The LLM call still runs (real token cost to the platform), but **no user credit is deducted and nothing is written**. Any other value = the real flow. |
 
-> **Dry-run response.** Same shape as the normal response plus `"dryRun": true`, `"status": "PREVIEW"`, `"id": null` (not persisted), and `"estimatedUsage"` (the generation's token usage). If the task already has a persisted plan, dry-run returns that existing plan read-only (with `dryRun: true`) — it never regenerates, reconciles billing, or re-materializes.
+> **Dry-run response.** Same shape as the normal response plus `"dryRun": true`, `"status": "PREVIEW"`, `"id": null` (not persisted), and `"estimatedUsage"` — the **summed** token usage across the whole generation: the main structured-output call **plus every content-shrink call** (see [Billing & token accounting](#billing--token-accounting)). If the task already has a persisted plan, dry-run returns that existing plan read-only (with `dryRun: true`) — it never regenerates, reconciles billing, or re-materializes.
 
 ### Request Body
 
@@ -108,8 +108,22 @@ Creates or returns the operation plan for one completed Aisee task. `taskId` is 
         {
           "id": "11111111-1111-4111-8111-111111111111",
           "platform": "x",
-          "content": "Publish-ready post text",
-          "media": []
+          "content": "Publish-ready anchor post",
+          "media": [],
+          "thread": [
+            {
+              "id": "22222222-2222-4222-8222-222222222222",
+              "content": "Follow-up reply that continues the point",
+              "media": null
+            }
+          ]
+        },
+        {
+          "id": "33333333-3333-4333-8333-333333333333",
+          "platform": "linkedin",
+          "content": "A single self-contained post — no thread here",
+          "media": [],
+          "thread": null
         }
       ]
     }
@@ -138,11 +152,35 @@ Creates or returns the operation plan for one completed Aisee task. `taskId` is 
 
 > **`data` (plan goal).** A JSON summary stored on the plan (separate from `planPayload`): `title` and `description` (LLM-generated campaign framing) plus `baselineScore` and `targetScore` (0-100). `baselineScore` is the source analysis's aggregate `total_score` (from `result.result.total_score`); `targetScore` is the LLM's realistic post-campaign estimate, clamped to `[baselineScore, 100]`. Present in the `dryRun` preview too.
 
+> **`creditAmount`.** The total credits charged for the generation — the sum over **every** LLM call it made (main generation + each content-shrink call), each priced by its own model. See [Billing & token accounting](#billing--token-accounting). `null`/unset until the row reaches `READY`.
+
 > **`targetRepliesPerDay` vs `dailyTargets`.** `targetRepliesPerDay` is the **default** daily reply target; `dailyTargets` overrides it for specific UTC dates (`YYYY-MM-DD`, inside the plan range, no repeats) — that is how a plan paces weekdays and weekends differently. A date not listed keeps the default; a `target` of `0` means "send nothing that day". The send-time pacing gate resolves the day's target this way, and `GET /operation-plans/:id` surfaces the resolved value per day as `engageStats[date][].targetRepliesPerDay`. `dailyTargets` may be an empty list when every day shares the default. Targets are **dated, never week-numbered** — the week is derivable from the date plus `startsAt`.
 
 > **`keywordTargets` keys.** The generator produces `keywordTargets` keyed by **keyword TEXT**. On the real (persisting) path the backend maps each text to its `EngageKeyword.id` — creating the keyword under the project's Engage config if it doesn't exist yet — and stores the plan with **`EngageKeyword.id` keys** (as shown above), which is what pacing and the overview endpoint read. In a **`dryRun` preview the keys stay keyword text** and no `EngageKeyword` rows are created. Two keyword texts that normalize to the same keyword (e.g. `"AI"` / `"ai"`) collapse to one id, summing their targets.
 
-`contentItems[].platforms[].id` is a required UUID reserved for the materialized `Post.id`. After the plan is marked `READY`, the server creates DRAFT `Post` rows with that id, `Post.title = contentItems[].themeTitle`, `Post.settings.themeKey = contentItems[].themeKey`, and `Post.operationPlanId = plan.id`. Repeating the same request reuses the existing plan and skips already-created posts by `Post.id`; it does not create duplicates.
+`contentItems[].platforms[].id` is a required UUID reserved for the materialized `Post.id`. After the plan is marked `READY`, the server creates DRAFT `Post` rows with that id, `Post.title = contentItems[].themeTitle`, `Post.settings.themeKey = contentItems[].themeKey`, and `Post.operationPlanId = plan.id`. Repeating the same request reuses the existing plan and skips already-created posts by `Post.id`; it does not create duplicates. A platform entry with a `thread` materializes into **multiple chained `Post` rows** (one per part) — see the `thread` note below.
+
+> **`thread` (native multi-part posts).** Each `contentItems[].platforms[]` entry carries a `thread` field: an **ordered list of follow-up posts** that publish as a native reply-chain beneath the entry's `content` (on X a tweet thread; on Reddit the self-post followed by top-level comments). `content` is always the anchor/first post; `thread` holds posts 2..N in reading order. **`null` or `[]` means a single post** — the model decides per platform whether a thread earns its place and how long it runs.
+>
+> - **The model decides, not the client.** There is no request-side thread control; the generator chooses whether/how many based on the theme (multi-step how-tos, data stories, and detailed arguments thread well; announcements and single hooks stay one post). It leans toward threading on X and single posts elsewhere.
+> - **Max length.** At most `operation_plan.max_thread_parts` follow-up parts (admin Setting, **default 3** → 4 posts total including the anchor). Anything longer is truncated server-side, keeping the leading parts. **`0` disables threads entirely** — the generator is told to omit them and any it produces anyway are dropped. Editable in aisee-manage → 运营计划.
+> - **Platform capability.** Only platforms whose Postiz provider supports follow-up posting (the `comment` capability — the same flag the publisher's `isCommentable` checks) can be threaded. A `thread` generated for an unsupported platform is dropped (set to `null`) before persistence, so a non-threadable platform always shows `thread: null`.
+> - **Each part is a full post.** Every thread part has its own required UUID `id` (globally unique across the plan, stable across re-materialization) and its own `content` + nullable `media`, and each **independently** obeys the platform character budget — the same hard gate as the anchor.
+> - **Materialization = a `parentPostId` chain.** On `READY`, the anchor becomes a `Post` with `parentPostId: null` and each part becomes a child `Post` whose `parentPostId` points at the **previous** part (a chain, not a star — this is exactly what the publisher walks). All parts share the anchor's `Post.group`; order is carried by the chain itself, not by `publishDate`. The `GET /operation-plans/{id}` overview returns these child posts too, each with its `parentPostId`, so a client can nest them.
+
+### Billing & token accounting
+
+`creditAmount` reflects the **full LLM cost of the generation** — not just the main structured-output call. A single generation can fire several LLM calls:
+
+1. **One main generation call** — produces the whole plan (content items, engage policies, goal).
+2. **N shrink calls** — one per piece of content that exceeds its platform character budget (an over-limit anchor **or any over-limit thread part**). Each is a separate LLM call that rewrites the text down to the budget before the plan is accepted, so a plan with several long posts bills several shrink calls on top of the main one.
+
+**Every one of these is billed.** Each usage record is priced by **its own model** — the main generation and the shrink calls may run on different models (shrink defaults to a cheap/fast model) — and all are charged as a **single transaction** with a per-call `cost_items` breakdown. `creditAmount` on the `READY` row is the sum of that breakdown; the dry-run `estimatedUsage` is the summed token count of the same set of calls.
+
+Caveats:
+
+- **Provider-internal retries** of a *failed* attempt are not billed — the provider returns no usage for a failed call, so there is nothing to charge (only the successful attempt's tokens count).
+- **Recovery re-drives are not double-charged.** If the generation sweeper (`resumeStuckGenerations`) or billing reconciliation re-runs a stuck row, billing is **idempotent on the plan id** (`taskId: operation_plan:{id}`) — the re-run's LLM tokens are intentionally not billed again, so a slow/recovered plan is never charged twice.
 
 ### Status Values
 
@@ -265,6 +303,7 @@ Seeded on backend boot (`OperationPlanService.onApplicationBootstrap`, insert-if
 | `operation_plan.max_duration_days` | number | `30` | Max plan length in whole days; a longer range → `400 DURATION_EXCEEDS_MAX`. |
 | `operation_plan.allowed_platforms` | json (string[]) | `[]` | Allowlist of platforms a plan may use. **Empty = no extra restriction.** Violations → `400 PLATFORM_NOT_ALLOWED`. |
 | `operation_plan.platform_cadence` | json | per-platform defaults | Publishing rhythm fed to the generator as **input** (`platformPlaybook`), so content volume follows the team's playbook instead of the model's guess. |
+| `operation_plan.max_thread_parts` | number | `3` | Max follow-up posts in a generated thread (anchor separate → full chain is 1 + this). Over-long threads are truncated. **`0` disables threads.** Only platforms whose provider supports follow-up posting (`comment` capability, e.g. x/reddit) are ever threaded. |
 
 > **Clients read these from `GET /engage/config`.** Its response carries an `operationPlan: { maxDurationDays, allowedPlatforms }` block so a plan-creation UI can bound its date range and platform picker without an extra request. There, `allowedPlatforms` is the **raw allowlist, returned verbatim** — it is **not** intersected with connected integrations, so an allowlisted-but-unconnected platform is still offered (it is still plannable; POST accepts it). This keeps the picker in lockstep with the create endpoint's single platform gate. `platform_cadence` is **not** exposed — it is generator-only steering.
 
@@ -324,6 +363,7 @@ Expect `201` with `"dryRun": true`, `"status": "PREVIEW"`, `"id": null`. The LLM
 
 - `data` — is `targetScore` a realistic uplift from `baselineScore`?
 - `contentItems[].platforms[].content` — the actual copy. Length is gate-checked server-side, but read a few for tone/accuracy.
+- `contentItems[].platforms[].thread` — when present, the follow-up chain (see the `thread` note under Create). Confirm the parts read as a coherent thread and belong on that platform; `null`/`[]` is a normal single post.
 - `engagePolicies[].keywordTargets` — **keyword TEXT keys** at this stage; verify they're keywords you actually want (they get **created** as `EngageKeyword` rows on commit).
 - `warnings[]` — the generator flags infeasibility here.
 
@@ -334,8 +374,8 @@ Iterate freely: re-running a dry-run costs tokens but never credits or rows.
 Same request without `?dryRun=true`. The endpoint returns **immediately** with `201` and `"status": "GENERATING"` (empty content); generation + billing run in the background. Background side effects, in order:
 
 1. `OperationPlan` stub written as `GENERATING` up front, so the id is returned immediately;
-2. LLM generation runs; on success the row is filled in and advanced to `BILLING_PENDING` (**before** billing, so a lost confirmation is recoverable — see `reconcileBillingPending`);
-3. credits deducted via Aisee `/credit/deduct` (+ confirm);
+2. LLM generation runs — the main generation call **plus a shrink call for every over-budget post/thread part** (see [Billing & token accounting](#billing--token-accounting)); on success the row is filled in and advanced to `BILLING_PENDING` (**before** billing, so a lost confirmation is recoverable — see `reconcileBillingPending`);
+3. credits deducted via Aisee `/credit/deduct` (+ confirm) — **all** the above LLM calls in one transaction, each priced by its own model;
 4. status → `READY`, `billingTransactionId` + `creditAmount` set;
 5. every keyword in `keywordTargets` is **get-or-created** as an `EngageKeyword` (this also seeds its initial scan) and the keys are rewritten to `EngageKeyword.id`;
 6. `contentItems` materialize into DRAFT `Post` rows.
