@@ -156,9 +156,12 @@ export class OperationPlanRepository {
       orderBy: { publishDate: 'asc' },
       select: {
         id: true,
+        title: true,
+        description: true,
         content: true,
         publishDate: true,
         state: true,
+        releaseId: true,
         releaseURL: true,
         group: true,
         settings: true,
