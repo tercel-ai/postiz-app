@@ -158,6 +158,7 @@ export class OperationPlanRepository {
         id: true,
         title: true,
         content: true,
+        image: true,
         publishDate: true,
         state: true,
         releaseId: true,
