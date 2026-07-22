@@ -110,6 +110,38 @@ describe('Post-publish extension protocol', () => {
     );
   });
 
+  it('replies with an actionable error when sendMessage throws synchronously (orphaned context)', () => {
+    // The classic dev pitfall: the extension was reloaded while this page stayed
+    // open, so chrome.runtime is invalidated and sendMessage THROWS synchronously
+    // (the callback never fires). Without the guard the page would just time out.
+    const sendMessage = vi.fn(() => {
+      throw new Error('Extension context invalidated.');
+    });
+    stubChrome(sendMessage);
+    const postMessage = vi.spyOn(window, 'postMessage');
+    installPostPublishBridge();
+
+    window.dispatchEvent(
+      pageMessage({
+        source: EXTENSION_MESSAGE.source,
+        action: EXTENSION_MESSAGE.postPublish,
+        requestId: 'req-dead',
+        items: [],
+      })
+    );
+
+    expect(postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        source: EXTENSION_MESSAGE.resultSource,
+        action: EXTENSION_MESSAGE.postPublishResult,
+        requestId: 'req-dead',
+        ok: false,
+        error: 'The extension was reloaded. Refresh this page and try again.',
+      }),
+      window.location.origin
+    );
+  });
+
   it('reports a runtime error when the extension does not answer', () => {
     const sendMessage = vi.fn((_m, cb) => cb(undefined));
     stubChrome(sendMessage);

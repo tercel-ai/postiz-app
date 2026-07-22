@@ -5,6 +5,7 @@ import {
   enqueuePublishBatch,
   publishQueueSnapshot,
   resetPublishQueueForTest,
+  setBackfillForTest,
   setSegmentPublisherForTest,
   setSleepForTest,
   waitForPublishIdle,
@@ -27,6 +28,7 @@ describe('publish queue', () => {
   beforeEach(() => {
     resetPublishQueueForTest();
     setSleepForTest(() => Promise.resolve()); // skip inter-segment gaps
+    setBackfillForTest(() => Promise.resolve()); // no real backend call in tests
     vi.stubGlobal('chrome', {
       tabs: { sendMessage: vi.fn() },
       runtime: { lastError: undefined },
@@ -36,6 +38,7 @@ describe('publish queue', () => {
   afterEach(async () => {
     setSegmentPublisherForTest(null);
     setSleepForTest(null);
+    setBackfillForTest(null);
     await waitForPublishIdle();
     vi.unstubAllGlobals();
   });
@@ -77,7 +80,7 @@ describe('publish queue', () => {
     enqueuePublishBatch('req-1', [redditItem('dup')], 1);
     const ack = enqueuePublishBatch('req-2', [redditItem('dup')], 1);
     expect(ack.rejected).toEqual([
-      { taskId: 'dup', reason: 'duplicate taskId (already queued or publishing)' },
+      { taskId: 'dup', reason: 'duplicate taskId (already queued, publishing, or sent)' },
     ]);
     release();
     await waitForPublishIdle();

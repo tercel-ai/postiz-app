@@ -79,5 +79,20 @@ export function usePublishQueueState() {
     []
   );
 
-  return { rows, publishNow, cancelTask };
+  const syncTask = useCallback(
+    (taskId: string) => sendAction(ENGAGE_EXTENSION_ACTION.publishSync, { taskId }),
+    []
+  );
+
+  const retryTask = useCallback(
+    (taskId: string) => sendAction(ENGAGE_EXTENSION_ACTION.publishRetry, { taskId }),
+    []
+  );
+
+  const removeTask = useCallback(
+    (taskId: string) => sendAction(ENGAGE_EXTENSION_ACTION.publishRemove, { taskId }),
+    []
+  );
+
+  return { rows, publishNow, cancelTask, syncTask, retryTask, removeTask };
 }

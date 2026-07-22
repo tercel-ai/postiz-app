@@ -139,6 +139,30 @@ export class PostsService {
     return this._postRepository.markStaleQueuePostsAsError();
   }
 
+  /**
+   * Extension publish-on-success callback for a Post. The browser extension
+   * published the post in-browser (X / Reddit) with the user's own platform
+   * session and reports the permalink (+ platform post id) back; flip the saved
+   * Post to PUBLISHED and backfill its releaseURL/releaseId — the Post-side
+   * mirror of the Engage `publishExtensionReply` closed loop. Org-scoped and
+   * idempotent (a duplicate/retried callback for an already-PUBLISHED post is a
+   * no-op success).
+   */
+  async markPublishedFromExtension(
+    orgId: string,
+    id: string,
+    releaseURL: string,
+    releaseId?: string
+  ): Promise<{ ok: boolean; alreadyPublished?: boolean; reason?: string }> {
+    const post = await this._postRepository.getPostById(id, orgId);
+    if (!post) return { ok: false, reason: 'not-found' };
+    if (post.state === 'PUBLISHED') return { ok: true, alreadyPublished: true };
+    // updatePost carries the recurring-original guard (returns null there).
+    const updated = await this.updatePost(id, releaseId || '', releaseURL);
+    if (!updated) return { ok: false, reason: 'blocked-recurring-original' };
+    return { ok: true };
+  }
+
   async updatePost(id: string, postId: string, releaseURL: string) {
     // Defense-in-depth: recurring originals must NEVER be directly published.
     // They use the clone-per-cycle mechanism (prepareRecurringCycle + finalizeRecurringCycle).

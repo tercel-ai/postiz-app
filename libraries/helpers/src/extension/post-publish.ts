@@ -84,6 +84,10 @@ export interface PublishPostItem {
 export type PublishTaskStatus =
   | 'queued'
   | 'publishing'
+  // Posted on-platform (permalink captured) but the backend Post is not yet
+  // flipped to PUBLISHED — the DB backfill is still pending or has failed. A
+  // manual "Sync" retries the backfill; success advances to 'published'.
+  | 'sent'
   | 'published'
   | 'error'
   | 'canceled';
@@ -103,6 +107,13 @@ export interface PublishTaskState {
   /** When this task is scheduled to publish (ISO), echoed from publishDate. */
   publishAt?: string;
   error?: string;
+  /**
+   * Why the DB backfill failed while the post is live on-platform (status
+   * stays 'sent'). Cleared once a backfill succeeds and the task reaches
+   * 'published'. Distinct from `error`, which means the platform send itself
+   * failed (status 'error').
+   */
+  backfillError?: string;
 }
 
 export interface PublishRejectedItem {

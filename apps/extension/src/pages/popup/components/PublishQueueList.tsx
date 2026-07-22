@@ -15,6 +15,7 @@ const PENDING_STATUSES = new Set(['queued', 'publishing']);
 const STATUS_LABEL: Record<string, string> = {
   queued: 'Queued',
   publishing: 'Publishing…',
+  sent: 'Sent · syncing',
   published: 'Published',
   error: 'Failed',
   canceled: 'Canceled',
@@ -33,10 +34,8 @@ function isPending(row: PublishQueueRow): boolean {
 }
 
 function rowText(row: PublishQueueRow): string {
-  const title = (row.item.title || '').trim();
   const body = (row.item.segments?.[0]?.text || '').trim();
-  if (title && body) return `${title} — ${body}`;
-  return title || body || '(no text)';
+  return body || '(no text)';
 }
 
 function formatDateTime(iso: string): string {
@@ -61,7 +60,10 @@ const QueueRow: FC<{
   row: PublishQueueRow;
   onPublishNow: (taskId: string) => Promise<void>;
   onCancel: (taskId: string) => Promise<void>;
-}> = ({ row, onPublishNow, onCancel }) => {
+  onSync: (taskId: string) => Promise<void>;
+  onRetry: (taskId: string) => Promise<void>;
+  onRemove: (taskId: string) => Promise<void>;
+}> = ({ row, onPublishNow, onCancel, onSync, onRetry, onRemove }) => {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const { taskId, platform, status, segmentsTotal, segmentsPublished } = row.state;
@@ -99,11 +101,21 @@ const QueueRow: FC<{
         {schedule && <span className="pz-time">{schedule}</span>}
       </div>
 
+      {(row.item.title || '').trim() && (
+        <div className="pz-content" style={{ fontWeight: 600, WebkitLineClamp: 1 }}>
+          {(row.item.title || '').trim()}
+        </div>
+      )}
       <div className="pz-content">{rowText(row)}</div>
 
       {row.state.error && (
         <div className="pz-content" style={{ color: 'var(--pz-danger)' }}>
           {row.state.error}
+        </div>
+      )}
+      {status === 'sent' && row.state.backfillError && (
+        <div className="pz-content" style={{ color: '#92400e' }}>
+          Not recorded in your dashboard yet: {row.state.backfillError}
         </div>
       )}
 
@@ -118,7 +130,7 @@ const QueueRow: FC<{
             View post ↗
           </a>
         )}
-        {row.state.status === 'queued' && (
+        {status === 'queued' && (
           <>
             <button
               className="pz-mini-btn primary"
@@ -136,6 +148,44 @@ const QueueRow: FC<{
             </button>
           </>
         )}
+        {status === 'sent' && (
+          <button
+            className="pz-mini-btn primary"
+            disabled={busy}
+            onClick={() => run(onSync)}
+          >
+            Sync
+          </button>
+        )}
+        {status === 'error' && (
+          <>
+            {segmentsPublished === 0 && (
+              <button
+                className="pz-mini-btn primary"
+                disabled={busy}
+                onClick={() => run(onRetry)}
+              >
+                Retry
+              </button>
+            )}
+            <button
+              className="pz-mini-btn"
+              disabled={busy}
+              onClick={() => run(onRemove)}
+            >
+              Remove
+            </button>
+          </>
+        )}
+        {status === 'canceled' && (
+          <button
+            className="pz-mini-btn"
+            disabled={busy}
+            onClick={() => run(onRemove)}
+          >
+            Remove
+          </button>
+        )}
         {err && <span className="pz-queue-err">{err}</span>}
       </div>
     </div>
@@ -146,7 +196,10 @@ export const PublishQueueList: FC<{
   rows: PublishQueueRow[];
   onPublishNow: (taskId: string) => Promise<void>;
   onCancel: (taskId: string) => Promise<void>;
-}> = ({ rows, onPublishNow, onCancel }) => {
+  onSync: (taskId: string) => Promise<void>;
+  onRetry: (taskId: string) => Promise<void>;
+  onRemove: (taskId: string) => Promise<void>;
+}> = ({ rows, onPublishNow, onCancel, onSync, onRetry, onRemove }) => {
   const [filter, setFilter] = useState<QueueFilter>('all');
   const [page, setPage] = useState(0);
 
@@ -213,6 +266,9 @@ export const PublishQueueList: FC<{
                 row={row}
                 onPublishNow={onPublishNow}
                 onCancel={onCancel}
+                onSync={onSync}
+                onRetry={onRetry}
+                onRemove={onRemove}
               />
             ))}
           </div>

@@ -4,6 +4,7 @@ import {
   Delete,
   Get,
   Param,
+  Patch,
   Post,
   Put,
   Query,
@@ -30,6 +31,7 @@ import { GetUserFromRequest } from '@gitroom/nestjs-libraries/user/user.from.req
 import { ShortLinkService } from '@gitroom/nestjs-libraries/short-linking/short.link.service';
 import { CreateTagDto } from '@gitroom/nestjs-libraries/dtos/posts/create.tag.dto';
 import { CreatePostDto } from '@gitroom/nestjs-libraries/dtos/posts/create.post.dto';
+import { MarkExtensionPublishedDto } from '@gitroom/nestjs-libraries/dtos/posts/mark-extension-published.dto';
 import {
   AuthorizationActions,
   Sections,
@@ -344,6 +346,27 @@ export class PostsController {
     @Body() body: { content: string; len: number }
   ) {
     return this._postsService.separatePosts(body.content, body.len);
+  }
+
+  /**
+   * Extension publish-on-success callback: the browser extension published this
+   * Post in-browser (X / Reddit) with the user's own platform session and
+   * reports back the permalink (+ platform post id). Flip the saved Post to
+   * PUBLISHED and backfill releaseURL/releaseId — the Post-side mirror of
+   * PATCH /engage/sent/:id/publish-reply. Org-scoped and idempotent.
+   */
+  @Patch('/:id/extension-published')
+  markExtensionPublished(
+    @GetOrgFromRequest() org: Organization,
+    @Param('id') id: string,
+    @Body() body: MarkExtensionPublishedDto
+  ) {
+    return this._postsService.markPublishedFromExtension(
+      org.id,
+      id,
+      body.releaseURL,
+      body.releaseId
+    );
   }
 
   @Post('/sync-metrics')

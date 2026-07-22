@@ -44,16 +44,38 @@ interface PublishPostItem {
 interface PublishTaskState {
   taskId: string;
   platform: 'x' | 'reddit';
-  status: 'queued' | 'publishing' | 'published' | 'error' | 'canceled';
+  // 'sent' = live on-platform (permalink captured) but the backend Post is not
+  // yet flipped to PUBLISHED — the DB backfill is pending or failed; a manual
+  // "Sync" retries it and advances to 'published'.
+  status: 'queued' | 'publishing' | 'sent' | 'published' | 'error' | 'canceled';
   segmentsTotal: number;
   segmentsPublished: number;
   permalink?: string;           // first segment, once published
   segmentPermalinks?: string[]; // every published segment in thread order
   postId?: string;              // platform id of the post (reddit t3_* / X rest_id)
   publishAt?: string;           // ISO, echoed from publishDate when scheduled
-  error?: string;
+  error?: string;               // platform send itself failed (status 'error')
+  backfillError?: string;       // DB backfill failed while live (status 'sent')
 }
 ```
+
+## DB backfill (closed loop to the backend Post)
+
+After a task's platform send succeeds it settles as `sent`, then the extension
+calls the backend with its own authenticated session (works even if the page is
+closed, e.g. scheduled posts) to flip the saved Post to PUBLISHED:
+
+```
+PATCH /posts/:taskId/extension-published   { releaseURL, releaseId? }
+  → { ok: true }                         // flipped (or already PUBLISHED — idempotent)
+  → { ok: false, reason }                // not found / not this org / recurring original
+```
+
+On success the task advances `sent → published`. On failure (HTTP error OR a
+`{ ok: false }` body) it stays `sent` with `backfillError` set, so nothing is
+ever marked published while the DB row is untouched, and the popup offers a
+manual **Sync** (idempotent retry). This mirrors the Engage reply's
+`PATCH /engage/sent/:id/publish-reply` callback.
 
 ## Example (batch enqueue)
 

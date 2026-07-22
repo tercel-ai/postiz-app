@@ -436,6 +436,10 @@ body {
   background: #fff7e6;
   color: #92400e;
 }
+.pz-status.sent {
+  background: #eaf2ff;
+  color: #1d4ed8;
+}
 .pz-status.published {
   background: var(--pz-accent-soft);
   color: #354600;

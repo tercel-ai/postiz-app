@@ -34,6 +34,9 @@ import {
   cancelPublishTasks,
   publishQueueSnapshot,
   publishTaskNow,
+  syncPublishTask,
+  retryPublishTask,
+  removePublishTask,
   initPublishQueue,
   handlePublishAlarm,
 } from '@gitroom/extension/utils/post-publish/queue';
@@ -416,24 +419,41 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
   // the queue before restore completes would clobber / hide the persisted
   // scheduled tasks when this very message is what woke the worker.
   if (request.action === ENGAGE_EXTENSION_ACTION.publishEnqueue) {
+    const items = Array.isArray(request.items) ? request.items : [];
+    console.log('[aisee-publish:sw] enqueue request', {
+      requestId: request.requestId,
+      tabId: sender.tab?.id,
+      items: items.length,
+      taskIds: items.map((i: any) => i?.taskId),
+    });
     initPublishQueue()
       .then(() => {
         const ack = enqueuePublishBatch(
           String(request.requestId || ''),
-          Array.isArray(request.items) ? request.items : [],
+          items,
           sender.tab?.id
         );
+        console.log('[aisee-publish:sw] enqueue ack', {
+          requestId: request.requestId,
+          accepted: ack.accepted.map((a) => ({ taskId: a.taskId, status: a.status })),
+          rejected: ack.rejected,
+        });
         sendResponse({ ok: true, ...ack });
       })
-      .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
+      .catch((e) => {
+        console.log('[aisee-publish:sw] enqueue ERROR', String(e?.message || e));
+        sendResponse({ ok: false, error: String(e?.message || e) });
+      });
     return true;
   }
   if (request.action === ENGAGE_EXTENSION_ACTION.publishCancel) {
+    console.log('[aisee-publish:sw] cancel request', { taskIds: request.taskIds });
     initPublishQueue()
       .then(() => {
         const ack = cancelPublishTasks(
           Array.isArray(request.taskIds) ? request.taskIds : []
         );
+        console.log('[aisee-publish:sw] cancel ack', ack);
         sendResponse({ ok: true, ...ack });
       })
       .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
@@ -441,13 +461,58 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
   }
   if (request.action === ENGAGE_EXTENSION_ACTION.publishStatus) {
     initPublishQueue()
-      .then(() => sendResponse({ ok: true, states: publishQueueSnapshot() }))
+      .then(() => {
+        const states = publishQueueSnapshot();
+        console.log('[aisee-publish:sw] status snapshot', {
+          count: states.length,
+          states: states.map((s) => ({ taskId: s.taskId, status: s.status })),
+        });
+        sendResponse({ ok: true, states });
+      })
       .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
     return true;
   }
   if (request.action === ENGAGE_EXTENSION_ACTION.publishNow) {
+    console.log('[aisee-publish:sw] publish-now request', { taskId: request.taskId });
     initPublishQueue()
-      .then(() => sendResponse(publishTaskNow(String(request.taskId || ''))))
+      .then(() => {
+        const result = publishTaskNow(String(request.taskId || ''));
+        console.log('[aisee-publish:sw] publish-now result', { taskId: request.taskId, result });
+        sendResponse(result);
+      })
+      .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
+    return true;
+  }
+  if (request.action === ENGAGE_EXTENSION_ACTION.publishSync) {
+    console.log('[aisee-publish:sw] sync request', { taskId: request.taskId });
+    initPublishQueue()
+      .then(() => syncPublishTask(String(request.taskId || '')))
+      .then((result) => {
+        console.log('[aisee-publish:sw] sync result', { taskId: request.taskId, result });
+        sendResponse(result);
+      })
+      .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
+    return true;
+  }
+  if (request.action === ENGAGE_EXTENSION_ACTION.publishRetry) {
+    console.log('[aisee-publish:sw] retry request', { taskId: request.taskId });
+    initPublishQueue()
+      .then(() => {
+        const result = retryPublishTask(String(request.taskId || ''));
+        console.log('[aisee-publish:sw] retry result', { taskId: request.taskId, result });
+        sendResponse(result);
+      })
+      .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
+    return true;
+  }
+  if (request.action === ENGAGE_EXTENSION_ACTION.publishRemove) {
+    console.log('[aisee-publish:sw] remove request', { taskId: request.taskId });
+    initPublishQueue()
+      .then(() => {
+        const result = removePublishTask(String(request.taskId || ''));
+        console.log('[aisee-publish:sw] remove result', { taskId: request.taskId, result });
+        sendResponse(result);
+      })
       .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
     return true;
   }

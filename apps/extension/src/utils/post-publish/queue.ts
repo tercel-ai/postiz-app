@@ -34,6 +34,7 @@ import {
   postLinkedinCompose,
   postLinkedinComment,
 } from '@gitroom/extension/pages/background/linkedin.poster';
+import { backendCall } from '@gitroom/extension/utils/executor/api';
 
 interface QueueEntry {
   item: PublishPostItem;
@@ -160,7 +161,70 @@ async function defaultPublishSegment(
   return { ok: r.ok, permalink: r.permalink, postId: r.postId, error: r.error };
 }
 
+/**
+ * Closed-loop DB backfill after a task publishes: report the permalink (+
+ * platform post id) to the backend so the saved Post flips to PUBLISHED — the
+ * Post-side mirror of the Engage reply's publish-reply callback. Uses the
+ * extension's OWN authenticated session (backendCall → getValidAccessToken), so
+ * it works even when the originating page is closed (scheduled posts). Taskid IS
+ * the backend Post id. Best-effort: the post is live on-platform regardless, so
+ * a failed backfill is logged, not fatal.
+ */
+export type PublishBackfiller = (
+  taskId: string,
+  releaseURL: string,
+  releaseId: string | undefined
+) => Promise<void>;
+
+async function defaultBackfill(
+  taskId: string,
+  releaseURL: string,
+  releaseId: string | undefined
+): Promise<void> {
+  const res = await backendCall<{ ok?: boolean; reason?: string }>(
+    `/posts/${taskId}/extension-published`,
+    'PATCH',
+    { releaseURL, ...(releaseId ? { releaseId } : {}) }
+  );
+  // backendCall.ok is only the HTTP status; the endpoint also signals logical
+  // failure (post not found / not owned by this session's org / recurring
+  // original) as `{ ok: false }` in a 200 body. Throw on EITHER so the task
+  // stays 'sent' with a real reason and offers Sync — never a silent
+  // "published" while the DB row is untouched.
+  if (!res.ok) {
+    throw new Error(`backend responded ${res.status}`);
+  }
+  if (res.data && res.data.ok === false) {
+    throw new Error(res.data.reason || 'backend rejected the backfill');
+  }
+}
+
+/**
+ * Advance a 'sent' task to 'published' by backfilling the DB, or leave it 'sent'
+ * with a backfillError. The post is ALREADY live on-platform here, so a failure
+ * is recorded (surfaced as a manual "Sync") — never a re-publish.
+ */
+async function attemptBackfill(entry: QueueEntry): Promise<void> {
+  if (!entry.state.permalink) {
+    entry.state.backfillError = 'no permalink captured — cannot backfill';
+    return;
+  }
+  try {
+    await backfillPublished(
+      entry.state.taskId,
+      entry.state.permalink,
+      entry.state.postId
+    );
+    entry.state.status = 'published';
+    delete entry.state.backfillError;
+  } catch (e: any) {
+    // Stays 'sent'; the row shows a Sync button to retry.
+    entry.state.backfillError = String(e?.message || e);
+  }
+}
+
 let publishSegment: SegmentPublisher = defaultPublishSegment;
+let backfillPublished: PublishBackfiller = defaultBackfill;
 let now: () => number = () => Date.now();
 
 // ── Human-like pause between thread segments ────────────────────────────────
@@ -210,6 +274,10 @@ let sleep: (ms: number) => Promise<void> = keepaliveSleep;
 
 export function setSegmentPublisherForTest(fn: SegmentPublisher | null): void {
   publishSegment = fn ?? defaultPublishSegment;
+}
+
+export function setBackfillForTest(fn: PublishBackfiller | null): void {
+  backfillPublished = fn ?? defaultBackfill;
 }
 
 export function setSleepForTest(
@@ -323,8 +391,24 @@ export function handlePublishAlarm(alarmName: string): boolean {
 
 // ── Progress push ───────────────────────────────────────────────────────────
 
+const QLOG = '[aisee-publish:sw:queue]';
+function qlog(...args: unknown[]): void {
+  try {
+    // eslint-disable-next-line no-console
+    console.log(QLOG, ...args);
+  } catch {
+    /* no console (tests) — ignore */
+  }
+}
+
 function emit(entry: QueueEntry): void {
-  if (entry.tabId == null) return;
+  if (entry.tabId == null) {
+    qlog('emit skipped — no originating tab', {
+      taskId: entry.state.taskId,
+      status: entry.state.status,
+    });
+    return;
+  }
   try {
     chrome.tabs.sendMessage(
       entry.tabId,
@@ -347,13 +431,20 @@ function emit(entry: QueueEntry): void {
 // ── Enqueue / cancel / snapshot ─────────────────────────────────────────────
 
 function isActive(e: QueueEntry): boolean {
-  return e.state.status === 'queued' || e.state.status === 'publishing';
+  // 'sent' counts as active: the post is live on-platform (re-enqueuing the same
+  // taskId would duplicate it) and it still needs its DB backfill, so it must
+  // never be trimmed as "settled" either.
+  return (
+    e.state.status === 'queued' ||
+    e.state.status === 'publishing' ||
+    e.state.status === 'sent'
+  );
 }
 
 function validate(item: PublishPostItem): string | null {
   if (!item?.taskId || typeof item.taskId !== 'string') return 'missing taskId';
   if (entries.some((e) => isActive(e) && e.state.taskId === item.taskId))
-    return 'duplicate taskId (already queued or publishing)';
+    return 'duplicate taskId (already queued, publishing, or sent)';
   if (
     item.platform !== 'reddit' &&
     item.platform !== 'x' &&
@@ -489,6 +580,86 @@ export function publishTaskNow(taskId: string): {
   return { ok: true };
 }
 
+/** Latest entry for a taskId (a re-enqueued id may also exist as an old row). */
+function latestEntry(taskId: string): QueueEntry | undefined {
+  return [...entries].reverse().find((e) => e.state.taskId === taskId);
+}
+
+/**
+ * Manual "Sync": retry the DB backfill for a task that is live on-platform but
+ * still 'sent' (auto-backfill failed). Idempotent on the backend, so pressing
+ * it repeatedly is safe. Advances to 'published' on success.
+ */
+export async function syncPublishTask(
+  taskId: string
+): Promise<{ ok: boolean; reason?: string }> {
+  const entry = latestEntry(taskId);
+  if (!entry) return { ok: false, reason: 'not found' };
+  if (entry.state.status !== 'sent')
+    return { ok: false, reason: `not sent (${entry.state.status})` };
+  await attemptBackfill(entry);
+  persist();
+  emit(entry);
+  return entry.state.status === 'published'
+    ? { ok: true }
+    : { ok: false, reason: entry.state.backfillError || 'backfill failed' };
+}
+
+/**
+ * Manual "Retry" for a task whose platform send FAILED ('error'). Re-queues it
+ * from scratch. Refused when any segment already went out (segmentsPublished >
+ * 0): re-running a partially-posted thread would duplicate the live segments.
+ */
+export function retryPublishTask(taskId: string): {
+  ok: boolean;
+  reason?: string;
+} {
+  const entry = latestEntry(taskId);
+  if (!entry) return { ok: false, reason: 'not found' };
+  if (entry.state.status !== 'error')
+    return { ok: false, reason: `not error (${entry.state.status})` };
+  if (entry.state.segmentsPublished > 0)
+    return {
+      ok: false,
+      reason: 'partial thread already posted — cannot safely retry',
+    };
+  entry.state.status = 'queued';
+  entry.state.segmentsPublished = 0;
+  delete entry.state.error;
+  delete entry.state.backfillError;
+  delete entry.state.permalink;
+  delete entry.state.postId;
+  delete entry.state.segmentPermalinks;
+  entry.dueAt = 0;
+  persist();
+  emit(entry);
+  kickDrain();
+  armAlarm();
+  return { ok: true };
+}
+
+/**
+ * Remove a settled row (error / canceled / published) from the queue. Refused
+ * for in-flight or actionable states: 'publishing' (mid-send), 'queued' (cancel
+ * it instead), and 'sent' (sync it — the post is live and unrecorded).
+ */
+export function removePublishTask(taskId: string): {
+  ok: boolean;
+  reason?: string;
+} {
+  const entry = latestEntry(taskId);
+  if (!entry) return { ok: false, reason: 'not found' };
+  const status = entry.state.status;
+  if (status === 'publishing')
+    return { ok: false, reason: 'cannot remove while publishing' };
+  if (status === 'queued') return { ok: false, reason: 'cancel it first' };
+  if (status === 'sent')
+    return { ok: false, reason: 'sync it first (post is live but unrecorded)' };
+  entries = entries.filter((e) => e !== entry);
+  persist();
+  return { ok: true };
+}
+
 export function publishQueueSnapshot(): PublishTaskState[] {
   return entries.map((e) => ({ ...e.state }));
 }
@@ -517,10 +688,17 @@ async function drain(): Promise<void> {
       (e) => e.state.status === 'queued' && e.dueAt <= now()
     );
     if (!entry) {
+      const waiting = entries.filter((e) => e.state.status === 'queued').length;
+      qlog('drain idle — no due task', { queuedWaiting: waiting });
       armAlarm(); // future-scheduled tasks (if any) will wake us
       return;
     }
 
+    qlog('drain → publishing', {
+      taskId: entry.state.taskId,
+      platform: entry.item.platform,
+      segments: entry.item.segments.length,
+    });
     entry.state.status = 'publishing';
     persist();
     emit(entry);
@@ -530,10 +708,21 @@ async function drain(): Promise<void> {
     for (let i = 0; i < entry.item.segments.length; i++) {
       let result: SegmentResult;
       try {
+        qlog('publishing segment', {
+          taskId: entry.state.taskId,
+          segment: `${i + 1}/${entry.item.segments.length}`,
+        });
         result = await publishSegment(entry.item, i, permalinks[i - 1]);
       } catch (e: any) {
         result = { ok: false, error: String(e?.message || e) };
       }
+      qlog('segment result', {
+        taskId: entry.state.taskId,
+        segment: `${i + 1}/${entry.item.segments.length}`,
+        ok: result.ok,
+        permalink: result.permalink,
+        error: result.error,
+      });
       if (!result.ok) {
         failed = result.error || `segment ${i + 1} failed`;
         break;
@@ -557,8 +746,40 @@ async function drain(): Promise<void> {
       }
     }
 
-    entry.state.status = failed ? 'error' : 'published';
-    if (failed) entry.state.error = failed;
+    if (failed) {
+      // Platform send itself failed — nothing (safely) live.
+      entry.state.status = 'error';
+      entry.state.error = failed;
+      qlog('task error (platform send failed)', {
+        taskId: entry.state.taskId,
+        segmentsPublished: entry.state.segmentsPublished,
+        error: failed,
+      });
+      persist();
+      emit(entry);
+      trimSettled();
+      continue;
+    }
+
+    // Platform send succeeded → SENT. Surface it immediately, THEN try the DB
+    // backfill (SENT → PUBLISHED, or stays SENT with a backfillError for the
+    // user to Sync). Two-phase so the panel reflects "live, syncing…" honestly
+    // and a backend outage never masquerades as a publish failure.
+    entry.state.status = 'sent';
+    delete entry.state.error;
+    qlog('task sent (platform ok)', {
+      taskId: entry.state.taskId,
+      permalink: entry.state.permalink,
+    });
+    persist();
+    emit(entry);
+
+    await attemptBackfill(entry);
+    qlog('after backfill', {
+      taskId: entry.state.taskId,
+      status: entry.state.status,
+      backfillError: entry.state.backfillError,
+    });
     persist();
     emit(entry);
     trimSettled();

@@ -18,6 +18,12 @@ export const ENGAGE_EXTENSION_ACTION = {
   publishStatus: 'publish:status',
   /** popup/panel → SW: make a queued task due immediately ("Publish now"). */
   publishNow: 'publish:now',
+  /** popup/panel → SW: retry the DB backfill for a 'sent' task ("Sync"). */
+  publishSync: 'publish:sync',
+  /** popup/panel → SW: re-queue a failed task ("Retry"). */
+  publishRetry: 'publish:retry',
+  /** popup/panel → SW: drop a settled row from the queue ("Remove"). */
+  publishRemove: 'publish:remove',
   /** SW → content-script push forwarded to the page as postPublishProgress. */
   publishProgressPush: 'publish:progress-push',
   loadSubscription: 'user:load-subscription',

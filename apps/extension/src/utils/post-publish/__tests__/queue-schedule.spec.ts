@@ -8,7 +8,11 @@ import {
   initPublishQueue,
   publishQueueSnapshot,
   publishTaskNow,
+  syncPublishTask,
+  retryPublishTask,
+  removePublishTask,
   resetPublishQueueForTest,
+  setBackfillForTest,
   setNowForTest,
   setSegmentPublisherForTest,
   setSleepForTest,
@@ -53,12 +57,14 @@ describe('publish queue scheduling + persistence', () => {
     resetPublishQueueForTest();
     setNowForTest(() => T0);
     setSleepForTest(() => Promise.resolve()); // skip inter-segment gaps
+    setBackfillForTest(() => Promise.resolve()); // no real backend call in tests
   });
 
   afterEach(async () => {
     setSegmentPublisherForTest(null);
     setNowForTest(null);
     setSleepForTest(null);
+    setBackfillForTest(null);
     await waitForPublishIdle();
     vi.unstubAllGlobals();
   });
@@ -114,6 +120,115 @@ describe('publish queue scheduling + persistence', () => {
 
     // Scheduled-but-not-due is exactly the cancel window.
     expect(cancelPublishTasks(['later']).canceled).toEqual(['later']);
+  });
+
+  it('backfills the DB (taskId, permalink, postId) after a task publishes, and skips it on failure', async () => {
+    stubChrome();
+    const backfill = vi.fn(async () => {});
+    setBackfillForTest(backfill);
+
+    // Success → backfill once with the first segment's permalink + postId.
+    setSegmentPublisherForTest(async () => ({ ok: true, permalink: 'https://x.com/p/1', postId: 't3_1' }));
+    enqueuePublishBatch('req-ok', [redditItem('ok')], 1);
+    await waitForPublishIdle();
+    expect(backfill).toHaveBeenCalledTimes(1);
+    expect(backfill).toHaveBeenCalledWith('ok', 'https://x.com/p/1', 't3_1');
+
+    // Failure → no backfill (nothing went live, so nothing to record).
+    backfill.mockClear();
+    setSegmentPublisherForTest(async () => ({ ok: false, error: 'boom' }));
+    enqueuePublishBatch('req-err', [redditItem('bad')], 1);
+    await waitForPublishIdle();
+    expect(backfill).not.toHaveBeenCalled();
+    expect(publishQueueSnapshot().find((s) => s.taskId === 'bad')?.status).toBe('error');
+  });
+
+  it('stays SENT (not error) when the DB backfill fails, then Sync recovers it to PUBLISHED', async () => {
+    stubChrome();
+    let backend: 'down' | 'up' = 'down';
+    setBackfillForTest(async () => {
+      if (backend === 'down') throw new Error('network down');
+    });
+    setSegmentPublisherForTest(async () => ({ ok: true, permalink: 'p', postId: 't3_1' }));
+
+    enqueuePublishBatch('req-1', [redditItem('live')], 1);
+    await waitForPublishIdle();
+
+    // Backfill failed → live on-platform but NOT flipped to error (that would
+    // risk a duplicate re-publish). Stays 'sent' with a backfillError.
+    const sent = publishQueueSnapshot()[0];
+    expect(sent.status).toBe('sent');
+    expect(sent.backfillError).toMatch(/network down/);
+
+    // Manual Sync retries the backfill; backend is up now → PUBLISHED.
+    backend = 'up';
+    const result = await syncPublishTask('live');
+    expect(result).toEqual({ ok: true });
+    const published = publishQueueSnapshot()[0];
+    expect(published.status).toBe('published');
+    expect(published.backfillError).toBeUndefined();
+  });
+
+  it('Sync is a no-op with a reason for a task that is not sent', async () => {
+    stubChrome();
+    setSegmentPublisherForTest(async () => ({ ok: true, permalink: 'p' }));
+    enqueuePublishBatch('req-1', [redditItem('done')], 1);
+    await waitForPublishIdle();
+    // Backfill defaulted to no-op resolve → already published.
+    expect(publishQueueSnapshot()[0].status).toBe('published');
+    expect(await syncPublishTask('done')).toEqual({
+      ok: false,
+      reason: 'not sent (published)',
+    });
+    expect(await syncPublishTask('nope')).toEqual({ ok: false, reason: 'not found' });
+  });
+
+  it('Retry re-queues a failed task and refuses a partially-posted thread', async () => {
+    stubChrome();
+    // Single-segment failure → nothing went out (segmentsPublished 0) → retryable.
+    setSegmentPublisherForTest(async () => ({ ok: false, error: 'boom' }));
+    enqueuePublishBatch('req-1', [redditItem('single')], 1);
+    await waitForPublishIdle();
+    expect(publishQueueSnapshot()[0].status).toBe('error');
+
+    // Retry: now the publisher succeeds → back through the queue to published.
+    setSegmentPublisherForTest(async () => ({ ok: true, permalink: 'p' }));
+    expect(retryPublishTask('single')).toEqual({ ok: true });
+    await waitForPublishIdle();
+    expect(publishQueueSnapshot().find((s) => s.taskId === 'single')?.status).toBe('published');
+
+    // A thread whose first segment posted but a later one failed is NOT safely
+    // retryable (would duplicate the live segment).
+    let call = 0;
+    setSegmentPublisherForTest(async () =>
+      call++ === 0 ? { ok: true, permalink: 'p1' } : { ok: false, error: 'seg2 down' }
+    );
+    enqueuePublishBatch('req-2', [redditItem('thread', { segments: [{ text: 'a' }, { text: 'b' }] })], 1);
+    await waitForPublishIdle();
+    const thread = publishQueueSnapshot().find((s) => s.taskId === 'thread');
+    expect(thread?.status).toBe('error');
+    expect(thread?.segmentsPublished).toBe(1);
+    expect(retryPublishTask('thread')).toEqual({
+      ok: false,
+      reason: 'partial thread already posted — cannot safely retry',
+    });
+  });
+
+  it('Remove drops a settled row but refuses queued/publishing/sent', async () => {
+    stubChrome();
+    // A failed (error) task can be removed.
+    setSegmentPublisherForTest(async () => ({ ok: false, error: 'boom' }));
+    enqueuePublishBatch('req-1', [redditItem('bad')], 1);
+    await waitForPublishIdle();
+    expect(publishQueueSnapshot().some((s) => s.taskId === 'bad')).toBe(true);
+    expect(removePublishTask('bad')).toEqual({ ok: true });
+    expect(publishQueueSnapshot().some((s) => s.taskId === 'bad')).toBe(false);
+
+    // A queued task cannot be removed (cancel it instead).
+    const futureIso = new Date(T0 + 3_600_000).toISOString();
+    enqueuePublishBatch('req-2', [redditItem('later', { publishDate: futureIso })], 1);
+    await waitForPublishIdle();
+    expect(removePublishTask('later')).toEqual({ ok: false, reason: 'cancel it first' });
   });
 
   it('publishes a scheduled task immediately via publishTaskNow', async () => {

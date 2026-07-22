@@ -32,6 +32,7 @@ import {
   enqueuePublishBatch,
   publishQueueSnapshot,
   resetPublishQueueForTest,
+  setBackfillForTest,
   setSleepForTest,
   waitForPublishIdle,
 } from '../queue';
@@ -48,6 +49,7 @@ describe('default publisher platform routing', () => {
     vi.clearAllMocks();
     resetPublishQueueForTest();
     setSleepForTest(() => Promise.resolve()); // skip inter-segment gaps
+    setBackfillForTest(() => Promise.resolve()); // no real backend call in tests
     vi.stubGlobal('chrome', {
       tabs: { sendMessage: vi.fn() },
       runtime: { lastError: undefined },
@@ -58,6 +60,7 @@ describe('default publisher platform routing', () => {
 
   afterEach(async () => {
     setSleepForTest(null);
+    setBackfillForTest(null);
     await waitForPublishIdle();
     vi.unstubAllGlobals();
   });
@@ -139,7 +142,9 @@ describe('default publisher platform routing', () => {
     expect(publishQueueSnapshot()[0].error).toMatch(/could not be confirmed/);
     expect(xReply).not.toHaveBeenCalled();
 
-    // Last segment: unconfirmed is tolerated — the post itself went out.
+    // Last segment: unconfirmed is tolerated — the post itself went out. But
+    // with no permalink there's nothing to backfill, so it settles as 'sent'
+    // (live on-platform, not recorded in the dashboard) rather than 'published'.
     resetPublishQueueForTest();
     enqueuePublishBatch(
       'req-2',
@@ -147,7 +152,10 @@ describe('default publisher platform routing', () => {
       1
     );
     await waitForPublishIdle();
-    expect(publishQueueSnapshot()[0].status).toBe('published');
+    expect(publishQueueSnapshot()[0]).toMatchObject({
+      status: 'sent',
+      backfillError: expect.stringMatching(/no permalink/i),
+    });
   });
 
   it('publishes a Reddit thread via submit then comment chain', async () => {

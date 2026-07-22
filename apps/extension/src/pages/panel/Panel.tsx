@@ -17,7 +17,8 @@ import { usePublishQueueState } from '@gitroom/extension/pages/popup/hooks/usePu
 export default function Panel() {
   const { user, platformLogin, planName, handleLogout } = useAiseeSession();
   const { history, handleClear } = useReplyHistoryState();
-  const { rows: queueRows, publishNow, cancelTask } = usePublishQueueState();
+  const { rows: queueRows, publishNow, cancelTask, syncTask, retryTask, removeTask } =
+    usePublishQueueState();
   const [view, setView] = React.useState<'home' | 'scan'>('home');
   const [showClear, setShowClear] = React.useState(false);
 
@@ -94,6 +95,9 @@ export default function Panel() {
             rows={queueRows}
             onPublishNow={publishNow}
             onCancel={cancelTask}
+            onSync={syncTask}
+            onRetry={retryTask}
+            onRemove={removeTask}
           />
           <HistoryList items={history} onClearPage={() => setShowClear(true)} />
         </div>

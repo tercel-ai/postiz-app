@@ -11,7 +11,8 @@ import { usePublishQueueState } from '@gitroom/extension/pages/popup/hooks/usePu
 export default function Popup() {
   const { user, platformLogin, planName, handleLogout } = useAiseeSession();
   const { history, handleClear } = useReplyHistoryState();
-  const { rows: queueRows, publishNow, cancelTask } = usePublishQueueState();
+  const { rows: queueRows, publishNow, cancelTask, syncTask, retryTask, removeTask } =
+    usePublishQueueState();
   const [view, setView] = useState<'main' | 'clear' | 'scan'>('main');
 
   // chrome.sidePanel is Chrome-only (this same bundle also ships for Firefox,
@@ -142,6 +143,9 @@ export default function Popup() {
             rows={queueRows}
             onPublishNow={publishNow}
             onCancel={cancelTask}
+            onSync={syncTask}
+            onRetry={retryTask}
+            onRemove={removeTask}
           />
           <HistoryList items={history} onClearPage={() => setView('clear')} />
         </>
