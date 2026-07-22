@@ -599,7 +599,6 @@ export class PostsRepository {
       select: {
         id: true,
         title: true,
-        description:: true,
         content: true,
         image: true,
         publishDate: true,

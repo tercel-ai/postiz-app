@@ -157,7 +157,6 @@ export class OperationPlanRepository {
       select: {
         id: true,
         title: true,
-        description: true,
         content: true,
         publishDate: true,
         state: true,
