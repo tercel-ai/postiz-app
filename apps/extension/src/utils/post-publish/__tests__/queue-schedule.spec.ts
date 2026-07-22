@@ -10,6 +10,7 @@ import {
   resetPublishQueueForTest,
   setNowForTest,
   setSegmentPublisherForTest,
+  setSleepForTest,
   waitForPublishIdle,
 } from '../queue';
 
@@ -50,11 +51,13 @@ describe('publish queue scheduling + persistence', () => {
   beforeEach(() => {
     resetPublishQueueForTest();
     setNowForTest(() => T0);
+    setSleepForTest(() => Promise.resolve()); // skip inter-segment gaps
   });
 
   afterEach(async () => {
     setSegmentPublisherForTest(null);
     setNowForTest(null);
+    setSleepForTest(null);
     await waitForPublishIdle();
     vi.unstubAllGlobals();
   });

@@ -69,6 +69,14 @@ export interface PublishPostItem {
    * (not the page) is what must be alive at fire time.
    */
   publishDate?: string;
+  /**
+   * Random human-like pause between THREAD segments, as a [minSeconds,
+   * maxSeconds] range (a value in it is drawn per gap). Default [30, 120] on
+   * both platforms — back-to-back follow-ups don't look human. [0, 0]
+   * disables the pause. Capped at 600s per gap. Only applies between
+   * segments of one thread, not between different posts.
+   */
+  segmentGapSeconds?: [number, number];
 }
 
 export type PublishTaskStatus =

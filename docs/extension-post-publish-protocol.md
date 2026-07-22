@@ -38,6 +38,7 @@ interface PublishPostItem {
   subreddit?: string;          // reddit required (with or without r/)
   title?: string;              // reddit required
   publishDate?: string;        // ISO; absent/past = publish ASAP
+  segmentGapSeconds?: [number, number]; // thread-segment pause range; default [30,120]
 }
 
 interface PublishTaskState {
@@ -52,6 +53,61 @@ interface PublishTaskState {
   publishAt?: string;           // ISO, echoed from publishDate when scheduled
   error?: string;
 }
+```
+
+## Example (batch enqueue)
+
+One message carries the whole batch; the queue then drains it one task at a
+time. In-repo frontends use the helper; external frontends post the same
+`items` array over the raw protocol.
+
+```ts
+import { enqueuePublishBatch } from '@gitroom/helpers/extension/post-publish';
+
+const ack = await enqueuePublishBatch([
+  // 1) plain single post
+  {
+    taskId: 'post-1',
+    platform: 'x',
+    segments: [{ text: 'just one tweet' }],
+  },
+  // 2) X thread with images on the first segment + custom pacing + scheduled
+  {
+    taskId: 'post-2',
+    platform: 'x',
+    segments: [
+      {
+        text: '1/ main tweet',
+        images: [
+          'https://api-post-dev.aisee.live/uploads/a.png', // first segment only
+          'https://api-post-dev.aisee.live/uploads/b.png',
+        ],
+      },
+      { text: '2/ second' },
+      { text: '3/ third' },
+    ],
+    segmentGapSeconds: [45, 90], // per-gap random pause; omit for the [30,120] default
+    publishDate: '2026-07-23T10:00:00.000Z', // omit/past = publish ASAP
+  },
+  // 3) Reddit thread (submission + comment chain), default pacing
+  {
+    taskId: 'post-3',
+    platform: 'reddit',
+    subreddit: 'r/test',
+    title: 'A title',
+    segments: [{ text: 'body' }, { text: 'first follow-up comment' }],
+  },
+]);
+// ack.accepted: PublishTaskState[]   ack.rejected: { taskId, reason }[]
+```
+
+Raw protocol equivalent (external frontends):
+
+```ts
+window.postMessage(
+  { source: 'aisee', action: 'aisee:post-publish', requestId, items: [/* same array */] },
+  location.origin
+);
 ```
 
 ## Semantics
@@ -70,6 +126,13 @@ interface PublishTaskState {
     automation. A `pending` outcome (X needed a human click — the tab is
     surfaced) settles the task as `error` for the unattended queue; a sent
     tweet whose URL couldn't be captured mid-thread also stops the chain.
+- **Thread pacing (`segmentGapSeconds`)**: a random pause is drawn per gap
+  from this `[minSeconds, maxSeconds]` range and slept BETWEEN thread segments
+  (never after the last, never between different posts) — back-to-back
+  follow-ups don't look human. Default `[30, 120]` on both platforms; `[0, 0]`
+  disables it; capped at 600s/gap; a malformed range is rejected at enqueue.
+  The sleep is chunked and touches a cheap extension API every ~20s to keep the
+  MV3 worker alive across the pause; each segment is persisted as it posts.
 - **Scheduling (`publishDate`)**: a future-dated task stays `queued` until
   due; the queue is persisted to `chrome.storage.local` and re-armed via a
   `chrome.alarms` wake-up, so scheduled posts survive service-worker death

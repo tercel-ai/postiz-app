@@ -127,8 +127,58 @@ async function defaultPublishSegment(
 let publishSegment: SegmentPublisher = defaultPublishSegment;
 let now: () => number = () => Date.now();
 
+// ── Human-like pause between thread segments ────────────────────────────────
+// Back-to-back follow-ups don't look human (and Reddit comments would fire
+// within seconds of each other). A random pause is drawn per gap from the
+// item's range, or these platform defaults.
+// Conservative human-like defaults: real users don't machine-gun a thread, so
+// wait 30–120s between segments on both platforms unless the caller overrides.
+const DEFAULT_SEGMENT_GAP_S: Record<'x' | 'reddit', [number, number]> = {
+  x: [30, 120],
+  reddit: [30, 120],
+};
+const MAX_SEGMENT_GAP_S = 600;
+
+function segmentGapMs(item: PublishPostItem): number {
+  const range =
+    item.segmentGapSeconds ??
+    DEFAULT_SEGMENT_GAP_S[item.platform as 'x' | 'reddit'] ??
+    [0, 0];
+  const lo = Math.max(0, Math.min(range[0], MAX_SEGMENT_GAP_S));
+  const hi = Math.max(lo, Math.min(range[1], MAX_SEGMENT_GAP_S));
+  return Math.round((lo + Math.random() * (hi - lo)) * 1000);
+}
+
+/**
+ * Sleep in short chunks, touching a cheap extension API between chunks so the
+ * MV3 service worker's idle timer keeps resetting during long thread gaps —
+ * a single multi-minute setTimeout would let Chrome kill the worker mid-task.
+ */
+async function keepaliveSleep(ms: number): Promise<void> {
+  const CHUNK_MS = 20_000;
+  let remaining = ms;
+  while (remaining > 0) {
+    const step = Math.min(CHUNK_MS, remaining);
+    await new Promise((r) => setTimeout(r, step));
+    remaining -= step;
+    try {
+      await chrome.storage.local.get('__aisee_keepalive');
+    } catch {
+      /* no storage API (tests) — plain sleep is fine there */
+    }
+  }
+}
+
+let sleep: (ms: number) => Promise<void> = keepaliveSleep;
+
 export function setSegmentPublisherForTest(fn: SegmentPublisher | null): void {
   publishSegment = fn ?? defaultPublishSegment;
+}
+
+export function setSleepForTest(
+  fn: ((ms: number) => Promise<void>) | null
+): void {
+  sleep = fn ?? keepaliveSleep;
 }
 
 export function setNowForTest(fn: (() => number) | null): void {
@@ -280,6 +330,18 @@ function validate(item: PublishPostItem): string | null {
   }
   if (item.publishDate != null && Number.isNaN(Date.parse(item.publishDate)))
     return 'invalid publishDate (must be an ISO datetime)';
+  if (item.segmentGapSeconds != null) {
+    const g = item.segmentGapSeconds;
+    if (
+      !Array.isArray(g) ||
+      g.length !== 2 ||
+      !Number.isFinite(g[0]) ||
+      !Number.isFinite(g[1]) ||
+      g[0] < 0 ||
+      g[1] < g[0]
+    )
+      return 'invalid segmentGapSeconds (expected [minSeconds, maxSeconds])';
+  }
   return null;
 }
 
@@ -411,7 +473,16 @@ async function drain(): Promise<void> {
         entry.state.postId = result.postId;
       }
       entry.state.segmentPermalinks = [...permalinks];
+      // Persist per segment so a worker death mid-thread leaves an accurate
+      // record of what already went out.
+      persist();
       emit(entry);
+
+      // Human-like pause before the NEXT segment of the same thread.
+      if (i < entry.item.segments.length - 1) {
+        const gap = segmentGapMs(entry.item);
+        if (gap > 0) await sleep(gap);
+      }
     }
 
     entry.state.status = failed ? 'error' : 'published';

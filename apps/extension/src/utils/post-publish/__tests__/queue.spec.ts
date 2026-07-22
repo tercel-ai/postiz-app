@@ -6,6 +6,7 @@ import {
   publishQueueSnapshot,
   resetPublishQueueForTest,
   setSegmentPublisherForTest,
+  setSleepForTest,
   waitForPublishIdle,
 } from '../queue';
 
@@ -25,6 +26,7 @@ const redditItem = (
 describe('publish queue', () => {
   beforeEach(() => {
     resetPublishQueueForTest();
+    setSleepForTest(() => Promise.resolve()); // skip inter-segment gaps
     vi.stubGlobal('chrome', {
       tabs: { sendMessage: vi.fn() },
       runtime: { lastError: undefined },
@@ -33,6 +35,7 @@ describe('publish queue', () => {
 
   afterEach(async () => {
     setSegmentPublisherForTest(null);
+    setSleepForTest(null);
     await waitForPublishIdle();
     vi.unstubAllGlobals();
   });
@@ -162,6 +165,44 @@ describe('publish queue', () => {
     expect(again.notCancelable).toEqual([
       { taskId: 'waiting', reason: 'already settled (canceled)' },
     ]);
+  });
+
+  it('pauses between thread segments per the item gap range, never after the last', async () => {
+    const gaps: number[] = [];
+    setSleepForTest(async (ms) => {
+      gaps.push(ms);
+    });
+    setSegmentPublisherForTest(async (_i, idx) => ({
+      ok: true,
+      permalink: `link-${idx}`,
+    }));
+
+    enqueuePublishBatch(
+      'req-1',
+      [
+        redditItem('gapped', ['a', 'b', 'c'], {
+          segmentGapSeconds: [30, 30], // fixed range → deterministic value
+        }),
+      ],
+      1
+    );
+    await waitForPublishIdle();
+
+    expect(gaps).toEqual([30_000, 30_000]); // 3 segments → 2 gaps, none trailing
+    expect(publishQueueSnapshot()[0].status).toBe('published');
+  });
+
+  it('rejects a malformed segmentGapSeconds range', () => {
+    const ack = enqueuePublishBatch(
+      'req-1',
+      [
+        redditItem('bad-gap', ['a'], { segmentGapSeconds: [10, 5] as any }),
+        redditItem('bad-gap-2', ['a'], { segmentGapSeconds: [-1, 5] as any }),
+      ],
+      1
+    );
+    expect(ack.rejected.map((r) => r.taskId)).toEqual(['bad-gap', 'bad-gap-2']);
+    expect(ack.rejected[0].reason).toMatch(/segmentGapSeconds/);
   });
 
   it('drains serially: the second post starts only after the first settles', async () => {

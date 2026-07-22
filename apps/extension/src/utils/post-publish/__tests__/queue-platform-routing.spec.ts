@@ -24,6 +24,7 @@ import {
   enqueuePublishBatch,
   publishQueueSnapshot,
   resetPublishQueueForTest,
+  setSleepForTest,
   waitForPublishIdle,
 } from '../queue';
 
@@ -36,6 +37,7 @@ describe('default publisher platform routing', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     resetPublishQueueForTest();
+    setSleepForTest(() => Promise.resolve()); // skip inter-segment gaps
     vi.stubGlobal('chrome', {
       tabs: { sendMessage: vi.fn() },
       runtime: { lastError: undefined },
@@ -45,6 +47,7 @@ describe('default publisher platform routing', () => {
   });
 
   afterEach(async () => {
+    setSleepForTest(null);
     await waitForPublishIdle();
     vi.unstubAllGlobals();
   });
