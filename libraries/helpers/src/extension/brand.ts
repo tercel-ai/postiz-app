@@ -43,6 +43,10 @@ export const EXTENSION_MESSAGE = {
   ping: `${EXTENSION_BRAND}:ping`,
   /** extension → page: presence acknowledgement */
   pong: `${EXTENSION_BRAND}:pong`,
+  /** page → extension: snapshot the browser's social platform sessions (X / Reddit) */
+  socialSessions: `${EXTENSION_BRAND}:social-sessions`,
+  /** extension → page: social platform session snapshot result */
+  socialSessionsResult: `${EXTENSION_BRAND}:social-sessions-result`,
 } as const;
 
 /** Content-script root container id — unique per brand so two extensions on the

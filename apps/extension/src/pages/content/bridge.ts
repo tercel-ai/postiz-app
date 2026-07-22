@@ -5,8 +5,10 @@ import { installEngageScanBridge } from '@gitroom/extension/pages/content/engage
 import { installEngageMetricsBridge } from '@gitroom/extension/pages/content/engage-metrics-bridge';
 import { installPostMetricsBridge } from '@gitroom/extension/pages/content/post-metrics-bridge';
 import { installPostsMetricsRefreshBridge } from '@gitroom/extension/pages/content/posts-metrics-refresh-bridge';
+import { installSocialSessionsBridge } from '@gitroom/extension/pages/content/social-sessions-bridge';
 
 installPingBridge();
+installSocialSessionsBridge();
 installEngageScanBridge();
 installEngageMetricsBridge();
 installPostMetricsBridge();

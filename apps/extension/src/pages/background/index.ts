@@ -28,6 +28,7 @@ import { buildClaimTasksPayload } from '@gitroom/extension/utils/executor/claim-
 import { scanReddit } from '@gitroom/extension/utils/executor/scan.reddit';
 import { scanX } from '@gitroom/extension/utils/executor/scan.x';
 import { ENGAGE_EXTENSION_ACTION } from '@gitroom/extension/utils/executor/actions';
+import { getSocialSessions } from '@gitroom/extension/utils/social-sessions';
 import {
   ensureEngageScanAlarm,
   clearEngageScanAlarm,
@@ -395,6 +396,14 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
   if (request.action === ENGAGE_EXTENSION_ACTION.loadConfig) {
     backendCall('/engage/config', 'GET')
       .then((r) => sendResponse({ ok: r.ok, data: r.data }))
+      .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
+    return true;
+  }
+
+  // ─── Social platform session snapshot (page bridge) ──────────────────────
+  if (request.action === ENGAGE_EXTENSION_ACTION.socialSessions) {
+    getSocialSessions()
+      .then((sessions) => sendResponse({ ok: true, sessions }))
       .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
     return true;
   }

@@ -12,6 +12,7 @@ export const ENGAGE_EXTENSION_ACTION = {
   ingestCollectedPosts: 'engage:ingest-collected-posts',
   syncCollectedMetrics: 'engage:sync-collected-metrics',
   loadConfig: 'engage:load-config',
+  socialSessions: 'social:sessions',
   loadSubscription: 'user:load-subscription',
   claimTasks: 'engage:claim-tasks',
   executeTask: 'engage:execute-task',
