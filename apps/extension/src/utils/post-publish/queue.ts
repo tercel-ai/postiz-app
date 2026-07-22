@@ -202,12 +202,14 @@ async function defaultBackfill(
 /**
  * Advance a 'sent' task to 'published' by backfilling the DB, or leave it 'sent'
  * with a backfillError. The post is ALREADY live on-platform here, so a failure
- * is recorded (surfaced as a manual "Sync") — never a re-publish.
+ * is recorded (surfaced as a manual "Sync") — never a re-publish. Returns
+ * whether it reached 'published' (callers use this rather than re-reading the
+ * mutated status, which the type system can't narrow across the await).
  */
-async function attemptBackfill(entry: QueueEntry): Promise<void> {
+async function attemptBackfill(entry: QueueEntry): Promise<boolean> {
   if (!entry.state.permalink) {
     entry.state.backfillError = 'no permalink captured — cannot backfill';
-    return;
+    return false;
   }
   try {
     await backfillPublished(
@@ -217,9 +219,11 @@ async function attemptBackfill(entry: QueueEntry): Promise<void> {
     );
     entry.state.status = 'published';
     delete entry.state.backfillError;
+    return true;
   } catch (e: any) {
     // Stays 'sent'; the row shows a Sync button to retry.
     entry.state.backfillError = String(e?.message || e);
+    return false;
   }
 }
 
@@ -597,10 +601,10 @@ export async function syncPublishTask(
   if (!entry) return { ok: false, reason: 'not found' };
   if (entry.state.status !== 'sent')
     return { ok: false, reason: `not sent (${entry.state.status})` };
-  await attemptBackfill(entry);
+  const published = await attemptBackfill(entry);
   persist();
   emit(entry);
-  return entry.state.status === 'published'
+  return published
     ? { ok: true }
     : { ok: false, reason: entry.state.backfillError || 'backfill failed' };
 }
