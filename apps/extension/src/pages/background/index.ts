@@ -33,6 +33,7 @@ import {
   enqueuePublishBatch,
   cancelPublishTasks,
   publishQueueSnapshot,
+  publishTaskNow,
   initPublishQueue,
   handlePublishAlarm,
 } from '@gitroom/extension/utils/post-publish/queue';
@@ -441,6 +442,12 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
   if (request.action === ENGAGE_EXTENSION_ACTION.publishStatus) {
     initPublishQueue()
       .then(() => sendResponse({ ok: true, states: publishQueueSnapshot() }))
+      .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
+    return true;
+  }
+  if (request.action === ENGAGE_EXTENSION_ACTION.publishNow) {
+    initPublishQueue()
+      .then(() => sendResponse(publishTaskNow(String(request.taskId || ''))))
       .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
     return true;
   }

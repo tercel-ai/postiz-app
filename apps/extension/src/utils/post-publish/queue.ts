@@ -464,6 +464,31 @@ export function cancelPublishTasks(taskIds: string[]): PublishCancelAck {
   return ack;
 }
 
+/**
+ * Make a still-'queued' task due immediately (manual "Publish now" from the
+ * popup/panel). No-op with a reason when the task isn't queued (already
+ * publishing or settled). Clears any future publishAt so the row stops reading
+ * as scheduled, persists (so the popup's storage listener refreshes) and kicks
+ * the drain.
+ */
+export function publishTaskNow(taskId: string): {
+  ok: boolean;
+  reason?: string;
+} {
+  // Latest entry wins: a re-enqueued taskId may also exist as an old settled row.
+  const entry = [...entries].reverse().find((e) => e.state.taskId === taskId);
+  if (!entry) return { ok: false, reason: 'not found' };
+  if (entry.state.status !== 'queued')
+    return { ok: false, reason: `not queued (${entry.state.status})` };
+  entry.dueAt = 0;
+  delete entry.state.publishAt;
+  persist();
+  emit(entry);
+  kickDrain();
+  armAlarm();
+  return { ok: true };
+}
+
 export function publishQueueSnapshot(): PublishTaskState[] {
   return entries.map((e) => ({ ...e.state }));
 }

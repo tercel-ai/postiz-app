@@ -7,6 +7,7 @@ import {
   handlePublishAlarm,
   initPublishQueue,
   publishQueueSnapshot,
+  publishTaskNow,
   resetPublishQueueForTest,
   setNowForTest,
   setSegmentPublisherForTest,
@@ -113,6 +114,44 @@ describe('publish queue scheduling + persistence', () => {
 
     // Scheduled-but-not-due is exactly the cancel window.
     expect(cancelPublishTasks(['later']).canceled).toEqual(['later']);
+  });
+
+  it('publishes a scheduled task immediately via publishTaskNow', async () => {
+    stubChrome();
+    const publish = vi.fn(async () => ({ ok: true, permalink: 'p' }));
+    setSegmentPublisherForTest(publish);
+
+    const futureIso = new Date(T0 + 3_600_000).toISOString();
+    enqueuePublishBatch('req-1', [redditItem('later', { publishDate: futureIso })], 1);
+    await waitForPublishIdle();
+    // Not due yet: still queued, scheduled, not published.
+    expect(publishQueueSnapshot()[0].status).toBe('queued');
+    expect(publishQueueSnapshot()[0].publishAt).toBe(futureIso);
+    expect(publish).not.toHaveBeenCalled();
+
+    // "Publish now" makes it due immediately and clears the schedule marker.
+    expect(publishTaskNow('later')).toEqual({ ok: true });
+    await waitForPublishIdle();
+    expect(publish).toHaveBeenCalledTimes(1);
+    const state = publishQueueSnapshot()[0];
+    expect(state.status).toBe('published');
+    expect(state.publishAt).toBeUndefined();
+  });
+
+  it('publishTaskNow is a no-op with a reason for unknown or settled tasks', async () => {
+    stubChrome();
+    setSegmentPublisherForTest(async () => ({ ok: true, permalink: 'p' }));
+
+    expect(publishTaskNow('nope')).toEqual({ ok: false, reason: 'not found' });
+
+    enqueuePublishBatch('req-1', [redditItem('done')], 1);
+    await waitForPublishIdle();
+    expect(publishQueueSnapshot()[0].status).toBe('published');
+    // Already settled → cannot re-fire.
+    expect(publishTaskNow('done')).toEqual({
+      ok: false,
+      reason: 'not queued (published)',
+    });
   });
 
   it('rejects an unparseable publishDate at enqueue', () => {

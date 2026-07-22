@@ -1,14 +1,17 @@
 import React, { useCallback, useState } from 'react';
 import { HistoryList } from '@gitroom/extension/pages/popup/components/HistoryList';
+import { PublishQueueList } from '@gitroom/extension/pages/popup/components/PublishQueueList';
 import { ClearHistoryPage } from '@gitroom/extension/pages/popup/components/ClearHistoryPage';
 import { LoginForm } from '@gitroom/extension/pages/popup/components/LoginForm';
 import { EngageScanPanel } from '@gitroom/extension/pages/popup/components/ScanPanel';
 import { useAiseeSession } from '@gitroom/extension/pages/popup/hooks/useAiseeSession';
 import { useReplyHistoryState } from '@gitroom/extension/pages/popup/hooks/useReplyHistoryState';
+import { usePublishQueueState } from '@gitroom/extension/pages/popup/hooks/usePublishQueueState';
 
 export default function Popup() {
   const { user, platformLogin, planName, handleLogout } = useAiseeSession();
   const { history, handleClear } = useReplyHistoryState();
+  const { rows: queueRows, publishNow, cancelTask } = usePublishQueueState();
   const [view, setView] = useState<'main' | 'clear' | 'scan'>('main');
 
   // chrome.sidePanel is Chrome-only (this same bundle also ships for Firefox,
@@ -134,7 +137,14 @@ export default function Popup() {
       )}
 
       {user ? (
-        <HistoryList items={history} onClearPage={() => setView('clear')} />
+        <>
+          <PublishQueueList
+            rows={queueRows}
+            onPublishNow={publishNow}
+            onCancel={cancelTask}
+          />
+          <HistoryList items={history} onClearPage={() => setView('clear')} />
+        </>
       ) : (
         <LoginForm />
       )}

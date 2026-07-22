@@ -16,6 +16,8 @@ export const ENGAGE_EXTENSION_ACTION = {
   publishEnqueue: 'publish:enqueue',
   publishCancel: 'publish:cancel',
   publishStatus: 'publish:status',
+  /** popup/panel → SW: make a queued task due immediately ("Publish now"). */
+  publishNow: 'publish:now',
   /** SW → content-script push forwarded to the page as postPublishProgress. */
   publishProgressPush: 'publish:progress-push',
   loadSubscription: 'user:load-subscription',

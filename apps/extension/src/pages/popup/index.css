@@ -427,6 +427,69 @@ body {
   background: var(--pz-danger-soft);
   color: var(--pz-danger);
 }
+/* ── Publish-queue statuses ─────────────────────────────── */
+.pz-status.queued {
+  background: var(--pz-soft);
+  color: var(--pz-muted);
+}
+.pz-status.publishing {
+  background: #fff7e6;
+  color: #92400e;
+}
+.pz-status.published {
+  background: var(--pz-accent-soft);
+  color: #354600;
+}
+.pz-status.error {
+  background: var(--pz-danger-soft);
+  color: var(--pz-danger);
+}
+.pz-status.canceled {
+  background: var(--pz-soft);
+  color: var(--pz-muted);
+  text-decoration: line-through;
+}
+.pz-badge.linkedin {
+  background: #0a66c2;
+  color: #fff;
+}
+
+/* ── Publish-queue row actions ──────────────────────────── */
+.pz-mini-btn {
+  appearance: none;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 3px 9px;
+  border-radius: 7px;
+  border: 1.5px solid var(--pz-border);
+  background: var(--pz-bg);
+  color: var(--pz-fg);
+  transition: background 0.15s, border-color 0.15s, transform 0.15s;
+}
+.pz-mini-btn:hover:not(:disabled) {
+  border-color: var(--pz-ink);
+  background: var(--pz-soft);
+  transform: translateY(-1px);
+}
+.pz-mini-btn.primary {
+  border-color: var(--pz-ink);
+  background: var(--pz-accent);
+  color: var(--pz-ink);
+}
+.pz-mini-btn.primary:hover:not(:disabled) {
+  background: var(--pz-accent-hover);
+}
+.pz-mini-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.pz-queue-err {
+  font-size: 10px;
+  color: var(--pz-danger);
+  width: 100%;
+}
 .pz-time {
   margin-left: auto;
   font-size: 10px;
