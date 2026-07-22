@@ -9,7 +9,7 @@ describe('Social-sessions extension protocol', () => {
   it('forwards a same-origin probe and echoes the session snapshot back', () => {
     const sessions = {
       x: { loggedIn: true, userId: '1234567890' },
-      reddit: { loggedIn: true, handle: 'someone', id: 't2_abc' },
+      reddit: { loggedIn: true, id: 't2_abc' },
     };
     const sendMessage = vi.fn((_message, callback) => {
       callback({ ok: true, sessions });

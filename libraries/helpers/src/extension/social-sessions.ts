@@ -1,14 +1,15 @@
 // Page-side helper + shared types for the `aisee:social-sessions` bridge: the
 // web app asks the extension which social platforms the BROWSER is currently
-// logged into, and gets back whatever identity the platform session exposes.
+// logged into. The probe is PASSIVE — cookies only, no requests to the
+// platforms, no script injection — so it can never look like automation.
 //
-// What each platform can reveal (browser session only, no platform API keys):
-//   - Reddit: /api/me.json → handle, t2_* id, display name, avatar. No email —
-//     Reddit never exposes it to this endpoint.
-//   - X: session cookies only (`auth_token` presence = logged in, `twid` =
-//     numeric user id). No username/email — resolving them would require X
-//     GraphQL calls from the service worker, which is forbidden (account-risk:
-//     X data collection must go through a real browser tab).
+// What each platform's cookies can reveal:
+//   - X: `auth_token` presence = logged in; `twid` = numeric user id.
+//   - Reddit: `reddit_session` presence = logged in; the `token_v2` JWT payload
+//     (decoded locally) = t2_* account id.
+// Usernames/avatars would require active requests (X GraphQL / Reddit
+// /api/me.json) and emails are never exposed to the browser session at all,
+// so neither is available here.
 //
 // Both sides import these types: the extension SW builds `SocialSessions`, the
 // web app consumes it, so the payload shape can never drift.
@@ -23,13 +24,8 @@ export interface XSessionInfo {
 
 export interface RedditSessionInfo {
   loggedIn: boolean;
-  /** Reddit username (without the u/ prefix). */
-  handle?: string;
-  /** Fullname id, e.g. "t2_abc123". */
+  /** Account fullname id decoded from the `token_v2` JWT, e.g. "t2_abc123". */
   id?: string;
-  /** Display name (profile title), falls back to the handle. */
-  name?: string;
-  avatarUrl?: string;
 }
 
 export interface SocialSessions {

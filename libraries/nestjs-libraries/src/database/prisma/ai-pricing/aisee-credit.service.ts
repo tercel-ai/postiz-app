@@ -241,7 +241,6 @@ export class AiseeCreditService {
       const confirmation = await this.aiseeClient.confirmDeduction({
         taskId: opts.taskId,
         status: 'success',
-        data: opts.data,
       });
       if (!confirmation.success) {
         throw new Error(confirmation.error || 'Credit deduction confirmation failed');
@@ -375,8 +374,6 @@ export class AiseeCreditService {
       .catch(() => undefined);
 
     if (deduction.success && !deduction.skipped && deduction.transactionId) {
-      // Engage-reply billing carries no operation-plan metadata, so nothing to
-      // forward on confirm here.
       this.fireConfirm(opts.taskId, 'success');
     }
 
@@ -586,13 +583,12 @@ export class AiseeCreditService {
         const confirmation = await this.aiseeClient.confirmDeduction({
           taskId: opts.taskId,
           status: 'success',
-          data: opts.data,
         });
         if (!confirmation.success) {
           throw new Error(confirmation.error || 'Credit deduction confirmation failed');
         }
       } else {
-        this.fireConfirm(opts.taskId, 'success', opts.data);
+        this.fireConfirm(opts.taskId, 'success');
       }
     }
 
@@ -629,13 +625,9 @@ export class AiseeCreditService {
     }
   }
 
-  private fireConfirm(
-    taskId: string,
-    status: 'success' | 'failed',
-    data?: Record<string, unknown>
-  ): void {
+  private fireConfirm(taskId: string, status: 'success' | 'failed'): void {
     this.aiseeClient
-      .confirmDeduction({ taskId, status, data })
+      .confirmDeduction({ taskId, status })
       .then((resp) => {
         if (!resp.success) {
           this.logger.warn(

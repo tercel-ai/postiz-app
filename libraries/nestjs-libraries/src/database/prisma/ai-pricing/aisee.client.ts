@@ -99,13 +99,6 @@ export interface AiseeDeductResponse {
 export interface AiseeConfirmRequest {
   taskId: string;
   status: 'success' | 'failed';
-  /**
-   * Optional business metadata mirrored from the deduct call, forwarded to Aisee
-   * as the confirm `data` dict. Lets aisee-core act on the confirm (e.g. write an
-   * operation plan's id/status into the product result) without re-reading the
-   * deduct record. Only set by callers that need it; omitted for plain billing.
-   */
-  data?: Record<string, unknown>;
 }
 
 export interface AiseeConfirmResponse {
@@ -394,7 +387,6 @@ export class AiseeClient {
         body: JSON.stringify({
           task_id: req.taskId,
           status: req.status,
-          data: req.data || undefined,
         }),
       });
 

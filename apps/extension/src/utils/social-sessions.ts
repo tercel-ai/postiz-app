@@ -1,15 +1,18 @@
 // Service-worker side of the `aisee:social-sessions` bridge: snapshot which
-// social platforms the BROWSER is logged into, using only what the session
-// itself exposes.
+// social platforms the BROWSER is logged into — passively, from cookies only.
+// NO network requests to the platforms and NO script injection: a login probe
+// must never look like automation to X or Reddit (account-risk rule).
 //
-//   - Reddit: GET /api/me.json with the session cookies — the same endpoint the
-//     reply poster uses — yields handle / t2_* id / display name / avatar.
-//   - X: cookies only. `auth_token` presence = logged in; `twid` ("u%3D<id>")
-//     carries the numeric user id. NO GraphQL calls from the SW — X data
-//     collection must go through a real browser tab (account-risk rule), and a
-//     login probe does not justify one, so username stays unresolved here.
+//   - X: `auth_token` presence = logged in; `twid` ("u%3D<id>") carries the
+//     numeric user id.
+//   - Reddit: `reddit_session` presence = logged in; the `token_v2` JWT payload
+//     carries the account fullname (t2_*), decoded locally — no fetch.
 //
-// Neither platform exposes the account email to the browser session at all.
+// What this cannot give: usernames/avatars (X would need GraphQL calls, Reddit
+// would need /api/me.json — both are active requests) and emails (neither
+// platform exposes them to the browser session at all). Page localStorage of
+// x.com/reddit.com is also unreachable from the SW without injecting scripts,
+// so cookies are the only passive source.
 
 import type {
   RedditSessionInfo,
@@ -48,29 +51,36 @@ async function getXSession(): Promise<XSessionInfo> {
   return { loggedIn: true, ...(userId ? { userId } : {}) };
 }
 
-async function getRedditSession(): Promise<RedditSessionInfo> {
+/**
+ * Best-effort t2_* account id from Reddit's `token_v2` JWT payload, decoded
+ * locally. The payload's key names have changed over time, so scan the values
+ * for the t2_ pattern instead of hardcoding one key. Returns undefined on any
+ * malformed/opaque token — the caller treats the id as simply unknown.
+ */
+export function decodeRedditIdFromJwt(jwt: string): string | undefined {
   try {
-    const res = await fetch(`${REDDIT_BASE}/api/me.json`, {
-      credentials: 'include',
-      headers: { Accept: 'application/json' },
-    });
-    const json = await res.json().catch(() => ({}));
-    const d = json?.data || {};
-    const handle: string = d.name || '';
-    if (!handle) return { loggedIn: false };
-    const rawAvatar: string = d.snoovatar_img || d.icon_img || '';
-    return {
-      loggedIn: true,
-      handle,
-      ...(d.id ? { id: `t2_${d.id}` } : {}),
-      name: d.subreddit?.title || handle,
-      ...(rawAvatar
-        ? { avatarUrl: String(rawAvatar).replace(/&amp;/g, '&') }
-        : {}),
-    };
+    const payload = jwt.split('.')[1];
+    if (!payload) return undefined;
+    const b64 = payload.replace(/-/g, '+').replace(/_/g, '/');
+    const padded = b64 + '='.repeat((4 - (b64.length % 4)) % 4);
+    const json = JSON.parse(atob(padded));
+    for (const v of Object.values(json)) {
+      if (typeof v === 'string' && /^t2_[a-z0-9]+$/i.test(v)) return v;
+    }
   } catch {
-    return { loggedIn: false };
+    /* opaque or absent token — id stays unknown */
   }
+  return undefined;
+}
+
+async function getRedditSession(): Promise<RedditSessionInfo> {
+  // `reddit_session` is the login cookie: present while logged in, cleared on
+  // logout — the same signal the reply poster's session cache keys off.
+  const session = await getCookie(`${REDDIT_BASE}/`, 'reddit_session');
+  if (!session) return { loggedIn: false };
+  const token = await getCookie(`${REDDIT_BASE}/`, 'token_v2');
+  const id = decodeRedditIdFromJwt(token);
+  return { loggedIn: true, ...(id ? { id } : {}) };
 }
 
 /** Snapshot both platforms in parallel; a platform probe never throws. */
