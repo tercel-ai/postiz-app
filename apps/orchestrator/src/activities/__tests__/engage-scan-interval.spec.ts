@@ -207,6 +207,20 @@ describe('xScanEnabled (X kill switch)', () => {
     process.env.ENGAGE_SUPPORTED_PLATFORMS = 'x,reddit';
     expect(xScanEnabled()).toBe(true);
   });
+
+  it('honours a resolved allowlist argument over the env var', () => {
+    // Simulates settings.operation_plan.allowed_platforms winning: env still lists
+    // x, but the resolved allowlist (passed in) does not → X disabled.
+    delete process.env.ENGAGE_X_SCAN_ENABLED;
+    process.env.ENGAGE_SUPPORTED_PLATFORMS = 'x,reddit';
+    expect(xScanEnabled(['reddit', 'linkedin'])).toBe(false);
+    expect(xScanEnabled(['x', 'reddit'])).toBe(true);
+  });
+
+  it('explicit ENGAGE_X_SCAN_ENABLED=false still wins over a resolved allowlist with x', () => {
+    process.env.ENGAGE_X_SCAN_ENABLED = 'false';
+    expect(xScanEnabled(['x', 'reddit'])).toBe(false);
+  });
 });
 
 describe('EngageScanActivity per-account tracked units', () => {

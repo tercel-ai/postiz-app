@@ -104,18 +104,28 @@ function trackedBackoffCadenceMs(
 // the extension path honoured ENGAGE_SUPPORTED_PLATFORMS, so setting it to
 // `reddit` silently left this workflow still hitting the X API. This unifies the
 // two: X is OFF when ENGAGE_X_SCAN_ENABLED=false (explicit per-platform toggle)
-// OR when ENGAGE_SUPPORTED_PLATFORMS is set and does not list 'x'. When off,
-// every X unit (keyword bucket / tracked / initial scan) is skipped; Reddit is
-// unaffected. Protects the X account from automation-risk rate-limiting.
-export function xScanEnabled(): boolean {
+// OR when the resolved scan allowlist does not list 'x'. When off, every X unit
+// (keyword bucket / tracked / initial scan) is skipped; Reddit is unaffected.
+// Protects the X account from automation-risk rate-limiting.
+//
+// `allowedPlatforms`, when provided, is the resolved allowlist
+// (`settings.operation_plan.allowed_platforms || ENGAGE_SUPPORTED_PLATFORMS`,
+// via EngageScanConfigService.getSupportedScanPlatforms). When omitted (unit
+// tests / no scan-config wired) it falls back to reading ENGAGE_SUPPORTED_PLATFORMS
+// directly, preserving the original env-only behaviour. An empty/absent list =
+// "not scoped" ⇒ X stays enabled.
+export function xScanEnabled(allowedPlatforms?: string[] | null): boolean {
   if ((process.env.ENGAGE_X_SCAN_ENABLED ?? '').trim().toLowerCase() === 'false') {
     return false;
   }
-  const allow = process.env.ENGAGE_SUPPORTED_PLATFORMS;
-  if (allow && allow.trim()) {
-    const set = new Set(
-      allow.split(',').map((p) => p.trim().toLowerCase()).filter(Boolean)
-    );
+  const envAllow = process.env.ENGAGE_SUPPORTED_PLATFORMS;
+  const resolved =
+    allowedPlatforms ??
+    (envAllow && envAllow.trim()
+      ? envAllow.split(',').map((p) => p.trim().toLowerCase()).filter(Boolean)
+      : []);
+  if (resolved.length) {
+    const set = new Set(resolved.map((p) => p.trim().toLowerCase()));
     if (!set.has('x')) return false;
   }
   return true;
@@ -335,11 +345,17 @@ export class EngageScanActivity {
     const keywords = unionKeywords(orgContexts);
     if (!keywords.length) return;
 
-    // X kill switch: env var / ENGAGE_SUPPORTED_PLATFORMS.
-    const xEnabled = xScanEnabled();
+    // X kill switch: env var / resolved allowlist
+    // (settings.operation_plan.allowed_platforms || ENGAGE_SUPPORTED_PLATFORMS).
+    // Resolve via scan-config when wired; unit tests build the activity without it
+    // and fall back to the env-only path inside xScanEnabled.
+    const allowedPlatforms = this._scanConfig
+      ? await this._scanConfig.getSupportedScanPlatforms().catch(() => undefined)
+      : undefined;
+    const xEnabled = xScanEnabled(allowedPlatforms);
     if (!xEnabled) {
       this.logger.log(
-        'X scanning disabled (ENGAGE_X_SCAN_ENABLED=false or ENGAGE_SUPPORTED_PLATFORMS excludes x); scanning Reddit only'
+        'X scanning disabled (ENGAGE_X_SCAN_ENABLED=false or the resolved allowlist excludes x); scanning Reddit only'
       );
     }
 

@@ -127,8 +127,9 @@ export class AdminSettingsController {
       return { value: fallback, source: 'default' };
     };
 
-    const platforms = (process.env.ENGAGE_SUPPORTED_PLATFORMS ?? 'x,reddit')
-      .split(',').map((p) => p.trim().toLowerCase()).filter(Boolean);
+    // Resolved through the same allowlist the scan task-producer uses:
+    // settings.operation_plan.allowed_platforms || ENGAGE_SUPPORTED_PLATFORMS.
+    const platforms = await this._engageScanConfigService.getSupportedScanPlatforms();
     const result: Record<string, any> = {};
     for (const platform of platforms) {
       const envPrefix = platform.toUpperCase();
