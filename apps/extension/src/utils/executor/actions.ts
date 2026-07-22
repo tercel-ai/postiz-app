@@ -13,6 +13,11 @@ export const ENGAGE_EXTENSION_ACTION = {
   syncCollectedMetrics: 'engage:sync-collected-metrics',
   loadConfig: 'engage:load-config',
   socialSessions: 'social:sessions',
+  publishEnqueue: 'publish:enqueue',
+  publishCancel: 'publish:cancel',
+  publishStatus: 'publish:status',
+  /** SW → content-script push forwarded to the page as postPublishProgress. */
+  publishProgressPush: 'publish:progress-push',
   loadSubscription: 'user:load-subscription',
   claimTasks: 'engage:claim-tasks',
   executeTask: 'engage:execute-task',

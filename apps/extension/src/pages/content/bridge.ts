@@ -6,9 +6,11 @@ import { installEngageMetricsBridge } from '@gitroom/extension/pages/content/eng
 import { installPostMetricsBridge } from '@gitroom/extension/pages/content/post-metrics-bridge';
 import { installPostsMetricsRefreshBridge } from '@gitroom/extension/pages/content/posts-metrics-refresh-bridge';
 import { installSocialSessionsBridge } from '@gitroom/extension/pages/content/social-sessions-bridge';
+import { installPostPublishBridge } from '@gitroom/extension/pages/content/post-publish-bridge';
 
 installPingBridge();
 installSocialSessionsBridge();
+installPostPublishBridge();
 installEngageScanBridge();
 installEngageMetricsBridge();
 installPostMetricsBridge();

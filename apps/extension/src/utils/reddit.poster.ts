@@ -5,6 +5,7 @@
 // user's real browser/IP.
 
 import { ReplyResult } from '@gitroom/extension/utils/reply.types';
+import { uploadRedditImage } from '@gitroom/extension/utils/reddit.media';
 
 export interface RedditReplyInput {
   url: string;
@@ -173,9 +174,10 @@ export function clearRedditSessionCache(): Promise<void> {
 /**
  * Get the Reddit session, reusing the cache when the reddit_session cookie is
  * unchanged and the cache is within TTL. `forceRefresh` bypasses the cache (used
- * to recover from a stale modhash after a failed post).
+ * to recover from a stale modhash after a failed post). Also exported for the
+ * social-sessions probe — same browser-session read, same cache.
  */
-async function getRedditSession(forceRefresh = false): Promise<RedditSession> {
+export async function getRedditSession(forceRefresh = false): Promise<RedditSession> {
   const cookie = await readRedditSessionCookie();
 
   if (!forceRefresh && cookie) {
@@ -228,6 +230,165 @@ async function postCommentOnce(
   const data = await res.json().catch(() => ({}));
   const errors: unknown[] = data?.json?.errors || [];
   return { data, errors };
+}
+
+// ── New self-post submission (post-publish queue) ───────────────────────────
+
+export interface RedditSubmitInput {
+  /** Subreddit to submit to, with or without the r/ prefix. */
+  subreddit: string;
+  title: string;
+  text: string;
+  /** Server URLs of images to upload and embed inline (may be the whole body). */
+  images?: string[];
+}
+
+/**
+ * Selftext markdown with the uploaded assets embedded inline. Reddit renders
+ * `![img](assetId)` natively when the asset belongs to the submitting user.
+ * An image-only post is just the image lines (selftext posts allow that).
+ */
+export function buildSelftextWithImages(
+  text: string,
+  assetIds: string[]
+): string {
+  const imageLines = assetIds.map((id) => `![img](${id})`).join('\n\n');
+  if (!text.trim()) return imageLines;
+  if (!imageLines) return text;
+  return `${text}\n\n${imageLines}`;
+}
+
+/**
+ * Extract the new submission's permalink + fullname from a /api/submit
+ * (api_type=json) response: json.data = { url, id, name: 't3_…' }.
+ */
+export function parseRedditSubmitResponse(data: any): {
+  permalink?: string;
+  postId?: string;
+} {
+  const d = data?.json?.data || {};
+  const permalink =
+    typeof d.url === 'string' && d.url ? String(d.url) : undefined;
+  const postId =
+    typeof d.name === 'string' && d.name ? String(d.name) : undefined;
+  return { permalink, postId };
+}
+
+/** POST one self-post submission with a given session; returns response + errors. */
+async function submitOnce(
+  input: RedditSubmitInput,
+  session: RedditSession
+): Promise<{ data: any; errors: unknown[] }> {
+  const sr = input.subreddit.trim().replace(/^\/?(r\/)?/i, '').replace(/\/$/, '');
+  const body = new URLSearchParams({
+    api_type: 'json',
+    kind: 'self',
+    sr,
+    title: input.title,
+    text: input.text,
+    uh: session.modhash,
+    resubmit: 'true',
+  });
+  const res = await fetch(`${REDDIT_BASE}/api/submit`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      ...(session.modhash ? { 'X-Modhash': session.modhash } : {}),
+    },
+    body: body.toString(),
+  });
+  const data = await res.json().catch(() => ({}));
+  const errors: unknown[] = data?.json?.errors || [];
+  return { data, errors };
+}
+
+/**
+ * Submit a NEW self post as the logged-in browser user. Mirrors
+ * postRedditComment: session cache + one forced-refresh retry on a stale
+ * modhash, same error shaping.
+ */
+export async function submitRedditPost(
+  input: RedditSubmitInput
+): Promise<ReplyResult> {
+  const title = (input.title || '').trim();
+  const text = (input.text || '').trim();
+  const subreddit = (input.subreddit || '').trim();
+  const images = (input.images || []).filter(Boolean);
+  if (!subreddit) return { ok: false, error: 'Subreddit is missing' };
+  if (!title) return { ok: false, error: 'Post title is empty' };
+  if (!text && !images.length)
+    return { ok: false, error: 'Post text is empty' };
+
+  let session: RedditSession;
+  try {
+    session = await getRedditSession();
+  } catch (e: any) {
+    return { ok: false, error: `Reddit session check failed: ${e?.message || e}` };
+  }
+  if (!session.name) {
+    return {
+      ok: false,
+      error:
+        'Not logged in to Reddit in this browser. Open reddit.com and log in first.',
+    };
+  }
+
+  // Upload every image to Reddit's media store first, then embed the assets
+  // inline in the selftext. Any upload failing fails the whole submission —
+  // never publish a post with silently missing images.
+  let body = text;
+  if (images.length) {
+    try {
+      const assetIds: string[] = [];
+      for (const url of images) {
+        assetIds.push(await uploadRedditImage(url, session.modhash));
+      }
+      body = buildSelftextWithImages(text, assetIds);
+    } catch (e: any) {
+      return { ok: false, error: String(e?.message || e) };
+    }
+  }
+  const effectiveInput = { ...input, text: body };
+
+  try {
+    let { data, errors } = await submitOnce(effectiveInput, session);
+
+    if (Array.isArray(errors) && errors.length > 0) {
+      await clearRedditSessionCache();
+      session = await getRedditSession(true);
+      ({ data, errors } = await submitOnce(effectiveInput, session));
+    }
+
+    if (Array.isArray(errors) && errors.length > 0) {
+      return {
+        ok: false,
+        error: errors
+          .map((e) => (Array.isArray(e) ? e.join(': ') : String(e)))
+          .join('; '),
+        detail: data,
+      };
+    }
+
+    const { permalink, postId } = parseRedditSubmitResponse(data);
+    if (!permalink) {
+      return {
+        ok: false,
+        error: 'Reddit accepted the submission but returned no URL',
+        detail: data,
+      };
+    }
+    return {
+      ok: true,
+      permalink,
+      postId,
+      author: session.author,
+      message: 'Post submitted to Reddit.',
+      detail: data,
+    };
+  } catch (e: any) {
+    return { ok: false, error: `Reddit submit failed: ${e?.message || e}` };
+  }
 }
 
 export async function postRedditComment(

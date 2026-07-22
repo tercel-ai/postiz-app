@@ -1,15 +1,23 @@
 // Page-side helper + shared types for the `aisee:social-sessions` bridge: the
 // web app asks the extension which social platforms the BROWSER is currently
-// logged into. The probe is PASSIVE — cookies only, no requests to the
-// platforms, no script injection — so it can never look like automation.
+// logged into, and who the account is.
 //
-// What each platform's cookies can reveal:
-//   - X: `auth_token` presence = logged in; `twid` = numeric user id.
-//   - Reddit: `reddit_session` presence = logged in; the `token_v2` JWT payload
-//     (decoded locally) = t2_* account id.
-// Usernames/avatars would require active requests (X GraphQL / Reddit
-// /api/me.json) and emails are never exposed to the browser session at all,
-// so neither is available here.
+// How each platform is probed:
+//   - X: cookies decide loggedIn/userId; the handle/name/avatar come from a
+//     real BROWSER TAB (background x.com page, DOM read of X's own nav) —
+//     never an X API call. Cached per account (twid), so the tab read happens
+//     once per login/account-switch; the first probe after a login can take a
+//     few seconds while that tab loads.
+//   - Reddit: cookie decides loggedIn; identity from the session /api/me.json
+//     read the reply poster already uses (10-min cache).
+//   - aisee (our own platform): the extension's current session (explicit
+//     extension login OR bridged from a logged-in frontend tab) — this one
+//     DOES carry id/email/username, since it is our own auth.
+// Emails for X/Reddit are never exposed to the browser session — only the
+// aisee entry can carry one.
+//
+// The ping/pong presence probe stays a separate, instant, SW-free check —
+// requestSocialSessions() below is the one way to get this snapshot.
 //
 // Both sides import these types: the extension SW builds `SocialSessions`, the
 // web app consumes it, so the payload shape can never drift.
@@ -20,17 +28,36 @@ export interface XSessionInfo {
   loggedIn: boolean;
   /** Numeric X user id decoded from the `twid` cookie (e.g. "1234567890"). */
   userId?: string;
+  /** Screen name (without @), read from x.com's own nav in a browser tab. */
+  handle?: string;
+  /** Display name, same tab read. */
+  name?: string;
+  avatarUrl?: string;
 }
 
 export interface RedditSessionInfo {
   loggedIn: boolean;
-  /** Account fullname id decoded from the `token_v2` JWT, e.g. "t2_abc123". */
+  /** Account fullname id, e.g. "t2_abc123". */
   id?: string;
+  /** Reddit username (without the u/ prefix), from the session me.json read. */
+  handle?: string;
+  /** Display name (profile title), falls back to the handle. */
+  name?: string;
+  avatarUrl?: string;
+}
+
+export interface AiseeSessionInfo {
+  loggedIn: boolean;
+  id?: string;
+  email?: string;
+  username?: string;
 }
 
 export interface SocialSessions {
   x: XSessionInfo;
   reddit: RedditSessionInfo;
+  /** The extension's aisee session (explicit login or bridged from a tab). */
+  aisee: AiseeSessionInfo;
 }
 
 /**

@@ -4,7 +4,10 @@ import { EXTENSION_MESSAGE } from '@gitroom/helpers/extension/brand';
  * Responds to presence probes sent by the web app.
  * The page sends { source: 'aisee', action: 'aisee:ping' } and waits for
  * { source: 'aisee-extension', action: 'aisee:pong' } to confirm the extension
- * is installed and the content script is active on this origin.
+ * is installed and the content script is active on this origin. Answered
+ * synchronously from the content script (no service worker involved) so
+ * presence detection stays instant. Login state is a separate concern — use
+ * the aisee:social-sessions bridge for that.
  */
 export function installPingBridge(): void {
   window.addEventListener('message', (e) => {

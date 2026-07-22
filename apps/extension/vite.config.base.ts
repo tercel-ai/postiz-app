@@ -38,6 +38,9 @@ const stripDebug = isProdRelease || !!process.env.STRIP_DEBUG;
 const replyHostPermissions = [
   'https://www.reddit.com/*',
   'https://*.reddit.com/*',
+  // Reddit media uploads: /api/media/asset.json leases point the multipart
+  // POST at Reddit's own S3 bucket (image posts in the publish queue).
+  'https://reddit-uploaded-media.s3-accelerate.amazonaws.com/*',
 ];
 
 // Backend API origins the background fetches to backfill the reply URL

@@ -47,6 +47,20 @@ export const EXTENSION_MESSAGE = {
   socialSessions: `${EXTENSION_BRAND}:social-sessions`,
   /** extension → page: social platform session snapshot result */
   socialSessionsResult: `${EXTENSION_BRAND}:social-sessions-result`,
+  /** page → extension: enqueue a batch of posts (each with optional thread segments) */
+  postPublish: `${EXTENSION_BRAND}:post-publish`,
+  /** extension → page: enqueue acknowledgement (accepted/rejected split) */
+  postPublishResult: `${EXTENSION_BRAND}:post-publish-result`,
+  /** extension → page: pushed per-task state transition while the publish queue drains */
+  postPublishProgress: `${EXTENSION_BRAND}:post-publish-progress`,
+  /** page → extension: cancel publish tasks that have not started yet */
+  postPublishCancel: `${EXTENSION_BRAND}:post-publish-cancel`,
+  /** extension → page: cancel outcome (canceled/notCancelable split) */
+  postPublishCancelResult: `${EXTENSION_BRAND}:post-publish-cancel-result`,
+  /** page → extension: snapshot the publish queue */
+  postPublishStatus: `${EXTENSION_BRAND}:post-publish-status`,
+  /** extension → page: publish queue snapshot result */
+  postPublishStatusResult: `${EXTENSION_BRAND}:post-publish-status-result`,
 } as const;
 
 /** Content-script root container id — unique per brand so two extensions on the

@@ -30,6 +30,13 @@ import { scanX } from '@gitroom/extension/utils/executor/scan.x';
 import { ENGAGE_EXTENSION_ACTION } from '@gitroom/extension/utils/executor/actions';
 import { getSocialSessions } from '@gitroom/extension/utils/social-sessions';
 import {
+  enqueuePublishBatch,
+  cancelPublishTasks,
+  publishQueueSnapshot,
+  initPublishQueue,
+  handlePublishAlarm,
+} from '@gitroom/extension/utils/post-publish/queue';
+import {
   ensureEngageScanAlarm,
   clearEngageScanAlarm,
   handleEngageAlarm,
@@ -208,13 +215,16 @@ function reArmAlarms(): void {
   // The shared X read-tab's idle-close timer lives in this worker; if a prior
   // worker was killed mid-idle its tab would linger, so reap it on startup.
   void reapOrphanXReadTab();
+  // Restore the persisted publish queue (scheduled posts) + re-arm its alarm.
+  void initPublishQueue();
 }
 chrome.runtime.onStartup?.addListener(reArmAlarms);
 chrome.runtime.onInstalled?.addListener(reArmAlarms);
 reArmAlarms();
 chrome.alarms.onAlarm.addListener((alarm) => {
-  // Engage-scan alarm is handled by the executor; everything else (token
-  // refresh) by the auth handler — names never collide.
+  // Publish-due first (scheduled posts), then the engage-scan executor, then
+  // the auth token refresh — names never collide.
+  if (handlePublishAlarm(alarm.name)) return;
   void handleEngageAlarm(alarm.name).then((handled) => {
     if (!handled) void handleAuthAlarm(alarm.name);
   });
@@ -396,6 +406,41 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
   if (request.action === ENGAGE_EXTENSION_ACTION.loadConfig) {
     backendCall('/engage/config', 'GET')
       .then((r) => sendResponse({ ok: r.ok, data: r.data }))
+      .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
+    return true;
+  }
+
+  // ─── Batch post publish queue (page bridge) ──────────────────────────────
+  // Every handler awaits the storage restore first: mutating (or snapshotting)
+  // the queue before restore completes would clobber / hide the persisted
+  // scheduled tasks when this very message is what woke the worker.
+  if (request.action === ENGAGE_EXTENSION_ACTION.publishEnqueue) {
+    initPublishQueue()
+      .then(() => {
+        const ack = enqueuePublishBatch(
+          String(request.requestId || ''),
+          Array.isArray(request.items) ? request.items : [],
+          sender.tab?.id
+        );
+        sendResponse({ ok: true, ...ack });
+      })
+      .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
+    return true;
+  }
+  if (request.action === ENGAGE_EXTENSION_ACTION.publishCancel) {
+    initPublishQueue()
+      .then(() => {
+        const ack = cancelPublishTasks(
+          Array.isArray(request.taskIds) ? request.taskIds : []
+        );
+        sendResponse({ ok: true, ...ack });
+      })
+      .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
+    return true;
+  }
+  if (request.action === ENGAGE_EXTENSION_ACTION.publishStatus) {
+    initPublishQueue()
+      .then(() => sendResponse({ ok: true, states: publishQueueSnapshot() }))
       .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
     return true;
   }

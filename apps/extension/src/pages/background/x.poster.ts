@@ -1,5 +1,7 @@
-// In-browser X reply (Option A): open the tweet in a tab and inject the draft
-// into X's native reply composer via chrome.scripting.executeScript.
+// In-browser X posting (Option A): open x.com in a tab and drive X's NATIVE
+// composer via chrome.scripting.executeScript — replies (postXReply) and new
+// posts (postXCompose) both. NEVER call X's internal API from the service
+// worker: the tab+interceptor path is the only allowed X write path.
 //
 // Why executeScript instead of a content script: X serves a strict CSP that
 // blocks crxjs's dynamic-import content-script loader, so the normal content
@@ -288,6 +290,208 @@ async function closeTab(tabId: number): Promise<void> {
     await chrome.tabs.remove(tabId);
   } catch (e) {
     console.warn('[aisee][x] closeTab failed', e);
+  }
+}
+
+/**
+ * Runs INSIDE the x.com page (serialized — fully self-contained). Rebuilds the
+ * images as File objects and hands them to the composer's file input, exactly
+ * like a user picking files, so X runs its own upload pipeline. Waits for the
+ * attachment previews to appear (uploading keeps the send button disabled, so
+ * the later send-click wait covers slow uploads too).
+ */
+function attachXImagesInPage(
+  files: Array<{ name: string; mime: string; b64: string }>
+): Promise<'attached' | 'no_input' | 'no_preview'> {
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  return (async () => {
+    const input =
+      document.querySelector<HTMLInputElement>(
+        'input[data-testid="fileInput"]'
+      ) ??
+      document.querySelector<HTMLInputElement>(
+        'input[type="file"][accept*="image"]'
+      ) ??
+      document.querySelector<HTMLInputElement>('input[type="file"]');
+    if (!input) return 'no_input';
+
+    const dt = new DataTransfer();
+    for (const f of files) {
+      const bin = atob(f.b64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      dt.items.add(new File([bytes], f.name, { type: f.mime }));
+    }
+    input.files = dt.files;
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+
+    const start = Date.now();
+    for (;;) {
+      if (document.querySelector('[data-testid="attachments"]'))
+        return 'attached';
+      if (Date.now() - start > 15_000) return 'no_preview';
+      await sleep(250);
+    }
+  })();
+}
+
+/**
+ * Download one image from OUR server and encode it for executeScript transfer
+ * (args are JSON-serialized, so bytes travel as base64).
+ */
+async function fetchImageForPage(
+  url: string
+): Promise<{ name: string; mime: string; b64: string }> {
+  const res = await fetch(url);
+  if (!res.ok) {
+    throw new Error(`image download failed (${res.status}): ${url}`);
+  }
+  const blob = await res.blob();
+  const mime = blob.type || 'image/jpeg';
+  const last = url.split('/').pop()?.split(/[?#]/)[0] || '';
+  const name = last.includes('.')
+    ? last
+    : `${last || 'image'}.${mime.split('/')[1] || 'jpg'}`;
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  let bin = '';
+  const CHUNK = 0x8000; // String.fromCharCode arg-count limit
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    bin += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  return { name, mime, b64: btoa(bin) };
+}
+
+export interface XComposeInput {
+  text: string;
+  /** Server URLs of images to attach via the composer's own file input. */
+  images?: string[];
+  // When false, fill the composer but let the user click Post on X.
+  autoSubmit?: boolean;
+}
+
+/**
+ * Publish a NEW post via x.com's own compose page — the same tab+interceptor
+ * pattern as postXReply (open tab → attach images → fill composer → click X's
+ * own Post button → capture CreateTweet). No direct API calls.
+ */
+export async function postXCompose(input: XComposeInput): Promise<ReplyResult> {
+  const text = (input.text || '').trim();
+  const images = (input.images || []).filter(Boolean);
+  if (!text && !images.length) {
+    return { ok: false, error: 'Post text is empty' };
+  }
+  const autoSubmit = input.autoSubmit !== false;
+
+  // Fetch the images BEFORE opening any tab so a bad URL fails fast + clean.
+  const files: Array<{ name: string; mime: string; b64: string }> = [];
+  try {
+    for (const url of images) files.push(await fetchImageForPage(url));
+  } catch (e: any) {
+    return { ok: false, error: String(e?.message || e) };
+  }
+
+  let tabId: number | undefined;
+  try {
+    const tab = await chrome.tabs.create({
+      url: 'https://x.com/compose/post',
+      active: !autoSubmit,
+    });
+    tabId = tab.id ?? undefined;
+  } catch (e: any) {
+    return { ok: false, error: `Failed to open X tab: ${e?.message || e}` };
+  }
+  if (tabId == null) return { ok: false, error: 'Failed to open X tab' };
+
+  await waitForTabComplete(tabId, 15_000);
+
+  try {
+    if (autoSubmit) {
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        world: 'MAIN',
+        func: installCreateTweetInterceptor,
+      });
+    }
+
+    if (files.length) {
+      const [attach] = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: attachXImagesInPage,
+        args: [files],
+      });
+      console.log('[aisee][x] attach result:', attach?.result);
+      if (attach?.result === 'no_input') {
+        await focusTab(tabId);
+        return {
+          ok: false,
+          error:
+            'Could not find the file input on the X composer (DOM may have changed). Post manually.',
+        };
+      }
+      // 'no_preview' falls through: uploads keep the Post button disabled, so
+      // the send-click wait below either succeeds late or ends 'filled'.
+    }
+
+    const [injection] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: fillXReplyInPage,
+      args: [text, autoSubmit],
+    });
+    const status = injection?.result;
+    console.log('[aisee][x] compose injection result:', status);
+
+    if (status === 'sent') {
+      let permalink: string | undefined;
+      let postId: string | undefined;
+      let author: ReplyResult['author'];
+      let confirmed = false;
+      try {
+        const [cap] = await chrome.scripting.executeScript({
+          target: { tabId },
+          world: 'MAIN',
+          func: readCapturedTweet,
+        });
+        const captured = cap?.result;
+        if (captured?.rest_id) {
+          confirmed = true;
+          postId = captured.rest_id;
+          permalink = captured.screen_name
+            ? `https://x.com/${captured.screen_name}/status/${captured.rest_id}`
+            : `https://x.com/i/web/status/${captured.rest_id}`;
+        }
+        author = captured?.author;
+      } catch (e) {
+        console.error('[aisee][x] capture read failed', e);
+      }
+      if (confirmed) {
+        await wait(TAB_CLOSE_GRACE_MS);
+        await closeTab(tabId);
+      } else {
+        await focusTab(tabId);
+      }
+      return { ok: true, message: 'Post sent on X.', permalink, postId, author };
+    }
+    if (status === 'filled') {
+      await focusTab(tabId);
+      return {
+        ok: true,
+        pending: true,
+        message: autoSubmit
+          ? 'Draft filled but the Post button stayed disabled — review and click Post on X.'
+          : 'Draft filled into the X composer. Review it, then click Post on X to send.',
+      };
+    }
+
+    await focusTab(tabId);
+    return {
+      ok: false,
+      error:
+        'Opened the composer but could not find the text box (X DOM may have changed). Post manually.',
+    };
+  } catch (e: any) {
+    console.error('[aisee][x] compose executeScript failed', e);
+    await focusTab(tabId);
+    return { ok: false, error: `X injection failed: ${e?.message || e}` };
   }
 }
 
