@@ -1320,10 +1320,27 @@ export class OperationPlanService implements OnApplicationBootstrap {
           sourceTaskId: plan.taskId,
         },
       });
-    } catch {
+    } catch (error) {
+      // A thrown reconcile (most often: the remote credit-confirm keeps failing,
+      // e.g. its handler errors) leaves the plan in BILLING_PENDING and the next
+      // interval retries. Log it — a silent catch here turns a stuck-forever plan
+      // into an invisible one, which is exactly how these rows "never change".
+      this.logger.warn(
+        `Reconcile of BILLING_PENDING plan ${plan.id} threw; keeping BILLING_PENDING for retry: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
       return this._toRecord(plan);
     }
-    if (!billed) return this._toRecord(plan);
+    if (!billed) {
+      // No BillingRecord for this plan (or its costItems failed to parse): there is
+      // nothing to confirm or re-deduct, so the plan cannot advance on its own.
+      // Surface it rather than stalling mutely.
+      this.logger.warn(
+        `Reconcile of BILLING_PENDING plan ${plan.id} found no billable record; keeping BILLING_PENDING`
+      );
+      return this._toRecord(plan);
+    }
     if (!billed.deduction.success && !billed.deduction.skipped) {
       return this._toRecord(await this._repo.updateStatus(plan.id, {
         status: 'BILLING_FAILED',

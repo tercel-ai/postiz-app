@@ -7,9 +7,10 @@
 # and login agrees with the scan/metrics executor's backend. Profiles live in
 # scripts/env/<profile>.env (committed, no secrets).
 #
-#   local → this machine's LAN stack (192.168.110.98:*)
-#   dev   → *-dev.aisee.live
-#   prod  → *.aisee.live (store release: prod-only host_permissions + strip debug)
+#   local     → this machine's LAN stack (192.168.110.98:*)
+#   dev       → *-dev.aisee.live
+#   dev-local → *-dev.aisee.live API/auth, frontend at http://localhost:3000
+#   prod      → *.aisee.live (store release: prod-only host_permissions + strip debug)
 #
 # Pick a browser with --browser=chrome|firefox (default: chrome). Chrome is
 # built from vite.config.chrome.ts → dist/; Firefox from vite.config.firefox.ts
@@ -86,7 +87,7 @@ fi
 # Resolve the env file: a known profile name maps to scripts/env/<name>.env;
 # anything else is treated as a literal path; empty falls back to repo-root .env.
 case "$ENV_ARG" in
-  local|dev|prod)
+  local|dev|dev-local|prod)
     ENV_FILE="scripts/env/${ENV_ARG}.env" ;;
   "")
     ENV_FILE="../../.env"
