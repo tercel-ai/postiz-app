@@ -12,7 +12,7 @@
 // matching happens server-side at ingest. So no keyword LIST is ever sent to a
 // client — only the org's own unit it is already scanning.
 
-export type ScanTaskPlatform = 'x' | 'reddit';
+export type ScanTaskPlatform = 'x' | 'reddit' | 'linkedin';
 export type ScanTaskType = 'keyword' | 'channel' | 'tracked';
 
 /** Where the extension should resume from (mirrors EngageScanCursor). */

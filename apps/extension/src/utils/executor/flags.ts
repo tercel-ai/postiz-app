@@ -21,3 +21,26 @@ const rawXEnabled = (
   .toLowerCase();
 
 export const X_EXECUTOR_ENABLED = rawXEnabled === 'true' || rawXEnabled === '1';
+
+// LinkedIn scan + metrics drive a real linkedin.com tab with the user's PERSONAL
+// session and scrape the rendered DOM. LinkedIn flags automation at least as
+// aggressively as X, so the LinkedIn executor is OFF BY DEFAULT and opted into at
+// build time the same way:
+//
+//   ENGAGE_LINKEDIN_ENABLED=true   (e.g. in a pack profile or the build env)
+//
+// Anything else keeps it disabled — the executor refuses LinkedIn scan tasks and
+// skips LinkedIn metrics, so a stray backend LinkedIn task can never drive a
+// request to linkedin.com. This gates the BACKGROUND read paths only; the
+// user-initiated post-publish poster is not gated (mirrors the X poster).
+const rawLinkedinEnabled = (
+  import.meta.env?.ENGAGE_LINKEDIN_ENABLED ??
+  process?.env?.ENGAGE_LINKEDIN_ENABLED ??
+  ''
+)
+  .toString()
+  .trim()
+  .toLowerCase();
+
+export const LINKEDIN_EXECUTOR_ENABLED =
+  rawLinkedinEnabled === 'true' || rawLinkedinEnabled === '1';

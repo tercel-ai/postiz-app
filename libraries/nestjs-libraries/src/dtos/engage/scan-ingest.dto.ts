@@ -81,7 +81,7 @@ export class EngageScanIngestDto {
 }
 
 export class ScanUnitSelectorDto {
-  @IsIn(['x', 'reddit']) platform: 'x' | 'reddit';
+  @IsIn(['x', 'reddit', 'linkedin']) platform: 'x' | 'reddit' | 'linkedin';
   @IsIn(['keyword', 'channel', 'tracked']) scanType: 'keyword' | 'channel' | 'tracked';
   @IsString() scanKey: string;
 }

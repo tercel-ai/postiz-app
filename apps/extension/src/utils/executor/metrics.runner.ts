@@ -17,7 +17,8 @@ import {
 } from './pacing';
 import { fetchRedditMetrics } from './metrics.reddit';
 import { fetchXMetrics } from './metrics.x';
-import { X_EXECUTOR_ENABLED } from './flags';
+import { fetchLinkedinMetrics } from './metrics.linkedin';
+import { LINKEDIN_EXECUTOR_ENABLED, X_EXECUTOR_ENABLED } from './flags';
 
 const DUE_ENDPOINT = '/posts/metrics/due';
 const INGEST_ENDPOINT = '/posts/metrics/ingest';
@@ -83,6 +84,9 @@ export async function runMetrics(ids: string[]): Promise<MetricsRunSummary> {
       // X metrics go through the personal x.com session — OFF by default (see
       // flags.ts). Skip before consuming any budget / hitting x.com.
       if (platform === 'x' && !X_EXECUTOR_ENABLED) continue;
+      // LinkedIn metrics drive the personal linkedin.com session — OFF by
+      // default too. Skip before consuming any budget / hitting linkedin.com.
+      if (platform === 'linkedin' && !LINKEDIN_EXECUTOR_ENABLED) continue;
 
       if (!(await tryConsumeHourly(DEFAULT_HOURLY_FETCH_CAP, platform))) {
         summary.stoppedReason = 'cap';
@@ -98,6 +102,8 @@ export async function runMetrics(ids: string[]): Promise<MetricsRunSummary> {
       let analytics = null;
       if (platform === 'reddit') analytics = await fetchRedditMetrics(url);
       else if (platform === 'x') analytics = await fetchXMetrics(url);
+      else if (platform === 'linkedin')
+        analytics = await fetchLinkedinMetrics(url);
       else continue; // platform the extension can't fetch with a session
 
       if (analytics?.length) {

@@ -1,5 +1,7 @@
 import { AnalyticsSeries } from './executor.types';
 import { fetchRedditMetrics } from './metrics.reddit';
+import { fetchLinkedinMetrics } from './metrics.linkedin';
+import { LINKEDIN_EXECUTOR_ENABLED } from './flags';
 import {
   DEFAULT_HOURLY_FETCH_CAP,
   spaceConsecutiveFetches,
@@ -17,7 +19,13 @@ export async function fetchPostMetrics(
   releaseURL: string
 ): Promise<AnalyticsSeries[] | null> {
   const url = String(releaseURL || '').trim();
-  if ((platform !== 'x' && platform !== 'reddit') || !url) return null;
+  if (
+    (platform !== 'x' && platform !== 'reddit' && platform !== 'linkedin') ||
+    !url
+  )
+    return null;
+  // LinkedIn opens a real linkedin.com tab and is account-risky — OFF by default.
+  if (platform === 'linkedin' && !LINKEDIN_EXECUTOR_ENABLED) return null;
   if (!(await tryConsumeHourly(DEFAULT_HOURLY_FETCH_CAP, platform))) {
     throw new Error(`Hourly ${platform} metrics limit reached`);
   }
@@ -26,6 +34,7 @@ export async function fetchPostMetrics(
   await spaceConsecutiveFetches(platform);
 
   if (platform === 'reddit') return fetchRedditMetrics(url);
+  if (platform === 'linkedin') return fetchLinkedinMetrics(url);
 
   const tweet = await fetchXPostFromPage(url);
   if (!tweet) return null;

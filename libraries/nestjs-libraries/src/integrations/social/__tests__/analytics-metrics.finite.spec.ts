@@ -25,6 +25,21 @@ describe('metric coercion is NaN-safe (C1)', () => {
     expect(score).toBe(20); // likes 10*1 + replies 5*2
   });
 
+  it('computes a LinkedIn traffic score from the extension-emitted labels', () => {
+    // The extension's buildLinkedinAnalytics emits impressions/likes/comments/
+    // shares — these must line up with the traffic.calculator `linkedin` weights
+    // (impressions 0.05, likes 1, comments 4, shares 3) or the scraped numbers
+    // would silently not count toward Traffic.
+    const score = computeTrafficScore('linkedin', [
+      { label: 'impressions', data: [{ total: 1000, date: 'd' }], percentageChange: 0 },
+      { label: 'likes', data: [{ total: 10, date: 'd' }], percentageChange: 0 },
+      { label: 'comments', data: [{ total: 4, date: 'd' }], percentageChange: 0 },
+      { label: 'shares', data: [{ total: 2, date: 'd' }], percentageChange: 0 },
+    ] as any);
+    // 1000*0.05 + 10*1 + 4*4 + 2*3 = 50 + 10 + 16 + 6 = 82
+    expect(score).toBe(82);
+  });
+
   it('extractMetrics yields finite impressions + trafficScore for non-numeric input', () => {
     const { impressions, trafficScore } = extractMetrics('x', [
       { label: 'impressions', data: [{ total: 'oops', date: 'd' }], percentageChange: 0 },

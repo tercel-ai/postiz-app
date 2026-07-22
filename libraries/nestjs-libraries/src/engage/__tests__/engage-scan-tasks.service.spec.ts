@@ -28,6 +28,7 @@ function build(opts: {
   subscribers?: any[];
   claimResults?: any[];
   pacing?: any;
+  scanPlatforms?: any[];
 } = {}) {
   let claimCall = 0;
   const engageRepo = {
@@ -44,6 +45,9 @@ function build(opts: {
   const config = {
     getPacing: vi.fn(async () => opts.pacing ?? DEFAULT_SCAN_PACING),
     getFreshnessWindowMs: vi.fn(async () => 24 * 3_600_000),
+    // Resolves `settings.operation_plan.allowed_platforms || ENGAGE_SUPPORTED_PLATFORMS`
+    // in prod; the mock lets a test drive the effective allowlist directly.
+    getSupportedScanPlatforms: vi.fn(async () => opts.scanPlatforms ?? ['x', 'reddit']),
   };
   const entitlement = { getScanIntervalHours: vi.fn(async () => 6) };
 
@@ -98,6 +102,27 @@ describe('EngageScanTasksService.sync — claim (bootstrap)', () => {
     expect(res.nextTasks[1].pacing.hourlyRequestCap).toBe(
       DEFAULT_SCAN_PACING.extension.session.hourlyRequestCap
     );
+  });
+
+  it('fans keyword units out to the resolved allowlist (operation_plan.allowed_platforms → linkedin included, x dropped)', async () => {
+    const { svc, lease } = build({
+      // Simulates settings.operation_plan.allowed_platforms = [reddit, linkedin].
+      scanPlatforms: ['reddit', 'linkedin'],
+      orgContext: {
+        keywords: [{ keyword: 'AI', enabled: true }],
+        monitoredChannels: [],
+        trackedAccounts: [],
+      },
+      claimResults: [
+        snap({ platform: 'reddit', leaseToken: 'tokR' }),
+        snap({ platform: 'linkedin', leaseToken: 'tokL' }),
+      ],
+    });
+    await svc.sync('org1', { want: 5 });
+    const claimedPlatforms = lease.claim.mock.calls.map((c: any[]) => c[0].platform);
+    // Only the allowlisted platforms are enumerated for the keyword — never x.
+    expect(claimedPlatforms).toEqual(['reddit', 'linkedin']);
+    expect(claimedPlatforms).not.toContain('x');
   });
 
   it('reactivates a dormant unit to the "initial" (deeper) phase when its cursor is older than the freshness window', async () => {

@@ -17,6 +17,7 @@
 import type {
   PublishEnqueueAck,
   PublishCancelAck,
+  PublishPlatform,
   PublishPostItem,
   PublishTaskState,
 } from '@gitroom/helpers/extension/post-publish';
@@ -29,6 +30,10 @@ import {
   postXCompose,
   postXReply,
 } from '@gitroom/extension/pages/background/x.poster';
+import {
+  postLinkedinCompose,
+  postLinkedinComment,
+} from '@gitroom/extension/pages/background/linkedin.poster';
 
 interface QueueEntry {
   item: PublishPostItem;
@@ -108,6 +113,37 @@ async function defaultPublishSegment(
     return { ok: true, permalink: r.permalink, postId: r.postId };
   }
 
+  if (item.platform === 'linkedin') {
+    // LinkedIn: segment 0 is a new share; every following segment is a native
+    // comment on the PREVIOUS segment's post (permalink chain → thread). Tab
+    // automation only — never a direct Voyager call from the worker.
+    const r =
+      segmentIndex === 0
+        ? await postLinkedinCompose({ text })
+        : prevPermalink
+        ? await postLinkedinComment({ url: prevPermalink, text })
+        : { ok: false as const, error: 'No previous segment permalink to thread onto' };
+    if (!r.ok) return { ok: false, error: r.error };
+    if ('pending' in r && r.pending) {
+      return {
+        ok: false,
+        error:
+          r.message ||
+          'LinkedIn post left pending — finish it manually in the opened tab',
+      };
+    }
+    // A confirmed share returns an activity permalink; without one the following
+    // comment segments have nothing to thread onto — only OK on the last segment.
+    if (!r.permalink && segmentIndex < item.segments.length - 1) {
+      return {
+        ok: false,
+        error:
+          'LinkedIn post was sent but its URL could not be confirmed; remaining thread segments were not posted',
+      };
+    }
+    return { ok: true, permalink: r.permalink, postId: r.postId };
+  }
+
   if (segmentIndex === 0) {
     const r = await submitRedditPost({
       subreddit: item.subreddit || '',
@@ -133,16 +169,17 @@ let now: () => number = () => Date.now();
 // item's range, or these platform defaults.
 // Conservative human-like defaults: real users don't machine-gun a thread, so
 // wait 30–120s between segments on both platforms unless the caller overrides.
-const DEFAULT_SEGMENT_GAP_S: Record<'x' | 'reddit', [number, number]> = {
+const DEFAULT_SEGMENT_GAP_S: Record<PublishPlatform, [number, number]> = {
   x: [30, 120],
   reddit: [30, 120],
+  linkedin: [30, 120],
 };
 const MAX_SEGMENT_GAP_S = 600;
 
 function segmentGapMs(item: PublishPostItem): number {
   const range =
     item.segmentGapSeconds ??
-    DEFAULT_SEGMENT_GAP_S[item.platform as 'x' | 'reddit'] ??
+    DEFAULT_SEGMENT_GAP_S[item.platform as PublishPlatform] ??
     [0, 0];
   const lo = Math.max(0, Math.min(range[0], MAX_SEGMENT_GAP_S));
   const hi = Math.max(lo, Math.min(range[1], MAX_SEGMENT_GAP_S));
@@ -317,7 +354,11 @@ function validate(item: PublishPostItem): string | null {
   if (!item?.taskId || typeof item.taskId !== 'string') return 'missing taskId';
   if (entries.some((e) => isActive(e) && e.state.taskId === item.taskId))
     return 'duplicate taskId (already queued or publishing)';
-  if (item.platform !== 'reddit' && item.platform !== 'x')
+  if (
+    item.platform !== 'reddit' &&
+    item.platform !== 'x' &&
+    item.platform !== 'linkedin'
+  )
     return `unsupported platform: ${item.platform}`;
   const segments = Array.isArray(item.segments) ? item.segments : [];
   if (!segments.length || segments.some((s) => !(s?.text || '').trim() && !s?.images?.length))
@@ -327,6 +368,12 @@ function validate(item: PublishPostItem): string | null {
   if (item.platform === 'reddit') {
     if (!(item.subreddit || '').trim()) return 'reddit post needs a subreddit';
     if (!(item.title || '').trim()) return 'reddit post needs a title';
+  }
+  if (item.platform === 'linkedin') {
+    // LinkedIn media upload isn't wired through the tab composer yet; reject at
+    // enqueue so an image post never silently publishes text-only.
+    if (segments.some((s) => s?.images?.length))
+      return 'LinkedIn image posts are not supported via the extension yet';
   }
   if (item.publishDate != null && Number.isNaN(Date.parse(item.publishDate)))
     return 'invalid publishDate (must be an ISO datetime)';

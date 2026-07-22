@@ -15,7 +15,8 @@ import {
 } from './executor.types';
 import { scanReddit } from './scan.reddit';
 import { scanX } from './scan.x';
-import { X_EXECUTOR_ENABLED } from './flags';
+import { scanLinkedin } from './scan.linkedin';
+import { LINKEDIN_EXECUTOR_ENABLED, X_EXECUTOR_ENABLED } from './flags';
 import {
   applyDelay,
   remainingHourlyBudget,
@@ -58,6 +59,18 @@ async function scanOne(task: EngageScanTask): Promise<ScanRunResult> {
       return { posts: [], nextCursor: task.cursor, exhausted: true };
     }
     return scanX(task, gate);
+  }
+  if (task.platform === 'linkedin') {
+    // LinkedIn scan drives the user's personal linkedin.com session and is
+    // account-risky, so it is OFF by default (see flags.ts). Refuse WITHOUT
+    // touching linkedin.com; mark exhausted so the backend stops re-leasing it.
+    if (!LINKEDIN_EXECUTOR_ENABLED) {
+      console.warn(
+        '[aisee][scan] LinkedIn disabled (ENGAGE_LINKEDIN_ENABLED!=true) — skipping'
+      );
+      return { posts: [], nextCursor: task.cursor, exhausted: true };
+    }
+    return scanLinkedin(task, gate);
   }
   console.warn('[aisee][scan] unknown platform', task.platform);
   return { posts: [], nextCursor: task.cursor, exhausted: true };

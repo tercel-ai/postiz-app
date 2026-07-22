@@ -17,8 +17,13 @@ export const ENGAGE_SCAN_FRESHNESS_KEY = 'engage_scan_freshness_hours';
 export interface ScanFreshnessHours {
   x: number;
   reddit: number;
+  linkedin: number;
 }
-export const DEFAULT_SCAN_FRESHNESS_HOURS: ScanFreshnessHours = { x: 24, reddit: 24 };
+export const DEFAULT_SCAN_FRESHNESS_HOURS: ScanFreshnessHours = {
+  x: 24,
+  reddit: 24,
+  linkedin: 24,
+};
 
 // Per-call page size for X keyword scans (X `max_results`). Resolution order:
 // stored setting → env (ENGAGE_X_SCAN_MAX_RESULTS) → default. The default (10)
@@ -47,9 +52,41 @@ export const ENGAGE_TOUCH_SWITCH_KEY = 'engage_touch_switch';
 export const ENGAGE_TOUCH_X_SWITCH_KEY = 'engage_touch_x_switch';
 export const ENGAGE_TOUCH_REDDIT_SWITCH_KEY = 'engage_touch_reddit_switch';
 
-export type ScanPlatform = 'x' | 'reddit';
+export type ScanPlatform = 'x' | 'reddit' | 'linkedin';
 export type ScanPhase = 'initial' | 'incremental';
 export type ScanPath = 'workflow' | 'extension';
+
+// Platforms the extension can actually scan. The operation-plan allowlist may
+// list any of the ~30 providers (it drives the plan platform picker), so the
+// scan resolution intersects it with these.
+const SCANNABLE_PLATFORMS: readonly ScanPlatform[] = ['x', 'reddit', 'linkedin'];
+
+// Canonical key literal for the admin operation-plan platform allowlist. Inlined
+// (not imported from operation-plan.service) to avoid an engage ↔ operation-plan
+// module import cycle — operation-plan.service already imports from engage.
+// Mirrors OPERATION_PLAN_ALLOWED_PLATFORMS_KEY.
+const OPERATION_PLAN_ALLOWED_PLATFORMS_SETTING = 'operation_plan.allowed_platforms';
+
+/**
+ * Parse a platform allowlist (a settings string[] OR an env comma-string) down to
+ * the scannable set, deduped and lowercased. Anything not in SCANNABLE_PLATFORMS
+ * (e.g. instagram/youtube from the operation-plan picker) is dropped.
+ */
+export function toScanPlatforms(raw: unknown): ScanPlatform[] {
+  const list = Array.isArray(raw)
+    ? raw
+    : typeof raw === 'string'
+      ? raw.split(',')
+      : [];
+  const out = new Set<ScanPlatform>();
+  for (const p of list) {
+    const v = String(p).trim().toLowerCase();
+    if ((SCANNABLE_PLATFORMS as readonly string[]).includes(v)) {
+      out.add(v as ScanPlatform);
+    }
+  }
+  return [...out];
+}
 
 /**
  * Pagination pacing for ONE (path, platform, phase): how many pages to pull and
@@ -111,6 +148,13 @@ export const DEFAULT_SCAN_PACING: EngageScanPacing = {
       initial: { maxPages: 5, pageSize: 25, pageDelayMs: 1200, jitterMs: 600 },
       incremental: { maxPages: 1, pageSize: 25, pageDelayMs: 1200, jitterMs: 600 },
     },
+    // LinkedIn has no backend (workflow) scan adapter — the extension is its
+    // only executor. This entry exists solely to satisfy the per-platform Record
+    // type; the workflow never reads it.
+    linkedin: {
+      initial: { maxPages: 3, pageSize: 25, pageDelayMs: 1500, jitterMs: 600 },
+      incremental: { maxPages: 1, pageSize: 25, pageDelayMs: 1500, jitterMs: 600 },
+    },
   },
   extension: {
     x: {
@@ -120,6 +164,12 @@ export const DEFAULT_SCAN_PACING: EngageScanPacing = {
     reddit: {
       initial: { maxPages: 1, pageSize: 25, pageDelayMs: 5000, jitterMs: 60000 },
       incremental: { maxPages: 1, pageSize: 25, pageDelayMs: 5000, jitterMs: 60000 },
+    },
+    // LinkedIn scan drives the user's personal session (DOM scrape + scroll) and
+    // is at least as automation-risky as X, so it is slow + single-page like X.
+    linkedin: {
+      initial: { maxPages: 1, pageSize: 20, pageDelayMs: 8000, jitterMs: 60000 },
+      incremental: { maxPages: 1, pageSize: 20, pageDelayMs: 8000, jitterMs: 60000 },
     },
     interUnit: { delayMs: 60000, jitterMs: 60000 },
     session: { hourlyRequestCap: 60 },
@@ -197,7 +247,10 @@ export class EngageScanConfigService implements OnModuleInit {
   async isTouchEnabled(platform?: ScanPlatform): Promise<boolean> {
     const global = await this._settings.get<boolean>(ENGAGE_TOUCH_SWITCH_KEY);
     if (global === false) return false;
-    if (platform) {
+    // Per-platform backend ("touch") switches only exist for the platforms the
+    // WORKFLOW can scan (x, reddit). LinkedIn has no backend scan adapter — it is
+    // extension-only — so only the global switch applies to it.
+    if (platform === 'x' || platform === 'reddit') {
       const key =
         platform === 'x' ? ENGAGE_TOUCH_X_SWITCH_KEY : ENGAGE_TOUCH_REDDIT_SWITCH_KEY;
       const platformOn = await this._settings.get<boolean>(key);
@@ -218,12 +271,38 @@ export class EngageScanConfigService implements OnModuleInit {
     const envName =
       platform === 'x'
         ? 'ENGAGE_X_SCAN_WINDOW_HOURS'
-        : 'ENGAGE_REDDIT_SCAN_WINDOW_HOURS';
+        : platform === 'linkedin'
+          ? 'ENGAGE_LINKEDIN_SCAN_WINDOW_HOURS'
+          : 'ENGAGE_REDDIT_SCAN_WINDOW_HOURS';
     const envH = Number(process.env[envName]);
     const fallback =
       Number.isFinite(envH) && envH > 0 ? envH : DEFAULT_SCAN_FRESHNESS_HOURS[platform];
     const hours = num(stored?.[platform], fallback);
     return hours * 3_600_000;
+  }
+
+  /**
+   * Resolve the platforms the extension is allowed to scan, preferring the
+   * admin-configured operation-plan allowlist (`operation_plan.allowed_platforms`
+   * — the same list the plan-creation platform picker uses), intersected with the
+   * platforms the extension can actually scan (x/reddit/linkedin). Falls back to
+   * the `ENGAGE_SUPPORTED_PLATFORMS` env allowlist, then to `x,reddit`, when the
+   * setting is empty/absent — i.e. `settings.operation_plan.allowed_platforms ||
+   * ENGAGE_SUPPORTED_PLATFORMS`. Never throws (allowlist is a gate, not a hot
+   * path): a Settings read hiccup degrades to the env fallback.
+   */
+  async getSupportedScanPlatforms(): Promise<ScanPlatform[]> {
+    let configured: unknown = null;
+    try {
+      configured = await this._settings.get(OPERATION_PLAN_ALLOWED_PLATFORMS_SETTING);
+    } catch (err) {
+      this.logger.warn(
+        `operation_plan.allowed_platforms read failed; using ENGAGE_SUPPORTED_PLATFORMS: ${(err as Error).message}`
+      );
+    }
+    const fromSettings = toScanPlatforms(configured);
+    if (fromSettings.length) return fromSettings;
+    return toScanPlatforms(process.env.ENGAGE_SUPPORTED_PLATFORMS ?? 'x,reddit');
   }
 
   /** Effective pacing config: stored value deep-merged onto the defaults. */
@@ -326,10 +405,12 @@ export function mergePacing(
     workflow: {
       x: mergePlatform(base.workflow.x, ow.x),
       reddit: mergePlatform(base.workflow.reddit, ow.reddit),
+      linkedin: mergePlatform(base.workflow.linkedin, ow.linkedin),
     },
     extension: {
       x: mergePlatform(base.extension.x, oe.x),
       reddit: mergePlatform(base.extension.reddit, oe.reddit),
+      linkedin: mergePlatform(base.extension.linkedin, oe.linkedin),
       interUnit: {
         delayMs: num(oe.interUnit?.delayMs, base.extension.interUnit.delayMs, true),
         jitterMs: num(oe.interUnit?.jitterMs, base.extension.interUnit.jitterMs, true),

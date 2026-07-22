@@ -9,6 +9,7 @@ import {
   ENGAGE_OPPORTUNITY_TTL_DAYS_KEY,
   DEFAULT_SCAN_PACING,
   mergePacing,
+  toScanPlatforms,
 } from '../engage-scan-config.service';
 
 function settingsMock(values: Record<string, unknown> = {}) {
@@ -52,7 +53,7 @@ describe('EngageScanConfigService.onModuleInit', () => {
     await svc.onModuleInit();
     expect(settings.set).toHaveBeenCalledWith(
       ENGAGE_SCAN_FRESHNESS_KEY,
-      { x: 24, reddit: 24 },
+      { x: 24, reddit: 24, linkedin: 24 },
       expect.objectContaining({ type: 'object' })
     );
   });
@@ -63,6 +64,7 @@ describe('EngageScanConfigService.getFreshnessWindowMs', () => {
     const svc = new EngageScanConfigService(settingsMock());
     expect(await svc.getFreshnessWindowMs('x')).toBe(24 * 3_600_000);
     expect(await svc.getFreshnessWindowMs('reddit')).toBe(24 * 3_600_000);
+    expect(await svc.getFreshnessWindowMs('linkedin')).toBe(24 * 3_600_000);
   });
 
   it('honours a stored per-platform override; sibling stays default', async () => {
@@ -82,6 +84,59 @@ describe('EngageScanConfigService.getFreshnessWindowMs', () => {
     } finally {
       if (prev === undefined) delete process.env.ENGAGE_X_SCAN_WINDOW_HOURS;
       else process.env.ENGAGE_X_SCAN_WINDOW_HOURS = prev;
+    }
+  });
+});
+
+describe('toScanPlatforms', () => {
+  it('parses a settings string[] down to the scannable set (drops non-scannable)', () => {
+    expect(toScanPlatforms(['x', 'reddit', 'linkedin', 'instagram', 'youtube'])).toEqual([
+      'x',
+      'reddit',
+      'linkedin',
+    ]);
+  });
+  it('parses an env comma-string and dedupes/lowercases', () => {
+    expect(toScanPlatforms('Reddit, LINKEDIN ,reddit')).toEqual(['reddit', 'linkedin']);
+  });
+  it('returns [] for absent / non-list input', () => {
+    expect(toScanPlatforms(undefined)).toEqual([]);
+    expect(toScanPlatforms(null)).toEqual([]);
+    expect(toScanPlatforms({})).toEqual([]);
+  });
+});
+
+describe('EngageScanConfigService.getSupportedScanPlatforms', () => {
+  it('prefers operation_plan.allowed_platforms (intersected with scannable)', async () => {
+    const svc = new EngageScanConfigService(
+      settingsMock({ 'operation_plan.allowed_platforms': ['linkedin', 'instagram', 'x'] })
+    );
+    expect(await svc.getSupportedScanPlatforms()).toEqual(['linkedin', 'x']);
+  });
+
+  it('falls back to ENGAGE_SUPPORTED_PLATFORMS when the allowlist is empty/absent', async () => {
+    const prev = process.env.ENGAGE_SUPPORTED_PLATFORMS;
+    process.env.ENGAGE_SUPPORTED_PLATFORMS = 'reddit';
+    try {
+      // Empty configured allowlist ⇒ treated as "unset" ⇒ env fallback.
+      const svc = new EngageScanConfigService(
+        settingsMock({ 'operation_plan.allowed_platforms': [] })
+      );
+      expect(await svc.getSupportedScanPlatforms()).toEqual(['reddit']);
+    } finally {
+      if (prev === undefined) delete process.env.ENGAGE_SUPPORTED_PLATFORMS;
+      else process.env.ENGAGE_SUPPORTED_PLATFORMS = prev;
+    }
+  });
+
+  it('defaults to x,reddit when neither settings nor env is set', async () => {
+    const prev = process.env.ENGAGE_SUPPORTED_PLATFORMS;
+    delete process.env.ENGAGE_SUPPORTED_PLATFORMS;
+    try {
+      const svc = new EngageScanConfigService(settingsMock());
+      expect(await svc.getSupportedScanPlatforms()).toEqual(['x', 'reddit']);
+    } finally {
+      if (prev !== undefined) process.env.ENGAGE_SUPPORTED_PLATFORMS = prev;
     }
   });
 });

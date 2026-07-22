@@ -7,7 +7,7 @@
 //   - libraries/.../dtos/posts/metrics-due.dto.ts, metrics-ingest.dto.ts
 // Keep them in sync if the backend contract changes.
 
-export type ScanTaskPlatform = 'x' | 'reddit';
+export type ScanTaskPlatform = 'x' | 'reddit' | 'linkedin';
 export type ScanTaskType = 'keyword' | 'channel' | 'tracked';
 
 /** Where to resume from (mirrors EngageScanCursor). */

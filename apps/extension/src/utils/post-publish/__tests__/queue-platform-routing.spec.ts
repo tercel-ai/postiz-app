@@ -11,6 +11,10 @@ vi.mock('@gitroom/extension/pages/background/x.poster', () => ({
   postXCompose: vi.fn(),
   postXReply: vi.fn(),
 }));
+vi.mock('@gitroom/extension/pages/background/linkedin.poster', () => ({
+  postLinkedinCompose: vi.fn(),
+  postLinkedinComment: vi.fn(),
+}));
 
 import {
   postRedditComment,
@@ -20,6 +24,10 @@ import {
   postXCompose,
   postXReply,
 } from '@gitroom/extension/pages/background/x.poster';
+import {
+  postLinkedinCompose,
+  postLinkedinComment,
+} from '@gitroom/extension/pages/background/linkedin.poster';
 import {
   enqueuePublishBatch,
   publishQueueSnapshot,
@@ -32,6 +40,8 @@ const xCompose = vi.mocked(postXCompose);
 const xReply = vi.mocked(postXReply);
 const rSubmit = vi.mocked(submitRedditPost);
 const rComment = vi.mocked(postRedditComment);
+const liCompose = vi.mocked(postLinkedinCompose);
+const liComment = vi.mocked(postLinkedinComment);
 
 describe('default publisher platform routing', () => {
   beforeEach(() => {
@@ -182,5 +192,57 @@ describe('default publisher platform routing', () => {
     });
     expect(xCompose).not.toHaveBeenCalled();
     expect(publishQueueSnapshot()[0].status).toBe('published');
+  });
+
+  it('publishes a LinkedIn thread via compose share then self-comment chain', async () => {
+    liCompose.mockResolvedValue({
+      ok: true,
+      permalink: 'https://www.linkedin.com/feed/update/urn:li:activity:1/',
+      postId: 'urn:li:activity:1',
+    });
+    liComment.mockResolvedValue({ ok: true, postId: 'urn:li:comment:(x,y)' });
+
+    enqueuePublishBatch(
+      'req-1',
+      [
+        {
+          taskId: 'li-thread',
+          platform: 'linkedin',
+          segments: [{ text: 'main' }, { text: 'follow-up' }],
+        },
+      ],
+      1
+    );
+    await waitForPublishIdle();
+
+    expect(liCompose).toHaveBeenCalledWith({ text: 'main' });
+    expect(liComment).toHaveBeenCalledWith({
+      url: 'https://www.linkedin.com/feed/update/urn:li:activity:1/',
+      text: 'follow-up',
+    });
+    expect(xCompose).not.toHaveBeenCalled();
+    expect(rSubmit).not.toHaveBeenCalled();
+    expect(publishQueueSnapshot()[0]).toMatchObject({
+      status: 'published',
+      permalink: 'https://www.linkedin.com/feed/update/urn:li:activity:1/',
+    });
+  });
+
+  it('rejects a LinkedIn image post at enqueue (media not supported yet)', async () => {
+    const ack = enqueuePublishBatch(
+      'req-1',
+      [
+        {
+          taskId: 'li-image',
+          platform: 'linkedin',
+          segments: [{ text: 'hi', images: ['https://api/img.png'] }],
+        },
+      ],
+      1
+    );
+    await waitForPublishIdle();
+    expect(ack.rejected[0]).toMatchObject({ taskId: 'li-image' });
+    expect(ack.rejected[0].reason).toMatch(/image posts are not supported/i);
+    expect(liCompose).not.toHaveBeenCalled();
   });
 });

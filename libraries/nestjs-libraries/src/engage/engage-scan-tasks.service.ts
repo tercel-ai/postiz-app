@@ -77,14 +77,22 @@ export function buildRedditChannelKeywordQuery(
   return parts.length ? parts.join(' OR ') : undefined;
 }
 
-// Platforms the extension can scan. Keyword units fan out to each (a keyword has
-// no platform of its own); channel/tracked carry their own platform.
-const SCAN_PLATFORMS: ScanTaskPlatform[] = (
+// Env-only fallback allowlist, used when the admin operation-plan allowlist is
+// absent AND the scan-config resolver is unavailable (e.g. unit tests that build
+// this service with a partial config mock). The live gate is resolved per call by
+// _resolveScanPlatforms → EngageScanConfigService.getSupportedScanPlatforms
+// (`settings.operation_plan.allowed_platforms || ENGAGE_SUPPORTED_PLATFORMS`).
+// Keyword units fan out to each platform (a keyword has no platform of its own);
+// channel/tracked carry their own platform.
+const ENV_SCAN_PLATFORMS: ScanTaskPlatform[] = (
   process.env.ENGAGE_SUPPORTED_PLATFORMS ?? 'x,reddit'
 )
   .split(',')
   .map((p) => p.trim().toLowerCase())
-  .filter((p): p is ScanTaskPlatform => p === 'x' || p === 'reddit');
+  .filter(
+    (p): p is ScanTaskPlatform =>
+      p === 'x' || p === 'reddit' || p === 'linkedin'
+  );
 
 // Default batch size handed back per call — small so a browser never over-leases
 // units it won't get to (a stuck lease only frees on the stale-reclaim TTL).
@@ -140,7 +148,7 @@ export class EngageScanTasksService {
 
     const windowDays = opts.windowDays ?? (await this._entitlement.getMetricsWindowDays(orgId));
     const since = new Date(Date.now() - windowDays * 86_400_000);
-    const platforms = SCAN_PLATFORMS as string[];
+    const platforms = (await this._resolveScanPlatforms()) as string[];
     const opportunities = await this._engageRepo.getRecentGlobalOpportunities(
       platforms,
       since,
@@ -273,12 +281,13 @@ export class EngageScanTasksService {
     const cadenceMs =
       (await this._entitlement.getScanIntervalHours(orgId)) * 3_600_000;
     const pacing = await this._config.getPacing();
+    const platforms = await this._resolveScanPlatforms();
     const selectedUnitSet = Array.isArray(opts.selectedUnits)
       ? new Set(opts.selectedUnits.map((u) => this._selectorKey(u)))
       : null;
     const units = selectedUnitSet
-      ? this._enumerateUnits(ctx).filter((u) => selectedUnitSet.has(this._selectorKey(u)))
-      : this._enumerateUnits(ctx);
+      ? this._enumerateUnits(ctx, platforms).filter((u) => selectedUnitSet.has(this._selectorKey(u)))
+      : this._enumerateUnits(ctx, platforms);
 
     // Active normalised keywords for building combined tracked+keyword queries.
     const activeKeywords = ctx.keywords
@@ -305,30 +314,56 @@ export class EngageScanTasksService {
     return `${u.platform}:${u.scanType}:${u.scanKey}`;
   }
 
+  /**
+   * Resolve the live scan-platform allowlist:
+   *   settings.operation_plan.allowed_platforms || ENGAGE_SUPPORTED_PLATFORMS
+   * Delegated to EngageScanConfigService (which owns the Settings read + the
+   * intersection with the scannable set). Falls back to the env-derived
+   * ENV_SCAN_PLATFORMS when the config resolver is unavailable (partial mocks in
+   * unit tests) or returns nothing — the gate must never open to zero silently
+   * because of a wiring gap.
+   */
+  private async _resolveScanPlatforms(): Promise<ScanTaskPlatform[]> {
+    try {
+      const resolved = await this._config.getSupportedScanPlatforms?.();
+      if (resolved?.length) return resolved as ScanTaskPlatform[];
+    } catch (err) {
+      this.logger.warn(
+        `Scan platform resolution failed; using env fallback: ${(err as Error).message}`
+      );
+    }
+    return ENV_SCAN_PLATFORMS;
+  }
+
   /** Org config → flat list of global scan units (keyword × platform, channel,
-   * tracked). Keyword text is normalised to the global scanKey. */
-  private _enumerateUnits(ctx: {
-    keywords: { keyword: string; enabled: boolean }[];
-    monitoredChannels: { platform: string; channelId: string }[];
-    trackedAccounts: { platform: string; username: string }[];
-  }): { platform: ScanTaskPlatform; scanType: ScanTaskType; scanKey: string }[] {
+   * tracked). Keyword text is normalised to the global scanKey. `platforms` is
+   * the resolved allowlist (settings → env; see _resolveScanPlatforms). */
+  private _enumerateUnits(
+    ctx: {
+      keywords: { keyword: string; enabled: boolean }[];
+      monitoredChannels: { platform: string; channelId: string }[];
+      trackedAccounts: { platform: string; username: string }[];
+    },
+    platforms: ScanTaskPlatform[]
+  ): { platform: ScanTaskPlatform; scanType: ScanTaskType; scanKey: string }[] {
     const units: {
       platform: ScanTaskPlatform;
       scanType: ScanTaskType;
       scanKey: string;
     }[] = [];
 
-    // ENGAGE_SUPPORTED_PLATFORMS is a hard allowlist that gates EVERY unit type
-    // (keyword/channel/tracked), so an operator can fully kill a platform — e.g.
-    // `ENGAGE_SUPPORTED_PLATFORMS=reddit` to stop all X scanning (X via the
-    // user's personal session is anti-automation-risky) without a code change.
-    const supported = new Set<ScanTaskPlatform>(SCAN_PLATFORMS);
+    // The resolved allowlist is a hard gate on EVERY unit type (keyword/channel/
+    // tracked), so an operator can fully kill a platform — e.g. an operation-plan
+    // allowlist of just `reddit` (or `ENGAGE_SUPPORTED_PLATFORMS=reddit`) stops
+    // all X scanning (X via the user's personal session is anti-automation-risky)
+    // without a code change.
+    const supported = new Set<ScanTaskPlatform>(platforms);
 
     for (const kw of ctx.keywords) {
       if (!kw.enabled) continue;
       const scanKey = normalizeKeyword(kw.keyword);
       if (!scanKey) continue;
-      for (const platform of SCAN_PLATFORMS) {
+      for (const platform of platforms) {
         units.push({ platform, scanType: 'keyword', scanKey });
       }
     }
@@ -345,8 +380,13 @@ export class EngageScanTasksService {
       }
     }
     for (const a of ctx.trackedAccounts) {
+      // X + LinkedIn support a tracked (per-author) scope; Reddit tracks a user
+      // too. LinkedIn tracked = the account's recent-activity feed (the extension
+      // resolves it to /in/<handle>/recent-activity). Reddit has no channel here.
       if (
-        (a.platform === 'x' || a.platform === 'reddit') &&
+        (a.platform === 'x' ||
+          a.platform === 'reddit' ||
+          a.platform === 'linkedin') &&
         supported.has(a.platform)
       ) {
         units.push({

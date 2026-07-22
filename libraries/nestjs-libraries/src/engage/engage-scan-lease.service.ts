@@ -62,6 +62,9 @@ export function normalizeUsername(platform: string, username: string): string {
 const HANDLE_PATTERN: Record<string, RegExp> = {
   x: /^[a-z0-9_]{1,15}$/,
   reddit: /^[a-z0-9_-]{1,30}$/,
+  // LinkedIn vanity public-id slug (the /in/<handle> segment). Case-preserved
+  // (verbatim in normalizeUsername), alphanumerics + hyphen/underscore.
+  linkedin: /^[a-zA-Z0-9_-]{1,100}$/,
 };
 export function isValidUsername(
   platform: string,

@@ -23,16 +23,18 @@
 //     probe and re-enqueue; taskId de-dupe makes re-enqueueing safe while a
 //     task is still active.
 //   - Platforms: reddit publishes via the session API (new submission +
-//     comment-chain thread). x publishes via BROWSER-TAB automation only —
-//     the extension opens x.com's own composer, fills it, clicks X's own
-//     Post/Reply button and intercepts the CreateTweet response. It never
-//     calls X's API directly from the worker.
+//     comment-chain thread). x and linkedin publish via BROWSER-TAB automation
+//     only — the extension opens the platform's own composer, fills it, clicks
+//     the platform's own Post/Reply button and intercepts the create response.
+//     Neither calls the platform API directly from the worker. LinkedIn threads
+//     continue as native comments on the previous segment; LinkedIn image posts
+//     are not supported via the extension yet (text-only).
 //
 // Both sides import these types, so the payload shape can never drift.
 
 import { EXTENSION_MESSAGE } from './brand';
 
-export type PublishPlatform = 'x' | 'reddit';
+export type PublishPlatform = 'x' | 'reddit' | 'linkedin';
 
 export interface PublishThreadSegment {
   /** Plain text of this segment. */

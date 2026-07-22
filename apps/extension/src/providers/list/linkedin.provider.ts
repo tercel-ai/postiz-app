@@ -7,6 +7,8 @@ export class LinkedinProvider implements ProviderInterface {
   attachTo = `[role="main"]`;
   style = 'light' as 'light';
   findIdentifier = (element: HTMLElement) => {
-    return element.closest('[data-urn]').getAttribute('data-urn');
+    // Guard the closest() lookup — a share box not wrapped in a [data-urn] node
+    // would otherwise throw on the null dereference.
+    return element.closest('[data-urn]')?.getAttribute('data-urn') ?? '';
   };
 }
