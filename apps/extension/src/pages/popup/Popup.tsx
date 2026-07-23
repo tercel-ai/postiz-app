@@ -175,16 +175,12 @@ export default function Popup() {
               Engage Replies
               <span className="pz-tab-count">{history.length}</span>
             </button>
-            {tab === 'queue' && queueRows.length > 0 && (
-              <button className="pz-clear-btn" onClick={() => setView('clear-queue')}>
-                Clear ›
-              </button>
-            )}
-            {tab === 'replies' && history.length > 0 && (
-              <button className="pz-clear-btn" onClick={() => setView('clear')}>
-                Clear ›
-              </button>
-            )}
+            <button
+              className="pz-clear-btn"
+              onClick={() => setView(tab === 'queue' ? 'clear-queue' : 'clear')}
+            >
+              Clear ›
+            </button>
           </div>
 
           {tab === 'queue' ? (

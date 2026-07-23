@@ -117,16 +117,14 @@ export default function Panel() {
               Engage Replies
               <span className="pz-tab-count">{history.length}</span>
             </button>
-            {tab === 'queue' && queueRows.length > 0 && (
-              <button className="pz-clear-btn" onClick={() => setShowClearQueue(true)}>
-                Clear ›
-              </button>
-            )}
-            {tab === 'replies' && history.length > 0 && (
-              <button className="pz-clear-btn" onClick={() => setShowClear(true)}>
-                Clear ›
-              </button>
-            )}
+            <button
+              className="pz-clear-btn"
+              onClick={() =>
+                tab === 'queue' ? setShowClearQueue(true) : setShowClear(true)
+              }
+            >
+              Clear ›
+            </button>
           </div>
 
           {tab === 'queue' ? (
