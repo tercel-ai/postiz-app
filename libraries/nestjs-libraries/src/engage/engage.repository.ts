@@ -313,6 +313,73 @@ export class EngageRepository {
     });
   }
 
+  /**
+   * Org-level aggregate config for clients that have no project context — the
+   * browser extension's scan panel, which enumerates keywords/channels/tracked
+   * accounts client-side to render the selectable scan units. It must see the
+   * SAME org-wide set the server-side scan loop (claimNext) enumerates, not just
+   * the legacy null-project row, or the extension's units diverge from what
+   * actually gets scanned.
+   *
+   * The null-project row supplies the scalar/entitlement/xReplyAccounts shape
+   * (so the response is shape-identical to getConfig(projectId)); the three
+   * relation lists are then REPLACED with the union across every ENABLED config
+   * (null-project + each project), deduped by the same global unit identity the
+   * scan loop keys on (normalized keyword / platform+channelId / platform+
+   * normalized username). Disabled configs are excluded — consistent with
+   * claimNext, which only scans enabled configs. Duplicates prefer an enabled
+   * row so a keyword enabled under any project surfaces as enabled.
+   */
+  async getOrgAggregateConfig(organizationId: string) {
+    const include = {
+      keywords: {
+        orderBy: { createdAt: 'asc' as const },
+        include: { initialScans: { orderBy: { platform: 'asc' as const } } },
+      },
+      monitoredChannels: { orderBy: { createdAt: 'asc' as const } },
+      trackedAccounts: { orderBy: { createdAt: 'asc' as const } },
+    };
+    const [base, configs] = await Promise.all([
+      this.getOrCreateConfig(organizationId, null),
+      this._config.model.engageConfig.findMany({
+        where: { organizationId, enabled: true },
+        include,
+      }),
+    ]);
+
+    const pickEnabled = <T extends { enabled: boolean }>(
+      map: Map<string, T>,
+      key: string,
+      row: T
+    ) => {
+      const prev = map.get(key);
+      if (!prev || (!prev.enabled && row.enabled)) map.set(key, row);
+    };
+
+    const kwByKey = new Map<string, (typeof base.keywords)[number]>();
+    const chByKey = new Map<string, (typeof base.monitoredChannels)[number]>();
+    const acctByKey = new Map<string, (typeof base.trackedAccounts)[number]>();
+    for (const c of configs) {
+      for (const kw of c.keywords) {
+        const key = normalizeKeyword(kw.keyword);
+        if (key) pickEnabled(kwByKey, key, kw);
+      }
+      for (const ch of c.monitoredChannels) {
+        pickEnabled(chByKey, `${ch.platform}:${ch.channelId}`, ch);
+      }
+      for (const a of c.trackedAccounts) {
+        pickEnabled(acctByKey, `${a.platform}:${normalizeUsername(a.platform ?? 'x', a.username)}`, a);
+      }
+    }
+
+    return {
+      ...base,
+      keywords: [...kwByKey.values()],
+      monitoredChannels: [...chByKey.values()],
+      trackedAccounts: [...acctByKey.values()],
+    };
+  }
+
   async getAllEnabledOrgContexts() {
     return this._config.model.engageConfig.findMany({
       where: { enabled: true },
@@ -347,6 +414,28 @@ export class EngageRepository {
   async getEnabledOrgContext(organizationId: string, projectId: string | null = null) {
     return this._config.model.engageConfig.findFirst({
       where: { organizationId, projectId, enabled: true },
+      include: {
+        keywords: { where: { enabled: true }, orderBy: { createdAt: 'asc' } },
+        monitoredChannels: { where: { enabled: true }, orderBy: { createdAt: 'asc' } },
+        trackedAccounts: { where: { enabled: true }, orderBy: { createdAt: 'asc' } },
+      },
+    });
+  }
+
+  /**
+   * EVERY enabled engage config for an org — the legacy null-project row AND
+   * each project-scoped row. The browser-extension scan loop enumerates units
+   * from all of them so that keywords/channels/tracked accounts activated on a
+   * project's config (e.g. when an operation plan is committed) are actually
+   * scanned, not just the legacy org-level ones.
+   *
+   * Scan units are GLOBAL (identified by platform/scanType/scanKey), so the
+   * caller dedups units that repeat across projects; fan-out at ingest time is
+   * unaffected because getOrgContextsForUnit resolves subscribers per unit.
+   */
+  async getEnabledConfigsForOrg(organizationId: string) {
+    return this._config.model.engageConfig.findMany({
+      where: { organizationId, enabled: true },
       include: {
         keywords: { where: { enabled: true }, orderBy: { createdAt: 'asc' } },
         monitoredChannels: { where: { enabled: true }, orderBy: { createdAt: 'asc' } },

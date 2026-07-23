@@ -31,6 +31,15 @@ describe('EngageService.getConfig — operationPlan block', () => {
         trackedAccounts: [],
         xReplyAccounts: [],
       })),
+      // getConfig(org) with no projectId routes here (org-wide aggregate for the
+      // browser extension); same empty shape as the null-project config.
+      getOrgAggregateConfig: vi.fn(async () => ({
+        id: 'cfg-1',
+        keywords: [],
+        monitoredChannels: [],
+        trackedAccounts: [],
+        xReplyAccounts: [],
+      })),
       getOrgScanStatus: vi.fn(async () => ({})),
       getKeywordCursors: vi.fn(async () => ({})),
       getChannelCursors: vi.fn(async () => ({})),

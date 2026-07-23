@@ -182,7 +182,14 @@ export class EngageService implements OnApplicationBootstrap {
     const scanIntervalHours = entitlement.limits.scanIntervalHours;
     const cadenceMs = scanIntervalHours * 3_600_000;
     const [config, scanStatus] = await Promise.all([
-      this._engageRepository.getOrCreateConfig(org.id, projectId),
+      // No projectId → the caller has no project context (the browser extension's
+      // scan panel). Return the org-wide aggregate (union across every enabled
+      // config, deduped) so its selectable scan units match what the server-side
+      // scan loop actually enumerates. A concrete projectId → that project's
+      // config only. aisee-app always passes projectId, so it is unaffected.
+      projectId
+        ? this._engageRepository.getOrCreateConfig(org.id, projectId)
+        : this._engageRepository.getOrgAggregateConfig(org.id),
       // getOrgScanStatus stays org-scoped (not yet project-aware) — a known,
       // separately-flagged gap, not a regression introduced here.
       this._engageRepository.getOrgScanStatus(org.id, scanIntervalHours),

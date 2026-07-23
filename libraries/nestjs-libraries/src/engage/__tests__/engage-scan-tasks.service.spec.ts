@@ -24,6 +24,7 @@ const DISTINCT_PHASE_PACING = {
 
 function build(opts: {
   orgContext?: any;
+  orgContexts?: any[];
   unitByToken?: any;
   subscribers?: any[];
   claimResults?: any[];
@@ -31,8 +32,13 @@ function build(opts: {
   scanPlatforms?: any[];
 } = {}) {
   let claimCall = 0;
+  // The scan loop now enumerates units across EVERY enabled config (null-project
+  // + each project-scoped one). `orgContexts` drives the multi-config case;
+  // `orgContext` stays as a single-config shorthand.
+  const allContexts = opts.orgContexts ?? [opts.orgContext].filter(Boolean);
   const engageRepo = {
     getEnabledOrgContext: vi.fn(async () => opts.orgContext ?? null),
+    getEnabledConfigsForOrg: vi.fn(async () => allContexts),
     findScanCursorByToken: vi.fn(async () => opts.unitByToken ?? null),
     getOrgContextsForUnit: vi.fn(async () => opts.subscribers ?? []),
   };
@@ -41,7 +47,14 @@ function build(opts: {
     completeByToken: vi.fn(async () => true),
     releaseByToken: vi.fn(async () => true),
   };
-  const ingest = { ingestForOrg: vi.fn(async () => 3) };
+  const ingest = {
+    ingestForOrg: vi.fn(async () => 3),
+    // Each post scores == its own `score` field so a test can drive the min-score
+    // gate; keyword-match count is the number of posts scored.
+    scoreAllForOrg: vi.fn((posts: any[]) =>
+      posts.map((p) => ({ ...p, score: p.score ?? 100 }))
+    ),
+  };
   const config = {
     getPacing: vi.fn(async () => opts.pacing ?? DEFAULT_SCAN_PACING),
     getFreshnessWindowMs: vi.fn(async () => 24 * 3_600_000),
@@ -263,6 +276,101 @@ describe('EngageScanTasksService.sync — claim (bootstrap)', () => {
 
     expect(res.nextTasks).toEqual([]);
     expect(lease.claim).not.toHaveBeenCalled();
+  });
+
+  it('enumerates units across ALL enabled configs (legacy null-project + project-scoped) and dedups a keyword shared across projects', async () => {
+    const { svc, lease } = build({
+      // Legacy org-level config + a project-scoped config activated by an
+      // operation plan. 'shared' appears in both → one global unit per platform.
+      orgContexts: [
+        {
+          keywords: [{ keyword: 'shared', enabled: true }],
+          monitoredChannels: [],
+          trackedAccounts: [],
+        },
+        {
+          keywords: [
+            { keyword: 'shared', enabled: true },
+            { keyword: 'projectonly', enabled: true },
+          ],
+          monitoredChannels: [{ platform: 'reddit', channelId: 'ProjSub' }],
+          trackedAccounts: [],
+        },
+      ],
+      claimResults: [
+        snap({ platform: 'x', scanType: 'keyword', scanKey: 'shared', leaseToken: 't1' }),
+        snap({ platform: 'reddit', scanType: 'keyword', scanKey: 'shared', leaseToken: 't2' }),
+        snap({ platform: 'x', scanType: 'keyword', scanKey: 'projectonly', leaseToken: 't3' }),
+        snap({ platform: 'reddit', scanType: 'keyword', scanKey: 'projectonly', leaseToken: 't4' }),
+        snap({ platform: 'reddit', scanType: 'channel', scanKey: 'ProjSub', leaseToken: 't5' }),
+      ],
+    });
+
+    const res = await svc.sync('org1', { want: 20 });
+
+    // 'shared' → 1 unit per platform (deduped), not 2; 'projectonly' from the
+    // project config is included; the project's monitored channel is included.
+    const claimed = lease.claim.mock.calls.map(([a]) => `${a.platform}:${a.scanType}:${a.scanKey}`);
+    expect(claimed).toContain('reddit:channel:ProjSub');
+    expect(claimed).toContain('x:keyword:projectonly');
+    expect(claimed.filter((k) => k === 'x:keyword:shared')).toHaveLength(1);
+    expect(claimed.filter((k) => k === 'reddit:keyword:shared')).toHaveLength(1);
+    expect(res.nextTasks).toHaveLength(5);
+  });
+
+  it('builds tracked/reddit-channel queries from keywords pooled across all configs', async () => {
+    const { svc, lease } = build({
+      orgContexts: [
+        {
+          keywords: [{ keyword: 'alpha', enabled: true }],
+          monitoredChannels: [],
+          trackedAccounts: [{ platform: 'x', username: '@Alice' }],
+        },
+        {
+          keywords: [{ keyword: 'beta', enabled: true }],
+          monitoredChannels: [],
+          trackedAccounts: [],
+        },
+      ],
+      claimResults: [
+        snap({ platform: 'x', scanType: 'tracked', scanKey: 'alice', leaseToken: 'tok' }),
+      ],
+      scanPlatforms: ['x'],
+    });
+
+    const res = await svc.sync('org1', {
+      want: 1,
+      selectedUnits: [{ platform: 'x', scanType: 'tracked', scanKey: 'alice' }],
+    } as any);
+
+    // rawQuery pools keywords from BOTH configs: from:alice (alpha OR beta).
+    expect(res.nextTasks[0].rawQuery).toBe(buildTrackedKeywordQuery('alice', ['alpha', 'beta']));
+  });
+});
+
+describe('EngageScanTasksService.ingestCollectedPosts', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('scores + persists collected posts against EVERY enabled config (null-project + project-scoped)', async () => {
+    const { svc, ingest } = build({
+      orgContexts: [
+        { projectId: null, keywords: [{ keyword: 'alpha', enabled: true }], monitoredChannels: [], trackedAccounts: [] },
+        { projectId: 'p1', keywords: [{ keyword: 'beta', enabled: true }], monitoredChannels: [], trackedAccounts: [] },
+      ],
+    });
+
+    const res = await svc.ingestCollectedPosts('org1', [{ id: 'x', postPublishedAt: new Date() }] as any);
+
+    // One config ingested per config with a keyword match (3 accepted each).
+    expect(ingest.ingestForOrg).toHaveBeenCalledTimes(2);
+    expect(res.accepted).toBe(6);
+    expect(res.keywordMatched).toBe(2); // one post × two configs
+  });
+
+  it('returns no-config reason when the org has no enabled config at all', async () => {
+    const { svc } = build({ orgContexts: [] });
+    const res = await svc.ingestCollectedPosts('org1', [{ id: 'x', postPublishedAt: new Date() }] as any);
+    expect(res.reason).toBe('no engage config found for org');
   });
 });
 

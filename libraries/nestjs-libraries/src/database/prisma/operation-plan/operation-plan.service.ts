@@ -1381,7 +1381,10 @@ export class OperationPlanService implements OnApplicationBootstrap {
         endsAt: plan.endsAt,
         data: plan.data ?? null,
       },
-      posts,
+      // getPostsForPlan returns every part flat (anchor + thread follow-ups as
+      // separate rows). Nest each thread under its anchor so the overview shows
+      // one entry per content item, its follow-ups carried in `thread`.
+      posts: this._nestThreadPosts(posts),
       engageStats,
       // The plan's engagement targets, with keywordTargets keyed by keyword TEXT
       // (not the internal keyword id persisted in planPayload) plus a flat list
@@ -1389,6 +1392,41 @@ export class OperationPlanService implements OnApplicationBootstrap {
       engagePolicies: engageView.engagePolicies,
       engageKeywords: engageView.engageKeywords,
     };
+  }
+
+  // Rebuild the flat post list into anchor posts each carrying their thread
+  // follow-ups in `thread`. materializePlanPosts links a thread as a chain
+  // (anchor <- part0 <- part1 …), all parts sharing the anchor's group; we walk
+  // that parentPostId chain to nest the follow-ups in publish order. A part
+  // whose parent is absent from the set (e.g. the anchor was soft-deleted) is
+  // treated as its own anchor so it is never dropped from the overview.
+  private _nestThreadPosts<T extends { id: string; parentPostId: string | null }>(
+    posts: T[]
+  ): (T & { thread: T[] })[] {
+    const ids = new Set(posts.map((p) => p.id));
+    const childrenByParent = new Map<string, T[]>();
+    for (const post of posts) {
+      if (!post.parentPostId || !ids.has(post.parentPostId)) continue;
+      const siblings = childrenByParent.get(post.parentPostId);
+      if (siblings) siblings.push(post);
+      else childrenByParent.set(post.parentPostId, [post]);
+    }
+
+    const collectThread = (anchorId: string): T[] => {
+      const thread: T[] = [];
+      const queue = [...(childrenByParent.get(anchorId) ?? [])];
+      while (queue.length) {
+        const node = queue.shift()!;
+        thread.push(node);
+        const kids = childrenByParent.get(node.id);
+        if (kids) queue.push(...kids);
+      }
+      return thread;
+    };
+
+    return posts
+      .filter((post) => !post.parentPostId || !ids.has(post.parentPostId))
+      .map((anchor) => ({ ...anchor, thread: collectThread(anchor.id) }));
   }
 
   async reconcileBillingPending(limit = 50): Promise<void> {

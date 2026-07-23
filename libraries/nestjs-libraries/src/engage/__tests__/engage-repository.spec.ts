@@ -2866,4 +2866,95 @@ describe('EngageRepository.getOrgScanStatus', () => {
       expect(await repo.getKeywordActivationStats()).toEqual([]);
     });
   });
+
+  describe('getOrgAggregateConfig', () => {
+    function buildConfigRepo(opts: { baseNull: any; enabledConfigs: any[] }) {
+      const configFindFirst = vi.fn().mockResolvedValue(opts.baseNull);
+      const configCreate = vi.fn();
+      const configFindMany = vi.fn().mockResolvedValue(opts.enabledConfigs);
+      const _config = {
+        model: {
+          engageConfig: {
+            findFirst: configFindFirst,
+            create: configCreate,
+            findMany: configFindMany,
+          },
+        },
+      } as any;
+      const repo = new EngageRepository(
+        _config, {} as any, {} as any, {} as any, {} as any, {} as any,
+        {} as any, {} as any, {} as any, {} as any, {} as any, {} as any
+      );
+      return { repo, configFindFirst, configFindMany };
+    }
+
+    it('unions keywords/channels/accounts across every enabled config, deduped by global unit identity, base scalars preserved', async () => {
+      const base = {
+        id: 'cfg-null',
+        organizationId: 'org1',
+        projectId: null,
+        enabled: true,
+        xReplyAccounts: [{ id: 'ra1' }],
+        keywords: [],
+        monitoredChannels: [],
+        trackedAccounts: [],
+      };
+      const { repo, configFindMany } = buildConfigRepo({
+        baseNull: base,
+        enabledConfigs: [
+          {
+            projectId: null,
+            keywords: [{ id: 'k1', keyword: 'AI', enabled: true }],
+            monitoredChannels: [],
+            trackedAccounts: [{ id: 'a1', platform: 'x', username: '@Alice', enabled: true }],
+          },
+          {
+            projectId: 'p1',
+            // 'ai' dups the null-config 'AI' (same normalized key) → one entry;
+            // 'ML' is project-only. Channel + a dup account (@alice) too.
+            keywords: [
+              { id: 'k2', keyword: 'ai', enabled: true },
+              { id: 'k3', keyword: 'ML', enabled: true },
+            ],
+            monitoredChannels: [{ id: 'c1', platform: 'reddit', channelId: 'LocalLLM', enabled: true }],
+            trackedAccounts: [{ id: 'a2', platform: 'x', username: 'alice', enabled: true }],
+          },
+        ],
+      });
+
+      const res = await repo.getOrgAggregateConfig('org1');
+
+      // Only ENABLED configs are queried (consistent with the scan loop).
+      expect(configFindMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { organizationId: 'org1', enabled: true } })
+      );
+      // Base scalars + xReplyAccounts preserved.
+      expect(res.id).toBe('cfg-null');
+      expect(res.xReplyAccounts).toEqual([{ id: 'ra1' }]);
+      // 'AI'/'ai' collapse to one; 'ML' present → 2 keywords.
+      expect(res.keywords.map((k: any) => k.keyword).sort()).toEqual(['AI', 'ML']);
+      // @Alice / alice collapse to one tracked account.
+      expect(res.trackedAccounts).toHaveLength(1);
+      // project channel surfaced.
+      expect(res.monitoredChannels.map((c: any) => c.channelId)).toEqual(['LocalLLM']);
+    });
+
+    it('prefers the enabled row when the same unit is disabled in one config and enabled in another', async () => {
+      const base = {
+        id: 'cfg-null', organizationId: 'org1', projectId: null, enabled: true,
+        xReplyAccounts: [], keywords: [], monitoredChannels: [], trackedAccounts: [],
+      };
+      const { repo } = buildConfigRepo({
+        baseNull: base,
+        enabledConfigs: [
+          { keywords: [{ id: 'k1', keyword: 'AI', enabled: false }], monitoredChannels: [], trackedAccounts: [] },
+          { keywords: [{ id: 'k2', keyword: 'ai', enabled: true }], monitoredChannels: [], trackedAccounts: [] },
+        ],
+      });
+
+      const res = await repo.getOrgAggregateConfig('org1');
+      expect(res.keywords).toHaveLength(1);
+      expect(res.keywords[0].enabled).toBe(true);
+    });
+  });
 });

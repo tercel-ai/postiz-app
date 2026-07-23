@@ -176,23 +176,35 @@ export class EngageScanTasksService {
     posts: RawPost[]
   ): Promise<{ accepted: number; keywordMatched: number; scoreFiltered: number; reason?: string }> {
     if (!posts.length) return { accepted: 0, keywordMatched: 0, scoreFiltered: 0, reason: 'no posts' };
-    const ctx = await this._engageRepo.getEnabledOrgContext(orgId);
-    if (!ctx) return { accepted: 0, keywordMatched: 0, scoreFiltered: 0, reason: 'no engage config found for org' };
-    if (!ctx.keywords.length) {
+    // Score + persist against EVERY enabled config (legacy null-project + each
+    // project-scoped one), so a post matching a project-only keyword is kept and
+    // its project-scoped opportunity state is written — not silently dropped
+    // because only the null-project config was consulted.
+    const ctxs = await this._engageRepo.getEnabledConfigsForOrg(orgId);
+    if (!ctxs.length) return { accepted: 0, keywordMatched: 0, scoreFiltered: 0, reason: 'no engage config found for org' };
+    const withKeywords = ctxs.filter((c) => c.keywords.length);
+    if (!withKeywords.length) {
       return { accepted: 0, keywordMatched: 0, scoreFiltered: 0, reason: 'org has no enabled keywords configured' };
     }
-    const allScored = this._ingest.scoreAllForOrg(posts, ctx as any);
     const minScore = Number(process.env.ENGAGE_MIN_SCORE ?? 60);
-    const scored = allScored.filter((p) => p.score >= minScore);
-    this.logger.log(`[collected-ingest] posts=${posts.length} keywordMatched=${allScored.length} scoreFiltered=${allScored.length - scored.length} minScore=${minScore} keywords=[${ctx.keywords.map((k) => k.keyword).join(', ')}]`);
-    if (!scored.length) {
-      const reason = allScored.length === 0
-        ? `no posts matched any keyword (configured: ${ctx.keywords.map((k) => k.keyword).join(', ')})`
-        : `all ${allScored.length} matched posts scored below MIN_SCORE=${minScore}`;
-      return { accepted: 0, keywordMatched: allScored.length, scoreFiltered: allScored.length - scored.length, reason };
+
+    let accepted = 0;
+    let keywordMatched = 0;
+    let scoreFiltered = 0;
+    for (const ctx of withKeywords) {
+      const allScored = this._ingest.scoreAllForOrg(posts, ctx as any);
+      const scored = allScored.filter((p) => p.score >= minScore);
+      keywordMatched += allScored.length;
+      scoreFiltered += allScored.length - scored.length;
+      this.logger.log(`[collected-ingest] projectId=${(ctx as any).projectId ?? null} posts=${posts.length} keywordMatched=${allScored.length} scoreFiltered=${allScored.length - scored.length} minScore=${minScore} keywords=[${ctx.keywords.map((k) => k.keyword).join(', ')}]`);
+      if (!scored.length) continue;
+      accepted += await this._ingest.ingestForOrg(ctx as any, posts);
     }
-    const accepted = await this._ingest.ingestForOrg(ctx as any, posts);
-    return { accepted, keywordMatched: allScored.length, scoreFiltered: allScored.length - scored.length };
+    if (!keywordMatched) {
+      const configured = [...new Set(withKeywords.flatMap((c) => c.keywords.map((k) => k.keyword)))].join(', ');
+      return { accepted: 0, keywordMatched: 0, scoreFiltered, reason: `no posts matched any keyword (configured: ${configured})` };
+    }
+    return { accepted, keywordMatched, scoreFiltered };
   }
 
   /** Complete (if any) + claim next batch. Bootstrap = call with no `completed`. */
@@ -275,8 +287,12 @@ export class EngageScanTasksService {
     want: number,
     opts: { force?: boolean; selectedUnits?: ScanUnitSelector[] } = {}
   ): Promise<EngageScanTask[]> {
-    const ctx = await this._engageRepo.getEnabledOrgContext(orgId);
-    if (!ctx) return [];
+    // ALL enabled configs — the legacy null-project row plus every project-scoped
+    // one. A keyword/channel/tracked account activated on a project's config
+    // (e.g. from a committed operation plan) must be scanned too, not only the
+    // org-level ones. Scan units are global, so we merge across configs and dedup.
+    const ctxs = await this._engageRepo.getEnabledConfigsForOrg(orgId);
+    if (!ctxs.length) return [];
 
     const cadenceMs =
       (await this._entitlement.getScanIntervalHours(orgId)) * 3_600_000;
@@ -285,15 +301,33 @@ export class EngageScanTasksService {
     const selectedUnitSet = Array.isArray(opts.selectedUnits)
       ? new Set(opts.selectedUnits.map((u) => this._selectorKey(u)))
       : null;
-    const units = selectedUnitSet
-      ? this._enumerateUnits(ctx, platforms).filter((u) => selectedUnitSet.has(this._selectorKey(u)))
-      : this._enumerateUnits(ctx, platforms);
 
-    // Active normalised keywords for building combined tracked+keyword queries.
-    const activeKeywords = ctx.keywords
-      .filter((k) => k.enabled)
-      .map((k) => normalizeKeyword(k.keyword))
-      .filter(Boolean);
+    // Enumerate every config's units, then dedup by global unit identity (a
+    // keyword shared across projects is ONE global unit / cursor).
+    const unitByKey = new Map<
+      string,
+      { platform: ScanTaskPlatform; scanType: ScanTaskType; scanKey: string }
+    >();
+    for (const ctx of ctxs) {
+      for (const u of this._enumerateUnits(ctx, platforms)) {
+        unitByKey.set(this._selectorKey(u), u);
+      }
+    }
+    const units = selectedUnitSet
+      ? [...unitByKey.values()].filter((u) => selectedUnitSet.has(this._selectorKey(u)))
+      : [...unitByKey.values()];
+
+    // Active normalised keywords across ALL enabled configs (deduped) — used to
+    // build combined tracked+keyword and Reddit-channel queries.
+    const activeKeywords = [
+      ...new Set(
+        ctxs
+          .flatMap((ctx) => ctx.keywords)
+          .filter((k) => k.enabled)
+          .map((k) => normalizeKeyword(k.keyword))
+          .filter(Boolean)
+      ),
+    ];
 
     const tasks: EngageScanTask[] = [];
     for (const u of units) {

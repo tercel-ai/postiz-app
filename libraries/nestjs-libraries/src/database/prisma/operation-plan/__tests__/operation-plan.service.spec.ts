@@ -227,14 +227,57 @@ describe('OperationPlanService.getOverview', () => {
 
   it('composes plan + posts + engageStats into the overview shape', async () => {
     mocks.getById.mockResolvedValue(makePlan());
-    mocks.getPostsForPlan.mockResolvedValue([{ id: 'post-1' }]);
+    mocks.getPostsForPlan.mockResolvedValue([{ id: 'post-1', parentPostId: null }]);
 
     const result = await service.getOverview('org-1', 'plan-1');
 
     expect(result.plan.id).toBe('plan-1');
     expect('contentItems' in result.plan).toBe(false);
-    expect(result.posts).toEqual([{ id: 'post-1' }]);
+    expect(result.posts).toEqual([{ id: 'post-1', parentPostId: null, thread: [] }]);
     expect(mocks.getPostsForPlan).toHaveBeenCalledWith('plan-1', 'org-1');
+  });
+
+  it('nests thread follow-ups under their anchor post in publish order', async () => {
+    mocks.getById.mockResolvedValue(makePlan());
+    // Flat rows as returned by getPostsForPlan: an anchor + a 2-part thread
+    // chained anchor <- part-1 <- part-2, plus a standalone post. Deliberately
+    // unordered to prove nesting relies on the parentPostId chain, not row order.
+    mocks.getPostsForPlan.mockResolvedValue([
+      { id: 'anchor', parentPostId: null, content: 'main' },
+      { id: 'part-2', parentPostId: 'part-1', content: 'reply 2' },
+      { id: 'standalone', parentPostId: null, content: 'other' },
+      { id: 'part-1', parentPostId: 'anchor', content: 'reply 1' },
+    ]);
+
+    const result = await service.getOverview('org-1', 'plan-1');
+
+    expect(result.posts).toEqual([
+      {
+        id: 'anchor',
+        parentPostId: null,
+        content: 'main',
+        thread: [
+          { id: 'part-1', parentPostId: 'anchor', content: 'reply 1' },
+          { id: 'part-2', parentPostId: 'part-1', content: 'reply 2' },
+        ],
+      },
+      { id: 'standalone', parentPostId: null, content: 'other', thread: [] },
+    ]);
+  });
+
+  it('keeps an orphan thread part as its own anchor when its parent is absent', async () => {
+    mocks.getById.mockResolvedValue(makePlan());
+    // The anchor was soft-deleted, so only the follow-up survives the query;
+    // it must still surface rather than vanish.
+    mocks.getPostsForPlan.mockResolvedValue([
+      { id: 'orphan', parentPostId: 'deleted-anchor', content: 'reply' },
+    ]);
+
+    const result = await service.getOverview('org-1', 'plan-1');
+
+    expect(result.posts).toEqual([
+      { id: 'orphan', parentPostId: 'deleted-anchor', content: 'reply', thread: [] },
+    ]);
   });
 
   it('returns empty engagePolicies/engageKeywords when the plan has no engagePolicies', async () => {
