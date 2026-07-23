@@ -58,7 +58,10 @@ const HistoryItemRow: FC<{ item: ReplyHistoryItem }> = ({ item }) => (
 export const HistoryList: FC<{
   items: ReplyHistoryItem[];
   onClearPage: () => void;
-}> = ({ items, onClearPage }) => {
+  /** Rendered inside a parent tab bar: hide the internal title/clear header
+   *  (the tab carries the label + count). */
+  embedded?: boolean;
+}> = ({ items, onClearPage, embedded }) => {
   const [filter, setFilter] = useState<PlatformFilter>('all');
   const [page, setPage] = useState(0);
 
@@ -73,14 +76,16 @@ export const HistoryList: FC<{
 
   return (
     <div className="pz-history">
-      <div className="pz-history-head">
-        <div className="pz-history-title">History ({items.length})</div>
-        {items.length > 0 && (
-          <button className="pz-clear-btn" onClick={onClearPage}>
-            Clear ›
-          </button>
-        )}
-      </div>
+      {!embedded && (
+        <div className="pz-history-head">
+          <div className="pz-history-title">Engage Replies ({items.length})</div>
+          {items.length > 0 && (
+            <button className="pz-clear-btn" onClick={onClearPage}>
+              Clear ›
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Platform filter */}
       {items.length > 0 && (

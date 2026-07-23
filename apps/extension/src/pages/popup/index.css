@@ -288,6 +288,55 @@ body {
   transform: translateY(-1px);
 }
 
+/* ── Section tabs (Post Queue / Engage Replies) ─────────── */
+.pz-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 10px 14px 0;
+  border-bottom: 1px solid var(--pz-border);
+}
+.pz-tab {
+  appearance: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  background: transparent;
+  color: var(--pz-muted);
+  font-family: Georgia, 'Times New Roman', serif;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+.pz-tab:hover:not(.active) {
+  color: var(--pz-fg);
+}
+.pz-tab.active {
+  color: var(--pz-ink);
+  border-bottom-color: var(--pz-ink);
+}
+.pz-tab-count {
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--pz-muted);
+  background: var(--pz-accent-soft);
+  border-radius: 10px;
+  padding: 1px 7px;
+}
+.pz-tab.active .pz-tab-count {
+  color: var(--pz-ink);
+}
+.pz-tabs .pz-clear-btn {
+  margin-left: auto;
+  margin-bottom: 6px;
+}
+
 /* ── Platform filter ────────────────────────────────────── */
 .pz-filter-bar {
   display: flex;

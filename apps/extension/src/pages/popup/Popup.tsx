@@ -2,6 +2,7 @@ import React, { useCallback, useState } from 'react';
 import { HistoryList } from '@gitroom/extension/pages/popup/components/HistoryList';
 import { PublishQueueList } from '@gitroom/extension/pages/popup/components/PublishQueueList';
 import { ClearHistoryPage } from '@gitroom/extension/pages/popup/components/ClearHistoryPage';
+import { ClearQueuePage } from '@gitroom/extension/pages/popup/components/ClearQueuePage';
 import { LoginForm } from '@gitroom/extension/pages/popup/components/LoginForm';
 import { EngageScanPanel } from '@gitroom/extension/pages/popup/components/ScanPanel';
 import { useAiseeSession } from '@gitroom/extension/pages/popup/hooks/useAiseeSession';
@@ -11,9 +12,18 @@ import { usePublishQueueState } from '@gitroom/extension/pages/popup/hooks/usePu
 export default function Popup() {
   const { user, platformLogin, planName, handleLogout } = useAiseeSession();
   const { history, handleClear } = useReplyHistoryState();
-  const { rows: queueRows, publishNow, cancelTask, syncTask, retryTask, removeTask } =
-    usePublishQueueState();
-  const [view, setView] = useState<'main' | 'clear' | 'scan'>('main');
+  const {
+    rows: queueRows,
+    publishNow,
+    cancelTask,
+    syncTask,
+    retryTask,
+    removeTask,
+    clearSettled,
+    clearQueued,
+  } = usePublishQueueState();
+  const [view, setView] = useState<'main' | 'clear' | 'clear-queue' | 'scan'>('main');
+  const [tab, setTab] = useState<'queue' | 'replies'>('queue');
 
   // chrome.sidePanel is Chrome-only (this same bundle also ships for Firefox,
   // which has no equivalent API) — feature-detect rather than build-flag so
@@ -38,6 +48,17 @@ export default function Popup() {
       <ClearHistoryPage
         items={history}
         onClear={handleClear}
+        onBack={() => setView('main')}
+      />
+    );
+  }
+
+  if (view === 'clear-queue') {
+    return (
+      <ClearQueuePage
+        rows={queueRows}
+        onClearSettled={clearSettled}
+        onClearQueued={clearQueued}
         onBack={() => setView('main')}
       />
     );
@@ -139,15 +160,46 @@ export default function Popup() {
 
       {user ? (
         <>
-          <PublishQueueList
-            rows={queueRows}
-            onPublishNow={publishNow}
-            onCancel={cancelTask}
-            onSync={syncTask}
-            onRetry={retryTask}
-            onRemove={removeTask}
-          />
-          <HistoryList items={history} onClearPage={() => setView('clear')} />
+          <div className="pz-tabs">
+            <button
+              className={`pz-tab${tab === 'queue' ? ' active' : ''}`}
+              onClick={() => setTab('queue')}
+            >
+              Post Queue
+              <span className="pz-tab-count">{queueRows.length}</span>
+            </button>
+            <button
+              className={`pz-tab${tab === 'replies' ? ' active' : ''}`}
+              onClick={() => setTab('replies')}
+            >
+              Engage Replies
+              <span className="pz-tab-count">{history.length}</span>
+            </button>
+            {tab === 'queue' && queueRows.length > 0 && (
+              <button className="pz-clear-btn" onClick={() => setView('clear-queue')}>
+                Clear ›
+              </button>
+            )}
+            {tab === 'replies' && history.length > 0 && (
+              <button className="pz-clear-btn" onClick={() => setView('clear')}>
+                Clear ›
+              </button>
+            )}
+          </div>
+
+          {tab === 'queue' ? (
+            <PublishQueueList
+              embedded
+              rows={queueRows}
+              onPublishNow={publishNow}
+              onCancel={cancelTask}
+              onSync={syncTask}
+              onRetry={retryTask}
+              onRemove={removeTask}
+            />
+          ) : (
+            <HistoryList embedded items={history} onClearPage={() => setView('clear')} />
+          )}
         </>
       ) : (
         <LoginForm />

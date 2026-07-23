@@ -205,7 +205,21 @@ export const PublishQueueList: FC<{
   onSync: (taskId: string) => Promise<void>;
   onRetry: (taskId: string) => Promise<void>;
   onRemove: (taskId: string) => Promise<void>;
-}> = ({ rows, onPublishNow, onCancel, onSync, onRetry, onRemove }) => {
+  onClear?: () => void;
+  /** Rendered inside a parent tab bar: hide the internal title/clear header
+   *  (the tab carries the label + count) and show an empty state instead of
+   *  collapsing to nothing. */
+  embedded?: boolean;
+}> = ({
+  rows,
+  onPublishNow,
+  onCancel,
+  onSync,
+  onRetry,
+  onRemove,
+  onClear,
+  embedded,
+}) => {
   const [filter, setFilter] = useState<QueueFilter>('all');
   const [page, setPage] = useState(0);
 
@@ -228,16 +242,27 @@ export const PublishQueueList: FC<{
     setPage(0);
   }, [filter, rows]);
 
-  if (rows.length === 0) return null;
+  if (rows.length === 0) {
+    return embedded ? (
+      <div className="pz-history" style={{ paddingBottom: 8 }}>
+        <div className="pz-empty">No posts in the queue.</div>
+      </div>
+    ) : null;
+  }
 
   return (
     <div className="pz-history" style={{ paddingBottom: 8 }}>
-      <div className="pz-history-head">
-        <div className="pz-history-title">
-          Publish Queue ({rows.length}
-          {pendingCount > 0 ? `, ${pendingCount} not sent` : ''})
+      {!embedded && (
+        <div className="pz-history-head">
+          <div className="pz-history-title">
+            Post Queue ({rows.length}
+            {pendingCount > 0 ? `, ${pendingCount} not sent` : ''})
+          </div>
+          {onClear && (
+            <button className="pz-clear-btn" onClick={onClear}>Clear ›</button>
+          )}
         </div>
-      </div>
+      )}
 
       <div className="pz-filter-bar" style={{ padding: 0 }}>
         {FILTERS.map((f) => {

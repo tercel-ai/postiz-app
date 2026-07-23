@@ -665,6 +665,57 @@ export function removePublishTask(taskId: string): {
   return { ok: true };
 }
 
+/**
+ * Best-effort "when did this settled task happen" timestamp, used to age out
+ * history. Prefers the real send time, then the intended publish time, then the
+ * due time it was enqueued for. Returns 0 when nothing is known (an ancient row
+ * that any cutoff should sweep).
+ */
+function settledTimestamp(e: QueueEntry): number {
+  const iso = e.state.publishedAt || e.state.publishAt;
+  if (iso) {
+    const t = Date.parse(iso);
+    if (!Number.isNaN(t)) return t;
+  }
+  return e.dueAt || 0;
+}
+
+/**
+ * Bulk-clear settled history rows (published / error / canceled). Active rows
+ * (queued / publishing / sent) are always kept — a 'sent' post is live but not
+ * yet recorded, and a queued/publishing one is still in flight. When olderThanMs
+ * is given, only rows whose settled time is beyond that cutoff are dropped;
+ * omit it to clear all history. Returns how many rows were removed.
+ */
+export function clearSettledPublishTasks(olderThanMs?: number): {
+  removed: number;
+} {
+  const cutoff = olderThanMs != null ? now() - olderThanMs : Infinity;
+  const before = entries.length;
+  entries = entries.filter((e) => {
+    if (isActive(e)) return true;
+    return settledTimestamp(e) >= cutoff;
+  });
+  const removed = before - entries.length;
+  if (removed) persist();
+  return { removed };
+}
+
+/**
+ * Bulk-drop every still-'queued' task (not yet sent, including future-scheduled
+ * ones). 'publishing' is left alone (mid-send) and settled rows are untouched.
+ * Re-arms the alarm since a dropped task may have held the next wake-up. Returns
+ * how many were removed.
+ */
+export function clearQueuedPublishTasks(): { removed: number } {
+  const drop = new Set(entries.filter((e) => e.state.status === 'queued'));
+  if (!drop.size) return { removed: 0 };
+  entries = entries.filter((e) => !drop.has(e));
+  persist();
+  armAlarm();
+  return { removed: drop.size };
+}
+
 export function publishQueueSnapshot(): PublishTaskState[] {
   return entries.map((e) => ({ ...e.state }));
 }

@@ -1,8 +1,8 @@
 import React, { FC, useState } from 'react';
 import { ClearRange, ReplyHistoryItem } from '@gitroom/extension/utils/reply.history';
 
+// Aligned with Clear Post Queue's time granularity (1 week / 1 month / all).
 const RANGES: { range: ClearRange; label: string }[] = [
-  { range: '1d', label: 'Older than 1 day' },
   { range: '1w', label: 'Older than 1 week' },
   { range: '1m', label: 'Older than 1 month' },
   { range: 'all', label: 'All records' },
@@ -33,7 +33,7 @@ export const ClearHistoryPage: FC<{
       <div className="pz-header">
         <div className="pz-header-row">
           <button className="pz-back-btn" onClick={onBack}>←</button>
-          <div className="pz-title">Clear History</div>
+          <div className="pz-title">Clear Engage Replies</div>
         </div>
       </div>
 

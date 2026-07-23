@@ -94,5 +94,28 @@ export function usePublishQueueState() {
     []
   );
 
-  return { rows, publishNow, cancelTask, syncTask, retryTask, removeTask };
+  // Bulk-clear settled history rows. omit olderThanMs to clear all history;
+  // pass a window (e.g. 1 week in ms) to only age out rows beyond it.
+  const clearSettled = useCallback(
+    (olderThanMs?: number) =>
+      sendAction(ENGAGE_EXTENSION_ACTION.publishClearSettled, { olderThanMs }),
+    []
+  );
+
+  // Bulk-drop every not-yet-sent (queued) task.
+  const clearQueued = useCallback(
+    () => sendAction(ENGAGE_EXTENSION_ACTION.publishClearQueued, {}),
+    []
+  );
+
+  return {
+    rows,
+    publishNow,
+    cancelTask,
+    syncTask,
+    retryTask,
+    removeTask,
+    clearSettled,
+    clearQueued,
+  };
 }

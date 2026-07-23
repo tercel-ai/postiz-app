@@ -24,6 +24,10 @@ export const ENGAGE_EXTENSION_ACTION = {
   publishRetry: 'publish:retry',
   /** popup/panel → SW: drop a settled row from the queue ("Remove"). */
   publishRemove: 'publish:remove',
+  /** popup/panel → SW: bulk-drop settled rows older than a cutoff ("Clear history"). */
+  publishClearSettled: 'publish:clear-settled',
+  /** popup/panel → SW: bulk-drop all still-queued (not-yet-sent) tasks. */
+  publishClearQueued: 'publish:clear-queued',
   /** SW → content-script push forwarded to the page as postPublishProgress. */
   publishProgressPush: 'publish:progress-push',
   loadSubscription: 'user:load-subscription',

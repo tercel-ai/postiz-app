@@ -37,6 +37,8 @@ import {
   syncPublishTask,
   retryPublishTask,
   removePublishTask,
+  clearSettledPublishTasks,
+  clearQueuedPublishTasks,
   initPublishQueue,
   handlePublishAlarm,
 } from '@gitroom/extension/utils/post-publish/queue';
@@ -455,6 +457,30 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
         );
         console.log('[aisee-publish:sw] cancel ack', ack);
         sendResponse({ ok: true, ...ack });
+      })
+      .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
+    return true;
+  }
+  if (request.action === ENGAGE_EXTENSION_ACTION.publishClearSettled) {
+    console.log('[aisee-publish:sw] clear-settled request', { olderThanMs: request.olderThanMs });
+    initPublishQueue()
+      .then(() => {
+        const olderThanMs =
+          typeof request.olderThanMs === 'number' ? request.olderThanMs : undefined;
+        const result = clearSettledPublishTasks(olderThanMs);
+        console.log('[aisee-publish:sw] clear-settled result', result);
+        sendResponse({ ok: true, ...result });
+      })
+      .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
+    return true;
+  }
+  if (request.action === ENGAGE_EXTENSION_ACTION.publishClearQueued) {
+    console.log('[aisee-publish:sw] clear-queued request');
+    initPublishQueue()
+      .then(() => {
+        const result = clearQueuedPublishTasks();
+        console.log('[aisee-publish:sw] clear-queued result', result);
+        sendResponse({ ok: true, ...result });
       })
       .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
     return true;
