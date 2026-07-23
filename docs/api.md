@@ -83,7 +83,7 @@ Modules with a dedicated, parameter-level API reference:
 | POST | `/user/t` |
 
 ### [integrations.controller.ts](../apps/backend/src/api/routes/integrations.controller.ts) — `/integrations`
-📝 No dedicated API reference yet.
+📖 Schedule / time-slots + per-project channel bindings → **[integration-schedule-rules.md](./integration-schedule-rules.md)**
 | Method | Path |
 | --- | --- |
 | GET | `/integrations/` |
@@ -98,6 +98,9 @@ Modules with a dedicated, parameter-level API reference:
 | GET | `/integrations/:id` |
 | GET | `/integrations/social/:integration` |
 | POST | `/integrations/:id/time` |
+| POST | `/integrations/integration-project` |
+| DELETE | `/integrations/integration-project` |
+| GET | `/integrations/integration-project/list` |
 | POST | `/integrations/mentions` |
 | POST | `/integrations/user-by-username` |
 | POST | `/integrations/function` |

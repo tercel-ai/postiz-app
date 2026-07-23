@@ -74,11 +74,13 @@ export class IntegrationService {
     return this._integrationRepository.insertMentions(platform, mentions);
   }
 
-  async setTimes(
-    orgId: string,
-    integrationId: string,
-    body: any
-  ) {
+  /**
+   * Validate a posting-times request body (v2 schedules or legacy time array)
+   * and return the serialized string ready for persistence. Throws 400 on an
+   * invalid shape or schedule rule. Shared by the org-level setTimes and the
+   * per-project binding upsert.
+   */
+  private serializeTimesBody(body: any): string {
     let v2: PostingTimesV2;
 
     if (body?.version === 2 && Array.isArray(body?.schedules)) {
@@ -112,11 +114,72 @@ export class IntegrationService {
       );
     }
 
+    return serializePostingTimes(v2);
+  }
+
+  async setTimes(
+    orgId: string,
+    integrationId: string,
+    body: any
+  ) {
     return this._integrationRepository.setTimes(
       orgId,
       integrationId,
-      serializePostingTimes(v2)
+      this.serializeTimesBody(body)
     );
+  }
+
+  /**
+   * Bind a channel to a project (idempotent) or update an existing binding.
+   * `postingTimes` (when provided) is validated with the same rules as the
+   * org-level setTimes; `disabled` toggles the per-project pause. Only the fields
+   * present are changed, so a toggle never clears the schedule. The channel must
+   * belong to the org, otherwise 404.
+   */
+  async upsertIntegrationProject(
+    orgId: string,
+    integrationId: string,
+    projectId: string,
+    body: { postingTimes?: any; disabled?: boolean }
+  ) {
+    const integration = await this._integrationRepository.getIntegrationById(
+      orgId,
+      integrationId
+    );
+    if (!integration) {
+      throw new HttpException('Integration not found', HttpStatus.NOT_FOUND);
+    }
+
+    const data: { postingTimes?: string; disabled?: boolean } = {};
+    if (body.postingTimes !== undefined) {
+      data.postingTimes = this.serializeTimesBody(body.postingTimes);
+    }
+    if (body.disabled !== undefined) {
+      data.disabled = body.disabled;
+    }
+
+    return this._integrationRepository.upsertIntegrationProject(
+      orgId,
+      integrationId,
+      projectId,
+      data
+    );
+  }
+
+  removeIntegrationProject(
+    orgId: string,
+    integrationId: string,
+    projectId: string
+  ) {
+    return this._integrationRepository.removeIntegrationProject(
+      orgId,
+      integrationId,
+      projectId
+    );
+  }
+
+  listProjectIntegrations(orgId: string, projectId: string) {
+    return this._integrationRepository.listProjectIntegrations(orgId, projectId);
   }
 
   updateProviderSettings(org: string, id: string, additionalSettings: string) {
@@ -833,12 +896,19 @@ export class IntegrationService {
 
   async findFreeDateTime(
     orgId: string,
-    integrationsId?: string
+    integrationsId?: string,
+    projectId?: string
   ): Promise<PostingTimesV2> {
-    const findTimes = await this._integrationRepository.getPostingTimes(
-      orgId,
-      integrationsId
-    );
+    // When scoped to a project, posting times come ONLY from the per-project
+    // IntegrationProject binding (no fallback to Integration.postingTimes). An
+    // unbound / unscheduled channel therefore yields no schedules for the project.
+    const findTimes = projectId
+      ? await this._integrationRepository.getProjectPostingTimes(
+          orgId,
+          projectId,
+          integrationsId
+        )
+      : await this._integrationRepository.getPostingTimes(orgId, integrationsId);
     const allSchedules = findTimes.reduce(
       (all: PostingTimesV2['schedules'], current: any) => {
         const v2 = normalizePostingTimes(current.postingTimes);

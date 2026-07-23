@@ -98,10 +98,13 @@ export class PublicIntegrationsController {
   @Get('/find-slot/:id')
   async findSlotIntegration(
     @GetOrgFromRequest() org: Organization,
-    @Param('id') id?: string
+    @Param('id') id?: string,
+    @Query('projectId') projectId?: string
   ) {
     Sentry.metrics.count("public_api-request", 1);
-    return { date: await this._postsService.findFreeDateTime(org.id, id) };
+    return {
+      date: await this._postsService.findFreeDateTime(org.id, id, projectId),
+    };
   }
 
   @Get('/posts')

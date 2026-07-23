@@ -791,6 +791,7 @@ export class EngageController {
       date: query.date,
       platform: query.platform,
       status: query.status,
+      projectId: query.projectId,
     });
   }
 
@@ -803,6 +804,7 @@ export class EngageController {
     return this._engageService.getSentCounts(org, {
       date: query.date,
       status: query.status,
+      projectId: query.projectId,
     });
   }
 

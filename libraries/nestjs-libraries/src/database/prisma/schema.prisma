@@ -389,6 +389,7 @@ model Integration {
   dataTicks             DataTicks[]
   postReleases          PostRelease[]
   engageXReplyAccounts  EngageXReplyAccount[]
+  integrationProjects   IntegrationProject[]
 
   @@unique([organizationId, internalId])
   @@index([rootInternalId])
@@ -401,6 +402,43 @@ model Integration {
   @@index([inBetweenSteps])
   @@index([refreshNeeded])
   @@index([disabled])
+}
+
+// Per-project binding of a channel (Integration). A channel is org-level and can
+// be shared by multiple projects, so the (integration, project) relationship is
+// many-to-many and lives here rather than on Integration (a `projects` JSON array
+// could not carry per-pair config like postingTimes).
+//
+// Semantics decided for this feature:
+//   - Presence of a row == this channel is assigned to that project. An
+//     integration with NO IntegrationProject rows is unassigned: it appears in
+//     no project (project channel lists filter through this table).
+//   - postingTimes is per-(integration, project). There is NO fallback to
+//     Integration.postingTimes: a pair whose postingTimes is empty means this
+//     project has no scheduling times on this channel.
+//   - disabled pauses the channel for this project while keeping the binding and
+//     its postingTimes (mirrors Integration's Disable vs Delete). Effective
+//     enablement is Integration.disabled OR IntegrationProject.disabled.
+//   - No soft delete: unbinding hard-deletes the row (relationship data, and a
+//     lingering deletedAt row would collide with @@unique on re-bind).
+// projectId is an external reference (aisee-core); no FK, matching the existing
+// projectId convention on Post/EngageConfig.
+model IntegrationProject {
+  id             String      @id @default(cuid())
+  integrationId  String
+  projectId      String
+  organizationId String
+  postingTimes   String      @default("{\"version\":2,\"schedules\":[]}")
+  disabled       Boolean     @default(false)
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime?   @updatedAt
+
+  integration    Integration @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+
+  @@unique([integrationId, projectId])
+  @@index([projectId])
+  @@index([organizationId, projectId])
+  @@index([integrationId])
 }
 
 model Signatures {

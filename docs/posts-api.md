@@ -227,13 +227,19 @@ A single post.
 
 Next free scheduling date/time for the org.
 
-**Response**: `{ "date": "<ISO>" }`.
+- **Query**: `projectId` (optional) — when set, posting-time slots are read from
+  the per-project `IntegrationProject` binding only (see
+  [integration-schedule-rules.md → Project-Scoped Schedules](./integration-schedule-rules.md#project-scoped-schedules-integrationproject)).
+  Omitted → org-level `Integration.postingTimes`.
+- **Response**: `{ "date": "<ISO>" }`.
 
 ### GET /posts/find-slot/:id
 
 Next free slot restricted to one integration.
 
 - **Path**: `id` — integration id.
+- **Query**: `projectId` (optional) — scope slots to that project's binding for
+  this integration (no fallback to the org-level schedule).
 - **Response**: `{ "date": "<ISO>" }`.
 
 ### GET /posts/tags

@@ -176,16 +176,28 @@ export class PostsController {
   }
 
   @Get('/find-slot')
-  async findSlot(@GetOrgFromRequest() org: Organization) {
-    return { date: await this._postsService.findFreeDateTime(org.id) };
+  async findSlot(
+    @GetOrgFromRequest() org: Organization,
+    @Query('projectId') projectId?: string
+  ) {
+    return {
+      date: await this._postsService.findFreeDateTime(
+        org.id,
+        undefined,
+        projectId
+      ),
+    };
   }
 
   @Get('/find-slot/:id')
   async findSlotIntegration(
     @GetOrgFromRequest() org: Organization,
-    @Param('id') id: string
+    @Param('id') id: string,
+    @Query('projectId') projectId?: string
   ) {
-    return { date: await this._postsService.findFreeDateTime(org.id, id) };
+    return {
+      date: await this._postsService.findFreeDateTime(org.id, id, projectId),
+    };
   }
 
   @Get('/release-list')

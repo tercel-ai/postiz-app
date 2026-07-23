@@ -1349,10 +1349,15 @@ export class PostsService {
     return this._postRepository.findPopularPosts(category, topic);
   }
 
-  async findFreeDateTime(orgId: string, integrationId?: string) {
+  async findFreeDateTime(
+    orgId: string,
+    integrationId?: string,
+    projectId?: string
+  ) {
     const timesConfig = await this._integrationService.findFreeDateTime(
       orgId,
-      integrationId
+      integrationId,
+      projectId
     );
     return this.findFreeDateTimeRecursive(
       orgId,

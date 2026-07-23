@@ -398,6 +398,99 @@ export class IntegrationsController {
     return this._integrationService.setTimes(org.id, id, body);
   }
 
+  // Bind a channel to a project, or update an existing binding. Partial-merge:
+  // only the fields present (`postingTimes` and/or `disabled`) are changed, so a
+  // toggle never wipes the schedule. Idempotent per (integrationId, projectId).
+  @Post('/integration-project')
+  async upsertIntegrationProject(
+    @GetOrgFromRequest() org: Organization,
+    @Body()
+    body: {
+      integrationId: string;
+      projectId: string;
+      postingTimes?: any;
+      disabled?: boolean;
+    }
+  ) {
+    if (!body?.integrationId || !body?.projectId) {
+      throw new HttpException(
+        'integrationId and projectId are required',
+        400
+      );
+    }
+    return this._integrationService.upsertIntegrationProject(
+      org.id,
+      body.integrationId,
+      body.projectId,
+      { postingTimes: body.postingTimes, disabled: body.disabled }
+    );
+  }
+
+  // Unbind a channel from a project (hard delete). Keys go in the query string,
+  // not a body, since DELETE bodies are unreliable across proxies/clients.
+  @Delete('/integration-project')
+  async removeIntegrationProject(
+    @GetOrgFromRequest() org: Organization,
+    @Query('integrationId') integrationId: string,
+    @Query('projectId') projectId: string
+  ) {
+    if (!integrationId || !projectId) {
+      throw new HttpException(
+        'integrationId and projectId are required',
+        400
+      );
+    }
+    await this._integrationService.removeIntegrationProject(
+      org.id,
+      integrationId,
+      projectId
+    );
+    return { success: true };
+  }
+
+  // All channels bound to a project (enabled + disabled bindings), each with the
+  // project's own posting times. Shape mirrors the org-level `/list` endpoint so
+  // the frontend channel list can reuse it. Path is 2-segment so it is never
+  // shadowed by the earlier `@Get('/:id')` route.
+  @Get('/integration-project/list')
+  async listProjectIntegrations(
+    @GetOrgFromRequest() org: Organization,
+    @Query('projectId') projectId: string
+  ) {
+    if (!projectId) {
+      throw new HttpException('projectId is required', 400);
+    }
+    const rows = await this._integrationService.listProjectIntegrations(
+      org.id,
+      projectId
+    );
+    return {
+      integrations: rows.map((row) => {
+        const p = row.integration;
+        const findIntegration = this._integrationManager.getSocialIntegration(
+          p.providerIdentifier
+        );
+        return {
+          name: p.name,
+          id: p.id,
+          internalId: p.internalId,
+          disabled: p.disabled,
+          projectDisabled: row.disabled,
+          editor: findIntegration.editor,
+          picture: p.picture || '/no-picture.jpg',
+          identifier: p.providerIdentifier,
+          inBetweenSteps: p.inBetweenSteps,
+          refreshNeeded: p.refreshNeeded,
+          display: p.profile,
+          type: p.type,
+          time: normalizePostingTimes(row.postingTimes),
+          customer: p.customer,
+          additionalSettings: p.additionalSettings || '[]',
+        };
+      }),
+    };
+  }
+
   @Post('/mentions')
   async mentions(
     @GetOrgFromRequest() org: Organization,

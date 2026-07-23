@@ -7,6 +7,7 @@ Multi-type time-slot scheduling for integrations. Rules are combined using **uni
 - [Data Format](#data-format)
 - [Rule Types](#rule-types)
 - [API Reference](#api-reference)
+- [Project-Scoped Schedules (IntegrationProject)](#project-scoped-schedules-integrationproject)
 - [Common Operations (CRUD Examples)](#common-operations-crud-examples)
 - [Resolution Logic (Union)](#resolution-logic-union)
 - [Backward Compatibility](#backward-compatibility)
@@ -116,12 +117,17 @@ Matches a **single calendar date** (non-recurring).
 
 ### Endpoints
 
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/integrations/list` | Read all integrations with their schedule rules |
-| `POST` | `/integrations/:id/time` | Replace all schedule rules for one integration |
+| Method | Path | Scope | Description |
+|---|---|---|---|
+| `GET` | `/integrations/list` | org | Read all integrations with their (org-level) schedule rules |
+| `POST` | `/integrations/:id/time` | org | Replace all schedule rules for one integration (account default) |
+| `GET` | `/integrations/integration-project/list?projectId=` | project | Channels bound to a project, each with that project's schedule |
+| `POST` | `/integrations/integration-project` | project | Bind/update a channel↔project pair (partial-merge; see [Project-Scoped Schedules](#project-scoped-schedules-integrationproject)) |
+| `DELETE` | `/integrations/integration-project?integrationId=&projectId=` | project | Unbind a channel from a project (hard delete) |
 
-> **Important:** The `POST` endpoint uses **full-replacement** semantics. Every call replaces the entire `schedules` array. There is no PATCH — to add, modify, or delete a single rule, the client must read the current state, modify the array, and POST the full result back.
+> **Important:** The org-level `POST /integrations/:id/time` uses **full-replacement** semantics. Every call replaces the entire `schedules` array. There is no PATCH — to add, modify, or delete a single rule, the client must read the current state, modify the array, and POST the full result back.
+>
+> The **project-level** `POST /integrations/integration-project` is different — it is a **partial-merge upsert**: only the fields present in the body (`postingTimes` and/or `disabled`) change. The `postingTimes` payload itself, when present, is still a full `schedules` array (same validation as the org endpoint).
 
 ### Read — `GET /integrations/list`
 
@@ -183,6 +189,93 @@ Legacy payloads are automatically converted to V2 (`daily` rules) before storage
 ```json
 "Schedule rule 0: time must be an integer between 0 and 1439"
 ```
+
+---
+
+## Project-Scoped Schedules (IntegrationProject)
+
+A channel (`Integration`) is org-level, but a single channel can be **shared by
+multiple projects**, and each project may want its **own posting times** on that
+channel. That relationship — and its per-pair schedule — lives in the
+`IntegrationProject` join table, not on `Integration` (defined in
+`libraries/.../prisma/schema.prisma`). The behavior:
+
+| Aspect | Org-level (`Integration.postingTimes`) | Project-level (`IntegrationProject.postingTimes`) |
+|---|---|---|
+| Who owns it | the channel (account default) | the `(integration, project)` pair |
+| Set via | `POST /integrations/:id/time` (full replace) | `POST /integrations/integration-project` (partial merge) |
+| Read via | `GET /integrations/list` | `GET /integrations/integration-project/list?projectId=` |
+| Used for scheduling by | `find-slot` **without** `projectId` | `find-slot` **with** `projectId` |
+
+### Semantics
+
+- **No fallback.** Project-scoped slots come **only** from the
+  `IntegrationProject` row. A pair whose `postingTimes` is empty means that
+  project has **no** posting times on that channel — the scheduler will not
+  auto-schedule to it. It does **not** fall back to `Integration.postingTimes`.
+- **Unbound = invisible.** A channel with no `IntegrationProject` row for a
+  project does not belong to that project and never appears in its channel list.
+- **`disabled` (per-project pause).** A binding can be paused
+  (`disabled: true`) to keep the pair and its schedule while temporarily
+  excluding the channel from that project's scheduling. Effective enablement is
+  `Integration.disabled OR IntegrationProject.disabled` — disabling the channel
+  globally overrides all its project bindings.
+- **Hard delete on unbind.** Unbinding removes the row (and its schedule)
+  outright; there is no soft delete.
+
+### Bind / update a pair — `POST /integrations/integration-project`
+
+```jsonc
+// Bind (no schedule yet) — creates the pair with an empty schedule:
+{ "integrationId": "abc123", "projectId": "prj_9" }
+
+// Set this project's schedule on the channel (partial merge — disabled untouched):
+{
+  "integrationId": "abc123",
+  "projectId": "prj_9",
+  "postingTimes": {
+    "version": 2,
+    "schedules": [
+      { "type": "weekday", "time": 540 },
+      { "type": "weekday", "time": 840 }
+    ]
+  }
+}
+
+// Pause this channel for this project (partial merge — postingTimes untouched):
+{ "integrationId": "abc123", "projectId": "prj_9", "disabled": true }
+```
+
+Because it is a partial merge, toggling `disabled` never wipes `postingTimes`
+and vice versa. The call is idempotent on the `(integrationId, projectId)` key.
+
+### Unbind — `DELETE /integrations/integration-project?integrationId=abc123&projectId=prj_9`
+
+Keys go in the **query string**, not a body (DELETE bodies are unreliable across
+proxies). Returns `{ "success": true }`. The channel's org-level schedule and
+any other project's binding are unaffected.
+
+### Read a project's channels — `GET /integrations/integration-project/list?projectId=prj_9`
+
+Same shape as `GET /integrations/list`, plus a `projectDisabled` flag; each
+channel's `time` field is **that project's** normalized schedule.
+
+### Scheduling with a project
+
+Pass `?projectId=` to `find-slot` to schedule against the project's slots:
+
+```
+GET /posts/find-slot?projectId=prj_9              → next slot across the project's channels
+GET /posts/find-slot/:integrationId?projectId=prj_9  → next slot for one channel in that project
+GET /public/v1/find-slot/:integrationId?projectId=prj_9  → same, public API
+```
+
+Omitting `projectId` preserves the legacy org-level behavior. Autopost and the
+AI agent currently have no project context and always schedule org-level.
+
+> **Not affected:** Operation-plan post generation does **not** use time slots —
+> each generated post's `publishDate` comes from the plan payload's `utcDate`,
+> so project schedules do not apply there.
 
 ---
 
@@ -595,10 +688,12 @@ The calendar day-view (`calendar.tsx`) filters schedule rules to show only those
 | `libraries/.../dtos/integrations/posting-times.types.ts` | TypeScript type definitions for all rule types |
 | `libraries/.../dtos/integrations/posting-times.utils.ts` | `normalizePostingTimes`, `resolveTimeSlotsForDate`, `validateScheduleRules`, `serializePostingTimes` |
 | `libraries/.../dtos/integrations/posting-times.utils.spec.ts` | 40 unit tests covering all functions |
-| `libraries/.../integrations/integration.service.ts` | `setTimes()` (add/update), `findFreeDateTime()` (merge across integrations) |
-| `libraries/.../integrations/integration.repository.ts` | `setTimes()` (persistence), `createOrUpdateIntegration()` (default V2 times) |
-| `libraries/.../posts/posts.service.ts` | `findFreeDateTimeRecursive()` — date-aware slot resolution with 365-day guard |
-| `apps/backend/.../integrations.controller.ts` | `POST /:id/time` (set), `GET /list` (read with normalization) |
+| `libraries/.../integrations/integration.service.ts` | `serializeTimesBody()` (shared validation), `setTimes()`, `upsertIntegrationProject()` / `removeIntegrationProject()` / `listProjectIntegrations()`, `findFreeDateTime(orgId, integrationId?, projectId?)` (project-aware merge) |
+| `libraries/.../integrations/integration.repository.ts` | `setTimes()`, `getProjectPostingTimes()`, `upsertIntegrationProject()` / `removeIntegrationProject()` / `listProjectIntegrations()`, `createOrUpdateIntegration()` (default V2 times) |
+| `libraries/.../posts/posts.service.ts` | `findFreeDateTime(orgId, integrationId?, projectId?)` wrapper + `findFreeDateTimeRecursive()` — date-aware slot resolution with 365-day guard |
+| `apps/backend/.../integrations.controller.ts` | `POST /:id/time`, `GET /list`, `POST`/`DELETE`/`GET` `/integration-project*` (project bindings) |
+| `apps/backend/.../public-api/.../public.integrations.controller.ts` | `GET /public/v1/find-slot/:id?projectId=` |
+| `libraries/.../prisma/schema.prisma` | `IntegrationProject` model (per-project binding + `postingTimes` + `disabled`) |
 | `apps/frontend/.../calendar.context.tsx` | Frontend `PostingTimesV2` / `ScheduleRule` types |
 | `apps/frontend/.../time.table.tsx` | Schedule rule editor UI |
 | `apps/frontend/.../calendar.tsx` | Day-view filtering by rule type |

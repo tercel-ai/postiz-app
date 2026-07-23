@@ -680,14 +680,14 @@ export class EngageService implements OnApplicationBootstrap {
 
   async getSentStats(
     org: Organization,
-    dto: { date?: string; platform?: string; status?: string } = {}
+    dto: { date?: string; platform?: string; status?: string; projectId?: string } = {}
   ) {
     return this._engageRepository.getSentStats(org.id, dto);
   }
 
   async getSentCounts(
     org: Organization,
-    dto: { date?: string; status?: string } = {}
+    dto: { date?: string; status?: string; projectId?: string } = {}
   ) {
     return this._engageRepository.getSentCounts(org.id, dto);
   }

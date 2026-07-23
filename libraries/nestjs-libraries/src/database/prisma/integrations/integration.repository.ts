@@ -16,7 +16,8 @@ export class IntegrationRepository {
     private _plugs: PrismaRepository<'plugs'>,
     private _exisingPlugData: PrismaRepository<'exisingPlugData'>,
     private _customers: PrismaRepository<'customer'>,
-    private _mentions: PrismaRepository<'mentions'>
+    private _mentions: PrismaRepository<'mentions'>,
+    private _integrationProject: PrismaRepository<'integrationProject'>
   ) { }
 
   getMentions(platform: string, q: string) {
@@ -840,6 +841,115 @@ export class IntegrationRepository {
       },
       select: {
         postingTimes: true,
+      },
+    });
+  }
+
+  /**
+   * Project-scoped posting times, read ONLY from the IntegrationProject binding
+   * (no fallback to Integration.postingTimes). A pair with empty postingTimes
+   * therefore contributes no schedule. Both the channel and the binding must be
+   * enabled (Integration.disabled OR IntegrationProject.disabled == not posting).
+   */
+  async getProjectPostingTimes(
+    orgId: string,
+    projectId: string,
+    integrationsId?: string
+  ) {
+    return this._integrationProject.model.integrationProject.findMany({
+      where: {
+        projectId,
+        organizationId: orgId,
+        disabled: false,
+        ...(integrationsId ? { integrationId: integrationsId } : {}),
+        integration: {
+          disabled: false,
+          deletedAt: null,
+        },
+      },
+      select: {
+        postingTimes: true,
+      },
+    });
+  }
+
+  /**
+   * Bind a channel to a project, or update an existing binding. Only the fields
+   * present in `data` are changed (partial-merge / PATCH semantics), so toggling
+   * `disabled` never wipes `postingTimes` and vice versa. Idempotent via the
+   * (integrationId, projectId) unique key.
+   */
+  upsertIntegrationProject(
+    orgId: string,
+    integrationId: string,
+    projectId: string,
+    data: { postingTimes?: string; disabled?: boolean }
+  ) {
+    return this._integrationProject.model.integrationProject.upsert({
+      where: {
+        integrationId_projectId: { integrationId, projectId },
+      },
+      create: {
+        integrationId,
+        projectId,
+        organizationId: orgId,
+        ...(data.postingTimes !== undefined
+          ? { postingTimes: data.postingTimes }
+          : {}),
+        ...(data.disabled !== undefined ? { disabled: data.disabled } : {}),
+      },
+      update: {
+        ...(data.postingTimes !== undefined
+          ? { postingTimes: data.postingTimes }
+          : {}),
+        ...(data.disabled !== undefined ? { disabled: data.disabled } : {}),
+      },
+    });
+  }
+
+  /**
+   * Unbind a channel from a project (hard delete). Scoped by organizationId so a
+   * caller cannot delete another org's binding. Returns the deletion count.
+   */
+  removeIntegrationProject(
+    orgId: string,
+    integrationId: string,
+    projectId: string
+  ) {
+    return this._integrationProject.model.integrationProject.deleteMany({
+      where: {
+        integrationId,
+        projectId,
+        organizationId: orgId,
+      },
+    });
+  }
+
+  /**
+   * All channels bound to a project (enabled bindings only, live channels only).
+   * Returns the joined Integration plus this project's per-pair posting times and
+   * disabled flag.
+   */
+  async listProjectIntegrations(orgId: string, projectId: string) {
+    return this._integrationProject.model.integrationProject.findMany({
+      where: {
+        projectId,
+        organizationId: orgId,
+        integration: {
+          deletedAt: null,
+        },
+      },
+      select: {
+        postingTimes: true,
+        disabled: true,
+        integration: {
+          include: {
+            customer: true,
+          },
+        },
+      },
+      orderBy: {
+        createdAt: 'asc',
       },
     });
   }

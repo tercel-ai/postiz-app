@@ -2857,7 +2857,7 @@ export class EngageRepository {
   // draft has no impressions and would deflate the response rate.
   async getSentStats(
     organizationId: string,
-    dto: { date?: string; platform?: string; status?: string } = {}
+    dto: { date?: string; platform?: string; status?: string; projectId?: string } = {}
   ) {
     const { postWhere, sentWhere } = this._buildSentReplyFilter(organizationId, dto);
 
@@ -2928,7 +2928,7 @@ export class EngageRepository {
   // three extra counts stay off the hot path for every other status scope.
   async getSentCounts(
     organizationId: string,
-    dto: { date?: string; status?: string } = {}
+    dto: { date?: string; status?: string; projectId?: string } = {}
   ) {
     const { sentWhere } = this._buildSentReplyFilter(organizationId, dto, {
       includeDrafts: true,
@@ -2943,29 +2943,29 @@ export class EngageRepository {
 
     const { sentWhere: settledWhere } = this._buildSentReplyFilter(
       organizationId,
-      { date: dto.date, status: 'settled' },
+      { date: dto.date, status: 'settled', projectId: dto.projectId },
       { includeDrafts: true }
     );
     const { sentWhere: awaitingWhere } = this._buildSentReplyFilter(
       organizationId,
-      { date: dto.date, status: 'awaiting' },
+      { date: dto.date, status: 'awaiting', projectId: dto.projectId },
       { includeDrafts: true }
     );
 
     const wantsAwaitingBreakdown = dto.status === 'awaiting';
     const { sentWhere: awaitingDraftWhere } = this._buildSentReplyFilter(
       organizationId,
-      { date: dto.date, status: 'awaiting-draft' },
+      { date: dto.date, status: 'awaiting-draft', projectId: dto.projectId },
       { includeDrafts: true }
     );
     const { sentWhere: awaitingLinkWhere } = this._buildSentReplyFilter(
       organizationId,
-      { date: dto.date, status: 'awaiting-link' },
+      { date: dto.date, status: 'awaiting-link', projectId: dto.projectId },
       { includeDrafts: true }
     );
     const { sentWhere: awaitingExpiredWhere } = this._buildSentReplyFilter(
       organizationId,
-      { date: dto.date, status: 'awaiting-expired' },
+      { date: dto.date, status: 'awaiting-expired', projectId: dto.projectId },
       { includeDrafts: true }
     );
 

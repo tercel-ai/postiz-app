@@ -1337,6 +1337,30 @@ describe('EngageRepository — two-table reads', () => {
       // No opportunity-state narrowing needed here — unlike awaiting-draft/-expired.
       expect(where.opportunity).toBeUndefined();
     });
+
+    it('projectId scopes the sent-reply query (regression: stats used to drop it)', async () => {
+      const { repo, sentCount, sentFindMany, postAggregate } = buildRepo();
+      sentCount.mockResolvedValue(0);
+      postAggregate.mockResolvedValue({ _sum: { impressions: 0 } });
+      sentFindMany.mockResolvedValue([]);
+
+      await repo.getSentStats('org1', { projectId: 'proj-1', platform: 'reddit' });
+
+      // Stats must filter on the requested project, not collapse to null-project
+      // (which returned the legacy/global replies and disagreed with /sent).
+      expect(sentCount.mock.calls[0][0].where.projectId).toBe('proj-1');
+    });
+
+    it('omitting projectId keeps the legacy null-project scope', async () => {
+      const { repo, sentCount, sentFindMany, postAggregate } = buildRepo();
+      sentCount.mockResolvedValue(0);
+      postAggregate.mockResolvedValue({ _sum: { impressions: 0 } });
+      sentFindMany.mockResolvedValue([]);
+
+      await repo.getSentStats('org1', {});
+
+      expect(sentCount.mock.calls[0][0].where.projectId).toBeNull();
+    });
   });
 
   describe('getSentCounts', () => {
@@ -1406,6 +1430,19 @@ describe('EngageRepository — two-table reads', () => {
       expect(expiredWhere.opportunity).toEqual({
         states: { some: { organizationId: 'org1', projectId: null, status: 'EXPIRED' } },
       });
+    });
+
+    it('projectId scopes the total count and every awaiting sub-count (regression)', async () => {
+      const { repo, sentCount } = buildRepo();
+      sentCount.mockResolvedValue(0);
+
+      await repo.getSentCounts('org1', { status: 'awaiting', projectId: 'proj-1' });
+
+      // Total + rollups + all three awaiting sub-counts must carry projectId, so
+      // the tab badges match the project-scoped /sent list instead of the global one.
+      for (const call of sentCount.mock.calls) {
+        expect(call[0].where.projectId).toBe('proj-1');
+      }
     });
   });
 
