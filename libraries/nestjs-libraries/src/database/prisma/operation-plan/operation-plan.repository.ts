@@ -295,7 +295,15 @@ export class OperationPlanRepository {
           integrationId,
           content: node.content,
           delay: 0,
-          group: `${plan.id}:${item.contentId}`,
+          // group must be per-platform: a single contentItem fans out into
+          // multiple platforms (item.platforms), and getPostsByGroup filters by
+          // `group` alone (no platform/integration predicate) while reading the
+          // integration/settings header from posts[0]. A group shared across
+          // platforms therefore mixes e.g. an X anchor with Reddit thread parts.
+          // Scoping the group by platform restores the vanilla invariant "one
+          // group = one channel's post + its thread chain". Still deterministic
+          // (plan.id + contentId + platform), so re-materialize stays idempotent.
+          group: `${plan.id}:${item.contentId}:${platform}`,
           title: item.themeTitle,
           description: null,
           settings: JSON.stringify({
