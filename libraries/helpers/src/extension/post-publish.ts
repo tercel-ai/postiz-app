@@ -106,6 +106,13 @@ export interface PublishTaskState {
   postId?: string;
   /** When this task is scheduled to publish (ISO), echoed from publishDate. */
   publishAt?: string;
+  /**
+   * When the post ACTUALLY went out on-platform (ISO) — set the moment the
+   * anchor segment posts. This is the real publish time, which for an overdue
+   * or publish-now task differs from the scheduled publishAt/publishDate; the
+   * history shows this once present.
+   */
+  publishedAt?: string;
   error?: string;
   /**
    * Why the DB backfill failed while the post is live on-platform (status

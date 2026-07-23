@@ -53,7 +53,9 @@ interface PublishTaskState {
   permalink?: string;           // first segment, once published
   segmentPermalinks?: string[]; // every published segment in thread order
   postId?: string;              // platform id of the post (reddit t3_* / X rest_id)
-  publishAt?: string;           // ISO, echoed from publishDate when scheduled
+  publishAt?: string;           // ISO, echoed from publishDate — the SCHEDULED time
+  publishedAt?: string;         // ISO, the REAL send time (set when the anchor posts;
+                                //   differs from publishAt for overdue / publish-now tasks)
   error?: string;               // platform send itself failed (status 'error')
   backfillError?: string;       // DB backfill failed while live (status 'sent')
 }

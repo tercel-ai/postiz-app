@@ -45,10 +45,14 @@ function formatDateTime(iso: string): string {
 }
 
 function publishTimeLabel(row: PublishQueueRow): string {
-  // The publish time the page submitted (item.publishDate); state.publishAt is
-  // the same value echoed back, used as a fallback. Shown on EVERY row — it's
-  // the post's intended publish time regardless of status. A still-queued task
-  // whose time is in the future is what the scheduler alarm will fire on.
+  // Once the post actually went out, show the REAL send time (publishedAt) —
+  // for an overdue or "Publish now" task this differs from the scheduled
+  // publishDate, and showing the stale scheduled time would be misleading.
+  if (row.state.publishedAt) {
+    return `Posted · ${formatDateTime(row.state.publishedAt)}`;
+  }
+  // Not sent yet: show the intended publish time (item.publishDate, echoed as
+  // state.publishAt). A still-queued future task is what the alarm fires on.
   const iso = row.item.publishDate || row.state.publishAt;
   if (!iso) return 'Publish: ASAP';
   const t = Date.parse(iso);

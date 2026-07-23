@@ -231,6 +231,21 @@ describe('publish queue scheduling + persistence', () => {
     expect(removePublishTask('later')).toEqual({ ok: false, reason: 'cancel it first' });
   });
 
+  it('records the real send time (publishedAt) when an overdue task publishes — not its stale scheduled time', async () => {
+    stubChrome();
+    setSegmentPublisherForTest(async () => ({ ok: true, permalink: 'p' }));
+
+    // Scheduled an hour in the PAST → overdue → publishes immediately at "now".
+    const pastIso = new Date(T0 - 3_600_000).toISOString();
+    enqueuePublishBatch('req-1', [redditItem('overdue', { publishDate: pastIso })], 1);
+    await waitForPublishIdle();
+
+    const state = publishQueueSnapshot()[0];
+    expect(state.status).toBe('published');
+    expect(state.publishAt).toBe(pastIso); // scheduled time is preserved…
+    expect(state.publishedAt).toBe(new Date(T0).toISOString()); // …but the real send time is now
+  });
+
   it('publishes a scheduled task immediately via publishTaskNow', async () => {
     stubChrome();
     const publish = vi.fn(async () => ({ ok: true, permalink: 'p' }));
@@ -251,6 +266,9 @@ describe('publish queue scheduling + persistence', () => {
     const state = publishQueueSnapshot()[0];
     expect(state.status).toBe('published');
     expect(state.publishAt).toBeUndefined();
+    // publishedAt is the REAL send time (now), NOT the original future schedule —
+    // publishing "now" a task scheduled for later records when it actually went out.
+    expect(state.publishedAt).toBe(new Date(T0).toISOString());
   });
 
   it('publishTaskNow is a no-op with a reason for unknown or settled tasks', async () => {

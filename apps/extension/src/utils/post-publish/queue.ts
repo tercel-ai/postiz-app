@@ -634,6 +634,7 @@ export function retryPublishTask(taskId: string): {
   delete entry.state.permalink;
   delete entry.state.postId;
   delete entry.state.segmentPermalinks;
+  delete entry.state.publishedAt;
   entry.dueAt = 0;
   persist();
   emit(entry);
@@ -736,6 +737,11 @@ async function drain(): Promise<void> {
       if (i === 0) {
         entry.state.permalink = result.permalink;
         entry.state.postId = result.postId;
+        // Real publish time = when the anchor actually posted. Recorded on EVERY
+        // successful publish (immediate, scheduled-due, or Publish-now on a
+        // future-scheduled task), so history shows when it truly went out rather
+        // than the scheduled publishAt.
+        entry.state.publishedAt = new Date(now()).toISOString();
       }
       entry.state.segmentPermalinks = [...permalinks];
       // Persist per segment so a worker death mid-thread leaves an accurate
