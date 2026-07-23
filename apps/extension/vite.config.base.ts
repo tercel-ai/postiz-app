@@ -73,6 +73,11 @@ const postizAppHosts = isProdRelease
   : [
       'http://localhost:3001/*', // aisee-agent local dev (3001 to avoid the postiz backend on :3000)
       'https://app-dev.aisee.live/*',
+      // app-dev2 shares the dev backend (api-post-dev / api-auth-dev) — it's just
+      // a second frontend domain, so the same dev build serves both. Listing it
+      // here grants the `auth` cookie read + engage/auth bridge content script on
+      // app-dev2, which is all the extension needs there.
+      'https://app-dev2.aisee.live/*',
       'https://app.aisee.live/*',
     ];
 
