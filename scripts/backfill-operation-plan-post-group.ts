@@ -90,8 +90,19 @@ function targetGroup(
 
   let contentId: string | null =
     typeof settings.contentId === 'string' ? settings.contentId : null;
-  if (!contentId && currentGroup?.startsWith(`${operationPlanId}:`)) {
-    contentId = currentGroup.slice(operationPlanId.length + 1) || null;
+  if (!contentId) {
+    // settings.contentId is missing (a corrupted row) — we cannot derive the
+    // true contentId authoritatively. Only a LEGACY 2-segment group
+    // (`${planId}:${contentId}`) can be migrated by taking the tail as the
+    // contentId. A group that ALREADY carries the `:${platform}` suffix is
+    // already correct; deriving from it would swallow the platform segment and
+    // re-append it (`…:x` -> `…:x:x`), so treat it as done and skip. contentId
+    // is never platform-suffixed in practice (it is a short id / UUID), so this
+    // suffix test cleanly separates migrated from legacy rows.
+    const prefix = `${operationPlanId}:`;
+    if (!currentGroup?.startsWith(prefix)) return null;
+    if (currentGroup.endsWith(`:${platform}`)) return null; // already migrated
+    contentId = currentGroup.slice(prefix.length) || null;
   }
   if (!contentId) return null;
 
