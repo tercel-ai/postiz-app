@@ -1,11 +1,37 @@
 # Backend API Index
 
-An index of all HTTP endpoints exposed by `apps/backend`, grouped by controller.
-Each controller links to its source file; the `@Controller('...')` prefix is the base
-path for every route below it (NestJS has **no** global prefix in this app).
+Top-level index of all HTTP endpoints exposed by `apps/backend`, grouped by
+controller. Each controller links to **(a)** its detailed API reference (📖) when
+one exists, and **(b)** its source file.
 
-Generated from the `@Controller` / `@Get` / `@Post` / `@Put` / `@Patch` / `@Delete`
-decorators. Paths shown are full paths (prefix + route).
+The `@Controller('...')` prefix is the base path for every route below it (NestJS
+has **no** global prefix in this app), so the paths shown are full paths.
+
+Generated from the `@Controller` / `@Get` / `@Post` / `@Put` / `@Patch` /
+`@Delete` decorators.
+
+## Detailed Module Docs
+
+Modules with a dedicated, parameter-level API reference:
+
+| Module | Detailed doc | Covers |
+| --- | --- | --- |
+| Engage | [engage/api.md](./engage/api.md) | Full `/engage/*` reference (config, keywords, opportunities, replies, dashboard) |
+| Posts | [posts-api.md](./posts-api.md) | Full `/posts/*` reference (create/list/metrics/tags/extension) |
+| Posts — publish body | [post-publish-api.md](./post-publish-api.md) | Deep `POST /posts` body: per-provider `settings`, media, threads |
+| Posts — list | [posts-list-module.md](./posts-list-module.md) | `GET /posts/list` filter/sort/pagination semantics |
+| Dashboard | [dashboard-api.md](./dashboard-api.md) | Full `/dashboard/*` reference |
+| Dashboard — concepts | [dashboard-module.md](./dashboard-module.md) | Metric definitions, scope, accuracy caveats |
+| Analytics / Account profile | [account-profile-module.md](./account-profile-module.md) | `/analytics/*` account & per-post performance |
+| Operation Plan | [operation-plan-api.md](./operation-plan-api.md) | `/operation-plans/*` + `/projects/:id/operation-plans` |
+| Settings | [settings-module.md](./settings-module.md) | `/settings/*` key-value store |
+| Admin | [admin-api.md](./admin-api.md) | `/admin/settings` + `/admin/ai-pricing` |
+| Admin — AI pricing | [ai-pricing-module.md](./ai-pricing-module.md) | AI cost/pricing model behind `/admin/ai-pricing` |
+| Billing / credits | [aisee-integration.md](./aisee-integration.md) | Credit billing model behind `/billing` + `/stripe` |
+| Copilot / agents | [agents-module-technical-guide.md](./agents-module-technical-guide.md) | Agent graph behind `/copilot` |
+| DataTicks (internal) | [data-ticks-module.md](./data-ticks-module.md) | Analytics aggregation feeding the dashboards |
+
+📝 = controller without a dedicated API reference yet (source-linked only).
 
 ## Table of Contents
 
@@ -17,12 +43,13 @@ decorators. Paths shown are full paths (prefix + route).
 
 ## User / App API (`src/api/routes`)
 
-### [root.controller.ts](apps/backend/src/api/routes/root.controller.ts) — `/`
+### [root.controller.ts](../apps/backend/src/api/routes/root.controller.ts) — `/`
 | Method | Path |
 | --- | --- |
 | GET | `/` |
 
-### [auth.controller.ts](apps/backend/src/api/routes/auth.controller.ts) — `/auth`
+### [auth.controller.ts](../apps/backend/src/api/routes/auth.controller.ts) — `/auth`
+📝 No dedicated API reference yet.
 | Method | Path |
 | --- | --- |
 | GET | `/auth/can-register` |
@@ -36,7 +63,8 @@ decorators. Paths shown are full paths (prefix + route).
 | POST | `/auth/resend-activation` |
 | POST | `/auth/oauth/:provider/exists` |
 
-### [users.controller.ts](apps/backend/src/api/routes/users.controller.ts) — `/user`
+### [users.controller.ts](../apps/backend/src/api/routes/users.controller.ts) — `/user`
+📝 No dedicated API reference yet.
 | Method | Path |
 | --- | --- |
 | GET | `/user/self` |
@@ -54,7 +82,8 @@ decorators. Paths shown are full paths (prefix + route).
 | POST | `/user/logout` |
 | POST | `/user/t` |
 
-### [integrations.controller.ts](apps/backend/src/api/routes/integrations.controller.ts) — `/integrations`
+### [integrations.controller.ts](../apps/backend/src/api/routes/integrations.controller.ts) — `/integrations`
+📝 No dedicated API reference yet.
 | Method | Path |
 | --- | --- |
 | GET | `/integrations/` |
@@ -83,7 +112,8 @@ decorators. Paths shown are full paths (prefix + route).
 | PUT | `/integrations/plugs/:id/activate` |
 | GET | `/integrations/telegram/updates` |
 
-### [posts.controller.ts](apps/backend/src/api/routes/posts.controller.ts) — `/posts`
+### [posts.controller.ts](../apps/backend/src/api/routes/posts.controller.ts) — `/posts`
+📖 **[posts-api.md](./posts-api.md)** · publish body → [post-publish-api.md](./post-publish-api.md) · list → [posts-list-module.md](./posts-list-module.md)
 | Method | Path |
 | --- | --- |
 | POST | `/posts/metrics/due` |
@@ -114,7 +144,8 @@ decorators. Paths shown are full paths (prefix + route).
 | PATCH | `/posts/:id/extension-published` |
 | POST | `/posts/sync-metrics` |
 
-### [autopost.controller.ts](apps/backend/src/api/routes/autopost.controller.ts) — `/autopost`
+### [autopost.controller.ts](../apps/backend/src/api/routes/autopost.controller.ts) — `/autopost`
+📝 No dedicated API reference yet.
 | Method | Path |
 | --- | --- |
 | GET | `/autopost/` |
@@ -124,7 +155,8 @@ decorators. Paths shown are full paths (prefix + route).
 | POST | `/autopost/:id/active` |
 | POST | `/autopost/send` |
 
-### [media.controller.ts](apps/backend/src/api/routes/media.controller.ts) — `/media`
+### [media.controller.ts](../apps/backend/src/api/routes/media.controller.ts) — `/media`
+📝 No dedicated API reference yet.
 | Method | Path |
 | --- | --- |
 | DELETE | `/media/:id` |
@@ -141,13 +173,15 @@ decorators. Paths shown are full paths (prefix + route).
 | POST | `/media/video/function` |
 | GET | `/media/generate-video/:type/allowed` |
 
-### [analytics.controller.ts](apps/backend/src/api/routes/analytics.controller.ts) — `/analytics`
+### [analytics.controller.ts](../apps/backend/src/api/routes/analytics.controller.ts) — `/analytics`
+📖 **[account-profile-module.md](./account-profile-module.md)**
 | Method | Path |
 | --- | --- |
 | GET | `/analytics/:integration` |
 | GET | `/analytics/post/:postId` |
 
-### [dashboard.controller.ts](apps/backend/src/api/routes/dashboard.controller.ts) — `/dashboard`
+### [dashboard.controller.ts](../apps/backend/src/api/routes/dashboard.controller.ts) — `/dashboard`
+📖 **[dashboard-api.md](./dashboard-api.md)** · concepts → [dashboard-module.md](./dashboard-module.md)
 | Method | Path |
 | --- | --- |
 | GET | `/dashboard/summary` |
@@ -156,7 +190,8 @@ decorators. Paths shown are full paths (prefix + route).
 | GET | `/dashboard/impressions` |
 | GET | `/dashboard/post-engagement` |
 
-### [engage.controller.ts](apps/backend/src/api/routes/engage.controller.ts) — `/engage`
+### [engage.controller.ts](../apps/backend/src/api/routes/engage.controller.ts) — `/engage`
+📖 **[engage/api.md](./engage/api.md)**
 | Method | Path |
 | --- | --- |
 | POST | `/engage/scan-tasks/ingest` |
@@ -217,13 +252,15 @@ decorators. Paths shown are full paths (prefix + route).
 | POST | `/engage/admin/resync-metrics` |
 | POST | `/engage/admin/sync-metrics` |
 
-### [operation-plan.controller.ts](apps/backend/src/api/routes/operation-plan.controller.ts) — (no prefix)
+### [operation-plan.controller.ts](../apps/backend/src/api/routes/operation-plan.controller.ts) — (no prefix)
+📖 **[operation-plan-api.md](./operation-plan-api.md)**
 | Method | Path |
 | --- | --- |
 | GET | `/operation-plans/:id` |
 | POST | `/projects/:projectId/operation-plans` |
 
-### [billing.controller.ts](apps/backend/src/api/routes/billing.controller.ts) — `/billing`
+### [billing.controller.ts](../apps/backend/src/api/routes/billing.controller.ts) — `/billing`
+📖 credit model → [aisee-integration.md](./aisee-integration.md) · 📝 endpoint-level reference TODO
 | Method | Path |
 | --- | --- |
 | GET | `/billing/check/:id` |
@@ -241,12 +278,14 @@ decorators. Paths shown are full paths (prefix + route).
 | POST | `/billing/add-subscription` |
 | GET | `/billing/crypto` |
 
-### [stripe.controller.ts](apps/backend/src/api/routes/stripe.controller.ts) — `/stripe`
+### [stripe.controller.ts](../apps/backend/src/api/routes/stripe.controller.ts) — `/stripe`
+📝 Stripe webhook receiver. See [aisee-integration.md](./aisee-integration.md).
 | Method | Path |
 | --- | --- |
 | POST | `/stripe/` |
 
-### [copilot.controller.ts](apps/backend/src/api/routes/copilot.controller.ts) — `/copilot`
+### [copilot.controller.ts](../apps/backend/src/api/routes/copilot.controller.ts) — `/copilot`
+📖 agent internals → [agents-module-technical-guide.md](./agents-module-technical-guide.md) · 📝 endpoint-level reference TODO
 | Method | Path |
 | --- | --- |
 | POST | `/copilot/chat` |
@@ -255,7 +294,8 @@ decorators. Paths shown are full paths (prefix + route).
 | GET | `/copilot/:thread/list` |
 | GET | `/copilot/list` |
 
-### [settings.controller.ts](apps/backend/src/api/routes/settings.controller.ts) — `/settings`
+### [settings.controller.ts](../apps/backend/src/api/routes/settings.controller.ts) — `/settings`
+📖 **[settings-module.md](./settings-module.md)**
 | Method | Path |
 | --- | --- |
 | GET | `/settings/team` |
@@ -266,7 +306,8 @@ decorators. Paths shown are full paths (prefix + route).
 | GET | `/settings/metrics-window` |
 | POST | `/settings/metrics-window` |
 
-### [signature.controller.ts](apps/backend/src/api/routes/signature.controller.ts) — `/signatures`
+### [signature.controller.ts](../apps/backend/src/api/routes/signature.controller.ts) — `/signatures`
+📝 No dedicated API reference yet.
 | Method | Path |
 | --- | --- |
 | GET | `/signatures/` |
@@ -275,7 +316,8 @@ decorators. Paths shown are full paths (prefix + route).
 | DELETE | `/signatures/:id` |
 | PUT | `/signatures/:id` |
 
-### [sets.controller.ts](apps/backend/src/api/routes/sets.controller.ts) — `/sets`
+### [sets.controller.ts](../apps/backend/src/api/routes/sets.controller.ts) — `/sets`
+📝 No dedicated API reference yet.
 | Method | Path |
 | --- | --- |
 | GET | `/sets/` |
@@ -283,7 +325,8 @@ decorators. Paths shown are full paths (prefix + route).
 | PUT | `/sets/` |
 | DELETE | `/sets/:id` |
 
-### [webhooks.controller.ts](apps/backend/src/api/routes/webhooks.controller.ts) — `/webhooks`
+### [webhooks.controller.ts](../apps/backend/src/api/routes/webhooks.controller.ts) — `/webhooks`
+📝 No dedicated API reference yet.
 | Method | Path |
 | --- | --- |
 | GET | `/webhooks/` |
@@ -292,13 +335,15 @@ decorators. Paths shown are full paths (prefix + route).
 | DELETE | `/webhooks/:id` |
 | POST | `/webhooks/send` |
 
-### [notifications.controller.ts](apps/backend/src/api/routes/notifications.controller.ts) — `/notifications`
+### [notifications.controller.ts](../apps/backend/src/api/routes/notifications.controller.ts) — `/notifications`
+📝 No dedicated API reference yet.
 | Method | Path |
 | --- | --- |
 | GET | `/notifications/` |
 | GET | `/notifications/list` |
 
-### [third-party.controller.ts](apps/backend/src/api/routes/third-party.controller.ts) — `/third-party`
+### [third-party.controller.ts](../apps/backend/src/api/routes/third-party.controller.ts) — `/third-party`
+📝 No dedicated API reference yet.
 | Method | Path |
 | --- | --- |
 | GET | `/third-party/list` |
@@ -308,7 +353,8 @@ decorators. Paths shown are full paths (prefix + route).
 | POST | `/third-party/function/:id/:functionName` |
 | POST | `/third-party/:identifier` |
 
-### [public.controller.ts](apps/backend/src/api/routes/public.controller.ts) — `/public`
+### [public.controller.ts](../apps/backend/src/api/routes/public.controller.ts) — `/public`
+📝 No dedicated API reference yet.
 | Method | Path |
 | --- | --- |
 | GET | `/public/extension/latest` |
@@ -323,12 +369,14 @@ decorators. Paths shown are full paths (prefix + route).
 | POST | `/public/crypto/:path` |
 | GET | `/public/stream` |
 
-### [internal.controller.ts](apps/backend/src/api/routes/internal.controller.ts) — `internal`
+### [internal.controller.ts](../apps/backend/src/api/routes/internal.controller.ts) — `internal`
+📝 No dedicated API reference yet.
 | Method | Path |
 | --- | --- |
 | POST | `internal/users` |
 
-### [monitor.controller.ts](apps/backend/src/api/routes/monitor.controller.ts) — `/monitor`
+### [monitor.controller.ts](../apps/backend/src/api/routes/monitor.controller.ts) — `/monitor`
+📝 No dedicated API reference yet.
 | Method | Path |
 | --- | --- |
 | GET | `/monitor/queue/:name` |
@@ -337,14 +385,20 @@ decorators. Paths shown are full paths (prefix + route).
 
 ## Admin API (`src/admin-api/routes`)
 
-### [admin-api-cost.controller.ts](apps/backend/src/admin-api/routes/admin-api-cost.controller.ts) — `/admin/api-cost`
+> `/admin/settings` and `/admin/ai-pricing` are documented in
+> [admin-api.md](./admin-api.md) and [ai-pricing-module.md](./ai-pricing-module.md).
+> The remaining admin controllers below are source-linked only (📝).
+
+### [admin-api-cost.controller.ts](../apps/backend/src/admin-api/routes/admin-api-cost.controller.ts) — `/admin/api-cost`
+📝 No dedicated API reference yet.
 | Method | Path |
 | --- | --- |
 | GET | `/admin/api-cost/` |
 | GET | `/admin/api-cost/business` |
 | GET | `/admin/api-cost/engage-scores` |
 
-### [admin-billing.controller.ts](apps/backend/src/admin-api/routes/admin-billing.controller.ts) — `/admin/billing`
+### [admin-billing.controller.ts](../apps/backend/src/admin-api/routes/admin-billing.controller.ts) — `/admin/billing`
+📝 No dedicated API reference yet.
 | Method | Path |
 | --- | --- |
 | GET | `/admin/billing/records` |
@@ -354,7 +408,8 @@ decorators. Paths shown are full paths (prefix + route).
 | POST | `/admin/billing/retry/:id` |
 | POST | `/admin/billing/retry-all-failed` |
 
-### [admin-dashboard.controller.ts](apps/backend/src/admin-api/routes/admin-dashboard.controller.ts) — `/admin/dashboard`
+### [admin-dashboard.controller.ts](../apps/backend/src/admin-api/routes/admin-dashboard.controller.ts) — `/admin/dashboard`
+📝 No dedicated API reference yet.
 | Method | Path |
 | --- | --- |
 | GET | `/admin/dashboard/` |
@@ -362,7 +417,8 @@ decorators. Paths shown are full paths (prefix + route).
 | GET | `/admin/dashboard/user/summary` |
 | POST | `/admin/dashboard/account-metrics/:integrationId` |
 
-### [admin-diagnostics.controller.ts](apps/backend/src/admin-api/routes/admin-diagnostics.controller.ts) — `/admin/diagnostics`
+### [admin-diagnostics.controller.ts](../apps/backend/src/admin-api/routes/admin-diagnostics.controller.ts) — `/admin/diagnostics`
+📝 No dedicated API reference yet.
 | Method | Path |
 | --- | --- |
 | GET | `/admin/diagnostics/recurring-posts` |
@@ -377,43 +433,50 @@ decorators. Paths shown are full paths (prefix + route).
 | GET | `/admin/diagnostics/engage-reply-errors` |
 | GET | `/admin/diagnostics/overview` |
 
-### [admin-errors.controller.ts](apps/backend/src/admin-api/routes/admin-errors.controller.ts) — `/admin/errors`
+### [admin-errors.controller.ts](../apps/backend/src/admin-api/routes/admin-errors.controller.ts) — `/admin/errors`
+📝 No dedicated API reference yet.
 | Method | Path |
 | --- | --- |
 | GET | `/admin/errors/` |
 | GET | `/admin/errors/:id` |
 
-### [admin-extension.controller.ts](apps/backend/src/admin-api/routes/admin-extension.controller.ts) — `/admin/extension`
+### [admin-extension.controller.ts](../apps/backend/src/admin-api/routes/admin-extension.controller.ts) — `/admin/extension`
+📝 No dedicated API reference yet.
 | Method | Path |
 | --- | --- |
 | GET | `/admin/extension/` |
 | POST | `/admin/extension/upload/chrome` |
 | POST | `/admin/extension/upload/firefox` |
 
-### [admin-integrations.controller.ts](apps/backend/src/admin-api/routes/admin-integrations.controller.ts) — `/admin/integrations`
+### [admin-integrations.controller.ts](../apps/backend/src/admin-api/routes/admin-integrations.controller.ts) — `/admin/integrations`
+📝 No dedicated API reference yet.
 | Method | Path |
 | --- | --- |
 | GET | `/admin/integrations/` |
 | GET | `/admin/integrations/:id` |
 
-### [admin-media.controller.ts](apps/backend/src/admin-api/routes/admin-media.controller.ts) — `/admin/media`
+### [admin-media.controller.ts](../apps/backend/src/admin-api/routes/admin-media.controller.ts) — `/admin/media`
+📝 No dedicated API reference yet.
 | Method | Path |
 | --- | --- |
 | GET | `/admin/media/` |
 
-### [admin-organizations.controller.ts](apps/backend/src/admin-api/routes/admin-organizations.controller.ts) — `/admin/organizations`
+### [admin-organizations.controller.ts](../apps/backend/src/admin-api/routes/admin-organizations.controller.ts) — `/admin/organizations`
+📝 No dedicated API reference yet.
 | Method | Path |
 | --- | --- |
 | GET | `/admin/organizations/` |
 | GET | `/admin/organizations/:id` |
 
-### [admin-posts.controller.ts](apps/backend/src/admin-api/routes/admin-posts.controller.ts) — `/admin/posts`
+### [admin-posts.controller.ts](../apps/backend/src/admin-api/routes/admin-posts.controller.ts) — `/admin/posts`
+📝 No dedicated API reference yet.
 | Method | Path |
 | --- | --- |
 | GET | `/admin/posts/` |
 | GET | `/admin/posts/:id` |
 
-### [admin-settings.controller.ts](apps/backend/src/admin-api/routes/admin-settings.controller.ts) — `/admin`
+### [admin-settings.controller.ts](../apps/backend/src/admin-api/routes/admin-settings.controller.ts) — `/admin`
+📖 **[admin-api.md](./admin-api.md)** · AI pricing → [ai-pricing-module.md](./ai-pricing-module.md)
 | Method | Path |
 | --- | --- |
 | GET | `/admin/social-providers` |
@@ -431,7 +494,8 @@ decorators. Paths shown are full paths (prefix + route).
 
 ## Public API v1 (`src/public-api/routes`)
 
-### [public.integrations.controller.ts](apps/backend/src/public-api/routes/v1/public.integrations.controller.ts) — `/public/v1`
+### [public.integrations.controller.ts](../apps/backend/src/public-api/routes/v1/public.integrations.controller.ts) — `/public/v1`
+📝 No dedicated API reference yet.
 | Method | Path |
 | --- | --- |
 | POST | `/public/v1/upload` |
