@@ -124,23 +124,53 @@ function fillXReplyInPage(
     if (!composer) return 'not_found';
 
     composer.focus();
-    const selection = window.getSelection();
-    const range = document.createRange();
-    range.selectNodeContents(composer);
-    selection?.removeAllRanges();
-    selection?.addRange(range);
+    const selectAllContents = () => {
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(composer);
+      selection?.removeAllRanges();
+      selection?.addRange(range);
+    };
+    selectAllContents();
 
-    const inserted =
-      document.execCommand?.('insertText', false, text) ?? false;
-    if (!inserted) composer.textContent = text;
+    // X's composer is a Draft.js rich-text editor. A single
+    // execCommand('insertText') with MULTI-LINE text is only partially applied:
+    // Draft rebuilds its ContentState from the DOM block under the cursor (the
+    // LAST line) and silently drops every earlier paragraph — the post ends up
+    // as just the final line. Simulate a PASTE instead; Draft's paste handler
+    // ingests the whole string and splits it into blocks, preserving every line.
+    let filled = false;
+    try {
+      const dt = new DataTransfer();
+      dt.setData('text/plain', text);
+      composer.dispatchEvent(
+        new ClipboardEvent('paste', {
+          bubbles: true,
+          cancelable: true,
+          clipboardData: dt,
+        })
+      );
+      await sleep(50); // Draft re-renders asynchronously
+      filled = (composer.textContent || '').replace(/\s/g, '').length > 0;
+    } catch {
+      filled = false;
+    }
 
-    composer.dispatchEvent(
-      new InputEvent('input', {
-        bubbles: true,
-        inputType: 'insertText',
-        data: text,
-      })
-    );
+    // Fallback for a browser/editor that ignored the synthetic paste (single-line
+    // text always survived this path, which is why it shipped this way).
+    if (!filled) {
+      selectAllContents();
+      const inserted =
+        document.execCommand?.('insertText', false, text) ?? false;
+      if (!inserted) composer.textContent = text;
+      composer.dispatchEvent(
+        new InputEvent('input', {
+          bubbles: true,
+          inputType: 'insertText',
+          data: text,
+        })
+      );
+    }
 
     if (!autoSubmit) return 'filled';
 
