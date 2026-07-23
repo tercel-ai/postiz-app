@@ -44,16 +44,18 @@ function formatDateTime(iso: string): string {
   return new Date(t).toLocaleString();
 }
 
-function scheduleLabel(row: PublishQueueRow): string | null {
-  // A future-dated queued task carries publishAt; show when it's due. A queued
-  // task with no publishAt publishes as soon as the serial queue reaches it.
-  if (row.state.status === 'queued') {
-    return row.state.publishAt
-      ? `Scheduled: ${formatDateTime(row.state.publishAt)}`
-      : 'Publishes ASAP';
-  }
-  if (row.state.publishAt) return `Was scheduled: ${formatDateTime(row.state.publishAt)}`;
-  return null;
+function publishTimeLabel(row: PublishQueueRow): string {
+  // The publish time the page submitted (item.publishDate); state.publishAt is
+  // the same value echoed back, used as a fallback. Shown on EVERY row — it's
+  // the post's intended publish time regardless of status. A still-queued task
+  // whose time is in the future is what the scheduler alarm will fire on.
+  const iso = row.item.publishDate || row.state.publishAt;
+  if (!iso) return 'Publish: ASAP';
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return 'Publish: ASAP';
+  const when = formatDateTime(iso);
+  if (row.state.status === 'queued' && t > Date.now()) return `Scheduled · ${when}`;
+  return `Publish · ${when}`;
 }
 
 const QueueRow: FC<{
@@ -67,7 +69,7 @@ const QueueRow: FC<{
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const { taskId, platform, status, segmentsTotal, segmentsPublished } = row.state;
-  const schedule = scheduleLabel(row);
+  const publishTime = publishTimeLabel(row);
 
   const run = useCallback(
     async (fn: (id: string) => Promise<void>) => {
@@ -98,7 +100,7 @@ const QueueRow: FC<{
             {segmentsPublished}/{segmentsTotal}
           </span>
         )}
-        {schedule && <span className="pz-time">{schedule}</span>}
+        <span className="pz-time">{publishTime}</span>
       </div>
 
       {(row.item.title || '').trim() && (
