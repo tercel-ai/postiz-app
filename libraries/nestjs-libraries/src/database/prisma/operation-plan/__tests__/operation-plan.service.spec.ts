@@ -687,6 +687,8 @@ describe('OperationPlanService.create', () => {
               // `.optional()`, so "no media" / "no thread" are explicit nulls.
               media: null,
               thread: null,
+              // Reddit-only target; null on every non-reddit platform entry.
+              subreddit: null,
             },
           ],
         },

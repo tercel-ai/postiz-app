@@ -8,6 +8,18 @@ type GeneratedThreadPart = {
   media?: { url: string; altText?: string | null }[] | null;
 };
 
+// Reddit-only publishing header, attached during generation by the reddit target
+// resolver (resolveRedditTargets). Present only on platform==='reddit' posts that
+// resolved to a valid subreddit; a reddit post WITHOUT it was dropped at
+// resolution time and should never reach here. Folded into settings.subreddit so
+// the Reddit provider's submit (which reads post.settings.subreddit) can publish.
+type ResolvedRedditTarget = {
+  subreddit: string;
+  title: string;
+  type: 'self';
+  is_flair_required: false;
+};
+
 type GeneratedPlatformPost = {
   id: string;
   platform: string;
@@ -18,6 +30,8 @@ type GeneratedPlatformPost = {
   // Ordered follow-up posts published as a native reply-chain under `content`.
   // null/empty = a single post. See the generation schema's `thread` field.
   thread?: GeneratedThreadPart[] | null;
+  // Resolved Reddit target (subreddit/title/type). See ResolvedRedditTarget.
+  redditTarget?: ResolvedRedditTarget | null;
 };
 
 type GeneratedContentItem = {
@@ -239,7 +253,15 @@ export class OperationPlanRepository {
             parentPostId: index === 0 ? post.id : parts[index - 1].id,
           })),
         ];
-        return chain.map((node) => ({ item, platform: post.platform, node }));
+        // The resolved Reddit target rides on every node of the chain (anchor +
+        // thread parts share one subreddit) so each materialized Reddit Post row
+        // is independently valid against the settings DTO.
+        return chain.map((node) => ({
+          item,
+          platform: post.platform,
+          node,
+          redditTarget: post.redditTarget ?? null,
+        }));
       })
     );
     if (!materializedPosts.length) {
@@ -279,7 +301,12 @@ export class OperationPlanRepository {
 
     const postsToCreate = materializedPosts
       .filter(({ node }) => !existingById.has(node.id))
-      .map(({ item, platform, node }) => {
+      // A Reddit post that reached materialization WITHOUT a resolved target is a
+      // resolver contract violation (or a legacy payload generated before this
+      // feature). Drop it here rather than persist an unpublishable Reddit draft
+      // that would throw at submit on `undefined.subreddit`.
+      .filter(({ platform, redditTarget }) => platform !== 'reddit' || !!redditTarget)
+      .map(({ item, platform, node, redditTarget }) => {
         // integrationId is optional: publishing is by platform (the plugin reads
         // settings.__type), so a platform without an OAuth integration still gets
         // a DRAFT post with a null integrationId. When an integration exists we
@@ -311,6 +338,24 @@ export class OperationPlanRepository {
             campaignId: payload?.campaignId ?? plan.campaignId,
             contentId: item.contentId,
             themeKey: item.themeKey,
+            // Reddit needs a real publishing header: the submit call reads
+            // settings.subreddit[].value.{subreddit,title,type}. Shaped to
+            // RedditSettingsDto (a one-element array; url/flair omitted — only
+            // validated for type='link'/is_flair_required, both false here).
+            ...(platform === 'reddit' && redditTarget
+              ? {
+                  subreddit: [
+                    {
+                      value: {
+                        subreddit: redditTarget.subreddit,
+                        title: redditTarget.title,
+                        type: redditTarget.type,
+                        is_flair_required: redditTarget.is_flair_required,
+                      },
+                    },
+                  ],
+                }
+              : {}),
           }),
           image: JSON.stringify(node.media ?? []),
           source: 'calendar',

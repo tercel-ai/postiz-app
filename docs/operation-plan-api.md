@@ -116,14 +116,24 @@ Creates or returns the operation plan for one completed Aisee task. `taskId` is 
               "content": "Follow-up reply that continues the point",
               "media": null
             }
-          ]
+          ],
+          "subreddit": null
         },
         {
           "id": "33333333-3333-4333-8333-333333333333",
           "platform": "linkedin",
           "content": "A single self-contained post — no thread here",
           "media": [],
-          "thread": null
+          "thread": null,
+          "subreddit": null
+        },
+        {
+          "id": "44444444-4444-4444-8444-444444444444",
+          "platform": "reddit",
+          "content": "A longer self-post that reads well on Reddit",
+          "media": [],
+          "thread": null,
+          "subreddit": "webdev"
         }
       ]
     }
@@ -169,6 +179,18 @@ Creates or returns the operation plan for one completed Aisee task. `taskId` is 
 > - **Platform capability.** Only platforms whose Postiz provider supports follow-up posting (the `comment` capability — the same flag the publisher's `isCommentable` checks) can be threaded. A `thread` generated for an unsupported platform is dropped (set to `null`) before persistence, so a non-threadable platform always shows `thread: null`.
 > - **Each part is a full post.** Every thread part has its own required UUID `id` (globally unique across the plan, stable across re-materialization) and its own `content` + nullable `media`, and each **independently** obeys the platform character budget — the same hard gate as the anchor.
 > - **Materialization = a `parentPostId` chain.** On `READY`, the anchor becomes a `Post` with `parentPostId: null` and each part becomes a child `Post` whose `parentPostId` points at the **previous** part (a chain, not a star — this is exactly what the publisher walks). All parts share the anchor's `Post.group`; order is carried by the chain itself, not by `publishDate`. The `GET /operation-plans/{id}` overview returns these child posts too, each with its `parentPostId`, so a client can nest them.
+
+> **`subreddit` (Reddit targeting).** Unlike X, a Reddit post cannot publish from content alone — the submit API hard-requires a target **subreddit**, a **title**, and a post **type**. So every `reddit` platform entry is assigned a validated subreddit **before materialization**, and a Reddit post that resolves to no valid target is **dropped** (a content item left with no platforms is dropped entirely) rather than persisted as an unpublishable draft. On non-Reddit platforms `subreddit` is always `null`.
+>
+> - **Tier 1 — reuse the project's monitored channels.** If the project's `EngageConfig` has enabled `EngageMonitoredChannel` rows with `platform = "reddit"`, those subreddits are used directly (round-robin, largest `audienceSize` first), skipping the LLM's proposal. Curated channels are trusted: kept even when the public probe can't be reached, dropped only on a definitive *link-only* or *no-longer-exists* verdict.
+> - **Tier 2 — validate the LLM's proposal.** With no monitored channels, the generator proposes a `subreddit` (bare name, no `r/`), which is validated against Reddit's **public** API (OAuth-free, via the same loid/proxy WAF-bypass the Engage scanner uses): `about.json` must show the subreddit **exists**, is **public**, and **accepts text (self) posts**, and `new.json` must show a post within the **last 48 hours** (activity check). All checks pass → the post is kept; any check fails → the post is dropped.
+> - **Write-back.** A Tier-2 subreddit that validates and isn't already monitored is persisted into the project's `EngageConfig` as an `EngageMonitoredChannel` (`channelId` = subreddit). The next plan then takes the cheaper Tier-1 path, and Engage scanning picks the community up too. Write-back is best-effort — a duplicate or failure never fails generation.
+> - **Idempotency & failure.** Resolution runs once during generation and is stored in `planPayload`, so every materialize path (main, idempotent retry, sweeper recovery) reads the same result. If resolution errors out, Reddit posts fall through unresolved and are dropped at materialize — the paid generation still completes for the other platforms.
+> - **Residual publish-failure risk (accepted).** Public validation reduces but cannot eliminate Reddit submit failures, because the OAuth-free path cannot see everything the actual submit enforces:
+>   - **Flair-forced subreddits.** `is_flair_required` needs the OAuth `post_requirements` endpoint, so it is always emitted **`false`**. A subreddit that silently forces post flair will still reject the submit.
+>   - **Account-level gates.** "Others posted in the last 48h" proves the community is *alive*, not that *this account* may post there — karma/age thresholds and approved-user-only (restricted) subreddits still 403 at submit despite showing recent posts.
+>   - **Text-only.** Reddit posts are materialized as `type: "self"` (text); any generated `media` is ignored for Reddit.
+>   These are only fully solved by an OAuth-authenticated pre-check or by attempting the actual submit.
 
 ### Billing & token accounting
 

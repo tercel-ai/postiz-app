@@ -383,6 +383,13 @@ describe('OperationPlanRepository', () => {
                 platform: 'reddit',
                 content: 'Reddit post text',
                 media: [],
+                // Attached by the reddit target resolver during generation.
+                redditTarget: {
+                  subreddit: 'webdev',
+                  title: 'Reddit theme',
+                  type: 'self',
+                  is_flair_required: false,
+                },
               },
             ],
           },
@@ -391,7 +398,8 @@ describe('OperationPlanRepository', () => {
     );
 
     // Post is still created; integrationId is null and the platform lives in
-    // settings.__type so the by-platform plugin can pick it up.
+    // settings.__type so the by-platform plugin can pick it up. The resolved
+    // subreddit is folded into settings.subreddit so the Reddit submit can run.
     expect(postCreateMany).toHaveBeenCalledWith({
       data: [
         expect.objectContaining({
@@ -402,10 +410,59 @@ describe('OperationPlanRepository', () => {
             campaignId: 'campaign-1',
             contentId: 'D01',
             themeKey: 'positioning',
+            subreddit: [
+              {
+                value: {
+                  subreddit: 'webdev',
+                  title: 'Reddit theme',
+                  type: 'self',
+                  is_flair_required: false,
+                },
+              },
+            ],
           }),
         }),
       ],
       skipDuplicates: true,
     });
+  });
+
+  it('materializePlanPosts drops a reddit post that has no resolved subreddit target', async () => {
+    const postFindMany = vi.fn().mockResolvedValue([]);
+    const postCreateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const integrationFindMany = vi.fn().mockResolvedValue([]);
+    const repo = createRepo({ postFindMany, postCreateMany, integrationFindMany });
+
+    const result = await repo.materializePlanPosts(
+      {
+        id: 'plan-1',
+        organizationId: 'org-1',
+        projectId: 'proj-1',
+        campaignId: 'campaign-1',
+      } as any,
+      {
+        contentItems: [
+          {
+            contentId: 'D01',
+            utcDate: '2030-01-01T00:00:00.000Z',
+            themeKey: 'positioning',
+            themeTitle: 'Reddit theme',
+            platforms: [
+              // No redditTarget → unpublishable → dropped, not persisted as a
+              // draft that would throw at submit on undefined.subreddit.
+              {
+                id: '33333333-3333-4333-8333-333333333333',
+                platform: 'reddit',
+                content: 'Reddit post text',
+                media: [],
+              },
+            ],
+          },
+        ],
+      }
+    );
+
+    expect(result).toEqual({ count: 0 });
+    expect(postCreateMany).not.toHaveBeenCalled();
   });
 });

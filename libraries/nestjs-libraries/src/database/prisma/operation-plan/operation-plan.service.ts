@@ -18,6 +18,10 @@ import { AiseeCreditService } from '../ai-pricing/aisee-credit.service';
 import { SettingsService } from '../settings/settings.service';
 import { OpenaiService, AiUsageInfo } from '@gitroom/nestjs-libraries/openai/openai.service';
 import { EngageRepository } from '@gitroom/nestjs-libraries/engage/engage.repository';
+import {
+  resolveRedditTargets,
+  MonitoredRedditChannel,
+} from './reddit-target-resolver';
 import { weightedLength, textSlicer } from '@gitroom/helpers/utils/count.length';
 import { socialIntegrationList } from '@gitroom/nestjs-libraries/integrations/integration.manager';
 import { createHash, randomUUID } from 'crypto';
@@ -199,6 +203,15 @@ const GeneratedPlanSchema = z.object({
       id: z.string().uuid(),
       platform: z.string().min(1),
       content: z.string().min(1),
+      // Reddit ONLY: the target community the post should go to (bare name, no
+      // `r/` prefix). Reddit's submit API requires a subreddit — unlike X, a
+      // content-only post cannot publish. The backend VALIDATES this against
+      // Reddit's public API before materializing (resolveRedditTargets): an
+      // invalid/dead subreddit drops the Reddit post. When the project already
+      // monitors Reddit channels those override this value, so it is best-effort.
+      // null for every non-Reddit platform (per the Structured-Outputs
+      // "required + nullable, never optional" rule noted on `media`).
+      subreddit: z.string().nullable(),
       // OpenAI Structured Outputs constraints (both learned the hard way — a
       // violation is a 400 from the provider, not a local error):
       //  1. every field must be REQUIRED; optionality is `.nullable()`, never
@@ -611,6 +624,7 @@ export class OperationPlanService implements OnApplicationBootstrap {
         '- Write PLAIN TEXT for X: no Markdown. `**bold**`, headings and backticks are NOT rendered — they appear literally as asterisks. Plain prose, line breaks and simple bullets ("•") only.',
         '- Hashtags: a hashtag ENDS at the first space, so a multi-word tag silently breaks — "#MCP protocol" renders as the tag "#MCP" followed by the loose word "protocol". Never hashtag a multi-word keyword: either write it as plain prose (preferred — keywords belong in the sentence, not bolted on as tags) or close it up into one word ("#MCPprotocol"). Use at most 1-2 hashtags, and only single-word ones.',
         '- Prefer content AI systems can cite: concrete data points and answer-style framing. For owned/blog channels, reference the project\'s own canonical URL. "Build-in-public" (sharing real, specific progress/metrics) tends to be the most citable. Keep copy concise and publish-ready.',
+        '- REDDIT TARGETING: for every `reddit` platform entry, set `subreddit` to the single most relevant EXISTING, ACTIVE, PUBLIC subreddit for this content (bare name, no "r/" prefix, e.g. "webdev"). Pick a real community you are confident exists and accepts text (self) posts on this topic — the backend verifies it against Reddit and DROPS the post if the subreddit is missing, private, link-only, or inactive, so a wrong guess wastes the post. For EVERY non-reddit platform entry, set `subreddit` to null.',
         '',
         'THREADS (multi-part posts)',
         ...(threadsEnabled
@@ -725,6 +739,27 @@ export class OperationPlanService implements OnApplicationBootstrap {
       return;
     }
     const { generation, planData, usages } = artifacts;
+
+    // Reddit posts are unpublishable without a subreddit (unlike X). Resolve one
+    // per generated Reddit post — reuse the project's monitored channels, else
+    // validate the LLM's proposal against Reddit's public API — attaching a
+    // publishing header and dropping posts with no valid target. Done BEFORE the
+    // payload is persisted so every materialize path (main/idempotent/sweeper)
+    // reads the already-resolved result. Failure here must not fail the paid
+    // generation: on error, Reddit posts fall through unresolved and are dropped
+    // at materialize by the reddit-target guard.
+    try {
+      await this._resolveAndAttachRedditTargets(
+        organizationId,
+        projectId,
+        generation.data.contentItems
+      );
+    } catch (error) {
+      this.logger.error(
+        `Reddit target resolution failed for plan ${planId} (Reddit posts will be dropped):`,
+        error instanceof Error ? error.stack : error
+      );
+    }
 
     // Read back the stub for its persisted campaignId/generatorVersion so the
     // payload matches the row (and so a sweeper-resumed row reuses its originals).
@@ -1254,6 +1289,113 @@ export class OperationPlanService implements OnApplicationBootstrap {
   // Record<EngageKeyword.id, number>, creating any keyword that doesn't exist
   // yet. Falls back to text keys when EngageRepository wasn't wired in
   // (unit-test construction).
+  // Attach a validated Reddit publishing target to every generated Reddit post,
+  // MUTATING `contentItems` in place: each reddit platform entry gains a
+  // `redditTarget` header, or is REMOVED when no valid subreddit resolves (a
+  // content item left with no platforms is dropped entirely). Tier 1 reuses the
+  // project's monitored Reddit channels; Tier 2 validates the LLM's `subreddit`
+  // against Reddit's public API and persists newly-discovered subreddits back
+  // into the Engage config so the next plan takes the cheap Tier-1 path. No-op
+  // without an EngageRepository (unit-test construction) — reddit posts then fall
+  // through unresolved and are dropped by materialize's guard.
+  private async _resolveAndAttachRedditTargets(
+    organizationId: string,
+    projectId: string,
+    contentItems: z.infer<typeof GeneratedPlanSchema>['contentItems']
+  ): Promise<void> {
+    // Every reddit platform entry across all content items, with its owning item
+    // (so a fully-dropped item can be pruned) and the title Reddit requires.
+    const redditEntries = contentItems.flatMap((item) =>
+      item.platforms
+        .filter((post) => post.platform === 'reddit')
+        .map((post) => ({ item, post }))
+    );
+    if (!redditEntries.length || !this._engageRepository) {
+      return;
+    }
+
+    const monitored = await this._engageRepository.listMonitoredChannels(
+      organizationId,
+      projectId
+    );
+    const monitoredChannels: MonitoredRedditChannel[] = monitored
+      .filter((c) => c.platform === 'reddit')
+      .map((c) => ({
+        channelId: c.channelId,
+        channelName: c.channelName,
+        audienceSize: c.audienceSize,
+        enabled: c.enabled,
+      }));
+
+    const { outputs, discovered } = await resolveRedditTargets(
+      // Reddit's required post title is the content item's themeTitle (there is
+      // no per-platform title field), so it is fed in as the target title here.
+      redditEntries.map(({ item, post }, index) => ({
+        key: `${post.id}:${index}`,
+        llmSubreddit: (post as { subreddit?: string | null }).subreddit ?? null,
+        title: item.themeTitle,
+      })),
+      monitoredChannels,
+      { log: (m) => this.logger.debug(m) }
+    );
+
+    // Apply resolution: attach the header, or mark the entry for removal.
+    const drop = new Set<unknown>();
+    outputs.forEach((output, index) => {
+      const { post } = redditEntries[index];
+      if (!output.target) {
+        drop.add(post);
+        return;
+      }
+      (post as { redditTarget?: unknown }).redditTarget = output.target;
+    });
+
+    if (drop.size) {
+      for (const item of contentItems) {
+        item.platforms = item.platforms.filter((post) => !drop.has(post));
+      }
+      // Prune content items whose every platform was dropped.
+      contentItems.splice(
+        0,
+        contentItems.length,
+        ...contentItems.filter((item) => item.platforms.length > 0)
+      );
+    }
+
+    // Persist Tier-2 discoveries back into the project's Engage config so future
+    // plans reuse them (Tier 1) and Engage scanning picks them up. Best-effort:
+    // a duplicate (409) or any single failure must not fail generation.
+    if (discovered.length) {
+      try {
+        const config = await this._engageRepository.getOrCreateConfig(
+          organizationId,
+          projectId
+        );
+        for (const { subreddit } of discovered) {
+          await this._engageRepository
+            .addMonitoredChannel(config.id, organizationId, {
+              platform: 'reddit',
+              channelId: subreddit,
+              channelName: subreddit,
+            })
+            .catch((error: unknown) => {
+              this.logger.debug(
+                `[reddit-target] persist r/${subreddit} skipped: ${
+                  error instanceof Error ? error.message : String(error)
+                }`
+              );
+            });
+        }
+      } catch (error) {
+        this.logger.warn(
+          `[reddit-target] could not persist discovered subreddits: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      }
+    }
+  }
+
   private async _mapKeywordTargetsToIds(
     organizationId: string,
     projectId: string,
