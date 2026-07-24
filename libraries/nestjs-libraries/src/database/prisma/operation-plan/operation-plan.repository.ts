@@ -11,7 +11,10 @@ import { postTitleFromTheme } from './theme-title';
 // let a later plan collide with an earlier plan's row and throw
 // OPERATION_PLAN_POST_ID_CONFLICT. Namespacing by plan.id makes the Post.id a pure
 // function of (plan.id, rawId): globally unique across plans, yet deterministic so
-// re-materializing the SAME plan stays idempotent. Any fixed UUID works here.
+// re-materializing the SAME plan stays idempotent. Any fixed UUID works as the
+// value, but it MUST NEVER CHANGE once in use: the derived id is part of the
+// idempotency key, so altering this constant would make every already-materialized
+// plan re-materialize under new ids and duplicate its posts.
 const OPERATION_PLAN_POST_ID_NAMESPACE = '6f4d2b1e-9c3a-4d7e-8b2f-0a1c3e5d7f90';
 
 // Derive the stable, globally-unique Post.id for a payload id under a given plan.
