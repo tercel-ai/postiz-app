@@ -8,6 +8,7 @@ function createRepo(overrides: {
   planUpdate?: any;
   postFindMany?: any;
   postCreateMany?: any;
+  postUpdateMany?: any;
   sentReplyFindMany?: any;
   keywordFindMany?: any;
   integrationFindMany?: any;
@@ -27,6 +28,7 @@ function createRepo(overrides: {
         post: {
           findMany: overrides.postFindMany ?? vi.fn().mockResolvedValue([]),
           createMany: overrides.postCreateMany ?? vi.fn().mockResolvedValue({ count: 0 }),
+          updateMany: overrides.postUpdateMany ?? vi.fn().mockResolvedValue({ count: 0 }),
         },
       },
     } as any,
@@ -464,5 +466,142 @@ describe('OperationPlanRepository', () => {
 
     expect(result).toEqual({ count: 0 });
     expect(postCreateMany).not.toHaveBeenCalled();
+  });
+
+  it('materializePlanPosts supersedes prior plans by soft-deleting their DRAFT posts (project-scoped, DRAFT-only, plan/manual drafts protected)', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2030-06-01T00:00:00.000Z'));
+    const postFindMany = vi.fn().mockResolvedValue([]);
+    const postCreateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const postUpdateMany = vi.fn().mockResolvedValue({ count: 3 });
+    const integrationFindMany = vi.fn().mockResolvedValue([
+      { id: 'integration-x', providerIdentifier: 'x' },
+    ]);
+    const repo = createRepo({ postFindMany, postCreateMany, postUpdateMany, integrationFindMany });
+
+    await repo.materializePlanPosts(
+      {
+        id: 'plan-2',
+        organizationId: 'org-1',
+        projectId: 'proj-1',
+        campaignId: 'campaign-1',
+      } as any,
+      {
+        contentItems: [
+          {
+            contentId: 'D01',
+            utcDate: '2030-06-02T00:00:00.000Z',
+            themeKey: 'positioning',
+            themeTitle: 'AI search positioning',
+            platforms: [
+              {
+                id: '11111111-1111-4111-8111-111111111111',
+                platform: 'x',
+                content: 'Publish-ready post text',
+                media: [],
+              },
+            ],
+          },
+        ],
+      }
+    );
+
+    // Prior plans' DRAFTs for this project are soft-deleted. Scoped by org+project;
+    // only DRAFT (committed QUEUE/PUBLISHED/ERROR survive); only plan-owned drafts
+    // (operationPlanId not null) and never this plan's own rows.
+    expect(postUpdateMany).toHaveBeenCalledWith({
+      where: {
+        organizationId: 'org-1',
+        projectId: 'proj-1',
+        state: 'DRAFT',
+        deletedAt: null,
+        operationPlanId: { not: null },
+        NOT: { operationPlanId: 'plan-2' },
+      },
+      data: { deletedAt: new Date('2030-06-01T00:00:00.000Z'), parentPostId: null },
+    });
+  });
+
+  it('materializePlanPosts re-asserts the active plan on an idempotent re-materialize (all ids already exist → no create, still supersedes)', async () => {
+    // Both payload ids already belong to this plan → nothing new to create, but the
+    // plan is still the active one, so prior plans must still be superseded.
+    const postFindMany = vi.fn().mockResolvedValue([
+      { id: '11111111-1111-4111-8111-111111111111', operationPlanId: 'plan-2', organizationId: 'org-1' },
+    ]);
+    const postCreateMany = vi.fn().mockResolvedValue({ count: 0 });
+    const postUpdateMany = vi.fn().mockResolvedValue({ count: 2 });
+    const integrationFindMany = vi.fn().mockResolvedValue([
+      { id: 'integration-x', providerIdentifier: 'x' },
+    ]);
+    const repo = createRepo({ postFindMany, postCreateMany, postUpdateMany, integrationFindMany });
+
+    const result = await repo.materializePlanPosts(
+      {
+        id: 'plan-2',
+        organizationId: 'org-1',
+        projectId: 'proj-1',
+        campaignId: 'campaign-1',
+      } as any,
+      {
+        contentItems: [
+          {
+            contentId: 'D01',
+            utcDate: '2030-06-02T00:00:00.000Z',
+            themeKey: 'positioning',
+            themeTitle: 'AI search positioning',
+            platforms: [
+              {
+                id: '11111111-1111-4111-8111-111111111111',
+                platform: 'x',
+                content: 'Existing text',
+                media: [],
+              },
+            ],
+          },
+        ],
+      }
+    );
+
+    expect(result).toEqual({ count: 0 });
+    expect(postCreateMany).not.toHaveBeenCalled();
+    expect(postUpdateMany).toHaveBeenCalledTimes(1);
+  });
+
+  it('materializePlanPosts does NOT supersede when the plan resolved to zero posts (dropped reddit, no existing) — avoids wiping the previous plan into an empty calendar', async () => {
+    const postFindMany = vi.fn().mockResolvedValue([]);
+    const postCreateMany = vi.fn().mockResolvedValue({ count: 0 });
+    const postUpdateMany = vi.fn().mockResolvedValue({ count: 0 });
+    const integrationFindMany = vi.fn().mockResolvedValue([]);
+    const repo = createRepo({ postFindMany, postCreateMany, postUpdateMany, integrationFindMany });
+
+    await repo.materializePlanPosts(
+      {
+        id: 'plan-2',
+        organizationId: 'org-1',
+        projectId: 'proj-1',
+        campaignId: 'campaign-1',
+      } as any,
+      {
+        contentItems: [
+          {
+            contentId: 'D01',
+            utcDate: '2030-06-02T00:00:00.000Z',
+            themeKey: 'positioning',
+            themeTitle: 'Reddit theme',
+            platforms: [
+              // No redditTarget → dropped → plan owns zero posts.
+              {
+                id: '33333333-3333-4333-8333-333333333333',
+                platform: 'reddit',
+                content: 'Reddit post text',
+                media: [],
+              },
+            ],
+          },
+        ],
+      }
+    );
+
+    expect(postUpdateMany).not.toHaveBeenCalled();
   });
 });

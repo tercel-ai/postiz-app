@@ -368,12 +368,42 @@ export class OperationPlanRepository {
         };
       });
 
-    if (!postsToCreate.length) {
-      return { count: 0 };
+    const result = postsToCreate.length
+      ? await this._post.model.post.createMany({
+          data: postsToCreate,
+          skipDuplicates: true,
+        })
+      : { count: 0 };
+
+    // Single-active-plan semantics: the latest materialized plan supersedes every
+    // earlier plan for this project. Soft-delete the prior plans' DRAFT posts so
+    // they leave the calendar (every read path filters deletedAt: null) and can no
+    // longer be published.
+    //   - Guard on planHasPosts: only supersede when THIS plan actually owns posts
+    //     — either just created (postsToCreate) or already present from an
+    //     idempotent re-materialize (existingById). A degenerate plan that resolved
+    //     to zero posts (e.g. every reddit item dropped) must not wipe the previous
+    //     valid plan and leave the project with an empty calendar.
+    //   - state DRAFT only: a post the user already scheduled (QUEUE) or that
+    //     already published/errored is committed work and must survive.
+    //   - operationPlanId IS NOT NULL: hand-authored drafts (no plan) are never a
+    //     stale plan and must be left untouched.
+    //   - NOT operationPlanId = plan.id: protect this plan's own rows.
+    const planHasPosts = postsToCreate.length > 0 || existingById.size > 0;
+    if (planHasPosts) {
+      await this._post.model.post.updateMany({
+        where: {
+          organizationId: plan.organizationId,
+          projectId: plan.projectId,
+          state: 'DRAFT',
+          deletedAt: null,
+          operationPlanId: { not: null },
+          NOT: { operationPlanId: plan.id },
+        },
+        data: { deletedAt: new Date(), parentPostId: null },
+      });
     }
-    return this._post.model.post.createMany({
-      data: postsToCreate,
-      skipDuplicates: true,
-    });
+
+    return result;
   }
 }
