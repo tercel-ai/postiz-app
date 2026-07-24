@@ -152,7 +152,20 @@ async function defaultPublishSegment(
       text,
       images: segment?.images,
     });
-    return { ok: r.ok, permalink: r.permalink, postId: r.postId, error: r.error };
+    if (!r.ok) return { ok: false, error: r.error };
+    // pending = the captcha-fallback tab was surfaced but Reddit's own Post
+    // button was never confirmed (a captcha to solve). For an unattended queue
+    // that is a failure — never mark published without a real permalink (mirrors
+    // the X/LinkedIn pending handling above).
+    if (r.pending) {
+      return {
+        ok: false,
+        error:
+          r.message ||
+          'Reddit post left pending — finish it manually in the opened tab',
+      };
+    }
+    return { ok: true, permalink: r.permalink, postId: r.postId };
   }
   if (!prevPermalink) {
     return { ok: false, error: 'No previous segment permalink to thread onto' };

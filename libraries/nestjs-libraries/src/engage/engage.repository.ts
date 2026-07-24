@@ -2335,6 +2335,10 @@ export class EngageRepository {
       this._sentReply.model.engageSentReply.findFirst({
         where: {
           organizationId,
+          // Scope to the same project as the state row above; a global opportunity
+          // may have been replied under another project in this org, whose reply
+          // must not leak onto this project's card.
+          projectId: projectId ?? null,
           opportunityId: id,
           post: { state: { not: 'DRAFT' } },
         },
@@ -2379,7 +2383,7 @@ export class EngageRepository {
       // An opportunity may now carry several replies (batch send); surface the
       // most recent for the detail panel.
       const sentReply = await this._sentReply.model.engageSentReply.findFirst({
-        where: { organizationId, opportunityId: id },
+        where: { organizationId, projectId: projectId ?? null, opportunityId: id },
         orderBy: { createdAt: 'desc' },
         include: {
           post: {
@@ -2883,6 +2887,11 @@ export class EngageRepository {
       this._post.model.post.aggregate({
         where: {
           organizationId,
+          // Match the project scope of `sentWhere` above: engage Posts carry the
+          // same projectId as their EngageSentReply, so without this the
+          // impressions/traffic totals sum org-wide while repliesCount/responseRate
+          // are project-scoped — inconsistent numbers and a cross-project leak.
+          projectId: dto.projectId ?? null,
           ...postWhere,
           ...(dto.platform
             ? { engageSentReply: { is: { opportunity: { platform: dto.platform } } } }

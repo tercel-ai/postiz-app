@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { parseRedditSubmitResponse } from '../reddit.poster';
+import {
+  isRedditCaptchaError,
+  parseRedditSubmitResponse,
+} from '../reddit.poster';
 
 describe('parseRedditSubmitResponse', () => {
   it('extracts url and fullname from an api_type=json submit response', () => {
@@ -32,5 +35,23 @@ describe('parseRedditSubmitResponse', () => {
       permalink: undefined,
       postId: undefined,
     });
+  });
+});
+
+describe('isRedditCaptchaError', () => {
+  it('detects a BAD_CAPTCHA error tuple from /api/submit', () => {
+    // The exact shape Reddit returns for a captcha-gated submission.
+    expect(
+      isRedditCaptchaError([
+        ['BAD_CAPTCHA', "That was a tricky one. Why don't you try that again.", 'captcha'],
+      ])
+    ).toBe(true);
+  });
+
+  it('is false for unrelated submit errors', () => {
+    expect(
+      isRedditCaptchaError([['RATELIMIT', 'you are doing that too much', 'ratelimit']])
+    ).toBe(false);
+    expect(isRedditCaptchaError([])).toBe(false);
   });
 });

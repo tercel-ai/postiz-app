@@ -6,6 +6,7 @@
 
 import { ReplyResult } from '@gitroom/extension/utils/reply.types';
 import { uploadRedditImage } from '@gitroom/extension/utils/reddit.media';
+import { submitRedditPostViaTab } from '@gitroom/extension/pages/background/reddit.submit.tab';
 
 export interface RedditReplyInput {
   url: string;
@@ -274,6 +275,18 @@ export function parseRedditSubmitResponse(data: any): {
   return { permalink, postId };
 }
 
+/**
+ * True when a /api/submit error list is a captcha demand (BAD_CAPTCHA / a
+ * `captcha` field). The API can't solve it, so this is the signal to fall back
+ * to the browser-assisted submit tab. Exported for tests.
+ */
+export function isRedditCaptchaError(errors: unknown[]): boolean {
+  return errors.some((e) => {
+    const parts = Array.isArray(e) ? e.map(String) : [String(e)];
+    return parts.some((p) => /captcha/i.test(p));
+  });
+}
+
 /** POST one self-post submission with a given session; returns response + errors. */
 async function submitOnce(
   input: RedditSubmitInput,
@@ -361,6 +374,12 @@ export async function submitRedditPost(
     }
 
     if (Array.isArray(errors) && errors.length > 0) {
+      // Reddit gates this account/subreddit behind a captcha the API can't solve
+      // (BAD_CAPTCHA). Hand the already-built body to a real submit tab, where
+      // Reddit's own UI handles the verification.
+      if (isRedditCaptchaError(errors)) {
+        return submitRedditPostViaTab({ subreddit, title, text: body });
+      }
       return {
         ok: false,
         error: errors

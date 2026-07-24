@@ -202,6 +202,35 @@ describe('default publisher platform routing', () => {
     expect(publishQueueSnapshot()[0].status).toBe('published');
   });
 
+  it('treats a Reddit pending outcome (captcha-tab manual finish) as a task error', async () => {
+    // submitRedditPost falls back to the submit tab and returns pending when a
+    // captcha must be solved by the user — the queue must not mark it published.
+    rSubmit.mockResolvedValue({
+      ok: true,
+      pending: true,
+      message: 'Reddit requires a captcha for this post.',
+    });
+    enqueuePublishBatch(
+      'req-1',
+      [
+        {
+          taskId: 'r-captcha',
+          platform: 'reddit',
+          subreddit: 'r/t',
+          title: 'T',
+          segments: [{ text: 'hi' }],
+        },
+      ],
+      1
+    );
+    await waitForPublishIdle();
+    expect(publishQueueSnapshot()[0]).toMatchObject({
+      status: 'error',
+      error: 'Reddit requires a captcha for this post.',
+    });
+    expect(rComment).not.toHaveBeenCalled();
+  });
+
   it('publishes a LinkedIn thread via compose share then self-comment chain', async () => {
     liCompose.mockResolvedValue({
       ok: true,

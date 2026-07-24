@@ -453,6 +453,7 @@ describe('EngageRepository — two-table reads', () => {
       expect(item.channelAvatar).toBeNull();
       expect(sentFindFirst.mock.calls[0][0].where).toEqual({
         organizationId: 'org1',
+        projectId: null,
         opportunityId: 'opp1',
         post: { state: { not: 'DRAFT' } },
       });
