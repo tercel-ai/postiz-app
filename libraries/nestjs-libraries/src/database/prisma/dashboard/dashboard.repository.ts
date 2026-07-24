@@ -43,26 +43,6 @@ export class DashboardRepository {
     });
   }
 
-  /**
-   * Resolve a project to the ids of the (enabled) channels bound to it. Used by
-   * the DataTicks-backed traffics/impressions queries, which filter by
-   * integrationId (DataTicks has no projectId column). An empty result means the
-   * project has no bound channels — callers must treat that as "no data", never
-   * as "all channels".
-   */
-  async getProjectIntegrationIds(orgId: string, projectId: string): Promise<string[]> {
-    const rows = await this._integration.model.integration.findMany({
-      where: {
-        organizationId: orgId,
-        deletedAt: null,
-        disabled: false,
-        integrationProjects: { some: { projectId, disabled: false } },
-      },
-      select: { id: true },
-    });
-    return rows.map((r) => r.id);
-  }
-
   async getPostsStats(
     orgId: string,
     startDate?: Date,
@@ -173,6 +153,97 @@ export class DashboardRepository {
     }
     const agg = await this._post.model.post.aggregate({ where, _sum: { trafficScore: true } });
     return agg._sum.trafficScore ?? 0;
+  }
+
+  /**
+   * Post-level traffic summary by platform. Used for project-scoped `/traffics`
+   * (DataTicks aggregates by integration with no project attribution, so a
+   * channel shared across projects would leak other projects' traffic into
+   * this project's total — see docs/dashboard-module.md § Project scoping).
+   */
+  async getTrafficByPlatform(
+    orgId: string,
+    integrationId?: string[],
+    channel?: string[],
+    startDate?: Date,
+    endDate?: Date,
+    projectId?: string
+  ): Promise<{ platform: string; value: number }[]> {
+    const where: Prisma.PostWhereInput = {
+      organizationId: orgId,
+      deletedAt: null,
+      parentPostId: null,
+      source: { notIn: ['engage'] },
+      trafficScore: { not: null },
+      ...(projectId && { projectId }),
+      ...(integrationId?.length && { integrationId: { in: integrationId } }),
+      ...(channel?.length && { integration: { providerIdentifier: { in: channel } } }),
+    };
+    if (startDate || endDate) {
+      where.publishDate = {
+        ...(startDate && { gte: startDate }),
+        ...(endDate && { lte: endDate }),
+      };
+    }
+    const rows = await this._post.model.post.groupBy({
+      by: ['integrationId'],
+      where,
+      _sum: { trafficScore: true },
+    });
+    const validRows = rows.filter((r) => r.integrationId != null);
+    if (!validRows.length) return [];
+
+    const integrationIds = validRows.map((r) => r.integrationId!);
+    const integrationRecords = await this._integration.model.integration.findMany({
+      where: { id: { in: integrationIds } },
+      select: { id: true, providerIdentifier: true },
+    });
+    const platformMap = new Map(integrationRecords.map((i) => [i.id, i.providerIdentifier]));
+
+    const byPlatform = new Map<string, number>();
+    for (const row of validRows) {
+      const platform = platformMap.get(row.integrationId!) ?? 'unknown';
+      byPlatform.set(platform, (byPlatform.get(platform) ?? 0) + Math.round(row._sum.trafficScore ?? 0));
+    }
+    return Array.from(byPlatform.entries()).map(([platform, value]) => ({ platform, value }));
+  }
+
+  /**
+   * Raw posts with impressions, for project-scoped `/impressions` time-series
+   * bucketing (done in DashboardService, which already carries the
+   * timezone-aware date-bucketing helpers). Post-level, not DataTicks-backed —
+   * see getTrafficByPlatform for why project scoping can't use DataTicks.
+   */
+  getPostsForImpressionsSeries(
+    orgId: string,
+    startDate: Date,
+    endDate: Date,
+    integrationId?: string[],
+    channel?: string[],
+    projectId?: string
+  ) {
+    return this._post.model.post.findMany({
+      where: {
+        organizationId: orgId,
+        deletedAt: null,
+        parentPostId: null,
+        source: { notIn: ['engage'] },
+        impressions: { not: null },
+        publishDate: { gte: startDate, lte: endDate },
+        ...(projectId && { projectId }),
+        ...(integrationId?.length && { integrationId: { in: integrationId } }),
+        ...(channel?.length && { integration: { providerIdentifier: { in: channel } } }),
+      },
+      select: {
+        publishDate: true,
+        impressions: true,
+        integration: {
+          select: {
+            providerIdentifier: true,
+          },
+        },
+      },
+    });
   }
 
   getPublishedPostsWithRelease(orgId: string, sinceDays: number, integrationId?: string[], channel?: string[], projectId?: string) {

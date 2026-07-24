@@ -212,24 +212,37 @@ export class DashboardService {
       return JSON.parse(cached);
     }
 
-    const effectiveIntegrationId = await this._resolveProjectIntegrationIds(
-      org.id,
-      projectId,
-      integrationId
-    );
-    // projectId supplied but no bound channels → no data (never fall through to "all")
-    if (effectiveIntegrationId?.length === 0) {
-      await ioRedis.set(cacheKey, JSON.stringify([]), 'EX', CACHE_TTL);
-      return [];
+    let result: Array<{ platform: string; value: number; percentage: number }>;
+    if (projectId) {
+      // Post-level, scoped by Post.projectId — DataTicks aggregates per
+      // integration with no project attribution, so a channel shared across
+      // projects would leak other projects' traffic into this total.
+      const normalizedStart = startDate ? dayjs.utc(startDate).startOf('day').toDate() : undefined;
+      const normalizedEnd = endDate ? dayjs.utc(endDate).endOf('day').toDate() : undefined;
+      const rows = await this._dashboardRepository.getTrafficByPlatform(
+        org.id,
+        integrationId,
+        channel,
+        normalizedStart,
+        normalizedEnd,
+        projectId
+      );
+      const grandTotal = rows.reduce((sum, r) => sum + r.value, 0);
+      result = rows
+        .map((r) => ({
+          ...r,
+          percentage: grandTotal > 0 ? Math.round((r.value / grandTotal) * 10000) / 100 : 0,
+        }))
+        .sort((a, b) => b.value - a.value);
+    } else {
+      result = await this._dataTicksService.getTrafficSummaryByPlatform({
+        organizationId: org.id,
+        integrationId,
+        channel,
+        startDate,
+        endDate,
+      });
     }
-
-    const result = await this._dataTicksService.getTrafficSummaryByPlatform({
-      organizationId: org.id,
-      integrationId: effectiveIntegrationId,
-      channel,
-      startDate,
-      endDate,
-    });
 
     await ioRedis.set(cacheKey, JSON.stringify(result), 'EX', CACHE_TTL);
     return result;
@@ -254,25 +267,61 @@ export class DashboardService {
       return JSON.parse(cached);
     }
 
-    const effectiveIntegrationId = await this._resolveProjectIntegrationIds(
-      org.id,
-      projectId,
-      integrationId
-    );
-    // projectId supplied but no bound channels → no data (never fall through to "all")
-    if (effectiveIntegrationId?.length === 0) {
-      await ioRedis.set(cacheKey, JSON.stringify([]), 'EX', CACHE_TTL);
-      return [];
-    }
+    let result: Array<{ date: string; value: number; platform: string }>;
+    if (projectId) {
+      // Post-level, scoped by Post.projectId — DataTicks aggregates per
+      // integration with no project attribution, so a channel shared across
+      // projects would leak other projects' impressions into this series.
+      const defaultDays = period === 'monthly' ? 365 : period === 'weekly' ? 90 : 30;
+      const rangeStart = startDate
+        ? dayjs.utc(startDate).startOf('day').toDate()
+        : dayjs.utc().subtract(defaultDays, 'day').startOf('day').toDate();
+      const rangeEnd = endDate ? dayjs.utc(endDate).endOf('day').toDate() : dayjs.utc().endOf('day').toDate();
 
-    const result = await this._dataTicksService.getImpressionsByPlatform({
-      organizationId: org.id,
-      period,
-      integrationId: effectiveIntegrationId,
-      channel,
-      startDate,
-      endDate,
-    });
+      const posts = await this._dashboardRepository.getPostsForImpressionsSeries(
+        org.id,
+        rangeStart,
+        rangeEnd,
+        integrationId,
+        channel,
+        projectId
+      );
+
+      const buckets = new Map<string, number>();
+      for (const post of posts) {
+        if (!post.integration || post.impressions == null) continue;
+        const d = dayjs.utc(post.publishDate);
+        let dateKey: string;
+        switch (period) {
+          case 'weekly':
+            dateKey = d.isoWeekday(1).format('YYYY-MM-DD');
+            break;
+          case 'monthly':
+            dateKey = d.format('YYYY-MM');
+            break;
+          default:
+            dateKey = d.format('YYYY-MM-DD');
+        }
+        const platform = post.integration.providerIdentifier;
+        const key = `${dateKey}|${platform}`;
+        buckets.set(key, (buckets.get(key) || 0) + post.impressions);
+      }
+
+      result = Array.from(buckets.entries()).map(([key, value]) => {
+        const [date, platform] = key.split('|');
+        return { date, platform, value };
+      });
+      result.sort((a, b) => a.date.localeCompare(b.date) || a.platform.localeCompare(b.platform));
+    } else {
+      result = await this._dataTicksService.getImpressionsByPlatform({
+        organizationId: org.id,
+        period,
+        integrationId,
+        channel,
+        startDate,
+        endDate,
+      });
+    }
 
     await ioRedis.set(cacheKey, JSON.stringify(result), 'EX', CACHE_TTL);
     return result;
@@ -366,33 +415,6 @@ export class DashboardService {
           : 0,
       errors_last_7d: errorsLast7Days,
     };
-  }
-
-  /**
-   * Resolve the effective integrationId filter for DataTicks-backed queries
-   * (traffics/impressions) that cannot filter by projectId directly.
-   *
-   * - No projectId → return the caller's integrationId unchanged (may be undefined
-   *   = all channels).
-   * - projectId set → return the project's bound channel ids, intersected with an
-   *   explicit integrationId when one is supplied. An empty array means the project
-   *   has no matching channels and callers must short-circuit to an empty result.
-   */
-  private async _resolveProjectIntegrationIds(
-    orgId: string,
-    projectId?: string,
-    integrationId?: string[]
-  ): Promise<string[] | undefined> {
-    if (!projectId) {
-      return integrationId;
-    }
-    const projectIntegrationIds =
-      await this._dashboardRepository.getProjectIntegrationIds(orgId, projectId);
-    if (integrationId?.length) {
-      const allowed = new Set(projectIntegrationIds);
-      return integrationId.filter((id) => allowed.has(id));
-    }
-    return projectIntegrationIds;
   }
 
   /**

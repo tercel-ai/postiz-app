@@ -34,6 +34,30 @@ import {
   ioRedis,
   notifyOncePerCooldown,
 } from '@gitroom/nestjs-libraries/redis/redis.service';
+import { HttpsProxyAgent } from 'https-proxy-agent';
+
+// twitter-api-v2 issues its outbound calls through Node's native `https` module,
+// which ignores the standard HTTPS_PROXY / HTTP_PROXY environment variables. On
+// hosts that cannot reach api.twitter.com directly (verified: a direct connect
+// times out while the configured proxy returns in <1s), the OAuth token exchange
+// and every API call would otherwise hang until the caller times out. Set
+// X_PROXY_URL (falls back to HTTPS_PROXY / HTTP_PROXY) and every TwitterApi
+// client below routes through it via an explicit httpAgent. Resolved once and
+// cached; returns {} when no proxy is configured so direct connections are
+// unaffected on hosts that can reach X directly.
+let _xProxyAgent: HttpsProxyAgent<string> | null | undefined;
+function xClientSettings(): { httpAgent?: HttpsProxyAgent<string> } {
+  if (_xProxyAgent === undefined) {
+    const proxyUrl =
+      process.env.X_PROXY_URL ||
+      process.env.HTTPS_PROXY ||
+      process.env.https_proxy ||
+      process.env.HTTP_PROXY ||
+      process.env.http_proxy;
+    _xProxyAgent = proxyUrl ? new HttpsProxyAgent(proxyUrl) : null;
+  }
+  return _xProxyAgent ? { httpAgent: _xProxyAgent } : {};
+}
 
 @Rules(
   'X can have maximum 4 pictures, or maximum one video, it can also be without attachments'
@@ -95,9 +119,9 @@ export class XProvider extends SocialAbstract implements SocialProvider {
         appSecret: process.env.X_API_SECRET!,
         accessToken: tokenPart,
         accessSecret: secretPart,
-      });
+      }, xClientSettings());
     }
-    return new TwitterApi(accessToken);
+    return new TwitterApi(accessToken, xClientSettings());
   }
 
   maxLength(isTwitterPremium: boolean) {
@@ -108,7 +132,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
     const client = new TwitterApi({
       clientId: process.env.X_CLIENT_ID!,
       clientSecret: process.env.X_CLIENT_SECRET!,
-    });
+    }, xClientSettings());
 
     const {
       accessToken,
@@ -395,7 +419,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
     const client = new TwitterApi({
       clientId: process.env.X_CLIENT_ID!,
       clientSecret: process.env.X_CLIENT_SECRET!,
-    });
+    }, xClientSettings());
 
     const { url, codeVerifier, state } = client.generateOAuth2AuthLink(
       (process.env.X_URL || process.env.FRONTEND_URL) +
@@ -418,7 +442,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
     const client = new TwitterApi({
       clientId: process.env.X_CLIENT_ID!,
       clientSecret: process.env.X_CLIENT_SECRET!,
-    });
+    }, xClientSettings());
 
     let accessToken: string;
     let refreshToken: string;
@@ -442,12 +466,41 @@ export class XProvider extends SocialAbstract implements SocialProvider {
       }
       refreshToken = ref;
     } catch (err: any) {
-      const status = err?.code || err?.status || '';
-      console.error(`X OAuth 2.0 login failed (${status}):`, err?.data || err?.message || err);
-      return `X authentication failed: ${err?.data?.detail || err?.message || 'Service temporarily unavailable. Please try again.'}`;
+      // twitter-api-v2 raises `ApiRequestError` (type='request') when the token
+      // POST to api.twitter.com fails at the transport layer — no HTTP response
+      // is ever received, so `code`/`status`/`data` are all empty and `message`
+      // is the useless constant "Request failed.". The real cause (ETIMEDOUT /
+      // ECONNRESET / ENETUNREACH / proxy not applied) lives on `err.requestError`.
+      // `ApiResponseError` (type='response') instead carries X's HTTP status in
+      // `code` and the parsed body in `data`. Log both shapes so we can tell a
+      // network failure apart from a scope/credential rejection.
+      const requestError = err?.requestError
+        ? {
+            message: err.requestError.message,
+            code: err.requestError.code,
+            errno: err.requestError.errno,
+            syscall: err.requestError.syscall,
+            address: err.requestError.address,
+            port: err.requestError.port,
+          }
+        : undefined;
+      console.error('[x] OAuth 2.0 login failed', {
+        type: err?.type,
+        code: err?.code,
+        status: err?.status,
+        message: err?.message,
+        data: err?.data,
+        requestError,
+      });
+      return `X authentication failed: ${
+        err?.data?.detail ||
+        err?.requestError?.message ||
+        err?.message ||
+        'Service temporarily unavailable. Please try again.'
+      }`;
     }
 
-    const newClient = new TwitterApi(accessToken);
+    const newClient = new TwitterApi(accessToken, xClientSettings());
     const { username, verified, profile_image_url, name, id } =
       await this._getUserInfo(newClient);
 
@@ -1431,7 +1484,7 @@ export class XProvider extends SocialAbstract implements SocialProvider {
 
     const today = dayjs().format('YYYY-MM-DD');
     try {
-      const appClient = await new TwitterApi({ appKey, appSecret }).appLogin();
+      const appClient = await new TwitterApi({ appKey, appSecret }, xClientSettings()).appLogin();
       const tweet = await appClient.v2.singleTweet(postId, {
         'tweet.fields': ['public_metrics', 'created_at'],
       });

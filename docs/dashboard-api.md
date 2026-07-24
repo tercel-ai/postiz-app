@@ -17,19 +17,28 @@ Postiz-managed posts, and the known accuracy caveats — see
   account-level platform data.
 - **Project scope** (`projectId`): every endpoint accepts an optional `projectId`
   query param. When supplied, analytics are narrowed to that project:
-  - Post-level metrics (post counts, per-platform impressions/traffic totals,
-    posts trend, post-engagement) filter on `Post.projectId`.
-  - Channel counts and the traffic/impressions time series are scoped to the
-    channels **bound** to the project (via `IntegrationProject`, `disabled: false`);
-    the DataTicks-backed series (`/traffics`, `/impressions`) resolve the project
-    to its bound channel ids internally, since DataTicks has no `projectId` column.
-  - A project with **no bound channels** yields empty channel-scoped results
-    (e.g. `/traffics` and `/impressions` return `[]`) rather than falling back to
-    the whole org.
+  - Post-level metrics — post counts, per-platform impressions/traffic totals,
+    posts trend, post-engagement, **and** the `/traffics` and `/impressions`
+    series — all filter on `Post.projectId` directly. `/traffics` and
+    `/impressions` do **not** use DataTicks when `projectId` is set: DataTicks
+    aggregates cumulative values per integration with no project attribution,
+    and a channel can be bound to more than one project (`IntegrationProject`
+    is many-to-many), so a DataTicks-based per-channel total would leak other
+    projects' (or unassigned) traffic into this project's numbers. Reading
+    `Post.impressions` / `Post.trafficScore` directly avoids that.
+  - Channel counts (`channel_count`, `channel_connected_count`,
+    `channels_by_platform` on `/summary`) are scoped to the channels **bound**
+    to the project (via `IntegrationProject`, `disabled: false`) — this is
+    still binding-based, since it's inherently a "which channels" question, not
+    a "whose posts" one.
+  - A project with **no matching posts** yields empty results for `/traffics`
+    and `/impressions` (`[]`) rather than falling back to the whole org.
   - **Billing quota** fields on `/summary` (`published_this_period`,
     `post_send_limit`, `period_end`) remain **organization-level** and are *not*
     affected by `projectId`.
-  - Omitting `projectId` returns organization-wide analytics (unchanged behaviour).
+  - Omitting `projectId` returns organization-wide analytics (unchanged
+    behaviour) — `/traffics` and `/impressions` still read from DataTicks in
+    that case, as before.
 - **Timezone**: Date parsing/bucketing uses the request timezone (`@GetTimezone`,
   falls back to the org default). Date strings are parsed to UTC via
   `parseDateToUTC`.
@@ -95,10 +104,10 @@ engagement metrics per platform — not raw views). Optionally filtered.
 
 | Field | Type | Required | Rules |
 | --- | --- | --- | --- |
-| `projectId` | `string` | no | Scopes to the project's bound channels; no bound channels ⇒ `[]`. |
+| `projectId` | `string` | no | Scopes to the project's posts (`Post.projectId`); no matching posts ⇒ `[]`. |
 | `startDate` | ISO date-time | no | |
 | `endDate` | ISO date-time | no | Must be ≥ `startDate` when both set. |
-| `integrationId` | `string[]` | no | Max **50** (CSV or repeated). Intersected with `projectId`'s channels when both set. |
+| `integrationId` | `string[]` | no | Max **50** (CSV or repeated). |
 | `channel` | `Channel[]` | no | Max **30** (CSV or repeated). |
 
 **Errors**: `400` if `startDate > endDate`.
@@ -112,7 +121,7 @@ optionally filtered.
 
 | Field | Type | Default / Rules |
 | --- | --- | --- |
-| `projectId` | `string` | optional; scopes to the project's bound channels; no bound channels ⇒ `[]` |
+| `projectId` | `string` | optional; scopes to the project's posts (`Post.projectId`); no matching posts ⇒ `[]` |
 | `period` | `daily` \| `weekly` \| `monthly` | default `daily` |
 | `startDate` | ISO date-time | optional |
 | `endDate` | ISO date-time | optional; must be ≥ `startDate` when both set |

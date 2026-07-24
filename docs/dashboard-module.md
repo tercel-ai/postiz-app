@@ -14,9 +14,9 @@ The Dashboard provides a **one-stop summary of social media operations data** fo
 
 **Project scoping (`projectId`):** Every dashboard endpoint accepts an optional `projectId` query param. When supplied, analytics are narrowed to a single project:
 
-- **Post-level metrics** (post counts, per-platform impressions/traffic totals, posts trend, post-engagement) filter on `Post.projectId`.
-- **Channel counts** and the **DataTicks-backed series** (`/traffics`, `/impressions`) are scoped to the channels *bound* to the project via the `IntegrationProject` join table (`disabled: false`). Since `DataTicks` has no `projectId` column, the service resolves the project to its bound channel ids and filters the ticks by `integrationId`.
-- A project with **no bound channels** yields empty channel-scoped results (e.g. `/traffics` and `/impressions` return `[]`) rather than falling back to the whole org.
+- **Post-level metrics** — post counts, per-platform impressions/traffic totals, posts trend, post-engagement, **and the `/traffics` / `/impressions` series** — all filter on `Post.projectId` directly. `/traffics` and `/impressions` bypass DataTicks entirely when `projectId` is set: DataTicks aggregates cumulative values per *integration*, not per project, and a channel can be bound to more than one project (`IntegrationProject` is many-to-many via `@@unique([integrationId, projectId])`), so a channel-bound DataTicks total would include other projects' (or unassigned) traffic/impressions. Reading `Post.impressions` / `Post.trafficScore` directly avoids that leak.
+- **Channel counts** (`channel_count`, `channel_connected_count`, `channels_by_platform`) are scoped to the channels *bound* to the project via the `IntegrationProject` join table (`disabled: false`) — a "which channels" question is legitimately binding-based, unlike the post-level metrics above.
+- A project with **no matching posts** yields empty results (e.g. `/traffics` and `/impressions` return `[]`) rather than falling back to the whole org.
 - **Billing quota** fields on `/summary` (`published_this_period`, `post_send_limit`, `period_end`) remain **organization-level** — they are *not* affected by `projectId`.
 - Omitting `projectId` returns organization-wide analytics (unchanged legacy behaviour).
 
@@ -24,7 +24,7 @@ The Dashboard provides a **one-stop summary of social media operations data** fo
 
 The dashboard uses **two complementary data pipelines**:
 
-1. **DataTicks (pre-aggregated)** — A background Temporal workflow syncs post-level analytics daily at UTC 00:05, storing cumulative impressions and weighted traffic scores in the `DataTicks` table. Used by: Summary, Traffics, Impressions Trend.
+1. **DataTicks (pre-aggregated)** — A background Temporal workflow syncs post-level analytics daily at UTC 00:05, storing cumulative impressions and weighted traffic scores in the `DataTicks` table. Used by: Summary (channel counts), Traffics, Impressions Trend — **only when no `projectId` is supplied**; project-scoped `/traffics` and `/impressions` read `Post.impressions` / `Post.trafficScore` directly instead (see § Project scoping above).
 2. **Real-time fetch** — On-demand post-level API calls when the user opens the page. Used by: Post Engagement.
 
 Both pipelines source data exclusively from post-level APIs (`batchPostAnalytics` / `postAnalytics`), never from account-level APIs.
@@ -112,8 +112,8 @@ Both pipelines source data exclusively from post-level APIs (`batchPostAnalytics
 | **Summary** `traffics_total` | Traffic | DataTicks (`getTrafficSummaryByPlatform`) | Postiz posts only, latest snapshot per integration |
 | **Summary** `posts_stats` | Post counts | Database query | All Postiz posts including recurring clones (each send = 1 count) |
 | **Summary** `channel_count` | Channel count | Database query | All active integrations |
-| **Impressions Trend** | Impressions by date + platform | DataTicks (`getImpressionsByPlatform`) | Postiz posts only, time series |
-| **Traffic Analysis** | Traffic by platform | DataTicks (`getTrafficSummaryByPlatform`) | Postiz posts only, latest snapshot |
+| **Impressions Trend** | Impressions by date + platform | DataTicks (org-wide) / `Post.impressions` (`projectId` set) | Postiz posts only, time series |
+| **Traffic Analysis** | Traffic by platform | DataTicks (org-wide) / `Post.trafficScore` (`projectId` set) | Postiz posts only, latest snapshot (org-wide) or live sum (project-scoped) |
 | **Post Engagement** | Views/Likes/Comments/Saves | Real-time `_fetchAllPostAnalytics()` | Postiz posts only, configurable 1–90 days |
 | **Posts Trend** | Post count by date | Database query | All Postiz posts (no limit) |
 
@@ -328,7 +328,7 @@ Posts Trend (daily, last 30 days)
 
 | Parameter | Type | Default | Meaning |
 |-----------|------|---------|---------|
-| `projectId` | string | — (org-wide) | Scope to the project's bound channels; no bound channels ⇒ `[]`. Intersected with `integrationId` when both set. |
+| `projectId` | string | — (org-wide) | Scope to the project's posts (`Post.projectId`); no matching posts ⇒ `[]`. When set, this endpoint reads `Post.trafficScore` directly instead of DataTicks (see § Project scoping). |
 | `startDate` | ISO 8601 date string | — (last 30 days) | Start of date range |
 | `endDate` | ISO 8601 date string | — (today) | End of date range |
 | `integrationId[]` | string array | — (all) | Filter by integration IDs |
@@ -374,9 +374,12 @@ Traffic Analysis by Platform (last 30 days)
 <details>
 <summary>Technical implementation details (for developers)</summary>
 
-**Algorithm**: Reads pre-aggregated DataTicks records (`type='traffic'`). For each integration, takes the latest snapshot within the date range. Sums across integrations by platform. Computes percentages. Returns sorted by value descending.
+**Algorithm**:
+- No `projectId`: reads pre-aggregated DataTicks records (`type='traffic'`). For each integration, takes the latest snapshot within the date range, sums across integrations by platform.
+- With `projectId`: groups `Post` rows (`projectId`, `trafficScore IS NOT NULL`, date range, optional `integrationId`/`channel`) by integration, sums `trafficScore`, maps integration → platform, sums by platform. This is Post-level, not DataTicks-backed — see § Project scoping for why.
+- Both paths then compute percentages and return sorted by value descending.
 
-**Caching**: Redis cache (key: `dashboard:traffics:${orgId}:${projectId}:${intKey}:${chKey}:${sdKey}:${edKey}`), TTL 1 hour. Cache is invalidated when DataTicks sync runs. When `projectId` is set, the project is first resolved to its bound channel ids (intersected with any explicit `integrationId`) before querying DataTicks; an empty set short-circuits to `[]`.
+**Caching**: Redis cache (key: `dashboard:traffics:${orgId}:${projectId}:${intKey}:${chKey}:${sdKey}:${edKey}`), TTL 1 hour. The non-project path is invalidated when DataTicks sync runs; the project-scoped path reflects `Post.trafficScore` as of the last `_syncPostAnalytics` write.
 
 </details>
 
@@ -392,7 +395,7 @@ Traffic Analysis by Platform (last 30 days)
 
 | Parameter | Type | Default | Meaning |
 |-----------|------|---------|---------|
-| `projectId` | string | — (org-wide) | Scope to the project's bound channels; no bound channels ⇒ `[]`. Intersected with `integrationId` when both set. |
+| `projectId` | string | — (org-wide) | Scope to the project's posts (`Post.projectId`); no matching posts ⇒ `[]`. When set, this endpoint buckets `Post.impressions` by `publishDate` instead of reading DataTicks (see § Project scoping). |
 | `period` | `daily` / `weekly` / `monthly` | `daily` | Time aggregation granularity |
 | `startDate` | ISO 8601 date string | — (default lookback) | Start of date range |
 | `endDate` | ISO 8601 date string | — (today) | End of date range |
@@ -434,9 +437,12 @@ Impressions Trend (daily, last 30 days)
 <details>
 <summary>Technical implementation details (for developers)</summary>
 
-**Algorithm**: Reads pre-aggregated DataTicks records (`type='impressions'`). Groups by (integration, time bucket), keeping only the latest snapshot per integration per bucket. Sums across integrations by (platform, bucket). Returns sorted by date then platform.
+**Algorithm**:
+- No `projectId`: reads pre-aggregated DataTicks records (`type='impressions'`). Groups by (integration, time bucket), keeping only the latest snapshot per integration per bucket. Sums across integrations by (platform, bucket).
+- With `projectId`: queries `Post` rows (`projectId`, `impressions IS NOT NULL`, date range, optional `integrationId`/`channel`), buckets each post by its own `publishDate` (day/ISO-week-Monday/month depending on `period`) and platform, and sums `Post.impressions` per bucket. This is Post-level, not DataTicks-backed — see § Project scoping for why.
+- Both paths return sorted by date then platform.
 
-**Caching**: Redis cache (key includes projectId, period, integrationId, channel, date range), TTL 1 hour. As with `/traffics`, a `projectId` is resolved to its bound channel ids before the DataTicks query, short-circuiting to `[]` when the project has no channels.
+**Caching**: Redis cache (key includes projectId, period, integrationId, channel, date range), TTL 1 hour. The non-project path is invalidated when DataTicks sync runs; the project-scoped path reflects `Post.impressions` as of the last `_syncPostAnalytics` write.
 
 </details>
 
@@ -724,11 +730,13 @@ Controller                    Service                          Data Source
 └──────────────────┘   └──────────────────────┘
 ```
 
+> `getTraffics()` and `getImpressions()` only call `DataTicksService` when no `projectId` is supplied. With `projectId`, they instead call `DashboardRepository.getTrafficByPlatform()` / `.getPostsForImpressionsSeries()`, reading `Post.trafficScore` / `Post.impressions` directly (see § Project scoping).
+
 ### Design principles
 
 1. **Post-level only**: All analytics data comes from post-level APIs (`batchPostAnalytics` / `postAnalytics`), never from account-level APIs. This ensures only Postiz-managed content is measured.
 2. **Two-pipeline architecture**: Pre-aggregated DataTicks for summary/trend endpoints (fast reads), real-time fetch for detailed engagement (fresh data).
-3. **Multi-tenant isolation**: All queries are scoped by `orgId`; an optional `projectId` further narrows results to one project (post metrics via `Post.projectId`, channel metrics via `IntegrationProject` bindings)
+3. **Multi-tenant isolation**: All queries are scoped by `orgId`; an optional `projectId` further narrows results to one project — post metrics (including `/traffics` and `/impressions`) via `Post.projectId`, channel counts via `IntegrationProject` bindings. Post metrics never go through DataTicks when `projectId` is set, since DataTicks has no per-project attribution and channels can be shared across projects.
 4. **Soft delete**: All database queries filter `deletedAt IS NULL`
 5. **Graceful degradation**: Single platform/post failure does not cause overall failure
 6. **Background sync with cache invalidation**: DataTicks sync runs daily and invalidates relevant dashboard caches
