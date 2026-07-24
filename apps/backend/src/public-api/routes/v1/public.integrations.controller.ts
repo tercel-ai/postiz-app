@@ -155,23 +155,43 @@ export class PublicIntegrationsController {
   }
 
   @Get('/integrations')
-  async listIntegration(@GetOrgFromRequest() org: Organization) {
+  async listIntegration(
+    @GetOrgFromRequest() org: Organization,
+    @Query('projectId') projectId?: string
+  ) {
     Sentry.metrics.count("public_api-request", 1);
+
+    const mapIntegration = (integration: any, disabled: boolean) => ({
+      id: integration.id,
+      name: integration.name,
+      identifier: integration.providerIdentifier,
+      picture: integration.picture,
+      disabled,
+      profile: integration.profile,
+      customer: integration.customer
+        ? {
+            id: integration.customer.id,
+            name: integration.customer.name,
+          }
+        : undefined,
+    });
+
+    // Project-scoped: only channels bound to the project via IntegrationProject
+    // (an unbound channel is invisible to that project), folding the per-project
+    // `disabled` flag into the channel's own disabled state.
+    if (projectId) {
+      const bindings = await this._integrationService.listProjectIntegrations(
+        org.id,
+        projectId
+      );
+      return bindings.map((row) =>
+        mapIntegration(row.integration, row.integration.disabled || row.disabled)
+      );
+    }
+
+    // Org-wide (legacy behavior when no projectId is supplied).
     return (await this._integrationService.getIntegrationsList(org.id)).map(
-      (org) => ({
-        id: org.id,
-        name: org.name,
-        identifier: org.providerIdentifier,
-        picture: org.picture,
-        disabled: org.disabled,
-        profile: org.profile,
-        customer: org.customer
-          ? {
-              id: org.customer.id,
-              name: org.customer.name,
-            }
-          : undefined,
-      })
+      (integration) => mapIntegration(integration, integration.disabled)
     );
   }
 
