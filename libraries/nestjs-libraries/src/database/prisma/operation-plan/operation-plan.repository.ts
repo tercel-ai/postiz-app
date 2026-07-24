@@ -1,6 +1,7 @@
 import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaRepository } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
 import { OperationPlan, Prisma } from '@prisma/client';
+import { postTitleFromTheme } from './theme-title';
 
 type GeneratedThreadPart = {
   id: string;
@@ -331,7 +332,10 @@ export class OperationPlanRepository {
           // group = one channel's post + its thread chain". Still deterministic
           // (plan.id + contentId + platform), so re-materialize stays idempotent.
           group: `${plan.id}:${item.contentId}:${platform}`,
-          title: item.themeTitle,
+          // Boundary guard: strip any week label the model leaked into themeTitle
+          // so the published post title (Reddit/Hashnode/blog channels submit this
+          // verbatim) stays clean even though the prompt asks for a clean title.
+          title: postTitleFromTheme(item.themeTitle),
           description: null,
           settings: JSON.stringify({
             __type: platform,

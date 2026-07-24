@@ -22,6 +22,7 @@ import {
   resolveRedditTargets,
   MonitoredRedditChannel,
 } from './reddit-target-resolver';
+import { postTitleFromTheme } from './theme-title';
 import { weightedLength, textSlicer } from '@gitroom/helpers/utils/count.length';
 import { socialIntegrationList } from '@gitroom/nestjs-libraries/integrations/integration.manager';
 import { createHash, randomUUID } from 'crypto';
@@ -603,7 +604,7 @@ export class OperationPlanService implements OnApplicationBootstrap {
         '',
         'WEEK STRUCTURE',
         '- Treat the range as ISO calendar weeks w1..wN (w1 and the final week may be partial). Give each week a coherent phase and progress them foundation -> distribution -> density -> consolidation as the range length allows.',
-        '- Encode the week as a stable token in themeKey (e.g. "w1:foundations") and prefix themeTitle with the week+phase (e.g. "W1 - Foundations: ...") — do NOT invent new fields, reuse themeKey/themeTitle.',
+        '- Encode the week+phase ONLY in themeKey as a stable token (e.g. "w1:foundations") — do NOT invent new fields. themeTitle MUST stay a clean, publish-ready title with NO week or phase prefix (never "W1 - ", "Week 1:", "Foundations: " and the like): it is submitted VERBATIM as the post title on platforms like Reddit, and the week is already carried by themeKey and the post date.',
         '',
         'CADENCE',
         '- Derive content counts from the actual dates, never a fixed template. Weight activity toward workdays (Mon-Fri) over weekends (Sat-Sun): more/heavier items on weekdays, lighter on weekends.',
@@ -619,7 +620,7 @@ export class OperationPlanService implements OnApplicationBootstrap {
         '- Read the analysis result and prioritise the weakest / lowest-scoring dimensions and platforms (largest gap to target = highest priority); do NOT spread effort evenly. Bias each theme toward closing a specific weak spot and reflect that gap in themeTitle.',
         '',
         'CONTENT RULES',
-        '- Each content item: a stable machine themeKey plus a human-readable themeTitle. Each platform entry: a UUID id (used as the materialized Post.id), the platform, and concise publish-ready content. themeTitle materializes into Post.title; themeKey is kept as Post.settings.themeKey.',
+        '- Each content item: a stable machine themeKey plus a human-readable themeTitle. Each platform entry: a UUID id (used as the materialized Post.id), the platform, and concise publish-ready content. themeTitle materializes VERBATIM into Post.title (so keep it clean and publish-ready — no week/phase prefix); themeKey is kept as Post.settings.themeKey.',
         '- Respect the character budgets declared at the top (and repeated below). This is a hard gate, not a style note.',
         '- Write PLAIN TEXT for X: no Markdown. `**bold**`, headings and backticks are NOT rendered — they appear literally as asterisks. Plain prose, line breaks and simple bullets ("•") only.',
         '- Hashtags: a hashtag ENDS at the first space, so a multi-word tag silently breaks — "#MCP protocol" renders as the tag "#MCP" followed by the loose word "protocol". Never hashtag a multi-word keyword: either write it as plain prose (preferred — keywords belong in the sentence, not bolted on as tags) or close it up into one word ("#MCPprotocol"). Use at most 1-2 hashtags, and only single-word ones.',
@@ -1329,11 +1330,13 @@ export class OperationPlanService implements OnApplicationBootstrap {
 
     const { outputs, discovered } = await resolveRedditTargets(
       // Reddit's required post title is the content item's themeTitle (there is
-      // no per-platform title field), so it is fed in as the target title here.
+      // no per-platform title field), so it is fed in as the target title here —
+      // with any leaked week label stripped so the submitted Reddit title matches
+      // the materialized Post.title (see postTitleFromTheme).
       redditEntries.map(({ item, post }, index) => ({
         key: `${post.id}:${index}`,
         llmSubreddit: (post as { subreddit?: string | null }).subreddit ?? null,
-        title: item.themeTitle,
+        title: postTitleFromTheme(item.themeTitle),
       })),
       monitoredChannels,
       { log: (m) => this.logger.debug(m) }
