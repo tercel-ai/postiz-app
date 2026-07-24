@@ -1,7 +1,25 @@
 import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { v5 as uuidv5 } from 'uuid';
 import { PrismaRepository } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
 import { OperationPlan, Prisma } from '@prisma/client';
 import { postTitleFromTheme } from './theme-title';
+
+// Fixed namespace for deriving a materialized Post.id from a (plan, payload id)
+// pair. The generation payload's ids are minted by the LLM, which only guarantees
+// uniqueness WITHIN a plan — it routinely re-emits the same UUID across separate
+// generations for the same project. Feeding those raw ids straight into Post.id
+// let a later plan collide with an earlier plan's row and throw
+// OPERATION_PLAN_POST_ID_CONFLICT. Namespacing by plan.id makes the Post.id a pure
+// function of (plan.id, rawId): globally unique across plans, yet deterministic so
+// re-materializing the SAME plan stays idempotent. Any fixed UUID works here.
+const OPERATION_PLAN_POST_ID_NAMESPACE = '6f4d2b1e-9c3a-4d7e-8b2f-0a1c3e5d7f90';
+
+// Derive the stable, globally-unique Post.id for a payload id under a given plan.
+// Applied uniformly to anchor ids AND thread parentPostId references so the
+// self-referential thread chain stays internally consistent.
+export function deriveOperationPlanPostId(planId: string, rawId: string): string {
+  return uuidv5(`${planId}:${rawId}`, OPERATION_PLAN_POST_ID_NAMESPACE);
+}
 
 type GeneratedThreadPart = {
   id: string;
@@ -243,15 +261,20 @@ export class OperationPlanRepository {
     // after the first. Ids come from the payload (stable across re-runs), so the
     // createMany stays idempotent. The anchor is emitted before its children, so
     // the self-referencing FK is satisfied within the single INSERT.
+    // Namespace every payload id by this plan so the resulting Post.id is globally
+    // unique (no cross-plan collision from an LLM-reused UUID) yet deterministic
+    // (same plan re-materialize → same ids → idempotent). Applied to BOTH the node
+    // id and the parentPostId reference so the thread chain's FK stays consistent.
+    const deriveId = (rawId: string) => deriveOperationPlanPostId(plan.id, rawId);
     const materializedPosts = contentItems.flatMap((item) =>
       item.platforms.flatMap((post) => {
         const chain = [
-          { id: post.id, content: post.content, media: post.media, parentPostId: null as string | null },
+          { id: deriveId(post.id), content: post.content, media: post.media, parentPostId: null as string | null },
           ...(post.thread ?? []).map((part, index, parts) => ({
-            id: part.id,
+            id: deriveId(part.id),
             content: part.content,
             media: part.media,
-            parentPostId: index === 0 ? post.id : parts[index - 1].id,
+            parentPostId: index === 0 ? deriveId(post.id) : deriveId(parts[index - 1].id),
           })),
         ];
         // The resolved Reddit target rides on every node of the chain (anchor +

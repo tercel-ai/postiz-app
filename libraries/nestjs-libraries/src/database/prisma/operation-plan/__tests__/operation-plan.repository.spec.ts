@@ -1,6 +1,9 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { NotFoundException } from '@nestjs/common';
-import { OperationPlanRepository } from '../operation-plan.repository';
+import {
+  OperationPlanRepository,
+  deriveOperationPlanPostId,
+} from '../operation-plan.repository';
 
 function createRepo(overrides: {
   planFindFirst?: any;
@@ -186,9 +189,15 @@ describe('OperationPlanRepository', () => {
     });
   });
 
-  it('materializePlanPosts creates draft posts using platform item ids as Post.id and skips existing same-plan posts', async () => {
+  it('materializePlanPosts derives Post.id = uuidv5(plan.id, payload id) and skips existing same-plan posts', async () => {
+    // The existing row is stored under the DERIVED id, so the idempotency skip must
+    // key off the derived id, not the raw payload id.
     const postFindMany = vi.fn().mockResolvedValue([
-      { id: '22222222-2222-4222-8222-222222222222', operationPlanId: 'plan-1', organizationId: 'org-1' },
+      {
+        id: deriveOperationPlanPostId('plan-1', '22222222-2222-4222-8222-222222222222'),
+        operationPlanId: 'plan-1',
+        organizationId: 'org-1',
+      },
     ]);
     const postCreateMany = vi.fn().mockResolvedValue({ count: 1 });
     const integrationFindMany = vi.fn().mockResolvedValue([
@@ -243,8 +252,8 @@ describe('OperationPlanRepository', () => {
       where: {
         id: {
           in: [
-            '11111111-1111-4111-8111-111111111111',
-            '22222222-2222-4222-8222-222222222222',
+            deriveOperationPlanPostId('plan-1', '11111111-1111-4111-8111-111111111111'),
+            deriveOperationPlanPostId('plan-1', '22222222-2222-4222-8222-222222222222'),
           ],
         },
       },
@@ -253,7 +262,7 @@ describe('OperationPlanRepository', () => {
     expect(postCreateMany).toHaveBeenCalledWith({
       data: [
         expect.objectContaining({
-          id: '11111111-1111-4111-8111-111111111111',
+          id: deriveOperationPlanPostId('plan-1', '11111111-1111-4111-8111-111111111111'),
           organizationId: 'org-1',
           projectId: 'proj-1',
           operationPlanId: 'plan-1',
@@ -314,41 +323,42 @@ describe('OperationPlanRepository', () => {
       }
     );
 
-    // Every part is looked up for idempotency, anchor first then the chain.
+    // Every part is looked up for idempotency, anchor first then the chain — all
+    // under their derived ids.
     expect(postFindMany).toHaveBeenCalledWith({
       where: {
         id: {
           in: [
-            'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
-            'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
-            'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+            deriveOperationPlanPostId('plan-1', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'),
+            deriveOperationPlanPostId('plan-1', 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'),
+            deriveOperationPlanPostId('plan-1', 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'),
           ],
         },
       },
       select: { id: true, organizationId: true, operationPlanId: true },
     });
-    // Anchor has no parent; each reply chains to the PREVIOUS part's id (a chain,
-    // not a star), so getPostsRecursively walks the whole thread. All parts share
-    // the anchor's group and carry the same publish metadata.
+    // Anchor has no parent; each reply chains to the PREVIOUS part's DERIVED id (a
+    // chain, not a star), so getPostsRecursively walks the whole thread. The same
+    // derivation is applied to id and parentPostId, so the self-referential FK holds.
     expect(postCreateMany).toHaveBeenCalledWith({
       data: [
         expect.objectContaining({
-          id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+          id: deriveOperationPlanPostId('plan-1', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'),
           parentPostId: null,
           content: 'Anchor tweet',
           group: 'plan-1:D01:x',
           integrationId: 'integration-x',
         }),
         expect.objectContaining({
-          id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
-          parentPostId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+          id: deriveOperationPlanPostId('plan-1', 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'),
+          parentPostId: deriveOperationPlanPostId('plan-1', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'),
           content: 'Reply 2',
           group: 'plan-1:D01:x',
           integrationId: 'integration-x',
         }),
         expect.objectContaining({
-          id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
-          parentPostId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+          id: deriveOperationPlanPostId('plan-1', 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'),
+          parentPostId: deriveOperationPlanPostId('plan-1', 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'),
           content: 'Reply 3',
           group: 'plan-1:D01:x',
           integrationId: 'integration-x',
@@ -405,7 +415,7 @@ describe('OperationPlanRepository', () => {
     expect(postCreateMany).toHaveBeenCalledWith({
       data: [
         expect.objectContaining({
-          id: '33333333-3333-4333-8333-333333333333',
+          id: deriveOperationPlanPostId('plan-1', '33333333-3333-4333-8333-333333333333'),
           integrationId: null,
           settings: JSON.stringify({
             __type: 'reddit',
@@ -523,10 +533,15 @@ describe('OperationPlanRepository', () => {
   });
 
   it('materializePlanPosts re-asserts the active plan on an idempotent re-materialize (all ids already exist → no create, still supersedes)', async () => {
-    // Both payload ids already belong to this plan → nothing new to create, but the
-    // plan is still the active one, so prior plans must still be superseded.
+    // The payload id already belongs to this plan (stored under its derived id) →
+    // nothing new to create, but the plan is still the active one, so prior plans
+    // must still be superseded.
     const postFindMany = vi.fn().mockResolvedValue([
-      { id: '11111111-1111-4111-8111-111111111111', operationPlanId: 'plan-2', organizationId: 'org-1' },
+      {
+        id: deriveOperationPlanPostId('plan-2', '11111111-1111-4111-8111-111111111111'),
+        operationPlanId: 'plan-2',
+        organizationId: 'org-1',
+      },
     ]);
     const postCreateMany = vi.fn().mockResolvedValue({ count: 0 });
     const postUpdateMany = vi.fn().mockResolvedValue({ count: 2 });
@@ -565,6 +580,55 @@ describe('OperationPlanRepository', () => {
     expect(result).toEqual({ count: 0 });
     expect(postCreateMany).not.toHaveBeenCalled();
     expect(postUpdateMany).toHaveBeenCalledTimes(1);
+  });
+
+  it('materializePlanPosts does NOT throw when the LLM re-emits a prior plan\'s raw UUID (namespacing by plan.id avoids the cross-plan Post.id collision)', async () => {
+    // Regression for OPERATION_PLAN_POST_ID_CONFLICT: plan-A already materialized a
+    // post from raw id X. The LLM hands plan-B the SAME raw id X. Because Post.id is
+    // derived per-plan, plan-B's derived id differs from plan-A's, so the conflict
+    // lookup (keyed on derived ids) finds nothing and creation proceeds.
+    const rawId = '11111111-1111-4111-8111-111111111111';
+    const priorPlanDerivedId = deriveOperationPlanPostId('plan-A', rawId);
+    const thisPlanDerivedId = deriveOperationPlanPostId('plan-B', rawId);
+    expect(thisPlanDerivedId).not.toEqual(priorPlanDerivedId);
+
+    // The conflict lookup queries globally by id; plan-A's row lives under a
+    // DIFFERENT derived id, so it is never returned for plan-B's derived id.
+    const postFindMany = vi.fn().mockResolvedValue([]);
+    const postCreateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const integrationFindMany = vi.fn().mockResolvedValue([
+      { id: 'integration-x', providerIdentifier: 'x' },
+    ]);
+    const repo = createRepo({ postFindMany, postCreateMany, integrationFindMany });
+
+    await expect(
+      repo.materializePlanPosts(
+        {
+          id: 'plan-B',
+          organizationId: 'org-1',
+          projectId: 'proj-1',
+          campaignId: 'campaign-1',
+        } as any,
+        {
+          contentItems: [
+            {
+              contentId: 'D01',
+              utcDate: '2030-06-02T00:00:00.000Z',
+              themeKey: 'positioning',
+              themeTitle: 'AI search positioning',
+              platforms: [
+                { id: rawId, platform: 'x', content: 'Publish-ready post text', media: [] },
+              ],
+            },
+          ],
+        }
+      )
+    ).resolves.toEqual({ count: 1 });
+
+    expect(postCreateMany).toHaveBeenCalledWith({
+      data: [expect.objectContaining({ id: thisPlanDerivedId, operationPlanId: 'plan-B' })],
+      skipDuplicates: true,
+    });
   });
 
   it('materializePlanPosts does NOT supersede when the plan resolved to zero posts (dropped reddit, no existing) — avoids wiping the previous plan into an empty calendar', async () => {
