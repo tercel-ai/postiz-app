@@ -26,6 +26,11 @@ const TAB_CLOSE_GRACE_MS = 1_500;
 // Give Reddit's JS a beat to render the (script-injected) reCAPTCHA widget
 // before we decide whether a captcha is required.
 const CAPTCHA_SETTLE_MS = 1_000;
+// How long to keep watching the surfaced tab for the user to solve the captcha
+// and click Reddit's own Post. Kept under the page bridge's 5-min idle window so
+// a slow-but-successful manual post still lands as a progress push. The user
+// closing the tab ends the wait early.
+const MANUAL_SUBMIT_TIMEOUT_MS = 4 * 60 * 1000;
 
 const wait = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -116,6 +121,54 @@ async function closeTab(tabId: number): Promise<void> {
   } catch (e) {
     console.warn('[aisee][reddit] closeTab failed', e);
   }
+}
+
+/**
+ * After the submit tab has been surfaced for a manual captcha solve, watch it
+ * until the user clicks Reddit's own Post — success is the tab navigating to the
+ * new post's /comments/ permalink. Resolves 'closed' if the user closes the tab
+ * first, 'timeout' after the window elapses. This is what turns a manual finish
+ * into a confirmed publish instead of a stuck 'failed'.
+ */
+function waitForManualRedditSubmit(
+  tabId: number,
+  timeoutMs: number
+): Promise<
+  | { done: 'submitted'; permalink: string; postId?: string }
+  | { done: 'closed' }
+  | { done: 'timeout' }
+> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (
+      r:
+        | { done: 'submitted'; permalink: string; postId?: string }
+        | { done: 'closed' }
+        | { done: 'timeout' }
+    ) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      chrome.tabs.onRemoved.removeListener(onRemoved);
+      resolve(r);
+    };
+    const timer = setTimeout(() => finish({ done: 'timeout' }), timeoutMs);
+    const onUpdated = (
+      updatedTabId: number,
+      info: chrome.tabs.TabChangeInfo
+    ) => {
+      if (updatedTabId !== tabId || !info.url) return;
+      const pl = redditPermalinkFromSubmittedUrl(info.url);
+      if (pl)
+        finish({ done: 'submitted', permalink: pl.permalink, postId: pl.postId });
+    };
+    const onRemoved = (removedTabId: number) => {
+      if (removedTabId === tabId) finish({ done: 'closed' });
+    };
+    chrome.tabs.onUpdated.addListener(onUpdated);
+    chrome.tabs.onRemoved.addListener(onRemoved);
+  });
 }
 
 /**
@@ -227,8 +280,36 @@ export async function submitRedditPostViaTab(
   }
   if (tabId == null) return { ok: false, error: 'Failed to open Reddit tab' };
 
-  const manual = (message: string): ReplyResult => {
-    if (tabId != null) void focusTab(tabId);
+  const success = async (pl: {
+    permalink: string;
+    postId?: string;
+  }): Promise<ReplyResult> => {
+    if (tabId != null) {
+      await wait(TAB_CLOSE_GRACE_MS);
+      await closeTab(tabId);
+    }
+    return {
+      ok: true,
+      permalink: pl.permalink,
+      postId: pl.postId,
+      message: 'Post submitted to Reddit.',
+    };
+  };
+
+  // Surface the tab and keep watching it: if the user solves the captcha and
+  // clicks Reddit's own Post, the tab navigates to the /comments/ permalink and
+  // we return a confirmed publish. Only a closed tab / timeout falls back to
+  // pending (which the queue records as an unfinished task).
+  const waitManual = async (message: string): Promise<ReplyResult> => {
+    if (tabId == null) return { ok: true, pending: true, message };
+    await focusTab(tabId);
+    const outcome = await waitForManualRedditSubmit(
+      tabId,
+      MANUAL_SUBMIT_TIMEOUT_MS
+    );
+    if (outcome.done === 'submitted') {
+      return success({ permalink: outcome.permalink, postId: outcome.postId });
+    }
     return { ok: true, pending: true, message };
   };
 
@@ -243,12 +324,12 @@ export async function submitRedditPostViaTab(
     });
     const fill = filled?.result;
     if (!fill || fill.status === 'no_form') {
-      return manual(
+      return waitManual(
         'Opened the Reddit submit page but could not find the form — review and post it manually in the opened tab.'
       );
     }
     if (fill.captcha) {
-      return manual(
+      return waitManual(
         'Reddit requires a captcha for this post. Solve it and click Post in the opened tab.'
       );
     }
@@ -258,7 +339,7 @@ export async function submitRedditPostViaTab(
       func: clickRedditSubmitInPage,
     });
     if (clicked?.result === 'no_button') {
-      return manual(
+      return waitManual(
         'Filled the Reddit post but could not find the submit button — click Post in the opened tab.'
       );
     }
@@ -275,20 +356,14 @@ export async function submitRedditPostViaTab(
       ? redditPermalinkFromSubmittedUrl(outcome.url)
       : null;
     if (permalink) {
-      await wait(TAB_CLOSE_GRACE_MS);
-      await closeTab(tabId);
-      return {
-        ok: true,
-        permalink: permalink.permalink,
-        postId: permalink.postId,
-        message: 'Post submitted to Reddit.',
-      };
+      return success(permalink);
     }
 
-    // Still on the form: a captcha appeared post-click → manual; a plain error →
-    // fail with its text; anything else → we can't confirm, hand it to the user.
+    // Still on the form: a captcha appeared post-click → wait for the manual
+    // solve; a plain error → fail with its text; anything else → we can't
+    // confirm, so hand it to the user and keep watching.
     if (outcome?.captcha) {
-      return manual(
+      return waitManual(
         'Reddit is asking for a captcha. Solve it and click Post in the opened tab.'
       );
     }
@@ -296,7 +371,7 @@ export async function submitRedditPostViaTab(
       void focusTab(tabId);
       return { ok: false, error: `Reddit rejected the post: ${outcome.error}` };
     }
-    return manual(
+    return waitManual(
       'Submitted on Reddit but the result could not be confirmed — check the opened tab.'
     );
   } catch (e: any) {
