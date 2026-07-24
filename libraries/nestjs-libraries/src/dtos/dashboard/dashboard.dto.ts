@@ -18,6 +18,11 @@ const channelTransform = Transform(({ value }) =>
 export class DashboardSummaryQueryDto {
   @ApiPropertyOptional()
   @IsOptional()
+  @IsString()
+  projectId?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
   @IsDateString()
   startDate?: string;
 
@@ -45,6 +50,11 @@ export class DashboardSummaryQueryDto {
 }
 
 export class PostsTrendQueryDto {
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  projectId?: string;
+
   @ApiPropertyOptional({ enum: ['daily', 'weekly', 'monthly'], default: 'daily' })
   @IsOptional()
   @IsString()
@@ -53,6 +63,11 @@ export class PostsTrendQueryDto {
 }
 
 export class ImpressionsQueryDto {
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  projectId?: string;
+
   @ApiPropertyOptional({ enum: ['daily', 'weekly', 'monthly'], default: 'daily' })
   @IsOptional()
   @IsString()
@@ -90,6 +105,11 @@ export class ImpressionsQueryDto {
 export class TrafficsQueryDto {
   @ApiPropertyOptional()
   @IsOptional()
+  @IsString()
+  projectId?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
   @IsDateString()
   startDate?: string;
 
@@ -117,6 +137,11 @@ export class TrafficsQueryDto {
 }
 
 export class PostEngagementQueryDto {
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  projectId?: string;
+
   @ApiPropertyOptional({ minimum: 1, maximum: 90, default: 30 })
   @IsOptional()
   @Type(() => Number)

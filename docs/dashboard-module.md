@@ -12,6 +12,14 @@ The Dashboard provides a **one-stop summary of social media operations data** fo
 
 **Important: All analytics data (impressions, traffic, engagement) is scoped to posts published through Postiz only.** Data from posts created directly on social platforms (outside Postiz) is not included. This ensures consistent and accurate measurement of content managed through the system.
 
+**Project scoping (`projectId`):** Every dashboard endpoint accepts an optional `projectId` query param. When supplied, analytics are narrowed to a single project:
+
+- **Post-level metrics** (post counts, per-platform impressions/traffic totals, posts trend, post-engagement) filter on `Post.projectId`.
+- **Channel counts** and the **DataTicks-backed series** (`/traffics`, `/impressions`) are scoped to the channels *bound* to the project via the `IntegrationProject` join table (`disabled: false`). Since `DataTicks` has no `projectId` column, the service resolves the project to its bound channel ids and filters the ticks by `integrationId`.
+- A project with **no bound channels** yields empty channel-scoped results (e.g. `/traffics` and `/impressions` return `[]`) rather than falling back to the whole org.
+- **Billing quota** fields on `/summary` (`published_this_period`, `post_send_limit`, `period_end`) remain **organization-level** — they are *not* affected by `projectId`.
+- Omitting `projectId` returns organization-wide analytics (unchanged legacy behaviour).
+
 ### Data pipeline overview
 
 The dashboard uses **two complementary data pipelines**:
@@ -134,6 +142,7 @@ Both pipelines source data exclusively from post-level APIs (`batchPostAnalytics
 
 | Parameter | Type | Default | Validation | Meaning |
 |-----------|------|---------|------------|---------|
+| `projectId` | string | — (org-wide) | `@IsString()` | Scope analytics to one project. Post metrics filter on `Post.projectId`; channel count uses the project's bound channels. Billing quota fields stay org-level. |
 | `startDate` | ISO 8601 date string | — (no filter) | `@IsDateString()` | Start of the date range for post statistics (inclusive, normalized to start of day) |
 | `endDate` | ISO 8601 date string | — (no filter) | `@IsDateString()` | End of the date range for post statistics (inclusive, normalized to end of day) |
 | `integrationId[]` | string array | — (all) | `@IsArray, @ArrayMaxSize(50)` | Filter by specific integration IDs |
@@ -236,7 +245,7 @@ Cases 1–3 all represent "the client means this local time". Case 4 means UTC. 
 1. Parse dates with `parseDateToUTC(input, tz)` — respects offset and timezone header
 2. Normalize `startDate` / `endDate` to day boundaries in the user's timezone
 3. Fetch Aisee billing period (`getUserLimits(userId)`) for `published_this_period`; fall back to calendar month if unavailable
-4. Check Redis cache (key: `dashboard:summary:${orgId}:${userId}:${start}:${end}:${intKey}:${chKey}:${tz}`) → return immediately if cache hit
+4. Check Redis cache (key: `dashboard:summary:${orgId}:${userId}:${projectId}:${start}:${end}:${intKey}:${chKey}:${tz}`) → return immediately if cache hit
 5. Query in parallel: total channels + active integrations list + post stats grouped by state + impressions/traffic from DataTicks + post count via `countPostsFromDay(orgId, periodStart)`
 6. Map `groupBy` results to `posts_stats` object (QUEUE→scheduled, PUBLISHED→published, DRAFT→drafts, ERROR→errors)
 7. Group channels by platform, sum impressions/traffic totals
@@ -258,6 +267,7 @@ Cases 1–3 all represent "the client means this local time". Case 4 means UTC. 
 
 | Parameter | Options | Meaning | Lookback range |
 |-----------|---------|---------|---------------|
+| `projectId` | string | Optional — scope the trend to one project (`Post.projectId`) | — |
 | `period` | `daily` (default) | Aggregate by day | Last 30 days |
 | | `weekly` | Aggregate by week | Last 90 days |
 | | `monthly` | Aggregate by month | Last 365 days |
@@ -318,6 +328,7 @@ Posts Trend (daily, last 30 days)
 
 | Parameter | Type | Default | Meaning |
 |-----------|------|---------|---------|
+| `projectId` | string | — (org-wide) | Scope to the project's bound channels; no bound channels ⇒ `[]`. Intersected with `integrationId` when both set. |
 | `startDate` | ISO 8601 date string | — (last 30 days) | Start of date range |
 | `endDate` | ISO 8601 date string | — (today) | End of date range |
 | `integrationId[]` | string array | — (all) | Filter by integration IDs |
@@ -365,7 +376,7 @@ Traffic Analysis by Platform (last 30 days)
 
 **Algorithm**: Reads pre-aggregated DataTicks records (`type='traffic'`). For each integration, takes the latest snapshot within the date range. Sums across integrations by platform. Computes percentages. Returns sorted by value descending.
 
-**Caching**: Redis cache (key: `dashboard:traffics:${orgId}:${intKey}:${chKey}:${sdKey}:${edKey}`), TTL 1 hour. Cache is invalidated when DataTicks sync runs.
+**Caching**: Redis cache (key: `dashboard:traffics:${orgId}:${projectId}:${intKey}:${chKey}:${sdKey}:${edKey}`), TTL 1 hour. Cache is invalidated when DataTicks sync runs. When `projectId` is set, the project is first resolved to its bound channel ids (intersected with any explicit `integrationId`) before querying DataTicks; an empty set short-circuits to `[]`.
 
 </details>
 
@@ -381,6 +392,7 @@ Traffic Analysis by Platform (last 30 days)
 
 | Parameter | Type | Default | Meaning |
 |-----------|------|---------|---------|
+| `projectId` | string | — (org-wide) | Scope to the project's bound channels; no bound channels ⇒ `[]`. Intersected with `integrationId` when both set. |
 | `period` | `daily` / `weekly` / `monthly` | `daily` | Time aggregation granularity |
 | `startDate` | ISO 8601 date string | — (default lookback) | Start of date range |
 | `endDate` | ISO 8601 date string | — (today) | End of date range |
@@ -424,7 +436,7 @@ Impressions Trend (daily, last 30 days)
 
 **Algorithm**: Reads pre-aggregated DataTicks records (`type='impressions'`). Groups by (integration, time bucket), keeping only the latest snapshot per integration per bucket. Sums across integrations by (platform, bucket). Returns sorted by date then platform.
 
-**Caching**: Redis cache (key includes period, integrationId, channel, date range), TTL 1 hour.
+**Caching**: Redis cache (key includes projectId, period, integrationId, channel, date range), TTL 1 hour. As with `/traffics`, a `projectId` is resolved to its bound channel ids before the DataTicks query, short-circuiting to `[]` when the project has no channels.
 
 </details>
 
@@ -440,6 +452,7 @@ Impressions Trend (daily, last 30 days)
 
 | Parameter | Type | Default | Range | Meaning |
 |-----------|------|---------|-------|---------|
+| `projectId` | string | — (org-wide) | — | Scope to the project's posts (`Post.projectId`) + bound channels |
 | `days` | Integer | 30 | 1–90 | Analyze posts published within the last N days |
 
 **What the user sees (example)**:
@@ -528,8 +541,8 @@ Different social platforms use different terminology for the same concepts. The 
 <summary>Technical implementation details (for developers)</summary>
 
 **Algorithm**:
-1. Check Redis cache (key: `dashboard:post-engagement:${orgId}:${days}`)
-2. Call `_fetchAllPostAnalytics(org, days)` which queries published posts and fetches analytics via batch or per-post APIs
+1. Check Redis cache (key: `dashboard:post-engagement:${orgId}:${projectId}:${days}`)
+2. Call `_fetchAllPostAnalytics(org, days, undefined, undefined, projectId)` which queries published posts (filtered by `Post.projectId`) and fetches analytics via batch or per-post APIs
 3. Cross-platform metric normalization (regex classification):
    - `VIEWS_RE = /^(impression|views|reach|unique.impression)/i`
    - `LIKES_RE = /^(like|reaction)/i`
@@ -580,10 +593,10 @@ After cache expires:  Back to the first-request flow
 
 | Feature | Cache duration | Cache key pattern | Notes |
 |---------|---------------|-------------------|-------|
-| Summary | 1 hour | `dashboard:summary:${orgId}:${start}:${end}:${intKey}:${chKey}:${tz}` | Invalidated by DataTicks sync |
-| Traffic Analysis | 1 hour | `dashboard:traffics:${orgId}:${intKey}:${chKey}:${sdKey}:${edKey}` | Invalidated by DataTicks sync |
-| Impressions Trend | 1 hour | `dashboard:impressions:${orgId}:${period}:${intKey}:${chKey}:${sdKey}:${edKey}` | Invalidated by DataTicks sync |
-| Post Engagement | 1 hour | `dashboard:post-engagement:${orgId}:${days}` | On-demand fetch + cache |
+| Summary | 1 hour | `dashboard:summary:${orgId}:${userId}:${projectId}:${start}:${end}:${intKey}:${chKey}:${tz}` | Invalidated by DataTicks sync |
+| Traffic Analysis | 1 hour | `dashboard:traffics:${orgId}:${projectId}:${intKey}:${chKey}:${sdKey}:${edKey}` | Invalidated by DataTicks sync |
+| Impressions Trend | 1 hour | `dashboard:impressions:${orgId}:${projectId}:${period}:${intKey}:${chKey}:${sdKey}:${edKey}` | Invalidated by DataTicks sync |
+| Post Engagement | 1 hour | `dashboard:post-engagement:${orgId}:${projectId}:${days}` | On-demand fetch + cache |
 | Posts Trend | No cache | — | Database query only, fast enough |
 
 > **Development environment**: Cache duration is reduced to 1 second for quick iteration during debugging.
@@ -650,26 +663,31 @@ The Dashboard connects to multiple external social platforms, any of which could
 
 ```
 DashboardSummaryQueryDto
+├── projectId?: string   (optional; scope to one project)
 ├── startDate?: string   (ISO 8601 date string, optional)
 ├── endDate?: string     (ISO 8601 date string, optional)
 ├── integrationId?: string[]  (array, max 50, supports comma-separated)
 ├── channel?: string[]   (array, max 30, must be in VALID_CHANNELS)
-├── Validation: @IsOptional, @IsDateString, @IsArray
+├── Validation: @IsOptional, @IsString, @IsDateString, @IsArray
 ├── Controller-level: BadRequestException if startDate > endDate
 
 ImpressionsQueryDto
+├── projectId?: string   (optional; scope to one project)
 ├── period?: 'daily' | 'weekly' | 'monthly'   (default: 'daily')
 ├── startDate?, endDate?, integrationId?, channel?  (same as above)
 
 TrafficsQueryDto
+├── projectId?: string   (optional; scope to one project)
 ├── startDate?, endDate?, integrationId?, channel?  (same as above)
 
 PostsTrendQueryDto
+├── projectId?: string   (optional; scope to one project)
 ├── period?: 'daily' | 'weekly' | 'monthly'   (default: 'daily')
 
 PostEngagementQueryDto
+├── projectId?: string   (optional; scope to one project)
 ├── days?: number   (default: 30, range: 1–90)
-├── Validation: @IsOptional, @Type(() => Number), @IsInt, @Min(1), @Max(90)
+├── Validation: @IsOptional, @IsString, @Type(() => Number), @IsInt, @Min(1), @Max(90)
 ```
 
 ### Architecture diagram
@@ -710,7 +728,7 @@ Controller                    Service                          Data Source
 
 1. **Post-level only**: All analytics data comes from post-level APIs (`batchPostAnalytics` / `postAnalytics`), never from account-level APIs. This ensures only Postiz-managed content is measured.
 2. **Two-pipeline architecture**: Pre-aggregated DataTicks for summary/trend endpoints (fast reads), real-time fetch for detailed engagement (fresh data).
-3. **Multi-tenant isolation**: All queries are scoped by `orgId`
+3. **Multi-tenant isolation**: All queries are scoped by `orgId`; an optional `projectId` further narrows results to one project (post metrics via `Post.projectId`, channel metrics via `IntegrationProject` bindings)
 4. **Soft delete**: All database queries filter `deletedAt IS NULL`
 5. **Graceful degradation**: Single platform/post failure does not cause overall failure
 6. **Background sync with cache invalidation**: DataTicks sync runs daily and invalidates relevant dashboard caches

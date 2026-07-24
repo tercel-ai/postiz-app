@@ -45,7 +45,8 @@ export class DashboardService {
     endDate?: Date,
     integrationId?: string[],
     channel?: string[],
-    tz?: string
+    tz?: string,
+    projectId?: string
   ) {
     const normalizedStart = startDate
       ? (tz ? dayjs(startDate).tz(tz) : dayjs.utc(startDate)).startOf('day').toDate()
@@ -55,7 +56,7 @@ export class DashboardService {
       : undefined;
     const intKey = integrationId?.length ? [...integrationId].sort().join(',') : 'all';
     const chKey = channel?.length ? [...channel].sort().join(',') : 'all';
-    const cacheKey = `dashboard:summary:${org.id}:${userId || 'anon'}:${normalizedStart?.getTime() || 'all'}:${normalizedEnd?.getTime() || 'all'}:${intKey}:${chKey}:${tz || 'utc'}`;
+    const cacheKey = `dashboard:summary:${org.id}:${userId || 'anon'}:${projectId || 'all'}:${normalizedStart?.getTime() || 'all'}:${normalizedEnd?.getTime() || 'all'}:${intKey}:${chKey}:${tz || 'utc'}`;
     const cached = await ioRedis.get(cacheKey);
     if (cached) {
       return JSON.parse(cached);
@@ -82,12 +83,12 @@ export class DashboardService {
     }
 
     const [channelCount, channelConnectedCount, integrations, postStats, impressionsByPlatform, trafficAgg, publishedThisPeriod] = await Promise.all([
-      this._dashboardRepository.getChannelCount(org.id, integrationId, channel),
-      this._dashboardRepository.getChannelCount(org.id, integrationId, channel, false),
-      this._dashboardRepository.getActiveIntegrations(org.id, integrationId, channel),
-      this._dashboardRepository.getPostsStats(org.id, normalizedStart, normalizedEnd, integrationId, channel),
-      this._dashboardRepository.getImpressionsByPlatform(org.id, integrationId, channel, normalizedStart, normalizedEnd),
-      this._dashboardRepository.getTrafficTotal(org.id, integrationId, channel, normalizedStart, normalizedEnd),
+      this._dashboardRepository.getChannelCount(org.id, integrationId, channel, undefined, projectId),
+      this._dashboardRepository.getChannelCount(org.id, integrationId, channel, false, projectId),
+      this._dashboardRepository.getActiveIntegrations(org.id, integrationId, channel, projectId),
+      this._dashboardRepository.getPostsStats(org.id, normalizedStart, normalizedEnd, integrationId, channel, projectId),
+      this._dashboardRepository.getImpressionsByPlatform(org.id, integrationId, channel, normalizedStart, normalizedEnd, projectId),
+      this._dashboardRepository.getTrafficTotal(org.id, integrationId, channel, normalizedStart, normalizedEnd, projectId),
       this._postsService.countPostsFromDay(org.id, periodStart),
     ]);
 
@@ -148,12 +149,14 @@ export class DashboardService {
   async getPostsTrend(
     org: Organization,
     period: 'daily' | 'weekly' | 'monthly' = 'daily',
-    tz?: string
+    tz?: string,
+    projectId?: string
   ) {
     const sinceDays = period === 'monthly' ? 365 : period === 'weekly' ? 90 : 30;
     const posts = await this._dashboardRepository.getPostsForTrend(
       org.id,
-      sinceDays
+      sinceDays,
+      projectId
     );
 
     const buckets = new Map<string, number>();
@@ -196,21 +199,33 @@ export class DashboardService {
     integrationId?: string[],
     channel?: string[],
     startDate?: Date,
-    endDate?: Date
+    endDate?: Date,
+    projectId?: string
   ) {
     const intKey = integrationId?.length ? [...integrationId].sort().join(',') : 'all';
     const chKey = channel?.length ? [...channel].sort().join(',') : 'all';
     const sdKey = startDate?.getTime() || 'all';
     const edKey = endDate?.getTime() || 'all';
-    const cacheKey = `dashboard:traffics:${org.id}:${intKey}:${chKey}:${sdKey}:${edKey}`;
+    const cacheKey = `dashboard:traffics:${org.id}:${projectId || 'all'}:${intKey}:${chKey}:${sdKey}:${edKey}`;
     const cached = await ioRedis.get(cacheKey);
     if (cached) {
       return JSON.parse(cached);
     }
 
+    const effectiveIntegrationId = await this._resolveProjectIntegrationIds(
+      org.id,
+      projectId,
+      integrationId
+    );
+    // projectId supplied but no bound channels → no data (never fall through to "all")
+    if (effectiveIntegrationId?.length === 0) {
+      await ioRedis.set(cacheKey, JSON.stringify([]), 'EX', CACHE_TTL);
+      return [];
+    }
+
     const result = await this._dataTicksService.getTrafficSummaryByPlatform({
       organizationId: org.id,
-      integrationId,
+      integrationId: effectiveIntegrationId,
       channel,
       startDate,
       endDate,
@@ -226,22 +241,34 @@ export class DashboardService {
     integrationId?: string[],
     channel?: string[],
     startDate?: Date,
-    endDate?: Date
+    endDate?: Date,
+    projectId?: string
   ) {
     const intKey = integrationId?.length ? [...integrationId].sort().join(',') : 'all';
     const chKey = channel?.length ? [...channel].sort().join(',') : 'all';
     const sdKey = startDate?.getTime() || 'all';
     const edKey = endDate?.getTime() || 'all';
-    const cacheKey = `dashboard:impressions:${org.id}:${period}:${intKey}:${chKey}:${sdKey}:${edKey}`;
+    const cacheKey = `dashboard:impressions:${org.id}:${projectId || 'all'}:${period}:${intKey}:${chKey}:${sdKey}:${edKey}`;
     const cached = await ioRedis.get(cacheKey);
     if (cached) {
       return JSON.parse(cached);
     }
 
+    const effectiveIntegrationId = await this._resolveProjectIntegrationIds(
+      org.id,
+      projectId,
+      integrationId
+    );
+    // projectId supplied but no bound channels → no data (never fall through to "all")
+    if (effectiveIntegrationId?.length === 0) {
+      await ioRedis.set(cacheKey, JSON.stringify([]), 'EX', CACHE_TTL);
+      return [];
+    }
+
     const result = await this._dataTicksService.getImpressionsByPlatform({
       organizationId: org.id,
       period,
-      integrationId,
+      integrationId: effectiveIntegrationId,
       channel,
       startDate,
       endDate,
@@ -251,18 +278,18 @@ export class DashboardService {
     return result;
   }
 
-  async getPostEngagement(org: Organization, days: number = 30) {
-    const cacheKey = `dashboard:post-engagement:${org.id}:${days}`;
+  async getPostEngagement(org: Organization, days: number = 30, projectId?: string) {
+    const cacheKey = `dashboard:post-engagement:${org.id}:${projectId || 'all'}:${days}`;
     const cached = await ioRedis.get(cacheKey);
     if (cached) {
       return JSON.parse(cached);
     }
 
     const activeIntegrations =
-      await this._dashboardRepository.getActiveIntegrations(org.id);
+      await this._dashboardRepository.getActiveIntegrations(org.id, undefined, undefined, projectId);
 
     const { analyticsMap, postsFailed, postsTotal } =
-      await this._fetchAllPostAnalytics(org, days);
+      await this._fetchAllPostAnalytics(org, days, undefined, undefined, projectId);
 
     const totals = { views: 0, likes: 0, comments: 0, saves: 0 };
     const platformMap = new Map<
@@ -342,6 +369,33 @@ export class DashboardService {
   }
 
   /**
+   * Resolve the effective integrationId filter for DataTicks-backed queries
+   * (traffics/impressions) that cannot filter by projectId directly.
+   *
+   * - No projectId → return the caller's integrationId unchanged (may be undefined
+   *   = all channels).
+   * - projectId set → return the project's bound channel ids, intersected with an
+   *   explicit integrationId when one is supplied. An empty array means the project
+   *   has no matching channels and callers must short-circuit to an empty result.
+   */
+  private async _resolveProjectIntegrationIds(
+    orgId: string,
+    projectId?: string,
+    integrationId?: string[]
+  ): Promise<string[] | undefined> {
+    if (!projectId) {
+      return integrationId;
+    }
+    const projectIntegrationIds =
+      await this._dashboardRepository.getProjectIntegrationIds(orgId, projectId);
+    if (integrationId?.length) {
+      const allowed = new Set(projectIntegrationIds);
+      return integrationId.filter((id) => allowed.has(id));
+    }
+    return projectIntegrationIds;
+  }
+
+  /**
    * Fetch post-level analytics for all published posts, using batch APIs
    * where available and per-post fallback with circuit breaker otherwise.
    */
@@ -349,15 +403,16 @@ export class DashboardService {
     org: Organization,
     days: number,
     integrationId?: string[],
-    channel?: string[]
+    channel?: string[],
+    projectId?: string
   ): Promise<{
     analyticsMap: Map<string, { metrics: AnalyticsData[]; platform: string }>;
     postsFailed: number;
     postsTotal: number;
   }> {
     const [posts, activeIntegrations] = await Promise.all([
-      this._dashboardRepository.getPublishedPostsWithRelease(org.id, days, integrationId, channel),
-      this._dashboardRepository.getActiveIntegrations(org.id, integrationId, channel),
+      this._dashboardRepository.getPublishedPostsWithRelease(org.id, days, integrationId, channel, projectId),
+      this._dashboardRepository.getActiveIntegrations(org.id, integrationId, channel, projectId),
     ]);
 
     const analyticsMap = new Map<string, { metrics: AnalyticsData[]; platform: string }>();

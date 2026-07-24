@@ -11,7 +11,7 @@ export class DashboardRepository {
     private _integration: PrismaRepository<'integration'>
   ) { }
 
-  getChannelCount(orgId: string, integrationId?: string[], channel?: string[], refreshNeeded?: boolean) {
+  getChannelCount(orgId: string, integrationId?: string[], channel?: string[], refreshNeeded?: boolean, projectId?: string) {
     return this._integration.model.integration.count({
       where: {
         organizationId: orgId,
@@ -20,11 +20,14 @@ export class DashboardRepository {
         ...(integrationId?.length && { id: { in: integrationId } }),
         ...(channel?.length && { providerIdentifier: { in: channel } }),
         ...(refreshNeeded !== undefined && { refreshNeeded }),
+        ...(projectId && {
+          integrationProjects: { some: { projectId, disabled: false } },
+        }),
       },
     });
   }
 
-  getActiveIntegrations(orgId: string, integrationId?: string[], channel?: string[]) {
+  getActiveIntegrations(orgId: string, integrationId?: string[], channel?: string[], projectId?: string) {
     return this._integration.model.integration.findMany({
       where: {
         organizationId: orgId,
@@ -33,8 +36,31 @@ export class DashboardRepository {
         type: 'social',
         ...(integrationId?.length && { id: { in: integrationId } }),
         ...(channel?.length && { providerIdentifier: { in: channel } }),
+        ...(projectId && {
+          integrationProjects: { some: { projectId, disabled: false } },
+        }),
       },
     });
+  }
+
+  /**
+   * Resolve a project to the ids of the (enabled) channels bound to it. Used by
+   * the DataTicks-backed traffics/impressions queries, which filter by
+   * integrationId (DataTicks has no projectId column). An empty result means the
+   * project has no bound channels — callers must treat that as "no data", never
+   * as "all channels".
+   */
+  async getProjectIntegrationIds(orgId: string, projectId: string): Promise<string[]> {
+    const rows = await this._integration.model.integration.findMany({
+      where: {
+        organizationId: orgId,
+        deletedAt: null,
+        disabled: false,
+        integrationProjects: { some: { projectId, disabled: false } },
+      },
+      select: { id: true },
+    });
+    return rows.map((r) => r.id);
   }
 
   async getPostsStats(
@@ -42,7 +68,8 @@ export class DashboardRepository {
     startDate?: Date,
     endDate?: Date,
     integrationId?: string[],
-    channel?: string[]
+    channel?: string[],
+    projectId?: string
   ) {
     const where: Prisma.PostWhereInput = {
       organizationId: orgId,
@@ -50,6 +77,7 @@ export class DashboardRepository {
       parentPostId: null,
       // Exclude Engage reply posts — they are tracked separately via EngageDataTicks
       source: { notIn: ['engage'] },
+      ...(projectId && { projectId }),
       ...(integrationId?.length && { integrationId: { in: integrationId } }),
       ...(channel?.length && { integration: { providerIdentifier: { in: channel } } }),
     };
@@ -77,7 +105,8 @@ export class DashboardRepository {
     integrationId?: string[],
     channel?: string[],
     startDate?: Date,
-    endDate?: Date
+    endDate?: Date,
+    projectId?: string
   ): Promise<{ platform: string; value: number }[]> {
     const where: Prisma.PostWhereInput = {
       organizationId: orgId,
@@ -85,6 +114,7 @@ export class DashboardRepository {
       parentPostId: null,
       source: { notIn: ['engage'] },
       impressions: { not: null },
+      ...(projectId && { projectId }),
       ...(integrationId?.length && { integrationId: { in: integrationId } }),
       ...(channel?.length && { integration: { providerIdentifier: { in: channel } } }),
     };
@@ -122,7 +152,8 @@ export class DashboardRepository {
     integrationId?: string[],
     channel?: string[],
     startDate?: Date,
-    endDate?: Date
+    endDate?: Date,
+    projectId?: string
   ): Promise<number> {
     const where: Prisma.PostWhereInput = {
       organizationId: orgId,
@@ -130,6 +161,7 @@ export class DashboardRepository {
       parentPostId: null,
       source: { notIn: ['engage'] },
       trafficScore: { not: null },
+      ...(projectId && { projectId }),
       ...(integrationId?.length && { integrationId: { in: integrationId } }),
       ...(channel?.length && { integration: { providerIdentifier: { in: channel } } }),
     };
@@ -143,7 +175,7 @@ export class DashboardRepository {
     return agg._sum.trafficScore ?? 0;
   }
 
-  getPublishedPostsWithRelease(orgId: string, sinceDays: number, integrationId?: string[], channel?: string[]) {
+  getPublishedPostsWithRelease(orgId: string, sinceDays: number, integrationId?: string[], channel?: string[], projectId?: string) {
     return this._post.model.post.findMany({
       where: {
         organizationId: orgId,
@@ -156,6 +188,7 @@ export class DashboardRepository {
         publishDate: {
           gte: dayjs().subtract(sinceDays, 'day').toDate(),
         },
+        ...(projectId && { projectId }),
         ...(integrationId?.length && { integrationId: { in: integrationId } }),
         ...(channel?.length && { integration: { providerIdentifier: { in: channel } } }),
       },
@@ -223,7 +256,7 @@ export class DashboardRepository {
     ]);
   }
 
-  getPostsForTrend(orgId: string, sinceDays: number) {
+  getPostsForTrend(orgId: string, sinceDays: number, projectId?: string) {
     return this._post.model.post.findMany({
       where: {
         organizationId: orgId,
@@ -234,6 +267,7 @@ export class DashboardRepository {
         publishDate: {
           gte: dayjs().subtract(sinceDays, 'day').toDate(),
         },
+        ...(projectId && { projectId }),
       },
       select: {
         publishDate: true,

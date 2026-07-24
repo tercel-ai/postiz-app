@@ -37,7 +37,7 @@ export class DashboardController {
       throw new BadRequestException('startDate must be before endDate');
     }
 
-    return this._dashboardService.getSummary(org, user?.id, startDate, endDate, query.integrationId, query.channel, tz);
+    return this._dashboardService.getSummary(org, user?.id, startDate, endDate, query.integrationId, query.channel, tz, query.projectId);
   }
 
   @Get('/posts-trend')
@@ -50,7 +50,7 @@ export class DashboardController {
     @Query() query: PostsTrendQueryDto,
     @GetTimezone() tz?: string
   ) {
-    return this._dashboardService.getPostsTrend(org, query.period, tz);
+    return this._dashboardService.getPostsTrend(org, query.period, tz, query.projectId);
   }
 
   @Get('/traffics')
@@ -68,7 +68,7 @@ export class DashboardController {
     if (startDate && endDate && startDate > endDate) {
       throw new BadRequestException('startDate must be before endDate');
     }
-    return this._dashboardService.getTraffics(org, query.integrationId, query.channel, startDate, endDate);
+    return this._dashboardService.getTraffics(org, query.integrationId, query.channel, startDate, endDate, query.projectId);
   }
 
   @Get('/impressions')
@@ -86,7 +86,7 @@ export class DashboardController {
     if (startDate && endDate && startDate > endDate) {
       throw new BadRequestException('startDate must be before endDate');
     }
-    return this._dashboardService.getImpressions(org, query.period, query.integrationId, query.channel, startDate, endDate);
+    return this._dashboardService.getImpressions(org, query.period, query.integrationId, query.channel, startDate, endDate, query.projectId);
   }
 
   @Get('/post-engagement')
@@ -98,6 +98,6 @@ export class DashboardController {
     @GetOrgFromRequest() org: Organization,
     @Query() query: PostEngagementQueryDto
   ) {
-    return this._dashboardService.getPostEngagement(org, query.days);
+    return this._dashboardService.getPostEngagement(org, query.days, query.projectId);
   }
 }
