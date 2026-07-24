@@ -8,7 +8,7 @@ import {
   NotFoundException,
   OnApplicationBootstrap,
 } from '@nestjs/common';
-import { EngageSentReply, Organization } from '@prisma/client';
+import { EngageSentReply, Organization, State } from '@prisma/client';
 import { TemporalService } from 'nestjs-temporal-core';
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc';
@@ -634,6 +634,20 @@ export class EngageService implements OnApplicationBootstrap {
 
   async listSentReplies(org: Organization, dto: ListSentDto) {
     return this._engageRepository.listSentReplies(org.id, dto);
+  }
+
+  // Cross-org Engage reply list for the admin console. Not org-scoped — the
+  // caller (AdminEngageController, SuperAdmin-guarded) passes an optional
+  // organizationId filter already resolved from userId.
+  listSentRepliesForAdmin(query: {
+    page?: number;
+    pageSize?: number;
+    organizationId?: string | string[];
+    platform?: string;
+    state?: State;
+    sortOrder?: 'asc' | 'desc';
+  }) {
+    return this._engageRepository.listSentRepliesForAdmin(query);
   }
 
   async locateOpportunity(org: Organization, dto: LocateOpportunityDto) {

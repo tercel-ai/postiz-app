@@ -12,6 +12,7 @@ import { AdminDiagnosticsController } from './routes/admin-diagnostics.controlle
 import { AdminBillingController } from './routes/admin-billing.controller';
 import { AdminApiCostController } from './routes/admin-api-cost.controller';
 import { AdminExtensionController } from './routes/admin-extension.controller';
+import { AdminEngageController } from './routes/admin-engage.controller';
 
 const adminControllers = [
   AdminSettingsController,
@@ -25,6 +26,7 @@ const adminControllers = [
   AdminBillingController,
   AdminApiCostController,
   AdminExtensionController,
+  AdminEngageController,
 ];
 
 @Module({

@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
-import { Prisma, EngageOpportunity, EngageOpportunityStatus } from '@prisma/client';
+import { Prisma, EngageOpportunity, EngageOpportunityStatus, State } from '@prisma/client';
 import { PrismaRepository, PrismaTransaction, PrismaService } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
 import {
   AddKeywordDto,
@@ -2807,6 +2807,143 @@ export class EngageRepository {
     });
 
     return { items: itemsWithMetrics, total, page, limit };
+  }
+
+  // Cross-org Engage reply list for the admin console (GET /admin/engage/sent).
+  // Anchored on EngageSentReply just like the org-scoped listSentReplies, but
+  // NOT locked to a single org / project — an optional organizationId (string or
+  // string[]) narrows it, otherwise every org's replies are returned. `platform`
+  // filters via the linked opportunity, `state` via the reply Post. Returns the
+  // admin envelope { results, total, page, pageSize, totalPages } to match
+  // getAllPostsList (AdminPostsController), enriched with org + author info.
+  async listSentRepliesForAdmin(query: {
+    page?: number;
+    pageSize?: number;
+    organizationId?: string | string[];
+    platform?: string;
+    state?: State;
+    sortOrder?: 'asc' | 'desc';
+  }) {
+    const page = query.page ?? 1;
+    const pageSize = query.pageSize ?? 20;
+    const offset = (page - 1) * pageSize;
+    const sortOrder = query.sortOrder ?? 'desc';
+
+    const postWhere: Prisma.PostWhereInput = {
+      source: 'engage',
+      ...(query.state ? { state: query.state } : {}),
+    };
+
+    const where: Prisma.EngageSentReplyWhereInput = {
+      ...(query.organizationId
+        ? {
+            organizationId: Array.isArray(query.organizationId)
+              ? { in: query.organizationId }
+              : query.organizationId,
+          }
+        : {}),
+      post: postWhere,
+      ...(query.platform && { opportunity: { platform: query.platform } }),
+    };
+
+    const [items, total] = await Promise.all([
+      this._sentReply.model.engageSentReply.findMany({
+        where,
+        include: {
+          organization: {
+            select: {
+              id: true,
+              name: true,
+              users: {
+                where: { role: { in: ['SUPERADMIN', 'ADMIN'] }, disabled: false },
+                orderBy: { role: 'asc' },
+                take: 1,
+                select: { userId: true },
+              },
+            },
+          },
+          post: {
+            select: {
+              id: true,
+              content: true,
+              state: true,
+              releaseURL: true,
+              publishDate: true,
+              createdAt: true,
+              impressions: true,
+              trafficScore: true,
+              analytics: true,
+              lastMetricsFetchAt: true,
+              settings: true,
+              integration: {
+                select: {
+                  id: true,
+                  name: true,
+                  providerIdentifier: true,
+                  picture: true,
+                  profile: true,
+                  internalId: true,
+                },
+              },
+            },
+          },
+          opportunity: {
+            select: {
+              id: true,
+              platform: true,
+              externalPostUrl: true,
+              postContent: true,
+              authorUsername: true,
+              authorDisplayName: true,
+              authorFollowers: true,
+              authorAvatarUrl: true,
+              postPublishedAt: true,
+            },
+          },
+        },
+        // Stable tiebreaker (id) mirrors listSentReplies for deterministic pages.
+        orderBy: [{ createdAt: sortOrder }, { id: 'desc' }],
+        skip: offset,
+        take: pageSize,
+      }),
+      this._sentReply.model.engageSentReply.count({ where }),
+    ]);
+
+    const results = items.map(({ organization, post, opportunity, ...rest }) => {
+      const base = {
+        id: rest.id,
+        createdAt: rest.createdAt,
+        projectId: rest.projectId,
+        matchedKeywords: rest.matchedKeywords,
+        platform: opportunity.platform,
+        organization: { id: organization.id, name: organization.name },
+        userId: organization.users[0]?.userId ?? null,
+        opportunity,
+      };
+      if (!post) return { ...base, post: null };
+      const { settings, ...postRest } = post;
+      return {
+        ...base,
+        post: {
+          ...postRest,
+          replyAuthor: resolveReplyAuthor(post.integration, settings),
+          metrics: normalizeReplyMetrics(
+            opportunity.platform,
+            post.analytics,
+            post.impressions,
+            post.trafficScore
+          ),
+        },
+      };
+    });
+
+    return {
+      results,
+      total,
+      page,
+      pageSize,
+      totalPages: Math.ceil(total / pageSize),
+    };
   }
 
   async locateSentReply(organizationId: string, dto: LocateSentReplyDto) {

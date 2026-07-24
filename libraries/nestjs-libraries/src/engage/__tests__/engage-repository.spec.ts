@@ -667,6 +667,124 @@ describe('EngageRepository — two-table reads', () => {
     });
   });
 
+  describe('listSentRepliesForAdmin', () => {
+    const ADMIN_ROW = {
+      id: 's1',
+      createdAt: new Date('2026-07-24T00:00:00Z'),
+      projectId: null,
+      matchedKeywords: ['react'],
+      organization: {
+        id: 'org1',
+        name: 'Acme',
+        users: [{ userId: 'u1' }],
+      },
+      opportunity: {
+        id: 'o1',
+        platform: 'x',
+        externalPostUrl: 'https://x.com/p/1',
+        postContent: 'original',
+        authorUsername: 'bob',
+      },
+      post: {
+        id: 'p1',
+        content: 'reply body',
+        state: 'PUBLISHED',
+        analytics: [],
+        impressions: 42,
+        trafficScore: 7,
+        integration: {
+          id: 'int1',
+          name: '0xKyd',
+          providerIdentifier: 'x',
+          picture: 'https://files/0xkyd.jpg',
+          profile: '@0xKyd',
+          internalId: '999',
+        },
+        settings: JSON.stringify({ __type: 'x' }),
+      },
+    };
+
+    it('returns the admin envelope (results/total/page/pageSize/totalPages)', async () => {
+      const { repo, sentFindMany, sentCount } = buildRepo();
+      sentFindMany.mockResolvedValue([]);
+      sentCount.mockResolvedValue(0);
+
+      const res = await repo.listSentRepliesForAdmin({ page: 2, pageSize: 15 });
+      expect(res).toEqual({
+        results: [],
+        total: 0,
+        page: 2,
+        pageSize: 15,
+        totalPages: 0,
+      });
+      // page 2 of size 15 → skip 15, take 15.
+      expect(sentFindMany.mock.calls[0][0].skip).toBe(15);
+      expect(sentFindMany.mock.calls[0][0].take).toBe(15);
+    });
+
+    it('scopes to organizationId (array → { in }) and maps platform/state to where', async () => {
+      const { repo, sentFindMany, sentCount } = buildRepo();
+      sentFindMany.mockResolvedValue([]);
+      sentCount.mockResolvedValue(0);
+
+      await repo.listSentRepliesForAdmin({
+        organizationId: ['org1', 'org2'],
+        platform: 'reddit',
+        state: 'ERROR' as any,
+      });
+      const where = sentFindMany.mock.calls[0][0].where;
+      expect(where.organizationId).toEqual({ in: ['org1', 'org2'] });
+      expect(where.post).toEqual({ source: 'engage', state: 'ERROR' });
+      expect(where.opportunity).toEqual({ platform: 'reddit' });
+    });
+
+    it('omits org/platform/state filters when not provided (all-orgs)', async () => {
+      const { repo, sentFindMany, sentCount } = buildRepo();
+      sentFindMany.mockResolvedValue([]);
+      sentCount.mockResolvedValue(0);
+
+      await repo.listSentRepliesForAdmin({});
+      const where = sentFindMany.mock.calls[0][0].where;
+      expect(where.organizationId).toBeUndefined();
+      expect(where.opportunity).toBeUndefined();
+      expect(where.post).toEqual({ source: 'engage' });
+    });
+
+    it('enriches each row with org, userId, platform, replyAuthor and metrics', async () => {
+      const { repo, sentFindMany, sentCount } = buildRepo();
+      sentFindMany.mockResolvedValue([ADMIN_ROW]);
+      sentCount.mockResolvedValue(1);
+
+      const res = await repo.listSentRepliesForAdmin({});
+      const row = res.results[0] as any;
+      expect(row.organization).toEqual({ id: 'org1', name: 'Acme' });
+      expect(row.userId).toBe('u1');
+      expect(row.platform).toBe('x');
+      expect(row.post.replyAuthor).toEqual({
+        handle: '0xKyd',
+        id: '999',
+        name: '0xKyd',
+        avatarUrl: 'https://files/0xkyd.jpg',
+      });
+      // metrics flattened from analytics; impressions falls back to the column.
+      expect(row.post.metrics.impressions).toBe(42);
+      expect(row.post.metrics.trafficScore).toBe(7);
+      // raw settings stripped from the response.
+      expect('settings' in row.post).toBe(false);
+    });
+
+    it('falls back to userId null when the org has no admin users', async () => {
+      const { repo, sentFindMany, sentCount } = buildRepo();
+      sentFindMany.mockResolvedValue([
+        { ...ADMIN_ROW, organization: { id: 'org1', name: 'Acme', users: [] } },
+      ]);
+      sentCount.mockResolvedValue(1);
+
+      const res = await repo.listSentRepliesForAdmin({});
+      expect((res.results[0] as any).userId).toBeNull();
+    });
+  });
+
   describe('getSentReplyItemById', () => {
     it('returns the same decorated item shape as listSentReplies', async () => {
       const { repo, sentFindFirst, stateFindFirst } = buildRepo();
