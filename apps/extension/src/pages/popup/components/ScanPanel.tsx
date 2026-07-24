@@ -1,7 +1,6 @@
 import React from 'react';
 import { ENGAGE_EXTENSION_ACTION } from '@gitroom/extension/utils/executor/actions';
 import { applyDelay } from '@gitroom/extension/utils/executor/pacing';
-import { shouldAutoSyncConfigCache } from './scan-config-cache';
 
 // Manually claiming/running scan tasks is a debug-only capability (bypasses
 // the normal background-scheduled executor) — the production store build only
@@ -321,12 +320,18 @@ export function EngageScanPanel() {
   const applyStates = (updater: (prev: Record<string, TaskState>) => Record<string, TaskState>) =>
     setStates((prev) => (statesRef.current = updater(prev)));
 
+  // Stale-while-revalidate: the cache exists only to paint the last-known scan
+  // units instantly on open (the popup is torn down on blur, so every open is a
+  // cold mount). It is NOT a freshness gate — we always refetch in the
+  // background so the displayed keywords/channels/accounts reflect the current
+  // backend config, not a snapshot that could be up to a full scan-interval
+  // (default 24h) stale. loadConfig() overwrites config + syncedAt on success.
   React.useEffect(() => {
     let alive = true;
     loadConfigCache().then((cached) => {
       if (!alive) return;
       if (cached) { setConfig(cached.data); setSyncedAt(cached.syncedAt); }
-      if (!autoSyncStartedRef.current && shouldAutoSyncConfigCache(cached)) {
+      if (!autoSyncStartedRef.current) {
         autoSyncStartedRef.current = true;
         void loadConfig();
       }
