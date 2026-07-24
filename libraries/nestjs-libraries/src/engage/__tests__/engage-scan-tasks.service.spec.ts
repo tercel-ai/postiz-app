@@ -32,9 +32,10 @@ function build(opts: {
   scanPlatforms?: any[];
 } = {}) {
   let claimCall = 0;
-  // The scan loop now enumerates units across EVERY enabled config (null-project
-  // + each project-scoped one). `orgContexts` drives the multi-config case;
-  // `orgContext` stays as a single-config shorthand.
+  // The scan loop enumerates units across EVERY enabled project-scoped config
+  // (getEnabledConfigsForOrg already excludes the legacy null-project row).
+  // `orgContexts` drives the multi-config case; `orgContext` stays as a
+  // single-config shorthand.
   const allContexts = opts.orgContexts ?? [opts.orgContext].filter(Boolean);
   const engageRepo = {
     getEnabledOrgContext: vi.fn(async () => opts.orgContext ?? null),
@@ -278,10 +279,11 @@ describe('EngageScanTasksService.sync — claim (bootstrap)', () => {
     expect(lease.claim).not.toHaveBeenCalled();
   });
 
-  it('enumerates units across ALL enabled configs (legacy null-project + project-scoped) and dedups a keyword shared across projects', async () => {
+  it('enumerates units across ALL enabled project-scoped configs and dedups a keyword shared across projects', async () => {
     const { svc, lease } = build({
-      // Legacy org-level config + a project-scoped config activated by an
-      // operation plan. 'shared' appears in both → one global unit per platform.
+      // Two project-scoped configs (the repo already excludes the legacy
+      // null-project row). 'shared' appears in both → one global unit per
+      // platform.
       orgContexts: [
         {
           keywords: [{ keyword: 'shared', enabled: true }],
@@ -351,10 +353,10 @@ describe('EngageScanTasksService.sync — claim (bootstrap)', () => {
 describe('EngageScanTasksService.ingestCollectedPosts', () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it('scores + persists collected posts against EVERY enabled config (null-project + project-scoped)', async () => {
+  it('scores + persists collected posts against EVERY enabled project-scoped config', async () => {
     const { svc, ingest } = build({
       orgContexts: [
-        { projectId: null, keywords: [{ keyword: 'alpha', enabled: true }], monitoredChannels: [], trackedAccounts: [] },
+        { projectId: 'p0', keywords: [{ keyword: 'alpha', enabled: true }], monitoredChannels: [], trackedAccounts: [] },
         { projectId: 'p1', keywords: [{ keyword: 'beta', enabled: true }], monitoredChannels: [], trackedAccounts: [] },
       ],
     });

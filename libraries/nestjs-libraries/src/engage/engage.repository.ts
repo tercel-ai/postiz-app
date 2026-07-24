@@ -317,18 +317,20 @@ export class EngageRepository {
    * Org-level aggregate config for clients that have no project context — the
    * browser extension's scan panel, which enumerates keywords/channels/tracked
    * accounts client-side to render the selectable scan units. It must see the
-   * SAME org-wide set the server-side scan loop (claimNext) enumerates, not just
-   * the legacy null-project row, or the extension's units diverge from what
-   * actually gets scanned.
+   * SAME org-wide set the server-side scan loop (claimNext) enumerates, or the
+   * extension's units diverge from what actually gets scanned.
    *
    * The null-project row supplies the scalar/entitlement/xReplyAccounts shape
    * (so the response is shape-identical to getConfig(projectId)); the three
-   * relation lists are then REPLACED with the union across every ENABLED config
-   * (null-project + each project), deduped by the same global unit identity the
-   * scan loop keys on (normalized keyword / platform+channelId / platform+
-   * normalized username). Disabled configs are excluded — consistent with
-   * claimNext, which only scans enabled configs. Duplicates prefer an enabled
-   * row so a keyword enabled under any project surfaces as enabled.
+   * relation lists are then REPLACED with the union across every ENABLED
+   * project-scoped config, deduped by the same global unit identity the scan
+   * loop keys on (normalized keyword / platform+channelId / platform+normalized
+   * username). The legacy null-project row is EXCLUDED from the union — its
+   * keywords/channels/tracked accounts are pre-project data that must no longer
+   * be scanned; only its scalar shape is reused as the base. Disabled configs
+   * are excluded — consistent with claimNext, which only scans enabled configs.
+   * Duplicates prefer an enabled row so a keyword enabled under any project
+   * surfaces as enabled.
    */
   async getOrgAggregateConfig(organizationId: string) {
     const include = {
@@ -342,7 +344,7 @@ export class EngageRepository {
     const [base, configs] = await Promise.all([
       this.getOrCreateConfig(organizationId, null),
       this._config.model.engageConfig.findMany({
-        where: { organizationId, enabled: true },
+        where: { organizationId, enabled: true, projectId: { not: null } },
         include,
       }),
     ]);
@@ -382,7 +384,7 @@ export class EngageRepository {
 
   async getAllEnabledOrgContexts() {
     return this._config.model.engageConfig.findMany({
-      where: { enabled: true },
+      where: { enabled: true, projectId: { not: null } },
       include: {
         keywords: {
           where: { enabled: true },
@@ -423,11 +425,12 @@ export class EngageRepository {
   }
 
   /**
-   * EVERY enabled engage config for an org — the legacy null-project row AND
-   * each project-scoped row. The browser-extension scan loop enumerates units
-   * from all of them so that keywords/channels/tracked accounts activated on a
-   * project's config (e.g. when an operation plan is committed) are actually
-   * scanned, not just the legacy org-level ones.
+   * Every enabled PROJECT-SCOPED engage config for an org. The browser-extension
+   * scan loop enumerates units from all of them so that keywords/channels/tracked
+   * accounts activated on a project's config (e.g. when an operation plan is
+   * committed) are actually scanned. The legacy null-project row is EXCLUDED — it
+   * holds pre-project data that must no longer be scanned; new configs always
+   * carry a projectId.
    *
    * Scan units are GLOBAL (identified by platform/scanType/scanKey), so the
    * caller dedups units that repeat across projects; fan-out at ingest time is
@@ -435,7 +438,7 @@ export class EngageRepository {
    */
   async getEnabledConfigsForOrg(organizationId: string) {
     return this._config.model.engageConfig.findMany({
-      where: { organizationId, enabled: true },
+      where: { organizationId, enabled: true, projectId: { not: null } },
       include: {
         keywords: { where: { enabled: true }, orderBy: { createdAt: 'asc' } },
         monitoredChannels: { where: { enabled: true }, orderBy: { createdAt: 'asc' } },
@@ -499,6 +502,11 @@ export class EngageRepository {
    * `equals … insensitive` pre-filter is sufficient, and the in-code
    * normalizeKeyword filter is a belt-and-braces guard for any legacy rows
    * persisted before write-time normalisation existed.
+   *
+   * The legacy null-project config is EXCLUDED from fan-out — even if it still
+   * subscribes to a global unit, its pre-project keywords/channels/tracked
+   * accounts must no longer receive persisted opportunities. Only project-scoped
+   * configs subscribe.
    */
   async getOrgContextsForUnit(
     platform: string,
@@ -515,6 +523,7 @@ export class EngageRepository {
       return this._config.model.engageConfig.findMany({
         where: {
           enabled: true,
+          projectId: { not: null },
           monitoredChannels: { some: { enabled: true, platform, channelId: scanKey } },
         },
         include,
@@ -525,6 +534,7 @@ export class EngageRepository {
       return this._config.model.engageConfig.findMany({
         where: {
           enabled: true,
+          projectId: { not: null },
           trackedAccounts: {
             some: {
               enabled: true,
@@ -540,6 +550,7 @@ export class EngageRepository {
     const configs = await this._config.model.engageConfig.findMany({
       where: {
         enabled: true,
+        projectId: { not: null },
         keywords: {
           some: { enabled: true, keyword: { equals: scanKey, mode: 'insensitive' } },
         },

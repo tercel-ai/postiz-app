@@ -2925,7 +2925,7 @@ describe('EngageRepository.getOrgScanStatus', () => {
       return { repo, configFindFirst, configFindMany };
     }
 
-    it('unions keywords/channels/accounts across every enabled config, deduped by global unit identity, base scalars preserved', async () => {
+    it('unions keywords/channels/accounts across every enabled project-scoped config, deduped by global unit identity, base scalars preserved', async () => {
       const base = {
         id: 'cfg-null',
         organizationId: 'org1',
@@ -2940,15 +2940,15 @@ describe('EngageRepository.getOrgScanStatus', () => {
         baseNull: base,
         enabledConfigs: [
           {
-            projectId: null,
+            projectId: 'p0',
             keywords: [{ id: 'k1', keyword: 'AI', enabled: true }],
             monitoredChannels: [],
             trackedAccounts: [{ id: 'a1', platform: 'x', username: '@Alice', enabled: true }],
           },
           {
             projectId: 'p1',
-            // 'ai' dups the null-config 'AI' (same normalized key) → one entry;
-            // 'ML' is project-only. Channel + a dup account (@alice) too.
+            // 'ai' dups p0's 'AI' (same normalized key) → one entry; 'ML' is
+            // project-only. Channel + a dup account (@alice) too.
             keywords: [
               { id: 'k2', keyword: 'ai', enabled: true },
               { id: 'k3', keyword: 'ML', enabled: true },
@@ -2961,9 +2961,12 @@ describe('EngageRepository.getOrgScanStatus', () => {
 
       const res = await repo.getOrgAggregateConfig('org1');
 
-      // Only ENABLED configs are queried (consistent with the scan loop).
+      // Only ENABLED, project-scoped configs are queried; the legacy null-project
+      // row is excluded from the union (consistent with the scan loop).
       expect(configFindMany).toHaveBeenCalledWith(
-        expect.objectContaining({ where: { organizationId: 'org1', enabled: true } })
+        expect.objectContaining({
+          where: { organizationId: 'org1', enabled: true, projectId: { not: null } },
+        })
       );
       // Base scalars + xReplyAccounts preserved.
       expect(res.id).toBe('cfg-null');
