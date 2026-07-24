@@ -81,7 +81,7 @@ function parseArgs(): CliArgs {
  * postTitleFromTheme. Returns null when the row is already clean or its settings
  * are unparseable (left untouched — never persist a corrupted settings blob).
  */
-function cleanPost(
+export function cleanPost(
   title: string | null,
   settingsRaw: string | null
 ): { title: string | null; settings: string | null; redditTitles: number } | null {
@@ -195,7 +195,11 @@ async function main(): Promise<void> {
   await prisma.$disconnect();
 }
 
-main().catch((err) => {
-  console.error('Fatal error:', err);
-  process.exit(1);
-});
+// Only auto-run when invoked directly (npx ts-node …), NOT when imported by the
+// test suite — importing must not open a DB connection.
+if (require.main === module) {
+  main().catch((err) => {
+    console.error('Fatal error:', err);
+    process.exit(1);
+  });
+}
