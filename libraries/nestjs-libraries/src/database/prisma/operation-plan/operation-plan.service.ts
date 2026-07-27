@@ -1515,6 +1515,9 @@ export class OperationPlanService implements OnApplicationBootstrap {
     ]);
 
     return {
+      // Keep the polling status at the response top level, matching the create
+      // endpoint, while preserving the existing plan.status field.
+      status: plan.status,
       plan: {
         id: plan.id,
         projectId: plan.projectId,

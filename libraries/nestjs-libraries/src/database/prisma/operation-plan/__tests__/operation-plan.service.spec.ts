@@ -237,6 +237,15 @@ describe('OperationPlanService.getOverview', () => {
     expect(mocks.getPostsForPlan).toHaveBeenCalledWith('plan-1', 'org-1');
   });
 
+  it('exposes a generating plan status at the overview top level for polling compatibility', async () => {
+    mocks.getById.mockResolvedValue(makePlan({ status: 'GENERATING' }));
+
+    const result = await service.getOverview('org-1', 'plan-1');
+
+    expect(result.status).toBe('GENERATING');
+    expect(result.plan.status).toBe('GENERATING');
+  });
+
   it('nests thread follow-ups under their anchor post in publish order', async () => {
     mocks.getById.mockResolvedValue(makePlan());
     // Flat rows as returned by getPostsForPlan: an anchor + a 2-part thread

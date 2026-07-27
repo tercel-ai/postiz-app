@@ -263,6 +263,7 @@ Returns the persisted plan summary, every `Post` generated under the plan, the E
 
 ```json
 {
+  "status": "READY",
   "plan": {
     "id": "operation-plan-uuid",
     "projectId": "aisee-product-id",
@@ -325,7 +326,7 @@ Returns the persisted plan summary, every `Post` generated under the plan, the E
 
 `plan.data` is the plan-level goal summary (see the `data` note under Create). It is `null` for legacy plans created before this field existed.
 
-> **While the plan is still generating.** This endpoint always returns `200` — it does not 404 or block on an in-flight plan. Until `plan.status` reaches `READY`, the plan is a stub: `data` is `{}`, `posts` is `[]`, and `engageStats` is `{}` (content, DRAFT posts, and pacing are only filled in once the plan is `READY`). **`plan.status === "READY"` is the only reliable readiness signal — never infer readiness from whether `posts`/`data` are empty**, or you will treat a `GENERATING` plan as an empty one.
+> **While the plan is still generating.** This endpoint always returns `200` — it does not 404 or block on an in-flight plan. Until the top-level `status` (also retained as `plan.status` for backward compatibility) reaches `READY`, the plan is a stub: `data` is `{}`, `posts` is `[]`, and `engageStats` is `{}` (content, DRAFT posts, and pacing are only filled in once the plan is `READY`). **`status === "READY"` is the only reliable readiness signal — never infer readiness from whether `posts`/`data` are empty**, or you will treat a `GENERATING` plan as an empty one.
 
 `engageStats` is keyed by UTC date; **each day is an array with one entry per platform** (a plan can span x/linkedin/instagram, each with its own Engage policy). Each entry carries that platform's `themeTitle`, the **resolved** `targetRepliesPerDay` for that day (the policy's `dailyTargets` override when one exists, else the default), and a `keywords` array — every keyword item has the persisted `EngageKeyword.id`, display text, actual replies sent on that platform that UTC day, and the configured target. `actualReplies` counts replies whose linked `Post.publishDate` falls on that UTC date **and** whose opportunity is on that platform. A keyword configured under two platforms appears once per platform (not summed).
 
