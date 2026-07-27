@@ -29,12 +29,67 @@
 //     Neither calls the platform API directly from the worker. LinkedIn threads
 //     continue as native comments on the previous segment; LinkedIn image posts
 //     are not supported via the extension yet (text-only).
+//   - Article / forum platforms (extension-published because they have no usable
+//     write API):
+//       hackernews — news.ycombinator.com tab automation (no write API). Story
+//                    submission (needs `title`) + comment-chain follow-ups.
+//       medium     — medium.com tab automation (write API is discontinued).
+//                    Single story, `title` required, text-only.
+//       quora      — quora.com tab automation (no API). Single space/feed post,
+//                    text-only, no title.
+//     Article platforms carry a single segment (no native thread); only x,
+//     reddit, linkedin and hackernews expand a multi-segment thread.
+//     (Dev.to is NOT here: it has a working REST API, so it publishes through
+//     the backend's native DevToProvider like any other API integration — the
+//     extension only scans + reads metrics for it.)
 //
 // Both sides import these types, so the payload shape can never drift.
 
 import { EXTENSION_MESSAGE } from './brand';
 
-export type PublishPlatform = 'x' | 'reddit' | 'linkedin';
+export type PublishPlatform =
+  | 'x'
+  | 'reddit'
+  | 'linkedin'
+  | 'hackernews'
+  | 'medium'
+  | 'quora';
+
+/**
+ * SINGLE SOURCE OF TRUTH for the platforms the browser extension can actually
+ * publish in-browser. Imported by BOTH the extension's publish queue (its
+ * SUPPORTED_PLATFORMS) AND the backend's publishing-divert routing
+ * (isExtensionPublishProvider), so the two can never drift: the backend only
+ * ever diverts a scheduled post away from the server publish path to the
+ * extension for a platform in THIS list. A provider flagged/config'd for the
+ * extension but absent here would strand its posts in QUEUE — so the routing
+ * intersects with this set instead.
+ */
+export const EXTENSION_PUBLISHABLE_PLATFORMS: readonly PublishPlatform[] = [
+  'x',
+  'reddit',
+  'linkedin',
+  'hackernews',
+  'medium',
+  'quora',
+];
+
+/**
+ * Platforms that publish a single post with no native thread continuation:
+ * article / long-form surfaces where a "thread" has no meaning. The queue
+ * rejects a multi-segment item on these at enqueue time.
+ */
+export const SINGLE_SEGMENT_PLATFORMS: readonly PublishPlatform[] = [
+  'medium',
+  'quora',
+];
+
+/** Platforms that require a `title` on the post item (article/story headline). */
+export const TITLE_REQUIRED_PLATFORMS: readonly PublishPlatform[] = [
+  'reddit',
+  'hackernews',
+  'medium',
+];
 
 export interface PublishThreadSegment {
   /** Plain text of this segment. */
@@ -62,7 +117,11 @@ export interface PublishPostItem {
   segments: PublishThreadSegment[];
   /** Reddit only (required): subreddit to submit to, with or without the r/ prefix. */
   subreddit?: string;
-  /** Reddit only (required): submission title. */
+  /**
+   * Post title / headline. Required for reddit (submission), devto + medium
+   * (article title) and hackernews (story title); ignored by x, linkedin and
+   * quora which have no title field.
+   */
   title?: string;
   /**
    * ISO datetime to publish at (the Post's publishDate). Absent or in the

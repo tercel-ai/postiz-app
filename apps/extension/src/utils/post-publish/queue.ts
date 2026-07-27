@@ -21,6 +21,11 @@ import type {
   PublishPostItem,
   PublishTaskState,
 } from '@gitroom/helpers/extension/post-publish';
+import {
+  EXTENSION_PUBLISHABLE_PLATFORMS,
+  SINGLE_SEGMENT_PLATFORMS,
+  TITLE_REQUIRED_PLATFORMS,
+} from '@gitroom/helpers/extension/post-publish';
 import { ENGAGE_EXTENSION_ACTION } from '@gitroom/extension/utils/executor/actions';
 import {
   postRedditComment,
@@ -34,7 +39,20 @@ import {
   postLinkedinCompose,
   postLinkedinComment,
 } from '@gitroom/extension/pages/background/linkedin.poster';
+import {
+  submitHackernewsStory,
+  postHackernewsComment,
+} from '@gitroom/extension/pages/background/hackernews.poster';
+import { postMediumStory } from '@gitroom/extension/pages/background/medium.poster';
+import { postQuoraPost } from '@gitroom/extension/pages/background/quora.poster';
 import { backendCall } from '@gitroom/extension/utils/executor/api';
+
+// Every platform the publish queue can drain — the shared source of truth the
+// backend routing also intersects against (so a diverted post is always one the
+// queue can publish). Dev.to is intentionally absent: it has a working REST API,
+// so it publishes through the backend's native DevToProvider rather than the
+// extension (the extension only scans + reads dev.to metrics).
+const SUPPORTED_PLATFORMS: readonly PublishPlatform[] = EXTENSION_PUBLISHABLE_PLATFORMS;
 
 interface QueueEntry {
   item: PublishPostItem;
@@ -145,6 +163,56 @@ async function defaultPublishSegment(
     return { ok: true, permalink: r.permalink, postId: r.postId };
   }
 
+  if (item.platform === 'hackernews') {
+    // Segment 0 submits the story; every following segment comments on it
+    // (the comment poster returns the story permalink to keep the thread
+    // anchored). Tab automation only — HN has no write API.
+    const r =
+      segmentIndex === 0
+        ? await submitHackernewsStory({ title: item.title || '', text })
+        : prevPermalink
+        ? await postHackernewsComment({ url: prevPermalink, text })
+        : { ok: false as const, error: 'No previous segment permalink to thread onto' };
+    if (!r.ok) return { ok: false, error: r.error };
+    if (!r.permalink && segmentIndex < item.segments.length - 1) {
+      return {
+        ok: false,
+        error:
+          'Hacker News item was posted but its URL could not be confirmed; remaining thread segments were not posted',
+      };
+    }
+    return { ok: true, permalink: r.permalink, postId: r.postId };
+  }
+
+  if (item.platform === 'medium') {
+    // Medium: single story via tab automation (no thread). segmentIndex is
+    // always 0 (single-segment platform). Pending = filled but not confirmed
+    // published → a failure for the unattended queue (mirrors X pending).
+    const r = await postMediumStory({ title: item.title || '', text });
+    if (!r.ok) return { ok: false, error: r.error };
+    if ('pending' in r && r.pending) {
+      return {
+        ok: false,
+        error: r.message || 'Medium story left pending — finish it in the opened tab',
+      };
+    }
+    return { ok: true, permalink: r.permalink, postId: r.postId };
+  }
+
+  if (item.platform === 'quora') {
+    // Quora: single feed post via tab automation (no thread, no title). Pending
+    // = filled but not confirmed posted → a failure for the unattended queue.
+    const r = await postQuoraPost({ text });
+    if (!r.ok) return { ok: false, error: r.error };
+    if ('pending' in r && r.pending) {
+      return {
+        ok: false,
+        error: r.message || 'Quora post left pending — finish it in the opened tab',
+      };
+    }
+    return { ok: true, permalink: r.permalink, postId: r.postId };
+  }
+
   if (segmentIndex === 0) {
     const r = await submitRedditPost({
       subreddit: item.subreddit || '',
@@ -218,16 +286,19 @@ async function defaultBackfill(
  * is recorded (surfaced as a manual "Sync") — never a re-publish. Returns
  * whether it reached 'published' (callers use this rather than re-reading the
  * mutated status, which the type system can't narrow across the await).
+ *
+ * A missing permalink is NOT a failure: some platforms (Quora) confirm the send
+ * but can't recover the URL. The post is live, so we still backfill (URL-less)
+ * to flip it PUBLISHED — otherwise, on the unattended publish-due path, the Post
+ * would stay QUEUE forever, be re-offered every poll, and (if the queue's dedup
+ * entry is ever lost) risk a duplicate re-publish. The only cost of a URL-less
+ * publish is no clickable link and no metrics for that one post.
  */
 async function attemptBackfill(entry: QueueEntry): Promise<boolean> {
-  if (!entry.state.permalink) {
-    entry.state.backfillError = 'no permalink captured — cannot backfill';
-    return false;
-  }
   try {
     await backfillPublished(
       entry.state.taskId,
-      entry.state.permalink,
+      entry.state.permalink || '',
       entry.state.postId
     );
     entry.state.status = 'published';
@@ -254,6 +325,12 @@ const DEFAULT_SEGMENT_GAP_S: Record<PublishPlatform, [number, number]> = {
   x: [30, 120],
   reddit: [30, 120],
   linkedin: [30, 120],
+  // Article platforms are single-segment so the gap is never drawn, but the map
+  // must be total over PublishPlatform. Hacker News threads (comment chain) do
+  // use it — HN rate-limits fast repeat comments, so keep the human-like pause.
+  hackernews: [30, 120],
+  medium: [30, 120],
+  quora: [30, 120],
 };
 const MAX_SEGMENT_GAP_S = 600;
 
@@ -462,27 +539,32 @@ function validate(item: PublishPostItem): string | null {
   if (!item?.taskId || typeof item.taskId !== 'string') return 'missing taskId';
   if (entries.some((e) => isActive(e) && e.state.taskId === item.taskId))
     return 'duplicate taskId (already queued, publishing, or sent)';
-  if (
-    item.platform !== 'reddit' &&
-    item.platform !== 'x' &&
-    item.platform !== 'linkedin'
-  )
+  if (!SUPPORTED_PLATFORMS.includes(item.platform))
     return `unsupported platform: ${item.platform}`;
   const segments = Array.isArray(item.segments) ? item.segments : [];
   if (!segments.length || segments.some((s) => !(s?.text || '').trim() && !s?.images?.length))
     return 'segments must be a non-empty list with text or images';
   if (segments.slice(1).some((s) => s?.images?.length))
     return 'images are only supported on the first segment';
+  // Article platforms (devto/medium/quora) have no native thread — a multi-
+  // segment item would silently drop everything past segment 0, so reject it.
+  if (SINGLE_SEGMENT_PLATFORMS.includes(item.platform) && segments.length > 1)
+    return `${item.platform} posts are single-segment (no thread) — expected exactly one segment`;
+  // Title-bearing platforms need a headline.
+  if (TITLE_REQUIRED_PLATFORMS.includes(item.platform) && !(item.title || '').trim())
+    return `${item.platform} post needs a title`;
   if (item.platform === 'reddit') {
     if (!(item.subreddit || '').trim()) return 'reddit post needs a subreddit';
-    if (!(item.title || '').trim()) return 'reddit post needs a title';
   }
-  if (item.platform === 'linkedin') {
-    // LinkedIn media upload isn't wired through the tab composer yet; reject at
-    // enqueue so an image post never silently publishes text-only.
-    if (segments.some((s) => s?.images?.length))
-      return 'LinkedIn image posts are not supported via the extension yet';
-  }
+  // Image upload is only wired through the Reddit and X pipelines; every other
+  // platform's poster is text-only, so reject images at enqueue rather than
+  // silently publishing text-only.
+  if (
+    item.platform !== 'reddit' &&
+    item.platform !== 'x' &&
+    segments.some((s) => s?.images?.length)
+  )
+    return `${item.platform} image posts are not supported via the extension yet`;
   if (item.publishDate != null && Number.isNaN(Date.parse(item.publishDate)))
     return 'invalid publishDate (must be an ISO datetime)';
   if (item.segmentGapSeconds != null) {

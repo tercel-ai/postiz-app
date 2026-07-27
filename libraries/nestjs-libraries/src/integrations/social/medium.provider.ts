@@ -4,13 +4,21 @@ import {
   PostResponse,
   SocialProvider,
 } from '@gitroom/nestjs-libraries/integrations/social/social.integrations.interface';
-import { SocialAbstract } from '@gitroom/nestjs-libraries/integrations/social.abstract';
-import dayjs from 'dayjs';
+import { BadBody, SocialAbstract } from '@gitroom/nestjs-libraries/integrations/social.abstract';
 import { Integration } from '@prisma/client';
 import { makeId } from '@gitroom/nestjs-libraries/services/make.is';
 import { MediumSettingsDto } from '@gitroom/nestjs-libraries/dtos/posts/providers-settings/medium.settings.dto';
-import { Tool } from '@gitroom/nestjs-libraries/integrations/tool.decorator';
 
+/**
+ * Medium integration. Medium DISCONTINUED its integration-token write API
+ * (api.medium.com no longer issues tokens), so — like hackernews/quora — Medium
+ * is published by the BROWSER EXTENSION (in-browser, with the user's own
+ * medium.com session) — see apps/extension .../medium.poster.ts. This provider
+ * is therefore `extensionPublish` and connects with just the Medium @handle (no
+ * dead api-key), so it is a first-class channel (connect, bind Posts, close the
+ * metrics loop via the extension's demand-driven metrics-due path); server-side
+ * `post()` cannot publish and throws to park a scheduled post.
+ */
 export class MediumProvider extends SocialAbstract implements SocialProvider {
   override maxConcurrentJob = 3; // Medium has lenient publishing limits
   identifier = 'medium';
@@ -18,6 +26,7 @@ export class MediumProvider extends SocialAbstract implements SocialProvider {
   isBetweenSteps = false;
   scopes = [] as string[];
   editor = 'markdown' as const;
+  extensionPublish = true;
   dto = MediumSettingsDto;
   maxLength() {
     return 100000;
@@ -32,7 +41,7 @@ export class MediumProvider extends SocialAbstract implements SocialProvider {
     };
   }
 
-  async refreshToken(refreshToken: string): Promise<AuthTokenDetails> {
+  async refreshToken(_refreshToken: string): Promise<AuthTokenDetails> {
     return {
       refreshToken: '',
       expiresIn: 0,
@@ -47,10 +56,10 @@ export class MediumProvider extends SocialAbstract implements SocialProvider {
   async customFields() {
     return [
       {
-        key: 'apiKey',
-        label: 'API key',
-        validation: `/^.{3,}$/`,
-        type: 'password' as const,
+        key: 'username',
+        label: 'Medium @username',
+        validation: `/^@?[^/\\s]{2,}$/`,
+        type: 'text' as const,
       },
     ];
   }
@@ -59,85 +68,48 @@ export class MediumProvider extends SocialAbstract implements SocialProvider {
     code: string;
     codeVerifier: string;
     refresh?: string;
-  }) {
-    const body = JSON.parse(Buffer.from(params.code, 'base64').toString());
+  }): Promise<AuthTokenDetails | string> {
+    // No secret: publishing is done by the extension with the user's session.
+    // Medium has no simple public handle-validation endpoint (the /feed/@user
+    // RSS is unreliable as a check), so — like Quora — the @handle is accepted
+    // as entered and doubles as the tracked scan key.
+    let username = '';
     try {
-      const {
-        data: { name, id, imageUrl, username },
-      } = await (
-        await fetch('https://api.medium.com/v1/me', {
-          headers: {
-            Authorization: `Bearer ${body.apiKey}`,
-          },
-        })
-      ).json();
-
-      return {
-        refreshToken: '',
-        expiresIn: dayjs().add(100, 'years').unix() - dayjs().unix(),
-        accessToken: body.apiKey,
-        id,
-        name,
-        picture: imageUrl || '',
-        username,
-      };
-    } catch (err) {
+      username = String(
+        JSON.parse(Buffer.from(params.code, 'base64').toString()).username || ''
+      )
+        .trim()
+        .replace(/^@/, '');
+    } catch {
       return 'Invalid credentials';
     }
-  }
+    if (!username) return 'Invalid credentials';
 
-  @Tool({ description: 'List of publications', dataSchema: [] })
-  async publications(accessToken: string, _: any, id: string) {
-    const { data } = await (
-      await fetch(`https://api.medium.com/v1/users/${id}/publications`, {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-        },
-      })
-    ).json();
-
-    return data;
+    return {
+      accessToken: username,
+      refreshToken: '',
+      expiresIn: 100 * 365 * 24 * 60 * 60,
+      id: username,
+      name: username,
+      picture: '',
+      username,
+    };
   }
 
   async post(
-    id: string,
-    accessToken: string,
+    _id: string,
+    _accessToken: string,
     postDetails: PostDetails[],
-    integration: Integration
+    _integration: Integration
   ): Promise<PostResponse[]> {
-    const { settings } = postDetails?.[0] || { settings: {} };
-    const { data } = await (
-      await fetch(
-        settings?.publication
-          ? `https://api.medium.com/v1/publications/${settings?.publication}/posts`
-          : `https://api.medium.com/v1/users/${id}/posts`,
-        {
-          method: 'POST',
-          body: JSON.stringify({
-            title: settings.title,
-            contentFormat: 'markdown',
-            content: postDetails?.[0].message,
-            ...(settings.canonical ? { canonicalUrl: settings.canonical } : {}),
-            ...(settings?.tags?.length
-              ? { tags: settings?.tags?.map((p: any) => p.value) }
-              : {}),
-            publishStatus: settings?.publication ? 'draft' : 'public',
-          }),
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-            'Content-Type': 'application/json',
-          },
-        }
-      )
-    ).json();
-
-    return [
-      {
-        id: postDetails?.[0].id,
-        status: 'completed',
-        postId: data.id,
-        releaseURL: data.url,
-      },
-    ];
+    // Medium's write API is discontinued — the browser extension publishes it.
+    // A scheduled post reaching the server can't be published here, so park it
+    // (bad_body is terminal + user-notified in the post workflow).
+    throw new BadBody(
+      this.identifier,
+      '{}',
+      JSON.stringify(postDetails?.[0] ?? {}),
+      'Medium is published through the aisee browser extension, not the server (Medium discontinued its write API). Open the aisee app with the extension installed and signed in to Medium to publish this post.'
+    );
   }
 }

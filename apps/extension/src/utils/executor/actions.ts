@@ -1,6 +1,8 @@
 export const ENGAGE_EXTENSION_ACTION = {
   runScan: 'engage:scan',
   runMetrics: 'engage:metrics',
+  /** popup/panel/debug → SW: pull due extension-routed posts and publish them. */
+  runPublishDue: 'posts:run-publish-due',
   scanXKeyword: 'engage:scan-x-keyword',
   fetchXPost: 'engage:fetch-x-post',
   scanXAccount: 'engage:scan-x-account',

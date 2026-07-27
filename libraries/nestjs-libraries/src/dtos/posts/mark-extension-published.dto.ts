@@ -8,10 +8,17 @@ import { IsOptional, IsString, MaxLength } from 'class-validator';
  * backfills its releaseURL — the same closed loop as the Engage reply flow.
  */
 export class MarkExtensionPublishedDto {
-  /** Permalink of the published post (the first thread segment). */
+  /**
+   * Permalink of the published post (the first thread segment). OPTIONAL: some
+   * extension-published platforms (notably Quora) confirm the post went live
+   * but cannot recover its URL. Such a post is still marked PUBLISHED (so it
+   * leaves QUEUE and is never re-published) — just without a releaseURL, which
+   * only means no clickable link and no metrics for that post.
+   */
+  @IsOptional()
   @IsString()
   @MaxLength(2048)
-  releaseURL: string;
+  releaseURL?: string;
 
   /** Platform post id (Reddit t3_* fullname / X rest_id), stored as releaseId. */
   @IsOptional()

@@ -34,6 +34,12 @@ const CASE_INSENSITIVE_HANDLE_PLATFORMS = new Set([
   'threads',
   'instagram',
   'tiktok',
+  // dev.to normalises usernames to lowercase; Medium @handles are
+  // case-insensitive too. Hacker News + Quora keep case-SENSITIVE keys (HN
+  // usernames preserve case; Quora profile slugs are "First-Last"), so they are
+  // intentionally omitted and fall through to the verbatim branch.
+  'devto',
+  'medium',
 ]);
 
 /**

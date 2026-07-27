@@ -16,7 +16,16 @@ import {
 import { scanReddit } from './scan.reddit';
 import { scanX } from './scan.x';
 import { scanLinkedin } from './scan.linkedin';
-import { LINKEDIN_EXECUTOR_ENABLED, X_EXECUTOR_ENABLED } from './flags';
+import { scanDevto } from './scan.devto';
+import { scanHackernews } from './scan.hackernews';
+import { scanMedium } from './scan.medium';
+import { scanQuora } from './scan.quora';
+import {
+  LINKEDIN_EXECUTOR_ENABLED,
+  MEDIUM_EXECUTOR_ENABLED,
+  QUORA_EXECUTOR_ENABLED,
+  X_EXECUTOR_ENABLED,
+} from './flags';
 import {
   applyDelay,
   remainingHourlyBudget,
@@ -48,8 +57,16 @@ export interface ScanRunSummary {
 // a simple guard keeps two loops from double-claiming leases.
 let scanInFlight = false;
 
-async function scanOne(task: EngageScanTask): Promise<ScanRunResult> {
-  const gate = () => tryConsumeHourly(task.pacing.hourlyRequestCap, task.platform);
+/**
+ * Route a task to its platform scanner, honouring per-platform build gates.
+ * Exposed so the manual `executeTask` debug path (Options panel) runs the exact
+ * same dispatch as the production loop and can never drift from it. The caller
+ * supplies the `gate` (production = hourly budget; debug = always-true).
+ */
+export async function dispatchScan(
+  task: EngageScanTask,
+  gate: () => Promise<boolean>
+): Promise<ScanRunResult> {
   if (task.platform === 'reddit') return scanReddit(task, gate);
   if (task.platform === 'x') {
     // X is account-risky and OFF by default (see flags.ts). Refuse the task
@@ -72,8 +89,35 @@ async function scanOne(task: EngageScanTask): Promise<ScanRunResult> {
     }
     return scanLinkedin(task, gate);
   }
+  // Dev.to + Hacker News scan are public API reads (no session) — always on,
+  // like Reddit.
+  if (task.platform === 'devto') return scanDevto(task, gate);
+  if (task.platform === 'hackernews') return scanHackernews(task, gate);
+  if (task.platform === 'medium') {
+    // Medium scan hits medium.com with the user's session (RSS) — OFF by default.
+    if (!MEDIUM_EXECUTOR_ENABLED) {
+      console.warn('[aisee][scan] Medium disabled (ENGAGE_MEDIUM_ENABLED!=true) — skipping');
+      return { posts: [], nextCursor: task.cursor, exhausted: true };
+    }
+    return scanMedium(task, gate);
+  }
+  if (task.platform === 'quora') {
+    // Quora scan drives the user's personal quora.com session (tab scrape) — OFF
+    // by default. Refuse WITHOUT touching quora.com; mark exhausted so the
+    // backend stops re-leasing it.
+    if (!QUORA_EXECUTOR_ENABLED) {
+      console.warn('[aisee][scan] Quora disabled (ENGAGE_QUORA_ENABLED!=true) — skipping');
+      return { posts: [], nextCursor: task.cursor, exhausted: true };
+    }
+    return scanQuora(task, gate);
+  }
   console.warn('[aisee][scan] unknown platform', task.platform);
   return { posts: [], nextCursor: task.cursor, exhausted: true };
+}
+
+async function scanOne(task: EngageScanTask): Promise<ScanRunResult> {
+  const gate = () => tryConsumeHourly(task.pacing.hourlyRequestCap, task.platform);
+  return dispatchScan(task, gate);
 }
 
 function toCompleted(

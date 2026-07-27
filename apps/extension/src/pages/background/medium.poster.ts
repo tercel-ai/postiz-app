@@ -1,0 +1,238 @@
+// In-browser Medium publishing. Medium's write API (integration tokens) was
+// discontinued, so — like X and LinkedIn — the extension drives medium.com in a
+// real tab with the user's OWN session and fills Medium's native editor via
+// chrome.scripting.executeScript, then best-effort clicks Medium's own Publish
+// flow. Medium's editor is a client-rendered SPA with unstable internals, so the
+// selectors are defensive and every path falls back to surfacing the tab for the
+// user to finish by hand (never a silent failure, never a direct API call).
+//
+// Medium has no native thread continuation for a story, so only segment 0 is
+// ever published here (enforced by SINGLE_SEGMENT_PLATFORMS at enqueue).
+
+import { ReplyResult } from '@gitroom/extension/utils/reply.types';
+import {
+  closeTab,
+  focusTab,
+  getTabUrl,
+  openTab,
+  runInPage,
+  sleep,
+} from '@gitroom/extension/utils/tab-automation';
+
+const MEDIUM_NEW_STORY = 'https://medium.com/new-story';
+const RENDER_SETTLE_MS = 3_000; // Medium hydrates the editor client-side
+const TAB_CLOSE_GRACE_MS = 1_500;
+
+export interface MediumStoryInput {
+  title: string;
+  /** Plain-text/markdown body of the story (segment[0].text). */
+  text: string;
+  /**
+   * When false, fill the editor but let the user click Publish. Defaults to
+   * true: the extension drives Medium's own Publish flow.
+   */
+  autoSubmit?: boolean;
+}
+
+// ── In-page injected functions (self-contained — no outer-scope refs) ─────────
+
+/** True when medium.com bounced us to a sign-in wall. */
+function mediumDetectAuthWall(): boolean {
+  const href = location.href;
+  if (/\/m\/signin|\/m\/callback|\/signin/i.test(href)) return true;
+  // The editor route without a session renders the marketing/sign-in page.
+  return !!document.querySelector('a[href*="/m/signin"]') &&
+    !document.querySelector('[contenteditable="true"]');
+}
+
+/**
+ * Fill Medium's editor: the title field (first editable heading / placeholder
+ * "Title") and the body (the main article contenteditable). Returns whether the
+ * fields were found and populated.
+ */
+async function mediumFillEditor(
+  title: string,
+  body: string
+): Promise<'filled' | 'no_editor'> {
+  const sleepMs = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  const setEditable = (el: HTMLElement, text: string) => {
+    el.focus();
+    const sel = window.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    sel?.removeAllRanges();
+    sel?.addRange(range);
+    // Prefer a synthetic paste so multi-line bodies keep their paragraph breaks
+    // (Medium's editor splits pasted text into blocks); fall back to execCommand.
+    let ok = false;
+    try {
+      const dt = new DataTransfer();
+      dt.setData('text/plain', text);
+      el.dispatchEvent(
+        new ClipboardEvent('paste', {
+          bubbles: true,
+          cancelable: true,
+          clipboardData: dt,
+        })
+      );
+      ok = (el.textContent || '').replace(/\s/g, '').length > 0;
+    } catch {
+      ok = false;
+    }
+    if (!ok) {
+      const inserted = document.execCommand?.('insertText', false, text) ?? false;
+      if (!inserted) el.textContent = text;
+      el.dispatchEvent(
+        new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text })
+      );
+    }
+  };
+
+  // The Medium editor exposes two contenteditable regions: the title (an
+  // <h3>/heading with placeholder "Title") and the body. Query broadly and
+  // classify by placeholder / tag so a markup shuffle doesn't break us.
+  const editables = Array.from(
+    document.querySelectorAll<HTMLElement>('[contenteditable="true"]')
+  );
+  if (!editables.length) return 'no_editor';
+
+  const titleEl =
+    editables.find((el) =>
+      /title/i.test(el.getAttribute('data-testid') || '') ||
+      /title/i.test(el.getAttribute('aria-label') || '') ||
+      /^h[1-3]$/i.test(el.tagName)
+    ) || editables[0];
+  const bodyEl = editables.find((el) => el !== titleEl) || editables[0];
+
+  setEditable(titleEl, title);
+  await sleepMs(150);
+  if (bodyEl !== titleEl) setEditable(bodyEl, body);
+  return 'filled';
+}
+
+/**
+ * Click Medium's Publish control, then the final "Publish now" in the pre-
+ * publish dialog. Returns 'published' once the second button was clicked,
+ * 'dialog' if only the first step succeeded, or 'no_button' when neither was
+ * found. Defensive: matches by data-testid AND visible button text.
+ */
+function mediumClickPublish(): Promise<'published' | 'dialog' | 'no_button'> {
+  const sleepMs = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const byText = (re: RegExp): HTMLElement | null =>
+    Array.from(document.querySelectorAll<HTMLElement>('button, a[role="button"]'))
+      .find((b) => re.test((b.textContent || '').trim())) || null;
+
+  return (async () => {
+    const publishBtn =
+      document.querySelector<HTMLElement>('[data-testid="publishButton"]') ||
+      document.querySelector<HTMLElement>('[data-action="show-prepublish"]') ||
+      byText(/^publish$/i);
+    if (!publishBtn) return 'no_button';
+    publishBtn.click();
+
+    // Wait for the pre-publish dialog, then click its confirm button.
+    for (let i = 0; i < 40; i++) {
+      await sleepMs(200);
+      const confirm =
+        document.querySelector<HTMLElement>(
+          '[data-testid="publishConfirmButton"]'
+        ) ||
+        document.querySelector<HTMLElement>('[data-action="publish"]') ||
+        byText(/publish now/i);
+      if (confirm) {
+        confirm.click();
+        return 'published';
+      }
+    }
+    return 'dialog';
+  })();
+}
+
+// ── Orchestration ─────────────────────────────────────────────────────────────
+
+/** Whether a URL looks like a published Medium story (not the editor route). */
+function isPublishedStoryUrl(url: string): boolean {
+  return (
+    /medium\.com\//i.test(url) &&
+    !/\/new-story|\/(m\/)?signin|\/edit(\b|\/|$)/i.test(url) &&
+    /-[0-9a-f]{6,}$/i.test(url.split(/[?#]/)[0])
+  );
+}
+
+/** Publish a single Medium story (segment 0). */
+export async function postMediumStory(
+  input: MediumStoryInput
+): Promise<ReplyResult> {
+  const title = (input.title || '').trim();
+  const body = (input.text || '').trim();
+  if (!title) return { ok: false, error: 'Medium story needs a title' };
+  if (!body) return { ok: false, error: 'Medium story body is empty' };
+  const autoSubmit = input.autoSubmit !== false;
+
+  const handle = await openTab(MEDIUM_NEW_STORY, {
+    active: !autoSubmit,
+    settleMs: RENDER_SETTLE_MS,
+  });
+  if (!handle) return { ok: false, error: 'Failed to open Medium tab' };
+  const { tabId } = handle;
+
+  try {
+    if (await runInPage(tabId, mediumDetectAuthWall)) {
+      await focusTab(tabId);
+      return { ok: false, error: 'Not signed in to Medium — log in, then retry.' };
+    }
+
+    const fill = await runInPage(tabId, mediumFillEditor, [title, body]);
+    if (fill !== 'filled') {
+      await focusTab(tabId);
+      return {
+        ok: false,
+        error:
+          'Could not find the Medium editor fields (Medium markup may have changed). Publish manually.',
+      };
+    }
+
+    if (!autoSubmit) {
+      await focusTab(tabId);
+      return {
+        ok: true,
+        pending: true,
+        message: 'Draft filled into the Medium editor. Review it, then click Publish.',
+      };
+    }
+
+    const clicked = await runInPage(tabId, mediumClickPublish);
+    if (clicked === 'published') {
+      // Medium navigates to the published story URL on success — read it back.
+      let permalink: string | undefined;
+      for (let i = 0; i < 25; i++) {
+        await sleep(300);
+        const url = (await getTabUrl(tabId)) || '';
+        if (isPublishedStoryUrl(url)) {
+          permalink = url.split(/[?#]/)[0];
+          break;
+        }
+      }
+      if (permalink) {
+        await sleep(TAB_CLOSE_GRACE_MS);
+        await closeTab(tabId);
+        return { ok: true, message: 'Published on Medium.', permalink };
+      }
+    }
+
+    // Filled + clicked but we couldn't confirm publication — surface the tab so
+    // the user can finish/verify rather than reporting a false success.
+    await focusTab(tabId);
+    return {
+      ok: true,
+      pending: true,
+      message:
+        'Medium story filled and Publish clicked, but publication was not confirmed — verify in the opened tab.',
+    };
+  } catch (e: any) {
+    console.error('[aisee][medium] publish failed', e);
+    await focusTab(tabId);
+    return { ok: false, error: `Medium injection failed: ${e?.message || e}` };
+  }
+}

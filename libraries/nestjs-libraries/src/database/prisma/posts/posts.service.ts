@@ -37,6 +37,7 @@ import { AnalyticsData } from '@gitroom/nestjs-libraries/integrations/social/soc
 import { computeTrafficScore } from '@gitroom/nestjs-libraries/integrations/social/traffic.calculator';
 import { extractMetrics } from '@gitroom/nestjs-libraries/integrations/social/analytics.utils';
 import { timer } from '@gitroom/helpers/utils/timer';
+import { stripHtmlValidation } from '@gitroom/helpers/utils/strip.html.validation';
 import { ioRedis } from '@gitroom/nestjs-libraries/redis/redis.service';
 import { RefreshToken } from '@gitroom/nestjs-libraries/integrations/social.abstract';
 import { RefreshIntegrationService } from '@gitroom/nestjs-libraries/integrations/refresh.integration.service';
@@ -151,14 +152,16 @@ export class PostsService {
   async markPublishedFromExtension(
     orgId: string,
     id: string,
-    releaseURL: string,
+    releaseURL?: string,
     releaseId?: string
   ): Promise<{ ok: boolean; alreadyPublished?: boolean; reason?: string }> {
     const post = await this._postRepository.getPostById(id, orgId);
     if (!post) return { ok: false, reason: 'not-found' };
     if (post.state === 'PUBLISHED') return { ok: true, alreadyPublished: true };
     // updatePost carries the recurring-original guard (returns null there).
-    const updated = await this.updatePost(id, releaseId || '', releaseURL);
+    // releaseURL may be empty for a URL-less publish (e.g. Quora) — the post
+    // still flips PUBLISHED so it leaves QUEUE and is never re-published.
+    const updated = await this.updatePost(id, releaseId || '', releaseURL || '');
     if (!updated) return { ok: false, reason: 'blocked-recurring-original' };
     return { ok: true };
   }
@@ -891,6 +894,31 @@ export class PostsService {
   }
 
   async startWorkflow(taskQueue: string, postId: string, orgId: string, postNow = false) {
+    // Publishing divert: extension-published providers (hackernews/quora, or any
+    // platform an operator routed to the extension via EXTENSION_PUBLISH_PLATFORMS)
+    // are NOT published by Temporal — the backend has no usable write API for
+    // them. Leave the Post in QUEUE; the browser extension's publish-due loop
+    // claims it, publishes in-browser with the user's own session, and backfills
+    // via /posts/:id/extension-published. No Temporal workflow is started, so no
+    // recovery path re-triggers it. (postNow callers poll for a non-QUEUE state
+    // and time out gracefully — the post is queued for the extension instead.)
+    try {
+      const post = await this._postRepository.getPostById(postId);
+      const providerId = post?.integration?.providerIdentifier;
+      if (providerId && this._integrationManager.isExtensionPublish(providerId)) {
+        this.logger.log(
+          `startWorkflow: ${providerId} is extension-published — skipping Temporal for postId=${postId}; it stays QUEUE for the browser extension`
+        );
+        return;
+      }
+    } catch (err) {
+      // A lookup hiccup must not block normal publishing — fall through to the
+      // regular Temporal path (the safe default for API-capable providers).
+      this.logger.warn(
+        `startWorkflow: extension-publish check failed for postId=${postId}, proceeding with Temporal: ${(err as Error)?.message || err}`
+      );
+    }
+
     let terminated = false;
     try {
       const workflows = this._temporalService.client
@@ -1472,6 +1500,42 @@ export class PostsService {
       windowStart,
       intervalCutoff
     );
+  }
+
+  /**
+   * Extension publish-due: the QUEUE posts on extension-routed integrations that
+   * are due to publish, shaped for the browser extension's publish queue
+   * (taskId = post.id, so its extension-published backfill flips the same row).
+   * The extension publishes each in-browser with the user's own session; the
+   * backend never calls a provider API here (mirrors metrics-due / scan-tasks:
+   * backend = scheduler, extension = executor).
+   */
+  async getDuePublishPosts(orgId: string, limit = 10) {
+    const providerIds = this._integrationManager.extensionPublishProviderIds();
+    if (!providerIds.length) return { due: [] as any[] };
+    const rows = await this._postRepository.getDueExtensionPublishPosts(
+      orgId,
+      providerIds,
+      dayjs.utc().toDate(),
+      Math.max(1, Math.min(limit, 50))
+    );
+    const due = rows.map((p) => {
+      let settings: Record<string, any> = {};
+      try {
+        settings = JSON.parse(p.settings || '{}') || {};
+      } catch {
+        /* malformed settings → publish without them */
+      }
+      return {
+        id: p.id,
+        platform: p.integration?.providerIdentifier,
+        title: p.title || settings.title || undefined,
+        subreddit: settings.subreddit || undefined,
+        segments: [{ text: stripHtmlValidation('normal', p.content || '', true) }],
+        publishDate: p.publishDate?.toISOString?.() ?? null,
+      };
+    });
+    return { due };
   }
 
   /** Stamp the given org-owned posts as fetched-now (backfill dedup gate). */

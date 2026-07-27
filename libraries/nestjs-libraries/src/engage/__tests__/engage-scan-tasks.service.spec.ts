@@ -258,6 +258,35 @@ describe('EngageScanTasksService.sync — claim (bootstrap)', () => {
     ]);
   });
 
+  it('fans a keyword out to article/forum platforms and enumerates their tracked accounts', async () => {
+    const { svc, lease } = build({
+      scanPlatforms: ['devto', 'hackernews'],
+      orgContext: {
+        keywords: [{ keyword: 'AI', enabled: true }],
+        monitoredChannels: [],
+        // dev.to normalises the handle to lowercase (case-insensitive); the
+        // hackernews account has no tracked entry here.
+        trackedAccounts: [{ platform: 'devto', username: 'Ben' }],
+      },
+      claimResults: [
+        snap({ platform: 'devto', scanType: 'keyword', scanKey: 'ai', leaseToken: 't1' }),
+        snap({ platform: 'hackernews', scanType: 'keyword', scanKey: 'ai', leaseToken: 't2' }),
+        snap({ platform: 'devto', scanType: 'tracked', scanKey: 'ben', leaseToken: 't3' }),
+      ],
+    });
+    await svc.sync('org1', { want: 5 });
+    const claimed = lease.claim.mock.calls.map(([a]: any[]) => ({
+      platform: a.platform,
+      scanType: a.scanType,
+      scanKey: a.scanKey,
+    }));
+    expect(claimed).toEqual([
+      { platform: 'devto', scanType: 'keyword', scanKey: 'ai' },
+      { platform: 'hackernews', scanType: 'keyword', scanKey: 'ai' },
+      { platform: 'devto', scanType: 'tracked', scanKey: 'ben' },
+    ]);
+  });
+
   it('does not claim selected units outside the org config', async () => {
     const { svc, lease } = build({
       orgContext: {

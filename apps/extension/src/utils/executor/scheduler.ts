@@ -9,6 +9,7 @@
 
 import { getValidAccessToken } from '@gitroom/extension/utils/auth.service';
 import { runScanLoop } from './scan.runner';
+import { runPublishLoop } from './publish.runner';
 
 export const ENGAGE_SCAN_ALARM = 'aisee-engage-scan';
 // Chrome clamps periods to ≥1 min; 15 keeps the cadence organic and cheap.
@@ -45,5 +46,14 @@ export async function handleEngageAlarm(name: string): Promise<boolean> {
   console.log('[aisee][scan] alarm fired — starting scheduled scan', new Date().toISOString());
   const summary = await runScanLoop();
   console.log('[aisee][scan] scheduled scan done', summary);
+  // Same cadence, same session guard: drain any due extension-routed posts
+  // (hackernews/quora/…) the backend has queued for in-browser publishing. Kept
+  // independent of the scan result so a scan error never blocks publishing.
+  try {
+    const publish = await runPublishLoop();
+    console.log('[aisee][publish] scheduled publish done', publish);
+  } catch (e) {
+    console.warn('[aisee][publish] scheduled publish failed', e);
+  }
   return true;
 }

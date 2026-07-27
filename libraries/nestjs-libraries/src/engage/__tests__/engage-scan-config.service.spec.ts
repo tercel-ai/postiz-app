@@ -8,6 +8,7 @@ import {
   ENGAGE_TOUCH_REDDIT_SWITCH_KEY,
   ENGAGE_OPPORTUNITY_TTL_DAYS_KEY,
   DEFAULT_SCAN_PACING,
+  DEFAULT_SCAN_FRESHNESS_HOURS,
   mergePacing,
   toScanPlatforms,
 } from '../engage-scan-config.service';
@@ -53,7 +54,7 @@ describe('EngageScanConfigService.onModuleInit', () => {
     await svc.onModuleInit();
     expect(settings.set).toHaveBeenCalledWith(
       ENGAGE_SCAN_FRESHNESS_KEY,
-      { x: 24, reddit: 24, linkedin: 24 },
+      DEFAULT_SCAN_FRESHNESS_HOURS,
       expect.objectContaining({ type: 'object' })
     );
   });

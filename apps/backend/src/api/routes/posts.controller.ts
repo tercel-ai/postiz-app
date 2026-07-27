@@ -381,6 +381,22 @@ export class PostsController {
     );
   }
 
+  /**
+   * Extension publish-due: the browser extension polls this for QUEUE posts on
+   * extension-routed integrations (hackernews/quora, or any platform routed via
+   * EXTENSION_PUBLISH_PLATFORMS) that are due to publish. It publishes each
+   * in-browser with the user's own session and reports back via
+   * PATCH /:id/extension-published. Org-scoped; the backend makes no provider
+   * API call (backend = scheduler, extension = executor — same as metrics/due).
+   */
+  @Post('/publish-due')
+  async getDuePublish(
+    @GetOrgFromRequest() org: Organization,
+    @Body() body: { limit?: number }
+  ) {
+    return this._postsService.getDuePublishPosts(org.id, body?.limit);
+  }
+
   @Post('/sync-metrics')
   async syncPostMetrics(
     @GetOrgFromRequest() org: Organization,

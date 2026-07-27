@@ -160,6 +160,17 @@ export interface SocialProvider
   refreshWait?: boolean;
   convertToJPEG?: boolean;
   refreshCron?: boolean;
+  /**
+   * True for platforms that have no usable server-side write API and are
+   * therefore published by the BROWSER EXTENSION (in-browser, with the user's
+   * own session) rather than the backend. For these the server `post()` cannot
+   * publish, so it throws a BadBody to park a scheduled post with a clear
+   * message; connection + metrics still flow through the normal Integration
+   * model. Unattended scheduled publishing is handled by the extension
+   * publish-due pull path. Examples: hackernews, quora, medium (Medium
+   * discontinued its write API).
+   */
+  extensionPublish?: boolean;
   dto?: any;
   maxLength: (additionalSettings?: any) => number;
   isWeb3?: boolean;

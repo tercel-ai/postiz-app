@@ -18,11 +18,19 @@ export interface ScanFreshnessHours {
   x: number;
   reddit: number;
   linkedin: number;
+  devto: number;
+  hackernews: number;
+  medium: number;
+  quora: number;
 }
 export const DEFAULT_SCAN_FRESHNESS_HOURS: ScanFreshnessHours = {
   x: 24,
   reddit: 24,
   linkedin: 24,
+  devto: 24,
+  hackernews: 24,
+  medium: 24,
+  quora: 24,
 };
 
 // Per-call page size for X keyword scans (X `max_results`). Resolution order:
@@ -52,14 +60,29 @@ export const ENGAGE_TOUCH_SWITCH_KEY = 'engage_touch_switch';
 export const ENGAGE_TOUCH_X_SWITCH_KEY = 'engage_touch_x_switch';
 export const ENGAGE_TOUCH_REDDIT_SWITCH_KEY = 'engage_touch_reddit_switch';
 
-export type ScanPlatform = 'x' | 'reddit' | 'linkedin';
+export type ScanPlatform =
+  | 'x'
+  | 'reddit'
+  | 'linkedin'
+  | 'devto'
+  | 'hackernews'
+  | 'medium'
+  | 'quora';
 export type ScanPhase = 'initial' | 'incremental';
 export type ScanPath = 'workflow' | 'extension';
 
 // Platforms the extension can actually scan. The operation-plan allowlist may
 // list any of the ~30 providers (it drives the plan platform picker), so the
 // scan resolution intersects it with these.
-const SCANNABLE_PLATFORMS: readonly ScanPlatform[] = ['x', 'reddit', 'linkedin'];
+const SCANNABLE_PLATFORMS: readonly ScanPlatform[] = [
+  'x',
+  'reddit',
+  'linkedin',
+  'devto',
+  'hackernews',
+  'medium',
+  'quora',
+];
 
 // Canonical key literal for the admin operation-plan platform allowlist. Inlined
 // (not imported from operation-plan.service) to avoid an engage ↔ operation-plan
@@ -155,6 +178,25 @@ export const DEFAULT_SCAN_PACING: EngageScanPacing = {
       initial: { maxPages: 3, pageSize: 25, pageDelayMs: 1500, jitterMs: 600 },
       incremental: { maxPages: 1, pageSize: 25, pageDelayMs: 1500, jitterMs: 600 },
     },
+    // devto/hackernews/medium/quora have no backend (workflow) scan adapter — the
+    // extension is their only executor. These entries exist solely to satisfy the
+    // per-platform Record type; the workflow never reads them.
+    devto: {
+      initial: { maxPages: 3, pageSize: 30, pageDelayMs: 500, jitterMs: 300 },
+      incremental: { maxPages: 1, pageSize: 30, pageDelayMs: 500, jitterMs: 300 },
+    },
+    hackernews: {
+      initial: { maxPages: 3, pageSize: 20, pageDelayMs: 500, jitterMs: 300 },
+      incremental: { maxPages: 1, pageSize: 20, pageDelayMs: 500, jitterMs: 300 },
+    },
+    medium: {
+      initial: { maxPages: 1, pageSize: 20, pageDelayMs: 1500, jitterMs: 600 },
+      incremental: { maxPages: 1, pageSize: 20, pageDelayMs: 1500, jitterMs: 600 },
+    },
+    quora: {
+      initial: { maxPages: 1, pageSize: 20, pageDelayMs: 1500, jitterMs: 600 },
+      incremental: { maxPages: 1, pageSize: 20, pageDelayMs: 1500, jitterMs: 600 },
+    },
   },
   extension: {
     x: {
@@ -168,6 +210,27 @@ export const DEFAULT_SCAN_PACING: EngageScanPacing = {
     // LinkedIn scan drives the user's personal session (DOM scrape + scroll) and
     // is at least as automation-risky as X, so it is slow + single-page like X.
     linkedin: {
+      initial: { maxPages: 1, pageSize: 20, pageDelayMs: 8000, jitterMs: 60000 },
+      incremental: { maxPages: 1, pageSize: 20, pageDelayMs: 8000, jitterMs: 60000 },
+    },
+    // Dev.to + Hacker News scan hit PUBLIC APIs (no personal session, no
+    // automation risk), so they can page a little and pace fast like a normal
+    // API client — closer to the workflow tier than the risky browser tiers.
+    devto: {
+      initial: { maxPages: 3, pageSize: 30, pageDelayMs: 800, jitterMs: 1200 },
+      incremental: { maxPages: 1, pageSize: 30, pageDelayMs: 800, jitterMs: 1200 },
+    },
+    hackernews: {
+      initial: { maxPages: 3, pageSize: 20, pageDelayMs: 800, jitterMs: 1200 },
+      incremental: { maxPages: 1, pageSize: 20, pageDelayMs: 800, jitterMs: 1200 },
+    },
+    // Medium (RSS via the user's session) + Quora (personal-session DOM scrape)
+    // are automation-risky like X/LinkedIn, so they are slow + single-page.
+    medium: {
+      initial: { maxPages: 1, pageSize: 20, pageDelayMs: 8000, jitterMs: 60000 },
+      incremental: { maxPages: 1, pageSize: 20, pageDelayMs: 8000, jitterMs: 60000 },
+    },
+    quora: {
       initial: { maxPages: 1, pageSize: 20, pageDelayMs: 8000, jitterMs: 60000 },
       incremental: { maxPages: 1, pageSize: 20, pageDelayMs: 8000, jitterMs: 60000 },
     },
@@ -268,12 +331,10 @@ export class EngageScanConfigService implements OnModuleInit {
     const stored = await this._settings.get<Partial<ScanFreshnessHours>>(
       ENGAGE_SCAN_FRESHNESS_KEY
     );
-    const envName =
-      platform === 'x'
-        ? 'ENGAGE_X_SCAN_WINDOW_HOURS'
-        : platform === 'linkedin'
-          ? 'ENGAGE_LINKEDIN_SCAN_WINDOW_HOURS'
-          : 'ENGAGE_REDDIT_SCAN_WINDOW_HOURS';
+    // Per-platform window override env var. New platforms get their own name so
+    // they never silently inherit Reddit's override; an unset var just falls
+    // through to DEFAULT_SCAN_FRESHNESS_HOURS[platform] below.
+    const envName = `ENGAGE_${platform.toUpperCase()}_SCAN_WINDOW_HOURS`;
     const envH = Number(process.env[envName]);
     const fallback =
       Number.isFinite(envH) && envH > 0 ? envH : DEFAULT_SCAN_FRESHNESS_HOURS[platform];
@@ -401,16 +462,26 @@ export function mergePacing(
 
   const ow = (override.workflow ?? {}) as any;
   const oe = (override.extension ?? {}) as any;
+  // Merge EVERY platform key present in the base (derived from ScanPlatform via
+  // DEFAULT_SCAN_PACING) so adding a platform is a one-line change to the
+  // defaults, never a per-key edit here. Platform keys come from base.workflow (a
+  // pure Record<ScanPlatform, …>); base.extension also carries interUnit/session,
+  // which are merged explicitly below and must be excluded from the per-platform loop.
+  const platformKeys = Object.keys(base.workflow) as ScanPlatform[];
+  const mergePlatformRecord = (
+    baseRec: Record<ScanPlatform, PerPlatformPacing>,
+    overrideRec: Record<string, Partial<PerPlatformPacing>>
+  ): Record<ScanPlatform, PerPlatformPacing> => {
+    const out = {} as Record<ScanPlatform, PerPlatformPacing>;
+    for (const key of platformKeys) {
+      out[key] = mergePlatform(baseRec[key], overrideRec?.[key]);
+    }
+    return out;
+  };
   return {
-    workflow: {
-      x: mergePlatform(base.workflow.x, ow.x),
-      reddit: mergePlatform(base.workflow.reddit, ow.reddit),
-      linkedin: mergePlatform(base.workflow.linkedin, ow.linkedin),
-    },
+    workflow: mergePlatformRecord(base.workflow, ow),
     extension: {
-      x: mergePlatform(base.extension.x, oe.x),
-      reddit: mergePlatform(base.extension.reddit, oe.reddit),
-      linkedin: mergePlatform(base.extension.linkedin, oe.linkedin),
+      ...mergePlatformRecord(base.extension, oe),
       interUnit: {
         delayMs: num(oe.interUnit?.delayMs, base.extension.interUnit.delayMs, true),
         jitterMs: num(oe.interUnit?.jitterMs, base.extension.interUnit.jitterMs, true),

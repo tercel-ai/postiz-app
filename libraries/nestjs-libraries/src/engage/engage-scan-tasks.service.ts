@@ -84,14 +84,37 @@ export function buildRedditChannelKeywordQuery(
 // (`settings.operation_plan.allowed_platforms || ENGAGE_SUPPORTED_PLATFORMS`).
 // Keyword units fan out to each platform (a keyword has no platform of its own);
 // channel/tracked carry their own platform.
+// The DEFAULT stays 'x,reddit' — new platforms are OPT-IN (an operator adds them
+// to ENGAGE_SUPPORTED_PLATFORMS or the operation-plan allowlist), so existing
+// deployments keep enumerating only x/reddit until explicitly widened.
+const SCANNABLE_SCAN_TASK_PLATFORMS: readonly ScanTaskPlatform[] = [
+  'x',
+  'reddit',
+  'linkedin',
+  'devto',
+  'hackernews',
+  'medium',
+  'quora',
+];
+// Platforms whose scanners resolve a per-author feed (scanType='tracked'). X /
+// Reddit / LinkedIn plus the article/forum platforms: dev.to (?username=),
+// Hacker News (author_<user>), Medium (/feed/@user), Quora (/profile/<user>).
+const TRACKED_SCOPE_PLATFORMS = new Set<string>([
+  'x',
+  'reddit',
+  'linkedin',
+  'devto',
+  'hackernews',
+  'medium',
+  'quora',
+]);
 const ENV_SCAN_PLATFORMS: ScanTaskPlatform[] = (
   process.env.ENGAGE_SUPPORTED_PLATFORMS ?? 'x,reddit'
 )
   .split(',')
   .map((p) => p.trim().toLowerCase())
-  .filter(
-    (p): p is ScanTaskPlatform =>
-      p === 'x' || p === 'reddit' || p === 'linkedin'
+  .filter((p): p is ScanTaskPlatform =>
+    (SCANNABLE_SCAN_TASK_PLATFORMS as readonly string[]).includes(p)
   );
 
 // Default batch size handed back per call — small so a browser never over-leases
@@ -414,17 +437,13 @@ export class EngageScanTasksService {
       }
     }
     for (const a of ctx.trackedAccounts) {
-      // X + LinkedIn support a tracked (per-author) scope; Reddit tracks a user
-      // too. LinkedIn tracked = the account's recent-activity feed (the extension
-      // resolves it to /in/<handle>/recent-activity). Reddit has no channel here.
-      if (
-        (a.platform === 'x' ||
-          a.platform === 'reddit' ||
-          a.platform === 'linkedin') &&
-        supported.has(a.platform)
-      ) {
+      // Platforms with a tracked (per-author) scope. X/Reddit/LinkedIn plus the
+      // article/forum platforms whose extension scanners resolve a per-author
+      // feed: dev.to (/api/articles?username=), Hacker News (author_<user>),
+      // Medium (/feed/@user), Quora (/profile/<user>).
+      if (TRACKED_SCOPE_PLATFORMS.has(a.platform) && supported.has(a.platform as ScanTaskPlatform)) {
         units.push({
-          platform: a.platform,
+          platform: a.platform as ScanTaskPlatform,
           scanType: 'tracked',
           // Normalized so this shares ONE cursor with the workflow writer + the
           // status reader (they all key tracked accounts via normalizeUsername).

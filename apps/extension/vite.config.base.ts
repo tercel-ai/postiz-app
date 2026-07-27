@@ -43,6 +43,24 @@ const replyHostPermissions = [
   'https://reddit-uploaded-media.s3-accelerate.amazonaws.com/*',
 ];
 
+// Article / forum platforms the background posts to (and reads metrics from)
+// with the user's own session. No content script runs on these — the posters
+// and metrics scrapers drive a background tab (or hit a public API) directly, so
+// they only need host_permissions:
+//   - dev.to           Forem public REST API (write + read metrics)
+//   - news.ycombinator tab automation (submit/comment) + Firebase metrics API
+//   - medium.com       tab automation (publish) + tab metrics scrape
+//   - quora.com        tab automation (post) + tab metrics scrape
+const articleForumHostPermissions = [
+  'https://dev.to/*',
+  'https://news.ycombinator.com/*',
+  'https://hacker-news.firebaseio.com/*',
+  'https://medium.com/*',
+  'https://*.medium.com/*',
+  'https://www.quora.com/*',
+  'https://*.quora.com/*',
+];
+
 // Backend API origins the background fetches to backfill the reply URL
 // (token-authenticated). Background only — no content script.
 const backendApiHosts = isProdRelease
@@ -90,6 +108,7 @@ export const baseManifest = {
   host_permissions: uniq([
     ...providerMatches,
     ...replyHostPermissions,
+    ...articleForumHostPermissions,
     ...backendApiHosts,
     ...authHosts,
     ...postizAppHosts,
@@ -137,7 +156,7 @@ export const baseBuildOptions: BuildOptions = {
 };
 
 export default defineConfig({
-  envPrefix: ['NEXT_PUBLIC_', 'FRONTEND_URL', 'AUTH_URL', 'EXTENSION_ENV', 'LOGIN_URL', 'ENGAGE_X_ENABLED', 'ENGAGE_LINKEDIN_ENABLED'],
+  envPrefix: ['NEXT_PUBLIC_', 'FRONTEND_URL', 'AUTH_URL', 'EXTENSION_ENV', 'LOGIN_URL', 'ENGAGE_X_ENABLED', 'ENGAGE_LINKEDIN_ENABLED', 'ENGAGE_MEDIUM_ENABLED', 'ENGAGE_QUORA_ENABLED'],
   esbuild: stripDebug ? { pure: ['console.debug'] } : {},
   plugins: [
     tailwindcss(),

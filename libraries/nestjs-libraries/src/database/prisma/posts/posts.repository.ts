@@ -2083,6 +2083,51 @@ export class PostsRepository {
   }
 
   /**
+   * Extension publish-due: QUEUE posts due to publish (publishDate <= now) on an
+   * extension-routed integration, that the browser extension should publish
+   * in-browser. Single-segment only for now — a post that is the ROOT of a
+   * thread with children is skipped (native thread reconstruction for
+   * extension-published platforms is a follow-up), so children are never
+   * stranded mid-chain. Ordered oldest-first so a backlog drains in schedule
+   * order.
+   */
+  getDueExtensionPublishPosts(
+    organizationId: string,
+    providerIdentifiers: string[],
+    now: Date,
+    limit: number
+  ) {
+    if (!providerIdentifiers.length) return Promise.resolve([]);
+    return this._post.model.post.findMany({
+      where: {
+        organizationId,
+        deletedAt: null,
+        state: State.QUEUE,
+        publishDate: { lte: now },
+        parentPostId: null, // roots only
+        childrenPost: { none: {} }, // single-segment only (no thread children)
+        integration: {
+          providerIdentifier: { in: providerIdentifiers },
+          disabled: false,
+          deletedAt: null,
+        },
+      },
+      orderBy: { publishDate: 'asc' },
+      take: limit,
+      select: {
+        id: true,
+        content: true,
+        settings: true,
+        title: true,
+        publishDate: true,
+        integration: {
+          select: { id: true, name: true, providerIdentifier: true },
+        },
+      },
+    });
+  }
+
+  /**
    * Resolve the platform (providerIdentifier) for each org-owned post id. Used
    * by the metrics backfill to derive the platform server-side — never trusting
    * a platform the extension claims — so traffic weights and impression labels

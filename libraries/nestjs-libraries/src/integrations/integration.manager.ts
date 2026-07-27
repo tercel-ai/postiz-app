@@ -32,7 +32,10 @@ import { ListmonkProvider } from '@gitroom/nestjs-libraries/integrations/social/
 import { GmbProvider } from '@gitroom/nestjs-libraries/integrations/social/gmb.provider';
 import { KickProvider } from '@gitroom/nestjs-libraries/integrations/social/kick.provider';
 import { TwitchProvider } from '@gitroom/nestjs-libraries/integrations/social/twitch.provider';
+import { HackernewsProvider } from '@gitroom/nestjs-libraries/integrations/social/hackernews.provider';
+import { QuoraProvider } from '@gitroom/nestjs-libraries/integrations/social/quora.provider';
 import { SocialAbstract } from '@gitroom/nestjs-libraries/integrations/social.abstract';
+import { EXTENSION_PUBLISHABLE_PLATFORMS } from '@gitroom/helpers/extension/post-publish';
 
 export const socialIntegrationList: Array<SocialAbstract & SocialProvider> = [
   new XProvider(),
@@ -62,13 +65,73 @@ export const socialIntegrationList: Array<SocialAbstract & SocialProvider> = [
   new MediumProvider(),
   new DevToProvider(),
   new HashnodeProvider(),
+  // Extension-published (no server write API) — see each provider's extensionPublish flag.
+  new HackernewsProvider(),
+  new QuoraProvider(),
   new WordpressProvider(),
   new ListmonkProvider(),
   new MastodonCustomProvider(),
 ];
 
+// Publishing routing (see isExtensionPublish): a platform publishes via the
+// BROWSER EXTENSION rather than the backend either because it has no usable
+// server write API at all (intrinsic — the provider's `extensionPublish` flag,
+// e.g. hackernews/quora/medium) OR because an operator prefers the in-browser
+// session path for a platform that CAN also use the backend API (settings
+// override — the EXTENSION_PUBLISH_PLATFORMS allowlist, e.g. forcing x to the
+// extension to dodge API cost / limits). The intrinsic flag can never be turned
+// off; the env allowlist only ADDS dual-capable platforms.
+//
+// SYNC GUARD: whatever the flag/env say, routing is INTERSECTED with
+// EXTENSION_PUBLISHABLE_PLATFORMS — the shared list of what the extension queue
+// can actually publish. A platform the extension can't publish (e.g. a stray
+// `EXTENSION_PUBLISH_PLATFORMS=devto`) is NOT diverted: it keeps the backend
+// path instead of stranding in QUEUE with no executor.
+const EXTENSION_PUBLISHABLE = new Set<string>(EXTENSION_PUBLISHABLE_PLATFORMS);
+const ENV_EXTENSION_PUBLISH_PLATFORMS: string[] = (
+  process.env.EXTENSION_PUBLISH_PLATFORMS ?? ''
+)
+  .split(',')
+  .map((p) => p.trim().toLowerCase())
+  .filter(Boolean);
+
+/**
+ * Whether a provider identifier publishes through the browser extension instead
+ * of the backend post workflow. Standalone (not an instance method) so callers
+ * without the DI'd manager — including the post workflow's scheduling divert —
+ * can use it. (`extensionPublish` flag OR EXTENSION_PUBLISH_PLATFORMS allowlist)
+ * AND the extension can actually publish it (EXTENSION_PUBLISHABLE_PLATFORMS).
+ */
+export function isExtensionPublishProvider(providerIdentifier: string): boolean {
+  const id = (providerIdentifier || '').toLowerCase();
+  if (!id || !EXTENSION_PUBLISHABLE.has(id)) return false;
+  const provider = socialIntegrationList.find((p) => p.identifier === id);
+  if (provider?.extensionPublish) return true;
+  return ENV_EXTENSION_PUBLISH_PLATFORMS.includes(id);
+}
+
+/** The provider identifiers currently routed to the extension (flag ∪ env), ∩ publishable. */
+export function extensionPublishProviderIds(): string[] {
+  const fromFlag = socialIntegrationList
+    .filter((p) => p.extensionPublish)
+    .map((p) => p.identifier);
+  return Array.from(new Set([...fromFlag, ...ENV_EXTENSION_PUBLISH_PLATFORMS])).filter(
+    (id) => EXTENSION_PUBLISHABLE.has(id)
+  );
+}
+
 @Injectable()
 export class IntegrationManager {
+  /** Instance passthrough to {@link isExtensionPublishProvider}. */
+  isExtensionPublish(providerIdentifier: string): boolean {
+    return isExtensionPublishProvider(providerIdentifier);
+  }
+
+  /** Instance passthrough to {@link extensionPublishProviderIds}. */
+  extensionPublishProviderIds(): string[] {
+    return extensionPublishProviderIds();
+  }
+
   async getAllIntegrations() {
     return {
       social: await Promise.all(

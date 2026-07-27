@@ -8,8 +8,9 @@ import {
   handleAuthAlarm,
   reArmRefreshAlarmIfLoggedIn,
 } from '@gitroom/extension/utils/auth.service';
-import { runScanLoop } from '@gitroom/extension/utils/executor/scan.runner';
+import { runScanLoop, dispatchScan } from '@gitroom/extension/utils/executor/scan.runner';
 import { runMetrics } from '@gitroom/extension/utils/executor/metrics.runner';
+import { runPublishLoop } from '@gitroom/extension/utils/executor/publish.runner';
 import {
   scanXKeywordFromPage,
   fetchXPostFromPage,
@@ -25,8 +26,6 @@ import { fetchPostMetrics } from '@gitroom/extension/utils/executor/metrics.page
 import { reapOrphanXReadTab } from '@gitroom/extension/utils/executor/x.tab-reader';
 import { backendCall } from '@gitroom/extension/utils/executor/api';
 import { buildClaimTasksPayload } from '@gitroom/extension/utils/executor/claim-tasks.payload';
-import { scanReddit } from '@gitroom/extension/utils/executor/scan.reddit';
-import { scanX } from '@gitroom/extension/utils/executor/scan.x';
 import { ENGAGE_EXTENSION_ACTION } from '@gitroom/extension/utils/executor/actions';
 import { getSocialSessions } from '@gitroom/extension/utils/social-sessions';
 import {
@@ -282,6 +281,13 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
   }
   if (request.action === ENGAGE_EXTENSION_ACTION.runMetrics) {
     runMetrics(Array.isArray(request.ids) ? request.ids : [])
+      .then((summary) => sendResponse({ ok: true, summary }))
+      .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
+    return true;
+  }
+  if (request.action === ENGAGE_EXTENSION_ACTION.runPublishDue) {
+    console.log('[aisee][publish] manual runPublishDue triggered', new Date().toISOString());
+    runPublishLoop()
       .then((summary) => sendResponse({ ok: true, summary }))
       .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
     return true;
@@ -573,11 +579,12 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
     const gate = () => Promise.resolve(true);
     const task = request.task;
     console.log('[aisee][scan] executeTask', task?.platform, task?.scanType, task?.scanKey);
-    // Options and the alarm runner use the same production scanners so their
-    // request fingerprints, cursor handling and parsing cannot drift apart.
-    // Honour the server-resolved pacing exactly: the debug panel is used to
-    // validate production task behaviour, including X maxPages scrolling.
-    (task.platform === 'x' ? scanX(task, gate) : scanReddit(task, gate))
+    // Options and the alarm runner use the SAME dispatch (dispatchScan) so their
+    // request fingerprints, cursor handling, parsing and per-platform gates
+    // cannot drift apart. Honour the server-resolved pacing exactly: the debug
+    // panel is used to validate production task behaviour, including X maxPages
+    // scrolling. The debug gate is always-true (no hourly budget for a manual run).
+    dispatchScan(task, gate)
       .then((result) => sendResponse({ ok: true, result }))
       .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
     return true;

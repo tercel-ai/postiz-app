@@ -44,3 +44,40 @@ const rawLinkedinEnabled = (
 
 export const LINKEDIN_EXECUTOR_ENABLED =
   rawLinkedinEnabled === 'true' || rawLinkedinEnabled === '1';
+
+// Medium + Quora BACKGROUND metrics drive a real medium.com / quora.com tab with
+// the user's personal session and scrape the rendered engagement counters (claps
+// / responses, upvotes / views). Both platforms flag automation, so — exactly
+// like X and LinkedIn — the background read path is OFF BY DEFAULT and opted into
+// at build time:
+//
+//   ENGAGE_MEDIUM_ENABLED=true
+//   ENGAGE_QUORA_ENABLED=true
+//
+// Anything else keeps them disabled, so a stray backend metrics task can never
+// drive a request to medium.com / quora.com. This gates the BACKGROUND read path
+// only; the user-initiated post-publish posters are NOT gated (mirrors X/
+// LinkedIn: the poster runs only when the user asked to publish).
+const rawMediumEnabled = (
+  import.meta.env?.ENGAGE_MEDIUM_ENABLED ??
+  process?.env?.ENGAGE_MEDIUM_ENABLED ??
+  ''
+)
+  .toString()
+  .trim()
+  .toLowerCase();
+
+export const MEDIUM_EXECUTOR_ENABLED =
+  rawMediumEnabled === 'true' || rawMediumEnabled === '1';
+
+const rawQuoraEnabled = (
+  import.meta.env?.ENGAGE_QUORA_ENABLED ??
+  process?.env?.ENGAGE_QUORA_ENABLED ??
+  ''
+)
+  .toString()
+  .trim()
+  .toLowerCase();
+
+export const QUORA_EXECUTOR_ENABLED =
+  rawQuoraEnabled === 'true' || rawQuoraEnabled === '1';

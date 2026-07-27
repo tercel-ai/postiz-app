@@ -18,7 +18,16 @@ import {
 import { fetchRedditMetrics } from './metrics.reddit';
 import { fetchXMetrics } from './metrics.x';
 import { fetchLinkedinMetrics } from './metrics.linkedin';
-import { LINKEDIN_EXECUTOR_ENABLED, X_EXECUTOR_ENABLED } from './flags';
+import { fetchDevtoMetrics } from './metrics.devto';
+import { fetchHackernewsMetrics } from './metrics.hackernews';
+import { fetchMediumMetrics } from './metrics.medium';
+import { fetchQuoraMetrics } from './metrics.quora';
+import {
+  LINKEDIN_EXECUTOR_ENABLED,
+  MEDIUM_EXECUTOR_ENABLED,
+  QUORA_EXECUTOR_ENABLED,
+  X_EXECUTOR_ENABLED,
+} from './flags';
 
 const DUE_ENDPOINT = '/posts/metrics/due';
 const INGEST_ENDPOINT = '/posts/metrics/ingest';
@@ -87,6 +96,11 @@ export async function runMetrics(ids: string[]): Promise<MetricsRunSummary> {
       // LinkedIn metrics drive the personal linkedin.com session — OFF by
       // default too. Skip before consuming any budget / hitting linkedin.com.
       if (platform === 'linkedin' && !LINKEDIN_EXECUTOR_ENABLED) continue;
+      // Medium/Quora metrics drive the personal medium.com/quora.com session via
+      // a scraped tab — OFF by default. Skip before touching either site. (Dev.to
+      // and Hacker News metrics are public API reads, so they are never gated.)
+      if (platform === 'medium' && !MEDIUM_EXECUTOR_ENABLED) continue;
+      if (platform === 'quora' && !QUORA_EXECUTOR_ENABLED) continue;
 
       if (!(await tryConsumeHourly(DEFAULT_HOURLY_FETCH_CAP, platform))) {
         summary.stoppedReason = 'cap';
@@ -104,6 +118,11 @@ export async function runMetrics(ids: string[]): Promise<MetricsRunSummary> {
       else if (platform === 'x') analytics = await fetchXMetrics(url);
       else if (platform === 'linkedin')
         analytics = await fetchLinkedinMetrics(url);
+      else if (platform === 'devto') analytics = await fetchDevtoMetrics(url);
+      else if (platform === 'hackernews')
+        analytics = await fetchHackernewsMetrics(url);
+      else if (platform === 'medium') analytics = await fetchMediumMetrics(url);
+      else if (platform === 'quora') analytics = await fetchQuoraMetrics(url);
       else continue; // platform the extension can't fetch with a session
 
       if (analytics?.length) {

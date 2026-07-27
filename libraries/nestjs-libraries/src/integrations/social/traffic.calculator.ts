@@ -73,6 +73,25 @@ const TRAFFIC_WEIGHTS: Record<string, Record<string, number>> = {
     upvotes: 1,
     comments: 3,
   },
+  // Article / forum platforms served by the browser extension. Labels match the
+  // AnalyticsData series the extension's metrics.<platform> fetchers emit.
+  devto: {
+    reactions: 1,
+    comments: 3,
+    impressions: 0.05, // page_views_count (author-only)
+  },
+  hackernews: {
+    score: 0.5, // mirrors reddit's score weight
+    comments: 3,
+  },
+  medium: {
+    claps: 1, // applause ≈ likes
+    comments: 3, // responses
+  },
+  quora: {
+    upvotes: 1,
+    impressions: 0.05, // views
+  },
   bluesky: {
     likes: 1,
     reposts: 1.5,
