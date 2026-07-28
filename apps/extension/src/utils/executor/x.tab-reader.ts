@@ -161,6 +161,16 @@ export interface XReadTab {
  * Open ONE reusable background tab for a scan run. Caller navigates it per keyword
  * (serial) and calls close() once at the end. Returns null if the tab can't open.
  */
+async function navigateOnly(id: number, url: string): Promise<void> {
+  try {
+    await chrome.tabs.update(id, { url });
+  } catch (e) {
+    console.warn('[aisee][x-read] navigate failed', e);
+    return;
+  }
+  await waitForTabComplete(id, TAB_LOAD_TIMEOUT_MS);
+}
+
 export async function openXReadTab(): Promise<XReadTab | null> {
   let tabId: number | undefined;
   try {
@@ -173,21 +183,11 @@ export async function openXReadTab(): Promise<XReadTab | null> {
   if (tabId == null) return null;
   const id = tabId;
 
-  async function navigateOnly(url: string): Promise<void> {
-    try {
-      await chrome.tabs.update(id, { url });
-    } catch (e) {
-      console.warn('[aisee][x-read] navigate failed', e);
-      return;
-    }
-    await waitForTabComplete(id, TAB_LOAD_TIMEOUT_MS);
-  }
-
   return {
     navigateAndCapture: (url: string, op: string) =>
       navigateAndCapture(id, url, op),
     scrollAndCapture: (op: string) => scrollAndCapture(id, op),
-    navigate: navigateOnly,
+    navigate: (url: string) => navigateOnly(id, url),
     close: () => closeTab(id),
   };
 }
@@ -423,6 +423,38 @@ async function ensureSharedTab(): Promise<number | null> {
   }
   await rememberSharedTab(sharedTabId);
   return sharedTabId;
+}
+
+/**
+ * Run `fn` against the shared warm tab WITHOUT closing it in between navigations,
+ * so a caller doing several steps back-to-back (e.g. a keyword search plus its
+ * pagination, or a whole run's worth of keywords) reuses ONE tab instead of
+ * opening/closing a fresh one per step. Shares the same idle-close +
+ * orphan-persistence machinery as readXShared (they serialise on the same
+ * `sharedChain` and idle timer). `close()` on the passed session is a no-op —
+ * the tab closes itself after SHARED_TAB_IDLE_MS of inactivity; callers should
+ * not try to close it directly. Returns null if the shared tab can't be created.
+ */
+export async function withSharedXTab<T>(
+  fn: (session: XReadTab) => Promise<T>
+): Promise<T | null> {
+  const run = sharedChain.then(async () => {
+    const id = await ensureSharedTab();
+    if (id == null) return null;
+    try {
+      return await fn({
+        navigateAndCapture: (url: string, op: string) =>
+          navigateAndCapture(id, url, op),
+        scrollAndCapture: (op: string) => scrollAndCapture(id, op),
+        navigate: (url: string) => navigateOnly(id, url),
+        close: async () => {},
+      });
+    } finally {
+      scheduleSharedIdleClose();
+    }
+  });
+  sharedChain = run.catch(() => undefined);
+  return run;
 }
 
 /**

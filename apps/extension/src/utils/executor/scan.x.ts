@@ -18,7 +18,7 @@ import {
 } from './executor.types';
 import { applyDelay } from './pacing';
 import { ParsedTweet, isNewerThan, newerId, parseTweetResult } from './x.parse';
-import { openXReadTab, readViaProfile } from './x.tab-reader';
+import { readViaProfile, withSharedXTab } from './x.tab-reader';
 
 // Exactly ONE keyword (or one tracked handle) per query — scanKey is never split,
 // OR-joined, or batched with other units. The runner's `scanInFlight` guard and
@@ -123,37 +123,38 @@ export async function scanX(
     );
     if (response != null) responses.push(response);
   } else {
-    const session = await openXReadTab();
-    if (!session) {
+    // Reuses the shared warm X tab across keyword units (instead of opening and
+    // closing a fresh tab per keyword) so a scan run doesn't churn/leak tabs —
+    // it closes itself after an idle gap and is reaped on the next service
+    // worker start if the worker is evicted mid-scan (see x.tab-reader.ts).
+    const captured = await withSharedXTab(async (session) => {
+      const first = await session.navigateAndCapture(searchUrl, 'SearchTimeline');
+      if (first == null) return false;
+      responses.push(first);
+      const maxPages = Math.max(1, Math.floor(task.pacing.maxPages || 1));
+      for (let page = 1; page < maxPages; page++) {
+        await applyDelay(task.pacing.pageDelayMs, task.pacing.pageJitterMs);
+        if (!(await gate())) {
+          exhausted = false;
+          console.debug('[aisee][scan][x] stopped by hourly gate during pagination', {
+            scanType: task.scanType,
+            scanKey: task.scanKey,
+            page,
+          });
+          break;
+        }
+        const next = await session.scrollAndCapture('SearchTimeline');
+        if (next == null) break;
+        responses.push(next);
+      }
+      return true;
+    });
+    if (captured == null) {
       console.debug('[aisee][scan][x] no readable X tab', {
         scanType: task.scanType,
         scanKey: task.scanKey,
       });
       return { posts: [], nextCursor: cursor, exhausted: false };
-    }
-    try {
-      const first = await session.navigateAndCapture(searchUrl, 'SearchTimeline');
-      if (first != null) responses.push(first);
-      if (first != null) {
-        const maxPages = Math.max(1, Math.floor(task.pacing.maxPages || 1));
-        for (let page = 1; page < maxPages; page++) {
-          await applyDelay(task.pacing.pageDelayMs, task.pacing.pageJitterMs);
-          if (!(await gate())) {
-            exhausted = false;
-            console.debug('[aisee][scan][x] stopped by hourly gate during pagination', {
-              scanType: task.scanType,
-              scanKey: task.scanKey,
-              page,
-            });
-            break;
-          }
-          const next = await session.scrollAndCapture('SearchTimeline');
-          if (next == null) break;
-          responses.push(next);
-        }
-      }
-    } finally {
-      await session.close();
     }
   }
   if (!responses.length) {
