@@ -1,6 +1,6 @@
 {
   "name": "aisee-extension",
-  "version": "1.5.5",
+  "version": "1.5.6",
   "private": true,
   "description": "A simple chrome & firefox extension template with Vite, React, TypeScript and Tailwind CSS.",
   "scripts": {
