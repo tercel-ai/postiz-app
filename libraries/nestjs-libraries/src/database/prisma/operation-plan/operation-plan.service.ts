@@ -495,6 +495,14 @@ export class OperationPlanService implements OnApplicationBootstrap {
     // itself (real token cost to us, but NO user-credit deduction).
     if (options.dryRun) {
       const { generation, planData, usages } = await this._generatePlanArtifacts(projectId, ctx);
+      // Preview the SAME linkedin personal/page resolution materializePlanPosts
+      // applies for real, so what a caller sees here matches what actually
+      // publishes once this plan is submitted (a dry-run for an org with only a
+      // linkedin-page integration would otherwise always show 'linkedin').
+      const previewContentItems = await this._resolveLinkedinForPreview(
+        organizationId,
+        generation.data.contentItems
+      );
       return {
         id: null as string | null,
         projectId,
@@ -508,7 +516,7 @@ export class OperationPlanService implements OnApplicationBootstrap {
         startsAt: start.toISOString(),
         endsAt: end.toISOString(),
         data: planData,
-        contentItems: generation.data.contentItems,
+        contentItems: previewContentItems,
         // Preview keeps keyword TEXT keys (no EngageKeyword rows are created).
         engagePolicies: this._foldKeywordTargets(
           generation.data.engagePolicies,
@@ -878,6 +886,30 @@ export class OperationPlanService implements OnApplicationBootstrap {
     }, {});
   }
 
+  // Dry-run mirror of materializePlanPosts' linkedin resolution (personal
+  // profile vs company page): prefer a connected `linkedin` integration,
+  // falling back to `linkedin-page` only when the org has no personal
+  // integration. Kept as a plain map over the generated payload (no Post
+  // rows exist yet in a dry-run) so the preview's `platform` field matches
+  // what materialization would actually attach an integration to.
+  private async _resolveLinkedinForPreview(
+    organizationId: string,
+    contentItems: z.infer<typeof GeneratedPlanSchema>['contentItems']
+  ): Promise<z.infer<typeof GeneratedPlanSchema>['contentItems']> {
+    if (!contentItems.some((item) => item.platforms.some((post) => post.platform === 'linkedin'))) {
+      return contentItems;
+    }
+    const connected = new Set(await this._repo.getConnectedPlatforms(organizationId));
+    const resolvePlatform = (platform: string): string =>
+      platform === 'linkedin' && !connected.has('linkedin') && connected.has('linkedin-page')
+        ? 'linkedin-page'
+        : platform;
+    return contentItems.map((item) => ({
+      ...item,
+      platforms: item.platforms.map((post) => ({ ...post, platform: resolvePlatform(post.platform) })),
+    }));
+  }
+
   private async _validateInput(organizationId: string, input: CreateOperationPlanInput) {
     if (!input.taskId || !Array.isArray(input.platforms) || !input.platforms.length) {
       throw new BadRequestException('taskId and at least one platform are required');
@@ -898,7 +930,24 @@ export class OperationPlanService implements OnApplicationBootstrap {
     if (durationDays > maxDays) {
       throw new BadRequestException({ code: 'DURATION_EXCEEDS_MAX', maxDays });
     }
-    const platforms = [...new Set(input.platforms.map((value) => value.trim()).filter(Boolean))];
+    // linkedin has two backing integration types — a personal profile
+    // (`linkedin`) and a company page (`linkedin-page`) — but content
+    // generation always targets a single canonical `linkedin` slot; the
+    // generated posts, `hardLimitFor`/`targetFor` (both keyed by provider
+    // identifier), the model prompt, and the admin cadence table all only
+    // know about `linkedin`. materializePlanPosts resolves which actual
+    // integration (personal vs page) to publish through, based on what the
+    // org has connected. Normalizing `linkedin-page` -> `linkedin` here means
+    // a caller can never make the generator see both as independent
+    // platforms and produce duplicate LinkedIn content for the same plan.
+    const platforms = [
+      ...new Set(
+        input.platforms
+          .map((value) => value.trim())
+          .filter(Boolean)
+          .map((platform) => (platform === 'linkedin-page' ? 'linkedin' : platform))
+      ),
+    ];
     // Publishing is by platform (a plugin reads Post.settings.__type), NOT by an
     // OAuth integration, so a platform need not have a connected account at plan
     // time — materializePlanPosts creates the Post with a null integrationId and
@@ -906,7 +955,7 @@ export class OperationPlanService implements OnApplicationBootstrap {
     // the only platform gate.
     const allowed = this._asKeywordArray(
       await this._settingsService!.get(OPERATION_PLAN_ALLOWED_PLATFORMS_KEY)
-    );
+    ).map((platform) => (platform === 'linkedin-page' ? 'linkedin' : platform));
     if (allowed.length) {
       const allowSet = new Set(allowed);
       const disallowed = platforms.filter((platform) => !allowSet.has(platform));

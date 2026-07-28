@@ -494,8 +494,19 @@ export class PostsService {
     organization: string,
     replaceDraft: boolean = false
   ): Promise<CreatePostDto> {
-    if (!body?.posts?.every((p) => p?.integration?.id)) {
-      throw new BadRequestException('All posts must have an integration id');
+    // A post MAY have no integration: `Post.integrationId` is nullable, and
+    // operation-plan posts for a platform the org never connected are
+    // materialized without one and published in-browser by the extension, which
+    // identifies the platform from `settings.__type`. Such a post therefore
+    // carries its own `__type` and there is no account to look up — requiring an
+    // integration here would make that whole flow unreachable over HTTP.
+    const missingPlatform = (body?.posts || []).find(
+      (p) => !p?.integration?.id && !(p?.settings as any)?.__type
+    );
+    if (missingPlatform) {
+      throw new BadRequestException(
+        'A post must have either an integration id or settings.__type'
+      );
     }
 
     const mappedValues = {
@@ -503,6 +514,12 @@ export class PostsService {
       type: replaceDraft ? 'schedule' : body.type,
       posts: await Promise.all(
         body.posts.map(async (post) => {
+          // No account to resolve the platform from — keep the caller's
+          // `__type`, which the guard above proved is present.
+          if (!post.integration?.id) {
+            return post;
+          }
+
           const integration = await this._integrationService.getIntegrationById(
             organization,
             post.integration.id
@@ -917,7 +934,18 @@ export class PostsService {
     // and time out gracefully — the post is queued for the extension instead.)
     try {
       const post = await this._postRepository.getPostById(postId);
-      const providerId = post?.integration?.providerIdentifier;
+      // No integration (operation-plan post for an unconnected platform) means
+      // the platform is only knowable from settings — the same fallback the
+      // extension publish-due query uses. Without it such a post would be sent
+      // down the Temporal path, which has no account to publish with.
+      let settings: Record<string, any> = {};
+      try {
+        settings = JSON.parse(post?.settings || '{}') || {};
+      } catch {
+        /* malformed settings → platform resolves from the integration only */
+      }
+      const providerId =
+        post?.integration?.providerIdentifier || settings.__type || '';
       // The persisted publishMethod is authoritative (set at schedule time and
       // shared with the extension publish-due query, so the two paths stay
       // mutually exclusive). Only fall back to the platform-capability check when
@@ -927,6 +955,21 @@ export class PostsService {
         (post?.publishMethod == null &&
           !!providerId &&
           this._integrationManager.isExtensionPublish(providerId));
+      // A post with no bound account has nothing for Temporal to publish WITH,
+      // and — not being extension-routed — nothing else will claim it either:
+      // the extension publish-due query matches EXTENSION posts or null-method
+      // posts on an extension-routed INTEGRATION, and a null integrationId is
+      // neither. Left in QUEUE it would sit invisible until the 7-day stale
+      // sweep flips it to ERROR with a message naming the wrong cause, so fail
+      // it now, with the reason.
+      if (post && !post.integrationId && !isExtension) {
+        const reason = `No connected account for ${providerId || 'this platform'}, and it cannot be published by the browser extension`;
+        this.logger.warn(
+          `startWorkflow: postId=${postId} has no bound integration and is not extension-publishable — marking ERROR`
+        );
+        await this.changeState(postId, 'ERROR', reason);
+        return;
+      }
       if (isExtension) {
         this.logger.log(
           `startWorkflow: postId=${postId} is extension-published (method=${post?.publishMethod ?? 'legacy:' + providerId}) — skipping Temporal; it stays QUEUE for the browser extension`
@@ -1038,8 +1081,8 @@ export class PostsService {
       }));
 
       // Explicit send-path choice on the editor: validate + resolve against the
-      // post's platform + bound account (an integration is always present here),
-      // so an impossible choice (e.g. 'api' on an extension-only platform) is
+      // post's platform + bound account, so an impossible choice (e.g. 'api' on
+      // an extension-only platform, or on a post with no connected account) is
       // rejected up-front rather than stranding the post in QUEUE. Omitted →
       // undefined → routing falls back to the capability check at publish time.
       let resolvedMethod: PublishMethod | undefined;
@@ -1047,7 +1090,7 @@ export class PostsService {
         try {
           resolvedMethod = resolvePublishMethod({
             platform: post.settings.__type,
-            hasBoundIntegration: true,
+            hasBoundIntegration: !!post.integration?.id,
             choice: post.publishMethod,
           });
         } catch (err) {
@@ -1120,7 +1163,7 @@ export class PostsService {
         } else {
           postList.push({
             postId: createdPostId,
-            integration: post.integration.id,
+            integration: post.integration?.id ?? null,
             state: finalPost.state,
             releaseURL: finalPost.releaseURL || null,
           });
@@ -1128,7 +1171,7 @@ export class PostsService {
       } else {
         postList.push({
           postId: createdPostId,
-          integration: post.integration.id,
+          integration: post.integration?.id ?? null,
         });
       }
 
@@ -1290,7 +1333,19 @@ export class PostsService {
 
     const post = await this._postRepository.getPostById(id, orgId);
     if (!post) throw new BadRequestException('Post not found');
-    if (!post.integration) {
+    // An accountless post reaches QUEUE through POST /posts/schedule and is
+    // published by the extension, so a missing integration is a legitimate
+    // state here — resolve the platform from settings the same way
+    // startWorkflow does, and reject only when neither source yields one.
+    let settings: Record<string, any> = {};
+    try {
+      settings = JSON.parse(post.settings || '{}') || {};
+    } catch {
+      /* malformed settings → platform resolves from the integration only */
+    }
+    const platform =
+      post.integration?.providerIdentifier || settings.__type || '';
+    if (!platform) {
       throw new BadRequestException('Integration not found or has been removed');
     }
     if (post.state !== 'QUEUE') {
@@ -1312,11 +1367,7 @@ export class PostsService {
     const newDate = await this._postRepository.changeDate(orgId, id, date);
 
     try {
-      await this.startWorkflow(
-        getSocialTaskQueue(post.integration.providerIdentifier),
-        post.id,
-        orgId
-      );
+      await this.startWorkflow(getSocialTaskQueue(platform), post.id, orgId);
     } catch (err) {
       this.logger.error(
         `changeDate: startWorkflow failed for postId=${id}: ${(err as Error)?.message || err}`
@@ -1722,12 +1773,27 @@ export class PostsService {
       const hasBoundIntegration =
         !!post.integrationId && post.integration?.disabled !== true;
 
+      // A send path already stamped on the post is an explicit choice the user
+      // made in the editor (POST /posts persists it). Without this fallback a
+      // batch schedule silently discards it — auto-resolve prefers `extension`
+      // for every extension-capable platform, so an "api" pick would be
+      // overwritten the moment the page was reloaded and the client-side memory
+      // of the pick was gone. Priority: this request's choice > the persisted
+      // choice > auto-resolve. Keeping the choice does not bypass validation —
+      // resolvePublishMethod still rejects it if the account was since removed.
+      const persistedChoice: PublishMethod | null =
+        post.publishMethod === 'API'
+          ? 'api'
+          : post.publishMethod === 'EXTENSION'
+            ? 'extension'
+            : null;
+
       let method: PublishMethod;
       try {
         method = resolvePublishMethod({
           platform,
           hasBoundIntegration,
-          choice: itemById.get(id)?.publishMethod ?? null,
+          choice: itemById.get(id)?.publishMethod ?? persistedChoice,
         });
       } catch (err) {
         if (err instanceof PublishMethodError) {

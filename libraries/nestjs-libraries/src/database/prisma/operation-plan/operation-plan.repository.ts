@@ -312,12 +312,19 @@ export class OperationPlanRepository {
     }
 
     const platforms = [...new Set(materializedPosts.map(({ platform }) => platform))];
+    // The generator only ever targets the canonical `linkedin` slot (see
+    // operation-plan.service.ts _validateInput), never `linkedin-page`
+    // directly, so also look up `linkedin-page` integrations whenever
+    // `linkedin` was requested — that's the fallback resolved below.
+    const queryProviderIdentifiers = platforms.includes('linkedin')
+      ? [...new Set([...platforms, 'linkedin-page'])]
+      : platforms;
     const integrations = await this._integration!.model.integration.findMany({
       where: {
         organizationId: plan.organizationId,
         disabled: false,
         deletedAt: null,
-        providerIdentifier: { in: platforms },
+        providerIdentifier: { in: queryProviderIdentifiers },
       },
       orderBy: { createdAt: 'asc' },
       select: { id: true, providerIdentifier: true },
@@ -325,6 +332,19 @@ export class OperationPlanRepository {
     const integrationByPlatform = new Map(
       integrations.map((integration) => [integration.providerIdentifier, integration.id])
     );
+    // Resolve `linkedin` to whichever integration type this org actually has
+    // connected: prefer a personal profile integration (matches the
+    // canonical platform value everywhere else — cadence, content limits,
+    // prompt), falling back to the company page only when no personal
+    // integration exists. An org with neither, or with both, is unaffected
+    // beyond this default (both connected → personal wins, same as before
+    // this fallback existed).
+    const resolvePlatform = (platform: string): string =>
+      platform === 'linkedin' &&
+      !integrationByPlatform.has('linkedin') &&
+      integrationByPlatform.has('linkedin-page')
+        ? 'linkedin-page'
+        : platform;
 
     const postsToCreate = materializedPosts
       .filter(({ node }) => !existingById.has(node.id))
@@ -338,7 +358,8 @@ export class OperationPlanRepository {
         // settings.__type), so a platform without an OAuth integration still gets
         // a DRAFT post with a null integrationId. When an integration exists we
         // attach it, so OAuth-based publishing is unaffected.
-        const integrationId = integrationByPlatform.get(platform) ?? null;
+        const resolvedPlatform = resolvePlatform(platform);
+        const integrationId = integrationByPlatform.get(resolvedPlatform) ?? null;
         return {
           id: node.id,
           // parentPostId chains thread parts to the anchor; null on the anchor.
@@ -357,14 +378,21 @@ export class OperationPlanRepository {
           // Scoping the group by platform restores the vanilla invariant "one
           // group = one channel's post + its thread chain". Still deterministic
           // (plan.id + contentId + platform), so re-materialize stays idempotent.
-          group: `${plan.id}:${item.contentId}:${platform}`,
+          group: `${plan.id}:${item.contentId}:${resolvedPlatform}`,
           // Boundary guard: strip any week label the model leaked into themeTitle
           // so the published post title (Reddit/Hashnode/blog channels submit this
           // verbatim) stays clean even though the prompt asks for a clean title.
           title: postTitleFromTheme(item.themeTitle),
           description: null,
           settings: JSON.stringify({
-            __type: platform,
+            // __type mirrors the RESOLVED platform (matches the rest of the
+            // codebase: __type is always set from the bound integration's
+            // providerIdentifier, e.g. posts.service.ts / autopost.service.ts),
+            // so a 'linkedin' plan post that resolved to a linkedin-page
+            // integration is tagged consistently for any code that reads
+            // settings.__type directly (e.g. getSocialTaskQueue) instead of
+            // going through post.integration.
+            __type: resolvedPlatform,
             campaignId: payload?.campaignId ?? plan.campaignId,
             contentId: item.contentId,
             themeKey: item.themeKey,

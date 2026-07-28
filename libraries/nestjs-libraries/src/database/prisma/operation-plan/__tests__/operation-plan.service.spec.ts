@@ -854,6 +854,70 @@ describe('OperationPlanService.create', () => {
     });
   });
 
+  // The preview must match what materializePlanPosts would actually attach an
+  // integration to (personal linkedin vs company linkedin-page) — otherwise a
+  // dry-run for an org with only a Page integration would misleadingly show
+  // 'linkedin' even though the real plan would publish through 'linkedin-page'.
+  describe('dryRun linkedin preview resolution', () => {
+    const linkedinFixture = {
+      contentItems: [
+        {
+          contentId: 'D01',
+          utcDate: '2030-01-01T00:00:00.000Z',
+          themeKey: 'x',
+          themeTitle: 'x',
+          platforms: [
+            { id: '11111111-1111-4111-8111-111111111111', platform: 'linkedin', content: 'c' },
+          ],
+        },
+      ],
+      engagePolicies: [],
+      warnings: [],
+    };
+
+    it('previews "linkedin-page" when the org only has a company page integration connected', async () => {
+      const { repo, service } = createGenerationDependencies(linkedinFixture);
+      repo.getConnectedPlatforms.mockResolvedValue(['linkedin-page']);
+
+      const result = await service.create('org-1', 'proj-1', {
+        taskId: 'task-1',
+        startAt: '2030-01-01T00:00:00.000Z',
+        endAt: '2030-01-02T00:00:00.000Z',
+        platforms: ['linkedin'],
+      }, { dryRun: true });
+
+      expect(result.contentItems[0].platforms[0].platform).toBe('linkedin-page');
+    });
+
+    it('previews "linkedin" when the org has a personal integration connected (even if a page is also connected)', async () => {
+      const { repo, service } = createGenerationDependencies(linkedinFixture);
+      repo.getConnectedPlatforms.mockResolvedValue(['linkedin', 'linkedin-page']);
+
+      const result = await service.create('org-1', 'proj-1', {
+        taskId: 'task-1',
+        startAt: '2030-01-01T00:00:00.000Z',
+        endAt: '2030-01-02T00:00:00.000Z',
+        platforms: ['linkedin'],
+      }, { dryRun: true });
+
+      expect(result.contentItems[0].platforms[0].platform).toBe('linkedin');
+    });
+
+    it('previews "linkedin" unresolved when the org has connected neither', async () => {
+      const { repo, service } = createGenerationDependencies(linkedinFixture);
+      repo.getConnectedPlatforms.mockResolvedValue([]);
+
+      const result = await service.create('org-1', 'proj-1', {
+        taskId: 'task-1',
+        startAt: '2030-01-01T00:00:00.000Z',
+        endAt: '2030-01-02T00:00:00.000Z',
+        platforms: ['linkedin'],
+      }, { dryRun: true });
+
+      expect(result.contentItems[0].platforms[0].platform).toBe('linkedin');
+    });
+  });
+
   it('dryRun still enforces the generation contract (invalid plan rejected, still writes nothing)', async () => {
     // utcDate outside [start,end] must be rejected by _validateGeneratedPlan
     // even on the preview path.
@@ -1443,6 +1507,67 @@ describe('OperationPlanService.create', () => {
       platforms: ['x'],
     });
     expect(repo.create).toHaveBeenCalled();
+  });
+
+  // linkedin has two backing integration types (personal profile vs company
+  // page), but content generation only ever targets one canonical 'linkedin'
+  // slot — materializePlanPosts resolves which integration to publish
+  // through. Normalizing here means a caller can never make a single plan
+  // request both as independent platforms and get duplicate LinkedIn content.
+  it('normalizes "linkedin-page" to "linkedin" in the requested platforms', async () => {
+    const { service } = createGenerationDependencies({
+      contentItems: [],
+      engagePolicies: [],
+      warnings: [],
+    });
+
+    const result = await service.create('org-1', 'proj-1', {
+      taskId: 'task-1',
+      startAt: '2030-01-01T00:00:00.000Z',
+      endAt: '2030-01-02T00:00:00.000Z',
+      platforms: ['linkedin-page'],
+    }, { dryRun: true });
+
+    expect(result.platforms).toEqual(['linkedin']);
+  });
+
+  it('dedupes when both "linkedin" and "linkedin-page" are requested on the same plan', async () => {
+    const { service } = createGenerationDependencies({
+      contentItems: [],
+      engagePolicies: [],
+      warnings: [],
+    });
+
+    const result = await service.create('org-1', 'proj-1', {
+      taskId: 'task-1',
+      startAt: '2030-01-01T00:00:00.000Z',
+      endAt: '2030-01-02T00:00:00.000Z',
+      platforms: ['linkedin', 'linkedin-page'],
+    }, { dryRun: true });
+
+    expect(result.platforms).toEqual(['linkedin']);
+  });
+
+  it('treats the admin allowlist "linkedin-page" entry as equivalent to "linkedin"', async () => {
+    const { settingsService, service } = createGenerationDependencies({
+      contentItems: [],
+      engagePolicies: [],
+      warnings: [],
+    });
+    // Admin only ticked the "LinkedIn Page" checkbox — a plan requesting the
+    // canonical "linkedin" slot must still be allowed.
+    settingsService.get.mockImplementation(async (key: string) =>
+      key === 'operation_plan.allowed_platforms' ? ['linkedin-page'] : undefined
+    );
+
+    const result = await service.create('org-1', 'proj-1', {
+      taskId: 'task-1',
+      startAt: '2030-01-01T00:00:00.000Z',
+      endAt: '2030-01-02T00:00:00.000Z',
+      platforms: ['linkedin'],
+    }, { dryRun: true });
+
+    expect(result.platforms).toEqual(['linkedin']);
   });
 
   it('accepts a platform with no connected account (publishing is by platform, not OAuth)', async () => {

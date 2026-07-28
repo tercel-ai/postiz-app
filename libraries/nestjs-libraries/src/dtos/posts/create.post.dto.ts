@@ -53,10 +53,16 @@ export class PostContent {
 }
 
 export class Post {
-  @IsDefined()
+  // Optional: `Post.integrationId` is nullable, and operation-plan posts for a
+  // platform the org has NOT connected are materialized without one — they are
+  // published in-browser by the extension, which resolves the platform from
+  // `settings.__type`. Editing such a post must not require inventing an
+  // integration. Omitted on an update leaves the post's current integration
+  // untouched; omitted on a create makes a post with no bound account.
+  @IsOptional()
   @Type(() => Integration)
   @ValidateNested()
-  integration: Integration;
+  integration?: Integration;
 
   @IsDefined()
   @ArrayMinSize(1)

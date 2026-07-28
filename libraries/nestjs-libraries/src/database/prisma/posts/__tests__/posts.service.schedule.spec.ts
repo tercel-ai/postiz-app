@@ -275,3 +275,85 @@ describe('PostsService.schedulePosts', () => {
     expect(res.scheduled).toEqual([{ id: 'q2', publishMethod: null }]);
   });
 });
+
+// A send path stamped on the post is an explicit user choice from the editor.
+// Auto-resolve prefers `extension` for every extension-capable platform, so
+// without a fallback to the stored value a batch schedule would quietly undo an
+// "api" pick as soon as the client no longer remembered it (e.g. after reload).
+describe('PostsService.schedulePosts — persisted publishMethod', () => {
+  beforeEach(() => vi.restoreAllMocks());
+
+  const apiPickOnExtensionCapablePlatform = (over?: Partial<any>) =>
+    draft({
+      id: 'p-api',
+      group: 'g-api',
+      integrationId: 'int-x',
+      integration: { providerIdentifier: 'x', disabled: false },
+      settings: JSON.stringify({ __type: 'x' }),
+      publishMethod: 'API',
+      ...over,
+    });
+
+  it('honours the stored API choice instead of auto-resolving to extension', async () => {
+    const { service, schedulePostGroupToQueue, startWorkflow } = makeService([
+      apiPickOnExtensionCapablePlatform(),
+    ]);
+
+    const res = await service.schedulePosts('org-1', [{ id: 'p-api' }]);
+
+    expect(res.scheduled).toEqual([{ id: 'p-api', publishMethod: 'api' }]);
+    expect(schedulePostGroupToQueue).toHaveBeenCalledWith('org-1', 'g-api', 'API', undefined);
+    expect(startWorkflow).toHaveBeenCalledTimes(1);
+  });
+
+  it('lets this request override the stored choice', async () => {
+    const { service, schedulePostGroupToQueue, startWorkflow } = makeService([
+      apiPickOnExtensionCapablePlatform(),
+    ]);
+
+    const res = await service.schedulePosts('org-1', [
+      { id: 'p-api', publishMethod: 'extension' },
+    ]);
+
+    expect(res.scheduled).toEqual([{ id: 'p-api', publishMethod: 'extension' }]);
+    expect(schedulePostGroupToQueue).toHaveBeenCalledWith('org-1', 'g-api', 'EXTENSION', undefined);
+    expect(startWorkflow).not.toHaveBeenCalled();
+  });
+
+  it('still rejects a stored API choice once the account is gone', async () => {
+    const { service, schedulePostGroupToQueue } = makeService([
+      apiPickOnExtensionCapablePlatform({ integrationId: null, integration: null }),
+    ]);
+
+    const res = await service.schedulePosts('org-1', [{ id: 'p-api' }]);
+
+    expect(res.scheduled).toEqual([]);
+    expect(res.failed).toEqual([
+      { id: 'p-api', code: 'ACCOUNT_BINDING_REQUIRED', message: expect.any(String) },
+    ]);
+    expect(schedulePostGroupToQueue).not.toHaveBeenCalled();
+  });
+
+  it('auto-resolves when nothing is stored and nothing is requested', async () => {
+    const { service, schedulePostGroupToQueue } = makeService([
+      apiPickOnExtensionCapablePlatform({ publishMethod: null }),
+    ]);
+
+    const res = await service.schedulePosts('org-1', [{ id: 'p-api' }]);
+
+    expect(res.scheduled).toEqual([{ id: 'p-api', publishMethod: 'extension' }]);
+    expect(schedulePostGroupToQueue).toHaveBeenCalledWith('org-1', 'g-api', 'EXTENSION', undefined);
+  });
+
+  it('reports the persisted method for an already-scheduled post', async () => {
+    const { service, schedulePostGroupToQueue } = makeService([
+      apiPickOnExtensionCapablePlatform({ state: 'QUEUE' }),
+    ]);
+
+    const res = await service.schedulePosts('org-1', [{ id: 'p-api' }]);
+
+    // Idempotent: reported, not re-flipped.
+    expect(res.scheduled).toEqual([{ id: 'p-api', publishMethod: 'api' }]);
+    expect(schedulePostGroupToQueue).not.toHaveBeenCalled();
+  });
+});

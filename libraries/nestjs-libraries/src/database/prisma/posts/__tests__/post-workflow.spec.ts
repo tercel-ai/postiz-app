@@ -1021,3 +1021,172 @@ describe('PostsRepository.createOrUpdatePost — group cleanup guard', () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// Tests: startWorkflow divert for posts with no bound integration
+// ---------------------------------------------------------------------------
+
+// An operation-plan post for an unconnected platform has integrationId = null.
+// Temporal has no account to publish it with, so it must never be handed over —
+// the post stays where it is (recoverable) instead of being parked in ERROR.
+describe('PostsService.startWorkflow — no bound integration', () => {
+  let mocks: ReturnType<typeof createServiceMocks>;
+  let service: PostsService;
+  let getRawClient: ReturnType<typeof vi.fn>;
+
+  function makeAccountlessPost(overrides?: Partial<any>) {
+    return makePost({
+      integrationId: null,
+      integration: null,
+      ...overrides,
+    });
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks = createServiceMocks();
+    getRawClient = vi.fn();
+    (mocks.temporalService as any).client = { getRawClient };
+    (mocks.integrationManager as any).isExtensionPublish = vi
+      .fn()
+      .mockImplementation((platform: string) => platform === 'reddit');
+    // NOT createService(): that stubs out the very method under test.
+    service = new PostsService(
+      mocks.postRepository as any,
+      mocks.integrationManager as any,
+      mocks.integrationService as any,
+      mocks.mediaService as any,
+      mocks.shortLinkService as any,
+      mocks.openaiService as any,
+      mocks.temporalService as any,
+      mocks.refreshIntegrationService as any,
+      mocks.postOverageService as any,
+    );
+  });
+
+  // Nothing can publish this post: Temporal has no account, and the extension
+  // publish-due query never matches a null integrationId. Failing it now beats
+  // letting the 7-day stale sweep mislabel it later.
+  it('fails an accountless post that the extension cannot publish either', async () => {
+    mocks.postRepository.getPostById.mockResolvedValue(
+      makeAccountlessPost({ settings: '{"__type":"x"}' }),
+    );
+
+    await service.startWorkflow('x-queue', 'post-1', 'org-1');
+
+    expect(getRawClient).not.toHaveBeenCalled();
+    expect(mocks.postRepository.changeState).toHaveBeenCalledWith(
+      'post-1',
+      'ERROR',
+      expect.stringContaining('No connected account'),
+      undefined,
+    );
+  });
+
+  it('leaves an accountless extension-publishable post in QUEUE for the extension', async () => {
+    mocks.postRepository.getPostById.mockResolvedValue(
+      makeAccountlessPost({ settings: '{"__type":"reddit"}' }),
+    );
+
+    await service.startWorkflow('reddit-queue', 'post-1', 'org-1');
+
+    expect(getRawClient).not.toHaveBeenCalled();
+    // NOT an error — the extension's publish-due loop will claim it.
+    expect(mocks.postRepository.changeState).not.toHaveBeenCalled();
+  });
+
+  it('resolves the platform from settings when there is no integration to read it from', async () => {
+    mocks.postRepository.getPostById.mockResolvedValue(
+      makeAccountlessPost({ settings: '{"__type":"reddit"}' }),
+    );
+
+    await service.startWorkflow('reddit-queue', 'post-1', 'org-1');
+
+    expect((mocks.integrationManager as any).isExtensionPublish).toHaveBeenCalledWith('reddit');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tests: createOrUpdatePost — integration + settings.__type handling
+// ---------------------------------------------------------------------------
+
+// settings is written wholesale on every edit. For a post with no integration,
+// settings.__type is the ONLY record of its platform, so an editor that doesn't
+// round-trip it would make the post unpublishable.
+describe('PostsRepository.createOrUpdatePost — accountless posts', () => {
+  let repo: any;
+  let mockPrismaPost: any;
+  let mockTagsPosts: any;
+
+  const body = (overrides?: Partial<any>) => ({
+    group: 'group-1',
+    settings: { someOption: true },
+    value: [{ id: 'post-1', content: 'hi', image: [] }],
+    ...overrides,
+  });
+
+  const upsertArgs = () => mockPrismaPost.upsert.mock.calls[0][0];
+
+  beforeEach(() => {
+    mockPrismaPost = {
+      upsert: vi.fn().mockResolvedValue({ id: 'post-1' }),
+      findUnique: vi.fn().mockResolvedValue(null),
+      findFirst: vi.fn().mockResolvedValue(null),
+      update: vi.fn(),
+    };
+    mockTagsPosts = { deleteMany: vi.fn().mockResolvedValue({}) };
+
+    repo = new PostsRepository(
+      { model: { post: mockPrismaPost } } as any,
+      {} as any, // _popularPosts
+      {} as any, // _comments
+      { model: { tags: { findMany: vi.fn().mockResolvedValue([]) } } } as any,
+      { model: { tagsPosts: mockTagsPosts } } as any,
+      {} as any, // _errors
+    );
+  });
+
+  it('omits the integration relation entirely when none is given', async () => {
+    await repo.createOrUpdatePost('draft', 'org-1', '2026-04-01T10:00:00', body(), []);
+
+    expect(upsertArgs().update.integration).toBeUndefined();
+    expect(upsertArgs().create.integration).toBeUndefined();
+  });
+
+  it('connects the integration when one is given', async () => {
+    await repo.createOrUpdatePost(
+      'draft',
+      'org-1',
+      '2026-04-01T10:00:00',
+      body({ integration: { id: 'int-1' } }),
+      [],
+    );
+
+    expect(upsertArgs().update.integration).toEqual({
+      connect: { id: 'int-1', organizationId: 'org-1' },
+    });
+  });
+
+  // settings.__type is the accountless post's only platform marker, so the
+  // write must round-trip exactly what the caller sent (mapTypeToPost is what
+  // guarantees it is there — see posts.service.createPost.spec.ts).
+  it('writes the caller settings through verbatim, __type included', async () => {
+    await repo.createOrUpdatePost(
+      'draft',
+      'org-1',
+      '2026-04-01T10:00:00',
+      body({ settings: { __type: 'reddit', subreddit: [{ value: { subreddit: 'r/test' } }] } }),
+      [],
+    );
+
+    const written = JSON.parse(upsertArgs().update.settings);
+    expect(written.__type).toBe('reddit');
+    expect(written.subreddit).toEqual([{ value: { subreddit: 'r/test' } }]);
+  });
+
+  it('does not read the post row back while writing it', async () => {
+    await repo.createOrUpdatePost('draft', 'org-1', '2026-04-01T10:00:00', body(), []);
+
+    expect(mockPrismaPost.findUnique).not.toHaveBeenCalled();
+  });
+});

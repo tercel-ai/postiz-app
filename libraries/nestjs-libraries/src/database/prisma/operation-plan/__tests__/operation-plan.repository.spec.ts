@@ -439,6 +439,126 @@ describe('OperationPlanRepository', () => {
     });
   });
 
+  // linkedin has two backing integration types (personal profile vs company
+  // page) but the generator only ever emits the canonical 'linkedin' platform
+  // — materializePlanPosts must resolve which one to actually publish through.
+  describe('materializePlanPosts linkedin -> linkedin-page resolution', () => {
+    const linkedinPayload = {
+      contentItems: [
+        {
+          contentId: 'D01',
+          utcDate: '2030-01-01T00:00:00.000Z',
+          themeKey: 'positioning',
+          themeTitle: 'LinkedIn theme',
+          platforms: [
+            {
+              id: '44444444-4444-4444-8444-444444444444',
+              platform: 'linkedin',
+              content: 'LinkedIn post text',
+              media: [],
+            },
+          ],
+        },
+      ],
+    };
+    const plan = {
+      id: 'plan-1',
+      organizationId: 'org-1',
+      projectId: 'proj-1',
+      campaignId: 'campaign-1',
+    } as any;
+
+    it('resolves to the personal integration when only linkedin is connected', async () => {
+      const postCreateMany = vi.fn().mockResolvedValue({ count: 1 });
+      const integrationFindMany = vi
+        .fn()
+        .mockResolvedValue([{ id: 'integration-linkedin', providerIdentifier: 'linkedin' }]);
+      const repo = createRepo({ postCreateMany, integrationFindMany });
+
+      await repo.materializePlanPosts(plan, linkedinPayload);
+
+      expect(integrationFindMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ providerIdentifier: { in: ['linkedin', 'linkedin-page'] } }),
+        })
+      );
+      expect(postCreateMany).toHaveBeenCalledWith({
+        data: [
+          expect.objectContaining({
+            integrationId: 'integration-linkedin',
+            group: 'plan-1:D01:linkedin',
+            settings: expect.stringContaining('"__type":"linkedin"'),
+          }),
+        ],
+        skipDuplicates: true,
+      });
+    });
+
+    it('falls back to the company page integration when only linkedin-page is connected', async () => {
+      const postCreateMany = vi.fn().mockResolvedValue({ count: 1 });
+      const integrationFindMany = vi
+        .fn()
+        .mockResolvedValue([{ id: 'integration-linkedin-page', providerIdentifier: 'linkedin-page' }]);
+      const repo = createRepo({ postCreateMany, integrationFindMany });
+
+      await repo.materializePlanPosts(plan, linkedinPayload);
+
+      expect(postCreateMany).toHaveBeenCalledWith({
+        data: [
+          expect.objectContaining({
+            integrationId: 'integration-linkedin-page',
+            group: 'plan-1:D01:linkedin-page',
+            settings: expect.stringContaining('"__type":"linkedin-page"'),
+          }),
+        ],
+        skipDuplicates: true,
+      });
+    });
+
+    it('prefers the personal integration (single post, no duplication) when both linkedin and linkedin-page are connected', async () => {
+      const postCreateMany = vi.fn().mockResolvedValue({ count: 1 });
+      const integrationFindMany = vi.fn().mockResolvedValue([
+        { id: 'integration-linkedin', providerIdentifier: 'linkedin' },
+        { id: 'integration-linkedin-page', providerIdentifier: 'linkedin-page' },
+      ]);
+      const repo = createRepo({ postCreateMany, integrationFindMany });
+
+      await repo.materializePlanPosts(plan, linkedinPayload);
+
+      expect(postCreateMany).toHaveBeenCalledWith({
+        data: [
+          expect.objectContaining({
+            integrationId: 'integration-linkedin',
+            group: 'plan-1:D01:linkedin',
+            settings: expect.stringContaining('"__type":"linkedin"'),
+          }),
+        ],
+        skipDuplicates: true,
+      });
+      // Exactly one Post row for the one generated content item — no fan-out.
+      expect((postCreateMany.mock.calls[0][0] as any).data).toHaveLength(1);
+    });
+
+    it('creates a null-integration draft tagged "linkedin" when neither is connected', async () => {
+      const postCreateMany = vi.fn().mockResolvedValue({ count: 1 });
+      const integrationFindMany = vi.fn().mockResolvedValue([]);
+      const repo = createRepo({ postCreateMany, integrationFindMany });
+
+      await repo.materializePlanPosts(plan, linkedinPayload);
+
+      expect(postCreateMany).toHaveBeenCalledWith({
+        data: [
+          expect.objectContaining({
+            integrationId: null,
+            group: 'plan-1:D01:linkedin',
+            settings: expect.stringContaining('"__type":"linkedin"'),
+          }),
+        ],
+        skipDuplicates: true,
+      });
+    });
+  });
+
   it('materializePlanPosts drops a reddit post that has no resolved subreddit target', async () => {
     const postFindMany = vi.fn().mockResolvedValue([]);
     const postCreateMany = vi.fn().mockResolvedValue({ count: 1 });

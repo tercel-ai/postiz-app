@@ -1664,14 +1664,28 @@ export class PostsRepository {
     const uuid = body.group || uuidv4();
 
     for (const value of body.value) {
+      // settings is written wholesale, and for a post with NO integration
+      // `settings.__type` is the only record of its platform (operation-plan
+      // posts, published by the extension) — erasing it would make the post
+      // unpublishable. mapTypeToPost guarantees `__type` is present on every
+      // path into here: it overwrites it from the bound account, and rejects an
+      // accountless post that doesn't carry its own.
       const updateData = (type: 'create' | 'update') => ({
         publishDate: dayjs(date).toDate(),
-        integration: {
-          connect: {
-            id: body.integration.id,
-            organizationId: orgId,
-          },
-        },
+        // integrationId is nullable: an operation-plan post for an unconnected
+        // platform has no account and is published by the extension. Connect
+        // only what the caller actually sent — omitting the key on an update
+        // leaves the existing link alone rather than clearing it.
+        ...(body.integration?.id
+          ? {
+            integration: {
+              connect: {
+                id: body.integration.id,
+                organizationId: orgId,
+              },
+            },
+          }
+          : {}),
         ...(posts?.[posts.length - 1]?.id
           ? {
             parentPost: {
@@ -2271,6 +2285,10 @@ export class PostsRepository {
         integrationId: true,
         settings: true,
         operationPlanId: true,
+        // The send path already persisted on the post — an explicit choice the
+        // user made in the editor. schedulePosts falls back to it before
+        // auto-resolving, and reports it for an already-scheduled post.
+        publishMethod: true,
         integration: {
           select: { providerIdentifier: true, disabled: true },
         },

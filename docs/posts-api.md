@@ -312,7 +312,7 @@ publish**. A single request can target multiple integrations. Guarded by
 | `date` | ISO date-time | yes | Scheduled time (also required for `now`/`draft`). |
 | `shortLink` | `boolean` | yes | Apply short-linking. |
 | `tags` | `{ value, label }[]` | yes | May be empty array. |
-| `posts` | `Post[]` | yes¹ | ≥1; each has `integration.id`, `value[]` (content + media), optional `group`, provider `settings`, optional `publishMethod` (`extension` \| `api` — explicit send path; validated against the platform + bound account, persisted on the post; omit to fall back to the capability check). |
+| `posts` | `Post[]` | yes¹ | ≥1; each has `value[]` (content + media), provider `settings`, optional `group`, optional `publishMethod` (`extension` \| `api` — explicit send path; validated against the platform + bound account, persisted on the post; omit to fall back to the capability check), and **either** `integration.id` **or** a `settings.__type` platform marker². |
 | `projectId` | `string` | no | aisee project scope. |
 | `source` | `PostSource` | no | `calendar` / `chat` / `engage`. |
 | `order` | `string` | no | Ordering hint. |
@@ -320,7 +320,18 @@ publish**. A single request can target multiple integrations. Guarded by
 
 ¹ `posts` is required unless `type === 'draft'`.
 
-**Response**: array of `{ postId, integration, state, releaseURL? }`.
+² `integration` is **optional**: `Post.integrationId` is nullable, and an
+operation-plan post for a platform the org has not connected is created without
+one — it is published in-browser by the extension, which resolves the platform
+from `settings.__type`. `mapTypeToPost` overwrites `settings.__type` from the
+bound account when there is one, and rejects a post that has neither
+(`400 A post must have either an integration id or settings.__type`). Note the
+consequence for such a post: only the extension can publish it, so an explicit
+`publishMethod: "api"` is rejected, and a platform the extension cannot publish
+lands in `ERROR` at publish time.
+
+**Response**: array of `{ postId, integration, state, releaseURL? }`, where
+`integration` is `null` for a post with no bound account.
 
 ### POST /posts/generator/draft
 

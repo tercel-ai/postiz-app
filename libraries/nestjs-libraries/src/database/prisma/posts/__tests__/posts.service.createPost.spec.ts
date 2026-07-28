@@ -102,7 +102,7 @@ describe('PostsService.createPost — explicit publishMethod (editor)', () => {
     expect(methodArg()).toBe('EXTENSION');
   });
 
-  it('resolves an explicit "api" choice to the API enum (editor always has a bound integration)', async () => {
+  it('resolves an explicit "api" choice to the API enum when an integration is bound', async () => {
     await service.createPost(
       'org-1',
       makeBody({ posts: [{ integration: { id: 'int-1' }, settings: { __type: 'x' }, value: [{ content: 'hi', image: [] }], publishMethod: 'api' }] } as any),
@@ -135,6 +135,49 @@ describe('PostsService.createPost — explicit publishMethod (editor)', () => {
         'user-1'
       )
     ).rejects.toBeInstanceOf(BadRequestException);
+  });
+});
+
+// An operation-plan post for a platform the org never connected is materialized
+// with integrationId = null and published in-browser by the extension. Editing
+// one must go through createPost without inventing an integration.
+describe('PostsService.createPost — post with no bound integration', () => {
+  let mocks: ReturnType<typeof createMocks>;
+  let service: PostsService;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks = createMocks();
+    service = createService(mocks);
+  });
+
+  const accountlessBody = (platform: string, publishMethod?: string) =>
+    makeBody({
+      posts: [
+        {
+          settings: { __type: platform },
+          value: [{ content: 'hi', image: [] }],
+          ...(publishMethod ? { publishMethod } : {}),
+        },
+      ],
+    } as any);
+
+  it('saves without an integration', async () => {
+    const result = await service.createPost('org-1', accountlessBody('reddit'), 'user-1');
+    expect(mocks.postRepository.createOrUpdatePost).toHaveBeenCalledTimes(1);
+    expect(result[0].integration).toBeNull();
+  });
+
+  it('accepts "extension" — the only path an accountless post has', async () => {
+    await service.createPost('org-1', accountlessBody('reddit', 'extension'), 'user-1');
+    expect(mocks.postRepository.createOrUpdatePost.mock.calls[0][8]).toBe('EXTENSION');
+  });
+
+  it('rejects "api" — there is no account to publish through', async () => {
+    await expect(
+      service.createPost('org-1', accountlessBody('x', 'api'), 'user-1')
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(mocks.postRepository.createOrUpdatePost).not.toHaveBeenCalled();
   });
 });
 
@@ -298,5 +341,66 @@ describe('PostsService.createPost — overage billing integration', () => {
     expect(mocks.postOverageService.deductIfOverage).toHaveBeenCalledWith(
       'org-1', 'user-1', 'post-draft', 'calendar',
     );
+  });
+});
+
+// The gate every HTTP entry point runs BEFORE createPost. Tests that call
+// createPost directly cannot see it, which is exactly how an accountless-save
+// regression can hide behind a green suite — so exercise the REAL mapTypeToPost
+// (its own ValidationPipe included) here.
+describe('PostsService.mapTypeToPost — accountless posts', () => {
+  let mocks: ReturnType<typeof createMocks>;
+  let service: PostsService;
+
+  const body = (post: any) => ({
+    type: 'schedule',
+    date: '2026-04-01T10:00:00.000Z',
+    shortLink: false,
+    tags: [],
+    posts: [post],
+  }) as any;
+
+  // Mirrors what the client sends for a post with no bound account: the stored
+  // platform marker plus the platform's required settings fields.
+  const accountlessPost = (overrides?: any) => ({
+    settings: { __type: 'x', who_can_reply_post: 'everyone' },
+    value: [{ content: 'hello', image: [] }],
+    ...overrides,
+  });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks = createMocks();
+    (mocks.integrationService as any).getIntegrationById = vi
+      .fn()
+      .mockResolvedValue({ id: 'int-1', providerIdentifier: 'mastodon' });
+    service = createService(mocks);
+  });
+
+  it('accepts a post with no integration and keeps its settings.__type', async () => {
+    const result = await service.mapTypeToPost(body(accountlessPost()), 'org-1');
+
+    expect(result.posts[0].integration).toBeUndefined();
+    expect((result.posts[0].settings as any).__type).toBe('x');
+    expect((mocks.integrationService as any).getIntegrationById).not.toHaveBeenCalled();
+  });
+
+  it('rejects a post that has neither an integration nor a platform marker', async () => {
+    await expect(
+      service.mapTypeToPost(
+        body(accountlessPost({ settings: { who_can_reply_post: 'everyone' } })),
+        'org-1'
+      )
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('still overwrites __type from the bound account when there is one', async () => {
+    const result = await service.mapTypeToPost(
+      body(accountlessPost({ integration: { id: 'int-1' } })),
+      'org-1'
+    );
+
+    expect((result.posts[0].settings as any).__type).toBe('mastodon');
+    expect((mocks.integrationService as any).getIntegrationById).toHaveBeenCalledWith('org-1', 'int-1');
   });
 });
