@@ -40,6 +40,7 @@ import {
   clearQueuedPublishTasks,
   initPublishQueue,
   handlePublishAlarm,
+  setPublishBroadcaster,
 } from '@gitroom/extension/utils/post-publish/queue';
 import {
   ensureEngageScanAlarm,
@@ -213,6 +214,29 @@ async function reconcileBrowserSession(): Promise<void> {
   }
 }
 
+// Broadcast a pull-driven publish task's progress to every open frontend tab.
+// Reuses the SAME `publishProgressPush` message the content bridge already relays
+// to the page as `aisee:post-publish-progress`, so no page/protocol change is
+// needed — the page just listens and refreshes from the DB. `requestId` is a
+// fixed sentinel (pull tasks have no page request to correlate to). Best-effort.
+function broadcastPublishProgress(state: unknown): void {
+  try {
+    chrome.tabs.query({ url: bridgeTabMatches() }, (tabs) => {
+      void chrome.runtime.lastError;
+      for (const tab of tabs || []) {
+        if (tab.id == null) continue;
+        chrome.tabs.sendMessage(
+          tab.id,
+          { action: ENGAGE_EXTENSION_ACTION.publishProgressPush, requestId: 'publish-due', state },
+          () => void chrome.runtime.lastError // tab without the bridge / not loaded
+        );
+      }
+    });
+  } catch {
+    /* no tabs API (tests) — ignore */
+  }
+}
+
 // Re-arm the 20-day token-refresh alarm on SW/browser startup (alarms are
 // cleared on extension reload/update) and run the silent refresh when it fires.
 // Also (re)arm the periodic engage-scan alarm so the executor keeps fetching
@@ -228,6 +252,9 @@ function reArmAlarms(): void {
   void reapOrphanXReadTab();
   // Restore the persisted publish queue (scheduled posts) + re-arm its alarm.
   void initPublishQueue();
+  // Broadcast pull-driven publish progress to open frontend tabs so a workspace
+  // page can refresh from the DB the moment a background publish settles.
+  setPublishBroadcaster(broadcastPublishProgress);
 }
 chrome.runtime.onStartup?.addListener(reArmAlarms);
 chrome.runtime.onInstalled?.addListener(reArmAlarms);

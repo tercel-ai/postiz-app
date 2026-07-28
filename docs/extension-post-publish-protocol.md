@@ -227,9 +227,16 @@ const ack = await enqueuePublishBatch([
   taskId, duplicate active taskId, empty segments (text or images required),
   images on non-first segments, reddit without subreddit/title, unparseable
   publishDate, unknown platform.
-- **Progress** is pushed to the tab that enqueued the batch (best-effort; if
-  the tab closed, poll `aisee:post-publish-status` — it is the source of
-  truth and also remembers up to 200 settled tasks).
+- **Progress** for a PAGE-driven task is pushed to the tab that enqueued the
+  batch (best-effort; if the tab closed, poll `aisee:post-publish-status`). For a
+  PULL-driven task (backend publish-due, no originating tab) progress is instead
+  **broadcast to every frontend tab** as the same `aisee:post-publish-progress`
+  message (with a fixed `requestId: "publish-due"`). A DB-authoritative page
+  listens for the settling transition and re-fetches from the DB — live status
+  without polling, the event only triggers the refresh. Wiring: the queue's
+  `emit()` calls a registered broadcaster when `tabId == null`
+  (`setPublishBroadcaster` in the service worker → `chrome.tabs.query` over the
+  bridge origins).
 
 ## Follow-ups
 

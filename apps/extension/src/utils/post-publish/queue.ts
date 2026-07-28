@@ -495,12 +495,35 @@ function qlog(...args: unknown[]): void {
   }
 }
 
+// Broadcaster for pull-driven tasks (no originating tab): the SW registers a fn
+// that pushes the progress state to ALL open frontend tabs, so an open workspace
+// can react to a background publish (e.g. re-fetch the DB). Page-DRIVEN tasks
+// keep the precise tab-targeted push below. Injected (not imported) to keep the
+// queue free of chrome.tabs.query / frontend-origin knowledge.
+let publishBroadcaster: ((state: PublishTaskState) => void) | null = null;
+export function setPublishBroadcaster(
+  fn: ((state: PublishTaskState) => void) | null
+): void {
+  publishBroadcaster = fn;
+}
+
 function emit(entry: QueueEntry): void {
   if (entry.tabId == null) {
-    qlog('emit skipped — no originating tab', {
-      taskId: entry.state.taskId,
-      status: entry.state.status,
-    });
+    // Pull-driven (backend publish-due): no originating tab to target, so
+    // broadcast to every frontend tab instead. Best-effort — the DB stays the
+    // source of truth; this only nudges an open page to refresh.
+    if (publishBroadcaster) {
+      try {
+        publishBroadcaster({ ...entry.state });
+      } catch {
+        /* broadcaster failure must never break the drain */
+      }
+    } else {
+      qlog('emit skipped — no originating tab & no broadcaster', {
+        taskId: entry.state.taskId,
+        status: entry.state.status,
+      });
+    }
     return;
   }
   try {
