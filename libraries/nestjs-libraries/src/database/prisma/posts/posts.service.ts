@@ -12,6 +12,8 @@ import {
   IntegrationManager,
   PublishMethod,
   PublishMethodError,
+  isExtensionOnlyProvider,
+  isExtensionPublishablePlatform,
   resolvePublishMethod,
 } from '@gitroom/nestjs-libraries/integrations/integration.manager';
 import { Integration, Post, Media, From, State } from '@prisma/client';
@@ -1595,6 +1597,63 @@ export class PostsService {
       };
     });
     return { due };
+  }
+
+  /**
+   * Per-platform publish-method capability for the SCHEDULING UI (org-scoped, so
+   * any signed-in user can call it — unlike the superadmin-only
+   * GET /admin/social-providers). Lets the editor render the send-path choice
+   * correctly BEFORE committing: which methods are selectable, the default the
+   * backend would auto-pick, and why a platform is unavailable (so the UI can
+   * prompt "connect an account").
+   *
+   * It returns the RESOLVED answer, not raw flags: capability depends on both the
+   * platform (static) and whether THIS org has a bound account (dynamic), and the
+   * rules are exactly the ones resolvePublishMethod enforces at schedule time —
+   * computed here, once, so the UI can never offer a choice the commit rejects
+   * and no rule logic is duplicated client-side.
+   */
+  async getPublishMethods(orgId: string) {
+    const integrations = await this._integrationService.getIntegrationsList(orgId);
+    const boundPlatforms = new Set(
+      (integrations || [])
+        .filter((i: any) => !i.disabled && !i.deletedAt)
+        .map((i: any) => (i.providerIdentifier || '').toLowerCase())
+    );
+    // Every registered provider — the client fetches this once and caches it, so
+    // there is no per-request platform filter to keep in sync.
+    const uniquePlatforms = [
+      ...new Set(
+        this._integrationManager
+          .getSocialProviderList()
+          .map((p) => (p.identifier || '').toLowerCase())
+          .filter(Boolean)
+      ),
+    ];
+    return uniquePlatforms.map((platform) => {
+      const hasBoundIntegration = boundPlatforms.has(platform);
+      const extensionCapable = isExtensionPublishablePlatform(platform);
+      const apiCapable = hasBoundIntegration && !isExtensionOnlyProvider(platform);
+      const methods: PublishMethod[] = [];
+      if (extensionCapable) methods.push('extension');
+      if (apiCapable) methods.push('api');
+      let defaultMethod: PublishMethod | null = null;
+      let reason: string | undefined;
+      try {
+        defaultMethod = resolvePublishMethod({ platform, hasBoundIntegration });
+      } catch (err) {
+        if (err instanceof PublishMethodError) reason = err.code;
+      }
+      return {
+        platform,
+        extensionCapable,
+        apiCapable,
+        hasBoundIntegration,
+        methods,
+        defaultMethod,
+        ...(reason ? { reason } : {}),
+      };
+    });
   }
 
   /**

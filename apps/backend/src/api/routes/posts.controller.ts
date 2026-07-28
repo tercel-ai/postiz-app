@@ -268,6 +268,29 @@ export class PostsController {
     return this._postsService.getPostsByGroup(org.id, group);
   }
 
+  /**
+   * Publish-method capability for the scheduling/editor UI: for EVERY registered
+   * platform, which send paths (extension / api) are selectable, the default the
+   * backend would auto-pick, and whether an account must be connected first.
+   *
+   * A pure, side-effect-free read of ORG-level state (the platform registry ∩ the
+   * org's bound accounts), so it is a GET with no parameters and the client is
+   * expected to fetch it ONCE and cache it — same shape as GET /engage/config —
+   * rather than per post or per editor keystroke.
+   *
+   * Org-scoped, so any signed-in user can call it: GET /admin/social-providers is
+   * superadmin-only and static, and cannot answer "does THIS org have a bound
+   * account". The UI renders the choice from this before committing via
+   * POST /posts/schedule or setting posts[].publishMethod on POST /posts.
+   *
+   * MUST stay declared BEFORE `@Get('/:id')` — a later static route would be
+   * shadowed by the `:id` wildcard and never reached.
+   */
+  @Get('/publish-methods')
+  async getPublishMethods(@GetOrgFromRequest() org: Organization) {
+    return this._postsService.getPublishMethods(org.id);
+  }
+
   @Get('/:id')
   getPost(
     @GetOrgFromRequest() org: Organization,

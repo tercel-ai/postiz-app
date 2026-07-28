@@ -58,12 +58,19 @@ behavior. It is set two ways:
 - **Single post**, on the main editor: [`POST /posts/`](#post-posts) accepts an
   optional `posts[].publishMethod` and persists it with the post.
 
-The scheduling UI derives the selectable methods client-side from
-[`GET /admin/social-providers`](./admin-api.md) — each provider carries
-`extensionPublishable` + `hasWriteApi` static flags — intersected with the org's
-own integrations list (a bound account is required for the API path). The backend
-still enforces the full rules at commit time (`resolvePublishMethod`), so a bad
-client choice is rejected per-post rather than mis-routed.
+The scheduling / editor UI asks
+[`GET /posts/publish-methods`](#get-postspublish-methods) which methods are
+selectable. That endpoint is **org-scoped** (any signed-in user) and returns the
+RESOLVED answer for every platform — capability depends on both the platform and
+whether THIS org has a bound account, and it applies the same
+`resolvePublishMethod` rules the commit enforces, so the UI can never offer a
+choice that would be rejected and no rule logic is duplicated client-side. It is
+org-level state, so fetch it **once and cache it** (like `GET /engage/config`) —
+not per post or per keystroke.
+
+> `GET /admin/social-providers` also carries `extensionPublishable` + `hasWriteApi`
+> static flags, but it is **superadmin-only** and cannot answer the per-org half
+> ("is an account bound?") — do not use it for the user-facing picker.
 
 ---
 
@@ -97,6 +104,7 @@ client choice is rejected per-post rather than mis-routed.
 | PUT | [`/posts/:id/date`](#put-postsiddate) | Reschedule a post |
 | POST | [`/posts/separate-posts`](#post-postsseparate-posts) | Split long content into a thread |
 | POST | [`/posts/schedule`](#post-postsschedule) | Commit DRAFT posts to the send queue (DRAFT → QUEUE) |
+| GET | [`/posts/publish-methods`](#get-postspublish-methods) | Per-platform send-path capability for the UI (org-scoped, cacheable) |
 | PATCH | [`/posts/:id/extension-published`](#patch-postsidextension-published) | Extension publish-on-success callback |
 | POST | [`/posts/publish-due`](#post-postspublish-due) | Extension: claim due QUEUE posts to publish in-browser (leased) |
 | POST | [`/posts/sync-metrics`](#post-postssync-metrics) | Sync raw external metrics for one post |
@@ -427,12 +435,45 @@ send paths pick up, and where the **send-path decision is made once per post**
 
 An already-`QUEUE`/`PUBLISHED` post is an idempotent success (returned under `scheduled`, no re-flip).
 
-> **Rendering the method choice (client-side).** There is no dedicated capability
-> endpoint. The UI derives selectable methods from
-> [`GET /admin/social-providers`](./admin-api.md) (each provider's
-> `extensionPublishable` + `hasWriteApi` static flags) intersected with the org's
-> integrations list (a bound account enables the API path). `resolvePublishMethod`
-> on the backend is the authority — a bad choice comes back in `failed[]`.
+> **Rendering the method choice.** Fetch
+> [`GET /posts/publish-methods`](#get-postspublish-methods) once and cache it;
+> `resolvePublishMethod` on the backend remains the authority — a bad choice comes
+> back in `failed[]`.
+
+### GET /posts/publish-methods
+
+Which send paths are selectable, per platform, for the current org. Use it to
+render the publish-method choice in the editor / scheduling UI before committing
+via [`POST /posts/schedule`](#post-postsschedule) or `posts[].publishMethod` on
+[`POST /posts/`](#post-posts).
+
+- **No parameters.** Returns an entry for **every registered platform**.
+- **Org-scoped** — any signed-in user (unlike the superadmin-only
+  [`GET /admin/social-providers`](./admin-api.md), which is static and cannot say
+  whether *this* org has a bound account).
+- Pure read of org-level state → **fetch once and cache** (same usage shape as
+  `GET /engage/config`), not per post or per keystroke.
+
+**Response**:
+
+```jsonc
+[
+  {
+    "platform": "x",
+    "extensionCapable": true,          // the extension can publish it in-browser
+    "apiCapable": true,                // a non-disabled account is bound AND the platform has a write API
+    "hasBoundIntegration": true,
+    "methods": ["extension", "api"],   // selectable methods (render these)
+    "defaultMethod": "extension",      // what auto-resolve picks (both-capable → extension)
+    "reason": "ACCOUNT_BINDING_REQUIRED" // ONLY when methods is empty — why it's unavailable
+  }
+]
+```
+
+Rules mirror `resolvePublishMethod` exactly: extension-only platforms
+(hackernews / medium / quora — no backend write API) → `["extension"]`; platforms
+with a write API **and** a bound account also offer `"api"`; a platform with
+neither viable path → `methods: []` plus `reason`.
 
 ### DELETE /posts/:group
 
