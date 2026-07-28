@@ -20,13 +20,9 @@ export default function Panel() {
   const { history, handleClear } = useReplyHistoryState();
   const {
     rows: queueRows,
-    publishNow,
-    cancelTask,
     syncTask,
-    retryTask,
     removeTask,
     clearSettled,
-    clearQueued,
   } = usePublishQueueState();
   const [view, setView] = React.useState<'home' | 'scan'>('home');
   const [tab, setTab] = React.useState<'queue' | 'replies'>('queue');
@@ -107,7 +103,7 @@ export default function Panel() {
               className={`pz-tab${tab === 'queue' ? ' active' : ''}`}
               onClick={() => setTab('queue')}
             >
-              Post Queue
+              Publish Activity
               <span className="pz-tab-count">{queueRows.length}</span>
             </button>
             <button
@@ -131,10 +127,7 @@ export default function Panel() {
             <PublishQueueList
               embedded
               rows={queueRows}
-              onPublishNow={publishNow}
-              onCancel={cancelTask}
               onSync={syncTask}
-              onRetry={retryTask}
               onRemove={removeTask}
             />
           ) : (
@@ -160,7 +153,6 @@ export default function Panel() {
           <ClearQueuePage
             rows={queueRows}
             onClearSettled={clearSettled}
-            onClearQueued={clearQueued}
             onBack={() => setShowClearQueue(false)}
           />
         </div>

@@ -31,7 +31,7 @@ export function installPostPublishBridge(): void {
             // DEMOTED to a pure SYNC TRIGGER. The DB QUEUE is the single source
             // of truth now: the page schedules via POST /posts/schedule first,
             // then sends this message only to make the extension pull publish-due
-            // IMMEDIATELY (instead of waiting for the 2-min poll). Any `items` the
+            // IMMEDIATELY (instead of waiting for the 1-min poll). Any `items` the
             // page sends are IGNORED — the extension no longer takes its work from
             // the page payload, it pulls the due posts from the backend.
             swMessage: {

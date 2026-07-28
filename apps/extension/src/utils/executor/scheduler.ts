@@ -19,12 +19,16 @@ const SCAN_PERIOD_MINUTES = 15;
 
 // Backend publish-due poll: the extension pulls QUEUE posts the backend has
 // marked for in-browser publishing. Because the DB is the source of truth, this
-// poll is what bounds how quickly a scheduled/edited post goes out (and is what
-// re-syncs after an uninstall/reinstall). 2 min keeps latency low while the
-// backend lease keeps a due post from being claimed twice. Deliberately its OWN
-// alarm so bumping publish latency never touches the scan cadence.
+// poll is what bounds how quickly a scheduled post goes out (and is what
+// re-syncs after an uninstall/reinstall). 1 min is the chrome.alarms floor —
+// the tightest cadence Chrome allows, matching the precision a local publishDate
+// alarm could achieve anyway, so a future post fires within ~1 min of its time.
+// The poll stays cheap: an idle tick is a single indexed, empty-result query
+// (no write); the backend lease keeps a due post from being claimed twice.
+// Deliberately its OWN alarm so publish cadence never touches the scan cadence
+// (scanning too often risks account rate-limits — that stays at 15 min).
 export const PUBLISH_POLL_ALARM = 'aisee-publish-poll';
-const PUBLISH_POLL_MINUTES = 2;
+const PUBLISH_POLL_MINUTES = 1;
 
 /** Arm the periodic scan alarm if a session exists (idempotent). */
 export async function ensureEngageScanAlarm(): Promise<void> {

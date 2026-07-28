@@ -1,10 +1,13 @@
 import React, { FC, useState } from 'react';
 import type { PublishQueueRow } from '@gitroom/extension/pages/popup/hooks/usePublishQueueState';
 
-// Which clear operation the user picked. 'settled-*' age out published history
-// (published / error / canceled rows); 'queued' drops not-yet-sent tasks.
+// Which clear operation the user picked. Only local publish HISTORY is
+// clearable here (published / error / canceled rows). "Queued (not sent)" was
+// removed: the queue is a transient buffer of DUE posts pulled from the DB, so
+// clearing it wouldn't unschedule anything (the next poll re-pulls) — scheduling
+// and cancellation live in the web app.
 type SettledAction = 'settled-1w' | 'settled-1m' | 'settled-all';
-type ClearAction = SettledAction | 'queued';
+type ClearAction = SettledAction;
 
 const WEEK_MS = 604_800_000;
 const MONTH_MS = 2_592_000_000;
@@ -20,7 +23,6 @@ const ACTIONS: { action: ClearAction; label: string }[] = [
   { action: 'settled-1w', label: 'Published history · older than 1 week' },
   { action: 'settled-1m', label: 'Published history · older than 1 month' },
   { action: 'settled-all', label: 'Published history · all' },
-  { action: 'queued', label: 'Queued (not sent) records' },
 ];
 
 // Statuses that are done and safe to sweep as "history". Active rows
@@ -40,9 +42,6 @@ function settledTimestamp(row: PublishQueueRow): number {
 }
 
 function matchCount(rows: PublishQueueRow[], action: ClearAction): number {
-  if (action === 'queued') {
-    return rows.filter((r) => r.state.status === 'queued').length;
-  }
   const window = SETTLED_WINDOW[action];
   const cutoff = window != null ? Date.now() - window : Infinity;
   return rows.filter(
@@ -53,16 +52,14 @@ function matchCount(rows: PublishQueueRow[], action: ClearAction): number {
 export const ClearQueuePage: FC<{
   rows: PublishQueueRow[];
   onClearSettled: (olderThanMs?: number) => Promise<void>;
-  onClearQueued: () => Promise<void>;
   onBack: () => void;
-}> = ({ rows, onClearSettled, onClearQueued, onBack }) => {
+}> = ({ rows, onClearSettled, onBack }) => {
   const [pending, setPending] = useState<ClearAction | null>(null);
   const pendingCount = pending ? matchCount(rows, pending) : 0;
 
   const handleConfirm = async () => {
     if (!pending) return;
-    if (pending === 'queued') await onClearQueued();
-    else await onClearSettled(SETTLED_WINDOW[pending]);
+    await onClearSettled(SETTLED_WINDOW[pending]);
     onBack();
   };
 
@@ -71,7 +68,7 @@ export const ClearQueuePage: FC<{
       <div className="pz-header">
         <div className="pz-header-row">
           <button className="pz-back-btn" onClick={onBack}>←</button>
-          <div className="pz-title">Clear Post Queue</div>
+          <div className="pz-title">Clear Publish History</div>
         </div>
       </div>
 
@@ -79,18 +76,12 @@ export const ClearQueuePage: FC<{
         {pending ? (
           <div className="pz-confirm">
             <p className="pz-confirm-msg">
-              {pending === 'queued'
-                ? `Cancel and remove ${pendingCount} not-sent record${
-                    pendingCount !== 1 ? 's' : ''
-                  }?`
-                : `Delete ${pendingCount} history record${
-                    pendingCount !== 1 ? 's' : ''
-                  }?`}
+              {`Delete ${pendingCount} history record${pendingCount !== 1 ? 's' : ''}?`}
               <br />
               This cannot be undone.
             </p>
             <button className="pz-btn pz-btn-danger" onClick={handleConfirm}>
-              {pending === 'queued' ? 'Remove' : 'Delete'}
+              Delete
             </button>
             <button className="pz-btn-ghost" onClick={() => setPending(null)}>
               Cancel

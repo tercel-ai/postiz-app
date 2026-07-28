@@ -14,13 +14,9 @@ export default function Popup() {
   const { history, handleClear } = useReplyHistoryState();
   const {
     rows: queueRows,
-    publishNow,
-    cancelTask,
     syncTask,
-    retryTask,
     removeTask,
     clearSettled,
-    clearQueued,
   } = usePublishQueueState();
   const [view, setView] = useState<'main' | 'clear' | 'clear-queue' | 'scan'>('main');
   const [tab, setTab] = useState<'queue' | 'replies'>('queue');
@@ -58,7 +54,6 @@ export default function Popup() {
       <ClearQueuePage
         rows={queueRows}
         onClearSettled={clearSettled}
-        onClearQueued={clearQueued}
         onBack={() => setView('main')}
       />
     );
@@ -165,7 +160,7 @@ export default function Popup() {
               className={`pz-tab${tab === 'queue' ? ' active' : ''}`}
               onClick={() => setTab('queue')}
             >
-              Post Queue
+              Publish Activity
               <span className="pz-tab-count">{queueRows.length}</span>
             </button>
             <button
@@ -187,10 +182,7 @@ export default function Popup() {
             <PublishQueueList
               embedded
               rows={queueRows}
-              onPublishNow={publishNow}
-              onCancel={cancelTask}
               onSync={syncTask}
-              onRetry={retryTask}
               onRemove={removeTask}
             />
           ) : (

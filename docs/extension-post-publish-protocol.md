@@ -7,7 +7,7 @@
 > (DRAFT → QUEUE), then (2) sends `aisee:post-publish` **with no `items`** just to
 > make the extension pull immediately. The extension pulls the due work from
 > [`POST /posts/publish-due`](./posts-api.md#post-postspublish-due) (also on its
-> own 2-min `aisee-publish-poll` alarm — so a missed trigger only adds latency),
+> own 1-min `aisee-publish-poll` alarm — so a missed trigger only adds latency),
 > then feeds it into the SAME internal queue described below. Any `items` a page
 > still sends on `aisee:post-publish` are **ignored**.
 >
@@ -118,7 +118,7 @@ const res = await fetch('/posts/schedule', {
 }).then((r) => r.json());
 // res.scheduled: [{id, publishMethod}]   res.failed: [{id, code, message}]
 
-// 3) trigger the extension to pull immediately (NO items). Optional — the 2-min
+// 3) trigger the extension to pull immediately (NO items). Optional — the 1-min
 //    aisee-publish-poll alarm would pick it up anyway.
 const requestId = crypto.randomUUID();
 window.postMessage({ source: 'aisee', action: 'aisee:post-publish', requestId }, location.origin);

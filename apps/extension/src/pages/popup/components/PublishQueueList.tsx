@@ -25,7 +25,7 @@ const FILTERS = ['all', 'pending', 'sent'] as const;
 type QueueFilter = (typeof FILTERS)[number];
 const FILTER_LABEL: Record<QueueFilter, string> = {
   all: 'All',
-  pending: 'Not sent',
+  pending: 'Sending',
   sent: 'Sent',
 };
 
@@ -64,12 +64,9 @@ function publishTimeLabel(row: PublishQueueRow): string {
 
 const QueueRow: FC<{
   row: PublishQueueRow;
-  onPublishNow: (taskId: string) => Promise<void>;
-  onCancel: (taskId: string) => Promise<void>;
   onSync: (taskId: string) => Promise<void>;
-  onRetry: (taskId: string) => Promise<void>;
   onRemove: (taskId: string) => Promise<void>;
-}> = ({ row, onPublishNow, onCancel, onSync, onRetry, onRemove }) => {
+}> = ({ row, onSync, onRemove }) => {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const { taskId, platform, status, segmentsTotal, segmentsPublished } = row.state;
@@ -136,23 +133,23 @@ const QueueRow: FC<{
             View post ↗
           </a>
         )}
+        {/* A `queued` row is normally a transient buffer entry (a due post pulled
+            from the DB, about to publish), so there is no "cancel"/"publish now"
+            here — scheduling and cancellation live in the web app (the DB is the
+            source of truth), and removing a pulled row only drops the local copy
+            until the next poll. Remove IS offered as an escape hatch: it is the
+            only way to clear a row that is stuck, or one left over from the old
+            page-driven model (those have no DB QUEUE row backing them, so
+            removing really does unschedule them). */}
         {status === 'queued' && (
-          <>
-            <button
-              className="pz-mini-btn primary"
-              disabled={busy}
-              onClick={() => run(onPublishNow)}
-            >
-              Publish now
-            </button>
-            <button
-              className="pz-mini-btn"
-              disabled={busy}
-              onClick={() => run(onCancel)}
-            >
-              Cancel
-            </button>
-          </>
+          <button
+            className="pz-mini-btn"
+            disabled={busy}
+            onClick={() => run(onRemove)}
+            title="Remove from this browser's local queue (does not unschedule a post scheduled in the web app)"
+          >
+            Remove
+          </button>
         )}
         {status === 'sent' && (
           <button
@@ -164,24 +161,13 @@ const QueueRow: FC<{
           </button>
         )}
         {status === 'error' && (
-          <>
-            {segmentsPublished === 0 && (
-              <button
-                className="pz-mini-btn primary"
-                disabled={busy}
-                onClick={() => run(onRetry)}
-              >
-                Retry
-              </button>
-            )}
-            <button
-              className="pz-mini-btn"
-              disabled={busy}
-              onClick={() => run(onRemove)}
-            >
-              Remove
-            </button>
-          </>
+          <button
+            className="pz-mini-btn"
+            disabled={busy}
+            onClick={() => run(onRemove)}
+          >
+            Remove
+          </button>
         )}
         {status === 'canceled' && (
           <button
@@ -200,10 +186,7 @@ const QueueRow: FC<{
 
 export const PublishQueueList: FC<{
   rows: PublishQueueRow[];
-  onPublishNow: (taskId: string) => Promise<void>;
-  onCancel: (taskId: string) => Promise<void>;
   onSync: (taskId: string) => Promise<void>;
-  onRetry: (taskId: string) => Promise<void>;
   onRemove: (taskId: string) => Promise<void>;
   onClear?: () => void;
   /** Rendered inside a parent tab bar: hide the internal title/clear header
@@ -212,10 +195,7 @@ export const PublishQueueList: FC<{
   embedded?: boolean;
 }> = ({
   rows,
-  onPublishNow,
-  onCancel,
   onSync,
-  onRetry,
   onRemove,
   onClear,
   embedded,
@@ -255,8 +235,8 @@ export const PublishQueueList: FC<{
       {!embedded && (
         <div className="pz-history-head">
           <div className="pz-history-title">
-            Post Queue ({rows.length}
-            {pendingCount > 0 ? `, ${pendingCount} not sent` : ''})
+            Publish Activity ({rows.length}
+            {pendingCount > 0 ? `, ${pendingCount} sending` : ''})
           </div>
           {onClear && (
             <button className="pz-clear-btn" onClick={onClear}>Clear ›</button>
@@ -295,10 +275,7 @@ export const PublishQueueList: FC<{
               <QueueRow
                 key={row.state.taskId}
                 row={row}
-                onPublishNow={onPublishNow}
-                onCancel={onCancel}
                 onSync={onSync}
-                onRetry={onRetry}
                 onRemove={onRemove}
               />
             ))}

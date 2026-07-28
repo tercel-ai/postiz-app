@@ -1,7 +1,7 @@
 import React, { FC, useState } from 'react';
 import { ClearRange, ReplyHistoryItem } from '@gitroom/extension/utils/reply.history';
 
-// Aligned with Clear Post Queue's time granularity (1 week / 1 month / all).
+// Aligned with Clear Publish History's time granularity (1 week / 1 month / all).
 const RANGES: { range: ClearRange; label: string }[] = [
   { range: '1w', label: 'Older than 1 week' },
   { range: '1m', label: 'Older than 1 month' },

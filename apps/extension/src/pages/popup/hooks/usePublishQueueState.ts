@@ -67,25 +67,8 @@ export function usePublishQueueState() {
     return () => chrome.storage.onChanged.removeListener(onChanged);
   }, []);
 
-  const publishNow = useCallback(
-    (taskId: string) =>
-      sendAction(ENGAGE_EXTENSION_ACTION.publishNow, { taskId }),
-    []
-  );
-
-  const cancelTask = useCallback(
-    (taskId: string) =>
-      sendAction(ENGAGE_EXTENSION_ACTION.publishCancel, { taskIds: [taskId] }),
-    []
-  );
-
   const syncTask = useCallback(
     (taskId: string) => sendAction(ENGAGE_EXTENSION_ACTION.publishSync, { taskId }),
-    []
-  );
-
-  const retryTask = useCallback(
-    (taskId: string) => sendAction(ENGAGE_EXTENSION_ACTION.publishRetry, { taskId }),
     []
   );
 
@@ -102,20 +85,10 @@ export function usePublishQueueState() {
     []
   );
 
-  // Bulk-drop every not-yet-sent (queued) task.
-  const clearQueued = useCallback(
-    () => sendAction(ENGAGE_EXTENSION_ACTION.publishClearQueued, {}),
-    []
-  );
-
   return {
     rows,
-    publishNow,
-    cancelTask,
     syncTask,
-    retryTask,
     removeTask,
     clearSettled,
-    clearQueued,
   };
 }

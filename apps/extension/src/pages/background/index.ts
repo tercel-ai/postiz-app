@@ -244,7 +244,7 @@ function broadcastPublishProgress(state: unknown): void {
 function reArmAlarms(): void {
   void reArmRefreshAlarmIfLoggedIn();
   void ensureEngageScanAlarm();
-  // Re-arm the 2-min backend publish-due poll so QUEUE posts re-sync across SW
+  // Re-arm the 1-min backend publish-due poll so QUEUE posts re-sync across SW
   // restarts and extension reinstalls without any web-page trigger.
   void ensurePublishPollAlarm();
   // The shared X read-tab's idle-close timer lives in this worker; if a prior

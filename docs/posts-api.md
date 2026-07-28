@@ -496,7 +496,7 @@ only after the lease expires.
 }
 ```
 
-Cadence: the extension polls this on its own 2-min alarm (`aisee-publish-poll`),
+Cadence: the extension polls this on its own 1-min alarm (`aisee-publish-poll`),
 and immediately on the `aisee:post-publish` sync trigger (see
 [Extension Post-Publish Protocol](./extension-post-publish-protocol.md)).
 

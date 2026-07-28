@@ -288,7 +288,7 @@ body {
   transform: translateY(-1px);
 }
 
-/* ── Section tabs (Post Queue / Engage Replies) ─────────── */
+/* ── Section tabs (Publish Activity / Engage Replies) ─────────── */
 .pz-tabs {
   display: flex;
   align-items: center;
