@@ -54,6 +54,7 @@ Content-Type: application/json
 {
   "integration": { "id": "<integration-uuid>" },
   "group": "<group-uuid>",            // shared across accounts for same content set
+  "publishMethod": "extension" | "api", // (optional) explicit send path; see below
   "settings": {
     "__type": "linkedin",             // provider discriminator key
     // provider-specific fields (see Settings section)
@@ -61,6 +62,14 @@ Content-Type: application/json
   "value": [ /* PostContent[] */ ]
 }
 ```
+
+`publishMethod` (optional) fixes this post's send path: `api` = the backend
+Temporal workflow via the provider's write API (needs a bound account); `extension`
+= the browser extension publishes it in-browser. It is validated against the
+platform + bound account and rejected if impossible (e.g. `api` on an
+extension-only platform). Omit it to let routing fall back to the platform
+capability check at publish time. See
+[posts-api.md → Publish method & the send queue](./posts-api.md#publish-method--the-send-queue).
 
 ### `PostContent` object
 

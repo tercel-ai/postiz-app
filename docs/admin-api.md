@@ -16,6 +16,31 @@ UPDATE "User" SET "isSuperAdmin" = true WHERE email = 'admin@example.com';
 
 ## Endpoints
 
+### Social providers
+
+#### GET /admin/social-providers
+
+Static registry of the supported social providers (used by the operation-plan
+platform picker and the scheduling UI's send-path choice). Returns one entry per
+provider:
+
+```jsonc
+[
+  {
+    "identifier": "x",
+    "name": "X",
+    "extensionPublishable": true,   // the browser extension can publish it in-browser
+    "hasWriteApi": true             // has a usable backend write API (false for hackernews/medium/quora)
+  }
+]
+```
+
+The scheduling UI derives selectable send methods from these two static flags
+intersected with the org's own integrations list (a bound account enables the
+`api` path). The backend still enforces the full rules at commit time
+(`resolvePublishMethod`); see
+[posts-api.md → Publish method & the send queue](./posts-api.md#publish-method--the-send-queue).
+
 ### Settings CRUD
 
 #### GET /admin/settings

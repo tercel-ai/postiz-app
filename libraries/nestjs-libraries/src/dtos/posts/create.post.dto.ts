@@ -69,6 +69,14 @@ export class Post {
   @IsString()
   group: string;
 
+  // Explicit send-path choice for this post (extension vs backend API). Optional:
+  // when omitted, routing falls back to the platform-capability check at publish
+  // time (see PublishMethod / startWorkflow). Validated + resolved server-side
+  // against the post's platform + bound account; an impossible choice is rejected.
+  @IsOptional()
+  @IsIn(['extension', 'api'])
+  publishMethod?: 'extension' | 'api';
+
   @ValidateNested()
   @Type(() => EmptySettings, {
     keepDiscriminatorProperty: true,

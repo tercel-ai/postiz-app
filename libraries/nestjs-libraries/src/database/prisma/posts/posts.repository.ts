@@ -1,7 +1,7 @@
 import { PrismaRepository } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
 import { Injectable } from '@nestjs/common';
 import { Post as PostBody } from '@gitroom/nestjs-libraries/dtos/posts/create.post.dto';
-import { APPROVED_SUBMIT_FOR_ORDER, Post, State } from '@prisma/client';
+import { APPROVED_SUBMIT_FOR_ORDER, Post, Prisma, PublishMethod, State } from '@prisma/client';
 import { GetPostsDto } from '@gitroom/nestjs-libraries/dtos/posts/get.posts.dto';
 import { PostSource } from '@gitroom/nestjs-libraries/dtos/posts/post-source';
 import { GetPostsListDto } from '@gitroom/nestjs-libraries/dtos/posts/get.posts-list.dto';
@@ -901,6 +901,12 @@ export class PostsRepository {
         // project/plan as the template they were cloned from.
         projectId: originalPost.projectId,
         operationPlanId: originalPost.operationPlanId,
+        // Inherit the template's send-path decision so a clone routes exactly
+        // like its original. Defensive: today an EXTENSION post never enters
+        // Temporal (so no clone is made for it), but if that ever changes a
+        // null here would let the clone's routing drift to the env-driven
+        // isExtensionPublish fallback instead of the original's explicit intent.
+        publishMethod: originalPost.publishMethod,
         publishDate: cyclePublishDate,
         state: 'QUEUE',
         releaseId: claimToken,
@@ -1031,8 +1037,24 @@ export class PostsRepository {
    * These fell outside the recovery window and will never be published.
    * Excludes recurring originals (intervalInDays set) and thread children (parentPostId set).
    */
-  async markStaleQueuePostsAsError(): Promise<number> {
+  async markStaleQueuePostsAsError(
+    extensionProviderIds: string[] = []
+  ): Promise<number> {
     const cutoff = dayjs.utc().subtract(7, 'day').toDate();
+    // Extension-routed posts must NEVER be swept: they legitimately sit in QUEUE
+    // until the user's browser comes online (a pull executor, not Temporal), so a
+    // time-based "never published" sweep would wrongly ERROR them — and an
+    // integration-less operation-plan draft can't even be retried afterwards
+    // (retryPost needs an integration), stranding it permanently. Mirrors
+    // extensionDueWhere's routing: explicit EXTENSION, or legacy null-method on an
+    // extension-routed integration.
+    const extensionRoutes: Prisma.PostWhereInput[] = [{ publishMethod: 'EXTENSION' }];
+    if (extensionProviderIds.length) {
+      extensionRoutes.push({
+        publishMethod: null,
+        integration: { providerIdentifier: { in: extensionProviderIds } },
+      });
+    }
     const result = await this._post.model.post.updateMany({
       where: {
         state: 'QUEUE',
@@ -1042,6 +1064,7 @@ export class PostsRepository {
         publishDate: {
           lt: cutoff,
         },
+        NOT: { OR: extensionRoutes },
       },
       data: {
         state: 'ERROR',
@@ -1164,6 +1187,11 @@ export class PostsRepository {
         parentPostId: null,
         sourcePostId: null,
         intervalInDays: null,
+        // Extension-routed posts wait in QUEUE by design (published in-browser
+        // when the user's browser is online), so they are not "stuck" — exclude
+        // them from the diagnostic. `NOT: {}` (not `{ not: 'EXTENSION' }`) so
+        // legacy null-method rows are kept, not dropped by SQL NULL semantics.
+        NOT: { publishMethod: 'EXTENSION' },
       },
       select: {
         id: true,
@@ -1627,7 +1655,8 @@ export class PostsRepository {
     tags: { value: string; label: string }[],
     inter?: number,
     source?: PostSource,
-    projectId?: string
+    projectId?: string,
+    publishMethod?: PublishMethod
   ) {
     const posts: Post[] = [];
     // Reuse existing group when editing, new UUID only for fresh posts.
@@ -1684,6 +1713,15 @@ export class PostsRepository {
           ? { projectId: projectId ?? null }
           : projectId !== undefined
             ? { projectId }
+            : {}),
+        // Send-path decision. Like projectId: a create defaults it (null =
+        // fall back to the platform-capability check at publish time); an edit
+        // only touches it when the caller explicitly passes one, so omitting it
+        // never silently clears an existing post's method.
+        ...(type === 'create'
+          ? { publishMethod: publishMethod ?? null }
+          : publishMethod !== undefined
+            ? { publishMethod }
             : {}),
       });
 
@@ -2091,38 +2129,181 @@ export class PostsRepository {
    * stranded mid-chain. Ordered oldest-first so a backlog drains in schedule
    * order.
    */
+  /**
+   * WHERE for "this QUEUE post is due to be published by the extension": due +
+   * single-segment root, routed to the extension. Two ways it routes:
+   *   (1) publishMethod = EXTENSION — the explicit decision written at schedule
+   *       time. Works even when integrationId is null (operation-plan posts
+   *       route by settings.__type, not an OAuth integration), so this branch
+   *       carries NO integration constraint.
+   *   (2) publishMethod = null (legacy/unset) — fall back to the platform-
+   *       capability routing: an extension-routed integration. Preserves the
+   *       original behaviour for posts created before publishMethod existed.
+   */
+  private extensionDueWhere(
+    organizationId: string,
+    providerIdentifiers: string[],
+    now: Date
+  ): Prisma.PostWhereInput {
+    const routes: Prisma.PostWhereInput[] = [{ publishMethod: 'EXTENSION' }];
+    if (providerIdentifiers.length) {
+      routes.push({
+        publishMethod: null,
+        integration: {
+          providerIdentifier: { in: providerIdentifiers },
+          disabled: false,
+          deletedAt: null,
+        },
+      });
+    }
+    return {
+      organizationId,
+      deletedAt: null,
+      state: State.QUEUE,
+      publishDate: { lte: now },
+      parentPostId: null, // roots only
+      childrenPost: { none: {} }, // single-segment only (no thread children)
+      // Exclude recurring ORIGINALS (intervalInDays > 0): they are permanent
+      // QUEUE templates published via the clone-per-cycle mechanism, which is a
+      // Temporal-only path. Handing one to the extension would loop — the
+      // extension-published backfill (updatePost) rejects a recurring original,
+      // so it never leaves QUEUE and gets re-offered every poll. Non-recurring
+      // posts and per-cycle clones both have intervalInDays = null and still match.
+      intervalInDays: null,
+      OR: routes,
+    };
+  }
+
+  private static readonly EXTENSION_DUE_SELECT = {
+    id: true,
+    content: true,
+    settings: true,
+    title: true,
+    publishDate: true,
+    integration: {
+      select: { id: true, name: true, providerIdentifier: true },
+    },
+  } as const;
+
   getDueExtensionPublishPosts(
     organizationId: string,
     providerIdentifiers: string[],
     now: Date,
     limit: number
   ) {
-    if (!providerIdentifiers.length) return Promise.resolve([]);
     return this._post.model.post.findMany({
-      where: {
-        organizationId,
-        deletedAt: null,
-        state: State.QUEUE,
-        publishDate: { lte: now },
-        parentPostId: null, // roots only
-        childrenPost: { none: {} }, // single-segment only (no thread children)
-        integration: {
-          providerIdentifier: { in: providerIdentifiers },
-          disabled: false,
-          deletedAt: null,
-        },
-      },
+      where: this.extensionDueWhere(organizationId, providerIdentifiers, now),
       orderBy: { publishDate: 'asc' },
       take: limit,
+      select: PostsRepository.EXTENSION_DUE_SELECT,
+    });
+  }
+
+  /**
+   * LEASE + return the extension-due posts atomically. Prevents two browser
+   * instances — or the same instance after an uninstall/reinstall — from both
+   * claiming and double-publishing the same post:
+   *   1. pick candidates that are due AND currently un-leased (releaseId null) or
+   *      whose lease has EXPIRED (claimedAt <= leaseCutoff), oldest first;
+   *   2. stamp our unique leaseToken + claimedAt on them, guarded by the SAME
+   *      availability predicate so a racing puller that grabbed one first makes
+   *      our guarded update a no-op for that row;
+   *   3. read back only the rows that now carry OUR leaseToken — those are the
+   *      ones we actually won.
+   * A successful publish backfills PUBLISHED (overwriting releaseId), releasing
+   * the lease; a crashed publish is re-offered only after the lease expires.
+   */
+  async claimDueExtensionPublishPosts(
+    organizationId: string,
+    providerIdentifiers: string[],
+    now: Date,
+    limit: number,
+    leaseToken: string,
+    leaseCutoff: Date
+  ) {
+    const available: Prisma.PostWhereInput = {
+      OR: [{ releaseId: null }, { claimedAt: { lte: leaseCutoff } }],
+    };
+    const dueWhere = this.extensionDueWhere(organizationId, providerIdentifiers, now);
+
+    const candidates = await this._post.model.post.findMany({
+      where: { AND: [dueWhere, available] },
+      orderBy: { publishDate: 'asc' },
+      take: limit,
+      select: { id: true },
+    });
+    const ids = candidates.map((c) => c.id);
+    if (!ids.length) return [];
+
+    await this._post.model.post.updateMany({
+      // Re-check availability at write time so a concurrent claim of the same
+      // candidate loses the race for that row (guard is a no-op there).
+      where: { id: { in: ids }, state: State.QUEUE, ...available },
+      data: { releaseId: leaseToken, claimedAt: now },
+    });
+
+    return this._post.model.post.findMany({
+      where: { id: { in: ids }, releaseId: leaseToken },
+      orderBy: { publishDate: 'asc' },
+      select: PostsRepository.EXTENSION_DUE_SELECT,
+    });
+  }
+
+  /**
+   * Load the posts eligible for scheduling (DRAFT -> QUEUE) by id, scoped to the
+   * org. Only roots (parentPostId=null) are entry points — a thread's children
+   * are flipped implicitly with their anchor via {@link schedulePostGroupToQueue}.
+   * Carries just what the send-path resolver needs (integration + settings).
+   */
+  getSchedulablePostsByIds(organizationId: string, ids: string[]) {
+    if (!ids.length) return Promise.resolve([]);
+    return this._post.model.post.findMany({
+      where: {
+        id: { in: ids },
+        organizationId,
+        deletedAt: null,
+        parentPostId: null,
+      },
       select: {
         id: true,
-        content: true,
+        group: true,
+        state: true,
+        integrationId: true,
         settings: true,
-        title: true,
-        publishDate: true,
+        operationPlanId: true,
         integration: {
-          select: { id: true, name: true, providerIdentifier: true },
+          select: { providerIdentifier: true, disabled: true },
         },
+      },
+    });
+  }
+
+  /**
+   * Schedule a post's whole group (anchor + its thread chain) from DRAFT to QUEUE
+   * and stamp the resolved send-path. Group-scoped so a thread commits atomically
+   * as one channel's chain. DRAFT-only so already-scheduled / published / errored
+   * work is never disturbed. publishDate is left as materialized (planned date).
+   */
+  schedulePostGroupToQueue(
+    organizationId: string,
+    group: string,
+    publishMethod: PublishMethod,
+    publishDate?: Date
+  ) {
+    return this._post.model.post.updateMany({
+      where: {
+        organizationId,
+        group,
+        state: State.DRAFT,
+        deletedAt: null,
+      },
+      data: {
+        state: State.QUEUE,
+        publishMethod,
+        // Only override the materialized publishDate when the caller passes a
+        // new time; applied group-wide (thread chain shares one schedule time —
+        // order is carried by the parentPostId chain, not by publishDate).
+        ...(publishDate ? { publishDate } : {}),
       },
     });
   }

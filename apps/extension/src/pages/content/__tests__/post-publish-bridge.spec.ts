@@ -25,8 +25,10 @@ const pageMessage = (data: object) =>
 describe('Post-publish extension protocol', () => {
   beforeEach(() => vi.restoreAllMocks());
 
-  it('routes enqueue requests and echoes the ack with the requestId', () => {
-    const ack = { ok: true, accepted: [{ taskId: 'a', status: 'queued' }], rejected: [] };
+  it('demotes post-publish to a pure sync trigger (runs publish-due, ignores items)', () => {
+    // The message is now just a trigger: it forwards runPublishDue with NO items
+    // (the extension pulls its work from the backend), and echoes the pull summary.
+    const ack = { ok: true, summary: { due: 2, enqueued: 2, rejected: 0, stoppedReason: 'ok' } };
     const sendMessage = vi.fn((_m, cb) => cb(ack));
     stubChrome(sendMessage);
     const postMessage = vi.spyOn(window, 'postMessage');
@@ -38,21 +40,23 @@ describe('Post-publish extension protocol', () => {
         source: EXTENSION_MESSAGE.source,
         action: EXTENSION_MESSAGE.postPublish,
         requestId: 'req-1',
-        items,
+        items, // still accepted on the wire, but must be ignored
       })
     );
 
+    // Routed to the publish-due trigger, and the ignored `items` are NOT forwarded.
     expect(sendMessage).toHaveBeenCalledWith(
-      { action: 'publish:enqueue', requestId: 'req-1', items },
+      { action: 'posts:run-publish-due', requestId: 'req-1' },
       expect.any(Function)
     );
+    expect(sendMessage.mock.calls[0][0]).not.toHaveProperty('items');
     expect(postMessage).toHaveBeenCalledWith(
       expect.objectContaining({
         source: EXTENSION_MESSAGE.resultSource,
         action: EXTENSION_MESSAGE.postPublishResult,
         requestId: 'req-1',
         ok: true,
-        accepted: ack.accepted,
+        summary: ack.summary,
       }),
       window.location.origin
     );

@@ -1,25 +1,44 @@
 # Extension Post-Publish Protocol (batch + thread + cancel)
 
-The web app hands the extension a **batch of posts** (each optionally a
-thread) to publish in-browser with the user's own platform session, tracks
-per-task progress, and may **cancel tasks that have not started**.
+> **⚠️ Updated model — the DB `QUEUE` state is the source of truth.**
+> `aisee:post-publish` is now a **pure sync trigger**: the page no longer hands
+> the extension the posts to publish. Instead the page (1) commits the posts to
+> the send queue via [`POST /posts/schedule`](./posts-api.md#post-postsschedule)
+> (DRAFT → QUEUE), then (2) sends `aisee:post-publish` **with no `items`** just to
+> make the extension pull immediately. The extension pulls the due work from
+> [`POST /posts/publish-due`](./posts-api.md#post-postspublish-due) (also on its
+> own 2-min `aisee-publish-poll` alarm — so a missed trigger only adds latency),
+> then feeds it into the SAME internal queue described below. Any `items` a page
+> still sends on `aisee:post-publish` are **ignored**.
+>
+> Everything below the Messages table (payload shapes, serial drain, pacing,
+> backfill, scheduling, cancel/status) still describes that internal queue — it is
+> now fed by the publish-due pull loop (`runPublishLoop` → `enqueuePublishBatch`)
+> instead of by the page payload. Status is now read from the DB
+> (`GET /operation-plans/:id` post `state`), not the extension queue mirror.
 
-Shared types + page-side helpers: `@gitroom/helpers/extension/post-publish`
+The extension publishes each queued post in-browser with the user's own platform
+session, tracks per-task progress, and may **cancel tasks that have not started**.
+
+Shared types + internal helpers: `@gitroom/helpers/extension/post-publish`
 (`enqueuePublishBatch` / `cancelPublishTasks` / `getPublishQueueStatus` /
-`onPublishProgress`). External frontends (e.g. aisee-app) speak the raw
-postMessage protocol below.
+`onPublishProgress`) — used by the pull loop and any in-repo caller.
 
 ## Messages (same-origin `window.postMessage`)
 
 | Direction | `action` | Payload |
 |---|---|---|
-| page → ext | `aisee:post-publish` | `{ requestId, items: PublishPostItem[] }` |
-| ext → page | `aisee:post-publish-result` | `{ requestId, ok, accepted: PublishTaskState[], rejected: {taskId, reason}[] }` |
-| ext → page | `aisee:post-publish-progress` | `{ requestId, state: PublishTaskState }` — pushed on every transition |
+| page → ext | `aisee:post-publish` | `{ requestId }` — **pure trigger** (any `items` ignored); makes the extension pull publish-due now |
+| ext → page | `aisee:post-publish-result` | `{ requestId, ok, summary: { due, enqueued, rejected, stoppedReason } }` — result of the triggered pull |
+| ext → page | `aisee:post-publish-progress` | `{ requestId, state: PublishTaskState }` — pushed on every transition (still emitted as the pulled queue drains) |
 | page → ext | `aisee:post-publish-cancel` | `{ requestId, taskIds: string[] }` |
 | ext → page | `aisee:post-publish-cancel-result` | `{ requestId, ok, canceled: string[], notCancelable: {taskId, reason}[] }` |
 | page → ext | `aisee:post-publish-status` | `{ requestId }` |
 | ext → page | `aisee:post-publish-status-result` | `{ requestId, ok, states: PublishTaskState[] }` |
+
+> The `aisee:post-publish-result` shape **changed** with the demotion: it now
+> reports the pull `summary` (`{ due, enqueued, rejected, stoppedReason }`), not
+> the old `{ accepted, rejected }` enqueue ack.
 
 All page → ext messages carry `source: 'aisee'`; all ext → page messages carry
 `source: 'aisee-extension'`. Correlate request/response by `requestId`;
@@ -79,15 +98,45 @@ ever marked published while the DB row is untouched, and the popup offers a
 manual **Sync** (idempotent retry). This mirrors the Engage reply's
 `PATCH /engage/sent/:id/publish-reply` callback.
 
-## Example (batch enqueue)
+## Example — frontend flow (schedule, then trigger)
 
-One message carries the whole batch; the queue then drains it one task at a
-time. In-repo frontends use the helper; external frontends post the same
-`items` array over the raw protocol.
+The page commits to the send queue, then fires the trigger. Status is polled
+from the DB, not from the extension.
+
+```ts
+// 1) (optional) render the send-path choice — no dedicated endpoint: derive it
+//    from GET /admin/social-providers (extensionPublishable + hasWriteApi flags)
+//    intersected with the org's integrations list (a bound account → API path).
+
+// 2) commit DRAFT → QUEUE (the real "send"); publishMethod + date optional.
+const res = await fetch('/posts/schedule', {
+  method: 'POST', headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ posts: [
+    { id: 'post-1' },
+    { id: 'post-2', publishMethod: 'api', date: '2026-08-01T09:00:00.000Z' },
+  ] }),
+}).then((r) => r.json());
+// res.scheduled: [{id, publishMethod}]   res.failed: [{id, code, message}]
+
+// 3) trigger the extension to pull immediately (NO items). Optional — the 2-min
+//    aisee-publish-poll alarm would pick it up anyway.
+const requestId = crypto.randomUUID();
+window.postMessage({ source: 'aisee', action: 'aisee:post-publish', requestId }, location.origin);
+// ext → page: { source:'aisee-extension', action:'aisee:post-publish-result', requestId, ok, summary }
+
+// 4) poll DB for status: GET /operation-plans/:id → post.state (QUEUE|PUBLISHED|ERROR)
+```
+
+## Internal queue item shape (built by the publish-due pull loop)
+
+The pull loop maps each `POST /posts/publish-due` row into the `PublishPostItem`
+below and calls `enqueuePublishBatch`; the queue then drains one task at a time.
+This is no longer sent by the page — it is documented as the internal contract.
 
 ```ts
 import { enqueuePublishBatch } from '@gitroom/helpers/extension/post-publish';
 
+// Illustrative — this is what runPublishLoop builds from the publish-due response:
 const ack = await enqueuePublishBatch([
   // 1) plain single post
   {
@@ -125,14 +174,11 @@ const ack = await enqueuePublishBatch([
 // ack.accepted: PublishTaskState[]   ack.rejected: { taskId, reason }[]
 ```
 
-Raw protocol equivalent (external frontends):
-
-```ts
-window.postMessage(
-  { source: 'aisee', action: 'aisee:post-publish', requestId, items: [/* same array */] },
-  location.origin
-);
-```
+> Historical note: before the demotion, the page sent this whole array on
+> `aisee:post-publish` and the extension enqueued it directly. That path is gone —
+> the page now commits via `POST /posts/schedule` and only *triggers* the pull
+> (see the frontend flow above). The item shape above survives only as what the
+> pull loop constructs internally.
 
 ## Semantics
 

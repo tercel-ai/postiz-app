@@ -6,8 +6,14 @@ import {
 } from '@nestjs/common';
 import { PostsRepository } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.repository';
 import { CreatePostDto } from '@gitroom/nestjs-libraries/dtos/posts/create.post.dto';
+import { randomUUID } from 'crypto';
 import dayjs from 'dayjs';
-import { IntegrationManager } from '@gitroom/nestjs-libraries/integrations/integration.manager';
+import {
+  IntegrationManager,
+  PublishMethod,
+  PublishMethodError,
+  resolvePublishMethod,
+} from '@gitroom/nestjs-libraries/integrations/integration.manager';
 import { Integration, Post, Media, From, State } from '@prisma/client';
 import { GetPostsDto } from '@gitroom/nestjs-libraries/dtos/posts/get.posts.dto';
 import { GetPostsListDto } from '@gitroom/nestjs-libraries/dtos/posts/get.posts-list.dto';
@@ -137,7 +143,12 @@ export class PostsService {
   }
 
   async markStaleQueuePostsAsError(): Promise<number> {
-    return this._postRepository.markStaleQueuePostsAsError();
+    // Pass the extension-routed providers so the sweep excludes both explicit
+    // EXTENSION posts and legacy null-method posts on those integrations (they
+    // wait for the browser, not Temporal — see repository method).
+    return this._postRepository.markStaleQueuePostsAsError(
+      this._integrationManager.extensionPublishProviderIds()
+    );
   }
 
   /**
@@ -905,9 +916,18 @@ export class PostsService {
     try {
       const post = await this._postRepository.getPostById(postId);
       const providerId = post?.integration?.providerIdentifier;
-      if (providerId && this._integrationManager.isExtensionPublish(providerId)) {
+      // The persisted publishMethod is authoritative (set at schedule time and
+      // shared with the extension publish-due query, so the two paths stay
+      // mutually exclusive). Only fall back to the platform-capability check when
+      // it is unset (legacy posts created before the field existed).
+      const isExtension =
+        post?.publishMethod === 'EXTENSION' ||
+        (post?.publishMethod == null &&
+          !!providerId &&
+          this._integrationManager.isExtensionPublish(providerId));
+      if (isExtension) {
         this.logger.log(
-          `startWorkflow: ${providerId} is extension-published — skipping Temporal for postId=${postId}; it stays QUEUE for the browser extension`
+          `startWorkflow: postId=${postId} is extension-published (method=${post?.publishMethod ?? 'legacy:' + providerId}) — skipping Temporal; it stays QUEUE for the browser extension`
         );
         return;
       }
@@ -1015,6 +1035,27 @@ export class PostsService {
         content: updateContent[i],
       }));
 
+      // Explicit send-path choice on the editor: validate + resolve against the
+      // post's platform + bound account (an integration is always present here),
+      // so an impossible choice (e.g. 'api' on an extension-only platform) is
+      // rejected up-front rather than stranding the post in QUEUE. Omitted →
+      // undefined → routing falls back to the capability check at publish time.
+      let resolvedMethod: PublishMethod | undefined;
+      if (post.publishMethod) {
+        try {
+          resolvedMethod = resolvePublishMethod({
+            platform: post.settings.__type,
+            hasBoundIntegration: true,
+            choice: post.publishMethod,
+          });
+        } catch (err) {
+          if (err instanceof PublishMethodError) {
+            throw new BadRequestException(err.message);
+          }
+          throw err;
+        }
+      }
+
       const { posts } = await this._postRepository.createOrUpdatePost(
         body.type,
         orgId,
@@ -1023,7 +1064,8 @@ export class PostsService {
         body.tags,
         body.inter,
         body.source,
-        body.projectId
+        body.projectId,
+        resolvedMethod === 'api' ? 'API' : resolvedMethod === 'extension' ? 'EXTENSION' : undefined
       );
 
       if (!posts?.length) {
@@ -1511,13 +1553,28 @@ export class PostsService {
    * backend = scheduler, extension = executor).
    */
   async getDuePublishPosts(orgId: string, limit = 10) {
+    // providerIds only feeds the LEGACY (publishMethod=null) fallback branch;
+    // explicit publishMethod=EXTENSION posts are returned regardless of it, so we
+    // no longer short-circuit when the env allowlist is empty.
     const providerIds = this._integrationManager.extensionPublishProviderIds();
-    if (!providerIds.length) return { due: [] as any[] };
-    const rows = await this._postRepository.getDueExtensionPublishPosts(
+    const now = dayjs.utc();
+    // Lease: hand each due post to at most one browser instance for the lease
+    // window; only re-offer it once the lease expires (covers a crashed /
+    // reinstalled extension that never backfilled). The token makes the claim
+    // unambiguous under concurrency.
+    const leaseMinutes = Math.max(
+      1,
+      Number(process.env.EXTENSION_PUBLISH_LEASE_MINUTES) || 10
+    );
+    const leaseToken = `ext_${randomUUID()}`;
+    const leaseCutoff = now.subtract(leaseMinutes, 'minute').toDate();
+    const rows = await this._postRepository.claimDueExtensionPublishPosts(
       orgId,
       providerIds,
-      dayjs.utc().toDate(),
-      Math.max(1, Math.min(limit, 50))
+      now.toDate(),
+      Math.max(1, Math.min(limit, 50)),
+      leaseToken,
+      leaseCutoff
     );
     const due = rows.map((p) => {
       let settings: Record<string, any> = {};
@@ -1527,8 +1584,10 @@ export class PostsService {
         /* malformed settings → publish without them */
       }
       return {
+        // Platform comes from the integration when bound, else from settings.__type
+        // (operation-plan posts publish by platform with a null integrationId).
         id: p.id,
-        platform: p.integration?.providerIdentifier,
+        platform: p.integration?.providerIdentifier || settings.__type,
         title: p.title || settings.title || undefined,
         subreddit: settings.subreddit || undefined,
         segments: [{ text: stripHtmlValidation('normal', p.content || '', true) }],
@@ -1536,6 +1595,121 @@ export class PostsService {
       };
     });
     return { due };
+  }
+
+  /**
+   * Commit a batch of DRAFT posts to the send queue (DRAFT -> QUEUE). This is the
+   * single entry point that turns generated/operation-plan drafts into work the
+   * send paths pick up, and where the send-path decision is made ONCE per post:
+   *   - resolvePublishMethod stamps EXTENSION or API on the post (+ its thread
+   *     chain) based on platform capability, the bound account, and the user's
+   *     optional choice; a post that cannot honour the choice fails individually.
+   *   - API posts additionally start the Temporal workflow; EXTENSION posts just
+   *     stay QUEUE for the extension publish-due loop.
+   * Partial success: each post is scheduled independently and failures are
+   * reported per id (so one unbindable platform never blocks the rest).
+   */
+  async schedulePosts(
+    orgId: string,
+    items: Array<{ id: string; publishMethod?: PublishMethod; date?: string }>
+  ) {
+    const ids = [...new Set(items.map((i) => i.id))];
+    const itemById = new Map(items.map((i) => [i.id, i]));
+    const posts = await this._postRepository.getSchedulablePostsByIds(orgId, ids);
+    const postById = new Map(posts.map((p) => [p.id, p]));
+
+    const scheduled: Array<{ id: string; publishMethod: PublishMethod | null }> = [];
+    const failed: Array<{ id: string; code: string; message: string }> = [];
+
+    for (const id of ids) {
+      const post = postById.get(id);
+      if (!post) {
+        failed.push({ id, code: 'NOT_FOUND', message: 'Post not found' });
+        continue;
+      }
+      // Idempotent: a post already scheduled/published is a no-op success.
+      if (post.state !== 'DRAFT') {
+        if (post.state === 'QUEUE' || post.state === 'PUBLISHED') {
+          // Report the STORED method as-is: null (legacy/unset) stays null rather
+          // than being guessed as 'extension' (a null-method post routes by the
+          // capability fallback, which may be API).
+          scheduled.push({
+            id,
+            publishMethod:
+              post.publishMethod === 'API'
+                ? 'api'
+                : post.publishMethod === 'EXTENSION'
+                  ? 'extension'
+                  : null,
+          });
+        } else {
+          failed.push({
+            id,
+            code: 'INVALID_STATE',
+            message: `Cannot schedule a post in state ${post.state}`,
+          });
+        }
+        continue;
+      }
+
+      let settings: Record<string, any> = {};
+      try {
+        settings = JSON.parse(post.settings || '{}') || {};
+      } catch {
+        /* malformed settings → platform resolves from the integration only */
+      }
+      const platform =
+        post.integration?.providerIdentifier || settings.__type || '';
+      const hasBoundIntegration =
+        !!post.integrationId && post.integration?.disabled !== true;
+
+      let method: PublishMethod;
+      try {
+        method = resolvePublishMethod({
+          platform,
+          hasBoundIntegration,
+          choice: itemById.get(id)?.publishMethod ?? null,
+        });
+      } catch (err) {
+        if (err instanceof PublishMethodError) {
+          failed.push({ id, code: err.code, message: err.message });
+        } else {
+          failed.push({
+            id,
+            code: 'SCHEDULE_FAILED',
+            message: (err as Error)?.message || 'Failed to resolve send method',
+          });
+        }
+        continue;
+      }
+
+      const newDate = itemById.get(id)?.date;
+      await this._postRepository.schedulePostGroupToQueue(
+        orgId,
+        post.group,
+        method === 'api' ? 'API' : 'EXTENSION',
+        newDate ? dayjs(newDate).toDate() : undefined
+      );
+
+      // API posts publish through Temporal; EXTENSION posts stay QUEUE for the
+      // extension pull loop. startWorkflow re-reads publishMethod and no-ops for
+      // extension, so this call is the API-only trigger.
+      if (method === 'api') {
+        try {
+          await this.startWorkflow(getSocialTaskQueue(platform), id, orgId);
+        } catch (err) {
+          this.logger.warn(
+            `schedulePosts: startWorkflow failed for postId=${id}: ${(err as Error)?.message || err}`
+          );
+          // Leave it QUEUE; a stuck-QUEUE backstop / manual retry recovers it,
+          // rather than failing the whole batch after the DB flip succeeded.
+        }
+      }
+
+      scheduled.push({ id, publishMethod: method });
+    }
+
+    return { scheduled, failed };
   }
 
   /** Stamp the given org-owned posts as fetched-now (backfill dedup gate). */

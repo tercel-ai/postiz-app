@@ -490,6 +490,20 @@ model Post {
   parentPostId               String?
   releaseId                  String?
   releaseURL                 String?
+  // Send-path decision for this post (see PublishMethod). Resolved once at
+  // schedule time; both the Temporal divert (startWorkflow) and the extension
+  // publish-due query read it, so the two paths are mutually exclusive.
+  publishMethod              PublishMethod?
+  // Extension publish LEASE timestamp. When the extension publish-due endpoint
+  // hands a QUEUE post to a browser instance it stamps claimedAt=now and writes
+  // a lease token into releaseId, then only re-offers the post once the lease
+  // has expired (now - EXTENSION_PUBLISH_LEASE_MINUTES). Prevents two browser
+  // instances — or the same instance after an uninstall/reinstall — from both
+  // claiming and double-publishing the same post. On success the extension
+  // backfills PUBLISHED (overwriting releaseId), so the lease is released
+  // implicitly. Only meaningful for extension-published posts (Temporal claims
+  // via releaseId alone and never sets this).
+  claimedAt                  DateTime?
   settings                   String?
   image                      String?
   submittedForOrderId        String?
@@ -566,6 +580,8 @@ model Post {
   @@index([organizationId, state, publishDate])
   @@index([lastMetricsFetchAt])
   @@index([operationPlanId])
+  // Serves the extension publish-due scan (state + publishMethod + due date).
+  @@index([state, publishMethod, publishDate])
 }
 
 enum OperationPlanStatus {
@@ -1042,6 +1058,22 @@ enum State {
   PUBLISHED
   ERROR
   DRAFT
+}
+
+// How a QUEUE post is actually sent. Single source of truth for the publishing
+// divert: EXACTLY ONE value per post, resolved once when the post is scheduled
+// (DRAFT -> QUEUE). Both send paths read THIS field, so a post can never be
+// picked up by both — the structural double-publish guard:
+//   - API       -> the Temporal post workflow publishes it via the provider's
+//                  backend write API (requires a bound OAuth integration).
+//   - EXTENSION -> the backend does NOT publish it; it stays QUEUE and the
+//                  browser extension's publish-due loop claims and publishes it
+//                  in-browser with the user's own session, then backfills.
+// Null = legacy/unset: routing falls back to the platform-capability check
+// (isExtensionPublishProvider) so pre-existing QUEUE posts keep working.
+enum PublishMethod {
+  API
+  EXTENSION
 }
 
 enum SubscriptionTier {

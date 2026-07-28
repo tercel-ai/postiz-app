@@ -120,6 +120,93 @@ export function extensionPublishProviderIds(): string[] {
   );
 }
 
+/** The persisted send-path decision (matches the Prisma PublishMethod enum, lowercased). */
+export type PublishMethod = 'extension' | 'api';
+
+/**
+ * Thrown by {@link resolvePublishMethod} when the requested/derived method is
+ * not achievable for a post. `code` is a stable machine string the API surfaces
+ * per-post so the UI can prompt the right fix (e.g. connect an account).
+ */
+export class PublishMethodError extends Error {
+  constructor(
+    public readonly code:
+      | 'ACCOUNT_BINDING_REQUIRED'
+      | 'PLATFORM_NOT_EXTENSION_PUBLISHABLE',
+    message: string
+  ) {
+    super(message);
+    this.name = 'PublishMethodError';
+  }
+}
+
+/**
+ * Whether a platform intrinsically has NO usable backend write API and therefore
+ * can ONLY be published through the extension (the provider's `extensionPublish`
+ * flag — hackernews/medium/quora). Distinct from the env allowlist, which merely
+ * PREFERS the extension for a platform that could also use the backend API.
+ */
+export function isExtensionOnlyProvider(providerIdentifier: string): boolean {
+  const id = (providerIdentifier || '').toLowerCase();
+  return !!socialIntegrationList.find((p) => p.identifier === id)?.extensionPublish;
+}
+
+/** Whether the browser extension can publish this platform in-browser at all. */
+export function isExtensionPublishablePlatform(providerIdentifier: string): boolean {
+  return EXTENSION_PUBLISHABLE.has((providerIdentifier || '').toLowerCase());
+}
+
+/**
+ * Resolve the single send-path for a post at schedule time. This is the ONE
+ * place both send paths agree on, so the same input can never route to two
+ * executors (the double-publish guard). Capability model:
+ *   - extensionCapable = platform is in EXTENSION_PUBLISHABLE_PLATFORMS.
+ *   - apiCapable       = a social account is bound AND the platform is not
+ *                        extension-only (it has a usable backend write API).
+ * Rules:
+ *   - explicit 'api'        -> require apiCapable, else ACCOUNT_BINDING_REQUIRED.
+ *   - explicit 'extension'  -> require extensionCapable, else PLATFORM_NOT_EXTENSION_PUBLISHABLE.
+ *   - no choice: the only capable path wins; when BOTH are capable (e.g. X with a
+ *     bound account) default to 'extension' (personal-session posting, dodging
+ *     API cost/limits); when NEITHER is capable -> ACCOUNT_BINDING_REQUIRED.
+ */
+export function resolvePublishMethod(input: {
+  platform: string;
+  hasBoundIntegration: boolean;
+  choice?: PublishMethod | null;
+}): PublishMethod {
+  const platform = (input.platform || '').toLowerCase();
+  const extensionCapable = EXTENSION_PUBLISHABLE.has(platform);
+  const apiCapable = input.hasBoundIntegration && !isExtensionOnlyProvider(platform);
+
+  if (input.choice === 'api') {
+    if (!apiCapable) {
+      throw new PublishMethodError(
+        'ACCOUNT_BINDING_REQUIRED',
+        `Cannot publish ${platform || 'this post'} via API: connect a ${platform || 'social'} account first`
+      );
+    }
+    return 'api';
+  }
+  if (input.choice === 'extension') {
+    if (!extensionCapable) {
+      throw new PublishMethodError(
+        'PLATFORM_NOT_EXTENSION_PUBLISHABLE',
+        `${platform || 'This platform'} cannot be published by the browser extension`
+      );
+    }
+    return 'extension';
+  }
+
+  // Auto: the only capable path wins; both -> extension; neither -> needs binding.
+  if (extensionCapable) return 'extension';
+  if (apiCapable) return 'api';
+  throw new PublishMethodError(
+    'ACCOUNT_BINDING_REQUIRED',
+    `Cannot publish ${platform || 'this post'}: connect a ${platform || 'social'} account first`
+  );
+}
+
 @Injectable()
 export class IntegrationManager {
   /** Instance passthrough to {@link isExtensionPublishProvider}. */
@@ -229,6 +316,15 @@ export class IntegrationManager {
     return socialIntegrationList.map((p) => ({
       identifier: p.identifier,
       name: p.name,
+      // Static send-path capability, for the scheduling UI to render the method
+      // choice. `extensionPublishable` = the browser extension can publish it
+      // in-browser; `hasWriteApi` = it has a usable backend write API (false for
+      // extension-only platforms like hackernews/medium/quora). The DYNAMIC half
+      // — whether THIS org has a bound account (apiCapable) — the client derives
+      // by intersecting `hasWriteApi` with its own integrations list. The backend
+      // still enforces the full rules at commit time (resolvePublishMethod).
+      extensionPublishable: isExtensionPublishablePlatform(p.identifier),
+      hasWriteApi: !p.extensionPublish,
     }));
   }
   getSocialIntegration(integration: string): SocialProvider {

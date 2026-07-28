@@ -6,6 +6,12 @@ Operation plans turn a completed Aisee analysis task into a project-scoped publi
 
 Base paths are mounted on the existing authenticated backend API. All requests require the normal Postiz session cookie.
 
+> **Sending a plan's posts.** Materialization creates posts in `DRAFT` — they are
+> not sent yet. The workspace commits selected posts to the send queue via
+> [`POST /posts/schedule`](./posts-api.md#post-postsschedule) (DRAFT → QUEUE),
+> which resolves each post's send path (extension vs API) once. See
+> [Publish method & the send queue](./posts-api.md#publish-method--the-send-queue).
+
 ## Create Operation Plan
 
 ```http

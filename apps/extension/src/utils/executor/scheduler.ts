@@ -12,8 +12,19 @@ import { runScanLoop } from './scan.runner';
 import { runPublishLoop } from './publish.runner';
 
 export const ENGAGE_SCAN_ALARM = 'aisee-engage-scan';
-// Chrome clamps periods to ≥1 min; 15 keeps the cadence organic and cheap.
+// Chrome clamps periods to ≥1 min; 15 keeps the SCAN cadence organic and cheap
+// (scanning too often risks account rate-limits — keep this separate from the
+// publish poll below, which must NOT drive a scan).
 const SCAN_PERIOD_MINUTES = 15;
+
+// Backend publish-due poll: the extension pulls QUEUE posts the backend has
+// marked for in-browser publishing. Because the DB is the source of truth, this
+// poll is what bounds how quickly a scheduled/edited post goes out (and is what
+// re-syncs after an uninstall/reinstall). 2 min keeps latency low while the
+// backend lease keeps a due post from being claimed twice. Deliberately its OWN
+// alarm so bumping publish latency never touches the scan cadence.
+export const PUBLISH_POLL_ALARM = 'aisee-publish-poll';
+const PUBLISH_POLL_MINUTES = 2;
 
 /** Arm the periodic scan alarm if a session exists (idempotent). */
 export async function ensureEngageScanAlarm(): Promise<void> {
@@ -40,15 +51,47 @@ export async function clearEngageScanAlarm(): Promise<void> {
   }
 }
 
-/** Returns true when the alarm was this module's (so the caller can stop). */
+/** Arm the periodic backend publish-due poll if a session exists (idempotent). */
+export async function ensurePublishPollAlarm(): Promise<void> {
+  try {
+    const token = await getValidAccessToken();
+    if (!token) return; // signed out → never poll
+    const existing = await chrome.alarms.get(PUBLISH_POLL_ALARM);
+    if (existing) return;
+    chrome.alarms.create(PUBLISH_POLL_ALARM, {
+      delayInMinutes: 1,
+      periodInMinutes: PUBLISH_POLL_MINUTES,
+    });
+    console.log('[aisee][publish] poll alarm armed', PUBLISH_POLL_MINUTES, 'min');
+  } catch (e) {
+    console.warn('[aisee][publish] ensurePublishPollAlarm failed', e);
+  }
+}
+
+export async function clearPublishPollAlarm(): Promise<void> {
+  try {
+    await chrome.alarms.clear(PUBLISH_POLL_ALARM);
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Returns true when the alarm was the engage-scan alarm (so the caller can stop). */
 export async function handleEngageAlarm(name: string): Promise<boolean> {
   if (name !== ENGAGE_SCAN_ALARM) return false;
   console.log('[aisee][scan] alarm fired — starting scheduled scan', new Date().toISOString());
   const summary = await runScanLoop();
   console.log('[aisee][scan] scheduled scan done', summary);
-  // Same cadence, same session guard: drain any due extension-routed posts
-  // (hackernews/quora/…) the backend has queued for in-browser publishing. Kept
-  // independent of the scan result so a scan error never blocks publishing.
+  return true;
+}
+
+/**
+ * Returns true when the alarm was the publish-due poll (so the caller can stop).
+ * Pulls + publishes any due extension-routed posts the backend has queued. Kept
+ * separate from the scan so a scan error never blocks publishing and vice versa.
+ */
+export async function handlePublishPollAlarm(name: string): Promise<boolean> {
+  if (name !== PUBLISH_POLL_ALARM) return false;
   try {
     const publish = await runPublishLoop();
     console.log('[aisee][publish] scheduled publish done', publish);

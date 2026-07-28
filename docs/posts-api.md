@@ -32,6 +32,41 @@ list / metrics / tags / extension callbacks). For the deep request-body detail o
 
 ---
 
+## Publish method & the send queue
+
+The **DB `QUEUE` state is the single source of truth** for what should be sent. A
+`QUEUE` post is sent by exactly ONE of two paths, decided once at schedule time
+and recorded in `Post.publishMethod`:
+
+| `publishMethod` | Sent by | When |
+| --- | --- | --- |
+| `API` | The Temporal post workflow (provider backend write API) | Platform has a usable write API **and** a bound OAuth account. |
+| `EXTENSION` | The browser extension, in-browser with the user's own session | Platform has no usable write API (hackernews/medium/quora), or an operator/user routed a dual-capable platform (x/reddit/linkedin) to the extension. |
+
+Both send paths read the **same** `publishMethod`, so a post can never be picked
+up by both — the structural **double-publish guard**. A second guard exists at
+execution time: the API path uses the `releaseId` optimistic claim; the extension
+path uses the [publish-due lease](#post-postspublish-due).
+
+`publishMethod` is nullable: when unset, routing falls back to the
+platform-capability check (`isExtensionPublishProvider`), preserving legacy
+behavior. It is set two ways:
+
+- **Bulk**, for operation-plan drafts: [`POST /posts/schedule`](#post-postsschedule)
+  resolves + stamps it while flipping DRAFT → QUEUE (and can set a new schedule
+  time per post).
+- **Single post**, on the main editor: [`POST /posts/`](#post-posts) accepts an
+  optional `posts[].publishMethod` and persists it with the post.
+
+The scheduling UI derives the selectable methods client-side from
+[`GET /admin/social-providers`](./admin-api.md) — each provider carries
+`extensionPublishable` + `hasWriteApi` static flags — intersected with the org's
+own integrations list (a bound account is required for the API path). The backend
+still enforces the full rules at commit time (`resolvePublishMethod`), so a bad
+client choice is rejected per-post rather than mis-routed.
+
+---
+
 ## Endpoint Index
 
 | Method | Path | Summary |
@@ -61,7 +96,9 @@ list / metrics / tags / extension callbacks). For the deep request-body detail o
 | POST | [`/posts/:id/retry`](#post-postsidretry) | Retry a failed post |
 | PUT | [`/posts/:id/date`](#put-postsiddate) | Reschedule a post |
 | POST | [`/posts/separate-posts`](#post-postsseparate-posts) | Split long content into a thread |
+| POST | [`/posts/schedule`](#post-postsschedule) | Commit DRAFT posts to the send queue (DRAFT → QUEUE) |
 | PATCH | [`/posts/:id/extension-published`](#patch-postsidextension-published) | Extension publish-on-success callback |
+| POST | [`/posts/publish-due`](#post-postspublish-due) | Extension: claim due QUEUE posts to publish in-browser (leased) |
 | POST | [`/posts/sync-metrics`](#post-postssync-metrics) | Sync raw external metrics for one post |
 
 ---
@@ -267,7 +304,7 @@ publish**. A single request can target multiple integrations. Guarded by
 | `date` | ISO date-time | yes | Scheduled time (also required for `now`/`draft`). |
 | `shortLink` | `boolean` | yes | Apply short-linking. |
 | `tags` | `{ value, label }[]` | yes | May be empty array. |
-| `posts` | `Post[]` | yes¹ | ≥1; each has `integration.id`, `value[]` (content + media), optional `group`, provider `settings`. |
+| `posts` | `Post[]` | yes¹ | ≥1; each has `integration.id`, `value[]` (content + media), optional `group`, provider `settings`, optional `publishMethod` (`extension` \| `api` — explicit send path; validated against the platform + bound account, persisted on the post; omit to fall back to the capability check). |
 | `projectId` | `string` | no | aisee project scope. |
 | `source` | `PostSource` | no | `calendar` / `chat` / `engage`. |
 | `order` | `string` | no | Ordering hint. |
@@ -339,6 +376,64 @@ Split long content into thread-sized segments.
 - **Body**: `{ "content": string, "len": number }` — `len` is the per-segment
   character limit.
 
+### POST /posts/schedule
+
+Commit a batch of `DRAFT` posts to the send queue (`DRAFT → QUEUE`). This is the
+single entry point that turns generated / operation-plan drafts into work the
+send paths pick up, and where the **send-path decision is made once per post**
+(the double-publish guard — see [Publish method & the send queue](#publish-method--the-send-queue)):
+
+- Each post's `publishMethod` (`extension` | `api`) is resolved from platform
+  capability + whether an account is bound + the caller's optional `publishMethod`
+  choice, then stamped on the post **and its thread chain** (group-scoped flip).
+- `api` posts additionally start their Temporal workflow; `extension` posts just
+  stay `QUEUE` for the extension [publish-due](#post-postspublish-due) loop.
+- Each post keeps its already-scheduled `publishDate` unless the item carries a
+  new `date` (per-post — a batch can commit different posts at different times);
+  a past date simply makes it due immediately. A new `date` applies group-wide
+  (the post's whole thread chain).
+- Partial success: each post is scheduled independently — one unschedulable post
+  never blocks the rest.
+
+- **Body** — `SchedulePostsDto`:
+
+```jsonc
+{
+  "posts": [
+    {
+      "id": "<post-uuid>",
+      "publishMethod": "extension" | "api",   // optional → auto-resolve
+      "date": "2026-08-01T09:00:00.000Z"       // optional ISO → override this post's publishDate
+    }
+  ]
+}
+```
+
+- **Response**:
+
+```jsonc
+{
+  "scheduled": [ { "id": "<post-uuid>", "publishMethod": "extension" | "api" } ],
+  "failed":    [ { "id": "<post-uuid>", "code": "<code>", "message": "<human text>" } ]
+}
+```
+
+| `failed[].code` | Meaning |
+| --- | --- |
+| `ACCOUNT_BINDING_REQUIRED` | `api` chosen (or the only viable path) but no bound account for the platform. |
+| `PLATFORM_NOT_EXTENSION_PUBLISHABLE` | `extension` chosen for a platform the extension can't publish. |
+| `NOT_FOUND` | Post not found in this org. |
+| `INVALID_STATE` | Post is not `DRAFT` (and not an idempotent already-`QUEUE`/`PUBLISHED`). |
+
+An already-`QUEUE`/`PUBLISHED` post is an idempotent success (returned under `scheduled`, no re-flip).
+
+> **Rendering the method choice (client-side).** There is no dedicated capability
+> endpoint. The UI derives selectable methods from
+> [`GET /admin/social-providers`](./admin-api.md) (each provider's
+> `extensionPublishable` + `hasWriteApi` static flags) intersected with the org's
+> integrations list (a bound account enables the API path). `resolvePublishMethod`
+> on the backend is the authority — a bad choice comes back in `failed[]`.
+
 ### DELETE /posts/:group
 
 Delete a whole post group.
@@ -363,6 +458,47 @@ Org-scoped and idempotent.
 | --- | --- | --- | --- |
 | `releaseURL` | `string` | yes | Permalink; max 2048 chars. |
 | `releaseId` | `string` | no | Platform post id (Reddit `t3_*` / X `rest_id`); max 512. |
+
+### POST /posts/publish-due
+
+The browser extension polls this for `QUEUE` posts due to publish in-browser
+(backend = scheduler, extension = executor — the backend makes no provider API
+call here). Returns single-segment, due (`publishDate <= now`) roots whose send
+path resolves to the extension (explicit `publishMethod = EXTENSION`, or the
+legacy fallback: an extension-routed integration with `publishMethod` unset).
+Recurring originals are excluded (they publish via the Temporal-only
+clone-per-cycle path).
+
+**Lease.** Each returned post is atomically **claimed** for a lease window: it is
+stamped with a unique token (`releaseId`) + `claimedAt = now` and is not re-offered
+until the lease expires (`now − EXTENSION_PUBLISH_LEASE_MINUTES`, default 10). This
+stops two browser instances — or the same instance after an uninstall/reinstall —
+from both claiming and double-publishing the same post. A successful
+[extension-published](#patch-postsidextension-published) backfill leaves `QUEUE`
+(overwriting `releaseId`), releasing the lease; a crashed publish is re-offered
+only after the lease expires.
+
+- **Body**: `{ "limit"?: number }` (default 10, clamped to `[1, 50]`).
+- **Response**:
+
+```jsonc
+{
+  "due": [
+    {
+      "id": "<post-uuid>",              // taskId — the extension backfills the SAME row
+      "platform": "hackernews",         // integration.providerIdentifier, else settings.__type
+      "title": "…",                     // optional (article/story platforms)
+      "subreddit": [ /* … */ ],         // optional (reddit publishing header)
+      "segments": [ { "text": "…" } ],
+      "publishDate": "2026-07-27T00:00:00.000Z"
+    }
+  ]
+}
+```
+
+Cadence: the extension polls this on its own 2-min alarm (`aisee-publish-poll`),
+and immediately on the `aisee:post-publish` sync trigger (see
+[Extension Post-Publish Protocol](./extension-post-publish-protocol.md)).
 
 ### POST /posts/sync-metrics
 

@@ -28,10 +28,15 @@ export function installPostPublishBridge(): void {
     const route =
       data.action === EXTENSION_MESSAGE.postPublish
         ? {
+            // DEMOTED to a pure SYNC TRIGGER. The DB QUEUE is the single source
+            // of truth now: the page schedules via POST /posts/schedule first,
+            // then sends this message only to make the extension pull publish-due
+            // IMMEDIATELY (instead of waiting for the 2-min poll). Any `items` the
+            // page sends are IGNORED — the extension no longer takes its work from
+            // the page payload, it pulls the due posts from the backend.
             swMessage: {
-              action: ENGAGE_EXTENSION_ACTION.publishEnqueue,
+              action: ENGAGE_EXTENSION_ACTION.runPublishDue,
               requestId: data.requestId,
-              items: Array.isArray(data.items) ? data.items : [],
             },
             resultAction: EXTENSION_MESSAGE.postPublishResult,
           }

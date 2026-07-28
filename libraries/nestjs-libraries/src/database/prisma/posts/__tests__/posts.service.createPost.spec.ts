@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { BadRequestException } from '@nestjs/common';
 import { PostsService } from '../posts.service';
 
 // ---------------------------------------------------------------------------
@@ -78,6 +79,64 @@ function makeBody(overrides?: Partial<{ type: string; posts: any[] }>) {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+describe('PostsService.createPost — explicit publishMethod (editor)', () => {
+  let mocks: ReturnType<typeof createMocks>;
+  let service: PostsService;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks = createMocks();
+    service = createService(mocks);
+  });
+
+  // createOrUpdatePost(type, orgId, date, post, tags, inter, source, projectId, publishMethod)
+  const methodArg = () => mocks.postRepository.createOrUpdatePost.mock.calls[0][8];
+
+  it('resolves an explicit "extension" choice to the EXTENSION enum', async () => {
+    await service.createPost(
+      'org-1',
+      makeBody({ posts: [{ integration: { id: 'int-1' }, settings: { __type: 'x' }, value: [{ content: 'hi', image: [] }], publishMethod: 'extension' }] } as any),
+      'user-1'
+    );
+    expect(methodArg()).toBe('EXTENSION');
+  });
+
+  it('resolves an explicit "api" choice to the API enum (editor always has a bound integration)', async () => {
+    await service.createPost(
+      'org-1',
+      makeBody({ posts: [{ integration: { id: 'int-1' }, settings: { __type: 'x' }, value: [{ content: 'hi', image: [] }], publishMethod: 'api' }] } as any),
+      'user-1'
+    );
+    expect(methodArg()).toBe('API');
+  });
+
+  it('passes undefined when no publishMethod is given (fall back to capability check)', async () => {
+    await service.createPost('org-1', makeBody(), 'user-1');
+    expect(methodArg()).toBeUndefined();
+  });
+
+  it('rejects an impossible choice — "api" on an extension-only platform', async () => {
+    await expect(
+      service.createPost(
+        'org-1',
+        makeBody({ posts: [{ integration: { id: 'int-1' }, settings: { __type: 'medium' }, value: [{ content: 'hi', image: [] }], publishMethod: 'api' }] } as any),
+        'user-1'
+      )
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(mocks.postRepository.createOrUpdatePost).not.toHaveBeenCalled();
+  });
+
+  it('rejects "extension" on a platform the extension cannot publish', async () => {
+    await expect(
+      service.createPost(
+        'org-1',
+        makeBody({ posts: [{ integration: { id: 'int-1' }, settings: { __type: 'twitter' }, value: [{ content: 'hi', image: [] }], publishMethod: 'extension' }] } as any),
+        'user-1'
+      )
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+});
 
 describe('PostsService.createPost — overage billing integration', () => {
   let mocks: ReturnType<typeof createMocks>;

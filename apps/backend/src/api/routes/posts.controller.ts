@@ -32,6 +32,7 @@ import { ShortLinkService } from '@gitroom/nestjs-libraries/short-linking/short.
 import { CreateTagDto } from '@gitroom/nestjs-libraries/dtos/posts/create.tag.dto';
 import { CreatePostDto } from '@gitroom/nestjs-libraries/dtos/posts/create.post.dto';
 import { MarkExtensionPublishedDto } from '@gitroom/nestjs-libraries/dtos/posts/mark-extension-published.dto';
+import { SchedulePostsDto } from '@gitroom/nestjs-libraries/dtos/posts/schedule-posts.dto';
 import {
   AuthorizationActions,
   Sections,
@@ -350,6 +351,22 @@ export class PostsController {
     @Body('date') date: string
   ) {
     return this._postsService.changeDate(org.id, id, date);
+  }
+
+  /**
+   * Commit a batch of DRAFT posts to the send queue (DRAFT -> QUEUE). Used by the
+   * operation-plan workspace to "send" selected posts: the DB QUEUE state becomes
+   * the single source of truth and the send path (extension vs API) is decided
+   * here per post. API posts start their Temporal workflow; extension posts stay
+   * QUEUE for the extension publish-due loop. Returns per-post scheduled/failed
+   * so one unbindable platform never blocks the rest.
+   */
+  @Post('/schedule')
+  async schedulePosts(
+    @GetOrgFromRequest() org: Organization,
+    @Body() body: SchedulePostsDto
+  ) {
+    return this._postsService.schedulePosts(org.id, body.posts);
   }
 
   @Post('/separate-posts')

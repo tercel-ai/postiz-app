@@ -95,7 +95,8 @@ describe('PostsService projectId threading', () => {
       [],
       undefined,
       undefined,
-      'proj-1'
+      'proj-1',
+      undefined
     );
   });
 
@@ -108,6 +109,7 @@ describe('PostsService projectId threading', () => {
       expect.any(String),
       expect.any(Object),
       [],
+      undefined,
       undefined,
       undefined,
       undefined

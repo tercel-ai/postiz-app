@@ -45,6 +45,9 @@ import {
   ensureEngageScanAlarm,
   clearEngageScanAlarm,
   handleEngageAlarm,
+  ensurePublishPollAlarm,
+  clearPublishPollAlarm,
+  handlePublishPollAlarm,
 } from '@gitroom/extension/utils/executor/scheduler';
 
 const isDevelopment = process.env.NODE_ENV === 'development';
@@ -217,6 +220,9 @@ async function reconcileBrowserSession(): Promise<void> {
 function reArmAlarms(): void {
   void reArmRefreshAlarmIfLoggedIn();
   void ensureEngageScanAlarm();
+  // Re-arm the 2-min backend publish-due poll so QUEUE posts re-sync across SW
+  // restarts and extension reinstalls without any web-page trigger.
+  void ensurePublishPollAlarm();
   // The shared X read-tab's idle-close timer lives in this worker; if a prior
   // worker was killed mid-idle its tab would linger, so reap it on startup.
   void reapOrphanXReadTab();
@@ -230,8 +236,11 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   // Publish-due first (scheduled posts), then the engage-scan executor, then
   // the auth token refresh — names never collide.
   if (handlePublishAlarm(alarm.name)) return;
-  void handleEngageAlarm(alarm.name).then((handled) => {
-    if (!handled) void handleAuthAlarm(alarm.name);
+  void handlePublishPollAlarm(alarm.name).then((handledPoll) => {
+    if (handledPoll) return;
+    void handleEngageAlarm(alarm.name).then((handled) => {
+      if (!handled) void handleAuthAlarm(alarm.name);
+    });
   });
 });
 
@@ -249,8 +258,9 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
         sendResponse({ ok: true, user });
         // Refresh cookie is now set on this host → pull any open login tabs in.
         enterFrontendAuthTabs();
-        // Session exists → start the background engage scan.
+        // Session exists → start the background engage scan + publish poll.
         void ensureEngageScanAlarm();
+        void ensurePublishPollAlarm();
       })
       .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
     return true;
@@ -263,6 +273,7 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
         logoutFrontendTabs();
         // No session → stop background fetches.
         void clearEngageScanAlarm();
+        void clearPublishPollAlarm();
       })
       .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
     return true;
@@ -319,10 +330,15 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
     bootstrapFromFrontendToken(request.token)
       .then(() => {
         sendResponse({ ok: true });
-        // A non-empty token means the browser is logged in → ensure the scan
-        // alarm; an empty token (logout) → clear it.
-        if (request.token) void ensureEngageScanAlarm();
-        else void clearEngageScanAlarm();
+        // A non-empty token means the browser is logged in → ensure the scan +
+        // publish-poll alarms; an empty token (logout) → clear them.
+        if (request.token) {
+          void ensureEngageScanAlarm();
+          void ensurePublishPollAlarm();
+        } else {
+          void clearEngageScanAlarm();
+          void clearPublishPollAlarm();
+        }
       })
       .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
     return true;
