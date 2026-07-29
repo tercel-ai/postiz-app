@@ -367,9 +367,11 @@ function attachXImagesInPage(
 
 /**
  * Download one image from OUR server and encode it for executeScript transfer
- * (args are JSON-serialized, so bytes travel as base64).
+ * (args are JSON-serialized, so bytes travel as base64). Shared with
+ * linkedin.poster — this download/encode step runs in the background/SW
+ * context (not page-injected), so it has no self-containment constraint.
  */
-async function fetchImageForPage(
+export async function fetchImageForPage(
   url: string
 ): Promise<{ name: string; mime: string; b64: string }> {
   const res = await fetch(url);

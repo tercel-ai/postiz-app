@@ -93,8 +93,8 @@ export const TITLE_REQUIRED_PLATFORMS: readonly PublishPlatform[] = [
 
 /**
  * Platforms whose extension poster can actually upload an image (Reddit's
- * media-asset lease, X's native composer attachment). Every other poster is
- * text-only.
+ * media-asset lease, X's native composer attachment, LinkedIn's media-editor
+ * file input). Every other poster is text-only.
  *
  * The backend selects and resolves media for EVERY extension-routed post, so
  * this set is what decides whether those URLs are forwarded or dropped. Dropping
@@ -104,6 +104,7 @@ export const TITLE_REQUIRED_PLATFORMS: readonly PublishPlatform[] = [
 export const IMAGE_CAPABLE_PLATFORMS: readonly PublishPlatform[] = [
   'x',
   'reddit',
+  'linkedin',
 ];
 
 export interface PublishThreadSegment {

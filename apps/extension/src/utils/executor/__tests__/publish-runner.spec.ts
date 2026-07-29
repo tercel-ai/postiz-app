@@ -94,11 +94,35 @@ describe('runPublishLoop', () => {
   });
 
   it('drops images for platforms whose poster cannot upload them', async () => {
-    // The backend resolves media for EVERY extension-routed post, but only the
-    // Reddit and X posters can upload one. Forwarding the image to a text-only
-    // platform gets the item rejected at enqueue, and a rejected item never
-    // leaves Post.state=QUEUE — so the post would be re-offered and re-rejected
-    // forever instead of publishing its text.
+    // The backend resolves media for EVERY extension-routed post, but only
+    // Reddit, X, and LinkedIn posters can upload one. Forwarding the image to
+    // a text-only platform (e.g. Quora) gets the item rejected at enqueue, and
+    // a rejected item never leaves Post.state=QUEUE — so the post would be
+    // re-offered and re-rejected forever instead of publishing its text.
+    backendCall.mockResolvedValue({
+      ok: true,
+      status: 200,
+      data: {
+        due: [
+          {
+            id: 'q-1',
+            platform: 'quora',
+            segments: [{ text: 'body', images: ['https://cdn.example.com/a.png'] }],
+          },
+        ],
+      },
+    });
+    enqueuePublishBatch.mockReturnValue({ accepted: [{ taskId: 'q-1' }], rejected: [] });
+
+    await runPublishLoop();
+
+    const [, items] = enqueuePublishBatch.mock.calls[0] as unknown as [string, any[]];
+    expect(items).toEqual([
+      { taskId: 'q-1', platform: 'quora', segments: [{ text: 'body' }] },
+    ]);
+  });
+
+  it('keeps images for LinkedIn (its poster can upload them)', async () => {
     backendCall.mockResolvedValue({
       ok: true,
       status: 200,
@@ -118,7 +142,11 @@ describe('runPublishLoop', () => {
 
     const [, items] = enqueuePublishBatch.mock.calls[0] as unknown as [string, any[]];
     expect(items).toEqual([
-      { taskId: 'li-1', platform: 'linkedin', segments: [{ text: 'body' }] },
+      {
+        taskId: 'li-1',
+        platform: 'linkedin',
+        segments: [{ text: 'body', images: ['https://cdn.example.com/a.png'] }],
+      },
     ]);
   });
 

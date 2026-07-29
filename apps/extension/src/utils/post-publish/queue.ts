@@ -143,7 +143,7 @@ async function defaultPublishSegment(
     // automation only — never a direct Voyager call from the worker.
     const r =
       segmentIndex === 0
-        ? await postLinkedinCompose({ text })
+        ? await postLinkedinCompose({ text, images: segment?.images })
         : prevPermalink
         ? await postLinkedinComment({ url: prevPermalink, text })
         : { ok: false as const, error: 'No previous segment permalink to thread onto' };

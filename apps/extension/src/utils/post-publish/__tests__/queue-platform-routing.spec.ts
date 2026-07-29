@@ -264,10 +264,10 @@ describe('default publisher platform routing', () => {
     });
   });
 
-  it('publishes a LinkedIn image post text-only (media not supported yet)', async () => {
-    // The LinkedIn poster cannot upload media. Rejecting the item would strand
-    // the post in Post.state=QUEUE forever (the backend re-leases and re-offers
-    // it every cycle), so the image is dropped and the text still goes out.
+  it('publishes a LinkedIn image post, forwarding the image to the poster', async () => {
+    // Unlike a genuinely text-only poster (Quora, Medium, ...), LinkedIn's
+    // poster can upload media (see linkedin.poster's attachLinkedinImagesInPage)
+    // — so the image must reach it, not get silently dropped.
     liCompose.mockResolvedValue({
       ok: true,
       permalink: 'https://www.linkedin.com/feed/update/urn:li:activity:9/',
@@ -286,8 +286,10 @@ describe('default publisher platform routing', () => {
     await waitForPublishIdle();
     expect(ack.rejected).toEqual([]);
     expect(ack.accepted[0]).toMatchObject({ taskId: 'li-image' });
-    // No `images` key reaches the poster at all.
-    expect(liCompose).toHaveBeenCalledWith({ text: 'hi' });
+    expect(liCompose).toHaveBeenCalledWith({
+      text: 'hi',
+      images: ['https://api/img.png'],
+    });
     expect(publishQueueSnapshot().find((s) => s.taskId === 'li-image')?.status).toBe(
       'published'
     );

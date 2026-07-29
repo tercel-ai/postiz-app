@@ -12,8 +12,15 @@
 //
 // linkedin.com host permission comes from the LinkedinProvider entry (see
 // vite.config.base.ts). LinkedIn's editor is Quill (`.ql-editor`).
+//
+// Images: LinkedIn's share composer only exposes its file input after the
+// "Add media" trigger is clicked (opens a separate media-editor overlay), so
+// attachLinkedinImagesInPage drives that two-step flow before the text fill —
+// confirmed live: attach → click Next → back at the compose view with the
+// image embedded and Quill still fillable normally.
 
 import { ReplyResult } from '@gitroom/extension/utils/reply.types';
+import { fetchImageForPage } from '@gitroom/extension/pages/background/x.poster';
 
 const LINKEDIN_BASE = 'https://www.linkedin.com';
 const TAB_LOAD_TIMEOUT_MS = 20_000;
@@ -184,28 +191,52 @@ function fillLinkedinShareInPage(
     }
   };
 
+  // LinkedIn's share-box composer is now a web component behind an OPEN shadow
+  // root — confirmed live: the editor is invisible to a plain
+  // document.querySelector/querySelectorAll (they never pierce shadow DOM,
+  // open or not), which is why every selector below always came back empty
+  // even though the composer was visibly on screen. These walk into any open
+  // shadow root encountered, depth-first.
+  const deepQuery = (
+    selector: string,
+    root: Document | ShadowRoot = document
+  ): HTMLElement | null => {
+    const direct = root.querySelector<HTMLElement>(selector);
+    if (direct) return direct;
+    for (const el of Array.from(root.querySelectorAll<HTMLElement>('*'))) {
+      if (el.shadowRoot) {
+        const found = deepQuery(selector, el.shadowRoot);
+        if (found) return found;
+      }
+    }
+    return null;
+  };
+  const deepQueryAll = (
+    selector: string,
+    root: Document | ShadowRoot = document,
+    out: HTMLElement[] = []
+  ): HTMLElement[] => {
+    out.push(...root.querySelectorAll<HTMLElement>(selector));
+    for (const el of Array.from(root.querySelectorAll<HTMLElement>('*'))) {
+      if (el.shadowRoot) deepQueryAll(selector, el.shadowRoot, out);
+    }
+    return out;
+  };
+
   const findEditor = (): HTMLElement | null =>
-    document.querySelector<HTMLElement>(
-      '.share-box .ql-editor[contenteditable="true"]'
-    ) ??
-    document.querySelector<HTMLElement>(
-      '.editor-content .ql-editor[contenteditable="true"]'
-    ) ??
-    document.querySelector<HTMLElement>('.ql-editor[contenteditable="true"]');
+    deepQuery('.share-box .ql-editor[contenteditable="true"]') ??
+    deepQuery('.editor-content .ql-editor[contenteditable="true"]') ??
+    deepQuery('.ql-editor[contenteditable="true"]');
 
   const findPostButton = (): HTMLElement | null => {
-    const byLabel = Array.from(
-      document.querySelectorAll<HTMLElement>('button')
-    ).find((b) => {
+    const byLabel = deepQueryAll('button').find((b) => {
       const label = (b.getAttribute('aria-label') || b.innerText || '')
         .trim()
         .toLowerCase();
       return /^post$/.test(label) || label === 'post';
     });
     return (
-      document.querySelector<HTMLElement>(
-        '.share-actions__primary-action, button.share-actions__primary-action'
-      ) ??
+      deepQuery('.share-actions__primary-action, button.share-actions__primary-action') ??
       byLabel ??
       null
     );
@@ -215,10 +246,8 @@ function fillLinkedinShareInPage(
     // Open the composer if it isn't already up: click the "Start a post" trigger.
     if (!findEditor()) {
       const trigger =
-        document.querySelector<HTMLElement>(
-          'button.share-box-feed-entry__trigger'
-        ) ??
-        Array.from(document.querySelectorAll<HTMLElement>('button')).find((b) =>
+        deepQuery('button.share-box-feed-entry__trigger') ??
+        deepQueryAll('button').find((b) =>
           /start a post/i.test(b.innerText || b.getAttribute('aria-label') || '')
         ) ??
         null;
@@ -226,7 +255,26 @@ function fillLinkedinShareInPage(
     }
 
     const editor = await waitFor(findEditor, 10_000);
-    if (!editor) return 'not_found';
+    if (!editor) {
+      // Captured at the exact failure instant (not a manual after-the-fact
+      // check, which can land on a stale/dismissed modal) — the diagnostic
+      // that matters when the selectors below drift from LinkedIn's DOM.
+      try {
+        console.warn('[aisee][linkedin] editor not found — DOM snapshot', {
+          url: location.href,
+          qlEditorCountDeep: deepQueryAll('.ql-editor').length,
+          contentEditableCountDeep: deepQueryAll('[contenteditable]').length,
+          shareBoxPresentDeep: !!deepQuery('.share-box'),
+          triggerButtons: deepQueryAll('button')
+            .map((b) => (b.getAttribute('aria-label') || b.innerText || '').trim())
+            .filter(Boolean)
+            .slice(0, 30),
+        });
+      } catch {
+        /* diagnostics must never throw past the caller */
+      }
+      return 'not_found';
+    }
 
     editor.focus();
     const selectAllContents = () => {
@@ -238,37 +286,79 @@ function fillLinkedinShareInPage(
     };
     selectAllContents();
 
-    // LinkedIn's composer is a Quill rich-text editor. Quill rebuilds its
-    // internal Delta from real browser input (paste/composition) — a raw
-    // execCommand('insertText') + synthetic 'input' event is not always
-    // enough to register, and Quill can silently discard the DOM mutation on
-    // its next re-render, leaving the editor (and the Post button, which is
-    // driven off Quill's model, not the raw DOM) looking untouched. Simulate
-    // a PASTE first — the same fix x.poster's Draft.js composer needed — and
-    // verify it actually landed before falling back.
+    // LinkedIn's composer exposes its live Quill instance as `__quill` on an
+    // ancestor of the editor (confirmed live, a few DOM levels up). Its own
+    // setText() is the authoritative way to change content: it updates
+    // Quill's internal Delta model directly, which is what actually drives
+    // the Post button's enabled state. DOM-level tricks can write visible
+    // text WITHOUT Quill ever recognizing it — confirmed live: a raw
+    // execCommand('insertText') happily mutates the DOM but leaves the
+    // editor's `ql-blank` class (and so the Post button) untouched, because
+    // Quill's own model never saw the change. Try the Quill API first, since
+    // it is the one path that reliably enables Post; the DOM fallbacks exist
+    // only because `__quill` is undocumented and could vanish in a future
+    // LinkedIn build.
+    const findQuillInstance = (): { setText: (t: string, source: string) => void } | null => {
+      let node: HTMLElement | null = editor.parentElement;
+      let hops = 0;
+      while (node && hops < 8) {
+        const q = (node as any).__quill;
+        if (q && typeof q.setText === 'function') return q;
+        node = node.parentElement;
+        hops++;
+      }
+      return null;
+    };
+
     let filled = false;
     try {
-      const dt = new DataTransfer();
-      dt.setData('text/plain', text);
-      editor.dispatchEvent(
-        new ClipboardEvent('paste', {
-          bubbles: true,
-          cancelable: true,
-          clipboardData: dt,
-        })
-      );
-      await sleep(50); // Quill re-renders asynchronously
-      filled = (editor.textContent || '').replace(/\s/g, '').length > 0;
+      const quill = findQuillInstance();
+      if (quill) {
+        quill.setText(text, 'user');
+        await sleep(50);
+        filled = (editor.textContent || '').replace(/\s/g, '').length > 0;
+      }
     } catch {
       filled = false;
     }
 
+    // Fallback: simulate a PASTE — the same fix x.poster's Draft.js composer
+    // needed — for a build where `__quill` isn't exposed or didn't take.
+    // `composed: true` lets the event cross OUT of the editor's shadow root,
+    // in case a listener is attached on the host/light-DOM side.
+    if (!filled) {
+      try {
+        const dt = new DataTransfer();
+        dt.setData('text/plain', text);
+        editor.dispatchEvent(
+          new ClipboardEvent('paste', {
+            bubbles: true,
+            cancelable: true,
+            composed: true,
+            clipboardData: dt,
+          })
+        );
+        await sleep(50); // Quill re-renders asynchronously
+        filled = (editor.textContent || '').replace(/\s/g, '').length > 0;
+      } catch {
+        filled = false;
+      }
+    }
+
+    // Last-resort fallback: raw execCommand. Confirmed live to write the DOM
+    // even when Quill's model never registers it (Post stays disabled) —
+    // still better than an empty box, since the user can see and finish it.
     if (!filled) {
       selectAllContents();
       const inserted = document.execCommand?.('insertText', false, text) ?? false;
       if (!inserted) editor.textContent = text;
       editor.dispatchEvent(
-        new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text })
+        new InputEvent('input', {
+          bubbles: true,
+          composed: true,
+          inputType: 'insertText',
+          data: text,
+        })
       );
     }
 
@@ -312,22 +402,45 @@ function fillLinkedinCommentInPage(
     }
   };
 
+  // Same shadow-DOM caveat as the share composer (see fillLinkedinShareInPage)
+  // — plain querySelector never pierces an open shadow root, so these walk
+  // into any encountered along the way.
+  const deepQuery = (
+    selector: string,
+    root: Document | ShadowRoot = document
+  ): HTMLElement | null => {
+    const direct = root.querySelector<HTMLElement>(selector);
+    if (direct) return direct;
+    for (const el of Array.from(root.querySelectorAll<HTMLElement>('*'))) {
+      if (el.shadowRoot) {
+        const found = deepQuery(selector, el.shadowRoot);
+        if (found) return found;
+      }
+    }
+    return null;
+  };
+  const deepQueryAll = (
+    selector: string,
+    root: Document | ShadowRoot = document,
+    out: HTMLElement[] = []
+  ): HTMLElement[] => {
+    out.push(...root.querySelectorAll<HTMLElement>(selector));
+    for (const el of Array.from(root.querySelectorAll<HTMLElement>('*'))) {
+      if (el.shadowRoot) deepQueryAll(selector, el.shadowRoot, out);
+    }
+    return out;
+  };
+
   const findCommentEditor = (): HTMLElement | null =>
-    document.querySelector<HTMLElement>(
-      '.comments-comment-box .ql-editor[contenteditable="true"]'
-    ) ??
-    document.querySelector<HTMLElement>(
-      '.comments-comment-texteditor .ql-editor[contenteditable="true"]'
-    ) ??
-    document.querySelector<HTMLElement>(
-      'div[data-placeholder][contenteditable="true"]'
-    );
+    deepQuery('.comments-comment-box .ql-editor[contenteditable="true"]') ??
+    deepQuery('.comments-comment-texteditor .ql-editor[contenteditable="true"]') ??
+    deepQuery('div[data-placeholder][contenteditable="true"]');
 
   const findSubmit = (): HTMLElement | null =>
-    document.querySelector<HTMLElement>(
+    deepQuery(
       '.comments-comment-box__submit-button, button.comments-comment-box__submit-button'
     ) ??
-    Array.from(document.querySelectorAll<HTMLElement>('button')).find((b) =>
+    deepQueryAll('button').find((b) =>
       /^(post|comment)$/i.test(
         (b.getAttribute('aria-label') || b.innerText || '').trim()
       )
@@ -338,7 +451,7 @@ function fillLinkedinCommentInPage(
     // Reveal the comment box: click the "Comment" action if the editor is hidden.
     if (!findCommentEditor()) {
       const commentAction =
-        Array.from(document.querySelectorAll<HTMLElement>('button')).find((b) =>
+        deepQueryAll('button').find((b) =>
           /^comment$/i.test(
             (b.getAttribute('aria-label') || b.innerText || '').trim()
           )
@@ -347,7 +460,19 @@ function fillLinkedinCommentInPage(
     }
 
     const editor = await waitFor(findCommentEditor, 10_000);
-    if (!editor) return 'not_found';
+    if (!editor) {
+      try {
+        console.warn('[aisee][linkedin] comment editor not found — DOM snapshot', {
+          url: location.href,
+          qlEditorCountDeep: deepQueryAll('.ql-editor').length,
+          contentEditableCountDeep: deepQueryAll('[contenteditable]').length,
+          commentBoxPresentDeep: !!deepQuery('.comments-comment-box'),
+        });
+      } catch {
+        /* diagnostics must never throw past the caller */
+      }
+      return 'not_found';
+    }
 
     editor.focus();
     const selectAllContents = () => {
@@ -359,24 +484,51 @@ function fillLinkedinCommentInPage(
     };
     selectAllContents();
 
-    // Same Quill caveat as the share composer (see fillLinkedinShareInPage) —
-    // simulate a paste first and verify it landed before falling back to a
-    // raw execCommand insertion.
+    // Same Quill caveats as the share composer (see fillLinkedinShareInPage):
+    // try the exposed `__quill` instance's own setText() first — it is what
+    // actually drives Quill's model (and so the submit button's enabled
+    // state) — then fall back to a simulated paste, then raw execCommand.
+    const findQuillInstance = (): { setText: (t: string, source: string) => void } | null => {
+      let node: HTMLElement | null = editor.parentElement;
+      let hops = 0;
+      while (node && hops < 8) {
+        const q = (node as any).__quill;
+        if (q && typeof q.setText === 'function') return q;
+        node = node.parentElement;
+        hops++;
+      }
+      return null;
+    };
+
     let filled = false;
     try {
-      const dt = new DataTransfer();
-      dt.setData('text/plain', text);
-      editor.dispatchEvent(
-        new ClipboardEvent('paste', {
-          bubbles: true,
-          cancelable: true,
-          clipboardData: dt,
-        })
-      );
-      await sleep(50); // Quill re-renders asynchronously
-      filled = (editor.textContent || '').replace(/\s/g, '').length > 0;
+      const quill = findQuillInstance();
+      if (quill) {
+        quill.setText(text, 'user');
+        await sleep(50);
+        filled = (editor.textContent || '').replace(/\s/g, '').length > 0;
+      }
     } catch {
       filled = false;
+    }
+
+    if (!filled) {
+      try {
+        const dt = new DataTransfer();
+        dt.setData('text/plain', text);
+        editor.dispatchEvent(
+          new ClipboardEvent('paste', {
+            bubbles: true,
+            cancelable: true,
+            composed: true,
+            clipboardData: dt,
+          })
+        );
+        await sleep(50); // Quill re-renders asynchronously
+        filled = (editor.textContent || '').replace(/\s/g, '').length > 0;
+      } catch {
+        filled = false;
+      }
     }
 
     if (!filled) {
@@ -384,7 +536,12 @@ function fillLinkedinCommentInPage(
       const inserted = document.execCommand?.('insertText', false, text) ?? false;
       if (!inserted) editor.textContent = text;
       editor.dispatchEvent(
-        new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text })
+        new InputEvent('input', {
+          bubbles: true,
+          composed: true,
+          inputType: 'insertText',
+          data: text,
+        })
       );
     }
 
@@ -406,39 +563,135 @@ function fillLinkedinCommentInPage(
   })();
 }
 
+/**
+ * Runs INSIDE the linkedin.com page (serialized — self-contained). Attaches
+ * images through LinkedIn's own two-step media flow: click "Add media" → find
+ * the file input (it does not exist in the DOM until this click — confirmed
+ * live) → hand it File objects, exactly like a user picking files, so
+ * LinkedIn runs its own upload pipeline → click "Next" to return to the
+ * compose view with the image embedded. Both the trigger button and the file
+ * input live behind an open shadow root — see fillLinkedinShareInPage.
+ */
+function attachLinkedinImagesInPage(
+  files: Array<{ name: string; mime: string; b64: string }>
+): Promise<'attached' | 'no_button' | 'no_input' | 'no_preview'> {
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const waitFor = async (
+    find: () => HTMLElement | null,
+    timeoutMs: number
+  ): Promise<HTMLElement | null> => {
+    const start = Date.now();
+    for (;;) {
+      const el = find();
+      if (el) return el;
+      if (Date.now() - start > timeoutMs) return null;
+      await sleep(150);
+    }
+  };
+  const deepQuery = (
+    selector: string,
+    root: Document | ShadowRoot = document
+  ): HTMLElement | null => {
+    const direct = root.querySelector<HTMLElement>(selector);
+    if (direct) return direct;
+    for (const el of Array.from(root.querySelectorAll<HTMLElement>('*'))) {
+      if (el.shadowRoot) {
+        const found = deepQuery(selector, el.shadowRoot);
+        if (found) return found;
+      }
+    }
+    return null;
+  };
+  const deepQueryAll = (
+    selector: string,
+    root: Document | ShadowRoot = document,
+    out: HTMLElement[] = []
+  ): HTMLElement[] => {
+    out.push(...root.querySelectorAll<HTMLElement>(selector));
+    for (const el of Array.from(root.querySelectorAll<HTMLElement>('*'))) {
+      if (el.shadowRoot) deepQueryAll(selector, el.shadowRoot, out);
+    }
+    return out;
+  };
+
+  return (async () => {
+    const addMediaButton = deepQueryAll('button').find((b) =>
+      /^add media$/i.test((b.getAttribute('aria-label') || b.innerText || '').trim())
+    );
+    if (!addMediaButton) return 'no_button';
+    addMediaButton.click();
+
+    const input = (await waitFor(
+      () =>
+        deepQuery('input#media-editor-file-selector__file-input') ??
+        deepQuery('input[type="file"][accept*="image"]') ??
+        deepQuery('input[type="file"]'),
+      10_000
+    )) as HTMLInputElement | null;
+    if (!input) return 'no_input';
+
+    const dt = new DataTransfer();
+    for (const f of files) {
+      const bin = atob(f.b64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      dt.items.add(new File([bytes], f.name, { type: f.mime }));
+    }
+    input.files = dt.files;
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+
+    const preview = await waitFor(() => deepQuery('img[alt^="Preview of"]'), 15_000);
+    if (!preview) return 'no_preview';
+
+    const nextButton = await waitFor(() => {
+      const btn = deepQueryAll('button').find(
+        (b) => (b.getAttribute('aria-label') || b.innerText || '').trim() === 'Next'
+      );
+      if (!btn) return null;
+      return (btn as HTMLButtonElement).disabled ? null : btn;
+    }, 8_000);
+    if (!nextButton) return 'no_preview';
+    nextButton.click();
+
+    // The media-editor overlay closes asynchronously; wait for the compose
+    // view's editor to be reachable again before the caller fills text.
+    await waitFor(() => deepQuery('.ql-editor[contenteditable="true"]'), 8_000);
+    return 'attached';
+  })();
+}
+
 // ── Public API ───────────────────────────────────────────────────────────────
 
 export interface LinkedinComposeInput {
   text: string;
-  /** Server URLs of images. Best-effort — see the note in postLinkedinCompose. */
+  /** Server URLs of images to attach via LinkedIn's own media-editor file input. */
   images?: string[];
   /** When false, fill the composer but let the user click Post. Default true. */
   autoSubmit?: boolean;
 }
 
 /**
- * Publish a NEW LinkedIn share via linkedin.com's own composer (open tab → fill
- * Quill editor → click LinkedIn's own Post → capture the create urn). No direct
- * Voyager calls.
- *
- * Images are NOT yet supported through the tab composer (LinkedIn's media upload
- * is a multi-step register/upload flow behind a native picker); an image-bearing
- * request is rejected so the caller never silently drops the media.
+ * Publish a NEW LinkedIn share via linkedin.com's own composer (open tab →
+ * attach images → fill Quill editor → click LinkedIn's own Post → capture the
+ * create urn). No direct Voyager calls — images go through LinkedIn's own
+ * "Add media" file input (see attachLinkedinImagesInPage), the same as a user
+ * picking files, mirroring x.poster's image attachment.
  */
 export async function postLinkedinCompose(
   input: LinkedinComposeInput
 ): Promise<ReplyResult> {
   const text = (input.text || '').trim();
   const images = (input.images || []).filter(Boolean);
-  if (!text) return { ok: false, error: 'Post text is empty' };
-  if (images.length) {
-    return {
-      ok: false,
-      error:
-        'LinkedIn image posts are not supported via the extension yet — post text-only or attach the image manually.',
-    };
-  }
+  if (!text && !images.length) return { ok: false, error: 'Post text is empty' };
   const autoSubmit = input.autoSubmit !== false;
+
+  // Fetch the images BEFORE opening any tab so a bad URL fails fast + clean.
+  const files: Array<{ name: string; mime: string; b64: string }> = [];
+  try {
+    for (const url of images) files.push(await fetchImageForPage(url));
+  } catch (e: any) {
+    return { ok: false, error: String(e?.message || e) };
+  }
 
   let tabId: number | undefined;
   try {
@@ -461,6 +714,26 @@ export async function postLinkedinCompose(
         world: 'MAIN',
         func: installLinkedinCreateInterceptor,
       });
+    }
+
+    if (files.length) {
+      const [attach] = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: attachLinkedinImagesInPage,
+        args: [files],
+      });
+      console.log('[aisee][linkedin] attach result:', attach?.result);
+      if (attach?.result === 'no_button' || attach?.result === 'no_input') {
+        await focusTab(tabId);
+        return {
+          ok: false,
+          error:
+            'Could not find the media upload control on the LinkedIn composer (DOM may have changed). Post manually.',
+        };
+      }
+      // 'no_preview' falls through: the fill/submit step below still runs —
+      // worst case the image silently didn't attach and only text goes out,
+      // the same tradeoff x.poster's 'no_preview' already makes.
     }
 
     const [injection] = await chrome.scripting.executeScript({
