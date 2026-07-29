@@ -229,17 +229,48 @@ function fillLinkedinShareInPage(
     if (!editor) return 'not_found';
 
     editor.focus();
-    // Quill listens for input events; execCommand insertText fires them.
-    const selection = window.getSelection();
-    const range = document.createRange();
-    range.selectNodeContents(editor);
-    selection?.removeAllRanges();
-    selection?.addRange(range);
-    const inserted = document.execCommand?.('insertText', false, text) ?? false;
-    if (!inserted) editor.textContent = text;
-    editor.dispatchEvent(
-      new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text })
-    );
+    const selectAllContents = () => {
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(editor);
+      selection?.removeAllRanges();
+      selection?.addRange(range);
+    };
+    selectAllContents();
+
+    // LinkedIn's composer is a Quill rich-text editor. Quill rebuilds its
+    // internal Delta from real browser input (paste/composition) — a raw
+    // execCommand('insertText') + synthetic 'input' event is not always
+    // enough to register, and Quill can silently discard the DOM mutation on
+    // its next re-render, leaving the editor (and the Post button, which is
+    // driven off Quill's model, not the raw DOM) looking untouched. Simulate
+    // a PASTE first — the same fix x.poster's Draft.js composer needed — and
+    // verify it actually landed before falling back.
+    let filled = false;
+    try {
+      const dt = new DataTransfer();
+      dt.setData('text/plain', text);
+      editor.dispatchEvent(
+        new ClipboardEvent('paste', {
+          bubbles: true,
+          cancelable: true,
+          clipboardData: dt,
+        })
+      );
+      await sleep(50); // Quill re-renders asynchronously
+      filled = (editor.textContent || '').replace(/\s/g, '').length > 0;
+    } catch {
+      filled = false;
+    }
+
+    if (!filled) {
+      selectAllContents();
+      const inserted = document.execCommand?.('insertText', false, text) ?? false;
+      if (!inserted) editor.textContent = text;
+      editor.dispatchEvent(
+        new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text })
+      );
+    }
 
     if (!autoSubmit) return 'filled';
 
@@ -319,16 +350,43 @@ function fillLinkedinCommentInPage(
     if (!editor) return 'not_found';
 
     editor.focus();
-    const selection = window.getSelection();
-    const range = document.createRange();
-    range.selectNodeContents(editor);
-    selection?.removeAllRanges();
-    selection?.addRange(range);
-    const inserted = document.execCommand?.('insertText', false, text) ?? false;
-    if (!inserted) editor.textContent = text;
-    editor.dispatchEvent(
-      new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text })
-    );
+    const selectAllContents = () => {
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(editor);
+      selection?.removeAllRanges();
+      selection?.addRange(range);
+    };
+    selectAllContents();
+
+    // Same Quill caveat as the share composer (see fillLinkedinShareInPage) —
+    // simulate a paste first and verify it landed before falling back to a
+    // raw execCommand insertion.
+    let filled = false;
+    try {
+      const dt = new DataTransfer();
+      dt.setData('text/plain', text);
+      editor.dispatchEvent(
+        new ClipboardEvent('paste', {
+          bubbles: true,
+          cancelable: true,
+          clipboardData: dt,
+        })
+      );
+      await sleep(50); // Quill re-renders asynchronously
+      filled = (editor.textContent || '').replace(/\s/g, '').length > 0;
+    } catch {
+      filled = false;
+    }
+
+    if (!filled) {
+      selectAllContents();
+      const inserted = document.execCommand?.('insertText', false, text) ?? false;
+      if (!inserted) editor.textContent = text;
+      editor.dispatchEvent(
+        new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text })
+      );
+    }
 
     if (!autoSubmit) return 'filled';
 
