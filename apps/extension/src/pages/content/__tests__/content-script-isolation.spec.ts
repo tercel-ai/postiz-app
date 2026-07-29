@@ -33,11 +33,14 @@ describe('extension content script isolation', () => {
     ).toBe(false);
   });
 
-  // The web app probes for the extension with a short ping/pong window that
-  // starts at hydration. Under the default document_idle the bridge attaches
-  // after window.onload AND after its async chunk import resolves, which can
-  // land after the app has already given up and rendered the install prompt.
-  it('attaches the app bridge at document_start so the presence ping cannot be missed', () => {
+  // Regression guard. The app bridge is loaded by crxjs via
+  // `import(chrome.runtime.getURL(...))` and its web-accessible resources are
+  // hardened with use_dynamic_url. At document_start that dynamic URL is not yet
+  // resolvable: getURL returns `chrome-extension://invalid/`, the import fails
+  // with net::ERR_FAILED, and NO bridge installs — the web app then reports the
+  // extension as missing. Attaching early looks like an easy win for the
+  // presence-ping race; it is not. That race is closed on the page side instead.
+  it('leaves the app bridge at the default document_idle', () => {
     const contentScripts = (
       baseManifest as {
         content_scripts: Array<{ matches: string[]; js?: string[]; run_at?: string }>;
@@ -48,6 +51,6 @@ describe('extension content script isolation', () => {
       script.js?.includes('src/pages/content/bridge.ts')
     );
 
-    expect(appScript?.run_at).toBe('document_start');
+    expect(appScript?.run_at).toBeUndefined();
   });
 });

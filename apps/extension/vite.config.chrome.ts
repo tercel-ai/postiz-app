@@ -2,7 +2,7 @@ import { resolve } from 'path';
 import { mergeConfig, defineConfig } from 'vite';
 import { crx, ManifestV3Export } from '@crxjs/vite-plugin';
 import baseConfig, { baseManifest, baseBuildOptions } from './vite.config.base';
-import { hardenWebAccessibleResources } from './custom-vite-plugins';
+import { selfContainedContentScripts } from './custom-vite-plugins';
 import hotReloadExtension from 'hot-reload-extension-vite';
 
 const outDir = resolve(__dirname, 'dist');
@@ -39,9 +39,12 @@ export default mergeConfig(
             }),
           ]
         : []),
-      // Runs after crx() has written the manifest — see the plugin for why
-      // MAIN-world entries are deliberately left static.
-      hardenWebAccessibleResources(),
+      // Runs after crx() has written the manifest and assets: bundles each
+      // content script self-contained and drops the web_accessible_resources
+      // entries that only served its chunks (the extension-fingerprinting
+      // surface). See the plugin docblock for why use_dynamic_url is not the
+      // fix it looks like.
+      selfContainedContentScripts(),
     ],
     build: {
       ...baseBuildOptions,
