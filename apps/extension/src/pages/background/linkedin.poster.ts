@@ -166,6 +166,46 @@ function readLinkedinCreated(): Promise<{ urn: string } | null> {
   });
 }
 
+/**
+ * Runs INSIDE the linkedin.com page (ISOLATED world — self-contained). Reads
+ * the permalink straight off LinkedIn's own "Post successful. View post" toast
+ * (role="alert" with an <a href="…/feed/update/urn:li:…">), confirmed live —
+ * this is the PRIMARY capture path (see settle()): the fetch/XHR interceptor
+ * is only installed in the top frame, and LinkedIn's actual create request can
+ * fire from a child frame it never patches, silently missing the urn even on
+ * a genuinely successful post. Reading the toast has no such frame dependency
+ * — it's rendered wherever this script runs. Also behind an open shadow root
+ * on some LinkedIn builds, hence deepQuery.
+ */
+function readLinkedinPostToastLink(): Promise<{ href: string } | null> {
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const deepQuery = (
+    selector: string,
+    root: Document | ShadowRoot = document
+  ): HTMLElement | null => {
+    const direct = root.querySelector<HTMLElement>(selector);
+    if (direct) return direct;
+    for (const el of Array.from(root.querySelectorAll<HTMLElement>('*'))) {
+      if (el.shadowRoot) {
+        const found = deepQuery(selector, el.shadowRoot);
+        if (found) return found;
+      }
+    }
+    return null;
+  };
+  return (async () => {
+    const start = Date.now();
+    for (;;) {
+      const link = deepQuery(
+        '[role="alert"] a[href*="/feed/update/urn:li:"]'
+      ) as HTMLAnchorElement | null;
+      if (link?.href) return { href: link.href };
+      if (Date.now() - start > 6_000) return null;
+      await sleep(200);
+    }
+  })();
+}
+
 // ── ISOLATED-world editor driver (self-contained) ───────────────────────────
 
 /**
@@ -818,20 +858,44 @@ async function settle(
     let permalink = fallbackPermalink;
     let postId: string | undefined;
     let confirmed = false;
+
+    // Primary: read LinkedIn's own "Post successful. View post" toast — no
+    // frame dependency (see readLinkedinPostToastLink's doc comment).
     try {
-      const [cap] = await chrome.scripting.executeScript({
+      const [toastCap] = await chrome.scripting.executeScript({
         target: { tabId },
-        world: 'MAIN',
-        func: readLinkedinCreated,
+        func: readLinkedinPostToastLink,
       });
-      const urn = cap?.result?.urn;
-      if (urn) {
+      const href = toastCap?.result?.href;
+      const urnFromToast = href?.match(/urn:li:(?:activity|ugcPost|share):\d+/)?.[0];
+      if (urnFromToast) {
         confirmed = true;
-        postId = urn;
-        permalink = permalinkFromUrn(urn) ?? permalink;
+        postId = urnFromToast;
+        permalink = href;
       }
     } catch (e) {
-      console.error('[aisee][linkedin] capture read failed', e);
+      console.error('[aisee][linkedin] toast capture read failed', e);
+    }
+
+    // Fallback: the MAIN-world fetch/XHR interceptor. Only installed in the
+    // top frame, so it misses a create request fired from a child frame —
+    // confirmed live: a real, toast-confirmed post with an empty capture.
+    if (!confirmed) {
+      try {
+        const [cap] = await chrome.scripting.executeScript({
+          target: { tabId },
+          world: 'MAIN',
+          func: readLinkedinCreated,
+        });
+        const urn = cap?.result?.urn;
+        if (urn) {
+          confirmed = true;
+          postId = urn;
+          permalink = permalinkFromUrn(urn) ?? permalink;
+        }
+      } catch (e) {
+        console.error('[aisee][linkedin] capture read failed', e);
+      }
     }
     if (confirmed) {
       await wait(TAB_CLOSE_GRACE_MS);
