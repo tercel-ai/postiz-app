@@ -32,4 +32,22 @@ describe('extension content script isolation', () => {
       appScript?.matches.some((match) => providerScript?.matches.includes(match))
     ).toBe(false);
   });
+
+  // The web app probes for the extension with a short ping/pong window that
+  // starts at hydration. Under the default document_idle the bridge attaches
+  // after window.onload AND after its async chunk import resolves, which can
+  // land after the app has already given up and rendered the install prompt.
+  it('attaches the app bridge at document_start so the presence ping cannot be missed', () => {
+    const contentScripts = (
+      baseManifest as {
+        content_scripts: Array<{ matches: string[]; js?: string[]; run_at?: string }>;
+      }
+    ).content_scripts;
+
+    const appScript = contentScripts.find((script) =>
+      script.js?.includes('src/pages/content/bridge.ts')
+    );
+
+    expect(appScript?.run_at).toBe('document_start');
+  });
 });

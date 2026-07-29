@@ -125,10 +125,17 @@ export const baseManifest = {
       matches: uniq(providerMatches),
       ...providerContentScript,
     },
+    // document_start so the presence-ping listener is attached before the web
+    // app hydrates. Under the default document_idle the bridge attaches after
+    // window.onload AND after the loader's async chunk import resolves, which on
+    // a slow dev build can land after the page has already given up probing and
+    // rendered "Install the AIsee extension". Nothing here touches the DOM, so
+    // running early is free.
     {
       matches: uniq([...postizAppHosts, frontendMatch]),
       js: ['src/pages/content/bridge.ts'],
-    },
+      run_at: 'document_start',
+    } as any,
     // MAIN-world, document_start interceptor on x.com: installs the fetch/XHR
     // capture (x-capture.ts) BEFORE X's own scripts run, so the page's own
     // UserTweets / SearchTimeline / TweetResultByRestId responses can be read.
