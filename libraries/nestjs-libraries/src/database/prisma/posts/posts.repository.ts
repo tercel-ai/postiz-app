@@ -602,6 +602,7 @@ export class PostsRepository {
         content: true,
         image: true,
         publishDate: true,
+        publishMethod: true,
         createdAt: true,
         releaseURL: true,
         releaseId: true,
@@ -2195,6 +2196,7 @@ export class PostsRepository {
     settings: true,
     title: true,
     publishDate: true,
+    publishMethod: true,
     integration: {
       // internalId + profile identify WHICH account on the platform this post
       // belongs to. The extension publishes with whatever session the browser

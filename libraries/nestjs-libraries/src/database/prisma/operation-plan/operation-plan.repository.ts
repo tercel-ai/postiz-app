@@ -196,6 +196,7 @@ export class OperationPlanRepository {
         content: true,
         image: true,
         publishDate: true,
+        publishMethod: true,
         state: true,
         releaseId: true,
         releaseURL: true,
