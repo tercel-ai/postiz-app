@@ -450,10 +450,15 @@ async function readLinkedinMemberId(): Promise<string | undefined> {
  * That is also why more than one distinct match is treated as failure rather
  * than "take the first": if Quora ever renders someone else's profile here,
  * guessing is worse than not checking at all.
+ *
+ * The path is `/settings` and nothing deeper. `/settings/account` looks right —
+ * the page's own first tab is labelled "Account" — but Quora renders those tabs
+ * client-side and serves 404 for the sub-path, which made this resolver fail
+ * 100% of the time while looking like a transient network problem.
  */
 async function readQuoraProfileSlug(): Promise<string | undefined> {
   try {
-    const res = await fetch('https://www.quora.com/settings/account', {
+    const res = await fetch('https://www.quora.com/settings', {
       credentials: 'include',
     });
     if (!res.ok) {

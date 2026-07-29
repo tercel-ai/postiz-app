@@ -184,13 +184,27 @@ describe('probeSessionAccount — quora', () => {
   it('takes the profile slug off the settings page', async () => {
     jar['https://www.quora.com/|m-b'] = 'device';
     // The settings page mentions only the signed-in user's own profile.
-    vi.stubGlobal('fetch', async () => ({
-      ok: true,
-      text: async () => '<a href="/profile/Tercel-Yi">Your profile</a>',
-    }));
+    //
+    // The stub is URL-aware deliberately. A stub that answers ANY url let this
+    // resolver ship pointing at `/settings/account` — a path Quora 404s, since
+    // the "Account" tab is rendered client-side — so the check was dead in
+    // production while the suite stayed green. Assert the url, not just the
+    // parse.
+    const requested: string[] = [];
+    vi.stubGlobal('fetch', async (url: string) => {
+      requested.push(url);
+      if (url !== 'https://www.quora.com/settings') {
+        return { ok: false, status: 404, text: async () => '' };
+      }
+      return {
+        ok: true,
+        text: async () => '<a href="/profile/Tercel-Yi">Your profile</a>',
+      };
+    });
 
     const probe = await probeSessionAccount('quora');
 
+    expect(requested).toEqual(['https://www.quora.com/settings']);
     expect(probe).toMatchObject({
       supported: true,
       loggedIn: true,
