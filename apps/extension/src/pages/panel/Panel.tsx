@@ -22,6 +22,7 @@ export default function Panel() {
     rows: queueRows,
     syncTask,
     removeTask,
+    retryTask,
     clearSettled,
   } = usePublishQueueState();
   const [view, setView] = React.useState<'home' | 'scan'>('home');
@@ -129,6 +130,7 @@ export default function Panel() {
               rows={queueRows}
               onSync={syncTask}
               onRemove={removeTask}
+              onRetry={retryTask}
             />
           ) : (
             <HistoryList embedded items={history} onClearPage={() => setShowClear(true)} />

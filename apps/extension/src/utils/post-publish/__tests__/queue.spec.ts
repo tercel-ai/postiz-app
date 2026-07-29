@@ -80,10 +80,44 @@ describe('publish queue', () => {
     enqueuePublishBatch('req-1', [redditItem('dup')], 1);
     const ack = enqueuePublishBatch('req-2', [redditItem('dup')], 1);
     expect(ack.rejected).toEqual([
-      { taskId: 'dup', reason: 'duplicate taskId (already queued, publishing, or sent)' },
+      {
+        taskId: 'dup',
+        reason:
+          'duplicate taskId (already in the local queue — retry or remove the existing entry first)',
+      },
     ]);
     release();
     await waitForPublishIdle();
+  });
+
+  it('rejects a re-enqueue of a taskId that already settled to error — no duplicate rows', async () => {
+    // Mirrors the backend's publish-due poller: a task that failed (e.g. the
+    // account guard blocked it) leaves the DB Post in QUEUE, so the same
+    // taskId gets offered again on every subsequent poll. Before the fix,
+    // 'error' wasn't in isActive()'s dedup check, so each re-poll pushed a
+    // fresh duplicate row instead of being rejected.
+    setSegmentPublisherForTest(async () => ({ ok: false, error: 'boom' }));
+    enqueuePublishBatch('req-1', [redditItem('dup-error')], 1);
+    await waitForPublishIdle();
+    expect(
+      publishQueueSnapshot().filter((s) => s.taskId === 'dup-error')
+    ).toHaveLength(1);
+    expect(
+      publishQueueSnapshot().find((s) => s.taskId === 'dup-error')?.status
+    ).toBe('error');
+
+    const ack = enqueuePublishBatch('req-2', [redditItem('dup-error')], 1);
+    expect(ack.accepted).toEqual([]);
+    expect(ack.rejected).toEqual([
+      {
+        taskId: 'dup-error',
+        reason:
+          'duplicate taskId (already in the local queue — retry or remove the existing entry first)',
+      },
+    ]);
+    expect(
+      publishQueueSnapshot().filter((s) => s.taskId === 'dup-error')
+    ).toHaveLength(1);
   });
 
   it('publishes a thread as a chain and reports segment progress', async () => {

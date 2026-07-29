@@ -16,6 +16,7 @@ export default function Popup() {
     rows: queueRows,
     syncTask,
     removeTask,
+    retryTask,
     clearSettled,
   } = usePublishQueueState();
   const [view, setView] = useState<'main' | 'clear' | 'clear-queue' | 'scan'>('main');
@@ -184,6 +185,7 @@ export default function Popup() {
               rows={queueRows}
               onSync={syncTask}
               onRemove={removeTask}
+              onRetry={retryTask}
             />
           ) : (
             <HistoryList embedded items={history} onClearPage={() => setView('clear')} />

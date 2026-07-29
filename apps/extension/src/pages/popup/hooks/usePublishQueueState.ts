@@ -77,6 +77,11 @@ export function usePublishQueueState() {
     []
   );
 
+  const retryTask = useCallback(
+    (taskId: string) => sendAction(ENGAGE_EXTENSION_ACTION.publishRetry, { taskId }),
+    []
+  );
+
   // Bulk-clear settled history rows. omit olderThanMs to clear all history;
   // pass a window (e.g. 1 week in ms) to only age out rows beyond it.
   const clearSettled = useCallback(
@@ -89,6 +94,7 @@ export function usePublishQueueState() {
     rows,
     syncTask,
     removeTask,
+    retryTask,
     clearSettled,
   };
 }

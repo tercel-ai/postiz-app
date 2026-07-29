@@ -66,7 +66,8 @@ const QueueRow: FC<{
   row: PublishQueueRow;
   onSync: (taskId: string) => Promise<void>;
   onRemove: (taskId: string) => Promise<void>;
-}> = ({ row, onSync, onRemove }) => {
+  onRetry: (taskId: string) => Promise<void>;
+}> = ({ row, onSync, onRemove, onRetry }) => {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const { taskId, platform, status, segmentsTotal, segmentsPublished } = row.state;
@@ -161,13 +162,23 @@ const QueueRow: FC<{
           </button>
         )}
         {status === 'error' && (
-          <button
-            className="pz-mini-btn"
-            disabled={busy}
-            onClick={() => run(onRemove)}
-          >
-            Remove
-          </button>
+          <>
+            <button
+              className="pz-mini-btn primary"
+              disabled={busy}
+              onClick={() => run(onRetry)}
+              title="Re-queue this post for another publish attempt"
+            >
+              Retry
+            </button>
+            <button
+              className="pz-mini-btn"
+              disabled={busy}
+              onClick={() => run(onRemove)}
+            >
+              Remove
+            </button>
+          </>
         )}
         {status === 'canceled' && (
           <button
@@ -188,6 +199,7 @@ export const PublishQueueList: FC<{
   rows: PublishQueueRow[];
   onSync: (taskId: string) => Promise<void>;
   onRemove: (taskId: string) => Promise<void>;
+  onRetry: (taskId: string) => Promise<void>;
   onClear?: () => void;
   /** Rendered inside a parent tab bar: hide the internal title/clear header
    *  (the tab carries the label + count) and show an empty state instead of
@@ -197,6 +209,7 @@ export const PublishQueueList: FC<{
   rows,
   onSync,
   onRemove,
+  onRetry,
   onClear,
   embedded,
 }) => {
@@ -277,6 +290,7 @@ export const PublishQueueList: FC<{
                 row={row}
                 onSync={onSync}
                 onRemove={onRemove}
+                onRetry={onRetry}
               />
             ))}
           </div>

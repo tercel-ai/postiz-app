@@ -207,7 +207,15 @@ async function defaultPublishSegment(
   if (item.platform === 'quora') {
     // Quora: single feed post via tab automation (no thread, no title). Pending
     // = filled but not confirmed posted → a failure for the unattended queue.
-    const r = await postQuoraPost({ text });
+    //
+    // targetAccount is handed to the poster rather than checked by
+    // checkPublishAccount: Quora's signed-in identity is only readable from
+    // inside a quora.com tab (the worker's own request is 403'd by Quora's
+    // WAF), and the poster already opens one.
+    const r = await postQuoraPost({
+      text,
+      ...(item.targetAccount?.id ? { expectedSlug: item.targetAccount.id } : {}),
+    });
     if (!r.ok) return { ok: false, error: r.error };
     if ('pending' in r && r.pending) {
       return {
@@ -595,8 +603,15 @@ function stripUnsupportedImages(item: PublishPostItem): {
 
 function validate(item: PublishPostItem): string | null {
   if (!item?.taskId || typeof item.taskId !== 'string') return 'missing taskId';
-  if (entries.some((e) => isActive(e) && e.state.taskId === item.taskId))
-    return 'duplicate taskId (already queued, publishing, or sent)';
+  // ANY existing row for this taskId blocks a fresh push — not just active ones.
+  // The backend re-offers a due Post on every publish-due poll until it is
+  // backfilled to PUBLISHED (a failed/canceled task never leaves DB QUEUE), so
+  // checking isActive() alone let a settled 'error'/'canceled' row get silently
+  // duplicated by the next poll instead of being surfaced once for the user to
+  // Retry or Remove. Only removePublishTask (or a fresh service-worker restart
+  // trim) frees the taskId slot again.
+  if (entries.some((e) => e.state.taskId === item.taskId))
+    return 'duplicate taskId (already in the local queue — retry or remove the existing entry first)';
   if (!SUPPORTED_PLATFORMS.includes(item.platform))
     return `unsupported platform: ${item.platform}`;
   const segments = Array.isArray(item.segments) ? item.segments : [];

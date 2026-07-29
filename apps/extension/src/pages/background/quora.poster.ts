@@ -31,9 +31,52 @@ export interface QuoraPostInput {
    * true: the extension drives Quora's own Post flow.
    */
   autoSubmit?: boolean;
+  /**
+   * Profile slug of the account this post is bound to (the Integration's
+   * internalId). When set, publishing aborts if the tab turns out to be signed
+   * in as someone else.
+   *
+   * The wrong-account check lives HERE, and not in the shared publish guard,
+   * because Quora's identity is only readable from inside a quora.com tab —
+   * see quoraReadOwnSlug. Leaving it in the guard would mean opening a tab per
+   * publish just to read it; here it costs nothing, since the poster has to
+   * open that tab anyway, and it runs one step before the composer instead of
+   * minutes earlier in the queue.
+   */
+  expectedSlug?: string;
 }
 
 // ── In-page injected functions (self-contained — no outer-scope refs) ─────────
+
+/**
+ * The signed-in account's profile slug, read from INSIDE the tab.
+ *
+ * `/settings` is fetched from the page's own context deliberately: the very
+ * same request from the background worker is answered 403 by Quora's WAF, which
+ * sees a cross-site `Sec-Fetch-Site` that JS is not allowed to forge. From the
+ * tab it is same-origin and returns 200.
+ *
+ * The path is `/settings` and nothing deeper. `/settings/account` looks right —
+ * the page's own first tab is labelled "Account" — but Quora renders those tabs
+ * client-side and 404s the sub-path.
+ *
+ * That page mentions exactly ONE `/profile/` link: the viewer's own. Anything
+ * else (a feed, a logged-out shell) shows other people's, and picking one would
+ * confidently identify the wrong person — so more than one distinct match
+ * yields undefined, "cannot conclude", never a guess.
+ */
+async function quoraReadOwnSlug(): Promise<string | undefined> {
+  try {
+    const res = await fetch('/settings', { credentials: 'include' });
+    if (!res.ok) return undefined;
+    const html = await res.text();
+    const found = [...new Set(html.match(/\/profile\/[A-Za-z0-9-]+/g) || [])];
+    if (found.length !== 1) return undefined;
+    return found[0].replace('/profile/', '') || undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 /** True when quora.com bounced us to a login wall (user not signed in). */
 function quoraDetectLogin(): boolean {
@@ -160,6 +203,19 @@ function isQuoraPermalink(url: string): boolean {
   return /quora\.com\/(profile\/[^/]+\/|[^/]*-)/i.test(url) && !/\/$|quora\.com\/?$/i.test(url);
 }
 
+/**
+ * Canonical form for comparing two Quora profile slugs.
+ *
+ * Quora treats its slugs case-insensitively, and an Integration row created
+ * before the provider started stripping the prefix may still store
+ * `/profile/Jane-Doe`. A false mismatch would block a legitimate post, so both
+ * sides are normalized; no two distinct accounts can collapse this way, since
+ * the slug itself stays intact.
+ */
+function normalizeSlug(raw: string): string {
+  return raw.trim().toLowerCase().replace(/^\/?profile\//, '');
+}
+
 /** Publish a single Quora post (segment 0). */
 export async function postQuoraPost(input: QuoraPostInput): Promise<ReplyResult> {
   const text = (input.text || '').trim();
@@ -177,6 +233,31 @@ export async function postQuoraPost(input: QuoraPostInput): Promise<ReplyResult>
     if (await runInPage(tabId, quoraDetectLogin)) {
       await focusTab(tabId);
       return { ok: false, error: 'Not signed in to Quora — log in, then retry.' };
+    }
+
+    if (input.expectedSlug) {
+      const expected = normalizeSlug(input.expectedSlug);
+      const actual = await runInPage(tabId, quoraReadOwnSlug);
+      if (!actual) {
+        // Fail OPEN, and say so. Publishing as intended is far likelier than a
+        // wrong account, so an unreadable identity must not block the post —
+        // but a wrong-account publish is irreversible and only ever reported
+        // after the fact, so "was the account actually checked?" has to be
+        // answerable from the log rather than looking identical to a pass.
+        console.warn(
+          '[aisee][quora] identity unreadable — publishing unverified',
+          { expected }
+        );
+      } else if (normalizeSlug(actual) !== expected) {
+        // The tab is signed in as someone else. Close it: leaving it open
+        // invites finishing the post by hand as the WRONG account, which is
+        // exactly what this check exists to prevent.
+        await closeTab(tabId);
+        return {
+          ok: false,
+          error: `This browser is signed in to Quora as ${actual}, but the post is bound to ${input.expectedSlug}. Switch accounts and it will go out on the next attempt.`,
+        };
+      }
     }
 
     const outcome = await runInPage(tabId, quoraComposeInPage, [text, autoSubmit]);

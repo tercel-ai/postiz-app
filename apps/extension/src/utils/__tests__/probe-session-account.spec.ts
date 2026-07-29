@@ -181,57 +181,56 @@ describe('probeSessionAccount — linkedin', () => {
 });
 
 describe('probeSessionAccount — quora', () => {
-  it('takes the profile slug off the settings page', async () => {
+  it('reports signed-in from cookies WITHOUT touching the network', async () => {
+    // Quora's identity page is 403'd for every request from the worker: a
+    // different origin means Chrome stamps `Sec-Fetch-Site: cross-site`, and JS
+    // cannot override it. Asking anyway would add a guaranteed-rejected request
+    // to each publish, so the probe must stay offline and simply not claim an
+    // id — the wrong-account check happens in quora.poster instead, inside the
+    // tab it opens to publish.
+    jar['https://www.quora.com/|m-login'] = '1';
     jar['https://www.quora.com/|m-b'] = 'device';
-    // The settings page mentions only the signed-in user's own profile.
-    //
-    // The stub is URL-aware deliberately. A stub that answers ANY url let this
-    // resolver ship pointing at `/settings/account` — a path Quora 404s, since
-    // the "Account" tab is rendered client-side — so the check was dead in
-    // production while the suite stayed green. Assert the url, not just the
-    // parse.
     const requested: string[] = [];
     vi.stubGlobal('fetch', async (url: string) => {
       requested.push(url);
-      if (url !== 'https://www.quora.com/settings') {
-        return { ok: false, status: 404, text: async () => '' };
-      }
-      return {
-        ok: true,
-        text: async () => '<a href="/profile/Tercel-Yi">Your profile</a>',
-      };
+      return { ok: false, status: 403, text: async () => '' };
     });
 
     const probe = await probeSessionAccount('quora');
 
-    expect(requested).toEqual(['https://www.quora.com/settings']);
-    expect(probe).toMatchObject({
-      supported: true,
-      loggedIn: true,
-      id: 'Tercel-Yi',
-    });
-  });
-
-  it('gives up rather than guessing when several profiles appear', async () => {
-    // Scraping the FEED returns the post authors' profiles, and picking one
-    // would confidently identify the wrong person — blocking every Quora
-    // publish. So more than one distinct match must yield no id at all.
-    jar['https://www.quora.com/|m-b'] = 'device';
-    vi.stubGlobal('fetch', async () => ({
-      ok: true,
-      text: async () =>
-        '<a href="/profile/Sangram-Sagar-1"></a><a href="/profile/Carlos-Rossi-62"></a>',
-    }));
-
-    const probe = await probeSessionAccount('quora');
-
+    expect(requested).toEqual([]);
     expect(probe).toMatchObject({ supported: true, loggedIn: true });
     expect(probe.id).toBeUndefined();
+  });
+
+  it('stays offline on the publish path too, where network defaults on', async () => {
+    // The publish guard omits `network`, so it defaults to true. Quora must
+    // ignore that rather than pay a 403 before every post.
+    jar['https://www.quora.com/|m-login'] = '1';
+    const requested: string[] = [];
+    vi.stubGlobal('fetch', async (url: string) => {
+      requested.push(url);
+      return { ok: false, status: 403, text: async () => '' };
+    });
+
+    const probe = await probeSessionAccount('quora', { network: true });
+
+    expect(requested).toEqual([]);
+    expect(probe).toMatchObject({ supported: true, loggedIn: true });
   });
 
   it('is logged out when the browser has never visited quora', async () => {
     const probe = await probeSessionAccount('quora');
     expect(probe).toMatchObject({ supported: true, loggedIn: false });
+  });
+
+  it('treats a lone device cookie as signed in', async () => {
+    // `m-b` survives sign-out, so it cannot prove a session — but its absence
+    // is the only safe logged-out conclusion, and claiming logged-out on its
+    // presence alone would block legitimate posts.
+    jar['https://www.quora.com/|m-b'] = 'device';
+    const probe = await probeSessionAccount('quora');
+    expect(probe).toMatchObject({ supported: true, loggedIn: true });
   });
 });
 
@@ -243,27 +242,33 @@ describe('probeSessionAccount — unknown platform', () => {
 });
 
 describe('identity cache', () => {
-  it('keeps every platform it resolved in one snapshot', async () => {
+  it('keeps every platform it resolved concurrently', async () => {
     // The cache is a single storage entry holding all platforms. Reading the
     // map, awaiting the network, then writing back the PRE-read snapshot lets
     // concurrent probes clobber each other — at most one platform survives, and
     // the rest hit the network again on the very next call.
     jar['https://medium.com/|sid'] = 'sess';
-    jar['https://www.quora.com/|m-s'] = 'qsess';
+    jar['https://www.linkedin.com/|li_at'] = 'tok';
+    jar['https://www.linkedin.com/|JSESSIONID'] = '"ajax:123"';
     let calls = 0;
+    const probeBoth = () =>
+      Promise.all([
+        probeSessionAccount('medium'),
+        probeSessionAccount('linkedin'),
+      ]);
     vi.stubGlobal('fetch', async (url: string) => {
       calls++;
-      return String(url).includes('quora')
-        ? { ok: true, text: async () => '<a href="/profile/Tercel-Yi"></a>' }
+      return String(url).includes('linkedin')
+        ? { ok: true, json: async () => ({ miniProfile: { entityUrn: 'urn:li:fs_miniProfile:ACoAAA' } }) }
         : { ok: true, url: 'https://medium.com/@tercel.yi' };
     });
 
-    await getSocialSessions();
+    await probeBoth();
     const afterFirst = calls;
-    await getSocialSessions();
+    await probeBoth();
 
-    expect(afterFirst).toBe(2); // medium + quora resolved once each
-    expect(calls).toBe(afterFirst); // second snapshot fully served from cache
+    expect(afterFirst).toBe(2); // medium + linkedin resolved once each
+    expect(calls).toBe(afterFirst); // second round fully served from cache
   });
 
   it('re-probes soon after a failed lookup instead of caching the miss for the full TTL', async () => {
@@ -294,24 +299,24 @@ describe('identity cache', () => {
     vi.mocked(Date.now).mockRestore();
   });
 
-  it('never caches the Quora slug under the device cookie', async () => {
-    // `m-b` is a device id that survives sign-out, so caching under it would
-    // keep account A's slug alive after the user switched to account B — the
-    // guard would then match a stale slug and publish as B.
-    jar['https://www.quora.com/|m-b'] = 'device';
+  it('drops a cached identity the moment the session cookie changes', async () => {
+    // The cache key MUST be a cookie that turns over on logout/account switch.
+    // Keyed on anything device-scoped, account A's handle would outlive the
+    // switch to account B and the guard would wave the post through as B —
+    // precisely the case it exists to catch.
+    jar['https://medium.com/|sid'] = 'sess-a';
     let calls = 0;
     vi.stubGlobal('fetch', async () => {
       calls++;
-      return {
-        ok: true,
-        text: async () =>
-          `<a href="/profile/Account-${calls}"></a>`,
-      };
+      return { ok: true, url: `https://medium.com/@account-${calls}` };
     });
 
-    expect((await probeSessionAccount('quora')).id).toBe('Account-1');
-    // Resolved fresh, not served from a cache keyed on the device cookie.
-    expect((await probeSessionAccount('quora')).id).toBe('Account-2');
+    expect((await probeSessionAccount('medium')).id).toBe('account-1');
+    expect((await probeSessionAccount('medium')).id).toBe('account-1'); // cached
+    expect(calls).toBe(1);
+
+    jar['https://medium.com/|sid'] = 'sess-b'; // signed in as someone else
+    expect((await probeSessionAccount('medium')).id).toBe('account-2');
     expect(calls).toBe(2);
   });
 });
@@ -324,11 +329,10 @@ describe('getSocialSessions', () => {
     jar['https://news.ycombinator.com/|user'] = 'tercelyi&hash';
     jar['https://www.quora.com/|m-b'] = 'device';
     jar['https://medium.com/|sid'] = 'sess';
-    vi.stubGlobal('fetch', async (url: string) =>
-      String(url).includes('quora')
-        ? { ok: true, text: async () => '<a href="/profile/Tercel-Yi"></a>' }
-        : { ok: true, url: 'https://medium.com/@tercel.yi' }
-    );
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      url: 'https://medium.com/@tercel.yi',
+    }));
 
     const sessions = await getSocialSessions();
 
@@ -336,8 +340,13 @@ describe('getSocialSessions', () => {
       loggedIn: true,
       id: 'tercelyi',
     });
-    expect(sessions.quora).toMatchObject({ loggedIn: true, id: 'Tercel-Yi' });
     expect(sessions.medium).toMatchObject({ loggedIn: true, id: 'tercel.yi' });
+    // Quora is the exception: signed-in is knowable from cookies, the account
+    // is not — its identity page is 403'd for anything this worker sends. The
+    // editor therefore cannot pre-warn on Quora, and the wrong-account check
+    // moves into quora.poster, inside the tab that publishes.
+    expect(sessions.quora).toMatchObject({ loggedIn: true });
+    expect(sessions.quora.id).toBeUndefined();
     // Never visited — logged out, and crucially no id to mistake for a mismatch.
     expect(sessions.linkedin).toMatchObject({ loggedIn: false });
     expect(sessions.linkedin.id).toBeUndefined();

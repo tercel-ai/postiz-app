@@ -309,7 +309,7 @@ const IDENTITY_TTL_MS = 10 * 60 * 1000;
  * Misses get their own, much shorter TTL.
  *
  * A miss means the resolver could not name the account — a 403 from LinkedIn, a
- * Quora layout change, a transient network error. The publish guard treats "no
+ * Medium layout change, a transient network error. The publish guard treats "no
  * id" as "cannot conclude" and ALLOWS the post, so caching a miss for the full
  * 10 minutes would silently disable the wrong-account check for that whole
  * window on the strength of one transient failure. A short TTL still stops the
@@ -439,49 +439,6 @@ async function readLinkedinMemberId(): Promise<string | undefined> {
 }
 
 /**
- * Quora's profile slug for the signed-in user, read off its own account
- * settings page — the Integration's internalId IS that slug (`Jane-Doe`).
- *
- * The settings page is used SPECIFICALLY because it mentions only the current
- * user. The obvious alternative — scraping profile links off the feed — returns
- * the links of whoever wrote the posts in it, so picking one would confidently
- * identify the wrong person and block every Quora publish.
- *
- * That is also why more than one distinct match is treated as failure rather
- * than "take the first": if Quora ever renders someone else's profile here,
- * guessing is worse than not checking at all.
- *
- * The path is `/settings` and nothing deeper. `/settings/account` looks right —
- * the page's own first tab is labelled "Account" — but Quora renders those tabs
- * client-side and serves 404 for the sub-path, which made this resolver fail
- * 100% of the time while looking like a transient network problem.
- */
-async function readQuoraProfileSlug(): Promise<string | undefined> {
-  try {
-    const res = await fetch('https://www.quora.com/settings', {
-      credentials: 'include',
-    });
-    if (!res.ok) {
-      console.warn('[aisee][sessions] quora identity read HTTP', res.status);
-      return undefined;
-    }
-    const html = await res.text();
-    const found = [...new Set(html.match(/\/profile\/[A-Za-z0-9-]+/g) || [])];
-    if (found.length !== 1) {
-      console.warn(
-        '[aisee][sessions] quora identity ambiguous — refusing to guess',
-        { matches: found.length }
-      );
-      return undefined;
-    }
-    return found[0].replace('/profile/', '') || undefined;
-  } catch (e) {
-    console.warn('[aisee][sessions] quora identity read failed', e);
-    return undefined;
-  }
-}
-
-/**
  * Which account this browser is logged into on `platform`, resolved from
  * COOKIES ALONE.
  *
@@ -492,11 +449,15 @@ async function readQuoraProfileSlug(): Promise<string | undefined> {
  * previous probe happened to cache one; it is for wording the error, never for
  * the comparison.
  *
- * `network: false` restricts this to cookies ALONE — medium / linkedin / quora
+ * `network: false` restricts this to cookies ALONE — medium / linkedin then
  * report logged-in without their account id. Callers that only need "is this
  * browser signed in" (the session snapshot the web app renders) pass it so the
  * platform never sees a request; the publish guard, where the id is what makes
  * the check work at all, uses the default.
+ *
+ * Quora ignores the flag: it is cookie-only either way, because its identity is
+ * unreadable from this worker at all (see the `quora` case). Its wrong-account
+ * check runs in quora.poster, inside the tab it opens to publish.
  */
 export async function probeSessionAccount(
   platform: string,
@@ -589,30 +550,28 @@ export async function probeSessionAccount(
       return { supported: true, loggedIn: true, ...(id ? { id } : {}) };
     }
     case 'quora': {
-      // No cookie identifies the signed-in Quora account, so the account comes
-      // from the settings page instead. Absence of even the device cookie does
-      // mean this browser has never been to Quora — the one logged-out
-      // conclusion that is safe.
+      // Cookies only, and deliberately no id — Quora is the one platform whose
+      // account this worker CANNOT name.
+      //
+      // Its identity lives on `/settings`, and Quora's WAF answers that page
+      // 403 for any request from here: the worker is a different origin, so
+      // Chrome stamps `Sec-Fetch-Site: cross-site`, which JS may not override.
+      // The identical fetch from inside a quora.com tab is same-origin and
+      // returns 200 — so the wrong-account check runs there instead, in
+      // quora.poster, which opens such a tab to publish anyway. Retrying it
+      // here would only add a guaranteed 403 to every publish, and a rejected
+      // request per post is exactly the traffic pattern a risk-controlled site
+      // is watching for.
+      //
+      // `m-login` is the signed-in marker; `m-b` is a device id that survives
+      // sign-out, so its absence is the one safe logged-out conclusion — this
+      // browser has never been to Quora at all.
+      const loginKey = await getCookie('https://www.quora.com/', 'm-login');
       const deviceKey = await getCookie('https://www.quora.com/', 'm-b');
-      // `m-s` is the session cookie and the ONLY valid cache invalidator here:
-      // `m-b` is a device id present when logged OUT too, so caching under it
-      // would keep the previous account's slug alive across a sign-out and
-      // sign-in — the guard would then match a stale slug and publish as the
-      // NEW account. Without m-s the slug is resolved fresh every time.
-      const sessionKey = await getCookie('https://www.quora.com/', 'm-s');
-      if (!sessionKey && !deviceKey) return { supported: true, loggedIn: false };
-      if (!network) return { supported: true, loggedIn: true };
-      // internalId is the profile slug, so the slug is the id.
-      const slug = await cachedHandle(
-        'quora',
-        sessionKey || undefined,
-        readQuoraProfileSlug
-      );
-      return {
-        supported: true,
-        loggedIn: true,
-        ...(slug ? { id: slug, handle: slug } : {}),
-      };
+      if (!loginKey && !deviceKey) {
+        return { supported: true, loggedIn: false };
+      }
+      return { supported: true, loggedIn: true };
     }
     default:
       return { supported: false, loggedIn: false };
@@ -626,12 +585,13 @@ export async function probeSessionAccount(
  */
 async function platformSession(platform: string): Promise<PlatformSessionInfo> {
   try {
-    // LinkedIn alone is cookie-only here. Its id costs a call to a PRIVATE API
+    // LinkedIn is held to cookies here. Its id costs a call to a PRIVATE API
     // from the worker, on the one platform this extension is known to be
     // fingerprinted by — worth paying on the publish path, where the id is what
     // stops an irreversible wrong-account post, but not for a snapshot that
-    // only renders "signed in / signed out". Medium and Quora resolve theirs
-    // from ordinary same-session pages, so they keep the id.
+    // only renders "signed in / signed out". Medium resolves its handle from an
+    // ordinary same-session page, so it keeps the id. Quora is cookie-only
+    // whatever this flag says — see probeSessionAccount.
     const probe = await probeSessionAccount(platform, {
       network: platform !== 'linkedin',
     });
@@ -654,9 +614,9 @@ async function platformSession(platform: string): Promise<PlatformSessionInfo> {
  * Snapshot all platforms in parallel; a platform probe never throws.
  *
  * The four platforms below go through the cheap id-only probe: cookies, plus one
- * cached session request for medium/quora (LinkedIn is cookie-only here — see
- * platformSession). Only X opens a browser tab (its handle is in no cookie), so
- * adding these does not change what dominates this call's latency.
+ * cached session request for medium (LinkedIn and Quora are cookie-only here —
+ * see platformSession). Only X opens a browser tab (its handle is in no cookie),
+ * so adding these does not change what dominates this call's latency.
  */
 export async function getSocialSessions(): Promise<SocialSessions> {
   const [x, reddit, aisee, linkedin, hackernews, medium, quora] =
