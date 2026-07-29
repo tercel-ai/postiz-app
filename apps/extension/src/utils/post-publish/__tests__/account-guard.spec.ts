@@ -126,6 +126,47 @@ describe('checkPublishAccount', () => {
     expect(result.ok).toBe(true);
   });
 
+  it('allows when ids disagree but both sides agree on a handle (e.g. LinkedIn OAuth sub vs. voyager session id)', async () => {
+    // Confirmed live: LinkedIn's OAuth `sub` (the Integration's id) and the
+    // browser session's own internal id are different, incompatible
+    // namespaces — they can disagree for the SAME real account. The public
+    // handle is the one signal both sides can actually agree on.
+    probe.mockResolvedValue({
+      supported: true,
+      loggedIn: true,
+      id: 'ACoAAA8nDKcBk1M3B73uLx0TiF15SaZqdHAL0fo',
+      handle: 'tercel-yi',
+    });
+
+    const result = await checkPublishAccount(
+      item({
+        platform: 'linkedin',
+        targetAccount: { id: 'sub-opaque-id-from-oauth', handle: 'tercel-yi' },
+      })
+    );
+
+    expect(result.ok).toBe(true);
+  });
+
+  it('still blocks when ids disagree AND the handles also disagree', async () => {
+    probe.mockResolvedValue({
+      supported: true,
+      loggedIn: true,
+      id: 'session-opaque-id',
+      handle: 'someone-else',
+    });
+
+    const result = await checkPublishAccount(
+      item({
+        platform: 'linkedin',
+        targetAccount: { id: 'target-opaque-id', handle: 'alice' },
+      })
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('Wrong linkedin account');
+  });
+
   it('falls back to comparing handles when the session reports no id', async () => {
     probe.mockResolvedValue({
       supported: true,

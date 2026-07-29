@@ -129,9 +129,21 @@ export async function checkPublishAccount(
 
   const targetId = normalizeAccountId(target.id);
   const sessionId = normalizeAccountId(probe.id);
+  const targetHandle = normalizeHandle(target.handle);
+  const sessionHandle = normalizeHandle(probe.handle);
 
   if (sessionId) {
     if (sessionId === targetId) return ALLOW;
+    // ids disagree — before concluding a mismatch, check the handles. Some
+    // platforms (LinkedIn) expose two independent, INCOMPATIBLE id namespaces
+    // for the very same real account: the OAuth `sub` an Integration is bound
+    // with vs. the browser's own internal session id (confirmed live — see
+    // readLinkedinIdentity). An id mismatch there is not reliable evidence on
+    // its own. A handle both sides agree on IS real evidence a same-id check
+    // would have missed: two different real accounts cannot simultaneously
+    // hold the identical current handle.
+    if (targetHandle && sessionHandle && targetHandle === sessionHandle)
+      return ALLOW;
     return {
       ok: false,
       error: `Wrong ${item.platform} account: this browser is signed in as ${describeSession(
@@ -144,8 +156,6 @@ export async function checkPublishAccount(
 
   // No id from the session. A handle on both sides is still real evidence, so
   // use it; otherwise there is nothing to compare and the post proceeds.
-  const targetHandle = normalizeHandle(target.handle);
-  const sessionHandle = normalizeHandle(probe.handle);
   if (targetHandle && sessionHandle && targetHandle !== sessionHandle) {
     return {
       ok: false,

@@ -299,7 +299,13 @@ export interface SessionAccountProbe {
   loggedIn: boolean;
   /** Platform-side account id, in whatever shape the platform reports it. */
   id?: string;
-  /** Handle when it is already cached; never fetched on demand here. */
+  /**
+   * Handle, when available: for X, only when already cached (never fetched on
+   * demand here); for LinkedIn, read alongside `id` in the same request — a
+   * second, independently-comparable signal for account-guard to fall back on
+   * when `id` disagrees with the Integration's (a real, confirmed case — see
+   * readLinkedinIdentity).
+   */
   handle?: string;
 }
 
@@ -321,7 +327,7 @@ const IDENTITY_MISS_TTL_MS = 30 * 1000;
 interface CachedIdentity {
   /** The session cookie this identity was resolved under — the invalidator. */
   key: string;
-  handle?: string;
+  value?: unknown;
   at: number;
 }
 
@@ -336,30 +342,32 @@ async function readIdentityCache(): Promise<Record<string, CachedIdentity>> {
 }
 
 /**
- * Cache a network-resolved handle against the session cookie it belongs to, so
+ * Cache a network-resolved value against the session cookie it belongs to, so
  * a logout/account-switch invalidates it immediately rather than after the TTL.
- * Keyed per platform in one storage entry.
+ * Keyed per platform in one storage entry. Generic over T so a platform can
+ * cache a single handle string (medium) or a richer identity (linkedin's
+ * {id, handle} — one voyager request must yield both, never two).
  *
  * `sessionKey` MUST be a cookie that actually changes on logout/account switch —
  * a device-scoped cookie would keep the previous account's identity alive across
  * a switch, which is exactly the case the guard exists to catch. Pass undefined
  * when no such cookie is available and the lookup runs uncached.
  */
-async function cachedHandle(
+async function cachedValue<T>(
   platform: string,
   sessionKey: string | undefined,
-  resolve: () => Promise<string | undefined>
-): Promise<string | undefined> {
+  resolve: () => Promise<T | undefined>
+): Promise<T | undefined> {
   // No trustworthy invalidator → never cache. Correctness beats one saved
   // request: a stale identity here means publishing as the wrong account.
   if (!sessionKey) return resolve();
 
   const hit = (await readIdentityCache())[platform];
   if (hit && hit.key === sessionKey) {
-    const ttl = hit.handle ? IDENTITY_TTL_MS : IDENTITY_MISS_TTL_MS;
-    if (Date.now() - hit.at < ttl) return hit.handle;
+    const ttl = hit.value !== undefined ? IDENTITY_TTL_MS : IDENTITY_MISS_TTL_MS;
+    if (Date.now() - hit.at < ttl) return hit.value as T;
   }
-  const handle = await resolve();
+  const value = await resolve();
   try {
     // Re-read immediately before writing. getSocialSessions resolves several
     // platforms inside one Promise.all, so a map snapshot taken BEFORE the
@@ -367,12 +375,12 @@ async function cachedHandle(
     // whatever the sibling probes stored in the meantime, leaving at most one
     // platform cached per snapshot and defeating the cache entirely.
     const all = await readIdentityCache();
-    all[platform] = { key: sessionKey, handle, at: Date.now() };
+    all[platform] = { key: sessionKey, value, at: Date.now() };
     await chrome.storage.session.set({ [IDENTITY_CACHE_KEY]: all });
   } catch (e) {
     console.warn('[aisee][sessions] identity cache write failed', platform, e);
   }
-  return handle;
+  return value;
 }
 
 /**
@@ -394,24 +402,36 @@ async function readMediumHandle(): Promise<string | undefined> {
   }
 }
 
+export interface LinkedinIdentity {
+  /** Opaque fs_miniProfile id — see the mismatch caveat below. */
+  id?: string;
+  /** Public profile vanity slug (linkedin.com/in/<publicIdentifier>). */
+  handle?: string;
+}
+
 /**
- * LinkedIn's member id via its own session endpoint. The CSRF token IS the
- * JSESSIONID cookie value (LinkedIn's own convention).
+ * LinkedIn's member identity via its own session endpoint. The CSRF token IS
+ * the JSESSIONID cookie value (LinkedIn's own convention).
  *
  * Which field to read is NOT interchangeable. voyager/api/me returns the same
- * account under two different identifiers:
+ * account under several identifiers:
  *
- *   plainId   254217383                                    (numeric)
- *   objectUrn urn:li:member:254217383                      (the same number)
- *   entityUrn urn:li:fs_miniProfile:ACoAAA8nDKcBk1M...     (opaque)
+ *   plainId          254217383                                (numeric)
+ *   objectUrn        urn:li:member:254217383                  (the same number)
+ *   entityUrn        urn:li:fs_miniProfile:ACoAAA8nDKcBk1M...  (opaque)
+ *   publicIdentifier tercel-yi                                 (vanity slug)
  *
  * The Integration's internalId is the OAuth `sub` from /v2/userinfo (see
- * linkedin.provider authenticate), which is the OPAQUE one. Reading plainId
- * would therefore never match and would block every LinkedIn publish — so this
- * reads entityUrn only, and returns undefined rather than falling back to a
- * numeric id that is guaranteed to mismatch. Verified against a live session.
+ * linkedin.provider authenticate) — an id LinkedIn issues per-app, drawn from a
+ * DIFFERENT namespace than voyager's own internal session id. Confirmed live:
+ * the two opaque ids disagreed for the very same real account, so entityUrn
+ * alone is not reliable evidence of a mismatch. publicIdentifier is read
+ * alongside it as a second, independently-comparable signal (against the
+ * Integration's `profile`, itself the OAuth `vanityName` — see
+ * linkedin.provider authenticate/refreshToken) for account-guard to fall back
+ * on when the opaque ids disagree.
  */
-async function readLinkedinMemberId(): Promise<string | undefined> {
+async function readLinkedinIdentity(): Promise<LinkedinIdentity | undefined> {
   try {
     const jsession = (
       await getCookie('https://www.linkedin.com/', 'JSESSIONID')
@@ -428,10 +448,12 @@ async function readLinkedinMemberId(): Promise<string | undefined> {
     const body = await res.json();
     const entityUrn: string =
       body?.miniProfile?.entityUrn || body?.entityUrn || '';
-    return (
+    const id =
       String(entityUrn).match(/urn:li:fs_miniProfile:([^,)\s"]+)/)?.[1] ||
-      undefined
-    );
+      undefined;
+    const handle: string | undefined =
+      body?.miniProfile?.publicIdentifier || undefined;
+    return id || handle ? { id, handle } : undefined;
   } catch (e) {
     console.warn('[aisee][sessions] linkedin identity read failed', e);
     return undefined;
@@ -528,7 +550,7 @@ export async function probeSessionAccount(
       if (!sid) return { supported: true, loggedIn: false };
       if (!network) return { supported: true, loggedIn: true };
       // internalId is the @handle, so the handle is the id here.
-      const handle = await cachedHandle('medium', sid, readMediumHandle);
+      const handle = await cachedValue('medium', sid, readMediumHandle);
       return {
         supported: true,
         loggedIn: true,
@@ -546,8 +568,13 @@ export async function probeSessionAccount(
       // 10 minutes per li_at — never on the session snapshot, which passes
       // network:false. Opening a tab per publish would be far more conspicuous
       // than one request the LinkedIn web app itself makes on every page load.
-      const id = await cachedHandle('linkedin', liAt, readLinkedinMemberId);
-      return { supported: true, loggedIn: true, ...(id ? { id } : {}) };
+      const identity = await cachedValue('linkedin', liAt, readLinkedinIdentity);
+      return {
+        supported: true,
+        loggedIn: true,
+        ...(identity?.id ? { id: identity.id } : {}),
+        ...(identity?.handle ? { handle: identity.handle } : {}),
+      };
     }
     case 'quora': {
       // Cookies only, and deliberately no id — Quora is the one platform whose
