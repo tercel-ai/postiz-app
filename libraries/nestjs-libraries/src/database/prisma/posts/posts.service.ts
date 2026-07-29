@@ -1166,6 +1166,12 @@ export class PostsService {
             integration: post.integration?.id ?? null,
             state: finalPost.state,
             releaseURL: finalPost.releaseURL || null,
+            // A postNow that comes back STILL QUEUE was not sent: either it is
+            // extension-routed (startWorkflow skips Temporal by design and leaves
+            // it for the extension's pull loop) or the Temporal poll timed out.
+            // The caller cannot tell those apart from `state` alone, and they
+            // need different things said to the user — so report the decision.
+            publishMethod: finalPost.publishMethod,
           });
         }
       } else {
@@ -1629,12 +1635,25 @@ export class PostsService {
       leaseToken,
       leaseCutoff
     );
-    const due = rows.map((p) => {
+    const due = await Promise.all(rows.map(async (p) => {
       let settings: Record<string, any> = {};
       try {
         settings = JSON.parse(p.settings || '{}') || {};
       } catch {
         /* malformed settings → publish without them */
+      }
+      // Resolve the post's stored media ({id}/{path} refs) into absolute URLs
+      // the extension can download and hand to the platform's own upload
+      // pipeline (see updateMedia). Best-effort: a bad/missing media ref must
+      // never block the text from publishing.
+      let images: string[] = [];
+      try {
+        const resolved = await this.updateMedia(p.id, JSON.parse(p.image || '[]'));
+        images = (resolved || [])
+          .map((m: any) => m?.url)
+          .filter((url: any): url is string => typeof url === 'string' && !!url);
+      } catch {
+        /* malformed/missing media → publish text-only */
       }
       return {
         // Platform comes from the integration when bound, else from settings.__type
@@ -1643,10 +1662,35 @@ export class PostsService {
         platform: p.integration?.providerIdentifier || settings.__type,
         title: p.title || settings.title || undefined,
         subreddit: settings.subreddit || undefined,
-        segments: [{ text: stripHtmlValidation('normal', p.content || '', true) }],
+        segments: [
+          {
+            text: stripHtmlValidation('normal', p.content || '', true),
+            ...(images.length ? { images } : {}),
+          },
+        ],
         publishDate: p.publishDate?.toISOString?.() ?? null,
+        // WHICH account this post must go out as. The extension publishes with
+        // the browser's own logged-in session, which is NOT necessarily the
+        // account the post was composed for — and posting to the wrong account
+        // cannot be undone, so the extension refuses to publish when the two
+        // disagree. `id` is the platform-side account id (survives renames);
+        // `handle` is only for the message shown to the user.
+        //
+        // Omitted when the post has NO bound integration (operation-plan posts
+        // publish by platform): there is no intended account to contradict, so
+        // publishing as whoever is logged in IS the intent and the extension
+        // skips the check rather than failing every such post.
+        ...(p.integration?.internalId
+          ? {
+              targetAccount: {
+                id: p.integration.internalId,
+                handle: p.integration.profile || undefined,
+                name: p.integration.name || undefined,
+              },
+            }
+          : {}),
       };
-    });
+    }));
     return { due };
   }
 

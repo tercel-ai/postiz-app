@@ -2191,11 +2191,22 @@ export class PostsRepository {
   private static readonly EXTENSION_DUE_SELECT = {
     id: true,
     content: true,
+    image: true,
     settings: true,
     title: true,
     publishDate: true,
     integration: {
-      select: { id: true, name: true, providerIdentifier: true },
+      // internalId + profile identify WHICH account on the platform this post
+      // belongs to. The extension publishes with whatever session the browser
+      // happens to be logged into, so without these it cannot tell that it is
+      // about to post to the wrong account — see getDuePublishPosts.
+      select: {
+        id: true,
+        name: true,
+        providerIdentifier: true,
+        internalId: true,
+        profile: true,
+      },
     },
   } as const;
 

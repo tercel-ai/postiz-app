@@ -36,16 +36,33 @@ and `EngageRepository.getOrgScanStatus` (`libraries/nestjs-libraries/src/engage/
       "keywordsMax": 3,                         // number | null (null = unlimited)
       "priorityAccountsMax": 0,                 // number | null (0 = feature hidden)
       "subredditsMax": 1,
+      "keywordsPerProjectMax": 5,               // per-project counterparts
+      "priorityAccountsPerProjectMax": 2,
+      "subredditsPerProjectMax": 2,
       "scanIntervalHours": 24,
       "replyMonthlyCap": 10,                    // number | null (null = unlimited)
       "metricsWindowDaysMax": 7,
       "metricsFetchIntervalHours": 24
     },
-    "usage": {
+    "usage": {                                  // ORG-WIDE enabled counts
       "keywords": 2,
       "trackedAccounts": 0,
       "subreddits": 1,
       "repliesThisPeriod": 4
+    },
+    "counts": {                                 // per-type org cap + project cap
+      "keywords": {
+        "added": 2, "active": 2, "max": 3,      // org scope
+        "project": { "added": 2, "active": 2, "max": 5 }   // null without projectId
+      },
+      "trackedAccounts": {
+        "added": 0, "active": 0, "max": 0,
+        "project": { "added": 0, "active": 0, "max": 2 }
+      },
+      "subreddits": {
+        "added": 1, "active": 1, "max": 1,
+        "project": { "added": 1, "active": 1, "max": 2 }
+      }
     },
     "replyCredits": {                           // already rounded final cost
       "short": 2,
@@ -97,28 +114,46 @@ Source: `model EngageConfig` (`libraries/nestjs-libraries/src/database/prisma/sc
 |-------|------|---------|
 | `plan` | `"starter" \| "developer" \| "pro" \| null` | Current plan code; `null` = self-hosted / unlimited mode |
 
-### B2. `entitlement.limits` — plan limits (7 fields)
+### B2. `entitlement.limits` — plan limits (10 fields)
+
+Keywords / tracked accounts / subreddits are capped **twice**: an org-wide budget
+(`*Max`) and a per-project one (`*PerProjectMax`). Both are enforced on every
+activation, so a project's real headroom is `min(org remaining, project remaining)`.
+The org cap bounds the account as a whole; the project cap stops one project from
+eating the entire account budget. A per-project value larger than its org
+counterpart is legal — the org cap simply wins.
 
 | Field | Type | Meaning | `null` means |
 |-------|------|---------|--------------|
-| `keywordsMax` | number \| null | Max simultaneously-enabled keywords | unlimited |
-| `priorityAccountsMax` | number \| null | Max tracked priority accounts | unlimited (`0` = feature hidden) |
-| `subredditsMax` | number \| null | Max monitored subreddits | unlimited |
+| `keywordsMax` | number \| null | Max simultaneously-enabled keywords, org-wide | unlimited |
+| `priorityAccountsMax` | number \| null | Max tracked priority accounts, org-wide | unlimited (`0` = feature hidden) |
+| `subredditsMax` | number \| null | Max monitored subreddits, org-wide | unlimited |
+| `keywordsPerProjectMax` | number \| null | Max enabled keywords within ONE project | unlimited |
+| `priorityAccountsPerProjectMax` | number \| null | Max tracked accounts within ONE project | unlimited |
+| `subredditsPerProjectMax` | number \| null | Max monitored subreddits within ONE project | unlimited |
 | `scanIntervalHours` | number | Scan interval in hours (smaller = more real-time) | — |
 | `replyMonthlyCap` | number \| null | Monthly reply-draft quota | unlimited |
 | `metricsWindowDaysMax` | number | Metrics-monitoring window ceiling (days) | — |
 | `metricsFetchIntervalHours` | number | Metrics refresh interval (hours) | — |
 
 **Default per-plan values** (`engage-entitlement.service.ts`, overridable via the
-`engage_entitlements` Settings key):
+`engage_entitlements` Settings key — a partial override merges over these defaults
+per plan, so an existing stored value that predates the per-project fields still
+picks them up):
 
 | Plan | keywordsMax | priorityAccountsMax | subredditsMax | scanIntervalHours | replyMonthlyCap | metricsWindowDaysMax | metricsFetchIntervalHours |
 |------|---|---|---|---|---|---|---|
-| starter | 3 | 0 (hidden) | 1 | 24 | 10 | 7 | 24 |
-| developer | 10 | 10 | 5 | 24 | null (∞) | 14 | 12 |
-| pro | 30 | null (∞) | 15 | 6 | null (∞) | 30 | 6 |
+| starter | 30 | 0 (hidden) | 10 | 24 | 10 | 7 | 24 |
+| developer | 100 | 10 | 50 | 24 | null (∞) | 14 | 12 |
+| pro | 300 | null (∞) | 150 | 6 | null (∞) | 30 | 6 |
 
-### B3. `entitlement.usage` — current usage
+| Plan | keywordsPerProjectMax | priorityAccountsPerProjectMax | subredditsPerProjectMax |
+|------|---|---|---|
+| starter | 5 | 2 | 2 |
+| developer | 15 | 10 | 8 |
+| pro | 30 | 20 | 15 |
+
+### B3. `entitlement.usage` — current usage (org-wide)
 
 | Field | Type | Meaning | Compare against |
 |-------|------|---------|-----------------|
@@ -127,7 +162,24 @@ Source: `model EngageConfig` (`libraries/nestjs-libraries/src/database/prisma/sc
 | `subreddits` | number | Enabled subreddits now | `limits.subredditsMax` |
 | `repliesThisPeriod` | number | Replies used this billing period | `limits.replyMonthlyCap` |
 
-### B4. `entitlement.replyCredits` — reply cost (already rounded)
+### B4. `entitlement.counts` — per-type org + project rollup
+
+One entry per unit type (`keywords` / `trackedAccounts` / `subreddits`), each
+`{ added, active, max, project }`. The top level is **org scope** (`active`/`max`
+mirror `usage`/`limits`); `project` repeats the same shape scoped to the
+`projectId` in the query.
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `added` | number | Total rows including disabled ones |
+| `active` | number | Enabled rows — the number the cap is checked against |
+| `max` | number \| null | The applicable cap (`null` = unlimited, `0` = feature hidden) |
+| `project` | object \| null | Same shape, project-scoped. **`null` when the request carried no `projectId`** (the extension's org-wide aggregate view has no single project to report) |
+
+An "+ Add" entrypoint should be disabled when **either** scope is full:
+`active >= max` at the org level, or `project.active >= project.max`.
+
+### B5. `entitlement.replyCredits` — reply cost (already rounded)
 
 Final credit cost = `round(base × multiplier)` per length tier. Defaults: `base=2`,
 multipliers `short=1.0 / medium=1.5 / long=2.5`, overridable via the
@@ -176,8 +228,10 @@ category is a `ScanTiming` object. Source types `OrgScanStatus` / `ScanTiming` i
 | UI scenario | Read |
 |-------------|------|
 | Module on/off state | `enabled` |
-| Disable "+ Add Keyword" | `usage.keywords >= limits.keywordsMax` (null = no limit) |
+| Disable "+ Add Keyword" | `counts.keywords.active >= counts.keywords.max` **OR** `counts.keywords.project.active >= counts.keywords.project.max` (null max = no limit; null `project` = no project context) |
+| "2/3 org · 2/5 in this project" | `counts.<type>.{active,max}` and `counts.<type>.project.{active,max}` |
 | Hide priority-accounts feature | `limits.priorityAccountsMax === 0` |
+| Which cap blocked an add | 403 body `{ code: "engage_limit_reached", limit, scope: "organization" \| "project", max, current }` |
 | "Replies this month 4/10" | `usage.repliesThisPeriod` / `limits.replyMonthlyCap` |
 | Reply price labels | `replyCredits.{short,medium,long}` |
 | "Last / next scan" hint | `scanStatus.lastScanAt` / `scanStatus.nextScanAt` |

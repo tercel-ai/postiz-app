@@ -261,21 +261,52 @@ export class EngageService implements OnApplicationBootstrap {
     // enabled-only counts in entitlement.usage; `max` is the plan cap (null =
     // unlimited, 0 = feature hidden). subreddits mirrors usage.subreddits, which
     // counts ALL monitored channels (no platform filter) — keep them aligned.
+    //
+    // Two caps apply to every activation, so each type also carries a `project`
+    // block with the SAME shape scoped to the requested project. It is null when
+    // no projectId was passed (the extension's org-wide aggregate view has no
+    // single project to report). Its counts come from the already-loaded config
+    // lists — with a projectId, `config` IS that project's config — so this adds
+    // no query. The UI should disable "+ Add" when EITHER cap is reached.
+    const enabledCount = <T extends { enabled: boolean }>(rows: T[]) =>
+      rows.filter((r) => r.enabled).length;
+    const projectCounts = projectId
+      ? {
+          keywords: {
+            added: config.keywords.length,
+            active: enabledCount(config.keywords),
+            max: entitlement.limits.keywordsPerProjectMax,
+          },
+          trackedAccounts: {
+            added: config.trackedAccounts.length,
+            active: enabledCount(config.trackedAccounts),
+            max: entitlement.limits.priorityAccountsPerProjectMax,
+          },
+          subreddits: {
+            added: config.monitoredChannels.length,
+            active: enabledCount(config.monitoredChannels),
+            max: entitlement.limits.subredditsPerProjectMax,
+          },
+        }
+      : null;
     const counts = {
       keywords: {
         added: config.keywords.length,
         active: entitlement.usage.keywords,
         max: entitlement.limits.keywordsMax,
+        project: projectCounts?.keywords ?? null,
       },
       trackedAccounts: {
         added: config.trackedAccounts.length,
         active: entitlement.usage.trackedAccounts,
         max: entitlement.limits.priorityAccountsMax,
+        project: projectCounts?.trackedAccounts ?? null,
       },
       subreddits: {
         added: config.monitoredChannels.length,
         active: entitlement.usage.subreddits,
         max: entitlement.limits.subredditsMax,
+        project: projectCounts?.subreddits ?? null,
       },
     };
     return {
@@ -366,6 +397,11 @@ export class EngageService implements OnApplicationBootstrap {
   }
 
   async setupEngage(org: Organization, dto: SetupEngageDto) {
+    // Resolve the config up front so the quota check can see what already
+    // exists (repository.setupEngage upserts the same row, so this is
+    // idempotent — it only flips enabled=true a moment earlier).
+    const config = await this._engageRepository.getOrCreateConfig(org.id, dto.projectId);
+    await this._assertSetupWithinQuota(org.id, config, dto);
     const result = await this._engageRepository.setupEngage(org.id, dto, dto.projectId);
     await this._ensureGlobalWorkflowsRunning();
     this.triggerImmediateScan(org).catch((err) =>
@@ -374,25 +410,118 @@ export class EngageService implements OnApplicationBootstrap {
     return result;
   }
 
+  /**
+   * Quota gate for the bulk setup path, which writes all three unit types at
+   * once and would otherwise bypass both the org-wide and the per-project cap.
+   *
+   * Charges the NET NEW activations, not the payload size: repository.setupEngage
+   * appends with `createMany({ skipDuplicates: true })` — it never deletes, and a
+   * row that already exists under this config is silently skipped (and keeps its
+   * current `enabled` value). Counting the raw payload would therefore make a
+   * legitimate re-run of the same setup fail once the totals approach the cap.
+   *
+   * Dedup mirrors each table's unique key exactly — `(configId, keyword)`,
+   * `(configId, platform, channelId)`, `(configId, platform, username)` — so a
+   * payload repeating the same unit is charged once, like the write will be.
+   * Keywords are compared raw because AddKeywordDto already trims/collapses them
+   * at the boundary, matching what gets stored. Channels and tracked accounts
+   * have no `enabled` field in the DTO and land on the schema default (true), so
+   * every genuinely new one counts; a keyword explicitly sent as
+   * `enabled: false` costs nothing, since caps only ever count enabled rows.
+   */
+  private async _assertSetupWithinQuota(
+    orgId: string,
+    config: {
+      id: string;
+      keywords: { keyword: string }[];
+      monitoredChannels: { platform: string; channelId: string }[];
+      trackedAccounts: { platform: string; username: string }[];
+    },
+    dto: SetupEngageDto
+  ): Promise<void> {
+    const newUnits = <T>(
+      incoming: T[] | undefined,
+      key: (item: T) => string,
+      existingKeys: string[]
+    ): number => {
+      const existing = new Set(existingKeys);
+      const fresh = new Set<string>();
+      for (const item of incoming ?? []) {
+        const k = key(item);
+        if (!existing.has(k)) fresh.add(k);
+      }
+      return fresh.size;
+    };
+
+    const keywords = newUnits(
+      (dto.keywords ?? []).filter((kw) => kw.enabled !== false),
+      (kw) => kw.keyword,
+      config.keywords.map((kw) => kw.keyword)
+    );
+    const channels = newUnits(
+      dto.monitoredChannels,
+      (ch) => `${ch.platform}:${ch.channelId}`,
+      config.monitoredChannels.map((ch) => `${ch.platform}:${ch.channelId}`)
+    );
+    // `platform ?? 'x'` mirrors the default repository.setupEngage writes.
+    const tracked = newUnits(
+      dto.trackedAccounts,
+      (acc) => `${acc.platform ?? 'x'}:${acc.username}`,
+      config.trackedAccounts.map((acc) => `${acc.platform}:${acc.username}`)
+    );
+
+    // Sequential, not parallel: the first cap to be exceeded should be the one
+    // reported, and each assert issues its own counting queries anyway.
+    if (keywords > 0) {
+      await this._entitlementService.assertCanActivate(
+        orgId,
+        'keyword',
+        keywords,
+        config.id
+      );
+    }
+    if (channels > 0) {
+      await this._entitlementService.assertCanActivate(
+        orgId,
+        'subreddit',
+        channels,
+        config.id
+      );
+    }
+    if (tracked > 0) {
+      await this._entitlementService.assertCanActivate(
+        orgId,
+        'tracked',
+        tracked,
+        config.id
+      );
+    }
+  }
+
   async resetConfig(org: Organization, projectId?: string | null) {
     return this._engageRepository.resetConfig(org.id, projectId);
   }
 
   // ─── Keywords ─────────────────────────────────────────────────────────────
 
+  // NOTE for every add* below: the config is resolved BEFORE the entitlement
+  // assert, because the per-project cap is keyed on the config id. Resolving it
+  // first only ever materialises an empty config row (idempotent upsert) — the
+  // units themselves are still written after the assert passes.
   async addKeyword(org: Organization, dto: AddKeywordDto) {
-    await this._entitlementService.assertCanActivate(org.id, 'keyword', 1);
     const config = await this._engageRepository.getOrCreateConfig(org.id, dto.projectId);
+    await this._entitlementService.assertCanActivate(org.id, 'keyword', 1, config.id);
     return this._engageRepository.addKeyword(config.id, org.id, dto);
   }
 
   async addKeywordsBulk(org: Organization, dto: AddKeywordsBulkDto) {
+    const config = await this._engageRepository.getOrCreateConfig(org.id, dto.projectId);
     await this._entitlementService.assertCanActivate(
       org.id,
       'keyword',
-      dto.keywords.length
+      dto.keywords.length,
+      config.id
     );
-    const config = await this._engageRepository.getOrCreateConfig(org.id, dto.projectId);
     return this._engageRepository.addKeywordsBulk(config.id, org.id, dto);
   }
 
@@ -418,8 +547,8 @@ export class EngageService implements OnApplicationBootstrap {
   }
 
   async addMonitoredChannel(org: Organization, dto: AddMonitoredChannelDto) {
-    await this._entitlementService.assertCanActivate(org.id, 'subreddit', 1);
     const config = await this._engageRepository.getOrCreateConfig(org.id, dto.projectId);
+    await this._entitlementService.assertCanActivate(org.id, 'subreddit', 1, config.id);
     return this._engageRepository.addMonitoredChannel(
       config.id,
       org.id,
@@ -457,8 +586,8 @@ export class EngageService implements OnApplicationBootstrap {
   }
 
   async addTrackedAccount(org: Organization, dto: AddTrackedAccountDto) {
-    await this._entitlementService.assertCanActivate(org.id, 'tracked', 1);
     const config = await this._engageRepository.getOrCreateConfig(org.id, dto.projectId);
+    await this._entitlementService.assertCanActivate(org.id, 'tracked', 1, config.id);
     return this._engageRepository.addTrackedAccount(config.id, org.id, dto);
   }
 

@@ -23,6 +23,7 @@ export class TiktokProvider extends SocialAbstract implements SocialProvider {
   identifier = 'tiktok';
   name = 'Tiktok';
   isBetweenSteps = false;
+  // TikTok renders PNG transparency as black, so PNGs are converted to JPEG before publishing.
   convertToJPEG = true;
   scopes = [
     'user.info.basic',

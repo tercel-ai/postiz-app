@@ -4,26 +4,34 @@ import type { EngageScanTask } from '../executor.types';
 const {
   navigateAndCapture,
   scrollAndCapture,
+  navigate,
   close,
-  openXReadTab,
+  withSharedXTab,
   readViaProfile,
 } = vi.hoisted(
   () => {
     const navigateAndCapture = vi.fn();
     const scrollAndCapture = vi.fn();
+    const navigate = vi.fn();
     const close = vi.fn();
     return {
       navigateAndCapture,
       scrollAndCapture,
+      navigate,
       close,
-      openXReadTab: vi.fn(async () => ({ navigateAndCapture, scrollAndCapture, close })),
+      // Mirrors the real helper: hands the caller a session bound to the shared
+      // warm tab. `close` is wired in so tests can assert scanX never calls it —
+      // the shared tab is reclaimed by the idle timer, not by the scan.
+      withSharedXTab: vi.fn(async (fn: (session: unknown) => Promise<unknown>) =>
+        fn({ navigateAndCapture, scrollAndCapture, navigate, close })
+      ),
       readViaProfile: vi.fn(),
     };
   }
 );
 
 vi.mock('../x.tab-reader', () => ({
-  openXReadTab,
+  withSharedXTab,
   readViaProfile,
 }));
 
@@ -120,12 +128,14 @@ describe('scanX real-page execution', () => {
   it('runs a keyword scan through x.com Top SearchTimeline results', async () => {
     const result = await scanX(task(), async () => true);
 
-    expect(openXReadTab).toHaveBeenCalledOnce();
+    expect(withSharedXTab).toHaveBeenCalledOnce();
     expect(navigateAndCapture).toHaveBeenCalledWith(
       'https://x.com/search?q=artificial%20intelligence&src=typed_query',
       'SearchTimeline'
     );
-    expect(close).toHaveBeenCalledOnce();
+    // The shared tab outlives the scan — it is closed by the idle timer in
+    // x.tab-reader, never by scanX itself.
+    expect(close).not.toHaveBeenCalled();
     expect(result).toEqual({
       posts: [],
       nextCursor: { lastSeenExternalId: null, lastSeenAt: null },
@@ -150,7 +160,7 @@ describe('scanX real-page execution', () => {
       'https://x.com/search?q=from%3Aalice%20(ai%20OR%20agents)&src=typed_query',
       'SearchTimeline'
     );
-    expect(openXReadTab).not.toHaveBeenCalled();
+    expect(withSharedXTab).not.toHaveBeenCalled();
     expect(result.posts.map((post) => post.externalPostId)).toEqual(['30']);
   });
 
@@ -261,17 +271,31 @@ describe('scanX real-page execution', () => {
       nextCursor: current.cursor,
       exhausted: false,
     });
-    expect(openXReadTab).not.toHaveBeenCalled();
+    expect(withSharedXTab).not.toHaveBeenCalled();
     expect(readViaProfile).not.toHaveBeenCalled();
   });
 
-  it('reports an unsuccessful capture as non-exhausted and closes the tab', async () => {
+  it('reports an unsuccessful capture as non-exhausted without closing the shared tab', async () => {
     navigateAndCapture.mockResolvedValue(null);
 
     const result = await scanX(task(), async () => true);
 
     expect(result.exhausted).toBe(false);
     expect(result.posts).toEqual([]);
-    expect(close).toHaveBeenCalledOnce();
+    expect(close).not.toHaveBeenCalled();
+  });
+
+  it('reports non-exhausted when the shared X tab cannot be created', async () => {
+    withSharedXTab.mockResolvedValueOnce(null);
+    const current = task();
+
+    const result = await scanX(current, async () => true);
+
+    expect(result).toEqual({
+      posts: [],
+      nextCursor: current.cursor,
+      exhausted: false,
+    });
+    expect(navigateAndCapture).not.toHaveBeenCalled();
   });
 });

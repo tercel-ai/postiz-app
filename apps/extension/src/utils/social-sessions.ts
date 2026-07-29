@@ -20,6 +20,7 @@
 
 import type {
   AiseeSessionInfo,
+  PlatformSessionInfo,
   RedditSessionInfo,
   SocialSessions,
   XSessionInfo,
@@ -286,12 +287,382 @@ async function getAiseeSession(): Promise<AiseeSessionInfo> {
   }
 }
 
-/** Snapshot all platforms in parallel; a platform probe never throws. */
+// ── Lightweight id-only probe (publish guard) ───────────────────────────────
+
+export interface SessionAccountProbe {
+  /**
+   * False when this platform has NO session probe at all — the caller cannot
+   * conclude anything about who is logged in, so it must not treat the result
+   * as a mismatch.
+   */
+  supported: boolean;
+  loggedIn: boolean;
+  /** Platform-side account id, in whatever shape the platform reports it. */
+  id?: string;
+  /** Handle when it is already cached; never fetched on demand here. */
+  handle?: string;
+}
+
+const IDENTITY_CACHE_KEY = 'aisee_publish_identity';
+const IDENTITY_TTL_MS = 10 * 60 * 1000;
+/**
+ * Misses get their own, much shorter TTL.
+ *
+ * A miss means the resolver could not name the account — a 403 from LinkedIn, a
+ * Quora layout change, a transient network error. The publish guard treats "no
+ * id" as "cannot conclude" and ALLOWS the post, so caching a miss for the full
+ * 10 minutes would silently disable the wrong-account check for that whole
+ * window on the strength of one transient failure. A short TTL still stops the
+ * network probe from running before every single publish (the reason the cache
+ * exists) while letting the very next drain cycle recover.
+ */
+const IDENTITY_MISS_TTL_MS = 30 * 1000;
+
+interface CachedIdentity {
+  /** The session cookie this identity was resolved under — the invalidator. */
+  key: string;
+  handle?: string;
+  at: number;
+}
+
+async function readIdentityCache(): Promise<Record<string, CachedIdentity>> {
+  try {
+    const d = await chrome.storage.session.get([IDENTITY_CACHE_KEY]);
+    return d?.[IDENTITY_CACHE_KEY] ?? {};
+  } catch {
+    /* no session storage — resolve fresh every time */
+    return {};
+  }
+}
+
+/**
+ * Cache a network-resolved handle against the session cookie it belongs to, so
+ * a logout/account-switch invalidates it immediately rather than after the TTL.
+ * Keyed per platform in one storage entry.
+ *
+ * `sessionKey` MUST be a cookie that actually changes on logout/account switch —
+ * a device-scoped cookie would keep the previous account's identity alive across
+ * a switch, which is exactly the case the guard exists to catch. Pass undefined
+ * when no such cookie is available and the lookup runs uncached.
+ */
+async function cachedHandle(
+  platform: string,
+  sessionKey: string | undefined,
+  resolve: () => Promise<string | undefined>
+): Promise<string | undefined> {
+  // No trustworthy invalidator → never cache. Correctness beats one saved
+  // request: a stale identity here means publishing as the wrong account.
+  if (!sessionKey) return resolve();
+
+  const hit = (await readIdentityCache())[platform];
+  if (hit && hit.key === sessionKey) {
+    const ttl = hit.handle ? IDENTITY_TTL_MS : IDENTITY_MISS_TTL_MS;
+    if (Date.now() - hit.at < ttl) return hit.handle;
+  }
+  const handle = await resolve();
+  try {
+    // Re-read immediately before writing. getSocialSessions resolves several
+    // platforms inside one Promise.all, so a map snapshot taken BEFORE the
+    // network await is already stale by now — writing it back would discard
+    // whatever the sibling probes stored in the meantime, leaving at most one
+    // platform cached per snapshot and defeating the cache entirely.
+    const all = await readIdentityCache();
+    all[platform] = { key: sessionKey, handle, at: Date.now() };
+    await chrome.storage.session.set({ [IDENTITY_CACHE_KEY]: all });
+  } catch (e) {
+    console.warn('[aisee][sessions] identity cache write failed', platform, e);
+  }
+  return handle;
+}
+
+/**
+ * Medium's own "my profile" redirect: /me lands on /@handle for the logged-in
+ * session. A same-session navigation Medium serves routinely — no API key, no
+ * scraping of another user's page.
+ */
+async function readMediumHandle(): Promise<string | undefined> {
+  try {
+    const res = await fetch('https://medium.com/me', {
+      credentials: 'include',
+      redirect: 'follow',
+    });
+    const m = new URL(res.url).pathname.match(/^\/@([^/?#]+)/);
+    return m?.[1] || undefined;
+  } catch (e) {
+    console.warn('[aisee][sessions] medium identity read failed', e);
+    return undefined;
+  }
+}
+
+/**
+ * LinkedIn's member id via its own session endpoint. The CSRF token IS the
+ * JSESSIONID cookie value (LinkedIn's own convention).
+ *
+ * Which field to read is NOT interchangeable. voyager/api/me returns the same
+ * account under two different identifiers:
+ *
+ *   plainId   254217383                                    (numeric)
+ *   objectUrn urn:li:member:254217383                      (the same number)
+ *   entityUrn urn:li:fs_miniProfile:ACoAAA8nDKcBk1M...     (opaque)
+ *
+ * The Integration's internalId is the OAuth `sub` from /v2/userinfo (see
+ * linkedin.provider authenticate), which is the OPAQUE one. Reading plainId
+ * would therefore never match and would block every LinkedIn publish — so this
+ * reads entityUrn only, and returns undefined rather than falling back to a
+ * numeric id that is guaranteed to mismatch. Verified against a live session.
+ */
+async function readLinkedinMemberId(): Promise<string | undefined> {
+  try {
+    const jsession = (
+      await getCookie('https://www.linkedin.com/', 'JSESSIONID')
+    ).replace(/"/g, '');
+    if (!jsession) return undefined;
+    const res = await fetch('https://www.linkedin.com/voyager/api/me', {
+      credentials: 'include',
+      headers: { 'csrf-token': jsession, accept: 'application/json' },
+    });
+    if (!res.ok) {
+      console.warn('[aisee][sessions] linkedin identity read HTTP', res.status);
+      return undefined;
+    }
+    const body = await res.json();
+    const entityUrn: string =
+      body?.miniProfile?.entityUrn || body?.entityUrn || '';
+    return (
+      String(entityUrn).match(/urn:li:fs_miniProfile:([^,)\s"]+)/)?.[1] ||
+      undefined
+    );
+  } catch (e) {
+    console.warn('[aisee][sessions] linkedin identity read failed', e);
+    return undefined;
+  }
+}
+
+/**
+ * Quora's profile slug for the signed-in user, read off its own account
+ * settings page — the Integration's internalId IS that slug (`Jane-Doe`).
+ *
+ * The settings page is used SPECIFICALLY because it mentions only the current
+ * user. The obvious alternative — scraping profile links off the feed — returns
+ * the links of whoever wrote the posts in it, so picking one would confidently
+ * identify the wrong person and block every Quora publish.
+ *
+ * That is also why more than one distinct match is treated as failure rather
+ * than "take the first": if Quora ever renders someone else's profile here,
+ * guessing is worse than not checking at all.
+ */
+async function readQuoraProfileSlug(): Promise<string | undefined> {
+  try {
+    const res = await fetch('https://www.quora.com/settings/account', {
+      credentials: 'include',
+    });
+    if (!res.ok) {
+      console.warn('[aisee][sessions] quora identity read HTTP', res.status);
+      return undefined;
+    }
+    const html = await res.text();
+    const found = [...new Set(html.match(/\/profile\/[A-Za-z0-9-]+/g) || [])];
+    if (found.length !== 1) {
+      console.warn(
+        '[aisee][sessions] quora identity ambiguous — refusing to guess',
+        { matches: found.length }
+      );
+      return undefined;
+    }
+    return found[0].replace('/profile/', '') || undefined;
+  } catch (e) {
+    console.warn('[aisee][sessions] quora identity read failed', e);
+    return undefined;
+  }
+}
+
+/**
+ * Which account this browser is logged into on `platform`, resolved from
+ * COOKIES ALONE.
+ *
+ * Deliberately not getSocialSessions(): that one also resolves display identity,
+ * which for X means opening a background tab and waiting seconds. This runs
+ * before every single publish, so it must stay cheap — and the stable account id
+ * it compares on is already in the cookies. A handle is returned only when a
+ * previous probe happened to cache one; it is for wording the error, never for
+ * the comparison.
+ *
+ * `network: false` restricts this to cookies ALONE — medium / linkedin / quora
+ * report logged-in without their account id. Callers that only need "is this
+ * browser signed in" (the session snapshot the web app renders) pass it so the
+ * platform never sees a request; the publish guard, where the id is what makes
+ * the check work at all, uses the default.
+ */
+export async function probeSessionAccount(
+  platform: string,
+  opts: { network?: boolean } = {}
+): Promise<SessionAccountProbe> {
+  const network = opts.network !== false;
+  switch ((platform || '').toLowerCase()) {
+    case 'x': {
+      const authToken = await getXCookie('auth_token');
+      if (!authToken) return { supported: true, loggedIn: false };
+      const twid = await getXCookie('twid');
+      const id = decodeURIComponent(twid).match(/u=(\d+)/)?.[1];
+      // Only reuse the cached handle when it belongs to THIS account, else a
+      // stale one from the previously logged-in account would word the error
+      // with the wrong name.
+      const cache = await loadXIdentityCache();
+      const handle =
+        cache && cache.twid === (id || '') ? cache.handle : undefined;
+      return {
+        supported: true,
+        loggedIn: true,
+        ...(id ? { id } : {}),
+        ...(handle ? { handle } : {}),
+      };
+    }
+    case 'reddit': {
+      const sessionCookie = await getCookie(
+        `${REDDIT_BASE}/`,
+        'reddit_session'
+      );
+      if (!sessionCookie) return { supported: true, loggedIn: false };
+      // JWT decode, not me.json: a local read with no network round-trip.
+      const id = decodeRedditIdFromJwt(
+        await getCookie(`${REDDIT_BASE}/`, 'token_v2')
+      );
+      return { supported: true, loggedIn: true, ...(id ? { id } : {}) };
+    }
+    case 'hackernews': {
+      // HN's `user` cookie is `<username>&<hash>`, and the Integration's
+      // internalId IS the HN username — an exact, network-free comparison.
+      // The cookie is httpOnly (confirmed against a live session): readable
+      // here via chrome.cookies, invisible to page JS.
+      const raw = await getCookie('https://news.ycombinator.com/', 'user');
+      if (!raw) return { supported: true, loggedIn: false };
+      let candidate = '';
+      try {
+        candidate = decodeURIComponent(raw).split('&')[0] || '';
+      } catch {
+        // Malformed percent-encoding — fall back to the raw split.
+        candidate = raw.split('&')[0] || '';
+      }
+      // The cookie's INTERNAL format is the one thing a live session could not
+      // confirm (httpOnly hides it from the page). So accept the value only if
+      // it actually looks like an HN username: should the format ever differ,
+      // a garbage id would block every HN publish, while no id just skips the
+      // check. HN usernames are 2-15 chars of [A-Za-z0-9_-].
+      const handle = /^[A-Za-z0-9_-]{2,15}$/.test(candidate)
+        ? candidate
+        : undefined;
+      return {
+        supported: true,
+        loggedIn: true,
+        ...(handle ? { id: handle, handle } : {}),
+      };
+    }
+    case 'medium': {
+      const sid = await getCookie('https://medium.com/', 'sid');
+      if (!sid) return { supported: true, loggedIn: false };
+      if (!network) return { supported: true, loggedIn: true };
+      // internalId is the @handle, so the handle is the id here.
+      const handle = await cachedHandle('medium', sid, readMediumHandle);
+      return {
+        supported: true,
+        loggedIn: true,
+        ...(handle ? { id: handle, handle } : {}),
+      };
+    }
+    case 'linkedin': {
+      const liAt = await getCookie('https://www.linkedin.com/', 'li_at');
+      if (!liAt) return { supported: true, loggedIn: false };
+      if (!network) return { supported: true, loggedIn: true };
+      // ACCEPTED EXCEPTION to the extension's "drive a real tab, never call a
+      // private API from the worker" rule (queue.ts, linkedin/page-scripts.ts).
+      // It is bounded deliberately: one GET of the user's OWN profile, only on
+      // the publish path where the id is what makes the guard work, cached for
+      // 10 minutes per li_at — never on the session snapshot, which passes
+      // network:false. Opening a tab per publish would be far more conspicuous
+      // than one request the LinkedIn web app itself makes on every page load.
+      const id = await cachedHandle('linkedin', liAt, readLinkedinMemberId);
+      return { supported: true, loggedIn: true, ...(id ? { id } : {}) };
+    }
+    case 'quora': {
+      // No cookie identifies the signed-in Quora account, so the account comes
+      // from the settings page instead. Absence of even the device cookie does
+      // mean this browser has never been to Quora — the one logged-out
+      // conclusion that is safe.
+      const deviceKey = await getCookie('https://www.quora.com/', 'm-b');
+      // `m-s` is the session cookie and the ONLY valid cache invalidator here:
+      // `m-b` is a device id present when logged OUT too, so caching under it
+      // would keep the previous account's slug alive across a sign-out and
+      // sign-in — the guard would then match a stale slug and publish as the
+      // NEW account. Without m-s the slug is resolved fresh every time.
+      const sessionKey = await getCookie('https://www.quora.com/', 'm-s');
+      if (!sessionKey && !deviceKey) return { supported: true, loggedIn: false };
+      if (!network) return { supported: true, loggedIn: true };
+      // internalId is the profile slug, so the slug is the id.
+      const slug = await cachedHandle(
+        'quora',
+        sessionKey || undefined,
+        readQuoraProfileSlug
+      );
+      return {
+        supported: true,
+        loggedIn: true,
+        ...(slug ? { id: slug, handle: slug } : {}),
+      };
+    }
+    default:
+      return { supported: false, loggedIn: false };
+  }
+}
+
+/**
+ * Reuse the publish guard's probe for a platform that has no richer identity
+ * read. Never throws — an unresolvable platform reports logged-out rather than
+ * failing the whole snapshot.
+ */
+async function platformSession(platform: string): Promise<PlatformSessionInfo> {
+  try {
+    // LinkedIn alone is cookie-only here. Its id costs a call to a PRIVATE API
+    // from the worker, on the one platform this extension is known to be
+    // fingerprinted by — worth paying on the publish path, where the id is what
+    // stops an irreversible wrong-account post, but not for a snapshot that
+    // only renders "signed in / signed out". Medium and Quora resolve theirs
+    // from ordinary same-session pages, so they keep the id.
+    const probe = await probeSessionAccount(platform, {
+      network: platform !== 'linkedin',
+    });
+    // `{}` — NOT `{loggedIn: false}`. Consumers block publishing on an explicit
+    // false, so claiming "signed out" for a platform we simply cannot probe
+    // would block legitimate posts.
+    if (!probe.supported) return {};
+    return {
+      loggedIn: probe.loggedIn,
+      ...(probe.id ? { id: probe.id } : {}),
+      ...(probe.handle ? { handle: probe.handle } : {}),
+    };
+  } catch (e) {
+    console.warn('[aisee][sessions] platform probe failed', platform, e);
+    return {};
+  }
+}
+
+/**
+ * Snapshot all platforms in parallel; a platform probe never throws.
+ *
+ * The four platforms below go through the cheap id-only probe: cookies, plus one
+ * cached session request for medium/quora (LinkedIn is cookie-only here — see
+ * platformSession). Only X opens a browser tab (its handle is in no cookie), so
+ * adding these does not change what dominates this call's latency.
+ */
 export async function getSocialSessions(): Promise<SocialSessions> {
-  const [x, reddit, aisee] = await Promise.all([
-    getXSession(),
-    getRedditSessionInfo(),
-    getAiseeSession(),
-  ]);
-  return { x, reddit, aisee };
+  const [x, reddit, aisee, linkedin, hackernews, medium, quora] =
+    await Promise.all([
+      getXSession(),
+      getRedditSessionInfo(),
+      getAiseeSession(),
+      platformSession('linkedin'),
+      platformSession('hackernews'),
+      platformSession('medium'),
+      platformSession('quora'),
+    ]);
+  return { x, reddit, aisee, linkedin, hackernews, medium, quora };
 }

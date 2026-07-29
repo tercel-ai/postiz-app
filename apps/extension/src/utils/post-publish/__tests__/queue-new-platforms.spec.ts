@@ -98,12 +98,23 @@ describe('publish queue — new platforms validation', () => {
     ).toBeNull();
   });
 
-  it('rejects images on the article/forum platforms', () => {
+  it('strips images on the article/forum platforms instead of rejecting', () => {
+    // Their posters are text-only, but rejecting the item would be worse than
+    // dropping the attachment: a rejected item never leaves Post.state=QUEUE,
+    // so the backend re-leases it every cycle and the post never publishes.
     expect(
       reasonFor(
         item({ taskId: 'i1', title: 'T', segments: [{ text: 'a', images: ['https://img/1'] }] })
       )
-    ).toMatch(/image posts are not supported/);
+    ).toBeNull();
+  });
+
+  it('rejects only when stripping the images leaves nothing to publish', () => {
+    expect(
+      reasonFor(
+        item({ taskId: 'i2', title: 'T', segments: [{ text: '', images: ['https://img/1'] }] })
+      )
+    ).toMatch(/non-empty list with text or images/);
   });
 
   it('completes (published) even when the poster captures no permalink (F1)', async () => {

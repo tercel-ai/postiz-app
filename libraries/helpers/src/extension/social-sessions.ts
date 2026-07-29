@@ -53,11 +53,40 @@ export interface AiseeSessionInfo {
   username?: string;
 }
 
+/**
+ * The remaining extension-publishable platforms, resolved by the SAME cheap
+ * id-only probe the publish guard uses (cookies, plus one cached session
+ * request where the account is not in a cookie). None of them opens a browser
+ * tab, unlike the X identity read.
+ *
+ * `id` is directly comparable to the Integration's `internalId`, which is what
+ * lets the web editor warn "you picked account A but this browser is signed in
+ * as B" before publishing. It is absent whenever the probe could not resolve
+ * the account with confidence — treat that as "unknown", never as a mismatch.
+ */
+export interface PlatformSessionInfo {
+  /**
+   * ABSENT means the probe could not conclude — the platform has no probe, or
+   * the lookup failed. Deliberately not `false`: a consumer reads `false` as
+   * "signed out" and blocks publishing on it, so reporting it for a failed
+   * lookup would turn any hiccup into a blocked post.
+   */
+  loggedIn?: boolean;
+  /** Platform-side account id, comparable to Integration.internalId. */
+  id?: string;
+  /** Username/handle without any @ or u/ prefix. */
+  handle?: string;
+}
+
 export interface SocialSessions {
   x: XSessionInfo;
   reddit: RedditSessionInfo;
   /** The extension's aisee session (explicit login or bridged from a tab). */
   aisee: AiseeSessionInfo;
+  linkedin: PlatformSessionInfo;
+  hackernews: PlatformSessionInfo;
+  medium: PlatformSessionInfo;
+  quora: PlatformSessionInfo;
 }
 
 /**

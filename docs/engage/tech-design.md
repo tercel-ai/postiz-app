@@ -2374,11 +2374,22 @@ Engage limits live in the global `Settings` table as JSON (same pattern as
 
   | Field | Starter | Developer | Pro |
   | --- | --- | --- | --- |
-  | `keywordsMax` | 3 | 10 | 30 |
+  | `keywordsMax` | 30 | 100 | 300 |
   | `priorityAccountsMax` | 0 | 10 | `null` |
-  | `subredditsMax` | 1 | 5 | 15 |
+  | `subredditsMax` | 10 | 50 | 150 |
+  | `keywordsPerProjectMax` | 5 | 15 | 30 |
+  | `priorityAccountsPerProjectMax` | 2 | 10 | 20 |
+  | `subredditsPerProjectMax` | 2 | 8 | 15 |
   | `scanIntervalHours` | 24 | 24 | 6 |
   | `replyMonthlyCap` | 10 | `null` | `null` |
+
+  The three unit types are capped **twice**: `*Max` bounds the whole account,
+  `*PerProjectMax` bounds one project. Both are checked on every activation
+  (`assertCanActivate(orgId, type, count, configId)`), so a project's real
+  headroom is `min(org remaining, project remaining)`. Project counting keys on
+  `EngageConfig.id` — unique per `(organizationId, projectId)` — because the
+  keyword/channel/tracked tables carry no `projectId` of their own. The 403 body
+  reports which cap fired via `scope: 'organization' | 'project'`.
 
 - **`engage_reply_credits`** — `{ base, multipliers: { short, medium, long } }`.
   `cost = round(base × multiplier)`. Defaults: base 2, ×1.0/1.5/2.5 → **2 / 3 / 5**.

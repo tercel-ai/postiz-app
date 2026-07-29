@@ -28,13 +28,25 @@ function aiseeMock(opts: { balance?: number | null } = {}) {
   } as any;
 }
 
-function repoMock(name: string, count = 0, enabled: boolean | null = false) {
+const CONFIG_ID = 'cfg1';
+
+// `count` answers the org-wide query (`where.organizationId`); `projectCount`
+// answers the per-project one (`where.configId`), defaulting to the same number
+// so single-scope tests need not care.
+function repoMock(
+  name: string,
+  count = 0,
+  projectCount?: number,
+  enabled: boolean | null = false
+) {
   return {
     model: {
       [name]: {
-        count: vi.fn(async () => count),
+        count: vi.fn(async (args: any = {}) =>
+          args?.where?.configId !== undefined ? projectCount ?? count : count
+        ),
         findFirst: vi.fn(async () =>
-          enabled === null ? null : { enabled }
+          enabled === null ? null : { enabled, configId: CONFIG_ID }
         ),
       },
     },
@@ -48,6 +60,11 @@ function build(opts: {
   keywordCount?: number;
   trackedCount?: number;
   channelCount?: number;
+  keywordProjectCount?: number;
+  trackedProjectCount?: number;
+  channelProjectCount?: number;
+  /** enabled flag the `findFirst` row reports; null = row not found. */
+  rowEnabled?: boolean | null;
   billingCount?: number;
   orgData?: Record<string, unknown> | null;
 }) {
@@ -79,9 +96,24 @@ function build(opts: {
       settingsMock(opts.settings),
       usersMock(opts.limits),
       aisee,
-      repoMock('engageKeyword', opts.keywordCount ?? 0),
-      repoMock('engageTrackedAccount', opts.trackedCount ?? 0),
-      repoMock('engageMonitoredChannel', opts.channelCount ?? 0),
+      repoMock(
+        'engageKeyword',
+        opts.keywordCount ?? 0,
+        opts.keywordProjectCount,
+        opts.rowEnabled === undefined ? false : opts.rowEnabled
+      ),
+      repoMock(
+        'engageTrackedAccount',
+        opts.trackedCount ?? 0,
+        opts.trackedProjectCount,
+        opts.rowEnabled === undefined ? false : opts.rowEnabled
+      ),
+      repoMock(
+        'engageMonitoredChannel',
+        opts.channelCount ?? 0,
+        opts.channelProjectCount,
+        opts.rowEnabled === undefined ? false : opts.rowEnabled
+      ),
       billing,
       organization,
       tx
@@ -144,15 +176,17 @@ describe('EngageEntitlementService.getEntitlement', () => {
   it('resolves Pro limits from the plan name', async () => {
     const { service } = build({ limits: PRO_LIMITS });
     const ent = await service.getEntitlement('org1');
-    expect(ent.keywordsMax).toBe(30);
+    expect(ent.keywordsMax).toBe(300);
     expect(ent.priorityAccountsMax).toBeNull(); // unlimited
+    expect(ent.keywordsPerProjectMax).toBe(30);
     expect(ent.scanIntervalHours).toBe(6);
   });
 
   it('falls back to starter limits for an unrecognised plan name', async () => {
     const { service } = build({ limits: { ...PRO_LIMITS, name: 'Mystery Tier' } });
     const ent = await service.getEntitlement('org1');
-    expect(ent.keywordsMax).toBe(3);
+    expect(ent.keywordsMax).toBe(30);
+    expect(ent.keywordsPerProjectMax).toBe(5);
     expect(ent.scanIntervalHours).toBe(24);
   });
 
@@ -160,14 +194,14 @@ describe('EngageEntitlementService.getEntitlement', () => {
     // A misleading/unparseable `name` must not matter when `plan` is exact.
     const { service } = build({ limits: { ...PRO_LIMITS, name: 'Something Unrelated', plan: 'developer' } });
     const ent = await service.getEntitlement('org1');
-    expect(ent.keywordsMax).toBe(10);
+    expect(ent.keywordsMax).toBe(100);
     expect(ent.scanIntervalHours).toBe(24);
   });
 
   it('ignores an unrecognised `plan` value and falls back to the display name', async () => {
     const { service } = build({ limits: { ...PRO_LIMITS, name: 'Pro Plan (Monthly)', plan: 'enterprise' } });
     const ent = await service.getEntitlement('org1');
-    expect(ent.keywordsMax).toBe(30);
+    expect(ent.keywordsMax).toBe(300);
   });
 });
 
@@ -269,7 +303,7 @@ describe('EngageEntitlementService.getScanIntervalHours', () => {
 
 describe('EngageEntitlementService.assertCanActivate', () => {
   it('throws when adding would exceed the keyword cap', async () => {
-    const { service } = build({ limits: STARTER_LIMITS, keywordCount: 3 });
+    const { service } = build({ limits: STARTER_LIMITS, keywordCount: 30 });
     await expect(service.assertCanActivate('org1', 'keyword', 1)).rejects.toBeInstanceOf(
       ForbiddenException
     );
@@ -293,10 +327,200 @@ describe('EngageEntitlementService.assertCanActivate', () => {
   });
 
   it('rejects a bulk add that overruns the cap', async () => {
-    const { service } = build({ limits: DEV_LIMITS, keywordCount: 8 });
+    const { service } = build({ limits: DEV_LIMITS, keywordCount: 98 });
     await expect(service.assertCanActivate('org1', 'keyword', 5)).rejects.toBeInstanceOf(
       ForbiddenException
     );
+  });
+});
+
+// ── Dual limits: org-wide cap AND per-project cap ────────────────────────────
+describe('EngageEntitlementService.assertCanActivate — per-project cap', () => {
+  // Deliberately loose org caps so the per-project cap is what binds; both are
+  // overridden through the same Settings key an admin would use.
+  const DUAL_CAPS = {
+    [ENGAGE_ENTITLEMENTS_KEY]: {
+      pro: {
+        keywordsMax: 100,
+        keywordsPerProjectMax: 5,
+        priorityAccountsMax: 100,
+        priorityAccountsPerProjectMax: 3,
+        subredditsMax: 100,
+        subredditsPerProjectMax: 2,
+      },
+    },
+  };
+
+  const payload = (err: unknown) =>
+    (err as ForbiddenException).getResponse() as Record<string, unknown>;
+
+  it('blocks when the project is full even though the org has room', async () => {
+    const { service } = build({
+      limits: PRO_LIMITS,
+      settings: DUAL_CAPS,
+      keywordCount: 40, // org: 40/100, plenty of room
+      keywordProjectCount: 5, // project: 5/5, full
+    });
+    await expect(
+      service.assertCanActivate('org1', 'keyword', 1, CONFIG_ID)
+    ).rejects.toBeInstanceOf(ForbiddenException);
+  });
+
+  it('reports scope="project" with the project cap and count', async () => {
+    const { service } = build({
+      limits: PRO_LIMITS,
+      settings: DUAL_CAPS,
+      keywordCount: 40,
+      keywordProjectCount: 5,
+    });
+    const err = await service
+      .assertCanActivate('org1', 'keyword', 1, CONFIG_ID)
+      .catch((e) => e);
+    expect(payload(err)).toMatchObject({
+      code: 'engage_limit_reached',
+      limit: 'keyword',
+      scope: 'project',
+      max: 5,
+      current: 5,
+    });
+  });
+
+  it('reports scope="organization" when the org cap binds first', async () => {
+    const { service } = build({
+      limits: PRO_LIMITS,
+      settings: DUAL_CAPS,
+      keywordCount: 100, // org full
+      keywordProjectCount: 0, // project empty
+    });
+    const err = await service
+      .assertCanActivate('org1', 'keyword', 1, CONFIG_ID)
+      .catch((e) => e);
+    expect(payload(err)).toMatchObject({ scope: 'organization', max: 100 });
+  });
+
+  it('allows an add that fits under BOTH caps', async () => {
+    const { service } = build({
+      limits: PRO_LIMITS,
+      settings: DUAL_CAPS,
+      keywordCount: 40,
+      keywordProjectCount: 4,
+    });
+    await expect(
+      service.assertCanActivate('org1', 'keyword', 1, CONFIG_ID)
+    ).resolves.toBeUndefined();
+  });
+
+  it('skips the project check when no configId is passed', async () => {
+    const { service } = build({
+      limits: PRO_LIMITS,
+      settings: DUAL_CAPS,
+      keywordCount: 40,
+      keywordProjectCount: 99, // way over the project cap, but unscoped
+    });
+    await expect(service.assertCanActivate('org1', 'keyword', 1)).resolves.toBeUndefined();
+  });
+
+  it('is a no-op when the per-project cap is null (unlimited)', async () => {
+    const { service } = build({
+      limits: PRO_LIMITS,
+      settings: {
+        [ENGAGE_ENTITLEMENTS_KEY]: {
+          pro: { keywordsMax: 100, keywordsPerProjectMax: null },
+        },
+      },
+      keywordCount: 40,
+      keywordProjectCount: 999,
+    });
+    await expect(
+      service.assertCanActivate('org1', 'keyword', 1, CONFIG_ID)
+    ).resolves.toBeUndefined();
+  });
+
+  it('rejects a bulk add that overruns only the project cap', async () => {
+    const { service } = build({
+      limits: PRO_LIMITS,
+      settings: DUAL_CAPS,
+      keywordCount: 10,
+      keywordProjectCount: 3,
+    });
+    await expect(
+      service.assertCanActivate('org1', 'keyword', 3, CONFIG_ID)
+    ).rejects.toBeInstanceOf(ForbiddenException);
+  });
+
+  it('applies the per-project cap to subreddits and tracked accounts too', async () => {
+    const { service } = build({
+      limits: PRO_LIMITS,
+      settings: DUAL_CAPS,
+      channelCount: 1,
+      channelProjectCount: 2, // at subredditsPerProjectMax
+      trackedCount: 1,
+      trackedProjectCount: 3, // at priorityAccountsPerProjectMax
+    });
+    await expect(
+      service.assertCanActivate('org1', 'subreddit', 1, CONFIG_ID)
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(
+      service.assertCanActivate('org1', 'tracked', 1, CONFIG_ID)
+    ).rejects.toBeInstanceOf(ForbiddenException);
+  });
+
+  it('defaults the per-project caps in when a stored override omits them', async () => {
+    // A settings row seeded before per-project caps existed: the per-plan merge
+    // must still supply them rather than leaving them undefined (= no cap).
+    const { service } = build({
+      limits: PRO_LIMITS,
+      settings: { [ENGAGE_ENTITLEMENTS_KEY]: { pro: { keywordsMax: 100 } } },
+      keywordCount: 40,
+      keywordProjectCount: 30, // pro default keywordsPerProjectMax = 30
+    });
+    expect((await service.getEntitlement('org1')).keywordsPerProjectMax).toBe(30);
+    await expect(
+      service.assertCanActivate('org1', 'keyword', 1, CONFIG_ID)
+    ).rejects.toBeInstanceOf(ForbiddenException);
+  });
+});
+
+describe('EngageEntitlementService.assertCanEnable', () => {
+  const DUAL_CAPS = {
+    [ENGAGE_ENTITLEMENTS_KEY]: {
+      pro: { keywordsMax: 100, keywordsPerProjectMax: 5 },
+    },
+  };
+
+  it('enforces the project cap of the config the row belongs to', async () => {
+    const { service } = build({
+      limits: PRO_LIMITS,
+      settings: DUAL_CAPS,
+      rowEnabled: false, // disabled → enabling it consumes a slot
+      keywordCount: 10,
+      keywordProjectCount: 5, // that project is full
+    });
+    await expect(service.assertCanEnable('org1', 'keyword', 'kw1')).rejects.toBeInstanceOf(
+      ForbiddenException
+    );
+  });
+
+  it('is a no-op for an already-enabled row (never double-charges)', async () => {
+    const { service } = build({
+      limits: PRO_LIMITS,
+      settings: DUAL_CAPS,
+      rowEnabled: true,
+      keywordCount: 10,
+      keywordProjectCount: 5,
+    });
+    await expect(service.assertCanEnable('org1', 'keyword', 'kw1')).resolves.toBeUndefined();
+  });
+
+  it('is a no-op for an unknown id', async () => {
+    const { service } = build({
+      limits: PRO_LIMITS,
+      settings: DUAL_CAPS,
+      rowEnabled: null,
+      keywordCount: 10,
+      keywordProjectCount: 5,
+    });
+    await expect(service.assertCanEnable('org1', 'keyword', 'nope')).resolves.toBeUndefined();
   });
 });
 
@@ -350,7 +574,7 @@ describe('EngageEntitlementService.getEntitlementSummary', () => {
     });
     const summary = await service.getEntitlementSummary('org1');
     expect(summary.plan).toBe('pro');
-    expect(summary.limits.keywordsMax).toBe(30);
+    expect(summary.limits.keywordsMax).toBe(300);
     expect(summary.usage).toEqual({
       keywords: 7,
       trackedAccounts: 2,
@@ -374,7 +598,7 @@ describe('EngageEntitlementService.getEntitlementSummary', () => {
     expect(summary.plan).toBeNull();
     expect(summary.degraded).toBe(true);
     // Limits still fail-closed to Starter internally, independent of the display plan.
-    expect(summary.limits.keywordsMax).toBe(3);
+    expect(summary.limits.keywordsMax).toBe(30);
   });
 });
 

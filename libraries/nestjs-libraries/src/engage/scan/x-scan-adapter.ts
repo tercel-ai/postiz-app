@@ -65,6 +65,7 @@ interface XTweet {
     retweet_count: number;
     quote_count: number;
     bookmark_count: number;
+    impression_count: number;
   };
   // Archival/filtering fields — requested into rawData, not promoted to columns.
   lang?: string;
@@ -380,7 +381,7 @@ function toRawPost(tweet: XTweet, author?: XUser): RawPost {
     metricRetweets: tweet.public_metrics?.retweet_count ?? 0,
     metricQuotes: tweet.public_metrics?.quote_count ?? 0,
     metricBookmarks: tweet.public_metrics?.bookmark_count ?? 0,
-    metricViews: 0,
+    metricViews: tweet.public_metrics?.impression_count ?? 0,
     metricShares: 0,
     metricSaves: 0,
     metricScore: 0,

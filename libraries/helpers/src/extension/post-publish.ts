@@ -91,6 +91,21 @@ export const TITLE_REQUIRED_PLATFORMS: readonly PublishPlatform[] = [
   'medium',
 ];
 
+/**
+ * Platforms whose extension poster can actually upload an image (Reddit's
+ * media-asset lease, X's native composer attachment). Every other poster is
+ * text-only.
+ *
+ * The backend selects and resolves media for EVERY extension-routed post, so
+ * this set is what decides whether those URLs are forwarded or dropped. Dropping
+ * is deliberate: the text is the post, and a platform that cannot carry the
+ * image must still publish rather than stall forever in QUEUE.
+ */
+export const IMAGE_CAPABLE_PLATFORMS: readonly PublishPlatform[] = [
+  'x',
+  'reddit',
+];
+
 export interface PublishThreadSegment {
   /** Plain text of this segment. */
   text: string;
@@ -106,10 +121,36 @@ export interface PublishThreadSegment {
   images?: string[];
 }
 
+/**
+ * The account a post MUST go out as. The extension publishes with whatever
+ * session the browser is logged into, which is not necessarily the account the
+ * post was composed for — and posting to the wrong account cannot be undone.
+ * So when this is present the queue compares it against the live session and
+ * refuses to publish on a mismatch.
+ *
+ * Absent = no bound account (operation-plan posts publish by platform), where
+ * "whoever is logged in" IS the intent and no check applies.
+ */
+export interface PublishTargetAccount {
+  /**
+   * Platform-side account id, as stored on the Integration (`internalId`).
+   * Survives renames, unlike the handle. Formats are platform-native and NOT
+   * normalized here — Reddit's is the bare base36 id while a browser session
+   * reports the `t2_`-prefixed fullname, so comparison must normalize both.
+   */
+  id: string;
+  /** Username/handle, without any @ or u/ prefix. Only for user-facing text. */
+  handle?: string;
+  /** Display name. Only for user-facing text. */
+  name?: string;
+}
+
 export interface PublishPostItem {
   /** Caller's id for this post (e.g. the backend Post id) — echoed in every event. */
   taskId: string;
   platform: PublishPlatform;
+  /** Account this post must publish as; see {@link PublishTargetAccount}. */
+  targetAccount?: PublishTargetAccount;
   /**
    * First segment = the post itself; every following segment publishes as a
    * native thread continuation (Reddit: comment chain under the submission).

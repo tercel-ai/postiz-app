@@ -2,6 +2,7 @@ import { resolve } from 'path';
 import { mergeConfig, defineConfig } from 'vite';
 import { crx, ManifestV3Export } from '@crxjs/vite-plugin';
 import baseConfig, { baseManifest, baseBuildOptions } from './vite.config.base';
+import { hardenWebAccessibleResources } from './custom-vite-plugins';
 import hotReloadExtension from 'hot-reload-extension-vite';
 
 const outDir = resolve(__dirname, 'dist');
@@ -38,6 +39,9 @@ export default mergeConfig(
             }),
           ]
         : []),
+      // Runs after crx() has written the manifest — see the plugin for why
+      // MAIN-world entries are deliberately left static.
+      hardenWebAccessibleResources(),
     ],
     build: {
       ...baseBuildOptions,

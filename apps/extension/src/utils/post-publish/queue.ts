@@ -23,6 +23,7 @@ import type {
 } from '@gitroom/helpers/extension/post-publish';
 import {
   EXTENSION_PUBLISHABLE_PLATFORMS,
+  IMAGE_CAPABLE_PLATFORMS,
   SINGLE_SEGMENT_PLATFORMS,
   TITLE_REQUIRED_PLATFORMS,
 } from '@gitroom/helpers/extension/post-publish';
@@ -46,6 +47,10 @@ import {
 import { postMediumStory } from '@gitroom/extension/pages/background/medium.poster';
 import { postQuoraPost } from '@gitroom/extension/pages/background/quora.poster';
 import { backendCall } from '@gitroom/extension/utils/executor/api';
+import {
+  checkPublishAccount,
+  type AccountGuardResult,
+} from '@gitroom/extension/utils/post-publish/account-guard';
 
 // Every platform the publish queue can drain — the shared source of truth the
 // backend routing also intersects against (so a diverted post is always one the
@@ -558,6 +563,36 @@ function isActive(e: QueueEntry): boolean {
   );
 }
 
+/**
+ * Drop images the target platform's poster cannot upload, so the TEXT still
+ * publishes.
+ *
+ * Image upload is only wired through the Reddit and X pipelines. Rejecting the
+ * whole item instead would be worse than useless for the pull path: a rejected
+ * item never leaves Post.state=QUEUE, so the backend re-leases it every cycle
+ * and the post is stuck forever. Losing an attachment the platform could not
+ * have carried anyway is the strictly better failure.
+ *
+ * Returns the item unchanged (same reference) when there is nothing to strip,
+ * so the common path allocates nothing.
+ */
+function stripUnsupportedImages(item: PublishPostItem): {
+  item: PublishPostItem;
+  stripped: boolean;
+} {
+  if (IMAGE_CAPABLE_PLATFORMS.includes(item.platform))
+    return { item, stripped: false };
+  const segments = Array.isArray(item.segments) ? item.segments : [];
+  if (!segments.some((s) => s?.images?.length)) return { item, stripped: false };
+  return {
+    item: {
+      ...item,
+      segments: segments.map(({ images, ...rest }) => rest),
+    },
+    stripped: true,
+  };
+}
+
 function validate(item: PublishPostItem): string | null {
   if (!item?.taskId || typeof item.taskId !== 'string') return 'missing taskId';
   if (entries.some((e) => isActive(e) && e.state.taskId === item.taskId))
@@ -579,15 +614,6 @@ function validate(item: PublishPostItem): string | null {
   if (item.platform === 'reddit') {
     if (!(item.subreddit || '').trim()) return 'reddit post needs a subreddit';
   }
-  // Image upload is only wired through the Reddit and X pipelines; every other
-  // platform's poster is text-only, so reject images at enqueue rather than
-  // silently publishing text-only.
-  if (
-    item.platform !== 'reddit' &&
-    item.platform !== 'x' &&
-    segments.some((s) => s?.images?.length)
-  )
-    return `${item.platform} image posts are not supported via the extension yet`;
   if (item.publishDate != null && Number.isNaN(Date.parse(item.publishDate)))
     return 'invalid publishDate (must be an ISO datetime)';
   if (item.segmentGapSeconds != null) {
@@ -611,10 +637,20 @@ export function enqueuePublishBatch(
   tabId: number | undefined
 ): PublishEnqueueAck {
   const ack: PublishEnqueueAck = { accepted: [], rejected: [] };
-  for (const item of items) {
+  for (const raw of items) {
+    // Strip BEFORE validating, so an images-only segment on a text-only
+    // platform is rejected as "nothing to publish" rather than accepted and
+    // then published as an empty post.
+    const { item, stripped } = stripUnsupportedImages(raw);
+    if (stripped) {
+      qlog('images dropped (platform poster is text-only)', {
+        taskId: item.taskId,
+        platform: item.platform,
+      });
+    }
     const reason = validate(item);
     if (reason) {
-      ack.rejected.push({ taskId: String(item?.taskId ?? ''), reason });
+      ack.rejected.push({ taskId: String(raw?.taskId ?? ''), reason });
       continue;
     }
     const dueAt = item.publishDate ? Date.parse(item.publishDate) : 0;
@@ -868,99 +904,159 @@ async function drain(): Promise<void> {
       return;
     }
 
-    qlog('drain → publishing', {
-      taskId: entry.state.taskId,
-      platform: entry.item.platform,
-      segments: entry.item.segments.length,
-    });
-    entry.state.status = 'publishing';
-    persist();
-    emit(entry);
-
-    const permalinks: string[] = [];
-    let failed: string | undefined;
-    for (let i = 0; i < entry.item.segments.length; i++) {
-      let result: SegmentResult;
-      try {
-        qlog('publishing segment', {
-          taskId: entry.state.taskId,
-          segment: `${i + 1}/${entry.item.segments.length}`,
-        });
-        result = await publishSegment(entry.item, i, permalinks[i - 1]);
-      } catch (e: any) {
-        result = { ok: false, error: String(e?.message || e) };
-      }
-      qlog('segment result', {
-        taskId: entry.state.taskId,
-        segment: `${i + 1}/${entry.item.segments.length}`,
-        ok: result.ok,
-        permalink: result.permalink,
-        error: result.error,
-      });
-      if (!result.ok) {
-        failed = result.error || `segment ${i + 1} failed`;
-        break;
-      }
-      if (result.permalink) permalinks.push(result.permalink);
-      entry.state.segmentsPublished = i + 1;
-      if (i === 0) {
-        entry.state.permalink = result.permalink;
-        entry.state.postId = result.postId;
-        // Real publish time = when the anchor actually posted. Recorded on EVERY
-        // successful publish (immediate, scheduled-due, or Publish-now on a
-        // future-scheduled task), so history shows when it truly went out rather
-        // than the scheduled publishAt.
-        entry.state.publishedAt = new Date(now()).toISOString();
-      }
-      entry.state.segmentPermalinks = [...permalinks];
-      // Persist per segment so a worker death mid-thread leaves an accurate
-      // record of what already went out.
-      persist();
-      emit(entry);
-
-      // Human-like pause before the NEXT segment of the same thread.
-      if (i < entry.item.segments.length - 1) {
-        const gap = segmentGapMs(entry.item);
-        if (gap > 0) await sleep(gap);
-      }
-    }
-
-    if (failed) {
-      // Platform send itself failed — nothing (safely) live.
+    // One task must never take down the run. Anything escaping publishEntry
+    // would otherwise leave this entry stuck at 'publishing' — a status
+    // cancel/remove/retry all refuse to act on, so it could never be cleared —
+    // AND abandon every other due task in this drain.
+    try {
+      await publishEntry(entry);
+    } catch (e: any) {
       entry.state.status = 'error';
-      entry.state.error = failed;
-      qlog('task error (platform send failed)', {
+      entry.state.error = `unexpected publish failure: ${String(e?.message || e)}`;
+      qlog('task error (unexpected — queue kept draining)', {
         taskId: entry.state.taskId,
-        segmentsPublished: entry.state.segmentsPublished,
-        error: failed,
+        platform: entry.item.platform,
+        error: entry.state.error,
       });
       persist();
       emit(entry);
       trimSettled();
-      continue;
     }
+  }
+}
 
-    // Platform send succeeded → SENT. Surface it immediately, THEN try the DB
-    // backfill (SENT → PUBLISHED, or stays SENT with a backfillError for the
-    // user to Sync). Two-phase so the panel reflects "live, syncing…" honestly
-    // and a backend outage never masquerades as a publish failure.
-    entry.state.status = 'sent';
-    delete entry.state.error;
-    qlog('task sent (platform ok)', {
+/** Publish one queued entry to completion; settles its state on every path. */
+async function publishEntry(entry: QueueEntry): Promise<void> {
+  qlog('drain → publishing', {
+    taskId: entry.state.taskId,
+    platform: entry.item.platform,
+    segments: entry.item.segments.length,
+  });
+  entry.state.status = 'publishing';
+  persist();
+  emit(entry);
+
+  // Wrong-account guard. Runs AFTER the 'publishing' transition so the user
+  // sees the attempt, but BEFORE any segment goes out — publishing as the
+  // wrong account cannot be undone. Settled as a normal task error, so the
+  // existing retry path applies once the user switches accounts.
+  //
+  // Gated on targetAccount so a post with no bound account never even awaits:
+  // that is the majority path, and keeping it synchronous means the guard adds
+  // no scheduling tick to the drain it did not have before.
+  if (entry.item.targetAccount?.id) {
+    // Fail OPEN on a throw, matching checkPublishAccount's own documented
+    // posture — a probe failure is not evidence of a mismatch. Logged loudly
+    // because an unverified publish must never look like a verified one.
+    let guard: AccountGuardResult;
+    try {
+      guard = await checkPublishAccount(entry.item);
+    } catch (e) {
+      console.warn(
+        '[aisee][publish] account guard threw — publishing unverified',
+        { taskId: entry.state.taskId, platform: entry.item.platform },
+        e
+      );
+      guard = { ok: true };
+    }
+    if (!guard.ok) {
+      entry.state.status = 'error';
+      entry.state.error = guard.error;
+      qlog('task error (wrong account — nothing published)', {
+        taskId: entry.state.taskId,
+        platform: entry.item.platform,
+        error: guard.error,
+      });
+      persist();
+      emit(entry);
+      trimSettled();
+      return;
+    }
+  }
+
+  const permalinks: string[] = [];
+  let failed: string | undefined;
+  for (let i = 0; i < entry.item.segments.length; i++) {
+    let result: SegmentResult;
+    try {
+      qlog('publishing segment', {
+        taskId: entry.state.taskId,
+        segment: `${i + 1}/${entry.item.segments.length}`,
+      });
+      result = await publishSegment(entry.item, i, permalinks[i - 1]);
+    } catch (e: any) {
+      result = { ok: false, error: String(e?.message || e) };
+    }
+    qlog('segment result', {
       taskId: entry.state.taskId,
-      permalink: entry.state.permalink,
+      segment: `${i + 1}/${entry.item.segments.length}`,
+      ok: result.ok,
+      permalink: result.permalink,
+      error: result.error,
     });
+    if (!result.ok) {
+      failed = result.error || `segment ${i + 1} failed`;
+      break;
+    }
+    if (result.permalink) permalinks.push(result.permalink);
+    entry.state.segmentsPublished = i + 1;
+    if (i === 0) {
+      entry.state.permalink = result.permalink;
+      entry.state.postId = result.postId;
+      // Real publish time = when the anchor actually posted. Recorded on EVERY
+      // successful publish (immediate, scheduled-due, or Publish-now on a
+      // future-scheduled task), so history shows when it truly went out rather
+      // than the scheduled publishAt.
+      entry.state.publishedAt = new Date(now()).toISOString();
+    }
+    entry.state.segmentPermalinks = [...permalinks];
+    // Persist per segment so a worker death mid-thread leaves an accurate
+    // record of what already went out.
     persist();
     emit(entry);
 
-    await attemptBackfill(entry);
-    qlog('after backfill', {
+    // Human-like pause before the NEXT segment of the same thread.
+    if (i < entry.item.segments.length - 1) {
+      const gap = segmentGapMs(entry.item);
+      if (gap > 0) await sleep(gap);
+    }
+  }
+
+  if (failed) {
+    // Platform send itself failed — nothing (safely) live.
+    entry.state.status = 'error';
+    entry.state.error = failed;
+    qlog('task error (platform send failed)', {
       taskId: entry.state.taskId,
-      status: entry.state.status,
-      backfillError: entry.state.backfillError,
+      segmentsPublished: entry.state.segmentsPublished,
+      error: failed,
     });
     persist();
     emit(entry);
     trimSettled();
+    return;
   }
+
+  // Platform send succeeded → SENT. Surface it immediately, THEN try the DB
+  // backfill (SENT → PUBLISHED, or stays SENT with a backfillError for the
+  // user to Sync). Two-phase so the panel reflects "live, syncing…" honestly
+  // and a backend outage never masquerades as a publish failure.
+  entry.state.status = 'sent';
+  delete entry.state.error;
+  qlog('task sent (platform ok)', {
+    taskId: entry.state.taskId,
+    permalink: entry.state.permalink,
+  });
+  persist();
+  emit(entry);
+
+  await attemptBackfill(entry);
+  qlog('after backfill', {
+    taskId: entry.state.taskId,
+    status: entry.state.status,
+    backfillError: entry.state.backfillError,
+  });
+  persist();
+  emit(entry);
+  trimSettled();
 }

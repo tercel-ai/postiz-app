@@ -49,17 +49,36 @@ export type EngagePlanCode = 'starter' | 'developer' | 'pro';
 const ENGAGE_PLAN_CODES: readonly EngagePlanCode[] = ['starter', 'developer', 'pro'];
 export type ReplyLength = 'short' | 'medium' | 'long';
 
+/** The three unit kinds a plan caps. */
+export type EngageLimitType = 'keyword' | 'tracked' | 'subreddit';
+
+/** Which cap rejected an activation — the org-wide budget or the per-project one. */
+export type EngageLimitScope = 'organization' | 'project';
+
 /**
  * Per-plan engage limits. `null` means "unlimited" (no hard cap). Mirrors the
  * product spec table; every value is overridable from the Settings store.
+ *
+ * Caps come in PAIRS: an org-wide budget (`*Max`) and a per-project one
+ * (`*PerProjectMax`). Both are enforced on every activation, so the effective
+ * headroom for one project is `min(org remaining, project remaining)` — the
+ * org cap bounds what the account can run in total, the project cap stops a
+ * single project from consuming the whole account budget. A per-project value
+ * larger than its org counterpart is not an error; the org cap simply wins.
  */
 export interface EngageEntitlement {
-  /** Max simultaneously-enabled keywords. */
+  /** Max simultaneously-enabled keywords, org-wide. */
   keywordsMax: number | null;
-  /** Max enabled tracked/priority accounts (0 = feature hidden). */
+  /** Max enabled tracked/priority accounts org-wide (0 = feature hidden). */
   priorityAccountsMax: number | null;
-  /** Max enabled monitored subreddits. */
+  /** Max enabled monitored subreddits, org-wide. */
   subredditsMax: number | null;
+  /** Max simultaneously-enabled keywords within ONE project. */
+  keywordsPerProjectMax: number | null;
+  /** Max enabled tracked/priority accounts within ONE project. */
+  priorityAccountsPerProjectMax: number | null;
+  /** Max enabled monitored subreddits within ONE project. */
+  subredditsPerProjectMax: number | null;
   /** Scan cadence applied to this org's keyword/channel/tracked units. */
   scanIntervalHours: number;
   /** Max reply drafts generated per billing period (null = unlimited). */
@@ -92,27 +111,36 @@ export interface EngageReplyCredits {
 // ─── Defaults (seeded on first boot; spec §1 + §3.2) ──────────────────────────
 const DEFAULT_ENTITLEMENTS: EngageEntitlementMap = {
   starter: {
-    keywordsMax: 3,
+    keywordsMax: 30,
     priorityAccountsMax: 0,
-    subredditsMax: 1,
+    subredditsMax: 10,
+    keywordsPerProjectMax: 5,
+    priorityAccountsPerProjectMax: 2,
+    subredditsPerProjectMax: 2,
     scanIntervalHours: 24,
     replyMonthlyCap: 10,
     metricsWindowDaysMax: 7,
     metricsFetchIntervalHours: 24,
   },
   developer: {
-    keywordsMax: 10,
+    keywordsMax: 100,
     priorityAccountsMax: 10,
-    subredditsMax: 5,
+    subredditsMax: 50,
+    keywordsPerProjectMax: 15,
+    priorityAccountsPerProjectMax: 10,
+    subredditsPerProjectMax: 8,
     scanIntervalHours: 24,
     replyMonthlyCap: null,
     metricsWindowDaysMax: 14,
     metricsFetchIntervalHours: 12,
   },
   pro: {
-    keywordsMax: 30,
+    keywordsMax: 300,
     priorityAccountsMax: null,
-    subredditsMax: 15,
+    subredditsMax: 150,
+    keywordsPerProjectMax: 30,
+    priorityAccountsPerProjectMax: 20,
+    subredditsPerProjectMax: 15,
     scanIntervalHours: 6,
     replyMonthlyCap: null,
     metricsWindowDaysMax: 30,
@@ -147,6 +175,9 @@ const UNLIMITED_ENTITLEMENT: EngageEntitlement = {
   keywordsMax: null,
   priorityAccountsMax: null,
   subredditsMax: null,
+  keywordsPerProjectMax: null,
+  priorityAccountsPerProjectMax: null,
+  subredditsPerProjectMax: null,
   scanIntervalHours: DEFAULT_SCAN_INTERVAL_HOURS,
   replyMonthlyCap: null,
   metricsWindowDaysMax: DEFAULT_METRICS_WINDOW_DAYS,
@@ -207,7 +238,7 @@ export class EngageEntitlementService implements OnModuleInit {
     await this._seedIfMissing(
       ENGAGE_ENTITLEMENTS_KEY,
       DEFAULT_ENTITLEMENTS,
-      'Per-plan engage limits (keywords/accounts/subreddits/scan interval/reply cap/metrics window days/metrics fetch interval). null = unlimited.'
+      'Per-plan engage limits: org-wide keywords/accounts/subreddits, their per-project counterparts (*PerProjectMax), scan interval, reply cap, metrics window days, metrics fetch interval. null = unlimited; both caps apply.'
     );
     await this._seedIfMissing(
       ENGAGE_REPLY_CREDITS_KEY,
@@ -485,78 +516,127 @@ export class EngageEntitlementService implements OnModuleInit {
   // ─── Hard limit checks (server-side; the frontend can be bypassed) ─────────
 
   /**
-   * Ensure activating `count` more units of `type` stays within the plan cap.
-   * No-op when the cap is null (unlimited). Throws ForbiddenException otherwise.
+   * Ensure activating `count` more units of `type` stays within BOTH plan caps:
+   * the org-wide budget, and — when `configId` identifies the project config the
+   * units land in — that project's own cap. Each check is a no-op when its cap
+   * is null (unlimited). The org cap is evaluated first, so an account that is
+   * globally out of budget reports that rather than a project-local shortfall.
+   *
+   * `configId` is optional only for callers with no project context; omitting it
+   * silently skips the project check, so always pass the resolved config id.
    */
   async assertCanActivate(
     orgId: string,
-    type: 'keyword' | 'tracked' | 'subreddit',
-    count = 1
+    type: EngageLimitType,
+    count = 1,
+    configId?: string | null
   ): Promise<void> {
     const entitlement = await this.getEntitlement(orgId);
-    const max =
-      type === 'keyword'
-        ? entitlement.keywordsMax
-        : type === 'tracked'
-        ? entitlement.priorityAccountsMax
-        : entitlement.subredditsMax;
 
-    if (max === null) return; // unlimited
+    const orgMax = this._orgMax(entitlement, type);
+    if (orgMax !== null) {
+      const current = await this._countEnabled(orgId, type);
+      if (current + count > orgMax) {
+        throw this._limitError(type, 'organization', orgMax, current);
+      }
+    }
 
-    const current = await this._countEnabled(orgId, type);
-    if (current + count > max) {
-      throw new ForbiddenException({
-        code: 'engage_limit_reached',
-        limit: type,
-        max,
-        current,
-        message: `Your plan allows up to ${max} active ${this._label(type)}.`,
-      });
+    if (!configId) return;
+    const projectMax = this._projectMax(entitlement, type);
+    if (projectMax === null) return; // unlimited per project
+    const currentInProject = await this._countEnabledInConfig(configId, type);
+    if (currentInProject + count > projectMax) {
+      throw this._limitError(type, 'project', projectMax, currentInProject);
     }
   }
 
   /**
-   * Enforce the cap only when an existing unit transitions disabled → enabled.
+   * Enforce the caps only when an existing unit transitions disabled → enabled.
    * Re-enabling an already-enabled row, or touching an unknown id, is a no-op so
-   * the count is never double-charged.
+   * the count is never double-charged. The row's own `configId` supplies the
+   * project scope, so the per-project cap is checked against the project the
+   * unit actually belongs to.
    */
   async assertCanEnable(
     orgId: string,
-    type: 'keyword' | 'tracked' | 'subreddit',
+    type: EngageLimitType,
     id: string
   ): Promise<void> {
-    const enabled = await this._currentlyEnabled(orgId, type, id);
-    if (enabled !== false) return; // already enabled / not found
-    await this.assertCanActivate(orgId, type, 1);
+    const row = await this._currentlyEnabled(orgId, type, id);
+    if (!row || row.enabled) return; // already enabled / not found
+    await this.assertCanActivate(orgId, type, 1, row.configId);
+  }
+
+  private _orgMax(
+    entitlement: EngageEntitlement,
+    type: EngageLimitType
+  ): number | null {
+    return type === 'keyword'
+      ? entitlement.keywordsMax
+      : type === 'tracked'
+      ? entitlement.priorityAccountsMax
+      : entitlement.subredditsMax;
+  }
+
+  private _projectMax(
+    entitlement: EngageEntitlement,
+    type: EngageLimitType
+  ): number | null {
+    return type === 'keyword'
+      ? entitlement.keywordsPerProjectMax
+      : type === 'tracked'
+      ? entitlement.priorityAccountsPerProjectMax
+      : entitlement.subredditsPerProjectMax;
+  }
+
+  private _limitError(
+    type: EngageLimitType,
+    scope: EngageLimitScope,
+    max: number,
+    current: number
+  ): ForbiddenException {
+    return new ForbiddenException({
+      code: 'engage_limit_reached',
+      limit: type,
+      // Which of the two caps rejected this — the frontend needs it to word the
+      // remedy ("upgrade your plan" vs "free a slot in this project").
+      scope,
+      max,
+      current,
+      message:
+        scope === 'project'
+          ? `Your plan allows up to ${max} active ${this._label(
+              type
+            )} per project.`
+          : `Your plan allows up to ${max} active ${this._label(type)}.`,
+    });
   }
 
   private async _currentlyEnabled(
     orgId: string,
-    type: 'keyword' | 'tracked' | 'subreddit',
+    type: EngageLimitType,
     id: string
-  ): Promise<boolean | null> {
+  ): Promise<{ enabled: boolean; configId: string } | null> {
+    const select = { enabled: true, configId: true };
     if (type === 'keyword') {
-      const row = await this._keyword.model.engageKeyword.findFirst({
+      return this._keyword.model.engageKeyword.findFirst({
         where: { id, organizationId: orgId },
-        select: { enabled: true },
+        select,
       });
-      return row ? row.enabled : null;
     }
     if (type === 'tracked') {
-      const row = await this._trackedAccount.model.engageTrackedAccount.findFirst({
+      return this._trackedAccount.model.engageTrackedAccount.findFirst({
         where: { id, organizationId: orgId },
-        select: { enabled: true },
+        select,
       });
-      return row ? row.enabled : null;
     }
-    const row = await this._channel.model.engageMonitoredChannel.findFirst({
+    return this._channel.model.engageMonitoredChannel.findFirst({
       where: { id, organizationId: orgId },
-      select: { enabled: true },
+      select,
     });
-    return row ? row.enabled : null;
   }
 
-  private _label(type: 'keyword' | 'tracked' | 'subreddit'): string {
+  private _label(type: EngageLimitType): string {
     return type === 'keyword'
       ? 'keywords'
       : type === 'tracked'
@@ -566,7 +646,7 @@ export class EngageEntitlementService implements OnModuleInit {
 
   private async _countEnabled(
     orgId: string,
-    type: 'keyword' | 'tracked' | 'subreddit'
+    type: EngageLimitType
   ): Promise<number> {
     if (type === 'keyword') {
       return this._keyword.model.engageKeyword.count({
@@ -580,6 +660,30 @@ export class EngageEntitlementService implements OnModuleInit {
     }
     return this._channel.model.engageMonitoredChannel.count({
       where: { organizationId: orgId, enabled: true },
+    });
+  }
+
+  /**
+   * Enabled units inside ONE project config. `configId` is unique per
+   * (organizationId, projectId), so it already scopes the count to both the org
+   * and the project — no extra orgId predicate needed.
+   */
+  private async _countEnabledInConfig(
+    configId: string,
+    type: EngageLimitType
+  ): Promise<number> {
+    if (type === 'keyword') {
+      return this._keyword.model.engageKeyword.count({
+        where: { configId, enabled: true },
+      });
+    }
+    if (type === 'tracked') {
+      return this._trackedAccount.model.engageTrackedAccount.count({
+        where: { configId, enabled: true },
+      });
+    }
+    return this._channel.model.engageMonitoredChannel.count({
+      where: { configId, enabled: true },
     });
   }
 

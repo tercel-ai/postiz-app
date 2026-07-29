@@ -264,7 +264,14 @@ describe('default publisher platform routing', () => {
     });
   });
 
-  it('rejects a LinkedIn image post at enqueue (media not supported yet)', async () => {
+  it('publishes a LinkedIn image post text-only (media not supported yet)', async () => {
+    // The LinkedIn poster cannot upload media. Rejecting the item would strand
+    // the post in Post.state=QUEUE forever (the backend re-leases and re-offers
+    // it every cycle), so the image is dropped and the text still goes out.
+    liCompose.mockResolvedValue({
+      ok: true,
+      permalink: 'https://www.linkedin.com/feed/update/urn:li:activity:9/',
+    } as any);
     const ack = enqueuePublishBatch(
       'req-1',
       [
@@ -277,8 +284,12 @@ describe('default publisher platform routing', () => {
       1
     );
     await waitForPublishIdle();
-    expect(ack.rejected[0]).toMatchObject({ taskId: 'li-image' });
-    expect(ack.rejected[0].reason).toMatch(/image posts are not supported/i);
-    expect(liCompose).not.toHaveBeenCalled();
+    expect(ack.rejected).toEqual([]);
+    expect(ack.accepted[0]).toMatchObject({ taskId: 'li-image' });
+    // No `images` key reaches the poster at all.
+    expect(liCompose).toHaveBeenCalledWith({ text: 'hi' });
+    expect(publishQueueSnapshot().find((s) => s.taskId === 'li-image')?.status).toBe(
+      'published'
+    );
   });
 });
