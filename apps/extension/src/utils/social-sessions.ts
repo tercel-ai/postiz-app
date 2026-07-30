@@ -382,37 +382,65 @@ async function readQuoraIdentityInPage(): Promise<{
 }> {
   const uid = (document.cookie.match(/(?:^|;\s*)m-uid=([^;]+)/) || [])[1];
   if (!uid) return { loggedIn: false };
-  const selector = `a[href*="/profile/"] img[src*="main-thumb-${uid}-"]`;
 
-  // MUST poll — `complete` is too early here. The avatar URL IS in the server
-  // HTML, but only inside a script payload: parsing that HTML yields ZERO
-  // matching <img> elements (measured), because React renders the avatar during
-  // hydration. dev.to gets away with a single read because <body data-user> is
-  // a plain SSR attribute; Quora does not. Reading once at tab-complete is what
-  // made this return a bare uid instead of the account.
-  let img = document.querySelector(selector);
-  const deadline = Date.now() + 10_000;
-  while (!img && Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 200));
-    img = document.querySelector(selector);
+  // The slug comes from /settings, fetched SAME-ORIGIN from inside this tab —
+  // the same trick quora.poster's expectedSlug check uses. From the service
+  // worker this identical request is 403'd by Quora's WAF (cross-site
+  // `Sec-Fetch-Site`), which is the whole reason a tab exists here.
+  //
+  // Parsing the RAW HTML rather than the DOM is deliberate and load-bearing:
+  // Quora renders nothing useful until React hydrates, and even then the
+  // viewer's avatar is often NOT inside an <a> (the nav avatar is a <button>),
+  // so there is no anchor to read a slug from. Measured: polling the DOM for a
+  // profile-linked avatar failed after a full 10s, while this returns in ~0.5s.
+  //
+  // /settings mentions exactly ONE /profile/ slug — the viewer's own. Trusting
+  // it only when the count is exactly 1 is what keeps that true if the page
+  // ever starts linking other people.
+  let slug: string | undefined;
+  let avatarUrl: string | undefined;
+  try {
+    const res = await fetch('https://www.quora.com/settings', {
+      credentials: 'include',
+    });
+    if (res.ok) {
+      const html = await res.text();
+      const slugs = Array.from(
+        new Set(
+          Array.from(html.matchAll(/\/profile\/([A-Za-z0-9\-_.]+)/g)).map(
+            (m) => m[1]
+          )
+        )
+      );
+      if (slugs.length === 1) slug = slugs[0];
+      avatarUrl =
+        html.match(
+          new RegExp(`https://[^"'\\s\\\\]*main-thumb-${uid}-[^"'\\s\\\\]*`)
+        )?.[0] || undefined;
+    }
+  } catch {
+    /* offline / blocked — fall through to whatever the DOM offers */
   }
-  // Signed in for certain (the cookie says so) but unnamed. Deliberately NO
-  // `id` — see QuoraIdentity: the uid is not comparable to internalId, and
-  // returning it here would fail every publish's account check.
-  if (!img) return { loggedIn: true, uid };
 
-  const href = img.closest('a')?.getAttribute('href') || '';
-  const slug = (href.split('/profile/')[1] || '').split(/[/?#]/)[0];
-  const alt = img.getAttribute('alt') || '';
-  const name = alt.replace(/^Profile photo for\s*/i, '').trim();
-  // `id` is the slug, NOT the uid it was found by — see QuoraIdentity.
+  // Display name: the avatar's alt text is stable across Quora's obfuscated
+  // markup and does not need an anchor. Best-effort — the slug is what matters.
+  const img = document.querySelector(`img[src*="main-thumb-${uid}-"]`);
+  const alt = img?.getAttribute('alt') || '';
+  const name =
+    alt.replace(/^Profile photo for\s*/i, '').trim() ||
+    slug?.replace(/-/g, ' ') ||
+    undefined;
+
+  // Signed in for certain (the cookie says so) but possibly unnamed.
+  // Deliberately NO uid in `id` — see QuoraIdentity: it is not comparable to
+  // internalId, and returning it there fails every publish's account check.
   return {
     loggedIn: true,
     uid,
-    id: slug || undefined,
-    handle: slug || undefined,
-    name: name || undefined,
-    avatarUrl: img.getAttribute('src') || undefined,
+    id: slug,
+    handle: slug,
+    name,
+    avatarUrl: avatarUrl || img?.getAttribute('src') || undefined,
   };
 }
 
@@ -424,8 +452,11 @@ async function readQuoraIdentityViaTab(): Promise<QuoraIdentity | undefined> {
     // `Sec-Fetch-Site: cross-site` and answered 403 by its WAF (see
     // probeSessionAccount). The identical read from inside a quora.com tab is
     // same-origin and simply works.
+    //
+    // /settings rather than the feed: it is the page the reader fetches anyway,
+    // less than half the size (~83KB vs ~185KB), and loads no timeline.
     const tab = await chrome.tabs.create({
-      url: 'https://www.quora.com/',
+      url: 'https://www.quora.com/settings',
       active: false,
     });
     tabId = tab.id ?? undefined;

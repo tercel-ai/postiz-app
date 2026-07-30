@@ -711,6 +711,29 @@ describe('getPlatformLoginSnapshot', () => {
     expect(fetched.filter((u) => u.includes('quora.com'))).toEqual([]);
   });
 
+  it('ignores a cached Quora uid when no slug was resolved', async () => {
+    // The identity carries `uid` for diagnostics, and the tab reader stores it
+    // even when the slug lookup came up empty. It must never leak into `id` on
+    // the way out — that is the exact shape that would reject every publish.
+    jar['https://www.quora.com/|m-login'] = '1';
+    jar['https://www.quora.com/|m-uid'] = '1923931969';
+    await chrome.storage.session.set({
+      aisee_publish_identity: {
+        quora: {
+          key: '1923931969',
+          value: { uid: '1923931969' },
+          at: Date.now(),
+        },
+      },
+    });
+
+    const probe = await probeSessionAccount('quora');
+
+    expect(probe).toMatchObject({ loggedIn: true });
+    expect(probe.id).toBeUndefined();
+    expect(probe.handle).toBeUndefined();
+  });
+
   it('drops a cached Quora slug once the uid changes', async () => {
     // Account switch. Reusing the previous account's slug here would word a
     // guard error with the wrong name — or worse, wave through a mismatch.
