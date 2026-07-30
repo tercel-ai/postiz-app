@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useState } from 'react';
-import { checkPlatformLogin } from '@gitroom/extension/pages/popup/components/ScanPanel';
 import { AuthUser, ACCESS_KEY } from '@gitroom/extension/utils/auth.service';
 import { ENGAGE_EXTENSION_ACTION } from '@gitroom/extension/utils/executor/actions';
 
@@ -12,14 +11,13 @@ const PLAN_LABELS: Record<string, string> = {
   pro: 'Pro',
 };
 
-/** Shared auth/plan/platform-login state — used by both Popup and Panel so
- *  the two surfaces show identical account info without duplicating this
- *  effect wiring in each. */
+/** Shared aisee auth/plan state — used by both Popup and Panel so the two
+ *  surfaces show identical account info without duplicating this effect wiring
+ *  in each. Social platform logins are a separate concern, owned by
+ *  usePlatformSessions / PlatformLoginBar. */
 export function useAiseeSession() {
   // undefined = checking, null = logged out, object = logged in
   const [user, setUser] = useState<AuthUser | null | undefined>(undefined);
-  // null = still checking, true/false = result
-  const [platformLogin, setPlatformLogin] = useState<{ x: boolean | null; reddit: boolean | null }>({ x: null, reddit: null });
   // undefined = loading, null = no active paid package (shown as "Free")
   const [planName, setPlanName] = useState<string | null | undefined>(undefined);
 
@@ -46,14 +44,6 @@ export function useAiseeSession() {
     chrome.storage.onChanged.addListener(onSession);
     return () => chrome.storage.onChanged.removeListener(onSession);
   }, []);
-
-  // Only check platform login after Aisee auth is confirmed — keeps the
-  // cookies IPC calls off the critical path for initial render.
-  useEffect(() => {
-    if (!user) return;
-    Promise.all([checkPlatformLogin('x'), checkPlatformLogin('reddit')])
-      .then(([x, reddit]) => setPlatformLogin({ x, reddit }));
-  }, [user]);
 
   // Subscription plan name. Primary source: GET /user/subscription, the real
   // Aisee package display name (e.g. "Starter Plan (Monthly)") — but that
@@ -93,5 +83,5 @@ export function useAiseeSession() {
     setUser(null);
   }, []);
 
-  return { user, platformLogin, planName, handleLogout };
+  return { user, planName, handleLogout };
 }

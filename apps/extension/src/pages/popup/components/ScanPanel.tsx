@@ -261,24 +261,6 @@ function defaultState(): TaskState {
   return { status: 'idle', posts: [], nextCursor: null, exhausted: true, accepted: null, err: null };
 }
 
-// ─── Cookie / login helpers ───────────────────────────────────────────────────
-
-function getCookie(url: string, name: string): Promise<chrome.cookies.Cookie | null> {
-  return new Promise((resolve) => chrome.cookies.get({ url, name }, (c) => resolve(c ?? null)));
-}
-
-export async function checkPlatformLogin(platform: 'x' | 'reddit'): Promise<boolean> {
-  if (platform === 'x') {
-    return !!(
-      (await getCookie('https://x.com', 'auth_token')) ??
-      (await getCookie('https://twitter.com', 'auth_token'))
-    );
-  }
-  // reddit_session is cleared on Reddit logout; token_v2 persists after logout
-  // and is therefore NOT a reliable login indicator. Check reddit_session only.
-  return !!(await getCookie('https://www.reddit.com', 'reddit_session'));
-}
-
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export function EngageScanPanel() {

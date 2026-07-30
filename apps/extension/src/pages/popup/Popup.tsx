@@ -5,12 +5,13 @@ import { ClearHistoryPage } from '@gitroom/extension/pages/popup/components/Clea
 import { ClearQueuePage } from '@gitroom/extension/pages/popup/components/ClearQueuePage';
 import { LoginForm } from '@gitroom/extension/pages/popup/components/LoginForm';
 import { EngageScanPanel } from '@gitroom/extension/pages/popup/components/ScanPanel';
+import { PlatformLoginBar } from '@gitroom/extension/pages/popup/components/PlatformLoginBar';
 import { useAiseeSession } from '@gitroom/extension/pages/popup/hooks/useAiseeSession';
 import { useReplyHistoryState } from '@gitroom/extension/pages/popup/hooks/useReplyHistoryState';
 import { usePublishQueueState } from '@gitroom/extension/pages/popup/hooks/usePublishQueueState';
 
 export default function Popup() {
-  const { user, platformLogin, planName, handleLogout } = useAiseeSession();
+  const { user, planName, handleLogout } = useAiseeSession();
   const { history, handleClear } = useReplyHistoryState();
   const {
     rows: queueRows,
@@ -130,29 +131,7 @@ export default function Popup() {
         )}
       </div>
 
-      {user && (platformLogin.x === null || platformLogin.reddit === null) && (
-        <div className="pz-platform-checking">Checking platform logins…</div>
-      )}
-      {user && (platformLogin.x === false || platformLogin.reddit === false) && (
-        <div className="pz-platform-warn">
-          {platformLogin.x === false && (
-            <div className="pz-platform-warn-row">
-              <span className="pz-platform-warn-label">𝕏 not logged in — scans won't run</span>
-              <button className="pz-platform-login-btn" onClick={() => chrome.tabs.create({ url: 'https://x.com/i/flow/login' })}>
-                Log in ↗
-              </button>
-            </div>
-          )}
-          {platformLogin.reddit === false && (
-            <div className="pz-platform-warn-row">
-              <span className="pz-platform-warn-label">Reddit not logged in — scans won't run</span>
-              <button className="pz-platform-login-btn" onClick={() => chrome.tabs.create({ url: 'https://www.reddit.com/login/' })}>
-                Log in ↗
-              </button>
-            </div>
-          )}
-        </div>
-      )}
+      {user && <PlatformLoginBar />}
 
       {user ? (
         <>

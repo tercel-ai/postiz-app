@@ -27,7 +27,10 @@ import { reapOrphanXReadTab } from '@gitroom/extension/utils/executor/x.tab-read
 import { backendCall } from '@gitroom/extension/utils/executor/api';
 import { buildClaimTasksPayload } from '@gitroom/extension/utils/executor/claim-tasks.payload';
 import { ENGAGE_EXTENSION_ACTION } from '@gitroom/extension/utils/executor/actions';
-import { getSocialSessions } from '@gitroom/extension/utils/social-sessions';
+import {
+  getPlatformLoginSnapshot,
+  getSocialSessions,
+} from '@gitroom/extension/utils/social-sessions';
 import {
   enqueuePublishBatch,
   cancelPublishTasks,
@@ -596,6 +599,16 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
   if (request.action === ENGAGE_EXTENSION_ACTION.socialSessions) {
     getSocialSessions()
       .then((sessions) => sendResponse({ ok: true, sessions }))
+      .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
+    return true;
+  }
+
+  // ─── Per-platform browser login state (popup / side panel status bar) ────
+  // `detailed` is only set when the user expands the list: it lets Reddit read
+  // me.json and X open its identity tab, which the collapsed counter must not.
+  if (request.action === ENGAGE_EXTENSION_ACTION.platformSessions) {
+    getPlatformLoginSnapshot({ detailed: !!request.detailed })
+      .then((platforms) => sendResponse({ ok: true, platforms }))
       .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
     return true;
   }

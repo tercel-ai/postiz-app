@@ -11,7 +11,12 @@ vi.mock('@gitroom/extension/utils/reddit.poster', () => ({
   getRedditSession: vi.fn(),
 }));
 
-import { getSocialSessions, probeSessionAccount } from '../social-sessions';
+import {
+  SESSION_PLATFORMS,
+  getPlatformLoginSnapshot,
+  getSocialSessions,
+  probeSessionAccount,
+} from '../social-sessions';
 
 /** Cookie jar keyed by `${url}|${name}`, served through a chrome.cookies stub. */
 let jar: Record<string, string> = {};
@@ -407,5 +412,110 @@ describe('getSocialSessions', () => {
 
     expect(sessions.medium.id).toBeUndefined();
     expect(sessions.medium.loggedIn).not.toBe(false);
+  });
+});
+
+describe('getPlatformLoginSnapshot', () => {
+  it('counts only platforms a browser login can actually unlock', () => {
+    // dev.to is scanned and metered through Forem's PUBLIC API and published by
+    // the backend provider, so it has no browser session to be signed out of.
+    // Counting it would permanently show one platform "missing".
+    expect([...SESSION_PLATFORMS]).toEqual([
+      'x',
+      'reddit',
+      'linkedin',
+      'medium',
+      'quora',
+      'hackernews',
+    ]);
+    expect(SESSION_PLATFORMS).not.toContain('devto');
+  });
+
+  it('reports every platform, signed in or out, in a fixed order', async () => {
+    jar['https://x.com/|auth_token'] = 'x-session';
+    jar['https://www.reddit.com/|reddit_session'] = 'r-session';
+    jar['https://news.ycombinator.com/|user'] = 'tercelyi&hash';
+
+    const snapshot = await getPlatformLoginSnapshot();
+
+    expect(snapshot.map((e) => e.platform)).toEqual([...SESSION_PLATFORMS]);
+    expect(snapshot.filter((e) => e.loggedIn).map((e) => e.platform)).toEqual([
+      'x',
+      'reddit',
+      'hackernews',
+    ]);
+  });
+
+  it('costs nothing but cookies while collapsed', async () => {
+    // The popup renders this counter on every open, before the user asks for
+    // anything — so no platform may be contacted. medium/linkedin therefore
+    // report signed-in without an account name.
+    jar['https://medium.com/|sid'] = 'sess';
+    jar['https://www.linkedin.com/|li_at'] = 'li-session';
+    const fetched: string[] = [];
+    vi.stubGlobal('fetch', async (url: string) => {
+      fetched.push(String(url));
+      return { ok: true, url: 'https://medium.com/@tercel.yi' };
+    });
+
+    const snapshot = await getPlatformLoginSnapshot();
+    const byKey = Object.fromEntries(snapshot.map((e) => [e.platform, e]));
+
+    expect(byKey.medium).toMatchObject({ loggedIn: true });
+    expect(byKey.medium.id).toBeUndefined();
+    expect(byKey.linkedin).toMatchObject({ loggedIn: true });
+    expect(fetched).toEqual([]);
+  });
+
+  it('names the accounts it safely can once expanded', async () => {
+    jar['https://medium.com/|sid'] = 'sess';
+    jar['https://news.ycombinator.com/|user'] = 'tercelyi&hash';
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      url: 'https://medium.com/@tercel.yi',
+    }));
+
+    const snapshot = await getPlatformLoginSnapshot({ detailed: true });
+    const byKey = Object.fromEntries(snapshot.map((e) => [e.platform, e]));
+
+    expect(byKey.medium).toMatchObject({ loggedIn: true, handle: 'tercel.yi' });
+    expect(byKey.hackernews).toMatchObject({ handle: 'tercelyi' });
+  });
+
+  it('keeps LinkedIn off the private API even when expanded', async () => {
+    // Expanding is a display action; it must not buy an extra voyager call on
+    // the one platform known to fingerprint this extension. The handle shows up
+    // only if a PUBLISH already resolved and cached it under this same li_at.
+    jar['https://www.linkedin.com/|li_at'] = 'li-session';
+    jar['https://www.linkedin.com/|JSESSIONID'] = '"ajax:1"';
+    const fetched: string[] = [];
+    vi.stubGlobal('fetch', async (url: string) => {
+      fetched.push(String(url));
+      return {
+        ok: true,
+        json: async () => ({
+          miniProfile: {
+            entityUrn: 'urn:li:fs_miniProfile:ACoAAA',
+            publicIdentifier: 'tercel-yi',
+          },
+        }),
+      };
+    });
+
+    const cold = await getPlatformLoginSnapshot({ detailed: true });
+    expect(cold.find((e) => e.platform === 'linkedin')).toMatchObject({
+      loggedIn: true,
+    });
+    expect(fetched.filter((u) => u.includes('linkedin.com'))).toEqual([]);
+
+    // A publish resolves the identity; the next expand reuses that cache.
+    await probeSessionAccount('linkedin');
+    const warm = await getPlatformLoginSnapshot({ detailed: true });
+
+    expect(warm.find((e) => e.platform === 'linkedin')).toMatchObject({
+      loggedIn: true,
+      handle: 'tercel-yi',
+    });
+    expect(fetched.filter((u) => u.includes('linkedin.com'))).toHaveLength(1);
   });
 });

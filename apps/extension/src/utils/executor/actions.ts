@@ -15,6 +15,8 @@ export const ENGAGE_EXTENSION_ACTION = {
   syncCollectedMetrics: 'engage:sync-collected-metrics',
   loadConfig: 'engage:load-config',
   socialSessions: 'social:sessions',
+  /** popup/panel → SW: per-platform browser login state for the status bar. */
+  platformSessions: 'platform:sessions',
   publishEnqueue: 'publish:enqueue',
   publishCancel: 'publish:cancel',
   publishStatus: 'publish:status',

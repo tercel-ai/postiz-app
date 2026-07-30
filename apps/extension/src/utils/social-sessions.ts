@@ -605,6 +605,147 @@ export async function probeSessionAccount(
   }
 }
 
+/** A cached identity, but only when it still belongs to the live session. */
+async function readCachedIdentity<T>(
+  platform: string,
+  sessionKey: string
+): Promise<T | undefined> {
+  if (!sessionKey) return undefined;
+  const hit = (await readIdentityCache())[platform];
+  if (!hit || hit.key !== sessionKey || hit.value === undefined) {
+    return undefined;
+  }
+  if (Date.now() - hit.at >= IDENTITY_TTL_MS) return undefined;
+  return hit.value as T;
+}
+
+// ── Platform login snapshot (popup / side panel) ────────────────────────────
+
+/**
+ * The platforms whose BROWSER session the extension actually depends on — the
+ * denominator of the popup's "n/m signed in" counter.
+ *
+ * dev.to is deliberately NOT here, even though the extension scans it and
+ * reads its metrics: both go through Forem's PUBLIC REST API, and dev.to
+ * publishing belongs to the backend provider (the article api-key lives on the
+ * Integration, server-side). No browser login unlocks anything, so counting it
+ * would report a problem that cannot exist. The UI still lists it, outside the
+ * count, so the platform doesn't look forgotten.
+ */
+export const SESSION_PLATFORMS = [
+  'x',
+  'reddit',
+  'linkedin',
+  'medium',
+  'quora',
+  'hackernews',
+] as const;
+
+export type SessionPlatform = (typeof SESSION_PLATFORMS)[number];
+
+export interface PlatformLoginEntry {
+  platform: SessionPlatform;
+  loggedIn: boolean;
+  id?: string;
+  handle?: string;
+  name?: string;
+  avatarUrl?: string;
+}
+
+/** Cookies only: what the popup renders on open, before any user interaction. */
+async function cheapLoginEntry(
+  platform: SessionPlatform
+): Promise<PlatformLoginEntry> {
+  const probe = await probeSessionAccount(platform, { network: false });
+  return {
+    platform,
+    loggedIn: probe.loggedIn,
+    ...(probe.id ? { id: probe.id } : {}),
+    ...(probe.handle ? { handle: probe.handle } : {}),
+  };
+}
+
+/**
+ * Who the account is — resolved only when the user expands the list, because
+ * naming an account is not free: Reddit reads me.json and X opens a background
+ * tab (cached per account afterwards).
+ *
+ * LinkedIn stays on cookies plus whatever a previous PUBLISH already cached.
+ * Its identity costs a call to a private API from the worker, on the one
+ * platform known to fingerprint this extension — a cost accepted for the
+ * publish guard, where the id stops an irreversible wrong-account post, and
+ * deliberately not paid to label a row. Quora's account is unreadable from the
+ * worker at all (see probeSessionAccount), so it renders as signed-in only.
+ */
+async function detailedLoginEntry(
+  platform: SessionPlatform
+): Promise<PlatformLoginEntry> {
+  if (platform === 'x') {
+    const s = await getXSession();
+    return {
+      platform,
+      loggedIn: s.loggedIn,
+      ...(s.userId ? { id: s.userId } : {}),
+      ...(s.handle ? { handle: s.handle } : {}),
+      ...(s.name ? { name: s.name } : {}),
+      ...(s.avatarUrl ? { avatarUrl: s.avatarUrl } : {}),
+    };
+  }
+  if (platform === 'reddit') {
+    const s = await getRedditSessionInfo();
+    return {
+      platform,
+      loggedIn: s.loggedIn,
+      ...(s.id ? { id: s.id } : {}),
+      ...(s.handle ? { handle: s.handle } : {}),
+      ...(s.name ? { name: s.name } : {}),
+      ...(s.avatarUrl ? { avatarUrl: s.avatarUrl } : {}),
+    };
+  }
+  if (platform === 'linkedin') {
+    const liAt = await getCookie('https://www.linkedin.com/', 'li_at');
+    if (!liAt) return { platform, loggedIn: false };
+    const cached = await readCachedIdentity<LinkedinIdentity>(
+      'linkedin',
+      liAt
+    );
+    return {
+      platform,
+      loggedIn: true,
+      ...(cached?.id ? { id: cached.id } : {}),
+      ...(cached?.handle ? { handle: cached.handle } : {}),
+    };
+  }
+  // medium resolves its @handle from an ordinary same-session page; hackernews
+  // and quora are cookie-only whatever the flag says.
+  const probe = await probeSessionAccount(platform);
+  return {
+    platform,
+    loggedIn: probe.loggedIn,
+    ...(probe.id ? { id: probe.id } : {}),
+    ...(probe.handle ? { handle: probe.handle } : {}),
+  };
+}
+
+/**
+ * Login state for every session-backed platform, in SESSION_PLATFORMS order.
+ * A platform that throws reports logged-out rather than failing the snapshot —
+ * this feeds a status counter, never the publish guard.
+ */
+export async function getPlatformLoginSnapshot(
+  opts: { detailed?: boolean } = {}
+): Promise<PlatformLoginEntry[]> {
+  const resolve = opts.detailed ? detailedLoginEntry : cheapLoginEntry;
+  return Promise.all(
+    SESSION_PLATFORMS.map((platform) =>
+      resolve(platform).catch((e) => {
+        console.warn('[aisee][sessions] login snapshot failed', platform, e);
+        return { platform, loggedIn: false } as PlatformLoginEntry;
+      })
+    )
+  );
+}
+
 /**
  * Reuse the publish guard's probe for a platform that has no richer identity
  * read. Never throws — an unresolvable platform reports logged-out rather than
