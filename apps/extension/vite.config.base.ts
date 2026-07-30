@@ -89,7 +89,15 @@ const authHosts = isProdRelease
 const postizAppHosts = isProdRelease
   ? ['https://app.aisee.live/*']
   : [
-      'http://localhost:3001/*', // aisee-agent local dev (3001 to avoid the postiz backend on :3000)
+      // Local frontend dev servers. FRONTEND_URL (frontendMatch below) carries
+      // only ONE origin, so a build packed for one profile silently stops being
+      // detected the moment the app is served on a different local port — the
+      // bridge content script just never injects and the page's `aisee:ping`
+      // goes unanswered ("extension not installed"). List every port the local
+      // frontends actually bind so ANY non-prod build works on all of them.
+      'http://localhost:3000/*', // aisee-app (`next dev`, Next's default port)
+      'http://localhost:3001/*', // aisee-agent local dev (when :3000 is taken by the postiz backend)
+      'http://localhost:4200/*', // nx-served frontend
       'https://app-dev.aisee.live/*',
       // app-dev2 shares the dev backend (api-post-dev / api-auth-dev) — it's just
       // a second frontend domain, so the same dev build serves both. Listing it
