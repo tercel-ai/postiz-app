@@ -930,13 +930,17 @@ async function platformSession(platform: string): Promise<PlatformSessionInfo> {
 /**
  * Snapshot all platforms in parallel; a platform probe never throws.
  *
- * The four platforms below go through the cheap id-only probe: cookies, plus one
- * cached session request for medium (LinkedIn and Quora are cookie-only here —
- * see platformSession). Only X opens a browser tab (its handle is in no cookie),
- * so adding these does not change what dominates this call's latency.
+ * The five platforms below go through the cheap id-only probe: cookies, plus one
+ * cached session request for medium (LinkedIn, Quora and dev.to are cookie-only
+ * here — see platformSession). Only X opens a browser tab (its handle is in no
+ * cookie), so adding these does not change what dominates this call's latency.
+ *
+ * This must keep covering every entry in SESSION_PLATFORMS, plus `aisee`. The
+ * popup and the web app are two views of one question, and a platform present in
+ * only one of them reads as "not signed in" on the side that omits it.
  */
 export async function getSocialSessions(): Promise<SocialSessions> {
-  const [x, reddit, aisee, linkedin, hackernews, medium, quora] =
+  const [x, reddit, aisee, linkedin, hackernews, medium, quora, devto] =
     await Promise.all([
       getXSession(),
       getRedditSessionInfo(),
@@ -945,6 +949,7 @@ export async function getSocialSessions(): Promise<SocialSessions> {
       platformSession('hackernews'),
       platformSession('medium'),
       platformSession('quora'),
+      platformSession('devto'),
     ]);
-  return { x, reddit, aisee, linkedin, hackernews, medium, quora };
+  return { x, reddit, aisee, linkedin, hackernews, medium, quora, devto };
 }

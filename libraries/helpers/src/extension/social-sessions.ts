@@ -87,6 +87,12 @@ export interface SocialSessions {
   hackernews: PlatformSessionInfo;
   medium: PlatformSessionInfo;
   quora: PlatformSessionInfo;
+  /**
+   * Cookie-only, like quora: dev.to's session cookies are readable from the
+   * worker but the account behind them is not, so this carries no `id`. The
+   * wrong-account check runs in devto.poster, inside the tab it opens anyway.
+   */
+  devto: PlatformSessionInfo;
 }
 
 /**

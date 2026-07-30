@@ -420,6 +420,27 @@ describe('getSocialSessions', () => {
     expect(sessions.medium.id).toBeUndefined();
     expect(sessions.medium.loggedIn).not.toBe(false);
   });
+
+  it('covers every platform the popup counts', async () => {
+    // The popup (SESSION_PLATFORMS) and the web app (this snapshot) answer the
+    // same question through different paths, and they drifted once: dev.to was
+    // probed for the popup but omitted from the snapshot, so the web app showed
+    // a signed-in dev.to as simply absent. Assert the platform LIST, not just
+    // that dev.to is present, so the next platform added to one side cannot
+    // silently skip the other.
+    jar['https://dev.to/|remember_user_token'] = 'devto-session';
+
+    const sessions = await getSocialSessions();
+
+    for (const platform of SESSION_PLATFORMS) {
+      expect(sessions).toHaveProperty(platform);
+    }
+    // dev.to is cookie-only, like quora: signed-in is knowable, the account is
+    // not — its identity needs a real page, so devto.poster checks it in the
+    // tab it opens to publish.
+    expect(sessions.devto).toMatchObject({ loggedIn: true });
+    expect(sessions.devto.id).toBeUndefined();
+  });
 });
 
 describe('getPlatformLoginSnapshot', () => {
