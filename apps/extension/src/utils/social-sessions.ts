@@ -252,6 +252,14 @@ async function getDevtoSessionCookies(): Promise<chrome.cookies.Cookie[]> {
   }
 }
 
+/**
+ * Cache key for a dev.to identity: the live session cookies themselves, so a
+ * logout or an account switch invalidates the cached account immediately.
+ */
+function devtoSessionKey(cookies: chrome.cookies.Cookie[]): string {
+  return cookies.map((c) => `${c.name}=${c.value}`).join('|');
+}
+
 export interface DevtoIdentity {
   /** Numeric account id — the SAME id DevToProvider stores as internalId. */
   id?: string;
@@ -318,6 +326,98 @@ async function readDevtoIdentityViaTab(): Promise<DevtoIdentity | undefined> {
     return { id: v.id, handle: v.handle, name: v.name, avatarUrl: v.avatarUrl };
   } catch (e) {
     console.warn('[aisee][sessions] dev.to identity tab read failed', e);
+    return undefined;
+  } finally {
+    if (tabId != null) {
+      try {
+        await chrome.tabs.remove(tabId);
+      } catch {
+        /* already gone */
+      }
+    }
+  }
+}
+
+// ── Quora ───────────────────────────────────────────────────────────────────
+
+export interface QuoraIdentity {
+  /**
+   * The profile SLUG, same value as `handle` — deliberately not the numeric
+   * `m-uid`. QuoraProvider binds an Integration with the slug (`id: username`),
+   * and account-guard compares this against that internalId, so the uid would
+   * be an unmatchable value from a different namespace. The uid's only job is
+   * to key this cache.
+   */
+  id?: string;
+  /** Profile slug, e.g. `Tercel-Yi` in /profile/Tercel-Yi. */
+  handle?: string;
+  name?: string;
+  avatarUrl?: string;
+}
+
+/**
+ * Runs INSIDE a quora.com page (serialized — fully self-contained).
+ *
+ * Quora ships no viewer object to the page (ansFrontendGlobals carries only
+ * settings), and its markup is hash-obfuscated, so the one durable anchor is
+ * the account's OWN avatar: Quora renders it as `main-thumb-<uid>-<size>-…`,
+ * and `m-uid` names that uid. Filtering on the uid is what makes this the
+ * viewer's identity and not some author's in the feed — a bare
+ * `a[href*="/profile/"]` would match hundreds of other people. The wrapping
+ * anchor carries the slug and the img's alt carries the display name, so one
+ * matched element yields the whole identity.
+ */
+function readQuoraIdentityInPage(): {
+  loggedIn: boolean;
+  id?: string;
+  handle?: string;
+  name?: string;
+  avatarUrl?: string;
+} {
+  const uid = (document.cookie.match(/(?:^|;\s*)m-uid=([^;]+)/) || [])[1];
+  if (!uid) return { loggedIn: false };
+  const img = document.querySelector(
+    `a[href*="/profile/"] img[src*="main-thumb-${uid}-"]`
+  );
+  if (!img) return { loggedIn: true, id: uid };
+  const href = img.closest('a')?.getAttribute('href') || '';
+  const slug = (href.split('/profile/')[1] || '').split(/[/?#]/)[0];
+  const alt = img.getAttribute('alt') || '';
+  const name = alt.replace(/^Profile photo for\s*/i, '').trim();
+  // `id` is the slug, NOT the uid it was found by — see QuoraIdentity.
+  return {
+    loggedIn: true,
+    id: slug || undefined,
+    handle: slug || undefined,
+    name: name || undefined,
+    avatarUrl: img.getAttribute('src') || undefined,
+  };
+}
+
+/** Open a background quora.com tab, read the signed-in identity, close it. */
+async function readQuoraIdentityViaTab(): Promise<QuoraIdentity | undefined> {
+  let tabId: number | undefined;
+  try {
+    // Must be a real tab: every request this worker sends Quora is stamped
+    // `Sec-Fetch-Site: cross-site` and answered 403 by its WAF (see
+    // probeSessionAccount). The identical read from inside a quora.com tab is
+    // same-origin and simply works.
+    const tab = await chrome.tabs.create({
+      url: 'https://www.quora.com/',
+      active: false,
+    });
+    tabId = tab.id ?? undefined;
+    if (tabId == null) return undefined;
+    await waitForTabComplete(tabId, 15_000);
+    const [res] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: readQuoraIdentityInPage,
+    });
+    const v = res?.result;
+    if (!v?.loggedIn) return undefined;
+    return { id: v.id, handle: v.handle, name: v.name, avatarUrl: v.avatarUrl };
+  } catch (e) {
+    console.warn('[aisee][sessions] quora identity tab read failed', e);
     return undefined;
   } finally {
     if (tabId != null) {
@@ -704,18 +804,24 @@ export async function probeSessionAccount(
       return { supported: true, loggedIn: cookies.length > 0 };
     }
     case 'quora': {
-      // Cookies only, and deliberately no id — Quora is the one platform whose
-      // account this worker CANNOT name.
+      // Cookies only, and NO id — deliberately, even though `m-uid` sits right
+      // there in the jar. It is the wrong NAMESPACE: QuoraProvider binds an
+      // Integration with the profile slug (`id: username`, e.g. `Tercel-Yi`),
+      // so reporting the numeric uid as `id` would make account-guard compare
+      // `1923931969` against `Tercel-Yi`, find no match, and reject every
+      // single Quora post as a wrong-account publish. The slug is the only
+      // comparable identifier here, so it travels as `handle`.
       //
-      // Its identity lives on `/settings`, and Quora's WAF answers that page
-      // 403 for any request from here: the worker is a different origin, so
-      // Chrome stamps `Sec-Fetch-Site: cross-site`, which JS may not override.
-      // The identical fetch from inside a quora.com tab is same-origin and
-      // returns 200 — so the wrong-account check runs there instead, in
-      // quora.poster, which opens such a tab to publish anyway. Retrying it
-      // here would only add a guaranteed 403 to every publish, and a rejected
-      // request per post is exactly the traffic pattern a risk-controlled site
-      // is watching for.
+      // The slug needs a real page: Quora's WAF answers any request from this
+      // worker 403 — we are a different origin, so Chrome stamps
+      // `Sec-Fetch-Site: cross-site`, which JS may not override. The identical
+      // read from inside a quora.com tab is same-origin and returns 200 (see
+      // readQuoraIdentityViaTab, which detailedLoginEntry pays for on expand).
+      // So, exactly like X: reuse a cached slug, never resolve one here.
+      // Retrying the fetch would only add a guaranteed 403 to every publish,
+      // and a rejected request per post is exactly the traffic pattern a
+      // risk-controlled site is watching for — quora.poster does the real
+      // wrong-account check inside the tab it opens to publish anyway.
       //
       // `m-login` is the signed-in marker; `m-b` is a device id that survives
       // sign-out, so its absence is the one safe logged-out conclusion — this
@@ -725,7 +831,16 @@ export async function probeSessionAccount(
       if (!loginKey && !deviceKey) {
         return { supported: true, loggedIn: false };
       }
-      return { supported: true, loggedIn: true };
+      // `m-uid` earns its keep as the CACHE KEY: it changes on an account
+      // switch, so a slug cached under the previous account is never reused.
+      const uid = await getCookie('https://www.quora.com/', 'm-uid');
+      const cached = await readCachedIdentity<QuoraIdentity>('quora', uid);
+      return {
+        supported: true,
+        loggedIn: true,
+        ...(cached?.id ? { id: cached.id } : {}),
+        ...(cached?.handle ? { handle: cached.handle } : {}),
+      };
     }
     default:
       return { supported: false, loggedIn: false };
@@ -795,15 +910,13 @@ async function cheapLoginEntry(
 
 /**
  * Who the account is — resolved only when the user expands the list, because
- * naming an account is not free: Reddit reads me.json and X opens a background
- * tab (cached per account afterwards).
+ * naming an account is not free: Reddit reads me.json, X/dev.to/Quora each open
+ * a background tab, and LinkedIn calls a private API (all cached per account
+ * afterwards, keyed on the session cookie so a logout invalidates them).
  *
- * LinkedIn stays on cookies plus whatever a previous PUBLISH already cached.
- * Its identity costs a call to a private API from the worker, on the one
- * platform known to fingerprint this extension — a cost accepted for the
- * publish guard, where the id stops an irreversible wrong-account post, and
- * deliberately not paid to label a row. Quora's account is unreadable from the
- * worker at all (see probeSessionAccount), so it renders as signed-in only.
+ * Expanding the list IS the opt-in. The two paths that run without the user
+ * asking — cheapLoginEntry on popup open, and the web app's getSocialSessions
+ * snapshot — stay on cookies plus cache reads, and never trigger any of this.
  */
 async function detailedLoginEntry(
   platform: SessionPlatform
@@ -836,10 +949,9 @@ async function detailedLoginEntry(
     // cookie, which a logout or account switch invalidates immediately.
     const cookies = await getDevtoSessionCookies();
     if (!cookies.length) return { platform, loggedIn: false };
-    const sessionKey = cookies.map((c) => `${c.name}=${c.value}`).join('|');
     const identity = await cachedValue<DevtoIdentity>(
       'devto',
-      sessionKey,
+      devtoSessionKey(cookies),
       readDevtoIdentityViaTab
     );
     return {
@@ -851,18 +963,53 @@ async function detailedLoginEntry(
       ...(identity?.avatarUrl ? { avatarUrl: identity.avatarUrl } : {}),
     };
   }
-  if (platform === 'linkedin') {
-    const liAt = await getCookie('https://www.linkedin.com/', 'li_at');
-    if (!liAt) return { platform, loggedIn: false };
-    const cached = await readCachedIdentity<LinkedinIdentity>(
-      'linkedin',
-      liAt
+  if (platform === 'quora') {
+    // Same shape as dev.to: only readable from a real page, so the tab read
+    // happens once per session and is cached against `m-uid`, which changes on
+    // an account switch.
+    //
+    // `id` is the SLUG, not the uid — QuoraProvider binds Integrations by slug,
+    // and this field is compared against internalId (see probeSessionAccount).
+    const loginKey = await getCookie('https://www.quora.com/', 'm-login');
+    const deviceKey = await getCookie('https://www.quora.com/', 'm-b');
+    if (!loginKey && !deviceKey) return { platform, loggedIn: false };
+    const uid = await getCookie('https://www.quora.com/', 'm-uid');
+    const identity = await cachedValue<QuoraIdentity>(
+      'quora',
+      uid,
+      readQuoraIdentityViaTab
     );
     return {
       platform,
       loggedIn: true,
-      ...(cached?.id ? { id: cached.id } : {}),
-      ...(cached?.handle ? { handle: cached.handle } : {}),
+      ...(identity?.handle ? { id: identity.handle, handle: identity.handle } : {}),
+      ...(identity?.name ? { name: identity.name } : {}),
+      ...(identity?.avatarUrl ? { avatarUrl: identity.avatarUrl } : {}),
+    };
+  }
+  if (platform === 'linkedin') {
+    const liAt = await getCookie('https://www.linkedin.com/', 'li_at');
+    if (!liAt) return { platform, loggedIn: false };
+    // Resolves on demand (one GET of voyager/api/me — the same call the
+    // LinkedIn web app itself makes on every page load), cached per li_at.
+    //
+    // This row used to be cache-READ only, so it stayed nameless until the
+    // user had published to LinkedIn at least once in the last 10 minutes —
+    // in practice it always rendered a bare "signed in" while every other
+    // platform showed its @handle. Paying for it HERE, and only here, keeps
+    // the cost where the user asked for it by expanding the list: the cheap
+    // popup-open path (cheapLoginEntry) and the web app's snapshot still never
+    // touch LinkedIn, and the publish path reuses whatever this cached.
+    const identity = await cachedValue<LinkedinIdentity>(
+      'linkedin',
+      liAt,
+      readLinkedinIdentity
+    );
+    return {
+      platform,
+      loggedIn: true,
+      ...(identity?.id ? { id: identity.id } : {}),
+      ...(identity?.handle ? { handle: identity.handle } : {}),
     };
   }
   // medium resolves its @handle from an ordinary same-session page; hackernews
@@ -928,12 +1075,84 @@ async function platformSession(platform: string): Promise<PlatformSessionInfo> {
 }
 
 /**
+ * Fill in an account name from the identity cache — a READ, never a resolve.
+ *
+ * dev.to, Quora and LinkedIn all cost something real to NAME (a background tab
+ * for the first two, a private-API call for the third), which is why only
+ * detailedLoginEntry pays for it, when the user expands the popup. Reusing what
+ * that already cached is free, though, and skipping it is what made the two
+ * views disagree: the popup showed `@handle` while `__aisee.sessions()`
+ * reported a nameless `loggedIn: true` for the very same account.
+ *
+ * `sessionKey` is the session cookie the cached identity was resolved under, so
+ * a logout or account switch drops it instead of surfacing a stale handle.
+ */
+async function withCachedIdentity(
+  platform: string,
+  sessionKey: string | undefined,
+  base: PlatformSessionInfo
+): Promise<PlatformSessionInfo> {
+  if (!base.loggedIn || !sessionKey) return base;
+  const identity = await readCachedIdentity<{ id?: string; handle?: string }>(
+    platform,
+    sessionKey
+  );
+  return {
+    ...base,
+    ...(identity?.id ? { id: identity.id } : {}),
+    ...(identity?.handle ? { handle: identity.handle } : {}),
+  };
+}
+
+/** dev.to: cookies for logged-in, cached identity for the account. */
+async function devtoSessionFromCache(): Promise<PlatformSessionInfo> {
+  try {
+    const cookies = await getDevtoSessionCookies();
+    if (!cookies.length) return { loggedIn: false };
+    return withCachedIdentity('devto', devtoSessionKey(cookies), {
+      loggedIn: true,
+    });
+  } catch (e) {
+    console.warn('[aisee][sessions] devto session probe failed', e);
+    return {};
+  }
+}
+
+/**
+ * Quora: `m-uid` already gives the id for free (see probeSessionAccount), so
+ * only the slug comes from the cache.
+ */
+async function quoraSessionFromCache(): Promise<PlatformSessionInfo> {
+  const base = await platformSession('quora');
+  try {
+    const uid = await getCookie('https://www.quora.com/', 'm-uid');
+    return withCachedIdentity('quora', uid, base);
+  } catch (e) {
+    console.warn('[aisee][sessions] quora identity cache read failed', e);
+    return base;
+  }
+}
+
+/** LinkedIn: cookies only for logged-in — the id/handle come from the cache. */
+async function linkedinSessionFromCache(): Promise<PlatformSessionInfo> {
+  const base = await platformSession('linkedin');
+  try {
+    const liAt = await getCookie('https://www.linkedin.com/', 'li_at');
+    return withCachedIdentity('linkedin', liAt, base);
+  } catch (e) {
+    console.warn('[aisee][sessions] linkedin identity cache read failed', e);
+    return base;
+  }
+}
+
+/**
  * Snapshot all platforms in parallel; a platform probe never throws.
  *
- * The five platforms below go through the cheap id-only probe: cookies, plus one
- * cached session request for medium (LinkedIn, Quora and dev.to are cookie-only
- * here — see platformSession). Only X opens a browser tab (its handle is in no
- * cookie), so adding these does not change what dominates this call's latency.
+ * The platforms below go through the cheap id-only probe: cookies, plus one
+ * cached session request for medium. LinkedIn, Quora and dev.to add a cache
+ * READ on top (withCachedIdentity) — never a resolve, so this path still sends
+ * those three nothing. Only X opens a browser tab (its handle is in no cookie),
+ * so adding these does not change what dominates this call's latency.
  *
  * This must keep covering every entry in SESSION_PLATFORMS, plus `aisee`. The
  * popup and the web app are two views of one question, and a platform present in
@@ -945,11 +1164,11 @@ export async function getSocialSessions(): Promise<SocialSessions> {
       getXSession(),
       getRedditSessionInfo(),
       getAiseeSession(),
-      platformSession('linkedin'),
+      linkedinSessionFromCache(),
       platformSession('hackernews'),
       platformSession('medium'),
-      platformSession('quora'),
-      platformSession('devto'),
+      quoraSessionFromCache(),
+      devtoSessionFromCache(),
     ]);
   return { x, reddit, aisee, linkedin, hackernews, medium, quora, devto };
 }

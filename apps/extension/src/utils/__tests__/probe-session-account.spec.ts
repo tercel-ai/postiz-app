@@ -435,11 +435,60 @@ describe('getSocialSessions', () => {
     for (const platform of SESSION_PLATFORMS) {
       expect(sessions).toHaveProperty(platform);
     }
-    // dev.to is cookie-only, like quora: signed-in is knowable, the account is
-    // not — its identity needs a real page, so devto.poster checks it in the
-    // tab it opens to publish.
+    // Cold cache: signed-in is knowable from the cookie, the account is not —
+    // naming it needs a real dev.to page, which this snapshot never opens.
     expect(sessions.devto).toMatchObject({ loggedIn: true });
     expect(sessions.devto.id).toBeUndefined();
+  });
+
+  it('reuses a cached dev.to account without opening a tab', async () => {
+    // The popup resolves the dev.to account by opening a real page (the handle
+    // is server-rendered into <body data-user>) and caches it against the
+    // session cookie. This snapshot must REUSE that — resolving is expensive,
+    // reusing is free — or the popup shows `@handle` while `__aisee.sessions()`
+    // reports a nameless `loggedIn: true` for the very same account.
+    jar['https://dev.to/|remember_user_token'] = 'devto-session';
+    await chrome.storage.session.set({
+      aisee_publish_identity: {
+        devto: {
+          key: 'remember_user_token=devto-session',
+          value: { id: '1176894', handle: 'tercelyi' },
+          at: Date.now(),
+        },
+      },
+    });
+    const created: unknown[] = [];
+    (chrome as any).tabs = { create: async (o: unknown) => (created.push(o), {}) };
+
+    const sessions = await getSocialSessions();
+
+    expect(sessions.devto).toMatchObject({
+      loggedIn: true,
+      id: '1176894',
+      handle: 'tercelyi',
+    });
+    expect(created).toEqual([]);
+  });
+
+  it('drops a cached dev.to account once the session cookie changes', async () => {
+    // Account switch / re-login. The cache key IS the session cookie, so a
+    // stale handle must not survive it — reporting the previous account here
+    // would be worse than reporting none.
+    jar['https://dev.to/|remember_user_token'] = 'devto-session-B';
+    await chrome.storage.session.set({
+      aisee_publish_identity: {
+        devto: {
+          key: 'remember_user_token=devto-session-A',
+          value: { id: '1176894', handle: 'tercelyi' },
+          at: Date.now(),
+        },
+      },
+    });
+
+    const sessions = await getSocialSessions();
+
+    expect(sessions.devto).toMatchObject({ loggedIn: true });
+    expect(sessions.devto.handle).toBeUndefined();
   });
 });
 
@@ -559,10 +608,14 @@ describe('getPlatformLoginSnapshot', () => {
     expect(created).toEqual([]);
   });
 
-  it('keeps LinkedIn off the private API even when expanded', async () => {
-    // Expanding is a display action; it must not buy an extra voyager call on
-    // the one platform known to fingerprint this extension. The handle shows up
-    // only if a PUBLISH already resolved and cached it under this same li_at.
+  it('resolves the LinkedIn handle on expand, then reuses the cache', async () => {
+    // Expanding is the user asking who the accounts are, and it is the ONLY
+    // popup path allowed to buy a voyager call on the platform known to
+    // fingerprint this extension. Cache-read-only left this row permanently
+    // nameless — it needed a publish within the last 10 minutes to say anything
+    // — so in practice LinkedIn alone rendered a bare "signed in".
+    //
+    // The bound that matters is that expanding twice still costs ONE call.
     jar['https://www.linkedin.com/|li_at'] = 'li-session';
     jar['https://www.linkedin.com/|JSESSIONID'] = '"ajax:1"';
     const fetched: string[] = [];
@@ -582,17 +635,116 @@ describe('getPlatformLoginSnapshot', () => {
     const cold = await getPlatformLoginSnapshot({ detailed: true });
     expect(cold.find((e) => e.platform === 'linkedin')).toMatchObject({
       loggedIn: true,
-    });
-    expect(fetched.filter((u) => u.includes('linkedin.com'))).toEqual([]);
-
-    // A publish resolves the identity; the next expand reuses that cache.
-    await probeSessionAccount('linkedin');
-    const warm = await getPlatformLoginSnapshot({ detailed: true });
-
-    expect(warm.find((e) => e.platform === 'linkedin')).toMatchObject({
-      loggedIn: true,
+      id: 'ACoAAA',
       handle: 'tercel-yi',
     });
     expect(fetched.filter((u) => u.includes('linkedin.com'))).toHaveLength(1);
+
+    const warm = await getPlatformLoginSnapshot({ detailed: true });
+    expect(warm.find((e) => e.platform === 'linkedin')).toMatchObject({
+      handle: 'tercel-yi',
+    });
+    expect(fetched.filter((u) => u.includes('linkedin.com'))).toHaveLength(1);
+  });
+
+  it('still keeps LinkedIn off the private API for the collapsed counter', async () => {
+    // The counter every popup open pays for stays on cookies alone — only the
+    // deliberate expand above may spend a request.
+    jar['https://www.linkedin.com/|li_at'] = 'li-session';
+    jar['https://www.linkedin.com/|JSESSIONID'] = '"ajax:1"';
+    const fetched: string[] = [];
+    vi.stubGlobal('fetch', async (url: string) => {
+      fetched.push(String(url));
+      return { ok: true, json: async () => ({}) };
+    });
+
+    await getPlatformLoginSnapshot();
+
+    expect(fetched.filter((u) => u.includes('linkedin.com'))).toEqual([]);
+  });
+
+  it('NEVER reports the Quora m-uid as the account id', async () => {
+    // The uid sits right there in the cookie jar, and using it would be a
+    // publish-breaking bug: QuoraProvider binds an Integration with the profile
+    // SLUG (`id: username`, e.g. Tercel-Yi), so account-guard would compare
+    // 1923931969 against Tercel-Yi, find no match and no handle to fall back
+    // on, and reject EVERY Quora post as a wrong-account publish.
+    jar['https://www.quora.com/|m-login'] = '1';
+    jar['https://www.quora.com/|m-uid'] = '1923931969';
+
+    const probe = await probeSessionAccount('quora');
+
+    expect(probe).toMatchObject({ loggedIn: true });
+    expect(probe.id).not.toBe('1923931969');
+    expect(probe.id).toBeUndefined();
+  });
+
+  it('reports the cached Quora slug, keyed on the uid, without a request', async () => {
+    // Once the expand has resolved it, the slug IS comparable to internalId, so
+    // it travels as both id and handle — and costs nothing to reuse. Quora's
+    // WAF 403s anything this worker sends, so a request here would be a
+    // guaranteed failure per publish.
+    jar['https://www.quora.com/|m-login'] = '1';
+    jar['https://www.quora.com/|m-uid'] = '1923931969';
+    await chrome.storage.session.set({
+      aisee_publish_identity: {
+        quora: {
+          key: '1923931969',
+          value: { id: 'Tercel-Yi', handle: 'Tercel-Yi', name: 'Tercel Yi' },
+          at: Date.now(),
+        },
+      },
+    });
+    const fetched: string[] = [];
+    vi.stubGlobal('fetch', async (url: string) => {
+      fetched.push(String(url));
+      return { ok: true, json: async () => ({}) };
+    });
+
+    const probe = await probeSessionAccount('quora');
+
+    expect(probe).toMatchObject({
+      loggedIn: true,
+      id: 'Tercel-Yi',
+      handle: 'Tercel-Yi',
+    });
+    expect(fetched.filter((u) => u.includes('quora.com'))).toEqual([]);
+  });
+
+  it('drops a cached Quora slug once the uid changes', async () => {
+    // Account switch. Reusing the previous account's slug here would word a
+    // guard error with the wrong name — or worse, wave through a mismatch.
+    jar['https://www.quora.com/|m-login'] = '1';
+    jar['https://www.quora.com/|m-uid'] = '2222222222';
+    await chrome.storage.session.set({
+      aisee_publish_identity: {
+        quora: {
+          key: '1923931969',
+          value: { id: 'Tercel-Yi', handle: 'Tercel-Yi' },
+          at: Date.now(),
+        },
+      },
+    });
+
+    const probe = await probeSessionAccount('quora');
+
+    expect(probe).toMatchObject({ loggedIn: true });
+    expect(probe.handle).toBeUndefined();
+  });
+
+  it('never opens a Quora tab for the collapsed counter', async () => {
+    // Quora's slug needs a real page (its WAF 403s this worker), so the tab is
+    // the expand's cost to pay — never the counter's.
+    jar['https://www.quora.com/|m-login'] = '1';
+    jar['https://www.quora.com/|m-uid'] = '1923931969';
+    const created: string[] = [];
+    vi.stubGlobal('chrome', {
+      ...(globalThis as any).chrome,
+      tabs: { create: (o: { url: string }) => created.push(o.url) },
+    });
+
+    await getPlatformLoginSnapshot();
+
+    expect(created).toEqual([]);
   });
 });
