@@ -214,6 +214,122 @@ async function getXSession(): Promise<XSessionInfo> {
   return { ...base, ...identity };
 }
 
+// ── dev.to ──────────────────────────────────────────────────────────────────
+
+let devtoCookieNamesLogged = false;
+
+/**
+ * dev.to's session cookies, matched by PATTERN rather than one hardcoded name.
+ *
+ * Forem is a Rails/Devise app: its session cookie ends in `_session` and the
+ * persistent-login cookie is Devise's `remember_user_token`. Both are httpOnly,
+ * which chrome.cookies can read but page JS cannot — so, unlike every other
+ * platform here, the exact name could NOT be confirmed against a live signed-in
+ * session (`document.cookie` on dev.to exposes only ahoy/GA analytics cookies).
+ *
+ * Betting the probe on a guessed name is precisely what produced a wrong
+ * diagnosis on Quora, so it matches the two shapes Forem can plausibly use and
+ * logs whatever it actually finds ONCE per worker — the first real run confirms
+ * the name, without a wrong guess silently reporting a signed-in user as
+ * signed out.
+ */
+async function getDevtoSessionCookies(): Promise<chrome.cookies.Cookie[]> {
+  try {
+    const all = (await chrome.cookies.getAll({ domain: 'dev.to' })) || [];
+    if (!devtoCookieNamesLogged) {
+      devtoCookieNamesLogged = true;
+      console.debug(
+        '[aisee][sessions] dev.to cookie names',
+        all.map((c) => c.name)
+      );
+    }
+    return all.filter(
+      (c) => /_session$/i.test(c.name) || c.name === 'remember_user_token'
+    );
+  } catch (e) {
+    console.warn('[aisee][sessions] dev.to cookie read failed', e);
+    return [];
+  }
+}
+
+export interface DevtoIdentity {
+  /** Numeric account id — the SAME id DevToProvider stores as internalId. */
+  id?: string;
+  /** @handle without the @. */
+  handle?: string;
+  name?: string;
+  avatarUrl?: string;
+}
+
+/**
+ * Runs INSIDE a dev.to page (serialized — fully self-contained). Forem
+ * server-renders the signed-in account onto <body data-user='{...}'> together
+ * with `data-user-status`, so this is a pure DOM read of what dev.to already
+ * published to the page — no API call, no scraping of anyone else's data.
+ */
+function readDevtoIdentityInPage(): {
+  loggedIn: boolean;
+  id?: string;
+  handle?: string;
+  name?: string;
+  avatarUrl?: string;
+} {
+  const body = document.body;
+  if (!body) return { loggedIn: false };
+  if (body.getAttribute('data-user-status') !== 'logged-in') {
+    return { loggedIn: false };
+  }
+  try {
+    const raw = body.getAttribute('data-user');
+    if (!raw) return { loggedIn: true };
+    const u = JSON.parse(raw);
+    return {
+      loggedIn: true,
+      id: u?.id != null ? String(u.id) : undefined,
+      handle: u?.username || undefined,
+      name: u?.name || undefined,
+      avatarUrl: u?.profile_image_90 || u?.profile_image || undefined,
+    };
+  } catch {
+    // Attribute present but unparseable — still signed in, just unnamed.
+    return { loggedIn: true };
+  }
+}
+
+/** Open a background dev.to tab, read the signed-in identity, close the tab. */
+async function readDevtoIdentityViaTab(): Promise<DevtoIdentity | undefined> {
+  let tabId: number | undefined;
+  try {
+    // The identity is server-rendered into the HTML, so the cheapest page will
+    // do — no need for the feed to hydrate.
+    const tab = await chrome.tabs.create({
+      url: 'https://dev.to/',
+      active: false,
+    });
+    tabId = tab.id ?? undefined;
+    if (tabId == null) return undefined;
+    await waitForTabComplete(tabId, 15_000);
+    const [res] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: readDevtoIdentityInPage,
+    });
+    const v = res?.result;
+    if (!v?.loggedIn) return undefined;
+    return { id: v.id, handle: v.handle, name: v.name, avatarUrl: v.avatarUrl };
+  } catch (e) {
+    console.warn('[aisee][sessions] dev.to identity tab read failed', e);
+    return undefined;
+  } finally {
+    if (tabId != null) {
+      try {
+        await chrome.tabs.remove(tabId);
+      } catch {
+        /* already gone */
+      }
+    }
+  }
+}
+
 // ── Reddit ──────────────────────────────────────────────────────────────────
 
 /**
@@ -576,6 +692,17 @@ export async function probeSessionAccount(
         ...(identity?.handle ? { handle: identity.handle } : {}),
       };
     }
+    case 'devto': {
+      // Cookie-only, and deliberately no id — mirroring quora, for a different
+      // reason. Dev.to's session cookies ARE readable here (httpOnly is no
+      // barrier to chrome.cookies), but the account behind them is not: the
+      // identity lives in a `data-user` attribute Forem server-renders onto
+      // <body>, which needs a real page. The publish path opens a dev.to tab
+      // anyway, so the wrong-account check runs there (devto.poster's
+      // expectedUserId), exactly like quora.poster's expectedSlug.
+      const cookies = await getDevtoSessionCookies();
+      return { supported: true, loggedIn: cookies.length > 0 };
+    }
     case 'quora': {
       // Cookies only, and deliberately no id — Quora is the one platform whose
       // account this worker CANNOT name.
@@ -625,12 +752,12 @@ async function readCachedIdentity<T>(
  * The platforms whose BROWSER session the extension actually depends on — the
  * denominator of the popup's "n/m signed in" counter.
  *
- * dev.to is deliberately NOT here, even though the extension scans it and
- * reads its metrics: both go through Forem's PUBLIC REST API, and dev.to
- * publishing belongs to the backend provider (the article api-key lives on the
- * Integration, server-side). No browser login unlocks anything, so counting it
- * would report a problem that cannot exist. The UI still lists it, outside the
- * count, so the platform doesn't look forgotten.
+ * dev.to counts like any other. Its scan and metrics run anonymously against
+ * Forem's public REST API and need nothing, but its PUBLISH path drives
+ * dev.to/new in a real tab with the user's own session, exactly like medium,
+ * quora and hackernews — all of which likewise bind an API-credential channel
+ * on the backend AND publish in-browser. The two routes are parallel, not
+ * alternatives, so a signed-out dev.to is a real, reportable gap.
  */
 export const SESSION_PLATFORMS = [
   'x',
@@ -639,6 +766,7 @@ export const SESSION_PLATFORMS = [
   'medium',
   'quora',
   'hackernews',
+  'devto',
 ] as const;
 
 export type SessionPlatform = (typeof SESSION_PLATFORMS)[number];
@@ -700,6 +828,27 @@ async function detailedLoginEntry(
       ...(s.handle ? { handle: s.handle } : {}),
       ...(s.name ? { name: s.name } : {}),
       ...(s.avatarUrl ? { avatarUrl: s.avatarUrl } : {}),
+    };
+  }
+  if (platform === 'devto') {
+    // Same shape as X: the account is only readable from a real page, so the
+    // tab read happens once per session and is cached against the session
+    // cookie, which a logout or account switch invalidates immediately.
+    const cookies = await getDevtoSessionCookies();
+    if (!cookies.length) return { platform, loggedIn: false };
+    const sessionKey = cookies.map((c) => `${c.name}=${c.value}`).join('|');
+    const identity = await cachedValue<DevtoIdentity>(
+      'devto',
+      sessionKey,
+      readDevtoIdentityViaTab
+    );
+    return {
+      platform,
+      loggedIn: true,
+      ...(identity?.id ? { id: identity.id } : {}),
+      ...(identity?.handle ? { handle: identity.handle } : {}),
+      ...(identity?.name ? { name: identity.name } : {}),
+      ...(identity?.avatarUrl ? { avatarUrl: identity.avatarUrl } : {}),
     };
   }
   if (platform === 'linkedin') {

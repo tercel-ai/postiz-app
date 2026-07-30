@@ -46,6 +46,7 @@ import {
 } from '@gitroom/extension/pages/background/hackernews.poster';
 import { postMediumStory } from '@gitroom/extension/pages/background/medium.poster';
 import { postQuoraPost } from '@gitroom/extension/pages/background/quora.poster';
+import { postDevtoArticle } from '@gitroom/extension/pages/background/devto.poster';
 import { backendCall } from '@gitroom/extension/utils/executor/api';
 import {
   checkPublishAccount,
@@ -54,9 +55,10 @@ import {
 
 // Every platform the publish queue can drain — the shared source of truth the
 // backend routing also intersects against (so a diverted post is always one the
-// queue can publish). Dev.to is intentionally absent: it has a working REST API,
-// so it publishes through the backend's native DevToProvider rather than the
-// extension (the extension only scans + reads dev.to metrics).
+// queue can publish). Dev.to is here despite ALSO having a working REST API:
+// the api-key channel and in-browser publishing are two parallel routes, as
+// they already are for medium/quora/hackernews, and `Post.publishMethod` picks
+// one per post.
 const SUPPORTED_PLATFORMS: readonly PublishPlatform[] = EXTENSION_PUBLISHABLE_PLATFORMS;
 
 interface QueueEntry {
@@ -204,6 +206,33 @@ async function defaultPublishSegment(
     return { ok: true, permalink: r.permalink, postId: r.postId };
   }
 
+  if (item.platform === 'devto') {
+    // Dev.to: single article via tab automation (no native thread).
+    //
+    // targetAccount goes to the poster rather than checkPublishAccount for the
+    // same reason as Quora: dev.to's signed-in identity is only readable from
+    // inside a dev.to page (Forem renders it onto <body data-user>), and the
+    // poster opens one anyway. Unlike Quora the id IS comparable — it is the
+    // same numeric dev.to user id DevToProvider stores as internalId.
+    const r = await postDevtoArticle({
+      title: item.title || '',
+      text,
+      images: segment?.images,
+      ...(item.targetAccount?.id
+        ? { expectedUserId: item.targetAccount.id }
+        : {}),
+    });
+    if (!r.ok) return { ok: false, error: r.error };
+    if ('pending' in r && r.pending) {
+      return {
+        ok: false,
+        error:
+          r.message || 'Dev.to article left pending — finish it in the opened tab',
+      };
+    }
+    return { ok: true, permalink: r.permalink, postId: r.postId };
+  }
+
   if (item.platform === 'quora') {
     // Quora: single feed post via tab automation (no thread, no title). Pending
     // = filled but not confirmed posted → a failure for the unattended queue.
@@ -344,6 +373,7 @@ const DEFAULT_SEGMENT_GAP_S: Record<PublishPlatform, [number, number]> = {
   hackernews: [30, 120],
   medium: [30, 120],
   quora: [30, 120],
+  devto: [30, 120],
 };
 const MAX_SEGMENT_GAP_S = 600;
 

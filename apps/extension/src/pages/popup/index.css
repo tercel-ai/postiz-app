@@ -268,9 +268,6 @@ body {
 .pz-platform-dot.on {
   background: #2e9e4f;
 }
-.pz-platform-dot.none {
-  background: var(--pz-border);
-}
 .pz-platform-avatar {
   width: 16px;
   height: 16px;
@@ -292,9 +289,6 @@ body {
   white-space: nowrap;
   font-size: 11px;
   color: var(--pz-muted);
-}
-.pz-platform-account.muted {
-  font-style: italic;
 }
 .pz-platform-row .pz-platform-login-btn {
   margin-left: auto;

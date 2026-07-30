@@ -42,7 +42,7 @@ function makeServiceWithIntegrations(integrations: any[]) {
       getSocialProviderList: () => [
         { identifier: 'x', name: 'X' },
         { identifier: 'hackernews', name: 'Hacker News' },
-        { identifier: 'devto', name: 'Dev.to' },
+        { identifier: 'mastodon', name: 'Mastodon' },
       ],
     } as any,
     { getIntegrationsList: vi.fn().mockResolvedValue(integrations) } as any,
@@ -64,7 +64,7 @@ describe('PostsService.getPublishMethods', () => {
 
     const rows = await service.getPublishMethods('org-1');
 
-    expect(rows.map((r) => r.platform)).toEqual(['x', 'hackernews', 'devto']);
+    expect(rows.map((r) => r.platform)).toEqual(['x', 'hackernews', 'mastodon']);
   });
 
   it('dual-capable platform with a bound account: both methods, defaults to extension', async () => {
@@ -97,7 +97,7 @@ describe('PostsService.getPublishMethods', () => {
   it('API-only platform without a bound account: no methods + ACCOUNT_BINDING_REQUIRED', async () => {
     const service = makeServiceWithIntegrations([]);
 
-    const devto = byPlatform(await service.getPublishMethods('org-1'), 'devto');
+    const devto = byPlatform(await service.getPublishMethods('org-1'), 'mastodon');
 
     expect(devto.methods).toEqual([]);
     expect(devto.defaultMethod).toBeNull();
@@ -106,10 +106,10 @@ describe('PostsService.getPublishMethods', () => {
 
   it('ignores disabled integrations when deciding api capability', async () => {
     const service = makeServiceWithIntegrations([
-      { providerIdentifier: 'devto', disabled: true, deletedAt: null },
+      { providerIdentifier: 'mastodon', disabled: true, deletedAt: null },
     ]);
 
-    const devto = byPlatform(await service.getPublishMethods('org-1'), 'devto');
+    const devto = byPlatform(await service.getPublishMethods('org-1'), 'mastodon');
 
     expect(devto.apiCapable).toBe(false);
     expect(devto.hasBoundIntegration).toBe(false);
@@ -155,8 +155,8 @@ describe('PostsService.schedulePosts', () => {
         id: 'd1',
         group: 'gd',
         integrationId: 'int-d',
-        integration: { providerIdentifier: 'devto', disabled: false },
-        settings: JSON.stringify({ __type: 'devto' }),
+        integration: { providerIdentifier: 'mastodon', disabled: false },
+        settings: JSON.stringify({ __type: 'mastodon' }),
       }),
     ]);
 
@@ -198,8 +198,8 @@ describe('PostsService.schedulePosts', () => {
         id: 'b',
         group: 'gb',
         integrationId: 'int-b',
-        integration: { providerIdentifier: 'devto', disabled: false },
-        settings: JSON.stringify({ __type: 'devto' }),
+        integration: { providerIdentifier: 'mastodon', disabled: false },
+        settings: JSON.stringify({ __type: 'mastodon' }),
       }), // api
       // 'c' is missing from the repo result -> NOT_FOUND
     ]);

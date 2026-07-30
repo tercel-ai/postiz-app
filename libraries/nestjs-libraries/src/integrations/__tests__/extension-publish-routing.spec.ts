@@ -15,8 +15,8 @@ describe('isExtensionPublishProvider', () => {
   it('is false for API-capable providers by default', () => {
     expect(isExtensionPublishProvider('x')).toBe(false);
     expect(isExtensionPublishProvider('reddit')).toBe(false);
-    // dev.to keeps its working REST API → published by the backend provider.
-    expect(isExtensionPublishProvider('devto')).toBe(false);
+    // Mastodon keeps its working REST API → published by the backend provider.
+    expect(isExtensionPublishProvider('mastodon')).toBe(false);
   });
 
   it('is case-insensitive and safe on empty/unknown input', () => {
@@ -35,7 +35,7 @@ describe('extensionPublishProviderIds', () => {
     // API-capable providers are not in the default set.
     expect(ids).not.toContain('x');
     expect(ids).not.toContain('reddit');
-    expect(ids).not.toContain('devto');
+    expect(ids).not.toContain('mastodon');
   });
 });
 
@@ -47,7 +47,7 @@ describe('EXTENSION_PUBLISH_PLATFORMS env override (sync guard)', () => {
 
   it('routes a publishable dual-capable platform but ignores an unpublishable one', async () => {
     // The env is read at module load, so stub it then re-import a fresh copy.
-    vi.stubEnv('EXTENSION_PUBLISH_PLATFORMS', 'x,devto');
+    vi.stubEnv('EXTENSION_PUBLISH_PLATFORMS', 'x,mastodon');
     vi.resetModules();
     const mod = await import(
       '@gitroom/nestjs-libraries/integrations/integration.manager'
@@ -56,8 +56,8 @@ describe('EXTENSION_PUBLISH_PLATFORMS env override (sync guard)', () => {
     expect(mod.isExtensionPublishProvider('x')).toBe(true);
     // devto is NOT extension-publishable → the guard ignores the misconfig, so it
     // keeps the backend path instead of stranding in QUEUE.
-    expect(mod.isExtensionPublishProvider('devto')).toBe(false);
+    expect(mod.isExtensionPublishProvider('mastodon')).toBe(false);
     expect(mod.extensionPublishProviderIds()).toContain('x');
-    expect(mod.extensionPublishProviderIds()).not.toContain('devto');
+    expect(mod.extensionPublishProviderIds()).not.toContain('mastodon');
   });
 });

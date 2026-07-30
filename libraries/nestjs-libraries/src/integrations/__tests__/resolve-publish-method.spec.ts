@@ -10,9 +10,11 @@ import {
 // resolvePublishMethod is the SINGLE place both send paths agree on the route,
 // so a post can never be picked up by both executors (the double-publish guard).
 // These tests pin the capability model + the user-choice rules.
-//   - x/reddit/linkedin: extension-publishable AND have a backend API (dual).
+//   - x/reddit/linkedin/devto: extension-publishable AND have a backend API
+//     (dual). Dev.to's api-key channel and its in-browser route are parallel,
+//     not alternatives — see EXTENSION_PUBLISHABLE_PLATFORMS.
 //   - hackernews/medium/quora: extension-only (no usable backend write API).
-//   - 'devto' stands in for an API-only platform: not extension-publishable and
+//   - 'mastodon' stands in for an API-only platform: not extension-publishable and
 //     not extension-only, so it models "backend API only" regardless of whether
 //     the provider registry lists it.
 
@@ -26,7 +28,7 @@ describe('isExtensionOnlyProvider', () => {
   it('is false for dual-capable and API-only platforms', () => {
     expect(isExtensionOnlyProvider('x')).toBe(false);
     expect(isExtensionOnlyProvider('reddit')).toBe(false);
-    expect(isExtensionOnlyProvider('devto')).toBe(false);
+    expect(isExtensionOnlyProvider('mastodon')).toBe(false);
     expect(isExtensionOnlyProvider('unknown-platform')).toBe(false);
   });
 });
@@ -53,16 +55,16 @@ describe('resolvePublishMethod — auto (no user choice)', () => {
 
   it('API-only platform with a bound account -> api', () => {
     expect(
-      resolvePublishMethod({ platform: 'devto', hasBoundIntegration: true })
+      resolvePublishMethod({ platform: 'mastodon', hasBoundIntegration: true })
     ).toBe('api');
   });
 
   it('API-only platform without a bound account -> ACCOUNT_BINDING_REQUIRED', () => {
     expect(() =>
-      resolvePublishMethod({ platform: 'devto', hasBoundIntegration: false })
+      resolvePublishMethod({ platform: 'mastodon', hasBoundIntegration: false })
     ).toThrowError(PublishMethodError);
     try {
-      resolvePublishMethod({ platform: 'devto', hasBoundIntegration: false });
+      resolvePublishMethod({ platform: 'mastodon', hasBoundIntegration: false });
     } catch (e) {
       expect((e as PublishMethodError).code).toBe('ACCOUNT_BINDING_REQUIRED');
     }
@@ -126,7 +128,7 @@ describe('resolvePublishMethod — explicit choice = extension', () => {
 
   it('rejects extension on an API-only platform', () => {
     try {
-      resolvePublishMethod({ platform: 'devto', hasBoundIntegration: true, choice: 'extension' });
+      resolvePublishMethod({ platform: 'mastodon', hasBoundIntegration: true, choice: 'extension' });
       throw new Error('expected throw');
     } catch (e) {
       expect(e).toBeInstanceOf(PublishMethodError);

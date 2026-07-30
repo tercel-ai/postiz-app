@@ -37,11 +37,21 @@
 //                    Single story, `title` required, text-only.
 //       quora      — quora.com tab automation (no API). Single space/feed post,
 //                    text-only, no title.
+//       devto      — dev.to/new tab automation. `title` required; body is a
+//                    plain markdown <textarea>, so body images are embedded as
+//                    markdown URLs and only the cover is uploaded.
 //     Article platforms carry a single segment (no native thread); only x,
 //     reddit, linkedin and hackernews expand a multi-segment thread.
-//     (Dev.to is NOT here: it has a working REST API, so it publishes through
-//     the backend's native DevToProvider like any other API integration — the
-//     extension only scans + reads metrics for it.)
+//
+//     Dev.to is the one platform here that ALSO has a working write API, and
+//     both routes stay live on purpose. They are not alternatives to pick
+//     between — they are the same two planes every other platform already has:
+//     an API channel bound by credentials at "add channel" time, and in-browser
+//     publishing with the user's own session. Medium, Quora and Hacker News all
+//     bind their backend channel with customFields credentials AND publish
+//     through this queue; Dev.to was the sole exception, which left a user with
+//     no Dev.to API key unable to publish there at all. Which route a given post
+//     takes is decided once, per post, by `Post.publishMethod`.
 //
 // Both sides import these types, so the payload shape can never drift.
 
@@ -53,7 +63,8 @@ export type PublishPlatform =
   | 'linkedin'
   | 'hackernews'
   | 'medium'
-  | 'quora';
+  | 'quora'
+  | 'devto';
 
 /**
  * SINGLE SOURCE OF TRUTH for the platforms the browser extension can actually
@@ -72,6 +83,7 @@ export const EXTENSION_PUBLISHABLE_PLATFORMS: readonly PublishPlatform[] = [
   'hackernews',
   'medium',
   'quora',
+  'devto',
 ];
 
 /**
@@ -82,6 +94,7 @@ export const EXTENSION_PUBLISHABLE_PLATFORMS: readonly PublishPlatform[] = [
 export const SINGLE_SEGMENT_PLATFORMS: readonly PublishPlatform[] = [
   'medium',
   'quora',
+  'devto',
 ];
 
 /** Platforms that require a `title` on the post item (article/story headline). */
@@ -89,6 +102,7 @@ export const TITLE_REQUIRED_PLATFORMS: readonly PublishPlatform[] = [
   'reddit',
   'hackernews',
   'medium',
+  'devto',
 ];
 
 /**
@@ -105,6 +119,12 @@ export const IMAGE_CAPABLE_PLATFORMS: readonly PublishPlatform[] = [
   'x',
   'reddit',
   'linkedin',
+  // dev.to carries images two different ways, each using the platform's own
+  // native mechanism (see devto.poster): body images are plain markdown
+  // `![](url)` — the body IS markdown, so no upload UI is involved at all —
+  // while the cover goes through the editor's file input, because the v2
+  // editor accepts a cover only as an upload.
+  'devto',
 ];
 
 export interface PublishThreadSegment {

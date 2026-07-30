@@ -6,15 +6,10 @@ import type {
 import { usePlatformSessions } from '@gitroom/extension/pages/popup/hooks/usePlatformSessions';
 
 interface PlatformRow {
-  key: SessionPlatform | 'devto';
+  key: SessionPlatform;
   label: string;
   /** Opened when the platform is signed out. */
   loginUrl: string;
-  /**
-   * Nothing here needs a browser session, so the row is listed but kept OUT of
-   * the counter — see SESSION_PLATFORMS in utils/social-sessions.
-   */
-  sessionless?: boolean;
   /** Why no account name is shown even while signed in. */
   identityNote?: string;
 }
@@ -46,15 +41,8 @@ const PLATFORM_ROWS: PlatformRow[] = [
     label: 'Hacker News',
     loginUrl: 'https://news.ycombinator.com/login',
   },
-  {
-    key: 'devto',
-    label: 'dev.to',
-    loginUrl: 'https://dev.to/enter',
-    sessionless: true,
-  },
+  { key: 'devto', label: 'dev.to', loginUrl: 'https://dev.to/enter' },
 ];
-
-const COUNTED_ROWS = PLATFORM_ROWS.filter((r) => !r.sessionless);
 
 function accountLabel(entry: PlatformLoginEntry): string | null {
   if (entry.handle) return `@${entry.handle}`;
@@ -87,7 +75,7 @@ export function PlatformLoginBar() {
   }, [entries]);
 
   const signedIn = (entries || []).filter((e) => e.loggedIn).length;
-  const total = COUNTED_ROWS.length;
+  const total = PLATFORM_ROWS.length;
   const missing = entries ? total - signedIn : 0;
 
   const toggle = () => {
@@ -124,7 +112,7 @@ export function PlatformLoginBar() {
             <div className="pz-platforms-hint">Reading accounts…</div>
           )}
           {PLATFORM_ROWS.map((row) => {
-            const entry = row.sessionless ? undefined : byKey[row.key];
+            const entry = byKey[row.key];
             const account = entry && entry.loggedIn ? accountLabel(entry) : null;
             return (
               <div className="pz-platform-row" key={row.key}>
@@ -136,21 +124,11 @@ export function PlatformLoginBar() {
                   />
                 ) : (
                   <span
-                    className={`pz-platform-dot${
-                      row.sessionless
-                        ? ' none'
-                        : entry?.loggedIn
-                        ? ' on'
-                        : ' off'
-                    }`}
+                    className={`pz-platform-dot${entry?.loggedIn ? ' on' : ' off'}`}
                   />
                 )}
                 <span className="pz-platform-name">{row.label}</span>
-                {row.sessionless ? (
-                  <span className="pz-platform-account muted">
-                    no login needed
-                  </span>
-                ) : entry?.loggedIn ? (
+                {entry?.loggedIn ? (
                   <span
                     className="pz-platform-account"
                     title={account || row.identityNote || 'Signed in'}

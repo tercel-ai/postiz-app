@@ -49,9 +49,30 @@ describe('publish queue — new platforms validation', () => {
     expect(reasonFor(item({ platform: 'facebook' as any }))).toMatch(/unsupported platform/);
   });
 
-  it('rejects dev.to — it publishes through the backend provider, not the extension', () => {
-    // Dev.to has a working REST API, so it is NOT an extension publish platform.
-    expect(reasonFor(item({ platform: 'devto' as any }))).toMatch(/unsupported platform/);
+  it('accepts dev.to even though it also has a working REST API', () => {
+    // The api-key channel and in-browser publishing are two parallel routes,
+    // exactly as they already are for medium/quora/hackernews — a user with no
+    // dev.to api-key must still be able to publish. `Post.publishMethod` picks
+    // the route per post; being publishable here is what makes that a choice.
+    expect(
+      reasonFor(item({ taskId: 'd0', platform: 'devto' as any, title: 'Hello' }))
+    ).toBeNull();
+  });
+
+  it('dev.to requires a title and rejects multi-segment threads', () => {
+    expect(
+      reasonFor(item({ taskId: 'd1', platform: 'devto' as any, title: '' }))
+    ).toMatch(/needs a title/);
+    expect(
+      reasonFor(
+        item({
+          taskId: 'd2',
+          platform: 'devto' as any,
+          title: 'Hello',
+          segments: [{ text: 'one' }, { text: 'two' }],
+        })
+      )
+    ).toMatch(/single-segment/);
   });
 
   it('medium requires a title and rejects multi-segment threads', () => {

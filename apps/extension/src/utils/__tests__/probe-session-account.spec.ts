@@ -35,6 +35,13 @@ function stubChrome() {
         });
         cb(hit ? { value: hit[1] } : null);
       },
+      // dev.to is the one platform probed by LISTING cookies rather than asking
+      // for a name — its session cookie is httpOnly, so the exact name could
+      // not be confirmed from a live page.
+      getAll: async ({ domain }: { domain: string }) =>
+        Object.entries(jar)
+          .filter(([k]) => k.split('|')[0].includes(domain))
+          .map(([k, value]) => ({ name: k.split('|')[1], value })),
     },
     storage: {
       // chrome.storage supports BOTH callback and promise styles and the code
@@ -416,10 +423,11 @@ describe('getSocialSessions', () => {
 });
 
 describe('getPlatformLoginSnapshot', () => {
-  it('counts only platforms a browser login can actually unlock', () => {
-    // dev.to is scanned and metered through Forem's PUBLIC API and published by
-    // the backend provider, so it has no browser session to be signed out of.
-    // Counting it would permanently show one platform "missing".
+  it('counts every platform the extension publishes with a browser session', () => {
+    // dev.to counts like the rest: its scan/metrics are anonymous, but its
+    // PUBLISH path drives dev.to/new in a real tab, so a signed-out dev.to is a
+    // genuine gap. Its api-key channel is a parallel route, not a replacement —
+    // the same arrangement medium/quora/hackernews already have.
     expect([...SESSION_PLATFORMS]).toEqual([
       'x',
       'reddit',
@@ -427,8 +435,8 @@ describe('getPlatformLoginSnapshot', () => {
       'medium',
       'quora',
       'hackernews',
+      'devto',
     ]);
-    expect(SESSION_PLATFORMS).not.toContain('devto');
   });
 
   it('reports every platform, signed in or out, in a fixed order', async () => {
@@ -480,6 +488,54 @@ describe('getPlatformLoginSnapshot', () => {
 
     expect(byKey.medium).toMatchObject({ loggedIn: true, handle: 'tercel.yi' });
     expect(byKey.hackernews).toMatchObject({ handle: 'tercelyi' });
+  });
+
+  it('recognises the dev.to session by shape, not by a guessed name', async () => {
+    // Forem's session cookie is httpOnly, so its exact name could not be
+    // confirmed against a live signed-in page (document.cookie there shows only
+    // ahoy/GA analytics). Hardcoding a guess is what went wrong on Quora, so the
+    // probe matches Rails/Devise shapes over chrome.cookies.getAll instead.
+    jar['https://dev.to/|_forem_session'] = 'abc';
+    const rails = await getPlatformLoginSnapshot();
+    expect(rails.find((e) => e.platform === 'devto')).toMatchObject({
+      loggedIn: true,
+    });
+
+    jar = { 'https://dev.to/|remember_user_token': 'xyz' };
+    const devise = await getPlatformLoginSnapshot();
+    expect(devise.find((e) => e.platform === 'devto')).toMatchObject({
+      loggedIn: true,
+    });
+  });
+
+  it('does not mistake dev.to analytics cookies for a session', async () => {
+    // These are exactly the cookies a SIGNED-OUT visitor gets, and the only ones
+    // page JS can see on a signed-in one — treating them as a login would report
+    // every anonymous visitor as authenticated.
+    jar['https://dev.to/|ahoy_visitor'] = 'v';
+    jar['https://dev.to/|ahoy_visit'] = 'v';
+    jar['https://dev.to/|_ga'] = 'g';
+
+    const snapshot = await getPlatformLoginSnapshot();
+
+    expect(snapshot.find((e) => e.platform === 'devto')).toMatchObject({
+      loggedIn: false,
+    });
+  });
+
+  it('never opens a dev.to tab for the collapsed counter', async () => {
+    // The identity is only readable from a real page, so the detailed pass may
+    // open a tab — the counter every popup open pays for may not.
+    jar['https://dev.to/|_forem_session'] = 'abc';
+    const created: string[] = [];
+    vi.stubGlobal('chrome', {
+      ...(globalThis as any).chrome,
+      tabs: { create: (o: { url: string }) => created.push(o.url) },
+    });
+
+    await getPlatformLoginSnapshot();
+
+    expect(created).toEqual([]);
   });
 
   it('keeps LinkedIn off the private API even when expanded', async () => {
