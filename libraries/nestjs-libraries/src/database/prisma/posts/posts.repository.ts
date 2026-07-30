@@ -352,9 +352,11 @@ export class PostsRepository {
         ],
         select: {
           id: true,
+          title: true,
           content: true,
           image: true,
           publishDate: true,
+          publishMethod: true,
           createdAt: true,
           releaseURL: true,
           intervalInDays: true,
@@ -362,6 +364,7 @@ export class PostsRepository {
           group: true,
           error: true,
           sourcePostId: true,
+          operationPlanId: true,
           impressions: true,
           trafficScore: true,
           lastMetricsFetchAt: true,
@@ -611,6 +614,7 @@ export class PostsRepository {
         group: true,
         integrationId: true,
         sourcePostId: true,
+        operationPlanId: true,
         tags: {
           select: {
             tag: true,
