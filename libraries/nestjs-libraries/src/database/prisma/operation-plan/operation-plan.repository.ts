@@ -355,12 +355,13 @@ export class OperationPlanRepository {
       // that would throw at submit on `undefined.subreddit`.
       .filter(({ platform, redditTarget }) => platform !== 'reddit' || !!redditTarget)
       .map(({ item, platform, node, redditTarget }) => {
-        // integrationId is optional: publishing is by platform (the plugin reads
-        // settings.__type), so a platform without an OAuth integration still gets
-        // a DRAFT post with a null integrationId. When an integration exists we
-        // attach it, so OAuth-based publishing is unaffected.
+        // integrationId is intentionally left null at generation time: publishing
+        // is by platform (the plugin reads settings.__type), and binding a
+        // specific account is deferred to schedule time — same as
+        // publishMethod. This avoids silently locking a plan post to whichever
+        // integration happened to exist (or be oldest) when the plan was
+        // generated, letting the user pick the account when they schedule.
         const resolvedPlatform = resolvePlatform(platform);
-        const integrationId = integrationByPlatform.get(resolvedPlatform) ?? null;
         return {
           id: node.id,
           // parentPostId chains thread parts to the anchor; null on the anchor.
@@ -368,7 +369,7 @@ export class OperationPlanRepository {
           state: 'DRAFT' as const,
           publishDate: new Date(item.utcDate),
           organizationId: plan.organizationId,
-          integrationId,
+          integrationId: null,
           content: node.content,
           delay: 0,
           // group must be per-platform: a single contentItem fans out into

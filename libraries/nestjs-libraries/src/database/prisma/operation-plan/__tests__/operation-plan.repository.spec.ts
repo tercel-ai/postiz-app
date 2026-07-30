@@ -266,7 +266,7 @@ describe('OperationPlanRepository', () => {
           organizationId: 'org-1',
           projectId: 'proj-1',
           operationPlanId: 'plan-1',
-          integrationId: 'integration-x',
+          integrationId: null,
           group: 'plan-1:D01:x',
           state: 'DRAFT',
           content: 'Publish-ready post text',
@@ -347,21 +347,21 @@ describe('OperationPlanRepository', () => {
           parentPostId: null,
           content: 'Anchor tweet',
           group: 'plan-1:D01:x',
-          integrationId: 'integration-x',
+          integrationId: null,
         }),
         expect.objectContaining({
           id: deriveOperationPlanPostId('plan-1', 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'),
           parentPostId: deriveOperationPlanPostId('plan-1', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'),
           content: 'Reply 2',
           group: 'plan-1:D01:x',
-          integrationId: 'integration-x',
+          integrationId: null,
         }),
         expect.objectContaining({
           id: deriveOperationPlanPostId('plan-1', 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'),
           parentPostId: deriveOperationPlanPostId('plan-1', 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'),
           content: 'Reply 3',
           group: 'plan-1:D01:x',
-          integrationId: 'integration-x',
+          integrationId: null,
         }),
       ],
       skipDuplicates: true,
@@ -485,7 +485,7 @@ describe('OperationPlanRepository', () => {
       expect(postCreateMany).toHaveBeenCalledWith({
         data: [
           expect.objectContaining({
-            integrationId: 'integration-linkedin',
+            integrationId: null,
             group: 'plan-1:D01:linkedin',
             settings: expect.stringContaining('"__type":"linkedin"'),
           }),
@@ -506,7 +506,7 @@ describe('OperationPlanRepository', () => {
       expect(postCreateMany).toHaveBeenCalledWith({
         data: [
           expect.objectContaining({
-            integrationId: 'integration-linkedin-page',
+            integrationId: null,
             group: 'plan-1:D01:linkedin-page',
             settings: expect.stringContaining('"__type":"linkedin-page"'),
           }),
@@ -528,7 +528,7 @@ describe('OperationPlanRepository', () => {
       expect(postCreateMany).toHaveBeenCalledWith({
         data: [
           expect.objectContaining({
-            integrationId: 'integration-linkedin',
+            integrationId: null,
             group: 'plan-1:D01:linkedin',
             settings: expect.stringContaining('"__type":"linkedin"'),
           }),
