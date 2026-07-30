@@ -34,6 +34,10 @@ import {
 } from './pacing';
 
 const SCAN_ENDPOINT = '/engage/scan-tasks/ingest';
+// Cheap "is it worth calling SCAN_ENDPOINT?" probe backing the 1-min fast-lane
+// alarm. SCAN_ENDPOINT itself is far too expensive to poll at that rate — with
+// nothing due it still walks every unit — so this stands in front of it.
+const SCAN_HINT_ENDPOINT = '/engage/scan-tasks/hint';
 // Safety bound on units processed in one drive (the loop also self-terminates
 // when the backend reports nothing due).
 const MAX_UNITS_PER_RUN = 20;
@@ -145,6 +149,32 @@ async function ingest(
     return null;
   }
   return resp.data;
+}
+
+/**
+ * Ask the backend whether a scan is worth driving right now.
+ *
+ * Returns false on any failure (including no session) so a backend hiccup can't
+ * turn the 1-min alarm into a 1-min stream of full scan loops. Losing a hint
+ * only delays the scan to the 15-min backstop alarm, which never consults this.
+ */
+export async function hasPendingScanWork(): Promise<boolean> {
+  try {
+    const resp = await backendCall<{ work?: boolean }>(
+      SCAN_HINT_ENDPOINT,
+      'GET'
+    );
+    if (!resp.ok) {
+      console.warn('[aisee][scan] hint HTTP', resp.status);
+      return false;
+    }
+    return Boolean(resp.data?.work);
+  } catch (e) {
+    if (!(e instanceof NotAuthenticatedError)) {
+      console.warn('[aisee][scan] hint failed', e);
+    }
+    return false;
+  }
 }
 
 export async function runScanLoop(): Promise<ScanRunSummary> {

@@ -49,6 +49,9 @@ import {
   ensureEngageScanAlarm,
   clearEngageScanAlarm,
   handleEngageAlarm,
+  ensureEngageHintAlarm,
+  clearEngageHintAlarm,
+  handleEngageHintAlarm,
   ensurePublishPollAlarm,
   clearPublishPollAlarm,
   handlePublishPollAlarm,
@@ -247,6 +250,9 @@ function broadcastPublishProgress(state: unknown): void {
 function reArmAlarms(): void {
   void reArmRefreshAlarmIfLoggedIn();
   void ensureEngageScanAlarm();
+  // Re-arm the 1-min fast-lane probe so a keyword created while the SW was
+  // asleep still gets scanned within ~a minute of the worker coming back.
+  void ensureEngageHintAlarm();
   // Re-arm the 1-min backend publish-due poll so QUEUE posts re-sync across SW
   // restarts and extension reinstalls without any web-page trigger.
   void ensurePublishPollAlarm();
@@ -268,8 +274,11 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   if (handlePublishAlarm(alarm.name)) return;
   void handlePublishPollAlarm(alarm.name).then((handledPoll) => {
     if (handledPoll) return;
-    void handleEngageAlarm(alarm.name).then((handled) => {
-      if (!handled) void handleAuthAlarm(alarm.name);
+    void handleEngageHintAlarm(alarm.name).then((handledHint) => {
+      if (handledHint) return;
+      void handleEngageAlarm(alarm.name).then((handled) => {
+        if (!handled) void handleAuthAlarm(alarm.name);
+      });
     });
   });
 });
@@ -290,6 +299,7 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
         enterFrontendAuthTabs();
         // Session exists → start the background engage scan + publish poll.
         void ensureEngageScanAlarm();
+        void ensureEngageHintAlarm();
         void ensurePublishPollAlarm();
       })
       .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
@@ -303,6 +313,7 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
         logoutFrontendTabs();
         // No session → stop background fetches.
         void clearEngageScanAlarm();
+        void clearEngageHintAlarm();
         void clearPublishPollAlarm();
       })
       .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
@@ -364,9 +375,11 @@ chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
         // publish-poll alarms; an empty token (logout) → clear them.
         if (request.token) {
           void ensureEngageScanAlarm();
+          void ensureEngageHintAlarm();
           void ensurePublishPollAlarm();
         } else {
           void clearEngageScanAlarm();
+          void clearEngageHintAlarm();
           void clearPublishPollAlarm();
         }
       })

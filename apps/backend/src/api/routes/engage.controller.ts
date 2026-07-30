@@ -178,6 +178,17 @@ export class EngageController {
 
   @ApiOperation({
     summary:
+      'Cheap probe (one Redis GET) telling the extension whether it is worth ' +
+      'calling /scan-tasks/ingest right now. Fast lane only — the extension ' +
+      'still polls ingest unconditionally on its slower backstop alarm.',
+  })
+  @Get('/scan-tasks/hint')
+  async scanTasksHint(@GetOrgFromRequest() org: Organization) {
+    return { work: await this._scanTasksService.hasPendingWork(org.id) };
+  }
+
+  @ApiOperation({
+    summary:
       'Release a held scan-task lease so the unit can be re-claimed. ' +
       'Resets status → IDLE without advancing the cursor; select and claim the unit afterwards to bypass cadence.',
   })

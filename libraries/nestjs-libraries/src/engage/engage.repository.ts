@@ -27,6 +27,7 @@ import {
   pickXReplyIntegration,
   XReplyResolution,
 } from '@gitroom/nestjs-libraries/engage/resolve-x-reply-integration';
+import { markEngageScanWork } from '@gitroom/nestjs-libraries/engage/engage-scan-hint';
 import { classifyReplyMetric, normalizeReplyMetrics } from '@gitroom/nestjs-libraries/engage/engage-metrics-stats';
 import { parseXTweetId } from '@gitroom/nestjs-libraries/engage/x-tweet';
 import { EngageAuthorProfile } from '@gitroom/nestjs-libraries/engage/engage-author';
@@ -877,7 +878,7 @@ export class EngageRepository {
     dto: AddKeywordDto
   ) {
     // Unique violation on (configId, keyword) → 409 with a readable message.
-    return this._createOrConflict(`Keyword "${dto.keyword}"`, () =>
+    const created = await this._createOrConflict(`Keyword "${dto.keyword}"`, () =>
       this._keyword.model.engageKeyword.create({
         data: {
           configId,
@@ -898,6 +899,14 @@ export class EngageRepository {
         },
       })
     );
+    // A new enabled keyword has no scan cursor yet, so it is due the instant
+    // anyone asks. Raise the fast-lane hint so the extension picks it up on its
+    // 1-min probe instead of waiting out the 15-min backstop alarm. Placed here
+    // rather than in the caller so both the manual add and operation-plan
+    // generation (resolveOrCreateKeywordIds) are covered; setupEngage builds
+    // its rows inside a transaction and marks separately, after the commit.
+    if (dto.enabled ?? true) await markEngageScanWork(organizationId);
+    return created;
   }
 
   // Atomic bulk-add — used by the setup wizard so a partial-commit mid-loop
@@ -921,6 +930,13 @@ export class EngageRepository {
       skipDuplicates: true,
     });
     await this._ensureInitialScansForEnabledKeywords(configId, organizationId);
+    // Same fast-lane hint as addKeyword — this path bypasses it (createMany, so
+    // the per-row helper never runs), but the new keywords are just as due.
+    // Gate on an ENABLED row actually landing: `count` alone would also fire for
+    // a batch of disabled keywords, which produce no scan unit at all.
+    if (result.count > 0 && data.some((k) => k.enabled)) {
+      await markEngageScanWork(organizationId);
+    }
     return result;
   }
 
@@ -1036,6 +1052,9 @@ export class EngageRepository {
         organizationId,
         updated.keyword
       );
+      // Re-enabling revives a scan unit; if the keyword was never scanned it
+      // still has no cursor and is due immediately. Same fast lane as a create.
+      await markEngageScanWork(organizationId);
     }
     return updated;
   }
@@ -1135,7 +1154,7 @@ export class EngageRepository {
     dto: AddMonitoredChannelDto
   ) {
     // Unique violation on (configId, platform, channelId) → 409.
-    return this._createOrConflict(
+    const created = await this._createOrConflict(
       `Channel "${dto.channelName ?? dto.channelId}"`,
       () =>
         this._channel.model.engageMonitoredChannel.create({
@@ -1153,6 +1172,12 @@ export class EngageRepository {
           },
         })
     );
+    // A channel is its own scan unit, so this is due immediately just like a new
+    // keyword. Matters most for operation-plan generation, which lands keywords
+    // and Tier-2-discovered subreddits in the same run — without this the
+    // subreddits would trail the keywords by a full backstop period.
+    if (dto.enabled ?? true) await markEngageScanWork(organizationId);
+    return created;
   }
 
   async listMonitoredChannels(organizationId: string, projectId: string | null = null) {
@@ -1208,7 +1233,7 @@ export class EngageRepository {
       );
     }
     // Unique violation on (configId, platform, username) → 409.
-    return this._createOrConflict(`Account "${dto.username}"`, () =>
+    const created = await this._createOrConflict(`Account "${dto.username}"`, () =>
       this._trackedAccount.model.engageTrackedAccount.create({
         data: {
           configId,
@@ -1221,6 +1246,9 @@ export class EngageRepository {
         },
       })
     );
+    // A tracked account is its own scan unit — same fast lane as a keyword.
+    if (dto.enabled ?? true) await markEngageScanWork(organizationId);
+    return created;
   }
 
   async listTrackedAccounts(organizationId: string, projectId: string | null = null) {
@@ -4393,7 +4421,7 @@ export class EngageRepository {
     dto: SetupEngageDto,
     projectId: string | null = null
   ) {
-    return this._tx.model.$transaction(async (tx) => {
+    const config = await this._tx.model.$transaction(async (tx) => {
       const config =
         projectId != null
           ? await tx.engageConfig.upsert({
@@ -4484,6 +4512,20 @@ export class EngageRepository {
 
       return config;
     });
+
+    // Fast-lane hint, raised AFTER the commit — never inside the transaction.
+    // A hint the extension acts on mid-transaction would have it claim against
+    // rows it cannot see yet, find nothing, and retract the hint, parking this
+    // setup's units on the 15-min backstop — the exact opposite of the point.
+    // (clearEngageScanWork's token check narrows that race but does not remove
+    // the reason to mark late.)
+    const setupCreatesUnit =
+      (dto.keywords ?? []).some((kw) => kw.enabled ?? true) ||
+      Boolean(dto.monitoredChannels?.length) ||
+      Boolean(dto.trackedAccounts?.length);
+    if (setupCreatesUnit) await markEngageScanWork(organizationId);
+
+    return config;
   }
 
   // ─── Admin diagnostics ───────────────────────────────────────────────────

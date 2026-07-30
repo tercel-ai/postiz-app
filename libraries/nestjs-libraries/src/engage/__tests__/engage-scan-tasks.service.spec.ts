@@ -5,6 +5,7 @@ import {
   buildRedditChannelKeywordQuery,
 } from '../engage-scan-tasks.service';
 import { DEFAULT_SCAN_PACING } from '../engage-scan-config.service';
+import { markEngageScanWork } from '../engage-scan-hint';
 
 // DEFAULT_SCAN_PACING deliberately keeps extension initial === incremental for
 // both platforms (account safety caps the extension at 1 page regardless of
@@ -376,6 +377,101 @@ describe('EngageScanTasksService.sync — claim (bootstrap)', () => {
 
     // rawQuery pools keywords from BOTH configs: from:alice (alpha OR beta).
     expect(res.nextTasks[0].rawQuery).toBe(buildTrackedKeywordQuery('alice', ['alpha', 'beta']));
+  });
+});
+
+// The 1-min fast-lane probe the extension polls (see engage-scan-hint.ts). It
+// only decides WHEN to ask; `sync` stays the authority on what is claimable.
+describe('EngageScanTasksService — fast-lane hint', () => {
+  // Unique per test: vitest.config.ts loads dotenv, so when .env defines
+  // REDIS_URL these hit a REAL, SHARED Redis and a fixed org would collide
+  // with any other spec file running in parallel.
+  let org: string;
+  let seq = 0;
+  beforeEach(() => {
+    vi.clearAllMocks();
+    org = `spec-tasks-${process.pid}-${++seq}`;
+  });
+
+  it('reports pending work once it has been marked', async () => {
+    const { svc } = build();
+    expect(await svc.hasPendingWork(org)).toBe(false);
+    await markEngageScanWork(org);
+    expect(await svc.hasPendingWork(org)).toBe(true);
+  });
+
+  it('drops the hint when a claim comes back empty', async () => {
+    await markEngageScanWork(org);
+    const { svc } = build({
+      orgContext: {
+        keywords: [{ keyword: 'AI', enabled: true }],
+        monitoredChannels: [],
+        trackedAccounts: [],
+      },
+      claimResults: [], // every unit cadence-blocked → nothing to hand out
+    });
+    const res = await svc.sync(org, { want: 1 });
+    expect(res.nextTasks).toHaveLength(0);
+    expect(await svc.hasPendingWork(org)).toBe(false);
+  });
+
+  // A partial batch means the chained loop is mid-drain and will be straight
+  // back for more — clearing here would drop it out of the fast lane early.
+  it('keeps the hint while tasks are still being handed out', async () => {
+    await markEngageScanWork(org);
+    const { svc } = build({
+      orgContext: {
+        keywords: [{ keyword: 'AI', enabled: true }],
+        monitoredChannels: [],
+        trackedAccounts: [],
+      },
+      claimResults: [snap()],
+    });
+    const res = await svc.sync(org, { want: 1 });
+    expect(res.nextTasks).toHaveLength(1);
+    expect(await svc.hasPendingWork(org)).toBe(true);
+  });
+
+  // The claim walked its units before this keyword committed, so its empty
+  // result says nothing about it. Retracting here would park exactly the
+  // keyword the fast lane exists for onto the 15-min backstop.
+  it('keeps a hint raised while the claim was running', async () => {
+    const { svc, lease } = build({
+      orgContext: {
+        keywords: [{ keyword: 'AI', enabled: true }],
+        monitoredChannels: [],
+        trackedAccounts: [],
+      },
+      claimResults: [],
+    });
+    lease.claim.mockImplementation(async () => {
+      await markEngageScanWork(org); // new work lands mid-claim
+      return null;
+    });
+    const res = await svc.sync(org, { want: 1 });
+    expect(res.nextTasks).toHaveLength(0);
+    expect(await svc.hasPendingWork(org)).toBe(true);
+  });
+
+  // selectedUnits asks about SPECIFIC units, so an empty result says nothing
+  // about the rest of the org — an org-wide retraction from the Options panel's
+  // unit-scoped query would park genuinely due work.
+  it('does not retract an org-wide hint on the unit-scoped debug path', async () => {
+    await markEngageScanWork(org);
+    const { svc } = build({
+      orgContext: {
+        keywords: [{ keyword: 'AI', enabled: true }],
+        monitoredChannels: [],
+        trackedAccounts: [],
+      },
+      claimResults: [],
+    });
+    const res = await svc.sync(org, {
+      want: 1,
+      selectedUnits: [{ platform: 'reddit', scanType: 'keyword', scanKey: 'gone' }],
+    });
+    expect(res.nextTasks).toHaveLength(0);
+    expect(await svc.hasPendingWork(org)).toBe(true);
   });
 });
 

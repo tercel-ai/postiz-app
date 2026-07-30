@@ -13,6 +13,11 @@ import {
   ScanPlatform,
 } from '@gitroom/nestjs-libraries/engage/engage-scan-config.service';
 import { EngageEntitlementService } from '@gitroom/nestjs-libraries/engage/engage-entitlement.service';
+import {
+  clearEngageScanWork,
+  hasEngageScanWork,
+  readEngageScanWork,
+} from '@gitroom/nestjs-libraries/engage/engage-scan-hint';
 import { RawPost } from '@gitroom/nestjs-libraries/engage/engage-scorer';
 import {
   EngageScanTask,
@@ -240,11 +245,41 @@ export class EngageScanTasksService {
       accepted = await this.ingestCompleted(body.completed);
     }
     const want = Math.min(Math.max(1, body.want ?? DEFAULT_WANT), MAX_WANT);
+    // Snapshot the fast-lane hint BEFORE claiming, so the retraction below can
+    // only drop the hint this claim actually accounted for — not one raised
+    // while it was walking units (see clearEngageScanWork).
+    const scoped = Array.isArray(body.selectedUnits);
+    const hintToken = scoped ? null : await readEngageScanWork(orgId);
+
     const nextTasks = await this.claimNext(orgId, want, {
       force: body.force,
       selectedUnits: body.selectedUnits,
     });
+    // Nothing left to hand out → drop the fast-lane hint so the extension's
+    // 1-min probe stops asking for this expensive endpoint until new work is
+    // written. Only on an EMPTY claim: a non-empty batch means the chained loop
+    // is mid-drain and will come straight back for more.
+    //
+    // Never on the `selectedUnits` debug path: that asks about specific units,
+    // so an empty result says nothing about the rest of the org — retracting an
+    // org-wide hint from a unit-scoped query would let the Options panel park
+    // genuinely due work on the 15-min backstop.
+    if (!scoped && !nextTasks.length) await clearEngageScanWork(orgId, hintToken);
     return { accepted, nextTasks };
+  }
+
+  /**
+   * Cheap "should the executor bother calling `sync`?" probe (one Redis GET).
+   *
+   * Backs the extension's 1-min fast-lane alarm, which exists so a keyword
+   * created by e.g. operation-plan generation gets its first scan in ~a minute
+   * instead of waiting out the 15-min backstop alarm. It is NOT a due
+   * calculation: `sync` remains the authority on what is actually claimable,
+   * and the backstop still calls it unconditionally — so a false negative here
+   * costs latency, never coverage.
+   */
+  async hasPendingWork(orgId: string): Promise<boolean> {
+    return hasEngageScanWork(orgId);
   }
 
   /**
