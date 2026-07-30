@@ -342,11 +342,16 @@ async function readDevtoIdentityViaTab(): Promise<DevtoIdentity | undefined> {
 
 export interface QuoraIdentity {
   /**
+   * The numeric `m-uid`, kept for diagnostics and as the cache key — NEVER as
+   * `id`. It is a different namespace from what an Integration is bound with,
+   * so account-guard must never see it (see `id` below).
+   */
+  uid?: string;
+  /**
    * The profile SLUG, same value as `handle` — deliberately not the numeric
    * `m-uid`. QuoraProvider binds an Integration with the slug (`id: username`),
    * and account-guard compares this against that internalId, so the uid would
-   * be an unmatchable value from a different namespace. The uid's only job is
-   * to key this cache.
+   * be an unmatchable value from a different namespace.
    */
   id?: string;
   /** Profile slug, e.g. `Tercel-Yi` in /profile/Tercel-Yi. */
@@ -367,19 +372,35 @@ export interface QuoraIdentity {
  * anchor carries the slug and the img's alt carries the display name, so one
  * matched element yields the whole identity.
  */
-function readQuoraIdentityInPage(): {
+async function readQuoraIdentityInPage(): Promise<{
   loggedIn: boolean;
+  uid?: string;
   id?: string;
   handle?: string;
   name?: string;
   avatarUrl?: string;
-} {
+}> {
   const uid = (document.cookie.match(/(?:^|;\s*)m-uid=([^;]+)/) || [])[1];
   if (!uid) return { loggedIn: false };
-  const img = document.querySelector(
-    `a[href*="/profile/"] img[src*="main-thumb-${uid}-"]`
-  );
-  if (!img) return { loggedIn: true, id: uid };
+  const selector = `a[href*="/profile/"] img[src*="main-thumb-${uid}-"]`;
+
+  // MUST poll — `complete` is too early here. The avatar URL IS in the server
+  // HTML, but only inside a script payload: parsing that HTML yields ZERO
+  // matching <img> elements (measured), because React renders the avatar during
+  // hydration. dev.to gets away with a single read because <body data-user> is
+  // a plain SSR attribute; Quora does not. Reading once at tab-complete is what
+  // made this return a bare uid instead of the account.
+  let img = document.querySelector(selector);
+  const deadline = Date.now() + 10_000;
+  while (!img && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 200));
+    img = document.querySelector(selector);
+  }
+  // Signed in for certain (the cookie says so) but unnamed. Deliberately NO
+  // `id` — see QuoraIdentity: the uid is not comparable to internalId, and
+  // returning it here would fail every publish's account check.
+  if (!img) return { loggedIn: true, uid };
+
   const href = img.closest('a')?.getAttribute('href') || '';
   const slug = (href.split('/profile/')[1] || '').split(/[/?#]/)[0];
   const alt = img.getAttribute('alt') || '';
@@ -387,6 +408,7 @@ function readQuoraIdentityInPage(): {
   // `id` is the slug, NOT the uid it was found by — see QuoraIdentity.
   return {
     loggedIn: true,
+    uid,
     id: slug || undefined,
     handle: slug || undefined,
     name: name || undefined,
@@ -409,13 +431,27 @@ async function readQuoraIdentityViaTab(): Promise<QuoraIdentity | undefined> {
     tabId = tab.id ?? undefined;
     if (tabId == null) return undefined;
     await waitForTabComplete(tabId, 15_000);
+    // The injected function is async (it waits for hydration) — executeScript
+    // awaits the returned promise and hands back the resolved value.
     const [res] = await chrome.scripting.executeScript({
       target: { tabId },
       func: readQuoraIdentityInPage,
     });
     const v = res?.result;
     if (!v?.loggedIn) return undefined;
-    return { id: v.id, handle: v.handle, name: v.name, avatarUrl: v.avatarUrl };
+    // No slug → report a MISS (undefined), not a named-but-empty identity.
+    // cachedValue gives a defined value the full 10-minute TTL, so caching the
+    // unnamed case would lock the row to "signed in" for ten minutes on the
+    // strength of one slow hydration; a miss retries after 30s. Nothing is lost
+    // — the uid is readable from the cookie whenever it is actually wanted.
+    if (!v.handle) return undefined;
+    return {
+      uid: v.uid,
+      id: v.id,
+      handle: v.handle,
+      name: v.name,
+      avatarUrl: v.avatarUrl,
+    };
   } catch (e) {
     console.warn('[aisee][sessions] quora identity tab read failed', e);
     return undefined;
