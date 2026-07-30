@@ -218,6 +218,7 @@ async function defaultPublishSegment(
       title: item.title || '',
       text,
       images: segment?.images,
+      ...(item.tags?.length ? { tags: item.tags } : {}),
       ...(item.targetAccount?.id
         ? { expectedUserId: item.targetAccount.id }
         : {}),

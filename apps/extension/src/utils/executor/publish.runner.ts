@@ -32,6 +32,8 @@ interface DuePublishPost {
   platform: string;
   title?: string;
   subreddit?: string;
+  /** Dev.to topic tags (labels only — the backend strips the tag ids). */
+  tags?: string[];
   segments: { text: string; images?: string[] }[];
   publishDate?: string | null;
   /** Account the post must go out as; absent when it has no bound account. */
@@ -68,6 +70,7 @@ function toPublishItem(p: DuePublishPost): PublishPostItem {
     })),
     ...(p.title ? { title: p.title } : {}),
     ...(p.subreddit ? { subreddit: p.subreddit } : {}),
+    ...(p.tags?.length ? { tags: p.tags } : {}),
     // Carried through so the queue can refuse to publish as the wrong account.
     // Dropping it here would silently disable that guard for the pull path —
     // which is exactly the unattended path that needs it most.

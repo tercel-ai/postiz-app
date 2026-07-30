@@ -151,4 +151,32 @@ describe('publish queue — new platforms validation', () => {
     expect(state?.status).toBe('published');
     expect(backfill).toHaveBeenCalledWith('noperm', '', undefined);
   });
+
+  it('backfills the dev.to article URL so the Post flips to PUBLISHED', async () => {
+    // Dev.to's poster recovers the permalink by watching the tab navigate from
+    // /new to /<username>/<slug> (verified against a real publish). Without the
+    // backfill the Post would sit in QUEUE and the publish-due loop would
+    // re-offer it every cycle — a duplicate article, not just a missing link.
+    const backfill = vi.fn(async () => {});
+    setBackfillForTest(backfill);
+    const url = 'https://dev.to/tercelyi/hello-from-the-extension-3pe5';
+    setSegmentPublisherForTest(async () => ({
+      ok: true,
+      permalink: url,
+      postId: '2451234',
+    }));
+
+    const ack = enqueuePublishBatch(
+      'r',
+      [item({ taskId: 'dv', platform: 'devto' as any, title: 'Hello' })],
+      undefined
+    );
+    expect(ack.accepted).toHaveLength(1);
+    await waitForPublishIdle();
+
+    const state = publishQueueSnapshot().find((s) => s.taskId === 'dv');
+    expect(state?.status).toBe('published');
+    expect(state?.permalink).toBe(url);
+    expect(backfill).toHaveBeenCalledWith('dv', url, '2451234');
+  });
 });

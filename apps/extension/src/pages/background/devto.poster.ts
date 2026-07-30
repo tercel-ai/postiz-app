@@ -57,6 +57,11 @@ export interface DevtoArticleInput {
    */
   images?: string[];
   /**
+   * Topic tags (names, no `#`), max 4 — dev.to's distribution runs through tag
+   * feeds, so these are load-bearing, not decoration.
+   */
+  tags?: string[];
+  /**
    * Numeric dev.to account id this post must publish as. Checked INSIDE the
    * tab, mirroring quora.poster's expectedSlug: dev.to's signed-in identity
    * lives in a `data-user` attribute Forem renders onto <body>, unreadable from
@@ -147,6 +152,22 @@ function devtoAttachCoverInPage(file: {
 }): Promise<'attached' | 'no_input' | 'unconfirmed'> {
   const sleepMs = (ms: number) => new Promise((r) => setTimeout(r, ms));
   return (async () => {
+    // Re-query EVERY time rather than holding the node. Forem REPLACES the
+    // cover input once its upload finishes (confirmed live: the original node
+    // reports document.contains() === false afterwards), so a held reference
+    // goes stale and `closest('div')` then walks a detached tree that can never
+    // show the post-upload controls — the poll would burn its whole budget and
+    // report a false 'unconfirmed' on every cover.
+    const coverArea = (): HTMLElement | null =>
+      document.getElementById('cover-image-input')?.closest('div') ?? null;
+    // Forem swaps "Add a cover image" for Change/Remove controls once the
+    // upload lands — the only reliable done-signal (the preview is a background
+    // image, not an <img>).
+    const uploaded = () =>
+      Array.from(coverArea()?.querySelectorAll('button') || []).some((b) =>
+        /^(remove|change)$/i.test((b.innerText || '').trim())
+      );
+
     const input = document.getElementById(
       'cover-image-input'
     ) as HTMLInputElement | null;
@@ -160,19 +181,91 @@ function devtoAttachCoverInPage(file: {
     input.files = dt.files;
     input.dispatchEvent(new Event('change', { bubbles: true }));
 
-    // Forem swaps the "Add a cover image" button for a preview + Change/Remove
-    // controls once its upload finishes. Poll for either signal.
+    // ~2s observed for a 1000x420 PNG; 20s leaves room for a slow upload
+    // without stalling the publish for long when something is wrong.
     const start = Date.now();
-    while (Date.now() - start < 30_000) {
-      const wrapper = input.closest('div');
-      const hasPreview = !!wrapper?.querySelector('img');
-      const hasRemove = Array.from(
-        wrapper?.querySelectorAll('button') || []
-      ).some((b) => /remove|change/i.test((b.innerText || '').trim()));
-      if (hasPreview || hasRemove) return 'attached';
-      await sleepMs(400);
+    while (Date.now() - start < 20_000) {
+      await sleepMs(300);
+      if (uploaded()) return 'attached';
     }
     return 'unconfirmed';
+  })();
+}
+
+/**
+ * Add topic tags through Forem's own autocomplete.
+ *
+ * Every step here was established against the live widget, because the obvious
+ * guesses are all wrong:
+ *   - Enter does NOT commit. Neither does a trailing comma. Both leave the raw
+ *     text sitting in the input and nothing selected.
+ *   - `option.click()` does NOT commit either. The handler runs on MOUSEDOWN
+ *     (an autocomplete has to act before the input blurs), so the pointer/mouse
+ *     down pair is what actually selects.
+ *   - A tag that does not exist on dev.to takes the SAME path: Forem offers the
+ *     typed text itself as a creatable option whose `id` is that text, so known
+ *     and novel tags need no separate branch.
+ *
+ * Committed tags land in `#combo-selected` as `div[role=group][aria-label=<tag>]`,
+ * which is also the read-back the caller verifies against.
+ */
+function devtoAddTagsInPage(tags: string[]): Promise<string[]> {
+  const sleepMs = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  return (async () => {
+    const input = document.getElementById(
+      'tag-input'
+    ) as HTMLInputElement | null;
+    if (!input) return [];
+
+    const setNative = (el: HTMLInputElement, text: string) => {
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype,
+        'value'
+      )?.set;
+      el.focus();
+      if (setter) setter.call(el, text);
+      else el.value = text;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+    };
+    const selected = () =>
+      Array.from(
+        document.querySelectorAll('#combo-selected div[role="group"]')
+      )
+        .map((d) => d.getAttribute('aria-label') || '')
+        .filter(Boolean);
+
+    for (const tag of tags) {
+      if (selected().length >= 4) break; // dev.to's own ceiling
+      setNative(input, '');
+      await sleepMs(150);
+      setNative(input, tag);
+
+      // Wait for the popover to offer this exact tag (existing or creatable).
+      let option: HTMLElement | null = null;
+      for (let i = 0; i < 20; i++) {
+        await sleepMs(200);
+        option = document.querySelector<HTMLElement>(
+          `#listbox1 li[role="option"][id="${CSS.escape(tag)}"]`
+        );
+        if (option) break;
+      }
+      if (!option) continue; // unofferable tag — skip it, never fail the post
+
+      for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup']) {
+        option.dispatchEvent(
+          new MouseEvent(type, {
+            bubbles: true,
+            cancelable: true,
+            composed: true,
+            button: 0,
+          })
+        );
+      }
+      await sleepMs(400);
+    }
+
+    setNative(input, '');
+    return selected();
   })();
 }
 
@@ -283,6 +376,19 @@ export async function postDevtoArticle(
         error:
           'Could not find the Dev.to editor fields (Forem markup may have changed). Publish manually.',
       };
+    }
+
+    // Tags go in AFTER the body: the autocomplete steals focus and Forem's
+    // editor is happier being filled top-down. A tag the widget refuses is
+    // logged and skipped — an under-tagged article still beats one stuck in
+    // QUEUE, the same call made for images.
+    const wantTags = (input.tags || []).slice(0, 4);
+    if (wantTags.length) {
+      const added = await runInPage(tabId, devtoAddTagsInPage, [wantTags]);
+      const missing = wantTags.filter((t) => !(added || []).includes(t));
+      if (missing.length) {
+        console.warn('[aisee][devto] tags not applied', missing);
+      }
     }
 
     if (!autoSubmit) {

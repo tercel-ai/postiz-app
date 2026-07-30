@@ -42,6 +42,30 @@ type ResolvedRedditTarget = {
   is_flair_required: false;
 };
 
+/**
+ * Dev.to tags, normalized to what the platform actually accepts: a single
+ * lowercase alphanumeric token each, deduped, capped at 4 (DevToSettingsDto's
+ * ArrayMaxSize — a fifth tag would fail validation and strand the post).
+ *
+ * `value` is the dev.to tag id, which plan generation has no way to know (the
+ * lookup needs a connected integration's api-key). It is a UI-only field —
+ * DevToProvider.post() sends `label` alone — but react-tag-autocomplete keys
+ * selected tags by it, so the values must at least be distinct. Deliberately
+ * NEGATIVE: real dev.to tag ids are positive, so a synthetic id can never be
+ * mistaken for, or collide with, a real one in the editor's tag picker.
+ */
+export function normalizeDevtoTags(
+  raw: unknown
+): { value: number; label: string }[] {
+  if (!Array.isArray(raw)) return [];
+  const labels = raw
+    .map((t) => String(t ?? '').toLowerCase().replace(/[^a-z0-9]/g, ''))
+    .filter(Boolean);
+  return [...new Set(labels)]
+    .slice(0, 4)
+    .map((label, index) => ({ value: -(index + 1), label }));
+}
+
 type GeneratedPlatformPost = {
   id: string;
   platform: string;
@@ -54,6 +78,8 @@ type GeneratedPlatformPost = {
   thread?: GeneratedThreadPart[] | null;
   // Resolved Reddit target (subreddit/title/type). See ResolvedRedditTarget.
   redditTarget?: ResolvedRedditTarget | null;
+  // Dev.to only: topic tags for its tag feeds. See normalizeDevtoTags.
+  tags?: string[] | null;
 };
 
 type GeneratedContentItem = {
@@ -289,6 +315,7 @@ export class OperationPlanRepository {
           platform: post.platform,
           node,
           redditTarget: post.redditTarget ?? null,
+          devtoTags: normalizeDevtoTags(post.tags),
         }));
       })
     );
@@ -354,7 +381,7 @@ export class OperationPlanRepository {
       // feature). Drop it here rather than persist an unpublishable Reddit draft
       // that would throw at submit on `undefined.subreddit`.
       .filter(({ platform, redditTarget }) => platform !== 'reddit' || !!redditTarget)
-      .map(({ item, platform, node, redditTarget }) => {
+      .map(({ item, platform, node, redditTarget, devtoTags }) => {
         // integrationId is intentionally left null at generation time: publishing
         // is by platform (the plugin reads settings.__type), and binding a
         // specific account is deferred to schedule time — same as
@@ -415,6 +442,13 @@ export class OperationPlanRepository {
                     },
                   ],
                 }
+              : {}),
+            // Dev.to's tag feeds are its distribution, so a generated article
+            // ships with tags. Shaped to DevToSettingsDto.tags — the provider's
+            // post() sends `label` only. Omitted entirely when the model
+            // returned none, so an untagged post still validates.
+            ...(platform === 'devto' && devtoTags.length
+              ? { tags: devtoTags }
               : {}),
           }),
           image: JSON.stringify(node.media ?? []),

@@ -180,6 +180,14 @@ export interface PublishPostItem {
   /** Reddit only (required): subreddit to submit to, with or without the r/ prefix. */
   subreddit?: string;
   /**
+   * Dev.to only: topic tag names (no `#`), max 4. Dev.to distributes through
+   * tag feeds, so these are not decoration — dropping them silently, the way a
+   * text-only platform drops images, would quietly gut the post's reach. The
+   * backend flattens them out of `settings.tags` (whose entries are
+   * `{value,label}`) into plain labels, which is all dev.to's own API takes.
+   */
+  tags?: string[];
+  /**
    * Post title / headline. Required for reddit (submission), devto + medium
    * (article title) and hackernews (story title); ignored by x, linkedin and
    * quora which have no title field.

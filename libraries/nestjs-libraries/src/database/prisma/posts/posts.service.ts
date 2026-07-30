@@ -1662,6 +1662,17 @@ export class PostsService {
         platform: p.integration?.providerIdentifier || settings.__type,
         title: p.title || settings.title || undefined,
         subreddit: settings.subreddit || undefined,
+        // Dev.to tags. settings.tags holds DevToSettingsDto's {value,label}
+        // pairs, where `value` is a dev.to tag id the extension has no use for —
+        // dev.to's own API takes tag NAMES — so only the labels cross the
+        // boundary. Absent for every other platform.
+        ...(Array.isArray(settings.tags) && settings.tags.length
+          ? {
+              tags: settings.tags
+                .map((t: any) => (typeof t === 'string' ? t : t?.label))
+                .filter((label: unknown): label is string => !!label),
+            }
+          : {}),
         segments: [
           {
             text: stripHtmlValidation('normal', p.content || '', true),

@@ -3,6 +3,7 @@ import { NotFoundException } from '@nestjs/common';
 import {
   OperationPlanRepository,
   deriveOperationPlanPostId,
+  normalizeDevtoTags,
 } from '../operation-plan.repository';
 
 function createRepo(overrides: {
@@ -787,5 +788,146 @@ describe('OperationPlanRepository', () => {
     );
 
     expect(postUpdateMany).not.toHaveBeenCalled();
+  });
+});
+
+describe('normalizeDevtoTags', () => {
+  // Dev.to distributes through tag feeds, so a generated article ships with
+  // tags — but only in the exact shape DevToSettingsDto accepts, or the post
+  // fails validation at publish and never goes out at all.
+  it('lowercases and strips everything dev.to tags cannot contain', () => {
+    expect(normalizeDevtoTags(['WebDev', 'build-in-public', '#AI'])).toEqual([
+      { value: -1, label: 'webdev' },
+      { value: -2, label: 'buildinpublic' },
+      { value: -3, label: 'ai' },
+    ]);
+  });
+
+  it('caps at 4 — a fifth tag would fail ArrayMaxSize and strand the post', () => {
+    const tags = normalizeDevtoTags(['a', 'b', 'c', 'd', 'e', 'f']);
+    expect(tags).toHaveLength(4);
+    expect(tags.map((t) => t.label)).toEqual(['a', 'b', 'c', 'd']);
+  });
+
+  it('dedupes tags that only differed by case or punctuation', () => {
+    expect(
+      normalizeDevtoTags(['AI', 'a.i.', 'ai']).map((t) => t.label)
+    ).toEqual(['ai']);
+  });
+
+  it('assigns distinct NEGATIVE ids so they cannot collide with real tag ids', () => {
+    // `value` is a dev.to tag id the generator cannot know. It is UI-only (the
+    // provider sends `label` alone), but react-tag-autocomplete keys selected
+    // tags by it, so they must be distinct — and negative, since every real
+    // dev.to tag id is positive.
+    const values = normalizeDevtoTags(['x', 'y', 'z']).map((t) => t.value);
+    expect(values).toEqual([-1, -2, -3]);
+    expect(new Set(values).size).toBe(3);
+    expect(values.every((v) => v < 0)).toBe(true);
+  });
+
+  it('drops entries that normalize to nothing, and tolerates junk input', () => {
+    expect(normalizeDevtoTags(['---', '', '  ', 'ok'])).toEqual([
+      { value: -1, label: 'ok' },
+    ]);
+    expect(normalizeDevtoTags(null)).toEqual([]);
+    expect(normalizeDevtoTags(undefined)).toEqual([]);
+    expect(normalizeDevtoTags('webdev')).toEqual([]);
+  });
+});
+
+describe('materializePlanPosts — dev.to tags', () => {
+  const plan = {
+    id: 'plan-1',
+    organizationId: 'org-1',
+    projectId: 'proj-1',
+    campaignId: 'campaign-1',
+  } as any;
+
+  const devtoPayload = (tags: unknown) => ({
+    contentItems: [
+      {
+        contentId: 'D01',
+        utcDate: '2030-01-01T00:00:00.000Z',
+        themeKey: 'positioning',
+        themeTitle: 'Dev.to theme',
+        platforms: [
+          {
+            id: '55555555-5555-4555-8555-555555555555',
+            platform: 'devto',
+            content: 'Article body',
+            media: [],
+            tags,
+          },
+        ],
+      },
+    ],
+  });
+
+  it('writes generated tags into settings in DevToSettingsDto shape', async () => {
+    const postCreateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const integrationFindMany = vi
+      .fn()
+      .mockResolvedValue([{ id: 'integration-devto', providerIdentifier: 'devto' }]);
+    const repo = createRepo({ postCreateMany, integrationFindMany });
+
+    await repo.materializePlanPosts(plan, devtoPayload(['WebDev', 'ai']));
+
+    const settings = JSON.parse(postCreateMany.mock.calls[0][0].data[0].settings);
+    expect(settings.__type).toBe('devto');
+    expect(settings.tags).toEqual([
+      { value: -1, label: 'webdev' },
+      { value: -2, label: 'ai' },
+    ]);
+  });
+
+  it('omits `tags` entirely when the model returned none', async () => {
+    // An empty array would still validate, but writing the key only when it has
+    // content keeps an untagged post indistinguishable from a pre-tags one.
+    const postCreateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const integrationFindMany = vi
+      .fn()
+      .mockResolvedValue([{ id: 'integration-devto', providerIdentifier: 'devto' }]);
+    const repo = createRepo({ postCreateMany, integrationFindMany });
+
+    await repo.materializePlanPosts(plan, devtoPayload(null));
+
+    const settings = JSON.parse(postCreateMany.mock.calls[0][0].data[0].settings);
+    expect(settings.__type).toBe('devto');
+    expect('tags' in settings).toBe(false);
+  });
+
+  it('never leaks tags onto a non-dev.to platform', async () => {
+    // The schema tells the model to null `tags` off dev.to, but a stray value
+    // must not reach e.g. an X post's settings.
+    const postCreateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const integrationFindMany = vi
+      .fn()
+      .mockResolvedValue([{ id: 'integration-x', providerIdentifier: 'x' }]);
+    const repo = createRepo({ postCreateMany, integrationFindMany });
+
+    await repo.materializePlanPosts(plan, {
+      contentItems: [
+        {
+          contentId: 'D02',
+          utcDate: '2030-01-02T00:00:00.000Z',
+          themeKey: 'positioning',
+          themeTitle: 'X theme',
+          platforms: [
+            {
+              id: '66666666-6666-4666-8666-666666666666',
+              platform: 'x',
+              content: 'Tweet text',
+              media: [],
+              tags: ['webdev'],
+            },
+          ],
+        },
+      ],
+    });
+
+    const settings = JSON.parse(postCreateMany.mock.calls[0][0].data[0].settings);
+    expect(settings.__type).toBe('x');
+    expect('tags' in settings).toBe(false);
   });
 });

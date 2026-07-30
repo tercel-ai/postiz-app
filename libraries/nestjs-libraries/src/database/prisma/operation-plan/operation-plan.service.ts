@@ -213,6 +213,14 @@ const GeneratedPlanSchema = z.object({
       // null for every non-Reddit platform (per the Structured-Outputs
       // "required + nullable, never optional" rule noted on `media`).
       subreddit: z.string().nullable(),
+      // Dev.to ONLY: up to 4 topic tags. Unlike Reddit's subreddit these are not
+      // required to publish, but dev.to's distribution runs almost entirely
+      // through tag feeds — an untagged article reaches little beyond the
+      // author's own followers, so a tagless dev.to post is a wasted one. The
+      // backend normalizes and caps these (normalizeDevtoTags); null for every
+      // non-dev.to platform, per the Structured-Outputs "required + nullable,
+      // never optional" rule noted on `media`.
+      tags: z.array(z.string()).nullable(),
       // OpenAI Structured Outputs constraints (both learned the hard way — a
       // violation is a 400 from the provider, not a local error):
       //  1. every field must be REQUIRED; optionality is `.nullable()`, never
@@ -634,6 +642,7 @@ export class OperationPlanService implements OnApplicationBootstrap {
         '- Hashtags: a hashtag ENDS at the first space, so a multi-word tag silently breaks — "#MCP protocol" renders as the tag "#MCP" followed by the loose word "protocol". Never hashtag a multi-word keyword: either write it as plain prose (preferred — keywords belong in the sentence, not bolted on as tags) or close it up into one word ("#MCPprotocol"). Use at most 1-2 hashtags, and only single-word ones.',
         '- Prefer content AI systems can cite: concrete data points and answer-style framing. For owned/blog channels, reference the project\'s own canonical URL. "Build-in-public" (sharing real, specific progress/metrics) tends to be the most citable. Keep copy concise and publish-ready.',
         '- REDDIT TARGETING: for every `reddit` platform entry, set `subreddit` to the single most relevant EXISTING, ACTIVE, PUBLIC subreddit for this content (bare name, no "r/" prefix, e.g. "webdev"). Pick a real community you are confident exists and accepts text (self) posts on this topic — the backend verifies it against Reddit and DROPS the post if the subreddit is missing, private, link-only, or inactive, so a wrong guess wastes the post. For EVERY non-reddit platform entry, set `subreddit` to null.',
+        '- DEV.TO TAGGING: for every `devto` platform entry, set `tags` to 1-4 topic tags. Dev.to distributes almost entirely through tag feeds, so an untagged article is close to invisible — treat this as required even though the API does not enforce it. Each tag must be a SINGLE lowercase alphanumeric token with no spaces, hyphens or "#" ("webdev", "javascript", "ai", "buildinpublic"); a multi-word topic must be closed up or dropped. Prefer large, established dev.to tags over invented niche ones — a tag nobody follows is the same as no tag. For EVERY non-devto platform entry, set `tags` to null.',
         '',
         'THREADS (multi-part posts)',
         ...(threadsEnabled

@@ -698,6 +698,8 @@ describe('OperationPlanService.create', () => {
               thread: null,
               // Reddit-only target; null on every non-reddit platform entry.
               subreddit: null,
+              // Dev.to-only topic tags; null on every non-devto platform entry.
+              tags: null,
             },
           ],
         },
