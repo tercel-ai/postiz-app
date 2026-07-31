@@ -35,6 +35,8 @@ import { PostComment } from '@gitroom/frontend/components/new-launch/providers/h
 import WordpressProvider from '@gitroom/frontend/components/new-launch/providers/wordpress/wordpress.provider';
 import ListmonkProvider from '@gitroom/frontend/components/new-launch/providers/listmonk/listmonk.provider';
 import GmbProvider from '@gitroom/frontend/components/new-launch/providers/gmb/gmb.provider';
+import HackernewsProvider from '@gitroom/frontend/components/new-launch/providers/hackernews/hackernews.provider';
+import QuoraProvider from '@gitroom/frontend/components/new-launch/providers/quora/quora.provider';
 
 export const Providers = [
   {
@@ -152,6 +154,14 @@ export const Providers = [
   {
     identifier: 'gmb',
     component: GmbProvider,
+  },
+  {
+    identifier: 'hackernews',
+    component: HackernewsProvider,
+  },
+  {
+    identifier: 'quora',
+    component: QuoraProvider,
   },
 ];
 export const ShowAllProviders = forwardRef((props, ref) => {

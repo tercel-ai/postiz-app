@@ -20,6 +20,7 @@ import { ListmonkDto } from '@gitroom/nestjs-libraries/dtos/posts/providers-sett
 import { GmbSettingsDto } from '@gitroom/nestjs-libraries/dtos/posts/providers-settings/gmb.settings.dto';
 import { FarcasterDto } from '@gitroom/nestjs-libraries/dtos/posts/providers-settings/farcaster.dto';
 import { FacebookDto } from '@gitroom/nestjs-libraries/dtos/posts/providers-settings/facebook.dto';
+import { HackernewsSettingsDto } from '@gitroom/nestjs-libraries/dtos/posts/providers-settings/hackernews.settings.dto';
 
 export type ProviderExtension<T extends string, M> = { __type: T } & M;
 export type AllProvidersSettings =
@@ -40,6 +41,7 @@ export type AllProvidersSettings =
   | ProviderExtension<'instagram-standalone', InstagramDto>
   | ProviderExtension<'medium', MediumSettingsDto>
   | ProviderExtension<'devto', DevToSettingsDto>
+  | ProviderExtension<'hackernews', HackernewsSettingsDto>
   | ProviderExtension<'hashnode', HashnodeSettingsDto>
   | ProviderExtension<'wordpress', WordpressDto>
   | ProviderExtension<'listmonk', ListmonkDto>
@@ -48,10 +50,14 @@ export type AllProvidersSettings =
   | ProviderExtension<'wrapcast', FarcasterDto>
   | ProviderExtension<'threads', None>
   | ProviderExtension<'mastodon', None>
+  | ProviderExtension<'mastodon-custom', None>
   | ProviderExtension<'bluesky', None>
   | ProviderExtension<'telegram', None>
   | ProviderExtension<'nostr', None>
-  | ProviderExtension<'vk', None>;
+  | ProviderExtension<'vk', None>
+  // Quora feed posts are a plain text body with no extra settings, so it shares
+  // the empty-settings shape with threads/mastodon/etc.
+  | ProviderExtension<'quora', None>;
 
 type None = NonNullable<unknown>;
 
@@ -74,6 +80,7 @@ export const allProviders = (setEmpty?: any) => {
     { value: InstagramDto, name: 'instagram-standalone' },
     { value: MediumSettingsDto, name: 'medium' },
     { value: DevToSettingsDto, name: 'devto' },
+    { value: HackernewsSettingsDto, name: 'hackernews' },
     { value: WordpressDto, name: 'wordpress' },
     { value: HashnodeSettingsDto, name: 'hashnode' },
     { value: ListmonkDto, name: 'listmonk' },
@@ -82,10 +89,12 @@ export const allProviders = (setEmpty?: any) => {
     { value: FacebookDto, name: 'facebook' },
     { value: setEmpty, name: 'threads' },
     { value: setEmpty, name: 'mastodon' },
+    { value: setEmpty, name: 'mastodon-custom' },
     { value: setEmpty, name: 'bluesky' },
     { value: setEmpty, name: 'telegram' },
     { value: setEmpty, name: 'nostr' },
     { value: setEmpty, name: 'vk' },
+    { value: setEmpty, name: 'quora' },
   ].filter((f) => f.value);
 };
 
