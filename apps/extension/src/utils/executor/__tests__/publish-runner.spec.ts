@@ -95,30 +95,32 @@ describe('runPublishLoop', () => {
 
   it('drops images for platforms whose poster cannot upload them', async () => {
     // The backend resolves media for EVERY extension-routed post, but only
-    // Reddit, X, and LinkedIn posters can upload one. Forwarding the image to
-    // a text-only platform (e.g. Quora) gets the item rejected at enqueue, and
-    // a rejected item never leaves Post.state=QUEUE — so the post would be
-    // re-offered and re-rejected forever instead of publishing its text.
+    // Reddit, X, LinkedIn, Dev.to and Quora posters can upload one. Forwarding
+    // the image to a genuinely text-only platform (e.g. Medium) gets the item
+    // rejected at enqueue, and a rejected item never leaves Post.state=QUEUE —
+    // so the post would be re-offered and re-rejected forever instead of
+    // publishing its text.
     backendCall.mockResolvedValue({
       ok: true,
       status: 200,
       data: {
         due: [
           {
-            id: 'q-1',
-            platform: 'quora',
+            id: 'm-1',
+            platform: 'medium',
+            title: 'T',
             segments: [{ text: 'body', images: ['https://cdn.example.com/a.png'] }],
           },
         ],
       },
     });
-    enqueuePublishBatch.mockReturnValue({ accepted: [{ taskId: 'q-1' }], rejected: [] });
+    enqueuePublishBatch.mockReturnValue({ accepted: [{ taskId: 'm-1' }], rejected: [] });
 
     await runPublishLoop();
 
     const [, items] = enqueuePublishBatch.mock.calls[0] as unknown as [string, any[]];
     expect(items).toEqual([
-      { taskId: 'q-1', platform: 'quora', segments: [{ text: 'body' }] },
+      { taskId: 'm-1', platform: 'medium', title: 'T', segments: [{ text: 'body' }] },
     ]);
   });
 

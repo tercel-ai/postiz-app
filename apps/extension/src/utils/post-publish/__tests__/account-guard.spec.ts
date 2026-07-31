@@ -46,6 +46,16 @@ describe('normalizeAccountId', () => {
   it('leaves a numeric X id untouched', () => {
     expect(normalizeAccountId('1234567890')).toBe('1234567890');
   });
+
+  it('makes a legacy /profile/ prefixed quora id compare equal to the bare slug', () => {
+    // A quora Integration created before the provider started stripping the
+    // prefix may still store `/profile/Jane-Doe`, while the live session
+    // (readQuoraIdentityInPage) only ever reports the bare slug. Left
+    // unstripped, this mismatch blocked every publish on such a row.
+    expect(normalizeAccountId('/profile/Tercel-Yi')).toBe(
+      normalizeAccountId('Tercel-Yi')
+    );
+  });
 });
 
 describe('normalizeHandle', () => {
@@ -180,6 +190,24 @@ describe('checkPublishAccount', () => {
 
     expect(result.ok).toBe(false);
     expect(result.error).toContain('@someone-else');
+  });
+
+  it('allows a quora publish when the Integration still stores the legacy /profile/ path', async () => {
+    probe.mockResolvedValue({
+      supported: true,
+      loggedIn: true,
+      id: 'Tercel-Yi',
+      handle: 'Tercel-Yi',
+    });
+
+    const result = await checkPublishAccount(
+      item({
+        platform: 'quora',
+        targetAccount: { id: '/profile/Tercel-Yi' },
+      })
+    );
+
+    expect(result.ok).toBe(true);
   });
 
   it('allows when neither an id nor a handle can be compared', async () => {

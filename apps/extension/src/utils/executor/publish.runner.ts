@@ -54,12 +54,13 @@ let publishInFlight = false;
 /** Map a backend due-post into the publish queue's item shape. */
 function toPublishItem(p: DuePublishPost): PublishPostItem {
   const platform = p.platform as PublishPlatform;
-  // The backend resolves media for every extension-routed post, but only the
-  // Reddit and X posters can upload one. Forwarding an image to a text-only
-  // platform gets the whole item rejected at enqueue, and since a rejected item
-  // never leaves Post.state=QUEUE the backend re-leases and re-offers it every
-  // cycle — the post would never publish at all. Dropping the image here keeps
-  // the text going out, which is what happened before media was selected.
+  // The backend resolves media for every extension-routed post, but only
+  // IMAGE_CAPABLE_PLATFORMS' posters can upload one. Forwarding an image to a
+  // text-only platform gets the whole item rejected at enqueue, and since a
+  // rejected item never leaves Post.state=QUEUE the backend re-leases and
+  // re-offers it every cycle — the post would never publish at all. Dropping
+  // the image here keeps the text going out, which is what happened before
+  // media was selected.
   const keepImages = IMAGE_CAPABLE_PLATFORMS.includes(platform);
   return {
     taskId: p.id,

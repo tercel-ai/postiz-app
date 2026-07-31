@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // The tab layer is the only thing standing between this poster and a live
 // browser, so it is stubbed wholesale and the injected functions are dispatched
@@ -44,6 +44,16 @@ beforeEach(() => {
   openTab.mockResolvedValue({ tabId: 1 });
   // A permalink on the first poll ends the post-submit wait immediately.
   getTabUrl.mockResolvedValue('https://www.quora.com/Some-Question-Title');
+  // The MAIN-world create interceptor install + capture-read go through
+  // chrome.scripting.executeScript directly (not the runInPage mock above).
+  // No capture here — falls through to the getTabUrl poll stubbed above.
+  vi.stubGlobal('chrome', {
+    scripting: { executeScript: vi.fn().mockResolvedValue([{ result: null }]) },
+  });
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
 });
 
 describe('postQuoraPost — wrong-account guard', () => {

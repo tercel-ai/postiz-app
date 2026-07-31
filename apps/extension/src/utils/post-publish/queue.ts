@@ -244,6 +244,7 @@ async function defaultPublishSegment(
     // WAF), and the poster already opens one.
     const r = await postQuoraPost({
       text,
+      images: segment?.images,
       ...(item.targetAccount?.id ? { expectedSlug: item.targetAccount.id } : {}),
     });
     if (!r.ok) return { ok: false, error: r.error };

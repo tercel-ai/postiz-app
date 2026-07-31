@@ -36,7 +36,7 @@
 //       medium     — medium.com tab automation (write API is discontinued).
 //                    Single story, `title` required, text-only.
 //       quora      — quora.com tab automation (no API). Single space/feed post,
-//                    text-only, no title.
+//                    no title. Images go through the composer's own file input.
 //       devto      — dev.to/new tab automation. `title` required; body is a
 //                    plain markdown <textarea>, so body images are embedded as
 //                    markdown URLs and only the cover is uploaded.
@@ -125,6 +125,10 @@ export const IMAGE_CAPABLE_PLATFORMS: readonly PublishPlatform[] = [
   // while the cover goes through the editor's file input, because the v2
   // editor accepts a cover only as an upload.
   'devto',
+  // quora attaches images through the Create Post composer's own photo
+  // control (see quora.poster's quoraComposeInPage), the same file-input
+  // pattern as LinkedIn's media editor.
+  'quora',
 ];
 
 export interface PublishThreadSegment {

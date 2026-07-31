@@ -32,6 +32,13 @@ import {
  * historical row may still carry the @ — and a false MISMATCH there would block
  * a legitimate post, so strip on both sides. Real numeric ids never carry these
  * prefixes, so this cannot collapse two distinct accounts.
+ *
+ * The `/profile/` stripping mirrors quora.poster's own normalizeSlug: a
+ * pre-existing quora Integration may still store the full `/profile/Jane-Doe`
+ * path rather than the bare slug, while the live session (readQuoraIdentityInPage)
+ * only ever reports the bare slug. Left unstripped, that legacy row would fail
+ * this comparison against every correctly-signed-in session and block every
+ * publish as a false wrong-account mismatch.
  */
 export function normalizeAccountId(raw: string | undefined | null): string {
   return (raw || '')
@@ -39,7 +46,8 @@ export function normalizeAccountId(raw: string | undefined | null): string {
     .toLowerCase()
     .replace(/^t2_/, '')
     .replace(/^@/, '')
-    .replace(/^\/?u\//, '');
+    .replace(/^\/?u\//, '')
+    .replace(/^\/?profile\//, '');
 }
 
 /** Strip the decorations each platform puts in front of a username. */

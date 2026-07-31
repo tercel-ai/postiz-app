@@ -265,9 +265,10 @@ describe('default publisher platform routing', () => {
   });
 
   it('publishes a LinkedIn image post, forwarding the image to the poster', async () => {
-    // Unlike a genuinely text-only poster (Quora, Medium, ...), LinkedIn's
+    // Unlike a genuinely text-only poster (Medium, Hacker News, ...), LinkedIn's
     // poster can upload media (see linkedin.poster's attachLinkedinImagesInPage)
-    // — so the image must reach it, not get silently dropped.
+    // — so the image must reach it, not get silently dropped. Quora's own
+    // image-forwarding is covered separately in queue-quora-images.spec.ts.
     liCompose.mockResolvedValue({
       ok: true,
       permalink: 'https://www.linkedin.com/feed/update/urn:li:activity:9/',
