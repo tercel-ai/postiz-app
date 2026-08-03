@@ -287,6 +287,57 @@ describe('OperationPlanRepository', () => {
     });
   });
 
+  it('materializePlanPosts strips a duplicated leading title from title-platform content but not from x', async () => {
+    const postFindMany = vi.fn().mockResolvedValue([]);
+    const postCreateMany = vi.fn().mockResolvedValue({ count: 2 });
+    const integrationFindMany = vi.fn().mockResolvedValue([]);
+    const repo = createRepo({ postFindMany, postCreateMany, integrationFindMany });
+
+    await repo.materializePlanPosts(
+      {
+        id: 'plan-1',
+        organizationId: 'org-1',
+        projectId: 'proj-1',
+        campaignId: 'campaign-1',
+      } as any,
+      {
+        contentItems: [
+          {
+            contentId: 'D01',
+            utcDate: '2030-01-01T00:00:00.000Z',
+            themeKey: 'positioning',
+            themeTitle: 'AI search positioning',
+            platforms: [
+              {
+                // hackernews submits Post.title separately, so the repeated
+                // headline must come off the body.
+                id: '11111111-1111-4111-8111-111111111111',
+                platform: 'hackernews',
+                content: '## AI search positioning\n\nBody paragraph for HN.',
+                media: [],
+              },
+              {
+                // x has no separate title field — an identical first line is
+                // real copy and stays.
+                id: '22222222-2222-4222-8222-222222222222',
+                platform: 'x',
+                content: 'AI search positioning\n\nTweet body.',
+                media: [],
+              },
+            ],
+          },
+        ],
+      }
+    );
+
+    const created = postCreateMany.mock.calls[0][0].data;
+    const hn = created.find((p: any) => p.providerIdentifier === 'hackernews');
+    const x = created.find((p: any) => p.providerIdentifier === 'x');
+    expect(hn.title).toBe('AI search positioning');
+    expect(hn.content).toBe('Body paragraph for HN.');
+    expect(x.content).toBe('AI search positioning\n\nTweet body.');
+  });
+
   it('materializePlanPosts expands a thread into a chained anchor + children (parentPostId links to the PREVIOUS part)', async () => {
     const postFindMany = vi.fn().mockResolvedValue([]);
     const postCreateMany = vi.fn().mockResolvedValue({ count: 3 });

@@ -2,7 +2,11 @@ import { ConflictException, Injectable, NotFoundException } from '@nestjs/common
 import { v5 as uuidv5 } from 'uuid';
 import { PrismaRepository } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
 import { OperationPlan, Prisma } from '@prisma/client';
-import { postTitleFromTheme } from './theme-title';
+import {
+  postTitleFromTheme,
+  stripDuplicatedTitleFromContent,
+} from './theme-title';
+import { TITLE_REQUIRED_PLATFORMS } from '@gitroom/helpers/extension/post-publish';
 
 // Fixed namespace for deriving a materialized Post.id from a (plan, payload id)
 // pair. The generation payload's ids are minted by the LLM, which only guarantees
@@ -395,6 +399,18 @@ export class OperationPlanRepository {
         // integration happened to exist (or be oldest) when the plan was
         // generated, letting the user pick the account when they schedule.
         const resolvedPlatform = resolvePlatform(platform);
+        const title = postTitleFromTheme(item.themeTitle);
+        // On title-submitting platforms (reddit/hackernews/medium/devto) the
+        // title is published from Post.title, so a headline the model repeated
+        // as the content's first line would show up twice on the platform.
+        // Strip the duplicate from the ANCHOR only (thread parts never carry
+        // the title); other platforms keep content verbatim — their first line
+        // is real copy, not a separate field.
+        const content =
+          node.parentPostId === null &&
+          (TITLE_REQUIRED_PLATFORMS as readonly string[]).includes(platform)
+            ? stripDuplicatedTitleFromContent(title, node.content)
+            : node.content;
         return {
           id: node.id,
           // parentPostId chains thread parts to the anchor; null on the anchor.
@@ -407,7 +423,7 @@ export class OperationPlanRepository {
           // the only record of the post's platform until schedule time binds an
           // integration — mirrors settings.__type below.
           providerIdentifier: resolvedPlatform,
-          content: node.content,
+          content,
           delay: 0,
           // group must be per-platform: a single contentItem fans out into
           // multiple platforms (item.platforms), and getPostsByGroup filters by
@@ -421,7 +437,7 @@ export class OperationPlanRepository {
           // Boundary guard: strip any week label the model leaked into themeTitle
           // so the published post title (Reddit/Hashnode/blog channels submit this
           // verbatim) stays clean even though the prompt asks for a clean title.
-          title: postTitleFromTheme(item.themeTitle),
+          title,
           description: null,
           settings: JSON.stringify({
             // __type mirrors the RESOLVED platform (matches the rest of the

@@ -89,12 +89,15 @@ describe('OperationPlanService.getOverview', () => {
 
     const result = await service.getOverview('org-1', 'plan-1');
 
-    // Each day is an array with one entry per platform policy.
+    // Each day is an array with one entry per platform policy. The platform-level
+    // actualReplies counts distinct replies (same unit as targetRepliesPerDay);
+    // the keyword counts are per (reply × matched keyword) and may exceed it.
     expect(result.engageStats).toEqual({
       '2026-07-20': [
         {
           platform: 'x',
           themeTitle: 'React positioning replies',
+          actualReplies: 2,
           keywords: [
             { keywordId: 'kw-react', keyword: 'react', actualReplies: 2, targetReplies: 5 },
           ],
@@ -104,6 +107,7 @@ describe('OperationPlanService.getOverview', () => {
         {
           platform: 'x',
           themeTitle: 'React positioning replies',
+          actualReplies: 1,
           keywords: [
             { keywordId: 'kw-react', keyword: 'react', actualReplies: 1, targetReplies: 5 },
           ],
@@ -147,11 +151,13 @@ describe('OperationPlanService.getOverview', () => {
       {
         platform: 'x',
         themeTitle: 'React replies on X',
+        actualReplies: 0,
         keywords: [{ keywordId: 'kw-react', keyword: 'react', actualReplies: 0, targetReplies: 3 }],
       },
       {
         platform: 'reddit',
         themeTitle: 'React replies on Reddit',
+        actualReplies: 1,
         keywords: [{ keywordId: 'kw-react', keyword: 'react', actualReplies: 1, targetReplies: 2 }],
       },
     ]);
@@ -193,10 +199,14 @@ describe('OperationPlanService.getOverview', () => {
     ]);
 
     const result = await service.getOverview('org-1', 'plan-1');
+    // The untracked keyword contributes nothing to the keyword grid, but the
+    // reply itself still counts toward the platform-level total — that total is
+    // keyword-independent, mirroring the send-time daily-target gate.
     expect(result.engageStats['2026-07-20']).toEqual([
       {
         platform: 'x',
         themeTitle: undefined,
+        actualReplies: 1,
         keywords: [
           { keywordId: 'kw-react', keyword: 'react', actualReplies: 0, targetReplies: 5 },
         ],

@@ -64,6 +64,11 @@ export type ReplyPacingByDay = Record<string, Array<{
   // The aggregate reply target for THIS platform on THIS day — the policy's
   // `dailyTargets` override when one exists, else `targetRepliesPerDay`.
   targetRepliesPerDay?: number;
+  // Distinct replies sent on THIS platform on THIS day — same unit ("one reply
+  // = one") and scope as targetRepliesPerDay / the send-time daily-target gate.
+  // NOT the sum of keywords[].actualReplies: those count per (reply × matched
+  // keyword), so one reply matching three keywords adds 3 there but 1 here.
+  actualReplies: number;
   keywords: Array<{
     keywordId: string;
     keyword: string;
@@ -637,6 +642,7 @@ export class OperationPlanService implements OnApplicationBootstrap {
         '',
         'CONTENT RULES',
         '- Each content item: a stable machine themeKey plus a human-readable themeTitle. Each platform entry: a UUID id (used as the materialized Post.id), the platform, and concise publish-ready content. themeTitle materializes VERBATIM into Post.title (so keep it clean and publish-ready — no week/phase prefix); themeKey is kept as Post.settings.themeKey.',
+        '- TITLE vs BODY: on reddit, hackernews, medium and devto the themeTitle is submitted SEPARATELY as the post/story title, so `content` is the BODY ONLY. NEVER open `content` with the title (or a heading/bold restatement of it) — the platform would display the title twice. Start directly with the body text.',
         '- Respect the character budgets declared at the top (and repeated below). This is a hard gate, not a style note.',
         '- Write PLAIN TEXT for X: no Markdown. `**bold**`, headings and backticks are NOT rendered — they appear literally as asterisks. Plain prose, line breaks and simple bullets ("•") only.',
         '- Hashtags: a hashtag ENDS at the first space, so a multi-word tag silently breaks — "#MCP protocol" renders as the tag "#MCP" followed by the loose word "protocol". Never hashtag a multi-word keyword: either write it as plain prose (preferred — keywords belong in the sentence, not bolted on as tags) or close it up into one word ("#MCPprotocol"). Use at most 1-2 hashtags, and only single-word ones.',
@@ -1777,10 +1783,25 @@ export class OperationPlanService implements OnApplicationBootstrap {
         ),
       ])
     );
+    // Platform-level distinct reply count per (day, platform) — the same unit as
+    // targetRepliesPerDay ("one reply = one") and the same scope as the send-time
+    // daily-target gate (countProjectSentRepliesToday: every reply on the
+    // platform counts, keyword-independent). The per-keyword counts below CANNOT
+    // be summed into this: they count per (reply × matched keyword).
+    const replyCountByDay = new Map<string, Map<string, number>>(
+      days.map((day) => [
+        day,
+        new Map(platformPolicies.map((pp) => [pp.platform, 0])),
+      ])
+    );
     for (const reply of replies) {
       const day = dayjs.utc(reply.post.publishDate).format('YYYY-MM-DD');
       const platform = reply.opportunity?.platform;
       if (!platform) continue;
+      const byPlatformCount = replyCountByDay.get(day);
+      if (byPlatformCount?.has(platform)) {
+        byPlatformCount.set(platform, byPlatformCount.get(platform)! + 1);
+      }
       const counts = actualByDay.get(day)?.get(platform);
       if (!counts) continue; // outside the range, or a platform with no policy
       for (const keyword of reply.matchedKeywords) {
@@ -1791,6 +1812,7 @@ export class OperationPlanService implements OnApplicationBootstrap {
     const result: ReplyPacingByDay = {};
     for (const day of days) {
       const byPlatform = actualByDay.get(day)!;
+      const byPlatformCount = replyCountByDay.get(day)!;
       result[day] = platformPolicies.map((pp) => {
         const counts = byPlatform.get(pp.platform)!;
         return {
@@ -1799,6 +1821,7 @@ export class OperationPlanService implements OnApplicationBootstrap {
           targetRepliesPerDay: pp.dailyTargetByDate.has(day)
             ? pp.dailyTargetByDate.get(day)
             : pp.targetRepliesPerDay,
+          actualReplies: byPlatformCount.get(pp.platform) ?? 0,
           keywords: pp.targets.map((t) => ({
             keywordId: t.keywordId,
             keyword: t.keyword,
