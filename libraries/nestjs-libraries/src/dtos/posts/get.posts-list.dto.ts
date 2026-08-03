@@ -10,7 +10,10 @@ export const VALID_CHANNELS = [
   'pinterest', 'threads', 'mastodon', 'bluesky', 'medium',
   'devto', 'hashnode', 'wordpress', 'discord', 'slack',
   'telegram', 'dribbble', 'kick', 'twitch', 'lemmy',
-  'listmonk', 'gmb', 'wrapcast', 'nostr', 'vk',
+  // NOTE: values must equal the provider `identifier` strings registered in
+  // integration.manager.ts (they are matched against Post.providerIdentifier).
+  // 'hackernews' has no hyphen there.
+  'listmonk', 'gmb', 'wrapcast', 'nostr', 'vk', 'quora', 'hackernews'
 ] as const;
 
 export type Channel = (typeof VALID_CHANNELS)[number];

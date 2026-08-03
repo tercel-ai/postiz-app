@@ -52,7 +52,8 @@ Content-Type: application/json
 
 ```jsonc
 {
-  "integration": { "id": "<integration-uuid>" },
+  "integration": { "id": "<integration-uuid>" }, // optional — see providerIdentifier
+  "providerIdentifier": "linkedin",   // (optional) explicit platform for an accountless post
   "group": "<group-uuid>",            // shared across accounts for same content set
   "publishMethod": "extension" | "api", // (optional) explicit send path; see below
   "settings": {
@@ -62,6 +63,15 @@ Content-Type: application/json
   "value": [ /* PostContent[] */ ]
 }
 ```
+
+`providerIdentifier` (optional) names the platform for a post with **no bound
+account** (e.g. `publishMethod: "extension"` on a platform the org never
+connected). It is persisted as `Post.providerIdentifier` — the source of truth
+for platform routing. When `integration.id` is present it is ignored and
+re-derived server-side from the bound account; when both it and `integration`
+are omitted, the server falls back to `settings.__type` for back-compat, and
+rejects the post if that is missing too. `settings.__type` itself remains the
+provider-settings discriminator only.
 
 `publishMethod` (optional) fixes this post's send path: `api` = the backend
 Temporal workflow via the provider's write API (needs a bound account); `extension`

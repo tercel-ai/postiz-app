@@ -20,13 +20,19 @@ list / metrics / tags / extension callbacks). For the deep request-body detail o
   `instagram`, `instagram-standalone`, `facebook`, `youtube`, `tiktok`,
   `pinterest`, `threads`, `mastodon`, `bluesky`, `medium`, `devto`, `hashnode`,
   `wordpress`, `discord`, `slack`, `telegram`, `dribbble`, `kick`, `twitch`,
-  `lemmy`, `listmonk`, `gmb`, `wrapcast`, `nostr`, `vk`.
+  `lemmy`, `listmonk`, `gmb`, `wrapcast`, `nostr`, `vk`, `quora`, `hackernews`
+  (no hyphen — values equal the provider `identifier` strings).
 - **`projectId`**: opaque aisee-core `products.id`. Omitting it preserves legacy,
   non-project behavior (returns every post the caller can already see). When
   present it is authorized against the org by `ProjectAuthGuard` before the
   handler runs.
 - **Array query params** (`integrationId`, `channel`, `source`): accept either a
   repeated param or a single comma-separated string (`?channel=x,reddit`).
+- **`channel` filtering** (`GET /posts`, `GET /posts/list`,
+  `GET /posts/list/locate`): filters on the persisted **`Post.providerIdentifier`**
+  column directly — no join against `Integration`, and it therefore also matches
+  **accountless** posts (`integrationId` null, e.g. extension-published
+  operation-plan posts), which the old relation-based filter silently excluded.
 - **Timezone**: date-bucketing endpoints resolve the request timezone via
   `@GetTimezone` (falls back to the org default).
 
@@ -195,7 +201,7 @@ Posts within a calendar date range (used by the calendar view).
 | `state` | `State` | no | `QUEUE` / `PUBLISHED` / `ERROR` / `DRAFT`. |
 | `source` | `PostSource[]` | no | `calendar` / `chat` / `engage` (CSV ok). |
 | `integrationId` | `string[]` | no | Max 50 (CSV ok). |
-| `channel` | `Channel[]` | no | Max 30 (CSV ok). |
+| `channel` | `Channel[]` | no | Max 30 (CSV ok). Filters `Post.providerIdentifier` directly (matches accountless posts too — see Conventions). |
 
 **Response**: `{ "posts": [ ... ] }`.
 
@@ -212,7 +218,7 @@ Paginated, filterable, sortable list. Full semantics in
 | `pageSize` | int 1–100 | `20` | |
 | `state` | `State` | — | |
 | `integrationId` | `string[]` | — | CSV ok. |
-| `channel` | `Channel[]` | — | Max 30, CSV ok. |
+| `channel` | `Channel[]` | — | Max 30, CSV ok. Filters `Post.providerIdentifier` directly (matches accountless posts too — see Conventions). |
 | `sourcePostId` | `string` | — | |
 | `projectId` | `string` | — | |
 | `operationPlanId` | `string` | — | |
@@ -312,7 +318,7 @@ publish**. A single request can target multiple integrations. Guarded by
 | `date` | ISO date-time | yes | Scheduled time (also required for `now`/`draft`). |
 | `shortLink` | `boolean` | yes | Apply short-linking. |
 | `tags` | `{ value, label }[]` | yes | May be empty array. |
-| `posts` | `Post[]` | yes¹ | ≥1; each has `value[]` (content + media), provider `settings`, optional `group`, optional `publishMethod` (`extension` \| `api` — explicit send path; validated against the platform + bound account, persisted on the post; omit to fall back to the capability check), and **either** `integration.id` **or** a `settings.__type` platform marker². |
+| `posts` | `Post[]` | yes¹ | ≥1; each has `value[]` (content + media), provider `settings`, optional `group`, optional `publishMethod` (`extension` \| `api` — explicit send path; validated against the platform + bound account, persisted on the post; omit to fall back to the capability check), and **either** `integration.id` **or** an explicit platform via `providerIdentifier` (legacy alias: `settings.__type`)². |
 | `projectId` | `string` | no | aisee project scope. |
 | `source` | `PostSource` | no | `calendar` / `chat` / `engage`. |
 | `order` | `string` | no | Ordering hint. |
@@ -323,12 +329,17 @@ publish**. A single request can target multiple integrations. Guarded by
 ² `integration` is **optional**: `Post.integrationId` is nullable, and an
 operation-plan post for a platform the org has not connected is created without
 one — it is published in-browser by the extension, which resolves the platform
-from `settings.__type`. `mapTypeToPost` overwrites `settings.__type` from the
-bound account when there is one, and rejects a post that has neither
-(`400 A post must have either an integration id or settings.__type`). Note the
-consequence for such a post: only the extension can publish it, so an explicit
-`publishMethod: "api"` is rejected, and a platform the extension cannot publish
-lands in `ERROR` at publish time.
+from the persisted **`Post.providerIdentifier`** column. That column is the
+source of truth for platform routing, resolved once at write time: when an
+`integration.id` is given, `mapTypeToPost` overwrites it (and `settings.__type`)
+from the bound account; when there is no account, the request's
+`providerIdentifier` is persisted, falling back to `settings.__type` for
+back-compat. A post with neither is rejected
+(`400 A post must have either an integration id or a providerIdentifier`).
+`settings.__type` itself remains only as the provider-settings discriminator.
+Note the consequence for an accountless post: only the extension can publish it,
+so an explicit `publishMethod: "api"` is rejected, and a platform the extension
+cannot publish lands in `ERROR` at publish time.
 
 **Response**: array of `{ postId, integration, state, releaseURL? }`, where
 `integration` is `null` for a post with no bound account.
@@ -538,7 +549,7 @@ only after the lease expires.
   "due": [
     {
       "id": "<post-uuid>",              // taskId — the extension backfills the SAME row
-      "platform": "hackernews",         // integration.providerIdentifier, else settings.__type
+      "platform": "hackernews",         // persisted Post.providerIdentifier
       "title": "…",                     // optional (article/story platforms)
       "subreddit": [ /* … */ ],         // optional (reddit publishing header)
       "segments": [ { "text": "…" } ],

@@ -42,7 +42,7 @@ Requires organization-level authentication. The `organizationId` is extracted fr
 | `pageSize` | number | No | `20` | Integer, min 1, max 100 | Number of items per page |
 | `state` | string | No | — (all states) | Must be a valid `State` enum value | Filter by post status |
 | `integrationId` | string[] | No | — (all integrations) | Array of strings; supports comma-separated | Filter by specific integration account IDs |
-| `channel` | string[] | No | — (all channels) | Array of valid provider identifiers; max 30 items | Filter by platform/channel type |
+| `channel` | string[] | No | — (all channels) | Array of valid provider identifiers; max 30 items | Filter by platform/channel type (matches `Post.providerIdentifier`, including accountless posts) |
 | `source` | string[] | No | — (all sources) | Subset of `calendar`, `chat`, `engage`; single or comma-separated | Filter by `Post.source` attribution |
 | `projectId` | string | No | — (all projects and legacy posts) | Opaque Aisee product id | Filter to posts attributed to one Aisee project |
 | `operationPlanId` | string | No | — (all plans) | Valid `OperationPlan.id` | Filter to posts generated under one operation plan |
@@ -102,6 +102,8 @@ The `channel` parameter accepts the following provider identifiers:
 | `wrapcast` | Farcaster (Warpcast) |
 | `nostr` | Nostr |
 | `vk` | VK |
+| `quora` | Quora |
+| `hackernews` | Hacker News (no hyphen — matches the provider identifier) |
 
 > **Note**: Providing an invalid channel value will result in a `400 Bad Request` validation error.
 
@@ -301,10 +303,16 @@ const where = {
     ? { integrationId: { in: query.integrationId } }
     : {}),
   ...(query.channel?.length
-    ? { integration: { providerIdentifier: { in: query.channel } } }
+    ? { providerIdentifier: { in: query.channel } }
     : {}),
 };
 ```
+
+> `channel` filters the persisted **`Post.providerIdentifier`** column directly
+> (no `Integration` join). This also matches **accountless** posts
+> (`integrationId` null — e.g. extension-published operation-plan posts), which
+> the earlier relation-based filter (`integration.providerIdentifier`) silently
+> excluded.
 
 > The sibling `locatePostInList` (`GET /posts/list/locate`) mirrors this exact
 > `where` — including `source`, `projectId`, and `operationPlanId` — so a located page index stays
