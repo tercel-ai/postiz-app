@@ -15,11 +15,13 @@ describe('publishExtensionReply — commit on confirmed extension success', () =
     const claimOpportunityForReply = vi.fn(async () => ({ opp: {}, priorStatus: 'NEW' }));
     const getSentReplyContext = vi.fn(async () => ctx);
     const updateReplyAuthor = vi.fn(async () => undefined);
+    const snapshotSentReplyMatchedKeywords = vi.fn(async () => undefined);
     const repo = {
       getSentReplyContext,
       updateReplyUrl,
       claimOpportunityForReply,
       updateReplyAuthor,
+      snapshotSentReplyMatchedKeywords,
     } as any;
     const postOverage = { deductIfOverage: vi.fn(async () => undefined) } as any;
     const postsService = { fetchEngageXAuthor: vi.fn(async () => null) } as any;
@@ -30,13 +32,21 @@ describe('publishExtensionReply — commit on confirmed extension success', () =
       postOverage,
       {} as any
     );
-    return { service, updateReplyUrl, claimOpportunityForReply, postOverage, getSentReplyContext };
+    return {
+      service,
+      updateReplyUrl,
+      claimOpportunityForReply,
+      postOverage,
+      getSentReplyContext,
+      snapshotSentReplyMatchedKeywords,
+    };
   }
 
   const draftCtx = {
     sentReplyId: 'r1',
     postId: 'p1',
     opportunityId: 'o1',
+    projectId: 'proj-1',
     state: 'DRAFT',
     releaseURL: null,
     platform: 'x',
@@ -44,16 +54,35 @@ describe('publishExtensionReply — commit on confirmed extension success', () =
 
   const author = { handle: 'alice', id: 't2_1', name: 'Alice' };
 
-  it('backfills+publishes, claims, and charges on success', async () => {
-    const { service, updateReplyUrl, claimOpportunityForReply, postOverage } =
-      build(draftCtx);
+  it('backfills+publishes, claims, snapshots keywords, and charges on success', async () => {
+    const {
+      service,
+      updateReplyUrl,
+      claimOpportunityForReply,
+      postOverage,
+      snapshotSentReplyMatchedKeywords,
+    } = build(draftCtx);
 
     const res = await service.publishExtensionReply(org, 'u1', 'r1', xUrl, author);
 
     expect(updateReplyUrl).toHaveBeenCalledWith('org-1', 'r1', xUrl, author, {
       markPublished: true,
     });
-    expect(claimOpportunityForReply).toHaveBeenCalledWith('org-1', 'o1', 'REPLIED');
+    // The claim must target the project state row the draft was saved under —
+    // an omitted projectId would claim the org-level (null-project) row instead.
+    expect(claimOpportunityForReply).toHaveBeenCalledWith(
+      'org-1',
+      'o1',
+      'REPLIED',
+      'proj-1'
+    );
+    // The draft-created reply row has no matchedKeywords; the commit point fills it.
+    expect(snapshotSentReplyMatchedKeywords).toHaveBeenCalledWith(
+      'org-1',
+      'r1',
+      'proj-1',
+      'o1'
+    );
     expect(postOverage.deductIfOverage).toHaveBeenCalledWith(
       'org-1',
       'u1',
@@ -64,26 +93,50 @@ describe('publishExtensionReply — commit on confirmed extension success', () =
   });
 
   it('is idempotent: an already-published reply does NOT re-write or re-charge', async () => {
-    const { service, updateReplyUrl, claimOpportunityForReply, postOverage } =
-      build({ ...draftCtx, state: 'PUBLISHED', releaseURL: xUrl });
+    const {
+      service,
+      updateReplyUrl,
+      claimOpportunityForReply,
+      postOverage,
+      snapshotSentReplyMatchedKeywords,
+    } = build({ ...draftCtx, state: 'PUBLISHED', releaseURL: xUrl });
 
     const res = await service.publishExtensionReply(org, 'u1', 'r1', xUrl, author);
 
     expect(updateReplyUrl).not.toHaveBeenCalled();
     expect(claimOpportunityForReply).not.toHaveBeenCalled();
+    expect(snapshotSentReplyMatchedKeywords).not.toHaveBeenCalled();
     expect(postOverage.deductIfOverage).not.toHaveBeenCalled();
     expect(res).toMatchObject({ alreadyPublished: true, state: 'PUBLISHED' });
   });
 
   it('still publishes + charges when the opportunity can no longer be claimed', async () => {
-    const { service, claimOpportunityForReply, postOverage } = build(draftCtx);
+    const {
+      service,
+      claimOpportunityForReply,
+      postOverage,
+      snapshotSentReplyMatchedKeywords,
+    } = build(draftCtx);
     claimOpportunityForReply.mockRejectedValueOnce(
       new Error('Opportunity not found or already replied')
     );
 
     const res = await service.publishExtensionReply(org, 'u1', 'r1', xUrl, author);
 
-    // Claim failed but the reply is live → recorded + charged anyway.
+    // Claim failed but the reply is live → recorded + charged anyway, and the
+    // keyword snapshot is still taken (attribution is independent of the claim).
+    expect(snapshotSentReplyMatchedKeywords).toHaveBeenCalledOnce();
+    expect(postOverage.deductIfOverage).toHaveBeenCalledOnce();
+    expect(res).toMatchObject({ state: 'PUBLISHED', replyUrl: xUrl });
+  });
+
+  it('a snapshot failure never fails the publish', async () => {
+    const { service, snapshotSentReplyMatchedKeywords, postOverage } =
+      build(draftCtx);
+    snapshotSentReplyMatchedKeywords.mockRejectedValueOnce(new Error('db down'));
+
+    const res = await service.publishExtensionReply(org, 'u1', 'r1', xUrl, author);
+
     expect(postOverage.deductIfOverage).toHaveBeenCalledOnce();
     expect(res).toMatchObject({ state: 'PUBLISHED', replyUrl: xUrl });
   });

@@ -969,11 +969,15 @@ export class EngageService implements OnApplicationBootstrap {
     });
 
     // The reply is live on the platform; recording it wins over claim bookkeeping.
+    // Claim the SAME (org, project) state row the draft was saved under — omitting
+    // projectId would target the org-level (null-project) row, silently leaving the
+    // project row unclaimed (stuck NEW).
     try {
       await this._engageRepository.claimOpportunityForReply(
         org.id,
         ctx.opportunityId,
-        'REPLIED'
+        'REPLIED',
+        ctx.projectId
       );
     } catch (err) {
       this.logger.warn(
@@ -981,6 +985,24 @@ export class EngageService implements OnApplicationBootstrap {
           `(already replied/expired?): ${err instanceof Error ? err.message : err}`
       );
     }
+
+    // The draft-created reply row (upsertDraft) carries no matchedKeywords
+    // snapshot; fill it now from the state row. Runs regardless of the claim
+    // outcome and best-effort — attribution must not fail a publish whose reply
+    // is already live.
+    await this._engageRepository
+      .snapshotSentReplyMatchedKeywords(
+        org.id,
+        sentReplyId,
+        ctx.projectId,
+        ctx.opportunityId
+      )
+      .catch((err) =>
+        this.logger.warn(
+          `publishExtensionReply: could not snapshot matchedKeywords for sent reply ${sentReplyId}: ` +
+            `${err instanceof Error ? err.message : err}`
+        )
+      );
 
     // Charge ONLY now, on confirmed success. Fire-and-forget — billing must not
     // break the user-visible publish — and idempotent by postId (taskId).

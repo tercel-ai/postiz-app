@@ -2513,6 +2513,32 @@ export class EngageRepository {
     return reply;
   }
 
+  /**
+   * Copy the (org, project) state row's matchedKeywords onto a sent reply whose
+   * snapshot is still empty. The extension flow's reply row is created at
+   * save-draft time (upsertDraft) with NO snapshot, so publishExtensionReply
+   * calls this at its commit point — the extension path's "send time" — giving
+   * it the same send-time snapshot the direct-send paths take from their claim.
+   * Operation-plan reply pacing attributes replies by this field. No-op when the
+   * state row is missing/empty or the reply already has a snapshot.
+   */
+  async snapshotSentReplyMatchedKeywords(
+    organizationId: string,
+    sentReplyId: string,
+    projectId: string | null | undefined,
+    opportunityId: string
+  ): Promise<void> {
+    const state = await this._oppState.model.engageOpportunityState.findFirst({
+      where: { organizationId, projectId: projectId ?? null, opportunityId },
+      select: { matchedKeywords: true },
+    });
+    if (!state?.matchedKeywords?.length) return;
+    await this._sentReply.model.engageSentReply.updateMany({
+      where: { id: sentReplyId, organizationId, matchedKeywords: { isEmpty: true } },
+      data: { matchedKeywords: state.matchedKeywords },
+    });
+  }
+
   // §6.1 per-account daily send cap: live count of one integration's sent
   // replies since `since` (the caller passes today's UTC start). No
   // dedicated capacity table — the cap VALUE lives in Settings, this is just
@@ -3928,6 +3954,7 @@ export class EngageRepository {
         id: true,
         postId: true,
         opportunityId: true,
+        projectId: true,
         post: { select: { state: true, releaseURL: true } },
         opportunity: { select: { platform: true } },
       },
@@ -3937,6 +3964,7 @@ export class EngageRepository {
       sentReplyId: reply.id,
       postId: reply.postId,
       opportunityId: reply.opportunityId,
+      projectId: reply.projectId,
       state: reply.post?.state ?? null,
       releaseURL: reply.post?.releaseURL ?? null,
       platform: reply.opportunity?.platform ?? null,

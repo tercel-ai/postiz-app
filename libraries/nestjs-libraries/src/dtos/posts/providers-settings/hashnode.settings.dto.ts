@@ -26,10 +26,13 @@ export class HashnodeSettingsDto {
   @IsDefined()
   title: string;
 
+  // Optional on Hashnode too; skip the length check for an empty string so a
+  // frontend sending `subtitle: ''` (untouched field) does not 400.
+  @IsOptional()
+  @ValidateIf((o) => o.subtitle !== '')
   @IsString()
   @MinLength(2)
-  @IsOptional()
-  subtitle: string;
+  subtitle?: string;
 
   @IsOptional()
   @ValidateNested()

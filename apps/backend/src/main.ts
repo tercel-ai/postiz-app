@@ -20,6 +20,7 @@ import { AppModule } from './app.module';
 
 import { SubscriptionExceptionFilter } from '@gitroom/backend/services/auth/permissions/subscription.exception';
 import { HttpExceptionFilter } from '@gitroom/nestjs-libraries/services/exception.filter';
+import { validationExceptionFactory } from '@gitroom/nestjs-libraries/services/validation.exception.factory';
 import { ConfigurationChecker } from '@gitroom/helpers/configuration/configuration.checker';
 import { startMcp } from '@gitroom/nestjs-libraries/chat/start.mcp';
 
@@ -72,6 +73,7 @@ async function start() {
   app.useGlobalPipes(
     new ValidationPipe({
       transform: true,
+      exceptionFactory: validationExceptionFactory,
     })
   );
 

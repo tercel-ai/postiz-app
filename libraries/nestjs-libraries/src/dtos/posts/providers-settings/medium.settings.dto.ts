@@ -25,10 +25,13 @@ export class MediumSettingsDto {
   @IsDefined()
   title: string;
 
+  // Medium itself treats the subtitle as optional and neither publish path
+  // (API provider or extension poster) sends it — only validate when provided.
+  @IsOptional()
+  @ValidateIf((o) => o.subtitle !== '')
   @IsString()
   @MinLength(2)
-  @IsDefined()
-  subtitle: string;
+  subtitle?: string;
 
   @IsOptional()
   @IsString()
