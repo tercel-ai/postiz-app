@@ -228,8 +228,12 @@ export class PostsRepository {
       ...(query.integrationId?.length
         ? { integrationId: { in: query.integrationId } }
         : {}),
+      // Filter on the persisted Post.providerIdentifier column, NOT the
+      // integration relation: it needs no join, and it also matches accountless
+      // rows (extension-published operation-plan posts with integrationId null),
+      // which a relation filter silently excludes.
       ...(query.channel?.length
-        ? { integration: { providerIdentifier: { in: query.channel } } }
+        ? { providerIdentifier: { in: query.channel } }
         : {}),
       ...(query.source?.length ? { source: { in: query.source } } : {}),
     };
@@ -331,8 +335,11 @@ export class PostsRepository {
       ...(query.integrationId?.length
         ? { integrationId: { in: query.integrationId } }
         : {}),
+      // Direct Post.providerIdentifier filter (no join) — a relation filter
+      // would silently drop accountless rows (integrationId null). See
+      // getAllPostsList's note.
       ...(query.channel?.length
-        ? { integration: { providerIdentifier: { in: query.channel } } }
+        ? { providerIdentifier: { in: query.channel } }
         : {}),
       // Opaque aisee-core products.id. Omitting it returns every post the
       // caller can already see (legacy, non-project behavior preserved
@@ -412,8 +419,9 @@ export class PostsRepository {
       ...(query.integrationId?.length
         ? { integrationId: { in: query.integrationId } }
         : {}),
+      // Direct column filter — must stay identical to getPostsList's clause.
       ...(query.channel?.length
-        ? { integration: { providerIdentifier: { in: query.channel } } }
+        ? { providerIdentifier: { in: query.channel } }
         : {}),
       // Must mirror getPostsList's projectId/operationPlanId clauses exactly
       // — see the "Mirror the where from getPostsList" note above.
@@ -585,13 +593,15 @@ export class PostsRepository {
         ...(query.integrationId?.length
           ? { integrationId: { in: query.integrationId } }
           : {}),
-        ...((query.channel?.length || query.customer)
-          ? {
-            integration: {
-              ...(query.channel?.length ? { providerIdentifier: { in: query.channel } } : {}),
-              ...(query.customer ? { customerId: query.customer } : {}),
-            },
-          }
+        // Channel filters on the persisted Post.providerIdentifier column (no
+        // join, and it matches accountless operation-plan rows a relation
+        // filter would drop). customer stays a relation filter — customerId
+        // only exists on Integration, so it inherently requires a bound account.
+        ...(query.channel?.length
+          ? { providerIdentifier: { in: query.channel } }
+          : {}),
+        ...(query.customer
+          ? { integration: { customerId: query.customer } }
           : {}),
         // Opaque aisee-core products.id. Omitting it returns every post in
         // the org (legacy, non-project calendar behavior preserved during
