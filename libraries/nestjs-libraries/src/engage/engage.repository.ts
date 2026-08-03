@@ -2084,6 +2084,7 @@ export class EngageRepository {
           state: 'DRAFT',
           source: 'engage',
           image: '[]',
+          providerIdentifier: data.platform === 'x' ? 'x' : 'reddit',
           settings: JSON.stringify({ __type: data.platform === 'x' ? 'x' : 'reddit' }),
           group: randomUUID(),
           delay: 0,
@@ -4275,6 +4276,7 @@ export class EngageRepository {
         state: 'PUBLISHED',
         source: 'engage',
         image: '[]',
+        providerIdentifier: 'reddit',
         // Reddit manual posts never have an integration, so engageAuthor (the
         // redditor who posted the reply) is the source of truth when known.
         settings: JSON.stringify({
@@ -4390,6 +4392,7 @@ export class EngageRepository {
         state: 'PUBLISHED',
         source: 'engage',
         image: '[]',
+        providerIdentifier: 'x',
         settings: JSON.stringify({
           __type: 'x',
           // engageAuthor is only a FALLBACK identity for when no connected account

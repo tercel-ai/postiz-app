@@ -122,6 +122,7 @@ const draft = (over: Partial<any>) => ({
   state: 'DRAFT',
   integrationId: null,
   settings: '{}',
+  providerIdentifier: null,
   operationPlanId: 'plan-1',
   integration: null,
   ...over,
@@ -193,7 +194,12 @@ describe('PostsService.schedulePosts', () => {
 
   it('mixed batch: schedules the good ones and isolates the failures', async () => {
     const { service, startWorkflow } = makeService([
-      draft({ id: 'a', group: 'ga', settings: JSON.stringify({ __type: 'hackernews' }) }), // ext-only -> extension
+      draft({
+        id: 'a',
+        group: 'ga',
+        providerIdentifier: 'hackernews',
+        settings: JSON.stringify({ __type: 'hackernews' }),
+      }), // ext-only -> extension
       draft({
         id: 'b',
         group: 'gb',
@@ -244,7 +250,12 @@ describe('PostsService.schedulePosts', () => {
 
   it('omits the date arg when the item carries no date (keep materialized publishDate)', async () => {
     const { service, schedulePostGroupToQueue } = makeService([
-      draft({ id: 'a', group: 'ga', settings: JSON.stringify({ __type: 'hackernews' }) }),
+      draft({
+        id: 'a',
+        group: 'ga',
+        providerIdentifier: 'hackernews',
+        settings: JSON.stringify({ __type: 'hackernews' }),
+      }),
     ]);
 
     await service.schedulePosts('org-1', [{ id: 'a' }]);

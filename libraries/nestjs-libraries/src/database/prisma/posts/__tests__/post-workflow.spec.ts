@@ -1085,7 +1085,7 @@ describe('PostsService.startWorkflow — no bound integration', () => {
 
   it('leaves an accountless extension-publishable post in QUEUE for the extension', async () => {
     mocks.postRepository.getPostById.mockResolvedValue(
-      makeAccountlessPost({ settings: '{"__type":"reddit"}' }),
+      makeAccountlessPost({ providerIdentifier: 'reddit', settings: '{"__type":"reddit"}' }),
     );
 
     await service.startWorkflow('reddit-queue', 'post-1', 'org-1');
@@ -1095,9 +1095,9 @@ describe('PostsService.startWorkflow — no bound integration', () => {
     expect(mocks.postRepository.changeState).not.toHaveBeenCalled();
   });
 
-  it('resolves the platform from settings when there is no integration to read it from', async () => {
+  it('resolves the platform from providerIdentifier when there is no integration to read it from', async () => {
     mocks.postRepository.getPostById.mockResolvedValue(
-      makeAccountlessPost({ settings: '{"__type":"reddit"}' }),
+      makeAccountlessPost({ providerIdentifier: 'reddit', settings: '{"__type":"reddit"}' }),
     );
 
     await service.startWorkflow('reddit-queue', 'post-1', 'org-1');

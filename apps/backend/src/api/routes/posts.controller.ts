@@ -311,7 +311,7 @@ export class PostsController {
         properties: {
           postId: { type: 'string' },
           // null for a post with no bound account (published by the extension,
-          // platform carried by settings.__type).
+          // platform carried by providerIdentifier).
           integration: { type: 'string', nullable: true },
           state: { type: 'string' },
           releaseURL: { type: 'string', nullable: true },

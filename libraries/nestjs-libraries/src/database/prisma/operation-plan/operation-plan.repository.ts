@@ -397,6 +397,10 @@ export class OperationPlanRepository {
           publishDate: new Date(item.utcDate),
           organizationId: plan.organizationId,
           integrationId: null,
+          // No bound account at generation time (see comment above), so this is
+          // the only record of the post's platform until schedule time binds an
+          // integration — mirrors settings.__type below.
+          providerIdentifier: resolvedPlatform,
           content: node.content,
           delay: 0,
           // group must be per-platform: a single contentItem fans out into

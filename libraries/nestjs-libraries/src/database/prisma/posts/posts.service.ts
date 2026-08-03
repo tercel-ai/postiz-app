@@ -497,15 +497,16 @@ export class PostsService {
     // A post MAY have no integration: `Post.integrationId` is nullable, and
     // operation-plan posts for a platform the org never connected are
     // materialized without one and published in-browser by the extension, which
-    // identifies the platform from `settings.__type`. Such a post therefore
-    // carries its own `__type` and there is no account to look up — requiring an
+    // identifies the platform from `Post.providerIdentifier`. Such a post
+    // therefore carries its own `providerIdentifier` (or, for back-compat,
+    // `settings.__type`) and there is no account to look up — requiring an
     // integration here would make that whole flow unreachable over HTTP.
     const missingPlatform = (body?.posts || []).find(
-      (p) => !p?.integration?.id && !(p?.settings as any)?.__type
+      (p) => !p?.integration?.id && !p?.providerIdentifier && !(p?.settings as any)?.__type
     );
     if (missingPlatform) {
       throw new BadRequestException(
-        'A post must have either an integration id or settings.__type'
+        'A post must have either an integration id or a providerIdentifier'
       );
     }
 
@@ -515,9 +516,12 @@ export class PostsService {
       posts: await Promise.all(
         body.posts.map(async (post) => {
           // No account to resolve the platform from — keep the caller's
-          // `__type`, which the guard above proved is present.
+          // `providerIdentifier` (falling back to legacy `settings.__type`),
+          // which the guard above proved is present.
           if (!post.integration?.id) {
-            return post;
+            const providerIdentifier =
+              post.providerIdentifier || (post.settings as any)?.__type;
+            return { ...post, providerIdentifier };
           }
 
           const integration = await this._integrationService.getIntegrationById(
@@ -533,6 +537,7 @@ export class PostsService {
 
           return {
             ...post,
+            providerIdentifier: integration.providerIdentifier,
             settings: {
               ...(post.settings || ({} as any)),
               __type: integration.providerIdentifier,
@@ -935,17 +940,12 @@ export class PostsService {
     try {
       const post = await this._postRepository.getPostById(postId);
       // No integration (operation-plan post for an unconnected platform) means
-      // the platform is only knowable from settings — the same fallback the
-      // extension publish-due query uses. Without it such a post would be sent
-      // down the Temporal path, which has no account to publish with.
-      let settings: Record<string, any> = {};
-      try {
-        settings = JSON.parse(post?.settings || '{}') || {};
-      } catch {
-        /* malformed settings → platform resolves from the integration only */
-      }
+      // the platform is only knowable from Post.providerIdentifier. Falls back
+      // to the bound integration for the rare row written before the
+      // providerIdentifier backfill ran. Without either, such a post would be
+      // sent down the Temporal path, which has no account to publish with.
       const providerId =
-        post?.integration?.providerIdentifier || settings.__type || '';
+        post?.providerIdentifier || post?.integration?.providerIdentifier || '';
       // The persisted publishMethod is authoritative (set at schedule time and
       // shared with the extension publish-due query, so the two paths stay
       // mutually exclusive). Only fall back to the platform-capability check when
@@ -1089,7 +1089,7 @@ export class PostsService {
       if (post.publishMethod) {
         try {
           resolvedMethod = resolvePublishMethod({
-            platform: post.settings.__type,
+            platform: post.providerIdentifier || post.settings.__type,
             hasBoundIntegration: !!post.integration?.id,
             choice: post.publishMethod,
           });
@@ -1123,7 +1123,7 @@ export class PostsService {
       if (body.type === 'now') {
         try {
           await this.startWorkflow(
-            getSocialTaskQueue(post.settings.__type),
+            getSocialTaskQueue(post.providerIdentifier || post.settings.__type),
             posts[0].id,
             orgId,
             true
@@ -1140,7 +1140,7 @@ export class PostsService {
         }
       } else {
         this.startWorkflow(
-          getSocialTaskQueue(post.settings.__type),
+          getSocialTaskQueue(post.providerIdentifier || post.settings.__type),
           posts[0].id,
           orgId
         ).catch((err) => {
@@ -1341,16 +1341,10 @@ export class PostsService {
     if (!post) throw new BadRequestException('Post not found');
     // An accountless post reaches QUEUE through POST /posts/schedule and is
     // published by the extension, so a missing integration is a legitimate
-    // state here — resolve the platform from settings the same way
-    // startWorkflow does, and reject only when neither source yields one.
-    let settings: Record<string, any> = {};
-    try {
-      settings = JSON.parse(post.settings || '{}') || {};
-    } catch {
-      /* malformed settings → platform resolves from the integration only */
-    }
+    // state here — resolve the platform from Post.providerIdentifier the same
+    // way startWorkflow does, and reject only when neither source yields one.
     const platform =
-      post.integration?.providerIdentifier || settings.__type || '';
+      post.providerIdentifier || post.integration?.providerIdentifier || '';
     if (!platform) {
       throw new BadRequestException('Integration not found or has been removed');
     }
@@ -1656,10 +1650,16 @@ export class PostsService {
         /* malformed/missing media → publish text-only */
       }
       return {
-        // Platform comes from the integration when bound, else from settings.__type
-        // (operation-plan posts publish by platform with a null integrationId).
+        // Platform is the persisted Post.providerIdentifier (set from the bound
+        // integration when present, else the caller-supplied platform — see
+        // mapTypeToPost / createOrUpdatePost). The trailing fallbacks only serve
+        // rows written before the backfill ran (settings is parsed above anyway,
+        // so the legacy read is free here).
         id: p.id,
-        platform: p.integration?.providerIdentifier || settings.__type,
+        platform:
+          p.providerIdentifier ||
+          p.integration?.providerIdentifier ||
+          settings.__type,
         title: p.title || settings.title || undefined,
         subreddit: settings.subreddit || undefined,
         // Dev.to tags. settings.tags holds DevToSettingsDto's {value,label}
@@ -1817,14 +1817,8 @@ export class PostsService {
         continue;
       }
 
-      let settings: Record<string, any> = {};
-      try {
-        settings = JSON.parse(post.settings || '{}') || {};
-      } catch {
-        /* malformed settings → platform resolves from the integration only */
-      }
       const platform =
-        post.integration?.providerIdentifier || settings.__type || '';
+        post.providerIdentifier || post.integration?.providerIdentifier || '';
       const hasBoundIntegration =
         !!post.integrationId && post.integration?.disabled !== true;
 
@@ -1933,7 +1927,7 @@ export class PostsService {
     const ids = items.map((i) => i.postId);
     const posts = await this._postRepository.getPostsProviderByIds(orgId, ids);
     const providerById = new Map(
-      posts.map((p) => [p.id, p.integration?.providerIdentifier])
+      posts.map((p) => [p.id, p.providerIdentifier || p.integration?.providerIdentifier])
     );
     // Currently persisted values, so a fresh read that declines to overwrite
     // (zero impressions / null traffic) can echo the stored value instead of 0.

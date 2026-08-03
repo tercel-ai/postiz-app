@@ -482,6 +482,14 @@ model Post {
   publishDate                DateTime
   organizationId             String
   integrationId              String?
+  // Persisted platform identifier for this post: `integration.providerIdentifier`
+  // when an account is bound, else the caller-supplied value (extension-published
+  // posts with no bound account, e.g. operation-plan posts for a platform the org
+  // never connected). This is now the source of truth for platform routing —
+  // resolved once at write time (mapTypeToPost/createOrUpdatePost) so read paths
+  // no longer need to fall back to parsing `settings.__type`, which stays only as
+  // the provider-settings discriminator.
+  providerIdentifier         String?
   content                    String
   delay                      Int                       @default(0)
   group                      String
@@ -575,6 +583,7 @@ model Post {
   @@index([updatedAt])
   @@index([releaseURL])
   @@index([integrationId])
+  @@index([providerIdentifier])
   @@index([sourcePostId])
   @@index([source])
   @@index([organizationId, state, publishDate])

@@ -902,6 +902,10 @@ export class PostsRepository {
         delay: originalPost.delay,
         organizationId: originalPost.organizationId,
         integrationId: originalPost.integrationId,
+        // Platform identity travels with the clone, same as settings — the
+        // integration fallback would cover today's clones (they always have a
+        // bound account), but the persisted column must not silently degrade.
+        providerIdentifier: originalPost.providerIdentifier ?? null,
         // A recurring post's future cycles stay attributed to the same
         // project/plan as the template they were cloned from.
         projectId: originalPost.projectId,
@@ -1005,6 +1009,8 @@ export class PostsRepository {
         delay: originalPost.delay,
         organizationId: originalPost.organizationId,
         integrationId: originalPost.integrationId,
+        // Platform identity travels with the clone — see findOrCreateCycleClone.
+        providerIdentifier: originalPost.providerIdentifier ?? null,
         // A release clone stays attributed to the same project/plan as the
         // post it was cloned from.
         projectId: originalPost.projectId,
@@ -1670,11 +1676,11 @@ export class PostsRepository {
 
     for (const value of body.value) {
       // settings is written wholesale, and for a post with NO integration
-      // `settings.__type` is the only record of its platform (operation-plan
-      // posts, published by the extension) — erasing it would make the post
-      // unpublishable. mapTypeToPost guarantees `__type` is present on every
-      // path into here: it overwrites it from the bound account, and rejects an
-      // accountless post that doesn't carry its own.
+      // `providerIdentifier` (persisted below) is the only record of its
+      // platform (operation-plan posts, published by the extension) — erasing it
+      // would make the post unpublishable. mapTypeToPost guarantees it is
+      // present on every path into here: it overwrites it from the bound
+      // account, and rejects an accountless post that doesn't carry its own.
       const updateData = (type: 'create' | 'update') => ({
         publishDate: dayjs(date).toDate(),
         // integrationId is nullable: an operation-plan post for an unconnected
@@ -1742,6 +1748,15 @@ export class PostsRepository {
           : publishMethod !== undefined
             ? { publishMethod }
             : {}),
+        // Persisted platform: integration.providerIdentifier when bound, else the
+        // caller-supplied value. The HTTP controllers resolve this onto
+        // `body.providerIdentifier` via mapTypeToPost, but several internal
+        // callers (engage replies, autopost, the chat scheduling tool) build the
+        // body by hand and only carry the platform in `settings.__type` — fall
+        // back to it so their rows are stamped too, not left null. Written
+        // wholesale like settings, on both create and update.
+        providerIdentifier:
+          body.providerIdentifier ?? (body.settings as any)?.__type ?? null,
       });
 
       posts.push(
@@ -2201,6 +2216,7 @@ export class PostsRepository {
     title: true,
     publishDate: true,
     publishMethod: true,
+    providerIdentifier: true,
     integration: {
       // internalId + profile identify WHICH account on the platform this post
       // belongs to. The extension publishes with whatever session the browser
@@ -2301,6 +2317,7 @@ export class PostsRepository {
         state: true,
         integrationId: true,
         settings: true,
+        providerIdentifier: true,
         operationPlanId: true,
         // The send path already persisted on the post — an explicit choice the
         // user made in the editor. schedulePosts falls back to it before
@@ -2348,6 +2365,11 @@ export class PostsRepository {
    * by the metrics backfill to derive the platform server-side — never trusting
    * a platform the extension claims — so traffic weights and impression labels
    * are applied authoritatively. Posts not owned by the org are simply absent.
+   * Reads the persisted `Post.providerIdentifier` directly (set from the bound
+   * integration when present, else the caller-supplied platform) — this also
+   * fixes accountless (extension-only) posts, which an integration-only lookup
+   * could never resolve. Falls back to the bound integration for a row written
+   * before the providerIdentifier backfill ran.
    */
   getPostsProviderByIds(organizationId: string, ids: string[]) {
     return this._post.model.post.findMany({
@@ -2359,6 +2381,7 @@ export class PostsRepository {
         // (a transient zero read must not flicker the UI back to 0).
         impressions: true,
         trafficScore: true,
+        providerIdentifier: true,
         integration: { select: { providerIdentifier: true } },
       },
     });

@@ -64,6 +64,16 @@ export class Post {
   @ValidateNested()
   integration?: Integration;
 
+  // Explicit platform for a post with no bound account (extension-published,
+  // e.g. operation-plan posts for a platform the org never connected). Optional:
+  // when an `integration` is provided this is ignored and re-derived server-side
+  // from the bound account (mapTypeToPost); when omitted here it falls back to
+  // `settings.__type` for back-compat. Persisted as `Post.providerIdentifier`,
+  // the source of truth for platform routing.
+  @IsOptional()
+  @IsString()
+  providerIdentifier?: string;
+
   @IsDefined()
   @ArrayMinSize(1)
   @IsArray()
