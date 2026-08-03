@@ -372,6 +372,7 @@ export class PostsRepository {
           error: true,
           sourcePostId: true,
           operationPlanId: true,
+          providerIdentifier: true,
           impressions: true,
           trafficScore: true,
           lastMetricsFetchAt: true,
@@ -625,6 +626,7 @@ export class PostsRepository {
         integrationId: true,
         sourcePostId: true,
         operationPlanId: true,
+        providerIdentifier: true,
         tags: {
           select: {
             tag: true,
