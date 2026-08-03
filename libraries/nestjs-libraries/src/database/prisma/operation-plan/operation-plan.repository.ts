@@ -260,7 +260,13 @@ export class OperationPlanRepository {
       where: {
         organizationId,
         projectId,
-        post: { publishDate: { gte: startDate, lte: endDate } },
+        // PUBLISHED only: the extension flow keeps a sent-reply row for its saved
+        // DRAFT (upsertDraft) and a failed publish leaves ERROR — neither is an
+        // "actual" reply for pacing, and QUEUE (scheduled, future) isn't sent yet.
+        post: {
+          publishDate: { gte: startDate, lte: endDate },
+          state: 'PUBLISHED',
+        },
       },
       select: {
         matchedKeywords: true,

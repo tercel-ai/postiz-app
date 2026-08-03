@@ -128,7 +128,7 @@ describe('OperationPlanRepository', () => {
     });
   });
 
-  it('getSentRepliesInRange scopes by organizationId, projectId, and the publishDate window', async () => {
+  it('getSentRepliesInRange scopes by organizationId, projectId, PUBLISHED state, and the publishDate window', async () => {
     const sentReplyFindMany = vi.fn().mockResolvedValue([]);
     const repo = createRepo({ sentReplyFindMany });
     const start = new Date('2026-07-20T00:00:00.000Z');
@@ -136,10 +136,12 @@ describe('OperationPlanRepository', () => {
 
     await repo.getSentRepliesInRange('org-1', 'proj-1', start, end);
 
+    // PUBLISHED only — the extension flow keeps sent-reply rows for saved
+    // DRAFTs and failed publishes leave ERROR; neither is an actual reply.
     expect(sentReplyFindMany.mock.calls[0][0].where).toEqual({
       organizationId: 'org-1',
       projectId: 'proj-1',
-      post: { publishDate: { gte: start, lte: end } },
+      post: { publishDate: { gte: start, lte: end }, state: 'PUBLISHED' },
     });
     // Selects the opportunity platform so pacing can split per platform.
     expect(sentReplyFindMany.mock.calls[0][0].select).toEqual({
