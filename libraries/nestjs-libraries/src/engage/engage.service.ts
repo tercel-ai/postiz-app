@@ -938,7 +938,7 @@ export class EngageService implements OnApplicationBootstrap {
     org: Organization,
     userId: string | undefined,
     sentReplyId: string,
-    url: string,
+    url?: string | null,
     author?: EngageAuthorProfile
   ) {
     const ctx = await this._engageRepository.getSentReplyContext(org.id, sentReplyId);
@@ -960,13 +960,23 @@ export class EngageService implements OnApplicationBootstrap {
       );
     }
 
-    // Same format validation as the manual backfill path.
-    await this._validateReplyUrl(ctx.platform, url);
+    // Same format validation as the manual backfill path. URL-less is allowed:
+    // the extension can confirm a send without capturing the permalink, and the
+    // commit (DRAFT→PUBLISHED) must still land — a record left in DRAFT for a
+    // reply that IS live reads as re-sendable and invites a duplicate post. The
+    // published-without-URL row surfaces the manual "submit link" flow instead.
+    if (url) {
+      await this._validateReplyUrl(ctx.platform, url);
+    }
 
     // Backfill URL + (X) releaseId/integration + author AND flip DRAFT→PUBLISHED.
-    await this._engageRepository.updateReplyUrl(org.id, sentReplyId, url, author, {
-      markPublished: true,
-    });
+    await this._engageRepository.updateReplyUrl(
+      org.id,
+      sentReplyId,
+      url || null,
+      author,
+      { markPublished: true }
+    );
 
     // The reply is live on the platform; recording it wins over claim bookkeeping.
     // Claim the SAME (org, project) state row the draft was saved under — omitting
@@ -1023,11 +1033,12 @@ export class EngageService implements OnApplicationBootstrap {
 
     // The extension usually supplies the real poster (X CreateTweet capture);
     // when it doesn't, resolve it out of band like the manual backfill path.
-    if (!author) {
+    // The lookup needs the reply's own URL, so URL-less publishes skip it.
+    if (!author && url) {
       this._storeReplyAuthorInBackground(org.id, sentReplyId, ctx.platform, url);
     }
 
-    return { id: sentReplyId, state: 'PUBLISHED', replyUrl: url };
+    return { id: sentReplyId, state: 'PUBLISHED', replyUrl: url || null };
   }
 
   /**
@@ -1557,6 +1568,9 @@ export class EngageService implements OnApplicationBootstrap {
           posts: [
             {
               integration: { id: body.integrationId },
+              // Replies are API-only: the extension publish-due loop has no
+              // reply-target support and would post them as NEW posts.
+              publishMethod: 'api',
               value: [
                 { content: body.draftContent, image: [], delay: 0, id: '' } as never,
               ],
@@ -1673,6 +1687,9 @@ export class EngageService implements OnApplicationBootstrap {
           posts: [
             {
               integration: { id: body.integrationId },
+              // Replies are API-only: the extension publish-due loop has no
+              // reply-target support and would post them as NEW posts.
+              publishMethod: 'api',
               value: [
                 { content: body.draftContent, image: [], delay: 0, id: '' } as never,
               ],
@@ -1758,6 +1775,9 @@ export class EngageService implements OnApplicationBootstrap {
             posts: [
               {
                 integration: { id: item.integrationId },
+                // Replies are API-only: the extension publish-due loop has no
+                // reply-target support and would post them as NEW posts.
+                publishMethod: 'api',
                 value: [
                   { content: item.draftContent, image: [], delay: 0, id: '' } as never,
                 ],
@@ -1857,6 +1877,9 @@ export class EngageService implements OnApplicationBootstrap {
             posts: [
               {
                 integration: { id: item.integrationId },
+                // Replies are API-only: the extension publish-due loop has no
+                // reply-target support and would post them as NEW posts.
+                publishMethod: 'api',
                 value: [
                   { content: item.draftContent, image: [], delay: 0, id: '' } as never,
                 ],

@@ -150,6 +150,32 @@ describe('publishExtensionReply — commit on confirmed extension success', () =
     expect(postOverage.deductIfOverage).not.toHaveBeenCalled();
   });
 
+  it('publishes URL-less when the extension confirmed the send but captured no permalink', async () => {
+    const { service, updateReplyUrl, claimOpportunityForReply, postOverage } =
+      build(draftCtx);
+
+    const res = await service.publishExtensionReply(org, 'u1', 'r1', undefined, author);
+
+    // The commit must still land: DRAFT→PUBLISHED with releaseURL null —
+    // leaving the row DRAFT is what makes a live reply re-sendable (duplicate).
+    expect(updateReplyUrl).toHaveBeenCalledWith('org-1', 'r1', null, author, {
+      markPublished: true,
+    });
+    expect(claimOpportunityForReply).toHaveBeenCalledOnce();
+    expect(postOverage.deductIfOverage).toHaveBeenCalledOnce();
+    expect(res).toMatchObject({ id: 'r1', state: 'PUBLISHED', replyUrl: null });
+  });
+
+  it('URL-less publish skips the author enrichment (it needs the reply URL)', async () => {
+    const { service } = build(draftCtx);
+    const postsService = (service as any)._postsService;
+
+    await service.publishExtensionReply(org, 'u1', 'r1', undefined, undefined);
+
+    // Background enrich resolves the author FROM the reply URL — nothing to do.
+    expect(postsService.fetchEngageXAuthor).not.toHaveBeenCalled();
+  });
+
   it('throws when the reply is not found', async () => {
     const { service } = build(null);
     await expect(

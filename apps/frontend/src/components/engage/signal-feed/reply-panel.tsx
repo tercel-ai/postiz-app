@@ -126,7 +126,7 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
   // path) and/or we poll the sent reply until its permalink is backfilled. On a
   // timeout we settle to "processing" — never a failure — so the user isn't
   // tempted to re-post and create a duplicate reply.
-  const { begin: beginPosting, posting } = useReplyPosting(
+  const { begin: beginPosting, posting, processing } = useReplyPosting(
     opportunity.id,
     useCallback(
       (resolution) => {
@@ -618,10 +618,14 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
                 X API reply tier is blocked. Posts as the user + auto-backfills. */}
             <button
               onClick={replyViaExtension}
-              disabled={!draft || overLimit || sending || posting}
+              disabled={!draft || overLimit || sending || posting || processing}
               className="w-full py-2 text-sm bg-purple-600 hover:bg-purple-700 disabled:bg-gray-700 disabled:text-gray-500 text-white rounded-lg font-medium transition-colors"
             >
-              {posting ? 'Posting…' : 'Post via Postiz Extension'}
+              {posting
+                ? 'Posting…'
+                : processing
+                ? 'Sent — confirming, see Sent list'
+                : 'Post via Postiz Extension'}
             </button>
             {/* Schedule option */}
             <details className="text-xs text-gray-500">
@@ -749,10 +753,14 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
               <>
                 <button
                   onClick={replyViaExtension}
-                  disabled={!draft || sending || posting}
+                  disabled={!draft || sending || posting || processing}
                   className="w-full py-2 text-sm bg-purple-600 hover:bg-purple-700 disabled:bg-gray-700 disabled:text-gray-500 text-white rounded-lg font-medium transition-colors"
                 >
-                  {posting ? 'Posting…' : 'Post via Postiz Extension'}
+                  {posting
+                    ? 'Posting…'
+                    : processing
+                    ? 'Sent — confirming, see Sent list'
+                    : 'Post via Postiz Extension'}
                 </button>
                 <div className="flex items-center gap-2">
                   <button

@@ -1054,6 +1054,25 @@ export class SubmitManualReplyUrlDto {
   author?: EngageAuthorDto;
 }
 
+// Extension publish-on-success callback. Unlike the manual backfill (URL
+// mandatory), the extension can confirm a send WITHOUT capturing a permalink
+// (e.g. Reddit responded but the comment node couldn't be parsed). The commit
+// must still land — flipping the DRAFT to PUBLISHED is what stops the record
+// from being re-sendable and duplicating the live reply — so url is optional
+// here and the reply is published URL-less (the Sent card then offers the
+// manual "submit link" flow).
+export class PublishExtensionReplyDto {
+  @IsOptional()
+  @IsString()
+  @MaxLength(2048)
+  url?: string;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => EngageAuthorDto)
+  author?: EngageAuthorDto;
+}
+
 // Persist an unpublished working draft for an opportunity (one DRAFT per
 // opportunity, upserted). Content may be AI-generated, AI-then-edited, or fully
 // hand-typed — the save is decoupled from generation. Surfaces in

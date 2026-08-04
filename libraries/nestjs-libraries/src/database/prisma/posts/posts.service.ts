@@ -981,11 +981,16 @@ export class PostsService {
       // shared with the extension publish-due query, so the two paths stay
       // mutually exclusive). Only fall back to the platform-capability check when
       // it is unset (legacy posts created before the field existed).
+      // Engage replies are NEVER extension-published: the publish-due query
+      // excludes source='engage' (the due-item shape has no reply target), so
+      // diverting one here would strand it in QUEUE with no executor. They are
+      // stamped publishMethod=API at creation; this guard covers legacy rows.
       const isExtension =
-        post?.publishMethod === 'EXTENSION' ||
-        (post?.publishMethod == null &&
-          !!providerId &&
-          this._integrationManager.isExtensionPublish(providerId));
+        post?.source !== 'engage' &&
+        (post?.publishMethod === 'EXTENSION' ||
+          (post?.publishMethod == null &&
+            !!providerId &&
+            this._integrationManager.isExtensionPublish(providerId)));
       // A post with no bound account has nothing for Temporal to publish WITH,
       // and — not being extension-routed — nothing else will claim it either:
       // the extension publish-due query matches EXTENSION posts or null-method

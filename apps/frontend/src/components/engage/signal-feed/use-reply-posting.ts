@@ -133,5 +133,13 @@ export function useReplyPosting(
   // Tear down any in-flight cycle on unmount.
   useEffect(() => clearTimers, [clearTimers]);
 
-  return { status, begin, posting: status === 'posting' };
+  return {
+    status,
+    begin,
+    posting: status === 'posting',
+    // Timed out waiting — the reply MAY be live with its backfill still pending.
+    // Callers must keep the send action blocked in this state: re-sending is
+    // exactly how a live-but-unrecorded reply becomes a duplicate post.
+    processing: status === 'processing',
+  };
 }

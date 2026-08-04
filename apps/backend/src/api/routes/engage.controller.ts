@@ -59,6 +59,7 @@ import {
   ScheduleReplyDto,
   ScoreStatsDto,
   SearchChannelsDto,
+  PublishExtensionReplyDto,
   SendReplyDto,
   SubmitManualReplyUrlDto,
   UpdateKeywordDto,
@@ -871,7 +872,7 @@ export class EngageController {
     @GetOrgFromRequest() org: Organization,
     @GetUserFromRequest() user: User,
     @Param('id') id: string,
-    @Body() body: SubmitManualReplyUrlDto
+    @Body() body: PublishExtensionReplyDto
   ) {
     return this._engageService.publishExtensionReply(
       org,

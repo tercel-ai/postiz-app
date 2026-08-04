@@ -2211,6 +2211,12 @@ export class PostsRepository {
       publishDate: { lte: now },
       parentPostId: null, // roots only
       childrenPost: { none: {} }, // single-segment only (no thread children)
+      // Engage replies must NEVER be offered to the extension publish queue:
+      // the due-item shape carries no reply target, so the extension would
+      // publish one as a brand-NEW post (X) or reject it forever for lacking a
+      // subreddit (Reddit). They are stamped publishMethod=API at creation now,
+      // but legacy rows predate the stamp — exclude by source as the backstop.
+      NOT: { source: 'engage' },
       // Exclude recurring ORIGINALS (intervalInDays > 0): they are permanent
       // QUEUE templates published via the clone-per-cycle mechanism, which is a
       // Temporal-only path. Handing one to the extension would loop — the

@@ -39,6 +39,19 @@ describe('getDueExtensionPublishPosts', () => {
     expect(where).not.toHaveProperty('integration');
   });
 
+  it('excludes engage replies — the due-item shape has no reply target', async () => {
+    const findMany = vi.fn().mockResolvedValue([]);
+    const repo = createRepo({ findMany });
+
+    await repo.getDueExtensionPublishPosts('org-1', ['x', 'reddit'], new Date(), 10);
+
+    // An engage reply offered to the extension would be published as a brand-NEW
+    // post (X) or rejected forever for lacking a subreddit (Reddit). Replies are
+    // stamped publishMethod=API at creation; this excludes legacy null-method rows.
+    const where = findMany.mock.calls[0][0].where;
+    expect(where.NOT).toEqual({ source: 'engage' });
+  });
+
   it('adds the legacy publishMethod=null + extension-integration branch when providers are given', async () => {
     const findMany = vi.fn().mockResolvedValue([]);
     const repo = createRepo({ findMany });

@@ -287,6 +287,18 @@ export async function submitHackernewsStory(
       };
     }
 
+    // HN's anti-abuse rejection lands on /x?fnid=…&fnop=sorry with a bare
+    // "Sorry." body (observed live 2026-08-04) — the URL is the reliable
+    // signal, the page text is too generic to match.
+    if (/fnop=sorry/.test(landedUrl)) {
+      await focusTab(tabId);
+      return {
+        ok: false,
+        error:
+          'Hacker News declined the submission ("Sorry." page) — the account is likely rate-limited or restricted by HN anti-abuse. Wait a while before retrying, and check the account standing if it persists.',
+      };
+    }
+
     // Leaving /submit is necessary but NOT sufficient: expired-fnid and
     // rate-limit interstitials also live outside /submit. Check the landing
     // page for HN's known error strings before trusting the redirect.

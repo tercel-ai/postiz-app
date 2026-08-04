@@ -3870,7 +3870,10 @@ export class EngageRepository {
   async updateReplyUrl(
     organizationId: string,
     sentReplyId: string,
-    url: string,
+    // null = extension confirmed the send but captured no permalink; the state
+    // flip (markPublished) still applies and releaseURL stays null so the Sent
+    // card offers the manual "submit link" flow.
+    url: string | null,
     engageAuthor?: EngageAuthorProfile,
     // When markPublished is set (extension publish-on-success path), also flip the
     // post DRAFT→PUBLISHED in the same write. The human manual-paste path leaves it
@@ -3894,7 +3897,7 @@ export class EngageRepository {
       );
     }
     const releaseId =
-      platform === 'x' ? parseXTweetId(url) ?? undefined : undefined;
+      platform === 'x' && url ? parseXTweetId(url) ?? undefined : undefined;
 
     // If this X reply was recorded without a connected account, the freshly
     // supplied URL lets us resolve the author's integration now (handle match)
@@ -3908,7 +3911,7 @@ export class EngageRepository {
         select: { integrationId: true, settings: true },
       });
       const alreadyLinked = !!post?.integrationId;
-      if (!alreadyLinked) {
+      if (!alreadyLinked && url) {
         integrationId =
           (await this.resolveXReplyIntegrationId(organizationId, url))
             ?.integrationId ?? undefined;
@@ -3934,7 +3937,9 @@ export class EngageRepository {
     return this._post.model.post.update({
       where: { id: reply.postId },
       data: {
-        releaseURL: url,
+        // Empty/absent URL persists as null (never '') so every "awaiting its
+        // link" check — which tests releaseURL for null — keeps working.
+        releaseURL: url || null,
         ...(releaseId ? { releaseId } : {}),
         ...(integrationId ? { integrationId } : {}),
         ...(mergedSettings ? { settings: mergedSettings } : {}),

@@ -147,6 +147,23 @@ describe('submitHackernewsStory', () => {
     expect(r.error).toMatch(/does not appear in your submitted list/i);
   });
 
+  it('fails with a clear reason on HN\'s anti-abuse "Sorry." page (fnop=sorry)', async () => {
+    mocked.getTabUrl.mockResolvedValue(
+      'https://news.ycombinator.com/x?fnid=qPi3ZBLZ3jzhBDCv1NbL2B&fnop=sorry'
+    );
+    stubPage({
+      hnDetectLogin: () => false,
+      hnFillSubmit: () => 'submitted',
+    });
+
+    const r = await submitHackernewsStory({ title: 'T', text: 'b' });
+
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/declined the submission/i);
+    // Must short-circuit before any permalink resolution.
+    expect((globalThis as any).chrome.tabs.update).not.toHaveBeenCalled();
+  });
+
   it('fails on HN error interstitials (expired fnid / rate limit) even off /submit', async () => {
     mocked.getTabUrl.mockResolvedValue('https://news.ycombinator.com/r');
     stubPage({
