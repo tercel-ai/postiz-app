@@ -21,6 +21,7 @@ dayjs.extend(utc);
 function buildRepo() {
   const stateFindMany = vi.fn();
   const stateCount = vi.fn();
+  const stateGroupBy = vi.fn();
   const stateAggregate = vi.fn();
   const stateFindFirst = vi.fn();
   const stateFindUnique = vi.fn();
@@ -71,6 +72,7 @@ function buildRepo() {
       engageOpportunityState: {
         findMany: stateFindMany,
         count: stateCount,
+        groupBy: stateGroupBy,
         aggregate: stateAggregate,
         findFirst: stateFindFirst,
         findUnique: stateFindUnique,
@@ -131,7 +133,7 @@ function buildRepo() {
     scanCursor      // _scanCursor
   );
   return {
-    repo, stateFindMany, stateCount, stateAggregate, stateFindFirst, stateFindUnique,
+    repo, stateFindMany, stateCount, stateGroupBy, stateAggregate, stateFindFirst, stateFindUnique,
     stateUpdateMany, stateExecuteRaw, oppAggregate, oppFindFirst, channelFindMany,
     channelFindFirst,
     trackedFindMany, cursorFindMany, keywordFindMany, sentCount, sentFindMany, sentFindFirst, sentCreate,
@@ -160,6 +162,28 @@ const STATE_ROW = {
 };
 
 describe('EngageRepository — two-table reads', () => {
+  describe('getOpportunityCounts', () => {
+    it('isolates the total filter from later platform counts', async () => {
+      const { repo, stateCount, stateGroupBy } = buildRepo();
+      stateGroupBy.mockResolvedValue([]);
+      stateCount.mockImplementation(async ({ where }: { where: any }) => {
+        if (stateCount.mock.calls.length === 1) {
+          where.opportunity.channelId = { in: ['mutated'] };
+        }
+        return 0;
+      });
+
+      await repo.getOpportunityCounts('org1', {
+        channels: ['expected'],
+        platform: ['reddit'],
+      });
+
+      expect(stateCount.mock.calls[1][0].where.opportunity.channelId).toEqual({
+        in: ['expected'],
+      });
+    });
+  });
+
   describe('listOpportunities', () => {
     it('merges state + opportunity into the flat shape with id = opportunity id', async () => {
       const { repo, stateFindMany, stateCount } = buildRepo();

@@ -1736,7 +1736,7 @@ export class EngageRepository {
     // query. `platform` lives on the joined EngageOpportunity, which Prisma's
     // groupBy can't traverse — two scoped counts stand in for that breakdown,
     // same pattern as getSentStats/getSentCounts below.
-    const totalWhere = { ...where };
+    const totalWhere = structuredClone(where);
     delete totalWhere.opportunity.platform;
     const [total, statusGroups, x, reddit, linkedin, medium, devto, hackernews, quora] = await Promise.all([
       this._oppState.model.engageOpportunityState.count({ where: totalWhere }),
