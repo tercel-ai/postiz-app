@@ -54,15 +54,16 @@ export class PostOverageService implements OnModuleInit {
     try {
       const limits = await this._usersService.getUserLimits(userId);
 
-      // Skip when billing is off (null) or there is no active subscription
-      // (sentinel marker — those users are blocked from posting anyway).
-      // postSendLimit=0 on an active plan is a REAL quota ("zero free posts")
-      // and must fall through so every post is charged as overage.
-      if (
-        !limits ||
-        'noActiveSubscription' in limits ||
-        !Number.isFinite(limits.postSendLimit)
-      ) {
+      // Skip when billing is off (null limits) or there is no active
+      // subscription (sentinel marker — those users are blocked from posting
+      // anyway). postSendLimit=null means "no limit — never overage-charge";
+      // postSendLimit=0 is a REAL quota ("zero free posts") and must fall
+      // through so every post is charged as overage.
+      if (!limits || 'noActiveSubscription' in limits) {
+        return;
+      }
+      const sendLimit = limits.postSendLimit;
+      if (sendLimit === null || !Number.isFinite(sendLimit)) {
         return;
       }
 
@@ -77,20 +78,20 @@ export class PostOverageService implements OnModuleInit {
 
       const count = await this._postsRepository.countPostsFromDay(orgId, periodStart);
 
-      if (count <= limits.postSendLimit) {
+      if (count <= sendLimit) {
         return;
       }
 
       const overageCost = await this.getOverageCost();
       const taskId = `postiz_post_overage_${postId}`;
 
-      this.logger.log(`${tag} DEDUCT ${overageCost} credits (${count}/${limits.postSendLimit})`);
+      this.logger.log(`${tag} DEDUCT ${overageCost} credits (${count}/${sendLimit})`);
 
       await this._aiseeCreditService.deductAndConfirm({
         userId: orgId,
         taskId,
         businessType: AiseeBusinessType.POST_OVERAGE,
-        description: `Post overage: ${count}/${limits.postSendLimit} posts used this period`,
+        description: `Post overage: ${count}/${sendLimit} posts used this period`,
         relatedId: postId,
         data: { source },
         costItems: [

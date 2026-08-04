@@ -168,6 +168,20 @@ describe('PostOverageService', () => {
     expect(mocks.aiseeCreditService.deductAndConfirm).not.toHaveBeenCalled();
   });
 
+  it('does NOT deduct when postSendLimit is null (no limit) on an active plan', async () => {
+    mocks.usersService.getUserLimits.mockResolvedValue({
+      postChannelLimit: null,
+      postSendLimit: null,
+      periodStart: '2026-03-01T00:00:00.000Z',
+      periodEnd: '2026-04-01T00:00:00.000Z',
+    });
+
+    await service.deductIfOverage('org-1', 'user-1', 'post-unlimited');
+
+    expect(mocks.postsRepository.countPostsFromDay).not.toHaveBeenCalled();
+    expect(mocks.aiseeCreditService.deductAndConfirm).not.toHaveBeenCalled();
+  });
+
   it('deducts from the FIRST post when postSendLimit is 0 on an active plan (zero free quota)', async () => {
     mocks.usersService.getUserLimits.mockResolvedValue({
       postChannelLimit: 10,

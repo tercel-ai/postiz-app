@@ -499,6 +499,57 @@ describe('PermissionsService.check', () => {
     // POSTS_PER_MONTH: fallback to subscription tier
     // -----------------------------------------------------------------------
 
+    it('allows unlimited channels when an active package has postChannelLimit null (no tier fallback)', async () => {
+      mocks.usersService.getUserLimits.mockResolvedValue({
+        postChannelLimit: null,
+        postSendLimit: 0,
+        periodStart: '2026-06-01T00:00:00.000Z',
+        periodEnd: '2999-01-01T00:00:00.000Z',
+      });
+      mocks.subscriptionService.getSubscriptionByOrganizationId.mockResolvedValue({
+        subscriptionTier: 'STANDARD',
+        totalChannels: 5,
+      });
+      // 40 channels — far beyond the STANDARD tier's 5, but the active
+      // package says "no limit", so the tier cap must not apply.
+      mocks.integrationService.getIntegrationsList.mockResolvedValue(
+        Array.from({ length: 40 }, (_, i) => ({ id: `${i}`, refreshNeeded: false })),
+      );
+
+      const ability = await service.check(
+        ORG_ID, CREATED_AT, 'USER',
+        [[AuthorizationActions.Create, Sections.CHANNEL]],
+        USER_ID,
+      );
+
+      expect(isAllowed(ability, AuthorizationActions.Create, Sections.CHANNEL)).toBe(true);
+    });
+
+    it('allows posting when an active package has postSendLimit null (no limit, no tier fallback)', async () => {
+      mocks.usersService.getUserLimits.mockResolvedValue({
+        postChannelLimit: 5,
+        postSendLimit: null,
+        periodStart: '2026-06-01T00:00:00.000Z',
+        periodEnd: '2999-01-01T00:00:00.000Z',
+      });
+      mocks.subscriptionService.getSubscriptionByOrganizationId.mockResolvedValue({
+        subscriptionTier: 'STANDARD',
+      });
+      mocks.subscriptionService.getSubscription.mockResolvedValue({
+        createdAt: new Date('2026-01-01'),
+      });
+      // Over the STANDARD tier's monthly count — irrelevant: no per-user limit.
+      mocks.postsService.countPostsFromDay.mockResolvedValue(9999);
+
+      const ability = await service.check(
+        ORG_ID, CREATED_AT, 'USER',
+        [[AuthorizationActions.Create, Sections.POSTS_PER_MONTH]],
+        USER_ID,
+      );
+
+      expect(isAllowed(ability, AuthorizationActions.Create, Sections.POSTS_PER_MONTH)).toBe(true);
+    });
+
     it('falls back to subscription tier post count when Aisee postSendLimit is null', async () => {
       mocks.usersService.getUserLimits.mockResolvedValue({
         postChannelLimit: null,

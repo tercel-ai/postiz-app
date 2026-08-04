@@ -75,7 +75,9 @@ export class DashboardService {
         if (limits && 'periodStart' in limits && limits.periodStart) {
           periodStart = new Date(limits.periodStart);
           periodEnd = 'periodEnd' in limits && limits.periodEnd ? new Date(limits.periodEnd) : undefined;
-          postSendLimit = limits.postSendLimit;
+          // null = no limit (post_plan_limits) — omit the field entirely so
+          // the summary keeps its "present only when a cap exists" contract.
+          postSendLimit = limits.postSendLimit ?? undefined;
         }
       } catch (err) {
         this.logger.warn(`getSummary: getUserLimits failed for userId=${userId}, falling back to calendar month`);

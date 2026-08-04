@@ -210,7 +210,7 @@ Both pipelines source data exclusively from post-level APIs (`batchPostAnalytics
 | `posts_stats.drafts` | Draft posts | Posts in `DRAFT` state |
 | `posts_stats.errors` | Error posts | Posts in `ERROR` state (publishing failed) |
 | `published_this_period` | Posts used this billing period | Count of `QUEUE` + `PUBLISHED` (top-level) posts since the Aisee billing period start (`periodStart`). Falls back to calendar month start if no Aisee subscription. Uses the same `countPostsFromDay` query as overage billing — ensuring dashboard and billing always show the same number. |
-| `post_send_limit` | Billing period post limit | Free posts allowed per billing period: Aisee `postSendLimit`, overridden by the per-plan `post_plan_limits` Settings map when configured (default 0 = every post overage-billed). Only present when Aisee subscription is active. |
+| `post_send_limit` | Billing period post limit | Free posts allowed per billing period, from the per-plan `post_plan_limits` Settings map (default 0 = every post overage-billed; aisee `postSendLimit` only as unresolvable-plan fallback). Omitted when there is no active subscription OR the plan is configured as unlimited (`null`). |
 | `period_end` | Billing period end | ISO 8601 UTC timestamp of billing period end. Only present when Aisee subscription is active. |
 
 **How does date filtering work?**

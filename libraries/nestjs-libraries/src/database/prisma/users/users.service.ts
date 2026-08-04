@@ -61,10 +61,11 @@ export class UsersService {
   // The hard-block sentinel carries an explicit `noActiveSubscription` marker:
   // downstream gates must block on the MARKER, never on `postSendLimit === 0`,
   // because 0 on an active package is a legitimate value ("zero free posts —
-  // every post is overage-charged", settable via post_plan_limits).
+  // every post is overage-charged"). On the active member the limits come from
+  // post_plan_limits (Settings), where null = no limit.
   async getUserLimits(userId: string): Promise<
     | { postChannelLimit: number; postSendLimit: number; noActiveSubscription: true }
-    | { postChannelLimit: number; postSendLimit: number; periodStart: string; periodEnd: string; name: string; status: string; interval: string; plan?: string }
+    | { postChannelLimit: number | null; postSendLimit: number | null; periodStart: string; periodEnd: string; name: string; status: string; interval: string; plan?: string }
     | null
   > {
     if (!this._aiseeClient.enabled) {
@@ -85,10 +86,11 @@ export class UsersService {
       return { postChannelLimit: 0, postSendLimit: 0, noActiveSubscription: true };
     }
 
-    // Per-plan Settings overrides (post_plan_limits) win over the package's
-    // raw numbers, so admin-tuned quotas apply everywhere getUserLimits feeds:
-    // the permissions gate, overage deduction, dashboard, and user-facing
-    // limits. The hard blocks above are intentionally NOT overridable.
+    // post_plan_limits (Settings) REPLACES the package's raw numbers once the
+    // plan resolves (null = no limit), so admin-tuned quotas apply everywhere
+    // getUserLimits feeds: the permissions gate, overage deduction, dashboard,
+    // and user-facing limits. The hard blocks above are intentionally NOT
+    // overridable; aisee numbers remain only as the unresolvable-plan fallback.
     return this._postPlanLimits.applyOverrides(pkg);
   }
 

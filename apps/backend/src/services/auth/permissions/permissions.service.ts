@@ -119,9 +119,14 @@ export class PermissionsService {
           await this._integrationService.getIntegrationsList(orgId)
         ).filter((f) => !f.refreshNeeded).length;
 
-        // Per-user channel limit (from Aisee) takes priority
-        if (userLimits.postChannelLimit !== null) {
-          if (totalChannels < userLimits.postChannelLimit) {
+        // Per-user channel limit takes priority. An active package with
+        // postChannelLimit=null means "no limit" (post_plan_limits) — allow
+        // without falling back to the Stripe tier caps below.
+        if (userLimits.postChannelLimit !== null || 'periodEnd' in userLimits) {
+          if (
+            userLimits.postChannelLimit === null ||
+            totalChannels < userLimits.postChannelLimit
+          ) {
             can(action, section);
           }
           continue;
@@ -158,11 +163,11 @@ export class PermissionsService {
           checkFrom.toDate()
         );
 
-        // Per-user posts limit (from Aisee) takes priority. Block only on the
-        // explicit no-active-subscription marker — postSendLimit=0 on an
-        // active plan means "zero free posts", posting stays allowed and every
-        // post is charged as overage post-creation.
-        if (userLimits.postSendLimit !== null) {
+        // Per-user posts limit takes priority. Block only on the explicit
+        // no-active-subscription marker — postSendLimit=0 on an active plan
+        // means "zero free posts" (allowed, all overage) and null means "no
+        // limit"; neither falls back to the Stripe tier caps below.
+        if (userLimits.postSendLimit !== null || 'periodEnd' in userLimits) {
           if (!('noActiveSubscription' in userLimits)) {
             can(action, section);
           }

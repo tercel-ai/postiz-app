@@ -76,16 +76,20 @@ Permission check (PoliciesGuard)
       → If API fails / no package / periodEnd expired → hard block sentinel:
         { postChannelLimit: 0, postSendLimit: 0, noActiveSubscription: true }
       → Otherwise PostPlanLimitsService.applyOverrides(pkg):
-        per-plan Settings overrides (key: post_plan_limits) replace the
-        package's postSendLimit/postChannelLimit; null defers to the aisee value
+        once the plan code resolves, the per-plan Settings map (key:
+        post_plan_limits) REPLACES the package's postSendLimit/postChannelLimit
+        entirely; null = no limit. The aisee numbers survive only as the
+        fallback for unresolvable plans or a Settings read failure.
 ```
 
-> **postSendLimit semantics**: downstream gates block ONLY on the explicit
-> `noActiveSubscription` marker — never on the number. `postSendLimit=0` on an
+> **Limit semantics**: downstream gates block ONLY on the explicit
+> `noActiveSubscription` marker — never on the numbers. `postSendLimit=0` on an
 > active plan is a real quota meaning "zero free posts": posting stays allowed
-> and every post is charged as overage. The seeded `post_plan_limits` default
-> is `postSendLimit: 0` for every plan (all posts overage-billed) with
-> `postChannelLimit: null` (channel cap deferred to aisee).
+> and every post is charged as overage; `postSendLimit=null` = unlimited free
+> posts (never overage-charged). `postChannelLimit=null` = unlimited channels;
+> `0` = no channels can be connected. The seeded `post_plan_limits` default is
+> `postSendLimit: 0` (all posts overage-billed) + `postChannelLimit: null`
+> (unlimited channels) for every plan.
 
 ### Response Mapping (Aisee → Postiz)
 

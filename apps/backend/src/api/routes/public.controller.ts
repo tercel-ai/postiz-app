@@ -53,8 +53,8 @@ export class PublicController {
    *   and per-project), scan interval, monthly reply cap, metrics window.
    *   `null` = unlimited.
    * - posts: free posts per billing period + channel cap from the
-   *   `post_plan_limits` Settings map. `null` = not configured in Postiz
-   *   (the aisee-core package value applies).
+   *   `post_plan_limits` Settings map (the source of truth for resolved
+   *   plans). `null` = no limit.
    * Plus reply credit pricing, the per-post overage cost, and the platforms
    * engage scanning currently covers. No org, usage, or billing state — safe
    * without authentication.

@@ -10,17 +10,18 @@ import {
 export const POST_PLAN_LIMITS_KEY = 'post_plan_limits';
 
 /**
- * Per-plan posting limits managed in Postiz Settings. `null` means "no
- * override — keep the number aisee-core's credit package reports". Once a
- * value is set here it becomes the source of truth for that plan: enforcement
- * (permissions gate, overage deduction), the dashboard summary, and the public
- * plan catalog all flow through the same override.
+ * Per-plan posting limits managed in Postiz Settings — the SOLE source of
+ * truth once the user's plan resolves. The aisee-core package numbers are only
+ * a fallback for unresolvable plans (unknown name/no plan code) or a Settings
+ * read failure. Enforcement (permissions gate, overage deduction), the
+ * dashboard summary, and the public plan catalog all read the same values.
  *
- * Values are non-negative integers or null. `postSendLimit: 0` is a real
- * quota — "zero free posts, every post is charged as overage" (posting stays
- * allowed; only the no-active-subscription sentinel blocks posting).
- * `postChannelLimit: 0` literally means "no channels can be connected" —
- * there is no channel overage billing.
+ * Values are non-negative integers or null; **null means "no limit"**.
+ * `postSendLimit: 0` = "zero free posts, every post is charged as overage"
+ * (posting stays allowed; only the no-active-subscription sentinel blocks
+ * posting); `postSendLimit: null` = unlimited free posts (no overage ever).
+ * `postChannelLimit: 0` = no channels can be connected (there is no channel
+ * overage billing); `postChannelLimit: null` = unlimited channels.
  */
 export interface PostPlanLimits {
   /** Free posts per billing period (the API/calendar send quota). */
@@ -31,10 +32,20 @@ export interface PostPlanLimits {
 
 export type PostPlanLimitsMap = Record<AiseePlanCode, PostPlanLimits>;
 
-// Product default: NO free posts on any plan — every post goes through
-// overage billing until an admin raises a plan's quota here. Channel caps
-// stay deferred to the aisee-core package value (0 would mean "no channels
-// at all", which is not a sane default).
+/** An aisee package whose posting limits were resolved from post_plan_limits
+ *  (null = no limit — a state the raw aisee package cannot express). */
+export type ResolvedPostLimitsPackage = Omit<
+  AiseeUserCreditPackage,
+  'postSendLimit' | 'postChannelLimit'
+> & {
+  postSendLimit: number | null;
+  postChannelLimit: number | null;
+};
+
+// Product default: NO free posts on any plan (every post goes through overage
+// billing) and UNLIMITED channels, until an admin tunes a plan here. Junk
+// stored values also fall back to these per-field defaults — never to null,
+// which would silently grant "no limit".
 const DEFAULT_POST_PLAN_LIMITS: PostPlanLimitsMap = {
   starter: { postSendLimit: 0, postChannelLimit: null },
   developer: { postSendLimit: 0, postChannelLimit: null },
@@ -68,9 +79,9 @@ export class PostPlanLimitsService implements OnModuleInit {
   /**
    * Stored map with defaults merged per plan: a field that is ABSENT falls
    * back to the product default (postSendLimit 0 / postChannelLimit null),
-   * while an explicit `null` means "defer to the aisee-core package value".
-   * Junk values (strings, negatives, floats) sanitise to null with a warning
-   * so they can neither corrupt enforcement nor leak into the public catalog.
+   * an explicit `null` means "no limit", and junk values (strings, negatives,
+   * floats) fall back to the field's DEFAULT with a warning — never to null,
+   * so a typo can't silently grant an unlimited quota.
    */
   async getAll(): Promise<PostPlanLimitsMap> {
     const stored = await this._settings.get<Partial<PostPlanLimitsMap>>(
@@ -79,14 +90,12 @@ export class PostPlanLimitsService implements OnModuleInit {
     return AISEE_PLAN_CODES.reduce((acc, code) => {
       const raw: Partial<PostPlanLimits> = stored?.[code] ?? {};
       acc[code] = {
-        postSendLimit:
-          raw.postSendLimit === undefined
-            ? DEFAULT_POST_PLAN_LIMITS[code].postSendLimit
-            : this._sanitize(code, 'postSendLimit', raw.postSendLimit),
-        postChannelLimit:
-          raw.postChannelLimit === undefined
-            ? DEFAULT_POST_PLAN_LIMITS[code].postChannelLimit
-            : this._sanitize(code, 'postChannelLimit', raw.postChannelLimit),
+        postSendLimit: this._sanitize(code, 'postSendLimit', raw.postSendLimit),
+        postChannelLimit: this._sanitize(
+          code,
+          'postChannelLimit',
+          raw.postChannelLimit
+        ),
       };
       return acc;
     }, {} as PostPlanLimitsMap);
@@ -97,37 +106,38 @@ export class PostPlanLimitsService implements OnModuleInit {
     field: keyof PostPlanLimits,
     value: unknown
   ): number | null {
-    if (value === null) return null;
+    if (value === undefined) return DEFAULT_POST_PLAN_LIMITS[code][field];
+    if (value === null) return null; // explicit: no limit
     if (typeof value === 'number' && Number.isInteger(value) && value >= 0) {
       return value;
     }
     this.logger.warn(
-      `Ignoring invalid ${POST_PLAN_LIMITS_KEY}.${code}.${field}=${JSON.stringify(
+      `Invalid ${POST_PLAN_LIMITS_KEY}.${code}.${field}=${JSON.stringify(
         value
-      )} — must be a non-negative integer or null`
+      )} — must be a non-negative integer or null (no limit); using the default`
     );
-    return null;
+    return DEFAULT_POST_PLAN_LIMITS[code][field];
   }
 
   /**
-   * Apply the plan's Settings overrides onto an aisee credit package: each
-   * configured value replaces the package's number; nulls leave the aisee
-   * value untouched. Packages whose plan can't be resolved (unknown name, no
-   * `plan` field) pass through unchanged — as does everything on a Settings
-   * read failure, so a Postiz DB hiccup can only lose the override, never
-   * break the permissions path that calls getUserLimits.
+   * Resolve a package's posting limits from post_plan_limits: once the plan
+   * code resolves, the Settings values REPLACE the aisee package numbers
+   * entirely (null = no limit). The aisee numbers only survive as a fallback
+   * when the plan can't be resolved (unknown name, no `plan` field) or the
+   * Settings read fails — so a Postiz DB hiccup can only lose the plan
+   * tuning, never break the permissions path that calls getUserLimits.
    */
   async applyOverrides(
     pkg: AiseeUserCreditPackage
-  ): Promise<AiseeUserCreditPackage> {
+  ): Promise<ResolvedPostLimitsPackage> {
     const code = resolveAiseePlanCode(pkg);
     if (!code) return pkg;
     try {
       const limits = (await this.getAll())[code];
       return {
         ...pkg,
-        postSendLimit: limits.postSendLimit ?? pkg.postSendLimit,
-        postChannelLimit: limits.postChannelLimit ?? pkg.postChannelLimit,
+        postSendLimit: limits.postSendLimit,
+        postChannelLimit: limits.postChannelLimit,
       };
     } catch (err) {
       this.logger.error(

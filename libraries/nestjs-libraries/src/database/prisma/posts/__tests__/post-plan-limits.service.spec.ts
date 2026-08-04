@@ -48,7 +48,7 @@ describe('PostPlanLimitsService.onModuleInit', () => {
 });
 
 describe('PostPlanLimitsService.getAll', () => {
-  it('absent fields fall back to defaults (send 0 / channel null); explicit null stays null', async () => {
+  it('absent fields fall back to defaults (send 0 / channel null); explicit null = no limit', async () => {
     const service = new PostPlanLimitsService(
       settingsMock({
         [POST_PLAN_LIMITS_KEY]: {
@@ -59,18 +59,19 @@ describe('PostPlanLimitsService.getAll', () => {
     );
     const all = await service.getAll();
     expect(all.starter).toEqual({ postSendLimit: 30, postChannelLimit: null });
-    // Explicit null = defer to the aisee package value, NOT the 0 default.
+    // Explicit null = unlimited free posts.
     expect(all.developer).toEqual({
       postSendLimit: null,
       postChannelLimit: null,
     });
-    // Entirely unset plan gets the product default: zero free posts.
+    // Entirely unset plan gets the product default: zero free posts,
+    // unlimited channels.
     expect(all.pro).toEqual({ postSendLimit: 0, postChannelLimit: null });
   });
 });
 
 describe('PostPlanLimitsService.getAll — sanitisation', () => {
-  it('accepts 0 as a real quota; rejects negatives, non-integers, and strings (become null)', async () => {
+  it('accepts 0 as a real quota; junk falls back to the field DEFAULT, never to null', async () => {
     const service = new PostPlanLimitsService(
       settingsMock({
         [POST_PLAN_LIMITS_KEY]: {
@@ -81,9 +82,11 @@ describe('PostPlanLimitsService.getAll — sanitisation', () => {
       })
     );
     const all = await service.getAll();
+    // Junk channel (-5, '50') → channel default null; junk send (1.5) → send
+    // default 0 — a typo must not silently grant an unlimited send quota.
     expect(all.starter).toEqual({ postSendLimit: 0, postChannelLimit: null });
     expect(all.developer).toEqual({
-      postSendLimit: null,
+      postSendLimit: 0,
       postChannelLimit: null,
     });
     expect(all.pro).toEqual({ postSendLimit: 300, postChannelLimit: null });
@@ -105,16 +108,16 @@ describe('PostPlanLimitsService.applyOverrides', () => {
     expect(result).toEqual(original);
   });
 
-  it('applies the zero-free-quota default when the plan has no stored entry', async () => {
+  it('applies the defaults when the plan has no stored entry (send 0, channel unlimited)', async () => {
     const service = new PostPlanLimitsService(
       settingsMock({ [POST_PLAN_LIMITS_KEY]: {} })
     );
     const result = await service.applyOverrides(pkg());
     expect(result.postSendLimit).toBe(0); // default: no free posts
-    expect(result.postChannelLimit).toBe(10); // channel deferred to aisee
+    expect(result.postChannelLimit).toBeNull(); // default: no channel limit
   });
 
-  it('replaces only configured values; null keeps the aisee number', async () => {
+  it('REPLACES the aisee numbers once the plan resolves; null = no limit', async () => {
     const service = new PostPlanLimitsService(
       settingsMock({
         [POST_PLAN_LIMITS_KEY]: {
@@ -123,8 +126,9 @@ describe('PostPlanLimitsService.applyOverrides', () => {
       })
     );
     const result = await service.applyOverrides(pkg());
-    expect(result.postSendLimit).toBe(500); // overridden
-    expect(result.postChannelLimit).toBe(10); // aisee value kept
+    expect(result.postSendLimit).toBe(500);
+    // aisee's postChannelLimit=10 is superseded by the configured "no limit".
+    expect(result.postChannelLimit).toBeNull();
   });
 
   it('resolves the plan from the exact `plan` field over the display name', async () => {
