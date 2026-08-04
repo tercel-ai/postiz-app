@@ -1735,7 +1735,7 @@ export class EngageRepository {
     // query. `platform` lives on the joined EngageOpportunity, which Prisma's
     // groupBy can't traverse — two scoped counts stand in for that breakdown,
     // same pattern as getSentStats/getSentCounts below.
-    const [total, statusGroups, x, reddit] = await Promise.all([
+    const [total, statusGroups, x, reddit, linkedin, medium, devto, hackernews, quora] = await Promise.all([
       this._oppState.model.engageOpportunityState.count({ where }),
       this._oppState.model.engageOpportunityState.groupBy({
         by: ['status'],
@@ -1748,6 +1748,21 @@ export class EngageRepository {
       this._oppState.model.engageOpportunityState.count({
         where: { ...where, opportunity: { ...oppFilter, platform: 'reddit' } },
       }),
+      this._oppState.model.engageOpportunityState.count({
+        where: { ...where, opportunity: { ...oppFilter, platform: 'linkedin' } },
+      }),
+      this._oppState.model.engageOpportunityState.count({
+        where: { ...where, opportunity: { ...oppFilter, platform: 'medium' } },
+      }),
+      this._oppState.model.engageOpportunityState.count({
+        where: { ...where, opportunity: { ...oppFilter, platform: 'devto' } },
+      }),
+      this._oppState.model.engageOpportunityState.count({
+        where: { ...where, opportunity: { ...oppFilter, platform: 'hackernews' } },
+      }),
+      this._oppState.model.engageOpportunityState.count({
+        where: { ...where, opportunity: { ...oppFilter, platform: 'quora' } },
+      }),
     ]);
 
     const byStatus = Object.fromEntries(
@@ -1755,7 +1770,7 @@ export class EngageRepository {
     ) as Record<EngageOpportunityStatus, number>;
     for (const g of statusGroups) byStatus[g.status] = g._count._all;
 
-    return { total, byStatus, byPlatform: { x, reddit } };
+    return { total, byStatus, byPlatform: { x, reddit, linkedin, medium, devto, hackernews, quora } };
   }
 
   async locateOpportunity(organizationId: string, dto: LocateOpportunityDto) {
