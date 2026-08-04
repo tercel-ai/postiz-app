@@ -125,6 +125,30 @@ describe('engage-scorer', () => {
     const heatOf = (post: RawPost) =>
       scorePost(post, [makeKeyword('GEO')])!.scoreHeat;
 
+    it('X: sums the specified view and engagement tiers, including strict thresholds', () => {
+      const score = (m: Partial<RawPost>) => heatOf(metricPost('x', m));
+
+      expect(score({ metricViews: 0 })).toBe(4);
+      expect(score({ metricViews: 301 })).toBe(8);
+      expect(score({ metricViews: 1_001 })).toBe(14);
+      expect(score({ metricViews: 5_001 })).toBe(21);
+      expect(score({ metricViews: 20_001 })).toBe(27);
+      expect(score({ metricViews: 50_001 })).toBe(32);
+
+      expect(score({ metricLikes: 81 })).toBe(7);
+      expect(score({ metricLikes: 301 })).toBe(12);
+      expect(score({ metricLikes: 1_001 })).toBe(17);
+      expect(score({ metricLikes: 2_001 })).toBe(22);
+      expect(score({ metricLikes: 81, metricViews: 301 })).toBe(11);
+    });
+
+    it('X: weights replies, retweets, and quotes and excludes shares from x_heat', () => {
+      expect(heatOf(metricPost('x', { metricReplies: 27 }))).toBe(7);
+      expect(heatOf(metricPost('x', { metricRetweets: 41 }))).toBe(7);
+      expect(heatOf(metricPost('x', { metricQuotes: 41 }))).toBe(7);
+      expect(heatOf(metricPost('x', { metricShares: 2_001 }))).toBe(4);
+    });
+
     it('text branch (bluesky): likes*1+replies*3+... → 400 lands in the >300 bucket (23)', () => {
       // bluesky is not "x" — proves the text branch covers all engagement platforms.
       expect(heatOf(metricPost('bluesky', { metricLikes: 400 }))).toBe(23);
@@ -132,11 +156,6 @@ describe('engage-scorer', () => {
 
     it('video branch (youtube): views are weighted (200k*0.005=1000 → >800 bucket, 33)', () => {
       expect(heatOf(metricPost('youtube', { metricViews: 200_000 }))).toBe(33);
-    });
-
-    it('text branch ignores views entirely (same 200k views on x → base 4)', () => {
-      // Discriminates video from text: views only count under the video branch.
-      expect(heatOf(metricPost('x', { metricViews: 200_000 }))).toBe(4);
     });
 
     it('network branch (instagram): saves are weighted (300*4=1200 → >1000 bucket, 45)', () => {

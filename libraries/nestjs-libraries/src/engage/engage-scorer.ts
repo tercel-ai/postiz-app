@@ -65,6 +65,7 @@ export function scorePost(
   const scoreHeat = (() => {
     switch (post.platform) {
       case 'x':
+        return computeXHeatScore(post);
       case 'threads':
       case 'mastodon':
       case 'bluesky':
@@ -139,7 +140,31 @@ function computeKeywordScore(
 
 // ─── Heat scoring ─────────────────────────────────────────────────────────────
 
-// X, Threads, Mastodon, Bluesky — engagement-based (no view counts)
+// X — views (30 points) + weighted engagement (20 points)
+function computeXHeatScore(post: RawPost): number {
+  const views = post.metricViews;
+  const viewScore =
+    views > 50_000 ? 30 :
+    views > 20_000 ? 25 :
+    views > 5_000 ? 19 :
+    views > 1_000 ? 12 :
+    views > 300 ? 6 : 2;
+
+  const engagement =
+    post.metricLikes +
+    post.metricReplies * 3 +
+    post.metricRetweets * 2 +
+    post.metricQuotes * 2;
+  const engagementScore =
+    engagement > 2_000 ? 20 :
+    engagement > 1_000 ? 15 :
+    engagement > 300 ? 10 :
+    engagement > 80 ? 5 : 2;
+
+  return viewScore + engagementScore;
+}
+
+// Threads, Mastodon, Bluesky — engagement-based (no view counts)
 function computeTextHeatScore(post: RawPost): number {
   const heat =
     post.metricLikes * 1 +
