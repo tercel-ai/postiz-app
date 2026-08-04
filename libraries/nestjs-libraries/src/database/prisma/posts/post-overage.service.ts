@@ -54,7 +54,15 @@ export class PostOverageService implements OnModuleInit {
     try {
       const limits = await this._usersService.getUserLimits(userId);
 
-      if (!limits || !limits.postSendLimit) {
+      // Skip when billing is off (null) or there is no active subscription
+      // (sentinel marker — those users are blocked from posting anyway).
+      // postSendLimit=0 on an active plan is a REAL quota ("zero free posts")
+      // and must fall through so every post is charged as overage.
+      if (
+        !limits ||
+        'noActiveSubscription' in limits ||
+        !Number.isFinite(limits.postSendLimit)
+      ) {
         return;
       }
 

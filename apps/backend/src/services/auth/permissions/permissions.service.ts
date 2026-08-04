@@ -59,8 +59,8 @@ export class PermissionsService {
       );
       if (needsUserLimits) {
         const userLimits = (await this._usersService.getUserLimits(userId)) || {
-          postChannelLimit: null,
-          postSendLimit: null,
+          postChannelLimit: null as number | null,
+          postSendLimit: null as number | null,
         };
         for (const [action, section] of requestedPermission) {
           if (section === Sections.CHANNEL) {
@@ -76,12 +76,11 @@ export class PermissionsService {
             continue;
           }
           if (section === Sections.POSTS_PER_MONTH) {
-            // postSendLimit=0 means no active subscription — block
-            // postSendLimit>0: always allow; overage is deducted post-creation
-            if (
-              userLimits.postSendLimit === null ||
-              userLimits.postSendLimit > 0
-            ) {
+            // Block only on the explicit no-active-subscription marker. The
+            // number itself never gates posting: postSendLimit=0 on an active
+            // plan means "zero free posts — allow, every post is charged as
+            // overage post-creation".
+            if (!('noActiveSubscription' in userLimits)) {
               can(action, section);
             }
             continue;
@@ -107,7 +106,10 @@ export class PermissionsService {
     );
     const userLimits = (needsUserLimitsCheck
       ? await this._usersService.getUserLimits(userId)
-      : null) || { postChannelLimit: null, postSendLimit: null };
+      : null) || {
+      postChannelLimit: null as number | null,
+      postSendLimit: null as number | null,
+    };
 
     const { subscription, options } = await this.getPackageOptions(orgId);
     for (const [action, section] of requestedPermission) {
@@ -156,11 +158,12 @@ export class PermissionsService {
           checkFrom.toDate()
         );
 
-        // Per-user posts limit (from Aisee) takes priority
-        // postSendLimit=0: no subscription — block
-        // postSendLimit>0: always allow; overage credits deducted post-creation
+        // Per-user posts limit (from Aisee) takes priority. Block only on the
+        // explicit no-active-subscription marker — postSendLimit=0 on an
+        // active plan means "zero free posts", posting stays allowed and every
+        // post is charged as overage post-creation.
         if (userLimits.postSendLimit !== null) {
-          if (userLimits.postSendLimit > 0) {
+          if (!('noActiveSubscription' in userLimits)) {
             can(action, section);
           }
           continue;

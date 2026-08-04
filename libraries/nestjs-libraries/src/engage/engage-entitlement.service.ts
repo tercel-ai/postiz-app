@@ -12,7 +12,13 @@ import { UsersService } from '@gitroom/nestjs-libraries/database/prisma/users/us
 import {
   AiseeCreditService,
 } from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/aisee-credit.service';
-import { AiseeBusinessType } from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/aisee.client';
+import {
+  AiseeBusinessType,
+  AISEE_PLAN_CODES,
+  AiseePlanCode,
+  normalizeAiseePlanName,
+  resolveAiseePlanCode,
+} from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/aisee.client';
 import {
   PrismaRepository,
   PrismaTransaction,
@@ -45,8 +51,8 @@ const RELEASED_STATUS = 'released';
 // to retry the cap reserve under SERIALIZABLE.
 const SERIALIZATION_FAILURE_CODE = 'P2034';
 
-export type EngagePlanCode = 'starter' | 'developer' | 'pro';
-const ENGAGE_PLAN_CODES: readonly EngagePlanCode[] = ['starter', 'developer', 'pro'];
+export type EngagePlanCode = AiseePlanCode;
+const ENGAGE_PLAN_CODES: readonly EngagePlanCode[] = AISEE_PLAN_CODES;
 export type ReplyLength = 'short' | 'medium' | 'long';
 
 /** The three unit kinds a plan caps. */
@@ -294,21 +300,12 @@ export class EngageEntitlementService implements OnModuleInit {
   }
 
   /**
-   * Fuzzy fallback: normalise an aisee plan DISPLAY name ("Starter Plan
-   * (Monthly)", "pro", …) to an engage plan code by substring match. Only used
-   * when the aisee record predates the exact `plan` field (see
-   * AiseeUserCreditPackage.plan) — prefer that exact code when present, since
-   * matching free text can misfire (e.g. a differently-named future plan, or
-   * a non-subscription product whose name happens to contain "pro").
-   * Returns null when nothing matches.
+   * Fuzzy fallback: normalise an aisee plan DISPLAY name to an engage plan
+   * code. Kept as a static for existing callers/tests; the logic itself is the
+   * shared aisee-client helper so every plan-mapping module agrees on it.
    */
   static normalizePlanName(name: string | undefined | null): EngagePlanCode | null {
-    if (!name) return null;
-    const n = name.toLowerCase();
-    if (n.includes('developer')) return 'developer';
-    if (n.includes('pro')) return 'pro';
-    if (n.includes('starter')) return 'starter';
-    return null;
+    return normalizeAiseePlanName(name);
   }
 
   /** Resolve (and cache) the org's plan code + billing-period start. */
@@ -346,10 +343,7 @@ export class EngageEntitlementService implements OnModuleInit {
     // product_code (e.g. "developer-month" -> "developer") — only fall back
     // to fuzzy-matching the free-text display name for older records that
     // predate this field.
-    const code =
-      (rawPlan && (ENGAGE_PLAN_CODES as readonly string[]).includes(rawPlan)
-        ? (rawPlan as EngagePlanCode)
-        : null) ?? EngageEntitlementService.normalizePlanName(name);
+    const code = resolveAiseePlanCode({ plan: rawPlan, name });
     if (!code) {
       this.logger.warn(
         `Unrecognised plan name "${name}" for org=${orgId}; applying "${FALLBACK_PLAN_CODE}" limits`
@@ -411,6 +405,29 @@ export class EngageEntitlementService implements OnModuleInit {
       degraded: plan.degraded ?? false,
       limits,
       usage: { keywords, trackedAccounts, subreddits, repliesThisPeriod },
+      replyCredits,
+    };
+  }
+
+  /**
+   * Public, org-independent plan catalog: every tier's limits (admin overrides
+   * from Settings applied) plus reply-draft credit pricing — the data a pricing
+   * page needs. Contains no org/usage/billing state, so it is safe to serve
+   * unauthenticated. `null` anywhere means "unlimited".
+   */
+  async getPublicPlanCatalog(): Promise<{
+    plans: Array<{ code: EngagePlanCode; limits: EngageEntitlement }>;
+    replyCredits: Record<ReplyLength, number>;
+  }> {
+    const [entitlements, replyCredits] = await Promise.all([
+      this._loadEntitlements(),
+      this.getAllReplyCosts(),
+    ]);
+    return {
+      plans: ENGAGE_PLAN_CODES.map((code) => ({
+        code,
+        limits: entitlements[code],
+      })),
       replyCredits,
     };
   }

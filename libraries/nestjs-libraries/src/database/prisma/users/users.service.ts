@@ -5,6 +5,7 @@ import { UserDetailDto } from '@gitroom/nestjs-libraries/dtos/users/user.details
 import { EmailNotificationsDto } from '@gitroom/nestjs-libraries/dtos/users/email-notifications.dto';
 import { OrganizationRepository } from '@gitroom/nestjs-libraries/database/prisma/organizations/organization.repository';
 import { AiseeClient } from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/aisee.client';
+import { PostPlanLimitsService } from '@gitroom/nestjs-libraries/database/prisma/posts/post-plan-limits.service';
 
 @Injectable()
 export class UsersService {
@@ -13,7 +14,8 @@ export class UsersService {
   constructor(
     private _usersRepository: UsersRepository,
     private _organizationRepository: OrganizationRepository,
-    private _aiseeClient: AiseeClient
+    private _aiseeClient: AiseeClient,
+    private _postPlanLimits: PostPlanLimitsService
   ) {}
 
   getUserByEmail(email: string) {
@@ -56,8 +58,12 @@ export class UsersService {
     return this._usersRepository.updateEmailNotifications(userId, body);
   }
 
+  // The hard-block sentinel carries an explicit `noActiveSubscription` marker:
+  // downstream gates must block on the MARKER, never on `postSendLimit === 0`,
+  // because 0 on an active package is a legitimate value ("zero free posts —
+  // every post is overage-charged", settable via post_plan_limits).
   async getUserLimits(userId: string): Promise<
-    | { postChannelLimit: number; postSendLimit: number }
+    | { postChannelLimit: number; postSendLimit: number; noActiveSubscription: true }
     | { postChannelLimit: number; postSendLimit: number; periodStart: string; periodEnd: string; name: string; status: string; interval: string; plan?: string }
     | null
   > {
@@ -70,16 +76,20 @@ export class UsersService {
     // API failed or no active package — hard block
     if (pkg === null) {
       this.logger.warn(`No credit package for user=${userId}, blocking channels and posts`);
-      return { postChannelLimit: 0, postSendLimit: 0 };
+      return { postChannelLimit: 0, postSendLimit: 0, noActiveSubscription: true };
     }
 
     // Package expired or periodEnd missing — hard block
     if (!pkg.periodEnd || new Date(pkg.periodEnd) < new Date()) {
       this.logger.warn(`Credit package expired at ${pkg.periodEnd} for user=${userId}, blocking channels and posts`);
-      return { postChannelLimit: 0, postSendLimit: 0 };
+      return { postChannelLimit: 0, postSendLimit: 0, noActiveSubscription: true };
     }
 
-    return pkg;
+    // Per-plan Settings overrides (post_plan_limits) win over the package's
+    // raw numbers, so admin-tuned quotas apply everywhere getUserLimits feeds:
+    // the permissions gate, overage deduction, dashboard, and user-facing
+    // limits. The hard blocks above are intentionally NOT overridable.
+    return this._postPlanLimits.applyOverrides(pkg);
   }
 
 }

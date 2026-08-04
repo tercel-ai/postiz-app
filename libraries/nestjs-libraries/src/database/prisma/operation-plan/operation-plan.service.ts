@@ -133,7 +133,33 @@ const DEFAULT_PLATFORM_CADENCE: Record<string, PlatformCadence> = {
     cadence: '3-5 posts per week',
     citationWeight: 'low — rarely cited as a text source',
   },
+  reddit: {
+    cadence: '2-3 self-posts per week across relevant subreddits',
+    citationWeight: 'high — Reddit threads are a top retrieval source for AI search engines',
+  },
+  medium: {
+    cadence: '1-2 articles per week',
+    citationWeight: 'medium — long-form articles get indexed and quoted',
+  },
+  devto: {
+    cadence: '1-2 articles per week',
+    citationWeight: 'medium — strong reach for developer topics via tag feeds',
+  },
+  hackernews: {
+    cadence: '1-2 submissions per week',
+    citationWeight: 'medium — high visibility when a submission lands; lead with substance, overt promotion is punished',
+  },
+  quora: {
+    cadence: '2-3 answers per week',
+    citationWeight: 'medium — Q&A format maps directly onto AI answer retrieval',
+  },
 };
+
+// Last-resort rhythm for a requested platform with neither an admin-configured
+// nor a built-in cadence entry. The playbook must cover EVERY requested
+// platform: an absent entry reads as "no volume" to the model, and that is
+// exactly how whole platforms used to end up with zero generated content.
+const GENERIC_PLATFORM_CADENCE: PlatformCadence = { cadence: '2-3 posts per week' };
 
 const DEFAULT_CONTENT_LIMIT = 3000;
 
@@ -620,6 +646,9 @@ export class OperationPlanService implements OnApplicationBootstrap {
         'Every `contentItems[].platforms[].content` MUST fit its platform budget. Over-budget content is REJECTED and the whole plan fails. Count BEFORE you write, and write to the budget — do not draft long and hope.',
         ...limitLines,
         '',
+        '### PLATFORM COVERAGE — EVERY REQUESTED PLATFORM ###',
+        `Every platform in \`platforms\` (${platforms.join(', ')}) MUST receive content: at least one contentItems platform entry inside the range, with its volume guided by that platform's platformPlaybook cadence. NEVER leave a requested platform with zero posts — a plan missing ANY requested platform is REJECTED and the whole generation fails, exactly like an over-budget post. Score-driven weighting (below) shifts volume BETWEEN platforms; it never removes one.`,
+        '',
         'GOAL',
         '- Produce a `goal` object: a short campaign `title`; a 1-2 sentence `description` of the strategy; and a `targetScore` (0-100) — a REALISTIC analysis score achievable by endAt. targetScore MUST be >= the provided baselineScore and <= 100; scale the uplift to the range length and to how much headroom the weakest dimensions have (do not promise 90 in two weeks from a low baseline).',
         '',
@@ -629,16 +658,16 @@ export class OperationPlanService implements OnApplicationBootstrap {
         '',
         'CADENCE',
         '- Derive content counts from the actual dates, never a fixed template. Weight activity toward workdays (Mon-Fri) over weekends (Sat-Sun): more/heavier items on weekdays, lighter on weekends.',
-        ...(Object.keys(platformPlaybook).length
-          ? [
-              '- FOLLOW the per-platform playbook in `platformPlaybook` (posting frequency + how strongly AI systems cite that channel). It is the team\'s configured rhythm — match its cadence rather than inventing your own volume, and lean into the higher-citation channels.',
-            ]
-          : []),
+        // The playbook covers EVERY requested platform (_buildPlatformPlaybook
+        // falls back to built-in/generic entries), so this instruction is
+        // unconditional — and "lean into higher-citation channels" is volume
+        // steering only, bounded by the PLATFORM COVERAGE rule above.
+        '- FOLLOW the per-platform playbook in `platformPlaybook` (posting frequency + how strongly AI systems cite that channel). It is the team\'s configured rhythm — match its cadence rather than inventing your own volume, and lean into the higher-citation channels while still covering every requested platform.',
         '- For each requested platform set `targetRepliesPerDay` to a sustainable WEEKDAY-level reply count — it is the default for any day you do not override.',
         '- Then express the weekday/weekend rhythm concretely in `dailyTargets`: one { date, target } per date in the range that should differ from the default (typically the weekends — a lower target). Dates are UTC "YYYY-MM-DD" and MUST fall inside [startAt, endAt]; do not repeat a date. Omit a date to leave it at `targetRepliesPerDay`. Return an empty list only if every day genuinely has the same target.',
         '',
         'SCORE-DRIVEN SELECTION',
-        '- Read the analysis result and prioritise the weakest / lowest-scoring dimensions and platforms (largest gap to target = highest priority); do NOT spread effort evenly. Bias each theme toward closing a specific weak spot and reflect that gap in themeTitle.',
+        '- Read the analysis result and prioritise the weakest / lowest-scoring dimensions and platforms (largest gap to target = highest priority); do NOT spread effort evenly. Bias each theme toward closing a specific weak spot and reflect that gap in themeTitle. "Uneven" means shifting VOLUME between platforms — it NEVER means dropping a requested platform to zero (see PLATFORM COVERAGE above).',
         '',
         'CONTENT RULES',
         '- Each content item: a stable machine themeKey plus a human-readable themeTitle. Each platform entry: a UUID id (used as the materialized Post.id), the platform, and concise publish-ready content. themeTitle materializes VERBATIM into Post.title (so keep it clean and publish-ready — no week/phase prefix); themeKey is kept as Post.settings.themeKey.',
@@ -888,15 +917,23 @@ export class OperationPlanService implements OnApplicationBootstrap {
 
   // Admin-configured publishing rhythm for the requested platforms (P2-10). Fed
   // to the generator as input so content counts follow the team's real playbook
-  // instead of the model's guess. Only the requested platforms are included, and
-  // only when they carry non-empty guidance.
+  // instead of the model's guess. EVERY requested platform gets an entry —
+  // admin-configured value first, then the built-in default, then a generic
+  // rhythm — because the prompt tells the model to follow the playbook rather
+  // than invent volume, so a platform absent from it reads as "no volume" and
+  // used to come back with zero content (the plan must cover every requested
+  // platform; see PLATFORM COVERAGE in the generation prompt).
   private async _buildPlatformPlaybook(
     platforms: string[]
   ): Promise<Record<string, PlatformCadence>> {
     const cadenceConfig = await this._getPlatformCadence();
+    const hasGuidance = (entry?: PlatformCadence): entry is PlatformCadence =>
+      !!entry && !!(entry.cadence || entry.citationWeight || entry.notes);
     return platforms.reduce<Record<string, PlatformCadence>>((all, platform) => {
-      const entry = cadenceConfig[platform];
-      if (entry && (entry.cadence || entry.citationWeight || entry.notes)) all[platform] = entry;
+      const configured = cadenceConfig[platform];
+      all[platform] = hasGuidance(configured)
+        ? configured
+        : DEFAULT_PLATFORM_CADENCE[platform] ?? GENERIC_PLATFORM_CADENCE;
       return all;
     }, {});
   }
@@ -1227,6 +1264,24 @@ export class OperationPlanService implements OnApplicationBootstrap {
           }
         }
       }
+    }
+    // Coverage: every requested platform must have produced at least one post.
+    // The request's platform set (already bounded by the admin whitelist) is the
+    // contract — a plan that silently skips a platform (the model concentrating
+    // everything on x/reddit) must fail loudly here, not materialize partial.
+    const covered = new Set(
+      plan.contentItems.flatMap((item) =>
+        item.platforms.map((post) => post.platform)
+      )
+    );
+    const missingPlatforms = requestedPlatforms.filter(
+      (platform) => !covered.has(platform)
+    );
+    if (missingPlatforms.length) {
+      throw new BadRequestException(
+        `Generated plan produced no content for requested platform(s): ` +
+        `${missingPlatforms.join(', ')} — every requested platform must receive at least one post`
+      );
     }
     for (const policy of plan.engagePolicies) {
       const keywordTargetTotal = policy.keywordTargets.reduce(

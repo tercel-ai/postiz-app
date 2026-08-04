@@ -458,9 +458,39 @@ describe('OperationPlanService.create', () => {
       }),
     };
     const openaiService = {
-      generateStructuredText: vi.fn().mockResolvedValue({
-        data: generatedPlan,
-        usage: { usage: { total_tokens: 100 } },
+      // The coverage validation requires at least one post per REQUESTED
+      // platform, and most flow tests don't care about content. When a fixture
+      // passes no contentItems, synthesize one minimal in-range post per
+      // requested platform (read back from the generation prompt payload) so
+      // those tests keep exercising their own concern. A fixture that DOES
+      // provide contentItems is returned verbatim — coverage tests included.
+      generateStructuredText: vi.fn(async (_system: string, userPrompt: string) => {
+        let data = generatedPlan;
+        if (!generatedPlan.contentItems?.length) {
+          const payload = JSON.parse(userPrompt);
+          const requested: string[] = Array.isArray(payload.platforms) ? payload.platforms : [];
+          data = {
+            ...generatedPlan,
+            contentItems: requested.map((platform, index) => ({
+              contentId: `coverage-${platform}`,
+              utcDate: payload.range.startAt,
+              themeKey: 'w1:coverage',
+              themeTitle: `Coverage ${platform}`,
+              platforms: [
+                {
+                  id: `00000000-0000-4000-8000-c0be${String(index).padStart(8, '0')}`,
+                  platform,
+                  content: `Coverage post for ${platform}`,
+                  subreddit: null,
+                  tags: null,
+                  media: null,
+                  thread: null,
+                },
+              ],
+            })),
+          };
+        }
+        return { data, usage: { usage: { total_tokens: 100 } } };
       }),
       // Default identity: only exercised when OPERATION_SHRINK_MODEL is set.
       // Returns the { post, usage } shape so shrink tokens can be accumulated.
@@ -555,7 +585,11 @@ describe('OperationPlanService.create', () => {
     );
     expect(repo.materializePlanPosts).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'plan-1', status: 'READY' }),
-      expect.objectContaining({ contentItems: [] })
+      // The helper synthesizes one coverage post per requested platform when
+      // the fixture provides none (coverage validation requires it).
+      expect.objectContaining({
+        contentItems: [expect.objectContaining({ contentId: 'coverage-x' })],
+      })
     );
   });
 
@@ -1632,7 +1666,7 @@ describe('OperationPlanService.create', () => {
     expect(systemPrompt).toContain('platformPlaybook');
   });
 
-  it('omits the playbook instruction when no requested platform has cadence configured', async () => {
+  it('falls back to the built-in cadence when a requested platform has none configured (playbook covers every platform)', async () => {
     const { openaiService, settingsService, service } = createGenerationDependencies({
       contentItems: [],
       engagePolicies: [],
@@ -1650,8 +1684,107 @@ describe('OperationPlanService.create', () => {
     });
 
     const [systemPrompt, userPrompt] = openaiService.generateStructuredText.mock.calls[0];
-    expect(JSON.parse(userPrompt).platformPlaybook).toEqual({});
-    expect(systemPrompt).not.toContain('platformPlaybook');
+    const playbook = JSON.parse(userPrompt).platformPlaybook;
+    // The playbook must cover every requested platform — an absent entry reads
+    // as "no volume" and used to yield zero content for that platform. With
+    // nothing configured, x falls back to its built-in default cadence.
+    expect(Object.keys(playbook)).toEqual(['x']);
+    expect(playbook.x.cadence).toContain('1 post per weekday');
+    expect(systemPrompt).toContain('platformPlaybook');
+  });
+
+  it('feeds a generic fallback cadence for a requested platform with neither configured nor built-in cadence', async () => {
+    const { openaiService, settingsService, service } = createGenerationDependencies({
+      contentItems: [],
+      engagePolicies: [],
+      warnings: [],
+    });
+    settingsService.get.mockImplementation(async (key: string) =>
+      key === 'operation_plan.platform_cadence'
+        ? { x: { cadence: '2 posts per weekday' } }
+        : undefined
+    );
+
+    await service.create('org-1', 'proj-1', {
+      taskId: 'task-1',
+      startAt: '2030-01-01T00:00:00.000Z',
+      endAt: '2030-01-02T00:00:00.000Z',
+      // mastodon has no entry in DEFAULT_PLATFORM_CADENCE and none configured.
+      platforms: ['x', 'mastodon'],
+    });
+
+    const [, userPrompt] = openaiService.generateStructuredText.mock.calls[0];
+    const playbook = JSON.parse(userPrompt).platformPlaybook;
+    expect(playbook.x).toEqual({ cadence: '2 posts per weekday' });
+    expect(playbook.mastodon.cadence).toBeTruthy();
+  });
+
+  it('declares the platform-coverage requirement (with the requested platforms) in the prompt', async () => {
+    const { openaiService, service } = createGenerationDependencies({
+      contentItems: [],
+      engagePolicies: [],
+      warnings: [],
+    });
+
+    await service.create('org-1', 'proj-1', {
+      taskId: 'task-1',
+      startAt: '2030-01-01T00:00:00.000Z',
+      endAt: '2030-01-02T00:00:00.000Z',
+      platforms: ['x', 'reddit'],
+    });
+
+    const [systemPrompt] = openaiService.generateStructuredText.mock.calls[0];
+    expect(systemPrompt).toContain('PLATFORM COVERAGE');
+    expect(systemPrompt).toContain('(x, reddit)');
+    expect(systemPrompt).toContain('NEVER leave a requested platform with zero posts');
+  });
+
+  it('rejects a generated plan that produced no content for a requested platform', async () => {
+    const { repo, creditService, aiseeClient, service } = createGenerationDependencies({
+      // Explicit contentItems: only x is covered although reddit was requested.
+      contentItems: [
+        {
+          contentId: 'c-1',
+          utcDate: '2030-01-01T10:00:00.000Z',
+          themeKey: 'w1:foundations',
+          themeTitle: 'Only X',
+          platforms: [
+            {
+              id: '11111111-1111-4111-8111-111111111111',
+              platform: 'x',
+              content: 'An X-only plan',
+              subreddit: null,
+              tags: null,
+              media: null,
+              thread: null,
+            },
+          ],
+        },
+      ],
+      engagePolicies: [],
+      warnings: [],
+    });
+
+    const { background } = await createAndSettle(service, {
+      taskId: 'task-1',
+      startAt: '2030-01-01T00:00:00.000Z',
+      endAt: '2030-01-02T00:00:00.000Z',
+      platforms: ['x', 'reddit'],
+    });
+    await background;
+
+    // Coverage violation fails the plan before billing or materialization.
+    expect(repo.updateStatus).toHaveBeenCalledWith('plan-1', {
+      status: 'FAILED',
+      errorCode: 'GENERATION_FAILED',
+    });
+    expect(creditService.deductUsageAndConfirm).not.toHaveBeenCalled();
+    expect(repo.materializePlanPosts).not.toHaveBeenCalled();
+    expect(aiseeClient.notifyOperationPlanStatus).toHaveBeenCalledWith(
+      'proj-1',
+      'plan-1',
+      'failed'
+    );
   });
 
   it('warns the generator that multi-word hashtags break on X', async () => {

@@ -22,6 +22,10 @@ import { getCookieUrlFromDomain } from '@gitroom/helpers/subdomain/subdomain.man
 import { AgentGraphInsertService } from '@gitroom/nestjs-libraries/agent/agent.graph.insert.service';
 import { Nowpayments } from '@gitroom/nestjs-libraries/crypto/nowpayments';
 import { SettingsService } from '@gitroom/nestjs-libraries/database/prisma/settings/settings.service';
+import { EngageEntitlementService } from '@gitroom/nestjs-libraries/engage/engage-entitlement.service';
+import { EngageScanConfigService } from '@gitroom/nestjs-libraries/engage/engage-scan-config.service';
+import { PostOverageService } from '@gitroom/nestjs-libraries/database/prisma/posts/post-overage.service';
+import { PostPlanLimitsService } from '@gitroom/nestjs-libraries/database/prisma/posts/post-plan-limits.service';
 import { Readable, pipeline } from 'stream';
 import { promisify } from 'util';
 
@@ -36,8 +40,45 @@ export class PublicController {
     private _agentGraphInsertService: AgentGraphInsertService,
     private _postsService: PostsService,
     private _nowpayments: Nowpayments,
-    private _settingsService: SettingsService
+    private _settingsService: SettingsService,
+    private _engageEntitlement: EngageEntitlementService,
+    private _engageScanConfig: EngageScanConfigService,
+    private _postOverage: PostOverageService,
+    private _postPlanLimits: PostPlanLimitsService
   ) {}
+
+  /**
+   * Public plan catalog for pricing/marketing pages, one entry per tier:
+   * - engage: keywords / tracked accounts / monitored channels caps (org-wide
+   *   and per-project), scan interval, monthly reply cap, metrics window.
+   *   `null` = unlimited.
+   * - posts: free posts per billing period + channel cap from the
+   *   `post_plan_limits` Settings map. `null` = not configured in Postiz
+   *   (the aisee-core package value applies).
+   * Plus reply credit pricing, the per-post overage cost, and the platforms
+   * engage scanning currently covers. No org, usage, or billing state — safe
+   * without authentication.
+   */
+  @Get('/plans')
+  async getPlans() {
+    const [catalog, scanPlatforms, postLimits, postOverageCost] =
+      await Promise.all([
+        this._engageEntitlement.getPublicPlanCatalog(),
+        this._engageScanConfig.getSupportedScanPlatforms(),
+        this._postPlanLimits.getAll(),
+        this._postOverage.getOverageCost(),
+      ]);
+    return {
+      plans: catalog.plans.map(({ code, limits }) => ({
+        code,
+        engage: limits,
+        posts: postLimits[code],
+      })),
+      replyCredits: catalog.replyCredits,
+      postOverageCost,
+      scanPlatforms,
+    };
+  }
 
   @Get('/extension/latest')
   async getExtensionLatest() {

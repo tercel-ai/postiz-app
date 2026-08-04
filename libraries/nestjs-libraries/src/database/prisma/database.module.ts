@@ -52,6 +52,7 @@ import { PostAnalyticsCreditService } from '@gitroom/nestjs-libraries/database/p
 import { PostReleaseRepository } from '@gitroom/nestjs-libraries/database/prisma/post-releases/post-release.repository';
 import { PostReleaseService } from '@gitroom/nestjs-libraries/database/prisma/post-releases/post-release.service';
 import { PostOverageService } from '@gitroom/nestjs-libraries/database/prisma/posts/post-overage.service';
+import { PostPlanLimitsService } from '@gitroom/nestjs-libraries/database/prisma/posts/post-plan-limits.service';
 import { ExtensionPublishConfigService } from '@gitroom/nestjs-libraries/database/prisma/posts/extension-publish-config.service';
 import { EngageRepository } from '@gitroom/nestjs-libraries/engage/engage.repository';
 import { EngageService } from '@gitroom/nestjs-libraries/engage/engage.service';
@@ -126,6 +127,7 @@ import { OperationPlanService } from '@gitroom/nestjs-libraries/database/prisma/
     PostReleaseRepository,
     PostReleaseService,
     PostOverageService,
+    PostPlanLimitsService,
     ExtensionPublishConfigService,
     EngageRepository,
     EngageService,

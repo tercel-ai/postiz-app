@@ -72,9 +72,20 @@ Permission check (PoliciesGuard)
   → UsersService.getUserLimits(userId)
       → AiseeClient.getUserCreditPackage(userId)
           → GET /user-credit-package/uid/{userId}
-      → Returns { postChannelLimit, postSendLimit, periodStart, periodEnd, name, interval }
-      → If API fails / no package / periodEnd expired → hard block: { postChannelLimit: 0, postSendLimit: 0 }
+      → Returns { postChannelLimit, postSendLimit, periodStart, periodEnd, name, interval, plan? }
+      → If API fails / no package / periodEnd expired → hard block sentinel:
+        { postChannelLimit: 0, postSendLimit: 0, noActiveSubscription: true }
+      → Otherwise PostPlanLimitsService.applyOverrides(pkg):
+        per-plan Settings overrides (key: post_plan_limits) replace the
+        package's postSendLimit/postChannelLimit; null defers to the aisee value
 ```
+
+> **postSendLimit semantics**: downstream gates block ONLY on the explicit
+> `noActiveSubscription` marker — never on the number. `postSendLimit=0` on an
+> active plan is a real quota meaning "zero free posts": posting stays allowed
+> and every post is charged as overage. The seeded `post_plan_limits` default
+> is `postSendLimit: 0` for every plan (all posts overage-billed) with
+> `postChannelLimit: null` (channel cap deferred to aisee).
 
 ### Response Mapping (Aisee → Postiz)
 
@@ -89,16 +100,20 @@ Permission check (PoliciesGuard)
 
 ### Hard Block Conditions
 
-Users are blocked from adding channels and sending posts (limits = 0) when:
+Users are blocked from adding channels and sending posts (sentinel
+`{ postChannelLimit: 0, postSendLimit: 0, noActiveSubscription: true }`) when:
 - Aisee API returns a non-200 response
 - `credit_package` is null (no active subscription)
 - `periodEnd` is missing or in the past
+
+These blocks are NOT overridable via `post_plan_limits` — the override step
+runs only for an active, unexpired package.
 
 > **Note**: The `User.maxChannels` and `User.maxPostsPerMonth` database fields have been removed. All limit data comes from the Aisee API.
 
 ## Post Overage Billing
 
-When a user exceeds their `postSendLimit`, they can **still send posts** — each overage post is charged credits.
+When a user exceeds their `postSendLimit`, they can **still send posts** — each overage post is charged credits. With the default `post_plan_limits` of `postSendLimit: 0`, that means every post is charged from the first one.
 
 ### Flow
 

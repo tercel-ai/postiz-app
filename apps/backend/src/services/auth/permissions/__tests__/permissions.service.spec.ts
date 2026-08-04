@@ -189,10 +189,11 @@ describe('PermissionsService.check', () => {
       expect(isAllowed(ability, AuthorizationActions.Create, Sections.POSTS_PER_MONTH)).toBe(true);
     });
 
-    it('blocks posting when postSendLimit is 0 (no subscription)', async () => {
+    it('blocks posting on the no-active-subscription sentinel', async () => {
       mocks.usersService.getUserLimits.mockResolvedValue({
         postChannelLimit: 0,
         postSendLimit: 0,
+        noActiveSubscription: true,
       });
 
       const ability = await service.check(
@@ -202,6 +203,21 @@ describe('PermissionsService.check', () => {
       );
 
       expect(isAllowed(ability, AuthorizationActions.Create, Sections.POSTS_PER_MONTH)).toBe(false);
+    });
+
+    it('allows posting when postSendLimit is 0 on an active plan (zero free quota — all overage)', async () => {
+      mocks.usersService.getUserLimits.mockResolvedValue({
+        postChannelLimit: 5,
+        postSendLimit: 0,
+      });
+
+      const ability = await service.check(
+        ORG_ID, CREATED_AT, 'USER',
+        [[AuthorizationActions.Create, Sections.POSTS_PER_MONTH]],
+        USER_ID,
+      );
+
+      expect(isAllowed(ability, AuthorizationActions.Create, Sections.POSTS_PER_MONTH)).toBe(true);
     });
 
     it('allows posting even when over limit (overage deducted post-creation)', async () => {
@@ -247,10 +263,11 @@ describe('PermissionsService.check', () => {
       expect(isAllowed(ability, AuthorizationActions.Create, Sections.POSTS_PER_MONTH)).toBe(true);
     });
 
-    it('allows channel but blocks posts when postSendLimit=0', async () => {
+    it('allows channel but blocks posts on the no-active-subscription sentinel with a channel allowance', async () => {
       mocks.usersService.getUserLimits.mockResolvedValue({
         postChannelLimit: 5,
         postSendLimit: 0,
+        noActiveSubscription: true,
       });
       mocks.integrationService.getIntegrationsList.mockResolvedValue([]);
 
@@ -440,7 +457,27 @@ describe('PermissionsService.check', () => {
       expect(isAllowed(ability, AuthorizationActions.Create, Sections.POSTS_PER_MONTH)).toBe(true);
     });
 
-    it('blocks posting when Aisee postSendLimit is 0 even with paid tier', async () => {
+    it('blocks posting on the no-active-subscription sentinel even with paid tier', async () => {
+      mocks.usersService.getUserLimits.mockResolvedValue({
+        postChannelLimit: 0,
+        postSendLimit: 0,
+        noActiveSubscription: true,
+      });
+      mocks.subscriptionService.getSubscriptionByOrganizationId.mockResolvedValue({
+        subscriptionTier: 'PRO',
+      });
+
+      const ability = await service.check(
+        ORG_ID, CREATED_AT, 'USER',
+        [[AuthorizationActions.Create, Sections.POSTS_PER_MONTH]],
+        USER_ID,
+      );
+
+      // No active Aisee subscription → blocked, even though PRO tier would normally allow
+      expect(isAllowed(ability, AuthorizationActions.Create, Sections.POSTS_PER_MONTH)).toBe(false);
+    });
+
+    it('allows posting when Aisee postSendLimit is 0 on an active plan (zero free quota — all overage)', async () => {
       mocks.usersService.getUserLimits.mockResolvedValue({
         postChannelLimit: 5,
         postSendLimit: 0,
@@ -455,8 +492,7 @@ describe('PermissionsService.check', () => {
         USER_ID,
       );
 
-      // Aisee says 0 → blocked, even though PRO tier would normally allow
-      expect(isAllowed(ability, AuthorizationActions.Create, Sections.POSTS_PER_MONTH)).toBe(false);
+      expect(isAllowed(ability, AuthorizationActions.Create, Sections.POSTS_PER_MONTH)).toBe(true);
     });
 
     // -----------------------------------------------------------------------

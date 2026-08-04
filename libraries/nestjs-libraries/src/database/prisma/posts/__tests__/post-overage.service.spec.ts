@@ -155,16 +155,36 @@ describe('PostOverageService', () => {
     expect(mocks.aiseeCreditService.deductAndConfirm).not.toHaveBeenCalled();
   });
 
-  it('does NOT deduct when postSendLimit is 0 (no subscription)', async () => {
+  it('does NOT deduct on the no-active-subscription sentinel', async () => {
     mocks.usersService.getUserLimits.mockResolvedValue({
       postChannelLimit: 0,
       postSendLimit: 0,
+      noActiveSubscription: true,
     });
 
     await service.deductIfOverage('org-1', 'user-1', 'post-blocked');
 
     expect(mocks.postsRepository.countPostsFromDay).not.toHaveBeenCalled();
     expect(mocks.aiseeCreditService.deductAndConfirm).not.toHaveBeenCalled();
+  });
+
+  it('deducts from the FIRST post when postSendLimit is 0 on an active plan (zero free quota)', async () => {
+    mocks.usersService.getUserLimits.mockResolvedValue({
+      postChannelLimit: 10,
+      postSendLimit: 0,
+      periodStart: '2026-03-01T00:00:00.000Z',
+      periodEnd: '2026-04-01T00:00:00.000Z',
+    });
+    mocks.postsRepository.countPostsFromDay.mockResolvedValue(1);
+
+    await service.deductIfOverage('org-1', 'user-1', 'post-first');
+
+    expect(mocks.aiseeCreditService.deductAndConfirm).toHaveBeenCalledTimes(1);
+    expect(mocks.aiseeCreditService.deductAndConfirm).toHaveBeenCalledWith(
+      expect.objectContaining({
+        description: expect.stringContaining('1/0'),
+      }),
+    );
   });
 
   it('does NOT deduct when periodStart is missing', async () => {

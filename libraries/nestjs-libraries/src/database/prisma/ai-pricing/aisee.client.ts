@@ -167,6 +167,48 @@ export interface AiseeUserCreditPackage {
   plan?: string;
 }
 
+// The base subscription tiers aisee-core sells. Shared across every Postiz
+// module that maps a tier to its own limits (engage entitlements, post plan
+// limits) so the plan vocabulary stays in one place.
+export type AiseePlanCode = 'starter' | 'developer' | 'pro';
+export const AISEE_PLAN_CODES: readonly AiseePlanCode[] = [
+  'starter',
+  'developer',
+  'pro',
+];
+
+/**
+ * Fuzzy fallback: normalise an aisee plan DISPLAY name ("Starter Plan
+ * (Monthly)", "pro", …) to a plan code by substring match. Only for records
+ * that predate the exact `plan` field — prefer resolveAiseePlanCode, which
+ * uses that exact code when present. Returns null when nothing matches.
+ */
+export function normalizeAiseePlanName(
+  name: string | undefined | null
+): AiseePlanCode | null {
+  if (!name) return null;
+  const n = name.toLowerCase();
+  if (n.includes('developer')) return 'developer';
+  if (n.includes('pro')) return 'pro';
+  if (n.includes('starter')) return 'starter';
+  return null;
+}
+
+/**
+ * Resolve a package's plan code: the exact aisee-derived `plan` field wins;
+ * the free-text display name is only a fallback for older records.
+ */
+export function resolveAiseePlanCode(pkg: {
+  plan?: string;
+  name?: string | null;
+}): AiseePlanCode | null {
+  return (
+    (pkg.plan && (AISEE_PLAN_CODES as readonly string[]).includes(pkg.plan)
+      ? (pkg.plan as AiseePlanCode)
+      : null) ?? normalizeAiseePlanName(pkg.name)
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Client
 // ---------------------------------------------------------------------------

@@ -205,6 +205,44 @@ describe('EngageEntitlementService.getEntitlement', () => {
   });
 });
 
+describe('EngageEntitlementService.getPublicPlanCatalog', () => {
+  it('returns all three tiers with default limits and reply credits, no org resolution', async () => {
+    const { service, aisee } = build({ limits: PRO_LIMITS });
+    const catalog = await service.getPublicPlanCatalog();
+
+    expect(catalog.plans.map((p) => p.code)).toEqual([
+      'starter',
+      'developer',
+      'pro',
+    ]);
+    const byCode = Object.fromEntries(
+      catalog.plans.map((p) => [p.code, p.limits])
+    );
+    expect(byCode.starter.keywordsMax).toBe(30);
+    expect(byCode.starter.replyMonthlyCap).toBe(10);
+    expect(byCode.developer.priorityAccountsMax).toBe(10);
+    expect(byCode.pro.priorityAccountsMax).toBeNull(); // unlimited
+    expect(byCode.pro.scanIntervalHours).toBe(6);
+    expect(catalog.replyCredits).toEqual({ short: 2, medium: 3, long: 5 });
+
+    // Public catalog must not touch org/billing state.
+    expect(aisee.resolveOwnerUserId).not.toHaveBeenCalled();
+  });
+
+  it('applies admin overrides from Settings per plan', async () => {
+    const { service } = build({
+      limits: PRO_LIMITS,
+      settings: {
+        [ENGAGE_ENTITLEMENTS_KEY]: { starter: { keywordsMax: 3 } },
+      },
+    });
+    const catalog = await service.getPublicPlanCatalog();
+    const starter = catalog.plans.find((p) => p.code === 'starter')!.limits;
+    expect(starter.keywordsMax).toBe(3); // overridden
+    expect(starter.subredditsMax).toBe(10); // untouched default survives
+  });
+});
+
 describe('EngageEntitlementService.getMetricsWindowDays', () => {
   it('returns the per-plan ceiling when no user override is set: starter 7 / developer 14 / pro 30', async () => {
     expect(await build({ limits: STARTER_LIMITS }).service.getMetricsWindowDays('o')).toBe(7);
