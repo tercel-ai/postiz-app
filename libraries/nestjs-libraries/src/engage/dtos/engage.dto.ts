@@ -483,14 +483,13 @@ export class ListOpportunitiesDto {
 
 // The counts endpoint's filter contract IS ListOpportunitiesDto's — same
 // scoping (channels/authors/keyword(s)/date window/minScore*/intent/
-// bookmarked) — minus `platform`/`status` (the two dimensions it breaks down
-// into byPlatform/byStatus, not a further narrowing) and `sortBy`/`sortOrder`/
-// `page`/`limit` (a counts response has no rows to sort or paginate).
+// bookmarked/platform) — minus `status` (returned as the byStatus breakdown)
+// and `sortBy`/`sortOrder`/`page`/`limit` (a counts response has no rows to
+// sort or paginate).
 // Derived via OmitType rather than hand-duplicated so a new filter added to
 // ListOpportunitiesDto is inherited here automatically instead of silently
 // missing from the counts endpoint.
 export class OpportunityCountsDto extends OmitType(ListOpportunitiesDto, [
-  'platform',
   'status',
   'sortBy',
   'sortOrder',

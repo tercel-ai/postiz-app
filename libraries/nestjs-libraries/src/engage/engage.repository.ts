@@ -1683,9 +1683,9 @@ export class EngageRepository {
   // Single round trip replacing what the frontend used to do with N separate
   // `listOpportunities({ platform: 'x', limit: 1 })`-style calls just to read
   // `.total` for a tab/platform badge. Mirrors listOpportunities' scoping
-  // filters (channels/authors/keywords/date/minScore*/bookmarked/intent) but
-  // omits `platform`/`status`/pagination/sort — those are the two dimensions
-  // broken down below, not a further narrowing.
+  // filters (platform/channels/authors/keywords/date/minScore*/bookmarked/
+  // intent) but omits `status`/pagination/sort — status is broken down below,
+  // while platform remains an optional narrowing filter.
   async getOpportunityCounts(organizationId: string, dto: OpportunityCountsDto) {
     const channelSpecific = dto.channels?.length ? dto.channels : undefined;
     const authorSpecificList = dto.authors?.length ? dto.authors : undefined;
@@ -1697,6 +1697,7 @@ export class EngageRepository {
     // EngageOpportunityScalarRelationFilter) and no longer accept `platform`.
     const oppFilter: Prisma.EngageOpportunityWhereInput = {
       deletedAt: null,
+      ...(dto.platform?.length && { platform: { in: dto.platform } }),
       ...(channelSpecific && { channelId: { in: channelSpecific } }),
       ...(authorSpecificList?.length && {
         OR: authorSpecificList.map((a) => ({
