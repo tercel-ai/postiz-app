@@ -13,6 +13,7 @@ function makeService(opts: { due?: any[]; mark?: any; providers?: any[] } = {}) 
     repo,
     {} as any, {} as any, {} as any, {} as any,
     {} as any, {} as any, {} as any, {} as any,
+    {} as any,
   );
   return { svc, repo };
 }

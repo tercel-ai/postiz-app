@@ -424,6 +424,25 @@ export class PostsController {
   }
 
   /**
+   * Extension publish-failed callback: the in-browser send settled as an error,
+   * so flip the row QUEUE → ERROR with the reason instead of leaving it in
+   * QUEUE to be re-offered forever. Org-scoped; a row already PUBLISHED is
+   * never touched.
+   */
+  @Patch('/:id/extension-publish-failed')
+  markExtensionPublishFailed(
+    @GetOrgFromRequest() org: Organization,
+    @Param('id') id: string,
+    @Body() body: { error?: string }
+  ) {
+    return this._postsService.markPublishFailedFromExtension(
+      org.id,
+      id,
+      body?.error
+    );
+  }
+
+  /**
    * Extension publish-due: the browser extension polls this for QUEUE posts on
    * extension-routed integrations (hackernews/quora, or any platform routed via
    * EXTENSION_PUBLISH_PLATFORMS) that are due to publish. It publishes each

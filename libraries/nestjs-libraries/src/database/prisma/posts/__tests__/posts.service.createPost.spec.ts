@@ -52,6 +52,7 @@ function createService(mocks: ReturnType<typeof createMocks>) {
     mocks.temporalService as any,
     mocks.refreshIntegrationService as any,
     mocks.postOverageService as any,
+    {} as any,
   );
   // Stub startWorkflow to avoid Temporal calls
   (svc as any).startWorkflow = vi.fn().mockResolvedValue(undefined);

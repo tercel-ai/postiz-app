@@ -50,6 +50,8 @@ import { ioRedis } from '@gitroom/nestjs-libraries/redis/redis.service';
 import { RefreshToken } from '@gitroom/nestjs-libraries/integrations/social.abstract';
 import { RefreshIntegrationService } from '@gitroom/nestjs-libraries/integrations/refresh.integration.service';
 import { PostOverageService } from '@gitroom/nestjs-libraries/database/prisma/posts/post-overage.service';
+import { ExtensionPublishConfigService } from '@gitroom/nestjs-libraries/database/prisma/posts/extension-publish-config.service';
+import { PublishPlatform } from '@gitroom/helpers/extension/post-publish';
 import { PostingTimesV2 } from '@gitroom/nestjs-libraries/dtos/integrations/posting-times.types';
 import { resolveTimeSlotsForDate } from '@gitroom/nestjs-libraries/dtos/integrations/posting-times.utils';
 import { getSocialTaskQueue } from '@gitroom/nestjs-libraries/temporal/task-queue';
@@ -76,7 +78,8 @@ export class PostsService {
     private _openaiService: OpenaiService,
     private _temporalService: TemporalService,
     private _refreshIntegrationService: RefreshIntegrationService,
-    private _postOverageService: PostOverageService
+    private _postOverageService: PostOverageService,
+    private _extensionPublishConfigService: ExtensionPublishConfigService
   ) {}
 
   searchForMissingThreeHoursPosts() {
@@ -176,6 +179,34 @@ export class PostsService {
     // still flips PUBLISHED so it leaves QUEUE and is never re-published.
     const updated = await this.updatePost(id, releaseId || '', releaseURL || '');
     if (!updated) return { ok: false, reason: 'blocked-recurring-original' };
+    return { ok: true };
+  }
+
+  /**
+   * Extension publish-FAILED callback: the in-browser send settled as an error
+   * (platform rejected it, wrong account, or the send could not be verified),
+   * so flip the row QUEUE → ERROR with the reason. Without this the row sat in
+   * QUEUE forever, re-offered on every publish-due poll. Org-scoped; never
+   * touches a row that already reached PUBLISHED, and recurring originals keep
+   * their clone-per-cycle mechanism untouched.
+   */
+  async markPublishFailedFromExtension(
+    orgId: string,
+    id: string,
+    error?: string
+  ): Promise<{ ok: boolean; reason?: string }> {
+    const post = await this._postRepository.getPostById(id, orgId);
+    if (!post) return { ok: false, reason: 'not-found' };
+    if (post.state === 'PUBLISHED')
+      return { ok: false, reason: 'already-published' };
+    if (post.intervalInDays && post.intervalInDays > 0 && !post.parentPostId) {
+      return { ok: false, reason: 'blocked-recurring-original' };
+    }
+    await this._postRepository.changeState(
+      id,
+      'ERROR',
+      error || 'extension publish failed'
+    );
     return { ok: true };
   }
 
@@ -1629,6 +1660,10 @@ export class PostsService {
       leaseToken,
       leaseCutoff
     );
+    // Per-platform thread segment-gap ranges (admin-editable setting), resolved
+    // once per poll and stamped on each item so the extension paces threads the
+    // way the operator configured, not by its own hardcoded fallback.
+    const segmentGaps = await this._extensionPublishConfigService.getSegmentGaps();
     const due = await Promise.all(rows.map(async (p) => {
       let settings: Record<string, any> = {};
       try {
@@ -1649,17 +1684,19 @@ export class PostsService {
       } catch {
         /* malformed/missing media → publish text-only */
       }
+      // Platform is the persisted Post.providerIdentifier (set from the bound
+      // integration when present, else the caller-supplied platform — see
+      // mapTypeToPost / createOrUpdatePost). The trailing fallbacks only serve
+      // rows written before the backfill ran (settings is parsed above anyway,
+      // so the legacy read is free here).
+      const platform =
+        p.providerIdentifier ||
+        p.integration?.providerIdentifier ||
+        settings.__type;
+      const segmentGap = segmentGaps[platform as PublishPlatform];
       return {
-        // Platform is the persisted Post.providerIdentifier (set from the bound
-        // integration when present, else the caller-supplied platform — see
-        // mapTypeToPost / createOrUpdatePost). The trailing fallbacks only serve
-        // rows written before the backfill ran (settings is parsed above anyway,
-        // so the legacy read is free here).
         id: p.id,
-        platform:
-          p.providerIdentifier ||
-          p.integration?.providerIdentifier ||
-          settings.__type,
+        platform,
         title: p.title || settings.title || undefined,
         subreddit: settings.subreddit || undefined,
         // Dev.to tags. settings.tags holds DevToSettingsDto's {value,label}
@@ -1680,6 +1717,12 @@ export class PostsService {
           },
         ],
         publishDate: p.publishDate?.toISOString?.() ?? null,
+        // Admin-configured [min, max] seconds pause between THREAD segments for
+        // this platform (extension_publish.segment_gap). Only meaningful on
+        // multi-segment items, but stamped unconditionally so the extension
+        // never falls back to its hardcoded default when a config exists.
+        // Absent for platforms outside the extension-publishable set.
+        ...(segmentGap ? { segmentGapSeconds: segmentGap } : {}),
         // WHICH account this post must go out as. The extension publishes with
         // the browser's own logged-in session, which is NOT necessarily the
         // account the post was composed for — and posting to the wrong account

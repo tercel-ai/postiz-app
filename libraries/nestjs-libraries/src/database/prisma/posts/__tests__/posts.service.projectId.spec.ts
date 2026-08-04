@@ -51,7 +51,8 @@ function createService(mocks: ReturnType<typeof createMocks>) {
     mocks.openaiService as any,
     mocks.temporalService as any,
     mocks.refreshIntegrationService as any,
-    mocks.postOverageService as any
+    mocks.postOverageService as any,
+    {} as any
   );
   (svc as any).startWorkflow = vi.fn().mockResolvedValue(undefined);
   return svc;

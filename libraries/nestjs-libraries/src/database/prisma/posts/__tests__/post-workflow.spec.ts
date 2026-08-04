@@ -110,6 +110,7 @@ function createService(mocks: ReturnType<typeof createServiceMocks>) {
     mocks.temporalService as any,
     mocks.refreshIntegrationService as any,
     mocks.postOverageService as any,
+    {} as any,
   );
   (svc as any).startWorkflow = vi.fn().mockResolvedValue(undefined);
   return svc;
@@ -1061,6 +1062,7 @@ describe('PostsService.startWorkflow — no bound integration', () => {
       mocks.temporalService as any,
       mocks.refreshIntegrationService as any,
       mocks.postOverageService as any,
+      {} as any,
     );
   });
 

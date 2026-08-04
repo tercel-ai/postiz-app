@@ -131,6 +131,39 @@ export const IMAGE_CAPABLE_PLATFORMS: readonly PublishPlatform[] = [
   'quora',
 ];
 
+/** Random human-like pause between thread segments, as [minSeconds, maxSeconds]. */
+export type SegmentGapRange = [number, number];
+
+/**
+ * Built-in global segment-gap range, shared by the extension queue (its
+ * fallback when an item carries no segmentGapSeconds) and the backend's
+ * `extension_publish.segment_gap` settings default — one source so the two
+ * sides can never drift. Back-to-back follow-ups don't look human (and Reddit
+ * comments would fire within seconds of each other), so a random pause is
+ * drawn per gap. Article platforms are single-segment so the gap is never
+ * drawn there; Hacker News threads (comment chain) do use it — HN rate-limits
+ * fast repeat comments.
+ */
+export const DEFAULT_SEGMENT_GAP_RANGE: SegmentGapRange = [30, 120];
+
+/**
+ * The built-in global range expanded per platform — the extension queue's
+ * per-platform fallback map, and the base the backend's platform resolution
+ * bottoms out on.
+ */
+export const DEFAULT_SEGMENT_GAP_S: Record<PublishPlatform, SegmentGapRange> = {
+  x: DEFAULT_SEGMENT_GAP_RANGE,
+  reddit: DEFAULT_SEGMENT_GAP_RANGE,
+  linkedin: DEFAULT_SEGMENT_GAP_RANGE,
+  hackernews: DEFAULT_SEGMENT_GAP_RANGE,
+  medium: DEFAULT_SEGMENT_GAP_RANGE,
+  quora: DEFAULT_SEGMENT_GAP_RANGE,
+  devto: DEFAULT_SEGMENT_GAP_RANGE,
+};
+
+/** Hard ceiling (seconds) any configured segment gap is clamped to. */
+export const MAX_SEGMENT_GAP_S = 600;
+
 export interface PublishThreadSegment {
   /** Plain text of this segment. */
   text: string;

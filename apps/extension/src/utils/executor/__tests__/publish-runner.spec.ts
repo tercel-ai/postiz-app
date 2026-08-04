@@ -58,6 +58,34 @@ describe('runPublishLoop', () => {
     expect(summary).toMatchObject({ due: 2, enqueued: 2, rejected: 0, stoppedReason: 'ok' });
   });
 
+  it('passes through the backend-resolved segmentGapSeconds', async () => {
+    backendCall.mockResolvedValue({
+      ok: true,
+      status: 200,
+      data: {
+        due: [
+          {
+            id: 'post-gap',
+            platform: 'reddit',
+            title: 'thread anchor',
+            subreddit: 'r/test',
+            segments: [{ text: 'root' }, { text: 'follow-up' }],
+            segmentGapSeconds: [45, 180],
+          },
+        ],
+      },
+    });
+    enqueuePublishBatch.mockReturnValue({
+      accepted: [{ taskId: 'post-gap' }],
+      rejected: [],
+    });
+
+    await runPublishLoop();
+
+    const [, items] = enqueuePublishBatch.mock.calls[0] as unknown as [string, any[]];
+    expect(items[0].segmentGapSeconds).toEqual([45, 180]);
+  });
+
   it('passes through per-segment images', async () => {
     backendCall.mockResolvedValue({
       ok: true,

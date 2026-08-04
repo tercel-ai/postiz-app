@@ -2,8 +2,11 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { PostsService } from '../posts.service';
 
 // Smallest viable PostsService — getDuePublishPosts only touches the
-// repository (claim) and media resolution (updateMedia → mediaService).
-function makeService(opts: { rows?: any[]; providerIds?: string[] } = {}) {
+// repository (claim), media resolution (updateMedia → mediaService) and the
+// extension publish config (segment gaps).
+function makeService(
+  opts: { rows?: any[]; providerIds?: string[]; segmentGaps?: any } = {}
+) {
   const repo: any = {
     claimDueExtensionPublishPosts: vi.fn().mockResolvedValue(opts.rows ?? []),
   };
@@ -12,6 +15,9 @@ function makeService(opts: { rows?: any[]; providerIds?: string[] } = {}) {
   };
   const mediaService: any = {
     getMediaById: vi.fn(),
+  };
+  const extensionPublishConfig: any = {
+    getSegmentGaps: vi.fn().mockResolvedValue(opts.segmentGaps ?? {}),
   };
   const svc = new PostsService(
     repo,
@@ -22,7 +28,8 @@ function makeService(opts: { rows?: any[]; providerIds?: string[] } = {}) {
     {} as any,
     {} as any,
     {} as any,
-    {} as any
+    {} as any,
+    extensionPublishConfig
   );
   return { svc, repo };
 }
@@ -91,5 +98,50 @@ describe('PostsService.getDuePublishPosts', () => {
     const { due } = await svc.getDuePublishPosts('org-1', 10);
 
     expect(due[0].segments).toEqual([{ text: 'still fine' }]);
+  });
+
+  it('stamps the platform-resolved segmentGapSeconds on each due item', async () => {
+    const { svc } = makeService({
+      segmentGaps: { reddit: [45, 180], x: [20, 90] },
+      rows: [
+        {
+          id: 'post4',
+          content: 'thread anchor',
+          image: '[]',
+          settings: '{"subreddit":"r/test"}',
+          title: 'hello',
+          publishDate: new Date('2026-07-01T00:00:00.000Z'),
+          providerIdentifier: 'reddit',
+          integration: null,
+        },
+      ],
+    });
+
+    const { due } = await svc.getDuePublishPosts('org-1', 10);
+
+    expect(due[0].platform).toBe('reddit');
+    expect(due[0].segmentGapSeconds).toEqual([45, 180]);
+  });
+
+  it('omits segmentGapSeconds when the platform has no configured range', async () => {
+    const { svc } = makeService({
+      segmentGaps: { reddit: [45, 180] },
+      rows: [
+        {
+          id: 'post5',
+          content: 'no gap config',
+          image: '[]',
+          settings: '{}',
+          title: null,
+          publishDate: new Date('2026-07-01T00:00:00.000Z'),
+          providerIdentifier: 'instagram',
+          integration: null,
+        },
+      ],
+    });
+
+    const { due } = await svc.getDuePublishPosts('org-1', 10);
+
+    expect(due[0]).not.toHaveProperty('segmentGapSeconds');
   });
 });

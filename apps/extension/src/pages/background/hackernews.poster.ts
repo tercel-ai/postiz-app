@@ -6,8 +6,9 @@
 // forms are plain server-rendered HTML, so the selectors are far more stable
 // than an SPA's.
 //
-//   story   → /submit  (title + text; HN redirects away on success, then we
-//                        resolve the new item id from /submitted?id=<user>)
+//   story   → /submit  (title + text; HN redirects to /newest on success, then
+//                        we resolve the new item id right on that landing page
+//                        by title+byline, falling back to /submitted?id=<user>)
 //   comment → /item?id=<id>  (the top-level comment box; follow-up thread
 //                        segments comment on the STORY, staying anchored to it)
 
@@ -57,7 +58,12 @@ function hnDetectLogin(): boolean {
   return !!document.querySelector('input[name="acct"]');
 }
 
-/** Read the logged-in username from HN's top bar (`user?id=<name>` link). */
+/**
+ * Read the logged-in username from HN's top bar (`user?id=<name>` link).
+ * NOTE: /submit renders a stripped-down header (a single `span.pagetop`
+ * containing only "Submit") with NO user link, so this only works on regular
+ * pages — e.g. the /newest page HN lands on after a successful submission.
+ */
 function hnReadUsername(): string | null {
   const link = document.querySelector<HTMLAnchorElement>(
     'span.pagetop a[href^="user?id="]'
@@ -115,11 +121,33 @@ function hnFillComment(text: string): 'submitted' | 'no_form' | 'login' {
 }
 
 /**
- * On /submitted?id=<user>, find the id of the row whose title matches the just-
- * posted title (fall back to the newest row). HN rows are `.athing` with a
- * `.titleline > a` headline and the row id === the item id.
+ * Detect HN's post-submit error interstitials. Leaving /submit is NOT proof of
+ * success: the form POSTs to /r with a one-time fnid token, and an expired
+ * fnid ("Unknown or expired link.") or rate limit ("You're submitting too
+ * fast.") lands on an error page that is also outside /submit.
  */
-function hnFindSubmittedId(title: string): string | null {
+function hnReadPageError(): string | null {
+  const text = (document.body?.innerText || '').slice(0, 2000);
+  const m = text.match(
+    /Unknown or expired link|submitting too fast|Please slow down|Validation required|you can't submit/i
+  );
+  return m ? m[0] : null;
+}
+
+/**
+ * On /submitted?id=<user>, find the id of the row whose title matches the
+ * just-posted title. HN rows are `.athing` with a `.titleline > a` headline
+ * and the row id === the item id, newest first. When no title matches (HN
+ * truncates >80-char titles and sometimes rewrites them), fall back to the
+ * newest row ONLY if it was submitted within the last few minutes — an old
+ * first row means the story never actually landed, and returning it would
+ * backfill a stale URL and mask the failure. `rows` lets the caller tell
+ * "page inspected, story absent" (a real failure) from "page didn't render".
+ */
+function hnScanSubmittedPage(title: string): {
+  id: string | null;
+  rows: number;
+} {
   const rows = Array.from(
     document.querySelectorAll<HTMLElement>('tr.athing[id]')
   );
@@ -131,40 +159,83 @@ function hnFindSubmittedId(title: string): string | null {
       row.querySelector('a.storylink') ||
       row.querySelector('.title a');
     const t = norm(link?.textContent || '');
-    if (t && t === target) return row.id;
+    if (t && t === target) return { id: row.id, rows: rows.length };
   }
-  // Newest submission is the first row — a reasonable fallback if the title was
-  // trimmed/edited by HN and no exact match was found.
-  return rows[0]?.id ?? null;
+  const first = rows[0];
+  // `.age` title attr is "<ISO local> <UTC epoch seconds>".
+  const ageAttr =
+    first?.nextElementSibling?.querySelector('.age')?.getAttribute('title') ||
+    '';
+  const epochSec = Number(ageAttr.split(' ')[1] || '');
+  if (first && epochSec && Date.now() - epochSec * 1000 < 10 * 60 * 1000) {
+    return { id: first.id, rows: rows.length };
+  }
+  return { id: null, rows: rows.length };
+}
+
+/**
+ * On the post-submit landing page (HN 302s to /newest), find the row that is
+ * the just-submitted story: headline matches the submitted title AND (when the
+ * username is known) the byline `a.hnuser` matches the logged-in user. Strict
+ * on purpose — a wrong id here would backfill someone ELSE's story URL, which
+ * is worse than no URL at all, so there is no first-row fallback.
+ */
+function hnFindOnLanding(title: string, username: string | null): string | null {
+  const norm = (s: string) => s.replace(/\s+/g, ' ').trim().toLowerCase();
+  const target = norm(title);
+  if (!target) return null;
+  const rows = Array.from(
+    document.querySelectorAll<HTMLElement>('tr.athing[id]')
+  );
+  for (const row of rows) {
+    const link =
+      row.querySelector('.titleline > a') ||
+      row.querySelector('a.storylink') ||
+      row.querySelector('.title a');
+    if (norm(link?.textContent || '') !== target) continue;
+    const by =
+      row.nextElementSibling?.querySelector('a.hnuser')?.textContent || '';
+    if (username && by !== username) continue;
+    return row.id;
+  }
+  return null;
 }
 
 // ── Orchestration ─────────────────────────────────────────────────────────────
 
 /**
  * Resolve the freshly-submitted story's item id by opening the user's
- * /submitted page and matching the title. Best-effort — a null id just means
- * the post is live but its permalink couldn't be confirmed (the queue treats a
- * missing permalink on the last segment as OK).
+ * /submitted page and matching the title. `checked` reports whether the page
+ * was actually inspected: checked with no id means the story is ABSENT from
+ * the user's own submitted list — a story that really posted is always its
+ * newest row, so the caller must treat that as a failed submission, not a
+ * merely-unconfirmed permalink.
  */
 async function resolveSubmittedPermalink(
   tabId: number,
   username: string,
   title: string
-): Promise<{ permalink?: string; postId?: string }> {
+): Promise<{ permalink?: string; postId?: string; checked: boolean }> {
   try {
     await chrome.tabs.update(tabId, {
       url: `${HN_BASE}/submitted?id=${encodeURIComponent(username)}`,
     });
     await waitForTabComplete(tabId);
     await sleep(RENDER_SETTLE_MS);
-    const id = await runInPage(tabId, hnFindSubmittedId, [title]);
-    if (id) {
-      return { permalink: `${HN_BASE}/item?id=${id}`, postId: id };
+    const scan = await runInPage(tabId, hnScanSubmittedPage, [title]);
+    if (!scan) return { checked: false };
+    if (scan.id) {
+      return {
+        permalink: `${HN_BASE}/item?id=${scan.id}`,
+        postId: scan.id,
+        checked: true,
+      };
     }
+    return { checked: true };
   } catch (e) {
     console.warn('[aisee][hn] resolveSubmittedPermalink failed', e);
   }
-  return {};
+  return { checked: false };
 }
 
 /** Submit a new Hacker News story (segment 0). */
@@ -190,7 +261,6 @@ export async function submitHackernewsStory(
       };
     }
 
-    const username = await runInPage(tabId, hnReadUsername);
     const result = await runInPage(tabId, hnFillSubmit, [title, text]);
     if (result !== 'submitted') {
       await focusTab(tabId);
@@ -217,10 +287,57 @@ export async function submitHackernewsStory(
       };
     }
 
-    const { permalink, postId }: { permalink?: string; postId?: string } =
-      username
-        ? await resolveSubmittedPermalink(tabId, username, title)
-        : {};
+    // Leaving /submit is necessary but NOT sufficient: expired-fnid and
+    // rate-limit interstitials also live outside /submit. Check the landing
+    // page for HN's known error strings before trusting the redirect.
+    const pageError = await runInPage(tabId, hnReadPageError);
+    if (pageError) {
+      await focusTab(tabId);
+      return {
+        ok: false,
+        error: `Hacker News rejected the submission ("${pageError}"). Check the opened tab.`,
+      };
+    }
+
+    // The /submit page's stripped header has no user link, so the username can
+    // only be read HERE, on the landing page (normally /newest) — reading it
+    // before submitting always returned null and silently skipped the whole
+    // permalink resolution (the releaseURL-backfill bug).
+    const username = await runInPage(tabId, hnReadUsername);
+
+    // Cheapest resolution first: the fresh story is already on the landing
+    // /newest page — match it by title + byline right there.
+    let permalink: string | undefined;
+    let postId: string | undefined;
+    const landingId = await runInPage(tabId, hnFindOnLanding, [
+      title,
+      username,
+    ]);
+    if (landingId) {
+      permalink = `${HN_BASE}/item?id=${landingId}`;
+      postId = landingId;
+    } else if (username) {
+      // Fall back to the user's own /submitted page (newest row first).
+      const resolved = await resolveSubmittedPermalink(tabId, username, title);
+      permalink = resolved.permalink;
+      postId = resolved.postId;
+    }
+
+    // HN success REQUIRES a resolved permalink: a story that really posted is
+    // always the newest row of the user's own /submitted page, so "couldn't
+    // find it" (or couldn't even read the username to look) means the send is
+    // unverified. Reporting ok here is exactly what produced PUBLISHED posts
+    // with no releaseURL that never appeared on the site — fail instead
+    // (queue retry is manual-only, so there is no duplicate-post risk).
+    if (!permalink) {
+      await focusTab(tabId);
+      return {
+        ok: false,
+        error: `Hacker News submission could not be verified — it does not appear in your submitted list (landed on ${landedUrl}${
+          username ? '' : ', username unreadable'
+        }). Check the opened tab and retry.`,
+      };
+    }
 
     await closeTab(tabId);
     return {

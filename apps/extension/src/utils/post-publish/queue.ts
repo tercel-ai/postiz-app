@@ -22,8 +22,10 @@ import type {
   PublishTaskState,
 } from '@gitroom/helpers/extension/post-publish';
 import {
+  DEFAULT_SEGMENT_GAP_S,
   EXTENSION_PUBLISHABLE_PLATFORMS,
   IMAGE_CAPABLE_PLATFORMS,
+  MAX_SEGMENT_GAP_S,
   SINGLE_SEGMENT_PLATFORMS,
   TITLE_REQUIRED_PLATFORMS,
 } from '@gitroom/helpers/extension/post-publish';
@@ -325,6 +327,45 @@ async function defaultBackfill(
 }
 
 /**
+ * Report a settled publish FAILURE to the backend so the Post row flips
+ * QUEUE → ERROR (with the reason) instead of sitting in QUEUE forever being
+ * re-offered on every publish-due poll. Fire-and-forget best-effort: the local
+ * entry already holds the error either way, and a later manual Retry that
+ * succeeds flips the same row ERROR → PUBLISHED via the normal backfill.
+ */
+export type PublishFailureReporter = (
+  taskId: string,
+  error: string
+) => Promise<void>;
+
+async function defaultReportFailure(
+  taskId: string,
+  error: string
+): Promise<void> {
+  await backendCall(`/posts/${taskId}/extension-publish-failed`, 'PATCH', {
+    error,
+  });
+}
+
+let reportFailure: PublishFailureReporter = defaultReportFailure;
+
+function reportPublishFailure(entry: QueueEntry): void {
+  try {
+    void reportFailure(
+      entry.state.taskId,
+      entry.state.error || 'extension publish failed'
+    ).catch((e) => {
+      qlog('failure report failed (post stays QUEUE in DB)', {
+        taskId: entry.state.taskId,
+        error: String((e as any)?.message || e),
+      });
+    });
+  } catch (e) {
+    qlog('failure report threw', { taskId: entry.state.taskId });
+  }
+}
+
+/**
  * Advance a 'sent' task to 'published' by backfilling the DB, or leave it 'sent'
  * with a backfillError. The post is ALREADY live on-platform here, so a failure
  * is recorded (surfaced as a manual "Sync") — never a re-publish. Returns
@@ -360,24 +401,10 @@ let backfillPublished: PublishBackfiller = defaultBackfill;
 let now: () => number = () => Date.now();
 
 // ── Human-like pause between thread segments ────────────────────────────────
-// Back-to-back follow-ups don't look human (and Reddit comments would fire
-// within seconds of each other). A random pause is drawn per gap from the
-// item's range, or these platform defaults.
-// Conservative human-like defaults: real users don't machine-gun a thread, so
-// wait 30–120s between segments on both platforms unless the caller overrides.
-const DEFAULT_SEGMENT_GAP_S: Record<PublishPlatform, [number, number]> = {
-  x: [30, 120],
-  reddit: [30, 120],
-  linkedin: [30, 120],
-  // Article platforms are single-segment so the gap is never drawn, but the map
-  // must be total over PublishPlatform. Hacker News threads (comment chain) do
-  // use it — HN rate-limits fast repeat comments, so keep the human-like pause.
-  hackernews: [30, 120],
-  medium: [30, 120],
-  quora: [30, 120],
-  devto: [30, 120],
-};
-const MAX_SEGMENT_GAP_S = 600;
+// A random pause is drawn per gap from the item's range (the backend resolves
+// it per platform from the admin-editable `extension_publish.segment_gap`
+// setting and sends it on each publish-due item), falling back to the shared
+// DEFAULT_SEGMENT_GAP_S map when the item carries none.
 
 function segmentGapMs(item: PublishPostItem): number {
   const range =
@@ -417,6 +444,12 @@ export function setSegmentPublisherForTest(fn: SegmentPublisher | null): void {
 
 export function setBackfillForTest(fn: PublishBackfiller | null): void {
   backfillPublished = fn ?? defaultBackfill;
+}
+
+export function setFailureReporterForTest(
+  fn: PublishFailureReporter | null
+): void {
+  reportFailure = fn ?? defaultReportFailure;
 }
 
 export function setSleepForTest(
@@ -1017,6 +1050,7 @@ async function publishEntry(entry: QueueEntry): Promise<void> {
       persist();
       emit(entry);
       trimSettled();
+      reportPublishFailure(entry);
       return;
     }
   }
@@ -1069,6 +1103,25 @@ async function publishEntry(entry: QueueEntry): Promise<void> {
     }
   }
 
+  // Systemic false-success guard: a publish with NO anchor permalink may only
+  // proceed to PUBLISHED on platforms whose poster POSITIVELY confirms the
+  // send even when the URL is unrecoverable (Quora's interceptor, X/LinkedIn/
+  // Medium's own send confirmation). Everywhere else a real success always
+  // yields a permalink (Reddit redirect, dev.to API, HN /submitted scan), so
+  // its absence means the send was never verified — settle as error instead of
+  // silently flipping the DB row to PUBLISHED with an empty releaseURL.
+  if (!failed && !entry.state.permalink) {
+    const CONFIRMED_URLLESS_PLATFORMS: PublishPlatform[] = [
+      'quora',
+      'x',
+      'linkedin',
+      'medium',
+    ];
+    if (!CONFIRMED_URLLESS_PLATFORMS.includes(entry.item.platform)) {
+      failed = `${entry.item.platform} send could not be verified (no permalink) — not marking published`;
+    }
+  }
+
   if (failed) {
     // Platform send itself failed — nothing (safely) live.
     entry.state.status = 'error';
@@ -1081,6 +1134,7 @@ async function publishEntry(entry: QueueEntry): Promise<void> {
     persist();
     emit(entry);
     trimSettled();
+    reportPublishFailure(entry);
     return;
   }
 

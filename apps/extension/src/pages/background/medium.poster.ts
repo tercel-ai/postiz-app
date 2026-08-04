@@ -56,72 +56,113 @@ async function mediumFillEditor(
 ): Promise<'filled' | 'no_editor'> {
   const sleepMs = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-  const setEditable = (el: HTMLElement, text: string) => {
+  const setEditable = async (el: HTMLElement, text: string) => {
     el.focus();
     const sel = window.getSelection();
     const range = document.createRange();
     range.selectNodeContents(el);
     sel?.removeAllRanges();
     sel?.addRange(range);
-    // Prefer a synthetic paste so multi-line bodies keep their paragraph breaks
-    // (Medium's editor splits pasted text into blocks); fall back to execCommand.
-    let ok = false;
-    try {
-      const dt = new DataTransfer();
-      dt.setData('text/plain', text);
-      el.dispatchEvent(
-        new ClipboardEvent('paste', {
+    if ((el.textContent || '').length) document.execCommand?.('delete');
+
+    // Medium's editor (verified live) listens for keydown/keypress/keyup —
+    // NOT a generic 'input' — and appears to track content by diffing what
+    // its own keystroke listeners saw against the resulting DOM. A synthetic
+    // ClipboardEvent('paste') is a silent no-op (distrusts non-isTrusted
+    // clipboard events), and bulk execCommand('insertText', text) — even
+    // wrapped in a single keydown/keypress/keyup — visually fills the story
+    // correctly but leaves Medium showing "Something is wrong and we cannot
+    // save your story" and Publish permanently disabled: one keypress event
+    // reporting a multi-character insertion doesn't match what its model
+    // expects, so it flags the desync (this exactly matches Medium's own
+    // help-doc explanation: "a browser extension interfering with the DOM").
+    // The fix (verified live, including with CJK text) is to insert ONE
+    // character per keydown+keypress+execCommand+keyup cycle, so every
+    // insertion Medium's listeners observe matches the DOM change it causes.
+    for (const ch of text) {
+      if (ch === '\n') {
+        const opts = { bubbles: true, cancelable: true, composed: true, key: 'Enter', keyCode: 13, which: 13 };
+        el.dispatchEvent(new KeyboardEvent('keydown', opts));
+        document.execCommand?.('insertParagraph');
+        el.dispatchEvent(new KeyboardEvent('keyup', opts));
+      } else {
+        const opts = {
           bubbles: true,
           cancelable: true,
-          clipboardData: dt,
-        })
-      );
-      ok = (el.textContent || '').replace(/\s/g, '').length > 0;
-    } catch {
-      ok = false;
+          composed: true,
+          key: ch,
+          charCode: ch.charCodeAt(0),
+          keyCode: ch.charCodeAt(0),
+          which: ch.charCodeAt(0),
+        };
+        el.dispatchEvent(new KeyboardEvent('keydown', opts));
+        el.dispatchEvent(new KeyboardEvent('keypress', opts));
+        const inserted = document.execCommand?.('insertText', false, ch) ?? false;
+        if (!inserted) el.textContent = (el.textContent || '') + ch;
+        el.dispatchEvent(new KeyboardEvent('keyup', opts));
+      }
+      await sleepMs(8);
     }
-    if (!ok) {
-      const inserted = document.execCommand?.('insertText', false, text) ?? false;
-      if (!inserted) el.textContent = text;
-      el.dispatchEvent(
-        new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text })
-      );
-    }
+    el.dispatchEvent(
+      new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text })
+    );
   };
 
-  // The Medium editor exposes two contenteditable regions: the title (an
-  // <h3>/heading with placeholder "Title") and the body. Query broadly and
-  // classify by placeholder / tag so a markup shuffle doesn't break us.
+  // Medium nests the WHOLE story — the title heading plus every body
+  // paragraph — inside a single contenteditable region (a <section> under
+  // .postArticle-content); it does not expose one contenteditable per
+  // field. A page can also contain unrelated contenteditable elements
+  // elsewhere (observed: an empty 100x100 decoy div), so naively treating
+  // the first two `[contenteditable="true"]` matches as "title" and "body"
+  // corrupts the article (title overwrites the whole container) and writes
+  // the body into an unrelated element. Instead: find the contenteditable
+  // region that actually contains the heading, then target the heading
+  // (title) and its first sibling paragraph (body) directly.
   const editables = Array.from(
     document.querySelectorAll<HTMLElement>('[contenteditable="true"]')
   );
   if (!editables.length) return 'no_editor';
 
-  const titleEl =
+  const isHeadingTag = (el: HTMLElement) => /^h[1-4]$/i.test(el.tagName);
+  const headingIn = (root: HTMLElement) =>
+    isHeadingTag(root) ? root : root.querySelector<HTMLElement>('h1, h2, h3, h4');
+
+  const container =
+    editables.find((el) => headingIn(el)) ||
     editables.find((el) =>
       /title/i.test(el.getAttribute('data-testid') || '') ||
-      /title/i.test(el.getAttribute('aria-label') || '') ||
-      /^h[1-3]$/i.test(el.tagName)
-    ) || editables[0];
-  const bodyEl = editables.find((el) => el !== titleEl) || editables[0];
+      /title/i.test(el.getAttribute('aria-label') || '')
+    ) ||
+    editables[0];
+  const heading = headingIn(container);
 
-  setEditable(titleEl, title);
+  const titleEl = heading || container;
+  const bodyEl =
+    (heading &&
+      Array.from(container.querySelectorAll<HTMLElement>('p')).find(
+        (p) => p !== heading
+      )) ||
+    editables.find((el) => el !== container) ||
+    container;
+
+  await setEditable(titleEl, title);
   await sleepMs(150);
-  if (bodyEl !== titleEl) setEditable(bodyEl, body);
+  if (bodyEl !== titleEl) await setEditable(bodyEl, body);
   return 'filled';
 }
 
 /**
- * Click Medium's Publish control, then the final "Publish now" in the pre-
- * publish dialog. Returns 'published' once the second button was clicked,
- * 'dialog' if only the first step succeeded, or 'no_button' when neither was
- * found. Defensive: matches by data-testid AND visible button text.
+ * Click Medium's Publish control, then the final confirm button on the
+ * "Story preview" step. Returns 'published' once the second button was
+ * clicked, 'dialog' if only the first step succeeded, or 'no_button' when
+ * neither was found. Defensive: matches by data-testid AND visible button
+ * text.
  */
 function mediumClickPublish(): Promise<'published' | 'dialog' | 'no_button'> {
   const sleepMs = (ms: number) => new Promise((r) => setTimeout(r, ms));
-  const byText = (re: RegExp): HTMLElement | null =>
+  const byText = (re: RegExp, exclude?: HTMLElement): HTMLElement | null =>
     Array.from(document.querySelectorAll<HTMLElement>('button, a[role="button"]'))
-      .find((b) => re.test((b.textContent || '').trim())) || null;
+      .find((b) => b !== exclude && re.test((b.textContent || '').trim())) || null;
 
   return (async () => {
     const publishBtn =
@@ -131,7 +172,13 @@ function mediumClickPublish(): Promise<'published' | 'dialog' | 'no_button'> {
     if (!publishBtn) return 'no_button';
     publishBtn.click();
 
-    // Wait for the pre-publish dialog, then click its confirm button.
+    // Medium doesn't show an in-page dialog here — clicking Publish navigates
+    // to a separate "Story preview" page (URL gains /submission) with its own
+    // confirm button, which (verified live) is plainly labelled "Publish"
+    // (not "Publish now") and carries no distinguishing data-testid/data-action.
+    // Since it's on a different page than publishBtn, matching by text alone
+    // is unambiguous; `exclude: publishBtn` guards against a same-page repeat
+    // match if Medium ever reintroduces an in-page dialog instead.
     for (let i = 0; i < 40; i++) {
       await sleepMs(200);
       const confirm =
@@ -139,7 +186,7 @@ function mediumClickPublish(): Promise<'published' | 'dialog' | 'no_button'> {
           '[data-testid="publishConfirmButton"]'
         ) ||
         document.querySelector<HTMLElement>('[data-action="publish"]') ||
-        byText(/publish now/i);
+        byText(/^publish( now)?$/i, publishBtn);
       if (confirm) {
         confirm.click();
         return 'published';

@@ -21,6 +21,7 @@ function makeService(posts: any[]) {
     {} as any,
     {} as any,
     {} as any,
+    {} as any,
     {} as any
   );
   // Stub the Temporal trigger so we can assert WHICH posts reach it.
@@ -46,6 +47,7 @@ function makeServiceWithIntegrations(integrations: any[]) {
       ],
     } as any,
     { getIntegrationsList: vi.fn().mockResolvedValue(integrations) } as any,
+    {} as any,
     {} as any,
     {} as any,
     {} as any,

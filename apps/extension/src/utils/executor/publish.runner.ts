@@ -38,6 +38,11 @@ interface DuePublishPost {
   publishDate?: string | null;
   /** Account the post must go out as; absent when it has no bound account. */
   targetAccount?: { id: string; handle?: string; name?: string };
+  /**
+   * Admin-configured [minSeconds, maxSeconds] pause between thread segments
+   * (extension_publish.segment_gap), resolved per platform by the backend.
+   */
+  segmentGapSeconds?: [number, number];
 }
 
 export interface PublishRunSummary {
@@ -76,6 +81,10 @@ function toPublishItem(p: DuePublishPost): PublishPostItem {
     // Dropping it here would silently disable that guard for the pull path —
     // which is exactly the unattended path that needs it most.
     ...(p.targetAccount?.id ? { targetAccount: p.targetAccount } : {}),
+    // Admin-configured thread pacing. Dropping it here would silently pin the
+    // pull path to the queue's hardcoded fallback and make the
+    // extension_publish.segment_gap setting a no-op.
+    ...(p.segmentGapSeconds ? { segmentGapSeconds: p.segmentGapSeconds } : {}),
     // No publishDate → the queue treats it as due-now (the backend already
     // filtered to publishDate <= now, so it should publish immediately).
   };

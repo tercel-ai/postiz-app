@@ -17,6 +17,7 @@ function makeService(opts: {
     repo,
     {} as any, {} as any, {} as any, {} as any,
     {} as any, {} as any, {} as any, {} as any,
+    {} as any,
   );
   const startWorkflow = opts.startWorkflow ?? vi.fn().mockResolvedValue(undefined);
   (svc as any).startWorkflow = startWorkflow;

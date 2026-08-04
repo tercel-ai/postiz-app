@@ -17,6 +17,10 @@ import { AiPricingService } from '@gitroom/nestjs-libraries/database/prisma/ai-p
 import { UpdateAiPricingDto } from '@gitroom/nestjs-libraries/dtos/admin/ai-pricing.dto';
 import { ListSettingsQueryDto } from '@gitroom/nestjs-libraries/dtos/admin/settings-query.dto';
 import { CreateSettingDto, UpdateSettingDto } from '@gitroom/nestjs-libraries/dtos/admin/settings-body.dto';
+import {
+  EXTENSION_PUBLISH_SEGMENT_GAP_KEY,
+  ExtensionPublishConfigService,
+} from '@gitroom/nestjs-libraries/database/prisma/posts/extension-publish-config.service';
 import { SuperAdmin } from '@gitroom/backend/services/auth/admin/super-admin.decorator';
 
 const RESERVED_KEYS = ['ai_model_pricing'];
@@ -40,6 +44,7 @@ export class AdminSettingsController {
     private _settingsService: SettingsService,
     private _aiPricingService: AiPricingService,
     private _engageScanConfigService: EngageScanConfigService,
+    private _extensionPublishConfigService: ExtensionPublishConfigService,
     private _integrationManager: IntegrationManager
   ) {}
 
@@ -165,6 +170,25 @@ export class AdminSettingsController {
       // Stored under the `engage.keyword_x_scan_max_results` settings key; edit it
       // via PUT /admin/settings/:key. Clamped to X's valid [10, 100] range.
       xScanMaxResults: await this._engageScanConfigService.resolveXScanMaxResults(),
+    };
+  }
+
+  /**
+   * GET /admin/settings/extension-publish-segment-gap
+   *
+   * The EFFECTIVE per-platform thread segment-gap ranges ([minSeconds,
+   * maxSeconds]) the extension publish queue paces with. The stored
+   * `extension_publish.segment_gap` setting is `{ default: [min, max],
+   * platforms: { <platform>: [min, max] } }`; each platform resolves
+   * platform override → stored global default → built-in default, malformed
+   * tiers falling through. Edit the raw value via
+   * PUT /admin/settings/extension_publish.segment_gap.
+   */
+  @Get('/settings/extension-publish-segment-gap')
+  async getExtensionPublishSegmentGap() {
+    return {
+      key: EXTENSION_PUBLISH_SEGMENT_GAP_KEY,
+      value: await this._extensionPublishConfigService.getSegmentGaps(),
     };
   }
 
