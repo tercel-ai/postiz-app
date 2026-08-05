@@ -174,7 +174,7 @@ export const baseBuildOptions: BuildOptions = {
 };
 
 export default defineConfig({
-  envPrefix: ['NEXT_PUBLIC_', 'FRONTEND_URL', 'AUTH_URL', 'EXTENSION_ENV', 'LOGIN_URL', 'ENGAGE_X_ENABLED', 'ENGAGE_LINKEDIN_ENABLED', 'ENGAGE_MEDIUM_ENABLED', 'ENGAGE_QUORA_ENABLED'],
+  envPrefix: ['NEXT_PUBLIC_', 'FRONTEND_URL', 'AUTH_URL', 'EXTENSION_ENV', 'LOGIN_URL', 'ENGAGE_X_ENABLED'],
   esbuild: stripDebug ? { pure: ['console.debug'] } : {},
   plugins: [
     tailwindcss(),

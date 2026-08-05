@@ -26,12 +26,10 @@ vi.mock('../scan.devto', () => ({ scanDevto }));
 vi.mock('../scan.hackernews', () => ({ scanHackernews }));
 vi.mock('../scan.medium', () => ({ scanMedium }));
 vi.mock('../scan.quora', () => ({ scanQuora }));
-// Risk-controlled platforms gated OFF (as in a default build); public API ones on.
+// X keeps its build gate (suspended read path); everything else is governed by
+// the backend allowlist, so the dispatcher runs whatever the server leases.
 vi.mock('../flags', () => ({
   X_EXECUTOR_ENABLED: false,
-  LINKEDIN_EXECUTOR_ENABLED: false,
-  MEDIUM_EXECUTOR_ENABLED: false,
-  QUORA_EXECUTOR_ENABLED: false,
 }));
 vi.mock('../pacing', () => ({
   tryConsumeHourly: vi.fn(async () => true),
@@ -58,25 +56,26 @@ const gate = () => Promise.resolve(true);
 describe('dispatchScan routing + gating', () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it('routes ungated public-API platforms to their scanner', async () => {
+  it('routes allowlist-governed platforms straight to their scanner', async () => {
     await dispatchScan(task('reddit'), gate);
     await dispatchScan(task('devto'), gate);
     await dispatchScan(task('hackernews'), gate);
+    await dispatchScan(task('linkedin'), gate);
+    await dispatchScan(task('medium'), gate);
+    await dispatchScan(task('quora'), gate);
     expect(scanReddit).toHaveBeenCalledOnce();
     expect(scanDevto).toHaveBeenCalledOnce();
     expect(scanHackernews).toHaveBeenCalledOnce();
+    expect(scanLinkedin).toHaveBeenCalledOnce();
+    expect(scanMedium).toHaveBeenCalledOnce();
+    expect(scanQuora).toHaveBeenCalledOnce();
   });
 
-  it('refuses gated platforms WITHOUT calling their scanner when the flag is off', async () => {
-    for (const p of ['x', 'linkedin', 'medium', 'quora'] as const) {
-      const r = await dispatchScan(task(p), gate);
-      expect(r.posts).toHaveLength(0);
-      expect(r.exhausted).toBe(true);
-    }
+  it('refuses X WITHOUT calling its scanner when the build flag is off', async () => {
+    const r = await dispatchScan(task('x'), gate);
+    expect(r.posts).toHaveLength(0);
+    expect(r.exhausted).toBe(true);
     expect(scanX).not.toHaveBeenCalled();
-    expect(scanLinkedin).not.toHaveBeenCalled();
-    expect(scanMedium).not.toHaveBeenCalled();
-    expect(scanQuora).not.toHaveBeenCalled();
   });
 
   it('returns exhausted with no posts for an unknown platform', async () => {

@@ -1,6 +1,7 @@
 // Quora scan executor. Quora has NO public API, so — like the LinkedIn scanner —
 // it opens a real background quora.com tab with the user's own session and
-// scrapes the rendered DOM. Gated OFF by default via QUORA_EXECUTOR_ENABLED.
+// scrapes the rendered DOM. Whether it runs is governed by the backend scan
+// allowlist (the server only leases Quora tasks when the platform is allowed).
 //   keyword / channel → /search?q=<kw>&type=answer
 //   tracked           → /profile/<user>
 //

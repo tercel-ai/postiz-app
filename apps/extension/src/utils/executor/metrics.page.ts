@@ -1,7 +1,6 @@
 import { AnalyticsSeries } from './executor.types';
 import { fetchRedditMetrics } from './metrics.reddit';
 import { fetchLinkedinMetrics } from './metrics.linkedin';
-import { LINKEDIN_EXECUTOR_ENABLED } from './flags';
 import {
   DEFAULT_HOURLY_FETCH_CAP,
   spaceConsecutiveFetches,
@@ -24,8 +23,8 @@ export async function fetchPostMetrics(
     !url
   )
     return null;
-  // LinkedIn opens a real linkedin.com tab and is account-risky — OFF by default.
-  if (platform === 'linkedin' && !LINKEDIN_EXECUTOR_ENABLED) return null;
+  // LinkedIn opens a real linkedin.com tab; this path is user-initiated (the
+  // user asked for this post's metrics), so like the posters it is not gated.
   if (!(await tryConsumeHourly(DEFAULT_HOURLY_FETCH_CAP, platform))) {
     throw new Error(`Hourly ${platform} metrics limit reached`);
   }

@@ -20,12 +20,7 @@ import { scanDevto } from './scan.devto';
 import { scanHackernews } from './scan.hackernews';
 import { scanMedium } from './scan.medium';
 import { scanQuora } from './scan.quora';
-import {
-  LINKEDIN_EXECUTOR_ENABLED,
-  MEDIUM_EXECUTOR_ENABLED,
-  QUORA_EXECUTOR_ENABLED,
-  X_EXECUTOR_ENABLED,
-} from './flags';
+import { X_EXECUTOR_ENABLED } from './flags';
 import {
   applyDelay,
   remainingHourlyBudget,
@@ -81,40 +76,16 @@ export async function dispatchScan(
     }
     return scanX(task, gate);
   }
-  if (task.platform === 'linkedin') {
-    // LinkedIn scan drives the user's personal linkedin.com session and is
-    // account-risky, so it is OFF by default (see flags.ts). Refuse WITHOUT
-    // touching linkedin.com; mark exhausted so the backend stops re-leasing it.
-    if (!LINKEDIN_EXECUTOR_ENABLED) {
-      console.warn(
-        '[aisee][scan] LinkedIn disabled (ENGAGE_LINKEDIN_ENABLED!=true) — skipping'
-      );
-      return { posts: [], nextCursor: task.cursor, exhausted: true };
-    }
-    return scanLinkedin(task, gate);
-  }
+  // LinkedIn / Medium / Quora drive the user's personal session, but the switch
+  // lives server-side: the backend only leases tasks for platforms in the scan
+  // allowlist, so a task arriving here IS the authorization to run it.
+  if (task.platform === 'linkedin') return scanLinkedin(task, gate);
   // Dev.to + Hacker News scan are public API reads (no session) — always on,
   // like Reddit.
   if (task.platform === 'devto') return scanDevto(task, gate);
   if (task.platform === 'hackernews') return scanHackernews(task, gate);
-  if (task.platform === 'medium') {
-    // Medium scan hits medium.com with the user's session (RSS) — OFF by default.
-    if (!MEDIUM_EXECUTOR_ENABLED) {
-      console.warn('[aisee][scan] Medium disabled (ENGAGE_MEDIUM_ENABLED!=true) — skipping');
-      return { posts: [], nextCursor: task.cursor, exhausted: true };
-    }
-    return scanMedium(task, gate);
-  }
-  if (task.platform === 'quora') {
-    // Quora scan drives the user's personal quora.com session (tab scrape) — OFF
-    // by default. Refuse WITHOUT touching quora.com; mark exhausted so the
-    // backend stops re-leasing it.
-    if (!QUORA_EXECUTOR_ENABLED) {
-      console.warn('[aisee][scan] Quora disabled (ENGAGE_QUORA_ENABLED!=true) — skipping');
-      return { posts: [], nextCursor: task.cursor, exhausted: true };
-    }
-    return scanQuora(task, gate);
-  }
+  if (task.platform === 'medium') return scanMedium(task, gate);
+  if (task.platform === 'quora') return scanQuora(task, gate);
   console.warn('[aisee][scan] unknown platform', task.platform);
   return { posts: [], nextCursor: task.cursor, exhausted: true };
 }

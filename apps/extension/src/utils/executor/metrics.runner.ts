@@ -22,12 +22,7 @@ import { fetchDevtoMetrics } from './metrics.devto';
 import { fetchHackernewsMetrics } from './metrics.hackernews';
 import { fetchMediumMetrics } from './metrics.medium';
 import { fetchQuoraMetrics } from './metrics.quora';
-import {
-  LINKEDIN_EXECUTOR_ENABLED,
-  MEDIUM_EXECUTOR_ENABLED,
-  QUORA_EXECUTOR_ENABLED,
-  X_EXECUTOR_ENABLED,
-} from './flags';
+import { X_EXECUTOR_ENABLED } from './flags';
 
 const DUE_ENDPOINT = '/posts/metrics/due';
 const INGEST_ENDPOINT = '/posts/metrics/ingest';
@@ -92,15 +87,10 @@ export async function runMetrics(ids: string[]): Promise<MetricsRunSummary> {
       if (!platform || !url) continue;
       // X metrics go through the personal x.com session — OFF by default (see
       // flags.ts). Skip before consuming any budget / hitting x.com.
+      // LinkedIn/Medium/Quora session-driven metrics are gated SERVER-SIDE: the
+      // /posts/metrics/due response only includes platforms in the scan
+      // allowlist, so anything the server returns here is authorized to fetch.
       if (platform === 'x' && !X_EXECUTOR_ENABLED) continue;
-      // LinkedIn metrics drive the personal linkedin.com session — OFF by
-      // default too. Skip before consuming any budget / hitting linkedin.com.
-      if (platform === 'linkedin' && !LINKEDIN_EXECUTOR_ENABLED) continue;
-      // Medium/Quora metrics drive the personal medium.com/quora.com session via
-      // a scraped tab — OFF by default. Skip before touching either site. (Dev.to
-      // and Hacker News metrics are public API reads, so they are never gated.)
-      if (platform === 'medium' && !MEDIUM_EXECUTOR_ENABLED) continue;
-      if (platform === 'quora' && !QUORA_EXECUTOR_ENABLED) continue;
 
       if (!(await tryConsumeHourly(DEFAULT_HOURLY_FETCH_CAP, platform))) {
         summary.stoppedReason = 'cap';

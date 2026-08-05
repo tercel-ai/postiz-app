@@ -5,8 +5,9 @@
 // scanners): stop once an item is older than the cursor's lastSeenAt.
 //
 // The MV3 service worker has NO DOMParser, so the RSS XML is parsed with small,
-// well-scoped regexes over <item> blocks (CDATA-aware). Gated OFF by default via
-// MEDIUM_EXECUTOR_ENABLED — the fetch carries the user's medium.com session.
+// well-scoped regexes over <item> blocks (CDATA-aware). The fetch carries the
+// user's medium.com session; whether it runs is governed by the backend scan
+// allowlist (the server only leases Medium tasks when the platform is allowed).
 //
 // RSS has no clap/response counts, so scanned Medium posts have no engagement
 // metrics (a later metrics.medium pass fills them when enabled).

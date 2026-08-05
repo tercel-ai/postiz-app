@@ -3,9 +3,10 @@
 // counters — Medium has no public read API. Shaped as the AnalyticsData series
 // the backend's extractMetrics / traffic pipeline consumes.
 //
-// OFF BY DEFAULT (ENGAGE_MEDIUM_ENABLED) — this drives medium.com with the
-// user's personal session, which Medium flags like the other risk-controlled
-// platforms. The metrics.runner gates on the same flag before calling this.
+// This drives medium.com with the user's personal session, which Medium flags
+// like the other risk-controlled platforms. The gate is server-side: the
+// /posts/metrics/due response only includes Medium posts when the platform is
+// in the backend scan allowlist.
 
 import { AnalyticsSeries } from './executor.types';
 import { closeTab, openTab, runInPage } from '@gitroom/extension/utils/tab-automation';

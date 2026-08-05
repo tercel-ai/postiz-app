@@ -3,9 +3,9 @@
 // Quora has no public read API. Shaped as the AnalyticsData series the backend's
 // extractMetrics / traffic pipeline consumes.
 //
-// OFF BY DEFAULT (ENGAGE_QUORA_ENABLED) — this drives quora.com with the user's
-// personal session, which Quora flags aggressively. The metrics.runner gates on
-// the same flag before calling this.
+// This drives quora.com with the user's personal session, which Quora flags
+// aggressively. The gate is server-side: the /posts/metrics/due response only
+// includes Quora posts when the platform is in the backend scan allowlist.
 
 import { AnalyticsSeries } from './executor.types';
 import { closeTab, openTab, runInPage } from '@gitroom/extension/utils/tab-automation';

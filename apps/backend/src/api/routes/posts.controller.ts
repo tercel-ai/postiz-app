@@ -12,6 +12,7 @@ import {
 } from '@nestjs/common';
 import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.service';
 import { EngageEntitlementService } from '@gitroom/nestjs-libraries/engage/engage-entitlement.service';
+import { EngageScanConfigService } from '@gitroom/nestjs-libraries/engage/engage-scan-config.service';
 import { MetricsDueDto } from '@gitroom/nestjs-libraries/dtos/posts/metrics-due.dto';
 import { MetricsIngestDto } from '@gitroom/nestjs-libraries/dtos/posts/metrics-ingest.dto';
 import { PostReleaseService } from '@gitroom/nestjs-libraries/database/prisma/post-releases/post-release.service';
@@ -47,7 +48,8 @@ export class PostsController {
     private _postReleaseService: PostReleaseService,
     private _agentGraphService: AgentGraphService,
     private _shortLinkService: ShortLinkService,
-    private _engageEntitlement: EngageEntitlementService
+    private _engageEntitlement: EngageEntitlementService,
+    private _engageScanConfig: EngageScanConfigService
   ) {}
 
   /**
@@ -56,15 +58,24 @@ export class PostsController {
    * the org's effective monitoring window + fetch interval and returns ONLY the
    * subset due for a refresh — the "visible ∩ due" intersection. Covers own
    * posts and engage replies alike (both are Post rows).
+   *
+   * Session-risky platforms (LinkedIn/Medium/Quora — fetched by driving the
+   * user's own logged-in session) are additionally gated by the scan platform
+   * allowlist, the same single switch that gates their scan tasks. The
+   * extension has no build-time flag for them anymore, so filtering here is
+   * what keeps a disallowed platform's session untouched. Public-API platforms
+   * (Reddit/Dev.to/HN) and X (extension-side ENGAGE_X_ENABLED build gate) are
+   * not filtered.
    */
   @Post('/metrics/due')
   async getDueMetrics(
     @GetOrgFromRequest() org: Organization,
     @Body() body: MetricsDueDto
   ) {
-    const [windowDays, intervalHours] = await Promise.all([
+    const [windowDays, intervalHours, allowedPlatforms] = await Promise.all([
       this._engageEntitlement.getMetricsWindowDays(org.id),
       this._engageEntitlement.getMetricsFetchIntervalHours(org.id),
+      this._engageScanConfig.getSupportedScanPlatforms(),
     ]);
     const due = await this._postsService.getDueMetricsPosts(
       org.id,
@@ -72,7 +83,13 @@ export class PostsController {
       windowDays,
       intervalHours
     );
-    return { windowDays, intervalHours, due };
+    const sessionGated = new Set(['linkedin', 'medium', 'quora']);
+    const allowed = new Set<string>(allowedPlatforms);
+    const filtered = due.filter((p) => {
+      const platform = p.integration?.providerIdentifier;
+      return !platform || !sessionGated.has(platform) || allowed.has(platform);
+    });
+    return { windowDays, intervalHours, due: filtered };
   }
 
   /**

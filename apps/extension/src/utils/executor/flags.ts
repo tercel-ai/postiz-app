@@ -22,62 +22,10 @@ const rawXEnabled = (
 
 export const X_EXECUTOR_ENABLED = rawXEnabled === 'true' || rawXEnabled === '1';
 
-// LinkedIn scan + metrics drive a real linkedin.com tab with the user's PERSONAL
-// session and scrape the rendered DOM. LinkedIn flags automation at least as
-// aggressively as X, so the LinkedIn executor is OFF BY DEFAULT and opted into at
-// build time the same way:
-//
-//   ENGAGE_LINKEDIN_ENABLED=true   (e.g. in a pack profile or the build env)
-//
-// Anything else keeps it disabled — the executor refuses LinkedIn scan tasks and
-// skips LinkedIn metrics, so a stray backend LinkedIn task can never drive a
-// request to linkedin.com. This gates the BACKGROUND read paths only; the
-// user-initiated post-publish poster is not gated (mirrors the X poster).
-const rawLinkedinEnabled = (
-  import.meta.env?.ENGAGE_LINKEDIN_ENABLED ??
-  process?.env?.ENGAGE_LINKEDIN_ENABLED ??
-  ''
-)
-  .toString()
-  .trim()
-  .toLowerCase();
-
-export const LINKEDIN_EXECUTOR_ENABLED =
-  rawLinkedinEnabled === 'true' || rawLinkedinEnabled === '1';
-
-// Medium + Quora BACKGROUND metrics drive a real medium.com / quora.com tab with
-// the user's personal session and scrape the rendered engagement counters (claps
-// / responses, upvotes / views). Both platforms flag automation, so — exactly
-// like X and LinkedIn — the background read path is OFF BY DEFAULT and opted into
-// at build time:
-//
-//   ENGAGE_MEDIUM_ENABLED=true
-//   ENGAGE_QUORA_ENABLED=true
-//
-// Anything else keeps them disabled, so a stray backend metrics task can never
-// drive a request to medium.com / quora.com. This gates the BACKGROUND read path
-// only; the user-initiated post-publish posters are NOT gated (mirrors X/
-// LinkedIn: the poster runs only when the user asked to publish).
-const rawMediumEnabled = (
-  import.meta.env?.ENGAGE_MEDIUM_ENABLED ??
-  process?.env?.ENGAGE_MEDIUM_ENABLED ??
-  ''
-)
-  .toString()
-  .trim()
-  .toLowerCase();
-
-export const MEDIUM_EXECUTOR_ENABLED =
-  rawMediumEnabled === 'true' || rawMediumEnabled === '1';
-
-const rawQuoraEnabled = (
-  import.meta.env?.ENGAGE_QUORA_ENABLED ??
-  process?.env?.ENGAGE_QUORA_ENABLED ??
-  ''
-)
-  .toString()
-  .trim()
-  .toLowerCase();
-
-export const QUORA_EXECUTOR_ENABLED =
-  rawQuoraEnabled === 'true' || rawQuoraEnabled === '1';
+// LinkedIn / Medium / Quora background reads (scan + metrics) also drive the
+// user's PERSONAL session, but they are NOT build-time gated: the backend scan
+// allowlist (`settings.operation_plan.allowed_platforms || ENGAGE_SUPPORTED_
+// PLATFORMS`) is the single switch. The server only leases scan tasks and only
+// returns metrics-due posts for allowed platforms, so an operator toggles these
+// platforms without rebuilding the extension. X keeps its build gate because the
+// X read path is suspended outright (account risk), independent of the allowlist.

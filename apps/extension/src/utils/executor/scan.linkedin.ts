@@ -1,7 +1,9 @@
 // LinkedIn scan executor. Opens a real (background) linkedin.com tab and scrapes
 // the rendered DOM of a content-search / recent-activity page with the user's
 // own session (the only reliable way — LinkedIn has no public search API and
-// flags automation aggressively). Gated OFF by default via LINKEDIN_EXECUTOR_ENABLED.
+// flags automation aggressively). Whether it runs is
+// governed by the backend scan allowlist (the server only leases LinkedIn tasks
+// when the platform is allowed).
 //
 //   keyword scope  → /search/results/content/?keywords=<kw> (sorted by date)
 //   tracked scope  → /in/<handle>/recent-activity/all/
