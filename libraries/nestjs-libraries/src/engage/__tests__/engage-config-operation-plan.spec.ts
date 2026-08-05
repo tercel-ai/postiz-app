@@ -47,9 +47,10 @@ describe('EngageService.getConfig — operationPlan block', () => {
     } as any;
     const entitlementService = {
       getEntitlementSummary: vi.fn(async () => ({
-        limits: { scanIntervalHours: 6, keywordsMax: 10, priorityAccountsMax: 5, subredditsMax: 5 },
+        limits: { scanIntervalHours: 6, keywordsMax: 10, priorityAccountsMax: 5 },
         usage: { keywords: 0, trackedAccounts: 0, subreddits: 0 },
       })),
+      getPriorityAccountsUsageByPlatform: vi.fn(async () => ({})),
     } as any;
     const settingsService = opts.settingsGet ? { get: vi.fn(opts.settingsGet) } : undefined;
     const getConnectedPlatforms = vi.fn(async () => opts.connected ?? []);

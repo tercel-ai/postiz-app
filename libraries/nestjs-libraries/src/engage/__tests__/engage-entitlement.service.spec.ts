@@ -32,21 +32,32 @@ const CONFIG_ID = 'cfg1';
 
 // `count` answers the org-wide query (`where.organizationId`); `projectCount`
 // answers the per-project one (`where.configId`), defaulting to the same number
-// so single-scope tests need not care.
+// so single-scope tests need not care. When the query carries a
+// `where.platform` (per-platform priority-accounts pool) and `byPlatform` is
+// provided, that map wins — unknown platforms count 0.
 function repoMock(
   name: string,
   count = 0,
   projectCount?: number,
-  enabled: boolean | null = false
+  enabled: boolean | null = false,
+  byPlatform?: Record<string, number>
 ) {
   return {
     model: {
       [name]: {
-        count: vi.fn(async (args: any = {}) =>
-          args?.where?.configId !== undefined ? projectCount ?? count : count
-        ),
+        count: vi.fn(async (args: any = {}) => {
+          const platform = args?.where?.platform;
+          if (platform !== undefined && byPlatform) {
+            return byPlatform[platform] ?? 0;
+          }
+          return args?.where?.configId !== undefined
+            ? projectCount ?? count
+            : count;
+        }),
         findFirst: vi.fn(async () =>
-          enabled === null ? null : { enabled, configId: CONFIG_ID }
+          enabled === null
+            ? null
+            : { enabled, configId: CONFIG_ID, platform: 'x' }
         ),
       },
     },
@@ -63,6 +74,9 @@ function build(opts: {
   keywordProjectCount?: number;
   trackedProjectCount?: number;
   channelProjectCount?: number;
+  /** Org-wide enabled counts per platform (used when the query filters one). */
+  trackedByPlatform?: Record<string, number>;
+  channelByPlatform?: Record<string, number>;
   /** enabled flag the `findFirst` row reports; null = row not found. */
   rowEnabled?: boolean | null;
   billingCount?: number;
@@ -106,13 +120,15 @@ function build(opts: {
         'engageTrackedAccount',
         opts.trackedCount ?? 0,
         opts.trackedProjectCount,
-        opts.rowEnabled === undefined ? false : opts.rowEnabled
+        opts.rowEnabled === undefined ? false : opts.rowEnabled,
+        opts.trackedByPlatform
       ),
       repoMock(
         'engageMonitoredChannel',
         opts.channelCount ?? 0,
         opts.channelProjectCount,
-        opts.rowEnabled === undefined ? false : opts.rowEnabled
+        opts.rowEnabled === undefined ? false : opts.rowEnabled,
+        opts.channelByPlatform
       ),
       billing,
       organization,
@@ -220,7 +236,7 @@ describe('EngageEntitlementService.getPublicPlanCatalog', () => {
     );
     expect(byCode.starter.keywordsMax).toBe(30);
     expect(byCode.starter.replyMonthlyCap).toBe(10);
-    expect(byCode.developer.priorityAccountsMax).toBe(10);
+    expect(byCode.developer.priorityAccountsMax).toBe(60);
     expect(byCode.pro.priorityAccountsMax).toBeNull(); // unlimited
     expect(byCode.pro.scanIntervalHours).toBe(6);
     expect(catalog.replyCredits).toEqual({ short: 2, medium: 3, long: 5 });
@@ -239,7 +255,37 @@ describe('EngageEntitlementService.getPublicPlanCatalog', () => {
     const catalog = await service.getPublicPlanCatalog();
     const starter = catalog.plans.find((p) => p.code === 'starter')!.limits;
     expect(starter.keywordsMax).toBe(3); // overridden
-    expect(starter.subredditsMax).toBe(10); // untouched default survives
+    expect(starter.priorityAccountsMax).toBe(10); // untouched default survives
+  });
+
+  it('folds a legacy stored override (subreddits caps) into the shared priority-accounts cap', async () => {
+    // A settings row persisted before the caps merged: subredditsMax still
+    // present, priorityAccountsMax still excluding channels. The effective cap
+    // must be their sum — same capacity as before, channels not blocked.
+    const { service } = build({
+      limits: PRO_LIMITS,
+      settings: {
+        [ENGAGE_ENTITLEMENTS_KEY]: {
+          starter: {
+            priorityAccountsMax: 0,
+            subredditsMax: 10,
+            priorityAccountsPerProjectMax: 2,
+            subredditsPerProjectMax: 2,
+          },
+          pro: { priorityAccountsMax: 5, subredditsMax: null },
+        },
+      },
+    });
+    const catalog = await service.getPublicPlanCatalog();
+    const byCode = Object.fromEntries(
+      catalog.plans.map((p) => [p.code, p.limits])
+    );
+    expect(byCode.starter.priorityAccountsMax).toBe(10); // 0 + 10
+    expect(byCode.starter.priorityAccountsPerProjectMax).toBe(4); // 2 + 2
+    expect(byCode.pro.priorityAccountsMax).toBeNull(); // null (unlimited) wins
+    // The removed keys never leak into the merged result.
+    expect(byCode.starter).not.toHaveProperty('subredditsMax');
+    expect(byCode.starter).not.toHaveProperty('subredditsPerProjectMax');
   });
 });
 
@@ -352,16 +398,74 @@ describe('EngageEntitlementService.assertCanActivate', () => {
     await expect(service.assertCanActivate('org1', 'keyword', 1)).resolves.toBeUndefined();
   });
 
-  it('blocks tracked accounts entirely on Starter (max 0)', async () => {
-    const { service } = build({ limits: STARTER_LIMITS, trackedCount: 0 });
+  it('charges tracked accounts AND monitored channels against ONE per-platform pool', async () => {
+    // Starter's priorityAccountsMax is 10 PER PLATFORM: on X, 4 tracked + 6
+    // channels fill it, so adding EITHER type on X is rejected even though
+    // neither table alone reaches 10.
+    const { service } = build({
+      limits: STARTER_LIMITS,
+      trackedByPlatform: { x: 4 },
+      channelByPlatform: { x: 6 },
+    });
+    await expect(
+      service.assertCanActivate('org1', 'tracked', 1, undefined, 'x')
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(
+      service.assertCanActivate('org1', 'subreddit', 1, undefined, 'x')
+    ).rejects.toBeInstanceOf(ForbiddenException);
+  });
+
+  it('leaves other platforms unaffected when one platform is full', async () => {
+    // X is at 10/10 but Reddit only holds 2 — Reddit adds still go through,
+    // and the X rejection payload names the platform.
+    const { service } = build({
+      limits: STARTER_LIMITS,
+      trackedByPlatform: { x: 4 },
+      channelByPlatform: { x: 6, reddit: 2 },
+    });
+    await expect(
+      service.assertCanActivate('org1', 'subreddit', 1, undefined, 'reddit')
+    ).resolves.toBeUndefined();
+    const err = await service
+      .assertCanActivate('org1', 'tracked', 1, undefined, 'x')
+      .catch((e) => e);
+    expect((err as ForbiddenException).getResponse()).toMatchObject({
+      code: 'engage_limit_reached',
+      platform: 'x',
+      max: 10,
+      current: 10,
+    });
+  });
+
+  it('allows either type while the platform pool has room', async () => {
+    const { service } = build({
+      limits: STARTER_LIMITS,
+      trackedByPlatform: { x: 4 },
+      channelByPlatform: { x: 5 }, // combined 9/10 on X
+    });
+    await expect(
+      service.assertCanActivate('org1', 'tracked', 1, undefined, 'x')
+    ).resolves.toBeUndefined();
+    await expect(
+      service.assertCanActivate('org1', 'subreddit', 1, undefined, 'x')
+    ).resolves.toBeUndefined();
+  });
+
+  it('falls back to counting ALL platforms when no platform is given (fail-closed)', async () => {
+    const { service } = build({
+      limits: STARTER_LIMITS,
+      trackedCount: 4,
+      channelCount: 6, // global 10/10, no single platform necessarily full
+    });
     await expect(service.assertCanActivate('org1', 'tracked', 1)).rejects.toBeInstanceOf(
       ForbiddenException
     );
   });
 
   it('is a no-op when the cap is unlimited (null)', async () => {
-    const { service } = build({ limits: PRO_LIMITS, trackedCount: 999 });
+    const { service } = build({ limits: PRO_LIMITS, trackedCount: 999, channelCount: 999 });
     await expect(service.assertCanActivate('org1', 'tracked', 1)).resolves.toBeUndefined();
+    await expect(service.assertCanActivate('org1', 'subreddit', 1)).resolves.toBeUndefined();
   });
 
   it('rejects a bulk add that overruns the cap', async () => {
@@ -383,8 +487,6 @@ describe('EngageEntitlementService.assertCanActivate — per-project cap', () =>
         keywordsPerProjectMax: 5,
         priorityAccountsMax: 100,
         priorityAccountsPerProjectMax: 3,
-        subredditsMax: 100,
-        subredditsPerProjectMax: 2,
       },
     },
   };
@@ -486,20 +588,23 @@ describe('EngageEntitlementService.assertCanActivate — per-project cap', () =>
     ).rejects.toBeInstanceOf(ForbiddenException);
   });
 
-  it('applies the per-project cap to subreddits and tracked accounts too', async () => {
+  it('applies the shared per-project pool to subreddits and tracked accounts too', async () => {
+    // priorityAccountsPerProjectMax = 3 is one pool per platform: within this
+    // project, 2 channels + 1 tracked on the platform fill it, blocking BOTH
+    // types even though neither alone reaches 3.
     const { service } = build({
       limits: PRO_LIMITS,
       settings: DUAL_CAPS,
-      channelCount: 1,
-      channelProjectCount: 2, // at subredditsPerProjectMax
+      channelCount: 2,
+      channelProjectCount: 2,
       trackedCount: 1,
-      trackedProjectCount: 3, // at priorityAccountsPerProjectMax
+      trackedProjectCount: 1,
     });
     await expect(
-      service.assertCanActivate('org1', 'subreddit', 1, CONFIG_ID)
+      service.assertCanActivate('org1', 'subreddit', 1, CONFIG_ID, 'reddit')
     ).rejects.toBeInstanceOf(ForbiddenException);
     await expect(
-      service.assertCanActivate('org1', 'tracked', 1, CONFIG_ID)
+      service.assertCanActivate('org1', 'tracked', 1, CONFIG_ID, 'reddit')
     ).rejects.toBeInstanceOf(ForbiddenException);
   });
 

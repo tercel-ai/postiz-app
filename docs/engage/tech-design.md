@@ -2375,21 +2375,29 @@ Engage limits live in the global `Settings` table as JSON (same pattern as
   | Field | Starter | Developer | Pro |
   | --- | --- | --- | --- |
   | `keywordsMax` | 30 | 100 | 300 |
-  | `priorityAccountsMax` | 0 | 10 | `null` |
-  | `subredditsMax` | 10 | 50 | 150 |
+  | `priorityAccountsMax` | 10 | 60 | `null` |
   | `keywordsPerProjectMax` | 5 | 15 | 30 |
-  | `priorityAccountsPerProjectMax` | 2 | 10 | 20 |
-  | `subredditsPerProjectMax` | 2 | 8 | 15 |
+  | `priorityAccountsPerProjectMax` | 4 | 18 | 35 |
   | `scanIntervalHours` | 24 | 24 | 6 |
   | `replyMonthlyCap` | 10 | `null` | `null` |
 
-  The three unit types are capped **twice**: `*Max` bounds the whole account,
+  `priorityAccounts*` is **one shared pool per platform**: on each platform,
+  tracked accounts AND monitored channels (subreddits etc.) count against the
+  cap together — a cap of 10 allows 10 follows on X plus 10 on Reddit, etc. The
+  former `subredditsMax` / `subredditsPerProjectMax` caps were folded into it
+  (a legacy Settings override still carrying them is summed in at read time, so
+  stored rows keep their old effective capacity).
+
+  Units are capped **twice**: `*Max` bounds the whole account,
   `*PerProjectMax` bounds one project. Both are checked on every activation
-  (`assertCanActivate(orgId, type, count, configId)`), so a project's real
-  headroom is `min(org remaining, project remaining)`. Project counting keys on
+  (`assertCanActivate(orgId, type, count, configId, platform)` — the platform
+  scopes the priority-accounts pool; omitted, the count spans all platforms as
+  a fail-closed fallback), so a project's real headroom is
+  `min(org remaining, project remaining)`. Project counting keys on
   `EngageConfig.id` — unique per `(organizationId, projectId)` — because the
   keyword/channel/tracked tables carry no `projectId` of their own. The 403 body
-  reports which cap fired via `scope: 'organization' | 'project'`.
+  reports which cap fired via `scope: 'organization' | 'project'` plus the
+  `platform` whose pool is full.
 
 - **`engage_reply_credits`** — `{ base, multipliers: { short, medium, long } }`.
   `cost = round(base × multiplier)`. Defaults: base 2, ×1.0/1.5/2.5 → **2 / 3 / 5**.

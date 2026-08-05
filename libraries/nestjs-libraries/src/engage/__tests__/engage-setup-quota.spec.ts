@@ -11,6 +11,10 @@ import { EngageService } from '@gitroom/nestjs-libraries/engage/engage.service';
  * with `createMany({ skipDuplicates: true })` and never deletes, so a unit that
  * already exists under this config produces no new row and must cost nothing —
  * otherwise re-running the same setup would start failing near the cap.
+ *
+ * Channels and tracked accounts share one per-platform priority-accounts pool,
+ * so their net-new units are grouped by platform and asserted as a single
+ * combined 'tracked' charge per platform.
  */
 describe('EngageService.setupEngage — quota gate', () => {
   const org = { id: 'org-1' } as any;
@@ -47,11 +51,18 @@ describe('EngageService.setupEngage — quota gate', () => {
     return { service, assertCanActivate, engageRepository };
   }
 
-  /** Counts asserted for one unit type, or undefined when never checked. */
-  const charged = (mock: any, type: string) =>
-    mock.mock.calls.find((c: unknown[]) => c[1] === type)?.[2];
+  /**
+   * Counts asserted for one unit type (optionally one platform), or undefined
+   * when never checked. Channels + tracked accounts share the per-platform
+   * priority-accounts pool, so both are charged as ONE 'tracked' assert per
+   * platform.
+   */
+  const charged = (mock: any, type: string, platform?: string) =>
+    mock.mock.calls.find(
+      (c: unknown[]) => c[1] === type && (platform === undefined || c[4] === platform)
+    )?.[2];
 
-  it('charges each unit type against both scopes with the config id', async () => {
+  it('charges keywords, and channels+tracked as one per-platform pool, with the config id', async () => {
     const { service, assertCanActivate } = buildService();
 
     await service.setupEngage(org, {
@@ -63,13 +74,31 @@ describe('EngageService.setupEngage — quota gate', () => {
     } as any);
 
     expect(charged(assertCanActivate, 'keyword')).toBe(2);
-    expect(charged(assertCanActivate, 'subreddit')).toBe(1);
-    expect(charged(assertCanActivate, 'tracked')).toBe(1);
+    // The reddit channel and the (default-'x') tracked account land on
+    // different platforms → one combined pool charge per platform.
+    expect(charged(assertCanActivate, 'tracked', 'reddit')).toBe(1);
+    expect(charged(assertCanActivate, 'tracked', 'x')).toBe(1);
     // Every call carries the config id, so the per-project cap actually applies.
     for (const call of assertCanActivate.mock.calls) {
       expect(call[0]).toBe('org-1');
       expect(call[3]).toBe('cfg-1');
     }
+  });
+
+  it('sums channels and tracked accounts on the SAME platform into one charge', async () => {
+    const { service, assertCanActivate } = buildService();
+
+    await service.setupEngage(org, {
+      monitoredChannels: [
+        { platform: 'x', channelId: 'list1', channelName: 'list one' },
+      ],
+      trackedAccounts: [{ platform: 'x', username: 'someone' }],
+    } as any);
+
+    // 1 channel + 1 tracked on X → a single combined charge of 2, so the two
+    // types cannot each fill the shared pool separately.
+    expect(charged(assertCanActivate, 'tracked', 'x')).toBe(2);
+    expect(assertCanActivate).toHaveBeenCalledTimes(1);
   });
 
   it('does not write when a cap rejects the payload', async () => {
@@ -125,7 +154,7 @@ describe('EngageService.setupEngage — quota gate', () => {
     } as any);
 
     expect(charged(assertCanActivate, 'keyword')).toBe(1);
-    expect(charged(assertCanActivate, 'tracked')).toBe(1);
+    expect(charged(assertCanActivate, 'tracked', 'x')).toBe(1);
   });
 
   it('does not charge a keyword explicitly sent as disabled', async () => {
@@ -160,6 +189,8 @@ describe('EngageService.setupEngage — quota gate', () => {
       ],
     } as any);
 
-    expect(charged(assertCanActivate, 'subreddit')).toBe(1);
+    // Only the linkedin one is new; its charge lands on its own platform pool.
+    expect(charged(assertCanActivate, 'tracked', 'linkedin')).toBe(1);
+    expect(charged(assertCanActivate, 'tracked', 'reddit')).toBeUndefined();
   });
 });

@@ -55,7 +55,13 @@ export type EngagePlanCode = AiseePlanCode;
 const ENGAGE_PLAN_CODES: readonly EngagePlanCode[] = AISEE_PLAN_CODES;
 export type ReplyLength = 'short' | 'medium' | 'long';
 
-/** The three unit kinds a plan caps. */
+/**
+ * The unit kinds a plan caps. `tracked` (priority accounts) and `subreddit`
+ * (monitored channels) identify different tables but draw from the SAME cap
+ * pair (`priorityAccounts*`), scoped PER PLATFORM — each platform gets its own
+ * "priority accounts" budget covering that platform's followed accounts and
+ * monitored channels together.
+ */
 export type EngageLimitType = 'keyword' | 'tracked' | 'subreddit';
 
 /** Which cap rejected an activation — the org-wide budget or the per-project one. */
@@ -75,16 +81,21 @@ export type EngageLimitScope = 'organization' | 'project';
 export interface EngageEntitlement {
   /** Max simultaneously-enabled keywords, org-wide. */
   keywordsMax: number | null;
-  /** Max enabled tracked/priority accounts org-wide (0 = feature hidden). */
+  /**
+   * Max enabled priority accounts PER PLATFORM, org-wide (0 = feature hidden).
+   * One pool per platform: on each platform, tracked accounts AND monitored
+   * channels (subreddits, LinkedIn pages, …) count against it together — so a
+   * cap of 10 allows up to 10 follows on X plus 10 on Reddit, etc.
+   */
   priorityAccountsMax: number | null;
-  /** Max enabled monitored subreddits, org-wide. */
-  subredditsMax: number | null;
   /** Max simultaneously-enabled keywords within ONE project. */
   keywordsPerProjectMax: number | null;
-  /** Max enabled tracked/priority accounts within ONE project. */
+  /**
+   * Max enabled priority accounts PER PLATFORM within ONE project — same
+   * per-platform pool as `priorityAccountsMax` (tracked accounts + monitored
+   * channels combined), scoped to the project.
+   */
   priorityAccountsPerProjectMax: number | null;
-  /** Max enabled monitored subreddits within ONE project. */
-  subredditsPerProjectMax: number | null;
   /** Scan cadence applied to this org's keyword/channel/tracked units. */
   scanIntervalHours: number;
   /** Max reply drafts generated per billing period (null = unlimited). */
@@ -115,14 +126,16 @@ export interface EngageReplyCredits {
 }
 
 // ─── Defaults (seeded on first boot; spec §1 + §3.2) ──────────────────────────
+// priorityAccounts caps absorb the former subreddits caps (sum of the two old
+// defaults; null = unlimited wins): starter 0+10, developer 10+50, pro
+// null+150 / per-project 2+2, 10+8, 20+15. The pool applies PER PLATFORM, so
+// each platform independently gets this many follows (accounts + channels).
 const DEFAULT_ENTITLEMENTS: EngageEntitlementMap = {
   starter: {
     keywordsMax: 30,
-    priorityAccountsMax: 0,
-    subredditsMax: 10,
+    priorityAccountsMax: 10,
     keywordsPerProjectMax: 5,
-    priorityAccountsPerProjectMax: 2,
-    subredditsPerProjectMax: 2,
+    priorityAccountsPerProjectMax: 4,
     scanIntervalHours: 24,
     replyMonthlyCap: 10,
     metricsWindowDaysMax: 7,
@@ -130,11 +143,9 @@ const DEFAULT_ENTITLEMENTS: EngageEntitlementMap = {
   },
   developer: {
     keywordsMax: 100,
-    priorityAccountsMax: 10,
-    subredditsMax: 50,
+    priorityAccountsMax: 60,
     keywordsPerProjectMax: 15,
-    priorityAccountsPerProjectMax: 10,
-    subredditsPerProjectMax: 8,
+    priorityAccountsPerProjectMax: 18,
     scanIntervalHours: 24,
     replyMonthlyCap: null,
     metricsWindowDaysMax: 14,
@@ -143,10 +154,8 @@ const DEFAULT_ENTITLEMENTS: EngageEntitlementMap = {
   pro: {
     keywordsMax: 300,
     priorityAccountsMax: null,
-    subredditsMax: 150,
     keywordsPerProjectMax: 30,
-    priorityAccountsPerProjectMax: 20,
-    subredditsPerProjectMax: 15,
+    priorityAccountsPerProjectMax: 35,
     scanIntervalHours: 6,
     replyMonthlyCap: null,
     metricsWindowDaysMax: 30,
@@ -180,10 +189,8 @@ export const DEFAULT_METRICS_FETCH_INTERVAL_HOURS = 6;
 const UNLIMITED_ENTITLEMENT: EngageEntitlement = {
   keywordsMax: null,
   priorityAccountsMax: null,
-  subredditsMax: null,
   keywordsPerProjectMax: null,
   priorityAccountsPerProjectMax: null,
-  subredditsPerProjectMax: null,
   scanIntervalHours: DEFAULT_SCAN_INTERVAL_HOURS,
   replyMonthlyCap: null,
   metricsWindowDaysMax: DEFAULT_METRICS_WINDOW_DAYS,
@@ -244,7 +251,7 @@ export class EngageEntitlementService implements OnModuleInit {
     await this._seedIfMissing(
       ENGAGE_ENTITLEMENTS_KEY,
       DEFAULT_ENTITLEMENTS,
-      'Per-plan engage limits: org-wide keywords/accounts/subreddits, their per-project counterparts (*PerProjectMax), scan interval, reply cap, metrics window days, metrics fetch interval. null = unlimited; both caps apply.'
+      'Per-plan engage limits: org-wide keywords + priority accounts (one shared pool covering tracked accounts AND monitored channels, all platforms), their per-project counterparts (*PerProjectMax), scan interval, reply cap, metrics window days, metrics fetch interval. null = unlimited; both caps apply.'
     );
     await this._seedIfMissing(
       ENGAGE_REPLY_CREDITS_KEY,
@@ -272,18 +279,59 @@ export class EngageEntitlementService implements OnModuleInit {
   // ─── Entitlement resolution ────────────────────────────────────────────────
 
   private async _loadEntitlements(): Promise<EngageEntitlementMap> {
-    const stored = await this._settings.get<Partial<EngageEntitlementMap>>(
-      ENGAGE_ENTITLEMENTS_KEY
-    );
+    const stored = await this._settings.get<
+      Partial<Record<EngagePlanCode, Partial<EngageEntitlement>>>
+    >(ENGAGE_ENTITLEMENTS_KEY);
     // Merge per-plan so a partial admin override never drops a tier.
     return {
-      starter: { ...DEFAULT_ENTITLEMENTS.starter, ...(stored?.starter ?? {}) },
+      starter: {
+        ...DEFAULT_ENTITLEMENTS.starter,
+        ...this._foldLegacySubredditCaps(stored?.starter),
+      },
       developer: {
         ...DEFAULT_ENTITLEMENTS.developer,
-        ...(stored?.developer ?? {}),
+        ...this._foldLegacySubredditCaps(stored?.developer),
       },
-      pro: { ...DEFAULT_ENTITLEMENTS.pro, ...(stored?.pro ?? {}) },
+      pro: {
+        ...DEFAULT_ENTITLEMENTS.pro,
+        ...this._foldLegacySubredditCaps(stored?.pro),
+      },
     };
+  }
+
+  /**
+   * Settings rows seeded before the caps merged still carry the removed
+   * `subredditsMax`/`subredditsPerProjectMax` keys — and, worse, an old
+   * `priorityAccountsMax` that excluded channels (e.g. starter's former 0).
+   * Fold each legacy pair into the unified priority-accounts cap by summing
+   * (null = unlimited wins), so a stored legacy row yields the same effective
+   * capacity it granted before instead of silently blocking channels.
+   */
+  private _foldLegacySubredditCaps(
+    entry:
+      | (Partial<EngageEntitlement> & {
+          subredditsMax?: number | null;
+          subredditsPerProjectMax?: number | null;
+        })
+      | undefined
+  ): Partial<EngageEntitlement> {
+    if (!entry) return {};
+    const { subredditsMax, subredditsPerProjectMax, ...rest } = entry;
+    const sum = (a: number | null, b: number | null) =>
+      a === null || b === null ? null : a + b;
+    if (subredditsMax !== undefined) {
+      rest.priorityAccountsMax = sum(
+        rest.priorityAccountsMax ?? 0,
+        subredditsMax
+      );
+    }
+    if (subredditsPerProjectMax !== undefined) {
+      rest.priorityAccountsPerProjectMax = sum(
+        rest.priorityAccountsPerProjectMax ?? 0,
+        subredditsPerProjectMax
+      );
+    }
+    return rest;
   }
 
   private async _loadReplyCredits(): Promise<EngageReplyCredits> {
@@ -541,29 +589,45 @@ export class EngageEntitlementService implements OnModuleInit {
    *
    * `configId` is optional only for callers with no project context; omitting it
    * silently skips the project check, so always pass the resolved config id.
+   *
+   * For 'tracked'/'subreddit', `platform` scopes the priority-accounts pool to
+   * the platform the new units land on (the cap is per platform). Always pass
+   * it; when omitted the count spans ALL platforms — a stricter, fail-closed
+   * fallback, never a wider allowance.
    */
   async assertCanActivate(
     orgId: string,
     type: EngageLimitType,
     count = 1,
-    configId?: string | null
+    configId?: string | null,
+    platform?: string | null
   ): Promise<void> {
     const entitlement = await this.getEntitlement(orgId);
 
     const orgMax = this._orgMax(entitlement, type);
     if (orgMax !== null) {
-      const current = await this._countEnabled(orgId, type);
+      const current = await this._countEnabledForCap(orgId, type, platform);
       if (current + count > orgMax) {
-        throw this._limitError(type, 'organization', orgMax, current);
+        throw this._limitError(type, 'organization', orgMax, current, platform);
       }
     }
 
     if (!configId) return;
     const projectMax = this._projectMax(entitlement, type);
     if (projectMax === null) return; // unlimited per project
-    const currentInProject = await this._countEnabledInConfig(configId, type);
+    const currentInProject = await this._countEnabledInConfig(
+      configId,
+      type,
+      platform
+    );
     if (currentInProject + count > projectMax) {
-      throw this._limitError(type, 'project', projectMax, currentInProject);
+      throw this._limitError(
+        type,
+        'project',
+        projectMax,
+        currentInProject,
+        platform
+      );
     }
   }
 
@@ -571,8 +635,8 @@ export class EngageEntitlementService implements OnModuleInit {
    * Enforce the caps only when an existing unit transitions disabled → enabled.
    * Re-enabling an already-enabled row, or touching an unknown id, is a no-op so
    * the count is never double-charged. The row's own `configId` supplies the
-   * project scope, so the per-project cap is checked against the project the
-   * unit actually belongs to.
+   * project scope and its own `platform` supplies the per-platform pool, so the
+   * caps are checked against the project and platform the unit belongs to.
    */
   async assertCanEnable(
     orgId: string,
@@ -581,18 +645,19 @@ export class EngageEntitlementService implements OnModuleInit {
   ): Promise<void> {
     const row = await this._currentlyEnabled(orgId, type, id);
     if (!row || row.enabled) return; // already enabled / not found
-    await this.assertCanActivate(orgId, type, 1, row.configId);
+    await this.assertCanActivate(orgId, type, 1, row.configId, row.platform);
   }
 
+  // 'tracked' and 'subreddit' resolve to the SAME cap: a per-platform
+  // priority-accounts pool shared by that platform's tracked accounts and
+  // monitored channels.
   private _orgMax(
     entitlement: EngageEntitlement,
     type: EngageLimitType
   ): number | null {
     return type === 'keyword'
       ? entitlement.keywordsMax
-      : type === 'tracked'
-      ? entitlement.priorityAccountsMax
-      : entitlement.subredditsMax;
+      : entitlement.priorityAccountsMax;
   }
 
   private _projectMax(
@@ -601,17 +666,19 @@ export class EngageEntitlementService implements OnModuleInit {
   ): number | null {
     return type === 'keyword'
       ? entitlement.keywordsPerProjectMax
-      : type === 'tracked'
-      ? entitlement.priorityAccountsPerProjectMax
-      : entitlement.subredditsPerProjectMax;
+      : entitlement.priorityAccountsPerProjectMax;
   }
 
   private _limitError(
     type: EngageLimitType,
     scope: EngageLimitScope,
     max: number,
-    current: number
+    current: number,
+    platform?: string | null
   ): ForbiddenException {
+    // The priority-accounts pool is per platform, so the shortfall wording (and
+    // the `platform` payload field) names the platform that is full.
+    const perPlatform = type === 'keyword' ? '' : ' per platform';
     return new ForbiddenException({
       code: 'engage_limit_reached',
       limit: type,
@@ -620,12 +687,15 @@ export class EngageEntitlementService implements OnModuleInit {
       scope,
       max,
       current,
+      ...(platform ? { platform } : {}),
       message:
         scope === 'project'
           ? `Your plan allows up to ${max} active ${this._label(
               type
-            )} per project.`
-          : `Your plan allows up to ${max} active ${this._label(type)}.`,
+            )}${perPlatform} per project.`
+          : `Your plan allows up to ${max} active ${this._label(
+              type
+            )}${perPlatform}.`,
     });
   }
 
@@ -633,14 +703,19 @@ export class EngageEntitlementService implements OnModuleInit {
     orgId: string,
     type: EngageLimitType,
     id: string
-  ): Promise<{ enabled: boolean; configId: string } | null> {
-    const select = { enabled: true, configId: true };
+  ): Promise<{
+    enabled: boolean;
+    configId: string;
+    platform?: string | null;
+  } | null> {
     if (type === 'keyword') {
       return this._keyword.model.engageKeyword.findFirst({
         where: { id, organizationId: orgId },
-        select,
+        select: { enabled: true, configId: true },
       });
     }
+    // tracked/channel rows carry the platform their per-platform pool keys on.
+    const select = { enabled: true, configId: true, platform: true };
     if (type === 'tracked') {
       return this._trackedAccount.model.engageTrackedAccount.findFirst({
         where: { id, organizationId: orgId },
@@ -654,13 +729,39 @@ export class EngageEntitlementService implements OnModuleInit {
   }
 
   private _label(type: EngageLimitType): string {
-    return type === 'keyword'
-      ? 'keywords'
-      : type === 'tracked'
-      ? 'tracked accounts'
-      : 'subreddits';
+    // tracked + subreddit share one cap, so the shortfall message names the
+    // shared pool rather than whichever table happened to trigger it.
+    return type === 'keyword' ? 'keywords' : 'priority accounts';
   }
 
+  /**
+   * Org-wide enabled priority-accounts usage per platform (tracked accounts +
+   * monitored channels summed) — the numbers a UI needs to gate "+ Add"
+   * against the per-platform cap without re-deriving the pool rule.
+   */
+  async getPriorityAccountsUsageByPlatform(
+    orgId: string
+  ): Promise<Record<string, number>> {
+    const args = {
+      by: ['platform'] as const,
+      where: { organizationId: orgId, enabled: true },
+      _count: { _all: true },
+    };
+    const [tracked, channels] = await Promise.all([
+      this._trackedAccount.model.engageTrackedAccount.groupBy(args as any),
+      this._channel.model.engageMonitoredChannel.groupBy(args as any),
+    ]);
+    const usage: Record<string, number> = {};
+    for (const row of [...tracked, ...channels] as Array<{
+      platform: string;
+      _count: { _all: number };
+    }>) {
+      usage[row.platform] = (usage[row.platform] ?? 0) + row._count._all;
+    }
+    return usage;
+  }
+
+  /** Enabled rows of ONE table, org-wide — per-type usage for the read model. */
   private async _countEnabled(
     orgId: string,
     type: EngageLimitType
@@ -681,27 +782,58 @@ export class EngageEntitlementService implements OnModuleInit {
   }
 
   /**
-   * Enabled units inside ONE project config. `configId` is unique per
+   * Org-wide usage counted AGAINST the cap for `type`: keywords count alone,
+   * while tracked accounts and monitored channels are summed — on ONE platform
+   * they consume the same per-platform priority-accounts budget. Omitting
+   * `platform` counts across all platforms (fail-closed fallback).
+   */
+  private async _countEnabledForCap(
+    orgId: string,
+    type: EngageLimitType,
+    platform?: string | null
+  ): Promise<number> {
+    if (type === 'keyword') {
+      return this._countEnabled(orgId, 'keyword');
+    }
+    const where = {
+      organizationId: orgId,
+      enabled: true,
+      ...(platform ? { platform } : {}),
+    };
+    const [tracked, channels] = await Promise.all([
+      this._trackedAccount.model.engageTrackedAccount.count({ where }),
+      this._channel.model.engageMonitoredChannel.count({ where }),
+    ]);
+    return tracked + channels;
+  }
+
+  /**
+   * Enabled units inside ONE project config, counted against the cap (tracked
+   * accounts + monitored channels summed for the per-platform pool; `platform`
+   * scoping as in _countEnabledForCap). `configId` is unique per
    * (organizationId, projectId), so it already scopes the count to both the org
    * and the project — no extra orgId predicate needed.
    */
   private async _countEnabledInConfig(
     configId: string,
-    type: EngageLimitType
+    type: EngageLimitType,
+    platform?: string | null
   ): Promise<number> {
     if (type === 'keyword') {
       return this._keyword.model.engageKeyword.count({
         where: { configId, enabled: true },
       });
     }
-    if (type === 'tracked') {
-      return this._trackedAccount.model.engageTrackedAccount.count({
-        where: { configId, enabled: true },
-      });
-    }
-    return this._channel.model.engageMonitoredChannel.count({
-      where: { configId, enabled: true },
-    });
+    const where = {
+      configId,
+      enabled: true,
+      ...(platform ? { platform } : {}),
+    };
+    const [tracked, channels] = await Promise.all([
+      this._trackedAccount.model.engageTrackedAccount.count({ where }),
+      this._channel.model.engageMonitoredChannel.count({ where }),
+    ]);
+    return tracked + channels;
   }
 
   // ─── Reply generation: monthly cap + credit cost ───────────────────────────

@@ -182,7 +182,7 @@ export class EngageService implements OnApplicationBootstrap {
     const entitlement = await this._entitlementService.getEntitlementSummary(org.id);
     const scanIntervalHours = entitlement.limits.scanIntervalHours;
     const cadenceMs = scanIntervalHours * 3_600_000;
-    const [config, scanStatus] = await Promise.all([
+    const [config, scanStatus, priorityUsageByPlatform] = await Promise.all([
       // No projectId → the caller has no project context (the browser extension's
       // scan panel). Return the org-wide aggregate (union across every enabled
       // config, deduped) so its selectable scan units match what the server-side
@@ -194,6 +194,9 @@ export class EngageService implements OnApplicationBootstrap {
       // getOrgScanStatus stays org-scoped (not yet project-aware) — a known,
       // separately-flagged gap, not a regression introduced here.
       this._engageRepository.getOrgScanStatus(org.id, scanIntervalHours),
+      // Org-wide enabled tracked+channels per platform — feeds the per-platform
+      // priority-accounts rollup in entitlement.counts.priorityAccounts.
+      this._entitlementService.getPriorityAccountsUsageByPlatform(org.id),
     ]);
 
     // Per-keyword per-platform scan times (from EngageScanCursor). Queried after
@@ -263,6 +266,13 @@ export class EngageService implements OnApplicationBootstrap {
     // unlimited, 0 = feature hidden). subreddits mirrors usage.subreddits, which
     // counts ALL monitored channels (no platform filter) — keep them aligned.
     //
+    // trackedAccounts and subreddits share ONE cap pair (priorityAccountsMax /
+    // priorityAccountsPerProjectMax), scoped PER PLATFORM: both blocks report
+    // the same `max`, which bounds accounts+channels combined on EACH platform,
+    // while `added`/`active` here are totals across platforms. A UI that wants
+    // to pre-disable "+ Add" must count per platform; the server-side assert
+    // (which receives the platform) remains the source of truth either way.
+    //
     // Two caps apply to every activation, so each type also carries a `project`
     // block with the SAME shape scoped to the requested project. It is null when
     // no projectId was passed (the extension's org-wide aggregate view has no
@@ -286,10 +296,48 @@ export class EngageService implements OnApplicationBootstrap {
           subreddits: {
             added: config.monitoredChannels.length,
             active: enabledCount(config.monitoredChannels),
-            max: entitlement.limits.subredditsPerProjectMax,
+            max: entitlement.limits.priorityAccountsPerProjectMax,
           },
         }
       : null;
+    // The authoritative per-platform rollup for the shared priority-accounts
+    // pool: `max`/`projectMax` are the per-platform caps, and each platform
+    // entry carries the org-wide enabled count plus (when a projectId scoped
+    // this call) this project's added/active. A platform is addable when
+    // `active < max` AND `project.active < projectMax` (null = unlimited) —
+    // exactly what the server-side assert enforces.
+    const projectPerPlatform = projectId
+      ? (() => {
+          const map: Record<string, { added: number; active: number }> = {};
+          const bump = (platform: string, enabled: boolean) => {
+            const entry = (map[platform] ??= { added: 0, active: 0 });
+            entry.added += 1;
+            if (enabled) entry.active += 1;
+          };
+          for (const a of config.trackedAccounts) bump(a.platform, a.enabled);
+          for (const c of config.monitoredChannels) bump(c.platform, c.enabled);
+          return map;
+        })()
+      : null;
+    const priorityPlatforms = new Set([
+      ...Object.keys(priorityUsageByPlatform),
+      ...Object.keys(projectPerPlatform ?? {}),
+    ]);
+    const priorityAccounts = {
+      max: entitlement.limits.priorityAccountsMax,
+      projectMax: entitlement.limits.priorityAccountsPerProjectMax,
+      byPlatform: Object.fromEntries(
+        [...priorityPlatforms].map((platform) => [
+          platform,
+          {
+            active: priorityUsageByPlatform[platform] ?? 0,
+            project: projectPerPlatform
+              ? projectPerPlatform[platform] ?? { added: 0, active: 0 }
+              : null,
+          },
+        ])
+      ),
+    };
     const counts = {
       keywords: {
         added: config.keywords.length,
@@ -306,9 +354,10 @@ export class EngageService implements OnApplicationBootstrap {
       subreddits: {
         added: config.monitoredChannels.length,
         active: entitlement.usage.subreddits,
-        max: entitlement.limits.subredditsMax,
+        max: entitlement.limits.priorityAccountsMax,
         project: projectCounts?.subreddits ?? null,
       },
+      priorityAccounts,
     };
     return {
       ...config,
@@ -459,17 +508,49 @@ export class EngageService implements OnApplicationBootstrap {
       (kw) => kw.keyword,
       config.keywords.map((kw) => kw.keyword)
     );
-    const channels = newUnits(
+
+    // Channels and tracked accounts share ONE per-platform priority-accounts
+    // pool, so their net-new units are grouped by platform and asserted as a
+    // single combined charge per platform — asserting the two types separately
+    // would let each fill the same pool past the cap.
+    const perPlatform = new Map<string, number>();
+    const chargePlatform = (platform: string, keys: Set<string>) => {
+      if (keys.size > 0) {
+        perPlatform.set(platform, (perPlatform.get(platform) ?? 0) + keys.size);
+      }
+    };
+    const freshKeys = <T>(
+      incoming: T[] | undefined,
+      key: (item: T) => string,
+      existingKeys: string[]
+    ): Map<string, Set<string>> => {
+      // platform → fresh unit keys, deduped the same way the write will be.
+      const existing = new Set(existingKeys);
+      const byPlatform = new Map<string, Set<string>>();
+      for (const item of incoming ?? []) {
+        const k = key(item);
+        if (existing.has(k)) continue;
+        const platform = k.slice(0, k.indexOf(':'));
+        if (!byPlatform.has(platform)) byPlatform.set(platform, new Set());
+        byPlatform.get(platform)!.add(k);
+      }
+      return byPlatform;
+    };
+    for (const [platform, keys] of freshKeys(
       dto.monitoredChannels,
       (ch) => `${ch.platform}:${ch.channelId}`,
       config.monitoredChannels.map((ch) => `${ch.platform}:${ch.channelId}`)
-    );
+    )) {
+      chargePlatform(platform, keys);
+    }
     // `platform ?? 'x'` mirrors the default repository.setupEngage writes.
-    const tracked = newUnits(
+    for (const [platform, keys] of freshKeys(
       dto.trackedAccounts,
       (acc) => `${acc.platform ?? 'x'}:${acc.username}`,
       config.trackedAccounts.map((acc) => `${acc.platform}:${acc.username}`)
-    );
+    )) {
+      chargePlatform(platform, keys);
+    }
 
     // Sequential, not parallel: the first cap to be exceeded should be the one
     // reported, and each assert issues its own counting queries anyway.
@@ -481,20 +562,13 @@ export class EngageService implements OnApplicationBootstrap {
         config.id
       );
     }
-    if (channels > 0) {
-      await this._entitlementService.assertCanActivate(
-        orgId,
-        'subreddit',
-        channels,
-        config.id
-      );
-    }
-    if (tracked > 0) {
+    for (const [platform, count] of perPlatform) {
       await this._entitlementService.assertCanActivate(
         orgId,
         'tracked',
-        tracked,
-        config.id
+        count,
+        config.id,
+        platform
       );
     }
   }
@@ -549,7 +623,13 @@ export class EngageService implements OnApplicationBootstrap {
 
   async addMonitoredChannel(org: Organization, dto: AddMonitoredChannelDto) {
     const config = await this._engageRepository.getOrCreateConfig(org.id, dto.projectId);
-    await this._entitlementService.assertCanActivate(org.id, 'subreddit', 1, config.id);
+    await this._entitlementService.assertCanActivate(
+      org.id,
+      'subreddit',
+      1,
+      config.id,
+      dto.platform
+    );
     return this._engageRepository.addMonitoredChannel(
       config.id,
       org.id,
@@ -588,7 +668,14 @@ export class EngageService implements OnApplicationBootstrap {
 
   async addTrackedAccount(org: Organization, dto: AddTrackedAccountDto) {
     const config = await this._engageRepository.getOrCreateConfig(org.id, dto.projectId);
-    await this._entitlementService.assertCanActivate(org.id, 'tracked', 1, config.id);
+    // `?? 'x'` mirrors the default platform repository.addTrackedAccount writes.
+    await this._entitlementService.assertCanActivate(
+      org.id,
+      'tracked',
+      1,
+      config.id,
+      dto.platform ?? 'x'
+    );
     return this._engageRepository.addTrackedAccount(config.id, org.id, dto);
   }
 

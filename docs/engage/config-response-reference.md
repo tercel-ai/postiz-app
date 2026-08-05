@@ -34,11 +34,9 @@ and `EngageRepository.getOrgScanStatus` (`libraries/nestjs-libraries/src/engage/
     "plan": "starter",                          // "starter" | "developer" | "pro" | null
     "limits": {
       "keywordsMax": 3,                         // number | null (null = unlimited)
-      "priorityAccountsMax": 0,                 // number | null (0 = feature hidden)
-      "subredditsMax": 1,
+      "priorityAccountsMax": 10,                // shared pool: tracked accounts + monitored channels
       "keywordsPerProjectMax": 5,               // per-project counterparts
-      "priorityAccountsPerProjectMax": 2,
-      "subredditsPerProjectMax": 2,
+      "priorityAccountsPerProjectMax": 4,
       "scanIntervalHours": 24,
       "replyMonthlyCap": 10,                    // number | null (null = unlimited)
       "metricsWindowDaysMax": 7,
@@ -55,13 +53,28 @@ and `EngageRepository.getOrgScanStatus` (`libraries/nestjs-libraries/src/engage/
         "added": 2, "active": 2, "max": 3,      // org scope
         "project": { "added": 2, "active": 2, "max": 5 }   // null without projectId
       },
+      // trackedAccounts + subreddits share ONE cap pair (priorityAccounts*),
+      // scoped PER PLATFORM: both report the same max (a per-platform bound),
+      // while added/active are totals across platforms.
       "trackedAccounts": {
-        "added": 0, "active": 0, "max": 0,
-        "project": { "added": 0, "active": 0, "max": 2 }
+        "added": 0, "active": 0, "max": 10,
+        "project": { "added": 0, "active": 0, "max": 4 }
       },
       "subreddits": {
-        "added": 1, "active": 1, "max": 1,
-        "project": { "added": 1, "active": 1, "max": 2 }
+        "added": 1, "active": 1, "max": 10,
+        "project": { "added": 1, "active": 1, "max": 4 }
+      },
+      // The authoritative per-platform rollup for the shared pool: a platform
+      // is addable when active < max AND project.active < projectMax (null =
+      // unlimited) — the same rule the server-side assert enforces.
+      "priorityAccounts": {
+        "max": 10,                                // per-platform org cap
+        "projectMax": 4,                          // per-platform project cap
+        "byPlatform": {
+          "x":      { "active": 3, "project": { "added": 2, "active": 2 } },
+          "reddit": { "active": 1, "project": { "added": 1, "active": 1 } }
+          // project is null when the request carried no projectId
+        }
       }
     },
     "replyCredits": {                           // already rounded final cost
@@ -114,23 +127,28 @@ Source: `model EngageConfig` (`libraries/nestjs-libraries/src/database/prisma/sc
 |-------|------|---------|
 | `plan` | `"starter" \| "developer" \| "pro" \| null` | Current plan code; `null` = self-hosted / unlimited mode |
 
-### B2. `entitlement.limits` — plan limits (10 fields)
+### B2. `entitlement.limits` — plan limits (8 fields)
 
-Keywords / tracked accounts / subreddits are capped **twice**: an org-wide budget
+Keywords / priority accounts are capped **twice**: an org-wide budget
 (`*Max`) and a per-project one (`*PerProjectMax`). Both are enforced on every
 activation, so a project's real headroom is `min(org remaining, project remaining)`.
 The org cap bounds the account as a whole; the project cap stops one project from
 eating the entire account budget. A per-project value larger than its org
 counterpart is legal — the org cap simply wins.
 
+`priorityAccountsMax` / `priorityAccountsPerProjectMax` are **one shared pool
+per platform**: on each platform, tracked accounts AND monitored channels
+(subreddits etc.) count against the cap together — a cap of 10 allows up to 10
+follows on X *plus* 10 on Reddit, and so on. The former `subredditsMax` /
+`subredditsPerProjectMax` fields were folded into it (legacy Settings overrides
+still carrying them are summed in at read time).
+
 | Field | Type | Meaning | `null` means |
 |-------|------|---------|--------------|
 | `keywordsMax` | number \| null | Max simultaneously-enabled keywords, org-wide | unlimited |
-| `priorityAccountsMax` | number \| null | Max tracked priority accounts, org-wide | unlimited (`0` = feature hidden) |
-| `subredditsMax` | number \| null | Max monitored subreddits, org-wide | unlimited |
+| `priorityAccountsMax` | number \| null | Max priority accounts (tracked accounts + monitored channels) PER PLATFORM, org-wide | unlimited (`0` = feature hidden) |
 | `keywordsPerProjectMax` | number \| null | Max enabled keywords within ONE project | unlimited |
-| `priorityAccountsPerProjectMax` | number \| null | Max tracked accounts within ONE project | unlimited |
-| `subredditsPerProjectMax` | number \| null | Max monitored subreddits within ONE project | unlimited |
+| `priorityAccountsPerProjectMax` | number \| null | Max priority accounts (per-platform pool) within ONE project | unlimited |
 | `scanIntervalHours` | number | Scan interval in hours (smaller = more real-time) | — |
 | `replyMonthlyCap` | number \| null | Monthly reply-draft quota | unlimited |
 | `metricsWindowDaysMax` | number | Metrics-monitoring window ceiling (days) | — |
@@ -141,25 +159,25 @@ counterpart is legal — the org cap simply wins.
 per plan, so an existing stored value that predates the per-project fields still
 picks them up):
 
-| Plan | keywordsMax | priorityAccountsMax | subredditsMax | scanIntervalHours | replyMonthlyCap | metricsWindowDaysMax | metricsFetchIntervalHours |
-|------|---|---|---|---|---|---|---|
-| starter | 30 | 0 (hidden) | 10 | 24 | 10 | 7 | 24 |
-| developer | 100 | 10 | 50 | 24 | null (∞) | 14 | 12 |
-| pro | 300 | null (∞) | 150 | 6 | null (∞) | 30 | 6 |
+| Plan | keywordsMax | priorityAccountsMax | scanIntervalHours | replyMonthlyCap | metricsWindowDaysMax | metricsFetchIntervalHours |
+|------|---|---|---|---|---|---|
+| starter | 30 | 10 | 24 | 10 | 7 | 24 |
+| developer | 100 | 60 | 24 | null (∞) | 14 | 12 |
+| pro | 300 | null (∞) | 6 | null (∞) | 30 | 6 |
 
-| Plan | keywordsPerProjectMax | priorityAccountsPerProjectMax | subredditsPerProjectMax |
-|------|---|---|---|
-| starter | 5 | 2 | 2 |
-| developer | 15 | 10 | 8 |
-| pro | 30 | 20 | 15 |
+| Plan | keywordsPerProjectMax | priorityAccountsPerProjectMax |
+|------|---|---|
+| starter | 5 | 4 |
+| developer | 15 | 18 |
+| pro | 30 | 35 |
 
 ### B3. `entitlement.usage` — current usage (org-wide)
 
 | Field | Type | Meaning | Compare against |
 |-------|------|---------|-----------------|
 | `keywords` | number | Enabled keywords now | `limits.keywordsMax` |
-| `trackedAccounts` | number | Enabled priority accounts now | `limits.priorityAccountsMax` |
-| `subreddits` | number | Enabled subreddits now | `limits.subredditsMax` |
+| `trackedAccounts` | number | Enabled tracked accounts now (all platforms) | per-platform: `trackedAccounts + subreddits` on ONE platform vs `limits.priorityAccountsMax` |
+| `subreddits` | number | Enabled monitored channels now (all platforms) | same per-platform pool as above |
 | `repliesThisPeriod` | number | Replies used this billing period | `limits.replyMonthlyCap` |
 
 ### B4. `entitlement.counts` — per-type org + project rollup
@@ -178,6 +196,21 @@ mirror `usage`/`limits`); `project` repeats the same shape scoped to the
 
 An "+ Add" entrypoint should be disabled when **either** scope is full:
 `active >= max` at the org level, or `project.active >= project.max`.
+
+For tracked accounts / monitored channels, the per-type blocks above report
+cross-platform totals against a per-platform cap — precise gating uses the
+extra **`counts.priorityAccounts`** block instead:
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `max` | number \| null | Per-platform org cap for the shared pool (`null` = unlimited, `0` = feature hidden) |
+| `projectMax` | number \| null | Per-platform cap within this project |
+| `byPlatform.<p>.active` | number | Org-wide enabled tracked+channels on platform `<p>` |
+| `byPlatform.<p>.project` | object \| null | `{ added, active }` for this project's rows on `<p>`; **`null` when the request carried no `projectId`** |
+
+Platform `<p>` is addable when `byPlatform[p].active < max` AND
+`byPlatform[p].project.active < projectMax` (each check skipped when its cap is
+`null`) — the same rule the server-side assert enforces.
 
 ### B5. `entitlement.replyCredits` — reply cost (already rounded)
 
