@@ -1752,30 +1752,53 @@ export class EngageRepository {
       ),
     ]);
 
-    const byStatus = Object.fromEntries(
-      Object.values(EngageOpportunityStatus).map((s) => [s, 0])
-    ) as Record<EngageOpportunityStatus, number>;
-    for (const g of statusGroups) byStatus[g.status] = g._count._all;
-
     return {
       total,
-      byStatus,
+      byStatus: this._zeroFilledByStatus(statusGroups),
       byPlatform: Object.fromEntries(
         OPPORTUNITY_COUNT_PLATFORMS.map((p, i) => [p, platformCounts[i]])
       ) as Record<(typeof OPPORTUNITY_COUNT_PLATFORMS)[number], number>,
     };
   }
 
-  // Count under EXACTLY the /opportunities filter contract (status/platform
-  // included), via the same shared where-builder as listOpportunities so the
-  // two can't drift. Sort/pagination fields on the dto are ignored — they
-  // can't change a count.
+  // Count under EXACTLY the /opportunities filter contract, via the same shared
+  // where-builder as listOpportunities so the two can't drift. `total` honors
+  // every filter (status/platform included) — it is the same number the list
+  // returns. `byStatus` honors every filter EXCEPT `status` itself (status is
+  // the breakdown axis; applying it would zero the very badges the breakdown
+  // exists for), so per-status badges stay complete while platform/keywords/
+  // date/etc. all narrow them. Sort/pagination fields on the dto are ignored —
+  // they can't change a count.
   async countOpportunities(organizationId: string, dto: ListOpportunitiesDto) {
-    const { where } = this._opportunityWhere(organizationId, dto);
-    const total = await this._oppState.model.engageOpportunityState.count({
-      where,
-    });
-    return { total };
+    const [total, statusGroups] = await Promise.all([
+      this._oppState.model.engageOpportunityState.count({
+        where: this._opportunityWhere(organizationId, dto).where,
+      }),
+      this._oppState.model.engageOpportunityState.groupBy({
+        by: ['status'],
+        where: this._opportunityWhere(organizationId, {
+          ...dto,
+          status: undefined,
+        }).where,
+        _count: { _all: true },
+      }),
+    ]);
+    return { total, byStatus: this._zeroFilledByStatus(statusGroups) };
+  }
+
+  // All EngageOpportunityStatus keys present (0 when empty) so clients can
+  // render fixed tab badges without existence checks.
+  private _zeroFilledByStatus(
+    statusGroups: Array<{
+      status: EngageOpportunityStatus;
+      _count: { _all: number };
+    }>
+  ): Record<EngageOpportunityStatus, number> {
+    const byStatus = Object.fromEntries(
+      Object.values(EngageOpportunityStatus).map((s) => [s, 0])
+    ) as Record<EngageOpportunityStatus, number>;
+    for (const g of statusGroups) byStatus[g.status] = g._count._all;
+    return byStatus;
   }
 
   async locateOpportunity(organizationId: string, dto: LocateOpportunityDto) {

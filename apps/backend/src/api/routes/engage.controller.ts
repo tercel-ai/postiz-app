@@ -479,7 +479,7 @@ export class EngageController {
     return this._engageService.getOpportunityCountsSummary(org, query);
   }
 
-  @ApiOperation({ summary: 'Count of opportunities under EXACTLY the same filters as GET /opportunities (status/platform included) — returns { total } only. Sort/pagination params are accepted and ignored, so clients can reuse the list query string verbatim.' })
+  @ApiOperation({ summary: 'Filtered counts under EXACTLY the same filters as GET /opportunities: `total` honors every filter (status/platform included, same number the list returns); `byStatus` honors every filter except `status` itself (the breakdown axis), so per-status badges stay complete while platform/keywords/date narrow them. Sort/pagination params are accepted and ignored, so clients can reuse the list query string verbatim.' })
   @Get('/opportunities/count')
   countOpportunities(
     @GetOrgFromRequest() org: Organization,

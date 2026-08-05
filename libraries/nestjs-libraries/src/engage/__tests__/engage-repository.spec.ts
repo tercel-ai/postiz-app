@@ -223,8 +223,9 @@ describe('EngageRepository — two-table reads', () => {
 
   describe('countOpportunities', () => {
     it('applies exactly the /opportunities filter contract, status and platform included', async () => {
-      const { repo, stateCount } = buildRepo();
+      const { repo, stateCount, stateGroupBy } = buildRepo();
       stateCount.mockResolvedValue(5);
+      stateGroupBy.mockResolvedValue([]);
 
       const res = await repo.countOpportunities('org1', {
         status: ['NEW'],
@@ -236,7 +237,30 @@ describe('EngageRepository — two-table reads', () => {
       expect(where.status).toEqual({ in: ['NEW'] });
       expect(where.opportunity.platform).toEqual({ in: ['x'] });
       expect(where.matchedKeywords).toEqual({ hasSome: ['react'] });
-      expect(res).toEqual({ total: 5 });
+      expect(res.total).toBe(5);
+    });
+
+    it('breaks down byStatus under every filter except status itself', async () => {
+      const { repo, stateCount, stateGroupBy } = buildRepo();
+      stateCount.mockResolvedValue(2);
+      stateGroupBy.mockResolvedValue([
+        { status: 'NEW', _count: { _all: 2 } },
+        { status: 'REPLIED', _count: { _all: 3 } },
+      ]);
+
+      const res = await repo.countOpportunities('org1', {
+        status: ['NEW'],
+        platform: ['x'],
+      } as any);
+
+      // The breakdown drops ONLY the status filter — platform still narrows it.
+      const groupByWhere = stateGroupBy.mock.calls[0][0].where;
+      expect(groupByWhere).not.toHaveProperty('status');
+      expect(groupByWhere.opportunity.platform).toEqual({ in: ['x'] });
+
+      expect(res.byStatus.NEW).toBe(2);
+      expect(res.byStatus.REPLIED).toBe(3);
+      expect(res.byStatus.DISMISSED).toBe(0); // zero-filled
     });
   });
 

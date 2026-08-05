@@ -23,7 +23,7 @@
   - [GET /opportunities/:id](#get-apienageopportunitiesid) — single signal-feed item
   - [GET /opportunities/locate](#get-apienageopportunitieslocate) — locate the page of an opportunityId within /opportunities
   - [GET /opportunities/counts/summary](#get-apiengageopportunitiescountssummary) — total/byStatus/byPlatform rollup for /opportunities
-  - [GET /opportunities/count](#get-apiengageopportunitiescount) — total under exactly the /opportunities filters
+  - [GET /opportunities/count](#get-apiengageopportunitiescount) — total + byStatus under exactly the /opportunities filters
 - [Draft Generation — AI Draft Generation (SSE)](#draft-generation--ai-draft-generation-sse)
   - [POST /opportunities/:id/draft](#post-apienageopportunitiesiddraft) — stream an AI draft (not persisted)
   - [POST /opportunities/:id/save-draft](#post-apienageopportunitiesidsave-draft) — save an unpublished working draft (DRAFT)
@@ -896,7 +896,7 @@ Retrieve scoring statistics for the Feed (used for the top dashboard).
 
 ### GET `/api/engage/opportunities/counts/summary`
 
-> Replaces the removed `GET /opportunities/counts`, which was split into this rollup and [`GET /opportunities/count`](#get-apiengageopportunitiescount) (a total under exactly the `/opportunities` filters). The old route's `platform` param was always a no-op (total/byStatus dropped it and each byPlatform count overrode it), so migrating here and dropping `platform` is behaviour-preserving.
+> Replaces the removed `GET /opportunities/counts`, which was split into this rollup and [`GET /opportunities/count`](#get-apiengageopportunitiescount) (total + byStatus under exactly the `/opportunities` filters). The old route's `platform` param was always a no-op (total/byStatus dropped it and each byPlatform count overrode it), so migrating here and dropping `platform` is behaviour-preserving.
 
 Total + byStatus + byPlatform counts for `/opportunities` in one round trip, **all computed under the SAME conditions**: the `/opportunities` filter contract minus `platform`/`status` (those two are the breakdown axes here, not filters — to narrow by them use `GET /opportunities/count`) and minus `sortBy`/`sortOrder`/`page`/`limit` (a counts response has no rows to sort or paginate). Use this instead of firing several `GET /opportunities?platform=x&limit=1` calls just to read `.total` for tab/platform badges — that N+1 pattern used to run a full `findMany` + `count` per call.
 
@@ -938,15 +938,32 @@ Total + byStatus + byPlatform counts for `/opportunities` in one round trip, **a
 
 ### GET `/api/engage/opportunities/count`
 
-Count of opportunities under **exactly** the same filters as `GET /opportunities` — `status` and `platform` included — sharing the list's where-clause builder server-side so the two can never drift. Returns `{ total }` only. `sortBy`/`sortOrder`/`page`/`limit` are accepted and ignored (they can't change a count), so clients can reuse the list query string verbatim.
+Filtered counts under **exactly** the same filters as `GET /opportunities`, sharing the list's where-clause builder server-side so the two can never drift:
+
+- `total` honors every filter — `status` and `platform` included — and is the same number the list returns for that query string.
+- `byStatus` honors every filter **except `status` itself** (status is the breakdown axis; applying it would zero the very badges the breakdown exists for), so per-status badges stay complete while `platform`/`keywords`/date-window/etc. all narrow them.
+
+`sortBy`/`sortOrder`/`page`/`limit` are accepted and ignored (they can't change a count), so clients can reuse the list query string verbatim.
 
 **Query Params** — identical to [`GET /opportunities`](#get-apiengageopportunities).
 
 **Response** `200 OK`
 
 ```json
-{ "total": 37 }
+{
+  "total": 37,
+  "byStatus": {
+    "NEW": 30,
+    "DISMISSED": 4,
+    "REPLIED": 7,
+    "SCHEDULED": 1,
+    "AUTO_QUEUED": 0,
+    "EXPIRED": 2
+  }
+}
 ```
+
+> `byStatus` always has all six `EngageOpportunityStatus` keys present (0 when empty). With `?status=NEW&platform=x`, `total` counts only NEW x-posts while `byStatus` breaks down ALL statuses among x-posts.
 
 ---
 
