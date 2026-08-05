@@ -743,19 +743,19 @@ export class EngageEntitlementService implements OnModuleInit {
     orgId: string
   ): Promise<Record<string, number>> {
     const args = {
-      by: ['platform'] as const,
+      by: ['platform'],
       where: { organizationId: orgId, enabled: true },
       _count: { _all: true },
     };
-    const [tracked, channels] = await Promise.all([
-      this._trackedAccount.model.engageTrackedAccount.groupBy(args as any),
-      this._channel.model.engageMonitoredChannel.groupBy(args as any),
-    ]);
+    // The models are cast to `any` before calling groupBy: Prisma's groupBy
+    // generics expand into a self-referencing mapped type that tsc rejects
+    // with TS2615 (argument-level `as any` does not stop the inference).
+    const [tracked, channels] = (await Promise.all([
+      (this._trackedAccount.model.engageTrackedAccount as any).groupBy(args),
+      (this._channel.model.engageMonitoredChannel as any).groupBy(args),
+    ])) as Array<Array<{ platform: string; _count: { _all: number } }>>;
     const usage: Record<string, number> = {};
-    for (const row of [...tracked, ...channels] as Array<{
-      platform: string;
-      _count: { _all: number };
-    }>) {
+    for (const row of [...tracked, ...channels]) {
       usage[row.platform] = (usage[row.platform] ?? 0) + row._count._all;
     }
     return usage;
