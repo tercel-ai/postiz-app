@@ -1,6 +1,6 @@
 import { ArrayMaxSize, IsArray, IsEnum, IsIn, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
 import { Transform, Type } from 'class-transformer';
-import { State } from '@prisma/client';
+import { PublishMethod, State } from '@prisma/client';
 import { VALID_CHANNELS, Channel } from '../posts/get.posts-list.dto';
 import { VALID_POST_SOURCES, PostSource } from '../posts/post-source';
 
@@ -51,6 +51,34 @@ export class AdminPostsQueryDto {
     )
   )
   channel?: Channel[];
+
+  // Alias for `channel` — both filter the persisted Post.providerIdentifier
+  // column. Ignored when `channel` is also provided.
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(30)
+  @IsString({ each: true })
+  @IsIn(VALID_CHANNELS as unknown as string[], { each: true })
+  @Transform(({ value }) =>
+    (Array.isArray(value) ? value : [value]).flatMap((v: string) =>
+      v.includes(',') ? v.split(',') : [v]
+    )
+  )
+  platform?: Channel[];
+
+  // Filter by Post.publishMethod. Accepts 'api'/'extension' (case-insensitive,
+  // comma-separated); normalized to the uppercase Prisma enum values.
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(2)
+  @IsString({ each: true })
+  @IsIn(Object.values(PublishMethod), { each: true })
+  @Transform(({ value }) =>
+    (Array.isArray(value) ? value : [value])
+      .flatMap((v: string) => (v.includes(',') ? v.split(',') : [v]))
+      .map((v: string) => v.trim().toUpperCase())
+  )
+  publishMethod?: PublishMethod[];
 
   // Filter by Post.source. Single value ('engage') or comma-separated
   // ('calendar,chat'); omitting it returns all sources. Mirrors GetPostsListDto.

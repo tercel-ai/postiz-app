@@ -59,7 +59,12 @@ export class DashboardRepository {
       source: { notIn: ['engage'] },
       ...(projectId && { projectId }),
       ...(integrationId?.length && { integrationId: { in: integrationId } }),
-      ...(channel?.length && { integration: { providerIdentifier: { in: channel } } }),
+      // Filter on the persisted Post.providerIdentifier column, NOT the
+      // integration relation: a relation filter silently drops accountless
+      // rows (integrationId null, e.g. extension-published operation-plan
+      // posts) — same rationale as posts.repository getPostsList. Applies to
+      // every channel filter in this file.
+      ...(channel?.length && { providerIdentifier: { in: channel } }),
     };
 
     if (startDate || endDate) {
@@ -96,7 +101,7 @@ export class DashboardRepository {
       impressions: { not: null },
       ...(projectId && { projectId }),
       ...(integrationId?.length && { integrationId: { in: integrationId } }),
-      ...(channel?.length && { integration: { providerIdentifier: { in: channel } } }),
+      ...(channel?.length && { providerIdentifier: { in: channel } }),
     };
     if (startDate || endDate) {
       where.publishDate = {
@@ -104,27 +109,18 @@ export class DashboardRepository {
         ...(endDate && { lte: endDate }),
       };
     }
+    // Group directly on the persisted Post.providerIdentifier column — the
+    // former integrationId groupBy dropped accountless rows (integrationId
+    // null) from the per-platform totals.
     const rows = await this._post.model.post.groupBy({
-      by: ['integrationId'],
+      by: ['providerIdentifier'],
       where,
       _sum: { impressions: true },
     });
-    const validRows = rows.filter((r) => r.integrationId != null);
-    if (!validRows.length) return [];
-
-    const integrationIds = validRows.map((r) => r.integrationId!);
-    const integrationRecords = await this._integration.model.integration.findMany({
-      where: { id: { in: integrationIds } },
-      select: { id: true, providerIdentifier: true },
-    });
-    const platformMap = new Map(integrationRecords.map((i) => [i.id, i.providerIdentifier]));
-
-    const byPlatform = new Map<string, number>();
-    for (const row of validRows) {
-      const platform = platformMap.get(row.integrationId!) ?? 'unknown';
-      byPlatform.set(platform, (byPlatform.get(platform) ?? 0) + (row._sum.impressions ?? 0));
-    }
-    return Array.from(byPlatform.entries()).map(([platform, value]) => ({ platform, value }));
+    return rows.map((r) => ({
+      platform: r.providerIdentifier ?? 'unknown',
+      value: r._sum.impressions ?? 0,
+    }));
   }
 
   async getTrafficTotal(
@@ -143,7 +139,7 @@ export class DashboardRepository {
       trafficScore: { not: null },
       ...(projectId && { projectId }),
       ...(integrationId?.length && { integrationId: { in: integrationId } }),
-      ...(channel?.length && { integration: { providerIdentifier: { in: channel } } }),
+      ...(channel?.length && { providerIdentifier: { in: channel } }),
     };
     if (startDate || endDate) {
       where.publishDate = {
@@ -177,7 +173,7 @@ export class DashboardRepository {
       trafficScore: { not: null },
       ...(projectId && { projectId }),
       ...(integrationId?.length && { integrationId: { in: integrationId } }),
-      ...(channel?.length && { integration: { providerIdentifier: { in: channel } } }),
+      ...(channel?.length && { providerIdentifier: { in: channel } }),
     };
     if (startDate || endDate) {
       where.publishDate = {
@@ -185,27 +181,17 @@ export class DashboardRepository {
         ...(endDate && { lte: endDate }),
       };
     }
+    // Same as getImpressionsByPlatform: group on Post.providerIdentifier so
+    // accountless rows keep their platform attribution.
     const rows = await this._post.model.post.groupBy({
-      by: ['integrationId'],
+      by: ['providerIdentifier'],
       where,
       _sum: { trafficScore: true },
     });
-    const validRows = rows.filter((r) => r.integrationId != null);
-    if (!validRows.length) return [];
-
-    const integrationIds = validRows.map((r) => r.integrationId!);
-    const integrationRecords = await this._integration.model.integration.findMany({
-      where: { id: { in: integrationIds } },
-      select: { id: true, providerIdentifier: true },
-    });
-    const platformMap = new Map(integrationRecords.map((i) => [i.id, i.providerIdentifier]));
-
-    const byPlatform = new Map<string, number>();
-    for (const row of validRows) {
-      const platform = platformMap.get(row.integrationId!) ?? 'unknown';
-      byPlatform.set(platform, (byPlatform.get(platform) ?? 0) + Math.round(row._sum.trafficScore ?? 0));
-    }
-    return Array.from(byPlatform.entries()).map(([platform, value]) => ({ platform, value }));
+    return rows.map((r) => ({
+      platform: r.providerIdentifier ?? 'unknown',
+      value: Math.round(r._sum.trafficScore ?? 0),
+    }));
   }
 
   /**
@@ -232,16 +218,12 @@ export class DashboardRepository {
         publishDate: { gte: startDate, lte: endDate },
         ...(projectId && { projectId }),
         ...(integrationId?.length && { integrationId: { in: integrationId } }),
-        ...(channel?.length && { integration: { providerIdentifier: { in: channel } } }),
+        ...(channel?.length && { providerIdentifier: { in: channel } }),
       },
       select: {
         publishDate: true,
         impressions: true,
-        integration: {
-          select: {
-            providerIdentifier: true,
-          },
-        },
+        providerIdentifier: true,
       },
     });
   }
@@ -261,19 +243,14 @@ export class DashboardRepository {
         },
         ...(projectId && { projectId }),
         ...(integrationId?.length && { integrationId: { in: integrationId } }),
-        ...(channel?.length && { integration: { providerIdentifier: { in: channel } } }),
+        ...(channel?.length && { providerIdentifier: { in: channel } }),
       },
       select: {
         id: true,
         releaseId: true,
         publishDate: true,
         integrationId: true,
-        integration: {
-          select: {
-            id: true,
-            providerIdentifier: true,
-          },
-        },
+        providerIdentifier: true,
       },
       orderBy: { publishDate: 'desc' },
     });
@@ -342,11 +319,7 @@ export class DashboardRepository {
       },
       select: {
         publishDate: true,
-        integration: {
-          select: {
-            providerIdentifier: true,
-          },
-        },
+        providerIdentifier: true,
       },
     });
   }

@@ -119,17 +119,17 @@ describe('DashboardService.getTraffics / getImpressions — project scoping', ()
       {
         publishDate: new Date('2026-07-01T10:00:00.000Z'),
         impressions: 100,
-        integration: { providerIdentifier: 'x' },
+        providerIdentifier: 'x',
       },
       {
         publishDate: new Date('2026-07-01T15:00:00.000Z'),
         impressions: 50,
-        integration: { providerIdentifier: 'x' },
+        providerIdentifier: 'x',
       },
       {
         publishDate: new Date('2026-07-02T09:00:00.000Z'),
         impressions: 30,
-        integration: { providerIdentifier: 'reddit' },
+        providerIdentifier: 'reddit',
       },
     ]);
 

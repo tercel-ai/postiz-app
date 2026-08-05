@@ -16,7 +16,7 @@ import {
   isExtensionPublishablePlatform,
   resolvePublishMethod,
 } from '@gitroom/nestjs-libraries/integrations/integration.manager';
-import { Integration, Post, Media, From, State } from '@prisma/client';
+import { Integration, Post, Media, From, State, PublishMethod as PrismaPublishMethod } from '@prisma/client';
 import { GetPostsDto } from '@gitroom/nestjs-libraries/dtos/posts/get.posts.dto';
 import { GetPostsListDto } from '@gitroom/nestjs-libraries/dtos/posts/get.posts-list.dto';
 import { LocatePostInListDto } from '@gitroom/nestjs-libraries/dtos/posts/locate.post-in-list.dto';
@@ -637,7 +637,12 @@ export class PostsService {
     return this._postRepository.locatePostInList(orgId, query);
   }
 
-  async getAllPostsList(query: GetPostsListDto & { organizationId?: string | string[] }) {
+  async getAllPostsList(
+    query: GetPostsListDto & {
+      organizationId?: string | string[];
+      publishMethod?: PrismaPublishMethod[];
+    }
+  ) {
     return this._postRepository.getAllPostsList(query);
   }
 

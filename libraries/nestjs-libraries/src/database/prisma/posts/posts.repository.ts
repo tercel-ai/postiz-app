@@ -177,6 +177,7 @@ export class PostsRepository {
         intervalInDays: true,
         organizationId: true,
         providerIdentifier: true,
+        publishMethod: true,
         source: true,
         impressions: true,
         trafficScore: true,
@@ -210,7 +211,12 @@ export class PostsRepository {
     return { ...post, metrics: flattenAnalytics(post.analytics) };
   }
 
-  async getAllPostsList(query: GetPostsListDto & { organizationId?: string | string[] }) {
+  async getAllPostsList(
+    query: GetPostsListDto & {
+      organizationId?: string | string[];
+      publishMethod?: PublishMethod[];
+    }
+  ) {
     const skip = (query.page - 1) * query.pageSize;
     const where = {
       deletedAt: null,
@@ -236,6 +242,9 @@ export class PostsRepository {
       ...(query.channel?.length
         ? { providerIdentifier: { in: query.channel } }
         : {}),
+      ...(query.publishMethod?.length
+        ? { publishMethod: { in: query.publishMethod } }
+        : {}),
       ...(query.source?.length ? { source: { in: query.source } } : {}),
     };
 
@@ -254,6 +263,7 @@ export class PostsRepository {
           group: true,
           organizationId: true,
           providerIdentifier: true,
+          publishMethod: true,
           source: true,
           impressions: true,
           trafficScore: true,

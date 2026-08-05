@@ -154,7 +154,7 @@ export class DataTicksService {
       postsByIntegration.get(intId)!.push({
         id: post.id,
         releaseId: post.releaseId,
-        platform: post.integration?.providerIdentifier ?? 'unknown',
+        platform: post.providerIdentifier ?? 'unknown',
       });
     }
 

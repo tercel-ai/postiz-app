@@ -31,7 +31,10 @@ export class AdminPostsController {
       organizationId,
       state: query.state,
       integrationId: query.integrationId,
-      channel: query.channel,
+      // `platform` is an alias for `channel` (both filter providerIdentifier);
+      // `channel` wins when both are sent.
+      channel: query.channel?.length ? query.channel : query.platform,
+      publishMethod: query.publishMethod,
       source: query.source,
       sortBy: query.sortBy,
       sortOrder: query.sortOrder,

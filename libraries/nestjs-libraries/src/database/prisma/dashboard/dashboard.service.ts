@@ -164,7 +164,7 @@ export class DashboardService {
     const buckets = new Map<string, number>();
 
     for (const post of posts) {
-      if (!post.publishDate || !post.integration) continue;
+      if (!post.publishDate) continue;
 
       const d = tz
         ? dayjs.utc(post.publishDate).tz(tz)
@@ -181,7 +181,7 @@ export class DashboardService {
           dateKey = d.format('YYYY-MM-DD');
       }
 
-      const platform = post.integration.providerIdentifier;
+      const platform = post.providerIdentifier ?? 'unknown';
       const key = `${dateKey}|${platform}`;
       buckets.set(key, (buckets.get(key) || 0) + 1);
     }
@@ -291,7 +291,7 @@ export class DashboardService {
 
       const buckets = new Map<string, number>();
       for (const post of posts) {
-        if (!post.integration || post.impressions == null) continue;
+        if (post.impressions == null) continue;
         const d = dayjs.utc(post.publishDate);
         let dateKey: string;
         switch (period) {
@@ -304,7 +304,7 @@ export class DashboardService {
           default:
             dateKey = d.format('YYYY-MM-DD');
         }
-        const platform = post.integration.providerIdentifier;
+        const platform = post.providerIdentifier ?? 'unknown';
         const key = `${dateKey}|${platform}`;
         buckets.set(key, (buckets.get(key) || 0) + post.impressions);
       }
@@ -459,7 +459,7 @@ export class DashboardService {
       postsByIntegration.get(intId)!.push({
         id: post.id,
         releaseId: post.releaseId,
-        platform: post.integration?.providerIdentifier ?? 'unknown',
+        platform: post.providerIdentifier ?? 'unknown',
       });
     }
 

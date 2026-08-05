@@ -25,7 +25,7 @@ const POST = {
   id: 'post-1',
   integrationId: INT_ID,
   releaseId: 'rel-1',
-  integration: { providerIdentifier: PLATFORM },
+  providerIdentifier: PLATFORM,
 };
 
 const FULL_INTEGRATION = {
