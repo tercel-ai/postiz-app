@@ -48,7 +48,7 @@ import {
   ListSentDto,
   LocateOpportunityDto,
   LocateSentReplyDto,
-  OpportunityCountsDto,
+  OpportunityCountsSummaryDto,
   RefreshMetricsDto,
   IngestReplyMetricsDto,
   SaveDraftDto,
@@ -470,13 +470,22 @@ export class EngageController {
     return this._engageService.getScoreStats(org, query);
   }
 
-  @ApiOperation({ summary: 'Total + byStatus + byPlatform counts for /opportunities, scoped by the same filters minus platform/status/pagination — replaces doing N separate limit=1 list calls just to read totals for tab/platform badges' })
-  @Get('/opportunities/counts')
-  getOpportunityCounts(
+  @ApiOperation({ summary: 'Rollup for tab/platform badges: total + byStatus + byPlatform in one call, all computed under the SAME conditions — the /opportunities filter contract minus status/platform (those are the breakdown axes here, not filters). Replaces doing N separate limit=1 list calls just to read totals.' })
+  @Get('/opportunities/counts/summary')
+  getOpportunityCountsSummary(
     @GetOrgFromRequest() org: Organization,
-    @Query() query: OpportunityCountsDto
+    @Query() query: OpportunityCountsSummaryDto
   ) {
-    return this._engageService.getOpportunityCounts(org, query);
+    return this._engageService.getOpportunityCountsSummary(org, query);
+  }
+
+  @ApiOperation({ summary: 'Count of opportunities under EXACTLY the same filters as GET /opportunities (status/platform included) — returns { total } only. Sort/pagination params are accepted and ignored, so clients can reuse the list query string verbatim.' })
+  @Get('/opportunities/count')
+  countOpportunities(
+    @GetOrgFromRequest() org: Organization,
+    @Query() query: ListOpportunitiesDto
+  ) {
+    return this._engageService.countOpportunities(org, query);
   }
 
   @ApiOperation({ summary: 'Locate the page of a given opportunityStateId within /opportunities using the same filters and sort. Returns null page when the opportunity does not match the filters.' })

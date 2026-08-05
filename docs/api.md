@@ -224,7 +224,8 @@ Modules with a dedicated, parameter-level API reference:
 | POST | `/engage/refresh-on-visit` |
 | POST | `/engage/sent/metrics/refresh` |
 | GET | `/engage/opportunities/score-stats` |
-| GET | `/engage/opportunities/counts` |
+| GET | `/engage/opportunities/counts/summary` |
+| GET | `/engage/opportunities/count` |
 | GET | `/engage/opportunities/locate` |
 | GET | `/engage/opportunities` |
 | GET | `/engage/opportunities/:id` |

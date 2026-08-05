@@ -22,7 +22,8 @@
   - [GET /opportunities](#get-apienageopportunities) — paginated signal feed
   - [GET /opportunities/:id](#get-apienageopportunitiesid) — single signal-feed item
   - [GET /opportunities/locate](#get-apienageopportunitieslocate) — locate the page of an opportunityId within /opportunities
-  - [GET /opportunities/counts](#get-apienageopportunitiescounts) — total/byStatus/byPlatform counts for /opportunities
+  - [GET /opportunities/counts/summary](#get-apiengageopportunitiescountssummary) — total/byStatus/byPlatform rollup for /opportunities
+  - [GET /opportunities/count](#get-apiengageopportunitiescount) — total under exactly the /opportunities filters
 - [Draft Generation — AI Draft Generation (SSE)](#draft-generation--ai-draft-generation-sse)
   - [POST /opportunities/:id/draft](#post-apienageopportunitiesiddraft) — stream an AI draft (not persisted)
   - [POST /opportunities/:id/save-draft](#post-apienageopportunitiesidsave-draft) — save an unpublished working draft (DRAFT)
@@ -65,7 +66,7 @@
 
 ### Project-Scoped Requests
 
-The following endpoints accept `projectId` as a query parameter: `GET /config`, `POST /config/reset`, `GET /monitored-channels`, `GET /tracked-accounts`, `GET /reply-accounts`, `GET /opportunities/score-stats`, `GET /opportunities/counts`, `GET /opportunities`, `GET /opportunities/:id`, `PATCH /opportunities/:id/dismiss`, `PATCH /opportunities/:id/bookmark`, `GET /opportunities/locate`, `GET /sent`, `GET /sent/locate`, `GET /sent/stats`, `GET /sent/counts`, `GET /dashboard/summary`, `GET /dashboard/replies-trend`, `GET /dashboard/traffics`, `GET /dashboard/impressions`, and `GET /dashboard/top-sources`.
+The following endpoints accept `projectId` as a query parameter: `GET /config`, `POST /config/reset`, `GET /monitored-channels`, `GET /tracked-accounts`, `GET /reply-accounts`, `GET /opportunities/score-stats`, `GET /opportunities/counts/summary`, `GET /opportunities/count`, `GET /opportunities`, `GET /opportunities/:id`, `PATCH /opportunities/:id/dismiss`, `PATCH /opportunities/:id/bookmark`, `GET /opportunities/locate`, `GET /sent`, `GET /sent/locate`, `GET /sent/stats`, `GET /sent/counts`, `GET /dashboard/summary`, `GET /dashboard/replies-trend`, `GET /dashboard/traffics`, `GET /dashboard/impressions`, and `GET /dashboard/top-sources`.
 
 Mutation endpoints that create project-owned config or reply records accept `projectId` in the JSON body: `POST /setup`, `POST /config`, `POST /keywords`, `POST /keywords/bulk`, `POST /monitored-channels`, `POST /tracked-accounts`, `POST /opportunities/:id/draft`, `POST /opportunities/:id/save-draft`, `POST /opportunities/:id/send-now`, `POST /opportunities/:id/schedule`, `POST /opportunities/:id/batch-send`, `POST /opportunities/:id/batch-schedule`, and `POST /opportunities/:id/manual-reply`.
 
@@ -893,9 +894,11 @@ Retrieve scoring statistics for the Feed (used for the top dashboard).
 
 ---
 
-### GET `/api/engage/opportunities/counts`
+### GET `/api/engage/opportunities/counts/summary`
 
-Total + byStatus + byPlatform counts for `/opportunities`, scoped by the same filters minus `platform`/`status` (those two become the breakdown axes, not a further narrowing) and `sortBy`/`sortOrder`/`page`/`limit` (a counts response has no rows to sort or paginate). Use this instead of firing several `GET /opportunities?platform=x&limit=1` calls just to read `.total` for tab/platform badges — that N+1 pattern used to run a full `findMany` + `count` per call.
+> Replaces the removed `GET /opportunities/counts`, which was split into this rollup and [`GET /opportunities/count`](#get-apiengageopportunitiescount) (a total under exactly the `/opportunities` filters). The old route's `platform` param was always a no-op (total/byStatus dropped it and each byPlatform count overrode it), so migrating here and dropping `platform` is behaviour-preserving.
+
+Total + byStatus + byPlatform counts for `/opportunities` in one round trip, **all computed under the SAME conditions**: the `/opportunities` filter contract minus `platform`/`status` (those two are the breakdown axes here, not filters — to narrow by them use `GET /opportunities/count`) and minus `sortBy`/`sortOrder`/`page`/`limit` (a counts response has no rows to sort or paginate). Use this instead of firing several `GET /opportunities?platform=x&limit=1` calls just to read `.total` for tab/platform badges — that N+1 pattern used to run a full `findMany` + `count` per call.
 
 **Query Params** (all optional — same scoping filters as `/opportunities`, minus `platform`/`status`/`sortBy`/`sortOrder`/`page`/`limit`)
 
@@ -929,7 +932,21 @@ Total + byStatus + byPlatform counts for `/opportunities`, scoped by the same fi
 }
 ```
 
-> `byStatus` always has all six `EngageOpportunityStatus` keys present (0 when empty), so the UI can render fixed tab badges without existence checks. `byPlatform` currently only has `x`/`reddit` — the two supported platforms.
+> `byStatus` always has all six `EngageOpportunityStatus` keys present (0 when empty), so the UI can render fixed tab badges without existence checks. `byPlatform` always has all broken-out platform keys (`x`/`reddit`/`linkedin`/`medium`/`devto`/`hackernews`/`quora`), 0 when empty.
+
+---
+
+### GET `/api/engage/opportunities/count`
+
+Count of opportunities under **exactly** the same filters as `GET /opportunities` — `status` and `platform` included — sharing the list's where-clause builder server-side so the two can never drift. Returns `{ total }` only. `sortBy`/`sortOrder`/`page`/`limit` are accepted and ignored (they can't change a count), so clients can reuse the list query string verbatim.
+
+**Query Params** — identical to [`GET /opportunities`](#get-apiengageopportunities).
+
+**Response** `200 OK`
+
+```json
+{ "total": 37 }
+```
 
 ---
 

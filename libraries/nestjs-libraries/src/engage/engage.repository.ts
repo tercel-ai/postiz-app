@@ -10,7 +10,7 @@ import {
   ListSentDto,
   LocateOpportunityDto,
   LocateSentReplyDto,
-  OpportunityCountsDto,
+  OpportunityCountsSummaryDto,
   SetupEngageDto,
   UpdateKeywordDto,
   UpdateMonitoredChannelDto,
@@ -55,6 +55,20 @@ const INITIAL_SCAN_PLATFORMS = ['reddit', 'x'] as const;
 const LIST_DEFAULT_MIN_SCORE = Number(
   process.env.ENGAGE_LIST_DEFAULT_MIN_SCORE ?? 60
 );
+
+// Platforms broken out by the opportunity-count endpoints' `byPlatform`
+// rollup. `platform` lives on the joined EngageOpportunity, which Prisma's
+// groupBy can't traverse — one scoped count per platform stands in for a
+// group-by (same pattern as getSentStats/getSentCounts).
+const OPPORTUNITY_COUNT_PLATFORMS = [
+  'x',
+  'reddit',
+  'linkedin',
+  'medium',
+  'devto',
+  'hackernews',
+  'quora',
+] as const;
 
 // Only NEW/AUTO_QUEUED opportunities can be replied to. Every other status is a
 // terminal/non-actionable state — map each to a precise, human-readable reason
@@ -1497,14 +1511,42 @@ export class EngageRepository {
     return Object.keys(filter).length ? filter : undefined;
   }
 
-  async listOpportunities(organizationId: string, dto: ListOpportunitiesDto) {
-    const page = dto.page ?? 1;
-    const limit = dto.limit ?? 20;
-    const offset = (page - 1) * limit;
-
-    const channelSpecific = dto.channels?.length ? dto.channels : undefined;
-    const authorSpecificList = dto.authors?.length ? dto.authors : undefined;
+  // Single source of truth for the /opportunities where-clause, shared by
+  // listOpportunities / locateOpportunity / countOpportunities and the counts
+  // rollups so their scoping can't drift. Filters absent from the caller's dto
+  // (e.g. `status`/`platform` on the counts-summary contract) are simply not
+  // applied. The nested opportunity filter is returned separately: call sites
+  // injecting `platform` must spread `oppFilter` — spreading `where.opportunity`
+  // would widen to the field's declared union type (EngageOpportunityWhereInput
+  // | EngageOpportunityScalarRelationFilter) and no longer accept `platform`.
+  private _opportunityWhere(
+    organizationId: string,
+    dto: Omit<ListOpportunitiesDto, 'sortBy' | 'sortOrder' | 'page' | 'limit'>
+  ): {
+    where: Prisma.EngageOpportunityStateWhereInput;
+    oppFilter: Prisma.EngageOpportunityWhereInput;
+  } {
     const postPublishedAtFilter = this._postPublishedAtFilter(dto);
+
+    // Global (EngageOpportunity) filters.
+    const oppFilter: Prisma.EngageOpportunityWhereInput = {
+      deletedAt: null,
+      ...(dto.platform?.length && { platform: { in: dto.platform } }),
+      ...(dto.channels?.length && { channelId: { in: dto.channels } }),
+      ...(dto.authors?.length && {
+        OR: dto.authors.map((a) => ({
+          authorUsername: { equals: a, mode: 'insensitive' as const },
+        })),
+      }),
+      ...(dto.intent?.length && { intentTags: { hasSome: dto.intent } }),
+      ...(dto.minScoreHeat !== undefined && {
+        scoreHeat: { gte: dto.minScoreHeat },
+      }),
+      ...(dto.minScoreAuthority !== undefined && {
+        scoreAuthority: { gte: dto.minScoreAuthority },
+      }),
+      ...(postPublishedAtFilter && { postPublishedAt: postPublishedAtFilter }),
+    };
 
     // State-table filters (per-org) + nested opportunity filters (global).
     const where: Prisma.EngageOpportunityStateWhereInput = {
@@ -1526,25 +1568,18 @@ export class EngageRepository {
         ];
         return set.length ? { matchedKeywords: { hasSome: set } } : {};
       })()),
-      opportunity: {
-        deletedAt: null,
-        ...(dto.platform?.length && { platform: { in: dto.platform } }),
-        ...(channelSpecific && { channelId: { in: channelSpecific } }),
-        ...(authorSpecificList?.length && {
-          OR: authorSpecificList.map((a) => ({
-            authorUsername: { equals: a, mode: 'insensitive' as const },
-          })),
-        }),
-        ...(dto.intent?.length && { intentTags: { hasSome: dto.intent } }),
-        ...(dto.minScoreHeat !== undefined && {
-          scoreHeat: { gte: dto.minScoreHeat },
-        }),
-        ...(dto.minScoreAuthority !== undefined && {
-          scoreAuthority: { gte: dto.minScoreAuthority },
-        }),
-        ...(postPublishedAtFilter && { postPublishedAt: postPublishedAtFilter }),
-      },
+      opportunity: oppFilter,
     };
+
+    return { where, oppFilter };
+  }
+
+  async listOpportunities(organizationId: string, dto: ListOpportunitiesDto) {
+    const page = dto.page ?? 1;
+    const limit = dto.limit ?? 20;
+    const offset = (page - 1) * limit;
+
+    const { where } = this._opportunityWhere(organizationId, dto);
 
     // Route sort field to the table that owns it.
     const stateSortFields = new Set([
@@ -1680,92 +1715,41 @@ export class EngageRepository {
     return { items, total, page, limit };
   }
 
-  // Single round trip replacing what the frontend used to do with N separate
-  // `listOpportunities({ platform: 'x', limit: 1 })`-style calls just to read
-  // `.total` for a tab/platform badge. Mirrors listOpportunities' scoping
-  // filters (platform/channels/authors/keywords/date/minScore*/bookmarked/
-  // intent) but omits `status`/pagination/sort — status is broken down below,
-  // while platform remains an optional narrowing filter.
-  async getOpportunityCounts(organizationId: string, dto: OpportunityCountsDto) {
-    const channelSpecific = dto.channels?.length ? dto.channels : undefined;
-    const authorSpecificList = dto.authors?.length ? dto.authors : undefined;
-    const postPublishedAtFilter = this._postPublishedAtFilter(dto);
+  // Rollup for the feed's tab/platform badges: total + byStatus + byPlatform in
+  // one round trip, all computed under the SAME conditions (the /opportunities
+  // filter contract minus `status`/`platform` — those are the breakdown axes
+  // here, not filters; narrowing by them is what countOpportunities is for).
+  // `status` lives on EngageOpportunityState itself, so it groups in one
+  // query. `platform` lives on the joined EngageOpportunity, which Prisma's
+  // groupBy can't traverse — one scoped count per platform stands in for that
+  // breakdown, same pattern as getSentStats/getSentCounts below.
+  async getOpportunityCountsSummary(
+    organizationId: string,
+    dto: OpportunityCountsSummaryDto
+  ) {
+    // Every query gets an independently built where-tree: sharing one object
+    // across the parallel counts lets anything that mutates its argument bleed
+    // filters from one count into another (the exact bug the old structured-
+    // Clone guard existed for).
+    const build = () => this._opportunityWhere(organizationId, dto);
 
-    // Declared with its own explicit type so it can be spread again below to
-    // inject `platform` — spreading `where.opportunity` directly would widen to
-    // the field's declared union type (EngageOpportunityWhereInput |
-    // EngageOpportunityScalarRelationFilter) and no longer accept `platform`.
-    const oppFilter: Prisma.EngageOpportunityWhereInput = {
-      deletedAt: null,
-      ...(dto.platform?.length && { platform: { in: dto.platform } }),
-      ...(channelSpecific && { channelId: { in: channelSpecific } }),
-      ...(authorSpecificList?.length && {
-        OR: authorSpecificList.map((a) => ({
-          authorUsername: { equals: a, mode: 'insensitive' as const },
-        })),
+    const [total, statusGroups, platformCounts] = await Promise.all([
+      this._oppState.model.engageOpportunityState.count({
+        where: build().where,
       }),
-      ...(dto.intent?.length && { intentTags: { hasSome: dto.intent } }),
-      ...(dto.minScoreHeat !== undefined && {
-        scoreHeat: { gte: dto.minScoreHeat },
-      }),
-      ...(dto.minScoreAuthority !== undefined && {
-        scoreAuthority: { gte: dto.minScoreAuthority },
-      }),
-      ...(postPublishedAtFilter && { postPublishedAt: postPublishedAtFilter }),
-    };
-
-    const where: Prisma.EngageOpportunityStateWhereInput = {
-      organizationId,
-      projectId: dto.projectId ?? null,
-      ...(dto.bookmarked !== undefined && { bookmarked: dto.bookmarked }),
-      score: { gte: dto.minScore ?? LIST_DEFAULT_MIN_SCORE },
-      ...(dto.minScoreKeyword !== undefined && {
-        scoreKeyword: { gte: dto.minScoreKeyword },
-      }),
-      ...((() => {
-        const set = [
-          ...(dto.keyword ? [dto.keyword] : []),
-          ...(dto.keywords ?? []),
-        ];
-        return set.length ? { matchedKeywords: { hasSome: set } } : {};
-      })()),
-      opportunity: oppFilter,
-    };
-
-    // `status` lives on EngageOpportunityState itself, so it groups in one
-    // query. `platform` lives on the joined EngageOpportunity, which Prisma's
-    // groupBy can't traverse — two scoped counts stand in for that breakdown,
-    // same pattern as getSentStats/getSentCounts below.
-    const totalWhere = structuredClone(where);
-    delete totalWhere.opportunity.platform;
-    const [total, statusGroups, x, reddit, linkedin, medium, devto, hackernews, quora] = await Promise.all([
-      this._oppState.model.engageOpportunityState.count({ where: totalWhere }),
       this._oppState.model.engageOpportunityState.groupBy({
         by: ['status'],
-        where: totalWhere,
+        where: build().where,
         _count: { _all: true },
       }),
-      this._oppState.model.engageOpportunityState.count({
-        where: { ...where, opportunity: { ...oppFilter, platform: 'x' } },
-      }),
-      this._oppState.model.engageOpportunityState.count({
-        where: { ...where, opportunity: { ...oppFilter, platform: 'reddit' } },
-      }),
-      this._oppState.model.engageOpportunityState.count({
-        where: { ...where, opportunity: { ...oppFilter, platform: 'linkedin' } },
-      }),
-      this._oppState.model.engageOpportunityState.count({
-        where: { ...where, opportunity: { ...oppFilter, platform: 'medium' } },
-      }),
-      this._oppState.model.engageOpportunityState.count({
-        where: { ...where, opportunity: { ...oppFilter, platform: 'devto' } },
-      }),
-      this._oppState.model.engageOpportunityState.count({
-        where: { ...where, opportunity: { ...oppFilter, platform: 'hackernews' } },
-      }),
-      this._oppState.model.engageOpportunityState.count({
-        where: { ...where, opportunity: { ...oppFilter, platform: 'quora' } },
-      }),
+      Promise.all(
+        OPPORTUNITY_COUNT_PLATFORMS.map((platform) => {
+          const { where, oppFilter } = build();
+          return this._oppState.model.engageOpportunityState.count({
+            where: { ...where, opportunity: { ...oppFilter, platform } },
+          });
+        })
+      ),
     ]);
 
     const byStatus = Object.fromEntries(
@@ -1773,49 +1757,32 @@ export class EngageRepository {
     ) as Record<EngageOpportunityStatus, number>;
     for (const g of statusGroups) byStatus[g.status] = g._count._all;
 
-    return { total, byStatus, byPlatform: { x, reddit, linkedin, medium, devto, hackernews, quora } };
+    return {
+      total,
+      byStatus,
+      byPlatform: Object.fromEntries(
+        OPPORTUNITY_COUNT_PLATFORMS.map((p, i) => [p, platformCounts[i]])
+      ) as Record<(typeof OPPORTUNITY_COUNT_PLATFORMS)[number], number>,
+    };
+  }
+
+  // Count under EXACTLY the /opportunities filter contract (status/platform
+  // included), via the same shared where-builder as listOpportunities so the
+  // two can't drift. Sort/pagination fields on the dto are ignored — they
+  // can't change a count.
+  async countOpportunities(organizationId: string, dto: ListOpportunitiesDto) {
+    const { where } = this._opportunityWhere(organizationId, dto);
+    const total = await this._oppState.model.engageOpportunityState.count({
+      where,
+    });
+    return { total };
   }
 
   async locateOpportunity(organizationId: string, dto: LocateOpportunityDto) {
     const limit = dto.limit ?? 20;
-    const postPublishedAtFilter = this._postPublishedAtFilter(dto);
 
-    // Mirror the `where` from `listOpportunities` exactly.
-    const where: Prisma.EngageOpportunityStateWhereInput = {
-      organizationId,
-      projectId: dto.projectId ?? null,
-      ...(dto.status?.length && { status: { in: dto.status } }),
-      ...(dto.bookmarked !== undefined && { bookmarked: dto.bookmarked }),
-      score: { gte: dto.minScore ?? LIST_DEFAULT_MIN_SCORE },
-      ...(dto.minScoreKeyword !== undefined && {
-        scoreKeyword: { gte: dto.minScoreKeyword },
-      }),
-      ...((() => {
-        const set = [
-          ...(dto.keyword ? [dto.keyword] : []),
-          ...(dto.keywords ?? []),
-        ];
-        return set.length ? { matchedKeywords: { hasSome: set } } : {};
-      })()),
-      opportunity: {
-        deletedAt: null,
-        ...(dto.platform?.length && { platform: { in: dto.platform } }),
-        ...(dto.channels?.length && { channelId: { in: dto.channels } }),
-        ...(dto.authors?.length && {
-          OR: dto.authors.map((a) => ({
-            authorUsername: { equals: a, mode: 'insensitive' as const },
-          })),
-        }),
-        ...(dto.intent?.length && { intentTags: { hasSome: dto.intent } }),
-        ...(dto.minScoreHeat !== undefined && {
-          scoreHeat: { gte: dto.minScoreHeat },
-        }),
-        ...(dto.minScoreAuthority !== undefined && {
-          scoreAuthority: { gte: dto.minScoreAuthority },
-        }),
-        ...(postPublishedAtFilter && { postPublishedAt: postPublishedAtFilter }),
-      },
-    };
+    // Mirror the `where` from `listOpportunities` exactly (shared builder).
+    const { where } = this._opportunityWhere(organizationId, dto);
 
     const stateSortFields = new Set([
       'score',

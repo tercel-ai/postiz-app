@@ -162,7 +162,7 @@ const STATE_ROW = {
 };
 
 describe('EngageRepository — two-table reads', () => {
-  describe('getOpportunityCounts', () => {
+  describe('getOpportunityCountsSummary', () => {
     it('isolates the total filter from later platform counts', async () => {
       const { repo, stateCount, stateGroupBy } = buildRepo();
       stateGroupBy.mockResolvedValue([]);
@@ -173,14 +173,70 @@ describe('EngageRepository — two-table reads', () => {
         return 0;
       });
 
-      await repo.getOpportunityCounts('org1', {
+      await repo.getOpportunityCountsSummary('org1', {
         channels: ['expected'],
-        platform: ['reddit'],
       });
 
       expect(stateCount.mock.calls[1][0].where.opportunity.channelId).toEqual({
         in: ['expected'],
       });
+    });
+
+    it('computes total/byStatus/byPlatform under the same platform-less where', async () => {
+      const { repo, stateCount, stateGroupBy } = buildRepo();
+      stateGroupBy.mockResolvedValue([
+        { status: 'NEW', _count: { _all: 2 } },
+        { status: 'REPLIED', _count: { _all: 1 } },
+      ]);
+      stateCount
+        .mockResolvedValueOnce(10) // total
+        .mockResolvedValue(1); // each per-platform count
+
+      const res = await repo.getOpportunityCountsSummary('org1', {
+        channels: ['c1'],
+      });
+
+      // total + one count per broken-out platform
+      expect(stateCount).toHaveBeenCalledTimes(8);
+      // The total/byStatus where carries the scoping filters but NO platform —
+      // platform is the breakdown axis, not a filter, on this contract.
+      const totalWhere = stateCount.mock.calls[0][0].where;
+      expect(totalWhere.opportunity.channelId).toEqual({ in: ['c1'] });
+      expect(totalWhere.opportunity).not.toHaveProperty('platform');
+      expect(totalWhere).not.toHaveProperty('status');
+      expect(stateGroupBy.mock.calls[0][0].where).toEqual(totalWhere);
+      // Each platform count keeps the scoping filters and pins one platform.
+      expect(stateCount.mock.calls[1][0].where.opportunity).toMatchObject({
+        channelId: { in: ['c1'] },
+        platform: 'x',
+      });
+
+      expect(res.total).toBe(10);
+      expect(res.byStatus.NEW).toBe(2);
+      expect(res.byStatus.REPLIED).toBe(1);
+      expect(res.byStatus.DISMISSED).toBe(0); // zero-filled
+      expect(Object.keys(res.byPlatform).sort()).toEqual(
+        ['x', 'reddit', 'linkedin', 'medium', 'devto', 'hackernews', 'quora'].sort()
+      );
+    });
+  });
+
+  describe('countOpportunities', () => {
+    it('applies exactly the /opportunities filter contract, status and platform included', async () => {
+      const { repo, stateCount } = buildRepo();
+      stateCount.mockResolvedValue(5);
+
+      const res = await repo.countOpportunities('org1', {
+        status: ['NEW'],
+        platform: ['x'],
+        keyword: 'react',
+      } as any);
+
+      const where = stateCount.mock.calls[0][0].where;
+      expect(where.status).toEqual({ in: ['NEW'] });
+      expect(where.opportunity.platform).toEqual({ in: ['x'] });
+      expect(where.matchedKeywords).toEqual({ hasSome: ['react'] });
+      expect(res).toEqual({ total: 5 });
     });
   });
 
