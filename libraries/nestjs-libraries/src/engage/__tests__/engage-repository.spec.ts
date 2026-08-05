@@ -1586,46 +1586,24 @@ describe('EngageRepository — two-table reads', () => {
     });
   });
 
-  describe('getSentCounts', () => {
-    it('status omitted: skips the three awaiting sub-counts and omits awaitingBreakdown', async () => {
+  describe('countSentReplies / getSentCountsSummary', () => {
+    it('returns total + byPlatform + rollups + awaitingBreakdown in one round trip', async () => {
       const { repo, sentCount } = buildRepo();
-      // total, x, reddit, settled, awaiting — the three awaiting sub-counts are
-      // never called (Promise.resolve(0) stands in), so only 5 count() calls fire.
       sentCount
         .mockResolvedValueOnce(340) // total
         .mockResolvedValueOnce(210) // x
         .mockResolvedValueOnce(130) // reddit
         .mockResolvedValueOnce(280) // settled
-        .mockResolvedValueOnce(60); // awaiting
-
-      const res = await repo.getSentCounts('org1', {});
-
-      expect(res).toEqual({
-        total: 340,
-        byPlatform: { x: 210, reddit: 130 },
-        rollups: { settled: 280, awaiting: 60 },
-      });
-      expect(res).not.toHaveProperty('awaitingBreakdown');
-      expect(sentCount).toHaveBeenCalledTimes(5);
-    });
-
-    it('status=awaiting: adds awaitingBreakdown (drafts/link/expired) from the three sub-filters', async () => {
-      const { repo, sentCount } = buildRepo();
-      sentCount
-        .mockResolvedValueOnce(60) // total (scoped by status=awaiting)
-        .mockResolvedValueOnce(40) // x
-        .mockResolvedValueOnce(20) // reddit
-        .mockResolvedValueOnce(280) // settled rollup
-        .mockResolvedValueOnce(60) // awaiting rollup
+        .mockResolvedValueOnce(60) // awaiting
         .mockResolvedValueOnce(25) // awaiting-draft
         .mockResolvedValueOnce(30) // awaiting-link
         .mockResolvedValueOnce(5); // awaiting-expired
 
-      const res = await repo.getSentCounts('org1', { status: 'awaiting' });
+      const res = await repo.countSentReplies('org1', {});
 
       expect(res).toEqual({
-        total: 60,
-        byPlatform: { x: 40, reddit: 20 },
+        total: 340,
+        byPlatform: { x: 210, reddit: 130 },
         rollups: { settled: 280, awaiting: 60 },
         awaitingBreakdown: { drafts: 25, link: 30, expired: 5 },
       });
@@ -1655,17 +1633,58 @@ describe('EngageRepository — two-table reads', () => {
       });
     });
 
-    it('projectId scopes the total count and every awaiting sub-count (regression)', async () => {
+    it('each breakdown drops only its own axis: total keeps status+platform, byPlatform keeps status, rollups keep platform', async () => {
       const { repo, sentCount } = buildRepo();
       sentCount.mockResolvedValue(0);
 
-      await repo.getSentCounts('org1', { status: 'awaiting', projectId: 'proj-1' });
+      await repo.countSentReplies('org1', {
+        status: 'awaiting',
+        platform: 'x',
+      });
+
+      // total: full filter set — awaiting OR-states AND platform=x.
+      const totalWhere = sentCount.mock.calls[0][0].where;
+      expect(totalWhere.post.OR).toBeDefined();
+      expect(totalWhere.opportunity).toMatchObject({ platform: 'x' });
+      // byPlatform pins its own platform but keeps the status filter.
+      const redditWhere = sentCount.mock.calls[2][0].where;
+      expect(redditWhere.opportunity).toMatchObject({ platform: 'reddit' });
+      expect(redditWhere.post.OR).toBeDefined();
+      // rollups drop status (settled pins its own) but keep platform=x.
+      const settledWhere = sentCount.mock.calls[3][0].where;
+      expect(settledWhere.opportunity).toMatchObject({ platform: 'x' });
+      expect(settledWhere.post.OR).toEqual([
+        { state: 'PUBLISHED', releaseURL: { not: null } },
+        { state: 'QUEUE' },
+      ]);
+    });
+
+    it('projectId scopes every count (regression)', async () => {
+      const { repo, sentCount } = buildRepo();
+      sentCount.mockResolvedValue(0);
+
+      await repo.countSentReplies('org1', { status: 'awaiting', projectId: 'proj-1' });
 
       // Total + rollups + all three awaiting sub-counts must carry projectId, so
       // the tab badges match the project-scoped /sent list instead of the global one.
       for (const call of sentCount.mock.calls) {
         expect(call[0].where.projectId).toBe('proj-1');
       }
+    });
+
+    it('getSentCountsSummary delegates with only date/projectId (no status/platform)', async () => {
+      const { repo, sentCount } = buildRepo();
+      sentCount.mockResolvedValue(0);
+
+      const res = await repo.getSentCountsSummary('org1', { projectId: 'proj-1' });
+
+      expect(sentCount).toHaveBeenCalledTimes(8);
+      // total where: no status → not-DRAFT branch is skipped (includeDrafts) and
+      // no platform filter on the linked opportunity.
+      const totalWhere = sentCount.mock.calls[0][0].where;
+      expect(totalWhere.opportunity).toBeUndefined();
+      expect(totalWhere.projectId).toBe('proj-1');
+      expect(res).toHaveProperty('awaitingBreakdown');
     });
   });
 

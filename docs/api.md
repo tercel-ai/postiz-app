@@ -241,7 +241,8 @@ Modules with a dedicated, parameter-level API reference:
 | GET | `/engage/sent/locate` |
 | GET | `/engage/sent` |
 | GET | `/engage/sent/stats` |
-| GET | `/engage/sent/counts` |
+| GET | `/engage/sent/counts/summary` |
+| GET | `/engage/sent/count` |
 | GET | `/engage/sent/:id/status` |
 | GET | `/engage/sent/:id` |
 | PATCH | `/engage/sent/:id` |

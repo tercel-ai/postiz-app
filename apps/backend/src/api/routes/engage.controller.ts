@@ -49,6 +49,7 @@ import {
   LocateOpportunityDto,
   LocateSentReplyDto,
   OpportunityCountsSummaryDto,
+  SentCountsSummaryDto,
   RefreshMetricsDto,
   IngestReplyMetricsDto,
   SaveDraftDto,
@@ -816,17 +817,22 @@ export class EngageController {
     });
   }
 
-  @ApiOperation({ summary: 'Total + byPlatform counts for /sent scoped by date/status, plus a settled/awaiting rollup (always recomputed from date alone, ignoring status) for tab badges, and — only when status=awaiting — an awaitingBreakdown (drafts/link/expired) for the Awaiting-review page sub-tabs — replaces N separate limit=1 /sent calls' })
-  @Get('/sent/counts')
-  getSentCounts(
+  @ApiOperation({ summary: 'Rollup for the sent tabs\' badges: total + byPlatform + rollups (settled/awaiting) + awaitingBreakdown (drafts/link/expired) in one call, all computed under the SAME conditions — the /sent filter contract minus status/platform (those are the breakdown axes here, not filters). Replaces doing N separate limit=1 /sent calls just to read totals.' })
+  @Get('/sent/counts/summary')
+  getSentCountsSummary(
+    @GetOrgFromRequest() org: Organization,
+    @Query() query: SentCountsSummaryDto
+  ) {
+    return this._engageService.getSentCountsSummary(org, query);
+  }
+
+  @ApiOperation({ summary: 'Filtered counts under EXACTLY the same filters as GET /sent: `total` honors every filter (status/platform/date included, same number the list returns); each breakdown honors every filter except its own axis — byPlatform drops platform, rollups and awaitingBreakdown drop status — so badges stay complete while the other filters narrow them. Pagination params are accepted and ignored, so clients can reuse the list query string verbatim.' })
+  @Get('/sent/count')
+  countSentReplies(
     @GetOrgFromRequest() org: Organization,
     @Query() query: ListSentDto
   ) {
-    return this._engageService.getSentCounts(org, {
-      date: query.date,
-      status: query.status,
-      projectId: query.projectId,
-    });
+    return this._engageService.countSentReplies(org, query);
   }
 
   @ApiOperation({ summary: 'Lightweight status of one sent reply — for the frontends to poll while an in-browser extension reply posts and self-backfills. Returns { id, state, replyUrl }; replyUrl flips non-null on success.' })

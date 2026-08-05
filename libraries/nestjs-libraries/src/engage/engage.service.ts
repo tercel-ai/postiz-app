@@ -47,6 +47,7 @@ import {
   LocateOpportunityDto,
   LocateSentReplyDto,
   OpportunityCountsSummaryDto,
+  SentCountsSummaryDto,
   SaveEngageConfigDto,
   SetupEngageDto,
   BatchScheduleReplyDto,
@@ -835,11 +836,12 @@ export class EngageService implements OnApplicationBootstrap {
     return this._engageRepository.getSentStats(org.id, dto);
   }
 
-  async getSentCounts(
-    org: Organization,
-    dto: { date?: string; status?: string; projectId?: string } = {}
-  ) {
-    return this._engageRepository.getSentCounts(org.id, dto);
+  async getSentCountsSummary(org: Organization, dto: SentCountsSummaryDto = {}) {
+    return this._engageRepository.getSentCountsSummary(org.id, dto);
+  }
+
+  async countSentReplies(org: Organization, dto: ListSentDto) {
+    return this._engageRepository.countSentReplies(org.id, dto);
   }
 
   // ─── Dashboard ────────────────────────────────────────────────────────────

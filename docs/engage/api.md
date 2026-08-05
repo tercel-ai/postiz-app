@@ -42,7 +42,8 @@
   - [GET /sent/:id](#get-apienagesentid) — single sent reply item
   - [GET /sent/locate](#get-apienagesentlocate) — locate the page of a sentReplyId within /sent
   - [GET /sent/stats](#get-apienagesentstats) — aggregate stats
-  - [GET /sent/counts](#get-apienagesentcounts) — total/byPlatform/settled-awaiting-rollup counts for /sent
+  - [GET /sent/counts/summary](#get-apiengagesentcountssummary) — total/byPlatform/rollups/awaitingBreakdown rollup for /sent
+  - [GET /sent/count](#get-apiengagesentcount) — filtered counts under exactly the /sent filters
   - [PATCH /sent/:id](#patch-apienagesentid) — edit scheduled reply
   - [PATCH /sent/:id/reply-url](#patch-apienagesentidreply-url) — Reddit URL submission
 - [Dashboard Stats — Dashboard Statistics](#dashboard-stats--dashboard-statistics)
@@ -66,7 +67,7 @@
 
 ### Project-Scoped Requests
 
-The following endpoints accept `projectId` as a query parameter: `GET /config`, `POST /config/reset`, `GET /monitored-channels`, `GET /tracked-accounts`, `GET /reply-accounts`, `GET /opportunities/score-stats`, `GET /opportunities/counts/summary`, `GET /opportunities/count`, `GET /opportunities`, `GET /opportunities/:id`, `PATCH /opportunities/:id/dismiss`, `PATCH /opportunities/:id/bookmark`, `GET /opportunities/locate`, `GET /sent`, `GET /sent/locate`, `GET /sent/stats`, `GET /sent/counts`, `GET /dashboard/summary`, `GET /dashboard/replies-trend`, `GET /dashboard/traffics`, `GET /dashboard/impressions`, and `GET /dashboard/top-sources`.
+The following endpoints accept `projectId` as a query parameter: `GET /config`, `POST /config/reset`, `GET /monitored-channels`, `GET /tracked-accounts`, `GET /reply-accounts`, `GET /opportunities/score-stats`, `GET /opportunities/counts/summary`, `GET /opportunities/count`, `GET /opportunities`, `GET /opportunities/:id`, `PATCH /opportunities/:id/dismiss`, `PATCH /opportunities/:id/bookmark`, `GET /opportunities/locate`, `GET /sent`, `GET /sent/locate`, `GET /sent/stats`, `GET /sent/counts/summary`, `GET /sent/count`, `GET /dashboard/summary`, `GET /dashboard/replies-trend`, `GET /dashboard/traffics`, `GET /dashboard/impressions`, and `GET /dashboard/top-sources`.
 
 Mutation endpoints that create project-owned config or reply records accept `projectId` in the JSON body: `POST /setup`, `POST /config`, `POST /keywords`, `POST /keywords/bulk`, `POST /monitored-channels`, `POST /tracked-accounts`, `POST /opportunities/:id/draft`, `POST /opportunities/:id/save-draft`, `POST /opportunities/:id/send-now`, `POST /opportunities/:id/schedule`, `POST /opportunities/:id/batch-send`, `POST /opportunities/:id/batch-schedule`, and `POST /opportunities/:id/manual-reply`.
 
@@ -1852,40 +1853,59 @@ Retrieve summary statistics for sent records (used for the top of the Sent page)
 
 ---
 
-### GET `/api/engage/sent/counts`
+### GET `/api/engage/sent/counts/summary`
 
-Total + byPlatform + settled/awaiting rollup counts for `/sent`, replacing several `GET /sent?platform=x&limit=1` calls just to read `.total` for platform/tab badges.
+> Replaces the removed `GET /sent/counts`, which was split into this rollup and [`GET /sent/count`](#get-apiengagesentcount) (filtered counts under exactly the `/sent` filters). Differences from the old endpoint: `status` is no longer a param (it skewed `total`/`byPlatform` while `rollups` ignored it), and `awaitingBreakdown` is now always present instead of appearing only when `status=awaiting`.
+
+Total + byPlatform + settled/awaiting rollups + awaitingBreakdown for `/sent` in one round trip, **all computed under the SAME conditions**: the `/sent` filter contract minus `status`/`platform` (those two are the breakdown axes here, not filters — to narrow by them use `GET /sent/count`). Replaces several `GET /sent?status=…&limit=1` calls just to read `.total` for platform/tab badges.
 
 **Query Params** (all optional)
 
 | Param | Type | Description |
 |---|---|---|
 | `projectId` | `string` | Optional project scope. |
-| `date` | `all` \| `day` \| `today` \| `week` \| `month` | Same vocabulary as `/sent`/`/sent/stats`. Scopes `total`/`byPlatform`, `rollups`, **and** `awaitingBreakdown`. |
-| `status` | Same values as `/sent` | Scopes `total`/`byPlatform` only. **`rollups` always recomputes settled/awaiting from `date` alone**, ignoring this param — the tab badges need their own totals regardless of which status tab is currently active. `awaitingBreakdown` is only computed (and only present in the response) **when `status=awaiting`** — it backs the Awaiting-review page's own Drafts / Awaiting link / Expired sub-tab badges. |
+| `date` | `all` \| `day` \| `today` \| `week` \| `month` | Same vocabulary as `/sent`/`/sent/stats`. Scopes every field. |
 
-**Response** `200 OK` (`status` omitted or not `awaiting`)
+**Response** `200 OK`
 
 ```json
 {
   "total": 340,
   "byPlatform": { "x": 210, "reddit": 130 },
-  "rollups": { "settled": 280, "awaiting": 60 }
-}
-```
-
-**Response** `200 OK` (`status=awaiting`)
-
-```json
-{
-  "total": 60,
-  "byPlatform": { "x": 40, "reddit": 20 },
   "rollups": { "settled": 280, "awaiting": 60 },
   "awaitingBreakdown": { "drafts": 25, "link": 30, "expired": 5 }
 }
 ```
 
 `awaitingBreakdown` mirrors the `awaiting-draft` / `awaiting-link` / `awaiting-expired` sub-filters documented on `GET /sent` above — `drafts` = still-actionable saved draft, `link` = manual link-pending or failed publish, `expired` = draft whose source opportunity aged out.
+
+---
+
+### GET `/api/engage/sent/count`
+
+Filtered counts under **exactly** the same filters as `GET /sent`, sharing the list's filter builder server-side so the two can never drift:
+
+- `total` honors every filter — `status`, `platform`, and `date` included — and is the same number the list returns for that query string.
+- `byPlatform` honors every filter **except `platform` itself** (each count pins one platform), so platform badges stay complete while `status`/`date` narrow them.
+- `rollups` (`settled`/`awaiting`) honor every filter **except `status` itself** (the status axis), so the tab badges stay complete while `platform`/`date` narrow them.
+- `awaitingBreakdown` (`drafts`/`link`/`expired`) — the awaiting rollup's sub-axis, same status-less scoping as `rollups`.
+
+`page`/`limit` are accepted and ignored (they can't change a count), so clients can reuse the list query string verbatim.
+
+**Query Params** — identical to [`GET /sent`](#get-apiengagesent).
+
+**Response** `200 OK` (e.g. `?status=awaiting&platform=x`)
+
+```json
+{
+  "total": 40,
+  "byPlatform": { "x": 40, "reddit": 20 },
+  "rollups": { "settled": 190, "awaiting": 40 },
+  "awaitingBreakdown": { "drafts": 18, "link": 19, "expired": 3 }
+}
+```
+
+> In the example, `total` counts awaiting x-replies, `byPlatform` breaks down awaiting replies per platform, and `rollups`/`awaitingBreakdown` break down x-replies per status.
 
 ---
 

@@ -17,7 +17,7 @@ import {
   ValidateNested,
 } from 'class-validator';
 import { Transform, Type } from 'class-transformer';
-import { OmitType } from '@nestjs/swagger';
+import { OmitType, PickType } from '@nestjs/swagger';
 import { EngageOpportunityStatus } from '@prisma/client';
 
 // Must stay in sync with STRATEGY_PROMPTS in engage-draft.service.ts. The service
@@ -756,6 +756,16 @@ export class ListSentDto {
   @Max(100)
   limit?: number;
 }
+
+// Filter contract for GET /sent/counts/summary: ListSentDto's scoping minus
+// `status`/`platform` — the summary is a pure rollup where those two are the
+// breakdown axes, not filters (narrowing by them belongs to GET /sent/count,
+// which takes the full /sent contract) — and minus pagination (a counts
+// response has no rows to paginate).
+export class SentCountsSummaryDto extends PickType(ListSentDto, [
+  'projectId',
+  'date',
+] as const) {}
 
 // Event-driven metrics refresh: the client posts the exact post ids it is
 // currently showing on /engage/sent (any sort/filter/page). The server gates

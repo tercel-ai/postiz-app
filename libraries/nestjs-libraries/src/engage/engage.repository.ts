@@ -11,6 +11,7 @@ import {
   LocateOpportunityDto,
   LocateSentReplyDto,
   OpportunityCountsSummaryDto,
+  SentCountsSummaryDto,
   SetupEngageDto,
   UpdateKeywordDto,
   UpdateMonitoredChannelDto,
@@ -3146,72 +3147,62 @@ export class EngageRepository {
   // — it backs the Awaiting-review page's own Drafts / Awaiting link / Expired
   // sub-tab badges, which are only ever visible while that page is open, so the
   // three extra counts stay off the hot path for every other status scope.
-  async getSentCounts(
+  // Rollup for the sent tabs' badges: total + byPlatform + rollups +
+  // awaitingBreakdown under the /sent filter contract minus `status`/`platform`
+  // (the breakdown axes here, not filters — narrowing by them is what
+  // countSentReplies is for). Equivalent to countSentReplies with neither
+  // filter set; kept as its own endpoint so the rollup contract is explicit
+  // and a status/platform param can't silently skew the badges.
+  async getSentCountsSummary(
     organizationId: string,
-    dto: { date?: string; status?: string; projectId?: string } = {}
+    dto: SentCountsSummaryDto = {}
   ) {
-    const { sentWhere } = this._buildSentReplyFilter(organizationId, dto, {
-      includeDrafts: true,
+    return this.countSentReplies(organizationId, {
+      projectId: dto.projectId,
+      date: dto.date,
     });
-    const injectPlatform = (platform: string): Prisma.EngageSentReplyWhereInput => ({
-      ...sentWhere,
-      opportunity: {
-        ...(sentWhere.opportunity as Prisma.EngageOpportunityWhereInput | undefined),
-        platform,
-      },
-    });
+  }
 
-    const { sentWhere: settledWhere } = this._buildSentReplyFilter(
-      organizationId,
-      { date: dto.date, status: 'settled', projectId: dto.projectId },
-      { includeDrafts: true }
-    );
-    const { sentWhere: awaitingWhere } = this._buildSentReplyFilter(
-      organizationId,
-      { date: dto.date, status: 'awaiting', projectId: dto.projectId },
-      { includeDrafts: true }
-    );
-
-    const wantsAwaitingBreakdown = dto.status === 'awaiting';
-    const { sentWhere: awaitingDraftWhere } = this._buildSentReplyFilter(
-      organizationId,
-      { date: dto.date, status: 'awaiting-draft', projectId: dto.projectId },
-      { includeDrafts: true }
-    );
-    const { sentWhere: awaitingLinkWhere } = this._buildSentReplyFilter(
-      organizationId,
-      { date: dto.date, status: 'awaiting-link', projectId: dto.projectId },
-      { includeDrafts: true }
-    );
-    const { sentWhere: awaitingExpiredWhere } = this._buildSentReplyFilter(
-      organizationId,
-      { date: dto.date, status: 'awaiting-expired', projectId: dto.projectId },
-      { includeDrafts: true }
-    );
+  // Filtered counts under EXACTLY the /sent filter contract, one round trip.
+  // `total` honors every filter (status/platform/date included) — the same
+  // number /sent returns. Each breakdown honors every filter EXCEPT its own
+  // axis (applying it would zero the very badges the breakdown exists for):
+  //   byPlatform        pins one platform per count; status/date still narrow.
+  //   rollups           settled/awaiting with the status filter dropped;
+  //                     platform/date still narrow.
+  //   awaitingBreakdown drafts/link/expired — the awaiting rollup's sub-axis,
+  //                     same status-less scoping as rollups.
+  // Pagination fields are ignored (they can't change a count). All counts run
+  // with includeDrafts to mirror the LIST, whose default view shows drafts.
+  // Every count builds its own where-tree via _buildSentReplyFilter — no
+  // shared mutable filter objects across the parallel queries.
+  async countSentReplies(organizationId: string, dto: ListSentDto) {
+    const where = (status?: string, platform?: string) =>
+      this._buildSentReplyFilter(
+        organizationId,
+        { date: dto.date, projectId: dto.projectId, status, platform },
+        { includeDrafts: true }
+      ).sentWhere;
+    const count = (w: Prisma.EngageSentReplyWhereInput) =>
+      this._sentReply.model.engageSentReply.count({ where: w });
 
     const [total, x, reddit, settled, awaiting, drafts, link, expired] =
       await Promise.all([
-        this._sentReply.model.engageSentReply.count({ where: sentWhere }),
-        this._sentReply.model.engageSentReply.count({ where: injectPlatform('x') }),
-        this._sentReply.model.engageSentReply.count({ where: injectPlatform('reddit') }),
-        this._sentReply.model.engageSentReply.count({ where: settledWhere }),
-        this._sentReply.model.engageSentReply.count({ where: awaitingWhere }),
-        wantsAwaitingBreakdown
-          ? this._sentReply.model.engageSentReply.count({ where: awaitingDraftWhere })
-          : Promise.resolve(0),
-        wantsAwaitingBreakdown
-          ? this._sentReply.model.engageSentReply.count({ where: awaitingLinkWhere })
-          : Promise.resolve(0),
-        wantsAwaitingBreakdown
-          ? this._sentReply.model.engageSentReply.count({ where: awaitingExpiredWhere })
-          : Promise.resolve(0),
+        count(where(dto.status, dto.platform)),
+        count(where(dto.status, 'x')),
+        count(where(dto.status, 'reddit')),
+        count(where('settled', dto.platform)),
+        count(where('awaiting', dto.platform)),
+        count(where('awaiting-draft', dto.platform)),
+        count(where('awaiting-link', dto.platform)),
+        count(where('awaiting-expired', dto.platform)),
       ]);
 
     return {
       total,
       byPlatform: { x, reddit },
       rollups: { settled, awaiting },
-      ...(wantsAwaitingBreakdown && { awaitingBreakdown: { drafts, link, expired } }),
+      awaitingBreakdown: { drafts, link, expired },
     };
   }
 
