@@ -130,6 +130,12 @@ export interface EngageReplyCredits {
 // defaults; null = unlimited wins): starter 0+10, developer 10+50, pro
 // null+150 / per-project 2+2, 10+8, 20+15. The pool applies PER PLATFORM, so
 // each platform independently gets this many follows (accounts + channels).
+//
+// starter/developer/pro are legacy tiers, retained only so pre-existing
+// subscriptions keep resolving (see AiseePlanCode). 'growth-loop' is the only
+// plan aisee-core sells going forward; it starts out at the old 'pro' limits
+// since it is now the single tier every paying org is on — tune via
+// admin settings, not by editing this default.
 const DEFAULT_ENTITLEMENTS: EngageEntitlementMap = {
   starter: {
     keywordsMax: 30,
@@ -152,6 +158,16 @@ const DEFAULT_ENTITLEMENTS: EngageEntitlementMap = {
     metricsFetchIntervalHours: 12,
   },
   pro: {
+    keywordsMax: 300,
+    priorityAccountsMax: null,
+    keywordsPerProjectMax: 30,
+    priorityAccountsPerProjectMax: 35,
+    scanIntervalHours: 6,
+    replyMonthlyCap: null,
+    metricsWindowDaysMax: 30,
+    metricsFetchIntervalHours: 6,
+  },
+  'growth-loop': {
     keywordsMax: 300,
     priorityAccountsMax: null,
     keywordsPerProjectMax: 30,
@@ -283,20 +299,13 @@ export class EngageEntitlementService implements OnModuleInit {
       Partial<Record<EngagePlanCode, Partial<EngageEntitlement>>>
     >(ENGAGE_ENTITLEMENTS_KEY);
     // Merge per-plan so a partial admin override never drops a tier.
-    return {
-      starter: {
-        ...DEFAULT_ENTITLEMENTS.starter,
-        ...this._foldLegacySubredditCaps(stored?.starter),
-      },
-      developer: {
-        ...DEFAULT_ENTITLEMENTS.developer,
-        ...this._foldLegacySubredditCaps(stored?.developer),
-      },
-      pro: {
-        ...DEFAULT_ENTITLEMENTS.pro,
-        ...this._foldLegacySubredditCaps(stored?.pro),
-      },
-    };
+    return ENGAGE_PLAN_CODES.reduce((acc, code) => {
+      acc[code] = {
+        ...DEFAULT_ENTITLEMENTS[code],
+        ...this._foldLegacySubredditCaps(stored?.[code]),
+      };
+      return acc;
+    }, {} as EngageEntitlementMap);
   }
 
   /**

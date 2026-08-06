@@ -9,6 +9,7 @@ const PLAN_LABELS: Record<string, string> = {
   starter: 'Starter',
   developer: 'Developer',
   pro: 'Pro',
+  'growth-loop': 'Growth Loop',
 };
 
 /** Shared aisee auth/plan state — used by both Popup and Panel so the two

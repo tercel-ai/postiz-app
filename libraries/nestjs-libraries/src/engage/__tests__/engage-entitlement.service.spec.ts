@@ -230,6 +230,7 @@ describe('EngageEntitlementService.getPublicPlanCatalog', () => {
       'starter',
       'developer',
       'pro',
+      'growth-loop',
     ]);
     const byCode = Object.fromEntries(
       catalog.plans.map((p) => [p.code, p.limits])

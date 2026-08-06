@@ -46,10 +46,15 @@ export type ResolvedPostLimitsPackage = Omit<
 // billing) and UNLIMITED channels, until an admin tunes a plan here. Junk
 // stored values also fall back to these per-field defaults — never to null,
 // which would silently grant "no limit".
+//
+// starter/developer/pro are legacy tiers, retained only so pre-existing
+// subscriptions keep resolving (see AiseePlanCode). 'growth-loop' is the only
+// plan aisee-core sells going forward.
 const DEFAULT_POST_PLAN_LIMITS: PostPlanLimitsMap = {
   starter: { postSendLimit: 0, postChannelLimit: null },
   developer: { postSendLimit: 0, postChannelLimit: null },
   pro: { postSendLimit: 0, postChannelLimit: null },
+  'growth-loop': { postSendLimit: 0, postChannelLimit: null },
 };
 
 /**

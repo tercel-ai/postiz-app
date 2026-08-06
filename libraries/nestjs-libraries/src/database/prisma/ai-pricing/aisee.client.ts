@@ -170,24 +170,32 @@ export interface AiseeUserCreditPackage {
 // The base subscription tiers aisee-core sells. Shared across every Postiz
 // module that maps a tier to its own limits (engage entitlements, post plan
 // limits) so the plan vocabulary stays in one place.
-export type AiseePlanCode = 'starter' | 'developer' | 'pro';
+// 'starter' | 'developer' | 'pro' are legacy tiers kept so existing
+// subscriptions (and their stored `plan`/`name` values) keep resolving after
+// aisee-core stopped selling them in favour of the single 'growth-loop' plan.
+export type AiseePlanCode = 'starter' | 'developer' | 'pro' | 'growth-loop';
 export const AISEE_PLAN_CODES: readonly AiseePlanCode[] = [
   'starter',
   'developer',
   'pro',
+  'growth-loop',
 ];
 
 /**
  * Fuzzy fallback: normalise an aisee plan DISPLAY name ("Starter Plan
- * (Monthly)", "pro", …) to a plan code by substring match. Only for records
- * that predate the exact `plan` field — prefer resolveAiseePlanCode, which
- * uses that exact code when present. Returns null when nothing matches.
+ * (Monthly)", "pro", "Growth Loop", …) to a plan code by substring match.
+ * Only for records that predate the exact `plan` field — prefer
+ * resolveAiseePlanCode, which uses that exact code when present. Returns null
+ * when nothing matches. `growth-loop`/`growth loop` is checked before `pro`
+ * so a display name like "Growth Loop Pro" (if that ever exists) doesn't
+ * misresolve to the legacy 'pro' tier.
  */
 export function normalizeAiseePlanName(
   name: string | undefined | null
 ): AiseePlanCode | null {
   if (!name) return null;
   const n = name.toLowerCase();
+  if (n.includes('growth loop') || n.includes('growth-loop')) return 'growth-loop';
   if (n.includes('developer')) return 'developer';
   if (n.includes('pro')) return 'pro';
   if (n.includes('starter')) return 'starter';

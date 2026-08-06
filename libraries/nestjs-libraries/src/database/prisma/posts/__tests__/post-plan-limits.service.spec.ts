@@ -35,6 +35,7 @@ describe('PostPlanLimitsService.onModuleInit', () => {
         starter: { postSendLimit: 0, postChannelLimit: null },
         developer: { postSendLimit: 0, postChannelLimit: null },
         pro: { postSendLimit: 0, postChannelLimit: null },
+        'growth-loop': { postSendLimit: 0, postChannelLimit: null },
       },
       expect.objectContaining({ type: 'object' })
     );
