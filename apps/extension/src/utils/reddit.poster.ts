@@ -287,6 +287,27 @@ export function isRedditCaptchaError(errors: unknown[]): boolean {
   });
 }
 
+/**
+ * True when /api/submit rejected the post for a subreddit posting rule the API
+ * cannot satisfy blind: a required post flair (SUBMIT_VALIDATION_FLAIR_REQUIRED)
+ * or a required title tag (POST_GUIDANCE_VALIDATION_FAILED — e.g.
+ * r/MachineLearning demanding [R]/[N]/[P]/[D]).
+ *
+ * Both need a CHOICE from the subreddit's own option set, and picking wrong
+ * mis-files a post on a live public community. So, exactly like a captcha, this
+ * is the signal to fall back to the browser-assisted submit tab, where Reddit
+ * renders its own flair picker and rule text and the user makes the call.
+ * Exported for tests.
+ */
+export function isRedditPostRuleError(errors: unknown[]): boolean {
+  return errors.some((e) => {
+    const parts = Array.isArray(e) ? e.map(String) : [String(e)];
+    return parts.some((p) =>
+      /FLAIR_REQUIRED|POST_GUIDANCE_VALIDATION_FAILED/i.test(p)
+    );
+  });
+}
+
 /** POST one self-post submission with a given session; returns response + errors. */
 async function submitOnce(
   input: RedditSubmitInput,
@@ -374,10 +395,16 @@ export async function submitRedditPost(
     }
 
     if (Array.isArray(errors) && errors.length > 0) {
-      // Reddit gates this account/subreddit behind a captcha the API can't solve
-      // (BAD_CAPTCHA). Hand the already-built body to a real submit tab, where
-      // Reddit's own UI handles the verification.
-      if (isRedditCaptchaError(errors)) {
+      // Two classes of rejection the blind API call can never satisfy on its
+      // own, both handed to a real submit tab where Reddit's OWN UI provides
+      // what's missing:
+      //   - captcha (BAD_CAPTCHA): only the user can solve it;
+      //   - a post rule (required flair / required title tag): the choice comes
+      //     from the subreddit's own option set, which old.reddit renders next
+      //     to the prefilled form.
+      // The tab keeps watching for the user's Post click, so finishing there
+      // still returns a confirmed permalink and flips the DB row PUBLISHED.
+      if (isRedditCaptchaError(errors) || isRedditPostRuleError(errors)) {
         return submitRedditPostViaTab({ subreddit, title, text: body });
       }
       return {

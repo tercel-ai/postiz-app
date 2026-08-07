@@ -1,8 +1,12 @@
-// Browser-assisted Reddit self-post submission (captcha fallback for
-// submitRedditPost). The direct /api/submit path returns BAD_CAPTCHA for
-// accounts/subreddits Reddit gates behind a captcha — which the API can't
-// solve. This module instead drives Reddit's OWN submit page in a real tab, the
-// same tab+executeScript pattern as x.poster / linkedin.poster:
+// Browser-assisted Reddit self-post submission (fallback for submitRedditPost).
+// The direct /api/submit path can't satisfy two classes of subreddit gate on its
+// own: a captcha (BAD_CAPTCHA), and a posting RULE that needs a choice from the
+// subreddit's own option set — a required post flair
+// (SUBMIT_VALIDATION_FLAIR_REQUIRED) or a required title tag
+// (POST_GUIDANCE_VALIDATION_FAILED). This module instead drives Reddit's OWN
+// submit page in a real tab, where the flair picker, the rule text and the
+// captcha all render natively, using the same tab+executeScript pattern as
+// x.poster / linkedin.poster:
 //
 //   - open old.reddit.com/r/<sub>/submit prefilled (server-rendered form is far
 //     more scriptable than shreddit's shadow DOM),
@@ -84,6 +88,18 @@ export function redditPermalinkFromSubmittedUrl(
     permalink: `${WWW_REDDIT_BASE}${parsed.pathname}`,
     postId: `t3_${id}`,
   };
+}
+
+/**
+ * True when a submit-form error is one the user can FIX right there in the open
+ * form — a missing post flair or a missing required title tag. Those get the tab
+ * surfaced and watched (the flair picker and rule text are right on the page)
+ * instead of an immediate failure. A hard rejection (banned, subreddit gone,
+ * rate limited) is NOT fixable in the form and must still fail fast rather than
+ * park an unattended tab for minutes. Exported for tests.
+ */
+export function isRedditFixableFormError(error: string): boolean {
+  return /flair|required tag|post guidance/i.test(error);
 }
 
 /** Resolve once the tab finishes its top-level load (or times out). */
@@ -368,6 +384,15 @@ export async function submitRedditPostViaTab(
       );
     }
     if (outcome?.error) {
+      // A missing flair / title tag is fixable in the very form that is open:
+      // surface it and keep watching, so the user's Post click still lands as a
+      // confirmed publish rather than an error the queue has to retry blind.
+      if (isRedditFixableFormError(outcome.error)) {
+        return waitManual(
+          `Reddit needs one more thing for r/${subreddit}: ${outcome.error} ` +
+            'Set it in the opened tab and click Post.'
+        );
+      }
       void focusTab(tabId);
       return { ok: false, error: `Reddit rejected the post: ${outcome.error}` };
     }

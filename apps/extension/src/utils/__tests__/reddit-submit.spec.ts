@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   isRedditCaptchaError,
+  isRedditPostRuleError,
   parseRedditSubmitResponse,
 } from '../reddit.poster';
+import { isRedditFixableFormError } from '../../pages/background/reddit.submit.tab';
 
 describe('parseRedditSubmitResponse', () => {
   it('extracts url and fullname from an api_type=json submit response', () => {
@@ -53,5 +55,85 @@ describe('isRedditCaptchaError', () => {
       isRedditCaptchaError([['RATELIMIT', 'you are doing that too much', 'ratelimit']])
     ).toBe(false);
     expect(isRedditCaptchaError([])).toBe(false);
+  });
+});
+
+// Real /api/submit rejection captured from r/machinelearning (see
+// SUBMIT_VALIDATION_FLAIR_REQUIRED / POST_GUIDANCE_VALIDATION_FAILED —
+// the exact shape the flair/title-tag self-heal retry detects).
+const FLAIR_AND_TAG_REQUIRED_ERRORS = [
+  ['SUBMIT_VALIDATION_FLAIR_REQUIRED', 'Your post must contain post flair.', 'flair'],
+  [
+    'POST_GUIDANCE_VALIDATION_FAILED',
+    'Please add a required tag to your title, such as [R], [N], [P], or [D], to prevent automatic removal. See the subreddit rules for the full list of valid tags.',
+    'title',
+  ],
+  [
+    'POST_GUIDANCE_VALIDATION_FAILED',
+    'Please add a required tag to your title, such as [R], [N], [P], or [D], to prevent automatic removal. See the subreddit rules for the full list of valid tags.',
+    'url',
+  ],
+];
+
+describe('isRedditPostRuleError', () => {
+  it('detects the real r/machinelearning flair + title-tag rejection', () => {
+    expect(isRedditPostRuleError(FLAIR_AND_TAG_REQUIRED_ERRORS)).toBe(true);
+  });
+
+  it('detects a flair-only rejection', () => {
+    expect(
+      isRedditPostRuleError([
+        ['SUBMIT_VALIDATION_FLAIR_REQUIRED', 'Your post must contain post flair.', 'flair'],
+      ])
+    ).toBe(true);
+  });
+
+  it('detects a title-tag-only rejection', () => {
+    expect(
+      isRedditPostRuleError([
+        ['POST_GUIDANCE_VALIDATION_FAILED', 'Please add a required tag to your title', 'title'],
+      ])
+    ).toBe(true);
+  });
+
+  // A rule error routes to the submit TAB; an unrelated error must keep failing
+  // fast, so this boundary is what keeps a banned/ratelimited post from parking
+  // an unattended tab for minutes.
+  it('is false for unrelated submit errors', () => {
+    expect(
+      isRedditPostRuleError([['RATELIMIT', 'you are doing that too much', 'ratelimit']])
+    ).toBe(false);
+    expect(
+      isRedditPostRuleError([['SUBREDDIT_NOTALLOWED', 'you are banned', 'sr']])
+    ).toBe(false);
+    expect(isRedditPostRuleError([])).toBe(false);
+  });
+
+  it('does not swallow a captcha error (that has its own branch)', () => {
+    expect(
+      isRedditPostRuleError([
+        ['BAD_CAPTCHA', "That was a tricky one. Why don't you try that again.", 'captcha'],
+      ])
+    ).toBe(false);
+  });
+});
+
+describe('isRedditFixableFormError', () => {
+  it('treats a missing-flair form error as fixable in the open tab', () => {
+    expect(isRedditFixableFormError('your post must contain post flair')).toBe(true);
+  });
+
+  it('treats a missing title tag as fixable in the open tab', () => {
+    expect(
+      isRedditFixableFormError(
+        'Please add a required tag to your title, such as [R], [N], [P], or [D]'
+      )
+    ).toBe(true);
+  });
+
+  it('is false for a hard rejection that no form edit can fix', () => {
+    expect(isRedditFixableFormError('you are banned from posting to /r/test')).toBe(false);
+    expect(isRedditFixableFormError('you are doing that too much')).toBe(false);
+    expect(isRedditFixableFormError('')).toBe(false);
   });
 });
