@@ -929,31 +929,44 @@ export class PostsService {
     const post = await this._postRepository.deletePost(orgId, group);
 
     if (post?.id) {
-      try {
-        const workflows = this._temporalService.client
-          .getRawClient()
-          ?.workflow.list({
-            query: `postId="${post.id}" AND ExecutionStatus="Running"`,
-          });
-
-        for await (const executionInfo of workflows) {
-          try {
-            const workflow =
-              await this._temporalService.client.getWorkflowHandle(
-                executionInfo.workflowId
-              );
-            if (
-              workflow &&
-              (await workflow.describe()).status.name !== 'TERMINATED'
-            ) {
-              await workflow.terminate();
-            }
-          } catch (err) {}
-        }
-      } catch (err) {}
+      await this._terminateRunningWorkflow(post.id);
     }
 
     return { error: true };
+  }
+
+  async deletePostById(orgId: string, id: string) {
+    const deleted = await this._postRepository.deletePostById(orgId, id);
+
+    if (deleted) {
+      await this._terminateRunningWorkflow(id);
+    }
+
+    return { error: true };
+  }
+
+  private async _terminateRunningWorkflow(postId: string) {
+    try {
+      const workflows = this._temporalService.client
+        .getRawClient()
+        ?.workflow.list({
+          query: `postId="${postId}" AND ExecutionStatus="Running"`,
+        });
+
+      for await (const executionInfo of workflows) {
+        try {
+          const workflow = await this._temporalService.client.getWorkflowHandle(
+            executionInfo.workflowId
+          );
+          if (
+            workflow &&
+            (await workflow.describe()).status.name !== 'TERMINATED'
+          ) {
+            await workflow.terminate();
+          }
+        } catch (err) {}
+      }
+    } catch (err) {}
   }
 
   async countPostsFromDay(orgId: string, date: Date) {
