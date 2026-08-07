@@ -51,6 +51,7 @@ import { RefreshToken } from '@gitroom/nestjs-libraries/integrations/social.abst
 import { RefreshIntegrationService } from '@gitroom/nestjs-libraries/integrations/refresh.integration.service';
 import { PostOverageService } from '@gitroom/nestjs-libraries/database/prisma/posts/post-overage.service';
 import { ExtensionPublishConfigService } from '@gitroom/nestjs-libraries/database/prisma/posts/extension-publish-config.service';
+import { titleFromSettings } from '@gitroom/nestjs-libraries/database/prisma/posts/settings-title';
 import { ProjectValidationService } from '@gitroom/nestjs-libraries/projects/project-validation.service';
 import { PublishPlatform } from '@gitroom/helpers/extension/post-publish';
 import { PostingTimesV2 } from '@gitroom/nestjs-libraries/dtos/integrations/posting-times.types';
@@ -1758,18 +1759,14 @@ export class PostsService {
       return {
         id: p.id,
         platform,
-        // Reddit keeps its title INSIDE the subreddit entry, not at the top of
-        // settings and not necessarily on Post.title — an operation-plan post
-        // is materialized with Post.title null, so the reddit-only fallback is
-        // the only place the title exists at all. Without it the extension
-        // rejects the item ("reddit post needs a title") and, because a
-        // rejected item never leaves Post.state=QUEUE, the post is re-offered
-        // every poll and can never publish.
-        title:
-          p.title ||
-          settings.subreddit?.[0]?.value?.title ||
-          settings.title ||
-          undefined,
+        // Post.title is the canonical field and createOrUpdatePost now
+        // persists it, but rows written before that (and any caller that
+        // shaped settings by hand) only carry the title inside settings —
+        // where it lives is per-platform, hence titleFromSettings. Without
+        // this fallback such a post reaches the extension titleless, is
+        // rejected ("reddit post needs a title"), and — since a rejected item
+        // never leaves Post.state=QUEUE — is re-offered on every poll forever.
+        title: p.title || titleFromSettings(platform, settings) || undefined,
         // RedditSettingsDto.subreddit is an ARRAY of { value: { subreddit, ... } }
         // (multi-subreddit submission support on the Temporal path — see
         // reddit.provider.ts). The extension's publish queue only supports a

@@ -256,3 +256,100 @@ describe('getSchedulablePostsByIds', () => {
     expect(findMany).not.toHaveBeenCalled();
   });
 });
+
+// Post.title used to be written ONLY by the operation-plan materializer, so
+// every post created through the API landed with title=null and its headline
+// reachable only inside settings — the shape of which is per-platform. That is
+// what made the extension reject Reddit posts as "reddit post needs a title"
+// forever (a rejected item never leaves QUEUE, so it is re-offered each poll).
+describe('createOrUpdatePost — Post.title persistence', () => {
+  function repoWithUpsert() {
+    const upsert = vi.fn().mockImplementation(async ({ create }) => ({
+      id: create?.id ?? 'post-1',
+    }));
+    // createOrUpdatePost also clears tag links, so this needs the tagsPosts
+    // repo rather than the bare post model createRepo() provides.
+    const repo = new PostsRepository(
+      { model: { post: { upsert } } } as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      { model: { tagsPosts: { deleteMany: vi.fn(), create: vi.fn() } } } as any,
+      {} as any
+    );
+    return { repo, upsert };
+  }
+
+  function body(settings: Record<string, any>, providerIdentifier?: string) {
+    return {
+      value: [{ content: 'body text', id: 'post-1' }],
+      settings,
+      ...(providerIdentifier ? { providerIdentifier } : {}),
+    } as any;
+  }
+
+  it('persists the reddit title from settings.subreddit[0].value', async () => {
+    const { repo, upsert } = repoWithUpsert();
+
+    await repo.createOrUpdatePost(
+      'schedule',
+      'org-1',
+      '2030-01-01T00:00:00.000Z',
+      body({
+        __type: 'reddit',
+        subreddit: [{ value: { subreddit: 'football', title: 'Tactical Deep-Dive' } }],
+      }),
+      []
+    );
+
+    expect(upsert.mock.calls[0][0].create.title).toBe('Tactical Deep-Dive');
+    // Written on update too, so an edited settings title doesn't leave a stale
+    // Post.title behind.
+    expect(upsert.mock.calls[0][0].update.title).toBe('Tactical Deep-Dive');
+  });
+
+  it('persists a top-level settings title for the article platforms', async () => {
+    const { repo, upsert } = repoWithUpsert();
+
+    await repo.createOrUpdatePost(
+      'schedule',
+      'org-1',
+      '2030-01-01T00:00:00.000Z',
+      body({ __type: 'devto', title: 'My dev.to article' }),
+      []
+    );
+
+    expect(upsert.mock.calls[0][0].create.title).toBe('My dev.to article');
+  });
+
+  it('writes null (not undefined) when the platform carries no title', async () => {
+    const { repo, upsert } = repoWithUpsert();
+
+    await repo.createOrUpdatePost(
+      'schedule',
+      'org-1',
+      '2030-01-01T00:00:00.000Z',
+      body({ __type: 'x' }),
+      []
+    );
+
+    expect(upsert.mock.calls[0][0].create.title).toBeNull();
+  });
+
+  it('resolves the platform from providerIdentifier when settings has no __type', async () => {
+    const { repo, upsert } = repoWithUpsert();
+
+    await repo.createOrUpdatePost(
+      'schedule',
+      'org-1',
+      '2030-01-01T00:00:00.000Z',
+      body(
+        { subreddit: [{ value: { subreddit: 'football', title: 'From providerIdentifier' } }] },
+        'reddit'
+      ),
+      []
+    );
+
+    expect(upsert.mock.calls[0][0].create.title).toBe('From providerIdentifier');
+  });
+});

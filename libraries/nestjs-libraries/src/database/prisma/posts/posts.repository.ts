@@ -6,6 +6,7 @@ import { GetPostsDto } from '@gitroom/nestjs-libraries/dtos/posts/get.posts.dto'
 import { PostSource } from '@gitroom/nestjs-libraries/dtos/posts/post-source';
 import { GetPostsListDto } from '@gitroom/nestjs-libraries/dtos/posts/get.posts-list.dto';
 import { LocatePostInListDto } from '@gitroom/nestjs-libraries/dtos/posts/locate.post-in-list.dto';
+import { titleFromSettings } from '@gitroom/nestjs-libraries/database/prisma/posts/settings-title';
 import dayjs from 'dayjs';
 import isoWeek from 'dayjs/plugin/isoWeek';
 import weekOfYear from 'dayjs/plugin/weekOfYear';
@@ -1810,6 +1811,19 @@ export class PostsRepository {
         // wholesale like settings, on both create and update.
         providerIdentifier:
           body.providerIdentifier ?? (body.settings as any)?.__type ?? null,
+        // Persisted headline for the title-submitting platforms. Only the
+        // operation-plan materializer used to write this, so every post
+        // created through the API arrived with Post.title null and the title
+        // reachable ONLY inside settings — where it sits differs per platform
+        // (see titleFromSettings), which is exactly how the extension ended up
+        // rejecting Reddit posts as titleless. Written wholesale like settings
+        // (the DTO carries no title of its own): settings IS the caller's
+        // title, so re-deriving on update keeps the two from diverging.
+        title:
+          titleFromSettings(
+            body.providerIdentifier ?? (body.settings as any)?.__type,
+            body.settings as any
+          ) ?? null,
       });
 
       posts.push(
