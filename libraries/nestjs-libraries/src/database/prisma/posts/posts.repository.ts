@@ -801,6 +801,15 @@ export class PostsRepository {
     });
   }
 
+  async deletePostById(orgId: string, id: string) {
+    const { count } = await this._post.model.post.updateMany({
+      where: { organizationId: orgId, id, deletedAt: null },
+      data: { parentPostId: null, deletedAt: new Date() },
+    });
+
+    return count > 0;
+  }
+
   getPostsByGroup(orgId: string, group: string) {
     return this._post.model.post.findMany({
       where: {
@@ -1108,6 +1117,21 @@ export class PostsRepository {
       },
     });
     return result.count;
+  }
+
+  /**
+   * The (organizationId, projectId) a post belongs to — the minimum needed to
+   * ask aisee-core whether the owning project is still active before
+   * publishing. Null when the post no longer exists; projectId is null for
+   * legacy posts written before project scoping.
+   */
+  async getPostProjectScope(
+    id: string
+  ): Promise<{ organizationId: string; projectId: string | null } | null> {
+    return this._post.model.post.findUnique({
+      where: { id },
+      select: { organizationId: true, projectId: true },
+    });
   }
 
   /**

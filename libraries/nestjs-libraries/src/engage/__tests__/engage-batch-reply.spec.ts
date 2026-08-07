@@ -33,7 +33,7 @@ describe('EngageService batch reply — per-post tracking', () => {
     let postSeq = 0;
     createPost = vi.fn(async () => [{ postId: `post-${++postSeq}` }]);
     claim = vi.fn(async () => ({
-      opp: { externalPostId: 'tweet-original' },
+      opp: { externalPostId: 'tweet-original', platform: 'x' },
       priorStatus: 'NEW',
     }));
     deletePostById = vi.fn(async () => undefined);
@@ -110,5 +110,98 @@ describe('EngageService batch reply — per-post tracking', () => {
     expect(createSentReply).toHaveBeenCalledTimes(3);
     // 3 live posts, 2 tracked (one transient failure isolated, not swallowed-all).
     expect(results).toHaveLength(2);
+  });
+});
+
+/**
+ * Regression coverage: scheduleReply/sendReply used to hard-code X-shaped
+ * settings (`reply_to_tweet_id`) for every platform, so a Reddit reply's
+ * Post.settings never matched what RedditProvider.post() reads — it would
+ * throw once Temporal actually tried to publish it. Each platform must get
+ * its own settings shape, and an unrecognised platform must fail fast at
+ * schedule time instead of creating a Post that's doomed to fail later.
+ */
+describe('EngageService reply settings — per-platform', () => {
+  const org = { id: 'org-1' } as any;
+
+  function buildService(opportunity: any) {
+    const createPost = vi.fn(async () => [{ postId: 'post-1' }]);
+    const engageRepository = {
+      claimOpportunityForReply: vi.fn(async () => ({
+        opp: opportunity,
+        priorStatus: 'NEW',
+      })),
+      createSentReply: vi.fn(async (data: any) => ({ id: 'reply-1', ...data })),
+      deletePostById: vi.fn(async () => undefined),
+      releaseOpportunityClaim: vi.fn(async () => undefined),
+    } as any;
+    const postsService = { createPost } as any;
+    const temporalService = { client: undefined } as any;
+    const overageService = {} as any;
+    const service = new EngageService(
+      engageRepository,
+      temporalService,
+      postsService,
+      overageService,
+      {} as any
+    );
+    return { service, createPost, engageRepository };
+  }
+
+  it('sendReply builds X-shaped settings for an X opportunity', async () => {
+    const { service, createPost } = buildService({
+      externalPostId: 'tweet-1',
+      platform: 'x',
+    });
+
+    await service.sendReply(org, 'user-1', 'opp-1', {
+      integrationId: 'int-1',
+      draftContent: 'hi',
+    } as any);
+
+    const settings = createPost.mock.calls[0][1].posts[0].settings;
+    expect(settings).toEqual({
+      __type: 'x',
+      reply_to_tweet_id: 'tweet-1',
+      who_can_reply_post: 'everyone',
+    });
+  });
+
+  it('sendReply builds Reddit-shaped settings for a Reddit opportunity (not the X shape)', async () => {
+    const { service, createPost } = buildService({
+      externalPostId: 'abc123',
+      platform: 'reddit',
+    });
+
+    await service.sendReply(org, 'user-1', 'opp-2', {
+      integrationId: 'int-1',
+      draftContent: 'hi',
+    } as any);
+
+    const settings = createPost.mock.calls[0][1].posts[0].settings;
+    expect(settings).toEqual({ __type: 'reddit', replyToId: 'abc123' });
+  });
+
+  it('sendReply rejects an unsupported platform before creating a doomed Post', async () => {
+    const { service, createPost, engageRepository } = buildService({
+      externalPostId: 'post-1',
+      platform: 'linkedin',
+    });
+
+    await expect(
+      service.sendReply(org, 'user-1', 'opp-3', {
+        integrationId: 'int-1',
+        draftContent: 'hi',
+      } as any)
+    ).rejects.toThrow('Scheduled replies are not supported for platform "linkedin" yet');
+
+    expect(createPost).not.toHaveBeenCalled();
+    // The earlier claim must be released, not left stuck as REPLIED.
+    expect(engageRepository.releaseOpportunityClaim).toHaveBeenCalledWith(
+      'org-1',
+      'opp-3',
+      'NEW',
+      undefined
+    );
   });
 });

@@ -2,8 +2,14 @@ import React, { FC, useState, useEffect } from 'react';
 import { ReplyHistoryItem } from '@gitroom/extension/utils/reply.history';
 
 const PAGE_SIZE = 5;
-const PLATFORM_LABEL: Record<string, string> = { reddit: 'Reddit', x: 'X' };
-const FILTERS = ['all', 'x', 'reddit'] as const;
+const PLATFORM_LABEL: Record<string, string> = {
+  reddit: 'Reddit', x: 'X', linkedin: 'LinkedIn', devto: 'Dev.to',
+  hackernews: 'HN', medium: 'Medium', quora: 'Quora',
+};
+// Filter buttons disable themselves (count === 0) below, so listing a platform
+// here before its reply-posting automation exists is harmless — the tab just
+// stays greyed out until history rows for it exist.
+const FILTERS = ['all', 'x', 'reddit', 'linkedin', 'devto', 'hackernews', 'medium', 'quora'] as const;
 type PlatformFilter = (typeof FILTERS)[number];
 
 function relativeTime(ts: number): string {

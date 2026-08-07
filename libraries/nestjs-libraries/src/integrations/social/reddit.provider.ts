@@ -285,6 +285,53 @@ export class RedditProvider extends SocialAbstract implements SocialProvider {
   ): Promise<PostResponse[]> {
     const [post] = postDetails;
 
+    // Reply-to-existing-thread mode (Engage scheduled replies): a bare comment
+    // via /api/comment, entirely separate from the subreddit-submission path
+    // below. `replyToId` is a bare Reddit id (t3_ prefix optional/added here) —
+    // see engage.service.ts's per-platform reply-settings builder.
+    const replyToId = (post.settings as RedditSettingsDto & { replyToId?: string })
+      .replyToId;
+    if (replyToId) {
+      const thingId = replyToId.startsWith('t3_') || replyToId.startsWith('t1_')
+        ? replyToId
+        : `t3_${replyToId}`;
+      const commentResponse = await (
+        await this.fetch('https://oauth.reddit.com/api/comment', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'Content-Type': 'application/x-www-form-urlencoded',
+          },
+          body: new URLSearchParams({
+            text: post.message,
+            thing_id: thingId,
+            api_type: 'json',
+          }),
+        })
+      ).json();
+
+      const errors = commentResponse?.json?.errors;
+      if (Array.isArray(errors) && errors.length) {
+        throw new Error(
+          `Reddit rejected reply to ${thingId}: ${errors
+            .map((e: any) => (Array.isArray(e) ? e.slice(0, 2).join(' — ') : String(e)))
+            .join('; ')}`
+        );
+      }
+      const created = commentResponse?.json?.data?.things?.[0]?.data;
+      if (!created?.id) {
+        throw new Error(`Reddit reply to ${thingId} returned no comment id`);
+      }
+      return [
+        {
+          postId: created.id,
+          releaseURL: 'https://www.reddit.com' + created.permalink,
+          id: post.id,
+          status: 'published',
+        },
+      ];
+    }
+
     const valueArray: PostResponse[] = [];
     for (const firstPostSettings of post.settings.subreddit) {
       const postData = {

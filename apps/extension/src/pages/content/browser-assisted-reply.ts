@@ -1,5 +1,6 @@
 import { appendHistory } from '@gitroom/extension/utils/reply.history';
 import { EXTENSION_MESSAGE } from '@gitroom/helpers/extension/brand';
+import { ScanTaskPlatform } from '@gitroom/extension/utils/executor/executor.types';
 
 const isNonEmptyString = (value: unknown): value is string => {
   return typeof value === 'string' && value.trim().length > 0;
@@ -76,7 +77,7 @@ export function installEngageReplyBridge() {
         id:
           (crypto as any)?.randomUUID?.() ??
           `${Date.now()}-${Math.round(Math.random() * 1e6)}`,
-        platform: String(payload.platform) as 'reddit' | 'x',
+        platform: String(payload.platform) as ScanTaskPlatform,
         targetUrl: String(payload.url),
         content: String(payload.text),
         permalink: r?.permalink,

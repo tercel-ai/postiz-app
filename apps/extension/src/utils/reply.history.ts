@@ -5,13 +5,14 @@
 
 import { saveStorage } from '@gitroom/extension/utils/save.storage';
 import { fetchStorage } from '@gitroom/extension/utils/load.storage';
+import { ScanTaskPlatform } from '@gitroom/extension/utils/executor/executor.types';
 
 export type ReplyStatus = 'sent' | 'pending' | 'failed';
 export type ClearRange = 'all' | '1d' | '1w' | '1m';
 
 export interface ReplyHistoryItem {
   id: string;
-  platform: 'reddit' | 'x';
+  platform: ScanTaskPlatform;
   targetUrl: string;
   content: string;
   permalink?: string;

@@ -2,6 +2,7 @@ import {
   ArrayMinSize,
   IsBoolean,
   IsDefined,
+  IsOptional,
   IsString,
   IsUrl,
   Matches,
@@ -67,8 +68,18 @@ export class RedditSettingsValueDto {
 }
 
 export class RedditSettingsDto {
+  // Absent in reply mode (see `replyToId` below) — the subreddit-submission
+  // path is skipped entirely then, so it has nothing to validate.
+  @ValidateIf((o) => !o.replyToId)
   @Type(() => RedditSettingsValueDto)
   @ValidateNested({ each: true })
   @ArrayMinSize(1)
   subreddit: RedditSettingsValueDto[];
+
+  // Reply-to-existing-thread mode (Engage scheduled replies): a bare Reddit id
+  // to comment on via /api/comment, bypassing subreddit submission. Not part
+  // of the normal compose UI — set only by engage.service.ts.
+  @IsOptional()
+  @IsString()
+  replyToId?: string;
 }

@@ -1671,11 +1671,10 @@ export class EngageService implements OnApplicationBootstrap {
                 { content: body.draftContent, image: [], delay: 0, id: '' } as never,
               ],
               group: '',
-              settings: {
-                __type: 'x',
-                reply_to_tweet_id: opportunity.externalPostId,
-                who_can_reply_post: 'everyone',
-              } as never,
+              settings: this._buildReplySettings(
+                opportunity.platform,
+                opportunity.externalPostId
+              ) as never,
             } as never,
           ],
         },
@@ -1742,6 +1741,33 @@ export class EngageService implements OnApplicationBootstrap {
     return this.sendReply(org, userId, opportunityId, body);
   }
 
+  /**
+   * Per-platform Post.settings shape for a scheduled/Temporal-published reply.
+   * Each provider's `.post()` needs its own reply-mode fields — reusing X's
+   * shape for every platform (the historical bug here) produces a Post that
+   * validates fine at creation but throws inside the publish activity, since
+   * e.g. RedditProvider.post() expects `subreddit`/`replyToId`, not
+   * `reply_to_tweet_id`. Throws for any platform whose provider has no
+   * reply-mode support yet, instead of silently creating a Post that will
+   * fail when Temporal tries to publish it.
+   */
+  private _buildReplySettings(platform: string, externalPostId: string): unknown {
+    switch (platform) {
+      case 'x':
+        return {
+          __type: 'x',
+          reply_to_tweet_id: externalPostId,
+          who_can_reply_post: 'everyone',
+        };
+      case 'reddit':
+        return { __type: 'reddit', replyToId: externalPostId };
+      default:
+        throw new BadRequestException(
+          `Scheduled replies are not supported for platform "${platform}" yet`
+        );
+    }
+  }
+
   async scheduleReply(
     org: Organization,
     userId: string | undefined,
@@ -1790,11 +1816,10 @@ export class EngageService implements OnApplicationBootstrap {
                 { content: body.draftContent, image: [], delay: 0, id: '' } as never,
               ],
               group: '',
-              settings: {
-                __type: 'x',
-                reply_to_tweet_id: opportunity.externalPostId,
-                who_can_reply_post: 'everyone',
-              } as never,
+              settings: this._buildReplySettings(
+                opportunity.platform,
+                opportunity.externalPostId
+              ) as never,
             } as never,
           ],
         },
@@ -1878,11 +1903,10 @@ export class EngageService implements OnApplicationBootstrap {
                   { content: item.draftContent, image: [], delay: 0, id: '' } as never,
                 ],
                 group: '',
-                settings: {
-                  __type: 'x',
-                  reply_to_tweet_id: opportunity.externalPostId,
-                  who_can_reply_post: 'everyone',
-                } as never,
+                settings: this._buildReplySettings(
+                  opportunity.platform,
+                  opportunity.externalPostId
+                ) as never,
               } as never,
             ],
           },
@@ -1980,11 +2004,10 @@ export class EngageService implements OnApplicationBootstrap {
                   { content: item.draftContent, image: [], delay: 0, id: '' } as never,
                 ],
                 group: '',
-                settings: {
-                  __type: 'x',
-                  reply_to_tweet_id: opportunity.externalPostId,
-                  who_can_reply_post: 'everyone',
-                } as never,
+                settings: this._buildReplySettings(
+                  opportunity.platform,
+                  opportunity.externalPostId
+                ) as never,
               } as never,
             ],
           },

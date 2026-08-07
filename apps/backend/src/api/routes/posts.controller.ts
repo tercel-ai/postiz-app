@@ -378,6 +378,14 @@ export class PostsController {
     return this._postsService.deletePost(org.id, group);
   }
 
+  @Delete('/id/:id')
+  deletePostById(
+    @GetOrgFromRequest() org: Organization,
+    @Param('id') id: string
+  ) {
+    return this._postsService.deletePostById(org.id, id);
+  }
+
   @Post('/:id/retry')
   retryPost(
     @GetOrgFromRequest() org: Organization,

@@ -1,6 +1,20 @@
 import React from 'react';
 import { ENGAGE_EXTENSION_ACTION } from '@gitroom/extension/utils/executor/actions';
 import { applyDelay } from '@gitroom/extension/utils/executor/pacing';
+import { ScanTaskPlatform } from '@gitroom/extension/utils/executor/executor.types';
+
+// All platforms the extension can scan (mirrors SCANNABLE_PLATFORMS in
+// engage-scan-config.service.ts). Order drives the toolbar tab order.
+const ALL_SCAN_PLATFORMS: ScanTaskPlatform[] = [
+  'x', 'reddit', 'linkedin', 'devto', 'hackernews', 'medium', 'quora',
+];
+const PLATFORM_TAB_LABEL: Record<ScanTaskPlatform, string> = {
+  x: '𝕏', reddit: 'Reddit', linkedin: 'LinkedIn', devto: 'Dev.to',
+  hackernews: 'HN', medium: 'Medium', quora: 'Quora',
+};
+const PLATFORM_BADGE_ICON: Record<ScanTaskPlatform, string> = {
+  x: '𝕏', reddit: 'r/', linkedin: 'in', devto: 'dev', hackernews: 'hn', medium: 'md', quora: 'qa',
+};
 
 // Manually claiming/running scan tasks is a debug-only capability (bypasses
 // the normal background-scheduled executor) — the production store build only
@@ -48,7 +62,7 @@ export interface EngageConfig {
 
 export interface ScanTask {
   taskId: string;
-  platform: 'x' | 'reddit';
+  platform: ScanTaskPlatform;
   scanType: 'keyword' | 'channel' | 'tracked';
   scanKey: string;
   cursor: { lastSeenExternalId: string | null; lastSeenAt: string | null };
@@ -56,7 +70,7 @@ export interface ScanTask {
   rawQuery?: string;
 }
 export interface ScanUnitSelector {
-  platform: 'x' | 'reddit';
+  platform: ScanTaskPlatform;
   scanType: 'keyword' | 'channel' | 'tracked';
   scanKey: string;
 }
@@ -158,7 +172,7 @@ function nextDue(lastAt: string | null | undefined, intervalHours: number): stri
   return new Date(new Date(lastAt).getTime() + intervalHours * 3_600_000).toISOString();
 }
 function taskLabel(t: ScanTask) {
-  const p = t.platform === 'x' ? '𝕏' : 'r/';
+  const p = PLATFORM_BADGE_ICON[t.platform] ?? t.platform;
   const tp = t.scanType === 'keyword' ? 'KW' : t.scanType === 'channel' ? 'CH' : 'AC';
   return `${p} ${tp} · ${t.rawQuery ?? t.scanKey}`;
 }
@@ -168,18 +182,29 @@ export function scanUnitSelectorKey(u: ScanUnitSelector): string {
 function normalizeScanKeyword(keyword: string): string {
   return keyword.trim().toLowerCase().replace(/\s+/g, ' ');
 }
+// Must mirror CASE_INSENSITIVE_HANDLE_PLATFORMS in
+// engage-scan-lease.service.ts's normalizeUsername — the backend is the
+// canonical scanKey, and a mismatch here would silently desync this popup's
+// selectable units from the real EngageScanCursor rows (wrong "last scanned",
+// or a claim that never matches an existing cursor). Of the platforms this
+// popup scans, x/reddit/devto/medium are case-insensitive there;
+// linkedin/hackernews/quora intentionally fall through unchanged (HN
+// usernames and Quora slugs are case-sensitive).
 function normalizeScanUsername(platform: string, username: string): string {
   const trimmed = username.trim();
   if (platform === 'x' || platform === 'reddit') {
     return trimmed.replace(/^@/, '').replace(/^\/?u\//i, '').toLowerCase();
   }
+  if (platform === 'devto' || platform === 'medium') {
+    return trimmed.toLowerCase();
+  }
   return trimmed;
 }
-function visiblePlatforms(filter: 'x' | 'reddit' | 'both'): Array<'x' | 'reddit'> {
-  return filter === 'both' ? ['x', 'reddit'] : [filter];
+function visiblePlatforms(filter: ScanTaskPlatform | 'all'): ScanTaskPlatform[] {
+  return filter === 'all' ? ALL_SCAN_PLATFORMS : [filter];
 }
-function platformBadge(platform: 'x' | 'reddit', scanType: ScanUnitSelector['scanType']): string {
-  const p = platform === 'x' ? '𝕏' : 'r/';
+function platformBadge(platform: ScanTaskPlatform, scanType: ScanUnitSelector['scanType']): string {
+  const p = PLATFORM_BADGE_ICON[platform] ?? platform;
   const tp = scanType === 'keyword' ? 'KW' : scanType === 'channel' ? 'CH' : 'AC';
   return `${p} ${tp}`;
 }
@@ -188,12 +213,13 @@ function isDue(lastScannedAt: string | null | undefined, nextScanAt: string | nu
 }
 export function buildSelectableScanUnits(
   config: EngageConfig | null,
-  platformFilter: 'x' | 'reddit' | 'both',
+  platformFilter: ScanTaskPlatform | 'all',
   now: number = Date.now()
 ): SelectableScanUnit[] {
   if (!config) return [];
   const units: SelectableScanUnit[] = [];
   const platforms = visiblePlatforms(platformFilter);
+  const platformSet = new Set<string>(platforms);
   const intervalHours = config.scanIntervals?.scanIntervalHours ?? config.entitlement?.limits?.scanIntervalHours ?? 24;
   const chHours = config.scanIntervals?.channelHours ?? intervalHours;
   const trHours = config.scanIntervals?.trackedHours ?? intervalHours;
@@ -216,31 +242,30 @@ export function buildSelectableScanUnits(
     }
   }
 
-  if (platformFilter !== 'reddit') {
-    for (const account of config.trackedAccounts.filter((a) => a.enabled && (!a.platform || a.platform === 'x'))) {
-      const lastScannedAt = account.scanCursor?.lastScannedAt ?? account.lastCheckedAt ?? null;
-      const nextScanAt = account.scanCursor?.nextScanAt ?? nextDue(lastScannedAt, trHours);
-      const unit: ScanUnitSelector = {
-        platform: 'x',
-        scanType: 'tracked',
-        scanKey: normalizeScanUsername('x', account.username),
-      };
-      units.push({
-        ...unit,
-        id: scanUnitSelectorKey(unit),
-        badge: platformBadge('x', 'tracked'),
-        label: account.username.startsWith('@') ? account.username : `@${account.username}`,
-        lastScannedAt,
-        nextScanAt,
-        due: isDue(lastScannedAt, nextScanAt, now),
-      });
-    }
+  for (const account of config.trackedAccounts.filter((a) => a.enabled)) {
+    const platform = (account.platform ?? 'x') as ScanTaskPlatform;
+    if (!platformSet.has(platform)) continue;
+    const lastScannedAt = account.scanCursor?.lastScannedAt ?? account.lastCheckedAt ?? null;
+    const nextScanAt = account.scanCursor?.nextScanAt ?? nextDue(lastScannedAt, trHours);
+    const unit: ScanUnitSelector = {
+      platform,
+      scanType: 'tracked',
+      scanKey: normalizeScanUsername(platform, account.username),
+    };
+    units.push({
+      ...unit,
+      id: scanUnitSelectorKey(unit),
+      badge: platformBadge(platform, 'tracked'),
+      label: account.username.startsWith('@') ? account.username : `@${account.username}`,
+      lastScannedAt,
+      nextScanAt,
+      due: isDue(lastScannedAt, nextScanAt, now),
+    });
   }
 
   for (const channel of config.monitoredChannels.filter((c) => c.enabled)) {
-    if (channel.platform !== 'x' && channel.platform !== 'reddit') continue;
-    if (platformFilter !== 'both' && channel.platform !== platformFilter) continue;
-    const platform = channel.platform;
+    const platform = channel.platform as ScanTaskPlatform;
+    if (!platformSet.has(platform)) continue;
     const lastScannedAt = channel.scanCursor?.lastScannedAt ?? channel.lastScannedAt ?? null;
     const nextScanAt = channel.scanCursor?.nextScanAt ?? nextDue(lastScannedAt, chHours);
     const unit: ScanUnitSelector = { platform, scanType: 'channel', scanKey: channel.channelId };
@@ -264,7 +289,7 @@ function defaultState(): TaskState {
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export function EngageScanPanel() {
-  const [platform, setPlatform] = React.useState<'x' | 'reddit' | 'both'>('both');
+  const [platform, setPlatform] = React.useState<ScanTaskPlatform | 'all'>('all');
   const [config, setConfig] = React.useState<EngageConfig | null>(null);
   const [syncedAt, setSyncedAt] = React.useState<number | null>(null);
   const [cfgBusy, setCfgBusy] = React.useState(false);
@@ -442,7 +467,7 @@ export function EngageScanPanel() {
       });
       if (!r.ok) throw new Error(r.error || 'failed');
       const all = r.tasks ?? [];
-      const filtered = platform === 'both' ? all : all.filter((t) => t.platform === platform);
+      const filtered = platform === 'all' ? all : all.filter((t) => t.platform === platform);
       const nextStates: Record<string, TaskState> = {};
       for (const t of filtered) {
         const cached = await loadCache(cacheKey(t));
@@ -571,9 +596,9 @@ export function EngageScanPanel() {
 
       {/* Platform filter + sync */}
       <div className="sc-toolbar">
-        {(['x', 'reddit', 'both'] as const).map((p) => (
+        {(['all', ...ALL_SCAN_PLATFORMS] as const).map((p) => (
           <button key={p} className={`sc-tab${platform === p ? ' sc-tab-active' : ''}`} onClick={() => setPlatform(p)}>
-            {p === 'x' ? '𝕏' : p === 'reddit' ? 'Reddit' : 'All'}
+            {p === 'all' ? 'All' : PLATFORM_TAB_LABEL[p]}
           </button>
         ))}
         <div style={{ flex: 1 }} />

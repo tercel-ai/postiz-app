@@ -1,5 +1,7 @@
 // Shared result shape for in-browser replies (Option A).
 
+import { ScanTaskPlatform } from '@gitroom/extension/utils/executor/executor.types';
+
 export interface ReplyResult {
   ok: boolean;
   // True when the reply was filled into the platform's composer but NOT yet
@@ -30,7 +32,10 @@ export interface ReplyResult {
 }
 
 export interface PostReplyPayload {
-  platform: 'reddit' | 'x';
+  // Widened to every scan platform for UI/type parity; postByPlatform() in
+  // pages/background/post-reply.ts only actually implements reddit/x today —
+  // any other value returns a clear "Unsupported platform" ReplyResult.
+  platform: ScanTaskPlatform;
   url: string;
   text: string;
   // Optional Engage context, echoed back so the caller can record the reply.

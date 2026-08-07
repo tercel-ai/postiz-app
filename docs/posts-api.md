@@ -106,6 +106,7 @@ not per post or per keystroke.
 | POST | [`/posts/generator/draft`](#post-postsgeneratordraft) | Generate draft posts (AI) |
 | POST | [`/posts/generator`](#post-postsgenerator) | Streaming AI post generation |
 | DELETE | [`/posts/:group`](#delete-postsgroup) | Delete a post group |
+| DELETE | [`/posts/id/:id`](#delete-postsidid) | Delete a single post by id |
 | POST | [`/posts/:id/retry`](#post-postsidretry) | Retry a failed post |
 | PUT | [`/posts/:id/date`](#put-postsiddate) | Reschedule a post |
 | POST | [`/posts/separate-posts`](#post-postsseparate-posts) | Split long content into a thread |
@@ -502,6 +503,14 @@ neither viable path → `methods: []` plus `reason`.
 Delete a whole post group.
 
 - **Path**: `group` — group id.
+
+### DELETE /posts/id/:id
+
+Delete a single post by id, without touching other posts in the same group.
+Terminates any running Temporal workflow for that post, same as the
+group-delete path.
+
+- **Path**: `id` — post id.
 
 ---
 
