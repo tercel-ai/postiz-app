@@ -162,6 +162,92 @@ describe('PostsService.getDuePublishPosts', () => {
     expect(due[0].subreddit).toBe('machinelearning');
   });
 
+  // Same class of bug as the subreddit one above, same settings entry: Reddit
+  // stores its title INSIDE subreddit[0].value, and an operation-plan post is
+  // materialized with Post.title null, so reading only `p.title ||
+  // settings.title` left the item titleless. The extension then rejected it
+  // ("reddit post needs a title") and, since a rejected item never leaves
+  // QUEUE, the post was re-offered every poll forever.
+  it('falls back to the reddit settings title when Post.title is null', async () => {
+    const { svc } = makeService({
+      rows: [
+        {
+          id: 'post9',
+          content: 'reddit body',
+          image: '[]',
+          settings: JSON.stringify({
+            __type: 'reddit',
+            subreddit: [
+              {
+                value: {
+                  subreddit: 'football',
+                  title: 'Tactical Deep-Dive: Spain’s defensive record',
+                  type: 'self',
+                  is_flair_required: false,
+                },
+              },
+            ],
+          }),
+          title: null,
+          publishDate: new Date('2026-07-01T00:00:00.000Z'),
+          providerIdentifier: 'reddit',
+          integration: null,
+        },
+      ],
+    });
+
+    const { due } = await svc.getDuePublishPosts('org-1', 10);
+
+    expect(due[0].title).toBe('Tactical Deep-Dive: Spain’s defensive record');
+    expect(due[0].subreddit).toBe('football');
+  });
+
+  it('prefers Post.title over the reddit settings title when both exist', async () => {
+    const { svc } = makeService({
+      rows: [
+        {
+          id: 'post10',
+          content: 'reddit body',
+          image: '[]',
+          settings: JSON.stringify({
+            subreddit: [{ value: { subreddit: 'football', title: 'settings title' } }],
+          }),
+          title: 'post row title',
+          publishDate: new Date('2026-07-01T00:00:00.000Z'),
+          providerIdentifier: 'reddit',
+          integration: null,
+        },
+      ],
+    });
+
+    const { due } = await svc.getDuePublishPosts('org-1', 10);
+
+    expect(due[0].title).toBe('post row title');
+  });
+
+  // The reddit fallback must not disturb the platforms that legitimately keep
+  // their title at the top level of settings (devto/medium/hackernews).
+  it('still reads a top-level settings title for non-reddit platforms', async () => {
+    const { svc } = makeService({
+      rows: [
+        {
+          id: 'post11',
+          content: 'article body',
+          image: '[]',
+          settings: JSON.stringify({ title: 'My dev.to article' }),
+          title: null,
+          publishDate: new Date('2026-07-01T00:00:00.000Z'),
+          providerIdentifier: 'devto',
+          integration: null,
+        },
+      ],
+    });
+
+    const { due } = await svc.getDuePublishPosts('org-1', 10);
+
+    expect(due[0].title).toBe('My dev.to article');
+  });
+
   it('forwards the reddit flair LABEL from settings so the extension can pre-select it', async () => {
     const { svc } = makeService({
       rows: [

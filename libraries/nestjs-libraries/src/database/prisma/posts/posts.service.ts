@@ -1758,7 +1758,18 @@ export class PostsService {
       return {
         id: p.id,
         platform,
-        title: p.title || settings.title || undefined,
+        // Reddit keeps its title INSIDE the subreddit entry, not at the top of
+        // settings and not necessarily on Post.title — an operation-plan post
+        // is materialized with Post.title null, so the reddit-only fallback is
+        // the only place the title exists at all. Without it the extension
+        // rejects the item ("reddit post needs a title") and, because a
+        // rejected item never leaves Post.state=QUEUE, the post is re-offered
+        // every poll and can never publish.
+        title:
+          p.title ||
+          settings.subreddit?.[0]?.value?.title ||
+          settings.title ||
+          undefined,
         // RedditSettingsDto.subreddit is an ARRAY of { value: { subreddit, ... } }
         // (multi-subreddit submission support on the Temporal path — see
         // reddit.provider.ts). The extension's publish queue only supports a
