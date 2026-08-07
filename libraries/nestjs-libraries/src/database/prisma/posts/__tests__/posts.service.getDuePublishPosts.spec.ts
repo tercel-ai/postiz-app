@@ -162,6 +162,62 @@ describe('PostsService.getDuePublishPosts', () => {
     expect(due[0].subreddit).toBe('machinelearning');
   });
 
+  it('forwards the reddit flair LABEL from settings so the extension can pre-select it', async () => {
+    const { svc } = makeService({
+      rows: [
+        {
+          id: 'post7',
+          content: 'reddit body',
+          image: '[]',
+          settings: JSON.stringify({
+            subreddit: [
+              {
+                value: {
+                  subreddit: 'machinelearning',
+                  title: '[D] hello',
+                  type: 'self',
+                  is_flair_required: false,
+                  flairLabel: 'Discussion',
+                },
+              },
+            ],
+          }),
+          title: '[D] hello',
+          publishDate: new Date('2026-07-01T00:00:00.000Z'),
+          providerIdentifier: 'reddit',
+          integration: null,
+        },
+      ],
+    });
+
+    const { due } = await svc.getDuePublishPosts('org-1', 10);
+
+    expect(due[0].flairLabel).toBe('Discussion');
+  });
+
+  it('omits flairLabel entirely when the plan proposed none', async () => {
+    const { svc } = makeService({
+      rows: [
+        {
+          id: 'post8',
+          content: 'reddit body',
+          image: '[]',
+          settings: JSON.stringify({
+            subreddit: [{ value: { subreddit: 'webdev', title: 'hello' } }],
+          }),
+          title: 'hello',
+          publishDate: new Date('2026-07-01T00:00:00.000Z'),
+          providerIdentifier: 'reddit',
+          integration: null,
+        },
+      ],
+    });
+
+    const { due } = await svc.getDuePublishPosts('org-1', 10);
+
+    expect(due[0]).not.toHaveProperty('flairLabel');
+  });
+
   it('omits segmentGapSeconds when the platform has no configured range', async () => {
     const { svc } = makeService({
       segmentGaps: { reddit: [45, 180] },

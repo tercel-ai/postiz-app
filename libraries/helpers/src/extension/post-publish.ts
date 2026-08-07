@@ -217,6 +217,20 @@ export interface PublishPostItem {
   /** Reddit only (required): subreddit to submit to, with or without the r/ prefix. */
   subreddit?: string;
   /**
+   * Reddit only (optional): the post flair to apply, as a human-readable LABEL
+   * ("Discussion"), never a flair id.
+   *
+   * A label — not an id — because nothing outside a logged-in Reddit session can
+   * enumerate a subreddit's flairs (both flair endpoints answer USER_REQUIRED to
+   * an unauthenticated caller, which is why reddit-target-resolver hardcodes
+   * `is_flair_required: false`). So generation can only propose what the flair
+   * should MEAN; the extension resolves that against the options Reddit actually
+   * renders on the submit page and applies it only on an unambiguous match,
+   * leaving the choice to the user otherwise. An invented label can therefore
+   * never select the wrong flair — it just doesn't match.
+   */
+  flairLabel?: string;
+  /**
    * Dev.to only: topic tag names (no `#`), max 4. Dev.to distributes through
    * tag feeds, so these are not decoration — dropping them silently, the way a
    * text-only platform drops images, would quietly gut the post's reach. The

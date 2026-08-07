@@ -32,6 +32,8 @@ interface DuePublishPost {
   platform: string;
   title?: string;
   subreddit?: string;
+  /** Reddit post flair as a human-readable label (never a flair id). */
+  flairLabel?: string;
   /** Dev.to topic tags (labels only — the backend strips the tag ids). */
   tags?: string[];
   segments: { text: string; images?: string[] }[];
@@ -76,6 +78,9 @@ function toPublishItem(p: DuePublishPost): PublishPostItem {
     })),
     ...(p.title ? { title: p.title } : {}),
     ...(p.subreddit ? { subreddit: p.subreddit } : {}),
+    // Dropping this would silently disable flair pre-selection for the pull
+    // path — the unattended path it exists for.
+    ...(p.flairLabel ? { flairLabel: p.flairLabel } : {}),
     ...(p.tags?.length ? { tags: p.tags } : {}),
     // Carried through so the queue can refuse to publish as the wrong account.
     // Dropping it here would silently disable that guard for the pull path —

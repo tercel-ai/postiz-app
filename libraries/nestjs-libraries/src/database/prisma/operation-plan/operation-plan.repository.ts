@@ -7,6 +7,7 @@ import {
   stripDuplicatedTitleFromContent,
 } from './theme-title';
 import { TITLE_REQUIRED_PLATFORMS } from '@gitroom/helpers/extension/post-publish';
+import type { ResolvedRedditTarget as ResolverRedditTarget } from './reddit-target-resolver';
 
 // Fixed namespace for deriving a materialized Post.id from a (plan, payload id)
 // pair. The generation payload's ids are minted by the LLM, which only guarantees
@@ -39,12 +40,10 @@ type GeneratedThreadPart = {
 // resolved to a valid subreddit; a reddit post WITHOUT it was dropped at
 // resolution time and should never reach here. Folded into settings.subreddit so
 // the Reddit provider's submit (which reads post.settings.subreddit) can publish.
-type ResolvedRedditTarget = {
-  subreddit: string;
-  title: string;
-  type: 'self';
-  is_flair_required: false;
-};
+// Imported rather than re-declared: a structural copy of this shape used to live
+// here and silently went stale the moment the resolver grew a field, so the
+// producer owns the type.
+type ResolvedRedditTarget = ResolverRedditTarget;
 
 /**
  * Dev.to tags, normalized to what the platform actually accepts: a single
@@ -455,6 +454,12 @@ export class OperationPlanRepository {
             // settings.subreddit[].value.{subreddit,title,type}. Shaped to
             // RedditSettingsDto (a one-element array; url/flair omitted — only
             // validated for type='link'/is_flair_required, both false here).
+            //
+            // flairLabel rides alongside as a plain string rather than filling
+            // the DTO's `flair` field, which is {id,name} and feeds the OAuth
+            // provider's `flair_id`: a label is not an id, and putting one there
+            // would make the API path submit a bogus flair_id. The executor that
+            // CAN see the real options resolves it instead.
             ...(platform === 'reddit' && redditTarget
               ? {
                   subreddit: [
@@ -464,6 +469,9 @@ export class OperationPlanRepository {
                         title: redditTarget.title,
                         type: redditTarget.type,
                         is_flair_required: redditTarget.is_flair_required,
+                        ...(redditTarget.flairLabel
+                          ? { flairLabel: redditTarget.flairLabel }
+                          : {}),
                       },
                     },
                   ],

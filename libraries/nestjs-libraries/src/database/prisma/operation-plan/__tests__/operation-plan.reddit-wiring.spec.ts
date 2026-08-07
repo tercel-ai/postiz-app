@@ -30,7 +30,14 @@ function makeContentItems() {
       themeTitle: 'Theme one',
       platforms: [
         { id: 'x-1', platform: 'x', content: 'x post', subreddit: null },
-        { id: 'r-1', platform: 'reddit', content: 'reddit post', subreddit: 'webdev' },
+        {
+          id: 'r-1',
+          platform: 'reddit',
+          content: 'reddit post',
+          subreddit: 'webdev',
+          flairLabel: 'Discussion',
+          titleTag: '[D]',
+        },
       ],
     },
     {
@@ -69,9 +76,23 @@ describe('_resolveAndAttachRedditTargets wiring', () => {
     // Only reddit posts are fed to the resolver, titled by their owning item.
     expect(resolveRedditTargets).toHaveBeenCalledTimes(1);
     const inputs = resolveRedditTargets.mock.calls[0][0];
+    // The community filing rules ride along per entry; null when the model
+    // proposed none, so a subreddit with no such rule stays untagged.
     expect(inputs).toEqual([
-      { key: 'r-1:0', llmSubreddit: 'webdev', title: 'Theme one' },
-      { key: 'r-2:1', llmSubreddit: 'ghost', title: 'Theme two' },
+      {
+        key: 'r-1:0',
+        llmSubreddit: 'webdev',
+        title: 'Theme one',
+        llmFlairLabel: 'Discussion',
+        llmTitleTag: '[D]',
+      },
+      {
+        key: 'r-2:1',
+        llmSubreddit: 'ghost',
+        title: 'Theme two',
+        llmFlairLabel: null,
+        llmTitleTag: null,
+      },
     ]);
     // Monitored channels (reddit-only) are passed through.
     expect(resolveRedditTargets.mock.calls[0][1]).toEqual([

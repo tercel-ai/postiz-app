@@ -45,6 +45,24 @@ const clampTitle = (title: string): string =>
   title.length > REDDIT_TITLE_MAX ? title.slice(0, REDDIT_TITLE_MAX) : title;
 
 /**
+ * Prefix the subreddit's required title tag ("[D]") onto the post title, then
+ * clamp. Idempotent: a title that already carries the tag is left alone, so a
+ * re-run during sweeper recovery can't produce "[D] [D] …". Tagging happens HERE
+ * rather than in the generated themeTitle because themeTitle is shared by every
+ * platform entry of the same content item — prefixing it there would leak "[D]"
+ * into the X and LinkedIn copies of the same post.
+ */
+export function applyTitleTag(
+  title: string,
+  titleTag: string | null | undefined
+): string {
+  const tag = (titleTag || '').trim();
+  if (!tag) return clampTitle(title);
+  if (title.toLowerCase().includes(tag.toLowerCase())) return clampTitle(title);
+  return clampTitle(`${tag} ${title}`);
+}
+
+/**
  * Canonical bare subreddit name, or null when the input can't be one. Strips a
  * leading `r/` or `/r/`, a trailing slash, surrounding whitespace, then
  * lowercases and validates the charset. Lowercasing is safe: Reddit subreddit
@@ -174,6 +192,14 @@ export interface ResolvedRedditTarget {
   title: string;
   type: 'self';
   is_flair_required: false;
+  /**
+   * The post flair to apply, as a human-readable LABEL — never a flair id (see
+   * the OAuth note in this file's header: ids are unreadable from here). Absent
+   * when generation proposed none. Reconciled against Reddit's real options by
+   * whichever executor publishes the post, so a wrong label can only fail to
+   * match, never select the wrong flair.
+   */
+  flairLabel?: string;
 }
 
 export interface RedditTargetInput {
@@ -183,6 +209,11 @@ export interface RedditTargetInput {
   llmSubreddit: string | null;
   // The post title Reddit requires — sourced from the content item's themeTitle.
   title: string;
+  // Community filing rules the LLM proposed (both may be null): the flair label
+  // to carry through to the executor, and the bracketed tag to prefix onto the
+  // title. Neither is verified here — see ResolvedRedditTarget.flairLabel.
+  llmFlairLabel?: string | null;
+  llmTitleTag?: string | null;
 }
 
 export interface RedditTargetOutput {
@@ -275,9 +306,12 @@ export async function resolveRedditTargets(
         key: input.key,
         target: {
           subreddit: channel.name,
-          title: clampTitle(input.title),
+          title: applyTitleTag(input.title, input.llmTitleTag),
           type: 'self',
           is_flair_required: false,
+          ...(input.llmFlairLabel?.trim()
+            ? { flairLabel: input.llmFlairLabel.trim() }
+            : {}),
         },
       });
       continue;
@@ -309,9 +343,12 @@ export async function resolveRedditTargets(
       key: input.key,
       target: {
         subreddit: candidate,
-        title: clampTitle(input.title),
+        title: applyTitleTag(input.title, input.llmTitleTag),
         type: 'self',
         is_flair_required: false,
+        ...(input.llmFlairLabel?.trim()
+          ? { flairLabel: input.llmFlairLabel.trim() }
+          : {}),
       },
     });
   }

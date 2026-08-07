@@ -242,6 +242,13 @@ export interface RedditSubmitInput {
   text: string;
   /** Server URLs of images to upload and embed inline (may be the whole body). */
   images?: string[];
+  /**
+   * Post flair as a human-readable LABEL ("Discussion"), never a flair id — see
+   * PublishPostItem.flairLabel. Only the tab path can act on it (flair ids are
+   * unreadable outside Reddit's own submit page), so the direct /api/submit call
+   * ignores it and lets a flair-required rejection route to the tab.
+   */
+  flairLabel?: string;
 }
 
 /**
@@ -405,7 +412,12 @@ export async function submitRedditPost(
       // The tab keeps watching for the user's Post click, so finishing there
       // still returns a confirmed permalink and flips the DB row PUBLISHED.
       if (isRedditCaptchaError(errors) || isRedditPostRuleError(errors)) {
-        return submitRedditPostViaTab({ subreddit, title, text: body });
+        return submitRedditPostViaTab({
+          subreddit,
+          title,
+          text: body,
+          ...(input.flairLabel ? { flairLabel: input.flairLabel } : {}),
+        });
       }
       return {
         ok: false,

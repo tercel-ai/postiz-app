@@ -265,6 +265,7 @@ async function defaultPublishSegment(
       title: item.title || '',
       text,
       images: segment?.images,
+      ...(item.flairLabel ? { flairLabel: item.flairLabel } : {}),
     });
     if (!r.ok) return { ok: false, error: r.error };
     // pending = the captcha-fallback tab was surfaced but Reddit's own Post

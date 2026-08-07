@@ -482,6 +482,8 @@ describe('OperationPlanService.create', () => {
                   platform,
                   content: `Coverage post for ${platform}`,
                   subreddit: null,
+                  flairLabel: null,
+                  titleTag: null,
                   tags: null,
                   media: null,
                   thread: null,
@@ -742,6 +744,10 @@ describe('OperationPlanService.create', () => {
               thread: null,
               // Reddit-only target; null on every non-reddit platform entry.
               subreddit: null,
+              // Reddit-only community filing rules (post flair label + the
+              // bracketed title tag some subreddits require); null elsewhere.
+              flairLabel: null,
+              titleTag: null,
               // Dev.to-only topic tags; null on every non-devto platform entry.
               tags: null,
             },
@@ -1754,6 +1760,8 @@ describe('OperationPlanService.create', () => {
               platform: 'x',
               content: 'An X-only plan',
               subreddit: null,
+              flairLabel: null,
+              titleTag: null,
               tags: null,
               media: null,
               thread: null,

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
+  applyTitleTag,
   normalizeSubreddit,
   probeSubreddit,
   resolveRedditTargets,
@@ -256,5 +257,95 @@ describe('resolveRedditTargets — Tier 2 (LLM proposal + validation)', () => {
     expect(discovered).toEqual([{ subreddit: 'webdev' }]);
     // about.json + new.json = 2 calls total for the single distinct subreddit.
     expect(fetchPublic).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('applyTitleTag', () => {
+  it('prefixes the subreddit-required tag onto the title', () => {
+    expect(applyTitleTag('Q&A: apcore vs MCP', '[D]')).toBe('[D] Q&A: apcore vs MCP');
+  });
+
+  it('leaves the title untouched when no tag was proposed', () => {
+    expect(applyTitleTag('Plain title', null)).toBe('Plain title');
+    expect(applyTitleTag('Plain title', '')).toBe('Plain title');
+    expect(applyTitleTag('Plain title', '   ')).toBe('Plain title');
+  });
+
+  // A sweeper re-run resolves the same plan again; without this guard the title
+  // would accumulate "[D] [D] [D] …" one prefix per recovery pass.
+  it('is idempotent — never double-prefixes an already-tagged title', () => {
+    expect(applyTitleTag('[D] Already tagged', '[D]')).toBe('[D] Already tagged');
+    expect(applyTitleTag('Discussion [d] mid-title', '[D]')).toBe('Discussion [d] mid-title');
+  });
+
+  it('still clamps to Reddit’s 300-char title limit after tagging', () => {
+    const tagged = applyTitleTag('x'.repeat(300), '[R]');
+    expect(tagged.length).toBe(300);
+    expect(tagged.startsWith('[R] ')).toBe(true);
+  });
+});
+
+describe('resolveRedditTargets — community filing rules', () => {
+  it('carries the flair label through and tags the reddit title only', async () => {
+    const fetchPublic = fakeFetch({
+      webdev: { about: { subreddit_type: 'public', submission_type: 'self' }, newestAgeMs: 1000 },
+    });
+    const { outputs } = await resolveRedditTargets(
+      [
+        {
+          key: 'a',
+          llmSubreddit: 'webdev',
+          title: 'Ask me anything',
+          llmFlairLabel: 'Discussion',
+          llmTitleTag: '[D]',
+        },
+      ],
+      [],
+      { fetchPublic, now }
+    );
+    expect(outputs[0].target).toMatchObject({
+      subreddit: 'webdev',
+      title: '[D] Ask me anything',
+      flairLabel: 'Discussion',
+      // Still false: nothing here can READ the real requirement (needs OAuth).
+      is_flair_required: false,
+    });
+  });
+
+  it('omits flairLabel entirely when generation proposed none', async () => {
+    const fetchPublic = fakeFetch({
+      webdev: { about: { subreddit_type: 'public', submission_type: 'self' }, newestAgeMs: 1000 },
+    });
+    const { outputs } = await resolveRedditTargets(
+      [{ key: 'a', llmSubreddit: 'webdev', title: 'T', llmFlairLabel: null, llmTitleTag: null }],
+      [],
+      { fetchPublic, now }
+    );
+    expect(outputs[0].target).not.toHaveProperty('flairLabel');
+    expect(outputs[0].target?.title).toBe('T');
+  });
+
+  it('applies the rules on the Tier-1 (monitored channel) path too', async () => {
+    const fetchPublic = fakeFetch({
+      curated: { about: { subreddit_type: 'public', submission_type: 'self' }, newestAgeMs: 1000 },
+    });
+    const { outputs } = await resolveRedditTargets(
+      [
+        {
+          key: 'a',
+          llmSubreddit: null,
+          title: 'Findings',
+          llmFlairLabel: 'Research',
+          llmTitleTag: '[R]',
+        },
+      ],
+      channels({ name: 'curated', audience: 5 }),
+      { fetchPublic, now }
+    );
+    expect(outputs[0].target).toMatchObject({
+      subreddit: 'curated',
+      title: '[R] Findings',
+      flairLabel: 'Research',
+    });
   });
 });

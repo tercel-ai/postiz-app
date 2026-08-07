@@ -1767,6 +1767,12 @@ export class PostsService {
         // silently swallowed by publish.runner's caller — the post stayed in
         // QUEUE and was re-offered every cycle without ever publishing.
         subreddit: settings.subreddit?.[0]?.value?.subreddit || undefined,
+        // Reddit post flair as a LABEL, not an id — the extension matches it
+        // against the options Reddit renders on the submit page (see
+        // PublishPostItem.flairLabel). Absent for every other platform.
+        ...(settings.subreddit?.[0]?.value?.flairLabel
+          ? { flairLabel: settings.subreddit[0].value.flairLabel }
+          : {}),
         // Dev.to tags. settings.tags holds DevToSettingsDto's {value,label}
         // pairs, where `value` is a dev.to tag id the extension has no use for —
         // dev.to's own API takes tag NAMES — so only the labels cross the

@@ -493,6 +493,59 @@ describe('OperationPlanRepository', () => {
     });
   });
 
+  it('materializePlanPosts folds the resolved flair LABEL into settings, not the DTO flair field', async () => {
+    const postFindMany = vi.fn().mockResolvedValue([]);
+    const postCreateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const integrationFindMany = vi.fn().mockResolvedValue([]);
+    const repo = createRepo({ postFindMany, postCreateMany, integrationFindMany });
+
+    await repo.materializePlanPosts(
+      {
+        id: 'plan-1',
+        organizationId: 'org-1',
+        projectId: 'proj-1',
+        campaignId: 'campaign-1',
+      } as any,
+      {
+        contentItems: [
+          {
+            contentId: 'D01',
+            utcDate: '2030-01-01T00:00:00.000Z',
+            themeKey: 'positioning',
+            themeTitle: 'Reddit theme',
+            platforms: [
+              {
+                id: '33333333-3333-4333-8333-333333333333',
+                platform: 'reddit',
+                content: 'Reddit post text',
+                media: [],
+                redditTarget: {
+                  subreddit: 'machinelearning',
+                  title: '[D] Reddit theme',
+                  type: 'self',
+                  is_flair_required: false,
+                  flairLabel: 'Discussion',
+                },
+              },
+            ],
+          },
+        ],
+      }
+    );
+
+    const settings = JSON.parse(postCreateMany.mock.calls[0][0].data[0].settings);
+    expect(settings.subreddit[0].value).toEqual({
+      subreddit: 'machinelearning',
+      title: '[D] Reddit theme',
+      type: 'self',
+      is_flair_required: false,
+      flairLabel: 'Discussion',
+    });
+    // NEVER the DTO's `flair` field: that is {id,name} and the OAuth provider
+    // submits it as flair_id, so a label there would post a bogus id.
+    expect(settings.subreddit[0].value).not.toHaveProperty('flair');
+  });
+
   // linkedin has two backing integration types (personal profile vs company
   // page) but the generator only ever emits the canonical 'linkedin' platform
   // — materializePlanPosts must resolve which one to actually publish through.

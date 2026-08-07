@@ -244,6 +244,19 @@ const GeneratedPlanSchema = z.object({
       // null for every non-Reddit platform (per the Structured-Outputs
       // "required + nullable, never optional" rule noted on `media`).
       subreddit: z.string().nullable(),
+      // Reddit ONLY: how the post should be FILED in the target community, for
+      // subreddits that gate submissions on it (r/MachineLearning rejects a post
+      // with no flair AND a title carrying no [R]/[N]/[P]/[D] tag).
+      //
+      // Both are proposals, never authority: nothing outside a logged-in Reddit
+      // session can enumerate a subreddit's real flairs or tag list, so these are
+      // reconciled downstream against what Reddit actually offers — an invented
+      // flairLabel simply fails to match and the choice falls to the user.
+      // null for every non-Reddit platform, and for Reddit posts going to a
+      // community with no such rule (per the Structured-Outputs "required +
+      // nullable, never optional" rule noted on `media`).
+      flairLabel: z.string().nullable(),
+      titleTag: z.string().nullable(),
       // Dev.to ONLY: up to 4 topic tags. Unlike Reddit's subreddit these are not
       // required to publish, but dev.to's distribution runs almost entirely
       // through tag feeds — an untagged article reaches little beyond the
@@ -677,6 +690,7 @@ export class OperationPlanService implements OnApplicationBootstrap {
         '- Hashtags: a hashtag ENDS at the first space, so a multi-word tag silently breaks — "#MCP protocol" renders as the tag "#MCP" followed by the loose word "protocol". Never hashtag a multi-word keyword: either write it as plain prose (preferred — keywords belong in the sentence, not bolted on as tags) or close it up into one word ("#MCPprotocol"). Use at most 1-2 hashtags, and only single-word ones.',
         '- Prefer content AI systems can cite: concrete data points and answer-style framing. For owned/blog channels, reference the project\'s own canonical URL. "Build-in-public" (sharing real, specific progress/metrics) tends to be the most citable. Keep copy concise and publish-ready.',
         '- REDDIT TARGETING: for every `reddit` platform entry, set `subreddit` to the single most relevant EXISTING, ACTIVE, PUBLIC subreddit for this content (bare name, no "r/" prefix, e.g. "webdev"). Pick a real community you are confident exists and accepts text (self) posts on this topic — the backend verifies it against Reddit and DROPS the post if the subreddit is missing, private, link-only, or inactive, so a wrong guess wastes the post. For EVERY non-reddit platform entry, set `subreddit` to null.',
+        '- REDDIT POST RULES: many communities REJECT a submission that is not filed correctly, and the rejection is silent until publish time. For every `reddit` platform entry, if the chosen subreddit is one you know gates posts this way, set `flairLabel` to the post flair it expects, worded as that community words it ("Discussion", "Research", "Project"), and set `titleTag` to the bracketed tag it requires in the title ("[D]", "[R]", "[P]", "[N]"). r/MachineLearning, for example, requires BOTH. Choose the one that genuinely matches the content — a Q&A or open-ended discussion is NOT research, and mis-filing gets a post removed by the subreddit\'s bots. Set either field to null when you are not confident the community requires it (a needless tag on a subreddit that does not use them looks like spam), and set BOTH to null for EVERY non-reddit platform entry.',
         '- DEV.TO TAGGING: for every `devto` platform entry, set `tags` to 1-4 topic tags. Dev.to distributes almost entirely through tag feeds, so an untagged article is close to invisible — treat this as required even though the API does not enforce it. Each tag must be a SINGLE lowercase alphanumeric token with no spaces, hyphens or "#" ("webdev", "javascript", "ai", "buildinpublic"); a multi-word topic must be closed up or dropped. Prefer large, established dev.to tags over invented niche ones — a tag nobody follows is the same as no tag. For EVERY non-devto platform entry, set `tags` to null.',
         '',
         'THREADS (multi-part posts)',
@@ -1456,6 +1470,11 @@ export class OperationPlanService implements OnApplicationBootstrap {
         key: `${post.id}:${index}`,
         llmSubreddit: (post as { subreddit?: string | null }).subreddit ?? null,
         title: postTitleFromTheme(item.themeTitle),
+        // Community filing rules (flair + bracketed title tag). The resolver
+        // prefixes the tag onto the REDDIT title only — themeTitle is shared
+        // with this item's other platform entries and must stay untagged.
+        llmFlairLabel: (post as { flairLabel?: string | null }).flairLabel ?? null,
+        llmTitleTag: (post as { titleTag?: string | null }).titleTag ?? null,
       })),
       monitoredChannels,
       { log: (m) => this.logger.debug(m) }

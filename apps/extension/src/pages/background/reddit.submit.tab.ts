@@ -232,6 +232,77 @@ function fillRedditSubmitInPage(
   return { status: 'filled', captcha: isVisible(captchaEl) };
 }
 
+/**
+ * Runs INSIDE the old.reddit submit page (serialized by executeScript — must be
+ * fully self-contained, no outer-scope references). Applies the post flair whose
+ * visible text matches `label`.
+ *
+ * The options only exist HERE: `.flairselector` is empty until the select button
+ * is clicked, which AJAX-loads the subreddit's real flairs (verified on
+ * r/MachineLearning — the container ships as an empty
+ * `div.flairselector.drop-choices`). That is precisely why the label travels as
+ * text rather than a flair id: this is the first point in the pipeline that can
+ * see what the ids even are.
+ *
+ * Applies ONLY on exactly one case-insensitive whole-text match. Zero matches or
+ * an ambiguous several both return 'no_match' and change nothing — a generated
+ * label is a guess, and silently filing a post under the nearest-looking flair
+ * on a live public subreddit is worse than leaving the picker to the user, who
+ * is being shown this tab anyway.
+ */
+async function selectRedditFlairInPage(
+  label: string
+): Promise<{ status: 'applied' | 'skipped' | 'no_selector' | 'no_options' | 'no_match'; matched?: string; available?: string[] }> {
+  const norm = (s: string | null | undefined): string =>
+    (s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  const want = norm(label);
+  if (!want) return { status: 'skipped' };
+
+  const trigger = document.querySelector(
+    'button.flairselect-btn'
+  ) as HTMLButtonElement | null;
+  if (!trigger) return { status: 'no_selector' };
+
+  const pane = () => document.querySelector('.flairselector');
+  if (!pane()?.children.length) {
+    trigger.click();
+    for (let i = 0; i < 40 && !pane()?.children.length; i++) {
+      await new Promise((r) => setTimeout(r, 250));
+    }
+  }
+  const box = pane();
+  if (!box || !box.children.length) return { status: 'no_options' };
+
+  const applyBtn = Array.from(
+    box.querySelectorAll('button, input[type="submit"]')
+  ).find((b) =>
+    /^apply$/i.test(((b as HTMLInputElement).value || b.textContent || '').trim())
+  ) as HTMLElement | undefined;
+
+  // ONE selector tier at a time: `li` and the `span.flair` inside it carry the
+  // same text, so mixing tiers would make a correct label look ambiguous.
+  // Reddit binds the option click on the row, so rows are tried first.
+  let optionEls = Array.from(box.querySelectorAll('li'));
+  if (!optionEls.length) optionEls = Array.from(box.querySelectorAll('a'));
+  if (!optionEls.length) optionEls = Array.from(box.querySelectorAll('span.flair'));
+
+  const options = optionEls
+    .filter((el) => el !== applyBtn && !el.contains(applyBtn as Node))
+    .map((el) => ({ el, text: norm(el.textContent) }))
+    .filter((o) => o.text);
+
+  const matches = options.filter((o) => o.text === want);
+  if (matches.length !== 1) {
+    return {
+      status: 'no_match',
+      available: Array.from(new Set(options.map((o) => o.text))).slice(0, 20),
+    };
+  }
+  (matches[0].el as HTMLElement).click();
+  if (applyBtn) applyBtn.click();
+  return { status: 'applied', matched: matches[0].text };
+}
+
 /** Click Reddit's own submit button. Returns 'clicked' | 'no_button'. */
 function clickRedditSubmitInPage(): 'clicked' | 'no_button' {
   const form = document.querySelector('#newlink') || document;
@@ -344,6 +415,28 @@ export async function submitRedditPostViaTab(
         'Opened the Reddit submit page but could not find the form — review and post it manually in the opened tab.'
       );
     }
+    // Apply the generated flair BEFORE the captcha check: even when the post
+    // ends up needing a manual finish, having the flair already selected is one
+    // less thing for the user to get right.
+    if (input.flairLabel) {
+      try {
+        const [flaired] = await chrome.scripting.executeScript({
+          target: { tabId },
+          func: selectRedditFlairInPage,
+          args: [input.flairLabel],
+        });
+        console.log('[aisee][reddit] flair selection', {
+          subreddit,
+          wanted: input.flairLabel,
+          ...(flaired?.result || {}),
+        });
+      } catch (e) {
+        // Never fatal: an unflaired submit is rejected by Reddit and routed to
+        // the manual path below, which is the same place a failed match lands.
+        console.warn('[aisee][reddit] flair selection threw', e);
+      }
+    }
+
     if (fill.captcha) {
       return waitManual(
         'Reddit requires a captcha for this post. Solve it and click Post in the opened tab.'
