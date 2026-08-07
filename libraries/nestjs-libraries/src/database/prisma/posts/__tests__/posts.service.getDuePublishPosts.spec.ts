@@ -108,7 +108,9 @@ describe('PostsService.getDuePublishPosts', () => {
           id: 'post4',
           content: 'thread anchor',
           image: '[]',
-          settings: '{"subreddit":"r/test"}',
+          settings: JSON.stringify({
+            subreddit: [{ value: { subreddit: 'test', title: 'hello' } }],
+          }),
           title: 'hello',
           publishDate: new Date('2026-07-01T00:00:00.000Z'),
           providerIdentifier: 'reddit',
@@ -121,6 +123,43 @@ describe('PostsService.getDuePublishPosts', () => {
 
     expect(due[0].platform).toBe('reddit');
     expect(due[0].segmentGapSeconds).toEqual([45, 180]);
+  });
+
+  it('resolves subreddit from the real RedditSettingsDto array shape (not the raw array)', async () => {
+    // settings.subreddit is RedditSettingsValueDto[] — an array of
+    // { value: { subreddit, title, type, is_flair_required } }, never a plain
+    // string. Forwarding the raw array made the extension's queue validation
+    // (`(item.subreddit || '').trim()`) throw on every poll, so the post
+    // never left QUEUE. Regression test for that bug.
+    const { svc } = makeService({
+      rows: [
+        {
+          id: 'post6',
+          content: 'reddit body',
+          image: '[]',
+          settings: JSON.stringify({
+            subreddit: [
+              {
+                value: {
+                  subreddit: 'machinelearning',
+                  title: 'hello reddit',
+                  type: 'self',
+                  is_flair_required: false,
+                },
+              },
+            ],
+          }),
+          title: 'hello reddit',
+          publishDate: new Date('2026-07-01T00:00:00.000Z'),
+          providerIdentifier: 'reddit',
+          integration: null,
+        },
+      ],
+    });
+
+    const { due } = await svc.getDuePublishPosts('org-1', 10);
+
+    expect(due[0].subreddit).toBe('machinelearning');
   });
 
   it('omits segmentGapSeconds when the platform has no configured range', async () => {

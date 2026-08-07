@@ -1759,7 +1759,14 @@ export class PostsService {
         id: p.id,
         platform,
         title: p.title || settings.title || undefined,
-        subreddit: settings.subreddit || undefined,
+        // RedditSettingsDto.subreddit is an ARRAY of { value: { subreddit, ... } }
+        // (multi-subreddit submission support on the Temporal path — see
+        // reddit.provider.ts). The extension's publish queue only supports a
+        // single subreddit string; forwarding the raw array made
+        // queue.ts's `.trim()` validation throw on every poll, which was
+        // silently swallowed by publish.runner's caller — the post stayed in
+        // QUEUE and was re-offered every cycle without ever publishing.
+        subreddit: settings.subreddit?.[0]?.value?.subreddit || undefined,
         // Dev.to tags. settings.tags holds DevToSettingsDto's {value,label}
         // pairs, where `value` is a dev.to tag id the extension has no use for —
         // dev.to's own API takes tag NAMES — so only the labels cross the
