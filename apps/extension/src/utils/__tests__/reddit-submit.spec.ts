@@ -4,7 +4,6 @@ import {
   isRedditPostRuleError,
   parseRedditSubmitResponse,
 } from '../reddit.poster';
-import { isRedditFixableFormError } from '../../pages/background/reddit.submit.tab';
 
 describe('parseRedditSubmitResponse', () => {
   it('extracts url and fullname from an api_type=json submit response', () => {
@@ -58,9 +57,8 @@ describe('isRedditCaptchaError', () => {
   });
 });
 
-// Real /api/submit rejection captured from r/machinelearning (see
-// SUBMIT_VALIDATION_FLAIR_REQUIRED / POST_GUIDANCE_VALIDATION_FAILED —
-// the exact shape the flair/title-tag self-heal retry detects).
+// Real /api/submit rejection captured from r/machinelearning — the exact shape
+// isRedditPostRuleError routes to the submit tab.
 const FLAIR_AND_TAG_REQUIRED_ERRORS = [
   ['SUBMIT_VALIDATION_FLAIR_REQUIRED', 'Your post must contain post flair.', 'flair'],
   [
@@ -115,25 +113,5 @@ describe('isRedditPostRuleError', () => {
         ['BAD_CAPTCHA', "That was a tricky one. Why don't you try that again.", 'captcha'],
       ])
     ).toBe(false);
-  });
-});
-
-describe('isRedditFixableFormError', () => {
-  it('treats a missing-flair form error as fixable in the open tab', () => {
-    expect(isRedditFixableFormError('your post must contain post flair')).toBe(true);
-  });
-
-  it('treats a missing title tag as fixable in the open tab', () => {
-    expect(
-      isRedditFixableFormError(
-        'Please add a required tag to your title, such as [R], [N], [P], or [D]'
-      )
-    ).toBe(true);
-  });
-
-  it('is false for a hard rejection that no form edit can fix', () => {
-    expect(isRedditFixableFormError('you are banned from posting to /r/test')).toBe(false);
-    expect(isRedditFixableFormError('you are doing that too much')).toBe(false);
-    expect(isRedditFixableFormError('')).toBe(false);
   });
 });

@@ -407,8 +407,8 @@ export async function submitRedditPost(
       // what's missing:
       //   - captcha (BAD_CAPTCHA): only the user can solve it;
       //   - a post rule (required flair / required title tag): the choice comes
-      //     from the subreddit's own option set, which old.reddit renders next
-      //     to the prefilled form.
+      //     from the subreddit's own option set, which Reddit's own submit page
+      //     renders next to the prefilled form.
       // The tab keeps watching for the user's Post click, so finishing there
       // still returns a confirmed permalink and flips the DB row PUBLISHED.
       if (isRedditCaptchaError(errors) || isRedditPostRuleError(errors)) {
