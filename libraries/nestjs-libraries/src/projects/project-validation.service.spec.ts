@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ProjectValidationService } from './project-validation.service';
 import {
+  ProjectInactiveException,
   ProjectNotFoundException,
   ProjectValidationUnavailableException,
 } from './project.exception';
@@ -128,5 +129,183 @@ describe('ProjectValidationService.assertProjectAccess', () => {
     await service.assertProjectAccess(ORG_ID, VALID_PROJECT_ID);
 
     expect(mocks.aiseeCreditService.resolveOwnerUserId).toHaveBeenCalledWith(ORG_ID);
+  });
+
+  it('allows a read on a deactivated project — only actions are blocked', async () => {
+    mocks.aiseeClient.getProduct.mockResolvedValue({
+      ok: true,
+      product: {
+        id: VALID_PROJECT_ID,
+        userId: OWNER_USER_ID,
+        status: 'active',
+        isActive: false,
+      },
+    });
+
+    await expect(
+      service.assertProjectAccess(ORG_ID, VALID_PROJECT_ID)
+    ).resolves.toBeUndefined();
+  });
+});
+
+describe('ProjectValidationService.assertProjectActive', () => {
+  let mocks: ReturnType<typeof createMocks>;
+  let service: ProjectValidationService;
+
+  beforeEach(() => {
+    mocks = createMocks();
+    service = createService(mocks);
+  });
+
+  it('resolves when the project is owned and active', async () => {
+    mocks.aiseeClient.getProduct.mockResolvedValue({
+      ok: true,
+      product: {
+        id: VALID_PROJECT_ID,
+        userId: OWNER_USER_ID,
+        status: 'active',
+        isActive: true,
+      },
+    });
+
+    await expect(
+      service.assertProjectActive(ORG_ID, VALID_PROJECT_ID)
+    ).resolves.toBeUndefined();
+  });
+
+  it('throws ProjectInactiveException (403) when the project is deactivated', async () => {
+    mocks.aiseeClient.getProduct.mockResolvedValue({
+      ok: true,
+      product: {
+        id: VALID_PROJECT_ID,
+        userId: OWNER_USER_ID,
+        status: 'active',
+        isActive: false,
+      },
+    });
+
+    await expect(
+      service.assertProjectActive(ORG_ID, VALID_PROJECT_ID)
+    ).rejects.toBeInstanceOf(ProjectInactiveException);
+  });
+
+  it('still throws ProjectNotFoundException (404) for another org — inactivity never leaks existence', async () => {
+    mocks.aiseeClient.getProduct.mockResolvedValue({
+      ok: true,
+      product: {
+        id: VALID_PROJECT_ID,
+        userId: 'someone-else',
+        status: 'active',
+        isActive: false,
+      },
+    });
+
+    await expect(
+      service.assertProjectActive(ORG_ID, VALID_PROJECT_ID)
+    ).rejects.toBeInstanceOf(ProjectNotFoundException);
+  });
+
+  it('reuses the ownership lookup — checking activation costs no extra call', async () => {
+    mocks.aiseeClient.getProduct.mockResolvedValue({
+      ok: true,
+      product: {
+        id: VALID_PROJECT_ID,
+        userId: OWNER_USER_ID,
+        status: 'active',
+        isActive: true,
+      },
+    });
+
+    await service.assertProjectAccess(ORG_ID, VALID_PROJECT_ID);
+    await service.assertProjectActive(ORG_ID, VALID_PROJECT_ID);
+
+    expect(mocks.aiseeClient.getProduct).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('ProjectValidationService.isProjectActive', () => {
+  let mocks: ReturnType<typeof createMocks>;
+  let service: ProjectValidationService;
+
+  beforeEach(() => {
+    mocks = createMocks();
+    service = createService(mocks);
+  });
+
+  it('returns true for an owned, active project', async () => {
+    mocks.aiseeClient.getProduct.mockResolvedValue({
+      ok: true,
+      product: {
+        id: VALID_PROJECT_ID,
+        userId: OWNER_USER_ID,
+        status: 'active',
+        isActive: true,
+      },
+    });
+
+    await expect(
+      service.isProjectActive(ORG_ID, VALID_PROJECT_ID)
+    ).resolves.toBe(true);
+  });
+
+  it('returns false for a deactivated project instead of throwing', async () => {
+    mocks.aiseeClient.getProduct.mockResolvedValue({
+      ok: true,
+      product: {
+        id: VALID_PROJECT_ID,
+        userId: OWNER_USER_ID,
+        status: 'active',
+        isActive: false,
+      },
+    });
+
+    await expect(
+      service.isProjectActive(ORG_ID, VALID_PROJECT_ID)
+    ).resolves.toBe(false);
+  });
+
+  it('re-checks a deactivated project sooner than the positive TTL, so reactivation lands promptly', async () => {
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(0);
+    mocks.aiseeClient.getProduct.mockResolvedValue({
+      ok: true,
+      product: {
+        id: VALID_PROJECT_ID,
+        userId: OWNER_USER_ID,
+        status: 'active',
+        isActive: false,
+      },
+    });
+
+    await service.isProjectActive(ORG_ID, VALID_PROJECT_ID);
+
+    // Past the 30s negative TTL but still inside the 60s positive one: the
+    // inactive verdict must have expired, not ridden the longer cache.
+    nowSpy.mockReturnValue(45_000);
+    mocks.aiseeClient.getProduct.mockResolvedValue({
+      ok: true,
+      product: {
+        id: VALID_PROJECT_ID,
+        userId: OWNER_USER_ID,
+        status: 'active',
+        isActive: true,
+      },
+    });
+
+    await expect(
+      service.isProjectActive(ORG_ID, VALID_PROJECT_ID)
+    ).resolves.toBe(true);
+    expect(mocks.aiseeClient.getProduct).toHaveBeenCalledTimes(2);
+    nowSpy.mockRestore();
+  });
+
+  it('returns false (fail closed) when aisee-core is unreachable', async () => {
+    mocks.aiseeClient.getProduct.mockResolvedValue({
+      ok: false,
+      reason: 'unavailable',
+    });
+
+    await expect(
+      service.isProjectActive(ORG_ID, VALID_PROJECT_ID)
+    ).resolves.toBe(false);
   });
 });

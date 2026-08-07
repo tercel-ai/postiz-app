@@ -51,6 +51,7 @@ import { RefreshToken } from '@gitroom/nestjs-libraries/integrations/social.abst
 import { RefreshIntegrationService } from '@gitroom/nestjs-libraries/integrations/refresh.integration.service';
 import { PostOverageService } from '@gitroom/nestjs-libraries/database/prisma/posts/post-overage.service';
 import { ExtensionPublishConfigService } from '@gitroom/nestjs-libraries/database/prisma/posts/extension-publish-config.service';
+import { ProjectValidationService } from '@gitroom/nestjs-libraries/projects/project-validation.service';
 import { PublishPlatform } from '@gitroom/helpers/extension/post-publish';
 import { PostingTimesV2 } from '@gitroom/nestjs-libraries/dtos/integrations/posting-times.types';
 import { resolveTimeSlotsForDate } from '@gitroom/nestjs-libraries/dtos/integrations/posting-times.utils';
@@ -79,7 +80,10 @@ export class PostsService {
     private _temporalService: TemporalService,
     private _refreshIntegrationService: RefreshIntegrationService,
     private _postOverageService: PostOverageService,
-    private _extensionPublishConfigService: ExtensionPublishConfigService
+    private _extensionPublishConfigService: ExtensionPublishConfigService,
+    // Optional so the many unit tests that build this service positionally keep
+    // working; DatabaseModule always provides it at runtime.
+    private _projectValidation?: ProjectValidationService
   ) {}
 
   searchForMissingThreeHoursPosts() {
@@ -139,7 +143,41 @@ export class PostsService {
     }
   }
 
+  /**
+   * The single choke point every scheduled publish passes through, so it is
+   * also where a deactivated project stops one. The post is flipped to ERROR
+   * with an explanatory message rather than left in QUEUE: a QUEUE post that is
+   * never claimed gets swept into a bare ERROR by markStaleQueuePostsAsError
+   * anyway, and the user would see an unexplained failure. Nothing is deleted —
+   * the post stays visible and can be rescheduled once the project is
+   * reactivated.
+   */
   async claimPostForPublishing(id: string, claimToken: string): Promise<boolean> {
+    if (this._projectValidation) {
+      const scope = await this._postRepository.getPostProjectScope(id);
+      const active =
+        !scope?.projectId ||
+        (await this._projectValidation.isProjectActive(
+          scope.organizationId,
+          scope.projectId
+        ));
+      if (!active) {
+        // Scope the write to a post still waiting in QUEUE: changeState is an
+        // unconditional update by id, so writing unguarded would let a retried
+        // activity turn an already-PUBLISHED post into an ERROR.
+        if (scope?.state === 'QUEUE') {
+          await this._postRepository.changeState(
+            id,
+            'ERROR',
+            new Error(
+              'Project is deactivated — publishing was skipped. Reactivate the project and reschedule this post.'
+            )
+          );
+        }
+        return false;
+      }
+    }
+
     return this._postRepository.claimPostForPublishing(id, claimToken);
   }
 

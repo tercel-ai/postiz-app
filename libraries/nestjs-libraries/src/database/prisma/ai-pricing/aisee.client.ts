@@ -120,6 +120,14 @@ export interface AiseeProduct {
   id: string;
   userId: string;
   status: string;
+  /**
+   * aisee-core's operational activation switch for the product. False means the
+   * owner switched the project off: reads stay allowed, but every action
+   * (posting, plan generation, engage, scanning, channel binding) must be
+   * refused. Defaults to true when aisee-core omits the field, so an older core
+   * keeps behaving exactly as before.
+   */
+  isActive: boolean;
 }
 
 /**
@@ -512,6 +520,7 @@ export class AiseeClient {
           id: data.id,
           userId: data.user_id,
           status: data.status,
+          isActive: data.is_active !== false,
         },
       };
     } catch (error) {

@@ -2,6 +2,7 @@ import { HttpException, HttpStatus } from '@nestjs/common';
 
 export type ProjectValidationErrorCode =
   | 'PROJECT_NOT_FOUND'
+  | 'PROJECT_INACTIVE'
   | 'PROJECT_VALIDATION_UNAVAILABLE';
 
 class ProjectValidationException extends HttpException {
@@ -23,6 +24,24 @@ class ProjectValidationException extends HttpException {
 export class ProjectNotFoundException extends ProjectValidationException {
   constructor() {
     super('PROJECT_NOT_FOUND', HttpStatus.NOT_FOUND, 'Project not found');
+  }
+}
+
+/**
+ * Thrown when the project exists and belongs to this organization but its owner
+ * switched it off in aisee-core (`Product.is_active = false`).
+ *
+ * 403, not the 404 used above: ownership is already established, so there is no
+ * cross-project existence to leak, and the client needs to tell "no such
+ * project" apart from "reactivate this project to continue".
+ */
+export class ProjectInactiveException extends ProjectValidationException {
+  constructor() {
+    super(
+      'PROJECT_INACTIVE',
+      HttpStatus.FORBIDDEN,
+      'Project is deactivated. Activate it to run this operation.'
+    );
   }
 }
 

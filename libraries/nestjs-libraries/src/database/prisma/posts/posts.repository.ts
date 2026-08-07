@@ -1120,17 +1120,22 @@ export class PostsRepository {
   }
 
   /**
-   * The (organizationId, projectId) a post belongs to — the minimum needed to
-   * ask aisee-core whether the owning project is still active before
-   * publishing. Null when the post no longer exists; projectId is null for
-   * legacy posts written before project scoping.
+   * The (organizationId, projectId, state) a post belongs to — the minimum
+   * needed to ask aisee-core whether the owning project is still active before
+   * publishing. `state` rides along so the caller can scope any write to a post
+   * that is still QUEUE. Null when the post no longer exists; projectId is null
+   * for legacy posts written before project scoping.
    */
   async getPostProjectScope(
     id: string
-  ): Promise<{ organizationId: string; projectId: string | null } | null> {
+  ): Promise<{
+    organizationId: string;
+    projectId: string | null;
+    state: State;
+  } | null> {
     return this._post.model.post.findUnique({
       where: { id },
-      select: { organizationId: true, projectId: true },
+      select: { organizationId: true, projectId: true, state: true },
     });
   }
 

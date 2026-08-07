@@ -18,6 +18,7 @@ import {
   DEFAULT_SCAN_INTERVAL_HOURS,
 } from '@gitroom/nestjs-libraries/engage/engage-entitlement.service';
 import { EngageScanConfigService } from '@gitroom/nestjs-libraries/engage/engage-scan-config.service';
+import { ProjectValidationService } from '@gitroom/nestjs-libraries/projects/project-validation.service';
 import { EngageScanIngestService } from '@gitroom/nestjs-libraries/engage/engage-scan-ingest.service';
 import {
   EngageScanLeaseService,
@@ -276,8 +277,40 @@ export class EngageScanActivity {
     private _keywordInitialScan: PrismaRepository<'engageKeywordInitialScan'>,
     private _settingsService?: SettingsService,
     private _entitlement?: EngageEntitlementService,
-    private _scanConfig?: EngageScanConfigService
+    private _scanConfig?: EngageScanConfigService,
+    private _projectValidation?: ProjectValidationService
   ) { }
+
+  /**
+   * Drop contexts whose aisee-core project has been deactivated: switching a
+   * project off must stop it consuming scan budget and producing new
+   * opportunities, without touching EngageConfig.enabled (the user's own engage
+   * switch — clobbering it would leave engage off after reactivation).
+   *
+   * Verdicts are cached in ProjectValidationService (60s positive), so a tick
+   * costs at most one aisee-core call per project. Left unfiltered when the
+   * service is not wired (unit tests build the activity positionally).
+   */
+  private async _filterActiveProjects<T extends { organizationId: string; projectId: string | null }>(
+    contexts: T[]
+  ): Promise<T[]> {
+    if (!this._projectValidation) return contexts;
+
+    const verdicts = await Promise.all(
+      contexts.map((ctx) =>
+        ctx.projectId
+          ? this._projectValidation!.isProjectActive(ctx.organizationId, ctx.projectId)
+          : Promise.resolve(true)
+      )
+    );
+    const active = contexts.filter((_, index) => verdicts[index]);
+    if (active.length !== contexts.length) {
+      this.logger.log(
+        `Skipping ${contexts.length - active.length} deactivated project(s) this scan tick`
+      );
+    }
+    return active;
+  }
 
   /**
    * Build a scan budget for the WORKFLOW path: keep the existing call cap but
@@ -340,7 +373,9 @@ export class EngageScanActivity {
   // cadence gate but NOT the rate-limit cooldown.
   @ActivityMethod()
   async runDueScans(force = false): Promise<void> {
-    const orgContexts = await this._engageRepository.getAllEnabledOrgContexts();
+    const orgContexts = await this._filterActiveProjects(
+      await this._engageRepository.getAllEnabledOrgContexts()
+    );
     if (!orgContexts.length) return;
     const keywords = unionKeywords(orgContexts);
     if (!keywords.length) return;
