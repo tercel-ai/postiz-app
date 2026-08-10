@@ -1795,6 +1795,167 @@ describe('OperationPlanService.create', () => {
     );
   });
 
+  it('backfills a platform the main generation call left uncovered, so the plan still reaches READY', async () => {
+    const { repo, creditService, openaiService, service } = createGenerationDependencies({
+      // Placeholder — overridden below by a call-count-aware mock so the main
+      // call and the coverage-backfill call can return different content.
+      contentItems: [],
+      engagePolicies: [],
+      warnings: [],
+    });
+    const xOnlyItem = {
+      contentId: 'c-1',
+      utcDate: '2030-01-01T10:00:00.000Z',
+      themeKey: 'w1:foundations',
+      themeTitle: 'Only X',
+      platforms: [
+        {
+          id: '11111111-1111-4111-8111-111111111111',
+          platform: 'x',
+          content: 'An X-only plan',
+          subreddit: null,
+          flairLabel: null,
+          titleTag: null,
+          tags: null,
+          media: null,
+          thread: null,
+        },
+      ],
+    };
+    const redditBackfillItem = {
+      contentId: 'backfill-reddit',
+      utcDate: '2030-01-01T12:00:00.000Z',
+      themeKey: 'w1:backfill',
+      themeTitle: 'Reddit backfill',
+      platforms: [
+        {
+          id: '22222222-2222-4222-8222-222222222222',
+          platform: 'reddit',
+          content: 'A reddit-only backfill post',
+          subreddit: 'webdev',
+          flairLabel: null,
+          titleTag: null,
+          tags: null,
+          media: null,
+          thread: null,
+        },
+      ],
+    };
+    openaiService.generateStructuredText.mockImplementation(
+      async (_system: string, userPrompt: string) => {
+        const requested: string[] = JSON.parse(userPrompt).platforms;
+        // The main call is asked for every requested platform; the backfill
+        // call that follows a coverage gap is asked for only the missing
+        // ones — distinguish them by that shape rather than call order.
+        const isBackfillCall =
+          requested.length === 1 && requested[0] === 'reddit';
+        return {
+          data: {
+            goal: { title: 'Goal', description: 'Desc', targetScore: 70 },
+            contentItems: [isBackfillCall ? redditBackfillItem : xOnlyItem],
+            engagePolicies: [],
+            warnings: [],
+          },
+          usage: { usage: { total_tokens: isBackfillCall ? 40 : 100 } },
+        };
+      }
+    );
+
+    const { background } = await createAndSettle(service, {
+      taskId: 'task-1',
+      startAt: '2030-01-01T00:00:00.000Z',
+      endAt: '2030-01-02T00:00:00.000Z',
+      platforms: ['x', 'reddit'],
+    });
+    await background;
+
+    // Two calls: the main generation, then the targeted backfill for reddit.
+    expect(openaiService.generateStructuredText).toHaveBeenCalledTimes(2);
+    const [, backfillUserPrompt] = openaiService.generateStructuredText.mock.calls[1];
+    expect(JSON.parse(backfillUserPrompt).platforms).toEqual(['reddit']);
+
+    // Coverage completed — the plan bills and materializes normally, with
+    // BOTH the original x post and the backfilled reddit post.
+    expect(creditService.deductUsageAndConfirm).toHaveBeenCalled();
+    expect(repo.updateStatus).toHaveBeenCalledWith(
+      'plan-1',
+      expect.objectContaining({ status: 'READY' })
+    );
+    expect(repo.materializePlanPosts).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'plan-1' }),
+      expect.objectContaining({
+        contentItems: [
+          expect.objectContaining({ contentId: 'c-1' }),
+          expect.objectContaining({ contentId: 'backfill-reddit' }),
+        ],
+      })
+    );
+  });
+
+  it('still fails the plan when the coverage backfill call itself errors', async () => {
+    const { repo, creditService, aiseeClient, openaiService, service } = createGenerationDependencies({
+      contentItems: [],
+      engagePolicies: [],
+      warnings: [],
+    });
+    const xOnlyItem = {
+      contentId: 'c-1',
+      utcDate: '2030-01-01T10:00:00.000Z',
+      themeKey: 'w1:foundations',
+      themeTitle: 'Only X',
+      platforms: [
+        {
+          id: '11111111-1111-4111-8111-111111111111',
+          platform: 'x',
+          content: 'An X-only plan',
+          subreddit: null,
+          flairLabel: null,
+          titleTag: null,
+          tags: null,
+          media: null,
+          thread: null,
+        },
+      ],
+    };
+    openaiService.generateStructuredText
+      .mockImplementationOnce(async () => ({
+        data: {
+          goal: { title: 'Goal', description: 'Desc', targetScore: 70 },
+          contentItems: [xOnlyItem],
+          engagePolicies: [],
+          warnings: [],
+        },
+        usage: { usage: { total_tokens: 100 } },
+      }))
+      .mockImplementationOnce(async () => {
+        throw new Error('backfill provider 500');
+      });
+
+    const { background } = await createAndSettle(service, {
+      taskId: 'task-1',
+      startAt: '2030-01-01T00:00:00.000Z',
+      endAt: '2030-01-02T00:00:00.000Z',
+      platforms: ['x', 'reddit'],
+    });
+    await background;
+
+    // The backfill attempt is logged/absorbed, not thrown out of
+    // _generatePlanArtifacts — the ORIGINAL coverage rejection still fires as
+    // the final safety net.
+    expect(openaiService.generateStructuredText).toHaveBeenCalledTimes(2);
+    expect(repo.updateStatus).toHaveBeenCalledWith('plan-1', {
+      status: 'FAILED',
+      errorCode: 'GENERATION_FAILED',
+    });
+    expect(creditService.deductUsageAndConfirm).not.toHaveBeenCalled();
+    expect(repo.materializePlanPosts).not.toHaveBeenCalled();
+    expect(aiseeClient.notifyOperationPlanStatus).toHaveBeenCalledWith(
+      'proj-1',
+      'plan-1',
+      'failed'
+    );
+  });
+
   it('warns the generator that multi-word hashtags break on X', async () => {
     const { openaiService, service } = createGenerationDependencies({
       contentItems: [],

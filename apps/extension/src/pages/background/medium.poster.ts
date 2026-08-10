@@ -217,8 +217,16 @@ export async function postMediumStory(
   if (!body) return { ok: false, error: 'Medium story body is empty' };
   const autoSubmit = input.autoSubmit !== false;
 
+  // Unlike X/Quora (a single synthetic paste event), mediumFillEditor types
+  // one keystroke at a time over several seconds — the only way Medium's own
+  // editor accepts bulk text without desyncing (see the comment on
+  // mediumFillEditor). Chrome throttles JS timers in background tabs, which
+  // stretches/bursts that per-character loop and DOES desync Medium (verified
+  // live: "Something is wrong and we cannot save your story", Publish left
+  // broken). So — unlike the other posters — this always opens the tab active,
+  // even when autoSubmit is true.
   const handle = await openTab(MEDIUM_NEW_STORY, {
-    active: !autoSubmit,
+    active: true,
     settleMs: RENDER_SETTLE_MS,
   });
   if (!handle) return { ok: false, error: 'Failed to open Medium tab' };

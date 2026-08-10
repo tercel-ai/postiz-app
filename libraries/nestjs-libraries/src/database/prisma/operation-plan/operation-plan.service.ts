@@ -92,6 +92,11 @@ export interface CreateOperationPlanInput {
 // default cap truncates it into invalid JSON.
 const OPERATION_PLAN_MAX_TOKENS = 32000;
 
+// Budget for the coverage-backfill call (_backfillMissingPlatformCoverage) —
+// at most one contentItem per requested platform, so this stays far below the
+// main generation's budget.
+const OPERATION_PLAN_BACKFILL_MAX_TOKENS = 4000;
+
 // Bound the background generation call. The SDK default (600s timeout, 2 retries,
 // retried on timeout → ~30min worst case) is too loose now that generation runs
 // off the request lifecycle: a stuck request older than the sweeper's staleMs
@@ -745,6 +750,25 @@ export class OperationPlanService implements OnApplicationBootstrap {
     // over-budget string can't throw away the whole (paid) generation. Each
     // shrink is its own LLM call — collect their usage so it gets billed too.
     const shrinkUsages = await this._enforceContentLimits(generation.data);
+
+    // Top up any platform the main call left at zero posts before validation
+    // gets a chance to reject the whole plan over it (see
+    // _backfillMissingPlatformCoverage). Its own content also needs
+    // normalizing/shrinking, and its usage is billed alongside everything else.
+    const missingPlatforms = this._missingPlatformCoverage(generation.data, platforms);
+    if (missingPlatforms.length) {
+      const backfill = await this._backfillMissingPlatformCoverage(
+        projectId,
+        ctx,
+        missingPlatforms
+      );
+      if (backfill) {
+        generation.data.contentItems.push(...backfill.contentItems);
+        shrinkUsages.push(backfill.usage);
+        this._normalizeThreads(generation.data, platforms, maxThreadParts);
+        shrinkUsages.push(...(await this._enforceContentLimits(generation.data)));
+      }
+    }
     this._validateGeneratedPlan(generation.data, platforms, start, end);
 
     // Plan-level goal summary for the `data` column. targetScore is clamped to
@@ -1190,6 +1214,83 @@ export class OperationPlanService implements OnApplicationBootstrap {
     return { content, usage };
   }
 
+  // Top up coverage for platforms the main generation call left at zero posts,
+  // BEFORE _validateGeneratedPlan gets a chance to reject the whole (paid) plan
+  // over it. A wide platform set with low weekly cadences (linkedin/medium/
+  // devto/hackernews/quora) squeezed into a short range is exactly the case
+  // where the model is most likely to skip one despite the PLATFORM COVERAGE
+  // instruction — betting the entire generation on nailing every platform in
+  // one shot is fragile. This is a second, narrowly-scoped call asking for
+  // just ONE post per still-missing platform, mirroring the AI-first/
+  // mechanical-guarantee split _shrinkContentToLimit already uses for length:
+  // best-effort AI repair here, with _validateGeneratedPlan's hard reject as
+  // the backstop if this also comes up short (never charges for a failed
+  // backfill beyond the tokens actually spent trying).
+  private async _backfillMissingPlatformCoverage(
+    projectId: string,
+    ctx: PlanGenerationContext,
+    missingPlatforms: string[]
+  ): Promise<{
+    contentItems: z.infer<typeof GeneratedPlanSchema>['contentItems'];
+    usage: AiUsageInfo;
+  } | null> {
+    const { start, end, task, baselineScore, platformPlaybook } = ctx;
+    const limitLines = missingPlatforms.map(
+      (p) =>
+        `    • ${p}: max ${targetFor(p)} characters` +
+        (p === 'x'
+          ? ` (X WEIGHTED counting: every URL counts as 23 characters regardless of its real length; CJK characters and emoji count as 2 each.)`
+          : '')
+    );
+    const backfillPlaybook = Object.fromEntries(
+      missingPlatforms.map((p) => [p, platformPlaybook[p]]).filter(([, v]) => v)
+    );
+    const BackfillSchema = z.object({
+      contentItems: GeneratedPlanSchema.shape.contentItems.element.array().min(1),
+    }).strict();
+    try {
+      const generation = await this._openaiService!.generateStructuredText(
+        [
+          'The operation plan you just generated left the following requested platform(s) with ZERO posts. Generate EXACTLY ONE publish-ready contentItem per listed platform (a distinct themeKey/themeTitle per item, dated anywhere inside the given range) so every platform below gets at least one post.',
+          '',
+          `Missing platform(s): ${missingPlatforms.join(', ')}`,
+          '',
+          '### CHARACTER LIMITS — HARD GATE ###',
+          'Every `contentItems[].platforms[].content` MUST fit its platform budget. Count BEFORE you write.',
+          ...limitLines,
+          '',
+          'Each contentItem carries exactly ONE `platforms` entry, for the missing platform it corresponds to. Set `thread` to null on every entry — no multi-part threads here.',
+          '- TITLE vs BODY: on reddit, hackernews, medium and devto the themeTitle is submitted SEPARATELY as the post/story title, so `content` is the BODY ONLY — never open it with the title.',
+          '- REDDIT TARGETING: if `reddit` is in the missing list, set `subreddit` to the single most relevant EXISTING, ACTIVE, PUBLIC subreddit (bare name, no "r/"). Set `flairLabel`/`titleTag` when you are confident the community requires them, else null. For every non-reddit entry set all three to null.',
+          '- DEV.TO TAGGING: if `devto` is in the missing list, set `tags` to 1-4 single-word lowercase topic tags. For every non-devto entry set `tags` to null.',
+          '- Write PLAIN TEXT for X: no Markdown.',
+          '- Follow the per-platform rhythm in `platformPlaybook` for tone/substance, but volume here is fixed at one post per platform regardless of its usual cadence — this is a minimum top-up, not a full week.',
+        ].join('\n'),
+        JSON.stringify({
+          projectId,
+          range: { startAt: start.toISOString(), endAt: end.toISOString() },
+          platforms: missingPlatforms,
+          platformPlaybook: backfillPlaybook,
+          baselineScore,
+          analysisResult: task.result,
+          productSnapshot: task.productSnapshot,
+          sourceUrl: task.url,
+        }),
+        BackfillSchema,
+        'operation_plan_backfill',
+        OPERATION_PLAN_BACKFILL_MAX_TOKENS,
+        { timeoutMs: OPERATION_PLAN_GEN_TIMEOUT_MS, maxRetries: OPERATION_PLAN_GEN_MAX_RETRIES }
+      );
+      return { contentItems: generation.data.contentItems, usage: generation.usage };
+    } catch (error) {
+      this.logger.warn(
+        `Operation plan coverage backfill for ${missingPlatforms.join(', ')} failed; ` +
+        `falling back to the coverage rejection. ${error instanceof Error ? error.message : error}`
+      );
+      return null;
+    }
+  }
+
   // Collapse many usage records into one summed AiUsageInfo for a client-facing
   // token ESTIMATE (dry-run). Token counts add up across models; the descriptive
   // model/method fields are taken from the first (main-generation) record. NOT
@@ -1219,6 +1320,22 @@ export class OperationPlanService implements OnApplicationBootstrap {
       if (lastSpace > 0) trimmed = trimmed.slice(0, lastSpace);
     }
     return trimmed.trimEnd();
+  }
+
+  // Requested platforms with zero posts anywhere in `plan.contentItems`. Shared
+  // by the pre-validation backfill attempt (_generatePlanArtifacts) and the
+  // hard-reject coverage check below, so both agree on exactly what "missing"
+  // means.
+  private _missingPlatformCoverage(
+    plan: z.infer<typeof GeneratedPlanSchema>,
+    requestedPlatforms: string[]
+  ): string[] {
+    const covered = new Set(
+      plan.contentItems.flatMap((item) =>
+        item.platforms.map((post) => post.platform)
+      )
+    );
+    return requestedPlatforms.filter((platform) => !covered.has(platform));
   }
 
   private _validateGeneratedPlan(
@@ -1283,14 +1400,10 @@ export class OperationPlanService implements OnApplicationBootstrap {
     // The request's platform set (already bounded by the admin whitelist) is the
     // contract — a plan that silently skips a platform (the model concentrating
     // everything on x/reddit) must fail loudly here, not materialize partial.
-    const covered = new Set(
-      plan.contentItems.flatMap((item) =>
-        item.platforms.map((post) => post.platform)
-      )
-    );
-    const missingPlatforms = requestedPlatforms.filter(
-      (platform) => !covered.has(platform)
-    );
+    // (_generatePlanArtifacts already tries to top up any gap via
+    // _backfillMissingPlatformCoverage before this runs, so reaching here with a
+    // gap means that repair attempt also came up short.)
+    const missingPlatforms = this._missingPlatformCoverage(plan, requestedPlatforms);
     if (missingPlatforms.length) {
       throw new BadRequestException(
         `Generated plan produced no content for requested platform(s): ` +
