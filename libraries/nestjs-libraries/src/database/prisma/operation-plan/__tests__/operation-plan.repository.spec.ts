@@ -338,6 +338,123 @@ describe('OperationPlanRepository', () => {
     expect(x.content).toBe('AI search positioning\n\nTweet body.');
   });
 
+  it('materializePlanPosts writes the headline into settings.title for non-community title platforms (devto/hackernews/medium), matching where the post editor and titleFromSettings read it — not just Post.title', async () => {
+    const postFindMany = vi.fn().mockResolvedValue([]);
+    const postCreateMany = vi.fn().mockResolvedValue({ count: 4 });
+    const integrationFindMany = vi.fn().mockResolvedValue([]);
+    const repo = createRepo({ postFindMany, postCreateMany, integrationFindMany });
+
+    await repo.materializePlanPosts(
+      {
+        id: 'plan-1',
+        organizationId: 'org-1',
+        projectId: 'proj-1',
+        campaignId: 'campaign-1',
+      } as any,
+      {
+        contentItems: [
+          {
+            contentId: 'D01',
+            utcDate: '2030-01-01T00:00:00.000Z',
+            themeKey: 'positioning',
+            themeTitle: 'Verified GTA 6 release info',
+            platforms: [
+              {
+                id: '11111111-1111-4111-8111-111111111111',
+                platform: 'devto',
+                content: 'Dev.to body.',
+                media: [],
+                tags: null,
+              },
+              {
+                id: '22222222-2222-4222-8222-222222222222',
+                platform: 'hackernews',
+                content: 'HN body.',
+                media: [],
+              },
+              {
+                id: '33333333-3333-4333-8333-333333333333',
+                platform: 'medium',
+                content: 'Medium body.',
+                media: [],
+              },
+              {
+                id: '44444444-4444-4444-8444-444444444444',
+                platform: 'x',
+                content: 'Tweet body.',
+                media: [],
+              },
+            ],
+          },
+        ],
+      }
+    );
+
+    const created = postCreateMany.mock.calls[0][0].data;
+    for (const platform of ['devto', 'hackernews', 'medium']) {
+      const post = created.find((p: any) => p.providerIdentifier === platform);
+      expect(post.title).toBe('Verified GTA 6 release info');
+      const settings = JSON.parse(post.settings);
+      // The same headline, reachable where titleFromSettings/the editor's
+      // per-platform settings form actually look for it — not only on the
+      // Post.title column.
+      expect(settings.title).toBe('Verified GTA 6 release info');
+    }
+
+    // x has no title-submitting concept — settings.title must stay absent
+    // there rather than cargo-culting a value nothing reads.
+    const x = created.find((p: any) => p.providerIdentifier === 'x');
+    const xSettings = JSON.parse(x.settings);
+    expect('title' in xSettings).toBe(false);
+  });
+
+  it('materializePlanPosts does NOT duplicate the headline into a flat settings.title for reddit — it stays nested under settings.subreddit[].value.title', async () => {
+    const postFindMany = vi.fn().mockResolvedValue([]);
+    const postCreateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const integrationFindMany = vi.fn().mockResolvedValue([]);
+    const repo = createRepo({ postFindMany, postCreateMany, integrationFindMany });
+
+    await repo.materializePlanPosts(
+      {
+        id: 'plan-1',
+        organizationId: 'org-1',
+        projectId: 'proj-1',
+        campaignId: 'campaign-1',
+      } as any,
+      {
+        contentItems: [
+          {
+            contentId: 'D01',
+            utcDate: '2030-01-01T00:00:00.000Z',
+            themeKey: 'positioning',
+            themeTitle: 'Reddit-only headline',
+            platforms: [
+              {
+                id: '11111111-1111-4111-8111-111111111111',
+                platform: 'reddit',
+                content: 'Reddit body.',
+                media: [],
+                redditTarget: {
+                  subreddit: 'webdev',
+                  title: 'Reddit-only headline',
+                  type: 'self',
+                  is_flair_required: false,
+                },
+              },
+            ],
+          },
+        ],
+      }
+    );
+
+    const created = postCreateMany.mock.calls[0][0].data;
+    const reddit = created.find((p: any) => p.providerIdentifier === 'reddit');
+    expect(reddit.title).toBe('Reddit-only headline');
+    const settings = JSON.parse(reddit.settings);
+    expect('title' in settings).toBe(false);
+    expect(settings.subreddit[0].value.title).toBe('Reddit-only headline');
+  });
+
   it('materializePlanPosts expands a thread into a chained anchor + children (parentPostId links to the PREVIOUS part)', async () => {
     const postFindMany = vi.fn().mockResolvedValue([]);
     const postCreateMany = vi.fn().mockResolvedValue({ count: 3 });

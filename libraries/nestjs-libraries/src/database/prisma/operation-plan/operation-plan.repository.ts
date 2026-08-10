@@ -7,6 +7,7 @@ import {
   stripDuplicatedTitleFromContent,
 } from './theme-title';
 import { TITLE_REQUIRED_PLATFORMS } from '@gitroom/helpers/extension/post-publish';
+import { COMMUNITY_TITLE_PLATFORMS } from '@gitroom/nestjs-libraries/database/prisma/posts/settings-title';
 import type { ResolvedRedditTarget as ResolverRedditTarget } from './reddit-target-resolver';
 
 // Fixed namespace for deriving a materialized Post.id from a (plan, payload id)
@@ -450,6 +451,21 @@ export class OperationPlanRepository {
             campaignId: payload?.campaignId ?? plan.campaignId,
             contentId: item.contentId,
             themeKey: item.themeKey,
+            // Title-required, non-community platforms (devto/hackernews/medium/…)
+            // read their headline from settings.title, NOT Post.title (see
+            // titleFromSettings) — the same place the normal post editor writes
+            // it via each platform's *SettingsDto.title. Without this, a
+            // plan-generated draft carried the title ONLY on Post.title: the
+            // calendar/list view (which reads Post.title) showed it fine, but
+            // the editor's per-platform settings form (which reads settings.*)
+            // rendered an empty title field, and re-saving from there could
+            // wipe the title (createOrUpdatePost derives Post.title FROM
+            // settings.title). Reddit/lemmy are excluded — their title nests
+            // under settings.subreddit[].value.title, set below instead.
+            ...((TITLE_REQUIRED_PLATFORMS as readonly string[]).includes(platform) &&
+            !COMMUNITY_TITLE_PLATFORMS.includes(platform)
+              ? { title }
+              : {}),
             // Reddit needs a real publishing header: the submit call reads
             // settings.subreddit[].value.{subreddit,title,type}. Shaped to
             // RedditSettingsDto (a one-element array; url/flair omitted — only

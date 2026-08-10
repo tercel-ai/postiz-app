@@ -18,7 +18,7 @@
 // leaves Post.state=QUEUE — was re-offered on every poll forever.
 
 /** Platforms whose title is nested under `settings.subreddit[].value.title`. */
-const COMMUNITY_TITLE_PLATFORMS = ['reddit', 'lemmy'];
+export const COMMUNITY_TITLE_PLATFORMS = ['reddit', 'lemmy'];
 
 /**
  * The post title carried in `settings`, or undefined when there is none.
