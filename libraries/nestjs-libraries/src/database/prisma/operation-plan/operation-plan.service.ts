@@ -105,11 +105,44 @@ const OPERATION_PLAN_BACKFILL_MAX_TOKENS = 4000;
 const OPERATION_PLAN_GEN_TIMEOUT_MS = Number(process.env.OPERATION_PLAN_GEN_TIMEOUT_MS) || 480_000;
 const OPERATION_PLAN_GEN_MAX_RETRIES = Number(process.env.OPERATION_PLAN_GEN_MAX_RETRIES ?? 1);
 
+// Heuristic-only timing for the GENERATING progress estimate surfaced by
+// getOverview. Generation is a single non-streaming LLM call covering every
+// day at once (see _generatePlanArtifacts) — there is no real per-day
+// completion signal to report — so this just interpolates elapsed wall time
+// against a rough expected duration, tuned so a typical plan reaches ~95%
+// around the time a real generation call finishes.
+//
+// The per-day rate is a LEARNED value (OPERATION_PLAN_PROGRESS_MS_PER_DAY_KEY,
+// below): every successful generation feeds its actual
+// (completeGeneration time - createdAt) / durationDays back in via an
+// exponential moving average (_recordObservedGenerationDuration), so the
+// estimate tracks real model/output-size drift instead of staying fixed at
+// a value tuned once. This constant is only the seed/fallback before any
+// generation has reported in.
+const OPERATION_PLAN_PROGRESS_BASE_MS = 6_000;
+const OPERATION_PLAN_PROGRESS_PER_DAY_MS_DEFAULT = 1_700;
+// Weight given to each new observation in the EMA — responsive enough to
+// track real drift within a handful of generations without one slow/fast
+// outlier swinging the estimate wildly.
+const OPERATION_PLAN_PROGRESS_EMA_ALPHA = 0.3;
+// How long the in-memory copy of the learned per-day rate is trusted before
+// re-reading Settings — avoids a DB round trip on every getOverview poll
+// while still picking up another instance's update within a bounded time.
+const OPERATION_PLAN_PROGRESS_CACHE_TTL_MS = 60_000;
+// Cap below 100% while still GENERATING: a row past this point is more likely
+// stuck than about to finish, and only the terminal status should ever claim
+// completion.
+const OPERATION_PLAN_PROGRESS_MAX_RATIO = 0.95;
+
 // ── Settings keys (admin-editable; seeded on boot so they appear in the UI) ──
 export const OPERATION_PLAN_MAX_DURATION_DAYS_KEY = 'operation_plan.max_duration_days';
 export const OPERATION_PLAN_ALLOWED_PLATFORMS_KEY = 'operation_plan.allowed_platforms';
 export const OPERATION_PLAN_PLATFORM_CADENCE_KEY = 'operation_plan.platform_cadence';
 export const OPERATION_PLAN_MAX_THREAD_PARTS_KEY = 'operation_plan.max_thread_parts';
+// Not really "admin-editable" in spirit (see the seed description below) —
+// the service keeps it up to date itself. Seeded like the others purely so
+// it's visible in the admin Settings UI for observability.
+export const OPERATION_PLAN_PROGRESS_MS_PER_DAY_KEY = 'operation_plan.progress_ms_per_day';
 
 const DEFAULT_MAX_DURATION_DAYS = 30;
 const DEFAULT_MAX_THREAD_PARTS = 3;
@@ -367,6 +400,9 @@ interface PlanArtifacts {
 @Injectable()
 export class OperationPlanService implements OnApplicationBootstrap {
   private readonly logger = new Logger(OperationPlanService.name);
+  // In-memory copy of the learned progress ms-per-day rate; see
+  // OPERATION_PLAN_PROGRESS_CACHE_TTL_MS for why this is cached at all.
+  private _progressMsPerDayCache: { value: number; loadedAt: number } | null = null;
 
   constructor(
     private _repo: OperationPlanRepository,
@@ -420,6 +456,15 @@ export class OperationPlanService implements OnApplicationBootstrap {
           'Maximum follow-up posts in a generated thread (the anchor is separate, so the ' +
           'full chain is 1 + this). A ceiling so the generator cannot spin up a huge thread; ' +
           'the prompt states it and over-long threads are truncated. 0 disables threads.',
+      },
+      {
+        key: OPERATION_PLAN_PROGRESS_MS_PER_DAY_KEY,
+        value: OPERATION_PLAN_PROGRESS_PER_DAY_MS_DEFAULT,
+        type: 'number',
+        description:
+          'Learned ms-per-day rate behind the GENERATING progress estimate in getOverview ' +
+          '(planId).progress. Auto-updated via a moving average after every successful ' +
+          'generation — not meant to be hand-tuned; editing it just seeds the next average.',
       },
     ];
     for (const seed of seeds) {
@@ -876,6 +921,13 @@ export class OperationPlanService implements OnApplicationBootstrap {
       data: planData,
       status: 'BILLING_PENDING',
     });
+    // Feed this generation's actual duration into the learned progress
+    // estimate. Fire-and-forget: purely cosmetic, never worth delaying or
+    // failing billing over (the method already catches its own errors).
+    void this._recordObservedGenerationDuration(
+      Date.now() - stub.createdAt.getTime(),
+      ctx.durationDays
+    );
 
     let billed;
     try {
@@ -1757,18 +1809,112 @@ export class OperationPlanService implements OnApplicationBootstrap {
     return this._toRecord(readyPlan);
   }
 
+  // Learned per-day rate behind the progress estimate, cached in memory for
+  // OPERATION_PLAN_PROGRESS_CACHE_TTL_MS to keep getOverview polling off the
+  // Settings table. Falls back to the hardcoded default when there is no
+  // Settings row yet (fresh install, before the first generation reports in)
+  // or the read fails for any reason.
+  private async _getProgressMsPerDay(): Promise<number> {
+    const now = Date.now();
+    if (
+      this._progressMsPerDayCache &&
+      now - this._progressMsPerDayCache.loadedAt < OPERATION_PLAN_PROGRESS_CACHE_TTL_MS
+    ) {
+      return this._progressMsPerDayCache.value;
+    }
+    let value = OPERATION_PLAN_PROGRESS_PER_DAY_MS_DEFAULT;
+    try {
+      value =
+        (await this._settingsService?.get<number>(OPERATION_PLAN_PROGRESS_MS_PER_DAY_KEY)) ??
+        value;
+    } catch (err) {
+      this.logger.warn(
+        `Failed to read ${OPERATION_PLAN_PROGRESS_MS_PER_DAY_KEY}, using default: ${
+          err instanceof Error ? err.message : err
+        }`
+      );
+    }
+    this._progressMsPerDayCache = { value, loadedAt: now };
+    return value;
+  }
+
+  // Feeds one successful generation's actual (completeGeneration - createdAt) /
+  // durationDays back into the learned per-day rate via an exponential moving
+  // average, so the estimate tracks real drift (model gets slower/faster,
+  // typical plan size changes) instead of staying pinned to a value tuned
+  // once. Called fire-and-forget right after the GENERATING → BILLING_PENDING
+  // transition — this is a cosmetic estimate, never worth blocking or
+  // failing a paid generation over.
+  private async _recordObservedGenerationDuration(
+    actualDurationMs: number,
+    totalDays: number
+  ): Promise<void> {
+    if (!this._settingsService || totalDays <= 0) return;
+    const observedMsPerDay = actualDurationMs / totalDays;
+    try {
+      const current = await this._getProgressMsPerDay();
+      const next = Math.round(
+        current + OPERATION_PLAN_PROGRESS_EMA_ALPHA * (observedMsPerDay - current)
+      );
+      await this._settingsService.set(OPERATION_PLAN_PROGRESS_MS_PER_DAY_KEY, next, {
+        type: 'number',
+        defaultValue: OPERATION_PLAN_PROGRESS_PER_DAY_MS_DEFAULT,
+      });
+      this._progressMsPerDayCache = { value: next, loadedAt: Date.now() };
+    } catch (err) {
+      this.logger.warn(
+        `Failed to update ${OPERATION_PLAN_PROGRESS_MS_PER_DAY_KEY}: ${
+          err instanceof Error ? err.message : err
+        }`
+      );
+    }
+  }
+
+  // Rough, non-authoritative progress estimate for a GENERATING plan. There is
+  // no real per-day completion signal (generation is one monolithic LLM call —
+  // see _generatePlanArtifacts), so this interpolates elapsed wall time
+  // against a day-count-scaled expected duration (the per-day rate is
+  // learned — see _getProgressMsPerDay). Good enough for a "day N of M"
+  // progress indicator; not a guarantee that day N is actually done. Returns
+  // null once the plan has left GENERATING (nothing left to estimate).
+  private async _estimateGenerationProgress(
+    plan: OperationPlan
+  ): Promise<{ totalDays: number; estimatedCompletedDays: number; percent: number } | null> {
+    if (plan.status !== 'GENERATING') {
+      return null;
+    }
+    const totalDays =
+      dayjs.utc(plan.endsAt).startOf('day').diff(dayjs.utc(plan.startsAt).startOf('day'), 'day') + 1;
+    const msPerDay = await this._getProgressMsPerDay();
+    const expectedMs = OPERATION_PLAN_PROGRESS_BASE_MS + msPerDay * totalDays;
+    const elapsedMs = Date.now() - plan.createdAt.getTime();
+    const ratio = Math.min(
+      Math.max(elapsedMs / expectedMs, 0),
+      OPERATION_PLAN_PROGRESS_MAX_RATIO
+    );
+    return {
+      totalDays,
+      estimatedCompletedDays: Math.min(totalDays - 1, Math.floor(ratio * totalDays)),
+      percent: Math.round(ratio * 100),
+    };
+  }
+
   async getOverview(organizationId: string, planId: string) {
     const plan = await this._repo.getById(planId, organizationId);
-    const [posts, engageStats, engageView] = await Promise.all([
+    const [posts, engageStats, engageView, progress] = await Promise.all([
       this._repo.getPostsForPlan(plan.id, organizationId),
       this._getReplyPacingByDay(plan),
       this._getEngagePoliciesView(plan),
+      this._estimateGenerationProgress(plan),
     ]);
 
     return {
       // Keep the polling status at the response top level, matching the create
       // endpoint, while preserving the existing plan.status field.
       status: plan.status,
+      // Only meaningful (non-null) while status === 'GENERATING'; see
+      // _estimateGenerationProgress for why it's an estimate, not a fact.
+      progress,
       plan: {
         id: plan.id,
         projectId: plan.projectId,
