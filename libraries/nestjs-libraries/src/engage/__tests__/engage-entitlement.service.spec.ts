@@ -352,6 +352,47 @@ describe('EngageEntitlementService.getPublicPlanCatalog', () => {
     expect(byCode.starter).not.toHaveProperty('subredditsMax');
     expect(byCode.starter).not.toHaveProperty('subredditsPerProjectMax');
   });
+
+  it('keeps a stored priorityAccounts cap of null unlimited when folding a legacy subreddits cap', async () => {
+    // The other side of "null wins": unlimited on the SURVIVING key, finite on
+    // the legacy one. Pro's pre-merge defaults were exactly this shape
+    // (priorityAccountsMax null + subredditsMax 150), so coalescing the null to
+    // 0 before summing would silently cap every pre-merge pro row at 150.
+    const { service } = build({
+      limits: PRO_LIMITS,
+      settings: {
+        [ENGAGE_ENTITLEMENTS_KEY]: {
+          pro: {
+            priorityAccountsMax: null,
+            subredditsMax: 150,
+            priorityAccountsPerProjectMax: null,
+            subredditsPerProjectMax: 15,
+          },
+        },
+      },
+    });
+    const catalog = await service.getPublicPlanCatalog();
+    const pro = catalog.plans.find((p) => p.code === 'pro')!.limits;
+    expect(pro.priorityAccountsMax).toBeNull();
+    expect(pro.priorityAccountsPerProjectMax).toBeNull();
+  });
+
+  it('treats an absent priorityAccounts cap as 0 so the legacy subreddits cap carries the pair', async () => {
+    // Distinguishes absent from null: with no surviving key to sum against, the
+    // legacy value IS the merged cap (it still overrides the plan default).
+    const { service } = build({
+      limits: PRO_LIMITS,
+      settings: {
+        [ENGAGE_ENTITLEMENTS_KEY]: {
+          pro: { subredditsMax: 7, subredditsPerProjectMax: 3 },
+        },
+      },
+    });
+    const catalog = await service.getPublicPlanCatalog();
+    const pro = catalog.plans.find((p) => p.code === 'pro')!.limits;
+    expect(pro.priorityAccountsMax).toBe(7);
+    expect(pro.priorityAccountsPerProjectMax).toBe(3);
+  });
 });
 
 describe('EngageEntitlementService.getMetricsWindowDays', () => {

@@ -431,6 +431,10 @@ body {
 /* ── Platform filter ────────────────────────────────────── */
 .pz-filter-bar {
   display: flex;
+  /* The reply filters are one button per supported platform (8 and counting) —
+     they no longer fit on a single 380px row, and a non-wrapping row makes the
+     whole popup window grow to the row's width. Wrap instead. */
+  flex-wrap: wrap;
   gap: 6px;
   padding: 0 14px 10px;
 }
@@ -542,11 +546,36 @@ body {
   border-radius: 5px;
   letter-spacing: 0.02em;
 }
+/* One rule per platform id in platform-labels.ts. Brand-ish but chosen to stay
+   apart from each other at badge size — the colour is the scanning cue, the
+   label is the confirmation. A platform with no rule here falls back to the
+   plain `.pz-badge` (transparent), which is how it stays obvious that a new
+   platform still needs a colour. */
 .pz-badge.reddit {
   background: var(--pz-accent);
 }
 .pz-badge.x {
   background: var(--pz-ink);
+  color: #fff;
+}
+.pz-badge.linkedin {
+  background: #0a66c2;
+  color: #fff;
+}
+.pz-badge.devto {
+  background: #3b49df;
+  color: #fff;
+}
+.pz-badge.hackernews {
+  background: #ff6600;
+  color: var(--pz-ink);
+}
+.pz-badge.medium {
+  background: #1a8917;
+  color: #fff;
+}
+.pz-badge.quora {
+  background: #b92b27;
   color: #fff;
 }
 .pz-status {
@@ -592,10 +621,6 @@ body {
   background: var(--pz-soft);
   color: var(--pz-muted);
   text-decoration: line-through;
-}
-.pz-badge.linkedin {
-  background: #0a66c2;
-  color: #fff;
 }
 
 /* ── Publish-queue row actions ──────────────────────────── */

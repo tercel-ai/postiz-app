@@ -1,11 +1,8 @@
 import React, { FC, useState, useEffect } from 'react';
 import { ReplyHistoryItem } from '@gitroom/extension/utils/reply.history';
+import { platformLabel } from '@gitroom/extension/pages/popup/components/platform-labels';
 
 const PAGE_SIZE = 5;
-const PLATFORM_LABEL: Record<string, string> = {
-  reddit: 'Reddit', x: 'X', linkedin: 'LinkedIn', devto: 'Dev.to',
-  hackernews: 'HN', medium: 'Medium', quora: 'Quora',
-};
 // Filter buttons disable themselves (count === 0) below, so listing a platform
 // here before its reply-posting automation exists is harmless — the tab just
 // stays greyed out until history rows for it exist.
@@ -28,7 +25,7 @@ const HistoryItemRow: FC<{ item: ReplyHistoryItem }> = ({ item }) => (
   <div className="pz-item">
     <div className="pz-item-top">
       <span className={`pz-badge ${item.platform}`}>
-        {PLATFORM_LABEL[item.platform] ?? item.platform}
+        {platformLabel(item.platform)}
       </span>
       <span className={`pz-status ${item.status}`}>{item.status}</span>
       <span className="pz-time">{relativeTime(item.createdAt)}</span>
@@ -105,7 +102,7 @@ export const HistoryList: FC<{
                 onClick={() => setFilter(f)}
                 disabled={count === 0}
               >
-                {f === 'all' ? 'All' : PLATFORM_LABEL[f] ?? f}
+                {f === 'all' ? 'All' : platformLabel(f)}
                 <span className="pz-filter-count">{count}</span>
               </button>
             );
@@ -114,7 +111,7 @@ export const HistoryList: FC<{
       )}
 
       {filtered.length === 0 ? (
-        <div className="pz-empty">No {filter === 'all' ? '' : PLATFORM_LABEL[filter] + ' '}replies yet.</div>
+        <div className="pz-empty">No {filter === 'all' ? '' : platformLabel(filter) + ' '}replies yet.</div>
       ) : (
         <>
           <div className="pz-list">

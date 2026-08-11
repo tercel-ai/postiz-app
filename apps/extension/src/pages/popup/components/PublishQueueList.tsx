@@ -1,12 +1,8 @@
 import React, { FC, useState, useCallback } from 'react';
 import type { PublishQueueRow } from '@gitroom/extension/pages/popup/hooks/usePublishQueueState';
+import { platformLabel } from '@gitroom/extension/pages/popup/components/platform-labels';
 
 const PAGE_SIZE = 5;
-const PLATFORM_LABEL: Record<string, string> = {
-  reddit: 'Reddit',
-  x: 'X',
-  linkedin: 'LinkedIn',
-};
 
 // Two buckets the user asked to distinguish: "not sent yet" (still in the
 // queue) vs "sent" (settled, whatever the outcome).
@@ -91,9 +87,7 @@ const QueueRow: FC<{
   return (
     <div className="pz-item">
       <div className="pz-item-top">
-        <span className={`pz-badge ${platform}`}>
-          {PLATFORM_LABEL[platform] ?? platform}
-        </span>
+        <span className={`pz-badge ${platform}`}>{platformLabel(platform)}</span>
         <span className={`pz-status ${status}`}>
           {STATUS_LABEL[status] ?? status}
         </span>

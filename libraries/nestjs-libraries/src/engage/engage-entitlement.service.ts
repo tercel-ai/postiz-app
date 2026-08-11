@@ -329,17 +329,18 @@ export class EngageEntitlementService implements OnModuleInit {
   ): Partial<EngageEntitlement> {
     if (!entry) return {};
     const { subredditsMax, subredditsPerProjectMax, ...rest } = entry;
-    const sum = (a: number | null, b: number | null) =>
-      a === null || b === null ? null : a + b;
+    // `undefined` (key absent) counts as 0 so the surviving key carries the pair
+    // on its own; `null` (explicitly unlimited) must reach the null branch, so it
+    // is NOT coalesced away before the check — coalescing it would silently
+    // demote a stored "unlimited" to a finite cap.
+    const sum = (a: number | null | undefined, b: number | null) =>
+      a === null || b === null ? null : (a ?? 0) + b;
     if (subredditsMax !== undefined) {
-      rest.priorityAccountsMax = sum(
-        rest.priorityAccountsMax ?? 0,
-        subredditsMax
-      );
+      rest.priorityAccountsMax = sum(rest.priorityAccountsMax, subredditsMax);
     }
     if (subredditsPerProjectMax !== undefined) {
       rest.priorityAccountsPerProjectMax = sum(
-        rest.priorityAccountsPerProjectMax ?? 0,
+        rest.priorityAccountsPerProjectMax,
         subredditsPerProjectMax
       );
     }
