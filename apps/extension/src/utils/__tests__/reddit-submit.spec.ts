@@ -3,6 +3,7 @@ import {
   isRedditCaptchaError,
   isRedditPostRuleError,
   parseRedditSubmitResponse,
+  toAbsoluteRedditUrl,
 } from '../reddit.poster';
 
 describe('parseRedditSubmitResponse', () => {
@@ -36,6 +37,74 @@ describe('parseRedditSubmitResponse', () => {
       permalink: undefined,
       postId: undefined,
     });
+  });
+
+  // Observed in production: the submit succeeded but `url` came back as the
+  // bare path, which was stored verbatim as releaseURL — a dead link.
+  it('absolutizes a host-relative url', () => {
+    const data = {
+      json: {
+        errors: [],
+        data: {
+          url: '/r/football/comments/1vhwjma/tactical_deepdive/',
+          name: 't3_1vhwjma',
+        },
+      },
+    };
+    expect(parseRedditSubmitResponse(data)).toEqual({
+      permalink:
+        'https://www.reddit.com/r/football/comments/1vhwjma/tactical_deepdive/',
+      postId: 't3_1vhwjma',
+    });
+  });
+
+  it('falls back to permalink when the response carries no url', () => {
+    const data = {
+      json: {
+        errors: [],
+        data: {
+          permalink: '/r/test/comments/abc123/a_title/',
+          name: 't3_abc123',
+        },
+      },
+    };
+    expect(parseRedditSubmitResponse(data)).toEqual({
+      permalink: 'https://www.reddit.com/r/test/comments/abc123/a_title/',
+      postId: 't3_abc123',
+    });
+  });
+});
+
+describe('toAbsoluteRedditUrl', () => {
+  it('passes an absolute URL through untouched', () => {
+    expect(
+      toAbsoluteRedditUrl('https://old.reddit.com/r/test/comments/abc/x/')
+    ).toBe('https://old.reddit.com/r/test/comments/abc/x/');
+  });
+
+  it('prefixes host-relative and scheme-relative forms', () => {
+    expect(toAbsoluteRedditUrl('/r/test/comments/abc/x/')).toBe(
+      'https://www.reddit.com/r/test/comments/abc/x/'
+    );
+    expect(toAbsoluteRedditUrl('//www.reddit.com/r/test/comments/abc/x/')).toBe(
+      'https://www.reddit.com/r/test/comments/abc/x/'
+    );
+  });
+
+  it('distinguishes a scheme-less host from a slash-less path', () => {
+    expect(toAbsoluteRedditUrl('www.reddit.com/r/test/comments/abc/x/')).toBe(
+      'https://www.reddit.com/r/test/comments/abc/x/'
+    );
+    expect(toAbsoluteRedditUrl('r/test/comments/abc/x/')).toBe(
+      'https://www.reddit.com/r/test/comments/abc/x/'
+    );
+  });
+
+  it('returns undefined for empty input', () => {
+    expect(toAbsoluteRedditUrl('')).toBeUndefined();
+    expect(toAbsoluteRedditUrl('   ')).toBeUndefined();
+    expect(toAbsoluteRedditUrl(null)).toBeUndefined();
+    expect(toAbsoluteRedditUrl(undefined)).toBeUndefined();
   });
 });
 

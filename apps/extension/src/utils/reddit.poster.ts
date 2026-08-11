@@ -41,6 +41,30 @@ export function resolveRedditThingId(url: string): string | null {
 }
 
 /**
+ * Normalize any URL shape Reddit hands back into an ABSOLUTE permalink.
+ *
+ * Reddit is not consistent here: comment things carry a host-relative
+ * `permalink` ("/r/sub/comments/id/slug/c1/") by contract, and /api/submit's
+ * `json.data.url` — usually absolute — has been observed returning the bare
+ * path too. An un-prefixed value stored as releaseURL is a dead link in the UI
+ * and an unparseable input for the metrics readers, so every permalink leaves
+ * this module absolute, whatever came in.
+ */
+export function toAbsoluteRedditUrl(
+  raw: string | null | undefined
+): string | undefined {
+  const value = String(raw ?? '').trim();
+  if (!value) return undefined;
+  if (/^https?:\/\//i.test(value)) return value;
+  if (value.startsWith('//')) return `https:${value}`;
+  if (value.startsWith('/')) return `${REDDIT_BASE}${value}`;
+  // Host without a scheme ("www.reddit.com/r/…") vs. a path without its leading
+  // slash ("r/sub/comments/…").
+  if (/^(?:[a-z0-9-]+\.)*reddit\.com\//i.test(value)) return `https://${value}`;
+  return `${REDDIT_BASE}/${value}`;
+}
+
+/**
  * Extract the new comment's permalink + fullname from a /api/comment response
  * thing. Reddit's old endpoint returns one of TWO shapes:
  *  - structured JSON: { name: 't1_xxx', permalink: '/r/.../xxx/' }
@@ -56,14 +80,14 @@ export function parseRedditCommentThing(
 
   let permalink: string | undefined;
   if (typeof thing.permalink === 'string' && thing.permalink) {
-    permalink = `${REDDIT_BASE}${thing.permalink}`;
+    permalink = toAbsoluteRedditUrl(thing.permalink);
   } else {
     const html: string =
       (typeof thing.content === 'string' && thing.content) ||
       (typeof thing.contentHTML === 'string' && thing.contentHTML) ||
       '';
     const match = html.match(/data-permalink="([^"]+)"/);
-    if (match) permalink = `${REDDIT_BASE}${match[1]}`;
+    if (match) permalink = toAbsoluteRedditUrl(match[1]);
   }
 
   return { permalink, postId };
@@ -269,14 +293,21 @@ export function buildSelftextWithImages(
 /**
  * Extract the new submission's permalink + fullname from a /api/submit
  * (api_type=json) response: json.data = { url, id, name: 't3_…' }.
+ *
+ * `url` has been seen coming back host-relative ("/r/sub/comments/id/slug/"),
+ * and some responses carry `permalink` instead of `url` — both are funnelled
+ * through toAbsoluteRedditUrl so what reaches releaseURL is always clickable.
  */
 export function parseRedditSubmitResponse(data: any): {
   permalink?: string;
   postId?: string;
 } {
   const d = data?.json?.data || {};
-  const permalink =
-    typeof d.url === 'string' && d.url ? String(d.url) : undefined;
+  const rawUrl =
+    (typeof d.url === 'string' && d.url) ||
+    (typeof d.permalink === 'string' && d.permalink) ||
+    '';
+  const permalink = toAbsoluteRedditUrl(rawUrl);
   const postId =
     typeof d.name === 'string' && d.name ? String(d.name) : undefined;
   return { permalink, postId };
