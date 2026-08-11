@@ -31,6 +31,7 @@ dotenv.config();
 
 import { Connection, Client } from '@temporalio/client';
 import { PrismaClient } from '@prisma/client';
+import { scanTypeFor } from '@gitroom/nestjs-libraries/engage/engage-scan-target';
 
 const address   = process.env.TEMPORAL_ADDRESS   || 'localhost:7233';
 const namespace = process.env.TEMPORAL_NAMESPACE || 'default';
@@ -49,16 +50,15 @@ async function printStats(prisma: PrismaClient) {
   const since24h = new Date(now.getTime() - 24 * 60 * 60 * 1000);
   const since1h  = new Date(now.getTime() -      60 * 60 * 1000);
 
-  // Step 1: derive configured platforms from channels + tracked accounts.
-  const [channelsByPlatform, trackedByPlatform] = await Promise.all([
-    prisma.engageMonitoredChannel.groupBy({ by: ['platform'], _count: { _all: true }, orderBy: { platform: 'asc' } }),
-    prisma.engageTrackedAccount.groupBy({  by: ['platform'], _count: { _all: true }, orderBy: { platform: 'asc' } }),
-  ]);
+  // Step 1: derive configured platforms from the scan targets. Channels and
+  // tracked accounts are one table now, so this is a single groupBy.
+  const targetsByPlatform = await prisma.engageTrackedAccount.groupBy({
+    by: ['platform'],
+    _count: { _all: true },
+    orderBy: { platform: 'asc' },
+  });
 
-  const allPlatforms = Array.from(new Set([
-    ...channelsByPlatform.map((r) => r.platform),
-    ...trackedByPlatform.map((r) => r.platform),
-  ])).sort();
+  const allPlatforms = targetsByPlatform.map((r) => r.platform).sort();
 
   // Step 2: query opportunities scoped to those platforms only.
   const platformFilter = allPlatforms.length ? { platform: { in: allPlatforms } } : {};
@@ -96,9 +96,19 @@ async function printStats(prisma: PrismaClient) {
   const last24h = recentOpps.filter((o) => o.createdAt >= since24h).length;
   const last1h  = recentOpps.filter((o) => o.createdAt >= since1h).length;
 
-  const oppMap     = new Map(oppByPlatform.map((r)     => [r.platform, r._count._all]));
-  const channelMap = new Map(channelsByPlatform.map((r) => [r.platform, r._count._all]));
-  const trackedMap = new Map(trackedByPlatform.map((r)  => [r.platform, r._count._all]));
+  const oppMap = new Map(oppByPlatform.map((r) => [r.platform, r._count._all]));
+  // The scan scope is derived from the platform, so the overview splits the one
+  // target count into its channel/tracked columns the same way the app does.
+  const channelMap = new Map(
+    targetsByPlatform
+      .filter((r) => scanTypeFor(r.platform) === 'channel')
+      .map((r) => [r.platform, r._count._all])
+  );
+  const trackedMap = new Map(
+    targetsByPlatform
+      .filter((r) => scanTypeFor(r.platform) === 'tracked')
+      .map((r) => [r.platform, r._count._all])
+  );
 
   console.log('\n═══════════════════════════════════════════════════════');
   console.log(' ENGAGE STATS  —  ' + new Date().toLocaleString());
@@ -182,30 +192,35 @@ async function triggerScan(client: Client) {
 // ─── Scan targets ─────────────────────────────────────────────────────────────
 
 async function printTargets(prisma: PrismaClient) {
+  // `projectId: { not: null }` mirrors every production enumerator — the legacy
+  // null-project config is excluded from fan-out, so counting its units here
+  // would over-report what the ticker will actually scan.
   const orgs = await (prisma as any).engageConfig.findMany({
-    where: { enabled: true },
+    where: { enabled: true, projectId: { not: null } },
     include: {
       keywords:         { where: { enabled: true }, orderBy: { keyword: 'asc' } },
-      monitoredChannels:{ where: { enabled: true }, orderBy: { channelId: 'asc' } },
+      // One relation holds both scan-target scopes; split by platform below.
       trackedAccounts:  { where: { enabled: true }, orderBy: { username: 'asc' } },
     },
   });
 
   // Deduplicate exactly as the activity does
   const uniqueUsernames  = new Map<string, string[]>();  // lower → [username, ...]
-  const uniqueSubreddits = new Map<string, number>();    // channelId → max audienceSize
+  const uniqueSubreddits = new Map<string, number>();    // subreddit → max audienceSize
   const uniqueKeywords   = new Map<string, string>();    // lower → original
 
   for (const org of orgs) {
-    for (const acc of org.trackedAccounts) {
-      const key = (acc.username as string).toLowerCase();
+    for (const t of org.trackedAccounts) {
+      const platform = (t.platform as string) ?? 'x';
+      const name = t.username as string;
+      if (scanTypeFor(platform) === 'channel') {
+        const cur = uniqueSubreddits.get(name) ?? 0;
+        if ((t.audienceSize as number) > cur) uniqueSubreddits.set(name, t.audienceSize as number);
+        continue;
+      }
+      const key = name.toLowerCase();
       if (!uniqueUsernames.has(key)) uniqueUsernames.set(key, []);
-      uniqueUsernames.get(key)!.push(acc.username as string);
-    }
-    for (const ch of org.monitoredChannels) {
-      if (ch.platform !== 'reddit') continue;
-      const cur = uniqueSubreddits.get(ch.channelId as string) ?? 0;
-      if ((ch.audienceSize as number) > cur) uniqueSubreddits.set(ch.channelId as string, ch.audienceSize as number);
+      uniqueUsernames.get(key)!.push(name);
     }
     for (const kw of org.keywords) {
       uniqueKeywords.set((kw.keyword as string).toLowerCase(), kw.keyword as string);

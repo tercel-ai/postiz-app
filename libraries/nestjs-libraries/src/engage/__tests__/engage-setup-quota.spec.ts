@@ -85,20 +85,51 @@ describe('EngageService.setupEngage — quota gate', () => {
     }
   });
 
-  it('sums channels and tracked accounts on the SAME platform into one charge', async () => {
+  // NOTE: this used to pass `{ platform: 'x', channelId: 'list1' }` as a
+  // monitored channel to exercise "both kinds on one platform sum into one
+  // charge". That state is exactly what the scan-target merge made
+  // unrepresentable — reddit is the only channel-scope platform, so a channel
+  // and a tracked account can never share a platform, and the old fixture was
+  // asserting a shared pool while constructing a row no scanner could serve.
+  // What remains true, and is asserted here, is that ALL targets on one platform
+  // draw from that platform's single pool regardless of how many rows.
+  it('sums every target on one platform into a single per-platform charge', async () => {
     const { service, assertCanActivate } = buildService();
 
     await service.setupEngage(org, {
       monitoredChannels: [
-        { platform: 'x', channelId: 'list1', channelName: 'list one' },
+        { platform: 'reddit', channelId: 'seo', channelName: 'r/SEO' },
+        { platform: 'reddit', channelId: 'webdev', channelName: 'r/webdev' },
       ],
-      trackedAccounts: [{ platform: 'x', username: 'someone' }],
+      trackedAccounts: [
+        { platform: 'x', username: 'alice' },
+        { platform: 'x', username: 'bob' },
+      ],
     } as any);
 
-    // 1 channel + 1 tracked on X → a single combined charge of 2, so the two
-    // types cannot each fill the shared pool separately.
+    expect(charged(assertCanActivate, 'tracked', 'reddit')).toBe(2);
     expect(charged(assertCanActivate, 'tracked', 'x')).toBe(2);
-    expect(assertCanActivate).toHaveBeenCalledTimes(1);
+    expect(assertCanActivate).toHaveBeenCalledTimes(2);
+  });
+
+  // The gate's whole purpose: re-running an identical setup must cost nothing.
+  // The stored key is NORMALIZED, so projecting the raw DTO value here (as it
+  // did) never matched an existing channel and re-charged the cap on every run
+  // while createMany's skipDuplicates correctly wrote nothing.
+  it('charges nothing when the payload only repeats existing targets, whatever the casing', async () => {
+    const { service, assertCanActivate } = buildService({
+      monitoredChannels: [{ platform: 'reddit', channelId: 'seo' }],
+      trackedAccounts: [{ platform: 'x', username: 'alice' }],
+    });
+
+    await service.setupEngage(org, {
+      monitoredChannels: [
+        { platform: 'reddit', channelId: 'r/SEO', channelName: 'r/SEO' },
+      ],
+      trackedAccounts: [{ platform: 'x', username: '@Alice' }],
+    } as any);
+
+    expect(assertCanActivate).not.toHaveBeenCalled();
   });
 
   it('does not write when a cap rejects the payload', async () => {

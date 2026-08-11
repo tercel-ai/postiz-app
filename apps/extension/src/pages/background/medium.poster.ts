@@ -85,6 +85,15 @@ async function mediumFillEditor(
         el.dispatchEvent(new KeyboardEvent('keydown', opts));
         document.execCommand?.('insertParagraph');
         el.dispatchEvent(new KeyboardEvent('keyup', opts));
+        // Match one 'input' event per DOM mutation, same granularity as the
+        // keyboard events above — a single bulk 'input' fired after the whole
+        // loop (reporting the entire string as one insertion) is exactly the
+        // "multi-character insertion in one event" pattern Medium's own
+        // desync detector flags (see the block comment above), even though
+        // the per-character loop itself is correct.
+        el.dispatchEvent(
+          new InputEvent('input', { bubbles: true, inputType: 'insertParagraph' })
+        );
       } else {
         const opts = {
           bubbles: true,
@@ -100,12 +109,12 @@ async function mediumFillEditor(
         const inserted = document.execCommand?.('insertText', false, ch) ?? false;
         if (!inserted) el.textContent = (el.textContent || '') + ch;
         el.dispatchEvent(new KeyboardEvent('keyup', opts));
+        el.dispatchEvent(
+          new InputEvent('input', { bubbles: true, inputType: 'insertText', data: ch })
+        );
       }
       await sleepMs(8);
     }
-    el.dispatchEvent(
-      new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text })
-    );
   };
 
   // Medium nests the WHOLE story — the title heading plus every body

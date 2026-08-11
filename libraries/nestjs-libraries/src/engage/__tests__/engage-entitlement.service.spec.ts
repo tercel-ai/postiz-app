@@ -64,6 +64,71 @@ function repoMock(
   } as any;
 }
 
+/**
+ * engageTrackedAccount holds BOTH scan-target scopes since the merge, so one
+ * mock answers three different query shapes:
+ *   - `platform: 'x'`            → the per-platform priority-accounts pool
+ *   - `platform: { in: [...] }`  → the channel-scope breakdown
+ *   - `platform: { notIn: ... }` → the author-scope breakdown
+ *   - no platform predicate      → the cap query, i.e. both scopes together
+ * The tests keep naming the two scopes separately (trackedCount/channelCount);
+ * this is where they are added up the way storage now does.
+ */
+function targetRepoMock(opts: {
+  trackedCount?: number;
+  channelCount?: number;
+  trackedProjectCount?: number;
+  channelProjectCount?: number;
+  enabled?: boolean | null;
+  byPlatform?: Record<string, number>;
+}) {
+  const tracked = opts.trackedCount ?? 0;
+  const channel = opts.channelCount ?? 0;
+  const trackedProject = opts.trackedProjectCount ?? tracked;
+  const channelProject = opts.channelProjectCount ?? channel;
+  const enabled = opts.enabled ?? false;
+  return {
+    model: {
+      engageTrackedAccount: {
+        count: vi.fn(async (args: any = {}) => {
+          const platform = args?.where?.platform;
+          const perProject = args?.where?.configId !== undefined;
+          if (typeof platform === 'string') {
+            if (opts.byPlatform) return opts.byPlatform[platform] ?? 0;
+            return perProject ? trackedProject + channelProject : tracked + channel;
+          }
+          if (Array.isArray(platform?.in)) return perProject ? channelProject : channel;
+          if (Array.isArray(platform?.notIn)) return perProject ? trackedProject : tracked;
+          return perProject ? trackedProject + channelProject : tracked + channel;
+        }),
+        groupBy: vi.fn(async () =>
+          Object.entries(opts.byPlatform ?? {}).map(([platform, n]) => ({
+            platform,
+            _count: { _all: n },
+          }))
+        ),
+        findFirst: vi.fn(async () =>
+          enabled === null
+            ? null
+            : { enabled, configId: CONFIG_ID, platform: 'x' }
+        ),
+      },
+    },
+  } as any;
+}
+
+/** Sum two per-platform maps into the single pool the merged table reports. */
+function mergePlatformCounts(
+  a?: Record<string, number>,
+  b?: Record<string, number>
+): Record<string, number> {
+  const out: Record<string, number> = { ...(a ?? {}) };
+  for (const [platform, n] of Object.entries(b ?? {})) {
+    out[platform] = (out[platform] ?? 0) + n;
+  }
+  return out;
+}
+
 function build(opts: {
   settings?: Record<string, unknown>;
   limits?: unknown;
@@ -116,20 +181,19 @@ function build(opts: {
         opts.keywordProjectCount,
         opts.rowEnabled === undefined ? false : opts.rowEnabled
       ),
-      repoMock(
-        'engageTrackedAccount',
-        opts.trackedCount ?? 0,
-        opts.trackedProjectCount,
-        opts.rowEnabled === undefined ? false : opts.rowEnabled,
-        opts.trackedByPlatform
-      ),
-      repoMock(
-        'engageMonitoredChannel',
-        opts.channelCount ?? 0,
-        opts.channelProjectCount,
-        opts.rowEnabled === undefined ? false : opts.rowEnabled,
-        opts.channelByPlatform
-      ),
+      targetRepoMock({
+        trackedCount: opts.trackedCount,
+        channelCount: opts.channelCount,
+        trackedProjectCount: opts.trackedProjectCount,
+        channelProjectCount: opts.channelProjectCount,
+        enabled: opts.rowEnabled === undefined ? false : opts.rowEnabled,
+        // One table → one per-platform map. Tests that used to stub the two
+        // scopes separately have their platform counts summed here.
+        byPlatform:
+          opts.trackedByPlatform || opts.channelByPlatform
+            ? mergePlatformCounts(opts.trackedByPlatform, opts.channelByPlatform)
+            : undefined,
+      }),
       billing,
       organization,
       tx

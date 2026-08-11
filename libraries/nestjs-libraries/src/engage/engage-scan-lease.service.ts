@@ -20,14 +20,13 @@ export function normalizeKeyword(keyword: string): string {
   return keyword.trim().toLowerCase().replace(/\s+/g, ' ');
 }
 
-// Platforms whose USERNAME/handle is case-INSENSITIVE: "@Alice", " alice ",
+// Platforms whose target key is case-INSENSITIVE: "@Alice", " alice ",
 // "u/Alice" all denote one account, so the scan-unit key (and cross-org/
 // cross-path dedup) lowercases them. ID-based platforms whose key is a
 // case-SENSITIVE opaque id (Bluesky DID, YouTube channelId) must NOT be added
-// here — they fall to the default branch and are preserved verbatim. Today
-// every tracked platform is case-insensitive (X; Reddit's tracked scope is
-// inert), but the platform-keyed set is here so adding such a platform is a
-// one-line change, never a call-site refactor.
+// here — they fall to the default branch and are preserved verbatim. Reddit is
+// here for its CHANNEL scope: subreddit lookups are case-insensitive, so one
+// canonical lowercase form keeps the key stable across paths.
 const CASE_INSENSITIVE_HANDLE_PLATFORMS = new Set([
   'x',
   'reddit',
@@ -43,17 +42,26 @@ const CASE_INSENSITIVE_HANDLE_PLATFORMS = new Set([
 ]);
 
 /**
- * Canonical form of a tracked-account username used as the scan-unit key
- * (`EngageScanCursor.scanKey` for scanType='tracked'). ONE entry point so every
- * caller (workflow writer, extension enumerator, status reader) keys an account
+ * Canonical form of a scan target's key (`EngageTrackedAccount.username`), used
+ * as `EngageScanCursor.scanKey` for both scan scopes. ONE entry point so every
+ * caller (workflow writer, extension enumerator, status reader) keys a target
  * identically — a split "case-sensitive vs not" choice made per call site is
- * exactly the drift this prevents. Strips a leading `@` (X family) or `u/`
- * (Reddit) prefix, then lowercases ONLY for case-insensitive-handle platforms.
+ * exactly the drift this prevents. Strips a leading `@` (X family), `u/` or `r/`
+ * (Reddit), then lowercases ONLY for case-insensitive platforms.
+ *
+ * Reddit rows are CHANNEL scope, so the key is a bare subreddit name and `r/` is
+ * the prefix that actually shows up; `u/` is still stripped because the same
+ * function fed the (now removed) reddit tracked scope. Agrees with
+ * `normalizeSubreddit` on every input that one accepts.
  */
 export function normalizeUsername(platform: string, username: string): string {
   const trimmed = username.trim();
   if (CASE_INSENSITIVE_HANDLE_PLATFORMS.has(platform.toLowerCase())) {
-    return trimmed.replace(/^@/, '').replace(/^\/?u\//i, '').toLowerCase();
+    return trimmed
+      .replace(/^@/, '')
+      .replace(/^\/?[ur]\//i, '')
+      .replace(/\/+$/, '')
+      .toLowerCase();
   }
   // Case-sensitive / id-based platforms (e.g. Bluesky DID, YouTube channelId):
   // the key is an opaque id — preserve it verbatim, only trimming surrounding ws.

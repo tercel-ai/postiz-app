@@ -16,6 +16,10 @@
  *
  * Flags:
  *   --org, --orgId <id>         Organization id. Required.
+ *   --project, --projectId <id> EngageConfig.projectId to replay. Omitted →
+ *                               prefers a project-scoped config (what production
+ *                               actually fans out to), falling back to the legacy
+ *                               null-project row only if none exists.
  *   --platform <reddit|x|all>   Platform to scan. Default: reddit.
  *   --scope <all|keyword|channel|tracked>
  *                               Scan units to run. Default: all.
@@ -33,7 +37,7 @@ process.env.NODE_ENV = process.env.NODE_ENV || 'production';
 process.env.TZ = 'UTC';
 
 import { setupHttpDispatcher } from '@gitroom/helpers/proxy/setup-dispatcher';
-import { PrismaClient, EngageKeyword } from '@prisma/client';
+import { PrismaClient, EngageKeyword, Prisma } from '@prisma/client';
 import {
   RawPost,
   ScoredPost,
@@ -60,6 +64,8 @@ type ScopeArg = 'all' | ScanType;
 
 interface CliArgs {
   orgId: string;
+  /** Explicit EngageConfig.projectId. Omitted → auto-select (see main). */
+  projectId: string | null;
   platform: PlatformArg;
   scope: ScopeArg;
   keyword: string | null;
@@ -123,6 +129,7 @@ function takeValue(args: string[], index: number): string {
 function parseArgs(): CliArgs {
   const raw = process.argv.slice(2);
   let orgId = '';
+  let projectId: string | null = null;
   let platform: PlatformArg = 'reddit';
   let scope: ScopeArg = 'all';
   let keyword: string | null = null;
@@ -136,6 +143,11 @@ function parseArgs(): CliArgs {
       case '--org':
       case '--orgId':
         orgId = takeValue(raw, i);
+        i++;
+        break;
+      case '--project':
+      case '--projectId':
+        projectId = takeValue(raw, i);
         i++;
         break;
       case '--platform': {
@@ -194,7 +206,7 @@ function parseArgs(): CliArgs {
     console.error('--org is required');
     usage(1);
   }
-  return { orgId, platform, scope, keyword, maxCalls, useCursor, token, json };
+  return { orgId, projectId, platform, scope, keyword, maxCalls, useCursor, token, json };
 }
 
 function maskDbUrl(url: string | undefined): string {
@@ -471,8 +483,11 @@ function analyzePosts(
   monitored: Array<{ platform: string; channelId: string }>
 ): AnalyzedPost[] {
   const trackedNames = new Set(tracked.map((a) => a.username.toLowerCase()));
+  // The caller already split by platform when it built this list, so a second
+  // reddit test here is a no-op — mirrors the production scorer, which dropped
+  // the same redundant filter.
   const monitoredSubreddits = new Set(
-    monitored.filter((c) => c.platform === 'reddit').map((c) => c.channelId.toLowerCase())
+    monitored.map((c) => c.channelId.toLowerCase())
   );
 
   return posts.map((post) => {
@@ -550,9 +565,20 @@ async function main(): Promise<void> {
     console.log(`minScore  : ${MIN_SCORE}`);
     console.log(`database  : ${maskDbUrl(process.env.DATABASE_URL)}`);
 
-    const config = await prisma.engageConfig.findUnique({
-      where: { organizationId: args.orgId },
-      include: {
+    // findFirst, not findUnique: EngageConfig's unique key is
+    // (organizationId, projectId), so an org alone no longer identifies one row.
+    //
+    // Config selection matters for what this tool REPORTS. Production fan-out
+    // resolves subscribers with `projectId: { not: null }` — the legacy
+    // null-project row is deliberately excluded — so pinning to it would replay
+    // a target set that never runs, and would report "no engage config" for an
+    // org whose Engage is project-scoped and actively scanning. Prefer a
+    // project-scoped config (explicit --project wins), fall back to the legacy
+    // row only when none exists, and always print which one was replayed.
+    const configWhere: Prisma.EngageConfigWhereInput = args.projectId
+      ? { organizationId: args.orgId, projectId: args.projectId }
+      : { organizationId: args.orgId, projectId: { not: null } };
+    const include = {
         keywords: {
           where: {
             enabled: true,
@@ -560,22 +586,45 @@ async function main(): Promise<void> {
           },
           orderBy: { createdAt: 'asc' },
         },
-        monitoredChannels: {
-          where: { enabled: true, platform: 'reddit' },
-          orderBy: { channelId: 'asc' },
-          select: { platform: true, channelId: true, channelName: true, audienceSize: true },
-        },
+        // Channels and accounts are ONE relation now — fetch both scopes and
+        // split by platform below, where the rest of this script still wants
+        // two lists.
         trackedAccounts: {
-          where: { enabled: true, platform: 'x' },
+          where: { enabled: true, platform: { in: ['reddit', 'x'] } },
           orderBy: { username: 'asc' },
-          select: { username: true, displayName: true },
+          select: {
+            platform: true,
+            username: true,
+            displayName: true,
+            audienceSize: true,
+          },
         },
-      },
-    });
+    } satisfies Prisma.EngageConfigInclude;
+
+    const config =
+      (await prisma.engageConfig.findFirst({
+        where: configWhere,
+        orderBy: { createdAt: 'asc' },
+        include,
+      })) ??
+      // Legacy fallback, only when the org has no project-scoped config at all.
+      (args.projectId
+        ? null
+        : await prisma.engageConfig.findFirst({
+            where: { organizationId: args.orgId, projectId: null },
+            include,
+          }));
 
     if (!config) {
-      throw new Error(`No EngageConfig found for org ${args.orgId}`);
+      throw new Error(
+        args.projectId
+          ? `No EngageConfig found for org ${args.orgId} project ${args.projectId}`
+          : `No EngageConfig found for org ${args.orgId}`
+      );
     }
+    console.log(
+      `config    : ${config.id} (projectId: ${config.projectId ?? 'null — LEGACY, production fan-out excludes this config'})`
+    );
     if (!config.enabled) {
       console.warn('WARN Engage config is disabled for this org. Production ticker skips disabled org contexts.');
     }
@@ -583,15 +632,26 @@ async function main(): Promise<void> {
       throw new Error(args.keyword ? `Keyword "${args.keyword}" is not enabled for this org` : 'No enabled keywords for this org');
     }
 
+    // Reddit rows are channel scope, x rows are author scope (see scanTypeFor).
+    const monitoredChannels = config.trackedAccounts
+      .filter((t) => t.platform === 'reddit')
+      .map((t) => ({
+        platform: t.platform,
+        channelId: t.username,
+        channelName: t.displayName ?? t.username,
+        audienceSize: t.audienceSize,
+      }));
+    const trackedAccounts = config.trackedAccounts.filter((t) => t.platform === 'x');
+
     console.log(`keywords  : ${config.keywords.map((kw) => `"${kw.keyword}"`).join(', ')}`);
     console.log(
-      `reddit ch : ${config.monitoredChannels.length ? config.monitoredChannels.map((ch) => `r/${ch.channelId}`).join(', ') : '(none)'}`
+      `reddit ch : ${monitoredChannels.length ? monitoredChannels.map((ch) => `r/${ch.channelId}`).join(', ') : '(none)'}`
     );
     console.log(
-      `x tracked : ${config.trackedAccounts.length ? config.trackedAccounts.map((a) => `@${a.username}`).join(', ') : '(none)'}`
+      `x tracked : ${trackedAccounts.length ? trackedAccounts.map((a) => `@${a.username}`).join(', ') : '(none)'}`
     );
 
-    const units = buildUnits(args, config.monitoredChannels, config.trackedAccounts);
+    const units = buildUnits(args, monitoredChannels, trackedAccounts);
     if (!units.length) {
       console.log('\nNo scan units for the selected platform/scope.');
       return;
@@ -637,8 +697,8 @@ async function main(): Promise<void> {
       deduped,
       config.keywords,
       states,
-      config.trackedAccounts,
-      config.monitoredChannels
+      trackedAccounts,
+      monitoredChannels
     );
 
     const keywordMatched = analyzed.filter((p) => p.scored).length;

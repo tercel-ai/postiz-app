@@ -2,7 +2,10 @@ import 'reflect-metadata';
 import { describe, it, expect } from 'vitest';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
-import { EngageScanIngestDto } from '../scan-ingest.dto';
+import {
+  EngageScanIngestDto,
+  ScanUnitSelectorDto,
+} from '../scan-ingest.dto';
 
 async function errorsFor(payload: unknown): Promise<string[]> {
   const dto = plainToInstance(EngageScanIngestDto, payload);
@@ -65,5 +68,36 @@ describe('EngageScanIngestDto', () => {
         exhausted: true,
       })
     ).toEqual([]);
+  });
+});
+
+describe('ScanUnitSelectorDto', () => {
+  const selectorErrorsFor = async (payload: unknown): Promise<string[]> => {
+    const dto = plainToInstance(ScanUnitSelectorDto, payload);
+    const errors = await validate(dto as object, { whitelist: false });
+    return errors.flatMap((e) => Object.keys(e.constraints ?? {}));
+  };
+
+  it('accepts every platform the scan system serves', async () => {
+    for (const platform of ['x', 'reddit', 'linkedin', 'devto', 'hackernews', 'medium', 'quora']) {
+      expect(
+        await selectorErrorsFor({ platform, scanType: 'keyword', scanKey: 'ai search' })
+      ).toEqual([]);
+    }
+  });
+
+  it('rejects an unknown platform', async () => {
+    const errs = await selectorErrorsFor({ platform: 'facebook', scanType: 'keyword', scanKey: 'x' });
+    expect(errs).toContain('isIn');
+  });
+
+  it('rejects an invalid scanType', async () => {
+    const errs = await selectorErrorsFor({ platform: 'quora', scanType: 'author', scanKey: 'x' });
+    expect(errs).toContain('isIn');
+  });
+
+  it('requires scanKey', async () => {
+    const errs = await selectorErrorsFor({ platform: 'quora', scanType: 'keyword' });
+    expect(errs).toContain('isString');
   });
 });

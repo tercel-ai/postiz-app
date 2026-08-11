@@ -334,7 +334,7 @@ describe('EngageScanTasksService.sync — claim (bootstrap)', () => {
         snap({ platform: 'reddit', scanType: 'keyword', scanKey: 'shared', leaseToken: 't2' }),
         snap({ platform: 'x', scanType: 'keyword', scanKey: 'projectonly', leaseToken: 't3' }),
         snap({ platform: 'reddit', scanType: 'keyword', scanKey: 'projectonly', leaseToken: 't4' }),
-        snap({ platform: 'reddit', scanType: 'channel', scanKey: 'ProjSub', leaseToken: 't5' }),
+        snap({ platform: 'reddit', scanType: 'channel', scanKey: 'projsub', leaseToken: 't5' }),
       ],
     });
 
@@ -343,7 +343,9 @@ describe('EngageScanTasksService.sync — claim (bootstrap)', () => {
     // 'shared' → 1 unit per platform (deduped), not 2; 'projectonly' from the
     // project config is included; the project's monitored channel is included.
     const claimed = lease.claim.mock.calls.map(([a]) => `${a.platform}:${a.scanType}:${a.scanKey}`);
-    expect(claimed).toContain('reddit:channel:ProjSub');
+    // Channel keys are normalized like tracked keys since the scan-target merge
+    // (both go through normalizeUsername), so 'ProjSub' claims as 'projsub'.
+    expect(claimed).toContain('reddit:channel:projsub');
     expect(claimed).toContain('x:keyword:projectonly');
     expect(claimed.filter((k) => k === 'x:keyword:shared')).toHaveLength(1);
     expect(claimed.filter((k) => k === 'reddit:keyword:shared')).toHaveLength(1);

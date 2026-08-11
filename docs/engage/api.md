@@ -135,7 +135,7 @@ interface EngageConfig {
   updatedAt: string;
   // Embedded relations (only returned by GET /config)
   keywords: EngageKeyword[];
-  monitoredChannels: EngageMonitoredChannel[];
+  monitoredChannels: MonitoredChannel[];   // channel-scope scan targets (reddit)
   trackedAccounts: EngageTrackedAccount[];
   xReplyAccounts: EngageXReplyAccount[];
   // Scan scheduling + status (only returned by GET /config)
@@ -186,16 +186,23 @@ interface EngageKeyword {
 }
 ```
 
-### EngageMonitoredChannel
+### MonitoredChannel
+
+> **Storage note.** There is no `EngageMonitoredChannel` table any more — monitored
+> channels are `EngageTrackedAccount` rows whose platform has a *channel* scope
+> (reddit). The `/monitored-channels` routes are a **thin alias** that keeps this
+> wire shape unchanged (`username`→`channelId`, `displayName`→`channelName`,
+> `lastCheckedAt`→`lastScannedAt`), so no client change was needed. See
+> `tech-design.md` § SCAN TARGETS.
 
 ```typescript
-interface EngageMonitoredChannel {
+interface MonitoredChannel {
   id: string;
   configId: string;
   organizationId: string;
-  platform: string;      // 'reddit' | 'youtube' | ...
-  channelId: string;     // e.g. 'SEO' (subreddit name without r/)
-  channelName: string;   // e.g. 'r/SEO'
+  platform: string;      // 'reddit' — the only platform with a channel scope
+  channelId: string;     // e.g. 'seo' — the CANONICAL key (see below)
+  channelName: string;   // e.g. 'r/SEO' (display name; never null)
   audienceSize: number;
   enabled: boolean;
   lastScannedAt: string | null;
@@ -203,6 +210,13 @@ interface EngageMonitoredChannel {
   createdAt: string;
   updatedAt: string;
 }
+```
+
+> **`channelId` is normalised on write.** The server stores the canonical
+> scan-unit key: lowercased, with a leading `r/` or `u/` and any trailing slashes
+> stripped. `r/SEO`, `/r/SEO/` and `SEO` all store — and read back — as `seo`.
+> Match it case-insensitively if you compare it against a value from Reddit,
+> which returns the community's display casing.
 ```
 
 ### EngageTrackedAccount
@@ -406,7 +420,7 @@ interface EngageExtensionReply {
 |---|---|---|
 | `projectId` | No | Project scope for the created config/keywords/channels/accounts. Omit for legacy null-project config. |
 | `keywords` | **Yes** (1–100 items) | Keywords to monitor. `type` optional (`CORE`/`BRAND`/`COMPETITOR`). Duplicates skipped. |
-| `monitoredChannels` | No | Channels to scan. Duplicates (`platform+channelId`) skipped. |
+| `monitoredChannels` | No | Channels to scan. Duplicates (`platform`+normalised `channelId`) skipped. Each entry is validated exactly as `POST /monitored-channels` — a bad platform or community name rejects the whole payload with a 400. |
 | `trackedAccounts` | No | External accounts to track. Duplicates (`platform+username`) skipped. |
 
 **Response** `200 OK` — Returns the updated `EngageConfig` (with `enabled: true`)
@@ -602,7 +616,7 @@ Retrieve all monitored channels for the current organization.
 |---|---|---|
 | `projectId` | string | Optional project scope. |
 
-**Response** `200 OK` — `EngageMonitoredChannel[]`
+**Response** `200 OK` — `MonitoredChannel[]`
 
 ```json
 [
@@ -665,8 +679,8 @@ Add a monitored channel. `channelId` + `platform` must be unique; duplicate addi
 
 ```json
 {
-  "platform": "reddit",
-  "channelId": "SEO",          // Required, subreddit name (without r/)
+  "platform": "reddit",        // Required — MUST be 'reddit' (only channel-scope platform)
+  "channelId": "SEO",          // Required, subreddit name; normalised to 'seo' on store
   "channelName": "r/SEO",      // Required, display name
   "audienceSize": 1200000,     // Optional
   "metadata": {},              // Optional, any JSON
@@ -674,7 +688,17 @@ Add a monitored channel. `channelId` + `platform` must be unique; duplicate addi
 }
 ```
 
-**Response** `200 OK` — Returns the created `EngageMonitoredChannel`
+**Response** `200 OK` — Returns the created `MonitoredChannel`. Note `channelId`
+comes back **normalised**, which may differ from what you sent (`r/SEO` → `seo`).
+
+**Error** `400` — one of:
+- `platform` is not `reddit` (no other platform has a channel scope)
+- `platform` has no scanner at all
+- `channelId` is not a valid subreddit name after normalisation
+  (`[a-z0-9_]{2,21}` — note `-` is legal in a reddit *username* but not a
+  community name)
+
+**Error** `409` — this config already monitors that community.
 
 ---
 
@@ -692,7 +716,9 @@ Update channel information.
 }
 ```
 
-**Response** `200 OK` — Returns the updated `EngageMonitoredChannel`
+**Response** `200 OK` — Returns the updated `MonitoredChannel`
+
+> `channelId` is immutable — the scan cursor is keyed on it. Delete and re-add to change it.
 
 **Error** `404` — Channel not found
 
@@ -702,7 +728,7 @@ Update channel information.
 
 Delete a monitored channel (historical Feed records are preserved).
 
-**Response** `200 OK` — Returns the deleted `EngageMonitoredChannel`
+**Response** `200 OK` — Returns the deleted `MonitoredChannel`
 
 **Error** `404` — Channel not found
 
@@ -734,14 +760,27 @@ Add a tracked account.
 
 ```json
 {
-  "username": "randfish",       // Required, 1-50 characters, without @ prefix
-  "platform": "x",             // Optional, default 'x'
+  "username": "randfish",       // Required, 1-50 characters; @ / u/ prefixes are stripped
+  "platform": "x",             // Optional, default 'x'. Must have an AUTHOR scope
   "categoryLabel": "GEO Expert", // Optional, max 100 characters
   "projectId": "product_123"     // Optional project scope
 }
 ```
 
-**Response** `200 OK` — Returns the created `EngageTrackedAccount`
+**Response** `200 OK` — Returns the created `EngageTrackedAccount`. `username`
+comes back **normalised** (`@Alice` → `alice` on case-insensitive platforms;
+LinkedIn / Hacker News / Quora keep their casing, their handles are case-sensitive).
+
+**Error** `400` — one of:
+- `platform` is `reddit` — reddit has a *channel* scope, so use
+  `POST /monitored-channels` instead
+- `platform` has no scanner (`youtube`, `qq`, `discord`, …). A platform that has
+  a scanner but is not currently in the operator's allowlist is **accepted** —
+  that is a config state, not a capability gap
+- `username` is not a plain handle after normalisation (guards the `from:<user>`
+  search query against injected operators)
+
+**Error** `409` — this config already tracks that account.
 
 ---
 

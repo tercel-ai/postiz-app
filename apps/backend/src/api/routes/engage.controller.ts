@@ -307,6 +307,12 @@ export class EngageController {
   }
 
   // ─── Monitored Channels ───────────────────────────────────────────────────
+  //
+  // A THIN ALIAS since the scan-target merge: channels are EngageTrackedAccount
+  // rows whose platform has a channel scope (reddit). These routes keep the old
+  // paths and the old channelId/channelName response shape so the frontend and
+  // the extension needed no coordinated release — the repository does the
+  // translation. Retire them once every client reads /tracked-accounts.
 
   @ApiOperation({ summary: 'List monitored channels for this org' })
   @Get('/monitored-channels')
@@ -317,7 +323,13 @@ export class EngageController {
     return this._engageService.listMonitoredChannels(org, projectId);
   }
 
-  @ApiOperation({ summary: 'Add a channel to monitor (Reddit subreddit, etc.)' })
+  @ApiOperation({ summary: 'Add a subreddit to monitor' })
+  @ApiResponse({
+    status: 400,
+    description:
+      'Platform has no channel scope (only reddit does), or the community name is not a valid subreddit',
+  })
+  @ApiResponse({ status: 409, description: 'Channel already monitored by this config' })
   @Post('/monitored-channels')
   addMonitoredChannel(
     @GetOrgFromRequest() org: Organization,

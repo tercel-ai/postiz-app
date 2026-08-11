@@ -21,8 +21,8 @@ function buildWithCursor(row: any, claimCount = 1) {
   const cursorRepo = { model: { engageScanCursor: { upsert, updateMany, update } } };
   const activity = new EngageScanActivity(
     {} as any, {} as any, {} as any, {} as any, {} as any,
-    {} as any, {} as any, {} as any, {} as any,
-    cursorRepo as any,
+    {} as any, {} as any, {} as any,
+    cursorRepo as any, // _scanCursor (index 8)
     {} as any
   );
   return { activity, upsert, updateMany };

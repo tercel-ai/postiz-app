@@ -188,10 +188,12 @@ export class EngageScanIngestService {
     const trackedUsernames = new Set(
       ctx.trackedAccounts.map((a) => a.username.toLowerCase())
     );
+    // No platform test on the LIST — partitionScanTargets only routes a row into
+    // monitoredChannels when scanTypeFor(platform) === 'channel'. The
+    // `p.platform === 'reddit'` test below gates on the POST's platform, which is
+    // a different question and stays.
     const monitoredSubreddits = new Set(
-      ctx.monitoredChannels
-        .filter((c) => c.platform === 'reddit')
-        .map((c) => c.channelId.toLowerCase())
+      ctx.monitoredChannels.map((c) => c.channelId.toLowerCase())
     );
 
     return posts

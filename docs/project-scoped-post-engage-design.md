@@ -61,7 +61,7 @@ EngageXReplyAccount (alter existing)
   remove global UNIQUE(integrationId)
   UNIQUE(configId, integrationId)
 
-EngageMonitoredChannel / EngageTrackedAccount / EngageKeywordInitialScan
+EngageTrackedAccount (all scan targets) / EngageKeywordInitialScan
   remain project-owned through configId or keywordId
 ```
 

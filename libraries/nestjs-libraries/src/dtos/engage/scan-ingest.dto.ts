@@ -14,6 +14,7 @@ import {
   ValidateNested,
 } from 'class-validator';
 import { RawPost } from '@gitroom/nestjs-libraries/engage/engage-scorer';
+import { ScanTaskPlatform } from '@gitroom/nestjs-libraries/engage/scan/scan-task.types';
 
 /**
  * One post the extension fetched (with the user's session) and NORMALISED to the
@@ -80,8 +81,25 @@ export class EngageScanIngestDto {
   @IsOptional() @IsBoolean() exhausted?: boolean;
 }
 
+/**
+ * All platforms the scan system can serve. Mirrors `ScanTaskPlatform` in
+ * scan-task.types.ts — keep them in sync when a platform is added/removed,
+ * otherwise the extension's selectedUnits get rejected at the DTO gate while
+ * the service already enumerates the platform.
+ */
+const SCAN_UNIT_SELECTOR_PLATFORMS: readonly ScanTaskPlatform[] = [
+  'x',
+  'reddit',
+  'linkedin',
+  'devto',
+  'hackernews',
+  'medium',
+  'quora',
+];
+
 export class ScanUnitSelectorDto {
-  @IsIn(['x', 'reddit', 'linkedin']) platform: 'x' | 'reddit' | 'linkedin';
+  @IsIn(SCAN_UNIT_SELECTOR_PLATFORMS as unknown as string[])
+  platform: ScanTaskPlatform;
   @IsIn(['keyword', 'channel', 'tracked']) scanType: 'keyword' | 'channel' | 'tracked';
   @IsString() scanKey: string;
 }

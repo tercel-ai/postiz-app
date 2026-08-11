@@ -1,4 +1,5 @@
 import { redditPublicGet } from '@gitroom/nestjs-libraries/engage/reddit-loid';
+import { SUBREDDIT_NAME_RE as SHARED_SUBREDDIT_NAME_RE } from '@gitroom/nestjs-libraries/engage/engage-scan-target';
 
 // Reddit posting is not "content-only" like X: the submit API (reddit.provider
 // `post()`) hard-requires a target subreddit, a title, and a post `type`, and
@@ -11,7 +12,7 @@ import { redditPublicGet } from '@gitroom/nestjs-libraries/engage/reddit-loid';
 //
 // Two tiers, by design (see the design discussion):
 //   Tier 1 — the project's Engage config already monitors Reddit channels
-//            (EngageMonitoredChannel, platform='reddit'). Those are user-curated
+//            (EngageTrackedAccount, platform='reddit'). Those are user-curated
 //            and already the project's chosen communities, so we trust them and
 //            only probe to learn the submission type (self vs link-only).
 //   Tier 2 — no monitored channels: the LLM proposes a subreddit, which we
@@ -31,7 +32,13 @@ import { redditPublicGet } from '@gitroom/nestjs-libraries/engage/reddit-loid';
 // A subreddit name is 3–21 chars of letters/digits/underscore (no hyphen, unlike
 // a username). We clamp the min to 2 only to satisfy the DTO's @MinLength(2);
 // Reddit itself rejects <3, which the probe's 404 then catches.
-const SUBREDDIT_NAME_RE = /^[a-z0-9_]{2,21}$/;
+// Shared with the scan-target write boundary (engage-scan-target.ts), so a name
+// this resolver would reject can no longer be stored as a monitored channel in
+// the first place. Two copies previously drifted: the write path validated a
+// community key with the reddit USERNAME alphabet, which admits `-` and 30
+// chars, so `foo-bar` was storable and then silently dropped from the Tier-1
+// pool here.
+const SUBREDDIT_NAME_RE = SHARED_SUBREDDIT_NAME_RE;
 
 // Newest post must be at most this old for a Tier-2 candidate to count as
 // "alive" — a community nobody has posted to in 48h is not worth seeding into.
@@ -67,7 +74,16 @@ export function applyTitleTag(
  * leading `r/` or `/r/`, a trailing slash, surrounding whitespace, then
  * lowercases and validates the charset. Lowercasing is safe: Reddit subreddit
  * lookups are case-insensitive, and storing one canonical form keeps the
- * EngageMonitoredChannel key (channelId) stable across paths.
+ * scan-target key (EngageTrackedAccount.username on reddit rows) stable across
+ * paths.
+ *
+ * Relationship to normalizeUsername('reddit', …): the two agree on every input
+ * this one ACCEPTS, with one exception — whitespace between the prefix and the
+ * name (`r/ foo`), which this function trims a second time after stripping the
+ * prefix and normalizeUsername does not. Nothing feeds a value into both today;
+ * the note is here because the equivalence is load-bearing (the write path keys
+ * a row through normalizeUsername, this resolver reads it back through here).
+ * Unlike normalizeUsername, this one also VALIDATES — null for anything unusable.
  */
 export function normalizeSubreddit(raw: string | null | undefined): string | null {
   if (!raw) return null;

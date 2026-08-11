@@ -160,13 +160,25 @@ export class AddKeywordsBulkDto {
 // ─── Monitored Channels ───────────────────────────────────────────────────────
 
 export class AddMonitoredChannelDto {
-  @IsString()
-  platform: string; // 'reddit' | 'youtube' | 'qq' | 'discord' | ...
+  // A monitored channel is a CHANNEL-scope scan target, and reddit is the only
+  // platform with a channel scope (CHANNEL_SCOPE_PLATFORMS in
+  // engage-scan-target.ts). This used to be a free-form @IsString() documented
+  // as 'reddit' | 'youtube' | 'qq' | 'discord', which let a caller store a row
+  // no scanner could serve — and, after the scan-target merge, one whose key
+  // reached the shared X `from:` query. Enumerated here so the rejection is a
+  // validation error at the boundary rather than a 400 from deep inside the
+  // repository. Widen this the day another platform gains a channel scanner.
+  @IsIn(['reddit'])
+  platform: string;
 
+  // Bare community name. `r/` prefixes and casing are normalised server-side
+  // (buildScanTargetKey); the stored value is the canonical scan-unit key.
   @IsString()
+  @MaxLength(64)
   channelId: string;
 
   @IsString()
+  @MaxLength(128)
   channelName: string;
 
   @IsOptional()

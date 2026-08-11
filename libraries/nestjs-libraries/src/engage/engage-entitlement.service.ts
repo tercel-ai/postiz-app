@@ -23,6 +23,7 @@ import {
   PrismaRepository,
   PrismaTransaction,
 } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
+import { CHANNEL_SCOPE_PLATFORMS } from '@gitroom/nestjs-libraries/engage/engage-scan-target';
 
 dayjs.extend(utc);
 
@@ -57,12 +58,15 @@ export type ReplyLength = 'short' | 'medium' | 'long';
 
 /**
  * The unit kinds a plan caps. `tracked` (priority accounts) and `subreddit`
- * (monitored channels) identify different tables but draw from the SAME cap
- * pair (`priorityAccounts*`), scoped PER PLATFORM — each platform gets its own
- * "priority accounts" budget covering that platform's followed accounts and
- * monitored channels together.
+ * (monitored channels) are two names for rows of the SAME table — they were
+ * separate tables until the scan-target merge, and both have always drawn from
+ * the SAME cap pair (`priorityAccounts*`), scoped PER PLATFORM. The two names
+ * survive as caller-facing labels; every count below treats them identically.
  */
 export type EngageLimitType = 'keyword' | 'tracked' | 'subreddit';
+
+/** True for the caller-facing labels that both mean "a scan target". */
+const isTargetLimit = (type: EngageLimitType): boolean => type !== 'keyword';
 
 /** Which cap rejected an activation — the org-wide budget or the per-project one. */
 export type EngageLimitScope = 'organization' | 'project';
@@ -257,7 +261,6 @@ export class EngageEntitlementService implements OnModuleInit {
     private readonly _aiseeCredit: AiseeCreditService,
     private readonly _keyword: PrismaRepository<'engageKeyword'>,
     private readonly _trackedAccount: PrismaRepository<'engageTrackedAccount'>,
-    private readonly _channel: PrismaRepository<'engageMonitoredChannel'>,
     private readonly _billingRecord: PrismaRepository<'billingRecord'>,
     private readonly _organization: PrismaRepository<'organization'>,
     private readonly _tx: PrismaTransaction
@@ -723,30 +726,26 @@ export class EngageEntitlementService implements OnModuleInit {
         select: { enabled: true, configId: true },
       });
     }
-    // tracked/channel rows carry the platform their per-platform pool keys on.
-    const select = { enabled: true, configId: true, platform: true };
-    if (type === 'tracked') {
-      return this._trackedAccount.model.engageTrackedAccount.findFirst({
-        where: { id, organizationId: orgId },
-        select,
-      });
-    }
-    return this._channel.model.engageMonitoredChannel.findFirst({
+    // Scan-target rows carry the platform their per-platform pool keys on. Both
+    // 'tracked' and 'subreddit' resolve here — one table, one lookup.
+    return this._trackedAccount.model.engageTrackedAccount.findFirst({
       where: { id, organizationId: orgId },
-      select,
+      select: { enabled: true, configId: true, platform: true },
     });
   }
 
   private _label(type: EngageLimitType): string {
     // tracked + subreddit share one cap, so the shortfall message names the
-    // shared pool rather than whichever table happened to trigger it.
+    // shared pool rather than whichever label happened to trigger it.
     return type === 'keyword' ? 'keywords' : 'priority accounts';
   }
 
   /**
-   * Org-wide enabled priority-accounts usage per platform (tracked accounts +
-   * monitored channels summed) — the numbers a UI needs to gate "+ Add"
-   * against the per-platform cap without re-deriving the pool rule.
+   * Org-wide enabled priority-accounts usage per platform — the numbers a UI
+   * needs to gate "+ Add" against the per-platform cap without re-deriving the
+   * pool rule. Tracked accounts and monitored channels are the same table, so
+   * this is one groupBy; the pool rule ("both kinds share a platform's budget")
+   * is now enforced by storage rather than by summing two queries.
    */
   async getPriorityAccountsUsageByPlatform(
     orgId: string
@@ -756,21 +755,25 @@ export class EngageEntitlementService implements OnModuleInit {
       where: { organizationId: orgId, enabled: true },
       _count: { _all: true },
     };
-    // The models are cast to `any` before calling groupBy: Prisma's groupBy
+    // The model is cast to `any` before calling groupBy: Prisma's groupBy
     // generics expand into a self-referencing mapped type that tsc rejects
     // with TS2615 (argument-level `as any` does not stop the inference).
-    const [tracked, channels] = (await Promise.all([
-      (this._trackedAccount.model.engageTrackedAccount as any).groupBy(args),
-      (this._channel.model.engageMonitoredChannel as any).groupBy(args),
-    ])) as Array<Array<{ platform: string; _count: { _all: number } }>>;
+    const rows = (await (
+      this._trackedAccount.model.engageTrackedAccount as any
+    ).groupBy(args)) as Array<{ platform: string; _count: { _all: number } }>;
     const usage: Record<string, number> = {};
-    for (const row of [...tracked, ...channels]) {
+    for (const row of rows) {
       usage[row.platform] = (usage[row.platform] ?? 0) + row._count._all;
     }
     return usage;
   }
 
-  /** Enabled rows of ONE table, org-wide — per-type usage for the read model. */
+  /**
+   * Enabled rows of ONE kind, org-wide — the per-kind breakdown the read model
+   * shows. Unlike the cap counts below, this DOES separate accounts from
+   * channels (the settings UI lists them apart), so it filters on the platform
+   * sets that define each scope.
+   */
   private async _countEnabled(
     orgId: string,
     type: EngageLimitType
@@ -780,40 +783,40 @@ export class EngageEntitlementService implements OnModuleInit {
         where: { organizationId: orgId, enabled: true },
       });
     }
-    if (type === 'tracked') {
-      return this._trackedAccount.model.engageTrackedAccount.count({
-        where: { organizationId: orgId, enabled: true },
-      });
-    }
-    return this._channel.model.engageMonitoredChannel.count({
-      where: { organizationId: orgId, enabled: true },
+    return this._trackedAccount.model.engageTrackedAccount.count({
+      where: {
+        organizationId: orgId,
+        enabled: true,
+        platform:
+          type === 'tracked'
+            ? { notIn: [...CHANNEL_SCOPE_PLATFORMS] }
+            : { in: [...CHANNEL_SCOPE_PLATFORMS] },
+      },
     });
   }
 
   /**
    * Org-wide usage counted AGAINST the cap for `type`: keywords count alone,
-   * while tracked accounts and monitored channels are summed — on ONE platform
-   * they consume the same per-platform priority-accounts budget. Omitting
-   * `platform` counts across all platforms (fail-closed fallback).
+   * while tracked accounts and monitored channels count TOGETHER — on ONE
+   * platform they consume the same per-platform priority-accounts budget, which
+   * is why this deliberately does NOT filter by scope the way _countEnabled
+   * does. Omitting `platform` counts across all platforms (fail-closed fallback).
    */
   private async _countEnabledForCap(
     orgId: string,
     type: EngageLimitType,
     platform?: string | null
   ): Promise<number> {
-    if (type === 'keyword') {
+    if (!isTargetLimit(type)) {
       return this._countEnabled(orgId, 'keyword');
     }
-    const where = {
-      organizationId: orgId,
-      enabled: true,
-      ...(platform ? { platform } : {}),
-    };
-    const [tracked, channels] = await Promise.all([
-      this._trackedAccount.model.engageTrackedAccount.count({ where }),
-      this._channel.model.engageMonitoredChannel.count({ where }),
-    ]);
-    return tracked + channels;
+    return this._trackedAccount.model.engageTrackedAccount.count({
+      where: {
+        organizationId: orgId,
+        enabled: true,
+        ...(platform ? { platform } : {}),
+      },
+    });
   }
 
   /**
@@ -828,21 +831,18 @@ export class EngageEntitlementService implements OnModuleInit {
     type: EngageLimitType,
     platform?: string | null
   ): Promise<number> {
-    if (type === 'keyword') {
+    if (!isTargetLimit(type)) {
       return this._keyword.model.engageKeyword.count({
         where: { configId, enabled: true },
       });
     }
-    const where = {
-      configId,
-      enabled: true,
-      ...(platform ? { platform } : {}),
-    };
-    const [tracked, channels] = await Promise.all([
-      this._trackedAccount.model.engageTrackedAccount.count({ where }),
-      this._channel.model.engageMonitoredChannel.count({ where }),
-    ]);
-    return tracked + channels;
+    return this._trackedAccount.model.engageTrackedAccount.count({
+      where: {
+        configId,
+        enabled: true,
+        ...(platform ? { platform } : {}),
+      },
+    });
   }
 
   // ─── Reply generation: monthly cap + credit cost ───────────────────────────

@@ -8,8 +8,14 @@ import {
 } from '@gitroom/nestjs-libraries/engage/engage-scan-lease.service';
 import { EngageScanIngestService } from '@gitroom/nestjs-libraries/engage/engage-scan-ingest.service';
 import {
+  normalizePlatform,
+  scanKeyFor,
+  scanTypeFor,
+} from '@gitroom/nestjs-libraries/engage/engage-scan-target';
+import {
   EngageScanConfigService,
   EngageScanPacing,
+  SCANNABLE_PLATFORMS,
   ScanPlatform,
 } from '@gitroom/nestjs-libraries/engage/engage-scan-config.service';
 import { EngageEntitlementService } from '@gitroom/nestjs-libraries/engage/engage-entitlement.service';
@@ -92,27 +98,16 @@ export function buildRedditChannelKeywordQuery(
 // The DEFAULT stays 'x,reddit' — new platforms are OPT-IN (an operator adds them
 // to ENGAGE_SUPPORTED_PLATFORMS or the operation-plan allowlist), so existing
 // deployments keep enumerating only x/reddit until explicitly widened.
-const SCANNABLE_SCAN_TASK_PLATFORMS: readonly ScanTaskPlatform[] = [
-  'x',
-  'reddit',
-  'linkedin',
-  'devto',
-  'hackernews',
-  'medium',
-  'quora',
-];
-// Platforms whose scanners resolve a per-author feed (scanType='tracked'). X /
-// Reddit / LinkedIn plus the article/forum platforms: dev.to (?username=),
-// Hacker News (author_<user>), Medium (/feed/@user), Quora (/profile/<user>).
-const TRACKED_SCOPE_PLATFORMS = new Set<string>([
-  'x',
-  'reddit',
-  'linkedin',
-  'devto',
-  'hackernews',
-  'medium',
-  'quora',
-]);
+// Re-exported alias of the ONE capability list (engage-scan-config.service.ts).
+// This file used to declare its own copy plus a second one for scan targets;
+// three identical lists meant adding a platform to some of them silently
+// dropped its units in the rest.
+//
+// Scan TARGETS are gated by this same list. Which SCOPE a target has is not a
+// list at all: `scanTypeFor(platform)` decides (reddit → channel
+// /r/<sub>/new.json, everything else → a per-author feed).
+const SCANNABLE_SCAN_TASK_PLATFORMS: readonly ScanTaskPlatform[] =
+  SCANNABLE_PLATFORMS as readonly ScanTaskPlatform[];
 const ENV_SCAN_PLATFORMS: ScanTaskPlatform[] = (
   process.env.ENGAGE_SUPPORTED_PLATFORMS ?? 'x,reddit'
 )
@@ -459,32 +454,39 @@ export class EngageScanTasksService {
         units.push({ platform, scanType: 'keyword', scanKey });
       }
     }
-    for (const c of ctx.monitoredChannels) {
-      if (
-        (c.platform === 'x' || c.platform === 'reddit') &&
-        supported.has(c.platform)
-      ) {
-        units.push({
-          platform: c.platform,
-          scanType: 'channel',
-          scanKey: c.channelId,
-        });
+    // Channels and accounts are rows of ONE table split by `platform`, so both
+    // lists funnel through the same loop and `scanTypeFor` picks the scope. This
+    // is what retired the old per-list platform allowlists, which overlapped on
+    // x and reddit and could emit a unit no scanner could serve (an x 'channel'
+    // was searched as a bare keyword, a reddit 'tracked' fetched as /r/<user>).
+    const targets = [
+      ...ctx.monitoredChannels.map((c) => ({
+        platform: c.platform,
+        key: c.channelId,
+      })),
+      ...ctx.trackedAccounts.map((a) => ({
+        platform: a.platform,
+        key: a.username,
+      })),
+    ];
+    for (const t of targets) {
+      // Canonicalise before EVERY use: `scanTypeFor` lowercases, so comparing
+      // the raw column against `supported` would classify a legacy `"Reddit"`
+      // row as a channel here and as an author target in every SQL filter.
+      const platform = normalizePlatform(t.platform) as ScanTaskPlatform;
+      if (!supported.has(platform)) {
+        this.logger.debug(
+          `[scan-units] skipping ${t.platform}:${t.key} — platform not in the resolved allowlist`
+        );
+        continue;
       }
-    }
-    for (const a of ctx.trackedAccounts) {
-      // Platforms with a tracked (per-author) scope. X/Reddit/LinkedIn plus the
-      // article/forum platforms whose extension scanners resolve a per-author
-      // feed: dev.to (/api/articles?username=), Hacker News (author_<user>),
-      // Medium (/feed/@user), Quora (/profile/<user>).
-      if (TRACKED_SCOPE_PLATFORMS.has(a.platform) && supported.has(a.platform as ScanTaskPlatform)) {
-        units.push({
-          platform: a.platform as ScanTaskPlatform,
-          scanType: 'tracked',
-          // Normalized so this shares ONE cursor with the workflow writer + the
-          // status reader (they all key tracked accounts via normalizeUsername).
-          scanKey: normalizeUsername(a.platform, a.username),
-        });
-      }
+      units.push({
+        platform,
+        scanType: scanTypeFor(platform),
+        // Normalized so this shares ONE cursor with the workflow writer + the
+        // status reader (they all key targets via scanKeyFor/normalizeUsername).
+        scanKey: scanKeyFor({ platform, username: t.key }),
+      });
     }
     return units;
   }

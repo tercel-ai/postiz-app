@@ -270,8 +270,8 @@ export class EngageScanActivity {
     private _opportunity: PrismaRepository<'engageOpportunity'>,
     private _oppState: PrismaRepository<'engageOpportunityState'>,
     private _keyword: PrismaRepository<'engageKeyword'>,
+    // Both scan-target scopes (author feeds AND monitored channels) live here.
     private _trackedAccount: PrismaRepository<'engageTrackedAccount'>,
-    private _channel: PrismaRepository<'engageMonitoredChannel'>,
     private _tx: PrismaTransaction,
     private _scanCursor: PrismaRepository<'engageScanCursor'>,
     private _keywordInitialScan: PrismaRepository<'engageKeywordInitialScan'>,
@@ -876,8 +876,12 @@ export class EngageScanActivity {
     const minBySubreddit = new Map<string, number>();
     for (const c of orgContexts) {
       const hours = this._orgHours(intervalByOrg, c.organizationId);
+      // No platform test: `monitoredChannels` is produced by partitionScanTargets,
+      // which routes a row there only when scanTypeFor(platform) === 'channel'.
+      // Re-testing the literal here would also silently drop a second channel
+      // platform the day CHANNEL_SCOPE_PLATFORMS widens.
       for (const ch of c.monitoredChannels) {
-        if (ch.platform === 'reddit') minMerge(minBySubreddit, ch.channelId, hours);
+        minMerge(minBySubreddit, ch.channelId, hours);
       }
     }
 
@@ -1183,10 +1187,13 @@ export class EngageScanActivity {
     // tracked bonus (重点频道命中), parallel to X tracked accounts. Fires regardless
     // of scan path (keyword OR channel scan) because channelId is the subreddit on
     // every Reddit RawPost.
+    // No platform test on the LIST — partitionScanTargets already guarantees
+    // channel scope. The `p.platform === 'reddit'` test below is different and
+    // stays: that one gates on the POST's platform, which is whatever the
+    // scanner returned. It is also the line to revisit if a second channel
+    // platform is ever added, not this Set.
     const monitoredSubreddits = new Set(
-      ctx.monitoredChannels
-        .filter((c) => c.platform === 'reddit')
-        .map((c) => c.channelId.toLowerCase())
+      ctx.monitoredChannels.map((c) => c.channelId.toLowerCase())
     );
 
     // Mark posts from this org's tracked sources so the scorer adds the +5 bonus.
@@ -1321,17 +1328,19 @@ export class EngageScanActivity {
     });
   }
 
-  // Bump lastScannedAt for the monitored-channel rows (across all orgs) whose
-  // subreddit was actually scanned this tick. Keyed by channelId, not org.
+  // Bump lastCheckedAt for the channel-scope scan-target rows (across all orgs)
+  // whose subreddit was actually scanned this tick. Keyed by the target key, not
+  // org. Channels live in EngageTrackedAccount since the scan-target merge, so
+  // the subreddit name is `username` and the timestamp is `lastCheckedAt`.
   private async _markChannelsScanned(subredditIds: string[]): Promise<void> {
     if (!subredditIds.length) return;
-    await this._channel.model.engageMonitoredChannel.updateMany({
+    await this._trackedAccount.model.engageTrackedAccount.updateMany({
       where: {
         platform: 'reddit',
-        channelId: { in: subredditIds },
+        username: { in: subredditIds },
         enabled: true,
       },
-      data: { lastScannedAt: new Date() },
+      data: { lastCheckedAt: new Date() },
     });
   }
 

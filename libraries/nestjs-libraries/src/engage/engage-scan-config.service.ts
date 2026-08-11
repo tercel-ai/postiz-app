@@ -71,10 +71,23 @@ export type ScanPlatform =
 export type ScanPhase = 'initial' | 'incremental';
 export type ScanPath = 'workflow' | 'extension';
 
-// Platforms the extension can actually scan. The operation-plan allowlist may
-// list any of the ~30 providers (it drives the plan platform picker), so the
-// scan resolution intersects it with these.
-const SCANNABLE_PLATFORMS: readonly ScanPlatform[] = [
+/**
+ * Platforms a scanner exists for. The operation-plan allowlist may list any of
+ * the ~30 providers (it drives the plan platform picker), so scan resolution
+ * intersects it with these.
+ *
+ * This is CAPABILITY, not configuration: membership means "an implementation
+ * can fetch this platform", while `getSupportedScanPlatforms()` answers the
+ * separate question "is the operator currently scanning it" (settings /
+ * ENGAGE_SUPPORTED_PLATFORMS, default `x,reddit`). The write boundary rejects a
+ * platform missing from THIS list — no scanner will ever serve it — but accepts
+ * one that is merely disabled, since that is a config state an operator flips.
+ *
+ * Exported as the single definition: identical copies previously sat in
+ * engage-scan-tasks.service.ts, and a fourth in the scan-target module, so
+ * adding a platform to some of them silently dropped its targets in the rest.
+ */
+export const SCANNABLE_PLATFORMS: readonly ScanPlatform[] = [
   'x',
   'reddit',
   'linkedin',

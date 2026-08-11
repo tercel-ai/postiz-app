@@ -1209,10 +1209,9 @@ model EngageConfig {
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
 
-  keywords          EngageKeyword[]
-  monitoredChannels EngageMonitoredChannel[]
-  trackedAccounts   EngageTrackedAccount[]
-  xReplyAccounts    EngageXReplyAccount[]
+  keywords        EngageKeyword[]
+  trackedAccounts EngageTrackedAccount[]
+  xReplyAccounts  EngageXReplyAccount[]
 
   @@unique([organizationId, projectId])
   @@index([organizationId])
@@ -1259,43 +1258,46 @@ model EngageKeywordInitialScan {
   @@index([organizationId, platform])
 }
 
-model EngageMonitoredChannel {
-  id             String       @id @default(uuid())
-  configId       String
-  config         EngageConfig @relation(fields: [configId], references: [id], onDelete: Cascade)
-  organizationId String
-  platform       String
-  channelId      String
-  channelName    String
-  audienceSize   Int          @default(0)
-  enabled        Boolean      @default(true)
-  lastScannedAt  DateTime?
-  metadata       Json?
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
-
-  @@unique([configId, platform, channelId])
-  @@index([organizationId])
-  @@index([configId, platform, enabled])
-}
-
+// The single scan-target table: one row per thing the scan loop polls, whatever
+// its shape on the platform. `platform` alone decides which scan scope the row
+// produces (see scanTypeFor in engage-scan-target.ts) — Reddit rows are CHANNEL
+// scope (a subreddit), every other platform is TRACKED scope (an author feed).
+// The former EngageMonitoredChannel was folded in here (2026-08-11): the two
+// tables were 85% identical, already shared ONE per-platform entitlement pool,
+// and both fed the same `isFromTrackedAccount` scoring signal — while their
+// overlapping platform allowlists let an API caller create rows no scanner could
+// serve (a reddit "tracked account" was fetched as /r/<username>, an x "channel"
+// as a plain keyword search). Deriving the scope from `platform` makes those
+// states unrepresentable.
 model EngageTrackedAccount {
   id             String       @id @default(uuid())
   configId       String
   config         EngageConfig @relation(fields: [configId], references: [id], onDelete: Cascade)
   organizationId String
   platform       String       @default("x")
+  // The scan-unit key. Reddit rows hold the bare SUBREDDIT name (`programming`,
+  // not `r/programming` and not a u/ handle) — the column keeps its historical
+  // name after the channel merge. Every other platform holds an author handle.
   username       String
+  // Reddit rows: the human-readable channel label (`r/programming`). Other
+  // platforms: the account's display name.
   displayName    String?
   picture        String?
   categoryLabel  String?
+  // Audience size of the target: subreddit subscribers for Reddit rows, the
+  // account's follower count elsewhere. 0 when unknown.
+  audienceSize   Int          @default(0)
   enabled        Boolean      @default(true)
   lastCheckedAt  DateTime?
+  // Free-form target metadata — Reddit rows carry the resolver's description/url
+  // writeback (see reddit-target-resolver.ts).
+  metadata       Json?
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
 
   @@unique([configId, platform, username])
   @@index([organizationId, enabled])
+  @@index([configId, platform, enabled])
 }
 
 // integrationId is intentionally NOT globally unique: the same integration may

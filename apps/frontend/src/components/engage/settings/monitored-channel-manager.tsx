@@ -13,7 +13,12 @@ const PLATFORM_COLORS: Record<string, string> = {
   discord: 'bg-indigo-500/20 text-indigo-400',
 };
 
-const PLATFORMS = ['reddit', 'youtube', 'qq', 'discord'];
+// Reddit only. A monitored channel is a CHANNEL-scope scan target, and reddit
+// is the only platform with a channel scope (see CHANNEL_SCOPE_PLATFORMS on the
+// backend) — POST /engage/monitored-channels rejects anything else with a 400.
+// The other three used to be selectable here and produced a row that was
+// created but never scanned; offering them now just produces a failed request.
+const PLATFORMS = ['reddit'];
 
 interface ChannelMetadata {
   avatar?: string | null;
@@ -86,7 +91,16 @@ export function MonitoredChannelManager() {
           body: JSON.stringify(ch),
         });
         if (!res.ok) {
-          toaster.show('Failed to add (may already exist)', 'warning');
+          // Surface the server's own message: the endpoint distinguishes a
+          // duplicate (409) from a rejected platform or malformed community
+          // name (400), and collapsing both into "may already exist" told the
+          // user to retry something that can never succeed.
+          const body = await res.json().catch(() => null);
+          const message =
+            typeof body?.message === 'string'
+              ? body.message
+              : 'Failed to add (may already exist)';
+          toaster.show(message, 'warning');
           return;
         }
         mutate();

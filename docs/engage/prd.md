@@ -152,7 +152,11 @@ Engage uses **two completely separate account concepts** that must not be confla
 
 #### Block 3: Monitored Channels (监控频道/社群)
 
-> One row per subscribed channel/community (`EngageMonitoredChannel`). v1.0 ships Reddit subreddits; future: YouTube channels, QQ群, Discord servers, etc. The `platform` field on each row distinguishes the type.
+> One row per subscribed community, stored as a channel-scope `EngageTrackedAccount`
+> (`platform='reddit'`). **Reddit only** — a monitored channel needs a community
+> scanner, and reddit is the only platform that has one. The platform selector is
+> fixed to Reddit and the API rejects anything else with a 400; widening it means
+> adding a scanner AND adding the platform to `CHANNEL_SCOPE_PLATFORMS`.
 
 | Requirement | Priority | Notes |
 |---|---|---|
@@ -202,7 +206,7 @@ Engage uses **two completely separate account concepts** that must not be confla
 | 平台热度 Platform Heat | `scoreHeat` | 45 | Per-platform formula; X thresholds at 2000/1000/300/80 → 45/33/23/12/4 pts |
 | 账号影响力 Account Authority | `scoreAuthority` | 15 | X: post author follower count (50k/10k/1k → 15/11/6). Reddit: subreddit audience size `channelFollowers` (1M/100k/10k → 15/11/6). Else 2 |
 | 时效性 Recency | `scoreRecency` | 5 | Within 24h → 5; else → 0 |
-| 重点账户/频道 Tracked Source | `scoreTracked` | 5 | Author is in **追踪账号 (EngageTrackedAccount, X)** OR post is in a **监控版块 (EngageMonitoredChannel, Reddit)** → +5 |
+| 重点账户/频道 Tracked Source | `scoreTracked` | 5 | Author is a **追踪账号** (author-scope `EngageTrackedAccount`, X) OR post is in a **监控版块** (channel-scope `EngageTrackedAccount`, Reddit) → +5 |
 
 Reddit heat: `reddit_heat = score × upvote_ratio + num_comments × 2`; thresholds 800/400/100/30.
 
@@ -368,7 +372,7 @@ If URL not submitted: Sent record shows "⚠ No reply URL submitted — tracking
 
 #### Block 3: Monitored Channels (监控频道/社群)
 
-> Same `EngageMonitoredChannel` model as Page 01 Block 3. This page is where ongoing management happens.
+> Same channel-scope `EngageTrackedAccount` rows as Page 01 Block 3. This page is where ongoing management happens.
 
 | Requirement | Details |
 |---|---|
@@ -379,7 +383,7 @@ If URL not submitted: Sent record shows "⚠ No reply URL submitted — tracking
 
 #### Block 4: Tracked Accounts (追踪账号)
 
-> These are **external third-party X accounts** — NOT the user's own accounts. Stored in the new `EngageTrackedAccount` table. When these accounts post new content on X, their posts are automatically pushed into Signal Feed as opportunities (checked every 3 hours). Posts from tracked accounts also receive a **+5 score bonus** in the scoring algorithm. The Reddit equivalent is a **监控版块 (EngageMonitoredChannel)**: a post landing in one of the org's monitored subreddits earns the same **+5 `scoreTracked` bonus** (an in-memory check, no extra request). This is independent of `scoreAuthority`, which for Reddit reflects the subreddit's audience size (`channelFollowers`).
+> These are **external third-party X accounts** — NOT the user's own accounts. Stored in the new `EngageTrackedAccount` table. When these accounts post new content on X, their posts are automatically pushed into Signal Feed as opportunities (checked every 3 hours). Posts from tracked accounts also receive a **+5 score bonus** in the scoring algorithm. The Reddit equivalent is a **监控版块** (a channel-scope row in the same `EngageTrackedAccount` table): a post landing in one of the org's monitored subreddits earns the same **+5 `scoreTracked` bonus** (an in-memory check, no extra request). This is independent of `scoreAuthority`, which for Reddit reflects the subreddit's audience size (`channelFollowers`).
 
 | Requirement | Details |
 |---|---|

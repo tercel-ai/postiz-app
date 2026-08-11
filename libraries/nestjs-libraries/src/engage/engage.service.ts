@@ -78,6 +78,10 @@ import {
 } from '@gitroom/nestjs-libraries/engage/engage-metrics-sync';
 import { normalizeReplyMetrics } from '@gitroom/nestjs-libraries/engage/engage-metrics-stats';
 import { normalizeKeyword } from '@gitroom/nestjs-libraries/engage/engage-scan-lease.service';
+import {
+  buildScanTargetKey,
+  ScanTargetScope,
+} from '@gitroom/nestjs-libraries/engage/engage-scan-target';
 import { EngageScanConfigService } from '@gitroom/nestjs-libraries/engage/engage-scan-config.service';
 import {
   BIZ_USAGE,
@@ -536,18 +540,50 @@ export class EngageService implements OnApplicationBootstrap {
       }
       return byPlatform;
     };
+    // BOTH sides of the comparison go through the same key function the WRITE
+    // uses (buildScanTargetKey → normalizePlatform + normalizeUsername). The
+    // stored value is normalized, so projecting the raw DTO value here would
+    // never match a channel the org already has — every re-run of an identical
+    // setup would be charged against the cap again while createMany's
+    // skipDuplicates correctly wrote nothing. An unparseable entry (bad scope
+    // or charset) is left to the repository's own guard to reject with a 400;
+    // charging it here would be wrong either way.
+    const targetKey = (
+      rawPlatform: string | null | undefined,
+      rawKey: string,
+      scope: ScanTargetScope
+    ): string | null => {
+      try {
+        const { platform, username } = buildScanTargetKey(rawPlatform, rawKey, scope);
+        return `${platform}:${username}`;
+      } catch {
+        return null;
+      }
+    };
+    const definedKeys = (keys: (string | null)[]) => keys.filter((k): k is string => !!k);
+
     for (const [platform, keys] of freshKeys(
       dto.monitoredChannels,
-      (ch) => `${ch.platform}:${ch.channelId}`,
-      config.monitoredChannels.map((ch) => `${ch.platform}:${ch.channelId}`)
+      (ch) => targetKey(ch.platform, ch.channelId, 'channel') ?? `${ch.platform}:${ch.channelId}`,
+      definedKeys(
+        config.monitoredChannels.map((ch) =>
+          targetKey(ch.platform, ch.channelId, 'channel')
+        )
+      )
     )) {
       chargePlatform(platform, keys);
     }
     // `platform ?? 'x'` mirrors the default repository.setupEngage writes.
     for (const [platform, keys] of freshKeys(
       dto.trackedAccounts,
-      (acc) => `${acc.platform ?? 'x'}:${acc.username}`,
-      config.trackedAccounts.map((acc) => `${acc.platform}:${acc.username}`)
+      (acc) =>
+        targetKey(acc.platform ?? 'x', acc.username, 'tracked') ??
+        `${acc.platform ?? 'x'}:${acc.username}`,
+      definedKeys(
+        config.trackedAccounts.map((acc) =>
+          targetKey(acc.platform, acc.username, 'tracked')
+        )
+      )
     )) {
       chargePlatform(platform, keys);
     }

@@ -400,7 +400,7 @@ Output includes:
 - Top 10 keywords by hit count (sorted by `weeklyHitCount`)
 - Most recent 8 Opportunities (Platform, score, author, content summary)
 
-> The platform list is dynamically derived from actual `platform` values in `EngageMonitoredChannel` and `EngageTrackedAccount`, not hardcoded.
+> The platform list is dynamically derived from actual `platform` values in `EngageTrackedAccount` (which holds both scan-target scopes), not hardcoded.
 
 ---
 

@@ -9,11 +9,12 @@
  * owns it. A cursor stuck at 150h+ that is ORPHAN is expected (dead data, prune
  * it); one that is LIVE is a real scan failure worth chasing.
  *
- * Subscription is resolved the SAME way runDueScans does it: only engageConfig
- * rows with enabled=true, and within them only enabled keywords / tracked
- * accounts / monitored channels. Keys are normalized identically to the scan
- * path (keyword: trim+lowercase+collapse-ws; X username: strip @ / u/, lowercase;
- * channel: raw channelId).
+ * Subscription is resolved the SAME way the scan path does it: engageConfig rows
+ * with enabled=true AND a non-null projectId (the legacy null-project row is
+ * excluded from fan-out), and within them only enabled keywords and scan
+ * targets. Keys come from the SAME functions the scan loop uses — normalizeKeyword
+ * and scanKeyFor, imported rather than re-implemented — so this tool cannot drift
+ * from the thing it is auditing.
  *
  * Read-only. Touches nothing.
  *
@@ -27,24 +28,21 @@ import * as dotenv from 'dotenv';
 dotenv.config();
 
 import { PrismaClient } from '@prisma/client';
+// Imported, NOT re-implemented. Inline copies of these lived here and drifted:
+// the local CASE_INSENSITIVE set was missing devto/medium, so every live cursor
+// on those platforms was labelled ORPHAN — under a summary line telling the
+// operator ORPHAN rows are safe to prune. The sibling scripts already import
+// from @gitroom/* under tsx, so there is no resolution problem to work around.
+import { normalizeKeyword } from '@gitroom/nestjs-libraries/engage/engage-scan-lease.service';
+import {
+  normalizePlatform,
+  scanKeyFor,
+  scanTypeFor,
+} from '@gitroom/nestjs-libraries/engage/engage-scan-target';
 
 const args = process.argv.slice(2);
 const orphansOnly = args.includes('--orphans');
 const liveStaleOnly = args.includes('--live-stale');
-
-// Mirror engage-scan-lease.service.ts normalization (kept inline so the script
-// has no cross-package import surprises under tsx).
-const CASE_INSENSITIVE = new Set(['x', 'reddit', 'threads', 'instagram', 'tiktok']);
-function normalizeKeyword(k: string): string {
-  return k.trim().toLowerCase().replace(/\s+/g, ' ');
-}
-function normalizeUsername(platform: string, username: string): string {
-  const t = username.trim();
-  if (CASE_INSENSITIVE.has(platform.toLowerCase())) {
-    return t.replace(/^@/, '').replace(/^\/?u\//i, '').toLowerCase();
-  }
-  return t;
-}
 
 function ago(d: Date | null | undefined, now: number): string {
   if (!d) return 'never';
@@ -57,28 +55,39 @@ async function main() {
   const now = Date.now();
 
   // ── Currently-subscribed sets (exactly what the workflow enumerates) ────────
+  //
+  // `projectId: { not: null }` is NOT optional: the legacy null-project config
+  // is excluded from fan-out by every production enumerator
+  // (getAllEnabledOrgContexts / getEnabledConfigsForOrg / getOrgContextsForUnit,
+  // pinned by engage-repository.null-project-exclusion.spec.ts). Omitting it
+  // here counted pre-project keywords as live, so their orphan cursors printed
+  // as LIVE⚠ and sent the operator chasing a unit nothing subscribes to.
   const configs = await prisma.engageConfig.findMany({
-    where: { enabled: true },
+    where: { enabled: true, projectId: { not: null } },
     include: {
       keywords: { where: { enabled: true }, select: { keyword: true } },
+      // One relation, two scopes — split by platform below (scanTypeFor).
       trackedAccounts: { where: { enabled: true }, select: { username: true, platform: true } },
-      monitoredChannels: { where: { enabled: true }, select: { channelId: true, platform: true } },
     },
   });
 
   const liveKeywords = new Set<string>();
-  const liveTracked = new Set<string>(); // normalized X usernames
-  const liveChannels = new Set<string>(); // raw channelIds
+  // Target sets are keyed `${platform}:${normalizedKey}` — the cursor table is
+  // unique on (platform, scanType, scanKey), so a bare key would let one
+  // platform's handle keep an identically-named cursor on another platform
+  // labelled LIVE.
+  const liveTracked = new Set<string>();
+  const liveChannels = new Set<string>();
   for (const c of configs) {
     for (const k of c.keywords) {
       const key = normalizeKeyword(k.keyword);
       if (key) liveKeywords.add(key);
     }
-    for (const a of c.trackedAccounts) {
-      liveTracked.add(normalizeUsername(a.platform ?? 'x', a.username));
-    }
-    for (const ch of c.monitoredChannels) {
-      liveChannels.add(ch.channelId);
+    for (const t of c.trackedAccounts) {
+      const platform = normalizePlatform(t.platform) || 'x';
+      const key = `${platform}:${scanKeyFor({ platform, username: t.username })}`;
+      if (scanTypeFor(platform) === 'channel') liveChannels.add(key);
+      else liveTracked.add(key);
     }
   }
 
@@ -91,10 +100,13 @@ async function main() {
     orderBy: [{ scanType: 'asc' }, { platform: 'asc' }, { scanKey: 'asc' }],
   });
 
-  function isLive(scanType: string, scanKey: string): boolean {
+  function isLive(scanType: string, platform: string, scanKey: string): boolean {
+    // Keyword units are GLOBAL (one cursor per platform per normalized keyword),
+    // so their liveness is platform-independent; target units are per-platform.
     if (scanType === 'keyword') return liveKeywords.has(scanKey);
-    if (scanType === 'tracked') return liveTracked.has(scanKey);
-    if (scanType === 'channel') return liveChannels.has(scanKey);
+    const key = `${normalizePlatform(platform)}:${scanKey}`;
+    if (scanType === 'tracked') return liveTracked.has(key);
+    if (scanType === 'channel') return liveChannels.has(key);
     return false; // unknown scanType → treat as orphan
   }
 
@@ -105,7 +117,7 @@ async function main() {
 
   const printed: string[] = [];
   for (const c of cursors) {
-    const live = isLive(c.scanType, c.scanKey);
+    const live = isLive(c.scanType, c.platform, c.scanKey);
     if (live) liveCount++;
     else orphanCount++;
 

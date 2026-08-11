@@ -49,11 +49,41 @@ function buildRepo() {
   const postUpdate = vi.fn();
   const postDeleteMany = vi.fn();
 
-  const channel = {
-    model: { engageMonitoredChannel: { findMany: channelFindMany, findFirst: channelFindFirst } },
-  } as any;
+  // Channels and tracked accounts are rows of ONE table since the scan-target
+  // merge, so both scopes hit engageTrackedAccount. The spec keeps two mock
+  // pairs so each scope can still be stubbed independently; these dispatchers
+  // route by the platform predicate the repository builds (channel-scope queries
+  // name reddit, author-scope queries exclude it). A query with NO platform
+  // predicate spans both scopes, so it gets both stubs' rows concatenated.
+  const isChannelQuery = (args: any) => {
+    const p = args?.where?.platform;
+    if (!p) return null; // spans both scopes
+    if (typeof p === 'string') return p === 'reddit';
+    if (Array.isArray(p?.in)) return p.in.includes('reddit');
+    if (Array.isArray(p?.notIn)) return !p.notIn.includes('reddit');
+    return null;
+  };
+  const dispatchFindMany = vi.fn(async (args: any) => {
+    const scope = isChannelQuery(args);
+    if (scope === true) return channelFindMany(args);
+    if (scope === false) return trackedFindMany(args);
+    const [channels, accounts] = await Promise.all([
+      channelFindMany(args),
+      trackedFindMany(args),
+    ]);
+    return [...(channels ?? []), ...(accounts ?? [])];
+  });
+  const trackedFindFirst = vi.fn();
+  const dispatchFindFirst = vi.fn(async (args: any) =>
+    isChannelQuery(args) === true ? channelFindFirst(args) : trackedFindFirst(args)
+  );
   const trackedAccount = {
-    model: { engageTrackedAccount: { findMany: trackedFindMany } },
+    model: {
+      engageTrackedAccount: {
+        findMany: dispatchFindMany,
+        findFirst: dispatchFindFirst,
+      },
+    },
   } as any;
   const scanCursor = {
     model: { engageScanCursor: { findMany: cursorFindMany } },
@@ -115,14 +145,12 @@ function buildRepo() {
   );
   const tx = { model: { $transaction: txTransaction } } as any;
 
-  // Constructor order: _config, _keyword, _channel, _trackedAccount,
-  // _replyAccount, _opportunity, _oppState, _sentReply, _integration, _post,
-  // _tx, _scanCursor
+  // Constructor order: _config, _keyword, _trackedAccount, _replyAccount,
+  // _opportunity, _oppState, _sentReply, _integration, _post, _tx, _scanCursor
   const repo = new EngageRepository(
     {} as any,      // _config
     keyword,        // _keyword
-    channel,        // _channel
-    trackedAccount, // _trackedAccount
+    trackedAccount, // _trackedAccount (both scan-target scopes)
     {} as any,
     opportunity,    // _opportunity
     oppState,       // _oppState
@@ -135,7 +163,7 @@ function buildRepo() {
   return {
     repo, stateFindMany, stateCount, stateGroupBy, stateAggregate, stateFindFirst, stateFindUnique,
     stateUpdateMany, stateExecuteRaw, oppAggregate, oppFindFirst, channelFindMany,
-    channelFindFirst,
+    channelFindFirst, trackedFindFirst,
     trackedFindMany, cursorFindMany, keywordFindMany, sentCount, sentFindMany, sentFindFirst, sentCreate,
     sentUpdate, postAggregate, postFindMany, postCreate, postUpdate, postDeleteMany,
     txTransaction,
@@ -168,7 +196,7 @@ describe('EngageRepository — two-table reads', () => {
       stateGroupBy.mockResolvedValue([]);
       stateCount.mockImplementation(async ({ where }: { where: any }) => {
         if (stateCount.mock.calls.length === 1) {
-          where.opportunity.channelId = { in: ['mutated'] };
+          where.opportunity.AND = [{ OR: [{ channelId: { equals: 'mutated' } }] }];
         }
         return 0;
       });
@@ -177,9 +205,9 @@ describe('EngageRepository — two-table reads', () => {
         channels: ['expected'],
       });
 
-      expect(stateCount.mock.calls[1][0].where.opportunity.channelId).toEqual({
-        in: ['expected'],
-      });
+      expect(stateCount.mock.calls[1][0].where.opportunity.AND).toEqual([
+        { OR: [{ channelId: { equals: 'expected', mode: 'insensitive' } }] },
+      ]);
     });
 
     it('computes total/byStatus/byPlatform under the same platform-less where', async () => {
@@ -201,13 +229,15 @@ describe('EngageRepository — two-table reads', () => {
       // The total/byStatus where carries the scoping filters but NO platform —
       // platform is the breakdown axis, not a filter, on this contract.
       const totalWhere = stateCount.mock.calls[0][0].where;
-      expect(totalWhere.opportunity.channelId).toEqual({ in: ['c1'] });
+      expect(totalWhere.opportunity.AND).toEqual([
+        { OR: [{ channelId: { equals: 'c1', mode: 'insensitive' } }] },
+      ]);
       expect(totalWhere.opportunity).not.toHaveProperty('platform');
       expect(totalWhere).not.toHaveProperty('status');
       expect(stateGroupBy.mock.calls[0][0].where).toEqual(totalWhere);
       // Each platform count keeps the scoping filters and pins one platform.
       expect(stateCount.mock.calls[1][0].where.opportunity).toMatchObject({
-        channelId: { in: ['c1'] },
+        AND: [{ OR: [{ channelId: { equals: 'c1', mode: 'insensitive' } }] }],
         platform: 'x',
       });
 
@@ -492,22 +522,35 @@ describe('EngageRepository — two-table reads', () => {
       expect(stateFindMany.mock.calls[0][0].where.opportunity.deletedAt).toBeNull();
     });
 
-    it('channels=[<specific>] filters those channel ids on the opportunity', async () => {
+    // Channels and authors are both CASE-INSENSITIVE identity filters, each its
+    // own OR set, combined through AND. Channels used to be an exact `in`, which
+    // silently returned nothing once the scan-target key became normalized while
+    // EngageOpportunity.channelId kept Reddit's display casing.
+    it('channels=[<specific>] filters that channel id case-insensitively', async () => {
       const { repo, stateFindMany, stateCount } = buildRepo();
       stateFindMany.mockResolvedValue([]);
       stateCount.mockResolvedValue(0);
 
       await repo.listOpportunities('org1', { channels: ['SEO'] } as any);
-      expect(stateFindMany.mock.calls[0][0].where.opportunity.channelId).toEqual({ in: ['SEO'] });
+      expect(stateFindMany.mock.calls[0][0].where.opportunity.AND).toEqual([
+        { OR: [{ channelId: { equals: 'SEO', mode: 'insensitive' } }] },
+      ]);
     });
 
-    it('channels=[multiple] filters all listed channel ids', async () => {
+    it('channels=[multiple] filters all listed channel ids case-insensitively', async () => {
       const { repo, stateFindMany, stateCount } = buildRepo();
       stateFindMany.mockResolvedValue([]);
       stateCount.mockResolvedValue(0);
 
       await repo.listOpportunities('org1', { channels: ['SEO', 'TECH'] } as any);
-      expect(stateFindMany.mock.calls[0][0].where.opportunity.channelId).toEqual({ in: ['SEO', 'TECH'] });
+      expect(stateFindMany.mock.calls[0][0].where.opportunity.AND).toEqual([
+        {
+          OR: [
+            { channelId: { equals: 'SEO', mode: 'insensitive' } },
+            { channelId: { equals: 'TECH', mode: 'insensitive' } },
+          ],
+        },
+      ]);
     });
 
     it('authors=[<specific>] filters authorUsername case-insensitively via OR', async () => {
@@ -516,8 +559,8 @@ describe('EngageRepository — two-table reads', () => {
       stateCount.mockResolvedValue(0);
 
       await repo.listOpportunities('org1', { authors: ['BobSmith'] } as any);
-      expect(stateFindMany.mock.calls[0][0].where.opportunity.OR).toEqual([
-        { authorUsername: { equals: 'BobSmith', mode: 'insensitive' } },
+      expect(stateFindMany.mock.calls[0][0].where.opportunity.AND).toEqual([
+        { OR: [{ authorUsername: { equals: 'BobSmith', mode: 'insensitive' } }] },
       ]);
     });
 
@@ -527,10 +570,32 @@ describe('EngageRepository — two-table reads', () => {
       stateCount.mockResolvedValue(0);
 
       await repo.listOpportunities('org1', { authors: ['Alice', 'Bob'] } as any);
-      expect(stateFindMany.mock.calls[0][0].where.opportunity.OR).toEqual([
-        { authorUsername: { equals: 'Alice', mode: 'insensitive' } },
-        { authorUsername: { equals: 'Bob', mode: 'insensitive' } },
+      expect(stateFindMany.mock.calls[0][0].where.opportunity.AND).toEqual([
+        {
+          OR: [
+            { authorUsername: { equals: 'Alice', mode: 'insensitive' } },
+            { authorUsername: { equals: 'Bob', mode: 'insensitive' } },
+          ],
+        },
       ]);
+    });
+
+    // Regression guard: the two axes must AND, not share one OR key — a row
+    // matching only the author would otherwise pass a channel+author filter.
+    it('channels + authors are ANDed as two separate OR sets', async () => {
+      const { repo, stateFindMany, stateCount } = buildRepo();
+      stateFindMany.mockResolvedValue([]);
+      stateCount.mockResolvedValue(0);
+
+      await repo.listOpportunities('org1', {
+        channels: ['SEO'],
+        authors: ['Alice'],
+      } as any);
+      expect(stateFindMany.mock.calls[0][0].where.opportunity.AND).toEqual([
+        { OR: [{ channelId: { equals: 'SEO', mode: 'insensitive' } }] },
+        { OR: [{ authorUsername: { equals: 'Alice', mode: 'insensitive' } }] },
+      ]);
+      expect(stateFindMany.mock.calls[0][0].where.opportunity).not.toHaveProperty('OR');
     });
   });
 
@@ -583,9 +648,12 @@ describe('EngageRepository — two-table reads', () => {
       expect(item.channelAvatar).toBe('https://styles.redditmedia.com/avatar.png');
       expect(item.sentReplyId).toBeNull();
       expect(item.replyLink).toBeNull();
+      // The avatar comes off the merged scan-target row, so the lookup keys on
+      // `username` — and NORMALIZED, because the stored key is lowercased while
+      // the opportunity keeps Reddit's display casing ('SEO').
       expect(channelFindFirst.mock.calls[0][0].where).toEqual({
         platform: 'reddit',
-        channelId: 'SEO',
+        username: 'seo',
       });
     });
   });
@@ -1710,7 +1778,7 @@ describe('EngageRepository — two-table reads', () => {
       const post = { model: { post: { create: postCreate } } } as any;
       const repo = new EngageRepository(
         {} as any, {} as any, {} as any, {} as any, {} as any,
-        {} as any, {} as any, {} as any,
+        {} as any, {} as any,
         integration, // _integration
         post,         // _post
         {} as any
@@ -1908,7 +1976,7 @@ describe('EngageRepository — two-table reads', () => {
       const post = { model: { post: { create: postCreate } } } as any;
       const repo = new EngageRepository(
         {} as any, {} as any, {} as any, {} as any, {} as any,
-        {} as any, {} as any, {} as any, {} as any,
+        {} as any, {} as any, {} as any,
         post, // _post
         {} as any
       );
@@ -1978,7 +2046,7 @@ describe('EngageRepository — two-table reads', () => {
       const sentReply = { model: { engageSentReply: { count } } } as any;
       const repo = new EngageRepository(
         {} as any, {} as any, {} as any, {} as any, {} as any,
-        {} as any, {} as any,
+        {} as any,
         sentReply, // _sentReply
         {} as any, {} as any, {} as any
       );
@@ -2010,7 +2078,7 @@ describe('EngageRepository — two-table reads', () => {
       const repo = new EngageRepository(
         config, // _config
         keyword, // _keyword
-        {} as any, {} as any, {} as any, {} as any, {} as any, {} as any,
+        {} as any, {} as any, {} as any, {} as any, {} as any,
         {} as any, {} as any, {} as any, {} as any, {} as any
       );
       return { repo, findMany, findFirst, configUpdate };
@@ -2090,10 +2158,10 @@ describe('EngageRepository — two-table reads', () => {
       } as any;
       const repo = new EngageRepository(
         {} as any, {} as any, {} as any, {} as any, {} as any,
-        {} as any, {} as any,
-        sentReply,    // _sentReply (index 7)
-        {} as any,    // _integration (index 8)
-        post,         // _post (index 9)
+        {} as any,
+        sentReply,    // _sentReply (index 6)
+        {} as any,    // _integration (index 7)
+        post,         // _post (index 8)
         {} as any, {} as any
       );
       return { repo, sentFindFirst, postFindUnique, postUpdate };
@@ -2156,7 +2224,7 @@ describe('EngageRepository — two-table reads', () => {
       const sentReply = { model: { engageSentReply: { findMany: sentFindMany } } } as any;
       const repo = new EngageRepository(
         {} as any, {} as any, {} as any, {} as any, {} as any,
-        {} as any, {} as any,
+        {} as any,
         sentReply,    // _sentReply
         {} as any,    // _integration
         {} as any,    // _post
@@ -2234,7 +2302,7 @@ describe('EngageRepository — two-table reads', () => {
       const post = { model: { post: { update: postUpdate } } } as any;
       const repo = new EngageRepository(
         {} as any, {} as any, {} as any, {} as any, {} as any,
-        {} as any, {} as any,
+        {} as any,
         sentReply,    // _sentReply
         integration,  // _integration
         post,         // _post
@@ -2321,7 +2389,7 @@ describe('EngageRepository — two-table reads', () => {
       const repo = new EngageRepository(
         {} as any,
         keyword, // _keyword
-        {} as any, {} as any, {} as any,
+        {} as any, {} as any,
         {} as any, {} as any, {} as any, {} as any, {} as any,
         {} as any
       );
@@ -2414,7 +2482,7 @@ describe('EngageRepository — two-table reads', () => {
       const repo = new EngageRepository(
         {} as any,
         { model: { engageKeyword: { findFirst: keywordFindFirst, update: keywordUpdate } } } as any,
-        {} as any, {} as any, {} as any,
+        {} as any, {} as any,
         {} as any, {} as any, {} as any, {} as any, {} as any,
         {} as any,
         {} as any,
@@ -2466,7 +2534,7 @@ describe('EngageRepository — two-table reads', () => {
       const repo = new EngageRepository(
         {} as any,
         { model: { engageKeyword: { findFirst: keywordFindFirst, update: keywordUpdate } } } as any,
-        {} as any, {} as any, {} as any,
+        {} as any, {} as any,
         {} as any, {} as any, {} as any, {} as any, {} as any,
         {} as any,
         {} as any,
@@ -2480,16 +2548,17 @@ describe('EngageRepository — two-table reads', () => {
   });
 
   describe('addMonitoredChannel', () => {
-    // (configId, platform, channelId) is unique — duplicate → 409.
+    // (configId, platform, username) is unique — duplicate → 409. Channels write
+    // to engageTrackedAccount since the scan-target merge.
     function buildChannelRepo() {
       const channelCreate = vi.fn();
-      const channel = {
-        model: { engageMonitoredChannel: { create: channelCreate } },
+      const trackedAccount = {
+        model: { engageTrackedAccount: { create: channelCreate } },
       } as any;
       const repo = new EngageRepository(
         {} as any, {} as any,
-        channel, // _channel
-        {} as any, {} as any, {} as any, {} as any, {} as any, {} as any,
+        trackedAccount, // _trackedAccount
+        {} as any, {} as any, {} as any, {} as any, {} as any,
         {} as any, {} as any
       );
       return { repo, channelCreate };
@@ -2507,13 +2576,60 @@ describe('EngageRepository — two-table reads', () => {
       await expect(
         repo.addMonitoredChannel('cfg1', 'org1', {
           platform: 'reddit',
-          channelId: 't5_x',
+          channelId: 'football',
           channelName: 'r/football',
         } as any)
       ).rejects.toMatchObject({
         status: 409,
         message: 'Channel "r/football" already exists',
       });
+    });
+
+    it('normalizes the channel key and stores it in the merged target columns', async () => {
+      const { repo, channelCreate } = buildChannelRepo();
+      channelCreate.mockResolvedValue({
+        id: 'ch1',
+        configId: 'cfg1',
+        organizationId: 'org1',
+        platform: 'reddit',
+        username: 'football',
+        displayName: 'r/football',
+        audienceSize: 12,
+        enabled: true,
+        lastCheckedAt: null,
+        metadata: null,
+        createdAt: new Date(0),
+        updatedAt: new Date(0),
+      });
+
+      const res = await repo.addMonitoredChannel('cfg1', 'org1', {
+        platform: 'reddit',
+        channelId: 'r/FootBall',
+        channelName: 'r/football',
+        audienceSize: 12,
+      } as any);
+
+      // Stored under the merged column names, key normalized like the scan loop.
+      expect(channelCreate.mock.calls[0][0].data).toMatchObject({
+        platform: 'reddit',
+        username: 'football',
+        displayName: 'r/football',
+        audienceSize: 12,
+      });
+      // Returned in the legacy channel shape the API contract still promises.
+      expect(res).toMatchObject({ channelId: 'football', channelName: 'r/football' });
+    });
+
+    it('rejects a platform that has no channel scope', async () => {
+      const { repo } = buildChannelRepo();
+
+      await expect(
+        repo.addMonitoredChannel('cfg1', 'org1', {
+          platform: 'x',
+          channelId: 'someone',
+          channelName: 'someone',
+        } as any)
+      ).rejects.toMatchObject({ status: 400 });
     });
   });
 
@@ -2525,13 +2641,26 @@ describe('EngageRepository — two-table reads', () => {
         model: { engageTrackedAccount: { create: trackedCreate } },
       } as any;
       const repo = new EngageRepository(
-        {} as any, {} as any, {} as any,
+        {} as any, {} as any,
         trackedAccount, // _trackedAccount
         {} as any, {} as any, {} as any, {} as any, {} as any,
         {} as any, {} as any
       );
       return { repo, trackedCreate };
     }
+
+    it('rejects a platform that has no author scope', async () => {
+      const { repo } = buildTrackedRepo();
+
+      // reddit is channel-scope: it used to be storable here and was then
+      // scanned as /r/<username>. Now it is a 400 at the door.
+      await expect(
+        repo.addTrackedAccount('cfg1', 'org1', {
+          platform: 'reddit',
+          username: 'spez',
+        } as any)
+      ).rejects.toMatchObject({ status: 400 });
+    });
 
     it('maps a P2002 unique violation to a 409 with the username', async () => {
       const { repo, trackedCreate } = buildTrackedRepo();
@@ -2549,10 +2678,128 @@ describe('EngageRepository — two-table reads', () => {
         message: 'Account "elonmusk" already exists',
       });
     });
+
+    it('stores the NORMALIZED key, so the scan unit and the fan-out lookup agree', async () => {
+      const { repo, trackedCreate } = buildTrackedRepo();
+      trackedCreate.mockResolvedValue({ id: 'a1' });
+
+      await repo.addTrackedAccount('cfg1', 'org1', {
+        platform: 'x',
+        username: '@Alice',
+      } as any);
+
+      // Stored raw, '@Alice' would be scanned as unit key 'alice' and then
+      // resolve zero subscribers — `equals … insensitive` bridges case but not
+      // the '@'. The posts would be fetched and silently discarded.
+      expect(trackedCreate.mock.calls[0][0].data).toMatchObject({
+        platform: 'x',
+        username: 'alice',
+      });
+    });
+  });
+
+  // INV-2's 404 half: a row of one scope must not be reachable through the
+  // other scope's endpoint. Only the 400-on-create half had coverage.
+  describe('scope isolation on the id-addressed routes', () => {
+    function buildScopedRepo() {
+      const findFirst = vi.fn();
+      const update = vi.fn();
+      const del = vi.fn();
+      const trackedAccount = {
+        model: {
+          engageTrackedAccount: { findFirst, update, delete: del },
+        },
+      } as any;
+      const repo = new EngageRepository(
+        {} as any, {} as any,
+        trackedAccount,
+        {} as any, {} as any, {} as any, {} as any, {} as any,
+        {} as any, {} as any
+      );
+      return { repo, findFirst, update, del };
+    }
+
+    it('scopes the channel routes to channel-scope platforms', async () => {
+      const { repo, findFirst } = buildScopedRepo();
+      findFirst.mockResolvedValue(null);
+
+      await expect(
+        repo.updateMonitoredChannel('org1', 'id1', { enabled: true } as any)
+      ).rejects.toMatchObject({ status: 404 });
+      await expect(repo.removeMonitoredChannel('org1', 'id1')).rejects.toMatchObject({
+        status: 404,
+      });
+
+      for (const call of findFirst.mock.calls) {
+        expect(call[0].where).toMatchObject({
+          organizationId: 'org1',
+          platform: { in: ['reddit'] },
+        });
+      }
+    });
+
+    it('scopes the tracked routes to author-scope platforms', async () => {
+      const { repo, findFirst } = buildScopedRepo();
+      findFirst.mockResolvedValue(null);
+
+      await expect(
+        repo.updateTrackedAccount('org1', 'id1', { enabled: true } as any)
+      ).rejects.toMatchObject({ status: 404 });
+      await expect(repo.removeTrackedAccount('org1', 'id1')).rejects.toMatchObject({
+        status: 404,
+      });
+
+      for (const call of findFirst.mock.calls) {
+        expect(call[0].where).toMatchObject({
+          organizationId: 'org1',
+          platform: { notIn: ['reddit'] },
+        });
+      }
+    });
+
+    it('round-trips a PATCHed channelName through displayName', async () => {
+      const { repo, findFirst, update } = buildScopedRepo();
+      findFirst.mockResolvedValue({ id: 'ch1', platform: 'reddit' });
+      update.mockResolvedValue({
+        id: 'ch1',
+        configId: 'cfg1',
+        organizationId: 'org1',
+        platform: 'reddit',
+        username: 'seo',
+        displayName: 'r/SEO renamed',
+        audienceSize: 7,
+        enabled: false,
+        lastCheckedAt: null,
+        metadata: null,
+        createdAt: new Date(0),
+        updatedAt: new Date(0),
+      });
+
+      const res = await repo.updateMonitoredChannel('org1', 'ch1', {
+        channelName: 'r/SEO renamed',
+        enabled: false,
+      } as any);
+
+      expect(update.mock.calls[0][0].data).toMatchObject({
+        displayName: 'r/SEO renamed',
+        enabled: false,
+      });
+      // The legacy shape the API contract still promises, in full.
+      expect(res).toMatchObject({
+        channelId: 'seo',
+        channelName: 'r/SEO renamed',
+        audienceSize: 7,
+        enabled: false,
+        lastScannedAt: null,
+        metadata: null,
+      });
+    });
   });
 });
 
 describe('EngageRepository projectId scoping (config-family)', () => {
+  // Both lists now read the SAME table, so each also asserts the platform
+  // predicate that keeps the two scopes from leaking into each other's endpoint.
   it('listMonitoredChannels defaults to the legacy null-project scope when projectId is omitted', async () => {
     const { repo, channelFindMany } = buildRepo();
     channelFindMany.mockResolvedValue([]);
@@ -2562,6 +2809,7 @@ describe('EngageRepository projectId scoping (config-family)', () => {
     expect(channelFindMany.mock.calls[0][0].where).toEqual({
       organizationId: 'org-1',
       config: { projectId: null },
+      platform: { in: ['reddit'] },
     });
   });
 
@@ -2574,6 +2822,7 @@ describe('EngageRepository projectId scoping (config-family)', () => {
     expect(channelFindMany.mock.calls[0][0].where).toEqual({
       organizationId: 'org-1',
       config: { projectId: 'proj-1' },
+      platform: { in: ['reddit'] },
     });
   });
 
@@ -2586,6 +2835,7 @@ describe('EngageRepository projectId scoping (config-family)', () => {
     expect(trackedFindMany.mock.calls[0][0].where).toEqual({
       organizationId: 'org-1',
       config: { projectId: null },
+      platform: { notIn: ['reddit'] },
     });
   });
 
@@ -2598,6 +2848,7 @@ describe('EngageRepository projectId scoping (config-family)', () => {
     expect(trackedFindMany.mock.calls[0][0].where).toEqual({
       organizationId: 'org-1',
       config: { projectId: 'proj-1' },
+      platform: { notIn: ['reddit'] },
     });
   });
 });
@@ -2713,7 +2964,12 @@ describe('EngageRepository.getOrgScanStatus', () => {
 
   it('aggregates the org\'s channel cursors: latest last, earliest next', async () => {
     const { repo, channelFindMany, trackedFindMany, cursorFindMany } = buildRepo();
-    channelFindMany.mockResolvedValue([{ channelId: 'a' }, { channelId: 'b' }]);
+    // getOrgScanStatus reads the merged table in ONE query and splits by
+    // platform, so the channel stub must carry its platform now.
+    channelFindMany.mockResolvedValue([
+      { platform: 'reddit', username: 'a' },
+      { platform: 'reddit', username: 'b' },
+    ]);
     trackedFindMany.mockResolvedValue([]);
     const aStart = new Date('2026-06-01T00:00:00Z'); // next = +24h
     const bStart = new Date('2026-06-01T01:00:00Z'); // next = +24h (later)
@@ -2745,7 +3001,10 @@ describe('EngageRepository.getOrgScanStatus', () => {
   it('lowercases tracked usernames for the cursor lookup', async () => {
     const { repo, channelFindMany, trackedFindMany, cursorFindMany } = buildRepo();
     channelFindMany.mockResolvedValue([]);
-    trackedFindMany.mockResolvedValue([{ username: 'OpenAI' }, { username: 'Vercel' }]);
+    trackedFindMany.mockResolvedValue([
+      { platform: 'x', username: 'OpenAI' },
+      { platform: 'x', username: 'Vercel' },
+    ]);
     cursorFindMany.mockResolvedValue([]);
 
     await repo.getOrgScanStatus('org1');
@@ -3178,13 +3437,14 @@ describe('EngageRepository.getOrgScanStatus', () => {
         monitoredChannels: [],
         trackedAccounts: [],
       };
+      // Channels and accounts arrive in ONE relation now (platform decides the
+      // scope), and the response splits them back apart.
       const { repo, configFindMany } = buildConfigRepo({
         baseNull: base,
         enabledConfigs: [
           {
             projectId: 'p0',
             keywords: [{ id: 'k1', keyword: 'AI', enabled: true }],
-            monitoredChannels: [],
             trackedAccounts: [{ id: 'a1', platform: 'x', username: '@Alice', enabled: true }],
           },
           {
@@ -3195,8 +3455,10 @@ describe('EngageRepository.getOrgScanStatus', () => {
               { id: 'k2', keyword: 'ai', enabled: true },
               { id: 'k3', keyword: 'ML', enabled: true },
             ],
-            monitoredChannels: [{ id: 'c1', platform: 'reddit', channelId: 'LocalLLM', enabled: true }],
-            trackedAccounts: [{ id: 'a2', platform: 'x', username: 'alice', enabled: true }],
+            trackedAccounts: [
+              { id: 'c1', platform: 'reddit', username: 'LocalLLM', enabled: true },
+              { id: 'a2', platform: 'x', username: 'alice', enabled: true },
+            ],
           },
         ],
       });
@@ -3217,7 +3479,7 @@ describe('EngageRepository.getOrgScanStatus', () => {
       expect(res.keywords.map((k: any) => k.keyword).sort()).toEqual(['AI', 'ML']);
       // @Alice / alice collapse to one tracked account.
       expect(res.trackedAccounts).toHaveLength(1);
-      // project channel surfaced.
+      // project channel surfaced, rendered back in the legacy channel shape.
       expect(res.monitoredChannels.map((c: any) => c.channelId)).toEqual(['LocalLLM']);
     });
 

@@ -11,7 +11,7 @@ function buildRepo(configFindMany: any) {
   // Only _config (arg 1) is exercised by getOrgContextsForUnit.
   return new EngageRepository(
     _config,
-    {} as any, {} as any, {} as any, {} as any, {} as any, {} as any,
+    {} as any, {} as any, {} as any, {} as any, {} as any,
     {} as any, {} as any, {} as any, {} as any, {} as any, {} as any
   );
 }
@@ -19,9 +19,9 @@ function buildRepo(configFindMany: any) {
 describe('EngageRepository.getOrgContextsForUnit (keyword)', () => {
   it('keeps orgs whose keyword normalises to the unit key, drops the rest', async () => {
     const findMany = vi.fn(async () => [
-      { organizationId: 'o1', keywords: [{ enabled: true, keyword: 'AI' }] },        // "ai" ✓
-      { organizationId: 'o2', keywords: [{ enabled: true, keyword: ' ai ' }] },      // legacy padded → "ai" ✓
-      { organizationId: 'o3', keywords: [{ enabled: true, keyword: 'airplane' }] },  // "airplane" ✗ (SQL false-positive guard)
+      { organizationId: 'o1', keywords: [{ enabled: true, keyword: 'AI' }], trackedAccounts: [] },        // "ai" ✓
+      { organizationId: 'o2', keywords: [{ enabled: true, keyword: ' ai ' }], trackedAccounts: [] },      // legacy padded → "ai" ✓
+      { organizationId: 'o3', keywords: [{ enabled: true, keyword: 'airplane' }], trackedAccounts: [] },  // "airplane" ✗ (SQL false-positive guard)
     ]);
     const repo = buildRepo(findMany);
     const res = await repo.getOrgContextsForUnit('reddit', 'keyword', 'ai');
@@ -31,15 +31,32 @@ describe('EngageRepository.getOrgContextsForUnit (keyword)', () => {
     expect(where.keywords.some.keyword).toEqual({ equals: 'ai', mode: 'insensitive' });
   });
 
-  it('channel/tracked branches query by scope directly (no keyword post-filter)', async () => {
-    const findMany = vi.fn(async () => [{ organizationId: 'o1', keywords: [] }]);
+  it('channel/tracked branches query the merged scan-target relation by scope', async () => {
+    const findMany = vi.fn(async () => [
+      { organizationId: 'o1', keywords: [], trackedAccounts: [] },
+    ]);
     const repo = buildRepo(findMany);
     await repo.getOrgContextsForUnit('reddit', 'channel', 'webdev');
     const where = findMany.mock.calls[0][0].where;
-    expect(where.monitoredChannels.some).toMatchObject({
+    // Both scopes resolve against engageTrackedAccount now; the scan key lands
+    // in `username` whichever scope the unit is.
+    expect(where.trackedAccounts.some).toMatchObject({
       enabled: true,
       platform: 'reddit',
-      channelId: 'webdev',
+      username: { equals: 'webdev', mode: 'insensitive' },
     });
+  });
+
+  it('returns no subscribers when the scanType contradicts the platform scope', async () => {
+    const findMany = vi.fn(async () => [
+      { organizationId: 'o1', keywords: [], trackedAccounts: [] },
+    ]);
+    const repo = buildRepo(findMany);
+
+    // reddit is channel scope and x is author scope: these two units could be
+    // created before the merge and no scanner could serve either.
+    expect(await repo.getOrgContextsForUnit('reddit', 'tracked', 'spez')).toEqual([]);
+    expect(await repo.getOrgContextsForUnit('x', 'channel', 'somesub')).toEqual([]);
+    expect(findMany).not.toHaveBeenCalled();
   });
 });

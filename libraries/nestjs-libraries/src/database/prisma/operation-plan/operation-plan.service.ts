@@ -1617,14 +1617,15 @@ export class OperationPlanService implements OnApplicationBootstrap {
       organizationId,
       projectId
     );
-    const monitoredChannels: MonitoredRedditChannel[] = monitored
-      .filter((c) => c.platform === 'reddit')
-      .map((c) => ({
-        channelId: c.channelId,
-        channelName: c.channelName,
-        audienceSize: c.audienceSize,
-        enabled: c.enabled,
-      }));
+    // listMonitoredChannels already restricts to CHANNEL_SCOPE_PLATFORMS, so a
+    // reddit re-test here is a no-op that would also drop a second channel
+    // platform the day that set widens.
+    const monitoredChannels: MonitoredRedditChannel[] = monitored.map((c) => ({
+      channelId: c.channelId,
+      channelName: c.channelName,
+      audienceSize: c.audienceSize,
+      enabled: c.enabled,
+    }));
 
     const { outputs, discovered } = await resolveRedditTargets(
       // Reddit's required post title is the content item's themeTitle (there is

@@ -19,7 +19,7 @@ Engage spans 8 new Prisma models, 4 Temporal workflows, 25+ API endpoints, a loc
 **Slug**: `engage-f1-schema`  
 **Scope**: All new Prisma models + extensions to existing models  
 **Deliverables**:
-- New models: `EngageConfig`, `EngageKeyword`, `EngageMonitoredChannel`, `EngageTrackedAccount`, `EngageXReplyAccount`, `EngageOpportunity`, `EngageSentReply`, `EngageDataTicks`
+- New models: `EngageConfig`, `EngageKeyword`, `EngageTrackedAccount` (all scan targets — channels and author feeds, scope derived from `platform`), `EngageXReplyAccount`, `EngageOpportunity`, `EngageSentReply`, `EngageDataTicks`
 - Extensions: `Organization` (3 relations), `Integration` (1 relation), `Post` (1 back-relation)
 - `pnpm prisma migrate dev --name add_engage_tables`
 

@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { Prisma, EngageOpportunity, EngageOpportunityStatus, State } from '@prisma/client';
 import { PrismaRepository, PrismaTransaction, PrismaService } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
 import {
@@ -24,6 +24,14 @@ import {
   normalizeUsername,
   isValidUsername,
 } from '@gitroom/nestjs-libraries/engage/engage-scan-lease.service';
+import {
+  buildScanTargetKey,
+  CHANNEL_SCOPE_PLATFORMS,
+  partitionScanTargets,
+  scanKeyFor,
+  scanTypeFor,
+  toChannelShape,
+} from '@gitroom/nestjs-libraries/engage/engage-scan-target';
 import {
   pickXReplyIntegration,
   XReplyResolution,
@@ -239,10 +247,11 @@ function resolveReplyAuthor(
 
 @Injectable()
 export class EngageRepository {
+  private readonly _logger = new Logger(EngageRepository.name);
+
   constructor(
     private _config: PrismaRepository<'engageConfig'>,
     private _keyword: PrismaRepository<'engageKeyword'>,
-    private _channel: PrismaRepository<'engageMonitoredChannel'>,
     private _trackedAccount: PrismaRepository<'engageTrackedAccount'>,
     private _replyAccount: PrismaRepository<'engageXReplyAccount'>,
     private _opportunity: PrismaRepository<'engageOpportunity'>,
@@ -278,13 +287,26 @@ export class EngageRepository {
 
   // ─── Config ────────────────────────────────────────────────────────────────
 
+  /**
+   * Render a config's single `trackedAccounts` relation as the two lists every
+   * caller still consumes. The scan-target tables were merged, but the config
+   * contract (and the frontend/extension reading it) keeps both keys — see
+   * engage-scan-target.ts.
+   */
+  private _withScanTargetShape<
+    T extends { trackedAccounts: Parameters<typeof partitionScanTargets>[0] }
+  >(config: T) {
+    return { ...config, ...partitionScanTargets(config.trackedAccounts) };
+  }
+
   async getOrCreateConfig(organizationId: string, projectId: string | null = null) {
     const include = {
       keywords: {
         orderBy: { createdAt: 'asc' as const },
         include: { initialScans: { orderBy: { platform: 'asc' as const } } },
       },
-      monitoredChannels: { orderBy: { createdAt: 'asc' as const } },
+      // ONE relation now holds both scopes; _withScanTargetShape splits it back
+      // into monitoredChannels/trackedAccounts for every consumer of this method.
       trackedAccounts: { orderBy: { createdAt: 'asc' as const } },
       xReplyAccounts: {
         include: {
@@ -304,12 +326,14 @@ export class EngageRepository {
     if (projectId != null) {
       // Atomic upsert: two concurrent first-call requests would otherwise both
       // miss findFirst and race on create → Prisma P2002 unique violation.
-      return this._config.model.engageConfig.upsert({
-        where: { organizationId_projectId: { organizationId, projectId } },
-        create: { organizationId, projectId, enabled: false },
-        update: {},
-        include,
-      });
+      return this._withScanTargetShape(
+        await this._config.model.engageConfig.upsert({
+          where: { organizationId_projectId: { organizationId, projectId } },
+          create: { organizationId, projectId, enabled: false },
+          update: {},
+          include,
+        })
+      );
     }
 
     // Legacy null-project row: a nullable column can never satisfy a
@@ -322,11 +346,13 @@ export class EngageRepository {
       where: { organizationId, projectId: null },
       include,
     });
-    if (existing) return existing;
-    return this._config.model.engageConfig.create({
-      data: { organizationId, projectId: null, enabled: false },
-      include,
-    });
+    if (existing) return this._withScanTargetShape(existing);
+    return this._withScanTargetShape(
+      await this._config.model.engageConfig.create({
+        data: { organizationId, projectId: null, enabled: false },
+        include,
+      })
+    );
   }
 
   /**
@@ -340,8 +366,10 @@ export class EngageRepository {
    * (so the response is shape-identical to getConfig(projectId)); the three
    * relation lists are then REPLACED with the union across every ENABLED
    * project-scoped config, deduped by the same global unit identity the scan
-   * loop keys on (normalized keyword / platform+channelId / platform+normalized
-   * username). The legacy null-project row is EXCLUDED from the union — its
+   * loop keys on (normalized keyword / platform+normalized target key). The
+   * dedup runs over the MERGED scan-target rows and is split into the
+   * channel/tracked response lists afterwards, so a subreddit and an account can
+   * never collide in one map. The legacy null-project row is EXCLUDED — its
    * keywords/channels/tracked accounts are pre-project data that must no longer
    * be scanned; only its scalar shape is reused as the base. Disabled configs
    * are excluded — consistent with claimNext, which only scans enabled configs.
@@ -354,7 +382,6 @@ export class EngageRepository {
         orderBy: { createdAt: 'asc' as const },
         include: { initialScans: { orderBy: { platform: 'asc' as const } } },
       },
-      monitoredChannels: { orderBy: { createdAt: 'asc' as const } },
       trackedAccounts: { orderBy: { createdAt: 'asc' as const } },
     };
     const [base, configs] = await Promise.all([
@@ -375,38 +402,35 @@ export class EngageRepository {
     };
 
     const kwByKey = new Map<string, (typeof base.keywords)[number]>();
-    const chByKey = new Map<string, (typeof base.monitoredChannels)[number]>();
-    const acctByKey = new Map<string, (typeof base.trackedAccounts)[number]>();
+    const targetByKey = new Map<string, (typeof configs)[number]['trackedAccounts'][number]>();
     for (const c of configs) {
       for (const kw of c.keywords) {
         const key = normalizeKeyword(kw.keyword);
         if (key) pickEnabled(kwByKey, key, kw);
       }
-      for (const ch of c.monitoredChannels) {
-        pickEnabled(chByKey, `${ch.platform}:${ch.channelId}`, ch);
-      }
-      for (const a of c.trackedAccounts) {
-        pickEnabled(acctByKey, `${a.platform}:${normalizeUsername(a.platform ?? 'x', a.username)}`, a);
+      for (const t of c.trackedAccounts) {
+        pickEnabled(
+          targetByKey,
+          `${t.platform}:${normalizeUsername(t.platform ?? 'x', t.username)}`,
+          t
+        );
       }
     }
+    const targets = partitionScanTargets([...targetByKey.values()]);
 
     return {
       ...base,
       keywords: [...kwByKey.values()],
-      monitoredChannels: [...chByKey.values()],
-      trackedAccounts: [...acctByKey.values()],
+      monitoredChannels: targets.monitoredChannels,
+      trackedAccounts: targets.trackedAccounts,
     };
   }
 
   async getAllEnabledOrgContexts() {
-    return this._config.model.engageConfig.findMany({
+    const configs = await this._config.model.engageConfig.findMany({
       where: { enabled: true, projectId: { not: null } },
       include: {
         keywords: {
-          where: { enabled: true },
-          orderBy: { createdAt: 'asc' },
-        },
-        monitoredChannels: {
           where: { enabled: true },
           orderBy: { createdAt: 'asc' },
         },
@@ -416,6 +440,7 @@ export class EngageRepository {
         },
       },
     });
+    return configs.map((c) => this._withScanTargetShape(c));
   }
 
   /**
@@ -430,14 +455,14 @@ export class EngageRepository {
    * step introduces.
    */
   async getEnabledOrgContext(organizationId: string, projectId: string | null = null) {
-    return this._config.model.engageConfig.findFirst({
+    const config = await this._config.model.engageConfig.findFirst({
       where: { organizationId, projectId, enabled: true },
       include: {
         keywords: { where: { enabled: true }, orderBy: { createdAt: 'asc' } },
-        monitoredChannels: { where: { enabled: true }, orderBy: { createdAt: 'asc' } },
         trackedAccounts: { where: { enabled: true }, orderBy: { createdAt: 'asc' } },
       },
     });
+    return config && this._withScanTargetShape(config);
   }
 
   /**
@@ -453,14 +478,14 @@ export class EngageRepository {
    * unaffected because getOrgContextsForUnit resolves subscribers per unit.
    */
   async getEnabledConfigsForOrg(organizationId: string) {
-    return this._config.model.engageConfig.findMany({
+    const configs = await this._config.model.engageConfig.findMany({
       where: { organizationId, enabled: true, projectId: { not: null } },
       include: {
         keywords: { where: { enabled: true }, orderBy: { createdAt: 'asc' } },
-        monitoredChannels: { where: { enabled: true }, orderBy: { createdAt: 'asc' } },
         trackedAccounts: { where: { enabled: true }, orderBy: { createdAt: 'asc' } },
       },
     });
+    return configs.map((c) => this._withScanTargetShape(c));
   }
 
   /**
@@ -531,23 +556,16 @@ export class EngageRepository {
   ) {
     const include = {
       keywords: { where: { enabled: true }, orderBy: { createdAt: 'asc' as const } },
-      monitoredChannels: { where: { enabled: true }, orderBy: { createdAt: 'asc' as const } },
       trackedAccounts: { where: { enabled: true }, orderBy: { createdAt: 'asc' as const } },
     };
 
-    if (scanType === 'channel') {
-      return this._config.model.engageConfig.findMany({
-        where: {
-          enabled: true,
-          projectId: { not: null },
-          monitoredChannels: { some: { enabled: true, platform, channelId: scanKey } },
-        },
-        include,
-      });
-    }
-
-    if (scanType === 'tracked') {
-      return this._config.model.engageConfig.findMany({
+    // 'channel' and 'tracked' now resolve against the SAME table — the scope is
+    // implied by `platform` (scanTypeFor), so a unit whose scanType contradicts
+    // its platform (an x 'channel', a reddit 'tracked') matches nothing instead
+    // of silently resolving subscribers for a scan no scanner can serve.
+    if (scanType !== 'keyword') {
+      if (scanTypeFor(platform) !== scanType) return [];
+      const configs = await this._config.model.engageConfig.findMany({
         where: {
           enabled: true,
           projectId: { not: null },
@@ -561,6 +579,34 @@ export class EngageRepository {
         },
         include,
       });
+
+      // The keyword branch below re-filters in code as belt-and-braces for rows
+      // written before normalisation existed. That trick does NOT transfer here:
+      // a legacy target key differs from its unit key by a leading '@' or 'u/',
+      // not just case, so `equals … insensitive` never returns the config in the
+      // first place and no in-code filter could recover it. The invariant that
+      // `username` IS the canonical scan key is established by DATA instead —
+      // migration STEP 2c canonicalises every pre-existing row, and every write
+      // since goes through buildScanTargetKey.
+      //
+      // What this check adds is a SIGNAL. If a config matched the SQL predicate
+      // but holds no row whose canonical key equals the unit key, the row is
+      // un-migrated: the unit gets scanned, paid for, and fans out to nobody.
+      // Silent before; now it names the org and the key so STEP 2c can be run.
+      for (const c of configs) {
+        const canonical = c.trackedAccounts.some(
+          (t) => t.enabled && scanKeyFor(t) === scanKey
+        );
+        if (!canonical) {
+          this._logger.warn(
+            `[engage] org=${c.organizationId} matched unit ${platform}/${scanType}/${scanKey} ` +
+              `only case-insensitively — its scan target holds a non-canonical key. ` +
+              `Run migration STEP 2c; until then this unit produces no opportunities for that org.`
+          );
+        }
+      }
+
+      return configs.map((c) => this._withScanTargetShape(c));
     }
 
     const configs = await this._config.model.engageConfig.findMany({
@@ -573,9 +619,11 @@ export class EngageRepository {
       },
       include,
     });
-    return configs.filter((c) =>
-      c.keywords.some((k) => k.enabled && normalizeKeyword(k.keyword) === scanKey)
-    );
+    return configs
+      .filter((c) =>
+        c.keywords.some((k) => k.enabled && normalizeKeyword(k.keyword) === scanKey)
+      )
+      .map((c) => this._withScanTargetShape(c));
   }
 
   /**
@@ -688,25 +736,25 @@ export class EngageRepository {
         ? scanIntervalHours
         : DEFAULT_SCAN_INTERVAL_HOURS) * 3_600_000;
 
-    const [subs, tracked, keywords] = await Promise.all([
-      this._channel.model.engageMonitoredChannel.findMany({
-        where: { organizationId, platform: 'reddit', enabled: true },
-        select: { channelId: true },
-      }),
+    const [targets, keywords] = await Promise.all([
       this._trackedAccount.model.engageTrackedAccount.findMany({
         where: { organizationId, enabled: true },
-        select: { username: true },
+        select: { platform: true, username: true },
       }),
       this._keyword.model.engageKeyword.findMany({
         where: { organizationId, enabled: true },
         select: { keyword: true },
       }),
     ]);
-    const subredditIds = subs.map((s) => s.channelId);
-    // Tracked accounts are scanned as per-account X units keyed by their
-    // normalized username (matching the writer + extension), so look up cursors
-    // by those keys.
-    const usernames = tracked.map((t) => normalizeUsername('x', t.username));
+    // One table, two scopes: `platform` decides which cursor namespace a target
+    // belongs to. Both sides key by the NORMALIZED value (matching the writer +
+    // extension), so look up cursors by those keys.
+    const subredditIds = targets
+      .filter((t) => scanTypeFor(t.platform) === 'channel')
+      .map(scanKeyFor);
+    const usernames = targets
+      .filter((t) => scanTypeFor(t.platform) === 'tracked')
+      .map(scanKeyFor);
     // Keywords are scanned as per-keyword global units keyed by their normalized
     // form (shared across orgs + the extension path), so look up THIS org's
     // keyword cursors by those keys — mirroring the channel/tracked lookups.
@@ -798,7 +846,7 @@ export class EngageRepository {
    * Per-channel scan cursor times for this org's monitored subreddits. Mirrors
    * getKeywordCursors so the config API reports the SAME source of truth
    * (EngageScanCursor) for channels as for keywords — NOT the per-row
-   * EngageMonitoredChannel.lastScannedAt bookkeeping field, which only the
+   * EngageTrackedAccount.lastCheckedAt bookkeeping field, which only the
    * workflow writes (so a unit advanced by the extension scan path left it stale
    * and the UI showed an old "last scanned" while the cursor was fresh).
    * Keyed by the caller's original `${platform}:${channelId}`.
@@ -810,29 +858,12 @@ export class EngageRepository {
   ): Promise<
     Record<string, { lastScannedAt: Date | null; nextScanAt: Date | null }>
   > {
-    if (!channels.length) return {};
-    const keys = Array.from(new Set(channels.map((c) => c.channelId)));
-    const rows = await this._scanCursor.model.engageScanCursor.findMany({
-      where: { scanType: 'channel', scanKey: { in: keys } },
-      select: {
-        platform: true,
-        scanKey: true,
-        lastScannedAt: true,
-        lastScanStartedAt: true,
-        cooldownUntil: true,
-      },
-    });
-    const out: Record<
-      string,
-      { lastScannedAt: Date | null; nextScanAt: Date | null }
-    > = {};
-    for (const row of rows) {
-      out[`${row.platform}:${row.scanKey}`] = {
-        lastScannedAt: row.lastScannedAt,
-        nextScanAt: new Date(deriveNext(row, cadenceMs, now)),
-      };
-    }
-    return out;
+    return this._getTargetCursors(
+      'channel',
+      channels.map((c) => ({ platform: c.platform, key: c.channelId })),
+      cadenceMs,
+      now
+    );
   }
 
   /**
@@ -849,12 +880,34 @@ export class EngageRepository {
   ): Promise<
     Record<string, { lastScannedAt: Date | null; nextScanAt: Date | null }>
   > {
-    if (!accounts.length) return {};
-    const keys = Array.from(
-      new Set(accounts.map((a) => normalizeUsername(a.platform ?? 'x', a.username)))
+    return this._getTargetCursors(
+      'tracked',
+      accounts.map((a) => ({ platform: a.platform, key: a.username })),
+      cadenceMs,
+      now
     );
+  }
+
+  /**
+   * Shared body of getChannelCursors/getTrackedCursors — identical since the
+   * scan-target tables merged; only the cursor namespace differs. Looks cursors
+   * up by the NORMALIZED key, then re-keys the result by the caller's ORIGINAL
+   * `${platform}:${key}` so no caller needs a normaliser of its own.
+   */
+  private async _getTargetCursors(
+    scanType: 'channel' | 'tracked',
+    targets: { platform: string; key: string }[],
+    cadenceMs: number,
+    now: number
+  ): Promise<
+    Record<string, { lastScannedAt: Date | null; nextScanAt: Date | null }>
+  > {
+    if (!targets.length) return {};
+    const norm = (t: { platform: string; key: string }) =>
+      normalizeUsername(t.platform ?? 'x', t.key);
+    const keys = Array.from(new Set(targets.map(norm)));
     const rows = await this._scanCursor.model.engageScanCursor.findMany({
-      where: { scanType: 'tracked', scanKey: { in: keys } },
+      where: { scanType, scanKey: { in: keys } },
       select: {
         platform: true,
         scanKey: true,
@@ -877,10 +930,10 @@ export class EngageRepository {
       string,
       { lastScannedAt: Date | null; nextScanAt: Date | null }
     > = {};
-    for (const a of accounts) {
-      const platform = a.platform ?? 'x';
-      const hit = byNorm.get(`${platform}:${normalizeUsername(platform, a.username)}`);
-      if (hit) out[`${platform}:${a.username}`] = hit;
+    for (const t of targets) {
+      const platform = t.platform ?? 'x';
+      const hit = byNorm.get(`${platform}:${norm(t)}`);
+      if (hit) out[`${platform}:${t.key}`] = hit;
     }
     return out;
   }
@@ -1162,23 +1215,36 @@ export class EngageRepository {
   }
 
   // ─── Monitored Channels ───────────────────────────────────────────────────
+  //
+  // Channels live in EngageTrackedAccount alongside author targets (the scope is
+  // implied by `platform`). These four methods keep the legacy channel field
+  // names on the way in and out so the /engage/monitored-channels routes, the
+  // frontend and the extension are unaffected by the merge.
 
   async addMonitoredChannel(
     configId: string,
     organizationId: string,
     dto: AddMonitoredChannelDto
   ) {
-    // Unique violation on (configId, platform, channelId) → 409.
+    // ONE write boundary: canonicalises the platform, asserts the scope matches
+    // this door, normalises the key and validates it against the CHANNEL
+    // alphabet. Shared with setupEngage so the bulk path cannot skip it.
+    const { platform, username } = buildScanTargetKey(
+      dto.platform,
+      dto.channelId,
+      'channel'
+    );
+    // Unique violation on (configId, platform, username) → 409.
     const created = await this._createOrConflict(
       `Channel "${dto.channelName ?? dto.channelId}"`,
       () =>
-        this._channel.model.engageMonitoredChannel.create({
+        this._trackedAccount.model.engageTrackedAccount.create({
           data: {
             configId,
             organizationId,
-            platform: dto.platform,
-            channelId: dto.channelId,
-            channelName: dto.channelName,
+            platform,
+            username,
+            displayName: dto.channelName,
             enabled: dto.enabled ?? true,
             audienceSize: dto.audienceSize ?? 0,
             ...(dto.metadata && {
@@ -1192,14 +1258,19 @@ export class EngageRepository {
     // and Tier-2-discovered subreddits in the same run — without this the
     // subreddits would trail the keywords by a full backstop period.
     if (dto.enabled ?? true) await markEngageScanWork(organizationId);
-    return created;
+    return toChannelShape(created);
   }
 
   async listMonitoredChannels(organizationId: string, projectId: string | null = null) {
-    return this._channel.model.engageMonitoredChannel.findMany({
-      where: { organizationId, config: { projectId } },
+    const rows = await this._trackedAccount.model.engageTrackedAccount.findMany({
+      where: {
+        organizationId,
+        config: { projectId },
+        platform: { in: [...CHANNEL_SCOPE_PLATFORMS] },
+      },
       orderBy: { createdAt: 'asc' },
     });
+    return rows.map(toChannelShape);
   }
 
   async updateMonitoredChannel(
@@ -1207,28 +1278,43 @@ export class EngageRepository {
     id: string,
     dto: UpdateMonitoredChannelDto
   ) {
-    const channel = await this._channel.model.engageMonitoredChannel.findFirst(
-      { where: { id, organizationId } }
-    );
-    if (!channel) throw new NotFoundException('Channel not found');
-    return this._channel.model.engageMonitoredChannel.update({
-      where: { id },
+    const channel = await this._findChannelOr404(organizationId, id);
+    const updated = await this._trackedAccount.model.engageTrackedAccount.update({
+      where: { id: channel.id },
       data: {
         ...(dto.enabled !== undefined && { enabled: dto.enabled }),
-        ...(dto.channelName !== undefined && { channelName: dto.channelName }),
+        ...(dto.channelName !== undefined && { displayName: dto.channelName }),
         ...(dto.audienceSize !== undefined && {
           audienceSize: dto.audienceSize,
         }),
       },
     });
+    return toChannelShape(updated);
   }
 
   async removeMonitoredChannel(organizationId: string, id: string) {
-    const channel = await this._channel.model.engageMonitoredChannel.findFirst(
-      { where: { id, organizationId } }
-    );
-    if (!channel) throw new NotFoundException('Channel not found');
-    return this._channel.model.engageMonitoredChannel.delete({ where: { id } });
+    const channel = await this._findChannelOr404(organizationId, id);
+    const deleted = await this._trackedAccount.model.engageTrackedAccount.delete({
+      where: { id: channel.id },
+    });
+    return toChannelShape(deleted);
+  }
+
+  /**
+   * A channel-scope row owned by this org, or 404. The platform predicate keeps
+   * the channel routes from reaching an author target that happens to share an
+   * id — they address disjoint subsets of one table now.
+   */
+  private async _findChannelOr404(organizationId: string, id: string) {
+    const row = await this._trackedAccount.model.engageTrackedAccount.findFirst({
+      where: {
+        id,
+        organizationId,
+        platform: { in: [...CHANNEL_SCOPE_PLATFORMS] },
+      },
+    });
+    if (!row) throw new NotFoundException('Channel not found');
+    return row;
   }
 
   // ─── Tracked Accounts ─────────────────────────────────────────────────────
@@ -1238,23 +1324,26 @@ export class EngageRepository {
     organizationId: string,
     dto: AddTrackedAccountDto
   ) {
-    const platform = dto.platform ?? 'x';
-    // Reject usernames that aren't a plain handle BEFORE they can reach the
-    // `from:<username>` search query — a crafted value (parens/operators/spaces)
-    // could otherwise shape the X search. Validate the normalized form.
-    if (!isValidUsername(platform, normalizeUsername(platform, dto.username))) {
-      throw new BadRequestException(
-        `Invalid ${platform} username "${dto.username}": use a plain handle (letters, digits, _${platform === 'reddit' ? ', -' : ''}).`
-      );
-    }
+    // Same write boundary as addMonitoredChannel — it rejects the wrong door
+    // (a reddit "tracked account" used to be storable and was then scanned as
+    // /r/<username>) and rejects a key that could shape the `from:<username>`
+    // X query. The NORMALIZED key is what gets STORED: it is the scan-unit key,
+    // and `getOrgContextsForUnit` matches it with `equals … insensitive`, which
+    // bridges case but not a stray `@` or `u/` — so a raw `@Alice` would be
+    // scanned and then fan out to zero subscribers.
+    const { platform, username } = buildScanTargetKey(
+      dto.platform ?? 'x',
+      dto.username,
+      'tracked'
+    );
     // Unique violation on (configId, platform, username) → 409.
     const created = await this._createOrConflict(`Account "${dto.username}"`, () =>
       this._trackedAccount.model.engageTrackedAccount.create({
         data: {
           configId,
           organizationId,
-          platform: dto.platform ?? 'x',
-          username: dto.username,
+          platform,
+          username,
           ...(dto.picture && { picture: dto.picture }),
           ...(dto.categoryLabel && { categoryLabel: dto.categoryLabel }),
           ...(dto.enabled !== undefined && { enabled: dto.enabled }),
@@ -1268,7 +1357,13 @@ export class EngageRepository {
 
   async listTrackedAccounts(organizationId: string, projectId: string | null = null) {
     return this._trackedAccount.model.engageTrackedAccount.findMany({
-      where: { organizationId, config: { projectId } },
+      where: {
+        organizationId,
+        config: { projectId },
+        // Channel-scope rows share this table but belong to the
+        // /engage/monitored-channels contract — see listMonitoredChannels.
+        platform: { notIn: [...CHANNEL_SCOPE_PLATFORMS] },
+      },
       orderBy: { createdAt: 'asc' },
     });
   }
@@ -1280,7 +1375,11 @@ export class EngageRepository {
   ) {
     const account =
       await this._trackedAccount.model.engageTrackedAccount.findFirst({
-        where: { id, organizationId },
+        where: {
+          id,
+          organizationId,
+          platform: { notIn: [...CHANNEL_SCOPE_PLATFORMS] },
+        },
       });
     if (!account) throw new NotFoundException('Tracked account not found');
     return this._trackedAccount.model.engageTrackedAccount.update({
@@ -1298,7 +1397,11 @@ export class EngageRepository {
   async removeTrackedAccount(organizationId: string, id: string) {
     const account =
       await this._trackedAccount.model.engageTrackedAccount.findFirst({
-        where: { id, organizationId },
+        where: {
+          id,
+          organizationId,
+          platform: { notIn: [...CHANNEL_SCOPE_PLATFORMS] },
+        },
       });
     if (!account) throw new NotFoundException('Tracked account not found');
     return this._trackedAccount.model.engageTrackedAccount.delete({
@@ -1529,16 +1632,33 @@ export class EngageRepository {
   } {
     const postPublishedAtFilter = this._postPublishedAtFilter(dto);
 
+    // Identity filters are CASE-INSENSITIVE on both axes. The scan-target key is
+    // stored normalized (lowercased) while EngageOpportunity.channelId /
+    // authorUsername keep the platform's display casing — an exact match would
+    // silently return nothing for every mixed-case subreddit or handle. Each
+    // axis is its own OR set, so they are combined through AND rather than
+    // sharing one `OR` key (which would make the two filters alternatives).
+    const identityFilters: Prisma.EngageOpportunityWhereInput[] = [];
+    if (dto.channels?.length) {
+      identityFilters.push({
+        OR: dto.channels.map((c) => ({
+          channelId: { equals: c, mode: 'insensitive' as const },
+        })),
+      });
+    }
+    if (dto.authors?.length) {
+      identityFilters.push({
+        OR: dto.authors.map((a) => ({
+          authorUsername: { equals: a, mode: 'insensitive' as const },
+        })),
+      });
+    }
+
     // Global (EngageOpportunity) filters.
     const oppFilter: Prisma.EngageOpportunityWhereInput = {
       deletedAt: null,
       ...(dto.platform?.length && { platform: { in: dto.platform } }),
-      ...(dto.channels?.length && { channelId: { in: dto.channels } }),
-      ...(dto.authors?.length && {
-        OR: dto.authors.map((a) => ({
-          authorUsername: { equals: a, mode: 'insensitive' as const },
-        })),
-      }),
+      ...(identityFilters.length && { AND: identityFilters }),
       ...(dto.intent?.length && { intentTags: { hasSome: dto.intent } }),
       ...(dto.minScoreHeat !== undefined && {
         scoreHeat: { gte: dto.minScoreHeat },
@@ -1629,15 +1749,20 @@ export class EngageRepository {
     // Both lookups below depend only on `rows`, not on each other, so fan them
     // out in one round trip.
     const oppIds = rows.map((r) => r.opportunity.id);
-    // Subreddit avatars live on the monitored channel's metadata
-    // (`metadata.avatar`), keyed by this org's (platform=reddit, channelId).
-    // Only Reddit rows carry a channel avatar; every other platform resolves to
-    // null. One bounded query for the channels referenced by the current page.
+    // Subreddit avatars live on the scan target's metadata (`metadata.avatar`),
+    // keyed by (platform=reddit, username). Only Reddit rows carry a channel
+    // avatar; every other platform resolves to null. One bounded query for the
+    // channels referenced by the current page.
+    //
+    // NORMALIZED on both sides: the target's `username` is stored normalized
+    // (lowercased) while EngageOpportunity.channelId keeps Reddit's display
+    // casing (`AskReddit`), so an as-is comparison would miss every subreddit
+    // whose name is not already lowercase.
     const redditChannelIds = [
       ...new Set(
         rows
           .filter((r) => r.opportunity.platform === 'reddit' && r.opportunity.channelId)
-          .map((r) => r.opportunity.channelId)
+          .map((r) => normalizeUsername('reddit', r.opportunity.channelId as string))
       ),
     ];
 
@@ -1660,19 +1785,23 @@ export class EngageRepository {
             .then((r) => r ?? [])
         : Promise.resolve([]),
       redditChannelIds.length
-        ? this._channel.model.engageMonitoredChannel.findMany({
-            // The subreddit avatar is a global property of the subreddit, not
-            // per-org, so match on (platform, channelId) only. Scoping by
-            // organizationId would miss the avatar whenever this org's own
-            // channel row lacks the cached metadata — e.g. the post surfaced via
-            // keyword scan for a subreddit this org doesn't monitor but another
-            // org does, or this org's row was added without the search metadata.
-            where: {
-              platform: 'reddit',
-              channelId: { in: redditChannelIds },
-            },
-            select: { channelId: true, metadata: true },
-          })
+        ? this._trackedAccount.model.engageTrackedAccount
+            .findMany({
+              // The subreddit avatar is a global property of the subreddit, not
+              // per-org, so match on (platform, username) only. Scoping by
+              // organizationId would miss the avatar whenever this org's own
+              // channel row lacks the cached metadata — e.g. the post surfaced via
+              // keyword scan for a subreddit this org doesn't monitor but another
+              // org does, or this org's row was added without the search metadata.
+              where: {
+                platform: 'reddit',
+                username: { in: redditChannelIds },
+              },
+              select: { username: true, metadata: true },
+            })
+            .then((rows) =>
+              rows.map((r) => ({ channelId: r.username, metadata: r.metadata }))
+            )
         : Promise.resolve([]),
     ]);
 
@@ -1701,6 +1830,12 @@ export class EngageRepository {
         channelAvatarById.set(ch.channelId, avatar);
       }
     }
+    // The map is keyed by the NORMALIZED target key (ch.channelId is the row's
+    // `username`), so reads must normalize too — see redditChannelIds above.
+    const avatarFor = (platform: string, channelId: string | null) =>
+      platform === 'reddit' && channelId
+        ? channelAvatarById.get(normalizeUsername('reddit', channelId)) ?? null
+        : null;
 
     const items = rows.map((r) => {
       const merged = this._merge(r);
@@ -1709,7 +1844,7 @@ export class EngageRepository {
         ...merged,
         sentReplyId: rep?.id ?? null,
         replyLink: rep?.replyLink ?? null,
-        channelAvatar: channelAvatarById.get(merged.channelId) ?? null,
+        channelAvatar: avatarFor(merged.platform, merged.channelId),
       };
     });
 
@@ -2384,10 +2519,12 @@ export class EngageRepository {
         select: { id: true, post: { select: { releaseURL: true } } },
       }),
       row.opportunity.platform === 'reddit' && row.opportunity.channelId
-        ? this._channel.model.engageMonitoredChannel.findFirst({
+        ? this._trackedAccount.model.engageTrackedAccount.findFirst({
             where: {
               platform: 'reddit',
-              channelId: row.opportunity.channelId,
+              // Normalized: the stored key is lowercased, the opportunity keeps
+              // Reddit's display casing (see listOpportunities' redditChannelIds).
+              username: normalizeUsername('reddit', row.opportunity.channelId),
             },
             select: { metadata: true },
           })
@@ -4516,31 +4653,52 @@ export class EngageRepository {
         }
       }
 
+      // Channels and accounts land in the SAME table — two createMany calls only
+      // because the DTO still carries them as two lists. BOTH go through
+      // buildScanTargetKey, the same boundary the per-row add endpoints use:
+      // this path takes the same externally-supplied DTO and writes the same
+      // table, so skipping the scope + charset guards here (as it did) let a
+      // `monitoredChannels` entry on platform `x` become a tracked target whose
+      // key reached the shared X `from:` query unescaped.
       if (dto.monitoredChannels?.length) {
-        await tx.engageMonitoredChannel.createMany({
-          data: dto.monitoredChannels.map((ch) => ({
-            configId: config.id,
-            organizationId,
-            platform: ch.platform,
-            channelId: ch.channelId,
-            channelName: ch.channelName,
-            audienceSize: ch.audienceSize ?? 0,
-            ...(ch.metadata && { metadata: ch.metadata as Prisma.InputJsonValue }),
-          })),
+        await tx.engageTrackedAccount.createMany({
+          data: dto.monitoredChannels.map((ch) => {
+            const { platform, username } = buildScanTargetKey(
+              ch.platform,
+              ch.channelId,
+              'channel'
+            );
+            return {
+              configId: config.id,
+              organizationId,
+              platform,
+              username,
+              displayName: ch.channelName,
+              audienceSize: ch.audienceSize ?? 0,
+              ...(ch.metadata && { metadata: ch.metadata as Prisma.InputJsonValue }),
+            };
+          }),
           skipDuplicates: true,
         });
       }
 
       if (dto.trackedAccounts?.length) {
         await tx.engageTrackedAccount.createMany({
-          data: dto.trackedAccounts.map((acc) => ({
-            configId: config.id,
-            organizationId,
-            platform: acc.platform ?? 'x',
-            username: acc.username,
-            ...(acc.picture && { picture: acc.picture }),
-            ...(acc.categoryLabel && { categoryLabel: acc.categoryLabel }),
-          })),
+          data: dto.trackedAccounts.map((acc) => {
+            const { platform, username } = buildScanTargetKey(
+              acc.platform ?? 'x',
+              acc.username,
+              'tracked'
+            );
+            return {
+              configId: config.id,
+              organizationId,
+              platform,
+              username,
+              ...(acc.picture && { picture: acc.picture }),
+              ...(acc.categoryLabel && { categoryLabel: acc.categoryLabel }),
+            };
+          }),
           skipDuplicates: true,
         });
       }

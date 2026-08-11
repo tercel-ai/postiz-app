@@ -128,8 +128,7 @@ model EngageConfig {
   updatedAt             DateTime  @updatedAt
 
   keywords              EngageKeyword[]
-  monitoredChannels     EngageMonitoredChannel[]
-  trackedAccounts       EngageTrackedAccount[]
+  trackedAccounts       EngageTrackedAccount[]   // ALL scan targets — see below
   xReplyAccounts        EngageXReplyAccount[]
 }
 
@@ -186,57 +185,68 @@ model EngageKeywordInitialScan {
 // Canonical values: "CORE" | "BRAND" | "COMPETITOR" | future values
 // Define in engage-keyword.constants.ts alongside KEYWORD_TYPE_COLORS etc.
 
-// A monitored channel / community the user subscribes to.
-// One row = one specific channel, regardless of platform.
-// Examples:
-//   Reddit subreddit: platform="reddit",  channelId="SEO",        channelName="r/SEO",          audienceSize=memberCount
-//   YouTube channel:  platform="youtube", channelId="UCxxxxxx",   channelName="Channel title",   audienceSize=subscriberCount
-//   QQ group:         platform="qq",      channelId="123456789",  channelName="SEO交流群",        audienceSize=memberCount
-//   Discord server:   platform="discord", channelId="server_id",  channelName="Server name",     audienceSize=memberCount
-model EngageMonitoredChannel {
-  id                    String    @id @default(uuid())
-  configId              String
-  config                EngageConfig @relation(fields: [configId], references: [id], onDelete: Cascade)
-  organizationId        String
-  platform              String    // "reddit" | "youtube" | "qq" | "discord" | ...
-  channelId             String    // platform-native identifier
-  channelName           String    // display name shown in UI
-  audienceSize          Int       @default(0)  // channel's stored member/subscriber count (display/reference); per-post authority uses EngageOpportunity.channelFollowers
-  enabled               Boolean   @default(true)
-  lastScannedAt         DateTime? // last time this channel was scanned; used for incremental fetch
-  metadata              Json?     // platform-specific extras ({ url, description, iconUrl })
-  createdAt             DateTime  @default(now())
-  updatedAt             DateTime  @updatedAt
-
-  @@unique([configId, platform, channelId])
-  @@index([organizationId])
-  @@index([configId, platform, enabled])
-}
-
 // ──────────────────────────────────────────────────────────────────────────
-// TRACKED ACCOUNTS (追踪账号): EXTERNAL third-party X accounts we MONITOR.
-// These are NOT the user's own accounts. They have no OAuth tokens here.
-// Purpose: when these external accounts post on X, their posts are pushed
-//          into Signal Feed as engagement opportunities (checked every 3h).
-//          Posts from tracked accounts also receive a +5 score bonus.
-// DO NOT confuse with EngageXReplyAccount (our own accounts we send from).
+// SCAN TARGETS (扫描目标): ONE table for everything the scan loop polls.
+//
+// EngageMonitoredChannel was folded into this model (2026-08). The two tables
+// were ~85% identical, already drew from ONE per-platform "priority accounts"
+// entitlement pool, and both fed the same +5 isFromTrackedAccount signal —
+// while their overlapping platform allowlists let an API caller create rows no
+// scanner could serve (a reddit "tracked account" was fetched as /r/<username>,
+// an x "channel" was searched as a bare keyword).
+//
+// ★ CORE INVARIANT: the SCOPE is DERIVED from `platform`, never stored.
+//     scanTypeFor(platform):  reddit → 'channel'   (a community: /r/<key>/new.json)
+//                             else   → 'tracked'   (an author feed: X from:, dev.to
+//                                                   ?username=, HN author_<user>,
+//                                                   Medium /feed/@user, Quora /profile/<user>)
+//   There is no discriminator column because no platform has both scopes.
+//   Deriving it is what makes the bad states above unrepresentable.
+//   → If a platform ever needs BOTH (e.g. tracking a u/ handle on Reddit), add a
+//     nullable `targetType` column that OVERRIDES the derivation. Do NOT split
+//     the table again.
+//   Source of truth: libraries/nestjs-libraries/src/engage/engage-scan-target.ts
+//
+// ★ CORE INVARIANT: `username` holds the CANONICAL scan-unit key.
+//   It is the value EngageScanCursor.scanKey carries, for both scopes. Every
+//   write goes through buildScanTargetKey(), which canonicalises the platform,
+//   asserts the scope matches the endpoint, normalises the key (normalizeUsername:
+//   trim → strip @ / u/ / r/ → strip trailing slashes → lowercase for
+//   case-insensitive platforms) and validates it against the SCOPE's alphabet
+//   (subreddit names are [a-z0-9_]{2,21} — NOT the reddit username alphabet).
+//
+// Examples of one row:
+//   Reddit subreddit: platform="reddit", username="seo",      displayName="r/SEO",  audienceSize=memberCount
+//   X account:        platform="x",      username="alice",    displayName="Alice"
+//   LinkedIn person:  platform="linkedin", username="Some-Person"   (case-SENSITIVE platform)
+//
+// The legacy /engage/monitored-channels REST routes still exist as a THIN ALIAS
+// over the channel-scope rows: the repository renders them with the old field
+// names (username→channelId, displayName→channelName, lastCheckedAt→lastScannedAt)
+// so the frontend and extension needed no coordinated release.
+//
+// DO NOT confuse with EngageXReplyAccount (our own accounts we send FROM).
 // ──────────────────────────────────────────────────────────────────────────
 model EngageTrackedAccount {
   id                    String    @id @default(uuid())
   configId              String
   config                EngageConfig @relation(fields: [configId], references: [id], onDelete: Cascade)
   organizationId        String
-  platform              String    @default("x")
-  username              String    // external user's X @username (no @ prefix)
-  displayName           String?
+  platform              String    @default("x")   // decides the scope; stored lowercase
+  username              String    // canonical scan-unit key: bare subreddit name on reddit rows, author handle elsewhere
+  displayName           String?   // "r/SEO" on channel rows; the account's display name elsewhere
+  picture               String?
   categoryLabel         String?   // user-defined label: "GEO专家", "SEO媒体", etc.
+  audienceSize          Int       @default(0)  // subreddit subscribers / follower count; 0 when unknown. Per-post authority uses EngageOpportunity.channelFollowers
   enabled               Boolean   @default(true)
-  lastCheckedAt         DateTime? // when we last polled their tweets
+  lastCheckedAt         DateTime? // last poll of this target (bookkeeping; EngageScanCursor is the source of truth)
+  metadata              Json?     // channel rows carry the resolver's { avatar, description, url } writeback
   createdAt             DateTime  @default(now())
   updatedAt             DateTime  @updatedAt
 
-  @@unique([configId, platform, username])  // username is platform-scoped; same name on X vs Bluesky = different rows
+  @@unique([configId, platform, username])  // sufficient for both scopes: scope is a function of platform, so a channel and an account can never share (configId, platform)
   @@index([organizationId, enabled])
+  @@index([configId, platform, enabled])
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -347,7 +357,7 @@ model EngageOpportunity {
 // Dimension      Max   Formula / thresholds
 // scoreKeyword    35   each keyword hit +15, capped at 35 (关键词质量)
 // scoreTracked     5   X: author is in this org's EngageTrackedAccount; Reddit: post is in
-//                      one of this org's EngageMonitoredChannel subreddits → +5 (重点账户/频道)
+//                      one of this org's channel-scope EngageTrackedAccount subreddits → +5 (重点账户/频道)
 // score          105   = scoreKeyword + scoreTracked + opportunity.(scoreHeat+scoreAuthority+scoreRecency)
 model EngageOpportunityState {
   organizationId String
@@ -518,7 +528,7 @@ engageSentReply       EngageSentReply?   // back-relation; null for non-Engage p
 Organization
 ├── EngageConfig (1:1)
 │   ├── EngageKeyword[] (1:N)
-│   ├── EngageMonitoredChannel[] (1:N)  ← subscribed channels (r/SEO, YT, QQ群, ...)
+│   │   └── (channel scope: platform='reddit')  ← subscribed subreddits (r/SEO, ...)
 │   ├── EngageTrackedAccount[] (1:N)    ← EXTERNAL accounts monitored for new posts
 │   └── EngageXReplyAccount[] (1:N)    ← OUR OWN X accounts (→ Integration)
 ├── EngageOpportunityState[] (1:N)     ← per-org state for a discovered post (status, bookmark, keyword/tracked score)
@@ -1792,7 +1802,8 @@ Reddit's public JSON API requires no auth for read operations:
 
 ```typescript
 async searchRedditPosts(channelId: string, keyword: string): Promise<RedditPost[]> {
-  // channelId = subreddit name (e.g. "SEO" for r/SEO), from EngageMonitoredChannel.channelId
+  // channelId = subreddit name (e.g. "SEO" for r/SEO); the org's copy lives in
+  // EngageTrackedAccount.username (canonical: lowercase, "seo")
   const url = `https://www.reddit.com/r/${channelId}/search.json?q=${encodeURIComponent(keyword)}&sort=new&t=day&limit=25`;
   const resp = await fetch(url, {
     headers: { 'User-Agent': 'AISEE-Engage/1.0' }
@@ -1836,7 +1847,7 @@ async fetchRedditCommentMetrics(commentId: string): Promise<{ score: number; num
 | Platform Heat | `scoreHeat` | 45 | `EngageOpportunity` (global) | Per-platform formula, 4 branches (see below) (平台热度) |
 | Account Authority | `scoreAuthority` | 15 | `EngageOpportunity` (global) | X: post author follower count (50k/10k/1k). Reddit/community: `channelFollowers` subreddit audience size (1M/100k/10k) (账号影响力) |
 | Recency | `scoreRecency` | 5 | `EngageOpportunity` (global) | within 24h → 5; else → 0 (时效性) |
-| Tracked Source | `scoreTracked` | 5 | `EngageOpportunityState` (per-org) | +5 if author is in this org's `EngageTrackedAccount` (X) OR post is in one of this org's `EngageMonitoredChannel` subreddits (Reddit) (重点账户/频道) |
+| Tracked Source | `scoreTracked` | 5 | `EngageOpportunityState` (per-org) | +5 if the post's author/community is one of this org's `EngageTrackedAccount` rows — author handle on X, subreddit on Reddit (重点账户/频道) |
 
 **Score ownership (two-table split):** the OBJECTIVE dimensions (heat / authority / recency) are identical for every org, so they live on the global `EngageOpportunity` row — authority uses the post author's followers (X) or the subreddit's audience size `channelFollowers` (Reddit), both org-independent facts. The SUBJECTIVE dimensions (keyword / tracked) depend on the org's own keyword set, tracked accounts, and monitored subreddits, so they — plus the total `score` (= keyword + tracked + heat + authority + recency, max 105) — live on the per-org `EngageOpportunityState`. "Is this subreddit in *my* monitored list" is inherently per-org, which is why the Reddit +5 is a separate `scoreTracked` signal, orthogonal to the (objective) subreddit-size authority. The total is recomputed each scan; the feed reads it directly.
 
