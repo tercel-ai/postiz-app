@@ -2387,3 +2387,240 @@ describe('OperationPlanService.create', () => {
     expect(repo.materializePlanPosts).toHaveBeenCalled();
   });
 });
+
+// ── Platform coverage & cross-platform sharing ──────────────────────────
+
+describe('OperationPlanService._missingPlatformCoverage', () => {
+  function createService() {
+    return new OperationPlanService({} as any);
+  }
+
+  it('returns empty array when every requested platform has at least one post', () => {
+    const service = createService();
+    const plan = {
+      contentItems: [
+        {
+          contentId: 'D01',
+          utcDate: '2030-01-01T00:00:00.000Z',
+          themeKey: 'w1:foundations',
+          themeTitle: 'Foundations',
+          platforms: [
+            { id: '00000000-0000-4000-8000-000000000001', platform: 'x', content: 'x post', subreddit: null, flairLabel: null, titleTag: null, tags: null, media: null, thread: null },
+            { id: '00000000-0000-4000-8000-000000000002', platform: 'linkedin', content: 'linkedin post', subreddit: null, flairLabel: null, titleTag: null, tags: null, media: null, thread: null },
+          ],
+        },
+        {
+          contentId: 'D02',
+          utcDate: '2030-01-02T00:00:00.000Z',
+          themeKey: 'w1:reddit',
+          themeTitle: 'Reddit discussion',
+          platforms: [
+            { id: '00000000-0000-4000-8000-000000000003', platform: 'reddit', content: 'reddit post', subreddit: 'webdev', flairLabel: null, titleTag: null, tags: null, media: null, thread: null },
+          ],
+        },
+      ],
+      engagePolicies: [],
+      warnings: [],
+    } as any;
+
+    const result = (service as any)._missingPlatformCoverage(plan, ['x', 'linkedin', 'reddit']);
+    expect(result).toEqual([]);
+  });
+
+  it('returns missing platforms that have zero posts', () => {
+    const service = createService();
+    const plan = {
+      contentItems: [
+        {
+          contentId: 'D01',
+          utcDate: '2030-01-01T00:00:00.000Z',
+          themeKey: 'w1:foundations',
+          themeTitle: 'Foundations',
+          platforms: [
+            { id: '00000000-0000-4000-8000-000000000001', platform: 'x', content: 'only X', subreddit: null, flairLabel: null, titleTag: null, tags: null, media: null, thread: null },
+          ],
+        },
+      ],
+      engagePolicies: [],
+      warnings: [],
+    } as any;
+
+    const result = (service as any)._missingPlatformCoverage(plan, ['x', 'linkedin', 'reddit', 'medium']);
+    expect(result).toEqual(['linkedin', 'reddit', 'medium']);
+  });
+
+  it('returns all requested platforms when contentItems is empty', () => {
+    const service = createService();
+    const plan = {
+      contentItems: [],
+      engagePolicies: [],
+      warnings: [],
+    } as any;
+
+    const result = (service as any)._missingPlatformCoverage(plan, ['x', 'linkedin', 'reddit']);
+    expect(result).toEqual(['x', 'linkedin', 'reddit']);
+  });
+
+  it('detects a platform only covered in one contentItem across many items', () => {
+    const service = createService();
+    const plan = {
+      contentItems: [
+        {
+          contentId: 'D01',
+          utcDate: '2030-01-01T00:00:00.000Z',
+          themeKey: 'w1:day1',
+          themeTitle: 'Day 1',
+          platforms: [
+            { id: '00000000-0000-4000-8000-000000000001', platform: 'x', content: 'day 1 x', subreddit: null, flairLabel: null, titleTag: null, tags: null, media: null, thread: null },
+          ],
+        },
+        {
+          contentId: 'D02',
+          utcDate: '2030-01-02T00:00:00.000Z',
+          themeKey: 'w1:day2',
+          themeTitle: 'Day 2',
+          platforms: [
+            { id: '00000000-0000-4000-8000-000000000002', platform: 'x', content: 'day 2 x', subreddit: null, flairLabel: null, titleTag: null, tags: null, media: null, thread: null },
+            { id: '00000000-0000-4000-8000-000000000003', platform: 'reddit', content: 'day 2 reddit', subreddit: 'test', flairLabel: null, titleTag: null, tags: null, media: null, thread: null },
+          ],
+        },
+      ],
+      engagePolicies: [],
+      warnings: [],
+    } as any;
+
+    // linkedin never appears; x appears twice; reddit appears once
+    const result = (service as any)._missingPlatformCoverage(plan, ['x', 'reddit', 'linkedin', 'medium']);
+    expect(result).toEqual(['linkedin', 'medium']);
+  });
+
+  it('a single contentItem with multiple platforms covers all of them', () => {
+    const service = createService();
+    const plan = {
+      contentItems: [
+        {
+          contentId: 'D01',
+          utcDate: '2030-01-01T00:00:00.000Z',
+          themeKey: 'w1:cross-platform',
+          themeTitle: 'Cross-platform post',
+          platforms: [
+            { id: '00000000-0000-4000-8000-000000000001', platform: 'x', content: 'x version', subreddit: null, flairLabel: null, titleTag: null, tags: null, media: null, thread: null },
+            { id: '00000000-0000-4000-8000-000000000002', platform: 'linkedin', content: 'linkedin version', subreddit: null, flairLabel: null, titleTag: null, tags: null, media: null, thread: null },
+            { id: '00000000-0000-4000-8000-000000000003', platform: 'reddit', content: 'reddit version', subreddit: 'webdev', flairLabel: null, titleTag: null, tags: null, media: null, thread: null },
+            { id: '00000000-0000-4000-8000-000000000004', platform: 'medium', content: 'medium version', subreddit: null, flairLabel: null, titleTag: null, tags: null, media: null, thread: null },
+          ],
+        },
+      ],
+      engagePolicies: [],
+      warnings: [],
+    } as any;
+
+    const result = (service as any)._missingPlatformCoverage(plan, ['x', 'linkedin', 'reddit', 'medium']);
+    expect(result).toEqual([]);
+  });
+});
+
+describe('OperationPlanService — cross-platform content sharing in create', () => {
+  /**
+   * Verifies that _validateGeneratedPlan accepts a cross-platform plan
+   * where 4 platforms are covered across 2 contentItems (one item carries
+   * three platforms, the other carries two). This is the pattern the main
+   * prompt now recommends: fewer contentItems, more platforms per item.
+   */
+  it('_validateGeneratedPlan accepts cross-platform contentItems (multiple platforms per item)', () => {
+    const svc = new OperationPlanService({} as any);
+    const plan = {
+      goal: { title: 'Test', description: 'Test desc', targetScore: 72 },
+      contentItems: [
+        {
+          contentId: 'D01',
+          utcDate: '2030-01-01T00:00:00.000Z',
+          themeKey: 'w1:data-story',
+          themeTitle: 'Our GEO score improved 12 points',
+          platforms: [
+            { id: '00000000-0000-4000-8000-c0be00000001', platform: 'x', content: 'Short x post', subreddit: null, flairLabel: null, titleTag: null, tags: null, media: null, thread: null },
+            { id: '00000000-0000-4000-8000-c0be00000002', platform: 'linkedin', content: 'LinkedIn version of the same story', subreddit: null, flairLabel: null, titleTag: null, tags: null, media: null, thread: null },
+            { id: '00000000-0000-4000-8000-c0be00000003', platform: 'medium', content: 'Long-form medium article about GEO journey', subreddit: null, flairLabel: null, titleTag: null, tags: null, media: null, thread: null },
+          ],
+        },
+        {
+          contentId: 'D02',
+          utcDate: '2030-01-02T00:00:00.000Z',
+          themeKey: 'w1:reddit-ama',
+          themeTitle: 'We built an AI-citable knowledge base — AMA',
+          platforms: [
+            { id: '00000000-0000-4000-8000-c0be00000004', platform: 'reddit', content: 'Reddit self-post about knowledge base', subreddit: 'webdev', flairLabel: null, titleTag: null, tags: null, media: null, thread: null },
+            { id: '00000000-0000-4000-8000-c0be00000005', platform: 'x', content: 'X promo for the Reddit AMA', subreddit: null, flairLabel: null, titleTag: null, tags: null, media: null, thread: null },
+          ],
+        },
+      ],
+      engagePolicies: [],
+      warnings: [],
+    };
+
+    const start = new Date('2030-01-01T00:00:00.000Z');
+    const end = new Date('2030-01-02T00:00:00.000Z');
+    // This must NOT throw — all 4 requested platforms are present
+    (svc as any)._validateGeneratedPlan(plan, ['x', 'linkedin', 'reddit', 'medium'], start, end);
+    expect(true).toBe(true); // reached without rejection
+  });
+
+  /**
+   * Verifies that _validateGeneratedPlan REJECTS a plan missing platforms.
+   * This is the gate that prevents billing a plan with zero content for
+   * some requested platforms.
+   */
+  it('_validateGeneratedPlan rejects a plan with missing platform coverage', () => {
+    const svc = new OperationPlanService({} as any);
+    const plan = {
+      goal: { title: 'Test', description: 'Test desc', targetScore: 72 },
+      contentItems: [
+        {
+          contentId: 'D01',
+          utcDate: '2030-01-01T00:00:00.000Z',
+          themeKey: 'w1:intro',
+          themeTitle: 'Intro',
+          platforms: [
+            { id: '00000000-0000-4000-8000-c0be00000001', platform: 'x', content: 'Only X', subreddit: null, flairLabel: null, titleTag: null, tags: null, media: null, thread: null },
+            { id: '00000000-0000-4000-8000-c0be00000002', platform: 'reddit', content: 'Only Reddit', subreddit: 'test', flairLabel: null, titleTag: null, tags: null, media: null, thread: null },
+          ],
+        },
+      ],
+      engagePolicies: [],
+      warnings: [],
+    };
+
+    const start = new Date('2030-01-01T00:00:00.000Z');
+    const end = new Date('2030-01-02T00:00:00.000Z');
+    expect(() => {
+      (svc as any)._validateGeneratedPlan(plan, ['x', 'reddit', 'linkedin', 'medium'], start, end);
+    }).toThrow('Generated plan produced no content for requested platform(s): linkedin, medium');
+  });
+
+  /**
+   * The classic bug scenario: x and reddit are covered; linkedin and
+   * medium are not. The validation MUST catch this.
+   */
+  it('detects missing linkedin and medium when only x and reddit are covered', () => {
+    const svc = new OperationPlanService({} as any);
+    const plan = {
+      contentItems: [
+        {
+          contentId: 'D01',
+          utcDate: '2030-01-01T00:00:00.000Z',
+          themeKey: 'w1:intro',
+          themeTitle: 'Introduction',
+          platforms: [
+            { id: '00000000-0000-4000-8000-c0be00000001', platform: 'x', content: 'intro on X', subreddit: null, flairLabel: null, titleTag: null, tags: null, media: null, thread: null },
+            { id: '00000000-0000-4000-8000-c0be00000002', platform: 'reddit', content: 'intro on Reddit', subreddit: 'test', flairLabel: null, titleTag: null, tags: null, media: null, thread: null },
+          ],
+        },
+      ],
+      engagePolicies: [],
+      warnings: [],
+    } as any;
+
+    const missing = (svc as any)._missingPlatformCoverage(plan, ['x', 'reddit', 'linkedin', 'medium']);
+    expect(missing).toEqual(['linkedin', 'medium']);
+  });
+});

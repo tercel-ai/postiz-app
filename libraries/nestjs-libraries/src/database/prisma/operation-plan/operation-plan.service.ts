@@ -725,15 +725,17 @@ export class OperationPlanService implements OnApplicationBootstrap {
         // falls back to built-in/generic entries), so this instruction is
         // unconditional — and "lean into higher-citation channels" is volume
         // steering only, bounded by the PLATFORM COVERAGE rule above.
-        '- FOLLOW the per-platform playbook in `platformPlaybook` (posting frequency + how strongly AI systems cite that channel). It is the team\'s configured rhythm — match its cadence rather than inventing your own volume, and lean into the higher-citation channels while still covering every requested platform.',
+        '- FOLLOW the per-platform playbook in `platformPlaybook` (posting frequency + how strongly AI systems cite that channel). It is the team\'s configured rhythm — match its cadence rather than inventing your own volume. FIRST ensure EVERY requested platform gets at least one contentItem (see PLATFORM COVERAGE above — this is a hard gate, not a suggestion). THEN, once every platform has its minimum, you may weight ADDITIONAL volume toward the higher-citation channels. Never let "lean into higher-citation" override the minimum-coverage rule.',
         '- For each requested platform set `targetRepliesPerDay` to a sustainable WEEKDAY-level reply count — it is the default for any day you do not override.',
         '- Then express the weekday/weekend rhythm concretely in `dailyTargets`: one { date, target } per date in the range that should differ from the default (typically the weekends — a lower target). Dates are UTC "YYYY-MM-DD" and MUST fall inside [startAt, endAt]; do not repeat a date. Omit a date to leave it at `targetRepliesPerDay`. Return an empty list only if every day genuinely has the same target.',
         '',
         'SCORE-DRIVEN SELECTION',
-        '- Read the analysis result and prioritise the weakest / lowest-scoring dimensions and platforms (largest gap to target = highest priority); do NOT spread effort evenly. Bias each theme toward closing a specific weak spot and reflect that gap in themeTitle. "Uneven" means shifting VOLUME between platforms — it NEVER means dropping a requested platform to zero (see PLATFORM COVERAGE above).',
+        '- Read the analysis result and prioritise the weakest / lowest-scoring dimensions and platforms (largest gap to target = highest priority); do NOT spread effort evenly. Bias each theme toward closing a specific weak spot and reflect that gap in themeTitle. "Uneven" means shifting ADDITIONAL volume across platforms AFTER every platform has its minimum one post — it NEVER means dropping a requested platform to zero (see PLATFORM COVERAGE above).',
         '',
         'CONTENT RULES',
         '- Each content item: a stable machine themeKey plus a human-readable themeTitle. Each platform entry: a UUID id (used as the materialized Post.id), the platform, and concise publish-ready content. themeTitle materializes VERBATIM into Post.title (so keep it clean and publish-ready — no week/phase prefix); themeKey is kept as Post.settings.themeKey.',
+        '',
+        '- CROSS-PLATFORM SHARING: a single `contentItem` SHOULD carry multiple platforms when the theme applies to all of them. For example, a data-story theme can have `platforms: [{platform:"x", ...}, {platform:"linkedin", ...}, {platform:"medium", ...}]` — one item, three platforms, each with content adapted to that platform\'s audience and format. This is MORE efficient than creating separate items per platform (fewer contentItems = lower token cost, better coherence). Prefer consolidating related platforms under one contentItem rather than splitting them. Every contentItem MUST still have at least one platform entry; a theme that only fits one platform stays single-platform. The platformPlaybook cadence drives how many contentItems each platform appears in — match those frequencies, not just the total post count.',
         '- TITLE vs BODY: on reddit, hackernews, medium and devto the themeTitle is submitted SEPARATELY as the post/story title, so `content` is the BODY ONLY. NEVER open `content` with the title (or a heading/bold restatement of it) — the platform would display the title twice. Start directly with the body text.',
         '- Respect the character budgets declared at the top (and repeated below). This is a hard gate, not a style note.',
         '- Write PLAIN TEXT for X: no Markdown. `**bold**`, headings and backticks are NOT rendered — they appear literally as asterisks. Plain prose, line breaks and simple bullets ("•") only.',
@@ -761,10 +763,12 @@ export class OperationPlanService implements OnApplicationBootstrap {
         '',
         'Use warnings[] to flag any infeasibility (range too short for the intended cadence, a requested platform with weak supply, etc.).',
         '',
-        '### FINAL REMINDER — CHARACTER LIMITS (same rule as the top) ###',
+        '### FINAL REMINDER — CHARACTER LIMITS + PLATFORM COVERAGE (same rules as the top) ###',
         'Before returning, re-check EVERY content string against its budget:',
         ...limitLines,
         'Any single over-budget string fails the entire plan. If a post does not fit, CUT it down — shorten the prose, drop a bullet, or drop a link. Never exceed the budget.',
+        '',
+        `Also re-check that EVERY platform listed below appears in at least one \`contentItems[].platforms[].platform\` — a plan that silently skips a platform is REJECTED. The requested platforms are: ${platforms.join(', ')}.`,
       ].join('\n'),
       JSON.stringify({
         projectId,
@@ -805,7 +809,8 @@ export class OperationPlanService implements OnApplicationBootstrap {
       const backfill = await this._backfillMissingPlatformCoverage(
         projectId,
         ctx,
-        missingPlatforms
+        missingPlatforms,
+        generation.data.contentItems
       );
       if (backfill) {
         generation.data.contentItems.push(...backfill.contentItems);
@@ -1272,16 +1277,20 @@ export class OperationPlanService implements OnApplicationBootstrap {
   // devto/hackernews/quora) squeezed into a short range is exactly the case
   // where the model is most likely to skip one despite the PLATFORM COVERAGE
   // instruction — betting the entire generation on nailing every platform in
-  // one shot is fragile. This is a second, narrowly-scoped call asking for
-  // just ONE post per still-missing platform, mirroring the AI-first/
-  // mechanical-guarantee split _shrinkContentToLimit already uses for length:
-  // best-effort AI repair here, with _validateGeneratedPlan's hard reject as
-  // the backstop if this also comes up short (never charges for a failed
-  // backfill beyond the tokens actually spent trying).
+  // one shot is fragile.
+  //
+  // Instead of generating from scratch, this method passes the ALREADY-GENERATED
+  // content (the anchor/thread posts from the platforms that DID get content,
+  // typically x and reddit) as REFERENCE material and asks the model to ADAPT
+  // them for the missing platforms. Adaptation is cheaper, more coherent, and
+  // keeps the plan's messaging consistent across channels. The model picks the
+  // best-matching existing contentItem(s) for each missing platform and rewrites
+  // them for that platform's audience, format, and length budget.
   private async _backfillMissingPlatformCoverage(
     projectId: string,
     ctx: PlanGenerationContext,
-    missingPlatforms: string[]
+    missingPlatforms: string[],
+    existingContent: z.infer<typeof GeneratedPlanSchema>['contentItems']
   ): Promise<{
     contentItems: z.infer<typeof GeneratedPlanSchema>['contentItems'];
     usage: AiUsageInfo;
@@ -1297,26 +1306,50 @@ export class OperationPlanService implements OnApplicationBootstrap {
     const backfillPlaybook = Object.fromEntries(
       missingPlatforms.map((p) => [p, platformPlaybook[p]]).filter(([, v]) => v)
     );
+    // Extract just the theme-and-content core of the already-generated items,
+    // stripped of UUIDs and platform details — just enough for the model to
+    // understand the messaging and adapt it. This keeps the backfill prompt
+    // compact (reference, not duplication) and avoids confusing the model
+    // with platform-specific fields it should NOT copy verbatim.
+    const referenceContent = existingContent.map((item) => ({
+      contentId: item.contentId,
+      utcDate: item.utcDate,
+      themeKey: item.themeKey,
+      themeTitle: item.themeTitle,
+      platforms: item.platforms.map((p) => ({
+        platform: p.platform,
+        content: p.content.slice(0, 500), // enough to capture the message
+        thread: p.thread?.map((t) => t.content.slice(0, 300)),
+        subreddit: p.subreddit,
+        tags: p.tags,
+      })),
+    }));
     const BackfillSchema = z.object({
       contentItems: GeneratedPlanSchema.shape.contentItems.element.array().min(1),
     }).strict();
     try {
       const generation = await this._openaiService!.generateStructuredText(
         [
-          'The operation plan you just generated left the following requested platform(s) with ZERO posts. Generate EXACTLY ONE publish-ready contentItem per listed platform (a distinct themeKey/themeTitle per item, dated anywhere inside the given range) so every platform below gets at least one post.',
+          'Below is a content plan that already has posts for some platforms but left the listed platform(s) with ZERO posts. DO NOT invent new themes — ADAPT the existing content below for each missing platform. Pick the best-matching existing contentItem(s) and rewrite their message for the missing platform\'s audience, format, and length budget.',
           '',
           `Missing platform(s): ${missingPlatforms.join(', ')}`,
+          '',
+          '### EXISTING CONTENT (reference — adapt from these) ###',
+          JSON.stringify(referenceContent, null, 2),
           '',
           '### CHARACTER LIMITS — HARD GATE ###',
           'Every `contentItems[].platforms[].content` MUST fit its platform budget. Count BEFORE you write.',
           ...limitLines,
           '',
-          'Each contentItem carries exactly ONE `platforms` entry, for the missing platform it corresponds to. Set `thread` to null on every entry — no multi-part threads here.',
+          '- Generate EXACTLY ONE contentItem per listed missing platform (distinct themeKey/themeTitle per item, dated anywhere inside the given range).',
+          '- Each contentItem carries exactly ONE `platforms` entry, for the missing platform it corresponds to. Set `thread` to null on every entry — no multi-part threads here.',
+          '- ADAPT, don\'t copy: the same message expressed for a different audience and format. For example, an X thread about a data insight becomes a single LinkedIn post with professional framing, or a longer dev.to article with code examples. Keep the theme and the core point; rewrite the delivery.',
+          '- Adapt content to each platform\'s native format: LinkedIn = professional, longer; dev.to = technical, tutorial-style; Medium = narrative, explanatory; Quora = direct answer format; HackerNews = concise, factual, no fluff.',
           '- TITLE vs BODY: on reddit, hackernews, medium and devto the themeTitle is submitted SEPARATELY as the post/story title, so `content` is the BODY ONLY — never open it with the title.',
           '- REDDIT TARGETING: if `reddit` is in the missing list, set `subreddit` to the single most relevant EXISTING, ACTIVE, PUBLIC subreddit (bare name, no "r/"). Set `flairLabel`/`titleTag` when you are confident the community requires them, else null. For every non-reddit entry set all three to null.',
           '- DEV.TO TAGGING: if `devto` is in the missing list, set `tags` to 1-4 single-word lowercase topic tags. For every non-devto entry set `tags` to null.',
           '- Write PLAIN TEXT for X: no Markdown.',
-          '- Follow the per-platform rhythm in `platformPlaybook` for tone/substance, but volume here is fixed at one post per platform regardless of its usual cadence — this is a minimum top-up, not a full week.',
+          '- Follow the per-platform rhythm in `platformPlaybook` for tone/substance.',
         ].join('\n'),
         JSON.stringify({
           projectId,
