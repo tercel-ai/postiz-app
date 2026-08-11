@@ -115,11 +115,22 @@ BEGIN
   --     non-reddit channel row (or a reddit tracked row) has no representable
   --     home in the merged table. AddMonitoredChannelDto.platform was a bare
   --     @IsString(), so these rows are storable in principle — hence the check.
+  --
+  --     IDEMPOTENCE: a reddit row in EngageTrackedAccount is only a violation
+  --     when it did NOT come from this backfill. After STEP 2 runs, every
+  --     migrated channel IS a reddit row there — the backfill preserves ids, so
+  --     matching on id tells the two apart. Without this exclusion the audit
+  --     rejects the very state its own backfill produces, and a re-run (e.g. to
+  --     reach STEP 3) fails instead of reporting "already done".
   SELECT count(*) INTO v_bad_channel
   FROM "EngageMonitoredChannel" WHERE lower("platform") <> 'reddit';
 
   SELECT count(*) INTO v_bad_tracked
-  FROM "EngageTrackedAccount" WHERE lower("platform") = 'reddit';
+  FROM "EngageTrackedAccount" t
+  WHERE lower(t."platform") = 'reddit'
+    AND NOT EXISTS (
+      SELECT 1 FROM "EngageMonitoredChannel" c WHERE c."id" = t."id"
+    );
 
   IF v_bad_channel > 0 OR v_bad_tracked > 0 THEN
     RAISE EXCEPTION
@@ -143,12 +154,17 @@ BEGIN
   --     (t.username as stored, not lower(t.username)) so this tests precisely
   --     what the unique index will test — no false negatives, no false alarms.
   --     `platform` is lowered on BOTH sides to match what STEP 2 now writes.
+  --
+  --     IDEMPOTENCE, same reason as 0a: after STEP 2 every channel matches its
+  --     OWN backfilled row on this join. A row colliding with itself is not a
+  --     collision, so exclude the id-identical pair.
   SELECT count(*) INTO v_cross_collide
   FROM "EngageMonitoredChannel" c
   JOIN "EngageTrackedAccount" t
     ON t."configId" = c."configId"
    AND lower(t."platform") = lower(c."platform")
-   AND t."username" = engage_normalize_target_key(c."platform", c."channelId");
+   AND t."username" = engage_normalize_target_key(c."platform", c."channelId")
+   AND t."id" <> c."id";
 
   IF v_dup_channel > 0 OR v_cross_collide > 0 THEN
     RAISE EXCEPTION

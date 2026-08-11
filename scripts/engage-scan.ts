@@ -274,16 +274,27 @@ async function main() {
   const doWatch   = args.includes('--watch');
 
   console.log(`\nEngage Debug Tool`);
-  console.log(`Temporal: ${address}  namespace: ${namespace}`);
   console.log(`Database: ${(process.env.DATABASE_URL ?? '').replace(/:\/\/[^@]+@/, '://***@')}`);
 
-  const connection = await Connection.connect({ address });
-  const client = new Client({ connection, namespace });
   const prisma = new PrismaClient();
+
+  // Temporal is connected LAZILY, and only by the paths that actually use it
+  // (--all/--scan/--trigger signal the ticker; --stats prints its status).
+  // `--targets` reads Prisma only, so connecting up front made it unusable
+  // whenever the worker was down — exactly when an operator reaches for it,
+  // e.g. verifying a migration before the stack is back up.
+  let connection: Awaited<ReturnType<typeof Connection.connect>> | null = null;
+  const temporal = async () => {
+    if (!connection) {
+      console.log(`Temporal: ${address}  namespace: ${namespace}`);
+      connection = await Connection.connect({ address });
+    }
+    return new Client({ connection, namespace });
+  };
 
   try {
     if (doScan) {
-      await triggerScan(client);
+      await triggerScan(await temporal());
     }
 
     if (doTargets) {
@@ -291,7 +302,15 @@ async function main() {
     }
 
     if (doStats || doWatch) {
-      await printWorkflowStatus(client);
+      // Status is nice-to-have; a down ticker must not hide the DB stats below.
+      try {
+        await printWorkflowStatus(await temporal());
+      } catch (err) {
+        console.log(
+          `\nTicker status  : UNAVAILABLE — cannot reach Temporal at ${address}` +
+            `\n                 (${err instanceof Error ? err.message : String(err)})`
+        );
+      }
       await printStats(prisma);
     }
 
@@ -311,7 +330,7 @@ async function main() {
   } finally {
     if (!doWatch) {
       await prisma.$disconnect();
-      await connection.close();
+      await connection?.close();
     }
   }
 }
