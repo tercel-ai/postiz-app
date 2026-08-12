@@ -12,7 +12,7 @@
   "icons": {
     "128": "icon-128.png"
   },
-  "permissions": ["activeTab", "cookies", "storage", "tabs"],
+  "permissions": ["activeTab", "cookies", "debugger", "storage", "tabs"],
   "content_scripts": [
     {
       "matches": ["http://*/*", "https://*/*", "<all_urls>"],
