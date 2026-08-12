@@ -90,20 +90,24 @@ export function quoraTimeToMs(raw: string | null | undefined, nowMs: number): nu
   return Number.isFinite(abs) ? abs : null;
 }
 
-interface ScrapedQuoraRow {
+export interface ScrapedQuoraRow {
   url: string;
   author: string;
   text: string;
   upvotes: number | null;
+  comments: number | null;
+  shares: number | null;
   timeText: string;
 }
 
 /**
  * Runs INSIDE the quora.com page (self-contained). Collects answer cards:
- * their permalink, author, text snippet, upvote count and any time label.
+ * their permalink, author, text snippet, engagement counters and time label.
+ * Exposed for tests (jsdom), not called anywhere but `scanQuora`.
  */
-function scrapeQuoraInPage(): ScrapedQuoraRow[] {
+export function scrapeQuoraInPage(): ScrapedQuoraRow[] {
   const norm = (s: string | null | undefined) => (s || '').replace(/\s+/g, ' ').trim();
+  const stripQuery = (raw: string | null | undefined) => String(raw || '').split(/[?#]/)[0];
   const parseNum = (raw: string | null | undefined): number | null => {
     const m = (raw || '').replace(/[,\s]/g, '').match(/(\d+(?:\.\d+)?)([KM])?/i);
     if (!m) return null;
@@ -115,57 +119,116 @@ function scrapeQuoraInPage(): ScrapedQuoraRow[] {
     return Math.round(n);
   };
 
+  // Quora sizes a counter by rendering a HIDDEN "999" spacer next to it and
+  // overlaying the real number absolutely on top, so `textContent` on the
+  // upvote button of a 658-upvote answer reads "Upvote · 999658". Concatenate
+  // only the text nodes that sit outside one of those spacers.
+  const HIDDEN = /qu-visibility--hidden|qu-display--none/;
+  const visibleText = (root: Element): string => {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    let out = '';
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      let el: HTMLElement | null = node.parentElement;
+      let hidden = false;
+      while (el && el !== root.parentElement) {
+        // SVG elements expose className as an SVGAnimatedString — String() on
+        // it is inert here, it just never matches.
+        if (HIDDEN.test(String(el.className || ''))) {
+          hidden = true;
+          break;
+        }
+        el = el.parentElement;
+      }
+      if (!hidden) out += node.nodeValue;
+    }
+    return norm(out);
+  };
+
+  /** The counter on a "<n> comments" / "<n> shares" button, via its aria-label. */
+  const labelledCount = (scope: Element | null, noun: string): number | null => {
+    const re = new RegExp(`^[\\d.,km]+\\s+${noun}s?$`, 'i');
+    const btn = Array.from(scope?.querySelectorAll('button') || []).find((b) =>
+      re.test(b.getAttribute('aria-label') || '')
+    );
+    return btn ? parseNum(btn.getAttribute('aria-label')) : null;
+  };
+
   const rows: ScrapedQuoraRow[] = [];
   const seen = new Set<string>();
-  // Answer permalinks contain "/answer/"; question links are "/<slug>".
-  const anchors = Array.from(
-    document.querySelectorAll<HTMLAnchorElement>('a[href*="/answer/"], a[href*="quora.com/"]')
-  );
+  // Anchor on the answer's own timestamp link: its href IS the answer permalink
+  // and its text IS the publish label — the two fields ingest hard-requires.
+  // Enumerating every quora.com link instead (as this once did) makes the site
+  // chrome — the logo, /following, /spaces, /notifications — look like answers:
+  // each is a unique href whose card walk climbs out to the whole page, so they
+  // fill the row budget with 8k-char nav blobs before a real answer is seen.
+  const ANCHOR_SEL = 'a[class*="answer_timestamp"], a[href*="/answer/"]';
+  const anchors = Array.from(document.querySelectorAll<HTMLAnchorElement>(ANCHOR_SEL));
   for (const a of anchors) {
-    let href = a.getAttribute('href') || '';
+    let href = stripQuery(a.getAttribute('href'));
     if (!href) continue;
     if (href.startsWith('/')) href = 'https://www.quora.com' + href;
     if (!/quora\.com\//.test(href)) continue;
-    href = href.split(/[?#]/)[0];
     if (seen.has(href)) continue;
 
-    // Walk up to a reasonably-sized card container.
-    let card: HTMLElement | null = a;
-    for (let i = 0; i < 5 && card; i++) {
-      if ((card.textContent || '').length > 120) break;
-      card = card.parentElement;
+    // Walk up to the answer BODY. The byline block directly wrapping the
+    // timestamp is ~90 chars and holds the author line ONLY — no answer text —
+    // so a low threshold stops one level short of the content and every row
+    // then fails the server-side keyword match. A real body is 300+ chars.
+    let body: HTMLElement | null = a;
+    for (let i = 0; i < 12 && body; i++) {
+      if ((body.textContent || '').length >= 300) break;
+      body = body.parentElement;
     }
-    const cardText = norm(card?.textContent);
-    if (cardText.length < 40) continue; // skip nav/util links
+    const bodyText = norm(body?.textContent);
+    if (bodyText.length < 60) continue;
 
-    const authorEl = card?.querySelector<HTMLAnchorElement>('a[href^="/profile/"]');
-    const upEl = Array.from(card?.querySelectorAll<HTMLElement>('button, span') || []).find((el) =>
-      /upvote/i.test(el.getAttribute('aria-label') || el.textContent || '')
+    // Then keep climbing to the CARD — the action bar (upvote / comments /
+    // shares) is a sibling of the body, a few levels further out. Bounded two
+    // ways so this can never swallow the result list: stop as soon as the next
+    // parent would take in a second answer, and cap the hops.
+    let card: HTMLElement = body as HTMLElement;
+    for (let i = 0; i < 8; i++) {
+      const parent = card.parentElement;
+      if (!parent || parent.querySelectorAll(ANCHOR_SEL).length > 1) break;
+      card = parent;
+      if (card.querySelector('button[aria-label]')) break;
+    }
+
+    // Quora emits BOTH relative ("/profile/x") and absolute
+    // ("https://www.quora.com/profile/x") profile hrefs on the same card, and
+    // the anchor text is often empty (avatar-only link) — so match the href
+    // loosely and take the slug from it rather than from the text.
+    const profileHref = stripQuery(
+      card.querySelector<HTMLAnchorElement>('a[href*="/profile/"]')?.getAttribute('href')
     );
-    // Quora renders the answer date as one of three shapes depending on age:
-    // a relative unit ("3d", "2y"), a bare weekday for the last week ("Sat"),
-    // or "Mon D" (no year) for anything older within the current year — all
-    // three must match here or quoraTimeToMs() never sees the text at all.
-    // The author's bio line ("Founder at X (2021–present)") also carries a
-    // 4-digit year and sits earlier in the card, so it's excluded by length —
-    // a real date badge is always short, a bio sentence never is.
-    const timeEl = Array.from(card?.querySelectorAll<HTMLElement>('a, span') || []).find((el) => {
-      const t = norm(el.textContent);
-      if (!t || t.length > 32) return false;
-      return (
-        /\b\d+\s*(y|mo|w|d|h)\b|answered|updated|\b(19|20)\d{2}\b/i.test(t) ||
-        /^(sun|mon|tue|wed|thu|fri|sat)$/i.test(t) ||
-        /^[a-z]{3}\s+\d{1,2}$/i.test(t)
-      );
-    });
+    const author = profileHref.split('/profile/')[1] || '';
+
+    // Comments and shares state their count in the aria-label ("159 comments").
+    // The upvote control does NOT — it is labelled just "Upvote" — so its count
+    // has to come from the rendered text, which reads "Upvote658" / "Upvote1.5K"
+    // once the hidden 999-spacer is stripped. Parsing the raw textContent
+    // instead would persist 999658 and hand the post a top-band heat score.
+    const voteBtn = Array.from(card.querySelectorAll('button')).find((b) =>
+      /^upvote\b/i.test(b.getAttribute('aria-label') || '')
+    );
+    const upvotes = voteBtn
+      ? parseNum(visibleText(voteBtn).replace(/^upvote/i, ''))
+      : null;
 
     seen.add(href);
     rows.push({
       url: href,
-      author: norm(authorEl?.textContent),
-      text: cardText.slice(0, 500),
-      upvotes: parseNum(upEl?.getAttribute('aria-label') || upEl?.textContent),
-      timeText: norm(timeEl?.textContent),
+      author,
+      text: bodyText.slice(0, 500),
+      upvotes,
+      comments: labelledCount(card, 'comment'),
+      shares: labelledCount(card, 'share'),
+      // The timestamp anchor's own text — a relative unit ("3d", "2y"), a bare
+      // weekday for the last week ("Sat"), "Mon D" within the current year, or
+      // a full "Mon D, YYYY". quoraTimeToMs() resolves all four; reading it
+      // straight off this anchor removes the old heuristic scan that could
+      // latch onto a 4-digit year inside the author's bio line instead.
+      timeText: norm(a.textContent),
     });
     if (rows.length >= 40) break;
   }
@@ -260,7 +323,13 @@ export async function scanQuora(
       authorUsername: row.author,
       postContent: row.text,
       postPublishedAt: new Date(atMs).toISOString(),
+      // Quora's action bar is the platform's only public engagement signal, and
+      // the community heat band is computed from upvotes + comments + shares —
+      // omitting them floors every answer at the lowest band regardless of how
+      // big it actually is.
       metricScore: row.upvotes ?? undefined,
+      metricComments: row.comments ?? undefined,
+      metricShares: row.shares ?? undefined,
     });
   }
 

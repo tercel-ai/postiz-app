@@ -208,11 +208,17 @@ function computeNetworkHeatScore(post: RawPost): number {
   return 4;
 }
 
-// Reddit — upvote score + comments
+// Reddit, Quora and the other community platforms — upvote score + comments,
+// plus shares where the platform exposes them. Reddit and X pin metricShares to
+// 0 and the article platforms never set it, so today the share term only moves
+// Quora, whose answer cards carry a real reshare counter.
 function computeCommunityHeatScore(post: RawPost): number {
   // Clamp metricScore to 0 — highly downvoted posts should not produce negative heat
   const score = Math.max(post.metricScore ?? 0, 0);
-  const heat = score * (post.metricUpvoteRatio ?? 1) + (post.metricComments ?? 0) * 2;
+  const heat =
+    score * (post.metricUpvoteRatio ?? 1) +
+    (post.metricComments ?? 0) * 2 +
+    (post.metricShares ?? 0) * 3;
   if (heat > 800) return 45;
   if (heat > 400) return 33;
   if (heat > 100) return 23;

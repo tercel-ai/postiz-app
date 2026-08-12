@@ -1,5 +1,6 @@
+// @vitest-environment jsdom
 import { describe, expect, it } from 'vitest';
-import { buildQuoraScanUrl, quoraTimeToMs } from '../scan.quora';
+import { buildQuoraScanUrl, quoraTimeToMs, scrapeQuoraInPage } from '../scan.quora';
 import type { EngageScanTask } from '../executor.types';
 
 function task(partial: Partial<EngageScanTask>): EngageScanTask {
@@ -87,5 +88,150 @@ describe('quoraTimeToMs', () => {
     expect(quoraTimeToMs('', now)).toBeNull();
     expect(quoraTimeToMs(null, now)).toBeNull();
     expect(quoraTimeToMs(undefined, now)).toBeNull();
+  });
+});
+
+// Mirrors the live /search?type=answer markup (captured 2026-08-12): a global
+// nav whose links are absolute quora.com URLs, then answer cards whose permalink
+// lives on an `answer_timestamp` anchor nested inside a short byline block, with
+// the action bar a SIBLING of the answer body rather than inside it.
+//
+// The counters reproduce Quora's width-reservation trick verbatim: a hidden
+// "999" spacer followed by the real, absolutely-positioned number — which is
+// why the upvote button's raw textContent reads "Upvote · 999658".
+function actionBar(upvotes: string, comments: number, shares: number): string {
+  return `
+    <div class="q-box actions">
+      <button aria-label="Upvote">
+        <span class="q-text qu-fontWeight--medium">Upvote</span>
+        <span class="q-box qu-display--none"> · </span><span class="q-text qu-visibility--hidden qu-display--inline-flex">999</span><span class="q-text qu-whiteSpace--nowrap qu-display--inline-flex">${upvotes}</span>
+      </button>
+      <button aria-label="Downvote"></button>
+      <button aria-label="${comments} comments">
+        <span class="q-text qu-visibility--hidden">999</span><span>${comments}</span>
+      </button>
+      <button aria-label="${shares} shares">
+        <span class="q-text qu-visibility--hidden">9</span><span>${shares}</span>
+      </button>
+      <button></button>
+    </div>`;
+}
+
+function renderSearchPage(): void {
+  document.body.innerHTML = `
+    <div id="root">
+      <div class="nav">
+        <a href="https://www.quora.com/">Quora</a>
+        <a href="https://www.quora.com/following">Following</a>
+        <a href="https://www.quora.com/spaces">Spaces</a>
+      </div>
+      <div class="q-box qu-borderBottom">
+        <div class="q-click-wrapper">
+          <div class="q-box">
+            <div class="q-box spacing_log_answer_header">
+              <a href="/profile/Rohan-Prasanth-8"><img /></a>
+              <a href="/profile/Rohan-Prasanth-8">Rohan Prasanth</a>
+              <span>SDE Microsoft | self-taught dev</span>
+              <span class="q-text qu-whiteSpace--nowrap"><span>
+                <a class="q-box answer_timestamp" href="/Why-big-tech-replaces-programmers/answer/Rohan-Prasanth-8?ch=1&amp;share=x">1y</a>
+              </span></span>
+            </div>
+            <div class="content">
+              Last week at the company all-hands they addressed their plan to replace
+              programmers with AI agents and lay off a large part of the org. A senior
+              fellow said a new team of 170 employees has been formed in the US to
+              ship this, and that the rollout starts next quarter across every product
+              line, which is why everyone in the room went very quiet afterwards.
+            </div>
+          </div>
+        </div>
+        ${actionBar('658', 159, 3)}
+      </div>
+      <div class="q-box qu-borderBottom">
+        <div class="q-click-wrapper">
+          <div class="q-box">
+            <div class="q-box spacing_log_answer_header">
+              <a href="https://www.quora.com/profile/William-Gunn-59">William Gunn</a>
+              <span class="q-text qu-whiteSpace--nowrap"><span>
+                <a class="q-box answer_timestamp" href="https://productupdates.quora.com/How-soon-before-an-official-bot">Dec 22, 2022</a>
+              </span></span>
+            </div>
+            <div class="content">
+              Quora has been experimenting with generated answers for a while now, and
+              the honest answer is that nobody internally agrees on when it ships. The
+              ranking team wants more signal before it goes live to everyone, and that
+              work is nowhere near finished at the time of writing this answer here.
+            </div>
+          </div>
+        </div>
+        ${actionBar('1.5K', 336, 58)}
+      </div>
+    </div>`;
+}
+
+describe('scrapeQuoraInPage', () => {
+  it('returns one row per answer card and no site-chrome rows', () => {
+    renderSearchPage();
+    const rows = scrapeQuoraInPage();
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r) => r.url)).toEqual([
+      'https://www.quora.com/Why-big-tech-replaces-programmers/answer/Rohan-Prasanth-8',
+      'https://productupdates.quora.com/How-soon-before-an-official-bot',
+    ]);
+  });
+
+  it('captures the answer body, so the server-side keyword match can hit', () => {
+    renderSearchPage();
+    const [first] = scrapeQuoraInPage();
+    // The byline block alone is ~90 chars and carries no answer text — the card
+    // walk must climb past it or every row fails the keyword filter.
+    expect(first.text).toContain('AI agents');
+    expect(first.text.length).toBeGreaterThan(200);
+  });
+
+  it('reads the author slug from relative AND absolute profile hrefs', () => {
+    renderSearchPage();
+    const rows = scrapeQuoraInPage();
+    expect(rows[0].author).toBe('Rohan-Prasanth-8');
+    expect(rows[1].author).toBe('William-Gunn-59');
+  });
+
+  it('takes the publish label off the timestamp anchor', () => {
+    renderSearchPage();
+    const rows = scrapeQuoraInPage();
+    expect(rows.map((r) => r.timeText)).toEqual(['1y', 'Dec 22, 2022']);
+  });
+
+  it('reads upvotes past the hidden 999 width-spacer, not through it', () => {
+    renderSearchPage();
+    const rows = scrapeQuoraInPage();
+    // Raw textContent here is "Upvote · 999658" — 999658 is the spacer glued to
+    // the real count, and persisting it would fake a top-band heat score.
+    expect(document.querySelector('button[aria-label="Upvote"]')!.textContent)
+      .toContain('999658');
+    expect(rows[0].upvotes).toBe(658);
+  });
+
+  it('expands a K-suffixed upvote count', () => {
+    renderSearchPage();
+    expect(scrapeQuoraInPage()[1].upvotes).toBe(1500);
+  });
+
+  it('reads comment and share counts off their aria-labels', () => {
+    renderSearchPage();
+    const rows = scrapeQuoraInPage();
+    expect(rows.map((r) => r.comments)).toEqual([159, 336]);
+    expect(rows.map((r) => r.shares)).toEqual([3, 58]);
+  });
+
+  it('leaves counters null when the card has no action bar', () => {
+    renderSearchPage();
+    document.querySelectorAll('.actions').forEach((el) => el.remove());
+    const [first] = scrapeQuoraInPage();
+    expect(first.upvotes).toBeNull();
+    expect(first.comments).toBeNull();
+    expect(first.shares).toBeNull();
+    // …and the card walk still stops inside the answer, never at the result list.
+    expect(first.text).not.toContain('Quora has been experimenting');
   });
 });
