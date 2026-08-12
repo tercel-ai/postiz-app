@@ -32,6 +32,31 @@ function displayToUnit(display: 'day' | 'week' | 'month'): 'day' | 'isoWeek' | '
 }
 
 /**
+ * Build the `Post.operationPlanId` clause shared by `getPosts`, `getPostsList`
+ * and `locatePostInList` — the three must stay byte-identical or the page index
+ * `locatePostInList` computes stops matching `/posts/list`.
+ *
+ * An explicit `operationPlanId` wins; otherwise `hasOperationPlan` acts as a
+ * presence filter (`true` → belongs to some plan, `false` → belongs to none).
+ * Omitting both returns plan and non-plan posts alike (legacy behavior).
+ */
+function operationPlanWhere(query: {
+  operationPlanId?: string;
+  hasOperationPlan?: boolean;
+}): { operationPlanId?: Prisma.StringNullableFilter | string | null } {
+  if (query.operationPlanId) {
+    return { operationPlanId: query.operationPlanId };
+  }
+  if (query.hasOperationPlan === true) {
+    return { operationPlanId: { not: null } };
+  }
+  if (query.hasOperationPlan === false) {
+    return { operationPlanId: null };
+  }
+  return {};
+}
+
+/**
  * Flatten a stored `Post.analytics` value (an AnalyticsData[] of
  * `{ label, data: [{ total, date }] }`) into a plain `{ label: number }` map,
  * taking each metric's latest `total`. Returns null when there is no analytics
@@ -358,7 +383,7 @@ export class PostsRepository {
       // caller can already see (legacy, non-project behavior preserved
       // during migration — project-scoped-post-engage-design.md §8/§11).
       ...(query.projectId ? { projectId: query.projectId } : {}),
-      ...(query.operationPlanId ? { operationPlanId: query.operationPlanId } : {}),
+      ...operationPlanWhere(query),
     };
 
     const [results, total] = await Promise.all([
@@ -440,7 +465,7 @@ export class PostsRepository {
       // Must mirror getPostsList's projectId/operationPlanId clauses exactly
       // — see the "Mirror the where from getPostsList" note above.
       ...(query.projectId ? { projectId: query.projectId } : {}),
-      ...(query.operationPlanId ? { operationPlanId: query.operationPlanId } : {}),
+      ...operationPlanWhere(query),
     };
 
     const sortBy = query.sortBy!;
@@ -621,7 +646,7 @@ export class PostsRepository {
         // the org (legacy, non-project calendar behavior preserved during
         // migration — project-scoped-post-engage-design.md §8/§11).
         ...(query.projectId ? { projectId: query.projectId } : {}),
-        ...(query.operationPlanId ? { operationPlanId: query.operationPlanId } : {}),
+        ...operationPlanWhere(query),
       },
       select: {
         id: true,

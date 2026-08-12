@@ -265,3 +265,100 @@ describe('PostsRepository operationPlanId scoping', () => {
     expect(count.mock.calls[0][0].where.operationPlanId).toBe('plan-1');
   });
 });
+
+describe('PostsRepository hasOperationPlan presence filter', () => {
+  it('getPosts keeps only plan-generated posts when hasOperationPlan=true', async () => {
+    const findMany = vi.fn().mockResolvedValue([]);
+    const repo = createRepo({ findMany });
+
+    await repo.getPosts('org-1', {
+      startDate: '2026-04-01',
+      endDate: '2026-04-30',
+      hasOperationPlan: true,
+    } as any);
+
+    expect(findMany.mock.calls[0][0].where.operationPlanId).toEqual({
+      not: null,
+    });
+  });
+
+  it('getPosts keeps only plan-less posts when hasOperationPlan=false', async () => {
+    const findMany = vi.fn().mockResolvedValue([]);
+    const repo = createRepo({ findMany });
+
+    await repo.getPosts('org-1', {
+      startDate: '2026-04-01',
+      endDate: '2026-04-30',
+      hasOperationPlan: false,
+    } as any);
+
+    expect(findMany.mock.calls[0][0].where.operationPlanId).toBeNull();
+  });
+
+  it('getPosts leaves operationPlanId unfiltered when hasOperationPlan is omitted', async () => {
+    const findMany = vi.fn().mockResolvedValue([]);
+    const repo = createRepo({ findMany });
+
+    await repo.getPosts('org-1', {
+      startDate: '2026-04-01',
+      endDate: '2026-04-30',
+    } as any);
+
+    expect(findMany.mock.calls[0][0].where).not.toHaveProperty(
+      'operationPlanId'
+    );
+  });
+
+  it('getPostsList applies the presence filter to both findMany and count', async () => {
+    const findMany = vi.fn().mockResolvedValue([]);
+    const count = vi.fn().mockResolvedValue(0);
+    const repo = createRepo({ findMany, count });
+
+    await repo.getPostsList('org-1', {
+      page: 1,
+      pageSize: 20,
+      sortBy: 'publishDate',
+      sortOrder: 'desc',
+      hasOperationPlan: false,
+    } as any);
+
+    expect(findMany.mock.calls[0][0].where.operationPlanId).toBeNull();
+    expect(count.mock.calls[0][0].where.operationPlanId).toBeNull();
+  });
+
+  it('an explicit operationPlanId wins over hasOperationPlan', async () => {
+    const findMany = vi.fn().mockResolvedValue([]);
+    const count = vi.fn().mockResolvedValue(0);
+    const repo = createRepo({ findMany, count });
+
+    await repo.getPostsList('org-1', {
+      page: 1,
+      pageSize: 20,
+      sortBy: 'publishDate',
+      sortOrder: 'desc',
+      operationPlanId: 'plan-1',
+      hasOperationPlan: false,
+    } as any);
+
+    expect(findMany.mock.calls[0][0].where.operationPlanId).toBe('plan-1');
+  });
+
+  it('locatePostInList mirrors getPostsList\'s presence filter exactly', async () => {
+    const count = vi.fn().mockResolvedValue(0);
+    const findFirst = vi.fn().mockResolvedValue(null);
+    const repo = createRepo({ findFirst, count });
+
+    await repo.locatePostInList('org-1', {
+      postId: 'missing',
+      pageSize: 20,
+      sortBy: 'publishDate',
+      sortOrder: 'desc',
+      hasOperationPlan: true,
+    } as any);
+
+    expect(findFirst.mock.calls[0][0].where.operationPlanId).toEqual({
+      not: null,
+    });
+    expect(count.mock.calls[0][0].where.operationPlanId).toEqual({ not: null });
+  });
+});

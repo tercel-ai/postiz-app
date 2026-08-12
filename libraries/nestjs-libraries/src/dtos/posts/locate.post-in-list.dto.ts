@@ -1,6 +1,7 @@
 import {
   ArrayMaxSize,
   IsArray,
+  IsBoolean,
   IsEnum,
   IsIn,
   IsInt,
@@ -85,6 +86,17 @@ export class LocatePostInListDto {
   @IsOptional()
   @IsString()
   operationPlanId?: string;
+
+  // Must mirror GetPostsListDto.hasOperationPlan so the located page index
+  // matches the index the post occupies under the same /posts/list filters.
+  @ApiPropertyOptional({
+    description:
+      'true = only posts that belong to an OperationPlan; false = only posts without one. Ignored when operationPlanId is set.',
+  })
+  @IsOptional()
+  @Transform(({ value }) => value === 'true' || value === true)
+  @IsBoolean()
+  hasOperationPlan?: boolean;
 
   // Must mirror GetPostsListDto.source so the located page index matches the
   // index the post occupies under the same /posts/list filters.

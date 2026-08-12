@@ -1,4 +1,4 @@
-import { ArrayMaxSize, IsArray, IsEnum, IsIn, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
+import { ArrayMaxSize, IsArray, IsBoolean, IsEnum, IsIn, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
 import { Transform, Type } from 'class-transformer';
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { State } from '@prisma/client';
@@ -81,6 +81,18 @@ export class GetPostsListDto {
   @IsOptional()
   @IsString()
   operationPlanId?: string;
+
+  // Presence filter on Post.operationPlanId: `true` keeps only plan-generated
+  // posts, `false` keeps only posts with no plan. Omitting it returns both.
+  // Ignored when `operationPlanId` is also given (the explicit id wins).
+  @ApiPropertyOptional({
+    description:
+      'true = only posts that belong to an OperationPlan; false = only posts without one. Ignored when operationPlanId is set.',
+  })
+  @IsOptional()
+  @Transform(({ value }) => value === 'true' || value === true)
+  @IsBoolean()
+  hasOperationPlan?: boolean;
 
   // Filter by Post.source. Single value ('engage') or comma-separated list
   // ('calendar,chat'); omitting it returns all sources. Mirrors GetPostsDto.

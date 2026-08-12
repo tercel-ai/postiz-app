@@ -199,6 +199,7 @@ Posts within a calendar date range (used by the calendar view).
 | `customer` | `string` | no | Filter by customer. |
 | `projectId` | `string` | no | Scope to an aisee project. |
 | `operationPlanId` | `string` | no | Only posts from one OperationPlan. |
+| `hasOperationPlan` | `boolean` | no | Presence filter on `operationPlanId`: `true` = plan-generated only, `false` = plan-less only. Omit for both. Ignored when `operationPlanId` is set. |
 | `state` | `State` | no | `QUEUE` / `PUBLISHED` / `ERROR` / `DRAFT`. |
 | `source` | `PostSource[]` | no | `calendar` / `chat` / `engage` (CSV ok). |
 | `integrationId` | `string[]` | no | Max 50 (CSV ok). |
@@ -223,6 +224,7 @@ Paginated, filterable, sortable list. Full semantics in
 | `sourcePostId` | `string` | — | |
 | `projectId` | `string` | — | |
 | `operationPlanId` | `string` | — | |
+| `hasOperationPlan` | `boolean` | — | Presence filter on `operationPlanId`: `true` = plan-generated only, `false` = plan-less only. Omit for both. Ignored when `operationPlanId` is set. |
 | `source` | `PostSource[]` | — | CSV ok. |
 | `view` | `templates` \| `timeline` | `timeline` | |
 | `sortBy` | `publishDate` \| `createdAt` \| `updatedAt` \| `state` | `publishDate` | |

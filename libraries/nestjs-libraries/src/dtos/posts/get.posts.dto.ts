@@ -1,6 +1,7 @@
 import {
   ArrayMaxSize,
   IsArray,
+  IsBoolean,
   IsEnum,
   IsIn,
   IsOptional,
@@ -46,6 +47,18 @@ export class GetPostsDto {
   @IsOptional()
   @IsString()
   operationPlanId?: string;
+
+  // Presence filter on Post.operationPlanId: `true` keeps only plan-generated
+  // posts, `false` keeps only posts with no plan. Omitting it returns both.
+  // Ignored when `operationPlanId` is also given (the explicit id wins).
+  @ApiPropertyOptional({
+    description:
+      'true = only posts that belong to an OperationPlan; false = only posts without one. Ignored when operationPlanId is set.',
+  })
+  @IsOptional()
+  @Transform(({ value }) => value === 'true' || value === true)
+  @IsBoolean()
+  hasOperationPlan?: boolean;
 
   @ApiPropertyOptional({ enum: State })
   @IsOptional()
