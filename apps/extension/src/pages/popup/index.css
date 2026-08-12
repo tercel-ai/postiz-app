@@ -19,9 +19,28 @@
   box-sizing: border-box;
 }
 
+/* Chrome measures a popup by laying the document out at the popup's maximum
+   size (800x600) and then shrinking the width down to what the content needs.
+   When the document is TALLER than the 600px cap that shrink step never runs
+   and the popup stays at the full 800px — with body pinned to 380px the extra
+   420px is just blank, and Chrome never shrinks a popup back afterwards. So
+   the document must never exceed 600px; the scrolling happens inside body.
+
+   `overflow` has to be set HERE and not only on body: while html is
+   `overflow: visible`, body's overflow value is propagated to the viewport and
+   body never becomes a scroll container of its own — which is exactly why
+   capping body alone does nothing. The side panel resets both of these
+   (panel/index.css); it is full-height and must not be capped. */
+html {
+  max-height: 600px;
+  overflow: hidden;
+}
+
 body {
   width: 380px;
   height: auto;
+  max-height: 600px;
+  overflow-y: auto;
   margin: 0;
   padding: 0;
   background: var(--pz-bg);

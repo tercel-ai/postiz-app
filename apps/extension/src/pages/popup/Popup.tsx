@@ -70,7 +70,11 @@ export default function Popup() {
             <div className="pz-title" style={{ fontSize: 14 }}>Scan Automation</div>
           </div>
         </div>
-        <div style={{ padding: '12px 14px', overflowY: 'auto', maxHeight: 560 }}>
+        {/* No inner maxHeight/overflow here: body is now the single scroll
+            container (index.css caps the document at the popup's 600px limit).
+            The old 560px inner cap put the document at 620px WITH the header —
+            over Chrome's cap, which is what blew the popup out to 800px wide. */}
+        <div style={{ padding: '12px 14px' }}>
           <EngageScanPanel />
         </div>
       </div>

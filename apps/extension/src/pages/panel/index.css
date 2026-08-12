@@ -1,8 +1,18 @@
 /* Overrides popup/index.css's `body { width: 380px }` — that fixed width
    exists so Chrome auto-sizes the *popup* window to fit; a side panel's
-   width is set by the browser/user instead, so the layout must be fluid. */
+   width is set by the browser/user instead, so the layout must be fluid.
+   Same for the 600px height cap popup/index.css puts on html/body to keep
+   Chrome's popup auto-resize from blowing the width out: a side panel is
+   full-height and scrolls with the browser's own scrollbar, so both the cap
+   and the html-level overflow lock have to come back off here. */
+html {
+  max-height: none;
+  overflow: visible;
+}
+
 body {
   width: auto;
   min-width: 0;
+  max-height: none;
   overflow-x: hidden;
 }
