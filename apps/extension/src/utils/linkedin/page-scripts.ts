@@ -104,6 +104,41 @@ export function extractLinkedinPosts(): ScrapedPostsPayload {
       line
     ) ||
     /^[A-Z][A-Za-z ]+\s+and\s+\d[\d,.]*\s+others$/i.test(line);
+  // The legacy card's social-counts bar carries the number IN its aria-label
+  // ("63 comments on <name>'s post", "1,232 reactions") — read that first.
+  const ariaCount = (scope: Element, noun: string): number | null => {
+    const re = new RegExp(`(\\d[\\d,.]*\\s*(?:k|m)?)\\s+${noun}s?\\b`, 'i');
+    for (const el of Array.from(scope.querySelectorAll<HTMLElement>('[aria-label]'))) {
+      const m = (el.getAttribute('aria-label') || '').match(re);
+      if (m) return parseMetric(m[1]);
+    }
+    return null;
+  };
+  // The redesigned "SDUI" card (see sduiRoots below) has NEITHER a keyword in
+  // the visible text NOR a number in any aria-label — verified against a live
+  // search-results page: the Like/Comment/Repost buttons carry only generic
+  // labels ("Reaction button state: no reaction", "Comment", "Repost"), and
+  // the actual digit sits as bare text: the aggregate-reactions control's
+  // OWN text is empty but its PARENT holds it ("Open reactions menu" → "12"),
+  // while Comment/Repost hold their count directly as their own text ("6").
+  // On a legacy card those same buttons just say the word "Comment"/"Repost"
+  // (not a number), so gating on "is this bare text a pure number" makes the
+  // fallback a safe no-op there instead of a false match.
+  const pureNumber = (s: string | null | undefined): number | null => {
+    const t = clean(s);
+    return /^\d[\d,.]*\s*(?:k|m)?$/i.test(t) ? parseMetric(t) : null;
+  };
+  const sduiButtonCount = (
+    scope: Element,
+    ariaLabel: string,
+    useParent: boolean
+  ): number | null => {
+    const btn = Array.from(scope.querySelectorAll<HTMLElement>('button, a')).find(
+      (b) => (b.getAttribute('aria-label') || '').trim() === ariaLabel
+    );
+    if (!btn) return null;
+    return pureNumber((useParent ? btn.parentElement : btn)?.textContent);
+  };
   const readBody = (root: Element, lines: string[]) => {
     const selectors = [
       '.feed-shared-update-v2__description',
@@ -227,16 +262,27 @@ export function extractLinkedinPosts(): ScrapedPostsPayload {
     const timestamp = (rawText.match(/\b\d+\s*(?:s|m|h|d|w|mo|yr|min)\b/i) || [
       '',
     ])[0];
-    const reactions = parseReactionText(rawText);
-    const comments = parseMetric(
-      (rawText.match(/(\d[\d,.]*\s*(?:k|m)?\s+comments?)/i) || [''])[0]
-    );
-    const reposts = parseMetric(
-      (rawText.match(/(\d[\d,.]*\s*(?:k|m)?\s+reposts?)/i) || [''])[0]
-    );
-    const impressions = parseMetric(
-      (rawText.match(/(\d[\d,.]*\s*(?:k|m)?\s+impressions?)/i) || [''])[0]
-    );
+    const reactions =
+      ariaCount(root, 'reaction') ??
+      sduiButtonCount(root, 'Open reactions menu', true) ??
+      parseReactionText(rawText);
+    const comments =
+      ariaCount(root, 'comment') ??
+      sduiButtonCount(root, 'Comment', false) ??
+      parseMetric(
+        (rawText.match(/(\d[\d,.]*\s*(?:k|m)?\s+comments?)/i) || [''])[0]
+      );
+    const reposts =
+      ariaCount(root, 'repost') ??
+      sduiButtonCount(root, 'Repost', false) ??
+      parseMetric(
+        (rawText.match(/(\d[\d,.]*\s*(?:k|m)?\s+reposts?)/i) || [''])[0]
+      );
+    const impressions =
+      ariaCount(root, 'impression') ??
+      parseMetric(
+        (rawText.match(/(\d[\d,.]*\s*(?:k|m)?\s+impressions?)/i) || [''])[0]
+      );
     const body = readBody(root, lines);
     if (!body && !url) continue;
     rows.push({
@@ -303,6 +349,33 @@ export function extractLinkedinPostMetrics(): ScrapedPostMetrics {
     if (andOthers) return parseMetric(andOthers[1]) + 1;
     return 0;
   };
+  // See extractLinkedinPosts' ariaCount/sduiButtonCount for why both are
+  // tried before the text regexes: the legacy layout's count sits inside an
+  // aria-label ("63 comments on ...'s post"), the SDUI layout has no keyword
+  // anywhere and the bare digit sits as plain text on (or beside) the button.
+  const ariaCount = (scope: Element, noun: string): number | null => {
+    const re = new RegExp(`(\\d[\\d,.]*\\s*(?:k|m)?)\\s+${noun}s?\\b`, 'i');
+    for (const el of Array.from(scope.querySelectorAll<HTMLElement>('[aria-label]'))) {
+      const m = (el.getAttribute('aria-label') || '').match(re);
+      if (m) return parseMetric(m[1]);
+    }
+    return null;
+  };
+  const pureNumber = (s: string | null | undefined): number | null => {
+    const t = clean(s);
+    return /^\d[\d,.]*\s*(?:k|m)?$/i.test(t) ? parseMetric(t) : null;
+  };
+  const sduiButtonCount = (
+    scope: Element,
+    ariaLabel: string,
+    useParent: boolean
+  ): number | null => {
+    const btn = Array.from(scope.querySelectorAll<HTMLElement>('button, a')).find(
+      (b) => (b.getAttribute('aria-label') || '').trim() === ariaLabel
+    );
+    if (!btn) return null;
+    return pureNumber((useParent ? btn.parentElement : btn)?.textContent);
+  };
   const root =
     document.querySelector(
       'article, [role="article"], .feed-shared-update-v2, .occludable-update'
@@ -313,13 +386,22 @@ export function extractLinkedinPostMetrics(): ScrapedPostMetrics {
   const rawText = clean(
     (root as HTMLElement).innerText || root.textContent || ''
   );
-  const reactions = parseReactionText(rawText);
-  const comments = parseMetric(
-    (rawText.match(/(\d[\d,.]*\s*(?:k|m)?\s+comments?)/i) || [''])[0]
-  );
-  const reposts = parseMetric(
-    (rawText.match(/(\d[\d,.]*\s*(?:k|m)?\s+reposts?)/i) || [''])[0]
-  );
+  const reactions =
+    ariaCount(root, 'reaction') ??
+    sduiButtonCount(root, 'Open reactions menu', true) ??
+    parseReactionText(rawText);
+  const comments =
+    ariaCount(root, 'comment') ??
+    sduiButtonCount(root, 'Comment', false) ??
+    parseMetric(
+      (rawText.match(/(\d[\d,.]*\s*(?:k|m)?\s+comments?)/i) || [''])[0]
+    );
+  const reposts =
+    ariaCount(root, 'repost') ??
+    sduiButtonCount(root, 'Repost', false) ??
+    parseMetric(
+      (rawText.match(/(\d[\d,.]*\s*(?:k|m)?\s+reposts?)/i) || [''])[0]
+    );
   const impressions = parseMetric(
     (rawText.match(/(\d[\d,.]*\s*(?:k|m)?\s+impressions?)/i) || [''])[0]
   );
