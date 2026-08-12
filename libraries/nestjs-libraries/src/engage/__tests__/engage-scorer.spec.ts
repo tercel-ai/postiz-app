@@ -64,6 +64,38 @@ describe('engage-scorer', () => {
     });
   });
 
+  describe('postMatchesKeyword — hyphenated spelling of a multi-word keyword', () => {
+    // A Quora scan for "open source AI" returned ten answers, six on-topic, but
+    // only the two that used a literal space survived — "open-source AI" was
+    // rejected four times over on the hyphen alone. The platform search that
+    // surfaced the post treats the two spellings as one phrase; so must this.
+    const kw = [makeKeyword('open source AI')];
+
+    it.each([
+      ['open source AI', 'There are no open source AI only projects'],
+      ['open-source AI', 'DeepSeek is an open-source AI model'],
+      ['Open-Source AI', 'What are some Open-Source AI chatbots?'],
+      ['open_source AI', 'tagged open_source AI in the repo'],
+      ['open — source AI', 'the open — source AI debate'],
+    ])('matches the %s spelling', (_label, content) => {
+      expect(scorePost(makePost({ postContent: content }), kw)).not.toBeNull();
+    });
+
+    it.each([
+      ['a different noun', 'Why did Google open source TensorFlow?'],
+      ['a different verb form', 'By open sourcing AI, OpenAI helps a little'],
+      ['the words out of order', 'Grok is open-source, and it is an AI'],
+    ])('still rejects %s', (_label, content) => {
+      expect(scorePost(makePost({ postContent: content }), kw)).toBeNull();
+    });
+
+    it('does not let the joiner leak across a word boundary', () => {
+      // "\b" must still anchor both ends: no matching inside a longer token.
+      const post = makePost({ postContent: 'reopen-source AIs' });
+      expect(scorePost(post, kw)).toBeNull();
+    });
+  });
+
   describe('computeKeywordScore — BRAND/COMPETITOR bonus (fix #8 invariant)', () => {
     it('grants +5 bonus only when type is exactly "BRAND"', () => {
       const post = makePost({ postContent: 'I love AISEE' });

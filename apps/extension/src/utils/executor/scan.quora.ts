@@ -182,16 +182,17 @@ export function scrapeQuoraInPage(): ScrapedQuoraRow[] {
     const bodyText = norm(body?.textContent);
     if (bodyText.length < 60) continue;
 
-    // Then keep climbing to the CARD — the action bar (upvote / comments /
-    // shares) is a sibling of the body, a few levels further out. Bounded two
-    // ways so this can never swallow the result list: stop as soon as the next
-    // parent would take in a second answer, and cap the hops.
+    // Then keep climbing to the CARD — the question title and the action bar
+    // (upvote / comments / shares) are siblings of the body, several levels
+    // further out. The ONLY stop condition is isolation: go up while the next
+    // parent still holds exactly this one answer. Stopping early at "the first
+    // ancestor that contains a button" looks tempting but lands 3 levels too
+    // low — the action bar shows up long before the question title does.
     let card: HTMLElement = body as HTMLElement;
     for (let i = 0; i < 8; i++) {
       const parent = card.parentElement;
       if (!parent || parent.querySelectorAll(ANCHOR_SEL).length > 1) break;
       card = parent;
-      if (card.querySelector('button[aria-label]')) break;
     }
 
     // Quora emits BOTH relative ("/profile/x") and absolute
@@ -215,11 +216,33 @@ export function scrapeQuoraInPage(): ScrapedQuoraRow[] {
       ? parseNum(visibleText(voteBtn).replace(/^upvote/i, ''))
       : null;
 
+    // postContent must be the QUESTION + ANSWER only. Feeding the whole card in
+    // drags the byline along ("Geo Ashe · Follow BSME in Engineering…"), and the
+    // server-side keyword filter then matches author names and bios: a scan for
+    // "geo" hit 10/10 rows purely on users called Geo Ashe / Geo Kay, none of
+    // which mention it in the answer. Quora tags both parts with stable
+    // `puppeteer_test_*` hooks, so select them positively rather than trying to
+    // subtract the byline.
+    const titleEl = card.querySelector('[class*="question_title"]');
+    const contentEl = card.querySelector('[class*="answer_content"]');
+    let text = norm(
+      [titleEl?.textContent, contentEl?.textContent].filter(Boolean).join(' ')
+    );
+    if (!text) {
+      // Layout drift / a surface without those hooks — fall back to the body
+      // with the byline block cut out, rather than losing the row entirely.
+      const stripped = body!.cloneNode(true) as HTMLElement;
+      stripped
+        .querySelectorAll('[class*="spacing_log_answer_header"]')
+        .forEach((el) => el.remove());
+      text = norm(stripped.textContent) || bodyText;
+    }
+
     seen.add(href);
     rows.push({
       url: href,
       author,
-      text: bodyText.slice(0, 500),
+      text: text.slice(0, 500),
       upvotes,
       comments: labelledCount(card, 'comment'),
       shares: labelledCount(card, 'share'),
@@ -240,16 +263,31 @@ export function scrapeQuoraInPage(): ScrapedQuoraRow[] {
  * Cloudflare's "Just a moment…" managed-challenge interstitial rather than the
  * real Quora app — happens on a fresh session with no `cf_clearance` cookie yet,
  * and background (never-focused/never-moved) tabs are more likely to trip it.
+ * Exposed for tests (jsdom), not called anywhere but `scanQuora`.
+ *
+ * Order matters: the app check comes FIRST. Quora keeps a Turnstile SDK
+ * <script src="challenges.cloudflare.com/turnstile/v0/api.js"> in <head> of
+ * EVERY page for its login flow, so testing for that script alone reported a
+ * challenge on perfectly healthy pages — which made scanQuora burn the poll
+ * budget and bail with zero posts on every single Quora unit.
  */
-function detectQuoraChallengeInPage(): boolean {
-  if (document.querySelector('#challenge-running, #challenge-stage, #challenge-form, .cf-turnstile')) {
-    return true;
+export function detectQuoraChallengeInPage(): boolean {
+  // The interstitial REPLACES the document, so a rendered Quora app and a live
+  // challenge can never coexist. `q-box` is Quora's server-rendered layout
+  // primitive and is present on search, profile and question pages alike.
+  if (document.querySelector('[class*="q-box"], [class*="answer_timestamp"]')) {
+    return false;
   }
-  if (document.querySelector('script[src*="challenges.cloudflare.com"]')) {
+  if (document.querySelector('#challenge-running, #challenge-stage, #challenge-form')) {
     return true;
   }
   const title = (document.title || '').toLowerCase();
-  return /just a moment|attention required|请稍候|安全验证/.test(title);
+  if (/just a moment|attention required|请稍候|安全验证/.test(title)) {
+    return true;
+  }
+  // A Turnstile widget MOUNT (not the SDK script) with no Quora app around it
+  // is the interstitial mid-render.
+  return !!document.querySelector('.cf-turnstile');
 }
 
 const CHALLENGE_POLL_MS = 1_500;
@@ -260,12 +298,18 @@ export async function scanQuora(
   gate: () => Promise<boolean>
 ): Promise<ScanRunResult> {
   const { cursor } = task;
-  if (!(await gate())) {
+  // Every bail-out below returns the SAME shape a healthy empty scan would
+  // (no posts, untouched cursor), so without a log line the ingest payload
+  // cannot tell them apart — say which one fired.
+  const bail = (why: string): ScanRunResult => {
+    console.warn('[aisee][scan][quora] aborted', { why, scanType: task.scanType, scanKey: task.scanKey });
     return { posts: [], nextCursor: cursor, exhausted: false };
-  }
+  };
+
+  if (!(await gate())) return bail('pacing gate closed');
 
   const handle = await openTab(buildQuoraScanUrl(task), { settleMs: RENDER_SETTLE_MS });
-  if (!handle) return { posts: [], nextCursor: cursor, exhausted: false };
+  if (!handle) return bail('tab could not be opened');
 
   let rows: ScrapedQuoraRow[] | null = null;
   try {
@@ -282,7 +326,7 @@ export async function scanQuora(
     if (await runInPage(handle.tabId, detectQuoraChallengeInPage)) {
       // Still blocked after the wait budget — don't advance the cursor;
       // report not-exhausted so the backend keeps the unit due for a retry.
-      return { posts: [], nextCursor: cursor, exhausted: false };
+      return bail('cloudflare challenge did not clear');
     }
 
     const maxPages = Math.max(1, Math.floor(task.pacing.maxPages || 1));
@@ -297,10 +341,20 @@ export async function scanQuora(
     await closeTab(handle.tabId);
   }
 
-  if (!rows) return { posts: [], nextCursor: cursor, exhausted: false };
+  if (!rows) return bail('scrape injection failed');
 
   const nowMs = Date.now();
-  const stopBefore = cursor.lastSeenAt ? Date.parse(cursor.lastSeenAt) : null;
+  // Quora's /search is RELEVANCE-ranked, not reverse-chronological: the same
+  // batch of years-old answers comes back every run, and the strongest ones are
+  // usually the oldest. A "newer than last time" cursor buries them for good —
+  // the coarsest label Quora prints is "1y", so the first run advances the
+  // cursor to ~now-1y and every genuinely old, high-upvote answer is dropped
+  // from then on. It also buys nothing here: the page is rendered and scraped in
+  // full either way, and EngageOpportunity is upserted on
+  // @@unique([platform, externalPostId]), so re-sending a post is a no-op.
+  // Profile scans DO come back newest-first, so the cursor still earns its keep.
+  const stopBefore =
+    task.scanType === 'tracked' && cursor.lastSeenAt ? Date.parse(cursor.lastSeenAt) : null;
   const posts: ScanIngestPost[] = [];
   let newestAtMs = stopBefore ?? 0;
   let newestId: string | null = cursor.lastSeenExternalId ?? null;

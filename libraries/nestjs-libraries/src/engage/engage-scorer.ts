@@ -117,6 +117,13 @@ export function scorePost(
 // backfill-time keyword hits.
 export function postMatchesKeyword(content: string, keyword: string): boolean {
   const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // A space INSIDE a multi-word keyword also matches a hyphen/dash/underscore
+  // joiner: the same phrase is spelled both ways in the wild, and the platform
+  // search that surfaced the post does not distinguish them. A Quora scan for
+  // "open source AI" came back with ten answers, six of them on-topic, but only
+  // the two that happened to use a literal space were kept — "open-source AI"
+  // was rejected four times over purely on the hyphen.
+  const flexible = escaped.replace(/\s+/g, '[\\s\\-–—_]+');
   // For ASCII keywords, keep \b boundaries to prevent "AI" matching "rail".
   // For keywords containing any non-ASCII character (CJK, accented, emoji),
   // do a case-insensitive substring match. CJK text has no whitespace-based
@@ -125,8 +132,8 @@ export function postMatchesKeyword(content: string, keyword: string): boolean {
   // legitimate hits. Substring is the conventional match semantics for CJK.
   const isAscii = /^[\x00-\x7F]+$/.test(keyword);
   return isAscii
-    ? new RegExp(`\\b${escaped}\\b`, 'i').test(content)
-    : new RegExp(escaped, 'i').test(content);
+    ? new RegExp(`\\b${flexible}\\b`, 'i').test(content)
+    : new RegExp(flexible, 'i').test(content);
 }
 
 function computeKeywordScore(
