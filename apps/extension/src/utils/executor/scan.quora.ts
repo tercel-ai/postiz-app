@@ -32,9 +32,12 @@ export function buildQuoraScanUrl(task: EngageScanTask): string {
   return `${QUORA_BASE}/search?q=${q}&type=answer`;
 }
 
+const WEEKDAYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
+
 /**
- * Parse a Quora time string ("2y", "answered 3mo ago", "March 5, 2023") to an
- * epoch-ms relative to `nowMs`, or null when it can't be dated. Exposed for tests.
+ * Parse a Quora time string ("2y", "answered 3mo ago", "March 5, 2023", "Jun 16",
+ * "Sat") to an epoch-ms relative to `nowMs`, or null when it can't be dated.
+ * Exposed for tests.
  */
 export function quoraTimeToMs(raw: string | null | undefined, nowMs: number): number | null {
   if (!raw) return null;
@@ -52,6 +55,36 @@ export function quoraTimeToMs(raw: string | null | undefined, nowMs: number): nu
       m: 60e3,
     };
     if (ms[unit]) return nowMs - n * ms[unit];
+  }
+  // Quora labels anything within the last week with a bare weekday
+  // ("Sat") — no date at all. Resolve to the most recent past (or today's)
+  // occurrence of that weekday.
+  const weekday = s.match(/^(sun|mon|tue|wed|thu|fri|sat)$/i);
+  if (weekday) {
+    const target = WEEKDAYS.indexOf(weekday[1].toLowerCase());
+    const now = new Date(nowMs);
+    const diff = (now.getDay() - target + 7) % 7;
+    const result = new Date(now);
+    result.setDate(now.getDate() - diff);
+    result.setHours(0, 0, 0, 0);
+    return result.getTime();
+  }
+  // Anything older than a week but within the current year is labelled
+  // "Mon D" with NO year — `Date.parse` on that alone defaults to a fixed
+  // reference year (e.g. 2001 in V8), silently fabricating the wrong decade,
+  // so it must be resolved against `nowMs` instead of falling through.
+  const monthDay = s.match(/^([A-Za-z]{3})\s+(\d{1,2})$/);
+  if (monthDay) {
+    const now = new Date(nowMs);
+    const candidate = new Date(`${monthDay[1]} ${monthDay[2]}, ${now.getFullYear()}`);
+    if (Number.isFinite(candidate.getTime())) {
+      // Quora never shows a future date without a year, so a same-year guess
+      // landing after "now" actually belongs to last year.
+      if (candidate.getTime() > nowMs) {
+        candidate.setFullYear(now.getFullYear() - 1);
+      }
+      return candidate.getTime();
+    }
   }
   const abs = Date.parse(s.replace(/^(answered|updated)\s+/i, ''));
   return Number.isFinite(abs) ? abs : null;
@@ -109,9 +142,22 @@ function scrapeQuoraInPage(): ScrapedQuoraRow[] {
     const upEl = Array.from(card?.querySelectorAll<HTMLElement>('button, span') || []).find((el) =>
       /upvote/i.test(el.getAttribute('aria-label') || el.textContent || '')
     );
-    const timeEl = Array.from(card?.querySelectorAll<HTMLElement>('a, span') || []).find((el) =>
-      /\b\d+\s*(y|mo|w|d|h)\b|answered|updated|\b(19|20)\d{2}\b/i.test(el.textContent || '')
-    );
+    // Quora renders the answer date as one of three shapes depending on age:
+    // a relative unit ("3d", "2y"), a bare weekday for the last week ("Sat"),
+    // or "Mon D" (no year) for anything older within the current year — all
+    // three must match here or quoraTimeToMs() never sees the text at all.
+    // The author's bio line ("Founder at X (2021–present)") also carries a
+    // 4-digit year and sits earlier in the card, so it's excluded by length —
+    // a real date badge is always short, a bio sentence never is.
+    const timeEl = Array.from(card?.querySelectorAll<HTMLElement>('a, span') || []).find((el) => {
+      const t = norm(el.textContent);
+      if (!t || t.length > 32) return false;
+      return (
+        /\b\d+\s*(y|mo|w|d|h)\b|answered|updated|\b(19|20)\d{2}\b/i.test(t) ||
+        /^(sun|mon|tue|wed|thu|fri|sat)$/i.test(t) ||
+        /^[a-z]{3}\s+\d{1,2}$/i.test(t)
+      );
+    });
 
     seen.add(href);
     rows.push({
@@ -125,6 +171,26 @@ function scrapeQuoraInPage(): ScrapedQuoraRow[] {
   }
   return rows;
 }
+
+/**
+ * Runs INSIDE the quora.com page (self-contained). True when the page is still
+ * Cloudflare's "Just a moment…" managed-challenge interstitial rather than the
+ * real Quora app — happens on a fresh session with no `cf_clearance` cookie yet,
+ * and background (never-focused/never-moved) tabs are more likely to trip it.
+ */
+function detectQuoraChallengeInPage(): boolean {
+  if (document.querySelector('#challenge-running, #challenge-stage, #challenge-form, .cf-turnstile')) {
+    return true;
+  }
+  if (document.querySelector('script[src*="challenges.cloudflare.com"]')) {
+    return true;
+  }
+  const title = (document.title || '').toLowerCase();
+  return /just a moment|attention required|请稍候|安全验证/.test(title);
+}
+
+const CHALLENGE_POLL_MS = 1_500;
+const CHALLENGE_MAX_WAIT_MS = 9_000;
 
 export async function scanQuora(
   task: EngageScanTask,
@@ -140,6 +206,22 @@ export async function scanQuora(
 
   let rows: ScrapedQuoraRow[] | null = null;
   try {
+    // Cloudflare's JS challenge auto-solves and reloads on its own — poll
+    // instead of scraping the interstitial and reporting a false "0 results".
+    let waited = 0;
+    while (
+      waited < CHALLENGE_MAX_WAIT_MS &&
+      (await runInPage(handle.tabId, detectQuoraChallengeInPage))
+    ) {
+      await sleep(CHALLENGE_POLL_MS);
+      waited += CHALLENGE_POLL_MS;
+    }
+    if (await runInPage(handle.tabId, detectQuoraChallengeInPage)) {
+      // Still blocked after the wait budget — don't advance the cursor;
+      // report not-exhausted so the backend keeps the unit due for a retry.
+      return { posts: [], nextCursor: cursor, exhausted: false };
+    }
+
     const maxPages = Math.max(1, Math.floor(task.pacing.maxPages || 1));
     for (let page = 1; page < maxPages; page++) {
       await runInPage(handle.tabId, () =>

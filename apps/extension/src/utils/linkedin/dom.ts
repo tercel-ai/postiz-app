@@ -98,6 +98,11 @@ export function activityIdFromUrl(url: string): string | null {
   // urn:li:activity:123 | .../feed/update/urn:li:activity:123/ | .../posts/...-123-
   const urn = raw.match(/urn:li:(?:activity|ugcPost|share):(\d+)/i);
   if (urn) return urn[1];
+  // Synthetic urn from the SDUI search renderer's card wrapper id (see
+  // page-scripts.ts extractLinkedinPosts) — no numeric activity id is exposed
+  // in that layout, so the stable per-post token itself is the id.
+  const sdui = raw.match(/^sdui:([A-Za-z0-9_-]+)/);
+  if (sdui) return `sdui-${sdui[1]}`;
   const digits = raw.match(/(\d{10,})/);
   return digits ? digits[1] : null;
 }

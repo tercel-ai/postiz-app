@@ -58,6 +58,11 @@ describe('linkedin/dom activityIdFromUrl', () => {
     ).toBe('7123456789012345678');
     expect(activityIdFromUrl('https://www.linkedin.com/feed/')).toBeNull();
   });
+  it('accepts the synthetic sdui: urn from the SDUI search renderer', () => {
+    expect(activityIdFromUrl('sdui:UWr8s7GZGx7Ntx2k24i3Dm3LrlA')).toBe(
+      'sdui-UWr8s7GZGx7Ntx2k24i3Dm3LrlA'
+    );
+  });
 });
 
 describe('linkedin/dom handleFromProfileUrl', () => {
@@ -100,6 +105,24 @@ describe('linkedin/dom toScanIngestPost', () => {
       metricComments: 3,
       metricShares: 1,
       metricViews: 500,
+    });
+  });
+  it('maps an SDUI search-results row (no data-urn/href) via the synthetic urn', () => {
+    const post = toScanIngestPost(
+      {
+        author: 'Jane Doe',
+        authorProfileUrl: 'https://www.linkedin.com/in/jane/',
+        body: 'hello from search',
+        url: '',
+        urn: 'sdui:UWr8s7GZGx7Ntx2k24i3Dm3LrlA',
+      },
+      iso
+    );
+    expect(post).toMatchObject({
+      platform: 'linkedin',
+      externalPostId: 'sdui-UWr8s7GZGx7Ntx2k24i3Dm3LrlA',
+      externalPostUrl: '',
+      postContent: 'hello from search',
     });
   });
   it('drops rows with no resolvable id or no content', () => {

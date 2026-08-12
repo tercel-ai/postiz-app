@@ -55,6 +55,7 @@ export interface ScrapedPostsPayload {
 export function extractLinkedinPosts(): ScrapedPostsPayload {
   const clean = (s: unknown) =>
     String(s || '')
+      .replace(/[​‌‍﻿]/g, '')
       .replace(/[  ]+/g, ' ')
       .replace(/\s+/g, ' ')
       .trim();
@@ -119,8 +120,11 @@ export function extractLinkedinPosts(): ScrapedPostsPayload {
     const timestampIndex = lines.findIndex((line) =>
       /^\d+\s*(?:s|m|h|d|w|mo|yr|min)\b/i.test(line)
     );
-    const start =
+    let start =
       timestampIndex >= 0 ? timestampIndex + 1 : Math.min(3, lines.length);
+    // Some layouts render UI chrome ("Follow") between the timestamp and the
+    // actual body — skip past it instead of treating it as the end of the body.
+    while (start < lines.length && stopLine(lines[start])) start++;
     const body: string[] = [];
     for (const line of lines.slice(start)) {
       if (stopLine(line)) break;
@@ -131,7 +135,7 @@ export function extractLinkedinPosts(): ScrapedPostsPayload {
     return clean(body.join(' ')).replace(/…more$/i, '').trim();
   };
 
-  const cards = Array.from(
+  const legacyCards = Array.from(
     document.querySelectorAll(
       'article, [role="article"], .feed-shared-update-v2, .occludable-update'
     )
@@ -140,13 +144,41 @@ export function extractLinkedinPosts(): ScrapedPostsPayload {
       clean((card as HTMLElement).innerText || card.textContent || '').length >
       60
   );
+  // LinkedIn's rewritten "SDUI" search-results renderer (flagship-web
+  // rsc-action) drops the semantic article/role markup entirely, so the
+  // selectors above match nothing there. Every post still carries a
+  // recognisable "Open control menu for post by <name>" button though —
+  // walk up from it to the nearest ancestor with an `expanded…FeedType_…`
+  // id, which is the SDUI equivalent of a card root and is stable across
+  // reloads (verified against the live DOM), unlike the hashed class names.
+  const sduiRoots: Element[] = [];
+  const legacySet = new Set(legacyCards);
+  for (const menuBtn of Array.from(
+    document.querySelectorAll(
+      '[aria-label^="Open control menu for post by "]'
+    )
+  )) {
+    let node: Element | null = menuBtn;
+    let root: Element | null = null;
+    for (let depth = 0; depth < 10 && node; depth++) {
+      if (node.id && node.id.startsWith('expanded')) {
+        root = node;
+        break;
+      }
+      node = node.parentElement;
+    }
+    if (root && !legacySet.has(root)) sduiRoots.push(root);
+  }
+  const cards: Element[] = [...legacyCards, ...sduiRoots];
   const rows: ScrapedPostsPayload['rows'] = [];
   const seen = new Set<Element>();
   for (const card of cards) {
     const root =
-      card.closest(
-        'article, [role="article"], .feed-shared-update-v2, .occludable-update'
-      ) || card;
+      card.id && card.id.startsWith('expanded')
+        ? card
+        : card.closest(
+            'article, [role="article"], .feed-shared-update-v2, .occludable-update'
+          ) || card;
     if (!root || seen.has(root)) continue;
     seen.add(root);
     const rawFullText = String(
@@ -161,7 +193,15 @@ export function extractLinkedinPosts(): ScrapedPostsPayload {
       ? new URL(permalink.href, location.origin).toString()
       : '';
     const urnEl = root.getAttribute('data-urn') || '';
-    const urn = urnEl || (url.match(/urn:li:[a-z]+:\d+/i) || [''])[0];
+    let urn = urnEl || (url.match(/urn:li:[a-z]+:\d+/i) || [''])[0];
+    if (!urn && root.id && root.id.startsWith('expanded')) {
+      // No data-urn and no permalink href on the SDUI card — fall back to the
+      // stable per-post token embedded in its wrapper id (e.g.
+      // "expanded<token>FeedType_FLAGSHIP_SEARCH") as a synthetic urn so the
+      // post still gets a dedup-safe externalPostId (see dom.ts activityIdFromUrl).
+      const m = root.id.match(/^expanded([A-Za-z0-9_-]+)FeedType_/);
+      if (m) urn = `sdui:${m[1]}`;
+    }
     const authorLink = root.querySelector(
       'a[href*="/in/"], a[href*="/company/"]'
     ) as HTMLAnchorElement | null;
@@ -169,7 +209,7 @@ export function extractLinkedinPosts(): ScrapedPostsPayload {
       ? safeHttpUrl(authorLink.href)
       : '';
     const avatarImg = root.querySelector(
-      'img[class*="presence-entity__image"], img.ivm-view-attr__img--centered, img[class*="EntityPhoto"]'
+      'img[class*="presence-entity__image"], img.ivm-view-attr__img--centered, img[class*="EntityPhoto"], a[href*="/in/"] img, a[href*="/company/"] img'
     ) as HTMLImageElement | null;
     const authorAvatarUrl = avatarImg
       ? safeHttpUrl(avatarImg.currentSrc || avatarImg.src || '')
@@ -234,6 +274,7 @@ export interface ScrapedPostMetrics {
 export function extractLinkedinPostMetrics(): ScrapedPostMetrics {
   const clean = (s: unknown) =>
     String(s || '')
+      .replace(/[​‌‍﻿]/g, '')
       .replace(/[  ]+/g, ' ')
       .replace(/\s+/g, ' ')
       .trim();
