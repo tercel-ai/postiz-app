@@ -743,6 +743,7 @@ export class OperationPlanService implements OnApplicationBootstrap {
         '- Prefer content AI systems can cite: concrete data points and answer-style framing. For owned/blog channels, reference the project\'s own canonical URL. "Build-in-public" (sharing real, specific progress/metrics) tends to be the most citable. Keep copy concise and publish-ready.',
         '- REDDIT TARGETING: for every `reddit` platform entry, set `subreddit` to the single most relevant EXISTING, ACTIVE, PUBLIC subreddit for this content (bare name, no "r/" prefix, e.g. "webdev"). Pick a real community you are confident exists and accepts text (self) posts on this topic — the backend verifies it against Reddit and DROPS the post if the subreddit is missing, private, link-only, or inactive, so a wrong guess wastes the post. For EVERY non-reddit platform entry, set `subreddit` to null.',
         '- REDDIT POST RULES: many communities REJECT a submission that is not filed correctly, and the rejection is silent until publish time. For every `reddit` platform entry, if the chosen subreddit is one you know gates posts this way, set `flairLabel` to the post flair it expects, worded as that community words it ("Discussion", "Research", "Project"), and set `titleTag` to the bracketed tag it requires in the title ("[D]", "[R]", "[P]", "[N]"). r/MachineLearning, for example, requires BOTH. Choose the one that genuinely matches the content — a Q&A or open-ended discussion is NOT research, and mis-filing gets a post removed by the subreddit\'s bots. Set either field to null when you are not confident the community requires it (a needless tag on a subreddit that does not use them looks like spam), and set BOTH to null for EVERY non-reddit platform entry.',
+        '- REDDIT SELF-PROMOTION / SPAM GUARDRAILS (a prior post was removed for this — treat as a hard rule): NEVER include the project\'s own URL, name, or "I built X, check it out" framing in `content` for a `reddit` platform entry — most subreddits auto-remove or ban for self-promotion regardless of who owns the link. Write the post as a genuine third-person discussion, question, or lesson-learned on the topic instead of an announcement of a product/service/account. Give it a clear, specific title and a substantive body — vague titles, empty bodies, or emoji-only content get removed as low-effort. Do not repeat near-duplicate posts across subreddits or cram in multiple external links (reads as spam and risks a permanent ban); at most one non-promotional supporting link, only when it genuinely helps the discussion. Never reproduce leaked or copyrighted material verbatim — discussing that something leaked is fine, posting the leaked content itself is not.',
         '- DEV.TO TAGGING: for every `devto` platform entry, set `tags` to 1-4 topic tags. Dev.to distributes almost entirely through tag feeds, so an untagged article is close to invisible — treat this as required even though the API does not enforce it. Each tag must be a SINGLE lowercase alphanumeric token with no spaces, hyphens or "#" ("webdev", "javascript", "ai", "buildinpublic"); a multi-word topic must be closed up or dropped. Prefer large, established dev.to tags over invented niche ones — a tag nobody follows is the same as no tag. For EVERY non-devto platform entry, set `tags` to null.',
         '',
         'THREADS (multi-part posts)',
@@ -1347,6 +1348,7 @@ export class OperationPlanService implements OnApplicationBootstrap {
           '- Adapt content to each platform\'s native format: LinkedIn = professional, longer; dev.to = technical, tutorial-style; Medium = narrative, explanatory; Quora = direct answer format; HackerNews = concise, factual, no fluff.',
           '- TITLE vs BODY: on reddit, hackernews, medium and devto the themeTitle is submitted SEPARATELY as the post/story title, so `content` is the BODY ONLY — never open it with the title.',
           '- REDDIT TARGETING: if `reddit` is in the missing list, set `subreddit` to the single most relevant EXISTING, ACTIVE, PUBLIC subreddit (bare name, no "r/"). Set `flairLabel`/`titleTag` when you are confident the community requires them, else null. For every non-reddit entry set all three to null.',
+          '- REDDIT SELF-PROMOTION / SPAM GUARDRAILS: if `reddit` is in the missing list, NEVER include the project\'s own URL or "I built X" framing in its `content` — write it as a genuine discussion/question, not an announcement, with a clear title and substantive body (no self-promotion, no spam links, no low-effort/empty content, no leaked material verbatim).',
           '- DEV.TO TAGGING: if `devto` is in the missing list, set `tags` to 1-4 single-word lowercase topic tags. For every non-devto entry set `tags` to null.',
           '- Write PLAIN TEXT for X: no Markdown.',
           '- Follow the per-platform rhythm in `platformPlaybook` for tone/substance.',
@@ -1676,7 +1678,17 @@ export class OperationPlanService implements OnApplicationBootstrap {
         llmTitleTag: (post as { titleTag?: string | null }).titleTag ?? null,
       })),
       monitoredChannels,
-      { log: (m) => this.logger.debug(m) }
+      {
+        log: (m) => this.logger.debug(m),
+        // What previous publishes observed about each community's posting
+        // rules. Guarded by the same `this._engageRepository` null check the
+        // caller already made above.
+        getCapability: (subreddit) =>
+          this._engageRepository!.getRedditChannelCapability(
+            organizationId,
+            subreddit
+          ),
+      }
     );
 
     // Apply resolution: attach the header, or mark the entry for removal.
