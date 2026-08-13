@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+
 import { zodResponseFormat } from 'openai/helpers/zod';
 import { OperationPlanService } from '../operation-plan.service';
 
@@ -13,6 +14,11 @@ function makePlan(overrides: Partial<any> = {}) {
     status: 'READY',
     startsAt: new Date('2026-07-20T00:00:00.000Z'),
     endsAt: new Date('2026-07-21T00:00:00.000Z'), // 2-day range
+    // Prisma @default(now()), so a real row always has one. Two production
+    // paths dereference it — _generateAndBill (to record how long generation
+    // took) and _estimateGenerationProgress (to report progress) — and both
+    // threw when the fixture omitted it.
+    createdAt: new Date('2026-07-20T00:00:00.000Z'),
     planPayload: {},
     ...overrides,
   };
@@ -506,6 +512,27 @@ describe('OperationPlanService.create', () => {
       resolveOrCreateKeywordIds: vi.fn(async (_org: string, _proj: string, texts: string[]) =>
         Object.fromEntries(texts.map((t) => [t, `id-${t}`]))
       ),
+      // Reddit target resolution reads the project's monitored channels.
+      // Returning one puts the resolver on its Tier-1 path, which KEEPS a
+      // curated channel whose probe is unreachable ("trust the curation") —
+      // so these tests resolve a Reddit target without depending on the real
+      // reddit.com probe that resolveRedditTargets otherwise performs. An empty
+      // list would take Tier 2, where an unreachable probe drops the post and
+      // silently removes it from the plan.
+      listMonitoredChannels: vi.fn().mockResolvedValue([
+        {
+          channelId: 'webdev',
+          channelName: 'r/webdev',
+          audienceSize: 100,
+          enabled: true,
+        },
+      ]),
+      // Capability lookups are optional enrichment and the resolver already
+      // degrades on a throw, but stub it so these tests do not depend on that
+      // rescue path.
+      getRedditChannelCapability: vi.fn().mockResolvedValue({}),
+      addMonitoredChannel: vi.fn().mockResolvedValue({}),
+      getOrCreateConfig: vi.fn().mockResolvedValue({ id: 'config-1' }),
     };
     // Per-key settings mock. Default: every operation_plan.* key unset, so the
     // service falls back to its built-in defaults (max 30 days, no allowlist).
@@ -521,8 +548,24 @@ describe('OperationPlanService.create', () => {
       openaiService as any,
       engageRepository as any
     );
+    // Reddit target resolution runs for real inside generation, and its probe
+    // reaches reddit.com. Override only the TRANSPORT — tiering, validation and
+    // flair resolution still execute — so these tests neither depend on the
+    // network nor pay its latency. Without this the file passed alone and timed
+    // out under full-suite load on a host that cannot reach reddit.com.
+    const redditFetchPublic = vi.fn(async () => ({
+      ok: false,
+      status: 503,
+      text: async () => '',
+    }));
+    (service as any).redditResolverDeps = (organizationId: string) => ({
+      log: () => undefined,
+      getCapability: (subreddit: string) =>
+        engageRepository.getRedditChannelCapability(organizationId, subreddit),
+      fetchPublic: redditFetchPublic,
+    });
 
-    return { repo, creditService, openaiService, engageRepository, aiseeClient, settingsService, service };
+    return { repo, creditService, openaiService, engageRepository, aiseeClient, settingsService, service, redditFetchPublic };
   }
 
   // create() (real path) spawns _generateAndBill fire-and-forget and returns the
@@ -2386,6 +2429,54 @@ describe('OperationPlanService.create', () => {
     );
     expect(repo.materializePlanPosts).toHaveBeenCalled();
   });
+
+  // Guards the test seam itself. The override above is applied with `as any`, so
+  // renaming or inlining OperationPlanService.redditResolverDeps would turn it
+  // into dead code and silently send every generation test back to reddit.com —
+  // green in isolation, timing out under load. This fails immediately instead.
+    it('routes the resolver probe through redditResolverDeps().fetchPublic', async () => {
+      const { service, redditFetchPublic } = createGenerationDependencies({
+        contentItems: [
+          {
+            contentId: 'c-1',
+            utcDate: '2030-01-01T10:00:00.000Z',
+            themeKey: 'w1:foundations',
+            themeTitle: 'A reddit post',
+            platforms: [
+              {
+                id: '11111111-1111-4111-8111-111111111111',
+                platform: 'reddit',
+                content: 'Body',
+                subreddit: 'webdev',
+                flairLabel: null,
+                titleTag: null,
+                tags: null,
+                media: null,
+                thread: null,
+              },
+            ],
+          },
+        ],
+        engagePolicies: [],
+        warnings: [],
+      });
+
+      const { background } = await createAndSettle(service, {
+        taskId: 'task-1',
+        startAt: '2030-01-01T00:00:00.000Z',
+        endAt: '2030-01-02T00:00:00.000Z',
+        platforms: ['reddit'],
+      });
+      await background;
+
+      expect(redditFetchPublic).toHaveBeenCalled();
+      // …and every call went to reddit.com through the override, never the real
+      // transport, so the suite neither depends on that host nor pays its latency.
+      for (const [url] of redditFetchPublic.mock.calls as unknown as [string][]) {
+        expect(url).toMatch(/^https:\/\/www\.reddit\.com\//);
+      }
+    });
+
 });
 
 // ── Platform coverage & cross-platform sharing ──────────────────────────
@@ -2624,3 +2715,4 @@ describe('OperationPlanService — cross-platform content sharing in create', ()
     expect(missing).toEqual(['linkedin', 'medium']);
   });
 });
+

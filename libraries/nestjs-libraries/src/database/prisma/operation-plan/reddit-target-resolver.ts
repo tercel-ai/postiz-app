@@ -1,5 +1,9 @@
 import { redditPublicGet } from '@gitroom/nestjs-libraries/engage/reddit-loid';
 import { SUBREDDIT_NAME_RE as SHARED_SUBREDDIT_NAME_RE } from '@gitroom/nestjs-libraries/engage/engage-scan-target';
+import {
+  matchRedditFlairLabel,
+  RedditChannelCapability,
+} from '@gitroom/nestjs-libraries/engage/reddit-channel-capability';
 
 // Reddit posting is not "content-only" like X: the submit API (reddit.provider
 // `post()`) hard-requires a target subreddit, a title, and a post `type`, and
@@ -25,9 +29,33 @@ import { SUBREDDIT_NAME_RE as SHARED_SUBREDDIT_NAME_RE } from '@gitroom/nestjs-l
 // endpoints (loid + proxy WAF-bypass) the Engage scanner already uses, via
 // redditPublicGet. That means it can verify a community exists and is alive, but
 // it CANNOT prove this account may post there (karma/age gates, approved-user
-// restrictions) or read a subreddit's flair requirements — those need OAuth. So
-// is_flair_required is always emitted false; a subreddit that silently forces
-// flair remains an accepted residual failure (documented, not solved here).
+// restrictions) — that remains an accepted residual failure, and no API exposes
+// it either.
+//
+// A subreddit's flair OPTION SET is now knowable here, but not because anything
+// in this module got smarter: Reddit's flair endpoints answer USER_REQUIRED to
+// an unauthenticated caller (verified against r/ClaudeAI in a run where
+// about.json returned 200, so it is the auth check and not the WAF), and the
+// OAuth route that would answer needs API credentials this deployment does not
+// have. What DOES see the real option set is the browser extension, which
+// Reddit shows the picker to whenever it publishes. Those observations come
+// back through EngageTrackedAccount.metadata and reach this module as
+// deps.getCapability, so flair data is learned by POSTING, one community at a
+// time; a subreddit this org has never published to still resolves exactly as
+// it did before (label passed through unverified).
+//
+// Two things are learned that way, and they travel separately. The option SET
+// validates and rewrites the generated label. Whether a community FORCES flair
+// rides in `flairRequired`, NOT in `is_flair_required` — that field would make
+// the settings DTO demand a `flair: {id, name}` nothing here can supply, so it
+// stays hard-false (see its comment). The executor uses `flairRequired` to skip
+// a submit it knows will bounce and open Reddit's own page directly.
+//
+// A rule can only ever be learned as TRUE — a rejection is evidence, a success
+// is not evidence of the opposite — so it carries a TTL (REDDIT_RULE_TTL_MS)
+// rather than living forever. The first post to a flair-forcing community still
+// costs one rejected submit, and so does the first post after each TTL lapse;
+// everything in between goes straight to the tab.
 
 // A subreddit name is 3–21 chars of letters/digits/underscore (no hyphen, unlike
 // a username). We clamp the min to 2 only to satisfy the DTO's @MinLength(2);
@@ -43,6 +71,30 @@ const SUBREDDIT_NAME_RE = SHARED_SUBREDDIT_NAME_RE;
 // Newest post must be at most this old for a Tier-2 candidate to count as
 // "alive" — a community nobody has posted to in 48h is not worth seeding into.
 export const REDDIT_ACTIVITY_WINDOW_MS = 48 * 60 * 60 * 1000;
+
+// How long an observed POSTING RULE is trusted before it has to be re-earned.
+//
+// The rule can only ever be learned as `true` (a rejection is evidence; a
+// success is not evidence of the opposite, so nothing ever writes `false`).
+// Without an expiry, a community whose mods later drop the flair requirement
+// would be routed through the browser-tab path forever. Letting the record go
+// stale costs exactly one doomed submit per window — after which Reddit either
+// rejects again, re-stamping observedAt, or accepts, and the rule stays lapsed.
+//
+// Deliberately NOT applied to `flairs`: a stale option list still matches most
+// labels and its failure mode is a hand-off, whereas a stale rule silently
+// changes which publish path is taken.
+export const REDDIT_RULE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+
+/** True when a capability record's rule observation is still within its TTL. */
+export function isRuleObservationFresh(
+  observedAt: string | undefined,
+  now: number
+): boolean {
+  if (!observedAt) return false;
+  const at = Date.parse(observedAt);
+  return Number.isFinite(at) && now - at <= REDDIT_RULE_TTL_MS;
+}
 
 // Reddit rejects a submit whose title exceeds 300 chars. The title is the
 // content item's themeTitle (usually short), but clamp defensively so a long
@@ -122,6 +174,18 @@ export interface RedditTargetResolverDeps {
   // Injectable clock for deterministic 48h-window tests.
   now?: () => number;
   log?: (message: string) => void;
+  /**
+   * What a subreddit requires of a post, as last observed by whoever published
+   * there — see reddit-channel-capability.ts. Optional: with no source of
+   * capability data the resolver behaves exactly as it did before (flair
+   * unverified, is_flair_required false), which is also what happens for a
+   * subreddit nobody has posted to yet.
+   *
+   * This is the ONLY way the resolver can learn a flair list. Reddit's flair
+   * endpoints answer USER_REQUIRED to unauthenticated callers, so the public
+   * probe above — which is all this module can do on its own — cannot read one.
+   */
+  getCapability?: (subreddit: string) => Promise<RedditChannelCapability>;
 }
 
 async function readJson(
@@ -207,13 +271,45 @@ export interface ResolvedRedditTarget {
   subreddit: string;
   title: string;
   type: 'self';
+  /**
+   * ALWAYS false, and the literal type is load-bearing rather than lazy.
+   *
+   * This field is copied verbatim into settings.subreddit[].value, where
+   * RedditSettingsDtoInner makes `flair` conditionally REQUIRED on it
+   * (`@ValidateIf((e) => e.is_flair_required) @IsDefined() flair`). Nothing here
+   * can supply a `flair` — it is `{id, name}` and a flair id is unreadable
+   * without OAuth (see this file's header) — so emitting `true` would make
+   * every such generated post fail CreatePostDto validation the moment it is
+   * saved or re-submitted through mapTypeToPost.
+   *
+   * Whether a community actually forces flair travels in `flairRequired`
+   * below — a carrier outside the DTO-validated `is_flair_required`/`flair`
+   * pair, the same sidestep `flairLabel` already makes.
+   */
   is_flair_required: false;
+  /**
+   * Set only when a previous publish was ACTUALLY rejected for a missing flair
+   * (the extension reports the SUBMIT_VALIDATION_FLAIR_REQUIRED it saw). Absent
+   * means "not observed", never "flair is optional".
+   *
+   * The executor uses it to skip a blind /api/submit that is guaranteed to be
+   * rejected — which today costs two submits and a forced session refresh, since
+   * the poster retries once on any error before reading the rejection.
+   */
+  flairRequired?: true;
   /**
    * The post flair to apply, as a human-readable LABEL — never a flair id (see
    * the OAuth note in this file's header: ids are unreadable from here). Absent
-   * when generation proposed none. Reconciled against Reddit's real options by
-   * whichever executor publishes the post, so a wrong label can only fail to
-   * match, never select the wrong flair.
+   * when generation proposed none, or when the one proposed is known not to
+   * exist in this community.
+   *
+   * When the subreddit's real option set IS known, this carries REDDIT'S OWN
+   * text for the matched option rather than the generated label, so the
+   * executor's exact-match pass hits instead of falling through to its
+   * decoration-stripping fallback. When it is not known, the generated label is
+   * passed through unverified — the executor reconciles it against the live
+   * picker, where a wrong label can only fail to match, never select the wrong
+   * flair.
    */
   flairLabel?: string;
 }
@@ -263,6 +359,10 @@ export async function resolveRedditTargets(
 ): Promise<ResolveRedditTargetsResult> {
   if (!inputs.length) return { outputs: [], discovered: [] };
 
+  // Same injectable clock probeSubreddit uses, so the rule TTL below is as
+  // deterministic in tests as the 48h activity window.
+  const now = deps.now ?? Date.now;
+
   // Tier-1 pool: enabled channels with a valid subreddit name, ordered by reach
   // (largest audience first) so the highest-value communities are used first,
   // then round-robined across posts to spread rather than dogpile one sub.
@@ -282,6 +382,91 @@ export async function resolveRedditTargets(
       probeCache.set(name, p);
     }
     return p;
+  };
+
+  // Same memoization for the capability lookup, which is a DB read: N posts
+  // round-robined onto one channel must not cost N queries. A lookup that
+  // throws degrades to "nothing known" rather than failing generation — a plan
+  // is still publishable without it, just with an unverified flair.
+  const capabilityCache = new Map<string, Promise<RedditChannelCapability>>();
+  const capabilityOf = (name: string): Promise<RedditChannelCapability> => {
+    let c = capabilityCache.get(name);
+    if (!c) {
+      const onError = (error: unknown): RedditChannelCapability => {
+        deps.log?.(
+          `[reddit-target] capability lookup for r/${name} failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+        return {};
+      };
+      // try/catch AND .catch: the dep is an injected function, so it can fail
+      // synchronously (an object that simply does not implement it) as well as
+      // reject. Either way this is an optional enrichment — a plan is still
+      // publishable without it, just with an unverified flair, so nothing here
+      // is allowed to fail generation.
+      try {
+        c = Promise.resolve(deps.getCapability?.(name) ?? {}).catch(onError);
+      } catch (error) {
+        c = Promise.resolve(onError(error));
+      }
+      capabilityCache.set(name, c);
+    }
+    return c;
+  };
+
+  /**
+   * Build the resolved header for one post, folding in whatever is known about
+   * the community's posting rules.
+   *
+   * The flair decision has three outcomes, and the middle one is the point of
+   * this whole layer:
+   *   - option set known AND the proposed label matches one → carry REDDIT'S
+   *     text for that option, so the executor's exact match hits;
+   *   - option set known and the label matches NOTHING → drop it. Sending a
+   *     label that provably does not exist only makes the executor burn a
+   *     match attempt before falling back to the same hand-off;
+   *   - option set NOT known (nobody has published here yet) → pass the label
+   *     through unverified, exactly as before this layer existed.
+   */
+  const buildTarget = async (
+    subreddit: string,
+    input: RedditTargetInput
+  ): Promise<ResolvedRedditTarget> => {
+    const capability = await capabilityOf(subreddit);
+    const proposed = input.llmFlairLabel?.trim() || '';
+    const known = capability.flairs?.length ? capability.flairs : undefined;
+
+    let flairLabel: string | undefined;
+    if (!proposed) {
+      flairLabel = undefined;
+    } else if (!known) {
+      flairLabel = proposed;
+    } else {
+      const matched = matchRedditFlairLabel(proposed, known);
+      if (matched) {
+        flairLabel = matched.label;
+      } else {
+        deps.log?.(
+          `[reddit-target] ${input.key}: flair "${proposed}" is not one of ` +
+            `r/${subreddit}'s ${known.length} options; dropping the label`
+        );
+      }
+    }
+
+    return {
+      subreddit,
+      title: applyTitleTag(input.title, input.llmTitleTag),
+      type: 'self',
+      // Never the observed value — see ResolvedRedditTarget.is_flair_required
+      // for why this field cannot carry it without breaking the settings DTO.
+      is_flair_required: false,
+      ...(capability.flairRequired === true &&
+      isRuleObservationFresh(capability.observedAt, now())
+        ? { flairRequired: true as const }
+        : {}),
+      ...(flairLabel ? { flairLabel } : {}),
+    };
   };
 
   // Pre-validate the Tier-1 pool ONCE, up front, keeping only channels that can
@@ -320,15 +505,7 @@ export async function resolveRedditTargets(
       const channel = tier1Pool[i % tier1Pool.length];
       outputs.push({
         key: input.key,
-        target: {
-          subreddit: channel.name,
-          title: applyTitleTag(input.title, input.llmTitleTag),
-          type: 'self',
-          is_flair_required: false,
-          ...(input.llmFlairLabel?.trim()
-            ? { flairLabel: input.llmFlairLabel.trim() }
-            : {}),
-        },
+        target: await buildTarget(channel.name, input),
       });
       continue;
     }
@@ -357,15 +534,7 @@ export async function resolveRedditTargets(
     }
     outputs.push({
       key: input.key,
-      target: {
-        subreddit: candidate,
-        title: applyTitleTag(input.title, input.llmTitleTag),
-        type: 'self',
-        is_flair_required: false,
-        ...(input.llmFlairLabel?.trim()
-          ? { flairLabel: input.llmFlairLabel.trim() }
-          : {}),
-      },
+      target: await buildTarget(candidate, input),
     });
   }
 

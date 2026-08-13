@@ -6,6 +6,8 @@ import {
   resolveRedditTargets,
   MonitoredRedditChannel,
   REDDIT_ACTIVITY_WINDOW_MS,
+  REDDIT_RULE_TTL_MS,
+  isRuleObservationFresh,
 } from '../reddit-target-resolver';
 
 const NOW = 1_700_000_000_000; // fixed clock
@@ -347,5 +349,185 @@ describe('resolveRedditTargets — community filing rules', () => {
       title: '[R] Findings',
       flairLabel: 'Research',
     });
+  });
+});
+
+// ─── Capability-informed flair resolution ────────────────────────────────────
+//
+// A subreddit's flair options can only be learned by PUBLISHING there (Reddit's
+// flair endpoints answer USER_REQUIRED to unauthenticated callers), so these
+// cover both states: the community has been observed, and it has not.
+describe('resolveRedditTargets flair resolution', () => {
+  const LIVE = {
+    about: { subreddit_type: 'public', submission_type: 'self' },
+    newestAgeMs: 60_000,
+  };
+  const channels: MonitoredRedditChannel[] = [
+    { channelId: 'football', channelName: 'r/football', audienceSize: 100, enabled: true },
+  ];
+  const input = (flair: string | null) => [
+    { key: 'k1', llmSubreddit: 'football', title: 'A title', llmFlairLabel: flair },
+  ];
+  const run = (flair: string | null, getCapability?: any) =>
+    resolveRedditTargets(input(flair), channels, {
+      now,
+      fetchPublic: fakeFetch({ football: LIVE }),
+      ...(getCapability ? { getCapability } : {}),
+    });
+
+  it('passes the generated label through unverified when nothing is known', async () => {
+    const { outputs } = await run('Growth Marketing');
+    expect(outputs[0].target).toMatchObject({
+      flairLabel: 'Growth Marketing',
+      is_flair_required: false,
+    });
+  });
+
+  // The r/football option set, verbatim: the generated label matches on text
+  // but the real option carries an emoji, so carrying REDDIT's text forward is
+  // what lets the extension's exact-match pass hit.
+  it("rewrites a match to Reddit's own label, emoji included", async () => {
+    const { outputs } = await run('News', async () => ({
+      flairs: [{ label: 'Redditch United' }, { label: '📰News' }, { label: '⇄ Transfer News' }],
+    }));
+    expect(outputs[0].target?.flairLabel).toBe('📰News');
+  });
+
+  // Sending a label that provably does not exist only makes the executor burn a
+  // match attempt before the same hand-off.
+  it('drops a label that is not in the known option set', async () => {
+    const { outputs } = await run('Growth Marketing', async () => ({
+      flairs: [{ label: 'Redditch United' }, { label: '📰News' }],
+    }));
+    expect(outputs[0].target).toBeTruthy();
+    expect(outputs[0].target).not.toHaveProperty('flairLabel');
+  });
+
+  // is_flair_required is copied verbatim into settings.subreddit[].value, where
+  // RedditSettingsDtoInner makes `flair` conditionally REQUIRED on it. Nothing
+  // here can supply a flair (it is {id,name} and an id needs OAuth), so a `true`
+  // would make the generated post fail CreatePostDto the moment it is saved.
+  // The observed requirement lives on the capability record instead.
+  it('never leaks an observed flairRequired into is_flair_required', async () => {
+    const { outputs } = await run(null, async () => ({ flairRequired: true }));
+    expect(outputs[0].target?.is_flair_required).toBe(false);
+  });
+
+  it('leaves is_flair_required false when the community was never observed', async () => {
+    const { outputs } = await run(null, async () => ({}));
+    expect(outputs[0].target?.is_flair_required).toBe(false);
+  });
+
+  // An empty list means "observed nothing usable", which must not be read as
+  // "this community offers no flairs" and silently discard every label.
+  it('treats an empty flair list as unknown, not as an empty option set', async () => {
+    const { outputs } = await run('Discussion', async () => ({ flairs: [] }));
+    expect(outputs[0].target?.flairLabel).toBe('Discussion');
+  });
+
+  it('memoizes the lookup across posts sharing a subreddit', async () => {
+    const getCapability = vi.fn(async () => ({ flairs: [{ label: 'News' }] }));
+    await resolveRedditTargets(
+      [
+        { key: 'a', llmSubreddit: 'football', title: 't1', llmFlairLabel: 'News' },
+        { key: 'b', llmSubreddit: 'football', title: 't2', llmFlairLabel: 'News' },
+        { key: 'c', llmSubreddit: 'football', title: 't3', llmFlairLabel: 'News' },
+      ],
+      channels,
+      { now, fetchPublic: fakeFetch({ football: LIVE }), getCapability }
+    );
+    expect(getCapability).toHaveBeenCalledTimes(1);
+  });
+
+  // The lookup is an optional enrichment; a plan is still publishable without
+  // it, so neither a rejection nor a synchronous throw may fail generation.
+  it('degrades to unverified when the lookup rejects', async () => {
+    const { outputs } = await run('Discussion', async () => {
+      throw new Error('db down');
+    });
+    expect(outputs[0].target?.flairLabel).toBe('Discussion');
+  });
+
+  it('degrades to unverified when the dep throws synchronously', async () => {
+    const { outputs } = await run('Discussion', () => {
+      throw new Error('not implemented');
+    });
+    expect(outputs[0].target?.flairLabel).toBe('Discussion');
+  });
+});
+
+// The observed posting RULE travels separately from is_flair_required (which
+// must stay hard-false or the settings DTO demands a flair id nothing can
+// supply). It is what lets the executor skip a submit it knows will bounce.
+describe('resolveRedditTargets flairRequired passthrough', () => {
+  const LIVE = {
+    about: { subreddit_type: 'public', submission_type: 'self' },
+    newestAgeMs: 60_000,
+  };
+  const channels: MonitoredRedditChannel[] = [
+    { channelId: 'football', channelName: 'r/football', audienceSize: 100, enabled: true },
+  ];
+  const resolve = (capability: any) =>
+    resolveRedditTargets(
+      [{ key: 'k1', llmSubreddit: 'football', title: 'A title', llmFlairLabel: null }],
+      channels,
+      {
+        now,
+        fetchPublic: fakeFetch({ football: LIVE }),
+        getCapability: async () => capability,
+      }
+    );
+  const freshly = (ageMs: number) => new Date(NOW - ageMs).toISOString();
+
+  it('forwards a freshly observed requirement', async () => {
+    const { outputs } = await resolve({
+      flairRequired: true,
+      observedAt: freshly(24 * 60 * 60 * 1000),
+    });
+    expect(outputs[0].target?.flairRequired).toBe(true);
+    // …without ever touching the DTO-validated field.
+    expect(outputs[0].target?.is_flair_required).toBe(false);
+  });
+
+  // A rule is only ever learned as `true`, so without an expiry a community
+  // whose mods later drop the requirement would be routed through the tab
+  // forever. Lapsing costs one doomed submit, which re-stamps observedAt if the
+  // rule still holds.
+  it('drops a requirement observed longer ago than the TTL', async () => {
+    const { outputs } = await resolve({
+      flairRequired: true,
+      observedAt: freshly(REDDIT_RULE_TTL_MS + 60_000),
+    });
+    expect(outputs[0].target).not.toHaveProperty('flairRequired');
+  });
+
+  it('drops a requirement with no or unparseable observedAt', async () => {
+    for (const observedAt of [undefined, '', 'not a date']) {
+      const { outputs } = await resolve({ flairRequired: true, observedAt });
+      expect(outputs[0].target).not.toHaveProperty('flairRequired');
+    }
+  });
+
+  it('omits the field entirely when nothing was observed', async () => {
+    const { outputs } = await resolve({ flairs: [{ label: 'News' }] });
+    expect(outputs[0].target).not.toHaveProperty('flairRequired');
+  });
+});
+
+describe('isRuleObservationFresh', () => {
+  it('accepts an observation inside the window and rejects one outside it', () => {
+    expect(isRuleObservationFresh(new Date(NOW).toISOString(), NOW)).toBe(true);
+    expect(
+      isRuleObservationFresh(new Date(NOW - REDDIT_RULE_TTL_MS + 1000).toISOString(), NOW)
+    ).toBe(true);
+    expect(
+      isRuleObservationFresh(new Date(NOW - REDDIT_RULE_TTL_MS - 1000).toISOString(), NOW)
+    ).toBe(false);
+  });
+
+  it('rejects a missing or unparseable timestamp rather than treating it as fresh', () => {
+    expect(isRuleObservationFresh(undefined, NOW)).toBe(false);
+    expect(isRuleObservationFresh('', NOW)).toBe(false);
+    expect(isRuleObservationFresh('yesterday', NOW)).toBe(false);
   });
 });

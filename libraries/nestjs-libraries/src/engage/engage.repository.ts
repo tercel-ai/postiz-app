@@ -37,6 +37,12 @@ import {
   XReplyResolution,
 } from '@gitroom/nestjs-libraries/engage/resolve-x-reply-integration';
 import { markEngageScanWork } from '@gitroom/nestjs-libraries/engage/engage-scan-hint';
+import {
+  isEmptyRedditCapability,
+  mergeRedditCapability,
+  readRedditCapability,
+  RedditChannelCapability,
+} from '@gitroom/nestjs-libraries/engage/reddit-channel-capability';
 import { classifyReplyMetric, normalizeReplyMetrics } from '@gitroom/nestjs-libraries/engage/engage-metrics-stats';
 import { parseXTweetId } from '@gitroom/nestjs-libraries/engage/x-tweet';
 import { EngageAuthorProfile } from '@gitroom/nestjs-libraries/engage/engage-author';
@@ -1298,6 +1304,94 @@ export class EngageRepository {
       where: { id: channel.id },
     });
     return toChannelShape(deleted);
+  }
+
+  /**
+   * What r/<subreddit> requires of a post (flair options, flair/title-tag
+   * rules), as last observed BY THIS ORG. Empty when nothing has been observed.
+   *
+   * Scoped to `organizationId`, symmetric with the write below. An earlier
+   * version read across orgs on the theory that a flair list is a public
+   * property of the community rather than tenant data. That is true of the
+   * FACT, but not of the value stored here: nothing server-side can fetch a
+   * flair list (Reddit answers USER_REQUIRED without credentials — the premise
+   * of this whole feature), so the record is one tenant's unverified assertion,
+   * validated for shape and never for truth. Serving it to another tenant let
+   * any org steer a victim's outbound posts — a seeded one-element list makes
+   * matchRedditFlairLabel drop the victim's proposed flair, and the effect
+   * landed on exactly the subreddits a victim had NOT monitored, since a
+   * Tier-2 discovery has no own row until after resolution.
+   *
+   * A subreddit this org has never published to therefore resolves as
+   * "unknown", which resolveRedditTargets already handles by passing the
+   * generated label through unverified — the pre-feature behavior.
+   */
+  async getRedditChannelCapability(
+    organizationId: string,
+    subreddit: string
+  ): Promise<RedditChannelCapability> {
+    // `?? ''` before normalizeUsername, which dereferences its argument: this
+    // is reachable from a query string, so a missing param must return the
+    // empty record rather than a TypeError.
+    const username = normalizeUsername('reddit', subreddit ?? '');
+    if (!username) return {};
+    // One org can monitor the same subreddit from several projects (a row per
+    // EngageConfig) and every one of them carries the same observation, so the
+    // freshest row is enough — no need to materialize the rest.
+    const row = await this._trackedAccount.model.engageTrackedAccount.findFirst({
+      where: { organizationId, platform: 'reddit', username },
+      select: { metadata: true },
+      orderBy: { updatedAt: 'desc' },
+    });
+    return row ? readRedditCapability(row.metadata) : {};
+  }
+
+  /**
+   * Fold one observation of r/<subreddit>'s posting rules into this org's rows.
+   *
+   * Multi-row, not single-row: one org can monitor the same subreddit from
+   * several projects (a row per EngageConfig), and all of them should carry the
+   * same observation. Per-row `update` rather than one `updateMany` because the
+   * merge reads each row's existing metadata — see the inline note below.
+   *
+   * Zero matched rows is a normal no-op: this org does not monitor the
+   * subreddit, and the capability record is a cache attached to a monitoring
+   * relationship, not an entity of its own. Creating a row here to hold it
+   * would silently add a scan target nobody asked for.
+   */
+  async recordRedditChannelCapability(
+    organizationId: string,
+    subreddit: string,
+    patch: RedditChannelCapability
+  ): Promise<{ updated: number }> {
+    const username = normalizeUsername('reddit', subreddit);
+    if (!username || isEmptyRedditCapability(patch)) return { updated: 0 };
+
+    const rows = await this._trackedAccount.model.engageTrackedAccount.findMany({
+      where: { organizationId, platform: 'reddit', username },
+      select: { id: true, metadata: true },
+    });
+    if (!rows.length) return { updated: 0 };
+
+    const observedAt = new Date().toISOString();
+    // Per-row rather than one updateMany: the merge reads each row's existing
+    // metadata (to preserve description/url/avatar and any boolean this patch
+    // does not state), so the new value differs per row.
+    await Promise.all(
+      rows.map((row) =>
+        this._trackedAccount.model.engageTrackedAccount.update({
+          where: { id: row.id },
+          data: {
+            metadata: mergeRedditCapability(
+              row.metadata,
+              patch,
+              observedAt
+            ) as Prisma.InputJsonValue,
+          },
+        })
+      )
+    );
+    return { updated: rows.length };
   }
 
   /**

@@ -488,6 +488,13 @@ export class OperationPlanRepository {
                         ...(redditTarget.flairLabel
                           ? { flairLabel: redditTarget.flairLabel }
                           : {}),
+                        // Rides alongside flairLabel for the same reason: the
+                        // DTO's `is_flair_required` makes `flair` conditionally
+                        // required and nothing here can supply a flair id, so
+                        // the OBSERVED requirement needs its own carrier.
+                        ...(redditTarget.flairRequired
+                          ? { flairRequired: true }
+                          : {}),
                       },
                     },
                   ],

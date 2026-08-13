@@ -21,6 +21,7 @@ import { EngageRepository } from '@gitroom/nestjs-libraries/engage/engage.reposi
 import {
   resolveRedditTargets,
   MonitoredRedditChannel,
+  RedditTargetResolverDeps,
 } from './reddit-target-resolver';
 import { postTitleFromTheme } from './theme-title';
 import { weightedLength, textSlicer } from '@gitroom/helpers/utils/count.length';
@@ -1632,6 +1633,35 @@ export class OperationPlanService implements OnApplicationBootstrap {
   // into the Engage config so the next plan takes the cheap Tier-1 path. No-op
   // without an EngageRepository (unit-test construction) — reddit posts then fall
   // through unresolved and are dropped by materialize's guard.
+  /**
+   * Dependencies handed to resolveRedditTargets. Overridable so a test can run
+   * the resolver WITHOUT reaching the network.
+   *
+   * The seam exists because resolveRedditTargets probes reddit.com
+   * (probeSubreddit -> redditPublicGet) and nothing above it could say
+   * otherwise: every service-level test that generated a Reddit post made live
+   * calls. That is harmless in OUTCOME — a curated Tier-1 channel is kept
+   * whether or not its probe is reachable — but not in LATENCY, and it produced
+   * the worst kind of failure to diagnose: green when the file ran alone, timed
+   * out under full-suite load on a host that cannot reach reddit.com.
+   *
+   * Production deliberately passes no `fetchPublic`, so the resolver keeps its
+   * real default. Only the transport is overridable; tiering, validation and
+   * flair resolution always run for real.
+   */
+  protected redditResolverDeps(
+    organizationId: string
+  ): RedditTargetResolverDeps {
+    return {
+      log: (m) => this.logger.debug(m),
+      // What previous publishes observed about each community's posting rules.
+      // Guarded by the same `this._engageRepository` null check the caller
+      // already made.
+      getCapability: (subreddit) =>
+        this._engageRepository!.getRedditChannelCapability(organizationId, subreddit),
+    };
+  }
+
   private async _resolveAndAttachRedditTargets(
     organizationId: string,
     projectId: string,
@@ -1678,17 +1708,7 @@ export class OperationPlanService implements OnApplicationBootstrap {
         llmTitleTag: (post as { titleTag?: string | null }).titleTag ?? null,
       })),
       monitoredChannels,
-      {
-        log: (m) => this.logger.debug(m),
-        // What previous publishes observed about each community's posting
-        // rules. Guarded by the same `this._engageRepository` null check the
-        // caller already made above.
-        getCapability: (subreddit) =>
-          this._engageRepository!.getRedditChannelCapability(
-            organizationId,
-            subreddit
-          ),
-      }
+      this.redditResolverDeps(organizationId)
     );
 
     // Apply resolution: attach the header, or mark the entry for removal.

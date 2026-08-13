@@ -1781,6 +1781,13 @@ export class PostsService {
         ...(settings.subreddit?.[0]?.value?.flairLabel
           ? { flairLabel: settings.subreddit[0].value.flairLabel }
           : {}),
+        // Whether this community was OBSERVED to force flair. Lets the executor
+        // skip a submit that is guaranteed to bounce — see
+        // PublishPostItem.flairRequired. Absent for every other platform, and
+        // absent here too when nothing has been observed.
+        ...(settings.subreddit?.[0]?.value?.flairRequired
+          ? { flairRequired: true }
+          : {}),
         // Dev.to tags. settings.tags holds DevToSettingsDto's {value,label}
         // pairs, where `value` is a dev.to tag id the extension has no use for —
         // dev.to's own API takes tag NAMES — so only the labels cross the

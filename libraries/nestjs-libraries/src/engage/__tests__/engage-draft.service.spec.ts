@@ -114,6 +114,45 @@ describe('EngageDraftService', () => {
       expect(brand3Prompt).toContain('invite the person to try it');
     });
 
+    it('should make the brand mention a hard requirement at the maximum brand strength', () => {
+      const prompt = (service as any)._buildSystemPrompt(
+        'x', 'QUICK_TAKE', 'help_seeking', 3, 260, ['AISEE']
+      );
+      expect(prompt).toContain('hard requirement');
+      expect(prompt).toContain('Brand requirement (non-negotiable)');
+      // The one-sentence strategy cap and the "relevance takes priority" rule must
+      // not read as licence to drop the name.
+      expect(prompt).toContain('add at most one short extra clause or sentence');
+      expect(prompt).toContain('never a reason to leave the name out');
+      // Restated in the final IMPORTANT line alongside the length limit.
+      expect(prompt).toContain('must name "AISEE"');
+    });
+
+    it('should list every mention as an accepted brand name when several are given', () => {
+      const prompt = (service as any)._buildSystemPrompt(
+        'reddit', 'EXPERT_ANSWER', 'discussion', 3, 1000, ['AISEE', 'Postiz']
+      );
+      expect(prompt).toContain('at least one of these names, spelled exactly as written: "AISEE", "Postiz"');
+      expect(prompt).toContain('must name "AISEE" or "Postiz"');
+    });
+
+    it('should not impose a hard brand requirement below the maximum brand strength', () => {
+      const brand2Prompt = (service as any)._buildSystemPrompt(
+        'x', 'EXPERT_ANSWER', 'help_seeking', 2, 260, ['AISEE']
+      );
+      expect(brand2Prompt).toContain('When highly relevant, naturally mention AISEE');
+      expect(brand2Prompt).not.toContain('Brand requirement (non-negotiable)');
+      expect(brand2Prompt).not.toContain('hard requirement');
+    });
+
+    it('should not impose a hard brand requirement when no mentions are provided', () => {
+      const prompt = (service as any)._buildSystemPrompt(
+        'x', 'EXPERT_ANSWER', 'help_seeking', 3, 260, []
+      );
+      expect(prompt).not.toContain('Brand requirement (non-negotiable)');
+      expect(prompt).toContain("you don't need to name any brand");
+    });
+
     it('should build a correct user prompt with author and content', () => {
       const userPrompt = (service as any)._buildUserPrompt(mockOpportunity as EngageOpportunity);
       // Author + content land inside a delimited element (prompt-injection guard).
@@ -478,6 +517,156 @@ describe('EngageDraftService', () => {
       };
 
       await expect(consume()).rejects.toThrow(
+        'Generated Reddit draft exceeded 2000 characters.'
+      );
+      expect(generateRaw).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('Mandatory brand mention (brandStrength = 3)', () => {
+    const xOpportunity: Partial<EngageOpportunity> = {
+      platform: 'x',
+      primaryIntent: 'help_seeking',
+      authorUsername: 'testuser',
+      postContent: 'How do I do X?',
+    };
+    const redditOpportunity: Partial<EngageOpportunity> = {
+      ...xOpportunity,
+      platform: 'reddit',
+    };
+
+    const consume = async (
+      opportunity: Partial<EngageOpportunity>,
+      brandStrength: number,
+      mentions?: string[]
+    ) => {
+      const chunks: string[] = [];
+      for await (const chunk of service.generateDraft(
+        opportunity as EngageOpportunity,
+        'EXPERT_ANSWER',
+        brandStrength,
+        mentions
+      )) {
+        chunks.push(chunk);
+      }
+      return chunks.join('');
+    };
+
+    it('regenerates once when the draft omits the required brand name', async () => {
+      const generateRaw = vi
+        .spyOn(service as any, '_generateRaw')
+        .mockResolvedValueOnce('A helpful reply with no brand in it.')
+        .mockResolvedValueOnce('A helpful reply — AISEE handles this well.');
+
+      expect(await consume(xOpportunity, 3, ['AISEE'])).toBe(
+        'A helpful reply — AISEE handles this well.'
+      );
+      expect(generateRaw).toHaveBeenCalledTimes(2);
+      expect(generateRaw.mock.calls[1][0]).toContain(
+        'Your previous draft left out the required brand name'
+      );
+    });
+
+    it('accepts the first draft when it already names the brand (no retry)', async () => {
+      const generateRaw = vi
+        .spyOn(service as any, '_generateRaw')
+        .mockResolvedValue('Try AISEE for this.');
+
+      expect(await consume(xOpportunity, 3, ['AISEE'])).toBe('Try AISEE for this.');
+      expect(generateRaw).toHaveBeenCalledTimes(1);
+    });
+
+    it('matches the brand name case-insensitively and inside surrounding punctuation', async () => {
+      const generateRaw = vi
+        .spyOn(service as any, '_generateRaw')
+        .mockResolvedValue("@aisee's approach fixes exactly this.");
+
+      expect(await consume(xOpportunity, 3, ['AISEE'])).toBe(
+        "@aisee's approach fixes exactly this."
+      );
+      expect(generateRaw).toHaveBeenCalledTimes(1);
+    });
+
+    it('accepts a draft that names any one of several mentions', async () => {
+      const generateRaw = vi
+        .spyOn(service as any, '_generateRaw')
+        .mockResolvedValue('Postiz solves that scheduling problem.');
+
+      expect(await consume(xOpportunity, 3, ['AISEE', 'Postiz'])).toBe(
+        'Postiz solves that scheduling problem.'
+      );
+      expect(generateRaw).toHaveBeenCalledTimes(1);
+    });
+
+    it('enforces the brand mention on Reddit too', async () => {
+      const generateRaw = vi
+        .spyOn(service as any, '_generateRaw')
+        .mockResolvedValueOnce('Long helpful reply without the brand.')
+        .mockResolvedValueOnce('Long helpful reply that names AISEE.');
+
+      expect(await consume(redditOpportunity, 3, ['AISEE'])).toBe(
+        'Long helpful reply that names AISEE.'
+      );
+      expect(generateRaw).toHaveBeenCalledTimes(2);
+    });
+
+    it('delivers the draft after one failed brand retry instead of failing the generation', async () => {
+      const generateRaw = vi
+        .spyOn(service as any, '_generateRaw')
+        .mockResolvedValue('Still no brand here.');
+
+      expect(await consume(xOpportunity, 3, ['AISEE'])).toBe('Still no brand here.');
+      // Initial attempt + exactly one corrective retry — never an unbounded loop.
+      expect(generateRaw).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not regenerate for a missing brand below the maximum brand strength', async () => {
+      const generateRaw = vi
+        .spyOn(service as any, '_generateRaw')
+        .mockResolvedValue('A helpful reply with no brand in it.');
+
+      expect(await consume(xOpportunity, 2, ['AISEE'])).toBe(
+        'A helpful reply with no brand in it.'
+      );
+      expect(generateRaw).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not regenerate at max brand strength when no mentions were provided', async () => {
+      const generateRaw = vi
+        .spyOn(service as any, '_generateRaw')
+        .mockResolvedValue('A helpful reply with no brand in it.');
+
+      expect(await consume(xOpportunity, 3, [])).toBe(
+        'A helpful reply with no brand in it.'
+      );
+      expect(generateRaw).toHaveBeenCalledTimes(1);
+    });
+
+    it('corrects an over-limit AND brand-less X draft in a single retry', async () => {
+      const generateRaw = vi
+        .spyOn(service as any, '_generateRaw')
+        .mockResolvedValueOnce('x'.repeat(281))
+        .mockResolvedValueOnce('Short reply naming AISEE.');
+
+      expect(await consume(xOpportunity, 3, ['AISEE'])).toBe(
+        'Short reply naming AISEE.'
+      );
+      expect(generateRaw).toHaveBeenCalledTimes(2);
+      // Both corrections ride on the same retry prompt.
+      expect(generateRaw.mock.calls[1][0]).toContain(
+        'Your previous draft exceeded the X character limit'
+      );
+      expect(generateRaw.mock.calls[1][0]).toContain(
+        'Your previous draft left out the required brand name'
+      );
+    });
+
+    it('still throws for an over-limit Reddit draft rather than retrying for the brand', async () => {
+      const generateRaw = vi
+        .spyOn(service as any, '_generateRaw')
+        .mockResolvedValue('r'.repeat(2001));
+
+      await expect(consume(redditOpportunity, 3, ['AISEE'])).rejects.toThrow(
         'Generated Reddit draft exceeded 2000 characters.'
       );
       expect(generateRaw).toHaveBeenCalledTimes(1);

@@ -200,6 +200,51 @@ export class AddMonitoredChannelDto {
   projectId?: string;
 }
 
+// Label only — no flair template id. Nothing that observes a subreddit's
+// picker can see one (see RedditFlairOption), so a modelled `id` would be a
+// field no client could ever populate.
+export class RedditFlairOptionDto {
+  @IsString()
+  @MaxLength(128)
+  label: string;
+}
+
+/**
+ * One observation of what a subreddit requires of a post, reported by the
+ * browser extension after a publish attempt.
+ *
+ * Every field is scraped from Reddit's own submit page, so the lengths and the
+ * array size are enforced HERE rather than trusted downstream: this is the only
+ * boundary between a DOM read in someone's browser and a Json column.
+ *
+ * Omitting a boolean means "this attempt did not observe it" — it is NOT a
+ * claim of false, and the merge preserves whatever was previously learned (see
+ * mergeRedditCapability).
+ */
+export class ReportRedditChannelCapabilityDto {
+  // Bare community name; `r/` prefixes and casing are normalised server-side.
+  @IsString()
+  @MaxLength(64)
+  subreddit: string;
+
+  // A SNAPSHOT of the subreddit's flair picker — it replaces the stored list
+  // rather than merging into it, so a partial read must not be sent.
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(100)
+  @ValidateNested({ each: true })
+  @Type(() => RedditFlairOptionDto)
+  flairs?: RedditFlairOptionDto[];
+
+  @IsOptional()
+  @IsBoolean()
+  flairRequired?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  titleTagRequired?: boolean;
+}
+
 export class UpdateMonitoredChannelDto {
   @IsOptional()
   @IsBoolean()

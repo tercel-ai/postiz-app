@@ -44,6 +44,7 @@
 
 import { ReplyResult } from '@gitroom/extension/utils/reply.types';
 import type { RedditSubmitInput } from '@gitroom/extension/utils/reddit.poster';
+import { reportRedditCapability } from '@gitroom/extension/utils/executor/reddit-capability';
 
 const WWW_REDDIT_BASE = 'https://www.reddit.com';
 const TAB_LOAD_TIMEOUT_MS = 20_000;
@@ -315,6 +316,31 @@ function watchForPublishConfirmation(opts: {
 }
 
 /**
+ * Catch-all flairs to accept when the proposed label matches nothing — tried in
+ * this order, and ONLY as exact whole-text matches like any other label.
+ *
+ * These are not "the nearest-looking option": each one is a bucket a moderator
+ * deliberately created for posts that fit no specific topic, so selecting it
+ * files the post exactly where the subreddit says such posts belong. That is
+ * what makes them safe to pick unattended, and it is also why the list is a
+ * fixed whitelist rather than a positional rule ("the second option") — list
+ * ORDER is mod-configured and meaningless, so an index picks a real topic at
+ * random and mis-files the post on a live public community.
+ *
+ * Ordered most-explicitly-catch-all first. "Question"-style flairs are
+ * deliberately absent: they assert something about the post's content that a
+ * generated post need not satisfy.
+ */
+export const GENERIC_FLAIR_FALLBACKS = [
+  'Other',
+  'Misc',
+  'Miscellaneous',
+  'General',
+  'General Discussion',
+  'Discussion',
+];
+
+/**
  * Runs INSIDE the reddit.com submit page (serialized by executeScript — must be
  * fully self-contained, no outer-scope references). Applies the post flair
  * whose visible text matches `label`.
@@ -338,21 +364,62 @@ function watchForPublishConfirmation(opts: {
  * visually/internally react to the fuller pointer/mouse sequence a real click
  * produces, not the lone event, so `realClick` dispatches the whole sequence.
  *
- * Applies ONLY on exactly one case-insensitive whole-text match. Zero matches
- * or several both return 'no_match' and change nothing — a generated label is
- * a guess, and silently filing a post under the nearest-looking flair on a
- * live public subreddit is worse than leaving the picker to the user, who is
- * being shown this tab anyway.
+ * Matching is by exact case-insensitive whole text, never "nearest-looking" and
+ * never by POSITION in the list: the order of the radios is whatever the mods
+ * configured, carries no meaning, and there is no guaranteed "no flair" entry to
+ * count from — `post-flair-radio-input-0` is already the first real flair. So
+ * picking "the second one" would file a post under an arbitrary topic on a live
+ * public subreddit.
+ *
+ * When `label` matches nothing, `fallbackLabels` is swept in order as a second
+ * chance — see GENERIC_FLAIR_FALLBACKS for what belongs in it and why those are
+ * the only guesses considered safe. Zero matches across both still returns
+ * 'no_match' and changes nothing, leaving the picker to the user, who is being
+ * shown this tab anyway.
  */
-export async function selectRedditFlairInPage(label: string): Promise<{
+export async function selectRedditFlairInPage(
+  label: string,
+  fallbackLabels: string[] = []
+): Promise<{
   status: 'applied' | 'skipped' | 'no_selector' | 'no_options' | 'no_match' | 'not_confirmed';
+  /** The matched option's own label, in Reddit's casing (emoji included). */
   matched?: string;
+  /** True when `matched` came from fallbackLabels rather than from `label`. */
+  viaFallback?: boolean;
+  /**
+   * Every option this subreddit offers, in Reddit's own casing — returned on
+   * EVERY outcome that got as far as reading the picker, not just no_match.
+   * This is the only place a flair list can be read at all (the public API
+   * answers USER_REQUIRED), and the common case is a SUCCESSFUL publish, so
+   * returning it only on failure would never observe most communities.
+   * Casing and emoji are preserved because the consumer feeds these back as
+   * flair labels, where they have to match Reddit's own text exactly.
+   */
   available?: string[];
 }> {
   const norm = (s: string | null | undefined): string =>
     (s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  // Same collapse WITHOUT the lowercasing — what an option actually reads as.
+  const raw = (s: string | null | undefined): string =>
+    (s || '').replace(/\s+/g, ' ').trim();
+  // Flair labels routinely carry decorative emoji/symbols the generated label
+  // never has — verified on r/football, whose options render as "📰News" and
+  // "⇄ Transfer News". Whole-text matching alone therefore misses every such
+  // flair, so `core` is the same text with those glyphs removed, used as a
+  // SECOND pass after exact matching and only when it identifies exactly one
+  // option (see findLabel) — stripping symbols can make two distinct flairs
+  // collide, and an ambiguous core match must not pick either.
+  // ️ = variation selector-16, ‍ = ZWJ: the invisible glue inside a
+  // composed emoji, which would otherwise survive as stray characters.
+  const DECORATION_RE = /[\p{Extended_Pictographic}\p{So}\p{Sk}️‍]/gu;
+  const core = (s: string | null | undefined): string =>
+    norm(s)
+      .replace(DECORATION_RE, '')
+      .replace(/\s+/g, ' ')
+      .trim();
   const want = norm(label);
-  if (!want) return { status: 'skipped' };
+  const fallbacks = (fallbackLabels || []).map(norm).filter(Boolean);
+  if (!want && !fallbacks.length) return { status: 'skipped' };
 
   const findDeep = (
     node: any,
@@ -406,6 +473,21 @@ export async function selectRedditFlairInPage(label: string): Promise<{
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   const isVisible = (el: Element): boolean => (el as HTMLElement).getClientRects().length > 0;
   const textOf = (el: Element): string => norm(el.textContent);
+  const rawTextOf = (el: Element): string => raw(el.textContent);
+  const isFlairRadio = (el: Element): boolean =>
+    el.tagName?.toLowerCase() === 'faceplate-radio-input' &&
+    /^post-flair-radio-input-/.test(el.id || '');
+  const readRadios = (): Element[] => findAllDeep(document.body, isFlairRadio, 0, []);
+  // Every option the picker offers, deduped, in Reddit's own casing.
+  //
+  // Re-reads the DOM rather than mapping a captured array: this value is a
+  // SNAPSHOT that the server REPLACES the stored list with, so a stale or
+  // partial read does not merely miss options, it DELETES known-good ones —
+  // after which the resolver drops any generated flair label that is no longer
+  // in the (shorter) cached set, and posts to that subreddit fall back to the
+  // manual hand-off this whole path exists to avoid.
+  const availableOptions = (): string[] =>
+    Array.from(new Set(readRadios().map(rawTextOf))).filter(Boolean).slice(0, 100);
 
   const trigger = findDeep(document.body, (el) => el.id === 'reddit-post-flair-button', 0);
   if (!trigger) return { status: 'no_selector' };
@@ -413,50 +495,100 @@ export async function selectRedditFlairInPage(label: string): Promise<{
 
   let radios: Element[] = [];
   for (let i = 0; i < 20; i++) {
-    radios = findAllDeep(
-      document.body,
-      (el) => el.tagName?.toLowerCase() === 'faceplate-radio-input' && /^post-flair-radio-input-/.test(el.id || ''),
-      0,
-      []
-    );
+    radios = readRadios();
     if (radios.length) break;
     await sleep(150);
   }
   if (!radios.length) return { status: 'no_options' };
 
-  let match = radios.find((r) => textOf(r) === want && isVisible(r));
-  if (!match) {
-    // The compact view only shows a handful of flairs — expand to the full
-    // list before giving up (verified: Discussion sat outside the compact
-    // list on both subreddits tested).
-    //
-    // Re-checks the ALREADY-CAPTURED `radios`, which relies on expanding
-    // toggling visibility on the same elements rather than re-rendering new
-    // ones — verified on the real page (post-flair-radio-input-3 was already
-    // in the DOM, zero-sized, before expanding, and kept its id after). If
-    // Reddit ever switches to re-rendering, this silently stops matching, so
-    // the no_match branch below stays the safe default rather than a guess.
-    const viewAll = findDeep(document.body, (el) => el.id === 'view-all-flairs-button', 0);
-    if (viewAll) {
-      realClick(viewAll);
-      for (let i = 0; i < 20 && !match; i++) {
-        await sleep(150);
-        match = radios.find((r) => textOf(r) === want && isVisible(r));
+  // Exact whole-text first; only if that finds nothing, retry ignoring
+  // decorative glyphs, and only when EXACTLY ONE option survives that
+  // comparison — "News" must never resolve against both "📰News" and "News"
+  // rather than picking one at random. `isVisible` is required because the
+  // result gets CLICKED, and a zero-sized element does not reliably take one.
+  const findLabel = (w: string): Element | undefined => {
+    if (!w) return undefined;
+    const exact = radios.find((r) => textOf(r) === w && isVisible(r));
+    if (exact) return exact;
+    const c = core(w);
+    if (!c) return undefined;
+    const hits = radios.filter((r) => core(textOf(r)) === c && isVisible(r));
+    return hits.length === 1 ? hits[0] : undefined;
+  };
+
+  // The proposed label and the catch-all sweep are tracked SEPARATELY, each
+  // latching the first hit it sees. Collapsing them into one "first candidate
+  // wins" probe would let the compact view decide the outcome: a catch-all that
+  // happens to render immediately would beat the exact label the caller asked
+  // for, purely because the latter needed the expansion to become visible.
+  let exact: Element | undefined;
+  let fallback: Element | undefined;
+  const probe = (): void => {
+    if (!exact) exact = findLabel(want);
+    if (!fallback) {
+      for (const f of fallbacks) {
+        const hit = findLabel(f);
+        if (hit) {
+          fallback = hit;
+          break;
+        }
       }
     }
+  };
+  // Nothing better can arrive once the exact label is in hand; with no label
+  // proposed, a catch-all is already the best possible outcome.
+  const settled = (): boolean => !!exact || (!want && !!fallback);
+
+  // Expand to the FULL option list, then poll until something usable shows up.
+  //
+  // Both halves used to be wrong. Expansion ran only after the PROPOSED label
+  // failed to match, so whenever it hit in the compact view — the common case
+  // — nothing expanded and `available` reported a subset. And the settle polled
+  // for that one label (`if (match || !want) break`), so the catch-all sweep and
+  // every no-label run got a single 150 ms pass where the same visibility
+  // transition otherwise had twenty; a catch-all outside the compact list was
+  // routinely missed and the post was parked on a human.
+  //
+  // Note what is NOT used as the exit condition: a stable option COUNT. It reads
+  // like a "rendering finished" signal and is not one — a picker whose reveal
+  // lands after two quiet polls is indistinguishable from a picker that is done,
+  // and guessing wrong truncates the snapshot. Polling for a usable candidate
+  // has no such ambiguity, and the same 20 x 150 ms cap bounds the wait.
+  probe();
+  const viewAll = findDeep(document.body, (el) => el.id === 'view-all-flairs-button', 0);
+  if (viewAll) {
+    realClick(viewAll);
+    for (let i = 0; i < 20 && !settled(); i++) {
+      await sleep(150);
+      radios = readRadios();
+      probe();
+    }
+  } else if (!settled()) {
+    // No expander: the picker renders everything at once, but the poll above can
+    // win the race against the first paint, so give it one settle pass.
+    await sleep(150);
+    radios = readRadios();
+    probe();
   }
+
+  // Exact always wins, even when a catch-all was latched several polls earlier.
+  let match = exact ?? fallback;
+  const viaFallback = !exact && !!fallback;
+
   if (!match) {
-    return {
-      status: 'no_match',
-      available: Array.from(new Set(radios.map(textOf))).filter(Boolean).slice(0, 20),
-    };
+    return { status: 'no_match', available: availableOptions() };
   }
 
   realClick(match);
   await sleep(150);
 
   const addBtn = findDeep(document.body, (el) => el.id === 'post-flair-modal-apply-button', 0);
-  if (!addBtn) return { status: 'no_selector', matched: textOf(match) };
+  if (!addBtn)
+    return {
+      status: 'no_selector',
+      matched: rawTextOf(match),
+      available: availableOptions(),
+    };
   realClick(addBtn);
   await sleep(200);
 
@@ -465,9 +597,19 @@ export async function selectRedditFlairInPage(label: string): Promise<{
   // is already set the moment an option is clicked) is the real signal.
   const modal = findDeep(document.body, (el) => el.tagName?.toLowerCase() === 'r-post-flairs-modal', 0) as any;
   if (modal && modal.flairId) {
-    return { status: 'applied', matched: textOf(match) };
+    return {
+      status: 'applied',
+      matched: rawTextOf(match),
+      viaFallback,
+      available: availableOptions(),
+    };
   }
-  return { status: 'not_confirmed', matched: textOf(match) };
+  return {
+    status: 'not_confirmed',
+    matched: rawTextOf(match),
+    viaFallback,
+    available: availableOptions(),
+  };
 }
 
 /**
@@ -535,9 +677,37 @@ export function clickRedditPostInPage(): {
 }
 
 /**
+ * Whether an unattended Post click is worth attempting, given what the flair
+ * pass achieved and which rule (if any) bounced this post here in the first
+ * place. Pure so it can be tested without a browser; the tab still defers to
+ * Reddit's own disabled-button check on top of this.
+ *
+ * "No flair was proposed" only means "nothing to satisfy" on the captcha route.
+ * When a FLAIR_REQUIRED rejection is what routed the post here, the subreddit
+ * has already refused this exact submission once, and there is frequently no
+ * escape hatch to click: a custom flair set need not include a "no flair"
+ * option at all, so nothing this module can pick unattended will clear the
+ * rule. A required title tag is stronger still — applyTitleTag folds the tag
+ * into the title upstream, so a rejection means none was ever proposed and the
+ * tab cannot invent one. Both hand straight over to the user rather than burn
+ * the confirm window on a click Reddit is guaranteed to reject.
+ */
+export function canAutoSubmitReddit(state: {
+  flairProposed: boolean;
+  /** Flair OBSERVED to commit, not merely clicked (selectRedditFlairInPage). */
+  flairApplied: boolean;
+  postRule?: { flairRequired: boolean; titleTagRequired: boolean };
+}): boolean {
+  if (state.postRule?.titleTagRequired) return false;
+  if (state.postRule?.flairRequired) return state.flairApplied;
+  return !state.flairProposed || state.flairApplied;
+}
+
+/**
  * Open reddit.com's submit page prefilled for this post, best-effort
  * pre-select the flair, then attempt a fully unattended publish — but ONLY
- * when nothing is left unconfirmed:
+ * when nothing is left unconfirmed (see canAutoSubmitReddit):
+ *   - no rule bounced the post here that the tab cannot satisfy, AND
  *   - no flair was proposed, or the one proposed was OBSERVED to commit
  *     (selectRedditFlairInPage's `applied`, not merely attempted), AND
  *   - Reddit's own Post button reports enabled (its own guard against a
@@ -617,30 +787,81 @@ export async function submitRedditPostViaTab(
     // (with its full option list and rule text) is right there if this can't
     // confirm a match on its own.
     let flairNote = '';
-    let flairConfirmed = !input.flairLabel; // nothing to confirm when none was proposed
-    if (input.flairLabel) {
+    let flairApplied = false;
+    let observedFlairs: string[] = [];
+    // Run the picker whenever there is anything to pick: a proposed label, or —
+    // even with none — a subreddit that already rejected this post for a missing
+    // flair, where a catch-all option is the difference between publishing and
+    // parking the post on a human.
+    if (input.flairLabel || input.postRule?.flairRequired) {
       try {
         const [flaired] = await chrome.scripting.executeScript({
           target: { tabId },
           func: selectRedditFlairInPage,
-          args: [input.flairLabel],
+          args: [input.flairLabel || '', GENERIC_FLAIR_FALLBACKS],
         });
         const result = flaired?.result;
         console.log('[aisee][reddit] flair selection', {
           subreddit,
-          wanted: input.flairLabel,
+          wanted: input.flairLabel || null,
           ...(result || {}),
         });
         if (result?.status === 'applied') {
-          flairNote = ` (flair "${result.matched}" pre-selected)`;
-          flairConfirmed = true;
+          flairNote = result.viaFallback
+            ? ` (no flair matched "${input.flairLabel ?? ''}"; fell back to this subreddit's catch-all flair "${result.matched}")`
+            : ` (flair "${result.matched}" pre-selected)`;
+          flairApplied = true;
+        } else if (result?.status === 'no_match' && result.available?.length) {
+          // The proposed label is not in this subreddit's own set — custom flair
+          // sets are per-community, so a generated label routinely misses. Name
+          // the real options in the hand-off rather than leaving the user to
+          // rediscover them: this is the note they act on.
+          flairNote = input.flairLabel
+            ? ` (flair "${input.flairLabel}" isn't offered here, and no catch-all flair either — pick one of: ${result.available.join(', ')})`
+            : ` (this subreddit offers no catch-all flair — pick one of: ${result.available.join(', ')})`;
         }
+        observedFlairs = result?.available ?? [];
       } catch (e) {
         console.warn('[aisee][reddit] flair selection threw', e);
       }
     }
 
-    if (flairConfirmed) {
+    // Cache what this subreddit requires, for the next post that targets it.
+    // Fire-and-forget by design: this tab exists to publish, and an observation
+    // is worth exactly one fewer manual flair pick later — never worth delaying
+    // or failing a publish for. The flair list is reported on EVERY outcome
+    // that read the picker, success included, since success is the common case
+    // and this is the only place the list can be read at all.
+    void reportRedditCapability({
+      subreddit,
+      ...(observedFlairs.length ? { flairs: observedFlairs } : {}),
+      // Each rule is reported ONLY when Reddit actually cited it. `postRule` is
+      // a struct of two REQUIRED booleans (redditPostRuleFromErrors runs one
+      // regex per rule), so the rule that was not cited comes back `false` —
+      // an unobserved negative. Forwarding that erased a `flairRequired: true`
+      // learned from an earlier real rejection, because the server cannot tell
+      // an unobserved `false` from an observed one: a subreddit enforcing both
+      // a flair and a title tag rejects on one at a time, so a title-tag-only
+      // bounce was enough to lose the flair requirement.
+      ...(input.postRule?.flairRequired ? { flairRequired: true as const } : {}),
+      ...(input.postRule?.titleTagRequired
+        ? { titleTagRequired: true as const }
+        : {}),
+    });
+    if (!flairApplied && input.postRule?.flairRequired && !flairNote) {
+      flairNote = ' (this subreddit requires a post flair — pick one in the tab)';
+    }
+    if (input.postRule?.titleTagRequired) {
+      flairNote += ' (this subreddit requires a tag in the title)';
+    }
+
+    if (
+      canAutoSubmitReddit({
+        flairProposed: !!input.flairLabel,
+        flairApplied,
+        ...(input.postRule ? { postRule: input.postRule } : {}),
+      })
+    ) {
       // Armed BEFORE the click so a fast redirect can't land in the gap
       // between executeScript returning and a listener attaching.
       const watch = watchForPublishConfirmation({
@@ -679,6 +900,13 @@ export async function submitRedditPostViaTab(
         // threw) — release the listeners rather than leave them attached.
         watch.cancel();
       }
+    } else {
+      console.log('[aisee][reddit] auto post-click skipped', {
+        subreddit,
+        flairProposed: !!input.flairLabel,
+        flairApplied,
+        postRule: input.postRule,
+      });
     }
 
     await focusTab(tabId);

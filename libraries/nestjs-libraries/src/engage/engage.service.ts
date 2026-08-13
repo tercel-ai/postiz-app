@@ -40,6 +40,7 @@ import {
   AddKeywordDto,
   AddKeywordsBulkDto,
   AddMonitoredChannelDto,
+  ReportRedditChannelCapabilityDto,
   AddTrackedAccountDto,
   ConfirmManualReplyDto,
   ListOpportunitiesDto,
@@ -671,6 +672,32 @@ export class EngageService implements OnApplicationBootstrap {
       org.id,
       dto
     );
+  }
+
+  /**
+   * Record what the extension observed about a subreddit's posting rules while
+   * publishing there.
+   *
+   * Deliberately not gated on entitlements or on the subreddit being monitored:
+   * it writes no new rows (see recordRedditChannelCapability) and only enriches
+   * ones this org already has, so there is nothing to meter. `updated: 0` is a
+   * normal answer, not an error — the extension reports after every publish and
+   * cannot know whether this org monitors the community it just posted to.
+   */
+  async reportRedditChannelCapability(
+    org: Organization,
+    dto: ReportRedditChannelCapabilityDto
+  ) {
+    return this._engageRepository.recordRedditChannelCapability(org.id, dto.subreddit, {
+      ...(dto.flairs ? { flairs: dto.flairs } : {}),
+      ...(typeof dto.flairRequired === 'boolean'
+        ? { flairRequired: dto.flairRequired }
+        : {}),
+      ...(typeof dto.titleTagRequired === 'boolean'
+        ? { titleTagRequired: dto.titleTagRequired }
+        : {}),
+      source: 'extension',
+    });
   }
 
   async updateMonitoredChannel(

@@ -3,8 +3,10 @@ import {
   isRedditCaptchaError,
   isRedditPostRuleError,
   parseRedditSubmitResponse,
+  redditPostRuleFromErrors,
   toAbsoluteRedditUrl,
 } from '../reddit.poster';
+import { canAutoSubmitReddit } from '../../pages/background/reddit.submit.tab';
 
 describe('parseRedditSubmitResponse', () => {
   it('extracts url and fullname from an api_type=json submit response', () => {
@@ -181,6 +183,105 @@ describe('isRedditPostRuleError', () => {
       isRedditPostRuleError([
         ['BAD_CAPTCHA', "That was a tricky one. Why don't you try that again.", 'captcha'],
       ])
+    ).toBe(false);
+  });
+});
+
+describe('redditPostRuleFromErrors', () => {
+  it('reports flair and title-tag rules separately on the real r/machinelearning rejection', () => {
+    expect(redditPostRuleFromErrors(FLAIR_AND_TAG_REQUIRED_ERRORS)).toEqual({
+      flairRequired: true,
+      titleTagRequired: true,
+    });
+  });
+
+  it('reports a flair-only rejection', () => {
+    expect(
+      redditPostRuleFromErrors([
+        ['SUBMIT_VALIDATION_FLAIR_REQUIRED', 'Your post must contain post flair.', 'flair'],
+      ])
+    ).toEqual({ flairRequired: true, titleTagRequired: false });
+  });
+
+  it('reports a title-tag-only rejection', () => {
+    expect(
+      redditPostRuleFromErrors([
+        ['POST_GUIDANCE_VALIDATION_FAILED', 'Please add a required tag to your title', 'title'],
+      ])
+    ).toEqual({ flairRequired: false, titleTagRequired: true });
+  });
+
+  it('reports neither for unrelated errors', () => {
+    expect(
+      redditPostRuleFromErrors([['RATELIMIT', 'you are doing that too much', 'ratelimit']])
+    ).toEqual({ flairRequired: false, titleTagRequired: false });
+  });
+});
+
+describe('canAutoSubmitReddit', () => {
+  // The captcha route carries no postRule: the pre-existing behaviour there is
+  // "nothing proposed = nothing to confirm", and must not regress.
+  it('allows an unattended click when no flair was proposed and no rule bounced the post', () => {
+    expect(
+      canAutoSubmitReddit({ flairProposed: false, flairApplied: false })
+    ).toBe(true);
+  });
+
+  it('blocks when a flair was proposed but never observed to commit', () => {
+    expect(
+      canAutoSubmitReddit({ flairProposed: true, flairApplied: false })
+    ).toBe(false);
+  });
+
+  it('allows when the proposed flair was observed to commit', () => {
+    expect(
+      canAutoSubmitReddit({ flairProposed: true, flairApplied: true })
+    ).toBe(true);
+  });
+
+  // The case this exists for: a subreddit whose custom flair set has no "no
+  // flair" option. Nothing is proposed, nothing can be picked unattended, and
+  // Reddit already rejected this exact submission once — clicking Post again
+  // only burns the confirm window before the same hand-off.
+  it('blocks a flair-required subreddit when no flair was proposed', () => {
+    expect(
+      canAutoSubmitReddit({
+        flairProposed: false,
+        flairApplied: false,
+        postRule: { flairRequired: true, titleTagRequired: false },
+      })
+    ).toBe(false);
+  });
+
+  it('blocks a flair-required subreddit when the proposed label matched nothing', () => {
+    expect(
+      canAutoSubmitReddit({
+        flairProposed: true,
+        flairApplied: false,
+        postRule: { flairRequired: true, titleTagRequired: false },
+      })
+    ).toBe(false);
+  });
+
+  it('allows a flair-required subreddit once the flair actually committed', () => {
+    expect(
+      canAutoSubmitReddit({
+        flairProposed: true,
+        flairApplied: true,
+        postRule: { flairRequired: true, titleTagRequired: false },
+      })
+    ).toBe(true);
+  });
+
+  // applyTitleTag folds the tag in upstream, so a rejection means none was ever
+  // proposed — a committed flair does not make the post publishable.
+  it('blocks a title-tag rejection even when the flair committed', () => {
+    expect(
+      canAutoSubmitReddit({
+        flairProposed: true,
+        flairApplied: true,
+        postRule: { flairRequired: true, titleTagRequired: true },
+      })
     ).toBe(false);
   });
 });

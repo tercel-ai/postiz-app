@@ -266,6 +266,7 @@ async function defaultPublishSegment(
       text,
       images: segment?.images,
       ...(item.flairLabel ? { flairLabel: item.flairLabel } : {}),
+      ...(item.flairRequired ? { flairRequired: true } : {}),
     });
     if (!r.ok) return { ok: false, error: r.error };
     // pending = the captcha-fallback tab was surfaced but Reddit's own Post
@@ -1002,6 +1003,7 @@ async function drain(): Promise<void> {
       persist();
       emit(entry);
       trimSettled();
+      reportPublishFailure(entry);
     }
   }
 }

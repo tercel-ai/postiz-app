@@ -273,6 +273,41 @@ export interface RedditSubmitInput {
    * ignores it and lets a flair-required rejection route to the tab.
    */
   flairLabel?: string;
+  /**
+   * Which posting rule /api/submit rejected this post for, when the tab path is
+   * being entered as that rejection's fallback. Absent on a first-choice tab
+   * submit and on the captcha fallback.
+   *
+   * The tab needs this to know whether an unattended Post click has any chance:
+   * a subreddit that demands a flair will reject the click just as the API did,
+   * and many custom flair sets offer no "no flair" option to fall back on, so
+   * there is nothing to satisfy the rule with — see canAutoSubmitReddit.
+   */
+  postRule?: RedditPostRule;
+  /**
+   * True when this community was OBSERVED to reject a flair-less post (see
+   * PublishPostItem.flairRequired). Absent means "not observed", never "flair
+   * is optional".
+   *
+   * When set, the blind /api/submit below is SKIPPED entirely: it carries no
+   * flair, so the rejection is certain, and the current code pays for it twice
+   * — the retry on line ~462 clears the session cache and re-submits before
+   * anything reads the error. Going straight to the tab also lets the picker
+   * pre-select from the cached option set and publish unattended.
+   *
+   * A stale `true` (mods dropped the requirement) costs a tab where an API call
+   * would have done; the post still publishes. That is the deliberate trade —
+   * the reverse mistake costs two doomed submits on every single post.
+   */
+  flairRequired?: boolean;
+}
+
+/** Which posting rule(s) a /api/submit rejection was about. */
+export interface RedditPostRule {
+  /** SUBMIT_VALIDATION_FLAIR_REQUIRED — the subreddit demands a post flair. */
+  flairRequired: boolean;
+  /** POST_GUIDANCE_VALIDATION_FAILED — the title needs a bracketed tag. */
+  titleTagRequired: boolean;
 }
 
 /**
@@ -326,24 +361,38 @@ export function isRedditCaptchaError(errors: unknown[]): boolean {
 }
 
 /**
- * True when /api/submit rejected the post for a subreddit posting rule the API
- * cannot satisfy blind: a required post flair (SUBMIT_VALIDATION_FLAIR_REQUIRED)
- * or a required title tag (POST_GUIDANCE_VALIDATION_FAILED — e.g.
- * r/MachineLearning demanding [R]/[N]/[P]/[D]).
+ * Which subreddit posting rule(s) a /api/submit error list was rejected for.
+ * Both rules need a CHOICE from the subreddit's own option set, and picking
+ * wrong mis-files a post on a live public community — so, exactly like a
+ * captcha, either one is the signal to fall back to the browser-assisted submit
+ * tab, where Reddit renders its own flair picker and rule text and the user
+ * makes the call.
  *
- * Both need a CHOICE from the subreddit's own option set, and picking wrong
- * mis-files a post on a live public community. So, exactly like a captcha, this
- * is the signal to fall back to the browser-assisted submit tab, where Reddit
- * renders its own flair picker and rule text and the user makes the call.
- * Exported for tests.
+ * They are reported separately rather than as one boolean because the tab can
+ * only ever satisfy the flair one on its own (and only when the proposed label
+ * matches a real option) — a required title tag is folded into the title
+ * upstream by applyTitleTag, so a rejection for it means no valid tag was ever
+ * proposed and nothing downstream can invent one. Exported for tests.
+ */
+export function redditPostRuleFromErrors(errors: unknown[]): RedditPostRule {
+  const matches = (re: RegExp): boolean =>
+    errors.some((e) => {
+      const parts = Array.isArray(e) ? e.map(String) : [String(e)];
+      return parts.some((p) => re.test(p));
+    });
+  return {
+    flairRequired: matches(/FLAIR_REQUIRED/i),
+    titleTagRequired: matches(/POST_GUIDANCE_VALIDATION_FAILED/i),
+  };
+}
+
+/**
+ * True when /api/submit rejected the post for either posting rule above — the
+ * "route this to the tab" predicate. Exported for tests.
  */
 export function isRedditPostRuleError(errors: unknown[]): boolean {
-  return errors.some((e) => {
-    const parts = Array.isArray(e) ? e.map(String) : [String(e)];
-    return parts.some((p) =>
-      /FLAIR_REQUIRED|POST_GUIDANCE_VALIDATION_FAILED/i.test(p)
-    );
-  });
+  const rule = redditPostRuleFromErrors(errors);
+  return rule.flairRequired || rule.titleTagRequired;
 }
 
 /** POST one self-post submission with a given session; returns response + errors. */
@@ -423,6 +472,21 @@ export async function submitRedditPost(
   }
   const effectiveInput = { ...input, text: body };
 
+  // Known-flair-required communities never get the blind submit: it cannot
+  // carry a flair, so it is a guaranteed rejection, and the retry below would
+  // pay for it a second time before any code reads the error.
+  if (input.flairRequired) {
+    return submitRedditPostViaTab({
+      subreddit,
+      title,
+      text: body,
+      ...(input.flairLabel ? { flairLabel: input.flairLabel } : {}),
+      // Shaped like a live rejection because that is exactly what it stands in
+      // for: it gates the picker and canAutoSubmitReddit identically.
+      postRule: { flairRequired: true, titleTagRequired: false },
+    });
+  }
+
   try {
     let { data, errors } = await submitOnce(effectiveInput, session);
 
@@ -442,12 +506,22 @@ export async function submitRedditPost(
       //     renders next to the prefilled form.
       // The tab keeps watching for the user's Post click, so finishing there
       // still returns a confirmed permalink and flips the DB row PUBLISHED.
-      if (isRedditCaptchaError(errors) || isRedditPostRuleError(errors)) {
+      const postRule = redditPostRuleFromErrors(errors);
+      if (
+        isRedditCaptchaError(errors) ||
+        postRule.flairRequired ||
+        postRule.titleTagRequired
+      ) {
         return submitRedditPostViaTab({
           subreddit,
           title,
           text: body,
           ...(input.flairLabel ? { flairLabel: input.flairLabel } : {}),
+          // Carried through so the tab doesn't attempt an unattended Post click
+          // against a rule it has nothing to satisfy — see canAutoSubmitReddit.
+          ...(postRule.flairRequired || postRule.titleTagRequired
+            ? { postRule }
+            : {}),
         });
       }
       return {

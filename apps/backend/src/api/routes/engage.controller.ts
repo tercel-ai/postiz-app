@@ -37,6 +37,7 @@ import {
   AddKeywordDto,
   AddKeywordsBulkDto,
   AddMonitoredChannelDto,
+  ReportRedditChannelCapabilityDto,
   AddTrackedAccountDto,
   ConfirmManualReplyDto,
   DashboardImpressionsDto,
@@ -358,6 +359,26 @@ export class EngageController {
   ) {
     return this._engageService.removeMonitoredChannel(org, id);
   }
+
+  @ApiOperation({
+    summary: "Report a subreddit's observed posting rules (flair options, flair/tag required)",
+    description:
+      "Reddit's flair endpoints answer USER_REQUIRED to unauthenticated callers and this deployment has no Reddit API credentials, so a flair list can only be read where Reddit renders it: the extension's submit tab. This is that observation coming back. Returns updated:0 when the org does not monitor the subreddit — no row is created for a cache.",
+  })
+  @Post('/monitored-channels/reddit/capability')
+  reportRedditChannelCapability(
+    @GetOrgFromRequest() org: Organization,
+    @Body() body: ReportRedditChannelCapabilityDto
+  ) {
+    return this._engageService.reportRedditChannelCapability(org, body);
+  }
+
+  // There is deliberately no GET counterpart. The capability record has exactly
+  // one reader — the operation-plan resolver, which calls the repository
+  // directly (operation-plan.service.ts -> getRedditChannelCapability) and never
+  // crosses HTTP. A read route existed briefly with no caller anywhere in the
+  // repo; add one back when a UI actually needs to show a subreddit's known
+  // flair set, and validate `subreddit` at the boundary when you do.
 
   @ApiOperation({ summary: 'Search for channels to add (e.g. Reddit subreddit search)' })
   @Post('/monitored-channels/search')

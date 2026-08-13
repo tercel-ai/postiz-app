@@ -231,6 +231,23 @@ export interface PublishPostItem {
    */
   flairLabel?: string;
   /**
+   * Reddit only (optional): true when this community was OBSERVED to reject a
+   * post that carried no flair. Absent means "not observed", never "flair is
+   * optional" — nothing outside a logged-in session can ask Reddit whether a
+   * flair is required, so the only source is a real rejection the extension saw
+   * and reported back.
+   *
+   * The executor uses it to skip the blind /api/submit, which for such a
+   * community is guaranteed to be rejected and currently costs two submits plus
+   * a forced session refresh (the poster retries once on any error before it
+   * reads the rejection), and to open Reddit's own submit page directly.
+   *
+   * It rides here rather than in the settings DTO's `is_flair_required` because
+   * that field makes `flair: {id, name}` conditionally required and a flair id
+   * is unreadable without OAuth — see ResolvedRedditTarget.is_flair_required.
+   */
+  flairRequired?: boolean;
+  /**
    * Dev.to only: topic tag names (no `#`), max 4. Dev.to distributes through
    * tag feeds, so these are not decoration — dropping them silently, the way a
    * text-only platform drops images, would quietly gut the post's reach. The
