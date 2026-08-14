@@ -1,0 +1,12 @@
+# Project-level Codex overrides for postiz-app.
+# Loaded automatically for any `codex` session run inside this repo
+# (does not affect ~/.codex/config.toml or other projects).
+
+default_permissions = "postiz-app"
+
+[permissions.postiz-app.filesystem]
+":minimal" = "read"
+
+[permissions.postiz-app.filesystem.":workspace_roots"]
+"." = "write"
+"apps/extension/**" = "deny"

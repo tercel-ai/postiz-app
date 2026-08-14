@@ -11,7 +11,7 @@ import { RedditSettingsDto } from '@gitroom/nestjs-libraries/dtos/posts/provider
 import { timer } from '@gitroom/helpers/utils/timer';
 import dayjs from 'dayjs';
 import { groupBy } from 'lodash';
-import { SocialAbstract } from '@gitroom/nestjs-libraries/integrations/social.abstract';
+import { RefreshToken, SocialAbstract } from '@gitroom/nestjs-libraries/integrations/social.abstract';
 import { lookup } from 'mime-types';
 import axios from 'axios';
 import WebSocket from 'ws';
@@ -750,6 +750,11 @@ export class RedditProvider extends SocialAbstract implements SocialProvider {
       if (comment_karma !== undefined) result.commentKarma = comment_karma;
       return Object.keys(result).length > 0 ? result : null;
     } catch (err) {
+      // A dead token surfaces as RefreshToken (SocialAbstract.fetch turns a 401
+      // into one). Let it through so the caller can refresh reactively and flag
+      // the channel for reconnect; swallowing it freezes this account's metrics
+      // until the proactive expiry cron eventually catches up.
+      if (err instanceof RefreshToken) throw err;
       console.error('Error fetching Reddit account metrics:', err);
       return null;
     }

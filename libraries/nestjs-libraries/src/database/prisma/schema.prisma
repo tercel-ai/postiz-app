@@ -637,6 +637,10 @@ model OperationPlan {
   billingTransactionId String?
   creditAmount         String?
   errorCode            String?
+  /// Human-readable reason for the terminal failure, surfaced by getOverview so
+  /// the plan page can tell the user WHAT failed instead of just "failed".
+  /// Provider/LLM message only (never a stack), truncated at write time.
+  errorMessage         String?
   createdAt            DateTime            @default(now())
   updatedAt            DateTime            @updatedAt
 

@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import {
   AiseeClient,
   AiseeBusinessType,
@@ -250,8 +251,12 @@ export class AiseeCreditService {
         costItems,
       };
     }
+    // No transactionId ⇒ the charge never completed, so this IS the retry this
+    // method exists for. Say so explicitly: the row is already there, and the
+    // duplicate-taskId default would otherwise read it as "already billed",
+    // return a skipped response, and leave the work permanently unbillable.
     return {
-      deduction: await this.deductWithItems(opts, costItems, true),
+      deduction: await this.deductWithItems(opts, costItems, true, true),
       costItems,
     };
   }
@@ -493,11 +498,19 @@ export class AiseeCreditService {
    * 1. Create local BillingRecord — always, regardless of billing mode
    * 2. If BILL_TYPE=internal: set status='internal', skip Aisee call
    * 3. If BILL_TYPE=third: call Aisee deductCredits(), update record, confirm
+   *
+   * `retryUnbilledTask` inverts the duplicate-taskId default for the ONE caller
+   * that already knows the previous attempt never took the money
+   * (reconcileAwaitedDeduction, which only re-deducts a row with no
+   * transactionId). Without it the conservative default — "a row exists, assume
+   * it was billed" — would permanently defeat that retry; see
+   * resolveDuplicateTask.
    */
   private async deductWithItems(
     opts: AiseeCreditExecOptions,
     costItems: AiseeCostItem[],
-    awaitConfirmation = false
+    awaitConfirmation = false,
+    retryUnbilledTask = false
   ): Promise<AiseeDeductResponse> {
     const totalAmount = this.sumDecimalStrings(
       costItems.map((item) => item.amount)
@@ -512,6 +525,13 @@ export class AiseeCreditService {
     );
 
     // Step 1: Create local BillingRecord — always created for unified tracking.
+    //
+    // `taskId` is unique, and for callers that derive it deterministically from
+    // the billed entity (post overage → `postiz_post_overage_<postId>`) it is the
+    // ONLY idempotency guard: re-saving the same post calls straight back in here
+    // with the same taskId. A P2002 therefore means "this task was already
+    // billed" — falling through would charge the user a SECOND time on Aisee with
+    // no local record to show for it, so short-circuit instead.
     let recordId: string | undefined;
     try {
       const record = await this._billingRecord.model.billingRecord.create({
@@ -530,10 +550,27 @@ export class AiseeCreditService {
       });
       recordId = record.id;
     } catch (dbErr) {
-      this.logger.error(
-        `Failed to create BillingRecord for task=${opts.taskId}, proceeding:`,
-        dbErr
-      );
+      if (
+        dbErr instanceof Prisma.PrismaClientKnownRequestError &&
+        dbErr.code === 'P2002'
+      ) {
+        const replay = await this.resolveDuplicateTask(
+          opts.taskId,
+          totalAmount,
+          costItems,
+          internal,
+          retryUnbilledTask
+        );
+        if (replay.alreadyBilled) {
+          return { success: true, skipped: true };
+        }
+        recordId = replay.recordId;
+      } else {
+        this.logger.error(
+          `Failed to create BillingRecord for task=${opts.taskId}, proceeding:`,
+          dbErr
+        );
+      }
     }
 
     // Step 2: Internal billing — record created, no Aisee call needed
@@ -593,6 +630,100 @@ export class AiseeCreditService {
     }
 
     return deduction;
+  }
+
+  /**
+   * A BillingRecord already exists for this taskId (unique-constraint hit).
+   * Decide whether the caller is replaying work that was already billed or
+   * retrying a charge that never took the money.
+   *
+   * DEFAULT (`retryUnbilled = false`) — the caller cannot tell the two apart, so
+   * only `failed` retries. Everything else, `pending` included, counts as billed:
+   * a pending row is an in-flight or crashed sibling, and for the callers that
+   * derive taskId from an entity (post overage, re-saved on every edit)
+   * double-charging is worse than leaving a stale row behind.
+   *
+   * `retryUnbilled = true` — the caller has ALREADY established that no money
+   * moved (reconcileAwaitedDeduction only re-deducts a row with no
+   * transactionId). Here the conservative default is the dangerous one: it would
+   * return "already billed" for a row that was never charged, and since the
+   * taskId stays occupied the work could never be billed by any later attempt.
+   * So only the statuses that genuinely owe nothing — `success`, `skipped`,
+   * `internal` — stop the charge; `failed`, `pending` and an unreadable row all
+   * proceed. Charging twice is not a risk here: taskId is Aisee's idempotency
+   * key, which is exactly what this path relied on before the duplicate branch
+   * existed.
+   */
+  private async resolveDuplicateTask(
+    taskId: string,
+    totalAmount: string,
+    costItems: AiseeCostItem[],
+    internal: boolean,
+    retryUnbilled: boolean
+  ): Promise<{ alreadyBilled: boolean; recordId?: string }> {
+    const existing = await this._billingRecord.model.billingRecord
+      .findUnique({ where: { taskId } })
+      .catch((err: unknown) => {
+        this.logger.error(`Duplicate billing task=${taskId}: lookup failed:`, err);
+        return null;
+      });
+
+    const status = existing?.status ?? null;
+    // Terminal states that can never owe a charge, whichever mode we are in.
+    const settled = status === 'success' || status === 'skipped' || status === 'internal';
+    const retryable = retryUnbilled ? !settled : status === 'failed';
+
+    if (!retryable) {
+      if (status === null) {
+        // Not the same event as a benign replay, and it is the branch that can
+        // actually leave real work uncharged — so it must be greppable on its
+        // own rather than hidden inside the "already billed" line that fires
+        // constantly in normal operation.
+        this.logger.error(
+          `Duplicate billing task=${taskId}: state unknown (record unreadable), declining to charge — amount=${totalAmount} may be uncollected`
+        );
+      } else {
+        this.logger.warn(
+          `Duplicate billing task=${taskId} (status=${status}) — already billed, skipping deduction`
+        );
+      }
+      return { alreadyBilled: true };
+    }
+
+    // Retry mode with no row to reuse (it vanished, or the read failed). Charge
+    // anyway rather than silently dropping a real debt — same fall-through as a
+    // non-uniqueness create failure, which also bills without a local record.
+    if (!existing) {
+      this.logger.warn(
+        `Duplicate billing task=${taskId}: retry requested but the record could not be read — charging without a local record`
+      );
+      return { alreadyBilled: false };
+    }
+
+    // Retry of a charge that never went through: refresh the row with this
+    // attempt's cost and let the normal flow re-run against Aisee.
+    const reset = await this._billingRecord.model.billingRecord
+      .update({
+        where: { id: existing.id },
+        data: {
+          amount: totalAmount,
+          costItems: JSON.stringify(costItems),
+          status: internal ? 'internal' : 'pending',
+          error: null,
+        },
+      })
+      .catch((err: unknown) => {
+        this.logger.error(
+          `Duplicate billing task=${taskId}: failed to reset the ${status} record for retry:`,
+          err
+        );
+        return null;
+      });
+
+    this.logger.log(
+      `Duplicate billing task=${taskId} (status=${status}): previous attempt took no money, retrying deduction`
+    );
+    return { alreadyBilled: false, recordId: reset?.id ?? existing.id };
   }
 
   private async updateBillingRecord(

@@ -252,7 +252,7 @@ The record tracks: taskId, amount, businessType, subType (fine-grained categoriz
 
 The `data` field (JSON) stores flexible business context: prompt, generation parameters, associated entity IDs. It supports **back-filling** via `associateEntity(taskId, { relatedId, data })` — used when business entities (Post, Media) are created after AI generation.
 
-If the local DB write fails, the deduction proceeds anyway — billing must not be blocked by audit failures.
+If the local DB write fails, the deduction proceeds anyway — billing must not be blocked by audit failures. **One exception: a unique-constraint violation on `taskId`.** That is not an audit failure, it means the task was already billed, so the deduction is skipped instead (see [Idempotency](#idempotency-taskid-is-the-dedupe-key)).
 
 ## Task ID Format
 
@@ -260,6 +260,34 @@ All Postiz operations use the format `postiz_{label}_{random}` as the task_id fo
 - Agent chat: `postiz_agent_chat_{orgId}_{timestamp}_{random}`
 - Image generation: `postiz_img_{orgId}_{timestamp}_{random}`
 - Agent post generation: `postiz_agent_{orgId}_{timestamp}_{random}`
+
+A caller may also derive the taskId from the billed **entity** instead of a random suffix, which makes the charge once-per-entity. Post overage does exactly that: `postiz_post_overage_{postId}`.
+
+### Idempotency: taskId is the dedupe key
+
+`BillingRecord.taskId` is `@unique`, and for entity-derived taskIds that index is the **only** guard against a double charge — the same entity can re-enter the billing flow (e.g. `createPost` runs again on every edit/re-save of a post, with the same postId). A `P2002` on `taskId` is therefore treated as an idempotency signal, not an audit failure:
+
+There are **two modes**, because the right answer depends on whether the caller can prove the earlier attempt took no money.
+
+**Default — the caller cannot tell a replay from a crash.** Used by every entity-derived taskId (post overage re-saved on each edit). Only a `failed` row retries; anything else is assumed billed, because double-charging is worse than leaving a stale row for reconciliation.
+
+| Existing record's status | Behaviour |
+|---|---|
+| `pending` / `success` / `skipped` / `internal` | Already billed (or a concurrent call is in flight) → **skip**; return `{ success: true, skipped: true }` without calling Aisee. |
+| `failed` | No money moved → **reuse that row** (reset to `pending` with this attempt's amount/costItems) and retry the deduction. |
+| unreadable (row gone / lookup failed) | Unknown state → **skip**, since double-charging is worse than a missing retry. |
+
+**Retry-unbilled — the caller has already established that no money moved.** `deductWithItems(..., retryUnbilledTask = true)`, used only by `reconcileAwaitedDeduction`, which is reached exclusively for a row with **no `transactionId`**. Here the conservative default is the dangerous one: it would report an uncharged `pending` row as billed and, because the taskId stays occupied, nothing could ever bill that work again — an operation plan would reach `READY` with its posts materialized and zero credits taken. So the polarity flips:
+
+| Existing record's status | Behaviour |
+|---|---|
+| `success` / `skipped` / `internal` | Genuinely owes nothing → **skip**. |
+| `pending` / `failed` | The charge never completed → **reuse the row and charge**. |
+| unreadable (row gone / lookup failed) | **Charge anyway** (without a local record) rather than silently dropping a real debt. |
+
+Charging twice is not a risk in this mode: `taskId` is Aisee's own idempotency key, which is exactly what this path relied on before the duplicate branch existed.
+
+Any other DB error on the create still falls through to the "billing must not be blocked" rule above.
 
 ## Billing Touchpoints
 

@@ -1561,6 +1561,23 @@ export class XProvider extends SocialAbstract implements SocialProvider {
         this._safeFireSuspendedNotification(integrationId);
         return null;
       }
+      // 401 = the stored access token is dead (revoked / invalidated), not a
+      // transient API error — and `tokenExpiration` can still be in the future,
+      // so the caller's proactive refresh never fired and every sweep would keep
+      // dumping the same stack. Surface it as RefreshToken (same as
+      // `_getUserInfo` above and `fetchUserByUsername` below) so the caller can
+      // refresh reactively and, if that fails, flag the integration for
+      // reconnect. The status is read the same three ways as those two: missing
+      // a 401 here silently reverts to the old behaviour.
+      const status = err?.code || err?.data?.status || err?.status;
+      if (status === 401) {
+        throw new RefreshToken(
+          this.identifier,
+          JSON.stringify(err?.data || {}),
+          '',
+          'X token expired'
+        );
+      }
       console.error('Error fetching X account metrics:', err);
       return null;
     }

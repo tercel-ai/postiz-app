@@ -79,6 +79,8 @@ Creates or returns the operation plan for one completed Aisee task. `taskId` is 
   "data": {},
   "contentItems": [],
   "engagePolicies": [],
+  "errorCode": null,
+  "errorMessage": null,
   "warnings": []
 }
 ```
@@ -162,6 +164,8 @@ Creates or returns the operation plan for one completed Aisee task. `taskId` is 
   ],
   "billingTransactionId": "aisee-transaction-id",
   "creditAmount": "0.250000",
+  "errorCode": null,
+  "errorMessage": null,
   "warnings": []
 }
 ```
@@ -170,7 +174,7 @@ Creates or returns the operation plan for one completed Aisee task. `taskId` is 
 
 > **`creditAmount`.** The total credits charged for the generation — the sum over **every** LLM call it made (main generation + each content-shrink call), each priced by its own model. See [Billing & token accounting](#billing--token-accounting). `null`/unset until the row reaches `READY`.
 
-> **`targetRepliesPerDay` vs `dailyTargets`.** `targetRepliesPerDay` is the **default** daily reply target; `dailyTargets` overrides it for specific UTC dates (`YYYY-MM-DD`, inside the plan range, no repeats) — that is how a plan paces weekdays and weekends differently. A date not listed keeps the default; a `target` of `0` means "send nothing that day". The send-time pacing gate resolves the day's target this way, and `GET /operation-plans/:id` surfaces the resolved value per day as `engageStats[date][].targetRepliesPerDay`. `dailyTargets` may be an empty list when every day shares the default. Targets are **dated, never week-numbered** — the week is derivable from the date plus `startsAt`.
+> **`targetRepliesPerDay` vs `dailyTargets`.** `targetRepliesPerDay` is the **default** daily reply target; `dailyTargets` overrides it for specific UTC dates (`YYYY-MM-DD`, inside the plan range, no repeats) — that is how a plan paces weekdays and weekends differently. A date not listed keeps the default; a `target` of `0` means "send nothing that day". The send-time pacing gate resolves the day's target this way, and `GET /operation-plans/:id` surfaces the resolved value per day as `engageStats[date][].targetRepliesPerDay`. `dailyTargets` may be an empty list when every day shares the default. Targets are **dated, never week-numbered** — the week is derivable from the date plus `startsAt`. An override the generator emits for a date **outside** the plan range, a repeated date, or a non-integer/negative target has no day to apply to, so it is **dropped** during generation (logged, that day simply keeps `targetRepliesPerDay`) — it does not fail the plan. What you receive is therefore always in-range and unique.
 
 > **`keywordTargets` keys.** The generator produces `keywordTargets` keyed by **keyword TEXT**. On the real (persisting) path the backend maps each text to its `EngageKeyword.id` — creating the keyword under the project's Engage config if it doesn't exist yet — and stores the plan with **`EngageKeyword.id` keys** (as shown above), which is what pacing and the overview endpoint read. In a **`dryRun` preview the keys stay keyword text** and no `EngageKeyword` rows are created. Two keyword texts that normalize to the same keyword (e.g. `"AI"` / `"ai"`) collapse to one id, summing their targets.
 
@@ -230,8 +234,15 @@ GENERATING ──▶ BILLING_PENDING ──▶ READY        (happy path)
 | `GENERATING` | no | Stub persisted; LLM generation is running (or a crashed worker's row is awaiting the sweeper). Content fields are empty. This is what a fresh POST returns. | Keep polling. |
 | `BILLING_PENDING` | no | Generation finished and the plan is persisted; credit confirmation is in flight (or awaiting reconciliation after a lost response). Content is populated; `billingTransactionId`/`creditAmount` are not yet set. | Keep polling. |
 | `READY` | **yes** | Plan generated **and** billing confirmed (or skipped). `contentItems`/`engagePolicies`/`data` populated; DRAFT `Post` rows materialized. | Render the plan. |
-| `BILLING_FAILED` | **yes** | Generation succeeded but credit deduction was rejected (e.g. insufficient credit at confirm time). `errorCode: CREDIT_DEDUCTION_FAILED`. | Stop polling; surface a billing error. |
-| `FAILED` | **yes** | Generation itself failed (LLM/validation error). `errorCode: GENERATION_FAILED`. Aisee is notified directly so `product.result.operation_plan_status` is flipped to `failed`. | Stop polling; surface a generation error. |
+| `BILLING_FAILED` | **yes** | Generation succeeded but credit deduction was rejected (e.g. insufficient credit at confirm time). `errorCode: CREDIT_DEDUCTION_FAILED`, `errorMessage` carries the rejection reason — an orchestrator message verbatim, or, when the billing service answered with a non-2xx, a collapsed `Credit deduction failed (billing service returned HTTP <status>)` (the raw upstream body stays in the server log). | Stop polling; surface a billing error. |
+| `FAILED` | **yes** | Generation itself failed (LLM/validation error). `errorCode: GENERATION_FAILED`, `errorMessage` carries the specific reason. Aisee is notified directly so `product.result.operation_plan_status` is flipped to `failed`. | Stop polling; surface a generation error. |
+
+> **Why it failed (`errorCode` + `errorMessage`).** Because generation is asynchronous, a background failure has no HTTP response to land in — the reason is persisted on the row and returned by **both** plan-returning shapes (the flat POST record and the top level of `GET /operation-plans/{id}`, next to `status`).
+>
+> - `errorCode` — stable machine value to branch on: `GENERATION_FAILED` or `CREDIT_DEDUCTION_FAILED`.
+> - `errorMessage` — the specific, human-readable reason to show the user, e.g. `"Generated plan produced no content for requested platform(s): reddit — every requested platform must receive at least one post"` or an insufficient-credit message. It is the validation/provider message only (never a stack trace) and is truncated at 500 characters.
+>
+> Both are `null` on every non-failed status, and are **cleared** when a row later reaches `READY` — which in practice means a `BILLING_PENDING` row that reconciliation later confirms. `FAILED` and `BILLING_FAILED` are **terminal**: the sweepers only re-select `GENERATING` and `BILLING_PENDING` rows, so neither state recovers on its own and a new POST is the only way forward. Render `errorMessage` when present and fall back to a generic message keyed off `errorCode` when it is `null` (rows that failed before this field existed).
 
 > **Durability.** A `GENERATING` row whose worker crashed mid-run is re-driven by the generation sweeper (`resumeStuckGenerations`, every ~interval, rows untouched > `OPERATION_PLAN_GENERATION_STALE_MS`); a `BILLING_PENDING` row whose confirmation was lost is retried by `reconcileBillingPending`. Both are idempotent on the plan id, so a slow row is never double-billed. In practice a stuck row still converges to a terminal state without a new POST.
 
@@ -272,6 +283,8 @@ Returns the persisted plan summary, every `Post` generated under the plan, the E
 ```json
 {
   "status": "READY",
+  "errorCode": null,
+  "errorMessage": null,
   "plan": {
     "id": "operation-plan-uuid",
     "projectId": "aisee-product-id",
@@ -335,6 +348,21 @@ Returns the persisted plan summary, every `Post` generated under the plan, the E
 `plan.data` is the plan-level goal summary (see the `data` note under Create). It is `null` for legacy plans created before this field existed.
 
 > **While the plan is still generating.** This endpoint always returns `200` — it does not 404 or block on an in-flight plan. Until the top-level `status` (also retained as `plan.status` for backward compatibility) reaches `READY`, the plan is a stub: `data` is `{}`, `posts` is `[]`, and `engageStats` is `{}` (content, DRAFT posts, and pacing are only filled in once the plan is `READY`). **`status === "READY"` is the only reliable readiness signal — never infer readiness from whether `posts`/`data` are empty**, or you will treat a `GENERATING` plan as an empty one.
+
+> **When the plan failed.** A terminal failure looks like a permanently empty plan, so read the top-level `errorCode` / `errorMessage` (sibling of `status`, both `null` unless the plan is `FAILED`/`BILLING_FAILED`) and render the reason instead of an empty state — see [Why it failed](#status-values). Example:
+>
+> ```json
+> {
+>   "status": "FAILED",
+>   "errorCode": "GENERATION_FAILED",
+>   "errorMessage": "Generated plan produced no content for requested platform(s): reddit — every requested platform must receive at least one post",
+>   "plan": { "id": "operation-plan-uuid", "status": "FAILED", "data": null },
+>   "posts": [],
+>   "engageStats": {},
+>   "engagePolicies": [],
+>   "engageKeywords": []
+> }
+> ```
 
 `engageStats` is keyed by UTC date; **each day is an array with one entry per platform** (a plan can span x/linkedin/instagram, each with its own Engage policy). Each entry carries that platform's `themeTitle`, the **resolved** `targetRepliesPerDay` for that day (the policy's `dailyTargets` override when one exists, else the default), and a `keywords` array — every keyword item has the persisted `EngageKeyword.id`, display text, actual replies sent on that platform that UTC day, and the configured target. `actualReplies` counts replies whose linked `Post.publishDate` falls on that UTC date **and** whose opportunity is on that platform. A keyword configured under two platforms appears once per platform (not summed).
 
@@ -465,7 +493,7 @@ To generate a genuinely new plan, use a different source task — or delete the 
 |---|---|
 | `404 TASK_NOT_FOUND` | `projectId` isn't the task's `product_id`, or the task's `user_id` isn't the org owner's Aisee user. |
 | `400 PLATFORM_NOT_ALLOWED` | A requested platform is excluded by the `operation_plan.allowed_platforms` allowlist. (A missing OAuth integration is no longer an error — the plan still generates and posts get a null `integrationId`.) |
-| plan stuck in `GENERATING` / lands on `FAILED` | Generation failures are now **async**: the POST returns `GENERATING`, then the background job fails the row (`FAILED` + `errorCode: GENERATION_FAILED`). Check backend logs for the generation error; a crashed worker's row is re-driven by the generation sweeper. |
-| `400 ... outside the requested range` / `... over the N limit` / `... not requested` | The generator broke a contract; the message names the offending item. Historically a synchronous `400`; now these validation failures fail the background row as `FAILED`. Re-run — or tighten the prompt if it repeats. |
+| plan stuck in `GENERATING` / lands on `FAILED` | Generation failures are **async**: the POST returns `GENERATING`, then the background job fails the row (`FAILED` + `errorCode: GENERATION_FAILED`). **Read `errorMessage` on `GET /operation-plans/{id}` first** — it carries the actual reason, no log access needed. A crashed worker's row is re-driven by the generation sweeper. |
+| `errorMessage` says `... outside the requested range` / `... over the N limit` / `... not requested` | The generator broke a contract; the message names the offending item. Historically a synchronous `400`; now these validation failures fail the background row as `FAILED` and the sentence lands in `errorMessage`. Re-run — or tighten the prompt if it repeats. (Over-budget content is auto-shrunk, an uncovered platform is auto-backfilled, and out-of-range `dailyTargets` are dropped, so reaching here means the repair also came up short.) |
 | `500` + `Unterminated string in JSON` | The completion was truncated. `OPERATION_PLAN_MAX_TOKENS` is the budget; a very long range needs more. |
 | `500` + `Provider returned error` / `invalid_json_schema` | The generation schema violated OpenAI Structured Outputs (every field must be required — use `.nullable()`, never bare `.optional()`; no dynamic-key `z.record()`; only date-time/time/date/duration/email/hostname/ipv4/ipv6/uuid string formats — `.url()` emits the rejected `uri`). The unit test *"generation schema is OpenAI structured-outputs compatible"* guards all three. |

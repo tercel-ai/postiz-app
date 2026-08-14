@@ -9,7 +9,7 @@ import {
 import { makeId } from '@gitroom/nestjs-libraries/services/make.is';
 import { timer } from '@gitroom/helpers/utils/timer';
 import dayjs from 'dayjs';
-import { SocialAbstract } from '@gitroom/nestjs-libraries/integrations/social.abstract';
+import { RefreshToken, SocialAbstract } from '@gitroom/nestjs-libraries/integrations/social.abstract';
 import { InstagramDto } from '@gitroom/nestjs-libraries/dtos/posts/providers-settings/instagram.dto';
 import { Integration } from '@prisma/client';
 import { Rules } from '@gitroom/nestjs-libraries/chat/rules.description.decorator';
@@ -780,6 +780,11 @@ export class InstagramProvider
       if (media_count !== undefined) result.posts = media_count;
       return Object.keys(result).length > 0 ? result : null;
     } catch (err) {
+      // A dead token surfaces as RefreshToken (SocialAbstract.fetch turns a 401
+      // into one). Let it through so the caller can refresh reactively and flag
+      // the channel for reconnect; swallowing it freezes this account's metrics
+      // until the proactive expiry cron eventually catches up.
+      if (err instanceof RefreshToken) throw err;
       console.error('Error fetching Instagram account metrics:', err);
       return null;
     }

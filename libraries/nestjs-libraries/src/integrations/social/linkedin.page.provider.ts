@@ -9,6 +9,7 @@ import {
 } from '@gitroom/nestjs-libraries/integrations/social/social.integrations.interface';
 import { makeId } from '@gitroom/nestjs-libraries/services/make.is';
 import { LinkedinProvider } from '@gitroom/nestjs-libraries/integrations/social/linkedin.provider';
+import { RefreshToken } from '@gitroom/nestjs-libraries/integrations/social.abstract';
 import dayjs from 'dayjs';
 import { Integration } from '@prisma/client';
 import { Plug } from '@gitroom/helpers/decorators/plug.decorator';
@@ -638,6 +639,11 @@ export class LinkedinPageProvider
 
       return Object.keys(result).length > 0 ? result : null;
     } catch (err) {
+      // A dead token surfaces as RefreshToken (SocialAbstract.fetch turns a 401
+      // into one). Let it through so the caller can refresh reactively and flag
+      // the channel for reconnect; swallowing it freezes this account's metrics
+      // until the proactive expiry cron eventually catches up.
+      if (err instanceof RefreshToken) throw err;
       console.error('Error fetching LinkedIn Page account metrics:', err);
       return null;
     }

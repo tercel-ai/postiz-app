@@ -9,7 +9,7 @@ import {
 import { makeId } from '@gitroom/nestjs-libraries/services/make.is';
 import { timer } from '@gitroom/helpers/utils/timer';
 import dayjs from 'dayjs';
-import { SocialAbstract } from '@gitroom/nestjs-libraries/integrations/social.abstract';
+import { RefreshToken, SocialAbstract } from '@gitroom/nestjs-libraries/integrations/social.abstract';
 import { capitalize, chunk } from 'lodash';
 import { Plug } from '@gitroom/helpers/decorators/plug.decorator';
 import { Integration } from '@prisma/client';
@@ -539,6 +539,11 @@ export class ThreadsProvider extends SocialAbstract implements SocialProvider {
       if (followers_count !== undefined) result.followers = followers_count;
       return Object.keys(result).length > 0 ? result : null;
     } catch (err) {
+      // A dead token surfaces as RefreshToken (SocialAbstract.fetch turns a 401
+      // into one). Let it through so the caller can refresh reactively and flag
+      // the channel for reconnect; swallowing it freezes this account's metrics
+      // until the proactive expiry cron eventually catches up.
+      if (err instanceof RefreshToken) throw err;
       console.error('Error fetching Threads account metrics:', err);
       return null;
     }

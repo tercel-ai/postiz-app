@@ -145,6 +145,11 @@ export const OPERATION_PLAN_MAX_THREAD_PARTS_KEY = 'operation_plan.max_thread_pa
 // it's visible in the admin Settings UI for observability.
 export const OPERATION_PLAN_PROGRESS_MS_PER_DAY_KEY = 'operation_plan.progress_ms_per_day';
 
+// Ceiling for the persisted/returned failure reason. Long enough for a full
+// validation sentence, short enough that a provider dumping a payload into its
+// error message cannot bloat the row or every getOverview poll.
+const OPERATION_PLAN_ERROR_MESSAGE_MAX = 500;
+
 const DEFAULT_MAX_DURATION_DAYS = 30;
 const DEFAULT_MAX_THREAD_PARTS = 3;
 
@@ -680,6 +685,16 @@ export class OperationPlanService implements OnApplicationBootstrap {
   ): Promise<PlanArtifacts> {
     const { start, end, durationDays, platforms, task, baselineScore, effectiveKeywords, platformPlaybook, maxThreadParts } = ctx;
 
+    // Every UTC day the plan may address, enumerated. Given startAt/endAt as
+    // instants alone the model drifts past the end of the range when it maps the
+    // final (partial) week onto a full one — it emitted 2026-08-23 for a range
+    // ending 2026-08-21 — and those dates are unusable as per-day overrides.
+    // Handing it the closed list removes the arithmetic. Bounded by the
+    // admin-configurable max duration (default 30 days).
+    const rangeDates = Array.from({ length: durationDays }, (_, index) =>
+      dayjs.utc(start).startOf('day').add(index, 'day').format('YYYY-MM-DD')
+    );
+
     // Per-platform length budget, stated TWICE in the prompt (opening + closing).
     // The first live run ignored a single mid-prompt mention and produced 20/20
     // unpublishable posts; repeating the constraint at both ends is what makes
@@ -728,7 +743,7 @@ export class OperationPlanService implements OnApplicationBootstrap {
         // steering only, bounded by the PLATFORM COVERAGE rule above.
         '- FOLLOW the per-platform playbook in `platformPlaybook` (posting frequency + how strongly AI systems cite that channel). It is the team\'s configured rhythm — match its cadence rather than inventing your own volume. FIRST ensure EVERY requested platform gets at least one contentItem (see PLATFORM COVERAGE above — this is a hard gate, not a suggestion). THEN, once every platform has its minimum, you may weight ADDITIONAL volume toward the higher-citation channels. Never let "lean into higher-citation" override the minimum-coverage rule.',
         '- For each requested platform set `targetRepliesPerDay` to a sustainable WEEKDAY-level reply count — it is the default for any day you do not override.',
-        '- Then express the weekday/weekend rhythm concretely in `dailyTargets`: one { date, target } per date in the range that should differ from the default (typically the weekends — a lower target). Dates are UTC "YYYY-MM-DD" and MUST fall inside [startAt, endAt]; do not repeat a date. Omit a date to leave it at `targetRepliesPerDay`. Return an empty list only if every day genuinely has the same target.',
+        '- Then express the weekday/weekend rhythm concretely in `dailyTargets`: one { date, target } per date that should differ from the default (typically the weekends — a lower target). Every `date` MUST be copied VERBATIM from the `range.dates` list supplied in the payload (UTC "YYYY-MM-DD") — that list is the complete set of days this plan covers, so do NOT compute dates yourself, do NOT extend a partial final week past the last entry, and do NOT repeat a date. A date outside that list is discarded and the day silently keeps the default. Omit a date to leave it at `targetRepliesPerDay`. Return an empty list only if every day genuinely has the same target.',
         '',
         'SCORE-DRIVEN SELECTION',
         '- Read the analysis result and prioritise the weakest / lowest-scoring dimensions and platforms (largest gap to target = highest priority); do NOT spread effort evenly. Bias each theme toward closing a specific weak spot and reflect that gap in themeTitle. "Uneven" means shifting ADDITIONAL volume across platforms AFTER every platform has its minimum one post — it NEVER means dropping a requested platform to zero (see PLATFORM COVERAGE above).',
@@ -774,7 +789,7 @@ export class OperationPlanService implements OnApplicationBootstrap {
       ].join('\n'),
       JSON.stringify({
         projectId,
-        range: { startAt: start.toISOString(), endAt: end.toISOString(), durationDays },
+        range: { startAt: start.toISOString(), endAt: end.toISOString(), durationDays, dates: rangeDates },
         platforms,
         platformPlaybook,
         keywords: effectiveKeywords,
@@ -821,6 +836,9 @@ export class OperationPlanService implements OnApplicationBootstrap {
         shrinkUsages.push(...(await this._enforceContentLimits(generation.data)));
       }
     }
+    // Drop unusable per-day Engage overrides (out-of-range / repeated dates)
+    // before validation, so a stray date cannot throw away a paid generation.
+    this._normalizeEngagePolicyDates(generation.data, start, end, projectId);
     this._validateGeneratedPlan(generation.data, platforms, start, end);
 
     // Plan-level goal summary for the `data` column. targetScore is clamped to
@@ -841,6 +859,54 @@ export class OperationPlanService implements OnApplicationBootstrap {
     // token is dropped.
     const usages: AiUsageInfo[] = [generation.usage, ...shrinkUsages];
     return { generation, planData, usages };
+  }
+
+  // Reduce a thrown error to one short, user-safe sentence for `errorMessage`.
+  // The validation/provider message ONLY — never a stack, never a cause chain —
+  // capped so a runaway provider payload cannot bloat the row or the overview
+  // response. Exported as a static for direct unit testing.
+  static failureReason(error: unknown): string {
+    let raw: unknown;
+    if (error instanceof HttpException) {
+      const response = error.getResponse();
+      raw =
+        typeof response === 'string'
+          ? response
+          : (response as { message?: unknown })?.message ?? response;
+    } else if (error instanceof Error) {
+      raw = error.message;
+    } else {
+      raw = error;
+    }
+    const text =
+      typeof raw === 'string'
+        ? raw
+        : Array.isArray(raw)
+          ? raw.join('; ')
+          : JSON.stringify(raw ?? null);
+    const trimmed = (text || 'Unknown error').trim();
+    return trimmed.length > OPERATION_PLAN_ERROR_MESSAGE_MAX
+      ? `${trimmed.slice(0, OPERATION_PLAN_ERROR_MESSAGE_MAX - 1)}…`
+      : trimmed;
+  }
+
+  // A failed deduction's `error` arrives straight off AiseeClient and has three
+  // shapes: an orchestrator business message ("insufficient credits" — exactly
+  // what the user needs to read), a transport message, and — for any non-2xx —
+  // `HTTP <status>: <raw body>`, where the body is the ENTIRE upstream response
+  // (an HTML 502 page from a proxy, a traceback from aisee-core). That third
+  // shape must not reach the plan page: it is unbounded, so it would also
+  // bypass the cap every other reason goes through. Collapse it to the status
+  // alone — the full body is already logged by the client — and reduce the
+  // other two the same way as any other failure reason.
+  private static billingFailureReason(error?: string | null): string | null {
+    if (!error) {
+      return null;
+    }
+    const http = /^HTTP (\d{3}):/.exec(error);
+    return http
+      ? `Credit deduction failed (billing service returned HTTP ${http[1]})`
+      : OperationPlanService.failureReason(error);
   }
 
   // Background job for the real (non-dry-run) path: generate the plan, fold its
@@ -874,7 +940,16 @@ export class OperationPlanService implements OnApplicationBootstrap {
         `Operation plan generation failed for plan ${planId}:`,
         error instanceof Error ? error.stack : error
       );
-      await this._repo.updateStatus(planId, { status: 'FAILED', errorCode: 'GENERATION_FAILED' });
+      // Persist WHY it failed, not just that it did: generation runs in the
+      // background, so the plan page polling getOverview is the only place the
+      // user can learn that (say) a platform came back empty or the provider
+      // timed out. Without this the page can only say "failed" and the reason
+      // lives in a server log nobody reading the page can see.
+      await this._repo.updateStatus(planId, {
+        status: 'FAILED',
+        errorCode: 'GENERATION_FAILED',
+        errorMessage: OperationPlanService.failureReason(error),
+      });
       // Generation failure never bills, so Aisee gets no signal from the
       // credit-deduct confirm callback (which covers success). Push the terminal
       // failure directly so the product's plan status does not stay "generating".
@@ -963,15 +1038,26 @@ export class OperationPlanService implements OnApplicationBootstrap {
         // its own model and billed as one multi-item transaction.
         usages
       );
-    } catch {
+    } catch (error) {
       // Confirmation may have succeeded remotely even when the response was lost.
-      // Keep BILLING_PENDING so reconciliation can retry the idempotent billing task.
+      // Keep BILLING_PENDING so reconciliation can retry the idempotent billing
+      // task — but say why, or a plan sitting in BILLING_PENDING looks like a
+      // hang with no trace of the call that failed.
+      this.logger.warn(
+        `Billing call for plan ${plan.id} did not complete (staying BILLING_PENDING for reconciliation): ` +
+        OperationPlanService.failureReason(error)
+      );
       return;
     }
     if (billed.deduction && !billed.deduction.success && !billed.deduction.skipped) {
+      this.logger.error(
+        `Credit deduction rejected for plan ${plan.id}: ${billed.deduction.error ?? 'no reason given'}`
+      );
       await this._repo.updateStatus(plan.id, {
         status: 'BILLING_FAILED',
         errorCode: 'CREDIT_DEDUCTION_FAILED',
+        // Usually "insufficient credits" — exactly the thing the user can act on.
+        errorMessage: OperationPlanService.billingFailureReason(billed.deduction.error),
       });
       return;
     }
@@ -983,6 +1069,7 @@ export class OperationPlanService implements OnApplicationBootstrap {
       billingTransactionId: billed.deduction?.transactionId ?? null,
       creditAmount,
       errorCode: null,
+      errorMessage: null,
     });
     await this._repo.materializePlanPosts(readyPlan, planPayload);
   }
@@ -1181,6 +1268,63 @@ export class OperationPlanService implements OnApplicationBootstrap {
           platformItem.thread = maxThreadParts > 0 ? thread.slice(0, maxThreadParts) : null;
         }
       }
+    }
+  }
+
+  // Engage `dailyTargets` are per-day OVERRIDES of targetRepliesPerDay, keyed by
+  // a concrete UTC date. The model reliably gets the rhythm right but not always
+  // the calendar: it emits a date just past endAt (a weekend it rounded the
+  // final week up to), repeats one, or attaches a non-integer target. Such an
+  // entry has no day in this plan to apply to, so it is DROPPED here — the day
+  // simply keeps `targetRepliesPerDay` — instead of failing the whole paid
+  // generation in _validateGeneratedPlan. Same repair-before-validate contract as
+  // _normalizeThreads / _enforceContentLimits; the validator's identical checks
+  // stay as a backstop.
+  private _normalizeEngagePolicyDates(
+    plan: z.infer<typeof GeneratedPlanSchema>,
+    start: Date,
+    end: Date,
+    projectId: string
+  ): void {
+    const firstDay = dayjs.utc(start).startOf('day');
+    const lastDay = dayjs.utc(end).startOf('day');
+    for (const policy of plan.engagePolicies) {
+      if (!policy.dailyTargets?.length) {
+        continue;
+      }
+      const seen = new Set<string>();
+      const kept: NonNullable<typeof policy.dailyTargets> = [];
+      const dropped: string[] = [];
+      for (const entry of policy.dailyTargets) {
+        // Plain regex + isValid, matching _validateGeneratedPlan — this file
+        // only loads dayjs's `utc` plugin, not `customParseFormat`.
+        const day = dayjs.utc(entry.date);
+        const usable =
+          /^\d{4}-\d{2}-\d{2}$/.test(entry.date) &&
+          day.isValid() &&
+          !day.isBefore(firstDay) &&
+          !day.isAfter(lastDay) &&
+          !seen.has(entry.date) &&
+          Number.isInteger(entry.target) &&
+          entry.target >= 0;
+        if (!usable) {
+          dropped.push(`${entry.date}=${entry.target}`);
+          continue;
+        }
+        seen.add(entry.date);
+        kept.push(entry);
+      }
+      if (dropped.length) {
+        // This warning is the ONLY trace that an override was discarded — the
+        // drop is invisible in the API response by design — so it has to say
+        // WHICH plan lost it, or it is unanswerable in a shared log stream.
+        this.logger.warn(
+          `Operation plan (project ${projectId}) Engage policy "${policy.platform}" generated ` +
+          `${dropped.length} unusable dailyTargets (${dropped.join(', ')}) for range ` +
+          `[${firstDay.format('YYYY-MM-DD')}, ${lastDay.format('YYYY-MM-DD')}]; dropping them.`
+        );
+      }
+      policy.dailyTargets = kept;
     }
   }
 
@@ -1517,6 +1661,18 @@ export class OperationPlanService implements OnApplicationBootstrap {
       }
       // Per-day overrides must land on real days of THIS plan, once each —
       // otherwise the pacing gate would silently never apply them.
+      //
+      // On the generation path these throws are unreachable: this method's only
+      // caller runs _normalizeEngagePolicyDates immediately before it, and that
+      // normalizer's `usable` predicate is the exact complement of the four
+      // conditions below, so every offending entry has already been dropped.
+      // They are kept deliberately, as the invariant's single written statement
+      // and as a loud backstop if the normalizer is ever loosened — and because
+      // this method is also exercised directly by unit tests. If you change one
+      // side, change BOTH: a silent divergence here means either an invalid
+      // plan is persisted, or a paid generation starts failing again over a
+      // stray date, which is the exact production bug the normalizer exists to
+      // prevent.
       const seenDates = new Set<string>();
       for (const { date, target } of policy.dailyTargets ?? []) {
         // Plain regex + isValid instead of dayjs strict parsing — this file only
@@ -1812,6 +1968,10 @@ export class OperationPlanService implements OnApplicationBootstrap {
       engagePolicies: payload.engagePolicies ?? [],
       billingTransactionId: plan.billingTransactionId ?? undefined,
       creditAmount: plan.creditAmount ?? undefined,
+      // Same failure contract as getOverview: a record handed back on a
+      // FAILED/BILLING_FAILED status carries the reason, not just the status.
+      errorCode: plan.errorCode ?? null,
+      errorMessage: plan.errorMessage ?? null,
       warnings: payload.warnings ?? [],
     };
   }
@@ -1856,9 +2016,13 @@ export class OperationPlanService implements OnApplicationBootstrap {
       return this._toRecord(plan);
     }
     if (!billed.deduction.success && !billed.deduction.skipped) {
+      this.logger.error(
+        `Credit deduction rejected on reconcile for plan ${plan.id}: ${billed.deduction.error ?? 'no reason given'}`
+      );
       return this._toRecord(await this._repo.updateStatus(plan.id, {
         status: 'BILLING_FAILED',
         errorCode: 'CREDIT_DEDUCTION_FAILED',
+        errorMessage: OperationPlanService.billingFailureReason(billed.deduction.error),
       }));
     }
     const creditAmount = billed.costItems.reduce(
@@ -1870,6 +2034,7 @@ export class OperationPlanService implements OnApplicationBootstrap {
       billingTransactionId: billed.deduction.transactionId ?? null,
       creditAmount,
       errorCode: null,
+      errorMessage: null,
     });
     await this._repo.materializePlanPosts(readyPlan, readyPlan.planPayload);
     return this._toRecord(readyPlan);
@@ -1981,6 +2146,12 @@ export class OperationPlanService implements OnApplicationBootstrap {
       // Only meaningful (non-null) while status === 'GENERATING'; see
       // _estimateGenerationProgress for why it's an estimate, not a fact.
       progress,
+      // Why a FAILED / BILLING_FAILED plan ended where it did. `errorCode` is
+      // the stable machine value to branch on; `errorMessage` is the specific
+      // reason to show the user (null on every non-failed status). Mirrored at
+      // the top level next to `status` because that is what the page polls.
+      errorCode: plan.errorCode ?? null,
+      errorMessage: plan.errorMessage ?? null,
       plan: {
         id: plan.id,
         projectId: plan.projectId,

@@ -41,6 +41,20 @@ export interface IAuthenticator {
     postIds: string[],
     fromDate: number,
   ): Promise<BatchPostAnalyticsResult>;
+  /**
+   * Account-level totals as the platform reports them. Best-effort: resolve to
+   * `null` for anything that merely failed (rate limit, transient API error,
+   * unparseable payload) — the caller treats null as "no metrics this round".
+   *
+   * ONE exception, and it is load-bearing: when the platform rejects the token
+   * itself (401), THROW `RefreshToken` instead of returning null. A stored token
+   * can be revoked long before `tokenExpiration` says it should be, so the
+   * caller's proactive refresh never fires; the throw is what lets
+   * `DataTicksService.syncSingleAccountMetrics` refresh reactively and, on a
+   * permanent failure, flag the channel for reconnect. Swallowing it leaves the
+   * account's metrics frozen and the user un-notified. `SocialAbstract.fetch`
+   * already raises it, so a provider built on it only has to not catch it.
+   */
   accountMetrics?(
     integrationId: string,
     accessToken: string,

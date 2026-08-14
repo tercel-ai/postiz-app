@@ -164,6 +164,42 @@ A `[integrations.connect] immediate account metrics sync failed` warning is
 logged in each failure case. The next `/integrations/list` call or the daily
 UTC 00:05 cron will backfill.
 
+#### Dead Token (401)
+
+A platform can reject the stored access token while `tokenExpiration` is still
+in the future (the user revoked access, or the platform invalidated it), so the
+proactive refresh in `syncSingleAccountMetrics` never fires. A provider that
+detects this surfaces it as `RefreshToken` instead of a raw error — X does, from
+`accountMetrics()` — and `DataTicksService` then **refreshes reactively and
+retries once**:
+
+- refresh succeeds → the retry runs against the fresh token and metrics are
+  written as usual;
+- refresh returns no token → the round is skipped. Only ONE of the three ways
+  `refresh()` returns `false` is a permanent failure that flags the integration
+  `refreshNeeded`, notifies the user and disconnects the channel; it also bails
+  out early for a permanent (non-expiring) token, and deliberately returns
+  `false` on a benign concurrent-refresh race where the account is healthy. The
+  log line says only what the call site observed, not which of the three it was;
+- anything in that recovery throws (transient refresh failure, or the retry hits
+  the same 401) → it is caught and the round degrades to "no metrics",
+  logged as `[account-metrics] … token rejected`.
+
+Account metrics are best-effort enrichment: a dead token never fails the caller.
+Non-auth provider errors still propagate so real faults stay visible.
+
+Once an integration IS flagged `refreshNeeded`, `syncSingleAccountMetrics`
+returns early and never re-enters the refresh path — neither the daily sweep's
+query nor `getIntegrationById` filters that flag, so without the guard a revoked
+channel would repeat the whole disconnect path (two notifications, two emails)
+on every run. Reconnecting clears the flag.
+
+Every provider is expected to follow the same rule: `accountMetrics` resolves to
+`null` for ordinary failures but lets a `RefreshToken` escape. `SocialAbstract.fetch`
+already raises it on a 401, so a provider built on it only has to not catch it —
+see the contract on `SocialProvider.accountMetrics`. YouTube (googleapis SDK) and
+Pinterest (global `fetch`) never route through it and so cannot produce one.
+
 ## 5. Platform Data Inventory
 
 Each table has three rows with different scopes — re-read §4.1 if the

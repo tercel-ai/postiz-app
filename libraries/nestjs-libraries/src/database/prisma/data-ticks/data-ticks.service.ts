@@ -14,6 +14,7 @@ import {
   BatchPostAnalyticsResult,
   SocialProvider,
 } from '@gitroom/nestjs-libraries/integrations/social/social.integrations.interface';
+import { RefreshToken } from '@gitroom/nestjs-libraries/integrations/social.abstract';
 import { extractMetrics, stripSyntheticMetrics } from '@gitroom/nestjs-libraries/integrations/social/analytics.utils';
 import { PostsRepository } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.repository';
 import { timer } from '@gitroom/helpers/utils/timer';
@@ -593,6 +594,16 @@ export class DataTicksService {
     if (!provider?.accountMetrics) {
       return null;
     }
+    // Already known to need re-auth: the user has been notified and the channel
+    // disconnected, and nothing here can fix it. Neither the daily sweep's query
+    // nor getIntegrationById filters this flag, so without the guard a revoked
+    // channel would re-enter the refresh path on EVERY run — and each permanent
+    // failure notifies the user twice (informAboutRefreshError, then again from
+    // disconnectChannel), by email as well. Skip until they reconnect, which
+    // clears the flag.
+    if (integration.refreshNeeded) {
+      return null;
+    }
 
     let token = integration.token;
     const isPermToken = provider.isTokenPermanent?.(integration.token) ?? false;
@@ -603,13 +614,57 @@ export class DataTicksService {
       token = refreshed.accessToken;
     }
 
-    const metrics = await runWithBizUsage(
-      {
-        organizationId: integration.organizationId,
-        bizCategory: BIZ_USAGE.ACCOUNT_METRICS,
-      },
-      () => provider.accountMetrics!(integration.internalId, token)
-    );
+    const fetchMetrics = (accessToken: string) =>
+      runWithBizUsage(
+        {
+          organizationId: integration.organizationId,
+          bizCategory: BIZ_USAGE.ACCOUNT_METRICS,
+        },
+        () => provider.accountMetrics!(integration.internalId, accessToken)
+      );
+
+    let metrics: Awaited<ReturnType<typeof fetchMetrics>>;
+    try {
+      metrics = await fetchMetrics(token);
+    } catch (err) {
+      // The platform rejected the token even though `tokenExpiration` said it
+      // was still valid (user revoked access, platform invalidated it), so the
+      // proactive refresh above never fired. Refresh reactively and retry once.
+      // A permanent refresh failure flags the integration `refreshNeeded`,
+      // notifies the user and disconnects the channel, so the next sweep stops
+      // hammering the platform with a dead token.
+      if (!(err instanceof RefreshToken)) throw err;
+      // Account metrics are a best-effort enrichment, so a dead token degrades
+      // to "no metrics this round" and never becomes the caller's problem. The
+      // whole recovery is wrapped: `refresh()` itself throws on a transient
+      // failure (TransientRefreshError), and the retry can hit the same 401
+      // again if the refreshed token is equally dead.
+      try {
+        const refreshed = await this._refreshIntegrationService.refresh(integration);
+        if (refreshed === false) {
+          // Say only what this call site observed. `refresh()` returns a bare
+          // `false` from three different places and only ONE of them flags the
+          // integration: a permanent-token provider bails out before flagging,
+          // and the concurrent-refresh race guard deliberately returns false on
+          // a perfectly healthy account. Claiming "flagged for reconnect" here
+          // would send an on-call engineer after a channel nobody flagged.
+          console.warn(
+            `[account-metrics] integration=${integration.id} provider=${integration.providerIdentifier}: ` +
+            `token rejected and refresh returned no token — skipping this round ` +
+            `(flagged for reconnect only if the refresh was a permanent failure)`
+          );
+          return null;
+        }
+        metrics = await fetchMetrics(refreshed.accessToken);
+      } catch (refreshErr) {
+        console.warn(
+          `[account-metrics] integration=${integration.id} provider=${integration.providerIdentifier}: ` +
+          `token rejected and recovery failed — skipping this round:`,
+          (refreshErr as Error)?.message || refreshErr
+        );
+        return null;
+      }
+    }
     if (!metrics || Object.keys(metrics).length === 0) return null;
 
     await this._dashboardRepository.updateAccountMetrics(

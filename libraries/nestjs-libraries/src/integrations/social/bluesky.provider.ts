@@ -663,6 +663,11 @@ export class BlueskyProvider extends SocialAbstract implements SocialProvider {
       if (profile.postsCount !== undefined) result.posts = profile.postsCount;
       return Object.keys(result).length > 0 ? result : null;
     } catch (err) {
+      // A dead token surfaces as RefreshToken (SocialAbstract.fetch turns a 401
+      // into one). Let it through so the caller can refresh reactively and flag
+      // the channel for reconnect; swallowing it freezes this account's metrics
+      // until the proactive expiry cron eventually catches up.
+      if (err instanceof RefreshToken) throw err;
       console.error('Error fetching Bluesky account metrics:', err);
       return null;
     }

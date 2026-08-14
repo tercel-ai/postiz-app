@@ -161,6 +161,7 @@ export class OperationPlanRepository {
       billingTransactionId?: string | null;
       creditAmount?: string | null;
       errorCode?: string | null;
+      errorMessage?: string | null;
     }
   ) {
     return this._operationPlan.model.operationPlan.update({ where: { id }, data });

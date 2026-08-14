@@ -37,6 +37,45 @@ function createService(mocks: ReturnType<typeof createMocks>) {
   return new OperationPlanService(mocks as any);
 }
 
+// What lands in the persisted `errorMessage` (and therefore in front of the
+// user): the validation/provider sentence only, never a stack or a raw object.
+describe('OperationPlanService.failureReason', () => {
+  it('takes the message out of a Nest HttpException', async () => {
+    const { BadRequestException } = await import('@nestjs/common');
+    expect(
+      OperationPlanService.failureReason(
+        new BadRequestException('Generated Engage policy for "x" has a dailyTargets date …')
+      )
+    ).toBe('Generated Engage policy for "x" has a dailyTargets date …');
+  });
+
+  it('serializes a structured HttpException body that carries no message', async () => {
+    const { BadRequestException } = await import('@nestjs/common');
+    expect(
+      OperationPlanService.failureReason(
+        new BadRequestException({ code: 'DURATION_EXCEEDS_MAX', maxDays: 30 })
+      )
+    ).toContain('DURATION_EXCEEDS_MAX');
+  });
+
+  it('takes a plain Error message and never its stack', () => {
+    const error = new Error('provider 500');
+    const reason = OperationPlanService.failureReason(error);
+    expect(reason).toBe('provider 500');
+    expect(reason).not.toContain('at ');
+  });
+
+  it('truncates a runaway message', () => {
+    const reason = OperationPlanService.failureReason(new Error('x'.repeat(2000)));
+    expect(reason.length).toBe(500);
+    expect(reason.endsWith('…')).toBe(true);
+  });
+
+  it('falls back rather than returning an empty reason', () => {
+    expect(OperationPlanService.failureReason(new Error(''))).toBe('Unknown error');
+  });
+});
+
 describe('OperationPlanService.getOverview', () => {
   let mocks: ReturnType<typeof createMocks>;
   let service: OperationPlanService;
@@ -44,6 +83,33 @@ describe('OperationPlanService.getOverview', () => {
   beforeEach(() => {
     mocks = createMocks();
     service = createService(mocks);
+  });
+
+  // A failed plan must say WHY on the endpoint the page polls — status alone
+  // leaves the reason stranded in a server log.
+  it('surfaces the failure reason on a FAILED plan', async () => {
+    mocks.getById.mockResolvedValue(
+      makePlan({
+        status: 'FAILED',
+        errorCode: 'GENERATION_FAILED',
+        errorMessage: 'Generated plan produced no content for requested platform(s): reddit',
+      })
+    );
+
+    const result = await service.getOverview('org-1', 'plan-1');
+
+    expect(result.status).toBe('FAILED');
+    expect(result.errorCode).toBe('GENERATION_FAILED');
+    expect(result.errorMessage).toContain('reddit');
+  });
+
+  it('reports no failure reason on a healthy plan', async () => {
+    mocks.getById.mockResolvedValue(makePlan());
+
+    const result = await service.getOverview('org-1', 'plan-1');
+
+    expect(result.errorCode).toBeNull();
+    expect(result.errorMessage).toBeNull();
   });
 
   it('returns empty engageStats when the plan has no engagePolicies', async () => {
@@ -638,6 +704,74 @@ describe('OperationPlanService.create', () => {
     );
   });
 
+  // A rejected deduction is the most likely terminal failure, and its `error`
+  // comes straight off the billing client. For a non-2xx that string is
+  // `HTTP <status>: <entire upstream body>` — an HTML error page or a remote
+  // traceback — which must not be persisted to, or polled back out of, a
+  // user-visible field.
+  it('collapses an HTTP-shaped billing error instead of storing the upstream body', async () => {
+    const { repo, creditService, service } = createGenerationDependencies({
+      contentItems: [],
+      engagePolicies: [],
+      warnings: [],
+    });
+    creditService.deductUsageAndConfirm.mockResolvedValue({
+      deduction: {
+        success: false,
+        error: `HTTP 502: <!DOCTYPE html><html><head><title>502 Bad Gateway</title></head>${'x'.repeat(4000)}`,
+      },
+      costItems: [{ amount: '1.250000' }],
+    });
+
+    const { background } = await createAndSettle(service, {
+      taskId: 'task-1',
+      startAt: '2030-01-01T00:00:00.000Z',
+      endAt: '2030-01-02T00:00:00.000Z',
+      platforms: ['x'],
+    });
+    await background;
+
+    const billingFailed = repo.updateStatus.mock.calls.find(
+      ([, data]: any) => data.status === 'BILLING_FAILED'
+    );
+    expect(billingFailed).toBeDefined();
+    expect(billingFailed[1].errorMessage).toBe(
+      'Credit deduction failed (billing service returned HTTP 502)'
+    );
+    expect(billingFailed[1].errorMessage).not.toContain('DOCTYPE');
+    expect(repo.materializePlanPosts).not.toHaveBeenCalled();
+  });
+
+  // A business message from the orchestrator is what the user actually needs;
+  // it is kept, only capped.
+  it('keeps a non-HTTP billing error, capped at the shared ceiling', async () => {
+    const { repo, creditService, service } = createGenerationDependencies({
+      contentItems: [],
+      engagePolicies: [],
+      warnings: [],
+    });
+    creditService.deductUsageAndConfirm.mockResolvedValue({
+      deduction: { success: false, error: 'Insufficient credits' },
+      costItems: [{ amount: '1.250000' }],
+    });
+
+    const { background } = await createAndSettle(service, {
+      taskId: 'task-1',
+      startAt: '2030-01-01T00:00:00.000Z',
+      endAt: '2030-01-02T00:00:00.000Z',
+      platforms: ['x'],
+    });
+    await background;
+
+    const billingFailed = repo.updateStatus.mock.calls.find(
+      ([, data]: any) => data.status === 'BILLING_FAILED'
+    );
+    expect(billingFailed[1]).toMatchObject({
+      errorCode: 'CREDIT_DEDUCTION_FAILED',
+      errorMessage: 'Insufficient credits',
+    });
+  });
+
   it('marks the plan FAILED (GENERATION_FAILED) and does not bill when generation fails', async () => {
     const { repo, creditService, openaiService, aiseeClient, service } = createGenerationDependencies({
       contentItems: [],
@@ -661,6 +795,9 @@ describe('OperationPlanService.create', () => {
     expect(repo.updateStatus).toHaveBeenCalledWith('plan-1', {
       status: 'FAILED',
       errorCode: 'GENERATION_FAILED',
+      // The reason is persisted, not just the status — the plan page polls
+      // getOverview and would otherwise only be able to say "failed".
+      errorMessage: 'provider 500',
     });
     expect(repo.completeGeneration).not.toHaveBeenCalled();
     expect(creditService.deductUsageAndConfirm).not.toHaveBeenCalled();
@@ -1490,7 +1627,11 @@ describe('OperationPlanService.create', () => {
     expect(policy.dailyTargets).toEqual([{ date: '2030-01-02', target: 3 }]);
   });
 
-  it('rejects a dailyTargets date outside the plan range', async () => {
+  // Regression (prod 2026-08-14): the model emitted 2026-08-23 for a range
+  // ending 2026-08-21 and the whole paid generation was rejected. A per-day
+  // override with no day in the plan is dropped instead — the day just keeps
+  // `targetRepliesPerDay`.
+  it('drops a dailyTargets date outside the plan range instead of failing the plan', async () => {
     const { repo, service } = createGenerationDependencies({
       contentItems: [],
       engagePolicies: [
@@ -1498,7 +1639,10 @@ describe('OperationPlanService.create', () => {
           platform: 'x',
           themeTitle: 't',
           targetRepliesPerDay: 6,
-          dailyTargets: [{ date: '2030-02-15', target: 3 }], // outside [01-01, 01-02]
+          dailyTargets: [
+            { date: '2030-01-02', target: 3 },
+            { date: '2030-02-15', target: 3 }, // outside [01-01, 01-02]
+          ],
           keywordTargets: [],
           enabled: true,
         },
@@ -1506,19 +1650,20 @@ describe('OperationPlanService.create', () => {
       warnings: [],
     });
 
-    // Validation is shared with the persist path; the preview enforces it
-    // synchronously, which is the deterministic way to assert the message.
-    await expect(service.create('org-1', 'proj-1', {
+    const { background } = await createAndSettle(service, {
       taskId: 'task-1',
       startAt: '2030-01-01T00:00:00.000Z',
       endAt: '2030-01-02T00:00:00.000Z',
       platforms: ['x'],
-    }, { dryRun: true })).rejects.toThrow(/dailyTargets date 2030-02-15 outside the requested range/);
-    expect(repo.create).not.toHaveBeenCalled();
+    });
+    await background;
+
+    const policy = repo.completeGeneration.mock.calls[0][1].planPayload.engagePolicies[0];
+    expect(policy.dailyTargets).toEqual([{ date: '2030-01-02', target: 3 }]);
   });
 
-  it('rejects a repeated dailyTargets date', async () => {
-    const { service } = createGenerationDependencies({
+  it('drops a repeated dailyTargets date, keeping the first', async () => {
+    const { repo, service } = createGenerationDependencies({
       contentItems: [],
       engagePolicies: [
         {
@@ -1536,12 +1681,38 @@ describe('OperationPlanService.create', () => {
       warnings: [],
     });
 
-    await expect(service.create('org-1', 'proj-1', {
+    const { background } = await createAndSettle(service, {
       taskId: 'task-1',
       startAt: '2030-01-01T00:00:00.000Z',
       endAt: '2030-01-02T00:00:00.000Z',
       platforms: ['x'],
-    }, { dryRun: true })).rejects.toThrow(/repeats dailyTargets date 2030-01-02/);
+    });
+    await background;
+
+    const policy = repo.completeGeneration.mock.calls[0][1].planPayload.engagePolicies[0];
+    expect(policy.dailyTargets).toEqual([{ date: '2030-01-02', target: 3 }]);
+  });
+
+  // The model was computing dates from startAt/endAt and drifting past the end
+  // of the range; it now gets the closed list of valid days in the payload.
+  it('supplies the enumerated valid dates in the generation payload', async () => {
+    const { openaiService, service } = createGenerationDependencies({
+      contentItems: [],
+      engagePolicies: [],
+      warnings: [],
+    });
+
+    await service.create('org-1', 'proj-1', {
+      taskId: 'task-1',
+      startAt: '2030-01-01T00:00:00.000Z',
+      endAt: '2030-01-03T00:00:00.000Z',
+      platforms: ['x'],
+    });
+
+    const systemPrompt: string = openaiService.generateStructuredText.mock.calls[0][0];
+    expect(systemPrompt).toContain('`range.dates`');
+    const payload = JSON.parse(openaiService.generateStructuredText.mock.calls[0][1]);
+    expect(payload.range.dates).toEqual(['2030-01-01', '2030-01-02', '2030-01-03']);
   });
 
   it('tells the generator to express the weekday/weekend rhythm via dated dailyTargets', async () => {
@@ -1789,7 +1960,7 @@ describe('OperationPlanService.create', () => {
   });
 
   it('rejects a generated plan that produced no content for a requested platform', async () => {
-    const { repo, creditService, aiseeClient, service } = createGenerationDependencies({
+    const { repo, creditService, aiseeClient, openaiService, service } = createGenerationDependencies({
       // Explicit contentItems: only x is covered although reddit was requested.
       contentItems: [
         {
@@ -1815,6 +1986,22 @@ describe('OperationPlanService.create', () => {
       engagePolicies: [],
       warnings: [],
     });
+    // The coverage gap triggers a backfill call before validation. Let it come
+    // back empty (the model still produced no reddit content) so this test
+    // exercises the coverage rejection — the harness default would replay the
+    // same fixture, and its duplicate Post id would fail the plan first for an
+    // unrelated reason.
+    openaiService.generateStructuredText.mockImplementationOnce(
+      openaiService.generateStructuredText.getMockImplementation()!
+    ).mockImplementationOnce(async () => ({
+      data: {
+        goal: { title: 'Goal', description: 'Desc', targetScore: 70 },
+        contentItems: [],
+        engagePolicies: [],
+        warnings: [],
+      },
+      usage: { usage: { total_tokens: 100 } },
+    }));
 
     const { background } = await createAndSettle(service, {
       taskId: 'task-1',
@@ -1828,6 +2015,7 @@ describe('OperationPlanService.create', () => {
     expect(repo.updateStatus).toHaveBeenCalledWith('plan-1', {
       status: 'FAILED',
       errorCode: 'GENERATION_FAILED',
+      errorMessage: expect.stringContaining('no content for requested platform(s): reddit'),
     });
     expect(creditService.deductUsageAndConfirm).not.toHaveBeenCalled();
     expect(repo.materializePlanPosts).not.toHaveBeenCalled();
@@ -1989,6 +2177,7 @@ describe('OperationPlanService.create', () => {
     expect(repo.updateStatus).toHaveBeenCalledWith('plan-1', {
       status: 'FAILED',
       errorCode: 'GENERATION_FAILED',
+      errorMessage: expect.stringContaining('no content for requested platform(s): reddit'),
     });
     expect(creditService.deductUsageAndConfirm).not.toHaveBeenCalled();
     expect(repo.materializePlanPosts).not.toHaveBeenCalled();
