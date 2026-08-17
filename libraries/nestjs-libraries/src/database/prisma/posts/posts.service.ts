@@ -62,6 +62,19 @@ import {
 } from '@gitroom/nestjs-libraries/engage/resolve-x-reply-integration';
 import { fetchXAuthorProfile } from '@gitroom/nestjs-libraries/engage/x-tweet';
 import { EngageAuthorProfile } from '@gitroom/nestjs-libraries/engage/engage-author';
+/**
+ * One thread segment the extension reported as PUBLISHED (the transport shape is
+ * PublishedSegmentDto). `postId` is OUR Post id echoed from the due-item, so
+ * segments are settled by identity rather than by position in the list — the
+ * chain can change during the lease window, and a positional match would stamp a
+ * live permalink onto the wrong row.
+ */
+interface PublishedSegment {
+  postId: string;
+  url?: string;
+  releaseId?: string;
+}
+
 type PostWithConditionals = Post & {
   integration?: Integration;
   childrenPost: Post[];
@@ -208,7 +221,8 @@ export class PostsService {
     orgId: string,
     id: string,
     releaseURL?: string,
-    releaseId?: string
+    releaseId?: string,
+    segments?: PublishedSegment[]
   ): Promise<{ ok: boolean; alreadyPublished?: boolean; reason?: string }> {
     const post = await this._postRepository.getPostById(id, orgId);
     if (!post) return { ok: false, reason: 'not-found' };
@@ -218,6 +232,49 @@ export class PostsService {
     // still flips PUBLISHED so it leaves QUEUE and is never re-published.
     const updated = await this.updatePost(id, releaseId || '', releaseURL || '');
     if (!updated) return { ok: false, reason: 'blocked-recurring-original' };
+    // A thread is published as ONE extension task that reports back against the
+    // anchor only, so settle its children here. Best-effort: the anchor is
+    // already PUBLISHED and must not be un-done because a follow-up write
+    // failed — a child left QUEUE is recoverable, a re-published anchor is not.
+    if (!post.parentPostId && post.group) {
+      try {
+        // Per-segment permalinks first, so each follow-up carries its OWN url
+        // (they exist only in the extension's queue state — unrecoverable once
+        // it settles). Then the group-wide sweep mops up anything not reported:
+        // it is QUEUE-guarded, so it never touches what was just published, and
+        // it is what keeps an older extension (no `segments`) working.
+        const reported = new Map(
+          (segments || [])
+            .filter((sg) => sg?.postId && sg.postId !== id)
+            .map((sg) => [sg.postId, sg])
+        );
+        if (reported.size) {
+          // Only ids that are genuinely children of THIS chain. The reported
+          // list is client input: without this intersection a caller could name
+          // any other QUEUE post of the org and have a permalink stamped on it.
+          // The failure path constrains the same way — the two must not differ.
+          const nodes = await this._postRepository.getExtensionPublishChainNodes(
+            orgId,
+            [post.group]
+          );
+          const children = nodes
+            .filter((n) => n.parentPostId && reported.has(n.id))
+            .map((n) => ({
+              id: n.id,
+              url: reported.get(n.id)?.url,
+              releaseId: reported.get(n.id)?.releaseId,
+            }));
+          if (children.length) {
+            await this._postRepository.publishExtensionChainNodes(orgId, children);
+          }
+        }
+        await this._postRepository.publishExtensionChainChildren(orgId, post.group);
+      } catch (err) {
+        this.logger.warn(
+          `markPublishedFromExtension: settling thread children failed for postId=${id} group=${post.group}: ${(err as Error)?.message || err}`
+        );
+      }
+    }
     return { ok: true };
   }
 
@@ -228,12 +285,23 @@ export class PostsService {
    * QUEUE forever, re-offered on every publish-due poll. Org-scoped; never
    * touches a row that already reached PUBLISHED, and recurring originals keep
    * their clone-per-cycle mechanism untouched.
+   *
+   * PARTIAL SUCCESS is the normal case for a thread: segments publish one by one
+   * and the run stops at the first failure, so the anchor is usually already
+   * live. `segments` names the ones that went out — they are recorded PUBLISHED
+   * with their own permalinks and only the remainder becomes ERROR. Marking a
+   * live post ERROR would drop it out of every metrics path permanently: the
+   * permalinks exist only in the extension's queue state, which is discarded
+   * when the task settles.
+   *
+   * `partial` in the result tells the caller which shape it got.
    */
   async markPublishFailedFromExtension(
     orgId: string,
     id: string,
-    error?: string
-  ): Promise<{ ok: boolean; reason?: string }> {
+    error?: string,
+    segments?: PublishedSegment[]
+  ): Promise<{ ok: boolean; reason?: string; partial?: boolean; published?: number }> {
     const post = await this._postRepository.getPostById(id, orgId);
     if (!post) return { ok: false, reason: 'not-found' };
     if (post.state === 'PUBLISHED')
@@ -241,12 +309,64 @@ export class PostsService {
     if (post.intervalInDays && post.intervalInDays > 0 && !post.parentPostId) {
       return { ok: false, reason: 'blocked-recurring-original' };
     }
-    await this._postRepository.changeState(
-      id,
-      'ERROR',
-      error || 'extension publish failed'
-    );
-    return { ok: true };
+    const reason = error || 'extension publish failed';
+    const published = (segments || []).filter((sg) => sg?.postId);
+    const publishedById = new Map(published.map((sg) => [sg.postId, sg]));
+
+    // The ANCHOR itself is commonly among the published segments — a thread
+    // breaks mid-chain, not at the start. Recording it ERROR while it is live on
+    // the platform is the single worst outcome here, so settle it by what was
+    // reported rather than by the callback's name.
+    const anchorPublished = publishedById.get(id);
+    if (anchorPublished) {
+      await this._postRepository.publishExtensionChainNodes(orgId, [
+        { id, url: anchorPublished.url, releaseId: anchorPublished.releaseId },
+      ]);
+    } else {
+      await this._postRepository.changeState(id, 'ERROR', reason);
+    }
+
+    // Children are never re-offered on their own (the due query is roots-only),
+    // so leaving them QUEUE strands them until the stale sweep renames the cause.
+    if (!post.parentPostId && post.group) {
+      try {
+        if (published.length) {
+          // Split the chain by what actually went out. Reading the chain back is
+          // what makes "the rest" precise — the reported list alone cannot say
+          // which nodes are missing from it.
+          const nodes = await this._postRepository.getExtensionPublishChainNodes(
+            orgId,
+            [post.group]
+          );
+          const childIds = nodes
+            .filter((n) => n.parentPostId && n.id !== id)
+            .map((n) => n.id);
+          const live = childIds
+            .filter((cid) => publishedById.has(cid))
+            .map((cid) => ({
+              id: cid,
+              url: publishedById.get(cid)?.url,
+              releaseId: publishedById.get(cid)?.releaseId,
+            }));
+          const dead = childIds.filter((cid) => !publishedById.has(cid));
+          if (live.length) {
+            await this._postRepository.publishExtensionChainNodes(orgId, live);
+          }
+          await this._postRepository.failExtensionChainNodesByIds(orgId, dead, reason);
+        } else {
+          // Nothing reported → nothing went out (or an older extension that
+          // cannot report). Previous all-or-nothing behaviour.
+          await this._postRepository.failExtensionChainChildren(orgId, post.group, reason);
+        }
+      } catch (err) {
+        this.logger.warn(
+          `markPublishFailedFromExtension: settling thread children failed for postId=${id} group=${post.group}: ${(err as Error)?.message || err}`
+        );
+      }
+    }
+    return published.length
+      ? { ok: true, partial: true, published: published.length }
+      : { ok: true };
   }
 
   async updatePost(id: string, postId: string, releaseURL: string) {
@@ -1726,6 +1846,20 @@ export class PostsService {
     // once per poll and stamped on each item so the extension paces threads the
     // way the operator configured, not by its own hardcoded fallback.
     const segmentGaps = await this._extensionPublishConfigService.getSegmentGaps();
+    // Expand each claimed ROOT into its thread chain. One query for the whole
+    // batch (not one per root) — a poll can claim up to 50.
+    const chainNodes = await this._postRepository.getExtensionPublishChainNodes(
+      orgId,
+      [...new Set(rows.map((r) => r.group).filter(Boolean))]
+    );
+    // parentPostId -> node, so a chain is walked from its anchor in order. Keyed
+    // by parent rather than by group because only nodes actually REACHABLE from
+    // the root belong to the thread: a malformed row that shares the group but
+    // hangs off nothing is simply never visited.
+    const nodeByParent = new Map<string, (typeof chainNodes)[number]>();
+    for (const node of chainNodes) {
+      if (node.parentPostId) nodeByParent.set(node.parentPostId, node);
+    }
     const due = await Promise.all(rows.map(async (p) => {
       let settings: Record<string, any> = {};
       try {
@@ -1733,19 +1867,60 @@ export class PostsService {
       } catch {
         /* malformed settings → publish without them */
       }
-      // Resolve the post's stored media ({id}/{path} refs) into absolute URLs
-      // the extension can download and hand to the platform's own upload
-      // pipeline (see updateMedia). Best-effort: a bad/missing media ref must
-      // never block the text from publishing.
-      let images: string[] = [];
-      try {
-        const resolved = await this.updateMedia(p.id, JSON.parse(p.image || '[]'));
-        images = (resolved || [])
-          .map((m: any) => m?.url)
-          .filter((url: any): url is string => typeof url === 'string' && !!url);
-      } catch {
-        /* malformed/missing media → publish text-only */
+      // Walk the chain from this anchor: [root, ...thread parts] in publish
+      // order. A cap of chainNodes.length makes a cyclic parentPostId (corrupt
+      // data) terminate instead of hanging the poll.
+      const chain: Array<{ id: string; content: string | null; image: string | null }> =
+        [p];
+      for (let cursor = nodeByParent.get(p.id), guard = 0;
+           cursor && guard < chainNodes.length;
+           cursor = nodeByParent.get(cursor.id), guard++) {
+        chain.push(cursor);
       }
+      // Resolve each node's stored media ({id}/{path} refs) into absolute URLs
+      // the extension can download and hand to the platform's own upload
+      // pipeline (see updateMedia). Best-effort per node: a bad/missing media ref
+      // must never block the text from publishing.
+      const segments = await Promise.all(
+        chain.map(async (node, segmentIndex) => {
+          let images: string[] = [];
+          try {
+            const resolved = await this.updateMedia(
+              node.id,
+              JSON.parse(node.image || '[]')
+            );
+            images = (resolved || [])
+              .map((m: any) => m?.url)
+              .filter((url: any): url is string => typeof url === 'string' && !!url);
+          } catch {
+            /* malformed/missing media → publish text-only */
+          }
+          // Media is only publishable on the ANCHOR. Every platform's thread
+          // continuation is a reply/comment whose poster takes text only (X
+          // reply, LinkedIn comment, HN comment), and the extension rejects the
+          // whole item when a later segment carries images. A rejected item never
+          // leaves Post.state=QUEUE, so it would be re-offered on every poll
+          // forever — dropping the image here publishes the thread instead of
+          // stranding it. Plan thread parts CAN carry media (materializePlanPosts
+          // writes `image` on every chain node), so this is reachable, not
+          // theoretical.
+          if (segmentIndex > 0 && images.length) {
+            this.logger.warn(
+              `getDuePublishPosts: dropping ${images.length} image(s) on thread segment ${segmentIndex} of post ${p.id} — thread continuations are text-only`
+            );
+            images = [];
+          }
+          return {
+            // OUR Post id for this segment. The extension echoes it back on the
+            // settle callbacks so each segment is recorded against the right row
+            // by identity — the chain can change during the lease window, so a
+            // positional match would stamp a live permalink onto the wrong post.
+            postId: node.id,
+            text: stripHtmlValidation('normal', node.content || '', true),
+            ...(images.length ? { images } : {}),
+          };
+        })
+      );
       // Platform is the persisted Post.providerIdentifier (set from the bound
       // integration when present, else the caller-supplied platform — see
       // mapTypeToPost / createOrUpdatePost). The trailing fallbacks only serve
@@ -1799,12 +1974,7 @@ export class PostsService {
                 .filter((label: unknown): label is string => !!label),
             }
           : {}),
-        segments: [
-          {
-            text: stripHtmlValidation('normal', p.content || '', true),
-            ...(images.length ? { images } : {}),
-          },
-        ],
+        segments,
         publishDate: p.publishDate?.toISOString?.() ?? null,
         // Admin-configured [min, max] seconds pause between THREAD segments for
         // this platform (extension_publish.segment_gap). Only meaningful on
@@ -2016,6 +2186,49 @@ export class PostsService {
     }
 
     return { scheduled, failed };
+  }
+
+  /**
+   * Plan-scoped DRAFT -> QUEUE: commit every still-draft post of one operation
+   * plan in a single call. Exists so "activate this plan" is one action on the
+   * plan itself — the client never has to enumerate the plan's post ids, which
+   * it cannot keep in sync anyway (re-running a plan re-materializes them).
+   *
+   * Deliberately a thin expansion over schedulePosts rather than a second commit
+   * path: send-path resolution, the thread-chain flip, the Temporal trigger and
+   * per-post failure reporting must stay identical for both entry points — once
+   * committed, a plan post and a hand-picked post are the same thing. Splitting
+   * them would let the two drift, and the send-path decision is the structural
+   * double-publish guard.
+   *
+   * `alreadyScheduled` is reported separately from `scheduled` so a re-run is
+   * legible: total > 0 with an empty `scheduled` means the plan is already
+   * committed, while total = 0 means the plan has no posts (or is not this org's).
+   */
+  async schedulePlanPosts(
+    orgId: string,
+    operationPlanId: string,
+    publishMethod?: PublishMethod
+  ) {
+    const roots = await this._postRepository.getSchedulablePostRootsByPlan(
+      orgId,
+      operationPlanId
+    );
+    const drafts = roots.filter((p) => p.state === 'DRAFT');
+    // Empty input is safe: schedulePosts short-circuits on an empty id list, so
+    // an already-committed (or unknown) plan is a no-op success, not an error.
+    const result = await this.schedulePosts(
+      orgId,
+      drafts.map((p) => ({
+        id: p.id,
+        ...(publishMethod ? { publishMethod } : {}),
+      }))
+    );
+    return {
+      ...result,
+      total: roots.length,
+      alreadyScheduled: roots.length - drafts.length,
+    };
   }
 
   /** Stamp the given org-owned posts as fetched-now (backfill dedup gate). */

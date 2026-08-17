@@ -7,10 +7,22 @@ import { PostsService } from '../posts.service';
 // never handed to Temporal, and an API post always is. That exclusivity is the
 // structural double-publish guard.
 
-function makeService(posts: any[]) {
-  const getSchedulablePostsByIds = vi.fn().mockResolvedValue(posts);
+function makeService(posts: any[], planRoots?: any[]) {
+  // The plan-scoped entry point expands planId -> ids and then delegates to the
+  // SAME id-based path, so both mocks feed one service: `planRoots` is what the
+  // plan query returns, `posts` what the id query resolves them to.
+  const getSchedulablePostsByIds = vi
+    .fn()
+    .mockImplementation((_org: string, ids: string[]) =>
+      Promise.resolve(posts.filter((p) => ids.includes(p.id)))
+    );
+  const getSchedulablePostRootsByPlan = vi.fn().mockResolvedValue(planRoots ?? []);
   const schedulePostGroupToQueue = vi.fn().mockResolvedValue({ count: 1 });
-  const repo = { getSchedulablePostsByIds, schedulePostGroupToQueue } as any;
+  const repo = {
+    getSchedulablePostsByIds,
+    getSchedulablePostRootsByPlan,
+    schedulePostGroupToQueue,
+  } as any;
 
   const service = new PostsService(
     repo,
@@ -29,7 +41,13 @@ function makeService(posts: any[]) {
     .spyOn(service as any, 'startWorkflow')
     .mockResolvedValue(undefined);
 
-  return { service, getSchedulablePostsByIds, schedulePostGroupToQueue, startWorkflow };
+  return {
+    service,
+    getSchedulablePostsByIds,
+    getSchedulablePostRootsByPlan,
+    schedulePostGroupToQueue,
+    startWorkflow,
+  };
 }
 
 // getPublishMethods answers the UI's "which send paths can I pick?" for EVERY
@@ -368,5 +386,126 @@ describe('PostsService.schedulePosts — persisted publishMethod', () => {
     // Idempotent: reported, not re-flipped.
     expect(res.scheduled).toEqual([{ id: 'p-api', publishMethod: 'api' }]);
     expect(schedulePostGroupToQueue).not.toHaveBeenCalled();
+  });
+});
+
+// Plan-scoped commit: the "activate this plan" action. What matters is that it
+// reduces to the id-based path (same send-path resolution, same double-publish
+// guard) while only ever touching the plan's still-DRAFT roots.
+describe('PostsService.schedulePlanPosts', () => {
+  beforeEach(() => vi.restoreAllMocks());
+
+  const xDraft = (over: Partial<any>) =>
+    draft({
+      integrationId: 'int-x',
+      integration: { providerIdentifier: 'x', disabled: false },
+      settings: JSON.stringify({ __type: 'x' }),
+      ...over,
+    });
+
+  it('commits every DRAFT root of the plan and leaves the rest alone', async () => {
+    const { service, getSchedulablePostsByIds, schedulePostGroupToQueue } = makeService(
+      [xDraft({ id: 'p1', group: 'g1' }), xDraft({ id: 'p2', group: 'g2' })],
+      [
+        { id: 'p1', state: 'DRAFT' },
+        { id: 'p2', state: 'DRAFT' },
+        { id: 'p3', state: 'PUBLISHED' },
+      ]
+    );
+
+    const res = await service.schedulePlanPosts('org-1', 'plan-1');
+
+    // Only the drafts are handed down — a PUBLISHED root is never re-committed.
+    expect(getSchedulablePostsByIds).toHaveBeenCalledWith('org-1', ['p1', 'p2']);
+    expect(res.scheduled).toEqual([
+      { id: 'p1', publishMethod: 'extension' },
+      { id: 'p2', publishMethod: 'extension' },
+    ]);
+    expect(res.failed).toEqual([]);
+    expect(res.total).toBe(3);
+    expect(res.alreadyScheduled).toBe(1);
+    expect(schedulePostGroupToQueue).toHaveBeenCalledTimes(2);
+  });
+
+  it('already-committed plan: no-op success that is distinguishable from an unknown plan', async () => {
+    const { service, schedulePostGroupToQueue } = makeService(
+      [],
+      [{ id: 'p1', state: 'QUEUE' }]
+    );
+
+    const res = await service.schedulePlanPosts('org-1', 'plan-1');
+
+    expect(res.scheduled).toEqual([]);
+    expect(res.failed).toEqual([]);
+    // total > 0 is what separates "already done" from "nothing there".
+    expect(res.total).toBe(1);
+    expect(res.alreadyScheduled).toBe(1);
+    expect(schedulePostGroupToQueue).not.toHaveBeenCalled();
+  });
+
+  it('unknown plan (or another org\'s): empty no-op, never an error', async () => {
+    const { service, getSchedulablePostsByIds, schedulePostGroupToQueue } = makeService(
+      [],
+      []
+    );
+
+    const res = await service.schedulePlanPosts('org-1', 'nope');
+
+    expect(res).toEqual({ scheduled: [], failed: [], total: 0, alreadyScheduled: 0 });
+    // Delegates with an empty id list; the repository short-circuits it, so no
+    // empty IN () ever reaches the DB.
+    expect(getSchedulablePostsByIds).toHaveBeenCalledWith('org-1', []);
+    expect(schedulePostGroupToQueue).not.toHaveBeenCalled();
+  });
+
+  it('applies the body-level publishMethod to every post in the plan', async () => {
+    const { service, schedulePostGroupToQueue, startWorkflow } = makeService(
+      [xDraft({ id: 'p1', group: 'g1' }), xDraft({ id: 'p2', group: 'g2' })],
+      [
+        { id: 'p1', state: 'DRAFT' },
+        { id: 'p2', state: 'DRAFT' },
+      ]
+    );
+
+    const res = await service.schedulePlanPosts('org-1', 'plan-1', 'api');
+
+    expect(res.scheduled).toEqual([
+      { id: 'p1', publishMethod: 'api' },
+      { id: 'p2', publishMethod: 'api' },
+    ]);
+    expect(schedulePostGroupToQueue).toHaveBeenCalledWith('org-1', 'g1', 'API', undefined);
+    // API posts must still each reach Temporal — the plan path changes WHICH
+    // posts are committed, never HOW one is committed.
+    expect(startWorkflow).toHaveBeenCalledTimes(2);
+  });
+
+  it('one unschedulable post never blocks the rest of the plan', async () => {
+    const { service, schedulePostGroupToQueue } = makeService(
+      [
+        xDraft({ id: 'ok', group: 'g-ok' }),
+        // api-only platform with no bound account -> fails on its own
+        draft({
+          id: 'bad',
+          group: 'g-bad',
+          integrationId: null,
+          integration: null,
+          settings: JSON.stringify({ __type: 'mastodon' }),
+          providerIdentifier: 'mastodon',
+        }),
+      ],
+      [
+        { id: 'ok', state: 'DRAFT' },
+        { id: 'bad', state: 'DRAFT' },
+      ]
+    );
+
+    const res = await service.schedulePlanPosts('org-1', 'plan-1');
+
+    expect(res.scheduled).toEqual([{ id: 'ok', publishMethod: 'extension' }]);
+    expect(res.failed).toEqual([
+      { id: 'bad', code: 'ACCOUNT_BINDING_REQUIRED', message: expect.any(String) },
+    ]);
+    expect(res.total).toBe(2);
+    expect(schedulePostGroupToQueue).toHaveBeenCalledTimes(1);
   });
 });

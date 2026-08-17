@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Delete,
@@ -33,6 +34,7 @@ import { ShortLinkService } from '@gitroom/nestjs-libraries/short-linking/short.
 import { CreateTagDto } from '@gitroom/nestjs-libraries/dtos/posts/create.tag.dto';
 import { CreatePostDto } from '@gitroom/nestjs-libraries/dtos/posts/create.post.dto';
 import { MarkExtensionPublishedDto } from '@gitroom/nestjs-libraries/dtos/posts/mark-extension-published.dto';
+import { MarkExtensionPublishFailedDto } from '@gitroom/nestjs-libraries/dtos/posts/mark-extension-publish-failed.dto';
 import { SchedulePostsDto } from '@gitroom/nestjs-libraries/dtos/posts/schedule-posts.dto';
 import {
   AuthorizationActions,
@@ -410,13 +412,31 @@ export class PostsController {
    * here per post. API posts start their Temporal workflow; extension posts stay
    * QUEUE for the extension publish-due loop. Returns per-post scheduled/failed
    * so one unbindable platform never blocks the rest.
+   *
+   * The batch is named EITHER by explicit `posts` (hand-picked, each with its own
+   * optional send path and date) OR by `planId` (every still-DRAFT post of one
+   * operation plan, the "activate this plan" action). Both together is rejected:
+   * merging them would leave it ambiguous which posts the body-level
+   * `publishMethod` applies to, and the two carry per-post choices differently.
    */
   @Post('/schedule')
   async schedulePosts(
     @GetOrgFromRequest() org: Organization,
     @Body() body: SchedulePostsDto
   ) {
-    return this._postsService.schedulePosts(org.id, body.posts);
+    if (body.planId && body.posts?.length) {
+      throw new BadRequestException(
+        'Provide either `planId` or `posts`, not both'
+      );
+    }
+    if (body.planId) {
+      return this._postsService.schedulePlanPosts(
+        org.id,
+        body.planId,
+        body.publishMethod
+      );
+    }
+    return this._postsService.schedulePosts(org.id, body.posts!);
   }
 
   @Post('/separate-posts')
@@ -444,7 +464,8 @@ export class PostsController {
       org.id,
       id,
       body.releaseURL,
-      body.releaseId
+      body.releaseId,
+      body.segments
     );
   }
 
@@ -453,17 +474,23 @@ export class PostsController {
    * so flip the row QUEUE → ERROR with the reason instead of leaving it in
    * QUEUE to be re-offered forever. Org-scoped; a row already PUBLISHED is
    * never touched.
+   *
+   * `segments` makes a PARTIAL thread failure recordable: the segments that did
+   * publish are marked PUBLISHED with their own permalinks and only the rest
+   * becomes ERROR. Optional, so an older extension keeps the all-or-nothing
+   * behaviour.
    */
   @Patch('/:id/extension-publish-failed')
   markExtensionPublishFailed(
     @GetOrgFromRequest() org: Organization,
     @Param('id') id: string,
-    @Body() body: { error?: string }
+    @Body() body: MarkExtensionPublishFailedDto
   ) {
     return this._postsService.markPublishFailedFromExtension(
       org.id,
       id,
-      body?.error
+      body?.error,
+      body?.segments
     );
   }
 

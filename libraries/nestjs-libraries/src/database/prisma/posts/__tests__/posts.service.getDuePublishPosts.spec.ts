@@ -5,10 +5,20 @@ import { PostsService } from '../posts.service';
 // repository (claim), media resolution (updateMedia → mediaService) and the
 // extension publish config (segment gaps).
 function makeService(
-  opts: { rows?: any[]; providerIds?: string[]; segmentGaps?: any } = {}
+  opts: {
+    rows?: any[];
+    providerIds?: string[];
+    segmentGaps?: any;
+    chainNodes?: any[];
+  } = {}
 ) {
   const repo: any = {
     claimDueExtensionPublishPosts: vi.fn().mockResolvedValue(opts.rows ?? []),
+    // Thread children of the claimed roots; empty means every item is a
+    // single-segment post.
+    getExtensionPublishChainNodes: vi
+      .fn()
+      .mockResolvedValue(opts.chainNodes ?? []),
   };
   const integrationManager: any = {
     extensionPublishProviderIds: vi.fn().mockReturnValue(opts.providerIds ?? []),
@@ -56,7 +66,7 @@ describe('PostsService.getDuePublishPosts', () => {
 
     expect(due).toHaveLength(1);
     expect(due[0].segments).toEqual([
-      { text: 'hello world', images: ['https://cdn.example.com/a.png'] },
+      { postId: 'post1', text: 'hello world', images: ['https://cdn.example.com/a.png'] },
     ]);
   });
 
@@ -77,7 +87,7 @@ describe('PostsService.getDuePublishPosts', () => {
 
     const { due } = await svc.getDuePublishPosts('org-1', 10);
 
-    expect(due[0].segments).toEqual([{ text: 'no pictures here' }]);
+    expect(due[0].segments).toEqual([{ postId: 'post2', text: 'no pictures here' }]);
   });
 
   it('publishes text-only when the stored image field is malformed', async () => {
@@ -97,7 +107,7 @@ describe('PostsService.getDuePublishPosts', () => {
 
     const { due } = await svc.getDuePublishPosts('org-1', 10);
 
-    expect(due[0].segments).toEqual([{ text: 'still fine' }]);
+    expect(due[0].segments).toEqual([{ postId: 'post3', text: 'still fine' }]);
   });
 
   it('stamps the platform-resolved segmentGapSeconds on each due item', async () => {
@@ -324,5 +334,154 @@ describe('PostsService.getDuePublishPosts', () => {
     const { due } = await svc.getDuePublishPosts('org-1', 10);
 
     expect(due[0]).not.toHaveProperty('segmentGapSeconds');
+  });
+});
+
+// Thread reconstruction. A chain is claimed by its ANCHOR only (the due query is
+// roots-only) and delivered as one multi-segment item — before this, a root with
+// children was excluded from the query outright and never published at all.
+describe('PostsService.getDuePublishPosts — thread chains', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  const root = (over: Partial<any> = {}) => ({
+    id: 'anchor',
+    group: 'g1',
+    content: 'part 1',
+    image: '[]',
+    settings: '{}',
+    title: null,
+    publishDate: new Date('2026-07-01T00:00:00.000Z'),
+    integration: null,
+    ...over,
+  });
+
+  const child = (over: Partial<any>) => ({
+    group: 'g1',
+    image: '[]',
+    ...over,
+  });
+
+  it('expands an anchor into ordered segments by walking parentPostId', async () => {
+    const { svc } = makeService({
+      rows: [root()],
+      // Deliberately out of order: order must come from the parent links, not
+      // from the row order the DB happened to return.
+      chainNodes: [
+        child({ id: 'c2', parentPostId: 'c1', content: 'part 3' }),
+        child({ id: 'anchor', parentPostId: null, content: 'part 1' }),
+        child({ id: 'c1', parentPostId: 'anchor', content: 'part 2' }),
+      ],
+    });
+
+    const { due } = await svc.getDuePublishPosts('org-1', 10);
+
+    expect(due).toHaveLength(1);
+    expect(due[0].segments).toEqual([
+      { postId: 'anchor', text: 'part 1' },
+      { postId: 'c1', text: 'part 2' },
+      { postId: 'c2', text: 'part 3' },
+    ]);
+  });
+
+  it('resolves the anchor media and drops media on thread continuations', async () => {
+    const { svc } = makeService({
+      rows: [
+        root({ image: JSON.stringify([{ path: 'https://cdn.example.com/a.png' }]) }),
+      ],
+      chainNodes: [
+        child({
+          id: 'c1',
+          parentPostId: 'anchor',
+          content: 'part 2',
+          image: JSON.stringify([{ path: 'https://cdn.example.com/b.png' }]),
+        }),
+      ],
+    });
+
+    const { due } = await svc.getDuePublishPosts('org-1', 10);
+
+    // A thread continuation is a reply/comment whose poster takes text only, and
+    // the extension REJECTS an item carrying images past segment 0. A rejected
+    // item never leaves Post.state=QUEUE, so emitting them would re-offer this
+    // post on every poll forever. Plan thread parts really can carry media
+    // (materializePlanPosts writes `image` on every chain node), so this is the
+    // case that keeps a threaded plan post publishable at all.
+    expect(due[0].segments).toEqual([
+      { postId: 'anchor', text: 'part 1', images: ['https://cdn.example.com/a.png'] },
+      { postId: 'c1', text: 'part 2' },
+    ]);
+  });
+
+  it('ignores same-group rows that are not reachable from the anchor', async () => {
+    const { svc } = makeService({
+      rows: [root()],
+      chainNodes: [
+        child({ id: 'c1', parentPostId: 'anchor', content: 'part 2' }),
+        // Shares the group but hangs off nothing in this chain — corrupt data
+        // must not silently become an extra segment.
+        child({ id: 'orphan', parentPostId: 'ghost', content: 'should not post' }),
+      ],
+    });
+
+    const { due } = await svc.getDuePublishPosts('org-1', 10);
+
+    expect(due[0].segments).toEqual([
+      { postId: 'anchor', text: 'part 1' },
+      { postId: 'c1', text: 'part 2' },
+    ]);
+  });
+
+  it('terminates on a cyclic parent link instead of hanging the poll', async () => {
+    const { svc } = makeService({
+      rows: [root()],
+      chainNodes: [
+        child({ id: 'c1', parentPostId: 'anchor', content: 'part 2' }),
+        child({ id: 'anchor', parentPostId: 'c1', content: 'cycle' }),
+      ],
+    });
+
+    const { due } = await svc.getDuePublishPosts('org-1', 10);
+
+    // Bounded by the node count — the guarantee that matters is that it returns.
+    expect(due[0].segments.length).toBeLessThanOrEqual(3);
+    expect(due[0].segments[0]).toEqual({ postId: 'anchor', text: 'part 1' });
+  });
+
+  it('keeps chains separate when several anchors are claimed in one poll', async () => {
+    const { svc } = makeService({
+      rows: [
+        root({ id: 'a1', group: 'g1', content: 'A1' }),
+        root({ id: 'a2', group: 'g2', content: 'B1' }),
+      ],
+      chainNodes: [
+        child({ id: 'a1c', group: 'g1', parentPostId: 'a1', content: 'A2' }),
+        child({ id: 'a2c', group: 'g2', parentPostId: 'a2', content: 'B2' }),
+      ],
+    });
+
+    const { due } = await svc.getDuePublishPosts('org-1', 10);
+
+    expect(due[0].segments).toEqual([
+      { postId: 'a1', text: 'A1' },
+      { postId: 'a1c', text: 'A2' },
+    ]);
+    expect(due[1].segments).toEqual([
+      { postId: 'a2', text: 'B1' },
+      { postId: 'a2c', text: 'B2' },
+    ]);
+  });
+
+  it('queries chain nodes once for the whole batch, by the claimed groups', async () => {
+    const { svc, repo } = makeService({
+      rows: [root({ id: 'a1', group: 'g1' }), root({ id: 'a2', group: 'g2' })],
+    });
+
+    await svc.getDuePublishPosts('org-1', 10);
+
+    expect(repo.getExtensionPublishChainNodes).toHaveBeenCalledTimes(1);
+    expect(repo.getExtensionPublishChainNodes).toHaveBeenCalledWith('org-1', [
+      'g1',
+      'g2',
+    ]);
   });
 });

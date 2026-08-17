@@ -1,4 +1,12 @@
-import { IsOptional, IsString, MaxLength } from 'class-validator';
+import { Type } from 'class-transformer';
+import {
+  IsArray,
+  IsOptional,
+  IsString,
+  MaxLength,
+  ValidateNested,
+} from 'class-validator';
+import { PublishedSegmentDto } from './published-segment.dto';
 
 /**
  * Body for the extension publish-on-success callback (PATCH
@@ -25,4 +33,17 @@ export class MarkExtensionPublishedDto {
   @IsString()
   @MaxLength(512)
   releaseId?: string;
+
+  /**
+   * Per-segment results for a THREAD. The fields above describe the anchor only,
+   * so without this every follow-up segment is marked PUBLISHED with no URL —
+   * on every successful thread, not just a failing one — and is therefore never
+   * eligible for metrics. Optional for version skew: an older extension omits it
+   * and the follow-up segments keep the URL-less treatment.
+   */
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => PublishedSegmentDto)
+  segments?: PublishedSegmentDto[];
 }

@@ -2249,11 +2249,10 @@ export class PostsRepository {
   /**
    * Extension publish-due: QUEUE posts due to publish (publishDate <= now) on an
    * extension-routed integration, that the browser extension should publish
-   * in-browser. Single-segment only for now — a post that is the ROOT of a
-   * thread with children is skipped (native thread reconstruction for
-   * extension-published platforms is a follow-up), so children are never
-   * stranded mid-chain. Ordered oldest-first so a backlog drains in schedule
-   * order.
+   * in-browser. ROOTS only — a thread's children are never offered on their own;
+   * they ride along as extra segments of their anchor's item (see
+   * getExtensionPublishChainNodes), which is also why they cannot be claimed
+   * twice. Ordered oldest-first so a backlog drains in schedule order.
    */
   /**
    * WHERE for "this QUEUE post is due to be published by the extension": due +
@@ -2287,8 +2286,7 @@ export class PostsRepository {
       deletedAt: null,
       state: State.QUEUE,
       publishDate: { lte: now },
-      parentPostId: null, // roots only
-      childrenPost: { none: {} }, // single-segment only (no thread children)
+      parentPostId: null, // roots only — children ride along as segments
       // Engage replies must NEVER be offered to the extension publish queue:
       // the due-item shape carries no reply target, so the extension would
       // publish one as a brand-NEW post (X) or reject it forever for lacking a
@@ -2308,6 +2306,10 @@ export class PostsRepository {
 
   private static readonly EXTENSION_DUE_SELECT = {
     id: true,
+    // One group = one channel's anchor + its thread chain. It is how a claimed
+    // root is expanded into its segments (getExtensionPublishChainNodes) and how
+    // the whole chain is settled once the extension reports back.
+    group: true,
     content: true,
     image: true,
     settings: true,
@@ -2329,6 +2331,143 @@ export class PostsRepository {
       },
     },
   } as const;
+
+  /**
+   * Every non-deleted node of the given publish groups, for expanding claimed
+   * ROOTS into their thread segments. One group = one channel's anchor + its
+   * chain — the invariant materializePlanPosts and schedulePostGroupToQueue both
+   * maintain — so the group key is what links a root to its children.
+   *
+   * Returns a flat list (the caller walks parentPostId to order it) rather than
+   * a nested include: a chain has no fixed depth, and a nested select would cap
+   * it at whatever depth was hard-coded.
+   */
+  getExtensionPublishChainNodes(organizationId: string, groups: string[]) {
+    if (!groups.length) return Promise.resolve([]);
+    return this._post.model.post.findMany({
+      where: {
+        organizationId,
+        group: { in: groups },
+        deletedAt: null,
+      },
+      select: {
+        id: true,
+        group: true,
+        parentPostId: true,
+        content: true,
+        image: true,
+      },
+    });
+  }
+
+  /**
+   * Mark SPECIFIC chain nodes PUBLISHED, each with its own permalink — the
+   * precise counterpart of publishExtensionChainChildren, used when the
+   * extension reports per-segment results.
+   *
+   * Nodes are addressed by id (never by position in the reported list): the
+   * chain can change between the due-offer and the callback, and a positional
+   * match would then stamp a live permalink onto the wrong row.
+   *
+   * QUEUE-only guard makes it idempotent — a replayed callback is a no-op, and a
+   * node another path already settled is left alone. Chain length is bounded by
+   * the plan's thread ceiling (a handful), so a loop of guarded updates is
+   * cheaper to reason about than one statement per column.
+   */
+  async publishExtensionChainNodes(
+    organizationId: string,
+    nodes: Array<{ id: string; url?: string; releaseId?: string }>
+  ) {
+    let count = 0;
+    for (const node of nodes) {
+      const res = await this._post.model.post.updateMany({
+        where: {
+          id: node.id,
+          organizationId,
+          deletedAt: null,
+          state: State.QUEUE,
+        },
+        data: {
+          state: 'PUBLISHED',
+          error: null,
+          // Only overwrite when the extension actually recovered one: a
+          // confirmed-but-URL-less send must not blank an existing value.
+          ...(node.url ? { releaseURL: node.url } : {}),
+          ...(node.releaseId ? { releaseId: node.releaseId } : {}),
+        },
+      });
+      count += res.count;
+    }
+    return { count };
+  }
+
+  /**
+   * Mark SPECIFIC chain nodes ERROR — the segments of a partially-published
+   * thread that never went out. Addressed by id rather than by group so the
+   * segments that DID publish are left untouched.
+   */
+  failExtensionChainNodesByIds(
+    organizationId: string,
+    ids: string[],
+    error: string
+  ) {
+    if (!ids.length) return Promise.resolve({ count: 0 });
+    return this._post.model.post.updateMany({
+      where: {
+        id: { in: ids },
+        organizationId,
+        deletedAt: null,
+        state: State.QUEUE,
+      },
+      data: { state: 'ERROR', error },
+    });
+  }
+
+  /**
+   * Settle the CHILDREN of a chain the extension published as one task. It
+   * reports back against the anchor's id only, so without this the child rows
+   * stay QUEUE forever and the stale sweep eventually flips them to ERROR with a
+   * reason that names the wrong cause.
+   *
+   * Marked PUBLISHED with NO releaseURL/releaseId on purpose: the extension
+   * captures one permalink for the thread, and copying it onto every child would
+   * make a single platform post look like N to every path that keys off
+   * releaseId (metrics sync, analytics). A URL-less PUBLISHED row is already an
+   * accepted shape here — see markPublishedFromExtension.
+   *
+   * QUEUE-only guard keeps it idempotent: a repeated callback is a no-op.
+   */
+  publishExtensionChainChildren(organizationId: string, group: string) {
+    return this._post.model.post.updateMany({
+      where: {
+        organizationId,
+        group,
+        deletedAt: null,
+        parentPostId: { not: null },
+        state: State.QUEUE,
+      },
+      data: { state: 'PUBLISHED', error: null },
+    });
+  }
+
+  /**
+   * Failure-path mirror of {@link publishExtensionChainChildren}: an anchor that
+   * failed means no thread was posted, so its children must not be left QUEUE to
+   * be re-offered (they never can be — they are not roots) nor swept later under
+   * a misleading reason.
+   */
+  failExtensionChainChildren(organizationId: string, group: string, error: string) {
+    return this._post.model.post.updateMany({
+      where: {
+        organizationId,
+        group,
+        deletedAt: null,
+        parentPostId: { not: null },
+        state: State.QUEUE,
+      },
+      data: { state: 'ERROR', error },
+    });
+  }
 
   getDueExtensionPublishPosts(
     organizationId: string,
@@ -2425,6 +2564,32 @@ export class PostsRepository {
           select: { providerIdentifier: true, disabled: true },
         },
       },
+    });
+  }
+
+  /**
+   * Every root post of ONE operation plan that a schedule call could act on,
+   * with its current state. The plan-scoped input to schedulePosts: roots only
+   * (a thread's children are flipped with their anchor, so returning them would
+   * double-process the chain) and soft-deleted rows excluded, so the DRAFT posts
+   * of a plan that was superseded by a re-run never resurface.
+   *
+   * Org-scoped, so a planId belonging to another organization simply matches
+   * nothing — the caller gets an empty batch, never another org's posts.
+   *
+   * Returns non-DRAFT roots too: the caller reports them as already-scheduled,
+   * which is what makes a repeated activation legible (nothing to do) instead of
+   * indistinguishable from an unknown plan (nothing there).
+   */
+  getSchedulablePostRootsByPlan(organizationId: string, operationPlanId: string) {
+    return this._post.model.post.findMany({
+      where: {
+        organizationId,
+        operationPlanId,
+        deletedAt: null,
+        parentPostId: null,
+      },
+      select: { id: true, state: true },
     });
   }
 
