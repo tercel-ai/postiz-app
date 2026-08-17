@@ -28,6 +28,13 @@ export class ScanIngestPostDto {
   @IsString() externalPostId: string;
   @IsString() externalPostUrl: string;
   @IsString() authorUsername: string;
+  /**
+   * The post's own title where the platform has one (Quora question, Reddit /
+   * HN / dev.to / Medium headline). Optional: X and LinkedIn have no title, and
+   * an older extension build sends none — it folded the title into postContent
+   * instead, which stays valid (postSearchText treats both shapes alike).
+   */
+  @IsOptional() @IsString() title?: string;
   @IsString() postContent: string;
   @IsDateString() postPublishedAt: string;
 
@@ -142,6 +149,7 @@ export function scanIngestPostToRawPost(p: ScanIngestPostDto): RawPost {
     authorFollowers: p.authorFollowers,
     channelFollowers: p.channelFollowers,
     authorAvatarUrl: p.authorAvatarUrl,
+    title: p.title,
     postContent: p.postContent,
     postPublishedAt: new Date(p.postPublishedAt),
     metricLikes: p.metricLikes ?? 0,

@@ -5,6 +5,7 @@ import {
   GenerationHistory,
   GenerationHistoryEntry,
 } from './generation-history';
+import { opportunityFullText } from '../opportunity-text';
 
 interface SentReply {
   id: string;
@@ -35,6 +36,7 @@ interface SentReply {
   opportunity: {
     platform: string;
     externalPostUrl: string;
+    title?: string | null;
     postContent: string;
     authorUsername: string;
     authorDisplayName?: string;
@@ -119,7 +121,7 @@ export const SentCardReddit: FC<SentCardRedditProps> = ({
         </span>
       </div>
       <p className="text-xs text-gray-500 mb-1 truncate">
-        {opportunity.postContent.slice(0, 60)}…
+        {opportunityFullText(opportunity).slice(0, 60)}…
       </p>
 
       {/* Matched keywords — why this opportunity surfaced */}

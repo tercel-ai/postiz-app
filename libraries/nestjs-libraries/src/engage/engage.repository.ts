@@ -210,6 +210,17 @@ function minDate(ds: (Date | null)[]): Date | null {
 }
 
 /**
+ * A one-line label for an opportunity in the dashboard highlights: its own
+ * title where the platform has one, else the opening of the body. Rows stored
+ * before the title column existed have a null title and a postContent that
+ * still begins with the title, so the fallback stays right for them too.
+ */
+function highlightTitle(o: { title?: string | null; postContent: string }): string {
+  const title = (o.title ?? '').trim();
+  return (title || o.postContent).slice(0, 80);
+}
+
+/**
  * Pull the reply author (engageAuthor) out of a Post.settings JSON blob. Returns
  * null when settings is absent/unparseable or carries no engageAuthor.
  */
@@ -517,7 +528,7 @@ export class EngageRepository {
         id: true, platform: true, externalPostId: true, externalPostUrl: true,
         channelId: true, channelName: true, channelFollowers: true,
         authorUsername: true, authorDisplayName: true, authorFollowers: true,
-        authorAvatarUrl: true, postContent: true, postPublishedAt: true,
+        authorAvatarUrl: true, title: true, postContent: true, postPublishedAt: true,
         metricLikes: true, metricReplies: true, metricRetweets: true,
         metricQuotes: true, metricBookmarks: true, metricViews: true,
         metricShares: true, metricSaves: true, metricScore: true,
@@ -1197,11 +1208,17 @@ export class EngageRepository {
     });
     if (!kw) throw new NotFoundException('Keyword not found');
     // Posts are global now — preview any post whose content matches the keyword.
-    // The trigram GIN index on postContent backs this ILIKE.
+    // Title is matched alongside the body: it holds text that used to live in
+    // postContent (a Quora question, a Reddit headline), so matching the body
+    // alone would drop every post that mentions the keyword only in its title.
+    // Trigram GIN indexes on BOTH columns back this ILIKE (engage-indexes.sql).
     return this._opportunity.model.engageOpportunity.findMany({
       where: {
         deletedAt: null,
-        postContent: { contains: kw.keyword, mode: 'insensitive' },
+        OR: [
+          { postContent: { contains: kw.keyword, mode: 'insensitive' } },
+          { title: { contains: kw.keyword, mode: 'insensitive' } },
+        ],
       },
       orderBy: { postPublishedAt: 'desc' },
       take: limit,
@@ -1210,6 +1227,7 @@ export class EngageRepository {
         platform: true,
         externalPostUrl: true,
         authorUsername: true,
+        title: true,
         postContent: true,
         postPublishedAt: true,
         metricScore: true,
@@ -1645,6 +1663,7 @@ export class EngageRepository {
       authorDisplayName: opportunity.authorDisplayName,
       authorFollowers: opportunity.authorFollowers,
       authorAvatarUrl: opportunity.authorAvatarUrl,
+      title: opportunity.title,
       postContent: opportunity.postContent,
       postPublishedAt: opportunity.postPublishedAt,
       // Objective scores — identical across all orgs
@@ -2512,18 +2531,18 @@ export class EngageRepository {
           select: {
             opportunityId: true,
             scoreKeyword: true,
-            opportunity: { select: { postContent: true } },
+            opportunity: { select: { title: true, postContent: true } },
           },
         }),
         this._opportunity.model.engageOpportunity.findFirst({
           where: oppWhere,
           orderBy: { scoreHeat: 'desc' },
-          select: { id: true, scoreHeat: true, postContent: true },
+          select: { id: true, scoreHeat: true, title: true, postContent: true },
         }),
         this._opportunity.model.engageOpportunity.findFirst({
           where: oppWhere,
           orderBy: { scoreAuthority: 'desc' },
-          select: { id: true, scoreAuthority: true, postContent: true },
+          select: { id: true, scoreAuthority: true, title: true, postContent: true },
         }),
       ]);
 
@@ -2571,20 +2590,22 @@ export class EngageRepository {
       avgScoreRecency: round1(oppAgg._avg.scoreRecency),
       avgScoreTracked: round1(stateAgg._avg.scoreTracked),
       distribution,
+      // The post's own title when it has one; otherwise the opening of the body,
+      // which is all a title-less platform (X, LinkedIn) ever offers.
       topByKeyword: bestKeyword && {
         id: bestKeyword.opportunityId,
         score: bestKeyword.scoreKeyword,
-        title: bestKeyword.opportunity.postContent.slice(0, 80),
+        title: highlightTitle(bestKeyword.opportunity),
       },
       topByHeat: bestHeat && {
         id: bestHeat.id,
         score: bestHeat.scoreHeat,
-        title: bestHeat.postContent.slice(0, 80),
+        title: highlightTitle(bestHeat),
       },
       topByAuthority: bestAuthority && {
         id: bestAuthority.id,
         score: bestAuthority.scoreAuthority,
-        title: bestAuthority.postContent.slice(0, 80),
+        title: highlightTitle(bestAuthority),
       },
       trackedCount,
     };
@@ -2681,6 +2702,7 @@ export class EngageRepository {
               id: true,
               platform: true,
               externalPostUrl: true,
+              title: true,
               postContent: true,
               authorUsername: true,
               authorDisplayName: true,
@@ -3015,6 +3037,7 @@ export class EngageRepository {
               id: true,
               platform: true,
               externalPostUrl: true,
+              title: true,
               postContent: true,
               authorUsername: true,
               authorDisplayName: true,
@@ -3187,6 +3210,7 @@ export class EngageRepository {
               id: true,
               platform: true,
               externalPostUrl: true,
+              title: true,
               postContent: true,
               authorUsername: true,
               authorDisplayName: true,
@@ -4043,6 +4067,7 @@ export class EngageRepository {
             id: true,
             platform: true,
             externalPostUrl: true,
+            title: true,
             postContent: true,
             authorUsername: true,
             authorDisplayName: true,

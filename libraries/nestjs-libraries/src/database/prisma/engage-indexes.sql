@@ -15,5 +15,12 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;
 CREATE INDEX IF NOT EXISTS "EngageOpportunity_postContent_trgm_idx"
   ON "EngageOpportunity" USING GIN ("postContent" gin_trgm_ops);
 
+-- The same preview now also matches the title, which holds text that used to
+-- live inside postContent (Quora's question, Reddit's/HN's headline). Without
+-- its own trigram index the added OR would degrade the whole preview to a
+-- sequential scan of the global table.
+CREATE INDEX IF NOT EXISTS "EngageOpportunity_title_trgm_idx"
+  ON "EngageOpportunity" USING GIN ("title" gin_trgm_ops);
+
 CREATE INDEX IF NOT EXISTS "EngageOpportunity_platform_externalPostUrl_idx"
   ON "EngageOpportunity"("platform", "externalPostUrl");

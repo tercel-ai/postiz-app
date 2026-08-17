@@ -248,7 +248,11 @@ function toRawPost(p: Record<string, unknown>): RawPost {
     // null. Community authority is driven by the subreddit's audience size below.
     authorFollowers: undefined,
     channelFollowers: (p.subreddit_subscribers as number) ?? 0,
-    postContent: `${p.title as string}${p.selftext ? '\n' + (p.selftext as string) : ''}`.trim(),
+    // Title and body are stored apart (EngageOpportunity.title) — a link post
+    // has a headline and NO selftext at all, and gluing the two together left
+    // the drafter unable to tell which half it was replying to.
+    title: ((p.title as string) ?? '').trim() || undefined,
+    postContent: ((p.selftext as string) ?? '').trim(),
     postPublishedAt: new Date(((p.created_utc as number) ?? 0) * 1000),
     metricLikes: 0,
     metricReplies: 0,

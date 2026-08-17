@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { scorePost, RawPost } from '../engage-scorer';
+import { postSearchText, scorePost, RawPost } from '../engage-scorer';
 import type { EngageKeyword } from '@prisma/client';
 
 // Test fixtures
@@ -29,6 +29,43 @@ function makePost(overrides: Partial<RawPost> = {}): RawPost {
     ...overrides,
   };
 }
+
+describe('title is part of the text every keyword is matched against', () => {
+  // Scanners used to concatenate the title into postContent, so reading the
+  // body alone saw everything. Now that the title is its own column, a post
+  // whose keyword appears ONLY in the title (a Reddit/HN link submission has
+  // no body at all) must still qualify — otherwise splitting the field would
+  // silently stop those posts from ever becoming opportunities.
+  const kw = [makeKeyword('apcore')];
+
+  it('scores a post whose keyword appears only in the title', () => {
+    const post = makePost({
+      platform: 'reddit',
+      title: 'apcore vs MCP: which runtime governs tool calls?',
+      postContent: '',
+    });
+    expect(scorePost(post, kw)).not.toBeNull();
+  });
+
+  it('still rejects a post that mentions the keyword in neither field', () => {
+    const post = makePost({ title: 'Weekend reading', postContent: 'unrelated' });
+    expect(scorePost(post, kw)).toBeNull();
+  });
+
+  describe('postSearchText', () => {
+    it('puts the title first, on its own line', () => {
+      expect(postSearchText({ title: 'Q?', postContent: 'A.' })).toBe('Q?\nA.');
+    });
+
+    it('falls back to the body alone on a title-less platform', () => {
+      expect(postSearchText({ postContent: 'just a tweet' })).toBe('just a tweet');
+    });
+
+    it('returns the title alone when the body is empty (link post)', () => {
+      expect(postSearchText({ title: 'headline', postContent: '' })).toBe('headline');
+    });
+  });
+});
 
 describe('engage-scorer', () => {
   describe('postMatchesKeyword — CJK keywords (fix #9)', () => {

@@ -502,8 +502,20 @@ IMPORTANT: The final reply must stay ${charLimit}${brandReminder}.`;
       /[&<>]/g,
       (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]!,
     );
+    // The title is a separate element, not glued onto the body: on Quora it is
+    // the QUESTION the reply must answer, and folding it into the body would
+    // let the model read it as the answer's opening line and continue from it
+    // instead of addressing it. Omitted entirely on title-less platforms
+    // (X, LinkedIn) and on rows stored before the title column existed.
+    const title = this._sanitizeForPrompt(opportunity.title ?? "", 300)
+      .replace(
+        /[&<>]/g,
+        (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]!,
+      )
+      .trim();
+    const titleLine = title ? `<title>${title}</title>\n` : "";
     return `<original_post author="${author}">
-${content}
+${titleLine}${content}
 </original_post>
 
 Write a reply that directly addresses the post's central point and uses its specific context.`;

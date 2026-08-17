@@ -7,6 +7,7 @@ import {
 import {
   RawPost,
   ScoredPost,
+  postSearchText,
   scorePost,
 } from '@gitroom/nestjs-libraries/engage/engage-scorer';
 import { EngageIntentClassifierService } from '@gitroom/nestjs-libraries/engage/engage-intent-classifier.service';
@@ -93,6 +94,7 @@ export interface OpportunityRow {
   authorDisplayName: string | null;
   authorFollowers: number | null;
   authorAvatarUrl: string | null;
+  title: string | null;
   postContent: string;
   postPublishedAt: Date;
   metricLikes: number;
@@ -122,6 +124,7 @@ export function opportunityToRawPost(o: OpportunityRow): RawPost {
     authorDisplayName: o.authorDisplayName ?? undefined,
     authorFollowers: o.authorFollowers ?? undefined,
     authorAvatarUrl: o.authorAvatarUrl ?? undefined,
+    title: o.title ?? undefined,
     postContent: o.postContent,
     postPublishedAt: o.postPublishedAt,
     metricLikes: o.metricLikes,
@@ -367,7 +370,12 @@ export class EngageScanIngestService {
 
   /** Attach intent tags/primary/score to each scored post (batched LLM call). */
   async classifyIntents(scored: ScoredPost[]): Promise<ScoredPost[]> {
-    const batchInput = scored.map((p) => ({ id: p.id, content: p.postContent }));
+    // Title included: on a Q&A platform the question carries the intent
+    // ("how do I…", "X vs Y") far more clearly than the answer body does.
+    const batchInput = scored.map((p) => ({
+      id: p.id,
+      content: postSearchText(p),
+    }));
     const results = await this._intentClassifier.classifyBatch(batchInput);
     return scored.map((p) => ({
       ...p,
@@ -432,6 +440,7 @@ export class EngageScanIngestService {
             authorDisplayName: post.authorDisplayName ?? null,
             authorFollowers: post.authorFollowers ?? null,
             authorAvatarUrl: post.authorAvatarUrl ?? null,
+            title: post.title ?? null,
             postContent: post.postContent,
             postPublishedAt: post.postPublishedAt,
             scoreHeat: post.scoreHeat,
@@ -461,6 +470,15 @@ export class EngageScanIngestService {
             // authority tracks growth.
             externalPostUrl: post.externalPostUrl,
             channelFollowers: post.channelFollowers ?? null,
+            // Title and body move together or not at all. A row stored before
+            // the title column existed holds "title\nbody" in postContent, so
+            // writing the title alone would leave the title duplicated in both
+            // fields; and a scraper that sends no title (X, LinkedIn, an older
+            // extension) must not be able to rewrite the body it did not split
+            // — hence the whole pair is left untouched in that case.
+            ...(post.title
+              ? { title: post.title, postContent: post.postContent }
+              : {}),
             scoreHeat: post.scoreHeat,
             scoreAuthority: post.scoreAuthority,
             scoreRecency: post.scoreRecency,
@@ -541,7 +559,7 @@ export class EngageScanIngestService {
           `\\b${kw.keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`,
           'i'
         );
-        if (kw.enabled && pattern.test(post.postContent)) {
+        if (kw.enabled && pattern.test(postSearchText(post))) {
           hitMap.set(kw.id, (hitMap.get(kw.id) ?? 0) + 1);
         }
       }

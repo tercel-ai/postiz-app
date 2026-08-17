@@ -7,6 +7,7 @@ import { useVariables } from '@gitroom/react/helpers/variable.context';
 import { EXTENSION_MESSAGE } from '@gitroom/helpers/extension/brand';
 import { useReplyPosting } from './use-reply-posting';
 import type { Opportunity } from './opportunity-card';
+import { opportunityFullText } from '../opportunity-text';
 
 interface ReplyPanelProps {
   opportunity: Opportunity;
@@ -428,7 +429,7 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
             @{opportunity.authorUsername}
           </p>
           <p className="text-sm text-gray-300 line-clamp-3">
-            {opportunity.postContent}
+            {opportunityFullText(opportunity)}
           </p>
           {opportunity.matchedKeywords &&
             opportunity.matchedKeywords.length > 0 && (

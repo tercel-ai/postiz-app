@@ -35,6 +35,7 @@ interface SentReply {
     id: string;
     platform: string;
     externalPostUrl: string;
+    title?: string | null;
     postContent: string;
     authorUsername: string;
     authorDisplayName?: string;

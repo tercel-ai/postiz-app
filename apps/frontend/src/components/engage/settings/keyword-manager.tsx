@@ -7,6 +7,7 @@ import { useToaster } from '@gitroom/react/toaster/toaster';
 import { invalidateEngageRefresh } from '@gitroom/frontend/components/engage/signal-feed/use-engage-visit-refresh';
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
+import { opportunityFullText } from '../opportunity-text';
 
 dayjs.extend(relativeTime);
 
@@ -37,6 +38,7 @@ interface PostSnippet {
   platform: string;
   externalPostUrl: string;
   authorUsername: string;
+  title?: string | null;
   postContent: string;
   postPublishedAt: string;
   metricScore: number;
@@ -92,7 +94,7 @@ function KeywordPostsPanel({ keywordId }: { keywordId: string }) {
           </span>
           <div className="flex-1 min-w-0">
             <p className="text-xs text-gray-300 truncate group-hover:text-white transition-colors">
-              {p.postContent.slice(0, 120)}
+              {opportunityFullText(p).slice(0, 120)}
             </p>
             <div className="flex items-center gap-3 mt-1">
               <span className="text-[11px] text-gray-600">

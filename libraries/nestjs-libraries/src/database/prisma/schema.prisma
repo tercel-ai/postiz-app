@@ -1354,6 +1354,14 @@ model EngageOpportunity {
   // collected (Reddit — authority uses channelFollowers instead).
   authorFollowers   Int?
   authorAvatarUrl   String?
+  // The post's own title, kept SEPARATE from the body. Question-and-answer and
+  // link-aggregator platforms (Quora, Reddit, HN, dev.to, Medium) publish a
+  // title that is not a summary of the body but the thing the body responds to
+  // — a reply drafted without it answers the wrong question. Null on platforms
+  // with no title concept (X, LinkedIn) and on rows ingested before this field
+  // existed, whose postContent still carries "title\nbody" concatenated; every
+  // reader must therefore treat a null title as "not known", never as "none".
+  title             String?
   postContent       String
   postPublishedAt   DateTime
 

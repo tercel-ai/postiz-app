@@ -14,6 +14,13 @@ export interface RawPost {
   authorFollowers?: number;  // post author's real follower count (X); null on Reddit
   channelFollowers?: number; // community/channel audience size (Reddit subreddit_subscribers)
   authorAvatarUrl?: string;
+  /**
+   * The post's own title, where the platform has one (Quora question, Reddit /
+   * HN / dev.to / Medium headline). Undefined on X and LinkedIn, and on rows
+   * stored before the field existed — in those the title, if any, is still
+   * folded into postContent. Read it through postSearchText(), never on its own.
+   */
+  title?: string;
   postContent: string;
   postPublishedAt: Date;
   isFromTrackedAccount?: boolean;
@@ -49,6 +56,26 @@ export interface ScoredPost extends RawPost {
   intentScore?: number;
 }
 
+/**
+ * The post's full searchable text: title first, then body.
+ *
+ * Every text consumer — the keyword hard filter, the keyword hit counters, the
+ * intent classifier, the reply drafter — MUST go through this. The title used
+ * to be concatenated into postContent by each scanner, so reading postContent
+ * alone was equivalent; now that it is a column of its own, reading postContent
+ * alone silently drops a Quora question or a Reddit headline from the match,
+ * and a post whose keyword only appears in its title stops being an
+ * opportunity at all.
+ */
+export function postSearchText(
+  post: Pick<RawPost, 'title' | 'postContent'>
+): string {
+  const title = (post.title ?? '').trim();
+  const body = post.postContent ?? '';
+  if (!title) return body;
+  return body ? `${title}\n${body}` : title;
+}
+
 // ─── Main entry point ─────────────────────────────────────────────────────────
 
 export function scorePost(
@@ -56,8 +83,9 @@ export function scorePost(
   keywords: Pick<EngageKeyword, 'keyword' | 'type' | 'enabled'>[]
 ): ScoredPost | null {
   // Layer 1: keyword hard filter — must hit at least one enabled keyword
+  const searchText = postSearchText(post);
   const hits = keywords.filter(
-    (k) => k.enabled && postMatchesKeyword(post.postContent, k.keyword)
+    (k) => k.enabled && postMatchesKeyword(searchText, k.keyword)
   );
   if (hits.length === 0) return null;
 

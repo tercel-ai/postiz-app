@@ -5,6 +5,7 @@ import { validate } from 'class-validator';
 import {
   EngageScanIngestDto,
   ScanUnitSelectorDto,
+  scanIngestPostToRawPost,
 } from '../scan-ingest.dto';
 
 async function errorsFor(payload: unknown): Promise<string[]> {
@@ -41,6 +42,23 @@ describe('EngageScanIngestDto', () => {
     const errs = await errorsFor({ posts: [{ platform: 'x' }] });
     expect(errs).toContain('isString'); // missing taskId + required post fields
     expect(errs.length).toBeGreaterThan(0);
+  });
+
+  it('accepts an optional title and carries it into the RawPost', async () => {
+    expect(
+      await errorsFor({
+        taskId: 'cur1',
+        posts: [{ ...validPost, title: 'GPT-5 is out' }],
+      })
+    ).toEqual([]);
+    expect(
+      scanIngestPostToRawPost({ ...validPost, title: 'GPT-5 is out' } as any).title
+    ).toBe('GPT-5 is out');
+  });
+
+  it('still accepts a post with no title — older extension builds send none', async () => {
+    expect(await errorsFor({ taskId: 'cur1', posts: [validPost] })).toEqual([]);
+    expect(scanIngestPostToRawPost(validPost as any).title).toBeUndefined();
   });
 
   it('rejects a non-ISO publish date', async () => {

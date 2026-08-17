@@ -2,6 +2,7 @@
 
 import { FC } from 'react';
 import clsx from 'clsx';
+import { opportunityFullText } from '../opportunity-text';
 
 export interface Opportunity {
   id: string;
@@ -11,6 +12,7 @@ export interface Opportunity {
   authorDisplayName?: string;
   // Subreddit avatar (Reddit only); null for other platforms or unmonitored channels.
   channelAvatar?: string | null;
+  title?: string | null;
   postContent: string;
   postPublishedAt: string;
   // Per-org first-seen time; this is the column "Sort by Newest" orders on.
@@ -131,7 +133,7 @@ export const OpportunityCard: FC<OpportunityCardProps> = ({
           </div>
 
           {/* Content */}
-          <p className="text-gray-200 text-sm line-clamp-2">{opp.postContent}</p>
+          <p className="text-gray-200 text-sm line-clamp-2">{opportunityFullText(opp)}</p>
 
           {/* Matched keywords — why this post surfaced for this org */}
           {opp.matchedKeywords && opp.matchedKeywords.length > 0 && (
