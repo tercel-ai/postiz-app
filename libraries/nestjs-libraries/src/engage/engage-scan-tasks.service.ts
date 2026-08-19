@@ -196,18 +196,27 @@ export class EngageScanTasksService {
    */
   async ingestCollectedPosts(
     orgId: string,
-    posts: RawPost[]
-  ): Promise<{ accepted: number; keywordMatched: number; scoreFiltered: number; reason?: string }> {
-    if (!posts.length) return { accepted: 0, keywordMatched: 0, scoreFiltered: 0, reason: 'no posts' };
+    collected: RawPost[]
+  ): Promise<{ accepted: number; keywordMatched: number; scoreFiltered: number; staleFiltered: number; reason?: string }> {
+    if (!collected.length) return { accepted: 0, keywordMatched: 0, scoreFiltered: 0, staleFiltered: 0, reason: 'no posts' };
+    // Drop posts already past their platform's TTL up front: the test is
+    // org-independent (platform + publish time), so doing it once here beats
+    // repeating it inside every subscribing org's ingest, and it gives the
+    // caller a counter — without one, "collected 100, stored 0" is undiagnosable.
+    const { kept: posts, dropped: staleFiltered } =
+      await this._ingest.filterExpiredByPublishTime(collected);
+    if (!posts.length) {
+      return { accepted: 0, keywordMatched: 0, scoreFiltered: 0, staleFiltered, reason: 'all posts older than their platform opportunity TTL' };
+    }
     // Score + persist against EVERY enabled config (legacy null-project + each
     // project-scoped one), so a post matching a project-only keyword is kept and
     // its project-scoped opportunity state is written — not silently dropped
     // because only the null-project config was consulted.
     const ctxs = await this._engageRepo.getEnabledConfigsForOrg(orgId);
-    if (!ctxs.length) return { accepted: 0, keywordMatched: 0, scoreFiltered: 0, reason: 'no engage config found for org' };
+    if (!ctxs.length) return { accepted: 0, keywordMatched: 0, scoreFiltered: 0, staleFiltered, reason: 'no engage config found for org' };
     const withKeywords = ctxs.filter((c) => c.keywords.length);
     if (!withKeywords.length) {
-      return { accepted: 0, keywordMatched: 0, scoreFiltered: 0, reason: 'org has no enabled keywords configured' };
+      return { accepted: 0, keywordMatched: 0, scoreFiltered: 0, staleFiltered, reason: 'org has no enabled keywords configured' };
     }
     const minScore = Number(process.env.ENGAGE_MIN_SCORE ?? 60);
 
@@ -219,15 +228,15 @@ export class EngageScanTasksService {
       const scored = allScored.filter((p) => p.score >= minScore);
       keywordMatched += allScored.length;
       scoreFiltered += allScored.length - scored.length;
-      this.logger.log(`[collected-ingest] projectId=${(ctx as any).projectId ?? null} posts=${posts.length} keywordMatched=${allScored.length} scoreFiltered=${allScored.length - scored.length} minScore=${minScore} keywords=[${ctx.keywords.map((k) => k.keyword).join(', ')}]`);
+      this.logger.log(`[collected-ingest] projectId=${(ctx as any).projectId ?? null} posts=${posts.length} staleFiltered=${staleFiltered} keywordMatched=${allScored.length} scoreFiltered=${allScored.length - scored.length} minScore=${minScore} keywords=[${ctx.keywords.map((k) => k.keyword).join(', ')}]`);
       if (!scored.length) continue;
       accepted += await this._ingest.ingestForOrg(ctx as any, posts);
     }
     if (!keywordMatched) {
       const configured = [...new Set(withKeywords.flatMap((c) => c.keywords.map((k) => k.keyword)))].join(', ');
-      return { accepted: 0, keywordMatched: 0, scoreFiltered, reason: `no posts matched any keyword (configured: ${configured})` };
+      return { accepted: 0, keywordMatched: 0, scoreFiltered, staleFiltered, reason: `no posts matched any keyword (configured: ${configured})` };
     }
-    return { accepted, keywordMatched, scoreFiltered };
+    return { accepted, keywordMatched, scoreFiltered, staleFiltered };
   }
 
   /** Complete (if any) + claim next batch. Bootstrap = call with no `completed`. */
@@ -291,8 +300,14 @@ export class EngageScanTasksService {
       return 0;
     }
 
-    const posts = completed.posts ?? [];
-    const nextCursor = this._deriveCursor(posts, completed.nextCursor);
+    const rawPosts = completed.posts ?? [];
+    // Cursor is derived from the RAW yield, before the TTL gate: the cursor
+    // tracks how far the scanner has read, not what we chose to keep. Deriving
+    // it from the filtered set would replay the same expired page forever.
+    const nextCursor = this._deriveCursor(rawPosts, completed.nextCursor);
+    // Org-independent gate, applied once for the whole fan-out.
+    const { kept: posts, dropped: staleFiltered } =
+      await this._ingest.filterExpiredByPublishTime(rawPosts);
 
     let ctxs;
     try {
@@ -302,7 +317,7 @@ export class EngageScanTasksService {
         unit.scanKey
       );
       this.logger.log(
-        `[scan-ingest] unit=${unit.platform}/${unit.scanType}/${unit.scanKey} posts=${posts.length} ctxs=${ctxs.length}`
+        `[scan-ingest] unit=${unit.platform}/${unit.scanType}/${unit.scanKey} posts=${posts.length} staleFiltered=${staleFiltered} ctxs=${ctxs.length}`
       );
     } catch (err) {
       // Could not even resolve subscribers — release WITHOUT advancing so the

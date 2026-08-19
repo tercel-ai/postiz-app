@@ -119,6 +119,13 @@ export function scorePost(
     : computeCommunityAuthorityScore(post.channelFollowers ?? null);
   const scoreRecency = computeRecencyScore(post.postPublishedAt);
   const scoreTracked = post.isFromTrackedAccount ? 5 : 0;
+  // Ceiling is 105, not 100, and that is deliberate: the four base dimensions
+  // (keyword 35 + heat 45 + authority 15 + recency 5) already sum to 100, and
+  // scoreTracked is a +5 bonus stacked on top of a perfect base — a post that
+  // maxes out every dimension scores 105. Do not "fix" this with a min(…, 100)
+  // clamp: it would collapse tracked and non-tracked perfect posts onto the
+  // same total and silently shift every stored score against the >=60 ingest
+  // gate and the feed's default min-score.
   const score =
     scoreKeyword + scoreHeat + scoreAuthority + scoreRecency + scoreTracked;
 

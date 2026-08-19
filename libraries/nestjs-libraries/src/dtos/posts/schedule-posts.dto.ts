@@ -71,4 +71,22 @@ export class SchedulePostsDto {
   @IsOptional()
   @IsIn(['extension', 'api'])
   publishMethod?: 'extension' | 'api';
+
+  // Plan-scoped only: restrict activation to roots on these platforms
+  // (Post.providerIdentifier, e.g. 'x' | 'reddit' | 'linkedin'; case-insensitive).
+  // Omit to activate every platform the plan has. Every response field —
+  // `total`, `alreadyScheduled`, `scheduled`, `failed` — is scoped to the
+  // filtered set, not the whole plan, so a caller that filtered to `['x']`
+  // never sees counts for posts it didn't ask to touch.
+  //
+  // Rejected together with `posts` — a hand-picked id list is already an
+  // explicit selection, so a platform-shaped filter on top of it would be
+  // ambiguous (narrow the list, or ignored?). That check lives in the
+  // controller (mirroring the `planId`+`posts` mutual exclusion just above):
+  // `@ValidateIf` can only skip a field's OWN validators, it cannot reject a
+  // field for another field's presence.
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  platforms?: string[];
 }

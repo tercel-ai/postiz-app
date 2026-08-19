@@ -8,6 +8,7 @@ import {
   IsIn,
   IsInt,
   IsNumber,
+  IsObject,
   IsOptional,
   IsString,
   Max,
@@ -66,6 +67,31 @@ export class SaveEngageConfigDto {
   @IsOptional()
   @IsBoolean()
   enabled?: boolean;
+
+  /**
+   * Unattended reply mode for this project's Engage.
+   *   'off'    — the plan's daily reply targets stay a send-time CEILING on
+   *              replies a user initiates (the behaviour before this existed).
+   *   'review' — the backend drafts up to the day's budget and parks them in
+   *              Awaiting review; a human sends.
+   *   'auto'   — the browser extension additionally sends them, unattended.
+   * Requires a projectId: the driver only reads project-scoped configs, so a
+   * mode set on the legacy null-project row would be silently inert.
+   */
+  @IsOptional()
+  @IsIn(['off', 'review', 'auto'])
+  autoReplyMode?: 'off' | 'review' | 'auto';
+
+  /**
+   * Per-PLATFORM reply policy, keyed by platform:
+   *   { "reddit": { autoReplyEnabled, windowStart, windowEnd, timezone,
+   *                 defaultStrategy } }
+   * Refines autoReplyMode (which decides WHETHER this project replies at all)
+   * with WHERE and WHEN. Replaces the key wholesale — send the full map.
+   */
+  @IsOptional()
+  @IsObject()
+  replyPolicies?: Record<string, unknown>;
 
   // Opaque aisee-core products.id. Omit for the legacy, single (null-project)
   // config (project-scoped-post-engage-design.md §8/§11).
@@ -319,36 +345,19 @@ export class UpdateTrackedAccountDto {
 }
 
 // ─── Reply Accounts (回复账号 — our own Integration accounts) ─────────────────
+//
+// Per-account auto-reply time window / default strategy moved to
+// EngageConfig.replyPolicies (per-platform, via SaveEngageConfigDto) — this DTO
+// only still owns whether the account may reply at all.
 
 export class UpdateReplyAccountDto {
   @IsOptional()
   @IsBoolean()
   engageEnabled?: boolean;
 
-  @IsOptional()
-  @IsBoolean()
-  autoReplyEnabled?: boolean;
-
-  @IsOptional()
-  @IsString()
-  autoReplyTimeStart?: string; // 'HH:MM' 24h
-
-  @IsOptional()
-  @IsString()
-  autoReplyTimeEnd?: string;
-
-  @IsOptional()
-  @IsString()
-  autoReplyTimezone?: string; // IANA timezone
-
-  @IsOptional()
-  @IsString()
-  defaultStrategy?: string;
-
-  // Disambiguates which project's reply-account row to update, now that an
-  // integration may have one row per project (UNIQUE(configId,integrationId),
-  // not a global UNIQUE(integrationId) — project-scoped-post-engage-
-  // design.md §3.1).
+  // Required in practice: engage.service.updateReplyAccountSettings writes
+  // IntegrationProject (integration, project), which has no legacy
+  // null-project fallback to write to instead.
   @IsOptional()
   @IsString()
   projectId?: string;

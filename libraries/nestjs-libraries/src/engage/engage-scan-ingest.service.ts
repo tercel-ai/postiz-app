@@ -15,6 +15,12 @@ import {
   EngageScorePhase,
   recordEngageScores,
 } from '@gitroom/nestjs-libraries/database/prisma/api-usage/api-usage.service';
+import {
+  EngageScanConfigService,
+  OpportunityTtlDays,
+  fallbackOpportunityTtlDaysMap,
+  opportunityExpiryCutoff,
+} from '@gitroom/nestjs-libraries/engage/engage-scan-config.service';
 
 // Max concurrent upserts per phase. The posts array is unbounded (a scan unit's
 // full yield), so an un-chunked Promise.all can exhaust the Prisma pool.
@@ -164,8 +170,56 @@ export class EngageScanIngestService {
     private readonly _oppState: PrismaRepository<'engageOpportunityState'>,
     private readonly _keyword: PrismaRepository<'engageKeyword'>,
     private readonly _intentClassifier: EngageIntentClassifierService,
-    private readonly _tx: PrismaTransaction
+    private readonly _tx: PrismaTransaction,
+    // Optional so a caller that constructs this service by hand (the Temporal
+    // scan activity, and the unit tests that build it directly) still works —
+    // the TTL gate then resolves from env/defaults instead of Settings.
+    private readonly _scanConfig?: EngageScanConfigService
   ) {}
+
+  /**
+   * Per-platform opportunity TTL. A Settings read failure degrades to
+   * env/defaults rather than throwing: the TTL gate is a filter, and losing it
+   * entirely (or aborting an ingest over it) is worse than using the defaults.
+   */
+  private async _ttlDays(): Promise<OpportunityTtlDays> {
+    if (this._scanConfig) {
+      try {
+        return await this._scanConfig.getOpportunityTtlDaysMap();
+      } catch {
+        // fall through
+      }
+    }
+    return fallbackOpportunityTtlDaysMap();
+  }
+
+  /**
+   * Drop posts already published before their platform's TTL cutoff. Such a
+   * post would land as an opportunity that is expired the moment it is written
+   * — no reply can be sent against it — so persisting it only buys an LLM
+   * intent call, a feed row nobody can act on, and a sweep to clean up later.
+   *
+   * Judged per POST, not per scan unit: `attributeExisting` and a mixed-yield
+   * unit can carry more than one platform. A platform with no configured TTL is
+   * never dropped (see opportunityExpiryCutoff).
+   */
+  async filterExpiredByPublishTime<
+    T extends { platform: string; postPublishedAt: Date }
+  >(posts: T[]): Promise<{ kept: T[]; dropped: number }> {
+    if (!posts.length) return { kept: posts, dropped: 0 };
+    const ttl = await this._ttlDays();
+    const now = Date.now();
+    const cutoffs = new Map<string, Date | null>();
+    const kept = posts.filter((p) => {
+      if (!cutoffs.has(p.platform)) {
+        cutoffs.set(p.platform, opportunityExpiryCutoff(p.platform, ttl, now));
+      }
+      const cutoff = cutoffs.get(p.platform);
+      if (!cutoff) return true;
+      return new Date(p.postPublishedAt).getTime() >= cutoff.getTime();
+    });
+    return { kept, dropped: posts.length - kept.length };
+  }
 
   /**
    * Score a scan unit's raw posts for ONE org: mark posts from the org's tracked
@@ -253,7 +307,11 @@ export class EngageScanIngestService {
     // the MIN_SCORE gate will drop (the low buckets), then gate for persistence.
     const allScored = this.scoreAllForOrg(posts, ctx);
     this.recordScoreDistribution(ctx.organizationId, 'scanned', allScored);
-    const scored = allScored.filter((p) => p.score >= MIN_SCORE);
+    const gated = allScored.filter((p) => p.score >= MIN_SCORE);
+    if (!gated.length) return 0;
+    // TTL gate BEFORE intent classification: an already-expired post must not
+    // cost an LLM call. `persisted` telemetry then counts what really persists.
+    const { kept: scored } = await this.filterExpiredByPublishTime(gated);
     if (!scored.length) return 0;
     this.recordScoreDistribution(ctx.organizationId, 'persisted', scored);
     const classified = await this.classifyIntents(scored);
@@ -349,8 +407,12 @@ export class EngageScanIngestService {
       idByExternal.has(`${post.platform}:${post.externalPostId}`)
     );
     if (!writable.length) return 0;
+    // Back-attribution must not resurrect a post that is already past its
+    // platform's TTL — the org would gain a state row it can never act on.
+    const { kept: fresh } = await this.filterExpiredByPublishTime(writable);
+    if (!fresh.length) return 0;
 
-    for (const batch of chunk(writable, PERSIST_BATCH_SIZE)) {
+    for (const batch of chunk(fresh, PERSIST_BATCH_SIZE)) {
       await Promise.all(
         batch.map((post) => {
           const opportunityId = idByExternal.get(
@@ -365,7 +427,7 @@ export class EngageScanIngestService {
         })
       );
     }
-    return writable.length;
+    return fresh.length;
   }
 
   /** Attach intent tags/primary/score to each scored post (batched LLM call). */
@@ -401,7 +463,13 @@ export class EngageScanIngestService {
     rawPosts: ScoredPost[]
   ): Promise<void> {
     if (!rawPosts.length) return;
-    const normalizedPosts = rawPosts.map(normalizeExternalPost);
+    // Authoritative TTL gate. ingestForOrg already filters (before paying for
+    // intent classification), but the Temporal scan activity calls this method
+    // directly, so the only place that can guarantee no expired post is ever
+    // written is here, immediately before the writes.
+    const { kept: fresh } = await this.filterExpiredByPublishTime(rawPosts);
+    if (!fresh.length) return;
+    const normalizedPosts = fresh.map(normalizeExternalPost);
 
     // Dedup by the GLOBAL natural key so the same post id/URL appearing twice in one
     // unit's yield (overlapping pages on X since_id / Reddit `after`) does not

@@ -41,11 +41,11 @@ function makeReq() {
 
 function build(overrides: Record<string, any> = {}) {
   const engageService = {
-    getOpportunityForReply: vi.fn(async () => ({ platform: 'x' })),
+    getOpportunityForReply: vi.fn(async () => ({ id: 'opp1', projectId: null, platform: 'x' })),
     reserveReplyGeneration: vi.fn(async () => ({ cost: 3, taskId: 't1' })),
     settleReplyGeneration: vi.fn(async () => undefined),
     releaseReplyGeneration: vi.fn(async () => undefined),
-    recordGeneration: vi.fn(async () => undefined),
+    recordGeneration: vi.fn(async (..._args: any[]) => undefined),
     ...overrides,
   };
   const draftService = {
@@ -53,7 +53,12 @@ function build(overrides: Record<string, any> = {}) {
       yield 'hello world';
     }),
   };
-  const controller = new EngageController(engageService as any, draftService as any);
+  const controller = new EngageController(
+    engageService as any,
+    draftService as any,
+    {} as any,
+    {} as any
+  );
   return { controller, engageService };
 }
 
@@ -78,7 +83,7 @@ describe('EngageController.generateDraft — billing contract', () => {
     // Every successful generation is persisted to the opportunity's version
     // history, linked to the BillingRecord taskId charged for it.
     expect(engageService.recordGeneration).toHaveBeenCalledTimes(1);
-    const [org, oppId, entry] = engageService.recordGeneration.mock.calls[0];
+    const [org, oppId, entry] = engageService.recordGeneration.mock.calls[0] as any[];
     expect(org).toBe(ORG);
     expect(oppId).toBe('opp1');
     expect(entry).toMatchObject({
@@ -91,6 +96,38 @@ describe('EngageController.generateDraft — billing contract', () => {
       billingTaskId: 't1',
     });
     expect(typeof entry.createdAt).toBe('string');
+  });
+
+  it('uses the state id only for lookup, then bills and records against its resolved context', async () => {
+    const { controller, engageService } = build({
+      getOpportunityForReply: vi.fn(async () => ({
+        id: 'shared-opportunity',
+        stateId: 'project-state',
+        projectId: 'project-1',
+        platform: 'x',
+      })),
+    });
+    const { res } = makeRes();
+    const { req } = makeReq();
+
+    await controller.generateDraft(ORG, 'project-state', BODY, req, res);
+
+    expect(engageService.getOpportunityForReply).toHaveBeenCalledWith(
+      ORG,
+      'project-state',
+      undefined
+    );
+    expect(engageService.reserveReplyGeneration).toHaveBeenCalledWith(
+      ORG,
+      'medium',
+      'shared-opportunity'
+    );
+    expect(engageService.recordGeneration).toHaveBeenCalledWith(
+      ORG,
+      'shared-opportunity',
+      expect.any(Object),
+      'project-1'
+    );
   });
 
   it('does NOT record history when the client aborts mid-stream (nothing delivered)', async () => {

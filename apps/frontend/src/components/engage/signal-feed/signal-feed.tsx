@@ -53,10 +53,8 @@ export function SignalFeed() {
         id: string;
         name: string;
         picture?: string;
-        engageXReplyAccount?: {
-          engageEnabled: boolean;
-          defaultStrategy: string;
-        } | null;
+        /** May Engage reply as this account, for this project. Defaults to true. */
+        engageEnabled?: boolean;
       }>
     >;
   });

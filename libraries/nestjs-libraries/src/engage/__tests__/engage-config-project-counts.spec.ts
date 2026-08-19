@@ -36,7 +36,7 @@ describe('EngageService.getConfig — entitlement.counts project block', () => {
     monitoredChannels: [
       { id: 'c1', platform: 'reddit', channelId: 'r1', enabled: false },
     ],
-    xReplyAccounts: [],
+    replyAccounts: [],
   };
 
   function buildService() {

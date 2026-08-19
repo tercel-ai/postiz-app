@@ -11,8 +11,9 @@ function buildRepo(configFindMany: any) {
   const _config = { model: { engageConfig: { findMany: configFindMany } } } as any;
   return new EngageRepository(
     _config,
-    {} as any, {} as any, {} as any, {} as any, {} as any, {} as any,
-    {} as any, {} as any, {} as any, {} as any, {} as any, {} as any
+    {} as any, {} as any, {} as any, {} as any, {} as any,
+    {} as any,
+        {} as any,   // _integrationProject, {} as any, {} as any, {} as any, {} as any, {} as any
   );
 }
 

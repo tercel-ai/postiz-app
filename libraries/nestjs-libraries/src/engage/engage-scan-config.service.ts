@@ -52,6 +52,119 @@ export type SettingSource = 'db' | 'env' | 'default';
 export const ENGAGE_OPPORTUNITY_TTL_DAYS_KEY = 'engage_opportunity_ttl_days';
 export const DEFAULT_OPPORTUNITY_TTL_DAYS = 7;
 
+// Per-platform opportunity TTL (days). Supersedes the single-value key above,
+// which stays readable as the all-platform fallback so an existing deployment
+// keeps its configured number until an admin edits the per-platform map.
+//
+// A uniform 7 days does not fit every platform: a timeline post is dead within
+// days, while an article or a Q&A answer keeps drawing readers (and stays worth
+// replying to) for weeks. Same shape and resolution style as
+// ENGAGE_SCAN_FRESHNESS_KEY so both admin cards read alike.
+//
+// This TTL now drives TWO gates, both measured against the SAME cutoff
+// (`now - ttlDays[platform]`):
+//   • the sweep that flips a NEW state to EXPIRED (state.createdAt OR the
+//     post's own postPublishedAt — whichever crosses the line first), and
+//   • the ingest gate, which refuses to persist a post already published
+//     before the cutoff (an expired opportunity supports no action, so storing
+//     it only costs an LLM intent call and feed noise).
+export const ENGAGE_OPPORTUNITY_TTL_DAYS_BY_PLATFORM_KEY =
+  'engage_opportunity_ttl_days_by_platform';
+export type OpportunityTtlDays = Record<ScanPlatform, number>;
+export const DEFAULT_OPPORTUNITY_TTL_DAYS_BY_PLATFORM: OpportunityTtlDays = {
+  // Timeline platforms: a reply past ~72h reaches nobody.
+  x: 3,
+  // Front-page cycle is ~a day; a 2-day-old item is off every list.
+  hackernews: 2,
+  // Thread-shaped: still gets traffic through the first week.
+  reddit: 7,
+  linkedin: 7,
+  // Article / Q&A long tail — the case the single 7-day value got wrong.
+  devto: 30,
+  medium: 30,
+  quora: 30,
+};
+
+/**
+ * Env/default-only TTL resolution, for callers that cannot reach Settings (an
+ * activity or service constructed without EngageScanConfigService — unit tests
+ * do this). Mirrors the last two rungs of resolveOpportunityTtlDays, so a
+ * degraded caller still gets the per-platform shape rather than a flat 7.
+ */
+export function fallbackOpportunityTtlDays(platform: ScanPlatform): number {
+  // Same resolver as the Settings-backed path, with no stored values — so the
+  // env and default rungs cannot drift between the two.
+  return resolveOpportunityTtlFor(platform, undefined, null).value;
+}
+
+/** Every platform's env/default TTL — the degraded form of getOpportunityTtlDaysMap. */
+export function fallbackOpportunityTtlDaysMap(): OpportunityTtlDays {
+  return Object.fromEntries(
+    SCANNABLE_PLATFORMS.map((p) => [p, fallbackOpportunityTtlDays(p)])
+  ) as OpportunityTtlDays;
+}
+
+/**
+ * Resolve ONE platform's TTL from already-read Settings values. Pure, so the
+ * single-platform reader and the whole-map reader cannot drift, and so the map
+ * reader can resolve every platform from ONE pair of Settings reads.
+ *
+ * The legacy single value applies only when the per-platform map is entirely
+ * ABSENT, never per missing key. Otherwise a platform added to
+ * SCANNABLE_PLATFORMS later (present in code, missing from the stored map)
+ * would silently inherit the legacy number instead of the default chosen for
+ * it — on a fresh install that legacy key is seeded to 7, so a new article
+ * platform would quietly get 7 days rather than its intended 30.
+ */
+export function resolveOpportunityTtlFor(
+  platform: ScanPlatform,
+  storedMap: Partial<OpportunityTtlDays> | null | undefined,
+  legacyValue: unknown
+): { value: number; source: SettingSource } {
+  const perPlatform = Number(storedMap?.[platform]);
+  if (Number.isFinite(perPlatform) && perPlatform > 0) {
+    return { value: perPlatform, source: 'db' };
+  }
+
+  // Per-platform env override. New platforms get their own name so they never
+  // silently inherit another platform's value (mirrors the freshness window).
+  const envPlatform = Number(
+    process.env[`ENGAGE_${platform.toUpperCase()}_OPPORTUNITY_TTL_DAYS`]
+  );
+  if (Number.isFinite(envPlatform) && envPlatform > 0) {
+    return { value: envPlatform, source: 'env' };
+  }
+
+  if (storedMap === null || storedMap === undefined) {
+    const legacy = Number(legacyValue);
+    if (Number.isFinite(legacy) && legacy > 0) return { value: legacy, source: 'db' };
+  }
+
+  const env = Number(process.env.ENGAGE_OPPORTUNITY_TTL_DAYS);
+  if (Number.isFinite(env) && env > 0) return { value: env, source: 'env' };
+
+  return {
+    value: DEFAULT_OPPORTUNITY_TTL_DAYS_BY_PLATFORM[platform],
+    source: 'default',
+  };
+}
+
+/**
+ * The instant before which a post of `platform` counts as expired. Returns null
+ * for a platform absent from the TTL map: an unknown platform has no configured
+ * lifetime, and the gate must never drop a post it cannot judge (a scanner for a
+ * new platform would otherwise silently ingest nothing until the map is edited).
+ */
+export function opportunityExpiryCutoff(
+  platform: string,
+  ttlDays: Partial<OpportunityTtlDays>,
+  now: number = Date.now()
+): Date | null {
+  const days = ttlDays[platform as ScanPlatform];
+  if (!Number.isFinite(days) || (days as number) <= 0) return null;
+  return new Date(now - (days as number) * 86_400_000);
+}
+
 // Backend ("touch") scan switches — allow disabling server-side Temporal scan
 // per platform so the browser extension can be the sole executor.
 // All default to true (backend scan ON); set to false via /admin/settings to
@@ -292,10 +405,34 @@ export class EngageScanConfigService implements OnModuleInit {
       await this._settings.set(ENGAGE_OPPORTUNITY_TTL_DAYS_KEY, DEFAULT_OPPORTUNITY_TTL_DAYS, {
         type: 'number',
         description:
-          'Days a NEW engage opportunity stays actionable before the scan tick marks it EXPIRED, measured from EngageOpportunityState.createdAt (when this org first matched the post).',
+          'Legacy single-value opportunity TTL (days), kept as the all-platform fallback for engage_opportunity_ttl_days_by_platform.',
         defaultValue: DEFAULT_OPPORTUNITY_TTL_DAYS,
       });
       this.logger.log(`Seeded default ${ENGAGE_OPPORTUNITY_TTL_DAYS_KEY}`);
+    }
+
+    const ttlByPlatform = await this._settings.get(
+      ENGAGE_OPPORTUNITY_TTL_DAYS_BY_PLATFORM_KEY
+    );
+    if (ttlByPlatform === null || ttlByPlatform === undefined) {
+      // Seed from the legacy single value when one is already configured, so an
+      // upgrade is behaviour-preserving: the per-platform defaults only apply to
+      // a deployment that never set the old key. An admin then tunes per
+      // platform from a map that matches what production was already doing.
+      const legacy = Number(opportunityTtl);
+      const seed: OpportunityTtlDays =
+        Number.isFinite(legacy) && legacy > 0
+          ? (Object.fromEntries(
+              SCANNABLE_PLATFORMS.map((p) => [p, legacy])
+            ) as OpportunityTtlDays)
+          : DEFAULT_OPPORTUNITY_TTL_DAYS_BY_PLATFORM;
+      await this._settings.set(ENGAGE_OPPORTUNITY_TTL_DAYS_BY_PLATFORM_KEY, seed, {
+        type: 'object',
+        description:
+          'Days a NEW engage opportunity stays actionable, per platform. Drives both the EXPIRED sweep (state.createdAt OR the post\'s postPublishedAt, whichever is older) and the ingest gate (a post published before now - days is never persisted).',
+        defaultValue: DEFAULT_OPPORTUNITY_TTL_DAYS_BY_PLATFORM,
+      });
+      this.logger.log(`Seeded default ${ENGAGE_OPPORTUNITY_TTL_DAYS_BY_PLATFORM_KEY}`);
     }
 
     for (const [key, description] of [
@@ -427,24 +564,53 @@ export class EngageScanConfigService implements OnModuleInit {
   }
 
   /**
-   * Resolve the opportunity TTL (days) WITH its source: stored setting → env
-   * (ENGAGE_OPPORTUNITY_TTL_DAYS) → default. `source` lets the admin UI show
-   * where the live value came from (same shape as resolveXScanMaxResults).
+   * Resolve ONE platform's opportunity TTL (days) WITH its source:
+   *   per-platform setting → env `ENGAGE_<PLATFORM>_OPPORTUNITY_TTL_DAYS`
+   *     → legacy single-value setting (only when no per-platform map exists)
+   *     → env ENGAGE_OPPORTUNITY_TTL_DAYS
+   *     → per-platform default
+   * `source` lets the admin UI show where the live value came from (same shape
+   * as resolveXScanMaxResults). See resolveOpportunityTtlFor for the rules.
    */
-  async resolveOpportunityTtlDays(): Promise<{ value: number; source: SettingSource }> {
-    const stored = await this._settings.get(ENGAGE_OPPORTUNITY_TTL_DAYS_KEY);
-    if (stored !== null && stored !== undefined) {
-      const n = Number(stored);
-      if (Number.isFinite(n) && n > 0) return { value: n, source: 'db' };
-    }
-    const env = Number(process.env.ENGAGE_OPPORTUNITY_TTL_DAYS);
-    if (Number.isFinite(env) && env > 0) return { value: env, source: 'env' };
-    return { value: DEFAULT_OPPORTUNITY_TTL_DAYS, source: 'default' };
+  async resolveOpportunityTtlDays(
+    platform: ScanPlatform
+  ): Promise<{ value: number; source: SettingSource }> {
+    const [storedMap, legacy] = await this._readTtlSettings();
+    return resolveOpportunityTtlFor(platform, storedMap, legacy);
   }
 
-  /** Effective opportunity TTL (days) only (orchestrator hot path). */
-  async getOpportunityTtlDays(): Promise<number> {
-    return (await this.resolveOpportunityTtlDays()).value;
+  /** Effective TTL (days) for one platform. */
+  async getOpportunityTtlDays(platform: ScanPlatform): Promise<number> {
+    return (await this.resolveOpportunityTtlDays(platform)).value;
+  }
+
+  /**
+   * Every platform's effective TTL from ONE pair of Settings reads. This is the
+   * hot-path reader: the ingest TTL gate runs it per batch (up to three times
+   * per ingest) and the hourly sweeps run it per tick, so resolving platform by
+   * platform would mean 7-14 uncached `findUnique` round-trips each time —
+   * SettingsService.get hits Postgres on every call.
+   */
+  async getOpportunityTtlDaysMap(): Promise<OpportunityTtlDays> {
+    const [storedMap, legacy] = await this._readTtlSettings();
+    return Object.fromEntries(
+      SCANNABLE_PLATFORMS.map((p) => [
+        p,
+        resolveOpportunityTtlFor(p, storedMap, legacy).value,
+      ])
+    ) as OpportunityTtlDays;
+  }
+
+  /** The two Settings keys the TTL chain can consult, read concurrently. */
+  private async _readTtlSettings(): Promise<
+    [Partial<OpportunityTtlDays> | null, unknown]
+  > {
+    return Promise.all([
+      this._settings.get<Partial<OpportunityTtlDays>>(
+        ENGAGE_OPPORTUNITY_TTL_DAYS_BY_PLATFORM_KEY
+      ),
+      this._settings.get(ENGAGE_OPPORTUNITY_TTL_DAYS_KEY),
+    ]);
   }
 }
 

@@ -21,4 +21,28 @@ describe('SchedulePostsDto validation', () => {
     expect(check({ posts: [] })).toEqual(['posts']));
   it('rejects a bad publishMethod', () =>
     expect(check({ planId: 'p', publishMethod: 'carrier-pigeon' })).toEqual(['publishMethod']));
+
+  it('accepts planId with a platforms filter', () =>
+    expect(check({ planId: 'p', platforms: ['x', 'reddit'] })).toEqual([]));
+
+  it('rejects platforms alone — it names no batch by itself', () => {
+    // platforms has no bearing on posts'/planId's own ValidateIf conditions
+    // (they check `!o.posts`/`!o.planId`, not `o.platforms`), so this must
+    // fail exactly like the empty-body case — locked in explicitly since a
+    // careless future edit to the ValidateIf predicates could silently let it
+    // through.
+    expect(check({ platforms: ['x'] }).sort()).toEqual(['planId', 'posts']);
+  });
+
+  it('rejects a non-string entry in platforms', () =>
+    expect(check({ planId: 'p', platforms: [1] })).toEqual(['platforms']));
+
+  // `platforms` + `posts` together is a controller-level 400, not a DTO
+  // validation failure — @ValidateIf can only skip a field's OWN validators,
+  // it cannot reject a field for another field's presence (see the class
+  // comment). This DTO-level check confirms platforms alone still passes when
+  // posts happens to be set, i.e. the rejection genuinely lives elsewhere and
+  // isn't silently absent.
+  it('platforms alongside posts passes DTO validation (the controller rejects the combination)', () =>
+    expect(check({ posts: [{ id: 'p1' }], platforms: ['x'] })).toEqual([]));
 });

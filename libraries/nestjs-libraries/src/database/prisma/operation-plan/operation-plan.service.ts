@@ -145,6 +145,15 @@ export const OPERATION_PLAN_MAX_THREAD_PARTS_KEY = 'operation_plan.max_thread_pa
 // it's visible in the admin Settings UI for observability.
 export const OPERATION_PLAN_PROGRESS_MS_PER_DAY_KEY = 'operation_plan.progress_ms_per_day';
 
+// The LLM is only ever told a content item's DATE must fall in [startAt, endAt]
+// (see the generation prompt) — nothing steers the clock time, so it's free to
+// (and in practice tends to) cluster on round numbers, producing a plan whose
+// posts all fire at the same time of day. This jitter is applied once per
+// content item at MATERIALIZATION time (never re-rolled — see
+// materializePlanPosts), independent of the LLM entirely.
+export const OPERATION_PLAN_PUBLISH_TIME_JITTER_MINUTES_KEY =
+  'operation_plan.publish_time_jitter_minutes';
+
 // Ceiling for the persisted/returned failure reason. Long enough for a full
 // validation sentence, short enough that a provider dumping a payload into its
 // error message cannot bloat the row or every getOverview poll.
@@ -152,6 +161,9 @@ const OPERATION_PLAN_ERROR_MESSAGE_MAX = 500;
 
 const DEFAULT_MAX_DURATION_DAYS = 30;
 const DEFAULT_MAX_THREAD_PARTS = 3;
+// ±30 min: enough to break up same-clock-time clustering without meaningfully
+// drifting from the slot the plan (or the LLM) intended. 0 disables jitter.
+const DEFAULT_PUBLISH_TIME_JITTER_MINUTES = 30;
 
 // An allowlist that can only NARROW the platform set, never widen it: a plan
 // platform must still resolve to a connected Integration (twice — here and at
@@ -464,6 +476,16 @@ export class OperationPlanService implements OnApplicationBootstrap {
           'the prompt states it and over-long threads are truncated. 0 disables threads.',
       },
       {
+        key: OPERATION_PLAN_PUBLISH_TIME_JITTER_MINUTES_KEY,
+        value: DEFAULT_PUBLISH_TIME_JITTER_MINUTES,
+        type: 'number',
+        description:
+          'Random ± minutes applied to each generated post\'s publish time at materialization, ' +
+          'so a plan does not fire every post at the same clock time day after day (the generator ' +
+          'is only told a DATE range, never a time-of-day, so it tends to cluster on round numbers). ' +
+          'Applied once per post, never re-rolled on re-materialize. 0 disables jitter.',
+      },
+      {
         key: OPERATION_PLAN_PROGRESS_MS_PER_DAY_KEY,
         value: OPERATION_PLAN_PROGRESS_PER_DAY_MS_DEFAULT,
         type: 'number',
@@ -557,7 +579,11 @@ export class OperationPlanService implements OnApplicationBootstrap {
         return this._reconcilePending(existing);
       }
       if (existing.status === 'READY') {
-        await this._repo.materializePlanPosts(existing, existing.planPayload);
+        await this._repo.materializePlanPosts(
+          existing,
+          existing.planPayload,
+          await this._resolvePublishTimeJitterMinutes()
+        );
       }
       return this._toRecord(existing);
     }
@@ -1071,7 +1097,11 @@ export class OperationPlanService implements OnApplicationBootstrap {
       errorCode: null,
       errorMessage: null,
     });
-    await this._repo.materializePlanPosts(readyPlan, planPayload);
+    await this._repo.materializePlanPosts(
+      readyPlan,
+      planPayload,
+      await this._resolvePublishTimeJitterMinutes()
+    );
   }
 
   // Engage keyword set for the plan's reply policies, by priority:
@@ -1231,6 +1261,17 @@ export class OperationPlanService implements OnApplicationBootstrap {
     return Number.isFinite(value) && value >= 0
       ? Math.floor(value)
       : DEFAULT_MAX_THREAD_PARTS;
+  }
+
+  /** Resolve the publish-time jitter (± minutes) from Settings. Mirrors _resolveMaxThreadParts. */
+  private async _resolvePublishTimeJitterMinutes(): Promise<number> {
+    const raw = await this._settingsService?.get<number>(
+      OPERATION_PLAN_PUBLISH_TIME_JITTER_MINUTES_KEY
+    );
+    const value = Number(raw);
+    return Number.isFinite(value) && value >= 0
+      ? Math.floor(value)
+      : DEFAULT_PUBLISH_TIME_JITTER_MINUTES;
   }
 
   // Enforce the two thread invariants the schema deliberately does NOT (no
@@ -2036,7 +2077,11 @@ export class OperationPlanService implements OnApplicationBootstrap {
       errorCode: null,
       errorMessage: null,
     });
-    await this._repo.materializePlanPosts(readyPlan, readyPlan.planPayload);
+    await this._repo.materializePlanPosts(
+      readyPlan,
+      readyPlan.planPayload,
+      await this._resolvePublishTimeJitterMinutes()
+    );
     return this._toRecord(readyPlan);
   }
 
@@ -2128,6 +2173,28 @@ export class OperationPlanService implements OnApplicationBootstrap {
       estimatedCompletedDays: Math.min(totalDays - 1, Math.floor(ratio * totalDays)),
       percent: Math.round(ratio * 100),
     };
+  }
+
+  /**
+   * The project's currently-active plan id, if any (READY, startsAt<=now<=
+   * endsAt — same definition getActivePlan / the engage reply pacing gate
+   * already use, so "active" never means two different things depending on
+   * which caller asks). Minimal by design: a caller that needs the full
+   * detail (posts, engage stats) follows up with GET /operation-plans/:id —
+   * this exists so a client doesn't have to invent its OWN notion of "which
+   * plan is active" (e.g. a client-side cache keyed by a DIFFERENT flow) to
+   * get that id in the first place.
+   */
+  async getActivePlanId(
+    organizationId: string,
+    projectId: string
+  ): Promise<{ id: string | null }> {
+    const plan = await this._repo.getActivePlan(
+      organizationId,
+      projectId,
+      new Date()
+    );
+    return { id: plan?.id ?? null };
   }
 
   async getOverview(organizationId: string, planId: string) {

@@ -394,7 +394,7 @@ export class AdminDiagnosticsController {
   /**
    * GET /admin/diagnostics/engage-dead-reply-accounts
    *
-   * Finds EngageXReplyAccount rows with engageEnabled=true but whose linked
+   * Finds project bindings with engageEnabled=true but whose linked
    * Integration has refreshNeeded=true or disabled=true. These accounts will
    * silently fail to send or auto-reply without any user-visible error.
    */
@@ -408,7 +408,7 @@ export class AdminDiagnosticsController {
         id: a.id,
         organizationId: a.organizationId,
         integrationId: a.integrationId,
-        autoReplyEnabled: a.autoReplyEnabled,
+        projectId: a.projectId,
         integration: {
           id: a.integration.id,
           name: a.integration.name,
@@ -419,7 +419,10 @@ export class AdminDiagnosticsController {
       })),
       summary: {
         count: deadAccounts.length,
-        autoReplyAffected: deadAccounts.filter((a) => a.autoReplyEnabled).length,
+        // Distinct ACCOUNTS, not bindings: one dead integration shared by three
+        // projects is one thing to fix, and counting it three times would make
+        // the number read as a bigger outage than it is.
+        affectedIntegrations: new Set(deadAccounts.map((a) => a.integrationId)).size,
         healthy: deadAccounts.length === 0,
       },
     };
@@ -499,7 +502,7 @@ export class AdminDiagnosticsController {
       },
       engageReplies: {
         deadReplyAccounts: deadReplyAccounts.summary.count,
-        autoReplyAffected: deadReplyAccounts.summary.autoReplyAffected,
+        affectedIntegrations: deadReplyAccounts.summary.affectedIntegrations,
         replyErrors: replyErrors.summary.count,
         healthy: deadReplyAccounts.summary.healthy && replyErrors.summary.healthy,
       },

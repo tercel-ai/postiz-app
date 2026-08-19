@@ -24,7 +24,10 @@ function makeScoredPost(n: number): ScoredPost {
     channelName: 'r/x',
     authorUsername: `u${n}`,
     postContent: `post ${n}`,
-    postPublishedAt: new Date('2026-01-01T00:00:00Z'),
+    // Inside reddit's opportunity TTL — the ingest gate drops anything older,
+    // which would starve every persistence assertion below. Relative to now so
+    // the fixture cannot rot.
+    postPublishedAt: new Date(Date.now() - 60 * 60 * 1000),
     metricLikes: 0,
     metricReplies: 0,
     metricRetweets: 0,

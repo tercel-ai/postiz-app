@@ -58,6 +58,37 @@ type ResolvedRedditTarget = ResolverRedditTarget;
  * NEGATIVE: real dev.to tag ids are positive, so a synthetic id can never be
  * mistaken for, or collide with, a real one in the editor's tag picker.
  */
+/**
+ * Offset `date` by a uniform-random amount in [-jitterMinutes, +jitterMinutes],
+ * clamped to the SAME UTC calendar day `date` already falls on.
+ *
+ * The generator (see the plan-generation prompt) is only ever told a content
+ * item's DATE must fall in [startAt, endAt] — nothing steers the clock time —
+ * so left alone it tends to cluster on round numbers, and a plan can end up
+ * firing every post at the same time of day. The clamp exists because a plan's
+ * per-day pacing (reply targets, dailyTargets overrides, the UI's calendar
+ * grouping) all key off the UTC calendar day; jitter crossing midnight would
+ * silently move a post into a different day's bucket than the one it was
+ * planned for.
+ *
+ * `jitterMinutes <= 0` returns `date` unchanged (0 = disabled).
+ */
+export function applyPublishTimeJitter(date: Date, jitterMinutes: number): Date {
+  if (!(jitterMinutes > 0)) return date;
+  const offsetMs = (Math.random() * 2 - 1) * jitterMinutes * 60_000;
+  const dayStart = Date.UTC(
+    date.getUTCFullYear(),
+    date.getUTCMonth(),
+    date.getUTCDate()
+  );
+  const dayEndExclusive = dayStart + 24 * 60 * 60 * 1000;
+  const clamped = Math.min(
+    Math.max(date.getTime() + offsetMs, dayStart),
+    dayEndExclusive - 1
+  );
+  return new Date(clamped);
+}
+
 export function normalizeDevtoTags(
   raw: unknown
 ): { value: number; label: string }[] {
@@ -291,9 +322,32 @@ export class OperationPlanRepository {
     });
   }
 
-  async materializePlanPosts(plan: OperationPlan, planPayload: unknown) {
+  /**
+   * @param jitterMinutes ± minutes of random offset applied once per content
+   *   item (see applyPublishTimeJitter) — 0 (default) reproduces the exact
+   *   pre-jitter behaviour, so existing/test callers that omit it are
+   *   unaffected.
+   */
+  async materializePlanPosts(
+    plan: OperationPlan,
+    planPayload: unknown,
+    jitterMinutes = 0
+  ) {
     const payload = planPayload as GeneratedPlanPayload | null;
     const contentItems = Array.isArray(payload?.contentItems) ? payload!.contentItems : [];
+    // One jittered Date per content ITEM, not per chain node: every node of a
+    // thread (anchor + parts) reads the same item.utcDate today, and jittering
+    // per-node would scatter one thread's segments across different moments
+    // instead of keeping them anchored together (segment-to-segment pacing is a
+    // separate, later mechanism — segmentGapSeconds at publish time).
+    const jitteredDateByItem = new WeakMap<object, Date>();
+    const jitteredPublishDate = (item: { utcDate: string }): Date => {
+      const cached = jitteredDateByItem.get(item);
+      if (cached) return cached;
+      const jittered = applyPublishTimeJitter(new Date(item.utcDate), jitterMinutes);
+      jitteredDateByItem.set(item, jittered);
+      return jittered;
+    };
     // Expand every platform post into a chain: the anchor (parentPostId=null)
     // followed by its thread parts, each linked to the PREVIOUS node's id. This
     // mirrors the main editor (createOrUpdatePost) and is exactly what the
@@ -417,7 +471,7 @@ export class OperationPlanRepository {
           // parentPostId chains thread parts to the anchor; null on the anchor.
           parentPostId: node.parentPostId,
           state: 'DRAFT' as const,
-          publishDate: new Date(item.utcDate),
+          publishDate: jitteredPublishDate(item),
           organizationId: plan.organizationId,
           integrationId: null,
           // No bound account at generation time (see comment above), so this is

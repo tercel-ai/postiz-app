@@ -5,6 +5,13 @@ import {
   normalizeExternalPostUrl,
 } from '../engage-scan-ingest.service';
 
+// Fixtures must be published INSIDE the platform's opportunity TTL, or the
+// ingest gate drops them before any of the persistence mechanics under test
+// run. Relative to now, not a literal date, so these specs cannot rot.
+function recentlyPublished(): Date {
+  return new Date(Date.now() - 60 * 60 * 1000);
+}
+
 function makeScoredPost(n: number): any {
   return {
     id: `p${n}`,
@@ -13,7 +20,7 @@ function makeScoredPost(n: number): any {
     externalPostUrl: `https://reddit.com/${n}`,
     authorUsername: `u${n}`,
     postContent: `react and nextjs ${n}`,
-    postPublishedAt: new Date('2026-06-17T10:00:00.000Z'),
+    postPublishedAt: recentlyPublished(),
     channelId: 'webdev',
     metricLikes: 0,
     metricReplies: 0,
@@ -239,7 +246,7 @@ function rawPost(over: any = {}): any {
     externalPostUrl: 'https://reddit.com/1',
     authorUsername: 'u1',
     postContent: 'I love react and nextjs',
-    postPublishedAt: new Date('2026-06-17T10:00:00.000Z'),
+    postPublishedAt: recentlyPublished(),
     channelId: 'webdev',
     metricLikes: 0, metricReplies: 0, metricRetweets: 0, metricQuotes: 0,
     metricScore: 200, metricComments: 50,
@@ -310,7 +317,7 @@ function oppRow(over: any = {}): any {
     authorFollowers: null,
     authorAvatarUrl: null,
     postContent: 'react and nextjs are great',
-    postPublishedAt: new Date('2026-06-17T10:00:00.000Z'),
+    postPublishedAt: recentlyPublished(),
     metricLikes: 0, metricReplies: 0, metricRetweets: 0, metricQuotes: 0,
     metricBookmarks: 0, metricViews: 0, metricShares: 0, metricSaves: 0,
     metricScore: 200, metricUpvoteRatio: null, metricComments: 50,

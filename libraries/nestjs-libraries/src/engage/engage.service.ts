@@ -30,6 +30,39 @@ dayjs.extend(utc);
 // §6.1: "the sending account hit its own per-account daily cap." No dedicated
 // capacity table — the cap VALUE is a Settings config; "sends so far" is a
 // live COUNT (EngageRepository.countAccountSentRepliesToday).
+/**
+ * Platforms whose engage replies are published through a CONNECTED ACCOUNT, so
+ * "which account replies" is a real choice. Everything else engage supports
+ * replies through the extension's own browser session — no account is picked, so
+ * those platforms never appear in the reply-accounts list.
+ */
+export const ACCOUNT_REPLY_PLATFORMS = ['x'] as const;
+
+/** Per-(project, platform) reply policy — the shape of EngageConfig.replyPolicies. */
+export interface EngageReplyPolicy {
+  /** Whether unattended replying is allowed on this platform for this project. */
+  autoReplyEnabled?: boolean;
+  /** Local-time window 'HH:MM'; absent = no window restriction. */
+  windowStart?: string;
+  windowEnd?: string;
+  /** IANA timezone the window is expressed in. */
+  timezone?: string;
+  /** Reply strategy the driver generates with on this platform. */
+  defaultStrategy?: string;
+  /** Draft length tier the driver generates with. Absent = 'medium'. */
+  length?: 'short' | 'medium' | 'long';
+  /** @-mentions steered into the generated draft on this platform. */
+  mentionTags?: string[];
+  /**
+   * Minimum minutes between two auto-replies on THIS platform, overriding the
+   * org-wide engage_reply_pacing.minGapMinutes default for it. Absent = use the
+   * global default. A per-platform override exists because platforms carry very
+   * different account risk — a slower cadence on X than on Reddit, say — that a
+   * single global number can't express.
+   */
+  checkIntervalMinutes?: number;
+}
+
 export const ENGAGE_REPLY_ACCOUNT_DAILY_CAP_KEY = 'engage_reply_account_daily_cap';
 const DEFAULT_REPLY_ACCOUNT_DAILY_CAP = 50;
 import {
@@ -437,9 +470,33 @@ export class EngageService implements OnApplicationBootstrap {
   }
 
   async saveConfig(org: Organization, dto: SaveEngageConfigDto) {
+    // The unattended-reply driver only ever reads project-scoped configs
+    // (getAutoReplyConfigs filters projectId: { not: null }), so a mode set on
+    // the legacy null-project row would be accepted, stored, echoed back by
+    // GET /config — and never do anything. Refuse it instead of shipping a
+    // switch that silently does nothing.
+    if (
+      dto.autoReplyMode &&
+      dto.autoReplyMode !== 'off' &&
+      !dto.projectId
+    ) {
+      throw new BadRequestException({
+        code: 'engage_auto_reply_requires_project',
+        message:
+          'autoReplyMode requires a projectId — unattended replying is driven by a project\'s operation plan.',
+      });
+    }
     const result = await this._engageRepository.saveConfig(
       org.id,
-      { ...(dto.enabled !== undefined && { enabled: dto.enabled }) },
+      {
+        ...(dto.enabled !== undefined && { enabled: dto.enabled }),
+        ...(dto.autoReplyMode !== undefined && {
+          autoReplyMode: dto.autoReplyMode,
+        }),
+        ...(dto.replyPolicies !== undefined && {
+          replyPolicies: dto.replyPolicies as object,
+        }),
+      },
       dto.projectId
     );
     if (dto.enabled) {
@@ -759,8 +816,20 @@ export class EngageService implements OnApplicationBootstrap {
 
   // ─── Reply Accounts ───────────────────────────────────────────────────────
 
+  /**
+   * Connected accounts Engage may reply as, for this project.
+   *
+   * Scoped to platforms whose replies go out through a connected ACCOUNT. Every
+   * other engage platform publishes through the extension's browser session,
+   * where no account is chosen — its policy is per-platform and lives in
+   * EngageConfig.replyPolicies (returned by GET /engage/config).
+   */
   async listReplyAccounts(org: Organization, projectId?: string | null) {
-    return this._engageRepository.listXIntegrationsWithReplySettings(org.id, projectId);
+    return this._engageRepository.listReplyAccountIntegrations(
+      org.id,
+      projectId,
+      ACCOUNT_REPLY_PLATFORMS
+    );
   }
 
   async updateReplyAccountSettings(
@@ -831,7 +900,9 @@ export class EngageService implements OnApplicationBootstrap {
       opportunityId,
       dto.projectId
     );
-    const saved = await this._engageRepository.upsertDraft(org.id, opportunityId, {
+    const resolvedOpportunityId = opportunity.id;
+    const resolvedProjectId = opportunity.projectId ?? dto.projectId;
+    const saved = await this._engageRepository.upsertDraft(org.id, resolvedOpportunityId, {
       platform: opportunity.platform,
       content: dto.draftContent,
       inputData: {
@@ -839,21 +910,21 @@ export class EngageService implements OnApplicationBootstrap {
         brandStrength: dto.brandStrength,
         mentions: dto.mentions,
       },
-    }, dto.projectId);
+    }, resolvedProjectId);
 
     // Also record this save as a 'manual' version in generationHistory so the
     // version history is complete (AI + hand-typed/edited), each tagged by source.
     // Deduped against the latest entry (saving an unchanged AI draft won't dup it).
     // Best-effort: a history hiccup must not fail the save itself.
     await this._engageRepository
-      .recordManualGeneration(org.id, opportunityId, {
+      .recordManualGeneration(org.id, resolvedOpportunityId, {
         source: 'manual',
         content: dto.draftContent,
         strategy: dto.strategy,
         brandStrength: dto.brandStrength,
         ...(dto.mentions?.length ? { mentions: dto.mentions } : {}),
         createdAt: new Date().toISOString(),
-      }, dto.projectId)
+      }, resolvedProjectId)
       .catch(() => undefined);
 
     return saved;
@@ -1529,6 +1600,159 @@ export class EngageService implements OnApplicationBootstrap {
     ]);
   }
 
+  /**
+   * The project's reply budget for one platform on one UTC day, as FACTS rather
+   * than a verdict: the day's target, how many already went out, and the same
+   * per keyword.
+   *
+   * Two callers read it with OPPOSITE defaults, which is why it reports
+   * `cap: null` instead of picking one:
+   *   - the send-time gate (_assertProjectDailyTarget) treats `null` as
+   *     "uncapped — don't block", because a project with no active plan has
+   *     always been allowed to reply (§3.4);
+   *   - the auto-reply driver treats `null` as "nothing to drive", because
+   *     without a plan there is no target to pace against and it must not invent
+   *     one.
+   * Sharing this one computation is what keeps "what we hand out" and "what we
+   * let through" from ever disagreeing.
+   */
+  async getReplyBudget(
+    organizationId: string,
+    projectId: string | null | undefined,
+    platform: string,
+    day: Date
+  ): Promise<{
+    /** null = no active plan / no enabled policy for this platform. */
+    cap: number | null;
+    sentToday: number;
+    /** null when `cap` is null. Never negative. */
+    remaining: number | null;
+    keywords: Array<{
+      keyword: string;
+      target: number;
+      sentToday: number;
+      remaining: number;
+    }>;
+  }> {
+    const dayStart = dayjs.utc(day).startOf('day');
+    const dayEnd = dayStart.add(1, 'day');
+    const empty = {
+      cap: null as number | null,
+      sentToday: 0,
+      remaining: null as number | null,
+      keywords: [] as Array<{
+        keyword: string;
+        target: number;
+        sentToday: number;
+        remaining: number;
+      }>,
+    };
+    if (!projectId || !this._operationPlanRepository) return empty;
+
+    const policy = await this._resolveEngagePolicy(
+      organizationId,
+      projectId,
+      platform,
+      dayStart.toDate()
+    );
+    if (!policy) return empty;
+
+    const caps = [
+      policy.dailyTarget,
+      policy.dailyHardCap,
+    ].filter((c): c is number => typeof c === 'number' && c >= 0);
+    // A target of exactly 0 is meaningful ("no replies this day"), so it must
+    // survive into the cap rather than being filtered out as falsy.
+    const cap = caps.length ? Math.min(...caps) : null;
+
+    const sentToday = await this._engageRepository.countProjectSentRepliesToday(
+      organizationId,
+      projectId,
+      platform,
+      dayStart.toDate(),
+      dayEnd.toDate()
+    );
+
+    const keywords = await Promise.all(
+      Object.entries(policy.keywordTargets)
+        .filter(([, target]) => typeof target === 'number' && target > 0)
+        .map(async ([keyword, target]) => {
+          const kwSent =
+            await this._engageRepository.countProjectKeywordSentRepliesToday(
+              organizationId,
+              projectId,
+              platform,
+              keyword,
+              dayStart.toDate(),
+              dayEnd.toDate()
+            );
+          return {
+            keyword,
+            target,
+            sentToday: kwSent,
+            remaining: Math.max(0, target - kwSent),
+          };
+        })
+    );
+
+    return {
+      cap,
+      sentToday,
+      remaining: cap === null ? null : Math.max(0, cap - sentToday),
+      keywords,
+    };
+  }
+
+  /**
+   * This day's engage policy for one platform, resolved from the project's active
+   * plan: the day's target (a `dailyTargets` override for the exact UTC date wins
+   * over `targetRepliesPerDay`), the optional extra hard cap, and the per-keyword
+   * targets. Null when no plan / no enabled policy covers the platform.
+   */
+  private async _resolveEngagePolicy(
+    organizationId: string,
+    projectId: string,
+    platform: string,
+    dayStart: Date
+  ): Promise<{
+    dailyTarget?: number;
+    dailyHardCap?: number;
+    keywordTargets: Record<string, number>;
+  } | null> {
+    const plan = await this._operationPlanRepository!.getActivePlan(
+      organizationId,
+      projectId,
+      dayStart
+    );
+    if (!plan) return null;
+
+    const policies = (plan.planPayload as { engagePolicies?: Array<{
+      platform: string;
+      enabled: boolean;
+      targetRepliesPerDay?: number;
+      dailyTargets?: Array<{ date: string; target: number }>;
+      keywordTargets?: Record<string, number>;
+      dailyHardCap?: number;
+      hardCapRepliesPerDay?: number;
+    }> } | null)?.engagePolicies;
+    const policy = policies?.find((p) => p?.platform === platform && p?.enabled);
+    if (!policy) return null;
+
+    // This day's target: a `dailyTargets` entry for the exact UTC date wins,
+    // else the policy default. A 0 override is meaningful ("send nothing this
+    // day"), so check for presence, not truthiness.
+    const dayKey = dayjs.utc(dayStart).format('YYYY-MM-DD');
+    const override = policy.dailyTargets?.find((d) => d?.date === dayKey);
+    return {
+      dailyTarget:
+        override && typeof override.target === 'number'
+          ? override.target
+          : policy.targetRepliesPerDay,
+      dailyHardCap: policy.dailyHardCap ?? policy.hardCapRepliesPerDay,
+      keywordTargets: policy.keywordTargets ?? {},
+    };
+  }
+
   private async _assertProjectDailyTarget(
     organizationId: string,
     projectId: string | null | undefined,
@@ -1542,58 +1766,35 @@ export class EngageService implements OnApplicationBootstrap {
     // (§3.4: "a project with no active plan has no daily target").
     if (!projectId || !this._operationPlanRepository) return;
 
-    const plan = await this._operationPlanRepository.getActivePlan(
+    // Same resolution the auto-reply driver reads (getReplyBudget), so the
+    // targets we hand out and the ones we let through can never disagree.
+    const resolved = await this._resolveEngagePolicy(
       organizationId,
       projectId,
+      platform,
       dayStart
     );
-    if (!plan) return;
-
-    const policies = (plan.planPayload as { engagePolicies?: Array<{
-      platform: string;
-      enabled: boolean;
-      targetRepliesPerDay?: number;
-      // Per-day overrides of targetRepliesPerDay, keyed by UTC "YYYY-MM-DD"
-      // (operation-plan generation emits these so a plan can pace weekdays and
-      // weekends differently). Absent/unmatched dates fall back to the default.
-      dailyTargets?: Array<{ date: string; target: number }>;
-      keywordTargets?: Record<string, number>;
-      // Optional extra safety ceiling — NOT emitted by operation-plan generation
-      // (§3.4: "the operation-plan API does not generate or return a dailyHardCap"),
-      // but honored as a tighter override if a plan carries one.
-      dailyHardCap?: number;
-      hardCapRepliesPerDay?: number;
-    }> } | null)?.engagePolicies;
-    const policy = policies?.find((p) => p?.platform === platform && p?.enabled);
-    if (!policy) return;
-
-    // This day's target: a `dailyTargets` entry for the exact UTC date wins,
-    // else the policy default. A 0 override is meaningful ("send nothing this
-    // day"), so check for presence, not truthiness.
+    if (!resolved) return;
+    const policy = { keywordTargets: resolved.keywordTargets };
+    const dailyTarget = resolved.dailyTarget;
     const dayKey = dayjs.utc(dayStart).format('YYYY-MM-DD');
-    const override = policy.dailyTargets?.find((d) => d?.date === dayKey);
-    const dailyTarget =
-      override && typeof override.target === 'number'
-        ? override.target
-        : policy.targetRepliesPerDay;
 
     // Aggregate daily ceiling: the day's target is the primary cap; an optional
     // dailyHardCap tightens it further. Enforce the tighter of whichever exist.
     // A target of exactly 0 means "no replies today" — enforce it rather than
     // letting the `> 0` filter drop it into "uncapped".
-    if (dailyTarget === 0) {
+    if (dailyTarget === 0 || resolved.dailyHardCap === 0) {
       throw new ForbiddenException({
         code: 'engage_daily_hard_cap_reached',
-        message: `This project's plan sets a 0 reply target for ${platform} on ${dayKey}.`,
+        message: `This project's plan sets a 0 reply cap for ${platform} on ${dayKey}.`,
         hardCap: 0,
         sentToday: 0,
         requested,
       });
     }
-    const caps = [
-      dailyTarget,
-      policy.dailyHardCap ?? policy.hardCapRepliesPerDay,
-    ].filter((c): c is number => typeof c === 'number' && c > 0);
+    const caps = [dailyTarget, resolved.dailyHardCap].filter(
+      (c): c is number => typeof c === 'number' && c >= 0
+    );
     const effectiveCap = caps.length ? Math.min(...caps) : undefined;
 
     // Per-keyword sub-targets that apply to THIS reply (only keywords it matched).
@@ -1694,13 +1895,15 @@ export class EngageService implements OnApplicationBootstrap {
     // Atomic claim: marks status=REPLIED iff currently NEW/AUTO_QUEUED. Loser
     // of a concurrent race throws NotFoundException here, BEFORE createPost —
     // eliminates duplicate X publishes and orphan Post rows.
-    const { opp: opportunity, priorStatus } =
-      await this._engageRepository.claimOpportunityForReply(
+    const claim = await this._engageRepository.claimOpportunityForReply(
         org.id,
         opportunityId,
         'REPLIED',
         body.projectId
       );
+    const { opp: opportunity, priorStatus } = claim;
+    const resolvedOpportunityId = claim.opportunityId ?? opportunityId;
+    const resolvedProjectId = claim.projectId ?? body.projectId;
 
     // Phase 1 — invoke the post pipeline. type='now' BLOCKS until X publish
     // completes; a failure means the reply never reached X. Full rollback safe.
@@ -1709,7 +1912,7 @@ export class EngageService implements OnApplicationBootstrap {
       // §6/§6.1 pacing gate — a blocked send hits this same catch/rollback.
       await this._assertReplyPacing(
         org.id,
-        body.projectId,
+        resolvedProjectId,
         opportunity.platform,
         opportunity.matchedKeywords ?? [],
         [{ integrationId: body.integrationId, at: new Date() }]
@@ -1720,7 +1923,7 @@ export class EngageService implements OnApplicationBootstrap {
         {
           type: 'now',
           source: 'engage',
-          projectId: body.projectId,
+          projectId: resolvedProjectId,
           tags: [],
           shortLink: false,
           date: new Date().toISOString(),
@@ -1761,8 +1964,8 @@ export class EngageService implements OnApplicationBootstrap {
     try {
       const sentReply = await this._engageRepository.createSentReply({
         organizationId: org.id,
-        projectId: body.projectId,
-        opportunityId,
+        projectId: resolvedProjectId,
+        opportunityId: resolvedOpportunityId,
         postId,
         inputData: { strategy: body.strategy, brandStrength: body.brandStrength, mentions: body.mentions },
         matchedKeywords: opportunity.matchedKeywords,
@@ -1770,7 +1973,7 @@ export class EngageService implements OnApplicationBootstrap {
       return sentReply;
     } catch (err) {
       this.logger.error(
-        `sendReply: X reply published (postId=${postId}, opportunityId=${opportunityId}, ` +
+        `sendReply: X reply published (postId=${postId}, opportunityId=${resolvedOpportunityId}, ` +
         `orgId=${org.id}) but failed to record EngageSentReply.`,
         err instanceof Error ? err.stack : err
       );
@@ -1789,7 +1992,11 @@ export class EngageService implements OnApplicationBootstrap {
     opportunityId: string,
     body: SendReplyDto
   ) {
-    const existing = await this._engageRepository.getSentReplyByOpportunity(org.id, opportunityId);
+    const existing = await this._engageRepository.getSentReplyByOpportunity(
+      org.id,
+      opportunityId,
+      body.projectId
+    );
     if (existing) {
       if (existing.post.state !== 'QUEUE') {
         throw new BadRequestException('Scheduled post is no longer pending — cannot cancel');
@@ -1841,20 +2048,22 @@ export class EngageService implements OnApplicationBootstrap {
       throw new BadRequestException('scheduledAt must be a future date');
     }
 
-    const { opp: opportunity, priorStatus } =
-      await this._engageRepository.claimOpportunityForReply(
+    const claim = await this._engageRepository.claimOpportunityForReply(
         org.id,
         opportunityId,
         'SCHEDULED',
         body.projectId
       );
+    const { opp: opportunity, priorStatus } = claim;
+    const resolvedOpportunityId = claim.opportunityId ?? opportunityId;
+    const resolvedProjectId = claim.projectId ?? body.projectId;
 
     // Scheduled posts publish at a future time — full rollback on failure is safe.
     let postId: string | undefined;
     try {
       await this._assertReplyPacing(
         org.id,
-        body.projectId,
+        resolvedProjectId,
         opportunity.platform,
         opportunity.matchedKeywords ?? [],
         [{ integrationId: body.integrationId, at: new Date(body.scheduledAt) }]
@@ -1865,7 +2074,7 @@ export class EngageService implements OnApplicationBootstrap {
         {
           type: 'schedule',
           source: 'engage',
-          projectId: body.projectId,
+          projectId: resolvedProjectId,
           tags: [],
           shortLink: false,
           date: body.scheduledAt,
@@ -1893,8 +2102,8 @@ export class EngageService implements OnApplicationBootstrap {
 
       return await this._engageRepository.createSentReply({
         organizationId: org.id,
-        projectId: body.projectId,
-        opportunityId,
+        projectId: resolvedProjectId,
+        opportunityId: resolvedOpportunityId,
         postId,
         inputData: { strategy: body.strategy, brandStrength: body.brandStrength, mentions: body.mentions },
         matchedKeywords: opportunity.matchedKeywords,
@@ -1925,19 +2134,21 @@ export class EngageService implements OnApplicationBootstrap {
       }
     }
 
-    const { opp: opportunity, priorStatus } =
-      await this._engageRepository.claimOpportunityForReply(
+    const claim = await this._engageRepository.claimOpportunityForReply(
         org.id,
         opportunityId,
         'SCHEDULED',
         body.projectId
       );
+    const { opp: opportunity, priorStatus } = claim;
+    const resolvedOpportunityId = claim.opportunityId ?? opportunityId;
+    const resolvedProjectId = claim.projectId ?? body.projectId;
 
     const createdPostIds: string[] = [];
     try {
       await this._assertReplyPacing(
         org.id,
-        body.projectId,
+        resolvedProjectId,
         opportunity.platform,
         opportunity.matchedKeywords ?? [],
         body.items.map((item) => ({
@@ -1952,7 +2163,7 @@ export class EngageService implements OnApplicationBootstrap {
           {
             type: 'schedule',
             source: 'engage',
-            projectId: body.projectId,
+            projectId: resolvedProjectId,
             tags: [],
             shortLink: false,
             date: item.scheduledAt,
@@ -1999,8 +2210,8 @@ export class EngageService implements OnApplicationBootstrap {
       body.items.map((item, i) =>
         this._engageRepository.createSentReply({
           organizationId: org.id,
-          projectId: body.projectId,
-          opportunityId,
+          projectId: resolvedProjectId,
+          opportunityId: resolvedOpportunityId,
           postId: createdPostIds[i],
           inputData: { strategy: item.strategy, brandStrength: item.brandStrength, mentions: item.mentions },
           matchedKeywords: opportunity.matchedKeywords,
@@ -2013,7 +2224,7 @@ export class EngageService implements OnApplicationBootstrap {
         results.push(r.value);
       } else {
         this.logger.error(
-          `batchScheduleReply: post scheduled (postId=${createdPostIds[i]}, opportunityId=${opportunityId}, ` +
+          `batchScheduleReply: post scheduled (postId=${createdPostIds[i]}, opportunityId=${resolvedOpportunityId}, ` +
           `orgId=${org.id}) but failed to record EngageSentReply.`,
           r.reason instanceof Error ? r.reason.stack : r.reason
         );
@@ -2028,20 +2239,22 @@ export class EngageService implements OnApplicationBootstrap {
     opportunityId: string,
     body: BatchSendReplyDto
   ) {
-    const { opp: opportunity, priorStatus } =
-      await this._engageRepository.claimOpportunityForReply(
+    const claim = await this._engageRepository.claimOpportunityForReply(
         org.id,
         opportunityId,
         'REPLIED',
         body.projectId
       );
+    const { opp: opportunity, priorStatus } = claim;
+    const resolvedOpportunityId = claim.opportunityId ?? opportunityId;
+    const resolvedProjectId = claim.projectId ?? body.projectId;
 
     const now = new Date().toISOString();
     const createdPostIds: string[] = [];
     try {
       await this._assertReplyPacing(
         org.id,
-        body.projectId,
+        resolvedProjectId,
         opportunity.platform,
         opportunity.matchedKeywords ?? [],
         body.items.map((item) => ({ integrationId: item.integrationId, at: new Date() }))
@@ -2053,7 +2266,7 @@ export class EngageService implements OnApplicationBootstrap {
           {
             type: 'now',
             source: 'engage',
-            projectId: body.projectId,
+            projectId: resolvedProjectId,
             tags: [],
             shortLink: false,
             date: now,
@@ -2101,8 +2314,8 @@ export class EngageService implements OnApplicationBootstrap {
         this._engageRepository
           .createSentReply({
             organizationId: org.id,
-            projectId: body.projectId,
-            opportunityId,
+            projectId: resolvedProjectId,
+            opportunityId: resolvedOpportunityId,
             postId: createdPostIds[i],
             inputData: { strategy: item.strategy, brandStrength: item.brandStrength, mentions: item.mentions },
             matchedKeywords: opportunity.matchedKeywords,
@@ -2116,7 +2329,7 @@ export class EngageService implements OnApplicationBootstrap {
         results.push(r.value);
       } else {
         this.logger.error(
-          `batchSendReply: X reply published (postId=${createdPostIds[i]}, opportunityId=${opportunityId}, ` +
+          `batchSendReply: X reply published (postId=${createdPostIds[i]}, opportunityId=${resolvedOpportunityId}, ` +
           `orgId=${org.id}) but failed to record EngageSentReply.`,
           r.reason instanceof Error ? r.reason.stack : r.reason
         );
@@ -2141,13 +2354,15 @@ export class EngageService implements OnApplicationBootstrap {
     // blocking the CONFIRMATION doesn't undo an already-sent reply, it only
     // loses the tracking record. This call still counts toward future pacing
     // checks via the recorded EngageSentReply below.
-    const { opp, priorStatus } =
-      await this._engageRepository.claimOpportunityForReply(
+    const claim = await this._engageRepository.claimOpportunityForReply(
         org.id,
         opportunityId,
         'REPLIED',
         body.projectId
       );
+    const { opp, priorStatus } = claim;
+    const resolvedOpportunityId = claim.opportunityId ?? opportunityId;
+    const resolvedProjectId = claim.projectId ?? body.projectId;
 
     // The reply URL is optional for both platforms now ("I've posted it — I'll
     // add the link later"). When omitted the reply is recorded with a null
@@ -2178,14 +2393,14 @@ export class EngageService implements OnApplicationBootstrap {
               date: new Date(),
               replyUrl: body.replyUrl,
               integrationId: body.integrationId,
-              projectId: body.projectId,
+              projectId: resolvedProjectId,
             })
           : await this._engageRepository.createManualRedditPost({
               organizationId: org.id,
               content: body.draftContent,
               date: new Date(),
               replyUrl: body.replyUrl,
-              projectId: body.projectId,
+              projectId: resolvedProjectId,
             });
       postId = post.id;
     } catch (err) {
@@ -2219,8 +2434,8 @@ export class EngageService implements OnApplicationBootstrap {
     try {
       const sentReply = await this._engageRepository.createSentReply({
         organizationId: org.id,
-        projectId: body.projectId,
-        opportunityId,
+        projectId: resolvedProjectId,
+        opportunityId: resolvedOpportunityId,
         postId,
         inputData: { strategy: body.strategy, brandStrength: body.brandStrength },
         matchedKeywords: opp.matchedKeywords,
@@ -2234,7 +2449,7 @@ export class EngageService implements OnApplicationBootstrap {
     } catch (err) {
       this.logger.error(
         `confirmManualReply: manual reply recorded (postId=${postId}, ` +
-        `opportunityId=${opportunityId}, orgId=${org.id}) but failed to record EngageSentReply.`,
+        `opportunityId=${resolvedOpportunityId}, orgId=${org.id}) but failed to record EngageSentReply.`,
         err instanceof Error ? err.stack : err
       );
       if (err instanceof HttpException) throw err;

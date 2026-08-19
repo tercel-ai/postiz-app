@@ -270,11 +270,11 @@ export class EngageRepository {
     private _config: PrismaRepository<'engageConfig'>,
     private _keyword: PrismaRepository<'engageKeyword'>,
     private _trackedAccount: PrismaRepository<'engageTrackedAccount'>,
-    private _replyAccount: PrismaRepository<'engageXReplyAccount'>,
     private _opportunity: PrismaRepository<'engageOpportunity'>,
     private _oppState: PrismaRepository<'engageOpportunityState'>,
     private _sentReply: PrismaRepository<'engageSentReply'>,
     private _integration: PrismaRepository<'integration'>,
+    private _integrationProject: PrismaRepository<'integrationProject'>,
     private _post: PrismaRepository<'post'>,
     private _tx: PrismaTransaction,
     private _scanCursor: PrismaRepository<'engageScanCursor'>,
@@ -325,19 +325,6 @@ export class EngageRepository {
       // ONE relation now holds both scopes; _withScanTargetShape splits it back
       // into monitoredChannels/trackedAccounts for every consumer of this method.
       trackedAccounts: { orderBy: { createdAt: 'asc' as const } },
-      xReplyAccounts: {
-        include: {
-          integration: {
-            select: {
-              id: true,
-              name: true,
-              providerIdentifier: true,
-              picture: true,
-            },
-          },
-        },
-        orderBy: { createdAt: 'asc' as const },
-      },
     };
 
     if (projectId != null) {
@@ -379,7 +366,7 @@ export class EngageRepository {
    * SAME org-wide set the server-side scan loop (claimNext) enumerates, or the
    * extension's units diverge from what actually gets scanned.
    *
-   * The null-project row supplies the scalar/entitlement/xReplyAccounts shape
+   * The null-project row supplies the scalar/entitlement/replyAccounts shape
    * (so the response is shape-identical to getConfig(projectId)); the three
    * relation lists are then REPLACED with the union across every ENABLED
    * project-scoped config, deduped by the same global unit identity the scan
@@ -687,7 +674,12 @@ export class EngageRepository {
 
   async saveConfig(
     organizationId: string,
-    data: Partial<{ enabled: boolean; lastScanAt: Date }>,
+    data: Partial<{
+      enabled: boolean;
+      lastScanAt: Date;
+      autoReplyMode: string;
+      replyPolicies: Prisma.InputJsonValue;
+    }>,
     projectId: string | null = null
   ) {
     if (projectId != null) {
@@ -1537,92 +1529,94 @@ export class EngageRepository {
     return integration?.token ?? null;
   }
 
-  async listXIntegrationsWithReplySettings(
+  /**
+   * Connected accounts that Engage may reply AS, for one project.
+   *
+   * Platform-scoped rather than X-only: `engageEnabled` is a per-(integration,
+   * project) fact, so it lives on IntegrationProject — the join table that IS
+   * that grain. Its default is TRUE (opt-out), which is why an org that never
+   * configured anything still sees every connected account as selectable.
+   *
+   * Only platforms whose replies go out through a CONNECTED ACCOUNT belong here.
+   * Extension-published replies (Reddit and friends) use the browser's own
+   * session — nothing picks an account for them, so their policy is
+   * per-platform, in EngageConfig.replyPolicies.
+   */
+  async listReplyAccountIntegrations(
     organizationId: string,
-    projectId: string | null = null
+    projectId: string | null = null,
+    platforms: readonly string[] = ['x']
   ) {
     const integrations = await this._integration.model.integration.findMany({
       where: {
         organizationId,
-        providerIdentifier: 'x',
+        providerIdentifier: { in: [...platforms] },
         deletedAt: null,
         disabled: false,
         type: 'social',
       },
-      // engageXReplyAccount(s) is plural now: the same integration may carry
-      // one reply-settings row per project (configId,integrationId) — a
-      // global UNIQUE(integrationId) no longer exists (project-scoped-post-
-      // engage-design.md §3.1). Scoped to THIS project's config so the
-      // response still surfaces at most one row per integration, matching
-      // the shape every caller of this method already expects.
+      // The project binding carries engageEnabled. Absent binding = never
+      // excluded, so it reads as enabled (see the default above).
       include: {
-        engageXReplyAccounts: {
-          where: { config: { organizationId, projectId } },
-        },
+        ...(projectId
+          ? {
+              integrationProjects: {
+                where: { projectId },
+                select: { engageEnabled: true },
+              },
+            }
+          : {}),
       },
       orderBy: { createdAt: 'asc' },
     });
-    return integrations.map(({ engageXReplyAccounts, ...integration }) => ({
+    return integrations.map(({ integrationProjects, ...integration }: any) => ({
       ...integration,
-      engageXReplyAccount: engageXReplyAccounts[0] ?? null,
+      engageEnabled: integrationProjects?.[0]?.engageEnabled ?? true,
     }));
   }
 
+  /**
+   * Set whether Engage may reply as this account in this project.
+   *
+   * Writes IntegrationProject, so it needs an existing binding — an account not
+   * bound to the project is not usable there at all, and silently creating a
+   * binding here would make an unrelated setting grant project access.
+   */
   async updateReplyAccount(
     organizationId: string,
     integrationId: string,
     dto: UpdateReplyAccountDto,
     projectId: string | null = null
   ) {
-    // Verify the integration belongs to this org before upserting engage settings
     const integration = await this._integration.model.integration.findFirst({
       where: { id: integrationId, organizationId, deletedAt: null },
       select: { id: true },
     });
     if (!integration) throw new NotFoundException('Integration not found');
+    if (dto.engageEnabled === undefined) return { engageEnabled: true };
+    if (!projectId) {
+      throw new NotFoundException(
+        'A projectId is required: Engage reply participation is per-project'
+      );
+    }
 
-    const configId = await this._getConfigId(organizationId, projectId);
-    return this._replyAccount.model.engageXReplyAccount.upsert({
-      where: { configId_integrationId: { configId, integrationId } },
-      create: {
-        configId,
-        organizationId,
-        integrationId,
-        engageEnabled: dto.engageEnabled ?? true,
-        autoReplyEnabled: dto.autoReplyEnabled ?? false,
-        autoReplyTimeStart: dto.autoReplyTimeStart ?? null,
-        autoReplyTimeEnd: dto.autoReplyTimeEnd ?? null,
-        autoReplyTimezone: dto.autoReplyTimezone ?? null,
-        defaultStrategy: dto.defaultStrategy ?? 'EXPERT_ANSWER',
-      },
-      update: {
-        ...(dto.engageEnabled !== undefined && {
-          engageEnabled: dto.engageEnabled,
-        }),
-        ...(dto.autoReplyEnabled !== undefined && {
-          autoReplyEnabled: dto.autoReplyEnabled,
-        }),
-        ...(dto.autoReplyTimeStart !== undefined && {
-          autoReplyTimeStart: dto.autoReplyTimeStart,
-        }),
-        ...(dto.autoReplyTimeEnd !== undefined && {
-          autoReplyTimeEnd: dto.autoReplyTimeEnd,
-        }),
-        ...(dto.autoReplyTimezone !== undefined && {
-          autoReplyTimezone: dto.autoReplyTimezone,
-        }),
-        ...(dto.defaultStrategy !== undefined && {
-          defaultStrategy: dto.defaultStrategy,
-        }),
-      },
+    const updated = await this._integrationProject.model.integrationProject.updateMany({
+      where: { integrationId, projectId, organizationId },
+      data: { engageEnabled: dto.engageEnabled },
     });
+    if (!updated.count) {
+      throw new NotFoundException(
+        'This account is not bound to the project'
+      );
+    }
+    return { integrationId, projectId, engageEnabled: dto.engageEnabled };
   }
 
   // ─── Opportunities ────────────────────────────────────────────────────────
 
   // Flatten a per-org state row + its global opportunity into the legacy
-  // EngageOpportunity response shape the API/frontend expect. `id` stays the
-  // opportunity id (the value the controller's :id routes operate on).
+  // EngageOpportunity response shape the API/frontend expect. `id` remains the
+  // global opportunity id for read compatibility; `stateId` is the mutation id.
   //
   // Fields are listed explicitly (not via `...opportunity`) so the compiler
   // catches any future schema migration that accidentally moves a score field
@@ -1630,6 +1624,8 @@ export class EngageRepository {
   // level by naming each field's source.
   private _merge<
     T extends {
+      id: string;
+      projectId: string | null;
       status: EngageOpportunityStatus;
       bookmarked: boolean;
       score: number;
@@ -1653,6 +1649,10 @@ export class EngageRepository {
     return {
       // ── Global fields (EngageOpportunity) ──────────────────────────────────
       id: opportunity.id,
+      // Reply mutations address this per-project state id. The global
+      // opportunity id remains available as `id` for legacy read-only callers.
+      stateId: state.id,
+      projectId: state.projectId,
       platform: opportunity.platform,
       externalPostId: opportunity.externalPostId,
       externalPostUrl: opportunity.externalPostUrl,
@@ -1736,6 +1736,152 @@ export class EngageRepository {
   // injecting `platform` must spread `oppFilter` — spreading `where.opportunity`
   // would widen to the field's declared union type (EngageOpportunityWhereInput
   // | EngageOpportunityScalarRelationFilter) and no longer accept `platform`.
+  /**
+   * Projects whose EngageConfig opts into unattended replying, with the mode.
+   * The switch lives on EngageConfig (per project = the granularity an operation
+   * plan works at). Per-PLATFORM refinements live in EngageConfig.replyPolicies.
+   *
+   * `enabled` is required too: a project whose Engage is switched off must not
+   * keep replying just because a mode was left set.
+   */
+  getAutoReplyConfigs(organizationId: string) {
+    return this._config.model.engageConfig.findMany({
+      where: {
+        organizationId,
+        enabled: true,
+        projectId: { not: null },
+        autoReplyMode: { in: ['review', 'auto'] },
+      },
+      select: {
+        id: true,
+        projectId: true,
+        autoReplyMode: true,
+        replyPolicies: true,
+      },
+    });
+  }
+
+  /**
+   * Opportunities this project could auto-reply to, best first.
+   *
+   * Only `NEW` rows qualify — every other status means the opportunity is spoken
+   * for (REPLIED / SCHEDULED / AUTO_QUEUED) or deliberately out (DISMISSED /
+   * EXPIRED). `isCurrentlyMatched` drops rows whose keywords were since edited or
+   * disabled, so a plan never replies through a keyword its owner removed.
+   *
+   * Rows that already carry an EngageSentReply for this (org, project) are
+   * excluded: one of those is a saved DRAFT awaiting review, and drafting it a
+   * second time would both double-charge and put two replies in front of the
+   * user for the same post.
+   *
+   * `keywords` narrows to a specific keyword's quota (the per-keyword targets a
+   * plan sets); omit it to draw from the whole matched pool.
+   */
+  async pickAutoReplyCandidates(
+    organizationId: string,
+    projectId: string,
+    platform: string,
+    opts: {
+      limit: number;
+      keywords?: string[];
+      minScore?: number;
+      /** Skip posts older than this — replying to a stale thread reads as spam. */
+      publishedAfter?: Date;
+    }
+  ) {
+    if (opts.limit <= 0) return [];
+    return this._oppState.model.engageOpportunityState.findMany({
+      where: {
+        organizationId,
+        projectId,
+        status: 'NEW',
+        isCurrentlyMatched: true,
+        ...(opts.minScore !== undefined && { score: { gte: opts.minScore } }),
+        ...(opts.keywords?.length && {
+          matchedKeywords: { hasSome: opts.keywords },
+        }),
+        opportunity: {
+          deletedAt: null,
+          platform,
+          ...(opts.publishedAfter && {
+            postPublishedAt: { gte: opts.publishedAfter },
+          }),
+          // No reply record for THIS project yet (another project replying to the
+          // same global post is fine — state is per-org/project).
+          sentReplies: { none: { organizationId, projectId } },
+        },
+      },
+      // Score first; same-score ties go to the freshest underlying post — a
+      // reply reads more natural on a conversation that just happened than one
+      // that's been sitting in our queue a while. `postPublishedAt` (the post's
+      // own timestamp) rather than `createdAt` (when WE scanned it in) is the
+      // field that actually means "how recent" from a reader's perspective —
+      // the two can diverge by hours if the scan cadence lags.
+      orderBy: [
+        { score: 'desc' },
+        { opportunity: { postPublishedAt: 'desc' } },
+      ],
+      take: opts.limit,
+      select: {
+        id: true,
+        opportunityId: true,
+        score: true,
+        matchedKeywords: true,
+      },
+    });
+  }
+
+  /**
+   * Reserve an auto-reply candidate before model generation. The conditional
+   * update is the cross-worker claim: concurrent pollers may discover the same
+   * NEW row, but only one can move it to AUTO_QUEUED and spend generation
+   * credits on it.
+   */
+  async claimAutoReplyCandidate(
+    organizationId: string,
+    projectId: string,
+    stateId: string
+  ): Promise<boolean> {
+    const updated = await this._oppState.model.engageOpportunityState.updateMany({
+      where: { id: stateId, organizationId, projectId, status: 'NEW' },
+      data: { status: 'AUTO_QUEUED' },
+    });
+    return updated.count === 1;
+  }
+
+  /** Release a failed auto-reply reservation so a later poll can retry it. */
+  async releaseAutoReplyCandidate(
+    organizationId: string,
+    projectId: string,
+    stateId: string
+  ): Promise<void> {
+    await this._oppState.model.engageOpportunityState.updateMany({
+      where: { id: stateId, organizationId, projectId, status: 'AUTO_QUEUED' },
+      data: { status: 'NEW' },
+    });
+  }
+
+  /**
+   * When this project last replied on this platform — the input to the driver's
+   * human-like spacing. Without it a poll loop would empty a whole day's budget
+   * into one burst the moment the active window opened, which is exactly the
+   * behaviour that gets an account rate-limited.
+   */
+  async getLastSentReplyAt(
+    organizationId: string,
+    projectId: string,
+    platform: string
+  ): Promise<Date | null> {
+    const last = await this._sentReply.model.engageSentReply.findFirst({
+      // Platform lives on the opportunity, not the reply row — same join the
+      // daily-target counts use.
+      where: { organizationId, projectId, opportunity: { platform } },
+      orderBy: { createdAt: 'desc' },
+      select: { createdAt: true },
+    });
+    return last?.createdAt ?? null;
+  }
+
   private _opportunityWhere(
     organizationId: string,
     dto: Omit<ListOpportunitiesDto, 'sortBy' | 'sortOrder' | 'page' | 'limit'>
@@ -2223,6 +2369,31 @@ export class EngageRepository {
   // Returns the opportunity plus the `priorStatus` (NEW | AUTO_QUEUED) so the caller can restore
   // the original status on rollback — preventing the loss of AUTO_QUEUED markers when the
   // auto-reply worker had pre-queued the opportunity.
+  private async _findReplyState(
+    organizationId: string,
+    id: string,
+    projectId?: string | null
+  ) {
+    if (projectId !== undefined) {
+      return this._oppState.model.engageOpportunityState.findFirst({
+        where: { organizationId, projectId: projectId ?? null, opportunityId: id },
+        include: { opportunity: true },
+      });
+    }
+
+    // Public reply routes use the surrogate state id. Fall back to the legacy
+    // null-project opportunity id only for older callers that predate it.
+    const state = await this._oppState.model.engageOpportunityState.findFirst({
+      where: { organizationId, id },
+      include: { opportunity: true },
+    });
+    if (state) return state;
+    return this._oppState.model.engageOpportunityState.findFirst({
+      where: { organizationId, projectId: null, opportunityId: id },
+      include: { opportunity: true },
+    });
+  }
+
   async claimOpportunityForReply(
     organizationId: string,
     id: string,
@@ -2233,10 +2404,7 @@ export class EngageRepository {
     // on this exact status — if a concurrent claimer flipped it between the read and
     // the update, the conditional update yields count=0 and we throw.
     // Not findUnique: projectId is nullable — see dismissOpportunity's note.
-    const existing = await this._oppState.model.engageOpportunityState.findFirst({
-      where: { organizationId, projectId: projectId ?? null, opportunityId: id },
-      select: { status: true },
-    });
+    const existing = await this._findReplyState(organizationId, id, projectId);
     // Give each failure its OWN status code so the frontend can tell them apart,
     // mirroring getOpportunityForReply (the generateDraft gate):
     //   • genuinely missing per-org state row → 404 Not Found
@@ -2255,18 +2423,24 @@ export class EngageRepository {
     const priorStatus = existing.status as 'NEW' | 'AUTO_QUEUED';
 
     const result = await this._oppState.model.engageOpportunityState.updateMany({
-      where: { organizationId, projectId: projectId ?? null, opportunityId: id, status: priorStatus },
+      where: { organizationId, id: existing.id, status: priorStatus },
       data: { status: claimStatus },
     });
     if (result.count === 0) {
       throw new ConflictException('Opportunity already claimed by another request');
     }
     const row = await this._oppState.model.engageOpportunityState.findFirst({
-      where: { organizationId, projectId: projectId ?? null, opportunityId: id },
+      where: { organizationId, id: existing.id },
       include: { opportunity: true },
     });
     if (!row) throw new NotFoundException('Opportunity not found');
-    return { opp: this._merge(row), priorStatus };
+    return {
+      opp: this._merge(row),
+      priorStatus,
+      stateId: row.id,
+      projectId: row.projectId,
+      opportunityId: row.opportunityId,
+    };
   }
 
   // Delete any saved working DRAFT reply for an opportunity. Deleting the Post
@@ -2423,6 +2597,19 @@ export class EngageRepository {
     projectId?: string | null
   ) {
     try {
+      if (projectId === undefined) {
+        const state = await this._oppState.model.engageOpportunityState.findFirst({
+          where: { organizationId, id },
+          select: { id: true },
+        });
+        if (state) {
+          await this._oppState.model.engageOpportunityState.updateMany({
+            where: { organizationId, id: state.id },
+            data: { status: priorStatus },
+          });
+          return;
+        }
+      }
       await this._oppState.model.engageOpportunityState.updateMany({
         where: { organizationId, projectId: projectId ?? null, opportunityId: id },
         data: { status: priorStatus },
@@ -2439,6 +2626,22 @@ export class EngageRepository {
     opportunityId: string,
     projectId?: string | null
   ) {
+    if (projectId === undefined) {
+      const state = await this._oppState.model.engageOpportunityState.findFirst({
+        where: { organizationId, id: opportunityId },
+        select: { id: true },
+      });
+      if (state) {
+        const result = await this._oppState.model.engageOpportunityState.updateMany({
+          where: { organizationId, id: state.id, status: 'SCHEDULED' },
+          data: { status: 'NEW' },
+        });
+        if (result.count === 0) {
+          throw new BadRequestException('Opportunity is not in SCHEDULED state');
+        }
+        return;
+      }
+    }
     const result = await this._oppState.model.engageOpportunityState.updateMany({
       where: { organizationId, projectId: projectId ?? null, opportunityId, status: 'SCHEDULED' },
       data: { status: 'NEW' },
@@ -2717,10 +2920,7 @@ export class EngageRepository {
   }
 
   async getOpportunityForReply(organizationId: string, id: string, projectId?: string | null) {
-    const row = await this._oppState.model.engageOpportunityState.findFirst({
-      where: { organizationId, projectId: projectId ?? null, opportunityId: id },
-      include: { opportunity: true },
-    });
+    const row = await this._findReplyState(organizationId, id, projectId);
     if (!row) {
       throw new NotFoundException('Opportunity not found');
     }
@@ -4015,11 +4215,31 @@ export class EngageRepository {
     });
   }
 
-  async getSentReplyByOpportunity(organizationId: string, opportunityId: string) {
+  async getSentReplyByOpportunity(
+    organizationId: string,
+    opportunityId: string,
+    projectId?: string | null
+  ) {
     // Per-post tracking means an opportunity can have multiple replies; return
     // the most recent (used by cancelAndSendNow to find a still-pending reply).
+    let resolvedOpportunityId = opportunityId;
+    let resolvedProjectId = projectId;
+    if (projectId === undefined) {
+      const state = await this._oppState.model.engageOpportunityState.findFirst({
+        where: { organizationId, id: opportunityId },
+        select: { opportunityId: true, projectId: true },
+      });
+      if (state) {
+        resolvedOpportunityId = state.opportunityId;
+        resolvedProjectId = state.projectId;
+      }
+    }
     return this._sentReply.model.engageSentReply.findFirst({
-      where: { organizationId, opportunityId },
+      where: {
+        organizationId,
+        opportunityId: resolvedOpportunityId,
+        ...(resolvedProjectId !== undefined && { projectId: resolvedProjectId ?? null }),
+      },
       orderBy: { createdAt: 'desc' },
       include: { post: { select: { id: true, state: true } } },
     });
@@ -4604,11 +4824,11 @@ export class EngageRepository {
       select: {
         id: true,
         profile: true,
-        // Plural now — see listXIntegrationsWithReplySettings's note (a
+        // Plural now — see listReplyAccountIntegrations's note (a
         // global UNIQUE(integrationId) no longer exists). Scoped to THIS
         // project's config so at most one row comes back per integration.
-        engageXReplyAccounts: {
-          where: { config: { organizationId, projectId } },
+        integrationProjects: {
+          where: { projectId: projectId ?? undefined },
           select: { engageEnabled: true },
         },
       },
@@ -4619,7 +4839,11 @@ export class EngageRepository {
       liveX.map((i) => ({
         id: i.id,
         profile: i.profile,
-        engageEnabled: i.engageXReplyAccounts[0]?.engageEnabled ?? false,
+        // Absent binding = never excluded. Previously this defaulted to FALSE,
+        // which was harmless only because pickXReplyIntegration ignores the flag
+        // entirely (it matches by handle) — keep the honest default now that the
+        // field has one meaning everywhere.
+        engageEnabled: i.integrationProjects?.[0]?.engageEnabled ?? true,
       })),
       replyUrl
     );
@@ -4882,19 +5106,29 @@ export class EngageRepository {
     });
   }
 
+  /**
+   * Accounts Engage may reply as whose underlying integration is dead (needs a
+   * re-auth, or is disabled) — a silent failure: the account still shows as
+   * selectable while every send through it fails.
+   *
+   * Reads the project binding now that engageEnabled lives there. Rows for a
+   * soft-deleted integration are excluded: that is a removed account, not a
+   * broken one.
+   */
   async findDeadReplyAccounts() {
-    return this._replyAccount.model.engageXReplyAccount.findMany({
+    return this._integrationProject.model.integrationProject.findMany({
       where: {
         engageEnabled: true,
         integration: {
+          deletedAt: null,
           OR: [{ refreshNeeded: true }, { disabled: true }],
         },
       },
       select: {
         id: true,
         organizationId: true,
+        projectId: true,
         integrationId: true,
-        autoReplyEnabled: true,
         integration: {
           select: {
             id: true,

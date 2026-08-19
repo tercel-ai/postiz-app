@@ -51,6 +51,12 @@ function build(opts: {
   };
   const ingest = {
     ingestForOrg: vi.fn(async () => 3),
+    // Pass-through by default: the TTL gate has its own spec, and these tests
+    // drive fan-out/cursor behaviour. A test that wants the gate stubs this.
+    filterExpiredByPublishTime: vi.fn(async (posts: any[]) => ({
+      kept: posts,
+      dropped: 0,
+    })),
     // Each post scores == its own `score` field so a test can drive the min-score
     // gate; keyword-match count is the number of posts scored.
     scoreAllForOrg: vi.fn((posts: any[]) =>

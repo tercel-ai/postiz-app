@@ -700,7 +700,8 @@ describe('OperationPlanService.create', () => {
       // the fixture provides none (coverage validation requires it).
       expect.objectContaining({
         contentItems: [expect.objectContaining({ contentId: 'coverage-x' })],
-      })
+      }),
+      expect.any(Number)
     );
   });
 
@@ -2119,7 +2120,8 @@ describe('OperationPlanService.create', () => {
           expect.objectContaining({ contentId: 'c-1' }),
           expect.objectContaining({ contentId: 'backfill-reddit' }),
         ],
-      })
+      }),
+      expect.any(Number)
     );
   });
 

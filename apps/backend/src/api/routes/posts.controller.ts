@@ -429,11 +429,17 @@ export class PostsController {
         'Provide either `planId` or `posts`, not both'
       );
     }
+    if (body.platforms?.length && body.posts?.length) {
+      throw new BadRequestException(
+        '`platforms` only applies to a `planId` batch — `posts` is already an explicit selection'
+      );
+    }
     if (body.planId) {
       return this._postsService.schedulePlanPosts(
         org.id,
         body.planId,
-        body.publishMethod
+        body.publishMethod,
+        body.platforms
       );
     }
     return this._postsService.schedulePosts(org.id, body.posts!);

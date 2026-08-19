@@ -388,7 +388,6 @@ model Integration {
   posts                 Post[]
   dataTicks             DataTicks[]
   postReleases          PostRelease[]
-  engageXReplyAccounts  EngageXReplyAccount[]
   integrationProjects   IntegrationProject[]
 
   @@unique([organizationId, internalId])
@@ -430,6 +429,17 @@ model IntegrationProject {
   organizationId String
   postingTimes   String      @default("{\"version\":2,\"schedules\":[]}")
   disabled       Boolean     @default(false)
+  // May Engage reply AS this account, for this project. Lives here because
+  // (integration, project) is exactly this table's grain — the same account can
+  // serve several projects and must be selectable in one while excluded from
+  // another, which a column on Integration could not express.
+  // Defaults TRUE (opt-out): a connected account is usable until excluded, which
+  // is why an empty configuration is the correct working default.
+  // Only meaningful for platforms whose replies go out through a connected
+  // account (X today). Extension-published replies use the browser's own
+  // session, so no account is chosen for them — their policy is per-platform,
+  // in EngageConfig.replyPolicies.
+  engageEnabled  Boolean     @default(true)
   createdAt      DateTime    @default(now())
   updatedAt      DateTime?   @updatedAt
 
@@ -1209,13 +1219,36 @@ model EngageConfig {
   projectId      String?
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   enabled        Boolean      @default(false)
+  // Unattended reply mode for THIS project — the granularity an operation plan
+  // works at. Per-PLATFORM refinements (window, strategy) live in replyPolicies
+  // below; whether a connected account may be replied AS lives on
+  // IntegrationProject.engageEnabled. Three grains, three homes.
+  //   'off'    (default) — the plan's daily targets stay what they are today: a
+  //                        send-time CEILING on replies a user initiates.
+  //   'review'           — the backend generates drafts up to the day's budget
+  //                        and parks them in Awaiting review; a human sends.
+  //   'auto'             — the extension additionally sends them, unattended.
+  // Defaults to 'off' deliberately: replying with a real account's session is
+  // the irreversible part of this feature, so it must be opted into per project.
+  autoReplyMode  String       @default("off")
+  // Per-PLATFORM unattended-reply policy for this project, keyed by platform:
+  //   { "reddit": { autoReplyEnabled, windowStart, windowEnd, timezone,
+  //                 defaultStrategy } }
+  // A JSON column rather than a table, for the same reason §3.4 gives for
+  // EngageReplyPolicy: the grain is (this config row, platform) — an attribute
+  // of this row, not an entity — the cardinality is bounded by
+  // SCANNABLE_PLATFORMS, and nothing ever queries BY these fields (the driver
+  // already loads the config row, so it reads them in code). Adding a knob then
+  // costs no migration.
+  // Distinct from autoReplyMode above: that decides WHETHER this project replies
+  // unattended at all; this refines WHERE and WHEN.
+  replyPolicies  Json?
   lastScanAt     DateTime?
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
 
   keywords        EngageKeyword[]
   trackedAccounts EngageTrackedAccount[]
-  xReplyAccounts  EngageXReplyAccount[]
 
   @@unique([organizationId, projectId])
   @@index([organizationId])
@@ -1304,30 +1337,6 @@ model EngageTrackedAccount {
   @@index([configId, platform, enabled])
 }
 
-// integrationId is intentionally NOT globally unique: the same integration may
-// now serve multiple projects' EngageConfig rows. Cross-project duplicate-reply
-// prevention is NOT enforced at the database level in this version — see the
-// EngageReplyClaim TODO note near the end of this file.
-model EngageXReplyAccount {
-  id                 String       @id @default(uuid())
-  configId           String
-  config             EngageConfig @relation(fields: [configId], references: [id], onDelete: Cascade)
-  organizationId     String
-  integrationId      String
-  integration        Integration  @relation(fields: [integrationId], references: [id], onDelete: Cascade)
-  engageEnabled      Boolean      @default(true)
-  autoReplyEnabled   Boolean      @default(false)
-  autoReplyTimeStart String?
-  autoReplyTimeEnd   String?
-  autoReplyTimezone  String?
-  defaultStrategy    String       @default("EXPERT_ANSWER")
-  createdAt          DateTime     @default(now())
-  updatedAt          DateTime     @updatedAt
-
-  @@unique([configId, integrationId])
-  @@index([organizationId, engageEnabled])
-  @@index([integrationId])
-}
 
 // Global post table — one row per (platform, externalPostId), shared across all
 // orgs. Holds immutable content + objective metrics/scores. Per-org mutable state
@@ -1476,6 +1485,10 @@ model EngageOpportunityState {
   @@index([organizationId, bookmarked])
   @@index([opportunityId])
   @@index([organizationId, projectId])
+  // The system-wide TTL sweep (EngageHousekeepingActivity) filters on
+  // status + createdAt with NO organizationId, so every index above is
+  // unusable for it — without this one it is a full table scan every hour.
+  @@index([status, createdAt])
 }
 
 model EngageSentReply {

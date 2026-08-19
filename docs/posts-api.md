@@ -113,6 +113,7 @@ not per post or per keystroke.
 | POST | [`/posts/schedule`](#post-postsschedule) | Commit DRAFT posts to the send queue (DRAFT → QUEUE) |
 | GET | [`/posts/publish-methods`](#get-postspublish-methods) | Per-platform send-path capability for the UI (org-scoped, cacheable) |
 | PATCH | [`/posts/:id/extension-published`](#patch-postsidextension-published) | Extension publish-on-success callback |
+| PATCH | [`/posts/:id/extension-publish-failed`](#patch-postsidextension-publish-failed) | Extension publish-failed callback (carries partial thread success) |
 | POST | [`/posts/publish-due`](#post-postspublish-due) | Extension: claim due QUEUE posts to publish in-browser (leased) |
 | POST | [`/posts/sync-metrics`](#post-postssync-metrics) | Sync raw external metrics for one post |
 
@@ -428,28 +429,94 @@ send paths pick up, and where the **send-path decision is made once per post**
 - Partial success: each post is scheduled independently — one unschedulable post
   never blocks the rest.
 
+The batch is named **either** by explicit `posts` **or** by `planId` — never both
+(`400` if both are given: merging them would leave it ambiguous which posts a
+body-level `publishMethod` applies to).
+
 - **Body** — `SchedulePostsDto`:
 
 ```jsonc
 {
+  // (a) hand-picked ids — each with its own optional send path and date
   "posts": [
     {
       "id": "<post-uuid>",
       "publishMethod": "extension" | "api",   // optional → auto-resolve
       "date": "2026-08-01T09:00:00.000Z"       // optional ISO → override this post's publishDate
     }
-  ]
+  ],
+
+  // (b) OR plan-scoped — commit EVERY still-DRAFT post of one operation plan
+  "planId": "<operation-plan-uuid>",
+  "publishMethod": "extension" | "api",       // optional, applies to the whole plan
+  "platforms": ["x", "reddit"]                // optional, plan-scoped only — see below
 }
 ```
+
+**Plan-scoped commit (`planId`).** The "activate this plan" action: the client
+never enumerates the plan's post ids, which it could not keep in sync anyway
+(re-running a plan re-materializes them). Only the plan's still-`DRAFT` **roots**
+are committed — a thread's children flip with their anchor — and soft-deleted
+rows are skipped, so the drafts of a plan superseded by a re-run never resurface.
+Org-scoped: a `planId` from another organization simply matches nothing.
+A per-post `date` is not expressible in the request body here; each post keeps
+its materialized `publishDate` **unless** a per-platform publish time window
+(below) re-picks it.
+
+**Per-platform publish time window.** Admin-configurable setting
+(`extension_publish.time_window`, resolved by `ExtensionPublishConfigService` —
+same default→platform-override shape as `extension_publish.segment_gap`):
+`{ default?: {windowStart, windowEnd, timezone?}, platforms: { <platform>: {windowStart, windowEnd, timezone?} } }`,
+`windowStart`/`windowEnd` as local `"HH:MM"` (a window may wrap past midnight,
+e.g. `22:00`–`02:00`); `timezone` is IANA, omitted = UTC. A platform absent from
+the resolved config (no override, no global `default`) is **unconstrained** — the
+out-of-the-box state, so configuring nothing changes nothing.
+
+Applied **at this call**, not at plan generation — the window may have been
+configured or edited after the plan was already generated, so re-evaluating it
+here (rather than baking it into the materialized `publishDate`) is what makes a
+later admin edit actually take effect. For each `DRAFT` root about to be
+committed: if its platform resolves to a window and its materialized
+`publishDate` falls outside it (in the window's timezone), a **new random
+instant inside the window** replaces it — never clamped to the nearest boundary,
+since the materialized time was only ever the plan's generated default and has
+no value worth preserving once a window says it's the wrong time of day. A post
+already inside its window, or on an unconstrained platform, keeps its
+materialized time exactly as before. Applies group-wide, same as an explicit
+`date` — a thread's segments share one publish time.
+
+**`platforms` — restrict to specific platforms.** Plan-scoped only (`400` if sent
+together with `posts` — a hand-picked id list is already an explicit selection,
+so a platform filter on top of it would be ambiguous). Matches
+`Post.providerIdentifier` case-insensitively (`"X"` and `"x"` are the same
+filter). Omit to activate every platform the plan has.
+
+Every response field below — `total`, `alreadyScheduled`, `scheduled`, `failed`
+— is scoped to the **filtered** set, not the whole plan: a call filtered to
+`["x"]` on a plan that also has `reddit`/`linkedin` posts reports counts only
+for the `x` roots, never the others. A filter matching nothing is a no-op
+success (`total: 0`), same as an unknown `planId` — never an error.
+
+Idempotent by construction: `state = DRAFT` is itself the filter, so a repeated
+activation matches nothing.
 
 - **Response**:
 
 ```jsonc
 {
   "scheduled": [ { "id": "<post-uuid>", "publishMethod": "extension" | "api" } ],
-  "failed":    [ { "id": "<post-uuid>", "code": "<code>", "message": "<human text>" } ]
+  "failed":    [ { "id": "<post-uuid>", "code": "<code>", "message": "<human text>" } ],
+
+  // plan-scoped calls only:
+  "total": 12,             // roots the plan has (any state) — or, with `platforms`, roots matching it
+  "alreadyScheduled": 12    // of those, how many were not DRAFT
 }
 ```
+
+`total` / `alreadyScheduled` are what make a repeat call legible: `total > 0` with
+an empty `scheduled` means the plan (or platform slice) is already committed,
+while `total = 0` means nothing matched (no posts, wrong org, or a `platforms`
+filter that hit nothing). Without them the two look identical.
 
 | `failed[].code` | Meaning |
 | --- | --- |
@@ -530,18 +597,83 @@ Org-scoped and idempotent.
 
 | Field | Type | Required | Rules |
 | --- | --- | --- | --- |
-| `releaseURL` | `string` | yes | Permalink; max 2048 chars. |
+| `releaseURL` | `string` | no | Permalink of the **anchor**; max 2048 chars. Omitted for a confirmed URL-less publish (e.g. Quora) — the post still flips `PUBLISHED` so it leaves `QUEUE`. |
 | `releaseId` | `string` | no | Platform post id (Reddit `t3_*` / X `rest_id`); max 512. |
+| `segments` | `PublishedSegment[]` | no | Per-segment results for a **thread** (see below). |
+
+**`segments` (threads).** The two fields above describe the anchor only, so
+without this every follow-up segment is stored `PUBLISHED` with no URL — on every
+successful thread, not just a failing one — and is therefore never eligible for
+metrics. Each entry:
+
+| Field | Type | Required | Rules |
+| --- | --- | --- | --- |
+| `postId` | `string` | yes | **Our** Post id for this segment, echoed from the due-item's `segments[].postId`. |
+| `url` | `string` | no | This segment's permalink; max 2048. |
+| `releaseId` | `string` | no | This segment's platform post id; max 512. |
+
+Segments are settled **by id, never by position**: a thread is offered and settled
+across a network hop and a lease window (minutes), during which the chain can
+change (an edit, a plan re-materialize, a soft-delete). A positional match would
+then stamp a live permalink onto the wrong row. Reported ids are intersected with
+the chain's real children, so an id outside it is ignored.
+
+Optional for version skew — an older extension omits it and the follow-ups keep
+the URL-less treatment.
+
+### PATCH /posts/:id/extension-publish-failed
+
+Publish-**failed** callback: the in-browser send settled as an error (platform
+rejected it, wrong account, or the send could not be verified), so the row flips
+`QUEUE → ERROR` with the reason instead of sitting in `QUEUE` to be re-offered on
+every poll. Org-scoped; a row already `PUBLISHED` is never touched, and recurring
+originals keep their clone-per-cycle mechanism.
+
+- **Path**: `id` — post id (the thread's **anchor**).
+- **Body** — `MarkExtensionPublishFailedDto`:
+
+| Field | Type | Required | Rules |
+| --- | --- | --- | --- |
+| `error` | `string` | no | Reason; max 2048. Defaults to `extension publish failed`. |
+| `segments` | `PublishedSegment[]` | no | Segments that **did** publish before the failure (same shape as above). |
+
+**Partial success is the normal shape of a thread failure.** Segments publish one
+at a time and the run stops at the first failure, so the anchor is usually already
+live. When `segments` is present:
+
+- the segments it names are recorded `PUBLISHED` with their own permalinks —
+  including the **anchor**, which is therefore *not* flipped to `ERROR`;
+- only the remaining chain nodes become `ERROR`.
+
+This matters because marking a live post `ERROR` drops it out of every metrics
+path permanently: the permalinks exist only in the extension's queue state, which
+is discarded when the task settles.
+
+- **Response**: `{ ok: true }`, or `{ ok: true, partial: true, published: <n> }`
+  when segments were reported. Failure shapes: `{ ok: false, reason }` with
+  `not-found` / `already-published` / `blocked-recurring-original`.
+
+An absent or empty `segments` means nothing went out (the classic total failure) —
+also what an older extension sends, which keeps the previous all-or-nothing
+behaviour.
 
 ### POST /posts/publish-due
 
 The browser extension polls this for `QUEUE` posts due to publish in-browser
 (backend = scheduler, extension = executor — the backend makes no provider API
-call here). Returns single-segment, due (`publishDate <= now`) roots whose send
-path resolves to the extension (explicit `publishMethod = EXTENSION`, or the
-legacy fallback: an extension-routed integration with `publishMethod` unset).
-Recurring originals are excluded (they publish via the Temporal-only
-clone-per-cycle path).
+call here). Returns due (`publishDate <= now`) **roots** whose send path resolves
+to the extension (explicit `publishMethod = EXTENSION`, or the legacy fallback: an
+extension-routed integration with `publishMethod` unset). Recurring originals are
+excluded (they publish via the Temporal-only clone-per-cycle path).
+
+**Threads.** A root with a thread chain is returned as ONE multi-segment item —
+its children are never offered on their own (which is also why they cannot be
+claimed twice). The chain is assembled by walking `parentPostId` from the anchor,
+so a row that shares the group but is unreachable from it is never included.
+Media is carried on the **anchor segment only**: every platform's thread
+continuation is a reply/comment whose poster takes text alone, and the extension
+rejects an item carrying images past segment 0 — a rejected item never leaves
+`QUEUE`, so it would be re-offered forever.
 
 **Lease.** Each returned post is atomically **claimed** for a lease window: it is
 stamped with a unique token (`releaseId`) + `claimedAt = now` and is not re-offered
@@ -563,12 +695,20 @@ only after the lease expires.
       "platform": "hackernews",         // persisted Post.providerIdentifier
       "title": "…",                     // optional (article/story platforms)
       "subreddit": [ /* … */ ],         // optional (reddit publishing header)
-      "segments": [ { "text": "…" } ],
+      "segments": [                     // [0] = anchor; [1..] = thread chain, in publish order
+        { "postId": "<post-uuid>", "text": "…", "images": ["https://…"] },
+        { "postId": "<post-uuid>", "text": "…" }   // continuations are text-only
+      ],
       "publishDate": "2026-07-27T00:00:00.000Z"
     }
   ]
 }
 ```
+
+`segments[].postId` is our Post id for that segment. The extension echoes it back
+on both settle callbacks so each segment is recorded against the right row by
+identity — see
+[extension-published](#patch-postsidextension-published).
 
 Cadence: the extension polls this on its own 1-min alarm (`aisee-publish-poll`),
 and immediately on the `aisee:post-publish` sync trigger (see

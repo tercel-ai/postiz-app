@@ -25,6 +25,7 @@ import { CreateGeneratedPostsDto } from '@gitroom/nestjs-libraries/dtos/generato
 import { IntegrationService } from '@gitroom/nestjs-libraries/database/prisma/integrations/integration.service';
 import { makeId } from '@gitroom/nestjs-libraries/services/make.is';
 import utc from 'dayjs/plugin/utc';
+import timezone from 'dayjs/plugin/timezone';
 import { MediaService } from '@gitroom/nestjs-libraries/database/prisma/media/media.service';
 import { ShortLinkService } from '@gitroom/nestjs-libraries/short-linking/short.link.service';
 import { CreateTagDto } from '@gitroom/nestjs-libraries/dtos/posts/create.tag.dto';
@@ -34,6 +35,7 @@ import { UploadFactory } from '@gitroom/nestjs-libraries/upload/upload.factory';
 import { Readable } from 'stream';
 import { OpenaiService } from '@gitroom/nestjs-libraries/openai/openai.service';
 dayjs.extend(utc);
+dayjs.extend(timezone);
 import * as Sentry from '@sentry/nestjs';
 import { TemporalService } from 'nestjs-temporal-core';
 import { TypedSearchAttributes } from '@temporalio/common';
@@ -50,7 +52,10 @@ import { ioRedis } from '@gitroom/nestjs-libraries/redis/redis.service';
 import { RefreshToken } from '@gitroom/nestjs-libraries/integrations/social.abstract';
 import { RefreshIntegrationService } from '@gitroom/nestjs-libraries/integrations/refresh.integration.service';
 import { PostOverageService } from '@gitroom/nestjs-libraries/database/prisma/posts/post-overage.service';
-import { ExtensionPublishConfigService } from '@gitroom/nestjs-libraries/database/prisma/posts/extension-publish-config.service';
+import {
+  ExtensionPublishConfigService,
+  redistributePublishTimeIfOutsideWindow,
+} from '@gitroom/nestjs-libraries/database/prisma/posts/extension-publish-config.service';
 import { titleFromSettings } from '@gitroom/nestjs-libraries/database/prisma/posts/settings-title';
 import { ProjectValidationService } from '@gitroom/nestjs-libraries/projects/project-validation.service';
 import { PublishPlatform } from '@gitroom/helpers/extension/post-publish';
@@ -2208,21 +2213,62 @@ export class PostsService {
   async schedulePlanPosts(
     orgId: string,
     operationPlanId: string,
-    publishMethod?: PublishMethod
+    publishMethod?: PublishMethod,
+    platforms?: string[]
   ) {
-    const roots = await this._postRepository.getSchedulablePostRootsByPlan(
+    const allRoots = await this._postRepository.getSchedulablePostRootsByPlan(
       orgId,
       operationPlanId
     );
+    // Filtered EARLY so every number below (`total`, `alreadyScheduled`,
+    // `scheduled`, `failed`) is scoped to what the caller asked for — a caller
+    // that filtered to `['x']` on a plan that also has linkedin/medium posts
+    // must not see `total` counting posts it never asked to touch, which would
+    // make the "already done" signal misleading.
+    const platformSet = platforms?.length
+      ? new Set(platforms.map((p) => p.toLowerCase()))
+      : null;
+    const roots = platformSet
+      ? allRoots.filter(
+          (p) =>
+            !!p.providerIdentifier &&
+            platformSet.has(p.providerIdentifier.toLowerCase())
+        )
+      : allRoots;
     const drafts = roots.filter((p) => p.state === 'DRAFT');
+    // Per-platform publish time windows (admin-configurable, may not have
+    // existed yet when the plan was generated) — resolved once for the whole
+    // batch, then applied per-post below. A platform absent from this map is
+    // unconstrained: its posts keep their materialized time untouched.
+    const timeWindows = drafts.length
+      ? await this._extensionPublishConfigService.getPublishTimeWindows()
+      : {};
     // Empty input is safe: schedulePosts short-circuits on an empty id list, so
-    // an already-committed (or unknown) plan is a no-op success, not an error.
+    // an already-committed (or unknown, or platform-filtered-to-nothing) plan is
+    // a no-op success, not an error.
     const result = await this.schedulePosts(
       orgId,
-      drafts.map((p) => ({
-        id: p.id,
-        ...(publishMethod ? { publishMethod } : {}),
-      }))
+      drafts.map((p) => {
+        const platform = p.providerIdentifier?.toLowerCase() as
+          | PublishPlatform
+          | undefined;
+        const window = platform ? timeWindows[platform] : undefined;
+        // Re-pick (not clamp) a time inside the window: the materialized time
+        // is just the plan's default and has no value worth preserving once a
+        // window says it's the wrong time of day.
+        const redistributed = window
+          ? redistributePublishTimeIfOutsideWindow(p.publishDate, window)
+          : undefined;
+        const dateOverride =
+          redistributed && redistributed.getTime() !== p.publishDate.getTime()
+            ? redistributed.toISOString()
+            : undefined;
+        return {
+          id: p.id,
+          ...(publishMethod ? { publishMethod } : {}),
+          ...(dateOverride ? { date: dateOverride } : {}),
+        };
+      })
     );
     return {
       ...result,

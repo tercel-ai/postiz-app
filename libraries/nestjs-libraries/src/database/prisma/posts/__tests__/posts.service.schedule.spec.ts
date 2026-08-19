@@ -24,6 +24,11 @@ function makeService(posts: any[], planRoots?: any[]) {
     schedulePostGroupToQueue,
   } as any;
 
+  // No configured window on any platform, by default — the pre-existing
+  // behaviour (materialized publishDate always kept as-is).
+  const getPublishTimeWindows = vi.fn().mockResolvedValue({});
+  const extensionPublishConfigService = { getPublishTimeWindows } as any;
+
   const service = new PostsService(
     repo,
     {} as any, // integrationManager (schedulePosts uses the standalone resolver)
@@ -34,7 +39,7 @@ function makeService(posts: any[], planRoots?: any[]) {
     {} as any,
     {} as any,
     {} as any,
-    {} as any
+    extensionPublishConfigService
   );
   // Stub the Temporal trigger so we can assert WHICH posts reach it.
   const startWorkflow = vi
@@ -47,6 +52,7 @@ function makeService(posts: any[], planRoots?: any[]) {
     getSchedulablePostRootsByPlan,
     schedulePostGroupToQueue,
     startWorkflow,
+    getPublishTimeWindows,
   };
 }
 
@@ -507,5 +513,275 @@ describe('PostsService.schedulePlanPosts', () => {
     ]);
     expect(res.total).toBe(2);
     expect(schedulePostGroupToQueue).toHaveBeenCalledTimes(1);
+  });
+});
+
+// `platforms` (Automation page's per-platform picker on "Confirm & schedule")
+// narrows a plan-scoped commit to specific providerIdentifiers. What matters:
+// every response number is scoped to the FILTERED set, not the whole plan —
+// a caller that filtered to `['x']` must never see counts for reddit/linkedin
+// posts it never asked to touch.
+describe('PostsService.schedulePlanPosts — platform filter', () => {
+  beforeEach(() => vi.restoreAllMocks());
+
+  const xDraft = (over: Partial<any>) =>
+    draft({
+      integrationId: 'int-x',
+      integration: { providerIdentifier: 'x', disabled: false },
+      settings: JSON.stringify({ __type: 'x' }),
+      ...over,
+    });
+
+  it('commits only the roots on the requested platforms', async () => {
+    const { service, getSchedulablePostsByIds, schedulePostGroupToQueue } = makeService(
+      [xDraft({ id: 'x1', group: 'gx' })],
+      [
+        { id: 'x1', state: 'DRAFT', providerIdentifier: 'x' },
+        { id: 'r1', state: 'DRAFT', providerIdentifier: 'reddit' },
+        { id: 'l1', state: 'DRAFT', providerIdentifier: 'linkedin' },
+      ]
+    );
+
+    const res = await service.schedulePlanPosts('org-1', 'plan-1', undefined, ['x']);
+
+    // Only the 'x' root is ever handed to the id-based path — reddit/linkedin
+    // are excluded before schedulePosts is even called, not filtered after.
+    expect(getSchedulablePostsByIds).toHaveBeenCalledWith('org-1', ['x1']);
+    expect(res.scheduled).toEqual([{ id: 'x1', publishMethod: 'extension' }]);
+    // Scoped to the filter: 1 (the 'x' root), not 3 (the whole plan).
+    expect(res.total).toBe(1);
+    expect(res.alreadyScheduled).toBe(0);
+    expect(schedulePostGroupToQueue).toHaveBeenCalledTimes(1);
+  });
+
+  it('matches providerIdentifier case-insensitively', async () => {
+    const { service, getSchedulablePostsByIds } = makeService(
+      [xDraft({ id: 'x1', group: 'gx' })],
+      [{ id: 'x1', state: 'DRAFT', providerIdentifier: 'X' }]
+    );
+
+    await service.schedulePlanPosts('org-1', 'plan-1', undefined, ['x']);
+
+    expect(getSchedulablePostsByIds).toHaveBeenCalledWith('org-1', ['x1']);
+  });
+
+  it('an empty match is a no-op success, not an error', async () => {
+    const { service, getSchedulablePostsByIds, schedulePostGroupToQueue } = makeService(
+      [],
+      [{ id: 'r1', state: 'DRAFT', providerIdentifier: 'reddit' }]
+    );
+
+    const res = await service.schedulePlanPosts('org-1', 'plan-1', undefined, ['linkedin']);
+
+    expect(res).toEqual({ scheduled: [], failed: [], total: 0, alreadyScheduled: 0 });
+    expect(getSchedulablePostsByIds).toHaveBeenCalledWith('org-1', []);
+    expect(schedulePostGroupToQueue).not.toHaveBeenCalled();
+  });
+
+  it('an empty or absent platforms list activates every platform (unchanged behaviour)', async () => {
+    const { service, getSchedulablePostsByIds } = makeService(
+      [xDraft({ id: 'x1', group: 'gx' })],
+      [
+        { id: 'x1', state: 'DRAFT', providerIdentifier: 'x' },
+        { id: 'r1', state: 'DRAFT', providerIdentifier: 'reddit' },
+      ]
+    );
+
+    await service.schedulePlanPosts('org-1', 'plan-1', undefined, []);
+
+    expect(getSchedulablePostsByIds).toHaveBeenCalledWith('org-1', ['x1', 'r1']);
+  });
+});
+
+// A configured per-platform publish time window (extension_publish.time_window)
+// re-picks an out-of-window materialized time at ACTIVATION, not generation —
+// the window may have been configured/edited after the plan was generated.
+// Re-picks (never clamps): the plan's time is just a default, so an out-of-
+// window post should land at a random point inside the window, not its edge.
+describe('PostsService.schedulePlanPosts — publish time window', () => {
+  beforeEach(() => vi.restoreAllMocks());
+
+  const xDraft = (over: Partial<any>) =>
+    draft({
+      integrationId: 'int-x',
+      integration: { providerIdentifier: 'x', disabled: false },
+      settings: JSON.stringify({ __type: 'x' }),
+      ...over,
+    });
+
+  it('leaves publishDate untouched when the platform has no configured window', async () => {
+    const { service, schedulePostGroupToQueue } = makeService(
+      [xDraft({ id: 'x1', group: 'gx' })],
+      [
+        {
+          id: 'x1',
+          group: 'gx',
+          state: 'DRAFT',
+          providerIdentifier: 'x',
+          publishDate: new Date('2026-08-01T03:00:00.000Z'),
+        },
+      ]
+    );
+
+    await service.schedulePlanPosts('org-1', 'plan-1');
+
+    expect(schedulePostGroupToQueue).toHaveBeenCalledWith(
+      'org-1',
+      'gx',
+      'EXTENSION',
+      undefined
+    );
+  });
+
+  it('leaves publishDate untouched when it already falls inside the window', async () => {
+    const { service, schedulePostGroupToQueue, getPublishTimeWindows } = makeService(
+      [xDraft({ id: 'x1', group: 'gx' })],
+      [
+        {
+          id: 'x1',
+          group: 'gx',
+          state: 'DRAFT',
+          providerIdentifier: 'x',
+          publishDate: new Date('2026-08-01T12:00:00.000Z'), // inside 09:00-17:00
+        },
+      ]
+    );
+    getPublishTimeWindows.mockResolvedValue({
+      x: { windowStart: '09:00', windowEnd: '17:00' },
+    });
+
+    await service.schedulePlanPosts('org-1', 'plan-1');
+
+    expect(schedulePostGroupToQueue).toHaveBeenCalledWith(
+      'org-1',
+      'gx',
+      'EXTENSION',
+      undefined
+    );
+  });
+
+  it('re-picks a random time inside the window when the materialized time falls outside it', async () => {
+    const { service, schedulePostGroupToQueue, getPublishTimeWindows } = makeService(
+      [xDraft({ id: 'x1', group: 'gx' })],
+      [
+        {
+          id: 'x1',
+          group: 'gx',
+          state: 'DRAFT',
+          providerIdentifier: 'x',
+          publishDate: new Date('2026-08-01T03:00:00.000Z'), // outside 09:00-17:00
+        },
+      ]
+    );
+    getPublishTimeWindows.mockResolvedValue({
+      x: { windowStart: '09:00', windowEnd: '17:00' },
+    });
+    vi.spyOn(Math, 'random').mockReturnValue(0.5); // midpoint of the 8h span
+
+    await service.schedulePlanPosts('org-1', 'plan-1');
+
+    expect(schedulePostGroupToQueue).toHaveBeenCalledWith(
+      'org-1',
+      'gx',
+      'EXTENSION',
+      new Date('2026-08-01T13:00:00.000Z')
+    );
+  });
+
+  it('honours the window timezone, not UTC clock time', async () => {
+    const { service, schedulePostGroupToQueue, getPublishTimeWindows } = makeService(
+      [xDraft({ id: 'x1', group: 'gx' })],
+      [
+        {
+          id: 'x1',
+          group: 'gx',
+          state: 'DRAFT',
+          // 2026-08-01T03:00Z is 12:00 in Asia/Tokyo (UTC+9) — inside 09:00-17:00
+          // local, even though it is well outside that range in UTC.
+          providerIdentifier: 'x',
+          publishDate: new Date('2026-08-01T03:00:00.000Z'),
+        },
+      ]
+    );
+    getPublishTimeWindows.mockResolvedValue({
+      x: { windowStart: '09:00', windowEnd: '17:00', timezone: 'Asia/Tokyo' },
+    });
+
+    await service.schedulePlanPosts('org-1', 'plan-1');
+
+    expect(schedulePostGroupToQueue).toHaveBeenCalledWith(
+      'org-1',
+      'gx',
+      'EXTENSION',
+      undefined
+    );
+  });
+
+  it('re-picks into the following local day for a window that wraps past midnight', async () => {
+    const { service, schedulePostGroupToQueue, getPublishTimeWindows } = makeService(
+      [xDraft({ id: 'x1', group: 'gx' })],
+      [
+        {
+          id: 'x1',
+          group: 'gx',
+          state: 'DRAFT',
+          providerIdentifier: 'x',
+          publishDate: new Date('2026-08-01T10:00:00.000Z'), // outside 22:00-02:00
+        },
+      ]
+    );
+    getPublishTimeWindows.mockResolvedValue({
+      x: { windowStart: '22:00', windowEnd: '02:00' },
+    });
+    // span = 240min; floor(0.999 * 240) = 239 -> 22:00 + 239min = next-day 01:59
+    vi.spyOn(Math, 'random').mockReturnValue(0.999);
+
+    await service.schedulePlanPosts('org-1', 'plan-1');
+
+    expect(schedulePostGroupToQueue).toHaveBeenCalledWith(
+      'org-1',
+      'gx',
+      'EXTENSION',
+      new Date('2026-08-02T01:59:00.000Z')
+    );
+  });
+
+  it('matches the window platform key case-insensitively', async () => {
+    const { service, schedulePostGroupToQueue, getPublishTimeWindows } = makeService(
+      [xDraft({ id: 'x1', group: 'gx' })],
+      [
+        {
+          id: 'x1',
+          group: 'gx',
+          state: 'DRAFT',
+          providerIdentifier: 'X', // stored uppercase
+          publishDate: new Date('2026-08-01T03:00:00.000Z'),
+        },
+      ]
+    );
+    getPublishTimeWindows.mockResolvedValue({
+      x: { windowStart: '09:00', windowEnd: '17:00' },
+    });
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+
+    await service.schedulePlanPosts('org-1', 'plan-1');
+
+    expect(schedulePostGroupToQueue).toHaveBeenCalledWith(
+      'org-1',
+      'gx',
+      'EXTENSION',
+      new Date('2026-08-01T13:00:00.000Z')
+    );
+  });
+
+  it('never calls getPublishTimeWindows when the plan has no DRAFT roots to schedule', async () => {
+    const { service, getPublishTimeWindows } = makeService(
+      [],
+      [{ id: 'x1', state: 'QUEUE', providerIdentifier: 'x' }]
+    );
+
+    await service.schedulePlanPosts('org-1', 'plan-1');
+
+    expect(getPublishTimeWindows).not.toHaveBeenCalled();
   });
 });

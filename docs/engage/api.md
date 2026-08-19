@@ -69,7 +69,9 @@
 
 The following endpoints accept `projectId` as a query parameter: `GET /config`, `POST /config/reset`, `GET /monitored-channels`, `GET /tracked-accounts`, `GET /reply-accounts`, `GET /opportunities/score-stats`, `GET /opportunities/counts/summary`, `GET /opportunities/count`, `GET /opportunities`, `GET /opportunities/:id`, `PATCH /opportunities/:id/dismiss`, `PATCH /opportunities/:id/bookmark`, `GET /opportunities/locate`, `GET /sent`, `GET /sent/locate`, `GET /sent/stats`, `GET /sent/counts/summary`, `GET /sent/count`, `GET /dashboard/summary`, `GET /dashboard/replies-trend`, `GET /dashboard/traffics`, `GET /dashboard/impressions`, and `GET /dashboard/top-sources`.
 
-Mutation endpoints that create project-owned config or reply records accept `projectId` in the JSON body: `POST /setup`, `POST /config`, `POST /keywords`, `POST /keywords/bulk`, `POST /monitored-channels`, `POST /tracked-accounts`, `POST /opportunities/:id/draft`, `POST /opportunities/:id/save-draft`, `POST /opportunities/:id/send-now`, `POST /opportunities/:id/schedule`, `POST /opportunities/:id/batch-send`, `POST /opportunities/:id/batch-schedule`, and `POST /opportunities/:id/manual-reply`.
+Mutation endpoints that create project-owned config records accept `projectId` in the JSON body: `POST /setup`, `POST /config`, `POST /keywords`, `POST /keywords/bulk`, `POST /monitored-channels`, and `POST /tracked-accounts`.
+
+Reply mutation endpoints use the `stateId` returned with each opportunity (`POST /opportunities/:stateId/draft`, `save-draft`, `send-now`, `schedule`, `batch-send`, `batch-schedule`, and `manual-reply`). The backend derives the project and shared opportunity identities from that state row, so a reply request does not need `projectId`. The older `opportunity id + projectId` form remains supported for compatibility.
 
 ---
 
@@ -137,7 +139,11 @@ interface EngageConfig {
   keywords: EngageKeyword[];
   monitoredChannels: MonitoredChannel[];   // channel-scope scan targets (reddit)
   trackedAccounts: EngageTrackedAccount[];
-  xReplyAccounts: EngageXReplyAccount[];
+  // Unattended-reply controls (§ Unattended Replying below). Two different
+  // grains: autoReplyMode is a project-level switch, replyPolicies refines it
+  // per platform. Neither is an embedded relation — plain columns on this row.
+  autoReplyMode: 'off' | 'review' | 'auto';
+  replyPolicies: Record<string, ReplyPolicy> | null;
   // Scan scheduling + status (only returned by GET /config)
   scanIntervals: { keywordHours: number; channelHours: number; trackedHours: number };
   // Per-org last/next scan time, derived from EngageScanCursor (next is computed:
@@ -237,30 +243,46 @@ interface EngageTrackedAccount {
 }
 ```
 
-### EngageXReplyAccount (Nested in Integration)
+### Reply Accounts & Reply Policies
+
+Two independent concepts, at two different grains — merged into one nested
+config table until the rework this doc reflects:
+
+| | Grain | Applies to | Lives on |
+| --- | --- | --- | --- |
+| **Reply account** — may this connected account send Engage replies, in this project? | (integration, project) | Platforms that reply through a connected account (**X** today) | `IntegrationProject.engageEnabled` |
+| **Reply policy** — is this platform auto-replied to, and where/when? | (project, platform) | Every engage platform, including extension-published ones (Reddit, …) | `EngageConfig.replyPolicies` (see `POST /config` above) |
+
+A platform that publishes replies through the browser extension's own session
+(Reddit and friends) has no "which account" question to answer — nothing picks
+an account for it — so it never appears in `GET /reply-accounts`; its only
+control is the reply policy.
 
 ```typescript
-// GET /reply-accounts returns Integration objects with nested engageXReplyAccount
+// GET /reply-accounts returns Integration objects with a flat engageEnabled —
+// no nested config object.
 interface Integration {
   id: string;
   name: string;
-  providerIdentifier: 'x';
+  providerIdentifier: 'x';   // scoped to ACCOUNT_REPLY_PLATFORMS (['x'] today)
   picture: string | null;
   // Other Integration fields...
-  engageXReplyAccount: EngageXReplyAccountConfig | null;
+  // May Engage reply as this account, for the requested project. Absent binding
+  // (account not bound to the project, or no projectId given) reads as `true` —
+  // opt-OUT, not opt-in: a connected account is usable until excluded.
+  engageEnabled: boolean;
 }
 
-interface EngageXReplyAccountConfig {
-  id: string;
-  integrationId: string;
-  engageEnabled: boolean;
-  autoReplyEnabled: boolean;
-  autoReplyTimeStart: string | null;   // 'HH:MM' 24h
-  autoReplyTimeEnd: string | null;
-  autoReplyTimezone: string | null;    // IANA timezone, e.g., 'Asia/Shanghai'
-  defaultStrategy: ReplyStrategy;
-  createdAt: string;
-  updatedAt: string;
+// EngageConfig.replyPolicies value shape, keyed by platform.
+interface ReplyPolicy {
+  autoReplyEnabled?: boolean;
+  windowStart?: string;   // 'HH:MM', local to `timezone`
+  windowEnd?: string;
+  timezone?: string;      // IANA; omitted window = UTC
+  defaultStrategy?: ReplyStrategy;
+  length?: 'short' | 'medium' | 'long';   // draft length tier; omit for 'medium'
+  mentionTags?: string[];                 // @-mentions steered into the draft
+  checkIntervalMinutes?: number;          // overrides engage_reply_pacing.minGapMinutes for THIS platform
 }
 ```
 
@@ -458,7 +480,8 @@ The first call will automatically create a default configuration (`enabled: fals
   "keywords": [],
   "monitoredChannels": [],
   "trackedAccounts": [],
-  "xReplyAccounts": []
+  "autoReplyMode": "off",
+  "replyPolicies": null
 }
 ```
 
@@ -472,14 +495,140 @@ Update configuration fields. Does not perform bulk writes to related tables — 
 
 **Request Body**
 
-```json
+```jsonc
 {
   "enabled": true,
-  "projectId": "product_123"
+  "projectId": "product_123",
+  "autoReplyMode": "off" | "review" | "auto"   // optional; omit = unchanged
 }
 ```
 
-**Response** `200 OK` — Returns the updated `EngageConfig` (without embedded relations)
+**`autoReplyMode` — unattended replying.** The opt-in switch for turning a
+project's operation-plan reply targets from a ceiling into a driver:
+
+| Value | Behaviour |
+| --- | --- |
+| `off` (default) | The plan's `targetRepliesPerDay` / `keywordTargets` stay a **send-time ceiling** on replies a user initiates. Nothing is generated or sent on its own. |
+| `review` | The backend drafts up to the day's budget and parks each as a `DRAFT`, visible in `GET /sent?status=awaiting-draft`. A human still sends. |
+| `auto` | The browser extension additionally posts them, unattended, using the user's own platform session. |
+
+Defaults to `off` deliberately: replying with a real account's session is the
+irreversible part of this feature, so it is opted into per project.
+
+A value other than `off` **requires `projectId`** — the driver only reads
+project-scoped configs, so a mode set on the legacy null-project row would be
+stored, echoed back, and never do anything. Sending one returns `400` with
+`code: "engage_auto_reply_requires_project"`. Turning it `off` is never blocked.
+
+Omitting the field leaves the stored mode unchanged, so a plain enable/disable
+never resets it.
+
+**`replyPolicies` — per-platform refinement.** `autoReplyMode` decides WHETHER a
+project replies unattended at all; `replyPolicies` decides WHERE and WHEN, keyed
+by platform:
+
+```jsonc
+{
+  "replyPolicies": {
+    "reddit": {
+      "autoReplyEnabled": true,
+      "windowStart": "09:00",       // 'HH:MM', local to `timezone` below
+      "windowEnd": "18:00",
+      "timezone": "Asia/Shanghai",  // IANA; omitted window = UTC
+      "defaultStrategy": "EXPERT_ANSWER",
+      "length": "medium",           // optional; omit for 'medium'
+      "mentionTags": ["@aisee"],    // optional; omit for none
+      "checkIntervalMinutes": 30    // optional; omit to use the org-wide default
+    }
+  }
+}
+```
+
+A platform absent from the map — or present with `autoReplyEnabled: false` —
+is never auto-replied to, **even when `autoReplyMode` is `auto`**. This is the
+one place where "no setting" means OFF rather than "inherit": an unconfigured
+platform must not start replying on its own just because the project opted in
+generally. Conversely, **the platform loop is entirely data-driven off this
+map's keys** — any platform can be given a policy, not just Reddit/X — but see
+the caveat below on `auto` mode's actual reach.
+
+The map is **replaced wholesale** — send every platform's policy you want kept,
+not just the one you're changing (the client should merge locally against the
+value `GET /config` returned, then POST the merged map).
+
+`windowStart`/`windowEnd` bound the LOCAL-time hours the driver may hand out
+replies for this platform (a window that wraps past midnight, e.g. `22:00`–
+`02:00`, is honoured as a wrap). Omit both for no window restriction.
+`defaultStrategy` is the reply strategy `POST /reply-due` drafts with on this
+platform; omit for `EXPERT_ANSWER`. `length` is the draft length tier (mirrors
+the user-driven `POST /opportunities/:id/draft`'s `length`); omit for `medium`.
+`mentionTags` are steered into the generated draft the same way the user-driven
+path's `mentions` are. `checkIntervalMinutes` overrides the org-wide
+`engage_reply_pacing.minGapMinutes` for THIS platform only — useful because
+platforms carry very different account risk (e.g. a slower cadence on X than on
+Reddit).
+
+**`auto` mode reach.** The backend driver (this endpoint's scheduling half) will
+draft for any platform with a policy — Reddit, X, LinkedIn, whatever. But
+`mode: 'auto'` additionally requires the browser extension to know how to POST a
+reply on that platform; today it only does for `reddit`/`x`. Configuring
+`autoReplyEnabled: true` on another platform with `autoReplyMode: 'auto'` will
+still draft and park replies (functionally like `review` mode for that
+platform) until the extension gains a poster for it — it will not error, but it
+will not send unattended either.
+
+**Response** `200 OK` — Returns the updated `EngageConfig` (without embedded relations).
+`GET /api/engage/config` echoes `autoReplyMode` and `replyPolicies` back for the
+project-scoped view; the org-wide aggregate view always reports the (inert)
+null-project row's value.
+
+---
+
+### POST `/api/engage/reply-due`
+
+The browser extension polls this for reply drafts that are due right now, across
+every project whose `autoReplyMode` is `review` or `auto`. The mirror of
+`POST /posts/publish-due`: backend = scheduler, extension = executor — this
+endpoint makes **no** platform call. It reads each project's plan budget, picks
+the opportunities, generates the drafts, parks them as `DRAFT` rows, and returns
+what is ready.
+
+Deliberately org-scoped with **no `planId`**: the plan decides how much to reply,
+which the server reads itself — the executor never needs to know which plans
+exist (the same reason publish-due takes no planId).
+
+**Pacing.** Governed by the `engage_reply_pacing` setting, which bounds how much
+one poll may hand out (`maxPerPoll`, default 1), the minimum spacing between two
+replies of the same project+platform (`minGapMinutes`, default 25), the UTC
+active-hours window, the maximum age of a post worth replying to, and the
+minimum opportunity score. A trickle per poll is what spreads a day's target
+across the day — handing out a whole budget at once is what gets an account
+rate-limited.
+
+**Response**
+
+```jsonc
+{
+  "due": [
+    {
+      "sentReplyId": "<engage-sent-reply-uuid>",  // the parked DRAFT record
+      "opportunityId": "<opportunity-uuid>",
+      "projectId": "product_123",
+      "platform": "reddit",
+      "url": "https://reddit.com/r/x/comments/1", // the post being replied to
+      "text": "…",                                 // the generated reply
+      "mode": "review" | "auto"
+    }
+  ]
+}
+```
+
+Every item is already a saved `DRAFT`, so it also shows up in Awaiting review.
+`mode` is what the executor keys off: only `auto` may be posted unattended — a
+`review` item is handed over for the UI, and the extension skips it.
+
+Each draft costs reply-generation credits and is admitted by the same monthly cap
+as the user-driven `POST /opportunities/:id/draft`.
 
 ---
 
@@ -815,19 +964,25 @@ Delete a tracked account (historical Feed records are preserved).
 
 ## Reply Accounts — Reply Accounts
 
-> Reply accounts are **our connected X OAuth accounts** (Integration table), used to send replies. They are completely independent from tracked accounts.
+> Reply accounts are **our connected accounts** (Integration table) that Engage
+> may reply AS, scoped to platforms that reply through a connected account (**X**
+> today — see `ACCOUNT_REPLY_PLATFORMS`). Completely independent from tracked
+> accounts (which are scan *targets*, not senders). For platforms that reply
+> through the extension's own browser session (Reddit, …), see `replyPolicies`
+> on `POST /config` instead — there is no account to choose there.
 
 ### GET `/api/engage/reply-accounts`
 
-Retrieve all available X accounts and their Engage configurations.
+Retrieve connected accounts Engage may reply as, and whether each is currently
+enabled for this project.
 
 **Query Params**
 
 | Parameter | Type | Description |
 |---|---|---|
-| `projectId` | string | Optional project scope for Engage reply-account settings. |
+| `projectId` | string | Optional project scope. Omit for the org-wide view (every binding reads as enabled — see below). |
 
-**Response** `200 OK` — `Integration[]` (with nested `engageXReplyAccount`)
+**Response** `200 OK` — `Integration[]`, flat `engageEnabled` (no nested config object)
 
 ```json
 [
@@ -836,48 +991,43 @@ Retrieve all available X accounts and their Engage configurations.
     "name": "mycompany_x",
     "providerIdentifier": "x",
     "picture": "https://...",
-    "engageXReplyAccount": {
-      "id": "uuid",
-      "integrationId": "integration-uuid",
-      "engageEnabled": true,
-      "autoReplyEnabled": false,
-      "autoReplyTimeStart": "09:00",
-      "autoReplyTimeEnd": "18:00",
-      "autoReplyTimezone": "Asia/Shanghai",
-      "defaultStrategy": "EXPERT_ANSWER",
-      "createdAt": "...",
-      "updatedAt": "..."
-    }
+    "engageEnabled": true
   }
 ]
 ```
 
-> `engageXReplyAccount` being `null` means the account has not been configured with Engage settings (uses defaults).
+> `engageEnabled` reflects `IntegrationProject.engageEnabled` for THIS project.
+> An account not (yet) bound to the project — or no `projectId` given — reads as
+> `true`: opt-OUT, not opt-in. A connected account is usable until explicitly
+> excluded.
 
 ---
 
 ### PATCH `/api/engage/reply-accounts/:integrationId`
 
-Update Engage settings for a specific X account (automatically creates if not exists).
+Set whether Engage may reply as this account, for one project.
 
 **URL Param**: `integrationId` — The `id` of the Integration (from `GET /reply-accounts`)
 
-**Request Body** (All fields optional)
+**Request Body**
 
 ```json
 {
-  "engageEnabled": true,           // Whether to enable this account in Engage
-  "autoReplyEnabled": false,       // Whether to enable auto-reply
-  "autoReplyTimeStart": "09:00",   // Auto-reply time window start (HH:MM 24h)
-  "autoReplyTimeEnd": "18:00",     // Auto-reply time window end
-  "autoReplyTimezone": "Asia/Shanghai", // IANA timezone
-  "defaultStrategy": "EXPERT_ANSWER"   // Default draft strategy
+  "engageEnabled": true,   // required; the only field this endpoint still owns
+  "projectId": "product_123"   // required — see below
 }
 ```
 
-**Response** `200 OK` — Returns `EngageXReplyAccountConfig`
+`projectId` is **required** (unlike most engage endpoints, which default to the
+legacy null-project config): this writes `IntegrationProject.engageEnabled`, the
+join row between the account and a specific project, so there is no
+"legacy config" row to fall back to. Per-account auto-reply time windows and
+default strategy moved to `POST /config`'s `replyPolicies` (per-platform, not
+per-account) — this endpoint no longer accepts them.
 
-**Error** `404` — Integration not found or does not belong to the current organization
+**Response** `200 OK` — `{ "integrationId": string, "projectId": string, "engageEnabled": boolean }`
+
+**Error** `404` — Integration not found / not this organization's, or not bound to the given project (bind it first via the project's integration settings).
 
 ---
 
@@ -936,7 +1086,7 @@ Retrieve scoring statistics for the Feed (used for the top dashboard).
 
 ### GET `/api/engage/opportunities/counts/summary`
 
-> Replaces the removed `GET /opportunities/counts`, which was split into this rollup and [`GET /opportunities/count`](#get-apiengageopportunitiescount) (total + byStatus under exactly the `/opportunities` filters). The old route's `platform` param was always a no-op (total/byStatus dropped it and each byPlatform count overrode it), so migrating here and dropping `platform` is behaviour-preserving.
+> `GET /opportunities/counts` remains a compatibility alias for this endpoint. Use the canonical `/counts/summary` path for new clients. To narrow by `platform` or `status`, use [`GET /opportunities/count`](#get-apiengageopportunitiescount).
 
 Total + byStatus + byPlatform counts for `/opportunities` in one round trip, **all computed under the SAME conditions**: the `/opportunities` filter contract minus `platform`/`status` (those two are the breakdown axes here, not filters — to narrow by them use `GET /opportunities/count`) and minus `sortBy`/`sortOrder`/`page`/`limit` (a counts response has no rows to sort or paginate). Use this instead of firing several `GET /opportunities?platform=x&limit=1` calls just to read `.total` for tab/platform badges — that N+1 pattern used to run a full `findMany` + `count` per call.
 
@@ -1090,7 +1240,7 @@ GET /api/engage/opportunities?keywords=GEO%20SEO,AISEE&platform=x&status=NEW,AUT
 
 **UI Reference: Score Level Colors**
 
-Total score max is 105 (scoreKeyword 35 + scoreHeat 45 + scoreAuthority 15 + scoreRecency 5 + scoreTracked 5). Only posts scoring ≥60 are stored.
+Total score max is **105, not 100** — this is intended, not an overflow. The four base dimensions (scoreKeyword 35 + scoreHeat 45 + scoreAuthority 15 + scoreRecency 5) add up to 100, and `scoreTracked` is a **+5 bonus stacked on top of that full 100**, so a post that maxes out every dimension lands on 105. Only posts scoring ≥60 are stored.
 
 | Score Range | Level | Recommended Color |
 |---|---|---|
@@ -1107,7 +1257,7 @@ Total score max is 105 (scoreKeyword 35 + scoreHeat 45 + scoreAuthority 15 + sco
 | `scoreAuthority` | 15 | 账号影响力 — X: author follower count; Reddit: subreddit audience size (channelFollowers) |
 | `scoreRecency` | 5 | 时效性 — freshness: 5 if within 24h, else 0 |
 | `scoreTracked` | 5 | 重点账户/频道 — 5 if X tracked account OR Reddit monitored subreddit, else 0 |
-| `score` | 105 | 总分 — sum of all dimensions |
+| `score` | 105 | 总分 — sum of all dimensions; 100 base + `scoreTracked` bonus, so >100 is expected |
 
 ---
 

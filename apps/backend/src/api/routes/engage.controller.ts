@@ -32,7 +32,11 @@ import {
   scanIngestPostToRawPost,
 } from '@gitroom/nestjs-libraries/dtos/engage/scan-ingest.dto';
 import { EngageDraftService } from '@gitroom/nestjs-libraries/engage/engage-draft.service';
-import { weightedLength } from '@gitroom/helpers/utils/count.length';
+import {
+  assertDraftWithinPlatformLimit,
+  outputLengthForLength,
+} from '@gitroom/nestjs-libraries/engage/engage-draft-length';
+import { EngageAutoReplyService } from '@gitroom/nestjs-libraries/engage/engage-auto-reply.service';
 import {
   AddKeywordDto,
   AddKeywordsBulkDto,
@@ -72,66 +76,6 @@ import {
 } from '@gitroom/nestjs-libraries/engage/dtos/engage.dto';
 
 // Soft target the model aims for vs. the hard ceiling we actually reject above
-// (X: 260 target / 280 ceiling = X's exact max — weightedLength uses official
-// twitter-text weighting, so no safety margin needed; Reddit: 1000 / 2000).
-// Keep these in sync with engage-draft.service.ts.
-const X_WEIGHTED_CHAR_LIMIT = 260;
-const X_HARD_CHAR_LIMIT = 280;
-const REDDIT_TARGET_CHAR_LIMIT = 1000;
-const REDDIT_HARD_CHAR_LIMIT = 2000;
-
-function normalizeEngagePlatform(platform: string): string {
-  const normalized = platform.toLowerCase();
-  return normalized === 'twitter' ? 'x' : normalized;
-}
-
-// Length tier → generation target. Used only when the client doesn't pass an
-// explicit outputLength; the model clamps to the platform ceiling regardless.
-const LENGTH_TARGETS: Record<
-  'short' | 'medium' | 'long',
-  { x: number; reddit: number }
-> = {
-  short: { x: 120, reddit: 400 },
-  medium: { x: 200, reddit: REDDIT_TARGET_CHAR_LIMIT },
-  long: { x: 255, reddit: 1800 },
-};
-
-function outputLengthForLength(
-  platform: string,
-  length: 'short' | 'medium' | 'long'
-): number {
-  const normalized = normalizeEngagePlatform(platform);
-  const target = LENGTH_TARGETS[length];
-  return normalized === 'x' ? target.x : target.reddit;
-}
-
-function assertDraftWithinPlatformLimit(
-  platform: string,
-  draft: string,
-  outputLength?: number
-) {
-  const normalized = normalizeEngagePlatform(platform);
-  if (normalized === 'x') {
-    // Mirror the draft service: reject only above the hard ceiling, with the
-    // requested target as the soft floor of that ceiling.
-    const hardLimit = Math.max(outputLength ?? X_WEIGHTED_CHAR_LIMIT, X_HARD_CHAR_LIMIT);
-    if (weightedLength(draft) > hardLimit) {
-      throw new Error(
-        `Generated X draft exceeded ${hardLimit} Twitter-weighted characters.`
-      );
-    }
-  }
-  if (normalized === 'reddit') {
-    const hardLimit = Math.max(
-      outputLength ?? REDDIT_TARGET_CHAR_LIMIT,
-      REDDIT_HARD_CHAR_LIMIT
-    );
-    if (draft.length > hardLimit) {
-      throw new Error(`Generated Reddit draft exceeded ${hardLimit} characters.`);
-    }
-  }
-}
-
 @ApiTags('Engage')
 @Controller('/engage')
 export class EngageController {
@@ -140,7 +84,8 @@ export class EngageController {
   constructor(
     private _engageService: EngageService,
     private _engageDraftService: EngageDraftService,
-    private _scanTasksService: EngageScanTasksService
+    private _scanTasksService: EngageScanTasksService,
+    private _engageAutoReplyService: EngageAutoReplyService
   ) {}
 
   // ─── Extension scan loop ──────────────────────────────────────────────────
@@ -229,7 +174,15 @@ export class EngageController {
     return this._engageService.getConfig(org, projectId);
   }
 
-  @ApiOperation({ summary: 'Update Engage config (enable/disable)' })
+  @ApiOperation({
+    summary:
+      'Update Engage config: enable/disable, and the project\'s unattended reply mode (off | review | auto)',
+  })
+  @ApiResponse({
+    status: 400,
+    description:
+      'autoReplyMode other than "off" was sent without a projectId — unattended replying is driven by a project\'s operation plan, so it cannot be set on the legacy null-project config',
+  })
   @Post('/config')
   saveConfig(
     @GetOrgFromRequest() org: Organization,
@@ -456,6 +409,30 @@ export class EngageController {
     );
   }
 
+  // ─── Unattended reply driver ──────────────────────────────────────────────
+
+  /**
+   * Drafts due to be replied to right now, for the projects that opted into
+   * unattended replying (`EngageConfig.autoReplyMode`).
+   *
+   * The mirror of `POST /posts/publish-due`: backend = scheduler, extension =
+   * executor. This makes NO platform call — it reads the project's plan budget,
+   * picks the opportunities, generates and PARKS the drafts, and hands back what
+   * is ready. Each item is already a saved `DRAFT` row, so it also shows up in
+   * Awaiting review; `mode: 'review'` means a human must send it, `mode: 'auto'`
+   * means the extension may.
+   *
+   * Deliberately org-scoped with no `planId`: the plan decides HOW MUCH to reply,
+   * which this endpoint reads server-side — the executor never needs to know
+   * which plans exist (the same reason publish-due takes no planId).
+   */
+  @ApiOperation({ summary: 'Drafts due for unattended reply (extension pull; org-scoped, paced)' })
+  @Post('/reply-due')
+  async getDueReplies(@GetOrgFromRequest() org: Organization) {
+    const due = await this._engageAutoReplyService.getDueReplies(org);
+    return { due };
+  }
+
   // ─── Manual scan trigger ──────────────────────────────────────────────────
 
   // 5 manual triggers per org per hour — prevents API abuse while allowing
@@ -505,7 +482,7 @@ export class EngageController {
   }
 
   @ApiOperation({ summary: 'Rollup for tab/platform badges: total + byStatus + byPlatform in one call, all computed under the SAME conditions — the /opportunities filter contract minus status/platform (those are the breakdown axes here, not filters). Replaces doing N separate limit=1 list calls just to read totals.' })
-  @Get('/opportunities/counts/summary')
+  @Get(['/opportunities/counts', '/opportunities/counts/summary'])
   getOpportunityCountsSummary(
     @GetOrgFromRequest() org: Organization,
     @Query() query: OpportunityCountsSummaryDto
@@ -621,7 +598,7 @@ export class EngageController {
       // BEFORE any model call, and the cap-ledger row is written up front so the
       // cap holds against concurrent requests. A block ends the stream without
       // generating (no reservation is taken).
-      reservation = await this._engageService.reserveReplyGeneration(org, length, id);
+      reservation = await this._engageService.reserveReplyGeneration(org, length, opportunity.id);
 
       const outputLength =
         body.outputLength ?? outputLengthForLength(opportunity.platform, length);
@@ -660,7 +637,7 @@ export class EngageController {
         // produced and charged must still be delivered even if the audit write
         // fails — never let it break the SSE response.
         try {
-          await this._engageService.recordGeneration(org, id, {
+          await this._engageService.recordGeneration(org, opportunity.id, {
             source: 'ai',
             content: draft,
             length,
@@ -670,7 +647,7 @@ export class EngageController {
             mentions: body.mentions,
             billingTaskId: reservation.taskId,
             createdAt: new Date().toISOString(),
-          }, body.projectId);
+          }, opportunity.projectId);
         } catch (histErr) {
           this.logger.error(
             `Reply generation history write failed for opportunity ${id} (org ${org.id})`,

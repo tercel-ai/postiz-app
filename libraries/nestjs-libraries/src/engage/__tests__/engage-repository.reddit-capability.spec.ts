@@ -12,8 +12,8 @@ function buildRepo(engageTrackedAccount: any) {
   return new EngageRepository(
     {} as any,
     {} as any,
-    { model: { engageTrackedAccount } } as any,
-    {} as any, {} as any, {} as any, {} as any, {} as any,
+    { model: { engageTrackedAccount } } as any, {} as any, {} as any, {} as any, {} as any,
+        {} as any,   // _integrationProject,
     {} as any, {} as any, {} as any, {} as any
   );
 }

@@ -7,6 +7,8 @@ import {
   ENGAGE_TOUCH_X_SWITCH_KEY,
   ENGAGE_TOUCH_REDDIT_SWITCH_KEY,
   ENGAGE_OPPORTUNITY_TTL_DAYS_KEY,
+  ENGAGE_OPPORTUNITY_TTL_DAYS_BY_PLATFORM_KEY,
+  DEFAULT_OPPORTUNITY_TTL_DAYS_BY_PLATFORM,
   DEFAULT_SCAN_PACING,
   DEFAULT_SCAN_FRESHNESS_HOURS,
   mergePacing,
@@ -41,6 +43,7 @@ describe('EngageScanConfigService.onModuleInit', () => {
       [ENGAGE_TOUCH_X_SWITCH_KEY]: true,
       [ENGAGE_TOUCH_REDDIT_SWITCH_KEY]: true,
       [ENGAGE_OPPORTUNITY_TTL_DAYS_KEY]: 7,
+      [ENGAGE_OPPORTUNITY_TTL_DAYS_BY_PLATFORM_KEY]: { x: 3, reddit: 7 },
     });
     const svc = new EngageScanConfigService(settings);
     await svc.onModuleInit();

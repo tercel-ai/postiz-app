@@ -11,8 +11,9 @@ function buildRepo(configFindMany: any) {
   // Only _config (arg 1) is exercised by getOrgContextsForUnit.
   return new EngageRepository(
     _config,
-    {} as any, {} as any, {} as any, {} as any, {} as any,
-    {} as any, {} as any, {} as any, {} as any, {} as any, {} as any
+    {} as any, {} as any, {} as any, {} as any,
+    {} as any, {} as any,
+        {} as any,   // _integrationProject, {} as any, {} as any, {} as any, {} as any
   );
 }
 

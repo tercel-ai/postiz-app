@@ -51,6 +51,7 @@ interface PublishPostItem {
   taskId: string;              // caller's id (e.g. backend Post id), echoed everywhere
   platform: 'x' | 'reddit';
   segments: {
+    postId?: string;           // OUR backend Post id for this segment (see below)
     text: string;
     images?: string[];         // server URLs; FIRST segment only
   }[];                         // [0] = the post; [1..] = native thread chain
@@ -71,6 +72,11 @@ interface PublishTaskState {
   segmentsPublished: number;
   permalink?: string;           // first segment, once published
   segmentPermalinks?: string[]; // every published segment in thread order
+  segmentResults?: {            // what the settle callbacks report (published segments only)
+    postId: string;
+    url?: string;
+    releaseId?: string;
+  }[];
   postId?: string;              // platform id of the post (reddit t3_* / X rest_id)
   publishAt?: string;           // ISO, echoed from publishDate — the SCHEDULED time
   publishedAt?: string;         // ISO, the REAL send time (set when the anchor posts;
@@ -80,6 +86,23 @@ interface PublishTaskState {
 }
 ```
 
+### Why `segments[].postId`
+
+A thread is offered by the backend and settled by the extension across a network
+hop and a lease window (minutes), during which the chain can change — an edit, a
+plan re-materialize, a soft-delete. Naming a segment by its POSITION in the list
+would then stamp a live permalink onto the wrong Post row: silent corruption, and
+strictly worse than the state inaccuracy the reporting exists to fix. So the
+backend sends its own Post id per segment and the extension echoes it back.
+
+`segmentResults` is kept separate from `segmentPermalinks` rather than derived
+from it: that array only grows when a permalink was actually recovered, so a
+confirmed-but-URL-less segment makes it shorter than `segmentsPublished` and its
+indices stop lining up with the segments.
+
+Both are optional for version skew: an older backend sends no `postId`, and a
+segment without one is simply left out of the report rather than guessed at.
+
 ## DB backfill (closed loop to the backend Post)
 
 After a task's platform send succeeds it settles as `sent`, then the extension
@@ -87,7 +110,7 @@ calls the backend with its own authenticated session (works even if the page is
 closed, e.g. scheduled posts) to flip the saved Post to PUBLISHED:
 
 ```
-PATCH /posts/:taskId/extension-published   { releaseURL, releaseId? }
+PATCH /posts/:taskId/extension-published   { releaseURL, releaseId?, segments? }
   → { ok: true }                         // flipped (or already PUBLISHED — idempotent)
   → { ok: false, reason }                // not found / not this org / recurring original
 ```
@@ -97,6 +120,34 @@ On success the task advances `sent → published`. On failure (HTTP error OR a
 ever marked published while the DB row is untouched, and the popup offers a
 manual **Sync** (idempotent retry). This mirrors the Engage reply's
 `PATCH /engage/sent/:id/publish-reply` callback.
+
+`releaseURL` / `releaseId` describe the **anchor**. `segments` carries the rest of
+a thread — without it every follow-up is stored `PUBLISHED` with no URL, on every
+successful thread, and is never eligible for metrics.
+
+## Failure callback (and partial threads)
+
+A thread publishes one segment at a time and STOPS at the first failure, so a
+"failed" task routinely has segments that ARE live — usually the anchor.
+
+```
+PATCH /posts/:taskId/extension-publish-failed   { error, segments? }
+  → { ok: true }                                  // nothing went out
+  → { ok: true, partial: true, published: n }     // n segments were live and recorded
+  → { ok: false, reason }                         // not found / already published / recurring original
+```
+
+`segments` names the ones that went out. The backend records those `PUBLISHED`
+with their own permalinks — **including the anchor, which is therefore not
+flipped to `ERROR`** — and errors only the remaining chain nodes.
+
+Reporting them is not cosmetic: marking a live post `ERROR` drops it out of every
+metrics path permanently, because the permalinks exist nowhere but this queue
+entry and are gone once it is trimmed.
+
+Fire-and-forget best effort — the local entry holds the error either way. Note the
+queue refuses a **Retry** once `segmentsPublished > 0`: re-running would re-post
+the segments that are already live.
 
 ## Example — frontend flow (schedule, then trigger)
 
@@ -117,6 +168,13 @@ const res = await fetch('/posts/schedule', {
   ] }),
 }).then((r) => r.json());
 // res.scheduled: [{id, publishMethod}]   res.failed: [{id, code, message}]
+
+//    OR, to activate a whole operation plan, name it instead of its posts —
+//    every still-DRAFT root is committed. `posts` and `planId` are mutually
+//    exclusive (400 if both).
+//    body: JSON.stringify({ planId: 'plan-1' })
+//    → res.total / res.alreadyScheduled additionally tell you whether there was
+//      anything left to commit.
 
 // 3) trigger the extension to pull immediately (NO items). Optional — the 1-min
 //    aisee-publish-poll alarm would pick it up anyway.
@@ -142,7 +200,7 @@ const ack = await enqueuePublishBatch([
   {
     taskId: 'post-1',
     platform: 'x',
-    segments: [{ text: 'just one tweet' }],
+    segments: [{ postId: 'post-1', text: 'just one tweet' }],
   },
   // 2) X thread with images on the first segment + custom pacing + scheduled
   {

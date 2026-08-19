@@ -6,6 +6,8 @@ import { opportunityFullText } from '../opportunity-text';
 
 export interface Opportunity {
   id: string;
+  /** Per-project state identity used by reply mutations. */
+  stateId?: string;
   platform: string;
   externalPostUrl: string;
   authorUsername: string;

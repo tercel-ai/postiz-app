@@ -48,6 +48,20 @@ export class OperationPlanController {
     return this._operationPlanService.getOverview(org.id, id);
   }
 
+  // The project's active plan id (READY, startsAt<=now<=endsAt), if any — the
+  // one entry point a client needs before it can call anything else plan-scoped
+  // (GET /operation-plans/:id for detail, POST /posts/schedule {planId} to
+  // activate it). Returns `{ id: null }` rather than 404 when there isn't
+  // one: "no active plan" is a normal, expected state for a project that
+  // hasn't generated one yet, not an error.
+  @Get('/projects/:projectId/operation-plans/active')
+  getActivePlanId(
+    @GetOrgFromRequest() org: Organization,
+    @Param('projectId') projectId: string
+  ) {
+    return this._operationPlanService.getActivePlanId(org.id, projectId);
+  }
+
   // `?dryRun=true` returns the generated + validated plan WITHOUT billing,
   // persistence, or Post materialization — a preview to eyeball generation
   // quality before committing credits + DB rows. Any other value runs the real

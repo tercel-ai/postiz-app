@@ -61,19 +61,28 @@ const TIMEZONES = [
   'UTC',
 ];
 
+// Platforms whose engage replies go out through a CONNECTED account, so
+// "which account replies" is a real choice. Everything else replies through the
+// extension's own browser session — no account is picked, which is why those
+// platforms appear only in the per-platform policy block below.
+const POLICY_PLATFORMS = ['reddit', 'x'] as const;
+
 interface Integration {
   id: string;
   name: string;
   picture?: string;
   providerIdentifier: string;
-  engageXReplyAccount?: {
-    engageEnabled: boolean;
-    autoReplyEnabled: boolean;
-    autoReplyTimeStart?: string;
-    autoReplyTimeEnd?: string;
-    autoReplyTimezone?: string;
-    defaultStrategy: string;
-  } | null;
+  /** May Engage reply as this account, for this project. Defaults to true. */
+  engageEnabled: boolean;
+}
+
+/** Per-(project, platform) reply policy — EngageConfig.replyPolicies. */
+interface ReplyPolicy {
+  autoReplyEnabled?: boolean;
+  windowStart?: string;
+  windowEnd?: string;
+  timezone?: string;
+  defaultStrategy?: string;
 }
 
 export function ReplyAccounts() {
@@ -85,6 +94,46 @@ export function ReplyAccounts() {
     if (!res.ok) throw new Error(`engage/reply-accounts returned ${res.status}`);
     return res.json() as Promise<Integration[]>;
   });
+
+  // The per-platform policy lives on the Engage CONFIG, not on an account —
+  // Reddit and friends reply through the browser session and have no account to
+  // hang it off. Same reason it is read from /engage/config rather than here.
+  const {
+    data: config,
+    error: configError,
+    mutate: mutateConfig,
+  } = useSWR('/engage/config', async (url) => {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`engage/config returned ${res.status}`);
+    return res.json() as Promise<{ replyPolicies?: Record<string, ReplyPolicy> }>;
+  });
+
+  const policies = config?.replyPolicies ?? {};
+
+  const updatePolicy = useCallback(
+    async (platform: string, patch: ReplyPolicy) => {
+      // The column is replaced wholesale, so merge locally first — a partial
+      // POST would drop every other platform's policy.
+      const next = {
+        ...policies,
+        [platform]: { ...(policies[platform] ?? {}), ...patch },
+      };
+      try {
+        const res = await fetch('/engage/config', {
+          method: 'POST',
+          body: JSON.stringify({ replyPolicies: next }),
+        });
+        if (!res.ok) {
+          toaster.show('Failed to update reply policy', 'warning');
+          return;
+        }
+        mutateConfig();
+      } catch {
+        toaster.show('Failed to update reply policy', 'warning');
+      }
+    },
+    [fetch, mutateConfig, policies, toaster]
+  );
 
   const update = useCallback(
     async (integrationId: string, patch: Record<string, unknown>) => {
@@ -137,107 +186,87 @@ export function ReplyAccounts() {
   }
 
   return (
-    <div className="space-y-4">
-      <p className="text-sm text-gray-400">
-        Your own X accounts used to send Engage replies. Configure auto-reply
-        time windows per account.
-      </p>
-
-      {accounts.map((acc) => {
-        const settings = acc.engageXReplyAccount;
-        return (
-          <div
-            key={acc.id}
-            className="bg-[#1a2035] rounded-lg p-5 border border-[#2d3748]"
-          >
-            {/* Account header */}
-            <div className="flex items-center gap-3 mb-4">
-              {acc.picture && (
-                <img
-                  src={acc.picture}
-                  alt=""
-                  className="w-10 h-10 rounded-full"
-                />
-              )}
-              <div>
-                <p className="text-white font-medium">{acc.name}</p>
-                <p className="text-xs text-gray-500">@{acc.providerIdentifier || acc.name}</p>
-              </div>
-              {/* Enable toggle */}
-              <div className="ml-auto flex items-center gap-2">
-                <span className="text-xs text-gray-400">Engage</span>
-                <button
-                  onClick={() =>
-                    update(acc.id, {
-                      engageEnabled: !(settings?.engageEnabled ?? true),
-                    })
-                  }
-                  className={`text-sm font-medium ${
-                    settings?.engageEnabled !== false
-                      ? 'text-green-400'
-                      : 'text-gray-600'
-                  }`}
-                >
-                  {settings?.engageEnabled !== false ? 'ON' : 'OFF'}
-                </button>
-              </div>
-            </div>
-
-            {/* Auto-reply section */}
-            <div className="space-y-3">
+    <div className="space-y-6">
+      {/* ── Per-platform reply policy ───────────────────────────────────── */}
+      <div className="space-y-3">
+        <p className="text-sm text-gray-400">
+          Unattended replying, per platform. The project&apos;s operation plan
+          decides how MANY replies a day; these decide where and when.
+        </p>
+        {configError && (
+          <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg flex items-center justify-between">
+            <p className="text-sm text-red-400">Failed to load reply policies.</p>
+            <button
+              onClick={() => mutateConfig()}
+              className="text-xs text-blue-400 hover:text-blue-300"
+            >
+              Retry
+            </button>
+          </div>
+        )}
+        {POLICY_PLATFORMS.map((platform) => {
+          const policy = policies[platform] ?? {};
+          return (
+            <div
+              key={platform}
+              className="p-3 bg-[#0f1219] border border-[#2d3748] rounded-lg space-y-3"
+            >
               <div className="flex items-center justify-between">
-                <span className="text-sm text-gray-300">Auto-reply</span>
+                <span className="text-sm text-gray-300 capitalize">{platform}</span>
                 <button
                   onClick={() =>
-                    update(acc.id, {
-                      autoReplyEnabled: !(settings?.autoReplyEnabled ?? false),
+                    updatePolicy(platform, {
+                      autoReplyEnabled: !policy.autoReplyEnabled,
                     })
                   }
                   className={`text-xs font-medium ${
-                    settings?.autoReplyEnabled
-                      ? 'text-green-400'
-                      : 'text-gray-600'
+                    policy.autoReplyEnabled ? 'text-green-400' : 'text-gray-600'
                   }`}
                 >
-                  {settings?.autoReplyEnabled ? 'ON' : 'OFF'}
+                  {policy.autoReplyEnabled ? 'ON' : 'OFF'}
                 </button>
               </div>
 
-              {settings?.autoReplyEnabled && (
-                <div className="grid grid-cols-3 gap-3 pl-3 border-l-2 border-[#2d3748]">
+              {policy.autoReplyEnabled && (
+                <div className="grid grid-cols-2 gap-3 pl-3 border-l-2 border-[#2d3748]">
                   <div>
-                    <label htmlFor={`start-${acc.id}`} className="text-xs text-gray-500 block mb-1">
+                    <label
+                      htmlFor={`start-${platform}`}
+                      className="text-xs text-gray-500 block mb-1"
+                    >
                       Start
                     </label>
                     <DeferredTimeInput
-                      id={`start-${acc.id}`}
-                      value={settings.autoReplyTimeStart ?? '09:00'}
-                      onCommit={(next) =>
-                        update(acc.id, { autoReplyTimeStart: next })
-                      }
+                      id={`start-${platform}`}
+                      value={policy.windowStart ?? '09:00'}
+                      onCommit={(next) => updatePolicy(platform, { windowStart: next })}
                     />
                   </div>
                   <div>
-                    <label htmlFor={`end-${acc.id}`} className="text-xs text-gray-500 block mb-1">
+                    <label
+                      htmlFor={`end-${platform}`}
+                      className="text-xs text-gray-500 block mb-1"
+                    >
                       End
                     </label>
                     <DeferredTimeInput
-                      id={`end-${acc.id}`}
-                      value={settings.autoReplyTimeEnd ?? '18:00'}
-                      onCommit={(next) =>
-                        update(acc.id, { autoReplyTimeEnd: next })
-                      }
+                      id={`end-${platform}`}
+                      value={policy.windowEnd ?? '18:00'}
+                      onCommit={(next) => updatePolicy(platform, { windowEnd: next })}
                     />
                   </div>
                   <div>
-                    <label htmlFor={`tz-${acc.id}`} className="text-xs text-gray-500 block mb-1">
+                    <label
+                      htmlFor={`tz-${platform}`}
+                      className="text-xs text-gray-500 block mb-1"
+                    >
                       Timezone
                     </label>
                     <select
-                      id={`tz-${acc.id}`}
-                      value={settings.autoReplyTimezone ?? 'Asia/Shanghai'}
+                      id={`tz-${platform}`}
+                      value={policy.timezone ?? 'Asia/Shanghai'}
                       onChange={(e) =>
-                        update(acc.id, { autoReplyTimezone: e.target.value })
+                        updatePolicy(platform, { timezone: e.target.value })
                       }
                       className="w-full bg-[#0f1219] border border-[#2d3748] text-white rounded px-2 py-1 text-sm"
                     >
@@ -248,30 +277,74 @@ export function ReplyAccounts() {
                       ))}
                     </select>
                   </div>
+                  <div>
+                    <label
+                      htmlFor={`strategy-${platform}`}
+                      className="text-xs text-gray-500 block mb-1"
+                    >
+                      Strategy
+                    </label>
+                    <select
+                      id={`strategy-${platform}`}
+                      value={policy.defaultStrategy ?? 'EXPERT_ANSWER'}
+                      onChange={(e) =>
+                        updatePolicy(platform, { defaultStrategy: e.target.value })
+                      }
+                      className="w-full bg-[#0f1219] border border-[#2d3748] text-white rounded px-2 py-1 text-sm"
+                    >
+                      {STRATEGIES.map((st) => (
+                        <option key={st} value={st}>
+                          {st}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
                 </div>
               )}
+            </div>
+          );
+        })}
+      </div>
 
-              {/* Default strategy */}
-              <div className="flex items-center justify-between">
-                <span className="text-sm text-gray-300">Default strategy</span>
-                <select
-                  value={settings?.defaultStrategy ?? 'EXPERT_ANSWER'}
-                  onChange={(e) =>
-                    update(acc.id, { defaultStrategy: e.target.value })
-                  }
-                  className="bg-[#0f1219] border border-[#2d3748] text-white rounded px-2 py-1 text-sm"
-                >
-                  {STRATEGIES.map((s) => (
-                    <option key={s} value={s}>
-                      {s.replace(/_/g, ' ')}
-                    </option>
-                  ))}
-                </select>
-              </div>
+      {/* ── Which connected accounts may reply ──────────────────────────── */}
+      <div className="space-y-3">
+        <p className="text-sm text-gray-400">
+          Connected accounts Engage may reply as. Only platforms that reply
+          through an account appear here — everything else replies with your
+          browser session.
+        </p>
+        {accounts.map((acc) => (
+          <div
+            key={acc.id}
+            className="p-3 bg-[#0f1219] border border-[#2d3748] rounded-lg flex items-center gap-3"
+          >
+            {acc.picture && (
+              <img
+                src={acc.picture}
+                alt=""
+                className="w-8 h-8 rounded-full"
+              />
+            )}
+            <div className="min-w-0">
+              <p className="text-sm text-white truncate">{acc.name}</p>
+              <p className="text-xs text-gray-500">{acc.providerIdentifier}</p>
+            </div>
+            <div className="ml-auto flex items-center gap-2">
+              <span className="text-xs text-gray-400">Engage</span>
+              <button
+                onClick={() =>
+                  update(acc.id, { engageEnabled: !acc.engageEnabled })
+                }
+                className={`text-sm font-medium ${
+                  acc.engageEnabled ? 'text-green-400' : 'text-gray-600'
+                }`}
+              >
+                {acc.engageEnabled ? 'ON' : 'OFF'}
+              </button>
             </div>
           </div>
-        );
-      })}
+        ))}
+      </div>
     </div>
   );
 }

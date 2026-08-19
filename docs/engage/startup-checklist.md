@@ -351,7 +351,8 @@ SET
 
 | Variable | Default | Description |
 |---|---|---|
-| `ENGAGE_OPPORTUNITY_TTL_DAYS` | `7` | NEW opportunities older than this are marked EXPIRED |
+| `ENGAGE_<PLATFORM>_OPPORTUNITY_TTL_DAYS` | `x=3`, `hackernews=2`, `reddit`/`linkedin`=`7`, `devto`/`medium`/`quora`=`30` | Per-platform opportunity lifetime, in days. Drives BOTH the EXPIRED sweep (state `createdAt` **or** the post's `postPublishedAt`, whichever crosses first) and the ingest gate (a post published before `now - days` is never persisted). Overridden by the `engage_opportunity_ttl_days_by_platform` setting |
+| `ENGAGE_OPPORTUNITY_TTL_DAYS` | `7` | All-platform fallback for the above. The legacy `engage_opportunity_ttl_days` **setting** outranks it, but only while no per-platform map exists at all — once the map is stored, a platform missing from it falls straight through to its own default, so adding a platform later cannot inherit a stale legacy number |
 | `ENGAGE_MIN_SCORE` | `60` | Minimum total score (0–100) for a scored post to become an opportunity. Lower → more (noisier) opportunities; raise → only strong matches |
 | `ENGAGE_X_SEARCH_DELAY_MS` | `1000` | Inter-request pacing for X keyword search (rate-limit guard) |
 | `ENGAGE_REDDIT_SEARCH_DELAY_MS` | `500` | Inter-request pacing for Reddit keyword search (rate-limit guard) |

@@ -144,7 +144,11 @@ Modules with a dedicated, parameter-level API reference:
 | POST | `/posts/:id/retry` |
 | PUT | `/posts/:id/date` |
 | POST | `/posts/separate-posts` |
+| POST | `/posts/schedule` |
+| GET | `/posts/publish-methods` |
 | PATCH | `/posts/:id/extension-published` |
+| PATCH | `/posts/:id/extension-publish-failed` |
+| POST | `/posts/publish-due` |
 | POST | `/posts/sync-metrics` |
 
 ### [autopost.controller.ts](../apps/backend/src/api/routes/autopost.controller.ts) — `/autopost`

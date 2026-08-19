@@ -5,6 +5,13 @@
 **Author**: Product Team  
 **Status**: Approved for Tech Design  
 
+> **⚠️ Historical requirements doc.** Reflects the Engage feature as originally
+> specified. Some implementation details below (notably the `EngageXReplyAccount`
+> table in Block 2) were later reworked — see
+> [`docs/engage/api.md`](./api.md#reply-accounts--reply-accounts) for the current
+> reply-accounts/reply-policy behavior. Kept as-is rather than retrofitted, so it
+> stays an honest record of what was asked for.
+
 ---
 
 ## Press Release (Amazon Working Backwards)
@@ -191,7 +198,7 @@ Engage uses **two completely separate account concepts** that must not be confla
 | 账号影响力 | `scoreAuthority` | 15 | X：发帖作者粉丝数；Reddit：版块成员数 `channelFollowers`（搜索结果自带，无需额外请求）|
 | 时效性 | `scoreRecency` | 5 | 24h 内 → 5；超出 → 0 |
 | 重点账户/频道 | `scoreTracked` | 5 | 命中重点账户（X）或监控版块（Reddit）+5 |
-| **总分** | `score` | **105** | 以上五项之和 |
+| **总分** | `score` | **105** | 以上五项之和；前四项构成 100 基础分，`scoreTracked` 是叠在满分之上的 +5 加成，因此总分超过 100 属预期行为 |
 
 **Layer 1: Keyword Hard Filter** (must pass)
 - Post body must contain ≥1 active keyword (case-insensitive, phrase-exact)
@@ -199,6 +206,8 @@ Engage uses **two completely separate account concepts** that must not be confla
 - Posts failing this filter are discarded, not stored
 
 **Layer 2: Composite Score (0–105, ≥60 enters Feed)**
+
+> The ceiling is 105 by design: the four base dimensions sum to 100 and `scoreTracked` is a +5 bonus on top of them, so a post maxing out every dimension scores 105.
 
 | Dimension | Field | Max | Logic |
 |---|---|---|---|
@@ -362,6 +371,11 @@ If URL not submitted: Sent record shows "⚠ No reply URL submitted — tracking
 #### Block 2: X Reply Accounts — Auto-Reply Config (回复账号)
 
 > Lists the user's **own** X accounts from the `Integration` model. These are the accounts used to **send replies**. Per-account auto-reply settings are stored in a new `EngageXReplyAccount` config table that references `Integration.id`.
+>
+> **Superseded**: `EngageXReplyAccount` was later split — which account may
+> reply lives on `IntegrationProject.engageEnabled`; auto-reply time window and
+> strategy became a per-PLATFORM (not per-account) setting on
+> `EngageConfig.replyPolicies`. See [`docs/engage/api.md`](./api.md#reply-accounts--reply-accounts).
 
 | Requirement | Details |
 |---|---|

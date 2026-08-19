@@ -29,7 +29,7 @@ describe('EngageService.setupEngage — quota gate', () => {
       keywords: existing?.keywords ?? [],
       monitoredChannels: existing?.monitoredChannels ?? [],
       trackedAccounts: existing?.trackedAccounts ?? [],
-      xReplyAccounts: [],
+      replyAccounts: [],
     };
     const engageRepository = {
       getOrCreateConfig: vi.fn(async () => config),

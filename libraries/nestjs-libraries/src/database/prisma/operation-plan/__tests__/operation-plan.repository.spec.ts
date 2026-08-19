@@ -2,6 +2,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { NotFoundException } from '@nestjs/common';
 import {
   OperationPlanRepository,
+  applyPublishTimeJitter,
   deriveOperationPlanPostId,
   normalizeDevtoTags,
 } from '../operation-plan.repository';
@@ -1152,5 +1153,125 @@ describe('materializePlanPosts — dev.to tags', () => {
     const settings = JSON.parse(postCreateMany.mock.calls[0][0].data[0].settings);
     expect(settings.__type).toBe('x');
     expect('tags' in settings).toBe(false);
+  });
+});
+
+// Found while implementing: the generator is only ever told a DATE range, never
+// a time-of-day, so left alone it clusters on round clock times day after day.
+describe('applyPublishTimeJitter', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('returns the date unchanged when jitterMinutes is 0 (disabled)', () => {
+    const date = new Date('2026-08-20T14:00:00.000Z');
+    expect(applyPublishTimeJitter(date, 0)).toBe(date);
+  });
+
+  it('returns the date unchanged for a negative jitterMinutes', () => {
+    const date = new Date('2026-08-20T14:00:00.000Z');
+    expect(applyPublishTimeJitter(date, -5)).toBe(date);
+  });
+
+  it('offsets within ± jitterMinutes', () => {
+    const date = new Date('2026-08-20T14:00:00.000Z');
+    vi.spyOn(Math, 'random').mockReturnValue(1); // max positive offset
+    const result = applyPublishTimeJitter(date, 30);
+    expect(result.getTime() - date.getTime()).toBe(30 * 60_000);
+  });
+
+  it('clamps to the END of the same UTC day rather than crossing into the next', () => {
+    // 23:50 UTC + up to 30 min would cross midnight without the clamp.
+    const date = new Date('2026-08-20T23:50:00.000Z');
+    vi.spyOn(Math, 'random').mockReturnValue(1); // max positive offset
+    const result = applyPublishTimeJitter(date, 30);
+    // Per-day pacing (reply targets, calendar grouping) keys off the UTC
+    // calendar day — jitter must never silently move a post into a different
+    // day's bucket than the one it was planned for.
+    expect(result.getUTCDate()).toBe(date.getUTCDate());
+    expect(result.getTime()).toBeLessThan(Date.UTC(2026, 7, 21, 0, 0, 0));
+  });
+
+  it('clamps to the START of the same UTC day rather than crossing into the previous', () => {
+    const date = new Date('2026-08-20T00:05:00.000Z');
+    vi.spyOn(Math, 'random').mockReturnValue(0); // max negative offset
+    const result = applyPublishTimeJitter(date, 30);
+    expect(result.getUTCDate()).toBe(date.getUTCDate());
+    expect(result.getTime()).toBeGreaterThanOrEqual(Date.UTC(2026, 7, 20, 0, 0, 0));
+  });
+});
+
+describe('materializePlanPosts — publish-time jitter', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('applies the SAME jittered time to every node of one thread (not one roll per node)', async () => {
+    const postFindMany = vi.fn().mockResolvedValue([]);
+    const postCreateMany = vi.fn().mockResolvedValue({ count: 2 });
+    const repo = createRepo({ postFindMany, postCreateMany });
+    // Fixed, non-max offset so every node's jittered time is identical only if
+    // they truly share one roll — independent per-node rolls would (almost
+    // certainly) disagree.
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+
+    await repo.materializePlanPosts(
+      { id: 'plan-1', organizationId: 'org-1' } as any,
+      {
+        contentItems: [
+          {
+            contentId: 'c-1',
+            utcDate: '2026-08-20T14:00:00.000Z',
+            themeKey: 'theme-1',
+            themeTitle: 'Theme',
+            platforms: [
+              {
+                id: 'anchor-1',
+                platform: 'x',
+                content: 'part 1',
+                media: [],
+                thread: [{ id: 'part-2', content: 'part 2', media: [] }],
+              },
+            ],
+          },
+        ],
+      },
+      30
+    );
+
+    const rows = postCreateMany.mock.calls[0][0].data;
+    expect(rows).toHaveLength(2);
+    expect(rows[0].publishDate.getTime()).toBe(rows[1].publishDate.getTime());
+  });
+
+  it('jitterMinutes=0 (default, omitted) reproduces the exact original utcDate — no silent jitter', async () => {
+    const postFindMany = vi.fn().mockResolvedValue([]);
+    const postCreateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const repo = createRepo({ postFindMany, postCreateMany });
+    // If the default silently jittered anyway, this would make the assertion
+    // below flaky/wrong instead of quietly passing.
+    vi.spyOn(Math, 'random').mockReturnValue(1);
+
+    await repo.materializePlanPosts(
+      { id: 'plan-1', organizationId: 'org-1' } as any,
+      {
+        contentItems: [
+          {
+            contentId: 'c-1',
+            utcDate: '2026-08-20T14:00:00.000Z',
+            themeKey: 'theme-1',
+            themeTitle: 'Theme',
+            platforms: [
+              {
+                id: 'anchor-1',
+                platform: 'x',
+                content: 'part 1',
+                media: [],
+              },
+            ],
+          },
+        ],
+      }
+      // jitterMinutes omitted — must default to 0.
+    );
+
+    const rows = postCreateMany.mock.calls[0][0].data;
+    expect(rows[0].publishDate.toISOString()).toBe('2026-08-20T14:00:00.000Z');
   });
 });

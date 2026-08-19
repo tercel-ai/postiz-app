@@ -90,6 +90,26 @@ describe('EngageService reply pacing gate (§6/§6.1)', () => {
     expect(releaseClaim).not.toHaveBeenCalled();
   });
 
+  it('derives project and global opportunity identity from the claimed state', async () => {
+    const { service, claim, createPost } = buildService();
+    claim.mockResolvedValue({
+      opp: { externalPostId: 'tweet-1', platform: 'x', matchedKeywords: ['react'] },
+      priorStatus: 'NEW',
+      stateId: 'state-1',
+      projectId: 'project-1',
+      opportunityId: 'shared-opportunity-1',
+    });
+
+    await service.sendReply(
+      org,
+      'user-1',
+      'state-1',
+      { ...sendBody, projectId: undefined } as any
+    );
+
+    expect(createPost.mock.calls[0][1].projectId).toBe('project-1');
+  });
+
   it('blocks the send BEFORE createPost when the project daily hard cap would be exceeded, and releases the claim', async () => {
     const { service, createPost, releaseClaim, getActivePlan, countProjectSentRepliesToday } =
       buildService();
@@ -226,6 +246,24 @@ describe('EngageService reply pacing gate (§6/§6.1)', () => {
       service.sendReply(org, 'user-1', 'opp-1', sendBody as any)
     ).rejects.toMatchObject({
       response: { code: 'engage_daily_hard_cap_reached', hardCap: 3 },
+    });
+    expect(createPost).not.toHaveBeenCalled();
+  });
+
+  it('blocks sends when dailyHardCap is explicitly zero', async () => {
+    const { service, createPost, getActivePlan } = buildService();
+    getActivePlan.mockResolvedValue({
+      planPayload: {
+        engagePolicies: [
+          { platform: 'x', enabled: true, targetRepliesPerDay: 10, dailyHardCap: 0 },
+        ],
+      },
+    });
+
+    await expect(
+      service.sendReply(org, 'user-1', 'opp-1', sendBody as any)
+    ).rejects.toMatchObject({
+      response: expect.objectContaining({ code: 'engage_daily_hard_cap_reached' }),
     });
     expect(createPost).not.toHaveBeenCalled();
   });

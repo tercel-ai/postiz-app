@@ -151,11 +151,11 @@ function buildRepo() {
     {} as any,      // _config
     keyword,        // _keyword
     trackedAccount, // _trackedAccount (both scan-target scopes)
-    {} as any,
     opportunity,    // _opportunity
     oppState,       // _oppState
     sentReply,      // _sentReply
-    {} as any,
+    {} as any,      // _integration
+    {} as any,      // _integrationProject
     post,           // _post
     tx,             // _tx
     scanCursor      // _scanCursor
@@ -171,6 +171,8 @@ function buildRepo() {
 }
 
 const STATE_ROW = {
+  id: 'state1',
+  projectId: null,
   status: 'NEW',
   bookmarked: true,
   score: 70,
@@ -1778,9 +1780,10 @@ describe('EngageRepository — two-table reads', () => {
       const post = { model: { post: { create: postCreate } } } as any;
       const repo = new EngageRepository(
         {} as any, {} as any, {} as any, {} as any, {} as any,
-        {} as any, {} as any,
+        {} as any,
         integration, // _integration
-        post,         // _post
+        {} as any,   // _integrationProject
+        post,        // _post
         {} as any
       );
       return { repo, integrationFindFirst, integrationFindMany, postCreate };
@@ -1837,8 +1840,8 @@ describe('EngageRepository — two-table reads', () => {
       const { repo, integrationFindFirst, integrationFindMany, postCreate } = buildXRepo();
       // Org has two live X accounts; the reply tweet's author handle matches one.
       integrationFindMany.mockResolvedValue([
-        { id: 'other', profile: 'someoneelse', engageXReplyAccounts: [] },
-        { id: 'author', profile: 'zhngyq310334', engageXReplyAccounts: [] },
+        { id: 'other', profile: 'someoneelse', integrationProjects: [] },
+        { id: 'author', profile: 'zhngyq310334', integrationProjects: [] },
       ]);
       postCreate.mockResolvedValue({ id: 'post1' });
 
@@ -1881,8 +1884,8 @@ describe('EngageRepository — two-table reads', () => {
       // the reply was posted from an external account, so we attach nothing rather
       // than misrepresent authorship with a fallback account.
       integrationFindMany.mockResolvedValue([
-        { id: 'other', profile: 'someoneelse', engageXReplyAccounts: [] },
-        { id: 'brand', profile: 'brandhq', engageXReplyAccounts: [{ engageEnabled: true }] },
+        { id: 'other', profile: 'someoneelse', integrationProjects: [] },
+        { id: 'brand', profile: 'brandhq', integrationProjects: [{ engageEnabled: true }] },
       ]);
       postCreate.mockResolvedValue({ id: 'post1' });
 
@@ -1919,7 +1922,7 @@ describe('EngageRepository — two-table reads', () => {
       const { repo, integrationFindMany, postCreate } = buildXRepo();
       // The reply URL's author handle matches a connected account → integrationId set.
       integrationFindMany.mockResolvedValue([
-        { id: 'author', profile: 'zhngyq310334', engageXReplyAccounts: [] },
+        { id: 'author', profile: 'zhngyq310334', integrationProjects: [] },
       ]);
       postCreate.mockResolvedValue({ id: 'post1' });
 
@@ -1975,8 +1978,9 @@ describe('EngageRepository — two-table reads', () => {
       const postCreate = vi.fn();
       const post = { model: { post: { create: postCreate } } } as any;
       const repo = new EngageRepository(
-        {} as any, {} as any, {} as any, {} as any, {} as any,
+        {} as any, {} as any, {} as any, {} as any,
         {} as any, {} as any, {} as any,
+        {} as any,   // _integrationProject,
         post, // _post
         {} as any
       );
@@ -2045,10 +2049,11 @@ describe('EngageRepository — two-table reads', () => {
       const count = vi.fn(async () => 3);
       const sentReply = { model: { engageSentReply: { count } } } as any;
       const repo = new EngageRepository(
-        {} as any, {} as any, {} as any, {} as any, {} as any,
+        {} as any, {} as any, {} as any, {} as any,
         {} as any,
         sentReply, // _sentReply
-        {} as any, {} as any, {} as any
+        {} as any,
+        {} as any,   // _integrationProject, {} as any, {} as any
       );
       const since = new Date('2026-07-16T00:00:00Z');
       const until = new Date('2026-07-17T00:00:00Z');
@@ -2078,8 +2083,9 @@ describe('EngageRepository — two-table reads', () => {
       const repo = new EngageRepository(
         config, // _config
         keyword, // _keyword
-        {} as any, {} as any, {} as any, {} as any, {} as any,
-        {} as any, {} as any, {} as any, {} as any, {} as any
+        {} as any, {} as any, {} as any, {} as any,
+        {} as any,
+        {} as any,   // _integrationProject, {} as any, {} as any, {} as any, {} as any
       );
       return { repo, findMany, findFirst, configUpdate };
     }
@@ -2157,10 +2163,11 @@ describe('EngageRepository — two-table reads', () => {
         model: { post: { findUnique: postFindUnique, update: postUpdate } },
       } as any;
       const repo = new EngageRepository(
-        {} as any, {} as any, {} as any, {} as any, {} as any,
+        {} as any, {} as any, {} as any, {} as any,
         {} as any,
         sentReply,    // _sentReply (index 6)
-        {} as any,    // _integration (index 7)
+        {} as any,
+        {} as any,   // _integrationProject,    // _integration (index 7)
         post,         // _post (index 8)
         {} as any, {} as any
       );
@@ -2223,10 +2230,11 @@ describe('EngageRepository — two-table reads', () => {
       const sentFindMany = vi.fn();
       const sentReply = { model: { engageSentReply: { findMany: sentFindMany } } } as any;
       const repo = new EngageRepository(
-        {} as any, {} as any, {} as any, {} as any, {} as any,
+        {} as any, {} as any, {} as any, {} as any,
         {} as any,
         sentReply,    // _sentReply
-        {} as any,    // _integration
+        {} as any,
+        {} as any,   // _integrationProject,    // _integration
         {} as any,    // _post
         {} as any, {} as any
       );
@@ -2301,10 +2309,11 @@ describe('EngageRepository — two-table reads', () => {
       const integration = { model: { integration: { findMany: integrationFindMany } } } as any;
       const post = { model: { post: { update: postUpdate } } } as any;
       const repo = new EngageRepository(
-        {} as any, {} as any, {} as any, {} as any, {} as any,
+        {} as any, {} as any, {} as any, {} as any,
         {} as any,
         sentReply,    // _sentReply
-        integration,  // _integration
+        integration,
+        {} as any,   // _integrationProject,  // _integration
         post,         // _post
         {} as any, {} as any
       );
@@ -2317,7 +2326,7 @@ describe('EngageRepository — two-table reads', () => {
         { post: { id: 'post1', releaseURL: 'https://x.com/zhngyq310334/status/1' } },
       ]);
       integrationFindMany.mockResolvedValue([
-        { id: 'author', profile: 'zhngyq310334', engageXReplyAccounts: [] },
+        { id: 'author', profile: 'zhngyq310334', integrationProjects: [] },
       ]);
 
       const res = await repo.backfillXReplyIntegrations('org1', false);
@@ -2336,7 +2345,7 @@ describe('EngageRepository — two-table reads', () => {
         { post: { id: 'post1', releaseURL: 'https://x.com/someoneelse/status/1' } },
       ]);
       integrationFindMany.mockResolvedValue([
-        { id: 'author', profile: 'someoneelse', engageXReplyAccounts: [] },
+        { id: 'author', profile: 'someoneelse', integrationProjects: [] },
       ]);
 
       const res = await repo.backfillXReplyIntegrations('org1', true);
@@ -2367,7 +2376,7 @@ describe('EngageRepository — two-table reads', () => {
       ]);
       // Org has a live X account, but it isn't the reply's author.
       integrationFindMany.mockResolvedValue([
-        { id: 'brand', profile: 'brandhq', engageXReplyAccounts: [{ engageEnabled: true }] },
+        { id: 'brand', profile: 'brandhq', integrationProjects: [{ engageEnabled: true }] },
       ]);
 
       const res = await repo.backfillXReplyIntegrations('org1', false);
@@ -2389,8 +2398,9 @@ describe('EngageRepository — two-table reads', () => {
       const repo = new EngageRepository(
         {} as any,
         keyword, // _keyword
-        {} as any, {} as any,
-        {} as any, {} as any, {} as any, {} as any, {} as any,
+        {} as any,
+        {} as any, {} as any, {} as any, {} as any,
+        {} as any,   // _integrationProject, {} as any,
         {} as any
       );
       return { repo, keywordCreate };
@@ -2480,12 +2490,17 @@ describe('EngageRepository — two-table reads', () => {
       });
       const initialUpsert = vi.fn().mockResolvedValue({});
       const repo = new EngageRepository(
-        {} as any,
+        {} as any,   // _config
         { model: { engageKeyword: { findFirst: keywordFindFirst, update: keywordUpdate } } } as any,
-        {} as any, {} as any,
-        {} as any, {} as any, {} as any, {} as any, {} as any,
-        {} as any,
-        {} as any,
+        {} as any,   // _trackedAccount
+        {} as any,   // _opportunity
+        {} as any,   // _oppState
+        {} as any,   // _sentReply
+        {} as any,   // _integration
+        {} as any,   // _integrationProject
+        {} as any,   // _post
+        {} as any,   // _tx
+        {} as any,   // _scanCursor
         { model: { engageKeywordInitialScan: { upsert: initialUpsert } } } as any
       );
 
@@ -2534,8 +2549,9 @@ describe('EngageRepository — two-table reads', () => {
       const repo = new EngageRepository(
         {} as any,
         { model: { engageKeyword: { findFirst: keywordFindFirst, update: keywordUpdate } } } as any,
-        {} as any, {} as any,
-        {} as any, {} as any, {} as any, {} as any, {} as any,
+        {} as any,
+        {} as any, {} as any, {} as any, {} as any,
+        {} as any,   // _integrationProject, {} as any,
         {} as any,
         {} as any,
         { model: { engageKeywordInitialScan: { upsert: initialUpsert } } } as any
@@ -2557,8 +2573,8 @@ describe('EngageRepository — two-table reads', () => {
       } as any;
       const repo = new EngageRepository(
         {} as any, {} as any,
-        trackedAccount, // _trackedAccount
-        {} as any, {} as any, {} as any, {} as any, {} as any,
+        trackedAccount, {} as any, {} as any, {} as any, {} as any,
+        {} as any,   // _integrationProject,
         {} as any, {} as any
       );
       return { repo, channelCreate };
@@ -2642,8 +2658,8 @@ describe('EngageRepository — two-table reads', () => {
       } as any;
       const repo = new EngageRepository(
         {} as any, {} as any,
-        trackedAccount, // _trackedAccount
-        {} as any, {} as any, {} as any, {} as any, {} as any,
+        trackedAccount, {} as any, {} as any, {} as any, {} as any,
+        {} as any,   // _integrationProject,
         {} as any, {} as any
       );
       return { repo, trackedCreate };
@@ -2712,8 +2728,8 @@ describe('EngageRepository — two-table reads', () => {
       } as any;
       const repo = new EngageRepository(
         {} as any, {} as any,
-        trackedAccount,
-        {} as any, {} as any, {} as any, {} as any, {} as any,
+        trackedAccount, {} as any, {} as any, {} as any, {} as any,
+        {} as any,   // _integrationProject,
         {} as any, {} as any
       );
       return { repo, findFirst, update, del };
@@ -3025,7 +3041,22 @@ describe('EngageRepository.getOrgScanStatus', () => {
 
       const opp = (await repo.getOpportunityForReply('org1', 'opp1')) as any;
       expect(opp.id).toBe('opp1');
+      expect(opp.stateId).toBe('state1');
       expect(opp.status).toBe('NEW');
+    });
+
+    it('resolves an unscoped reply id as the per-project state id', async () => {
+      const { repo, stateFindFirst } = buildRepo();
+      stateFindFirst.mockResolvedValue({ ...STATE_ROW, projectId: 'proj1', status: 'NEW' });
+
+      const opp = (await repo.getOpportunityForReply('org1', 'state1')) as any;
+
+      expect(opp.id).toBe('opp1');
+      expect(opp.stateId).toBe('state1');
+      expect(opp.projectId).toBe('proj1');
+      expect(stateFindFirst).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { organizationId: 'org1', id: 'state1' } })
+      );
     });
 
     it('allows an AUTO_QUEUED row', async () => {
@@ -3420,8 +3451,9 @@ describe('EngageRepository.getOrgScanStatus', () => {
         },
       } as any;
       const repo = new EngageRepository(
-        _config, {} as any, {} as any, {} as any, {} as any, {} as any,
-        {} as any, {} as any, {} as any, {} as any, {} as any, {} as any
+        _config, {} as any, {} as any, {} as any, {} as any,
+        {} as any, {} as any,
+        {} as any,   // _integrationProject, {} as any, {} as any, {} as any, {} as any
       );
       return { repo, configFindFirst, configFindMany };
     }
@@ -3432,7 +3464,7 @@ describe('EngageRepository.getOrgScanStatus', () => {
         organizationId: 'org1',
         projectId: null,
         enabled: true,
-        xReplyAccounts: [{ id: 'ra1' }],
+        replyAccounts: [{ id: 'ra1' }],
         keywords: [],
         monitoredChannels: [],
         trackedAccounts: [],
@@ -3472,9 +3504,9 @@ describe('EngageRepository.getOrgScanStatus', () => {
           where: { organizationId: 'org1', enabled: true, projectId: { not: null } },
         })
       );
-      // Base scalars + xReplyAccounts preserved.
+      // Base scalars + replyAccounts preserved.
       expect(res.id).toBe('cfg-null');
-      expect(res.xReplyAccounts).toEqual([{ id: 'ra1' }]);
+      expect(res.replyAccounts).toEqual([{ id: 'ra1' }]);
       // 'AI'/'ai' collapse to one; 'ML' present → 2 keywords.
       expect(res.keywords.map((k: any) => k.keyword).sort()).toEqual(['AI', 'ML']);
       // @Alice / alice collapse to one tracked account.
@@ -3486,7 +3518,7 @@ describe('EngageRepository.getOrgScanStatus', () => {
     it('prefers the enabled row when the same unit is disabled in one config and enabled in another', async () => {
       const base = {
         id: 'cfg-null', organizationId: 'org1', projectId: null, enabled: true,
-        xReplyAccounts: [], keywords: [], monitoredChannels: [], trackedAccounts: [],
+        replyAccounts: [], keywords: [], monitoredChannels: [], trackedAccounts: [],
       };
       const { repo } = buildConfigRepo({
         baseNull: base,
@@ -3499,6 +3531,40 @@ describe('EngageRepository.getOrgScanStatus', () => {
       const res = await repo.getOrgAggregateConfig('org1');
       expect(res.keywords).toHaveLength(1);
       expect(res.keywords[0].enabled).toBe(true);
+    });
+  });
+});
+
+// Found on re-review: same-score candidates were tiebroken by
+// EngageOpportunityState.createdAt ASC (when WE scanned it in) — the OPPOSITE
+// of "most recent" from a reader's perspective, and the wrong field besides
+// (postPublishedAt is the post's own timestamp; createdAt can lag it by hours
+// depending on scan cadence).
+describe('EngageRepository.pickAutoReplyCandidates', () => {
+  it('orders by score desc, then the POST\'s own recency desc (not our scan-discovery time)', async () => {
+    const { repo, stateFindMany } = buildRepo();
+    stateFindMany.mockResolvedValue([]);
+
+    await repo.pickAutoReplyCandidates('org-1', 'proj-1', 'reddit', { limit: 1 });
+
+    expect(stateFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        orderBy: [
+          { score: 'desc' },
+          { opportunity: { postPublishedAt: 'desc' } },
+        ],
+      })
+    );
+  });
+
+  it('claims a candidate with a conditional NEW → AUTO_QUEUED transition', async () => {
+    const { repo, stateUpdateMany } = buildRepo();
+    stateUpdateMany.mockResolvedValue({ count: 1 });
+
+    await expect(repo.claimAutoReplyCandidate('org-1', 'proj-1', 'state-1')).resolves.toBe(true);
+    expect(stateUpdateMany).toHaveBeenCalledWith({
+      where: { id: 'state-1', organizationId: 'org-1', projectId: 'proj-1', status: 'NEW' },
+      data: { status: 'AUTO_QUEUED' },
     });
   });
 });

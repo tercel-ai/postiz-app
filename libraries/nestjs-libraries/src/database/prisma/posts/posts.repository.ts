@@ -2589,7 +2589,11 @@ export class PostsRepository {
         deletedAt: null,
         parentPostId: null,
       },
-      select: { id: true, state: true },
+      // providerIdentifier lets the caller filter to specific platforms
+      // (POST /posts/schedule { planId, platforms }) without a second query.
+      // publishDate lets the caller check it against a configured per-platform
+      // time window (extension_publish.time_window) and re-pick it if outside.
+      select: { id: true, state: true, providerIdentifier: true, publishDate: true },
     });
   }
 

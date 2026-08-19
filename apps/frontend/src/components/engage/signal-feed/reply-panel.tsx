@@ -15,7 +15,8 @@ interface ReplyPanelProps {
     id: string;
     name: string;
     picture?: string;
-    engageXReplyAccount?: { engageEnabled: boolean; defaultStrategy: string } | null;
+    /** May Engage reply as this account, for this project. Defaults to true. */
+    engageEnabled?: boolean;
   }>;
   onClose: () => void;
   onSent: () => void;
@@ -44,7 +45,7 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
   const { backendUrl } = useVariables();
 
   const enabledAccounts = replyAccounts.filter(
-    (a) => a.engageXReplyAccount?.engageEnabled !== false
+    (a) => a.engageEnabled !== false
   );
 
   const [strategy, setStrategy] = useState('EXPERT_ANSWER');
@@ -69,6 +70,9 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
   const [xManualStep, setXManualStep] = useState<'draft' | 'url'>('draft');
 
   const isX = opportunity.platform === 'x';
+  // A global opportunity can be surfaced by multiple projects. Reply actions
+  // must address the project's state row, not the shared opportunity id.
+  const replyStateId = opportunity.stateId ?? opportunity.id;
 
   const abortRef = useRef<AbortController | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
@@ -169,7 +173,7 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
     setSending(true);
     try {
       const res = await fetch(
-        `/engage/opportunities/${opportunity.id}/save-draft`,
+        `/engage/opportunities/${replyStateId}/save-draft`,
         {
           method: 'POST',
           body: JSON.stringify({ draftContent: draft, strategy, brandStrength }),
@@ -207,7 +211,7 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
     }
   }, [
     draft,
-    opportunity.id,
+    replyStateId,
     opportunity.platform,
     opportunity.externalPostUrl,
     strategy,
@@ -228,7 +232,7 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
     abortRef.current = new AbortController();
 
     try {
-      const res = await fetch(`/engage/opportunities/${opportunity.id}/draft`, {
+      const res = await fetch(`/engage/opportunities/${replyStateId}/draft`, {
         method: 'POST',
         body: JSON.stringify({ strategy, brandStrength, mentions }),
         signal: abortRef.current.signal,
@@ -288,13 +292,13 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
     } finally {
       setStreaming(false);
     }
-  }, [opportunity.id, strategy, brandStrength, mentions, streaming, fetch, toaster]);
+  }, [replyStateId, strategy, brandStrength, mentions, streaming, fetch, toaster]);
 
   const handleSend = useCallback(async () => {
     if (!draft || !selectedAccountId) return;
     setSending(true);
     try {
-      const res = await fetch(`/engage/opportunities/${opportunity.id}/send-now`, {
+      const res = await fetch(`/engage/opportunities/${replyStateId}/send-now`, {
         method: 'POST',
         body: JSON.stringify({
           integrationId: selectedAccountId,
@@ -314,14 +318,14 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
     } finally {
       setSending(false);
     }
-  }, [draft, selectedAccountId, opportunity.id, strategy, brandStrength, fetch, toaster, onSent]);
+  }, [draft, selectedAccountId, replyStateId, strategy, brandStrength, fetch, toaster, onSent]);
 
   const handleSchedule = useCallback(
     async (scheduledAt: string) => {
       if (!draft || !selectedAccountId) return;
       setSending(true);
       try {
-        const res = await fetch(`/engage/opportunities/${opportunity.id}/schedule`, {
+        const res = await fetch(`/engage/opportunities/${replyStateId}/schedule`, {
           method: 'POST',
           body: JSON.stringify({
             integrationId: selectedAccountId,
@@ -343,7 +347,7 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
         setSending(false);
       }
     },
-    [draft, selectedAccountId, opportunity.id, strategy, brandStrength, fetch, toaster, onSent]
+    [draft, selectedAccountId, replyStateId, strategy, brandStrength, fetch, toaster, onSent]
   );
 
   const handleConfirmReply = useCallback(
@@ -352,7 +356,7 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
       setSending(true);
       try {
         const res = await fetch(
-          `/engage/opportunities/${opportunity.id}/manual-reply`,
+          `/engage/opportunities/${replyStateId}/manual-reply`,
           {
             method: 'POST',
             body: JSON.stringify({
@@ -393,7 +397,7 @@ export const ReplyPanel: FC<ReplyPanelProps> = ({
         setSending(false);
       }
     },
-    [draft, opportunity.id, strategy, brandStrength, isX, selectedAccountId, fetch, toaster, onSent]
+    [draft, replyStateId, strategy, brandStrength, isX, selectedAccountId, fetch, toaster, onSent]
   );
 
   const charCount = draft.length;

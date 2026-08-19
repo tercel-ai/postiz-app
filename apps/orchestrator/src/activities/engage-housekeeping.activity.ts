@@ -1,7 +1,12 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Activity, ActivityMethod } from 'nestjs-temporal-core';
 import { PrismaRepository } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
-import { EngageScanConfigService } from '@gitroom/nestjs-libraries/engage/engage-scan-config.service';
+import {
+  DEFAULT_OPPORTUNITY_TTL_DAYS,
+  EngageScanConfigService,
+  SCANNABLE_PLATFORMS,
+  opportunityExpiryCutoff,
+} from '@gitroom/nestjs-libraries/engage/engage-scan-config.service';
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc';
 
@@ -63,19 +68,63 @@ export class EngageHousekeepingActivity {
     });
   }
 
-  // Opportunity TTL is a single system-wide setting (not per-org), so one
-  // global updateMany covers every org. This is a durable backstop for the
-  // opportunistic per-org sweep that also runs inline during an active scan
-  // tick (engage-scan.activity.ts) — that sweep only fires for orgs the scan
-  // happens to touch, so an org scanned exclusively via the extension path (or
-  // not visited in a while) would otherwise never age its opportunities out.
+  // Opportunity TTL is system-wide (not per-org) but per-PLATFORM, so this is
+  // one updateMany per platform rather than one for everything. It is a durable
+  // backstop for the opportunistic per-org sweep that also runs inline during an
+  // active scan tick (engage-scan.activity.ts) — that sweep only fires for orgs
+  // the scan happens to touch, so an org scanned exclusively via the extension
+  // path (or not visited in a while) would otherwise never age its
+  // opportunities out.
+  //
+  // Two clocks reach the same cutoff, and either one expires the row:
+  //   • state.createdAt      — how long THIS org has held the opportunity
+  //   • postPublishedAt      — how old the underlying post itself is
+  // The second matches the ingest gate, which refuses to persist a post already
+  // published before the cutoff; without it a post ingested just inside the
+  // window would live up to twice its TTL.
   private async _expireStaleOpportunities(): Promise<string> {
-    const ttlDays = await this._scanConfig.getOpportunityTtlDays();
-    const cutoff = dayjs.utc().subtract(ttlDays, 'day').toDate();
-    const { count } = await this._oppState.model.engageOpportunityState.updateMany({
-      where: { status: 'NEW', createdAt: { lt: cutoff } },
-      data: { status: 'EXPIRED' },
-    });
-    return `expired ${count} stale NEW opportunities (ttlDays=${ttlDays})`;
+    const ttlDays = await this._scanConfig.getOpportunityTtlDaysMap();
+    const now = Date.now();
+
+    let total = 0;
+    const parts: string[] = [];
+    for (const platform of SCANNABLE_PLATFORMS) {
+      const cutoff = opportunityExpiryCutoff(platform, ttlDays, now);
+      if (!cutoff) continue;
+      const { count } = await this._oppState.model.engageOpportunityState.updateMany({
+        where: {
+          status: 'NEW',
+          opportunity: { platform },
+          OR: [
+            { createdAt: { lt: cutoff } },
+            { opportunity: { postPublishedAt: { lt: cutoff } } },
+          ],
+        },
+        data: { status: 'EXPIRED' },
+      });
+      total += count;
+      if (count) parts.push(`${platform}=${count}@${ttlDays[platform]}d`);
+    }
+
+    // Catch-all for rows whose platform is no longer scannable (a platform
+    // retired from SCANNABLE_PLATFORMS still has stored opportunities). Without
+    // it those rows would sit in NEW forever now that the sweep is per-platform.
+    const legacyCutoff = dayjs.utc().subtract(DEFAULT_OPPORTUNITY_TTL_DAYS, 'day').toDate();
+    const { count: orphaned } =
+      await this._oppState.model.engageOpportunityState.updateMany({
+        where: {
+          status: 'NEW',
+          opportunity: { platform: { notIn: [...SCANNABLE_PLATFORMS] } },
+          OR: [
+            { createdAt: { lt: legacyCutoff } },
+            { opportunity: { postPublishedAt: { lt: legacyCutoff } } },
+          ],
+        },
+        data: { status: 'EXPIRED' },
+      });
+    total += orphaned;
+    if (orphaned) parts.push(`other=${orphaned}@${DEFAULT_OPPORTUNITY_TTL_DAYS}d`);
+
+    return `expired ${total} stale NEW opportunities${parts.length ? ` (${parts.join(', ')})` : ''}`;
   }
 }

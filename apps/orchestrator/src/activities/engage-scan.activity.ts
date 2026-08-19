@@ -17,7 +17,13 @@ import {
   EngageEntitlementService,
   DEFAULT_SCAN_INTERVAL_HOURS,
 } from '@gitroom/nestjs-libraries/engage/engage-entitlement.service';
-import { EngageScanConfigService } from '@gitroom/nestjs-libraries/engage/engage-scan-config.service';
+import {
+  EngageScanConfigService,
+  OpportunityTtlDays,
+  SCANNABLE_PLATFORMS,
+  fallbackOpportunityTtlDaysMap,
+  opportunityExpiryCutoff,
+} from '@gitroom/nestjs-libraries/engage/engage-scan-config.service';
 import { ProjectValidationService } from '@gitroom/nestjs-libraries/projects/project-validation.service';
 import { EngageScanIngestService } from '@gitroom/nestjs-libraries/engage/engage-scan-ingest.service';
 import {
@@ -1210,10 +1216,17 @@ export class EngageScanActivity {
     const matched = orgPosts
       .map((p) => scorePost(p, orgKeywords))
       .filter((p): p is ScoredPost => p !== null);
-    const scored = matched.filter((p) => p.score >= MIN_SCORE);
+    const gated = matched.filter((p) => p.score >= MIN_SCORE);
+    // TTL gate on THIS path too, not only in persistOpportunities. Leaving it
+    // to the persist call would still charge intent classification for posts
+    // that are then dropped, inflate the 'persisted' score distribution, and —
+    // worst — credit keyword hit counts to posts that never became
+    // opportunities. Mirrors the same gate in EngageScanIngestService.ingestForOrg.
+    const { kept: scored, dropped: staleFiltered } =
+      await this._ingest.filterExpiredByPublishTime(gated);
     this.logger.log(
-      `Fan-out org=${ctx.organizationId}: ${orgPosts.length} raw → ${matched.length} keyword-matched → ${scored.length} scored>=${MIN_SCORE}` +
-      (matched.length && !scored.length
+      `Fan-out org=${ctx.organizationId}: ${orgPosts.length} raw → ${matched.length} keyword-matched → ${gated.length} scored>=${MIN_SCORE} → ${scored.length} within TTL (staleFiltered=${staleFiltered})` +
+      (matched.length && !gated.length
         ? ` (top score ${Math.max(...matched.map((p) => p.score))})`
         : '')
     );
@@ -1250,7 +1263,10 @@ export class EngageScanActivity {
       this._oppState,
       this._keyword,
       this._intentClassifier,
-      this._tx
+      this._tx,
+      // Give the shared pipeline the settings-backed TTL map; it degrades to
+      // env/defaults on its own when this is absent (unit tests).
+      this._scanConfig
     ));
   }
 
@@ -1281,37 +1297,49 @@ export class EngageScanActivity {
     return this._ingest.updateKeywordHitCounts(orgId, posts, keywords);
   }
 
+  // Per-platform expiry for ONE project, mirroring the system-wide sweep in
+  // EngageHousekeepingActivity (see its comment for why both clocks count):
+  //   • state.createdAt   — how long this project has held the opportunity
+  //   • postPublishedAt   — how old the underlying post is (same cutoff the
+  //                         ingest gate uses, so a post ingested just inside the
+  //                         window cannot live up to twice its TTL)
   private async _expireStaleOpportunities(
     orgId: string,
     projectId: string | null
   ): Promise<void> {
     const ttlDays = await this._opportunityTtlDays();
-    const cutoff = dayjs.utc().subtract(ttlDays, 'day').toDate();
-    // createdAt on the state row = when this project first matched the post.
-    await this._oppState.model.engageOpportunityState.updateMany({
-      where: {
-        organizationId: orgId,
-        projectId,
-        status: 'NEW',
-        createdAt: { lt: cutoff },
-      },
-      data: { status: 'EXPIRED' },
-    });
+    const now = Date.now();
+    for (const platform of SCANNABLE_PLATFORMS) {
+      const cutoff = opportunityExpiryCutoff(platform, ttlDays, now);
+      if (!cutoff) continue;
+      await this._oppState.model.engageOpportunityState.updateMany({
+        where: {
+          organizationId: orgId,
+          projectId,
+          status: 'NEW',
+          opportunity: { platform },
+          OR: [
+            { createdAt: { lt: cutoff } },
+            { opportunity: { postPublishedAt: { lt: cutoff } } },
+          ],
+        },
+        data: { status: 'EXPIRED' },
+      });
+    }
   }
 
-  // Opportunity TTL (days), resolved from settings → env → default. Falls back
-  // to the raw env-or-default when the config service isn't wired (e.g. unit
-  // tests build the activity without it) — never throws.
-  private async _opportunityTtlDays(): Promise<number> {
+  // Per-platform opportunity TTL (days), resolved from settings → env →
+  // default. Falls back to the env/default map when the config service isn't
+  // wired (e.g. unit tests build the activity without it) — never throws.
+  private async _opportunityTtlDays(): Promise<OpportunityTtlDays> {
     if (this._scanConfig) {
       try {
-        return await this._scanConfig.getOpportunityTtlDays();
+        return await this._scanConfig.getOpportunityTtlDaysMap();
       } catch {
         // fall through to the env/default fallback below
       }
     }
-    const envDays = Number(process.env.ENGAGE_OPPORTUNITY_TTL_DAYS);
-    return Number.isFinite(envDays) && envDays > 0 ? envDays : 7;
+    return fallbackOpportunityTtlDaysMap();
   }
 
   private async _updateTrackedAccountAfterScan(
@@ -1363,7 +1391,7 @@ export class EngageScanActivity {
   //   1. All posting-capable X integrations across the enabled orgs (connected,
   //      not disabled, not pending refresh/setup).
   //   2. The app-only X_BEARER_TOKEN env var, as an extra pool member.
-  // Independent of EngageXReplyAccount — reply accounts only choose who *sends*
+  // Independent of reply-account settings — those only choose who *sends*
   // replies, not which token we *read* the firehose with.
   private async _collectXTokens(orgContexts: OrgContext[]): Promise<string[]> {
     const orgIds = orgContexts.map((c) => c.organizationId);

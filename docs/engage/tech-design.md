@@ -5,6 +5,14 @@
 **Status**: Draft — Pending Review  
 **PRD Reference**: `docs/engage/prd.md`
 
+> **⚠️ Historical design doc.** Captures the Engage architecture as originally
+> designed. The `EngageXReplyAccount` table described below (schema, ER diagram,
+> route stubs) was later split across `IntegrationProject.engageEnabled` and
+> `EngageConfig.replyPolicies` — see
+> [`docs/engage/api.md`](./api.md#reply-accounts--reply-accounts) for current
+> behavior. Kept as-is rather than retrofitted, so it stays an honest record of
+> the original design.
+
 ---
 
 ## 1. Overview
@@ -254,6 +262,14 @@ model EngageTrackedAccount {
 // These reference the existing Integration model (which holds OAuth tokens).
 // Per-account Engage settings: enabled for Engage? auto-reply on? time window?
 // DO NOT confuse with EngageTrackedAccount (external accounts we monitor).
+//
+// SUPERSEDED — this model no longer exists. `engageEnabled` moved to
+// IntegrationProject (integration × project is its actual grain: the same
+// account can serve several projects and must be independently includable/
+// excludable in each). auto-reply enabled/window/timezone/strategy moved to
+// EngageConfig.replyPolicies, keyed by PLATFORM rather than by account — every
+// engage platform needs a policy, not just ones with a connected account.
+// See docs/engage/api.md.
 // ──────────────────────────────────────────────────────────────────────────
 model EngageXReplyAccount {
   id                    String    @id @default(uuid())
@@ -372,7 +388,7 @@ model EngageOpportunityState {
   scoreTracked   Int       @default(0)
   matchedKeywords String[]                  // this org's enabled keywords the post hit (per-org; refreshed each re-scan)
 
-  createdAt      DateTime  @default(now())  // when THIS org first matched the post (drives TTL/expiry)
+  createdAt      DateTime  @default(now())  // when THIS org first matched the post (one of the two TTL/expiry clocks; the other is the post's own postPublishedAt)
   updatedAt      DateTime  @updatedAt
 
   @@id([organizationId, opportunityId])
@@ -413,7 +429,7 @@ enum EngageOpportunityStatus {
   REPLIED      // reply sent or manually confirmed
   SCHEDULED    // reply queued for later send
   AUTO_QUEUED  // added to auto-reply queue; waiting for time window
-  EXPIRED      // exceeded TTL (e.g. 30 days old); excluded from Feed, kept for audit
+  EXPIRED      // exceeded the platform's TTL (state.createdAt OR postPublishedAt past the cutoff); excluded from Feed, kept for audit
 }
 
 // Intent types are NOT a Prisma enum — stored as plain strings for forward compatibility.
@@ -1118,8 +1134,20 @@ the activity stays platform-agnostic:
   tokens (+ optional `X_BEARER_TOKEN`); parks a token on rate-limit.
 
 After all due units are scanned, posts are deduped and fanned out to every org:
-`scorePost` (per-org keyword/tracked scoring) → intent classify (§6.2) → two-phase
-persist (§3.1) → keyword hit counts → expire stale → `lastScanAt`.
+`scorePost` (per-org keyword/tracked scoring) → **TTL gate** → intent classify
+(§6.2) → two-phase persist (§3.1) → keyword hit counts → expire stale →
+`lastScanAt`.
+
+> **TTL gate.** A post published before `now - ttlDays[platform]` is dropped
+> rather than persisted: it would land already expired, so no reply can ever be
+> sent against it. The gate sits before intent classification (an expired post
+> must not cost an LLM call) and again inside `persistOpportunities`, which is
+> the one method both write paths go through — the Temporal scan activity calls
+> it directly, bypassing `ingestForOrg`. Judged per post against its OWN
+> platform; a platform absent from the TTL map is never dropped. The TTL is
+> per-platform and admin-configurable (`engage_opportunity_ttl_days_by_platform`),
+> because a timeline post is dead in days while an article keeps drawing readers
+> for weeks.
 
 > Tracked-account posts are no longer a separate workflow — they are the `tracked`
 > scan units above. The `isFromTrackedAccount` +5 bonus is applied **per-org during
@@ -1342,8 +1370,9 @@ Response: { data: { children: [{ data: { score, num_comments } }] } }
 // @ActivityMethod runDueScans drives keyword + channel + tracked units in one
 // pass (see §5.1). The engageScanTickerWorkflow that calls it is auto-discovered
 // from workflows/index.ts. (Replaces the retired per-type scan/tracked workflows.)
-//   EngageScanActivity.runDueScans → adapters(X/Reddit) → score → classify →
-//     persist (two-phase) → keyword hit counts → expire stale → lastScanAt
+//   EngageScanActivity.runDueScans → adapters(X/Reddit) → score → TTL gate →
+//     classify → persist (two-phase) → keyword hit counts → expire stale
+//     (per-platform) → lastScanAt
 
 // DataTicks aggregation activities (daily)
 const engageDataTicksActivities = createActivities([
