@@ -355,7 +355,7 @@ export class UpdateReplyAccountDto {
   @IsBoolean()
   engageEnabled?: boolean;
 
-  // Required in practice: engage.service.updateReplyAccountSettings writes
+  // Required in practice: engage.service.upsertReplyAccountSettings writes
   // IntegrationProject (integration, project), which has no legacy
   // null-project fallback to write to instead.
   @IsOptional()

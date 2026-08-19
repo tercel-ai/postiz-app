@@ -99,7 +99,10 @@ export class EngageController {
     @GetOrgFromRequest() org: Organization,
     @Body() body: EngageScanSyncDto
   ) {
-    console.log('[ingest-ctrl] completed=', JSON.stringify(body.completed)?.slice(0, 200));
+    console.log(
+      '[ingest-ctrl] completed=',
+      JSON.stringify(body.completed)?.slice(0, 200)
+    );
     const completed = body.completed
       ? {
           taskId: body.completed.taskId,
@@ -141,9 +144,7 @@ export class EngageController {
       'Resets status → IDLE without advancing the cursor; select and claim the unit afterwards to bypass cadence.',
   })
   @Post('/scan-tasks/release')
-  async scanTasksRelease(
-    @Body() body: { taskId: string }
-  ) {
+  async scanTasksRelease(@Body() body: { taskId: string }) {
     if (!body?.taskId) return { released: false };
     const released = await this._scanTasksService.releaseTask(body.taskId);
     return { released };
@@ -159,13 +160,18 @@ export class EngageController {
     @Body() body: { posts?: any[] }
   ) {
     const posts = (body?.posts ?? []).map(scanIngestPostToRawPost);
-    const result = await this._scanTasksService.ingestCollectedPosts(org.id, posts);
+    const result = await this._scanTasksService.ingestCollectedPosts(
+      org.id,
+      posts
+    );
     return result;
   }
 
   // ─── Config ───────────────────────────────────────────────────────────────
 
-  @ApiOperation({ summary: 'Get Engage config and keywords/channels/accounts for this org' })
+  @ApiOperation({
+    summary: 'Get Engage config and keywords/channels/accounts for this org',
+  })
   @Get('/config')
   getConfig(
     @GetOrgFromRequest() org: Organization,
@@ -176,7 +182,7 @@ export class EngageController {
 
   @ApiOperation({
     summary:
-      'Update Engage config: enable/disable, and the project\'s unattended reply mode (off | review | auto)',
+      "Update Engage config: enable/disable, and the project's unattended reply mode (off | review | auto)",
   })
   @ApiResponse({
     status: 400,
@@ -200,7 +206,10 @@ export class EngageController {
     return this._engageService.resetConfig(org, projectId);
   }
 
-  @ApiOperation({ summary: 'Atomic bulk setup: create config + keywords + channels + tracked accounts' })
+  @ApiOperation({
+    summary:
+      'Atomic bulk setup: create config + keywords + channels + tracked accounts',
+  })
   @Post('/setup')
   setupEngage(
     @GetOrgFromRequest() org: Organization,
@@ -220,7 +229,9 @@ export class EngageController {
     return this._engageService.addKeyword(org, body);
   }
 
-  @ApiOperation({ summary: 'Bulk-add keywords (idempotent; duplicates skipped)' })
+  @ApiOperation({
+    summary: 'Bulk-add keywords (idempotent; duplicates skipped)',
+  })
   @Post('/keywords/bulk')
   addKeywordsBulk(
     @GetOrgFromRequest() org: Organization,
@@ -283,7 +294,10 @@ export class EngageController {
     description:
       'Platform has no channel scope (only reddit does), or the community name is not a valid subreddit',
   })
-  @ApiResponse({ status: 409, description: 'Channel already monitored by this config' })
+  @ApiResponse({
+    status: 409,
+    description: 'Channel already monitored by this config',
+  })
   @Post('/monitored-channels')
   addMonitoredChannel(
     @GetOrgFromRequest() org: Organization,
@@ -292,7 +306,9 @@ export class EngageController {
     return this._engageService.addMonitoredChannel(org, body);
   }
 
-  @ApiOperation({ summary: 'Update a monitored channel (enable/disable, metadata)' })
+  @ApiOperation({
+    summary: 'Update a monitored channel (enable/disable, metadata)',
+  })
   @ApiResponse({ status: 404, description: 'Channel not found' })
   @Patch('/monitored-channels/:id')
   updateMonitoredChannel(
@@ -314,7 +330,8 @@ export class EngageController {
   }
 
   @ApiOperation({
-    summary: "Report a subreddit's observed posting rules (flair options, flair/tag required)",
+    summary:
+      "Report a subreddit's observed posting rules (flair options, flair/tag required)",
     description:
       "Reddit's flair endpoints answer USER_REQUIRED to unauthenticated callers and this deployment has no Reddit API credentials, so a flair list can only be read where Reddit renders it: the extension's submit tab. This is that observation coming back. Returns updated:0 when the org does not monitor the subreddit — no row is created for a cache.",
   })
@@ -333,7 +350,9 @@ export class EngageController {
   // repo; add one back when a UI actually needs to show a subreddit's known
   // flair set, and validate `subreddit` at the boundary when you do.
 
-  @ApiOperation({ summary: 'Search for channels to add (e.g. Reddit subreddit search)' })
+  @ApiOperation({
+    summary: 'Search for channels to add (e.g. Reddit subreddit search)',
+  })
   @Post('/monitored-channels/search')
   searchChannels(
     @GetOrgFromRequest() org: Organization,
@@ -385,7 +404,9 @@ export class EngageController {
 
   // ─── Reply Accounts ───────────────────────────────────────────────────────
 
-  @ApiOperation({ summary: "List this org's X integrations with Engage reply settings" })
+  @ApiOperation({
+    summary: "List this org's X integrations with Engage reply settings",
+  })
   @Get('/reply-accounts')
   listReplyAccounts(
     @GetOrgFromRequest() org: Organization,
@@ -394,15 +415,18 @@ export class EngageController {
     return this._engageService.listReplyAccounts(org, projectId);
   }
 
-  @ApiOperation({ summary: 'Update reply account settings (auto-reply window, strategy)' })
+  @ApiOperation({
+    summary: 'Create or update reply account settings for a project',
+  })
+  @ApiResponse({ status: 400, description: 'projectId is required' })
   @ApiResponse({ status: 404, description: 'Integration not found' })
-  @Patch('/reply-accounts/:integrationId')
-  updateReplyAccountSettings(
+  @Post('/reply-accounts/:integrationId')
+  upsertReplyAccountSettings(
     @GetOrgFromRequest() org: Organization,
     @Param('integrationId') integrationId: string,
     @Body() body: UpdateReplyAccountDto
   ) {
-    return this._engageService.updateReplyAccountSettings(
+    return this._engageService.upsertReplyAccountSettings(
       org,
       integrationId,
       body
@@ -426,7 +450,10 @@ export class EngageController {
    * which this endpoint reads server-side — the executor never needs to know
    * which plans exist (the same reason publish-due takes no planId).
    */
-  @ApiOperation({ summary: 'Drafts due for unattended reply (extension pull; org-scoped, paced)' })
+  @ApiOperation({
+    summary:
+      'Drafts due for unattended reply (extension pull; org-scoped, paced)',
+  })
   @Post('/reply-due')
   async getDueReplies(@GetOrgFromRequest() org: Organization) {
     const due = await this._engageAutoReplyService.getDueReplies(org);
@@ -441,7 +468,10 @@ export class EngageController {
   // always "due" so they scan immediately; units still in cooldown are
   // skipped. Force-scan is reserved for first-time setup (saveConfig /
   // setupEngage) where nothing has a cursor yet.
-  @ApiOperation({ summary: 'Trigger a due-only keyword/channel scan (new units scan immediately, cooldown-respecting)' })
+  @ApiOperation({
+    summary:
+      'Trigger a due-only keyword/channel scan (new units scan immediately, cooldown-respecting)',
+  })
   @ApiResponse({ status: 429, description: 'Rate limit exceeded (5/hour)' })
   @Throttle({ default: { limit: 5, ttl: 3_600_000 } })
   @Post('/scan')
@@ -451,7 +481,7 @@ export class EngageController {
 
   @ApiOperation({
     summary:
-      'Page-visit trigger: fire-and-forget kick of this org\'s DUE scan (keywords/tracked/channels). Returns { status, coldStart, nextRefreshAt }; the client caches nextRefreshAt and skips calling again until then. Metrics are NOT handled here — refresh them via POST /sent/metrics/refresh with the post ids on screen.',
+      "Page-visit trigger: fire-and-forget kick of this org's DUE scan (keywords/tracked/channels). Returns { status, coldStart, nextRefreshAt }; the client caches nextRefreshAt and skips calling again until then. Metrics are NOT handled here — refresh them via POST /sent/metrics/refresh with the post ids on screen.",
   })
   @Post('/refresh-on-visit')
   refreshOnVisit(@GetOrgFromRequest() org: Organization) {
@@ -472,7 +502,9 @@ export class EngageController {
 
   // ─── Opportunities ────────────────────────────────────────────────────────
 
-  @ApiOperation({ summary: 'Score distribution and top-opportunity stats for this org' })
+  @ApiOperation({
+    summary: 'Score distribution and top-opportunity stats for this org',
+  })
   @Get('/opportunities/score-stats')
   getScoreStats(
     @GetOrgFromRequest() org: Organization,
@@ -481,7 +513,10 @@ export class EngageController {
     return this._engageService.getScoreStats(org, query);
   }
 
-  @ApiOperation({ summary: 'Rollup for tab/platform badges: total + byStatus + byPlatform in one call, all computed under the SAME conditions — the /opportunities filter contract minus status/platform (those are the breakdown axes here, not filters). Replaces doing N separate limit=1 list calls just to read totals.' })
+  @ApiOperation({
+    summary:
+      'Rollup for tab/platform badges: total + byStatus + byPlatform in one call, all computed under the SAME conditions — the /opportunities filter contract minus status/platform (those are the breakdown axes here, not filters). Replaces doing N separate limit=1 list calls just to read totals.',
+  })
   @Get(['/opportunities/counts', '/opportunities/counts/summary'])
   getOpportunityCountsSummary(
     @GetOrgFromRequest() org: Organization,
@@ -490,7 +525,10 @@ export class EngageController {
     return this._engageService.getOpportunityCountsSummary(org, query);
   }
 
-  @ApiOperation({ summary: 'Filtered counts under EXACTLY the same filters as GET /opportunities: `total` honors every filter (status/platform included, same number the list returns); `byStatus` honors every filter except `status` itself (the breakdown axis), so per-status badges stay complete while platform/keywords/date narrow them. Sort/pagination params are accepted and ignored, so clients can reuse the list query string verbatim.' })
+  @ApiOperation({
+    summary:
+      'Filtered counts under EXACTLY the same filters as GET /opportunities: `total` honors every filter (status/platform included, same number the list returns); `byStatus` honors every filter except `status` itself (the breakdown axis), so per-status badges stay complete while platform/keywords/date narrow them. Sort/pagination params are accepted and ignored, so clients can reuse the list query string verbatim.',
+  })
   @Get('/opportunities/count')
   countOpportunities(
     @GetOrgFromRequest() org: Organization,
@@ -499,7 +537,10 @@ export class EngageController {
     return this._engageService.countOpportunities(org, query);
   }
 
-  @ApiOperation({ summary: 'Locate the page of a given opportunityStateId within /opportunities using the same filters and sort. Returns null page when the opportunity does not match the filters.' })
+  @ApiOperation({
+    summary:
+      'Locate the page of a given opportunityStateId within /opportunities using the same filters and sort. Returns null page when the opportunity does not match the filters.',
+  })
   @Get('/opportunities/locate')
   locateOpportunity(
     @GetOrgFromRequest() org: Organization,
@@ -508,7 +549,9 @@ export class EngageController {
     return this._engageService.locateOpportunity(org, query);
   }
 
-  @ApiOperation({ summary: 'Paginated list of signal-feed opportunities for this org' })
+  @ApiOperation({
+    summary: 'Paginated list of signal-feed opportunities for this org',
+  })
   @Get('/opportunities')
   listOpportunities(
     @GetOrgFromRequest() org: Organization,
@@ -517,7 +560,10 @@ export class EngageController {
     return this._engageService.listOpportunities(org, query);
   }
 
-  @ApiOperation({ summary: 'Get a single signal-feed opportunity by id; response shape matches one item from /opportunities' })
+  @ApiOperation({
+    summary:
+      'Get a single signal-feed opportunity by id; response shape matches one item from /opportunities',
+  })
   @ApiResponse({ status: 404, description: 'Opportunity not found' })
   @Get('/opportunities/:id')
   getOpportunityById(
@@ -528,8 +574,13 @@ export class EngageController {
     return this._engageService.getOpportunityById(org, id, projectId);
   }
 
-  @ApiOperation({ summary: 'Dismiss an opportunity (moves it to DISMISSED status)' })
-  @ApiResponse({ status: 404, description: 'Opportunity not found or no longer actionable' })
+  @ApiOperation({
+    summary: 'Dismiss an opportunity (moves it to DISMISSED status)',
+  })
+  @ApiResponse({
+    status: 404,
+    description: 'Opportunity not found or no longer actionable',
+  })
   @Patch('/opportunities/:id/dismiss')
   dismissOpportunity(
     @GetOrgFromRequest() org: Organization,
@@ -555,8 +606,14 @@ export class EngageController {
   // Spec §11 (tech-design.md): 20 generations/user/hour. Each call opens a
   // Claude Sonnet streaming completion; without a cap an authenticated user
   // can replay the request and bleed Anthropic spend.
-  @ApiOperation({ summary: 'Stream an AI-generated reply draft via SSE (text/event-stream)' })
-  @ApiResponse({ status: 200, description: 'SSE stream of text chunks; ends with [DONE]. Non-actionable statuses (expired/replied/scheduled/dismissed) end the stream with a typed error frame carrying a human-readable reason.' })
+  @ApiOperation({
+    summary: 'Stream an AI-generated reply draft via SSE (text/event-stream)',
+  })
+  @ApiResponse({
+    status: 200,
+    description:
+      'SSE stream of text chunks; ends with [DONE]. Non-actionable statuses (expired/replied/scheduled/dismissed) end the stream with a typed error frame carrying a human-readable reason.',
+  })
   @ApiResponse({ status: 404, description: 'Opportunity not found' })
   @ApiResponse({ status: 429, description: 'Rate limit exceeded (20/hour)' })
   @Throttle({ default: { limit: 20, ttl: 3_600_000 } })
@@ -598,10 +655,15 @@ export class EngageController {
       // BEFORE any model call, and the cap-ledger row is written up front so the
       // cap holds against concurrent requests. A block ends the stream without
       // generating (no reservation is taken).
-      reservation = await this._engageService.reserveReplyGeneration(org, length, opportunity.id);
+      reservation = await this._engageService.reserveReplyGeneration(
+        org,
+        length,
+        opportunity.id
+      );
 
       const outputLength =
-        body.outputLength ?? outputLengthForLength(opportunity.platform, length);
+        body.outputLength ??
+        outputLengthForLength(opportunity.platform, length);
 
       let draft = '';
       for await (const chunk of this._engageDraftService.generateDraft(
@@ -619,12 +681,21 @@ export class EngageController {
         // Client gone mid-stream — uncount the reservation; nothing delivered.
         await this._engageService.releaseReplyGeneration(reservation.taskId);
       } else {
-        assertDraftWithinPlatformLimit(opportunity.platform, draft, outputLength);
+        assertDraftWithinPlatformLimit(
+          opportunity.platform,
+          draft,
+          outputLength
+        );
         // Settle only after a successful, non-aborted generation (spec §3.3).
         // Best-effort: a billing hiccup must not fail an already-produced draft —
         // the reservation stays counted (status reserved/unbilled) so the cap holds.
         try {
-          await this._engageService.settleReplyGeneration(org, reservation.taskId, length, reservation.cost);
+          await this._engageService.settleReplyGeneration(
+            org,
+            reservation.taskId,
+            length,
+            reservation.cost
+          );
         } catch (billErr) {
           this.logger.error(
             `Reply credit settle failed for opportunity ${id} (org ${org.id})`,
@@ -637,7 +708,10 @@ export class EngageController {
         // produced and charged must still be delivered even if the audit write
         // fails — never let it break the SSE response.
         try {
-          await this._engageService.recordGeneration(org, opportunity.id, {
+          await this._engageService.recordGeneration(
+            org,
+            opportunity.id,
+            {
             source: 'ai',
             content: draft,
             length,
@@ -647,7 +721,9 @@ export class EngageController {
             mentions: body.mentions,
             billingTaskId: reservation.taskId,
             createdAt: new Date().toISOString(),
-          }, opportunity.projectId);
+            },
+            opportunity.projectId
+          );
         } catch (histErr) {
           this.logger.error(
             `Reply generation history write failed for opportunity ${id} (org ${org.id})`,
@@ -708,9 +784,16 @@ export class EngageController {
 
   // ─── Save Draft (unpublished working copy) ───────────────────────────────
 
-  @ApiOperation({ summary: 'Save (upsert) an unpublished working draft reply for an opportunity — one DRAFT per opportunity. Content may be AI-generated, edited, or hand-typed. Surfaces in GET /sent?status=awaiting (Post.state=DRAFT). Does NOT claim the opportunity, charge credits, or sync metrics.' })
+  @ApiOperation({
+    summary:
+      'Save (upsert) an unpublished working draft reply for an opportunity — one DRAFT per opportunity. Content may be AI-generated, edited, or hand-typed. Surfaces in GET /sent?status=awaiting (Post.state=DRAFT). Does NOT claim the opportunity, charge credits, or sync metrics.',
+  })
   @ApiResponse({ status: 404, description: 'Opportunity not found' })
-  @ApiResponse({ status: 403, description: 'Opportunity is no longer actionable (expired / replied / scheduled / dismissed)' })
+  @ApiResponse({
+    status: 403,
+    description:
+      'Opportunity is no longer actionable (expired / replied / scheduled / dismissed)',
+  })
   @Post('/opportunities/:id/save-draft')
   saveDraft(
     @GetOrgFromRequest() org: Organization,
@@ -723,7 +806,10 @@ export class EngageController {
   // ─── Send / Schedule Reply (X via Post pipeline) ─────────────────────────
 
   @ApiOperation({ summary: 'Cancel a scheduled reply and immediately send it' })
-  @ApiResponse({ status: 400, description: 'No scheduled reply found, or post already published' })
+  @ApiResponse({
+    status: 400,
+    description: 'No scheduled reply found, or post already published',
+  })
   @Post('/opportunities/:id/send-now')
   cancelAndSendNow(
     @GetOrgFromRequest() org: Organization,
@@ -734,10 +820,19 @@ export class EngageController {
     return this._engageService.cancelAndSendNow(org, user?.id, id, body);
   }
 
-  @ApiOperation({ summary: 'Schedule a reply to an opportunity for future publishing' })
+  @ApiOperation({
+    summary: 'Schedule a reply to an opportunity for future publishing',
+  })
   @ApiResponse({ status: 404, description: 'Opportunity not found' })
-  @ApiResponse({ status: 403, description: 'Opportunity is no longer actionable (replied / scheduled / dismissed / expired) — carries a typed { code, message } reason' })
-  @ApiResponse({ status: 409, description: 'Opportunity was just claimed by another concurrent request' })
+  @ApiResponse({
+    status: 403,
+    description:
+      'Opportunity is no longer actionable (replied / scheduled / dismissed / expired) — carries a typed { code, message } reason',
+  })
+  @ApiResponse({
+    status: 409,
+    description: 'Opportunity was just claimed by another concurrent request',
+  })
   @Post('/opportunities/:id/schedule')
   scheduleReply(
     @GetOrgFromRequest() org: Organization,
@@ -748,11 +843,25 @@ export class EngageController {
     return this._engageService.scheduleReply(org, user?.id, id, body);
   }
 
-  @ApiOperation({ summary: 'Schedule replies from multiple integrations at different times in one request' })
-  @ApiResponse({ status: 400, description: 'Any scheduledAt is not in the future, or items array is invalid' })
+  @ApiOperation({
+    summary:
+      'Schedule replies from multiple integrations at different times in one request',
+  })
+  @ApiResponse({
+    status: 400,
+    description:
+      'Any scheduledAt is not in the future, or items array is invalid',
+  })
   @ApiResponse({ status: 404, description: 'Opportunity not found' })
-  @ApiResponse({ status: 403, description: 'Opportunity is no longer actionable (replied / scheduled / dismissed / expired) — carries a typed { code, message } reason' })
-  @ApiResponse({ status: 409, description: 'Opportunity was just claimed by another concurrent request' })
+  @ApiResponse({
+    status: 403,
+    description:
+      'Opportunity is no longer actionable (replied / scheduled / dismissed / expired) — carries a typed { code, message } reason',
+  })
+  @ApiResponse({
+    status: 409,
+    description: 'Opportunity was just claimed by another concurrent request',
+  })
   @Post('/opportunities/:id/batch-schedule')
   batchScheduleReply(
     @GetOrgFromRequest() org: Organization,
@@ -763,10 +872,20 @@ export class EngageController {
     return this._engageService.batchScheduleReply(org, user?.id, id, body);
   }
 
-  @ApiOperation({ summary: 'Send replies from multiple integrations immediately in one request' })
+  @ApiOperation({
+    summary:
+      'Send replies from multiple integrations immediately in one request',
+  })
   @ApiResponse({ status: 404, description: 'Opportunity not found' })
-  @ApiResponse({ status: 403, description: 'Opportunity is no longer actionable (replied / scheduled / dismissed / expired) — carries a typed { code, message } reason' })
-  @ApiResponse({ status: 409, description: 'Opportunity was just claimed by another concurrent request' })
+  @ApiResponse({
+    status: 403,
+    description:
+      'Opportunity is no longer actionable (replied / scheduled / dismissed / expired) — carries a typed { code, message } reason',
+  })
+  @ApiResponse({
+    status: 409,
+    description: 'Opportunity was just claimed by another concurrent request',
+  })
   @Post('/opportunities/:id/batch-send')
   batchSendReply(
     @GetOrgFromRequest() org: Organization,
@@ -779,10 +898,20 @@ export class EngageController {
 
   // ─── Manual reply (Reddit + X) ────────────────────────────────────────────
 
-  @ApiOperation({ summary: 'Confirm a manual reply (Reddit or X) and record it in the system. X requires replyUrl + integrationId.' })
+  @ApiOperation({
+    summary:
+      'Confirm a manual reply (Reddit or X) and record it in the system. X requires replyUrl + integrationId.',
+  })
   @ApiResponse({ status: 404, description: 'Opportunity not found' })
-  @ApiResponse({ status: 403, description: 'Opportunity is no longer actionable (replied / scheduled / dismissed / expired) — carries a typed { code, message } reason' })
-  @ApiResponse({ status: 409, description: 'Opportunity was just claimed by another concurrent request' })
+  @ApiResponse({
+    status: 403,
+    description:
+      'Opportunity is no longer actionable (replied / scheduled / dismissed / expired) — carries a typed { code, message } reason',
+  })
+  @ApiResponse({
+    status: 409,
+    description: 'Opportunity was just claimed by another concurrent request',
+  })
   @Post('/opportunities/:id/manual-reply')
   confirmManualReply(
     @GetOrgFromRequest() org: Organization,
@@ -795,7 +924,10 @@ export class EngageController {
 
   // ─── Sent Replies ─────────────────────────────────────────────────────────
 
-  @ApiOperation({ summary: 'Locate the page of a given sentReplyId within /sent using the same filters. Returns null page when the reply does not match the filters.' })
+  @ApiOperation({
+    summary:
+      'Locate the page of a given sentReplyId within /sent using the same filters. Returns null page when the reply does not match the filters.',
+  })
   @Get('/sent/locate')
   locateSentReply(
     @GetOrgFromRequest() org: Organization,
@@ -804,7 +936,10 @@ export class EngageController {
     return this._engageService.locateSentReply(org, query);
   }
 
-  @ApiOperation({ summary: "Paginated list of Engage replies. Optional status filter: published | scheduled | manual | error | draft, plus rollups — settled (published + scheduled) and awaiting (draft + manual link-pending + failed publishes) — and awaiting's own sub-filters for the Awaiting-review tabs: awaiting-draft (still-actionable draft), awaiting-expired (draft whose opportunity aged out), awaiting-link (link-pending or failed publish)" })
+  @ApiOperation({
+    summary:
+      "Paginated list of Engage replies. Optional status filter: published | scheduled | manual | error | draft, plus rollups — settled (published + scheduled) and awaiting (draft + manual link-pending + failed publishes) — and awaiting's own sub-filters for the Awaiting-review tabs: awaiting-draft (still-actionable draft), awaiting-expired (draft whose opportunity aged out), awaiting-link (link-pending or failed publish)",
+  })
   @Get('/sent')
   listSentReplies(
     @GetOrgFromRequest() org: Organization,
@@ -813,7 +948,10 @@ export class EngageController {
     return this._engageService.listSentReplies(org, query);
   }
 
-  @ApiOperation({ summary: 'Aggregate stats for sent replies, scoped by the same date/platform/status filters as /sent (no date = all-time)' })
+  @ApiOperation({
+    summary:
+      'Aggregate stats for sent replies, scoped by the same date/platform/status filters as /sent (no date = all-time)',
+  })
   @Get('/sent/stats')
   getSentStats(
     @GetOrgFromRequest() org: Organization,
@@ -827,7 +965,10 @@ export class EngageController {
     });
   }
 
-  @ApiOperation({ summary: 'Rollup for the sent tabs\' badges: total + byPlatform + rollups (settled/awaiting) + awaitingBreakdown (drafts/link/expired) in one call, all computed under the SAME conditions — the /sent filter contract minus status/platform (those are the breakdown axes here, not filters). Replaces doing N separate limit=1 /sent calls just to read totals.' })
+  @ApiOperation({
+    summary:
+      "Rollup for the sent tabs' badges: total + byPlatform + rollups (settled/awaiting) + awaitingBreakdown (drafts/link/expired) in one call, all computed under the SAME conditions — the /sent filter contract minus status/platform (those are the breakdown axes here, not filters). Replaces doing N separate limit=1 /sent calls just to read totals.",
+  })
   @Get('/sent/counts/summary')
   getSentCountsSummary(
     @GetOrgFromRequest() org: Organization,
@@ -836,7 +977,10 @@ export class EngageController {
     return this._engageService.getSentCountsSummary(org, query);
   }
 
-  @ApiOperation({ summary: 'Filtered counts under EXACTLY the same filters as GET /sent: `total` honors every filter (status/platform/date included, same number the list returns); each breakdown honors every filter except its own axis — byPlatform drops platform, rollups and awaitingBreakdown drop status — so badges stay complete while the other filters narrow them. Pagination params are accepted and ignored, so clients can reuse the list query string verbatim.' })
+  @ApiOperation({
+    summary:
+      'Filtered counts under EXACTLY the same filters as GET /sent: `total` honors every filter (status/platform/date included, same number the list returns); each breakdown honors every filter except its own axis — byPlatform drops platform, rollups and awaitingBreakdown drop status — so badges stay complete while the other filters narrow them. Pagination params are accepted and ignored, so clients can reuse the list query string verbatim.',
+  })
   @Get('/sent/count')
   countSentReplies(
     @GetOrgFromRequest() org: Organization,
@@ -845,7 +989,10 @@ export class EngageController {
     return this._engageService.countSentReplies(org, query);
   }
 
-  @ApiOperation({ summary: 'Lightweight status of one sent reply — for the frontends to poll while an in-browser extension reply posts and self-backfills. Returns { id, state, replyUrl }; replyUrl flips non-null on success.' })
+  @ApiOperation({
+    summary:
+      'Lightweight status of one sent reply — for the frontends to poll while an in-browser extension reply posts and self-backfills. Returns { id, state, replyUrl }; replyUrl flips non-null on success.',
+  })
   @ApiResponse({ status: 404, description: 'Sent reply not found' })
   @Get('/sent/:id/status')
   getSentReplyStatus(
@@ -855,7 +1002,10 @@ export class EngageController {
     return this._engageService.getSentReplyStatus(org, id);
   }
 
-  @ApiOperation({ summary: 'Get a single sent reply by id; response shape matches one item from /sent' })
+  @ApiOperation({
+    summary:
+      'Get a single sent reply by id; response shape matches one item from /sent',
+  })
   @ApiResponse({ status: 404, description: 'Sent reply not found' })
   @Get('/sent/:id')
   getSentReplyById(
@@ -865,8 +1015,13 @@ export class EngageController {
     return this._engageService.getSentReplyItemById(org, id);
   }
 
-  @ApiOperation({ summary: 'Edit content / schedule of a scheduled (QUEUE) engage reply' })
-  @ApiResponse({ status: 400, description: 'Reply already sent, or scheduledAt is not in the future' })
+  @ApiOperation({
+    summary: 'Edit content / schedule of a scheduled (QUEUE) engage reply',
+  })
+  @ApiResponse({
+    status: 400,
+    description: 'Reply already sent, or scheduledAt is not in the future',
+  })
   @ApiResponse({ status: 404, description: 'Sent reply not found' })
   @Patch('/sent/:id')
   updateScheduledReply(
@@ -877,21 +1032,39 @@ export class EngageController {
     return this._engageService.updateScheduledReply(org, id, body);
   }
 
-  @ApiOperation({ summary: 'Submit the reply URL (+ optional author) for a manual reply (X or Reddit)' })
+  @ApiOperation({
+    summary:
+      'Submit the reply URL (+ optional author) for a manual reply (X or Reddit)',
+  })
   @ApiResponse({ status: 404, description: 'Sent reply not found' })
-  @ApiResponse({ status: 400, description: 'Invalid URL format, not an X/Reddit reply, or the reply is not a posted reply awaiting its link (e.g. still a DRAFT)' })
+  @ApiResponse({
+    status: 400,
+    description:
+      'Invalid URL format, not an X/Reddit reply, or the reply is not a posted reply awaiting its link (e.g. still a DRAFT)',
+  })
   @Patch('/sent/:id/reply-url')
   submitManualReplyUrl(
     @GetOrgFromRequest() org: Organization,
     @Param('id') id: string,
     @Body() body: SubmitManualReplyUrlDto
   ) {
-    return this._engageService.submitManualReplyUrl(org, id, body.url, body.author);
+    return this._engageService.submitManualReplyUrl(
+      org,
+      id,
+      body.url,
+      body.author
+    );
   }
 
-  @ApiOperation({ summary: "Extension publish-on-success callback: backfill the reply URL, flip the saved DRAFT to PUBLISHED, claim the opportunity, and charge — the only place the extension reply path bills. Idempotent for an already-published reply." })
+  @ApiOperation({
+    summary:
+      'Extension publish-on-success callback: backfill the reply URL, flip the saved DRAFT to PUBLISHED, claim the opportunity, and charge — the only place the extension reply path bills. Idempotent for an already-published reply.',
+  })
   @ApiResponse({ status: 404, description: 'Sent reply not found' })
-  @ApiResponse({ status: 400, description: 'Only valid for X or Reddit replies' })
+  @ApiResponse({
+    status: 400,
+    description: 'Only valid for X or Reddit replies',
+  })
   @Patch('/sent/:id/publish-reply')
   publishExtensionReply(
     @GetOrgFromRequest() org: Organization,
@@ -908,9 +1081,16 @@ export class EngageController {
     );
   }
 
-  @ApiOperation({ summary: "Persist extension-scraped metrics for one published reply. The browser extension reads the reply's own page (X TweetDetail / Reddit comment .json) and posts the raw public counters here; the server computes impressions/traffic and returns the normalized metrics so the page can update the card in place." })
+  @ApiOperation({
+    summary:
+      "Persist extension-scraped metrics for one published reply. The browser extension reads the reply's own page (X TweetDetail / Reddit comment .json) and posts the raw public counters here; the server computes impressions/traffic and returns the normalized metrics so the page can update the card in place.",
+  })
   @ApiResponse({ status: 404, description: 'Sent reply not found' })
-  @ApiResponse({ status: 400, description: 'Not an X/Reddit reply, platform mismatch, or the reply has no published post to attach metrics to' })
+  @ApiResponse({
+    status: 400,
+    description:
+      'Not an X/Reddit reply, platform mismatch, or the reply has no published post to attach metrics to',
+  })
   @Patch('/sent/:id/metrics')
   ingestReplyMetrics(
     @GetOrgFromRequest() org: Organization,
@@ -924,7 +1104,10 @@ export class EngageController {
 
   // Panel ① "Engage Performance": weekly count, response rate, impressions,
   // traffic index, likes/upvotes, per-platform split, and this week's best reply.
-  @ApiOperation({ summary: 'Engage Performance panel: headline stats, optional platform filter, platform split, best reply' })
+  @ApiOperation({
+    summary:
+      'Engage Performance panel: headline stats, optional platform filter, platform split, best reply',
+  })
   @Get('/dashboard/summary')
   getDashboardSummary(
     @GetOrgFromRequest() org: Organization,
@@ -938,7 +1121,10 @@ export class EngageController {
   }
 
   // Panel ② "Your Posts" overlay: Engage reply counts bucketed by publish day.
-  @ApiOperation({ summary: 'Daily Engage reply counts over a trailing window (for the Your Posts chart overlay)' })
+  @ApiOperation({
+    summary:
+      'Daily Engage reply counts over a trailing window (for the Your Posts chart overlay)',
+  })
   @Get('/dashboard/replies-trend')
   getDashboardRepliesTrend(
     @GetOrgFromRequest() org: Organization,
@@ -952,7 +1138,10 @@ export class EngageController {
   }
 
   // Panel ③ "Traffic from Engage": total traffic index + per-reply breakdown.
-  @ApiOperation({ summary: 'Total Engage traffic index plus per-reply breakdown (Traffic from Engage panel)' })
+  @ApiOperation({
+    summary:
+      'Total Engage traffic index plus per-reply breakdown (Traffic from Engage panel)',
+  })
   @Get('/dashboard/traffics')
   getDashboardTraffics(
     @GetOrgFromRequest() org: Organization,
@@ -967,7 +1156,10 @@ export class EngageController {
 
   // Panel ④ "Engage Impressions Trend": impressions by publish date and
   // platform, bucketed by period. Response shape matches /dashboard/impressions.
-  @ApiOperation({ summary: 'Engage impressions trend by period and platform (daily/weekly/monthly)' })
+  @ApiOperation({
+    summary:
+      'Engage impressions trend by period and platform (daily/weekly/monthly)',
+  })
   @Get('/dashboard/impressions')
   getDashboardImpressions(
     @GetOrgFromRequest() org: Organization,
@@ -983,7 +1175,10 @@ export class EngageController {
   // Panel ⑤ "Top engage sources": engage replies grouped by the original post
   // author (traffic source), ranked by traffic index. Reuses the traffics query
   // params (optional platform filter + limit).
-  @ApiOperation({ summary: 'Top engage traffic sources grouped by original author (Top engage sources panel)' })
+  @ApiOperation({
+    summary:
+      'Top engage traffic sources grouped by original author (Top engage sources panel)',
+  })
   @Get('/dashboard/top-sources')
   getDashboardTopSources(
     @GetOrgFromRequest() org: Organization,
@@ -998,7 +1193,10 @@ export class EngageController {
 
   // ─── Admin: resync metrics ─────────────────────────────────────────────────
 
-  @ApiOperation({ summary: 'Re-fetch Reddit/X metrics for published engage replies with missing stats' })
+  @ApiOperation({
+    summary:
+      'Re-fetch Reddit/X metrics for published engage replies with missing stats',
+  })
   // Org-admin only: this re-fetches external Reddit/X metrics and must not be
   // triggerable by an ordinary org member. Throttled like the other
   // external-API endpoints (/scan, /draft) to bound the upstream call volume.
@@ -1008,7 +1206,7 @@ export class EngageController {
   resyncEngageMetrics(
     @GetOrgFromRequest() org: Organization,
     @Query('platform') platform?: string,
-    @Query('dry_run') dryRun?: string,
+    @Query('dry_run') dryRun?: string
   ) {
     return this._engageService.resyncEngageMetrics({
       orgId: org.id,
@@ -1022,7 +1220,10 @@ export class EngageController {
   // per-platform stats. Same external-API call budget as /resync-metrics, so it
   // shares the 5/hour throttle. backfill defaults on; pass backfill=false to skip
   // and dry_run=true for a read-only preview.
-  @ApiOperation({ summary: 'Manually wake up engage reply-metrics collection and return before/after stats.' })
+  @ApiOperation({
+    summary:
+      'Manually wake up engage reply-metrics collection and return before/after stats.',
+  })
   @CheckPolicies([AuthorizationActions.Create, Sections.ADMIN])
   @Throttle({ default: { limit: 5, ttl: 3_600_000 } })
   @Post('/admin/sync-metrics')
@@ -1030,7 +1231,7 @@ export class EngageController {
     @GetOrgFromRequest() org: Organization,
     @Query('platform') platform?: string,
     @Query('dry_run') dryRun?: string,
-    @Query('backfill') backfill?: string,
+    @Query('backfill') backfill?: string
   ) {
     return this._engageService.syncEngageMetricsWithStats(org, {
       platform,

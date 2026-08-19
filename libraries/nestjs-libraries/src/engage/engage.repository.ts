@@ -1,6 +1,22 @@
-import { BadRequestException, ConflictException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { Prisma, EngageOpportunity, EngageOpportunityStatus, State } from '@prisma/client';
-import { PrismaRepository, PrismaTransaction, PrismaService } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
+import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
+import {
+  Prisma,
+  EngageOpportunity,
+  EngageOpportunityStatus,
+  State,
+} from '@prisma/client';
+import {
+  PrismaRepository,
+  PrismaTransaction,
+  PrismaService,
+} from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
 import {
   AddKeywordDto,
   AddKeywordsBulkDto,
@@ -43,7 +59,10 @@ import {
   readRedditCapability,
   RedditChannelCapability,
 } from '@gitroom/nestjs-libraries/engage/reddit-channel-capability';
-import { classifyReplyMetric, normalizeReplyMetrics } from '@gitroom/nestjs-libraries/engage/engage-metrics-stats';
+import {
+  classifyReplyMetric,
+  normalizeReplyMetrics,
+} from '@gitroom/nestjs-libraries/engage/engage-metrics-stats';
 import { parseXTweetId } from '@gitroom/nestjs-libraries/engage/x-tweet';
 import { EngageAuthorProfile } from '@gitroom/nestjs-libraries/engage/engage-author';
 import dayjs from 'dayjs';
@@ -175,7 +194,11 @@ type ScanCursorTiming = {
 // next = max(lastScanStartedAt + cadence, cooldownUntil). Anchored to scan
 // START (not duration) so scan length never affects the next-due time; a unit
 // never scanned is due now. cooldownUntil pushes it out under rate-limit.
-function deriveNext(row: ScanCursorTiming, cadenceMs: number, now: number): number {
+function deriveNext(
+  row: ScanCursorTiming,
+  cadenceMs: number,
+  now: number
+): number {
   const base = row.lastScanStartedAt
     ? row.lastScanStartedAt.getTime() + cadenceMs
     : now;
@@ -215,7 +238,10 @@ function minDate(ds: (Date | null)[]): Date | null {
  * before the title column existed have a null title and a postContent that
  * still begins with the title, so the fallback stays right for them too.
  */
-function highlightTitle(o: { title?: string | null; postContent: string }): string {
+function highlightTitle(o: {
+  title?: string | null;
+  postContent: string;
+}): string {
   const title = (o.title ?? '').trim();
   return (title || o.postContent).slice(0, 80);
 }
@@ -224,10 +250,14 @@ function highlightTitle(o: { title?: string | null; postContent: string }): stri
  * Pull the reply author (engageAuthor) out of a Post.settings JSON blob. Returns
  * null when settings is absent/unparseable or carries no engageAuthor.
  */
-function parseEngageAuthor(settings: string | null): EngageAuthorProfile | null {
+function parseEngageAuthor(
+  settings: string | null
+): EngageAuthorProfile | null {
   if (!settings) return null;
   try {
-    const parsed = JSON.parse(settings) as { engageAuthor?: EngageAuthorProfile };
+    const parsed = JSON.parse(settings) as {
+      engageAuthor?: EngageAuthorProfile;
+    };
     return parsed?.engageAuthor ?? null;
   } catch {
     return null;
@@ -243,7 +273,12 @@ function parseEngageAuthor(settings: string | null): EngageAuthorProfile | null 
  */
 function resolveReplyAuthor(
   integration:
-    | { profile: string | null; internalId: string | null; name: string | null; picture: string | null }
+    | {
+        profile: string | null;
+        internalId: string | null;
+        name: string | null;
+        picture: string | null;
+      }
     | null
     | undefined,
   settings: string | null
@@ -316,7 +351,10 @@ export class EngageRepository {
     return { ...config, ...partitionScanTargets(config.trackedAccounts) };
   }
 
-  async getOrCreateConfig(organizationId: string, projectId: string | null = null) {
+  async getOrCreateConfig(
+    organizationId: string,
+    projectId: string | null = null
+  ) {
     const include = {
       keywords: {
         orderBy: { createdAt: 'asc' as const },
@@ -406,7 +444,10 @@ export class EngageRepository {
     };
 
     const kwByKey = new Map<string, (typeof base.keywords)[number]>();
-    const targetByKey = new Map<string, (typeof configs)[number]['trackedAccounts'][number]>();
+    const targetByKey = new Map<
+      string,
+      (typeof configs)[number]['trackedAccounts'][number]
+    >();
     for (const c of configs) {
       for (const kw of c.keywords) {
         const key = normalizeKeyword(kw.keyword);
@@ -458,12 +499,18 @@ export class EngageRepository {
    * null-project one here; that is unchanged behavior, not a regression this
    * step introduces.
    */
-  async getEnabledOrgContext(organizationId: string, projectId: string | null = null) {
+  async getEnabledOrgContext(
+    organizationId: string,
+    projectId: string | null = null
+  ) {
     const config = await this._config.model.engageConfig.findFirst({
       where: { organizationId, projectId, enabled: true },
       include: {
         keywords: { where: { enabled: true }, orderBy: { createdAt: 'asc' } },
-        trackedAccounts: { where: { enabled: true }, orderBy: { createdAt: 'asc' } },
+        trackedAccounts: {
+          where: { enabled: true },
+          orderBy: { createdAt: 'asc' },
+        },
       },
     });
     return config && this._withScanTargetShape(config);
@@ -486,7 +533,10 @@ export class EngageRepository {
       where: { organizationId, enabled: true, projectId: { not: null } },
       include: {
         keywords: { where: { enabled: true }, orderBy: { createdAt: 'asc' } },
-        trackedAccounts: { where: { enabled: true }, orderBy: { createdAt: 'asc' } },
+        trackedAccounts: {
+          where: { enabled: true },
+          orderBy: { createdAt: 'asc' },
+        },
       },
     });
     return configs.map((c) => this._withScanTargetShape(c));
@@ -512,14 +562,31 @@ export class EngageRepository {
       orderBy: { postPublishedAt: 'desc' },
       take: limit,
       select: {
-        id: true, platform: true, externalPostId: true, externalPostUrl: true,
-        channelId: true, channelName: true, channelFollowers: true,
-        authorUsername: true, authorDisplayName: true, authorFollowers: true,
-        authorAvatarUrl: true, title: true, postContent: true, postPublishedAt: true,
-        metricLikes: true, metricReplies: true, metricRetweets: true,
-        metricQuotes: true, metricBookmarks: true, metricViews: true,
-        metricShares: true, metricSaves: true, metricScore: true,
-        metricUpvoteRatio: true, metricComments: true,
+        id: true,
+        platform: true,
+        externalPostId: true,
+        externalPostUrl: true,
+        channelId: true,
+        channelName: true,
+        channelFollowers: true,
+        authorUsername: true,
+        authorDisplayName: true,
+        authorFollowers: true,
+        authorAvatarUrl: true,
+        title: true,
+        postContent: true,
+        postPublishedAt: true,
+        metricLikes: true,
+        metricReplies: true,
+        metricRetweets: true,
+        metricQuotes: true,
+        metricBookmarks: true,
+        metricViews: true,
+        metricShares: true,
+        metricSaves: true,
+        metricScore: true,
+        metricUpvoteRatio: true,
+        metricComments: true,
       },
     });
   }
@@ -559,8 +626,14 @@ export class EngageRepository {
     scanKey: string
   ) {
     const include = {
-      keywords: { where: { enabled: true }, orderBy: { createdAt: 'asc' as const } },
-      trackedAccounts: { where: { enabled: true }, orderBy: { createdAt: 'asc' as const } },
+      keywords: {
+        where: { enabled: true },
+        orderBy: { createdAt: 'asc' as const },
+      },
+      trackedAccounts: {
+        where: { enabled: true },
+        orderBy: { createdAt: 'asc' as const },
+      },
     };
 
     // 'channel' and 'tracked' now resolve against the SAME table — the scope is
@@ -618,14 +691,19 @@ export class EngageRepository {
         enabled: true,
         projectId: { not: null },
         keywords: {
-          some: { enabled: true, keyword: { equals: scanKey, mode: 'insensitive' } },
+          some: {
+            enabled: true,
+            keyword: { equals: scanKey, mode: 'insensitive' },
+          },
         },
       },
       include,
     });
     return configs
       .filter((c) =>
-        c.keywords.some((k) => k.enabled && normalizeKeyword(k.keyword) === scanKey)
+        c.keywords.some(
+          (k) => k.enabled && normalizeKeyword(k.keyword) === scanKey
+        )
       )
       .map((c) => this._withScanTargetShape(c));
   }
@@ -802,8 +880,16 @@ export class EngageRepository {
     const trackedAgg = aggregateScan(trackedCursors, cadenceMs, now);
 
     return {
-      lastScanAt: maxDate([keyword.lastScanAt, channel.lastScanAt, trackedAgg.lastScanAt]),
-      nextScanAt: minDate([keyword.nextScanAt, channel.nextScanAt, trackedAgg.nextScanAt]),
+      lastScanAt: maxDate([
+        keyword.lastScanAt,
+        channel.lastScanAt,
+        trackedAgg.lastScanAt,
+      ]),
+      nextScanAt: minDate([
+        keyword.nextScanAt,
+        channel.nextScanAt,
+        trackedAgg.nextScanAt,
+      ]),
       keyword,
       channel,
       tracked: trackedAgg,
@@ -822,7 +908,11 @@ export class EngageRepository {
   ): Promise<
     Record<
       string,
-      { platform: string; lastScannedAt: Date | null; nextScanAt: Date | null }[]
+      {
+        platform: string;
+        lastScannedAt: Date | null;
+        nextScanAt: Date | null;
+      }[]
     >
   > {
     if (!keywordKeys.length) return {};
@@ -838,7 +928,11 @@ export class EngageRepository {
     });
     const out: Record<
       string,
-      { platform: string; lastScannedAt: Date | null; nextScanAt: Date | null }[]
+      {
+        platform: string;
+        lastScannedAt: Date | null;
+        nextScanAt: Date | null;
+      }[]
     > = {};
     for (const row of rows) {
       const next = new Date(deriveNext(row, cadenceMs, now));
@@ -955,7 +1049,9 @@ export class EngageRepository {
     dto: AddKeywordDto
   ) {
     // Unique violation on (configId, keyword) → 409 with a readable message.
-    const created = await this._createOrConflict(`Keyword "${dto.keyword}"`, () =>
+    const created = await this._createOrConflict(
+      `Keyword "${dto.keyword}"`,
+      () =>
       this._keyword.model.engageKeyword.create({
         data: {
           configId,
@@ -1073,7 +1169,8 @@ export class EngageRepository {
       select: { id: true, keyword: true },
     });
     const normToId = new Map<string, string>();
-    for (const row of existing) normToId.set(normalizeKeyword(row.keyword), row.id);
+    for (const row of existing)
+      normToId.set(normalizeKeyword(row.keyword), row.id);
 
     for (const [norm, text] of normToRaw) {
       if (normToId.has(norm)) continue;
@@ -1086,7 +1183,11 @@ export class EngageRepository {
         // Lost a concurrent create race (P2002 → ConflictException); the row
         // now exists, so re-read it by its normalized text.
         const row = await this._keyword.model.engageKeyword.findFirst({
-          where: { configId, organizationId, keyword: { equals: text, mode: 'insensitive' } },
+          where: {
+            configId,
+            organizationId,
+            keyword: { equals: text, mode: 'insensitive' },
+          },
           select: { id: true, keyword: true },
         });
         if (row) normToId.set(normalizeKeyword(row.keyword), row.id);
@@ -1114,8 +1215,7 @@ export class EngageRepository {
       where: { id, organizationId },
     });
     if (!kw) throw new NotFoundException('Keyword not found');
-    const shouldResetInitialScan =
-      dto.enabled === true && kw.enabled === false;
+    const shouldResetInitialScan = dto.enabled === true && kw.enabled === false;
     const updated = await this._keyword.model.engageKeyword.update({
       where: { id },
       data: {
@@ -1277,15 +1377,20 @@ export class EngageRepository {
     return toChannelShape(created);
   }
 
-  async listMonitoredChannels(organizationId: string, projectId: string | null = null) {
-    const rows = await this._trackedAccount.model.engageTrackedAccount.findMany({
+  async listMonitoredChannels(
+    organizationId: string,
+    projectId: string | null = null
+  ) {
+    const rows = await this._trackedAccount.model.engageTrackedAccount.findMany(
+      {
       where: {
         organizationId,
         config: { projectId },
         platform: { in: [...CHANNEL_SCOPE_PLATFORMS] },
       },
       orderBy: { createdAt: 'asc' },
-    });
+      }
+    );
     return rows.map(toChannelShape);
   }
 
@@ -1295,11 +1400,14 @@ export class EngageRepository {
     dto: UpdateMonitoredChannelDto
   ) {
     const channel = await this._findChannelOr404(organizationId, id);
-    const updated = await this._trackedAccount.model.engageTrackedAccount.update({
+    const updated =
+      await this._trackedAccount.model.engageTrackedAccount.update({
       where: { id: channel.id },
       data: {
         ...(dto.enabled !== undefined && { enabled: dto.enabled }),
-        ...(dto.channelName !== undefined && { displayName: dto.channelName }),
+          ...(dto.channelName !== undefined && {
+            displayName: dto.channelName,
+          }),
         ...(dto.audienceSize !== undefined && {
           audienceSize: dto.audienceSize,
         }),
@@ -1310,7 +1418,8 @@ export class EngageRepository {
 
   async removeMonitoredChannel(organizationId: string, id: string) {
     const channel = await this._findChannelOr404(organizationId, id);
-    const deleted = await this._trackedAccount.model.engageTrackedAccount.delete({
+    const deleted =
+      await this._trackedAccount.model.engageTrackedAccount.delete({
       where: { id: channel.id },
     });
     return toChannelShape(deleted);
@@ -1348,11 +1457,13 @@ export class EngageRepository {
     // One org can monitor the same subreddit from several projects (a row per
     // EngageConfig) and every one of them carries the same observation, so the
     // freshest row is enough — no need to materialize the rest.
-    const row = await this._trackedAccount.model.engageTrackedAccount.findFirst({
+    const row = await this._trackedAccount.model.engageTrackedAccount.findFirst(
+      {
       where: { organizationId, platform: 'reddit', username },
       select: { metadata: true },
       orderBy: { updatedAt: 'desc' },
-    });
+      }
+    );
     return row ? readRedditCapability(row.metadata) : {};
   }
 
@@ -1377,10 +1488,12 @@ export class EngageRepository {
     const username = normalizeUsername('reddit', subreddit);
     if (!username || isEmptyRedditCapability(patch)) return { updated: 0 };
 
-    const rows = await this._trackedAccount.model.engageTrackedAccount.findMany({
+    const rows = await this._trackedAccount.model.engageTrackedAccount.findMany(
+      {
       where: { organizationId, platform: 'reddit', username },
       select: { id: true, metadata: true },
-    });
+      }
+    );
     if (!rows.length) return { updated: 0 };
 
     const observedAt = new Date().toISOString();
@@ -1410,13 +1523,15 @@ export class EngageRepository {
    * id — they address disjoint subsets of one table now.
    */
   private async _findChannelOr404(organizationId: string, id: string) {
-    const row = await this._trackedAccount.model.engageTrackedAccount.findFirst({
+    const row = await this._trackedAccount.model.engageTrackedAccount.findFirst(
+      {
       where: {
         id,
         organizationId,
         platform: { in: [...CHANNEL_SCOPE_PLATFORMS] },
       },
-    });
+      }
+    );
     if (!row) throw new NotFoundException('Channel not found');
     return row;
   }
@@ -1441,7 +1556,9 @@ export class EngageRepository {
       'tracked'
     );
     // Unique violation on (configId, platform, username) → 409.
-    const created = await this._createOrConflict(`Account "${dto.username}"`, () =>
+    const created = await this._createOrConflict(
+      `Account "${dto.username}"`,
+      () =>
       this._trackedAccount.model.engageTrackedAccount.create({
         data: {
           configId,
@@ -1459,7 +1576,10 @@ export class EngageRepository {
     return created;
   }
 
-  async listTrackedAccounts(organizationId: string, projectId: string | null = null) {
+  async listTrackedAccounts(
+    organizationId: string,
+    projectId: string | null = null
+  ) {
     return this._trackedAccount.model.engageTrackedAccount.findMany({
       where: {
         organizationId,
@@ -1515,7 +1635,9 @@ export class EngageRepository {
 
   // ─── Reply Accounts ───────────────────────────────────────────────────────
 
-  async getRedditIntegrationToken(organizationId: string): Promise<string | null> {
+  async getRedditIntegrationToken(
+    organizationId: string
+  ): Promise<string | null> {
     const integration = await this._integration.model.integration.findFirst({
       where: {
         organizationId,
@@ -1576,40 +1698,55 @@ export class EngageRepository {
   }
 
   /**
-   * Set whether Engage may reply as this account in this project.
-   *
-   * Writes IntegrationProject, so it needs an existing binding — an account not
-   * bound to the project is not usable there at all, and silently creating a
-   * binding here would make an unrelated setting grant project access.
+   * Create or update the project-level Engage reply setting for an account.
    */
-  async updateReplyAccount(
+  async upsertReplyAccount(
     organizationId: string,
     integrationId: string,
-    dto: UpdateReplyAccountDto,
-    projectId: string | null = null
+    dto: UpdateReplyAccountDto
   ) {
+    if (!dto.projectId) {
+      throw new BadRequestException(
+        'A projectId is required: Engage reply participation is per-project'
+      );
+    }
+
     const integration = await this._integration.model.integration.findFirst({
       where: { id: integrationId, organizationId, deletedAt: null },
       select: { id: true },
     });
     if (!integration) throw new NotFoundException('Integration not found');
-    if (dto.engageEnabled === undefined) return { engageEnabled: true };
-    if (!projectId) {
-      throw new NotFoundException(
-        'A projectId is required: Engage reply participation is per-project'
-      );
-    }
 
-    const updated = await this._integrationProject.model.integrationProject.updateMany({
-      where: { integrationId, projectId, organizationId },
-      data: { engageEnabled: dto.engageEnabled },
-    });
-    if (!updated.count) {
-      throw new NotFoundException(
-        'This account is not bound to the project'
-      );
-    }
-    return { integrationId, projectId, engageEnabled: dto.engageEnabled };
+    const replyAccount =
+      await this._integrationProject.model.integrationProject.upsert({
+        where: {
+          integrationId_projectId: {
+            integrationId,
+            projectId: dto.projectId,
+          },
+        },
+        create: {
+          integrationId,
+          projectId: dto.projectId,
+          organizationId,
+          ...(dto.engageEnabled === undefined
+            ? {}
+            : { engageEnabled: dto.engageEnabled }),
+        },
+        update: {
+          organizationId,
+          ...(dto.engageEnabled === undefined
+            ? {}
+            : { engageEnabled: dto.engageEnabled }),
+        },
+        select: { engageEnabled: true },
+      });
+
+    return {
+      integrationId,
+      projectId: dto.projectId,
+      engageEnabled: replyAccount.engageEnabled,
+    };
   }
 
   // ─── Opportunities ────────────────────────────────────────────────────────
@@ -1842,7 +1979,8 @@ export class EngageRepository {
     projectId: string,
     stateId: string
   ): Promise<boolean> {
-    const updated = await this._oppState.model.engageOpportunityState.updateMany({
+    const updated =
+      await this._oppState.model.engageOpportunityState.updateMany({
       where: { id: stateId, organizationId, projectId, status: 'NEW' },
       data: { status: 'AUTO_QUEUED' },
     });
@@ -1941,13 +2079,13 @@ export class EngageRepository {
       // Keyword filter — exact match against this org's matchedKeywords. `keyword`
       // (single) and `keywords` (multi) union into one OR set (hasSome), so either
       // or both params work and a match on any listed keyword keeps the row.
-      ...((() => {
+      ...(() => {
         const set = [
           ...(dto.keyword ? [dto.keyword] : []),
           ...(dto.keywords ?? []),
         ];
         return set.length ? { matchedKeywords: { hasSome: set } } : {};
-      })()),
+      })(),
       opportunity: oppFilter,
     };
 
@@ -1962,11 +2100,7 @@ export class EngageRepository {
     const { where } = this._opportunityWhere(organizationId, dto);
 
     // Route sort field to the table that owns it.
-    const stateSortFields = new Set([
-      'score',
-      'scoreKeyword',
-      'scoreTracked',
-    ]);
+    const stateSortFields = new Set(['score', 'scoreKeyword', 'scoreTracked']);
     const oppSortFields = new Set([
       'scoreHeat',
       'scoreAuthority',
@@ -1974,7 +2108,8 @@ export class EngageRepository {
       'postPublishedAt',
     ]);
     const sortBy =
-      dto.sortBy && (stateSortFields.has(dto.sortBy) || oppSortFields.has(dto.sortBy))
+      dto.sortBy &&
+      (stateSortFields.has(dto.sortBy) || oppSortFields.has(dto.sortBy))
         ? dto.sortBy
         : 'score';
     const sortOrder = dto.sortOrder ?? 'desc';
@@ -1992,7 +2127,11 @@ export class EngageRepository {
     // index for rows sharing the same primary + secondary sort values.
     // EngageOpportunityState has composite PK (organizationId+opportunityId),
     // so opportunityId is the per-org unique discriminator.
-    const orderBy = [primaryOrderBy, tiebreaker, { opportunityId: 'desc' as const }];
+    const orderBy = [
+      primaryOrderBy,
+      tiebreaker,
+      { opportunityId: 'desc' as const },
+    ];
 
     const [rows, total] = await Promise.all([
       this._oppState.model.engageOpportunityState.findMany({
@@ -2020,8 +2159,13 @@ export class EngageRepository {
     const redditChannelIds = [
       ...new Set(
         rows
-          .filter((r) => r.opportunity.platform === 'reddit' && r.opportunity.channelId)
-          .map((r) => normalizeUsername('reddit', r.opportunity.channelId as string))
+          .filter(
+            (r) =>
+              r.opportunity.platform === 'reddit' && r.opportunity.channelId
+          )
+          .map((r) =>
+            normalizeUsername('reddit', r.opportunity.channelId as string)
+          )
       ),
     ];
 
@@ -2039,7 +2183,11 @@ export class EngageRepository {
                 post: { state: { not: 'DRAFT' } },
               },
               orderBy: { createdAt: 'desc' },
-              select: { id: true, opportunityId: true, post: { select: { releaseURL: true } } },
+              select: {
+                id: true,
+                opportunityId: true,
+                post: { select: { releaseURL: true } },
+              },
             })
             .then((r) => r ?? [])
         : Promise.resolve([]),
@@ -2069,10 +2217,16 @@ export class EngageRepository {
     // tracking means an opportunity may have several replies). `replyLink` is
     // the stored Post.releaseURL (null = not yet submitted); `sentReplyId` is
     // what the backfill endpoint (PATCH /sent/:id/reply-url) needs.
-    const latestByOpp = new Map<string, { id: string; replyLink: string | null }>();
+    const latestByOpp = new Map<
+      string,
+      { id: string; replyLink: string | null }
+    >();
     for (const rep of replies) {
       if (!latestByOpp.has(rep.opportunityId)) {
-        latestByOpp.set(rep.opportunityId, { id: rep.id, replyLink: rep.post?.releaseURL ?? null });
+        latestByOpp.set(rep.opportunityId, {
+          id: rep.id,
+          replyLink: rep.post?.releaseURL ?? null,
+        });
       }
     }
 
@@ -2202,11 +2356,7 @@ export class EngageRepository {
     // Mirror the `where` from `listOpportunities` exactly (shared builder).
     const { where } = this._opportunityWhere(organizationId, dto);
 
-    const stateSortFields = new Set([
-      'score',
-      'scoreKeyword',
-      'scoreTracked',
-    ]);
+    const stateSortFields = new Set(['score', 'scoreKeyword', 'scoreTracked']);
     const oppSortFields = new Set([
       'scoreHeat',
       'scoreAuthority',
@@ -2214,7 +2364,8 @@ export class EngageRepository {
       'postPublishedAt',
     ]);
     const sortBy =
-      dto.sortBy && (stateSortFields.has(dto.sortBy) || oppSortFields.has(dto.sortBy))
+      dto.sortBy &&
+      (stateSortFields.has(dto.sortBy) || oppSortFields.has(dto.sortBy))
         ? dto.sortBy
         : 'score';
     const sortOrder = dto.sortOrder ?? 'desc';
@@ -2274,7 +2425,8 @@ export class EngageRepository {
       : (target as Record<string, unknown>)[tbField];
 
     const cmp = sortOrder === 'desc' ? ('gt' as const) : ('lt' as const);
-    const baseOpp = (where.opportunity ?? {}) as Prisma.EngageOpportunityWhereInput;
+    const baseOpp = (where.opportunity ??
+      {}) as Prisma.EngageOpportunityWhereInput;
 
     // Merge a field condition into `base`, routing it onto the nested
     // `opportunity` relation when the field lives there instead of on the
@@ -2290,7 +2442,8 @@ export class EngageRepository {
         ? {
             ...base,
             opportunity: {
-              ...((base.opportunity as Prisma.EngageOpportunityWhereInput) ?? baseOpp),
+              ...((base.opportunity as Prisma.EngageOpportunityWhereInput) ??
+                baseOpp),
               [field]: condition,
             },
           }
@@ -2312,7 +2465,9 @@ export class EngageRepository {
         }),
         // Equal primary, strictly better tiebreaker (always desc).
         this._oppState.model.engageOpportunityState.count({
-          where: withField(equalPrimaryWhere, tbField, tbIsOppField, { gt: tbValue }),
+          where: withField(equalPrimaryWhere, tbField, tbIsOppField, {
+            gt: tbValue,
+          }),
         }),
         // Equal primary, equal tiebreaker, opportunityId comes before target (desc).
         this._oppState.model.engageOpportunityState.count({
@@ -2337,10 +2492,15 @@ export class EngageRepository {
     };
   }
 
-  async dismissOpportunity(organizationId: string, id: string, projectId?: string | null) {
+  async dismissOpportunity(
+    organizationId: string,
+    id: string,
+    projectId?: string | null
+  ) {
     // Atomic: only dismiss actionable opportunities. Replied/scheduled rows are protected.
     // `id` is the opportunity id; status lives on this org's (+project's) state row.
-    const result = await this._oppState.model.engageOpportunityState.updateMany({
+    const result = await this._oppState.model.engageOpportunityState.updateMany(
+      {
       where: {
         organizationId,
         projectId: projectId ?? null,
@@ -2348,15 +2508,22 @@ export class EngageRepository {
         status: { in: ['NEW', 'AUTO_QUEUED'] },
       },
       data: { status: 'DISMISSED' },
-    });
+      }
+    );
     if (result.count === 0) {
-      throw new NotFoundException('Opportunity not found or no longer actionable');
+      throw new NotFoundException(
+        'Opportunity not found or no longer actionable'
+      );
     }
     // Not findUnique: projectId is nullable, and a nullable column can never
     // satisfy a compound-unique lookup (Postgres NULL != NULL) — see the
     // schema comment on EngageOpportunityState's surrogate id.
     const row = await this._oppState.model.engageOpportunityState.findFirst({
-      where: { organizationId, projectId: projectId ?? null, opportunityId: id },
+      where: {
+        organizationId,
+        projectId: projectId ?? null,
+        opportunityId: id,
+      },
       include: { opportunity: true },
     });
     return row ? this._merge(row) : null;
@@ -2376,7 +2543,11 @@ export class EngageRepository {
   ) {
     if (projectId !== undefined) {
       return this._oppState.model.engageOpportunityState.findFirst({
-        where: { organizationId, projectId: projectId ?? null, opportunityId: id },
+        where: {
+          organizationId,
+          projectId: projectId ?? null,
+          opportunityId: id,
+        },
         include: { opportunity: true },
       });
     }
@@ -2422,12 +2593,16 @@ export class EngageRepository {
     }
     const priorStatus = existing.status as 'NEW' | 'AUTO_QUEUED';
 
-    const result = await this._oppState.model.engageOpportunityState.updateMany({
+    const result = await this._oppState.model.engageOpportunityState.updateMany(
+      {
       where: { organizationId, id: existing.id, status: priorStatus },
       data: { status: claimStatus },
-    });
+      }
+    );
     if (result.count === 0) {
-      throw new ConflictException('Opportunity already claimed by another request');
+      throw new ConflictException(
+        'Opportunity already claimed by another request'
+      );
     }
     const row = await this._oppState.model.engageOpportunityState.findFirst({
       where: { organizationId, id: existing.id },
@@ -2502,7 +2677,9 @@ export class EngageRepository {
         return tx.engageSentReply.update({
           where: { id: existing.id },
           data: { inputData: data.inputData as Prisma.InputJsonValue },
-          include: { post: { select: { id: true, content: true, state: true } } },
+          include: {
+            post: { select: { id: true, content: true, state: true } },
+          },
         });
       }
 
@@ -2516,7 +2693,9 @@ export class EngageRepository {
           source: 'engage',
           image: '[]',
           providerIdentifier: data.platform === 'x' ? 'x' : 'reddit',
-          settings: JSON.stringify({ __type: data.platform === 'x' ? 'x' : 'reddit' }),
+          settings: JSON.stringify({
+            __type: data.platform === 'x' ? 'x' : 'reddit',
+          }),
           group: randomUUID(),
           delay: 0,
         },
@@ -2553,7 +2732,9 @@ export class EngageRepository {
     await (this._oppState.model as unknown as PrismaService).$executeRaw`
       UPDATE "EngageOpportunityState"
       SET "generationHistory" =
-            COALESCE("generationHistory", '[]'::jsonb) || ${JSON.stringify([entry])}::jsonb,
+            COALESCE("generationHistory", '[]'::jsonb) || ${JSON.stringify([
+              entry,
+            ])}::jsonb,
           "updatedAt" = NOW()
       WHERE "organizationId" = ${organizationId}
         AND "opportunityId" = ${opportunityId}
@@ -2584,7 +2765,12 @@ export class EngageRepository {
       : [];
     const last = history[history.length - 1];
     if (last && last.content === entry.content) return false; // unchanged → skip
-    await this.appendGenerationHistory(organizationId, opportunityId, entry, projectId);
+    await this.appendGenerationHistory(
+      organizationId,
+      opportunityId,
+      entry,
+      projectId
+    );
     return true;
   }
 
@@ -2598,7 +2784,8 @@ export class EngageRepository {
   ) {
     try {
       if (projectId === undefined) {
-        const state = await this._oppState.model.engageOpportunityState.findFirst({
+        const state =
+          await this._oppState.model.engageOpportunityState.findFirst({
           where: { organizationId, id },
           select: { id: true },
         });
@@ -2611,7 +2798,11 @@ export class EngageRepository {
         }
       }
       await this._oppState.model.engageOpportunityState.updateMany({
-        where: { organizationId, projectId: projectId ?? null, opportunityId: id },
+        where: {
+          organizationId,
+          projectId: projectId ?? null,
+          opportunityId: id,
+        },
         data: { status: priorStatus },
       });
     } catch {
@@ -2627,25 +2818,37 @@ export class EngageRepository {
     projectId?: string | null
   ) {
     if (projectId === undefined) {
-      const state = await this._oppState.model.engageOpportunityState.findFirst({
+      const state = await this._oppState.model.engageOpportunityState.findFirst(
+        {
         where: { organizationId, id: opportunityId },
         select: { id: true },
-      });
+        }
+      );
       if (state) {
-        const result = await this._oppState.model.engageOpportunityState.updateMany({
+        const result =
+          await this._oppState.model.engageOpportunityState.updateMany({
           where: { organizationId, id: state.id, status: 'SCHEDULED' },
           data: { status: 'NEW' },
         });
         if (result.count === 0) {
-          throw new BadRequestException('Opportunity is not in SCHEDULED state');
+          throw new BadRequestException(
+            'Opportunity is not in SCHEDULED state'
+          );
         }
         return;
       }
     }
-    const result = await this._oppState.model.engageOpportunityState.updateMany({
-      where: { organizationId, projectId: projectId ?? null, opportunityId, status: 'SCHEDULED' },
+    const result = await this._oppState.model.engageOpportunityState.updateMany(
+      {
+        where: {
+          organizationId,
+          projectId: projectId ?? null,
+          opportunityId,
+          status: 'SCHEDULED',
+        },
       data: { status: 'NEW' },
-    });
+      }
+    );
     if (result.count === 0) {
       throw new BadRequestException('Opportunity is not in SCHEDULED state');
     }
@@ -2659,9 +2862,17 @@ export class EngageRepository {
     }
   }
 
-  async toggleBookmark(organizationId: string, id: string, projectId?: string | null) {
+  async toggleBookmark(
+    organizationId: string,
+    id: string,
+    projectId?: string | null
+  ) {
     const row = await this._oppState.model.engageOpportunityState.findFirst({
-      where: { organizationId, projectId: projectId ?? null, opportunityId: id },
+      where: {
+        organizationId,
+        projectId: projectId ?? null,
+        opportunityId: id,
+      },
     });
     if (!row) throw new NotFoundException('Opportunity not found');
     // Update by the resolved surrogate id — projectId is nullable so it can't
@@ -2709,8 +2920,15 @@ export class EngageRepository {
     const round1 = (n: number | null | undefined) =>
       n == null ? 0 : Math.round(n * 10) / 10;
 
-    const [stateAgg, oppAgg, distRows, trackedCount, bestKeyword, bestHeat, bestAuthority] =
-      await Promise.all([
+    const [
+      stateAgg,
+      oppAgg,
+      distRows,
+      trackedCount,
+      bestKeyword,
+      bestHeat,
+      bestAuthority,
+    ] = await Promise.all([
         this._oppState.model.engageOpportunityState.aggregate({
           where: stateWhere,
           _count: { _all: true },
@@ -2745,7 +2963,12 @@ export class EngageRepository {
         this._opportunity.model.engageOpportunity.findFirst({
           where: oppWhere,
           orderBy: { scoreAuthority: 'desc' },
-          select: { id: true, scoreAuthority: true, title: true, postContent: true },
+        select: {
+          id: true,
+          scoreAuthority: true,
+          title: true,
+          postContent: true,
+        },
         }),
       ]);
 
@@ -2759,10 +2982,22 @@ export class EngageRepository {
         avgScoreAuthority: 0,
         avgScoreRecency: 0,
         avgScoreTracked: 0,
-        distribution: [] as Array<{ range: string; count: number; pct: number }>,
-        topByKeyword: null as null | { id: string; score: number; title: string },
+        distribution: [] as Array<{
+          range: string;
+          count: number;
+          pct: number;
+        }>,
+        topByKeyword: null as null | {
+          id: string;
+          score: number;
+          title: string;
+        },
         topByHeat: null as null | { id: string; score: number; title: string },
-        topByAuthority: null as null | { id: string; score: number; title: string },
+        topByAuthority: null as null | {
+          id: string;
+          score: number;
+          title: string;
+        },
         trackedCount: 0,
       };
     }
@@ -2774,13 +3009,14 @@ export class EngageRepository {
     ];
     const distSampleSize = distRows.length;
     const distribution = buckets.map(({ range, min, max }) => {
-      const count = distRows.filter((o) => o.score >= min && o.score <= max).length;
+      const count = distRows.filter(
+        (o) => o.score >= min && o.score <= max
+      ).length;
       return {
         range,
         count,
-        pct: distSampleSize > 0
-          ? Math.round((count / distSampleSize) * 100)
-          : 0,
+        pct:
+          distSampleSize > 0 ? Math.round((count / distSampleSize) * 100) : 0,
       };
     });
 
@@ -2814,9 +3050,17 @@ export class EngageRepository {
     };
   }
 
-  async getOpportunityById(organizationId: string, id: string, projectId?: string | null) {
+  async getOpportunityById(
+    organizationId: string,
+    id: string,
+    projectId?: string | null
+  ) {
     const row = await this._oppState.model.engageOpportunityState.findFirst({
-      where: { organizationId, projectId: projectId ?? null, opportunityId: id },
+      where: {
+        organizationId,
+        projectId: projectId ?? null,
+        opportunityId: id,
+      },
       include: { opportunity: true },
     });
     if (!row) throw new NotFoundException('Opportunity not found');
@@ -2849,9 +3093,14 @@ export class EngageRepository {
         : Promise.resolve(null),
     ]);
 
-    const metadata = channel?.metadata as Record<string, unknown> | null | undefined;
+    const metadata = channel?.metadata as
+      | Record<string, unknown>
+      | null
+      | undefined;
     const channelAvatar =
-      metadata && typeof metadata === 'object' && typeof metadata.avatar === 'string'
+      metadata &&
+      typeof metadata === 'object' &&
+      typeof metadata.avatar === 'string'
         ? metadata.avatar
         : null;
 
@@ -2863,9 +3112,17 @@ export class EngageRepository {
     };
   }
 
-  async getOpportunityDetail(organizationId: string, id: string, projectId?: string | null) {
+  async getOpportunityDetail(
+    organizationId: string,
+    id: string,
+    projectId?: string | null
+  ) {
     const row = await this._oppState.model.engageOpportunityState.findFirst({
-      where: { organizationId, projectId: projectId ?? null, opportunityId: id },
+      where: {
+        organizationId,
+        projectId: projectId ?? null,
+        opportunityId: id,
+      },
       include: { opportunity: true },
     });
     if (!row) throw new NotFoundException('Opportunity not found');
@@ -2876,7 +3133,11 @@ export class EngageRepository {
       // An opportunity may now carry several replies (batch send); surface the
       // most recent for the detail panel.
       const sentReply = await this._sentReply.model.engageSentReply.findFirst({
-        where: { organizationId, projectId: projectId ?? null, opportunityId: id },
+        where: {
+          organizationId,
+          projectId: projectId ?? null,
+          opportunityId: id,
+        },
         orderBy: { createdAt: 'desc' },
         include: {
           post: {
@@ -2919,7 +3180,11 @@ export class EngageRepository {
     return { ...merged, sentReply: null };
   }
 
-  async getOpportunityForReply(organizationId: string, id: string, projectId?: string | null) {
+  async getOpportunityForReply(
+    organizationId: string,
+    id: string,
+    projectId?: string | null
+  ) {
     const row = await this._findReplyState(organizationId, id, projectId);
     if (!row) {
       throw new NotFoundException('Opportunity not found');
@@ -2996,7 +3261,11 @@ export class EngageRepository {
     });
     if (!state?.matchedKeywords?.length) return;
     await this._sentReply.model.engageSentReply.updateMany({
-      where: { id: sentReplyId, organizationId, matchedKeywords: { isEmpty: true } },
+      where: {
+        id: sentReplyId,
+        organizationId,
+        matchedKeywords: { isEmpty: true },
+      },
       data: { matchedKeywords: state.matchedKeywords },
     });
   }
@@ -3085,9 +3354,17 @@ export class EngageRepository {
   // unaffected (each pins its own state).
   private _buildSentReplyFilter(
     organizationId: string,
-    dto: { date?: string; platform?: string; status?: string; projectId?: string },
+    dto: {
+      date?: string;
+      platform?: string;
+      status?: string;
+      projectId?: string;
+    },
     opts: { includeDrafts?: boolean } = {}
-  ): { postWhere: Prisma.PostWhereInput; sentWhere: Prisma.EngageSentReplyWhereInput } {
+  ): {
+    postWhere: Prisma.PostWhereInput;
+    sentWhere: Prisma.EngageSentReplyWhereInput;
+  } {
     // Single source of truth for the date→publishDate window (shared with
     // getDashboardSummary), so /sent, /sent/stats and /dashboard/summary all
     // accept the same vocabulary (all | day | today | week | month).
@@ -3141,7 +3418,11 @@ export class EngageRepository {
       postWhere.state = 'DRAFT';
       opportunityWhere = {
         states: {
-          some: { organizationId, projectId: dto.projectId ?? null, status: 'EXPIRED' },
+          some: {
+            organizationId,
+            projectId: dto.projectId ?? null,
+            status: 'EXPIRED',
+          },
         },
       };
     } else if (dto.status === 'awaiting-link') {
@@ -3196,9 +3477,13 @@ export class EngageRepository {
     // The list shows DRAFT working-copies in the default "All" view too, so
     // `awaiting` (which always includes DRAFT) can never return more rows than the
     // unfiltered list.
-    const { sentWhere: where } = this._buildSentReplyFilter(organizationId, dto, {
+    const { sentWhere: where } = this._buildSentReplyFilter(
+      organizationId,
+      dto,
+      {
       includeDrafts: true,
-    });
+      }
+    );
 
     const [items, total] = await Promise.all([
       this._sentReply.model.engageSentReply.findMany({
@@ -3373,7 +3658,10 @@ export class EngageRepository {
               id: true,
               name: true,
               users: {
-                where: { role: { in: ['SUPERADMIN', 'ADMIN'] }, disabled: false },
+                where: {
+                  role: { in: ['SUPERADMIN', 'ADMIN'] },
+                  disabled: false,
+                },
                 orderBy: { role: 'asc' },
                 take: 1,
                 select: { userId: true },
@@ -3428,7 +3716,8 @@ export class EngageRepository {
       this._sentReply.model.engageSentReply.count({ where }),
     ]);
 
-    const results = items.map(({ organization, post, opportunity, ...rest }) => {
+    const results = items.map(
+      ({ organization, post, opportunity, ...rest }) => {
       const base = {
         id: rest.id,
         createdAt: rest.createdAt,
@@ -3454,7 +3743,8 @@ export class EngageRepository {
           ),
         },
       };
-    });
+      }
+    );
 
     return {
       results,
@@ -3470,9 +3760,13 @@ export class EngageRepository {
 
     // Mirror the `where` from `listSentReplies` exactly — including DRAFT in the
     // "All" view, so a draft row can be located on the same page the list shows it.
-    const { sentWhere: where } = this._buildSentReplyFilter(organizationId, dto, {
+    const { sentWhere: where } = this._buildSentReplyFilter(
+      organizationId,
+      dto,
+      {
       includeDrafts: true,
-    });
+      }
+    );
 
     const target = await this._sentReply.model.engageSentReply.findFirst({
       where: { ...where, id: dto.sentReplyId },
@@ -3480,7 +3774,9 @@ export class EngageRepository {
     });
 
     if (!target) {
-      const total = await this._sentReply.model.engageSentReply.count({ where });
+      const total = await this._sentReply.model.engageSentReply.count({
+        where,
+      });
       return {
         found: false as const,
         page: null as number | null,
@@ -3528,12 +3824,21 @@ export class EngageRepository {
   // draft has no impressions and would deflate the response rate.
   async getSentStats(
     organizationId: string,
-    dto: { date?: string; platform?: string; status?: string; projectId?: string } = {}
+    dto: {
+      date?: string;
+      platform?: string;
+      status?: string;
+      projectId?: string;
+    } = {}
   ) {
-    const { postWhere, sentWhere } = this._buildSentReplyFilter(organizationId, dto);
+    const { postWhere, sentWhere } = this._buildSentReplyFilter(
+      organizationId,
+      dto
+    );
 
     // Totals and response rate via DB aggregation — no row cap.
-    const [total, repliedCount, impressionsAgg, likeSample] = await Promise.all([
+    const [total, repliedCount, impressionsAgg, likeSample] = await Promise.all(
+      [
       this._sentReply.model.engageSentReply.count({ where: sentWhere }),
       this._sentReply.model.engageSentReply.count({
         where: { ...sentWhere, authorReplied: true },
@@ -3550,7 +3855,11 @@ export class EngageRepository {
           projectId: dto.projectId ?? null,
           ...postWhere,
           ...(dto.platform
-            ? { engageSentReply: { is: { opportunity: { platform: dto.platform } } } }
+              ? {
+                  engageSentReply: {
+                    is: { opportunity: { platform: dto.platform } },
+                  },
+                }
             : {}),
         },
         _sum: { impressions: true, trafficScore: true },
@@ -3567,7 +3876,8 @@ export class EngageRepository {
           opportunity: { select: { platform: true } },
         },
       }),
-    ]);
+      ]
+    );
 
     const responseRate =
       total > 0 ? Math.round((repliedCount / total) * 100) : 0;
@@ -3587,7 +3897,13 @@ export class EngageRepository {
           )
         : 0;
 
-    return { repliesCount: total, responseRate, totalImpressions, totalTrafficScore, avgLikes };
+    return {
+      repliesCount: total,
+      responseRate,
+      totalImpressions,
+      totalTrafficScore,
+      avgLikes,
+    };
   }
 
   // Single round trip replacing the frontend's `listSentReplies({ platform,
@@ -3666,13 +3982,21 @@ export class EngageRepository {
   // each metric as { label, data: [{ total, date }], percentageChange }.
   private _extractLikes(analytics: unknown, platform: string): number {
     if (!Array.isArray(analytics)) return 0;
-    const wanted = platform === 'reddit' ? /score|upvote/i : /like|favorite|reaction/i;
+    const wanted =
+      platform === 'reddit' ? /score|upvote/i : /like|favorite|reaction/i;
     const entry = (
-      analytics as Array<{ label?: string; data?: Array<{ total?: string | number }> }>
+      analytics as Array<{
+        label?: string;
+        data?: Array<{ total?: string | number }>;
+      }>
     ).find((a) => a.label && wanted.test(a.label));
     const raw = entry?.data?.[entry.data.length - 1]?.total;
     const n =
-      typeof raw === 'string' ? parseInt(raw, 10) : typeof raw === 'number' ? raw : 0;
+      typeof raw === 'string'
+        ? parseInt(raw, 10)
+        : typeof raw === 'number'
+        ? raw
+        : 0;
     return Number.isFinite(n) ? n : 0;
   }
 
@@ -3739,22 +4063,34 @@ export class EngageRepository {
       xPostAgg,
       replyRows,
       bestReplyRows,
-    ] =
-      await Promise.all([
+    ] = await Promise.all([
         this._sentReply.model.engageSentReply.count({
           where: { organizationId, post: windowedPostFilter, ...platformFilter },
         }),
         this._sentReply.model.engageSentReply.count({
-          where: { organizationId, post: windowedPostFilter, authorReplied: true, ...platformFilter },
+        where: {
+          organizationId,
+          post: windowedPostFilter,
+          authorReplied: true,
+          ...platformFilter,
+        },
         }),
         this._sentReply.model.engageSentReply.count({
           where: { organizationId, post: sentPostFilter, ...platformFilter },
         }),
         this._sentReply.model.engageSentReply.count({
-          where: { organizationId, post: sentPostFilter, opportunity: { platform: 'x' } },
+        where: {
+          organizationId,
+          post: sentPostFilter,
+          opportunity: { platform: 'x' },
+        },
         }),
         this._sentReply.model.engageSentReply.count({
-          where: { organizationId, post: sentPostFilter, opportunity: { platform: 'reddit' } },
+        where: {
+          organizationId,
+          post: sentPostFilter,
+          opportunity: { platform: 'reddit' },
+        },
         }),
         // Headline impressions + traffic for the selected UI scope + date window.
         this._post.model.post.aggregate({
@@ -3803,12 +4139,15 @@ export class EngageRepository {
                 authorAvatarUrl: true,
               },
             },
-            post: { select: { content: true, releaseURL: true, analytics: true } },
+          post: {
+            select: { content: true, releaseURL: true, analytics: true },
+          },
           },
         }),
       ]);
 
-    const responseRate = total > 0 ? Math.round((repliedCount / total) * 100) : 0;
+    const responseRate =
+      total > 0 ? Math.round((repliedCount / total) * 100) : 0;
 
     let bestReply: {
       opportunityId: string;
@@ -3825,7 +4164,10 @@ export class EngageRepository {
     } | null = null;
     let bestLikes = 0;
     for (const r of bestReplyRows) {
-      const likes = this._extractLikes(r.post?.analytics, r.opportunity.platform);
+      const likes = this._extractLikes(
+        r.post?.analytics,
+        r.opportunity.platform
+      );
       if (likes > bestLikes) {
         bestLikes = likes;
         bestReply = {
@@ -3856,7 +4198,8 @@ export class EngageRepository {
       totalImpressions,
       totalTrafficScore: Math.round(totalPostAgg._sum.trafficScore ?? 0),
       totalLikes: replyRows.reduce(
-        (sum, r) => sum + this._extractLikes(r.post?.analytics, r.opportunity.platform),
+        (sum, r) =>
+          sum + this._extractLikes(r.post?.analytics, r.opportunity.platform),
         0
       ),
       impressionsByPlatform: [
@@ -3879,7 +4222,12 @@ export class EngageRepository {
     if (period === 'monthly') {
       rangeStart = dayjs.utc().subtract(11, 'month').startOf('month').toDate();
     } else if (period === 'weekly') {
-      rangeStart = dayjs.utc().subtract(11, 'week').isoWeekday(1).startOf('day').toDate();
+      rangeStart = dayjs
+        .utc()
+        .subtract(11, 'week')
+        .isoWeekday(1)
+        .startOf('day')
+        .toDate();
     } else {
       rangeStart = dayjs.utc().subtract(29, 'day').startOf('day').toDate();
     }
@@ -3918,7 +4266,11 @@ export class EngageRepository {
       }
     } else if (period === 'weekly') {
       for (let i = 11; i >= 0; i--) {
-        const d = dayjs.utc().subtract(i, 'week').isoWeekday(1).format('YYYY-MM-DD');
+        const d = dayjs
+          .utc()
+          .subtract(i, 'week')
+          .isoWeekday(1)
+          .format('YYYY-MM-DD');
         buckets.set(d, { date: d, count: 0, x: 0, reddit: 0 });
       }
     } else {
@@ -3988,7 +4340,9 @@ export class EngageRepository {
           },
         },
         select: {
-          opportunity: { select: { id: true, platform: true, externalPostUrl: true } },
+          opportunity: {
+            select: { id: true, platform: true, externalPostUrl: true },
+          },
           post: {
             select: {
               content: true,
@@ -4024,8 +4378,13 @@ export class EngageRepository {
     period: 'daily' | 'weekly' | 'monthly' = 'daily',
     projectId?: string
   ) {
-    const sinceDays = period === 'monthly' ? 365 : period === 'weekly' ? 90 : 30;
-    const rangeStart = dayjs.utc().subtract(sinceDays, 'day').startOf('day').toDate();
+    const sinceDays =
+      period === 'monthly' ? 365 : period === 'weekly' ? 90 : 30;
+    const rangeStart = dayjs
+      .utc()
+      .subtract(sinceDays, 'day')
+      .startOf('day')
+      .toDate();
 
     const rows = await this._post.model.post.findMany({
       where: {
@@ -4072,12 +4431,19 @@ export class EngageRepository {
       if (existing) {
         existing.value += row.impressions ?? 0;
       } else {
-        buckets.set(key, { date: dateKey, platform, value: row.impressions ?? 0 });
+        buckets.set(key, {
+          date: dateKey,
+          platform,
+          value: row.impressions ?? 0,
+        });
       }
     }
 
     const result = Array.from(buckets.values());
-    result.sort((a, b) => a.date.localeCompare(b.date) || a.platform.localeCompare(b.platform));
+    result.sort(
+      (a, b) =>
+        a.date.localeCompare(b.date) || a.platform.localeCompare(b.platform)
+    );
     return result;
   }
 
@@ -4143,8 +4509,10 @@ export class EngageRepository {
     });
 
     // Reddit → upvotes, everything else (X) → likes; missing metrics rank as 0.
-    const rankValue = (p: string, metrics: { likes?: number; upvotes?: number }) =>
-      p === 'reddit' ? metrics.upvotes ?? 0 : metrics.likes ?? 0;
+    const rankValue = (
+      p: string,
+      metrics: { likes?: number; upvotes?: number }
+    ) => (p === 'reddit' ? metrics.upvotes ?? 0 : metrics.likes ?? 0);
 
     const items = rows.map((r) => {
       const p = r.opportunity?.platform ?? 'unknown';
@@ -4160,10 +4528,14 @@ export class EngageRepository {
         post: {
           id: r.post?.id ?? null,
           content: r.post?.content ?? '',
-          releaseURL: r.post?.releaseURL ?? r.opportunity?.externalPostUrl ?? null,
+          releaseURL:
+            r.post?.releaseURL ?? r.opportunity?.externalPostUrl ?? null,
           publishDate: r.post?.publishDate ?? null,
           // The account that posted the reply (avatar + @handle), as in /sent.
-          replyAuthor: resolveReplyAuthor(r.post?.integration ?? null, r.post?.settings ?? null),
+          replyAuthor: resolveReplyAuthor(
+            r.post?.integration ?? null,
+            r.post?.settings ?? null
+          ),
           metrics,
         },
         metric: rankValue(p, metrics),
@@ -4185,7 +4557,9 @@ export class EngageRepository {
     });
     if (!reply) throw new NotFoundException('Sent reply not found');
     if (reply.post.state !== 'QUEUE') {
-      throw new BadRequestException('Reply has already been sent — cannot edit');
+      throw new BadRequestException(
+        'Reply has already been sent — cannot edit'
+      );
     }
 
     // Both writes must commit together: a partial commit would leave the
@@ -4210,7 +4584,9 @@ export class EngageRepository {
     return this._sentReply.model.engageSentReply.findFirst({
       where: { id },
       include: {
-        post: { select: { id: true, content: true, state: true, publishDate: true } },
+        post: {
+          select: { id: true, content: true, state: true, publishDate: true },
+        },
       },
     });
   }
@@ -4225,10 +4601,12 @@ export class EngageRepository {
     let resolvedOpportunityId = opportunityId;
     let resolvedProjectId = projectId;
     if (projectId === undefined) {
-      const state = await this._oppState.model.engageOpportunityState.findFirst({
+      const state = await this._oppState.model.engageOpportunityState.findFirst(
+        {
         where: { organizationId, id: opportunityId },
         select: { opportunityId: true, projectId: true },
-      });
+        }
+      );
       if (state) {
         resolvedOpportunityId = state.opportunityId;
         resolvedProjectId = state.projectId;
@@ -4238,7 +4616,9 @@ export class EngageRepository {
       where: {
         organizationId,
         opportunityId: resolvedOpportunityId,
-        ...(resolvedProjectId !== undefined && { projectId: resolvedProjectId ?? null }),
+        ...(resolvedProjectId !== undefined && {
+          projectId: resolvedProjectId ?? null,
+        }),
       },
       orderBy: { createdAt: 'desc' },
       include: { post: { select: { id: true, state: true } } },
@@ -4397,7 +4777,11 @@ export class EngageRepository {
       // even when an integration is linked. Without an explicit author we keep the
       // old behavior (integration is the source of truth; settings untouched).
       if (engageAuthor) {
-        mergedSettings = this._mergeEngageAuthor(post?.settings, 'x', engageAuthor);
+        mergedSettings = this._mergeEngageAuthor(
+          post?.settings,
+          'x',
+          engageAuthor
+        );
       }
     } else if (platform === 'reddit' && engageAuthor) {
       // Reddit replies never have an integration, so engageAuthor is always the
@@ -4406,7 +4790,11 @@ export class EngageRepository {
         where: { id: reply.postId },
         select: { settings: true },
       });
-      mergedSettings = this._mergeEngageAuthor(post?.settings, 'reddit', engageAuthor);
+      mergedSettings = this._mergeEngageAuthor(
+        post?.settings,
+        'reddit',
+        engageAuthor
+      );
     }
 
     return this._post.model.post.update({
@@ -4482,7 +4870,11 @@ export class EngageRepository {
     // X: a connected integration is the source of truth — leave settings untouched.
     if (platform === 'x' && post.integrationId) return undefined;
 
-    const mergedSettings = this._mergeEngageAuthor(post.settings, platform, engageAuthor);
+    const mergedSettings = this._mergeEngageAuthor(
+      post.settings,
+      platform,
+      engageAuthor
+    );
     return this._post.model.post.update({
       where: { id: reply.postId },
       data: { settings: mergedSettings },
@@ -4539,16 +4931,20 @@ export class EngageRepository {
           releaseURL: { not: null },
           impressions: null,
         },
-        ...(platform
-          ? { opportunity: { platform } }
-          : {}),
+        ...(platform ? { opportunity: { platform } } : {}),
       },
       select: {
         id: true,
         organizationId: true,
         authorReplied: true,
         post: { select: { id: true, releaseURL: true, integrationId: true } },
-        opportunity: { select: { platform: true, externalPostId: true, authorUsername: true } },
+        opportunity: {
+          select: {
+            platform: true,
+            externalPostId: true,
+            authorUsername: true,
+          },
+        },
       },
     });
   }
@@ -4563,8 +4959,16 @@ export class EngageRepository {
    * The `impressions > 0` write guard in PostsService keeps a transient empty/0
    * read from clobbering a previously good value.
    */
-  async findEngageRepliesInWindow(sinceDays: number, orgId?: string, platform?: string) {
-    const cutoff = dayjs.utc().subtract(sinceDays, 'day').startOf('day').toDate();
+  async findEngageRepliesInWindow(
+    sinceDays: number,
+    orgId?: string,
+    platform?: string
+  ) {
+    const cutoff = dayjs
+      .utc()
+      .subtract(sinceDays, 'day')
+      .startOf('day')
+      .toDate();
     return this._sentReply.model.engageSentReply.findMany({
       where: {
         ...(orgId ? { organizationId: orgId } : {}),
@@ -4574,16 +4978,20 @@ export class EngageRepository {
           releaseURL: { not: null },
           publishDate: { gte: cutoff },
         },
-        ...(platform
-          ? { opportunity: { platform } }
-          : {}),
+        ...(platform ? { opportunity: { platform } } : {}),
       },
       select: {
         id: true,
         organizationId: true,
         authorReplied: true,
         post: { select: { id: true, releaseURL: true, integrationId: true } },
-        opportunity: { select: { platform: true, externalPostId: true, authorUsername: true } },
+        opportunity: {
+          select: {
+            platform: true,
+            externalPostId: true,
+            authorUsername: true,
+          },
+        },
       },
     });
   }
@@ -4622,7 +5030,11 @@ export class EngageRepository {
           },
         },
         opportunity: {
-          select: { platform: true, externalPostId: true, authorUsername: true },
+          select: {
+            platform: true,
+            externalPostId: true,
+            authorUsername: true,
+          },
         },
       },
     });
@@ -4647,11 +5059,18 @@ export class EngageRepository {
 
     let filled = 0;
     let unresolved = 0;
-    const items: Array<{ postId: string; integrationId: string; matchedBy: string }> = [];
+    const items: Array<{
+      postId: string;
+      integrationId: string;
+      matchedBy: string;
+    }> = [];
 
     for (const r of pending) {
       if (!r.post) continue;
-      const pick = await this.resolveXReplyIntegrationId(organizationId, r.post.releaseURL);
+      const pick = await this.resolveXReplyIntegrationId(
+        organizationId,
+        r.post.releaseURL
+      );
       if (!pick) {
         unresolved++;
         continue;
@@ -4663,7 +5082,11 @@ export class EngageRepository {
         });
       }
       filled++;
-      items.push({ postId: r.post.id, integrationId: pick.integrationId, matchedBy: pick.matchedBy });
+      items.push({
+        postId: r.post.id,
+        integrationId: pick.integrationId,
+        matchedBy: pick.matchedBy,
+      });
     }
 
     return { found: pending.length, filled, unresolved, items };
@@ -4747,7 +5170,8 @@ export class EngageRepository {
         else s.missingSyncable++;
       }
     }
-    for (const s of Object.values(stats)) s.totalTrafficScore = Math.round(s.totalTrafficScore);
+    for (const s of Object.values(stats))
+      s.totalTrafficScore = Math.round(s.totalTrafficScore);
     return stats;
   }
 
@@ -4877,15 +5301,21 @@ export class EngageRepository {
         select: { id: true },
       });
       if (!integration) {
-        throw new NotFoundException('X integration not found for this organization');
+        throw new NotFoundException(
+          'X integration not found for this organization'
+        );
       }
     } else {
       // No account picked: resolve one so metrics aren't stuck null forever.
       // Prefer the tweet author's own integration (by handle) so impressions are
       // readable; else the org's engage reply account; else any live X account.
       integrationId =
-        (await this.resolveXReplyIntegrationId(data.organizationId, data.replyUrl))
-          ?.integrationId ?? undefined;
+        (
+          await this.resolveXReplyIntegrationId(
+            data.organizationId,
+            data.replyUrl
+          )
+        )?.integrationId ?? undefined;
     }
 
     // Parse the snowflake tweet id from the pasted reply URL into releaseId.
@@ -4940,7 +5370,9 @@ export class EngageRepository {
       const config =
         projectId != null
           ? await tx.engageConfig.upsert({
-              where: { organizationId_projectId: { organizationId, projectId } },
+              where: {
+                organizationId_projectId: { organizationId, projectId },
+              },
               create: { organizationId, projectId, enabled: true },
               update: { enabled: true },
             })
@@ -5018,7 +5450,9 @@ export class EngageRepository {
               username,
               displayName: ch.channelName,
               audienceSize: ch.audienceSize ?? 0,
-              ...(ch.metadata && { metadata: ch.metadata as Prisma.InputJsonValue }),
+              ...(ch.metadata && {
+                metadata: ch.metadata as Prisma.InputJsonValue,
+              }),
             };
           }),
           skipDuplicates: true,
@@ -5154,7 +5588,9 @@ export class EngageRepository {
         opportunityId: true,
         postId: true,
         createdAt: true,
-        post: { select: { id: true, state: true, error: true, createdAt: true } },
+        post: {
+          select: { id: true, state: true, error: true, createdAt: true },
+        },
         opportunity: { select: { externalPostUrl: true, platform: true } },
       },
       orderBy: { createdAt: 'desc' },
@@ -5176,5 +5612,4 @@ export class EngageRepository {
       );
     return config.id;
   }
-
 }

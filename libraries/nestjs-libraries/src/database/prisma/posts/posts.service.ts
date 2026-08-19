@@ -85,6 +85,28 @@ type PostWithConditionals = Post & {
   childrenPost: Post[];
 };
 
+function resolveScheduledPostPlatform(post: {
+  providerIdentifier?: string | null;
+  integration?: { providerIdentifier?: string | null } | null;
+  settings?: unknown;
+}) {
+  const persistedPlatform =
+    post.providerIdentifier || post.integration?.providerIdentifier;
+  if (persistedPlatform) return persistedPlatform;
+
+  try {
+    const settings =
+      typeof post.settings === 'string'
+        ? JSON.parse(post.settings)
+        : post.settings;
+    return typeof (settings as { __type?: unknown } | null)?.__type === 'string'
+      ? (settings as { __type: string }).__type
+      : '';
+  } catch {
+    return '';
+  }
+}
+
 @Injectable()
 export class PostsService {
   private readonly logger = new Logger(PostsService.name);
@@ -2124,8 +2146,7 @@ export class PostsService {
         continue;
       }
 
-      const platform =
-        post.providerIdentifier || post.integration?.providerIdentifier || '';
+      const platform = resolveScheduledPostPlatform(post);
       const hasBoundIntegration =
         !!post.integrationId && post.integration?.disabled !== true;
 

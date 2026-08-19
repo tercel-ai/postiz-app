@@ -75,7 +75,9 @@ function buildRepo() {
   });
   const trackedFindFirst = vi.fn();
   const dispatchFindFirst = vi.fn(async (args: any) =>
-    isChannelQuery(args) === true ? channelFindFirst(args) : trackedFindFirst(args)
+    isChannelQuery(args) === true
+      ? channelFindFirst(args)
+      : trackedFindFirst(args)
   );
   const trackedAccount = {
     model: {
@@ -92,7 +94,9 @@ function buildRepo() {
     model: { engageKeyword: { findMany: keywordFindMany } },
   } as any;
   const opportunity = {
-    model: { engageOpportunity: { aggregate: oppAggregate, findFirst: oppFindFirst } },
+    model: {
+      engageOpportunity: { aggregate: oppAggregate, findFirst: oppFindFirst },
+    },
   } as any;
   // appendGenerationHistory runs an atomic jsonb concat via $executeRaw on the
   // oppState client, so the mock exposes it alongside the model accessors.
@@ -139,8 +143,16 @@ function buildRepo() {
   // tx-scoped calls.
   const txTransaction = vi.fn(async (cb: any) =>
     cb({
-      engageSentReply: { findFirst: sentFindFirst, create: sentCreate, update: sentUpdate },
-      post: { create: postCreate, update: postUpdate, deleteMany: postDeleteMany },
+      engageSentReply: {
+        findFirst: sentFindFirst,
+        create: sentCreate,
+        update: sentUpdate,
+      },
+      post: {
+        create: postCreate,
+        update: postUpdate,
+        deleteMany: postDeleteMany,
+      },
     })
   );
   const tx = { model: { $transaction: txTransaction } } as any;
@@ -161,11 +173,33 @@ function buildRepo() {
     scanCursor      // _scanCursor
   );
   return {
-    repo, stateFindMany, stateCount, stateGroupBy, stateAggregate, stateFindFirst, stateFindUnique,
-    stateUpdateMany, stateExecuteRaw, oppAggregate, oppFindFirst, channelFindMany,
-    channelFindFirst, trackedFindFirst,
-    trackedFindMany, cursorFindMany, keywordFindMany, sentCount, sentFindMany, sentFindFirst, sentCreate,
-    sentUpdate, postAggregate, postFindMany, postCreate, postUpdate, postDeleteMany,
+    repo,
+    stateFindMany,
+    stateCount,
+    stateGroupBy,
+    stateAggregate,
+    stateFindFirst,
+    stateFindUnique,
+    stateUpdateMany,
+    stateExecuteRaw,
+    oppAggregate,
+    oppFindFirst,
+    channelFindMany,
+    channelFindFirst,
+    trackedFindFirst,
+    trackedFindMany,
+    cursorFindMany,
+    keywordFindMany,
+    sentCount,
+    sentFindMany,
+    sentFindFirst,
+    sentCreate,
+    sentUpdate,
+    postAggregate,
+    postFindMany,
+    postCreate,
+    postUpdate,
+    postDeleteMany,
     txTransaction,
   };
 }
@@ -198,7 +232,9 @@ describe('EngageRepository — two-table reads', () => {
       stateGroupBy.mockResolvedValue([]);
       stateCount.mockImplementation(async ({ where }: { where: any }) => {
         if (stateCount.mock.calls.length === 1) {
-          where.opportunity.AND = [{ OR: [{ channelId: { equals: 'mutated' } }] }];
+          where.opportunity.AND = [
+            { OR: [{ channelId: { equals: 'mutated' } }] },
+          ];
         }
         return 0;
       });
@@ -248,7 +284,15 @@ describe('EngageRepository — two-table reads', () => {
       expect(res.byStatus.REPLIED).toBe(1);
       expect(res.byStatus.DISMISSED).toBe(0); // zero-filled
       expect(Object.keys(res.byPlatform).sort()).toEqual(
-        ['x', 'reddit', 'linkedin', 'medium', 'devto', 'hackernews', 'quora'].sort()
+        [
+          'x',
+          'reddit',
+          'linkedin',
+          'medium',
+          'devto',
+          'hackernews',
+          'quora',
+        ].sort()
       );
     });
   });
@@ -439,9 +483,9 @@ describe('EngageRepository — two-table reads', () => {
       stateCount.mockResolvedValue(0);
 
       await repo.listOpportunities('org1', {} as any);
-      expect(stateFindMany.mock.calls[0][0].where.opportunity).not.toHaveProperty(
-        'postPublishedAt'
-      );
+      expect(
+        stateFindMany.mock.calls[0][0].where.opportunity
+      ).not.toHaveProperty('postPublishedAt');
     });
 
     it('attaches replyLink + sentReplyId from the latest sent reply', async () => {
@@ -449,15 +493,22 @@ describe('EngageRepository — two-table reads', () => {
       stateFindMany.mockResolvedValue([STATE_ROW]);
       stateCount.mockResolvedValue(1);
       sentFindMany.mockResolvedValue([
-        { id: 'reply-new', opportunityId: 'opp1', post: { releaseURL: 'https://x.com/a/status/1' } },
+        {
+          id: 'reply-new',
+          opportunityId: 'opp1',
+          post: { releaseURL: 'https://x.com/a/status/1' },
+        },
       ]);
 
-      const item = (await repo.listOpportunities('org1', {} as any)).items[0] as any;
+      const item = (await repo.listOpportunities('org1', {} as any))
+        .items[0] as any;
       expect(item.sentReplyId).toBe('reply-new');
       expect(item.replyLink).toBe('https://x.com/a/status/1');
       // The feed's reply-link lookup must EXCLUDE unsent DRAFT working-copies, so a
       // saved draft never makes an opportunity look "already replied".
-      expect(sentFindMany.mock.calls[0][0].where.post).toEqual({ state: { not: 'DRAFT' } });
+      expect(sentFindMany.mock.calls[0][0].where.post).toEqual({
+        state: { not: 'DRAFT' },
+      });
     });
 
     it('reports replyLink null when the latest reply has no URL (pending backfill)', async () => {
@@ -465,10 +516,15 @@ describe('EngageRepository — two-table reads', () => {
       stateFindMany.mockResolvedValue([STATE_ROW]);
       stateCount.mockResolvedValue(1);
       sentFindMany.mockResolvedValue([
-        { id: 'reply-pending', opportunityId: 'opp1', post: { releaseURL: null } },
+        {
+          id: 'reply-pending',
+          opportunityId: 'opp1',
+          post: { releaseURL: null },
+        },
       ]);
 
-      const item = (await repo.listOpportunities('org1', {} as any)).items[0] as any;
+      const item = (await repo.listOpportunities('org1', {} as any))
+        .items[0] as any;
       expect(item.sentReplyId).toBe('reply-pending');
       expect(item.replyLink).toBeNull();
     });
@@ -478,7 +534,10 @@ describe('EngageRepository — two-table reads', () => {
       stateFindMany.mockResolvedValue([]);
       stateCount.mockResolvedValue(0);
 
-      await repo.listOpportunities('org1', { sortBy: 'scoreHeat', sortOrder: 'desc' } as any);
+      await repo.listOpportunities('org1', {
+        sortBy: 'scoreHeat',
+        sortOrder: 'desc',
+      } as any);
       expect(stateFindMany.mock.calls[0][0].orderBy).toEqual([
         { opportunity: { scoreHeat: 'desc' } },
         { opportunity: { postPublishedAt: 'desc' } },
@@ -492,7 +551,10 @@ describe('EngageRepository — two-table reads', () => {
       stateFindMany.mockResolvedValue([]);
       stateCount.mockResolvedValue(0);
 
-      await repo.listOpportunities('org1', { sortBy: 'score', sortOrder: 'desc' } as any);
+      await repo.listOpportunities('org1', {
+        sortBy: 'score',
+        sortOrder: 'desc',
+      } as any);
       expect(stateFindMany.mock.calls[0][0].orderBy).toEqual([
         { score: 'desc' },
         { opportunity: { postPublishedAt: 'desc' } },
@@ -505,7 +567,10 @@ describe('EngageRepository — two-table reads', () => {
       stateFindMany.mockResolvedValue([]);
       stateCount.mockResolvedValue(0);
 
-      await repo.listOpportunities('org1', { sortBy: 'postPublishedAt', sortOrder: 'desc' } as any);
+      await repo.listOpportunities('org1', {
+        sortBy: 'postPublishedAt',
+        sortOrder: 'desc',
+      } as any);
       expect(stateFindMany.mock.calls[0][0].orderBy).toEqual([
         { opportunity: { postPublishedAt: 'desc' } },
         { score: 'desc' },
@@ -521,7 +586,9 @@ describe('EngageRepository — two-table reads', () => {
       await repo.listOpportunities('org1', { projectId: 'project-1' } as any);
       expect(stateFindMany.mock.calls[0][0].where.organizationId).toBe('org1');
       expect(stateFindMany.mock.calls[0][0].where.projectId).toBe('project-1');
-      expect(stateFindMany.mock.calls[0][0].where.opportunity.deletedAt).toBeNull();
+      expect(
+        stateFindMany.mock.calls[0][0].where.opportunity.deletedAt
+      ).toBeNull();
     });
 
     // Channels and authors are both CASE-INSENSITIVE identity filters, each its
@@ -544,7 +611,9 @@ describe('EngageRepository — two-table reads', () => {
       stateFindMany.mockResolvedValue([]);
       stateCount.mockResolvedValue(0);
 
-      await repo.listOpportunities('org1', { channels: ['SEO', 'TECH'] } as any);
+      await repo.listOpportunities('org1', {
+        channels: ['SEO', 'TECH'],
+      } as any);
       expect(stateFindMany.mock.calls[0][0].where.opportunity.AND).toEqual([
         {
           OR: [
@@ -562,7 +631,9 @@ describe('EngageRepository — two-table reads', () => {
 
       await repo.listOpportunities('org1', { authors: ['BobSmith'] } as any);
       expect(stateFindMany.mock.calls[0][0].where.opportunity.AND).toEqual([
-        { OR: [{ authorUsername: { equals: 'BobSmith', mode: 'insensitive' } }] },
+        {
+          OR: [{ authorUsername: { equals: 'BobSmith', mode: 'insensitive' } }],
+        },
       ]);
     });
 
@@ -571,7 +642,9 @@ describe('EngageRepository — two-table reads', () => {
       stateFindMany.mockResolvedValue([]);
       stateCount.mockResolvedValue(0);
 
-      await repo.listOpportunities('org1', { authors: ['Alice', 'Bob'] } as any);
+      await repo.listOpportunities('org1', {
+        authors: ['Alice', 'Bob'],
+      } as any);
       expect(stateFindMany.mock.calls[0][0].where.opportunity.AND).toEqual([
         {
           OR: [
@@ -597,7 +670,9 @@ describe('EngageRepository — two-table reads', () => {
         { OR: [{ channelId: { equals: 'SEO', mode: 'insensitive' } }] },
         { OR: [{ authorUsername: { equals: 'Alice', mode: 'insensitive' } }] },
       ]);
-      expect(stateFindMany.mock.calls[0][0].where.opportunity).not.toHaveProperty('OR');
+      expect(
+        stateFindMany.mock.calls[0][0].where.opportunity
+      ).not.toHaveProperty('OR');
     });
   });
 
@@ -631,7 +706,8 @@ describe('EngageRepository — two-table reads', () => {
     });
 
     it('attaches a reddit channel avatar using the same field name as listOpportunities', async () => {
-      const { repo, stateFindFirst, sentFindFirst, channelFindFirst } = buildRepo();
+      const { repo, stateFindFirst, sentFindFirst, channelFindFirst } =
+        buildRepo();
       stateFindFirst.mockResolvedValue({
         ...STATE_ROW,
         opportunity: {
@@ -647,7 +723,9 @@ describe('EngageRepository — two-table reads', () => {
 
       const item = (await repo.getOpportunityById('org1', 'opp1')) as any;
 
-      expect(item.channelAvatar).toBe('https://styles.redditmedia.com/avatar.png');
+      expect(item.channelAvatar).toBe(
+        'https://styles.redditmedia.com/avatar.png'
+      );
       expect(item.sentReplyId).toBeNull();
       expect(item.replyLink).toBeNull();
       // The avatar comes off the merged scan-target row, so the lookup keys on
@@ -727,8 +805,20 @@ describe('EngageRepository — two-table reads', () => {
           opportunityId: 'o1',
           matchedKeywords: [],
           generationHistory: [
-            { content: 'first', length: 'medium', cost: 3, billingTaskId: 't1', createdAt: '2026-06-16T00:00:00Z' },
-            { content: 'second', length: 'long', cost: 5, billingTaskId: 't2', createdAt: '2026-06-16T01:00:00Z' },
+            {
+              content: 'first',
+              length: 'medium',
+              cost: 3,
+              billingTaskId: 't1',
+              createdAt: '2026-06-16T00:00:00Z',
+            },
+            {
+              content: 'second',
+              length: 'long',
+              cost: 5,
+              billingTaskId: 't2',
+              createdAt: '2026-06-16T01:00:00Z',
+            },
           ],
         },
         { opportunityId: 'o2', matchedKeywords: [], generationHistory: null },
@@ -737,10 +827,9 @@ describe('EngageRepository — two-table reads', () => {
       const res = await repo.listSentReplies('org1', {} as any);
       const [a, b] = res.items as any[];
       // Reversed → newest generation first.
-      expect(a.opportunity.generationHistory.map((g: any) => g.content)).toEqual([
-        'second',
-        'first',
-      ]);
+      expect(
+        a.opportunity.generationHistory.map((g: any) => g.content)
+      ).toEqual(['second', 'first']);
       // null column / missing state → empty array, never undefined.
       expect(b.opportunity.generationHistory).toEqual([]);
       // The state select pulls generationHistory alongside matchedKeywords.
@@ -812,7 +901,12 @@ describe('EngageRepository — two-table reads', () => {
             integration: null,
             settings: JSON.stringify({
               __type: 'x',
-              engageAuthor: { handle: 'zhngyq310334', id: '7', name: '张玉琪', avatarUrl: 'https://files/zq.png' },
+              engageAuthor: {
+                handle: 'zhngyq310334',
+                id: '7',
+                name: '张玉琪',
+                avatarUrl: 'https://files/zq.png',
+              },
             }),
           },
         },
@@ -1004,8 +1098,20 @@ describe('EngageRepository — two-table reads', () => {
         matchedKeywords: ['react'],
         status: 'REPLIED',
         generationHistory: [
-          { content: 'first', length: 'medium', cost: 3, billingTaskId: 't1', createdAt: '2026-07-01T00:00:00Z' },
-          { content: 'second', length: 'long', cost: 5, billingTaskId: 't2', createdAt: '2026-07-01T00:10:00Z' },
+          {
+            content: 'first',
+            length: 'medium',
+            cost: 3,
+            billingTaskId: 't1',
+            createdAt: '2026-07-01T00:00:00Z',
+          },
+          {
+            content: 'second',
+            length: 'long',
+            cost: 5,
+            billingTaskId: 't2',
+            createdAt: '2026-07-01T00:10:00Z',
+          },
         ],
       });
 
@@ -1017,10 +1123,9 @@ describe('EngageRepository — two-table reads', () => {
         status: 'REPLIED',
         matchedKeywords: ['react'],
       });
-      expect(item.opportunity.generationHistory.map((g: any) => g.content)).toEqual([
-        'second',
-        'first',
-      ]);
+      expect(
+        item.opportunity.generationHistory.map((g: any) => g.content)
+      ).toEqual(['second', 'first']);
       expect(item.post.replyAuthor).toEqual({
         handle: '0xKyd',
         id: '999',
@@ -1045,7 +1150,13 @@ describe('EngageRepository — two-table reads', () => {
       sentFindFirst.mockResolvedValue({
         id: 'sent1',
         opportunity: { id: 'opp1', platform: 'reddit' },
-        post: { analytics: [], impressions: 0, trafficScore: 0, integration: null, settings: null },
+        post: {
+          analytics: [],
+          impressions: 0,
+          trafficScore: 0,
+          integration: null,
+          settings: null,
+        },
       });
       stateFindFirst.mockResolvedValue(null);
 
@@ -1060,8 +1171,15 @@ describe('EngageRepository — two-table reads', () => {
 
   describe('getScoreStats', () => {
     it('sources objective averages from the opportunity aggregate, org scores from state', async () => {
-      const { repo, stateAggregate, stateCount, stateFindMany, stateFindFirst, oppAggregate, oppFindFirst } =
-        buildRepo();
+      const {
+        repo,
+        stateAggregate,
+        stateCount,
+        stateFindMany,
+        stateFindFirst,
+        oppAggregate,
+        oppFindFirst,
+      } = buildRepo();
       stateAggregate.mockResolvedValue({
         _count: { _all: 5 },
         _avg: { score: 72, scoreKeyword: 31, scoreTracked: 2 },
@@ -1069,7 +1187,11 @@ describe('EngageRepository — two-table reads', () => {
       oppAggregate.mockResolvedValue({
         _avg: { scoreHeat: 20, scoreAuthority: 9, scoreRecency: 3 },
       });
-      stateFindMany.mockResolvedValue([{ score: 90 }, { score: 75 }, { score: 65 }]);
+      stateFindMany.mockResolvedValue([
+        { score: 90 },
+        { score: 75 },
+        { score: 65 },
+      ]);
       stateCount.mockResolvedValue(2);
       stateFindFirst.mockResolvedValue({
         opportunityId: 'opp1',
@@ -1077,8 +1199,16 @@ describe('EngageRepository — two-table reads', () => {
         opportunity: { postContent: 'best keyword post' },
       });
       oppFindFirst
-        .mockResolvedValueOnce({ id: 'oppH', scoreHeat: 35, postContent: 'hot' })
-        .mockResolvedValueOnce({ id: 'oppA', scoreAuthority: 20, postContent: 'auth' });
+        .mockResolvedValueOnce({
+          id: 'oppH',
+          scoreHeat: 35,
+          postContent: 'hot',
+        })
+        .mockResolvedValueOnce({
+          id: 'oppA',
+          scoreAuthority: 20,
+          postContent: 'auth',
+        });
 
       const stats = await repo.getScoreStats('org1');
       expect(stats.total).toBe(5);
@@ -1086,13 +1216,24 @@ describe('EngageRepository — two-table reads', () => {
       expect(stats.avgScoreHeat).toBe(20);       // opportunity aggregate
       expect(stats.avgScoreAuthority).toBe(9);   // opportunity aggregate
       expect(stats.trackedCount).toBe(2);
-      expect(stats.topByKeyword).toEqual({ id: 'opp1', score: 35, title: 'best keyword post' });
+      expect(stats.topByKeyword).toEqual({
+        id: 'opp1',
+        score: 35,
+        title: 'best keyword post',
+      });
       expect(stats.topByHeat).toEqual({ id: 'oppH', score: 35, title: 'hot' });
     });
 
     it('returns a zeroed shape when the org has no state rows', async () => {
-      const { repo, stateAggregate, stateCount, stateFindMany, stateFindFirst, oppAggregate, oppFindFirst } =
-        buildRepo();
+      const {
+        repo,
+        stateAggregate,
+        stateCount,
+        stateFindMany,
+        stateFindFirst,
+        oppAggregate,
+        oppFindFirst,
+      } = buildRepo();
       stateAggregate.mockResolvedValue({ _count: { _all: 0 }, _avg: {} });
       oppAggregate.mockResolvedValue({ _avg: {} });
       stateFindMany.mockResolvedValue([]);
@@ -1121,12 +1262,34 @@ describe('EngageRepository — two-table reads', () => {
       });
       sentFindMany.mockResolvedValue([
         {
-          opportunity: { id: 'o1', platform: 'x', externalPostUrl: 'u1', authorUsername: 'alice', authorDisplayName: 'Alice', authorAvatarUrl: 'a.png' },
-          post: { content: 'a', releaseURL: 'r1', analytics: [{ label: 'like_count', data: [{ total: '5' }] }] },
+          opportunity: {
+            id: 'o1',
+            platform: 'x',
+            externalPostUrl: 'u1',
+            authorUsername: 'alice',
+            authorDisplayName: 'Alice',
+            authorAvatarUrl: 'a.png',
+          },
+          post: {
+            content: 'a',
+            releaseURL: 'r1',
+            analytics: [{ label: 'like_count', data: [{ total: '5' }] }],
+          },
         },
         {
-          opportunity: { id: 'o2', platform: 'reddit', externalPostUrl: 'u2', authorUsername: 'bob', authorDisplayName: null, authorAvatarUrl: null },
-          post: { content: 'b', releaseURL: null, analytics: [{ label: 'score', data: [{ total: '12' }] }] },
+          opportunity: {
+            id: 'o2',
+            platform: 'reddit',
+            externalPostUrl: 'u2',
+            authorUsername: 'bob',
+            authorDisplayName: null,
+            authorAvatarUrl: null,
+          },
+          post: {
+            content: 'b',
+            releaseURL: null,
+            analytics: [{ label: 'score', data: [{ total: '12' }] }],
+          },
         },
       ]);
 
@@ -1144,7 +1307,9 @@ describe('EngageRepository — two-table reads', () => {
         source: 'engage',
         state: 'PUBLISHED',
       });
-      expect(sentCount.mock.calls[2][0].where.post.is.publishDate).toBeUndefined();
+      expect(
+        sentCount.mock.calls[2][0].where.post.is.publishDate
+      ).toBeUndefined();
       // Best reply is the Reddit one (score 12 > like 5); url falls back to externalPostUrl;
       // includes the original author's account info.
       expect(stats.bestReply).toEqual({
@@ -1166,8 +1331,12 @@ describe('EngageRepository — two-table reads', () => {
         .mockResolvedValueOnce(6)
         .mockResolvedValueOnce(2);
       postAggregate
-        .mockResolvedValueOnce({ _sum: { impressions: 900, trafficScore: 234.2 } })
-        .mockResolvedValueOnce({ _sum: { impressions: 1200, trafficScore: 87.6 } });
+        .mockResolvedValueOnce({
+          _sum: { impressions: 900, trafficScore: 234.2 },
+        })
+        .mockResolvedValueOnce({
+          _sum: { impressions: 1200, trafficScore: 87.6 },
+        });
       sentFindMany
         .mockResolvedValueOnce([
           {
@@ -1177,12 +1346,22 @@ describe('EngageRepository — two-table reads', () => {
         ])
         .mockResolvedValueOnce([
           {
-            opportunity: { id: 'o2', platform: 'reddit', externalPostUrl: 'u2' },
-            post: { content: 'b', releaseURL: null, analytics: [{ label: 'score', data: [{ total: '12' }] }] },
+            opportunity: {
+              id: 'o2',
+              platform: 'reddit',
+              externalPostUrl: 'u2',
+            },
+            post: {
+              content: 'b',
+              releaseURL: null,
+              analytics: [{ label: 'score', data: [{ total: '12' }] }],
+            },
           },
         ]);
 
-      const stats = await repo.getDashboardSummary('org1', { platform: 'reddit' });
+      const stats = await repo.getDashboardSummary('org1', {
+        platform: 'reddit',
+      });
 
       expect(stats.repliesCount).toBe(2);
       expect(stats.responseRate).toBe(80); // 4/5
@@ -1192,20 +1371,32 @@ describe('EngageRepository — two-table reads', () => {
       expect(stats.xImpressions).toBe(1200); // legacy helper remains X-only
       expect(stats.xTrafficIndex).toBe(88);
       expect(stats.bestReply?.platform).toBe('reddit');
-      expect(sentCount.mock.calls[0][0].where.opportunity).toEqual({ platform: 'reddit' });
-      expect(sentCount.mock.calls[1][0].where.opportunity).toEqual({ platform: 'reddit' });
-      expect(sentCount.mock.calls[2][0].where.opportunity).toEqual({ platform: 'reddit' });
+      expect(sentCount.mock.calls[0][0].where.opportunity).toEqual({
+        platform: 'reddit',
+      });
+      expect(sentCount.mock.calls[1][0].where.opportunity).toEqual({
+        platform: 'reddit',
+      });
+      expect(sentCount.mock.calls[2][0].where.opportunity).toEqual({
+        platform: 'reddit',
+      });
       expect(postAggregate.mock.calls[0][0].where.engageSentReply).toEqual({
         is: { opportunity: { platform: 'reddit' } },
       });
-      expect(sentFindMany.mock.calls[0][0].where.opportunity).toEqual({ platform: 'reddit' });
-      expect(sentFindMany.mock.calls[1][0].where.opportunity).toEqual({ platform: 'reddit' });
+      expect(sentFindMany.mock.calls[0][0].where.opportunity).toEqual({
+        platform: 'reddit',
+      });
+      expect(sentFindMany.mock.calls[1][0].where.opportunity).toEqual({
+        platform: 'reddit',
+      });
     });
 
     it('returns bestReply=null and responseRate=0 when there is no engagement data', async () => {
       const { repo, sentCount, sentFindMany, postAggregate } = buildRepo();
       sentCount.mockResolvedValue(0);
-      postAggregate.mockResolvedValue({ _sum: { impressions: null, trafficScore: null } });
+      postAggregate.mockResolvedValue({
+        _sum: { impressions: null, trafficScore: null },
+      });
       sentFindMany.mockResolvedValue([]);
 
       const stats = await repo.getDashboardSummary('org1');
@@ -1218,7 +1409,9 @@ describe('EngageRepository — two-table reads', () => {
     it('date=month applies a publishDate window to counts and aggregates', async () => {
       const { repo, sentCount, sentFindMany, postAggregate } = buildRepo();
       sentCount.mockResolvedValue(0);
-      postAggregate.mockResolvedValue({ _sum: { impressions: 0, trafficScore: 0 } });
+      postAggregate.mockResolvedValue({
+        _sum: { impressions: 0, trafficScore: 0 },
+      });
       sentFindMany.mockResolvedValue([]);
 
       await repo.getDashboardSummary('org1', { date: 'month' });
@@ -1233,18 +1426,24 @@ describe('EngageRepository — two-table reads', () => {
       expect(totalWhere.publishDate.gte).toBeInstanceOf(Date);
       expect(totalWhere.state).toEqual({ not: 'DRAFT' });
       // Headline impressions aggregate (1st aggregate) is windowed too.
-      expect(postAggregate.mock.calls[0][0].where.publishDate.gte).toBeInstanceOf(Date);
+      expect(
+        postAggregate.mock.calls[0][0].where.publishDate.gte
+      ).toBeInstanceOf(Date);
     });
 
     it('no date / "all" applies no publishDate window', async () => {
       const { repo, sentCount, sentFindMany, postAggregate } = buildRepo();
       sentCount.mockResolvedValue(0);
-      postAggregate.mockResolvedValue({ _sum: { impressions: 0, trafficScore: 0 } });
+      postAggregate.mockResolvedValue({
+        _sum: { impressions: 0, trafficScore: 0 },
+      });
       sentFindMany.mockResolvedValue([]);
 
       await repo.getDashboardSummary('org1', { date: 'all' });
 
-      expect(sentCount.mock.calls[2][0].where.post.is.publishDate).toBeUndefined();
+      expect(
+        sentCount.mock.calls[2][0].where.post.is.publishDate
+      ).toBeUndefined();
       expect(postAggregate.mock.calls[0][0].where.publishDate).toBeUndefined();
     });
   });
@@ -1254,7 +1453,10 @@ describe('EngageRepository — two-table reads', () => {
       const { repo, sentFindMany } = buildRepo();
       sentFindMany.mockResolvedValue([
         { opportunity: { platform: 'x' }, post: { publishDate: new Date() } },
-        { opportunity: { platform: 'reddit' }, post: { publishDate: new Date() } },
+        {
+          opportunity: { platform: 'reddit' },
+          post: { publishDate: new Date() },
+        },
         { opportunity: { platform: 'x' }, post: { publishDate: null } }, // ignored
       ]);
 
@@ -1262,7 +1464,11 @@ describe('EngageRepository — two-table reads', () => {
       expect(res.period).toBe('daily');
       expect(res.items).toHaveLength(30); // daily → 30 zero-filled continuous buckets
       const totals = res.items.reduce(
-        (a, b) => ({ count: a.count + b.count, x: a.x + b.x, reddit: a.reddit + b.reddit }),
+        (a, b) => ({
+          count: a.count + b.count,
+          x: a.x + b.x,
+          reddit: a.reddit + b.reddit,
+        }),
         { count: 0, x: 0, reddit: 0 }
       );
       expect(totals).toEqual({ count: 2, x: 1, reddit: 1 }); // null publishDate dropped
@@ -1276,21 +1482,41 @@ describe('EngageRepository — two-table reads', () => {
       sentFindMany.mockResolvedValue([
         {
           opportunity: { id: 'o1', platform: 'x', externalPostUrl: 'u1' },
-          post: { content: 'c', releaseURL: 'r1', publishDate: new Date('2026-05-20'), trafficScore: 30.2 },
+          post: {
+            content: 'c',
+            releaseURL: 'r1',
+            publishDate: new Date('2026-05-20'),
+            trafficScore: 30.2,
+          },
         },
         {
           opportunity: { id: 'o2', platform: 'reddit', externalPostUrl: 'u2' },
-          post: { content: 'd', releaseURL: null, publishDate: new Date('2026-05-19'), trafficScore: 12 },
+          post: {
+            content: 'd',
+            releaseURL: null,
+            publishDate: new Date('2026-05-19'),
+            trafficScore: 12,
+          },
         },
       ]);
 
       const res = await repo.getDashboardTraffics('org1', { limit: 5 });
       expect(res.totalClicks).toBe(42); // round(42.4)
       expect(res.items).toHaveLength(2);
-      expect(res.items[0]).toMatchObject({ opportunityId: 'o1', clicks: 30, url: 'r1' });
-      expect(res.items[1]).toMatchObject({ opportunityId: 'o2', clicks: 12, url: 'u2' }); // releaseURL null → externalPostUrl
+      expect(res.items[0]).toMatchObject({
+        opportunityId: 'o1',
+        clicks: 30,
+        url: 'r1',
+      });
+      expect(res.items[1]).toMatchObject({
+        opportunityId: 'o2',
+        clicks: 12,
+        url: 'u2',
+      }); // releaseURL null → externalPostUrl
       // top-N ordering and platform filter wiring
-      expect(sentFindMany.mock.calls[0][0].orderBy).toEqual({ post: { trafficScore: 'desc' } });
+      expect(sentFindMany.mock.calls[0][0].orderBy).toEqual({
+        post: { trafficScore: 'desc' },
+      });
       expect(sentFindMany.mock.calls[0][0].take).toBe(5);
     });
 
@@ -1303,7 +1529,9 @@ describe('EngageRepository — two-table reads', () => {
       expect(postAggregate.mock.calls[0][0].where.engageSentReply).toEqual({
         is: { opportunity: { platform: 'x' } },
       });
-      expect(sentFindMany.mock.calls[0][0].where.opportunity).toEqual({ platform: 'x' });
+      expect(sentFindMany.mock.calls[0][0].where.opportunity).toEqual({
+        platform: 'x',
+      });
       expect(sentFindMany.mock.calls[0][0].take).toBe(10); // default limit
     });
   });
@@ -1312,11 +1540,31 @@ describe('EngageRepository — two-table reads', () => {
     it('buckets impressions by publish day + platform, sums duplicates, drops null dates, sorts', async () => {
       const { repo, postFindMany } = buildRepo();
       postFindMany.mockResolvedValue([
-        { impressions: 100, publishDate: new Date('2026-05-20T00:00:00Z'), engageSentReply: { opportunity: { platform: 'x' } } },
-        { impressions: 50, publishDate: new Date('2026-05-20T12:00:00Z'), engageSentReply: { opportunity: { platform: 'x' } } }, // same day+x → 150
-        { impressions: 30, publishDate: new Date('2026-05-20T06:00:00Z'), engageSentReply: { opportunity: { platform: 'reddit' } } },
-        { impressions: 20, publishDate: new Date('2026-05-21T00:00:00Z'), engageSentReply: null }, // no reply → 'unknown'
-        { impressions: 999, publishDate: null, engageSentReply: { opportunity: { platform: 'x' } } }, // dropped (null date)
+        {
+          impressions: 100,
+          publishDate: new Date('2026-05-20T00:00:00Z'),
+          engageSentReply: { opportunity: { platform: 'x' } },
+        },
+        {
+          impressions: 50,
+          publishDate: new Date('2026-05-20T12:00:00Z'),
+          engageSentReply: { opportunity: { platform: 'x' } },
+        }, // same day+x → 150
+        {
+          impressions: 30,
+          publishDate: new Date('2026-05-20T06:00:00Z'),
+          engageSentReply: { opportunity: { platform: 'reddit' } },
+        },
+        {
+          impressions: 20,
+          publishDate: new Date('2026-05-21T00:00:00Z'),
+          engageSentReply: null,
+        }, // no reply → 'unknown'
+        {
+          impressions: 999,
+          publishDate: null,
+          engageSentReply: { opportunity: { platform: 'x' } },
+        }, // dropped (null date)
       ]);
 
       const res = await repo.getDashboardImpressions('org1'); // defaults to 'daily'
@@ -1339,8 +1587,16 @@ describe('EngageRepository — two-table reads', () => {
       const { repo, postFindMany } = buildRepo();
       // 2026-05-20 (Wed) and 2026-05-22 (Fri) share the same ISO week.
       postFindMany.mockResolvedValue([
-        { impressions: 10, publishDate: new Date('2026-05-20T00:00:00Z'), engageSentReply: { opportunity: { platform: 'x' } } },
-        { impressions: 5, publishDate: new Date('2026-05-22T00:00:00Z'), engageSentReply: { opportunity: { platform: 'x' } } },
+        {
+          impressions: 10,
+          publishDate: new Date('2026-05-20T00:00:00Z'),
+          engageSentReply: { opportunity: { platform: 'x' } },
+        },
+        {
+          impressions: 5,
+          publishDate: new Date('2026-05-22T00:00:00Z'),
+          engageSentReply: { opportunity: { platform: 'x' } },
+        },
       ]);
 
       const res = await repo.getDashboardImpressions('org1', 'weekly');
@@ -1365,18 +1621,54 @@ describe('EngageRepository — two-table reads', () => {
       sentFindMany.mockResolvedValue([
         {
           id: 's1',
-          opportunity: { id: 'o1', platform: 'x', authorUsername: 'alice', authorAvatarUrl: 'a.png' },
-          post: { id: 'p1', content: 'cx', releaseURL: 'rx', analytics: xAnalytics(7), integration: { profile: '@me', picture: 'm.png' }, settings: null },
+          opportunity: {
+            id: 'o1',
+            platform: 'x',
+            authorUsername: 'alice',
+            authorAvatarUrl: 'a.png',
+          },
+          post: {
+            id: 'p1',
+            content: 'cx',
+            releaseURL: 'rx',
+            analytics: xAnalytics(7),
+            integration: { profile: '@me', picture: 'm.png' },
+            settings: null,
+          },
         },
         {
           id: 's2',
-          opportunity: { id: 'o2', platform: 'reddit', authorUsername: 'bob', authorAvatarUrl: null },
-          post: { id: 'p2', content: 'cr', releaseURL: 'rr', analytics: redditAnalytics(20), integration: null, settings: null },
+          opportunity: {
+            id: 'o2',
+            platform: 'reddit',
+            authorUsername: 'bob',
+            authorAvatarUrl: null,
+          },
+          post: {
+            id: 'p2',
+            content: 'cr',
+            releaseURL: 'rr',
+            analytics: redditAnalytics(20),
+            integration: null,
+            settings: null,
+          },
         },
         {
           id: 's3',
-          opportunity: { id: 'o3', platform: 'x', authorUsername: 'carol', authorAvatarUrl: null },
-          post: { id: 'p3', content: 'cx2', releaseURL: 'rx2', analytics: xAnalytics(3), integration: null, settings: null },
+          opportunity: {
+            id: 'o3',
+            platform: 'x',
+            authorUsername: 'carol',
+            authorAvatarUrl: null,
+          },
+          post: {
+            id: 'p3',
+            content: 'cx2',
+            releaseURL: 'rx2',
+            analytics: xAnalytics(3),
+            integration: null,
+            settings: null,
+          },
         },
       ]);
 
@@ -1387,16 +1679,31 @@ describe('EngageRepository — two-table reads', () => {
       expect(res.items[0].metric).toBe(20); // upvotes
       expect(res.items[1].metric).toBe(7); // likes
       // reply-author (the posting account) is surfaced for the panel.
-      expect(res.items[1].post.replyAuthor).toMatchObject({ handle: 'me', avatarUrl: 'm.png' });
+      expect(res.items[1].post.replyAuthor).toMatchObject({
+        handle: 'me',
+        avatarUrl: 'm.png',
+      });
       expect(res.items[1].post.metrics.likes).toBe(7);
     });
 
     it('respects the limit after ranking', async () => {
       const { repo, sentFindMany } = buildRepo();
       sentFindMany.mockResolvedValue([
-        { id: 's1', opportunity: { platform: 'x', authorUsername: 'a' }, post: { analytics: xAnalytics(1), integration: null, settings: null } },
-        { id: 's2', opportunity: { platform: 'x', authorUsername: 'b' }, post: { analytics: xAnalytics(9), integration: null, settings: null } },
-        { id: 's3', opportunity: { platform: 'x', authorUsername: 'c' }, post: { analytics: xAnalytics(5), integration: null, settings: null } },
+        {
+          id: 's1',
+          opportunity: { platform: 'x', authorUsername: 'a' },
+          post: { analytics: xAnalytics(1), integration: null, settings: null },
+        },
+        {
+          id: 's2',
+          opportunity: { platform: 'x', authorUsername: 'b' },
+          post: { analytics: xAnalytics(9), integration: null, settings: null },
+        },
+        {
+          id: 's3',
+          opportunity: { platform: 'x', authorUsername: 'c' },
+          post: { analytics: xAnalytics(5), integration: null, settings: null },
+        },
       ]);
 
       const res = await repo.getDashboardTopSources('org1', { limit: 2 });
@@ -1408,7 +1715,10 @@ describe('EngageRepository — two-table reads', () => {
       const { repo, sentFindMany } = buildRepo();
       sentFindMany.mockResolvedValue([]);
 
-      await repo.getDashboardTopSources('org1', { platform: 'reddit', limit: 3 });
+      await repo.getDashboardTopSources('org1', {
+        platform: 'reddit',
+        limit: 3,
+      });
 
       const call = sentFindMany.mock.calls[0][0];
       expect(call.where.opportunity).toEqual({ platform: 'reddit' });
@@ -1433,7 +1743,9 @@ describe('EngageRepository — two-table reads', () => {
     it('summary: threads projectId into the sent-reply post filter and the post aggregates', async () => {
       const { repo, sentCount, sentFindMany, postAggregate } = buildRepo();
       sentCount.mockResolvedValue(0);
-      postAggregate.mockResolvedValue({ _sum: { impressions: 0, trafficScore: 0 } });
+      postAggregate.mockResolvedValue({
+        _sum: { impressions: 0, trafficScore: 0 },
+      });
       sentFindMany.mockResolvedValue([]);
 
       await repo.getDashboardSummary('org1', { projectId: 'proj-1' });
@@ -1451,7 +1763,9 @@ describe('EngageRepository — two-table reads', () => {
 
       await repo.getDashboardRepliesTrend('org1', 'daily', 'proj-1');
 
-      expect(sentFindMany.mock.calls[0][0].where.post.is.projectId).toBe('proj-1');
+      expect(sentFindMany.mock.calls[0][0].where.post.is.projectId).toBe(
+        'proj-1'
+      );
     });
 
     it('traffics: filters both the aggregate and the per-reply list', async () => {
@@ -1462,7 +1776,9 @@ describe('EngageRepository — two-table reads', () => {
       await repo.getDashboardTraffics('org1', { projectId: 'proj-1' });
 
       expect(postAggregate.mock.calls[0][0].where.projectId).toBe('proj-1');
-      expect(sentFindMany.mock.calls[0][0].where.post.is.projectId).toBe('proj-1');
+      expect(sentFindMany.mock.calls[0][0].where.post.is.projectId).toBe(
+        'proj-1'
+      );
     });
 
     it('impressions: filters the direct Post query by projectId', async () => {
@@ -1480,7 +1796,9 @@ describe('EngageRepository — two-table reads', () => {
 
       await repo.getDashboardTopSources('org1', { projectId: 'proj-1' });
 
-      expect(sentFindMany.mock.calls[0][0].where.post.is.projectId).toBe('proj-1');
+      expect(sentFindMany.mock.calls[0][0].where.post.is.projectId).toBe(
+        'proj-1'
+      );
     });
 
     it('omitting projectId adds no projectId key (legacy org-wide behavior)', async () => {
@@ -1497,7 +1815,9 @@ describe('EngageRepository — two-table reads', () => {
     it('no date → all-time: repliesCount = total, no publishDate window', async () => {
       const { repo, sentCount, sentFindMany, postAggregate } = buildRepo();
       sentCount.mockResolvedValueOnce(10).mockResolvedValueOnce(3); // total, replied
-      postAggregate.mockResolvedValue({ _sum: { impressions: 4200, trafficScore: 286.4 } });
+      postAggregate.mockResolvedValue({
+        _sum: { impressions: 4200, trafficScore: 286.4 },
+      });
       sentFindMany.mockResolvedValue([]); // no likes sample → avgLikes 0
 
       const res = await repo.getSentStats('org1', {});
@@ -1555,7 +1875,9 @@ describe('EngageRepository — two-table reads', () => {
     it("date='day' is accepted and windowed (shared vocab with /dashboard/summary)", async () => {
       const { repo, sentCount, sentFindMany, postAggregate } = buildRepo();
       sentCount.mockResolvedValue(0);
-      postAggregate.mockResolvedValue({ _sum: { impressions: 0, trafficScore: 0 } });
+      postAggregate.mockResolvedValue({
+        _sum: { impressions: 0, trafficScore: 0 },
+      });
       sentFindMany.mockResolvedValue([]);
 
       // 'day' previously had no effect here (inline mapper only knew 'today');
@@ -1563,7 +1885,9 @@ describe('EngageRepository — two-table reads', () => {
       await repo.getSentStats('org1', { date: 'day' });
 
       expect(sentCount.mock.calls[0][0].where.post.source).toBe('engage');
-      expect(sentCount.mock.calls[0][0].where.post.publishDate.gte).toBeInstanceOf(Date);
+      expect(
+        sentCount.mock.calls[0][0].where.post.publishDate.gte
+      ).toBeInstanceOf(Date);
     });
 
     it('status=awaiting-draft: DRAFT posts whose opportunity is not EXPIRED for this org', async () => {
@@ -1577,7 +1901,13 @@ describe('EngageRepository — two-table reads', () => {
       const where = sentCount.mock.calls[0][0].where;
       expect(where.post).toMatchObject({ source: 'engage', state: 'DRAFT' });
       expect(where.opportunity).toEqual({
-        states: { some: { organizationId: 'org1', projectId: null, status: { not: 'EXPIRED' } } },
+        states: {
+          some: {
+            organizationId: 'org1',
+            projectId: null,
+            status: { not: 'EXPIRED' },
+          },
+        },
       });
     });
 
@@ -1592,7 +1922,9 @@ describe('EngageRepository — two-table reads', () => {
       const where = sentCount.mock.calls[0][0].where;
       expect(where.post).toMatchObject({ source: 'engage', state: 'DRAFT' });
       expect(where.opportunity).toEqual({
-        states: { some: { organizationId: 'org1', projectId: null, status: 'EXPIRED' } },
+        states: {
+          some: { organizationId: 'org1', projectId: null, status: 'EXPIRED' },
+        },
       });
     });
 
@@ -1602,12 +1934,17 @@ describe('EngageRepository — two-table reads', () => {
       postAggregate.mockResolvedValue({ _sum: { impressions: 0 } });
       sentFindMany.mockResolvedValue([]);
 
-      await repo.getSentStats('org1', { status: 'awaiting-expired', platform: 'x' });
+      await repo.getSentStats('org1', {
+        status: 'awaiting-expired',
+        platform: 'x',
+      });
 
       const where = sentCount.mock.calls[0][0].where;
       expect(where.opportunity).toEqual({
         platform: 'x',
-        states: { some: { organizationId: 'org1', projectId: null, status: 'EXPIRED' } },
+        states: {
+          some: { organizationId: 'org1', projectId: null, status: 'EXPIRED' },
+        },
       });
     });
 
@@ -1622,10 +1959,7 @@ describe('EngageRepository — two-table reads', () => {
       const where = sentCount.mock.calls[0][0].where;
       expect(where.post).toMatchObject({
         source: 'engage',
-        OR: [
-          { state: 'PUBLISHED', releaseURL: null },
-          { state: 'ERROR' },
-        ],
+        OR: [{ state: 'PUBLISHED', releaseURL: null }, { state: 'ERROR' }],
       });
       // No opportunity-state narrowing needed here — unlike awaiting-draft/-expired.
       expect(where.opportunity).toBeUndefined();
@@ -1637,7 +1971,10 @@ describe('EngageRepository — two-table reads', () => {
       postAggregate.mockResolvedValue({ _sum: { impressions: 0 } });
       sentFindMany.mockResolvedValue([]);
 
-      await repo.getSentStats('org1', { projectId: 'proj-1', platform: 'reddit' });
+      await repo.getSentStats('org1', {
+        projectId: 'proj-1',
+        platform: 'reddit',
+      });
 
       // Stats must filter on the requested project, not collapse to null-project
       // (which returned the legacy/global replies and disagreed with /sent).
@@ -1682,24 +2019,35 @@ describe('EngageRepository — two-table reads', () => {
       // The three sub-counts key off the same status filters as getSentStats'
       // awaiting-draft/-link/-expired branches.
       const draftWhere = sentCount.mock.calls[5][0].where;
-      expect(draftWhere.post).toMatchObject({ source: 'engage', state: 'DRAFT' });
+      expect(draftWhere.post).toMatchObject({
+        source: 'engage',
+        state: 'DRAFT',
+      });
       expect(draftWhere.opportunity).toEqual({
-        states: { some: { organizationId: 'org1', projectId: null, status: { not: 'EXPIRED' } } },
+        states: {
+          some: {
+            organizationId: 'org1',
+            projectId: null,
+            status: { not: 'EXPIRED' },
+          },
+        },
       });
 
       const linkWhere = sentCount.mock.calls[6][0].where;
       expect(linkWhere.post).toMatchObject({
         source: 'engage',
-        OR: [
-          { state: 'PUBLISHED', releaseURL: null },
-          { state: 'ERROR' },
-        ],
+        OR: [{ state: 'PUBLISHED', releaseURL: null }, { state: 'ERROR' }],
       });
 
       const expiredWhere = sentCount.mock.calls[7][0].where;
-      expect(expiredWhere.post).toMatchObject({ source: 'engage', state: 'DRAFT' });
+      expect(expiredWhere.post).toMatchObject({
+        source: 'engage',
+        state: 'DRAFT',
+      });
       expect(expiredWhere.opportunity).toEqual({
-        states: { some: { organizationId: 'org1', projectId: null, status: 'EXPIRED' } },
+        states: {
+          some: { organizationId: 'org1', projectId: null, status: 'EXPIRED' },
+        },
       });
     });
 
@@ -1733,7 +2081,10 @@ describe('EngageRepository — two-table reads', () => {
       const { repo, sentCount } = buildRepo();
       sentCount.mockResolvedValue(0);
 
-      await repo.countSentReplies('org1', { status: 'awaiting', projectId: 'proj-1' });
+      await repo.countSentReplies('org1', {
+        status: 'awaiting',
+        projectId: 'proj-1',
+      });
 
       // Total + rollups + all three awaiting sub-counts must carry projectId, so
       // the tab badges match the project-scoped /sent list instead of the global one.
@@ -1746,7 +2097,9 @@ describe('EngageRepository — two-table reads', () => {
       const { repo, sentCount } = buildRepo();
       sentCount.mockResolvedValue(0);
 
-      const res = await repo.getSentCountsSummary('org1', { projectId: 'proj-1' });
+      const res = await repo.getSentCountsSummary('org1', {
+        projectId: 'proj-1',
+      });
 
       expect(sentCount).toHaveBeenCalledTimes(8);
       // total where: no status → not-DRAFT branch is skipped (includeDrafts) and
@@ -1779,7 +2132,11 @@ describe('EngageRepository — two-table reads', () => {
       } as any;
       const post = { model: { post: { create: postCreate } } } as any;
       const repo = new EngageRepository(
-        {} as any, {} as any, {} as any, {} as any, {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
         {} as any,
         integration, // _integration
         {} as any,   // _integrationProject
@@ -1837,7 +2194,8 @@ describe('EngageRepository — two-table reads', () => {
     });
 
     it('resolves the author-handle integration when none is supplied', async () => {
-      const { repo, integrationFindFirst, integrationFindMany, postCreate } = buildXRepo();
+      const { repo, integrationFindFirst, integrationFindMany, postCreate } =
+        buildXRepo();
       // Org has two live X accounts; the reply tweet's author handle matches one.
       integrationFindMany.mockResolvedValue([
         { id: 'other', profile: 'someoneelse', integrationProjects: [] },
@@ -1885,7 +2243,11 @@ describe('EngageRepository — two-table reads', () => {
       // than misrepresent authorship with a fallback account.
       integrationFindMany.mockResolvedValue([
         { id: 'other', profile: 'someoneelse', integrationProjects: [] },
-        { id: 'brand', profile: 'brandhq', integrationProjects: [{ engageEnabled: true }] },
+        {
+          id: 'brand',
+          profile: 'brandhq',
+          integrationProjects: [{ engageEnabled: true }],
+        },
       ]);
       postCreate.mockResolvedValue({ id: 'post1' });
 
@@ -1915,7 +2277,11 @@ describe('EngageRepository — two-table reads', () => {
 
       const settings = JSON.parse(postCreate.mock.calls[0][0].data.settings);
       expect(settings.__type).toBe('x');
-      expect(settings.engageAuthor).toEqual({ handle: 'externalguy', id: '42', name: 'External Guy' });
+      expect(settings.engageAuthor).toEqual({
+        handle: 'externalguy',
+        id: '42',
+        name: 'External Guy',
+      });
     });
 
     it('does NOT write engageAuthor when an integration authored the reply (integrationId is source of truth)', async () => {
@@ -1978,8 +2344,13 @@ describe('EngageRepository — two-table reads', () => {
       const postCreate = vi.fn();
       const post = { model: { post: { create: postCreate } } } as any;
       const repo = new EngageRepository(
-        {} as any, {} as any, {} as any, {} as any,
-        {} as any, {} as any, {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
         {} as any,   // _integrationProject,
         post, // _post
         {} as any
@@ -1996,7 +2367,12 @@ describe('EngageRepository — two-table reads', () => {
         content: 'reply',
         date: new Date(0),
         replyUrl: 'https://www.reddit.com/r/sub/comments/abc/title/def/',
-        engageAuthor: { handle: 'bigbaffler', id: 't2_9', name: 'Big Baffler', avatarUrl: 'https://x/a.png' },
+        engageAuthor: {
+          handle: 'bigbaffler',
+          id: 't2_9',
+          name: 'Big Baffler',
+          avatarUrl: 'https://x/a.png',
+        },
       });
 
       const data = postCreate.mock.calls[0][0].data;
@@ -2004,7 +2380,10 @@ describe('EngageRepository — two-table reads', () => {
       const settings = JSON.parse(data.settings);
       expect(settings.__type).toBe('reddit');
       expect(settings.engageAuthor).toEqual({
-        handle: 'bigbaffler', id: 't2_9', name: 'Big Baffler', avatarUrl: 'https://x/a.png',
+        handle: 'bigbaffler',
+        id: 't2_9',
+        name: 'Big Baffler',
+        avatarUrl: 'https://x/a.png',
       });
     });
 
@@ -2049,17 +2428,25 @@ describe('EngageRepository — two-table reads', () => {
       const count = vi.fn(async () => 3);
       const sentReply = { model: { engageSentReply: { count } } } as any;
       const repo = new EngageRepository(
-        {} as any, {} as any, {} as any, {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
         {} as any,
         sentReply, // _sentReply
         {} as any,
-        {} as any,   // _integrationProject, {} as any, {} as any
+        {} as any // _integrationProject, {} as any, {} as any
       );
       const since = new Date('2026-07-16T00:00:00Z');
       const until = new Date('2026-07-17T00:00:00Z');
 
       const n = await repo.countProjectKeywordSentRepliesToday(
-        'org1', 'proj-1', 'x', 'react', since, until
+        'org1',
+        'proj-1',
+        'x',
+        'react',
+        since,
+        until
       );
 
       expect(n).toBe(3);
@@ -2077,40 +2464,67 @@ describe('EngageRepository — two-table reads', () => {
     function buildRepo(existing: Array<{ id: string; keyword: string }>) {
       const findMany = vi.fn().mockResolvedValue(existing);
       const findFirst = vi.fn();
-      const keyword = { model: { engageKeyword: { findMany, findFirst } } } as any;
+      const keyword = {
+        model: { engageKeyword: { findMany, findFirst } },
+      } as any;
       const configUpdate = vi.fn().mockResolvedValue({});
-      const config = { model: { engageConfig: { update: configUpdate } } } as any;
+      const config = {
+        model: { engageConfig: { update: configUpdate } },
+      } as any;
       const repo = new EngageRepository(
         config, // _config
         keyword, // _keyword
-        {} as any, {} as any, {} as any, {} as any,
         {} as any,
-        {} as any,   // _integrationProject, {} as any, {} as any, {} as any, {} as any
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any // _integrationProject, {} as any, {} as any, {} as any, {} as any
       );
       return { repo, findMany, findFirst, configUpdate };
     }
 
     it('resolves existing ids (normalized) and creates missing keywords, keyed by original text', async () => {
       const { repo } = buildRepo([{ id: 'kw-ai', keyword: 'AI' }]);
-      vi.spyOn(repo, 'getOrCreateConfig').mockResolvedValue({ id: 'cfg-1', enabled: true } as any);
+      vi.spyOn(repo, 'getOrCreateConfig').mockResolvedValue({
+        id: 'cfg-1',
+        enabled: true,
+      } as any);
       const addKeyword = vi
         .spyOn(repo, 'addKeyword')
-        .mockImplementation(async (_c: any, _o: any, dto: any) => ({ id: `new-${dto.keyword}` } as any));
+        .mockImplementation(
+          async (_c: any, _o: any, dto: any) =>
+            ({ id: `new-${dto.keyword}` } as any)
+        );
 
-      const result = await repo.resolveOrCreateKeywordIds('org1', 'proj-1', ['AI', 'apcore', 'ai']);
+      const result = await repo.resolveOrCreateKeywordIds('org1', 'proj-1', [
+        'AI',
+        'apcore',
+        'ai',
+      ]);
 
       // 'AI' and 'ai' both collapse (normalizeKeyword) to the existing kw-ai;
       // only 'apcore' is created; the result preserves each original spelling.
-      expect(result).toEqual({ AI: 'kw-ai', ai: 'kw-ai', apcore: 'new-apcore' });
+      expect(result).toEqual({
+        AI: 'kw-ai',
+        ai: 'kw-ai',
+        apcore: 'new-apcore',
+      });
       expect(addKeyword).toHaveBeenCalledTimes(1);
-      expect(addKeyword).toHaveBeenCalledWith('cfg-1', 'org1', { keyword: 'apcore' });
+      expect(addKeyword).toHaveBeenCalledWith('cfg-1', 'org1', {
+        keyword: 'apcore',
+      });
     });
 
     it('skips blank inputs and does not touch config/keywords when nothing usable is passed', async () => {
       const { repo, findMany } = buildRepo([]);
       const getCfg = vi.spyOn(repo, 'getOrCreateConfig');
 
-      const result = await repo.resolveOrCreateKeywordIds('org1', null, ['', '   ', '']);
+      const result = await repo.resolveOrCreateKeywordIds('org1', null, [
+        '',
+        '   ',
+        '',
+      ]);
 
       expect(result).toEqual({});
       expect(getCfg).not.toHaveBeenCalled();
@@ -2119,20 +2533,32 @@ describe('EngageRepository — two-table reads', () => {
 
     it('re-reads the row on a create race instead of dropping the keyword', async () => {
       const { repo, findFirst } = buildRepo([]);
-      vi.spyOn(repo, 'getOrCreateConfig').mockResolvedValue({ id: 'cfg-1', enabled: true } as any);
+      vi.spyOn(repo, 'getOrCreateConfig').mockResolvedValue({
+        id: 'cfg-1',
+        enabled: true,
+      } as any);
       // addKeyword loses the unique race and throws; the row now exists.
-      vi.spyOn(repo, 'addKeyword').mockRejectedValue(new Error('Keyword already exists'));
+      vi.spyOn(repo, 'addKeyword').mockRejectedValue(
+        new Error('Keyword already exists')
+      );
       findFirst.mockResolvedValue({ id: 'kw-raced', keyword: 'apcore' });
 
-      const result = await repo.resolveOrCreateKeywordIds('org1', 'proj-1', ['apcore']);
+      const result = await repo.resolveOrCreateKeywordIds('org1', 'proj-1', [
+        'apcore',
+      ]);
 
       expect(result).toEqual({ apcore: 'kw-raced' });
     });
 
     it('activates a disabled config so the plan keywords actually run (config enabled:false → true)', async () => {
-      const { repo, configUpdate } = buildRepo([{ id: 'kw-ai', keyword: 'AI' }]);
+      const { repo, configUpdate } = buildRepo([
+        { id: 'kw-ai', keyword: 'AI' },
+      ]);
       // getOrCreateConfig returns a freshly-created, DISABLED project config.
-      vi.spyOn(repo, 'getOrCreateConfig').mockResolvedValue({ id: 'cfg-1', enabled: false } as any);
+      vi.spyOn(repo, 'getOrCreateConfig').mockResolvedValue({
+        id: 'cfg-1',
+        enabled: false,
+      } as any);
 
       await repo.resolveOrCreateKeywordIds('org1', 'proj-1', ['AI']);
 
@@ -2144,8 +2570,13 @@ describe('EngageRepository — two-table reads', () => {
     });
 
     it('leaves an already-enabled config untouched (no needless write on re-drive)', async () => {
-      const { repo, configUpdate } = buildRepo([{ id: 'kw-ai', keyword: 'AI' }]);
-      vi.spyOn(repo, 'getOrCreateConfig').mockResolvedValue({ id: 'cfg-1', enabled: true } as any);
+      const { repo, configUpdate } = buildRepo([
+        { id: 'kw-ai', keyword: 'AI' },
+      ]);
+      vi.spyOn(repo, 'getOrCreateConfig').mockResolvedValue({
+        id: 'cfg-1',
+        enabled: true,
+      } as any);
 
       await repo.resolveOrCreateKeywordIds('org1', 'proj-1', ['AI']);
 
@@ -2158,28 +2589,46 @@ describe('EngageRepository — two-table reads', () => {
       const sentFindFirst = vi.fn();
       const postFindUnique = vi.fn();
       const postUpdate = vi.fn(async (a: any) => a);
-      const sentReply = { model: { engageSentReply: { findFirst: sentFindFirst } } } as any;
+      const sentReply = {
+        model: { engageSentReply: { findFirst: sentFindFirst } },
+      } as any;
       const post = {
         model: { post: { findUnique: postFindUnique, update: postUpdate } },
       } as any;
       const repo = new EngageRepository(
-        {} as any, {} as any, {} as any, {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
         {} as any,
         sentReply,    // _sentReply (index 6)
         {} as any,
         {} as any,   // _integrationProject,    // _integration (index 7)
         post,         // _post (index 8)
-        {} as any, {} as any
+        {} as any,
+        {} as any
       );
       return { repo, sentFindFirst, postFindUnique, postUpdate };
     }
 
-    const author = { handle: 'benppoulton', id: 't2_1', name: 'Ben Poulton', avatarUrl: 'https://x/a.jpg' };
+    const author = {
+      handle: 'benppoulton',
+      id: 't2_1',
+      name: 'Ben Poulton',
+      avatarUrl: 'https://x/a.jpg',
+    };
 
     it('reddit: always merges engageAuthor into settings, preserving __type', async () => {
-      const { repo, sentFindFirst, postFindUnique, postUpdate } = buildAuthorRepo();
-      sentFindFirst.mockResolvedValue({ postId: 'post1', opportunity: { platform: 'reddit' } });
-      postFindUnique.mockResolvedValue({ integrationId: null, settings: '{"__type":"reddit"}' });
+      const { repo, sentFindFirst, postFindUnique, postUpdate } =
+        buildAuthorRepo();
+      sentFindFirst.mockResolvedValue({
+        postId: 'post1',
+        opportunity: { platform: 'reddit' },
+      });
+      postFindUnique.mockResolvedValue({
+        integrationId: null,
+        settings: '{"__type":"reddit"}',
+      });
 
       await repo.updateReplyAuthor('org1', 'reply1', author);
 
@@ -2192,19 +2641,35 @@ describe('EngageRepository — two-table reads', () => {
     });
 
     it('x WITHOUT an integration: records engageAuthor (the fallback identity)', async () => {
-      const { repo, sentFindFirst, postFindUnique, postUpdate } = buildAuthorRepo();
-      sentFindFirst.mockResolvedValue({ postId: 'post1', opportunity: { platform: 'x' } });
-      postFindUnique.mockResolvedValue({ integrationId: null, settings: '{"__type":"x"}' });
+      const { repo, sentFindFirst, postFindUnique, postUpdate } =
+        buildAuthorRepo();
+      sentFindFirst.mockResolvedValue({
+        postId: 'post1',
+        opportunity: { platform: 'x' },
+      });
+      postFindUnique.mockResolvedValue({
+        integrationId: null,
+        settings: '{"__type":"x"}',
+      });
 
       await repo.updateReplyAuthor('org1', 'reply1', author);
 
-      expect(JSON.parse(postUpdate.mock.calls[0][0].data.settings).engageAuthor).toEqual(author);
+      expect(
+        JSON.parse(postUpdate.mock.calls[0][0].data.settings).engageAuthor
+      ).toEqual(author);
     });
 
     it('x WITH a connected integration: no-op (integration is source of truth)', async () => {
-      const { repo, sentFindFirst, postFindUnique, postUpdate } = buildAuthorRepo();
-      sentFindFirst.mockResolvedValue({ postId: 'post1', opportunity: { platform: 'x' } });
-      postFindUnique.mockResolvedValue({ integrationId: 'int1', settings: '{"__type":"x"}' });
+      const { repo, sentFindFirst, postFindUnique, postUpdate } =
+        buildAuthorRepo();
+      sentFindFirst.mockResolvedValue({
+        postId: 'post1',
+        opportunity: { platform: 'x' },
+      });
+      postFindUnique.mockResolvedValue({
+        integrationId: 'int1',
+        settings: '{"__type":"x"}',
+      });
 
       const out = await repo.updateReplyAuthor('org1', 'reply1', author);
 
@@ -2228,15 +2693,21 @@ describe('EngageRepository — two-table reads', () => {
     // withMetrics / missing / missingIntegration (X) / Σimpressions / Σtraffic.
     function buildStatsRepo() {
       const sentFindMany = vi.fn();
-      const sentReply = { model: { engageSentReply: { findMany: sentFindMany } } } as any;
+      const sentReply = {
+        model: { engageSentReply: { findMany: sentFindMany } },
+      } as any;
       const repo = new EngageRepository(
-        {} as any, {} as any, {} as any, {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
         {} as any,
         sentReply,    // _sentReply
         {} as any,
         {} as any,   // _integrationProject,    // _integration
         {} as any,    // _post
-        {} as any, {} as any
+        {} as any,
+        {} as any
       );
       return { repo, sentFindMany };
     }
@@ -2246,15 +2717,87 @@ describe('EngageRepository — two-table reads', () => {
       const url = 'https://x.com/u/status/123';
       sentFindMany.mockResolvedValue([
         // X — one of each bucket
-        { post: { impressions: 100, trafficScore: 2.4, integrationId: 'i1', releaseURL: url, releaseId: '123' }, opportunity: { platform: 'x' } }, // has_metrics
-        { post: { impressions: null, trafficScore: null, integrationId: null, releaseURL: null, releaseId: null }, opportunity: { platform: 'x' } }, // no_release_url
-        { post: { impressions: null, trafficScore: null, integrationId: null, releaseURL: url, releaseId: '123' }, opportunity: { platform: 'x' } }, // no_integration
-        { post: { impressions: null, trafficScore: null, integrationId: 'i2', releaseURL: url, releaseId: null }, opportunity: { platform: 'x' } }, // no_release_id
-        { post: { impressions: null, trafficScore: null, integrationId: 'i2', releaseURL: url, releaseId: '123' }, opportunity: { platform: 'x' } }, // syncable
+        {
+          post: {
+            impressions: 100,
+            trafficScore: 2.4,
+            integrationId: 'i1',
+            releaseURL: url,
+            releaseId: '123',
+          },
+          opportunity: { platform: 'x' },
+        }, // has_metrics
+        {
+          post: {
+            impressions: null,
+            trafficScore: null,
+            integrationId: null,
+            releaseURL: null,
+            releaseId: null,
+          },
+          opportunity: { platform: 'x' },
+        }, // no_release_url
+        {
+          post: {
+            impressions: null,
+            trafficScore: null,
+            integrationId: null,
+            releaseURL: url,
+            releaseId: '123',
+          },
+          opportunity: { platform: 'x' },
+        }, // no_integration
+        {
+          post: {
+            impressions: null,
+            trafficScore: null,
+            integrationId: 'i2',
+            releaseURL: url,
+            releaseId: null,
+          },
+          opportunity: { platform: 'x' },
+        }, // no_release_id
+        {
+          post: {
+            impressions: null,
+            trafficScore: null,
+            integrationId: 'i2',
+            releaseURL: url,
+            releaseId: '123',
+          },
+          opportunity: { platform: 'x' },
+        }, // syncable
         // Reddit — needs only a releaseURL
-        { post: { impressions: 40, trafficScore: 7.6, integrationId: null, releaseURL: 'https://reddit.com/r/x/comments/a/b/c1', releaseId: null }, opportunity: { platform: 'reddit' } }, // has_metrics
-        { post: { impressions: null, trafficScore: null, integrationId: null, releaseURL: null, releaseId: null }, opportunity: { platform: 'reddit' } }, // no_release_url
-        { post: { impressions: null, trafficScore: null, integrationId: null, releaseURL: 'https://reddit.com/r/x/comments/a/b/c2', releaseId: null }, opportunity: { platform: 'reddit' } }, // syncable
+        {
+          post: {
+            impressions: 40,
+            trafficScore: 7.6,
+            integrationId: null,
+            releaseURL: 'https://reddit.com/r/x/comments/a/b/c1',
+            releaseId: null,
+          },
+          opportunity: { platform: 'reddit' },
+        }, // has_metrics
+        {
+          post: {
+            impressions: null,
+            trafficScore: null,
+            integrationId: null,
+            releaseURL: null,
+            releaseId: null,
+          },
+          opportunity: { platform: 'reddit' },
+        }, // no_release_url
+        {
+          post: {
+            impressions: null,
+            trafficScore: null,
+            integrationId: null,
+            releaseURL: 'https://reddit.com/r/x/comments/a/b/c2',
+            releaseId: null,
+          },
+          opportunity: { platform: 'reddit' },
+        }, // syncable
       ]);
 
       const stats = await repo.getEngageMetricsStats('org1');
@@ -2305,25 +2848,39 @@ describe('EngageRepository — two-table reads', () => {
       const sentFindMany = vi.fn();
       const integrationFindMany = vi.fn().mockResolvedValue([]);
       const postUpdate = vi.fn().mockResolvedValue({});
-      const sentReply = { model: { engageSentReply: { findMany: sentFindMany } } } as any;
-      const integration = { model: { integration: { findMany: integrationFindMany } } } as any;
+      const sentReply = {
+        model: { engageSentReply: { findMany: sentFindMany } },
+      } as any;
+      const integration = {
+        model: { integration: { findMany: integrationFindMany } },
+      } as any;
       const post = { model: { post: { update: postUpdate } } } as any;
       const repo = new EngageRepository(
-        {} as any, {} as any, {} as any, {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
         {} as any,
         sentReply,    // _sentReply
         integration,
         {} as any,   // _integrationProject,  // _integration
         post,         // _post
-        {} as any, {} as any
+        {} as any,
+        {} as any
       );
       return { repo, sentFindMany, integrationFindMany, postUpdate };
     }
 
     it('resolves by author handle and writes integrationId when executing', async () => {
-      const { repo, sentFindMany, integrationFindMany, postUpdate } = buildBackfillRepo();
+      const { repo, sentFindMany, integrationFindMany, postUpdate } =
+        buildBackfillRepo();
       sentFindMany.mockResolvedValue([
-        { post: { id: 'post1', releaseURL: 'https://x.com/zhngyq310334/status/1' } },
+        {
+          post: {
+            id: 'post1',
+            releaseURL: 'https://x.com/zhngyq310334/status/1',
+          },
+        },
       ]);
       integrationFindMany.mockResolvedValue([
         { id: 'author', profile: 'zhngyq310334', integrationProjects: [] },
@@ -2336,13 +2893,23 @@ describe('EngageRepository — two-table reads', () => {
         data: { integrationId: 'author' },
       });
       expect(res).toMatchObject({ found: 1, filled: 1, unresolved: 0 });
-      expect(res.items[0]).toEqual({ postId: 'post1', integrationId: 'author', matchedBy: 'handle' });
+      expect(res.items[0]).toEqual({
+        postId: 'post1',
+        integrationId: 'author',
+        matchedBy: 'handle',
+      });
     });
 
     it('does not write in dry-run, but still reports what would be filled', async () => {
-      const { repo, sentFindMany, integrationFindMany, postUpdate } = buildBackfillRepo();
+      const { repo, sentFindMany, integrationFindMany, postUpdate } =
+        buildBackfillRepo();
       sentFindMany.mockResolvedValue([
-        { post: { id: 'post1', releaseURL: 'https://x.com/someoneelse/status/1' } },
+        {
+          post: {
+            id: 'post1',
+            releaseURL: 'https://x.com/someoneelse/status/1',
+          },
+        },
       ]);
       integrationFindMany.mockResolvedValue([
         { id: 'author', profile: 'someoneelse', integrationProjects: [] },
@@ -2356,7 +2923,8 @@ describe('EngageRepository — two-table reads', () => {
     });
 
     it('counts replies as unresolved when the org has no usable X account', async () => {
-      const { repo, sentFindMany, integrationFindMany, postUpdate } = buildBackfillRepo();
+      const { repo, sentFindMany, integrationFindMany, postUpdate } =
+        buildBackfillRepo();
       sentFindMany.mockResolvedValue([
         { post: { id: 'post1', releaseURL: 'https://x.com/u/status/1' } },
       ]);
@@ -2370,13 +2938,23 @@ describe('EngageRepository — two-table reads', () => {
     });
 
     it('leaves external-authored replies unresolved (no handle match → no fallback)', async () => {
-      const { repo, sentFindMany, integrationFindMany, postUpdate } = buildBackfillRepo();
+      const { repo, sentFindMany, integrationFindMany, postUpdate } =
+        buildBackfillRepo();
       sentFindMany.mockResolvedValue([
-        { post: { id: 'post1', releaseURL: 'https://x.com/externalguy/status/1' } },
+        {
+          post: {
+            id: 'post1',
+            releaseURL: 'https://x.com/externalguy/status/1',
+          },
+        },
       ]);
       // Org has a live X account, but it isn't the reply's author.
       integrationFindMany.mockResolvedValue([
-        { id: 'brand', profile: 'brandhq', integrationProjects: [{ engageEnabled: true }] },
+        {
+          id: 'brand',
+          profile: 'brandhq',
+          integrationProjects: [{ engageEnabled: true }],
+        },
       ]);
 
       const res = await repo.backfillXReplyIntegrations('org1', false);
@@ -2399,7 +2977,10 @@ describe('EngageRepository — two-table reads', () => {
         {} as any,
         keyword, // _keyword
         {} as any,
-        {} as any, {} as any, {} as any, {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
         {} as any,   // _integrationProject, {} as any,
         {} as any
       );
@@ -2491,7 +3072,14 @@ describe('EngageRepository — two-table reads', () => {
       const initialUpsert = vi.fn().mockResolvedValue({});
       const repo = new EngageRepository(
         {} as any,   // _config
-        { model: { engageKeyword: { findFirst: keywordFindFirst, update: keywordUpdate } } } as any,
+        {
+          model: {
+            engageKeyword: {
+              findFirst: keywordFindFirst,
+              update: keywordUpdate,
+            },
+          },
+        } as any,
         {} as any,   // _trackedAccount
         {} as any,   // _opportunity
         {} as any,   // _oppState
@@ -2501,14 +3089,18 @@ describe('EngageRepository — two-table reads', () => {
         {} as any,   // _post
         {} as any,   // _tx
         {} as any,   // _scanCursor
-        { model: { engageKeywordInitialScan: { upsert: initialUpsert } } } as any
+        {
+          model: { engageKeywordInitialScan: { upsert: initialUpsert } },
+        } as any
       );
 
       await repo.updateKeyword('org1', 'kw1', { enabled: true } as any);
 
       expect(initialUpsert).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { keywordId_platform: { keywordId: 'kw1', platform: 'reddit' } },
+          where: {
+            keywordId_platform: { keywordId: 'kw1', platform: 'reddit' },
+          },
           update: expect.objectContaining({
             status: 'PENDING',
             startedAt: null,
@@ -2548,13 +3140,25 @@ describe('EngageRepository — two-table reads', () => {
       const initialUpsert = vi.fn().mockResolvedValue({});
       const repo = new EngageRepository(
         {} as any,
-        { model: { engageKeyword: { findFirst: keywordFindFirst, update: keywordUpdate } } } as any,
+        {
+          model: {
+            engageKeyword: {
+              findFirst: keywordFindFirst,
+              update: keywordUpdate,
+            },
+          },
+        } as any,
         {} as any,
-        {} as any, {} as any, {} as any, {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
         {} as any,   // _integrationProject, {} as any,
         {} as any,
         {} as any,
-        { model: { engageKeywordInitialScan: { upsert: initialUpsert } } } as any
+        {
+          model: { engageKeywordInitialScan: { upsert: initialUpsert } },
+        } as any
       );
 
       await repo.updateKeyword('org1', 'kw1', { type: 'BRAND' } as any);
@@ -2572,10 +3176,16 @@ describe('EngageRepository — two-table reads', () => {
         model: { engageTrackedAccount: { create: channelCreate } },
       } as any;
       const repo = new EngageRepository(
-        {} as any, {} as any,
-        trackedAccount, {} as any, {} as any, {} as any, {} as any,
+        {} as any,
+        {} as any,
+        trackedAccount,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
         {} as any,   // _integrationProject,
-        {} as any, {} as any
+        {} as any,
+        {} as any
       );
       return { repo, channelCreate };
     }
@@ -2633,7 +3243,10 @@ describe('EngageRepository — two-table reads', () => {
         audienceSize: 12,
       });
       // Returned in the legacy channel shape the API contract still promises.
-      expect(res).toMatchObject({ channelId: 'football', channelName: 'r/football' });
+      expect(res).toMatchObject({
+        channelId: 'football',
+        channelName: 'r/football',
+      });
     });
 
     it('rejects a platform that has no channel scope', async () => {
@@ -2657,10 +3270,16 @@ describe('EngageRepository — two-table reads', () => {
         model: { engageTrackedAccount: { create: trackedCreate } },
       } as any;
       const repo = new EngageRepository(
-        {} as any, {} as any,
-        trackedAccount, {} as any, {} as any, {} as any, {} as any,
+        {} as any,
+        {} as any,
+        trackedAccount,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
         {} as any,   // _integrationProject,
-        {} as any, {} as any
+        {} as any,
+        {} as any
       );
       return { repo, trackedCreate };
     }
@@ -2727,10 +3346,16 @@ describe('EngageRepository — two-table reads', () => {
         },
       } as any;
       const repo = new EngageRepository(
-        {} as any, {} as any,
-        trackedAccount, {} as any, {} as any, {} as any, {} as any,
+        {} as any,
+        {} as any,
+        trackedAccount,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
         {} as any,   // _integrationProject,
-        {} as any, {} as any
+        {} as any,
+        {} as any
       );
       return { repo, findFirst, update, del };
     }
@@ -2742,7 +3367,9 @@ describe('EngageRepository — two-table reads', () => {
       await expect(
         repo.updateMonitoredChannel('org1', 'id1', { enabled: true } as any)
       ).rejects.toMatchObject({ status: 404 });
-      await expect(repo.removeMonitoredChannel('org1', 'id1')).rejects.toMatchObject({
+      await expect(
+        repo.removeMonitoredChannel('org1', 'id1')
+      ).rejects.toMatchObject({
         status: 404,
       });
 
@@ -2761,7 +3388,9 @@ describe('EngageRepository — two-table reads', () => {
       await expect(
         repo.updateTrackedAccount('org1', 'id1', { enabled: true } as any)
       ).rejects.toMatchObject({ status: 404 });
-      await expect(repo.removeTrackedAccount('org1', 'id1')).rejects.toMatchObject({
+      await expect(
+        repo.removeTrackedAccount('org1', 'id1')
+      ).rejects.toMatchObject({
         status: 404,
       });
 
@@ -2938,7 +3567,13 @@ describe('EngageRepository.getOrgScanStatus', () => {
   const H = 3_600_000;
 
   it('derives keyword next = lastScanStartedAt + cadence; last = lastScannedAt', async () => {
-    const { repo, channelFindMany, trackedFindMany, cursorFindMany, keywordFindMany } = buildRepo();
+    const {
+      repo,
+      channelFindMany,
+      trackedFindMany,
+      cursorFindMany,
+      keywordFindMany,
+    } = buildRepo();
     const started = new Date('2026-06-01T00:00:00Z');
     const scanned = new Date('2026-06-01T00:05:00Z');
     channelFindMany.mockResolvedValue([]); // org monitors no subreddits
@@ -2946,7 +3581,13 @@ describe('EngageRepository.getOrgScanStatus', () => {
     keywordFindMany.mockResolvedValue([{ keyword: 'ai' }]); // org has one keyword
     cursorFindMany.mockImplementation(async ({ where }: any) =>
       where.scanType === 'keyword'
-        ? [{ lastScanStartedAt: started, lastScannedAt: scanned, cooldownUntil: null }]
+        ? [
+            {
+              lastScanStartedAt: started,
+              lastScannedAt: scanned,
+              cooldownUntil: null,
+            },
+          ]
         : []
     );
 
@@ -2962,7 +3603,13 @@ describe('EngageRepository.getOrgScanStatus', () => {
   });
 
   it('cooldownUntil pushes next scan beyond the cadence', async () => {
-    const { repo, channelFindMany, trackedFindMany, cursorFindMany, keywordFindMany } = buildRepo();
+    const {
+      repo,
+      channelFindMany,
+      trackedFindMany,
+      cursorFindMany,
+      keywordFindMany,
+    } = buildRepo();
     const started = new Date('2026-06-01T00:00:00Z');
     const cooldown = new Date('2026-06-05T00:00:00Z'); // far past started + 24h
     channelFindMany.mockResolvedValue([]);
@@ -2970,7 +3617,13 @@ describe('EngageRepository.getOrgScanStatus', () => {
     keywordFindMany.mockResolvedValue([{ keyword: 'ai' }]);
     cursorFindMany.mockImplementation(async ({ where }: any) =>
       where.scanType === 'keyword'
-        ? [{ lastScanStartedAt: started, lastScannedAt: started, cooldownUntil: cooldown }]
+        ? [
+            {
+              lastScanStartedAt: started,
+              lastScannedAt: started,
+              cooldownUntil: cooldown,
+            },
+          ]
         : []
     );
 
@@ -2978,8 +3631,9 @@ describe('EngageRepository.getOrgScanStatus', () => {
     expect(st.keyword.nextScanAt).toEqual(cooldown);
   });
 
-  it('aggregates the org\'s channel cursors: latest last, earliest next', async () => {
-    const { repo, channelFindMany, trackedFindMany, cursorFindMany } = buildRepo();
+  it("aggregates the org's channel cursors: latest last, earliest next", async () => {
+    const { repo, channelFindMany, trackedFindMany, cursorFindMany } =
+      buildRepo();
     // getOrgScanStatus reads the merged table in ONE query and splits by
     // platform, so the channel stub must carry its platform now.
     channelFindMany.mockResolvedValue([
@@ -2994,8 +3648,16 @@ describe('EngageRepository.getOrgScanStatus', () => {
     cursorFindMany.mockImplementation(async ({ where }: any) =>
       where.scanType === 'channel'
         ? [
-            { lastScanStartedAt: aStart, lastScannedAt: aScanned, cooldownUntil: null },
-            { lastScanStartedAt: bStart, lastScannedAt: bScanned, cooldownUntil: null },
+            {
+              lastScanStartedAt: aStart,
+              lastScannedAt: aScanned,
+              cooldownUntil: null,
+            },
+            {
+              lastScanStartedAt: bStart,
+              lastScannedAt: bScanned,
+              cooldownUntil: null,
+            },
           ]
         : []
     );
@@ -3015,7 +3677,8 @@ describe('EngageRepository.getOrgScanStatus', () => {
   });
 
   it('lowercases tracked usernames for the cursor lookup', async () => {
-    const { repo, channelFindMany, trackedFindMany, cursorFindMany } = buildRepo();
+    const { repo, channelFindMany, trackedFindMany, cursorFindMany } =
+      buildRepo();
     channelFindMany.mockResolvedValue([]);
     trackedFindMany.mockResolvedValue([
       { platform: 'x', username: 'OpenAI' },
@@ -3047,7 +3710,11 @@ describe('EngageRepository.getOrgScanStatus', () => {
 
     it('resolves an unscoped reply id as the per-project state id', async () => {
       const { repo, stateFindFirst } = buildRepo();
-      stateFindFirst.mockResolvedValue({ ...STATE_ROW, projectId: 'proj1', status: 'NEW' });
+      stateFindFirst.mockResolvedValue({
+        ...STATE_ROW,
+        projectId: 'proj1',
+        status: 'NEW',
+      });
 
       const opp = (await repo.getOpportunityForReply('org1', 'state1')) as any;
 
@@ -3055,7 +3722,9 @@ describe('EngageRepository.getOrgScanStatus', () => {
       expect(opp.stateId).toBe('state1');
       expect(opp.projectId).toBe('proj1');
       expect(stateFindFirst).toHaveBeenCalledWith(
-        expect.objectContaining({ where: { organizationId: 'org1', id: 'state1' } })
+        expect.objectContaining({
+          where: { organizationId: 'org1', id: 'state1' },
+        })
       );
     });
 
@@ -3078,7 +3747,9 @@ describe('EngageRepository.getOrgScanStatus', () => {
         const { repo, stateFindFirst } = buildRepo();
         stateFindFirst.mockResolvedValue({ ...STATE_ROW, status });
 
-        await expect(repo.getOpportunityForReply('org1', 'opp1')).rejects.toMatchObject({
+        await expect(
+          repo.getOpportunityForReply('org1', 'opp1')
+        ).rejects.toMatchObject({
           // ForbiddenException — surfaced as a typed code + human reason so the
           // UI can tell the user why generation is blocked.
           response: {
@@ -3092,9 +3763,9 @@ describe('EngageRepository.getOrgScanStatus', () => {
     it('404s only a genuinely missing row', async () => {
       const { repo, stateFindFirst } = buildRepo();
       stateFindFirst.mockResolvedValue(null);
-      await expect(repo.getOpportunityForReply('org1', 'missing')).rejects.toThrow(
-        'Opportunity not found'
-      );
+      await expect(
+        repo.getOpportunityForReply('org1', 'missing')
+      ).rejects.toThrow('Opportunity not found');
     });
   });
 
@@ -3139,7 +3810,9 @@ describe('EngageRepository.getOrgScanStatus', () => {
     it('no status filter ("All") STATS still excludes DRAFT (sent-reply performance only)', async () => {
       const { repo, sentCount, sentFindMany, postAggregate } = buildRepo();
       sentCount.mockResolvedValue(0);
-      postAggregate.mockResolvedValue({ _sum: { impressions: 0, trafficScore: 0 } });
+      postAggregate.mockResolvedValue({
+        _sum: { impressions: 0, trafficScore: 0 },
+      });
       sentFindMany.mockResolvedValue([]);
 
       await repo.getSentStats('org1', {});
@@ -3170,7 +3843,9 @@ describe('EngageRepository.getOrgScanStatus', () => {
     it('getSentStats applies the same combined OR to the stats scope', async () => {
       const { repo, sentCount, sentFindMany, postAggregate } = buildRepo();
       sentCount.mockResolvedValue(0);
-      postAggregate.mockResolvedValue({ _sum: { impressions: 0, trafficScore: 0 } });
+      postAggregate.mockResolvedValue({
+        _sum: { impressions: 0, trafficScore: 0 },
+      });
       sentFindMany.mockResolvedValue([]);
 
       await repo.getSentStats('org1', { status: 'awaiting' });
@@ -3227,7 +3902,11 @@ describe('EngageRepository.getOrgScanStatus', () => {
         generationHistory: [{ source: 'ai', content: 'an older AI draft' }],
       });
 
-      const wrote = await repo.recordManualGeneration('org1', 'opp1', manualEntry);
+      const wrote = await repo.recordManualGeneration(
+        'org1',
+        'opp1',
+        manualEntry
+      );
 
       expect(wrote).toBe(true);
       expect(stateExecuteRaw).toHaveBeenCalledTimes(1);
@@ -3239,7 +3918,11 @@ describe('EngageRepository.getOrgScanStatus', () => {
         generationHistory: [{ source: 'ai', content: 'hand-typed reply' }],
       });
 
-      const wrote = await repo.recordManualGeneration('org1', 'opp1', manualEntry);
+      const wrote = await repo.recordManualGeneration(
+        'org1',
+        'opp1',
+        manualEntry
+      );
 
       expect(wrote).toBe(false);
       expect(stateExecuteRaw).not.toHaveBeenCalled();
@@ -3249,7 +3932,11 @@ describe('EngageRepository.getOrgScanStatus', () => {
       const { repo, stateFindFirst, stateExecuteRaw } = buildRepo();
       stateFindFirst.mockResolvedValue(null);
 
-      const wrote = await repo.recordManualGeneration('org1', 'opp1', manualEntry);
+      const wrote = await repo.recordManualGeneration(
+        'org1',
+        'opp1',
+        manualEntry
+      );
 
       expect(wrote).toBe(false);
       expect(stateExecuteRaw).not.toHaveBeenCalled();
@@ -3258,7 +3945,14 @@ describe('EngageRepository.getOrgScanStatus', () => {
 
   describe('upsertDraft (save-draft)', () => {
     it('creates a Post(state=DRAFT, source=engage) + EngageSentReply when none exists', async () => {
-      const { repo, sentFindFirst, postCreate, sentCreate, postUpdate, txTransaction } = buildRepo();
+      const {
+        repo,
+        sentFindFirst,
+        postCreate,
+        sentCreate,
+        postUpdate,
+        txTransaction,
+      } = buildRepo();
       sentFindFirst.mockResolvedValue(null); // no existing draft
       postCreate.mockResolvedValue({ id: 'post-d' });
       sentCreate.mockResolvedValue({ id: 'reply-d', postId: 'post-d' });
@@ -3297,7 +3991,14 @@ describe('EngageRepository.getOrgScanStatus', () => {
     });
 
     it('updates the existing draft in place (no second Post created)', async () => {
-      const { repo, sentFindFirst, postUpdate, sentUpdate, postCreate, sentCreate } = buildRepo();
+      const {
+        repo,
+        sentFindFirst,
+        postUpdate,
+        sentUpdate,
+        postCreate,
+        sentCreate,
+      } = buildRepo();
       sentFindFirst.mockResolvedValue({ id: 'reply-d', postId: 'post-d' });
       postUpdate.mockResolvedValue({ id: 'post-d' });
       sentUpdate.mockResolvedValue({ id: 'reply-d' });
@@ -3312,7 +4013,9 @@ describe('EngageRepository.getOrgScanStatus', () => {
         where: { id: 'post-d' },
         data: { content: 'edited draft' },
       });
-      expect(sentUpdate.mock.calls[0][0]).toMatchObject({ where: { id: 'reply-d' } });
+      expect(sentUpdate.mock.calls[0][0]).toMatchObject({
+        where: { id: 'reply-d' },
+      });
       // Upsert — never creates a second draft.
       expect(postCreate).not.toHaveBeenCalled();
       expect(sentCreate).not.toHaveBeenCalled();
@@ -3347,7 +4050,8 @@ describe('EngageRepository.getOrgScanStatus', () => {
     });
 
     it('claimOpportunityForReply does NOT delete drafts (a rolled-back publish keeps the draft)', async () => {
-      const { repo, stateFindFirst, stateUpdateMany, postDeleteMany } = buildRepo();
+      const { repo, stateFindFirst, stateUpdateMany, postDeleteMany } =
+        buildRepo();
       stateFindFirst
         .mockResolvedValueOnce({ status: 'NEW' })
         .mockResolvedValueOnce({ ...STATE_ROW, status: 'REPLIED' });
@@ -3451,9 +4155,14 @@ describe('EngageRepository.getOrgScanStatus', () => {
         },
       } as any;
       const repo = new EngageRepository(
-        _config, {} as any, {} as any, {} as any, {} as any,
-        {} as any, {} as any,
-        {} as any,   // _integrationProject, {} as any, {} as any, {} as any, {} as any
+        _config,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any // _integrationProject, {} as any, {} as any, {} as any, {} as any
       );
       return { repo, configFindFirst, configFindMany };
     }
@@ -3477,7 +4186,9 @@ describe('EngageRepository.getOrgScanStatus', () => {
           {
             projectId: 'p0',
             keywords: [{ id: 'k1', keyword: 'AI', enabled: true }],
-            trackedAccounts: [{ id: 'a1', platform: 'x', username: '@Alice', enabled: true }],
+            trackedAccounts: [
+              { id: 'a1', platform: 'x', username: '@Alice', enabled: true },
+            ],
           },
           {
             projectId: 'p1',
@@ -3488,7 +4199,12 @@ describe('EngageRepository.getOrgScanStatus', () => {
               { id: 'k3', keyword: 'ML', enabled: true },
             ],
             trackedAccounts: [
-              { id: 'c1', platform: 'reddit', username: 'LocalLLM', enabled: true },
+              {
+                id: 'c1',
+                platform: 'reddit',
+                username: 'LocalLLM',
+                enabled: true,
+              },
               { id: 'a2', platform: 'x', username: 'alice', enabled: true },
             ],
           },
@@ -3501,30 +4217,53 @@ describe('EngageRepository.getOrgScanStatus', () => {
       // row is excluded from the union (consistent with the scan loop).
       expect(configFindMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { organizationId: 'org1', enabled: true, projectId: { not: null } },
+          where: {
+            organizationId: 'org1',
+            enabled: true,
+            projectId: { not: null },
+          },
         })
       );
       // Base scalars + replyAccounts preserved.
       expect(res.id).toBe('cfg-null');
       expect(res.replyAccounts).toEqual([{ id: 'ra1' }]);
       // 'AI'/'ai' collapse to one; 'ML' present → 2 keywords.
-      expect(res.keywords.map((k: any) => k.keyword).sort()).toEqual(['AI', 'ML']);
+      expect(res.keywords.map((k: any) => k.keyword).sort()).toEqual([
+        'AI',
+        'ML',
+      ]);
       // @Alice / alice collapse to one tracked account.
       expect(res.trackedAccounts).toHaveLength(1);
       // project channel surfaced, rendered back in the legacy channel shape.
-      expect(res.monitoredChannels.map((c: any) => c.channelId)).toEqual(['LocalLLM']);
+      expect(res.monitoredChannels.map((c: any) => c.channelId)).toEqual([
+        'LocalLLM',
+      ]);
     });
 
     it('prefers the enabled row when the same unit is disabled in one config and enabled in another', async () => {
       const base = {
-        id: 'cfg-null', organizationId: 'org1', projectId: null, enabled: true,
-        replyAccounts: [], keywords: [], monitoredChannels: [], trackedAccounts: [],
+        id: 'cfg-null',
+        organizationId: 'org1',
+        projectId: null,
+        enabled: true,
+        replyAccounts: [],
+        keywords: [],
+        monitoredChannels: [],
+        trackedAccounts: [],
       };
       const { repo } = buildConfigRepo({
         baseNull: base,
         enabledConfigs: [
-          { keywords: [{ id: 'k1', keyword: 'AI', enabled: false }], monitoredChannels: [], trackedAccounts: [] },
-          { keywords: [{ id: 'k2', keyword: 'ai', enabled: true }], monitoredChannels: [], trackedAccounts: [] },
+          {
+            keywords: [{ id: 'k1', keyword: 'AI', enabled: false }],
+            monitoredChannels: [],
+            trackedAccounts: [],
+          },
+          {
+            keywords: [{ id: 'k2', keyword: 'ai', enabled: true }],
+            monitoredChannels: [],
+            trackedAccounts: [],
+          },
         ],
       });
 
@@ -3541,11 +4280,13 @@ describe('EngageRepository.getOrgScanStatus', () => {
 // (postPublishedAt is the post's own timestamp; createdAt can lag it by hours
 // depending on scan cadence).
 describe('EngageRepository.pickAutoReplyCandidates', () => {
-  it('orders by score desc, then the POST\'s own recency desc (not our scan-discovery time)', async () => {
+  it("orders by score desc, then the POST's own recency desc (not our scan-discovery time)", async () => {
     const { repo, stateFindMany } = buildRepo();
     stateFindMany.mockResolvedValue([]);
 
-    await repo.pickAutoReplyCandidates('org-1', 'proj-1', 'reddit', { limit: 1 });
+    await repo.pickAutoReplyCandidates('org-1', 'proj-1', 'reddit', {
+      limit: 1,
+    });
 
     expect(stateFindMany).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -3561,10 +4302,80 @@ describe('EngageRepository.pickAutoReplyCandidates', () => {
     const { repo, stateUpdateMany } = buildRepo();
     stateUpdateMany.mockResolvedValue({ count: 1 });
 
-    await expect(repo.claimAutoReplyCandidate('org-1', 'proj-1', 'state-1')).resolves.toBe(true);
+    await expect(
+      repo.claimAutoReplyCandidate('org-1', 'proj-1', 'state-1')
+    ).resolves.toBe(true);
     expect(stateUpdateMany).toHaveBeenCalledWith({
-      where: { id: 'state-1', organizationId: 'org-1', projectId: 'proj-1', status: 'NEW' },
+      where: {
+        id: 'state-1',
+        organizationId: 'org-1',
+        projectId: 'proj-1',
+        status: 'NEW',
+      },
       data: { status: 'AUTO_QUEUED' },
+    });
+  });
+});
+
+describe('EngageRepository.upsertReplyAccount', () => {
+  function buildReplyAccountRepo() {
+    const integrationFindFirst = vi.fn();
+    const integrationProjectUpsert = vi.fn();
+    const integration = {
+      model: { integration: { findFirst: integrationFindFirst } },
+    } as any;
+    const integrationProject = {
+      model: { integrationProject: { upsert: integrationProjectUpsert } },
+    } as any;
+    const repo = new EngageRepository(
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      integration,
+      integrationProject,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any
+    );
+    return { repo, integrationFindFirst, integrationProjectUpsert };
+  }
+
+  it('creates the project binding and reply setting in one upsert', async () => {
+    const { repo, integrationFindFirst, integrationProjectUpsert } =
+      buildReplyAccountRepo();
+    integrationFindFirst.mockResolvedValue({ id: 'integration-1' });
+    integrationProjectUpsert.mockResolvedValue({ engageEnabled: false });
+
+    await expect(
+      repo.upsertReplyAccount('org-1', 'integration-1', {
+        projectId: 'project-1',
+        engageEnabled: false,
+      })
+    ).resolves.toEqual({
+      integrationId: 'integration-1',
+      projectId: 'project-1',
+      engageEnabled: false,
+    });
+
+    expect(integrationProjectUpsert).toHaveBeenCalledWith({
+      where: {
+        integrationId_projectId: {
+          integrationId: 'integration-1',
+          projectId: 'project-1',
+        },
+      },
+      create: {
+        integrationId: 'integration-1',
+        projectId: 'project-1',
+        organizationId: 'org-1',
+        engageEnabled: false,
+      },
+      update: { organizationId: 'org-1', engageEnabled: false },
+      select: { engageEnabled: true },
     });
   });
 });

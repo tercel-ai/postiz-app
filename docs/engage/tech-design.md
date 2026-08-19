@@ -774,11 +774,11 @@ export class EngageController {
   @Get('/reply-accounts')
   listReplyAccounts(@GetOrgFromRequest() org: Organization) { ... }
 
-  @Patch('/reply-accounts/:integrationId')
-  updateReplyAccountSettings(
+  @Post('/reply-accounts/:integrationId')
+  upsertReplyAccountSettings(
     @GetOrgFromRequest() org: Organization,
     @Param('integrationId') integrationId: string,
-    @Body() body: UpdateReplyAccountDto  // { engageEnabled, autoReplyEnabled, timeStart, timeEnd }
+    @Body() body: UpdateReplyAccountDto  // { projectId, engageEnabled }
   ) { ... }
 }
 ```

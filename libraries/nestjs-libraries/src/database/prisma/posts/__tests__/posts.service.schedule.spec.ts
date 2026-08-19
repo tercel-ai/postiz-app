@@ -176,6 +176,33 @@ describe('PostsService.schedulePosts', () => {
     expect(startWorkflow).not.toHaveBeenCalled();
   });
 
+  it('uses settings.__type to queue an accountless draft for extension publishing', async () => {
+    const { service, schedulePostGroupToQueue, startWorkflow } = makeService([
+      draft({
+        id: 'x-accountless',
+        group: 'gx-accountless',
+        integrationId: null,
+        integration: null,
+        providerIdentifier: null,
+        settings: JSON.stringify({ __type: 'x' }),
+      }),
+    ]);
+
+    const res = await service.schedulePosts('org-1', [{ id: 'x-accountless' }]);
+
+    expect(res.scheduled).toEqual([
+      { id: 'x-accountless', publishMethod: 'extension' },
+    ]);
+    expect(res.failed).toEqual([]);
+    expect(schedulePostGroupToQueue).toHaveBeenCalledWith(
+      'org-1',
+      'gx-accountless',
+      'EXTENSION',
+      undefined
+    );
+    expect(startWorkflow).not.toHaveBeenCalled();
+  });
+
   it('api post: flips to QUEUE(API) and starts Temporal exactly once', async () => {
     const { service, schedulePostGroupToQueue, startWorkflow } = makeService([
       draft({

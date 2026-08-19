@@ -63,7 +63,8 @@ export interface EngageReplyPolicy {
   checkIntervalMinutes?: number;
 }
 
-export const ENGAGE_REPLY_ACCOUNT_DAILY_CAP_KEY = 'engage_reply_account_daily_cap';
+export const ENGAGE_REPLY_ACCOUNT_DAILY_CAP_KEY =
+  'engage_reply_account_daily_cap';
 const DEFAULT_REPLY_ACCOUNT_DAILY_CAP = 50;
 import {
   EngageEntitlementService,
@@ -102,7 +103,10 @@ import {
   EngageAuthorProfile,
 } from '@gitroom/nestjs-libraries/engage/engage-author';
 import { parseRedditCommentId } from '@gitroom/nestjs-libraries/engage/reddit-url';
-import { getRedditToken, redditAuthHeaders } from '@gitroom/nestjs-libraries/engage/reddit-auth';
+import {
+  getRedditToken,
+  redditAuthHeaders,
+} from '@gitroom/nestjs-libraries/engage/reddit-auth';
 import { redditPublicGet } from '@gitroom/nestjs-libraries/engage/reddit-loid';
 import {
   dispatchReplyMetricsSync,
@@ -152,8 +156,9 @@ function engageRefreshFloorMs(): number {
     process.env.ENGAGE_REFRESH_FLOOR_SECONDS ?? DEFAULT_REFRESH_FLOOR_SECONDS
   );
   return (
-    (Number.isFinite(value) && value > 0 ? value : DEFAULT_REFRESH_FLOOR_SECONDS) *
-    1000
+    (Number.isFinite(value) && value > 0
+      ? value
+      : DEFAULT_REFRESH_FLOOR_SECONDS) * 1000
   );
 }
 
@@ -217,7 +222,9 @@ export class EngageService implements OnApplicationBootstrap {
   // ─── Config ───────────────────────────────────────────────────────────────
 
   async getConfig(org: Organization, projectId?: string | null) {
-    const entitlement = await this._entitlementService.getEntitlementSummary(org.id);
+    const entitlement = await this._entitlementService.getEntitlementSummary(
+      org.id
+    );
     const scanIntervalHours = entitlement.limits.scanIntervalHours;
     const cadenceMs = scanIntervalHours * 3_600_000;
     const [config, scanStatus, priorityUsageByPlatform] = await Promise.all([
@@ -455,16 +462,23 @@ export class EngageService implements OnApplicationBootstrap {
         this._settingsService.get(OPERATION_PLAN_ALLOWED_PLATFORMS_KEY),
       ]);
       const allowlist = Array.isArray(allowedRaw)
-        ? allowedRaw.filter((p): p is string => typeof p === 'string' && p.trim().length > 0)
+        ? allowedRaw.filter(
+            (p): p is string => typeof p === 'string' && p.trim().length > 0
+          )
         : [];
       return {
-        maxDurationDays: Number.isFinite(Number(maxDays)) ? Number(maxDays) : fallback.maxDurationDays,
+        maxDurationDays: Number.isFinite(Number(maxDays))
+          ? Number(maxDays)
+          : fallback.maxDurationDays,
         allowedPlatforms: allowlist,
       };
     } catch (err) {
       // Config is decoration on this endpoint — never fail the whole Engage
       // page because a Settings read hiccuped.
-      this.logger.error('Failed to read operation-plan settings for /engage/config:', err);
+      this.logger.error(
+        'Failed to read operation-plan settings for /engage/config:',
+        err
+      );
       return fallback;
     }
   }
@@ -475,15 +489,11 @@ export class EngageService implements OnApplicationBootstrap {
     // the legacy null-project row would be accepted, stored, echoed back by
     // GET /config — and never do anything. Refuse it instead of shipping a
     // switch that silently does nothing.
-    if (
-      dto.autoReplyMode &&
-      dto.autoReplyMode !== 'off' &&
-      !dto.projectId
-    ) {
+    if (dto.autoReplyMode && dto.autoReplyMode !== 'off' && !dto.projectId) {
       throw new BadRequestException({
         code: 'engage_auto_reply_requires_project',
         message:
-          'autoReplyMode requires a projectId — unattended replying is driven by a project\'s operation plan.',
+          "autoReplyMode requires a projectId — unattended replying is driven by a project's operation plan.",
       });
     }
     const result = await this._engageRepository.saveConfig(
@@ -502,7 +512,10 @@ export class EngageService implements OnApplicationBootstrap {
     if (dto.enabled) {
       await this._ensureGlobalWorkflowsRunning();
       this.triggerImmediateScan(org).catch((err) =>
-        this.logger.warn(`Immediate scan trigger failed for org ${org.id}:`, err)
+        this.logger.warn(
+          `Immediate scan trigger failed for org ${org.id}:`,
+          err
+        )
       );
     }
     return result;
@@ -512,9 +525,16 @@ export class EngageService implements OnApplicationBootstrap {
     // Resolve the config up front so the quota check can see what already
     // exists (repository.setupEngage upserts the same row, so this is
     // idempotent — it only flips enabled=true a moment earlier).
-    const config = await this._engageRepository.getOrCreateConfig(org.id, dto.projectId);
+    const config = await this._engageRepository.getOrCreateConfig(
+      org.id,
+      dto.projectId
+    );
     await this._assertSetupWithinQuota(org.id, config, dto);
-    const result = await this._engageRepository.setupEngage(org.id, dto, dto.projectId);
+    const result = await this._engageRepository.setupEngage(
+      org.id,
+      dto,
+      dto.projectId
+    );
     await this._ensureGlobalWorkflowsRunning();
     this.triggerImmediateScan(org).catch((err) =>
       this.logger.warn(`Immediate scan trigger failed for org ${org.id}:`, err)
@@ -612,17 +632,24 @@ export class EngageService implements OnApplicationBootstrap {
       scope: ScanTargetScope
     ): string | null => {
       try {
-        const { platform, username } = buildScanTargetKey(rawPlatform, rawKey, scope);
+        const { platform, username } = buildScanTargetKey(
+          rawPlatform,
+          rawKey,
+          scope
+        );
         return `${platform}:${username}`;
       } catch {
         return null;
       }
     };
-    const definedKeys = (keys: (string | null)[]) => keys.filter((k): k is string => !!k);
+    const definedKeys = (keys: (string | null)[]) =>
+      keys.filter((k): k is string => !!k);
 
     for (const [platform, keys] of freshKeys(
       dto.monitoredChannels,
-      (ch) => targetKey(ch.platform, ch.channelId, 'channel') ?? `${ch.platform}:${ch.channelId}`,
+      (ch) =>
+        targetKey(ch.platform, ch.channelId, 'channel') ??
+        `${ch.platform}:${ch.channelId}`,
       definedKeys(
         config.monitoredChannels.map((ch) =>
           targetKey(ch.platform, ch.channelId, 'channel')
@@ -678,13 +705,24 @@ export class EngageService implements OnApplicationBootstrap {
   // first only ever materialises an empty config row (idempotent upsert) — the
   // units themselves are still written after the assert passes.
   async addKeyword(org: Organization, dto: AddKeywordDto) {
-    const config = await this._engageRepository.getOrCreateConfig(org.id, dto.projectId);
-    await this._entitlementService.assertCanActivate(org.id, 'keyword', 1, config.id);
+    const config = await this._engageRepository.getOrCreateConfig(
+      org.id,
+      dto.projectId
+    );
+    await this._entitlementService.assertCanActivate(
+      org.id,
+      'keyword',
+      1,
+      config.id
+    );
     return this._engageRepository.addKeyword(config.id, org.id, dto);
   }
 
   async addKeywordsBulk(org: Organization, dto: AddKeywordsBulkDto) {
-    const config = await this._engageRepository.getOrCreateConfig(org.id, dto.projectId);
+    const config = await this._engageRepository.getOrCreateConfig(
+      org.id,
+      dto.projectId
+    );
     await this._entitlementService.assertCanActivate(
       org.id,
       'keyword',
@@ -716,7 +754,10 @@ export class EngageService implements OnApplicationBootstrap {
   }
 
   async addMonitoredChannel(org: Organization, dto: AddMonitoredChannelDto) {
-    const config = await this._engageRepository.getOrCreateConfig(org.id, dto.projectId);
+    const config = await this._engageRepository.getOrCreateConfig(
+      org.id,
+      dto.projectId
+    );
     await this._entitlementService.assertCanActivate(
       org.id,
       'subreddit',
@@ -724,11 +765,7 @@ export class EngageService implements OnApplicationBootstrap {
       config.id,
       dto.platform
     );
-    return this._engageRepository.addMonitoredChannel(
-      config.id,
-      org.id,
-      dto
-    );
+    return this._engageRepository.addMonitoredChannel(config.id, org.id, dto);
   }
 
   /**
@@ -745,7 +782,10 @@ export class EngageService implements OnApplicationBootstrap {
     org: Organization,
     dto: ReportRedditChannelCapabilityDto
   ) {
-    return this._engageRepository.recordRedditChannelCapability(org.id, dto.subreddit, {
+    return this._engageRepository.recordRedditChannelCapability(
+      org.id,
+      dto.subreddit,
+      {
       ...(dto.flairs ? { flairs: dto.flairs } : {}),
       ...(typeof dto.flairRequired === 'boolean'
         ? { flairRequired: dto.flairRequired }
@@ -754,7 +794,8 @@ export class EngageService implements OnApplicationBootstrap {
         ? { titleTagRequired: dto.titleTagRequired }
         : {}),
       source: 'extension',
-    });
+      }
+    );
   }
 
   async updateMonitoredChannel(
@@ -774,7 +815,9 @@ export class EngageService implements OnApplicationBootstrap {
 
   async searchChannels(org: Organization, platform: string, query: string) {
     if (platform === 'reddit') {
-      const userToken = await this._engageRepository.getRedditIntegrationToken(org.id);
+      const userToken = await this._engageRepository.getRedditIntegrationToken(
+        org.id
+      );
       return this._searchRedditSubreddits(query, userToken);
     }
     return [];
@@ -787,7 +830,10 @@ export class EngageService implements OnApplicationBootstrap {
   }
 
   async addTrackedAccount(org: Organization, dto: AddTrackedAccountDto) {
-    const config = await this._engageRepository.getOrCreateConfig(org.id, dto.projectId);
+    const config = await this._engageRepository.getOrCreateConfig(
+      org.id,
+      dto.projectId
+    );
     // `?? 'x'` mirrors the default platform repository.addTrackedAccount writes.
     await this._entitlementService.assertCanActivate(
       org.id,
@@ -832,16 +878,15 @@ export class EngageService implements OnApplicationBootstrap {
     );
   }
 
-  async updateReplyAccountSettings(
+  async upsertReplyAccountSettings(
     org: Organization,
     integrationId: string,
     dto: UpdateReplyAccountDto
   ) {
-    return this._engageRepository.updateReplyAccount(
+    return this._engageRepository.upsertReplyAccount(
       org.id,
       integrationId,
-      dto,
-      dto.projectId
+      dto
     );
   }
 
@@ -851,16 +896,29 @@ export class EngageService implements OnApplicationBootstrap {
     return this._engageRepository.listOpportunities(org.id, dto);
   }
 
-  async dismissOpportunity(org: Organization, id: string, projectId?: string | null) {
+  async dismissOpportunity(
+    org: Organization,
+    id: string,
+    projectId?: string | null
+  ) {
     return this._engageRepository.dismissOpportunity(org.id, id, projectId);
   }
 
-  async toggleBookmark(org: Organization, id: string, projectId?: string | null) {
+  async toggleBookmark(
+    org: Organization,
+    id: string,
+    projectId?: string | null
+  ) {
     return this._engageRepository.toggleBookmark(org.id, id, projectId);
   }
 
   async getScoreStats(org: Organization, dto: ScoreStatsDto) {
-    return this._engageRepository.getScoreStats(org.id, dto.date, dto.platform, dto.projectId);
+    return this._engageRepository.getScoreStats(
+      org.id,
+      dto.date,
+      dto.platform,
+      dto.projectId
+    );
   }
 
   async getOpportunityCountsSummary(
@@ -874,15 +932,27 @@ export class EngageService implements OnApplicationBootstrap {
     return this._engageRepository.countOpportunities(org.id, dto);
   }
 
-  async getOpportunityById(org: Organization, id: string, projectId?: string | null) {
+  async getOpportunityById(
+    org: Organization,
+    id: string,
+    projectId?: string | null
+  ) {
     return this._engageRepository.getOpportunityById(org.id, id, projectId);
   }
 
-  async getOpportunityDetail(org: Organization, id: string, projectId?: string | null) {
+  async getOpportunityDetail(
+    org: Organization,
+    id: string,
+    projectId?: string | null
+  ) {
     return this._engageRepository.getOpportunityDetail(org.id, id, projectId);
   }
 
-  async getOpportunityForReply(org: Organization, id: string, projectId?: string | null) {
+  async getOpportunityForReply(
+    org: Organization,
+    id: string,
+    projectId?: string | null
+  ) {
     return this._engageRepository.getOpportunityForReply(org.id, id, projectId);
   }
 
@@ -902,7 +972,10 @@ export class EngageService implements OnApplicationBootstrap {
     );
     const resolvedOpportunityId = opportunity.id;
     const resolvedProjectId = opportunity.projectId ?? dto.projectId;
-    const saved = await this._engageRepository.upsertDraft(org.id, resolvedOpportunityId, {
+    const saved = await this._engageRepository.upsertDraft(
+      org.id,
+      resolvedOpportunityId,
+      {
       platform: opportunity.platform,
       content: dto.draftContent,
       inputData: {
@@ -910,21 +983,28 @@ export class EngageService implements OnApplicationBootstrap {
         brandStrength: dto.brandStrength,
         mentions: dto.mentions,
       },
-    }, resolvedProjectId);
+      },
+      resolvedProjectId
+    );
 
     // Also record this save as a 'manual' version in generationHistory so the
     // version history is complete (AI + hand-typed/edited), each tagged by source.
     // Deduped against the latest entry (saving an unchanged AI draft won't dup it).
     // Best-effort: a history hiccup must not fail the save itself.
     await this._engageRepository
-      .recordManualGeneration(org.id, resolvedOpportunityId, {
+      .recordManualGeneration(
+        org.id,
+        resolvedOpportunityId,
+        {
         source: 'manual',
         content: dto.draftContent,
         strategy: dto.strategy,
         brandStrength: dto.brandStrength,
         ...(dto.mentions?.length ? { mentions: dto.mentions } : {}),
         createdAt: new Date().toISOString(),
-      }, resolvedProjectId)
+        },
+        resolvedProjectId
+      )
       .catch(() => undefined);
 
     return saved;
@@ -1026,18 +1106,33 @@ export class EngageService implements OnApplicationBootstrap {
     return this._engageRepository.getSentReplyItemById(org.id, sentReplyId);
   }
 
-  async updateScheduledReply(org: Organization, id: string, dto: UpdateScheduledReplyDto) {
+  async updateScheduledReply(
+    org: Organization,
+    id: string,
+    dto: UpdateScheduledReplyDto
+  ) {
     if (dto.scheduledAt !== undefined) {
       if (new Date(dto.scheduledAt) <= new Date()) {
         throw new BadRequestException('scheduledAt must be a future date');
       }
       const reply = await this._engageRepository.getSentReplyById(org.id, id);
       // changeDate handles the claim-gate and Temporal workflow restart
-      await this._postsService.changeDate(org.id, reply.post.id, dto.scheduledAt);
+      await this._postsService.changeDate(
+        org.id,
+        reply.post.id,
+        dto.scheduledAt
+      );
     }
 
-    const inputData = (dto.strategy !== undefined || dto.brandStrength !== undefined || dto.mentions !== undefined)
-      ? { strategy: dto.strategy, brandStrength: dto.brandStrength, mentions: dto.mentions }
+    const inputData =
+      dto.strategy !== undefined ||
+      dto.brandStrength !== undefined ||
+      dto.mentions !== undefined
+        ? {
+            strategy: dto.strategy,
+            brandStrength: dto.brandStrength,
+            mentions: dto.mentions,
+          }
       : undefined;
 
     if (dto.content !== undefined || inputData !== undefined) {
@@ -1052,12 +1147,20 @@ export class EngageService implements OnApplicationBootstrap {
 
   async getSentStats(
     org: Organization,
-    dto: { date?: string; platform?: string; status?: string; projectId?: string } = {}
+    dto: {
+      date?: string;
+      platform?: string;
+      status?: string;
+      projectId?: string;
+    } = {}
   ) {
     return this._engageRepository.getSentStats(org.id, dto);
   }
 
-  async getSentCountsSummary(org: Organization, dto: SentCountsSummaryDto = {}) {
+  async getSentCountsSummary(
+    org: Organization,
+    dto: SentCountsSummaryDto = {}
+  ) {
     return this._engageRepository.getSentCountsSummary(org.id, dto);
   }
 
@@ -1079,7 +1182,11 @@ export class EngageService implements OnApplicationBootstrap {
     period?: 'daily' | 'weekly' | 'monthly',
     projectId?: string
   ) {
-    return this._engageRepository.getDashboardRepliesTrend(org.id, period, projectId);
+    return this._engageRepository.getDashboardRepliesTrend(
+      org.id,
+      period,
+      projectId
+    );
   }
 
   async getDashboardTraffics(
@@ -1094,7 +1201,11 @@ export class EngageService implements OnApplicationBootstrap {
     period: 'daily' | 'weekly' | 'monthly' = 'daily',
     projectId?: string
   ) {
-    return this._engageRepository.getDashboardImpressions(org.id, period, projectId);
+    return this._engageRepository.getDashboardImpressions(
+      org.id,
+      period,
+      projectId
+    );
   }
 
   async getDashboardTopSources(
@@ -1120,7 +1231,10 @@ export class EngageService implements OnApplicationBootstrap {
     // the row. The extension publish-on-success path intentionally backfills a DRAFT
     // and flips it PUBLISHED in one write — but it goes through publishExtensionReply
     // (updateReplyUrl with markPublished), never here, so this guard can't break it.
-    const ctx = await this._engageRepository.getSentReplyContext(org.id, sentReplyId);
+    const ctx = await this._engageRepository.getSentReplyContext(
+      org.id,
+      sentReplyId
+    );
     if (!ctx) throw new NotFoundException('Sent reply not found');
     if (ctx.state !== 'PUBLISHED') {
       throw new BadRequestException(
@@ -1171,7 +1285,10 @@ export class EngageService implements OnApplicationBootstrap {
     url?: string | null,
     author?: EngageAuthorProfile
   ) {
-    const ctx = await this._engageRepository.getSentReplyContext(org.id, sentReplyId);
+    const ctx = await this._engageRepository.getSentReplyContext(
+      org.id,
+      sentReplyId
+    );
     if (!ctx) throw new NotFoundException('Sent reply not found');
 
     // Already published with a URL → a repeat success callback. No-op so we never
@@ -1222,7 +1339,9 @@ export class EngageService implements OnApplicationBootstrap {
     } catch (err) {
       this.logger.warn(
         `publishExtensionReply: could not claim opportunity ${ctx.opportunityId} ` +
-          `(already replied/expired?): ${err instanceof Error ? err.message : err}`
+          `(already replied/expired?): ${
+            err instanceof Error ? err.message : err
+          }`
       );
     }
 
@@ -1265,7 +1384,12 @@ export class EngageService implements OnApplicationBootstrap {
     // when it doesn't, resolve it out of band like the manual backfill path.
     // The lookup needs the reply's own URL, so URL-less publishes skip it.
     if (!author && url) {
-      this._storeReplyAuthorInBackground(org.id, sentReplyId, ctx.platform, url);
+      this._storeReplyAuthorInBackground(
+        org.id,
+        sentReplyId,
+        ctx.platform,
+        url
+      );
     }
 
     return { id: sentReplyId, state: 'PUBLISHED', replyUrl: url || null };
@@ -1290,7 +1414,8 @@ export class EngageService implements OnApplicationBootstrap {
       async () => {
       let engageAuthor: EngageAuthorProfile | null = null;
       if (platform === 'x') {
-        engageAuthor = (await this._postsService.fetchEngageXAuthor(orgId, url)) ?? null;
+          engageAuthor =
+            (await this._postsService.fetchEngageXAuthor(orgId, url)) ?? null;
       } else if (platform === 'reddit') {
         engageAuthor = await fetchRedditAuthorProfile(url, (message) =>
           this.logger.warn(`storeReplyAuthor: ${message}`)
@@ -1302,7 +1427,11 @@ export class EngageService implements OnApplicationBootstrap {
         );
         return;
       }
-      await this._engageRepository.updateReplyAuthor(orgId, sentReplyId, engageAuthor);
+        await this._engageRepository.updateReplyAuthor(
+          orgId,
+          sentReplyId,
+          engageAuthor
+        );
       }
     ).catch((err) =>
       this.logger.error(
@@ -1321,7 +1450,10 @@ export class EngageService implements OnApplicationBootstrap {
    * dispatcher, which returns 407 in environments without proxy credentials and
    * blocks legitimate backfills. We trust the user-supplied link's format instead.
    */
-  private async _validateReplyUrl(platform: string, url: string): Promise<void> {
+  private async _validateReplyUrl(
+    platform: string,
+    url: string
+  ): Promise<void> {
     if (platform === 'reddit') {
       if (!isRedditUrl(url)) {
         throw new BadRequestException(
@@ -1365,7 +1497,10 @@ export class EngageService implements OnApplicationBootstrap {
 
   // ─── Private helpers ──────────────────────────────────────────────────────
 
-  private async _searchRedditSubreddits(query: string, userToken?: string | null) {
+  private async _searchRedditSubreddits(
+    query: string,
+    userToken?: string | null
+  ) {
     // Strip leading "r/" so users can type either "SEO" or "r/SEO".
     const normalized = query.replace(/^r\//i, '').trim();
     if (!normalized) return [];
@@ -1378,7 +1513,11 @@ export class EngageService implements OnApplicationBootstrap {
     const token = userToken || appToken;
     this.logger.log(
       `[redditSearch] query="${query}" normalized="${normalized}" tokenSource=${
-        userToken ? 'user-oauth' : appToken ? 'app-client-credentials' : 'none(public-json)'
+        userToken
+          ? 'user-oauth'
+          : appToken
+          ? 'app-client-credentials'
+          : 'none(public-json)'
       }`
     );
 
@@ -1416,33 +1555,46 @@ export class EngageService implements OnApplicationBootstrap {
       metadata: {
         description: d.public_description,
         url: `https://reddit.com/r/${d.display_name}`,
-        avatar: (d.community_icon as string)?.split('?')[0] || (d.icon_img as string) || null,
+        avatar:
+          (d.community_icon as string)?.split('?')[0] ||
+          (d.icon_img as string) ||
+          null,
       },
     });
 
     // Primary: subreddit search.
     try {
-      const url = `${searchBase}?q=${encodeURIComponent(normalized)}&limit=10&type=sr`;
+      const url = `${searchBase}?q=${encodeURIComponent(
+        normalized
+      )}&limit=10&type=sr`;
       this.logger.log(`[redditSearch] primary GET ${url}`);
       const res = await redditFetch(url);
       const raw = await res.text();
       this.logger.log(
-        `[redditSearch] primary status=${res.status} ok=${res.ok} bodyLen=${raw.length} body=${raw.slice(0, 2000)}`
+        `[redditSearch] primary status=${res.status} ok=${res.ok} bodyLen=${
+          raw.length
+        } body=${raw.slice(0, 2000)}`
       );
       if (res.ok) {
         const json = JSON.parse(raw) as {
           data?: { children?: Array<{ data: Record<string, unknown> }> };
         };
         const children = json?.data?.children ?? [];
-        this.logger.log(`[redditSearch] primary parsed children=${children.length}`);
+        this.logger.log(
+          `[redditSearch] primary parsed children=${children.length}`
+        );
         const results = children.map((c) => mapSubreddit(c.data));
         if (results.length) {
-          this.logger.log(`[redditSearch] primary returning ${results.length} result(s)`);
+          this.logger.log(
+            `[redditSearch] primary returning ${results.length} result(s)`
+          );
           return results;
         }
       }
     } catch (err) {
-      this.logger.warn(`[redditSearch] primary failed: ${(err as Error).message}`);
+      this.logger.warn(
+        `[redditSearch] primary failed: ${(err as Error).message}`
+      );
       // fall through to direct lookup
     }
 
@@ -1453,21 +1605,27 @@ export class EngageService implements OnApplicationBootstrap {
       const aboutRes = await redditFetch(aboutUrl);
       const raw = await aboutRes.text();
       this.logger.log(
-        `[redditSearch] fallback status=${aboutRes.status} ok=${aboutRes.ok} bodyLen=${raw.length} body=${raw.slice(0, 2000)}`
+        `[redditSearch] fallback status=${aboutRes.status} ok=${
+          aboutRes.ok
+        } bodyLen=${raw.length} body=${raw.slice(0, 2000)}`
       );
       if (!aboutRes.ok) return [];
       const about = JSON.parse(raw) as { data?: Record<string, unknown> };
       const d = about.data;
       if (!d || d.subreddit_type === 'private') {
         this.logger.log(
-          `[redditSearch] fallback no usable data (type=${d?.subreddit_type ?? 'missing'})`
+          `[redditSearch] fallback no usable data (type=${
+            d?.subreddit_type ?? 'missing'
+          })`
         );
         return [];
       }
       this.logger.log(`[redditSearch] fallback returning r/${d.display_name}`);
       return [mapSubreddit(d)];
     } catch (err) {
-      this.logger.warn(`[redditSearch] fallback failed: ${(err as Error).message}`);
+      this.logger.warn(
+        `[redditSearch] fallback failed: ${(err as Error).message}`
+      );
       return [];
     }
   }
@@ -1503,7 +1661,9 @@ export class EngageService implements OnApplicationBootstrap {
     // ticker, whose history is incompatible with the new event-driven code).
     for (const id of EngageService.LEGACY_SCAN_WORKFLOW_IDS) {
       try {
-        await client.workflow?.getHandle(id).terminate('superseded by engage-scan-ticker-v2');
+        await client.workflow
+          ?.getHandle(id)
+          .terminate('superseded by engage-scan-ticker-v2');
       } catch {
         // Not running / already gone — ignore.
       }
@@ -1552,7 +1712,10 @@ export class EngageService implements OnApplicationBootstrap {
     matchedKeywords: string[],
     requests: Array<{ integrationId: string; at: Date }>
   ): Promise<void> {
-    const projectGroups = new Map<string, { start: Date; end: Date; count: number }>();
+    const projectGroups = new Map<
+      string,
+      { start: Date; end: Date; count: number }
+    >();
     const accountGroups = new Map<
       string,
       { integrationId: string; start: Date; end: Date; count: number }
@@ -1563,7 +1726,12 @@ export class EngageService implements OnApplicationBootstrap {
       const dayKey = start.toISOString();
       const projectGroup = projectGroups.get(dayKey);
       if (projectGroup) projectGroup.count += 1;
-      else projectGroups.set(dayKey, { start: start.toDate(), end: end.toDate(), count: 1 });
+      else
+        projectGroups.set(dayKey, {
+          start: start.toDate(),
+          end: end.toDate(),
+          count: 1,
+        });
 
       const accountKey = `${request.integrationId}:${dayKey}`;
       const accountGroup = accountGroups.get(accountKey);
@@ -1657,10 +1825,9 @@ export class EngageService implements OnApplicationBootstrap {
     );
     if (!policy) return empty;
 
-    const caps = [
-      policy.dailyTarget,
-      policy.dailyHardCap,
-    ].filter((c): c is number => typeof c === 'number' && c >= 0);
+    const caps = [policy.dailyTarget, policy.dailyHardCap].filter(
+      (c): c is number => typeof c === 'number' && c >= 0
+    );
     // A target of exactly 0 is meaningful ("no replies this day"), so it must
     // survive into the cap rather than being filtered out as falsy.
     const cap = caps.length ? Math.min(...caps) : null;
@@ -1726,7 +1893,9 @@ export class EngageService implements OnApplicationBootstrap {
     );
     if (!plan) return null;
 
-    const policies = (plan.planPayload as { engagePolicies?: Array<{
+    const policies = (
+      plan.planPayload as {
+        engagePolicies?: Array<{
       platform: string;
       enabled: boolean;
       targetRepliesPerDay?: number;
@@ -1734,8 +1903,12 @@ export class EngageService implements OnApplicationBootstrap {
       keywordTargets?: Record<string, number>;
       dailyHardCap?: number;
       hardCapRepliesPerDay?: number;
-    }> } | null)?.engagePolicies;
-    const policy = policies?.find((p) => p?.platform === platform && p?.enabled);
+        }>;
+      } | null
+    )?.engagePolicies;
+    const policy = policies?.find(
+      (p) => p?.platform === platform && p?.enabled
+    );
     if (!policy) return null;
 
     // This day's target: a `dailyTargets` entry for the exact UTC date wins,
@@ -1809,7 +1982,8 @@ export class EngageService implements OnApplicationBootstrap {
       // Aggregate target/hard-cap check.
       (async () => {
         if (effectiveCap === undefined) return;
-        const sentToday = await this._engageRepository.countProjectSentRepliesToday(
+        const sentToday =
+          await this._engageRepository.countProjectSentRepliesToday(
           organizationId,
           projectId,
           platform,
@@ -1860,8 +2034,9 @@ export class EngageService implements OnApplicationBootstrap {
   ): Promise<void> {
     if (!this._settingsService) return;
     const cap =
-      (await this._settingsService.get<number>(ENGAGE_REPLY_ACCOUNT_DAILY_CAP_KEY)) ??
-      DEFAULT_REPLY_ACCOUNT_DAILY_CAP;
+      (await this._settingsService.get<number>(
+        ENGAGE_REPLY_ACCOUNT_DAILY_CAP_KEY
+      )) ?? DEFAULT_REPLY_ACCOUNT_DAILY_CAP;
     if (!cap || cap <= 0) return; // 0/unset = uncapped
 
     const sentToday = await this._engageRepository.countAccountSentRepliesToday(
@@ -1934,7 +2109,12 @@ export class EngageService implements OnApplicationBootstrap {
               // reply-target support and would post them as NEW posts.
               publishMethod: 'api',
               value: [
-                { content: body.draftContent, image: [], delay: 0, id: '' } as never,
+                {
+                  content: body.draftContent,
+                  image: [],
+                  delay: 0,
+                  id: '',
+                } as never,
               ],
               group: '',
               settings: this._buildReplySettings(
@@ -1967,7 +2147,11 @@ export class EngageService implements OnApplicationBootstrap {
         projectId: resolvedProjectId,
         opportunityId: resolvedOpportunityId,
         postId,
-        inputData: { strategy: body.strategy, brandStrength: body.brandStrength, mentions: body.mentions },
+        inputData: {
+          strategy: body.strategy,
+          brandStrength: body.brandStrength,
+          mentions: body.mentions,
+        },
         matchedKeywords: opportunity.matchedKeywords,
       });
       return sentReply;
@@ -1999,7 +2183,9 @@ export class EngageService implements OnApplicationBootstrap {
     );
     if (existing) {
       if (existing.post.state !== 'QUEUE') {
-        throw new BadRequestException('Scheduled post is no longer pending — cannot cancel');
+        throw new BadRequestException(
+          'Scheduled post is no longer pending — cannot cancel'
+        );
       }
       await this._engageRepository.deletePostById(existing.postId);
       await this._engageRepository.resetScheduledOpportunity(
@@ -2021,7 +2207,10 @@ export class EngageService implements OnApplicationBootstrap {
    * reply-mode support yet, instead of silently creating a Post that will
    * fail when Temporal tries to publish it.
    */
-  private _buildReplySettings(platform: string, externalPostId: string): unknown {
+  private _buildReplySettings(
+    platform: string,
+    externalPostId: string
+  ): unknown {
     switch (platform) {
       case 'x':
         return {
@@ -2085,7 +2274,12 @@ export class EngageService implements OnApplicationBootstrap {
               // reply-target support and would post them as NEW posts.
               publishMethod: 'api',
               value: [
-                { content: body.draftContent, image: [], delay: 0, id: '' } as never,
+                {
+                  content: body.draftContent,
+                  image: [],
+                  delay: 0,
+                  id: '',
+                } as never,
               ],
               group: '',
               settings: this._buildReplySettings(
@@ -2105,7 +2299,11 @@ export class EngageService implements OnApplicationBootstrap {
         projectId: resolvedProjectId,
         opportunityId: resolvedOpportunityId,
         postId,
-        inputData: { strategy: body.strategy, brandStrength: body.brandStrength, mentions: body.mentions },
+        inputData: {
+          strategy: body.strategy,
+          brandStrength: body.brandStrength,
+          mentions: body.mentions,
+        },
         matchedKeywords: opportunity.matchedKeywords,
       });
       // metrics sync is started after the scheduled post actually publishes
@@ -2130,7 +2328,9 @@ export class EngageService implements OnApplicationBootstrap {
   ) {
     for (const item of body.items) {
       if (new Date(item.scheduledAt) <= new Date()) {
-        throw new BadRequestException('All scheduledAt values must be future dates');
+        throw new BadRequestException(
+          'All scheduledAt values must be future dates'
+        );
       }
     }
 
@@ -2174,7 +2374,12 @@ export class EngageService implements OnApplicationBootstrap {
                 // reply-target support and would post them as NEW posts.
                 publishMethod: 'api',
                 value: [
-                  { content: item.draftContent, image: [], delay: 0, id: '' } as never,
+                  {
+                    content: item.draftContent,
+                    image: [],
+                    delay: 0,
+                    id: '',
+                  } as never,
                 ],
                 group: '',
                 settings: this._buildReplySettings(
@@ -2213,7 +2418,11 @@ export class EngageService implements OnApplicationBootstrap {
           projectId: resolvedProjectId,
           opportunityId: resolvedOpportunityId,
           postId: createdPostIds[i],
-          inputData: { strategy: item.strategy, brandStrength: item.brandStrength, mentions: item.mentions },
+          inputData: {
+            strategy: item.strategy,
+            brandStrength: item.brandStrength,
+            mentions: item.mentions,
+          },
           matchedKeywords: opportunity.matchedKeywords,
         })
       )
@@ -2257,7 +2466,10 @@ export class EngageService implements OnApplicationBootstrap {
         resolvedProjectId,
         opportunity.platform,
         opportunity.matchedKeywords ?? [],
-        body.items.map((item) => ({ integrationId: item.integrationId, at: new Date() }))
+        body.items.map((item) => ({
+          integrationId: item.integrationId,
+          at: new Date(),
+        }))
       );
 
       for (const item of body.items) {
@@ -2277,7 +2489,12 @@ export class EngageService implements OnApplicationBootstrap {
                 // reply-target support and would post them as NEW posts.
                 publishMethod: 'api',
                 value: [
-                  { content: item.draftContent, image: [], delay: 0, id: '' } as never,
+                  {
+                    content: item.draftContent,
+                    image: [],
+                    delay: 0,
+                    id: '',
+                  } as never,
                 ],
                 group: '',
                 settings: this._buildReplySettings(
@@ -2317,7 +2534,11 @@ export class EngageService implements OnApplicationBootstrap {
             projectId: resolvedProjectId,
             opportunityId: resolvedOpportunityId,
             postId: createdPostIds[i],
-            inputData: { strategy: item.strategy, brandStrength: item.brandStrength, mentions: item.mentions },
+            inputData: {
+              strategy: item.strategy,
+              brandStrength: item.brandStrength,
+              mentions: item.mentions,
+            },
             matchedKeywords: opportunity.matchedKeywords,
           })
           .then(async (sentReply) => sentReply)
@@ -2437,13 +2658,21 @@ export class EngageService implements OnApplicationBootstrap {
         projectId: resolvedProjectId,
         opportunityId: resolvedOpportunityId,
         postId,
-        inputData: { strategy: body.strategy, brandStrength: body.brandStrength },
+        inputData: {
+          strategy: body.strategy,
+          brandStrength: body.brandStrength,
+        },
         matchedKeywords: opp.matchedKeywords,
       });
       // Now that the reply row exists, resolve + persist its author out of band.
       // Only when a URL was supplied — without one there's nothing to look up.
       if (body.replyUrl) {
-        this._storeReplyAuthorInBackground(org.id, sentReply.id, opp.platform, body.replyUrl);
+        this._storeReplyAuthorInBackground(
+          org.id,
+          sentReply.id,
+          opp.platform,
+          body.replyUrl
+        );
       }
       return sentReply;
     } catch (err) {
@@ -2468,7 +2697,11 @@ export class EngageService implements OnApplicationBootstrap {
     org: Organization,
     _keywordIds: string[] = []
   ): Promise<{ status: 'signaled' | 'started' | 'no_client' | 'error' }> {
-    return this._signalScanExecutor(org, 'triggerScanNow', 'triggerImmediateScan');
+    return this._signalScanExecutor(
+      org,
+      'triggerScanNow',
+      'triggerImmediateScan'
+    );
   }
 
   // DUE scan (non-force): wake the executor to scan only units whose per-unit
@@ -2487,9 +2720,13 @@ export class EngageService implements OnApplicationBootstrap {
     signalName: 'triggerScanNow' | 'triggerDueScan',
     logLabel: string
   ): Promise<{ status: 'signaled' | 'started' | 'no_client' | 'error' }> {
-    const touchEnabled = !this._scanConfig || await this._scanConfig.isTouchEnabled().catch(() => true);
+    const touchEnabled =
+      !this._scanConfig ||
+      (await this._scanConfig.isTouchEnabled().catch(() => true));
     if (!touchEnabled) {
-      this.logger.log(`${logLabel}: backend scan disabled (engage_touch_switch=false) — skipping signal`);
+      this.logger.log(
+        `${logLabel}: backend scan disabled (engage_touch_switch=false) — skipping signal`
+      );
       return { status: 'signaled' };
     }
 
@@ -2497,7 +2734,9 @@ export class EngageService implements OnApplicationBootstrap {
     if (!client) return { status: 'no_client' };
 
     try {
-      await client.workflow.getHandle(EngageService.SCAN_WORKFLOW_ID).signal(signalName);
+      await client.workflow
+        .getHandle(EngageService.SCAN_WORKFLOW_ID)
+        .signal(signalName);
       return { status: 'signaled' };
     } catch {
       try {
@@ -2507,7 +2746,9 @@ export class EngageService implements OnApplicationBootstrap {
           args: [],
           workflowIdConflictPolicy: 'USE_EXISTING',
         });
-        await client.workflow.getHandle(EngageService.SCAN_WORKFLOW_ID).signal(signalName);
+        await client.workflow
+          .getHandle(EngageService.SCAN_WORKFLOW_ID)
+          .signal(signalName);
         return { status: 'started' };
       } catch (startErr) {
         this.logger.error(
@@ -2551,9 +2792,8 @@ export class EngageService implements OnApplicationBootstrap {
     nextRefreshAt: string;
   }> {
     const now = Date.now();
-    const scanIntervalHours = await this._entitlementService.getScanIntervalHours(
-      org.id
-    );
+    const scanIntervalHours =
+      await this._entitlementService.getScanIntervalHours(org.id);
 
     // ── Scan side: per-unit cadence gate (EngageScanCursor) ──────────────────
     const scanStatus = await this._engageRepository.getOrgScanStatus(
@@ -2760,9 +3000,7 @@ export class EngageService implements OnApplicationBootstrap {
    * a failure just leaves that value stale until the next visit past the interval.
    */
   private async _runMetricsSyncForReplies(
-    rows: Awaited<
-      ReturnType<EngageRepository['findEngageRepliesByPostIds']>
-    >
+    rows: Awaited<ReturnType<EngageRepository['findEngageRepliesByPostIds']>>
   ): Promise<void> {
     const deps = this._metricsSyncDeps();
     for (const row of rows) {
@@ -2784,7 +3022,8 @@ export class EngageService implements OnApplicationBootstrap {
     }
   }
 
-  async resyncEngageMetrics(opts: {
+  async resyncEngageMetrics(
+    opts: {
     orgId?: string;
     platform?: string;
     dryRun?: boolean;
@@ -2795,7 +3034,8 @@ export class EngageService implements OnApplicationBootstrap {
      * legacy "fill missing" behaviour (only `impressions: null` rows).
      */
     sinceDays?: number;
-  } = {}): Promise<{
+    } = {}
+  ): Promise<{
     found: number;
     updated: number;
     written: number;
@@ -2807,11 +3047,24 @@ export class EngageService implements OnApplicationBootstrap {
     const { orgId, platform, dryRun = false, sinceDays } = opts;
     const pending =
       sinceDays != null
-        ? await this._engageRepository.findEngageRepliesInWindow(sinceDays, orgId, platform)
-        : await this._engageRepository.findPendingEngageMetrics(orgId, platform);
+        ? await this._engageRepository.findEngageRepliesInWindow(
+            sinceDays,
+            orgId,
+            platform
+          )
+        : await this._engageRepository.findPendingEngageMetrics(
+            orgId,
+            platform
+          );
     // Count REAL outcomes from the shared sync, not attempts — so the caller can
     // tell "fetched & written" apart from "API returned nothing / WAF blocked".
-    const tally = { written: 0, empty: 0, unreachable: 0, skipped: 0, errors: 0 };
+    const tally = {
+      written: 0,
+      empty: 0,
+      unreachable: 0,
+      skipped: 0,
+      errors: 0,
+    };
 
     for (const reply of pending) {
       if (dryRun) continue;
@@ -2825,7 +3078,11 @@ export class EngageService implements OnApplicationBootstrap {
         );
         tally[outcome]++;
       } catch (err) {
-        this.logger.warn(`resyncEngageMetrics: failed for sentReplyId=${reply.id}: ${(err as Error).message}`);
+        this.logger.warn(
+          `resyncEngageMetrics: failed for sentReplyId=${reply.id}: ${
+            (err as Error).message
+          }`
+        );
         tally.errors++;
       }
     }
@@ -2848,37 +3105,62 @@ export class EngageService implements OnApplicationBootstrap {
   ) {
     const { platform, dryRun = false, backfill = true } = opts;
 
-    const before = await this._engageRepository.getEngageMetricsStats(org.id, platform);
+    const before = await this._engageRepository.getEngageMetricsStats(
+      org.id,
+      platform
+    );
 
     // Backfill only matters for X — Reddit metrics never need an integration.
     const backfillResult =
       backfill && platform !== 'reddit'
-        ? await this._engageRepository.backfillXReplyIntegrations(org.id, dryRun)
+        ? await this._engageRepository.backfillXReplyIntegrations(
+            org.id,
+            dryRun
+          )
         : { found: 0, filled: 0, unresolved: 0, items: [] as Array<unknown> };
 
-    const resync = await this.resyncEngageMetrics({ orgId: org.id, platform, dryRun });
+    const resync = await this.resyncEngageMetrics({
+      orgId: org.id,
+      platform,
+      dryRun,
+    });
 
-    const after = await this._engageRepository.getEngageMetricsStats(org.id, platform);
+    const after = await this._engageRepository.getEngageMetricsStats(
+      org.id,
+      platform
+    );
 
-    return { dryRun, backfill: backfillResult, resync, stats: { before, after } };
+    return {
+      dryRun,
+      backfill: backfillResult,
+      resync,
+      stats: { before, after },
+    };
   }
 
   /** Sinks for the shared engage-metrics-sync module (see engage-metrics-sync.ts). */
   private _metricsSyncDeps(): MetricsSyncDeps {
     return {
       updatePostMetrics: (postId, impressions, analytics, trafficScore) =>
-        this._engageRepository.updatePostMetrics(postId, impressions, analytics, trafficScore),
-      markAuthorReplied: (sentReplyId) => this._engageRepository.markAuthorReplied(sentReplyId),
+        this._engageRepository.updatePostMetrics(
+          postId,
+          impressions,
+          analytics,
+          trafficScore
+        ),
+      markAuthorReplied: (sentReplyId) =>
+        this._engageRepository.markAuthorReplied(sentReplyId),
       // Shared engage X analytics read with the own-token → app-only fallback
       // chain (PostsService is the single source of truth; the scheduled Temporal
       // activity uses the same method so both behave identically).
       checkPostAnalytics: (orgId, postId, when) =>
-        this._postsService.checkEngageXAnalyticsWithFallback(orgId, postId, when),
+        this._postsService.checkEngageXAnalyticsWithFallback(
+          orgId,
+          postId,
+          when
+        ),
       warn: (m) => this.logger.warn(m),
       log: (m) => this.logger.log(m),
     };
   }
-
-
-
 }

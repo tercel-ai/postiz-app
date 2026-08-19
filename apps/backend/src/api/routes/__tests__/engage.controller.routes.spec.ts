@@ -1,6 +1,7 @@
 import 'reflect-metadata';
 import { describe, expect, it } from 'vitest';
-import { PATH_METADATA } from '@nestjs/common/constants';
+import { METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
+import { RequestMethod } from '@nestjs/common';
 import { EngageController } from '../engage.controller';
 
 describe('EngageController opportunity count routes', () => {
@@ -16,5 +17,19 @@ describe('EngageController opportunity count routes', () => {
         '/opportunities/counts/summary',
       ])
     );
+  });
+
+  it('exposes reply account upsert through POST only', () => {
+    const routes = Object.getOwnPropertyNames(EngageController.prototype)
+      .map((name) => ({
+        name,
+        path: Reflect.getMetadata(PATH_METADATA, EngageController.prototype[name]),
+        method: Reflect.getMetadata(METHOD_METADATA, EngageController.prototype[name]),
+      }))
+      .filter(({ path }) => path === '/reply-accounts/:integrationId');
+
+    expect(routes).toEqual([
+      { name: 'upsertReplyAccountSettings', method: RequestMethod.POST, path: '/reply-accounts/:integrationId' },
+    ]);
   });
 });
