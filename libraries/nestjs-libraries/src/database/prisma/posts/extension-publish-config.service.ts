@@ -106,7 +106,7 @@ export class ExtensionPublishConfigService implements OnModuleInit {
         {
           type: 'object',
           description:
-            'Allowed publish clock-time window per platform: { default?: {windowStart,windowEnd,timezone}, platforms: { <platform>: {windowStart,windowEnd,timezone} } }. windowStart/windowEnd are \'HH:MM\' local to `timezone` (IANA; omitted = UTC); a window that wraps past midnight (e.g. 22:00–02:00) is honoured as a wrap. A platform with NO effective window (no override and no `default`) is unconstrained — this is the out-of-the-box state, so configuring nothing changes nothing. When a plan is scheduled (POST /posts/schedule), any post on a constrained platform whose materialized time falls outside its window is re-picked to a random time inside it, on the same local date.',
+            'Allowed publish clock-time window per platform: { default?: {windowStart,windowEnd,timezone}, platforms: { <platform>: {windowStart,windowEnd,timezone} } }. windowStart/windowEnd are \'HH:MM\' local to `timezone` (IANA; omitted = UTC); a window that wraps past midnight (e.g. 22:00–02:00) is honoured as a wrap. A platform with NO effective window (no override and no `default`) is unconstrained — this is the out-of-the-box state, so configuring nothing changes nothing. When a plan is activated (POST /projects/:projectId/automation/publishing), any post on a constrained platform whose materialized time falls outside its window is re-picked to a random time inside it, on the same local date. A project may narrow this window further through its own Automation settings; the project tier wins over these.',
           defaultValue: DEFAULT_PUBLISH_TIME_WINDOW_SETTING,
         }
       );
@@ -157,7 +157,14 @@ export function resolvePublishTimeWindows(
   return out;
 }
 
-function isValidWindow(value: unknown): value is PublishTimeWindow {
+/**
+ * A window is only usable when both bounds are 'HH:MM' clock times that differ
+ * and the timezone (when present) is a real IANA zone. Exported because the
+ * PROJECT-level window override (ProjectPublishingService) must accept exactly
+ * what the admin-level setting accepts — one rule, so a value that survives one
+ * tier can never be silently dropped by the other.
+ */
+export function isValidWindow(value: unknown): value is PublishTimeWindow {
   if (!value || typeof value !== 'object') return false;
   const w = value as Partial<PublishTimeWindow>;
   const toMinutes = (value: unknown): number | null => {

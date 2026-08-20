@@ -54,6 +54,12 @@ import {
 } from '@gitroom/nestjs-libraries/engage/resolve-x-reply-integration';
 import { markEngageScanWork } from '@gitroom/nestjs-libraries/engage/engage-scan-hint';
 import {
+  EngageConfigMetadataPatch,
+  isRepliesActive,
+  mergeEngageConfigMetadata,
+  readEngageConfigMetadata,
+} from '@gitroom/nestjs-libraries/engage/engage-config-metadata';
+import {
   isEmptyRedditCapability,
   mergeRedditCapability,
   readRedditCapability,
@@ -750,21 +756,68 @@ export class EngageRepository {
     })).sort((a, b) => b.activatedOrgs - a.activatedOrgs);
   }
 
+  /**
+   * The bare config row for a project — no entitlement lookup, no scan cursors,
+   * none of the decoration `EngageService.getConfig` adds. Automation reads
+   * only these three fields, and paying for the full config (dozens of cursor
+   * queries) to learn whether replies are on would make the page's one
+   * aggregate call slower than the five it replaced.
+   *
+   * Read-only on purpose: unlike getOrCreateConfig this never inserts, so
+   * loading a page cannot create an EngageConfig row for a project that has
+   * never used Engage.
+   */
+  getConfigCore(organizationId: string, projectId: string) {
+    return this._config.model.engageConfig.findFirst({
+      where: { organizationId, projectId },
+      select: { id: true, enabled: true, metadata: true },
+    });
+  }
+
+  /**
+   * Write the config row.
+   *
+   * `metadata` is a PATCH, not a replacement: it is folded onto whatever the row
+   * currently resolves to and stored whole, so the blob is always self-describing
+   * rather than a sparse diff readers would have to reassemble.
+   *
+   * Read-then-write rather than a JSON merge in SQL, because the merge has to
+   * apply the same defaults and validation as every read — two concurrent saves
+   * to the SAME project are a UI impossibility (one page, one form), while two
+   * different settings ending up in disagreeing shapes would not be.
+   */
   async saveConfig(
     organizationId: string,
     data: Partial<{
       enabled: boolean;
       lastScanAt: Date;
-      autoReplyMode: string;
-      replyPolicies: Prisma.InputJsonValue;
+      metadata: EngageConfigMetadataPatch;
     }>,
     projectId: string | null = null
   ) {
+    const { metadata: patch, ...columns } = data;
+    const resolveMetadata = async () => {
+      if (!patch) return undefined;
+      const current = await this._config.model.engageConfig.findFirst({
+        where:
+          projectId != null
+            ? { organizationId, projectId }
+            : { organizationId, projectId: null },
+        select: { metadata: true },
+      });
+      return mergeEngageConfigMetadata(current, patch) as unknown as Prisma.InputJsonValue;
+    };
+    const metadata = await resolveMetadata();
+    const payload = {
+      ...columns,
+      ...(metadata !== undefined ? { metadata } : {}),
+    };
+
     if (projectId != null) {
       return this._config.model.engageConfig.upsert({
         where: { organizationId_projectId: { organizationId, projectId } },
-        create: { organizationId, projectId, ...data },
-        update: data,
+        create: { organizationId, projectId, ...payload },
+        update: payload,
       });
     }
     // Legacy null-project row — see getOrCreateConfig's note (nullable column
@@ -776,11 +829,11 @@ export class EngageRepository {
     if (existing) {
       return this._config.model.engageConfig.update({
         where: { id: existing.id },
-        data,
+        data: payload,
       });
     }
     return this._config.model.engageConfig.create({
-      data: { organizationId, projectId: null, ...data },
+      data: { organizationId, projectId: null, ...payload },
     });
   }
 
@@ -1881,21 +1934,43 @@ export class EngageRepository {
    * `enabled` is required too: a project whose Engage is switched off must not
    * keep replying just because a mode was left set.
    */
-  getAutoReplyConfigs(organizationId: string) {
-    return this._config.model.engageConfig.findMany({
-      where: {
-        organizationId,
-        enabled: true,
-        projectId: { not: null },
-        autoReplyMode: { in: ['review', 'auto'] },
-      },
-      select: {
-        id: true,
-        projectId: true,
-        autoReplyMode: true,
-        replyPolicies: true,
-      },
+  /**
+   * Projects whose managed replies are actually driveable right now.
+   *
+   * The switch chain, top down (docs/automation-api.md): the Automation master
+   * switch, then the managed-replies feature switch — which IS `autoReplyMode`,
+   * not a second boolean beside it, so there is only ever one answer to "does
+   * this project reply unattended". `enabled` remains the Engage feature's own
+   * switch (it also gates scanning). The per-platform level is applied by the
+   * caller, which reads `replyPolicies[platform].autoReplyEnabled`.
+   *
+   * Filtering here rather than in the driver keeps a switched-off project out of
+   * the result set entirely, so no budget lookup or pacing query is spent on it.
+   */
+  async getAutoReplyConfigs(organizationId: string) {
+    const rows = await this._config.model.engageConfig.findMany({
+      // Only the real columns are filtered in SQL; the switch chain lives in
+      // `metadata` and is applied in code below.
+      //
+      // A JSON path filter could express it, but keeping it in code means the
+      // driver's gate and every other read share one implementation of the
+      // defaults — and it costs nothing here, where the row count is "projects
+      // in this org", not "opportunities".
+      where: { organizationId, enabled: true, projectId: { not: null } },
+      select: { id: true, projectId: true, metadata: true },
     });
+
+    return rows
+      .map((row) => ({ row, meta: readEngageConfigMetadata(row) }))
+      // Master switch AND the managed-replies feature switch. The per-platform
+      // level is applied by the caller against replyPolicies[platform].
+      .filter(({ meta }) => isRepliesActive(meta))
+      .map(({ row, meta }) => ({
+        id: row.id,
+        projectId: row.projectId,
+        autoReplyMode: meta.autoReplyMode,
+        replyPolicies: meta.replyPolicies,
+      }));
   }
 
   /**

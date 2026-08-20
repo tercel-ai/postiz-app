@@ -58,7 +58,7 @@ path uses the [publish-due lease](#post-postspublish-due).
 platform-capability check (`isExtensionPublishProvider`), preserving legacy
 behavior. It is set two ways:
 
-- **Bulk**, for operation-plan drafts: [`POST /posts/schedule`](#post-postsschedule)
+- **Bulk**, for hand-picked drafts: [`POST /posts/schedule`](#post-postsschedule)
   resolves + stamps it while flipping DRAFT → QUEUE (and can set a new schedule
   time per post).
 - **Single post**, on the main editor: [`POST /posts/`](#post-posts) accepts an
@@ -110,7 +110,7 @@ not per post or per keystroke.
 | POST | [`/posts/:id/retry`](#post-postsidretry) | Retry a failed post |
 | PUT | [`/posts/:id/date`](#put-postsiddate) | Reschedule a post |
 | POST | [`/posts/separate-posts`](#post-postsseparate-posts) | Split long content into a thread |
-| POST | [`/posts/schedule`](#post-postsschedule) | Commit DRAFT posts to the send queue (DRAFT → QUEUE) |
+| POST | [`/posts/schedule`](#post-postsschedule) | Commit hand-picked DRAFT posts to the send queue (DRAFT → QUEUE) |
 | GET | [`/posts/publish-methods`](#get-postspublish-methods) | Per-platform send-path capability for the UI (org-scoped, cacheable) |
 | PATCH | [`/posts/:id/extension-published`](#patch-postsidextension-published) | Extension publish-on-success callback |
 | PATCH | [`/posts/:id/extension-publish-failed`](#patch-postsidextension-publish-failed) | Extension publish-failed callback (carries partial thread success) |
@@ -412,10 +412,9 @@ Split long content into thread-sized segments.
 
 ### POST /posts/schedule
 
-Commit a batch of `DRAFT` posts to the send queue (`DRAFT → QUEUE`). This is the
-single entry point that turns generated / operation-plan drafts into work the
-send paths pick up, and where the **send-path decision is made once per post**
-(the double-publish guard — see [Publish method & the send queue](#publish-method--the-send-queue)):
+Commit a batch of hand-picked `DRAFT` posts to the send queue (`DRAFT → QUEUE`),
+and the place where the **send-path decision is made once per post** (the
+double-publish guard — see [Publish method & the send queue](#publish-method--the-send-queue)):
 
 - Each post's `publishMethod` (`extension` | `api`) is resolved from platform
   capability + whether an account is bound + the caller's optional `publishMethod`
@@ -429,94 +428,38 @@ send paths pick up, and where the **send-path decision is made once per post**
 - Partial success: each post is scheduled independently — one unschedulable post
   never blocks the rest.
 
-The batch is named **either** by explicit `posts` **or** by `planId` — never both
-(`400` if both are given: merging them would leave it ambiguous which posts a
-body-level `publishMethod` applies to).
-
 - **Body** — `SchedulePostsDto`:
 
 ```jsonc
 {
-  // (a) hand-picked ids — each with its own optional send path and date
   "posts": [
     {
       "id": "<post-uuid>",
       "publishMethod": "extension" | "api",   // optional → auto-resolve
       "date": "2026-08-01T09:00:00.000Z"       // optional ISO → override this post's publishDate
     }
-  ],
-
-  // (b) OR plan-scoped — commit EVERY still-DRAFT post of one operation plan
-  "planId": "<operation-plan-uuid>",
-  "publishMethod": "extension" | "api",       // optional, applies to the whole plan
-  "platforms": ["x", "reddit"]                // optional, plan-scoped only — see below
+  ]
 }
 ```
 
-**Plan-scoped commit (`planId`).** The "activate this plan" action: the client
-never enumerates the plan's post ids, which it could not keep in sync anyway
-(re-running a plan re-materializes them). Only the plan's still-`DRAFT` **roots**
-are committed — a thread's children flip with their anchor — and soft-deleted
-rows are skipped, so the drafts of a plan superseded by a re-run never resurface.
-Org-scoped: a `planId` from another organization simply matches nothing.
-A per-post `date` is not expressible in the request body here; each post keeps
-its materialized `publishDate` **unless** a per-platform publish time window
-(below) re-picks it.
-
-**Per-platform publish time window.** Admin-configurable setting
-(`extension_publish.time_window`, resolved by `ExtensionPublishConfigService` —
-same default→platform-override shape as `extension_publish.segment_gap`):
-`{ default?: {windowStart, windowEnd, timezone?}, platforms: { <platform>: {windowStart, windowEnd, timezone?} } }`,
-`windowStart`/`windowEnd` as local `"HH:MM"` (a window may wrap past midnight,
-e.g. `22:00`–`02:00`); `timezone` is IANA, omitted = UTC. A platform absent from
-the resolved config (no override, no global `default`) is **unconstrained** — the
-out-of-the-box state, so configuring nothing changes nothing.
-
-Applied **at this call**, not at plan generation — the window may have been
-configured or edited after the plan was already generated, so re-evaluating it
-here (rather than baking it into the materialized `publishDate`) is what makes a
-later admin edit actually take effect. For each `DRAFT` root about to be
-committed: if its platform resolves to a window and its materialized
-`publishDate` falls outside it (in the window's timezone), a **new random
-instant inside the window** replaces it — never clamped to the nearest boundary,
-since the materialized time was only ever the plan's generated default and has
-no value worth preserving once a window says it's the wrong time of day. A post
-already inside its window, or on an unconstrained platform, keeps its
-materialized time exactly as before. Applies group-wide, same as an explicit
-`date` — a thread's segments share one publish time.
-
-**`platforms` — restrict to specific platforms.** Plan-scoped only (`400` if sent
-together with `posts` — a hand-picked id list is already an explicit selection,
-so a platform filter on top of it would be ambiguous). Matches
-`Post.providerIdentifier` case-insensitively (`"X"` and `"x"` are the same
-filter). Omit to activate every platform the plan has.
-
-Every response field below — `total`, `alreadyScheduled`, `scheduled`, `failed`
-— is scoped to the **filtered** set, not the whole plan: a call filtered to
-`["x"]` on a plan that also has `reddit`/`linkedin` posts reports counts only
-for the `x` roots, never the others. A filter matching nothing is a no-op
-success (`total: 0`), same as an unknown `planId` — never an error.
-
-Idempotent by construction: `state = DRAFT` is itself the filter, so a repeated
-activation matches nothing.
+> **Committing a whole operation plan** ("activate this plan") is
+> [`POST /projects/:projectId/automation/publishing`](./automation-api.md#post-projectsprojectidautomationpublishing)
+> with `commit: true`, **not** this route. It used to be a `planId` form here,
+> which put a project-scoped action in an org-scoped body: with no `projectId`
+> anywhere in the request, the global `ProjectAuthGuard` never fired, so nothing
+> checked the plan belonged to a project the caller was acting on — and a
+> deactivated project could still be made to queue posts. The Automation route
+> names its project in the path and resolves the plan **server-side**, so a
+> client cannot name a plan at all.
 
 - **Response**:
 
 ```jsonc
 {
   "scheduled": [ { "id": "<post-uuid>", "publishMethod": "extension" | "api" } ],
-  "failed":    [ { "id": "<post-uuid>", "code": "<code>", "message": "<human text>" } ],
-
-  // plan-scoped calls only:
-  "total": 12,             // roots the plan has (any state) — or, with `platforms`, roots matching it
-  "alreadyScheduled": 12    // of those, how many were not DRAFT
+  "failed":    [ { "id": "<post-uuid>", "code": "<code>", "message": "<human text>" } ]
 }
 ```
-
-`total` / `alreadyScheduled` are what make a repeat call legible: `total > 0` with
-an empty `scheduled` means the plan (or platform slice) is already committed,
-while `total = 0` means nothing matched (no posts, wrong org, or a `platforms`
-filter that hit nothing). Without them the two look identical.
 
 | `failed[].code` | Meaning |
 | --- | --- |

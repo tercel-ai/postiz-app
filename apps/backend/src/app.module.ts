@@ -20,6 +20,7 @@ import { TemporalRegisterMissingSearchAttributesModule } from '@gitroom/nestjs-l
 import { InfiniteWorkflowRegisterModule } from '@gitroom/nestjs-libraries/temporal/infinite.workflow.register';
 import { EngageModule } from '@gitroom/backend/engage/engage.module';
 import { OperationPlanModule } from '@gitroom/backend/operation-plan/operation-plan.module';
+import { AutomationModule } from '@gitroom/backend/automation/automation.module';
 
 @Global()
 @Module({
@@ -29,6 +30,7 @@ import { OperationPlanModule } from '@gitroom/backend/operation-plan/operation-p
     ApiModule,
     EngageModule,
     OperationPlanModule,
+    AutomationModule,
     PublicApiModule,
     AdminApiModule,
     AgentModule,

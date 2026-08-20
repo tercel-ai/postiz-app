@@ -1,5 +1,4 @@
 import {
-  BadRequestException,
   Body,
   Controller,
   Delete,
@@ -406,43 +405,23 @@ export class PostsController {
   }
 
   /**
-   * Commit a batch of DRAFT posts to the send queue (DRAFT -> QUEUE). Used by the
-   * operation-plan workspace to "send" selected posts: the DB QUEUE state becomes
-   * the single source of truth and the send path (extension vs API) is decided
-   * here per post. API posts start their Temporal workflow; extension posts stay
-   * QUEUE for the extension publish-due loop. Returns per-post scheduled/failed
-   * so one unbindable platform never blocks the rest.
+   * Commit a batch of hand-picked DRAFT posts to the send queue (DRAFT ->
+   * QUEUE): the DB QUEUE state becomes the single source of truth and the send
+   * path (extension vs API) is decided here per post. API posts start their
+   * Temporal workflow; extension posts stay QUEUE for the extension publish-due
+   * loop. Returns per-post scheduled/failed so one unbindable platform never
+   * blocks the rest.
    *
-   * The batch is named EITHER by explicit `posts` (hand-picked, each with its own
-   * optional send path and date) OR by `planId` (every still-DRAFT post of one
-   * operation plan, the "activate this plan" action). Both together is rejected:
-   * merging them would leave it ambiguous which posts the body-level
-   * `publishMethod` applies to, and the two carry per-post choices differently.
+   * Explicit ids only. Committing a whole operation plan lives at
+   * POST /projects/:projectId/automation/publishing — see SchedulePostsDto for
+   * why that moved off this route.
    */
   @Post('/schedule')
   async schedulePosts(
     @GetOrgFromRequest() org: Organization,
     @Body() body: SchedulePostsDto
   ) {
-    if (body.planId && body.posts?.length) {
-      throw new BadRequestException(
-        'Provide either `planId` or `posts`, not both'
-      );
-    }
-    if (body.platforms?.length && body.posts?.length) {
-      throw new BadRequestException(
-        '`platforms` only applies to a `planId` batch — `posts` is already an explicit selection'
-      );
-    }
-    if (body.planId) {
-      return this._postsService.schedulePlanPosts(
-        org.id,
-        body.planId,
-        body.publishMethod,
-        body.platforms
-      );
-    }
-    return this._postsService.schedulePosts(org.id, body.posts!);
+    return this._postsService.schedulePosts(org.id, body.posts);
   }
 
   @Post('/separate-posts')

@@ -266,7 +266,17 @@ Modules with a dedicated, parameter-level API reference:
 | Method | Path |
 | --- | --- |
 | GET | `/operation-plans/:id` |
+| GET | `/projects/:projectId/operation-plans/active` |
 | POST | `/projects/:projectId/operation-plans` |
+
+### [automation.controller.ts](../apps/backend/src/api/routes/automation.controller.ts) — `/projects/:projectId/automation`
+📖 **[automation-api.md](./automation-api.md)**
+| Method | Path |
+| --- | --- |
+| GET | `/projects/:projectId/automation` |
+| POST | `/projects/:projectId/automation/enabled` |
+| POST | `/projects/:projectId/automation/publishing` |
+| POST | `/projects/:projectId/automation/replies` |
 
 ### [billing.controller.ts](../apps/backend/src/api/routes/billing.controller.ts) — `/billing`
 📖 credit model → [aisee-integration.md](./aisee-integration.md) · 📝 endpoint-level reference TODO

@@ -58,6 +58,10 @@ import {
 } from '@gitroom/nestjs-libraries/database/prisma/posts/extension-publish-config.service';
 import { titleFromSettings } from '@gitroom/nestjs-libraries/database/prisma/posts/settings-title';
 import { ProjectValidationService } from '@gitroom/nestjs-libraries/projects/project-validation.service';
+import {
+  isPublishingActive,
+  ProjectPublishingService,
+} from '@gitroom/nestjs-libraries/automation/project-publishing.service';
 import { PublishPlatform } from '@gitroom/helpers/extension/post-publish';
 import { PostingTimesV2 } from '@gitroom/nestjs-libraries/dtos/integrations/posting-times.types';
 import { resolveTimeSlotsForDate } from '@gitroom/nestjs-libraries/dtos/integrations/posting-times.utils';
@@ -124,7 +128,11 @@ export class PostsService {
     private _extensionPublishConfigService: ExtensionPublishConfigService,
     // Optional so the many unit tests that build this service positionally keep
     // working; DatabaseModule always provides it at runtime.
-    private _projectValidation?: ProjectValidationService
+    private _projectValidation?: ProjectValidationService,
+    // Same reason as above. Only the project-scoped plan branch of
+    // schedulePlanPosts touches it, and that branch requires a projectId the
+    // legacy positional test callers never pass.
+    private _projectPublishingService?: ProjectPublishingService
   ) {}
 
   searchForMissingThreeHoursPosts() {
@@ -2215,6 +2223,24 @@ export class PostsService {
   }
 
   /**
+   * Still-DRAFT, still-in-the-future roots of one plan — what Automation shows
+   * as "waiting to be published". Manual posts are excluded structurally
+   * (operationPlanId equality), so the number never counts work the user
+   * created by hand.
+   */
+  getPlanPublishingQueue(
+    orgId: string,
+    operationPlanId: string,
+    notBefore = new Date()
+  ) {
+    return this._postRepository.getPlanPublishingQueue(
+      orgId,
+      operationPlanId,
+      notBefore
+    );
+  }
+
+  /**
    * Plan-scoped DRAFT -> QUEUE: commit every still-draft post of one operation
    * plan in a single call. Exists so "activate this plan" is one action on the
    * plan itself — the client never has to enumerate the plan's post ids, which
@@ -2230,13 +2256,61 @@ export class PostsService {
    * `alreadyScheduled` is reported separately from `scheduled` so a re-run is
    * legible: total > 0 with an empty `scheduled` means the plan is already
    * committed, while total = 0 means the plan has no posts (or is not this org's).
+   *
+   * Manual posts are structurally out of reach here: the plan query matches
+   * `operationPlanId` by equality, so a hand-created post (operationPlanId
+   * null) can never join this batch no matter what the caller passes. Turning
+   * Automation on therefore cannot touch anything the user typed themselves.
+   *
+   * `projectId` is REQUIRED, not optional: a plan is a project's artifact, so
+   * committing one is always a project-scoped action. Taking it as a parameter
+   * rather than inferring it is what lets this method assert the plan actually
+   * belongs to the project the caller was authorized for — and making it
+   * mandatory means no future caller can reach the plan path without that
+   * assertion running. The only caller is AutomationService, reached through
+   * /projects/:projectId/automation, where ProjectAuthGuard has already
+   * authorized the id against the request's org.
    */
   async schedulePlanPosts(
     orgId: string,
     operationPlanId: string,
+    projectId: string,
     publishMethod?: PublishMethod,
     platforms?: string[]
   ) {
+    if (!this._projectPublishingService) {
+      // Only reachable if someone constructs this service positionally without
+      // the dependency. Failing loudly beats silently skipping the ownership
+      // assertion, which is the whole point of this path.
+      throw new Error(
+        'ProjectPublishingService is required to schedule an operation plan'
+      );
+    }
+    // Ownership first: a plan from a sibling project must not even reveal how
+    // many posts it has, so this runs before any counting.
+    await this._projectPublishingService.assertPlanBelongsToProject(
+      orgId,
+      projectId,
+      operationPlanId
+    );
+    const projectPublishing = await this._projectPublishingService.resolve(
+      orgId,
+      projectId
+    );
+
+    // The switch chain, in order: master -> scheduled-publishing feature. The
+    // per-platform level is applied below, per post.
+    //
+    // Gates what ENTERS the queue, nothing else. A post already in QUEUE — or
+    // one the extension is mid-send on — is past this point and finishes;
+    // turning publishing off is a configuration change, not a recall. Reported
+    // as a plain empty batch rather than an error: the caller (saving publishing
+    // settings with `commit`) is doing something legitimate, it simply has
+    // nothing to commit while the feature is off.
+    if (!isPublishingActive(projectPublishing)) {
+      return { scheduled: [], failed: [], total: 0, alreadyScheduled: 0 };
+    }
+
     const allRoots = await this._postRepository.getSchedulablePostRootsByPlan(
       orgId,
       operationPlanId
@@ -2246,8 +2320,19 @@ export class PostsService {
     // that filtered to `['x']` on a plan that also has linkedin/medium posts
     // must not see `total` counting posts it never asked to touch, which would
     // make the "already done" signal misleading.
-    const platformSet = platforms?.length
-      ? new Set(platforms.map((p) => p.toLowerCase()))
+    // Explicit `platforms` wins; otherwise a project-scoped call falls back to
+    // the platforms the project itself has publishing turned on for. That
+    // fallback is what makes the saved setting REAL — before it, the stored
+    // per-platform toggle was decoration and the only thing that decided what
+    // got queued was the list the client happened to send.
+    //
+    // `enabledPlatforms: null` means the project never expressed a preference,
+    // which stays unconstrained (pre-existing behaviour); an EMPTY array means
+    // every platform was explicitly turned off, and correctly queues nothing.
+    const effectivePlatforms =
+      platforms?.length ? platforms : projectPublishing.enabledPlatforms ?? undefined;
+    const platformSet = effectivePlatforms
+      ? new Set(effectivePlatforms.map((p) => p.toLowerCase()))
       : null;
     const roots = platformSet
       ? allRoots.filter(
@@ -2257,13 +2342,13 @@ export class PostsService {
         )
       : allRoots;
     const drafts = roots.filter((p) => p.state === 'DRAFT');
-    // Per-platform publish time windows (admin-configurable, may not have
-    // existed yet when the plan was generated) — resolved once for the whole
-    // batch, then applied per-post below. A platform absent from this map is
+    // Per-platform publish time windows — resolved once for the whole batch,
+    // then applied per-post below. A platform absent from this map is
     // unconstrained: its posts keep their materialized time untouched.
-    const timeWindows = drafts.length
-      ? await this._extensionPublishConfigService.getPublishTimeWindows()
-      : {};
+    //
+    // Already resolved by ProjectPublishingService, which layered the PROJECT's
+    // own window over the admin tiers (platform override -> global default).
+    const timeWindows = drafts.length ? projectPublishing.windows : {};
     // Empty input is safe: schedulePosts short-circuits on an empty id list, so
     // an already-committed (or unknown, or platform-filtered-to-nothing) plan is
     // a no-op success, not an error.

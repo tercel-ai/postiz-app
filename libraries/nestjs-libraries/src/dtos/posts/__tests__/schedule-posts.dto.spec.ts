@@ -7,42 +7,39 @@ import { SchedulePostsDto } from '../schedule-posts.dto';
 const check = (body: any) =>
   validateSync(plainToInstance(SchedulePostsDto, body)).map((e) => e.property);
 
-// The batch is named EITHER by explicit `posts` or by `planId`. ValidateIf is
-// what makes each required only when the other is absent, and its semantics are
-// easy to get wrong by inspection — a body naming NEITHER must still be
-// rejected, which only holds because both conditions fire at once.
+// This route now names its batch ONE way: explicit post ids. It used to also
+// accept a `planId` ("activate this plan"), which made a project-scoped action
+// travel in an org-scoped body — no projectId meant the global ProjectAuthGuard
+// never fired, so nothing checked the plan belonged to a project the caller was
+// acting on. That form moved to POST /projects/:projectId/automation/publishing.
 describe('SchedulePostsDto validation', () => {
-  it('accepts posts alone', () => expect(check({ posts: [{ id: 'p1' }] })).toEqual([]));
-  it('accepts planId alone', () => expect(check({ planId: 'plan-1' })).toEqual([]));
-  it('rejects an empty body naming neither', () => {
-    expect(check({}).sort()).toEqual(['planId', 'posts']);
-  });
-  it('rejects an empty posts array with no planId', () =>
+  it('accepts a batch of ids', () =>
+    expect(check({ posts: [{ id: 'p1' }] })).toEqual([]));
+
+  it('accepts per-post send path and date', () =>
+    expect(
+      check({
+        posts: [{ id: 'p1', publishMethod: 'api', date: '2026-08-20T10:00:00.000Z' }],
+      })
+    ).toEqual([]));
+
+  it('rejects an empty body', () => expect(check({})).toEqual(['posts']));
+
+  it('rejects an empty posts array', () =>
     expect(check({ posts: [] })).toEqual(['posts']));
-  it('rejects a bad publishMethod', () =>
-    expect(check({ planId: 'p', publishMethod: 'carrier-pigeon' })).toEqual(['publishMethod']));
 
-  it('accepts planId with a platforms filter', () =>
-    expect(check({ planId: 'p', platforms: ['x', 'reddit'] })).toEqual([]));
+  it('rejects a post with no id', () =>
+    expect(check({ posts: [{ publishMethod: 'api' }] })).toEqual(['posts']));
 
-  it('rejects platforms alone — it names no batch by itself', () => {
-    // platforms has no bearing on posts'/planId's own ValidateIf conditions
-    // (they check `!o.posts`/`!o.planId`, not `o.platforms`), so this must
-    // fail exactly like the empty-body case — locked in explicitly since a
-    // careless future edit to the ValidateIf predicates could silently let it
-    // through.
-    expect(check({ platforms: ['x'] }).sort()).toEqual(['planId', 'posts']);
+  it('rejects a bad per-post publishMethod', () =>
+    expect(check({ posts: [{ id: 'p1', publishMethod: 'carrier-pigeon' }] })).toEqual([
+      'posts',
+    ]));
+
+  // Pinned so the plan form cannot quietly come back on this route: a body that
+  // names a plan is now just an unrecognised body missing its required `posts`.
+  it('no longer accepts a planId batch', () => {
+    expect(check({ planId: 'plan-1' })).toEqual(['posts']);
+    expect(check({ planId: 'plan-1', platforms: ['x'] })).toEqual(['posts']);
   });
-
-  it('rejects a non-string entry in platforms', () =>
-    expect(check({ planId: 'p', platforms: [1] })).toEqual(['platforms']));
-
-  // `platforms` + `posts` together is a controller-level 400, not a DTO
-  // validation failure — @ValidateIf can only skip a field's OWN validators,
-  // it cannot reject a field for another field's presence (see the class
-  // comment). This DTO-level check confirms platforms alone still passes when
-  // posts happens to be set, i.e. the rejection genuinely lives elsewhere and
-  // isn't silently absent.
-  it('platforms alongside posts passes DTO validation (the controller rejects the combination)', () =>
-    expect(check({ posts: [{ id: 'p1' }], platforms: ['x'] })).toEqual([]));
 });

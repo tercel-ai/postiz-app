@@ -71,6 +71,12 @@ import {
   ReplyLength,
 } from '@gitroom/nestjs-libraries/engage/engage-entitlement.service';
 import {
+  AutoReplyMode,
+  EngageConfigMetadataPatch,
+  EngagePlatformPolicy,
+  readEngageConfigMetadata,
+} from '@gitroom/nestjs-libraries/engage/engage-config-metadata';
+import {
   AddKeywordDto,
   AddKeywordsBulkDto,
   AddMonitoredChannelDto,
@@ -404,8 +410,15 @@ export class EngageService implements OnApplicationBootstrap {
       },
       priorityAccounts,
     };
+    // Lifted out of `metadata` so the response keeps its historical top-level
+    // shape — the HTTP contract never mentioned where these were stored.
+    const settings = readEngageConfigMetadata(config as any);
+
     return {
       ...config,
+      // Top-level fields with the names and shapes clients already expect.
+      autoReplyMode: settings.autoReplyMode,
+      replyPolicies: settings.replyPolicies,
       keywords,
       monitoredChannels,
       trackedAccounts,
@@ -496,16 +509,22 @@ export class EngageService implements OnApplicationBootstrap {
           "autoReplyMode requires a projectId — unattended replying is driven by a project's operation plan.",
       });
     }
+    // `enabled` is still a column (scan enumeration filters on it); the two
+    // settings are folded into `metadata`. The HTTP contract is unchanged —
+    // only where the values are stored moved.
+    const metadata: EngageConfigMetadataPatch = {
+      ...(dto.autoReplyMode !== undefined && {
+        autoReplyMode: dto.autoReplyMode as AutoReplyMode,
+      }),
+      ...(dto.replyPolicies !== undefined && {
+        replyPolicies: dto.replyPolicies as Record<string, EngagePlatformPolicy>,
+      }),
+    };
     const result = await this._engageRepository.saveConfig(
       org.id,
       {
         ...(dto.enabled !== undefined && { enabled: dto.enabled }),
-        ...(dto.autoReplyMode !== undefined && {
-          autoReplyMode: dto.autoReplyMode,
-        }),
-        ...(dto.replyPolicies !== undefined && {
-          replyPolicies: dto.replyPolicies as object,
-        }),
+        ...(Object.keys(metadata).length ? { metadata } : {}),
       },
       dto.projectId
     );

@@ -7,16 +7,18 @@ Operation plans turn a completed Aisee analysis task into a project-scoped publi
 Base paths are mounted on the existing authenticated backend API. All requests require the normal Postiz session cookie.
 
 > **Sending a plan's posts.** Materialization creates posts in `DRAFT` — they are
-> not sent yet. The workspace commits them to the send queue via
-> [`POST /posts/schedule`](./posts-api.md#post-postsschedule) (DRAFT → QUEUE),
-> which resolves each post's send path (extension vs API) once. See
+> not sent yet. Committing them to the send queue (DRAFT → QUEUE) resolves each
+> post's send path (extension vs API) once; see
 > [Publish method & the send queue](./posts-api.md#publish-method--the-send-queue).
 >
-> Two ways to name the batch: `posts` (hand-picked ids) or **`planId`** — the
-> "activate this plan" action, which commits every still-`DRAFT` post of the plan
-> in one call. Prefer `planId`: a plan's post ids are re-materialized when the
-> plan is re-run, so a client-held id list goes stale. There is no separate
-> activate endpoint; `POST /posts/schedule` is it.
+> The "activate this plan" action is
+> [`POST /projects/:projectId/automation/publishing`](./automation-api.md#post-projectsprojectidautomationpublishing)
+> with `commit: true`. The client does **not** name the plan — the route resolves
+> the project's active plan server-side, which is both simpler (a plan's post ids
+> are re-materialized when the plan is re-run, so a client-held id list goes
+> stale) and safer (a plan id supplied by the client cannot belong to another
+> project). [`POST /posts/schedule`](./posts-api.md#post-postsschedule) remains
+> the entry point for hand-picked post ids only.
 >
 > This applies to POSTS only. A plan's Engage reply targets
 > (`engagePolicies[].targetRepliesPerDay` / `keywordTargets`) are **not** activated
@@ -306,8 +308,14 @@ diverge from what the backend would actually schedule/reply against.
 `{ "id": null }` when the project has no active plan — a normal state (not yet
 generated, or between plans), never a `404`. Follow up with
 [`GET /operation-plans/:id`](#get-operation-plan-overview) for the full detail
-(posts, engage stats), or [`POST /posts/schedule`](./posts-api.md#post-postsschedule)
-`{ planId }` to activate it.
+(posts, engage stats), or
+[`POST /projects/:projectId/automation/publishing`](./automation-api.md#post-projectsprojectidautomationpublishing)
+`{ commit: true }` to activate it.
+
+> The Automation page does not call this endpoint directly — it reads
+> [`GET /projects/:projectId/automation`](./automation-api.md#get-projectsprojectidautomation),
+> which returns the active plan id together with a send-queue rollup and the
+> project's publishing/reply settings in one project-scoped call.
 
 ---
 
@@ -437,7 +445,7 @@ Seeded on backend boot (`OperationPlanService.onApplicationBootstrap`, insert-if
 | `operation_plan.max_thread_parts` | number | `3` | Max follow-up posts in a generated thread (anchor separate → full chain is 1 + this). Over-long threads are truncated. **`0` disables threads.** Only platforms whose provider supports follow-up posting (`comment` capability, e.g. x/reddit) are ever threaded. |
 | `operation_plan.publish_time_jitter_minutes` | number | `30` | Random `±N` minutes applied to each generated post's `publishDate` at materialization, so a plan does not fire every post at the same clock time day after day (the model gives zero time-of-day guidance on its own). `0` disables jitter. Clamped to the same UTC calendar day it was generated for. A thread's segments share **one** jittered time (rolled once per content item, not once per segment). |
 
-> **Constraining WHAT time of day a platform publishes at** (not just de-clustering) is a separate, `extension_publish.*`-namespaced setting resolved at plan **activation** rather than generation — see [`POST /posts/schedule` — per-platform publish time window](posts-api.md#post-postsschedule).
+> **Constraining WHAT time of day a platform publishes at** (not just de-clustering) is a separate, `extension_publish.*`-namespaced setting resolved at plan **activation** rather than generation — see [per-platform publish time window](automation-api.md#per-platform-publish-time-window). A **project** may narrow the admin window further through the Automation API.
 
 > **Clients read these from `GET /engage/config`.** Its response carries an `operationPlan: { maxDurationDays, allowedPlatforms }` block so a plan-creation UI can bound its date range and platform picker without an extra request. There, `allowedPlatforms` is the **raw allowlist, returned verbatim** — it is **not** intersected with connected integrations, so an allowlisted-but-unconnected platform is still offered (it is still plannable; POST accepts it). This keeps the picker in lockstep with the create endpoint's single platform gate. `platform_cadence` is **not** exposed — it is generator-only steering.
 

@@ -29,6 +29,22 @@ function makeService(posts: any[], planRoots?: any[]) {
   const getPublishTimeWindows = vi.fn().mockResolvedValue({});
   const extensionPublishConfigService = { getPublishTimeWindows } as any;
 
+  // Only the project-scoped branch of schedulePlanPosts reaches this; the
+  // org-scoped calls below never pass a projectId, so it stays untouched and
+  // the pre-existing behaviour is exercised exactly as before.
+  const assertPlanBelongsToProject = vi.fn().mockResolvedValue(undefined);
+  const resolveProjectPublishing = vi.fn().mockResolvedValue({
+    automationEnabled: true,
+    publishingEnabled: true,
+    publishingConfigured: false,
+    enabledPlatforms: null,
+    windows: {},
+  });
+  const projectPublishingService = {
+    assertPlanBelongsToProject,
+    resolve: resolveProjectPublishing,
+  } as any;
+
   const service = new PostsService(
     repo,
     {} as any, // integrationManager (schedulePosts uses the standalone resolver)
@@ -39,7 +55,9 @@ function makeService(posts: any[], planRoots?: any[]) {
     {} as any,
     {} as any,
     {} as any,
-    extensionPublishConfigService
+    extensionPublishConfigService,
+    undefined, // projectValidation
+    projectPublishingService
   );
   // Stub the Temporal trigger so we can assert WHICH posts reach it.
   const startWorkflow = vi
@@ -53,6 +71,8 @@ function makeService(posts: any[], planRoots?: any[]) {
     schedulePostGroupToQueue,
     startWorkflow,
     getPublishTimeWindows,
+    assertPlanBelongsToProject,
+    resolveProjectPublishing,
   };
 }
 
@@ -422,9 +442,13 @@ describe('PostsService.schedulePosts — persisted publishMethod', () => {
   });
 });
 
-// Plan-scoped commit: the "activate this plan" action. What matters is that it
-// reduces to the id-based path (same send-path resolution, same double-publish
-// guard) while only ever touching the plan's still-DRAFT roots.
+// Plan-scoped commit: the "activate this plan" action, reached only through
+// /projects/:projectId/automation. What matters is that it reduces to the
+// id-based path (same send-path resolution, same double-publish guard) while
+// only ever touching the plan's still-DRAFT roots.
+//
+// `projectId` is a REQUIRED parameter, so every call here passes one — there is
+// no org-scoped plan commit left to test.
 describe('PostsService.schedulePlanPosts', () => {
   beforeEach(() => vi.restoreAllMocks());
 
@@ -446,7 +470,7 @@ describe('PostsService.schedulePlanPosts', () => {
       ]
     );
 
-    const res = await service.schedulePlanPosts('org-1', 'plan-1');
+    const res = await service.schedulePlanPosts('org-1', 'plan-1', 'proj-1');
 
     // Only the drafts are handed down — a PUBLISHED root is never re-committed.
     expect(getSchedulablePostsByIds).toHaveBeenCalledWith('org-1', ['p1', 'p2']);
@@ -466,7 +490,7 @@ describe('PostsService.schedulePlanPosts', () => {
       [{ id: 'p1', state: 'QUEUE' }]
     );
 
-    const res = await service.schedulePlanPosts('org-1', 'plan-1');
+    const res = await service.schedulePlanPosts('org-1', 'plan-1', 'proj-1');
 
     expect(res.scheduled).toEqual([]);
     expect(res.failed).toEqual([]);
@@ -482,7 +506,7 @@ describe('PostsService.schedulePlanPosts', () => {
       []
     );
 
-    const res = await service.schedulePlanPosts('org-1', 'nope');
+    const res = await service.schedulePlanPosts('org-1', 'nope', 'proj-1');
 
     expect(res).toEqual({ scheduled: [], failed: [], total: 0, alreadyScheduled: 0 });
     // Delegates with an empty id list; the repository short-circuits it, so no
@@ -500,7 +524,7 @@ describe('PostsService.schedulePlanPosts', () => {
       ]
     );
 
-    const res = await service.schedulePlanPosts('org-1', 'plan-1', 'api');
+    const res = await service.schedulePlanPosts('org-1', 'plan-1', 'proj-1', 'api');
 
     expect(res.scheduled).toEqual([
       { id: 'p1', publishMethod: 'api' },
@@ -532,7 +556,7 @@ describe('PostsService.schedulePlanPosts', () => {
       ]
     );
 
-    const res = await service.schedulePlanPosts('org-1', 'plan-1');
+    const res = await service.schedulePlanPosts('org-1', 'plan-1', 'proj-1');
 
     expect(res.scheduled).toEqual([{ id: 'ok', publishMethod: 'extension' }]);
     expect(res.failed).toEqual([
@@ -569,7 +593,7 @@ describe('PostsService.schedulePlanPosts — platform filter', () => {
       ]
     );
 
-    const res = await service.schedulePlanPosts('org-1', 'plan-1', undefined, ['x']);
+    const res = await service.schedulePlanPosts('org-1', 'plan-1', 'proj-1', undefined, ['x']);
 
     // Only the 'x' root is ever handed to the id-based path — reddit/linkedin
     // are excluded before schedulePosts is even called, not filtered after.
@@ -587,7 +611,7 @@ describe('PostsService.schedulePlanPosts — platform filter', () => {
       [{ id: 'x1', state: 'DRAFT', providerIdentifier: 'X' }]
     );
 
-    await service.schedulePlanPosts('org-1', 'plan-1', undefined, ['x']);
+    await service.schedulePlanPosts('org-1', 'plan-1', 'proj-1', undefined, ['x']);
 
     expect(getSchedulablePostsByIds).toHaveBeenCalledWith('org-1', ['x1']);
   });
@@ -598,7 +622,7 @@ describe('PostsService.schedulePlanPosts — platform filter', () => {
       [{ id: 'r1', state: 'DRAFT', providerIdentifier: 'reddit' }]
     );
 
-    const res = await service.schedulePlanPosts('org-1', 'plan-1', undefined, ['linkedin']);
+    const res = await service.schedulePlanPosts('org-1', 'plan-1', 'proj-1', undefined, ['linkedin']);
 
     expect(res).toEqual({ scheduled: [], failed: [], total: 0, alreadyScheduled: 0 });
     expect(getSchedulablePostsByIds).toHaveBeenCalledWith('org-1', []);
@@ -614,7 +638,7 @@ describe('PostsService.schedulePlanPosts — platform filter', () => {
       ]
     );
 
-    await service.schedulePlanPosts('org-1', 'plan-1', undefined, []);
+    await service.schedulePlanPosts('org-1', 'plan-1', 'proj-1', undefined, []);
 
     expect(getSchedulablePostsByIds).toHaveBeenCalledWith('org-1', ['x1', 'r1']);
   });
@@ -650,7 +674,7 @@ describe('PostsService.schedulePlanPosts — publish time window', () => {
       ]
     );
 
-    await service.schedulePlanPosts('org-1', 'plan-1');
+    await service.schedulePlanPosts('org-1', 'plan-1', 'proj-1');
 
     expect(schedulePostGroupToQueue).toHaveBeenCalledWith(
       'org-1',
@@ -661,7 +685,7 @@ describe('PostsService.schedulePlanPosts — publish time window', () => {
   });
 
   it('leaves publishDate untouched when it already falls inside the window', async () => {
-    const { service, schedulePostGroupToQueue, getPublishTimeWindows } = makeService(
+    const { service, schedulePostGroupToQueue, resolveProjectPublishing } = makeService(
       [xDraft({ id: 'x1', group: 'gx' })],
       [
         {
@@ -673,11 +697,17 @@ describe('PostsService.schedulePlanPosts — publish time window', () => {
         },
       ]
     );
-    getPublishTimeWindows.mockResolvedValue({
-      x: { windowStart: '09:00', windowEnd: '17:00' },
+    resolveProjectPublishing.mockResolvedValue({
+      automationEnabled: true,
+      publishingEnabled: true,
+      publishingConfigured: true,
+      enabledPlatforms: null,
+      windows: {
+        x: { windowStart: '09:00', windowEnd: '17:00' },
+      },
     });
 
-    await service.schedulePlanPosts('org-1', 'plan-1');
+    await service.schedulePlanPosts('org-1', 'plan-1', 'proj-1');
 
     expect(schedulePostGroupToQueue).toHaveBeenCalledWith(
       'org-1',
@@ -688,7 +718,7 @@ describe('PostsService.schedulePlanPosts — publish time window', () => {
   });
 
   it('re-picks a random time inside the window when the materialized time falls outside it', async () => {
-    const { service, schedulePostGroupToQueue, getPublishTimeWindows } = makeService(
+    const { service, schedulePostGroupToQueue, resolveProjectPublishing } = makeService(
       [xDraft({ id: 'x1', group: 'gx' })],
       [
         {
@@ -700,12 +730,18 @@ describe('PostsService.schedulePlanPosts — publish time window', () => {
         },
       ]
     );
-    getPublishTimeWindows.mockResolvedValue({
-      x: { windowStart: '09:00', windowEnd: '17:00' },
+    resolveProjectPublishing.mockResolvedValue({
+      automationEnabled: true,
+      publishingEnabled: true,
+      publishingConfigured: true,
+      enabledPlatforms: null,
+      windows: {
+        x: { windowStart: '09:00', windowEnd: '17:00' },
+      },
     });
     vi.spyOn(Math, 'random').mockReturnValue(0.5); // midpoint of the 8h span
 
-    await service.schedulePlanPosts('org-1', 'plan-1');
+    await service.schedulePlanPosts('org-1', 'plan-1', 'proj-1');
 
     expect(schedulePostGroupToQueue).toHaveBeenCalledWith(
       'org-1',
@@ -716,7 +752,7 @@ describe('PostsService.schedulePlanPosts — publish time window', () => {
   });
 
   it('honours the window timezone, not UTC clock time', async () => {
-    const { service, schedulePostGroupToQueue, getPublishTimeWindows } = makeService(
+    const { service, schedulePostGroupToQueue, resolveProjectPublishing } = makeService(
       [xDraft({ id: 'x1', group: 'gx' })],
       [
         {
@@ -730,11 +766,17 @@ describe('PostsService.schedulePlanPosts — publish time window', () => {
         },
       ]
     );
-    getPublishTimeWindows.mockResolvedValue({
-      x: { windowStart: '09:00', windowEnd: '17:00', timezone: 'Asia/Tokyo' },
+    resolveProjectPublishing.mockResolvedValue({
+      automationEnabled: true,
+      publishingEnabled: true,
+      publishingConfigured: true,
+      enabledPlatforms: null,
+      windows: {
+        x: { windowStart: '09:00', windowEnd: '17:00', timezone: 'Asia/Tokyo' },
+      },
     });
 
-    await service.schedulePlanPosts('org-1', 'plan-1');
+    await service.schedulePlanPosts('org-1', 'plan-1', 'proj-1');
 
     expect(schedulePostGroupToQueue).toHaveBeenCalledWith(
       'org-1',
@@ -745,7 +787,7 @@ describe('PostsService.schedulePlanPosts — publish time window', () => {
   });
 
   it('re-picks into the following local day for a window that wraps past midnight', async () => {
-    const { service, schedulePostGroupToQueue, getPublishTimeWindows } = makeService(
+    const { service, schedulePostGroupToQueue, resolveProjectPublishing } = makeService(
       [xDraft({ id: 'x1', group: 'gx' })],
       [
         {
@@ -757,13 +799,19 @@ describe('PostsService.schedulePlanPosts — publish time window', () => {
         },
       ]
     );
-    getPublishTimeWindows.mockResolvedValue({
-      x: { windowStart: '22:00', windowEnd: '02:00' },
+    resolveProjectPublishing.mockResolvedValue({
+      automationEnabled: true,
+      publishingEnabled: true,
+      publishingConfigured: true,
+      enabledPlatforms: null,
+      windows: {
+        x: { windowStart: '22:00', windowEnd: '02:00' },
+      },
     });
     // span = 240min; floor(0.999 * 240) = 239 -> 22:00 + 239min = next-day 01:59
     vi.spyOn(Math, 'random').mockReturnValue(0.999);
 
-    await service.schedulePlanPosts('org-1', 'plan-1');
+    await service.schedulePlanPosts('org-1', 'plan-1', 'proj-1');
 
     expect(schedulePostGroupToQueue).toHaveBeenCalledWith(
       'org-1',
@@ -774,7 +822,7 @@ describe('PostsService.schedulePlanPosts — publish time window', () => {
   });
 
   it('matches the window platform key case-insensitively', async () => {
-    const { service, schedulePostGroupToQueue, getPublishTimeWindows } = makeService(
+    const { service, schedulePostGroupToQueue, resolveProjectPublishing } = makeService(
       [xDraft({ id: 'x1', group: 'gx' })],
       [
         {
@@ -786,12 +834,18 @@ describe('PostsService.schedulePlanPosts — publish time window', () => {
         },
       ]
     );
-    getPublishTimeWindows.mockResolvedValue({
-      x: { windowStart: '09:00', windowEnd: '17:00' },
+    resolveProjectPublishing.mockResolvedValue({
+      automationEnabled: true,
+      publishingEnabled: true,
+      publishingConfigured: true,
+      enabledPlatforms: null,
+      windows: {
+        x: { windowStart: '09:00', windowEnd: '17:00' },
+      },
     });
     vi.spyOn(Math, 'random').mockReturnValue(0.5);
 
-    await service.schedulePlanPosts('org-1', 'plan-1');
+    await service.schedulePlanPosts('org-1', 'plan-1', 'proj-1');
 
     expect(schedulePostGroupToQueue).toHaveBeenCalledWith(
       'org-1',
@@ -801,14 +855,340 @@ describe('PostsService.schedulePlanPosts — publish time window', () => {
     );
   });
 
-  it('never calls getPublishTimeWindows when the plan has no DRAFT roots to schedule', async () => {
-    const { service, getPublishTimeWindows } = makeService(
-      [],
-      [{ id: 'x1', state: 'QUEUE', providerIdentifier: 'x' }]
+  it('never reads the admin publish-window setting directly', async () => {
+    // Windows reach this path ONLY through ProjectPublishingService.resolve(),
+    // which has already layered the project's own window over the admin tiers.
+    // Reading the admin setting here again would silently discard that layering.
+    const { service, getPublishTimeWindows, resolveProjectPublishing } = makeService(
+      [xDraft({ id: 'x1', group: 'gx' })],
+      [
+        {
+          id: 'x1',
+          group: 'gx',
+          state: 'DRAFT',
+          providerIdentifier: 'x',
+          publishDate: new Date('2026-08-01T03:00:00.000Z'),
+        },
+      ]
     );
 
-    await service.schedulePlanPosts('org-1', 'plan-1');
+    await service.schedulePlanPosts('org-1', 'plan-1', 'proj-1');
+
+    expect(resolveProjectPublishing).toHaveBeenCalled();
+    expect(getPublishTimeWindows).not.toHaveBeenCalled();
+  });
+});
+
+// The project-scoped branch — what a request coming through
+// /projects/:projectId/automation (or POST /posts/schedule with a projectId)
+// gets on top of the org-scoped behaviour above: an ownership assertion on the
+// plan, and the PROJECT's own publishing settings applied.
+describe('PostsService.schedulePlanPosts — project scoping', () => {
+  beforeEach(() => vi.restoreAllMocks());
+
+  const xDraft = (over: Partial<any>) =>
+    draft({
+      integrationId: 'int-x',
+      integration: { providerIdentifier: 'x', disabled: false },
+      settings: JSON.stringify({ __type: 'x' }),
+      ...over,
+    });
+
+  const planRoot = (id: string, platform: string, group: string) => ({
+    id,
+    group,
+    state: 'DRAFT',
+    providerIdentifier: platform,
+    publishDate: new Date('2026-08-01T12:00:00.000Z'),
+  });
+
+  it('asserts the plan belongs to the project BEFORE reading any of its posts', async () => {
+    const {
+      service,
+      assertPlanBelongsToProject,
+      getSchedulablePostRootsByPlan,
+    } = makeService([], []);
+    assertPlanBelongsToProject.mockRejectedValue(
+      new Error('Operation plan not found')
+    );
+
+    await expect(
+      service.schedulePlanPosts('org-1', 'plan-of-other-project', 'proj-1')
+    ).rejects.toThrow('Operation plan not found');
+
+    // The point of ordering it first: a plan from a sibling project must not
+    // even leak how many posts it has.
+    expect(getSchedulablePostRootsByPlan).not.toHaveBeenCalled();
+  });
+
+  it('always asserts ownership and always applies the project settings', async () => {
+    const {
+      service,
+      assertPlanBelongsToProject,
+      resolveProjectPublishing,
+      getPublishTimeWindows,
+    } = makeService([xDraft({ id: 'x1', group: 'gx' })], [planRoot('x1', 'x', 'gx')]);
+
+    await service.schedulePlanPosts('org-1', 'plan-1', 'proj-1');
+
+    expect(assertPlanBelongsToProject).toHaveBeenCalledWith(
+      'org-1',
+      'proj-1',
+      'plan-1'
+    );
+    expect(resolveProjectPublishing).toHaveBeenCalledWith('org-1', 'proj-1');
+    // The admin windows are read INSIDE resolve(), which layers the project's
+    // own window over them — the schedule path must not read them a second time
+    // and overwrite that result.
+    expect(getPublishTimeWindows).not.toHaveBeenCalled();
+  });
+
+  it('refuses to commit a plan at all when the ownership dependency is missing', async () => {
+    // A positional construction that omits ProjectPublishingService must fail
+    // loudly rather than silently skip the assertion — that skip is exactly the
+    // hole this path exists to close.
+    const service = new PostsService(
+      { getSchedulablePostRootsByPlan: vi.fn() } as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      { getPublishTimeWindows: vi.fn() } as any
+    );
+
+    await expect(
+      service.schedulePlanPosts('org-1', 'plan-1', 'proj-1')
+    ).rejects.toThrow('ProjectPublishingService is required');
+  });
+
+  it("falls back to the project's enabled platforms when the caller names none", async () => {
+    const { service, getSchedulablePostsByIds, resolveProjectPublishing } =
+      makeService(
+        [xDraft({ id: 'x1', group: 'gx' }), xDraft({ id: 'r1', group: 'gr' })],
+        [planRoot('x1', 'x', 'gx'), planRoot('r1', 'reddit', 'gr')]
+      );
+    resolveProjectPublishing.mockResolvedValue({
+      automationEnabled: true,
+      publishingEnabled: true,
+      publishingConfigured: true,
+      enabledPlatforms: ['x'],
+      windows: {},
+    });
+
+    const res = await service.schedulePlanPosts('org-1', 'plan-1', 'proj-1');
+
+    // Reddit is off for this project, so its root is never committed — and the
+    // counts report only the platform the caller's project actually publishes.
+    expect(getSchedulablePostsByIds).toHaveBeenCalledWith('org-1', ['x1']);
+    expect(res.total).toBe(1);
+  });
+
+  it('queues nothing when every platform is explicitly turned off', async () => {
+    const { service, getSchedulablePostsByIds, schedulePostGroupToQueue, resolveProjectPublishing } =
+      makeService([xDraft({ id: 'x1', group: 'gx' })], [planRoot('x1', 'x', 'gx')]);
+    // The Automation master switch: an EMPTY enabled list, not a null one.
+    resolveProjectPublishing.mockResolvedValue({
+      automationEnabled: true,
+      publishingEnabled: true,
+      publishingConfigured: true,
+      enabledPlatforms: [],
+      windows: {},
+    });
+
+    const res = await service.schedulePlanPosts('org-1', 'plan-1', 'proj-1');
+
+    expect(schedulePostGroupToQueue).not.toHaveBeenCalled();
+    // Reaches the id-based path with an EMPTY batch rather than being skipped,
+    // which is the same no-op an already-committed plan produces.
+    expect(getSchedulablePostsByIds).toHaveBeenCalledWith('org-1', []);
+    expect(res.total).toBe(0);
+  });
+
+  it('leaves the platform set unconstrained when the project never configured publishing', async () => {
+    const { service, getSchedulablePostsByIds, resolveProjectPublishing } =
+      makeService(
+        [xDraft({ id: 'x1', group: 'gx' }), xDraft({ id: 'r1', group: 'gr' })],
+        [planRoot('x1', 'x', 'gx'), planRoot('r1', 'reddit', 'gr')]
+      );
+    // null = "never expressed a preference", which must NOT read as "all off".
+    resolveProjectPublishing.mockResolvedValue({
+      automationEnabled: true,
+      publishingEnabled: true,
+      publishingConfigured: true,
+      enabledPlatforms: null,
+      windows: {},
+    });
+
+    await service.schedulePlanPosts('org-1', 'plan-1', 'proj-1');
+
+    expect(getSchedulablePostsByIds).toHaveBeenCalledWith('org-1', ['x1', 'r1']);
+  });
+
+  it('lets an explicit platforms argument win over the project setting', async () => {
+    const { service, getSchedulablePostsByIds, resolveProjectPublishing } =
+      makeService(
+        [xDraft({ id: 'x1', group: 'gx' }), xDraft({ id: 'r1', group: 'gr' })],
+        [planRoot('x1', 'x', 'gx'), planRoot('r1', 'reddit', 'gr')]
+      );
+    resolveProjectPublishing.mockResolvedValue({
+      automationEnabled: true,
+      publishingEnabled: true,
+      publishingConfigured: true,
+      enabledPlatforms: ['x', 'reddit'],
+      windows: {},
+    });
+
+    await service.schedulePlanPosts('org-1', 'plan-1', 'proj-1', undefined, ['reddit']);
+
+    expect(getSchedulablePostsByIds).toHaveBeenCalledWith('org-1', ['r1']);
+  });
+
+  it("re-picks the publish time inside the PROJECT's window, not the admin one", async () => {
+    const {
+      service,
+      schedulePostGroupToQueue,
+      resolveProjectPublishing,
+      getPublishTimeWindows,
+    } = makeService(
+      [xDraft({ id: 'x1', group: 'gx' })],
+      [
+        {
+          id: 'x1',
+          group: 'gx',
+          state: 'DRAFT',
+          providerIdentifier: 'x',
+          publishDate: new Date('2026-08-01T03:00:00.000Z'), // outside 09:00-17:00
+        },
+      ]
+    );
+    // resolve() already layered the project window over the admin tiers, so the
+    // schedule path must use ITS result and not re-read the admin setting.
+    resolveProjectPublishing.mockResolvedValue({
+      automationEnabled: true,
+      publishingEnabled: true,
+      publishingConfigured: true,
+      enabledPlatforms: ['x'],
+      windows: { x: { windowStart: '09:00', windowEnd: '17:00' } },
+    });
+    vi.spyOn(Math, 'random').mockReturnValue(0.5); // midpoint of the 8h span
+
+    await service.schedulePlanPosts('org-1', 'plan-1', 'proj-1');
 
     expect(getPublishTimeWindows).not.toHaveBeenCalled();
+    expect(schedulePostGroupToQueue).toHaveBeenCalledWith(
+      'org-1',
+      'gx',
+      'EXTENSION',
+      new Date('2026-08-01T13:00:00.000Z')
+    );
+  });
+});
+
+// The switch chain the product asks for: master → feature → platform, ANDed.
+// These pin the two upper levels; the platform level is covered by the
+// "project scoping" block above.
+//
+// What they must NOT do is reach past the queue: a post already in QUEUE, or one
+// the extension is mid-send on, is past this gate and finishes regardless. These
+// switches gate what ENTERS the queue, which is why every assertion here is
+// about schedulePostGroupToQueue never being called — not about anything being
+// un-queued.
+describe('PostsService.schedulePlanPosts — automation switch chain', () => {
+  beforeEach(() => vi.restoreAllMocks());
+
+  const xDraft = (over: Partial<any>) =>
+    draft({
+      integrationId: 'int-x',
+      integration: { providerIdentifier: 'x', disabled: false },
+      settings: JSON.stringify({ __type: 'x' }),
+      ...over,
+    });
+
+  const oneDraftPlan = () =>
+    makeService(
+      [xDraft({ id: 'x1', group: 'gx' })],
+      [
+        {
+          id: 'x1',
+          group: 'gx',
+          state: 'DRAFT',
+          providerIdentifier: 'x',
+          publishDate: new Date('2026-08-21T12:00:00.000Z'),
+        },
+      ]
+    );
+
+  const switches = (over: Partial<Record<string, unknown>> = {}) => ({
+    automationEnabled: true,
+    publishingEnabled: true,
+    publishingConfigured: true,
+    enabledPlatforms: ['x'],
+    windows: {},
+    ...over,
+  });
+
+  it('queues nothing when the MASTER switch is off, whatever the feature says', async () => {
+    const { service, schedulePostGroupToQueue, getSchedulablePostRootsByPlan, resolveProjectPublishing } =
+      oneDraftPlan();
+    resolveProjectPublishing.mockResolvedValue(
+      switches({ automationEnabled: false, publishingEnabled: true })
+    );
+
+    const res = await service.schedulePlanPosts('org-1', 'plan-1', 'proj-1');
+
+    expect(schedulePostGroupToQueue).not.toHaveBeenCalled();
+    // Short-circuits before even reading the plan's posts — a switched-off
+    // project should cost nothing.
+    expect(getSchedulablePostRootsByPlan).not.toHaveBeenCalled();
+    expect(res).toEqual({ scheduled: [], failed: [], total: 0, alreadyScheduled: 0 });
+  });
+
+  it('queues nothing when the PUBLISHING feature switch is off under a live master', async () => {
+    const { service, schedulePostGroupToQueue, resolveProjectPublishing } = oneDraftPlan();
+    resolveProjectPublishing.mockResolvedValue(
+      switches({ automationEnabled: true, publishingEnabled: false })
+    );
+
+    const res = await service.schedulePlanPosts('org-1', 'plan-1', 'proj-1');
+
+    expect(schedulePostGroupToQueue).not.toHaveBeenCalled();
+    expect(res.total).toBe(0);
+  });
+
+  it('queues when both levels are on', async () => {
+    const { service, schedulePostGroupToQueue, resolveProjectPublishing } = oneDraftPlan();
+    resolveProjectPublishing.mockResolvedValue(switches());
+
+    const res = await service.schedulePlanPosts('org-1', 'plan-1', 'proj-1');
+
+    expect(schedulePostGroupToQueue).toHaveBeenCalledWith('org-1', 'gx', 'EXTENSION', undefined);
+    expect(res.scheduled).toEqual([{ id: 'x1', publishMethod: 'extension' }]);
+  });
+
+  it('still applies the PLATFORM level under two live switches', async () => {
+    // Both features on, but this plan's platform is not in the project's list —
+    // the third level of the chain, applied per post rather than per project.
+    const { service, schedulePostGroupToQueue, resolveProjectPublishing } = oneDraftPlan();
+    resolveProjectPublishing.mockResolvedValue(switches({ enabledPlatforms: ['reddit'] }));
+
+    const res = await service.schedulePlanPosts('org-1', 'plan-1', 'proj-1');
+
+    expect(schedulePostGroupToQueue).not.toHaveBeenCalled();
+    expect(res.total).toBe(0);
+  });
+
+  it('reports an empty batch rather than throwing when a switch is off', async () => {
+    // The caller is saving publishing settings with `commit` — a legitimate
+    // action that simply has nothing to commit. Throwing would fail the save.
+    const { service, resolveProjectPublishing } = oneDraftPlan();
+    resolveProjectPublishing.mockResolvedValue(switches({ automationEnabled: false }));
+
+    await expect(service.schedulePlanPosts('org-1', 'plan-1', 'proj-1')).resolves.toMatchObject({
+      failed: [],
+    });
   });
 });

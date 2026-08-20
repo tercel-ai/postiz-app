@@ -67,6 +67,8 @@ import { EngageAutoReplyService } from '@gitroom/nestjs-libraries/engage/engage-
 import { ProjectValidationService } from '@gitroom/nestjs-libraries/projects/project-validation.service';
 import { OperationPlanRepository } from '@gitroom/nestjs-libraries/database/prisma/operation-plan/operation-plan.repository';
 import { OperationPlanService } from '@gitroom/nestjs-libraries/database/prisma/operation-plan/operation-plan.service';
+import { ProjectPublishingService } from '@gitroom/nestjs-libraries/automation/project-publishing.service';
+import { AutomationService } from '@gitroom/nestjs-libraries/automation/automation.service';
 
 @Global()
 @Module({
@@ -141,8 +143,10 @@ import { OperationPlanService } from '@gitroom/nestjs-libraries/database/prisma/
     EngageDraftService,
     EngageAutoReplyService,
     ProjectValidationService,
+    ProjectPublishingService,
     OperationPlanRepository,
     OperationPlanService,
+    AutomationService,
   ],
   get exports() {
     return this.providers;

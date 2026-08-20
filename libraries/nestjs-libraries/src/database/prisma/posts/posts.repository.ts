@@ -2581,6 +2581,42 @@ export class PostsRepository {
    * which is what makes a repeated activation legible (nothing to do) instead of
    * indistinguishable from an unknown plan (nothing there).
    */
+  /**
+   * The Automation page's publishing-queue rollup for one plan: still-DRAFT
+   * roots whose publish time has not already passed.
+   *
+   * Separate from getSchedulablePostRootsByPlan (which the commit path uses)
+   * because this one needs `content` to tell a ready post from one still
+   * missing its body, and the commit path must not pay for every post's text.
+   *
+   * Roots only (parentPostId null) so a thread counts once, and
+   * `operationPlanId` is matched by equality — a hand-created post carries
+   * null there and is therefore never counted as Automation's work.
+   */
+  getPlanPublishingQueue(
+    organizationId: string,
+    operationPlanId: string,
+    notBefore: Date
+  ) {
+    return this._post.model.post.findMany({
+      where: {
+        organizationId,
+        operationPlanId,
+        deletedAt: null,
+        parentPostId: null,
+        state: 'DRAFT',
+        publishDate: { gte: notBefore },
+      },
+      select: {
+        id: true,
+        providerIdentifier: true,
+        publishDate: true,
+        content: true,
+      },
+      orderBy: { publishDate: 'asc' },
+    });
+  }
+
   getSchedulablePostRootsByPlan(organizationId: string, operationPlanId: string) {
     return this._post.model.post.findMany({
       where: {
@@ -2590,7 +2626,7 @@ export class PostsRepository {
         parentPostId: null,
       },
       // providerIdentifier lets the caller filter to specific platforms
-      // (POST /posts/schedule { planId, platforms }) without a second query.
+      // (POST /projects/:projectId/automation/publishing) without a second query.
       // publishDate lets the caller check it against a configured per-platform
       // time window (extension_publish.time_window) and re-pick it if outside.
       select: { id: true, state: true, providerIdentifier: true, publishDate: true },

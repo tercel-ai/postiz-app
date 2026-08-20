@@ -169,12 +169,13 @@ const res = await fetch('/posts/schedule', {
 }).then((r) => r.json());
 // res.scheduled: [{id, publishMethod}]   res.failed: [{id, code, message}]
 
-//    OR, to activate a whole operation plan, name it instead of its posts —
-//    every still-DRAFT root is committed. `posts` and `planId` are mutually
-//    exclusive (400 if both).
-//    body: JSON.stringify({ planId: 'plan-1' })
-//    → res.total / res.alreadyScheduled additionally tell you whether there was
-//      anything left to commit.
+//    OR, to activate a whole operation plan, use the project-scoped Automation
+//    route instead — it resolves the project's active plan server-side, so no
+//    plan id travels in the request:
+//    POST /projects/<projectId>/automation/publishing
+//      body: { platforms: ['x','reddit'], commit: true }
+//    → res.scheduled.total / .alreadyScheduled tell you whether there was
+//      anything left to commit. See automation-api.md.
 
 // 3) trigger the extension to pull immediately (NO items). Optional — the 1-min
 //    aisee-publish-poll alarm would pick it up anyway.

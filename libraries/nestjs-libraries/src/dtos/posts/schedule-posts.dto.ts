@@ -6,7 +6,6 @@ import {
   IsIn,
   IsOptional,
   IsString,
-  ValidateIf,
   ValidateNested,
 } from 'class-validator';
 
@@ -36,57 +35,24 @@ export class SchedulePostItemDto {
 }
 
 /**
- * Body for POST /posts/schedule — commit a batch of DRAFT posts (typically an
- * operation plan's selected posts) to the send queue. The DB QUEUE state is the
- * single source of truth; the send path (extension vs API) is decided here, once
- * per post, and both executors read that decision so a post is never double-sent.
+ * Body for POST /posts/schedule — commit a batch of hand-picked DRAFT posts to
+ * the send queue. The DB QUEUE state is the single source of truth; the send
+ * path (extension vs API) is decided here, once per post, and both executors
+ * read that decision so a post is never double-sent.
  *
- * Two mutually exclusive ways to name the batch: explicit `posts` (hand-picked
- * ids) or `planId` (every still-DRAFT post of one operation plan). Supplying
- * both is rejected rather than merged — a silent union would make it impossible
- * to tell which posts a per-post `publishMethod` was meant to apply to.
+ * Explicit ids only. This route used to accept a `planId` as an alternative way
+ * to name the batch ("activate this plan"), which made it a project-scoped
+ * action wearing an org-scoped body: it carried no projectId, so the global
+ * ProjectAuthGuard never fired on it and nothing checked that the plan belonged
+ * to a project the caller was acting on. Activating a plan now lives at
+ * POST /projects/:projectId/automation/publishing, where the project is named
+ * in the path and the plan is resolved server-side — so a client cannot name a
+ * plan at all, let alone the wrong one.
  */
 export class SchedulePostsDto {
-  // Hand-picked ids. Required only when `planId` is absent; ValidateIf keeps a
-  // plan-scoped body from failing ArrayNotEmpty on a field it never sets.
-  @ValidateIf((o) => !o.planId)
   @IsArray()
   @ArrayNotEmpty()
   @ValidateNested({ each: true })
   @Type(() => SchedulePostItemDto)
-  posts?: SchedulePostItemDto[];
-
-  // Plan-scoped alternative: commit EVERY still-DRAFT post of this operation
-  // plan. Exists because "activate this plan" is one user action over a set the
-  // client would otherwise have to enumerate and keep in sync — a plan can be
-  // re-materialized, so a client-held id list goes stale.
-  @ValidateIf((o) => !o.posts)
-  @IsString()
-  planId?: string;
-
-  // Send path for a plan-scoped commit, applied to every post in it (a per-post
-  // choice is only expressible through `posts`). Omit — the normal case — to let
-  // the backend resolve each post's only viable path. Ignored when `posts` is
-  // used, which carries its own per-item choice.
-  @IsOptional()
-  @IsIn(['extension', 'api'])
-  publishMethod?: 'extension' | 'api';
-
-  // Plan-scoped only: restrict activation to roots on these platforms
-  // (Post.providerIdentifier, e.g. 'x' | 'reddit' | 'linkedin'; case-insensitive).
-  // Omit to activate every platform the plan has. Every response field —
-  // `total`, `alreadyScheduled`, `scheduled`, `failed` — is scoped to the
-  // filtered set, not the whole plan, so a caller that filtered to `['x']`
-  // never sees counts for posts it didn't ask to touch.
-  //
-  // Rejected together with `posts` — a hand-picked id list is already an
-  // explicit selection, so a platform-shaped filter on top of it would be
-  // ambiguous (narrow the list, or ignored?). That check lives in the
-  // controller (mirroring the `planId`+`posts` mutual exclusion just above):
-  // `@ValidateIf` can only skip a field's OWN validators, it cannot reject a
-  // field for another field's presence.
-  @IsOptional()
-  @IsArray()
-  @IsString({ each: true })
-  platforms?: string[];
+  posts!: SchedulePostItemDto[];
 }
