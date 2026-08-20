@@ -23,6 +23,7 @@ import {
   MonitoredRedditChannel,
   RedditTargetResolverDeps,
 } from './reddit-target-resolver';
+import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.service';
 import { postTitleFromTheme } from './theme-title';
 import { weightedLength, textSlicer } from '@gitroom/helpers/utils/count.length';
 import { socialIntegrationList } from '@gitroom/nestjs-libraries/integrations/integration.manager';
@@ -431,8 +432,49 @@ export class OperationPlanService implements OnApplicationBootstrap {
     // Optional (like the others) so unit tests can construct the service with
     // fewer deps. Used only on the real persist path to map generated
     // keywordTargets from keyword TEXT to EngageKeyword.id (get-or-create).
-    private _engageRepository?: EngageRepository
+    private _engageRepository?: EngageRepository,
+    // Optional for the same reason. Used only to align freshly materialized
+    // DRAFT posts with the project's publish time windows — see
+    // _materializePlanPosts.
+    private _postsService?: PostsService
   ) {}
+
+  /**
+   * Materialize a READY plan's posts, then align the resulting DRAFTs with the
+   * project's publish time windows.
+   *
+   * The alignment rides here rather than inside materializePlanPosts because
+   * the two answer different questions: materialization turns the payload into
+   * rows (and must stay a pure, idempotent function of the payload), while
+   * alignment reads live project configuration that has nothing to do with the
+   * plan. Keeping them separate is also what lets the commit path run the
+   * alignment a second time, against a window that may have changed since.
+   *
+   * Best-effort: a plan that generated successfully must not be reported as
+   * failed because its schedule could not be tidied.
+   */
+  private async _materializePlanPosts(plan: OperationPlan, planPayload: unknown) {
+    await this._repo.materializePlanPosts(
+      plan,
+      planPayload,
+      await this._resolvePublishTimeJitterMinutes()
+    );
+    // No projectId means no per-project windows to align against — the whole
+    // publishing configuration is project-scoped.
+    if (!this._postsService || !plan.projectId) return;
+    try {
+      await this._postsService.alignPlanDraftPublishDates(
+        plan.organizationId,
+        plan.projectId,
+        plan.id
+      );
+    } catch (err) {
+      this.logger.warn(
+        `Publish-window alignment failed for plan ${plan.id} (posts keep their generated times): ` +
+          OperationPlanService.failureReason(err)
+      );
+    }
+  }
 
   // Seed the admin-editable knobs so they exist as rows (with description +
   // default) and therefore show up in the admin Settings UI. Insert-if-absent
@@ -579,11 +621,7 @@ export class OperationPlanService implements OnApplicationBootstrap {
         return this._reconcilePending(existing);
       }
       if (existing.status === 'READY') {
-        await this._repo.materializePlanPosts(
-          existing,
-          existing.planPayload,
-          await this._resolvePublishTimeJitterMinutes()
-        );
+        await this._materializePlanPosts(existing, existing.planPayload);
       }
       return this._toRecord(existing);
     }
@@ -1097,11 +1135,7 @@ export class OperationPlanService implements OnApplicationBootstrap {
       errorCode: null,
       errorMessage: null,
     });
-    await this._repo.materializePlanPosts(
-      readyPlan,
-      planPayload,
-      await this._resolvePublishTimeJitterMinutes()
-    );
+    await this._materializePlanPosts(readyPlan, planPayload);
   }
 
   // Engage keyword set for the plan's reply policies, by priority:
@@ -2077,11 +2111,7 @@ export class OperationPlanService implements OnApplicationBootstrap {
       errorCode: null,
       errorMessage: null,
     });
-    await this._repo.materializePlanPosts(
-      readyPlan,
-      readyPlan.planPayload,
-      await this._resolvePublishTimeJitterMinutes()
-    );
+    await this._materializePlanPosts(readyPlan, readyPlan.planPayload);
     return this._toRecord(readyPlan);
   }
 

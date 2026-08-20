@@ -2625,6 +2625,101 @@ export class PostsRepository {
   }
 
   /**
+   * Plan-post ROOTS of one project in the given states — the input to both
+   * publish time-window passes (PostsService.alignPlanDraftPublishDates and
+   * rescheduleQueuedPlanPosts).
+   *
+   * Both passes read DRAFT *and* QUEUE even though each only moves one of them:
+   * a post the other pass owns still occupies a slot in the same window, and a
+   * placement blind to it would drop a post right on top of one.
+   *
+   * `operationPlanId: { not: null }` is what keeps hand-created posts out: a
+   * post the user wrote themselves carries a null operationPlanId, and null
+   * never matches, so aligning a project's plan can never move a manual draft.
+   * ROOTS only — a thread's segments share the anchor's time and are moved with
+   * it by group — and `deletedAt: null` so a superseded plan's soft-deleted
+   * drafts are not resurrected into the schedule.
+   *
+   * `releaseId` rides along because it is the claim marker: a QUEUE post whose
+   * releaseId starts with `claim_` is already being published and must never be
+   * rescheduled.
+   */
+  getPlanPostRootsForProject(
+    organizationId: string,
+    projectId: string,
+    states: State[],
+    operationPlanId?: string
+  ) {
+    return this._post.model.post.findMany({
+      where: {
+        organizationId,
+        projectId,
+        operationPlanId: operationPlanId ?? { not: null },
+        state: { in: states },
+        deletedAt: null,
+        parentPostId: null,
+        // A recurring original is a permanent QUEUE template published through
+        // the clone-per-cycle mechanism, which owns its own publishDate
+        // advance. Moving one would fight that mechanism.
+        intervalInDays: null,
+      },
+      select: {
+        id: true,
+        group: true,
+        providerIdentifier: true,
+        publishDate: true,
+        state: true,
+        releaseId: true,
+      },
+    });
+  }
+
+  /**
+   * Move whole publish groups to a new date, guarded on the state they were
+   * read in. QUEUE-guarded reschedules are how a post that reached PUBLISHED
+   * between the read and the write is left alone; DRAFT-guarded ones likewise
+   * skip a post that has since been committed.
+   */
+  updateGroupPublishDate(
+    organizationId: string,
+    group: string,
+    state: State,
+    publishDate: Date
+  ) {
+    return this._post.model.post.updateMany({
+      where: { organizationId, group, state, deletedAt: null },
+      data: { publishDate },
+    });
+  }
+
+  /**
+   * Move whole publish groups to a new date. Group-scoped so a thread's
+   * segments keep sharing one publish time, and DRAFT-guarded so a post that
+   * reached QUEUE between the read and this write is left alone — a QUEUE post
+   * cannot be rescheduled by a bare UPDATE (its Temporal workflow captured the
+   * old date at start), so it must not be swept up here.
+   */
+  updateDraftGroupPublishDates(
+    organizationId: string,
+    updates: Array<{ group: string; publishDate: Date }>
+  ) {
+    if (!updates.length) return Promise.resolve([]);
+    return Promise.all(
+      updates.map((update) =>
+        this._post.model.post.updateMany({
+          where: {
+            organizationId,
+            group: update.group,
+            state: State.DRAFT,
+            deletedAt: null,
+          },
+          data: { publishDate: update.publishDate },
+        })
+      )
+    );
+  }
+
+  /**
    * Schedule a post's whole group (anchor + its thread chain) from DRAFT to QUEUE
    * and stamp the resolved send-path. Group-scoped so a thread commits atomically
    * as one channel's chain. DRAFT-only so already-scheduled / published / errored

@@ -293,7 +293,15 @@ The project's Automation master switch.
 
 - **Body**: `{ "enabled": true | false }` — required. An empty body is a `400`
   rather than being read as "off".
-- **Response**: `{ "saved": true, "enabled": false }`
+- **Response**: `{ "saved": true, "enabled": false, "rescheduled": null }`
+
+`rescheduled` reports the queued posts moved back inside their publish window by
+the OFF→ON transition — `{ "moved": 2, "skipped": [{ "id": "…", "reason": "claimed" }] }`,
+or `null` when no realignment ran (switching OFF, or publishing was already
+running) or one failed. Only the QUEUE half is reported: a draft that moves has
+no consequence the user needs to hear about, while a scheduled send that could
+**not** be moved is a real exception to what they just asked for. See
+[When the alignment runs](#when-the-alignment-runs).
 
 Writes **only** that column. Both feature switches and every platform selection
 underneath keep their values, so flipping it off and back on restores exactly the
@@ -346,7 +354,12 @@ queue the active plan in the same call.
 }
 ```
 
-- **Response**: `{ "saved": true, "scheduled": <schedule result> | null }`
+- **Response**: `{ "saved": true, "scheduled": <schedule result> | null, "rescheduled": <realign result> | null }`
+
+`rescheduled` carries the same shape as on the master-switch endpoint above.
+Unlike there it runs on **every** save, because a window edit is exactly when a
+realignment is due — and since both passes only touch posts that are outside
+their window, a save that changed nothing relevant moves nothing.
 
 `scheduled` is `null` when `commit` was absent, **and** when the project has no
 active plan — choosing publishing platforms is configuration, and a project may
@@ -380,17 +393,132 @@ absent both, **UTC**. `GET /automation` returns the resolved zone alongside each
 window, so a client can show which zone the times are actually enforced in
 rather than assuming the viewer's own.
 
-Applied **at commit time**, not at plan generation, so a window configured or
-edited after the plan was generated still takes effect. For each `DRAFT` root
-about to be committed: if its platform resolves to a window and its materialized
-`publishDate` falls outside it (in the window's timezone), a **new random instant
-inside the window** replaces it — re-picked, never clamped to the nearest
-boundary, since the materialized time was only ever the plan's generated default.
-Applies group-wide: a thread's segments share one publish time.
+The rule is the same everywhere it runs: if a `DRAFT` post's platform resolves to
+a window and its `publishDate` falls outside that window (in the window's
+timezone), a **new random instant inside the window** replaces it — re-picked,
+never clamped to the nearest boundary, since the materialized time was only ever
+the plan's generated default. A post already **inside** its window is never
+touched. Applies group-wide: a thread's segments share one publish time.
 
 A malformed project window is **dropped** and the admin tier stands, rather than
 the window being cleared — a bad edit must never widen publishing past what an
 admin allowed.
+
+**Bounds are anchored to the wall clock, not to midnight-plus-N-minutes.** The
+two are the same on 363 days a year and different on the two a DST zone is 23 or
+25 hours long: midnight + 9h is `10:00` on a spring-forward day, and a window the
+transition falls *inside* — say `01:00`–`05:00` — is three real hours that day and
+five on the fall-back day, not the four its bounds suggest. Each occurrence
+therefore resolves its own opening instant and its own real duration, so
+`09:00`–`18:00` means those hours every day of the year, which is the entire
+point of expressing a window in local time. (Before this, a post could be placed
+at `05:59` local in a window that closed at `05:00`.)
+
+#### When the alignment runs
+
+Three times, and all three are needed — none of them subsumes another:
+
+| When | Scope | Why it cannot be dropped |
+| --- | --- | --- |
+| **Plan generation** (`POST /projects/:projectId/operation-plans`) | that plan's DRAFTs | Without it the calendar shows the generator's own times, which then silently change at commit. What the user sees should be when the post goes out. Generation never touches QUEUE — committing a post is a decision it has no business revisiting. |
+| **Saving publishing settings** (this endpoint) and the master switch going **OFF→ON** | the project's DRAFTs, then its QUEUE | The window that matters is the one that exists *now*; a window edited after generation has to reach the posts already scheduled. DRAFTs first, because the QUEUE pass measures its gap against them — spacing against a draft that is itself about to move is spacing against a slot nobody uses. |
+| **Commit** (`commit: true`) | the committed slice | Last line of defence — the window may have changed since the save, and this is the point of no return. |
+
+Running it more than once is safe **because only out-of-window posts move**: the
+second pass finds everything already compliant and does nothing. That same
+property is why a user who dragged a post to a different time inside the window
+keeps that time.
+
+The generation and settings passes are **best-effort** — neither generating a
+plan nor saving settings fails because the schedule could not be tidied — and
+both are gated on the same `enabled && publishing.enabled` chain as the commit.
+
+Both passes read `DRAFT` **and** `QUEUE` even though each moves only one of
+them: a post the other pass owns still occupies a slot in the same window, and a
+placement blind to it would drop a post right on top of one. The posts a pass
+does not own are pinned — they hold their slot and the minimum gap is measured
+against them.
+
+**A post is never moved backwards across the clock.** The window is anchored to
+the post's own local day, so committing at 19:00 a post dated 22:00 tonight
+against a `09:00`–`18:00` window offers a time *this morning* — and a `QUEUE`
+post dated in the past publishes on the spot, which is the opposite of what a
+window is for. Such a post keeps its own time (out-of-window is bad;
+published-right-now is worse) and the alignment passes report it as
+`window-passed`. All three passes apply this, the commit included, so they cannot
+disagree about it.
+
+#### Rescheduling posts that are already queued
+
+Moving a `QUEUE` post is a different operation, not a different filter, and it
+has its own method (`rescheduleQueuedPlanPosts`).
+
+A queued post's publish time is not a column you can move. An API post's Temporal
+workflow read its `publishDate` when it started, sleeps until then, and
+**returns** on waking to find the date changed — so a bare `UPDATE` strands it in
+`QUEUE` until the stale sweep turns it into an unexplained `ERROR`. Moving one
+means writing the date **and** terminating + restarting its workflow, behind the
+same two gates [`changeDate`](../libraries/nestjs-libraries/src/database/prisma/posts/posts.service.ts)
+uses:
+
+| Gate | Skipped as | Why |
+| --- | --- | --- |
+| `releaseId` starts with `claim_` | `claimed` | A workflow may already be inside `postSocial`, and terminating it cannot cancel an in-flight HTTP call — a new workflow would publish a **second copy**. |
+| less than 30s to `publishDate` | `imminent` | The workflow may no longer be sleeping, which is what makes `terminate()` clean. A past-due post falls here too. |
+| the new time would be in the past | `window-passed` | See above. |
+| the workflow restart threw | `workflow-failed` | The date is written and the old timer is gone, so the post has **no timer** and must be rescheduled. Not reverted — a revert can fail too — but named loudly and sent to Sentry. |
+
+Both gates **skip** rather than fail: this runs as a follow-up to saving
+settings, where "one of eleven posts is publishing right now" is a normal state
+of the world, not an error the save should surface as a failure. Every skip is
+returned so the caller can say what was left alone — the two write endpoints
+carry it back as `rescheduled`.
+
+Moves are applied **serially**, because each one terminates and restarts a
+Temporal workflow and a burst of those is the load pattern that makes
+`terminate()` race the timer it is trying to beat.
+
+Extension-published posts take the same path: `startWorkflow` recognises them and
+returns without touching Temporal, and the extension's publish-due query is
+`publishDate <= now`, so the row change is all they need. The gates still apply —
+a post inside its lockout is one the extension may already be publishing.
+
+#### Minimum gap between posts
+
+`extension_publish.min_gap` — `{ default: 30, platforms: { <platform>: 45 } }`,
+in minutes, resolved platform override → global default → built-in **30**.
+
+The window says *when* a project may publish; this says how close together two of
+its posts may land. Without it the window pass was per-post and blind: two posts
+re-picked independently could land in the same minute, which on a narrow window
+was likely rather than unlucky. Posts are therefore allocated per **window
+instance** (one platform, one occurrence of the window) so each placement can see
+its siblings.
+
+The default is deliberately generous. It is a **target, not a constraint** — see
+the degradation below — so a wide window is the only place it has any effect, and
+that is exactly where a small value would let three posts pile into five minutes
+of a nine-hour window with nothing to pull them apart. For reference the engage
+reply driver's own gap is 25 minutes, and an original post is a higher-risk action
+than a reply.
+
+Two things it does **not** do:
+
+- **It never widens the window.** When the window cannot hold its posts at the
+  configured gap, the gap degrades — full gap → an even `span/(n+1)` share → none
+  — and the shortfall is logged with the window and the gap actually applied.
+  Overflowing the window is the precise thing this mechanism exists to prevent,
+  so it is never traded for spacing. A window too narrow for its posts is a
+  configuration problem, and saying so beats quietly producing a schedule nobody
+  asked for.
+- **It does not retrofit onto compliant posts.** The gap is enforced against the
+  posts being *placed*. Two posts already sitting one minute apart *inside* the
+  window stay one minute apart — moving them would mean re-rolling in-window
+  times, which is what makes every save shuffle a schedule that was fine.
+
+Not to be confused with `extension_publish.segment_gap`, which is the
+**seconds**-scale pause between the segments of one thread. That is what a real
+thread looks like; different posts are not a thread.
 
 ### Platform filter
 

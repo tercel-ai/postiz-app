@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PostsService } from '../posts.service';
 
 // schedulePosts is the single DRAFT->QUEUE entry point. The behavioural contract
@@ -652,6 +652,16 @@ describe('PostsService.schedulePlanPosts — platform filter', () => {
 describe('PostsService.schedulePlanPosts — publish time window', () => {
   beforeEach(() => vi.restoreAllMocks());
 
+  // These fixtures are dated 2026-08-01, and the commit pass refuses to move a
+  // post BACKWARDS across the clock (a QUEUE post dated in the past publishes on
+  // the spot). Freeze "now" before the fixtures so the window they are re-picked
+  // into is still ahead of it — which is the real-world case being described.
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-07-31T12:00:00.000Z'));
+  });
+  afterEach(() => vi.useRealTimers());
+
   const xDraft = (over: Partial<any>) =>
     draft({
       integrationId: 'int-x',
@@ -748,6 +758,43 @@ describe('PostsService.schedulePlanPosts — publish time window', () => {
       'gx',
       'EXTENSION',
       new Date('2026-08-01T13:00:00.000Z')
+    );
+  });
+
+  it('refuses to move a post BACKWARDS into a window that has already closed', async () => {
+    // 19:00 now, the post is scheduled for 22:00 tonight, and the window closed
+    // at 17:00. Re-picking would land this morning — and a QUEUE post dated in
+    // the past publishes on the spot, which is the opposite of what a window is
+    // for. Out-of-window is bad; published-right-now is worse.
+    vi.setSystemTime(new Date('2026-08-01T19:00:00.000Z'));
+    const { service, schedulePostGroupToQueue, resolveProjectPublishing } = makeService(
+      [xDraft({ id: 'x1', group: 'gx' })],
+      [
+        {
+          id: 'x1',
+          group: 'gx',
+          state: 'DRAFT',
+          providerIdentifier: 'x',
+          publishDate: new Date('2026-08-01T22:00:00.000Z'),
+        },
+      ]
+    );
+    resolveProjectPublishing.mockResolvedValue({
+      automationEnabled: true,
+      publishingEnabled: true,
+      publishingConfigured: true,
+      enabledPlatforms: null,
+      windows: { x: { windowStart: '09:00', windowEnd: '17:00' } },
+    });
+
+    await service.schedulePlanPosts('org-1', 'plan-1', 'proj-1');
+
+    // No date override — the post keeps its own 22:00.
+    expect(schedulePostGroupToQueue).toHaveBeenCalledWith(
+      'org-1',
+      'gx',
+      'EXTENSION',
+      undefined
     );
   });
 
@@ -885,6 +932,16 @@ describe('PostsService.schedulePlanPosts — publish time window', () => {
 // plan, and the PROJECT's own publishing settings applied.
 describe('PostsService.schedulePlanPosts — project scoping', () => {
   beforeEach(() => vi.restoreAllMocks());
+
+  // These fixtures are dated 2026-08-01, and the commit pass refuses to move a
+  // post BACKWARDS across the clock (a QUEUE post dated in the past publishes on
+  // the spot). Freeze "now" before the fixtures so the window they are re-picked
+  // into is still ahead of it — which is the real-world case being described.
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-07-31T12:00:00.000Z'));
+  });
+  afterEach(() => vi.useRealTimers());
 
   const xDraft = (over: Partial<any>) =>
     draft({

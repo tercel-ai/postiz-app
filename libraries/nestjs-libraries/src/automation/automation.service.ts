@@ -1,10 +1,11 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { Organization } from '@prisma/client';
 import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.service';
 import { OperationPlanService } from '@gitroom/nestjs-libraries/database/prisma/operation-plan/operation-plan.service';
 import { EngageService } from '@gitroom/nestjs-libraries/engage/engage.service';
 import { EngageRepository } from '@gitroom/nestjs-libraries/engage/engage.repository';
 import {
+  isPublishingActive,
   ProjectPublishingService,
   type ResolvedProjectPublishing,
 } from '@gitroom/nestjs-libraries/automation/project-publishing.service';
@@ -44,6 +45,8 @@ const PUBLISHING_POLICY_KEYS = [
  */
 @Injectable()
 export class AutomationService {
+  private readonly logger = new Logger(AutomationService.name);
+
   constructor(
     private readonly _postsService: PostsService,
     private readonly _operationPlanService: OperationPlanService,
@@ -195,8 +198,20 @@ export class AutomationService {
       projectId
     );
 
+    // Realign BEFORE committing, not after: this is the pass that knows about
+    // the minimum gap between posts, and schedulePlanPosts' own per-post pass
+    // leaves anything already inside its window alone — so aligning first is
+    // what carries the spacing through into QUEUE. Unconditional because a
+    // window edit is exactly when a realignment is due, and the alignment only
+    // touches posts that are OUTSIDE their window, so a save that changed
+    // nothing relevant moves nothing.
+    //
+    // No planId: a superseded plan's drafts are soft-deleted, so "this
+    // project's DRAFT plan posts" is already the active plan's.
+    const rescheduled = await this._realign(org.id, projectId);
+
     if (!dto.commit) {
-      return { saved: true, scheduled: null };
+      return { saved: true, scheduled: null, rescheduled };
     }
 
     // The plan id is resolved SERVER-side from the project. The client never
@@ -209,7 +224,7 @@ export class AutomationService {
     if (!planId) {
       // Not an error: choosing publishing platforms is configuration, and a
       // project is allowed to configure it before it has ever generated a plan.
-      return { saved: true, scheduled: null };
+      return { saved: true, scheduled: null, rescheduled };
     }
 
     const scheduled = await this._postsService.schedulePlanPosts(
@@ -219,7 +234,7 @@ export class AutomationService {
       dto.publishMethod,
       dto.platforms
     );
-    return { saved: true, scheduled };
+    return { saved: true, scheduled, rescheduled };
   }
 
   /**
@@ -236,12 +251,65 @@ export class AutomationService {
    * switch has no business doing either.
    */
   async saveEnabled(org: Organization, projectId: string, enabled: boolean) {
+    // Read before writing so the OFF→ON transition is visible. Only that
+    // direction realigns: turning Automation off is a suspension, and a
+    // suspended project's schedule must survive untouched so turning it back on
+    // restores what was there.
+    const wasActive = isPublishingActive(
+      await this._projectPublishing.resolve(org.id, projectId)
+    );
+
     await this._engageRepository.saveConfig(
       org.id,
       { metadata: { automationEnabled: enabled } },
       projectId
     );
-    return { saved: true as const, enabled };
+
+    // `enabled` is only the master switch — the feature switch below it decides
+    // whether publishing is actually on, which is what alignPlanDraftPublishDates
+    // re-checks for itself. Calling it on every ON is therefore safe; this guard
+    // just avoids the read when nothing can have changed.
+    const rescheduled =
+      enabled && !wasActive ? await this._realign(org.id, projectId) : null;
+
+    return { saved: true as const, enabled, rescheduled };
+  }
+
+  /**
+   * Re-align this project's plan posts with its publish time windows — the
+   * DRAFTs first, then the already-QUEUED ones.
+   *
+   * DRAFTs first because the QUEUE pass measures the minimum gap against them:
+   * placing a queued post next to a draft that is itself about to move would
+   * space it against a slot nobody ends up using.
+   *
+   * Only the QUEUE half is reported back. A draft that moves has no consequence
+   * the user needs to hear about — it is still a draft, and the calendar shows
+   * the new time. A QUEUE post is a scheduled send being moved, and one that
+   * could NOT be moved (publishing right now, or already claimed) is a genuine
+   * exception to what the user just asked for, so it is named.
+   *
+   * Best-effort by design: the settings save has already succeeded and is what
+   * the user asked for, so a failure to tidy the schedule must not turn it into
+   * an error. Both passes are idempotent (they only move posts that are outside
+   * their window), so the next save — or the commit — picks up whatever this
+   * missed.
+   */
+  private async _realign(orgId: string, projectId: string) {
+    try {
+      await this._postsService.alignPlanDraftPublishDates(orgId, projectId);
+      const queued = await this._postsService.rescheduleQueuedPlanPosts(
+        orgId,
+        projectId
+      );
+      return { moved: queued.rescheduled, skipped: queued.skipped };
+    } catch (err) {
+      this.logger.warn(
+        `Publish-window alignment failed for orgId=${orgId} projectId=${projectId} ` +
+          `(settings were saved; posts keep their current times): ${(err as Error)?.message || err}`
+      );
+      return null;
+    }
   }
 
   /**

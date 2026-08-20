@@ -21,6 +21,46 @@ export const EXTENSION_PUBLISH_SEGMENT_GAP_KEY = 'extension_publish.segment_gap'
 // ─── Per-platform publish TIME WINDOW ──────────────────────────────────────
 export const EXTENSION_PUBLISH_TIME_WINDOW_KEY = 'extension_publish.time_window';
 
+// ─── Per-platform MINIMUM GAP between two posts ────────────────────────────
+export const EXTENSION_PUBLISH_MIN_GAP_KEY = 'extension_publish.min_gap';
+
+/**
+ * Minutes that must separate two posts of the SAME platform on the same day.
+ *
+ * 30 rather than something small: this is a best-effort target, not a hard
+ * constraint — when the window is too narrow to honour it the allocator
+ * degrades (see redistributePublishTimesWithinWindow), so a generous default
+ * costs nothing on a tight window and is the only thing that spreads posts out
+ * on a wide one. A small default can never be undone: 3 posts landing inside 5
+ * minutes of a nine-hour window "satisfies" it, and nothing would pull them
+ * apart. For comparison the engage reply driver's own minGapMinutes is 25, and
+ * an original post is a higher-risk action than a reply.
+ *
+ * NOT to be confused with the segment gap above: that is the SECONDS-scale
+ * pause between the segments of one thread, which is what a real thread looks
+ * like. Different posts are not a thread.
+ */
+export const DEFAULT_MIN_GAP_MINUTES = 30;
+
+/** Sanity ceiling. Above half a day a "gap" is really a schedule, not a pause. */
+export const MAX_MIN_GAP_MINUTES = 720;
+
+/**
+ * Stored setting shape — same default→override→built-in resolution as
+ * SegmentGapSetting, so an admin tunes ONE value to move every platform and
+ * only pins the platforms that should differ (Reddit rate-limits low-karma
+ * accounts and wants more; a low-frequency long-form channel wants less).
+ */
+export interface MinGapSetting {
+  default?: number;
+  platforms?: Partial<Record<PublishPlatform, number>>;
+}
+
+export const DEFAULT_MIN_GAP_SETTING: MinGapSetting = {
+  default: DEFAULT_MIN_GAP_MINUTES,
+  platforms: {},
+};
+
 /** 'HH:MM' local bounds + the IANA timezone they're expressed in. */
 export interface PublishTimeWindow {
   windowStart: string;
@@ -112,6 +152,17 @@ export class ExtensionPublishConfigService implements OnModuleInit {
       );
       this.logger.log(`Seeded default ${EXTENSION_PUBLISH_TIME_WINDOW_KEY}`);
     }
+
+    const existingMinGap = await this._settings.get(EXTENSION_PUBLISH_MIN_GAP_KEY);
+    if (existingMinGap === null || existingMinGap === undefined) {
+      await this._settings.set(EXTENSION_PUBLISH_MIN_GAP_KEY, DEFAULT_MIN_GAP_SETTING, {
+        type: 'object',
+        description:
+          'Minimum minutes between two posts of the SAME platform on the same day: { default: 30, platforms: { <platform>: 45 } }. Applied when plan posts are redistributed into their publish time window — it is a best-effort TARGET, not a hard constraint: a window too narrow to honour it degrades to an even spread rather than pushing a post outside the window. Distinct from extension_publish.segment_gap, which is the seconds-scale pause between the segments of ONE thread. 0 disables spacing; capped at 720.',
+        defaultValue: DEFAULT_MIN_GAP_SETTING,
+      });
+      this.logger.log(`Seeded default ${EXTENSION_PUBLISH_MIN_GAP_KEY}`);
+    }
   }
 
   /** Effective per-platform gap config: stored setting resolved onto the defaults. */
@@ -136,6 +187,38 @@ export class ExtensionPublishConfigService implements OnModuleInit {
     );
     return resolvePublishTimeWindows(stored);
   }
+
+  /** Effective per-platform minimum gap in minutes (see resolveMinGaps). */
+  async getMinGapMinutes(): Promise<Record<PublishPlatform, number>> {
+    const stored = await this._settings.get<MinGapSetting>(EXTENSION_PUBLISH_MIN_GAP_KEY);
+    return resolveMinGaps(stored);
+  }
+}
+
+/**
+ * Resolve the stored setting to the effective per-platform map. Per platform:
+ * platform override → stored global default → built-in default; a tier only
+ * wins when it is a finite number ≥ 0, and the result is capped at
+ * MAX_MIN_GAP_MINUTES. Mirrors resolveSegmentGaps so a malformed edit falls
+ * through to the next tier instead of silently disabling spacing.
+ */
+export function resolveMinGaps(
+  stored: MinGapSetting | null | undefined
+): Record<PublishPlatform, number> {
+  const isValid = (value: unknown): value is number =>
+    typeof value === 'number' && Number.isFinite(value) && value >= 0;
+  const clamp = (value: number) => Math.min(value, MAX_MIN_GAP_MINUTES);
+  const normalized =
+    stored && typeof stored === 'object' && !Array.isArray(stored) ? stored : {};
+  const globalDefault = isValid(normalized.default)
+    ? clamp(normalized.default)
+    : DEFAULT_MIN_GAP_MINUTES;
+  const out = {} as Record<PublishPlatform, number>;
+  for (const platform of EXTENSION_PUBLISHABLE_PLATFORMS) {
+    const override = normalized.platforms?.[platform];
+    out[platform] = isValid(override) ? clamp(override) : globalDefault;
+  }
+  return out;
 }
 
 /** Resolve the stored setting to the effective per-platform map (see getPublishTimeWindows). */
@@ -206,25 +289,274 @@ export function redistributePublishTimeIfOutsideWindow(
   window: Pick<PublishTimeWindow, 'windowStart' | 'windowEnd' | 'timezone'>
 ): Date {
   const local = window.timezone ? dayjs(date).tz(window.timezone) : dayjs.utc(date);
+  const { startMin, endMin, wraps } = windowBounds(window);
+  const nowMin = local.hour() * 60 + local.minute();
+  const inWindow = wraps
+    ? nowMin >= startMin || nowMin < endMin
+    : nowMin >= startMin && nowMin < endMin;
+  if (inWindow) return date;
+
+  const { start, spanMin } = windowInstanceOn(local.format('YYYY-MM-DD'), window);
+  if (spanMin <= 0) return date;
+  return start.add(Math.floor(Math.random() * spanMin), 'minute').toDate();
+}
+
+/** One post's identity + planned time, as the window allocator sees it. */
+export interface WindowAllocatable {
+  id: string;
+  publishDate: Date;
+  /**
+   * Whether this post may be moved. Default true.
+   *
+   * A post that is NOT movable still takes part: it occupies its slot and the
+   * gap is measured against it. That is the whole reason the flag exists —
+   * placing a DRAFT has to account for the QUEUE posts already sitting in the
+   * same window (and vice versa), or the two passes would happily put a post on
+   * top of one the other pass just placed.
+   */
+  movable?: boolean;
+}
+
+/** What the allocator did, for logging — see redistributePublishTimesWithinWindow. */
+export interface WindowAllocationResult {
+  /** New instant per moved post id. Posts already inside the window are ABSENT. */
+  moved: Map<string, Date>;
+  /** Window instances where minGapMinutes could not be honoured in full. */
+  degraded: Array<{ windowStart: Date; requestedGapMinutes: number; appliedGapMinutes: number }>;
+}
+
+/**
+ * Wall-clock geometry of a window: the two bounds in minutes-of-day, and
+ * whether it wraps past midnight.
+ *
+ * Deliberately NOT a duration. `18:00 - 09:00` is nine hours on the clock but
+ * eight or ten real hours on a DST transition day, and every duration this file
+ * needs is a real one — see windowInstanceOn.
+ */
+function windowBounds(window: Pick<PublishTimeWindow, 'windowStart' | 'windowEnd'>) {
   const toMinutes = (hhmm: string) => {
     const [h, m] = hhmm.split(':').map(Number);
     return (h || 0) * 60 + (m || 0);
   };
   const startMin = toMinutes(window.windowStart);
   const endMin = toMinutes(window.windowEnd);
-  const nowMin = local.hour() * 60 + local.minute();
-  const wraps = startMin > endMin;
-  const inWindow = wraps
-    ? nowMin >= startMin || nowMin < endMin
-    : nowMin >= startMin && nowMin < endMin;
-  if (inWindow) return date;
+  return { startMin, endMin, wraps: startMin > endMin };
+}
 
-  const spanMin = wraps ? 24 * 60 - startMin + endMin : endMin - startMin;
-  const offsetMin = spanMin > 0 ? Math.floor(Math.random() * spanMin) : 0;
-  return local
-    .startOf('day')
-    .add(startMin + offsetMin, 'minute')
-    .toDate();
+/** Calendar-day arithmetic, done in UTC so no DST-length day can distort it. */
+function shiftDay(dayStamp: string, days: number): string {
+  return dayjs.utc(dayStamp).add(days, 'day').format('YYYY-MM-DD');
+}
+
+/**
+ * The concrete occurrence of `window` that OPENS on the local day `dayStamp`
+ * ('YYYY-MM-DD'): the instant it opens, and how many REAL minutes it lasts.
+ *
+ * Both bounds are resolved as WALL-CLOCK times rather than by adding minutes to
+ * midnight, because across a DST transition those are not the same thing:
+ * midnight + 9h is 10:00 on a spring-forward day, and a 09:00-18:00 window is
+ * only eight real hours long that day (ten on the fall-back day). Anchoring on
+ * the wall clock is what makes "09:00 to 18:00" mean the same hours every day of
+ * the year — which is the whole point of expressing a window in local time.
+ *
+ * Offsets are then REAL minutes from `start`, so a time picked inside
+ * [0, spanMin) always lands inside the wall-clock window too.
+ */
+function windowInstanceOn(
+  dayStamp: string,
+  window: Pick<PublishTimeWindow, 'windowStart' | 'windowEnd' | 'timezone'>
+): { start: dayjs.Dayjs; spanMin: number } {
+  const at = (day: string, hhmm: string) => {
+    const stamp = `${day}T${hhmm}:00`;
+    return window.timezone ? dayjs.tz(stamp, window.timezone) : dayjs.utc(stamp);
+  };
+  const { wraps } = windowBounds(window);
+  const start = at(dayStamp, window.windowStart);
+  const end = at(wraps ? shiftDay(dayStamp, 1) : dayStamp, window.windowEnd);
+  return { start, spanMin: end.diff(start, 'minute') };
+}
+
+/**
+ * The sub-intervals of [0, span) that are at least `gap` minutes away from
+ * every already-occupied offset. Window EDGES do not impose a gap — only other
+ * posts do — so a post may sit at the very start or end of the window.
+ */
+function freeIntervals(
+  spanMin: number,
+  occupied: number[],
+  gapMin: number
+): Array<[number, number]> {
+  if (gapMin <= 0) return [[0, spanMin]];
+  const blocked = occupied
+    .map((point): [number, number] => [point - gapMin, point + gapMin])
+    .sort((a, b) => a[0] - b[0]);
+  const free: Array<[number, number]> = [];
+  let cursor = 0;
+  for (const [from, to] of blocked) {
+    if (from > cursor) free.push([cursor, Math.min(from, spanMin)]);
+    cursor = Math.max(cursor, to);
+    if (cursor >= spanMin) break;
+  }
+  if (cursor < spanMin) free.push([cursor, spanMin]);
+  return free.filter(([from, to]) => to > from);
+}
+
+/** How many placement retries before a gap tier is declared unusable. */
+const PLACEMENT_ATTEMPTS = 8;
+
+/**
+ * Place `count` new offsets inside [0, span), each at least `gap` from every
+ * occupied offset AND from each other. Random rather than evenly spaced — the
+ * point is to look like a person, not a cron — which means a greedy pass can
+ * paint itself into a corner, hence the retries. Returns null when it could not
+ * fit them, which is the caller's signal to degrade the gap.
+ */
+function placeWithGap(
+  spanMin: number,
+  occupied: number[],
+  count: number,
+  gapMin: number
+): number[] | null {
+  for (let attempt = 0; attempt < PLACEMENT_ATTEMPTS; attempt++) {
+    const points = [...occupied];
+    const placed: number[] = [];
+    let ok = true;
+    for (let i = 0; i < count; i++) {
+      const free = freeIntervals(spanMin, points, gapMin);
+      const total = free.reduce((sum, [from, to]) => sum + (to - from), 0);
+      if (total <= 0) {
+        ok = false;
+        break;
+      }
+      let roll = Math.random() * total;
+      let picked = free[0][0];
+      for (const [from, to] of free) {
+        if (roll < to - from) {
+          picked = from + roll;
+          break;
+        }
+        roll -= to - from;
+      }
+      placed.push(picked);
+      points.push(picked);
+    }
+    if (ok) return placed;
+    // gap 0 can only fail on a zero-width window, which no retry fixes.
+    if (gapMin <= 0) return null;
+  }
+  return null;
+}
+
+/**
+ * Redistribute a batch of posts into their platform's publish window, keeping
+ * them at least `minGapMinutes` apart.
+ *
+ * The group-aware counterpart of redistributePublishTimeIfOutsideWindow, and it
+ * exists because that function is per-post and blind: two posts it re-picks
+ * independently can land in the same minute, which is exactly what a minimum
+ * gap is for. Batching by window INSTANCE (one platform, one local day's
+ * occurrence of the window) is what lets a placement see its siblings.
+ *
+ * ONLY posts OUTSIDE the window move, and only those marked movable. A post
+ * already inside the window is a fixed point: its time is either already
+ * compliant or something a person chose, and re-rolling it would make every save
+ * of the automation settings shuffle times that were fine. The consequence is
+ * that two in-window posts sitting a minute apart STAY a minute apart — the gap
+ * is enforced against the posts being placed, not retrofitted onto the whole
+ * day. A post marked `movable: false` is pinned wherever it is, inside the
+ * window or not, and still occupies its slot (see WindowAllocatable.movable).
+ *
+ * When the window cannot hold everything at `minGapMinutes`, the gap degrades
+ * — full gap → an even span/(n+1) share → none at all — rather than the window
+ * being widened. Overflowing the window is the precise thing this whole
+ * mechanism exists to prevent, so it is never traded for spacing; a window too
+ * narrow for its posts is a configuration problem and is reported in
+ * `degraded` so the caller can say so out loud.
+ */
+export function redistributePublishTimesWithinWindow(
+  posts: WindowAllocatable[],
+  window: Pick<PublishTimeWindow, 'windowStart' | 'windowEnd' | 'timezone'>,
+  minGapMinutes: number
+): WindowAllocationResult {
+  const moved = new Map<string, Date>();
+  const degraded: WindowAllocationResult['degraded'] = [];
+  const { startMin, endMin, wraps } = windowBounds(window);
+  if (!posts.length || startMin === endMin) return { moved, degraded };
+
+  const localOf = (date: Date) =>
+    window.timezone ? dayjs(date).tz(window.timezone) : dayjs.utc(date);
+
+  // Bucket by window INSTANCE: the concrete occurrence of the window a post
+  // sits in (or would be placed into). Keyed by that occurrence's start instant
+  // so a wrapping window's late-night and early-morning halves are one bucket.
+  const buckets = new Map<
+    string,
+    {
+      start: dayjs.Dayjs;
+      spanMin: number;
+      occupied: number[];
+      toPlace: WindowAllocatable[];
+    }
+  >();
+  for (const post of posts) {
+    const local = localOf(post.publishDate);
+    const nowMin = local.hour() * 60 + local.minute();
+    const inWindow = wraps
+      ? nowMin >= startMin || nowMin < endMin
+      : nowMin >= startMin && nowMin < endMin;
+    // Pinned posts occupy wherever they are — including OUTSIDE the window.
+    // A pinned out-of-window post is one nothing may move (already claimed, or
+    // about to publish); it is going out at that time whether the window likes
+    // it or not, so the gap must still be measured against it.
+    const pinned = post.movable === false;
+    // An in-window post in a wrapping window's early-morning tail belongs to
+    // the occurrence that STARTED yesterday. Out-of-window posts anchor to
+    // their own local day, matching redistributePublishTimeIfOutsideWindow.
+    const localDay = local.format('YYYY-MM-DD');
+    const { start, spanMin } = windowInstanceOn(
+      inWindow && wraps && nowMin < endMin ? shiftDay(localDay, -1) : localDay,
+      window
+    );
+    const key = start.toISOString();
+    const bucket = buckets.get(key) ?? { start, spanMin, occupied: [], toPlace: [] };
+    if (inWindow || pinned) {
+      bucket.occupied.push(local.diff(start, 'minute'));
+    } else {
+      bucket.toPlace.push(post);
+    }
+    buckets.set(key, bucket);
+  }
+
+  for (const bucket of buckets.values()) {
+    // spanMin is resolved PER INSTANCE, not once for the window: a DST
+    // transition makes one day's occurrence an hour shorter (or longer) than
+    // its neighbours, and packing posts into it uses the length it actually has.
+    const spanMin = bucket.spanMin;
+    if (!bucket.toPlace.length || spanMin <= 0) continue;
+    const total = bucket.occupied.length + bucket.toPlace.length;
+    // Ladder, most generous first. The even share is what a fully-packed window
+    // could manage at best; 0 always succeeds and is the floor.
+    const tiers = [minGapMinutes, spanMin / (total + 1), 0].filter(
+      (gap, index, all) => gap >= 0 && all.indexOf(gap) === index
+    );
+    for (const gap of tiers) {
+      const offsets = placeWithGap(spanMin, bucket.occupied, bucket.toPlace.length, gap);
+      if (!offsets) continue;
+      if (gap < minGapMinutes) {
+        degraded.push({
+          windowStart: bucket.start.toDate(),
+          requestedGapMinutes: minGapMinutes,
+          appliedGapMinutes: gap,
+        });
+      }
+      bucket.toPlace.forEach((post, index) => {
+        moved.set(post.id, bucket.start.add(offsets[index], 'minute').toDate());
+      });
+      break;
+    }
+  }
+
+  return { moved, degraded };
 }
 
 /**

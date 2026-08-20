@@ -53,8 +53,10 @@ import { RefreshToken } from '@gitroom/nestjs-libraries/integrations/social.abst
 import { RefreshIntegrationService } from '@gitroom/nestjs-libraries/integrations/refresh.integration.service';
 import { PostOverageService } from '@gitroom/nestjs-libraries/database/prisma/posts/post-overage.service';
 import {
+  DEFAULT_MIN_GAP_MINUTES,
   ExtensionPublishConfigService,
   redistributePublishTimeIfOutsideWindow,
+  redistributePublishTimesWithinWindow,
 } from '@gitroom/nestjs-libraries/database/prisma/posts/extension-publish-config.service';
 import { titleFromSettings } from '@gitroom/nestjs-libraries/database/prisma/posts/settings-title';
 import { ProjectValidationService } from '@gitroom/nestjs-libraries/projects/project-validation.service';
@@ -110,6 +112,31 @@ function resolveScheduledPostPlatform(post: {
     return '';
   }
 }
+
+/**
+ * How close to its publish time a QUEUE post stops being reschedulable.
+ *
+ * The workflow's timer fires exactly at publishDate, so refusing changes inside
+ * this window is what guarantees the workflow is still SLEEPING when
+ * startWorkflow terminates it — which is what makes the terminate clean. 30s
+ * covers worker scheduling + visibility-index lag + clock skew, well above the
+ * few seconds startWorkflow itself takes.
+ *
+ * Shared by changeDate (one post, rejects) and rescheduleQueuedPlanPosts (a
+ * batch, skips): the two disagree about what to DO about it, never about where
+ * the line is.
+ */
+const RESCHEDULE_LOCKOUT_MS = 30_000;
+
+/**
+ * Why a post the window pass looked at was left where it is.
+ *
+ * `claimed` / `imminent` are the two changeDate gates — a send that may already
+ * be in flight, and one too close to its timer to terminate cleanly.
+ * `window-passed` is the pass declining to move a post BACKWARDS across the
+ * clock (see _resolveWindowPlacement).
+ */
+type SkipReason = 'claimed' | 'imminent' | 'window-passed';
 
 @Injectable()
 export class PostsService {
@@ -1583,8 +1610,6 @@ export class PostsService {
    *      well above the few seconds startWorkflow itself takes to complete.
    */
   async changeDate(orgId: string, id: string, date: string) {
-    const RESCHEDULE_LOCKOUT_MS = 30_000;
-
     const post = await this._postRepository.getPostById(id, orgId);
     if (!post) throw new BadRequestException('Post not found');
     // An accountless post reaches QUEUE through POST /posts/schedule and is
@@ -2222,6 +2247,304 @@ export class PostsService {
     return { scheduled, failed };
   }
 
+  /**
+   * Align a project's still-DRAFT plan posts with their platform's publish time
+   * window, spacing the ones it moves at least `min_gap` minutes apart.
+   *
+   * WHY IT EXISTS. Window alignment used to happen only at commit time
+   * (schedulePlanPosts), which meant a freshly generated plan showed the
+   * generator's own times on the calendar — times that would silently change the
+   * moment the plan was committed. Running the same alignment at generation, and
+   * again whenever the publishing settings are turned on, makes what the user
+   * sees the time the post actually goes out.
+   *
+   * It does NOT replace the commit-time pass. A window configured or edited
+   * AFTER generation still has to take effect, and only the commit-time pass can
+   * see it — so both run, and the second is a no-op whenever the first already
+   * did the work.
+   *
+   * DRAFT ONLY, deliberately. A QUEUE post's publish time is not a database
+   * field you can move: for API posts the Temporal workflow captured the date
+   * when it started and aborts on finding it changed, so rescheduling one means
+   * terminating and restarting its workflow behind the claim + lockout gates
+   * `changeDate` implements. That is a different operation with a different
+   * failure model and it does not belong behind the same call.
+   *
+   * Only posts OUTSIDE their window move — see
+   * redistributePublishTimesWithinWindow for why, and for what the minimum gap
+   * does and does not guarantee.
+   *
+   * Reported as a count rather than thrown on: this runs as a follow-up to
+   * generating or saving, and neither should fail because the schedule could not
+   * be tidied.
+   */
+  async alignPlanDraftPublishDates(
+    orgId: string,
+    projectId: string,
+    operationPlanId?: string
+  ): Promise<{ aligned: number; skipped: 'inactive' | 'no-windows' | null }> {
+    if (!this._projectPublishingService) {
+      throw new Error(
+        'ProjectPublishingService is required to align operation-plan publish dates'
+      );
+    }
+    const plan = await this._resolveWindowPlacement(
+      orgId,
+      projectId,
+      'DRAFT',
+      operationPlanId
+    );
+    if (plan.skipped) return { aligned: 0, skipped: plan.skipped };
+
+    await this._postRepository.updateDraftGroupPublishDates(
+      orgId,
+      plan.moves.map((move) => ({ group: move.group, publishDate: move.publishDate }))
+    );
+    return { aligned: plan.moves.length, skipped: null };
+  }
+
+  /**
+   * Move a project's already-QUEUED plan posts back inside their publish time
+   * window — the QUEUE counterpart of alignPlanDraftPublishDates, and a
+   * deliberately separate method because rescheduling a queued post is a
+   * different operation, not a different filter.
+   *
+   * A QUEUE post's publish time is not a column you can move. An API post's
+   * Temporal workflow read its publishDate when it started, sleeps until then,
+   * and RETURNS on waking to find the date changed — so a bare UPDATE strands it
+   * in QUEUE until the stale sweep turns it into an unexplained ERROR. Moving
+   * one means terminating and restarting its workflow, behind the same two gates
+   * `changeDate` uses:
+   *
+   *   - the CLAIM gate: `releaseId` starting with `claim_` means a workflow may
+   *     already be inside postSocial, and terminating it cannot cancel an
+   *     in-flight HTTP call — a new workflow would publish a second copy.
+   *   - the LOCKOUT gate: within 30s of publishing, the workflow may no longer
+   *     be sleeping, which is what makes terminate() clean.
+   *
+   * Both gates SKIP rather than fail. This runs as a follow-up to saving
+   * settings, where "one of eleven posts is publishing right now" is a normal
+   * state of the world, not an error the save should surface as a failure. Every
+   * skip is returned with its reason so the caller can say what was left alone.
+   *
+   * Extension-published posts pass through the same path: `startWorkflow`
+   * recognises them and returns without touching Temporal, and the extension's
+   * publish-due query is `publishDate <= now`, so the row change is all they
+   * need. The gates still apply — a post inside its 30s lockout is one the
+   * extension may already be publishing.
+   */
+  async rescheduleQueuedPlanPosts(
+    orgId: string,
+    projectId: string,
+    operationPlanId?: string
+  ): Promise<{
+    rescheduled: number;
+    skipped: Array<{ id: string; reason: SkipReason | 'workflow-failed' }>;
+    inactive: 'inactive' | 'no-windows' | null;
+  }> {
+    const plan = await this._resolveWindowPlacement(
+      orgId,
+      projectId,
+      'QUEUE',
+      operationPlanId
+    );
+    if (plan.skipped) {
+      return { rescheduled: 0, skipped: [], inactive: plan.skipped };
+    }
+
+    const skipped: Array<{
+      id: string;
+      reason: SkipReason | 'workflow-failed';
+    }> = [...plan.pinnedReasons];
+    let rescheduled = 0;
+
+    // Serial, not Promise.all: each move terminates and restarts a Temporal
+    // workflow, and a burst of those against the same namespace is exactly the
+    // load pattern that makes terminate() race the timer it is trying to beat.
+    // A settings save moves a handful of posts, not thousands.
+    for (const move of plan.moves) {
+      await this._postRepository.updateGroupPublishDate(
+        orgId,
+        move.group,
+        'QUEUE',
+        move.publishDate
+      );
+      try {
+        // Root id only: one workflow owns a whole chain (it walks the group
+        // itself), which is the same thing schedulePosts relies on.
+        await this.startWorkflow(
+          getSocialTaskQueue(move.platform),
+          move.id,
+          orgId
+        );
+        rescheduled++;
+      } catch (err) {
+        // The date is already written and the old workflow already terminated,
+        // so this post now has no timer. Not reverted — a revert can fail too,
+        // and would leave the same post in the same place with a less honest
+        // report. Named loudly instead; it is recoverable by rescheduling.
+        this.logger.error(
+          `rescheduleQueuedPlanPosts: startWorkflow failed for postId=${move.id} ` +
+            `orgId=${orgId} projectId=${projectId} — the post has no timer and must be rescheduled: ` +
+            `${(err as Error)?.message || err}`
+        );
+        Sentry.captureException(err, {
+          extra: { postId: move.id, orgId, projectId },
+        });
+        skipped.push({ id: move.id, reason: 'workflow-failed' });
+      }
+    }
+
+    return { rescheduled, skipped, inactive: null };
+  }
+
+  /**
+   * The shared half of the two window passes: resolve the project's settings,
+   * read every not-yet-published plan post root, and work out where the ones
+   * this pass may move should go.
+   *
+   * Both states are always READ, whichever one is being moved: a DRAFT and a
+   * QUEUE post can sit in the same window on the same day, so a pass blind to
+   * the other's posts would place one on top of the other. The posts this pass
+   * does not own are handed to the allocator pinned — they occupy their slot and
+   * the minimum gap is measured against them.
+   */
+  private async _resolveWindowPlacement(
+    orgId: string,
+    projectId: string,
+    moving: 'DRAFT' | 'QUEUE',
+    operationPlanId?: string
+  ): Promise<{
+    skipped: 'inactive' | 'no-windows' | null;
+    moves: Array<{ id: string; group: string; platform: string; publishDate: Date }>;
+    pinnedReasons: Array<{ id: string; reason: SkipReason }>;
+  }> {
+    const empty = {
+      moves: [] as Array<{
+        id: string;
+        group: string;
+        platform: string;
+        publishDate: Date;
+      }>,
+      pinnedReasons: [] as Array<{ id: string; reason: SkipReason }>,
+    };
+    if (!this._projectPublishingService) {
+      throw new Error(
+        'ProjectPublishingService is required to align operation-plan publish dates'
+      );
+    }
+    const projectPublishing = await this._projectPublishingService.resolve(
+      orgId,
+      projectId
+    );
+    // Same gate as the commit path, through the same function: master switch
+    // AND the scheduled-publishing feature switch. A project that has not turned
+    // publishing on has not authorized us to rewrite its schedule either.
+    if (!isPublishingActive(projectPublishing)) {
+      return { ...empty, skipped: 'inactive' };
+    }
+    const windows = projectPublishing.windows;
+    if (!Object.keys(windows).length) {
+      // No window at any tier = unconstrained, which is the out-of-the-box
+      // state. Nothing to align against, so nothing is touched.
+      return { ...empty, skipped: 'no-windows' };
+    }
+
+    const roots = await this._postRepository.getPlanPostRootsForProject(
+      orgId,
+      projectId,
+      ['DRAFT', 'QUEUE'],
+      operationPlanId
+    );
+    if (!roots.length) return { ...empty, skipped: null };
+
+    const minGaps = await this._extensionPublishConfigService.getMinGapMinutes();
+    const pinnedReasons: Array<{ id: string; reason: SkipReason }> = [];
+    const now = dayjs();
+
+    // Why a post may not be moved by THIS pass. Null = it may.
+    const pinReason = (root: (typeof roots)[number]): 'claimed' | 'imminent' | null => {
+      if (root.state !== moving) return null; // owned by the other pass
+      if (moving === 'DRAFT') return null; // a draft has no timer to race
+      if (root.releaseId?.startsWith('claim_')) return 'claimed';
+      if (dayjs(root.publishDate).diff(now, 'millisecond') < RESCHEDULE_LOCKOUT_MS) {
+        return 'imminent';
+      }
+      return null;
+    };
+
+    // Per PLATFORM: the window and the gap are both per-platform, and posts on
+    // different platforms have no reason to avoid each other — two channels
+    // publishing at the same minute is a person with two tabs open, not a bot.
+    const byPlatform = new Map<PublishPlatform, typeof roots>();
+    for (const root of roots) {
+      const platform = root.providerIdentifier?.toLowerCase() as
+        | PublishPlatform
+        | undefined;
+      if (!platform || !windows[platform]) continue;
+      const bucket = byPlatform.get(platform);
+      if (bucket) bucket.push(root);
+      else byPlatform.set(platform, [root]);
+    }
+
+    const moves: Array<{
+      id: string;
+      group: string;
+      platform: string;
+      publishDate: Date;
+    }> = [];
+    for (const [platform, platformRoots] of byPlatform) {
+      const { moved, degraded } = redistributePublishTimesWithinWindow(
+        platformRoots.map((root) => {
+          const reason = pinReason(root);
+          if (reason) pinnedReasons.push({ id: root.id, reason });
+          return {
+            id: root.id,
+            publishDate: root.publishDate,
+            movable: root.state === moving && !reason,
+          };
+        }),
+        windows[platform]!,
+        // A platform with a project window but outside the publishable set has
+        // no resolved entry; the built-in default is the safe read, not "no
+        // spacing at all".
+        minGaps[platform] ?? DEFAULT_MIN_GAP_MINUTES
+      );
+      for (const root of platformRoots) {
+        const date = moved.get(root.id);
+        if (!date) continue;
+        // Never move a post to a time that has already passed. The window is
+        // anchored to the post's own local day, so a post scheduled for tonight
+        // can be offered this morning's window — and applying that would
+        // publish it on the spot, which is the exact opposite of what a window
+        // is for. Leaving it where it is keeps it in the future; the next pass
+        // (or the commit) gets another go once its own day comes round.
+        if (dayjs(date).diff(now, 'millisecond') < RESCHEDULE_LOCKOUT_MS) {
+          pinnedReasons.push({ id: root.id, reason: 'window-passed' });
+          continue;
+        }
+        moves.push({
+          id: root.id,
+          group: root.group,
+          platform,
+          publishDate: date,
+        });
+      }
+      // Never silent: a window too narrow for its posts still produces a
+      // schedule, but the operator asked for spacing they did not get and the
+      // only place that is visible is here.
+      for (const instance of degraded) {
+        this.logger.warn(
+          `Publish window ${platform} starting ${instance.windowStart.toISOString()} ` +
+            `could not honour a ${instance.requestedGapMinutes}min gap for orgId=${orgId} projectId=${projectId} — ` +
+            `spaced at ${instance.appliedGapMinutes.toFixed(1)}min instead. Widen the window or lower extension_publish.min_gap.`
+        );
+      }
+    }
+
+    return { skipped: null, moves, pinnedReasons };
+  }
+
   /** When this project last actually published something; null if never. */
   getLastPublishedAt(orgId: string, projectId: string) {
     return this._postRepository.getLastPublishedAt(orgId, projectId);
@@ -2336,6 +2659,7 @@ export class PostsService {
     // Already resolved by ProjectPublishingService, which layered the PROJECT's
     // own window over the admin tiers (platform override -> global default).
     const timeWindows = drafts.length ? projectPublishing.windows : {};
+    const now = dayjs();
     // Empty input is safe: schedulePosts short-circuits on an empty id list, so
     // an already-committed (or unknown, or platform-filtered-to-nothing) plan is
     // a no-op success, not an error.
@@ -2352,9 +2676,21 @@ export class PostsService {
         const redistributed = window
           ? redistributePublishTimeIfOutsideWindow(p.publishDate, window)
           : undefined;
+        // ...but never BACKWARDS across the clock. The window is anchored to the
+        // post's own local day, so committing at 19:00 a post dated 22:00 today
+        // against a 09:00-18:00 window offers a time this morning — and a QUEUE
+        // post dated in the past publishes on the spot, which is the precise
+        // opposite of what a publish window is for. The post keeps its own time
+        // instead; out-of-window is bad, published-right-now is worse. Same rule
+        // _resolveWindowPlacement applies, so the two paths cannot disagree
+        // about it.
+        const usable =
+          redistributed && redistributed.getTime() > now.valueOf()
+            ? redistributed
+            : undefined;
         const dateOverride =
-          redistributed && redistributed.getTime() !== p.publishDate.getTime()
-            ? redistributed.toISOString()
+          usable && usable.getTime() !== p.publishDate.getTime()
+            ? usable.toISOString()
             : undefined;
         return {
           id: p.id,

@@ -27,6 +27,14 @@ function makeService(over: {
     }
   );
   const getLastPublishedAt = vi.fn().mockResolvedValue(over.lastPublishedAt ?? null);
+  // The two publish-window passes. Both are best-effort follow-ups to a save,
+  // so the harness gives them benign defaults and the tests assert WHEN they run.
+  const alignPlanDraftPublishDates = vi
+    .fn()
+    .mockResolvedValue({ aligned: 0, skipped: null });
+  const rescheduleQueuedPlanPosts = vi
+    .fn()
+    .mockResolvedValue({ rescheduled: 0, skipped: [], inactive: null });
   const schedulePlanPosts = vi
     .fn()
     .mockResolvedValue({ scheduled: [], failed: [], total: 0, alreadyScheduled: 0 });
@@ -35,7 +43,12 @@ function makeService(over: {
   const upsertReplyAccountSettings = vi.fn().mockResolvedValue({});
 
   const service = new AutomationService(
-    { getLastPublishedAt, schedulePlanPosts } as any,
+    {
+      getLastPublishedAt,
+      schedulePlanPosts,
+      alignPlanDraftPublishDates,
+      rescheduleQueuedPlanPosts,
+    } as any,
     { getActivePlanId } as any,
     { countOpportunities, saveConfig, upsertReplyAccountSettings } as any,
     { getConfigCore, saveConfig: saveConfigRaw } as any,
@@ -50,6 +63,8 @@ function makeService(over: {
     resolve,
     getLastPublishedAt,
     schedulePlanPosts,
+    alignPlanDraftPublishDates,
+    rescheduleQueuedPlanPosts,
     countOpportunities,
     saveConfig,
     upsertReplyAccountSettings,
@@ -251,7 +266,51 @@ describe('AutomationService.saveEnabled', () => {
     // Not through EngageService.saveConfig — that one starts the global Engage
     // workflows and kicks a scan whenever it sees `enabled`.
     expect(saveConfig).not.toHaveBeenCalled();
-    expect(res).toEqual({ saved: true, enabled: false });
+    // Turning the master OFF is a suspension — nothing is rescheduled, and the
+    // response says so rather than reporting an empty move.
+    expect(res).toEqual({ saved: true, enabled: false, rescheduled: null });
+  });
+
+  it('realigns when publishing goes from not-running to running', async () => {
+    const { service, alignPlanDraftPublishDates, rescheduleQueuedPlanPosts } =
+      makeService();
+
+    await service.saveEnabled(org, 'proj-1', true);
+
+    expect(alignPlanDraftPublishDates).toHaveBeenCalledWith('org-1', 'proj-1');
+    expect(rescheduleQueuedPlanPosts).toHaveBeenCalledWith('org-1', 'proj-1');
+  });
+
+  it('does not realign when publishing was ALREADY running', async () => {
+    const { service, alignPlanDraftPublishDates, rescheduleQueuedPlanPosts } =
+      makeService({
+        publishing: {
+          automationEnabled: true,
+          publishingEnabled: true,
+          publishingConfigured: true,
+          enabledPlatforms: ['x'],
+          platformDecisions: { x: true },
+          windows: {},
+        },
+      });
+
+    await service.saveEnabled(org, 'proj-1', true);
+
+    // Nothing transitioned, so nothing may rewrite a schedule that was already
+    // running — a no-op save must stay a no-op.
+    expect(alignPlanDraftPublishDates).not.toHaveBeenCalled();
+    expect(rescheduleQueuedPlanPosts).not.toHaveBeenCalled();
+  });
+
+  it('does not realign when the master is switched OFF', async () => {
+    const { service, alignPlanDraftPublishDates, rescheduleQueuedPlanPosts } =
+      makeService();
+
+    await service.saveEnabled(org, 'proj-1', false);
+
+    // A switch suspends, it does not reset — and it certainly does not reshuffle.
+    expect(alignPlanDraftPublishDates).not.toHaveBeenCalled();
+    expect(rescheduleQueuedPlanPosts).not.toHaveBeenCalled();
   });
 
   it('turns the master back on without restating anything else', async () => {
@@ -325,7 +384,11 @@ describe('AutomationService.savePublishing', () => {
     const res = await service.savePublishing(org, 'proj-1', { platforms: ['x'] });
 
     expect(schedulePlanPosts).not.toHaveBeenCalled();
-    expect(res).toEqual({ saved: true, scheduled: null });
+    expect(res).toEqual({
+      saved: true,
+      scheduled: null,
+      rescheduled: { moved: 0, skipped: [] },
+    });
   });
 
   it('resolves the plan id server-side and passes the projectId down when committing', async () => {
@@ -365,7 +428,67 @@ describe('AutomationService.savePublishing', () => {
     // ever generated a plan.
     expect(saveConfigRaw).toHaveBeenCalled();
     expect(schedulePlanPosts).not.toHaveBeenCalled();
-    expect(res).toEqual({ saved: true, scheduled: null });
+    expect(res).toEqual({
+      saved: true,
+      scheduled: null,
+      rescheduled: { moved: 0, skipped: [] },
+    });
+  });
+
+  it('realigns DRAFTs before queued posts, and both before the commit', async () => {
+    const {
+      service,
+      alignPlanDraftPublishDates,
+      rescheduleQueuedPlanPosts,
+      schedulePlanPosts,
+    } = makeService();
+
+    await service.savePublishing(org, 'proj-1', {
+      platforms: ['x'],
+      commit: true,
+    });
+
+    // Drafts first: the QUEUE pass measures its minimum gap against them, so
+    // spacing against a draft that is itself about to move is spacing against
+    // a slot nobody uses.
+    expect(alignPlanDraftPublishDates).toHaveBeenCalledWith('org-1', 'proj-1');
+    expect(rescheduleQueuedPlanPosts).toHaveBeenCalledWith('org-1', 'proj-1');
+    const draftOrder = alignPlanDraftPublishDates.mock.invocationCallOrder[0];
+    const queueOrder = rescheduleQueuedPlanPosts.mock.invocationCallOrder[0];
+    const commitOrder = schedulePlanPosts.mock.invocationCallOrder[0];
+    expect(draftOrder).toBeLessThan(queueOrder);
+    expect(queueOrder).toBeLessThan(commitOrder);
+  });
+
+  it('reports queued posts it could not move', async () => {
+    const { service, rescheduleQueuedPlanPosts } = makeService();
+    rescheduleQueuedPlanPosts.mockResolvedValue({
+      rescheduled: 2,
+      skipped: [{ id: 'p9', reason: 'claimed' }],
+      inactive: null,
+    });
+
+    const res = await service.savePublishing(org, 'proj-1', { platforms: ['x'] });
+
+    // A scheduled send that could NOT be moved is a real exception to what the
+    // user just asked for, so it is named rather than swallowed.
+    expect(res.rescheduled).toEqual({
+      moved: 2,
+      skipped: [{ id: 'p9', reason: 'claimed' }],
+    });
+  });
+
+  it('still reports the save as successful when a realign throws', async () => {
+    const { service, rescheduleQueuedPlanPosts, saveConfigRaw } = makeService();
+    rescheduleQueuedPlanPosts.mockRejectedValue(new Error('temporal down'));
+
+    const res = await service.savePublishing(org, 'proj-1', { platforms: ['x'] });
+
+    // The settings ARE saved; tidying the schedule is a follow-up and must not
+    // turn a successful write into an error.
+    expect(saveConfigRaw).toHaveBeenCalled();
+    expect(res.saved).toBe(true);
+    expect(res.rescheduled).toBeNull();
   });
 });
 
