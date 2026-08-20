@@ -1,4 +1,3 @@
-import { Type } from 'class-transformer';
 import {
   ArrayMaxSize,
   IsArray,
@@ -8,7 +7,6 @@ import {
   IsOptional,
   IsString,
   registerDecorator,
-  ValidateNested,
   ValidationOptions,
 } from 'class-validator';
 
@@ -117,18 +115,14 @@ export class SaveAutomationPublishingDto {
   publishMethod?: 'extension' | 'api';
 }
 
-export class ReplyAccountAccessDto {
-  @IsString()
-  integrationId!: string;
-
-  @IsBoolean()
-  engageEnabled!: boolean;
-}
-
 /**
  * Body for POST /projects/:projectId/automation/replies — the managed-reply
  * half of Automation: whether Engage runs for this project, how unattended it
- * is, the per-platform reply policy, and which connected accounts may reply.
+ * is, and the per-platform reply policy.
+ *
+ * Per-ACCOUNT authorization is deliberately not here: Automation sends through
+ * the extension's own browser session and never picks an account. Choosing a
+ * specific account is a per-post edit, on a different surface.
  *
  * Every field is optional and only what is present is written, so a client can
  * flip one switch without restating the rest.
@@ -148,15 +142,6 @@ export class SaveAutomationRepliesDto {
   @IsOptional()
   @IsObject()
   policies?: Record<string, Record<string, unknown>>;
-
-  // Batched on purpose: the previous shape was one request per account, which
-  // left a partial failure with no coherent state to report or retry.
-  @IsOptional()
-  @IsArray()
-  @ArrayMaxSize(50)
-  @ValidateNested({ each: true })
-  @Type(() => ReplyAccountAccessDto)
-  accounts?: ReplyAccountAccessDto[];
 }
 
 /**

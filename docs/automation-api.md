@@ -92,10 +92,9 @@ from the AND with the master (`active`):
   were cleared" rather than "suspended";
 - render status, counts, and "will this run" from `active`.
 
-`publishing.enabledConfigured` distinguishes an explicit choice from the legacy
-derived rule (see the column comment on `publishingEnabled`): projects that
-predate the column resolve their feature switch from "is any platform on", so a
-deploy changes nothing for them.
+Whether the feature switch is an explicit choice or derived from the platform
+selection is not surfaced separately — `publishing.platforms` already carries the
+per-platform decisions it would have been derived from.
 
 ## Where these settings live
 
@@ -172,48 +171,74 @@ does **not** create an `EngageConfig` row for a project that has never used Enga
   // The Automation master switch.
   "enabled": true,
 
-  // null when the project has no active plan (READY, startsAt <= now <= endsAt).
-  "plan": {
-    "id": "<operation-plan-uuid>",
-    "queue": {
-      "totalPosts": 12,      // still-DRAFT roots whose publish time is still ahead
-      "readyPosts": 10,      // have a body AND a resolved platform
-      "attentionPosts": 2,   // totalPosts - readyPosts
-      "platforms": ["x", "reddit"]
-    }
+  // The active plan's send-queue rollup; zeroed when the project has no active
+  // plan (READY, startsAt <= now <= endsAt). Flat and always present — a client
+  // asking "how many posts are waiting" should not have to unwrap a nullable
+  // object to learn the answer is none.
+  //
+  // The plan's ID is deliberately NOT returned. The client never names a plan
+  // anywhere — the commit route resolves the project's active one server-side —
+  // so handing the id out would only invite a caller to start passing it again,
+  // which is exactly what let a sibling project's plan be activated before.
+  "queue": {
+    "totalPosts": 12,      // still-DRAFT roots whose publish time is still ahead
+    "readyPosts": 10,      // have a body AND a resolved platform
+    "attentionPosts": 2,   // totalPosts - readyPosts
+    "platforms": ["x", "reddit"]
   },
 
   "publishing": {
-    // false = the project has never expressed a preference. Distinct from
-    // `enabled: false` with `configured: true`, which is the master switch off.
-    "configured": true,        // has the project ever chosen PLATFORMS?
-    "enabled": true,           // the feature switch, on its own
-    "enabledConfigured": true, // is that switch explicit, or the legacy derived rule?
-    "active": true,            // master AND feature — will publishing run?
-    "platforms": ["x", "reddit"],
+    // The feature switch, on its own. `active` is NOT sent: it is just
+    // `enabled && this`, and a value the client can compute is one that can
+    // disagree with a server-sent copy of itself.
+    "enabled": true,
 
-    // EFFECTIVE windows — the project's own override already layered onto the
-    // admin-level `extension_publish.time_window` setting. A platform absent
-    // here is unconstrained.
-    "windows": {
-      "x": { "start": "09:00", "end": "17:00", "timezone": "Asia/Shanghai" }
+    // The zone every window below is in, unless that window overrides it.
+    // Hoisted because the project writes ONE zone for all its platforms (the
+    // browser's), so repeating it per platform was the same string N times.
+    // Absent when the windows genuinely disagree — an admin can pin a different
+    // zone per platform, and a window with NO zone means UTC, which does not
+    // agree with a sibling that names one.
+    "timezone": "Asia/Taipei",
+
+    // ONE entry per platform, carrying both halves of that platform's state.
+    // Previously a `platforms` array beside a parallel `windows` map, which the
+    // client had to cross-reference — and the array was a lossy projection of
+    // the same information.
+    //
+    // `enabled` ABSENT = the project has never decided for this platform. A
+    // platform can appear with only a `window` when an admin restricted it and
+    // the project never touched it — that window has to stay visible, or the UI
+    // would show its own default hours for a platform that is actually capped.
+    "platforms": {
+      "x":        { "enabled": true,  "window": { "start": "09:00", "end": "18:00" } },
+      "reddit":   { "enabled": true,  "window": { "start": "07:00", "end": "12:00" } },
+      "linkedin": { "enabled": false, "window": { "start": "09:00", "end": "18:00" } }
     }
   },
 
   "replies": {
-    "enabled": true,           // the ENGAGE feature switch (also gates scanning)
-    "autoReplyMode": "off" | "review" | "auto",
-    "repliesEnabled": true,    // the feature switch — the mode IS the switch
-    "active": true,            // master AND feature
-    // Reply-side keys only — the publishing keys that currently share the same
-    // column are reported under `publishing` above.
-    "policies": { "x": { "autoReplyEnabled": true, "length": "short" } },
-    "accounts": [
-      { "id": "<integration-uuid>", "name": "...", "picture": "...",
-        "providerIdentifier": "x", "engageEnabled": true }
-    ]
-  },
+    // Engage's OWN switch. It also gates scanning, is changeable from the Engage
+    // page, and independently gates replying: with it off nothing is driven
+    // whatever the mode says — so a client that only knew the mode could not
+    // explain why replies are idle.
+    "enabled": true,
 
+    // Carries the feature switch AND the review/auto distinction, so a separate
+    // `repliesEnabled` boolean would just restate `!== "off"`.
+    "autoReplyMode": "off" | "review" | "auto",
+
+    // ONE entry per platform: that platform's reply policy.
+    //
+    // Connected reply ACCOUNTS are deliberately absent. Automation never picks
+    // an account — it sends through the extension's own browser session, so the
+    // identity is whoever the user is already signed in as. Choosing a specific
+    // account is a per-post edit, on a different surface.
+    "platforms": {
+      "x": { "autoReplyEnabled": true, "length": "short", "checkIntervalMinutes": 480 },
+      "reddit": { "autoReplyEnabled": true, "length": "medium" }
+    }
+  }
 }
 ```
 
@@ -222,23 +247,35 @@ it counts opportunities discovered by scanning, which the Automation switches do
 not govern — and belongs on the Engage surface next to the conversations
 themselves, not on a page about switches and schedules.
 
-### `configured` vs an empty platform list
+### Telling "never configured" from "everything off"
 
-`publishing.platforms: []` is ambiguous on its own, and the two readings are
-opposite:
+`publishing.platforms` carries this per platform rather than in a separate flag:
+an entry's `enabled` is **absent** until the project decides about that platform.
+The two readings are opposite, so they must stay distinguishable:
 
 | | meaning | effect on a commit |
 | --- | --- | --- |
-| `configured: false` | never picked platforms | **unconstrained** — every platform the plan has |
-| `configured: true` | every platform deliberately off | queues **nothing** |
+| no entry has `enabled` | never chose platforms | **unconstrained** — every platform the plan has |
+| entries exist, all `false` | every platform deliberately off | queues **nothing** |
 
 Collapsing them would either silently stop publishing for every project that
 predates this setting, or silently ignore a user turning every platform off.
 
-This is the PLATFORM level, separate from the feature switch above it: a project
-can have publishing switched on with no platform picked yet (`enabled: true`,
-`platforms: []`, `configured: false`), and one with platforms picked but the
-feature switched off (`enabled: false`, `platforms: ["x"]`).
+### What the client derives rather than receives
+
+Three values are deliberately not transmitted, because each is computable from
+what is — and a duplicated value is one that can disagree with itself:
+
+| Derived | From |
+| --- | --- |
+| is publishing actually running | `enabled && publishing.enabled` |
+| is replying actually running | `enabled && replies.autoReplyMode !== "off"` |
+| the managed-replies feature switch | `replies.autoReplyMode !== "off"` |
+
+Render the switch CONTROLS from each feature's own `enabled` / `autoReplyMode`,
+and status, counts and "will this run" from the derived values. Driving the
+controls off the derived value makes both snap to off the moment the master goes
+off, which reads as "your settings were cleared" rather than "suspended".
 
 ---
 
@@ -363,9 +400,7 @@ already committed; `total = 0` means nothing matched.
 
 ## POST /projects/:projectId/automation/replies
 
-Save the managed-reply half: config flags, per-platform reply policy, and
-per-account reply authorization — in one call instead of a config write plus one
-request per account (whose partial failure left no coherent state to report).
+Save the managed-reply half: the config flags and the per-platform reply policy.
 
 - **Body** — every field optional; only what is present is written, so a client
   can flip one switch without restating the rest. An entirely empty body is a
@@ -379,15 +414,18 @@ request per account (whose partial failure left no coherent state to report).
   // Merged key-by-key over what is stored, per platform.
   "policies": {
     "x": { "autoReplyEnabled": true, "length": "short", "mentionTags": ["@acme"] }
-  },
-
-  "accounts": [
-    { "integrationId": "<integration-uuid>", "engageEnabled": true }
-  ]
+  }
 }
 ```
 
-- **Response**: `{ "saved": true, "accounts": <number applied> }`
+- **Response**: `{ "saved": true }`
+
+Per-ACCOUNT authorization is deliberately not accepted. Automation never picks an
+account — it sends through the extension's own browser session, so the identity
+is whoever the user is signed in as; choosing a specific account is a per-post
+edit on a different surface. The flag such a payload would write
+(`IntegrationProject.engageEnabled`) is an Engage setting no gate anywhere reads,
+and it stays on the Engage surface, which has a UI for it.
 
 Publishing keys (`publishingEnabled`, `publishingWindowStart`,
 `publishingWindowEnd`, `publishingTimezone`) sent here are **dropped**: they are

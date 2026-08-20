@@ -116,7 +116,6 @@ describe('SaveAutomationRepliesDto', () => {
             checkIntervalMinutes: 300,
           },
         },
-        accounts: [{ integrationId: 'i1', engageEnabled: true }],
       })
     ).toEqual([]);
   });
@@ -131,10 +130,13 @@ describe('SaveAutomationRepliesDto', () => {
     ]);
   });
 
-  it('rejects a malformed account entry', () => {
-    expect(check(SaveAutomationRepliesDto, { accounts: [{ integrationId: 'i1' }] })).toEqual([
-      'accounts',
-    ]);
+  it('ignores a per-account payload — the field no longer exists', () => {
+    // Automation never picks an account (everything sends through the
+    // extension's own browser session), so a body carrying one is simply an
+    // unrecognised property, not a validation error.
+    expect(
+      check(SaveAutomationRepliesDto, { enabled: true, accounts: [{ integrationId: 'i1' }] })
+    ).toEqual([]);
   });
 });
 

@@ -56,6 +56,11 @@ export interface ResolvedProjectPublishing {
   enabledPlatforms: string[] | null;
   /** Effective per-platform window: project override on top of the admin tiers. */
   windows: Partial<Record<PublishPlatform, PublishTimeWindow>>;
+  /**
+   * Per-platform switch decisions, keyed by platform. A platform absent from
+   * here has never been decided — distinct from one explicitly set to false.
+   */
+  platformDecisions: Record<string, boolean>;
 }
 
 /**
@@ -101,6 +106,27 @@ export function readPublishingPolicies(
       entry.publishingTimezone = policy.publishingTimezone;
     }
     if (Object.keys(entry).length) out[platform.toLowerCase()] = entry;
+  }
+  return out;
+}
+
+/**
+ * Per-platform publishing state, as the API surfaces it: whether the project has
+ * switched this platform on, or `undefined` when it has never said either way.
+ *
+ * Tracked per platform rather than as one project-level "configured" flag
+ * because that is the truth — a project can have decided about `x` and never
+ * touched `linkedin` — and because it lets the API drop a separate flag whose
+ * only job was to disambiguate an empty list.
+ */
+export function resolvePlatformDecisions(
+  policies: Record<string, ProjectPublishingPolicy>
+): Record<string, boolean> {
+  const out: Record<string, boolean> = {};
+  for (const [platform, policy] of Object.entries(policies)) {
+    if (typeof policy.publishingEnabled === 'boolean') {
+      out[platform] = policy.publishingEnabled;
+    }
   }
   return out;
 }
@@ -233,6 +259,7 @@ export class ProjectPublishingService {
       publishingConfigured: explicit !== null,
       enabledPlatforms,
       windows: mergePublishWindows(adminWindows, policies),
+      platformDecisions: resolvePlatformDecisions(policies),
     };
   }
 }

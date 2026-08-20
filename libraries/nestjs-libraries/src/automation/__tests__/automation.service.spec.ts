@@ -9,7 +9,6 @@ function makeService(over: {
   config?: any;
   publishing?: any;
   queue?: any[];
-  accounts?: any[];
   count?: any;
 } = {}) {
   const getActivePlanId = vi
@@ -23,6 +22,7 @@ function makeService(over: {
       publishingEnabled: false,
       publishingConfigured: false,
       enabledPlatforms: null,
+      platformDecisions: {},
       windows: {},
     }
   );
@@ -30,7 +30,6 @@ function makeService(over: {
   const schedulePlanPosts = vi
     .fn()
     .mockResolvedValue({ scheduled: [], failed: [], total: 0, alreadyScheduled: 0 });
-  const listReplyAccounts = vi.fn().mockResolvedValue(over.accounts ?? []);
   const countOpportunities = vi.fn().mockResolvedValue(over.count ?? { total: 0 });
   const saveConfig = vi.fn().mockResolvedValue({});
   const upsertReplyAccountSettings = vi.fn().mockResolvedValue({});
@@ -38,7 +37,7 @@ function makeService(over: {
   const service = new AutomationService(
     { getPlanPublishingQueue, schedulePlanPosts } as any,
     { getActivePlanId } as any,
-    { listReplyAccounts, countOpportunities, saveConfig, upsertReplyAccountSettings } as any,
+    { countOpportunities, saveConfig, upsertReplyAccountSettings } as any,
     { getConfigCore, saveConfig: saveConfigRaw } as any,
     { resolve } as any
   );
@@ -51,7 +50,6 @@ function makeService(over: {
     resolve,
     getPlanPublishingQueue,
     schedulePlanPosts,
-    listReplyAccounts,
     countOpportunities,
     saveConfig,
     upsertReplyAccountSettings,
@@ -76,23 +74,30 @@ describe('AutomationService.getOverview', () => {
     const res = await service.getOverview(org, 'proj-1');
 
     expect(getPlanPublishingQueue).toHaveBeenCalledWith('org-1', 'plan-1');
-    expect(res.plan).toEqual({
-      id: 'plan-1',
-      queue: {
-        totalPosts: 4,
-        readyPosts: 2,
-        attentionPosts: 2,
-        platforms: ['x', 'reddit'],
-      },
+    // Flat, and with no plan id: the client never names a plan, so returning one
+    // would only invite a caller to start passing it somewhere again.
+    expect(res).not.toHaveProperty('plan');
+    expect(res.queue).toEqual({
+      totalPosts: 4,
+      readyPosts: 2,
+      attentionPosts: 2,
+      platforms: ['x', 'reddit'],
     });
   });
 
-  it('returns a null plan without touching the queue when the project has none', async () => {
+  it('reports a zeroed queue without touching the plan when the project has none', async () => {
     const { service, getPlanPublishingQueue } = makeService({ activePlanId: null });
 
     const res = await service.getOverview(org, 'proj-1');
 
-    expect(res.plan).toBeNull();
+    // Zeroed rather than null, so a client reading "how many posts are waiting"
+    // never has to unwrap an object to find out the answer is none.
+    expect(res.queue).toEqual({
+      totalPosts: 0,
+      readyPosts: 0,
+      attentionPosts: 0,
+      platforms: [],
+    });
     expect(getPlanPublishingQueue).not.toHaveBeenCalled();
   });
 
@@ -103,14 +108,14 @@ describe('AutomationService.getOverview', () => {
         publishingEnabled: false,
         publishingConfigured: false,
         enabledPlatforms: null,
+        platformDecisions: {},
         windows: {},
       },
     }).service.getOverview(org, 'proj-1');
-    expect(unconfigured.publishing).toMatchObject({
-      configured: false,
-      enabled: false,
-      platforms: [],
-    });
+    // Never configured: no platform carries an `enabled` decision at all, which
+    // is what tells this apart from "every platform deliberately off" below.
+    expect(unconfigured.publishing.enabled).toBe(false);
+    expect(unconfigured.publishing.platforms).toEqual({});
 
     const allOff = await makeService({
       publishing: {
@@ -118,13 +123,15 @@ describe('AutomationService.getOverview', () => {
         publishingEnabled: false,
         publishingConfigured: true,
         enabledPlatforms: [],
+        platformDecisions: { x: false, reddit: false },
         windows: {},
       },
     }).service.getOverview(org, 'proj-1');
-    expect(allOff.publishing).toMatchObject({
-      configured: true,
-      enabled: false,
-      platforms: [],
+    // Every platform explicitly off — the decisions are present and false.
+    expect(allOff.publishing.enabled).toBe(false);
+    expect(allOff.publishing.platforms).toEqual({
+      x: { enabled: false },
+      reddit: { enabled: false },
     });
   });
 
@@ -135,6 +142,7 @@ describe('AutomationService.getOverview', () => {
         publishingEnabled: true,
         publishingConfigured: true,
         enabledPlatforms: ['x', 'reddit'],
+        platformDecisions: { x: true, reddit: true },
         windows: {
           x: { windowStart: '09:00', windowEnd: '17:00', timezone: 'Asia/Shanghai' },
           reddit: { windowStart: '10:00', windowEnd: '20:00' },
@@ -144,9 +152,12 @@ describe('AutomationService.getOverview', () => {
 
     const res = await service.getOverview(org, 'proj-1');
 
-    expect(res.publishing.windows).toEqual({
-      x: { start: '09:00', end: '17:00', timezone: 'Asia/Shanghai' },
-      reddit: { start: '10:00', end: '20:00' },
+    // The zones disagree (one window carries none), so there is no unanimous
+    // default to hoist and the one that has a zone states it itself.
+    expect(res.publishing.timezone).toBeUndefined();
+    expect(res.publishing.platforms).toEqual({
+      x: { enabled: true, window: { start: '09:00', end: '17:00', timezone: 'Asia/Shanghai' } },
+      reddit: { enabled: true, window: { start: '10:00', end: '20:00' } },
     });
   });
 
@@ -172,7 +183,7 @@ describe('AutomationService.getOverview', () => {
 
     // Returning them under both halves would invite a client to write them back
     // through the reply endpoint, which is exactly the clobbering this split ends.
-    expect(res.replies.policies).toEqual({
+    expect(res.replies.platforms).toEqual({
       x: { autoReplyEnabled: true, length: 'short' },
     });
     expect(res.replies).toMatchObject({ enabled: true, autoReplyMode: 'review' });
@@ -186,7 +197,7 @@ describe('AutomationService.getOverview', () => {
     expect(res.replies).toMatchObject({
       enabled: false,
       autoReplyMode: 'off',
-      policies: {},
+      platforms: {},
     });
     // Read-only: loading the page must not create an EngageConfig row.
     expect(getConfigCore).toHaveBeenCalledWith('org-1', 'proj-1');
@@ -205,6 +216,7 @@ describe('AutomationService.getOverview — switch chain', () => {
     publishingEnabled: true,
     publishingConfigured: true,
     enabledPlatforms: ['x'],
+    platformDecisions: { x: true },
     windows: {},
     ...over,
   });
@@ -228,10 +240,14 @@ describe('AutomationService.getOverview — switch chain', () => {
     }).service.getOverview(org, 'proj-1');
 
     expect(res.publishing.enabled).toBe(true);
-    expect(res.publishing.active).toBe(false);
-    // The platform selection survives too — a master switch suspends, it does
-    // not reset.
-    expect(res.publishing.platforms).toEqual(['x']);
+    // `active` is no longer transmitted — the client computes
+    // `overview.enabled && publishing.enabled`, so it cannot disagree with a
+    // server-sent copy of itself.
+    expect(res.publishing).not.toHaveProperty('active');
+    expect(res.enabled).toBe(false);
+    // The platform selection survives — a master switch suspends, it does not
+    // reset.
+    expect(res.publishing.platforms).toEqual({ x: { enabled: true } });
   });
 
   it('derives replies.active from master AND autoReplyMode', async () => {
@@ -247,8 +263,14 @@ describe('AutomationService.getOverview — switch chain', () => {
         publishing: withSwitches({ automationEnabled: master }),
         config: { enabled: true, metadata: { autoReplyMode: mode, replyPolicies: {} } },
       }).service.getOverview(org, 'proj-1');
-      expect(res.replies.active, `master=${master} mode=${mode}`).toBe(expected);
-      expect(res.replies.repliesEnabled, `master=${master} mode=${mode}`).toBe(mode !== 'off');
+      // Both were dropped from the payload: `active` is master AND feature, and
+      // `repliesEnabled` is `autoReplyMode !== 'off'` — each restates something
+      // the client already has.
+      expect(res.replies).not.toHaveProperty('active');
+      expect(res.replies).not.toHaveProperty('repliesEnabled');
+      expect(res.enabled && res.replies.autoReplyMode !== 'off', `master=${master} mode=${mode}`).toBe(
+        expected
+      );
     }
   });
 });
@@ -447,24 +469,135 @@ describe('AutomationService.saveReplies', () => {
     });
   });
 
-  it('applies account authorization in one batched call', async () => {
+  it('never writes per-account settings', async () => {
+    // `IntegrationProject.engageEnabled` is an Engage setting that no gate even
+    // reads. Writing it from a managed-reply save meant this page silently
+    // reached into another feature's configuration for every account at once.
     const { service, upsertReplyAccountSettings } = makeService();
 
-    const res = await service.saveReplies(org, 'proj-1', {
-      accounts: [
-        { integrationId: 'int-1', engageEnabled: true },
-        { integrationId: 'int-2', engageEnabled: false },
-      ],
+    const res = await service.saveReplies(org, 'proj-1', { enabled: true });
+
+    expect(upsertReplyAccountSettings).not.toHaveBeenCalled();
+    expect(res).toEqual({ saved: true });
+  });
+});
+
+// The payload states each platform once, with both halves of its state, instead
+// of a `platforms` array beside a parallel `windows` map (publishing) or an
+// `accounts` list the client had to join by providerIdentifier (replies).
+describe('AutomationService.getOverview — one entry per platform', () => {
+  beforeEach(() => vi.restoreAllMocks());
+
+  it('hoists the timezone when every window agrees, and states it once', async () => {
+    const { service } = makeService({
+      publishing: {
+        automationEnabled: true,
+        publishingEnabled: true,
+        publishingConfigured: true,
+        enabledPlatforms: ['x', 'reddit'],
+        platformDecisions: { x: true, reddit: true, linkedin: false },
+        windows: {
+          x: { windowStart: '09:00', windowEnd: '18:00', timezone: 'Asia/Taipei' },
+          reddit: { windowStart: '07:00', windowEnd: '12:00', timezone: 'Asia/Taipei' },
+          linkedin: { windowStart: '09:00', windowEnd: '18:00', timezone: 'Asia/Taipei' },
+        },
+      },
     });
 
-    expect(upsertReplyAccountSettings).toHaveBeenNthCalledWith(1, org, 'int-1', {
-      projectId: 'proj-1',
-      engageEnabled: true,
+    const res = await service.getOverview(org, 'proj-1');
+
+    expect(res.publishing.timezone).toBe('Asia/Taipei');
+    // Stated once above, so no window repeats it.
+    for (const entry of Object.values(res.publishing.platforms)) {
+      expect(entry.window).not.toHaveProperty('timezone');
+    }
+  });
+
+  it('keeps a divergent zone on the window that diverges', async () => {
+    const { service } = makeService({
+      publishing: {
+        automationEnabled: true,
+        publishingEnabled: true,
+        publishingConfigured: true,
+        enabledPlatforms: ['x', 'linkedin'],
+        platformDecisions: { x: true, linkedin: true },
+        windows: {
+          x: { windowStart: '09:00', windowEnd: '18:00', timezone: 'Asia/Taipei' },
+          linkedin: { windowStart: '08:00', windowEnd: '20:00', timezone: 'America/New_York' },
+        },
+      },
     });
-    expect(upsertReplyAccountSettings).toHaveBeenNthCalledWith(2, org, 'int-2', {
-      projectId: 'proj-1',
-      engageEnabled: false,
+
+    const res = await service.getOverview(org, 'proj-1');
+
+    // No unanimous zone, so nothing is hoisted and each states its own — a
+    // hoisted default here would misstate one of the two.
+    expect(res.publishing.timezone).toBeUndefined();
+    expect(res.publishing.platforms.x.window).toMatchObject({ timezone: 'Asia/Taipei' });
+    expect(res.publishing.platforms.linkedin.window).toMatchObject({ timezone: 'America/New_York' });
+  });
+
+  it('does not hoist a zone onto a window that has none', async () => {
+    // A window with no zone is UTC, not "unset" — it does not agree with a
+    // sibling that names one, and hoisting would state the wrong zone for it.
+    const { service } = makeService({
+      publishing: {
+        automationEnabled: true,
+        publishingEnabled: true,
+        publishingConfigured: true,
+        enabledPlatforms: ['x', 'reddit'],
+        platformDecisions: { x: true, reddit: true },
+        windows: {
+          x: { windowStart: '09:00', windowEnd: '18:00', timezone: 'Asia/Taipei' },
+          reddit: { windowStart: '07:00', windowEnd: '12:00' },
+        },
+      },
     });
-    expect(res).toEqual({ saved: true, accounts: 2 });
+
+    const res = await service.getOverview(org, 'proj-1');
+
+    expect(res.publishing.timezone).toBeUndefined();
+    expect(res.publishing.platforms.x.window).toMatchObject({ timezone: 'Asia/Taipei' });
+    expect(res.publishing.platforms.reddit.window).not.toHaveProperty('timezone');
+  });
+
+  it('surfaces a platform that has only an admin window and no decision', async () => {
+    // `enabled` absent = the project never decided. The window still has to show,
+    // or the dialog would render its default hours for a platform an admin has
+    // actually restricted.
+    const { service } = makeService({
+      publishing: {
+        automationEnabled: true,
+        publishingEnabled: false,
+        publishingConfigured: false,
+        enabledPlatforms: null,
+        platformDecisions: {},
+        windows: { linkedin: { windowStart: '08:00', windowEnd: '20:00' } },
+      },
+    });
+
+    const res = await service.getOverview(org, 'proj-1');
+
+    expect(res.publishing.platforms.linkedin).toEqual({
+      window: { start: '08:00', end: '20:00' },
+    });
+    expect(res.publishing.platforms.linkedin).not.toHaveProperty('enabled');
+  });
+
+  it('omits reply accounts entirely — Automation never picks an account', async () => {
+    // Everything sends through the extension's own browser session, so the
+    // identity is whoever the user is signed in as. Choosing a specific account
+    // is a per-post edit on a different surface.
+    const { service } = makeService({
+      config: {
+        enabled: true,
+        metadata: { autoReplyMode: 'review', replyPolicies: { x: { autoReplyEnabled: true } } },
+      },
+    });
+
+    const res = await service.getOverview(org, 'proj-1');
+
+    expect(res.replies.platforms.x).toEqual({ autoReplyEnabled: true });
+    expect(res.replies.platforms.x).not.toHaveProperty('accounts');
   });
 });

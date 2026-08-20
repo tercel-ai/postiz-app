@@ -5,9 +5,10 @@ import { OperationPlanService } from '@gitroom/nestjs-libraries/database/prisma/
 import { EngageService } from '@gitroom/nestjs-libraries/engage/engage.service';
 import { EngageRepository } from '@gitroom/nestjs-libraries/engage/engage.repository';
 import {
-  isPublishingActive,
   ProjectPublishingService,
+  type ResolvedProjectPublishing,
 } from '@gitroom/nestjs-libraries/automation/project-publishing.service';
+import { PublishPlatform } from '@gitroom/helpers/extension/post-publish';
 import {
   EngagePlatformPolicy,
   readEngageConfigMetadata,
@@ -62,18 +63,26 @@ export class AutomationService {
    * here).
    */
   async getOverview(org: Organization, projectId: string) {
-    const [{ id: planId }, config, publishing, accounts] = await Promise.all([
+    const [{ id: planId }, config, publishing] = await Promise.all([
       this._operationPlanService.getActivePlanId(org.id, projectId),
       this._engageRepository.getConfigCore(org.id, projectId),
       this._projectPublishing.resolve(org.id, projectId),
-      this._engageService.listReplyAccounts(org, projectId),
     ]);
 
+    // The plan id itself is deliberately NOT returned. The client never names a
+    // plan — the commit route resolves the project's active one server-side —
+    // so handing the id out would only invite a caller to start passing it
+    // somewhere again, which is what let a sibling project's plan be activated
+    // in the first place. What the page actually needs is the rollup.
     const queue = planId
       ? this._summarizeQueue(
           await this._postsService.getPlanPublishingQueue(org.id, planId)
         )
       : EMPTY_QUEUE;
+
+    // Resolved once so the hoisted default and the per-window overrides below
+    // can never disagree about what "the common zone" is.
+    const commonTimezone = resolveCommonTimezone(publishing.windows);
 
     const settings = readEngageConfigMetadata(config);
     const storedPolicies = settings.replyPolicies as Record<
@@ -81,68 +90,59 @@ export class AutomationService {
       Record<string, unknown>
     >;
 
-    const repliesEnabled = settings.autoReplyMode !== 'off';
-
     return {
       projectId,
       // The master switch. Everything below it is only reachable when this is on
       // — the client should render the two feature panels as inert, not as off,
       // when it is not.
       enabled: publishing.automationEnabled,
-      plan: planId ? { id: planId, queue } : null,
+      // Always present, zeroed when the project has no active plan — a client
+      // reading "how many posts are waiting" should not have to unwrap a
+      // nullable object to find out the answer is none.
+      queue,
       publishing: {
-        // `enabledPlatforms: null` = never configured. Reported as `configured:
-        // false` with an empty list rather than as "everything is on", because
-        // the two differ only in intent and the client needs to tell them apart
-        // to render an unconfigured panel differently from an all-off one.
-        configured: publishing.enabledPlatforms !== null,
-        // The feature switch ALONE — deliberately not ANDed with the master.
-        // A client has to be able to show "publishing is on, but Automation is
-        // off overall", and collapsing the two would lose the user's setting the
-        // moment the master goes off.
+        // The feature switch ALONE — deliberately not ANDed with the master, so
+        // a client can show "publishing is on, Automation is off overall"
+        // instead of losing the user's setting the moment the master goes off.
+        // `active` is just `overview.enabled && this`, which the client can do.
         enabled: publishing.publishingEnabled,
-        // Whether `enabled` is an explicit choice or the legacy derived rule.
-        enabledConfigured: publishing.publishingConfigured,
-        // The AND chain, precomputed: master AND feature. What the client should
-        // use to answer "is publishing actually going to run".
-        active: isPublishingActive(publishing),
-        platforms: publishing.enabledPlatforms ?? [],
-        // EFFECTIVE windows — the project's own override already layered onto
-        // the admin-level setting. The page previously echoed back only what it
-        // had stored, which is why an admin-imposed window was invisible there.
-        windows: Object.fromEntries(
-          Object.entries(publishing.windows).map(([platform, window]) => [
-            platform,
-            {
-              start: window!.windowStart,
-              end: window!.windowEnd,
-              ...(window!.timezone ? { timezone: window!.timezone } : {}),
-            },
-          ])
-        ),
+        // The zone every window below is expressed in, unless that window says
+        // otherwise. Hoisted because the project writes ONE zone for all its
+        // platforms (the browser's), so repeating it per platform was the same
+        // string seven times. Absent when the windows genuinely disagree — an
+        // admin can pin a different zone per platform — in which case each
+        // window carries its own and there is no meaningful default to state.
+        ...(commonTimezone !== undefined ? { timezone: commonTimezone } : {}),
+        // ONE entry per platform, carrying both halves of that platform's state.
+        // They used to be a `platforms` array beside a `windows` map, which the
+        // client had to cross-reference — and the array was a lossy projection
+        // of the same information.
+        platforms: buildPublishingPlatforms(publishing, commonTimezone),
       },
       replies: {
-        // The Engage feature's own switch — it also gates SCANNING, which the
-        // Automation switches deliberately leave alone (see saveReplies).
+        // Engage's OWN switch, which also gates scanning and is changeable from
+        // the Engage page. Kept because it independently gates replying: with it
+        // off, nothing is driven no matter what the mode says — so a client that
+        // only knew the mode could not explain why replies are idle.
         enabled: config?.enabled ?? false,
+        // Carries the feature switch AND the review/auto distinction, so a
+        // separate `repliesEnabled` boolean would just be `!== 'off'` restated.
         autoReplyMode: settings.autoReplyMode,
-        // The managed-replies feature switch. Not a separate column: the mode IS
-        // the switch, so there is only one answer to "does this project reply
-        // unattended".
-        repliesEnabled,
-        // The AND chain, precomputed: master AND feature.
-        active: publishing.automationEnabled && repliesEnabled,
-        // Reply-side keys only: the publishing keys sharing this column are
-        // reported under `publishing` above, and returning them twice would
-        // invite a client to write them back through the wrong endpoint.
-        policies: stripPublishingKeys(storedPolicies),
-        accounts: accounts.map((account: any) => ({
-          id: account.id,
-          name: account.name,
-          picture: account.picture,
-          providerIdentifier: account.providerIdentifier,
-          engageEnabled: account.engageEnabled,
-        })),
+        // ONE entry per platform, same shape rationale as publishing above.
+        //
+        // Connected reply ACCOUNTS are deliberately absent, because Automation
+        // does not pick an account at all: it sends through the extension's own
+        // browser session, so the identity is whoever the user is already
+        // signed in as. Choosing a specific account is a per-post edit, on a
+        // different surface.
+        //
+        // Two smaller confirmations of the same conclusion:
+        // `IntegrationProject.engageEnabled` is never read by any gate (the
+        // reply driver does not filter on it, and pickXReplyIntegration matches
+        // by handle and ignores it), and this page had no per-account control to
+        // set it with — so listing accounts here only invited a managed-reply
+        // save to write an Engage-owned flag on every account at once.
+        platforms: stripPublishingKeys(storedPolicies),
       },
     };
   }
@@ -254,9 +254,15 @@ export class AutomationService {
   }
 
   /**
-   * Save the managed-reply half: config flags, per-platform reply policy, and
-   * per-account reply authorization — in one call instead of one request per
-   * account plus a separate config write.
+   * Save the managed-reply half: the config flags and the per-platform reply
+   * policy.
+   *
+   * Per-ACCOUNT authorization is not part of this. Automation sends through the
+   * extension's own browser session and never picks an account, so there is
+   * nothing to authorize here; choosing a specific account is a per-post edit on
+   * a different surface. Writing `IntegrationProject.engageEnabled` from here
+   * meant a managed-reply save silently reached into an Engage setting that no
+   * gate even reads.
    */
   async saveReplies(
     org: Organization,
@@ -266,8 +272,7 @@ export class AutomationService {
     if (
       dto.enabled === undefined &&
       dto.autoReplyMode === undefined &&
-      dto.policies === undefined &&
-      !dto.accounts?.length
+      dto.policies === undefined
     ) {
       throw new BadRequestException('Nothing to update');
     }
@@ -306,21 +311,7 @@ export class AutomationService {
       } as any);
     }
 
-    // Sequential, not Promise.all: these are upserts on the same
-    // (integration, project) table and a batch is small. Reporting one
-    // aggregate outcome beats N independent promises whose partial failure the
-    // caller could not act on.
-    const accounts: { integrationId: string; engageEnabled: boolean }[] = [];
-    for (const account of dto.accounts ?? []) {
-      await this._engageService.upsertReplyAccountSettings(
-        org,
-        account.integrationId,
-        { projectId, engageEnabled: account.engageEnabled }
-      );
-      accounts.push(account);
-    }
-
-    return { saved: true, accounts: accounts.length };
+    return { saved: true as const };
   }
 
   /**
@@ -352,6 +343,75 @@ export class AutomationService {
       platforms: [...platforms],
     };
   }
+}
+
+/**
+ * One entry per platform, merging the switch decision with the effective window.
+ *
+ * A platform appears when the project has decided about it OR an effective
+ * window resolves for it (which includes admin-configured windows the project
+ * never touched — those must stay visible, or the UI would show its default
+ * hours for a platform the admin has actually restricted).
+ *
+ * `enabled` is ABSENT when the project has never decided for that platform,
+ * which is what replaces the old project-level `configured` flag: a client that
+ * finds no `enabled` anywhere knows the panel has never been configured.
+ */
+/**
+ * The one timezone every effective window shares, or `undefined` when they
+ * differ (or when none carries a zone at all). Only a unanimous zone can be
+ * stated as a default — anything else would make some window read as being in a
+ * zone it is not enforced in, which is precisely the class of bug that made the
+ * publishing dialog show the wrong hours.
+ */
+function resolveCommonTimezone(
+  windows: ResolvedProjectPublishing['windows']
+): string | undefined {
+  const entries = Object.values(windows).filter(Boolean);
+  if (!entries.length) return undefined;
+  // A window with NO zone is not "unset", it is UTC — so it does not agree with
+  // a sibling that names one, and hoisting that sibling's zone would state the
+  // wrong zone for it. Only a set that is unanimous AND fully explicit can be
+  // stated as a default.
+  const zones = new Set(entries.map((window) => window!.timezone ?? ''));
+  if (zones.size !== 1) return undefined;
+  const [only] = [...zones];
+  return only || undefined;
+}
+
+function buildPublishingPlatforms(
+  publishing: ResolvedProjectPublishing,
+  commonTimezone: string | undefined
+) {
+  const platforms = new Set<string>([
+    ...Object.keys(publishing.platformDecisions),
+    ...Object.keys(publishing.windows),
+  ]);
+  const out: Record<
+    string,
+    { enabled?: boolean; window?: { start: string; end: string; timezone?: string } }
+  > = {};
+  for (const platform of platforms) {
+    const decision = publishing.platformDecisions[platform];
+    const window = publishing.windows[platform as PublishPlatform];
+    out[platform] = {
+      ...(decision !== undefined ? { enabled: decision } : {}),
+      ...(window
+        ? {
+            window: {
+              start: window.windowStart,
+              end: window.windowEnd,
+              // Stated only when it differs from the hoisted default, so the
+              // common case carries the zone once instead of once per platform.
+              ...(window.timezone && window.timezone !== commonTimezone
+                ? { timezone: window.timezone }
+                : {}),
+            },
+          }
+        : {}),
+    };
+  }
+  return out;
 }
 
 const EMPTY_QUEUE = {

@@ -260,6 +260,7 @@ describe('ProjectPublishingService.resolve', () => {
       publishingConfigured: false,
       enabledPlatforms: ['x'],
       windows: { x: { windowStart: '09:00', windowEnd: '17:00' } },
+      platformDecisions: { x: true, reddit: false },
     });
   });
 
@@ -276,6 +277,7 @@ describe('ProjectPublishingService.resolve', () => {
       publishingConfigured: false,
       enabledPlatforms: null,
       windows: {},
+      platformDecisions: {},
     });
   });
 });
