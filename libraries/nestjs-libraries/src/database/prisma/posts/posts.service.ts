@@ -2222,22 +2222,9 @@ export class PostsService {
     return { scheduled, failed };
   }
 
-  /**
-   * Still-DRAFT, still-in-the-future roots of one plan — what Automation shows
-   * as "waiting to be published". Manual posts are excluded structurally
-   * (operationPlanId equality), so the number never counts work the user
-   * created by hand.
-   */
-  getPlanPublishingQueue(
-    orgId: string,
-    operationPlanId: string,
-    notBefore = new Date()
-  ) {
-    return this._postRepository.getPlanPublishingQueue(
-      orgId,
-      operationPlanId,
-      notBefore
-    );
+  /** When this project last actually published something; null if never. */
+  getLastPublishedAt(orgId: string, projectId: string) {
+    return this._postRepository.getLastPublishedAt(orgId, projectId);
   }
 
   /**

@@ -8,7 +8,7 @@ function makeService(over: {
   activePlanId?: string | null;
   config?: any;
   publishing?: any;
-  queue?: any[];
+  lastPublishedAt?: Date | null;
   count?: any;
 } = {}) {
   const getActivePlanId = vi
@@ -26,7 +26,7 @@ function makeService(over: {
       windows: {},
     }
   );
-  const getPlanPublishingQueue = vi.fn().mockResolvedValue(over.queue ?? []);
+  const getLastPublishedAt = vi.fn().mockResolvedValue(over.lastPublishedAt ?? null);
   const schedulePlanPosts = vi
     .fn()
     .mockResolvedValue({ scheduled: [], failed: [], total: 0, alreadyScheduled: 0 });
@@ -35,7 +35,7 @@ function makeService(over: {
   const upsertReplyAccountSettings = vi.fn().mockResolvedValue({});
 
   const service = new AutomationService(
-    { getPlanPublishingQueue, schedulePlanPosts } as any,
+    { getLastPublishedAt, schedulePlanPosts } as any,
     { getActivePlanId } as any,
     { countOpportunities, saveConfig, upsertReplyAccountSettings } as any,
     { getConfigCore, saveConfig: saveConfigRaw } as any,
@@ -48,7 +48,7 @@ function makeService(over: {
     getConfigCore,
     saveConfigRaw,
     resolve,
-    getPlanPublishingQueue,
+    getLastPublishedAt,
     schedulePlanPosts,
     countOpportunities,
     saveConfig,
@@ -59,47 +59,7 @@ function makeService(over: {
 describe('AutomationService.getOverview', () => {
   beforeEach(() => vi.restoreAllMocks());
 
-  it('reports the queue rollup from the plan, not from every post', async () => {
-    const { service, getPlanPublishingQueue } = makeService({
-      queue: [
-        { id: 'p1', providerIdentifier: 'x', content: '<p>hello</p>' },
-        { id: 'p2', providerIdentifier: 'reddit', content: 'body' },
-        // Empty once the tags come off — needs a human before it can go out.
-        { id: 'p3', providerIdentifier: 'x', content: '<p></p>' },
-        // No platform resolved — same.
-        { id: 'p4', providerIdentifier: null, content: 'body' },
-      ],
-    });
 
-    const res = await service.getOverview(org, 'proj-1');
-
-    expect(getPlanPublishingQueue).toHaveBeenCalledWith('org-1', 'plan-1');
-    // Flat, and with no plan id: the client never names a plan, so returning one
-    // would only invite a caller to start passing it somewhere again.
-    expect(res).not.toHaveProperty('plan');
-    expect(res.queue).toEqual({
-      totalPosts: 4,
-      readyPosts: 2,
-      attentionPosts: 2,
-      platforms: ['x', 'reddit'],
-    });
-  });
-
-  it('reports a zeroed queue without touching the plan when the project has none', async () => {
-    const { service, getPlanPublishingQueue } = makeService({ activePlanId: null });
-
-    const res = await service.getOverview(org, 'proj-1');
-
-    // Zeroed rather than null, so a client reading "how many posts are waiting"
-    // never has to unwrap an object to find out the answer is none.
-    expect(res.queue).toEqual({
-      totalPosts: 0,
-      readyPosts: 0,
-      attentionPosts: 0,
-      platforms: [],
-    });
-    expect(getPlanPublishingQueue).not.toHaveBeenCalled();
-  });
 
   it('distinguishes "never configured" from "everything turned off"', async () => {
     const unconfigured = await makeService({
@@ -599,5 +559,41 @@ describe('AutomationService.getOverview — one entry per platform', () => {
 
     expect(res.replies.platforms.x).toEqual({ autoReplyEnabled: true });
     expect(res.replies.platforms.x).not.toHaveProperty('accounts');
+  });
+});
+
+// The status banner reports when the project last actually published. It
+// previously showed a hardcoded "Just now" beside a hardcoded "In 24 min"
+// countdown — neither measured anything, so both read as facts while being
+// decoration.
+describe('AutomationService.getOverview — lastPublishedAt', () => {
+  beforeEach(() => vi.restoreAllMocks());
+
+  it('reports the last publish time as an ISO string', async () => {
+    const when = new Date('2026-08-19T07:30:00.000Z');
+    const { service, getLastPublishedAt } = makeService({ lastPublishedAt: when });
+
+    const res = await service.getOverview(org, 'proj-1');
+
+    expect(getLastPublishedAt).toHaveBeenCalledWith('org-1', 'proj-1');
+    expect(res.lastPublishedAt).toBe('2026-08-19T07:30:00.000Z');
+  });
+
+  it('reports null for a project that has never published', async () => {
+    // Distinct from "0 minutes ago" — the banner has to be able to say "None
+    // yet" rather than implying something just went out.
+    const { service } = makeService({ lastPublishedAt: null });
+
+    expect((await service.getOverview(org, 'proj-1')).lastPublishedAt).toBeNull();
+  });
+
+  it('asks for it project-wide, not per plan', async () => {
+    // Engage replies are Post rows with no operationPlanId; scoping the lookup
+    // to a plan would make a project that only replies look inactive.
+    const { service, getLastPublishedAt } = makeService();
+
+    await service.getOverview(org, 'proj-1');
+
+    expect(getLastPublishedAt).toHaveBeenCalledWith('org-1', 'proj-1');
   });
 });

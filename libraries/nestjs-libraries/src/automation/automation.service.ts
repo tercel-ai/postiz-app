@@ -63,22 +63,11 @@ export class AutomationService {
    * here).
    */
   async getOverview(org: Organization, projectId: string) {
-    const [{ id: planId }, config, publishing] = await Promise.all([
-      this._operationPlanService.getActivePlanId(org.id, projectId),
+    const [config, publishing, lastPublishedAt] = await Promise.all([
       this._engageRepository.getConfigCore(org.id, projectId),
       this._projectPublishing.resolve(org.id, projectId),
+      this._postsService.getLastPublishedAt(org.id, projectId),
     ]);
-
-    // The plan id itself is deliberately NOT returned. The client never names a
-    // plan — the commit route resolves the project's active one server-side —
-    // so handing the id out would only invite a caller to start passing it
-    // somewhere again, which is what let a sibling project's plan be activated
-    // in the first place. What the page actually needs is the rollup.
-    const queue = planId
-      ? this._summarizeQueue(
-          await this._postsService.getPlanPublishingQueue(org.id, planId)
-        )
-      : EMPTY_QUEUE;
 
     // Resolved once so the hoisted default and the per-window overrides below
     // can never disagree about what "the common zone" is.
@@ -96,10 +85,12 @@ export class AutomationService {
       // — the client should render the two feature panels as inert, not as off,
       // when it is not.
       enabled: publishing.automationEnabled,
-      // Always present, zeroed when the project has no active plan — a client
-      // reading "how many posts are waiting" should not have to unwrap a
-      // nullable object to find out the answer is none.
-      queue,
+      // When this project last actually published something (ISO), or null if it
+      // never has. A real timestamp rather than a "checked N minutes ago" —
+      // there is no polling clock to report, and the page previously showed a
+      // hardcoded "Just now" beside a hardcoded "next action" countdown, neither
+      // of which was measuring anything.
+      lastPublishedAt: lastPublishedAt ? lastPublishedAt.toISOString() : null,
       publishing: {
         // The feature switch ALONE — deliberately not ANDed with the master, so
         // a client can show "publishing is on, Automation is off overall"
@@ -314,35 +305,6 @@ export class AutomationService {
     return { saved: true as const };
   }
 
-  /**
-   * Four numbers the Automation page shows about the send queue. "Ready" means
-   * the post has a body and a resolved platform; anything else needs a human
-   * before it can go out.
-   */
-  private _summarizeQueue(
-    posts: {
-      id: string;
-      providerIdentifier: string | null;
-      content: string | null;
-    }[]
-  ) {
-    const platforms = new Set<string>();
-    let readyPosts = 0;
-    for (const post of posts) {
-      const platform = post.providerIdentifier?.toLowerCase();
-      if (platform) platforms.add(platform);
-      // Strip tags before testing for emptiness: a materialized post whose body
-      // is `<p></p>` is empty to a reader and must not count as ready.
-      const body = (post.content ?? '').replace(/<[^>]*>/g, '').trim();
-      if (body && platform) readyPosts++;
-    }
-    return {
-      totalPosts: posts.length,
-      readyPosts,
-      attentionPosts: posts.length - readyPosts,
-      platforms: [...platforms],
-    };
-  }
 }
 
 /**
@@ -413,13 +375,6 @@ function buildPublishingPlatforms(
   }
   return out;
 }
-
-const EMPTY_QUEUE = {
-  totalPosts: 0,
-  readyPosts: 0,
-  attentionPosts: 0,
-  platforms: [] as string[],
-};
 
 function stripPublishingKeysFromPolicy(
   policy: Record<string, unknown>

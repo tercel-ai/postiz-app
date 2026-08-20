@@ -168,13 +168,14 @@ the plan detail could be fetched — and two of those five turned out not to bel
 on this page at all (the reply-account list and the new-conversation count are
 Engage's, see [What Automation does NOT touch](#what-automation-does-not-touch)).
 
-Deliberately **not** built out of the endpoints it replaced:
+Deliberately **not** built out of the endpoints it replaced: the engage side
+reads the bare config row rather than the fully decorated `GET /engage/config`,
+which resolves entitlements plus a scan cursor per keyword, channel and tracked
+account — none of it shown here.
 
-- the plan side reads a **rollup** rather than every post of the plan (the page
-  shows four numbers), and
-- the engage side reads the bare config row rather than the fully decorated
-  `GET /engage/config`, which resolves entitlements plus a scan cursor per
-  keyword, channel and tracked account — none of it shown here.
+It says nothing about the operation plan either — not its id, not a rollup of its
+posts. The client never names a plan (the commit route resolves the project's
+active one server-side), and the page has no number to show about one.
 
 It is also strictly read-only: unlike `GET /engage/config`, loading this page
 does **not** create an `EngageConfig` row for a project that has never used Engage.
@@ -188,21 +189,16 @@ does **not** create an `EngageConfig` row for a project that has never used Enga
   // The Automation master switch.
   "enabled": true,
 
-  // The active plan's send-queue rollup; zeroed when the project has no active
-  // plan (READY, startsAt <= now <= endsAt). Flat and always present — a client
-  // asking "how many posts are waiting" should not have to unwrap a nullable
-  // object to learn the answer is none.
+  // ISO timestamp of the last post this project actually published, or null if
+  // it never has. Covers scheduled posts AND engage replies — both are Post
+  // rows, and both are "something that went out"; scoping it to an operation
+  // plan would make a project that only replies look like it had never acted.
   //
-  // The plan's ID is deliberately NOT returned. The client never names a plan
-  // anywhere — the commit route resolves the project's active one server-side —
-  // so handing the id out would only invite a caller to start passing it again,
-  // which is exactly what let a sibling project's plan be activated before.
-  "queue": {
-    "totalPosts": 12,      // still-DRAFT roots whose publish time is still ahead
-    "readyPosts": 10,      // have a body AND a resolved platform
-    "attentionPosts": 2,   // totalPosts - readyPosts
-    "platforms": ["x", "reddit"]
-  },
+  // A real timestamp rather than a "checked N minutes ago": there is no polling
+  // clock to report. The status banner used to show a hardcoded "Just now"
+  // beside a hardcoded "In 24 min" countdown, neither of which measured
+  // anything.
+  "lastPublishedAt": "2026-08-19T07:30:00.000Z",
 
   "publishing": {
     // The feature switch, on its own. `active` is NOT sent: it is just

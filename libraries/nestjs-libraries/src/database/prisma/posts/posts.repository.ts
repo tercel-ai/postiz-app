@@ -2582,39 +2582,30 @@ export class PostsRepository {
    * indistinguishable from an unknown plan (nothing there).
    */
   /**
-   * The Automation page's publishing-queue rollup for one plan: still-DRAFT
-   * roots whose publish time has not already passed.
+   * When this project last actually published something — the newest PUBLISHED
+   * post's publish time, or null if it never has.
    *
-   * Separate from getSchedulablePostRootsByPlan (which the commit path uses)
-   * because this one needs `content` to tell a ready post from one still
-   * missing its body, and the commit path must not pay for every post's text.
+   * NOT restricted to an operation plan, unlike the queue rollup below. Engage
+   * replies are Post rows carrying no `operationPlanId`, and a reply that went
+   * out is just as much "something happened" as a scheduled post; filtering by
+   * plan would make a project that only replies look like it had never acted.
    *
-   * Roots only (parentPostId null) so a thread counts once, and
-   * `operationPlanId` is matched by equality — a hand-created post carries
-   * null there and is therefore never counted as Automation's work.
+   * Roots only, matching how the rollup counts: a thread that went out is one
+   * action, not one per segment.
    */
-  getPlanPublishingQueue(
-    organizationId: string,
-    operationPlanId: string,
-    notBefore: Date
-  ) {
-    return this._post.model.post.findMany({
+  async getLastPublishedAt(organizationId: string, projectId: string) {
+    const post = await this._post.model.post.findFirst({
       where: {
         organizationId,
-        operationPlanId,
+        projectId,
+        state: State.PUBLISHED,
         deletedAt: null,
         parentPostId: null,
-        state: 'DRAFT',
-        publishDate: { gte: notBefore },
       },
-      select: {
-        id: true,
-        providerIdentifier: true,
-        publishDate: true,
-        content: true,
-      },
-      orderBy: { publishDate: 'asc' },
+      select: { publishDate: true },
+      orderBy: { publishDate: 'desc' },
     });
+    return post?.publishDate ?? null;
   }
 
   getSchedulablePostRootsByPlan(organizationId: string, operationPlanId: string) {
