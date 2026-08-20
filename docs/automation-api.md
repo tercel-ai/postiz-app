@@ -34,14 +34,25 @@ relationship between the two.
 
 Three levels, ANDed. Nothing runs unless every level above it is on.
 
+Where each level is **stored** (all inside one `EngageConfig.metadata` JSON
+column, read through `engage-config-metadata.ts` — see
+[Where these settings live](#where-these-settings-live)):
+
 | Level | Scheduled publishing | Managed replies |
 | --- | --- | --- |
 | **Master** | `metadata.automationEnabled` | same key |
 | **Feature** | `metadata.publishingEnabled` | `metadata.autoReplyMode != 'off'` |
 | **Platform** | `metadata.replyPolicies[p].publishingEnabled` | `metadata.replyPolicies[p].autoReplyEnabled` |
 
-All of it lives in one `EngageConfig.metadata` JSON column, read through
-`engage-config-metadata.ts` — see [Where these settings live](#where-these-settings-live).
+Where the same levels appear on the **API**, which is deliberately not a mirror
+of storage — the two per-platform maps are split by feature so neither endpoint
+can write the other's keys:
+
+| Level | Scheduled publishing | Managed replies |
+| --- | --- | --- |
+| **Master** | `enabled` | same field |
+| **Feature** | `publishing.enabled` | `replies.autoReplyMode != 'off'` |
+| **Platform** | `publishing.platforms[p].enabled` | `replies.platforms[p].autoReplyEnabled` |
 
 **Every switch defaults to OFF when absent.** Automation posts and replies with
 the user's real accounts, so a missing — or malformed — value must never read as
@@ -73,8 +84,9 @@ pacing lookup is spent on it). Nothing is un-queued and nothing is rolled back t
 **A switch suspends, it does not reset.** Turning the master off leaves both
 feature switches and every platform selection exactly as they were, so turning it
 back on restores the configuration rather than an empty form. Same for the
-publishing feature switch: it is a column of its own, so switching it off keeps
-the platform list instead of clearing it.
+publishing feature switch: it is stored independently of the platform list, so
+switching it off keeps the selection instead of clearing it — which is why it
+cannot be "is any platform on".
 
 **Scanning is deliberately not gated.** `EngageConfig.enabled` remains the Engage
 feature's own switch and still governs discovery. Turning Automation off stops
@@ -82,19 +94,8 @@ replying, not finding — so conversations keep accumulating and are there to ac
 on the moment it comes back. Gate scanning too by adding `automationEnabled` to
 the scan queries, if that is ever wanted.
 
-### Reading the switches from a client
-
-`GET /automation` reports each feature's **own** switch (`enabled`) separately
-from the AND with the master (`active`):
-
-- render the switch controls from `enabled` — rendering them from `active` makes
-  both snap to off the moment the master goes off, which reads as "your settings
-  were cleared" rather than "suspended";
-- render status, counts, and "will this run" from `active`.
-
-Whether the feature switch is an explicit choice or derived from the platform
-selection is not surfaced separately — `publishing.platforms` already carries the
-per-platform decisions it would have been derived from.
+`GET /automation` transmits only the switches themselves, never the AND of them —
+see [What the client derives rather than receives](#what-the-client-derives-rather-than-receives).
 
 ## Where these settings live
 
@@ -143,15 +144,31 @@ structural, not a filter applied afterwards, and is pinned by
 drafts, and `deletedAt: null` is part of the same query — so an old plan's posts
 never resurface.
 
+**Reply accounts.** Automation never picks an account: it sends through the
+extension's own browser session, so the identity is whoever the user is already
+signed in as. Choosing a specific account is a per-post edit, on a different
+surface. The endpoints therefore neither return the connected accounts nor accept
+per-account authorization — writing `IntegrationProject.engageEnabled` from here
+meant a managed-reply save reached into an Engage setting that no gate anywhere
+reads (the reply driver does not filter on it, and `pickXReplyIntegration`
+matches by handle and ignores it).
+
+**The new-conversation count.** It counts opportunities discovered by scanning,
+which the Automation switches do not govern, so it belongs on the Engage surface
+next to the conversations themselves — not on a page about switches and
+schedules.
+
 ---
 
 ## GET /projects/:projectId/automation
 
-Everything the Automation page renders, in one call. Replaces five separate
-requests (two of them serialized, because the plan id had to come back before the
-plan detail could be fetched).
+Everything the Automation page renders, in one call. It replaced five separate
+requests — two of them serialized, because the plan id had to come back before
+the plan detail could be fetched — and two of those five turned out not to belong
+on this page at all (the reply-account list and the new-conversation count are
+Engage's, see [What Automation does NOT touch](#what-automation-does-not-touch)).
 
-Deliberately **not** built out of the endpoints it replaces:
+Deliberately **not** built out of the endpoints it replaced:
 
 - the plan side reads a **rollup** rather than every post of the plan (the page
   shows four numbers), and
@@ -241,11 +258,6 @@ does **not** create an `EngageConfig` row for a project that has never used Enga
   }
 }
 ```
-
-The new-conversation count is deliberately **not** here. It is an Engage metric —
-it counts opportunities discovered by scanning, which the Automation switches do
-not govern — and belongs on the Engage surface next to the conversations
-themselves, not on a page about switches and schedules.
 
 ### Telling "never configured" from "everything off"
 

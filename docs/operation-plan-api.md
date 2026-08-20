@@ -314,8 +314,10 @@ generated, or between plans), never a `404`. Follow up with
 
 > The Automation page does not call this endpoint directly — it reads
 > [`GET /projects/:projectId/automation`](./automation-api.md#get-projectsprojectidautomation),
-> which returns the active plan id together with a send-queue rollup and the
-> project's publishing/reply settings in one project-scoped call.
+> which returns the active plan's send-queue rollup and the project's
+> publishing/reply settings in one project-scoped call. Note it does NOT return
+> the plan's id: the client never names a plan anywhere, since the commit route
+> resolves the project's active one server-side.
 
 ---
 
