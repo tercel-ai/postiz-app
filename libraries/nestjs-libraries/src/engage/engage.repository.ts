@@ -4236,11 +4236,14 @@ export class EngageRepository {
     const count = (w: Prisma.EngageSentReplyWhereInput) =>
       this._sentReply.model.engageSentReply.count({ where: w });
 
-    const [total, x, reddit, settled, awaiting, drafts, link, expired] =
+    const [total, platformCounts, settled, awaiting, drafts, link, expired] =
       await Promise.all([
         count(where(dto.status, dto.platform)),
-        count(where(dto.status, 'x')),
-        count(where(dto.status, 'reddit')),
+        Promise.all(
+          OPPORTUNITY_COUNT_PLATFORMS.map((platform) =>
+            count(where(dto.status, platform))
+          )
+        ),
         count(where('settled', dto.platform)),
         count(where('awaiting', dto.platform)),
         count(where('awaiting-draft', dto.platform)),
@@ -4250,7 +4253,9 @@ export class EngageRepository {
 
     return {
       total,
-      byPlatform: { x, reddit },
+      byPlatform: Object.fromEntries(
+        OPPORTUNITY_COUNT_PLATFORMS.map((p, i) => [p, platformCounts[i]])
+      ) as Record<(typeof OPPORTUNITY_COUNT_PLATFORMS)[number], number>,
       rollups: { settled, awaiting },
       awaitingBreakdown: { drafts, link, expired },
     };

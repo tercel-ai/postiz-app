@@ -2000,6 +2000,11 @@ describe('EngageRepository — two-table reads', () => {
         .mockResolvedValueOnce(340) // total
         .mockResolvedValueOnce(210) // x
         .mockResolvedValueOnce(130) // reddit
+        .mockResolvedValueOnce(0) // linkedin
+        .mockResolvedValueOnce(0) // medium
+        .mockResolvedValueOnce(0) // devto
+        .mockResolvedValueOnce(0) // hackernews
+        .mockResolvedValueOnce(0) // quora
         .mockResolvedValueOnce(280) // settled
         .mockResolvedValueOnce(60) // awaiting
         .mockResolvedValueOnce(25) // awaiting-draft
@@ -2010,15 +2015,23 @@ describe('EngageRepository — two-table reads', () => {
 
       expect(res).toEqual({
         total: 340,
-        byPlatform: { x: 210, reddit: 130 },
+        byPlatform: {
+          x: 210,
+          reddit: 130,
+          linkedin: 0,
+          medium: 0,
+          devto: 0,
+          hackernews: 0,
+          quora: 0,
+        },
         rollups: { settled: 280, awaiting: 60 },
         awaitingBreakdown: { drafts: 25, link: 30, expired: 5 },
       });
-      expect(sentCount).toHaveBeenCalledTimes(8);
+      expect(sentCount).toHaveBeenCalledTimes(13);
 
       // The three sub-counts key off the same status filters as getSentStats'
       // awaiting-draft/-link/-expired branches.
-      const draftWhere = sentCount.mock.calls[5][0].where;
+      const draftWhere = sentCount.mock.calls[10][0].where;
       expect(draftWhere.post).toMatchObject({
         source: 'engage',
         state: 'DRAFT',
@@ -2033,13 +2046,13 @@ describe('EngageRepository — two-table reads', () => {
         },
       });
 
-      const linkWhere = sentCount.mock.calls[6][0].where;
+      const linkWhere = sentCount.mock.calls[11][0].where;
       expect(linkWhere.post).toMatchObject({
         source: 'engage',
         OR: [{ state: 'PUBLISHED', releaseURL: null }, { state: 'ERROR' }],
       });
 
-      const expiredWhere = sentCount.mock.calls[7][0].where;
+      const expiredWhere = sentCount.mock.calls[12][0].where;
       expect(expiredWhere.post).toMatchObject({
         source: 'engage',
         state: 'DRAFT',
@@ -2069,7 +2082,7 @@ describe('EngageRepository — two-table reads', () => {
       expect(redditWhere.opportunity).toMatchObject({ platform: 'reddit' });
       expect(redditWhere.post.OR).toBeDefined();
       // rollups drop status (settled pins its own) but keep platform=x.
-      const settledWhere = sentCount.mock.calls[3][0].where;
+      const settledWhere = sentCount.mock.calls[8][0].where;
       expect(settledWhere.opportunity).toMatchObject({ platform: 'x' });
       expect(settledWhere.post.OR).toEqual([
         { state: 'PUBLISHED', releaseURL: { not: null } },
@@ -2101,7 +2114,7 @@ describe('EngageRepository — two-table reads', () => {
         projectId: 'proj-1',
       });
 
-      expect(sentCount).toHaveBeenCalledTimes(8);
+      expect(sentCount).toHaveBeenCalledTimes(13);
       // total where: no status → not-DRAFT branch is skipped (includeDrafts) and
       // no platform filter on the linked opportunity.
       const totalWhere = sentCount.mock.calls[0][0].where;
