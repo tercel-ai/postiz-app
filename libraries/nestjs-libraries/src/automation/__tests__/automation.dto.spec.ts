@@ -105,8 +105,7 @@ describe('SaveAutomationRepliesDto', () => {
   it('accepts the body the Automation page actually sends', () => {
     expect(
       check(SaveAutomationRepliesDto, {
-        enabled: true,
-        autoReplyMode: 'review',
+        autoReplyEnabled: true,
         policies: {
           x: {
             autoReplyEnabled: true,
@@ -120,14 +119,22 @@ describe('SaveAutomationRepliesDto', () => {
     ).toEqual([]);
   });
 
-  it('accepts a flags-only body — a client may flip one switch', () => {
-    expect(check(SaveAutomationRepliesDto, { enabled: false, autoReplyMode: 'off' })).toEqual([]);
+  it('accepts a switch-only body — the page has exactly one reply control', () => {
+    expect(check(SaveAutomationRepliesDto, { autoReplyEnabled: false })).toEqual([]);
+    expect(check(SaveAutomationRepliesDto, { autoReplyEnabled: true })).toEqual([]);
   });
 
-  it('rejects an unknown autoReplyMode', () => {
-    expect(check(SaveAutomationRepliesDto, { autoReplyMode: 'sometimes' })).toEqual([
-      'autoReplyMode',
-    ]);
+  it('ignores the switches this page does not own', () => {
+    // Engage's scan switch and the review/auto mode are both set elsewhere —
+    // scanning is turned on implicitly with replying, and the mode is resumed.
+    // A body naming either is an unrecognised property, not a validation error.
+    expect(
+      check(SaveAutomationRepliesDto, {
+        autoReplyEnabled: true,
+        scanEnabled: false,
+        autoReplyMode: 'auto',
+      })
+    ).toEqual([]);
   });
 
   it('ignores a per-account payload — the field no longer exists', () => {
@@ -135,7 +142,10 @@ describe('SaveAutomationRepliesDto', () => {
     // extension's own browser session), so a body carrying one is simply an
     // unrecognised property, not a validation error.
     expect(
-      check(SaveAutomationRepliesDto, { enabled: true, accounts: [{ integrationId: 'i1' }] })
+      check(SaveAutomationRepliesDto, {
+        autoReplyEnabled: true,
+        accounts: [{ integrationId: 'i1' }],
+      })
     ).toEqual([]);
   });
 });

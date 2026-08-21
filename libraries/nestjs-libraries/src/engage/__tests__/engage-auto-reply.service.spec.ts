@@ -1,14 +1,16 @@
 import 'reflect-metadata';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   EngageAutoReplyService,
   DEFAULT_REPLY_PACING,
   withinLocalWindow,
 } from '../engage-auto-reply.service';
 
-// The unattended reply DRIVER. The behavioural contract that matters most: it
-// can never hand out more than the send-time gate would let through (both read
-// EngageService.getReplyBudget), and it must never invent a target for a project
+// The unattended reply DRIVER. By default (ENGAGE_REPLY_BUDGET_GATE_ENABLED
+// unset) it is paced by interval/active-hours alone and does not require an
+// operation plan. With the flag set to 'true' it additionally never hands out
+// more than the send-time gate would let through (both read
+// EngageService.getReplyBudget), and never invents a target for a project
 // whose plan does not set one.
 
 const org = { id: 'org-1' } as any;
@@ -89,10 +91,13 @@ const budgetWith = (over: any = {}) => ({
 
 describe('EngageAutoReplyService.getDueReplies', () => {
   beforeEach(() => vi.clearAllMocks());
+  afterEach(() => vi.unstubAllEnvs());
 
   it('drafts one reply and parks it as a DRAFT row', async () => {
     const { svc, engage } = makeService({
-      configs: [enabledConfig],
+      // Single platform: the per-platform maxPerPoll cap is exercised separately
+      // below, this test is only about the draft/persist sequence.
+      configs: [{ ...enabledConfig, replyPolicies: { reddit: { autoReplyEnabled: true } } }],
       budget: budgetWith(),
       candidates: [{ opportunityId: 'opp-1', score: 90, matchedKeywords: ['geo'] }],
     });
@@ -150,12 +155,28 @@ describe('EngageAutoReplyService.getDueReplies', () => {
     ).toBe(false);
   });
 
-  it('hands out NOTHING when the project has no active plan', async () => {
+  it('drafts anyway with no active plan when the budget gate is OFF (default)', async () => {
+    // ENGAGE_REPLY_BUDGET_GATE_ENABLED unset — the driver must not require an
+    // operation plan to exist; interval/active-hours pacing alone governs it.
+    const { svc, repo, engage } = makeService({
+      configs: [{ ...enabledConfig, replyPolicies: { reddit: { autoReplyEnabled: true } } }],
+      budget: { cap: null, sentToday: 0, remaining: null, keywords: [] },
+      candidates: [{ opportunityId: 'opp-1', score: 90, matchedKeywords: [] }],
+    });
+
+    expect(await svc.getDueReplies(org, new Date('2026-08-18T12:00:00Z'))).toHaveLength(1);
+    expect(repo.pickAutoReplyCandidates).toHaveBeenCalled();
+    expect(engage.saveDraft).toHaveBeenCalled();
+  });
+
+  it('hands out NOTHING when the project has no active plan and the budget gate is ON', async () => {
+    vi.stubEnv('ENGAGE_REPLY_BUDGET_GATE_ENABLED', 'true');
     const { svc, repo, engage } = makeService({
       configs: [enabledConfig],
       // cap: null is what getReplyBudget returns with no plan. The send-time gate
       // reads it as "uncapped, do not block"; the driver must read the SAME value
-      // as "nothing to drive" and never invent a target.
+      // as "nothing to drive" and never invent a target — but only when the gate
+      // is explicitly enabled.
       budget: { cap: null, sentToday: 0, remaining: null, keywords: [] },
       candidates: [{ opportunityId: 'opp-1', score: 90, matchedKeywords: [] }],
     });
@@ -165,7 +186,8 @@ describe('EngageAutoReplyService.getDueReplies', () => {
     expect(engage.saveDraft).not.toHaveBeenCalled();
   });
 
-  it('hands out nothing once the day\'s budget is spent', async () => {
+  it('hands out nothing once the day\'s budget is spent and the budget gate is ON', async () => {
+    vi.stubEnv('ENGAGE_REPLY_BUDGET_GATE_ENABLED', 'true');
     const { svc, repo } = makeService({
       configs: [enabledConfig],
       budget: budgetWith({ cap: 5, sentToday: 5, remaining: 0 }),
@@ -242,11 +264,11 @@ describe('EngageAutoReplyService.getDueReplies', () => {
     expect(repo.getAutoReplyConfigs).not.toHaveBeenCalled();
   });
 
-  it('never exceeds maxPerPoll across projects', async () => {
+  it('never exceeds maxPerPoll for ONE platform, even across projects', async () => {
     const { svc } = makeService({
       configs: [
-        { ...enabledConfig, id: 'c1', projectId: 'p1' },
-        { ...enabledConfig, id: 'c2', projectId: 'p2' },
+        { ...enabledConfig, id: 'c1', projectId: 'p1', replyPolicies: { reddit: { autoReplyEnabled: true } } },
+        { ...enabledConfig, id: 'c2', projectId: 'p2', replyPolicies: { reddit: { autoReplyEnabled: true } } },
       ],
       budget: budgetWith(),
       candidates: [{ opportunityId: 'opp-1', score: 90, matchedKeywords: [] }],
@@ -254,8 +276,29 @@ describe('EngageAutoReplyService.getDueReplies', () => {
     });
 
     // A trickle per poll is what spreads a day's target across the day; handing
-    // out a whole budget at once is what gets an account rate-limited.
+    // out a whole budget at once is what gets an account rate-limited. Both
+    // projects run reddit, so the cap is shared between them.
     expect(await svc.getDueReplies(org, new Date('2026-08-18T12:00:00Z'))).toHaveLength(1);
+  });
+
+  it('hands out maxPerPoll separately for EACH platform in one poll', async () => {
+    const { svc, repo } = makeService({
+      // One project running both reddit and x.
+      configs: [enabledConfig],
+      budget: budgetWith(),
+      candidates: [{ opportunityId: 'opp-1', score: 90, matchedKeywords: [] }],
+      pacing: { maxPerPoll: 1 },
+    });
+
+    const due = await svc.getDueReplies(org, new Date('2026-08-18T12:00:00Z'));
+
+    // A busy reddit slate must not starve x (or vice versa): each platform gets
+    // its own maxPerPoll allowance within the same poll. `due[].platform` comes
+    // from the (here identically-mocked) opportunity, not the loop's platform
+    // key, so assert on which platforms were actually driven instead.
+    expect(due).toHaveLength(2);
+    const drivenPlatforms = repo.pickAutoReplyCandidates.mock.calls.map((c: any) => c[2]);
+    expect(drivenPlatforms.sort()).toEqual(['reddit', 'x']);
   });
 
   it('releases the credit reservation when generation fails', async () => {
@@ -528,7 +571,8 @@ describe('EngageAutoReplyService.getDueReplies — settle ordering', () => {
 
   it('settles only after saveDraft has already succeeded', async () => {
     const { svc, engage } = makeService({
-      configs: [enabledConfig],
+      // Single platform so callOrder reflects exactly one draft/settle pair.
+      configs: [{ ...enabledConfig, replyPolicies: { reddit: { autoReplyEnabled: true } } }],
       budget: budgetWith(),
       candidates: [{ opportunityId: 'opp-1', score: 90, matchedKeywords: [] }],
     });

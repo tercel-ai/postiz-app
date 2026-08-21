@@ -589,21 +589,29 @@ null-project row's value.
 The browser extension polls this for reply drafts that are due right now, across
 every project whose `autoReplyMode` is `review` or `auto`. The mirror of
 `POST /posts/publish-due`: backend = scheduler, extension = executor — this
-endpoint makes **no** platform call. It reads each project's plan budget, picks
-the opportunities, generates the drafts, parks them as `DRAFT` rows, and returns
-what is ready.
+endpoint makes **no** platform call. It picks the opportunities, generates the
+drafts, parks them as `DRAFT` rows, and returns what is ready.
 
-Deliberately org-scoped with **no `planId`**: the plan decides how much to reply,
-which the server reads itself — the executor never needs to know which plans
-exist (the same reason publish-due takes no planId).
+Deliberately org-scoped with **no `planId`**: a project needs no operation plan
+for this to run at all — see **Plan budget** below.
 
-**Pacing.** Governed by the `engage_reply_pacing` setting, which bounds how much
-one poll may hand out (`maxPerPoll`, default 1), the minimum spacing between two
-replies of the same project+platform (`minGapMinutes`, default 25), the UTC
-active-hours window, the maximum age of a post worth replying to, and the
-minimum opportunity score. A trickle per poll is what spreads a day's target
-across the day — handing out a whole budget at once is what gets an account
-rate-limited.
+**Pacing.** Governed by the `engage_reply_pacing` setting: `maxPerPoll` (default
+1) bounds how much one poll may hand out **for each platform independently** —
+a busy Reddit slate does not starve X, and vice versa, within the same poll,
+though it IS shared across every project on that platform. Also: the minimum
+spacing between two replies of the same project+platform (`minGapMinutes`,
+default 25), the UTC active-hours window, the maximum age of a post worth
+replying to, and the minimum opportunity score. A trickle per poll is what
+spreads a day's target across the day — handing out a whole budget at once is
+what gets an account rate-limited.
+
+**Plan budget.** Off by default (`ENGAGE_REPLY_BUDGET_GATE_ENABLED` unset) — the
+driver is then paced by interval/active-hours alone and drafts happily for a
+project with no active operation plan. Set `ENGAGE_REPLY_BUDGET_GATE_ENABLED=true`
+to additionally gate on the project's active plan (`targetRepliesPerDay` /
+`dailyHardCap` / `keywordTargets` via `EngageService.getReplyBudget`): with the
+flag on, a project with no active plan — or one whose daily target is already
+spent — is skipped entirely rather than spaced only by interval.
 
 **Response**
 

@@ -71,7 +71,7 @@ export class AutomationController {
 
   @ApiOperation({
     summary:
-      'Save managed-reply settings: enable/mode, per-platform reply policy, and per-account reply authorization.',
+      'Save managed-reply settings: the reply switch plus the per-platform reply policy. Switching replies on also switches Engage post-scanning on, and resumes the reply mode the project already had.',
   })
   @Post('/replies')
   saveReplies(

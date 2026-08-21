@@ -11,6 +11,7 @@ import {
 } from '@gitroom/nestjs-libraries/automation/project-publishing.service';
 import { PublishPlatform } from '@gitroom/helpers/extension/post-publish';
 import {
+  AutoReplyMode,
   EngagePlatformPolicy,
   readEngageConfigMetadata,
 } from '@gitroom/nestjs-libraries/engage/engage-config-metadata';
@@ -26,6 +27,15 @@ import { EXTENSION_PUBLISHABLE_PLATFORMS } from '@gitroom/helpers/extension/post
  * about which keys they may touch — the reply half must preserve these, and
  * the publishing half must preserve everything that is NOT one of these.
  */
+/**
+ * The mode a project resumes on when replying is switched back on and it has no
+ * stored preference to resume — `review` rather than `auto`, because the mode
+ * decides whether a reply reaches a real audience without a human seeing it, and
+ * a default must never be the irreversible one. Same reason
+ * `readEngageConfigMetadata` resolves an absent mode to `off`.
+ */
+const DEFAULT_AUTO_REPLY_MODE = 'review' as const;
+
 const PUBLISHING_POLICY_KEYS = [
   'publishingEnabled',
   'publishingWindowStart',
@@ -114,14 +124,20 @@ export class AutomationService {
         platforms: buildPublishingPlatforms(publishing, commonTimezone),
       },
       replies: {
-        // Engage's OWN switch, which also gates scanning and is changeable from
-        // the Engage page. Kept because it independently gates replying: with it
-        // off, nothing is driven no matter what the mode says — so a client that
-        // only knew the mode could not explain why replies are idle.
-        enabled: config?.enabled ?? false,
-        // Carries the feature switch AND the review/auto distinction, so a
-        // separate `repliesEnabled` boolean would just be `!== 'off'` restated.
-        autoReplyMode: settings.autoReplyMode,
+        // Engage's post-SCAN switch — whether opportunities are discovered at
+        // all. Reported for DIAGNOSIS only: it belongs to the Engage page, and
+        // the Automation page must not render it as a control. Two toggles for
+        // what a user experiences as one decision is what made "replying is on
+        // but nothing happens" possible, and `saveReplies` now turns scanning on
+        // with replying so this page never has to ask about it.
+        //
+        // Still transmitted because the one state this page cannot cause — the
+        // Engage page switching scanning off under an active reply config — is
+        // otherwise unexplainable here: replies would read as on and be idle.
+        scanEnabled: config?.enabled ?? false,
+        // The switch this page owns, and — read-only — the mode it is running
+        // in. See `splitAutoReplyMode`.
+        ...splitAutoReplyMode(settings.autoReplyMode),
         // ONE entry per platform, same shape rationale as publishing above.
         //
         // Connected reply ACCOUNTS are deliberately absent, because Automation
@@ -328,18 +344,33 @@ export class AutomationService {
     projectId: string,
     dto: SaveAutomationRepliesDto
   ) {
-    if (
-      dto.enabled === undefined &&
-      dto.autoReplyMode === undefined &&
-      dto.policies === undefined
-    ) {
+    if (dto.autoReplyEnabled === undefined && dto.policies === undefined) {
       throw new BadRequestException('Nothing to update');
     }
 
+    // One read serves both halves that need it: merging policies needs what is
+    // stored, and so does "switch replying on without naming a mode" — that
+    // resumes the mode the project last used. Skipped entirely when neither
+    // asks, so a bare switch flip is still a single write.
+    const needsCurrent =
+      dto.policies !== undefined || dto.autoReplyEnabled === true;
+    const current = needsCurrent
+      ? readEngageConfigMetadata(
+          await this._engageRepository.getConfigCore(org.id, projectId)
+        )
+      : null;
+
+    const autoReplyMode = resolveStoredAutoReplyMode(
+      dto,
+      current?.autoReplyMode ?? 'off'
+    );
+
+    let replyPolicies: Record<string, Record<string, unknown>> | undefined;
     if (dto.policies) {
-      const existing = readEngageConfigMetadata(
-        await this._engageRepository.getConfigCore(org.id, projectId)
-      ).replyPolicies as Record<string, Record<string, unknown>>;
+      const existing = current!.replyPolicies as Record<
+        string,
+        Record<string, unknown>
+      >;
       // Merge per platform, and drop any publishing key the caller tried to
       // send: publishing settings are owned by the other endpoint, and letting
       // them in here would reintroduce exactly the cross-module clobbering this
@@ -352,23 +383,29 @@ export class AutomationService {
           ...stripPublishingKeysFromPolicy(policy),
         };
       }
-      await this._engageService.saveConfig(org, {
-        projectId,
-        ...(dto.enabled !== undefined && { enabled: dto.enabled }),
-        ...(dto.autoReplyMode !== undefined && {
-          autoReplyMode: dto.autoReplyMode,
-        }),
-        replyPolicies: merged,
-      } as any);
-    } else if (dto.enabled !== undefined || dto.autoReplyMode !== undefined) {
-      await this._engageService.saveConfig(org, {
-        projectId,
-        ...(dto.enabled !== undefined && { enabled: dto.enabled }),
-        ...(dto.autoReplyMode !== undefined && {
-          autoReplyMode: dto.autoReplyMode,
-        }),
-      } as any);
+      replyPolicies = merged;
     }
+
+    await this._engageService.saveConfig(org, {
+      projectId,
+      // Switching replying ON turns SCANNING on with it. A project replies to
+      // opportunities Engage discovered, so replying with scanning off is not a
+      // configuration, it is a dead end: nothing is found, nothing is drafted,
+      // and the Automation page shows a switch that is on and idle with no
+      // control on it that explains why. Pairing them here rather than asking
+      // the client to send both also means it cannot forget.
+      //
+      // Deliberately ONE-WAY. Switching replying off leaves scanning alone:
+      // discovery is the Engage page's own feature, and stopping it would empty
+      // that page as a side effect of a decision made on this one. It also
+      // matches the rule the switch chain already states — turning Automation
+      // off stops replying, not finding, so conversations keep accumulating and
+      // are there the moment it comes back.
+      ...(autoReplyMode !== undefined &&
+        autoReplyMode !== 'off' && { enabled: true }),
+      ...(autoReplyMode !== undefined && { autoReplyMode }),
+      ...(replyPolicies !== undefined && { replyPolicies }),
+    } as any);
 
     return { saved: true as const };
   }
@@ -464,4 +501,53 @@ function stripPublishingKeys(
     out[platform] = stripPublishingKeysFromPolicy(policy);
   }
   return out;
+}
+
+/**
+ * The stored tri-state, projected onto what the client actually needs: the
+ * boolean it renders as a switch, plus the mode it can only READ.
+ *
+ * `off` is not a mode on the wire — it is `autoReplyEnabled: false`. Carrying it
+ * in both places made `enabled: false, autoReplyMode: "off"` read as one fact
+ * stated twice, which is exactly what it was. Storage keeps the single
+ * tri-state, so the two can never disagree at rest.
+ *
+ * The mode survives as an output-only field because `auto` is reachable through
+ * Engage's config endpoint, and a project running unattended must be legible
+ * here rather than showing an ordinary-looking switch. While the switch is off
+ * it reports the mode replying would RESUME on, not a stored value that is not
+ * in effect.
+ */
+function splitAutoReplyMode(mode: AutoReplyMode): {
+  autoReplyEnabled: boolean;
+  autoReplyMode: Exclude<AutoReplyMode, 'off'>;
+} {
+  return {
+    autoReplyEnabled: mode !== 'off',
+    autoReplyMode: mode === 'off' ? DEFAULT_AUTO_REPLY_MODE : mode,
+  };
+}
+
+/**
+ * Fold this page's one boolean onto the stored tri-state, or `undefined` when the
+ * body says nothing about replying (a policies-only save must not restate it).
+ *
+ * The boolean is the whole contract here — Automation offers no review/auto
+ * choice — so the ON direction has to answer "which mode" on the client's
+ * behalf, and it answers it by RESUMING rather than defaulting. That matters in
+ * one direction specifically: a project set to `auto` through Engage's own
+ * config endpoint must not be silently demoted to `review` by someone toggling
+ * this page off and on. Only a project with nothing to resume falls to the
+ * default, and that default is `review` for the same reason every switch
+ * defaults off — sending unreviewed is the irreversible side.
+ */
+function resolveStoredAutoReplyMode(
+  dto: SaveAutomationRepliesDto,
+  currentMode: AutoReplyMode
+): AutoReplyMode | undefined {
+  if (dto.autoReplyEnabled === false) return 'off';
+  if (dto.autoReplyEnabled === true) {
+    return currentMode === 'off' ? DEFAULT_AUTO_REPLY_MODE : currentMode;
+  }
+  return undefined;
 }

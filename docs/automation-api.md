@@ -51,8 +51,44 @@ can write the other's keys:
 | Level | Scheduled publishing | Managed replies |
 | --- | --- | --- |
 | **Master** | `enabled` | same field |
-| **Feature** | `publishing.enabled` | `replies.autoReplyMode != 'off'` |
+| **Feature** | `publishing.enabled` | `replies.autoReplyEnabled` |
 | **Platform** | `publishing.platforms[p].enabled` | `replies.platforms[p].autoReplyEnabled` |
+
+Managed replies depend on one more switch that publishing has no equivalent of:
+`EngageConfig.enabled`, which governs post **discovery**. It is reported as
+`replies.scanEnabled` but is **not** an Automation control — see below.
+
+### Scanning is turned on WITH replying, never off with it
+
+Discovery belongs to the Engage page. The Automation page neither shows it nor
+accepts it: `POST /automation/replies` has no `scanEnabled` field, and a body
+carrying one is ignored as an unrecognised property.
+
+Instead the coupling is **one-way and implicit**:
+
+| The save | What happens to scanning |
+| --- | --- |
+| replying switched **on** (`autoReplyEnabled: true`, or a mode sent alone) | switched **on** with it |
+| replying switched **off** | **untouched** |
+| policies-only save | **untouched** |
+
+**On, because replying with scanning off is not a configuration, it is a dead
+end.** A reply answers an opportunity Engage found; with nothing found, nothing
+is drafted, and the page shows a switch that is on and permanently idle carrying
+no control that explains why. Two toggles for what a user experiences as one
+decision is the confusion this removes — and doing it in the service rather than
+asking the client to send both means the client cannot forget.
+
+**Off never propagates, because discovery is not Automation's to stop.** Emptying
+the Engage page as a side effect of a decision made on the Automation page is the
+inverse of the same confusion, and it matches the rule the chain already states:
+turning Automation off stops replying, not finding, so conversations keep
+accumulating and are there the moment it comes back.
+
+`replies.scanEnabled` is still transmitted for **diagnosis**, because the one
+state this page cannot cause — the Engage page switching scanning off under an
+active reply config — is otherwise unexplainable here: replies would read as on
+and sit idle. Render it as status if at all, never as a toggle.
 
 **Every switch defaults to OFF when absent.** Automation posts and replies with
 the user's real accounts, so a missing — or malformed — value must never read as
@@ -68,10 +104,38 @@ which resolves from the platform selection, and that is distinct from an explici
 `false`. It is not a permission default: the master switch above it still has to
 be on for anything to publish.
 
-The managed-replies feature switch **is** `autoReplyMode`, not a second boolean
-beside it — one question, one answer, no precedence rule to get wrong. The mode
-also carries `review` vs `auto`, so the switch and the mode were already the same
-field.
+### The reply switch is a boolean; the mode is read-only
+
+**Stored as one tri-state, written as one boolean.**
+`metadata.autoReplyMode` is `off | review | auto` and stays the single source of
+truth. `POST /automation/replies` accepts only `autoReplyEnabled`, because the
+Automation page has exactly one control for replying — there is no review/auto
+selector on it, and a field no client fills in is a field that eventually gets
+filled in wrong.
+
+`off` is not a mode on the wire either; it is `autoReplyEnabled: false`. Carrying
+it in both places made `enabled: false` beside `autoReplyMode: "off"` read as one
+fact stated twice, which is what it was.
+
+Writing:
+
+| Body | Stored |
+| --- | --- |
+| `autoReplyEnabled: false` | `off` |
+| `autoReplyEnabled: true` | the mode the project already had, else `review` |
+| field omitted (policies-only save) | unchanged |
+
+**ON resumes, it does not default.** `auto` is reachable through
+`POST /engage/config`, and a project set there to send unattended must not be
+silently demoted to `review` because someone toggled this page off and on. Only a
+project with nothing to resume falls to `review` — the safe side, for the same
+reason every switch defaults off: the mode decides whether a reply reaches a real
+audience with no human seeing it.
+
+**`autoReplyMode` is still transmitted on `GET`, output-only.** A project running
+unattended has to be legible here rather than showing an ordinary-looking switch.
+While replying is off it reports the mode that would RESUME, not a stored value
+that is not in effect.
 
 **The switches gate FUTURE work only.** A post already in `QUEUE`, or a reply the
 extension is mid-send on, is past the gate and finishes. Turning a switch off is
@@ -231,15 +295,25 @@ does **not** create an `EngageConfig` row for a project that has never used Enga
   },
 
   "replies": {
-    // Engage's OWN switch. It also gates scanning, is changeable from the Engage
-    // page, and independently gates replying: with it off nothing is driven
-    // whatever the mode says — so a client that only knew the mode could not
-    // explain why replies are idle.
-    "enabled": true,
+    // Engage's post-SCAN switch — whether this project keeps DISCOVERING
+    // opportunities at all. READ-ONLY here: it belongs to the Engage page, and
+    // POST /automation/replies has no field for it — switching replying on turns
+    // it on. Render as status, never as a toggle. Present so that the one state
+    // this page cannot cause (the Engage page switching scanning off under an
+    // active reply config) is explainable instead of "on but idle".
+    "scanEnabled": true,
 
-    // Carries the feature switch AND the review/auto distinction, so a separate
-    // `repliesEnabled` boolean would just restate `!== "off"`.
-    "autoReplyMode": "off" | "review" | "auto",
+    // The managed-reply switch.
+    "autoReplyEnabled": false,
+
+    // How unattended replying is. OUTPUT-ONLY: POST has no such field — this
+    // page offers no review/auto choice, and switching replying on resumes
+    // whatever the project already had. Present so a project set to `auto`
+    // through POST /engage/config is legible here instead of showing an
+    // ordinary-looking switch. There is no "off": that state IS
+    // `autoReplyEnabled: false`, and while it is off this reports the mode
+    // replying would RESUME on.
+    "autoReplyMode": "review" | "auto",
 
     // ONE entry per platform: that platform's reply policy.
     //
@@ -277,10 +351,11 @@ what is — and a duplicated value is one that can disagree with itself:
 | Derived | From |
 | --- | --- |
 | is publishing actually running | `enabled && publishing.enabled` |
-| is replying actually running | `enabled && replies.autoReplyMode !== "off"` |
-| the managed-replies feature switch | `replies.autoReplyMode !== "off"` |
+| is replying actually running | `enabled && replies.scanEnabled && replies.autoReplyEnabled` |
+| the managed-replies feature switch | `replies.autoReplyEnabled` |
 
-Render the switch CONTROLS from each feature's own `enabled` / `autoReplyMode`,
+Render the switch CONTROLS from each feature's own `enabled` / `autoReplyEnabled`
+(`scanEnabled` is status, not a control),
 and status, counts and "will this run" from the derived values. Driving the
 controls off the derived value makes both snap to off the moment the master goes
 off, which reads as "your settings were cleared" rather than "suspended".
@@ -544,8 +619,10 @@ Save the managed-reply half: the config flags and the per-platform reply policy.
 
 ```jsonc
 {
-  "enabled": true,
-  "autoReplyMode": "off" | "review" | "auto",
+  // The managed-reply switch, and the ONLY switch this endpoint accepts. Sent
+  // as `true` it also turns Engage's post scanning on, and resumes the reply
+  // mode the project already had (`review` if it has none).
+  "autoReplyEnabled": true,
 
   // Merged key-by-key over what is stored, per platform.
   "policies": {
@@ -553,6 +630,22 @@ Save the managed-reply half: the config flags and the per-platform reply policy.
   }
 }
 ```
+
+Two switches deliberately have **no field** here, and a body carrying either is
+ignored as an unrecognised property:
+
+- **`scanEnabled`** — Engage's scan switch is the Engage page's. This endpoint
+  turns it on implicitly when replying goes on, never off when replying goes off.
+- **`autoReplyMode`** — the Automation page offers no review/auto choice, so its
+  switch must not double as a decision about the mode. Unattended sending is set
+  through `POST /engage/config`, and switching replying on here resumes it rather
+  than overwriting it.
+
+`autoReplyEnabled` and `policies[p].autoReplyEnabled` are two levels of the same
+chain, not two names for one switch — see
+[the switch chain](#the-switch-chain). A save changes only the levels it names;
+turning replying off never rewrites the per-platform selection, or turning it
+back on would restore an empty form instead of the configuration that was there.
 
 - **Response**: `{ "saved": true }`
 
@@ -570,6 +663,8 @@ preserves every reply-side key. Both halves currently share
 `EngageConfig.replyPolicies`, so each writer merges rather than replaces —
 splitting that column is tracked separately.
 
-Config flags **do** go through `EngageService.saveConfig`, so enabling Engage
-still starts its workflows and triggers an immediate scan, exactly as
-`POST /engage/config` does.
+Config flags **do** go through `EngageService.saveConfig`, so switching replying
+on — which switches scanning on with it — also starts Engage's workflows and
+triggers an immediate scan, exactly as `POST /engage/config` does. That is the
+point: the opportunities a newly enabled reply config needs start arriving at
+once rather than at the next scheduled scan.

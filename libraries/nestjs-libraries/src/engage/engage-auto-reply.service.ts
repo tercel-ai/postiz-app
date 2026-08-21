@@ -21,6 +21,21 @@ dayjs.extend(timezone);
 export const ENGAGE_REPLY_PACING_KEY = 'engage_reply_pacing';
 
 /**
+ * Whether the unattended driver still gates on the operation plan's daily
+ * reply budget (`EngageService.getReplyBudget` — `targetRepliesPerDay` /
+ * `dailyHardCap` / `keywordTargets`). OFF by default: the driver's day-to-day
+ * job is spacing (active hours + `checkIntervalMinutes`), and most projects
+ * running Automation never generate an operation plan at all — gating on one
+ * by default silently produced zero replies for them. Set to `'true'` to
+ * restore the stricter behaviour, where a project with no active plan (or an
+ * exhausted daily target) is skipped entirely by the driver rather than
+ * spaced only by interval.
+ */
+function isReplyBudgetGateEnabled(): boolean {
+  return process.env.ENGAGE_REPLY_BUDGET_GATE_ENABLED === 'true';
+}
+
+/**
  * Whether `now` falls inside the policy's LOCAL-time window. Absent bounds mean
  * no restriction.
  *
@@ -63,7 +78,12 @@ export function withinLocalWindow(
  * a trickle, never a day's budget at once.
  */
 export interface EngageReplyPacing {
-  /** Max drafts one poll may hand out, across all projects. */
+  /**
+   * Max drafts one poll may hand out FOR EACH PLATFORM, across all projects
+   * running that platform. Counted per platform, not as one shared total — a
+   * poll that drafts one reddit reply may still draft one x reply in the same
+   * call.
+   */
   maxPerPoll: number;
   /** Minimum spacing between two replies for the SAME project+platform. */
   minGapMinutes: number;
@@ -98,14 +118,17 @@ export interface DueReply {
 }
 
 /**
- * The unattended reply DRIVER: turns an operation plan's daily reply targets into
- * actual drafts.
+ * The unattended reply DRIVER: paces auto-replies by active hours and
+ * per-project/platform interval, optionally against an operation plan's daily
+ * reply targets.
  *
  * The pacing gate in EngageService is a BRAKE — it runs at send time and refuses
- * a reply that would exceed the plan. Nothing was ever the ACCELERATOR: no code
- * decided "this project owes 5 replies today, here are the 5 posts". That is this
- * service. Both read the same budget (EngageService.getReplyBudget), so what is
- * handed out can never exceed what would be let through.
+ * a reply that would exceed the plan. This service is the ACCELERATOR: no other
+ * code decides "this project owes a reply now, here is the post". When
+ * `ENGAGE_REPLY_BUDGET_GATE_ENABLED=true`, both read the same budget
+ * (EngageService.getReplyBudget), so what is handed out can never exceed what
+ * would be let through — with the gate at its default (off), this driver is
+ * paced by interval alone and does not require an active plan.
  *
  * Backend = scheduler, extension = executor — the same split as publish-due and
  * the scan loop. This service makes NO platform call; it only decides and drafts.
@@ -135,8 +158,8 @@ export class EngageAutoReplyService implements OnModuleInit {
           {
             type: 'json',
             description:
-              'Unattended engage-reply pacing: how many drafts one poll may hand out, ' +
-              'minimum spacing per project+platform, the UTC active-hours window, the ' +
+              'Unattended engage-reply pacing: how many drafts one poll may hand out PER ' +
+              'PLATFORM, minimum spacing per project+platform, the UTC active-hours window, the ' +
               'maximum age of a post worth replying to, and the minimum opportunity score.',
             defaultValue: DEFAULT_REPLY_PACING,
           }
@@ -167,9 +190,10 @@ export class EngageAutoReplyService implements OnModuleInit {
   /**
    * Drafts due for this org right now, newest budget first.
    *
-   * Returns at most `maxPerPoll` across ALL projects: the caller polls on a short
-   * cadence, so a trickle per poll spreads a day's target across the day by
-   * construction — no separate scheduling clock needed.
+   * Returns at most `maxPerPoll` FOR EACH PLATFORM (summed across all projects
+   * running that platform, not shared with other platforms): the caller polls
+   * on a short cadence, so a trickle per poll spreads a day's target across the
+   * day by construction — no separate scheduling clock needed.
    */
   async getDueReplies(org: Organization, now = new Date()): Promise<DueReply[]> {
     const pacing = await this.getPacing();
@@ -183,8 +207,11 @@ export class EngageAutoReplyService implements OnModuleInit {
     if (!configs.length) return [];
 
     const due: DueReply[] = [];
+    // Counted per PLATFORM, not globally: `maxPerPoll` caps each platform's own
+    // rate-limit risk independently, so a busy reddit slate must not starve x
+    // (or vice versa) within the same poll.
+    const perPlatformCount = new Map<string, number>();
     for (const config of configs) {
-      if (due.length >= pacing.maxPerPoll) break;
       const projectId = config.projectId!;
       const mode = config.autoReplyMode as 'review' | 'auto';
       const policies = (config.replyPolicies ?? {}) as Record<string, EngageReplyPolicy>;
@@ -205,7 +232,7 @@ export class EngageAutoReplyService implements OnModuleInit {
       // and get skipped — not rejected, not logged, just quietly never driven.
       for (const rawPlatform of Object.keys(policies)) {
         const platform = rawPlatform.toLowerCase();
-        if (due.length >= pacing.maxPerPoll) break;
+        if ((perPlatformCount.get(platform) ?? 0) >= pacing.maxPerPoll) continue;
 
         // Per-platform policy refines the project-level mode. Absent = the
         // platform was never configured, and an unconfigured platform must not
@@ -226,7 +253,16 @@ export class EngageAutoReplyService implements OnModuleInit {
         // No plan / no enabled policy → nothing to drive. Deliberately the
         // OPPOSITE default from the send-time gate, which reads the same null as
         // "uncapped": the driver must never invent a target the plan didn't set.
-        if (budget.cap === null || !budget.remaining) continue;
+        // Opt-in via ENGAGE_REPLY_BUDGET_GATE_ENABLED (default off) — see
+        // isReplyBudgetGateEnabled above. `budget` is still fetched either way:
+        // `_draftOne` uses `budget.keywords` to prefer under-quota keywords
+        // regardless of whether the cap itself is enforced.
+        if (
+          isReplyBudgetGateEnabled() &&
+          (budget.cap === null || !budget.remaining)
+        ) {
+          continue;
+        }
 
         // Human-like spacing, per project+platform: without it a poll loop would
         // empty a day's budget into one burst the moment the window opened.
@@ -246,7 +282,10 @@ export class EngageAutoReplyService implements OnModuleInit {
         const drafted = await this._draftOne(
           org, projectId, platform, budget, pacing, mode, now, policy
         );
-        if (drafted) due.push(drafted);
+        if (drafted) {
+          due.push(drafted);
+          perPlatformCount.set(platform, (perPlatformCount.get(platform) ?? 0) + 1);
+        }
       }
     }
     return due;

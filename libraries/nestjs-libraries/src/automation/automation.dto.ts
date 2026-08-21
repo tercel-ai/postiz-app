@@ -128,13 +128,31 @@ export class SaveAutomationPublishingDto {
  * flip one switch without restating the rest.
  */
 export class SaveAutomationRepliesDto {
+  /**
+   * The managed-reply switch — the ONLY switch this endpoint accepts, because
+   * the Automation page has exactly one control for replying.
+   *
+   * Two other switches deliberately have no field here:
+   *
+   * `EngageConfig.enabled` (post scanning) belongs to the Engage page. A second
+   * toggle beside this one gave the Automation page two switches for what a user
+   * experiences as one decision, with a silent failure mode — replying on,
+   * scanning off, nothing discovered, nothing to reply to, and no control on
+   * this page that explains why. `AutomationService.saveReplies` switches it on
+   * with replying instead, so the client cannot forget it.
+   *
+   * `autoReplyMode` (review vs auto) is not a choice this page offers: the
+   * Automation surface only ever means `review` — draft and wait for a human.
+   * Unattended sending (`auto`) is set through Engage's own config endpoint, and
+   * accepting it here would have been a field no client fills in and a way for
+   * this page to silently promote a project to sending unreviewed. Switching
+   * replying back on RESUMES whatever mode the project had (see
+   * `resolveStoredAutoReplyMode`), so a project set to `auto` elsewhere is not
+   * quietly demoted by a toggle here either.
+   */
   @IsOptional()
   @IsBoolean()
-  enabled?: boolean;
-
-  @IsOptional()
-  @IsIn(['off', 'review', 'auto'])
-  autoReplyMode?: 'off' | 'review' | 'auto';
+  autoReplyEnabled?: boolean;
 
   // Per-platform REPLY policy (strategy, length, mention tags, pacing…). Merged
   // key-by-key over what is stored, so it cannot clobber the publishing keys

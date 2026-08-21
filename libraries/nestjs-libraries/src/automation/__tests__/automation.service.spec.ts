@@ -161,7 +161,11 @@ describe('AutomationService.getOverview', () => {
     expect(res.replies.platforms).toEqual({
       x: { autoReplyEnabled: true, length: 'short' },
     });
-    expect(res.replies).toMatchObject({ enabled: true, autoReplyMode: 'review' });
+    expect(res.replies).toMatchObject({
+      scanEnabled: true,
+      autoReplyEnabled: true,
+      autoReplyMode: 'review',
+    });
   });
 
   it('defaults replies to off for a project with no engage config row', async () => {
@@ -170,8 +174,11 @@ describe('AutomationService.getOverview', () => {
     const res = await service.getOverview(org, 'proj-1');
 
     expect(res.replies).toMatchObject({
-      enabled: false,
-      autoReplyMode: 'off',
+      scanEnabled: false,
+      autoReplyEnabled: false,
+      // `off` is not a mode on the wire: the switch above carries that state,
+      // and the mode reports the safe default it would resume on.
+      autoReplyMode: 'review',
       platforms: {},
     });
     // Read-only: loading the page must not create an EngageConfig row.
@@ -225,28 +232,45 @@ describe('AutomationService.getOverview — switch chain', () => {
     expect(res.publishing.platforms).toEqual({ x: { enabled: true } });
   });
 
-  it('derives replies.active from master AND autoReplyMode', async () => {
-    const cases: Array<[boolean, string, boolean]> = [
-      [true, 'review', true],
-      [true, 'auto', true],
-      [true, 'off', false],
-      [false, 'review', false],
-      [false, 'off', false],
+  it('reports the three reply switches separately, so the client can AND them', async () => {
+    // scan / reply / master are three different reasons for silence, and the
+    // payload keeps them apart. `active` itself is still NOT transmitted — it is
+    // the AND, which the client computes and so cannot disagree with a
+    // server-sent copy of itself (same rule as publishing above).
+    const cases: Array<[boolean, boolean, string, boolean]> = [
+      [true, true, 'review', true],
+      [true, true, 'auto', true],
+      [true, true, 'off', false],
+      [true, false, 'auto', false],
+      [false, true, 'review', false],
+      [false, true, 'off', false],
     ];
-    for (const [master, mode, expected] of cases) {
+    for (const [master, scan, mode, expected] of cases) {
       const res = await makeService({
         publishing: withSwitches({ automationEnabled: master }),
-        config: { enabled: true, metadata: { autoReplyMode: mode, replyPolicies: {} } },
+        config: { enabled: scan, metadata: { autoReplyMode: mode, replyPolicies: {} } },
       }).service.getOverview(org, 'proj-1');
-      // Both were dropped from the payload: `active` is master AND feature, and
-      // `repliesEnabled` is `autoReplyMode !== 'off'` — each restates something
-      // the client already has.
       expect(res.replies).not.toHaveProperty('active');
-      expect(res.replies).not.toHaveProperty('repliesEnabled');
-      expect(res.enabled && res.replies.autoReplyMode !== 'off', `master=${master} mode=${mode}`).toBe(
-        expected
-      );
+      expect(res.replies).not.toHaveProperty('enabled');
+      expect(res.replies.scanEnabled).toBe(scan);
+      expect(res.replies.autoReplyEnabled).toBe(mode !== 'off');
+      expect(
+        res.enabled && res.replies.scanEnabled && res.replies.autoReplyEnabled,
+        `master=${master} scan=${scan} mode=${mode}`
+      ).toBe(expected);
     }
+  });
+
+  it('never reports a mode that is not in effect', async () => {
+    // A stored `auto` shown beside an off switch reads as a promise the resume
+    // path does not keep — switching back on lands on the safe default.
+    const res = await makeService({
+      publishing: withSwitches({}),
+      config: { enabled: true, metadata: { autoReplyMode: 'off', replyPolicies: {} } },
+    }).service.getOverview(org, 'proj-1');
+
+    expect(res.replies.autoReplyEnabled).toBe(false);
+    expect(res.replies.autoReplyMode).toBe('review');
   });
 });
 
@@ -543,12 +567,102 @@ describe('AutomationService.saveReplies', () => {
   it('writes config flags through EngageService so enabling engage still starts it', async () => {
     const { service, saveConfig } = makeService();
 
-    await service.saveReplies(org, 'proj-1', { enabled: true, autoReplyMode: 'auto' });
+    await service.saveReplies(org, 'proj-1', { autoReplyEnabled: true });
+
+    expect(saveConfig).toHaveBeenCalledWith(org, {
+      projectId: 'proj-1',
+      enabled: true,
+      autoReplyMode: 'review',
+    });
+  });
+
+  it('turns SCANNING on with replying — replying to nothing is a dead end', async () => {
+    // Engage scanning is what produces the opportunities a reply answers. With
+    // it off the page would show a switch that is on and permanently idle, and
+    // carries no control that explains why.
+    const { service, saveConfig } = makeService({
+      config: { enabled: false, metadata: { autoReplyMode: 'off', replyPolicies: {} } },
+    });
+
+    await service.saveReplies(org, 'proj-1', { autoReplyEnabled: true });
+
+    expect(saveConfig).toHaveBeenCalledWith(org, {
+      projectId: 'proj-1',
+      enabled: true,
+      autoReplyMode: 'review',
+    });
+  });
+
+  it('leaves scanning alone when replying goes off — the coupling is one-way', async () => {
+    // Discovery is the Engage page's own feature. Stopping it would empty that
+    // page as a side effect of a decision made on the Automation page, and the
+    // switch chain already says turning Automation off stops replying, not
+    // finding.
+    const { service, saveConfig } = makeService({
+      config: { enabled: true, metadata: { autoReplyMode: 'auto', replyPolicies: {} } },
+    });
+
+    await service.saveReplies(org, 'proj-1', { autoReplyEnabled: false });
+
+    expect(saveConfig).toHaveBeenCalledWith(org, {
+      projectId: 'proj-1',
+      autoReplyMode: 'off',
+    });
+  });
+
+  it('leaves scanning alone on a policies-only save', async () => {
+    const { service, saveConfig } = makeService({
+      config: { enabled: false, metadata: { autoReplyMode: 'off', replyPolicies: {} } },
+    });
+
+    await service.saveReplies(org, 'proj-1', { policies: { x: { length: 'long' } } });
+
+    // Editing a platform's policy is not a decision about whether replying runs.
+    expect(saveConfig.mock.calls[0][1]).not.toHaveProperty('enabled');
+    expect(saveConfig.mock.calls[0][1]).not.toHaveProperty('autoReplyMode');
+  });
+
+  it("folds the wire pair back onto the stored tri-state's off", async () => {
+    const { service, saveConfig, getConfigCore } = makeService();
+
+    await service.saveReplies(org, 'proj-1', { autoReplyEnabled: false });
+
+    expect(saveConfig).toHaveBeenCalledWith(org, {
+      projectId: 'proj-1',
+      autoReplyMode: 'off',
+    });
+    // Switching off needs nothing from the row — no read, one write.
+    expect(getConfigCore).not.toHaveBeenCalled();
+  });
+
+  it('resumes `auto` set through Engage rather than demoting it to review', async () => {
+    // The Automation page offers no review/auto choice, so its ON must not be a
+    // decision about the mode: a project running unattended stays unattended
+    // across a toggle here.
+    const { service, saveConfig } = makeService({
+      config: { enabled: false, metadata: { autoReplyMode: 'auto', replyPolicies: {} } },
+    });
+
+    await service.saveReplies(org, 'proj-1', { autoReplyEnabled: true });
 
     expect(saveConfig).toHaveBeenCalledWith(org, {
       projectId: 'proj-1',
       enabled: true,
       autoReplyMode: 'auto',
+    });
+  });
+
+  it('falls to review when there is nothing to resume', async () => {
+    // The mode decides whether a reply reaches a real audience unseen, so the
+    // default must never be the irreversible one.
+    const { service, saveConfig } = makeService({ config: null });
+
+    await service.saveReplies(org, 'proj-1', { autoReplyEnabled: true });
+
+    expect(saveConfig).toHaveBeenCalledWith(org, {
+      projectId: 'proj-1',
+      enabled: true,
+      autoReplyMode: 'review',
     });
   });
 
@@ -558,7 +672,7 @@ describe('AutomationService.saveReplies', () => {
     // reached into another feature's configuration for every account at once.
     const { service, upsertReplyAccountSettings } = makeService();
 
-    const res = await service.saveReplies(org, 'proj-1', { enabled: true });
+    const res = await service.saveReplies(org, 'proj-1', { autoReplyEnabled: true });
 
     expect(upsertReplyAccountSettings).not.toHaveBeenCalled();
     expect(res).toEqual({ saved: true });
