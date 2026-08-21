@@ -10,6 +10,8 @@ function makeService(over: {
   publishing?: any;
   lastPublishedAt?: Date | null;
   count?: any;
+  pacing?: any;
+  lastSentAtByPlatform?: Record<string, Date>;
 } = {}) {
   const getActivePlanId = vi
     .fn()
@@ -41,6 +43,12 @@ function makeService(over: {
   const countOpportunities = vi.fn().mockResolvedValue(over.count ?? { total: 0 });
   const saveConfig = vi.fn().mockResolvedValue({});
   const upsertReplyAccountSettings = vi.fn().mockResolvedValue({});
+  const getPacing = vi
+    .fn()
+    .mockResolvedValue(over.pacing ?? { minGapMinutes: 25 });
+  const getLastSentReplyAtByPlatform = vi
+    .fn()
+    .mockResolvedValue(over.lastSentAtByPlatform ?? {});
 
   const service = new AutomationService(
     {
@@ -51,8 +59,9 @@ function makeService(over: {
     } as any,
     { getActivePlanId } as any,
     { countOpportunities, saveConfig, upsertReplyAccountSettings } as any,
-    { getConfigCore, saveConfig: saveConfigRaw } as any,
-    { resolve } as any
+    { getConfigCore, saveConfig: saveConfigRaw, getLastSentReplyAtByPlatform } as any,
+    { resolve } as any,
+    { getPacing } as any
   );
 
   return {
@@ -68,6 +77,8 @@ function makeService(over: {
     countOpportunities,
     saveConfig,
     upsertReplyAccountSettings,
+    getPacing,
+    getLastSentReplyAtByPlatform,
   };
 }
 
@@ -158,9 +169,13 @@ describe('AutomationService.getOverview', () => {
 
     // Returning them under both halves would invite a client to write them back
     // through the reply endpoint, which is exactly the clobbering this split ends.
-    expect(res.replies.platforms).toEqual({
+    // `nextCheckAt` is asserted separately below — it is a live timestamp, not
+    // part of what this test is checking.
+    expect(res.replies.platforms).toMatchObject({
       x: { autoReplyEnabled: true, length: 'short' },
     });
+    expect(res.replies.platforms.x).not.toHaveProperty('publishingEnabled');
+    expect(res.replies.platforms.x).not.toHaveProperty('publishingWindowStart');
     expect(res.replies).toMatchObject({ scanEnabled: true, autoReplyEnabled: true });
   });
 
@@ -798,8 +813,132 @@ describe('AutomationService.getOverview — one entry per platform', () => {
 
     const res = await service.getOverview(org, 'proj-1');
 
-    expect(res.replies.platforms.x).toEqual({ autoReplyEnabled: true });
+    expect(res.replies.platforms.x).toMatchObject({ autoReplyEnabled: true });
     expect(res.replies.platforms.x).not.toHaveProperty('accounts');
+  });
+});
+
+// The next time AIsee will check a platform for reply opportunities — the same
+// anchor and interval the driver itself gates on
+// (EngageAutoReplyService.getDueReplies), so this can never disagree with what
+// the driver actually does.
+describe('AutomationService.getOverview — replies.platforms[].nextCheckAt', () => {
+  beforeEach(() => vi.restoreAllMocks());
+
+  const withSwitches = (over: Record<string, unknown>) => ({
+    automationEnabled: true,
+    publishingEnabled: true,
+    publishingConfigured: true,
+    enabledPlatforms: ['x'],
+    platformDecisions: { x: true },
+    windows: {},
+    ...over,
+  });
+
+  const activeConfig = {
+    enabled: true,
+    metadata: {
+      autoReplyEnabled: true,
+      replyPolicies: { x: { autoReplyEnabled: true } },
+    },
+  };
+
+  it('is null when the platform has never replied before, minus the master switch', async () => {
+    const { service } = makeService({
+      config: activeConfig,
+      publishing: withSwitches({ automationEnabled: false }),
+    });
+
+    const res = await service.getOverview(org, 'proj-1');
+
+    expect(res.replies.platforms.x.nextCheckAt).toBeNull();
+  });
+
+  it('is null when scanning is off, even with replying and the platform both on', async () => {
+    const { service } = makeService({
+      config: { ...activeConfig, enabled: false },
+      publishing: withSwitches({}),
+    });
+
+    const res = await service.getOverview(org, 'proj-1');
+
+    expect(res.replies.platforms.x.nextCheckAt).toBeNull();
+  });
+
+  it('is null when the platform itself never turned replying on', async () => {
+    const { service } = makeService({
+      config: {
+        enabled: true,
+        metadata: {
+          autoReplyEnabled: true,
+          replyPolicies: { x: { autoReplyEnabled: false } },
+        },
+      },
+      publishing: withSwitches({}),
+    });
+
+    const res = await service.getOverview(org, 'proj-1');
+
+    expect(res.replies.platforms.x.nextCheckAt).toBeNull();
+  });
+
+  it('is "now" for an active platform that has never sent a reply', async () => {
+    const now = new Date('2026-08-21T10:00:00.000Z');
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    try {
+      const { service } = makeService({
+        config: activeConfig,
+        publishing: withSwitches({}),
+      });
+
+      const res = await service.getOverview(org, 'proj-1');
+
+      expect(res.replies.platforms.x.nextCheckAt).toBe(now.toISOString());
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('is lastSentReplyAt + checkIntervalMinutes when the platform overrides the interval', async () => {
+    const lastSentAt = new Date('2026-08-21T08:00:00.000Z');
+    const { service, getLastSentReplyAtByPlatform } = makeService({
+      config: {
+        enabled: true,
+        metadata: {
+          autoReplyEnabled: true,
+          replyPolicies: {
+            x: { autoReplyEnabled: true, checkIntervalMinutes: 480 },
+          },
+        },
+      },
+      publishing: withSwitches({}),
+      pacing: { minGapMinutes: 25 },
+      lastSentAtByPlatform: { x: lastSentAt },
+    });
+
+    const res = await service.getOverview(org, 'proj-1');
+
+    expect(getLastSentReplyAtByPlatform).toHaveBeenCalledWith('org-1', 'proj-1', ['x']);
+    expect(res.replies.platforms.x.nextCheckAt).toBe(
+      new Date(lastSentAt.getTime() + 480 * 60_000).toISOString()
+    );
+  });
+
+  it('falls back to the org-wide pacing default when the platform sets no interval', async () => {
+    const lastSentAt = new Date('2026-08-21T08:00:00.000Z');
+    const { service } = makeService({
+      config: activeConfig,
+      publishing: withSwitches({}),
+      pacing: { minGapMinutes: 25 },
+      lastSentAtByPlatform: { x: lastSentAt },
+    });
+
+    const res = await service.getOverview(org, 'proj-1');
+
+    expect(res.replies.platforms.x.nextCheckAt).toBe(
+      new Date(lastSentAt.getTime() + 25 * 60_000).toISOString()
+    );
   });
 });
 

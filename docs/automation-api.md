@@ -68,7 +68,7 @@ Instead the coupling is **one-way and implicit**:
 
 | The save | What happens to scanning |
 | --- | --- |
-| replying switched **on** (`autoReplyEnabled: true`, or a mode sent alone) | switched **on** with it |
+| replying switched **on** (`autoReplyEnabled: true`) | switched **on** with it |
 | replying switched **off** | **untouched** |
 | policies-only save | **untouched** |
 
@@ -122,12 +122,23 @@ as `true`, anything else as `false`. The first write of any kind replaces the
 whole blob and the old key disappears. Reading a stale `review` as `false` would
 have silently switched off every project not touched since.
 
-One place the retired name survives on the wire: `POST /api/engage/reply-due`
-still returns a constant `"mode": "auto"` on every item. The extension no longer
-reads it, but older builds do — and the extension updates on Chrome's schedule in
-browsers nobody controls, so the backend cannot drop a field a deployed client
-might still gate on. See
-[the retirement order](engage/api.md#post-apiengagereply-due).
+The name is gone from the wire too: `POST /api/engage/reply-due` returns no
+`mode`. Deleting it — rather than serving a constant forever for builds that
+might still read it — is possible because the API declares a minimum extension
+version and refuses anything older with `426`, so it carries exactly one
+contract. See [Extension version floor](engage/api.md#extension-version-floor).
+
+With the mode gone, `state` carries the whole distinction: an automated reply is
+written as `Post(state=QUEUE)` and drained under a lease exactly like a scheduled
+post, while `DRAFT` means only "a person saved this and has not sent it". That is
+also what makes a failed send recoverable — an expired lease re-offers the reply,
+so redelivery needs no mechanism of its own.
+
+A queued reply is still paced: it passes the project's local-time window and
+minimum gap on the way out, exactly as a freshly generated one does. Only the
+plan budget is skipped, because the budget bounds what is *produced* and a queued
+reply was counted against it when it was generated. Details in
+[the reply-due contract](engage/api.md#post-apiengagereply-due).
 
 **The switches gate FUTURE work only.** A post already in `QUEUE`, or a reply the
 extension is mid-send on, is past the gate and finishes. Turning a switch off is
@@ -304,9 +315,22 @@ does **not** create an `EngageConfig` row for a project that has never used Enga
     // an account — it sends through the extension's own browser session, so the
     // identity is whoever the user is already signed in as. Choosing a specific
     // account is a per-post edit, on a different surface.
+    //
+    // `nextCheckAt` is the next time AIsee will check THAT platform for reply
+    // opportunities: (last reply sent on this platform, or now if it never has)
+    // + `checkIntervalMinutes` (falling back to the org-wide pacing default when
+    // the platform sets none). It is `null` whenever this platform is not
+    // actually being driven — the master switch, `scanEnabled`, the global
+    // `autoReplyEnabled`, or this platform's own `autoReplyEnabled` is off — so a
+    // null never implies a time that will never arrive.
     "platforms": {
-      "x": { "autoReplyEnabled": true, "length": "short", "checkIntervalMinutes": 480 },
-      "reddit": { "autoReplyEnabled": true, "length": "medium" }
+      "x": {
+        "autoReplyEnabled": true,
+        "length": "short",
+        "checkIntervalMinutes": 480,
+        "nextCheckAt": "2026-08-21T15:30:00.000Z"
+      },
+      "reddit": { "autoReplyEnabled": true, "length": "medium", "nextCheckAt": "2026-08-21T08:10:00.000Z" }
     }
   }
 }

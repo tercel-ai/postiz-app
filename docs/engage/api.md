@@ -140,7 +140,7 @@ interface EngageConfig {
   monitoredChannels: MonitoredChannel[];   // channel-scope scan targets (reddit)
   trackedAccounts: EngageTrackedAccount[];
   // Unattended-reply controls (§ Unattended Replying below). Two different
-  // grains: autoReplyMode is a project-level switch, replyPolicies refines it
+  // grains: autoReplyEnabled is a project-level switch, replyPolicies refines it
   // per platform. Neither is an embedded relation — plain columns on this row.
   autoReplyEnabled: boolean;
   replyPolicies: Record<string, ReplyPolicy> | null;
@@ -480,7 +480,7 @@ The first call will automatically create a default configuration (`enabled: fals
   "keywords": [],
   "monitoredChannels": [],
   "trackedAccounts": [],
-  "autoReplyMode": "off",
+  "autoReplyEnabled": false,
   "replyPolicies": null
 }
 ```
@@ -525,11 +525,11 @@ project-scoped configs, so a switch set on the legacy null-project row would be
 stored, echoed back, and never do anything. Sending one returns `400` with
 `code: "engage_auto_reply_requires_project"`. Turning it `off` is never blocked.
 
-Omitting the field leaves the stored mode unchanged, so a plain enable/disable
-never resets it.
+Omitting the field leaves the stored switch unchanged, so a plain enable/disable
+of Engage itself never resets it.
 
-**`replyPolicies` — per-platform refinement.** `autoReplyMode` decides WHETHER a
-project replies unattended at all; `replyPolicies` decides WHERE and WHEN, keyed
+**`replyPolicies` — per-platform refinement.** `autoReplyEnabled` decides WHETHER
+a project replies unattended at all; `replyPolicies` decides WHERE and WHEN, keyed
 by platform:
 
 ```jsonc
@@ -550,12 +550,13 @@ by platform:
 ```
 
 A platform absent from the map — or present with `autoReplyEnabled: false` —
-is never auto-replied to, **even when `autoReplyMode` is `auto`**. This is the
-one place where "no setting" means OFF rather than "inherit": an unconfigured
+is never auto-replied to, **even when the project-level `autoReplyEnabled` is
+on**. This is the one place where "no setting" means OFF rather than "inherit":
+an unconfigured
 platform must not start replying on its own just because the project opted in
 generally. Conversely, **the platform loop is entirely data-driven off this
 map's keys** — any platform can be given a policy, not just Reddit/X — but see
-the caveat below on `auto` mode's actual reach.
+the caveat below on how far unattended sending actually reaches.
 
 The map is **replaced wholesale** — send every platform's policy you want kept,
 not just the one you're changing (the client should merge locally against the
@@ -592,8 +593,8 @@ null-project row's value.
 The browser extension polls this for reply drafts that are due right now, across
 every project whose `autoReplyEnabled` is on. The mirror of
 `POST /posts/publish-due`: backend = scheduler, extension = executor — this
-endpoint makes **no** platform call. It picks the opportunities, generates the
-drafts, parks them as `DRAFT` rows, and returns what is ready.
+endpoint makes **no** platform call. It claims whatever is already queued, then
+generates more if the per-platform cap allows, and returns what is ready.
 
 Deliberately org-scoped with **no `planId`**: a project needs no operation plan
 for this to run at all — see **Plan budget** below.
@@ -622,50 +623,186 @@ spent — is skipped entirely rather than spaced only by interval.
 {
   "due": [
     {
-      "sentReplyId": "<engage-sent-reply-uuid>",  // the parked DRAFT record
+      "sentReplyId": "<engage-sent-reply-uuid>",  // the queued reply record
       "opportunityId": "<opportunity-uuid>",
       "projectId": "product_123",
       "platform": "reddit",
       "url": "https://reddit.com/r/x/comments/1", // the post being replied to
-      "text": "…",                                 // the generated reply
-      "mode": "auto"                              // compat constant; see below
+      "text": "…"                                  // the generated reply
     }
   ]
 }
 ```
 
-Every item is already a saved `DRAFT`, so it also shows up in Awaiting review.
+Every item is a `Post(state=QUEUE)` claimed under a lease. They do **not** appear
+in Awaiting review — that lists `DRAFT`, which now means exactly "a person saved
+this and has not sent it".
 
-`mode` is a **constant `"auto"`**, kept only for backward compatibility. It used
-to carry the project's `autoReplyMode`, and the extension posted only the
-`"auto"` items, parking `"review"` for a human. That mode is retired — managed
-replying has one behaviour — so the field no longer decides anything here.
+There is no `mode` field. It used to carry the project's `autoReplyMode`, and the
+extension posted only the `"auto"` items, parking `"review"` for a human. Both
+are retired — managed replying has one behaviour.
 
-**Why it is still sent.** The extension ships to browsers nobody controls and
-updates on Chrome's schedule, so no backend release can assume a particular build
-is deployed. Builds up to and including the one that stopped reading `mode` gate
-sending on `mode === 'auto'`; an item without the field is skipped. Dropping the
-field server-side would silently stop replies for every client still running an
-older build — and "silently" is the problem, since nothing errors.
+It was deleted rather than kept as a constant because the API carries exactly one
+contract: see [Extension version floor](#extension-version-floor).
 
-This is the ordinary field-retirement order, and it only runs one way:
+**Queued, claimed, drained — the same shape as scheduled posts.** The driver
+writes each generated reply as `Post(state=QUEUE)` and this endpoint hands it to
+a browser under a lease, exactly as `POST /posts/publish-due` does for scheduled
+posts. Same two columns (`releaseId` + `claimedAt`), same claim, same release.
 
-| Step | Who | State |
+| | Scheduled post | Engage reply |
 | --- | --- | --- |
-| 1 | Extension | stops reading `mode` — a build that tolerates the field present **or** absent |
-| 2 | — | wait until telemetry shows no build still reading it |
-| 3 | Backend | stops sending it |
+| Waiting | `Post(state=QUEUE)` | same |
+| Drained by | `POST /posts/publish-due` | `POST /api/engage/reply-due` |
+| Lease | `releaseId` + `claimedAt` | same |
+| Released by | publish backfills `PUBLISHED` | same |
+| Paced by | each post's own `publishDate` | the driver's window + minimum gap |
 
-Steps 1 and 3 can be years apart; the field costs one constant string per item.
-The compatibility matrix while both exist:
+**Sharing the state machine is not sharing the pipeline.** A reply is a
+`Post(state=QUEUE)` like any other, so every mechanism that walks QUEUE posts
+sees it — and two of them must not act on it. Both exclude it by
+`source: 'engage'`, and both would fail loudly if they did not:
 
-| | old backend (sends `mode`) | new backend (sends `mode`) |
+| Mechanism | Engage replies | What excluding it prevents |
 | --- | --- | --- |
-| **old extension** (reads it) | sends | sends |
-| **new extension** (ignores it) | sends | sends |
+| `POST /posts/publish-due` | **excluded** | The due-item shape carries no reply target, so the extension would publish the text as a brand-new post (X) or reject it forever for lacking a subreddit (Reddit). |
+| `markStaleQueuePostsAsError` (7-day sweep) | **excluded** | A reply Post matches neither routing branch — no `publishMethod`, no integration — so it would be swept to `ERROR`. Waiting a week is a user who has not opened Chrome, not a failure, and `retryPost` could not resurrect it (it needs an integration). |
+
+`publishMethod: EXTENSION` would have inherited the sweep's existing exclusion,
+but it is not available: publish-due selects on exactly that field, so setting it
+would hand replies to the wrong drain. `source` is what separates them.
+
+**Redelivery is not a separate mechanism — it is what a lease already does.** A
+claim that never results in a send (browser closed, network dropped, platform
+errored) simply expires, and the reply is offered again on a later poll. Nothing
+tracks attempts and nothing needs to.
+
+**A queued reply passes the same gates as a fresh one**, per (project, platform):
+
+| Gate | Queued | Fresh | Why |
+| --- | --- | --- | --- |
+| local-time window | ✅ | ✅ | it decides *when* a reply may leave; a re-offer at 3am is outside the hours the project set |
+| minimum gap | ✅ | ✅ | draining a backlog as fast as the extension polls is the burst the gap exists to prevent |
+| plan budget | ❌ | ✅ | the budget bounds what is *produced*; a queued reply was counted when generated, and blocking it would strand what the budget already paid for |
+
+One queued reply per (project, platform) per poll, mirroring generation — a
+backlog therefore clears at the configured pace, deliberately. Re-offers cost
+nothing to produce but still consume `maxPerPoll`, because the cap protects the
+user's account and the account cannot tell a re-offer from a first attempt. The
+queue is drained before anything new is generated, or new work would permanently
+outrank the replies already waiting.
+
+`claimLeaseMinutes` in `engage_reply_pacing` (default **30**) sets how long a
+claimed reply stays spoken for. **It must exceed the extension's poll interval**
+(15 min) with room to spare — a shorter lease hands a reply still being posted to
+a second client, which is the one failure this must never introduce.
+
+> **`state` is the only thing separating an automated reply from a human's
+> draft.** `POST /opportunities/:id/save-draft` writes `DRAFT`; the unattended
+> driver writes `QUEUE`. Both produce an `EngageSentReply` over a `Post` and are
+> otherwise identical. A `DRAFT` belongs to a person who has not pressed send —
+> it waits in Awaiting review and no automated path may claim it. The public
+> save-draft endpoint accepts no `state` for exactly this reason: a client able
+> to ask for `QUEUE` could put text in front of a real audience with no human
+> step. Queueing is `EngageService.queueAutoReply`, reachable only by the driver.
 
 Each draft costs reply-generation credits and is admitted by the same monthly cap
 as the user-driven `POST /opportunities/:id/draft`.
+
+---
+
+### Extension version floor
+
+The extension runs in browsers nobody controls, updated on Chrome's schedule, so
+several builds are always live at once. Two ways to handle that, and only one
+scales:
+
+**Serve every old shape forever.** Each retired field leaves a permanent shim,
+because "has the whole fleet updated?" has no answer — so the shim is never
+removed and the contract only ever grows.
+
+**State the contract and refuse builds too old to speak it.** The API carries one
+shape; a stale client is told to update rather than quietly handed a payload it
+will misread.
+
+The second is what runs. Every extension call sends `x-aisee-ext-version`
+(its Chrome manifest version). `ExtensionVersionGuard` compares it against the
+`extension_min_version` setting and answers **`426 Upgrade Required`** below the
+floor:
+
+```jsonc
+{
+  "code": "extension_upgrade_required",
+  "message": "This extension build (1.2.0) is older than the minimum supported version (2.0.0). Update the extension to continue.",
+  "minVersion": "2.0.0",
+  "yourVersion": "1.2.0"
+}
+```
+
+The extension's `backendCall` turns a 426 into an `UpgradeRequiredError`, pauses
+**all** background loops, and calls `chrome.runtime.requestUpdateCheck()` — which
+typically turns "within a day or two" into minutes. Handled centrally in the
+transport rather than per loop, because one refusal has to stop every loop and a
+check per runner is a check the next runner forgets. The pause is mirrored into
+`chrome.storage.local`, so an MV3 worker eviction does not silently un-pause it,
+and it clears itself once the running build differs from the refused one — a
+successful update must not leave the user stuck on "please update".
+
+### Telling a client the floor BEFORE it is refused
+
+Every served response to an extension caller carries
+**`x-aisee-ext-min-version`**. A 426 says "you have stopped working", which is
+too late to be a warning; the header says "you will stop working", while
+everything still functions.
+
+It is a header rather than a field on `/engage/config`, `/user/subscription`, or
+any other payload, for two reasons:
+
+- The floor is a property of the **contract**, not of engage config or of a
+  subscription. Those endpoints would be carrying it only because they happen to
+  be called.
+- A client already below the floor gets 426 from **every** business endpoint —
+  so a payload field is unreadable in exactly the situation it exists for. The
+  header is present on the served and the refused answer alike.
+
+The extension records it in `chrome.storage.local` from `fetchRequestUtil` (one
+place, every call) and the popup renders a **banner over the working UI** while
+the build is below the floor but not yet refused — never a block, because the
+extension still works and taking it away would be the wrong trade. Once actually
+refused, the banner yields to the blocking notice; two notices about the same
+thing is one too many.
+
+Both headers are listed in the API's CORS config — `x-aisee-ext-version` under
+`allowedHeaders`, `x-aisee-ext-min-version` under `exposedHeaders`. A service
+worker with host permissions bypasses CORS, but the same transport is reachable
+from page contexts that do not, and a request header missing from `allowedHeaders`
+fails preflight — taking out every call rather than just this one.
+
+Four properties make raising the floor safe:
+
+- **No header, no gate.** The web app and server-to-server calls state no version
+  and pass. They have no build to gate, and refusing them would take out the
+  whole API rather than just stale extensions.
+- **The default floor is the build that introduced the header.**
+  `extension_min_version` defaults to `1.10.0` — anything older cannot state a
+  version at all and passes as "not the extension", so the default refuses
+  exactly the builds that *do* announce themselves and are behind. Editable in
+  aisee-manage (**Post → 配置 → 插件 → 版本管理**); raising it when a contract
+  changes needs no deploy. An empty value turns the gate off without deleting
+  the key.
+- **A read failure enforces nothing.** Not the same as "nothing stored": an
+  unreadable setting yields *no floor at all*, never the default. A gate that
+  cannot read its own configuration must not enforce it — falling back to the
+  default there would let a settings outage start refusing clients. Nothing
+  behind the gate is protected *by* it, so failing open costs one stale client
+  one more poll, while failing closed costs every user their automation.
+- **A build too old to understand 426 still fails safely.** It sees an error,
+  publishes nothing, and keeps polling until Chrome updates it. The failure
+  direction is "nothing happens", never "the wrong thing happens" — which is the
+  only reason the floor can be raised without waiting for the fleet.
+
+Only `426` triggers this. A `500` is the server having a bad moment, and pausing
+all background work over one would be an outage of our own making.
 
 ---
 
@@ -1545,12 +1682,12 @@ while (true) {
 
 Save (upsert) an **unpublished working draft** reply for an opportunity — **one DRAFT per opportunity**. The content may be AI-generated, AI-then-edited, or **fully hand-typed**: the save is decoupled from generation (the SSE `/draft` endpoint above does *not* persist anything, and a manually-typed reply never calls it).
 
-Stored as a `Post(state=DRAFT, source=engage)` + `EngageSentReply`, so it surfaces in `GET /sent?status=awaiting`. It is deliberately **lightweight** — unlike send/schedule/manual it does **NOT**:
+Stored as a `Post(state=DRAFT, source=engage)` + `EngageSentReply`, so it surfaces in `GET /sent?status=awaiting`. `DRAFT` is the whole meaning of "a person saved this and has not sent it": automated replies are written as `QUEUE` instead, and **no automated path may claim a `DRAFT`**. This endpoint accepts no `state` for that reason — a client able to ask for `QUEUE` could put text in front of a real audience with no human step. It is deliberately **lightweight** — unlike send/schedule/manual it does **NOT**:
 - claim the opportunity (it stays actionable in the signal feed),
 - charge reply credits (generation already did, if used),
 - create a real post or sync metrics.
 
-When the opportunity is later sent / scheduled / manually replied, the leftover DRAFT is **automatically deleted** (the claim obsoletes it).
+When the opportunity is later sent / scheduled / manually replied, every **un-held unsent** reply for it is **automatically deleted** — the saved `DRAFT` and any automated reply still sitting in `QUEUE` that no browser is currently holding. A reply under an *active claim* is left alone: the extension already has its text and is posting it, so deleting the row cannot call it back — it would only destroy the record of a reply that goes live anyway. The queued half matters: a reply queued *before* the user replied by hand is already past the driver's own exclusion and would otherwise go out too, posting the same opportunity twice. Published rows are history and are never touched.
 
 **Request Body**
 
@@ -1851,10 +1988,10 @@ Retrieve the list of sent replies (includes original post summary and metrics da
 | status | Post condition |
 |---|---|
 | `published` | `state=PUBLISHED` && `releaseURL != null` (published & live) |
-| `scheduled` | `state=QUEUE` (queued for a future auto-publish) |
+| `scheduled` | `state=QUEUE` — queued for a future auto-publish. **Includes unattended replies** the driver generated and is waiting for a browser to drain (see [reply-due](#post-apiengagereply-due)); they are not drafts and never appear under `awaiting`. |
 | `manual` | `state=PUBLISHED` && `releaseURL=null` (posted/copied, link not yet backfilled) |
 | `error` | `state=ERROR` (publishing failed; the generated draft is preserved) |
-| `draft` | `state=DRAFT` (saved working copy, never sent; see `POST /opportunities/:id/save-draft`) |
+| `draft` | `state=DRAFT` — a saved working copy a PERSON has not sent (see `POST /opportunities/:id/save-draft`). Unattended replies are never DRAFT; nothing automated may claim one. |
 | `settled` | `published` **OR** `scheduled` — no further action needed (live, or will auto-fire) |
 | `awaiting` | `draft` **OR** `manual` **OR** `error` — has content but not yet live |
 | `awaiting-draft` | `draft` **AND** this org's `EngageOpportunityState.status != EXPIRED` — the "Drafts" tab: still-actionable saved drafts |

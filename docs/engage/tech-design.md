@@ -677,8 +677,18 @@ export class EngageController {
   // may be AI-generated, edited, or HAND-TYPED (decoupled from generation). Stored as
   // a Post(state=DRAFT)+EngageSentReply; surfaces in the default /sent ("All") list
   // and in /sent?status=awaiting (but NOT in settled / /sent/stats). Does
-  // NOT claim the opportunity, charge credits, or sync metrics. The leftover DRAFT is
-  // auto-deleted when the opportunity is later sent/scheduled/manually replied.
+  // NOT claim the opportunity, charge credits, or sync metrics.
+  //
+  // DRAFT means exactly "a person saved this and has not sent it". The unattended
+  // driver writes QUEUE instead, and no automated path may claim a DRAFT — which
+  // is why this endpoint takes no `state`: a client able to ask for QUEUE could
+  // put text in front of a real audience with no human step.
+  //
+  // Superseded drafts are auto-deleted when the opportunity is later
+  // sent/scheduled/manually replied — every UN-HELD unsent reply for it, DRAFT or
+  // QUEUE. One under an active claim is left alone: the extension already has its
+  // text, so deleting the row cannot call the send back, only destroy the record
+  // of a reply that goes live anyway.
   @Post('/opportunities/:id/save-draft')
   saveDraft(
     @GetOrgFromRequest() org: Organization,
@@ -690,10 +700,12 @@ export class EngageController {
   // status values (no separate endpoint — the old /awaiting-review was folded in),
   // plus three sub-filters of `awaiting` that back the Awaiting-review tabs:
   //   published       = state=PUBLISHED && releaseURL!=null   (live)
-  //   scheduled       = state=QUEUE                           (queued, will auto-fire)
+  //   scheduled       = state=QUEUE                           (queued, will auto-fire —
+  //                     includes unattended replies waiting for a browser to drain them)
   //   manual          = state=PUBLISHED && releaseURL=null    (link not backfilled yet)
   //   error           = state=ERROR                           (publish failed, draft kept)
-  //   draft           = state=DRAFT                           (saved working copy, never sent)
+  //   draft           = state=DRAFT                           (a PERSON's saved working
+  //                     copy, never sent — unattended replies are QUEUE, never DRAFT)
   //   settled         = published OR scheduled        (已处理 — no further action needed)
   //   awaiting        = draft OR manual OR error      (待处理 — has content, not yet live)
   //   awaiting-draft  = draft AND this org's EngageOpportunityState.status != EXPIRED

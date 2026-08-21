@@ -1,5 +1,6 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import dayjs from 'dayjs';
+import { randomUUID } from 'crypto';
 import utc from 'dayjs/plugin/utc';
 import timezone from 'dayjs/plugin/timezone';
 import { Organization } from '@prisma/client';
@@ -94,20 +95,17 @@ export interface EngageReplyPacing {
   /** Opportunities below this score are never auto-replied to. */
   minScore: number;
   /**
-   * How long a handed-out draft is considered SPOKEN FOR before redelivery.
+   * How long a claimed reply stays SPOKEN FOR before it is offered again.
    *
-   * Must exceed the extension's poll interval with room to spare, or the same
-   * draft is handed to a second poll while the first is still posting it — the
-   * one failure this whole mechanism must not introduce. 15-minute alarm, 30 to
-   * be safe.
+   * Must exceed the extension's poll interval with room to spare, or a reply
+   * still being posted is handed to a second client — the one failure this must
+   * never introduce. 15-minute alarm, 30 to be safe.
+   *
+   * The same idea as `EXTENSION_PUBLISH_LEASE_MINUTES` on the publish path, and
+   * for the same reason; a separate knob only because replies poll on their own
+   * cadence and inherit no benefit from being forced to share a number.
    */
-  redeliverAfterMinutes: number;
-  /**
-   * How many times one draft may be handed out in total (first delivery
-   * included). Past it the draft is left for a human rather than taking a slot
-   * out of every poll forever. 0 disables redelivery entirely.
-   */
-  maxHandouts: number;
+  claimLeaseMinutes: number;
 }
 
 export const DEFAULT_REPLY_PACING: EngageReplyPacing = {
@@ -116,8 +114,7 @@ export const DEFAULT_REPLY_PACING: EngageReplyPacing = {
   activeHoursUtc: [0, 24],
   maxPostAgeHours: 48,
   minScore: 70,
-  redeliverAfterMinutes: 30,
-  maxHandouts: 3,
+  claimLeaseMinutes: 30,
 };
 
 /** One draft the extension (or the Awaiting-review UI) can act on. */
@@ -130,20 +127,6 @@ export interface DueReply {
   url: string;
   /** The generated reply text. */
   text: string;
-  /**
-   * Always `'auto'`. A BACKWARD-COMPATIBILITY constant, not a decision.
-   *
-   * It used to carry the project's retired `autoReplyMode`, and extension builds
-   * up to and including the one that retired it gate sending on
-   * `mode === 'auto'` — an item without the field is skipped. The extension
-   * ships to browsers we do not control and updates on Chrome's schedule, so the
-   * backend cannot assume any particular build is out there: dropping this field
-   * would silently stop replies for every client still running an older one.
-   *
-   * Removable only once telemetry shows no build still reading it. Until then it
-   * costs one constant string per item.
-   */
-  mode: 'auto';
 }
 
 /**
@@ -190,8 +173,8 @@ export class EngageAutoReplyService implements OnModuleInit {
               'Unattended engage-reply pacing: how many drafts one poll may hand out PER ' +
               'PLATFORM, minimum spacing per project+platform, the UTC active-hours window, the ' +
               'maximum age of a post worth replying to, the minimum opportunity score, and the ' +
-              'redelivery lease (how long a handed-out draft is spoken for, and how many times ' +
-              'one may be handed out before it is left for a human).',
+              'claim lease (how long a reply handed to a browser stays spoken for before it ' +
+              'is offered again).',
             defaultValue: DEFAULT_REPLY_PACING,
           }
         );
@@ -242,6 +225,14 @@ export class EngageAutoReplyService implements OnModuleInit {
     // rate-limit risk independently, so a busy reddit slate must not starve x
     // (or vice versa) within the same poll.
     const perPlatformCount = new Map<string, number>();
+
+    // Both lanes below share this cutoff: a reply claimed more recently than
+    // this may still be posting in someone's browser.
+    const leaseCutoff = dayjs
+      .utc(now)
+      .subtract(pacing.claimLeaseMinutes, 'minute')
+      .toDate();
+
     for (const config of configs) {
       const projectId = config.projectId!;
       const policies = (config.replyPolicies ?? {}) as Record<string, EngageReplyPolicy>;
@@ -272,8 +263,71 @@ export class EngageAutoReplyService implements OnModuleInit {
         // normalized `platform` used below for the budget/pacing comparisons.
         const policy = policies[rawPlatform];
         if (!policy?.autoReplyEnabled) continue;
+
+        // ── Gates that apply to EVERY reply handed out, queued or fresh ──────
+        //
+        // These decide WHEN a reply may leave, so a queued one has to pass them
+        // too. It was generated at some earlier moment under conditions that no
+        // longer hold: handing it over now without re-checking would post
+        // outside the hours the project set, or in a burst the gap exists to
+        // prevent — and a reply that failed to send once is exactly the one most
+        // likely to be re-offered at 3am.
         if (!withinLocalWindow(policy, now)) continue;
 
+        // Human-like spacing, per project+platform: without it a poll loop would
+        // empty a day's budget into one burst the moment the window opened.
+        const lastAt = await this._engageRepository.getLastSentReplyAt(
+          org.id,
+          projectId,
+          platform
+        );
+        const minGapMinutes = policy.checkIntervalMinutes ?? pacing.minGapMinutes;
+        if (
+          lastAt &&
+          dayjs.utc(now).diff(dayjs.utc(lastAt), 'minute') < minGapMinutes
+        ) {
+          continue;
+        }
+
+        // ── Queued first ────────────────────────────────────────────────────
+        //
+        // A reply already in QUEUE is claimed before anything new is generated.
+        // Cost: it was generated and paid for on an earlier poll, so re-offering
+        // it is free, while generating alongside it spends twice for one reply.
+        // Debt: otherwise new work permanently outranks the replies waiting to
+        // go out, which is how a queue only grows.
+        //
+        // ONE per (project, platform) per poll, mirroring `_draftOne` — the
+        // spacing above is the point, and draining a backlog in one burst is
+        // precisely what gets an account rate-limited. A backlog therefore
+        // clears at the configured pace, deliberately.
+        const claimed = await this._engageRepository.claimDueEngageReplies(
+          org.id,
+          projectId,
+          platform,
+          { limit: 1, leaseToken: `claim_${randomUUID()}`, leaseCutoff, now }
+        );
+        if (claimed.length) {
+          for (const row of claimed) {
+            due.push({
+              sentReplyId: row.id,
+              opportunityId: row.opportunityId,
+              projectId: row.projectId ?? projectId,
+              platform: row.platform,
+              url: row.url,
+              text: row.content,
+            });
+            perPlatformCount.set(platform, (perPlatformCount.get(platform) ?? 0) + 1);
+          }
+          continue;
+        }
+
+        // ── Gate that applies to GENERATION only ─────────────────────────────
+        //
+        // The plan budget bounds how much is PRODUCED. A queued reply was
+        // counted against it when it was generated, so re-offering one must not
+        // be blocked by a spent budget — that would strand the very replies the
+        // budget already paid for.
         const budget = await this._engageService.getReplyBudget(
           org.id,
           projectId,
@@ -290,21 +344,6 @@ export class EngageAutoReplyService implements OnModuleInit {
         if (
           isReplyBudgetGateEnabled() &&
           (budget.cap === null || !budget.remaining)
-        ) {
-          continue;
-        }
-
-        // Human-like spacing, per project+platform: without it a poll loop would
-        // empty a day's budget into one burst the moment the window opened.
-        const lastAt = await this._engageRepository.getLastSentReplyAt(
-          org.id,
-          projectId,
-          platform
-        );
-        const minGapMinutes = policy.checkIntervalMinutes ?? pacing.minGapMinutes;
-        if (
-          lastAt &&
-          dayjs.utc(now).diff(dayjs.utc(lastAt), 'minute') < minGapMinutes
         ) {
           continue;
         }
@@ -418,12 +457,16 @@ export class EngageAutoReplyService implements OnModuleInit {
       // failure here releases instead — recoverable, not a repeat charge.
       let saved: { id: string };
       try {
-        saved = await this._engageService.saveDraft(org, candidate.opportunityId, {
-          draftContent: text,
-          strategy,
-          brandStrength: 50,
+        // QUEUE, not DRAFT. DRAFT is a person's — it waits for them in Awaiting
+        // review and nothing automated may send it. This reply was authorized by
+        // the project's automation switch and is waiting only for a browser,
+        // exactly like a scheduled post waiting for its slot.
+        saved = await this._engageService.queueAutoReply(org, candidate.opportunityId, {
+          platform: opportunity.platform,
+          content: text,
+          inputData: { strategy, brandStrength: 50 },
           projectId,
-        } as any);
+        });
       } catch (err) {
         await this._engageService
           .releaseReplyGeneration(reservation.taskId)
@@ -445,6 +488,11 @@ export class EngageAutoReplyService implements OnModuleInit {
           )
         );
 
+      // No lease stamped here. The reply is in QUEUE, so the very next poll's
+      // claim lane picks it up and leases it there — one code path holding the
+      // lease instead of two writing the same columns. Handing it over now
+      // without a lease is safe for the same reason: an unclaimed QUEUE row is
+      // exactly what the claim lane is for.
       return {
         sentReplyId: saved.id,
         opportunityId: candidate.opportunityId,
@@ -452,8 +500,6 @@ export class EngageAutoReplyService implements OnModuleInit {
         platform: opportunity.platform,
         url: opportunity.externalPostUrl || '',
         text,
-        // See DueReply.mode — a constant for old extension builds, not a branch.
-        mode: 'auto',
       };
     } catch (err) {
       await this._engageRepository
@@ -475,3 +521,4 @@ export class EngageAutoReplyService implements OnModuleInit {
     }
   }
 }
+

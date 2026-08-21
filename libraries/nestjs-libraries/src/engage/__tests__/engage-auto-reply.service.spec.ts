@@ -22,6 +22,7 @@ function makeService(over: {
   lastSentAt?: Date | null;
   pacing?: Partial<typeof DEFAULT_REPLY_PACING>;
   opportunity?: any;
+  queued?: any[];
 } = {}) {
   const repo = {
     getAutoReplyConfigs: vi.fn().mockResolvedValue(over.configs ?? []),
@@ -29,6 +30,7 @@ function makeService(over: {
     claimAutoReplyCandidate: vi.fn().mockResolvedValue(true),
     releaseAutoReplyCandidate: vi.fn().mockResolvedValue(undefined),
     getLastSentReplyAt: vi.fn().mockResolvedValue(over.lastSentAt ?? null),
+    claimDueEngageReplies: vi.fn().mockResolvedValue(over.queued ?? []),
   } as any;
 
   const engage = {
@@ -48,6 +50,7 @@ function makeService(over: {
     settleReplyGeneration: vi.fn().mockResolvedValue(undefined),
     releaseReplyGeneration: vi.fn().mockResolvedValue(undefined),
     saveDraft: vi.fn().mockResolvedValue({ id: 'sent-1' }),
+    queueAutoReply: vi.fn().mockResolvedValue({ id: 'sent-1' }),
   } as any;
 
   const draft = {
@@ -75,7 +78,6 @@ function makeService(over: {
 const enabledConfig = {
   id: 'cfg-1',
   projectId: 'proj-1',
-  autoReplyMode: 'auto',
   replyPolicies: {
     reddit: { autoReplyEnabled: true },
     x: { autoReplyEnabled: true },
@@ -93,7 +95,7 @@ describe('EngageAutoReplyService.getDueReplies', () => {
   beforeEach(() => vi.clearAllMocks());
   afterEach(() => vi.unstubAllEnvs());
 
-  it('drafts one reply and parks it as a DRAFT row', async () => {
+  it('drafts one reply and parks it as a QUEUE row', async () => {
     const { svc, engage } = makeService({
       // Single platform: the per-platform maxPerPoll cap is exercised separately
       // below, this test is only about the draft/persist sequence.
@@ -112,13 +114,14 @@ describe('EngageAutoReplyService.getDueReplies', () => {
       platform: 'reddit',
       url: 'https://reddit.com/r/x/comments/1',
       text: 'a thoughtful reply',
-      // Constant, kept for extension builds that still gate on it. Dropping it
-      // would silently stop replies on every client running an older build.
-      mode: 'auto',
     });
-    // The DRAFT row is the commit point — it is what stops the next poll from
-    // drafting the same opportunity again.
-    expect(engage.saveDraft).toHaveBeenCalledTimes(1);
+    // Gone from the wire: the version floor (ExtensionVersionGuard) means the
+    // API carries one contract, so a retired field is deleted rather than
+    // shimmed forever for builds that might still read it.
+    expect(due[0]).not.toHaveProperty('mode');
+    // The QUEUE row is the commit point — it is what stops the next poll from
+    // drafting the same opportunity again, and what the claim lane picks up.
+    expect(engage.queueAutoReply).toHaveBeenCalledTimes(1);
   });
 
   it('does not generate when another worker has already claimed the candidate', async () => {
@@ -140,7 +143,7 @@ describe('EngageAutoReplyService.getDueReplies', () => {
       budget: budgetWith(),
       candidates: [{ id: 'state-1', opportunityId: 'opp-1', score: 90, matchedKeywords: [] }],
     });
-    engage.saveDraft.mockRejectedValue(new Error('db down'));
+    engage.queueAutoReply.mockRejectedValue(new Error('db down'));
 
     await expect(svc.getDueReplies(org, new Date('2026-08-18T12:00:00Z'))).resolves.toEqual([]);
     expect(repo.releaseAutoReplyCandidate).toHaveBeenCalledWith('org-1', 'proj-1', 'state-1');
@@ -168,7 +171,7 @@ describe('EngageAutoReplyService.getDueReplies', () => {
 
     expect(await svc.getDueReplies(org, new Date('2026-08-18T12:00:00Z'))).toHaveLength(1);
     expect(repo.pickAutoReplyCandidates).toHaveBeenCalled();
-    expect(engage.saveDraft).toHaveBeenCalled();
+    expect(engage.queueAutoReply).toHaveBeenCalled();
   });
 
   it('hands out NOTHING when the project has no active plan and the budget gate is ON', async () => {
@@ -185,7 +188,7 @@ describe('EngageAutoReplyService.getDueReplies', () => {
 
     expect(await svc.getDueReplies(org, new Date('2026-08-18T12:00:00Z'))).toEqual([]);
     expect(repo.pickAutoReplyCandidates).not.toHaveBeenCalled();
-    expect(engage.saveDraft).not.toHaveBeenCalled();
+    expect(engage.queueAutoReply).not.toHaveBeenCalled();
   });
 
   it('hands out nothing once the day\'s budget is spent and the budget gate is ON', async () => {
@@ -315,7 +318,7 @@ describe('EngageAutoReplyService.getDueReplies', () => {
 
     expect(await svc.getDueReplies(org, new Date('2026-08-18T12:00:00Z'))).toEqual([]);
     expect(engage.releaseReplyGeneration).toHaveBeenCalledWith('task-1');
-    expect(engage.saveDraft).not.toHaveBeenCalled();
+    expect(engage.queueAutoReply).not.toHaveBeenCalled();
   });
 
   it('a failing draft never aborts the rest of the sweep', async () => {
@@ -540,15 +543,17 @@ describe('EngageAutoReplyService.getDueReplies — platform key casing', () => {
 
     await svc.getDueReplies(org, new Date('2026-08-18T12:00:00Z'));
 
-    expect(engage.saveDraft).toHaveBeenCalledWith(
+    expect(engage.queueAutoReply).toHaveBeenCalledWith(
       org,
       'opp-1',
-      expect.objectContaining({ strategy: 'AMPLIFY' })
+      expect.objectContaining({
+        inputData: expect.objectContaining({ strategy: 'AMPLIFY' }),
+      })
     );
   });
 });
 
-// Found on re-review: settleReplyGeneration ran BEFORE saveDraft. A saveDraft
+// Found on re-review: settleReplyGeneration ran BEFORE the persist. A persist
 // failure after a successful settle would charge for a draft that exists
 // nowhere retrievable — no EngageSentReply row, so pickAutoReplyCandidates
 // would offer the SAME opportunity again next poll, re-drafting (and
@@ -556,13 +561,13 @@ describe('EngageAutoReplyService.getDueReplies — platform key casing', () => {
 describe('EngageAutoReplyService.getDueReplies — settle ordering', () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it('releases (never settles) the reservation when saveDraft fails', async () => {
+  it('releases (never settles) the reservation when the queue write fails', async () => {
     const { svc, engage } = makeService({
       configs: [enabledConfig],
       budget: budgetWith(),
       candidates: [{ opportunityId: 'opp-1', score: 90, matchedKeywords: [] }],
     });
-    engage.saveDraft.mockRejectedValue(new Error('db down'));
+    engage.queueAutoReply.mockRejectedValue(new Error('db down'));
 
     const due = await svc.getDueReplies(org, new Date('2026-08-18T12:00:00Z'));
 
@@ -571,7 +576,7 @@ describe('EngageAutoReplyService.getDueReplies — settle ordering', () => {
     expect(engage.settleReplyGeneration).not.toHaveBeenCalled();
   });
 
-  it('settles only after saveDraft has already succeeded', async () => {
+  it('settles only after the queue write has already succeeded', async () => {
     const { svc, engage } = makeService({
       // Single platform so callOrder reflects exactly one draft/settle pair.
       configs: [{ ...enabledConfig, replyPolicies: { reddit: { autoReplyEnabled: true } } }],
@@ -579,8 +584,8 @@ describe('EngageAutoReplyService.getDueReplies — settle ordering', () => {
       candidates: [{ opportunityId: 'opp-1', score: 90, matchedKeywords: [] }],
     });
     const callOrder: string[] = [];
-    engage.saveDraft.mockImplementation(async () => {
-      callOrder.push('saveDraft');
+    engage.queueAutoReply.mockImplementation(async () => {
+      callOrder.push('queueAutoReply');
       return { id: 'sent-1' };
     });
     engage.settleReplyGeneration.mockImplementation(async () => {
@@ -589,6 +594,198 @@ describe('EngageAutoReplyService.getDueReplies — settle ordering', () => {
 
     await svc.getDueReplies(org, new Date('2026-08-18T12:00:00Z'));
 
-    expect(callOrder).toEqual(['saveDraft', 'settle']);
+    expect(callOrder).toEqual(['queueAutoReply', 'settle']);
+  });
+});
+
+// A reply is generated, claimed by the extension, and the send never lands — the
+// browser was closed, the network dropped, the platform errored. Redelivery is
+// not a mechanism of its own: the reply is in QUEUE, the claim leases it, and an
+// expired lease means it is simply offered again. Same shape as the publish path.
+//
+// These pin that, and the one thing it must never become: sending a DRAFT, which
+// belongs to a human who has not pressed send.
+describe('EngageAutoReplyService.getDueReplies — the queue lane', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  const queued = (over: Record<string, unknown> = {}) => ({
+    id: 'sent-old',
+    projectId: 'proj-1',
+    opportunityId: 'opp-old',
+    platform: 'reddit',
+    url: 'https://reddit.com/r/x/comments/old',
+    content: 'a reply waiting to go out',
+    ...over,
+  });
+
+  it('hands over a queued reply without generating or charging anything', async () => {
+    const { svc, engage, repo } = makeService({
+      configs: [{ ...enabledConfig, replyPolicies: { reddit: { autoReplyEnabled: true } } }],
+      queued: [queued()],
+    });
+
+    const due = await svc.getDueReplies(org);
+
+    expect(due).toHaveLength(1);
+    expect(due[0]).toMatchObject({
+      sentReplyId: 'sent-old',
+      url: 'https://reddit.com/r/x/comments/old',
+      text: 'a reply waiting to go out',
+    });
+    // The text already exists — regenerating it would charge twice for one reply
+    // and burn another slice of the daily budget.
+    expect(engage.reserveReplyGeneration).not.toHaveBeenCalled();
+    expect(engage.queueAutoReply).not.toHaveBeenCalled();
+    expect(repo.pickAutoReplyCandidates).not.toHaveBeenCalled();
+  });
+
+  it('drains the queue before generating anything new', async () => {
+    // maxPerPoll is 1 by default, so a waiting reply takes that slot: the cap
+    // protects the user's account, which cannot tell a re-offer from a first
+    // attempt, and new work outranking the queue is what lets it only grow.
+    const { svc, engage } = makeService({
+      configs: [{ ...enabledConfig, replyPolicies: { reddit: { autoReplyEnabled: true } } }],
+      queued: [queued()],
+      candidates: [{ opportunityId: 'opp-new', stateId: 'st-new' }],
+    });
+
+    const due = await svc.getDueReplies(org);
+
+    expect(due).toHaveLength(1);
+    expect(due[0].sentReplyId).toBe('sent-old');
+    expect(engage.queueAutoReply).not.toHaveBeenCalled();
+  });
+
+  it('claims with a fresh lease token and an expiring cutoff', async () => {
+    const { svc, repo } = makeService({
+      configs: [{ ...enabledConfig, replyPolicies: { reddit: { autoReplyEnabled: true } } }],
+    });
+    const now = new Date('2026-08-21T12:00:00Z');
+
+    await svc.getDueReplies(org, now);
+
+    const [, projectId, platform, opts] = repo.claimDueEngageReplies.mock.calls[0];
+    expect(projectId).toBe('proj-1');
+    expect(platform).toBe('reddit');
+    // 30 minutes back — comfortably longer than the extension's 15-minute poll,
+    // so a reply still being posted is never offered to a second client.
+    expect(opts.leaseCutoff).toEqual(new Date('2026-08-21T11:30:00Z'));
+    // The token identifies OUR claim, which is how the read-back tells the rows
+    // we won from the ones a racing puller took.
+    expect(opts.leaseToken).toMatch(/^claim_/);
+  });
+
+  it('generates into QUEUE, never into DRAFT', async () => {
+    // DRAFT is a person's: it waits for them in Awaiting review and nothing
+    // automated may send it. Writing an automated reply there would put it
+    // somewhere nothing sends from — and make it indistinguishable from theirs.
+    const { svc, engage } = makeService({
+      configs: [{ ...enabledConfig, replyPolicies: { reddit: { autoReplyEnabled: true } } }],
+      candidates: [{ opportunityId: 'opp-1', stateId: 'st-1' }],
+    });
+
+    await svc.getDueReplies(org);
+
+    expect(engage.queueAutoReply).toHaveBeenCalledTimes(1);
+    expect(engage.saveDraft).not.toHaveBeenCalled();
+  });
+
+  it('leaves a freshly generated reply unleased for the next poll to claim', async () => {
+    // One code path holds the lease. Stamping one here too would mean two places
+    // writing the same columns for the same reason.
+    const { svc, repo } = makeService({
+      configs: [{ ...enabledConfig, replyPolicies: { reddit: { autoReplyEnabled: true } } }],
+      candidates: [{ opportunityId: 'opp-1', stateId: 'st-1' }],
+    });
+
+    const due = await svc.getDueReplies(org);
+
+    expect(due).toHaveLength(1);
+    expect(repo.claimDueEngageReplies).toHaveBeenCalledTimes(1);
+  });
+
+  // The gates decide WHEN a reply may leave, so a queued one has to pass them
+  // too. It was generated under conditions that no longer hold — and a reply
+  // whose send already failed once is exactly the one most likely to come back
+  // round at 3am.
+  it('will not hand over a queued reply outside the local-time window', async () => {
+    const { svc, repo } = makeService({
+      configs: [
+        {
+          ...enabledConfig,
+          replyPolicies: {
+            reddit: {
+              autoReplyEnabled: true,
+              windowStart: '09:00',
+              windowEnd: '18:00',
+              timezone: 'UTC',
+            },
+          },
+        },
+      ],
+      queued: [queued()],
+    });
+
+    const due = await svc.getDueReplies(org, new Date('2026-08-21T03:00:00Z'));
+
+    expect(due).toHaveLength(0);
+    expect(repo.claimDueEngageReplies).not.toHaveBeenCalled();
+  });
+
+  it('will not hand over a queued reply inside the minimum gap', async () => {
+    // Otherwise a backlog drains as fast as the extension polls — the burst the
+    // gap exists to prevent, and the one an account gets rate-limited for.
+    const { svc, repo } = makeService({
+      configs: [{ ...enabledConfig, replyPolicies: { reddit: { autoReplyEnabled: true } } }],
+      queued: [queued()],
+      lastSentAt: new Date('2026-08-21T11:55:00Z'),
+    });
+
+    const due = await svc.getDueReplies(org, new Date('2026-08-21T12:00:00Z'));
+
+    expect(due).toHaveLength(0);
+    expect(repo.claimDueEngageReplies).not.toHaveBeenCalled();
+  });
+
+  it('hands over a queued reply even when the plan budget is spent', async () => {
+    // The budget bounds what is PRODUCED. A queued reply was counted against it
+    // when generated, so a spent budget must not strand the very replies it
+    // already paid for.
+    vi.stubEnv('ENGAGE_REPLY_BUDGET_GATE_ENABLED', 'true');
+    const { svc, engage } = makeService({
+      configs: [{ ...enabledConfig, replyPolicies: { reddit: { autoReplyEnabled: true } } }],
+      queued: [queued()],
+      budget: { cap: 5, sentToday: 5, remaining: 0, keywords: [] },
+    });
+
+    const due = await svc.getDueReplies(org);
+
+    expect(due).toHaveLength(1);
+    expect(due[0].sentReplyId).toBe('sent-old');
+    // The budget is not even consulted before the claim.
+    expect(engage.getReplyBudget).not.toHaveBeenCalled();
+  });
+
+  it('takes ONE queued reply per project+platform per poll', async () => {
+    // Mirrors `_draftOne`. Draining a backlog in one burst is exactly what the
+    // spacing forbids, so a backlog clears at the configured pace.
+    const { svc, repo } = makeService({
+      configs: [{ ...enabledConfig, replyPolicies: { reddit: { autoReplyEnabled: true } } }],
+      queued: [queued()],
+    });
+
+    await svc.getDueReplies(org);
+
+    expect(repo.claimDueEngageReplies.mock.calls[0][3].limit).toBe(1);
+  });
+
+  it('does not touch the queue for a platform the project has switched off', async () => {
+    const { svc, repo } = makeService({
+      configs: [{ ...enabledConfig, replyPolicies: { reddit: { autoReplyEnabled: false } } }],
+    });
+
+    await svc.getDueReplies(org);
+
+    expect(repo.claimDueEngageReplies).not.toHaveBeenCalled();
   });
 });

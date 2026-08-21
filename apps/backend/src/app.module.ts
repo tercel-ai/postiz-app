@@ -5,6 +5,7 @@ import { APP_GUARD } from '@nestjs/core';
 import { PoliciesGuard } from '@gitroom/backend/services/auth/permissions/permissions.guard';
 import { SuperAdminGuard } from '@gitroom/backend/services/auth/admin/super-admin.guard';
 import { ProjectAuthGuard } from '@gitroom/backend/services/auth/projects/project-auth.guard';
+import { ExtensionVersionGuard } from '@gitroom/backend/services/extension/extension-version.guard';
 import { PublicApiModule } from '@gitroom/backend/public-api/public.api.module';
 import { AdminApiModule } from '@gitroom/backend/admin-api/admin.api.module';
 import { ThrottlerBehindProxyGuard } from '@gitroom/nestjs-libraries/throttler/throttler.provider';
@@ -65,6 +66,12 @@ import { AutomationModule } from '@gitroom/backend/automation/automation.module'
     {
       provide: APP_GUARD,
       useClass: ProjectAuthGuard,
+    },
+    // Registered LAST so it runs after auth: an unauthenticated request should
+    // be told it is unauthenticated, not that its extension is out of date.
+    {
+      provide: APP_GUARD,
+      useClass: ExtensionVersionGuard,
     },
   ],
   exports: [

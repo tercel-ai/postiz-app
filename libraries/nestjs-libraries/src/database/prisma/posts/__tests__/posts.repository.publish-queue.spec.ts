@@ -181,7 +181,7 @@ describe('schedulePostGroupToQueue', () => {
   });
 });
 
-describe('markStaleQueuePostsAsError — never sweeps extension-routed posts', () => {
+describe('markStaleQueuePostsAsError — never sweeps what waits for a browser', () => {
   it('excludes explicit EXTENSION and legacy null-method extension-integration posts', async () => {
     const updateMany = vi.fn().mockResolvedValue({ count: 3 });
     const repo = createRepo({ updateMany });
@@ -197,6 +197,10 @@ describe('markStaleQueuePostsAsError — never sweeps extension-routed posts', (
           publishMethod: null,
           integration: { providerIdentifier: { in: ['hackernews', 'quora'] } },
         },
+        // Engage replies match NEITHER routing branch — no publishMethod, no
+        // integration — so they need naming separately. They are drained by
+        // reply-due, another pull executor waiting on the same browser.
+        { source: 'engage' },
       ],
     });
   });
@@ -208,7 +212,7 @@ describe('markStaleQueuePostsAsError — never sweeps extension-routed posts', (
     await repo.markStaleQueuePostsAsError();
 
     expect(updateMany.mock.calls[0][0].where.NOT).toEqual({
-      OR: [{ publishMethod: 'EXTENSION' }],
+      OR: [{ publishMethod: 'EXTENSION' }, { source: 'engage' }],
     });
   });
 });

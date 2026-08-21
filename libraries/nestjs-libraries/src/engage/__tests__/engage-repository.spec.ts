@@ -4023,7 +4023,7 @@ describe('EngageRepository.getOrgScanStatus', () => {
   });
 
   describe('draft cleanup on a committed reply', () => {
-    it('createSentReply deletes any leftover DRAFT for the opportunity', async () => {
+    it('createSentReply deletes every UNSENT reply for the opportunity', async () => {
       const { repo, sentCreate, sentFindMany, postDeleteMany } = buildRepo();
       sentCreate.mockResolvedValue({ id: 'reply-1' });
       // A saved draft exists for this opportunity.
@@ -4036,14 +4036,24 @@ describe('EngageRepository.getOrgScanStatus', () => {
         inputData: {},
       });
 
-      // The DRAFT lookup is scoped to org+opportunity+DRAFT; its Post is deleted
-      // (cascades to the EngageSentReply).
-      expect(sentFindMany.mock.calls[0][0].where).toEqual({
+      // Both unsent states, and the QUEUE half is the one that matters: an
+      // automated reply queued BEFORE the user replied by hand is already past
+      // pickAutoReplyCandidates' exclusion and would otherwise go out too,
+      // posting the same opportunity twice. `releaseURL: null` keeps a published
+      // row — history — out of it.
+      const where = sentFindMany.mock.calls[0][0].where;
+      expect(where).toMatchObject({
         organizationId: 'org1',
         projectId: null,
         opportunityId: 'opp1',
-        post: { state: 'DRAFT' },
       });
+      expect(where.post.state).toEqual({ in: ['DRAFT', 'QUEUE'] });
+      expect(where.post.releaseURL).toBeNull();
+      // Un-held only. Deleting a reply the extension is mid-send on cannot call
+      // it back — it would only destroy the record of a reply that goes live
+      // anyway, leaving it unbillable and invisible in Sent.
+      expect(where.post.OR[0]).toEqual({ releaseId: null });
+      expect(where.post.OR[1].claimedAt.lte).toBeInstanceOf(Date);
       expect(postDeleteMany.mock.calls[0][0]).toEqual({
         where: { id: { in: ['post-d'] } },
       });

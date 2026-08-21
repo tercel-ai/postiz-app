@@ -1001,6 +1001,11 @@ export class EngageService implements OnApplicationBootstrap {
         brandStrength: dto.brandStrength,
         mentions: dto.mentions,
       },
+      // Always DRAFT, and deliberately not a parameter of `SaveDraftDto`: this
+      // is a public endpoint, and a client able to ask for QUEUE could put text
+      // in front of a real audience with no human step. Queueing is the
+      // unattended driver's to do — see `queueAutoReply`.
+      state: 'DRAFT',
       },
       resolvedProjectId
     );
@@ -1026,6 +1031,45 @@ export class EngageService implements OnApplicationBootstrap {
       .catch(() => undefined);
 
     return saved;
+  }
+
+  /**
+   * Persist an unattended reply straight into the send QUEUE.
+   *
+   * The driver's counterpart to `saveDraft`, and a separate method rather than a
+   * flag on it because the difference is not a detail of one operation — it is
+   * who the reply belongs to. A DRAFT waits for a person; a QUEUE reply is
+   * already approved by the project's own automation switch and is waiting only
+   * for a browser to send it, the same way a scheduled post waits for its slot.
+   *
+   * Keeping it off the public DTO is the point: `saveDraft` is reachable by any
+   * client, and a `state` it could set would let it put text in front of a real
+   * audience with no human step anywhere.
+   *
+   * No generationHistory entry — that records what a PERSON wrote or picked, and
+   * the driver already appends its own AI entry at generation time.
+   */
+  async queueAutoReply(
+    org: Organization,
+    opportunityId: string,
+    data: {
+      platform: string;
+      content: string;
+      inputData: object;
+      projectId?: string | null;
+    }
+  ) {
+    return this._engageRepository.upsertDraft(
+      org.id,
+      opportunityId,
+      {
+        platform: data.platform,
+        content: data.content,
+        inputData: data.inputData,
+        state: 'QUEUE',
+      },
+      data.projectId
+    );
   }
 
   // Append one AI-generation entry to the opportunity's per-org version history

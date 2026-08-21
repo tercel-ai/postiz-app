@@ -46,6 +46,11 @@ async function start() {
         'Baggage',
         'x-copilotkit-runtime-client-gql-version',
         'x-timezone',
+        // Which extension build is calling. A service worker with host
+        // permissions bypasses CORS, but the same transport is reachable from
+        // page contexts that do not — and a header missing from this list fails
+        // preflight, which would take out every call rather than just this one.
+        'x-aisee-ext-version',
         ...(process.env.NOT_SECURED ? ['auth', 'showorg', 'impersonate'] : []),
       ],
       exposedHeaders: [
@@ -53,6 +58,10 @@ async function start() {
         'onboarding',
         'activate',
         'x-copilotkit-runtime-client-gql-version',
+        // The oldest extension build this API still serves. Sent on every
+        // response so a client learns the floor while it is still ABOVE it —
+        // 426 only tells you once you have already stopped working.
+        'x-aisee-ext-min-version',
         ...(process.env.NOT_SECURED ? ['auth', 'showorg', 'impersonate'] : []),
       ],
       origin: [

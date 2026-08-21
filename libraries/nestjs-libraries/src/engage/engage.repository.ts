@@ -303,6 +303,14 @@ function resolveReplyAuthor(
   return null;
 }
 
+/**
+ * Lease window used when a caller has no pacing config to hand — currently only
+ * `_deleteDraftsForOpportunity`, deciding whether a queued reply is still held
+ * by a browser. Mirrors `DEFAULT_REPLY_PACING.claimLeaseMinutes`; duplicated
+ * rather than imported because the repository must not depend on the driver.
+ */
+const DEFAULT_CLAIM_LEASE_MINUTES = 30;
+
 @Injectable()
 export class EngageRepository {
   private readonly _logger = new Logger(EngageRepository.name);
@@ -1972,6 +1980,98 @@ export class EngageRepository {
   }
 
   /**
+   * LEASE + return this org's queued engage replies for one platform.
+   *
+   * The same claim `claimDueExtensionPublishPosts` performs for scheduled posts,
+   * applied to replies — deliberately the same three steps, on the same two
+   * columns, with the same release semantics:
+   *   1. pick QUEUE replies that are un-leased (`releaseId` null) or whose lease
+   *      has EXPIRED (`claimedAt <= leaseCutoff`), oldest first;
+   *   2. stamp our `leaseToken` + `claimedAt`, guarded by the SAME predicate so
+   *      a racing puller makes our update a no-op for a row it already took;
+   *   3. read back only the rows carrying OUR token — the ones we won.
+   *
+   * A sent reply backfills PUBLISHED and a URL, which overwrites `releaseId` and
+   * releases the lease implicitly. A send that never landed — browser closed,
+   * network dropped, platform errored — is simply re-offered once the lease
+   * expires. That is the whole redelivery mechanism: it is not a feature added
+   * on top, it is what a lease already does, and it is why replies needed no
+   * columns of their own.
+   *
+   * **`state: QUEUE` is what separates an automated reply from a human's draft.**
+   * `POST /opportunities/:id/save-draft` writes DRAFT and the unattended driver
+   * writes QUEUE; nothing else distinguishes them, and both produce an
+   * `EngageSentReply` over a `Post`. A DRAFT is something a person is still
+   * deciding about — it is theirs to send, and it must never be picked up here.
+   */
+  async claimDueEngageReplies(
+    organizationId: string,
+    projectId: string,
+    platform: string,
+    opts: { limit: number; leaseToken: string; leaseCutoff: Date; now: Date }
+  ) {
+    if (opts.limit <= 0) return [];
+
+    const available: Prisma.PostWhereInput = {
+      OR: [{ releaseId: null }, { claimedAt: { lte: opts.leaseCutoff } }],
+    };
+    const dueWhere: Prisma.EngageSentReplyWhereInput = {
+      organizationId,
+      // Scoped to ONE project, because the caller's gates are: the local-time
+      // window and the minimum gap are per (project, platform), and a claim that
+      // spanned projects would be answering for gates it never checked.
+      projectId,
+      opportunity: { platform },
+      post: {
+        state: 'QUEUE',
+        deletedAt: null,
+        // Belt and braces with `state`: a reply that went out leaves QUEUE AND
+        // gains a URL, so a half-written commit cannot resurrect it.
+        releaseURL: null,
+        ...available,
+      },
+    };
+
+    const candidates = await this._sentReply.model.engageSentReply.findMany({
+      where: dueWhere,
+      // Oldest first, so a reply waiting since yesterday is not starved by a
+      // steady trickle of fresher ones.
+      orderBy: { createdAt: 'asc' },
+      take: opts.limit,
+      select: { postId: true },
+    });
+    const postIds = candidates.map((c) => c.postId);
+    if (!postIds.length) return [];
+
+    await this._post.model.post.updateMany({
+      // Re-check availability at write time: a concurrent claim of the same
+      // candidate loses the race for that row, where the guard is a no-op.
+      where: { id: { in: postIds }, state: 'QUEUE', ...available },
+      data: { releaseId: opts.leaseToken, claimedAt: opts.now },
+    });
+
+    const won = await this._sentReply.model.engageSentReply.findMany({
+      where: { postId: { in: postIds }, post: { releaseId: opts.leaseToken } },
+      orderBy: { createdAt: 'asc' },
+      select: {
+        id: true,
+        projectId: true,
+        opportunity: { select: { id: true, platform: true, externalPostUrl: true } },
+        post: { select: { content: true } },
+      },
+    });
+
+    return won.map((row) => ({
+      id: row.id,
+      projectId: row.projectId,
+      opportunityId: row.opportunity.id,
+      platform: row.opportunity.platform,
+      url: row.opportunity.externalPostUrl || '',
+      content: row.post.content,
+    }));
+  }
+
+  /**
    * Opportunities this project could auto-reply to, best first.
    *
    * Only `NEW` rows qualify — every other status means the opportunity is spoken
@@ -2091,6 +2191,33 @@ export class EngageRepository {
       select: { createdAt: true },
     });
     return last?.createdAt ?? null;
+  }
+
+  /**
+   * The same lookup as {@link getLastSentReplyAt}, batched across every
+   * platform a project has a reply policy for — one caller (the Automation
+   * overview) needs it for N platforms at once, and N sequential calls would
+   * cost N round trips for what is otherwise a handful of rows.
+   */
+  async getLastSentReplyAtByPlatform(
+    organizationId: string,
+    projectId: string,
+    platforms: string[]
+  ): Promise<Record<string, Date>> {
+    if (!platforms.length) return {};
+    const rows = await this._sentReply.model.engageSentReply.findMany({
+      where: { organizationId, projectId, opportunity: { platform: { in: platforms } } },
+      orderBy: { createdAt: 'desc' },
+      select: { createdAt: true, opportunity: { select: { platform: true } } },
+    });
+    const out: Record<string, Date> = {};
+    // Rows arrive newest first, so the first one seen per platform is its most
+    // recent — no need to compare timestamps.
+    for (const row of rows) {
+      const platform = row.opportunity.platform;
+      if (!(platform in out)) out[platform] = row.createdAt;
+    }
+    return out;
   }
 
   private _opportunityWhere(
@@ -2691,19 +2818,55 @@ export class EngageRepository {
     };
   }
 
-  // Delete any saved working DRAFT reply for an opportunity. Deleting the Post
-  // cascades to its EngageSentReply (onDelete: Cascade). No-op when none exist.
+  /**
+   * Drop every UNSENT reply for an opportunity — a real reply has gone out, and
+   * anything still waiting to say the same thing is now obsolete.
+   *
+   * Covers BOTH unsent states, and the QUEUE half is the one that matters:
+   *   - `DRAFT` — a person's saved working copy.
+   *   - `QUEUE` — an automated reply waiting for a browser to send it.
+   *
+   * Missing the QUEUE half would post the same opportunity twice. The driver
+   * itself cannot cause that (`pickAutoReplyCandidates` excludes an opportunity
+   * that already carries an `EngageSentReply`), but a reply queued BEFORE the
+   * user replied by hand is already past that check and would go out anyway.
+   *
+   * `releaseURL: null` keeps this to replies that never went out. A published
+   * row is history and is never deleted, whatever its state says.
+   *
+   * A reply under an ACTIVE claim is left alone, and that is not caution — it is
+   * the only useful choice. The extension already holds its text and is posting
+   * it; deleting the row cannot call that back. All it would do is destroy the
+   * record of a reply that goes live anyway — unbillable, untrackable, and
+   * invisible in Sent. Leaving it lets the send complete and commit normally.
+   *
+   * (The claim is read against the same lease window `claimDueEngageReplies`
+   * uses; an EXPIRED claim means nobody is holding it, so it is deleted like any
+   * other unsent row.)
+   *
+   * Deleting the Post cascades to its EngageSentReply (onDelete: Cascade).
+   * No-op when none exist.
+   */
   private async _deleteDraftsForOpportunity(
     organizationId: string,
     opportunityId: string,
-    projectId?: string | null
+    projectId?: string | null,
+    leaseCutoff?: Date
   ): Promise<void> {
+    const cutoff =
+      leaseCutoff ??
+      new Date(Date.now() - DEFAULT_CLAIM_LEASE_MINUTES * 60_000);
     const drafts = await this._sentReply.model.engageSentReply.findMany({
       where: {
         organizationId,
         projectId: projectId ?? null,
         opportunityId,
-        post: { state: 'DRAFT' },
+        post: {
+          state: { in: ['DRAFT', 'QUEUE'] },
+          releaseURL: null,
+          // Un-held only: no claim, or one whose lease has lapsed.
+          OR: [{ releaseId: null }, { claimedAt: { lte: cutoff } }],
+        },
       },
       select: { postId: true },
     });
@@ -2718,12 +2881,34 @@ export class EngageRepository {
   // machinery as sent replies and surfaces in /sent?status=awaiting — but it is NOT
   // a sent reply: no releaseURL, it never claims the opportunity, and every
   // "sent reply" count/analytic excludes DRAFT (only `awaiting` includes it).
+  /**
+   * `state` decides who owns the reply, and it is the ONLY thing that does.
+   *
+   * `DRAFT` — a person saved it and is still deciding. Theirs to send; it sits
+   * in Awaiting review and no automated path may touch it.
+   *
+   * `QUEUE` — the unattended driver produced it and it is waiting to go out,
+   * exactly like a scheduled post waiting for its slot. `claimDueEngageReplies`
+   * only ever picks these up.
+   *
+   * Both produce the same rows otherwise — same `EngageSentReply` over the same
+   * `Post` — so there is no second signal to fall back on. Writing an automated
+   * reply as DRAFT would put it somewhere nothing sends from; writing a human's
+   * as QUEUE would publish something they never approved.
+   */
   async upsertDraft(
     organizationId: string,
     opportunityId: string,
-    data: { platform: string; content: string; inputData: object },
+    data: {
+      platform: string;
+      content: string;
+      inputData: object;
+      /** Automated replies queue for sending; a person's draft waits for them. */
+      state?: 'DRAFT' | 'QUEUE';
+    },
     projectId?: string | null
   ) {
+    const state = data.state ?? 'DRAFT';
     const { randomUUID } = await import('crypto');
     // Atomic: the existing-draft lookup and the Post + EngageSentReply writes run in
     // ONE transaction, so a mid-write failure can never leave an orphan DRAFT Post
@@ -2732,12 +2917,16 @@ export class EngageRepository {
     // DB-level partial unique index, deliberately skipped to avoid a migration; the
     // realistic trigger is a double-click, which the client should debounce.)
     return this._tx.model.$transaction(async (tx) => {
+      // Scoped to the state being written: re-saving a human's draft updates
+      // that draft, and the driver's own upsert can only ever meet its own
+      // queued row. Without the scope a driver run would silently overwrite a
+      // draft the user was editing — and hand it to the extension.
       const existing = await tx.engageSentReply.findFirst({
         where: {
           organizationId,
           projectId: projectId ?? null,
           opportunityId,
-          post: { state: 'DRAFT' },
+          post: { state },
         },
         select: { id: true, postId: true },
       });
@@ -2762,7 +2951,7 @@ export class EngageRepository {
           projectId: projectId ?? null,
           content: data.content,
           publishDate: new Date(),
-          state: 'DRAFT',
+          state,
           source: 'engage',
           image: '[]',
           providerIdentifier: data.platform === 'x' ? 'x' : 'reddit',

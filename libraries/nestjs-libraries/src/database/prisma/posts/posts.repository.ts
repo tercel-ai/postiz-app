@@ -1134,7 +1134,24 @@ export class PostsRepository {
         publishDate: {
           lt: cutoff,
         },
-        NOT: { OR: extensionRoutes },
+        // Engage replies are excluded for the same reason as extension-routed
+        // posts, and they need saying separately because they match neither
+        // routing branch: a reply Post carries no `publishMethod` and no
+        // integration (the extension sends through the user's own browser
+        // session, so there is no OAuth row to route by).
+        //
+        // They are drained by `POST /api/engage/reply-due`, a pull executor on
+        // the same "waits for a browser" footing — sitting in QUEUE for a week
+        // is a user who has not opened Chrome, not a failure. Sweeping one to
+        // ERROR would discard a reply that was generated and paid for, and
+        // `retryPost` could not resurrect it (it needs an integration).
+        //
+        // `publishMethod: EXTENSION` would have inherited the exclusion above,
+        // but it is not available here: `publish-due` selects on exactly that,
+        // and a reply offered to the publish queue is posted as a brand-new
+        // post — the shape of a real incident. Both places therefore exclude
+        // engage replies by `source`.
+        NOT: { OR: [...extensionRoutes, { source: 'engage' }] },
       },
       data: {
         state: 'ERROR',

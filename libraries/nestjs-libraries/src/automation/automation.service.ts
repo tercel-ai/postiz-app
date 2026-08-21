@@ -4,6 +4,7 @@ import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/po
 import { OperationPlanService } from '@gitroom/nestjs-libraries/database/prisma/operation-plan/operation-plan.service';
 import { EngageService } from '@gitroom/nestjs-libraries/engage/engage.service';
 import { EngageRepository } from '@gitroom/nestjs-libraries/engage/engage.repository';
+import { EngageAutoReplyService } from '@gitroom/nestjs-libraries/engage/engage-auto-reply.service';
 import {
   isPublishingActive,
   ProjectPublishingService,
@@ -52,7 +53,8 @@ export class AutomationService {
     private readonly _operationPlanService: OperationPlanService,
     private readonly _engageService: EngageService,
     private readonly _engageRepository: EngageRepository,
-    private readonly _projectPublishing: ProjectPublishingService
+    private readonly _projectPublishing: ProjectPublishingService,
+    private readonly _engageAutoReply: EngageAutoReplyService
   ) {}
 
   /**
@@ -66,10 +68,11 @@ export class AutomationService {
    * here).
    */
   async getOverview(org: Organization, projectId: string) {
-    const [config, publishing, lastPublishedAt] = await Promise.all([
+    const [config, publishing, lastPublishedAt, pacing] = await Promise.all([
       this._engageRepository.getConfigCore(org.id, projectId),
       this._projectPublishing.resolve(org.id, projectId),
       this._postsService.getLastPublishedAt(org.id, projectId),
+      this._engageAutoReply.getPacing(),
     ]);
 
     // Resolved once so the hoisted default and the per-window overrides below
@@ -81,6 +84,30 @@ export class AutomationService {
       string,
       Record<string, unknown>
     >;
+
+    // The same three gates `EngageRepository.getAutoReplyConfigs` applies before
+    // the driver ever looks at a platform — master switch, scan switch, global
+    // reply switch. A platform whose own `autoReplyEnabled` is also true is the
+    // ONLY case the driver will ever act on, so it is the only case worth a
+    // `nextCheckAt`; everything else reports `null` rather than a time that will
+    // never arrive.
+    const repliesActive =
+      publishing.automationEnabled &&
+      (config?.enabled ?? false) &&
+      settings.autoReplyEnabled;
+    const platformKeys = Object.keys(storedPolicies);
+    // Keyed lowercase to match how the driver normalizes a policy's platform
+    // before it ever queries EngageSentReply (engage-auto-reply.service.ts) —
+    // a policy key written with different casing must still resolve.
+    const lastSentAtByPlatform =
+      repliesActive && platformKeys.length
+        ? await this._engageRepository.getLastSentReplyAtByPlatform(
+            org.id,
+            projectId,
+            platformKeys.map((platform) => platform.toLowerCase())
+          )
+        : {};
+    const now = new Date();
 
     return {
       projectId,
@@ -141,7 +168,17 @@ export class AutomationService {
         // by handle and ignores it), and this page had no per-account control to
         // set it with — so listing accounts here only invited a managed-reply
         // save to write an Engage-owned flag on every account at once.
-        platforms: stripPublishingKeys(storedPolicies),
+        //
+        // Each entry also carries `nextCheckAt`: the next time AIsee will check
+        // THIS platform for reply opportunities, or null while that platform is
+        // not being driven at all (see withNextCheckAt below for the formula).
+        platforms: withNextCheckAt(
+          stripPublishingKeys(storedPolicies),
+          repliesActive,
+          lastSentAtByPlatform,
+          pacing.minGapMinutes,
+          now
+        ),
       },
     };
   }
@@ -471,6 +508,43 @@ function stripPublishingKeys(
   for (const [platform, policy] of Object.entries(policies ?? {})) {
     if (!policy || typeof policy !== 'object') continue;
     out[platform] = stripPublishingKeysFromPolicy(policy);
+  }
+  return out;
+}
+
+/**
+ * Adds, to every platform policy, the next time AIsee will check that platform
+ * for reply opportunities — the same anchor and interval the driver itself
+ * gates on (`EngageAutoReplyService.getDueReplies`), so this can never show a
+ * time the driver disagrees with:
+ *
+ *   nextCheckAt = (last reply sent on this platform, or now if never) + minutes
+ *
+ * `minutes` is the platform's own `checkIntervalMinutes` if it set one, else the
+ * org-wide pacing default — again, the exact fallback the driver applies.
+ */
+function withNextCheckAt(
+  policies: Record<string, Record<string, unknown>>,
+  repliesActive: boolean,
+  lastSentAtByPlatform: Record<string, Date>,
+  defaultMinGapMinutes: number,
+  now: Date
+): Record<string, Record<string, unknown>> {
+  const out: Record<string, Record<string, unknown>> = {};
+  for (const [platform, policy] of Object.entries(policies)) {
+    const active = repliesActive && policy.autoReplyEnabled === true;
+    let nextCheckAt: string | null = null;
+    if (active) {
+      const lastSentAt = lastSentAtByPlatform[platform.toLowerCase()];
+      const minGapMinutes =
+        typeof policy.checkIntervalMinutes === 'number'
+          ? policy.checkIntervalMinutes
+          : defaultMinGapMinutes;
+      nextCheckAt = lastSentAt
+        ? new Date(lastSentAt.getTime() + minGapMinutes * 60_000).toISOString()
+        : now.toISOString();
+    }
+    out[platform] = { ...policy, nextCheckAt };
   }
   return out;
 }

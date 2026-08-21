@@ -811,6 +811,31 @@ describe('PostsRepository.markStaleQueuePostsAsError', () => {
     expect(Math.abs(cutoff.getTime() - sevenDaysAgo.getTime())).toBeLessThan(5000);
   });
 
+  it('excludes engage replies, which legitimately wait for a browser', async () => {
+    // A reply Post matches NEITHER routing branch — no publishMethod, no
+    // integration (the extension sends through the user's own session, so there
+    // is no OAuth row) — so without naming `source` it would be swept. Sitting
+    // in QUEUE for a week is a user who has not opened Chrome, not a failure,
+    // and sweeping one discards a reply that was generated and paid for that
+    // `retryPost` cannot resurrect (it needs an integration).
+    mockPrismaPost.updateMany.mockResolvedValue({ count: 0 });
+
+    await repo.markStaleQueuePostsAsError();
+
+    const call = mockPrismaPost.updateMany.mock.calls[0][0];
+    expect(call.where.NOT.OR).toContainEqual({ source: 'engage' });
+  });
+
+  it('still excludes extension-routed posts alongside engage replies', async () => {
+    mockPrismaPost.updateMany.mockResolvedValue({ count: 0 });
+
+    await repo.markStaleQueuePostsAsError(['mastodon']);
+
+    const call = mockPrismaPost.updateMany.mock.calls[0][0];
+    expect(call.where.NOT.OR).toContainEqual({ publishMethod: 'EXTENSION' });
+    expect(call.where.NOT.OR).toContainEqual({ source: 'engage' });
+  });
+
   it('clears releaseId so stale claim tokens do not leak to clients', async () => {
     mockPrismaPost.updateMany.mockResolvedValue({ count: 0 });
 
