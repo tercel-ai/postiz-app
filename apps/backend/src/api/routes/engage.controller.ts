@@ -187,7 +187,7 @@ export class EngageController {
   @ApiResponse({
     status: 400,
     description:
-      'autoReplyMode other than "off" was sent without a projectId — unattended replying is driven by a project\'s operation plan, so it cannot be set on the legacy null-project config',
+      'autoReplyEnabled was sent without a projectId — unattended replying is driven by a project\'s operation plan, so it cannot be set on the legacy null-project config',
   })
   @Post('/config')
   saveConfig(
@@ -437,7 +437,7 @@ export class EngageController {
 
   /**
    * Drafts due to be replied to right now, for the projects that opted into
-   * unattended replying (`EngageConfig.autoReplyMode`).
+   * unattended replying (`EngageConfig.metadata.autoReplyEnabled`).
    *
    * The mirror of `POST /posts/publish-due`: backend = scheduler, extension =
    * executor. This makes NO platform call — it reads the project's plan budget,

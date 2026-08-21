@@ -1938,11 +1938,10 @@ export class EngageRepository {
    * Projects whose managed replies are actually driveable right now.
    *
    * The switch chain, top down (docs/automation-api.md): the Automation master
-   * switch, then the managed-replies feature switch — which IS `autoReplyMode`,
-   * not a second boolean beside it, so there is only ever one answer to "does
-   * this project reply unattended". `enabled` remains the Engage feature's own
-   * switch (it also gates scanning). The per-platform level is applied by the
-   * caller, which reads `replyPolicies[platform].autoReplyEnabled`.
+   * switch, then the managed-replies feature switch (`autoReplyEnabled`).
+   * `enabled` remains the Engage feature's own switch (it also gates scanning).
+   * The per-platform level is applied by the caller, which reads
+   * `replyPolicies[platform].autoReplyEnabled`.
    *
    * Filtering here rather than in the driver keeps a switched-off project out of
    * the result set entirely, so no budget lookup or pacing query is spent on it.
@@ -1968,7 +1967,6 @@ export class EngageRepository {
       .map(({ row, meta }) => ({
         id: row.id,
         projectId: row.projectId,
-        autoReplyMode: meta.autoReplyMode,
         replyPolicies: meta.replyPolicies,
       }));
   }

@@ -35,8 +35,6 @@ export interface EngagePlatformPolicy {
   publishingTimezone?: string;
 }
 
-export type AutoReplyMode = 'off' | 'review' | 'auto';
-
 export interface EngageConfigMetadata {
   /** Automation master switch. */
   automationEnabled: boolean;
@@ -47,8 +45,17 @@ export interface EngageConfigMetadata {
    * configured", and those resolve oppositely.
    */
   publishingEnabled: boolean | null;
-  /** Managed-replies feature switch; the mode IS the switch. */
-  autoReplyMode: AutoReplyMode;
+  /**
+   * Managed-replies feature switch.
+   *
+   * Was a tri-state `autoReplyMode` (`off | review | auto`), where `review`
+   * meant "draft it and wait for a human". That mode is gone: managed replying
+   * always sends, so the third state described a product behaviour that does not
+   * exist, and every client that ever wrote the field wrote `review` — making it
+   * a boolean spelled as an enum. See `readEngageConfigMetadata` for how stored
+   * rows carrying the old field are read.
+   */
+  autoReplyEnabled: boolean;
   replyPolicies: Record<string, EngagePlatformPolicy>;
 }
 
@@ -56,7 +63,7 @@ export interface EngageConfigMetadata {
 export type EngageConfigMetadataPatch = Partial<{
   automationEnabled: boolean;
   publishingEnabled: boolean;
-  autoReplyMode: AutoReplyMode;
+  autoReplyEnabled: boolean;
   replyPolicies: Record<string, EngagePlatformPolicy>;
 }>;
 
@@ -65,16 +72,24 @@ export interface EngageConfigMetadataSource {
   metadata?: unknown;
 }
 
-const AUTO_REPLY_MODES: readonly AutoReplyMode[] = ['off', 'review', 'auto'];
-
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
-function asMode(value: unknown): AutoReplyMode | null {
-  return typeof value === 'string' && (AUTO_REPLY_MODES as readonly string[]).includes(value)
-    ? (value as AutoReplyMode)
-    : null;
+/**
+ * Read the retired tri-state `autoReplyMode` as the boolean that replaced it.
+ *
+ * Rows written before the switch still carry it, and there is no migration:
+ * `mergeEngageConfigMetadata` stores the whole resolved object, so the first
+ * write of any kind drops the old key. Until then a project that had replying ON
+ * must keep reading as ON — reading a stale `review` as `false` would silently
+ * switch off every project that has not been touched since.
+ *
+ * Anything that is not one of the two live modes — `off`, absent, or a value of
+ * the wrong type — is `false`, the same safe side every other switch defaults to.
+ */
+function legacyModeAsBoolean(value: unknown): boolean {
+  return value === 'review' || value === 'auto';
 }
 
 /** Keeps only well-formed per-platform objects, lower-casing the platform key. */
@@ -96,9 +111,6 @@ export function readEngageConfigMetadata(
 ): EngageConfigMetadata {
   const meta = isPlainObject(row?.metadata) ? row!.metadata : {};
 
-  // Absent resolves to 'off' deliberately: replying with a real account's
-  // session is the irreversible part of this feature.
-  const mode = asMode(meta.autoReplyMode) ?? 'off';
   const policies = asPolicies(meta.replyPolicies) ?? {};
 
   return {
@@ -112,7 +124,14 @@ export function readEngageConfigMetadata(
     // selection so a pre-switch project keeps behaving exactly as before.
     publishingEnabled:
       typeof meta.publishingEnabled === 'boolean' ? meta.publishingEnabled : null,
-    autoReplyMode: mode,
+    // Absent = FALSE for the same reason as `automationEnabled`: replying with a
+    // real account's session is the irreversible part of this feature. Falls back
+    // to the retired `autoReplyMode` so rows written before the switch keep
+    // reading as they behaved.
+    autoReplyEnabled:
+      typeof meta.autoReplyEnabled === 'boolean'
+        ? meta.autoReplyEnabled
+        : legacyModeAsBoolean(meta.autoReplyMode),
     replyPolicies: policies,
   };
 }
@@ -137,7 +156,7 @@ export function mergeEngageConfigMetadata(
       patch.publishingEnabled !== undefined
         ? patch.publishingEnabled
         : current.publishingEnabled,
-    autoReplyMode: patch.autoReplyMode ?? current.autoReplyMode,
+    autoReplyEnabled: patch.autoReplyEnabled ?? current.autoReplyEnabled,
     replyPolicies: asPolicies(patch.replyPolicies) ?? current.replyPolicies,
   };
 }
@@ -150,5 +169,5 @@ export function mergeEngageConfigMetadata(
  * disagree about what "on" means.
  */
 export function isRepliesActive(meta: EngageConfigMetadata): boolean {
-  return meta.automationEnabled && meta.autoReplyMode !== 'off';
+  return meta.automationEnabled && meta.autoReplyEnabled;
 }

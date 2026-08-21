@@ -72,21 +72,27 @@ export class SaveEngageConfigDto {
    * Unattended reply mode for this project's Engage.
    *   'off'    — the plan's daily reply targets stay a send-time CEILING on
    *              replies a user initiates (the behaviour before this existed).
-   *   'review' — the backend drafts up to the day's budget and parks them in
-   *              Awaiting review; a human sends.
-   *   'auto'   — the browser extension additionally sends them, unattended.
+   * On, the backend drafts up to the day's budget and the browser extension
+   * sends them unattended.
+   *
+   * Replaces the tri-state `autoReplyMode`, whose third value `review` parked
+   * drafts for a human to send. That mode is retired: managed replying always
+   * sends, and no client ever set anything but `review`, which made the enum a
+   * boolean in disguise. Stored rows carrying the old key are still read
+   * correctly — see `readEngageConfigMetadata`.
+   *
    * Requires a projectId: the driver only reads project-scoped configs, so a
-   * mode set on the legacy null-project row would be silently inert.
+   * switch set on the legacy null-project row would be silently inert.
    */
   @IsOptional()
-  @IsIn(['off', 'review', 'auto'])
-  autoReplyMode?: 'off' | 'review' | 'auto';
+  @IsBoolean()
+  autoReplyEnabled?: boolean;
 
   /**
    * Per-PLATFORM reply policy, keyed by platform:
    *   { "reddit": { autoReplyEnabled, windowStart, windowEnd, timezone,
    *                 defaultStrategy } }
-   * Refines autoReplyMode (which decides WHETHER this project replies at all)
+   * Refines autoReplyEnabled (which decides WHETHER this project replies at all)
    * with WHERE and WHEN. Replaces the key wholesale — send the full map.
    */
   @IsOptional()

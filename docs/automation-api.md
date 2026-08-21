@@ -41,7 +41,7 @@ column, read through `engage-config-metadata.ts` — see
 | Level | Scheduled publishing | Managed replies |
 | --- | --- | --- |
 | **Master** | `metadata.automationEnabled` | same key |
-| **Feature** | `metadata.publishingEnabled` | `metadata.autoReplyMode != 'off'` |
+| **Feature** | `metadata.publishingEnabled` | `metadata.autoReplyEnabled` |
 | **Platform** | `metadata.replyPolicies[p].publishingEnabled` | `metadata.replyPolicies[p].autoReplyEnabled` |
 
 Where the same levels appear on the **API**, which is deliberately not a mirror
@@ -92,7 +92,7 @@ and sit idle. Render it as status if at all, never as a toggle.
 
 **Every switch defaults to OFF when absent.** Automation posts and replies with
 the user's real accounts, so a missing — or malformed — value must never read as
-authorized; this matches `enabled` and `autoReplyMode`, which have always
+authorized; this matches `enabled` and `autoReplyEnabled`, which have always
 defaulted off for the same reason.
 
 Nothing grandfathers a project in, either: configuring replies or picking
@@ -104,38 +104,30 @@ which resolves from the platform selection, and that is distinct from an explici
 `false`. It is not a permission default: the master switch above it still has to
 be on for anything to publish.
 
-### The reply switch is a boolean; the mode is read-only
+### There is no reply MODE
 
-**Stored as one tri-state, written as one boolean.**
-`metadata.autoReplyMode` is `off | review | auto` and stays the single source of
-truth. `POST /automation/replies` accepts only `autoReplyEnabled`, because the
-Automation page has exactly one control for replying — there is no review/auto
-selector on it, and a field no client fills in is a field that eventually gets
-filled in wrong.
+`metadata.autoReplyEnabled` is a plain boolean. It replaced a tri-state
+`autoReplyMode` (`off | review | auto`) whose middle value meant "draft it and
+park it for a human to send".
 
-`off` is not a mode on the wire either; it is `autoReplyEnabled: false`. Carrying
-it in both places made `enabled: false` beside `autoReplyMode: "off"` read as one
-fact stated twice, which is what it was.
+That mode is retired, for two reasons that pointed the same way. Managed replying
+has **one** behaviour — the backend drafts, the extension sends — so `review`
+described a product step that does not exist. And no client ever wrote anything
+else: the Automation page sent `enabled ? "review" : "off"`, which is a boolean
+spelled as an enum, next to an `enabled` field that already said the same thing.
 
-Writing:
+**Stored rows are read, not migrated.** A row written before the switch still
+carries `autoReplyMode`, and `readEngageConfigMetadata` reads `review` or `auto`
+as `true`, anything else as `false`. The first write of any kind replaces the
+whole blob and the old key disappears. Reading a stale `review` as `false` would
+have silently switched off every project not touched since.
 
-| Body | Stored |
-| --- | --- |
-| `autoReplyEnabled: false` | `off` |
-| `autoReplyEnabled: true` | the mode the project already had, else `review` |
-| field omitted (policies-only save) | unchanged |
-
-**ON resumes, it does not default.** `auto` is reachable through
-`POST /engage/config`, and a project set there to send unattended must not be
-silently demoted to `review` because someone toggled this page off and on. Only a
-project with nothing to resume falls to `review` — the safe side, for the same
-reason every switch defaults off: the mode decides whether a reply reaches a real
-audience with no human seeing it.
-
-**`autoReplyMode` is still transmitted on `GET`, output-only.** A project running
-unattended has to be legible here rather than showing an ordinary-looking switch.
-While replying is off it reports the mode that would RESUME, not a stored value
-that is not in effect.
+One place the retired name survives on the wire: `POST /api/engage/reply-due`
+still returns a constant `"mode": "auto"` on every item. The extension no longer
+reads it, but older builds do — and the extension updates on Chrome's schedule in
+browsers nobody controls, so the backend cannot drop a field a deployed client
+might still gate on. See
+[the retirement order](engage/api.md#post-apiengagereply-due).
 
 **The switches gate FUTURE work only.** A post already in `QUEUE`, or a reply the
 extension is mid-send on, is past the gate and finishes. Turning a switch off is
@@ -305,15 +297,6 @@ does **not** create an `EngageConfig` row for a project that has never used Enga
 
     // The managed-reply switch.
     "autoReplyEnabled": false,
-
-    // How unattended replying is. OUTPUT-ONLY: POST has no such field — this
-    // page offers no review/auto choice, and switching replying on resumes
-    // whatever the project already had. Present so a project set to `auto`
-    // through POST /engage/config is legible here instead of showing an
-    // ordinary-looking switch. There is no "off": that state IS
-    // `autoReplyEnabled: false`, and while it is off this reports the mode
-    // replying would RESUME on.
-    "autoReplyMode": "review" | "auto",
 
     // ONE entry per platform: that platform's reply policy.
     //
@@ -620,8 +603,7 @@ Save the managed-reply half: the config flags and the per-platform reply policy.
 ```jsonc
 {
   // The managed-reply switch, and the ONLY switch this endpoint accepts. Sent
-  // as `true` it also turns Engage's post scanning on, and resumes the reply
-  // mode the project already had (`review` if it has none).
+  // as `true` it also turns Engage's post scanning on.
   "autoReplyEnabled": true,
 
   // Merged key-by-key over what is stored, per platform.
@@ -636,10 +618,9 @@ ignored as an unrecognised property:
 
 - **`scanEnabled`** — Engage's scan switch is the Engage page's. This endpoint
   turns it on implicitly when replying goes on, never off when replying goes off.
-- **`autoReplyMode`** — the Automation page offers no review/auto choice, so its
-  switch must not double as a decision about the mode. Unattended sending is set
-  through `POST /engage/config`, and switching replying on here resumes it rather
-  than overwriting it.
+- **`autoReplyMode`** — retired entirely. Managed replying has one behaviour, so
+  the switch above is the whole answer. See
+  [There is no reply MODE](#there-is-no-reply-mode).
 
 `autoReplyEnabled` and `policies[p].autoReplyEnabled` are two levels of the same
 chain, not two names for one switch — see
@@ -668,3 +649,7 @@ on — which switches scanning on with it — also starts Engage's workflows and
 triggers an immediate scan, exactly as `POST /engage/config` does. That is the
 point: the opportunities a newly enabled reply config needs start arriving at
 once rather than at the next scheduled scan.
+
+`POST /engage/config` takes the same switch under the name `autoReplyEnabled`,
+and still refuses it without a `projectId` — the driver only reads project-scoped
+configs, so a switch set on the legacy null-project row would be inert.

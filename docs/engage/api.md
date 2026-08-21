@@ -142,7 +142,7 @@ interface EngageConfig {
   // Unattended-reply controls (§ Unattended Replying below). Two different
   // grains: autoReplyMode is a project-level switch, replyPolicies refines it
   // per platform. Neither is an embedded relation — plain columns on this row.
-  autoReplyMode: 'off' | 'review' | 'auto';
+  autoReplyEnabled: boolean;
   replyPolicies: Record<string, ReplyPolicy> | null;
   // Scan scheduling + status (only returned by GET /config)
   scanIntervals: { keywordHours: number; channelHours: number; trackedHours: number };
@@ -499,24 +499,29 @@ Update configuration fields. Does not perform bulk writes to related tables — 
 {
   "enabled": true,
   "projectId": "product_123",
-  "autoReplyMode": "off" | "review" | "auto"   // optional; omit = unchanged
+  "autoReplyEnabled": true                     // optional; omit = unchanged
 }
 ```
 
-**`autoReplyMode` — unattended replying.** The opt-in switch for turning a
+**`autoReplyEnabled` — unattended replying.** The opt-in switch for turning a
 project's operation-plan reply targets from a ceiling into a driver:
 
 | Value | Behaviour |
 | --- | --- |
-| `off` (default) | The plan's `targetRepliesPerDay` / `keywordTargets` stay a **send-time ceiling** on replies a user initiates. Nothing is generated or sent on its own. |
-| `review` | The backend drafts up to the day's budget and parks each as a `DRAFT`, visible in `GET /sent?status=awaiting-draft`. A human still sends. |
-| `auto` | The browser extension additionally posts them, unattended, using the user's own platform session. |
+| `false` (default) | The plan's `targetRepliesPerDay` / `keywordTargets` stay a **send-time ceiling** on replies a user initiates. Nothing is generated or sent on its own. |
+| `true` | The backend drafts up to the day's budget and the browser extension posts them, unattended, using the user's own platform session. |
 
-Defaults to `off` deliberately: replying with a real account's session is the
+Replaced a tri-state `autoReplyMode` (`off | review | auto`) whose middle value
+parked drafts for a human to send. Managed replying has one behaviour, so that
+described a step the product does not have — and no client ever set it to
+anything but `review`. Stored rows carrying the old key are read as this boolean
+(`review`/`auto` → `true`); there is no migration, the first write drops the key.
+
+Defaults to `false` deliberately: replying with a real account's session is the
 irreversible part of this feature, so it is opted into per project.
 
-A value other than `off` **requires `projectId`** — the driver only reads
-project-scoped configs, so a mode set on the legacy null-project row would be
+Switching it ON **requires `projectId`** — the driver only reads
+project-scoped configs, so a switch set on the legacy null-project row would be
 stored, echoed back, and never do anything. Sending one returns `400` with
 `code: "engage_auto_reply_requires_project"`. Turning it `off` is never blocked.
 
@@ -568,17 +573,15 @@ path's `mentions` are. `checkIntervalMinutes` overrides the org-wide
 platforms carry very different account risk (e.g. a slower cadence on X than on
 Reddit).
 
-**`auto` mode reach.** The backend driver (this endpoint's scheduling half) will
-draft for any platform with a policy — Reddit, X, LinkedIn, whatever. But
-`mode: 'auto'` additionally requires the browser extension to know how to POST a
-reply on that platform; today it only does for `reddit`/`x`. Configuring
-`autoReplyEnabled: true` on another platform with `autoReplyMode: 'auto'` will
-still draft and park replies (functionally like `review` mode for that
-platform) until the extension gains a poster for it — it will not error, but it
-will not send unattended either.
+**Unattended reach.** The backend driver (this endpoint's scheduling half) will
+draft for any platform with a policy — Reddit, X, LinkedIn, whatever. Sending
+additionally requires the browser extension to know how to POST a reply on that
+platform; today it only does for `reddit`/`x`. A policy on another platform still
+drafts and parks replies until the extension gains a poster for it — it will not
+error, but it will not send either.
 
 **Response** `200 OK` — Returns the updated `EngageConfig` (without embedded relations).
-`GET /api/engage/config` echoes `autoReplyMode` and `replyPolicies` back for the
+`GET /api/engage/config` echoes `autoReplyEnabled` and `replyPolicies` back for the
 project-scoped view; the org-wide aggregate view always reports the (inert)
 null-project row's value.
 
@@ -587,7 +590,7 @@ null-project row's value.
 ### POST `/api/engage/reply-due`
 
 The browser extension polls this for reply drafts that are due right now, across
-every project whose `autoReplyMode` is `review` or `auto`. The mirror of
+every project whose `autoReplyEnabled` is on. The mirror of
 `POST /posts/publish-due`: backend = scheduler, extension = executor — this
 endpoint makes **no** platform call. It picks the opportunities, generates the
 drafts, parks them as `DRAFT` rows, and returns what is ready.
@@ -625,15 +628,41 @@ spent — is skipped entirely rather than spaced only by interval.
       "platform": "reddit",
       "url": "https://reddit.com/r/x/comments/1", // the post being replied to
       "text": "…",                                 // the generated reply
-      "mode": "review" | "auto"
+      "mode": "auto"                              // compat constant; see below
     }
   ]
 }
 ```
 
 Every item is already a saved `DRAFT`, so it also shows up in Awaiting review.
-`mode` is what the executor keys off: only `auto` may be posted unattended — a
-`review` item is handed over for the UI, and the extension skips it.
+
+`mode` is a **constant `"auto"`**, kept only for backward compatibility. It used
+to carry the project's `autoReplyMode`, and the extension posted only the
+`"auto"` items, parking `"review"` for a human. That mode is retired — managed
+replying has one behaviour — so the field no longer decides anything here.
+
+**Why it is still sent.** The extension ships to browsers nobody controls and
+updates on Chrome's schedule, so no backend release can assume a particular build
+is deployed. Builds up to and including the one that stopped reading `mode` gate
+sending on `mode === 'auto'`; an item without the field is skipped. Dropping the
+field server-side would silently stop replies for every client still running an
+older build — and "silently" is the problem, since nothing errors.
+
+This is the ordinary field-retirement order, and it only runs one way:
+
+| Step | Who | State |
+| --- | --- | --- |
+| 1 | Extension | stops reading `mode` — a build that tolerates the field present **or** absent |
+| 2 | — | wait until telemetry shows no build still reading it |
+| 3 | Backend | stops sending it |
+
+Steps 1 and 3 can be years apart; the field costs one constant string per item.
+The compatibility matrix while both exist:
+
+| | old backend (sends `mode`) | new backend (sends `mode`) |
+| --- | --- | --- |
+| **old extension** (reads it) | sends | sends |
+| **new extension** (ignores it) | sends | sends |
 
 Each draft costs reply-generation credits and is admitted by the same monthly cap
 as the user-driven `POST /opportunities/:id/draft`.

@@ -20,7 +20,7 @@ describe('readEngageConfigMetadata — defaults', () => {
     const off = {
       automationEnabled: false,
       publishingEnabled: null,
-      autoReplyMode: 'off',
+      autoReplyEnabled: false,
       replyPolicies: {},
     };
     expect(readEngageConfigMetadata(null)).toEqual(off);
@@ -38,7 +38,7 @@ describe('readEngageConfigMetadata — defaults', () => {
     // Configuring replies is not the same as authorizing them to run unattended.
     expect(
       readEngageConfigMetadata({
-        metadata: { autoReplyMode: 'auto', replyPolicies: { x: { autoReplyEnabled: true } } },
+        metadata: { autoReplyEnabled: true, replyPolicies: { x: { autoReplyEnabled: true } } },
       }).automationEnabled
     ).toBe(false);
   });
@@ -50,17 +50,17 @@ describe('readEngageConfigMetadata — defaults', () => {
 
   it('ignores values of the wrong type instead of trusting them', () => {
     const meta = readEngageConfigMetadata({
-      metadata: { automationEnabled: 'yes', publishingEnabled: 1, autoReplyMode: 'sometimes' },
+      metadata: { automationEnabled: 'yes', publishingEnabled: 1, autoReplyEnabled: 'sure' },
     });
     // A malformed value falls to the SAFE side, not the permissive one.
     expect(meta.automationEnabled).toBe(false);
     expect(meta.publishingEnabled).toBeNull();
-    expect(meta.autoReplyMode).toBe('off');
+    expect(meta.autoReplyEnabled).toBe(false);
   });
 
   it('survives a malformed metadata blob', () => {
     for (const bad of ['nope', 42, [], null, undefined]) {
-      expect(readEngageConfigMetadata({ metadata: bad }).autoReplyMode).toBe('off');
+      expect(readEngageConfigMetadata({ metadata: bad }).autoReplyEnabled).toBe(false);
     }
   });
 });
@@ -69,8 +69,30 @@ describe('readEngageConfigMetadata — defaults', () => {
 // These pin that every malformed value falls to the safe side rather than being
 // trusted or throwing.
 describe('readEngageConfigMetadata — malformed input', () => {
-  it('ignores an unknown reply mode', () => {
-    expect(readEngageConfigMetadata({ metadata: { autoReplyMode: 'sometimes' } }).autoReplyMode).toBe('off');
+  it('ignores an unknown value for the reply switch', () => {
+    expect(
+      readEngageConfigMetadata({ metadata: { autoReplyEnabled: 'sometimes' } }).autoReplyEnabled
+    ).toBe(false);
+  });
+
+  // The switch used to be a tri-state `autoReplyMode`. There is no migration —
+  // the first write of any kind drops the old key — so until a row is touched it
+  // must keep reading as it behaved, or every untouched project silently stops
+  // replying.
+  it('reads the retired autoReplyMode as the boolean that replaced it', () => {
+    expect(readEngageConfigMetadata({ metadata: { autoReplyMode: 'auto' } }).autoReplyEnabled).toBe(true);
+    expect(readEngageConfigMetadata({ metadata: { autoReplyMode: 'review' } }).autoReplyEnabled).toBe(true);
+    expect(readEngageConfigMetadata({ metadata: { autoReplyMode: 'off' } }).autoReplyEnabled).toBe(false);
+    expect(
+      readEngageConfigMetadata({ metadata: { autoReplyMode: 'sometimes' } }).autoReplyEnabled
+    ).toBe(false);
+  });
+
+  it('lets the new key win over a stale mode left beside it', () => {
+    expect(
+      readEngageConfigMetadata({ metadata: { autoReplyEnabled: false, autoReplyMode: 'auto' } })
+        .autoReplyEnabled
+    ).toBe(false);
   });
 
   it('drops non-object platform entries rather than spreading them later', () => {
@@ -95,13 +117,13 @@ describe('mergeEngageConfigMetadata', () => {
     // The stored blob stays self-describing, so a reader never has to reassemble
     // it from a sparse diff.
     const merged = mergeEngageConfigMetadata(
-      { metadata: { autoReplyMode: 'review', replyPolicies: { x: { length: 'short' } } } },
+      { metadata: { autoReplyEnabled: true, replyPolicies: { x: { length: 'short' } } } },
       { automationEnabled: true }
     );
     expect(merged).toEqual({
       automationEnabled: true,
       publishingEnabled: null,
-      autoReplyMode: 'review',
+      autoReplyEnabled: true,
       replyPolicies: { x: { length: 'short' } },
     });
   });
@@ -111,14 +133,14 @@ describe('mergeEngageConfigMetadata', () => {
       metadata: {
         automationEnabled: false,
         publishingEnabled: true,
-        autoReplyMode: 'auto',
+        autoReplyEnabled: true,
         replyPolicies: { x: { length: 'long' } },
       },
     };
     expect(mergeEngageConfigMetadata(current, {})).toEqual({
       automationEnabled: false,
       publishingEnabled: true,
-      autoReplyMode: 'auto',
+      autoReplyEnabled: true,
       replyPolicies: { x: { length: 'long' } },
     });
   });
@@ -145,24 +167,22 @@ describe('mergeEngageConfigMetadata', () => {
 });
 
 describe('isRepliesActive', () => {
-  it('requires the master switch AND a non-off mode', () => {
-    const cases: Array<[boolean, 'off' | 'review' | 'auto', boolean]> = [
-      [true, 'review', true],
-      [true, 'auto', true],
-      [true, 'off', false],
-      [false, 'review', false],
-      [false, 'auto', false],
-      [false, 'off', false],
+  it('requires the master switch AND the reply switch', () => {
+    const cases: Array<[boolean, boolean, boolean]> = [
+      [true, true, true],
+      [true, false, false],
+      [false, true, false],
+      [false, false, false],
     ];
-    for (const [automationEnabled, autoReplyMode, expected] of cases) {
+    for (const [automationEnabled, autoReplyEnabled, expected] of cases) {
       expect(
         isRepliesActive({
           automationEnabled,
-          autoReplyMode,
+          autoReplyEnabled,
           publishingEnabled: null,
           replyPolicies: {},
         }),
-        `${automationEnabled}/${autoReplyMode}`
+        `${automationEnabled}/${autoReplyEnabled}`
       ).toBe(expected);
     }
   });

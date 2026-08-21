@@ -23,52 +23,49 @@ function makeService() {
   return { svc: svc as EngageService, saveConfig };
 }
 
-describe('EngageService.saveConfig — autoReplyMode', () => {
+describe('EngageService.saveConfig — autoReplyEnabled', () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it('persists the mode for a project-scoped config', async () => {
+  it('persists the switch for a project-scoped config', async () => {
     const { svc, saveConfig } = makeService();
 
-    await svc.saveConfig(org, { autoReplyMode: 'auto', projectId: 'proj-1' } as any);
+    await svc.saveConfig(org, { autoReplyEnabled: true, projectId: 'proj-1' } as any);
 
     // Stored inside `metadata` now, not as a column of its own — the HTTP
     // contract is unchanged, only the storage moved.
     expect(saveConfig).toHaveBeenCalledWith(
       'org-1',
-      { metadata: { autoReplyMode: 'auto' } },
+      { metadata: { autoReplyEnabled: true } },
       'proj-1'
     );
   });
 
-  it('refuses a non-off mode without a projectId', async () => {
+  it('refuses switching it ON without a projectId', async () => {
     const { svc, saveConfig } = makeService();
 
     // The driver only reads project-scoped configs, so this would be stored and
     // echoed back by GET /config while never doing anything.
     await expect(
-      svc.saveConfig(org, { autoReplyMode: 'auto' } as any)
-    ).rejects.toBeInstanceOf(BadRequestException);
-    await expect(
-      svc.saveConfig(org, { autoReplyMode: 'review' } as any)
+      svc.saveConfig(org, { autoReplyEnabled: true } as any)
     ).rejects.toBeInstanceOf(BadRequestException);
     expect(saveConfig).not.toHaveBeenCalled();
   });
 
-  it("allows turning it 'off' without a projectId", async () => {
+  it('allows switching it OFF without a projectId', async () => {
     const { svc, saveConfig } = makeService();
 
     // Switching OFF must never be blocked — that would strand a config an
     // operator is trying to make safe.
-    await svc.saveConfig(org, { autoReplyMode: 'off' } as any);
+    await svc.saveConfig(org, { autoReplyEnabled: false } as any);
 
     expect(saveConfig).toHaveBeenCalledWith(
       'org-1',
-      { metadata: { autoReplyMode: 'off' } },
+      { metadata: { autoReplyEnabled: false } },
       undefined
     );
   });
 
-  it('leaves the mode untouched when the request only toggles enabled', async () => {
+  it('leaves the reply switch untouched when the request only toggles enabled', async () => {
     const { svc, saveConfig } = makeService();
 
     await svc.saveConfig(org, { enabled: false, projectId: 'proj-1' } as any);

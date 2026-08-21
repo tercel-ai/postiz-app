@@ -71,7 +71,6 @@ import {
   ReplyLength,
 } from '@gitroom/nestjs-libraries/engage/engage-entitlement.service';
 import {
-  AutoReplyMode,
   EngageConfigMetadataPatch,
   EngagePlatformPolicy,
   readEngageConfigMetadata,
@@ -417,7 +416,7 @@ export class EngageService implements OnApplicationBootstrap {
     return {
       ...config,
       // Top-level fields with the names and shapes clients already expect.
-      autoReplyMode: settings.autoReplyMode,
+      autoReplyEnabled: settings.autoReplyEnabled,
       replyPolicies: settings.replyPolicies,
       keywords,
       monitoredChannels,
@@ -502,19 +501,19 @@ export class EngageService implements OnApplicationBootstrap {
     // the legacy null-project row would be accepted, stored, echoed back by
     // GET /config — and never do anything. Refuse it instead of shipping a
     // switch that silently does nothing.
-    if (dto.autoReplyMode && dto.autoReplyMode !== 'off' && !dto.projectId) {
+    if (dto.autoReplyEnabled && !dto.projectId) {
       throw new BadRequestException({
         code: 'engage_auto_reply_requires_project',
         message:
-          "autoReplyMode requires a projectId — unattended replying is driven by a project's operation plan.",
+          "autoReplyEnabled requires a projectId — unattended replying is driven by a project's operation plan.",
       });
     }
     // `enabled` is still a column (scan enumeration filters on it); the two
     // settings are folded into `metadata`. The HTTP contract is unchanged —
     // only where the values are stored moved.
     const metadata: EngageConfigMetadataPatch = {
-      ...(dto.autoReplyMode !== undefined && {
-        autoReplyMode: dto.autoReplyMode as AutoReplyMode,
+      ...(dto.autoReplyEnabled !== undefined && {
+        autoReplyEnabled: dto.autoReplyEnabled,
       }),
       ...(dto.replyPolicies !== undefined && {
         replyPolicies: dto.replyPolicies as Record<string, EngagePlatformPolicy>,

@@ -40,8 +40,8 @@ describe('EngageRepository.getAutoReplyConfigs — switch chain', () => {
 
   it('drops a project whose MASTER switch is off', async () => {
     const { repo } = buildRepo([
-      row('a', { automationEnabled: false, autoReplyMode: 'auto' }),
-      row('b', { automationEnabled: true, autoReplyMode: 'auto' }),
+      row('a', { automationEnabled: false, autoReplyEnabled: true }),
+      row('b', { automationEnabled: true, autoReplyEnabled: true }),
     ]);
 
     expect((await repo.getAutoReplyConfigs('org-1')).map((c) => c.id)).toEqual(['b']);
@@ -50,17 +50,17 @@ describe('EngageRepository.getAutoReplyConfigs — switch chain', () => {
   it('drops a project that never set the master switch — absence is not consent', async () => {
     // Automation replies with the user's real account. A project that has never
     // been switched on must not be driven just because the field is missing.
-    const { repo } = buildRepo([row('a', { autoReplyMode: 'review' })]);
+    const { repo } = buildRepo([row('a', { autoReplyEnabled: true })]);
 
     expect(await repo.getAutoReplyConfigs('org-1')).toEqual([]);
   });
 
-  it("drops a project whose reply mode is 'off' or unset", async () => {
+  it('drops a project whose reply switch is off or unset', async () => {
     const { repo } = buildRepo([
-      row('a', { automationEnabled: true, autoReplyMode: 'off' }),
+      row('a', { automationEnabled: true, autoReplyEnabled: false }),
       row('b', { automationEnabled: true }),
       row('c', null),
-      row('d', { automationEnabled: true, autoReplyMode: 'review' }),
+      row('d', { automationEnabled: true, autoReplyEnabled: true }),
     ]);
 
     expect((await repo.getAutoReplyConfigs('org-1')).map((c) => c.id)).toEqual(['d']);
@@ -70,7 +70,7 @@ describe('EngageRepository.getAutoReplyConfigs — switch chain', () => {
     const { repo } = buildRepo([
       row('a', {
         automationEnabled: true,
-        autoReplyMode: 'auto',
+        autoReplyEnabled: true,
         replyPolicies: { x: { autoReplyEnabled: true }, reddit: { autoReplyEnabled: false } },
       }),
     ]);
@@ -88,7 +88,7 @@ describe('EngageRepository.getAutoReplyConfigs — switch chain', () => {
     const { repo } = buildRepo([
       row('a', {
         automationEnabled: true,
-        autoReplyMode: 'auto',
+        autoReplyEnabled: true,
         replyPolicies: { X: { autoReplyEnabled: true } },
       }),
     ]);
@@ -97,7 +97,9 @@ describe('EngageRepository.getAutoReplyConfigs — switch chain', () => {
     expect(config).toEqual({
       id: 'a',
       projectId: 'proj-a',
-      autoReplyMode: 'auto',
+      // The reply switch itself is NOT carried: `isRepliesActive` already
+      // filtered on it, so every row that survives has it on. Returning it would
+      // invite the driver to re-check what the query already decided.
       // Platform keys are normalized to lowercase on the way out, so the driver
       // does not have to guess how the caller wrote them.
       replyPolicies: { x: { autoReplyEnabled: true } },

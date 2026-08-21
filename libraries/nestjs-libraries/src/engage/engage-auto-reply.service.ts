@@ -93,6 +93,21 @@ export interface EngageReplyPacing {
   maxPostAgeHours: number;
   /** Opportunities below this score are never auto-replied to. */
   minScore: number;
+  /**
+   * How long a handed-out draft is considered SPOKEN FOR before redelivery.
+   *
+   * Must exceed the extension's poll interval with room to spare, or the same
+   * draft is handed to a second poll while the first is still posting it — the
+   * one failure this whole mechanism must not introduce. 15-minute alarm, 30 to
+   * be safe.
+   */
+  redeliverAfterMinutes: number;
+  /**
+   * How many times one draft may be handed out in total (first delivery
+   * included). Past it the draft is left for a human rather than taking a slot
+   * out of every poll forever. 0 disables redelivery entirely.
+   */
+  maxHandouts: number;
 }
 
 export const DEFAULT_REPLY_PACING: EngageReplyPacing = {
@@ -101,6 +116,8 @@ export const DEFAULT_REPLY_PACING: EngageReplyPacing = {
   activeHoursUtc: [0, 24],
   maxPostAgeHours: 48,
   minScore: 70,
+  redeliverAfterMinutes: 30,
+  maxHandouts: 3,
 };
 
 /** One draft the extension (or the Awaiting-review UI) can act on. */
@@ -113,8 +130,20 @@ export interface DueReply {
   url: string;
   /** The generated reply text. */
   text: string;
-  /** 'review' drafts are parked for a human; only 'auto' may be sent unattended. */
-  mode: 'review' | 'auto';
+  /**
+   * Always `'auto'`. A BACKWARD-COMPATIBILITY constant, not a decision.
+   *
+   * It used to carry the project's retired `autoReplyMode`, and extension builds
+   * up to and including the one that retired it gate sending on
+   * `mode === 'auto'` — an item without the field is skipped. The extension
+   * ships to browsers we do not control and updates on Chrome's schedule, so the
+   * backend cannot assume any particular build is out there: dropping this field
+   * would silently stop replies for every client still running an older one.
+   *
+   * Removable only once telemetry shows no build still reading it. Until then it
+   * costs one constant string per item.
+   */
+  mode: 'auto';
 }
 
 /**
@@ -160,7 +189,9 @@ export class EngageAutoReplyService implements OnModuleInit {
             description:
               'Unattended engage-reply pacing: how many drafts one poll may hand out PER ' +
               'PLATFORM, minimum spacing per project+platform, the UTC active-hours window, the ' +
-              'maximum age of a post worth replying to, and the minimum opportunity score.',
+              'maximum age of a post worth replying to, the minimum opportunity score, and the ' +
+              'redelivery lease (how long a handed-out draft is spoken for, and how many times ' +
+              'one may be handed out before it is left for a human).',
             defaultValue: DEFAULT_REPLY_PACING,
           }
         );
@@ -213,7 +244,6 @@ export class EngageAutoReplyService implements OnModuleInit {
     const perPlatformCount = new Map<string, number>();
     for (const config of configs) {
       const projectId = config.projectId!;
-      const mode = config.autoReplyMode as 'review' | 'auto';
       const policies = (config.replyPolicies ?? {}) as Record<string, EngageReplyPolicy>;
 
       // Data-driven: whichever platforms this project actually configured a
@@ -234,7 +264,7 @@ export class EngageAutoReplyService implements OnModuleInit {
         const platform = rawPlatform.toLowerCase();
         if ((perPlatformCount.get(platform) ?? 0) >= pacing.maxPerPoll) continue;
 
-        // Per-platform policy refines the project-level mode. Absent = the
+        // Per-platform policy refines the project-level switch. Absent = the
         // platform was never configured, and an unconfigured platform must not
         // start replying on its own — this is the one gate where "no setting"
         // has to mean OFF rather than "inherit". Looked up by the ORIGINAL raw
@@ -280,7 +310,7 @@ export class EngageAutoReplyService implements OnModuleInit {
         }
 
         const drafted = await this._draftOne(
-          org, projectId, platform, budget, pacing, mode, now, policy
+          org, projectId, platform, budget, pacing, now, policy
         );
         if (drafted) {
           due.push(drafted);
@@ -306,7 +336,6 @@ export class EngageAutoReplyService implements OnModuleInit {
     platform: string,
     budget: Awaited<ReturnType<EngageService['getReplyBudget']>>,
     pacing: EngageReplyPacing,
-    mode: 'review' | 'auto',
     now: Date,
     policy: EngageReplyPolicy
   ): Promise<DueReply | null> {
@@ -423,7 +452,8 @@ export class EngageAutoReplyService implements OnModuleInit {
         platform: opportunity.platform,
         url: opportunity.externalPostUrl || '',
         text,
-        mode,
+        // See DueReply.mode — a constant for old extension builds, not a branch.
+        mode: 'auto',
       };
     } catch (err) {
       await this._engageRepository

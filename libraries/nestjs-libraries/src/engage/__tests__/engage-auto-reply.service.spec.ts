@@ -112,6 +112,8 @@ describe('EngageAutoReplyService.getDueReplies', () => {
       platform: 'reddit',
       url: 'https://reddit.com/r/x/comments/1',
       text: 'a thoughtful reply',
+      // Constant, kept for extension builds that still gate on it. Dropping it
+      // would silently stop replies on every client running an older build.
       mode: 'auto',
     });
     // The DRAFT row is the commit point — it is what stops the next poll from
@@ -336,7 +338,7 @@ describe('EngageAutoReplyService.getDueReplies', () => {
     const due = await svc.getDueReplies(org, new Date('2026-08-18T12:00:00Z'));
 
     expect(due).toHaveLength(1);
-    expect(due[0]).toMatchObject({ platform: 'x', mode: 'review' });
+    expect(due[0]).toMatchObject({ platform: 'x' });
   });
 
   it('skips every project when none opted in', async () => {
@@ -409,7 +411,7 @@ describe('EngageAutoReplyService.getDueReplies', () => {
 
     // The loop is data-driven off replyPolicies' keys, not a hardcoded pair — a
     // newly supported platform needs only a policy entry, no code change here.
-    // (Whether 'auto' mode can actually post there is a SEPARATE, extension-side
+    // (Whether the extension can actually post there is a SEPARATE, extension-side
     // concern this driver does not gate on.)
     expect(repo.pickAutoReplyCandidates).toHaveBeenCalledWith(
       'org-1', 'proj-1', 'linkedin', expect.anything()

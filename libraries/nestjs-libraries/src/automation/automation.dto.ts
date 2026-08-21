@@ -141,14 +141,10 @@ export class SaveAutomationRepliesDto {
    * this page that explains why. `AutomationService.saveReplies` switches it on
    * with replying instead, so the client cannot forget it.
    *
-   * `autoReplyMode` (review vs auto) is not a choice this page offers: the
-   * Automation surface only ever means `review` — draft and wait for a human.
-   * Unattended sending (`auto`) is set through Engage's own config endpoint, and
-   * accepting it here would have been a field no client fills in and a way for
-   * this page to silently promote a project to sending unreviewed. Switching
-   * replying back on RESUMES whatever mode the project had (see
-   * `resolveStoredAutoReplyMode`), so a project set to `auto` elsewhere is not
-   * quietly demoted by a toggle here either.
+   * There is no reply MODE beside it either. Managed replying has one behaviour
+   * — the backend drafts, the extension sends — so the retired tri-state's
+   * `review` ("park it for a human") described something the product does not
+   * do, and every client that ever wrote the field wrote the same value.
    */
   @IsOptional()
   @IsBoolean()
