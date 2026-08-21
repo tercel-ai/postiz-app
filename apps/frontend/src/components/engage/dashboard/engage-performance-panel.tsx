@@ -35,15 +35,30 @@ const DATE_OPTIONS: Array<{ value: '' | 'today' | 'week' | 'month'; label: strin
   { value: 'month', label: 'This month' },
 ];
 
-const PLATFORM_OPTIONS: Array<{ value: '' | 'x' | 'reddit'; label: string }> = [
+type EngagePlatform =
+  | ''
+  | 'x'
+  | 'reddit'
+  | 'linkedin'
+  | 'devto'
+  | 'hackernews'
+  | 'medium'
+  | 'quora';
+
+const PLATFORM_OPTIONS: Array<{ value: EngagePlatform; label: string }> = [
   { value: '', label: 'All' },
   { value: 'x', label: 'X' },
   { value: 'reddit', label: 'Reddit' },
+  { value: 'linkedin', label: 'LinkedIn' },
+  { value: 'devto', label: 'Dev.to' },
+  { value: 'hackernews', label: 'Hacker News' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'quora', label: 'Quora' },
 ];
 
 export function EngagePerformancePanel() {
   const fetch = useFetch();
-  const [platform, setPlatform] = useState<'' | 'x' | 'reddit'>('');
+  const [platform, setPlatform] = useState<EngagePlatform>('');
   const [date, setDate] = useState<'' | 'today' | 'week' | 'month'>('');
 
   const params = new URLSearchParams({

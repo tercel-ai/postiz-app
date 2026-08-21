@@ -9,6 +9,7 @@ import {
   normalizeKeyword,
   normalizeUsername,
 } from '@gitroom/nestjs-libraries/engage/engage-scan-lease.service';
+import { SCANNABLE_PLATFORMS } from '@gitroom/nestjs-libraries/engage/engage-scan-config.service';
 
 type ReleaseScanCursorBody = {
   platform?: string;
@@ -309,8 +310,10 @@ export class AdminDiagnosticsController {
     const scanType = String(body?.scanType ?? '').trim().toLowerCase();
     const rawScanKey = String(body?.scanKey ?? '').trim();
 
-    if (!['x', 'reddit'].includes(platform)) {
-      throw new BadRequestException('platform must be one of: x, reddit');
+    if (!SCANNABLE_PLATFORMS.includes(platform as (typeof SCANNABLE_PLATFORMS)[number])) {
+      throw new BadRequestException(
+        `platform must be one of: ${SCANNABLE_PLATFORMS.join(', ')}`
+      );
     }
     if (!['keyword', 'tracked', 'channel'].includes(scanType)) {
       throw new BadRequestException('scanType must be one of: keyword, tracked, channel');

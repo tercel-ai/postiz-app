@@ -12,7 +12,15 @@ import {
 } from './scan-automation.model';
 import { EngageScanRunSummary, requestEngageScan } from './request-engage-scan';
 
-type PlatformFilter = 'all' | 'x' | 'reddit';
+type PlatformFilter =
+  | 'all'
+  | 'x'
+  | 'reddit'
+  | 'linkedin'
+  | 'devto'
+  | 'hackernews'
+  | 'medium'
+  | 'quora';
 
 function formatAbsolute(value: string | null | undefined): string {
   if (!value) return 'Not scanned';
@@ -38,6 +46,11 @@ function formatRelative(value: string | null | undefined): string {
 function platformMark(platform: string): string {
   if (platform === 'x') return '𝕏';
   if (platform === 'reddit') return 'r/';
+  if (platform === 'linkedin') return 'in';
+  if (platform === 'devto') return 'dev';
+  if (platform === 'hackernews') return 'hn';
+  if (platform === 'medium') return 'M';
+  if (platform === 'quora') return 'Q';
   return '•';
 }
 
@@ -225,7 +238,18 @@ export function ScanAutomationPanel() {
               </p>
             </div>
             <div className="flex gap-1">
-              {(['all', 'x', 'reddit'] as const).map((value) => (
+              {(
+                [
+                  'all',
+                  'x',
+                  'reddit',
+                  'linkedin',
+                  'devto',
+                  'hackernews',
+                  'medium',
+                  'quora',
+                ] as const
+              ).map((value) => (
                 <button
                   key={value}
                   type="button"

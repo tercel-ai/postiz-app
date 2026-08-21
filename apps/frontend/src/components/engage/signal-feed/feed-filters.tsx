@@ -33,6 +33,11 @@ const PLATFORMS = [
   { label: 'All', value: '' },
   { label: 'X', value: 'x' },
   { label: 'Reddit', value: 'reddit' },
+  { label: 'LinkedIn', value: 'linkedin' },
+  { label: 'Dev.to', value: 'devto' },
+  { label: 'Hacker News', value: 'hackernews' },
+  { label: 'Medium', value: 'medium' },
+  { label: 'Quora', value: 'quora' },
 ];
 
 const SCORE_OPTIONS = [

@@ -4301,7 +4301,9 @@ export class EngageRepository {
   // Dashboard panel ① "Engage Performance": reply count, response rate,
   // impressions, traffic index, total likes/upvotes, per-platform split, and the
   // single best reply — all scoped to the optional platform + date window
-  // (default all-time). Pass platform='x'|'reddit' for the UI tab/chip scope.
+  // (default all-time). Pass any OPPORTUNITY_COUNT_PLATFORMS value for the UI
+  // tab/chip scope; `platformSplit`/`impressionsByPlatform`/`trafficByPlatform`
+  // always break down across every engage platform, not just x/reddit.
   async getDashboardSummary(
     organizationId: string,
     opts: { projectId?: string; platform?: string; date?: string } = {}
@@ -4341,10 +4343,9 @@ export class EngageRepository {
       total,
       repliedCount,
       sentReplies,
-      xSent,
-      redditSent,
+      sentByPlatform,
       totalPostAgg,
-      xPostAgg,
+      aggByPlatform,
       replyRows,
       bestReplyRows,
     ] = await Promise.all([
@@ -4362,20 +4363,20 @@ export class EngageRepository {
         this._sentReply.model.engageSentReply.count({
           where: { organizationId, post: sentPostFilter, ...platformFilter },
         }),
-        this._sentReply.model.engageSentReply.count({
-        where: {
-          organizationId,
-          post: sentPostFilter,
-          opportunity: { platform: 'x' },
-        },
-        }),
-        this._sentReply.model.engageSentReply.count({
-        where: {
-          organizationId,
-          post: sentPostFilter,
-          opportunity: { platform: 'reddit' },
-        },
-        }),
+        // Per-platform SENT-reply counts across every engage platform (not just
+        // x/reddit) — powers `platformSplit`. One scoped count per platform stands
+        // in for a group-by, same pattern as countSentReplies/getOpportunityCountsSummary.
+        Promise.all(
+          OPPORTUNITY_COUNT_PLATFORMS.map((p) =>
+            this._sentReply.model.engageSentReply.count({
+              where: {
+                organizationId,
+                post: sentPostFilter,
+                opportunity: { platform: p },
+              },
+            })
+          )
+        ),
         // Headline impressions + traffic for the selected UI scope + date window.
         this._post.model.post.aggregate({
           where: {
@@ -4389,17 +4390,25 @@ export class EngageRepository {
           },
           _sum: { impressions: true, trafficScore: true },
         }),
-        // X-only cumulative impressions + traffic index across engage X posts in window.
-        this._post.model.post.aggregate({
-          where: {
-            organizationId,
-            source: 'engage',
-            ...dateWindow,
-            ...projectFilter,
-            engageSentReply: { is: { opportunity: { platform: 'x' } } },
-          },
-          _sum: { impressions: true, trafficScore: true },
-        }),
+        // Per-platform cumulative impressions + traffic across every engage
+        // platform in window. Queried directly per platform (not `total - x`) —
+        // with 5 non-x/reddit engage platforms now live, that subtraction would
+        // silently fold all of their impressions/traffic into whichever platform
+        // got queried last.
+        Promise.all(
+          OPPORTUNITY_COUNT_PLATFORMS.map((p) =>
+            this._post.model.post.aggregate({
+              where: {
+                organizationId,
+                source: 'engage',
+                ...dateWindow,
+                ...projectFilter,
+                engageSentReply: { is: { opportunity: { platform: p } } },
+              },
+              _sum: { impressions: true, trafficScore: true },
+            })
+          )
+        ),
         // Likes/upvotes for the selected UI scope + window. Analytics is JSON, so use
         // the same platform-aware extractor as sent stats after loading the rows.
         this._sentReply.model.engageSentReply.findMany({
@@ -4429,6 +4438,11 @@ export class EngageRepository {
           },
         }),
       ]);
+
+    const platformIndex = (p: (typeof OPPORTUNITY_COUNT_PLATFORMS)[number]) =>
+      OPPORTUNITY_COUNT_PLATFORMS.indexOf(p);
+    const xPostAgg = aggByPlatform[platformIndex('x')];
+    const redditPostAgg = aggByPlatform[platformIndex('reddit')];
 
     const responseRate =
       total > 0 ? Math.round((repliedCount / total) * 100) : 0;
@@ -4471,14 +4485,13 @@ export class EngageRepository {
 
     const xImpressions = xPostAgg._sum.impressions ?? 0;
     const totalImpressions = totalPostAgg._sum.impressions ?? 0;
-    const redditImpressions = Math.max(0, totalImpressions - xImpressions);
 
     return {
       // All-time count of SENT replies (PUBLISHED only).
       repliesCount: sentReplies,
       responseRate,
-      xImpressions,
-      xTrafficIndex: Math.round(xPostAgg._sum.trafficScore ?? 0),
+      xImpressions, // legacy X-only helper, kept for existing callers
+      xTrafficIndex: Math.round(xPostAgg._sum.trafficScore ?? 0), // legacy X-only helper
       totalImpressions,
       totalTrafficScore: Math.round(totalPostAgg._sum.trafficScore ?? 0),
       totalLikes: replyRows.reduce(
@@ -4486,11 +4499,18 @@ export class EngageRepository {
           sum + this._extractLikes(r.post?.analytics, r.opportunity.platform),
         0
       ),
-      impressionsByPlatform: [
-        { platform: 'x', value: xImpressions },
-        { platform: 'reddit', value: redditImpressions },
-      ],
-      platformSplit: { x: xSent, reddit: redditSent },
+      // Full breakdown across every engage platform (not just x/reddit).
+      impressionsByPlatform: OPPORTUNITY_COUNT_PLATFORMS.map((p, i) => ({
+        platform: p,
+        value: aggByPlatform[i]._sum.impressions ?? 0,
+      })),
+      trafficByPlatform: OPPORTUNITY_COUNT_PLATFORMS.map((p, i) => ({
+        platform: p,
+        value: Math.round(aggByPlatform[i]._sum.trafficScore ?? 0),
+      })),
+      platformSplit: Object.fromEntries(
+        OPPORTUNITY_COUNT_PLATFORMS.map((p, i) => [p, sentByPlatform[i]])
+      ) as Record<(typeof OPPORTUNITY_COUNT_PLATFORMS)[number], number>,
       bestReply,
     };
   }
@@ -4581,8 +4601,13 @@ export class EngageRepository {
       const b = buckets.get(dateKey);
       if (!b) continue;
       b.count++;
+      // `count` covers every engage platform; x/reddit are broken out for the
+      // chart's two named series only — a non-x/reddit platform (linkedin,
+      // medium, devto, hackernews, quora) still counts toward `count` but is
+      // deliberately NOT folded into either named bucket (it used to fall into
+      // `x` via the `else` branch, mislabeling e.g. LinkedIn replies as X).
       if (r.opportunity.platform === 'reddit') b.reddit++;
-      else b.x++;
+      else if (r.opportunity.platform === 'x') b.x++;
     }
 
     return { period: period ?? 'daily', items: [...buckets.values()] };

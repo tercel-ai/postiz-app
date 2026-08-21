@@ -61,11 +61,21 @@ const TIMEZONES = [
   'UTC',
 ];
 
-// Platforms whose engage replies go out through a CONNECTED account, so
-// "which account replies" is a real choice. Everything else replies through the
-// extension's own browser session — no account is picked, which is why those
-// platforms appear only in the per-platform policy block below.
-const POLICY_PLATFORMS = ['reddit', 'x'] as const;
+// Every engage-scannable platform gets its own auto-reply policy block
+// (window/timezone/strategy) — the backend driver (getDueReplies) is fully
+// data-driven off whichever keys exist in EngageConfig.replyPolicies, not a
+// hardcoded x/reddit pair. Only X posts through a CONNECTED account (see the
+// "which account replies" section below); every other platform here still
+// replies through the extension's own browser session.
+const POLICY_PLATFORMS = [
+  'x',
+  'reddit',
+  'linkedin',
+  'devto',
+  'hackernews',
+  'medium',
+  'quora',
+] as const;
 
 interface Integration {
   id: string;
@@ -166,21 +176,6 @@ export function ReplyAccounts() {
         >
           Retry
         </button>
-      </div>
-    );
-  }
-
-  if (accounts.length === 0) {
-    return (
-      <div className="text-center text-gray-500 text-sm py-8">
-        <p>No X accounts connected.</p>
-        <p className="text-xs mt-1">
-          Connect an X account in{' '}
-          <a href="/integrations" className="text-blue-400 hover:underline">
-            Integrations
-          </a>{' '}
-          first.
-        </p>
       </div>
     );
   }
@@ -313,6 +308,18 @@ export function ReplyAccounts() {
           through an account appear here — everything else replies with your
           browser session.
         </p>
+        {accounts.length === 0 && (
+          <div className="text-center text-gray-500 text-sm py-8">
+            <p>No X accounts connected.</p>
+            <p className="text-xs mt-1">
+              Connect an X account in{' '}
+              <a href="/integrations" className="text-blue-400 hover:underline">
+                Integrations
+              </a>{' '}
+              first.
+            </p>
+          </div>
+        )}
         {accounts.map((acc) => (
           <div
             key={acc.id}

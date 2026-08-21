@@ -1250,13 +1250,20 @@ describe('EngageRepository — two-table reads', () => {
   describe('getDashboardSummary (panel ①)', () => {
     it('computes response rate, X-only impressions/traffic, all-time platform split, and best reply', async () => {
       const { repo, sentCount, sentFindMany, postAggregate } = buildRepo();
-      // Promise.all order: total, replied, sentReplies, xSent, redditSent
+      // Promise.all order: total, replied, sentReplies, then one count per
+      // OPPORTUNITY_COUNT_PLATFORMS entry (x, reddit, linkedin, medium, devto,
+      // hackernews, quora).
       sentCount
         .mockResolvedValueOnce(10)
         .mockResolvedValueOnce(4)
         .mockResolvedValueOnce(6)
-        .mockResolvedValueOnce(4)
-        .mockResolvedValueOnce(2);
+        .mockResolvedValueOnce(4) // x
+        .mockResolvedValueOnce(2) // reddit
+        .mockResolvedValueOnce(0) // linkedin
+        .mockResolvedValueOnce(0) // medium
+        .mockResolvedValueOnce(0) // devto
+        .mockResolvedValueOnce(0) // hackernews
+        .mockResolvedValueOnce(0); // quora
       postAggregate.mockResolvedValue({
         _sum: { impressions: 1200, trafficScore: 87.6 },
       });
@@ -1301,7 +1308,15 @@ describe('EngageRepository — two-table reads', () => {
       expect(stats.totalImpressions).toBe(1200);
       expect(stats.totalTrafficScore).toBe(88);
       expect(stats.totalLikes).toBe(17);
-      expect(stats.platformSplit).toEqual({ x: 4, reddit: 2 });
+      expect(stats.platformSplit).toEqual({
+        x: 4,
+        reddit: 2,
+        linkedin: 0,
+        medium: 0,
+        devto: 0,
+        hackernews: 0,
+        quora: 0,
+      });
       // repliesCount / platformSplit are ALL-TIME, PUBLISHED-only (no week window).
       expect(sentCount.mock.calls[2][0].where.post.is).toEqual({
         source: 'engage',
@@ -1328,15 +1343,28 @@ describe('EngageRepository — two-table reads', () => {
         .mockResolvedValueOnce(5)
         .mockResolvedValueOnce(4)
         .mockResolvedValueOnce(2)
-        .mockResolvedValueOnce(6)
-        .mockResolvedValueOnce(2);
+        .mockResolvedValueOnce(6) // x
+        .mockResolvedValueOnce(2) // reddit
+        .mockResolvedValueOnce(0) // linkedin
+        .mockResolvedValueOnce(0) // medium
+        .mockResolvedValueOnce(0) // devto
+        .mockResolvedValueOnce(0) // hackernews
+        .mockResolvedValueOnce(0); // quora
       postAggregate
         .mockResolvedValueOnce({
           _sum: { impressions: 900, trafficScore: 234.2 },
-        })
+        }) // headline
         .mockResolvedValueOnce({
           _sum: { impressions: 1200, trafficScore: 87.6 },
-        });
+        }) // x
+        .mockResolvedValueOnce({
+          _sum: { impressions: 700, trafficScore: 50 },
+        }) // reddit
+        .mockResolvedValueOnce({ _sum: { impressions: 0, trafficScore: 0 } }) // linkedin
+        .mockResolvedValueOnce({ _sum: { impressions: 0, trafficScore: 0 } }) // medium
+        .mockResolvedValueOnce({ _sum: { impressions: 0, trafficScore: 0 } }) // devto
+        .mockResolvedValueOnce({ _sum: { impressions: 0, trafficScore: 0 } }) // hackernews
+        .mockResolvedValueOnce({ _sum: { impressions: 0, trafficScore: 0 } }); // quora
       sentFindMany
         .mockResolvedValueOnce([
           {
