@@ -386,6 +386,19 @@ change:
 | 3 | `replies.autoReplyEnabled` | managed replying is off for the project |
 | 4 | `replies.platforms[p].autoReplyEnabled` | **this platform** is off — the most common case, and the one users miss, because a platform absent from the map or left unset counts as OFF rather than inheriting |
 
+> ⚠️ **`autoReplyEnabled` appears at two levels and they are different switches.**
+> `replies.autoReplyEnabled` authorizes the PROJECT to reply; each
+> `replies.platforms[p].autoReplyEnabled` authorizes ONE platform. Reading the
+> project-level `true` and expecting a timestamp on every platform is the single
+> most common misreading of this payload — a project can be fully switched on
+> while five of its seven platforms are off, and every one of those five reports
+> `nextCheckAt: null` correctly.
+>
+> They are same-named on purpose: it is one question ("does this reply
+> unattended?") asked at two grains, and renaming either would make the level a
+> reader has to learn from a name rather than from its position. The level is the
+> path, not the field.
+
 #### What it does NOT account for
 
 `nextCheckAt` applies the interval only. The driver has two further gates, and
