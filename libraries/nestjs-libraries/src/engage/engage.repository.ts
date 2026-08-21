@@ -440,11 +440,21 @@ export class EngageRepository {
       },
       trackedAccounts: { orderBy: { createdAt: 'asc' as const } },
     };
-    const [base, configs] = await Promise.all([
+    const [base, configs, automationRows] = await Promise.all([
       this.getOrCreateConfig(organizationId, null),
       this._config.model.engageConfig.findMany({
         where: { organizationId, enabled: true, projectId: { not: null } },
         include,
+      }),
+      // Unfiltered by `enabled` (the Engage scan switch), unlike `configs`
+      // above: a project whose Automation master switch is on for scheduled
+      // publishing alone never flips scanning on (saveReplies is the only
+      // writer that does, per docs/automation-api.md's switch chain), so it
+      // would be invisible to the query above despite genuinely having
+      // automation running. This is the only field read off these rows.
+      this._config.model.engageConfig.findMany({
+        where: { organizationId, projectId: { not: null } },
+        select: { metadata: true },
       }),
     ]);
 
@@ -482,6 +492,13 @@ export class EngageRepository {
       keywords: [...kwByKey.values()],
       monitoredChannels: targets.monitoredChannels,
       trackedAccounts: targets.trackedAccounts,
+      // OR across every real project: this org-wide view has no single
+      // project to report a scoped switch for, so "is anything automated"
+      // is the only question it can answer. Read by getConfig() in place of
+      // the null-project base row's own (always-off) metadata.
+      automationEnabled: automationRows.some(
+        (row) => readEngageConfigMetadata(row as any).automationEnabled
+      ),
     };
   }
 

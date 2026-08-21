@@ -125,7 +125,11 @@ import {
   buildScanTargetKey,
   ScanTargetScope,
 } from '@gitroom/nestjs-libraries/engage/engage-scan-target';
-import { EngageScanConfigService } from '@gitroom/nestjs-libraries/engage/engage-scan-config.service';
+import {
+  EngageScanConfigService,
+  fallbackOpportunityTtlDaysMap,
+  type OpportunityTtlDays,
+} from '@gitroom/nestjs-libraries/engage/engage-scan-config.service';
 import {
   BIZ_USAGE,
   runWithBizUsage,
@@ -418,6 +422,15 @@ export class EngageService implements OnApplicationBootstrap {
       // Top-level fields with the names and shapes clients already expect.
       autoReplyEnabled: settings.autoReplyEnabled,
       replyPolicies: settings.replyPolicies,
+      // With a projectId, `config` IS that project's row and `settings` (read
+      // from its own metadata) is already correct. Without one, `config` is
+      // the org-wide aggregate, which precomputes this same field by ORing
+      // across every real project — `settings.automationEnabled` there would
+      // instead read the null-project base row, which Automation never
+      // writes to and so always reports off. See getOrgAggregateConfig.
+      automationEnabled:
+        (config as { automationEnabled?: boolean }).automationEnabled ??
+        settings.automationEnabled,
       keywords,
       monitoredChannels,
       trackedAccounts,
@@ -442,7 +455,32 @@ export class EngageService implements OnApplicationBootstrap {
       // deliberately NOT exposed: it steers the generator's editorial strategy
       // and no client has a use for it.
       operationPlan: await this._getOperationPlanConfig(),
+      // How many days a scanned post stays actionable before its opportunity
+      // expires, per platform. Admin-configured (engage_opportunity_ttl_days_by_platform
+      // via PUT /admin/settings/:key); surfaced here read-only so a client can
+      // show "expires in N days" without a separate call.
+      opportunityTtlDays: await this._getOpportunityTtlDaysConfig(),
     };
+  }
+
+  /**
+   * Effective opportunity TTL (days) per platform, read-only decoration on
+   * `/engage/config`. Falls back to the env/default resolution (no DB read)
+   * when `_scanConfig` was not wired in (e.g. a test constructing EngageService
+   * directly) — mirrors `_scanConfig`'s own never-throws posture elsewhere in
+   * this file.
+   */
+  private async _getOpportunityTtlDaysConfig(): Promise<OpportunityTtlDays> {
+    if (!this._scanConfig) return fallbackOpportunityTtlDaysMap();
+    try {
+      return await this._scanConfig.getOpportunityTtlDaysMap();
+    } catch (err) {
+      this.logger.error(
+        'Failed to read engage_opportunity_ttl_days_by_platform for /engage/config:',
+        err
+      );
+      return fallbackOpportunityTtlDaysMap();
+    }
   }
 
   /**

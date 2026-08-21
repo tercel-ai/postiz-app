@@ -317,12 +317,16 @@ does **not** create an `EngageConfig` row for a project that has never used Enga
     // account is a per-post edit, on a different surface.
     //
     // `nextCheckAt` is the next time AIsee will check THAT platform for reply
-    // opportunities: (last reply sent on this platform, or now if it never has)
-    // + `checkIntervalMinutes` (falling back to the org-wide pacing default when
-    // the platform sets none). It is `null` whenever this platform is not
+    // opportunities: (last reply GENERATED on this platform, or now if it never
+    // has) + `checkIntervalMinutes` (falling back to the org-wide pacing default
+    // when the platform sets none). It is `null` whenever this platform is not
     // actually being driven — the master switch, `scanEnabled`, the global
     // `autoReplyEnabled`, or this platform's own `autoReplyEnabled` is off — so a
     // null never implies a time that will never arrive.
+    //
+    // `null` is the NORMAL value for any platform the user has not switched on,
+    // and a past value is a health signal rather than an error. Both need
+    // deliberate handling — see "Reading nextCheckAt" below.
     "platforms": {
       "x": {
         "autoReplyEnabled": true,
@@ -335,6 +339,69 @@ does **not** create an `EngageConfig` row for a project that has never used Enga
   }
 }
 ```
+
+### Reading `nextCheckAt`
+
+```
+nextCheckAt = (last reply GENERATED on this platform, or now if never) + checkIntervalMinutes
+```
+
+`checkIntervalMinutes` is the platform's own value, falling back to
+`engage_reply_pacing.minGapMinutes` (default 25) — the same fallback the driver
+applies, from the same anchor, so the two cannot disagree about the interval.
+
+**The anchor is the last reply GENERATED, not sent.** It reads
+`EngageSentReply.createdAt`, which is written when the backend drafts a reply,
+and it does not filter on state. A reply that was drafted but never made it out
+still moves this forward.
+
+**Four values, three of them easy to misread:**
+
+| Value | Means | Render as |
+| --- | --- | --- |
+| `null` | this platform is not being driven at all | "未启用" / not scheduled — **never** a countdown |
+| in the future | normal operation | countdown or relative time |
+| ≈ `now` (within a second of the response) | this platform has **never** generated a reply | "下一轮" / "any moment" — not `00:00:00` |
+| well in the past | it has been due for a while and produced nothing | **not a negative countdown** — "等待中", and worth flagging |
+
+The last row is a health signal, not a bug: the further `nextCheckAt` has slipped
+into the past, the longer that platform has been idle while switched on. A
+platform whose value is three weeks old is one to investigate (no opportunities
+passing `minScore`, scanning stopped, or the budget gate skipping the project).
+
+**Do not feed `null` to a date formatter.** It is the normal value for every
+platform the user has not switched on — four of seven in a typical config — and
+`formatDistance(null)` renders "Invalid Date" rather than nothing.
+
+#### Explaining a `null` without another request
+
+`null` means one of four switches is off, and the same response says which. Check
+in this order and stop at the first `false` — that is the one the user has to
+change:
+
+| # | Field in this payload | If false |
+| --- | --- | --- |
+| 1 | `enabled` | Automation is off for the whole project |
+| 2 | `replies.scanEnabled` | Engage is not discovering opportunities (Engage page owns this) |
+| 3 | `replies.autoReplyEnabled` | managed replying is off for the project |
+| 4 | `replies.platforms[p].autoReplyEnabled` | **this platform** is off — the most common case, and the one users miss, because a platform absent from the map or left unset counts as OFF rather than inheriting |
+
+#### What it does NOT account for
+
+`nextCheckAt` applies the interval only. The driver has two further gates, and
+neither moves this timestamp:
+
+| Driver gate | Reflected in `nextCheckAt` |
+| --- | --- |
+| minimum gap / `checkIntervalMinutes` | ✅ |
+| local-time window (`windowStart` / `windowEnd`) | ❌ |
+| plan budget (when `ENGAGE_REPLY_BUDGET_GATE_ENABLED`) | ❌ |
+
+So a platform with a `09:00`–`18:00` window can report `22:30`: the interval
+elapses then, but the driver skips it and the next real attempt is the following
+morning. Treat the value as "not before this", not "at this".
+
+---
 
 ### Telling "never configured" from "everything off"
 
@@ -360,6 +427,7 @@ what is — and a duplicated value is one that can disagree with itself:
 | is publishing actually running | `enabled && publishing.enabled` |
 | is replying actually running | `enabled && replies.scanEnabled && replies.autoReplyEnabled` |
 | the managed-replies feature switch | `replies.autoReplyEnabled` |
+| is THIS platform replying | the above **AND** `replies.platforms[p].autoReplyEnabled` — equivalently, `replies.platforms[p].nextCheckAt !== null`, which the server has already ANDed for you |
 
 Render the switch CONTROLS from each feature's own `enabled` / `autoReplyEnabled`
 (`scanEnabled` is status, not a control),

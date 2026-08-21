@@ -465,7 +465,7 @@ The first call will automatically create a default configuration (`enabled: fals
 
 | Parameter | Type | Description |
 |---|---|---|
-| `projectId` | string | Optional project scope. Omit for the legacy null-project config. |
+| `projectId` | string | Optional project scope. Omit to get the org-wide aggregate (every real project's enabled keywords/channels/tracked accounts, unioned) layered onto the legacy null-project row's own settings — this is what the browser extension, which has no project context, calls. |
 
 **Response** `200 OK`
 
@@ -481,11 +481,21 @@ The first call will automatically create a default configuration (`enabled: fals
   "monitoredChannels": [],
   "trackedAccounts": [],
   "autoReplyEnabled": false,
-  "replyPolicies": null
+  "replyPolicies": null,
+  "automationEnabled": false
 }
 ```
 
 > **Frontend routing**: If `enabled: false`, redirect to the Setup Wizard. If `enabled: true`, render the Signal Feed.
+
+> **`automationEnabled`** is the Automation master switch (see
+> [automation-api.md](../automation-api.md#the-switch-chain)), read-only here.
+> With a `projectId`, it is that project's own switch. Without one, it is an
+> OR across every one of the org's real projects — this org-wide view has no
+> single project to report a scoped value for, so it can only answer "is
+> automation running anywhere." A client that needs a specific project's
+> switch — or wants to change it — must call
+> `GET /projects/:projectId/automation` directly.
 
 ---
 
