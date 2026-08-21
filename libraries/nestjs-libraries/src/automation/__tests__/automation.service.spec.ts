@@ -533,12 +533,17 @@ describe('AutomationService.saveReplies', () => {
     });
   });
 
-  it('merges reply policies over what is stored and preserves the publishing keys', async () => {
+  it('replaces a platform reply policy and preserves its publishing keys', async () => {
     const { service, saveConfig } = makeService({
       config: {
         metadata: {
           replyPolicies: {
-            x: { length: 'short', publishingEnabled: true, publishingWindowStart: '09:00' },
+            x: {
+              length: 'short',
+              defaultStrategy: 'helpful',
+              publishingEnabled: true,
+              publishingWindowStart: '09:00',
+            },
           },
         },
       },
@@ -549,10 +554,110 @@ describe('AutomationService.saveReplies', () => {
     });
 
     const policies = saveConfig.mock.calls[0][1].replyPolicies as Record<string, any>;
+    // `defaultStrategy` is GONE: the incoming policy is the whole reply half of
+    // this platform, not a patch on it. The publishing keys stand.
     expect(policies.x).toEqual({
       length: 'long',
       publishingEnabled: true,
       publishingWindowStart: '09:00',
+    });
+  });
+
+  it('clears the reply policy of every platform the caller omits', async () => {
+    // Whole-set semantics. Under a merge, "stop replying on reddit" could not be
+    // said at all: the client can only overwrite keys whose names it knows.
+    const { service, saveConfig } = makeService({
+      config: {
+        metadata: {
+          replyPolicies: {
+            x: { length: 'short' },
+            reddit: { autoReplyEnabled: true, checkIntervalMinutes: 30 },
+            linkedin: { length: 'long' },
+          },
+        },
+      },
+    });
+
+    await service.saveReplies(org, 'proj-1', {
+      autoReplyEnabled: true,
+      policies: { x: { length: 'long' } },
+    });
+
+    expect(saveConfig.mock.calls[0][1].replyPolicies).toEqual({ x: { length: 'long' } });
+  });
+
+  it('clears every platform when handed an empty map', async () => {
+    const { service, saveConfig } = makeService({
+      config: {
+        metadata: {
+          replyPolicies: {
+            x: { length: 'short', defaultStrategy: 'helpful' },
+            reddit: { autoReplyEnabled: true },
+          },
+        },
+      },
+    });
+
+    await service.saveReplies(org, 'proj-1', { autoReplyEnabled: true, policies: {} });
+
+    expect(saveConfig.mock.calls[0][1].replyPolicies).toEqual({});
+  });
+
+  it('keeps the publishing half of a cleared platform', async () => {
+    // The column is shared with the publishing endpoint. Dropping whole entries
+    // here would delete windows and enablement this endpoint does not own.
+    const { service, saveConfig } = makeService({
+      config: {
+        metadata: {
+          replyPolicies: {
+            x: { length: 'short' },
+            reddit: {
+              length: 'long',
+              publishingEnabled: true,
+              publishingWindowStart: '09:00',
+              publishingWindowEnd: '17:00',
+              publishingTimezone: 'Asia/Shanghai',
+            },
+          },
+        },
+      },
+    });
+
+    await service.saveReplies(org, 'proj-1', { policies: { x: { length: 'long' } } });
+
+    // reddit loses its reply policy but keeps its publish window; x is replaced.
+    expect(saveConfig.mock.calls[0][1].replyPolicies).toEqual({
+      x: { length: 'long' },
+      reddit: {
+        publishingEnabled: true,
+        publishingWindowStart: '09:00',
+        publishingWindowEnd: '17:00',
+        publishingTimezone: 'Asia/Shanghai',
+      },
+    });
+  });
+
+  it('drops a platform whose entry is left with nothing at all', async () => {
+    // An empty object would be a second spelling of "never configured", which an
+    // absent entry already means to getOverview.
+    const { service, saveConfig } = makeService({
+      config: { metadata: { replyPolicies: { x: { length: 'short' } } } },
+    });
+
+    await service.saveReplies(org, 'proj-1', { policies: { x: {} } });
+
+    expect(saveConfig.mock.calls[0][1].replyPolicies).toEqual({});
+  });
+
+  it('normalizes an incoming platform key instead of storing a second entry', async () => {
+    const { service, saveConfig } = makeService({
+      config: { metadata: { replyPolicies: { x: { publishingEnabled: true } } } },
+    });
+
+    await service.saveReplies(org, 'proj-1', { policies: { X: { length: 'long' } } });
+
+    expect(saveConfig.mock.calls[0][1].replyPolicies).toEqual({
+      x: { publishingEnabled: true, length: 'long' },
     });
   });
 

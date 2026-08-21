@@ -150,9 +150,27 @@ export class SaveAutomationRepliesDto {
   @IsBoolean()
   autoReplyEnabled?: boolean;
 
-  // Per-platform REPLY policy (strategy, length, mention tags, pacing…). Merged
-  // key-by-key over what is stored, so it cannot clobber the publishing keys
-  // that currently share the same column.
+  /**
+   * Per-platform REPLY policy (strategy, length, mention tags, pacing…).
+   *
+   * This is the COMPLETE set, not a delta — the same shape rule as
+   * `SaveAutomationPublishingDto.platforms`, for the same reason. A platform
+   * absent from the map has its reply policy CLEARED, and `{}` clears every
+   * platform. Under a merge, "stop replying on reddit" and "reset this panel"
+   * are inexpressible: a client can only overwrite keys whose names it knows, so
+   * a key it has never heard of outlives every save it makes.
+   *
+   *   stored { x: {…}, reddit: {…} } + { x: {…} }  ->  x kept, reddit cleared
+   *   stored { x: {…}, reddit: {…} } + {}          ->  both cleared
+   *
+   * Only the reply half is replaced. Publishing keys (`publishingEnabled`,
+   * `publishingWindow*`, `publishingTimezone`) currently share this column but
+   * belong to the publishing endpoint: they survive a clear, and any that a
+   * caller sends here are ignored.
+   *
+   * Omit the field entirely to leave every policy untouched. That, not `{}`, is
+   * how a client flips only `autoReplyEnabled`.
+   */
   @IsOptional()
   @IsObject()
   policies?: Record<string, Record<string, unknown>>;

@@ -711,15 +711,46 @@ Save the managed-reply half: the config flags and the per-platform reply policy.
   // as `true` it also turns Engage's post scanning on.
   "autoReplyEnabled": true,
 
-  // Merged key-by-key over what is stored, per platform.
+  // The COMPLETE per-platform reply policy set — not a delta. Any platform
+  // absent from this map has its reply policy CLEARED. Omit the field entirely
+  // to leave every policy untouched.
   "policies": {
     "x": { "autoReplyEnabled": true, "length": "short", "mentionTags": ["@acme"] }
   }
 }
 ```
 
-Two switches deliberately have **no field** here, and a body carrying either is
-ignored as an unrecognised property:
+### `policies` is the complete set, not a delta
+
+Same shape rule as `platforms` on the publishing endpoint, for the same reason.
+A platform the map does not name has its reply policy **cleared**:
+
+| Stored | Body sends | Result |
+| --- | --- | --- |
+| `{ x, reddit }` | field **omitted** | both untouched |
+| `{ x, reddit }` | `"policies": { "x": {…} }` | `x` replaced, **`reddit` cleared** |
+| `{ x, reddit }` | `"policies": {}` | **both cleared** |
+| `{ x }` | `"policies": { "x": {} }` | `x` cleared (an entry left with nothing is dropped) |
+
+The replacement is per platform too: the object sent for `x` **is** that
+platform's whole reply policy, so a key the caller does not restate is gone.
+
+Under a merge neither "stop replying on reddit" nor "reset this panel" could be
+said at all. A client can only overwrite keys whose names it knows, so a key it
+has never heard of — a retired one, or one written by an older build — outlives
+every save it makes. Clearing has to be expressible, and "absent means cleared"
+is the only spelling that does not need a second, delete-shaped endpoint.
+
+**This makes a partial save destructive.** A client that sends `policies` at all
+must send the full set it wants stored. To change one switch — including
+`autoReplyEnabled` alone — omit the field rather than sending `{}`.
+
+Platform keys are matched case-insensitively (`"X"` updates the stored `x`
+rather than creating a second entry beside it).
+
+### Two switches have no field here
+
+Deliberately, and a body carrying either is ignored as an unrecognised property:
 
 - **`scanEnabled`** — Engage's scan switch is the Engage page's. This endpoint
   turns it on implicitly when replying goes on, never off when replying goes off.
@@ -729,9 +760,10 @@ ignored as an unrecognised property:
 
 `autoReplyEnabled` and `policies[p].autoReplyEnabled` are two levels of the same
 chain, not two names for one switch — see
-[the switch chain](#the-switch-chain). A save changes only the levels it names;
-turning replying off never rewrites the per-platform selection, or turning it
-back on would restore an empty form instead of the configuration that was there.
+[the switch chain](#the-switch-chain). The two levels are written independently:
+turning replying off while omitting `policies` never rewrites the per-platform
+selection, or turning it back on would restore an empty form instead of the
+configuration that was there.
 
 - **Response**: `{ "saved": true }`
 
@@ -745,9 +777,14 @@ and it stays on the Engage surface, which has a UI for it.
 Publishing keys (`publishingEnabled`, `publishingWindowStart`,
 `publishingWindowEnd`, `publishingTimezone`) sent here are **dropped**: they are
 the publishing endpoint's to change. Conversely, the publishing endpoint
-preserves every reply-side key. Both halves currently share
-`EngageConfig.replyPolicies`, so each writer merges rather than replaces —
-splitting that column is tracked separately.
+preserves every reply-side key.
+
+Both halves currently share `EngageConfig.replyPolicies`, so the replacement
+above is scoped to the **reply half only**: a platform cleared by an omitted key
+keeps its publishing keys, and is dropped from the map entirely only when nothing
+at all is left. Clearing a reply policy therefore never moves a publish window,
+which is exactly the cross-module clobbering this split exists to end. Splitting
+that column is tracked separately.
 
 Config flags **do** go through `EngageService.saveConfig`, so switching replying
 on — which switches scanning on with it — also starts Engage's workflows and

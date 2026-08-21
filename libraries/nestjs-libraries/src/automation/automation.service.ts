@@ -379,19 +379,18 @@ export class AutomationService {
       const existing = readEngageConfigMetadata(
         await this._engageRepository.getConfigCore(org.id, projectId)
       ).replyPolicies as Record<string, Record<string, unknown>>;
-      // Merge per platform, and drop any publishing key the caller tried to
-      // send: publishing settings are owned by the other endpoint, and letting
-      // them in here would reintroduce exactly the cross-module clobbering this
-      // split exists to end.
-      const merged: Record<string, Record<string, unknown>> = { ...existing };
-      for (const [platform, policy] of Object.entries(dto.policies)) {
-        const key = platform.toLowerCase();
-        merged[key] = {
-          ...(merged[key] ?? {}),
-          ...stripPublishingKeysFromPolicy(policy),
-        };
-      }
-      replyPolicies = merged;
+      // `policies` is the COMPLETE reply-policy set, not a delta: a platform
+      // absent from it has its reply policy cleared, and an empty map clears
+      // every platform. Same shape rule as `savePublishing`'s `platforms`, for
+      // the same reason — under a merge, "remove this platform" and "reset this
+      // panel" are inexpressible. A client could only ever overwrite keys whose
+      // names it knows, so a retired key would outlive every save.
+      //
+      // Only the REPLY half is replaced. This column is shared with the
+      // publishing endpoint, so dropping whole entries here would delete windows
+      // and enablement this endpoint does not own — the exact cross-module
+      // clobbering `stripPublishingKeysFromPolicy` exists to prevent.
+      replyPolicies = replaceReplyPolicies(existing, dto.policies);
     }
 
     await this._engageService.saveConfig(org, {
@@ -498,6 +497,51 @@ function stripPublishingKeysFromPolicy(
     if ((PUBLISHING_POLICY_KEYS as readonly string[]).includes(key)) continue;
     out[key] = value;
   }
+  return out;
+}
+
+/**
+ * Replace the REPLY half of every platform's policy with `incoming`, preserving
+ * the PUBLISHING half of whatever is stored.
+ *
+ * Whole-set semantics: a platform `incoming` does not name keeps only its
+ * publishing keys, so its reply policy is gone. An entry left with nothing at
+ * all is dropped rather than stored as an empty object — "never configured" is
+ * already what an absent entry means to `getOverview`, and an empty shell would
+ * be a second spelling of it.
+ *
+ * Publishing keys inside `incoming` are dropped: those belong to the publishing
+ * endpoint, and honouring them here would let a reply save silently move a
+ * publish window.
+ */
+function replaceReplyPolicies(
+  existing: Record<string, Record<string, unknown>>,
+  incoming: Record<string, Record<string, unknown>>
+): Record<string, Record<string, unknown>> {
+  const out: Record<string, Record<string, unknown>> = {};
+
+  // Stored keys are already lower-cased by `readEngageConfigMetadata`; the
+  // incoming ones are normalized below so a differently-cased platform name
+  // updates the entry it means instead of creating a second one beside it.
+  for (const [platform, policy] of Object.entries(existing ?? {})) {
+    if (!policy || typeof policy !== 'object') continue;
+    const kept: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(policy)) {
+      if ((PUBLISHING_POLICY_KEYS as readonly string[]).includes(key)) kept[key] = value;
+    }
+    if (Object.keys(kept).length) out[platform] = kept;
+  }
+
+  for (const [platform, policy] of Object.entries(incoming)) {
+    const key = platform.toLowerCase();
+    const merged = {
+      ...(out[key] ?? {}),
+      ...stripPublishingKeysFromPolicy(policy),
+    };
+    if (Object.keys(merged).length) out[key] = merged;
+    else delete out[key];
+  }
+
   return out;
 }
 
