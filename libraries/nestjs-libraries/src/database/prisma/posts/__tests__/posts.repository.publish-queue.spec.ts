@@ -357,3 +357,92 @@ describe('createOrUpdatePost — Post.title persistence', () => {
     expect(upsert.mock.calls[0][0].create.title).toBe('From providerIdentifier');
   });
 });
+
+// The read-only backlog count. It exists BECAUSE the claim query cannot answer
+// the question — that one leases what it returns — so what matters here is that
+// it stays a pure read and keeps the same routing rules as the claim, split
+// across the three windows a client needs to tell apart.
+describe('countDueExtensionPublishPosts', () => {
+  const NOW = new Date('2030-01-01T12:00:00.000Z');
+  const CUTOFF = new Date('2030-01-01T11:50:00.000Z');
+
+  function countingRepo() {
+    const count = vi.fn().mockResolvedValue(0);
+    const updateMany = vi.fn();
+    const findMany = vi.fn().mockResolvedValue([]);
+    return { repo: createRepo({ count, updateMany, findMany }), count, updateMany, findMany };
+  }
+
+  it('never writes — no claim, no lease stamp', async () => {
+    const { repo, count, updateMany, findMany } = countingRepo();
+
+    await repo.countDueExtensionPublishPosts('org-1', ['hackernews'], NOW, CUTOFF);
+
+    expect(count).toHaveBeenCalledTimes(3);
+    // A single updateMany here would hand the backlog to whoever asked how big
+    // it is, and delay the publish it was reporting on by a full lease window.
+    expect(updateMany).not.toHaveBeenCalled();
+    expect(findMany).not.toHaveBeenCalled();
+  });
+
+  it('counts dueNow as due AND claimable, the same predicate the claim uses', async () => {
+    const { repo, count } = countingRepo();
+
+    await repo.countDueExtensionPublishPosts('org-1', ['hackernews'], NOW, CUTOFF);
+
+    const [due, available] = count.mock.calls[0][0].where.AND;
+    expect(due.publishDate).toEqual({ lte: NOW });
+    expect(due.state).toBe('QUEUE');
+    expect(available).toEqual({
+      OR: [{ releaseId: null }, { claimedAt: { lte: CUTOFF } }],
+    });
+  });
+
+  it('spells the leased predicate out instead of negating availability', async () => {
+    const { repo, count } = countingRepo();
+
+    await repo.countDueExtensionPublishPosts('org-1', ['hackernews'], NOW, CUTOFF);
+
+    const and = count.mock.calls[1][0].where.AND;
+    expect(and[1]).toEqual({ releaseId: { not: null } });
+    // `NOT: available` would drop a row with a releaseId and a null claimedAt
+    // from BOTH counts — SQL three-valued logic makes it match neither side.
+    expect(and[2]).toEqual({
+      OR: [{ claimedAt: null }, { claimedAt: { gt: CUTOFF } }],
+    });
+    expect(count.mock.calls[1][0].where).not.toHaveProperty('NOT');
+  });
+
+  it('counts scheduledAhead with the due half’s rules but the opposite window', async () => {
+    const { repo, count } = countingRepo();
+
+    await repo.countDueExtensionPublishPosts('org-1', ['hackernews'], NOW, CUTOFF);
+
+    const where = count.mock.calls[2][0].where;
+    expect(where.publishDate).toEqual({ gt: NOW });
+    // Same exclusions as the due half: counting a post the poll would never
+    // offer is how a queue reads as backed up while nothing is publishable.
+    expect(where.state).toBe('QUEUE');
+    expect(where.parentPostId).toBeNull();
+    expect(where.intervalInDays).toBeNull();
+    expect(where.NOT).toEqual({ source: 'engage' });
+    expect(where.OR).toHaveLength(2);
+    // Not yet due means not yet leasable — the lease predicate has no business
+    // narrowing this one.
+    expect(where).not.toHaveProperty('releaseId');
+    expect(where).not.toHaveProperty('claimedAt');
+  });
+
+  it('returns the three counts in their own fields', async () => {
+    const count = vi
+      .fn()
+      .mockResolvedValueOnce(2)
+      .mockResolvedValueOnce(1)
+      .mockResolvedValueOnce(7);
+    const repo = createRepo({ count, updateMany: vi.fn(), findMany: vi.fn() });
+
+    await expect(
+      repo.countDueExtensionPublishPosts('org-1', [], NOW, CUTOFF)
+    ).resolves.toEqual({ dueNow: 2, leased: 1, scheduledAhead: 7 });
+  });
+});

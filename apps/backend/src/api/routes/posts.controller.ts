@@ -287,6 +287,22 @@ export class PostsController {
   }
 
   /**
+   * Read-only backlog counts for the extension publish queue.
+   *
+   * Separate route rather than a flag on POST /publish-due, because that one
+   * LEASES what it returns: a client polling it to render a number would hold
+   * a batch away from the browser meant to publish it for the whole lease
+   * window. Nothing here claims, stamps or state-changes anything.
+   *
+   * MUST stay declared BEFORE `@Get('/:id')` — a later static route would be
+   * shadowed by the param route and resolve 'publish-due' as an id.
+   */
+  @Get('/publish-due/count')
+  async countDuePublish(@GetOrgFromRequest() org: Organization) {
+    return this._postsService.countDuePublishPosts(org.id);
+  }
+
+  /**
    * Publish-method capability for the scheduling/editor UI: for EVERY registered
    * platform, which send paths (extension / api) are selectable, the default the
    * backend would auto-pick, and whether an account must be connected first.

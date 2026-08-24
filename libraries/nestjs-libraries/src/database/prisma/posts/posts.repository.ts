@@ -2287,6 +2287,26 @@ export class PostsRepository {
     providerIdentifiers: string[],
     now: Date
   ): Prisma.PostWhereInput {
+    return {
+      ...this.extensionRoutedWhere(organizationId, providerIdentifiers),
+      publishDate: { lte: now },
+    };
+  }
+
+  /**
+   * The same predicate WITHOUT the due cutoff: "this QUEUE post belongs to the
+   * extension publish queue", whenever it is scheduled for.
+   *
+   * Split out of {@link extensionDueWhere} so counting the backlog can ask for
+   * the not-yet-due half with exactly the routing, exclusion and roots-only
+   * rules the due half uses. Keeping the two definitions apart is how a post
+   * ends up counted as "scheduled ahead" and then never offered when its time
+   * comes — one predicate, two windows.
+   */
+  private extensionRoutedWhere(
+    organizationId: string,
+    providerIdentifiers: string[]
+  ): Prisma.PostWhereInput {
     const routes: Prisma.PostWhereInput[] = [{ publishMethod: 'EXTENSION' }];
     if (providerIdentifiers.length) {
       routes.push({
@@ -2302,7 +2322,6 @@ export class PostsRepository {
       organizationId,
       deletedAt: null,
       state: State.QUEUE,
-      publishDate: { lte: now },
       parentPostId: null, // roots only — children ride along as segments
       // Engage replies must NEVER be offered to the extension publish queue:
       // the due-item shape carries no reply target, so the extension would
@@ -2514,6 +2533,61 @@ export class PostsRepository {
    * A successful publish backfills PUBLISHED (overwriting releaseId), releasing
    * the lease; a crashed publish is re-offered only after the lease expires.
    */
+  /** Un-leased, or leased so long ago that the lease has expired. */
+  private static extensionLeaseAvailableWhere(
+    leaseCutoff: Date
+  ): Prisma.PostWhereInput {
+    return { OR: [{ releaseId: null }, { claimedAt: { lte: leaseCutoff } }] };
+  }
+
+  /**
+   * Read-only counterpart of {@link claimDueExtensionPublishPosts}: how much
+   * work the extension publish queue is holding, WITHOUT leasing any of it.
+   *
+   * This exists because the claim query cannot be used to answer the question.
+   * It leases what it returns for EXTENSION_PUBLISH_LEASE_MINUTES, so a client
+   * polling it to display a backlog would take that backlog away from the
+   * browser that is supposed to publish it — up to a full batch held hostage
+   * per refresh, publishing delayed by exactly as long as someone watches it.
+   *
+   * Three numbers, because "waiting" hides a distinction that matters when
+   * nothing is going out: `dueNow` is claimable this second, `leased` is
+   * already with a browser and not yet reported back (so a still-empty queue is
+   * a stalled executor, not an empty backlog), and `scheduledAhead` has simply
+   * not reached its publish time.
+   */
+  async countDueExtensionPublishPosts(
+    organizationId: string,
+    providerIdentifiers: string[],
+    now: Date,
+    leaseCutoff: Date
+  ): Promise<{ dueNow: number; leased: number; scheduledAhead: number }> {
+    const dueWhere = this.extensionDueWhere(organizationId, providerIdentifiers, now);
+    const available = PostsRepository.extensionLeaseAvailableWhere(leaseCutoff);
+    const [dueNow, leased, scheduledAhead] = await Promise.all([
+      this._post.model.post.count({ where: { AND: [dueWhere, available] } }),
+      this._post.model.post.count({
+        // Spelled out rather than `NOT: available`: a row carrying a releaseId
+        // with a null claimedAt matches neither side of that negation under SQL
+        // three-valued logic, and would vanish from both counts.
+        where: {
+          AND: [
+            dueWhere,
+            { releaseId: { not: null } },
+            { OR: [{ claimedAt: null }, { claimedAt: { gt: leaseCutoff } }] },
+          ],
+        },
+      }),
+      this._post.model.post.count({
+        where: {
+          ...this.extensionRoutedWhere(organizationId, providerIdentifiers),
+          publishDate: { gt: now },
+        },
+      }),
+    ]);
+    return { dueNow, leased, scheduledAhead };
+  }
+
   async claimDueExtensionPublishPosts(
     organizationId: string,
     providerIdentifiers: string[],
@@ -2522,9 +2596,7 @@ export class PostsRepository {
     leaseToken: string,
     leaseCutoff: Date
   ) {
-    const available: Prisma.PostWhereInput = {
-      OR: [{ releaseId: null }, { claimedAt: { lte: leaseCutoff } }],
-    };
+    const available = PostsRepository.extensionLeaseAvailableWhere(leaseCutoff);
     const dueWhere = this.extensionDueWhere(organizationId, providerIdentifiers, now);
 
     const candidates = await this._post.model.post.findMany({

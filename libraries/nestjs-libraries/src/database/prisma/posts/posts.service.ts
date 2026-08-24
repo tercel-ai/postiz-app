@@ -1878,6 +1878,36 @@ export class PostsService {
    * backend never calls a provider API here (mirrors metrics-due / scan-tasks:
    * backend = scheduler, extension = executor).
    */
+  /**
+   * Start of the window a still-valid lease must have been taken in. Shared by
+   * the claim and the read-only count so the two can never disagree about which
+   * posts are "already with a browser" — a count using a different cutoff would
+   * report work as claimable that the very next poll refuses to hand out.
+   */
+  private static extensionLeaseCutoff(now: dayjs.Dayjs): Date {
+    const leaseMinutes = Math.max(
+      1,
+      Number(process.env.EXTENSION_PUBLISH_LEASE_MINUTES) || 10
+    );
+    return now.subtract(leaseMinutes, 'minute').toDate();
+  }
+
+  /**
+   * How much the extension publish queue is holding for this org, without
+   * taking any of it — the read-only counterpart of {@link getDuePublishPosts},
+   * which leases everything it returns and so cannot be polled for a display.
+   */
+  async countDuePublishPosts(orgId: string) {
+    const providerIds = this._integrationManager.extensionPublishProviderIds();
+    const now = dayjs.utc();
+    return this._postRepository.countDueExtensionPublishPosts(
+      orgId,
+      providerIds,
+      now.toDate(),
+      PostsService.extensionLeaseCutoff(now)
+    );
+  }
+
   async getDuePublishPosts(orgId: string, limit = 10) {
     // providerIds only feeds the LEGACY (publishMethod=null) fallback branch;
     // explicit publishMethod=EXTENSION posts are returned regardless of it, so we
@@ -1888,12 +1918,8 @@ export class PostsService {
     // window; only re-offer it once the lease expires (covers a crashed /
     // reinstalled extension that never backfilled). The token makes the claim
     // unambiguous under concurrency.
-    const leaseMinutes = Math.max(
-      1,
-      Number(process.env.EXTENSION_PUBLISH_LEASE_MINUTES) || 10
-    );
     const leaseToken = `ext_${randomUUID()}`;
-    const leaseCutoff = now.subtract(leaseMinutes, 'minute').toDate();
+    const leaseCutoff = PostsService.extensionLeaseCutoff(now);
     const rows = await this._postRepository.claimDueExtensionPublishPosts(
       orgId,
       providerIds,

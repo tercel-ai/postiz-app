@@ -485,3 +485,95 @@ describe('PostsService.getDuePublishPosts — thread chains', () => {
     ]);
   });
 });
+
+// The read-only sibling. Its whole reason to exist is that a display cannot
+// call the claiming path, so the contract worth pinning is: same lease window
+// as the claim, and no claim.
+describe('PostsService.countDuePublishPosts', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  function countingService(providerIds: string[] = []) {
+    const counts = { dueNow: 3, leased: 1, scheduledAhead: 9 };
+    const repo: any = {
+      claimDueExtensionPublishPosts: vi.fn().mockResolvedValue([]),
+      countDueExtensionPublishPosts: vi.fn().mockResolvedValue(counts),
+    };
+    const integrationManager: any = {
+      extensionPublishProviderIds: vi.fn().mockReturnValue(providerIds),
+    };
+    const svc = new PostsService(
+      repo,
+      integrationManager,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      { getSegmentGaps: vi.fn().mockResolvedValue({}) } as any
+    );
+    return { svc, repo, counts };
+  }
+
+  it('reads without claiming', async () => {
+    const { svc, repo, counts } = countingService(['hackernews']);
+
+    await expect(svc.countDuePublishPosts('org-1')).resolves.toEqual(counts);
+
+    expect(repo.countDueExtensionPublishPosts).toHaveBeenCalledTimes(1);
+    expect(repo.claimDueExtensionPublishPosts).not.toHaveBeenCalled();
+    const [orgId, providerIds] = repo.countDueExtensionPublishPosts.mock.calls[0];
+    expect(orgId).toBe('org-1');
+    expect(providerIds).toEqual(['hackernews']);
+  });
+
+  it('uses the same lease window the claim uses', async () => {
+    process.env.EXTENSION_PUBLISH_LEASE_MINUTES = '15';
+    try {
+      const { svc, repo } = countingService();
+
+      await svc.countDuePublishPosts('org-1');
+
+      const [, , now, cutoff] = repo.countDueExtensionPublishPosts.mock.calls[0];
+      // A cutoff that disagreed with the claim's would report work as claimable
+      // that the very next poll refuses to hand out.
+      expect(now.getTime() - cutoff.getTime()).toBe(15 * 60 * 1000);
+    } finally {
+      delete process.env.EXTENSION_PUBLISH_LEASE_MINUTES;
+    }
+  });
+
+  it('falls back to a 10-minute lease window when the env says nothing usable', async () => {
+    const { svc, repo } = countingService();
+    await svc.countDuePublishPosts('org-1');
+    const [, , now, cutoff] = repo.countDueExtensionPublishPosts.mock.calls[0];
+    expect(now.getTime() - cutoff.getTime()).toBe(10 * 60 * 1000);
+
+    // '0' is falsy, so it takes the same fallback rather than meaning "no
+    // lease" — the pre-existing `Number(env) || 10` behaviour, kept as-is.
+    process.env.EXTENSION_PUBLISH_LEASE_MINUTES = '0';
+    try {
+      const second = countingService();
+      await second.svc.countDuePublishPosts('org-1');
+      const [, , n2, c2] = second.repo.countDueExtensionPublishPosts.mock.calls[0];
+      expect(n2.getTime() - c2.getTime()).toBe(10 * 60 * 1000);
+    } finally {
+      delete process.env.EXTENSION_PUBLISH_LEASE_MINUTES;
+    }
+  });
+
+  it('clamps a negative lease window up to one minute', async () => {
+    process.env.EXTENSION_PUBLISH_LEASE_MINUTES = '-5';
+    try {
+      const { svc, repo } = countingService();
+      await svc.countDuePublishPosts('org-1');
+      const [, , now, cutoff] = repo.countDueExtensionPublishPosts.mock.calls[0];
+      // A cutoff in the FUTURE would make every live lease look expired and
+      // report leased work as claimable.
+      expect(now.getTime() - cutoff.getTime()).toBe(60 * 1000);
+    } finally {
+      delete process.env.EXTENSION_PUBLISH_LEASE_MINUTES;
+    }
+  });
+});
