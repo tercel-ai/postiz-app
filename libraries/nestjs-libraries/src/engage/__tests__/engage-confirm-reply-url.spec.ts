@@ -94,10 +94,13 @@ describe('EngageService.confirmManualReply — URL verification gating', () => {
     expect(updateReplyAuthor).not.toHaveBeenCalled();
   });
 
+  // Host rejection now names the accepted domains, sourced from PLATFORM_HOSTS
+  // rather than a hand-written sentence per platform (_validateReplyUrl). The
+  // assertions below pin that the domains reach the user, not the old wording.
   it('rejects a malformed X URL and releases the claim (no record created)', async () => {
     await expect(
       service.confirmManualReply(org, undefined, 'opp-1', body({ replyUrl: 'not-a-tweet-url' }))
-    ).rejects.toThrow(/Invalid X reply URL/);
+    ).rejects.toThrow(/Invalid x reply URL.*x\.com or twitter\.com/);
     expect(createX).not.toHaveBeenCalled();
     expect(release).toHaveBeenCalledTimes(1);
   });
@@ -106,8 +109,23 @@ describe('EngageService.confirmManualReply — URL verification gating', () => {
     claim.mockResolvedValue({ opp: { platform: 'reddit' }, priorStatus: 'NEW' });
     await expect(
       service.confirmManualReply(org, undefined, 'opp-1', body({ replyUrl: 'https://example.com/not-reddit' }))
-    ).rejects.toThrow(/Invalid Reddit comment URL/);
+    ).rejects.toThrow(/Invalid reddit reply URL.*reddit\.com/);
     expect(createReddit).not.toHaveBeenCalled();
     expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it('still rejects a right-host-but-id-less Reddit URL with the comment-id message', async () => {
+    // The host layer passes; the id-shape layer is what refuses. Both layers
+    // must stay reachable after the registry refactor collapsed the host checks.
+    claim.mockResolvedValue({ opp: { platform: 'reddit' }, priorStatus: 'NEW' });
+    await expect(
+      service.confirmManualReply(
+        org,
+        undefined,
+        'opp-1',
+        body({ replyUrl: 'https://www.reddit.com/r/sub/comments/abc/' })
+      )
+    ).rejects.toThrow(/must link to a specific comment/);
+    expect(createReddit).not.toHaveBeenCalled();
   });
 });

@@ -183,14 +183,56 @@ describe('publishExtensionReply — commit on confirmed extension success', () =
     ).rejects.toThrow(/not found/i);
   });
 
-  it('rejects a platform that is not X or Reddit', async () => {
+  it('publishes a non-X/Reddit SCANNABLE_PLATFORMS reply (linkedin) — this callback is its only path to PUBLISHED', async () => {
+    // Regression: this used to reject every platform but X/Reddit, so a
+    // linkedin/hackernews/devto/medium/quora reply that genuinely posted stayed
+    // QUEUE forever — the extension's success callback was the only writer of
+    // DRAFT/QUEUE→PUBLISHED and it always threw for these platforms.
+    const { service, updateReplyUrl, claimOpportunityForReply } = build({
+      ...draftCtx,
+      platform: 'linkedin',
+    });
+    const linkedinUrl = 'https://www.linkedin.com/feed/update/urn:li:activity:123/';
+
+    const res = await service.publishExtensionReply(
+      org,
+      'u1',
+      'r1',
+      linkedinUrl,
+      undefined
+    );
+
+    expect(updateReplyUrl).toHaveBeenCalledWith(
+      'org-1',
+      'r1',
+      linkedinUrl,
+      undefined,
+      { markPublished: true }
+    );
+    expect(claimOpportunityForReply).toHaveBeenCalledOnce();
+    expect(res).toMatchObject({ state: 'PUBLISHED', replyUrl: linkedinUrl });
+  });
+
+  it('rejects a platform outside SCANNABLE_PLATFORMS entirely', async () => {
+    const { service, updateReplyUrl } = build({
+      ...draftCtx,
+      platform: 'made-up-platform',
+    });
+    await expect(
+      service.publishExtensionReply(org, 'u1', 'r1', xUrl, author)
+    ).rejects.toThrow(/not supported for platform/i);
+    expect(updateReplyUrl).not.toHaveBeenCalled();
+  });
+
+  it('rejects a linkedin URL whose domain does not match', async () => {
     const { service, updateReplyUrl } = build({
       ...draftCtx,
       platform: 'linkedin',
     });
     await expect(
-      service.publishExtensionReply(org, 'u1', 'r1', xUrl, author)
-    ).rejects.toThrow(/only valid for X or Reddit/i);
+      service.publishExtensionReply(org, 'u1', 'r1', xUrl, author) // an x.com URL
+      // The accepted hosts come from PLATFORM_HOSTS, so the message names them.
+    ).rejects.toThrow(/Invalid linkedin reply URL.*linkedin\.com/);
     expect(updateReplyUrl).not.toHaveBeenCalled();
   });
 });

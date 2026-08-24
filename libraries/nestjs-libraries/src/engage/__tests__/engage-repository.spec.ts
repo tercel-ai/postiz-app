@@ -2596,6 +2596,82 @@ describe('EngageRepository — two-table reads', () => {
     });
   });
 
+  describe('updateReplyUrl — the DRAFT/QUEUE→PUBLISHED commit write', () => {
+    function buildRepo(platform: string) {
+      const sentFindFirst = vi.fn(async () => ({
+        id: 'r1',
+        postId: 'p1',
+        opportunity: { platform },
+      }));
+      const postUpdate = vi.fn(async () => ({ id: 'p1' }));
+      const postFindUnique = vi.fn(async () => ({
+        integrationId: null,
+        settings: null,
+      }));
+      const sentReply = {
+        model: { engageSentReply: { findFirst: sentFindFirst } },
+      } as any;
+      const post = {
+        model: { post: { update: postUpdate, findUnique: postFindUnique } },
+      } as any;
+      const repo = new EngageRepository(
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        sentReply, // _sentReply
+        {} as any,
+        {} as any,
+        post, // _post
+        {} as any,
+        {} as any,
+        {} as any
+      );
+      return { repo, postUpdate };
+    }
+
+    it('flips a devto reply to PUBLISHED — every SCANNABLE_PLATFORMS platform can commit, not just X/Reddit', async () => {
+      // Regression: this used to throw for anything but X/Reddit, so a devto /
+      // linkedin / hackernews / medium / quora reply the extension really did
+      // post stayed QUEUE forever.
+      const { repo, postUpdate } = buildRepo('devto');
+
+      await repo.updateReplyUrl(
+        'org1',
+        'r1',
+        'https://dev.to/alice/post/comment/1',
+        undefined,
+        { markPublished: true }
+      );
+
+      expect(postUpdate.mock.calls[0][0].data.state).toBe('PUBLISHED');
+    });
+
+    it('commits URL-less too — a confirmed send with no captured permalink still leaves QUEUE', async () => {
+      const { repo, postUpdate } = buildRepo('hackernews');
+
+      await repo.updateReplyUrl('org1', 'r1', null, undefined, {
+        markPublished: true,
+      });
+
+      const data = postUpdate.mock.calls[0][0].data;
+      expect(data.state).toBe('PUBLISHED');
+      expect(data.releaseURL).toBeNull();
+    });
+
+    it('rejects a platform outside SCANNABLE_PLATFORMS', async () => {
+      const { repo, postUpdate } = buildRepo('made-up-platform');
+
+      await expect(
+        repo.updateReplyUrl('org1', 'r1', 'https://example.com/x', undefined, {
+          markPublished: true,
+        })
+      ).rejects.toThrow(/not supported for platform/i);
+      expect(postUpdate).not.toHaveBeenCalled();
+    });
+  });
+
   describe('resolveOrCreateKeywordIds', () => {
     function buildRepo(existing: Array<{ id: string; keyword: string }>) {
       const findMany = vi.fn().mockResolvedValue(existing);

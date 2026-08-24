@@ -210,6 +210,52 @@ export const SCANNABLE_PLATFORMS: readonly ScanPlatform[] = [
   'quora',
 ];
 
+/**
+ * The public hostname(s) each platform's post/reply URLs live on. Lives here,
+ * beside SCANNABLE_PLATFORMS, for the same reason that list does: this is the
+ * kind of per-platform fact that gets copied and then silently drifts. Reply-URL
+ * validation used to hold private copies of it (an `isRedditUrl`, an `isXUrl`,
+ * and a third map for everything else), so adding a platform to
+ * SCANNABLE_PLATFORMS left it rejecting that platform's URLs with "not
+ * supported" — a config-shaped error for what was really a missing table entry.
+ *
+ * Typed `Record<ScanPlatform, ...>` rather than a partial map ON PURPOSE: adding
+ * a member to ScanPlatform without adding its hosts is then a COMPILE error, not
+ * a runtime surprise. That is the whole guarantee — the list cannot change
+ * without this changing with it.
+ *
+ * Hosts only, never path shapes: platforms rewrite their permalink structure
+ * over time, and the id-shape checks that some flows additionally need (X's
+ * /status/<id>, Reddit's comment id) live with the parsers that consume them.
+ */
+export const PLATFORM_HOSTS: Record<ScanPlatform, readonly string[]> = {
+  x: ['x.com', 'twitter.com'],
+  reddit: ['reddit.com'],
+  linkedin: ['linkedin.com'],
+  devto: ['dev.to'],
+  hackernews: ['news.ycombinator.com'],
+  medium: ['medium.com'],
+  quora: ['quora.com'],
+};
+
+/**
+ * Whether `url`'s host belongs to `platform`. Subdomains count (www.reddit.com,
+ * old.reddit.com), an unparseable URL never does, and an unknown platform is
+ * always false — callers must treat "cannot judge" as "reject", since the only
+ * caller is URL validation.
+ */
+export function hostMatchesPlatform(platform: string, url: string): boolean {
+  const domains = PLATFORM_HOSTS[platform as ScanPlatform];
+  if (!domains) return false;
+  let host: string;
+  try {
+    host = new URL(url).hostname.toLowerCase();
+  } catch {
+    return false; // not a parseable absolute URL
+  }
+  return domains.some((d) => host === d || host.endsWith(`.${d}`));
+}
+
 // Canonical key literal for the admin operation-plan platform allowlist. Inlined
 // (not imported from operation-plan.service) to avoid an engage ↔ operation-plan
 // module import cycle — operation-plan.service already imports from engage.

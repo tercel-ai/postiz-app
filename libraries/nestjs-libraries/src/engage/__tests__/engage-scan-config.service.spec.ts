@@ -13,6 +13,9 @@ import {
   DEFAULT_SCAN_FRESHNESS_HOURS,
   mergePacing,
   toScanPlatforms,
+  PLATFORM_HOSTS,
+  SCANNABLE_PLATFORMS,
+  hostMatchesPlatform,
 } from '../engage-scan-config.service';
 
 function settingsMock(values: Record<string, unknown> = {}) {
@@ -212,5 +215,55 @@ describe('mergePacing (leaf guards)', () => {
     expect(merged.extension.interUnit.delayMs).toBe(90000);
     expect(merged.extension.interUnit.jitterMs).toBe(60000); // default preserved
     expect(merged.extension.session.hourlyRequestCap).toBe(30);
+  });
+});
+
+describe('PLATFORM_HOSTS / hostMatchesPlatform', () => {
+  // The point of this registry is that it CANNOT drift from SCANNABLE_PLATFORMS.
+  // The Record<ScanPlatform, ...> type makes a missing entry a compile error;
+  // this pins the runtime half of the same guarantee.
+  it('covers every scannable platform, with no extras', () => {
+    expect(Object.keys(PLATFORM_HOSTS).sort()).toEqual(
+      [...SCANNABLE_PLATFORMS].sort()
+    );
+  });
+
+  it('gives every platform at least one non-empty host', () => {
+    for (const platform of SCANNABLE_PLATFORMS) {
+      expect(PLATFORM_HOSTS[platform].length).toBeGreaterThan(0);
+      for (const host of PLATFORM_HOSTS[platform]) {
+        expect(host).toMatch(/^[a-z0-9.-]+\.[a-z]{2,}$/);
+      }
+    }
+  });
+
+  it('matches a platform own host, and subdomains of it', () => {
+    expect(hostMatchesPlatform('reddit', 'https://reddit.com/r/a/comments/1')).toBe(true);
+    expect(hostMatchesPlatform('reddit', 'https://www.reddit.com/r/a/comments/1')).toBe(true);
+    expect(hostMatchesPlatform('reddit', 'https://old.reddit.com/r/a/comments/1')).toBe(true);
+    expect(hostMatchesPlatform('devto', 'https://dev.to/alice/post')).toBe(true);
+    expect(hostMatchesPlatform('hackernews', 'https://news.ycombinator.com/item?id=1')).toBe(true);
+  });
+
+  it('accepts both x.com and the legacy twitter.com', () => {
+    expect(hostMatchesPlatform('x', 'https://x.com/a/status/1')).toBe(true);
+    expect(hostMatchesPlatform('x', 'https://twitter.com/a/status/1')).toBe(true);
+  });
+
+  it('rejects another platform host, so a cross-platform URL cannot be stored', () => {
+    expect(hostMatchesPlatform('linkedin', 'https://x.com/a/status/1')).toBe(false);
+    expect(hostMatchesPlatform('x', 'https://reddit.com/r/a/comments/1')).toBe(false);
+  });
+
+  it('rejects a lookalike domain rather than matching on a substring', () => {
+    // endsWith('.' + domain) — not includes() — so this must NOT pass.
+    expect(hostMatchesPlatform('reddit', 'https://reddit.com.evil.test/r/a')).toBe(false);
+    expect(hostMatchesPlatform('devto', 'https://notdev.to/alice')).toBe(false);
+  });
+
+  it('rejects an unparseable URL and an unknown platform — never throws', () => {
+    expect(hostMatchesPlatform('reddit', 'not a url')).toBe(false);
+    expect(hostMatchesPlatform('reddit', '')).toBe(false);
+    expect(hostMatchesPlatform('made-up', 'https://example.com')).toBe(false);
   });
 });

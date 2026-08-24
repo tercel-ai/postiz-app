@@ -128,27 +128,21 @@ import {
 import {
   EngageScanConfigService,
   fallbackOpportunityTtlDaysMap,
+  hostMatchesPlatform,
+  PLATFORM_HOSTS,
+  SCANNABLE_PLATFORMS,
   type OpportunityTtlDays,
+  type ScanPlatform,
 } from '@gitroom/nestjs-libraries/engage/engage-scan-config.service';
 import {
   BIZ_USAGE,
   runWithBizUsage,
 } from '@gitroom/nestjs-libraries/database/prisma/api-usage/api-usage.service';
 
-// Validate by DOMAIN only, not by full path shape — Reddit/X change their
-// permalink structure over time. The reply URL is only checked for the right
-// platform host; target reachability is not verified (see _validateReplyUrl).
-function hostIsOneOf(url: string, domains: string[]): boolean {
-  try {
-    const host = new URL(url).hostname.toLowerCase();
-    return domains.some((d) => host === d || host.endsWith(`.${d}`));
-  } catch {
-    return false; // not a parseable absolute URL
-  }
-}
-
-const isRedditUrl = (url: string) => hostIsOneOf(url, ['reddit.com']);
-const isXUrl = (url: string) => hostIsOneOf(url, ['x.com', 'twitter.com']);
+// Host validation lives with the platform list (engage-scan-config.service.ts's
+// PLATFORM_HOSTS / hostMatchesPlatform), not here: it used to be three private
+// copies in this file — an isRedditUrl, an isXUrl, and a map for the rest — and
+// a platform added to SCANNABLE_PLATFORMS reached none of them.
 
 // Event-driven metrics refresh (`refreshMetricsForPosts`): hard cap on how many
 // client-supplied post ids one request may refresh, bounding external API work
@@ -1401,9 +1395,15 @@ export class EngageService implements OnApplicationBootstrap {
         alreadyPublished: true,
       };
     }
-    if (ctx.platform !== 'x' && ctx.platform !== 'reddit') {
+    // Stale restriction from when the extension only drove X/Reddit: it now
+    // posts replies for every SCANNABLE_PLATFORMS platform (linkedin,
+    // hackernews, devto, medium, quora — see post-reply.ts's postByPlatform),
+    // and this callback is their ONLY path to DRAFT/QUEUE→PUBLISHED. Blocking
+    // it here left every non-X/Reddit reply stuck in QUEUE forever, even
+    // though the platform post itself succeeded.
+    if (!(SCANNABLE_PLATFORMS as readonly string[]).includes(ctx.platform)) {
       throw new BadRequestException(
-        'Publish is only valid for X or Reddit replies'
+        `Publish is not supported for platform "${ctx.platform}".`
       );
     }
 
@@ -1545,6 +1545,12 @@ export class EngageService implements OnApplicationBootstrap {
    * Validate a reply URL against its platform: correct format only. Shared by the
    * confirm path (only when a URL is supplied) and the backfill path (always).
    *
+   * Two layers, in order:
+   *   1. HOST — every scannable platform, from the one PLATFORM_HOSTS registry.
+   *      A platform added to SCANNABLE_PLATFORMS is covered the moment it is
+   *      added, because the registry is typed to require it.
+   *   2. ID SHAPE — only where a downstream parser depends on it (below).
+   *
    * Network reachability of the target (Reddit comment / X tweet) is intentionally
    * NOT checked: the verification fetch goes out through the global proxy
    * dispatcher, which returns 407 in environments without proxy credentials and
@@ -1554,43 +1560,39 @@ export class EngageService implements OnApplicationBootstrap {
     platform: string,
     url: string
   ): Promise<void> {
-    if (platform === 'reddit') {
-      if (!isRedditUrl(url)) {
-        throw new BadRequestException(
-          'Invalid Reddit comment URL — must be a reddit.com link.'
-        );
-      }
-      // Strict: the URL must contain a parseable comment id. Host-only
-      // validation let truncated links (e.g. .../comments/d) and post-only links
-      // through, which saved a releaseURL whose comment id can't be parsed —
-      // syncRedditMetrics then skips forever and the reply silently never gets
-      // metrics. Reject here so the id is guaranteed present before persisting.
-      if (!parseRedditCommentId(url)) {
-        throw new BadRequestException(
-          'Invalid Reddit comment URL — must link to a specific comment, e.g. ' +
-            'https://www.reddit.com/r/<sub>/comments/<postId>/comment/<commentId>/ ' +
-            '(share params like ?utm_source are fine).'
-        );
-      }
-    } else if (platform === 'x') {
-      if (!isXUrl(url)) {
-        throw new BadRequestException(
-          'Invalid X reply URL — must be an x.com or twitter.com link.'
-        );
-      }
-      // Strict: the URL must contain a parseable /status/<id>. Host-only
-      // validation let id-less links through, which saved releaseURL with a
-      // null releaseId — checkPostAnalytics then early-returns and metrics never
-      // sync. Reject here so the id is guaranteed present before persisting.
-      if (!parseXTweetId(url)) {
-        throw new BadRequestException(
-          'Invalid X reply URL — must link to a specific tweet, e.g. ' +
-            'https://x.com/<user>/status/<id> (tracking params like ?s=20 are fine).'
-        );
-      }
-    } else {
+    if (!(SCANNABLE_PLATFORMS as readonly string[]).includes(platform)) {
       throw new BadRequestException(
-        'Reply-URL backfill is only valid for X or Reddit manual replies'
+        `Reply-URL backfill is not supported for platform "${platform}"`
+      );
+    }
+
+    if (!hostMatchesPlatform(platform, url)) {
+      // The accepted hosts come from the registry rather than the message, so a
+      // newly added platform states its own domains correctly without anyone
+      // remembering to write a sentence for it.
+      throw new BadRequestException(
+        `Invalid ${platform} reply URL — must be a link on ` +
+          `${PLATFORM_HOSTS[platform as ScanPlatform].join(' or ')}.`
+      );
+    }
+
+    // Beyond the host, two platforms need the URL to carry a parseable id,
+    // because their metrics sync derives it from the stored releaseURL. Host-only
+    // validation let truncated/post-only links through, which persisted a
+    // releaseURL nothing could ever sync — a silent, permanent no-metrics state.
+    // Everything else has no releaseURL-dependent id parser, so the host IS the
+    // whole check; when one gains a parser, add it here next to these.
+    if (platform === 'reddit' && !parseRedditCommentId(url)) {
+      throw new BadRequestException(
+        'Invalid Reddit comment URL — must link to a specific comment, e.g. ' +
+          'https://www.reddit.com/r/<sub>/comments/<postId>/comment/<commentId>/ ' +
+          '(share params like ?utm_source are fine).'
+      );
+    }
+    if (platform === 'x' && !parseXTweetId(url)) {
+      throw new BadRequestException(
+        'Invalid X reply URL — must link to a specific tweet, e.g. ' +
+          'https://x.com/<user>/status/<id> (tracking params like ?s=20 are fine).'
       );
     }
   }

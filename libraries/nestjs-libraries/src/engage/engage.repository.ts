@@ -48,6 +48,7 @@ import {
   scanTypeFor,
   toChannelShape,
 } from '@gitroom/nestjs-libraries/engage/engage-scan-target';
+import { SCANNABLE_PLATFORMS } from '@gitroom/nestjs-libraries/engage/engage-scan-config.service';
 import {
   pickXReplyIntegration,
   XReplyResolution,
@@ -5089,19 +5090,22 @@ export class EngageRepository {
     // backfill there only fills the URL.
     opts: { markPublished?: boolean } = {}
   ) {
-    // Join the opportunity for its platform: backfill is only meaningful for the
-    // manual-reply platforms (X / Reddit), and for X we also derive releaseId
-    // from the tweet URL so metrics sync can read it. The caller (service) has
-    // already validated the URL matches this platform.
+    // Join the opportunity for its platform: X gets releaseId derived from the
+    // tweet URL so metrics sync can read it, X/Reddit get author enrichment
+    // merged into settings — everything below is genuinely platform-specific
+    // enrichment, gated per-branch, not a reason to refuse the write outright.
+    // The caller (service) has already validated the URL matches this
+    // platform via _validateReplyUrl; this only guards against an opportunity
+    // whose platform fell outside SCANNABLE_PLATFORMS entirely.
     const reply = await this._sentReply.model.engageSentReply.findFirst({
       where: { id: sentReplyId, organizationId },
       include: { opportunity: { select: { platform: true } } },
     });
     if (!reply) throw new NotFoundException('Sent reply not found');
     const platform = reply.opportunity.platform;
-    if (platform !== 'reddit' && platform !== 'x') {
+    if (!(SCANNABLE_PLATFORMS as readonly string[]).includes(platform)) {
       throw new BadRequestException(
-        'Reply-URL backfill is only valid for X or Reddit manual replies'
+        `Reply-URL backfill is not supported for platform "${platform}"`
       );
     }
     const releaseId =
