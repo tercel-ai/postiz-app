@@ -2112,8 +2112,6 @@ export class EngageRepository {
       limit: number;
       keywords?: string[];
       minScore?: number;
-      /** Skip posts older than this — replying to a stale thread reads as spam. */
-      publishedAfter?: Date;
     }
   ) {
     if (opts.limit <= 0) return [];
@@ -2130,9 +2128,6 @@ export class EngageRepository {
         opportunity: {
           deletedAt: null,
           platform,
-          ...(opts.publishedAfter && {
-            postPublishedAt: { gte: opts.publishedAfter },
-          }),
           // No reply record for THIS project yet (another project replying to the
           // same global post is fine — state is per-org/project).
           sentReplies: { none: { organizationId, projectId } },
@@ -2154,6 +2149,55 @@ export class EngageRepository {
         opportunityId: true,
         score: true,
         matchedKeywords: true,
+      },
+    });
+  }
+
+  /**
+   * How many replies are already generated and sitting in `QUEUE` for this
+   * (project, platform) — read-only, unlike {@link claimDueEngageReplies},
+   * which leases what it finds. Counts a currently-leased row too: it is still
+   * "in the queue" from an operator's point of view, just mid-attempt.
+   */
+  async countQueuedEngageReplies(
+    organizationId: string,
+    projectId: string,
+    platform: string
+  ): Promise<number> {
+    return this._sentReply.model.engageSentReply.count({
+      where: {
+        organizationId,
+        projectId,
+        opportunity: { platform },
+        post: { state: 'QUEUE', deletedAt: null, releaseURL: null },
+      },
+    });
+  }
+
+  /**
+   * How many opportunities could still become a queued reply — the read-only
+   * count behind {@link pickAutoReplyCandidates}'s same where-clause, so a
+   * status check and the actual pick can never disagree about what "eligible"
+   * means.
+   */
+  async countEligibleOpportunities(
+    organizationId: string,
+    projectId: string,
+    platform: string,
+    opts: { minScore?: number } = {}
+  ): Promise<number> {
+    return this._oppState.model.engageOpportunityState.count({
+      where: {
+        organizationId,
+        projectId,
+        status: 'NEW',
+        isCurrentlyMatched: true,
+        ...(opts.minScore !== undefined && { score: { gte: opts.minScore } }),
+        opportunity: {
+          deletedAt: null,
+          platform,
+          sentReplies: { none: { organizationId, projectId } },
+        },
       },
     });
   }

@@ -23,6 +23,8 @@ function makeService(over: {
   pacing?: Partial<typeof DEFAULT_REPLY_PACING>;
   opportunity?: any;
   queued?: any[];
+  queuedCount?: number;
+  eligibleCount?: number;
 } = {}) {
   const repo = {
     getAutoReplyConfigs: vi.fn().mockResolvedValue(over.configs ?? []),
@@ -31,6 +33,8 @@ function makeService(over: {
     releaseAutoReplyCandidate: vi.fn().mockResolvedValue(undefined),
     getLastSentReplyAt: vi.fn().mockResolvedValue(over.lastSentAt ?? null),
     claimDueEngageReplies: vi.fn().mockResolvedValue(over.queued ?? []),
+    countQueuedEngageReplies: vi.fn().mockResolvedValue(over.queuedCount ?? 0),
+    countEligibleOpportunities: vi.fn().mockResolvedValue(over.eligibleCount ?? 0),
   } as any;
 
   const engage = {
@@ -787,5 +791,145 @@ describe('EngageAutoReplyService.getDueReplies — the queue lane', () => {
     await svc.getDueReplies(org);
 
     expect(repo.claimDueEngageReplies).not.toHaveBeenCalled();
+  });
+});
+
+describe('EngageAutoReplyService.getReplyQueueStatus', () => {
+  // Read-only: `getDueReplies` returning `{ due: [] }` cannot tell "nothing
+  // eligible" apart from "something is eligible/queued but pacing is holding
+  // it back". This is the diagnostic the extension's debug panel calls.
+
+  it('reports queued and eligible counts per (project, platform), with no claim/draft side effects', async () => {
+    const { svc, repo, engage } = makeService({
+      configs: [{ ...enabledConfig, replyPolicies: { reddit: { autoReplyEnabled: true } } }],
+      queuedCount: 3,
+      eligibleCount: 7,
+    });
+
+    const rows = await svc.getReplyQueueStatus(org, new Date('2026-08-18T12:00:00Z'));
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      projectId: 'proj-1',
+      platform: 'reddit',
+      policyEnabled: true,
+      queuedCount: 3,
+      eligibleCount: 7,
+    });
+    expect(repo.claimDueEngageReplies).not.toHaveBeenCalled();
+    expect(repo.claimAutoReplyCandidate).not.toHaveBeenCalled();
+    expect(engage.queueAutoReply).not.toHaveBeenCalled();
+  });
+
+  it('omits a platform the project has switched off, rather than reporting 0/0', async () => {
+    // 0 queued / 0 eligible would read identically to "this platform is on but
+    // idle" — the row must not exist at all when the switch itself is off.
+    const { svc } = makeService({
+      configs: [{ ...enabledConfig, replyPolicies: { reddit: { autoReplyEnabled: false } } }],
+    });
+
+    const rows = await svc.getReplyQueueStatus(org);
+
+    expect(rows).toHaveLength(0);
+  });
+
+  it('reports withinActiveHours=false outside the pacing window, but still surfaces the counts', async () => {
+    const { svc } = makeService({
+      configs: [{ ...enabledConfig, replyPolicies: { reddit: { autoReplyEnabled: true } } }],
+      pacing: { activeHoursUtc: [9, 17] },
+      queuedCount: 2,
+    });
+
+    const rows = await svc.getReplyQueueStatus(org, new Date('2026-08-18T22:00:00Z'));
+
+    expect(rows[0]).toMatchObject({ withinActiveHours: false, queuedCount: 2 });
+  });
+
+  it('reports withinLocalWindow from the platform policy, independent of the pacing window', async () => {
+    const { svc } = makeService({
+      configs: [
+        {
+          ...enabledConfig,
+          replyPolicies: {
+            reddit: { autoReplyEnabled: true, windowStart: '09:00', windowEnd: '17:00' },
+          },
+        },
+      ],
+    });
+
+    const rows = await svc.getReplyQueueStatus(org, new Date('2026-08-18T22:00:00Z'));
+
+    expect(rows[0].withinLocalWindow).toBe(false);
+  });
+
+  it('computes nextEligibleAt from the last sent reply + the min gap, when still inside it', async () => {
+    const { svc } = makeService({
+      configs: [{ ...enabledConfig, replyPolicies: { reddit: { autoReplyEnabled: true } } }],
+      lastSentAt: new Date('2026-08-18T11:50:00Z'),
+      pacing: { minGapMinutes: 25 },
+    });
+
+    const rows = await svc.getReplyQueueStatus(org, new Date('2026-08-18T12:00:00Z'));
+
+    // 10 minutes since the last reply, 25-minute gap → still gated, 15 to go.
+    expect(rows[0].withinMinGap).toBe(false);
+    expect(rows[0].nextEligibleAt).toBe(new Date('2026-08-18T12:15:00Z').toISOString());
+  });
+
+  it('reports withinMinGap=true and nextEligibleAt=null once the gap has elapsed', async () => {
+    const { svc } = makeService({
+      configs: [{ ...enabledConfig, replyPolicies: { reddit: { autoReplyEnabled: true } } }],
+      lastSentAt: new Date('2026-08-18T11:00:00Z'),
+      pacing: { minGapMinutes: 25 },
+    });
+
+    const rows = await svc.getReplyQueueStatus(org, new Date('2026-08-18T12:00:00Z'));
+
+    expect(rows[0].withinMinGap).toBe(true);
+    expect(rows[0].nextEligibleAt).toBeNull();
+  });
+
+  it('never gates on the min gap when this project+platform has never sent a reply', async () => {
+    const { svc } = makeService({
+      configs: [{ ...enabledConfig, replyPolicies: { reddit: { autoReplyEnabled: true } } }],
+      lastSentAt: null,
+    });
+
+    const rows = await svc.getReplyQueueStatus(org);
+
+    expect(rows[0].withinMinGap).toBe(true);
+    expect(rows[0].nextEligibleAt).toBeNull();
+  });
+
+  it('passes the pacing minScore through to the eligible-count query', async () => {
+    const { svc, repo } = makeService({
+      configs: [{ ...enabledConfig, replyPolicies: { reddit: { autoReplyEnabled: true } } }],
+      pacing: { minScore: 80 },
+    });
+
+    await svc.getReplyQueueStatus(org);
+
+    expect(repo.countEligibleOpportunities).toHaveBeenCalledWith(
+      org.id,
+      'proj-1',
+      'reddit',
+      { minScore: 80 }
+    );
+  });
+
+  it('reports one row per configured platform, across multiple projects', async () => {
+    const { svc } = makeService({
+      configs: [
+        { id: 'cfg-1', projectId: 'proj-1', replyPolicies: { reddit: { autoReplyEnabled: true } } },
+        { id: 'cfg-2', projectId: 'proj-2', replyPolicies: { x: { autoReplyEnabled: true } } },
+      ],
+    });
+
+    const rows = await svc.getReplyQueueStatus(org);
+
+    expect(rows.map((r) => `${r.projectId}:${r.platform}`).sort()).toEqual([
+      'proj-1:reddit',
+      'proj-2:x',
+    ]);
   });
 });

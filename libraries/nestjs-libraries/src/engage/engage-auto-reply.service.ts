@@ -90,8 +90,6 @@ export interface EngageReplyPacing {
   minGapMinutes: number;
   /** UTC hours [startInclusive, endExclusive) the driver may hand out work in. */
   activeHoursUtc: [number, number];
-  /** Skip opportunities whose post is older than this — a late reply reads as spam. */
-  maxPostAgeHours: number;
   /** Opportunities below this score are never auto-replied to. */
   minScore: number;
   /**
@@ -112,7 +110,6 @@ export const DEFAULT_REPLY_PACING: EngageReplyPacing = {
   maxPerPoll: 1,
   minGapMinutes: 25,
   activeHoursUtc: [0, 24],
-  maxPostAgeHours: 48,
   minScore: 70,
   claimLeaseMinutes: 30,
 };
@@ -127,6 +124,28 @@ export interface DueReply {
   url: string;
   /** The generated reply text. */
   text: string;
+}
+
+/** Read-only status for one (project, platform) pair — see getReplyQueueStatus. */
+export interface ReplyQueueStatusRow {
+  projectId: string;
+  platform: string;
+  /** The platform-level managed-replies switch (replyPolicies[platform].autoReplyEnabled). */
+  policyEnabled: boolean;
+  /** Already generated, sitting in QUEUE, waiting for the extension to send it. */
+  queuedCount: number;
+  /** NEW opportunities that could still become a queued reply. */
+  eligibleCount: number;
+  /** The pacing setting's UTC active-hours window. */
+  withinActiveHours: boolean;
+  /** This policy's own local-time window (windowStart/windowEnd/timezone). */
+  withinLocalWindow: boolean;
+  /** Human-like spacing since this project+platform's last sent reply. */
+  withinMinGap: boolean;
+  minGapMinutes: number;
+  lastSentReplyAt: string | null;
+  /** ISO timestamp of when the min-gap gate next opens; null when not gated by it. */
+  nextEligibleAt: string | null;
 }
 
 /**
@@ -172,9 +191,8 @@ export class EngageAutoReplyService implements OnModuleInit {
             description:
               'Unattended engage-reply pacing: how many drafts one poll may hand out PER ' +
               'PLATFORM, minimum spacing per project+platform, the UTC active-hours window, the ' +
-              'maximum age of a post worth replying to, the minimum opportunity score, and the ' +
-              'claim lease (how long a reply handed to a browser stays spoken for before it ' +
-              'is offered again).',
+              'minimum opportunity score, and the claim lease (how long a reply handed to a ' +
+              'browser stays spoken for before it is offered again).',
             defaultValue: DEFAULT_REPLY_PACING,
           }
         );
@@ -349,7 +367,7 @@ export class EngageAutoReplyService implements OnModuleInit {
         }
 
         const drafted = await this._draftOne(
-          org, projectId, platform, budget, pacing, now, policy
+          org, projectId, platform, budget, pacing, policy
         );
         if (drafted) {
           due.push(drafted);
@@ -358,6 +376,79 @@ export class EngageAutoReplyService implements OnModuleInit {
       }
     }
     return due;
+  }
+
+  /**
+   * Read-only status for every (project, platform) this org has configured for
+   * managed replying — what {@link getDueReplies} would see on its next poll,
+   * without claiming or drafting anything.
+   *
+   * `getDueReplies` returning `{ due: [] }` conflates two very different
+   * situations: "nothing eligible exists" and "something is eligible/queued
+   * but pacing has it on hold this poll" (outside the active-hours window,
+   * inside the minimum gap, or the platform switch is off). This tells them
+   * apart so a stuck automation can be diagnosed from the numbers alone,
+   * instead of guessing from a single empty array.
+   */
+  async getReplyQueueStatus(
+    org: Organization,
+    now = new Date()
+  ): Promise<ReplyQueueStatusRow[]> {
+    const pacing = await this.getPacing();
+    const hour = dayjs.utc(now).hour();
+    const [startHour, endHour] = pacing.activeHoursUtc;
+    const withinActiveHours = hour >= startHour && hour < endHour;
+
+    const configs = await this._engageRepository.getAutoReplyConfigs(org.id);
+    const rows: ReplyQueueStatusRow[] = [];
+
+    for (const config of configs) {
+      const projectId = config.projectId!;
+      const policies = (config.replyPolicies ?? {}) as Record<string, EngageReplyPolicy>;
+
+      for (const rawPlatform of Object.keys(policies)) {
+        const platform = rawPlatform.toLowerCase();
+        const policy = policies[rawPlatform];
+        const policyEnabled = !!policy?.autoReplyEnabled;
+
+        // Skip the (project, platform) entirely when the platform was never
+        // switched on — same as getDueReplies, and for the same reason: a row
+        // here would otherwise read as "0 queued, 0 eligible" which looks
+        // identical to "there's genuinely nothing", when the real answer is
+        // "this platform isn't running at all".
+        if (!policyEnabled) continue;
+
+        const [queuedCount, eligibleCount, lastSentReplyAt] = await Promise.all([
+          this._engageRepository.countQueuedEngageReplies(org.id, projectId, platform),
+          this._engageRepository.countEligibleOpportunities(org.id, projectId, platform, {
+            minScore: pacing.minScore,
+          }),
+          this._engageRepository.getLastSentReplyAt(org.id, projectId, platform),
+        ]);
+
+        const minGapMinutes = policy.checkIntervalMinutes ?? pacing.minGapMinutes;
+        const nextEligibleAt = lastSentReplyAt
+          ? dayjs.utc(lastSentReplyAt).add(minGapMinutes, 'minute').toDate()
+          : null;
+        const withinMinGap = !nextEligibleAt || nextEligibleAt.getTime() <= now.getTime();
+
+        rows.push({
+          projectId,
+          platform,
+          policyEnabled,
+          queuedCount,
+          eligibleCount,
+          withinActiveHours,
+          withinLocalWindow: withinLocalWindow(policy, now),
+          withinMinGap,
+          minGapMinutes,
+          lastSentReplyAt: lastSentReplyAt ? lastSentReplyAt.toISOString() : null,
+          nextEligibleAt:
+            nextEligibleAt && !withinMinGap ? nextEligibleAt.toISOString() : null,
+        });
+      }
+    }
+    return rows;
   }
 
   /**
@@ -375,10 +466,8 @@ export class EngageAutoReplyService implements OnModuleInit {
     platform: string,
     budget: Awaited<ReturnType<EngageService['getReplyBudget']>>,
     pacing: EngageReplyPacing,
-    now: Date,
     policy: EngageReplyPolicy
   ): Promise<DueReply | null> {
-    const publishedAfter = dayjs.utc(now).subtract(pacing.maxPostAgeHours, 'hour').toDate();
     const hungryKeywords = budget.keywords
       .filter((k) => k.remaining > 0)
       .map((k) => k.keyword);
@@ -390,7 +479,6 @@ export class EngageAutoReplyService implements OnModuleInit {
       {
         limit: 1,
         minScore: pacing.minScore,
-        publishedAfter,
         ...(hungryKeywords.length ? { keywords: hungryKeywords } : {}),
       }
     );

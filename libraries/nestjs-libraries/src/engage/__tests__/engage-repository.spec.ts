@@ -2501,6 +2501,101 @@ describe('EngageRepository — two-table reads', () => {
     });
   });
 
+  describe('countQueuedEngageReplies', () => {
+    it('counts EngageSentReply rows whose post is still QUEUE, undeleted, unreleased — read-only', async () => {
+      const count = vi.fn(async () => 4);
+      const sentReply = { model: { engageSentReply: { count } } } as any;
+      const repo = new EngageRepository(
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        sentReply, // _sentReply
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any
+      );
+
+      const n = await repo.countQueuedEngageReplies('org1', 'proj-1', 'reddit');
+
+      expect(n).toBe(4);
+      const where = count.mock.calls[0][0].where;
+      expect(where.organizationId).toBe('org1');
+      expect(where.projectId).toBe('proj-1');
+      expect(where.opportunity).toEqual({ platform: 'reddit' });
+      expect(where.post).toEqual({
+        state: 'QUEUE',
+        deletedAt: null,
+        releaseURL: null,
+      });
+    });
+  });
+
+  describe('countEligibleOpportunities', () => {
+    it('counts NEW, currently-matched opportunities not yet replied to for this project — same shape pickAutoReplyCandidates picks from', async () => {
+      const count = vi.fn(async () => 9);
+      const oppState = { model: { engageOpportunityState: { count } } } as any;
+      const repo = new EngageRepository(
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        oppState, // _oppState
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any
+      );
+
+      const n = await repo.countEligibleOpportunities('org1', 'proj-1', 'x', {
+        minScore: 70,
+      });
+
+      expect(n).toBe(9);
+      const where = count.mock.calls[0][0].where;
+      expect(where.organizationId).toBe('org1');
+      expect(where.projectId).toBe('proj-1');
+      expect(where.status).toBe('NEW');
+      expect(where.isCurrentlyMatched).toBe(true);
+      expect(where.score).toEqual({ gte: 70 });
+      expect(where.opportunity).toEqual({
+        deletedAt: null,
+        platform: 'x',
+        sentReplies: { none: { organizationId: 'org1', projectId: 'proj-1' } },
+      });
+    });
+
+    it('omits the score filter when minScore is not supplied', async () => {
+      const count = vi.fn(async () => 0);
+      const oppState = { model: { engageOpportunityState: { count } } } as any;
+      const repo = new EngageRepository(
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        oppState,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any
+      );
+
+      await repo.countEligibleOpportunities('org1', 'proj-1', 'x');
+
+      expect('score' in count.mock.calls[0][0].where).toBe(false);
+    });
+  });
+
   describe('resolveOrCreateKeywordIds', () => {
     function buildRepo(existing: Array<{ id: string; keyword: string }>) {
       const findMany = vi.fn().mockResolvedValue(existing);

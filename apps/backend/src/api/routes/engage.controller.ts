@@ -460,6 +460,27 @@ export class EngageController {
     return { due };
   }
 
+  /**
+   * Read-only status of the unattended reply driver, per (project, platform):
+   * how many replies are already queued, how many opportunities are still
+   * eligible to be drafted, and whether pacing (active hours / local window /
+   * minimum gap) currently allows a poll to hand any of it out.
+   *
+   * A GET, unlike `/reply-due`: it claims nothing, drafts nothing, and is safe
+   * to poll as often as a debug panel wants — `/reply-due` cannot answer "is
+   * there something queued that pacing is holding back" without side effects,
+   * since claiming a queued row IS one.
+   */
+  @ApiOperation({
+    summary:
+      'Read-only queue/eligibility status for unattended reply (no side effects)',
+  })
+  @Get('/reply-queue-status')
+  async getReplyQueueStatus(@GetOrgFromRequest() org: Organization) {
+    const rows = await this._engageAutoReplyService.getReplyQueueStatus(org);
+    return { rows };
+  }
+
   // ─── Manual scan trigger ──────────────────────────────────────────────────
 
   // 5 manual triggers per org per hour — prevents API abuse while allowing
