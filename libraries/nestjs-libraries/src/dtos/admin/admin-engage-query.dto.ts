@@ -35,6 +35,14 @@ export class AdminEngageQueryDto {
   @IsString()
   platform?: string;
 
+  // Find the replies posted to one source post. Matched as a case-insensitive
+  // substring of the opportunity's externalPostUrl, and normalised first, so a
+  // pasted `twitter.com/...?s=20` finds the row stored as `x.com/...`. A bare
+  // status id works too (it is a substring of the stored URL).
+  @IsOptional()
+  @IsString()
+  externalPostUrl?: string;
+
   // Filter by the reply Post.state (DRAFT | QUEUE | PUBLISHED | ERROR).
   @IsOptional()
   @IsEnum(State)

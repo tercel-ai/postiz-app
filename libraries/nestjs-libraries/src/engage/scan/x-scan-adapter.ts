@@ -364,6 +364,64 @@ function isoSecondsUtc(ms: number): string {
   return new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
 }
 
+// One entry of X API v2's `entities.urls`. An entry carrying `media_key` is an
+// ATTACHMENT's shortlink (photo/video), not a link the tweet's text shows.
+interface XUrlEntity {
+  url?: string;
+  expanded_url?: string;
+  media_key?: string;
+}
+
+/** Every t.co shortlink X substitutes into a tweet's text looks like this. */
+const TCO_RE = /https?:\/\/t\.co\/[A-Za-z0-9]+/g;
+
+/**
+ * Rewrite a tweet's text into what x.com actually displays.
+ *
+ * X NEVER puts the real link in `text`: it substitutes a t.co shortlink and
+ * keeps the destination in `entities.urls`. Unexpanded, the body is stored as
+ * `https://t.co/Pn764BHwyL` where the site renders `seo-stuff.com/free-audit` —
+ * a body that does not match the post it came from. An attachment's entry
+ * (identified by `media_key`) has no textual form on x.com at all, so it is
+ * dropped rather than expanded. `&`, `<` and `>` arrive HTML-escaped, decoded
+ * here for the same reason (`&amp;` LAST, so "&amp;lt;" becomes "&lt;", not "<").
+ *
+ * A t.co with no matching entity is left untouched — an unresolvable shortlink
+ * still beats dropping the link. The verbatim `text` stays available on rawData,
+ * where the whole tweet is archived.
+ */
+export function expandXTweetText(
+  text: string,
+  ...entitySets: Array<Record<string, unknown> | undefined>
+): string {
+  const expand = new Map<string, string>();
+  const media = new Set<string>();
+  for (const set of entitySets) {
+    const urls = set?.urls;
+    if (!Array.isArray(urls)) continue;
+    for (const u of urls as XUrlEntity[]) {
+      if (typeof u?.url !== 'string' || !u.url) continue;
+      if (u.media_key) {
+        media.add(u.url);
+        continue;
+      }
+      if (typeof u.expanded_url === 'string' && u.expanded_url) {
+        expand.set(u.url, u.expanded_url);
+      }
+    }
+  }
+  const out = String(text ?? '').replace(TCO_RE, (short) =>
+    media.has(short) ? '' : (expand.get(short) ?? short)
+  );
+  return out
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&')
+    // Removing a trailing attachment placeholder leaves the space before it.
+    .replace(/[ \t]+$/gm, '')
+    .trim();
+}
+
 function toRawPost(tweet: XTweet, author?: XUser): RawPost {
   return {
     id: `x_${tweet.id}`,
@@ -374,7 +432,12 @@ function toRawPost(tweet: XTweet, author?: XUser): RawPost {
     authorDisplayName: author?.name,
     authorAvatarUrl: author?.profile_image_url?.replace('_normal', '_400x400'),
     authorFollowers: author?.public_metrics?.followers_count,
-    postContent: tweet.note_tweet?.text ?? tweet.text,
+    // The stored body must read like x.com, not like X's wire format.
+    postContent: expandXTweetText(
+      tweet.note_tweet?.text ?? tweet.text,
+      tweet.entities,
+      tweet.note_tweet?.entities
+    ),
     postPublishedAt: new Date(tweet.created_at),
     metricLikes: tweet.public_metrics?.like_count ?? 0,
     metricReplies: tweet.public_metrics?.reply_count ?? 0,

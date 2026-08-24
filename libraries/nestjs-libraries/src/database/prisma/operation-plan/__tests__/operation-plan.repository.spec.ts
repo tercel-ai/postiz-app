@@ -1156,6 +1156,95 @@ describe('materializePlanPosts — dev.to tags', () => {
   });
 });
 
+describe('materializePlanPosts — hackernews link url', () => {
+  const plan = {
+    id: 'plan-1',
+    organizationId: 'org-1',
+    projectId: 'proj-1',
+    campaignId: 'campaign-1',
+  } as any;
+
+  const hnPayload = (sourceUrl: unknown) => ({
+    sourceUrl,
+    contentItems: [
+      {
+        contentId: 'D01',
+        utcDate: '2030-01-01T00:00:00.000Z',
+        themeKey: 'positioning',
+        themeTitle: 'Show HN theme',
+        platforms: [
+          {
+            id: '77777777-7777-4777-8777-777777777777',
+            platform: 'hackernews',
+            content: 'Story body',
+            media: [],
+          },
+        ],
+      },
+    ],
+  });
+
+  it('writes the payload-level sourceUrl (the projectId-resolved product URL) into settings.url', async () => {
+    const postCreateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const integrationFindMany = vi
+      .fn()
+      .mockResolvedValue([{ id: 'integration-hn', providerIdentifier: 'hackernews' }]);
+    const repo = createRepo({ postCreateMany, integrationFindMany });
+
+    await repo.materializePlanPosts(plan, hnPayload('https://example.com/product'));
+
+    const settings = JSON.parse(postCreateMany.mock.calls[0][0].data[0].settings);
+    expect(settings.__type).toBe('hackernews');
+    expect(settings.url).toBe('https://example.com/product');
+  });
+
+  it('omits `url` entirely when the plan payload carried no sourceUrl', async () => {
+    const postCreateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const integrationFindMany = vi
+      .fn()
+      .mockResolvedValue([{ id: 'integration-hn', providerIdentifier: 'hackernews' }]);
+    const repo = createRepo({ postCreateMany, integrationFindMany });
+
+    await repo.materializePlanPosts(plan, hnPayload(null));
+
+    const settings = JSON.parse(postCreateMany.mock.calls[0][0].data[0].settings);
+    expect(settings.__type).toBe('hackernews');
+    expect('url' in settings).toBe(false);
+  });
+
+  it('never leaks sourceUrl onto a non-hackernews platform', async () => {
+    const postCreateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const integrationFindMany = vi
+      .fn()
+      .mockResolvedValue([{ id: 'integration-x', providerIdentifier: 'x' }]);
+    const repo = createRepo({ postCreateMany, integrationFindMany });
+
+    await repo.materializePlanPosts(plan, {
+      sourceUrl: 'https://example.com/product',
+      contentItems: [
+        {
+          contentId: 'D02',
+          utcDate: '2030-01-02T00:00:00.000Z',
+          themeKey: 'positioning',
+          themeTitle: 'X theme',
+          platforms: [
+            {
+              id: '88888888-8888-4888-8888-888888888888',
+              platform: 'x',
+              content: 'Tweet text',
+              media: [],
+            },
+          ],
+        },
+      ],
+    });
+
+    const settings = JSON.parse(postCreateMany.mock.calls[0][0].data[0].settings);
+    expect(settings.__type).toBe('x');
+    expect('url' in settings).toBe(false);
+  });
+});
+
 // Found while implementing: the generator is only ever told a DATE range, never
 // a time-of-day, so left alone it clusters on round clock times day after day.
 describe('applyPublishTimeJitter', () => {

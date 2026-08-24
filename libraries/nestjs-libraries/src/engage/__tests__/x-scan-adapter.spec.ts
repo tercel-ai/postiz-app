@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { XScanAdapter, clampXMaxResults } from '../scan/x-scan-adapter';
+import {
+  XScanAdapter,
+  clampXMaxResults,
+  expandXTweetText,
+} from '../scan/x-scan-adapter';
 import type { SearchScopedArgs } from '../scan/platform-scan-adapter';
 
 // Minimal fetch Response stub.
@@ -438,5 +442,77 @@ describe('XScanAdapter max_results (per-call page size)', () => {
       res(200, { data: [tweet('998', text)], includes: USERS })) as any;
     const out = await new XScanAdapter({ fetchImpl }).searchScoped(baseArgs());
     expect(out.posts[0].postContent).toBe(text);
+  });
+});
+
+// X's `text` is its WIRE format, not what the site renders: every link is a t.co
+// shortlink whose destination lives in entities.urls, and an attachment gets a
+// t.co placeholder the site shows as an image rather than as text.
+describe('expandXTweetText', () => {
+  it('expands a t.co link to its real destination', () => {
+    expect(
+      expandXTweetText('audit here, free: https://t.co/Pn764BHwyL', {
+        urls: [
+          {
+            url: 'https://t.co/Pn764BHwyL',
+            expanded_url: 'https://seo-stuff.com/free-audit',
+            display_url: 'seo-stuff.com/free-audit',
+          },
+        ],
+      })
+    ).toBe('audit here, free: https://seo-stuff.com/free-audit');
+  });
+
+  it('expands every occurrence, and several distinct shortlinks', () => {
+    expect(
+      expandXTweetText('https://t.co/a x https://t.co/b y https://t.co/a', {
+        urls: [
+          { url: 'https://t.co/a', expanded_url: 'https://one.example' },
+          { url: 'https://t.co/b', expanded_url: 'https://two.example' },
+        ],
+      })
+    ).toBe('https://one.example x https://two.example y https://one.example');
+  });
+
+  it('drops an attachment placeholder (the entry carrying media_key)', () => {
+    expect(
+      expandXTweetText('First, the confirmed part. https://t.co/imgAAA', {
+        urls: [
+          {
+            url: 'https://t.co/imgAAA',
+            expanded_url: 'https://x.com/alex/status/209/photo/1',
+            display_url: 'pic.x.com/abc',
+            media_key: '3_209',
+          },
+        ],
+      })
+    ).toBe('First, the confirmed part.');
+  });
+
+  it('reads a longform note tweet’s own entities', () => {
+    expect(
+      expandXTweetText(
+        'the long body with https://t.co/note1',
+        undefined,
+        { urls: [{ url: 'https://t.co/note1', expanded_url: 'https://long.example/post' }] }
+      )
+    ).toBe('the long body with https://long.example/post');
+  });
+
+  it('leaves a shortlink with no entity untouched', () => {
+    expect(expandXTweetText('mystery https://t.co/unknown1', { urls: [] })).toBe(
+      'mystery https://t.co/unknown1'
+    );
+  });
+
+  it('decodes the HTML entities X escapes', () => {
+    expect(expandXTweetText('R&amp;D on &lt;script&gt; tags')).toBe(
+      'R&D on <script> tags'
+    );
+  });
+
+  it('tolerates a missing/!array entities payload', () => {
+    expect(expandXTweetText('plain body')).toBe('plain body');
+    expect(expandXTweetText('plain body', { urls: 'nope' } as any)).toBe('plain body');
   });
 });

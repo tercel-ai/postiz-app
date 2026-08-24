@@ -30,6 +30,13 @@ const PERSIST_BATCH_SIZE = 25;
 // in sync with the orchestrator's ENGAGE_MIN_SCORE.
 const MIN_SCORE = Number(process.env.ENGAGE_MIN_SCORE ?? 60);
 
+// Platforms with no title concept: their postContent is ALWAYS the plain body,
+// never the "title\nbody" concatenation older rows can hold. With no pair to
+// break, the body can safely be refreshed when the same post is scanned again —
+// which is how a row stored with X's wire format in the body (t.co shortlinks
+// instead of the real links) gets repaired by a newer extension's re-scan.
+const TITLELESS_PLATFORMS = new Set(['x', 'linkedin']);
+
 function xStatusFromUrl(url: string): { username: string; id: string } | null {
   try {
     const parsed = new URL(url);
@@ -541,12 +548,16 @@ export class EngageScanIngestService {
             // Title and body move together or not at all. A row stored before
             // the title column existed holds "title\nbody" in postContent, so
             // writing the title alone would leave the title duplicated in both
-            // fields; and a scraper that sends no title (X, LinkedIn, an older
-            // extension) must not be able to rewrite the body it did not split
-            // — hence the whole pair is left untouched in that case.
+            // fields; and on a platform that HAS titles, a scraper sending none
+            // (an older extension) must not be able to rewrite the body it did
+            // not split — hence the whole pair is left untouched there.
+            // TITLELESS_PLATFORMS have no pair to break: postContent is the
+            // whole body, so it is refreshed on every re-scan.
             ...(post.title
               ? { title: post.title, postContent: post.postContent }
-              : {}),
+              : TITLELESS_PLATFORMS.has(post.platform)
+                ? { postContent: post.postContent }
+                : {}),
             scoreHeat: post.scoreHeat,
             scoreAuthority: post.scoreAuthority,
             scoreRecency: post.scoreRecency,

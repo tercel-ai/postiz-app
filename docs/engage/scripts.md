@@ -27,6 +27,7 @@ by **when you reach for them** and lists the flags/env you actually need.
 | `engage-diagnose-x-reply.ts` | Explain why an X reply has no metrics | read-only | ts-node |
 | `engage-fetch-raw.ts` | Raw fetch of ONE post's reply (回帖) + original (原帖) data via shared workflow funcs | read-only | ts-node |
 | `ingest-engage-post.ts` | Manually inject one X post into the pool | **writes** | ts-node |
+| `refresh-engage-opportunity-content.ts` | Re-fetch + re-normalise an X body still holding `t.co` links | dry-run | ts-node |
 | `cleanup-engage-opportunities.ts` | Soft-delete un-repliable opportunities | list/check | tsx |
 | `backfill-engage-data-ticks.ts` | Rebuild `EngageDataTicks` from `Post` | dry-run | ts-node |
 | `backfill-engage-matched-keywords.ts` | Fill `EngageOpportunityState.matchedKeywords` for pre-field rows | dry-run | ts-node |
@@ -110,6 +111,42 @@ npx ts-node --project scripts/tsconfig.json scripts/ingest-engage-post.ts \
 
 - **Flags:** `--url` (req), `--org` (req), `--score`, `--status`.
 - **Env:** `X_BEARER_TOKEN` **or** (`X_API_KEY` + `X_API_SECRET`).
+
+### `refresh-engage-opportunity-content.ts` — repair a body still in X's wire format
+Re-fetches the tweet and re-stores `postContent` NORMALISED: `t.co` shortlinks
+resolved to their real destination, the attachment placeholder stripped, HTML
+entities decoded. Also fills `rawData.mediaUrls` with the attachment URLs, merging
+into the existing `rawData` rather than replacing it.
+
+Both scan paths normalise on ingest now, and X rows are refreshed whenever the same
+post is scanned again — this is for the rows in between: a post nobody will scan a
+second time, or one you want fixed now. Normalisation calls the scanner's own
+`expandXTweetText`, so a repaired row matches what a fresh scan would store.
+
+**Dry-run by default — pass `--execute` to write.**
+
+```bash
+# what is still broken, touching nothing
+npx ts-node --project scripts/tsconfig.json scripts/refresh-engage-opportunity-content.ts --scan
+
+# repair one row found in the admin UI (GET /admin/engage/sent?externalPostUrl=…)
+npx ts-node --project scripts/tsconfig.json scripts/refresh-engage-opportunity-content.ts \
+  --url https://x.com/alex/status/2090431343046095255 --execute
+
+# by EngageOpportunity.id, comma-separated
+npx ts-node --project scripts/tsconfig.json scripts/refresh-engage-opportunity-content.ts \
+  --opportunity clx123abc,clx456def --execute
+
+# the whole backlog
+npx ts-node --project scripts/tsconfig.json scripts/refresh-engage-opportunity-content.ts \
+  --scan --limit 500 --execute
+```
+
+- **Flags:** `--opportunity <id[,id]>`, `--url <url[,url]>` (full URL, X status URL, or
+  bare tweet id), `--scan` (every X row whose body still contains a `t.co`),
+  `--limit` (with `--scan`, default 50), `--execute`.
+- **Env:** `X_BEARER_TOKEN` **or** (`X_API_KEY` + `X_API_SECRET`).
+- X only. Rows whose tweet is deleted/protected are reported and left untouched.
 
 ### `cleanup-engage-opportunities.ts` — soft-delete un-repliable opportunities
 Sets `deletedAt = now()` (all repo queries already filter `deletedAt: null`). Useful

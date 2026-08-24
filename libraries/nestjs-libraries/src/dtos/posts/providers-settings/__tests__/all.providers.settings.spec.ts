@@ -62,6 +62,31 @@ describe('Post.settings discriminator', () => {
     expect(JSON.stringify(errors)).toContain('title');
   });
 
+  it('accepts a hackernews post with no url (plain text post)', async () => {
+    expect(
+      await validatePost({ __type: 'hackernews', title: 'Ask HN: anything' })
+    ).toEqual([]);
+  });
+
+  it('accepts a hackernews post carrying a link url (Show HN style)', async () => {
+    expect(
+      await validatePost({
+        __type: 'hackernews',
+        title: 'Show HN: Postiz',
+        url: 'https://example.com/product',
+      })
+    ).toEqual([]);
+  });
+
+  it('rejects a hackernews post with a malformed url', async () => {
+    const errors = await validatePost({
+      __type: 'hackernews',
+      title: 'Show HN: Postiz',
+      url: 'not-a-url',
+    });
+    expect(JSON.stringify(errors)).toContain('url');
+  });
+
   it('still rejects an unknown provider', async () => {
     const errors = await validatePost({ __type: 'myspace' });
     expect(JSON.stringify(errors)).toContain('__type');

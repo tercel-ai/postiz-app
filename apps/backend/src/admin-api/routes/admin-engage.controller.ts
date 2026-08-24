@@ -38,6 +38,7 @@ export class AdminEngageController {
       pageSize: query.pageSize,
       organizationId,
       platform: query.platform,
+      externalPostUrl: query.externalPostUrl,
       state: query.state,
       sortOrder: query.sortOrder,
     });

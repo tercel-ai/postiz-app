@@ -77,6 +77,57 @@ describe('EngageScanIngestDto', () => {
     expect(errs).toContain('min');
   });
 
+  it('accepts rawData.mediaUrls and carries it into the RawPost', async () => {
+    // X's body only ever carried a t.co placeholder for an attachment, which
+    // postContent strips; the real URLs are archived on rawData instead.
+    const post = {
+      ...validPost,
+      platform: 'x',
+      rawData: { mediaUrls: ['https://pbs.twimg.com/media/A.jpg'] },
+    };
+    expect(await errorsFor({ taskId: 'c', posts: [post] })).toEqual([]);
+    expect(scanIngestPostToRawPost(post as any).rawData).toEqual({
+      mediaUrls: ['https://pbs.twimg.com/media/A.jpg'],
+    });
+  });
+
+  it('rejects more mediaUrls than a tweet can carry', async () => {
+    const errs = await errorsFor({
+      taskId: 'c',
+      posts: [{ ...validPost, rawData: { mediaUrls: ['a', 'b', 'c', 'd', 'e'] } }],
+    });
+    expect(errs).toContain('arrayMaxSize');
+  });
+
+  it('rejects non-string mediaUrls', async () => {
+    const errs = await errorsFor({
+      taskId: 'c',
+      posts: [{ ...validPost, rawData: { mediaUrls: [42] } }],
+    });
+    expect(errs).toContain('isString');
+  });
+
+  it('DROPS unknown rawData keys — the pipe does not whitelist, so the mapper must', async () => {
+    // Without this, any caller could write arbitrary JSON into the rawData column.
+    const post = {
+      ...validPost,
+      rawData: { mediaUrls: ['https://pbs.twimg.com/media/A.jpg'], injected: { junk: 'x' } },
+    };
+    expect(scanIngestPostToRawPost(post as any).rawData).toEqual({
+      mediaUrls: ['https://pbs.twimg.com/media/A.jpg'],
+    });
+  });
+
+  it('leaves rawData undefined when there is nothing to archive', async () => {
+    expect(scanIngestPostToRawPost(validPost as any).rawData).toBeUndefined();
+    expect(
+      scanIngestPostToRawPost({ ...validPost, rawData: { mediaUrls: [] } } as any).rawData
+    ).toBeUndefined();
+    expect(
+      scanIngestPostToRawPost({ ...validPost, rawData: { mediaUrls: ['  '] } } as any).rawData
+    ).toBeUndefined();
+  });
+
   it('validates the optional nextCursor', async () => {
     expect(
       await errorsFor({

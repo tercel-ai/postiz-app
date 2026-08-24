@@ -71,6 +71,7 @@ import {
   normalizeReplyMetrics,
 } from '@gitroom/nestjs-libraries/engage/engage-metrics-stats';
 import { parseXTweetId } from '@gitroom/nestjs-libraries/engage/x-tweet';
+import { normalizeExternalPostUrl } from '@gitroom/nestjs-libraries/engage/engage-scan-ingest.service';
 import { EngageAuthorProfile } from '@gitroom/nestjs-libraries/engage/engage-author';
 import dayjs from 'dayjs';
 import isoWeek from 'dayjs/plugin/isoWeek';
@@ -251,6 +252,25 @@ function highlightTitle(o: {
 }): string {
   const title = (o.title ?? '').trim();
   return (title || o.postContent).slice(0, 80);
+}
+
+/**
+ * The direct media URLs (photos / videos) archived on an opportunity's rawData.
+ *
+ * A post's body never contains them: X substitutes a t.co placeholder for an
+ * attachment, which the scanner strips from postContent because x.com renders
+ * it as an image rather than as text. The real URLs are archived on rawData at
+ * ingest, and this is the ONLY part of rawData a client ever receives — the
+ * blob itself stays unexposed (the server-side X adapter stores a whole tweet
+ * payload in there, which would bloat every list response).
+ *
+ * Always an array: a row with no attachment, a row ingested before this field
+ * existed, and a row whose rawData holds an unrelated payload all yield [].
+ */
+export function opportunityMediaUrls(rawData: unknown): string[] {
+  const urls = (rawData as { mediaUrls?: unknown } | null)?.mediaUrls;
+  if (!Array.isArray(urls)) return [];
+  return urls.filter((u): u is string => typeof u === 'string' && !!u.trim());
 }
 
 /**
@@ -1900,9 +1920,15 @@ export class EngageRepository {
       metricScore: opportunity.metricScore,
       metricUpvoteRatio: opportunity.metricUpvoteRatio,
       metricComments: opportunity.metricComments,
-      // rawData (full platform JSON payload) is intentionally NOT exposed: no
-      // client or downstream service reads it, and returning it per item bloats
-      // every _merge-based response (notably the paginated opportunities list).
+      // rawData (full platform JSON payload) is intentionally NOT exposed:
+      // returning it per item bloats every _merge-based response (notably the
+      // paginated opportunities list) — the server-side X adapter archives a
+      // whole tweet payload in there. What a client actually needs is derived
+      // out of it explicitly instead: the attachment URLs, which the body
+      // cannot carry because postContent strips X's t.co media placeholder.
+      // Free of extra DB cost — the row is already loaded via
+      // `include: { opportunity: true }`.
+      mediaUrls: opportunityMediaUrls(opportunity.rawData),
       // Per-org createdAt (when this org first saw the opportunity).
       createdAt,
       updatedAt: opportunity.updatedAt,
@@ -3948,6 +3974,7 @@ export class EngageRepository {
     pageSize?: number;
     organizationId?: string | string[];
     platform?: string;
+    externalPostUrl?: string;
     state?: State;
     sortOrder?: 'asc' | 'desc';
   }) {
@@ -3961,6 +3988,29 @@ export class EngageRepository {
       ...(query.state ? { state: query.state } : {}),
     };
 
+    // Normalised so a pasted `twitter.com/u/status/1?s=20` matches the row
+    // stored as `x.com/u/status/1`; a no-op for any other platform's URL. A
+    // substring match, so a bare status id finds the post too.
+    const urlQuery = query.externalPostUrl?.trim();
+    const normalizedUrl = urlQuery
+      ? normalizeExternalPostUrl('x', urlQuery)
+      : undefined;
+
+    // Both filters narrow the SAME relation, so they must be merged into one
+    // `opportunity` object — written as two keys, the second would silently
+    // overwrite the first and drop a filter the caller asked for.
+    const opportunityWhere: Prisma.EngageOpportunityWhereInput = {
+      ...(query.platform ? { platform: query.platform } : {}),
+      ...(normalizedUrl
+        ? {
+            externalPostUrl: {
+              contains: normalizedUrl,
+              mode: 'insensitive' as const,
+            },
+          }
+        : {}),
+    };
+
     const where: Prisma.EngageSentReplyWhereInput = {
       ...(query.organizationId
         ? {
@@ -3970,7 +4020,9 @@ export class EngageRepository {
           }
         : {}),
       post: postWhere,
-      ...(query.platform && { opportunity: { platform: query.platform } }),
+      ...(Object.keys(opportunityWhere).length
+        ? { opportunity: opportunityWhere }
+        : {}),
     };
 
     const [items, total] = await Promise.all([

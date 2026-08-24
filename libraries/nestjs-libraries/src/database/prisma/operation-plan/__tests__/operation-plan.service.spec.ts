@@ -2378,6 +2378,57 @@ describe('OperationPlanService.create', () => {
     });
   });
 
+  it('stamps the source task URL onto the persisted planPayload as sourceUrl (materializePlanPosts reads it to fill hackernews link posts)', async () => {
+    const { repo, aiseeClient, service } = createGenerationDependencies({
+      contentItems: [],
+      engagePolicies: [],
+      warnings: [],
+    });
+    aiseeClient.getTaskDetail.mockResolvedValue({
+      ok: true,
+      task: {
+        id: 'task-1',
+        userId: 'owner-1',
+        productId: 'proj-1',
+        status: 'completed',
+        result: { summary: 'usable' },
+        productSnapshot: {},
+        url: 'https://example.com/product',
+        version: 'v1',
+      },
+    });
+
+    const { background } = await createAndSettle(service, {
+      taskId: 'task-1',
+      startAt: '2030-01-01T00:00:00.000Z',
+      endAt: '2030-01-02T00:00:00.000Z',
+      platforms: ['x'],
+    });
+    await background;
+
+    const persisted = repo.completeGeneration.mock.calls[0][1].planPayload;
+    expect(persisted.sourceUrl).toBe('https://example.com/product');
+  });
+
+  it('persists a null sourceUrl when the source task carries no URL', async () => {
+    const { repo, service } = createGenerationDependencies({
+      contentItems: [],
+      engagePolicies: [],
+      warnings: [],
+    });
+
+    const { background } = await createAndSettle(service, {
+      taskId: 'task-1',
+      startAt: '2030-01-01T00:00:00.000Z',
+      endAt: '2030-01-02T00:00:00.000Z',
+      platforms: ['x'],
+    });
+    await background;
+
+    const persisted = repo.completeGeneration.mock.calls[0][1].planPayload;
+    expect(persisted.sourceUrl).toBeNull();
+  });
+
   it('clamps a targetScore above 100 down to 100', async () => {
     const { repo, service } = createGenerationDependencies({
       goal: { title: 'T', description: 'D', targetScore: 150 },

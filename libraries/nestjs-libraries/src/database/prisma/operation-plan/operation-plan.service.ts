@@ -1060,6 +1060,11 @@ export class OperationPlanService implements OnApplicationBootstrap {
       engagePolicies,
       campaignId: stub.campaignId,
       generatorVersion: stub.generatorVersion,
+      // The analyzed project's own canonical URL, stamped onto the persisted
+      // payload so materializePlanPosts can fill hackernews's link-post `url`
+      // deterministically from projectId rather than trusting the LLM to
+      // reproduce it verbatim (see operation-plan.repository.ts).
+      sourceUrl: ctx.task.url ?? null,
       durationDays: ctx.durationDays,
     };
     const plan = await this._repo.completeGeneration(planId, {

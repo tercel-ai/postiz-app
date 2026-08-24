@@ -13,7 +13,10 @@ import { Prisma } from '@prisma/client';
 import dayjs from 'dayjs';
 import isoWeek from 'dayjs/plugin/isoWeek';
 import utc from 'dayjs/plugin/utc';
-import { EngageRepository } from '../engage.repository';
+import {
+  EngageRepository,
+  opportunityMediaUrls,
+} from '../engage.repository';
 
 dayjs.extend(isoWeek);
 dayjs.extend(utc);
@@ -356,6 +359,42 @@ describe('EngageRepository — two-table reads', () => {
       expect(item.intentTags).toEqual(['support']);
       expect(item.matchedKeywords).toEqual(['react', 'nextjs']); // from state (per-org)
       expect(item).not.toHaveProperty('opportunity'); // flattened, not nested
+    });
+
+    it('exposes rawData\'s media URLs as mediaUrls, never rawData itself', async () => {
+      // The body cannot carry these: postContent strips X's t.co attachment
+      // placeholder. rawData stays unexposed — the server-side X adapter
+      // archives a whole tweet payload in it.
+      const { repo, stateFindMany, stateCount } = buildRepo();
+      stateFindMany.mockResolvedValue([
+        {
+          ...STATE_ROW,
+          opportunity: {
+            ...STATE_ROW.opportunity,
+            rawData: {
+              mediaUrls: ['https://pbs.twimg.com/media/A.jpg'],
+              tweet: { full_text: 'the whole archived payload' },
+            },
+          },
+        },
+      ]);
+      stateCount.mockResolvedValue(1);
+
+      const item = (await repo.listOpportunities('org1', {} as any))
+        .items[0] as any;
+      expect(item.mediaUrls).toEqual(['https://pbs.twimg.com/media/A.jpg']);
+      expect(item).not.toHaveProperty('rawData');
+    });
+
+    it('returns mediaUrls as [] for a row with no attachment', async () => {
+      // Clients can iterate unconditionally — no null check, no undefined.
+      const { repo, stateFindMany, stateCount } = buildRepo();
+      stateFindMany.mockResolvedValue([STATE_ROW]);
+      stateCount.mockResolvedValue(1);
+
+      const item = (await repo.listOpportunities('org1', {} as any))
+        .items[0] as any;
+      expect(item.mediaUrls).toEqual([]);
     });
 
     it('filters by an exact matched keyword on the state table', async () => {
@@ -1004,6 +1043,67 @@ describe('EngageRepository — two-table reads', () => {
       expect(where.organizationId).toEqual({ in: ['org1', 'org2'] });
       expect(where.post).toEqual({ source: 'engage', state: 'ERROR' });
       expect(where.opportunity).toEqual({ platform: 'reddit' });
+    });
+
+    it('finds one source post by externalPostUrl, normalising the pasted URL', async () => {
+      // A URL copied from the X app carries twitter.com + tracking params; the
+      // row is stored canonicalised, so an un-normalised match would find nothing.
+      const { repo, sentFindMany, sentCount } = buildRepo();
+      sentFindMany.mockResolvedValue([]);
+      sentCount.mockResolvedValue(0);
+
+      await repo.listSentRepliesForAdmin({
+        externalPostUrl: '  https://twitter.com/alex/status/2090431343046095255?s=20  ',
+      });
+      expect(sentFindMany.mock.calls[0][0].where.opportunity).toEqual({
+        externalPostUrl: {
+          contains: 'https://x.com/alex/status/2090431343046095255',
+          mode: 'insensitive',
+        },
+      });
+    });
+
+    it('accepts a bare status id as the search term', async () => {
+      const { repo, sentFindMany, sentCount } = buildRepo();
+      sentFindMany.mockResolvedValue([]);
+      sentCount.mockResolvedValue(0);
+
+      await repo.listSentRepliesForAdmin({ externalPostUrl: '2090431343046095255' });
+      expect(sentFindMany.mock.calls[0][0].where.opportunity).toEqual({
+        externalPostUrl: {
+          contains: '2090431343046095255',
+          mode: 'insensitive',
+        },
+      });
+    });
+
+    it('MERGES platform and externalPostUrl into one opportunity filter', async () => {
+      // Written as two `opportunity` keys the second would overwrite the first,
+      // silently dropping a filter the caller asked for.
+      const { repo, sentFindMany, sentCount } = buildRepo();
+      sentFindMany.mockResolvedValue([]);
+      sentCount.mockResolvedValue(0);
+
+      await repo.listSentRepliesForAdmin({
+        platform: 'x',
+        externalPostUrl: 'https://x.com/alex/status/209',
+      });
+      expect(sentFindMany.mock.calls[0][0].where.opportunity).toEqual({
+        platform: 'x',
+        externalPostUrl: {
+          contains: 'https://x.com/alex/status/209',
+          mode: 'insensitive',
+        },
+      });
+    });
+
+    it('ignores a blank externalPostUrl rather than matching everything', async () => {
+      const { repo, sentFindMany, sentCount } = buildRepo();
+      sentFindMany.mockResolvedValue([]);
+      sentCount.mockResolvedValue(0);
+
+      await repo.listSentRepliesForAdmin({ externalPostUrl: '   ' });
+      expect(sentFindMany.mock.calls[0][0].where.opportunity).toBeUndefined();
     });
 
     it('omits org/platform/state filters when not provided (all-orgs)', async () => {
@@ -4599,5 +4699,29 @@ describe('EngageRepository.upsertReplyAccount', () => {
       update: { organizationId: 'org-1', engageEnabled: false },
       select: { engageEnabled: true },
     });
+  });
+});
+
+describe('opportunityMediaUrls', () => {
+  it('reads the archived media URLs', () => {
+    expect(
+      opportunityMediaUrls({ mediaUrls: ['https://pbs.twimg.com/media/A.jpg'] })
+    ).toEqual(['https://pbs.twimg.com/media/A.jpg']);
+  });
+
+  it('returns [] for every shape that carries none', () => {
+    // null rawData (every row ingested before this existed), an unrelated
+    // payload (the server-side adapter's archived tweet), and junk entries.
+    expect(opportunityMediaUrls(null)).toEqual([]);
+    expect(opportunityMediaUrls(undefined)).toEqual([]);
+    expect(opportunityMediaUrls({ tweet: { full_text: 'x' } })).toEqual([]);
+    expect(opportunityMediaUrls({ mediaUrls: 'not-an-array' })).toEqual([]);
+    expect(opportunityMediaUrls({ mediaUrls: [] })).toEqual([]);
+  });
+
+  it('drops non-string and blank entries', () => {
+    expect(
+      opportunityMediaUrls({ mediaUrls: ['https://a/1.jpg', 42, null, '  ', ''] })
+    ).toEqual(['https://a/1.jpg']);
   });
 });

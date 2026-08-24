@@ -23,6 +23,7 @@ import * as dotenv from 'dotenv';
 dotenv.config();
 
 import { PrismaClient, EngageOpportunityStatus } from '@prisma/client';
+import { expandXTweetText } from '@gitroom/nestjs-libraries/engage/scan/x-scan-adapter';
 
 interface CliArgs {
   url: string;
@@ -69,6 +70,12 @@ interface XTweet {
   author_id: string;
   reply_settings?: string;
   referenced_tweets?: Array<{ type: string; id: string }>;
+  // entities carries each t.co's real destination; note_tweet the untruncated
+  // body of a >280-char tweet. Both are required to store the body the way
+  // x.com displays it rather than X's wire format.
+  entities?: Record<string, unknown>;
+  note_tweet?: { text?: string; entities?: Record<string, unknown> };
+  attachments?: { media_keys?: string[] };
   public_metrics?: {
     like_count: number;
     reply_count: number;
@@ -86,12 +93,47 @@ interface XUser {
   public_metrics?: { followers_count: number };
 }
 
-async function fetchTweet(tweetId: string, bearer: string): Promise<{ tweet: XTweet; author?: XUser }> {
+interface XMedia {
+  media_key?: string;
+  type?: string;
+  url?: string;
+  variants?: Array<{ content_type?: string; bit_rate?: number; url?: string }>;
+}
+
+/**
+ * Attachment URLs for one tweet: a photo's `url`, or the highest-bitrate MP4 for
+ * a video/GIF. The body cannot carry these — it only ever held a t.co
+ * placeholder, which the normalisation below strips.
+ */
+function mediaUrlsFor(tweet: XTweet, media: XMedia[]): string[] {
+  const byKey = new Map(media.filter((m) => m.media_key).map((m) => [m.media_key!, m]));
+  const urls: string[] = [];
+  for (const key of tweet.attachments?.media_keys ?? []) {
+    const m = byKey.get(key);
+    if (!m) continue;
+    if (m.type === 'video' || m.type === 'animated_gif') {
+      const best = (m.variants ?? [])
+        .filter((v) => v?.content_type === 'video/mp4' && typeof v?.url === 'string')
+        .sort((a, b) => (Number(b?.bit_rate) || 0) - (Number(a?.bit_rate) || 0))[0]?.url;
+      if (best) urls.push(best);
+      continue;
+    }
+    if (typeof m.url === 'string' && m.url) urls.push(m.url);
+  }
+  return Array.from(new Set(urls));
+}
+
+async function fetchTweet(
+  tweetId: string,
+  bearer: string
+): Promise<{ tweet: XTweet; author?: XUser; media: XMedia[] }> {
   const params = new URLSearchParams({
     ids: tweetId,
-    'tweet.fields': 'public_metrics,author_id,created_at,text,reply_settings,referenced_tweets',
+    'tweet.fields':
+      'public_metrics,author_id,created_at,text,reply_settings,referenced_tweets,entities,note_tweet,attachments',
     'user.fields': 'public_metrics,name,username,profile_image_url',
-    expansions: 'author_id',
+    'media.fields': 'url,variants,type',
+    expansions: 'author_id,attachments.media_keys',
   });
   const res = await fetch(`https://api.twitter.com/2/tweets?${params}`, {
     headers: { Authorization: `Bearer ${bearer}` },
@@ -99,7 +141,7 @@ async function fetchTweet(tweetId: string, bearer: string): Promise<{ tweet: XTw
   if (!res.ok) throw new Error(`X API ${res.status}: ${(await res.text()).slice(0, 300)}`);
   const json = (await res.json()) as {
     data?: XTweet[];
-    includes?: { users?: XUser[] };
+    includes?: { users?: XUser[]; media?: XMedia[] };
     errors?: Array<{ detail?: string; title?: string }>;
   };
   const tweet = json.data?.[0];
@@ -108,7 +150,7 @@ async function fetchTweet(tweetId: string, bearer: string): Promise<{ tweet: XTw
     throw new Error(`Tweet ${tweetId} not retrievable: ${reason}`);
   }
   const author = json.includes?.users?.find((u) => u.id === tweet.author_id);
-  return { tweet, author };
+  return { tweet, author, media: json.includes?.media ?? [] };
 }
 
 async function main() {
@@ -136,7 +178,7 @@ async function main() {
     }
 
     const bearer = await getBearerToken();
-    const { tweet, author } = await fetchTweet(tweetId, bearer);
+    const { tweet, author, media } = await fetchTweet(tweetId, bearer);
 
     const retweetOf = tweet.referenced_tweets?.find((r) => r.type === 'retweeted');
     if (retweetOf) {
@@ -149,6 +191,19 @@ async function main() {
     const pm = tweet.public_metrics;
     const externalPostUrl = `https://x.com/${author?.username ?? 'i'}/status/${tweet.id}`;
 
+    // Store the body the way x.com displays it, not X's wire format: t.co
+    // shortlinks resolved, the attachment placeholder stripped, HTML entities
+    // decoded. Calls the scanner's own normaliser so a row ingested here is
+    // identical to one a scan would have produced.
+    const postContent = expandXTweetText(
+      tweet.note_tweet?.text ?? tweet.text,
+      tweet.entities,
+      tweet.note_tweet?.entities
+    );
+    // The attachment URLs the body no longer mentions. Archived alongside the
+    // raw payload under the key the API derives `mediaUrls` from.
+    const mediaUrls = mediaUrlsFor(tweet, media);
+
     // Phase 1 — global opportunity row.
     const opp = await prisma.engageOpportunity.upsert({
       where: { platform_externalPostId: { platform: 'x', externalPostId: tweet.id } },
@@ -160,7 +215,7 @@ async function main() {
         authorDisplayName: author?.name ?? null,
         authorFollowers: author?.public_metrics?.followers_count ?? null,
         authorAvatarUrl: author?.profile_image_url?.replace('_normal', '_400x400') ?? null,
-        postContent: tweet.text,
+        postContent,
         postPublishedAt: new Date(tweet.created_at),
         scoreHeat: 0,
         scoreAuthority: 0,
@@ -176,9 +231,15 @@ async function main() {
         metricViews: pm?.impression_count ?? 0,
         metricScore: 0,
         metricComments: 0,
-        rawData: { tweet, author } as object,
+        rawData: { tweet, author, mediaUrls } as object,
       },
       update: {
+        // Re-ingesting is an explicit "fetch this post again", so the body and
+        // its attachments are refreshed too — that is what repairs a row stored
+        // by an older build with t.co links still in it. Classification/state
+        // stay untouched.
+        postContent,
+        rawData: { tweet, author, mediaUrls } as object,
         // Refresh metrics on re-ingest; leave classification/state untouched.
         metricLikes: pm?.like_count ?? 0,
         metricReplies: pm?.reply_count ?? 0,
@@ -190,22 +251,34 @@ async function main() {
       select: { id: true },
     });
 
-    // Phase 2 — per-org state.
-    await prisma.engageOpportunityState.upsert({
-      where: { organizationId_opportunityId: { organizationId: args.orgId, opportunityId: opp.id } },
-      create: {
-        organizationId: args.orgId,
-        opportunityId: opp.id,
-        status: args.status,
-        score: args.score,
-        scoreKeyword: 0,
-        scoreTracked: 0,
-      },
-      update: {
-        status: args.status,
-        score: args.score,
-      },
+    // Phase 2 — per-org state. The row is identified by
+    // (organizationId, projectId, opportunityId), and this script ingests with
+    // projectId = null. A compound unique cannot match on a NULL column in
+    // Postgres, so the upsert has to be findFirst + create/update — the same
+    // shape EngageScanIngestService._upsertOpportunityState uses. (The previous
+    // `organizationId_opportunityId` key does not exist and failed at runtime.)
+    const existingState = await prisma.engageOpportunityState.findFirst({
+      where: { organizationId: args.orgId, projectId: null, opportunityId: opp.id },
+      select: { id: true },
     });
+    if (existingState) {
+      await prisma.engageOpportunityState.update({
+        where: { id: existingState.id },
+        data: { status: args.status, score: args.score },
+      });
+    } else {
+      await prisma.engageOpportunityState.create({
+        data: {
+          organizationId: args.orgId,
+          projectId: null,
+          opportunityId: opp.id,
+          status: args.status,
+          score: args.score,
+          scoreKeyword: 0,
+          scoreTracked: 0,
+        },
+      });
+    }
 
     console.log('\n✓ Ingested.');
     console.log(`  opportunityId: ${opp.id}`);

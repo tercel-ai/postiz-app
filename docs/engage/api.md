@@ -335,7 +335,12 @@ interface EngageOpportunity {
   metricScore: number;       // Reddit: score (upvotes - downvotes)
   metricUpvoteRatio: number | null;
   metricComments: number;
-  rawData: Record<string, unknown> | null;  // original platform API response (debug)
+  // Attachment URLs (X photos / videos). ALWAYS an array — `[]` when the post
+  // has none, which is most rows. postContent cannot carry these: it strips X's
+  // t.co attachment placeholder, which x.com renders as an image, not as text.
+  // Derived from EngageOpportunity.rawData; rawData ITSELF IS NOT RETURNED (it
+  // archives a whole tweet payload server-side). See opportunity-content-rendering.md.
+  mediaUrls: string[];
   createdAt: string;
   updatedAt: string;
   deletedAt: string | null;

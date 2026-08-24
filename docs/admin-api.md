@@ -252,6 +252,35 @@ Response includes `replyErrors[]` with `organizationId`, `opportunityId`, `postI
 
 ---
 
+### Engage
+
+#### GET /admin/engage/sent
+
+Paginated, cross-org list of Engage replies. Mirrors `GET /admin/posts`: optional
+org/user scoping plus Engage-specific filters. Each row carries the reply `post`
+(state, metrics, reply author) and the `opportunity` it answered.
+
+**Query Parameters:**
+- `page` (number, default `1`), `pageSize` (number, default `20`, max `100`).
+- `organizationId` (string) / `userId` (string): scoping — resolved by
+  `resolveOrganizationId`; an unresolvable value returns an empty page rather than an error.
+- `platform` (string): platform of the opportunity replied to (`x`, `reddit`, …).
+  Unknown values match nothing rather than 400-ing.
+- `externalPostUrl` (string): **find every reply posted to one source post.**
+  Case-insensitive substring match on the opportunity's `externalPostUrl`, and the
+  input is canonicalised first — so a URL pasted straight from the X app
+  (`twitter.com/…?s=20`) finds the row stored as `x.com/…`. A bare status id works
+  too. Combines with `platform`; a blank/whitespace value is ignored rather than
+  matching everything.
+- `state` (enum): reply `Post.state` — `DRAFT`, `QUEUE`, `PUBLISHED`, `ERROR`.
+- `sortOrder` (`asc` | `desc`, default `desc`): by `createdAt`.
+
+**Response:** `{ results, total, page, pageSize, totalPages }`.
+
+To repair an opportunity found this way (a body still holding `t.co` shortlinks),
+see `scripts/refresh-engage-opportunity-content.ts` in
+[engage/scripts.md](engage/scripts.md).
+
 ### Dashboard
 
 Overview and data management for application-wide statistics.
@@ -320,6 +349,8 @@ Manually trigger a backfill of daily statistics (DataTicks) for a specific date 
 - `apps/backend/src/admin-api/routes/admin-dashboard.controller.ts`
 - `apps/backend/src/admin-api/routes/admin-settings.controller.ts`
 - `apps/backend/src/admin-api/routes/admin-diagnostics.controller.ts`
+- `apps/backend/src/admin-api/routes/admin-engage.controller.ts`
+- `libraries/nestjs-libraries/src/dtos/admin/admin-engage-query.dto.ts`
 - `libraries/nestjs-libraries/src/engage/engage.repository.ts` (diagnostic query methods: `findStuckScanCursors`, `findFailedKeywordScans`, `findDeadReplyAccounts`, `findEngageReplyErrors`)
 - `libraries/nestjs-libraries/src/dtos/admin/ai-pricing.dto.ts`
 - `libraries/nestjs-libraries/src/dtos/admin/settings-body.dto.ts`

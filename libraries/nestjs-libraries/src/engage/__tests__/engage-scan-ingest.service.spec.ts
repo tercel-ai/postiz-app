@@ -135,6 +135,34 @@ describe('EngageScanIngestService.persistOpportunities', () => {
     expect(arg.create).not.toHaveProperty('status');
   });
 
+  it('refreshes postContent on re-scan for a title-less platform (X)', async () => {
+    // An X row stored by an older extension holds X's wire format in the body
+    // (t.co shortlinks instead of the real links). X has no title, so there is
+    // no "title\nbody" pair to break — re-scanning must repair the body.
+    const { svc, oppUpsert } = build();
+    await svc.persistOpportunities('org1', null, [
+      {
+        ...makeScoredPost(1),
+        platform: 'x',
+        externalPostId: '2090431343046095255',
+        externalPostUrl: 'https://x.com/alex/status/2090431343046095255',
+        postContent: 'audit here: https://seo-stuff.com/free-audit',
+      },
+    ]);
+    expect(oppUpsert.mock.calls[0][0].update.postContent).toBe(
+      'audit here: https://seo-stuff.com/free-audit'
+    );
+  });
+
+  it('still leaves postContent untouched on a titled platform that sends no title', async () => {
+    // Reddit HAS titles: a row stored before the title column existed holds
+    // "title\nbody" in postContent, so a scraper that did not split the pair
+    // must not rewrite the body — the guard this asserts is unchanged.
+    const { svc, oppUpsert } = build();
+    await svc.persistOpportunities('org1', null, [makeScoredPost(1)]);
+    expect(oppUpsert.mock.calls[0][0].update).not.toHaveProperty('postContent');
+  });
+
   it('dedups duplicate (platform,externalPostId) within one batch → single global upsert (W3)', async () => {
     const { svc, oppUpsert, stateCreate } = build();
     const dup1 = makeScoredPost(1);

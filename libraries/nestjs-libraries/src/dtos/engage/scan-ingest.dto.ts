@@ -17,6 +17,34 @@ import { RawPost } from '@gitroom/nestjs-libraries/engage/engage-scorer';
 import { ScanTaskPlatform } from '@gitroom/nestjs-libraries/engage/scan/scan-task.types';
 
 /**
+ * Extra platform data the extension archives on EngageOpportunity.rawData — an
+ * existing Json column, so a new key here needs NO migration.
+ *
+ * Typed explicitly rather than accepted as a free-form object: the global
+ * ValidationPipe does not whitelist, so an untyped `rawData` would let any
+ * caller write arbitrary JSON into the column. scanIngestPostToRawPost re-picks
+ * the known keys on top of this validation, so an unknown property that slips
+ * through still never reaches the database.
+ *
+ * This is an ARCHIVE, not a client payload: the opportunities list/detail
+ * responses deliberately omit rawData (see engage.repository's _merge), so
+ * nothing stored here is returned to the frontend as-is.
+ */
+export class ScanIngestRawDataDto {
+  /**
+   * X only: direct URLs of the photos/videos attached to the tweet. X's body
+   * carries only a t.co placeholder for those, which postContent strips —
+   * x.com renders them as an attachment, not as text — so the real URLs would
+   * otherwise be lost. A tweet carries at most 4 photos or 1 video.
+   */
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(4)
+  @IsString({ each: true })
+  mediaUrls?: string[];
+}
+
+/**
  * One post the extension fetched (with the user's session) and NORMALISED to the
  * backend RawPost shape. The backend never sees raw platform JSON — the
  * extension owns parsing — so this mirrors `RawPost` (engage-scorer) field for
@@ -56,6 +84,11 @@ export class ScanIngestPostDto {
   @IsOptional() @IsInt() metricScore?: number; // Reddit score may be negative
   @IsOptional() @IsNumber() metricUpvoteRatio?: number;
   @IsOptional() @IsInt() @Min(0) metricComments?: number;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => ScanIngestRawDataDto)
+  rawData?: ScanIngestRawDataDto;
 }
 
 /** Where the extension stopped — persisted as the unit's advanced cursor. */
@@ -135,6 +168,21 @@ export class EngageScanSyncDto {
   selectedUnits?: ScanUnitSelectorDto[];
 }
 
+/**
+ * Re-pick the keys the extension is allowed to archive on rawData. Validation
+ * alone is not enough — the global ValidationPipe keeps unknown properties — so
+ * the column only ever receives what is listed here. Returns undefined when
+ * there is nothing to archive, leaving rawData null as before.
+ */
+function pickIngestRawData(
+  raw?: ScanIngestRawDataDto
+): Record<string, unknown> | undefined {
+  const mediaUrls = (raw?.mediaUrls ?? []).filter(
+    (u): u is string => typeof u === 'string' && !!u.trim()
+  );
+  return mediaUrls.length ? { mediaUrls } : undefined;
+}
+
 /** Map one normalised ingest post to the scorer's RawPost (metrics default 0). */
 export function scanIngestPostToRawPost(p: ScanIngestPostDto): RawPost {
   return {
@@ -163,5 +211,6 @@ export function scanIngestPostToRawPost(p: ScanIngestPostDto): RawPost {
     metricScore: p.metricScore ?? 0,
     metricUpvoteRatio: p.metricUpvoteRatio,
     metricComments: p.metricComments ?? 0,
+    rawData: pickIngestRawData(p.rawData),
   };
 }

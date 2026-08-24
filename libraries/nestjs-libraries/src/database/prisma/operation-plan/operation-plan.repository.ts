@@ -128,6 +128,11 @@ type GeneratedContentItem = {
 type GeneratedPlanPayload = {
   campaignId?: string;
   contentItems?: GeneratedContentItem[];
+  // The analyzed project's own canonical URL (aisee task.url), stamped onto
+  // the payload at generation time (see operation-plan.service.ts). Used to
+  // fill hackernews's link-post `url` deterministically — see
+  // materializePlanPosts — rather than trusting the LLM to reproduce it.
+  sourceUrl?: string | null;
 };
 
 @Injectable()
@@ -335,6 +340,10 @@ export class OperationPlanRepository {
   ) {
     const payload = planPayload as GeneratedPlanPayload | null;
     const contentItems = Array.isArray(payload?.contentItems) ? payload!.contentItems : [];
+    const sourceUrl =
+      typeof payload?.sourceUrl === 'string' && payload.sourceUrl.trim()
+        ? payload.sourceUrl.trim()
+        : null;
     // One jittered Date per content ITEM, not per chain node: every node of a
     // thread (anchor + parts) reads the same item.utcDate today, and jittering
     // per-node would scatter one thread's segments across different moments
@@ -562,6 +571,12 @@ export class OperationPlanRepository {
             ...(platform === 'devto' && devtoTags.length
               ? { tags: devtoTags }
               : {}),
+            // Hacker News link post: the project's own canonical URL (resolved
+            // from the plan's projectId at generation time — see sourceUrl
+            // above), the same "Show HN"-style link every generated HN post
+            // should point at. Shaped to HackernewsSettingsDto.url. Omitted
+            // when the source task carried no URL, leaving a plain text post.
+            ...(platform === 'hackernews' && sourceUrl ? { url: sourceUrl } : {}),
           }),
           image: JSON.stringify(node.media ?? []),
           source: 'calendar',

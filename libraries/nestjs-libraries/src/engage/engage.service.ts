@@ -1176,6 +1176,7 @@ export class EngageService implements OnApplicationBootstrap {
     pageSize?: number;
     organizationId?: string | string[];
     platform?: string;
+    externalPostUrl?: string;
     state?: State;
     sortOrder?: 'asc' | 'desc';
   }) {

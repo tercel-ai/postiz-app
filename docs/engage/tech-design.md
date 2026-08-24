@@ -309,6 +309,10 @@ model EngageOpportunity {
   channelFollowers      Int?      // community/channel audience size (Reddit subreddit_subscribers); drives scoreAuthority on community platforms
   authorFollowers       Int?      // post author's real follower count (X); null on Reddit (no cheap per-author source)
   authorAvatarUrl       String?
+  // The body AS THE PLATFORM DISPLAYS IT, never the platform's wire format:
+  // link shorteners resolved (X hands out t.co and keeps the destination in
+  // entities), attachment placeholders stripped, HTML entities decoded. Both X
+  // paths normalise this before it is stored — see opportunity-content-rendering.md.
   postContent           String
   postPublishedAt       DateTime
 
@@ -342,7 +346,10 @@ model EngageOpportunity {
   metricUpvoteRatio     Float?                  // Reddit
   metricComments        Int       @default(0)  // Reddit num_comments | YouTube/TikTok comment_count
 
-  rawData               Json?     // original platform API response (debug / field-coverage audit)
+  // Archive, NEVER returned to clients (the API derives `mediaUrls` out of it):
+  //   server-side adapters → the whole platform payload ({ tweet, author })
+  //   the extension        → only what it could not promote to a column ({ mediaUrls })
+  rawData               Json?
 
   createdAt             DateTime  @default(now())
   updatedAt             DateTime  @updatedAt
