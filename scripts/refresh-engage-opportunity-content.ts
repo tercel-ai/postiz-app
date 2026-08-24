@@ -52,6 +52,8 @@ import {
 
 const X_BATCH = 100;
 const DEFAULT_SCAN_LIMIT = 50;
+/** Per-row cap on the shortlink explanation — see the truncation in main(). */
+const MAX_SHORTLINK_LINES = 8;
 
 const prisma = new PrismaClient();
 
@@ -326,6 +328,15 @@ async function main() {
       ...Array.from(drop, ([url, why]) => `${url}  ✗ removed (${why})`),
       ...Array.from(expand, ([url, to]) => `${url}  → ${to}`),
     ];
+    // A link-roundup tweet can carry 40+ shortlinks, which buries every other
+    // row in the run. The count still tells you the rewrite touched them all.
+    const shown =
+      shortlinks.length > MAX_SHORTLINK_LINES
+        ? [
+            ...shortlinks.slice(0, MAX_SHORTLINK_LINES),
+            `… ${shortlinks.length - MAX_SHORTLINK_LINES} more shortlink(s)`,
+          ]
+        : shortlinks;
 
     plans.push({
       row,
@@ -333,7 +344,7 @@ async function main() {
       mediaUrls,
       contentChanged,
       mediaChanged,
-      shortlinks,
+      shortlinks: shown,
     });
   }
 

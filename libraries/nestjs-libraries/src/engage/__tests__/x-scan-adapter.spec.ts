@@ -3,6 +3,7 @@ import {
   XScanAdapter,
   clampXMaxResults,
   expandXTweetText,
+  planXShortlinks,
   quotedTweetIds,
 } from '../scan/x-scan-adapter';
 import type { SearchScopedArgs } from '../scan/platform-scan-adapter';
@@ -607,5 +608,105 @@ describe('quotedTweetIds', () => {
   it('returns [] when there are no references', () => {
     expect(quotedTweetIds({})).toEqual([]);
     expect(quotedTweetIds({ referenced_tweets: [] })).toEqual([]);
+  });
+});
+
+// X hands back a `.../status/123/video/1` permalink when a tweet embeds SOMEONE
+// ELSE's media: no media_key (the media is the other tweet's) and no
+// referenced_tweets entry (it is not a quote), yet x.com renders it as embedded
+// media with no URL in the text.
+describe('expandXTweetText — media permalinks', () => {
+  it('drops a permalink pointing at another tweet’s video', () => {
+    expect(
+      expandXTweetText('New Gta 6 Gameplay İs Absolutely İnsane https://t.co/KGGPqE7iUW', {
+        entities: {
+          urls: [
+            {
+              url: 'https://t.co/KGGPqE7iUW',
+              expanded_url:
+                'https://x.com/NxChiill/status/2091513329982341268/video/1',
+            },
+          ],
+        },
+      })
+    ).toBe('New Gta 6 Gameplay İs Absolutely İnsane');
+  });
+
+  it('drops a photo permalink too', () => {
+    expect(
+      expandXTweetText('look https://t.co/p1', {
+        entities: {
+          urls: [
+            {
+              url: 'https://t.co/p1',
+              expanded_url: 'https://twitter.com/bob/status/999/photo/2',
+            },
+          ],
+        },
+      })
+    ).toBe('look');
+  });
+
+  it('KEEPS a plain status permalink with no media segment', () => {
+    // Linking to a tweet in your own words IS shown as text; only the media
+    // form is rendered as an embed.
+    expect(
+      expandXTweetText('see https://t.co/s1', {
+        entities: {
+          urls: [
+            {
+              url: 'https://t.co/s1',
+              expanded_url: 'https://x.com/bob/status/999',
+            },
+          ],
+        },
+      })
+    ).toBe('see https://x.com/bob/status/999');
+  });
+});
+
+describe('planXShortlinks', () => {
+  it('never reports one shortlink as both dropped and expanded', () => {
+    // X lists the same t.co in two entity sets: a media entity, and a url
+    // entity resolving to the other tweet's permalink. Dropping wins, so the
+    // expand map must not still carry it.
+    const { expand, drop } = planXShortlinks({
+      entities: {
+        urls: [
+          {
+            url: 'https://t.co/itZgWRd1gc',
+            expanded_url:
+              'https://x.com/littleblass/status/2091517076665999461/video/1',
+          },
+        ],
+        media: [],
+      },
+      noteEntities: {
+        urls: [{ url: 'https://t.co/itZgWRd1gc', media_key: '7_209' }],
+      },
+    });
+    expect(drop.get('https://t.co/itZgWRd1gc')).toBeDefined();
+    expect(expand.has('https://t.co/itZgWRd1gc')).toBe(false);
+  });
+
+  it('labels each drop with its reason', () => {
+    const { drop } = planXShortlinks({
+      entities: {
+        urls: [
+          { url: 'https://t.co/att', media_key: '3_1' },
+          { url: 'https://t.co/quo', expanded_url: 'https://x.com/a/status/55' },
+          {
+            url: 'https://t.co/vid',
+            expanded_url: 'https://x.com/b/status/66/video/1',
+          },
+        ],
+      },
+      quotedTweetIds: ['55'],
+    });
+    expect(Object.fromEntries(drop)).toEqual({
+      'https://t.co/att': 'attachment',
+      'https://t.co/quo': 'quoted',
+      'https://t.co/vid': 'media-link',
+    });
   });
 });

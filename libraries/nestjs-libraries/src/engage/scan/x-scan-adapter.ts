@@ -379,6 +379,16 @@ const TCO_RE = /https?:\/\/t\.co\/[A-Za-z0-9]+/g;
 const STATUS_URL_RE = /(?:x|twitter)\.com\/[^/?#]+\/status(?:es)?\/(\d+)/i;
 
 /**
+ * A status permalink pointing AT A TWEET'S MEDIA — `.../status/123/video/1`,
+ * `.../photo/2`. X hands one of these back when a tweet embeds someone else's
+ * video or photo: there is no `media_key` (the media belongs to the other
+ * tweet) and no `referenced_tweets` entry (it is not a quote), yet x.com still
+ * renders it as embedded media with no URL in the text.
+ */
+const MEDIA_PERMALINK_RE =
+  /(?:x|twitter)\.com\/[^/?#]+\/status(?:es)?\/\d+\/(?:photo|video)\/\d+/i;
+
+/**
  * Ids of the tweets this one QUOTES. Their shortlink renders as an embedded
  * card on x.com, never as text, so it is dropped from the body like a media
  * placeholder. A REPLY's parent is not included: replying does not put a link
@@ -400,10 +410,11 @@ export function quotedTweetIds(tweet: {
  * `https://t.co/Pn764BHwyL` where the site renders `seo-stuff.com/free-audit` —
  * a body that does not match the post it came from.
  *
- * Two kinds of shortlink have NO textual form on x.com and are dropped rather
+ * Three kinds of shortlink have NO textual form on x.com and are dropped rather
  * than expanded, because the site renders each as its own block below the text:
  *   - an attachment (the entry carries `media_key`)
  *   - a quoted tweet (the destination is one of `opts.quotedTweetIds`)
+ *   - someone else's media (the destination is a `.../status/1/video/1` permalink)
  * Expanding those puts a link in the body that the real post never showed.
  *
  * `&`, `<` and `>` arrive HTML-escaped, decoded here for the same reason
@@ -413,6 +424,9 @@ export function quotedTweetIds(tweet: {
  * still beats dropping the link. The verbatim `text` stays available on rawData,
  * where the whole tweet is archived.
  */
+/** Why a shortlink is removed from the body instead of expanded. */
+export type XShortlinkDropReason = 'attachment' | 'quoted' | 'media-link';
+
 export interface XTweetEntityOptions {
   entities?: Record<string, unknown>;
   /** A >280-char tweet carries its own entity set on note_tweet. */
@@ -429,10 +443,10 @@ export interface XTweetEntityOptions {
  */
 export function planXShortlinks(opts: XTweetEntityOptions = {}): {
   expand: Map<string, string>;
-  drop: Map<string, 'attachment' | 'quoted'>;
+  drop: Map<string, XShortlinkDropReason>;
 } {
   const expand = new Map<string, string>();
-  const drop = new Map<string, 'attachment' | 'quoted'>();
+  const drop = new Map<string, XShortlinkDropReason>();
   const quoted = new Set(opts.quotedTweetIds ?? []);
   for (const set of [opts.entities, opts.noteEntities]) {
     const urls = set?.urls;
@@ -451,9 +465,19 @@ export function planXShortlinks(opts: XTweetEntityOptions = {}): {
         drop.set(u.url, 'quoted');
         continue;
       }
+      if (MEDIA_PERMALINK_RE.test(expanded)) {
+        drop.set(u.url, 'media-link');
+        continue;
+      }
       expand.set(u.url, expanded);
     }
   }
+  // The two are mutually exclusive: X lists the SAME shortlink in more than one
+  // entity set (a media entity plus a url entity resolving to the other tweet's
+  // permalink), and dropping wins in the rewrite below. Without this the two
+  // maps disagree about one shortlink and any explanation built from them reads
+  // as self-contradictory.
+  for (const url of drop.keys()) expand.delete(url);
   return { expand, drop };
 }
 

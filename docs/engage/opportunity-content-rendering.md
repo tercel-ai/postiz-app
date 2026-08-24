@@ -21,6 +21,7 @@ Not the platform's wire format. Both X paths normalise before storing:
 | `check this https://t.co/Pn764BHwyL` | `check this https://seo-stuff.com/free-audit` |
 | `nice shot https://t.co/imgAAA` (an attached photo) | `nice shot` |
 | `good thread https://t.co/quoteAA` (a quoted tweet) | `good thread` |
+| `insane clip https://t.co/vidAAA` (another tweet's video) | `insane clip` |
 | `R&amp;D on &lt;script&gt;` | `R&D on <script>` |
 
 X never puts the real link in the body: it substitutes a `t.co` shortlink and
@@ -34,6 +35,14 @@ renders each as its own block below the text and never as a link inside it:
   a link in the body the real post never showed (and X hands back a
   `twitter.com` permalink for it, which does not even match the `x.com` form
   every stored `externalPostUrl` uses).
+- **someone else's media** — a `.../status/123/video/1` or `/photo/2`
+  permalink, which X uses when a tweet embeds another tweet's media. It carries
+  no `media_key` (the media is the other tweet's) and is not a quote, so it is
+  recognised by the permalink shape. A *plain* `.../status/123` link is still
+  expanded: linking to a tweet in your own words IS shown as text.
+
+A shortlink can appear in more than one entity set at once — X lists the same
+`t.co` as both a media entity and a url entity. Removal always wins.
 
 An ordinary link in a tweet that also quotes one is still expanded normally.
 
