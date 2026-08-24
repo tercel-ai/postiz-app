@@ -44,7 +44,11 @@ process.env.TZ = 'UTC';
 
 import { PrismaClient, Prisma } from '@prisma/client';
 import { TwitterApi } from 'twitter-api-v2';
-import { expandXTweetText } from '@gitroom/nestjs-libraries/engage/scan/x-scan-adapter';
+import {
+  expandXTweetText,
+  planXShortlinks,
+  quotedTweetIds,
+} from '@gitroom/nestjs-libraries/engage/scan/x-scan-adapter';
 
 const X_BATCH = 100;
 const DEFAULT_SCAN_LIMIT = 50;
@@ -114,7 +118,14 @@ async function fetchXTweets(
     const batch = ids.slice(i, i + X_BATCH);
     try {
       const resp = await client.v2.tweets(batch, {
-        'tweet.fields': ['text', 'entities', 'note_tweet', 'attachments'] as any,
+        'tweet.fields': [
+          'text',
+          'entities',
+          'note_tweet',
+          'attachments',
+          // A quoted tweet's shortlink renders as a card, not as text.
+          'referenced_tweets',
+        ] as any,
         expansions: ['attachments.media_keys'] as any,
         'media.fields': ['url', 'variants', 'type'] as any,
       });
@@ -182,6 +193,8 @@ interface Plan {
   mediaUrls: string[];
   contentChanged: boolean;
   mediaChanged: boolean;
+  /** Why the body changed, one line per t.co — see printPlan. */
+  shortlinks: string[];
 }
 
 async function resolveRows(): Promise<Row[]> {
@@ -287,11 +300,11 @@ async function main() {
     }
     const { tweet, media } = hit;
     const body = tweet.note_tweet?.text ?? tweet.text ?? '';
-    const contentTo = expandXTweetText(
-      body,
-      tweet.entities,
-      tweet.note_tweet?.entities
-    );
+    const contentTo = expandXTweetText(body, {
+      entities: tweet.entities,
+      noteEntities: tweet.note_tweet?.entities,
+      quotedTweetIds: quotedTweetIds(tweet),
+    });
     const mediaUrls = mediaUrlsFor(tweet, media);
     const currentMedia = ((row.rawData as any)?.mediaUrls ?? []) as unknown[];
 
@@ -301,7 +314,27 @@ async function main() {
       JSON.stringify(mediaUrls) !== JSON.stringify(currentMedia);
 
     if (!contentChanged && !mediaChanged) continue;
-    plans.push({ row, contentTo, mediaUrls, contentChanged, mediaChanged });
+
+    // Same classification the rewrite itself used, rendered for the operator:
+    // truncated previews of two long bodies rarely show WHERE they differ.
+    const { expand, drop } = planXShortlinks({
+      entities: tweet.entities,
+      noteEntities: tweet.note_tweet?.entities,
+      quotedTweetIds: quotedTweetIds(tweet),
+    });
+    const shortlinks = [
+      ...Array.from(drop, ([url, why]) => `${url}  ✗ removed (${why})`),
+      ...Array.from(expand, ([url, to]) => `${url}  → ${to}`),
+    ];
+
+    plans.push({
+      row,
+      contentTo,
+      mediaUrls,
+      contentChanged,
+      mediaChanged,
+      shortlinks,
+    });
   }
 
   if (!plans.length) {
@@ -311,12 +344,18 @@ async function main() {
 
   for (const p of plans) {
     console.log(`\n${p.row.externalPostUrl}  (opportunity ${p.row.id})`);
+    // The shortlink lines are the real diff. The body previews below are only a
+    // sanity check — two 280-char bodies clipped to one line often look
+    // identical even when the rewrite changed something in the middle.
+    for (const line of p.shortlinks) console.log(`  ${line}`);
     if (p.contentChanged) {
       console.log(`  - ${preview(p.row.postContent)}`);
       console.log(`  + ${preview(p.contentTo)}`);
+    } else {
+      console.log('  (body unchanged; only mediaUrls)');
     }
     if (p.mediaChanged) {
-      console.log(`  mediaUrls → ${p.mediaUrls.join(', ')}`);
+      for (const u of p.mediaUrls) console.log(`  media → ${u}`);
     }
   }
 

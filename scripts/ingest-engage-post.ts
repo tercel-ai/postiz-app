@@ -23,7 +23,10 @@ import * as dotenv from 'dotenv';
 dotenv.config();
 
 import { PrismaClient, EngageOpportunityStatus } from '@prisma/client';
-import { expandXTweetText } from '@gitroom/nestjs-libraries/engage/scan/x-scan-adapter';
+import {
+  expandXTweetText,
+  quotedTweetIds,
+} from '@gitroom/nestjs-libraries/engage/scan/x-scan-adapter';
 
 interface CliArgs {
   url: string;
@@ -195,11 +198,11 @@ async function main() {
     // shortlinks resolved, the attachment placeholder stripped, HTML entities
     // decoded. Calls the scanner's own normaliser so a row ingested here is
     // identical to one a scan would have produced.
-    const postContent = expandXTweetText(
-      tweet.note_tweet?.text ?? tweet.text,
-      tweet.entities,
-      tweet.note_tweet?.entities
-    );
+    const postContent = expandXTweetText(tweet.note_tweet?.text ?? tweet.text, {
+      entities: tweet.entities,
+      noteEntities: tweet.note_tweet?.entities,
+      quotedTweetIds: quotedTweetIds(tweet),
+    });
     // The attachment URLs the body no longer mentions. Archived alongside the
     // raw payload under the key the API derives `mediaUrls` from.
     const mediaUrls = mediaUrlsFor(tweet, media);

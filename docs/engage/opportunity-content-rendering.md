@@ -20,12 +20,22 @@ Not the platform's wire format. Both X paths normalise before storing:
 | --- | --- |
 | `check this https://t.co/Pn764BHwyL` | `check this https://seo-stuff.com/free-audit` |
 | `nice shot https://t.co/imgAAA` (an attached photo) | `nice shot` |
+| `good thread https://t.co/quoteAA` (a quoted tweet) | `good thread` |
 | `R&amp;D on &lt;script&gt;` | `R&D on <script>` |
 
 X never puts the real link in the body: it substitutes a `t.co` shortlink and
-keeps the destination in the entity set. An attachment gets a `t.co` placeholder
-too, but x.com renders that as an image rather than as text, so it is stripped
-from the body and its real URL is kept in `mediaUrls` instead.
+keeps the destination in the entity set.
+
+Two kinds of shortlink are **removed** rather than expanded, because x.com
+renders each as its own block below the text and never as a link inside it:
+
+- **an attachment** — its real URL is kept in `mediaUrls` instead.
+- **a quoted tweet** — its permalink is a `t.co` as well. Expanding it would put
+  a link in the body the real post never showed (and X hands back a
+  `twitter.com` permalink for it, which does not even match the `x.com` form
+  every stored `externalPostUrl` uses).
+
+An ordinary link in a tweet that also quotes one is still expanded normally.
 
 **A `t.co` link can still appear** in two cases, so clients must tolerate it:
 

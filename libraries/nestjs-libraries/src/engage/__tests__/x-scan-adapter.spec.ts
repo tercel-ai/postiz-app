@@ -3,6 +3,7 @@ import {
   XScanAdapter,
   clampXMaxResults,
   expandXTweetText,
+  quotedTweetIds,
 } from '../scan/x-scan-adapter';
 import type { SearchScopedArgs } from '../scan/platform-scan-adapter';
 
@@ -452,13 +453,13 @@ describe('expandXTweetText', () => {
   it('expands a t.co link to its real destination', () => {
     expect(
       expandXTweetText('audit here, free: https://t.co/Pn764BHwyL', {
-        urls: [
+        entities: { urls: [
           {
             url: 'https://t.co/Pn764BHwyL',
             expanded_url: 'https://seo-stuff.com/free-audit',
             display_url: 'seo-stuff.com/free-audit',
           },
-        ],
+        ] },
       })
     ).toBe('audit here, free: https://seo-stuff.com/free-audit');
   });
@@ -466,10 +467,12 @@ describe('expandXTweetText', () => {
   it('expands every occurrence, and several distinct shortlinks', () => {
     expect(
       expandXTweetText('https://t.co/a x https://t.co/b y https://t.co/a', {
-        urls: [
-          { url: 'https://t.co/a', expanded_url: 'https://one.example' },
-          { url: 'https://t.co/b', expanded_url: 'https://two.example' },
-        ],
+        entities: {
+          urls: [
+            { url: 'https://t.co/a', expanded_url: 'https://one.example' },
+            { url: 'https://t.co/b', expanded_url: 'https://two.example' },
+          ],
+        },
       })
     ).toBe('https://one.example x https://two.example y https://one.example');
   });
@@ -477,32 +480,36 @@ describe('expandXTweetText', () => {
   it('drops an attachment placeholder (the entry carrying media_key)', () => {
     expect(
       expandXTweetText('First, the confirmed part. https://t.co/imgAAA', {
-        urls: [
-          {
-            url: 'https://t.co/imgAAA',
-            expanded_url: 'https://x.com/alex/status/209/photo/1',
-            display_url: 'pic.x.com/abc',
-            media_key: '3_209',
-          },
-        ],
+        entities: {
+          urls: [
+            {
+              url: 'https://t.co/imgAAA',
+              expanded_url: 'https://x.com/alex/status/209/photo/1',
+              display_url: 'pic.x.com/abc',
+              media_key: '3_209',
+            },
+          ],
+        },
       })
     ).toBe('First, the confirmed part.');
   });
 
   it('reads a longform note tweet’s own entities', () => {
     expect(
-      expandXTweetText(
-        'the long body with https://t.co/note1',
-        undefined,
-        { urls: [{ url: 'https://t.co/note1', expanded_url: 'https://long.example/post' }] }
-      )
+      expandXTweetText('the long body with https://t.co/note1', {
+        noteEntities: {
+          urls: [
+            { url: 'https://t.co/note1', expanded_url: 'https://long.example/post' },
+          ],
+        },
+      })
     ).toBe('the long body with https://long.example/post');
   });
 
   it('leaves a shortlink with no entity untouched', () => {
-    expect(expandXTweetText('mystery https://t.co/unknown1', { urls: [] })).toBe(
-      'mystery https://t.co/unknown1'
-    );
+    expect(
+      expandXTweetText('mystery https://t.co/unknown1', { entities: { urls: [] } })
+    ).toBe('mystery https://t.co/unknown1');
   });
 
   it('decodes the HTML entities X escapes', () => {
@@ -513,6 +520,92 @@ describe('expandXTweetText', () => {
 
   it('tolerates a missing/!array entities payload', () => {
     expect(expandXTweetText('plain body')).toBe('plain body');
-    expect(expandXTweetText('plain body', { urls: 'nope' } as any)).toBe('plain body');
+    expect(
+      expandXTweetText('plain body', { entities: { urls: 'nope' } } as any)
+    ).toBe('plain body');
+  });
+});
+
+// A quoted tweet renders as an embedded card BELOW the text on x.com — the
+// shortlink standing in for it is never displayed as text, exactly like a media
+// placeholder. Expanding it puts a link in the body the real post never showed
+// (and X hands back a twitter.com permalink for it, so it does not even match
+// the stored externalPostUrl form).
+describe('expandXTweetText — quoted tweets', () => {
+  const QUOTE_ENTITIES = {
+    urls: [
+      {
+        url: 'https://t.co/CdJ2Wfjpoe',
+        expanded_url: 'https://twitter.com/Robbie_reigns1/status/2091525063860654474',
+        display_url: 'twitter.com/Robbie_reigns1…',
+      },
+    ],
+  };
+
+  it('drops the shortlink of a tweet this one quotes', () => {
+    expect(
+      expandXTweetText('NEW GTA 6 LEAK -Might get taken down https://t.co/CdJ2Wfjpoe', {
+        entities: QUOTE_ENTITIES,
+        quotedTweetIds: ['2091525063860654474'],
+      })
+    ).toBe('NEW GTA 6 LEAK -Might get taken down');
+  });
+
+  it('EXPANDS a status permalink that is not the quoted tweet', () => {
+    // Someone linking to an unrelated tweet in their own words — that link IS
+    // shown as text, so dropping it would lose content.
+    expect(
+      expandXTweetText('look at this https://t.co/CdJ2Wfjpoe', {
+        entities: QUOTE_ENTITIES,
+        quotedTweetIds: ['9999999999999999999'],
+      })
+    ).toBe(
+      'look at this https://twitter.com/Robbie_reigns1/status/2091525063860654474'
+    );
+  });
+
+  it('expands normally when the tweet quotes nothing', () => {
+    expect(
+      expandXTweetText('look at this https://t.co/CdJ2Wfjpoe', {
+        entities: QUOTE_ENTITIES,
+      })
+    ).toBe(
+      'look at this https://twitter.com/Robbie_reigns1/status/2091525063860654474'
+    );
+  });
+
+  it('drops a quoted x.com permalink too, not just twitter.com', () => {
+    expect(
+      expandXTweetText('quoting https://t.co/xq1', {
+        entities: {
+          urls: [
+            {
+              url: 'https://t.co/xq1',
+              expanded_url: 'https://x.com/NxChiill/status/2091513329982341268',
+            },
+          ],
+        },
+        quotedTweetIds: ['2091513329982341268'],
+      })
+    ).toBe('quoting');
+  });
+});
+
+describe('quotedTweetIds', () => {
+  it('picks only the quoted references', () => {
+    expect(
+      quotedTweetIds({
+        referenced_tweets: [
+          { type: 'replied_to', id: '111' },
+          { type: 'quoted', id: '222' },
+          { type: 'retweeted', id: '333' },
+        ],
+      })
+    ).toEqual(['222']);
+  });
+
+  it('returns [] when there are no references', () => {
+    expect(quotedTweetIds({})).toEqual([]);
+    expect(quotedTweetIds({ referenced_tweets: [] })).toEqual([]);
   });
 });

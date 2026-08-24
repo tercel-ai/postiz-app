@@ -375,43 +375,95 @@ interface XUrlEntity {
 /** Every t.co shortlink X substitutes into a tweet's text looks like this. */
 const TCO_RE = /https?:\/\/t\.co\/[A-Za-z0-9]+/g;
 
+/** The tweet id inside an x.com / twitter.com status permalink. */
+const STATUS_URL_RE = /(?:x|twitter)\.com\/[^/?#]+\/status(?:es)?\/(\d+)/i;
+
+/**
+ * Ids of the tweets this one QUOTES. Their shortlink renders as an embedded
+ * card on x.com, never as text, so it is dropped from the body like a media
+ * placeholder. A REPLY's parent is not included: replying does not put a link
+ * in the body at all.
+ */
+export function quotedTweetIds(tweet: {
+  referenced_tweets?: Array<{ type?: string; id?: string }>;
+}): string[] {
+  return (tweet?.referenced_tweets ?? [])
+    .filter((r) => r?.type === 'quoted' && typeof r?.id === 'string')
+    .map((r) => r.id as string);
+}
+
 /**
  * Rewrite a tweet's text into what x.com actually displays.
  *
  * X NEVER puts the real link in `text`: it substitutes a t.co shortlink and
  * keeps the destination in `entities.urls`. Unexpanded, the body is stored as
  * `https://t.co/Pn764BHwyL` where the site renders `seo-stuff.com/free-audit` —
- * a body that does not match the post it came from. An attachment's entry
- * (identified by `media_key`) has no textual form on x.com at all, so it is
- * dropped rather than expanded. `&`, `<` and `>` arrive HTML-escaped, decoded
- * here for the same reason (`&amp;` LAST, so "&amp;lt;" becomes "&lt;", not "<").
+ * a body that does not match the post it came from.
+ *
+ * Two kinds of shortlink have NO textual form on x.com and are dropped rather
+ * than expanded, because the site renders each as its own block below the text:
+ *   - an attachment (the entry carries `media_key`)
+ *   - a quoted tweet (the destination is one of `opts.quotedTweetIds`)
+ * Expanding those puts a link in the body that the real post never showed.
+ *
+ * `&`, `<` and `>` arrive HTML-escaped, decoded here for the same reason
+ * (`&amp;` LAST, so "&amp;lt;" becomes "&lt;", not "<").
  *
  * A t.co with no matching entity is left untouched — an unresolvable shortlink
  * still beats dropping the link. The verbatim `text` stays available on rawData,
  * where the whole tweet is archived.
  */
-export function expandXTweetText(
-  text: string,
-  ...entitySets: Array<Record<string, unknown> | undefined>
-): string {
+export interface XTweetEntityOptions {
+  entities?: Record<string, unknown>;
+  /** A >280-char tweet carries its own entity set on note_tweet. */
+  noteEntities?: Record<string, unknown>;
+  quotedTweetIds?: readonly string[];
+}
+
+/**
+ * What happens to each t.co in a tweet's text: which resolve to a real address,
+ * and which the body must not show at all (with why). Exported so a diagnostic
+ * can explain a rewrite shortlink-by-shortlink without reimplementing the rules
+ * — expandXTweetText below is the only consumer that matters, and it must stay
+ * the single definition of those rules.
+ */
+export function planXShortlinks(opts: XTweetEntityOptions = {}): {
+  expand: Map<string, string>;
+  drop: Map<string, 'attachment' | 'quoted'>;
+} {
   const expand = new Map<string, string>();
-  const media = new Set<string>();
-  for (const set of entitySets) {
+  const drop = new Map<string, 'attachment' | 'quoted'>();
+  const quoted = new Set(opts.quotedTweetIds ?? []);
+  for (const set of [opts.entities, opts.noteEntities]) {
     const urls = set?.urls;
     if (!Array.isArray(urls)) continue;
     for (const u of urls as XUrlEntity[]) {
       if (typeof u?.url !== 'string' || !u.url) continue;
       if (u.media_key) {
-        media.add(u.url);
+        drop.set(u.url, 'attachment');
         continue;
       }
-      if (typeof u.expanded_url === 'string' && u.expanded_url) {
-        expand.set(u.url, u.expanded_url);
+      const expanded =
+        typeof u.expanded_url === 'string' && u.expanded_url ? u.expanded_url : '';
+      if (!expanded) continue;
+      const quotedId = quoted.size ? expanded.match(STATUS_URL_RE)?.[1] : undefined;
+      if (quotedId && quoted.has(quotedId)) {
+        drop.set(u.url, 'quoted');
+        continue;
       }
+      expand.set(u.url, expanded);
     }
   }
+  return { expand, drop };
+}
+
+export function expandXTweetText(
+  text: string,
+  opts: XTweetEntityOptions = {}
+): string {
+  const { expand, drop } = planXShortlinks(opts);
   const out = String(text ?? '').replace(TCO_RE, (short) =>
-    media.has(short) ? '' : (expand.get(short) ?? short)
+    drop.has(short) ? '' : (expand.get(short) ?? short)
   );
   return out
     .replace(/&lt;/g, '<')
@@ -433,11 +485,11 @@ function toRawPost(tweet: XTweet, author?: XUser): RawPost {
     authorAvatarUrl: author?.profile_image_url?.replace('_normal', '_400x400'),
     authorFollowers: author?.public_metrics?.followers_count,
     // The stored body must read like x.com, not like X's wire format.
-    postContent: expandXTweetText(
-      tweet.note_tweet?.text ?? tweet.text,
-      tweet.entities,
-      tweet.note_tweet?.entities
-    ),
+    postContent: expandXTweetText(tweet.note_tweet?.text ?? tweet.text, {
+      entities: tweet.entities,
+      noteEntities: tweet.note_tweet?.entities,
+      quotedTweetIds: quotedTweetIds(tweet),
+    }),
     postPublishedAt: new Date(tweet.created_at),
     metricLikes: tweet.public_metrics?.like_count ?? 0,
     metricReplies: tweet.public_metrics?.reply_count ?? 0,
