@@ -90,7 +90,22 @@ export interface EngageReplyPacing {
   minGapMinutes: number;
   /** UTC hours [startInclusive, endExclusive) the driver may hand out work in. */
   activeHoursUtc: [number, number];
-  /** Opportunities below this score are never auto-replied to. */
+  /**
+   * Opportunities below this score are never auto-replied to.
+   *
+   * Defaults to 0 — NO filtering of its own. The authoritative quality line is
+   * the INGEST gate (ENGAGE_MIN_SCORE, see engage-scan-ingest.service.ts): a
+   * post below it never becomes an opportunity at all, so everything reaching
+   * this driver has already cleared it. Two gates on the same score shipping
+   * two different defaults is how a value here silently overrides a tuned
+   * ENGAGE_MIN_SCORE — with nothing in the env to show it, since this one lives
+   * in the `engage_reply_pacing` setting.
+   *
+   * Raise it to tighten reply quality WITHOUT losing data: this gate is
+   * reversible (the opportunities stay in the DB, so lowering it again brings
+   * them straight back), whereas raising the ingest gate discards everything
+   * below it permanently.
+   */
   minScore: number;
   /**
    * How long a claimed reply stays SPOKEN FOR before it is offered again.
@@ -110,7 +125,8 @@ export const DEFAULT_REPLY_PACING: EngageReplyPacing = {
   maxPerPoll: 1,
   minGapMinutes: 25,
   activeHoursUtc: [0, 24],
-  minScore: 70,
+  // 0 = defer to the ingest gate; see the field doc above.
+  minScore: 0,
   claimLeaseMinutes: 30,
 };
 
