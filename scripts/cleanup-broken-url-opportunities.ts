@@ -126,7 +126,7 @@ function parseArgs(argv: string[]): Args {
 async function loadCandidates(
   prisma: PrismaClient,
   args: Args
-): Promise<{ deletable: Candidate[]; sparedCount: number }> {
+): Promise<{ deletable: Candidate[]; spared: Candidate[] }> {
   const platformFilter = args.platform
     ? Prisma.sql`AND o."platform" = ${args.platform}`
     : Prisma.empty;
@@ -147,13 +147,18 @@ async function loadCandidates(
     )
   `;
 
-  const spared = await prisma.$queryRaw<{ count: bigint }[]>(Prisma.sql`
-    SELECT count(*)::bigint AS count
+  // Listed, not just counted: these are the rows that actually need doing
+  // something about — each one is a broken address someone already paid to
+  // reply to. A bare count tells an operator nothing about what to repair.
+  const spared = await prisma.$queryRaw<Candidate[]>(Prisma.sql`
+    SELECT o."id", o."platform", o."externalPostId", o."externalPostUrl",
+           o."postContent", o."postPublishedAt"
     FROM "EngageOpportunity" o
     WHERE o."deletedAt" IS NULL
       AND ${BROKEN_URL_SQL}
       ${platformFilter}
       AND (${paidSignals})
+    ORDER BY o."postPublishedAt" DESC
   `);
 
   const deletable = await prisma.$queryRaw<Candidate[]>(Prisma.sql`
@@ -168,7 +173,7 @@ async function loadCandidates(
     ${args.limit ? Prisma.sql`LIMIT ${args.limit}` : Prisma.empty}
   `);
 
-  return { deletable, sparedCount: Number(spared[0]?.count ?? 0) };
+  return { deletable, spared };
 }
 
 function summarise(rows: Candidate[]): Map<string, number> {
@@ -189,13 +194,32 @@ async function main() {
   console.log(`limit    : ${args.limit ?? '(none)'}\n`);
 
   try {
-    const { deletable, sparedCount } = await loadCandidates(prisma, args);
+    const { deletable, spared } = await loadCandidates(prisma, args);
 
     console.log(
-      `${sparedCount} row(s) spared — they have replies, generation history, or an ` +
-        'engage_reply charge of any status. Repair those addresses instead of ' +
-        'deleting them.\n'
+      `${spared.length} row(s) SPARED — they have replies, generation history, or an ` +
+        'engage_reply charge of any status.\n'
     );
+    if (spared.length) {
+      // An id that is a plain number came from a card's data-urn and can be
+      // resolved back to a real address; an `sdui-` id is a hash of the search
+      // card's wrapper and encodes nothing, so no address can be rebuilt from
+      // it. The split decides whether the panel can repair a row at all.
+      const repairable = spared.filter((r) => /^\d+$/.test(r.externalPostId));
+      console.log('  These are the rows that need repairing, not deleting:');
+      for (const r of spared) {
+        const kind = /^\d+$/.test(r.externalPostId) ? 'repairable' : 'NO ID    ';
+        console.log(
+          `    [${kind}] ${r.externalPostId.padEnd(24)} ${(r.externalPostUrl || '(no url)').slice(0, 55)}`
+        );
+      }
+      console.log(
+        `\n  ${repairable.length} of ${spared.length} have a numeric post id, so the ` +
+          'extension can resolve their real address\n  (options → Engage ' +
+          'opportunities → Probe, then Apply). The rest carry only a synthetic\n' +
+          '  SDUI token and cannot be repaired automatically — handle those by hand.\n'
+      );
+    }
 
     if (deletable.length === 0) {
       console.log('Nothing to delete.');
