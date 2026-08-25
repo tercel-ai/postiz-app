@@ -5481,13 +5481,22 @@ export class EngageRepository {
   async getSentReplyStatus(organizationId: string, sentReplyId: string) {
     const reply = await this._sentReply.model.engageSentReply.findFirst({
       where: { id: sentReplyId, organizationId },
-      select: { id: true, post: { select: { state: true, releaseURL: true } } },
+      select: {
+        id: true,
+        post: { select: { state: true, releaseURL: true } },
+        opportunity: { select: { externalPostUrl: true } },
+      },
     });
     if (!reply) throw new NotFoundException('Sent reply not found');
     return {
       id: reply.id,
       state: reply.post?.state ?? null,
       replyUrl: reply.post?.releaseURL ?? null,
+      // The CURRENT address of the post being replied to. The extension holds
+      // its own copy from when the reply was drafted, and a manual retry of an
+      // old failure would otherwise re-send to an address that has since been
+      // repaired — failing again for a reason that no longer exists.
+      targetUrl: reply.opportunity?.externalPostUrl ?? null,
     };
   }
 
