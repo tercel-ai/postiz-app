@@ -348,7 +348,11 @@ export class EngageRepository {
     private _post: PrismaRepository<'post'>,
     private _tx: PrismaTransaction,
     private _scanCursor: PrismaRepository<'engageScanCursor'>,
-    private _keywordInitialScan: PrismaRepository<'engageKeywordInitialScan'>
+    private _keywordInitialScan: PrismaRepository<'engageKeywordInitialScan'>,
+    // The engage_reply ledger. Needed by the broken-address triage below: it is
+    // the only signal that survives for legacy paid generations, whose
+    // EngageOpportunityState.generationHistory is SQL NULL.
+    private _billingRecord: PrismaRepository<'billingRecord'>
   ) {}
 
   // Runs a create that may hit a unique constraint and converts the resulting
@@ -3969,6 +3973,170 @@ export class EngageRepository {
   // filters via the linked opportunity, `state` via the reply Post. Returns the
   // admin envelope { results, total, page, pageSize, totalPages } to match
   // getAllPostsList (AdminPostsController), enriched with org + author info.
+  // ── Broken-address triage (admin) ──────────────────────────────────────────
+  // See docs/admin-engage-opportunities.md. Driven by the browser extension,
+  // which is the only place a LinkedIn address can be re-resolved: those pages
+  // are members-only, so no server-side job can read them.
+
+  /**
+   * Opportunities whose stored address can never be replied to: an entity page's
+   * post LIST (…/company/<slug>/posts/ and the school/showcase equivalents), or
+   * no address at all.
+   *
+   * Matched as a substring rather than a regex so it works identically on any
+   * database Prisma targets; the single-post forms (/posts/, /pulse/,
+   * /feed/update/) never contain these fragments.
+   */
+  private brokenUrlFilter(): Prisma.EngageOpportunityWhereInput {
+    return {
+      OR: [
+        { externalPostUrl: '' },
+        { externalPostUrl: { contains: 'linkedin.com/company/' } },
+        { externalPostUrl: { contains: 'linkedin.com/school/' } },
+        { externalPostUrl: { contains: 'linkedin.com/showcase/' } },
+      ],
+    };
+  }
+
+  /**
+   * Which of these opportunities cost someone something.
+   *
+   * THE definition of "paid work", in one place, because both the listing (which
+   * decides what an operator is shown) and the delete (which decides what is
+   * destroyed) must agree — a row judged free by one and paid by the other is
+   * exactly how paid work gets deleted.
+   *
+   * Three independent signals, ANY of which counts:
+   *   1. an EngageSentReply — a reply was sent, or is queued to be;
+   *   2. a non-empty generationHistory on any of its states;
+   *   3. ANY engage_reply BillingRecord, whatever its status.
+   *
+   * (3) is not filtered by status even though 'released' means the reservation
+   * was returned: releaseReplyGeneration fires both when generateDraft threw
+   * (nothing produced) and when queueAutoReply failed to persist a draft that
+   * WAS produced, and those are indistinguishable in the data. A draft that
+   * exists must never be deleted, so the charge row alone spares the row.
+   */
+  private async opportunityIdsWithPaidWork(ids: string[]): Promise<Set<string>> {
+    if (!ids.length) return new Set();
+    const [replies, states, charges] = await Promise.all([
+      this._sentReply.model.engageSentReply.findMany({
+        where: { opportunityId: { in: ids } },
+        select: { opportunityId: true },
+      }),
+      this._oppState.model.engageOpportunityState.findMany({
+        where: { opportunityId: { in: ids }, generationHistory: { not: Prisma.DbNull } },
+        select: { opportunityId: true, generationHistory: true },
+      }),
+      this._billingRecord.model.billingRecord.findMany({
+        where: { relatedId: { in: ids }, businessType: 'engage_reply' },
+        select: { relatedId: true },
+      }),
+    ]);
+
+    const paid = new Set<string>();
+    for (const r of replies) paid.add(r.opportunityId);
+    for (const s of states) {
+      // `not: DbNull` still lets through JSON null and an empty array.
+      if (Array.isArray(s.generationHistory) && s.generationHistory.length > 0) {
+        paid.add(s.opportunityId);
+      }
+    }
+    for (const c of charges) if (c.relatedId) paid.add(c.relatedId);
+    return paid;
+  }
+
+  async listOpportunitiesForAdmin(query: {
+    platform?: string;
+    page?: number;
+    pageSize?: number;
+    onlyBrokenUrls?: boolean;
+  }) {
+    const page = query.page ?? 1;
+    const pageSize = query.pageSize ?? 25;
+
+    const where: Prisma.EngageOpportunityWhereInput = {
+      deletedAt: null,
+      ...(query.platform ? { platform: query.platform } : {}),
+      ...(query.onlyBrokenUrls ? this.brokenUrlFilter() : {}),
+    };
+
+    const [rows, total] = await Promise.all([
+      this._opportunity.model.engageOpportunity.findMany({
+        where,
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+        orderBy: { postPublishedAt: 'desc' },
+        select: {
+          id: true,
+          platform: true,
+          externalPostId: true,
+          externalPostUrl: true,
+          postContent: true,
+          authorDisplayName: true,
+          postPublishedAt: true,
+        },
+      }),
+      this._opportunity.model.engageOpportunity.count({ where }),
+    ]);
+
+    const paid = await this.opportunityIdsWithPaidWork(rows.map((r) => r.id));
+
+    return {
+      items: rows.map((r) => ({
+        ...r,
+        postPublishedAt: r.postPublishedAt?.toISOString?.() ?? null,
+        // The extension triages on this: > 0 means repair the address (paid work
+        // is waiting on it), 0 means the row is safe to retire. It is a flag
+        // reported as a count, not a reply tally — see opportunityIdsWithPaidWork.
+        replyCount: paid.has(r.id) ? 1 : 0,
+      })),
+      total,
+      page,
+      pageSize,
+    };
+  }
+
+  /**
+   * Rewrite verified addresses. Idempotent: re-sending the same pair updates
+   * nothing new and is not an error, so a partially-failed batch can be re-run.
+   *
+   * Only externalPostUrl is touched. externalPostId backs
+   * @@unique([platform, externalPostId]) and is the identity the extension
+   * verified the new address against — re-keying a row is a separate migration.
+   */
+  async repairOpportunityUrlsForAdmin(items: { id: string; externalPostUrl: string }[]) {
+    let updated = 0;
+    for (const item of items) {
+      const res = await this._opportunity.model.engageOpportunity.updateMany({
+        where: { id: item.id, deletedAt: null },
+        data: { externalPostUrl: item.externalPostUrl },
+      });
+      updated += res.count;
+    }
+    return { updated };
+  }
+
+  /**
+   * Retire rows that produced no paid work, cascading to their states.
+   *
+   * The caller's own filtering is NOT trusted: it is a browser extension whose
+   * counts are as old as its last list call, so every id is re-checked here, at
+   * delete time. A row that gained a reply in between is skipped and counted,
+   * never deleted. EngageSentReply is not cascaded in the schema either, so even
+   * a bug here meets a foreign-key refusal rather than destroying a paid reply.
+   */
+  async deleteOpportunitiesForAdmin(ids: string[]) {
+    const paid = await this.opportunityIdsWithPaidWork(ids);
+    const deletable = ids.filter((id) => !paid.has(id));
+    if (!deletable.length) return { deleted: 0, skipped: ids.length };
+
+    const res = await this._opportunity.model.engageOpportunity.deleteMany({
+      where: { id: { in: deletable } },
+    });
+    return { deleted: res.count, skipped: ids.length - deletable.length };
+  }
+
   async listSentRepliesForAdmin(query: {
     page?: number;
     pageSize?: number;

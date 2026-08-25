@@ -1171,6 +1171,25 @@ export class EngageService implements OnApplicationBootstrap {
   // Cross-org Engage reply list for the admin console. Not org-scoped — the
   // caller (AdminEngageController, SuperAdmin-guarded) passes an optional
   // organizationId filter already resolved from userId.
+  // ── Broken-address triage (admin) — see engage.repository.ts ───────────────
+
+  listOpportunitiesForAdmin(query: {
+    platform?: string;
+    page?: number;
+    pageSize?: number;
+    onlyBrokenUrls?: boolean;
+  }) {
+    return this._engageRepository.listOpportunitiesForAdmin(query);
+  }
+
+  repairOpportunityUrlsForAdmin(items: { id: string; externalPostUrl: string }[]) {
+    return this._engageRepository.repairOpportunityUrlsForAdmin(items);
+  }
+
+  deleteOpportunitiesForAdmin(ids: string[]) {
+    return this._engageRepository.deleteOpportunitiesForAdmin(ids);
+  }
+
   listSentRepliesForAdmin(query: {
     page?: number;
     pageSize?: number;
