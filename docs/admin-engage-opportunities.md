@@ -103,8 +103,13 @@ Auth header is the one the extension already sends:
   OR "externalPostUrl" = ''
 ```
 
-Include `sdui-` rows: the extension reports them back as `unrepairable` rather
-than hiding them, which is how an operator learns how many need retiring.
+Include `sdui-` rows. They are NOT a dead end: their id is a hash that resolves
+to nothing, but the wrong address they stored is the company's post LIST, and
+the post is usually still on it. The extension re-scrapes that list and matches
+the card by `postContent`, which is why `postContent` must be sent as-is — it is
+the only handle those rows have. Rows that genuinely cannot be recovered come
+back as `unresolved` or `unrepairable`, so an operator still learns how many
+need doing by hand.
 
 ---
 
@@ -125,6 +130,13 @@ than hiding them, which is how an operator learns how many need retiring.
 
 Only rows the extension verified are sent — never `unchanged`, `unresolved`,
 `unrepairable`, `authwall` or `error` outcomes.
+
+**`externalPostId` is never sent, even when the repair discovered the real one.**
+A list-page recovery often turns up the post's true numeric id, and the panel
+displays it, but applying it would rewrite the key behind
+`@@unique([platform, externalPostId])` and could collide with a row a later scan
+already ingested under that id. Fixing the address is what unblocks the queued
+replies; re-keying a row is a separate, deliberate migration.
 
 **Response `200`** — `{ "updated": 1 }`
 
