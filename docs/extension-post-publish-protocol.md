@@ -188,6 +188,10 @@ window.postMessage({ source: 'aisee', action: 'aisee:post-publish', requestId },
 
 ## Internal queue item shape (built by the publish-due pull loop)
 
+> What decides that a post is offered to this loop at all — and why a post can
+> sit in `DRAFT` forever without ever reaching it — is documented in
+> [Post lifecycle: DRAFT → QUEUE → PUBLISHED](./post-lifecycle-draft-to-published.md).
+
 The pull loop maps each `POST /posts/publish-due` row into the `PublishPostItem`
 below and calls `enqueuePublishBatch`; the queue then drains one task at a time.
 This is no longer sent by the page — it is documented as the internal contract.

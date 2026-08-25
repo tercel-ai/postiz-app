@@ -297,9 +297,56 @@ describe('AutomationService.saveEnabled', () => {
     // Not through EngageService.saveConfig — that one starts the global Engage
     // workflows and kicks a scan whenever it sees `enabled`.
     expect(saveConfig).not.toHaveBeenCalled();
-    // Turning the master OFF is a suspension — nothing is rescheduled, and the
-    // response says so rather than reporting an empty move.
-    expect(res).toEqual({ saved: true, enabled: false, rescheduled: null });
+    // Turning the master OFF is a suspension — nothing is rescheduled, nothing
+    // is committed, and the response says so rather than reporting an empty
+    // move.
+    expect(res).toEqual({
+      saved: true,
+      enabled: false,
+      rescheduled: null,
+      scheduled: null,
+    });
+  });
+
+  it('commits the drafts stranded during the suspension when the master goes back on', async () => {
+    const { service, schedulePlanPosts, getActivePlanId } = makeService();
+
+    const res = await service.saveEnabled(org, 'proj-1', true);
+
+    // Platforms are left undefined so the PROJECT's own saved selection
+    // decides — the master switch carries no platform list of its own, and
+    // passing one here would silently narrow what a resume publishes.
+    expect(getActivePlanId).toHaveBeenCalledWith('org-1', 'proj-1');
+    expect(schedulePlanPosts).toHaveBeenCalledWith(
+      'org-1',
+      'plan-1',
+      'proj-1',
+      undefined,
+      undefined
+    );
+    expect(res.scheduled).toEqual({
+      scheduled: [],
+      failed: [],
+      total: 0,
+      alreadyScheduled: 0,
+    });
+  });
+
+  it('does not commit when the master was ALREADY on', async () => {
+    const { service, schedulePlanPosts } = makeService({
+      publishing: {
+        automationEnabled: true,
+        publishingEnabled: true,
+        publishingConfigured: true,
+        enabledPlatforms: ['x'],
+        platformDecisions: { x: true },
+        windows: {},
+      },
+    });
+
+    await service.saveEnabled(org, 'proj-1', true);
+
+    expect(schedulePlanPosts).not.toHaveBeenCalled();
   });
 
   it('realigns when publishing goes from not-running to running', async () => {
@@ -445,7 +492,7 @@ describe('AutomationService.savePublishing', () => {
     );
   });
 
-  it('still saves the settings when the project has no active plan', async () => {
+  it('commits project-wide when no plan is ACTIVE, so an expired plan is still reachable', async () => {
     const { service, saveConfigRaw, schedulePlanPosts } = makeService({
       activePlanId: null,
     });
@@ -455,15 +502,89 @@ describe('AutomationService.savePublishing', () => {
       commit: true,
     });
 
-    // Choosing platforms is configuration; a project may do it before it has
-    // ever generated a plan.
     expect(saveConfigRaw).toHaveBeenCalled();
-    expect(schedulePlanPosts).not.toHaveBeenCalled();
-    expect(res).toEqual({
-      saved: true,
-      scheduled: null,
-      rescheduled: { moved: 0, skipped: [] },
+    // A null plan id used to short-circuit the commit entirely. `getActivePlanId`
+    // only counts a plan inside its startsAt..endsAt window, so a plan that ran
+    // past its end date stopped being reachable while its DRAFT posts were still
+    // live rows — and the supersede sweep only deletes drafts when a NEWER plan
+    // materializes, so nothing queued them and nothing cleaned them up. Null is
+    // passed through instead, widening the batch to the project's live plan posts.
+    expect(schedulePlanPosts).toHaveBeenCalledWith(
+      'org-1',
+      null,
+      'proj-1',
+      undefined,
+      ['x']
+    );
+    expect(res.scheduled).toEqual({
+      scheduled: [],
+      failed: [],
+      total: 0,
+      alreadyScheduled: 0,
     });
+  });
+
+  it('commits on the OFF -> ON edge even when the client asked for no commit', async () => {
+    const { service, schedulePlanPosts } = makeService();
+
+    await service.savePublishing(org, 'proj-1', {
+      platforms: ['x'],
+      enabled: true,
+    });
+
+    // Switching the feature on IS the instruction to publish what is scheduled.
+    // Without this, a project whose plan materialized while publishing was off
+    // kept its posts in DRAFT and no control on the page could ever move them.
+    expect(schedulePlanPosts).toHaveBeenCalledWith(
+      'org-1',
+      'plan-1',
+      'proj-1',
+      undefined,
+      ['x']
+    );
+  });
+
+  it('does not commit a settings-only save that leaves an already-on switch on', async () => {
+    const { service, schedulePlanPosts } = makeService({
+      publishing: {
+        automationEnabled: true,
+        publishingEnabled: true,
+        publishingConfigured: true,
+        enabledPlatforms: ['x'],
+        platformDecisions: { x: true },
+        windows: {},
+      },
+    });
+
+    // Only the OFF -> ON edge auto-commits. Editing a window on a project that
+    // is already publishing must not silently queue a batch behind the user.
+    await service.savePublishing(org, 'proj-1', {
+      platforms: ['x'],
+      enabled: true,
+      windows: { x: { start: '09:00', end: '18:00' } },
+    });
+
+    expect(schedulePlanPosts).not.toHaveBeenCalled();
+  });
+
+  it('does not commit when the switch goes OFF', async () => {
+    const { service, schedulePlanPosts } = makeService({
+      publishing: {
+        automationEnabled: true,
+        publishingEnabled: true,
+        publishingConfigured: true,
+        enabledPlatforms: ['x'],
+        platformDecisions: { x: true },
+        windows: {},
+      },
+    });
+
+    await service.savePublishing(org, 'proj-1', {
+      platforms: ['x'],
+      enabled: false,
+    });
+
+    expect(schedulePlanPosts).not.toHaveBeenCalled();
   });
 
   it('realigns DRAFTs before queued posts, and both before the commit', async () => {

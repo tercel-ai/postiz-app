@@ -198,6 +198,12 @@ export class AutomationService {
     projectId: string,
     dto: SaveAutomationPublishingDto
   ) {
+    // Read BEFORE the write so the OFF -> ON transition is visible below. A
+    // switch-on is the one save that must commit whether or not the client
+    // asked for it — see the `shouldCommit` note further down.
+    const wasActive = isPublishingActive(
+      await this._projectPublishing.resolve(org.id, projectId)
+    );
     const requested = new Set(dto.platforms.map((p) => p.toLowerCase()));
     const existing = readEngageConfigMetadata(
       await this._engageRepository.getConfigCore(org.id, projectId)
@@ -252,26 +258,26 @@ export class AutomationService {
     // project's DRAFT plan posts" is already the active plan's.
     const rescheduled = await this._realign(org.id, projectId);
 
-    if (!dto.commit) {
+    // Turning scheduled publishing ON commits, even when the client sent no
+    // `commit` flag. The switch used to be pure configuration, which read as a
+    // reasonable separation but produced a dead end in practice: a project
+    // whose plan materialized while publishing was off kept its posts in DRAFT,
+    // the switch-on did not move them, and nothing else ever would — the user
+    // saw "Scheduled publishing: on", an empty queue, and no control that
+    // explained the gap. Switching the feature on IS the instruction to publish
+    // what is scheduled, so it now means that.
+    //
+    // Only the OFF -> ON edge, never a save that leaves an already-on switch
+    // on: a settings-only save (windows, platform list) keeps needing an
+    // explicit `commit`, so editing a window does not silently queue a batch.
+    const switchedOn = dto.enabled === true && !wasActive;
+    const shouldCommit = dto.commit || switchedOn;
+    if (!shouldCommit) {
       return { saved: true, scheduled: null, rescheduled };
     }
 
-    // The plan id is resolved SERVER-side from the project. The client never
-    // names a plan, so there is no plan id for it to get wrong — or to borrow
-    // from another project.
-    const { id: planId } = await this._operationPlanService.getActivePlanId(
+    const scheduled = await this._commitPlanPosts(
       org.id,
-      projectId
-    );
-    if (!planId) {
-      // Not an error: choosing publishing platforms is configuration, and a
-      // project is allowed to configure it before it has ever generated a plan.
-      return { saved: true, scheduled: null, rescheduled };
-    }
-
-    const scheduled = await this._postsService.schedulePlanPosts(
-      org.id,
-      planId,
       projectId,
       dto.publishMethod,
       dto.platforms
@@ -311,10 +317,62 @@ export class AutomationService {
     // whether publishing is actually on, which is what alignPlanDraftPublishDates
     // re-checks for itself. Calling it on every ON is therefore safe; this guard
     // just avoids the read when nothing can have changed.
-    const rescheduled =
-      enabled && !wasActive ? await this._realign(org.id, projectId) : null;
+    const turnedOn = enabled && !wasActive;
+    const rescheduled = turnedOn ? await this._realign(org.id, projectId) : null;
+    // Turning the master switch back on commits, for the same reason the
+    // feature switch does (see savePublishing): a project that generated its
+    // plan while Automation was suspended has drafts nothing else will ever
+    // queue, and "Automation: on" with a permanently empty queue is not a
+    // suspension the user can reason about.
+    //
+    // `_commitPlanPosts` re-checks `isPublishingActive` itself, so a master-on
+    // with the publishing FEATURE still off correctly queues nothing.
+    // Platforms are left undefined so the project's own saved selection
+    // decides — this switch carries no platform list of its own.
+    const scheduled = turnedOn
+      ? await this._commitPlanPosts(org.id, projectId)
+      : null;
 
-    return { saved: true as const, enabled, rescheduled };
+    return { saved: true as const, enabled, rescheduled, scheduled };
+  }
+
+  /**
+   * Commit this project's still-DRAFT plan posts (DRAFT -> QUEUE).
+   *
+   * Resolves the plan id SERVER-side: the client never names a plan, so there
+   * is no plan id for it to get wrong — or to borrow from another project.
+   *
+   * A null plan id is NOT a short-circuit. `getActivePlanId` only counts a plan
+   * whose `startsAt <= now <= endsAt`, so a plan that simply ran past its end
+   * date stops being "active" while its DRAFT posts are still perfectly valid,
+   * un-deleted rows on the calendar. Returning early there is what stranded
+   * them: the supersede sweep only soft-deletes drafts when a NEWER plan
+   * materializes, so nothing queued them and nothing cleaned them up. Passing
+   * null through widens the batch to every live plan post of the project, which
+   * is what the user means by "publish what is scheduled".
+   *
+   * Still safe for a project that has never generated a plan: the query is
+   * scoped to `operationPlanId: { not: null }`, so an empty project commits an
+   * empty batch instead of erroring, and a hand-authored draft is never swept
+   * in.
+   */
+  private async _commitPlanPosts(
+    orgId: string,
+    projectId: string,
+    publishMethod?: 'extension' | 'api',
+    platforms?: string[]
+  ) {
+    const { id: planId } = await this._operationPlanService.getActivePlanId(
+      orgId,
+      projectId
+    );
+    return this._postsService.schedulePlanPosts(
+      orgId,
+      planId,
+      projectId,
+      publishMethod,
+      platforms
+    );
   }
 
   /**

@@ -34,6 +34,24 @@ relationship between the two.
 
 Three levels, ANDed. Nothing runs unless every level above it is on.
 
+**What the chain gates.** For scheduled publishing it governs `DRAFT → QUEUE`
+and nothing after it: `POST /posts/publish-due` reads none of these three, and is
+org-scoped rather than project-scoped, so a post that has already reached `QUEUE`
+is detached from the configuration that put it there. Switching publishing off is
+a configuration change, not a recall — queued posts still go out. The full
+gate-by-gate chain, including the queue and browser stages below this one, is in
+[Post lifecycle: DRAFT → QUEUE → PUBLISHED](./post-lifecycle-draft-to-published.md).
+
+The **platform** level is three-state, not two: a project where no platform has
+ever been set true *or* false resolves to `null`, which is **unconstrained** (every
+platform passes) — distinct from `[]`, every platform explicitly off, which
+commits nothing. See
+[Telling "never configured" from "everything off"](#telling-never-configured-from-everything-off).
+
+The **feature** level is not independent from the platform level on projects that
+never wrote it explicitly: `publishingEnabled` falls back to "is any platform on?",
+so the two are one decision until the column is set.
+
 Where each level is **stored** (all inside one `EngageConfig.metadata` JSON
 column, read through `engage-config-metadata.ts` — see
 [Where these settings live](#where-these-settings-live)):
@@ -201,15 +219,17 @@ else parses the column.
 ## What Automation does NOT touch
 
 **Hand-created posts.** A post the user wrote themselves carries
-`operationPlanId = null`. Every plan query matches `operationPlanId` by
-**equality**, and null never equals a plan id — so turning Automation on, saving
-platforms, or committing a plan can never move a manual draft. This is
-structural, not a filter applied afterwards, and is pinned by
+`operationPlanId = null`, and neither commit scope can reach it. The plan-scoped
+query matches `operationPlanId` by **equality**, and null never equals a plan id;
+the project-scoped one (used when no plan is active) matches
+`operationPlanId: { not: null }`, and null never matches that either. So turning
+Automation on, saving platforms, or committing a plan can never move a manual
+draft. This is structural, not a filter applied afterwards, and is pinned by
 `posts.repository.plan-scope.spec.ts`.
 
 **Superseded plans.** Re-running a project's plan soft-deletes the prior plan's
-drafts, and `deletedAt: null` is part of the same query — so an old plan's posts
-never resurface.
+drafts, and `deletedAt: null` is part of both queries — so an old plan's posts
+never resurface, on either scope.
 
 **Reply accounts.** Automation never picks an account: it sends through the
 extension's own browser session, so the identity is whoever the user is already
@@ -456,7 +476,7 @@ The project's Automation master switch.
 
 - **Body**: `{ "enabled": true | false }` — required. An empty body is a `400`
   rather than being read as "off".
-- **Response**: `{ "saved": true, "enabled": false, "rescheduled": null }`
+- **Response**: `{ "saved": true, "enabled": false, "rescheduled": null, "scheduled": null }`
 
 `rescheduled` reports the queued posts moved back inside their publish window by
 the OFF→ON transition — `{ "moved": 2, "skipped": [{ "id": "…", "reason": "claimed" }] }`,
@@ -466,10 +486,25 @@ no consequence the user needs to hear about, while a scheduled send that could
 **not** be moved is a real exception to what they just asked for. See
 [When the alignment runs](#when-the-alignment-runs).
 
+`scheduled` reports the commit the **OFF→ON** transition ran — the same
+`scheduled` / `failed` / `total` / `alreadyScheduled` shape as
+[`POST /posts/schedule`](./posts-api.md#post-postsschedule) — or `null` when the
+switch went off, or was already on.
+
 Writes **only** that column. Both feature switches and every platform selection
 underneath keep their values, so flipping it off and back on restores exactly the
-configuration that was there. Nothing is committed either way: resuming does not
-retroactively queue the posts that were skipped while it was off.
+configuration that was there.
+
+**Resuming commits.** Turning the master back on queues the plan posts that
+stayed in `DRAFT` while it was off. A suspension that silently stranded
+everything materialized during it left the user with "Automation: on", a queue
+that never filled, and no control on the page that explained why. The switch
+still does not *reset* anything: turning it off queues nothing and un-queues
+nothing, and a post already in flight finishes.
+
+The commit re-checks the feature switch itself, so master-on with scheduled
+publishing still off correctly queues nothing. No platform list is passed — the
+project's own saved selection decides, since this switch carries none of its own.
 
 Its own endpoint rather than a field on the two feature endpoints because it
 governs both — folding it into either would make "suspend everything" a write
@@ -512,8 +547,10 @@ queue the active plan in the same call.
     "x": { "start": "09:00", "end": "17:00", "timezone": "Asia/Shanghai" }
   },
 
-  "commit": true,                        // optional — also queue the active plan
-  "publishMethod": "extension" | "api"   // optional, only meaningful with commit
+  // Optional — also commit the project's drafts. NOT needed when `enabled`
+  // flips this switch from off to on: that edge commits on its own.
+  "commit": true,
+  "publishMethod": "extension" | "api"   // optional, only meaningful with a commit
 }
 ```
 
@@ -524,15 +561,51 @@ Unlike there it runs on **every** save, because a window edit is exactly when a
 realignment is due — and since both passes only touch posts that are outside
 their window, a save that changed nothing relevant moves nothing.
 
-`scheduled` is `null` when `commit` was absent, **and** when the project has no
-active plan — choosing publishing platforms is configuration, and a project may
-do it before it has ever generated one. The result otherwise carries the same
+`scheduled` is `null` only when no commit ran. It otherwise carries the same
 `scheduled` / `failed` / `total` / `alreadyScheduled` shape as
 [`POST /posts/schedule`](./posts-api.md#post-postsschedule), scoped to the
 committed platform slice.
 
+### When this endpoint commits
+
+A commit runs when **either** `commit: true` is sent, **or** `enabled: true`
+flips the feature switch from off to on.
+
+**Why the switch-on commits.** The switch used to be pure configuration. That
+read as a clean separation and produced a dead end: a project whose plan
+materialized while publishing was off kept its posts in `DRAFT`, the switch-on
+did not move them, and nothing else ever would — the user saw "Scheduled
+publishing: on", an empty queue, and no control that explained the gap.
+
+**Only the OFF→ON edge.** A save that leaves an already-on switch on — a window
+edit, a platform reorder — still needs an explicit `commit`, so editing a window
+never silently queues a batch behind the user. A save that turns the switch
+**off** commits nothing.
+
+The edge is detected **server-side**, deliberately: only the server sees the
+previous value that makes an edge an edge, and every caller of this endpoint has
+to get the same behaviour.
+
 **The plan id is resolved server-side** from the project's active plan. The
 client never names a plan, so it cannot name the wrong one.
+
+**A project with no ACTIVE plan still commits.** `getActivePlan` requires
+`startsAt <= now <= endsAt`, so a plan that ran past its end date stops being
+"active" while its `DRAFT` posts are still live rows on the calendar — and the
+supersede sweep only deletes drafts when a *newer* plan materializes. Those posts
+used to be unreachable by every path: nothing queued them, and the 7-day stale
+sweep does not look at `DRAFT`. The commit therefore falls back to a
+**project-scoped** batch (every live plan post of the project) when no plan is
+active, keeping the same two invariants — `operationPlanId: { not: null }` so a
+hand-authored draft is never swept in, and `deletedAt: null` so a superseded
+plan's drafts are never resurrected. A project that has never generated a plan
+commits an empty batch rather than erroring.
+
+⚠️ **Committing a backlog publishes it immediately.** An overdue draft keeps its
+past `publishDate` — the window pass never moves a time backwards across the
+clock — so it is due the instant it reaches `QUEUE`. See
+[Operational consequences](./post-lifecycle-draft-to-published.md#operational-consequences)
+for what that means for a project holding a large backlog, and how to stage it.
 
 **Not routed through `EngageService.saveConfig`.** That method starts the global
 Engage workflows and kicks an immediate scan whenever it is handed `enabled` —

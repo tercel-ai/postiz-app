@@ -657,6 +657,15 @@ Cadence: the extension polls this on its own 1-min alarm (`aisee-publish-poll`),
 and immediately on the `aisee:post-publish` sync trigger (see
 [Extension Post-Publish Protocol](./extension-post-publish-protocol.md)).
 
+**The Automation switches are not consulted here.** This query reads neither the
+project's master switch, nor its scheduled-publishing switch, nor its
+per-platform policy — those gate `DRAFT → QUEUE` only — and it is org-scoped
+rather than project-scoped. A post that has reached `QUEUE` goes out regardless
+of what the owning project's switches say afterwards. There is also **no lower
+bound** on `publishDate`: overdue by any amount is still due. For the full chain
+from generation to publish, see
+[Post lifecycle: DRAFT → QUEUE → PUBLISHED](./post-lifecycle-draft-to-published.md).
+
 ### POST /posts/sync-metrics
 
 Sync raw external metrics for one post identified by its platform + external id.

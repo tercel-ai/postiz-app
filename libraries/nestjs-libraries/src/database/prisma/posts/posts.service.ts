@@ -2577,10 +2577,15 @@ export class PostsService {
   }
 
   /**
-   * Plan-scoped DRAFT -> QUEUE: commit every still-draft post of one operation
-   * plan in a single call. Exists so "activate this plan" is one action on the
-   * plan itself — the client never has to enumerate the plan's post ids, which
-   * it cannot keep in sync anyway (re-running a plan re-materializes them).
+   * DRAFT -> QUEUE: commit every still-draft plan post in a single call. Exists
+   * so "activate this plan" is one action on the plan itself — the client never
+   * has to enumerate the plan's post ids, which it cannot keep in sync anyway
+   * (re-running a plan re-materializes them).
+   *
+   * `operationPlanId` may be null, which widens the batch from one plan to
+   * every live plan post of the project. That is the path a caller takes when
+   * no plan is currently ACTIVE — see the comment on the roots query below for
+   * why an inactive plan's drafts would otherwise be stranded forever.
    *
    * Deliberately a thin expansion over schedulePosts rather than a second commit
    * path: send-path resolution, the thread-chain flip, the Temporal trigger and
@@ -2603,13 +2608,14 @@ export class PostsService {
    * rather than inferring it is what lets this method assert the plan actually
    * belongs to the project the caller was authorized for — and making it
    * mandatory means no future caller can reach the plan path without that
-   * assertion running. The only caller is AutomationService, reached through
+   * assertion running. It is also what scopes the null-plan branch, which has
+   * no plan id to authorize and relies on the project scope alone. The only caller is AutomationService, reached through
    * /projects/:projectId/automation, where ProjectAuthGuard has already
    * authorized the id against the request's org.
    */
   async schedulePlanPosts(
     orgId: string,
-    operationPlanId: string,
+    operationPlanId: string | null,
     projectId: string,
     publishMethod?: PublishMethod,
     platforms?: string[]
@@ -2623,12 +2629,17 @@ export class PostsService {
       );
     }
     // Ownership first: a plan from a sibling project must not even reveal how
-    // many posts it has, so this runs before any counting.
-    await this._projectPublishingService.assertPlanBelongsToProject(
-      orgId,
-      projectId,
-      operationPlanId
-    );
+    // many posts it has, so this runs before any counting. Skipped on the
+    // project-scoped path, where there is no plan id to authorize — the caller
+    // has already been authorized for the PROJECT, and the query below is
+    // scoped to it.
+    if (operationPlanId) {
+      await this._projectPublishingService.assertPlanBelongsToProject(
+        orgId,
+        projectId,
+        operationPlanId
+      );
+    }
     const projectPublishing = await this._projectPublishingService.resolve(
       orgId,
       projectId
@@ -2647,10 +2658,30 @@ export class PostsService {
       return { scheduled: [], failed: [], total: 0, alreadyScheduled: 0 };
     }
 
-    const allRoots = await this._postRepository.getSchedulablePostRootsByPlan(
-      orgId,
-      operationPlanId
-    );
+    // Plan-scoped when a plan id was resolved; otherwise EVERY live plan post of
+    // this project.
+    //
+    // The project-scoped branch is what makes an expired plan committable. A
+    // plan is only "active" while `startsAt <= now <= endsAt`, so once its
+    // window closes `getActivePlanId` returns null and its still-DRAFT posts
+    // become unreachable by the plan path — while the supersede sweep in
+    // materializePlanPosts only soft-deletes drafts when a NEWER plan
+    // materializes. A project whose last plan simply ran out of runway was
+    // therefore left holding drafts that nothing could ever queue or clean up.
+    //
+    // Scoping by `operationPlanId: { not: null }` + `deletedAt: null` (see
+    // getPlanPostRootsForProject) keeps the two invariants that matter: a
+    // hand-authored post is never swept in, and a superseded plan's
+    // soft-deleted drafts are never resurrected.
+    const allRoots = operationPlanId
+      ? await this._postRepository.getSchedulablePostRootsByPlan(
+          orgId,
+          operationPlanId
+        )
+      : await this._postRepository.getPlanPostRootsForProject(orgId, projectId, [
+          State.DRAFT,
+          State.QUEUE,
+        ]);
     // Filtered EARLY so every number below (`total`, `alreadyScheduled`,
     // `scheduled`, `failed`) is scoped to what the caller asked for — a caller
     // that filtered to `['x']` on a plan that also has linkedin/medium posts

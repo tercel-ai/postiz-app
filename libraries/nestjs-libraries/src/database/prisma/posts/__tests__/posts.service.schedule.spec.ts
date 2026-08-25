@@ -17,10 +17,14 @@ function makeService(posts: any[], planRoots?: any[]) {
       Promise.resolve(posts.filter((p) => ids.includes(p.id)))
     );
   const getSchedulablePostRootsByPlan = vi.fn().mockResolvedValue(planRoots ?? []);
+  // The null-plan branch reads the project's live plan posts instead. Same
+  // rows, different scope, so the harness feeds it the same fixture.
+  const getPlanPostRootsForProject = vi.fn().mockResolvedValue(planRoots ?? []);
   const schedulePostGroupToQueue = vi.fn().mockResolvedValue({ count: 1 });
   const repo = {
     getSchedulablePostsByIds,
     getSchedulablePostRootsByPlan,
+    getPlanPostRootsForProject,
     schedulePostGroupToQueue,
   } as any;
 
@@ -68,6 +72,7 @@ function makeService(posts: any[], planRoots?: any[]) {
     service,
     getSchedulablePostsByIds,
     getSchedulablePostRootsByPlan,
+    getPlanPostRootsForProject,
     schedulePostGroupToQueue,
     startWorkflow,
     getPublishTimeWindows,
@@ -482,6 +487,60 @@ describe('PostsService.schedulePlanPosts', () => {
     expect(res.total).toBe(3);
     expect(res.alreadyScheduled).toBe(1);
     expect(schedulePostGroupToQueue).toHaveBeenCalledTimes(2);
+  });
+
+  it('commits the PROJECT\'s live plan posts when handed a null plan id', async () => {
+    const {
+      service,
+      getPlanPostRootsForProject,
+      getSchedulablePostRootsByPlan,
+      assertPlanBelongsToProject,
+      getSchedulablePostsByIds,
+    } = makeService(
+      [xDraft({ id: 'p1', group: 'g1' })],
+      [
+        { id: 'p1', state: 'DRAFT' },
+        { id: 'p2', state: 'QUEUE' },
+      ]
+    );
+
+    const res = await service.schedulePlanPosts('org-1', null, 'proj-1');
+
+    // The plan query is bypassed entirely: there is no plan to scope to. The
+    // project query is scoped to `operationPlanId: { not: null }` and
+    // `deletedAt: null`, so a hand-authored draft is never swept in and a
+    // superseded plan's soft-deleted drafts are never resurrected.
+    expect(getSchedulablePostRootsByPlan).not.toHaveBeenCalled();
+    expect(getPlanPostRootsForProject).toHaveBeenCalledWith('org-1', 'proj-1', [
+      'DRAFT',
+      'QUEUE',
+    ]);
+    // Nothing to authorize — there is no plan id. The caller was already
+    // authorized for the PROJECT, which is what the query is scoped to.
+    expect(assertPlanBelongsToProject).not.toHaveBeenCalled();
+    expect(getSchedulablePostsByIds).toHaveBeenCalledWith('org-1', ['p1']);
+    expect(res.scheduled).toEqual([{ id: 'p1', publishMethod: 'extension' }]);
+    expect(res.total).toBe(2);
+    expect(res.alreadyScheduled).toBe(1);
+  });
+
+  it('still gates the null-plan branch on the publishing switch chain', async () => {
+    const { service, getPlanPostRootsForProject, resolveProjectPublishing } =
+      makeService([xDraft({ id: 'p1', group: 'g1' })], [{ id: 'p1', state: 'DRAFT' }]);
+    resolveProjectPublishing.mockResolvedValue({
+      automationEnabled: true,
+      publishingEnabled: false,
+      publishingConfigured: true,
+      enabledPlatforms: ['x'],
+      windows: {},
+    });
+
+    const res = await service.schedulePlanPosts('org-1', null, 'proj-1');
+
+    // Widening the scope must not widen what the switches allow — a project
+    // with publishing off queues nothing on either branch.
+    expect(getPlanPostRootsForProject).not.toHaveBeenCalled();
+    expect(res).toEqual({ scheduled: [], failed: [], total: 0, alreadyScheduled: 0 });
   });
 
   it('already-committed plan: no-op success that is distinguishable from an unknown plan', async () => {
