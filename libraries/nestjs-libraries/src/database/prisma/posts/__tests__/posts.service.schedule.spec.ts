@@ -21,17 +21,27 @@ function makeService(posts: any[], planRoots?: any[]) {
   // rows, different scope, so the harness feeds it the same fixture.
   const getPlanPostRootsForProject = vi.fn().mockResolvedValue(planRoots ?? []);
   const schedulePostGroupToQueue = vi.fn().mockResolvedValue({ count: 1 });
+  // Slots already taken on the platform — read when a commit has to defer
+  // past-due drafts, so they do not land on top of an existing post.
+  const getFuturePublishDates = vi.fn().mockResolvedValue([]);
   const repo = {
     getSchedulablePostsByIds,
     getSchedulablePostRootsByPlan,
     getPlanPostRootsForProject,
     schedulePostGroupToQueue,
+    getFuturePublishDates,
   } as any;
 
   // No configured window on any platform, by default — the pre-existing
   // behaviour (materialized publishDate always kept as-is).
   const getPublishTimeWindows = vi.fn().mockResolvedValue({});
-  const extensionPublishConfigService = { getPublishTimeWindows } as any;
+  // Read when a commit contains past-due drafts: they are deferred forward
+  // rather than queued into the past, and the gap is what spreads them.
+  const getMinGapMinutes = vi.fn().mockResolvedValue({});
+  const extensionPublishConfigService = {
+    getPublishTimeWindows,
+    getMinGapMinutes,
+  } as any;
 
   // Only the project-scoped branch of schedulePlanPosts reaches this; the
   // org-scoped calls below never pass a projectId, so it stays untouched and
@@ -1073,7 +1083,10 @@ describe('PostsService.schedulePlanPosts — project scoping', () => {
       {} as any,
       {} as any,
       {} as any,
-      { getPublishTimeWindows: vi.fn() } as any
+      {
+        getPublishTimeWindows: vi.fn(),
+        getMinGapMinutes: vi.fn().mockResolvedValue({}),
+      } as any
     );
 
     await expect(
@@ -1281,8 +1294,49 @@ describe('PostsService.schedulePlanPosts — automation switch chain', () => {
 
     const res = await service.schedulePlanPosts('org-1', 'plan-1', 'proj-1');
 
-    expect(schedulePostGroupToQueue).toHaveBeenCalledWith('org-1', 'gx', 'EXTENSION', undefined);
+    // The fixture's slot (2026-08-21) has passed, so the commit hands it a NEW
+    // one instead of queueing a post whose time is already up — a post like
+    // that is returned by the very next publish-due poll and goes out
+    // immediately, which is how a parked plan turns into a burst.
+    expect(schedulePostGroupToQueue).toHaveBeenCalledWith(
+      'org-1',
+      'gx',
+      'EXTENSION',
+      expect.any(Date)
+    );
+    const deferredTo = schedulePostGroupToQueue.mock.calls[0][3] as Date;
+    expect(deferredTo.valueOf()).toBeGreaterThan(Date.now());
     expect(res.scheduled).toEqual([{ id: 'x1', publishMethod: 'extension' }]);
+  });
+
+  it('leaves a draft whose slot is still ahead exactly where it is', async () => {
+    // Deferral is for slots that have PASSED. A plan scheduled for next week is
+    // committed unchanged — rewriting those times would throw away the spacing
+    // the plan was generated with.
+    const future = new Date(Date.now() + 7 * 24 * 60 * 60_000);
+    const { service, schedulePostGroupToQueue, resolveProjectPublishing } =
+      makeService(
+        [xDraft({ id: 'x1', group: 'gx' })],
+        [
+          {
+            id: 'x1',
+            group: 'gx',
+            state: 'DRAFT',
+            providerIdentifier: 'x',
+            publishDate: future,
+          },
+        ]
+      );
+    resolveProjectPublishing.mockResolvedValue(switches());
+
+    await service.schedulePlanPosts('org-1', 'plan-1', 'proj-1');
+
+    expect(schedulePostGroupToQueue).toHaveBeenCalledWith(
+      'org-1',
+      'gx',
+      'EXTENSION',
+      undefined
+    );
   });
 
   it('still applies the PLATFORM level under two live switches', async () => {

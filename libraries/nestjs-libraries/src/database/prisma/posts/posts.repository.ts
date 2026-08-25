@@ -2764,6 +2764,130 @@ export class PostsRepository {
   }
 
   /**
+   * Every future publish time already taken on one platform for this project —
+   * plan posts AND hand-scheduled ones, DRAFT and QUEUE alike.
+   *
+   * Feeds the past-due deferral pass, which has to know what the slots it is
+   * about to hand out would collide with. Reading only the current plan's rows
+   * (which the caller already has) would let a deferred post land on top of a
+   * post someone scheduled by hand — the minimum gap is a property of the
+   * PLATFORM's timeline, not of one plan.
+   */
+  getFuturePublishDates(
+    organizationId: string,
+    projectId: string,
+    platform: string,
+    after: Date
+  ): Promise<Array<{ publishDate: Date }>> {
+    return this._post.model.post.findMany({
+      where: {
+        organizationId,
+        projectId,
+        providerIdentifier: platform,
+        state: { in: [State.DRAFT, State.QUEUE] },
+        deletedAt: null,
+        parentPostId: null, // a thread occupies one slot, not one per segment
+        // An engage reply is sent on its own cadence by a different driver; it
+        // is not part of this platform's publish schedule.
+        source: { not: 'engage' },
+        publishDate: { gt: after },
+      },
+      select: { publishDate: true },
+    });
+  }
+
+  /**
+   * The plan posts that may be UNCOMMITTED (QUEUE -> DRAFT) when a project turns
+   * scheduled publishing off, drops the master switch, or removes a platform.
+   *
+   * Every filter here is load-bearing:
+   *
+   *  - `operationPlanId: { not: null }` — only automation's own work. A post a
+   *    person scheduled by hand is their instruction, not automation's, and a
+   *    switch that silently unscheduled it would be taking away something the
+   *    user never delegated.
+   *  - `NOT: { source: 'engage' }` — an engage REPLY is also a QUEUE Post, and
+   *    on that side DRAFT means "a human's unsent draft, never auto-sent"
+   *    (claimDueEngageReplies). Turning one into a DRAFT would strand the reply
+   *    forever AND drop it into the user's review pile. Belt and braces with
+   *    the plan-id filter above, which already excludes them.
+   *  - the lease predicate — a post already handed to a browser is mid-send;
+   *    reverting it would race the backfill that is about to report it
+   *    published. It finishes, exactly like a post that is past the gate.
+   *  - `publishDate` beyond the lockout — a post seconds from going out is in
+   *    the same position, whether or not anyone has claimed it yet.
+   *  - `intervalInDays: null` — recurring originals are permanent QUEUE
+   *    templates owned by the clone-per-cycle mechanism.
+   *
+   * Roots only: the group is what gets reverted, so its thread rides along.
+   */
+  getUncommittablePlanPostRoots(
+    organizationId: string,
+    projectId: string,
+    opts: { leaseCutoff: Date; notBefore: Date; platforms?: string[] }
+  ) {
+    return this._post.model.post.findMany({
+      where: {
+        organizationId,
+        projectId,
+        operationPlanId: { not: null },
+        state: State.QUEUE,
+        deletedAt: null,
+        parentPostId: null,
+        source: { not: 'engage' },
+        intervalInDays: null,
+        publishDate: { gt: opts.notBefore },
+        ...(opts.platforms?.length
+          ? { providerIdentifier: { in: opts.platforms } }
+          : {}),
+        OR: [{ releaseId: null }, { claimedAt: { lte: opts.leaseCutoff } }],
+      },
+      select: {
+        id: true,
+        group: true,
+        providerIdentifier: true,
+        publishDate: true,
+      },
+    });
+  }
+
+  /**
+   * QUEUE -> DRAFT for whole publish groups: the exact inverse of
+   * {@link schedulePostGroupToQueue}, so a switch-off puts the schedule back
+   * where a switch-on found it.
+   *
+   * `publishDate` is deliberately LEFT ALONE. The draft keeps the slot the plan
+   * gave it, so turning publishing back on re-commits the same schedule rather
+   * than inventing a new one — and the past-due pass is what deals with slots
+   * that expired while the switch was off.
+   *
+   * The safety filters are repeated here rather than trusted from the read:
+   * between the two statements a post can be claimed, published, or (for an
+   * engage reply sharing a group id) mean something entirely different.
+   */
+  revertPlanGroupsToDraft(
+    organizationId: string,
+    groups: string[],
+    opts: { leaseCutoff: Date; notBefore: Date }
+  ) {
+    if (!groups.length) return Promise.resolve({ count: 0 });
+    return this._post.model.post.updateMany({
+      where: {
+        organizationId,
+        group: { in: groups },
+        state: State.QUEUE,
+        deletedAt: null,
+        operationPlanId: { not: null },
+        source: { not: 'engage' },
+        intervalInDays: null,
+        publishDate: { gt: opts.notBefore },
+        OR: [{ releaseId: null }, { claimedAt: { lte: opts.leaseCutoff } }],
+      },
+      data: { state: State.DRAFT },
+    });
+  }
+
+  /**
    * Move whole publish groups to a new date, guarded on the state they were
    * read in. QUEUE-guarded reschedules are how a post that reached PUBLISHED
    * between the read and the write is left alone; DRAFT-guarded ones likewise

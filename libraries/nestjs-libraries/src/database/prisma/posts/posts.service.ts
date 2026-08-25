@@ -54,6 +54,7 @@ import { RefreshIntegrationService } from '@gitroom/nestjs-libraries/integration
 import { PostOverageService } from '@gitroom/nestjs-libraries/database/prisma/posts/post-overage.service';
 import {
   DEFAULT_MIN_GAP_MINUTES,
+  deferPastDueIntoWindow,
   ExtensionPublishConfigService,
   redistributePublishTimeIfOutsideWindow,
   redistributePublishTimesWithinWindow,
@@ -127,6 +128,16 @@ function resolveScheduledPostPlatform(post: {
  * the line is.
  */
 const RESCHEDULE_LOCKOUT_MS = 30_000;
+
+/**
+ * The window a platform with none of its own is deferred across.
+ *
+ * "No window" means the project never restricted the TIME OF DAY — it does not
+ * mean "publish a week's backlog in one minute". Deferral still needs somewhere
+ * to put the posts, so it uses the whole day and lets the per-platform minimum
+ * gap do the spreading.
+ */
+const UNCONSTRAINED_DAY_WINDOW = { windowStart: '00:00', windowEnd: '23:59' };
 
 /**
  * Why a post the window pass looked at was left where it is.
@@ -2571,6 +2582,65 @@ export class PostsService {
     return { skipped: null, moves, pinnedReasons };
   }
 
+  /**
+   * QUEUE -> DRAFT for this project's plan posts: the inverse of
+   * {@link schedulePlanPosts}, run when scheduled publishing is switched off,
+   * the master switch drops, or a platform is removed.
+   *
+   * WHY revert the rows at all, rather than filtering them out at send time:
+   * the state then IS the answer. A calendar showing "scheduled" for a post
+   * that will never go out has to be explained; a draft explains itself. It
+   * also keeps the decision in ONE place — the extension's publish-due query
+   * stays a pure "what is due", and no client version can disagree with the
+   * switch. (The extension is an executor: it is never told what the switches
+   * say, and it must not have to be.)
+   *
+   * What it deliberately does NOT touch:
+   *  - hand-scheduled posts (no `operationPlanId`) — the user's own instruction;
+   *  - engage replies — a QUEUE Post there too, but DRAFT means something else
+   *    entirely on that side (see getUncommittablePlanPostRoots);
+   *  - anything claimed or seconds from publishing — past the gate, it finishes;
+   *  - `publishDate` — the draft keeps its slot so a switch-on re-commits the
+   *    same schedule.
+   *
+   * Best-effort by design, like _realign: the settings save is what the user
+   * asked for and has already succeeded, so a failure to tidy the queue must
+   * not turn it into an error.
+   */
+  async uncommitPlanPosts(
+    orgId: string,
+    projectId: string,
+    platforms?: string[]
+  ): Promise<{ uncommitted: number; groups: number }> {
+    const now = dayjs();
+    const roots = await this._postRepository.getUncommittablePlanPostRoots(
+      orgId,
+      projectId,
+      {
+        leaseCutoff: PostsService.extensionLeaseCutoff(now),
+        notBefore: now.add(RESCHEDULE_LOCKOUT_MS, 'millisecond').toDate(),
+        ...(platforms?.length
+          ? { platforms: platforms.map((p) => p.toLowerCase()) }
+          : {}),
+      }
+    );
+    const groups = [...new Set(roots.map((root) => root.group).filter(Boolean))];
+    if (!groups.length) return { uncommitted: 0, groups: 0 };
+
+    // Re-derived rather than reused: the read and the write are separate
+    // statements, and a post can be claimed in between.
+    const writeNow = dayjs();
+    const { count } = await this._postRepository.revertPlanGroupsToDraft(
+      orgId,
+      groups,
+      {
+        leaseCutoff: PostsService.extensionLeaseCutoff(writeNow),
+        notBefore: writeNow.add(RESCHEDULE_LOCKOUT_MS, 'millisecond').toDate(),
+      }
+    );
+    return { uncommitted: count, groups: groups.length };
+  }
+
   /** When this project last actually published something; null if never. */
   getLastPublishedAt(orgId: string, projectId: string) {
     return this._postRepository.getLastPublishedAt(orgId, projectId);
@@ -2717,6 +2787,84 @@ export class PostsService {
     // own window over the admin tiers (platform override -> global default).
     const timeWindows = drafts.length ? projectPublishing.windows : {};
     const now = dayjs();
+
+    // ── Past-due drafts get NEW slots, they do not go out all at once ────────
+    //
+    // A draft whose planned time has passed is normally left alone here (the
+    // window pass refuses to move anything backwards, and its own slot is
+    // already behind us). Committing it then puts a QUEUE post in the past, and
+    // publish-due returns everything in the past on its very next poll — so a
+    // plan that sat parked for a week publishes the whole week in one burst the
+    // moment automation is switched back on.
+    //
+    // Instead they are spread forward from now, honouring the same per-platform
+    // window and minimum gap the rest of the schedule obeys, and stepping into
+    // the following days when one window cannot hold them.
+
+    // Guarded on the date's presence: the column is non-null in the schema, but
+    // this runs over whatever the query selected, and a missing date is not a
+    // reason to throw away the whole commit.
+    const pastDue = drafts.filter(
+      (d) => d.publishDate && d.publishDate.valueOf() <= now.valueOf()
+    );
+    const deferred = new Map<string, Date>();
+    if (pastDue.length) {
+      const minGaps = await this._extensionPublishConfigService.getMinGapMinutes();
+      // Not before the lockout: a slot at exactly `now` is a post that publishes
+      // the instant it is queued, which is the burst this is preventing.
+      const after = now.add(RESCHEDULE_LOCKOUT_MS, 'millisecond').toDate();
+      const byPlatform = new Map<string, typeof pastDue>();
+      for (const draft of pastDue) {
+        const platform = draft.providerIdentifier?.toLowerCase();
+        if (!platform) continue; // no platform, no window and no gap to apply
+        const bucket = byPlatform.get(platform);
+        if (bucket) bucket.push(draft);
+        else byPlatform.set(platform, [draft]);
+      }
+      for (const [platform, platformDrafts] of byPlatform) {
+        // A platform with no configured window is unconstrained about the TIME
+        // OF DAY, not about bursting — so it defers across a full day instead
+        // of being skipped, which keeps the minimum gap doing its job.
+        const window =
+          timeWindows[platform as PublishPlatform] ?? UNCONSTRAINED_DAY_WINDOW;
+        // Slots already taken on this platform, read from the DB rather than
+        // from `roots`: the minimum gap belongs to the platform's timeline, so
+        // a hand-scheduled post — or one from another plan — is just as much an
+        // obstacle as this plan's own, and neither appears in `roots`.
+        const occupied = (
+          await this._postRepository.getFuturePublishDates(
+            orgId,
+            projectId,
+            platform,
+            now.toDate()
+          )
+        ).map((row) => row.publishDate);
+        const placedHere = deferPastDueIntoWindow(
+          platformDrafts.map((draft) => ({
+            id: draft.id,
+            publishDate: draft.publishDate,
+          })),
+          occupied,
+          window,
+          minGaps[platform as PublishPlatform] ?? DEFAULT_MIN_GAP_MINUTES,
+          after
+        );
+        for (const [id, when] of placedHere) deferred.set(id, when);
+
+        // Never silent. Anything left unplaced keeps its expired slot and goes
+        // out the moment it is queued — the burst this pass exists to prevent —
+        // and the only place that is visible is here.
+        if (placedHere.size < platformDrafts.length) {
+          this.logger.warn(
+            `Deferral could not re-slot ${platformDrafts.length - placedHere.size} of ` +
+              `${platformDrafts.length} past-due ${platform} post(s) for orgId=${orgId} ` +
+              `projectId=${projectId} — they keep an expired publishDate and will go out ` +
+              `as soon as they are queued. Widen the publish window or lower ` +
+              `extension_publish.min_gap.`
+          );
+        }
+      }
+    }
     // Empty input is safe: schedulePosts short-circuits on an empty id list, so
     // an already-committed (or unknown, or platform-filtered-to-nothing) plan is
     // a no-op success, not an error.
@@ -2745,9 +2893,14 @@ export class PostsService {
           redistributed && redistributed.getTime() > now.valueOf()
             ? redistributed
             : undefined;
+        // A deferred slot wins: it was computed against the same window plus
+        // the gap AND the slots already taken, whereas `usable` only knows
+        // about this one post. (They are mutually exclusive in practice — a
+        // past-due post is exactly the case `usable` gives up on.)
+        const resolved = deferred.get(p.id) ?? usable;
         const dateOverride =
-          usable && usable.getTime() !== p.publishDate.getTime()
-            ? usable.toISOString()
+          resolved && resolved.getTime() !== p.publishDate.getTime()
+            ? resolved.toISOString()
             : undefined;
         return {
           id: p.id,

@@ -201,14 +201,38 @@ export class AutomationService {
     // Read BEFORE the write so the OFF -> ON transition is visible below. A
     // switch-on is the one save that must commit whether or not the client
     // asked for it — see the `shouldCommit` note further down.
-    const wasActive = isPublishingActive(
-      await this._projectPublishing.resolve(org.id, projectId)
-    );
+    const before = await this._projectPublishing.resolve(org.id, projectId);
+    const wasActive = isPublishingActive(before);
     const requested = new Set(dto.platforms.map((p) => p.toLowerCase()));
     const existing = readEngageConfigMetadata(
       await this._engageRepository.getConfigCore(org.id, projectId)
     ).replyPolicies as Record<string, Record<string, unknown>>;
     const policies: Record<string, Record<string, unknown>> = { ...existing };
+
+    // Platform-level deltas, measured against the RESOLVED decisions rather than
+    // the raw policy blob — resolvePlatformDecisions is what defines "on" for
+    // this project, and reading the blob directly would answer a slightly
+    // different question than every other gate does.
+    //
+    // Read BEFORE the write for the same reason `wasActive` is: afterwards
+    // there is nothing left to compare against.
+    const decisionsBefore = new Map(
+      Object.entries(before.platformDecisions ?? {}).map(([platform, on]) => [
+        platform.toLowerCase(),
+        on,
+      ])
+    );
+    // Turned off here → its queued plan posts go back to DRAFT.
+    const dropped = [...decisionsBefore]
+      .filter(([platform, on]) => on === true && !requested.has(platform))
+      .map(([platform]) => platform);
+    // Turned back on here → commit again, so the drafts this switch parked come
+    // back. EXPLICITLY-off only: a platform being configured for the first time
+    // has no parked drafts to restore, and treating that as a commit
+    // instruction would queue a batch off a settings save.
+    const reEnabled = [...requested].filter(
+      (platform) => decisionsBefore.get(platform) === false
+    );
 
     // The universe every platform gets an explicit true/false for. Union of the
     // publishable set, whatever the project already had an opinion on, and what
@@ -256,6 +280,19 @@ export class AutomationService {
     //
     // No planId: a superseded plan's drafts are soft-deleted, so "this
     // project's DRAFT plan posts" is already the active plan's.
+
+    // Uncommit BEFORE realigning, so anything that just went back to DRAFT is
+    // realigned as a draft — no claim/lockout gates, no workflow to restart.
+    //
+    // Switching the feature off reverts everything; a settings-only save that
+    // merely drops a platform reverts just that platform's posts.
+    const uncommitted =
+      dto.enabled === false
+        ? await this._uncommitPlanPosts(org.id, projectId)
+        : dropped.length
+        ? await this._uncommitPlanPosts(org.id, projectId, dropped)
+        : null;
+
     const rescheduled = await this._realign(org.id, projectId);
 
     // Turning scheduled publishing ON commits, even when the client sent no
@@ -267,13 +304,21 @@ export class AutomationService {
     // explained the gap. Switching the feature on IS the instruction to publish
     // what is scheduled, so it now means that.
     //
-    // Only the OFF -> ON edge, never a save that leaves an already-on switch
-    // on: a settings-only save (windows, platform list) keeps needing an
-    // explicit `commit`, so editing a window does not silently queue a batch.
+    // Only the OFF -> ON edge, never a save that leaves an already-on switch on:
+    // editing a WINDOW still needs an explicit `commit`, so it cannot silently
+    // queue a batch.
     const switchedOn = dto.enabled === true && !wasActive;
-    const shouldCommit = dto.commit || switchedOn;
+    // Ticking a platform back on is its own commit instruction, for the same
+    // reason switching the feature on is. Without this, the round trip
+    // "untick reddit -> its posts go back to DRAFT -> tick reddit again" would
+    // leave them stranded as drafts that nothing ever queues — the exact dead
+    // end the feature-switch commit was added to close.
+    // Never on the way OFF: `enabled: false` cannot be a commit instruction, no
+    // matter which platforms the same save happens to name.
+    const platformReEnabled = dto.enabled !== false && reEnabled.length > 0;
+    const shouldCommit = dto.commit || switchedOn || platformReEnabled;
     if (!shouldCommit) {
-      return { saved: true, scheduled: null, rescheduled };
+      return { saved: true, scheduled: null, rescheduled, uncommitted };
     }
 
     const scheduled = await this._commitPlanPosts(
@@ -282,7 +327,7 @@ export class AutomationService {
       dto.publishMethod,
       dto.platforms
     );
-    return { saved: true, scheduled, rescheduled };
+    return { saved: true, scheduled, rescheduled, uncommitted };
   }
 
   /**
@@ -313,6 +358,18 @@ export class AutomationService {
       projectId
     );
 
+    // Switching the master OFF puts automation's queued posts back to DRAFT —
+    // the suspension the switch has always claimed to be. Unconditional on
+    // `wasActive`: the revert is idempotent, and a project whose feature switch
+    // was already off can still be holding posts committed before that.
+    //
+    // Hand-scheduled posts and engage replies are untouched (see
+    // uncommitPlanPosts): the master switch suspends AUTOMATION, not the
+    // calendar someone filled in by hand.
+    const uncommitted = enabled
+      ? null
+      : await this._uncommitPlanPosts(org.id, projectId);
+
     // `enabled` is only the master switch — the feature switch below it decides
     // whether publishing is actually on, which is what alignPlanDraftPublishDates
     // re-checks for itself. Calling it on every ON is therefore safe; this guard
@@ -333,7 +390,7 @@ export class AutomationService {
       ? await this._commitPlanPosts(org.id, projectId)
       : null;
 
-    return { saved: true as const, enabled, rescheduled, scheduled };
+    return { saved: true as const, enabled, rescheduled, scheduled, uncommitted };
   }
 
   /**
@@ -373,6 +430,42 @@ export class AutomationService {
       publishMethod,
       platforms
     );
+  }
+
+  /**
+   * Put automation's queued plan posts back to DRAFT for this project (or just
+   * for the platforms named), best-effort.
+   *
+   * Best-effort for the same reason _realign is: the settings save has already
+   * succeeded and is what the user asked for, so failing to tidy the queue must
+   * not turn their save into an error. The next switch-off — or the next save —
+   * retries it, since the revert is idempotent.
+   */
+  private async _uncommitPlanPosts(
+    orgId: string,
+    projectId: string,
+    platforms?: string[]
+  ) {
+    try {
+      const result = await this._postsService.uncommitPlanPosts(
+        orgId,
+        projectId,
+        platforms
+      );
+      if (result.uncommitted) {
+        this.logger.log(
+          `Automation off for orgId=${orgId} projectId=${projectId}` +
+            `${platforms?.length ? ` platforms=${platforms.join(',')}` : ''} — ` +
+            `${result.uncommitted} queued plan post(s) across ${result.groups} group(s) put back to DRAFT`
+        );
+      }
+      return result;
+    } catch (e) {
+      this.logger.warn(
+        `Could not put queued plan posts back to DRAFT for orgId=${orgId} projectId=${projectId}: ${e}`
+      );
+      return null;
+    }
   }
 
   /**

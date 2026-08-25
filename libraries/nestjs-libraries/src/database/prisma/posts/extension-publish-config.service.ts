@@ -473,6 +473,93 @@ function placeWithGap(
  * narrow for its posts is a configuration problem and is reported in
  * `degraded` so the caller can say so out loud.
  */
+/** A post whose slot has already passed and needs a new one. */
+export interface PastDueAllocatable {
+  id: string;
+  publishDate: Date;
+}
+
+/** How far ahead the deferral pass will look for room before giving up. */
+const MAX_DEFER_DAYS = 90;
+
+/**
+ * Give past-due posts the NEXT available slots, spread across as many future
+ * window occurrences as it takes.
+ *
+ * Why this exists: a switch that parks the queue (QUEUE -> DRAFT) leaves every
+ * parked post holding the slot the plan gave it. Switch back on a week later
+ * and every one of those slots is in the past, so committing them means the
+ * publish-due query returns the whole week at once and the extension posts them
+ * back to back — the burst that pacing exists to prevent, arriving the moment
+ * the user turns automation on.
+ *
+ * Distinct from redistributePublishTimesWithinWindow, which anchors each post
+ * to the window occurrence on its OWN day and deliberately refuses to move
+ * anything into the past. That is right for realignment and useless here: these
+ * posts' own days are gone. This walks FORWARD from `after` instead, filling
+ * each occurrence subject to the same minimum gap, and spilling into the next
+ * day when one is full.
+ *
+ * `occupiedFuture` is every slot already taken on this platform (posts that are
+ * still in the future), so a deferred post never lands on top of one.
+ *
+ * Order is preserved: the post that was scheduled first is placed first, so a
+ * thread of a plan's content keeps the sequence its author intended.
+ */
+export function deferPastDueIntoWindow(
+  pastDue: PastDueAllocatable[],
+  occupiedFuture: Date[],
+  window: Pick<PublishTimeWindow, 'windowStart' | 'windowEnd' | 'timezone'>,
+  minGapMinutes: number,
+  after: Date
+): Map<string, Date> {
+  const placed = new Map<string, Date>();
+  const { startMin, endMin } = windowBounds(window);
+  if (!pastDue.length || startMin === endMin) return placed;
+
+  const queue = [...pastDue].sort(
+    (a, b) => a.publishDate.valueOf() - b.publishDate.valueOf()
+  );
+  const gap = Math.max(0, minGapMinutes);
+  const afterMs = after.valueOf();
+  let day = (window.timezone ? dayjs(after).tz(window.timezone) : dayjs.utc(after))
+    .format('YYYY-MM-DD');
+
+  for (let dayIndex = 0; dayIndex < MAX_DEFER_DAYS && queue.length; dayIndex++) {
+    const { start, spanMin } = windowInstanceOn(day, window);
+    day = shiftDay(day, 1);
+    if (spanMin <= 0) continue;
+
+    const startMs = start.valueOf();
+    const toOffset = (at: number) => (at - startMs) / 60_000;
+    const inThisInstance = (offset: number) => offset >= 0 && offset < spanMin;
+
+    // Everything already sitting in this occurrence — other posts' slots, and
+    // whatever earlier iterations of this loop put here.
+    const occupied = [
+      ...occupiedFuture.map((at) => toOffset(at.valueOf())),
+      ...[...placed.values()].map((at) => toOffset(at.valueOf())),
+    ].filter(inThisInstance);
+
+    // Never place before `after`: the window may have opened hours ago.
+    const earliest = Math.max(0, Math.ceil(toOffset(afterMs)));
+    if (earliest >= spanMin) continue;
+
+    // Recomputed per placement: each one becomes an obstacle for the next.
+    while (queue.length) {
+      const slot = freeIntervals(spanMin, occupied, gap)
+        .map(([from, to]): [number, number] => [Math.max(from, earliest), to])
+        .find(([from, to]) => from < to);
+      if (!slot) break;
+      const offset = slot[0];
+      placed.set(queue.shift()!.id, new Date(startMs + offset * 60_000));
+      occupied.push(offset);
+    }
+  }
+
+  return placed;
+}
+
 export function redistributePublishTimesWithinWindow(
   posts: WindowAllocatable[],
   window: Pick<PublishTimeWindow, 'windowStart' | 'windowEnd' | 'timezone'>,

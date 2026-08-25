@@ -49,6 +49,11 @@ function makeService(over: {
   const getLastSentReplyAtByPlatform = vi
     .fn()
     .mockResolvedValue(over.lastSentAtByPlatform ?? {});
+  // QUEUE -> DRAFT when a switch goes off. Returns a zero result by default so
+  // the common case reads as "nothing to put back", not as a failure.
+  const uncommitPlanPosts = vi
+    .fn()
+    .mockResolvedValue({ uncommitted: 0, groups: 0 });
 
   const service = new AutomationService(
     {
@@ -56,6 +61,7 @@ function makeService(over: {
       schedulePlanPosts,
       alignPlanDraftPublishDates,
       rescheduleQueuedPlanPosts,
+      uncommitPlanPosts,
     } as any,
     { getActivePlanId } as any,
     { countOpportunities, saveConfig, upsertReplyAccountSettings } as any,
@@ -79,6 +85,7 @@ function makeService(over: {
     upsertReplyAccountSettings,
     getPacing,
     getLastSentReplyAtByPlatform,
+    uncommitPlanPosts,
   };
 }
 
@@ -305,6 +312,9 @@ describe('AutomationService.saveEnabled', () => {
       enabled: false,
       rescheduled: null,
       scheduled: null,
+      // Suspension now includes putting automation's queued posts back to
+      // DRAFT — see the dedicated cases below.
+      uncommitted: { uncommitted: 0, groups: 0 },
     });
   });
 
@@ -466,6 +476,8 @@ describe('AutomationService.savePublishing', () => {
       saved: true,
       scheduled: null,
       rescheduled: { moved: 0, skipped: [] },
+      // Nothing was switched off, so nothing was put back to DRAFT.
+      uncommitted: null,
     });
   });
 
@@ -565,6 +577,156 @@ describe('AutomationService.savePublishing', () => {
     });
 
     expect(schedulePlanPosts).not.toHaveBeenCalled();
+  });
+
+  // ── Switching OFF parks the queue (QUEUE -> DRAFT) ────────────────────────
+  //
+  // The switch has always described itself as a suspension, but until now it
+  // only stopped new drafts from ENTERING the queue: whatever was already
+  // queued kept going out, because the extension's publish-due query does not
+  // (and must not) know what the switches say. Parking the rows is what makes
+  // the calendar tell the truth — and it keeps the decision server-side, where
+  // no client version can disagree with it.
+
+  it('parks automation’s queued posts when scheduled publishing is switched off', async () => {
+    const { service, uncommitPlanPosts } = makeService({
+      publishing: {
+        automationEnabled: true,
+        publishingEnabled: true,
+        publishingConfigured: true,
+        enabledPlatforms: ['x'],
+        platformDecisions: { x: true },
+        windows: {},
+      },
+    });
+
+    await service.savePublishing(org, 'proj-1', { platforms: ['x'], enabled: false });
+
+    // No platform list: the feature is off, so every platform is parked.
+    expect(uncommitPlanPosts).toHaveBeenCalledWith('org-1', 'proj-1', undefined);
+  });
+
+  it('parks only the dropped platform’s posts on a settings-only save', async () => {
+    // Unticking reddit must not touch x's queue — the user changed one platform.
+    const { service, uncommitPlanPosts } = makeService({
+      publishing: {
+        automationEnabled: true,
+        publishingEnabled: true,
+        publishingConfigured: true,
+        enabledPlatforms: ['x', 'reddit'],
+        platformDecisions: { x: true, reddit: true },
+        windows: {},
+      },
+    });
+
+    await service.savePublishing(org, 'proj-1', { platforms: ['x'] });
+
+    expect(uncommitPlanPosts).toHaveBeenCalledWith('org-1', 'proj-1', ['reddit']);
+  });
+
+  it('parks nothing when the save adds a platform without removing one', async () => {
+    const { service, uncommitPlanPosts } = makeService({
+      publishing: {
+        automationEnabled: true,
+        publishingEnabled: true,
+        publishingConfigured: true,
+        enabledPlatforms: ['x'],
+        platformDecisions: { x: true },
+        windows: {},
+      },
+    });
+
+    await service.savePublishing(org, 'proj-1', { platforms: ['x', 'reddit'] });
+
+    expect(uncommitPlanPosts).not.toHaveBeenCalled();
+  });
+
+  it('commits again when a platform that was explicitly OFF is ticked back on', async () => {
+    // The round trip this exists for: untick reddit (posts park as DRAFT), tick
+    // it again — without this the drafts would sit there with nothing to queue
+    // them, since a settings-only save otherwise needs an explicit `commit`.
+    const { service, schedulePlanPosts } = makeService({
+      publishing: {
+        automationEnabled: true,
+        publishingEnabled: true,
+        publishingConfigured: true,
+        enabledPlatforms: ['x'],
+        platformDecisions: { x: true, reddit: false },
+        windows: {},
+      },
+    });
+
+    await service.savePublishing(org, 'proj-1', { platforms: ['x', 'reddit'] });
+
+    expect(schedulePlanPosts).toHaveBeenCalled();
+  });
+
+  it('does NOT commit a platform being configured for the first time', async () => {
+    // "Never decided" is not "put it back": there are no parked drafts to
+    // restore, and queueing a batch off a settings save is what the explicit
+    // `commit` flag exists to prevent.
+    const { service, schedulePlanPosts } = makeService({
+      publishing: {
+        automationEnabled: true,
+        publishingEnabled: true,
+        publishingConfigured: true,
+        enabledPlatforms: ['x'],
+        platformDecisions: { x: true },
+        windows: {},
+      },
+    });
+
+    await service.savePublishing(org, 'proj-1', { platforms: ['x', 'reddit'] });
+
+    expect(schedulePlanPosts).not.toHaveBeenCalled();
+  });
+
+  it('never commits on the way off, whatever platforms the save names', async () => {
+    // `enabled: false` alongside a re-ticked platform must not queue anything.
+    const { service, schedulePlanPosts } = makeService({
+      publishing: {
+        automationEnabled: true,
+        publishingEnabled: true,
+        publishingConfigured: true,
+        enabledPlatforms: ['x'],
+        platformDecisions: { x: true, reddit: false },
+        windows: {},
+      },
+    });
+
+    await service.savePublishing(org, 'proj-1', {
+      platforms: ['x', 'reddit'],
+      enabled: false,
+    });
+
+    expect(schedulePlanPosts).not.toHaveBeenCalled();
+  });
+
+  it('parks the queue when the MASTER switch goes off', async () => {
+    const { service, uncommitPlanPosts } = makeService();
+
+    await service.saveEnabled(org, 'proj-1', false);
+
+    expect(uncommitPlanPosts).toHaveBeenCalledWith('org-1', 'proj-1', undefined);
+  });
+
+  it('parks nothing when the master switch goes ON', async () => {
+    const { service, uncommitPlanPosts } = makeService();
+
+    await service.saveEnabled(org, 'proj-1', true);
+
+    expect(uncommitPlanPosts).not.toHaveBeenCalled();
+  });
+
+  it('still saves when parking the queue fails — the settings write already succeeded', async () => {
+    const { service, uncommitPlanPosts, saveConfigRaw } = makeService();
+    uncommitPlanPosts.mockRejectedValue(new Error('db down'));
+
+    const res = await service.saveEnabled(org, 'proj-1', false);
+
+    expect(saveConfigRaw).toHaveBeenCalled();
+    expect(res.saved).toBe(true);
+    expect(res.uncommitted).toBeNull();
   });
 
   it('does not commit when the switch goes OFF', async () => {

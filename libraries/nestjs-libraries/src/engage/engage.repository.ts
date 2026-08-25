@@ -80,6 +80,23 @@ import utc from 'dayjs/plugin/utc';
 dayjs.extend(isoWeek);
 dayjs.extend(utc);
 
+/**
+ * The later of two optional timestamps, or null when neither exists.
+ *
+ * Small on purpose: it keeps the reply-pacing clock defined in ONE place, read
+ * identically by the gate that hands replies out and by the countdown the user
+ * sees. Those two disagreeing is precisely the bug it was introduced for — the
+ * UI reporting hours remaining while a reply went out every five minutes.
+ */
+function laterOf(
+  a?: Date | null,
+  b?: Date | null
+): Date | null {
+  if (!a) return b ?? null;
+  if (!b) return a;
+  return a > b ? a : b;
+}
+
 // getOrgScanStatus derives "next scan" = lastScanStartedAt + cadence (or
 // cooldownUntil, whichever is later). The activity/workflows own the actual
 // scheduling; this only reports the derived timing to the UI. Cadence is the
@@ -2269,20 +2286,47 @@ export class EngageRepository {
    * human-like spacing. Without it a poll loop would empty a whole day's budget
    * into one burst the moment the active window opened, which is exactly the
    * behaviour that gets an account rate-limited.
+   *
+   * "Last replied" is the later of TWO timestamps, and reading only the first
+   * is a bug that has already reached production:
+   *
+   *  - `createdAt` — when the draft was generated. Written once, by the drafting
+   *    path only.
+   *  - `post.claimedAt` — when the draft was HANDED TO THE EXTENSION to send
+   *    (claimDueEngageReplies stamps it, same column the publish lease uses).
+   *
+   * A poll that hands out an ALREADY-QUEUED draft creates no row, so it moves
+   * `createdAt` not at all. Against `createdAt` alone the gate therefore opens
+   * once — when the newest draft ages past the interval — and never closes
+   * again: every subsequent poll sees an even older timestamp and hands out one
+   * more reply, so a backlog drains at the extension's poll rate (one per five
+   * minutes) no matter what interval the project configured. Observed live as
+   * three Reddit replies inside thirteen minutes against a 4-6 hour setting.
+   *
+   * Taking the later of the two makes every hand-out — fresh draft or queued
+   * one — advance the clock, which is what the gate was always meant to measure.
    */
   async getLastSentReplyAt(
     organizationId: string,
     projectId: string,
     platform: string
   ): Promise<Date | null> {
-    const last = await this._sentReply.model.engageSentReply.findFirst({
-      // Platform lives on the opportunity, not the reply row — same join the
-      // daily-target counts use.
-      where: { organizationId, projectId, opportunity: { platform } },
-      orderBy: { createdAt: 'desc' },
-      select: { createdAt: true },
-    });
-    return last?.createdAt ?? null;
+    // Platform lives on the opportunity, not the reply row — same join the
+    // daily-target counts use.
+    const where = { organizationId, projectId, opportunity: { platform } };
+    const [lastDrafted, lastHandedOut] = await Promise.all([
+      this._sentReply.model.engageSentReply.findFirst({
+        where,
+        orderBy: { createdAt: 'desc' },
+        select: { createdAt: true },
+      }),
+      this._sentReply.model.engageSentReply.findFirst({
+        where: { ...where, post: { claimedAt: { not: null } } },
+        orderBy: { post: { claimedAt: 'desc' } },
+        select: { post: { select: { claimedAt: true } } },
+      }),
+    ]);
+    return laterOf(lastDrafted?.createdAt, lastHandedOut?.post?.claimedAt);
   }
 
   /**
@@ -2290,6 +2334,12 @@ export class EngageRepository {
    * platform a project has a reply policy for — one caller (the Automation
    * overview) needs it for N platforms at once, and N sequential calls would
    * cost N round trips for what is otherwise a handful of rows.
+   *
+   * Shares that method's definition of "last replied" deliberately: this feeds
+   * the countdown the user reads ("next reply in 4h 56m"), and a countdown
+   * computed from a different clock than the gate it is describing is worse
+   * than none — it was reporting hours remaining while replies went out every
+   * five minutes.
    */
   async getLastSentReplyAtByPlatform(
     organizationId: string,
@@ -2300,14 +2350,22 @@ export class EngageRepository {
     const rows = await this._sentReply.model.engageSentReply.findMany({
       where: { organizationId, projectId, opportunity: { platform: { in: platforms } } },
       orderBy: { createdAt: 'desc' },
-      select: { createdAt: true, opportunity: { select: { platform: true } } },
+      select: {
+        createdAt: true,
+        post: { select: { claimedAt: true } },
+        opportunity: { select: { platform: true } },
+      },
     });
     const out: Record<string, Date> = {};
-    // Rows arrive newest first, so the first one seen per platform is its most
-    // recent — no need to compare timestamps.
+    // Row order can NOT be trusted to pick the winner here: rows are sorted by
+    // createdAt, but an older draft handed out five minutes ago outranks a
+    // newer one that has never left the queue. Every row is compared.
     for (const row of rows) {
       const platform = row.opportunity.platform;
-      if (!(platform in out)) out[platform] = row.createdAt;
+      const rowLatest = laterOf(row.createdAt, row.post?.claimedAt);
+      if (!rowLatest) continue;
+      const current = out[platform];
+      if (!current || rowLatest > current) out[platform] = rowLatest;
     }
     return out;
   }
