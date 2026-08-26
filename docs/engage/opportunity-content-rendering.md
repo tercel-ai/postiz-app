@@ -133,15 +133,59 @@ and `title`.
   yet; its `URL_PATTERN` swallows the trailing `.`.
 - Keep stripping bare `t.co` from the *display* (the legacy rows in §1).
 
-#### @mentions and #hashtags — NOT implemented anywhere
+#### ⚠️ P0 — `stripTcoUrls` deletes the character after the shortlink
 
-X never puts a URL in the body for these: `@nvidia` and `#AI` live in
-`entities.user_mentions` / `entities.hashtags`, and x.com linkifies them at
-render. Stored as bare text, they are correct — they just render as grey text
-where the source post shows a blue link.
+**Owner: `aisee-app`.** Not present in `postiz-app` or the extension.
+
+| | |
+|---|---|
+| Defined | `app/(pages)/engage/_components/post-media-preview.tsx:2` |
+| Called | `engage-signal-feed-view.tsx:941` (feed card) · `generate-reply-panel/post-preview.tsx:62` (reply preview) |
+
+A t.co shortlink is `t.co/` plus alphanumerics, but the pattern matches `\S+` —
+every non-whitespace character — so it runs past the link and swallows whatever
+punctuation follows it:
+
+```diff
+- const TCO = /https?:\/\/t\.co\/\S+/g;
++ const TCO = /https?:\/\/t\.co\/[A-Za-z0-9]+/g;
+```
+
+Behaviour, verified:
+
+| stored | rendered now | after fix |
+|---|---|---|
+| `1.) 'https://t.co/ElN…' — Bypass any paywall` | `1.) ' — Bypass any paywall` | `1.) '' — Bypass any paywall` |
+| `see https://t.co/abc. next sentence` | `see  next sentence` | `see . next sentence` |
+| `(link https://t.co/xyz) trailing` | `(link  trailing` | `(link ) trailing` |
+
+The closing quote, the sentence period and the closing paren are all lost today.
+On the 50-link post that prompted this, every one of the 50 lines renders as a
+lone `'` — which reads as *"the links vanished"* when the truth is *"the links
+were never expanded"*. That misreading is the real cost: it points debugging at
+the renderer instead of at ingestion.
+
+**This is mitigation, not a cure.** It stops the surrounding text being
+destroyed; it does not put the links back. `''` is still not what x.com shows.
+The cure is re-ingesting the row (§1) so the body holds real URLs and this
+function becomes a no-op on it. Worth doing anyway: legacy rows persist until
+each is re-ingested, and §1 documents two cases where a `t.co` legitimately
+survives expansion forever.
+
+#### ⚠️ P1 — `@mention` / `#hashtag` are never linked
+
+**Owner: `aisee-app`.** X never puts a URL in the body for these: `@nvidia` and
+`#AI` live in `entities.user_mentions` / `entities.hashtags`, and x.com linkifies
+them at render time. Stored as bare text they are *correct* — they simply render
+grey where the source post shows blue. Same file as the URL logic:
+
+| | |
+|---|---|
+| Defined | `app/(pages)/engage/_components/clampable-post-content.tsx` — `renderPostContent()` |
+| Call sites | 4 (see the prop table below) |
 
 Resolve the target from the opportunity's `platform`. Linkify **only** where the
-rule is unambiguous; a wrong guess sends the reader to a stranger's profile:
+rule is unambiguous — a wrong guess sends the reader to a stranger's profile:
 
 | platform | span | href |
 |---|---|---|
@@ -149,60 +193,176 @@ rule is unambiguous; a wrong guess sends the reader to a stranger's profile:
 | `x` | `#tag` | `https://x.com/hashtag/{tag}` |
 | `reddit` | `u/name` | `https://reddit.com/user/{name}` |
 | `reddit` | `r/name` | `https://reddit.com/r/{name}` |
-| everything else | — | **leave as text** |
+| anything else / unknown | — | **leave as text** |
 
-LinkedIn, Hacker News, dev.to, Medium and Quora have no portable handle syntax —
-do not guess one for them.
+LinkedIn, Hacker News, dev.to, Medium and Quora have no portable handle syntax.
+Do not invent one.
 
-#### Reference implementation
+##### Implementation
 
-Two passes rather than one combined regex: URLs are segmented first, then
-mentions/hashtags are matched **only inside the leftover text**. That ordering
-is what keeps `https://a.com/p#section` from producing a `#section` hashtag, and
-it needs no lookbehind (so no Safari floor).
+Two passes, not one combined regex: segment URLs first, then match entities
+**only inside the leftover text**. That ordering is what stops
+`https://a.com/p#section` producing a `#section` tag, and it needs no lookbehind
+(so no Safari floor). The leading boundary character is **captured**, not looked
+behind — that is what keeps `bob@example.com` from reading as `@example`.
 
 ```ts
 const URL_RE = /https?:\/\/[^\s<>"']+/g;
-const TRAILING = /[.,;:!?)\]}]+$/;
-// A leading boundary char is CAPTURED, not looked behind: it is what keeps
-// bob@example.com from reading as a mention of @example.
-const ENTITY_RE = /(^|[^\w@#/])([@#])([A-Za-z0-9_]{1,30})/g;
+// §2.2 also requires this — sentence punctuation is not part of the address.
+const TRAILING_PUNCT = /[.,;:!?)\]}]+$/;
+const X_ENTITY_RE = /(^|[^\w@#/])([@#])([A-Za-z0-9_]{1,30})/g;
+const REDDIT_ENTITY_RE = /(^|[^\w/])(u|r)\/([A-Za-z0-9_-]{2,21})\b/g;
+
+function entityHref(platform: string | undefined, sigil: string, name: string) {
+  if (platform === "x") {
+    return sigil === "@"
+      ? `https://x.com/${name}`
+      : `https://x.com/hashtag/${name}`;
+  }
+  if (platform === "reddit") {
+    return sigil === "u"
+      ? `https://reddit.com/user/${name}`
+      : `https://reddit.com/r/${name}`;
+  }
+  return null; // unknown platform → not a link
+}
+
+type Seg =
+  | { type: "text"; value: string }
+  | { type: "url"; value: string }
+  | { type: "entity"; value: string; href: string };
+
+function splitUrls(text: string): Seg[] {
+  const out: Seg[] = [];
+  let last = 0;
+  let m: RegExpExecArray | null;
+  URL_RE.lastIndex = 0;
+  while ((m = URL_RE.exec(text)) !== null) {
+    let url = m[0];
+    const trail = url.match(TRAILING_PUNCT);
+    if (trail) {
+      url = url.slice(0, -trail[0].length);
+      URL_RE.lastIndex = m.index + url.length; // re-scan the punctuation as text
+    }
+    if (m.index > last) out.push({ type: "text", value: text.slice(last, m.index) });
+    out.push({ type: "url", value: url });
+    last = m.index + url.length;
+  }
+  if (last < text.length) out.push({ type: "text", value: text.slice(last) });
+  return out;
+}
+
+function splitEntities(text: string, platform?: string): Seg[] {
+  const re = platform === "reddit" ? REDDIT_ENTITY_RE : X_ENTITY_RE;
+  if (platform !== "x" && platform !== "reddit") return [{ type: "text", value: text }];
+  const out: Seg[] = [];
+  let last = 0;
+  let m: RegExpExecArray | null;
+  re.lastIndex = 0;
+  while ((m = re.exec(text)) !== null) {
+    const [, lead, sigil, name] = m;
+    const start = m.index + lead.length;
+    const raw = platform === "reddit" ? `${sigil}/${name}` : `${sigil}${name}`;
+    const href = entityHref(platform, sigil, name);
+    if (start > last) out.push({ type: "text", value: text.slice(last, start) });
+    if (href) out.push({ type: "entity", value: raw, href });
+    else out.push({ type: "text", value: raw });
+    last = start + raw.length;
+  }
+  if (last < text.length) out.push({ type: "text", value: text.slice(last) });
+  return out;
+}
+
+function renderPostContent(content: string, platform?: string): ReactNode[] {
+  const nodes: ReactNode[] = [];
+  let key = 0;
+  for (const seg of splitUrls(content)) {
+    if (seg.type === "url") {
+      nodes.push(
+        <a
+          key={key++}
+          href={seg.value}
+          target="_blank"
+          rel="noopener noreferrer nofollow"
+          title={seg.value}
+          className="break-all text-blue-4398ff underline underline-offset-2 transition-all hover:opacity-80"
+        >
+          {getUrlLabel(seg.value)}
+        </a>
+      );
+      continue;
+    }
+    for (const part of splitEntities(seg.value, platform)) {
+      if (part.type !== "entity") {
+        nodes.push(part.value);
+        continue;
+      }
+      nodes.push(
+        <a
+          key={key++}
+          href={part.href}
+          target="_blank"
+          rel="noopener noreferrer nofollow"
+          className="text-blue-4398ff hover:opacity-80"
+        >
+          {part.value}
+        </a>
+      );
+    }
+  }
+  return nodes;
+}
 ```
 
-Verified against the cases that actually occur:
+##### Prop change — `platform` must be OPTIONAL
+
+Three of the four call sites have a platform in scope; one does not, and it
+renders **our own reply text**, not scanned content. Making the prop optional
+lets that one keep today's behaviour (URLs only) instead of forcing a wrong
+platform on it:
+
+| Call site | platform in scope | pass |
+|---|---|---|
+| `engage-signal-feed-view.tsx:1090` | `safePlatform` | ✅ |
+| `awaiting-review-post-card.tsx:296` | `platform` | ✅ |
+| `generate-reply-panel/post-preview.tsx:61` | `platform?` | ✅ |
+| `sent-post-card-content.tsx:40` | — (own reply body) | omit → URL-only |
+
+```ts
+type ClampablePostContentProps = {
+  content: string;
+  /** Enables @mention / #hashtag linking. Omitted → URLs only. */
+  platform?: string;
+  // …existing props unchanged
+};
+```
+
+##### Verified behaviour
+
+Each row was executed against the implementation above:
 
 | input | result |
 |---|---|
-| `1.) 'http://12ft.io' — Bypass any paywall` | link `12ft.io`, closing quote stays text |
-| `Launching today for @nvidia DGX Spark.` | mention `@nvidia`, trailing `.` stays text |
-| `see https://a.com/x. next` | link `https://a.com/x`, `.` stays text |
+| `1.) 'http://12ft.io' — Bypass any paywall` | link `12ft.io`; closing `'` stays text |
+| `Launching today for @nvidia DGX Spark.` | mention `@nvidia`; trailing `.` stays text |
+| `see https://a.com/x. next` | link `https://a.com/x`; `.` stays text |
 | `mail me at bob@example.com ok` | **no mention** — plain text |
 | `read https://a.com/p#section here` | one link, **no hashtag** |
+| `#AI and #buildinpublic` | two hashtags |
 
-**Security:** return React elements. Never assemble an HTML string, and never
-pass the result to `dangerouslySetInnerHTML` — see §2.1. Reddit `selftext` is
-stored unescaped and X bodies carry decoded `<`/`>`.
+##### Security
 
-**Styling (`aisee-app`):** reuse the existing link token `text-blue-4398ff`, per
-its `AGENTS.md` ban on bare colour values.
+Return React elements. Never assemble an HTML string, and never pass the result
+to `dangerouslySetInnerHTML` — see §2.1. Reddit `selftext` is stored unescaped
+and X bodies carry decoded `<`/`>`.
 
-#### A separate defect: `stripTcoUrls` eats the following character
+**Do NOT reuse `injectMentionLinks()`** from
+`app/(pages)/post/calendar/_lib/post-content.ts`. It builds `<a>` tags as an HTML
+string for the user's OWN drafts; on this attacker-controlled body it would
+reintroduce the injection path §2.1 exists to close.
 
-`aisee-app`'s `stripTcoUrls` is `/https?:\/\/t\.co\/\S+/g`. `\S+` is greedy over
-non-whitespace, so a quoted shortlink loses its closing quote too:
-
-```
-stored:   1.) 'https://t.co/ElNBmlQM4R' — Bypass any paywall
-rendered: 1.) ' — Bypass any paywall
-```
-
-Every legacy row from §1 renders mangled this way, which reads as "the links
-vanished" rather than "the links were never expanded". Bound the match to the
-shortlink's own alphabet:
-
-```ts
-/https?:\/\/t\.co\/[A-Za-z0-9]+/g
-```
+**Styling:** reuse the existing link token `text-blue-4398ff`, per `aisee-app`'s
+`AGENTS.md` ban on bare colour values.
 
 ### 2.3 Attachments
 
