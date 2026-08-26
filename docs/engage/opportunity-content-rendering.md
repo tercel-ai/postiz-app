@@ -237,7 +237,16 @@ attachment, and the body no longer contains anything referring to it.
 
 ### Known gaps at the time of writing
 
-| Surface | URL links | Trailing punct | mention/hashtag | `t.co` strip |
-|---|---|---|---|---|
-| `aisee-app` `ClampablePostContent` | ✅ | ❌ | ❌ | ⚠️ eats next char |
-| `postiz-app` `apps/frontend` engage cards | ❌ plain text | — | ❌ | — |
+| Surface | URL links | Trailing punct | mention/hashtag | `t.co` strip | attachments (§2.3) |
+|---|---|---|---|---|---|
+| `aisee-app` engage feed / reply panel / sent | ✅ | ❌ | ❌ | ⚠️ eats next char | ❌ **not rendered at all** |
+| `postiz-app` `apps/frontend` engage cards | ❌ plain text | — | ❌ | — | ❌ |
+
+**`mediaUrls` is served but nothing consumes it.** `grep mediaUrls` across
+`aisee-app`'s engage module returns nothing: the API returns the array, and every
+surface drops it. `post-media-preview.tsx` is a 5-line file whose only export is
+`stripTcoUrls` — the name promises a component that was never written.
+
+This matters more since the upsert began merging `rawData` (§1): repairing a row
+now restores its attachment URLs, and that repair is invisible until a surface
+renders them. §2.3 already specifies the layout; it has simply never been built.
