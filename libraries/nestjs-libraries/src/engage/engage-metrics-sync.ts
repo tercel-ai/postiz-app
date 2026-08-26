@@ -1,10 +1,6 @@
 import { getRedditToken, redditAuthHeaders } from '@gitroom/nestjs-libraries/engage/reddit-auth';
 import { redditPublicGet } from '@gitroom/nestjs-libraries/engage/reddit-loid';
 import { parseRedditCommentId } from '@gitroom/nestjs-libraries/engage/reddit-url';
-import {
-  recordApiUsage,
-  X_USAGE,
-} from '@gitroom/nestjs-libraries/database/prisma/api-usage/api-usage.service';
 import { computeTrafficScore } from '@gitroom/nestjs-libraries/integrations/social/traffic.calculator';
 
 /**
@@ -158,25 +154,20 @@ export async function syncRedditMetrics(
 export async function syncXMetrics(
   args: {
     orgId: string;
-    sentReplyId: string;
     postDbId: string;
-    replyTweetUrl: string;
-    originalTweetId: string;
-    authorUsername: string;
   },
   deps: MetricsSyncDeps
 ): Promise<MetricsSyncOutcome> {
-  const {
-    orgId,
-    sentReplyId,
-    postDbId,
-    replyTweetUrl,
-    originalTweetId,
-    authorUsername,
-  } = args;
+  const { orgId, postDbId } = args;
 
-  // Metric outcome is decided by the per-account analytics fetch below; the
-  // author-replied check afterwards is independent and never changes it.
+  // X used to also run an author-replied check here, via the app-only bearer's
+  // conversation search. It was removed with the move to browser-tab collection:
+  // it read a THIRD PARTY's content from the server, and it was gated on
+  // X_BEARER_TOKEN, which production never set — so it had never once run.
+  // Reddit still detects author replies (from the thread .json it already
+  // fetches), so EngageSentReply.authorReplied and the responseRate stat built
+  // on it stay live for Reddit and remain false for X. See
+  // docs/engage/x-tab-only-migration.md §5.
   let outcome: MetricsSyncOutcome = 'skipped';
 
   // Fetch the reply tweet's metrics and write impressions/traffic back to the
@@ -197,50 +188,6 @@ export async function syncXMetrics(
     outcome = 'unreachable';
   }
 
-  // Author-replied detection uses the app-only bearer (conversation search),
-  // which is independent of the per-integration analytics token above.
-  const bearerToken = process.env.X_BEARER_TOKEN;
-  if (!bearerToken) return outcome;
-  const replyTweetId = replyTweetUrl.match(/\/status\/(\d+)/)?.[1];
-  if (!replyTweetId) return outcome;
-
-  try {
-    const authorRes = await fetch(
-      `https://api.twitter.com/2/users/by/username/${authorUsername}`,
-      { headers: { Authorization: `Bearer ${bearerToken}` }, signal: AbortSignal.timeout(15_000) }
-    );
-    if (!authorRes.ok) {
-      const body = await authorRes.text().catch(() => '<unreadable>');
-      deps.warn(`X /users/by/username returned ${authorRes.status} for @${authorUsername}: ${body.slice(0, 200)}`);
-      return outcome;
-    }
-    const authorJson = (await authorRes.json()) as { data?: { id: string } };
-    const originalAuthorId = authorJson.data?.id;
-    if (!originalAuthorId) return outcome;
-    recordApiUsage('x', X_USAGE.USER_READ, 1); // 1 returned user record
-
-    const res = await fetch(
-      `https://api.twitter.com/2/tweets/search/recent?query=conversation_id:${originalTweetId}&tweet.fields=author_id&max_results=50`,
-      { headers: { Authorization: `Bearer ${bearerToken}` }, signal: AbortSignal.timeout(15_000) }
-    );
-    if (!res.ok) {
-      const body = await res.text().catch(() => '<unreadable>');
-      deps.warn(`X /tweets/search/recent (conversation_id) returned ${res.status} for ${originalTweetId}: ${body.slice(0, 200)}`);
-      return outcome;
-    }
-    const json = (await res.json()) as { data?: Array<{ id: string; author_id: string }> };
-    recordApiUsage('x', X_USAGE.POSTS_READ, (json.data ?? []).length); // returned records
-    // Did the ORIGINAL AUTHOR specifically reply AFTER our reply?
-    if (
-      (json.data ?? []).some(
-        (t) => t.author_id === originalAuthorId && BigInt(t.id) > BigInt(replyTweetId)
-      )
-    ) {
-      await deps.markAuthorReplied(sentReplyId);
-    }
-  } catch (err) {
-    deps.warn(`X author-replied check failed: ${(err as Error).message}`);
-  }
   return outcome;
 }
 
@@ -286,14 +233,7 @@ export async function dispatchReplyMetricsSync(
   }
   if (reply.opportunity.platform === 'x') {
     return syncXMetrics(
-      {
-        orgId: reply.organizationId,
-        sentReplyId: reply.id,
-        postDbId: reply.post.id,
-        replyTweetUrl: releaseURL,
-        originalTweetId: reply.opportunity.externalPostId ?? '',
-        authorUsername: reply.opportunity.authorUsername ?? '',
-      },
+      { orgId: reply.organizationId, postDbId: reply.post.id },
       deps
     );
   }

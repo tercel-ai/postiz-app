@@ -14,6 +14,7 @@ function createRepo(overrides: {
   postFindMany?: any;
   postCreateMany?: any;
   postUpdateMany?: any;
+  postCount?: any;
   sentReplyFindMany?: any;
   keywordFindMany?: any;
   integrationFindMany?: any;
@@ -34,6 +35,7 @@ function createRepo(overrides: {
           findMany: overrides.postFindMany ?? vi.fn().mockResolvedValue([]),
           createMany: overrides.postCreateMany ?? vi.fn().mockResolvedValue({ count: 0 }),
           updateMany: overrides.postUpdateMany ?? vi.fn().mockResolvedValue({ count: 0 }),
+          count: overrides.postCount ?? vi.fn().mockResolvedValue(0),
         },
       },
     } as any,
@@ -76,6 +78,51 @@ describe('OperationPlanRepository', () => {
       orderBy: { updatedAt: 'asc' },
       take: 10,
     });
+  });
+
+  it('findStaleReadyPlans selects READY rows in the [maxAgeMs, olderThanMs] window, oldest first, capped by limit', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2030-01-02T00:10:00.000Z'));
+    const planFindMany = vi.fn().mockResolvedValue([]);
+    const repo = createRepo({ planFindMany });
+
+    await repo.findStaleReadyPlans(600_000, 86_400_000, 10); // 10min stale, 24h max age
+
+    expect(planFindMany).toHaveBeenCalledWith({
+      where: {
+        status: 'READY',
+        updatedAt: {
+          lt: new Date('2030-01-02T00:00:00.000Z'), // now - 600s
+          gt: new Date('2030-01-01T00:10:00.000Z'), // now - 24h
+        },
+      },
+      orderBy: { updatedAt: 'asc' },
+      take: 10,
+    });
+  });
+
+  it('countPostsForPlan counts live (non-deleted) posts scoped to the plan id', async () => {
+    const postCount = vi.fn().mockResolvedValue(3);
+    const repo = createRepo({ postCount });
+
+    const count = await repo.countPostsForPlan('plan-1');
+
+    expect(postCount).toHaveBeenCalledWith({
+      where: { operationPlanId: 'plan-1', deletedAt: null },
+    });
+    expect(count).toBe(3);
+  });
+
+  it('countDraftPostsForPlan counts only live DRAFT posts scoped to the plan id', async () => {
+    const postCount = vi.fn().mockResolvedValue(2);
+    const repo = createRepo({ postCount });
+
+    const count = await repo.countDraftPostsForPlan('plan-1');
+
+    expect(postCount).toHaveBeenCalledWith({
+      where: { operationPlanId: 'plan-1', deletedAt: null, state: 'DRAFT' },
+    });
+    expect(count).toBe(2);
   });
 
   it('completeGeneration writes planPayload + data + status onto the row by id', async () => {

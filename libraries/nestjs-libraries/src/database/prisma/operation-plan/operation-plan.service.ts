@@ -2394,6 +2394,60 @@ export class OperationPlanService implements OnApplicationBootstrap {
     );
   }
 
+  // Re-drive READY rows whose materialization never finished, OR whose Posts
+  // materialized but never got auto-committed — both are a worker crash
+  // somewhere between the status write and the end of _materializePlanPosts
+  // (create -> align -> auto-commit; see that method's own comment). Called on
+  // an interval by the materialization sweeper. _materializePlanPosts is
+  // idempotent (deterministic derived post ids, and its alignment/commit calls
+  // only ever touch rows still DRAFT), so re-running it on a row that merely
+  // finished slowly is harmless — the grace period (`olderThanMs`, default
+  // 10min) exists to make that "merely slow" case rare in practice rather than
+  // to guarantee it, since a large plan's auto-commit can start one Temporal
+  // workflow per post. `maxAgeMs` (default 48h) is the other end of the
+  // window: past it, a plan that still has DRAFT posts is treated as
+  // legitimately not-yet-automated (Automation off, or off for that platform)
+  // rather than stuck, and is left to the existing manual paths — see
+  // findStaleReadyPlans for why an unbounded upper end would starve out
+  // recently-stuck plans.
+  async resumeIncompleteMaterializations(
+    olderThanMs = 600_000,
+    maxAgeMs = 172_800_000,
+    limit = 20
+  ): Promise<void> {
+    const plans = await this._repo.findStaleReadyPlans(olderThanMs, maxAgeMs, limit);
+    await Promise.allSettled(plans.map((plan) => this._resumeMaterialization(plan)));
+  }
+
+  // A plan whose every content item got pruned (e.g. every Reddit item lost its
+  // subreddit target in _resolveAndAttachRedditTargets, which splices
+  // empty items out of contentItems before planPayload is persisted)
+  // legitimately materializes zero posts. Without this check the sweeper would
+  // re-attempt such a plan forever.
+  private _planExpectsPosts(plan: OperationPlan): boolean {
+    const payload = plan.planPayload as { contentItems?: unknown[] } | null;
+    return Array.isArray(payload?.contentItems) && payload!.contentItems!.length > 0;
+  }
+
+  private async _resumeMaterialization(plan: OperationPlan): Promise<void> {
+    if (!this._planExpectsPosts(plan)) return;
+    if ((await this._repo.countPostsForPlan(plan.id)) > 0) {
+      // Materialized already — only worth re-running if some rows never got
+      // past DRAFT (auto-commit crashed or never ran). Fully committed plans
+      // (draft count 0 — every row is QUEUE/PUBLISHED/ERROR) have nothing left
+      // for this method to do.
+      if ((await this._repo.countDraftPostsForPlan(plan.id)) === 0) return;
+    }
+    try {
+      await this._materializePlanPosts(plan, plan.planPayload);
+    } catch (err) {
+      this.logger.warn(
+        `Resume materialization failed for plan ${plan.id}: ` +
+          OperationPlanService.failureReason(err)
+      );
+    }
+  }
+
   private async _getReplyPacingByDay(plan: OperationPlan): Promise<ReplyPacingByDay> {
     const payload = plan.planPayload as { engagePolicies?: EngagePolicy[] } | null;
     const enabledPolicies = (

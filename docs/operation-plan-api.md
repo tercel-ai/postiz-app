@@ -11,6 +11,15 @@ Base paths are mounted on the existing authenticated backend API. All requests r
 > post's send path (extension vs API) once; see
 > [Publish method & the send queue](./posts-api.md#publish-method--the-send-queue).
 >
+> **Materialization also self-commits.** Right after creating (or re-creating, on
+> a retry) a plan's DRAFT posts, generation calls the same commit method the
+> "activate this plan" action below uses, scoped to just this plan. It is a no-op
+> when Automation is not active for the project, so a project that has never
+> turned Automation on is unaffected — but a project where Automation is
+> **already** on has no OFF→ON edge left for the action below to catch, and
+> without this call its freshly generated posts would sit in `DRAFT` forever. See
+> [Plan (re)generation also commits](./automation-api.md#plan-regeneration-also-commits).
+>
 > The "activate this plan" action is
 > [`POST /projects/:projectId/automation/publishing`](./automation-api.md#post-projectsprojectidautomationpublishing)
 > with `commit: true`. The client does **not** name the plan — the route resolves
@@ -258,7 +267,7 @@ GENERATING ──▶ BILLING_PENDING ──▶ READY        (happy path)
 >
 > Both are `null` on every non-failed status, and are **cleared** when a row later reaches `READY` — which in practice means a `BILLING_PENDING` row that reconciliation later confirms. `FAILED` and `BILLING_FAILED` are **terminal**: the sweepers only re-select `GENERATING` and `BILLING_PENDING` rows, so neither state recovers on its own and a new POST is the only way forward. Render `errorMessage` when present and fall back to a generic message keyed off `errorCode` when it is `null` (rows that failed before this field existed).
 
-> **Durability.** A `GENERATING` row whose worker crashed mid-run is re-driven by the generation sweeper (`resumeStuckGenerations`, every ~interval, rows untouched > `OPERATION_PLAN_GENERATION_STALE_MS`); a `BILLING_PENDING` row whose confirmation was lost is retried by `reconcileBillingPending`. Both are idempotent on the plan id, so a slow row is never double-billed. In practice a stuck row still converges to a terminal state without a new POST.
+> **Durability.** A `GENERATING` row whose worker crashed mid-run is re-driven by the generation sweeper (`resumeStuckGenerations`, every ~interval, rows untouched > `OPERATION_PLAN_GENERATION_STALE_MS`); a `BILLING_PENDING` row whose confirmation was lost is retried by `reconcileBillingPending`. A third crash window sits between them and `READY`: the status write and materialization (create → align → auto-commit) are separate awaits with no transaction spanning them, so a crash anywhere in that sequence can leave a row `READY` with zero `Post`s, or with `Post`s that never got past `DRAFT`. `resumeIncompleteMaterializations` re-drives both cases (rows untouched between `OPERATION_PLAN_MATERIALIZATION_STALE_MS` and `OPERATION_PLAN_MATERIALIZATION_MAX_AGE_MS`, skipping any plan whose `contentItems` were legitimately pruned to empty). The upper bound matters here in a way it does not for the other two sweepers: a plan that fully committed never touches `updatedAt` again, and a project with Automation off is *expected* to hold `DRAFT` posts indefinitely — without a ceiling those would eventually crowd out the oldest-first, limited-take query and starve a genuinely-recent stuck plan. Past the ceiling, recovery falls back to the existing manual paths (toggling Automation, an explicit `commit`, or a same-params `create()` retry) rather than being polled forever. All three sweepers are idempotent on the plan id, so a slow row is never double-billed or double-materialized. In practice a stuck row still converges to a terminal state without a new POST.
 
 ### Errors
 

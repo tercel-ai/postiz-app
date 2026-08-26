@@ -3,6 +3,7 @@ import { OperationPlanController } from '@gitroom/backend/api/routes/operation-p
 import { AuthMiddleware } from '@gitroom/backend/services/auth/auth.middleware';
 import { OperationPlanReconciliationService } from './operation-plan-reconciliation.service';
 import { OperationPlanGenerationSweeperService } from './operation-plan-generation-sweeper.service';
+import { OperationPlanMaterializationSweeperService } from './operation-plan-materialization-sweeper.service';
 
 // OperationPlanService/Repository are globally available via DatabaseModule.
 // This module only owns the controller and applies auth middleware to it —
@@ -13,6 +14,7 @@ import { OperationPlanGenerationSweeperService } from './operation-plan-generati
     AuthMiddleware,
     OperationPlanReconciliationService,
     OperationPlanGenerationSweeperService,
+    OperationPlanMaterializationSweeperService,
   ],
 })
 export class OperationPlanModule implements NestModule {

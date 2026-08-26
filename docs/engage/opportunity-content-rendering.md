@@ -94,32 +94,109 @@ Render the body as **text nodes** (React/Vue escape these automatically) and
 build links as real elements. Newlines need only `white-space: pre-wrap`, never
 `innerHTML`.
 
-> Status: `aisee-app`'s `ClampablePostContent` currently renders the body with
-> `dangerouslySetInnerHTML`. All four of its call sites pass plain text, so the
-> fix is to render text nodes plus the link elements below — nothing needs HTML.
+> Status (2026-08-26): **resolved in `aisee-app`.** `ClampablePostContent`
+> renders text nodes plus real `<a>` elements; it no longer uses
+> `dangerouslySetInnerHTML`. The rule stands for every new surface, and for the
+> mention/hashtag work in §2.2 — that must extend the segment renderer, never
+> reintroduce HTML. `injectMentionLinks()` in `aisee-app`'s
+> `app/(pages)/post/calendar/_lib/post-content.ts` builds `<a>` tags as an HTML
+> string for the user's OWN drafts; it must NOT be reused here, where the body is
+> attacker-controlled.
 
-### 2.2 Links inside the body
+### 2.2 Linkifying the body
 
-The body holds full URLs (`https://seo-stuff.com/free-audit`). x.com displays a
-shortened label. Match that: split the body into text and link segments, render
-each link as an anchor whose label is shortened but whose `href` is the full URL.
+`postContent` is **plain text**. It stores no markup and no link metadata, by
+design — its other consumers are the AI reply prompt
+(`engage-draft.service._buildUserPrompt`, which wraps it in `<original_post>`)
+and keyword matching (`engage-scorer.postSearchText`). Injecting markdown or
+HTML at storage time would push URLs into the model's context and into keyword
+matches. **Linkifying is the client's job, on render.**
 
-Label: drop the scheme and a leading `www.`, drop a trailing slash, truncate
-long labels with an ellipsis. Keep the full address in `href` and `title` so
-nothing is lost.
+Three kinds of span become links. Only the first is implemented today.
 
-```
-https://seo-stuff.com/free-audit   →   seo-stuff.com/free-audit
-```
+#### URLs — implemented
 
-Requirements:
+The body holds full URLs (`https://seo-stuff.com/free-audit`); x.com shows a
+shortened label. Match that: shorten the label, keep the full address in `href`
+and `title`.
 
 - `target="_blank"` with `rel="noopener noreferrer nofollow"`.
-- Only linkify `http`/`https`. Never build an anchor from any other scheme.
-- Strip trailing punctuation from the matched URL — the period in
-  `see https://a.com/x.` is sentence punctuation, not part of the address.
-- Keep stripping bare `t.co` links from the *display* (the legacy rows in §1).
-  It is a no-op on normalised bodies.
+- Only `http`/`https`. Never build an anchor from any other scheme.
+- **Strip trailing punctuation** — the period in `see https://a.com/x.` is
+  sentence punctuation, not part of the address. ⚠️ `aisee-app` does NOT do this
+  yet; its `URL_PATTERN` swallows the trailing `.`.
+- Keep stripping bare `t.co` from the *display* (the legacy rows in §1).
+
+#### @mentions and #hashtags — NOT implemented anywhere
+
+X never puts a URL in the body for these: `@nvidia` and `#AI` live in
+`entities.user_mentions` / `entities.hashtags`, and x.com linkifies them at
+render. Stored as bare text, they are correct — they just render as grey text
+where the source post shows a blue link.
+
+Resolve the target from the opportunity's `platform`. Linkify **only** where the
+rule is unambiguous; a wrong guess sends the reader to a stranger's profile:
+
+| platform | span | href |
+|---|---|---|
+| `x` | `@handle` (1–15 of `[A-Za-z0-9_]`) | `https://x.com/{handle}` |
+| `x` | `#tag` | `https://x.com/hashtag/{tag}` |
+| `reddit` | `u/name` | `https://reddit.com/user/{name}` |
+| `reddit` | `r/name` | `https://reddit.com/r/{name}` |
+| everything else | — | **leave as text** |
+
+LinkedIn, Hacker News, dev.to, Medium and Quora have no portable handle syntax —
+do not guess one for them.
+
+#### Reference implementation
+
+Two passes rather than one combined regex: URLs are segmented first, then
+mentions/hashtags are matched **only inside the leftover text**. That ordering
+is what keeps `https://a.com/p#section` from producing a `#section` hashtag, and
+it needs no lookbehind (so no Safari floor).
+
+```ts
+const URL_RE = /https?:\/\/[^\s<>"']+/g;
+const TRAILING = /[.,;:!?)\]}]+$/;
+// A leading boundary char is CAPTURED, not looked behind: it is what keeps
+// bob@example.com from reading as a mention of @example.
+const ENTITY_RE = /(^|[^\w@#/])([@#])([A-Za-z0-9_]{1,30})/g;
+```
+
+Verified against the cases that actually occur:
+
+| input | result |
+|---|---|
+| `1.) 'http://12ft.io' — Bypass any paywall` | link `12ft.io`, closing quote stays text |
+| `Launching today for @nvidia DGX Spark.` | mention `@nvidia`, trailing `.` stays text |
+| `see https://a.com/x. next` | link `https://a.com/x`, `.` stays text |
+| `mail me at bob@example.com ok` | **no mention** — plain text |
+| `read https://a.com/p#section here` | one link, **no hashtag** |
+
+**Security:** return React elements. Never assemble an HTML string, and never
+pass the result to `dangerouslySetInnerHTML` — see §2.1. Reddit `selftext` is
+stored unescaped and X bodies carry decoded `<`/`>`.
+
+**Styling (`aisee-app`):** reuse the existing link token `text-blue-4398ff`, per
+its `AGENTS.md` ban on bare colour values.
+
+#### A separate defect: `stripTcoUrls` eats the following character
+
+`aisee-app`'s `stripTcoUrls` is `/https?:\/\/t\.co\/\S+/g`. `\S+` is greedy over
+non-whitespace, so a quoted shortlink loses its closing quote too:
+
+```
+stored:   1.) 'https://t.co/ElNBmlQM4R' — Bypass any paywall
+rendered: 1.) ' — Bypass any paywall
+```
+
+Every legacy row from §1 renders mangled this way, which reads as "the links
+vanished" rather than "the links were never expanded". Bound the match to the
+shortlink's own alphabet:
+
+```ts
+/https?:\/\/t\.co\/[A-Za-z0-9]+/g
+```
 
 ### 2.3 Attachments
 
@@ -141,7 +218,20 @@ attachment, and the body no longer contains anything referring to it.
 
 - [ ] Body rendered as text nodes, not HTML.
 - [ ] Links are real anchors, shortened label, full `href`, `rel` set.
-- [ ] `t.co` still stripped from display for legacy rows.
+- [ ] Trailing punctuation excluded from the matched URL.
+- [ ] `@mention` / `#hashtag` linkified per the platform table, and left as text
+      on platforms with no unambiguous rule.
+- [ ] An email address in the body produces no mention.
+- [ ] A URL fragment (`…/p#section`) produces no hashtag.
+- [ ] `t.co` still stripped from display for legacy rows — with the bounded
+      pattern, not `\S+`.
 - [ ] `mediaUrls` empty → no media block at all.
 - [ ] Image `onError` hides the image.
 - [ ] `rawData` is not requested or relied on anywhere.
+
+### Known gaps at the time of writing
+
+| Surface | URL links | Trailing punct | mention/hashtag | `t.co` strip |
+|---|---|---|---|---|
+| `aisee-app` `ClampablePostContent` | ✅ | ❌ | ❌ | ⚠️ eats next char |
+| `postiz-app` `apps/frontend` engage cards | ❌ plain text | — | ❌ | — |

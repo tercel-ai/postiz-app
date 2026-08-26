@@ -545,6 +545,24 @@ export class EngageScanIngestService {
             // authority tracks growth.
             externalPostUrl: post.externalPostUrl,
             channelFollowers: post.channelFollowers ?? null,
+            // The author-side counterpart of channelFollowers: on X there IS no
+            // channel, so this is the whole of scoreAuthority there. Omitting it
+            // from this branch is why an X row that once scored an author at all
+            // could never be refreshed — and why rows that landed null stayed
+            // null through every re-scan.
+            //
+            // Written only when the scanner actually reported it, NOT `?? null`
+            // like channelFollowers above. That asymmetry is deliberate: this
+            // field is optional on ScanIngestPostDto and only X reports it, so a
+            // scanner that cannot supply it must not clear one that could. The
+            // concrete case is extension version skew — a build predating the
+            // `relationship_counts.followers` fix reports nothing (it read a
+            // container X deleted), and `?? null` would let that old build wipe
+            // the count a current build just stored. A stale follower count
+            // still scores; a null scores as zero authority.
+            ...(post.authorFollowers != null
+              ? { authorFollowers: post.authorFollowers }
+              : {}),
             // Title and body move together or not at all. A row stored before
             // the title column existed holds "title\nbody" in postContent, so
             // writing the title alone would leave the title duplicated in both

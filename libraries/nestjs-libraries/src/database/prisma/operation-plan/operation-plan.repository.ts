@@ -186,6 +186,52 @@ export class OperationPlanRepository {
     });
   }
 
+  // READY rows whose materialization may not have finished — the status write
+  // and _materializePlanPosts (create -> align -> auto-commit) are separate
+  // awaits with no transaction spanning them, so a crash anywhere in that
+  // sequence can leave a plan permanently READY with no Posts, or with Posts
+  // that never got aligned/committed. Mirrors findStuckGenerating /
+  // findBillingPending so the materialization sweeper can re-drive them.
+  //
+  // Bounded on BOTH ends, unlike the other two `findStuck*` queries: a plan
+  // that materialized and committed successfully never touches `updatedAt`
+  // again, so an unbounded upper end would let the sweep's `orderBy asc, take
+  // limit` fill up forever with old, perfectly-fine plans — starving out
+  // genuinely-recent stuck ones once the org has more than `limit` READY
+  // plans older than `olderThanMs`. `maxAgeMs` caps how far back automatic
+  // retry reaches; anything older is not un-recoverable, it just falls back
+  // to the existing manual paths (toggling Automation, an explicit `commit`,
+  // or the same-params create() retry) rather than being polled forever.
+  findStaleReadyPlans(olderThanMs: number, maxAgeMs: number, limit = 20) {
+    const now = Date.now();
+    return this._operationPlan.model.operationPlan.findMany({
+      where: {
+        status: 'READY',
+        updatedAt: { lt: new Date(now - olderThanMs), gt: new Date(now - maxAgeMs) },
+      },
+      orderBy: { updatedAt: 'asc' },
+      take: limit,
+    });
+  }
+
+  // Live (non-deleted) DRAFT post count for a plan — tells "materialized but
+  // never committed" (crash between the createMany and the auto-commit)
+  // apart from "fully committed, nothing left to do".
+  countDraftPostsForPlan(planId: string) {
+    return this._post.model.post.count({
+      where: { operationPlanId: planId, deletedAt: null, state: 'DRAFT' },
+    });
+  }
+
+  // Live (non-deleted) Post count for a plan — the signal the materialization
+  // sweeper uses to tell "never materialized" apart from "materialized and
+  // just hasn't been touched since".
+  countPostsForPlan(planId: string) {
+    return this._post.model.post.count({
+      where: { operationPlanId: planId, deletedAt: null },
+    });
+  }
+
   create(data: Prisma.OperationPlanUncheckedCreateInput) {
     return this._operationPlan.model.operationPlan.create({ data });
   }

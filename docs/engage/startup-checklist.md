@@ -270,9 +270,11 @@ X. Reddit is unaffected by both switches. Changes require an orchestrator restar
 (or terminate + auto-restart of the ticker) to take effect.
 
 > Note: only the literal string `false` disables `ENGAGE_X_SCAN_ENABLED`; `0`,
-> `no`, `off` are treated as enabled. The extension also has its own
-> **build-time** `ENGAGE_X_ENABLED` flag (default OFF) covering its scan +
-> metrics runners — separate from these runtime server-side switches.
+> `no`, `off` are treated as enabled. The extension used to carry its own
+> **build-time** `ENGAGE_X_ENABLED` flag on top of these switches; it has been
+> removed. The extension now honours the scan allowlist alone, like every other
+> session-driven platform, so X can be turned on or off for it at runtime
+> without rebuilding and re-publishing.
 
 **Keyword Initial Scan Environment Variables** (Optional `.env` config, defaults built-in):
 

@@ -44,10 +44,19 @@ operationPlanId: plan.id,
 group: `${plan.id}:${item.contentId}:${resolvedPlatform}`,
 ```
 
-**Nothing is auto-committed here.** A plan reaching `READY` produces drafts and
-stops. `integrationId` is deliberately null — publishing routes by platform
+**Materialization no longer stops at drafts.** A plan reaching `READY` still
+always writes every post as `DRAFT` first, but immediately afterward runs the
+same Stage 1 commit gates below against its own output
+(`PostsService.schedulePlanPosts`, plan-scoped to just this plan — see
+[Plan (re)generation also commits](./automation-api.md#plan-regeneration-also-commits)
+for the why and the safety argument). Gates ①–③ decide the outcome exactly as
+they would for any other commit trigger: a project with Automation off gets
+drafts and stops, same as before this existed; a project with Automation already
+on for that platform gets `QUEUE` posts with no further action needed.
+`integrationId` is deliberately null either way — publishing routes by platform
 (`settings.__type`), and binding an account at generation time would pin the post
-to whichever integration happened to exist then.
+to whichever integration happened to exist then; a commit resolves it, whether
+that commit runs here or later.
 
 Two rows never make it this far:
 
@@ -141,7 +150,7 @@ it reaches `QUEUE`. Committing a backlog publishes it immediately, oldest first,
 
 | Trigger | Commits? |
 | --- | --- |
-| Plan reaches `READY` | ❌ drafts only |
+| Plan reaches `READY` (first time, retry, or `BILLING_PENDING` reconcile) | ✅ if Automation + that platform are already on for the plan's project, else ❌ drafts only |
 | `POST /automation/enabled` OFF→ON (master) | ✅ |
 | `POST /automation/enabled` ON→OFF | ❌ (and nothing is un-queued) |
 | `POST /automation/publishing` with `enabled: true`, previously off | ✅ even without `commit` |
@@ -296,6 +305,8 @@ a batch may be.
 | Gate | File |
 | --- | --- |
 | Materialization, supersede sweep | `operation-plan/operation-plan.repository.ts` → `materializePlanPosts` |
+| Auto-commit on materialization | `operation-plan/operation-plan.service.ts` → `_materializePlanPosts` |
+| Recovery for interrupted materialization | `operation-plan/operation-plan.service.ts` → `resumeIncompleteMaterializations` |
 | Switch resolution (①②③) | `automation/project-publishing.service.ts` → `resolve`, `isPublishingActive`, `resolveEnabledPlatforms` |
 | Auto-commit on switch-on | `automation/automation.service.ts` → `savePublishing`, `saveEnabled`, `_commitPlanPosts` |
 | Commit gates ③④⑤ + window | `posts/posts.service.ts` → `schedulePlanPosts`, `schedulePosts` |

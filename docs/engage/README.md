@@ -17,6 +17,9 @@ X and Reddit. This is the entry point to all Engage docs.
 | [`sync-metrics-script.md`](./sync-metrics-script.md) | Ops | Detailed output walkthrough for `engage-sync-metrics.ts`. |
 | [`reddit-loid-waf-bypass.md`](./reddit-loid-waf-bypass.md) | Dev | How Reddit public-JSON reads clear the anti-bot WAF (the `loid` cookie). |
 | [`reddit-metrics-sync-todo.md`](./reddit-metrics-sync-todo.md) | Dev | Open TODOs on Reddit metrics syncing. |
+| [`opportunity-content-rendering.md`](./opportunity-content-rendering.md) | **Dev / Frontend** | What `postContent` / `mediaUrls` hold, and the rules every client MUST follow to render them — never `innerHTML`, how to linkify URLs / `@mentions` / `#hashtags` per platform, attachment layout. Includes the open frontend gaps. |
+| [`x-tab-only-migration.md`](./x-tab-only-migration.md) | **Dev / Ops** | Migration plan: every remaining server-side X API read, what the extension's browser-tab path already covers, and the order to retire them. Includes the switches that turn the server-side X scan off. |
+| [`author-followers-null.md`](./author-followers-null.md) | Dev | Why `authorFollowers` was null on every X row — three independent causes, two fixed, one open. |
 | [`../project-scoped-post-engage-design.md`](../project-scoped-post-engage-design.md) | **Dev** | Postiz implementation requirements for project isolation, shared-scan fan-out, reply arbitration, quotas, APIs, UI, and migration. |
 | [`../aisee-live-geo-growth-plan.md`](../aisee-live-geo-growth-plan.md) | Dev / Integrators | Postiz integration contract for API-configured Aisee operation plans and variable-duration calendar materialization. |
 
@@ -26,6 +29,8 @@ X and Reddit. This is the entry point to all Engage docs.
 - **Understanding the design** → [`tech-design.md`](./tech-design.md)
 - **Calling the API** → [`api.md`](./api.md)
 - **Operating it day-to-day** (sync metrics, trigger scans, repair data) → [`scripts.md`](./scripts.md)
+- **Turning the server-side X scan off / moving X reads to the extension** → [`x-tab-only-migration.md`](./x-tab-only-migration.md)
+- **Rendering an opportunity body on any surface** (links, mentions, images) → [`opportunity-content-rendering.md`](./opportunity-content-rendering.md)
 
 ## Common operational tasks (→ [`scripts.md`](./scripts.md))
 

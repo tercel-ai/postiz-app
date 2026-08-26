@@ -493,6 +493,9 @@ describe('OperationPlanService.create', () => {
       getConnectedPlatforms: vi.fn().mockResolvedValue(['x']),
       findManyByTaskId: vi.fn().mockResolvedValue([]),
       findStuckGenerating: vi.fn().mockResolvedValue([]),
+      findStaleReadyPlans: vi.fn().mockResolvedValue([]),
+      countPostsForPlan: vi.fn().mockResolvedValue(0),
+      countDraftPostsForPlan: vi.fn().mockResolvedValue(0),
       create: vi.fn().mockResolvedValue(generatingStub),
       getById: vi.fn().mockResolvedValue(generatingStub),
       completeGeneration: vi
@@ -2670,6 +2673,107 @@ describe('OperationPlanService.create', () => {
       expect.objectContaining({ status: 'READY' })
     );
     expect(repo.materializePlanPosts).toHaveBeenCalled();
+  });
+
+  it('resumeIncompleteMaterializations re-materializes a READY plan stuck with no posts', async () => {
+    const { repo, service } = createGenerationDependencies({
+      contentItems: [],
+      engagePolicies: [],
+      warnings: [],
+    });
+    const stuck = {
+      id: 'plan-1',
+      organizationId: 'org-1',
+      projectId: 'proj-1',
+      status: 'READY',
+      planPayload: { contentItems: [{ contentId: 'c-1' }] },
+    };
+    repo.findStaleReadyPlans.mockResolvedValue([stuck]);
+    repo.countPostsForPlan.mockResolvedValue(0);
+
+    await service.resumeIncompleteMaterializations();
+
+    expect(repo.findStaleReadyPlans).toHaveBeenCalled();
+    expect(repo.countPostsForPlan).toHaveBeenCalledWith('plan-1');
+    expect(repo.materializePlanPosts).toHaveBeenCalledWith(
+      stuck,
+      stuck.planPayload,
+      expect.anything()
+    );
+  });
+
+  it('resumeIncompleteMaterializations skips a plan whose content was legitimately pruned to empty', async () => {
+    const { repo, service } = createGenerationDependencies({
+      contentItems: [],
+      engagePolicies: [],
+      warnings: [],
+    });
+    const empty = {
+      id: 'plan-empty',
+      organizationId: 'org-1',
+      projectId: 'proj-1',
+      status: 'READY',
+      planPayload: { contentItems: [] },
+    };
+    repo.findStaleReadyPlans.mockResolvedValue([empty]);
+
+    await service.resumeIncompleteMaterializations();
+
+    // Never even checked the post count — a plan with no content items has
+    // nothing to materialize and this is not a stuck state.
+    expect(repo.countPostsForPlan).not.toHaveBeenCalled();
+    expect(repo.materializePlanPosts).not.toHaveBeenCalled();
+  });
+
+  it('resumeIncompleteMaterializations leaves a fully-committed plan alone', async () => {
+    const { repo, service } = createGenerationDependencies({
+      contentItems: [],
+      engagePolicies: [],
+      warnings: [],
+    });
+    const done = {
+      id: 'plan-done',
+      organizationId: 'org-1',
+      projectId: 'proj-1',
+      status: 'READY',
+      planPayload: { contentItems: [{ contentId: 'c-1' }] },
+    };
+    repo.findStaleReadyPlans.mockResolvedValue([done]);
+    repo.countPostsForPlan.mockResolvedValue(5);
+    repo.countDraftPostsForPlan.mockResolvedValue(0); // every row moved past DRAFT
+
+    await service.resumeIncompleteMaterializations();
+
+    expect(repo.countPostsForPlan).toHaveBeenCalledWith('plan-done');
+    expect(repo.countDraftPostsForPlan).toHaveBeenCalledWith('plan-done');
+    expect(repo.materializePlanPosts).not.toHaveBeenCalled();
+  });
+
+  it('resumeIncompleteMaterializations re-runs a plan that materialized but never got past DRAFT', async () => {
+    const { repo, service } = createGenerationDependencies({
+      contentItems: [],
+      engagePolicies: [],
+      warnings: [],
+    });
+    const halfDone = {
+      id: 'plan-half',
+      organizationId: 'org-1',
+      projectId: 'proj-1',
+      status: 'READY',
+      planPayload: { contentItems: [{ contentId: 'c-1' }] },
+    };
+    repo.findStaleReadyPlans.mockResolvedValue([halfDone]);
+    repo.countPostsForPlan.mockResolvedValue(3); // Posts exist...
+    repo.countDraftPostsForPlan.mockResolvedValue(3); // ...but auto-commit never ran
+
+    await service.resumeIncompleteMaterializations();
+
+    expect(repo.countDraftPostsForPlan).toHaveBeenCalledWith('plan-half');
+    expect(repo.materializePlanPosts).toHaveBeenCalledWith(
+      halfDone,
+      halfDone.planPayload,
+      expect.anything()
+    );
   });
 
   // Guards the test seam itself. The override above is applied with `as any`, so

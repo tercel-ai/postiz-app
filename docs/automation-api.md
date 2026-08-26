@@ -611,6 +611,38 @@ for what that means for a project holding a large backlog, and how to stage it.
 Engage workflows and kicks an immediate scan whenever it is handed `enabled` —
 saving publishing settings has no business doing either.
 
+### Plan (re)generation also commits
+
+A commit also runs from a trigger entirely outside this endpoint:
+`_materializePlanPosts` (`operation-plan.service.ts`) calls the same
+`PostsService.schedulePlanPosts` this endpoint calls, right after every
+materialization — the first time a plan reaches `READY`, an idempotent retry of
+an already-`READY` plan, and a `BILLING_PENDING` reconciliation.
+
+**Why.** The OFF→ON edge above only fires once, at the moment Automation is
+switched on. A project that generates (or regenerates) a plan while Automation is
+**already** on never crosses that edge, so nothing would ever commit its fresh
+`DRAFT`s — the same dead end the switch-on commit exists to close, mirrored onto
+the opposite ordering of "turn Automation on" and "make new content".
+
+**Scope.** Plan-scoped to the plan that just materialized, not project-wide — a
+plan stranded in `DRAFT` from before this existed still needs the project-scoped
+fallback (no active plan → every live plan post) that this endpoint's own commit
+falls back to.
+
+**Safety.** `schedulePlanPosts` re-checks `isPublishingActive` and the
+per-platform filter itself, so calling it unconditionally after every
+materialization is a no-op for a project with Automation off, or for a platform
+the project has not enabled — nothing here bypasses the switch chain above. It is
+also idempotent: only rows still `DRAFT` are touched, so a repeated
+materialization (the retry / reconcile paths) never re-commits an already-`QUEUE`
+post.
+
+**Best-effort.** Wrapped the same way the alignment call beside it is — a
+generation that succeeded must not be reported as failed because the commit
+could not run; a failure is logged and the posts simply stay `DRAFT`, recoverable
+the normal way (an explicit `commit: true`, or the OFF→ON edge above).
+
 ### Per-platform publish time window
 
 Three tiers, most specific wins: **project window → admin platform override →
@@ -656,7 +688,7 @@ Three times, and all three are needed — none of them subsumes another:
 
 | When | Scope | Why it cannot be dropped |
 | --- | --- | --- |
-| **Plan generation** (`POST /projects/:projectId/operation-plans`) | that plan's DRAFTs | Without it the calendar shows the generator's own times, which then silently change at commit. What the user sees should be when the post goes out. Generation never touches QUEUE — committing a post is a decision it has no business revisiting. |
+| **Plan generation** (`POST /projects/:projectId/operation-plans`) | that plan's DRAFTs | Without it the calendar shows the generator's own times, which then silently change at commit. What the user sees should be when the post goes out. This pass itself still only ever touches `DRAFT`s — but generation as a whole now also *commits* those aligned drafts when Automation is already active; see [Plan (re)generation also commits](#plan-regeneration-also-commits). |
 | **Saving publishing settings** (this endpoint) and the master switch going **OFF→ON** | the project's DRAFTs, then its QUEUE | The window that matters is the one that exists *now*; a window edited after generation has to reach the posts already scheduled. DRAFTs first, because the QUEUE pass measures its gap against them — spacing against a draft that is itself about to move is spacing against a slot nobody uses. |
 | **Commit** (`commit: true`) | the committed slice | Last line of defence — the window may have changed since the save, and this is the point of no return. |
 

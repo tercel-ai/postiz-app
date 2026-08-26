@@ -163,6 +163,44 @@ describe('EngageScanIngestService.persistOpportunities', () => {
     expect(oppUpsert.mock.calls[0][0].update).not.toHaveProperty('postContent');
   });
 
+  it('refreshes authorFollowers on re-scan when the scanner reports it', async () => {
+    // On X there is no channel, so authorFollowers IS scoreAuthority. Leaving it
+    // out of the update branch is why a row that landed null stayed null through
+    // every later re-scan.
+    const { svc, oppUpsert } = build();
+    await svc.persistOpportunities('org1', null, [
+      { ...makeScoredPost(1), platform: 'x', authorFollowers: 2992 },
+    ]);
+    expect(oppUpsert.mock.calls[0][0].update.authorFollowers).toBe(2992);
+  });
+
+  it('leaves a stored authorFollowers alone when the scanner reports none', async () => {
+    // NOT `?? null` like channelFollowers: the field is optional on the ingest
+    // DTO and only X reports it, so a scanner that cannot supply it must not
+    // clear one that could. The live case is extension version skew — a build
+    // predating the relationship_counts fix reports nothing, and clobbering
+    // would wipe the count a current build just stored.
+    const { svc, oppUpsert } = build();
+    await svc.persistOpportunities('org1', null, [
+      { ...makeScoredPost(1), platform: 'x', authorFollowers: undefined },
+    ]);
+    expect(oppUpsert.mock.calls[0][0].update).not.toHaveProperty(
+      'authorFollowers'
+    );
+  });
+
+  it('still writes authorFollowers on create, including a genuine zero', async () => {
+    // 0 is a real follower count. The create branch keeps `?? null` because
+    // there is no prior value to protect there.
+    const { svc, oppUpsert } = build();
+    await svc.persistOpportunities('org1', null, [
+      { ...makeScoredPost(1), platform: 'x', authorFollowers: 0 },
+    ]);
+    const arg = oppUpsert.mock.calls[0][0];
+    expect(arg.create.authorFollowers).toBe(0);
+    expect(arg.update.authorFollowers).toBe(0);
+  });
+
   it('dedups duplicate (platform,externalPostId) within one batch → single global upsert (W3)', async () => {
     const { svc, oppUpsert, stateCreate } = build();
     const dup1 = makeScoredPost(1);
