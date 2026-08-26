@@ -60,11 +60,17 @@ An ordinary link in a tweet that also quotes one is still expanded normally.
 rows. Photos are direct CDN URLs (`https://pbs.twimg.com/media/…`); video and
 GIF resolve to the highest-bitrate MP4.
 
-Only rows ingested **after** this field shipped carry it. Re-scanning an older
-row does NOT backfill it: the upsert deliberately leaves `rawData` untouched so
-the extension's `{ mediaUrls }` cannot overwrite the whole tweet payload that
-the server-side adapter archives there. **Design every surface for "this post
-has no images", and treat images as the exception.**
+**Design every surface for "this post has no images", and treat images as the
+exception** — most rows genuinely have none.
+
+A re-scan DOES now backfill this field. It previously did not: the upsert left
+`rawData` untouched so the extension's `{ mediaUrls }` could not overwrite the
+`{ tweet, author }` payload the server-side adapter archives there. That read a
+merge as an either/or — the two paths write different keys and never collide —
+and the cost was that an existing row could never gain its images. Rows carrying
+replies are exactly the ones that cannot be deleted and re-ingested, so they had
+no route to them at all. The upsert now merges with Postgres `||` (a shallow
+jsonb merge), so the archive survives and new keys land on top.
 
 `rawData` itself is never returned. It is an archive with two different shapes
 depending on which path ingested the row, and returning it per item would bloat

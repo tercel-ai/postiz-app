@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { EngageKeyword, Prisma } from '@prisma/client';
 import {
   PrismaRepository,
+  PrismaService,
   PrismaTransaction,
 } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
 import {
@@ -398,6 +399,41 @@ export class EngageScanIngestService {
    * org and upsert ONLY the per-org state (phase 2) — the global row and its
    * intent are untouched. Returns the number of states written.
    */
+  /**
+   * Merge a scanner's rawData into the stored archive instead of replacing it.
+   *
+   * The two ingest paths write DIFFERENT keys: the server-side X adapter
+   * archives `{ tweet, author }` (the whole API payload), while the extension
+   * contributes `{ mediaUrls }` — the attachment URLs, which are the only part
+   * of rawData that is read back and served (`opportunityMediaUrls`). Those
+   * keys do not collide, so the original "leave rawData alone on update" rule
+   * was solving a conflict that does not exist: it read a merge as an
+   * either/or, and the cost was that an existing row could NEVER gain its
+   * images. Rows carrying replies are exactly the ones that cannot simply be
+   * deleted and re-ingested, so they had no route to them at all.
+   *
+   * Postgres `||` on jsonb is a shallow merge, so the archive survives and the
+   * new keys land on top — no read-modify-write, and correct whichever path
+   * wrote the row first. Skipped entirely when the scanner sent nothing, which
+   * is most posts (`mediaUrls` is absent unless the post has attachments).
+   *
+   * `model` is typed to the model accessor but is the full PrismaClient at
+   * runtime — same cast as EngageRepository.appendGenerationHistory.
+   */
+  private async _mergeRawData(
+    opportunityId: string,
+    rawData: RawPost['rawData'] | null | undefined
+  ): Promise<void> {
+    if (rawData == null || Object.keys(rawData).length === 0) return;
+    await (this._opportunity.model as unknown as PrismaService).$executeRaw`
+      UPDATE "EngageOpportunity"
+      SET "rawData" = COALESCE("rawData", '{}'::jsonb) || ${JSON.stringify(
+        rawData
+      )}::jsonb
+      WHERE "id" = ${opportunityId}
+    `;
+  }
+
   async attributeExisting(
     ctx: OrgScanContext,
     opportunities: Array<OpportunityRow>
@@ -600,25 +636,29 @@ export class EngageScanIngestService {
               },
               select: { id: true },
             });
-          if (existingByUrl) {
-            return this._opportunity.model.engageOpportunity.update({
-              where: { id: existingByUrl.id },
-              data: update,
-              select: { id: true },
-            });
-          }
+          const row = existingByUrl
+            ? await this._opportunity.model.engageOpportunity.update({
+                where: { id: existingByUrl.id },
+                data: update,
+                select: { id: true },
+              })
+            : await this._opportunity.model.engageOpportunity.upsert({
+                where: {
+                  platform_externalPostId: {
+                    platform: post.platform,
+                    externalPostId: post.externalPostId,
+                  },
+                },
+                create,
+                update,
+                select: { id: true },
+              });
 
-          return this._opportunity.model.engageOpportunity.upsert({
-            where: {
-              platform_externalPostId: {
-                platform: post.platform,
-                externalPostId: post.externalPostId,
-              },
-            },
-            create,
-            update,
-            select: { id: true },
-          });
+          // `update` above cannot carry rawData (see _mergeRawData), so a row
+          // that already existed keeps whatever archive it had. Merge it in
+          // separately.
+          await this._mergeRawData(row.id, post.rawData);
+          return row;
         })
       );
       opportunities.push(...persisted);

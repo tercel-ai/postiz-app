@@ -23,6 +23,7 @@ the server-side one is strictly poorer for X:
 |---|---|---|
 | Long-form (`note_tweet`) t.co expansion | entity set incomplete → **body keeps raw `t.co/…`** | `note_tweet_results.result.entity_set` present → expanded |
 | Attached media | not collected → `mediaUrls: []` | `collectMediaUrls()` → real CDN URLs |
+| Re-ingesting a dirty row | — | repairs `postContent` + `authorFollowers` + `mediaUrls` |
 | Author follower count | `public_metrics.followers_count` | `relationship_counts.followers` |
 
 A concrete pair of stored rows, same copied content, different paths:
@@ -31,7 +32,17 @@ A concrete pair of stored rows, same copied content, different paths:
 - `ArifAIHQ/2092059641702412560` — server v2: 50 unexpanded `t.co`, no media.
 
 So retiring the server path is also a **data-quality fix**, not only a
-risk-control one. See [`author-followers-null.md`](./author-followers-null.md)
+risk-control one.
+
+**Repairing an already-stored dirty row needs no script.** Re-ingesting the same
+post through the extension (Options ② → `Ingest to server`, or ① / ③ for a
+batch) hits the upsert's update branch, which refreshes `postContent` for
+title-less platforms (X and LinkedIn), writes `authorFollowers` when the scanner
+reports it, and merges `rawData` so `mediaUrls` lands too. It needs only an org
+token — **not** admin — while deleting a row does need admin and is refused
+outright once replies are attached. Note that `EngageOpportunity` is global
+(`@@unique([platform, externalPostId])`), so one repair fixes the row every org
+sees. See [`author-followers-null.md`](./author-followers-null.md)
 for the follower-count half of this.
 
 ---

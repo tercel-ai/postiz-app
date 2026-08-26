@@ -59,9 +59,18 @@ function build() {
   const kwFindMany = vi.fn(async () => []);
   const kwUpdate = vi.fn(async () => ({}));
   const txRun = vi.fn(async (ops: any[]) => ops);
+  // The rawData merge reaches $executeRaw on the runtime PrismaClient. Capture
+  // the tagged-template call so the test can assert BOTH that a merge happened
+  // and what it was given.
+  const executeRaw = vi.fn(async () => 1);
 
   const svc = new EngageScanIngestService(
-    { model: { engageOpportunity: { findFirst: oppFindFirst, upsert: oppUpsert, update: oppUpdate } } } as any,
+    {
+      model: {
+        engageOpportunity: { findFirst: oppFindFirst, upsert: oppUpsert, update: oppUpdate },
+        $executeRaw: executeRaw,
+      },
+    } as any,
     {
       model: {
         engageOpportunityState: {
@@ -81,6 +90,7 @@ function build() {
     oppFindFirst,
     oppUpsert,
     oppUpdate,
+    executeRaw,
     stateFindFirst,
     stateCreate,
     stateUpdate,
@@ -199,6 +209,55 @@ describe('EngageScanIngestService.persistOpportunities', () => {
     const arg = oppUpsert.mock.calls[0][0];
     expect(arg.create.authorFollowers).toBe(0);
     expect(arg.update.authorFollowers).toBe(0);
+  });
+
+  it('merges rawData instead of letting the archive block it', async () => {
+    // The two ingest paths write DIFFERENT keys — the server adapter archives
+    // { tweet, author }, the extension contributes { mediaUrls } — so `||`
+    // keeps both. The old rule left rawData untouched on update, which read a
+    // merge as an either/or and meant an existing row could never gain images.
+    const { svc, executeRaw } = build();
+    await svc.persistOpportunities('org1', null, [
+      {
+        ...makeScoredPost(1),
+        platform: 'x',
+        rawData: { mediaUrls: ['https://pbs.twimg.com/media/a.jpg'] },
+      } as any,
+    ]);
+    expect(executeRaw).toHaveBeenCalledOnce();
+    // The payload the merge was handed, regardless of template chunking.
+    const args = executeRaw.mock.calls[0].flat().map(String).join(' ');
+    expect(args).toContain('mediaUrls');
+    expect(args).toContain('https://pbs.twimg.com/media/a.jpg');
+  });
+
+  it('performs a shallow merge, not a replace', async () => {
+    // Pinned on the SQL: `||` is what preserves { tweet, author }. A plain
+    // assignment here would silently discard the server-side archive, which is
+    // still the only way to diagnose what the X API returned for a row.
+    const { svc, executeRaw } = build();
+    await svc.persistOpportunities('org1', null, [
+      { ...makeScoredPost(1), platform: 'x', rawData: { mediaUrls: ['a.jpg'] } } as any,
+    ]);
+    const sql = executeRaw.mock.calls[0][0].join('?');
+    expect(sql).toContain('||');
+    expect(sql).toContain(`COALESCE("rawData", '{}'::jsonb)`);
+  });
+
+  it('skips the extra write when the scanner sent no rawData', async () => {
+    // Most posts have no attachments, so this is the common path — it must not
+    // cost a second UPDATE per row.
+    const { svc, executeRaw } = build();
+    await svc.persistOpportunities('org1', null, [makeScoredPost(1)]);
+    expect(executeRaw).not.toHaveBeenCalled();
+  });
+
+  it('skips an empty rawData object too', async () => {
+    const { svc, executeRaw } = build();
+    await svc.persistOpportunities('org1', null, [
+      { ...makeScoredPost(1), rawData: {} } as any,
+    ]);
+    expect(executeRaw).not.toHaveBeenCalled();
   });
 
   it('dedups duplicate (platform,externalPostId) within one batch → single global upsert (W3)', async () => {
