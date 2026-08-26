@@ -95,7 +95,20 @@ describe('EngageRepository.claimDueEngageReplies — what it will not pick up', 
     // per (project, platform), so a claim spanning projects would be answering
     // for gates it never checked.
     expect(where.projectId).toBe('proj-1');
-    expect(where.opportunity).toEqual({ platform: 'reddit' });
+    expect(where.opportunity).toMatchObject({ platform: 'reddit' });
+  });
+
+  it('will not re-offer a reply whose target has no address', async () => {
+    const { repo, sentFindMany } = buildRepo();
+
+    await repo.claimDueEngageReplies('org-1', 'proj-1', 'reddit', opts);
+
+    // Claiming one of these succeeds, the poster then fails for want of a URL,
+    // and the record stays QUEUE — so the next lease cycle offers it again,
+    // forever. Excluded from the claim itself, not left to the executor.
+    expect(sentFindMany.mock.calls[0][0].where.opportunity.externalPostUrl).toEqual({
+      not: '',
+    });
   });
 });
 

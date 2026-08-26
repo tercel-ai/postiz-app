@@ -2635,6 +2635,36 @@ describe('EngageRepository — two-table reads', () => {
     });
   });
 
+  describe('pickAutoReplyCandidates', () => {
+    it('never offers an opportunity with no address for drafting', async () => {
+      const findMany = vi.fn(async () => []);
+      const oppState = { model: { engageOpportunityState: { findMany } } } as any;
+      const repo = new EngageRepository(
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        oppState, // _oppState
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any
+      );
+
+      await repo.pickAutoReplyCandidates('org1', 'proj-1', 'linkedin', { limit: 1 });
+
+      // Drafting is where the money is spent. An opportunity that cannot be
+      // replied to has to be excluded HERE — excluding it at send time means
+      // every poll has already paid an LLM to write a reply the poster can only
+      // refuse.
+      const where = findMany.mock.calls[0][0].where;
+      expect(where.opportunity.externalPostUrl).toEqual({ not: '' });
+    });
+  });
+
   describe('countEligibleOpportunities', () => {
     it('counts NEW, currently-matched opportunities not yet replied to for this project — same shape pickAutoReplyCandidates picks from', async () => {
       const count = vi.fn(async () => 9);
@@ -2668,8 +2698,46 @@ describe('EngageRepository — two-table reads', () => {
       expect(where.opportunity).toEqual({
         deletedAt: null,
         platform: 'x',
+        externalPostUrl: { not: '' },
         sentReplies: { none: { organizationId: 'org1', projectId: 'proj-1' } },
       });
+    });
+
+    it('asks the database exactly what pickAutoReplyCandidates asks', async () => {
+      // The doc comment on countEligibleOpportunities promises the two can
+      // "never disagree about what eligible means". Asserting the two clauses
+      // against each other keeps that true: a filter added to one and forgotten
+      // on the other fails HERE, rather than shipping a status panel that counts
+      // work the driver will never hand out.
+      const mk = (fn: any) =>
+        new EngageRepository(
+          {} as any,
+          {} as any,
+          {} as any,
+          {} as any,
+          { model: { engageOpportunityState: fn } } as any,
+          {} as any,
+          {} as any,
+          {} as any,
+          {} as any,
+          {} as any,
+          {} as any,
+          {} as any
+        );
+
+      const count = vi.fn(async () => 0);
+      const findMany = vi.fn(async () => []);
+      await mk({ count }).countEligibleOpportunities('org1', 'proj-1', 'x', {
+        minScore: 70,
+      });
+      await mk({ findMany }).pickAutoReplyCandidates('org1', 'proj-1', 'x', {
+        limit: 5,
+        minScore: 70,
+      });
+
+      expect(count.mock.calls[0][0].where).toEqual(
+        findMany.mock.calls[0][0].where
+      );
     });
 
     it('omits the score filter when minScore is not supplied', async () => {

@@ -230,6 +230,31 @@ export class EngageScanIngestService {
   }
 
   /**
+   * Drop posts carrying no address.
+   *
+   * An opportunity with an empty `externalPostUrl` cannot be replied to, and
+   * nothing downstream notices: the reply driver picks it up, pays an LLM to
+   * write a reply, queues it, and only the in-browser poster discovers there is
+   * nowhere to send it — once per lease cycle, forever, because the record
+   * never leaves QUEUE. LinkedIn's SDUI search layout produced exactly this
+   * (see EngageOpportunity 8007f51d), and a `sdui-` id cannot be repaired back
+   * into an address, so the row is unrecoverable once written.
+   *
+   * The empty string also poisons the dedup in persistOpportunities, whose URL
+   * key is `<platform>:<externalPostUrl>` — every addressless row of one
+   * platform collapses onto the same key and silently overwrites the last.
+   *
+   * The extension is fixed not to send these (linkedin/dom.ts toScanIngestPost),
+   * but old builds stay installed, and the Temporal path has its own scrapers.
+   */
+  filterAddressless<T extends { platform: string; externalPostUrl: string }>(
+    posts: T[]
+  ): { kept: T[]; dropped: number } {
+    const kept = posts.filter((p) => !!p.externalPostUrl?.trim());
+    return { kept, dropped: posts.length - kept.length };
+  }
+
+  /**
    * Score a scan unit's raw posts for ONE org: mark posts from the org's tracked
    * accounts / monitored subreddits (the +tracked bonus), run the keyword
    * scorer (hard keyword filter + scoring), and keep only posts at/above
@@ -315,7 +340,21 @@ export class EngageScanIngestService {
     // the MIN_SCORE gate will drop (the low buckets), then gate for persistence.
     const allScored = this.scoreAllForOrg(posts, ctx);
     this.recordScoreDistribution(ctx.organizationId, 'scanned', allScored);
-    const gated = allScored.filter((p) => p.score >= MIN_SCORE);
+    // Addresslessness gate BEFORE intent classification, for the same reason as
+    // the TTL gate below: a post with no address can never be replied to, so
+    // paying an LLM to classify it buys nothing. persistOpportunities repeats
+    // this as the authoritative gate — but it would then see nothing to report,
+    // so the drop is logged HERE, where the extension path actually loses rows.
+    const { kept: gated, dropped: addressless } = this.filterAddressless(
+      allScored.filter((p) => p.score >= MIN_SCORE)
+    );
+    if (addressless) {
+      console.warn('[engage][ingest] dropped addressless posts', {
+        orgId: ctx.organizationId,
+        projectId: ctx.projectId,
+        dropped: addressless,
+      });
+    }
     if (!gated.length) return 0;
     // TTL gate BEFORE intent classification: an already-expired post must not
     // cost an LLM call. `persisted` telemetry then counts what really persists.
@@ -512,7 +551,19 @@ export class EngageScanIngestService {
     // written is here, immediately before the writes.
     const { kept: fresh } = await this.filterExpiredByPublishTime(rawPosts);
     if (!fresh.length) return;
-    const normalizedPosts = fresh.map(normalizeExternalPost);
+    // Same reasoning as the TTL gate above, and the same reason it is repeated
+    // here: ingestForOrg filters before paying for intent classification, but
+    // the Temporal scan activity calls this method directly, so this is the
+    // only gate both write paths are guaranteed to pass.
+    const { kept: addressed, dropped: addressless } = this.filterAddressless(fresh);
+    if (addressless) {
+      console.warn(
+        '[engage][ingest] dropped addressless posts',
+        { orgId, projectId, dropped: addressless }
+      );
+    }
+    if (!addressed.length) return;
+    const normalizedPosts = addressed.map(normalizeExternalPost);
 
     // Dedup by the GLOBAL natural key so the same post id/URL appearing twice in one
     // unit's yield (overlapping pages on X since_id / Reddit `after`) does not

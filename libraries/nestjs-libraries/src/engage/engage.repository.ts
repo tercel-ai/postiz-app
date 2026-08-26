@@ -2086,7 +2086,13 @@ export class EngageRepository {
       // window and the minimum gap are per (project, platform), and a claim that
       // spanned projects would be answering for gates it never checked.
       projectId,
-      opportunity: { platform },
+      // An opportunity with no address cannot be replied to, and re-offering it
+      // is not harmless: the claim succeeds, the extension fails at the poster,
+      // the record stays QUEUE, and the next lease cycle offers it again — the
+      // loop behind EngageOpportunity 8007f51d. Excluded here rather than left
+      // to the executor so the row simply stops being handed out; repairing its
+      // address (admin URL repair) puts it straight back in the queue.
+      opportunity: { platform, externalPostUrl: { not: '' } },
       post: {
         state: 'QUEUE',
         deletedAt: null,
@@ -2176,6 +2182,12 @@ export class EngageRepository {
         opportunity: {
           deletedAt: null,
           platform,
+          // Drafting is where the money is spent, so an address that cannot be
+          // replied to has to be excluded HERE, not at send time — otherwise
+          // every poll pays an LLM to write a reply that the poster can only
+          // refuse. Empty addresses used to reach ingest from LinkedIn's SDUI
+          // search layout; they are now dropped on the way in as well.
+          externalPostUrl: { not: '' },
           // No reply record for THIS project yet (another project replying to the
           // same global post is fine — state is per-org/project).
           sentReplies: { none: { organizationId, projectId } },
@@ -2244,6 +2256,10 @@ export class EngageRepository {
         opportunity: {
           deletedAt: null,
           platform,
+          // Mirrors pickAutoReplyCandidates. Without it this reports work the
+          // pick will never hand out, which is precisely the disagreement the
+          // doc comment above promises cannot happen.
+          externalPostUrl: { not: '' },
           sentReplies: { none: { organizationId, projectId } },
         },
       },
@@ -4132,6 +4148,12 @@ export class EngageRepository {
           externalPostUrl: true,
           postContent: true,
           authorDisplayName: true,
+          // The repair handle for a row that stored no address at all: its
+          // author's recent-activity page is a post list the extension can
+          // re-read and match the stored content against. Without it those rows
+          // are unrepairable, and they are exactly the ones that reach the reply
+          // queue with nowhere to send to.
+          authorUsername: true,
           postPublishedAt: true,
         },
       }),

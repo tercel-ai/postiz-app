@@ -523,3 +523,60 @@ describe('EngageScanIngestService.updateKeywordHitCounts', () => {
     expect(txRun).not.toHaveBeenCalled();
   });
 });
+
+describe('EngageScanIngestService — addressless posts', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('never persists a post with no externalPostUrl', async () => {
+    const { svc, oppUpsert } = build();
+
+    await svc.persistOpportunities('org1', null, [
+      { ...makeScoredPost(1), externalPostUrl: '' },
+    ] as any);
+
+    // The whole failure this gate exists for: such a row cannot be replied to,
+    // yet the reply driver would pick it up, pay to draft a reply, queue it,
+    // and only the in-browser poster would find there is nowhere to send it —
+    // every lease cycle, forever, since the record never leaves QUEUE.
+    expect(oppUpsert).not.toHaveBeenCalled();
+  });
+
+  it('treats a whitespace-only address as no address', async () => {
+    const { svc, oppUpsert } = build();
+
+    await svc.persistOpportunities('org1', null, [
+      { ...makeScoredPost(1), externalPostUrl: '   ' },
+    ] as any);
+
+    expect(oppUpsert).not.toHaveBeenCalled();
+  });
+
+  it('keeps the addressed posts in a mixed batch', async () => {
+    const { svc, oppUpsert } = build();
+
+    await svc.persistOpportunities('org1', null, [
+      { ...makeScoredPost(1), externalPostUrl: '' },
+      makeScoredPost(2),
+    ] as any);
+
+    // One bad row must not cost the scan its good ones — and, before this gate,
+    // two addressless rows in ONE batch also collapsed onto the same dedup key
+    // (`<platform>:<externalPostUrl>`) and silently overwrote each other.
+    expect(oppUpsert).toHaveBeenCalledTimes(1);
+    expect(
+      oppUpsert.mock.calls[0][0].where.platform_externalPostId.externalPostId
+    ).toBe('t3_2');
+  });
+
+  it('reports what it dropped', () => {
+    const { svc } = build();
+
+    const { kept, dropped } = svc.filterAddressless([
+      { platform: 'linkedin', externalPostUrl: '' },
+      { platform: 'linkedin', externalPostUrl: 'https://www.linkedin.com/feed/update/urn:li:activity:1/' },
+    ]);
+
+    expect(dropped).toBe(1);
+    expect(kept).toHaveLength(1);
+  });
+});

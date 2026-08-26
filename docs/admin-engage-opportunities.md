@@ -20,8 +20,20 @@ A list page has no comment box. Every reply generated against those rows failed
 to post, and the poster's failure path surfaced (rather than closed) its tab —
 hence the browser filling up with `/company/<slug>/posts/` tabs.
 
-The scraper is fixed. Rows already stored keep the wrong address until
-something rewrites them.
+A second, worse shape came from LinkedIn's SDUI search layout, which exposes
+neither a `data-urn` nor a permalink: those rows were stored with
+`externalPostUrl = ''`. Nothing downstream refused them — the reply driver
+picked them up, **paid** to draft a reply, queued it, and only the in-browser
+poster discovered there was nowhere to send it ("A LinkedIn post URL is required
+to thread onto"). The record never leaves `QUEUE`, so the next lease cycle
+offered it again, indefinitely. `EngageOpportunity 8007f51d` is the worked
+example.
+
+Both are fixed at the source now — the scraper no longer takes a list page for a
+permalink, `toScanIngestPost` drops a row it cannot address, ingest drops one
+that arrives anyway, and the reply driver excludes addressless opportunities
+from both drafting and claiming. Rows already stored keep their bad address
+until something rewrites them.
 
 **Quora stores a scraped `href` too** (`scan.quora.ts`), so the list endpoint is
 platform-filtered rather than LinkedIn-only. Repair is currently LinkedIn-only:
@@ -79,6 +91,7 @@ Auth header is the one the extension already sends:
       "externalPostUrl": "https://www.linkedin.com/company/krovacloud/posts/",
       "postContent": "Not every website needs a DevOps engineer…",
       "authorDisplayName": "Krova Cloud",
+      "authorUsername": "krovacloud",
       "postPublishedAt": "2026-08-18T16:14:59.473Z",
       "replyCount": 2
     }
@@ -94,6 +107,10 @@ Auth header is the one the extension already sends:
 - `postContent` is compared against the live page during repair, so send the
   stored text as-is (including its `… more` truncation); the extension
   normalises before comparing.
+- `authorUsername` is the `/in/<handle>` the repair falls back to. A row that
+  stored NO address has no list of its own to search, and the author's
+  recent-activity page is one — without this field those rows are unrepairable.
+  Omit it only when the platform genuinely has no such handle.
 - `total` is the count matching the filter, so the UI can page without guessing.
 
 **Suggested `onlyBrokenUrls` predicate**
@@ -104,12 +121,21 @@ Auth header is the one the extension already sends:
 ```
 
 Include `sdui-` rows. They are NOT a dead end: their id is a hash that resolves
-to nothing, but the wrong address they stored is the company's post LIST, and
-the post is usually still on it. The extension re-scrapes that list and matches
-the card by `postContent`, which is why `postContent` must be sent as-is — it is
-the only handle those rows have. Rows that genuinely cannot be recovered come
-back as `unresolved` or `unrepairable`, so an operator still learns how many
-need doing by hand.
+to nothing, so recovery works by re-reading a post LIST and matching the card by
+`postContent` — which is why `postContent` must be sent as-is. Two lists serve,
+in this order:
+
+1. **The address the row stored**, when it is a company / school / showcase post
+   list. That is the page the row was scraped from, so the post is usually still
+   on it.
+2. **The author's recent-activity page**, when the row stored no address at all
+   (`externalPostUrl = ''`). This is the case that matters most: those rows are
+   the ones that reach the reply queue with nowhere to send to, so a reply is
+   drafted, charged, queued — and can only ever fail. Recovering them needs
+   `authorUsername`, which is why the list endpoint returns it.
+
+Rows that genuinely cannot be recovered come back as `unresolved` or
+`unrepairable`, so an operator still learns how many need doing by hand.
 
 ---
 
