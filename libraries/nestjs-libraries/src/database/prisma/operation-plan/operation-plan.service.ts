@@ -474,6 +474,25 @@ export class OperationPlanService implements OnApplicationBootstrap {
           OperationPlanService.failureReason(err)
       );
     }
+    // Mirrors AutomationService's "switching the feature ON commits" rule for
+    // the opposite edge: a project whose Automation is ALREADY on when this
+    // plan (re)materializes has no OFF->ON transition to trigger a commit, so
+    // without this call its fresh DRAFTs would sit stranded forever — nothing
+    // else ever queues them. Safe to call unconditionally and on every re-run:
+    // schedulePlanPosts no-ops when publishing is off, and only ever touches
+    // rows still in DRAFT.
+    try {
+      await this._postsService.schedulePlanPosts(
+        plan.organizationId,
+        plan.id,
+        plan.projectId
+      );
+    } catch (err) {
+      this.logger.warn(
+        `Auto-commit failed for plan ${plan.id} (posts stay in DRAFT): ` +
+          OperationPlanService.failureReason(err)
+      );
+    }
   }
 
   // Seed the admin-editable knobs so they exist as rows (with description +
