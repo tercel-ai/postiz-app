@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   ExtensionVersionGuard,
   compareVersions,
+  readMinExtensionVersion,
   MIN_EXTENSION_VERSION_KEY,
 } from '../extension-version.guard';
 
@@ -143,5 +144,34 @@ describe('compareVersions', () => {
     // trust with the current contract.
     expect(compareVersions('1.x.0', '1.0.0')).toBe(0);
     expect(compareVersions('nonsense', '0.0.1')).toBe(-1);
+  });
+});
+
+// Shared with `/public/extension/latest`, which publishes the same floor in its
+// body. These cases exist at this level (and not only through the guard)
+// because a second, disagreeing reading is the one failure the mechanism cannot
+// survive: the endpoint would tell a client it is fine while every other call
+// refuses it.
+describe('readMinExtensionVersion', () => {
+  const settings = (value: unknown, opts: { throws?: boolean } = {}) =>
+    ({
+      get: async () => {
+        if (opts.throws) throw new Error('settings down');
+        return value;
+      },
+    } as any);
+
+  it('returns the stored floor, trimmed', async () => {
+    expect(await readMinExtensionVersion(settings('  2.0.0 '))).toBe('2.0.0');
+  });
+
+  it('falls back to the built-in floor when nothing is stored', async () => {
+    expect(await readMinExtensionVersion(settings(undefined))).toBe('1.10.0');
+  });
+
+  it('returns no floor at all when the settings read FAILS', async () => {
+    // Not the default: a gate that cannot read its configuration must not
+    // enforce it, and the endpoint must not publish a floor nobody enforces.
+    expect(await readMinExtensionVersion(settings(null, { throws: true }))).toBe('');
   });
 });

@@ -42,6 +42,46 @@ export const MIN_EXTENSION_VERSION_KEY = 'extension_min_version';
 export const DEFAULT_MIN_EXTENSION_VERSION = '1.10.0';
 
 /**
+ * Read the configured floor, or `''` when it must not be enforced.
+ *
+ * Three outcomes, and the difference between two of them is load-bearing:
+ *
+ *   - a stored value  → that floor;
+ *   - nothing stored  → `DEFAULT_MIN_EXTENSION_VERSION`, the intended floor;
+ *   - a read FAILURE  → `''`, no floor at all.
+ *
+ * The last is not the same as the second. Falling back to the default on a
+ * failure would let a settings outage start REFUSING clients — a gate that
+ * cannot read its own configuration must not enforce it. Nothing behind the
+ * gate is protected by it, so failing open costs a stale client one more poll,
+ * while failing closed costs every user their automation.
+ *
+ * An empty stored value is honoured as "no floor" — that is how an operator
+ * turns the gate off without deleting the key.
+ *
+ * Free function rather than a guard method because `/public/extension/latest`
+ * publishes the same floor in its body, and two readings of "what is the floor"
+ * that can disagree is the one failure this whole mechanism cannot survive: the
+ * endpoint would tell a client it is fine while the guard refuses it.
+ */
+export async function readMinExtensionVersion(
+  settings: SettingsService,
+  logger?: Logger
+): Promise<string> {
+  try {
+    const stored = await settings.get<string>(MIN_EXTENSION_VERSION_KEY);
+    return typeof stored === 'string' ? stored.trim() : DEFAULT_MIN_EXTENSION_VERSION;
+  } catch (err) {
+    logger?.warn(
+      `Could not read ${MIN_EXTENSION_VERSION_KEY}; serving without a version floor: ${
+        err instanceof Error ? err.message : err
+      }`
+    );
+    return '';
+  }
+}
+
+/**
  * Refuses requests from extension builds older than the configured floor.
  *
  * The problem it solves: the extension runs in browsers nobody controls, on
@@ -80,7 +120,7 @@ export class ExtensionVersionGuard implements CanActivate {
     const version = request.headers?.[EXTENSION_VERSION_HEADER];
     if (typeof version !== 'string' || !version) return true;
 
-    const floor = await this._readFloor();
+    const floor = await readMinExtensionVersion(this._settings, this.logger);
     if (!floor) return true;
 
     // Tell every extension caller the floor, whether or not it clears it. This
@@ -105,36 +145,6 @@ export class ExtensionVersionGuard implements CanActivate {
       // number standing in for one.
       426
     );
-  }
-
-  /**
-   * Three outcomes, and the difference between two of them is load-bearing:
-   *
-   *   - a stored value  → that floor;
-   *   - nothing stored  → `DEFAULT_MIN_EXTENSION_VERSION`, the intended floor;
-   *   - a read FAILURE  → `''`, no floor at all.
-   *
-   * The last is not the same as the second. Falling back to the default on a
-   * failure would let a settings outage start REFUSING clients — a gate that
-   * cannot read its own configuration must not enforce it. Nothing behind this
-   * gate is protected by it, so failing open costs a stale client one more poll,
-   * while failing closed costs every user their automation.
-   *
-   * An empty stored value is honoured as "no floor" — that is how an operator
-   * turns the gate off without deleting the key.
-   */
-  private async _readFloor(): Promise<string> {
-    try {
-      const stored = await this._settings.get<string>(MIN_EXTENSION_VERSION_KEY);
-      return typeof stored === 'string' ? stored.trim() : DEFAULT_MIN_EXTENSION_VERSION;
-    } catch (err) {
-      this.logger.warn(
-        `Could not read ${MIN_EXTENSION_VERSION_KEY}; serving without a version floor: ${
-          err instanceof Error ? err.message : err
-        }`
-      );
-      return '';
-    }
   }
 }
 

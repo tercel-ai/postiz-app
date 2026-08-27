@@ -26,6 +26,7 @@ import { EngageEntitlementService } from '@gitroom/nestjs-libraries/engage/engag
 import { EngageScanConfigService } from '@gitroom/nestjs-libraries/engage/engage-scan-config.service';
 import { PostOverageService } from '@gitroom/nestjs-libraries/database/prisma/posts/post-overage.service';
 import { PostPlanLimitsService } from '@gitroom/nestjs-libraries/database/prisma/posts/post-plan-limits.service';
+import { readMinExtensionVersion } from '@gitroom/backend/services/extension/extension-version.guard';
 import { Readable, pipeline } from 'stream';
 import { promisify } from 'util';
 
@@ -80,13 +81,34 @@ export class PublicController {
     };
   }
 
+  /**
+   * The published builds, plus the floor the API enforces.
+   *
+   * `minVersion` is the SAME value `ExtensionVersionGuard` compares against —
+   * read through the shared `readMinExtensionVersion` so the two can never
+   * disagree, which would have this endpoint telling a client it is fine while
+   * every other call refuses it. `''` means the gate is off (or its settings
+   * read failed) and is returned as null: "no floor stated", not "floor zero".
+   *
+   * Why the body and not only the response header: the header is set by the
+   * guard, and only for requests that ANNOUNCE a version. This route is
+   * unauthenticated, so it is the one call a fresh or logged-out install can
+   * make — and `chrome.version` next to `minVersion` is what lets the extension
+   * distinguish "a newer build exists" from "this build is about to be
+   * refused". The web app's download button reads the same payload.
+   */
   @Get('/extension/latest')
   async getExtensionLatest() {
-    const [chrome, firefox] = await Promise.all([
+    const [chrome, firefox, minVersion] = await Promise.all([
       this._settingsService.get<Record<string, string>>('extension.chrome'),
       this._settingsService.get<Record<string, string>>('extension.firefox'),
+      readMinExtensionVersion(this._settingsService),
     ]);
-    return { chrome: chrome ?? null, firefox: firefox ?? null };
+    return {
+      chrome: chrome ?? null,
+      firefox: firefox ?? null,
+      minVersion: minVersion || null,
+    };
   }
 
   @Post('/agent')
