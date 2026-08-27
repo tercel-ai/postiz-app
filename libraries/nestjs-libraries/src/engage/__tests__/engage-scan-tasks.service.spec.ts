@@ -3,6 +3,7 @@ import {
   EngageScanTasksService,
   buildTrackedKeywordQuery,
   buildRedditChannelKeywordQuery,
+  ingestDropReason,
 } from '../engage-scan-tasks.service';
 import { DEFAULT_SCAN_PACING } from '../engage-scan-config.service';
 import { markEngageScanWork } from '../engage-scan-hint';
@@ -660,5 +661,60 @@ describe('buildRedditChannelKeywordQuery', () => {
   it('produces a query usable as a Reddit search q param (no from: prefix)', () => {
     const result = buildRedditChannelKeywordQuery(['openai', 'claude']);
     expect(result).not.toMatch(/^from:/);
+  });
+});
+
+// A completed unit that stores nothing reports `accepted: 0`, which conflates
+// five unrelated causes. These assert that each one is distinguishable from the
+// response alone — the executor has no other view into the fan-out.
+describe('ingestDropReason', () => {
+  it('is silent when anything was stored', () => {
+    expect(
+      ingestDropReason({ rawCount: 10, staleFiltered: 8, ctxCount: 1, accepted: 2 })
+    ).toBeUndefined();
+  });
+
+  it('names the TTL gate when every post is expired', () => {
+    // The real Quora case: 10 answers scanned, youngest 90 days old, all
+    // dropped before the fan-out ever ran.
+    const reason = ingestDropReason({
+      rawCount: 10,
+      staleFiltered: 10,
+      ctxCount: 1,
+      accepted: 0,
+    });
+    expect(reason).toContain('all 10');
+    expect(reason).toContain('opportunity TTL');
+  });
+
+  it('reports an empty scrape as such, not as a TTL drop', () => {
+    expect(
+      ingestDropReason({ rawCount: 0, staleFiltered: 0, ctxCount: 1, accepted: 0 })
+    ).toBe('the scanner returned no posts');
+  });
+
+  it('names the missing subscriber when no org config claims the unit', () => {
+    expect(
+      ingestDropReason({ rawCount: 5, staleFiltered: 0, ctxCount: 0, accepted: 0 })
+    ).toContain('no enabled engage config');
+  });
+
+  it('falls back to the per-org keyword/score gates', () => {
+    expect(
+      ingestDropReason({ rawCount: 5, staleFiltered: 0, ctxCount: 2, accepted: 0 })
+    ).toBe('none of the remaining 5 matched a keyword or cleared the score gate');
+  });
+
+  it('reports BOTH gates when the TTL took only some of the posts', () => {
+    // Losing 8 of 10 to the TTL and the last 2 to keywords is a different fix
+    // from losing all 10 to either one alone, so both numbers have to survive.
+    const reason = ingestDropReason({
+      rawCount: 10,
+      staleFiltered: 8,
+      ctxCount: 1,
+      accepted: 0,
+    });
+    expect(reason).toContain('8 of 10');
+    expect(reason).toContain('remaining 2');
   });
 });

@@ -33,6 +33,48 @@ import {
 
 // X SearchTimeline query budget. Keep under 512 (X hard cap); leave headroom
 // for the `from:username ` prefix (~20 chars) and ` -filter:retweets` suffix.
+/**
+ * Why a completed scan unit stored nothing — `undefined` when it stored something.
+ *
+ * `accepted: 0` is the single number the executor gets back, and it has at least
+ * five causes that need five different fixes: every post past its platform TTL,
+ * no org subscribing to the unit, no keyword match, everything under the score
+ * gate, or rows with no address. The counters that tell them apart already exist
+ * inside ingestCompleted and already reach the server log — but the log is only
+ * readable by someone with shell access, while the person who can act on it is
+ * the one clicking Run in the extension panel. This lifts the distinction into
+ * the response.
+ *
+ * The TTL cause is reported first and unconditionally because it runs BEFORE the
+ * fan-out, so it is org-independent and always attributable. The keyword/score
+ * causes are per-org (one unit can serve several orgs with different keyword
+ * sets), so they are reported together as one un-attributed sentence rather than
+ * claiming a number that belongs to whichever org happened to be last in the
+ * loop. Splitting those two needs a notion of "the requesting org" that
+ * ingestCompleted does not currently have.
+ *
+ * Exported for tests.
+ */
+export function ingestDropReason(args: {
+  rawCount: number;
+  staleFiltered: number;
+  ctxCount: number;
+  accepted: number;
+}): string | undefined {
+  const { rawCount, staleFiltered, ctxCount, accepted } = args;
+  if (accepted > 0) return undefined;
+  if (!rawCount) return 'the scanner returned no posts';
+  if (staleFiltered >= rawCount) {
+    return `all ${rawCount} scanned posts are older than this platform's opportunity TTL`;
+  }
+  if (!ctxCount) return 'no enabled engage config subscribes to this scan unit';
+  const survived = rawCount - staleFiltered;
+  const stale = staleFiltered
+    ? `${staleFiltered} of ${rawCount} posts dropped as older than the platform TTL; `
+    : '';
+  return `${stale}none of the remaining ${survived} matched a keyword or cleared the score gate`;
+}
+
 const X_TRACKED_KW_QUERY_MAX = 460;
 // Reddit search `q` cap mirrors REDDIT_QUERY_MAX_LEN in reddit-scan-adapter.ts.
 const REDDIT_CHANNEL_QUERY_MAX = 480;
@@ -243,10 +285,16 @@ export class EngageScanTasksService {
   async sync(
     orgId: string,
     body: { completed?: CompletedUnitInput; want?: number; force?: boolean; selectedUnits?: ScanUnitSelector[] }
-  ): Promise<{ accepted: number; nextTasks: EngageScanTask[] }> {
+  ): Promise<{ accepted: number; reason?: string; nextTasks: EngageScanTask[] }> {
     let accepted = 0;
+    // Why nothing was stored, when nothing was. `accepted: 0` alone has at
+    // least five distinct causes with five different fixes (TTL, keywords,
+    // score gate, addressless rows, no subscriber), and the executor cannot
+    // tell them apart — it took a hand-replayed ingest payload to find out that
+    // a Quora unit was losing every post to the TTL gate.
+    let reason: string | undefined;
     if (body.completed) {
-      accepted = await this.ingestCompleted(body.completed);
+      ({ accepted, reason } = await this.ingestCompleted(body.completed));
     }
     const want = Math.min(Math.max(1, body.want ?? DEFAULT_WANT), MAX_WANT);
     // Snapshot the fast-lane hint BEFORE claiming, so the retraction below can
@@ -269,7 +317,7 @@ export class EngageScanTasksService {
     // org-wide hint from a unit-scoped query would let the Options panel park
     // genuinely due work on the 15-min backstop.
     if (!scoped && !nextTasks.length) await clearEngageScanWork(orgId, hintToken);
-    return { accepted, nextTasks };
+    return { accepted, ...(reason ? { reason } : {}), nextTasks };
   }
 
   /**
@@ -291,13 +339,15 @@ export class EngageScanTasksService {
    * every subscribing org (server-side keyword match + persist) → advance the
    * cursor (server-DERIVED, not trusting the client) and release the lease.
    */
-  private async ingestCompleted(completed: CompletedUnitInput): Promise<number> {
+  private async ingestCompleted(
+    completed: CompletedUnitInput
+  ): Promise<{ accepted: number; reason?: string }> {
     this.logger.log(`[scan-ingest] ingestCompleted called, taskId=${completed.taskId}, posts=${completed.posts?.length ?? 0}`);
     const unit = await this._engageRepo.findScanCursorByToken(completed.taskId);
     if (!unit) {
       // Invalid / expired / rotated token, or the lease was reclaimed — ignore.
       this.logger.warn(`Ingest with stale/invalid lease token; dropped`);
-      return 0;
+      return { accepted: 0, reason: 'lease token was stale, expired or reclaimed' };
     }
 
     const rawPosts = completed.posts ?? [];
@@ -326,7 +376,7 @@ export class EngageScanTasksService {
         `Scan ingest: subscriber resolution failed for ${unit.platform}/${unit.scanType}/${unit.scanKey}: ${(err as Error).message}`
       );
       await this._lease.releaseByToken(completed.taskId).catch(() => undefined);
-      return 0;
+      return { accepted: 0, reason: 'subscriber lookup failed; unit will be retried' };
     }
 
     // Isolate per org: one org's transient ingest failure (LLM/DB) must NOT abort
@@ -346,7 +396,15 @@ export class EngageScanTasksService {
     await this._lease
       .completeByToken(completed.taskId, nextCursor)
       .catch(() => undefined);
-    return accepted;
+    return {
+      accepted,
+      reason: ingestDropReason({
+        rawCount: rawPosts.length,
+        staleFiltered,
+        ctxCount: ctxs.length,
+        accepted,
+      }),
+    };
   }
 
   /** Enumerate this org's due units, claim up to `want`, build instructions. */

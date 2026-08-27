@@ -91,5 +91,14 @@ export interface EngageScanTasksResponse {
  */
 export interface EngageScanIngestResponse {
   accepted: number;
+  /**
+   * Why `accepted` is 0, in one human sentence — absent when something was
+   * stored. Purely diagnostic: the executor must not branch on its text, only
+   * surface it. Added because `accepted: 0` conflates five unrelated causes
+   * (platform TTL, no subscriber, no keyword match, score gate, addressless
+   * rows) whose only other record is a server-side log line that the person
+   * running the scan cannot read.
+   */
+  reason?: string;
   nextTasks: EngageScanTask[];
 }
