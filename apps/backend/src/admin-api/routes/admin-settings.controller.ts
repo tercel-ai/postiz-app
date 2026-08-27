@@ -16,7 +16,7 @@ import { IntegrationManager } from '@gitroom/nestjs-libraries/integrations/integ
 import { AiPricingService } from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/ai-pricing.service';
 import { UpdateAiPricingDto } from '@gitroom/nestjs-libraries/dtos/admin/ai-pricing.dto';
 import { ListSettingsQueryDto } from '@gitroom/nestjs-libraries/dtos/admin/settings-query.dto';
-import { CreateSettingDto, UpdateSettingDto } from '@gitroom/nestjs-libraries/dtos/admin/settings-body.dto';
+import { UpdateSettingDto } from '@gitroom/nestjs-libraries/dtos/admin/settings-body.dto';
 import {
   EXTENSION_PUBLISH_SEGMENT_GAP_KEY,
   ExtensionPublishConfigService,
@@ -201,27 +201,16 @@ export class AdminSettingsController {
     return { key, value };
   }
 
-  @Post('/settings')
-  async createSetting(@Body() body: CreateSettingDto) {
-    if (RESERVED_KEYS.includes(body.key)) {
-      throw new HttpException(
-        `Setting "${body.key}" is managed by a dedicated API, use the corresponding endpoint instead`,
-        400
-      );
-    }
-    const existing = await this._settingsService.get(body.key);
-    if (existing !== null) {
-      throw new HttpException(`Setting "${body.key}" already exists, use PUT to update`, 409);
-    }
-    await this._settingsService.set(body.key, body.value, {
-      type: body.type,
-      description: body.description,
-    });
-    return { key: body.key, created: true };
-  }
-
+  /**
+   * PUT /admin/settings/:key
+   *
+   * Upsert: creates the setting if it doesn't exist yet, otherwise updates
+   * its value in place. There's no separate create-only endpoint — the
+   * underlying repository write is already a DB-level upsert, so layering a
+   * create/update distinction on top of it only added friction for callers.
+   */
   @Put('/settings/:key')
-  async updateSetting(
+  async upsertSetting(
     @Param('key') key: string,
     @Body() body: UpdateSettingDto
   ) {
@@ -231,15 +220,11 @@ export class AdminSettingsController {
         400
       );
     }
-    const existing = await this._settingsService.get(key);
-    if (existing === null) {
-      throw new HttpException(`Setting "${key}" not found, use POST to create`, 404);
-    }
     await this._settingsService.set(key, body.value, {
       type: body.type,
       description: body.description,
     });
-    return { key, updated: true };
+    return { key, upserted: true };
   }
 
   @Delete('/settings/:key')
