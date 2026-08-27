@@ -44,6 +44,7 @@ process.env.ENGAGE_DISABLE_LOCAL_NLI = 'true';
 import { NestFactory } from '@nestjs/core';
 import { Module } from '@nestjs/common';
 import { DatabaseModule } from '@gitroom/nestjs-libraries/database/prisma/database.module';
+import { getTemporalModule } from '@gitroom/nestjs-libraries/temporal/temporal.module';
 import { SettingsService } from '@gitroom/nestjs-libraries/database/prisma/settings/settings.service';
 import {
   PLATFORM_PACING_KEY,
@@ -56,7 +57,11 @@ import {
 import { ENGAGE_REPLY_PACING_KEY } from '@gitroom/nestjs-libraries/engage/engage-auto-reply.service';
 import type { PacingWindow } from '@gitroom/helpers/extension/platform-pacing';
 
-@Module({ imports: [DatabaseModule] })
+// DatabaseModule alone is not enough: it provides NotificationService, which
+// takes a TemporalService, which lives in the Temporal module. Without this the
+// context fails to build before the script's own code ever runs. `false` skips
+// connecting to a Temporal server — nothing here starts a workflow.
+@Module({ imports: [DatabaseModule, getTemporalModule(false)] })
 class ScriptModule {}
 
 interface CliArgs {
