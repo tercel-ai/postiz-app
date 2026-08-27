@@ -10,6 +10,8 @@ function createController() {
     {} as any,
     {} as any,
     {} as any,
+    {} as any,
+    {} as any,
     {} as any
   );
   return { controller, postsService };

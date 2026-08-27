@@ -25,6 +25,11 @@ function createController(mocks: ReturnType<typeof createMocks>) {
     mocks.postReleaseService as any,
     mocks.agentGraphService as any,
     mocks.shortLinkService as any,
+    // Collaborators these cases never reach; passed so the arity matches the
+    // constructor rather than relying on TS to overlook the gap.
+    {} as any, // engageEntitlement
+    {} as any, // engageScanConfig
+    {} as any, // platformPacing
   );
 }
 

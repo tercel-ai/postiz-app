@@ -25,6 +25,12 @@ function makeService(over: {
   queued?: any[];
   queuedCount?: number;
   eligibleCount?: number;
+  /** Last write on this platform by ANY track, org-wide (the floor's clock). */
+  lastPlatformWriteAt?: Date | null;
+  /** The platform floor in minutes; 0 (the default) takes it out of the way. */
+  writeFloorMinutes?: number;
+  /** Whether the platform's write window allows writing now. */
+  withinWriteWindow?: boolean;
 } = {}) {
   const repo = {
     getAutoReplyConfigs: vi.fn().mockResolvedValue(over.configs ?? []),
@@ -32,6 +38,9 @@ function makeService(over: {
     claimAutoReplyCandidate: vi.fn().mockResolvedValue(true),
     releaseAutoReplyCandidate: vi.fn().mockResolvedValue(undefined),
     getLastSentReplyAt: vi.fn().mockResolvedValue(over.lastSentAt ?? null),
+    getLastPlatformWriteAt: vi
+      .fn()
+      .mockResolvedValue(over.lastPlatformWriteAt ?? null),
     claimDueEngageReplies: vi.fn().mockResolvedValue(over.queued ?? []),
     countQueuedEngageReplies: vi.fn().mockResolvedValue(over.queuedCount ?? 0),
     countEligibleOpportunities: vi.fn().mockResolvedValue(over.eligibleCount ?? 0),
@@ -68,11 +77,28 @@ function makeService(over: {
     set: vi.fn().mockResolvedValue(undefined),
   } as any;
 
+  // The platform write floor. Defaults to 0 so the specs below exercise the
+  // per-project cadence in isolation; the cases that are ABOUT the floor
+  // override it.
+  // The driver resolves the config ONCE per call and then uses the pure
+  // variants, so the mock mirrors that shape. getPlatformPacing's return value
+  // is opaque here — the pure methods are stubbed directly.
+  const platformPacing = {
+    getPlatformPacing: vi.fn().mockResolvedValue({ default: {}, platforms: {} }),
+    getWriteFloorMinutes: vi.fn().mockResolvedValue(over.writeFloorMinutes ?? 0),
+    writeFloorMinutesFor: vi.fn().mockReturnValue(over.writeFloorMinutes ?? 0),
+    // Unconstrained by default — the out-of-the-box state. Cases about the
+    // window set it explicitly.
+    isWithinWriteWindow: vi.fn().mockResolvedValue(over.withinWriteWindow ?? true),
+    isWithinWriteWindowFor: vi.fn().mockReturnValue(over.withinWriteWindow ?? true),
+  } as any;
+
   return {
-    svc: new EngageAutoReplyService(repo, engage, draft, settings),
+    svc: new EngageAutoReplyService(repo, engage, draft, settings, platformPacing),
     repo,
     engage,
     draft,
+    platformPacing,
   };
 }
 
@@ -261,18 +287,6 @@ describe('EngageAutoReplyService.getDueReplies', () => {
     expect(opts.keywords).toBeUndefined();
   });
 
-  it('hands out nothing outside the configured active window', async () => {
-    const { svc, repo } = makeService({
-      configs: [enabledConfig],
-      budget: budgetWith(),
-      pacing: { activeHoursUtc: [9, 18] },
-    });
-
-    // 03:00 UTC — outside [9,18). Checked before any query.
-    expect(await svc.getDueReplies(org, new Date('2026-08-18T03:00:00Z'))).toEqual([]);
-    expect(repo.getAutoReplyConfigs).not.toHaveBeenCalled();
-  });
-
   it('never exceeds maxPerPoll for ONE platform, even across projects', async () => {
     const { svc } = makeService({
       configs: [
@@ -423,6 +437,144 @@ describe('EngageAutoReplyService.getDueReplies', () => {
     expect(repo.pickAutoReplyCandidates).toHaveBeenCalledWith(
       'org-1', 'proj-1', 'linkedin', expect.anything()
     );
+  });
+});
+
+describe('EngageAutoReplyService.getDueReplies — platform write window', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  const dueConfig = {
+    configs: [{ ...enabledConfig, replyPolicies: { reddit: { autoReplyEnabled: true } } }],
+    budget: budgetWith(),
+    candidates: [{ opportunityId: 'opp-1', score: 90, matchedKeywords: [] as string[] }],
+  };
+
+  it('hands out nothing outside the platform write window', async () => {
+    const { svc, repo } = makeService({ ...dueConfig, withinWriteWindow: false });
+
+    await svc.getDueReplies(org, new Date('2026-08-18T03:00:00Z'));
+
+    expect(repo.pickAutoReplyCandidates).not.toHaveBeenCalled();
+  });
+
+  it('checks the window PER PLATFORM, not once globally', async () => {
+    // It used to be one global pair of UTC hours, checked before any query — so
+    // it could neither name a timezone nor differ between platforms, while
+    // POSTING had its own per-platform window that could disagree with it.
+    const { svc, platformPacing } = makeService(dueConfig);
+
+    const now = new Date('2026-08-18T12:00:00Z');
+    await svc.getDueReplies(org, now);
+
+    // Per platform, against a config resolved ONCE for the whole call — the
+    // window used to be one global pair of UTC hours checked before any query.
+    expect(platformPacing.getPlatformPacing).toHaveBeenCalledTimes(1);
+    expect(platformPacing.isWithinWriteWindowFor).toHaveBeenCalledWith(
+      expect.anything(),
+      'reddit',
+      now
+    );
+  });
+
+  it('proceeds when the window allows it', async () => {
+    const { svc, repo } = makeService({ ...dueConfig, withinWriteWindow: true });
+
+    await svc.getDueReplies(org, new Date('2026-08-18T12:00:00Z'));
+
+    expect(repo.pickAutoReplyCandidates).toHaveBeenCalled();
+  });
+});
+
+describe('EngageAutoReplyService.getDueReplies — platform write floor', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  const dueConfig = {
+    configs: [{ ...enabledConfig, replyPolicies: { reddit: { autoReplyEnabled: true } } }],
+    budget: budgetWith(),
+    candidates: [{ opportunityId: 'opp-1', score: 90, matchedKeywords: [] as string[] }],
+  };
+
+  it('holds a reply back when ANOTHER track wrote to the platform just now', async () => {
+    // The incident, on the backend side: a post went out to this platform's
+    // account minutes ago. The project's own reply clock says "go" — it has not
+    // replied at all today — but the platform counts posts and replies against
+    // one throttle, so it must not.
+    const { svc, repo } = makeService({
+      ...dueConfig,
+      lastSentAt: null, // this project has never replied
+      lastPlatformWriteAt: new Date('2026-08-18T11:55:00Z'), // a POST, 5 min ago
+      writeFloorMinutes: 15,
+    });
+
+    await svc.getDueReplies(org, new Date('2026-08-18T12:00:00Z'));
+
+    expect(repo.pickAutoReplyCandidates).not.toHaveBeenCalled();
+  });
+
+  it('releases the reply once the floor has elapsed', async () => {
+    const { svc, repo } = makeService({
+      ...dueConfig,
+      lastSentAt: null,
+      lastPlatformWriteAt: new Date('2026-08-18T11:40:00Z'), // 20 min ago
+      writeFloorMinutes: 15,
+    });
+
+    await svc.getDueReplies(org, new Date('2026-08-18T12:00:00Z'));
+
+    expect(repo.pickAutoReplyCandidates).toHaveBeenCalled();
+  });
+
+  it('checks the floor ORG-wide, not per project', async () => {
+    // A project is our concept; the throttle belongs to the platform account,
+    // and two projects publishing to one login share it. The floor's lookup must
+    // therefore not be scoped by project — scoping it would let N projects each
+    // spend the full floor.
+    const { svc, repo } = makeService({
+      ...dueConfig,
+      lastSentAt: null,
+      lastPlatformWriteAt: new Date('2026-08-18T11:55:00Z'),
+      writeFloorMinutes: 15,
+    });
+
+    await svc.getDueReplies(org, new Date('2026-08-18T12:00:00Z'));
+
+    expect(repo.getLastPlatformWriteAt).toHaveBeenCalledWith(org.id, 'reddit');
+  });
+
+  it('does not block when nothing has ever written to the platform', async () => {
+    const { svc, repo } = makeService({
+      ...dueConfig,
+      lastSentAt: null,
+      lastPlatformWriteAt: null,
+      writeFloorMinutes: 15,
+    });
+
+    await svc.getDueReplies(org, new Date('2026-08-18T12:00:00Z'));
+
+    expect(repo.pickAutoReplyCandidates).toHaveBeenCalled();
+  });
+
+  it('a tighter project cadence cannot get under the floor', async () => {
+    // checkIntervalMinutes is a preference and may be tighter than the global
+    // default cadence — but never tighter than what the platform tolerates.
+    // This is the split that keeps `??` correct on the cadence above.
+    const { svc, repo } = makeService({
+      configs: [
+        {
+          ...enabledConfig,
+          replyPolicies: { reddit: { autoReplyEnabled: true, checkIntervalMinutes: 1 } },
+        },
+      ],
+      budget: budgetWith(),
+      candidates: [{ opportunityId: 'opp-1', score: 90, matchedKeywords: [] }],
+      lastSentAt: new Date('2026-08-18T11:58:00Z'), // 2 min — clears the 1-min cadence
+      lastPlatformWriteAt: new Date('2026-08-18T11:58:00Z'),
+      writeFloorMinutes: 15,
+    });
+
+    await svc.getDueReplies(org, new Date('2026-08-18T12:00:00Z'));
+
+    expect(repo.pickAutoReplyCandidates).not.toHaveBeenCalled();
   });
 });
 
@@ -794,6 +946,62 @@ describe('EngageAutoReplyService.getDueReplies — the queue lane', () => {
   });
 });
 
+describe('EngageAutoReplyService.getReplyQueueStatus — mirrors the dispatch gate', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('reports NOT eligible when the platform floor holds the reply, not the cadence', async () => {
+    // This row exists to EXPLAIN the dispatch gate. It used to compute
+    // eligibility from the project cadence alone, so a post published minutes
+    // earlier — which moves a clock this project never touched — left the
+    // overview saying "eligible now" while getDueReplies withheld the reply.
+    const { svc } = makeService({
+      configs: [{ ...enabledConfig, replyPolicies: { reddit: { autoReplyEnabled: true } } }],
+      lastSentAt: new Date('2026-08-18T06:00:00Z'), // 6h ago — cadence is clear
+      lastPlatformWriteAt: new Date('2026-08-18T11:55:00Z'), // a POST, 5 min ago
+      writeFloorMinutes: 15,
+      queuedCount: 2,
+    });
+
+    const rows = await svc.getReplyQueueStatus(org, new Date('2026-08-18T12:00:00Z'));
+
+    expect(rows[0]).toMatchObject({ withinMinGap: false, queuedCount: 2 });
+    // And it names WHEN, from the floor rather than the cadence.
+    expect(rows[0].nextEligibleAt).toBe(new Date('2026-08-18T12:10:00Z').toISOString());
+  });
+
+  it('reports the LATER of the cadence and the floor', async () => {
+    const { svc } = makeService({
+      configs: [{ ...enabledConfig, replyPolicies: { reddit: { autoReplyEnabled: true } } }],
+      lastSentAt: new Date('2026-08-18T11:50:00Z'), // cadence clears at 12:15 (25m)
+      lastPlatformWriteAt: new Date('2026-08-18T11:55:00Z'), // floor clears at 12:10
+      writeFloorMinutes: 15,
+    });
+
+    const rows = await svc.getReplyQueueStatus(org, new Date('2026-08-18T12:00:00Z'));
+
+    expect(rows[0].nextEligibleAt).toBe(new Date('2026-08-18T12:15:00Z').toISOString());
+  });
+
+  it('resolves the pacing config ONCE, not per row', async () => {
+    // It is a settings query, and this loop is (projects × platforms) deep.
+    const { svc, platformPacing } = makeService({
+      configs: [
+        {
+          ...enabledConfig,
+          replyPolicies: {
+            reddit: { autoReplyEnabled: true },
+            x: { autoReplyEnabled: true },
+          },
+        },
+      ],
+    });
+
+    await svc.getReplyQueueStatus(org, new Date('2026-08-18T12:00:00Z'));
+
+    expect(platformPacing.getPlatformPacing).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('EngageAutoReplyService.getReplyQueueStatus', () => {
   // Read-only: `getDueReplies` returning `{ due: [] }` cannot tell "nothing
   // eligible" apart from "something is eligible/queued but pacing is holding
@@ -833,10 +1041,13 @@ describe('EngageAutoReplyService.getReplyQueueStatus', () => {
     expect(rows).toHaveLength(0);
   });
 
-  it('reports withinActiveHours=false outside the pacing window, but still surfaces the counts', async () => {
+  it('reports withinActiveHours=false outside the write window, but still surfaces the counts', async () => {
+    // Resolved from the platform's own window now, not a global pair of UTC
+    // hours — and from the SAME call the dispatch gate makes, so this row cannot
+    // disagree with the gate it exists to explain.
     const { svc } = makeService({
       configs: [{ ...enabledConfig, replyPolicies: { reddit: { autoReplyEnabled: true } } }],
-      pacing: { activeHoursUtc: [9, 17] },
+      withinWriteWindow: false,
       queuedCount: 2,
     });
 

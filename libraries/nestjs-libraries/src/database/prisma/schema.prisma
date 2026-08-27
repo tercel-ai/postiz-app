@@ -601,6 +601,11 @@ model Post {
   @@index([operationPlanId])
   // Serves the extension publish-due scan (state + publishMethod + due date).
   @@index([state, publishMethod, publishDate])
+  // Serves getLastPlatformWriteAt's post lookup (engage.repository.ts): the
+  // platform write floor is consulted per platform on every extension reply
+  // poll, and without this the query filters a single-column index and sorts
+  // the survivors on the largest table in the schema.
+  @@index([organizationId, providerIdentifier, claimedAt])
 }
 
 enum OperationPlanStatus {
@@ -1553,6 +1558,10 @@ model EngageSentReply {
   @@index([organizationId])
   @@index([organizationId, opportunityId])
   @@index([organizationId, projectId, createdAt])
+  // getLastPlatformWriteAt drops the project scope on purpose — the throttle
+  // belongs to the platform account, not to one project — so the composite
+  // above cannot serve it (projectId is skipped, createdAt cannot be used).
+  @@index([organizationId, createdAt])
 }
 
 // Global, org-independent cursor for one scan unit. A "scan unit" is a single

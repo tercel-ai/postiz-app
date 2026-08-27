@@ -64,6 +64,7 @@ import { EngageScanTasksService } from '@gitroom/nestjs-libraries/engage/engage-
 import { EngageIntentClassifierService } from '@gitroom/nestjs-libraries/engage/engage-intent-classifier.service';
 import { EngageDraftService } from '@gitroom/nestjs-libraries/engage/engage-draft.service';
 import { EngageAutoReplyService } from '@gitroom/nestjs-libraries/engage/engage-auto-reply.service';
+import { PlatformPacingConfigService } from '@gitroom/nestjs-libraries/engage/platform-pacing-config.service';
 import { ProjectValidationService } from '@gitroom/nestjs-libraries/projects/project-validation.service';
 import { OperationPlanRepository } from '@gitroom/nestjs-libraries/database/prisma/operation-plan/operation-plan.repository';
 import { OperationPlanService } from '@gitroom/nestjs-libraries/database/prisma/operation-plan/operation-plan.service';
@@ -142,6 +143,7 @@ import { AutomationService } from '@gitroom/nestjs-libraries/automation/automati
     EngageIntentClassifierService,
     EngageDraftService,
     EngageAutoReplyService,
+    PlatformPacingConfigService,
     ProjectValidationService,
     ProjectPublishingService,
     OperationPlanRepository,

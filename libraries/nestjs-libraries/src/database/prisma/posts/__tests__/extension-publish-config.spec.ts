@@ -89,13 +89,22 @@ describe('resolveSegmentGaps', () => {
   });
 });
 
+/**
+ * The window now resolves from platform_pacing, so the service takes it as a
+ * collaborator. Cases that are not about windows get one that reports "no
+ * window configured" — the out-of-the-box state.
+ */
+const stubPacing = (pacing: any = { default: {}, platforms: {} }): any => ({
+  getPlatformPacing: vi.fn().mockResolvedValue(pacing),
+});
+
 describe('ExtensionPublishConfigService', () => {
   it('seeds the default setting once on module init', async () => {
     const settings: any = {
       get: vi.fn().mockResolvedValue(null),
       set: vi.fn().mockResolvedValue(undefined),
     };
-    const svc = new ExtensionPublishConfigService(settings);
+    const svc = new ExtensionPublishConfigService(settings, stubPacing());
     await svc.onModuleInit();
     expect(settings.set).toHaveBeenCalledWith(
       EXTENSION_PUBLISH_SEGMENT_GAP_KEY,
@@ -115,42 +124,61 @@ describe('ExtensionPublishConfigService', () => {
         .fn()
         .mockResolvedValue({ default: [15, 45], platforms: { x: [10, 40] } }),
     };
-    const svc = new ExtensionPublishConfigService(settings);
+    const svc = new ExtensionPublishConfigService(settings, stubPacing());
     const gaps = await svc.getSegmentGaps();
     expect(gaps.x).toEqual([10, 40]);
     expect(gaps.reddit).toEqual([15, 45]);
   });
 
-  it('seeds the default TIME WINDOW setting once on module init', async () => {
-    const settings: any = {
-      get: vi.fn().mockResolvedValue(null),
-      set: vi.fn().mockResolvedValue(undefined),
-    };
-    const svc = new ExtensionPublishConfigService(settings);
-    await svc.onModuleInit();
-    expect(settings.set).toHaveBeenCalledWith(
-      EXTENSION_PUBLISH_TIME_WINDOW_KEY,
-      DEFAULT_PUBLISH_TIME_WINDOW_SETTING,
-      expect.objectContaining({ type: 'object' })
-    );
-
-    settings.get.mockResolvedValue(DEFAULT_PUBLISH_TIME_WINDOW_SETTING);
-    settings.set.mockClear();
-    await svc.onModuleInit();
-    expect(settings.set).not.toHaveBeenCalled();
-  });
-
-  it('getPublishTimeWindows resolves from the stored setting', async () => {
+  it('getPublishTimeWindows resolves from platform_pacing, not the old key', async () => {
+    // The window is a statement about the ACCOUNT, so posting and replying now
+    // read the same one. The old `extension_publish.time_window` is not consulted
+    // at all — this settings stub would answer it if it were.
     const settings: any = {
       get: vi.fn().mockResolvedValue({
-        platforms: { reddit: { windowStart: '08:00', windowEnd: '20:00' } },
+        platforms: { reddit: { windowStart: '00:00', windowEnd: '01:00' } },
       }),
     };
-    const svc = new ExtensionPublishConfigService(settings);
+    const svc = new ExtensionPublishConfigService(
+      settings,
+      stubPacing({
+        default: {},
+        platforms: { reddit: { window: { windowStart: '08:00', windowEnd: '20:00' } } },
+      })
+    );
     const windows = await svc.getPublishTimeWindows();
     expect(windows).toEqual({
       reddit: { windowStart: '08:00', windowEnd: '20:00' },
     });
+  });
+
+  it('leaves a platform unconstrained when neither tier sets a window', async () => {
+    const svc = new ExtensionPublishConfigService({ get: vi.fn() } as any, stubPacing());
+    expect(await svc.getPublishTimeWindows()).toEqual({});
+  });
+
+  it('applies a global default window to every publishable platform', async () => {
+    const svc = new ExtensionPublishConfigService(
+      { get: vi.fn() } as any,
+      stubPacing({
+        default: { window: { windowStart: '09:00', windowEnd: '17:00', timezone: 'UTC' } },
+        platforms: {},
+      })
+    );
+    const windows = await svc.getPublishTimeWindows();
+    expect(Object.keys(windows).sort()).toEqual([...EXTENSION_PUBLISHABLE_PLATFORMS].sort());
+  });
+
+  it('no longer seeds the retired time_window key', async () => {
+    // Re-seeding it would re-create the second source of truth this removed.
+    const settings: any = {
+      get: vi.fn().mockResolvedValue(null),
+      set: vi.fn().mockResolvedValue(undefined),
+    };
+    const svc = new ExtensionPublishConfigService(settings, stubPacing());
+    await svc.onModuleInit();
+    const seededKeys = settings.set.mock.calls.map((c: any[]) => c[0]);
+    expect(seededKeys).not.toContain('extension_publish.time_window');
   });
 });
 

@@ -3,6 +3,8 @@ import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc';
 import timezone from 'dayjs/plugin/timezone';
 import { SettingsService } from '@gitroom/nestjs-libraries/database/prisma/settings/settings.service';
+import { PlatformPacingConfigService } from '@gitroom/nestjs-libraries/engage/platform-pacing-config.service';
+import { resolvePacingWindow } from '@gitroom/helpers/extension/platform-pacing';
 import {
   DEFAULT_SEGMENT_GAP_RANGE,
   DEFAULT_SEGMENT_GAP_S,
@@ -120,7 +122,10 @@ export const DEFAULT_SEGMENT_GAP_SETTING: SegmentGapSetting = {
 export class ExtensionPublishConfigService implements OnModuleInit {
   private readonly logger = new Logger(ExtensionPublishConfigService.name);
 
-  constructor(private readonly _settings: SettingsService) {}
+  constructor(
+    private readonly _settings: SettingsService,
+    private readonly _platformPacing: PlatformPacingConfigService
+  ) {}
 
   async onModuleInit(): Promise<void> {
     const existing = await this._settings.get(EXTENSION_PUBLISH_SEGMENT_GAP_KEY);
@@ -138,20 +143,11 @@ export class ExtensionPublishConfigService implements OnModuleInit {
       this.logger.log(`Seeded default ${EXTENSION_PUBLISH_SEGMENT_GAP_KEY}`);
     }
 
-    const existingWindow = await this._settings.get(EXTENSION_PUBLISH_TIME_WINDOW_KEY);
-    if (existingWindow === null || existingWindow === undefined) {
-      await this._settings.set(
-        EXTENSION_PUBLISH_TIME_WINDOW_KEY,
-        DEFAULT_PUBLISH_TIME_WINDOW_SETTING,
-        {
-          type: 'object',
-          description:
-            'Allowed publish clock-time window per platform: { default?: {windowStart,windowEnd,timezone}, platforms: { <platform>: {windowStart,windowEnd,timezone} } }. windowStart/windowEnd are \'HH:MM\' local to `timezone` (IANA; omitted = UTC); a window that wraps past midnight (e.g. 22:00–02:00) is honoured as a wrap. A platform with NO effective window (no override and no `default`) is unconstrained — this is the out-of-the-box state, so configuring nothing changes nothing. When a plan is activated (POST /projects/:projectId/automation/publishing), any post on a constrained platform whose materialized time falls outside its window is re-picked to a random time inside it, on the same local date. A project may narrow this window further through its own Automation settings; the project tier wins over these.',
-          defaultValue: DEFAULT_PUBLISH_TIME_WINDOW_SETTING,
-        }
-      );
-      this.logger.log(`Seeded default ${EXTENSION_PUBLISH_TIME_WINDOW_KEY}`);
-    }
+    // EXTENSION_PUBLISH_TIME_WINDOW_KEY is deliberately NOT seeded any more: the
+    // window moved to `platform_pacing`, and re-creating this key on every boot
+    // would re-create the second source of truth the move removed. The constant
+    // and `resolvePublishTimeWindows` stay only for the migration script, which
+    // reads the old key one last time before deleting it.
 
     const existingMinGap = await this._settings.get(EXTENSION_PUBLISH_MIN_GAP_KEY);
     if (existingMinGap === null || existingMinGap === undefined) {
@@ -178,14 +174,28 @@ export class ExtensionPublishConfigService implements OnModuleInit {
    * platforms that resolve to an ACTUAL window (override, or a global
    * `default`) — a platform absent from the result is unconstrained, which the
    * caller (schedulePlanPosts) reads as "leave this post's time alone".
+   *
+   * NOW READ FROM `platform_pacing`. The window is a statement about the
+   * ACCOUNT — "these are reasonable hours to write as this identity" — not about
+   * publishing in particular, and it used to be stated twice: here for posts, and
+   * as `engage_reply_pacing.activeHoursUtc` for replies. Two settings answering
+   * one question about one account could disagree, and only this one could name a
+   * timezone. Both now resolve from the same place.
+   *
+   * The signature is unchanged because `PacingWindow` and `PublishTimeWindow`
+   * are structurally identical — deliberately, so unifying the source needed no
+   * translation layer and no change at any call site.
    */
   async getPublishTimeWindows(): Promise<
     Partial<Record<PublishPlatform, PublishTimeWindow>>
   > {
-    const stored = await this._settings.get<PublishTimeWindowSetting>(
-      EXTENSION_PUBLISH_TIME_WINDOW_KEY
-    );
-    return resolvePublishTimeWindows(stored);
+    const pacing = await this._platformPacing.getPlatformPacing();
+    const out: Partial<Record<PublishPlatform, PublishTimeWindow>> = {};
+    for (const platform of EXTENSION_PUBLISHABLE_PLATFORMS) {
+      const window = resolvePacingWindow(pacing, platform);
+      if (window) out[platform] = window;
+    }
+    return out;
   }
 
   /** Effective per-platform minimum gap in minutes (see resolveMinGaps). */

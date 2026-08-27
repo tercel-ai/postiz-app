@@ -37,6 +37,7 @@ import {
   outputLengthForLength,
 } from '@gitroom/nestjs-libraries/engage/engage-draft-length';
 import { EngageAutoReplyService } from '@gitroom/nestjs-libraries/engage/engage-auto-reply.service';
+import { PlatformPacingConfigService } from '@gitroom/nestjs-libraries/engage/platform-pacing-config.service';
 import {
   AddKeywordDto,
   AddKeywordsBulkDto,
@@ -85,7 +86,8 @@ export class EngageController {
     private _engageService: EngageService,
     private _engageDraftService: EngageDraftService,
     private _scanTasksService: EngageScanTasksService,
-    private _engageAutoReplyService: EngageAutoReplyService
+    private _engageAutoReplyService: EngageAutoReplyService,
+    private _platformPacing: PlatformPacingConfigService
   ) {}
 
   // ─── Extension scan loop ──────────────────────────────────────────────────
@@ -456,8 +458,21 @@ export class EngageController {
   })
   @Post('/reply-due')
   async getDueReplies(@GetOrgFromRequest() org: Organization) {
-    const due = await this._engageAutoReplyService.getDueReplies(org);
-    return { due };
+    const [due, pacing] = await Promise.all([
+      this._engageAutoReplyService.getDueReplies(org),
+      this._platformPacing.getPlatformPacing(),
+    ]);
+    // `pacing` rides at the TOP LEVEL, not on each item, because it describes
+    // the platform account rather than any one reply — the extension installs it
+    // once and every track reads it. That is also why it is here at all: until
+    // now this endpoint sent no pacing whatsoever, so the extension could only
+    // ever enforce its own built-in floor and an operator had no way to tune it
+    // without shipping a build.
+    //
+    // Sent on EVERY poll rather than on change: the extension has no way to ask,
+    // the payload is a few hundred bytes, and a config that only arrives once is
+    // one an evicted service worker never sees again.
+    return { due, pacing };
   }
 
   /**

@@ -15,6 +15,7 @@ import {
   assertDraftWithinPlatformLimit,
   outputLengthForLength,
 } from '@gitroom/nestjs-libraries/engage/engage-draft-length';
+import { PlatformPacingConfigService } from '@gitroom/nestjs-libraries/engage/platform-pacing-config.service';
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -40,9 +41,9 @@ function isReplyBudgetGateEnabled(): boolean {
  * Whether `now` falls inside the policy's LOCAL-time window. Absent bounds mean
  * no restriction.
  *
- * Local rather than UTC because a window is a human statement ("office hours"),
- * and the global pacing setting's activeHoursUtc cannot express it for an org
- * whose day straddles midnight UTC. A window that wraps past midnight
+ * Local rather than UTC because a window is a human statement ("office hours").
+ * The account-level window in platform_pacing is the separate, wider constraint
+ * that this project-level one narrows. A window that wraps past midnight
  * (22:00–02:00) is honoured as a wrap, not treated as empty.
  */
 export function withinLocalWindow(
@@ -88,8 +89,19 @@ export interface EngageReplyPacing {
   maxPerPoll: number;
   /** Minimum spacing between two replies for the SAME project+platform. */
   minGapMinutes: number;
-  /** UTC hours [startInclusive, endExclusive) the driver may hand out work in. */
-  activeHoursUtc: [number, number];
+  /**
+   * REMOVED — the write window now lives in `platform_pacing`, per platform and
+   * in a real timezone. This field used to hold one global pair of UTC hours
+   * while publishing had its own, separate, per-platform window: two settings
+   * answering the same question about the same account, able to disagree, and
+   * only one of them able to name a timezone.
+   *
+   * Left declared as optional purely so a stored config written before the
+   * migration still type-checks on read. Nothing consults it.
+   *
+   * @deprecated migrated to platform_pacing[platform].window
+   */
+  activeHoursUtc?: [number, number];
   /**
    * Opportunities below this score are never auto-replied to.
    *
@@ -124,7 +136,8 @@ export interface EngageReplyPacing {
 export const DEFAULT_REPLY_PACING: EngageReplyPacing = {
   maxPerPoll: 1,
   minGapMinutes: 25,
-  activeHoursUtc: [0, 24],
+  // No activeHoursUtc: the write window moved to platform_pacing. Seeding it
+  // here again would re-create the second source of truth this removed.
   // 0 = defer to the ingest gate; see the field doc above.
   minScore: 0,
   claimLeaseMinutes: 30,
@@ -188,7 +201,8 @@ export class EngageAutoReplyService implements OnModuleInit {
     private _engageRepository: EngageRepository,
     private _engageService: EngageService,
     private _engageDraftService: EngageDraftService,
-    private _settingsService: SettingsService
+    private _settingsService: SettingsService,
+    private _platformPacing: PlatformPacingConfigService
   ) {}
 
   /**
@@ -206,9 +220,10 @@ export class EngageAutoReplyService implements OnModuleInit {
             type: 'json',
             description:
               'Unattended engage-reply pacing: how many drafts one poll may hand out PER ' +
-              'PLATFORM, minimum spacing per project+platform, the UTC active-hours window, the ' +
-              'minimum opportunity score, and the claim lease (how long a reply handed to a ' +
-              'browser stays spoken for before it is offered again).',
+              'PLATFORM, minimum spacing per project+platform, the minimum opportunity ' +
+              'score, and the claim lease (how long a reply handed to a browser stays ' +
+              'spoken for before it is offered again). The WRITE WINDOW is not here: it ' +
+              'moved to platform_pacing[*].window, shared with publishing.',
             defaultValue: DEFAULT_REPLY_PACING,
           }
         );
@@ -244,13 +259,19 @@ export class EngageAutoReplyService implements OnModuleInit {
    * day by construction — no separate scheduling clock needed.
    */
   async getDueReplies(org: Organization, now = new Date()): Promise<DueReply[]> {
-    const pacing = await this.getPacing();
-    const hour = dayjs.utc(now).hour();
-    const [startHour, endHour] = pacing.activeHoursUtc;
-    // Outside the configured window the driver hands out nothing. Checked before
-    // any query: the common case for a narrow window is "not now".
-    if (hour < startHour || hour >= endHour) return [];
-
+    // Both resolved ONCE. The window and the floor are consulted per
+    // (project × platform) below, and getPlatformPacing is a settings query on
+    // every call — reading it inside the loop was an N+1 on a global admin value.
+    const [pacing, pacingConfig] = await Promise.all([
+      this.getPacing(),
+      this._platformPacing.getPlatformPacing(),
+    ]);
+    // The write window is checked PER PLATFORM further down, not once here.
+    // It used to be one global pair of UTC hours (`activeHoursUtc`), which could
+    // neither name a timezone nor differ between platforms — and posting had its
+    // own, separate, per-platform window that could disagree with it. One
+    // question ("is now a reasonable hour to write as this account?") now has one
+    // answer, and it is a property of the platform, so it belongs in the loop.
     const configs = await this._engageRepository.getAutoReplyConfigs(org.id);
     if (!configs.length) return [];
 
@@ -308,17 +329,53 @@ export class EngageAutoReplyService implements OnModuleInit {
         // likely to be re-offered at 3am.
         if (!withinLocalWindow(policy, now)) continue;
 
+        // The platform's own write window, shared with publishing. The project
+        // window above is the user's preference; this is the account-level one,
+        // and both must hold — a project may narrow the platform's hours, never
+        // widen them.
+        if (!this._platformPacing.isWithinWriteWindowFor(pacingConfig, platform, now))
+          continue;
+
         // Human-like spacing, per project+platform: without it a poll loop would
         // empty a day's budget into one burst the moment the window opened.
-        const lastAt = await this._engageRepository.getLastSentReplyAt(
-          org.id,
-          projectId,
-          platform
-        );
-        const minGapMinutes = policy.checkIntervalMinutes ?? pacing.minGapMinutes;
+        //
+        // TWO clocks, and they answer different questions.
+        //
+        // `lastAt` is this project+platform's own last reply — the CADENCE the
+        // user configured ("every 4-6 hours for this project").
+        //
+        // `lastWriteAt` is the last time ANY track wrote to this platform for
+        // the whole org: another project's reply, or a post the extension took
+        // to publish. That is the FLOOR, because a platform throttles by account
+        // and cannot see our project boundaries. Hacker News says "You're
+        // posting too fast" about stories and comments alike, and a queued story
+        // going out seconds after a reply is exactly what tripped it.
+        const [lastAt, lastWriteAt] = await Promise.all([
+          this._engageRepository.getLastSentReplyAt(org.id, projectId, platform),
+          this._engageRepository.getLastPlatformWriteAt(org.id, platform),
+        ]);
+        // `??`, deliberately: minGapMinutes is the DEFAULT cadence for a project
+        // that set none, not a floor. A project asking for a tighter interval is
+        // stating a preference, and preferences are allowed to be tighter than
+        // other preferences. What a preference may NOT undercut is the platform
+        // floor below — which is why that is a separate setting rather than an
+        // attempt to make this one mean two things.
+        const cadenceMinutes = policy.checkIntervalMinutes ?? pacing.minGapMinutes;
         if (
           lastAt &&
-          dayjs.utc(now).diff(dayjs.utc(lastAt), 'minute') < minGapMinutes
+          dayjs.utc(now).diff(dayjs.utc(lastAt), 'minute') < cadenceMinutes
+        ) {
+          continue;
+        }
+        // The platform floor applies to the org-wide clock and is never
+        // negotiable by a cadence — a cadence may only ever be SLOWER than it.
+        const floorMinutes = this._platformPacing.writeFloorMinutesFor(
+          pacingConfig,
+          platform
+        );
+        if (
+          lastWriteAt &&
+          dayjs.utc(now).diff(dayjs.utc(lastWriteAt), 'minute') < floorMinutes
         ) {
           continue;
         }
@@ -410,10 +467,14 @@ export class EngageAutoReplyService implements OnModuleInit {
     org: Organization,
     now = new Date()
   ): Promise<ReplyQueueStatusRow[]> {
-    const pacing = await this.getPacing();
-    const hour = dayjs.utc(now).hour();
-    const [startHour, endHour] = pacing.activeHoursUtc;
-    const withinActiveHours = hour >= startHour && hour < endHour;
+    // Resolved ONCE, not per row. getPlatformPacing issues a settings query on
+    // every call and this loop is (projects × platforms) deep — reading it
+    // inside was an N+1 on a value that changes on the order of weeks. The
+    // helpers below are pure functions over the resolved object.
+    const [pacing, pacingConfig] = await Promise.all([
+      this.getPacing(),
+      this._platformPacing.getPlatformPacing(),
+    ]);
 
     const configs = await this._engageRepository.getAutoReplyConfigs(org.id);
     const rows: ReplyQueueStatusRow[] = [];
@@ -434,18 +495,49 @@ export class EngageAutoReplyService implements OnModuleInit {
         // "this platform isn't running at all".
         if (!policyEnabled) continue;
 
-        const [queuedCount, eligibleCount, lastSentReplyAt] = await Promise.all([
-          this._engageRepository.countQueuedEngageReplies(org.id, projectId, platform),
-          this._engageRepository.countEligibleOpportunities(org.id, projectId, platform, {
-            minScore: pacing.minScore,
-          }),
-          this._engageRepository.getLastSentReplyAt(org.id, projectId, platform),
-        ]);
+        const [queuedCount, eligibleCount, lastSentReplyAt, lastWriteAt] =
+          await Promise.all([
+            this._engageRepository.countQueuedEngageReplies(org.id, projectId, platform),
+            this._engageRepository.countEligibleOpportunities(org.id, projectId, platform, {
+              minScore: pacing.minScore,
+            }),
+            this._engageRepository.getLastSentReplyAt(org.id, projectId, platform),
+            this._engageRepository.getLastPlatformWriteAt(org.id, platform),
+          ]);
+
+        // This row exists to EXPLAIN the dispatch gate, so it has to be computed
+        // from the same rules — a row that disagrees with the gate is worse than
+        // no row. It therefore mirrors all three of the gate's clocks:
+        //   · the platform write window   (gate 2)
+        //   · the project cadence          (gate 3)
+        //   · the platform write floor     (gate 4)
+        // Missing the floor was exactly this bug in miniature: the overview said
+        // "eligible now" while getDueReplies withheld the reply, because a post
+        // published minutes earlier had moved a clock this row never read.
+        const withinActiveHours = this._platformPacing.isWithinWriteWindowFor(
+          pacingConfig,
+          platform,
+          now
+        );
 
         const minGapMinutes = policy.checkIntervalMinutes ?? pacing.minGapMinutes;
-        const nextEligibleAt = lastSentReplyAt
+        const floorMinutes = this._platformPacing.writeFloorMinutesFor(
+          pacingConfig,
+          platform
+        );
+        const cadenceEligibleAt = lastSentReplyAt
           ? dayjs.utc(lastSentReplyAt).add(minGapMinutes, 'minute').toDate()
           : null;
+        const floorEligibleAt = lastWriteAt
+          ? dayjs.utc(lastWriteAt).add(floorMinutes, 'minute').toDate()
+          : null;
+        // Whichever holds the reply back longer is the one to report.
+        const nextEligibleAt =
+          cadenceEligibleAt && floorEligibleAt
+            ? cadenceEligibleAt > floorEligibleAt
+              ? cadenceEligibleAt
+              : floorEligibleAt
+            : cadenceEligibleAt ?? floorEligibleAt;
         const withinMinGap = !nextEligibleAt || nextEligibleAt.getTime() <= now.getTime();
 
         rows.push({

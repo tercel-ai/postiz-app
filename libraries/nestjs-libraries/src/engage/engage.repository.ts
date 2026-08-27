@@ -2346,6 +2346,76 @@ export class EngageRepository {
   }
 
   /**
+   * The last time ANY track wrote to this platform for this ORG — a reply, or a
+   * post the extension took to publish.
+   *
+   * Deliberately NOT scoped to a project, unlike {@link getLastSentReplyAt}.
+   * A project is our concept; the throttle belongs to the platform ACCOUNT, and
+   * two projects publishing to the same Hacker News login share one. Scoping
+   * this by project would let N projects each spend the full floor.
+   *
+   * `claimedAt` is the post side's write moment: it is stamped when the
+   * extension takes the post to publish, which is the instant the platform
+   * actually sees traffic — `publishDate` is only when we intended to.
+   */
+  async getLastPlatformWriteAt(
+    organizationId: string,
+    platform: string
+  ): Promise<Date | null> {
+    const [lastReply, lastPost] = await Promise.all([
+      // ENGAGE replies. Keyed through `opportunity.platform`, which is the true
+      // platform, and gated on `claimedAt` — the moment the extension took the
+      // reply to post it, i.e. when the account is actually touched.
+      //
+      // Deliberately NOT `createdAt`, unlike getLastSentReplyAt. Creating a
+      // draft is an LLM call and a row insert; a human draft parked in Awaiting
+      // Review may never be sent at all. Counting it would let one person
+      // generating drafts hold back every project's replies on that platform.
+      this._sentReply.model.engageSentReply.findFirst({
+        where: {
+          organizationId,
+          opportunity: { platform },
+          post: { claimedAt: { not: null } },
+        },
+        orderBy: { post: { claimedAt: 'desc' } },
+        select: { post: { select: { claimedAt: true } } },
+      }),
+      // PUBLISHED posts, excluding engage's own rows — those are covered above,
+      // by their true platform.
+      //
+      // The exclusion is load-bearing, not tidiness: upsertDraft writes
+      // `providerIdentifier: platform === 'x' ? 'x' : 'reddit'` for EVERY
+      // platform, so a hackernews reply is stored as a reddit row. Matching on
+      // that column without the filter counted an HN reply as a reddit write and
+      // starved the org's reddit replies for a full floor.
+      //
+      // The platform match mirrors how the publish path resolves it
+      // (posts.service.getDuePublishPosts): the column first, then the bound
+      // integration for legacy rows that never had it written. Without the
+      // second arm those rows publish through the extension while staying
+      // invisible to this clock — the floor simply would not apply to them.
+      this._post.model.post.findFirst({
+        where: {
+          organizationId,
+          claimedAt: { not: null },
+          deletedAt: null,
+          source: { not: 'engage' },
+          OR: [
+            { providerIdentifier: platform },
+            {
+              providerIdentifier: null,
+              integration: { providerIdentifier: platform },
+            },
+          ],
+        },
+        orderBy: { claimedAt: 'desc' },
+        select: { claimedAt: true },
+      }),
+    ]);
+    return laterOf(lastReply?.post?.claimedAt, lastPost?.claimedAt);
+  }
+
+  /**
    * The same lookup as {@link getLastSentReplyAt}, batched across every
    * platform a project has a reply policy for — one caller (the Automation
    * overview) needs it for N platforms at once, and N sequential calls would

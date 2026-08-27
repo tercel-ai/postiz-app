@@ -11,6 +11,7 @@ import {
   Res,
 } from '@nestjs/common';
 import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.service';
+import { PlatformPacingConfigService } from '@gitroom/nestjs-libraries/engage/platform-pacing-config.service';
 import { EngageEntitlementService } from '@gitroom/nestjs-libraries/engage/engage-entitlement.service';
 import { EngageScanConfigService } from '@gitroom/nestjs-libraries/engage/engage-scan-config.service';
 import { MetricsDueDto } from '@gitroom/nestjs-libraries/dtos/posts/metrics-due.dto';
@@ -50,7 +51,8 @@ export class PostsController {
     private _agentGraphService: AgentGraphService,
     private _shortLinkService: ShortLinkService,
     private _engageEntitlement: EngageEntitlementService,
-    private _engageScanConfig: EngageScanConfigService
+    private _engageScanConfig: EngageScanConfigService,
+    private _platformPacing: PlatformPacingConfigService
   ) {}
 
   /**
@@ -508,7 +510,23 @@ export class PostsController {
     @GetOrgFromRequest() org: Organization,
     @Body() body: { limit?: number }
   ) {
-    return this._postsService.getDuePublishPosts(org.id, body?.limit);
+    const [due, pacing] = await Promise.all([
+      this._postsService.getDuePublishPosts(org.id, body?.limit),
+      this._platformPacing.getPlatformPacing(),
+    ]);
+    // Spread, so the `due` key this endpoint has always returned is untouched —
+    // it is an EXECUTION CONTRACT field, and the extension reads `data.due`
+    // directly. `pacing` is added beside it.
+    //
+    // It rides at the top level rather than on each item because it describes
+    // the platform ACCOUNT, not any single post, and the extension installs it
+    // once for every track to read.
+    //
+    // Sent here as well as on /engage/reply-due because the two polls are
+    // independent — an org that publishes but never runs engage would otherwise
+    // never receive a config change and would be stuck on the extension's
+    // built-in floor, with no way for an operator to tune it.
+    return { ...due, pacing };
   }
 
   @Post('/sync-metrics')
