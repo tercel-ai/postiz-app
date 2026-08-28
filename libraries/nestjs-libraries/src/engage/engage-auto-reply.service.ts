@@ -273,7 +273,16 @@ export class EngageAutoReplyService implements OnModuleInit {
     // question ("is now a reasonable hour to write as this account?") now has one
     // answer, and it is a property of the platform, so it belongs in the loop.
     const configs = await this._engageRepository.getAutoReplyConfigs(org.id);
-    if (!configs.length) return [];
+    if (!configs.length) {
+      // The widest blind spot on this path: no config means the whole org is
+      // skipped before a single gate runs, and the poll returns {due: []} —
+      // indistinguishable from "everything was gated" without this line.
+      this.logger.debug(
+        `[reply-gate] org ${org.id} SKIP no-auto-reply-config (no project has ` +
+          `enabled=true + replies active)`
+      );
+      return [];
+    }
 
     const due: DueReply[] = [];
     // Counted per PLATFORM, not globally: `maxPerPoll` caps each platform's own
@@ -317,7 +326,12 @@ export class EngageAutoReplyService implements OnModuleInit {
         // key — `policies` is keyed however the caller wrote it, not by the
         // normalized `platform` used below for the budget/pacing comparisons.
         const policy = policies[rawPlatform];
-        if (!policy?.autoReplyEnabled) continue;
+        if (!policy?.autoReplyEnabled) {
+          this.logger.debug(
+            `[reply-gate] ${projectId}/${platform} SKIP policy-disabled`
+          );
+          continue;
+        }
 
         // ── Gates that apply to EVERY reply handed out, queued or fresh ──────
         //
@@ -327,14 +341,26 @@ export class EngageAutoReplyService implements OnModuleInit {
         // outside the hours the project set, or in a burst the gap exists to
         // prevent — and a reply that failed to send once is exactly the one most
         // likely to be re-offered at 3am.
-        if (!withinLocalWindow(policy, now)) continue;
+        if (!withinLocalWindow(policy, now)) {
+          this.logger.debug(
+            `[reply-gate] ${projectId}/${platform} SKIP project-local-window ` +
+              `(${policy.windowStart ?? '-'}..${policy.windowEnd ?? '-'} ${
+                policy.timezone ?? 'UTC'
+              })`
+          );
+          continue;
+        }
 
         // The platform's own write window, shared with publishing. The project
         // window above is the user's preference; this is the account-level one,
         // and both must hold — a project may narrow the platform's hours, never
         // widen them.
-        if (!this._platformPacing.isWithinWriteWindowFor(pacingConfig, platform, now))
+        if (!this._platformPacing.isWithinWriteWindowFor(pacingConfig, platform, now)) {
+          this.logger.debug(
+            `[reply-gate] ${projectId}/${platform} SKIP platform-write-window`
+          );
           continue;
+        }
 
         // Human-like spacing, per project+platform: without it a poll loop would
         // empty a day's budget into one burst the moment the window opened.
@@ -365,6 +391,13 @@ export class EngageAutoReplyService implements OnModuleInit {
           lastAt &&
           dayjs.utc(now).diff(dayjs.utc(lastAt), 'minute') < cadenceMinutes
         ) {
+          this.logger.debug(
+            `[reply-gate] ${projectId}/${platform} SKIP cadence — lastAt=${dayjs
+              .utc(lastAt)
+              .toISOString()} elapsed=${dayjs
+              .utc(now)
+              .diff(dayjs.utc(lastAt), 'minute')}m < ${cadenceMinutes}m`
+          );
           continue;
         }
         // The platform floor applies to the org-wide clock and is never
@@ -377,6 +410,12 @@ export class EngageAutoReplyService implements OnModuleInit {
           lastWriteAt &&
           dayjs.utc(now).diff(dayjs.utc(lastWriteAt), 'minute') < floorMinutes
         ) {
+          this.logger.debug(
+            `[reply-gate] ${projectId}/${platform} SKIP platform-floor — ` +
+              `lastWriteAt=${dayjs.utc(lastWriteAt).toISOString()} elapsed=${dayjs
+                .utc(now)
+                .diff(dayjs.utc(lastWriteAt), 'minute')}m < ${floorMinutes}m`
+          );
           continue;
         }
 
@@ -439,6 +478,12 @@ export class EngageAutoReplyService implements OnModuleInit {
           continue;
         }
 
+        this.logger.debug(
+          `[reply-gate] ${projectId}/${platform} PASSED all gates — drafting ` +
+            `(budget cap=${budget.cap ?? 'uncapped'} remaining=${
+              budget.remaining ?? 'n/a'
+            } keywords=${budget.keywords.length})`
+        );
         const drafted = await this._draftOne(
           org, projectId, platform, budget, pacing, policy
         );
@@ -591,7 +636,23 @@ export class EngageAutoReplyService implements OnModuleInit {
       }
     );
     const candidate = candidates[0];
-    if (!candidate) return null;
+    if (!candidate) {
+      // The ONE silent exit on this path, and the one that cost the most to
+      // diagnose: an empty pick is indistinguishable from "nothing eligible"
+      // from the outside, while the reply-queue-status overview keeps reporting
+      // a large `eligibleCount` because it does not apply the keyword filter.
+      // The keywords are the part worth printing — they come from the plan's
+      // keywordTargets and are the only condition here the overview does not
+      // share, so a mismatch between them and the opportunities' stored
+      // matchedKeywords shows up nowhere else.
+      this.logger.debug(
+        `Auto-reply pick empty for project ${projectId} / ${platform} — ` +
+          `minScore=${pacing.minScore}, keywords=${
+            hungryKeywords.length ? JSON.stringify(hungryKeywords) : '(unfiltered)'
+          }`
+      );
+      return null;
+    }
 
     // Discovery is intentionally a read so scoring and keyword filters stay
     // simple. Claim separately with a conditional state transition; only its

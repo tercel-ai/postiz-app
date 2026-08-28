@@ -1962,6 +1962,9 @@ export class EngageService implements OnApplicationBootstrap {
       dayEnd.toDate()
     );
 
+    // `policy.keywordTargets` is already keyed by keyword TEXT — see the
+    // translation in _resolveEngagePolicy — so these keys can be matched
+    // directly against the stored `matchedKeywords` snapshots.
     const keywords = await Promise.all(
       Object.entries(policy.keywordTargets)
         .filter(([, target]) => typeof target === 'number' && target > 0)
@@ -2038,13 +2041,44 @@ export class EngageService implements OnApplicationBootstrap {
     // day"), so check for presence, not truthiness.
     const dayKey = dayjs.utc(dayStart).format('YYYY-MM-DD');
     const override = policy.dailyTargets?.find((d) => d?.date === dayKey);
+    // A plan stores `keywordTargets` keyed by keyword ID, but every consumer
+    // compares those keys against a stored match snapshot — which holds keyword
+    // TEXT (`EngageOpportunityState.matchedKeywords`,
+    // `EngageSentReply.matchedKeywords`). Translating HERE, in the one resolver
+    // both consumers share, is what keeps them from disagreeing:
+    //
+    //   · getReplyBudget       → per-keyword tallies, and the `hasSome` filter
+    //                            pickAutoReplyCandidates applies to them. With
+    //                            ids the filter matches nothing, so the
+    //                            unattended driver hands out NO reply at all
+    //                            while a plan is active — silently.
+    //   · _assertProjectDailyTarget → the send-time per-keyword ceiling. With
+    //                            ids `applicableKeywords` is always empty, so
+    //                            that ceiling is never enforced — silently, and
+    //                            in the opposite direction.
+    //
+    // A key that does not resolve keeps its original value: it is most likely
+    // already text (an older generator, or a hand-edited plan), and dropping it
+    // would silently shrink the plan's keyword budget.
+    const rawTargets = policy.keywordTargets ?? {};
+    const keywordTexts = await this._engageRepository.resolveKeywordTexts(
+      organizationId,
+      Object.keys(rawTargets)
+    );
+    const keywordTargets = Object.fromEntries(
+      Object.entries(rawTargets).map(([key, target]) => [
+        keywordTexts.get(key) ?? key,
+        target,
+      ])
+    );
+
     return {
       dailyTarget:
         override && typeof override.target === 'number'
           ? override.target
           : policy.targetRepliesPerDay,
       dailyHardCap: policy.dailyHardCap ?? policy.hardCapRepliesPerDay,
-      keywordTargets: policy.keywordTargets ?? {},
+      keywordTargets,
     };
   }
 

@@ -27,6 +27,10 @@ describe('EngageService reply pacing gate (§6/§6.1)', () => {
     const countProjectSentRepliesToday = vi.fn(async () => 0);
     const countProjectKeywordSentRepliesToday = vi.fn(async () => 0);
     const countAccountSentRepliesToday = vi.fn(async () => 0);
+    // Most specs here key keywordTargets by TEXT already, so an empty map is
+    // the right default: _resolveEngagePolicy falls back to the original key
+    // for anything it cannot resolve, leaving those cases unchanged.
+    const resolveKeywordTexts = vi.fn(async () => new Map<string, string>());
     const getActivePlan = vi.fn(async () => null);
     const settingsGet = vi.fn(async () => undefined);
     const createManualXPost = vi.fn(async () => ({ id: 'manual-post-1' }));
@@ -39,6 +43,7 @@ describe('EngageService reply pacing gate (§6/§6.1)', () => {
       countProjectSentRepliesToday,
       countProjectKeywordSentRepliesToday,
       countAccountSentRepliesToday,
+      resolveKeywordTexts,
       createManualXPost,
     } as any;
     const postsService = { createPost } as any;
@@ -69,6 +74,7 @@ describe('EngageService reply pacing gate (§6/§6.1)', () => {
       countProjectSentRepliesToday,
       countProjectKeywordSentRepliesToday,
       countAccountSentRepliesToday,
+      resolveKeywordTexts,
       getActivePlan,
       settingsGet,
       createManualXPost,
@@ -378,6 +384,86 @@ describe('EngageService reply pacing gate (§6/§6.1)', () => {
       expect.any(Date),
       expect.any(Date)
     );
+  });
+
+  // REGRESSION. A plan writes `keywordTargets` keyed by keyword ID, while every
+  // match snapshot stores keyword TEXT. Comparing the two directly makes both
+  // consumers fail SILENTLY and in opposite directions: the send-time ceiling
+  // below never matches (nothing is ever capped), and the unattended driver's
+  // `hasSome` filter matches nothing (no reply is EVER handed out while a plan
+  // is active). Production ran this way for the whole life of two plans.
+  it('resolves keywordTargets keyed by keyword ID to keyword text', async () => {
+    const {
+      service,
+      createPost,
+      getActivePlan,
+      resolveKeywordTexts,
+      countProjectKeywordSentRepliesToday,
+    } = buildService();
+    const keywordId = '100f410f-f841-4607-b489-50309870accd';
+    getActivePlan.mockResolvedValue({
+      planPayload: {
+        engagePolicies: [
+          {
+            platform: 'x',
+            enabled: true,
+            targetRepliesPerDay: 10,
+            keywordTargets: { [keywordId]: 2 },
+          },
+        ],
+      },
+    });
+    // The opportunity matched the TEXT 'react' (see the claim mock).
+    resolveKeywordTexts.mockResolvedValue(new Map([[keywordId, 'react']]));
+    countProjectKeywordSentRepliesToday.mockResolvedValue(2); // at the cap
+
+    await expect(
+      service.sendReply(org, 'user-1', 'opp-1', sendBody as any)
+    ).rejects.toMatchObject({
+      response: {
+        code: 'engage_daily_keyword_target_reached',
+        keyword: 'react',
+        target: 2,
+      },
+    });
+    expect(createPost).not.toHaveBeenCalled();
+    // The id must never reach the query — it would match no stored snapshot.
+    expect(countProjectKeywordSentRepliesToday).toHaveBeenCalledWith(
+      'org-1',
+      'proj-1',
+      'x',
+      'react',
+      expect.any(Date),
+      expect.any(Date)
+    );
+  });
+
+  // The other half of the same contract: a key that resolves to nothing is an
+  // older, text-keyed plan, and must keep working rather than be dropped.
+  it('keeps an unresolvable keywordTargets key as-is', async () => {
+    const { service, createPost, getActivePlan, countProjectKeywordSentRepliesToday } =
+      buildService();
+    getActivePlan.mockResolvedValue({
+      planPayload: {
+        engagePolicies: [
+          {
+            platform: 'x',
+            enabled: true,
+            targetRepliesPerDay: 10,
+            keywordTargets: { react: 2 },
+          },
+        ],
+      },
+    });
+    // resolveKeywordTexts returns an empty map by default — nothing resolved.
+    countProjectKeywordSentRepliesToday.mockResolvedValue(2);
+
+    await expect(
+      service.sendReply(org, 'user-1', 'opp-1', sendBody as any)
+    ).rejects.toMatchObject({
+      response: { code: 'engage_daily_keyword_target_reached', keyword: 'react' },
+    });
+    expect(createPost).not.toHaveBeenCalled();
   });
 
   it('ignores per-keyword targets for keywords the opportunity did not match', async () => {

@@ -3811,6 +3811,37 @@ export class EngageRepository {
     });
   }
 
+  /**
+   * Resolve EngageKeyword ids to their keyword TEXT.
+   *
+   * An operation plan stores `engagePolicies[].keywordTargets` keyed by keyword
+   * ID, while every match snapshot — `EngageOpportunityState.matchedKeywords`
+   * and `EngageSentReply.matchedKeywords` — stores keyword TEXT. Two array
+   * filters compare the two directly (`hasSome` in pickAutoReplyCandidates,
+   * `has` in countProjectKeywordSentRepliesToday), so without this translation
+   * both compare an id against text and can only ever return the empty set: the
+   * driver picks no candidate and every per-keyword tally reads zero, silently,
+   * for as long as a plan is active.
+   *
+   * Ids that resolve to nothing are simply absent from the map, and the caller
+   * keeps the original key. A key that is ALREADY text — a plan from an older
+   * generator, or a hand-edited one — must keep working, and "leave it alone"
+   * is the only reading that serves both shapes.
+   */
+  async resolveKeywordTexts(
+    organizationId: string,
+    ids: string[]
+  ): Promise<Map<string, string>> {
+    const out = new Map<string, string>();
+    if (!ids.length) return out;
+    const rows = await this._keyword.model.engageKeyword.findMany({
+      where: { organizationId, id: { in: ids } },
+      select: { id: true, keyword: true },
+    });
+    for (const row of rows) out.set(row.id, row.keyword);
+    return out;
+  }
+
   // §3.4/§6 per-keyword daily target gate: same window/state semantics as
   // countProjectSentRepliesToday, additionally narrowed to replies whose
   // send-time `matchedKeywords` snapshot contains `keyword`. A reply matching
