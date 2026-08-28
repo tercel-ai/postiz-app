@@ -182,13 +182,17 @@ describe('schedulePostGroupToQueue', () => {
 });
 
 describe('markStaleQueuePostsAsError — never sweeps what waits for a browser', () => {
+  // The sweep selects stale ROOTS with findMany (their `group` is what carries
+  // the thread children along) and then updates by id, so the exclusions live
+  // on the findMany predicate.
   it('excludes explicit EXTENSION and legacy null-method extension-integration posts', async () => {
+    const findMany = vi.fn().mockResolvedValue([{ id: 'root-1', group: 'g1' }]);
     const updateMany = vi.fn().mockResolvedValue({ count: 3 });
-    const repo = createRepo({ updateMany });
+    const repo = createRepo({ findMany, updateMany });
 
     await repo.markStaleQueuePostsAsError(['hackernews', 'quora']);
 
-    const where = updateMany.mock.calls[0][0].where;
+    const where = findMany.mock.calls[0][0].where;
     expect(where.state).toBe('QUEUE');
     expect(where.NOT).toEqual({
       OR: [
@@ -206,12 +210,13 @@ describe('markStaleQueuePostsAsError — never sweeps what waits for a browser',
   });
 
   it('excludes only explicit EXTENSION when no provider list is passed', async () => {
+    const findMany = vi.fn().mockResolvedValue([{ id: 'root-1', group: 'g1' }]);
     const updateMany = vi.fn().mockResolvedValue({ count: 0 });
-    const repo = createRepo({ updateMany });
+    const repo = createRepo({ findMany, updateMany });
 
     await repo.markStaleQueuePostsAsError();
 
-    expect(updateMany.mock.calls[0][0].where.NOT).toEqual({
+    expect(findMany.mock.calls[0][0].where.NOT).toEqual({
       OR: [{ publishMethod: 'EXTENSION' }, { source: 'engage' }],
     });
   });

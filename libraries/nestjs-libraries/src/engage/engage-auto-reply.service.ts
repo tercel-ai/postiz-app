@@ -540,11 +540,32 @@ export class EngageAutoReplyService implements OnModuleInit {
         // "this platform isn't running at all".
         if (!policyEnabled) continue;
 
+        // The plan's keyword budget, resolved BEFORE the counts because
+        // `eligibleCount` has to apply the same keyword filter _draftOne does.
+        // Reported without it, this number counts opportunities the pick can
+        // never hand out — which is how the overview kept reading "134
+        // eligible" through two days of the driver producing nothing.
+        //
+        // A serial query in a (projects × platforms) loop, deliberately: this
+        // endpoint claims and drafts nothing and is called when a human opens a
+        // debug panel, so an accurate number is worth more here than a round
+        // trip saved.
+        const budget = await this._engageService.getReplyBudget(
+          org.id,
+          projectId,
+          platform,
+          now
+        );
+        const hungryKeywords = budget.keywords
+          .filter((k) => k.remaining > 0)
+          .map((k) => k.keyword);
+
         const [queuedCount, eligibleCount, lastSentReplyAt, lastWriteAt] =
           await Promise.all([
             this._engageRepository.countQueuedEngageReplies(org.id, projectId, platform),
             this._engageRepository.countEligibleOpportunities(org.id, projectId, platform, {
               minScore: pacing.minScore,
+              ...(hungryKeywords.length ? { keywords: hungryKeywords } : {}),
             }),
             this._engageRepository.getLastSentReplyAt(org.id, projectId, platform),
             this._engageRepository.getLastPlatformWriteAt(org.id, platform),

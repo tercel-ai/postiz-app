@@ -757,8 +757,19 @@ describe('PostsRepository.markStaleQueuePostsAsError', () => {
   let repo: any;
   let mockPrismaPost: any;
 
+  // The sweep reads the stale ROOTS first and updates by id, because a root's
+  // `group` is the only handle on the thread children that must follow it. The
+  // selection predicate therefore lives on findMany; updateMany carries the ids
+  // and the ERROR payload.
+  const selectCall = () => mockPrismaPost.findMany.mock.calls[0][0];
+  const rootUpdate = () => mockPrismaPost.updateMany.mock.calls[0][0];
+  const childUpdate = () => mockPrismaPost.updateMany.mock.calls[1][0];
+
   beforeEach(() => {
     mockPrismaPost = {
+      findMany: vi
+        .fn()
+        .mockResolvedValue([{ id: 'root-1', group: 'g1', organizationId: 'org-1' }]),
       updateMany: vi.fn().mockResolvedValue({ count: 0 }),
     };
 
@@ -768,44 +779,90 @@ describe('PostsRepository.markStaleQueuePostsAsError', () => {
   });
 
   it('marks stale non-recurring QUEUE posts as ERROR', async () => {
-    mockPrismaPost.updateMany.mockResolvedValue({ count: 3 });
+    mockPrismaPost.findMany.mockResolvedValue([
+      { id: 'root-1', group: 'g1', organizationId: 'org-1' },
+      { id: 'root-2', group: 'g2', organizationId: 'org-1' },
+      { id: 'root-3', group: 'g3', organizationId: 'org-1' },
+    ]);
+    mockPrismaPost.updateMany
+      .mockResolvedValueOnce({ count: 3 }) // roots
+      .mockResolvedValueOnce({ count: 0 }); // children
 
     const count = await repo.markStaleQueuePostsAsError();
 
     expect(count).toBe(3);
-    const call = mockPrismaPost.updateMany.mock.calls[0][0];
-    expect(call.where.state).toBe('QUEUE');
-    expect(call.where.intervalInDays).toBe(null);
-    expect(call.where.parentPostId).toBe(null);
-    expect(call.data.state).toBe('ERROR');
+    expect(selectCall().where.state).toBe('QUEUE');
+    expect(selectCall().where.intervalInDays).toBe(null);
+    expect(selectCall().where.parentPostId).toBe(null);
+    // Ids AND the full predicate — the read above is not atomic with this
+    // write, so a row that published in between must not be flipped to ERROR.
+    expect(rootUpdate().where.AND[0].id.in).toEqual([
+      'root-1',
+      'root-2',
+      'root-3',
+    ]);
+    expect(rootUpdate().where.AND[1].state).toBe('QUEUE');
+    expect(rootUpdate().data.state).toBe('ERROR');
   });
 
   it('excludes recurring originals (intervalInDays set)', async () => {
-    mockPrismaPost.updateMany.mockResolvedValue({ count: 0 });
-
     await repo.markStaleQueuePostsAsError();
 
-    const call = mockPrismaPost.updateMany.mock.calls[0][0];
     // intervalInDays: null means only non-recurring posts are targeted
-    expect(call.where.intervalInDays).toBe(null);
+    expect(selectCall().where.intervalInDays).toBe(null);
   });
 
-  it('excludes thread children (parentPostId set)', async () => {
-    mockPrismaPost.updateMany.mockResolvedValue({ count: 0 });
-
+  it('does not select thread children directly (they follow their root)', async () => {
     await repo.markStaleQueuePostsAsError();
 
-    const call = mockPrismaPost.updateMany.mock.calls[0][0];
-    expect(call.where.parentPostId).toBe(null);
+    expect(selectCall().where.parentPostId).toBe(null);
+  });
+
+  // REGRESSION. Children are excluded from the selection above because a child
+  // has no independent publish decision — but that used to mean a swept thread
+  // left them in QUEUE forever: no later sweep would select them (they are
+  // children), and no publish path takes a child without its root. The result
+  // was a permanently "queued" half of a thread that had already failed,
+  // invisible to every root-scoped query and to the backlog counts.
+  it('sweeps the thread children of every root it errors', async () => {
+    mockPrismaPost.findMany.mockResolvedValue([
+      { id: 'root-1', group: 'g1', organizationId: 'org-1' },
+      { id: 'root-2', group: 'g2', organizationId: 'org-2' },
+    ]);
+    mockPrismaPost.updateMany
+      .mockResolvedValueOnce({ count: 2 }) // roots
+      .mockResolvedValueOnce({ count: 3 }); // children
+
+    const count = await repo.markStaleQueuePostsAsError();
+
+    // Both halves of the thread are reported, not just the roots.
+    expect(count).toBe(5);
+    expect(childUpdate().where.group.in).toEqual(['g1', 'g2']);
+    expect(childUpdate().where.parentPostId).toEqual({ not: null });
+    // A child that already published keeps its state.
+    expect(childUpdate().where.state).toBe('QUEUE');
+    expect(childUpdate().data.state).toBe('ERROR');
+    // `group` is caller-supplied, so a colliding value must not reach another
+    // tenant: the update is scoped to the orgs the swept roots belong to.
+    expect(childUpdate().where.organizationId.in).toEqual(['org-1', 'org-2']);
+    // Children waiting on a browser are excluded here too, not just inferred
+    // from their root's routing.
+    expect(childUpdate().where.NOT.OR).toContainEqual({ source: 'engage' });
+  });
+
+  it('does not touch anything when no root is stale', async () => {
+    mockPrismaPost.findMany.mockResolvedValue([]);
+
+    const count = await repo.markStaleQueuePostsAsError();
+
+    expect(count).toBe(0);
+    expect(mockPrismaPost.updateMany).not.toHaveBeenCalled();
   });
 
   it('only targets posts older than 7 days', async () => {
-    mockPrismaPost.updateMany.mockResolvedValue({ count: 0 });
-
     await repo.markStaleQueuePostsAsError();
 
-    const call = mockPrismaPost.updateMany.mock.calls[0][0];
-    const cutoff = call.where.publishDate.lt as Date;
+    const cutoff = selectCall().where.publishDate.lt as Date;
     const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
     // cutoff should be approximately 7 days ago (within 5 seconds)
     expect(Math.abs(cutoff.getTime() - sevenDaysAgo.getTime())).toBeLessThan(5000);
@@ -818,31 +875,22 @@ describe('PostsRepository.markStaleQueuePostsAsError', () => {
     // in QUEUE for a week is a user who has not opened Chrome, not a failure,
     // and sweeping one discards a reply that was generated and paid for that
     // `retryPost` cannot resurrect (it needs an integration).
-    mockPrismaPost.updateMany.mockResolvedValue({ count: 0 });
-
     await repo.markStaleQueuePostsAsError();
 
-    const call = mockPrismaPost.updateMany.mock.calls[0][0];
-    expect(call.where.NOT.OR).toContainEqual({ source: 'engage' });
+    expect(selectCall().where.NOT.OR).toContainEqual({ source: 'engage' });
   });
 
   it('still excludes extension-routed posts alongside engage replies', async () => {
-    mockPrismaPost.updateMany.mockResolvedValue({ count: 0 });
-
     await repo.markStaleQueuePostsAsError(['mastodon']);
 
-    const call = mockPrismaPost.updateMany.mock.calls[0][0];
-    expect(call.where.NOT.OR).toContainEqual({ publishMethod: 'EXTENSION' });
-    expect(call.where.NOT.OR).toContainEqual({ source: 'engage' });
+    expect(selectCall().where.NOT.OR).toContainEqual({ publishMethod: 'EXTENSION' });
+    expect(selectCall().where.NOT.OR).toContainEqual({ source: 'engage' });
   });
 
   it('clears releaseId so stale claim tokens do not leak to clients', async () => {
-    mockPrismaPost.updateMany.mockResolvedValue({ count: 0 });
-
     await repo.markStaleQueuePostsAsError();
 
-    const call = mockPrismaPost.updateMany.mock.calls[0][0];
-    expect(call.data.releaseId).toBe(null);
+    expect(rootUpdate().data.releaseId).toBe(null);
   });
 });
 

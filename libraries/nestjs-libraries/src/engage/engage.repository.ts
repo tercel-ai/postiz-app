@@ -999,17 +999,31 @@ export class EngageRepository {
     const channel = aggregateScan(channelCursors, cadenceMs, now);
     const trackedAgg = aggregateScan(trackedCursors, cadenceMs, now);
 
+    // The two top-level fields aggregate in OPPOSITE directions — `lastScanAt`
+    // is the most recent scan of any track, `nextScanAt` the soonest due of any
+    // track — so they describe different tracks and can invert: a healthy
+    // keyword scan finishing at 10:00 next to a tracked cursor that has been
+    // overdue since July reads as "last scan 10:00, next scan in July".
+    //
+    // `deriveNext` deliberately returns times in the past (an overdue cursor is
+    // due NOW, and the per-track fields below keep that meaning — the extension
+    // reads `nextScanAt <= now` exactly that way). What must not leak out is a
+    // top-level pair that contradicts itself, so the aggregate is floored at
+    // `now`: "the soonest anything is due, and never earlier than this moment".
+    const earliestNext = minDate([
+      keyword.nextScanAt,
+      channel.nextScanAt,
+      trackedAgg.nextScanAt,
+    ]);
     return {
       lastScanAt: maxDate([
         keyword.lastScanAt,
         channel.lastScanAt,
         trackedAgg.lastScanAt,
       ]),
-      nextScanAt: minDate([
-        keyword.nextScanAt,
-        channel.nextScanAt,
-        trackedAgg.nextScanAt,
-      ]),
+      nextScanAt: earliestNext
+        ? new Date(Math.max(earliestNext.getTime(), now))
+        : null,
       keyword,
       channel,
       tracked: trackedAgg,
@@ -2244,7 +2258,7 @@ export class EngageRepository {
     organizationId: string,
     projectId: string,
     platform: string,
-    opts: { minScore?: number } = {}
+    opts: { minScore?: number; keywords?: string[] } = {}
   ): Promise<number> {
     return this._oppState.model.engageOpportunityState.count({
       where: {
@@ -2253,6 +2267,17 @@ export class EngageRepository {
         status: 'NEW',
         isCurrentlyMatched: true,
         ...(opts.minScore !== undefined && { score: { gte: opts.minScore } }),
+        // The plan's per-keyword budget, exactly as pickAutoReplyCandidates
+        // applies it. Leaving it out is what let this report 134 eligible while
+        // the pick handed out nothing for two days: the overview and the gate
+        // disagreed, and the overview was the one being believed.
+        //
+        // Absent/empty means the caller has no keyword budget to apply (no
+        // active plan), which is also when the pick runs unfiltered — so the
+        // two stay in step in both directions.
+        ...(opts.keywords?.length && {
+          matchedKeywords: { hasSome: opts.keywords },
+        }),
         opportunity: {
           deletedAt: null,
           platform,

@@ -3977,9 +3977,64 @@ describe('EngageRepository.getOrgScanStatus', () => {
     // Scoped types the org hasn't configured report null.
     expect(st.channel).toEqual({ lastScanAt: null, nextScanAt: null });
     expect(st.tracked).toEqual({ lastScanAt: null, nextScanAt: null });
-    // Overall folds across types.
+    // Overall folds across types. `lastScanAt` is the latest across tracks and
+    // `nextScanAt` the soonest — opposite directions, so the pair could invert.
+    // The per-track value above is genuinely in the past (overdue = due now),
+    // but the top-level one is floored at `now` so the two never contradict.
+    const overdue = new Date(started.getTime() + 24 * H);
     expect(st.lastScanAt).toEqual(scanned);
-    expect(st.nextScanAt).toEqual(new Date(started.getTime() + 24 * H));
+    expect(st.nextScanAt!.getTime()).toBeGreaterThan(overdue.getTime());
+    expect(st.nextScanAt!.getTime()).toBeGreaterThanOrEqual(
+      st.lastScanAt!.getTime()
+    );
+  });
+
+  // REGRESSION. `lastScanAt` folds with max() and `nextScanAt` with min(), so
+  // they can describe different tracks: a keyword scan that just finished next
+  // to a tracked cursor overdue since July reported "last scan today, next scan
+  // in July". The per-track fields keep the overdue timestamp (the extension
+  // reads `nextScanAt <= now` as "due now"); only the aggregate is floored.
+  it('never reports a top-level nextScanAt earlier than lastScanAt', async () => {
+    const {
+      repo,
+      channelFindMany,
+      trackedFindMany,
+      cursorFindMany,
+      keywordFindMany,
+    } = buildRepo();
+    const freshKeywordScan = new Date('2026-08-28T00:55:00Z');
+    const abandonedTracked = new Date('2026-07-23T21:08:00Z'); // stalled for a month
+    channelFindMany.mockResolvedValue([]);
+    trackedFindMany.mockResolvedValue([{ platform: 'x', username: 'someone' }]);
+    keywordFindMany.mockResolvedValue([{ keyword: 'ai' }]);
+    cursorFindMany.mockImplementation(async ({ where }: any) =>
+      where.scanType === 'keyword'
+        ? [
+            {
+              lastScanStartedAt: freshKeywordScan,
+              lastScannedAt: freshKeywordScan,
+              cooldownUntil: null,
+            },
+          ]
+        : where.scanType === 'tracked'
+          ? [
+              {
+                lastScanStartedAt: abandonedTracked,
+                lastScannedAt: abandonedTracked,
+                cooldownUntil: null,
+              },
+            ]
+          : []
+    );
+
+    const st = await repo.getOrgScanStatus('org1');
+    // The stalled track still reports its real, overdue next — that is what
+    // makes it visible as "should have run long ago".
+    expect(st.tracked.nextScanAt!.getTime()).toBeLessThan(Date.now());
+    // The aggregate must not inherit it.
+    expect(st.nextScanAt!.getTime()).toBeGreaterThanOrEqual(
+      st.lastScanAt!.getTime()
+    );
   });
 
   it('cooldownUntil pushes next scan beyond the cadence', async () => {

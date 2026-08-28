@@ -1125,41 +1125,98 @@ export class PostsRepository {
         integration: { providerIdentifier: { in: extensionProviderIds } },
       });
     }
-    const result = await this._post.model.post.updateMany({
-      where: {
-        state: 'QUEUE',
-        deletedAt: null,
-        parentPostId: null,
-        intervalInDays: null,
-        publishDate: {
-          lt: cutoff,
-        },
-        // Engage replies are excluded for the same reason as extension-routed
-        // posts, and they need saying separately because they match neither
-        // routing branch: a reply Post carries no `publishMethod` and no
-        // integration (the extension sends through the user's own browser
-        // session, so there is no OAuth row to route by).
-        //
-        // They are drained by `POST /api/engage/reply-due`, a pull executor on
-        // the same "waits for a browser" footing — sitting in QUEUE for a week
-        // is a user who has not opened Chrome, not a failure. Sweeping one to
-        // ERROR would discard a reply that was generated and paid for, and
-        // `retryPost` could not resurrect it (it needs an integration).
-        //
-        // `publishMethod: EXTENSION` would have inherited the exclusion above,
-        // but it is not available here: `publish-due` selects on exactly that,
-        // and a reply offered to the publish queue is posted as a brand-new
-        // post — the shape of a real incident. Both places therefore exclude
-        // engage replies by `source`.
-        NOT: { OR: [...extensionRoutes, { source: 'engage' }] },
+    // Engage replies are excluded for the same reason as extension-routed
+    // posts, and they need saying separately because they match neither
+    // routing branch: a reply Post carries no `publishMethod` and no
+    // integration (the extension sends through the user's own browser
+    // session, so there is no OAuth row to route by).
+    //
+    // They are drained by `POST /api/engage/reply-due`, a pull executor on
+    // the same "waits for a browser" footing — sitting in QUEUE for a week
+    // is a user who has not opened Chrome, not a failure. Sweeping one to
+    // ERROR would discard a reply that was generated and paid for, and
+    // `retryPost` could not resurrect it (it needs an integration).
+    //
+    // `publishMethod: EXTENSION` would have inherited the exclusion above,
+    // but it is not available here: `publish-due` selects on exactly that,
+    // and a reply offered to the publish queue is posted as a brand-new
+    // post — the shape of a real incident. Both places therefore exclude
+    // engage replies by `source`.
+    const excludeWaitingOnBrowser: Prisma.PostWhereInput = {
+      NOT: { OR: [...extensionRoutes, { source: 'engage' }] },
+    };
+
+    const staleWhere: Prisma.PostWhereInput = {
+      state: 'QUEUE',
+      deletedAt: null,
+      parentPostId: null,
+      intervalInDays: null,
+      publishDate: {
+        lt: cutoff,
       },
-      data: {
-        state: 'ERROR',
-        error: 'Post was never published — it fell outside the recovery window. Please reschedule.',
-        releaseId: null,
-      },
+      ...excludeWaitingOnBrowser,
+    };
+
+    const errorData: Prisma.PostUpdateManyMutationInput = {
+      state: State.ERROR,
+      error:
+        'Post was never published — it fell outside the recovery window. Please reschedule.',
+      releaseId: null,
+    };
+
+    // Read the roots BEFORE updating them: once they are ERROR the predicate no
+    // longer selects them, and their `group` is the only handle on the thread
+    // children that have to follow.
+    const staleRoots = await this._post.model.post.findMany({
+      where: staleWhere,
+      select: { id: true, group: true, organizationId: true },
     });
-    return result.count;
+    if (!staleRoots.length) return 0;
+
+    // The predicate is re-asserted rather than trusting the ids alone: this read
+    // and the write below are not one atomic statement (they used to be a single
+    // updateMany), so a row that published in between must not be flipped to
+    // ERROR on the strength of a stale read.
+    const result = await this._post.model.post.updateMany({
+      where: { AND: [{ id: { in: staleRoots.map((r) => r.id) } }, staleWhere] },
+      data: errorData,
+    });
+
+    // Thread children ride along with their root — they are excluded from the
+    // predicate above (a child has no independent publish decision), which used
+    // to mean a swept thread left its children in QUEUE forever: no sweep would
+    // ever look at them again, and no publish path would pick them up without a
+    // root. The result was a permanently "queued" half of a thread that had
+    // already failed, invisible to every root-scoped query and to the backlog
+    // counts.
+    //
+    // Matched by `group` rather than by `parentPostId in roots`, so a chain
+    // deeper than one level is covered in the same pass.
+    //
+    // Still-QUEUE only: a child that already published is history and must keep
+    // its state, and the same extension/engage exclusions are inherited by
+    // construction — a child of an excluded root is never in `staleRoots`.
+    const children = await this._post.model.post.updateMany({
+      where: {
+        // `group` comes from `body.group || uuidv4()` — caller-supplied, so it
+        // is not guaranteed unique across organizations. Scoping by the roots'
+        // own orgs keeps a colliding group from reaching into another tenant.
+        organizationId: {
+          in: [...new Set(staleRoots.map((r) => r.organizationId))],
+        },
+        group: { in: [...new Set(staleRoots.map((r) => r.group))] },
+        parentPostId: { not: null },
+        state: State.QUEUE,
+        deletedAt: null,
+        // Restated rather than inferred from the root. A child SHOULD share its
+        // root's routing, but nothing enforces it, and the cost of being wrong
+        // is erroring a post that is legitimately waiting for a browser.
+        ...excludeWaitingOnBrowser,
+      },
+      data: errorData,
+    });
+
+    return result.count + children.count;
   }
 
   /**
