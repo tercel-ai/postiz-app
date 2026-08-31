@@ -33,7 +33,7 @@ describe('EngageService.confirmManualReply — URL verification gating', () => {
     const repo = {
       claimOpportunityForReply: claim,
       createManualXPost: createX,
-      createManualRedditPost: createReddit,
+      createManualCommunityPost: createReddit,
       releaseOpportunityClaim: release,
       createSentReply,
       updateReplyAuthor,
@@ -112,6 +112,33 @@ describe('EngageService.confirmManualReply — URL verification gating', () => {
     ).rejects.toThrow(/Invalid reddit reply URL.*reddit\.com/);
     expect(createReddit).not.toHaveBeenCalled();
     expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  // Every non-X platform shares createManualCommunityPost. The platform it is
+  // filed under must come from the OPPORTUNITY — this branch used to call a
+  // `createManualRedditPost` that hard-coded 'reddit', so a Hacker News reply
+  // was persisted as a reddit Post whose releaseURL pointed at ycombinator.
+  it.each([
+    ['hackernews', 'https://news.ycombinator.com/item?id=49494133'],
+    ['quora', undefined],
+    ['linkedin', undefined],
+    ['medium', undefined],
+    ['devto', undefined],
+    ['reddit', 'https://www.reddit.com/r/sub/comments/abc/title/def/'],
+  ])('files a %s manual reply under its own platform', async (platform, replyUrl) => {
+    claim.mockResolvedValue({ opp: { platform }, priorStatus: 'NEW' });
+
+    await service.confirmManualReply(org, undefined, 'opp-1', body({ replyUrl }));
+
+    expect(createX).not.toHaveBeenCalled();
+    expect(createReddit).toHaveBeenCalledTimes(1);
+    expect(createReddit.mock.calls[0][0].platform).toBe(platform);
+  });
+
+  it('still routes an X reply to the X-specific path, not the community one', async () => {
+    await service.confirmManualReply(org, undefined, 'opp-1', body());
+    expect(createX).toHaveBeenCalledTimes(1);
+    expect(createReddit).not.toHaveBeenCalled();
   });
 
   it('still rejects a right-host-but-id-less Reddit URL with the comment-id message', async () => {

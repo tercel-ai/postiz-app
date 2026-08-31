@@ -2480,7 +2480,7 @@ describe('EngageRepository — two-table reads', () => {
     });
   });
 
-  describe('createManualRedditPost', () => {
+  describe('createManualCommunityPost', () => {
     function buildRedditRepo() {
       const postCreate = vi.fn();
       const post = { model: { post: { create: postCreate } } } as any;
@@ -2503,8 +2503,9 @@ describe('EngageRepository — two-table reads', () => {
       const { repo, postCreate } = buildRedditRepo();
       postCreate.mockResolvedValue({ id: 'post1' });
 
-      await repo.createManualRedditPost({
+      await repo.createManualCommunityPost({
         organizationId: 'org1',
+        platform: 'reddit',
         content: 'reply',
         date: new Date(0),
         replyUrl: 'https://www.reddit.com/r/sub/comments/abc/title/def/',
@@ -2532,8 +2533,9 @@ describe('EngageRepository — two-table reads', () => {
       const { repo, postCreate } = buildRedditRepo();
       postCreate.mockResolvedValue({ id: 'post1' });
 
-      await repo.createManualRedditPost({
+      await repo.createManualCommunityPost({
         organizationId: 'org1',
+        platform: 'reddit',
         content: 'reply',
         date: new Date(0),
       });
@@ -2547,21 +2549,45 @@ describe('EngageRepository — two-table reads', () => {
       const { repo, postCreate } = buildRedditRepo();
       postCreate.mockResolvedValue({ id: 'post1' });
 
-      await repo.createManualRedditPost({
+      await repo.createManualCommunityPost({
         organizationId: 'org1',
+        platform: 'reddit',
         content: 'reply',
         date: new Date(0),
         projectId: 'proj-1',
       });
       expect(postCreate.mock.calls[0][0].data.projectId).toBe('proj-1');
 
-      await repo.createManualRedditPost({
+      await repo.createManualCommunityPost({
         organizationId: 'org1',
+        platform: 'reddit',
         content: 'reply',
         date: new Date(0),
       });
       expect('projectId' in postCreate.mock.calls[1][0].data).toBe(false);
     });
+
+    // Every non-X platform shares this path. It used to hard-code 'reddit',
+    // which is how a Hacker News reply ended up as a reddit Post row whose
+    // releaseURL pointed at news.ycombinator.com.
+    it.each(['hackernews', 'quora', 'linkedin', 'medium', 'devto', 'reddit'])(
+      'files a %s manual reply under its real platform',
+      async (platform) => {
+        const { repo, postCreate } = buildRedditRepo();
+        postCreate.mockResolvedValue({ id: 'post1' });
+
+        await repo.createManualCommunityPost({
+          organizationId: 'org1',
+          platform,
+          content: 'reply',
+          date: new Date(0),
+        });
+
+        const data = postCreate.mock.calls[0][0].data;
+        expect(data.providerIdentifier).toBe(platform);
+        expect(JSON.parse(data.settings).__type).toBe(platform);
+      }
+    );
   });
 
   describe('countProjectKeywordSentRepliesToday', () => {
@@ -2796,8 +2822,51 @@ describe('EngageRepository — two-table reads', () => {
         {} as any,
         {} as any
       );
-      return { repo, postUpdate };
+      return { repo, postUpdate, postFindUnique };
     }
+
+    // The extension posts as the logged-in session, so it KNOWS who replied and
+    // sends it. This write used to merge that author only on X and Reddit — on
+    // every other platform the caller handed over ground truth and the write
+    // silently threw it away.
+    it.each(['hackernews', 'quora', 'linkedin', 'medium', 'devto'])(
+      'records a supplied author on %s instead of dropping it',
+      async (platform) => {
+        const { repo, postUpdate } = buildRepo(platform);
+        const author = { handle: 'someone', name: 'Some One' };
+
+        await repo.updateReplyUrl('org1', 'r1', 'https://example.com/c/1', author, {
+          markPublished: true,
+        });
+
+        const settings = JSON.parse(postUpdate.mock.calls[0][0].data.settings);
+        expect(settings.engageAuthor).toEqual(author);
+        expect(settings.__type).toBe(platform);
+      }
+    );
+
+    it('leaves settings alone when no author is supplied', async () => {
+      const { repo, postUpdate } = buildRepo('hackernews');
+
+      await repo.updateReplyUrl('org1', 'r1', 'https://news.ycombinator.com/item?id=1', undefined, {
+        markPublished: true,
+      });
+
+      expect('settings' in postUpdate.mock.calls[0][0].data).toBe(false);
+    });
+
+    // Resolving an OAuth account back from the reply URL is genuinely X-only —
+    // opening author recording to every platform must not drag that along.
+    it('does not attempt an integration lookup on a non-X platform', async () => {
+      const { repo, postFindUnique } = buildRepo('hackernews');
+
+      await repo.updateReplyUrl('org1', 'r1', 'https://news.ycombinator.com/item?id=1', undefined, {
+        markPublished: true,
+      });
+
+      // No author and not X → nothing to read the post for at all.
+      expect(postFindUnique).not.toHaveBeenCalled();
+    });
 
     it('flips a devto reply to PUBLISHED — every SCANNABLE_PLATFORMS platform can commit, not just X/Reddit', async () => {
       // Regression: this used to throw for anything but X/Reddit, so a devto /
@@ -3065,6 +3134,54 @@ describe('EngageRepository — two-table reads', () => {
 
       expect(out).toBeUndefined();
       expect(postUpdate).not.toHaveBeenCalled();
+    });
+
+    // This used to bail on anything that was not X or Reddit, so a reply on any
+    // other engage platform could never record who posted it — not even when
+    // the caller already knew. None of these platforms has an integration to
+    // speak for the reply, so the supplied author IS the only identity there is.
+    it.each(['hackernews', 'quora', 'linkedin', 'medium', 'devto'])(
+      '%s: records the author instead of bailing on the platform',
+      async (platform) => {
+        const { repo, sentFindFirst, postFindUnique, postUpdate } =
+          buildAuthorRepo();
+        sentFindFirst.mockResolvedValue({
+          postId: 'post1',
+          opportunity: { platform },
+        });
+        postFindUnique.mockResolvedValue({
+          integrationId: null,
+          settings: JSON.stringify({ __type: platform }),
+        });
+
+        await repo.updateReplyAuthor('org1', 'reply1', author);
+
+        const settings = JSON.parse(postUpdate.mock.calls[0][0].data.settings);
+        expect(settings.engageAuthor).toEqual(author);
+        // The discriminator survives the merge — it is what the read path uses.
+        expect(settings.__type).toBe(platform);
+      }
+    );
+
+    // The X rule is a semantic, not a gate: an integration IS the author there,
+    // so it must NOT start applying to platforms that have no integration.
+    it('a non-X platform records the author even with an integration attached', async () => {
+      const { repo, sentFindFirst, postFindUnique, postUpdate } =
+        buildAuthorRepo();
+      sentFindFirst.mockResolvedValue({
+        postId: 'post1',
+        opportunity: { platform: 'linkedin' },
+      });
+      postFindUnique.mockResolvedValue({
+        integrationId: 'int1',
+        settings: '{"__type":"linkedin"}',
+      });
+
+      await repo.updateReplyAuthor('org1', 'reply1', author);
+
+      expect(
+        JSON.parse(postUpdate.mock.calls[0][0].data.settings).engageAuthor
+      ).toEqual(author);
     });
   });
 
@@ -4415,6 +4532,8 @@ describe('EngageRepository.getOrgScanStatus', () => {
         content: 'my draft reply',
         state: 'DRAFT',
         source: 'engage',
+        providerIdentifier: 'x',
+        settings: JSON.stringify({ __type: 'x' }),
       });
       // Linked to a fresh EngageSentReply; no in-place update on the create path.
       expect(sentCreate.mock.calls[0][0].data).toMatchObject({
@@ -4455,6 +4574,111 @@ describe('EngageRepository.getOrgScanStatus', () => {
       expect(postCreate).not.toHaveBeenCalled();
       expect(sentCreate).not.toHaveBeenCalled();
     });
+
+    // A draft written before the platform fix carries providerIdentifier
+    // 'reddit'. Editing it must repair the row, not preserve the lie — otherwise
+    // the only cure is the backfill migration.
+    it('re-stamps the real platform when an existing draft is edited', async () => {
+      const { repo, sentFindFirst, postUpdate, sentUpdate } = buildRepo();
+      sentFindFirst.mockResolvedValue({
+        id: 'reply-d',
+        postId: 'post-d',
+        post: { settings: JSON.stringify({ __type: 'reddit' }) },
+      });
+      postUpdate.mockResolvedValue({ id: 'post-d' });
+      sentUpdate.mockResolvedValue({ id: 'reply-d' });
+
+      await repo.upsertDraft('org1', 'opp1', {
+        platform: 'hackernews',
+        content: 'edited',
+        inputData: {},
+      });
+
+      expect(postUpdate.mock.calls[0][0].data).toMatchObject({
+        content: 'edited',
+        providerIdentifier: 'hackernews',
+      });
+      expect(
+        JSON.parse(postUpdate.mock.calls[0][0].data.settings).__type
+      ).toBe('hackernews');
+    });
+
+    // settings also carries engageAuthor (who posted a manual reply), merged in
+    // by the publish paths. Re-stamping __type must not drop it.
+    it('preserves every other settings key when re-stamping __type', async () => {
+      const { repo, sentFindFirst, postUpdate, sentUpdate } = buildRepo();
+      const engageAuthor = { handle: 'someone', id: 't2_1' };
+      sentFindFirst.mockResolvedValue({
+        id: 'reply-d',
+        postId: 'post-d',
+        post: { settings: JSON.stringify({ __type: 'reddit', engageAuthor }) },
+      });
+      postUpdate.mockResolvedValue({ id: 'post-d' });
+      sentUpdate.mockResolvedValue({ id: 'reply-d' });
+
+      await repo.upsertDraft('org1', 'opp1', {
+        platform: 'quora',
+        content: 'edited',
+        inputData: {},
+      });
+
+      expect(JSON.parse(postUpdate.mock.calls[0][0].data.settings)).toEqual({
+        __type: 'quora',
+        engageAuthor,
+      });
+    });
+
+    // A row whose settings never parsed must still come out with a usable
+    // discriminator rather than throwing the edit away.
+    it.each([null, undefined, 'not json at all', '[1,2]'])(
+      'falls back to a fresh {__type} when settings is %s',
+      async (settings) => {
+        const { repo, sentFindFirst, postUpdate, sentUpdate } = buildRepo();
+        sentFindFirst.mockResolvedValue({
+          id: 'reply-d',
+          postId: 'post-d',
+          post: { settings },
+        });
+        postUpdate.mockResolvedValue({ id: 'post-d' });
+        sentUpdate.mockResolvedValue({ id: 'reply-d' });
+
+        await repo.upsertDraft('org1', 'opp1', {
+          platform: 'devto',
+          content: 'edited',
+          inputData: {},
+        });
+
+        expect(JSON.parse(postUpdate.mock.calls[0][0].data.settings)).toEqual({
+          __type: 'devto',
+        });
+      }
+    );
+
+    // The reply is filed under the opportunity's OWN platform. This used to be
+    // `platform === 'x' ? 'x' : 'reddit'`, which stored every hackernews, quora,
+    // linkedin, medium and devto reply as a reddit row — the admin Post list and
+    // the calendar filter on this column, so a Hacker News reply appeared as a
+    // reddit post whose releaseURL pointed at news.ycombinator.com.
+    it.each(['hackernews', 'quora', 'linkedin', 'medium', 'devto', 'reddit', 'x'])(
+      'stores a %s reply under its real platform, never collapsed to reddit',
+      async (platform) => {
+        const { repo, sentFindFirst, postCreate, sentCreate } = buildRepo();
+        sentFindFirst.mockResolvedValue(null);
+        postCreate.mockResolvedValue({ id: 'post-d' });
+        sentCreate.mockResolvedValue({ id: 'reply-d', postId: 'post-d' });
+
+        await repo.upsertDraft('org1', 'opp1', {
+          platform,
+          content: 'reply',
+          inputData: {},
+        });
+
+        expect(postCreate.mock.calls[0][0].data).toMatchObject({
+          providerIdentifier: platform,
+          settings: JSON.stringify({ __type: platform }),
+        });
+      }
+    );
   });
 
   describe('draft cleanup on a committed reply', () => {

@@ -1540,6 +1540,20 @@ export class EngageService implements OnApplicationBootstrap {
         engageAuthor = await fetchRedditAuthorProfile(url, (message) =>
           this.logger.warn(`storeReplyAuthor: ${message}`)
         );
+      } else {
+        // No SERVER-side lookup exists for this platform: X puts the handle in
+        // the reply URL and Reddit exposes the comment's author over its API,
+        // but hackernews/quora/linkedin/medium/devto offer neither from a
+        // logged-out backend. That is not a failure to report as one — the
+        // author reaches us the other way, from the extension, which posted the
+        // reply as the logged-in session and knows exactly who that was
+        // (`probeSessionAccount`). Persisting it is now open to every platform
+        // (updateReplyUrl / updateReplyAuthor); only this backstop is X/Reddit.
+        this.logger.debug(
+          `storeReplyAuthor: no server-side author lookup for ${platform} ` +
+            `(sentReplyId=${sentReplyId}) — relying on the extension to supply it`
+        );
+        return;
       }
       if (!engageAuthor) {
         this.logger.warn(
@@ -2772,8 +2786,12 @@ export class EngageService implements OnApplicationBootstrap {
               integrationId: body.integrationId,
               projectId: resolvedProjectId,
             })
-          : await this._engageRepository.createManualRedditPost({
+          : await this._engageRepository.createManualCommunityPost({
               organizationId: org.id,
+              // The opportunity's OWN platform. Everything non-X shares this
+              // path (reddit, hackernews, quora, linkedin, medium, devto), so
+              // passing a constant here is what filed an HN reply as reddit.
+              platform: opp.platform,
               content: body.draftContent,
               date: new Date(),
               replyUrl: body.replyUrl,

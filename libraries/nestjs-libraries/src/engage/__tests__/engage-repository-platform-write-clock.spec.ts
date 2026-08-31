@@ -74,12 +74,17 @@ describe('getLastPlatformWriteAt', () => {
     });
   });
 
-  it('EXCLUDES engage posts from the post lookup — they are stored under the wrong platform', async () => {
-    // upsertDraft writes `providerIdentifier: platform === 'x' ? 'x' : 'reddit'`
-    // for EVERY platform, so a hackernews reply is persisted as a reddit row.
-    // Matching on that column without the filter counted an HN reply as a reddit
-    // write and starved the org's reddit replies for a full floor. Engage rows
-    // are already covered by the reply lookup, keyed on the TRUE platform.
+  it('EXCLUDES engage posts from the post lookup — the reply lookup already owns them', async () => {
+    // Engage rows are covered above by the reply lookup, keyed on the TRUE
+    // platform (opportunity.platform), so leaving them in here would match the
+    // same hand-out twice.
+    //
+    // It also keeps the query correct against an un-migrated database: rows
+    // written before upsertDraft was fixed carry
+    // `providerIdentifier: platform === 'x' ? 'x' : 'reddit'`, so a hackernews
+    // reply is persisted as a reddit row. Matching on that column without the
+    // filter counted an HN reply as a reddit write and starved the org's reddit
+    // replies for a full floor.
     const { repo, postFindFirst } = buildRepo();
     postFindFirst.mockResolvedValue(null);
     await repo.getLastPlatformWriteAt('org-1', 'reddit');

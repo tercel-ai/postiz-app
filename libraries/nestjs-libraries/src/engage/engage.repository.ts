@@ -291,6 +291,30 @@ export function opportunityMediaUrls(rawData: unknown): string[] {
 }
 
 /**
+ * Rewrite ONLY `__type` in a Post.settings JSON blob, preserving every other key
+ * it carries — `engageAuthor` above all, which the publish paths merge in after
+ * the fact and which a blind overwrite would silently drop.
+ *
+ * Null/unparseable/non-object input yields a fresh `{__type}`: there was nothing
+ * readable to keep, and the discriminator has to be there.
+ */
+function mergeSettingsType(
+  settings: string | null | undefined,
+  type: string
+): string {
+  let parsed: Record<string, unknown> = {};
+  try {
+    const raw = JSON.parse(settings ?? '{}');
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+      parsed = raw as Record<string, unknown>;
+    }
+  } catch {
+    /* unparseable settings: fall through to a fresh object */
+  }
+  return JSON.stringify({ ...parsed, __type: type });
+}
+
+/**
  * Pull the reply author (engageAuthor) out of a Post.settings JSON blob. Returns
  * null when settings is absent/unparseable or carries no engageAuthor.
  */
@@ -2408,11 +2432,19 @@ export class EngageRepository {
       // PUBLISHED posts, excluding engage's own rows — those are covered above,
       // by their true platform.
       //
-      // The exclusion is load-bearing, not tidiness: upsertDraft writes
-      // `providerIdentifier: platform === 'x' ? 'x' : 'reddit'` for EVERY
-      // platform, so a hackernews reply is stored as a reddit row. Matching on
-      // that column without the filter counted an HN reply as a reddit write and
-      // starved the org's reddit replies for a full floor.
+      // The exclusion is load-bearing, not tidiness. Two reasons, and the
+      // second outlives the first:
+      //
+      //   1. Rows written before upsertDraft was fixed carry
+      //      `providerIdentifier: platform === 'x' ? 'x' : 'reddit'` — every
+      //      non-X reply filed under reddit. Matching on that column without
+      //      the filter counted an HN reply as a reddit write and starved the
+      //      org's reddit replies for a full floor. The backfill in
+      //      `fix-engage-post-provider-identifier.sql` repairs them, but this
+      //      query must be correct against an un-migrated database too.
+      //   2. Even with every row correct, an engage reply is already counted
+      //      above by its true `opportunity.platform` — leaving it in here
+      //      would just match the same hand-out twice.
       //
       // The platform match mirrors how the publish path resolves it
       // (posts.service.getDuePublishPosts): the column first, then the bound
@@ -3189,13 +3221,28 @@ export class EngageRepository {
           opportunityId,
           post: { state },
         },
-        select: { id: true, postId: true },
+        select: {
+          id: true,
+          postId: true,
+          // Needed to re-stamp the platform below without clobbering anything
+          // else the settings blob carries.
+          post: { select: { settings: true } },
+        },
       });
 
       if (existing) {
         await tx.post.update({
           where: { id: existing.postId },
-          data: { content: data.content },
+          data: {
+            content: data.content,
+            // Re-stamp the platform on every save, so a row written before this
+            // was fixed repairs itself the next time its draft is edited rather
+            // than waiting on the backfill migration. Idempotent: an
+            // opportunity's platform never changes, so this rewrites the same
+            // value on an already-correct row.
+            providerIdentifier: data.platform,
+            settings: mergeSettingsType(existing.post?.settings, data.platform),
+          },
         });
         return tx.engageSentReply.update({
           where: { id: existing.id },
@@ -3215,10 +3262,21 @@ export class EngageRepository {
           state,
           source: 'engage',
           image: '[]',
-          providerIdentifier: data.platform === 'x' ? 'x' : 'reddit',
-          settings: JSON.stringify({
-            __type: data.platform === 'x' ? 'x' : 'reddit',
-          }),
+          // The opportunity's OWN platform, verbatim. This used to be
+          // `platform === 'x' ? 'x' : 'reddit'`, which filed every non-X reply
+          // (hackernews, quora, linkedin, medium, devto) under reddit: the admin
+          // Post list and the calendar filter on this column directly
+          // (posts.repository `channel` filter), so a Hacker News reply showed up
+          // as a reddit row whose releaseURL pointed at news.ycombinator.com.
+          //
+          // Safe to widen because nothing ROUTES on it for an engage reply: the
+          // send path claims by `opportunity.platform`
+          // (claimDueEngageReplies), and both publish queues exclude
+          // `source: 'engage'` outright, so this value never reaches
+          // getSocialTaskQueue or the extension's provider lookup. It is the
+          // reporting/filtering column, and it must tell the truth.
+          providerIdentifier: data.platform,
+          settings: JSON.stringify({ __type: data.platform }),
           group: randomUUID(),
           delay: 0,
         },
@@ -5543,41 +5601,40 @@ export class EngageRepository {
     // never override an account the user explicitly chose at confirm time.
     let integrationId: string | undefined;
     let mergedSettings: string | undefined;
-    if (platform === 'x') {
+    // One read serves both jobs below, on every platform. It used to sit inside
+    // an `if (platform === 'x') ... else if (platform === 'reddit')` chain,
+    // which meant a hackernews/quora/linkedin/medium/devto reply had its author
+    // SILENTLY DROPPED even when the extension had captured and sent one — the
+    // caller supplied ground truth and the write threw it away.
+    if (engageAuthor || (platform === 'x' && url)) {
       const post = await this._post.model.post.findUnique({
         where: { id: reply.postId },
         select: { integrationId: true, settings: true },
       });
-      const alreadyLinked = !!post?.integrationId;
-      if (!alreadyLinked && url) {
+
+      // X ONLY: an OAuth account can be matched back from the reply URL's
+      // handle, so a reply recorded without one can still gain the integration
+      // its metrics sync needs. No other engage platform has an integration to
+      // resolve — this genuinely is X-specific, unlike the author recording.
+      if (platform === 'x' && url && !post?.integrationId) {
         integrationId =
           (await this.resolveXReplyIntegrationId(organizationId, url))
             ?.integrationId ?? undefined;
       }
-      // Record the actual poster when supplied. The browser extension (Option A)
-      // posts as the logged-in X session, which can differ from the selected
-      // integration — that real author is ground truth, so store it in settings
-      // even when an integration is linked. Without an explicit author we keep the
-      // old behavior (integration is the source of truth; settings untouched).
+
+      // Record the actual poster whenever one is supplied, on ANY platform. The
+      // browser extension posts as the logged-in session, which can differ from
+      // the selected integration — that real author is ground truth, so it is
+      // stored even when an integration is linked. Without an explicit author
+      // the old behaviour stands: settings untouched, and the integration (or a
+      // later background lookup) speaks for the reply.
       if (engageAuthor) {
         mergedSettings = this._mergeEngageAuthor(
           post?.settings,
-          'x',
+          platform,
           engageAuthor
         );
       }
-    } else if (platform === 'reddit' && engageAuthor) {
-      // Reddit replies never have an integration, so engageAuthor is always the
-      // recorded author. Merge into existing settings to preserve the __type tag.
-      const post = await this._post.model.post.findUnique({
-        where: { id: reply.postId },
-        select: { settings: true },
-      });
-      mergedSettings = this._mergeEngageAuthor(
-        post?.settings,
-        'reddit',
-        engageAuthor
-      );
     }
 
     return this._post.model.post.update({
@@ -5623,14 +5680,22 @@ export class EngageRepository {
   }
 
   /**
-   * Patch ONLY settings.engageAuthor for a sent reply's post — the slow,
-   * display-only author/avatar enrichment that the confirm + backfill paths now
-   * resolve in the background (the URL is saved synchronously; this fills the
-   * author once Reddit/X finally answers). Honours the same FALLBACK rule as
-   * updateReplyUrl: for X, record engageAuthor ONLY when the post has no connected
-   * integration (the integration is the source of truth); for Reddit, always
-   * record it. No-ops (returns undefined) when the reply/post is gone or the
-   * platform isn't a manual-reply platform — a background enrich must never throw.
+   * Patch ONLY settings.engageAuthor for a sent reply's post — the
+   * display-only author/avatar enrichment the confirm + backfill paths resolve
+   * out of band (the URL is saved synchronously; this fills the author once the
+   * platform finally answers, or once a caller hands one over).
+   *
+   * Works on EVERY engage platform. It used to bail on anything that was not X
+   * or Reddit, so a hackernews/quora/linkedin/medium/devto reply could never
+   * record who posted it — not even when the caller already knew.
+   *
+   * The one platform rule that remains is X's, and it is a real semantic, not a
+   * gate: a connected X integration IS the author, so settings are left alone
+   * rather than shadowed by a second identity. Everywhere else there is no
+   * integration to speak for the reply, so the supplied author is recorded.
+   *
+   * No-ops (returns undefined) when the reply or post is gone — a background
+   * enrich must never throw.
    */
   async updateReplyAuthor(
     organizationId: string,
@@ -5643,7 +5708,6 @@ export class EngageRepository {
     });
     if (!reply) return undefined;
     const platform = reply.opportunity.platform;
-    if (platform !== 'reddit' && platform !== 'x') return undefined;
 
     const post = await this._post.model.post.findUnique({
       where: { id: reply.postId },
@@ -5668,7 +5732,7 @@ export class EngageRepository {
    *  other keys; tolerant of null/unparseable input. */
   private _mergeEngageAuthor(
     settings: string | null | undefined,
-    type: 'x' | 'reddit',
+    type: string,
     engageAuthor: EngageAuthorProfile
   ): string {
     let parsed: Record<string, unknown> = { __type: type };
@@ -5983,8 +6047,22 @@ export class EngageRepository {
     });
   }
 
-  async createManualRedditPost(data: {
+  /**
+   * A manual reply confirmed on any platform that is NOT X — reddit, hackernews,
+   * quora, linkedin, medium, devto. X has its own path (createManualXPost)
+   * because only there is a reply bound to a connected OAuth account, whose
+   * token drives the metrics sync.
+   *
+   * `platform` is REQUIRED, and it is the whole point of this signature. The
+   * method used to be `createManualRedditPost` and hard-coded `'reddit'`, so a
+   * Hacker News reply was persisted as a reddit Post whose releaseURL pointed at
+   * news.ycombinator.com — mislabelled everywhere the admin list, the calendar
+   * and the platform write clock filter on `providerIdentifier`. Taking the
+   * platform as an argument makes the caller say which one it is.
+   */
+  async createManualCommunityPost(data: {
     organizationId: string;
+    platform: string;
     content: string;
     date: Date;
     replyUrl?: string;
@@ -6000,11 +6078,11 @@ export class EngageRepository {
         state: 'PUBLISHED',
         source: 'engage',
         image: '[]',
-        providerIdentifier: 'reddit',
-        // Reddit manual posts never have an integration, so engageAuthor (the
-        // redditor who posted the reply) is the source of truth when known.
+        providerIdentifier: data.platform,
+        // These platforms never have an integration, so engageAuthor (the
+        // account that posted the reply) is the source of truth when known.
         settings: JSON.stringify({
-          __type: 'reddit',
+          __type: data.platform,
           ...(data.engageAuthor ? { engageAuthor: data.engageAuthor } : {}),
         }),
         group: randomUUID(),
@@ -6014,7 +6092,7 @@ export class EngageRepository {
         // by project like every other engage post (matches the EngageSentReply
         // row's projectId written by confirmManualReply).
         ...(data.projectId ? { projectId: data.projectId } : {}),
-        // integrationId intentionally omitted: Reddit manual posts have no integration
+        // integrationId intentionally omitted: these platforms have no integration
       },
     });
   }
@@ -6140,7 +6218,7 @@ export class EngageRepository {
         delay: 0,
         ...(data.replyUrl ? { releaseURL: data.replyUrl } : {}),
         ...(releaseId ? { releaseId } : {}),
-        // Project attribution — see createManualRedditPost's note.
+        // Project attribution — see createManualCommunityPost's note.
         ...(data.projectId ? { projectId: data.projectId } : {}),
         // Scalar FK (not a `connect` relation) to stay in Prisma's unchecked
         // create form alongside organizationId; ownership is validated/resolved
