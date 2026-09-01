@@ -5,12 +5,13 @@ gate, backfill script). **Frontend UI not built** — no signal-feed entry point
 or composer wiring yet; the two endpoints below are only reachable directly.
 
 Implementation:
-- Schema: `Post.referenceOpportunityId` (§4.2), `AiseeBusinessSubType.POST_GEN_REFERENCE` (§7)
-- Generation: [`engage-reference-post.service.ts`](../../libraries/nestjs-libraries/src/engage/engage-reference-post.service.ts), reusing [`prompt-source-envelope.ts`](../../libraries/nestjs-libraries/src/engage/prompt-source-envelope.ts) and [`reference-similarity.ts`](../../libraries/nestjs-libraries/src/engage/reference-similarity.ts) (§6)
+- Schema: `Post.referenceOpportunityId` (§4.2), `AiseeBusinessSubType.POST_GEN_REFERENCE` (§7) — **not yet pushed to any database**, see §10
+- Generation: [`engage-reference-post.service.ts`](../../libraries/nestjs-libraries/src/engage/engage-reference-post.service.ts), reusing [`prompt-source-envelope.ts`](../../libraries/nestjs-libraries/src/engage/prompt-source-envelope.ts) and [`reference-similarity.ts`](../../libraries/nestjs-libraries/src/engage/reference-similarity.ts) (§6). Failures still carry every already-completed model call's usage via `ReferencePostGenerationError`/`TooSimilarToReferenceError(usages)`, so a similarity-gate rejection is billed like any other real spend (§7.1) — this was a real bug in the first implementation pass, caught in code review and fixed.
 - Orchestration + billing: `EngageService.generateReferencePost` / `saveGeneratedPost` (§5/§7.1)
 - API: `engage.controller.ts` `POST /opportunities/:id/generate-post` + `/save-generated-post` — see `docs/engage/api.md` §"Reference-Post Generation"
 - Backfill: [`scripts/backfill-engage-reference-opportunity.ts`](../../scripts/backfill-engage-reference-opportunity.ts) (§4.4) — not yet run against any environment; dry-run by default
-- Tests: `reference-similarity.spec.ts`, `engage-reference-post.service.spec.ts`, `engage-service.reference-post.spec.ts`, `engage.controller.referencePost.spec.ts`
+- Tests: `reference-similarity.spec.ts`, `engage-reference-post.service.spec.ts`, `engage-service.reference-post.spec.ts`, `engage.controller.referencePost.spec.ts` — 76 tests, full repo suite green (210 files / 2761 tests) as of the last review pass
+- Deployment: not yet shipped to any environment — see §10 for the exact steps
 
 Known gaps vs this design (tracked, not silently dropped):
 - §4.5 snapshot retention policy is still **undecided** — the full snapshot is
@@ -18,6 +19,11 @@ Known gaps vs this design (tracked, not silently dropped):
   explicitly warned against), pending the product decision.
 - §6's similarity thresholds (12-word run / 25% shingle overlap) are the
   starting numbers from this doc, unvalidated against real generations.
+- §5's `SaveGeneratedPostDto.integrationId` consistency with the prior
+  `/generate-post` call is a **client convention, not server-enforced** — the
+  two endpoints share no correlation token. An earlier draft of this doc and
+  the code's own comment both overstated this as "checked server-side," which
+  code review caught; corrected in both places.
 
 ## 1. Overview
 
@@ -499,3 +505,71 @@ does not re-diverge once implementation starts:
   not wired up here.
 - Any change to `EngageOpportunity`/`EngageOpportunityState` — this feature
   only *reads* an opportunity, it never writes one.
+
+## 10. Deployment
+
+This is a **backend-only, upgrade-path** change against an existing Engage
+deployment — follow `docs/engage/startup-checklist.md` §0.B's shape, but most
+of that checklist's steps don't apply here and are called out as skipped
+below so this isn't run as a full Engage-launch procedure by mistake.
+
+```bash
+# 1) Pull the code
+git pull
+
+# 2) Regenerate the Prisma client + push the new column/relation/index
+#    (Post.referenceOpportunityId, its FK to EngageOpportunity, the index —
+#    §4.2) to the database. Additive only — a new nullable column + a new
+#    index on an existing table — so despite the script's standard
+#    --accept-data-loss flag (see startup-checklist.md §4), there is nothing
+#    for it to actually drop here; safe against a live database with data.
+pnpm run prisma-db-push
+
+# 3) Restart ONLY the backend — no new frontend code shipped (§9: no UI),
+#    so, unlike a typical Engage feature upgrade, frontend does NOT need
+#    restarting here.
+pm2 restart backend                 # dev
+# pm2 restart backend-prod          # prod
+
+# 4) (Optional, any time after step 3 — not blocking) Backfill
+#    referenceOpportunityId onto existing Engage reply posts. Pure data
+#    hygiene (§4.4); the feature works without it.
+npx ts-node --project scripts/tsconfig.json scripts/backfill-engage-reference-opportunity.ts
+npx ts-node --project scripts/tsconfig.json scripts/backfill-engage-reference-opportunity.ts --execute
+```
+
+**Explicitly skipped, vs. the general Engage upgrade checklist:**
+- [ ] **No orchestrator/Temporal redeploy.** This feature adds no workflow —
+  generation and save are both plain request/response. Do not run
+  `scripts/redeploy-orchestrator.sh` for this change alone.
+- [ ] **No new/changed `.env` variables.** Generation reuses whichever
+  provider `engage-draft.service.ts` already uses —
+  `ANTHROPIC_API_KEY`/`CLAUDE_API_KEY` or `OPENROUTER_API_KEY` — already
+  required for the existing reply-draft feature. If that already works in
+  the target environment, nothing to add.
+- [ ] **No `pnpm install`.** No new npm dependency was introduced.
+
+**Smoke test** (mirrors `startup-checklist.md` §8's style — manual checks,
+not an automated suite):
+
+- [ ] `POST /api/engage/opportunities/:id/generate-post` with a real
+  `integrationId` + `tone` on any existing opportunity → SSE stream ends
+  with a `data: {"text": "..."}` frame then `[DONE]`; the generated text
+  should read as an original post, not a copy of the opportunity's
+  `postContent`.
+- [ ] `POST /api/engage/opportunities/:id/save-generated-post` with that
+  text + the same `integrationId`, `type: 'draft'` → `200 OK`,
+  `[{ postId, integration, state: 'DRAFT', releaseURL: null }]`.
+- [ ] Query that `Post` row directly (Prisma Studio or `psql`): `source` is
+  `'calendar'` (not `'engage'`), `referenceOpportunityId` is set to the
+  opportunity's id, and `settings` (parsed) contains a `referenceOpportunity`
+  key with `snapshotContent`.
+- [ ] Confirm it does **not** create an `EngageSentReply` row and does
+  **not** change the opportunity's `EngageOpportunityState.status`.
+- [ ] Existing-business regression: `POST /api/engage/opportunities/:id/draft`
+  (reply generation) still works unchanged — the shared
+  `prompt-source-envelope.ts` refactor (§6) touched `engage-draft.service.ts`
+  too, so this is the one path a schema-only change wouldn't otherwise
+  exercise.
+- [ ] Rate limit: an 21st call to either new endpoint within an hour from the
+  same user returns `429`.
