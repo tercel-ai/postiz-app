@@ -27,6 +27,9 @@
 - [Draft Generation — AI Draft Generation (SSE)](#draft-generation--ai-draft-generation-sse)
   - [POST /opportunities/:id/draft](#post-apienageopportunitiesiddraft) — stream an AI draft (not persisted)
   - [POST /opportunities/:id/save-draft](#post-apienageopportunitiesidsave-draft) — save an unpublished working draft (DRAFT)
+- [Reference-Post Generation — Original Post Inspired By An Opportunity](#reference-post-generation--original-post-inspired-by-an-opportunity)
+  - [POST /opportunities/:id/generate-post](#post-apienageopportunitiesidgenerate-post) — stream an AI-generated original post (not a reply, not persisted)
+  - [POST /opportunities/:id/save-generated-post](#post-apienageopportunitiesidsave-generated-post) — persist as a real Post
 - [Reply Actions — Send/Schedule/Manual Reply](#reply-actions--sendschedulemanual-reply)
   - [POST /send-now](#post-apienageopportunitiesidsend-now) — immediate single (cancels scheduled if exists)
   - [POST /schedule](#post-apienageopportunitiesidschedule) — scheduled single
@@ -1717,6 +1720,57 @@ When the opportunity is later sent / scheduled / manually replied, every **un-he
 **Response** `200 OK` — Returns the upserted `EngageSentReply` (with its `Post`, `state=DRAFT`).
 
 **Errors**: `404` opportunity not found · `403` opportunity no longer actionable (expired / replied / scheduled / dismissed).
+
+---
+
+## Reference-Post Generation — Original Post Inspired By An Opportunity
+
+Generates a normal calendar **Post** inspired by an opportunity's content — **not** a reply. See `docs/engage/reference-post-generation.md` for the full design (data model, billing, anti-plagiarism gate). Unlike every endpoint above, these two do **not** require the opportunity to be in an actionable status — an opportunity you already replied to, or that expired, is still valid inspiration — and they never claim the opportunity or create an `EngageSentReply`.
+
+**Rate Limit**: Max 20 calls per user per hour (both endpoints, same as `/draft`).
+
+### POST `/api/engage/opportunities/:id/generate-post`
+
+Stream an AI-generated **original** post via SSE (`text/event-stream`). Does not persist anything.
+
+**Request Body**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `integrationId` | `string` | ✓ | Target account. The platform is resolved from it server-side — there is no separate `platform` field, so the generated post's constraints (length, etc.) can never disagree with where it's later saved |
+| `tone` | `'personal' \| 'company'` | ✓ | Voice to write in |
+| `outputLength` | `integer` (≥ 2) | — | Target length; soft target only, same semantics as reply drafts |
+| `projectId` | `string` | — | Optional project scope |
+
+**SSE Response Format** — identical wire shape to `/draft` (`data: {"text": "..."}` then `data: [DONE]`).
+
+**On error**, one typed frame then `[DONE]`:
+
+| error code | Meaning |
+|---|---|
+| `opportunity_unavailable` | Opportunity or integration not found (404) |
+| `too_similar_to_reference` | The draft reused too much of the reference post's own wording, even after one corrective retry — nothing usable was produced |
+| `generation_failed` | Model call failed |
+
+### POST `/api/engage/opportunities/:id/save-generated-post`
+
+Persist a (possibly edited) draft from the endpoint above as a real `Post`. The content may be AI-generated, AI-then-edited, or fully hand-typed — same decoupling as `/save-draft`.
+
+Stored as a normal `Post` with `source='calendar'` (behaves exactly like any other calendar post — publish queue, dashboard analytics, billing) and `referenceOpportunityId` set to the opportunity id, plus a content snapshot merged into `settings.referenceOpportunity` (the opportunity itself can be deleted or its content can drift later; the snapshot is what survives). **No** `EngageSentReply` is created and the opportunity is **not** claimed.
+
+**Request Body**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `content` | `string` (max 10000) | ✓ | Final post text |
+| `type` | `'draft' \| 'schedule' \| 'now'` | ✓ | Same semantics as the generic calendar composer |
+| `integrationId` | `string` | ✓ | **Should equal** the `integrationId` used in `/generate-post` for this draft (not server-verified — client convention, same trust level as `/save-draft`'s unchecked `strategy`/`brandStrength`) |
+| `date` | ISO datetime | when `type: 'schedule'` | Publish time |
+| `projectId` | `string` | — | Optional project scope |
+
+**Response** `200 OK` — Same shape as `POST /api/posts/` (`[{ postId, integration, state, releaseURL }]`).
+
+**Errors**: `404` opportunity or integration not found.
 
 ---
 

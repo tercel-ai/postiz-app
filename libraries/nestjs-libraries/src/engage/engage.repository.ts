@@ -5744,6 +5744,55 @@ export class EngageRepository {
     return JSON.stringify({ ...parsed, engageAuthor });
   }
 
+  /**
+   * Attach reference-post provenance to a just-created Post: the queryable FK
+   * column plus a content snapshot merged into settings (durable display/audit
+   * — EngageOpportunity rows can be hard-deleted or drift on re-scan, see
+   * docs/engage/reference-post-generation.md §4). `createPost`'s own return
+   * value carries no `settings`, hence the read-then-merge instead of a
+   * blind overwrite (same tolerant-merge shape as _mergeEngageAuthor).
+   */
+  async attachReferenceOpportunity(
+    postId: string,
+    snapshot: {
+      opportunityId: string;
+      platform: string;
+      externalPostUrl: string;
+      authorUsername: string;
+      snapshotTitle: string | null;
+      snapshotContent: string;
+    }
+  ) {
+    const post = await this._post.model.post.findUnique({
+      where: { id: postId },
+      select: { settings: true },
+    });
+    let parsed: Record<string, unknown> = {};
+    try {
+      parsed = JSON.parse(post?.settings ?? '{}') ?? {};
+    } catch {
+      /* keep {} on unparseable settings */
+    }
+    return this._post.model.post.update({
+      where: { id: postId },
+      data: {
+        referenceOpportunityId: snapshot.opportunityId,
+        settings: JSON.stringify({
+          ...parsed,
+          referenceOpportunity: snapshot,
+        }),
+      },
+    });
+  }
+
+  /** Org-scoped integration lookup — used by generateReferencePost/
+   *  saveGeneratedPost to resolve the target platform from an integrationId. */
+  getIntegrationById(organizationId: string, id: string) {
+    return this._integration.model.integration.findFirst({
+      where: { organizationId, id },
+    });
+  }
+
   // Lightweight status of a single sent reply — for the frontends to poll while
   // an in-browser extension reply posts + self-backfills its permalink. Success
   // is signalled by `replyUrl` (Post.releaseURL) flipping non-null; the Post is

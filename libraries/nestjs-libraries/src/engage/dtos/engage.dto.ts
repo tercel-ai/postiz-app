@@ -1008,6 +1008,32 @@ export class GenerateDraftDto {
   length?: 'short' | 'medium' | 'long';
 }
 
+// ─── Reference-Post Generation (docs/engage/reference-post-generation.md) ─────
+// Generates an ORIGINAL post inspired by an opportunity — not a reply to it.
+// See engage.controller.ts POST /opportunities/:id/generate-post.
+
+export class GenerateReferencePostDto {
+  // Target account, resolved server-side to get the target platform — NOT a
+  // client-supplied platform string, so generation can never target a
+  // platform the save step later disagrees with (§3/§5 of the design doc).
+  @IsString()
+  integrationId: string;
+
+  @IsString()
+  @IsIn(['personal', 'company'])
+  tone: 'personal' | 'company';
+
+  @IsOptional()
+  @IsInt()
+  @Min(2)
+  @Type(() => Number)
+  outputLength?: number;
+
+  @IsOptional()
+  @IsString()
+  projectId?: string;
+}
+
 // ─── Reply Sending ────────────────────────────────────────────────────────────
 
 export class SendReplyDto {
@@ -1187,6 +1213,40 @@ export class SaveDraftDto {
   @MaxLength(100, { each: true })
   @ArrayMaxSize(20)
   mentions?: string[];
+}
+
+// Persists a (possibly edited) reference-post draft as a real Post. See
+// engage.controller.ts POST /opportunities/:id/save-generated-post and
+// docs/engage/reference-post-generation.md §5 for the caller-facing shape /
+// server-side CreatePostDto assembly split.
+export class SaveGeneratedPostDto {
+  @IsString()
+  @MaxLength(10000)
+  content: string;
+
+  @IsString()
+  @IsIn(['draft', 'schedule', 'now'])
+  type: 'draft' | 'schedule' | 'now';
+
+  // SHOULD equal the integrationId used in the /generate-post call for this
+  // draft, so the platform whose length/format rules shaped the generated
+  // text matches the account it's actually saved to. NOT verified
+  // server-side: /generate-post and /save-generated-post are independent
+  // stateless calls with nothing to correlate them (no shared token), same
+  // as SaveDraftDto.strategy/brandStrength below aren't checked against what
+  // /draft actually generated with. The caller (composer UI) is trusted to
+  // send the same value; a mismatch is a content-quality bug, not a security
+  // issue, since both integrationIds are already scoped to the caller's org.
+  @IsString()
+  integrationId: string;
+
+  @IsOptional()
+  @IsDateString()
+  date?: string;
+
+  @IsOptional()
+  @IsString()
+  projectId?: string;
 }
 
 export class UpdateScheduledReplyDto {

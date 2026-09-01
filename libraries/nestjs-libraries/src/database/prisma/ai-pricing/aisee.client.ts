@@ -37,6 +37,12 @@ export type AiseeConsumptionType =
 export const AiseeBusinessSubType = {
   CHAT: 'chat',
   POST_GEN: 'post_gen',
+  // Post generation seeded from a user-picked EngageOpportunity as
+  // inspiration (docs/engage/reference-post-generation.md §7). Kept distinct
+  // from POST_GEN — reusing it would make the two flows indistinguishable in
+  // BillingRecord.subType, the one indexed column meant for exactly this kind
+  // of split within a businessType.
+  POST_GEN_REFERENCE: 'post_gen_reference',
   IMAGE: 'image',
   VIDEO: 'video',
 } as const;

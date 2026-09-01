@@ -20,6 +20,17 @@ import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/po
 import { PostOverageService } from '@gitroom/nestjs-libraries/database/prisma/posts/post-overage.service';
 import { SettingsService } from '@gitroom/nestjs-libraries/database/prisma/settings/settings.service';
 import { OperationPlanRepository } from '@gitroom/nestjs-libraries/database/prisma/operation-plan/operation-plan.repository';
+import { AiseeCreditService } from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/aisee-credit.service';
+import {
+  AiseeBusinessType,
+  AiseeBusinessSubType,
+  AiseeClient,
+} from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/aisee.client';
+import {
+  EngageReferencePostService,
+  ReferencePostGenerationError,
+  ReferencePostUsage,
+} from '@gitroom/nestjs-libraries/engage/engage-reference-post.service';
 import {
   OPERATION_PLAN_ALLOWED_PLATFORMS_KEY,
   OPERATION_PLAN_MAX_DURATION_DAYS_KEY,
@@ -94,6 +105,8 @@ import {
   BatchSendReplyDto,
   ScheduleReplyDto,
   SaveDraftDto,
+  GenerateReferencePostDto,
+  SaveGeneratedPostDto,
   ScoreStatsDto,
   SendReplyDto,
   UpdateKeywordDto,
@@ -182,7 +195,12 @@ export class EngageService implements OnApplicationBootstrap {
     // block a send) when either is absent, matching _scanConfig's own
     // never-throws fallback posture elsewhere in this file.
     private _operationPlanRepository?: OperationPlanRepository,
-    private _settingsService?: SettingsService
+    private _settingsService?: SettingsService,
+    // Same reason as the two above: optional so existing positional test
+    // constructors keep working. Used only by generateReferencePost/
+    // saveGeneratedPost (reference-post-generation.md).
+    private _aiseeCredit?: AiseeCreditService,
+    private _referencePostService?: EngageReferencePostService
   ) { }
 
   // Auto-start global workflows on every app boot so pnpm dev / Docker restart
@@ -1160,6 +1178,221 @@ export class EngageService implements OnApplicationBootstrap {
   /** Release a reservation when generation failed/aborted (uncounts it). */
   async releaseReplyGeneration(taskId: string): Promise<void> {
     await this._entitlementService.releaseReplyGeneration(taskId);
+  }
+
+  // ─── Reference-Post Generation (docs/engage/reference-post-generation.md) ─
+  // Generates/saves an ORIGINAL post inspired by an opportunity — not a
+  // reply. Deliberately separate from the reply-draft machinery above: no
+  // EngageEntitlementService reservation (that model is reply-credit
+  // specific), no opportunity claim, and the opportunity is resolved via
+  // getOpportunityById (no reply-eligibility status gate — §5 of the doc).
+
+  /**
+   * Stream an AI-generated original post seeded by `opportunityId`. Bills
+   * AI_COPYWRITING/POST_GEN_REFERENCE for every model call this generation
+   * made (including the similarity corrective retry, if any) as ONE
+   * BillingRecord — see §7.1. Billing is best-effort: a billing failure must
+   * not withhold a draft that was already generated (the spend already
+   * happened regardless of whether the deduction succeeds).
+   */
+  async generateReferencePost(
+    org: Organization,
+    opportunityId: string,
+    dto: GenerateReferencePostDto,
+    signal?: AbortSignal
+  ): Promise<{ text: string }> {
+    const opportunity = await this._engageRepository.getOpportunityById(
+      org.id,
+      opportunityId,
+      dto.projectId
+    );
+
+    const integration = await this._engageRepository.getIntegrationById(
+      org.id,
+      dto.integrationId
+    );
+    if (!integration) {
+      throw new NotFoundException(
+        `Integration with id ${dto.integrationId} not found`
+      );
+    }
+
+    if (!this._referencePostService) {
+      throw new InternalServerErrorException(
+        'Reference-post generation is not configured'
+      );
+    }
+
+    try {
+      const result = await this._referencePostService.generate(
+        opportunity,
+        integration.providerIdentifier,
+        dto.tone,
+        dto.outputLength,
+        signal
+      );
+      await this._billReferencePostUsages(
+        org,
+        opportunityId,
+        integration.providerIdentifier,
+        dto.tone,
+        result.usages
+      );
+      return { text: result.text };
+    } catch (err) {
+      // Even a FAILED generation (similarity gate exhausted, a later attempt
+      // erroring after an earlier one already succeeded) can carry real,
+      // billable usage from the attempts that did complete — see
+      // ReferencePostGenerationError. Bill it, then let the original error
+      // (TooSimilarToReferenceError etc.) propagate unchanged so the
+      // controller's error-frame mapping still sees the right type.
+      if (err instanceof ReferencePostGenerationError && err.usages.length) {
+        await this._billReferencePostUsages(
+          org,
+          opportunityId,
+          integration.providerIdentifier,
+          dto.tone,
+          err.usages
+        );
+      }
+      throw err;
+    }
+  }
+
+  /** Best-effort: a billing failure must not withhold a draft that was
+   *  already generated — the spend already happened regardless of whether
+   *  the deduction succeeds. See §7.1. */
+  private async _billReferencePostUsages(
+    org: Organization,
+    opportunityId: string,
+    targetPlatform: string,
+    tone: string,
+    usages: ReferencePostUsage[]
+  ): Promise<void> {
+    if (!this._aiseeCredit || !usages.length) return;
+    try {
+      await this._aiseeCredit.billCollectedUsages(
+        {
+          userId: org.id,
+          taskId: AiseeClient.buildTaskId(`engage_ref_post_${org.id}`),
+          businessType: AiseeBusinessType.AI_COPYWRITING,
+          subType: AiseeBusinessSubType.POST_GEN_REFERENCE,
+          // The opportunity, not the Post — no Post exists yet at
+          // generation time (§7 of the design doc).
+          relatedId: opportunityId,
+          description: 'Reference-post generation (Engage)',
+          data: { targetPlatform, tone },
+        },
+        usages.map((usage) => ({
+          servicer: usage.provider,
+          provider: usage.provider,
+          model: usage.model,
+          type: 'text' as const,
+          billing_mode: 'per_token' as const,
+          method: 'messages.create',
+          usage: {
+            prompt_tokens: usage.promptTokens,
+            completion_tokens: usage.completionTokens,
+            total_tokens: usage.totalTokens,
+          },
+        }))
+      );
+    } catch (billErr) {
+      this.logger.error(
+        `Reference-post generation billing failed for opportunity ${opportunityId} (org ${org.id})`,
+        billErr instanceof Error ? billErr.stack : billErr
+      );
+    }
+  }
+
+  /**
+   * Persist a (possibly edited) reference-post draft as a real Post. Assembles
+   * the caller-facing DTO into a full CreatePostDto server-side (see §5 of the
+   * design doc for why: date/shortLink/tags requirements the caller has no
+   * business supplying), then attaches referenceOpportunityId + a content
+   * snapshot the generic createPost path has no field for.
+   */
+  async saveGeneratedPost(
+    org: Organization,
+    userId: string,
+    opportunityId: string,
+    dto: SaveGeneratedPostDto
+  ) {
+    const opportunity = await this._engageRepository.getOpportunityById(
+      org.id,
+      opportunityId,
+      dto.projectId
+    );
+
+    const integration = await this._engageRepository.getIntegrationById(
+      org.id,
+      dto.integrationId
+    );
+    if (!integration) {
+      throw new NotFoundException(
+        `Integration with id ${dto.integrationId} not found`
+      );
+    }
+
+    // createPost itself overrides `date` to "right now" whenever
+    // type==='now' (posts.service.ts:1393), so findFreeDateTime must not run
+    // on that path: besides being wasted work, it can throw ("No available
+    // posting time slot found within the next 365 days") on a misconfigured
+    // account and wrongly block an immediate send that never needed a slot.
+    // 'draft' has no such override — CreatePostDto.date is unconditionally
+    // required (§5), so a placeholder is still needed there.
+    const date =
+      dto.type === 'schedule'
+        ? dto.date
+        : dto.type === 'now'
+        ? new Date().toISOString()
+        : await this._postsService.findFreeDateTime(
+            org.id,
+            dto.integrationId,
+            dto.projectId
+          );
+    if (!date) {
+      throw new BadRequestException('date is required when type is "schedule"');
+    }
+
+    const mapped = await this._postsService.mapTypeToPost(
+      {
+        type: dto.type,
+        projectId: dto.projectId,
+        // Always 'calendar' — never taken from the request body. See §4.1:
+        // a reference-inspired post behaves like a normal calendar post
+        // everywhere (publish-due, dashboard, billing channel), and only the
+        // referenceOpportunityId column (attached below) carries provenance.
+        source: 'calendar',
+        shortLink: false,
+        tags: [],
+        date,
+        posts: [
+          {
+            integration: { id: dto.integrationId },
+            value: [{ content: dto.content, image: [] }],
+          },
+        ],
+      } as never,
+      org.id
+    );
+
+    const created = await this._postsService.createPost(org.id, mapped, userId);
+    const postId = created?.[0]?.postId;
+    if (!postId) {
+      throw new InternalServerErrorException('Post creation failed');
+    }
+
+    await this._engageRepository.attachReferenceOpportunity(postId, {
+      opportunityId,
+      platform: opportunity.platform,
+      externalPostUrl: opportunity.externalPostUrl,
+      authorUsername: opportunity.authorUsername,
+      snapshotTitle: opportunity.title ?? null,
+      snapshotContent: opportunity.postContent,
+    });
+
+    return created;
   }
 
   // ─── Sent Replies ─────────────────────────────────────────────────────────

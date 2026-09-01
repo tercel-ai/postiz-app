@@ -49,6 +49,52 @@ interface RawAnalyticsEntry {
 }
 
 /**
+ * Can the public actually see this reply?
+ *
+ * A reply that a platform has killed still reads, everywhere else in this
+ * pipeline, exactly like a healthy one: it has a releaseURL, it has a state of
+ * PUBLISHED, and its metrics are simply low. That is how an account whose every
+ * comment had been flagged into invisibility went forty days without a single
+ * signal reaching the product.
+ *
+ * `unknown` is deliberately NOT folded into `visible`. The flags only exist on
+ * rows written by an extension build that emits them, so most historical rows
+ * carry no answer at all — and "we have never checked" must not render as
+ * "healthy", which is the precise mistake this whole change is undoing.
+ */
+export type ReplyVisibility = 'visible' | 'hidden' | 'removed' | 'unknown';
+
+/**
+ * Read the `dead` / `deleted` flags the extension's metrics fetchers emit
+ * alongside the numbers (see the extension's metrics.hackernews.ts).
+ *
+ * Labels are matched EXACTLY, not by regex like the numeric getters below:
+ * `/dead/` also matches `deleted`, so a pattern match would report an
+ * author-removed item as platform-killed.
+ *
+ * `hidden` wins over `removed` when both are set, because the two answer
+ * different questions and only one is actionable — a flagged item says
+ * something about the content whether or not we later deleted it, while
+ * "we removed it" closes the case.
+ */
+function readVisibility(series: RawAnalyticsEntry[]): ReplyVisibility {
+  const flag = (label: string): boolean | null => {
+    const entry = series.find(
+      (a) => typeof a?.label === 'string' && a.label.toLowerCase() === label
+    );
+    if (!entry) return null;
+    const value = Number(entry.data?.[0]?.total ?? 0);
+    return Number.isFinite(value) && value > 0;
+  };
+  const dead = flag('dead');
+  const deleted = flag('deleted');
+  if (dead === null && deleted === null) return 'unknown';
+  if (dead) return 'hidden';
+  if (deleted) return 'removed';
+  return 'visible';
+}
+
+/**
  * Flatten the verbose `Post.analytics` array into a stable, frontend-friendly
  * metrics object so the UI can read `metrics.bookmarks` directly instead of
  * regex-matching labels. Always returns the full per-platform key set (every
@@ -57,6 +103,11 @@ interface RawAnalyticsEntry {
  */
 export interface NormalizedReplyMetrics {
   trafficScore: number;
+  /**
+   * Present on EVERY platform, unlike the numeric fields below, because it is
+   * the one metric whose absence is itself misleading — see ReplyVisibility.
+   */
+  visibility: ReplyVisibility;
   // X
   impressions?: number;
   likes?: number;
@@ -64,7 +115,7 @@ export interface NormalizedReplyMetrics {
   replies?: number;
   quotes?: number;
   bookmarks?: number;
-  // Reddit
+  // Reddit + Hacker News (HN "points" reuse `upvotes` so one UI renders both)
   upvotes?: number;
   comments?: number;
   estReach?: number;
@@ -85,10 +136,12 @@ export function normalizeReplyMetrics(
     return Number.isFinite(value) ? value : 0;
   };
   const traffic = trafficScore ?? 0;
+  const visibility = readVisibility(series);
 
   if (platform === 'x') {
     return {
       trafficScore: traffic,
+      visibility,
       impressions: impressions ?? get(/impression|views/i),
       likes: get(/like|reaction/i),
       retweets: get(/retweet|repost/i),
@@ -103,6 +156,7 @@ export function normalizeReplyMetrics(
     const comments = get(/comment/i);
     return {
       trafficScore: traffic,
+      visibility,
       upvotes,
       comments,
       // estimated reach = (upvotes + comments) * 20, or the synced impressions.
@@ -110,5 +164,20 @@ export function normalizeReplyMetrics(
     };
   }
 
-  return { trafficScore: traffic, impressions: impressions ?? 0 };
+  // Hacker News reports points + comment count and has no impression figure at
+  // all, so the generic branch below rendered every HN reply as a flat
+  // `impressions: 0`. Mapped onto Reddit's key names on purpose: the two read
+  // identically to a reader, and reusing them means the existing score/comments
+  // UI covers HN without a second layout. No estReach — HN publishes nothing
+  // that would make a reach estimate anything but invented.
+  if (platform === 'hackernews') {
+    return {
+      trafficScore: traffic,
+      visibility,
+      upvotes: get(/score|point/i),
+      comments: get(/comment/i),
+    };
+  }
+
+  return { trafficScore: traffic, visibility, impressions: impressions ?? 0 };
 }

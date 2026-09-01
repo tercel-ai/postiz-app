@@ -5,6 +5,10 @@ import {
   GenerationHistory,
   GenerationHistoryEntry,
 } from './generation-history';
+import {
+  ReplyVisibilityBadge,
+  type ReplyVisibility,
+} from './reply-visibility-badge';
 
 interface SentReply {
   id: string;
@@ -27,6 +31,14 @@ interface SentReply {
       quotes?: number;
       bookmarks?: number;
       trafficScore?: number;
+      /**
+       * Can the public still see this reply? See ReplyVisibilityBadge.
+       *
+       * Read here and not only on the Reddit card because sent-list.tsx routes
+       * EVERY non-Reddit platform through this component — Hacker News included,
+       * which is the one that actually reports the flag today.
+       */
+      visibility?: ReplyVisibility;
     };
     // Unified author of the reply (who posted it): from the posting integration
     // when one authored it, else from the reply URL (settings.engageAuthor).
@@ -117,6 +129,7 @@ export const SentCardX: FC<SentCardXProps> = ({ reply, sentReplyId, onSubmitUrl 
             ⚠ 未提交回复链接
           </span>
         )}
+        <ReplyVisibilityBadge visibility={m?.visibility} />
         {reply.authorReplied && (
           <span className="text-xs bg-purple-500/20 text-purple-400 px-1.5 py-0.5 rounded">
             Author replied ✓

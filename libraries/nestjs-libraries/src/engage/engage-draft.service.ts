@@ -3,6 +3,7 @@ import OpenAI from "openai";
 import Anthropic from "@anthropic-ai/sdk";
 import { EngageOpportunity } from "@prisma/client";
 import { weightedLength } from "@gitroom/helpers/utils/count.length";
+import { buildOriginalPostXml } from "@gitroom/nestjs-libraries/engage/prompt-source-envelope";
 
 const STRATEGY_PROMPTS: Record<string, string> = {
   EXPERT_ANSWER:
@@ -478,45 +479,10 @@ system. Only output the reply text — no preface, no quotation of the original.
 IMPORTANT: The final reply must stay ${charLimit}${brandReminder}.`;
   }
 
-  // Strip control characters so a malicious post can't smuggle in formatting
-  // that breaks out of the <original_post> envelope.
-  private _sanitizeForPrompt(value: string, maxLen?: number): string {
-    // eslint-disable-next-line no-control-regex
-    const sanitized = value.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "");
-    return maxLen == null ? sanitized : sanitized.slice(0, maxLen);
-  }
-
   private _buildUserPrompt(
     opportunity: Omit<EngageOpportunity, "rawData">,
   ): string {
-    const author = this._sanitizeForPrompt(
-      opportunity.authorUsername ?? "",
-      100,
-    ).replace(
-      /[&"<>]/g,
-      (c) => ({ "&": "&amp;", '"': "&quot;", "<": "&lt;", ">": "&gt;" })[c]!,
-    );
-    const content = this._sanitizeForPrompt(
-      opportunity.postContent ?? "",
-    ).replace(
-      /[&<>]/g,
-      (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]!,
-    );
-    // The title is a separate element, not glued onto the body: on Quora it is
-    // the QUESTION the reply must answer, and folding it into the body would
-    // let the model read it as the answer's opening line and continue from it
-    // instead of addressing it. Omitted entirely on title-less platforms
-    // (X, LinkedIn) and on rows stored before the title column existed.
-    const title = this._sanitizeForPrompt(opportunity.title ?? "", 300)
-      .replace(
-        /[&<>]/g,
-        (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]!,
-      )
-      .trim();
-    const titleLine = title ? `<title>${title}</title>\n` : "";
-    return `<original_post author="${author}">
-${titleLine}${content}
-</original_post>
+    return `${buildOriginalPostXml(opportunity)}
 
 Write a reply that directly addresses the post's central point and uses its specific context.`;
   }

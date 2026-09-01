@@ -50,3 +50,50 @@ describe('metric coercion is NaN-safe (C1)', () => {
     expect(trafficScore === null || Number.isFinite(trafficScore)).toBe(true);
   });
 });
+
+// The extension's HN fetcher emits `dead` / `deleted` visibility flags alongside
+// score + comments. They must ride through extractMetrics UNWEIGHTED and be
+// KEPT in rawMetrics — rawMetrics is what lands in Post.analytics, which is the
+// only place normalizeReplyMetrics can read them back from.
+describe('visibility flags are carried, never scored', () => {
+  const hn = (dead: number, deleted: number) =>
+    [
+      { label: 'score', data: [{ total: 12, date: 'd' }], percentageChange: 0 },
+      { label: 'comments', data: [{ total: 4, date: 'd' }], percentageChange: 0 },
+      { label: 'dead', data: [{ total: dead, date: 'd' }], percentageChange: 0 },
+      { label: 'deleted', data: [{ total: deleted, date: 'd' }], percentageChange: 0 },
+    ] as any;
+
+  it('gives dead/deleted no traffic weight', () => {
+    // 12*0.5 + 4*3 = 18, whether or not the item is dead.
+    expect(computeTrafficScore('hackernews', hn(0, 0))).toBe(18);
+    expect(computeTrafficScore('hackernews', hn(1, 1))).toBe(18);
+  });
+
+  it('never counts a flag as an impression', () => {
+    const { impressions } = extractMetrics('hackernews', hn(1, 0));
+    expect(impressions).toBe(0);
+  });
+
+  // The persistence gate in ingestMetrics is `impressions > 0 || trafficScore
+  // !== null`. HN has no impressions ever, so a non-null trafficScore is the
+  // ONLY reason a dead item's analytics get written at all — if this went null
+  // the flag would be computed and then silently dropped.
+  it('keeps trafficScore non-null for a dead item, so the row is persisted', () => {
+    const { trafficScore, rawMetrics } = extractMetrics('hackernews', hn(1, 0));
+    expect(trafficScore).not.toBeNull();
+    expect(rawMetrics.map((m) => m.label)).toContain('dead');
+    expect(rawMetrics.map((m) => m.label)).toContain('deleted');
+  });
+
+  // A deleted item reports 0/0 — the gate must still hold on a zero score.
+  it('persists a zeroed-out deleted item too', () => {
+    const deleted = [
+      { label: 'score', data: [{ total: 0, date: 'd' }], percentageChange: 0 },
+      { label: 'comments', data: [{ total: 0, date: 'd' }], percentageChange: 0 },
+      { label: 'dead', data: [{ total: 0, date: 'd' }], percentageChange: 0 },
+      { label: 'deleted', data: [{ total: 1, date: 'd' }], percentageChange: 0 },
+    ] as any;
+    expect(extractMetrics('hackernews', deleted).trafficScore).toBe(0);
+  });
+});

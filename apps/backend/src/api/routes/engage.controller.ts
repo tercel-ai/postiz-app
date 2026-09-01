@@ -32,6 +32,7 @@ import {
   scanIngestPostToRawPost,
 } from '@gitroom/nestjs-libraries/dtos/engage/scan-ingest.dto';
 import { EngageDraftService } from '@gitroom/nestjs-libraries/engage/engage-draft.service';
+import { TooSimilarToReferenceError } from '@gitroom/nestjs-libraries/engage/engage-reference-post.service';
 import {
   assertDraftWithinPlatformLimit,
   outputLengthForLength,
@@ -50,6 +51,8 @@ import {
   DashboardSummaryDto,
   DashboardTrafficsDto,
   GenerateDraftDto,
+  GenerateReferencePostDto,
+  SaveGeneratedPostDto,
   ListOpportunitiesDto,
   ListSentDto,
   LocateOpportunityDto,
@@ -837,6 +840,106 @@ export class EngageController {
     @Body() body: SaveDraftDto
   ) {
     return this._engageService.saveDraft(org, id, body);
+  }
+
+  // ─── Reference-Post Generation (docs/engage/reference-post-generation.md) ─
+  // Generates/saves an ORIGINAL post inspired by an opportunity — NOT a reply.
+  // Uses getOpportunityById (no reply-eligibility status gate: an already-
+  // replied-to or expired opportunity is still valid inspiration) and the
+  // same Create+POSTS_PER_MONTH policy as creating a post normally, since the
+  // output is a normal calendar Post, not an engage reply.
+
+  @ApiOperation({
+    summary:
+      'Stream an AI-generated ORIGINAL post inspired by an opportunity via SSE (text/event-stream) — not a reply.',
+  })
+  @ApiResponse({
+    status: 200,
+    description:
+      'SSE stream of the generated post text; ends with [DONE]. Failures (opportunity not found, integration not found, generation failed, too similar to the reference) end the stream with a typed error frame.',
+  })
+  @ApiResponse({ status: 404, description: 'Opportunity or integration not found' })
+  @ApiResponse({ status: 429, description: 'Rate limit exceeded (20/hour)' })
+  @CheckPolicies([AuthorizationActions.Create, Sections.POSTS_PER_MONTH])
+  @Throttle({ default: { limit: 20, ttl: 3_600_000 } })
+  @Post('/opportunities/:id/generate-post')
+  async generateReferencePost(
+    @GetOrgFromRequest() org: Organization,
+    @Param('id') id: string,
+    @Body() body: GenerateReferencePostDto,
+    @Req() req: Request,
+    @Res() res: Response
+  ) {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+
+    const abortController = new AbortController();
+    req.on('close', () => abortController.abort());
+
+    try {
+      const result = await this._engageService.generateReferencePost(
+        org,
+        id,
+        body,
+        abortController.signal
+      );
+      if (!abortController.signal.aborted) {
+        res.write(`data: ${JSON.stringify({ text: result.text })}\n\n`);
+        res.write(`data: [DONE]\n\n`);
+      }
+    } catch (err) {
+      if ((err as Error)?.name === 'AbortError') {
+        return;
+      }
+      if (err instanceof NotFoundException) {
+        if (!res.writableEnded) {
+          res.write(
+            `data: ${JSON.stringify({ error: 'opportunity_unavailable' })}\n\n`
+          );
+          res.write(`data: [DONE]\n\n`);
+        }
+        if (!res.writableEnded) res.end();
+        return;
+      }
+      if (err instanceof TooSimilarToReferenceError) {
+        if (!res.writableEnded) {
+          res.write(
+            `data: ${JSON.stringify({ error: 'too_similar_to_reference' })}\n\n`
+          );
+          res.write(`data: [DONE]\n\n`);
+        }
+        if (!res.writableEnded) res.end();
+        return;
+      }
+      this.logger.error(
+        `generateReferencePost failed for opportunity ${id} (org ${org.id})`,
+        err instanceof Error ? err.stack : err
+      );
+      if (!res.writableEnded) {
+        res.write(`data: ${JSON.stringify({ error: 'generation_failed' })}\n\n`);
+        res.write(`data: [DONE]\n\n`);
+      }
+    } finally {
+      if (!res.writableEnded) res.end();
+    }
+  }
+
+  @ApiOperation({
+    summary:
+      'Persist a (possibly edited) reference-post draft as a real Post. Does NOT create an EngageSentReply and does NOT claim the opportunity.',
+  })
+  @ApiResponse({ status: 404, description: 'Opportunity or integration not found' })
+  @CheckPolicies([AuthorizationActions.Create, Sections.POSTS_PER_MONTH])
+  @Throttle({ default: { limit: 20, ttl: 3_600_000 } })
+  @Post('/opportunities/:id/save-generated-post')
+  saveGeneratedPost(
+    @GetOrgFromRequest() org: Organization,
+    @GetUserFromRequest() user: User,
+    @Param('id') id: string,
+    @Body() body: SaveGeneratedPostDto
+  ) {
+    return this._engageService.saveGeneratedPost(org, user?.id, id, body);
   }
 
   // ─── Send / Schedule Reply (X via Post pipeline) ─────────────────────────

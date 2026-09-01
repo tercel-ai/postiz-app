@@ -6,6 +6,10 @@ import {
   GenerationHistoryEntry,
 } from './generation-history';
 import { opportunityFullText } from '../opportunity-text';
+import {
+  ReplyVisibilityBadge,
+  type ReplyVisibility,
+} from './reply-visibility-badge';
 
 interface SentReply {
   id: string;
@@ -23,6 +27,8 @@ interface SentReply {
       comments?: number;
       estReach?: number;
       trafficScore?: number;
+      /** Can the public still see this reply? See ReplyVisibilityBadge. */
+      visibility?: ReplyVisibility;
     };
     // Unified author of the reply (the redditor who posted it), resolved by the API
     // from the comment's author. Null until the reply URL is known/synced.
@@ -96,6 +102,7 @@ export const SentCardReddit: FC<SentCardRedditProps> = ({
             ⚠ 未提交回复链接
           </span>
         )}
+        <ReplyVisibilityBadge visibility={m?.visibility} />
         {reply.authorReplied && (
           <span className="text-xs bg-purple-500/20 text-purple-400 px-1.5 py-0.5 rounded">
             Author replied ✓
