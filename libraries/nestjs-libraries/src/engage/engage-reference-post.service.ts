@@ -13,13 +13,54 @@ import {
   normalizeEngagePlatform,
   assertDraftWithinPlatformLimit,
 } from '@gitroom/nestjs-libraries/engage/engage-draft-length';
+import {
+  requiresMention,
+  containsRequiredMention,
+  buildBrandInstruction,
+  buildMandatoryBrandBlock,
+} from '@gitroom/nestjs-libraries/engage/engage-brand-instruction';
+import { VALID_STRATEGIES } from '@gitroom/nestjs-libraries/engage/dtos/engage.dto';
 
 // docs/engage/reference-post-generation.md §6. Generates an ORIGINAL post
 // inspired by a reference EngageOpportunity — not a reply to it. Reuses the
-// same injection-isolation envelope as engage-draft.service.ts (see
-// prompt-source-envelope.ts) but deliberately does NOT reuse its "reply to
-// the post" relevance instructions, and adds an output-side similarity gate
-// that reply generation has no need for.
+// same injection-isolation envelope and brand-instruction logic as
+// engage-draft.service.ts, but deliberately does NOT reuse its per-strategy
+// prompt TEXT (REFERENCE_POST_STRATEGY_PROMPTS below is its own reworded set
+// — the reply-draft wording is framed around responding to the post, e.g.
+// QUESTION_LED literally says "Reply with one genuine question", which reads
+// as a non-sequitur on a standalone original post that never addresses
+// anyone), and adds an output-side similarity gate reply generation has no
+// need for.
+//
+// The target platform is always the reference opportunity's OWN platform
+// (reference.platform) — not a client-supplied value. See §3: the caller
+// picks WHICH of their own accounts on that platform to eventually save to
+// (SaveGeneratedPostDto.integrationId), not which platform to write for.
+
+// Typed against VALID_STRATEGIES rather than Record<string, string>: adding a
+// strategy to that list without adding its prompt here is then a compile
+// error, instead of silently falling back to EXPERT_ANSWER at runtime for
+// the new key. (engage-draft.service.ts's own STRATEGY_PROMPTS predates this
+// and is still loosely typed.)
+const REFERENCE_POST_STRATEGY_PROMPTS: Record<
+  (typeof VALID_STRATEGIES)[number],
+  string
+> = {
+  EXPERT_ANSWER:
+    'Write with expert, step-by-step insight on the topic. Share actionable frameworks. Be specific and concrete.',
+  DATA_BACKED:
+    "Ground the post in a concrete number or data point related to the topic — you may build on a number from the reference, expressed in your own words — and say what it implies. Beyond that, only suggest what's worth checking or what it's consistent with; never assert a specific unstated fact. When unsure, frame it as a question, not a claim.",
+  EMPATHY_LED:
+    "Open by naming the specific feeling or frustration this topic evokes, grounded in a concrete detail — not a generic 'that's rough'. Only after that, pivot to one concrete insight of your own. If your opener is analysis or advice instead of a feeling, it fails.",
+  CONTRARIAN:
+    "Open by naming the topic's common, expected take — then push back on it with your own reasoning (skip this angle if there's no real common take to push against). Make your own claim in your own words; don't quote or directly reference the reference post itself.",
+  QUESTION_LED:
+    "Open the post with one genuine, open question that springs from a specific angle on the topic. State it with at most one short clause of framing, and never state or hint at the answer (no 'usually it's...'). Skip generic openers like 'Have you considered' or 'What if'; ask it the way a sharp, curious person would.",
+  QUICK_TAKE:
+    "Fire off ONE single-sentence quip (one period, about 25 words max) that takes a specific, sharp angle on the topic and flips expectations. It's a joke or a jab, not a diagnosis: no 'the real problem/waste is', no advice, no second sentence. A generic gripe that could sit under any post on the topic does not count.",
+  AMPLIFY:
+    "Agree with the topic's general thrust in a few words, then add the one underrated angle that pushes it further. Keep it to two short sentences and don't drift into a generic truism — skip stock connectives like 'the part people miss is' or 'the catch is'.",
+};
 
 export interface ReferencePostUsage {
   promptTokens: number;
@@ -73,8 +114,6 @@ export class TooSimilarToReferenceError extends ReferencePostGenerationError {
 // first draft — see reference-post-generation.md §6 step 2.
 const MAX_ATTEMPTS = 2;
 
-export type ReferencePostTone = 'personal' | 'company';
-
 @Injectable()
 export class EngageReferencePostService {
   private readonly logger = new Logger(EngageReferencePostService.name);
@@ -103,17 +142,25 @@ export class EngageReferencePostService {
     : null;
 
   async generate(
-    reference: ReferencePostFields,
-    targetPlatform: string,
-    tone: ReferencePostTone,
+    reference: ReferencePostFields & { platform: string },
+    strategy: string,
+    brandStrength: number,
+    mentions: string[] | undefined,
     outputLength: number | undefined,
     signal?: AbortSignal
   ): Promise<ReferencePostGenerationResult> {
-    const platform = normalizeEngagePlatform(targetPlatform);
+    const platform = normalizeEngagePlatform(reference.platform);
     const limit =
       outputLength ??
       (platform === 'reddit' ? REDDIT_TARGET_CHAR_LIMIT : X_WEIGHTED_CHAR_LIMIT);
-    const systemPrompt = this._buildSystemPrompt(platform, tone, limit);
+    const requiredMentions = requiresMention(brandStrength, mentions);
+    const systemPrompt = this._buildSystemPrompt(
+      platform,
+      strategy,
+      brandStrength,
+      mentions,
+      limit
+    );
     const userPrompt = this._buildUserPrompt(reference);
 
     const usages: ReferencePostUsage[] = [];
@@ -146,11 +193,15 @@ export class EngageReferencePostService {
       }
       if (usage) usages.push(usage);
 
+      const missingMention =
+        requiredMentions.length > 0 &&
+        !containsRequiredMention(text, requiredMentions);
       const similarity = checkReferenceSimilarity(
         text,
         reference.postContent ?? ''
       );
-      if (!similarity.tooSimilar) {
+
+      if (!similarity.tooSimilar && !missingMention) {
         try {
           assertDraftWithinPlatformLimit(platform, text, outputLength);
         } catch (err) {
@@ -160,6 +211,19 @@ export class EngageReferencePostService {
             err
           );
         }
+        return { text, usages };
+      }
+
+      if (!similarity.tooSimilar && missingMention) {
+        // Otherwise-valid post, just missing the brand — ship it with a
+        // warning rather than burning a retry/credits on a hard failure,
+        // same posture as engage-draft.service.ts's own mention handling.
+        this.logger.warn(
+          `Reference-post draft omitted the required brand mention (${requiredMentions.join(
+            ', '
+          )}); delivering it anyway.`
+        );
+        assertDraftWithinPlatformLimit(platform, text, outputLength);
         return { text, usages };
       }
 
@@ -186,24 +250,38 @@ Your previous draft reused too much of the reference post's own wording (shared 
 
   private _buildSystemPrompt(
     platform: string,
-    tone: ReferencePostTone,
+    strategy: string,
+    brandStrength: number,
+    mentions: string[] | undefined,
     limit: number
   ): string {
-    const toneInstruction =
-      tone === 'company'
-        ? 'Write in a professional brand voice suitable for a company account.'
-        : 'Write in a natural, first-person personal voice.';
+    // The DTO's @IsIn(VALID_STRATEGIES) already rejects anything else at the
+    // controller boundary; this fallback only covers internal callers that
+    // bypass the DTO, matching engage-draft.service.ts's same posture.
+    const strategyInstruction =
+      REFERENCE_POST_STRATEGY_PROMPTS[
+        strategy as (typeof VALID_STRATEGIES)[number]
+      ] ?? REFERENCE_POST_STRATEGY_PROMPTS.EXPERT_ANSWER;
+    const brandInstruction = buildBrandInstruction(
+      brandStrength,
+      mentions,
+      'post'
+    );
+    const requiredMentions = requiresMention(brandStrength, mentions);
+    const mandatoryBrandBlock = requiredMentions.length
+      ? `\n${buildMandatoryBrandBlock(requiredMentions, 'post')}\n`
+      : '';
     const charLimit =
       platform === 'x'
         ? `under ${limit} Twitter-weighted characters (CJK/emoji count as 2, URLs as 23)`
         : `up to about ${limit} characters`;
 
     return `You are a social media copywriter. Write an ORIGINAL ${platform} post INSPIRED BY a reference post — you are not replying to it, and the reference's author will never see this post.
-${toneInstruction}
-Read the reference only for its topic, angle, and structure.
+${strategyInstruction}
+${brandInstruction}
 
 Hard requirement — do not copy: write a genuinely original post in your own words. Do not paraphrase-copy, closely reword, or reuse the reference's sentences, distinctive phrases, or structure. Reusing another person's wording is a copyright problem for the person publishing this post, not just a style issue.
-
+${mandatoryBrandBlock}
 Platform constraint: keep the post ${charLimit}.
 Write in the same language as the reference post unless it explicitly asks for another language.
 

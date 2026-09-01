@@ -21,10 +21,15 @@ import { Transform, Type } from 'class-transformer';
 import { OmitType, PickType } from '@nestjs/swagger';
 import { EngageOpportunityStatus } from '@prisma/client';
 
-// Must stay in sync with STRATEGY_PROMPTS in engage-draft.service.ts. The service
-// falls back to EXPERT_ANSWER for unknown keys, but @IsIn rejects values missing
-// here at the controller boundary (400) before they ever reach the service.
-const VALID_STRATEGIES = [
+// @IsIn rejects values missing here at the controller boundary (400) before
+// either generator service sees them. Two prompt maps key off this list:
+// STRATEGY_PROMPTS (engage-draft.service.ts, reply wording) and
+// REFERENCE_POST_STRATEGY_PROMPTS (engage-reference-post.service.ts, original-
+// post wording — see reference-post-generation.md §6 on why the text differs).
+// Exported so the latter can type itself as Record<VALID_STRATEGIES[number],
+// string>, making "added a strategy but not its prompt" a compile error there
+// rather than a silent EXPERT_ANSWER fallback at runtime.
+export const VALID_STRATEGIES = [
   'EXPERT_ANSWER',
   'DATA_BACKED',
   'EMPATHY_LED',
@@ -1009,19 +1014,38 @@ export class GenerateDraftDto {
 }
 
 // ─── Reference-Post Generation (docs/engage/reference-post-generation.md) ─────
-// Generates an ORIGINAL post inspired by an opportunity — not a reply to it.
-// See engage.controller.ts POST /opportunities/:id/generate-post.
+// Generates AND persists an ORIGINAL post inspired by an opportunity — not a
+// reply to it. See engage.controller.ts POST /opportunities/:id/generate-post.
+// One call, not a generate-then-save pair: it always saves as an
+// account-less DRAFT Post (source='calendar', referenceOpportunityId
+// attached). Further editing — content, picking an account, scheduling —
+// goes through the existing generic POST /api/posts/ edit flow, same as any
+// other draft; there is no separate save-generated-post endpoint.
+//
+// No integrationId/platform field: the target platform is always the
+// opportunity's OWN platform (opportunity.platform), not a client choice —
+// simpler than resolving it from an account. Deliberately mirrors
+// GenerateDraftDto's shape (same strategy/brandStrength/mentions/outputLength
+// vocabulary the reply-draft endpoint already uses) rather than a bespoke
+// tone axis, for a consistent creative-control UI across both.
 
 export class GenerateReferencePostDto {
-  // Target account, resolved server-side to get the target platform — NOT a
-  // client-supplied platform string, so generation can never target a
-  // platform the save step later disagrees with (§3/§5 of the design doc).
   @IsString()
-  integrationId: string;
+  @IsIn(VALID_STRATEGIES)
+  strategy: string;
 
-  @IsString()
-  @IsIn(['personal', 'company'])
-  tone: 'personal' | 'company';
+  @IsInt()
+  @Min(0)
+  @Max(3)
+  @Type(() => Number)
+  brandStrength: number;
+
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  @MaxLength(100, { each: true })
+  @ArrayMaxSize(20)
+  mentions?: string[];
 
   @IsOptional()
   @IsInt()
@@ -1032,6 +1056,15 @@ export class GenerateReferencePostDto {
   @IsOptional()
   @IsString()
   projectId?: string;
+
+  // Opt-in, default false. Unlike the text itself, reused media has no
+  // "rewrite it in your own words" mitigation — it's the same file, so this
+  // carries a more direct copyright exposure than the generated text does.
+  // Defaulting to false means that risk is only taken when a caller
+  // explicitly asks for it. See docs/engage/reference-post-generation.md §6.
+  @IsOptional()
+  @IsBoolean()
+  includeReferenceMedia?: boolean;
 }
 
 // ─── Reply Sending ────────────────────────────────────────────────────────────
@@ -1097,6 +1130,33 @@ export class BatchScheduleReplyDto {
   @IsOptional()
   @IsString()
   projectId?: string;
+}
+
+/**
+ * The extension telling the backend that a reply target no longer exists.
+ *
+ * Everything here is DIAGNOSTIC. The opportunity id in the route is what is
+ * acted on; `platform` and `url` are recorded so a report can be traced back to
+ * the post it was made about, and `reason` is the poster's own words ("the post
+ * was deleted by its author"), which end up on the closed reply's error. None
+ * of it is trusted as authorisation — that comes from the caller owning a
+ * queued reply against the opportunity.
+ */
+export class ReportTargetGoneDto {
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  platform?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(2048)
+  url?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  reason?: string;
 }
 
 export class ConfirmManualReplyDto {
@@ -1213,40 +1273,6 @@ export class SaveDraftDto {
   @MaxLength(100, { each: true })
   @ArrayMaxSize(20)
   mentions?: string[];
-}
-
-// Persists a (possibly edited) reference-post draft as a real Post. See
-// engage.controller.ts POST /opportunities/:id/save-generated-post and
-// docs/engage/reference-post-generation.md §5 for the caller-facing shape /
-// server-side CreatePostDto assembly split.
-export class SaveGeneratedPostDto {
-  @IsString()
-  @MaxLength(10000)
-  content: string;
-
-  @IsString()
-  @IsIn(['draft', 'schedule', 'now'])
-  type: 'draft' | 'schedule' | 'now';
-
-  // SHOULD equal the integrationId used in the /generate-post call for this
-  // draft, so the platform whose length/format rules shaped the generated
-  // text matches the account it's actually saved to. NOT verified
-  // server-side: /generate-post and /save-generated-post are independent
-  // stateless calls with nothing to correlate them (no shared token), same
-  // as SaveDraftDto.strategy/brandStrength below aren't checked against what
-  // /draft actually generated with. The caller (composer UI) is trusted to
-  // send the same value; a mismatch is a content-quality bug, not a security
-  // issue, since both integrationIds are already scoped to the caller's org.
-  @IsString()
-  integrationId: string;
-
-  @IsOptional()
-  @IsDateString()
-  date?: string;
-
-  @IsOptional()
-  @IsString()
-  projectId?: string;
 }
 
 export class UpdateScheduledReplyDto {

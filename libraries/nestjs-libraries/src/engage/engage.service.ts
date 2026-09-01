@@ -20,6 +20,10 @@ import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/po
 import { PostOverageService } from '@gitroom/nestjs-libraries/database/prisma/posts/post-overage.service';
 import { SettingsService } from '@gitroom/nestjs-libraries/database/prisma/settings/settings.service';
 import { OperationPlanRepository } from '@gitroom/nestjs-libraries/database/prisma/operation-plan/operation-plan.repository';
+import { MediaService } from '@gitroom/nestjs-libraries/database/prisma/media/media.service';
+import { UploadFactory } from '@gitroom/nestjs-libraries/upload/upload.factory';
+import { hasValidMediaExtension } from '@gitroom/helpers/utils/valid.url.path';
+import { fetchMediaAsDataUri } from '@gitroom/nestjs-libraries/engage/safe-media-fetch';
 import { AiseeCreditService } from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/aisee-credit.service';
 import {
   AiseeBusinessType,
@@ -106,7 +110,6 @@ import {
   ScheduleReplyDto,
   SaveDraftDto,
   GenerateReferencePostDto,
-  SaveGeneratedPostDto,
   ScoreStatsDto,
   SendReplyDto,
   UpdateKeywordDto,
@@ -181,6 +184,20 @@ function engageRefreshFloorMs(): number {
 @Injectable()
 export class EngageService implements OnApplicationBootstrap {
   private readonly logger = new Logger(EngageService.name);
+  // Same pattern as agent.graph.service.ts's uploadPictures — download an
+  // external URL and re-host it via the app's own storage provider (local/R2
+  // per STORAGE_PROVIDER). Not injected: UploadFactory.createStorage() is a
+  // plain factory call, same as every other caller of it.
+  private readonly _storage = UploadFactory.createStorage();
+  // §6.1 reference-media reuse caps — no platform this app posts to accepts
+  // more than a handful of images per post, and a timeout bounds the worst
+  // case of a slow/hanging third-party CDN response.
+  private readonly _maxReferenceMediaItems = 4;
+  private readonly _referenceMediaTimeoutMs = 20_000;
+  // uploadSimple buffers whole responses with no cap of its own; this bounds
+  // one attachment. 64MB comfortably clears a platform-length video while
+  // keeping a hostile/huge URL from being an easy memory-pressure lever.
+  private readonly _maxReferenceMediaBytes = 64 * 1024 * 1024;
 
   constructor(
     private _engageRepository: EngageRepository,
@@ -197,10 +214,11 @@ export class EngageService implements OnApplicationBootstrap {
     private _operationPlanRepository?: OperationPlanRepository,
     private _settingsService?: SettingsService,
     // Same reason as the two above: optional so existing positional test
-    // constructors keep working. Used only by generateReferencePost/
-    // saveGeneratedPost (reference-post-generation.md).
+    // constructors keep working. Used only by generateReferencePost
+    // (reference-post-generation.md).
     private _aiseeCredit?: AiseeCreditService,
-    private _referencePostService?: EngageReferencePostService
+    private _referencePostService?: EngageReferencePostService,
+    private _mediaService?: MediaService
   ) { }
 
   // Auto-start global workflows on every app boot so pnpm dev / Docker restart
@@ -972,6 +990,39 @@ export class EngageService implements OnApplicationBootstrap {
     return this._engageRepository.dismissOpportunity(org.id, id, projectId);
   }
 
+  /**
+   * The extension reporting that a reply target no longer exists on the
+   * platform (deleted post, removed article, suspended author).
+   *
+   * Straight through to the repository, which owns both the entitlement check
+   * and the two writes — see markOpportunityTargetGone for why a global row is
+   * safe to stamp from an org-scoped call.
+   */
+  async markOpportunityTargetGone(
+    org: Organization,
+    id: string,
+    reason: string
+  ) {
+    return this._engageRepository.markOpportunityTargetGone(org.id, id, reason);
+  }
+
+  /**
+   * The extension reporting a send that fired but was never confirmed, so the
+   * record is closed rather than re-offered. See closeUnconfirmedReply for why
+   * closing beats leaving it queued.
+   */
+  async closeUnconfirmedReply(
+    org: Organization,
+    sentReplyId: string,
+    reason: string
+  ) {
+    return this._engageRepository.closeUnconfirmedReply(
+      org.id,
+      sentReplyId,
+      reason
+    );
+  }
+
   async toggleBookmark(
     org: Organization,
     id: string,
@@ -1181,41 +1232,44 @@ export class EngageService implements OnApplicationBootstrap {
   }
 
   // ─── Reference-Post Generation (docs/engage/reference-post-generation.md) ─
-  // Generates/saves an ORIGINAL post inspired by an opportunity — not a
+  // Generates AND saves an ORIGINAL post inspired by an opportunity — not a
   // reply. Deliberately separate from the reply-draft machinery above: no
   // EngageEntitlementService reservation (that model is reply-credit
   // specific), no opportunity claim, and the opportunity is resolved via
   // getOpportunityById (no reply-eligibility status gate — §5 of the doc).
+  //
+  // One call, not a generate-then-save pair: it always persists as an
+  // account-less DRAFT (source='calendar', providerIdentifier=
+  // opportunity.platform, no bound integration — same shape as an
+  // operation-plan post for a platform the org hasn't connected). Everything
+  // after that — editing content, picking which of the org's accounts to
+  // publish through, scheduling, publishing — is the EXISTING generic
+  // POST /api/posts/ edit flow (re-post with the same group), same as any
+  // other draft already sitting in the calendar. A dedicated
+  // save-generated-post endpoint isn't needed for that: this feature's job
+  // ends at "produce a correctly-attributed draft," not at "manage its
+  // lifecycle," which the rest of the app already does for every draft.
 
   /**
-   * Stream an AI-generated original post seeded by `opportunityId`. Bills
-   * AI_COPYWRITING/POST_GEN_REFERENCE for every model call this generation
-   * made (including the similarity corrective retry, if any) as ONE
-   * BillingRecord — see §7.1. Billing is best-effort: a billing failure must
-   * not withhold a draft that was already generated (the spend already
-   * happened regardless of whether the deduction succeeds).
+   * Generate an AI original post seeded by `opportunityId` and persist it as
+   * a DRAFT `Post`. Bills AI_COPYWRITING/POST_GEN_REFERENCE for every model
+   * call the generation made (including the similarity corrective retry, if
+   * any) as ONE BillingRecord — see §7.1. Billing is best-effort: a billing
+   * failure must not withhold a draft that was already generated (the spend
+   * already happened regardless of whether the deduction succeeds).
    */
   async generateReferencePost(
     org: Organization,
+    userId: string,
     opportunityId: string,
     dto: GenerateReferencePostDto,
     signal?: AbortSignal
-  ): Promise<{ text: string }> {
+  ): Promise<{ text: string; postId: string }> {
     const opportunity = await this._engageRepository.getOpportunityById(
       org.id,
       opportunityId,
       dto.projectId
     );
-
-    const integration = await this._engageRepository.getIntegrationById(
-      org.id,
-      dto.integrationId
-    );
-    if (!integration) {
-      throw new NotFoundException(
-        `Integration with id ${dto.integrationId} not found`
-      );
-    }
 
     if (!this._referencePostService) {
       throw new InternalServerErrorException(
@@ -1223,22 +1277,24 @@ export class EngageService implements OnApplicationBootstrap {
       );
     }
 
+    let text: string;
     try {
       const result = await this._referencePostService.generate(
         opportunity,
-        integration.providerIdentifier,
-        dto.tone,
+        dto.strategy,
+        dto.brandStrength,
+        dto.mentions,
         dto.outputLength,
         signal
       );
       await this._billReferencePostUsages(
         org,
         opportunityId,
-        integration.providerIdentifier,
-        dto.tone,
+        opportunity.platform,
+        dto.strategy,
         result.usages
       );
-      return { text: result.text };
+      text = result.text;
     } catch (err) {
       // Even a FAILED generation (similarity gate exhausted, a later attempt
       // erroring after an earlier one already succeeded) can carry real,
@@ -1250,13 +1306,139 @@ export class EngageService implements OnApplicationBootstrap {
         await this._billReferencePostUsages(
           org,
           opportunityId,
-          integration.providerIdentifier,
-          dto.tone,
+          opportunity.platform,
+          dto.strategy,
           err.usages
         );
       }
       throw err;
     }
+
+    // Opt-in only (§6.1) — best-effort: a media failure must not sink an
+    // already-generated, already-billed draft. Runs after generation
+    // succeeds, not in parallel with it, so a failed/too-similar generation
+    // never pays for media downloads that would just be thrown away.
+    const media = dto.includeReferenceMedia
+      ? await this._fetchReferenceMedia(org.id, opportunityId)
+      : [];
+
+    // Persist as an account-less draft. findFreeDateTime with no
+    // integrationId still returns a placeholder — CreatePostDto.date is
+    // unconditionally required even for a draft with nothing scheduled yet.
+    const date = await this._postsService.findFreeDateTime(
+      org.id,
+      undefined,
+      dto.projectId
+    );
+    const mapped = await this._postsService.mapTypeToPost(
+      {
+        type: 'draft',
+        projectId: dto.projectId,
+        // Always 'calendar' — never taken from the request body. See §4.1:
+        // a reference-inspired post behaves like a normal calendar post
+        // everywhere (publish-due, dashboard, billing channel), and only the
+        // referenceOpportunityId column (attached below) carries provenance.
+        source: 'calendar',
+        shortLink: false,
+        tags: [],
+        date,
+        posts: [
+          {
+            providerIdentifier: opportunity.platform,
+            value: [{ content: text, image: media }],
+          },
+        ],
+      } as never,
+      org.id
+    );
+    const created = await this._postsService.createPost(org.id, mapped, userId);
+    const postId = created?.[0]?.postId;
+    if (!postId) {
+      throw new InternalServerErrorException('Post creation failed');
+    }
+
+    await this._engageRepository.attachReferenceOpportunity(postId, {
+      opportunityId,
+      platform: opportunity.platform,
+      externalPostUrl: opportunity.externalPostUrl,
+      authorUsername: opportunity.authorUsername,
+      snapshotTitle: opportunity.title ?? null,
+      snapshotContent: opportunity.postContent,
+    });
+
+    return { text, postId };
+  }
+
+  /**
+   * Opt-in (§6.1): download the reference opportunity's own media (external
+   * CDN URLs — X/Reddit/etc, never yet hosted by this app) and re-host each
+   * into this org's media library, for direct attachment to the generated
+   * post. Best-effort per item — a broken/slow/oversized URL is skipped
+   * (logged), never fatal to the whole generation: unlike text, there is no
+   * fallback rewrite for media, so silently degrading to "post without that
+   * one image" is the only sane failure mode. Capped at
+   * `_maxReferenceMediaItems`.
+   */
+  private async _fetchReferenceMedia(
+    orgId: string,
+    opportunityId: string
+  ): Promise<Array<{ id: string; path: string }>> {
+    if (!this._mediaService) return [];
+
+    let urls: string[];
+    try {
+      urls = await this._engageRepository.getOpportunityMediaUrls(
+        opportunityId
+      );
+    } catch (err) {
+      this.logger.warn(
+        `Failed to look up reference media for opportunity ${opportunityId}: ${
+          err instanceof Error ? err.message : err
+        }`
+      );
+      return [];
+    }
+
+    const results: Array<{ id: string; path: string }> = [];
+    for (const url of urls.slice(0, this._maxReferenceMediaItems)) {
+      try {
+        // NOT storage.uploadSimple(url) directly: these URLs are scraped
+        // third-party page content (see safe-media-fetch.ts's header), and
+        // uploadSimple's bare axios.get would make a hostile post author an
+        // SSRF vector. Download under guards first, hand storage an inert
+        // data: URI — a shape it already ingests (the DALL-E path).
+        const dataUri = await fetchMediaAsDataUri(url, {
+          maxBytes: this._maxReferenceMediaBytes,
+          timeoutMs: this._referenceMediaTimeoutMs,
+        });
+        const uploaded = await this._storage.uploadSimple(dataUri);
+        // uploadSimple names the file from the content type
+        // (`mime.getExtension(...) || 'png'`), and third-party CDNs serve
+        // plenty that MediaDto rejects — X hands out image/avif, Reddit
+        // video/webm. Such a path would sail through here and then blow up
+        // in mapTypeToPost's ValidationPipe, taking the whole (already
+        // generated, already billed) post down with it. Drop it here
+        // instead, so an unusable file costs at most that one attachment.
+        if (!hasValidMediaExtension(uploaded)) {
+          this.logger.warn(
+            `Skipping reference media ${url} for opportunity ${opportunityId}: re-hosted as ${uploaded
+              .split('/')
+              .pop()}, an extension MediaDto does not accept`
+          );
+          continue;
+        }
+        const name = uploaded.split('/').pop()!;
+        const saved = await this._mediaService.saveFile(orgId, name, uploaded);
+        results.push({ id: saved.id, path: saved.path });
+      } catch (err) {
+        this.logger.warn(
+          `Skipping reference media ${url} for opportunity ${opportunityId}: ${
+            err instanceof Error ? err.message : err
+          }`
+        );
+      }
+    }
+    return results;
   }
 
   /** Best-effort: a billing failure must not withhold a draft that was
@@ -1265,8 +1447,8 @@ export class EngageService implements OnApplicationBootstrap {
   private async _billReferencePostUsages(
     org: Organization,
     opportunityId: string,
-    targetPlatform: string,
-    tone: string,
+    platform: string,
+    strategy: string,
     usages: ReferencePostUsage[]
   ): Promise<void> {
     if (!this._aiseeCredit || !usages.length) return;
@@ -1281,7 +1463,7 @@ export class EngageService implements OnApplicationBootstrap {
           // generation time (§7 of the design doc).
           relatedId: opportunityId,
           description: 'Reference-post generation (Engage)',
-          data: { targetPlatform, tone },
+          data: { platform, strategy },
         },
         usages.map((usage) => ({
           servicer: usage.provider,
@@ -1303,96 +1485,6 @@ export class EngageService implements OnApplicationBootstrap {
         billErr instanceof Error ? billErr.stack : billErr
       );
     }
-  }
-
-  /**
-   * Persist a (possibly edited) reference-post draft as a real Post. Assembles
-   * the caller-facing DTO into a full CreatePostDto server-side (see §5 of the
-   * design doc for why: date/shortLink/tags requirements the caller has no
-   * business supplying), then attaches referenceOpportunityId + a content
-   * snapshot the generic createPost path has no field for.
-   */
-  async saveGeneratedPost(
-    org: Organization,
-    userId: string,
-    opportunityId: string,
-    dto: SaveGeneratedPostDto
-  ) {
-    const opportunity = await this._engageRepository.getOpportunityById(
-      org.id,
-      opportunityId,
-      dto.projectId
-    );
-
-    const integration = await this._engageRepository.getIntegrationById(
-      org.id,
-      dto.integrationId
-    );
-    if (!integration) {
-      throw new NotFoundException(
-        `Integration with id ${dto.integrationId} not found`
-      );
-    }
-
-    // createPost itself overrides `date` to "right now" whenever
-    // type==='now' (posts.service.ts:1393), so findFreeDateTime must not run
-    // on that path: besides being wasted work, it can throw ("No available
-    // posting time slot found within the next 365 days") on a misconfigured
-    // account and wrongly block an immediate send that never needed a slot.
-    // 'draft' has no such override — CreatePostDto.date is unconditionally
-    // required (§5), so a placeholder is still needed there.
-    const date =
-      dto.type === 'schedule'
-        ? dto.date
-        : dto.type === 'now'
-        ? new Date().toISOString()
-        : await this._postsService.findFreeDateTime(
-            org.id,
-            dto.integrationId,
-            dto.projectId
-          );
-    if (!date) {
-      throw new BadRequestException('date is required when type is "schedule"');
-    }
-
-    const mapped = await this._postsService.mapTypeToPost(
-      {
-        type: dto.type,
-        projectId: dto.projectId,
-        // Always 'calendar' — never taken from the request body. See §4.1:
-        // a reference-inspired post behaves like a normal calendar post
-        // everywhere (publish-due, dashboard, billing channel), and only the
-        // referenceOpportunityId column (attached below) carries provenance.
-        source: 'calendar',
-        shortLink: false,
-        tags: [],
-        date,
-        posts: [
-          {
-            integration: { id: dto.integrationId },
-            value: [{ content: dto.content, image: [] }],
-          },
-        ],
-      } as never,
-      org.id
-    );
-
-    const created = await this._postsService.createPost(org.id, mapped, userId);
-    const postId = created?.[0]?.postId;
-    if (!postId) {
-      throw new InternalServerErrorException('Post creation failed');
-    }
-
-    await this._engageRepository.attachReferenceOpportunity(postId, {
-      opportunityId,
-      platform: opportunity.platform,
-      externalPostUrl: opportunity.externalPostUrl,
-      authorUsername: opportunity.authorUsername,
-      snapshotTitle: opportunity.title ?? null,
-      snapshotContent: opportunity.postContent,
-    });
-
-    return created;
   }
 
   // ─── Sent Replies ─────────────────────────────────────────────────────────

@@ -110,6 +110,63 @@ describe('EngageRepository.claimDueEngageReplies — what it will not pick up', 
       not: '',
     });
   });
+
+  it('offers the LEAST-RECENTLY-ATTEMPTED reply first, not the oldest draft', async () => {
+    // The ordering is the whole anti-starvation mechanism, so it is asserted
+    // literally. Oldest-drafted-first looks right and starves the queue: a
+    // reply that cannot succeed keeps its `createdAt` forever, so it returns to
+    // the head the moment its lease expires, and with `limit: 1` per poll plus
+    // a lease (30m) longer than the cadence (25m) it takes one send slot in
+    // two. Ordering by `claimedAt` — stamped on every hand-out, failures
+    // included — sends a row that just failed to the back instead.
+    const { repo, sentFindMany } = buildRepo();
+
+    await repo.claimDueEngageReplies('org-1', 'proj-1', 'reddit', opts);
+
+    expect(sentFindMany.mock.calls[0][0].orderBy).toEqual([
+      { post: { claimedAt: { sort: 'asc', nulls: 'first' } } },
+      { createdAt: 'asc' },
+    ]);
+  });
+
+  it('puts a never-handed-out reply AHEAD of everything already tried', async () => {
+    // `nulls: 'first'` is the load-bearing half. A reply that has never been
+    // handed out has a NULL claimedAt, and Postgres sorts NULLS LAST for ASC —
+    // so dropping this option does not merely lose a nicety, it inverts the
+    // fix: fresh replies would queue up BEHIND every row that has already
+    // failed, which is worse than the starvation being repaired.
+    const { repo, sentFindMany } = buildRepo();
+
+    await repo.claimDueEngageReplies('org-1', 'proj-1', 'reddit', opts);
+
+    const [primary] = sentFindMany.mock.calls[0][0].orderBy;
+    expect(primary.post.claimedAt.nulls).toBe('first');
+  });
+
+  it('still breaks ties by age, so the oldest untried reply goes first', async () => {
+    // Among rows never handed out every claimedAt is NULL, so `createdAt` is
+    // what orders them — the original intent, kept where it was right.
+    const { repo, sentFindMany } = buildRepo();
+
+    await repo.claimDueEngageReplies('org-1', 'proj-1', 'reddit', opts);
+
+    expect(sentFindMany.mock.calls[0][0].orderBy[1]).toEqual({
+      createdAt: 'asc',
+    });
+  });
+
+  it('will not re-offer a reply whose target has been retired', async () => {
+    const { repo, sentFindMany } = buildRepo();
+
+    await repo.claimDueEngageReplies('org-1', 'proj-1', 'reddit', opts);
+
+    // The same forever-loop as the address case, with a different cause: the
+    // address is fine and the POST behind it is gone. pickAutoReplyCandidates
+    // has always filtered on deletedAt, so a retired opportunity stopped
+    // producing NEW drafts — but the one already in QUEUE kept being claimed,
+    // which users saw as the same dead posts retried across days.
+    expect(sentFindMany.mock.calls[0][0].where.opportunity.deletedAt).toBeNull();
+  });
 });
 
 describe('EngageRepository.claimDueEngageReplies — winning the race', () => {
@@ -169,12 +226,16 @@ describe('EngageRepository.claimDueEngageReplies — winning the race', () => {
     expect(postUpdateMany).not.toHaveBeenCalled();
   });
 
-  it('takes the longest-waiting replies first', async () => {
+  it('asks for no more than the caller’s limit', async () => {
+    // The driver passes limit: 1 per (project, platform) poll — the spacing IS
+    // the point, and draining a backlog in one burst is what gets an account
+    // rate-limited. This case used to also pin `orderBy: { createdAt: 'asc' }`;
+    // that ordering starved the queue and its replacement is covered by the
+    // three ordering cases above.
     const { repo, sentFindMany } = buildRepo();
 
     await repo.claimDueEngageReplies('org-1', 'proj-1', 'reddit', opts);
 
-    expect(sentFindMany.mock.calls[0][0].orderBy).toEqual({ createdAt: 'asc' });
     expect(sentFindMany.mock.calls[0][0].take).toBe(5);
   });
 });

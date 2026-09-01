@@ -4,8 +4,9 @@ import { EngageController } from '../engage.controller';
 import { TooSimilarToReferenceError } from '@gitroom/nestjs-libraries/engage/engage-reference-post.service';
 
 // Locks the SSE contract for the reference-post generation endpoint — a
-// sibling of generateDraft, but with no reply-credit reservation and its own
-// typed error frame for the similarity gate. See
+// sibling of generateDraft, but with no reply-credit reservation, its own
+// typed error frame for the similarity gate, and — unlike generateDraft — it
+// persists a Post itself (no separate save endpoint). See
 // docs/engage/reference-post-generation.md §5/§6.
 
 function makeRes() {
@@ -40,8 +41,10 @@ function makeReq() {
 
 function build(overrides: Record<string, any> = {}) {
   const engageService = {
-    generateReferencePost: vi.fn(async () => ({ text: 'a fresh original post' })),
-    saveGeneratedPost: vi.fn(async () => [{ postId: 'post1' }]),
+    generateReferencePost: vi.fn(async () => ({
+      text: 'a fresh original post',
+      postId: 'post1',
+    })),
     ...overrides,
   };
   const controller = new EngageController(
@@ -56,19 +59,36 @@ function build(overrides: Record<string, any> = {}) {
 
 const ORG = { id: 'org1' } as any;
 const USER = { id: 'user1' } as any;
-const BODY = { integrationId: 'int1', tone: 'personal', outputLength: 260 } as any;
+const BODY = { strategy: 'EXPERT_ANSWER', brandStrength: 1, outputLength: 260 } as any;
 
 describe('EngageController.generateReferencePost', () => {
-  it('streams the generated text then [DONE] on success', async () => {
+  it('streams the generated text + postId then [DONE] on success', async () => {
     const { controller } = build();
     const { res, frames } = makeRes();
     const { req } = makeReq();
 
-    await controller.generateReferencePost(ORG, 'opp1', BODY, req, res);
+    await controller.generateReferencePost(ORG, USER, 'opp1', BODY, req, res);
 
     expect(frames.join('')).toContain('a fresh original post');
+    expect(frames.join('')).toContain('"postId":"post1"');
     expect(frames.join('')).toContain('[DONE]');
     expect(res.end).toHaveBeenCalled();
+  });
+
+  it('passes the userId through to EngageService (needed to persist the draft)', async () => {
+    const { controller, engageService } = build();
+    const { res } = makeRes();
+    const { req } = makeReq();
+
+    await controller.generateReferencePost(ORG, USER, 'opp1', BODY, req, res);
+
+    expect(engageService.generateReferencePost).toHaveBeenCalledWith(
+      ORG,
+      'user1',
+      'opp1',
+      BODY,
+      expect.anything()
+    );
   });
 
   it('emits opportunity_unavailable on a NotFoundException', async () => {
@@ -80,7 +100,7 @@ describe('EngageController.generateReferencePost', () => {
     const { res, frames } = makeRes();
     const { req } = makeReq();
 
-    await controller.generateReferencePost(ORG, 'opp1', BODY, req, res);
+    await controller.generateReferencePost(ORG, USER, 'opp1', BODY, req, res);
 
     expect(frames.join('')).toContain('opportunity_unavailable');
   });
@@ -94,12 +114,12 @@ describe('EngageController.generateReferencePost', () => {
     const { res, frames } = makeRes();
     const { req } = makeReq();
 
-    await controller.generateReferencePost(ORG, 'opp1', BODY, req, res);
+    await controller.generateReferencePost(ORG, USER, 'opp1', BODY, req, res);
 
     expect(frames.join('')).toContain('too_similar_to_reference');
   });
 
-  it('emits generation_failed on an unexpected error', async () => {
+  it('emits generation_failed on an unexpected error (e.g. post persistence failed)', async () => {
     const { controller } = build({
       generateReferencePost: vi.fn(async () => {
         throw new Error('boom');
@@ -108,7 +128,7 @@ describe('EngageController.generateReferencePost', () => {
     const { res, frames } = makeRes();
     const { req } = makeReq();
 
-    await controller.generateReferencePost(ORG, 'opp1', BODY, req, res);
+    await controller.generateReferencePost(ORG, USER, 'opp1', BODY, req, res);
 
     expect(frames.join('')).toContain('generation_failed');
   });
@@ -118,34 +138,13 @@ describe('EngageController.generateReferencePost', () => {
     const { controller } = build({
       generateReferencePost: vi.fn(async () => {
         triggerClose();
-        return { text: 'too late' };
+        return { text: 'too late', postId: 'post1' };
       }),
     });
     const { res, frames } = makeRes();
 
-    await controller.generateReferencePost(ORG, 'opp1', BODY, req, res);
+    await controller.generateReferencePost(ORG, USER, 'opp1', BODY, req, res);
 
     expect(frames.join('')).toBe('');
-  });
-});
-
-describe('EngageController.saveGeneratedPost', () => {
-  it('delegates to EngageService with org, userId, opportunityId, and body', async () => {
-    const { controller, engageService } = build();
-    const saveBody = {
-      content: 'final text',
-      type: 'draft',
-      integrationId: 'int1',
-    } as any;
-
-    const result = await controller.saveGeneratedPost(ORG, USER, 'opp1', saveBody);
-
-    expect(engageService.saveGeneratedPost).toHaveBeenCalledWith(
-      ORG,
-      'user1',
-      'opp1',
-      saveBody
-    );
-    expect(result).toEqual([{ postId: 'post1' }]);
   });
 });

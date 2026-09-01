@@ -2130,7 +2130,19 @@ export class EngageRepository {
       // loop behind EngageOpportunity 8007f51d. Excluded here rather than left
       // to the executor so the row simply stops being handed out; repairing its
       // address (admin URL repair) puts it straight back in the queue.
-      opportunity: { platform, externalPostUrl: { not: '' } },
+      //
+      // `deletedAt` is the same loop with a different cause — the address is
+      // fine, the POST behind it is gone (deleted, removed, author suspended) —
+      // and it needs the same exclusion. pickAutoReplyCandidates has always
+      // filtered on it, so a retired opportunity stopped producing NEW drafts;
+      // the one already sitting in QUEUE went on being claimed forever, which
+      // is what users saw as the same four dead posts retried across days.
+      //
+      // This is a GUARDRAIL, not the mechanism: markOpportunityTargetGone also
+      // closes those queued replies outright. Without the filter, though, any
+      // reply that gets stamped by some other route — the admin sweep, a
+      // partial failure — would keep looping.
+      opportunity: { platform, externalPostUrl: { not: '' }, deletedAt: null },
       post: {
         state: 'QUEUE',
         deletedAt: null,
@@ -2143,9 +2155,33 @@ export class EngageRepository {
 
     const candidates = await this._sentReply.model.engageSentReply.findMany({
       where: dueWhere,
-      // Oldest first, so a reply waiting since yesterday is not starved by a
-      // steady trickle of fresher ones.
-      orderBy: { createdAt: 'asc' },
+      // LEAST-RECENTLY-ATTEMPTED first, not oldest-drafted first.
+      //
+      // Oldest-drafted was the obvious ordering and it has a failure mode that
+      // took six days to notice: a reply that cannot succeed keeps its
+      // `createdAt` forever, so it stays at the head of the queue and is picked
+      // again the moment its lease expires. With `limit: 1` per (project,
+      // platform) poll, and a lease (30m) longer than the cadence (25m), that
+      // costs one send slot in two — measured in production, on seven rows, the
+      // oldest of which had been spinning since it was drafted.
+      //
+      // `claimedAt` is stamped on every hand-out (including the ones that went
+      // on to fail), so ordering by it puts a row that just failed at the BACK
+      // and the queue rotates. A row that cannot succeed then costs one slot per
+      // full rotation instead of every other slot.
+      //
+      // `nulls: 'first'` is load-bearing: a never-handed-out reply has a NULL
+      // claimedAt, and Postgres sorts NULLS LAST for ASC by default — without
+      // it, brand-new replies would sort BEHIND everything that has already
+      // failed, which is the very starvation this is fixing, inverted.
+      //
+      // `createdAt` stays as the tie-break, so among rows never handed out (all
+      // NULL) the oldest still goes first — the original intent, preserved
+      // exactly where it was right.
+      orderBy: [
+        { post: { claimedAt: { sort: 'asc', nulls: 'first' } } },
+        { createdAt: 'asc' },
+      ],
       take: opts.limit,
       select: { postId: true },
     });
@@ -2983,6 +3019,142 @@ export class EngageRepository {
       limit,
       totalPages: Math.ceil(total / limit),
     };
+  }
+
+  /**
+   * Retire an opportunity whose post no longer exists on the platform.
+   *
+   * The failure this closes: the extension posts a QUEUE reply, the poster
+   * opens the permalink and finds the post deleted, the reply fails, the record
+   * stays QUEUE, {@link claimDueEngageReplies}'s lease expires, and the very
+   * same reply is handed out again on the next poll. Nothing in that cycle
+   * learns anything, so it repeats for as long as the row exists — the users
+   * saw the same four dead posts retried across days.
+   *
+   * Two writes, and BOTH are needed:
+   *
+   *   1. `deletedAt` on the opportunity stops any FURTHER draft being generated
+   *      against it (pickAutoReplyCandidates already filters on it) and, with
+   *      the matching filter added to claimDueEngageReplies, stops the existing
+   *      one being re-offered.
+   *   2. The replies already parked against it move QUEUE → ERROR. Without this
+   *      they would simply stop being handed out and sit in QUEUE forever,
+   *      invisible to the queue counts and to whoever is wondering why a
+   *      project's reply budget never drains.
+   *
+   * AUTHORISATION, and the reason this is not a plain "set a flag" endpoint:
+   * `EngageOpportunity` is GLOBAL — one row is shared by every org that scanned
+   * the same post — so an unguarded call would let any authenticated caller
+   * retire a post for everyone. The caller must therefore own a reply that is
+   * actually parked against this opportunity; that is what makes "my extension
+   * just tried to post here and the post was gone" a claim it is entitled to
+   * make. No such reply, no write, and the caller is told so.
+   *
+   * Idempotent: a second report (two projects, one dead post) finds the row
+   * already stamped and returns the same shape without re-writing it.
+   */
+  async markOpportunityTargetGone(
+    organizationId: string,
+    opportunityId: string,
+    reason: string,
+    now = new Date()
+  ): Promise<{ retired: boolean; repliesClosed: number }> {
+    // The entitlement check AND the work list in one query: these are exactly
+    // the replies that get closed below.
+    const parked = await this._sentReply.model.engageSentReply.findMany({
+      where: {
+        organizationId,
+        opportunityId,
+        post: { state: 'QUEUE', deletedAt: null, releaseURL: null },
+      },
+      select: { postId: true },
+    });
+    if (!parked.length) {
+      throw new NotFoundException(
+        'No queued reply of yours is waiting on that opportunity'
+      );
+    }
+
+    const error =
+      `Target is gone: ${reason}`.slice(0, 400) +
+      ' — the opportunity was retired, so this reply will not be retried.';
+
+    // One transaction: an opportunity retired while its replies stayed QUEUE
+    // would go on being claimed until the deletedAt filter caught it, and
+    // replies closed against an opportunity that never got stamped would let
+    // the next poll draft a fresh one for the same dead post.
+    return this._tx.model.$transaction(async (tx) => {
+      // `deletedAt: null` in the where, not a blind update: a row another org
+      // already retired keeps its ORIGINAL timestamp, which is when the post
+      // was first observed gone rather than when the last report arrived.
+      await tx.engageOpportunity.updateMany({
+        where: { id: opportunityId, deletedAt: null },
+        data: { deletedAt: now },
+      });
+      // Scoped to THIS org's replies. Another org's queued reply to the same
+      // dead post is closed by its own report — closing it here would write
+      // into an organization that never asked us to.
+      //
+      // The lease is cleared alongside the state so nothing is left holding a
+      // claim on a post that will never be handed out again.
+      const closed = await tx.post.updateMany({
+        where: { id: { in: parked.map((p) => p.postId) }, state: 'QUEUE' },
+        data: { state: 'ERROR', error, releaseId: null, claimedAt: null },
+      });
+      return { retired: true, repliesClosed: closed.count };
+    });
+  }
+
+  /**
+   * Close a reply whose send FIRED but could not be confirmed.
+   *
+   * Distinct from {@link markOpportunityTargetGone} in both claim and blast
+   * radius. That one says "this post does not exist" and retires a row shared
+   * by every org. This one says only "we submitted and could not read the
+   * result", which is a fact about one attempt — so the opportunity stays live
+   * and exactly one reply record is closed.
+   *
+   * Why close it at all, when the reply may be live: because leaving it QUEUE
+   * is the strictly worse option. The lease expires, `claimDueEngageReplies`
+   * offers it again, and the extension posts a SECOND copy of a comment that
+   * may already be there. Closing risks losing a reply that never went out;
+   * leaving it risks publishing one twice. Only the second is visible to the
+   * audience and impossible to take back.
+   *
+   * And closing is recoverable. `utils/reply.unconfirmed.ts` in the extension
+   * walks unresolved rows, looks each reply up on the platform by its own text,
+   * and commits the record when it finds one — `publishExtensionReply` does not
+   * gate on the record's current state, so ERROR → PUBLISHED still works.
+   *
+   * Idempotent: `state: 'QUEUE'` in the where means a second report (or a row
+   * that went out in the meantime) is a no-op returning `closed: false`.
+   */
+  async closeUnconfirmedReply(
+    organizationId: string,
+    sentReplyId: string,
+    reason: string
+  ): Promise<{ closed: boolean }> {
+    // Scoped by organizationId through the reply, so one org can never close
+    // another's record by guessing an id.
+    const reply = await this._sentReply.model.engageSentReply.findFirst({
+      where: { id: sentReplyId, organizationId },
+      select: { postId: true },
+    });
+    if (!reply) throw new NotFoundException('Sent reply not found');
+
+    const error =
+      `Send unconfirmed: ${reason}`.slice(0, 400) +
+      ' — the reply may be live on the platform, so it will NOT be re-sent. ' +
+      'Check the post before sending another.';
+
+    const closed = await this._post.model.post.updateMany({
+      // `state: 'QUEUE'` re-asserted at write time: a row that reached
+      // PUBLISHED between the extension's attempt and this call went out for
+      // real, and marking it ERROR would contradict a confirmed send.
+      where: { id: reply.postId, state: 'QUEUE' },
+      data: { state: 'ERROR', error, releaseId: null, claimedAt: null },
+    });
+    return { closed: closed.count > 0 };
   }
 
   async dismissOpportunity(
@@ -5745,6 +5917,23 @@ export class EngageRepository {
   }
 
   /**
+   * Media URLs (external CDN — X/Reddit/etc, not yet re-hosted) attached to
+   * an opportunity's original post, for the opt-in reference-post media reuse
+   * path (docs/engage/reference-post-generation.md §6.1). A dedicated,
+   * narrowly-`select`ed query rather than exposing `rawData` on the general
+   * opportunity fetch path (_merge deliberately omits it — "bloats every
+   * _merge-based response", see opportunityMediaUrls' own comment) — this
+   * one extra query is paid only when a caller actually opts into media.
+   */
+  async getOpportunityMediaUrls(opportunityId: string): Promise<string[]> {
+    const row = await this._opportunity.model.engageOpportunity.findUnique({
+      where: { id: opportunityId },
+      select: { rawData: true },
+    });
+    return opportunityMediaUrls(row?.rawData);
+  }
+
+  /**
    * Attach reference-post provenance to a just-created Post: the queryable FK
    * column plus a content snapshot merged into settings (durable display/audit
    * — EngageOpportunity rows can be hard-deleted or drift on re-scan, see
@@ -5782,14 +5971,6 @@ export class EngageRepository {
           referenceOpportunity: snapshot,
         }),
       },
-    });
-  }
-
-  /** Org-scoped integration lookup — used by generateReferencePost/
-   *  saveGeneratedPost to resolve the target platform from an integrationId. */
-  getIntegrationById(organizationId: string, id: string) {
-    return this._integration.model.integration.findFirst({
-      where: { organizationId, id },
     });
   }
 

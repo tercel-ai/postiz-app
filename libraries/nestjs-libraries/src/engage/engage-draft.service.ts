@@ -4,6 +4,12 @@ import Anthropic from "@anthropic-ai/sdk";
 import { EngageOpportunity } from "@prisma/client";
 import { weightedLength } from "@gitroom/helpers/utils/count.length";
 import { buildOriginalPostXml } from "@gitroom/nestjs-libraries/engage/prompt-source-envelope";
+import {
+  requiresMention,
+  containsRequiredMention,
+  buildBrandInstruction,
+  buildMandatoryBrandBlock,
+} from "@gitroom/nestjs-libraries/engage/engage-brand-instruction";
 
 const STRATEGY_PROMPTS: Record<string, string> = {
   EXPERT_ANSWER:
@@ -21,78 +27,6 @@ const STRATEGY_PROMPTS: Record<string, string> = {
   AMPLIFY:
     "Agree with the post's specific point in a few words, then add the one underrated angle that pushes it further. Keep it to two short sentences and don't drift into a generic truism. Say the angle plainly — skip stock connectives like 'the part people miss is', 'the catch is', 'cuts both ways', or 'what gets overlooked is'.",
 };
-
-// brandStrength 3 (the maximum) is the only tier where naming the brand is a
-// contract rather than a suggestion: the caller explicitly asked for a
-// promotional reply, so a draft without the brand name is not what was ordered.
-// Tiers 0-2 stay advisory (the model may legitimately decide the brand doesn't fit).
-const MANDATORY_BRAND_STRENGTH = 3;
-
-function requiresMention(brandStrength: number, mentions?: string[]): string[] {
-  if (brandStrength < MANDATORY_BRAND_STRENGTH) return [];
-  return (mentions ?? []).map((m) => m.trim()).filter(Boolean);
-}
-
-// Case-insensitive, whitespace-tolerant containment. Substring matching is
-// deliberate: "@AISEE", "AISEE's" and "(AISEE)" all count as naming the brand.
-function normalizeForMentionMatch(value: string): string {
-  return value.toLowerCase().replace(/\s+/g, " ");
-}
-
-function containsRequiredMention(draft: string, mentions: string[]): boolean {
-  const haystack = normalizeForMentionMatch(draft);
-  return mentions.some((mention) =>
-    haystack.includes(normalizeForMentionMatch(mention).trim()),
-  );
-}
-
-function buildMentionRequirement(mentions: string[]): string {
-  const list = mentions.map((m) => `"${m}"`).join(", ");
-  const requirement =
-    mentions.length === 1
-      ? `the reply MUST contain ${list}, spelled exactly as written, at least once`
-      : `the reply MUST contain at least one of these names, spelled exactly as written: ${list}`;
-  return `This is a hard requirement — ${requirement}. A reply that omits it is invalid.`;
-}
-
-function buildBrandInstruction(
-  brandStrength: number,
-  mentions?: string[],
-): string {
-  const brand = mentions?.length ? mentions.join(", ") : null;
-  switch (brandStrength) {
-    case 0:
-      return "Do not mention any brand name. Provide pure value.";
-    case 1:
-      return "Share insights and data naturally; you don't need to name any brand to be genuinely useful.";
-    case 2:
-      return brand
-        ? `When highly relevant, naturally mention ${brand} as an example or tool.`
-        : "Share insights naturally; you don't need to name any brand to be genuinely useful.";
-    case 3:
-      return brand
-        ? `Proactively introduce ${brand} and invite the person to try it. ${buildMentionRequirement(
-            requiresMention(brandStrength, mentions),
-          )}`
-        : "Share insights naturally; you don't need to name any brand to be genuinely useful.";
-    default:
-      return "Share insights and data naturally; you don't need to name any brand to be genuinely useful.";
-  }
-}
-
-// Appended to the system prompt when the brand name is mandatory. The strategy
-// prompts (QUICK_TAKE's one-sentence cap, QUESTION_LED's "only a question") and
-// the "relevance takes priority" rule each give the model a reason to drop the
-// name — this block resolves those conflicts in the brand's favour without
-// licensing invented claims about it.
-function buildMandatoryBrandBlock(mentions: string[]): string {
-  const list = mentions.map((m) => `"${m}"`).join(" / ");
-  return `Brand requirement (non-negotiable):
-- ${list} must appear verbatim in the reply. Never swap it for "this tool", "a tool I use", an abbreviation, or a paraphrase.
-- If the strategy above caps you at one sentence or a tight word count, add at most one short extra clause or sentence so the name fits naturally — the length limit below still applies.
-- Stay honest: name it as what you'd genuinely point this person to. Do not invent features, pricing, results, or numbers for it.
-- The relevance rules still govern what you say, but they are never a reason to leave the name out.`;
-}
 
 const INTENT_PROMPTS: Record<string, string> = {
   help_seeking:

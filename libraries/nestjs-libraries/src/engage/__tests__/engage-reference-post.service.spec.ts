@@ -31,6 +31,7 @@ function anthropicResponse(text: string, usage = { input_tokens: 100, output_tok
 }
 
 const REFERENCE = {
+  platform: 'x',
   authorUsername: 'coolwriter',
   postContent:
     'The market for handmade ceramics has quietly tripled in the last two years, and most sellers still price like it is 2019.',
@@ -70,7 +71,7 @@ describe('EngageReferencePostService', () => {
       )
     );
 
-    const result = await service.generate(REFERENCE, 'x', 'personal', 260);
+    const result = await service.generate(REFERENCE, 'EXPERT_ANSWER', 1, undefined, 260);
 
     expect(anthropicCreate).toHaveBeenCalledTimes(1);
     expect(result.text).toContain('artisan pottery');
@@ -85,10 +86,20 @@ describe('EngageReferencePostService', () => {
     ]);
   });
 
+  it('derives the target platform from the reference itself, not a client-supplied value', async () => {
+    anthropicCreate.mockResolvedValueOnce(anthropicResponse('An original take on ceramics.'));
+
+    await service.generate({ ...REFERENCE, platform: 'reddit' }, 'EXPERT_ANSWER', 1, undefined, undefined);
+
+    // Reddit's default target (1000 chars), not X's (260) — proves platform
+    // came from reference.platform, since no outputLength was passed.
+    expect(anthropicCreate.mock.calls[0][0].system).toContain('up to about 1000 characters');
+  });
+
   it('embeds the reference inside <original_post> and never frames this as a reply', async () => {
     anthropicCreate.mockResolvedValueOnce(anthropicResponse('An original take on ceramics.'));
 
-    await service.generate(REFERENCE, 'x', 'personal', 260);
+    await service.generate(REFERENCE, 'EXPERT_ANSWER', 1, undefined, 260);
 
     const systemPrompt = anthropicCreate.mock.calls[0][0].system;
     const userContent = anthropicCreate.mock.calls[0][0].messages[0].content;
@@ -100,6 +111,44 @@ describe('EngageReferencePostService', () => {
     expect(systemPrompt.toLowerCase()).not.toContain('reply directly to the central point');
   });
 
+  it('uses reworded, non-reply strategy prompts (e.g. QUESTION_LED never says "Reply")', async () => {
+    anthropicCreate.mockResolvedValueOnce(anthropicResponse('A fresh take.'));
+
+    await service.generate(REFERENCE, 'QUESTION_LED', 1, undefined, 260);
+
+    const systemPrompt = anthropicCreate.mock.calls[0][0].system;
+    expect(systemPrompt).toContain('Open the post with one genuine, open question');
+    expect(systemPrompt).not.toContain('Reply with one genuine');
+  });
+
+  it('applies the mandatory brand-mention requirement at brandStrength 3, same mechanism as reply drafts', async () => {
+    anthropicCreate.mockResolvedValueOnce(anthropicResponse('AISEE makes this so much easier.'));
+
+    const result = await service.generate(
+      REFERENCE,
+      'EXPERT_ANSWER',
+      3,
+      ['AISEE'],
+      260
+    );
+
+    const systemPrompt = anthropicCreate.mock.calls[0][0].system;
+    expect(systemPrompt).toContain('Brand requirement (non-negotiable)');
+    expect(systemPrompt).toContain('must appear verbatim in the post');
+    expect(result.text).toContain('AISEE');
+  });
+
+  it('ships a draft missing the mandatory mention with a warning rather than retrying', async () => {
+    anthropicCreate.mockResolvedValueOnce(
+      anthropicResponse('A perfectly original take on ceramics pricing, no brand mentioned.')
+    );
+
+    const result = await service.generate(REFERENCE, 'EXPERT_ANSWER', 3, ['AISEE'], 260);
+
+    expect(anthropicCreate).toHaveBeenCalledTimes(1);
+    expect(result.text).toContain('no brand mentioned');
+  });
+
   it('retries once with a corrective prompt when the first draft is too similar, then succeeds', async () => {
     anthropicCreate
       .mockResolvedValueOnce(anthropicResponse(REFERENCE.postContent)) // verbatim copy
@@ -109,7 +158,7 @@ describe('EngageReferencePostService', () => {
         )
       );
 
-    const result = await service.generate(REFERENCE, 'x', 'personal', 260);
+    const result = await service.generate(REFERENCE, 'EXPERT_ANSWER', 1, undefined, 260);
 
     expect(anthropicCreate).toHaveBeenCalledTimes(2);
     // The second call's system prompt carries the corrective instruction.
@@ -127,7 +176,7 @@ describe('EngageReferencePostService', () => {
       .mockResolvedValueOnce(anthropicResponse(REFERENCE.postContent));
 
     const error = await service
-      .generate(REFERENCE, 'x', 'personal', 260)
+      .generate(REFERENCE, 'EXPERT_ANSWER', 1, undefined, 260)
       .catch((e) => e);
 
     expect(error).toBeInstanceOf(TooSimilarToReferenceError);
@@ -144,7 +193,7 @@ describe('EngageReferencePostService', () => {
       .mockRejectedValueOnce(new Error('anthropic 500'));
 
     const error = await service
-      .generate(REFERENCE, 'x', 'personal', 260)
+      .generate(REFERENCE, 'EXPERT_ANSWER', 1, undefined, 260)
       .catch((e) => e);
 
     expect(error.message).toBe(
@@ -159,7 +208,7 @@ describe('EngageReferencePostService', () => {
     anthropicCreate.mockResolvedValueOnce(anthropicResponse(tooLong));
 
     await expect(
-      service.generate(REFERENCE, 'x', 'personal', 260)
+      service.generate(REFERENCE, 'EXPERT_ANSWER', 1, undefined, 260)
     ).rejects.toThrow(/280/);
   });
 
@@ -169,8 +218,9 @@ describe('EngageReferencePostService', () => {
 
     const result = await service.generate(
       REFERENCE,
-      'x',
-      'personal',
+      'EXPERT_ANSWER',
+      1,
+      undefined,
       260,
       controller.signal
     );
@@ -185,7 +235,7 @@ describe('EngageReferencePostService', () => {
       usage: undefined,
     });
 
-    const result = await service.generate(REFERENCE, 'x', 'personal', 260);
+    const result = await service.generate(REFERENCE, 'EXPERT_ANSWER', 1, undefined, 260);
     expect(result.usages).toEqual([]);
   });
 });

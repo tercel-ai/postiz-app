@@ -46,13 +46,13 @@ import {
   ReportRedditChannelCapabilityDto,
   AddTrackedAccountDto,
   ConfirmManualReplyDto,
+  ReportTargetGoneDto,
   DashboardImpressionsDto,
   DashboardRepliesTrendDto,
   DashboardSummaryDto,
   DashboardTrafficsDto,
   GenerateDraftDto,
   GenerateReferencePostDto,
-  SaveGeneratedPostDto,
   ListOpportunitiesDto,
   ListSentDto,
   LocateOpportunityDto,
@@ -629,6 +629,44 @@ export class EngageController {
     return this._engageService.dismissOpportunity(org, id, projectId);
   }
 
+  /**
+   * The extension reporting that a reply target is GONE from the platform.
+   *
+   * Called by the unattended reply runner when a poster proves the post no
+   * longer exists — not when it merely failed. Every other failure (a signed-out
+   * session, a rate limit, markup that moved) is retryable and must stay in the
+   * queue; this one never succeeds, and before this endpoint existed the same
+   * dead post was re-offered on every poll for as long as its row lived.
+   *
+   * Retires the opportunity (`deletedAt`) and closes the caller's replies parked
+   * against it. 404 when the caller has no queued reply waiting on it — which is
+   * also the authorisation check, since EngageOpportunity is shared across orgs.
+   */
+  @ApiOperation({
+    summary:
+      'Report that an opportunity’s post no longer exists: retires it (deletedAt) and closes the caller’s queued replies to it',
+  })
+  @ApiResponse({
+    status: 404,
+    description: 'No queued reply of this org is waiting on that opportunity',
+  })
+  @Post('/opportunities/:id/target-gone')
+  reportTargetGone(
+    @GetOrgFromRequest() org: Organization,
+    @Param('id') id: string,
+    @Body() body: ReportTargetGoneDto
+  ) {
+    this.logger.log(
+      `[engage] target gone reported org=${org.id} opportunity=${id} ` +
+        `platform=${body.platform ?? '?'} reason=${body.reason ?? '?'}`
+    );
+    return this._engageService.markOpportunityTargetGone(
+      org,
+      id,
+      body.reason || 'the post could not be found on the platform'
+    );
+  }
+
   @ApiOperation({ summary: 'Toggle bookmark on an opportunity' })
   @ApiResponse({ status: 404, description: 'Opportunity not found' })
   @Patch('/opportunities/:id/bookmark')
@@ -843,28 +881,33 @@ export class EngageController {
   }
 
   // ─── Reference-Post Generation (docs/engage/reference-post-generation.md) ─
-  // Generates/saves an ORIGINAL post inspired by an opportunity — NOT a reply.
-  // Uses getOpportunityById (no reply-eligibility status gate: an already-
-  // replied-to or expired opportunity is still valid inspiration) and the
-  // same Create+POSTS_PER_MONTH policy as creating a post normally, since the
-  // output is a normal calendar Post, not an engage reply.
+  // Generates AND saves an ORIGINAL post inspired by an opportunity — NOT a
+  // reply. One call: it always persists as an account-less DRAFT Post
+  // (referenceOpportunityId attached); there is no separate save endpoint —
+  // further editing (content, picking an account, scheduling) goes through
+  // the existing generic POST /api/posts/ edit flow, same as any other
+  // draft. Uses getOpportunityById (no reply-eligibility status gate: an
+  // already-replied-to or expired opportunity is still valid inspiration)
+  // and the same Create+POSTS_PER_MONTH policy as creating a post normally,
+  // since the output is a normal calendar Post, not an engage reply.
 
   @ApiOperation({
     summary:
-      'Stream an AI-generated ORIGINAL post inspired by an opportunity via SSE (text/event-stream) — not a reply.',
+      'Generate AND save an AI-written ORIGINAL post inspired by an opportunity, via SSE (text/event-stream) — not a reply. Always persists as an account-less DRAFT Post.',
   })
   @ApiResponse({
     status: 200,
     description:
-      'SSE stream of the generated post text; ends with [DONE]. Failures (opportunity not found, integration not found, generation failed, too similar to the reference) end the stream with a typed error frame.',
+      'SSE stream ending with a data frame carrying {text, postId} then [DONE]. Failures (opportunity not found, generation failed, too similar to the reference) end the stream with a typed error frame instead.',
   })
-  @ApiResponse({ status: 404, description: 'Opportunity or integration not found' })
+  @ApiResponse({ status: 404, description: 'Opportunity not found' })
   @ApiResponse({ status: 429, description: 'Rate limit exceeded (20/hour)' })
   @CheckPolicies([AuthorizationActions.Create, Sections.POSTS_PER_MONTH])
   @Throttle({ default: { limit: 20, ttl: 3_600_000 } })
   @Post('/opportunities/:id/generate-post')
   async generateReferencePost(
     @GetOrgFromRequest() org: Organization,
+    @GetUserFromRequest() user: User,
     @Param('id') id: string,
     @Body() body: GenerateReferencePostDto,
     @Req() req: Request,
@@ -880,12 +923,15 @@ export class EngageController {
     try {
       const result = await this._engageService.generateReferencePost(
         org,
+        user?.id,
         id,
         body,
         abortController.signal
       );
       if (!abortController.signal.aborted) {
-        res.write(`data: ${JSON.stringify({ text: result.text })}\n\n`);
+        res.write(
+          `data: ${JSON.stringify({ text: result.text, postId: result.postId })}\n\n`
+        );
         res.write(`data: [DONE]\n\n`);
       }
     } catch (err) {
@@ -923,23 +969,6 @@ export class EngageController {
     } finally {
       if (!res.writableEnded) res.end();
     }
-  }
-
-  @ApiOperation({
-    summary:
-      'Persist a (possibly edited) reference-post draft as a real Post. Does NOT create an EngageSentReply and does NOT claim the opportunity.',
-  })
-  @ApiResponse({ status: 404, description: 'Opportunity or integration not found' })
-  @CheckPolicies([AuthorizationActions.Create, Sections.POSTS_PER_MONTH])
-  @Throttle({ default: { limit: 20, ttl: 3_600_000 } })
-  @Post('/opportunities/:id/save-generated-post')
-  saveGeneratedPost(
-    @GetOrgFromRequest() org: Organization,
-    @GetUserFromRequest() user: User,
-    @Param('id') id: string,
-    @Body() body: SaveGeneratedPostDto
-  ) {
-    return this._engageService.saveGeneratedPost(org, user?.id, id, body);
   }
 
   // ─── Send / Schedule Reply (X via Post pipeline) ─────────────────────────
@@ -1217,6 +1246,44 @@ export class EngageController {
       id,
       body.url,
       body.author
+    );
+  }
+
+  /**
+   * The extension reporting a send that FIRED but was never confirmed — dev.to's
+   * AJAX comment that never rendered, a Reddit comment that never joined the
+   * tree.
+   *
+   * Closes this one record (QUEUE → ERROR) so the driver stops offering it. The
+   * opportunity is untouched: unlike /target-gone, this makes no claim about the
+   * post existing, only about one attempt whose result could not be read.
+   *
+   * Deliberately closes a reply that MIGHT be live. Leaving it queued is worse:
+   * the lease expires, the reply is handed out again, and a second copy of the
+   * same comment goes up. Losing an unsent reply is recoverable by hand;
+   * a duplicate comment on someone else's post is not — and the extension's own
+   * reply.unconfirmed pass looks these up on the platform and commits the ones
+   * that did land.
+   */
+  @ApiOperation({
+    summary:
+      'Report a reply whose send fired but was never confirmed: closes that record (QUEUE→ERROR) so it is never re-sent. Does NOT touch the opportunity.',
+  })
+  @ApiResponse({ status: 404, description: 'Sent reply not found' })
+  @Post('/sent/:id/unconfirmed')
+  reportUnconfirmedReply(
+    @GetOrgFromRequest() org: Organization,
+    @Param('id') id: string,
+    @Body() body: ReportTargetGoneDto
+  ) {
+    this.logger.warn(
+      `[engage] unconfirmed send reported org=${org.id} sentReply=${id} ` +
+        `platform=${body.platform ?? '?'} reason=${body.reason ?? '?'}`
+    );
+    return this._engageService.closeUnconfirmedReply(
+      org,
+      id,
+      body.reason || 'the platform never showed the reply'
     );
   }
 
