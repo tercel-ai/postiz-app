@@ -67,6 +67,62 @@ function defaultOutputLimitForPlatform(platform: string): number {
     : X_WEIGHTED_CHAR_LIMIT;
 }
 
+/**
+ * The brandStrength a platform will actually tolerate.
+ *
+ * Reddit caps at 2, and not for taste: tier 3 asks for the exact thing the
+ * target communities ban, so it writes replies that are removed within seconds
+ * of posting. From their own published rules (/r/<sub>/about/rules.json):
+ *
+ *   r/SaaS          "No Vendor Spam on posts or comments"
+ *                   "No selling, soliciting... posts or comments"
+ *   r/Entrepreneur  "No promotion, sales, or solicitation... or drive traffic"
+ *   r/webdev        "No commercial promotions/solicitations — Violations can
+ *                    result in a ban"
+ *
+ * Tier 3 says "Proactively introduce X and invite the person to try it", then
+ * enforces the name VERBATIM through a rewrite retry — so the model cannot
+ * soften it even when it judges, correctly, that the community will not take
+ * it. That is a generator overruling a moderator, and the moderator wins.
+ *
+ * The publish side of this codebase already learned this: the operation-plan
+ * generation prompt carries "NEVER include the project's own URL, name, or
+ * 'I built X, check it out' framing", annotated there as a hard rule added
+ * after a post was removed for exactly that. This is the same lesson reaching
+ * the reply side, where the volume — and so the exposure — is far higher.
+ *
+ * Tier 2 still names the brand where it genuinely fits ("When highly relevant,
+ * naturally mention X as an example or tool"). What it drops is the demand and
+ * the retry, which is the part that gets comments removed.
+ */
+export function effectiveBrandStrength(
+  platform: string,
+  brandStrength: number,
+): number {
+  return platform === "reddit" ? Math.min(brandStrength, 2) : brandStrength;
+}
+
+/**
+ * Reddit-only guardrails appended to the system prompt.
+ *
+ * Ported from the operation-plan generation prompt and trimmed to what applies
+ * to a COMMENT: its submission-shaped rules (flair, title tags, picking a
+ * subreddit) mean nothing here, while its promotion, link and low-effort rules
+ * apply to comments explicitly — several communities write "posts or comments"
+ * in so many words.
+ *
+ * Placed AFTER the brand instruction and worded to win. Without an explicit
+ * ordering, a tier-2 "mention the brand when relevant" and a "do not promote"
+ * rule are two suggestions, and the model resolves the conflict however it
+ * likes — which is how a rule that is present still fails to bind.
+ */
+const REDDIT_COMMUNITY_GUARDRAILS = `Reddit rules (these OVERRIDE the brand instruction above wherever the two disagree):
+- Never post the project's own URL, and never write "I built X", "check it out", "try it free", or any other invitation to go try something. Communities auto-remove comments for this regardless of who wrote them, and several ban for it.
+- Naming a tool is allowed ONLY where it genuinely answers the question, worded the way one practitioner mentions a tool to another — never as an introduction, a pitch, or an invitation. If the reply still works without the name, leave the name out.
+- Write as a participant in the discussion, not as someone with something to sell. A comment that reads as marketing is removed even when its advice is correct.
+- No low-effort comments: a bare agreement, a restatement of the post, or a generic tip is removed as spam on the larger subreddits.
+- At most one external link, only when it is not yours and genuinely helps. Two links, or one of your own, reads as promotion.`;
+
 @Injectable()
 export class EngageDraftService {
   private readonly logger = new Logger(EngageDraftService.name);
@@ -105,7 +161,13 @@ export class EngageDraftService {
   ): AsyncGenerator<string> {
     const platform = normalizePlatform(opportunity.platform);
     const outputLimit = outputLength ?? defaultOutputLimitForPlatform(platform);
-    const requiredMentions = requiresMention(brandStrength, mentions);
+    // Clamped HERE as well as inside _buildSystemPrompt, and it has to be both:
+    // this value drives the post-generation check that rewrites a draft for
+    // omitting the brand name. Clamping only the prompt would leave the checker
+    // demanding a name the prompt no longer asks for, and the retry would put
+    // back exactly the phrasing the guardrails removed.
+    const effectiveStrength = effectiveBrandStrength(platform, brandStrength);
+    const requiredMentions = requiresMention(effectiveStrength, mentions);
     const systemPrompt = this._buildSystemPrompt(
       platform,
       strategy,
@@ -379,10 +441,15 @@ export class EngageDraftService {
           : `up to ${marginTarget} characters`;
     const strategyInstruction =
       STRATEGY_PROMPTS[strategy] ?? STRATEGY_PROMPTS["EXPERT_ANSWER"];
-    const brandInstruction = buildBrandInstruction(brandStrength, mentions);
+    // See effectiveBrandStrength: on Reddit, tier 3 asks for the exact thing
+    // the target communities remove comments for.
+    const effectiveStrength = effectiveBrandStrength(platform, brandStrength);
+    const brandInstruction = buildBrandInstruction(effectiveStrength, mentions);
     const intentInstruction =
       INTENT_PROMPTS[primaryIntent] ?? INTENT_PROMPTS["discussion"];
-    const requiredMentions = requiresMention(brandStrength, mentions);
+    const requiredMentions = requiresMention(effectiveStrength, mentions);
+    const communityGuardrails =
+      platform === "reddit" ? `\n${REDDIT_COMMUNITY_GUARDRAILS}\n` : "";
     const mandatoryBrandBlock = requiredMentions.length
       ? `\n${buildMandatoryBrandBlock(requiredMentions)}\n`
       : "";
@@ -393,7 +460,7 @@ export class EngageDraftService {
     return `You are a social media engagement expert writing a reply on ${platform}.
 ${strategyInstruction}
 ${brandInstruction}
-${intentInstruction}
+${communityGuardrails}${intentInstruction}
 Platform constraint: Keep the reply ${charLimit}.
 Relevance requirements:
 - Reply directly to the central point, question, or situation in the original post.

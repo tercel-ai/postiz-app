@@ -1157,6 +1157,24 @@ export class ReportTargetGoneDto {
   @IsString()
   @MaxLength(500)
   reason?: string;
+
+  /**
+   * Whether the PLATFORM itself said the address does not resolve (HTTP
+   * 404/410), as opposed to the extension inferring it from page text.
+   *
+   * The one field here that is NOT diagnostic — it selects the blast radius.
+   * `EngageOpportunity` is a globally-shared row with no un-retire path, so only
+   * a confirmed report may retire it for every tenant; an unconfirmed one closes
+   * just the caller's own reply. Page text cannot separate "deleted for
+   * everyone" from "invisible to this session" (a protected account, a private
+   * community, an author who blocked that one login).
+   *
+   * Absent means UNCONFIRMED. An older extension sends nothing, and the safe
+   * reading of silence is the narrow action, never the global one.
+   */
+  @IsOptional()
+  @IsBoolean()
+  confirmed?: boolean;
 }
 
 export class ConfirmManualReplyDto {
@@ -1241,6 +1259,30 @@ export class PublishExtensionReplyDto {
   @ValidateNested()
   @Type(() => EngageAuthorDto)
   author?: EngageAuthorDto;
+}
+
+// The extension reporting that the platform removed a reply it had just posted
+// successfully — verified from a logged-out view (extension utils/liveness/).
+export class MarkReplyRemovedDto {
+  // 'removed' — the platform left a tombstone where the content was.
+  // 'gone'    — not visible to a logged-out reader at all, which can mean an
+  //             account-level block rather than one community's rule.
+  @IsString()
+  @IsIn(['removed', 'gone'])
+  reason: string;
+
+  // The reply's own permalink, when the poster captured one. Kept even though
+  // the reply is gone: it is the id any investigation starts from.
+  @IsOptional()
+  @IsString()
+  @MaxLength(2048)
+  url?: string;
+
+  // What the check actually saw, for diagnosing a verdict that turns out wrong.
+  @IsOptional()
+  @IsString()
+  @MaxLength(512)
+  evidence?: string;
 }
 
 // Persist an unpublished working draft for an opportunity (one DRAFT per

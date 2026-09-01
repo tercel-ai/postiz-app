@@ -129,11 +129,49 @@ describe('EngageDraftService', () => {
     });
 
     it('should list every mention as an accepted brand name when several are given', () => {
+      // On X, not Reddit: Reddit clamps to strength 2 (effectiveBrandStrength),
+      // so it has no mandatory-brand block to list names in. The list-building
+      // this covers is platform-independent.
       const prompt = (service as any)._buildSystemPrompt(
-        'reddit', 'EXPERT_ANSWER', 'discussion', 3, 1000, ['AISEE', 'Postiz']
+        'x', 'EXPERT_ANSWER', 'discussion', 3, 1000, ['AISEE', 'Postiz']
       );
       expect(prompt).toContain('at least one of these names, spelled exactly as written: "AISEE", "Postiz"');
       expect(prompt).toContain('must name "AISEE" or "Postiz"');
+    });
+
+    it('should carry the community guardrails on reddit, after the brand line', () => {
+      const prompt = (service as any)._buildSystemPrompt(
+        'reddit', 'EXPERT_ANSWER', 'discussion', 3, 1000, ['AISEE']
+      );
+      // Ordering is load-bearing: a "mention the brand when relevant" line and
+      // a "do not promote" line are two suggestions unless one is declared to
+      // win. The guardrails say so, and must come after what they override.
+      expect(prompt).toContain('these OVERRIDE the brand instruction above');
+      expect(prompt.indexOf('these OVERRIDE the brand instruction above'))
+        .toBeGreaterThan(prompt.indexOf('AISEE'));
+      expect(prompt).toContain("Never post the project's own URL");
+      expect(prompt).toContain('check it out');
+    });
+
+    it('should drop the mandatory-brand block on reddit even at strength 3', () => {
+      const prompt = (service as any)._buildSystemPrompt(
+        'reddit', 'EXPERT_ANSWER', 'discussion', 3, 1000, ['AISEE']
+      );
+      // The demand and its rewrite retry are what produced removable comments;
+      // the softer tier-2 phrasing takes over.
+      expect(prompt).not.toContain('Brand requirement (non-negotiable)');
+      expect(prompt).not.toContain('Proactively introduce');
+      expect(prompt).not.toContain('must name "AISEE"');
+      expect(prompt).toContain('naturally mention AISEE');
+    });
+
+    it('should leave other platforms untouched by the reddit guardrails', () => {
+      const prompt = (service as any)._buildSystemPrompt(
+        'x', 'EXPERT_ANSWER', 'discussion', 3, 260, ['AISEE']
+      );
+      expect(prompt).not.toContain('these OVERRIDE the brand instruction above');
+      expect(prompt).toContain('Brand requirement (non-negotiable)');
+      expect(prompt).toContain('Proactively introduce');
     });
 
     it('should not impose a hard brand requirement below the maximum brand strength', () => {
@@ -627,14 +665,36 @@ describe('EngageDraftService', () => {
       expect(generateRaw).toHaveBeenCalledTimes(1);
     });
 
-    it('enforces the brand mention on Reddit too', async () => {
+    it('does NOT enforce the brand mention on Reddit, even at strength 3', async () => {
+      // Reddit is capped at 2 (effectiveBrandStrength). The communities engage
+      // targets remove comments for exactly what strength 3 asks for —
+      // r/SaaS "No Vendor Spam on posts or comments", r/webdev "No commercial
+      // promotions/solicitations — Violations can result in a ban" — so the
+      // rewrite-until-it-names-the-brand loop was manufacturing removals.
+      //
+      // A draft that leaves the name out is now delivered as-is: no retry, and
+      // no second model call spent restoring the phrasing the guardrails exist
+      // to keep out.
       const generateRaw = vi
         .spyOn(service as any, '_generateRaw')
-        .mockResolvedValueOnce('Long helpful reply without the brand.')
-        .mockResolvedValueOnce('Long helpful reply that names AISEE.');
+        .mockResolvedValue('Long helpful reply without the brand.');
 
       expect(await consume(redditOpportunity, 3, ['AISEE'])).toBe(
-        'Long helpful reply that names AISEE.'
+        'Long helpful reply without the brand.'
+      );
+      expect(generateRaw).toHaveBeenCalledTimes(1);
+    });
+
+    it('still enforces the brand mention on X at strength 3', async () => {
+      // The cap is Reddit-only. Nothing in X's rules calls for it, and clamping
+      // every platform would quietly disable a feature that is fine elsewhere.
+      const generateRaw = vi
+        .spyOn(service as any, '_generateRaw')
+        .mockResolvedValueOnce('Short reply without the brand.')
+        .mockResolvedValueOnce('Short reply naming AISEE.');
+
+      expect(await consume(xOpportunity, 3, ['AISEE'])).toBe(
+        'Short reply naming AISEE.'
       );
       expect(generateRaw).toHaveBeenCalledTimes(2);
     });

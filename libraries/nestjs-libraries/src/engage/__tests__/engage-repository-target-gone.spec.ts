@@ -64,7 +64,7 @@ describe('EngageRepository.markOpportunityTargetGone — authorisation', () => {
     const { repo, oppUpdateMany, postUpdateMany } = buildRepo({ parked: [] });
 
     await expect(
-      repo.markOpportunityTargetGone('org-1', 'opp-1', 'the post was deleted', now)
+      repo.markOpportunityTargetGone('org-1', 'opp-1', 'the post was deleted', true, now)
     ).rejects.toBeInstanceOf(NotFoundException);
 
     expect(oppUpdateMany).not.toHaveBeenCalled();
@@ -74,7 +74,7 @@ describe('EngageRepository.markOpportunityTargetGone — authorisation', () => {
   it('looks for the caller’s own live queue rows, not anyone’s reply ever', async () => {
     const { repo, sentFindMany } = buildRepo({ parked: [{ postId: 'p1' }] });
 
-    await repo.markOpportunityTargetGone('org-1', 'opp-1', 'gone', now);
+    await repo.markOpportunityTargetGone('org-1', 'opp-1', 'gone', true, now);
 
     expect(sentFindMany.mock.calls[0][0].where).toMatchObject({
       organizationId: 'org-1',
@@ -90,7 +90,7 @@ describe('EngageRepository.markOpportunityTargetGone — the two writes', () => 
   it('stamps deletedAt so nothing is drafted or claimed against it again', async () => {
     const { repo, oppUpdateMany } = buildRepo({ parked: [{ postId: 'p1' }] });
 
-    await repo.markOpportunityTargetGone('org-1', 'opp-1', 'gone', now);
+    await repo.markOpportunityTargetGone('org-1', 'opp-1', 'gone', true, now);
 
     expect(oppUpdateMany).toHaveBeenCalledWith({
       where: { id: 'opp-1', deletedAt: null },
@@ -103,7 +103,7 @@ describe('EngageRepository.markOpportunityTargetGone — the two writes', () => 
     // the post was first observed gone", not "when the last report arrived".
     const { repo, oppUpdateMany } = buildRepo({ parked: [{ postId: 'p1' }] });
 
-    await repo.markOpportunityTargetGone('org-2', 'opp-1', 'gone', now);
+    await repo.markOpportunityTargetGone('org-2', 'opp-1', 'gone', true, now);
 
     expect(oppUpdateMany.mock.calls[0][0].where.deletedAt).toBeNull();
   });
@@ -120,6 +120,7 @@ describe('EngageRepository.markOpportunityTargetGone — the two writes', () => 
       'org-1',
       'opp-1',
       'the post was deleted by its author',
+      true,
       now
     );
 
@@ -131,11 +132,28 @@ describe('EngageRepository.markOpportunityTargetGone — the two writes', () => 
       state: 'QUEUE',
     });
     expect(call.data.state).toBe('ERROR');
-    // The lease goes with it — nothing should be left holding a claim on a post
-    // that will never be handed out again.
+    // The lease token goes with it, but NOT claimedAt — that column is the
+    // platform write clock (see the dedicated case below), and `state: 'ERROR'`
+    // is already what stops the row being handed out again.
     expect(call.data.releaseId).toBeNull();
-    expect(call.data.claimedAt).toBeNull();
+    expect('claimedAt' in call.data).toBe(false);
     expect(result).toEqual({ retired: true, repliesClosed: 2 });
+  });
+
+  it('preserves claimedAt — it is the platform write clock, not just a lease', async () => {
+    // `post.claimedAt` is the sole reply-side input to getLastPlatformWriteAt,
+    // documented there as "the moment the account is actually touched", and the
+    // publish branch of that query explicitly excludes engage rows — so there is
+    // no fallback. Clearing it would rewind the platform write floor. This
+    // method's own premise makes it sharpest: the send FIRED, so this row's
+    // claimedAt is the most recent moment the account was written to.
+    const { repo, postUpdateMany } = buildRepo();
+
+    await repo.closeUnconfirmedReply('org-1', 'sent-1', 'unconfirmed');
+
+    const data = postUpdateMany.mock.calls[0][0].data;
+    expect(data.releaseId).toBeNull();
+    expect('claimedAt' in data).toBe(false);
   });
 
   it('records the poster’s own reason on the closed reply', async () => {
@@ -147,6 +165,7 @@ describe('EngageRepository.markOpportunityTargetGone — the two writes', () => 
       'org-1',
       'opp-1',
       'the post was deleted by its author',
+      true,
       now
     );
 
@@ -159,7 +178,7 @@ describe('EngageRepository.markOpportunityTargetGone — the two writes', () => 
   it('does not let an oversized reason overflow the error column', async () => {
     const { repo, postUpdateMany } = buildRepo({ parked: [{ postId: 'p1' }] });
 
-    await repo.markOpportunityTargetGone('org-1', 'opp-1', 'x'.repeat(5_000), now);
+    await repo.markOpportunityTargetGone('org-1', 'opp-1', 'x'.repeat(5_000), true, now);
 
     expect(postUpdateMany.mock.calls[0][0].data.error.length).toBeLessThan(600);
   });
@@ -177,6 +196,69 @@ describe('EngageRepository.markOpportunityTargetGone — the two writes', () => 
 // comment goes up — and a duplicate comment on someone else's post cannot be
 // taken back, while an unsent reply can be re-sent by hand (and the extension's
 // reply.unconfirmed pass commits the ones that did land).
+// ─── Blast radius: who a report is allowed to speak for ─────────────────────
+//
+// Owning a parked reply establishes STANDING, not truth. `EngageOpportunity` is
+// one row shared by every org that scanned the same post, `deletedAt` has no
+// un-retire path anywhere in the backend, and every opportunity read filters on
+// it — so acting globally on a verdict we merely inferred from page text would
+// delete a live post from every other tenant's Engage surface, permanently.
+//
+// The extension grades its own evidence: an HTTP 404/410 is the platform
+// stating the address does not resolve (true for everyone); a text match cannot
+// separate "deleted for everyone" from "invisible to THIS browser session" — a
+// protected account, a private community, an author who blocked that one login.
+describe('EngageRepository.markOpportunityTargetGone — blast radius', () => {
+  it('does NOT retire the shared opportunity on an unconfirmed report', async () => {
+    const { repo, oppUpdateMany, postUpdateMany } = buildRepo({
+      parked: [{ postId: 'p1' }],
+    });
+
+    const result = await repo.markOpportunityTargetGone(
+      'org-1',
+      'opp-1',
+      'the post was deleted',
+      false,
+      now
+    );
+
+    // The global row is untouched — another tenant signed in as a follower can
+    // still see and reply to this post.
+    expect(oppUpdateMany).not.toHaveBeenCalled();
+    // But the caller's own loop still ends: its parked reply is closed, and
+    // pickAutoReplyCandidates will not draft another (it excludes opportunities
+    // this project already has a reply against).
+    expect(postUpdateMany.mock.calls[0][0].data.state).toBe('ERROR');
+    expect(result).toEqual({ retired: false, repliesClosed: 1 });
+  });
+
+  it('reports what it did, not what was asked — retired mirrors confirmed', async () => {
+    // A caller told `retired: true` after an unconfirmed report would have no
+    // way to tell the two outcomes apart.
+    const { repo } = buildRepo({ parked: [{ postId: 'p1' }] });
+
+    expect(
+      (await repo.markOpportunityTargetGone('org-1', 'opp-1', 'gone', false, now))
+        .retired
+    ).toBe(false);
+    expect(
+      (await repo.markOpportunityTargetGone('org-1', 'opp-1', 'gone', true, now))
+        .retired
+    ).toBe(true);
+  });
+
+  it('still refuses an unconfirmed report from a caller with no parked reply', async () => {
+    // Standing is checked first and independently — an unconfirmed report is
+    // narrower, not exempt.
+    const { repo, postUpdateMany } = buildRepo({ parked: [] });
+
+    await expect(
+      repo.markOpportunityTargetGone('org-1', 'opp-1', 'gone', false, now)
+    ).rejects.toBeInstanceOf(NotFoundException);
+    expect(postUpdateMany).not.toHaveBeenCalled();
+  });
+});
+
 describe('EngageRepository.closeUnconfirmedReply', () => {
   it('closes the reply without touching the opportunity', async () => {
     const { repo, oppUpdateMany, postUpdateMany } = buildRepo();

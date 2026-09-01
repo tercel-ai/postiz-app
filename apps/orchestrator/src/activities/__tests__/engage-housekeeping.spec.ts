@@ -110,10 +110,9 @@ describe('EngageHousekeepingActivity — stale queued replies', () => {
     const x = replyCallFor(postUpdateMany, 'x');
     expect(x.where.state).toBe('QUEUE');
     expect(x.data.state).toBe('ERROR');
-    // The lease goes with it — nothing should hold a claim on a post that will
-    // never be handed out again.
+    // The lease token goes with it, but NOT claimedAt — that column is the
+    // platform write clock, pinned by its own case below.
     expect(x.data.releaseId).toBeNull();
-    expect(x.data.claimedAt).toBeNull();
   });
 
   it('reuses the SAME per-platform cutoff as the opportunity sweep', async () => {
@@ -156,6 +155,42 @@ describe('EngageHousekeepingActivity — stale queued replies', () => {
     for (const [args] of postUpdateMany.mock.calls) {
       expect(args.where.engageSentReply?.is).toBeDefined();
     }
+  });
+
+  it('never touches a reply whose send time has not arrived yet', async () => {
+    // THE regression this guards. A user-SCHEDULED engage reply is also a QUEUE
+    // Post with an EngageSentReply, so it satisfies every other predicate here —
+    // `scheduleReply` creates it with `type: 'schedule'`, `source: 'engage'` and
+    // a future publishDate. Without a publishDate floor the sweep flips it to
+    // ERROR before it is ever due, and `claimPostForPublishing` requires
+    // `state: 'QUEUE'`, so it can never be sent afterwards: the user is told it
+    // "waited past the TTL without going out" about a reply that never had a
+    // turn. Auto-queued replies are created with `publishDate: new Date()`, so
+    // the bound costs the sweep nothing.
+    const { activity, postUpdateMany } = build({ x: 3 });
+    const before = Date.now();
+    await activity.runDueMaintenanceJobs();
+    const after = Date.now();
+
+    const bound = replyCallFor(postUpdateMany, 'x').where.publishDate;
+    expect(bound).toBeDefined();
+    expect(bound.lte.getTime()).toBeGreaterThanOrEqual(before);
+    expect(bound.lte.getTime()).toBeLessThanOrEqual(after);
+  });
+
+  it('preserves claimedAt — it is the platform write clock, not just a lease', async () => {
+    // `post.claimedAt` is the only reply-side input to getLastPlatformWriteAt,
+    // which feeds the write floor the auto-reply driver calls never negotiable.
+    // Clearing it here would rewind that clock and let the next poll write to
+    // the same account inside the floor window. `state: 'ERROR'` alone already
+    // stops the row being re-offered, since claimDueEngageReplies requires
+    // `post.state: 'QUEUE'`.
+    const { activity, postUpdateMany } = build({ x: 3 });
+    await activity.runDueMaintenanceJobs();
+
+    const data = replyCallFor(postUpdateMany, 'x').data;
+    expect(data.releaseId).toBeNull();
+    expect('claimedAt' in data).toBe(false);
   });
 
   it('never touches a reply that already went out', async () => {

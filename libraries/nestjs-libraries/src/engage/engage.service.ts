@@ -1001,9 +1001,15 @@ export class EngageService implements OnApplicationBootstrap {
   async markOpportunityTargetGone(
     org: Organization,
     id: string,
-    reason: string
+    reason: string,
+    confirmed: boolean
   ) {
-    return this._engageRepository.markOpportunityTargetGone(org.id, id, reason);
+    return this._engageRepository.markOpportunityTargetGone(
+      org.id,
+      id,
+      reason,
+      confirmed
+    );
   }
 
   /**
@@ -1702,6 +1708,52 @@ export class EngageService implements OnApplicationBootstrap {
       this._storeReplyAuthorInBackground(org.id, sentReplyId, platform, url);
     }
     return result;
+  }
+
+  /**
+   * The other half of publishExtensionReply: the extension posted successfully,
+   * checked seconds later from a logged-out view, and found the platform had
+   * removed it.
+   *
+   * A SEPARATE endpoint rather than a flag on publish-reply, because the two do
+   * opposite things. publish-reply commits: DRAFT→PUBLISHED, claim the
+   * opportunity, charge. This one records that there is nothing to commit —
+   * which is the entire point of checking before committing rather than
+   * correcting afterwards. Neither the claim nor the charge has a reverse, so
+   * the only way not to bill for a reply nobody can read is never to bill for
+   * it.
+   *
+   * The user still spends the post from their period allowance (the Post stays
+   * PUBLISHED, and countPostsFromDay counts it) — it was published. They are
+   * not charged overage for it.
+   */
+  async markExtensionReplyRemoved(
+    org: Organization,
+    sentReplyId: string,
+    reason: string,
+    url?: string | null
+  ) {
+    const ctx = await this._engageRepository.getSentReplyContext(
+      org.id,
+      sentReplyId
+    );
+    if (!ctx) throw new NotFoundException('Sent reply not found');
+
+    // 'removed' (a tombstone was left) and 'gone' (not publicly visible at all)
+    // are the extension's two verdicts. Anything else is stored as 'removed' —
+    // the fact is what matters, and an unrecognised label must not lose it.
+    const verdict = reason === 'gone' ? 'gone' : 'removed';
+
+    this.logger.log(
+      `markExtensionReplyRemoved: ${sentReplyId} (${ctx.platform}) verdict=${verdict}`
+    );
+
+    return this._engageRepository.markSentReplyRemoved(
+      org.id,
+      sentReplyId,
+      verdict,
+      url
+    );
   }
 
   /**

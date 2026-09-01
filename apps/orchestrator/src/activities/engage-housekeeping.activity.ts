@@ -122,6 +122,26 @@ export class EngageHousekeepingActivity {
           // exist (so a plain scheduled POST is never touched by this) and
           // scopes it to the platform in one condition.
           engageSentReply: { is: { opportunity: { platform } } },
+          // Only replies whose send time has ARRIVED. Without this the sweep
+          // reaches a reply a user SCHEDULED for the future: `scheduleReply`
+          // creates it with `type: 'schedule'`, `source: 'engage'` and a future
+          // publishDate, and `createOrUpdatePost` writes `state: 'QUEUE'` — so
+          // it satisfies every other predicate here. Cancelling it would flip it
+          // to ERROR before it was ever due, and `claimPostForPublishing`
+          // requires `state: 'QUEUE'`, so it could never be sent afterwards. The
+          // user would be told it "waited past the TTL without going out" about
+          // a reply that never had its turn.
+          //
+          // This costs the sweep nothing: the auto-queued replies it exists for
+          // are created with `publishDate: new Date()`, so they are always
+          // already due. A scheduled reply is merely spared until its slot
+          // passes — after which it is swept like any other if it still fails.
+          //
+          // The house sweep for the same job on the same table takes the same
+          // position and goes further: `markStaleQueuePostsAsError` measures
+          // `publishDate` and excludes `source: 'engage'` outright, which is
+          // exactly why scheduled engage replies were safe before this job.
+          publishDate: { lte: new Date(now) },
           OR: [
             { createdAt: { lt: cutoff } },
             {
@@ -137,8 +157,10 @@ export class EngageHousekeepingActivity {
             'Expired in queue: this reply waited past the platform’s ' +
             'opportunity TTL without going out, so the conversation it was ' +
             'written for is no longer current. It was not sent.',
+          // `claimedAt` is deliberately preserved — it is the reply-side input
+          // to getLastPlatformWriteAt (the platform write floor), not merely a
+          // lease column. See EngageRepository.markOpportunityTargetGone.
           releaseId: null,
-          claimedAt: null,
         },
       });
       total += count;

@@ -1565,6 +1565,32 @@ model EngageSentReply {
   // EngageOpportunityState.matchedKeywords holds, so the two are comparable.
   matchedKeywords String[] @default([])
 
+  // When the PLATFORM removed this reply after it was posted, verified from a
+  // logged-out view by the extension (utils/liveness/). Null = still standing,
+  // or never checked.
+  //
+  // Deliberately NOT a Post.state value. The four states describe how far OUR
+  // publish got, and this one got all the way — the reply really was submitted
+  // and really did exist. Removal is what the platform did afterwards, which is
+  // a different axis, and folding it into `state` would break things that read
+  // it: ERROR is the precondition `retryPost` checks (so it would offer to
+  // re-send content that was just removed, through the OAuth path no less) and
+  // `changeState(ERROR)` nulls `releaseId`, discarding the very id needed to
+  // investigate. DRAFT is worse — it reads as "not sent yet", inviting a
+  // duplicate.
+  //
+  // A removed reply keeps `Post.state = PUBLISHED` and so keeps consuming its
+  // slot in the period's post allowance (countPostsFromDay counts PUBLISHED):
+  // it WAS published. What it does not do is get charged — publishExtensionReply
+  // is never reached, so `deductIfOverage` never runs.
+  removedAt     DateTime?
+  // Which verdict removed it: 'removed' (the platform left a tombstone in its
+  // place) or 'gone' (not publicly visible at all). Kept apart because only
+  // 'gone' can point at an ACCOUNT-level problem — a run of them across
+  // different communities is what a shadowban looks like, and that calls for
+  // pausing the account rather than down-ranking one community.
+  removedReason String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -1575,6 +1601,9 @@ model EngageSentReply {
   @@index([organizationId])
   @@index([organizationId, opportunityId])
   @@index([organizationId, projectId, createdAt])
+  // Removal-rate reads (per-subreddit rates, shadowban detection) and the
+  // `removedAt: null` filters the metrics/dashboard queries now carry.
+  @@index([organizationId, removedAt])
   // getLastPlatformWriteAt drops the project scope on purpose — the throttle
   // belongs to the platform account, not to one project — so the composite
   // above cannot serve it (projectId is skipped, createdAt cannot be used).

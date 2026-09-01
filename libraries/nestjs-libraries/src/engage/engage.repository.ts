@@ -3042,21 +3042,39 @@ export class EngageRepository {
    *      invisible to the queue counts and to whoever is wondering why a
    *      project's reply budget never drains.
    *
-   * AUTHORISATION, and the reason this is not a plain "set a flag" endpoint:
-   * `EngageOpportunity` is GLOBAL — one row is shared by every org that scanned
-   * the same post — so an unguarded call would let any authenticated caller
-   * retire a post for everyone. The caller must therefore own a reply that is
-   * actually parked against this opportunity; that is what makes "my extension
-   * just tried to post here and the post was gone" a claim it is entitled to
-   * make. No such reply, no write, and the caller is told so.
+   * TWO checks, answering two different questions — conflating them was the
+   * original bug here:
    *
-   * Idempotent: a second report (two projects, one dead post) finds the row
-   * already stamped and returns the same shape without re-writing it.
+   *   WHO may report — the caller must own a reply actually parked against this
+   *     opportunity. `EngageOpportunity` is GLOBAL (one row shared by every org
+   *     that scanned the same post), so without this any authenticated caller
+   *     could speak about any post. No such reply, no write, 404.
+   *
+   *   WHETHER the report may act GLOBALLY — `confirmed`. Owning a parked reply
+   *     establishes standing, not truth. The extension's own detector grades its
+   *     evidence: an HTTP 404/410 is the platform stating the address does not
+   *     resolve, true for every tenant; a text match is our inference, and page
+   *     text cannot separate "deleted for everyone" from "invisible to THIS
+   *     browser session" — a protected account, a private community, an author
+   *     who blocked that one login. `deletedAt` has no un-retire path anywhere
+   *     (verified: three writers touch this table, none clears it, and scan
+   *     re-ingest omits the column), and every opportunity read filters on it,
+   *     so an unconfirmed verdict acted on globally would delete a live post
+   *     from every other tenant's Engage surface permanently.
+   *
+   * So `confirmed: false` closes only the caller's parked replies and leaves the
+   * opportunity alone. That still ends the loop for the reporter — the replies
+   * are closed, and `pickAutoReplyCandidates` will not draft another because it
+   * excludes opportunities this project already has a reply against.
+   *
+   * Idempotent: a second confirmed report (two projects, one dead post) finds
+   * the row already stamped and keeps the ORIGINAL timestamp.
    */
   async markOpportunityTargetGone(
     organizationId: string,
     opportunityId: string,
     reason: string,
+    confirmed: boolean,
     now = new Date()
   ): Promise<{ retired: boolean; repliesClosed: number }> {
     // The entitlement check AND the work list in one query: these are exactly
@@ -3084,24 +3102,46 @@ export class EngageRepository {
     // replies closed against an opportunity that never got stamped would let
     // the next poll draft a fresh one for the same dead post.
     return this._tx.model.$transaction(async (tx) => {
-      // `deletedAt: null` in the where, not a blind update: a row another org
-      // already retired keeps its ORIGINAL timestamp, which is when the post
-      // was first observed gone rather than when the last report arrived.
-      await tx.engageOpportunity.updateMany({
-        where: { id: opportunityId, deletedAt: null },
-        data: { deletedAt: now },
-      });
-      // Scoped to THIS org's replies. Another org's queued reply to the same
-      // dead post is closed by its own report — closing it here would write
-      // into an organization that never asked us to.
+      // The global write, and ONLY on platform-confirmed evidence — see the
+      // doc comment. `deletedAt: null` in the where, not a blind update: a row
+      // another org already retired keeps its ORIGINAL timestamp, which is when
+      // the post was first observed gone rather than when the last report came.
+      if (confirmed) {
+        await tx.engageOpportunity.updateMany({
+          where: { id: opportunityId, deletedAt: null },
+          data: { deletedAt: now },
+        });
+      }
+      // Scoped to THIS org's replies — writing into an organization that never
+      // asked us to is not ours to do.
       //
-      // The lease is cleared alongside the state so nothing is left holding a
-      // claim on a post that will never be handed out again.
+      // NOTE the consequence, because it is not self-healing: once `deletedAt`
+      // is stamped, `claimDueEngageReplies` filters the opportunity out for
+      // EVERY org, so another org's parked reply is never handed out again and
+      // that org can never make the report that would close it. Its row is left
+      // QUEUE until the housekeeping shelf-life sweep closes it
+      // (engage-housekeeping.activity.ts), which bounds the lifetime but
+      // attributes the cause as "expired in queue".
+      //
+      // `releaseId` is cleared so no lease token is left pointing at a post that
+      // will never be handed out again. `claimedAt` is deliberately NOT cleared:
+      // it is not only a lease column. It is the sole reply-side input to
+      // getLastPlatformWriteAt — "the moment the extension took the reply to
+      // post it, i.e. when the account is actually touched" — which feeds the
+      // platform write floor the auto-reply driver calls never negotiable.
+      // Erasing it would rewind that clock to an older hand-out (or to null),
+      // letting the next poll write to the same account inside the floor window,
+      // which is the burst the floor exists to prevent. Nothing is left holding
+      // the row either way: `state: 'ERROR'` already excludes it from
+      // claimDueEngageReplies, whose where-clause requires `post.state: 'QUEUE'`.
       const closed = await tx.post.updateMany({
         where: { id: { in: parked.map((p) => p.postId) }, state: 'QUEUE' },
-        data: { state: 'ERROR', error, releaseId: null, claimedAt: null },
+        data: { state: 'ERROR', error, releaseId: null },
       });
-      return { retired: true, repliesClosed: closed.count };
+      // `retired` reports what actually happened, not what was asked for: an
+      // unconfirmed report closes replies without retiring anything, and a
+      // caller told otherwise would have no way to tell the two apart.
+      return { retired: confirmed, repliesClosed: closed.count };
     });
   }
 
@@ -3152,7 +3192,12 @@ export class EngageRepository {
       // PUBLISHED between the extension's attempt and this call went out for
       // real, and marking it ERROR would contradict a confirmed send.
       where: { id: reply.postId, state: 'QUEUE' },
-      data: { state: 'ERROR', error, releaseId: null, claimedAt: null },
+      // `claimedAt` is preserved — see markOpportunityTargetGone for why. It
+      // matters most HERE: this method's own premise is that the send FIRED, so
+      // this row's claimedAt is the most recent moment the platform account was
+      // actually written to. Clearing it would tell the pacing floor that the
+      // account is idle seconds after a comment that probably landed.
+      data: { state: 'ERROR', error, releaseId: null },
     });
     return { closed: closed.count > 0 };
   }
@@ -5050,13 +5095,27 @@ export class EngageRepository {
       replyRows,
       bestReplyRows,
     ] = await Promise.all([
+        // Response-rate DENOMINATOR. Removed replies are excluded, and the
+        // reason is structural rather than cosmetic: `authorReplied` is only
+        // ever set by the metrics sync, which now skips removed replies — so a
+        // removed reply can never enter the numerator, no matter what happens.
+        // Left in the denominator it would drag response rate down by exactly
+        // the removal rate, and the panel would end up measuring how strict the
+        // communities are instead of how good the replies are. Nobody can reply
+        // to a comment they cannot see.
         this._sentReply.model.engageSentReply.count({
-          where: { organizationId, post: windowedPostFilter, ...platformFilter },
+          where: {
+            organizationId,
+            post: windowedPostFilter,
+            removedAt: null,
+            ...platformFilter,
+          },
         }),
         this._sentReply.model.engageSentReply.count({
         where: {
           organizationId,
           post: windowedPostFilter,
+          removedAt: null,
           authorReplied: true,
           ...platformFilter,
         },
@@ -5852,6 +5911,73 @@ export class EngageRepository {
   }
 
   /**
+   * Record that the platform removed a reply we posted, and stop the
+   * opportunity from being handed out again.
+   *
+   * Three writes, and each is deliberately NOT the obvious alternative:
+   *
+   *   Post.state → PUBLISHED, keeping releaseURL. The reply WAS published; the
+   *     platform removed it afterwards. Not ERROR — that is `retryPost`'s
+   *     precondition, so it would offer to re-send content that was just
+   *     removed, and `changeState(ERROR)` nulls releaseId, discarding the id
+   *     needed to investigate. Not DRAFT either: that reads as "never sent" and
+   *     invites a duplicate.
+   *
+   *   removedAt / removedReason on the reply. What the platform did afterwards
+   *     is an engage-domain fact, not a state of our publish.
+   *
+   *   Opportunity → DISMISSED. Not left NEW: an opportunity is one specific
+   *     post in one specific community, so re-offering it means posting into
+   *     the same rule that just removed us — another write and another exposure
+   *     of the account for an outcome already observed. Not REPLIED: that
+   *     asserts a reply is standing there, which is the belief this whole path
+   *     exists to correct.
+   *
+   * Nothing is charged here, because publishExtensionReply is never reached.
+   */
+  async markSentReplyRemoved(
+    organizationId: string,
+    sentReplyId: string,
+    reason: string,
+    url?: string | null
+  ) {
+    const reply = await this._sentReply.model.engageSentReply.findFirst({
+      where: { id: sentReplyId, organizationId },
+      select: { id: true, postId: true, opportunityId: true, projectId: true },
+    });
+    if (!reply) throw new NotFoundException('Sent reply not found');
+
+    await this._sentReply.model.engageSentReply.update({
+      where: { id: reply.id },
+      data: { removedAt: new Date(), removedReason: reason },
+    });
+
+    await this._post.model.post.update({
+      where: { id: reply.postId },
+      data: {
+        state: 'PUBLISHED',
+        // Only when the extension captured one — never overwrite a stored URL
+        // with an empty string.
+        ...(url ? { releaseURL: url } : {}),
+      },
+    });
+
+    // Best-effort, and last: the removal is recorded either way. updateMany
+    // rather than update so a state row that has already moved on (a concurrent
+    // claim, an expiry) is a no-op instead of a throw.
+    await this._oppState.model.engageOpportunityState.updateMany({
+      where: {
+        organizationId,
+        projectId: reply.projectId ?? null,
+        opportunityId: reply.opportunityId,
+      },
+      data: { status: 'DISMISSED' },
+    });
+
+    return { id: reply.id, removed: true, reason };
+  }
+
+  /**
    * Patch ONLY settings.engageAuthor for a sent reply's post — the
    * display-only author/avatar enrichment the confirm + backfill paths resolve
    * out of band (the URL is saved synchronously; this fills the author once the
@@ -6011,6 +6137,10 @@ export class EngageRepository {
     return this._sentReply.model.engageSentReply.findMany({
       where: {
         ...(orgId ? { organizationId: orgId } : {}),
+        // Removed replies keep state=PUBLISHED and impressions=null forever, so
+        // without this they are permanent residents of the "pending metrics"
+        // set: re-fetched on every resync, never resolvable.
+        removedAt: null,
         post: {
           source: 'engage',
           state: 'PUBLISHED',
@@ -6058,6 +6188,9 @@ export class EngageRepository {
     return this._sentReply.model.engageSentReply.findMany({
       where: {
         ...(orgId ? { organizationId: orgId } : {}),
+        // Same reason as findPendingEngageMetrics: a removed reply has no
+        // counters to fetch, so re-polling it daily only spends platform calls.
+        removedAt: null,
         post: {
           source: 'engage',
           state: 'PUBLISHED',
@@ -6096,6 +6229,12 @@ export class EngageRepository {
       where: {
         organizationId,
         postId: { in: postIds },
+        // A removed reply keeps state=PUBLISHED (it WAS published), so it would
+        // otherwise stay a metrics candidate forever: every refresh spends a
+        // platform call fetching counters for a comment nobody can read, and
+        // gets nothing back. Skipped here rather than deeper down so it never
+        // consumes the per-platform hourly budget either.
+        removedAt: null,
         post: {
           source: 'engage',
           state: 'PUBLISHED',

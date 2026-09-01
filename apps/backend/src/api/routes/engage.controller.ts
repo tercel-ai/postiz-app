@@ -70,6 +70,7 @@ import {
   ScoreStatsDto,
   SearchChannelsDto,
   PublishExtensionReplyDto,
+  MarkReplyRemovedDto,
   SendReplyDto,
   SubmitManualReplyUrlDto,
   UpdateKeywordDto,
@@ -78,6 +79,20 @@ import {
   UpdateTrackedAccountDto,
   UpdateScheduledReplyDto,
 } from '@gitroom/nestjs-libraries/engage/dtos/engage.dto';
+
+/**
+ * Flatten caller-supplied text before it reaches a single-line log statement.
+ *
+ * `reason` and `platform` come off the wire and are validated for type and
+ * length only — nothing strips CR/LF. Spliced raw into these log lines, a value
+ * containing a newline forges a second line in the shared backend log, and
+ * these two lines exist precisely to be a reliable record of what each org
+ * reported about a shared row.
+ */
+function logSafe(value: string | undefined): string {
+  if (!value) return '?';
+  return value.replace(/\s+/g, ' ').trim() || '?';
+}
 
 // Soft target the model aims for vs. the hard ceiling we actually reject above
 @ApiTags('Engage')
@@ -644,12 +659,18 @@ export class EngageController {
    */
   @ApiOperation({
     summary:
-      'Report that an opportunity’s post no longer exists: retires it (deletedAt) and closes the caller’s queued replies to it',
+      'Report that an opportunity’s post no longer exists. `confirmed: true` (platform answered 404/410) retires the shared opportunity and closes the caller’s queued replies; anything else closes only the caller’s replies.',
   })
   @ApiResponse({
     status: 404,
     description: 'No queued reply of this org is waiting on that opportunity',
   })
+  // 30/hour. The unattended driver hands out at most one reply per (project,
+  // platform) per poll, so a healthy extension reports a handful a day — while
+  // the confirmed branch writes a globally-shared row no code path can undo.
+  // The neighbouring /generate-post carries a throttle for a smaller blast
+  // radius (its own org's spend); this one had none.
+  @Throttle({ default: { limit: 30, ttl: 3_600_000 } })
   @Post('/opportunities/:id/target-gone')
   reportTargetGone(
     @GetOrgFromRequest() org: Organization,
@@ -658,12 +679,17 @@ export class EngageController {
   ) {
     this.logger.log(
       `[engage] target gone reported org=${org.id} opportunity=${id} ` +
-        `platform=${body.platform ?? '?'} reason=${body.reason ?? '?'}`
+        `platform=${logSafe(body.platform)} confirmed=${body.confirmed === true} ` +
+        `reason=${logSafe(body.reason)}`
     );
     return this._engageService.markOpportunityTargetGone(
       org,
       id,
-      body.reason || 'the post could not be found on the platform'
+      body.reason || 'the post could not be found on the platform',
+      // Absent means UNCONFIRMED: an older extension sends no flag, and the safe
+      // reading of silence is to close only this org's replies rather than
+      // retire a row every tenant shares.
+      body.confirmed === true
     );
   }
 
@@ -1249,6 +1275,25 @@ export class EngageController {
     );
   }
 
+  @ApiOperation({
+    summary:
+      'Extension removal callback: the reply posted successfully and the platform removed it seconds later (verified from a logged-out view). Records the removal, keeps the Post PUBLISHED, dismisses the opportunity — and charges nothing, because publish-reply is never reached.',
+  })
+  @ApiResponse({ status: 404, description: 'Sent reply not found' })
+  @Patch('/sent/:id/removed')
+  markExtensionReplyRemoved(
+    @GetOrgFromRequest() org: Organization,
+    @Param('id') id: string,
+    @Body() body: MarkReplyRemovedDto
+  ) {
+    return this._engageService.markExtensionReplyRemoved(
+      org,
+      id,
+      body.reason,
+      body.url
+    );
+  }
+
   /**
    * The extension reporting a send that FIRED but was never confirmed — dev.to's
    * AJAX comment that never rendered, a Reddit comment that never joined the
@@ -1278,7 +1323,7 @@ export class EngageController {
   ) {
     this.logger.warn(
       `[engage] unconfirmed send reported org=${org.id} sentReply=${id} ` +
-        `platform=${body.platform ?? '?'} reason=${body.reason ?? '?'}`
+        `platform=${logSafe(body.platform)} reason=${logSafe(body.reason)}`
     );
     return this._engageService.closeUnconfirmedReply(
       org,
