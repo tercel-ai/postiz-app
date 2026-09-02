@@ -54,6 +54,10 @@ function buildService(deps: {
     ...deps.posts,
   };
   const aisee = {
+    // Default: the org can pay. The pre-flight gate runs before generation, so
+    // without this every existing case would be refused before reaching the
+    // behaviour it is actually asserting.
+    hasCredits: vi.fn(async () => true),
     billCollectedUsages: vi.fn(async () => ({})),
     ...deps.aisee,
   };
@@ -812,5 +816,49 @@ describe('EngageService.generateReferencePost', () => {
       const [dto] = posts.mapTypeToPost.mock.calls[0];
       expect(dto.posts[0].value[0].image).toEqual([]);
     });
+  });
+});
+
+describe('EngageService.generateReferencePost — credit gate', () => {
+
+  it('refuses before generating when the balance is exhausted', async () => {
+    const { service, referencePost, posts, aisee } = buildService({
+      aisee: { hasCredits: vi.fn(async () => false) },
+    });
+
+    await expect(
+      service.generateReferencePost(ORG, 'user1', 'opp1', GEN_DTO)
+    ).rejects.toMatchObject({
+      response: { code: 'engage_insufficient_credits' },
+    });
+
+    // The whole point of a PRE-flight gate: a refused call runs no model and
+    // persists nothing, so there is no post to bill for afterwards either.
+    expect(referencePost.generate).not.toHaveBeenCalled();
+    expect(posts.createPost).not.toHaveBeenCalled();
+    expect(aisee.billCollectedUsages).not.toHaveBeenCalled();
+  });
+
+  it('generates and bills as before when the balance is positive', async () => {
+    const { service, referencePost, aisee } = buildService();
+    const result = await service.generateReferencePost(
+      ORG,
+      'user1',
+      'opp1',
+      GEN_DTO
+    );
+    expect(result.postId).toBe('post1');
+    expect(referencePost.generate).toHaveBeenCalled();
+    expect(aisee.billCollectedUsages).toHaveBeenCalled();
+  });
+
+  it('does not gate a self-hosted install with billing switched off', async () => {
+    // hasCredits() returns true when Aisee is disabled, so the gate is a no-op
+    // there rather than blocking every generation on an install with no billing.
+    const { service, referencePost } = buildService({
+      aisee: { hasCredits: vi.fn(async () => true) },
+    });
+    await service.generateReferencePost(ORG, 'user1', 'opp1', GEN_DTO);
+    expect(referencePost.generate).toHaveBeenCalled();
   });
 });

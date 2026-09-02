@@ -258,3 +258,35 @@ describe('EngageController.generateReferencePost', () => {
     expect(frames.join('')).toBe('');
   });
 });
+
+describe('EngageController.generateReferencePost — gate frames', () => {
+  it('surfaces a credit block as its own typed frame, not generation_failed', async () => {
+    // The client branches on `error`; collapsing a gate block into the generic
+    // failure code would leave it unable to prompt a top-up.
+    const { ForbiddenException } = await import('@nestjs/common');
+    const { controller } = build({
+      generateReferencePost: vi.fn(async () => {
+        throw new ForbiddenException({
+          code: 'engage_insufficient_credits',
+          message: 'Not enough credits to generate a post. Top up to continue.',
+        });
+      }),
+    });
+    const { res, frames } = makeRes();
+    const { req } = makeReq();
+
+    await controller.generateReferencePost(
+      ORG,
+      USER,
+      'opp1',
+      BODY,
+      req as any,
+      res as any
+    );
+
+    const payload = JSON.parse(frames[0].replace(/^data: /, '').trim());
+    expect(payload.error).toBe('engage_insufficient_credits');
+    expect(payload.detail.message).toContain('Top up');
+    expect(frames[frames.length - 1]).toContain('[DONE]');
+  });
+});

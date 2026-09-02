@@ -1466,7 +1466,17 @@ export class PostsService {
             await this.changeState(posts[0].id, 'ERROR', `Workflow failed: ${(err as Error)?.message || err}`);
           }
         }
-      } else {
+      } else if (body.type !== 'draft') {
+        // A DRAFT is explicitly NOT scheduled — createOrUpdatePost writes it as
+        // state=DRAFT, and nothing should try to publish it until the user
+        // schedules it (which comes back through here as type='schedule').
+        // Starting a workflow for one was actively destructive in both
+        // directions: a draft with a bound account had a real publish workflow
+        // started against it, and an account-less one (reference-post drafts,
+        // operation-plan drafts for unconnected platforms) hit startWorkflow's
+        // no-integration guard, which flipped state DRAFT → ERROR moments after
+        // creation. Because this call is fire-and-forget, the caller saw a
+        // perfectly successful create and only found the ERROR row later.
         this.startWorkflow(
           getSocialTaskQueue(post.providerIdentifier || post.settings.__type),
           posts[0].id,

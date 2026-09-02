@@ -934,7 +934,7 @@ export class EngageController {
   @ApiResponse({
     status: 200,
     description:
-      'SSE stream ending with a data frame carrying {text, postId, parts, thread, threadSkippedReason?} then [DONE]. `parts` is one entry per post in the chain (a single-element array unless a thread was produced) and `thread` reports whether one actually was — a thread requested on a platform that cannot chain one (medium/quora/devto) degrades to a single post with threadSkippedReason=platform_unsupported. Failures (opportunity not found, generation failed, too similar to the reference) end the stream with a typed error frame instead; the untyped `generation_failed` frame also carries a diagnostic `reason` string.',
+      'SSE stream ending with a data frame carrying {text, postId, parts, thread, threadSkippedReason?} then [DONE]. `parts` is one entry per post in the chain (a single-element array unless a thread was produced) and `thread` reports whether one actually was — a thread requested on a platform that cannot chain one (medium/quora/devto) degrades to a single post with threadSkippedReason=platform_unsupported. Failures (opportunity not found, generation failed, too similar to the reference, engage_insufficient_credits) end the stream with a typed error frame instead; the untyped `generation_failed` frame also carries a diagnostic `reason` string.',
   })
   @ApiResponse({ status: 404, description: 'Opportunity not found' })
   @ApiResponse({ status: 429, description: 'Rate limit exceeded (20/hour)' })
@@ -1002,6 +1002,27 @@ export class EngageController {
         if (!res.writableEnded) {
           res.write(
             `data: ${JSON.stringify({ error: 'too_similar_to_reference' })}\n\n`
+          );
+          res.write(`data: [DONE]\n\n`);
+        }
+        if (!res.writableEnded) res.end();
+        return;
+      }
+      // Gate blocks (insufficient credits, …) carry their own code so the UI can
+      // prompt the right next step instead of showing a generic failure. Same
+      // frame shape as /draft's, so a client handles both paths with one branch.
+      if (err instanceof ForbiddenException) {
+        if (!res.writableEnded) {
+          const response = err.getResponse();
+          const payload =
+            typeof response === 'object' && response !== null
+              ? (response as Record<string, unknown>)
+              : { message: response };
+          res.write(
+            `data: ${JSON.stringify({
+              error: (payload.code as string) ?? 'forbidden',
+              detail: payload,
+            })}\n\n`
           );
           res.write(`data: [DONE]\n\n`);
         }

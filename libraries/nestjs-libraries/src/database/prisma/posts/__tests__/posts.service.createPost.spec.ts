@@ -349,6 +349,59 @@ describe('PostsService.createPost — overage billing integration', () => {
 // createPost directly cannot see it, which is exactly how an accountless-save
 // regression can hide behind a green suite — so exercise the REAL mapTypeToPost
 // (its own ValidationPipe included) here.
+// A DRAFT is not scheduled for anything. Starting a publish workflow for one
+// was destructive both ways: with a bound account a real publish workflow ran
+// against an unfinished post, and without one startWorkflow's no-integration
+// guard flipped state DRAFT → ERROR seconds after creation — silently, because
+// the call is fire-and-forget, so the create itself still looked successful.
+describe('PostsService.createPost — drafts are never handed to a publish workflow', () => {
+  let mocks: ReturnType<typeof createMocks>;
+  let service: PostsService;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks = createMocks();
+    service = createService(mocks);
+  });
+
+  it('does not start a workflow for a draft', async () => {
+    await service.createPost('org-1', makeBody({ type: 'draft' }), 'user-1');
+
+    expect((service as any).startWorkflow).not.toHaveBeenCalled();
+  });
+
+  it('does not start a workflow for an account-less draft either', async () => {
+    await service.createPost(
+      'org-1',
+      makeBody({
+        type: 'draft',
+        posts: [
+          {
+            providerIdentifier: 'reddit',
+            settings: { __type: 'reddit' },
+            value: [{ content: 'an original post', image: [] }],
+          },
+        ],
+      } as any),
+      'user-1'
+    );
+
+    expect((service as any).startWorkflow).not.toHaveBeenCalled();
+  });
+
+  it('still starts one for a scheduled post', async () => {
+    await service.createPost('org-1', makeBody({ type: 'schedule' }), 'user-1');
+
+    expect((service as any).startWorkflow).toHaveBeenCalledTimes(1);
+  });
+
+  it('still starts one for a post-now post', async () => {
+    await service.createPost('org-1', makeBody({ type: 'now' }), 'user-1');
+
+    expect((service as any).startWorkflow).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('PostsService.mapTypeToPost — accountless posts', () => {
   let mocks: ReturnType<typeof createMocks>;
   let service: PostsService;

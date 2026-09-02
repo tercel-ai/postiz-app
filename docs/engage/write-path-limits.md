@@ -1,6 +1,7 @@
 # Write-Path Limits — what bounds how much a subscriber can push in
 
-**Status**: ingest ceiling implemented; two gaps open (see §5).
+**Status**: ingest ceiling, shared throttler storage and the reference-post
+credit gate implemented; two gaps open (see §5).
 
 Every subscriber-facing write path in Postiz is one of three things: *governed*
 (a real server-side bound), *metered* (a charge that blocks when the balance runs
@@ -26,7 +27,7 @@ way engage data enters the system.
 | `POST /engage/opportunities/:id/draft` | yes | no (streamed) | **yes, up front** | 20/h/user | credit balance |
 | engage reply send | no | yes | reply credits | — | monthly cap, per-poll cap, min gap, account daily cap, platform pacing |
 | `POST /engage/opportunities/:id/save-draft` | no | upsert, 1/opportunity | no | no | opportunity count (natural) |
-| `POST /engage/opportunities/:id/generate-post` | **yes** | yes | **no** | 20/h/user | ⚠️ throttle only |
+| `POST /engage/opportunities/:id/generate-post` | yes | yes | yes, **post-hoc on actual tokens** + pre-flight balance gate | 20/h/user | credit balance |
 | `POST /posts/` type `schedule`/`now` | no | yes | overage, **post-hoc** | no | ⚠️ subscription check only |
 | `POST /posts/` type `draft` | no | yes | **no** | no | ⚠️ **none** |
 | `POST /posts/metrics/ingest` | no | updates only | no | no | array cap (100) |
@@ -163,19 +164,43 @@ The bounds it needs are a **row cap** (per org and per project, mirroring
 `keywordsMax` / `keywordsPerProjectMax`), a route throttle, and an array cap.
 *Open decision: what the draft row cap should be.*
 
-### 5.2 `generate-post` — LLM cost with no meter
+### 5.2 `generate-post` — free at a zero balance — **DONE**
 
-`EngageReferencePostService` calls an LLM and persists a DRAFT `Post`, and
-charges nothing; only the 20/h/user throttle bounds it. It is structurally the
-same operation as a reply draft, which *is* metered — the inconsistency is the
-gap. It should adopt `reserveReplyGeneration`'s shape: check balance, reserve,
-generate, settle or release.
+This path was always billed — `_billReferencePostUsages` → `billCollectedUsages`
+charges actual token usage, and it charges even for a failed generation whose
+attempts consumed tokens. What it lacked was a gate BEFORE the work:
+`billCollectedUsages` does no balance check by contract (the work is already
+done) and its failure is caught and logged, so an org at zero could generate
+indefinitely — every call ran the model, persisted a draft, and dropped its
+charge into a logged branch.
 
-### 5.3 Throttling is per-replica
+`EngageService.generateReferencePost` now asserts a positive balance before
+generating, mirroring `reserveReplyGeneration`'s first step, and the controller
+surfaces the block as its own SSE frame (`engage_insufficient_credits`) rather
+than the generic `generation_failed`.
 
-`ThrottlerModule.forRoot` uses in-memory storage, so every `@Throttle` on this
-list — existing and future — multiplies by the replica count. This has to be
-moved to Redis storage **before** any new throttle is relied on.
+Unlike a reply it asserts only that the balance is **positive**, not that it
+covers the bill: the cost is per-token and a similarity retry can multiply it, so
+it is not knowable up front. That closes "free forever at zero" without
+pretending to price the call. `hasCredits()` returns true when billing is
+disabled, so a self-hosted install is unaffected.
+
+### 5.3 Throttling is per-replica — **DONE**
+
+`ThrottlerModule` now takes a Redis-backed `ThrottlerStorage`
+(`RedisThrottlerStorage`, `libraries/nestjs-libraries/src/throttler/`), so every
+`@Throttle` counts once per org/user rather than once per replica. Before this,
+a route documented as "20 per user per hour" allowed 20 × however many pods were
+running, and the real number moved whenever the deployment scaled.
+
+- One Lua round trip counts the hit and decides the block, so N replicas cannot
+  each read the same under-limit count and all admit.
+- **Fails open** on a Redis outage (logged at `error`): the guard throws only on
+  `isBlocked`, so an unblocked zero-hit record admits the request. An hour of
+  unthrottled traffic is recoverable; 500-ing every throttled route is not.
+- `createThrottlerStorage()` returns `undefined` without `REDIS_URL`, which is
+  meaningful — the package's provider then falls back to its in-memory default,
+  correct for a single-process self-hosted install with nothing to share.
 
 ### 5.4 Ingest lease is not bound to its claimer
 

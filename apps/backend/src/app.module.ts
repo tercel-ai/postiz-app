@@ -10,6 +10,7 @@ import { PublicApiModule } from '@gitroom/backend/public-api/public.api.module';
 import { AdminApiModule } from '@gitroom/backend/admin-api/admin.api.module';
 import { ThrottlerBehindProxyGuard } from '@gitroom/nestjs-libraries/throttler/throttler.provider';
 import { ThrottlerModule } from '@nestjs/throttler';
+import { createThrottlerStorage } from '@gitroom/nestjs-libraries/throttler/redis-throttler.storage';
 import { AgentModule } from '@gitroom/nestjs-libraries/agent/agent.module';
 import { ThirdPartyModule } from '@gitroom/nestjs-libraries/3rdparties/thirdparty.module';
 import { VideoModule } from '@gitroom/nestjs-libraries/videos/video.module';
@@ -41,12 +42,20 @@ import { AutomationModule } from '@gitroom/backend/automation/automation.module'
     getTemporalModule(false),
     TemporalRegisterMissingSearchAttributesModule,
     InfiniteWorkflowRegisterModule,
-    ThrottlerModule.forRoot([
-      {
-        ttl: 3600000,
-        limit: process.env.API_LIMIT ? Number(process.env.API_LIMIT) : 30,
-      },
-    ]),
+    ThrottlerModule.forRoot({
+      throttlers: [
+        {
+          ttl: 3600000,
+          limit: process.env.API_LIMIT ? Number(process.env.API_LIMIT) : 30,
+        },
+      ],
+      // Object form (not the array shorthand) purely so `storage` can be passed.
+      // Without it every @Throttle counts in a per-process Map, so each limit
+      // multiplies by the replica count and moves whenever the deployment
+      // scales. Falls back to that in-memory default when REDIS_URL is unset —
+      // a single-process install has nothing to share.
+      storage: createThrottlerStorage(),
+    }),
   ],
   controllers: [],
   providers: [

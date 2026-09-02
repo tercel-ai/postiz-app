@@ -1328,6 +1328,27 @@ export class EngageService implements OnApplicationBootstrap {
       );
     }
 
+    // Pre-flight balance gate, mirroring reserveReplyGeneration's first step.
+    //
+    // This generation IS billed, but only afterwards and on ACTUAL token usage
+    // (_billReferencePostUsages → billCollectedUsages, which by contract does no
+    // balance check because the work is already done). Without a check up front,
+    // an org at zero could generate indefinitely: every call would run the model,
+    // persist a draft, then fail its charge into a caught-and-logged branch.
+    //
+    // Unlike a reply, the cost is not knowable before the model runs — it is
+    // per-token, and a similarity retry can multiply it — so this asserts only
+    // that the balance is positive rather than that it covers the bill. That
+    // closes "free forever at zero" without pretending to price the call.
+    // hasCredits() returns true when billing is disabled (self-hosted).
+    if (this._aiseeCredit && !(await this._aiseeCredit.hasCredits(org.id))) {
+      throw new ForbiddenException({
+        code: 'engage_insufficient_credits',
+        message:
+          'Not enough credits to generate a post. Top up to continue.',
+      });
+    }
+
     let text: string;
     let parts: string[];
     // Held, NOT billed here. A generation that succeeds and then fails to
