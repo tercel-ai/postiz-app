@@ -1286,6 +1286,15 @@ export class EngageController {
     @Param('id') id: string,
     @Body() body: MarkReplyRemovedDto
   ) {
+    // `evidence` is diagnostic-only and not worth a stored column (it exists
+    // to explain a WRONG verdict after the fact, not to be queried) — so it is
+    // logged here, at the boundary, the same way target-gone's `reason` is
+    // above, rather than threaded through the service/repository for a field
+    // nothing downstream needs.
+    this.logger.log(
+      `[engage] reply removed reported org=${org.id} sentReplyId=${id} ` +
+        `reason=${logSafe(body.reason)} evidence=${logSafe(body.evidence)}`
+    );
     return this._engageService.markExtensionReplyRemoved(
       org,
       id,

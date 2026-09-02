@@ -34,6 +34,7 @@ import { ShortLinkService } from '@gitroom/nestjs-libraries/short-linking/short.
 import { CreateTagDto } from '@gitroom/nestjs-libraries/dtos/posts/create.tag.dto';
 import { CreatePostDto } from '@gitroom/nestjs-libraries/dtos/posts/create.post.dto';
 import { MarkExtensionPublishedDto } from '@gitroom/nestjs-libraries/dtos/posts/mark-extension-published.dto';
+import { MarkExtensionPostRemovedDto } from '@gitroom/nestjs-libraries/dtos/posts/mark-extension-post-removed.dto';
 import { MarkExtensionPublishFailedDto } from '@gitroom/nestjs-libraries/dtos/posts/mark-extension-publish-failed.dto';
 import { SchedulePostsDto } from '@gitroom/nestjs-libraries/dtos/posts/schedule-posts.dto';
 import {
@@ -469,6 +470,29 @@ export class PostsController {
       body.releaseURL,
       body.releaseId,
       body.segments
+    );
+  }
+
+  /**
+   * Extension removal callback: the post published successfully and the
+   * platform removed it seconds later, verified by the extension from a
+   * logged-out view (currently Reddit only). Records the removal and keeps the
+   * Post PUBLISHED — charging/claiming has no equivalent here (a Post has no
+   * opportunity), so unlike engage's identical-shaped callback this one has
+   * nothing to withhold. Org-scoped.
+   */
+  @Patch('/:id/extension-removed')
+  markExtensionPostRemoved(
+    @GetOrgFromRequest() org: Organization,
+    @Param('id') id: string,
+    @Body() body: MarkExtensionPostRemovedDto
+  ) {
+    return this._postsService.markExtensionPostRemoved(
+      org.id,
+      id,
+      body.reason,
+      body.releaseURL,
+      body.evidence
     );
   }
 

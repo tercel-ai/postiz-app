@@ -352,6 +352,48 @@ export class PostsService {
   }
 
   /**
+   * Extension removal callback: the post published successfully and the
+   * platform removed it seconds later, verified by the extension from a
+   * logged-out view (utils/liveness/ — currently Reddit only). Records the
+   * removal; `state` is left exactly where markPublishedFromExtension put it
+   * (PUBLISHED) — see markPostRemoved's own comment for why.
+   *
+   * Called AFTER a successful markPublishedFromExtension, never instead of it:
+   * withholding the commit here (the way the engage-reply side does) would
+   * leave the row in QUEUE, which the publish-due poll re-offers every round —
+   * risking a duplicate re-publish that the reply side has no equivalent risk
+   * for (a DRAFT engage reply is not polled for re-send the same way). So the
+   * order is reversed from the reply side on purpose: commit first, THEN
+   * record what happened to it.
+   */
+  async markExtensionPostRemoved(
+    orgId: string,
+    id: string,
+    reason: string,
+    releaseURL?: string | null,
+    evidence?: string
+  ): Promise<{ ok: boolean; reason?: string }> {
+    const post = await this._postRepository.getPostById(id, orgId);
+    if (!post) return { ok: false, reason: 'not-found' };
+    // 'removed' (a tombstone was left) and 'gone' (not publicly visible at
+    // all) are the extension's two verdicts. Defence in depth, matching
+    // engage's markExtensionReplyRemoved: the DTO's @IsIn already refuses
+    // anything else at the HTTP boundary, but that is not trusted as the only
+    // line of defence — an unrecognised label must still resolve to the fact
+    // that matters (the platform removed it), not to garbage in
+    // removedReason.
+    const verdict = reason === 'gone' ? 'gone' : 'removed';
+    // evidence is diagnostic-only (explains a WRONG verdict after the fact) and
+    // not worth a stored column nothing else queries — logged here instead,
+    // same call this makes for engage's identical field.
+    this.logger.log(
+      `markExtensionPostRemoved: postId=${id} reason=${verdict} evidence=${(evidence || '?').replace(/\s+/g, ' ').trim()}`
+    );
+    await this._postRepository.markPostRemoved(id, verdict, releaseURL);
+    return { ok: true };
+  }
+
+  /**
    * Extension publish-FAILED callback: the in-browser send settled as an error
    * (platform rejected it, wrong account, or the send could not be verified),
    * so flip the row QUEUE → ERROR with the reason. Without this the row sat in

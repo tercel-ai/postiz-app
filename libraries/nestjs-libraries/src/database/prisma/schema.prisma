@@ -546,6 +546,21 @@ model Post {
   trafficScore               Float?
   analytics                  Json?
   lastMetricsFetchAt         DateTime?
+  // When the PLATFORM removed this post after the extension published it,
+  // verified from a logged-out view (extension utils/liveness/) — the
+  // general, source-agnostic sibling of EngageSentReply.removedAt/
+  // removedReason for engage replies. A Post has no opportunity to dismiss and
+  // often no EngageSentReply row at all (operation-plan / calendar posts are
+  // source='calendar', never engage), so this cannot live there; it has to be
+  // on Post itself to cover every extension-published platform post,
+  // regardless of source.
+  //
+  // Unlike the reply side, `state` stays PUBLISHED and is left untouched even
+  // if this Post already went through the ERROR->QUEUE retry path once before:
+  // it is easier to reason about "PUBLISHED means it was sent; removedAt means
+  // what happened after" as one invariant than to special-case retried rows.
+  removedAt                  DateTime?
+  removedReason              String?
   // Operation-plan / campaign attribution (aisee-live-geo-growth-plan.md
   // §5). Only two real columns are added:
   //   projectId       — the project-scoping filter (also used by manually-created

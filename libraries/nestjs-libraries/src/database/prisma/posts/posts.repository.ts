@@ -1711,6 +1711,33 @@ export class PostsRepository {
     };
   }
 
+  /**
+   * Record that the platform removed a Post the extension had just published
+   * — the general, source-agnostic sibling of EngageSentReply's
+   * markSentReplyRemoved (which covers only engage replies). `state` is left
+   * PUBLISHED: the post really was published, and this is a fact about what
+   * happened afterwards, not about our own publish attempt — see the
+   * removedAt/removedReason comment on the Post model for why ERROR (opens
+   * retryPost, nulls releaseId) and DRAFT (reads as unsent, invites a
+   * duplicate) are each wrong here for the same reasons they are on the
+   * EngageSentReply side.
+   *
+   * `where: { id }` only — no organizationId — matching changeState just below:
+   * callers are expected to have already org-scoped the read that led here
+   * (posts.service.ts's markExtensionPostRemoved does, via getPostById(id,
+   * org)), so this write does not re-check what the caller already verified.
+   */
+  async markPostRemoved(id: string, reason: string, releaseURL?: string | null) {
+    return this._post.model.post.update({
+      where: { id },
+      data: {
+        removedAt: new Date(),
+        removedReason: reason,
+        ...(releaseURL ? { releaseURL } : {}),
+      },
+    });
+  }
+
   async changeState(id: string, state: State, err?: any, body?: any) {
     const errorMessage = err ? this.extractErrorMessage(err) : undefined;
 
