@@ -6,12 +6,14 @@ or composer wiring yet; the endpoint below is only reachable directly.
 
 Implementation:
 - Schema: `Post.referenceOpportunityId` (§4.2), `AiseeBusinessSubType.POST_GEN_REFERENCE` (§7) — **live**, pushed and backfilled (485 rows) against the deployment server on 2026-09-01
+- Source adaptation (§6.3): `sourceAdaptation` = `PRESERVE_STRUCTURE` | `REFRAME` (default) | `FRESH_ANGLE`, prompt-side only — no mode relaxes the similarity gate, and the corrective retry is mode-aware so a rejected `PRESERVE_STRUCTURE` draft is not silently retried as a fresh angle.
+- Threads (§6.2): opt-in `thread`/`maxThreadParts`, gated by the shared capability rule in [`integrations/thread-capability.ts`](../../libraries/nestjs-libraries/src/integrations/thread-capability.ts) (also adopted by `operation-plan.service.ts`, which previously judged by `comment()` alone and so dropped Hacker News threads). No schema change — a thread is N `value` entries, chained by the existing `createOrUpdatePost` path.
 - Generation: [`engage-reference-post.service.ts`](../../libraries/nestjs-libraries/src/engage/engage-reference-post.service.ts), reusing [`prompt-source-envelope.ts`](../../libraries/nestjs-libraries/src/engage/prompt-source-envelope.ts), [`engage-brand-instruction.ts`](../../libraries/nestjs-libraries/src/engage/engage-brand-instruction.ts), and [`reference-similarity.ts`](../../libraries/nestjs-libraries/src/engage/reference-similarity.ts) (§6). Failures still carry every already-completed model call's usage via `ReferencePostGenerationError`/`TooSimilarToReferenceError(usages)`, so a similarity-gate rejection is billed like any other real spend (§7.1).
 - Orchestration + billing + persistence: `EngageService.generateReferencePost` (§5/§7.1) — **one** call now does generate, bill, and save (see the second design revision below).
 - API: `engage.controller.ts` `POST /opportunities/:id/generate-post` — see `docs/engage/api.md` §"Reference-Post Generation"
 - Backfill: [`scripts/backfill-engage-reference-opportunity.ts`](../../scripts/backfill-engage-reference-opportunity.ts) (§4.4) — **run**, 485 reply posts across 14 orgs backfilled on the deployment server.
-- Tests: `reference-similarity.spec.ts`, `engage-reference-post.service.spec.ts`, `engage-service.reference-post.spec.ts`, `engage.controller.referencePost.spec.ts` — full repo suite green as of the last revision.
-- Deployment: schema pushed, backend restarted, backfill run — see §10. **The API contract changed again since that deploy (this revision) — needs another `git pull` + backend restart, still no new schema/env changes.**
+- Tests: `reference-similarity.spec.ts`, `engage-reference-post.service.spec.ts`, `engage-service.reference-post.spec.ts`, `engage.controller.referencePost.spec.ts`, `thread-capability.spec.ts` — full repo suite green as of the last revision.
+- Deployment: schema pushed, backend restarted, backfill run — see §10. **The API contract changed again since that deploy (thread support, this revision) — needs another `git pull` + backend restart, still no new schema/env changes.**
 
 Design revision 1 (post-deploy, still backend-only — no frontend consumes
 this endpoint yet, so these were safe API-contract changes):
@@ -59,6 +61,13 @@ Known gaps vs this design (tracked, not silently dropped):
   explicitly warned against), pending the product decision.
 - §6's similarity thresholds (12-word run / 25% shingle overlap) are the
   starting numbers from this doc, unvalidated against real generations.
+- Length targets/ceilings only really exist for X and Reddit
+  (`engage-draft-length.ts`): every other platform gets X's 260-character
+  target in the prompt and no hard ceiling check at all. Pre-dates thread
+  support and applies equally to single posts, but it bites harder now that
+  LinkedIn and Hacker News — both long-form-friendly — can produce chains.
+  Fixing it means per-platform targets sourced from the provider's own
+  `maxLength()`, the way `operation-plan.service.ts` already does it.
 
 ## 1. Overview
 
@@ -80,11 +89,15 @@ any other post — it does not target the original thread, does not create an
   from the signal feed and asks to generate a post from it. That is the entire
   trigger — there is no automatic discovery, ranking, or suggestion of "posts
   worth copying."
-- Output is a single post — no thread expansion (see §9). Text is always
-  AI-generated; the reference's own images/video may optionally be reused
-  as-is (opt-in, `includeReferenceMedia` — §6.1), unlike the text itself
-  they are not rewritten, since there is no equivalent of "paraphrase" for
-  media.
+- How closely the output may follow the reference is the caller's choice
+  (`sourceAdaptation`, default `REFRAME` — §6.3); no setting of it permits
+  reusing the reference's wording.
+- Output is a single post by default, or a native **thread** on request
+  (opt-in, `thread` — §6.2; the V1 "no thread expansion" bullet in §9 is
+  lifted). Text is always AI-generated; the reference's own images/video may
+  optionally be reused as-is (opt-in, `includeReferenceMedia` — §6.1), unlike
+  the text itself they are not rewritten, since there is no equivalent of
+  "paraphrase" for media.
 
 ## 3. User Flow
 
@@ -304,10 +317,17 @@ same UI the reply-draft composer already has:
 | `mentions` | `string[]` (≤20) | | Optional brand names, used when `brandStrength` ≥ 2 |
 | `outputLength` | `integer` (≥ 2) | | Target length; same soft-target semantics as reply drafts |
 | `projectId` | `string` | | Optional project scope |
+| `sourceAdaptation` | `PRESERVE_STRUCTURE` \| `REFRAME` \| `FRESH_ANGLE` | | How closely the post may follow the reference; default `REFRAME`. A separate axis from `strategy` — that picks the voice, this picks the distance from the source. No mode relaxes the anti-plagiarism gate. See §6.3 |
 | `includeReferenceMedia` | `boolean` | | Default `false`. Reuse the reference's own images/video as-is on the generated post — opt-in, no rewrite-mitigation exists for media the way it does for text. See §6.1 |
+| `thread` | `boolean` | | Default `false`. Produce a native thread (anchor + `parentPostId`-chained follow-ups in one `group`) instead of a single post. Honoured only where the platform can chain one; elsewhere the call degrades to a single post and reports it. See §6.2 |
+| `maxThreadParts` | `integer` (1–5) | | Follow-up parts beyond the anchor (chain = `1 + this`), default 3. Read only when `thread` is `true`. A ceiling, not a target. See §6.2 |
 
-**SSE success frame**: `data: {"text": "...", "postId": "..."}` then
-`data: [DONE]`.
+**SSE success frame**: `data: {"text": "...", "postId": "...", "parts": ["..."], "thread": false}`
+then `data: [DONE]`. `text` is the whole post (thread parts joined by a blank
+line), `postId` is the ROOT post, `parts` is one entry per post in the chain,
+and `thread` says whether one was actually produced — with
+`threadSkippedReason` (`platform_unsupported` | `single_post_generated`)
+present only when a requested thread came back as one post (§6.2).
 
 **On error**, a typed frame then `[DONE]` — see §7's `error code` table in
 `docs/engage/api.md`; a persistence failure (rare — a DB error after a
@@ -323,8 +343,30 @@ actual implementation:
 ```ts
 const opportunity = await this._engageRepository.getOpportunityById(org.id, opportunityId, dto.projectId);
 
-// Generate + bill — see §7.1 for the usage-preservation-on-failure detail.
-const { text } = await this._generateAndBill(org, opportunityId, dto, opportunity, signal);
+// ONE resolver, shared with the billing call below, so generation and the
+// billing record can never disagree about which mode ran (§6.3).
+const sourceAdaptation = resolveSourceAdaptation(dto.sourceAdaptation);
+
+// A thread is only asked for on a platform that can publish one (§6.2); an
+// unsupported platform degrades to a single post and is reported back.
+const threadCapable = isThreadCapablePlatform(normalizeEngagePlatform(opportunity.platform));
+
+// `parts` is the chain in publish order: [anchor] for a single post. Wrapped
+// in a try/catch (elided here) that bills a ReferencePostGenerationError's
+// own usages before rethrowing — see §7.1.
+const { text, parts, usages } = await this._referencePostService.generate(opportunity, {
+  strategy: dto.strategy,
+  sourceAdaptation,
+  brandStrength: dto.brandStrength,
+  mentions: dto.mentions,
+  outputLength: dto.outputLength,
+  thread: !!dto.thread && threadCapable,
+  maxThreadParts: dto.maxThreadParts,
+  signal,
+});
+await this._billReferencePostUsages(
+  org, opportunityId, opportunity.platform, dto.strategy, sourceAdaptation, usages
+);
 
 // Opt-in, best-effort, after generation succeeds — see §6.1.
 const media = dto.includeReferenceMedia
@@ -344,7 +386,13 @@ const mapped = await this._postsService.mapTypeToPost(
     shortLink: false,
     tags: [],
     date,
-    posts: [{ providerIdentifier: opportunity.platform, value: [{ content: text, image: media }] }],
+    // One value entry per post in the chain — createOrUpdatePost chains
+    // entries 2..N by parentPostId inside one group. Media on the ANCHOR
+    // only: thread continuations are text-only on the extension path.
+    posts: [{
+      providerIdentifier: opportunity.platform,
+      value: parts.map((content, i) => ({ content, image: i === 0 ? media : [] })),
+    }],
   },
   org.id
 );
@@ -364,7 +412,10 @@ await this._engageRepository.attachReferenceOpportunity(postId, {
   snapshotContent: opportunity.postContent,
 });
 
-return { text, postId };
+// The ROOT post carries the provenance; its chained children ride along in
+// the same group. `threadSkippedReason` is added only when a requested
+// thread came back as a single post (§6.2).
+return { text, postId, parts, thread: parts.length > 1 };
 ```
 
 `mapTypeToPost`'s no-account branch (`providerIdentifier` set directly, no
@@ -526,6 +577,141 @@ whatever validation the generic publish path already applies to any other
 post's media is all that applies to this one too, same as content length is
 already not cross-checked (§9).
 
+### 6.2 Thread generation (opt-in)
+
+`thread: true` asks for a native thread instead of a single post: an anchor
+plus follow-up parts that publish as a reply chain beneath it (an X thread,
+Reddit follow-up comments, a LinkedIn comment chain, HN comment follow-ups).
+Default `false` — a thread is a different artifact from a single post, never
+something to hand back by surprise.
+
+**Which platforms can carry one.** Resolved by ONE shared rule,
+[`integrations/thread-capability.ts`](../../libraries/nestjs-libraries/src/integrations/thread-capability.ts),
+which accepts a platform when EITHER publish path can chain it: the
+provider's own `comment()` (server/API path, the same flag `isCommentable`
+checks at publish time) or the extension's in-browser segment chaining
+(everything in `EXTENSION_PUBLISHABLE_PLATFORMS` except
+`SINGLE_SEGMENT_PLATFORMS`). Across the seven engage platforms:
+
+| Platform | Thread | Why |
+|---|---|---|
+| `x` | ✅ | reply chain, both paths |
+| `reddit` | ✅ | self-post + follow-up comments, both paths |
+| `linkedin` | ✅ | comment chain, both paths |
+| `hackernews` | ✅ | extension only — HN has no write API at all (its provider's `post()` throws by design), so every HN post publishes in-browser, where follow-ups chain fine |
+| `medium` | ❌ | long-form article; a thread has no meaning there |
+| `quora` | ❌ | same |
+| `devto` | ❌ | same |
+
+`operation-plan.service.ts` used to answer this question from `comment()`
+alone and therefore called Hacker News unthreadable; it now imports the same
+rule, so the two features cannot drift and HN plan threads are no longer
+dropped.
+
+**A `thread: true` on an unsupported platform is not an error.** The client
+never picks the platform — it is always the opportunity's own (§3) — so
+400-ing a request whose only fault is the opportunity it points at would be
+punishing the caller for something it cannot control. The call degrades to a
+single post and *says so*: the final SSE frame carries `thread: false` plus
+`threadSkippedReason: "platform_unsupported"` (or `"single_post_generated"`
+when the platform could have chained one but the model judged a single post
+enough). See `docs/engage/api.md`.
+
+**Generation.** One model call produces the whole chain, with the posts
+separated by a `[[PART]]` sentinel line — a bracketed token rather than the
+usual `---`/`1/5` conventions precisely because those DO occur inside real
+post text. The token cannot, so splitting on it can never cut a post in half;
+a response that carries it when no thread was asked for is joined back into
+one post rather than leaking the sentinel into published text. `max_tokens`
+scales with the number of posts requested so the last part is never truncated
+mid-sentence. `maxThreadParts` (1–5, default 3) counts FOLLOW-UPS beyond the
+anchor — same semantics as the operation plan's own
+`operation_plan.max_thread_parts` — and is a ceiling, not a target: a shorter
+chain the model judged sufficient is never padded up to it, and an over-long
+one is truncated rather than failing an already-paid generation.
+
+**Both guardrails still apply, at the right granularity:**
+
+- The **similarity gate** (§6) runs over the JOINED chain, not part by part.
+  A thread that scatters the reference's own sentences across its parts is
+  exactly as much of a copy as one that reproduces them in a single post —
+  checking each part alone would be a way around the whole check.
+- The **platform character ceiling** runs PER PART, since every part is its
+  own published post facing that ceiling on its own — not a budget shared
+  across the chain. The failure names the offending part
+  (`… (thread part 2 of 3)`).
+
+**Persistence needs no new mechanism.** The chain is written as N `value`
+entries on the single `posts[]` entry, which `createOrUpdatePost` already
+turns into `parentPostId`-chained rows inside one `group` — the same rows the
+operation plan's thread support produces, and the shape the whole app
+already treats as one post (one `POSTS_PER_MONTH` slot, one calendar entry,
+group-wide scheduling and publish-method resolution). `postId` in the
+response is the ROOT; the returned `parts` array lets a client render the
+segments without re-splitting `text`. Reference media rides on the ANCHOR
+only: thread continuations are text-only on the extension publish path
+(`getDuePublishPosts` drops images on segments), so attaching it further down
+would silently lose it.
+
+### 6.3 Source adaptation
+
+`sourceAdaptation` controls the RELATIONSHIP between the generated post and
+the reference — a separate axis from `strategy`, which controls the voice the
+post is written in. The two compose: a `CONTRARIAN` `FRESH_ANGLE` post and a
+`CONTRARIAN` `PRESERVE_STRUCTURE` post are both contrarian, but only the
+second walks the reference's own beats.
+
+| Value | Carries over | Always rewritten |
+|---|---|---|
+| `PRESERVE_STRUCTURE` | Information order and overall shape (hook → detail → takeaway, list, story arc) | Every sentence |
+| `REFRAME` (default) | The core point | Opening, order of ideas, structure, wording |
+| `FRESH_ANGLE` | The topic and why it resonates | Everything else — different aspect/audience/question, no mirrored argument or structure |
+
+**Why these names and not Close / Balanced / Fresh.** "Close" reads as a
+promise that the system will imitate the source, which is precisely the thing
+this feature must not be understood to do — a user who picks a mode called
+"close" and gets a near-copy will reasonably think that is the intended
+product. Each name here states what is preserved, so the safe boundary is
+visible in the option itself rather than in a tooltip nobody reads.
+
+**The default is `REFRAME`** because it keeps what made the reference worth
+riffing on (its point) while forcing the post to be organized by its own
+author — the most useful output and the least exposed one.
+
+**No mode relaxes the guardrail.** All three sit under the same
+do-not-copy system-prompt requirement and the same output-side similarity gate
+(§6) with the same thresholds. The one prompt-level difference is a
+contradiction that had to be resolved rather than a softening: the blanket
+clause forbids reusing the reference's "sentences, distinctive phrases, or
+structure", and under `PRESERVE_STRUCTURE` that last word contradicts the mode
+itself — the model would be told to keep the shape and to drop it in the same
+prompt. There the prohibition narrows to WORDING (the part that actually
+carries the copyright exposure) and states why, so it cannot read as a general
+carve-out. `PRESERVE_STRUCTURE` preserves the ORDER OF
+IDEAS, never sentences, and its prompt says so explicitly ("Keeping its
+structure is NOT permission to keep its sentences"). The natural consequence
+is that this mode trips the gate — and therefore the corrective retry, and
+occasionally `too_similar_to_reference` — more often than the other two. That
+is the gate working, not a defect: a structure-preserving draft is exactly
+where near-verbatim reuse is most likely to creep in.
+
+The corrective retry is adaptation-aware for the same reason. Its generic
+wording ("keep only the topic and general angle from the reference") would
+silently downgrade a `PRESERVE_STRUCTURE` request into a `FRESH_ANGLE` one on
+the second attempt; under that mode it instead says the order of ideas may
+stay while no sentence or distinctive phrase of the reference may survive.
+
+`sourceAdaptation` is recorded in the billing record's `data` alongside
+`platform`/`strategy` (§7.1) — audit-only, it changes nothing about what is
+charged, but it is the axis that most affects how close the output sits to the
+source, so a billed generation should say which mode produced it. Generation
+and that record resolve the mode through ONE function
+(`resolveSourceAdaptation`, in `engage.dto.ts`) rather than each applying its
+own fallback: HTTP callers are gated by the DTO's `@IsIn`, internal callers
+build the dto by hand and are not, and two independent fallbacks meant such a
+caller's invalid value was generated as `REFRAME` but billed as whatever it
+sent.
+
 ## 7. Billing
 
 Two independent charges, at two different points in the flow — do not
@@ -633,12 +819,14 @@ settled by engineering judgment alone:
 Settled, not open — pulled in from what used to be open questions, so scope
 does not re-diverge once implementation starts:
 
-- **Single post — no thread expansion**, even though the reference may be a
-  long thread (summarize/adapt into one post, don't chain). Revisit only as
-  an explicit V2 proposal with its own design — needs to decide how it
-  interacts with `PublishMethod`/`parentPostId` chaining, which this doc does
-  not cover. (Reference-media reuse is now in scope, opt-in — see §6.1; this
-  bullet used to also exclude that.)
+- ~~**Single post — no thread expansion**~~ — **now in scope, opt-in** (§6.2).
+  The open question this bullet parked was how a thread interacts with
+  `parentPostId` chaining, and the answer turned out to need no new mechanism:
+  a thread is already just N `value` entries on one `posts[]` entry, which
+  `createOrUpdatePost` chains by `parentPostId` inside a single `group` — the
+  same rows the operation plan's own thread support produces. `PublishMethod`
+  is likewise unaffected: it is resolved per post and applied group-wide, so
+  the chain commits, schedules and publishes as one unit either way.
 - Automatic discovery/ranking of "posts worth copying" — no scan, no
   scoring dimension, no proactive suggestion surface.
 - Batch/multi-reference generation.

@@ -60,6 +60,7 @@ function buildService(deps: {
   const referencePost = {
     generate: vi.fn(async () => ({
       text: 'an original take on ceramics pricing',
+      parts: ['an original take on ceramics pricing'],
       usages: [
         {
           promptTokens: 100,
@@ -122,11 +123,16 @@ describe('EngageService.generateReferencePost', () => {
     expect(result.text).toBe('an original take on ceramics pricing');
     expect(referencePost.generate).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'opp1', platform: 'x' }),
-      'EXPERT_ANSWER',
-      1,
-      undefined,
-      260,
-      undefined
+      {
+        strategy: 'EXPERT_ANSWER',
+        sourceAdaptation: 'REFRAME',
+        brandStrength: 1,
+        mentions: undefined,
+        outputLength: 260,
+        thread: false,
+        maxThreadParts: undefined,
+        signal: undefined,
+      }
     );
     expect(aisee.billCollectedUsages).toHaveBeenCalledTimes(1);
     const [opts, usages] = aisee.billCollectedUsages.mock.calls[0];
@@ -135,7 +141,7 @@ describe('EngageService.generateReferencePost', () => {
       businessType: 'ai_copywriting',
       subType: 'post_gen_reference',
       relatedId: 'opp1',
-      data: { platform: 'x', strategy: 'EXPERT_ANSWER' },
+      data: { platform: 'x', strategy: 'EXPERT_ANSWER', sourceAdaptation: 'REFRAME' },
     });
     expect(usages).toEqual([
       {
@@ -167,7 +173,7 @@ describe('EngageService.generateReferencePost', () => {
   it('does not call billCollectedUsages when generation produced no usage entries', async () => {
     const { service, aisee } = buildService({
       referencePost: {
-        generate: vi.fn(async () => ({ text: '', usages: [] })),
+        generate: vi.fn(async () => ({ text: '', parts: [], usages: [] })),
       },
     });
 
@@ -266,6 +272,8 @@ describe('EngageService.generateReferencePost', () => {
       expect(result).toEqual({
         text: 'an original take on ceramics pricing',
         postId: 'post1',
+        parts: ['an original take on ceramics pricing'],
+        thread: false,
       });
     });
 
@@ -277,6 +285,222 @@ describe('EngageService.generateReferencePost', () => {
       await expect(
         service.generateReferencePost(ORG, 'user1', 'opp1', GEN_DTO)
       ).rejects.toBeInstanceOf(InternalServerErrorException);
+    });
+  });
+
+  describe('source adaptation', () => {
+    it('resolves the default (REFRAME) once and uses it for BOTH generation and the billing record', async () => {
+      const { service, referencePost, aisee } = buildService();
+
+      await service.generateReferencePost(ORG, 'user1', 'opp1', GEN_DTO);
+
+      expect(referencePost.generate).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ sourceAdaptation: 'REFRAME' })
+      );
+      const [opts] = aisee.billCollectedUsages.mock.calls[0];
+      expect(opts.data.sourceAdaptation).toBe('REFRAME');
+    });
+
+    it('forwards an explicitly requested mode', async () => {
+      const { service, referencePost, aisee } = buildService();
+
+      await service.generateReferencePost(ORG, 'user1', 'opp1', {
+        ...GEN_DTO,
+        sourceAdaptation: 'FRESH_ANGLE',
+      });
+
+      expect(referencePost.generate).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ sourceAdaptation: 'FRESH_ANGLE' })
+      );
+      const [opts] = aisee.billCollectedUsages.mock.calls[0];
+      expect(opts.data.sourceAdaptation).toBe('FRESH_ANGLE');
+    });
+
+    it('bills the mode that ACTUALLY ran when an internal caller sends an invalid one', async () => {
+      // Regression: the service used to resolve with a plain `?? DEFAULT`
+      // while the generator separately validated the value, so an internal
+      // caller (which bypasses the DTO's @IsIn) got REFRAME generated and
+      // its own bogus string billed — audit data for a mode that never ran.
+      const { service, referencePost, aisee } = buildService();
+
+      await service.generateReferencePost(ORG, 'user1', 'opp1', {
+        ...GEN_DTO,
+        sourceAdaptation: 'CLOSE',
+      } as any);
+
+      expect(referencePost.generate).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ sourceAdaptation: 'REFRAME' })
+      );
+      const [opts] = aisee.billCollectedUsages.mock.calls[0];
+      expect(opts.data.sourceAdaptation).toBe('REFRAME');
+    });
+
+    it('records the mode on a FAILED generation too (that spend is billed as well)', async () => {
+      const { service, aisee } = buildService({
+        referencePost: {
+          generate: vi.fn(async () => {
+            throw new TooSimilarToReferenceError([
+              {
+                promptTokens: 100,
+                completionTokens: 40,
+                totalTokens: 140,
+                provider: 'anthropic',
+                model: 'claude-sonnet-4-6',
+              },
+            ] as any);
+          }),
+        },
+      });
+
+      await expect(
+        service.generateReferencePost(ORG, 'user1', 'opp1', {
+          ...GEN_DTO,
+          sourceAdaptation: 'PRESERVE_STRUCTURE',
+        })
+      ).rejects.toBeInstanceOf(TooSimilarToReferenceError);
+
+      const [opts] = aisee.billCollectedUsages.mock.calls[0];
+      expect(opts.data.sourceAdaptation).toBe('PRESERVE_STRUCTURE');
+    });
+  });
+
+  // Thread support (§9's V1 "no thread expansion" is lifted): `thread: true`
+  // asks for a native chain, and whether the PLATFORM can publish one is
+  // decided by the shared capability rule, not by this feature.
+  describe('thread generation (thread / maxThreadParts)', () => {
+    const THREAD_PARTS = ['anchor post', 'follow-up one', 'follow-up two'];
+
+    function buildThreadService(overrides: Record<string, any> = {}) {
+      return buildService({
+        referencePost: {
+          generate: vi.fn(async () => ({
+            text: THREAD_PARTS.join('\n\n'),
+            parts: THREAD_PARTS,
+            usages: [],
+          })),
+        },
+        ...overrides,
+      });
+    }
+
+    it('asks the generator for a thread and forwards the requested part ceiling', async () => {
+      const { service, referencePost } = buildThreadService();
+
+      await service.generateReferencePost(ORG, 'user1', 'opp1', {
+        ...GEN_DTO,
+        thread: true,
+        maxThreadParts: 2,
+      });
+
+      expect(referencePost.generate).toHaveBeenCalledWith(
+        expect.objectContaining({ platform: 'x' }),
+        expect.objectContaining({ thread: true, maxThreadParts: 2 })
+      );
+    });
+
+    it('persists the chain as one value entry per part, in publish order', async () => {
+      const { service, posts } = buildThreadService();
+
+      const result = await service.generateReferencePost(ORG, 'user1', 'opp1', {
+        ...GEN_DTO,
+        thread: true,
+      });
+
+      const [dto] = posts.mapTypeToPost.mock.calls[0];
+      // createOrUpdatePost turns entries 2..N into parentPostId-chained rows —
+      // one value entry per part IS how a thread is stored in this app.
+      expect(dto.posts[0].value.map((v: any) => v.content)).toEqual(THREAD_PARTS);
+      expect(result.thread).toBe(true);
+      expect(result.parts).toEqual(THREAD_PARTS);
+      expect(result.text).toBe(THREAD_PARTS.join('\n\n'));
+      // Still ONE draft from the caller's point of view — the root id.
+      expect(result.postId).toBe('post1');
+    });
+
+    it('attaches reference media to the ANCHOR only (thread continuations are text-only)', async () => {
+      const { service, posts } = buildThreadService({
+        repo: {
+          getOpportunityMediaUrls: vi.fn(async () => [
+            'https://pbs.twimg.com/media/one.jpg',
+          ]),
+        },
+      });
+      uploadSimple.mockResolvedValueOnce('https://cdn.example.com/uploads/one.jpg');
+
+      await service.generateReferencePost(ORG, 'user1', 'opp1', {
+        ...GEN_DTO,
+        thread: true,
+        includeReferenceMedia: true,
+      });
+
+      const [dto] = posts.mapTypeToPost.mock.calls[0];
+      expect(dto.posts[0].value[0].image).toEqual([
+        { id: 'media-one.jpg', path: 'https://cdn.example.com/uploads/one.jpg' },
+      ]);
+      expect(dto.posts[0].value[1].image).toEqual([]);
+      expect(dto.posts[0].value[2].image).toEqual([]);
+    });
+
+    it('degrades to a single post on a platform that cannot chain one, and says so', async () => {
+      // devto/medium/quora are single-segment surfaces on every publish path.
+      const { service, referencePost, posts } = buildService({
+        repo: {
+          getOpportunityById: vi.fn(async () => ({
+            id: 'opp1',
+            platform: 'devto',
+            externalPostUrl: 'https://dev.to/someone/post',
+            authorUsername: 'someone',
+            title: null,
+            postContent: 'A long-form article about ceramics pricing.',
+          })),
+        },
+      });
+
+      const result = await service.generateReferencePost(ORG, 'user1', 'opp1', {
+        ...GEN_DTO,
+        thread: true,
+      });
+
+      expect(referencePost.generate).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ thread: false })
+      );
+      expect(result.thread).toBe(false);
+      expect(result.threadSkippedReason).toBe('platform_unsupported');
+      const [dto] = posts.mapTypeToPost.mock.calls[0];
+      expect(dto.posts[0].value).toHaveLength(1);
+    });
+
+    it('reports a thread-capable platform that still produced one post as single_post_generated', async () => {
+      const { service } = buildService({
+        referencePost: {
+          generate: vi.fn(async () => ({
+            text: 'one post was enough',
+            parts: ['one post was enough'],
+            usages: [],
+          })),
+        },
+      });
+
+      const result = await service.generateReferencePost(ORG, 'user1', 'opp1', {
+        ...GEN_DTO,
+        thread: true,
+      });
+
+      expect(result.thread).toBe(false);
+      expect(result.threadSkippedReason).toBe('single_post_generated');
+    });
+
+    it('never reports a skip reason when no thread was asked for', async () => {
+      const { service } = buildService();
+
+      const result = await service.generateReferencePost(ORG, 'user1', 'opp1', GEN_DTO);
+
+      expect(result.thread).toBe(false);
+      expect(result.threadSkippedReason).toBeUndefined();
     });
   });
 

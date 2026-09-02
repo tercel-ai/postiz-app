@@ -118,6 +118,45 @@ describe('EngageScanIngestDto', () => {
     });
   });
 
+  it('accepts rawData.postContentType and carries it into the RawPost', async () => {
+    // X mixes Article (long-form) posts into the same search results as plain
+    // tweets; the extension marks the ones it detects so downstream code does
+    // not mistake an article preview for a full tweet body.
+    const post = {
+      ...validPost,
+      platform: 'x',
+      rawData: { postContentType: 'article' },
+    };
+    expect(await errorsFor({ taskId: 'c', posts: [post] })).toEqual([]);
+    expect(scanIngestPostToRawPost(post as any).rawData).toEqual({
+      postContentType: 'article',
+    });
+  });
+
+  it('rejects a postContentType other than "article"', async () => {
+    const errs = await errorsFor({
+      taskId: 'c',
+      posts: [{ ...validPost, rawData: { postContentType: 'video' } }],
+    });
+    expect(errs).toContain('isIn');
+  });
+
+  it('combines mediaUrls and postContentType in the same rawData', async () => {
+    const post = {
+      ...validPost,
+      platform: 'x',
+      rawData: {
+        mediaUrls: ['https://pbs.twimg.com/media/A.jpg'],
+        postContentType: 'article',
+      },
+    };
+    expect(await errorsFor({ taskId: 'c', posts: [post] })).toEqual([]);
+    expect(scanIngestPostToRawPost(post as any).rawData).toEqual({
+      mediaUrls: ['https://pbs.twimg.com/media/A.jpg'],
+      postContentType: 'article',
+    });
+  });
+
   it('leaves rawData undefined when there is nothing to archive', async () => {
     expect(scanIngestPostToRawPost(validPost as any).rawData).toBeUndefined();
     expect(

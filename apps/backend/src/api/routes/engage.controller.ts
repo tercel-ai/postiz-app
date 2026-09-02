@@ -919,12 +919,12 @@ export class EngageController {
 
   @ApiOperation({
     summary:
-      'Generate AND save an AI-written ORIGINAL post inspired by an opportunity, via SSE (text/event-stream) — not a reply. Always persists as an account-less DRAFT Post.',
+      'Generate AND save an AI-written ORIGINAL post inspired by an opportunity, via SSE (text/event-stream) — not a reply. Always persists as an account-less DRAFT Post; `sourceAdaptation` (PRESERVE_STRUCTURE | REFRAME | FRESH_ANGLE, default REFRAME) sets how closely it may follow the reference, and `thread: true` produces a native thread (anchor + parentPostId-chained follow-ups) where the platform supports one.',
   })
   @ApiResponse({
     status: 200,
     description:
-      'SSE stream ending with a data frame carrying {text, postId} then [DONE]. Failures (opportunity not found, generation failed, too similar to the reference) end the stream with a typed error frame instead.',
+      'SSE stream ending with a data frame carrying {text, postId, parts, thread, threadSkippedReason?} then [DONE]. `parts` is one entry per post in the chain (a single-element array unless a thread was produced) and `thread` reports whether one actually was — a thread requested on a platform that cannot chain one (medium/quora/devto) degrades to a single post with threadSkippedReason=platform_unsupported. Failures (opportunity not found, generation failed, too similar to the reference) end the stream with a typed error frame instead.',
   })
   @ApiResponse({ status: 404, description: 'Opportunity not found' })
   @ApiResponse({ status: 429, description: 'Rate limit exceeded (20/hour)' })
@@ -955,8 +955,22 @@ export class EngageController {
         abortController.signal
       );
       if (!abortController.signal.aborted) {
+        // Fields picked explicitly rather than serializing the service result
+        // wholesale: this frame is a public wire contract, and spreading the
+        // return value would publish any field a future change adds to
+        // ReferencePostResult without anyone deciding it should be public.
         res.write(
-          `data: ${JSON.stringify({ text: result.text, postId: result.postId })}\n\n`
+          `data: ${JSON.stringify({
+            text: result.text,
+            postId: result.postId,
+            parts: result.parts,
+            thread: result.thread,
+            // Absent unless a requested thread came back as one post, so a
+            // plain single-post request keeps its original frame shape.
+            ...(result.threadSkippedReason
+              ? { threadSkippedReason: result.threadSkippedReason }
+              : {}),
+          })}\n\n`
         );
         res.write(`data: [DONE]\n\n`);
       }

@@ -291,6 +291,24 @@ export function opportunityMediaUrls(rawData: unknown): string[] {
 }
 
 /**
+ * Whether an opportunity's postContent is something other than a plain post
+ * body — currently only X's long-form Article. X's SearchTimeline mixes an
+ * Article into ordinary tweet results with no separate entry shape (a tweet
+ * node with an extra `article` field), so the extension marks it on rawData
+ * at ingest instead; without this a client would treat the article's preview
+ * text as if it were the whole tweet.
+ *
+ * null for every other row, including a plain tweet and one ingested before
+ * this field existed — same "absent means normal" contract as
+ * opportunityMediaUrls' [].
+ */
+export function opportunityContentType(rawData: unknown): 'article' | null {
+  const type = (rawData as { postContentType?: unknown } | null)
+    ?.postContentType;
+  return type === 'article' ? 'article' : null;
+}
+
+/**
  * Rewrite ONLY `__type` in a Post.settings JSON blob, preserving every other key
  * it carries — `engageAuthor` above all, which the publish paths merge in after
  * the fact and which a blind overwrite would silently drop.
@@ -1984,10 +2002,12 @@ export class EngageRepository {
       // paginated opportunities list) — the server-side X adapter archives a
       // whole tweet payload in there. What a client actually needs is derived
       // out of it explicitly instead: the attachment URLs, which the body
-      // cannot carry because postContent strips X's t.co media placeholder.
-      // Free of extra DB cost — the row is already loaded via
-      // `include: { opportunity: true }`.
+      // cannot carry because postContent strips X's t.co media placeholder,
+      // and whether postContent is an X Article's preview text rather than a
+      // full tweet body. Free of extra DB cost — the row is already loaded
+      // via `include: { opportunity: true }`.
       mediaUrls: opportunityMediaUrls(opportunity.rawData),
+      contentType: opportunityContentType(opportunity.rawData),
       // Per-org createdAt (when this org first saw the opportunity).
       createdAt,
       updatedAt: opportunity.updatedAt,

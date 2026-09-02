@@ -27,6 +27,7 @@ import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/po
 import { postTitleFromTheme } from './theme-title';
 import { weightedLength, textSlicer } from '@gitroom/helpers/utils/count.length';
 import { socialIntegrationList } from '@gitroom/nestjs-libraries/integrations/integration.manager';
+import { threadCapablePlatforms } from '@gitroom/nestjs-libraries/integrations/thread-capability';
 import { createHash, randomUUID } from 'crypto';
 import { z } from 'zod';
 
@@ -265,15 +266,12 @@ const targetFor = (platform: string): number =>
     MAX_CONTENT_TARGET
   );
 
-// Whether a platform can publish a native thread — sourced from the provider's
-// `comment` capability (the SAME flag the publisher checks via isCommentable),
-// so this can never drift from what actually publishes. A platform without
-// `comment` (thread would silently not chain) must never be threaded.
-const threadCapablePlatforms = (platforms: string[]): string[] =>
-  platforms.filter(
-    (platform) =>
-      !!socialIntegrationList.find((p) => p.identifier === platform)?.comment
-  );
+// Whether a platform can publish a native thread — resolved by the ONE shared
+// capability rule (integrations/thread-capability.ts), which covers BOTH
+// publish paths: the provider's `comment()` (server/API) and the extension's
+// in-browser segment chaining. This file used to answer it from `comment()`
+// alone, which called Hacker News unthreadable even though HN posts can ONLY
+// go out through the extension, which chains them fine.
 
 const GeneratedPlanSchema = z.object({
   goal: z.object({

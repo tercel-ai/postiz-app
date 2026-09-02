@@ -42,6 +42,16 @@ export class ScanIngestRawDataDto {
   @ArrayMaxSize(4)
   @IsString({ each: true })
   mediaUrls?: string[];
+
+  /**
+   * X only: marks this post as an X Article (long-form) rather than a plain
+   * tweet. X's search timeline mixes the two in with no separate shape, so the
+   * extension flags it here — code that treats postContent as a full tweet
+   * body should know it is instead an article preview.
+   */
+  @IsOptional()
+  @IsIn(['article'])
+  postContentType?: 'article';
 }
 
 /**
@@ -180,7 +190,10 @@ function pickIngestRawData(
   const mediaUrls = (raw?.mediaUrls ?? []).filter(
     (u): u is string => typeof u === 'string' && !!u.trim()
   );
-  return mediaUrls.length ? { mediaUrls } : undefined;
+  const picked: Record<string, unknown> = {};
+  if (mediaUrls.length) picked.mediaUrls = mediaUrls;
+  if (raw?.postContentType === 'article') picked.postContentType = 'article';
+  return Object.keys(picked).length ? picked : undefined;
 }
 
 /** Map one normalised ingest post to the scorer's RawPost (metrics default 0). */

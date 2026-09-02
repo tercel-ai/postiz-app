@@ -16,6 +16,7 @@ import utc from 'dayjs/plugin/utc';
 import {
   EngageRepository,
   opportunityMediaUrls,
+  opportunityContentType,
 } from '../engage.repository';
 
 dayjs.extend(isoWeek);
@@ -395,6 +396,37 @@ describe('EngageRepository — two-table reads', () => {
       const item = (await repo.listOpportunities('org1', {} as any))
         .items[0] as any;
       expect(item.mediaUrls).toEqual([]);
+    });
+
+    it('exposes rawData\'s postContentType as contentType', async () => {
+      // Same "derive it out of rawData explicitly" contract as mediaUrls —
+      // rawData itself never reaches the client.
+      const { repo, stateFindMany, stateCount } = buildRepo();
+      stateFindMany.mockResolvedValue([
+        {
+          ...STATE_ROW,
+          opportunity: {
+            ...STATE_ROW.opportunity,
+            rawData: { postContentType: 'article' },
+          },
+        },
+      ]);
+      stateCount.mockResolvedValue(1);
+
+      const item = (await repo.listOpportunities('org1', {} as any))
+        .items[0] as any;
+      expect(item.contentType).toBe('article');
+      expect(item).not.toHaveProperty('rawData');
+    });
+
+    it('returns contentType as null for an ordinary post', async () => {
+      const { repo, stateFindMany, stateCount } = buildRepo();
+      stateFindMany.mockResolvedValue([STATE_ROW]);
+      stateCount.mockResolvedValue(1);
+
+      const item = (await repo.listOpportunities('org1', {} as any))
+        .items[0] as any;
+      expect(item.contentType).toBeNull();
     });
 
     it('filters by an exact matched keyword on the state table', async () => {
@@ -5070,5 +5102,23 @@ describe('opportunityMediaUrls', () => {
     expect(
       opportunityMediaUrls({ mediaUrls: ['https://a/1.jpg', 42, null, '  ', ''] })
     ).toEqual(['https://a/1.jpg']);
+  });
+});
+
+describe('opportunityContentType', () => {
+  it('reads the archived content type', () => {
+    expect(opportunityContentType({ postContentType: 'article' })).toBe(
+      'article'
+    );
+  });
+
+  it('returns null for every shape that is not a marked article', () => {
+    // null rawData (every row ingested before this existed, or every
+    // non-X platform), an unrelated payload, and an unrecognised value.
+    expect(opportunityContentType(null)).toBeNull();
+    expect(opportunityContentType(undefined)).toBeNull();
+    expect(opportunityContentType({ tweet: { full_text: 'x' } })).toBeNull();
+    expect(opportunityContentType({ postContentType: 'video' })).toBeNull();
+    expect(opportunityContentType({ postContentType: '' })).toBeNull();
   });
 });

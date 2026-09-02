@@ -1743,8 +1743,54 @@ Stored as a normal `Post` with `source='calendar'` (behaves exactly like any oth
 | `mentions` | `string[]` (≤20) | — | Optional brand names, used when `brandStrength` ≥ 2 |
 | `outputLength` | `integer` (≥ 2) | — | Target length; soft target only, same semantics as reply drafts |
 | `projectId` | `string` | — | Optional project scope |
+| `sourceAdaptation` | `PRESERVE_STRUCTURE` \| `REFRAME` \| `FRESH_ANGLE` | — | How closely the post may follow the reference. Default `REFRAME`. Orthogonal to `strategy` (which picks the voice) — see the table below |
+| `includeReferenceMedia` | `boolean` | — | Opt-in (default `false`): re-host the reference's own images/video onto the generated post. Unlike the text, media is reused as-is — see `reference-post-generation.md` §6.1 |
+| `thread` | `boolean` | — | Opt-in (default `false`): produce a native **thread** (anchor + follow-up posts stored as a `parentPostId` chain in one `group`) instead of a single post. Honoured only where the platform can chain one — see the table below |
+| `maxThreadParts` | `integer` (1–5) | — | Follow-up parts beyond the anchor, so the chain is `1 + this`. Default 3. Read only when `thread` is `true`; a shorter chain the model judged sufficient is never padded up to it |
 
-**SSE Response Format** — `data: {"text": "...", "postId": "..."}` then `data: [DONE]`.
+**Source adaptation** — the relationship between the generated post and the
+reference. **No mode relaxes the anti-plagiarism gate**: all three sit under
+the same do-not-copy instruction and the same output-side similarity check, so
+none of them will hand back the reference's own wording.
+
+| Value | What carries over | What is always rewritten |
+|---|---|---|
+| `PRESERVE_STRUCTURE` | The reference's information order and overall shape (hook → detail → takeaway, list, story arc) | Every sentence. Same skeleton, none of its phrasing — this mode trips the similarity gate more often than the others, by design |
+| `REFRAME` (default) | The core point only | Opening, order of ideas, structure, wording |
+| `FRESH_ANGLE` | The topic and what makes it resonate | Everything else — a different aspect/audience/question, no mirroring of the reference's argument or structure |
+
+Named for what each mode preserves rather than a Close/Balanced/Fresh scale on
+purpose: "close" reads as a promise to imitate the source, which is exactly
+what this endpoint does not do.
+
+**Thread support per platform** — resolved by the one shared rule
+(`integrations/thread-capability.ts`), which accepts a platform when EITHER
+publish path can chain it: the provider's own `comment()` (server/API path) or
+the browser extension's in-browser segment chaining.
+
+| Platform | Thread | Why |
+|---|---|---|
+| `x` | ✅ | reply-chain, both paths |
+| `reddit` | ✅ | self-post + follow-up comments, both paths |
+| `linkedin` | ✅ | comment chain, both paths |
+| `hackernews` | ✅ | extension only — HN has no write API at all, so every HN post goes out in-browser, where follow-up comments chain fine |
+| `medium` | ❌ | long-form article; a thread has no meaning there (`SINGLE_SEGMENT_PLATFORMS`) |
+| `quora` | ❌ | same |
+| `devto` | ❌ | same |
+
+A `thread: true` request on one of the ❌ platforms is **not** a 400 — the
+client never chose the platform (it is always the opportunity's), so the call
+degrades to a single post and reports it in the response.
+
+**SSE Response Format** — `data: {"text": "...", "postId": "...", "parts": ["..."], "thread": false}` then `data: [DONE]`.
+
+| Field | Description |
+|---|---|
+| `text` | The whole post — thread parts joined by a blank line. Equals `parts[0]` for a single post |
+| `postId` | The **root** `Post` id. Follow-up parts are its `parentPostId` chain, in the same `group`, and move/schedule/publish with it |
+| `parts` | One entry per post in the chain, in publish order. Single-element array unless a thread was produced |
+| `thread` | Whether a thread was actually produced (`parts.length > 1`) |
+| `threadSkippedReason` | Only present when `thread` was requested but one post came back: `platform_unsupported` (the platform cannot chain — see the table above) or `single_post_generated` (the model judged one post enough) |
 
 **On error**, one typed frame then `[DONE]`:
 

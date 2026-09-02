@@ -1013,6 +1013,59 @@ export class GenerateDraftDto {
   length?: 'short' | 'medium' | 'long';
 }
 
+// How closely a generated post may follow the reference it was inspired by —
+// the relationship between the two, which is a SEPARATE axis from `strategy`
+// (what voice the post is written in). Named for what each mode preserves
+// rather than a Close/Balanced/Fresh scale on purpose: "close" reads as a
+// promise to imitate the source, which is exactly what this feature must not
+// be understood to do. NONE of these modes relaxes the anti-plagiarism gate —
+// see reference-post-generation.md §6.3.
+//
+// Typed as a const tuple so REFERENCE_POST_SOURCE_ADAPTATION_PROMPTS can key
+// off it exhaustively: adding a mode without its prompt is then a compile
+// error, the same guarantee VALID_STRATEGIES already gives.
+export const VALID_SOURCE_ADAPTATIONS = [
+  // Same information order as the reference, entirely re-expressed.
+  'PRESERVE_STRUCTURE',
+  // Same core point, reorganized into the writer's own structure.
+  'REFRAME',
+  // Only the topic (and why it resonates) carries over; new angle.
+  'FRESH_ANGLE',
+] as const;
+
+export type SourceAdaptation = (typeof VALID_SOURCE_ADAPTATIONS)[number];
+
+// The middle mode is the default: it keeps what made the reference worth
+// riffing on (its point) while forcing the post to be organized by its own
+// author, which is both the most useful output and the least exposed one.
+export const DEFAULT_SOURCE_ADAPTATION: SourceAdaptation = 'REFRAME';
+
+/**
+ * The mode a generation actually runs in. ONE resolver, because two callers
+ * need the SAME answer: the generator (which mode to prompt for) and the
+ * billing record (which mode to attribute that spend to). Resolving it
+ * separately in each — an `?? DEFAULT` in one and a validity check in the
+ * other — meant an internal caller's invalid value was generated as REFRAME
+ * but BILLED as whatever it sent, i.e. audit data describing a mode that
+ * never ran. HTTP callers are gated by the DTO's `@IsIn`; internal callers
+ * (which build the dto by hand) are not, which is exactly why the fallback
+ * has to live in one place.
+ */
+export function resolveSourceAdaptation(value?: string): SourceAdaptation {
+  return VALID_SOURCE_ADAPTATIONS.includes(value as SourceAdaptation)
+    ? (value as SourceAdaptation)
+    : DEFAULT_SOURCE_ADAPTATION;
+}
+
+// Thread ceiling for a generated reference post: follow-up parts BEYOND the
+// anchor, so the longest chain this endpoint can produce is 1 + 5 posts. A
+// ceiling, not a target — the generator is told to use only as many parts as
+// the topic earns. Lives here rather than in engage-reference-post.service.ts
+// because the DTO's own @Max reads it, and that service already imports from
+// this file (the reverse import would be a cycle).
+export const REFERENCE_POST_MAX_THREAD_PARTS = 5;
+export const DEFAULT_REFERENCE_POST_THREAD_PARTS = 3;
+
 // ─── Reference-Post Generation (docs/engage/reference-post-generation.md) ─────
 // Generates AND persists an ORIGINAL post inspired by an opportunity — not a
 // reply to it. See engage.controller.ts POST /opportunities/:id/generate-post.
@@ -1057,6 +1110,15 @@ export class GenerateReferencePostDto {
   @IsString()
   projectId?: string;
 
+  // How closely this post may follow the reference — see
+  // VALID_SOURCE_ADAPTATIONS. Defaults to REFRAME server-side when omitted.
+  // Orthogonal to `strategy`: that picks the voice, this picks the distance
+  // from the source.
+  @IsOptional()
+  @IsString()
+  @IsIn(VALID_SOURCE_ADAPTATIONS)
+  sourceAdaptation?: SourceAdaptation;
+
   // Opt-in, default false. Unlike the text itself, reused media has no
   // "rewrite it in your own words" mitigation — it's the same file, so this
   // carries a more direct copyright exposure than the generated text does.
@@ -1065,6 +1127,30 @@ export class GenerateReferencePostDto {
   @IsOptional()
   @IsBoolean()
   includeReferenceMedia?: boolean;
+
+  // Opt-in native THREAD (anchor + follow-up parts that publish as a reply
+  // chain), default false — a thread is a different artifact from a single
+  // post, never something to hand back by surprise. Honoured only on a
+  // thread-capable platform: on medium/quora/devto (and any other platform
+  // neither publish path can chain — see integrations/thread-capability.ts)
+  // the request degrades to a single post and the response says so via
+  // `thread: false` + `threadSkippedReason`, rather than 400-ing a request
+  // whose platform the client never chose in the first place.
+  @IsOptional()
+  @IsBoolean()
+  thread?: boolean;
+
+  // How many FOLLOW-UP parts beyond the anchor, so the full chain is
+  // 1 + this. Same semantics as the operation plan's own
+  // `operation_plan.max_thread_parts` ceiling. Read only when `thread` is
+  // true; a model that decides fewer parts serve the topic better is not
+  // padded up to it.
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(REFERENCE_POST_MAX_THREAD_PARTS)
+  @Type(() => Number)
+  maxThreadParts?: number;
 }
 
 // ─── Reply Sending ────────────────────────────────────────────────────────────

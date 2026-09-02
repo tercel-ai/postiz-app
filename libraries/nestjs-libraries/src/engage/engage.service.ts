@@ -110,6 +110,7 @@ import {
   ScheduleReplyDto,
   SaveDraftDto,
   GenerateReferencePostDto,
+  resolveSourceAdaptation,
   ScoreStatsDto,
   SendReplyDto,
   UpdateKeywordDto,
@@ -119,6 +120,8 @@ import {
   UpdateScheduledReplyDto,
 } from '@gitroom/nestjs-libraries/engage/dtos/engage.dto';
 import { parseXTweetId } from '@gitroom/nestjs-libraries/engage/x-tweet';
+import { isThreadCapablePlatform } from '@gitroom/nestjs-libraries/integrations/thread-capability';
+import { normalizeEngagePlatform } from '@gitroom/nestjs-libraries/engage/engage-draft-length';
 import {
   fetchRedditAuthorProfile,
   EngageAuthorProfile,
@@ -179,6 +182,25 @@ function engageRefreshFloorMs(): number {
       ? value
       : DEFAULT_REFRESH_FLOOR_SECONDS) * 1000
   );
+}
+
+/**
+ * What POST /opportunities/:id/generate-post streams back. `text` and `postId`
+ * are the original two fields; the rest describe the THREAD outcome, which the
+ * caller cannot infer on its own — it never chose the platform (that is the
+ * opportunity's), so it cannot know whether the platform can chain a thread.
+ */
+export interface ReferencePostResult {
+  /** The whole post — thread parts joined by a blank line. */
+  text: string;
+  /** Root `Post` id. Follow-up parts are its parentPostId chain, same group. */
+  postId: string;
+  /** One entry per post in the chain, in publish order. */
+  parts: string[];
+  /** Whether a thread was actually produced (parts.length > 1). */
+  thread: boolean;
+  /** Only when `thread` was requested but a single post came back. */
+  threadSkippedReason?: 'platform_unsupported' | 'single_post_generated';
 }
 
 @Injectable()
@@ -1270,7 +1292,7 @@ export class EngageService implements OnApplicationBootstrap {
     opportunityId: string,
     dto: GenerateReferencePostDto,
     signal?: AbortSignal
-  ): Promise<{ text: string; postId: string }> {
+  ): Promise<ReferencePostResult> {
     const opportunity = await this._engageRepository.getOpportunityById(
       org.id,
       opportunityId,
@@ -1283,24 +1305,56 @@ export class EngageService implements OnApplicationBootstrap {
       );
     }
 
-    let text: string;
-    try {
-      const result = await this._referencePostService.generate(
-        opportunity,
-        dto.strategy,
-        dto.brandStrength,
-        dto.mentions,
-        dto.outputLength,
-        signal
+    // Through the SHARED resolver, not a local `?? DEFAULT`: generation and
+    // the billing record below must attribute the spend to the same mode, and
+    // an internal caller (which bypasses the DTO's @IsIn) can send anything.
+    const sourceAdaptation = resolveSourceAdaptation(dto.sourceAdaptation);
+
+    // A thread is only ever produced on a platform that can actually chain
+    // one — the caller never picks the platform here (it is always the
+    // opportunity's own), so an unsupported one degrades to a single post
+    // and SAYS SO in the result, rather than 400-ing a request whose only
+    // fault is the opportunity it points at. Capability comes from the one
+    // shared rule (integrations/thread-capability.ts), which covers both the
+    // API and the extension publish paths.
+    const threadCapable = isThreadCapablePlatform(
+      normalizeEngagePlatform(opportunity.platform)
+    );
+    const wantsThread = !!dto.thread;
+    const threadRequested = wantsThread && threadCapable;
+    if (wantsThread && !threadCapable) {
+      this.logger.warn(
+        `Thread requested for opportunity ${opportunityId} on ${opportunity.platform}, which cannot publish a native thread; generating a single post instead.`
       );
+    }
+
+    let text: string;
+    let parts: string[];
+    try {
+      const result = await this._referencePostService.generate(opportunity, {
+        strategy: dto.strategy,
+        sourceAdaptation,
+        brandStrength: dto.brandStrength,
+        mentions: dto.mentions,
+        outputLength: dto.outputLength,
+        thread: threadRequested,
+        maxThreadParts: dto.maxThreadParts,
+        signal,
+      });
       await this._billReferencePostUsages(
         org,
         opportunityId,
         opportunity.platform,
         dto.strategy,
+        sourceAdaptation,
         result.usages
       );
       text = result.text;
+      // An aborted generation comes back with no parts at all; keep the
+      // single-(empty)-post shape the persistence below has always been
+      // handed rather than building a post with zero content entries, which
+      // createOrUpdatePost would turn into zero rows.
+      parts = result.parts?.length ? result.parts : [result.text];
     } catch (err) {
       // Even a FAILED generation (similarity gate exhausted, a later attempt
       // erroring after an earlier one already succeeded) can carry real,
@@ -1314,6 +1368,7 @@ export class EngageService implements OnApplicationBootstrap {
           opportunityId,
           opportunity.platform,
           dto.strategy,
+          sourceAdaptation,
           err.usages
         );
       }
@@ -1351,7 +1406,16 @@ export class EngageService implements OnApplicationBootstrap {
         posts: [
           {
             providerIdentifier: opportunity.platform,
-            value: [{ content: text, image: media }],
+            // One value entry per post in the chain — createOrUpdatePost
+            // turns entries 2..N into parentPostId-chained rows, which IS
+            // how every thread in this app is stored. Media rides on the
+            // ANCHOR only: thread continuations are text-only on the
+            // extension publish path (getDuePublishPosts drops images on
+            // segments), so attaching it further down would silently lose it.
+            value: parts.map((content, index) => ({
+              content,
+              image: index === 0 ? media : [],
+            })),
           },
         ],
       } as never,
@@ -1372,7 +1436,19 @@ export class EngageService implements OnApplicationBootstrap {
       snapshotContent: opportunity.postContent,
     });
 
-    return { text, postId };
+    return {
+      text,
+      postId,
+      parts,
+      thread: parts.length > 1,
+      ...(wantsThread && parts.length <= 1
+        ? {
+            threadSkippedReason: threadCapable
+              ? ('single_post_generated' as const)
+              : ('platform_unsupported' as const),
+          }
+        : {}),
+    };
   }
 
   /**
@@ -1455,6 +1531,10 @@ export class EngageService implements OnApplicationBootstrap {
     opportunityId: string,
     platform: string,
     strategy: string,
+    // Audit-only, like `strategy`: it does not change what is charged, but it
+    // is the axis that most affects how close the output sits to the source,
+    // so a billed generation should record which mode produced it.
+    sourceAdaptation: string,
     usages: ReferencePostUsage[]
   ): Promise<void> {
     if (!this._aiseeCredit || !usages.length) return;
@@ -1469,7 +1549,7 @@ export class EngageService implements OnApplicationBootstrap {
           // generation time (§7 of the design doc).
           relatedId: opportunityId,
           description: 'Reference-post generation (Engage)',
-          data: { platform, strategy },
+          data: { platform, strategy, sourceAdaptation },
         },
         usages.map((usage) => ({
           servicer: usage.provider,

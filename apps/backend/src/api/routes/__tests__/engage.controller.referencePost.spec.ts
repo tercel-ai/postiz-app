@@ -44,6 +44,8 @@ function build(overrides: Record<string, any> = {}) {
     generateReferencePost: vi.fn(async () => ({
       text: 'a fresh original post',
       postId: 'post1',
+      parts: ['a fresh original post'],
+      thread: false,
     })),
     ...overrides,
   };
@@ -73,6 +75,70 @@ describe('EngageController.generateReferencePost', () => {
     expect(frames.join('')).toContain('"postId":"post1"');
     expect(frames.join('')).toContain('[DONE]');
     expect(res.end).toHaveBeenCalled();
+  });
+
+  it('forwards the thread outcome (parts / thread / skip reason) in the final frame', async () => {
+    // The client cannot infer any of this: it never picks the platform (that
+    // is the opportunity's), so only the response can say whether a thread
+    // was actually produced.
+    const { controller } = build({
+      generateReferencePost: vi.fn(async () => ({
+        text: 'anchor\n\nfollow-up',
+        postId: 'post1',
+        parts: ['anchor', 'follow-up'],
+        thread: true,
+      })),
+    });
+    const { res, frames } = makeRes();
+    const { req } = makeReq();
+
+    await controller.generateReferencePost(ORG, USER, 'opp1', { ...BODY, thread: true } as any, req, res);
+
+    const stream = frames.join('');
+    expect(stream).toContain('"thread":true');
+    expect(stream).toContain('"parts":["anchor","follow-up"]');
+  });
+
+  it('publishes only the declared wire fields, never whatever else the service returns', async () => {
+    // The frame is a public contract: serializing the service result
+    // wholesale would leak any field a future change adds to
+    // ReferencePostResult without anyone deciding it should be public.
+    const { controller } = build({
+      generateReferencePost: vi.fn(async () => ({
+        text: 'a fresh original post',
+        postId: 'post1',
+        parts: ['a fresh original post'],
+        thread: false,
+        internalDebugTrace: 'should never reach the client',
+      })),
+    });
+    const { res, frames } = makeRes();
+    const { req } = makeReq();
+
+    await controller.generateReferencePost(ORG, USER, 'opp1', BODY, req, res);
+
+    const stream = frames.join('');
+    expect(stream).not.toContain('internalDebugTrace');
+    // …and a plain single-post request keeps its original frame shape.
+    expect(stream).not.toContain('threadSkippedReason');
+  });
+
+  it('reports a thread that degraded to one post on an unsupported platform', async () => {
+    const { controller } = build({
+      generateReferencePost: vi.fn(async () => ({
+        text: 'just one post',
+        postId: 'post1',
+        parts: ['just one post'],
+        thread: false,
+        threadSkippedReason: 'platform_unsupported',
+      })),
+    });
+    const { res, frames } = makeRes();
+    const { req } = makeReq();
+
+    await controller.generateReferencePost(ORG, USER, 'opp1', { ...BODY, thread: true } as any, req, res);
+
+    expect(frames.join('')).toContain('"threadSkippedReason":"platform_unsupported"');
   });
 
   it('passes the userId through to EngageService (needed to persist the draft)', async () => {
