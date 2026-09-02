@@ -38,9 +38,12 @@ a per-post interval so already-fetched data is not re-pulled.
 ### Window resolution (per-plan, user-overridable)
 `effective = min(userOverride ?? planMax, planMax)`, clamped at READ time.
 - Plan ceilings live in the `engage_entitlements` Settings key (admin-tunable):
-  `metricsWindowDaysMax` = **starter 7 / developer 14 / pro 30** (self-hosted 30).
+  `metricsWindowDaysMax` = **growth-loop 30 / starter 7 / developer 14 / pro 30**
+  (self-hosted 30). growth-loop reads `DEFAULT_METRICS_WINDOW_DAYS` rather than
+  repeating the number, so that constant is the single place it is written.
 - User override stored in `Organization.data.metricsWindowDays`.
-- Per-plan fetch interval `metricsFetchIntervalHours` = starter 24 / developer 12 / pro 6.
+- Per-plan fetch interval `metricsFetchIntervalHours` = growth-loop 6 / starter 24 /
+  developer 12 / pro 6.
 
 ### Flow
 ```
@@ -124,6 +127,11 @@ cursor.
 | `POST /posts/metrics/due` | due posts for the viewed ids |
 | `POST /posts/metrics/backfill` | extension writes back metrics |
 | `POST /engage/scan-tasks/ingest` | extension scan loop (ingest + claim next) |
+
+> Both ingest endpoints sit behind a per-org records/hour ceiling
+> (`engage_ingest_quota`). The pacing on this page is what the backend ASKS the
+> extension to honour; the ceiling is what it ENFORCES on the way back in — see
+> [`write-path-limits.md`](./write-path-limits.md).
 | `GET /admin/settings/engage-initial-scan-budget` | now also returns `pacing` |
 | `PUT /admin/settings/engage_scan_pacing` | edit pacing (generic settings CRUD) |
 

@@ -4,6 +4,9 @@ import {
   EngageEntitlementService,
   ENGAGE_ENTITLEMENTS_KEY,
   ENGAGE_REPLY_CREDITS_KEY,
+  DEFAULT_SCAN_INTERVAL_HOURS,
+  DEFAULT_METRICS_WINDOW_DAYS,
+  DEFAULT_METRICS_FETCH_INTERVAL_HOURS,
 } from '../engage-entitlement.service';
 
 // ── Mock builders ─────────────────────────────────────────────────────────────
@@ -880,5 +883,207 @@ describe('EngageEntitlementService.releaseReplyGeneration', () => {
       where: { taskId: 'task-1' },
       data: { status: 'released' },
     });
+  });
+});
+
+describe('EngageEntitlementService.onModuleInit — per-plan backfill', () => {
+  // onModuleInit touches only the settings store, so the rest of the graph can
+  // stay empty here — build() constructs its own settings mock internally and
+  // does not hand it back.
+  function seedBuild(stored?: unknown) {
+    const settings = settingsMock(
+      stored === undefined ? {} : { [ENGAGE_ENTITLEMENTS_KEY]: stored }
+    );
+    const service = new EngageEntitlementService(
+      settings,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any
+    );
+    const writes = () =>
+      settings.set.mock.calls.filter(
+        (c: unknown[]) => c[0] === ENGAGE_ENTITLEMENTS_KEY
+      );
+    return { service, settings, writes };
+  }
+
+  // The production row was written before 'growth-loop' existed, so it carried
+  // only the three legacy tiers — and the admin settings UI renders the STORED
+  // object, which meant it showed three unsellable tiers and hid the only one
+  // being sold.
+  const LEGACY_ROW = {
+    pro: { keywordsMax: 300, subredditsMax: 150, scanIntervalHours: 6 },
+    starter: { keywordsMax: 30, subredditsMax: 10, scanIntervalHours: 24 },
+    developer: { keywordsMax: 100, subredditsMax: 50, scanIntervalHours: 24 },
+  };
+
+  it('adds the missing plan without touching the stored ones', async () => {
+    const { service, writes } = seedBuild(LEGACY_ROW);
+    await service.onModuleInit();
+
+    expect(writes()).toHaveLength(1);
+    const value = writes()[0][1] as Record<string, any>;
+    expect(Object.keys(value).sort()).toEqual([
+      'developer',
+      'growth-loop',
+      'pro',
+      'starter',
+    ]);
+    // Admin tuning outranks a default — the legacy entries are byte-identical.
+    expect(value.pro).toEqual(LEGACY_ROW.pro);
+    expect(value.starter).toEqual(LEGACY_ROW.starter);
+    expect(value.developer).toEqual(LEGACY_ROW.developer);
+    // ...and the backfilled plan carries the sold spec.
+    expect(value['growth-loop']).toMatchObject({
+      keywordsPerProjectMax: 30,
+      priorityAccountsPerProjectMax: 20,
+      scanIntervalHours: 24,
+    });
+  });
+
+  it('writes nothing when every plan is already stored', async () => {
+    const { service, writes } = seedBuild({
+      ...LEGACY_ROW,
+      'growth-loop': { keywordsMax: 1 },
+    });
+    await service.onModuleInit();
+    expect(writes()).toHaveLength(0);
+  });
+
+  it('seeds the full default map when the key is absent entirely', async () => {
+    const { service, writes } = seedBuild();
+    await service.onModuleInit();
+    expect(Object.keys(writes()[0][1] as object).sort()).toEqual([
+      'developer',
+      'growth-loop',
+      'pro',
+      'starter',
+    ]);
+  });
+
+  it('refuses to overwrite a stored value that is not an object', async () => {
+    const { service, writes } = seedBuild('corrupted');
+    await service.onModuleInit();
+    expect(writes()).toHaveLength(0);
+  });
+});
+
+describe('EngageEntitlementService.onModuleInit — unreachable project caps', () => {
+  function warnBuild(stored: unknown) {
+    const settings = settingsMock({ [ENGAGE_ENTITLEMENTS_KEY]: stored });
+    const service = new EngageEntitlementService(
+      settings,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any
+    );
+    const warn = vi
+      .spyOn((service as any).logger, 'warn')
+      .mockImplementation(() => undefined);
+    return { service, warn };
+  }
+
+  const complete = (extra: Record<string, unknown>) => ({
+    starter: {},
+    developer: {},
+    pro: {},
+    'growth-loop': {},
+    ...extra,
+  });
+
+  it('warns when the org cap sits below the per-project cap', async () => {
+    // The exact shape that reached production: growth-loop filled in from
+    // starter, so a 10-keyword org budget against a 30-keyword project cap.
+    const { service, warn } = warnBuild(
+      complete({ 'growth-loop': { keywordsMax: 10, priorityAccountsMax: 10 } })
+    );
+    await service.onModuleInit();
+
+    const message = warn.mock.calls.map(String).join('\n');
+    expect(message).toContain('growth-loop');
+    expect(message).toContain('keywordsMax=10 < keywordsPerProjectMax=30');
+    expect(message).toContain(
+      'priorityAccountsMax=10 < priorityAccountsPerProjectMax=20'
+    );
+  });
+
+  it('stays quiet on a well-formed map', async () => {
+    const { service, warn } = warnBuild(complete({}));
+    await service.onModuleInit();
+    expect(
+      warn.mock.calls.filter((c) => String(c[0]).includes('PerProjectMax'))
+    ).toHaveLength(0);
+  });
+
+  it('treats an unlimited org cap as reachable, not as zero', async () => {
+    // null means unlimited; comparing it numerically would flag every pro row.
+    const { service, warn } = warnBuild(
+      complete({ pro: { priorityAccountsMax: null, keywordsMax: null } })
+    );
+    await service.onModuleInit();
+    expect(
+      warn.mock.calls.filter((c) => String(c[0]).includes('pro:'))
+    ).toHaveLength(0);
+  });
+});
+
+describe('growth-loop tracks the named cadence/window defaults', () => {
+  // The sold plan must not repeat these numbers as literals — a second copy is
+  // how it and the no-billing fallback drift apart. Asserting identity rather
+  // than a value keeps this test true when the defaults are retuned.
+  it('reads its cadence and metrics window from the shared constants', async () => {
+    const settings = settingsMock({});
+    const service = new EngageEntitlementService(
+      settings,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any
+    );
+    const growthLoop = (await service.getPublicPlanCatalog()).plans.find(
+      (p) => p.code === 'growth-loop'
+    )!.limits;
+
+    expect(growthLoop.scanIntervalHours).toBe(DEFAULT_SCAN_INTERVAL_HOURS);
+    expect(growthLoop.metricsWindowDaysMax).toBe(DEFAULT_METRICS_WINDOW_DAYS);
+    expect(growthLoop.metricsFetchIntervalHours).toBe(
+      DEFAULT_METRICS_FETCH_INTERVAL_HOURS
+    );
+  });
+
+  it('leaves the legacy ladder on its own literals', async () => {
+    const settings = settingsMock({});
+    const service = new EngageEntitlementService(
+      settings,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any
+    );
+    const byCode = Object.fromEntries(
+      (await service.getPublicPlanCatalog()).plans.map((p) => [p.code, p.limits])
+    );
+    // starter/developer sit BELOW the shared defaults by design; binding them
+    // to the constants would collapse the ladder on the next retune.
+    expect(byCode.starter.metricsWindowDaysMax).toBeLessThan(
+      DEFAULT_METRICS_WINDOW_DAYS
+    );
+    expect(byCode.developer.metricsWindowDaysMax).toBeLessThan(
+      DEFAULT_METRICS_WINDOW_DAYS
+    );
   });
 });

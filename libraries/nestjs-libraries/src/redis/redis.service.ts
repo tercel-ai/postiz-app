@@ -8,6 +8,8 @@ import { Redis } from 'ioredis';
 //   - `set(key, value, 'EX', ttl, 'NX')` returns null when the key already
 //     exists, matching ioredis. This is the primitive used by
 //     `notifyOncePerCooldown` below.
+//   - `incrby`/`incr`/`expire`, so counter-backed code (the engage ingest
+//     quota) works unchanged when REDIS_URL is unset.
 class MockRedis {
   private data: Map<string, any> = new Map();
   private expiries: Map<string, number> = new Map();
@@ -57,6 +59,27 @@ class MockRedis {
   async del(key: string) {
     this.data.delete(key);
     this.expiries.delete(key);
+    return 1;
+  }
+
+  // Counter primitives, so code that meters something (e.g. the engage ingest
+  // quota) behaves the same with or without REDIS_URL instead of throwing
+  // "incrby is not a function" on a self-hosted install.
+  async incrby(key: string, increment: number) {
+    this._evictIfExpired(key);
+    const next = (Number(this.data.get(key)) || 0) + Number(increment);
+    this.data.set(key, String(next));
+    return next;
+  }
+
+  async incr(key: string) {
+    return this.incrby(key, 1);
+  }
+
+  async expire(key: string, ttlSeconds: number) {
+    this._evictIfExpired(key);
+    if (!this.data.has(key)) return 0;
+    this.expiries.set(key, Date.now() + Number(ttlSeconds) * 1000);
     return 1;
   }
 }

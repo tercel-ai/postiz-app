@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { NotFoundException } from '@nestjs/common';
+import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { EngageController } from '../engage.controller';
 import { TooSimilarToReferenceError } from '@gitroom/nestjs-libraries/engage/engage-reference-post.service';
 
@@ -51,6 +51,7 @@ function build(overrides: Record<string, any> = {}) {
   };
   const controller = new EngageController(
     engageService as any,
+    {} as any,
     {} as any,
     {} as any,
     {} as any,
@@ -197,6 +198,49 @@ describe('EngageController.generateReferencePost', () => {
     await controller.generateReferencePost(ORG, USER, 'opp1', BODY, req, res);
 
     expect(frames.join('')).toContain('generation_failed');
+  });
+
+  // Without this the frame is a single opaque token and the only way to learn
+  // what actually broke is a server log the caller has no access to.
+  it('carries the underlying failure message as `reason` on the generation_failed frame', async () => {
+    const { controller } = build({
+      generateReferencePost: vi.fn(async () => {
+        throw new BadRequestException(
+          'No available posting time slot found within the next 365 days'
+        );
+      }),
+    });
+    const { res, frames } = makeRes();
+    const { req } = makeReq();
+
+    await controller.generateReferencePost(ORG, USER, 'opp1', BODY, req, res);
+
+    const payload = JSON.parse(
+      frames.join('').split('data: ')[1].split('\n\n')[0]
+    );
+    expect(payload).toEqual({
+      error: 'generation_failed',
+      reason: 'No available posting time slot found within the next 365 days',
+    });
+  });
+
+  // The typed frames say everything their code already says; a reason there
+  // would just be a second, redundant string for the client to ignore.
+  it('does not add a reason to the typed frames', async () => {
+    const { controller } = build({
+      generateReferencePost: vi.fn(async () => {
+        throw new TooSimilarToReferenceError([]);
+      }),
+    });
+    const { res, frames } = makeRes();
+    const { req } = makeReq();
+
+    await controller.generateReferencePost(ORG, USER, 'opp1', BODY, req, res);
+
+    const payload = JSON.parse(
+      frames.join('').split('data: ')[1].split('\n\n')[0]
+    );
+    expect(payload).toEqual({ error: 'too_similar_to_reference' });
   });
 
   it('writes nothing when the client aborts before generation resolves', async () => {

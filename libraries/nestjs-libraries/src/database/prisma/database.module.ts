@@ -61,6 +61,7 @@ import { EngageScanConfigService } from '@gitroom/nestjs-libraries/engage/engage
 import { EngageScanLeaseService } from '@gitroom/nestjs-libraries/engage/engage-scan-lease.service';
 import { EngageScanIngestService } from '@gitroom/nestjs-libraries/engage/engage-scan-ingest.service';
 import { EngageScanTasksService } from '@gitroom/nestjs-libraries/engage/engage-scan-tasks.service';
+import { EngageIngestQuotaService } from '@gitroom/nestjs-libraries/engage/engage-ingest-quota.service';
 import { EngageIntentClassifierService } from '@gitroom/nestjs-libraries/engage/engage-intent-classifier.service';
 import { EngageDraftService } from '@gitroom/nestjs-libraries/engage/engage-draft.service';
 import { EngageReferencePostService } from '@gitroom/nestjs-libraries/engage/engage-reference-post.service';
@@ -141,6 +142,7 @@ import { AutomationService } from '@gitroom/nestjs-libraries/automation/automati
     EngageScanLeaseService,
     EngageScanIngestService,
     EngageScanTasksService,
+    EngageIngestQuotaService,
     EngageIntentClassifierService,
     EngageDraftService,
     EngageReferencePostService,

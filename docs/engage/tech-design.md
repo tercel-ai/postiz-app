@@ -2431,14 +2431,20 @@ Engage limits live in the global `Settings` table as JSON (same pattern as
 
 - **`engage_entitlements`** — plan code → limits. `null` = unlimited.
 
-  | Field | Starter | Developer | Pro |
-  | --- | --- | --- | --- |
-  | `keywordsMax` | 30 | 100 | 300 |
-  | `priorityAccountsMax` | 10 | 60 | `null` |
-  | `keywordsPerProjectMax` | 5 | 15 | 30 |
-  | `priorityAccountsPerProjectMax` | 4 | 18 | 35 |
-  | `scanIntervalHours` | 24 | 24 | 6 |
-  | `replyMonthlyCap` | 10 | `null` | `null` |
+  | Field | Growth-Loop | Starter | Developer | Pro |
+  | --- | --- | --- | --- | --- |
+  | `keywordsMax` | **300** | 30 | 100 | 300 |
+  | `priorityAccountsMax` | **200** | 10 | 60 | `null` |
+  | `keywordsPerProjectMax` | **30** | 5 | 15 | 30 |
+  | `priorityAccountsPerProjectMax` | **20** | 4 | 18 | 35 |
+  | `scanIntervalHours` | **24** | 24 | 24 | 6 |
+  | `replyMonthlyCap` | **`null`** | 10 | `null` | `null` |
+
+  `growth-loop` is the only plan aisee-core still sells; the rest are legacy
+  tiers kept so pre-existing subscriptions resolve. An org-wide cap must stay
+  **>=** its per-project counterpart — the effective head-room is
+  `min(org remaining, project remaining)`, so an org cap below the project one
+  makes the project cap unreachable; `onModuleInit` warns when it finds one.
 
   `priorityAccounts*` is **one shared pool per platform**: on each platform,
   tracked accounts AND monitored channels (subreddits etc.) count against the

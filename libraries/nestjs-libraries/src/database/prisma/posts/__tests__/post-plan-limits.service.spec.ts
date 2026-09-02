@@ -41,8 +41,42 @@ describe('PostPlanLimitsService.onModuleInit', () => {
     );
   });
 
-  it('does not reseed when a value exists', async () => {
-    const settings = settingsMock({ [POST_PLAN_LIMITS_KEY]: {} });
+  it('does not reseed when every plan is already stored', async () => {
+    const settings = settingsMock({
+      [POST_PLAN_LIMITS_KEY]: {
+        starter: { postSendLimit: 5 },
+        developer: { postSendLimit: 5 },
+        pro: { postSendLimit: 5 },
+        'growth-loop': { postSendLimit: 5 },
+      },
+    });
+    await new PostPlanLimitsService(settings).onModuleInit();
+    expect(settings.set).not.toHaveBeenCalled();
+  });
+
+  it('backfills a plan the stored row predates, leaving tuned plans intact', async () => {
+    // The production row was written before 'growth-loop' was a plan code, and
+    // the admin settings UI renders the STORED object — so the only tier still
+    // being sold was missing from the page every admin tunes.
+    const settings = settingsMock({
+      [POST_PLAN_LIMITS_KEY]: {
+        starter: { postSendLimit: 7, postChannelLimit: 3 },
+        developer: { postSendLimit: 0, postChannelLimit: null },
+        pro: { postSendLimit: 0, postChannelLimit: null },
+      },
+    });
+    await new PostPlanLimitsService(settings).onModuleInit();
+    const written = settings.set.mock.calls[0][1] as Record<string, unknown>;
+    expect(written['growth-loop']).toEqual({
+      postSendLimit: 0,
+      postChannelLimit: null,
+    });
+    // An admin's tuning outranks a default and must survive verbatim.
+    expect(written.starter).toEqual({ postSendLimit: 7, postChannelLimit: 3 });
+  });
+
+  it('leaves a non-object stored value alone rather than overwriting it', async () => {
+    const settings = settingsMock({ [POST_PLAN_LIMITS_KEY]: 'corrupted' });
     await new PostPlanLimitsService(settings).onModuleInit();
     expect(settings.set).not.toHaveBeenCalled();
   });

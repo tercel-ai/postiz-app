@@ -68,17 +68,59 @@ export class PostPlanLimitsService implements OnModuleInit {
 
   constructor(private readonly _settings: SettingsService) {}
 
+  /**
+   * Seed the map, and backfill any plan code the stored object predates.
+   *
+   * Testing only whether the KEY exists is right for a flat value and wrong for
+   * a map keyed by plan: this row was written when starter/developer/pro were
+   * the only codes, so 'growth-loop' — added to AISEE_PLAN_CODES afterwards —
+   * could never reach the table. `getAll` merges per plan so nothing broke, but
+   * the admin settings UI renders the STORED object, and it listed three tiers
+   * nobody can buy any more while omitting the only one that is sold. Mirrors
+   * EngageEntitlementService._seedPlansIfMissing.
+   *
+   * Stored entries are never touched: an admin's tuning outranks a default, and
+   * a plan present in storage but absent from the defaults is left alone rather
+   * than pruned.
+   */
   async onModuleInit(): Promise<void> {
-    const existing = await this._settings.get(POST_PLAN_LIMITS_KEY);
+    const description =
+      'Per-plan posting limits: postSendLimit (free posts per billing period) and postChannelLimit. null = defer to the aisee-core credit package value.';
+    const existing = await this._settings.get<Record<string, unknown>>(
+      POST_PLAN_LIMITS_KEY
+    );
     if (existing === null || existing === undefined) {
       await this._settings.set(POST_PLAN_LIMITS_KEY, DEFAULT_POST_PLAN_LIMITS, {
         type: 'object',
-        description:
-          'Per-plan posting limits: postSendLimit (free posts per billing period) and postChannelLimit. null = defer to the aisee-core credit package value.',
+        description,
         defaultValue: DEFAULT_POST_PLAN_LIMITS,
       });
       this.logger.log(`Seeded default ${POST_PLAN_LIMITS_KEY}`);
+      return;
     }
+    if (typeof existing !== 'object' || Array.isArray(existing)) {
+      this.logger.warn(
+        `${POST_PLAN_LIMITS_KEY} is not an object; leaving it alone rather than overwriting an admin's value`
+      );
+      return;
+    }
+    const missing = AISEE_PLAN_CODES.filter(
+      (code) => existing[code] === undefined
+    );
+    if (!missing.length) return;
+    await this._settings.set(
+      POST_PLAN_LIMITS_KEY,
+      {
+        ...existing,
+        ...Object.fromEntries(
+          missing.map((code) => [code, DEFAULT_POST_PLAN_LIMITS[code]])
+        ),
+      },
+      { type: 'object', description, defaultValue: DEFAULT_POST_PLAN_LIMITS }
+    );
+    this.logger.log(
+      `Backfilled ${POST_PLAN_LIMITS_KEY} with missing plan(s): ${missing.join(', ')}`
+    );
   }
 
   /**

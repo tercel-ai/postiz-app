@@ -16,6 +16,7 @@ import {
 } from '@nestjs/common';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
+import { EngageIngestQuotaService } from '@gitroom/nestjs-libraries/engage/engage-ingest-quota.service';
 import { Organization, User } from '@prisma/client';
 import { Request, Response } from 'express';
 import { GetOrgFromRequest } from '@gitroom/nestjs-libraries/user/org.from.request';
@@ -105,7 +106,8 @@ export class EngageController {
     private _engageDraftService: EngageDraftService,
     private _scanTasksService: EngageScanTasksService,
     private _engageAutoReplyService: EngageAutoReplyService,
-    private _platformPacing: PlatformPacingConfigService
+    private _platformPacing: PlatformPacingConfigService,
+    private _ingestQuota: EngageIngestQuotaService
   ) {}
 
   // ─── Extension scan loop ──────────────────────────────────────────────────
@@ -122,6 +124,13 @@ export class EngageController {
     console.log(
       '[ingest-ctrl] completed=',
       JSON.stringify(body.completed)?.slice(0, 200)
+    );
+    // Ceiling first, before any parsing or persistence: an over-quota batch must
+    // cost nothing. A call carrying no `completed` unit is a pure claim (the
+    // bootstrap poll) and consumes no quota.
+    await this._ingestQuota.assertWithinQuota(
+      org.id,
+      body.completed?.posts?.length ?? 0
     );
     const completed = body.completed
       ? {
@@ -179,6 +188,7 @@ export class EngageController {
     @GetOrgFromRequest() org: Organization,
     @Body() body: { posts?: any[] }
   ) {
+    await this._ingestQuota.assertWithinQuota(org.id, body?.posts?.length ?? 0);
     const posts = (body?.posts ?? []).map(scanIngestPostToRawPost);
     const result = await this._scanTasksService.ingestCollectedPosts(
       org.id,
@@ -924,7 +934,7 @@ export class EngageController {
   @ApiResponse({
     status: 200,
     description:
-      'SSE stream ending with a data frame carrying {text, postId, parts, thread, threadSkippedReason?} then [DONE]. `parts` is one entry per post in the chain (a single-element array unless a thread was produced) and `thread` reports whether one actually was — a thread requested on a platform that cannot chain one (medium/quora/devto) degrades to a single post with threadSkippedReason=platform_unsupported. Failures (opportunity not found, generation failed, too similar to the reference) end the stream with a typed error frame instead.',
+      'SSE stream ending with a data frame carrying {text, postId, parts, thread, threadSkippedReason?} then [DONE]. `parts` is one entry per post in the chain (a single-element array unless a thread was produced) and `thread` reports whether one actually was — a thread requested on a platform that cannot chain one (medium/quora/devto) degrades to a single post with threadSkippedReason=platform_unsupported. Failures (opportunity not found, generation failed, too similar to the reference) end the stream with a typed error frame instead; the untyped `generation_failed` frame also carries a diagnostic `reason` string.',
   })
   @ApiResponse({ status: 404, description: 'Opportunity not found' })
   @ApiResponse({ status: 429, description: 'Rate limit exceeded (20/hour)' })
@@ -1003,7 +1013,18 @@ export class EngageController {
         err instanceof Error ? err.stack : err
       );
       if (!res.writableEnded) {
-        res.write(`data: ${JSON.stringify({ error: 'generation_failed' })}\n\n`);
+        // `error` stays the stable, machine-readable contract the client
+        // branches on; `reason` is the human-readable message of whatever
+        // actually threw, carried so a failure is diagnosable from the
+        // response instead of only from a server log the caller cannot see.
+        // Message only — never the stack, and never on the typed frames
+        // above, whose code already says everything there is to say.
+        res.write(
+          `data: ${JSON.stringify({
+            error: 'generation_failed',
+            reason: err instanceof Error ? err.message : String(err),
+          })}\n\n`
+        );
         res.write(`data: [DONE]\n\n`);
       }
     } finally {

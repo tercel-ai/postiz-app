@@ -31,16 +31,18 @@ and `EngageRepository.getOrgScanStatus` (`libraries/nestjs-libraries/src/engage/
 
   // ── B. entitlement: plan limits + usage + reply pricing ──
   "entitlement": {
-    "plan": "starter",                          // "starter" | "developer" | "pro" | null
+    // "growth-loop" is the only plan aisee-core still sells; starter /
+    // developer / pro are legacy tiers kept so existing subscriptions resolve.
+    "plan": "growth-loop",                      // "starter" | "developer" | "pro" | "growth-loop" | null
     "limits": {
-      "keywordsMax": 3,                         // number | null (null = unlimited)
-      "priorityAccountsMax": 10,                // shared pool: tracked accounts + monitored channels
-      "keywordsPerProjectMax": 5,               // per-project counterparts
-      "priorityAccountsPerProjectMax": 4,
+      "keywordsMax": 300,                       // number | null (null = unlimited)
+      "priorityAccountsMax": 200,               // shared pool: tracked accounts + monitored channels
+      "keywordsPerProjectMax": 30,              // per-project counterparts
+      "priorityAccountsPerProjectMax": 20,
       "scanIntervalHours": 24,
-      "replyMonthlyCap": 10,                    // number | null (null = unlimited)
-      "metricsWindowDaysMax": 7,
-      "metricsFetchIntervalHours": 24
+      "replyMonthlyCap": null,                  // number | null (null = unlimited)
+      "metricsWindowDaysMax": 30,
+      "metricsFetchIntervalHours": 6
     },
     "usage": {                                  // ORG-WIDE enabled counts
       "keywords": 2,
@@ -161,15 +163,33 @@ picks them up):
 
 | Plan | keywordsMax | priorityAccountsMax | scanIntervalHours | replyMonthlyCap | metricsWindowDaysMax | metricsFetchIntervalHours |
 |------|---|---|---|---|---|---|
+| **growth-loop** | **300** | **200** | **24** | **null (∞)** | **30** | **6** |
 | starter | 30 | 10 | 24 | 10 | 7 | 24 |
 | developer | 100 | 60 | 24 | null (∞) | 14 | 12 |
 | pro | 300 | null (∞) | 6 | null (∞) | 30 | 6 |
 
 | Plan | keywordsPerProjectMax | priorityAccountsPerProjectMax |
 |------|---|---|
+| **growth-loop** | **30** | **20** |
 | starter | 5 | 4 |
 | developer | 15 | 18 |
 | pro | 30 | 35 |
+
+`growth-loop` is the only plan aisee-core still sells; the other three are legacy
+tiers retained so pre-existing subscriptions keep resolving. Its per-project
+numbers are the ones the plan is SOLD on — they are transcribed from the plan
+panel in aisee-app (30 tracked keywords, 20 accounts per platform, a 24h scan
+frequency), and its org-wide caps are 10x those, i.e. an account budget sized for
+about ten projects. Its cadence and metrics fields reference
+`DEFAULT_SCAN_INTERVAL_HOURS` / `DEFAULT_METRICS_WINDOW_DAYS` /
+`DEFAULT_METRICS_FETCH_INTERVAL_HOURS` rather than repeating the numbers, so those
+constants are the single place each value is written.
+
+**Invariant**: an org-wide cap must be >= its per-project counterpart. Both are
+enforced on every activation and the effective head-room is
+`min(org remaining, project remaining)`, so an org cap below the project one makes
+the project cap unreachable and the plan silently grants less than it advertises.
+`EngageEntitlementService.onModuleInit` warns (does not throw) when it finds one.
 
 ### B3. `entitlement.usage` — current usage (org-wide)
 

@@ -137,9 +137,60 @@ export interface EngageReplyCredits {
 //
 // starter/developer/pro are legacy tiers, retained only so pre-existing
 // subscriptions keep resolving (see AiseePlanCode). 'growth-loop' is the only
-// plan aisee-core sells going forward; it starts out at the old 'pro' limits
-// since it is now the single tier every paying org is on — tune via
-// admin settings, not by editing this default.
+// plan aisee-core sells going forward.
+//
+// growth-loop no longer copies the old 'pro' shape. 'pro' left
+// priorityAccountsMax unlimited, which was survivable while aisee-core still
+// capped how many products a tier could own — it does not: GROWTH_LOOP's
+// product limit is null (unlimited) in product_limit_service.py, so an
+// unlimited per-platform follow pool times an unlimited project count left the
+// scan-unit count, and therefore the ingest volume it authorises, with no
+// upper bound at all. A DEFAULT is a safety floor, not a tuning knob: it has to
+// hold when an admin has configured nothing. Settings overrides raise it.
+//
+// Note the same null still stands on 'pro' — deliberately, since that tier is
+// closed to new subscriptions and its remaining orgs were sold uncapped.
+//
+// growth-loop's PER-PROJECT numbers are the ones the plan is actually sold on,
+// so they are transcribed from the plan panel in aisee-app (StatsPanel /
+// MetricPanel) rather than chosen here: 30 tracked keywords, 20 accounts per
+// platform, a 24h scan frequency. That panel hardcodes its figures and never
+// reads scanIntervals.scanIntervalHours back from this service, so a divergence
+// is invisible in the product — which is how growth-loop came to run a 6h scan
+// against a 24h promise, inherited from the 'pro' copy it was seeded from. Four
+// times the fetches, the ingest volume and the intent-classification calls that
+// were paid for.
+//
+// The org-wide caps stay 10x their per-project counterparts, the ratio
+// keywordsMax already used — i.e. the account budget is sized for ~10 projects.
+// ─── Cadence/window defaults ──────────────────────────────────────────────────
+//
+// Declared here, above DEFAULT_ENTITLEMENTS, because 'growth-loop' REFERENCES
+// them rather than repeating the numbers. Each is the single place its value is
+// written, so changing one moves the sold plan and the no-billing fallback
+// together — which is the point: those two must agree, and a literal in each
+// place is exactly how they drift apart.
+//
+// The legacy tiers keep their own literals on purpose. starter/developer are a
+// deliberate ladder BELOW these values, not the same value spelled twice, so
+// binding them here would collapse the ladder the next time a default moves.
+
+/** Scan cadence for the sold plan, and when no entitlement applies (self-hosted / billing off). */
+export const DEFAULT_SCAN_INTERVAL_HOURS = 24;
+
+/**
+ * How many days after publication a post stays eligible for metrics fetching —
+ * for the sold plan, and when no plan cap applies (self-hosted / billing off).
+ *
+ * Not only a cost dial: the same window decides how far back
+ * `backfillFromExisting` reaches when an org adds a keyword, so shrinking it
+ * also thins the cold-start signal a new keyword arrives with.
+ */
+export const DEFAULT_METRICS_WINDOW_DAYS = 30;
+
+/** Minimum spacing between two metrics fetches of one post, for the sold plan and the no-plan fallback. */
+export const DEFAULT_METRICS_FETCH_INTERVAL_HOURS = 6;
+
 const DEFAULT_ENTITLEMENTS: EngageEntitlementMap = {
   starter: {
     keywordsMax: 30,
@@ -173,13 +224,13 @@ const DEFAULT_ENTITLEMENTS: EngageEntitlementMap = {
   },
   'growth-loop': {
     keywordsMax: 300,
-    priorityAccountsMax: null,
+    priorityAccountsMax: 200,
     keywordsPerProjectMax: 30,
-    priorityAccountsPerProjectMax: 35,
-    scanIntervalHours: 6,
+    priorityAccountsPerProjectMax: 20,
+    scanIntervalHours: DEFAULT_SCAN_INTERVAL_HOURS,
     replyMonthlyCap: null,
-    metricsWindowDaysMax: 30,
-    metricsFetchIntervalHours: 6,
+    metricsWindowDaysMax: DEFAULT_METRICS_WINDOW_DAYS,
+    metricsFetchIntervalHours: DEFAULT_METRICS_FETCH_INTERVAL_HOURS,
   },
 };
 
@@ -192,17 +243,6 @@ const DEFAULT_REPLY_CREDITS: EngageReplyCredits = {
 // unrecognised plan name), fall back to the most restrictive tier. Over-blocking
 // an anomalous account is safer for revenue than silently granting Pro limits.
 const FALLBACK_PLAN_CODE: EngagePlanCode = 'starter';
-
-// Default scan cadence when no entitlement applies (self-hosted / billing off).
-export const DEFAULT_SCAN_INTERVAL_HOURS = 24;
-
-// Metrics-monitoring window used when no plan cap applies (self-hosted / billing
-// off): the most generous tier, since there is no plan to bound it.
-export const DEFAULT_METRICS_WINDOW_DAYS = 30;
-
-// Metrics fetch spacing when no plan applies (self-hosted / billing off): the
-// most generous (most frequent) tier.
-export const DEFAULT_METRICS_FETCH_INTERVAL_HOURS = 6;
 
 // Fully-unlimited entitlement used when billing is disabled (self-hosted). No
 // hard caps; scan cadence falls back to the default.
@@ -267,16 +307,120 @@ export class EngageEntitlementService implements OnModuleInit {
   ) {}
 
   async onModuleInit(): Promise<void> {
-    await this._seedIfMissing(
+    await this._seedPlansIfMissing(
       ENGAGE_ENTITLEMENTS_KEY,
       DEFAULT_ENTITLEMENTS,
       'Per-plan engage limits: org-wide keywords + priority accounts (one shared pool covering tracked accounts AND monitored channels, all platforms), their per-project counterparts (*PerProjectMax), scan interval, reply cap, metrics window days, metrics fetch interval. null = unlimited; both caps apply.'
     );
+    await this._warnOnUnreachableProjectCaps();
     await this._seedIfMissing(
       ENGAGE_REPLY_CREDITS_KEY,
       DEFAULT_REPLY_CREDITS,
       'Engage reply-draft pricing: cost = round(base × length multiplier).'
     );
+  }
+
+  /**
+   * Warn when a plan's org-wide cap sits BELOW its per-project counterpart.
+   *
+   * Both caps are enforced on every activation and the effective head-room is
+   * `min(org remaining, project remaining)`, so an org cap under the project one
+   * makes the project cap unreachable — the plan then quietly grants less than
+   * the number its own pricing page advertises, and nothing about the failure
+   * says which of the two settings is at fault. This has already happened once:
+   * a 'growth-loop' row filled in from starter's shape carried keywordsMax 10
+   * against a keywordsPerProjectMax of 30.
+   *
+   * Warn rather than throw: a mistuned cap is over-restrictive, not dangerous,
+   * and refusing to boot over a settings typo would turn a bad limit into an
+   * outage. Runs against the MERGED map, so it catches a bad default as readily
+   * as a bad stored override.
+   */
+  private async _warnOnUnreachableProjectCaps(): Promise<void> {
+    let entitlements: EngageEntitlementMap;
+    try {
+      entitlements = await this._loadEntitlements();
+    } catch (err) {
+      this.logger.error(
+        'Could not read engage entitlements to validate their caps',
+        err as Error
+      );
+      return;
+    }
+    // null = unlimited, which is never below anything.
+    const below = (org: number | null, project: number | null) =>
+      org !== null && project !== null && org < project;
+
+    for (const [code, limits] of Object.entries(entitlements)) {
+      const offenders: string[] = [];
+      if (below(limits.keywordsMax, limits.keywordsPerProjectMax)) {
+        offenders.push(
+          `keywordsMax=${limits.keywordsMax} < keywordsPerProjectMax=${limits.keywordsPerProjectMax}`
+        );
+      }
+      if (
+        below(limits.priorityAccountsMax, limits.priorityAccountsPerProjectMax)
+      ) {
+        offenders.push(
+          `priorityAccountsMax=${limits.priorityAccountsMax} < priorityAccountsPerProjectMax=${limits.priorityAccountsPerProjectMax}`
+        );
+      }
+      if (offenders.length) {
+        this.logger.warn(
+          `${ENGAGE_ENTITLEMENTS_KEY}.${code}: ${offenders.join('; ')} — the ` +
+            'org-wide cap is the binding one, so the per-project cap can never ' +
+            'be reached and this plan grants less than it advertises. Set the ' +
+            'org cap to roughly (per-project cap x the plan\'s project limit).'
+        );
+      }
+    }
+  }
+
+  /**
+   * Seed a PER-PLAN settings map, backfilling plan codes the stored object does
+   * not carry yet.
+   *
+   * `_seedIfMissing` tests only whether the KEY exists, which is right for a
+   * flat value and wrong for a map keyed by plan: `engage_entitlements` was
+   * written when starter/developer/pro were the only codes, so 'growth-loop' —
+   * added to AISEE_PLAN_CODES afterwards — could never reach the table. Nothing
+   * broke, because _loadEntitlements merges each plan over DEFAULT_ENTITLEMENTS,
+   * but the admin settings UI renders the STORED object: it listed three tiers
+   * nobody can buy any more and omitted the only one that is sold, so every
+   * limit tuned there silently applied to no paying customer.
+   *
+   * Stored entries are never touched — an admin's tuning outranks a default, and
+   * a plan absent from `defaults` (a code retired in code but still stored) is
+   * left in place rather than pruned, so a downgrade cannot erase a tier some
+   * org is still resolving to.
+   */
+  private async _seedPlansIfMissing<T>(
+    key: string,
+    defaults: Record<string, T>,
+    description: string
+  ): Promise<void> {
+    const existing = await this._settings.get<Record<string, unknown>>(key);
+    if (existing === null || existing === undefined) {
+      await this._seedIfMissing(key, defaults, description);
+      return;
+    }
+    if (typeof existing !== 'object' || Array.isArray(existing)) {
+      this.logger.warn(
+        `${key} is not an object; leaving it alone rather than overwriting an admin's value`
+      );
+      return;
+    }
+    const missing = Object.keys(defaults).filter(
+      (code) => existing[code] === undefined
+    );
+    if (!missing.length) return;
+
+    await this._settings.set(
+      key,
+      { ...existing, ...Object.fromEntries(missing.map((c) => [c, defaults[c]])) },
+      { type: 'object', description, defaultValue: defaults }
+    );
+    this.logger.log(`Backfilled ${key} with missing plan(s): ${missing.join(', ')}`);
   }
 
   private async _seedIfMissing(

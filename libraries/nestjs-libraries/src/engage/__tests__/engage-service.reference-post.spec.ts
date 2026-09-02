@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { InternalServerErrorException } from '@nestjs/common';
+import { BadRequestException, InternalServerErrorException } from '@nestjs/common';
 import { EngageService } from '../engage.service';
 import { TooSimilarToReferenceError } from '../engage-reference-post.service';
 
@@ -277,6 +277,35 @@ describe('EngageService.generateReferencePost', () => {
       });
     });
 
+    // Regression: a project whose IntegrationProject bindings carry no
+    // postingTimes yields an empty schedule set, and findFreeDateTime walks
+    // 365 days finding nothing and throws BadRequestException. That used to
+    // sink the whole call — AFTER the model had run and the org had been
+    // BILLED — surfacing to the client as an opaque `generation_failed`.
+    it('falls back to a placeholder date when no posting-time slot can be resolved', async () => {
+      const { service, posts, aisee } = buildService({
+        posts: {
+          findFreeDateTime: vi.fn(async () => {
+            throw new BadRequestException(
+              'No available posting time slot found within the next 365 days'
+            );
+          }),
+        },
+      });
+
+      const result = await service.generateReferencePost(ORG, 'user1', 'opp1', {
+        ...GEN_DTO,
+        projectId: 'project1',
+      });
+
+      expect(result.postId).toBe('post1');
+      // The generation was still billed, and the post still persisted.
+      expect(aisee.billCollectedUsages).toHaveBeenCalledTimes(1);
+      const [dto] = posts.mapTypeToPost.mock.calls[0];
+      expect(dto.type).toBe('draft');
+      expect(dto.date).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:00$/);
+    });
+
     it('throws when post creation fails to return a postId', async () => {
       const { service } = buildService({
         posts: { createPost: vi.fn(async () => []) },
@@ -285,6 +314,65 @@ describe('EngageService.generateReferencePost', () => {
       await expect(
         service.generateReferencePost(ORG, 'user1', 'opp1', GEN_DTO)
       ).rejects.toBeInstanceOf(InternalServerErrorException);
+    });
+
+    // Billing used to fire the moment generation returned, so any failure in
+    // the persistence steps below it charged the user for a post they never
+    // received — and every one of those failures is our own bug or
+    // misconfiguration, not something they asked for.
+    it('does NOT bill when the post fails to persist', async () => {
+      const { service, aisee } = buildService({
+        posts: { createPost: vi.fn(async () => []) },
+      });
+
+      await expect(
+        service.generateReferencePost(ORG, 'user1', 'opp1', GEN_DTO)
+      ).rejects.toBeInstanceOf(InternalServerErrorException);
+
+      expect(aisee.billCollectedUsages).not.toHaveBeenCalled();
+    });
+
+    it('does NOT bill when attaching the reference provenance fails', async () => {
+      const { service, aisee } = buildService({
+        repo: {
+          attachReferenceOpportunity: vi.fn(async () => {
+            throw new Error('db unreachable');
+          }),
+        },
+      });
+
+      await expect(
+        service.generateReferencePost(ORG, 'user1', 'opp1', GEN_DTO)
+      ).rejects.toThrow('db unreachable');
+
+      expect(aisee.billCollectedUsages).not.toHaveBeenCalled();
+    });
+
+    it('bills only AFTER the post is persisted', async () => {
+      const order: string[] = [];
+      const { service } = buildService({
+        posts: {
+          createPost: vi.fn(async () => {
+            order.push('createPost');
+            return [{ postId: 'post1' }];
+          }),
+        },
+        repo: {
+          attachReferenceOpportunity: vi.fn(async () => {
+            order.push('attach');
+          }),
+        },
+        aisee: {
+          billCollectedUsages: vi.fn(async () => {
+            order.push('bill');
+            return {};
+          }),
+        },
+      });
+
+      await service.generateReferencePost(ORG, 'user1', 'opp1', GEN_DTO);
+
+      expect(order).toEqual(['createPost', 'attach', 'bill']);
     });
   });
 

@@ -21,6 +21,7 @@ X and Reddit. This is the entry point to all Engage docs.
 | [`x-tab-only-migration.md`](./x-tab-only-migration.md) | **Dev / Ops** | Migration plan: every remaining server-side X API read, what the extension's browser-tab path already covers, and the order to retire them. Includes the switches that turn the server-side X scan off. |
 | [`author-followers-null.md`](./author-followers-null.md) | Dev | Why `authorFollowers` was null on every X row — three independent causes, two fixed, one open. |
 | [`reference-post-generation.md`](./reference-post-generation.md) | **Dev** | Backend implemented, frontend not built: generate + save an original `Post` (account-less DRAFT) from a user-picked Engage opportunity as reference. `Post.referenceOpportunityId` + `settings.referenceOpportunity` attribution, single `POST /opportunities/:id/generate-post` call, output-side anti-plagiarism gate, dedicated billing subtype. |
+| [`write-path-limits.md`](./write-path-limits.md) | **Dev / Ops** | What bounds how much a subscriber can write: the per-org ingest ceiling (`engage_ingest_quota`) and its formula, a coverage matrix over every write path (ingest / reply / draft / post), the entitlement invariants, and the open gaps (free unlimited post drafts, unmetered reference-post generation, per-replica throttling). |
 | [`../project-scoped-post-engage-design.md`](../project-scoped-post-engage-design.md) | **Dev** | Postiz implementation requirements for project isolation, shared-scan fan-out, reply arbitration, quotas, APIs, UI, and migration. |
 | [`../aisee-live-geo-growth-plan.md`](../aisee-live-geo-growth-plan.md) | Dev / Integrators | Postiz integration contract for API-configured Aisee operation plans and variable-duration calendar materialization. |
 
@@ -32,6 +33,7 @@ X and Reddit. This is the entry point to all Engage docs.
 - **Operating it day-to-day** (sync metrics, trigger scans, repair data) → [`scripts.md`](./scripts.md)
 - **Turning the server-side X scan off / moving X reads to the extension** → [`x-tab-only-migration.md`](./x-tab-only-migration.md)
 - **Rendering an opportunity body on any surface** (links, mentions, images) → [`opportunity-content-rendering.md`](./opportunity-content-rendering.md)
+- **Adding a write endpoint, or tuning what a subscriber may push** → [`write-path-limits.md`](./write-path-limits.md)
 
 ## Common operational tasks (→ [`scripts.md`](./scripts.md))
 

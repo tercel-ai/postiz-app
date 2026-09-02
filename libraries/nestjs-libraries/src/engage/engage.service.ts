@@ -1330,6 +1330,10 @@ export class EngageService implements OnApplicationBootstrap {
 
     let text: string;
     let parts: string[];
+    // Held, NOT billed here. A generation that succeeds and then fails to
+    // persist leaves the caller with nothing, so the charge waits until the
+    // post is on disk — see the billing call at the end of this method.
+    let usages: ReferencePostUsage[];
     try {
       const result = await this._referencePostService.generate(opportunity, {
         strategy: dto.strategy,
@@ -1341,14 +1345,7 @@ export class EngageService implements OnApplicationBootstrap {
         maxThreadParts: dto.maxThreadParts,
         signal,
       });
-      await this._billReferencePostUsages(
-        org,
-        opportunityId,
-        opportunity.platform,
-        dto.strategy,
-        sourceAdaptation,
-        result.usages
-      );
+      usages = result.usages;
       text = result.text;
       // An aborted generation comes back with no parts at all; keep the
       // single-(empty)-post shape the persistence below has always been
@@ -1383,14 +1380,10 @@ export class EngageService implements OnApplicationBootstrap {
       ? await this._fetchReferenceMedia(org.id, opportunityId)
       : [];
 
-    // Persist as an account-less draft. findFreeDateTime with no
-    // integrationId still returns a placeholder — CreatePostDto.date is
-    // unconditionally required even for a draft with nothing scheduled yet.
-    const date = await this._postsService.findFreeDateTime(
-      org.id,
-      undefined,
-      dto.projectId
-    );
+    // Persist as an account-less draft. CreatePostDto.date is unconditionally
+    // required even for a draft with nothing scheduled yet, so this value is a
+    // placeholder — nothing ever publishes off it.
+    const date = await this._resolveDraftPlaceholderDate(org.id, dto.projectId);
     const mapped = await this._postsService.mapTypeToPost(
       {
         type: 'draft',
@@ -1436,6 +1429,30 @@ export class EngageService implements OnApplicationBootstrap {
       snapshotContent: opportunity.postContent,
     });
 
+    // Charged LAST, once the post this spend produced is safely persisted.
+    //
+    // The model call has really happened by the time we reach the generation
+    // block above, so billing it the moment it returned looked right — but
+    // everything between there and here (media re-hosting, the placeholder
+    // date, mapTypeToPost's validation, createPost, the attach above) can
+    // still fail, and every one of those failures is OUR bug or OUR
+    // misconfiguration, not something the user asked for. Charging for them
+    // billed the user for a post they never received. Deferring the charge
+    // makes us, not them, absorb the cost of our own defects.
+    //
+    // Deliberately NOT extended to the generation-failure path (the catch
+    // above): a similarity-gate rejection or a mid-flight model error is the
+    // generation itself not working out, which §7.1 charges for, and no post
+    // was ever owed there.
+    await this._billReferencePostUsages(
+      org,
+      opportunityId,
+      opportunity.platform,
+      dto.strategy,
+      sourceAdaptation,
+      usages
+    );
+
     return {
       text,
       postId,
@@ -1449,6 +1466,45 @@ export class EngageService implements OnApplicationBootstrap {
           }
         : {}),
     };
+  }
+
+  /**
+   * The placeholder `date` for the account-less DRAFT this endpoint persists.
+   *
+   * Best-effort by design. findFreeDateTime resolves a slot from the posting
+   * times of the org's channels — or, when a projectId scopes the call, ONLY
+   * from that project's IntegrationProject bindings, which deliberately do not
+   * fall back to Integration.postingTimes. A project whose bindings carry no
+   * postingTimes therefore yields an empty schedule set, and findFreeDateTime
+   * walks 365 days finding nothing and throws.
+   *
+   * That must not sink the generation: the post has already been produced and
+   * already BILLED by the time we get here, and this draft has no account and
+   * no schedule, so the date it is stamped with is never read by anything. It
+   * exists solely to satisfy a required DTO field. Losing a paid-for post to a
+   * calendar setting it does not use is the wrong trade — fall back to now and
+   * let the user pick a real time when they schedule it.
+   */
+  private async _resolveDraftPlaceholderDate(
+    orgId: string,
+    projectId?: string
+  ): Promise<string> {
+    try {
+      return await this._postsService.findFreeDateTime(
+        orgId,
+        undefined,
+        projectId
+      );
+    } catch (err) {
+      this.logger.warn(
+        `No posting-time slot resolvable for org ${orgId}${
+          projectId ? ` / project ${projectId}` : ''
+        }; stamping the reference-post draft with the current time instead: ${
+          err instanceof Error ? err.message : err
+        }`
+      );
+      return dayjs.utc().format('YYYY-MM-DDTHH:mm:00');
+    }
   }
 
   /**
