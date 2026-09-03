@@ -3,6 +3,7 @@ import {
   ApiRateLimitService,
   API_RATE_LIMITS_KEY,
   DEFAULT_API_RATE_LIMITS,
+  DEFAULT_API_RATE_LIMIT_SETTINGS,
   getApiRateLimits,
   limitFor,
   resetApiRateLimits,
@@ -50,9 +51,11 @@ describe('ApiRateLimitService', () => {
   it('seeds the defaults when the key is absent', async () => {
     const settings = settingsMock();
     await new ApiRateLimitService(settings).onModuleInit();
+    // The STORED shape, which carries engageIngest: null (derive) rather than a
+    // resolved number — pinning one would freeze it against the client pacing.
     expect(settings.set).toHaveBeenCalledWith(
       API_RATE_LIMITS_KEY,
-      DEFAULT_API_RATE_LIMITS,
+      DEFAULT_API_RATE_LIMIT_SETTINGS,
       expect.objectContaining({ type: 'object' })
     );
   });
@@ -79,6 +82,66 @@ describe('ApiRateLimitService', () => {
     await service.refresh();
     expect(getApiRateLimits().createPost).toBe(7);
     service.onApplicationShutdown();
+  });
+});
+
+describe('engageIngest derivation', () => {
+  const PACING = (delayMs: number) => ({
+    extension: { interUnit: { delayMs } },
+  });
+
+  it('derives from engage_scan_pacing interUnit x allowance', async () => {
+    // 3600s / 60s = 60 requests per session per hour, x the default allowance.
+    const settings = settingsMock({
+      [API_RATE_LIMITS_KEY]: {},
+      engage_scan_pacing: PACING(60_000),
+    });
+    await new ApiRateLimitService(settings).onModuleInit();
+    expect(getApiRateLimits().engageIngest).toBe(
+      60 * DEFAULT_API_RATE_LIMIT_SETTINGS.engageIngestAllowance
+    );
+  });
+
+  it('follows a retuned client pacing instead of drifting from it', async () => {
+    // Halving interUnit doubles what one session legitimately sends; the server
+    // ceiling has to move with it or it silently throttles the change.
+    const settings = settingsMock({
+      [API_RATE_LIMITS_KEY]: {},
+      engage_scan_pacing: PACING(30_000),
+    });
+    await new ApiRateLimitService(settings).onModuleInit();
+    expect(getApiRateLimits().engageIngest).toBe(
+      120 * DEFAULT_API_RATE_LIMIT_SETTINGS.engageIngestAllowance
+    );
+  });
+
+  it('scales with the session allowance', async () => {
+    const settings = settingsMock({
+      [API_RATE_LIMITS_KEY]: { engageIngestAllowance: 2 },
+      engage_scan_pacing: PACING(60_000),
+    });
+    await new ApiRateLimitService(settings).onModuleInit();
+    expect(getApiRateLimits().engageIngest).toBe(120);
+  });
+
+  it('honours an explicitly pinned value over the derivation', async () => {
+    const settings = settingsMock({
+      [API_RATE_LIMITS_KEY]: { engageIngest: 42 },
+      engage_scan_pacing: PACING(60_000),
+    });
+    await new ApiRateLimitService(settings).onModuleInit();
+    expect(getApiRateLimits().engageIngest).toBe(42);
+  });
+
+  it('falls back to a per-session default when the pacing is unreadable', async () => {
+    const settings = settingsMock({ [API_RATE_LIMITS_KEY]: {} });
+    settings.get = vi.fn(async (key: string) =>
+      key === 'engage_scan_pacing' ? Promise.reject(new Error('down')) : {}
+    ) as any;
+    await new ApiRateLimitService(settings).onModuleInit();
+    expect(getApiRateLimits().engageIngest).toBe(
+      60 * DEFAULT_API_RATE_LIMIT_SETTINGS.engageIngestAllowance
+    );
   });
 });
 

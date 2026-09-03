@@ -79,11 +79,14 @@ export class ThrottlerBehindProxyGuard extends ThrottlerGuard {
     // Per-route throttles need a stable tracker that does NOT collapse all
     // engage requests into a single bucket. Prefer userId when present (matches
     // F-04's "20 generations/user/hour" wording); fall back to org-scoped key.
+    //
+    // The route is deliberately NOT part of this string: the package's default
+    // generateKey already hashes in the controller class and handler name, so
+    // every route gets its own counter regardless. A route discriminator here
+    // was redundant, and worse, it read as though limits were shared across
+    // whole groups of routes.
     const userId = req.user?.id;
     const orgId = req.org?.id ?? 'anon';
-    const bucket = req.url?.indexOf?.('/posts') > -1 ? 'posts' : 'other';
-    return userId
-      ? `${orgId}_${userId}_${bucket}`
-      : `${orgId}_${bucket}`;
+    return userId ? `${orgId}_${userId}` : orgId;
   }
 }

@@ -28,6 +28,43 @@ export interface ApiRateLimits {
   engageIngest: number;
 }
 
+/**
+ * The STORED shape. Differs from the resolved one in a single field, because
+ * `engageIngest` is the one bucket that should not be a standalone number: the
+ * extension's request rate is set by `engage_scan_pacing.extension.interUnit`,
+ * so pinning a literal here means the two silently drift the moment anyone
+ * retunes the client's pacing.
+ */
+export interface ApiRateLimitSettings
+  extends Omit<ApiRateLimits, 'engageIngest'> {
+  /** Explicit ceiling, or `null` (the default) to derive it — see below. */
+  engageIngest: number | null;
+  /**
+   * Multiplier on the derived ingest rate: how many concurrent browser sessions
+   * (plus retries) one org may have hitting the ingest endpoints.
+   *
+   * Ignored when `engageIngest` pins a number.
+   */
+  engageIngestAllowance: number;
+}
+
+/**
+ * Requests/hour one browser session can make when it honours `interUnit`, if the
+ * pacing config cannot be read at all.
+ */
+const FALLBACK_INGEST_PER_SESSION = 60;
+
+export const DEFAULT_API_RATE_LIMIT_SETTINGS: ApiRateLimitSettings = {
+  createPost: 300,
+  engageDraft: 20,
+  engageGeneratePost: 20,
+  engageScan: 5,
+  engageTargetGone: 30,
+  engageAdminSync: 5,
+  engageIngest: null,
+  engageIngestAllowance: 5,
+};
+
 export const DEFAULT_API_RATE_LIMITS: ApiRateLimits = {
   // Generous: a person saving a batch of posts in the editor is a normal burst,
   // and this limit exists to stop an automated flood, not to pace a human.
@@ -40,11 +77,11 @@ export const DEFAULT_API_RATE_LIMITS: ApiRateLimits = {
   engageScan: 5,
   engageTargetGone: 30,
   engageAdminSync: 5,
-  // The extension's chained scan loop is one unit per round trip, paced by
-  // interUnit (60s) — about 60 calls/hour per browser session. Sized for several
-  // sessions plus retries; the per-org RECORD ceiling (engage_ingest_quota) is
-  // what actually bounds the volume, this only bounds the request rate.
-  engageIngest: 300,
+  // Only a fallback; the live value is derived per refresh. 60 requests/hour is
+  // what one session honouring a 60s interUnit delay makes, times the default
+  // allowance of 5. The per-org RECORD ceiling (engage_ingest_quota) is what
+  // actually bounds the volume; this only bounds the request rate.
+  engageIngest: FALLBACK_INGEST_PER_SESSION * 5,
 };
 
 /**
@@ -118,14 +155,17 @@ export class ApiRateLimitService implements OnModuleInit {
   async onModuleInit(): Promise<void> {
     const existing = await this._settings.get(API_RATE_LIMITS_KEY);
     if (existing === null || existing === undefined) {
-      await this._settings.set(API_RATE_LIMITS_KEY, DEFAULT_API_RATE_LIMITS, {
+      await this._settings.set(API_RATE_LIMITS_KEY, DEFAULT_API_RATE_LIMIT_SETTINGS, {
         type: 'object',
         description:
           'Per-route request ceilings, in requests per hour per user. Enforced by ' +
-          '@Throttle and shared across replicas via RedisThrottlerStorage. A junk ' +
-          'or non-positive value falls back to that default, never to ' +
+          '@Throttle on the HTTP route, so INTERNAL service calls (autopost, ' +
+          'operation-plan materialization, engage) are not subject to them. ' +
+          'Shared across replicas via RedisThrottlerStorage. engageIngest null = ' +
+          'derive from engage_scan_pacing interUnit x engageIngestAllowance. A ' +
+          'junk or non-positive value falls back to that default, never to ' +
           'unlimited and never to 0.',
-        defaultValue: DEFAULT_API_RATE_LIMITS,
+        defaultValue: DEFAULT_API_RATE_LIMIT_SETTINGS,
       });
       this.logger.log(`Seeded default ${API_RATE_LIMITS_KEY}`);
     }
@@ -140,10 +180,13 @@ export class ApiRateLimitService implements OnModuleInit {
 
   async refresh(): Promise<ApiRateLimits> {
     try {
-      const stored = await this._settings.get<Partial<ApiRateLimits>>(
+      const stored = await this._settings.get<Partial<ApiRateLimitSettings>>(
         API_RATE_LIMITS_KEY
       );
-      setApiRateLimits(stored ?? {});
+      setApiRateLimits({
+        ...(stored ?? {}),
+        engageIngest: await this._resolveIngestLimit(stored ?? {}),
+      });
     } catch (err) {
       // Keep the last known values rather than snapping back to defaults: a
       // transient settings failure must not quietly widen a tuned-down limit.
@@ -153,6 +196,50 @@ export class ApiRateLimitService implements OnModuleInit {
       );
     }
     return getApiRateLimits();
+  }
+
+  /**
+   * Requests/hour for the ingest endpoints: the pinned value if an admin set
+   * one, else derived from the pacing the extension is already told to honour.
+   *
+   *   3600s / interUnit.delayMs   requests one session makes per hour
+   *   x engageIngestAllowance     concurrent sessions, plus retries
+   *
+   * Derived rather than pinned so widening the client's pacing is not silently
+   * throttled here instead — the same reason engage_ingest_quota computes its
+   * record ceiling instead of carrying a number.
+   */
+  private async _resolveIngestLimit(
+    stored: Partial<ApiRateLimitSettings>
+  ): Promise<number> {
+    if (
+      typeof stored.engageIngest === 'number' &&
+      Number.isFinite(stored.engageIngest) &&
+      stored.engageIngest > 0
+    ) {
+      return Math.floor(stored.engageIngest);
+    }
+    const allowance =
+      typeof stored.engageIngestAllowance === 'number' &&
+      Number.isFinite(stored.engageIngestAllowance) &&
+      stored.engageIngestAllowance > 0
+        ? stored.engageIngestAllowance
+        : DEFAULT_API_RATE_LIMIT_SETTINGS.engageIngestAllowance;
+
+    let perSession = FALLBACK_INGEST_PER_SESSION;
+    try {
+      const pacing = await this._settings.get<any>('engage_scan_pacing');
+      const delayMs = pacing?.extension?.interUnit?.delayMs;
+      if (typeof delayMs === 'number' && Number.isFinite(delayMs) && delayMs > 0) {
+        perSession = Math.ceil(RATE_LIMIT_TTL_MS / delayMs);
+      }
+    } catch (err) {
+      this.logger.error(
+        `Could not read engage_scan_pacing to derive the ingest rate limit; using ${FALLBACK_INGEST_PER_SESSION}/session`,
+        err as Error
+      );
+    }
+    return Math.max(1, Math.floor(perSession * allowance));
   }
 
   onApplicationShutdown(): void {

@@ -112,6 +112,27 @@ hot path of the thing meant to protect it.
 
 Defaults: createPost 300/h, engageDraft 20/h, engageGeneratePost 20/h,
 engageScan 5/h, engageTargetGone 30/h, engageAdminSync 5/h — all per user.
+`engageIngest` is not a literal: it derives as
+`3600s / engage_scan_pacing.extension.interUnit.delayMs x engageIngestAllowance`
+(60s and 5 today → 300/h), so widening the client's pacing is not silently
+throttled here instead.
+
+**These are guards, not entitlements**, and the distinction is why they are flat
+numbers in a system where everything else follows the plan. A cap on keywords,
+accounts, drafts, ingest records or reply credits is something the customer
+BOUGHT, so it scales with what they paid. A cap on requests per hour to one
+endpoint protects the server, not the wallet: `/engage/scan` does whole-org work
+per call, and a Pro customer does not get to trigger it more often for having
+paid more. For the same reason none of them is per-platform — a per-platform cap
+suits a STOCK spent per surface (drafts, priority accounts), while these bound a
+RATE against a single HTTP route, and the platform is not a dimension the guard
+can see.
+
+They apply to the HTTP route only. `PostsService.createPost` is also called
+internally by autopost, the chat tool, engage and operation-plan materialization;
+none of those passes through a guard, so `createPost: 300/h` bounds the editor
+and the public API, not automated posting. Tuning it down will not slow automated
+volume — the plan quota and the draft cap are what govern that.
 A junk or non-positive value falls back to that bucket's default: never to
 unlimited, and never to 0, which would lock every caller out of the route. A
 failed refresh keeps the last known values rather than snapping back to defaults,
