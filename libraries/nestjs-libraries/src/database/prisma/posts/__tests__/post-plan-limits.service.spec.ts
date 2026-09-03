@@ -45,10 +45,10 @@ describe('PostPlanLimitsService.onModuleInit', () => {
   it('does not reseed when every plan is already stored', async () => {
     const settings = settingsMock({
       [POST_PLAN_LIMITS_KEY]: {
-        starter: { postSendLimit: 5 },
-        developer: { postSendLimit: 5 },
-        pro: { postSendLimit: 5 },
-        'growth-loop': { postSendLimit: 5 },
+        starter: { postSendLimit: 5, postChannelLimit: null, draftsPerPlatformMax: 5000, draftsPerPlatformPerProjectMax: 500 },
+        developer: { postSendLimit: 5, postChannelLimit: null, draftsPerPlatformMax: 5000, draftsPerPlatformPerProjectMax: 500 },
+        pro: { postSendLimit: 5, postChannelLimit: null, draftsPerPlatformMax: 5000, draftsPerPlatformPerProjectMax: 500 },
+        'growth-loop': { postSendLimit: 5, postChannelLimit: null, draftsPerPlatformMax: 5000, draftsPerPlatformPerProjectMax: 500 },
       },
     });
     await new PostPlanLimitsService(settings).onModuleInit();
@@ -73,8 +73,58 @@ describe('PostPlanLimitsService.onModuleInit', () => {
       postChannelLimit: null,
       draftsPerPlatformMax: 5000, draftsPerPlatformPerProjectMax: 500,
     });
-    // An admin's tuning outranks a default and must survive verbatim.
-    expect(written.starter).toEqual({ postSendLimit: 7, postChannelLimit: 3 });
+    // An admin's tuning outranks a default and must survive verbatim — the
+    // fields it did not set are filled in around it.
+    expect(written.starter).toEqual({
+      postSendLimit: 7,
+      postChannelLimit: 3,
+      draftsPerPlatformMax: 5000,
+      draftsPerPlatformPerProjectMax: 500,
+    });
+  });
+
+  it('backfills a FIELD the stored plan predates, not just a whole plan', async () => {
+    // The draft caps were added to PostPlanLimits after this row was written.
+    // Plan-level backfill alone could never reach them, so the knob stayed
+    // invisible in the admin UI even though the runtime enforced it.
+    const settings = settingsMock({
+      [POST_PLAN_LIMITS_KEY]: {
+        starter: { postSendLimit: 7, postChannelLimit: 3 },
+        developer: { postSendLimit: 0, postChannelLimit: null },
+        pro: { postSendLimit: 0, postChannelLimit: null },
+        'growth-loop': { postSendLimit: 0, postChannelLimit: null },
+      },
+    });
+    await new PostPlanLimitsService(settings).onModuleInit();
+    const written = settings.set.mock.calls[0][1] as Record<string, any>;
+    expect(written['growth-loop'].draftsPerPlatformPerProjectMax).toBe(500);
+    expect(written.starter.draftsPerPlatformMax).toBe(5000);
+    expect(written.starter.postSendLimit).toBe(7); // tuning survives
+  });
+
+  it('treats an explicit null as a real value, not a missing field', async () => {
+    // null means "no limit" — backfilling over it would silently impose one.
+    const complete: Record<string, number | null> = {
+      postSendLimit: 0,
+      postChannelLimit: null,
+      draftsPerPlatformMax: 5000,
+      draftsPerPlatformPerProjectMax: 500,
+    };
+    const settings = settingsMock({
+      [POST_PLAN_LIMITS_KEY]: {
+        starter: {
+          postSendLimit: null,
+          postChannelLimit: null,
+          draftsPerPlatformMax: null,
+          draftsPerPlatformPerProjectMax: null,
+        },
+        developer: complete,
+        pro: complete,
+        'growth-loop': complete,
+      },
+    });
+    await new PostPlanLimitsService(settings).onModuleInit();
+    expect(settings.set).not.toHaveBeenCalled();
   });
 
   it('leaves a non-object stored value alone rather than overwriting it', async () => {

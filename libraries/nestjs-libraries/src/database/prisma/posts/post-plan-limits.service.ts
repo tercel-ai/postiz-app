@@ -172,22 +172,42 @@ export class PostPlanLimitsService implements OnModuleInit {
       );
       return;
     }
-    const missing = AISEE_PLAN_CODES.filter(
-      (code) => existing[code] === undefined
-    );
-    if (!missing.length) return;
-    await this._settings.set(
-      POST_PLAN_LIMITS_KEY,
-      {
-        ...existing,
+    // Backfill at FIELD level, not just plan level. Testing only whether a plan
+    // key exists leaves a field added to PostPlanLimits later unable to ever
+    // reach the table — getAll merges it per field so nothing breaks at runtime,
+    // but the admin UI renders the STORED object, so the knob is invisible and
+    // un-tunable. That is how draftsPerPlatformMax shipped with no way to edit
+    // it. `null` is a real value (no limit) and is never treated as missing.
+    const added: string[] = [];
+    const merged: Record<string, unknown> = { ...existing };
+    for (const code of AISEE_PLAN_CODES) {
+      const stored = (existing[code] ?? {}) as Partial<PostPlanLimits>;
+      if (existing[code] === undefined) {
+        merged[code] = DEFAULT_POST_PLAN_LIMITS[code];
+        added.push(code);
+        continue;
+      }
+      if (typeof stored !== 'object' || Array.isArray(stored)) continue;
+      const fields = (
+        Object.keys(DEFAULT_POST_PLAN_LIMITS[code]) as (keyof PostPlanLimits)[]
+      ).filter((f) => stored[f] === undefined);
+      if (!fields.length) continue;
+      merged[code] = {
+        ...stored,
         ...Object.fromEntries(
-          missing.map((code) => [code, DEFAULT_POST_PLAN_LIMITS[code]])
+          fields.map((f) => [f, DEFAULT_POST_PLAN_LIMITS[code][f]])
         ),
-      },
-      { type: 'object', description, defaultValue: DEFAULT_POST_PLAN_LIMITS }
-    );
+      };
+      added.push(...fields.map((f) => `${code}.${String(f)}`));
+    }
+    if (!added.length) return;
+    await this._settings.set(POST_PLAN_LIMITS_KEY, merged, {
+      type: 'object',
+      description,
+      defaultValue: DEFAULT_POST_PLAN_LIMITS,
+    });
     this.logger.log(
-      `Backfilled ${POST_PLAN_LIMITS_KEY} with missing plan(s): ${missing.join(', ')}`
+      `Backfilled ${POST_PLAN_LIMITS_KEY}: ${added.join(', ')}`
     );
   }
 

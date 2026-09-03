@@ -1476,6 +1476,22 @@ model EngageOpportunity {
   @@index([postPublishedAt])
   // GIN index for intentTags @> ARRAY[...] (Prisma: { has: tag }).
   @@index([intentTags], type: Gin)
+  // Trigram indexes backing the ILIKE keyword preview in
+  // EngageRepository.getKeywordPosts against this GLOBAL (cross-org, unbounded)
+  // table. Declared HERE rather than only in engage-indexes.sql: `db push`
+  // drops any index the schema does not know about, so while they lived purely
+  // out-of-band every push deleted them and relied on the `&& prisma-db-indexes`
+  // half of the npm script to put them back. Anyone running the push alone got a
+  // silent sequential scan — no error, just a slow preview.
+  //
+  // `map:` keeps the names the SQL file already created, so adopting them costs
+  // no index rebuild on an existing database.
+  //
+  // The pg_trgm EXTENSION still has to be created out-of-band (engage-indexes.sql)
+  // — declaring extensions needs the postgresqlExtensions preview feature, and an
+  // index referencing gin_trgm_ops cannot be created before the extension exists.
+  @@index([postContent(ops: raw("gin_trgm_ops"))], type: Gin, map: "EngageOpportunity_postContent_trgm_idx")
+  @@index([title(ops: raw("gin_trgm_ops"))], type: Gin, map: "EngageOpportunity_title_trgm_idx")
 }
 
 enum EngageOpportunityStatus {

@@ -933,10 +933,14 @@ describe('EngageEntitlementService.onModuleInit — per-plan backfill', () => {
       'pro',
       'starter',
     ]);
-    // Admin tuning outranks a default — the legacy entries are byte-identical.
-    expect(value.pro).toEqual(LEGACY_ROW.pro);
-    expect(value.starter).toEqual(LEGACY_ROW.starter);
-    expect(value.developer).toEqual(LEGACY_ROW.developer);
+    // Admin tuning outranks a default: every stored value survives verbatim.
+    // The fields it never set are filled in AROUND it — plan-level backfill
+    // alone would leave a field added to the shape later permanently invisible
+    // in the admin UI, which renders this stored object.
+    for (const code of ['pro', 'starter', 'developer'] as const) {
+      expect(value[code]).toMatchObject(LEGACY_ROW[code]);
+      expect(value[code].keywordsPerProjectMax).toBeDefined();
+    }
     // ...and the backfilled plan carries the sold spec.
     expect(value['growth-loop']).toMatchObject({
       keywordsPerProjectMax: 30,
@@ -945,13 +949,38 @@ describe('EngageEntitlementService.onModuleInit — per-plan backfill', () => {
     });
   });
 
-  it('writes nothing when every plan is already stored', async () => {
-    const { service, writes } = seedBuild({
-      ...LEGACY_ROW,
-      'growth-loop': { keywordsMax: 1 },
-    });
+  it('writes nothing when every plan AND field is already stored', async () => {
+    const complete = Object.fromEntries(
+      (['starter', 'developer', 'pro', 'growth-loop'] as const).map((code) => [
+        code,
+        {
+          keywordsMax: 1,
+          priorityAccountsMax: 1,
+          keywordsPerProjectMax: 1,
+          priorityAccountsPerProjectMax: 1,
+          scanIntervalHours: 1,
+          replyMonthlyCap: null,
+          metricsWindowDaysMax: 1,
+          metricsFetchIntervalHours: 1,
+        },
+      ])
+    );
+    const { service, writes } = seedBuild(complete);
     await service.onModuleInit();
     expect(writes()).toHaveLength(0);
+  });
+
+  it('backfills a FIELD the stored plan predates, not just a whole plan', async () => {
+    // `null` stays untouched — it is a real value (unlimited), not a gap.
+    const { service, writes } = seedBuild({
+      ...LEGACY_ROW,
+      'growth-loop': { keywordsMax: 42, replyMonthlyCap: null },
+    });
+    await service.onModuleInit();
+    const value = writes()[0][1] as Record<string, any>;
+    expect(value['growth-loop'].keywordsMax).toBe(42); // tuning survives
+    expect(value['growth-loop'].replyMonthlyCap).toBeNull(); // null preserved
+    expect(value['growth-loop'].priorityAccountsPerProjectMax).toBe(20); // filled
   });
 
   it('seeds the full default map when the key is absent entirely', async () => {

@@ -1,26 +1,23 @@
--- Engage post-content trigram index.
+-- Out-of-band database objects that `prisma db push` cannot create.
 --
--- `prisma db push` (the project's provisioning workflow — see package.json
--- "prisma-db-push") only materializes schema-declared objects. It cannot create
--- a pg_trgm extension or a gin_trgm_ops index, so this index — which backs the
--- ILIKE keyword preview in EngageRepository.getKeywordPosts against the GLOBAL
--- (cross-org, unbounded) EngageOpportunity table — must be created out-of-band.
+-- This file used to own the trigram INDEXES as well. It no longer does: they are
+-- declared in schema.prisma (EngageOpportunity, `ops: raw("gin_trgm_ops")` +
+-- `type: Gin`), which Prisma 6 supports without a preview feature.
 --
--- This file is executed right after `prisma db push` via the "prisma-db-push"
--- npm script, so a fresh database provisioned by the documented workflow always
--- has the index. Idempotent — safe to run repeatedly.
+-- Moving them was a correctness fix, not tidying. `db push` DROPS any index the
+-- schema does not know about, so while they lived only here every push deleted
+-- them, and the `&& prisma-db-indexes` half of the "prisma-db-push" npm script
+-- was the only thing putting them back. Anyone who ran the push on its own was
+-- left with a sequential scan over the GLOBAL (cross-org, unbounded)
+-- EngageOpportunity table on every keyword preview — no error, just slow. The
+-- schema declarations carry `map:` so they adopt the names created here, which
+-- is why existing databases needed no index rebuild.
+--
+-- What remains here is the one thing a schema cannot express without the
+-- postgresqlExtensions preview feature: the EXTENSION itself. An index
+-- referencing gin_trgm_ops cannot be created before it exists, so this must
+-- still run BEFORE a push against a fresh database.
+--
+-- Still wired into the "prisma-db-push" npm script. Idempotent.
 
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
-
-CREATE INDEX IF NOT EXISTS "EngageOpportunity_postContent_trgm_idx"
-  ON "EngageOpportunity" USING GIN ("postContent" gin_trgm_ops);
-
--- The same preview now also matches the title, which holds text that used to
--- live inside postContent (Quora's question, Reddit's/HN's headline). Without
--- its own trigram index the added OR would degrade the whole preview to a
--- sequential scan of the global table.
-CREATE INDEX IF NOT EXISTS "EngageOpportunity_title_trgm_idx"
-  ON "EngageOpportunity" USING GIN ("title" gin_trgm_ops);
-
-CREATE INDEX IF NOT EXISTS "EngageOpportunity_platform_externalPostUrl_idx"
-  ON "EngageOpportunity"("platform", "externalPostUrl");

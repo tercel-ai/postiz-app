@@ -410,17 +410,44 @@ export class EngageEntitlementService implements OnModuleInit {
       );
       return;
     }
-    const missing = Object.keys(defaults).filter(
-      (code) => existing[code] === undefined
-    );
-    if (!missing.length) return;
+    // Backfill at FIELD level too, not just plan level: a field added to the
+    // shape later can otherwise never reach the table, and the admin UI renders
+    // the STORED object — so the knob exists in code, is enforced at runtime via
+    // the per-field merge in _loadEntitlements, and is invisible on screen.
+    // `null` is a real value (unlimited) and is never treated as missing.
+    const added: string[] = [];
+    const merged: Record<string, unknown> = { ...existing };
+    for (const code of Object.keys(defaults)) {
+      const stored = existing[code];
+      if (stored === undefined) {
+        merged[code] = defaults[code];
+        added.push(code);
+        continue;
+      }
+      if (typeof stored !== 'object' || stored === null || Array.isArray(stored)) {
+        continue;
+      }
+      const entry = stored as Record<string, unknown>;
+      const fields = Object.keys(defaults[code] as Record<string, unknown>).filter(
+        (f) => entry[f] === undefined
+      );
+      if (!fields.length) continue;
+      merged[code] = {
+        ...entry,
+        ...Object.fromEntries(
+          fields.map((f) => [f, (defaults[code] as Record<string, unknown>)[f]])
+        ),
+      };
+      added.push(...fields.map((f) => `${code}.${f}`));
+    }
+    if (!added.length) return;
 
-    await this._settings.set(
-      key,
-      { ...existing, ...Object.fromEntries(missing.map((c) => [c, defaults[c]])) },
-      { type: 'object', description, defaultValue: defaults }
-    );
-    this.logger.log(`Backfilled ${key} with missing plan(s): ${missing.join(', ')}`);
+    await this._settings.set(key, merged, {
+      type: 'object',
+      description,
+      defaultValue: defaults,
+    });
+    this.logger.log(`Backfilled ${key}: ${added.join(', ')}`);
   }
 
   private async _seedIfMissing(
