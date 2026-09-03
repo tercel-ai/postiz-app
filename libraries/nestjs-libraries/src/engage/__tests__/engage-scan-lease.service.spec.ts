@@ -175,6 +175,7 @@ describe('EngageScanLeaseService id-based lifecycle (workflow path)', () => {
       status: 'IDLE',
       cooldownUntil: until,
       leaseToken: null,
+      claimedByOrgId: null,
     });
   });
 
@@ -184,6 +185,7 @@ describe('EngageScanLeaseService id-based lifecycle (workflow path)', () => {
     expect(engageScanCursor.update.mock.calls[0][0].data).toEqual({
       status: 'IDLE',
       leaseToken: null,
+      claimedByOrgId: null,
       lastScanStartedAt: null,
     });
   });
@@ -194,22 +196,92 @@ describe('EngageScanLeaseService.completeByToken (session binding)', () => {
 
   it('completes when the token matches the current SCANNING lease', async () => {
     const { svc, engageScanCursor } = build({ ...base }, 1);
-    const ok = await svc.completeByToken('tok123', { lastSeenExternalId: 't3_x', lastSeenAt: NOW }, NOW);
+    const ok = await svc.completeByToken(
+      'tok123',
+      'org1',
+      { lastSeenExternalId: 't3_x', lastSeenAt: NOW },
+      NOW
+    );
     expect(ok).toBe(true);
-    const call = engageScanCursor.updateMany.mock.calls[0][0];
-    expect(call.where).toEqual({ leaseToken: 'tok123', status: 'SCANNING' });
+    const call = (engageScanCursor.updateMany.mock.calls[0] as any[])[0];
+    expect(call.where).toEqual({
+      leaseToken: 'tok123',
+      status: 'SCANNING',
+      claimedByOrgId: 'org1',
+    });
     expect(call.data.leaseToken).toBeNull(); // token cleared on complete
+    expect(call.data.claimedByOrgId).toBeNull(); // and so is the owner
     expect(call.data.status).toBe('IDLE');
   });
 
   it('returns false for a stale/forged/rotated token (0 rows matched)', async () => {
     const { svc } = build({ ...base }, 0);
-    expect(await svc.completeByToken('wrong', {}, NOW)).toBe(false);
+    expect(await svc.completeByToken('wrong', 'org1', {}, NOW)).toBe(false);
+  });
+
+  it('scopes the update to the claiming org, so a token alone is not enough', async () => {
+    // The token is a bearer credential. Without claimedByOrgId in the WHERE,
+    // any org holding one could complete a lease it never took — and the ingest
+    // that follows writes rows for every OTHER subscriber of that unit.
+    const { svc, engageScanCursor } = build({ ...base }, 0);
+    expect(await svc.completeByToken('tok123', 'other-org', {}, NOW)).toBe(false);
+    expect(
+      (engageScanCursor.updateMany.mock.calls[0] as any[])[0].where
+    ).toMatchObject({
+      claimedByOrgId: 'other-org',
+    });
   });
 
   it('releaseByToken returns false when the token no longer owns the lease', async () => {
     const { svc } = build({ ...base }, 0);
-    expect(await svc.releaseByToken('wrong')).toBe(false);
+    expect(await svc.releaseByToken('wrong', 'org1')).toBe(false);
+  });
+
+  it('releaseByToken is org-scoped too', async () => {
+    const { svc, engageScanCursor } = build({ ...base }, 0);
+    expect(await svc.releaseByToken('tok123', 'other-org')).toBe(false);
+    expect(
+      (engageScanCursor.updateMany.mock.calls[0] as any[])[0].where
+    ).toEqual({
+      leaseToken: 'tok123',
+      status: 'SCANNING',
+      claimedByOrgId: 'other-org',
+    });
+  });
+});
+
+describe('EngageScanLeaseService.claim — lease ownership', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('records the claiming org on the CAS write', async () => {
+    const { svc, engageScanCursor } = build({ ...base }, 1);
+    await svc.claim({
+      platform: 'reddit',
+      scanType: 'keyword',
+      scanKey: 'mcp',
+      cadenceMs: 0,
+      force: true,
+      claimedByOrgId: 'org1',
+    });
+    expect(
+      (engageScanCursor.updateMany.mock.calls[0] as any[])[0].data
+    ).toMatchObject({ status: 'SCANNING', claimedByOrgId: 'org1' });
+  });
+
+  it('writes an explicit null for a server-side (workflow) claim', async () => {
+    // Always written, never left out: a previous claimant's org would otherwise
+    // outlive its lease and decide who may complete the NEXT one.
+    const { svc, engageScanCursor } = build({ ...base }, 1);
+    await svc.claim({
+      platform: 'reddit',
+      scanType: 'keyword',
+      scanKey: 'mcp',
+      cadenceMs: 0,
+      force: true,
+    });
+    expect(
+      (engageScanCursor.updateMany.mock.calls[0] as any[])[0].data.claimedByOrgId
+    ).toBeNull();
   });
 });
 
@@ -242,7 +314,7 @@ describe('EngageScanLeaseService.releaseByUnit (admin debug)', () => {
     });
     expect(engageScanCursor.updateMany).toHaveBeenCalledWith({
       where: { id: 'c1', status: 'SCANNING' },
-      data: { status: 'IDLE', leaseToken: null },
+      data: { status: 'IDLE', leaseToken: null, claimedByOrgId: null },
     });
   });
 
@@ -259,6 +331,7 @@ describe('EngageScanLeaseService.releaseByUnit (admin debug)', () => {
     expect(engageScanCursor.updateMany.mock.calls[0][0].data).toEqual({
       status: 'IDLE',
       leaseToken: null,
+      claimedByOrgId: null,
       cooldownUntil: null,
     });
   });

@@ -83,6 +83,55 @@ describe('EngageDraftService', () => {
       );
     });
 
+    // The one rule whose violation is fatal — an over-long reply is rejected
+    // outright — so it is stated first, restated mid-prompt, and repeated last.
+    // Stated once in the middle of a long prompt is where an instruction gets lost.
+    it('states the length limit at the top, in the middle, and at the very end', () => {
+      const xPrompt: string = (service as any)._buildSystemPrompt('x', 'EXPERT_ANSWER', 'help_seeking', 1);
+
+      const occurrences = xPrompt.split('under 260 Twitter-weighted characters').length - 1;
+      expect(occurrences).toBe(3);
+      expect(xPrompt).toContain('HARD LENGTH LIMIT — THIS OUTRANKS EVERY OTHER INSTRUCTION');
+      expect(xPrompt.trimEnd().endsWith('never truncate mid-thought.')).toBe(true);
+    });
+
+    it('puts length above relevance, strategy and the brand mention', () => {
+      const xPrompt: string = (service as any)._buildSystemPrompt('x', 'EXPERT_ANSWER', 'help_seeking', 1);
+
+      expect(xPrompt).toContain(
+        'If the strategy, the brand mention, or finishing a thought would push it past that, cut the content instead'
+      );
+      // The pre-existing relevance clause now names where it sits in the chain.
+      expect(xPrompt).toContain(
+        'relevance takes priority — and the hard length limit above takes priority over all three'
+      );
+    });
+
+    it('repeats the limit in the user message, the last thing the model reads', () => {
+      // The original post sits in this message and is often far longer than the
+      // limit — an unrepeated constraint competes with that concrete example.
+      const userPrompt: string = (service as any)._buildUserPrompt(
+        mockOpportunity,
+        'x',
+        undefined
+      );
+
+      expect(userPrompt).toContain('Length is the hard constraint');
+      expect(userPrompt).toContain('under 260 Twitter-weighted characters');
+      expect(userPrompt).toContain('regardless of how long the original post above is');
+    });
+
+    it('honours an explicit outputLength in the user message too', () => {
+      const userPrompt: string = (service as any)._buildUserPrompt(
+        { ...mockOpportunity, platform: 'reddit' },
+        'reddit',
+        400
+      );
+
+      // 400 * 0.85 = 340, the same safety margin the system prompt applies.
+      expect(userPrompt).toContain('under 340 characters');
+    });
+
     it('should include strategy instructions in system prompt', () => {
       const expertPrompt = (service as any)._buildSystemPrompt('x', 'EXPERT_ANSWER', 'help_seeking', 1);
       expect(expertPrompt).toContain('expert step-by-step advice');

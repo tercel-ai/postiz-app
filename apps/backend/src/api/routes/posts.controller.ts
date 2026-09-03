@@ -10,6 +10,11 @@ import {
   Query,
   Res,
 } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
+import {
+  limitFor,
+  RATE_LIMIT_TTL_MS,
+} from '@gitroom/nestjs-libraries/throttler/rate-limit-settings';
 import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.service';
 import { PlatformPacingConfigService } from '@gitroom/nestjs-libraries/engage/platform-pacing-config.service';
 import { EngageEntitlementService } from '@gitroom/nestjs-libraries/engage/engage-entitlement.service';
@@ -357,6 +362,12 @@ export class PostsController {
     },
   })
   @CheckPolicies([AuthorizationActions.Create, Sections.POSTS_PER_MONTH])
+  // The route had no rate limit at all. Generous on purpose — this is the
+  // editor's save path and a burst of legitimate saves is normal — so it bounds
+  // an automated flood without getting in a person's way. Counts per user, and
+  // now counts once per ORG rather than once per replica (RedisThrottlerStorage).
+  // The number lives in `api_rate_limits`, so it is retunable without a deploy.
+  @Throttle({ default: { limit: limitFor('createPost'), ttl: RATE_LIMIT_TTL_MS } })
   async createPost(
     @GetOrgFromRequest() org: Organization,
     @GetUserFromRequest() user: User,

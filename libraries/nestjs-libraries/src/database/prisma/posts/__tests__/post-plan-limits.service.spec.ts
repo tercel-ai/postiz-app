@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import {
   PostPlanLimitsService,
   POST_PLAN_LIMITS_KEY,
+  DEFAULT_DRAFT_PLATFORM_COUNT,
 } from '../post-plan-limits.service';
 import { AiseeUserCreditPackage } from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/aisee.client';
 
@@ -32,10 +33,10 @@ describe('PostPlanLimitsService.onModuleInit', () => {
     expect(settings.set).toHaveBeenCalledWith(
       POST_PLAN_LIMITS_KEY,
       {
-        starter: { postSendLimit: 0, postChannelLimit: null },
-        developer: { postSendLimit: 0, postChannelLimit: null },
-        pro: { postSendLimit: 0, postChannelLimit: null },
-        'growth-loop': { postSendLimit: 0, postChannelLimit: null },
+        starter: { postSendLimit: 0, postChannelLimit: null, draftsPerPlatformMax: 5000, draftsPerPlatformPerProjectMax: 500 },
+        developer: { postSendLimit: 0, postChannelLimit: null, draftsPerPlatformMax: 5000, draftsPerPlatformPerProjectMax: 500 },
+        pro: { postSendLimit: 0, postChannelLimit: null, draftsPerPlatformMax: 5000, draftsPerPlatformPerProjectMax: 500 },
+        'growth-loop': { postSendLimit: 0, postChannelLimit: null, draftsPerPlatformMax: 5000, draftsPerPlatformPerProjectMax: 500 },
       },
       expect.objectContaining({ type: 'object' })
     );
@@ -70,6 +71,7 @@ describe('PostPlanLimitsService.onModuleInit', () => {
     expect(written['growth-loop']).toEqual({
       postSendLimit: 0,
       postChannelLimit: null,
+      draftsPerPlatformMax: 5000, draftsPerPlatformPerProjectMax: 500,
     });
     // An admin's tuning outranks a default and must survive verbatim.
     expect(written.starter).toEqual({ postSendLimit: 7, postChannelLimit: 3 });
@@ -93,15 +95,15 @@ describe('PostPlanLimitsService.getAll', () => {
       })
     );
     const all = await service.getAll();
-    expect(all.starter).toEqual({ postSendLimit: 30, postChannelLimit: null });
+    expect(all.starter).toMatchObject({ postSendLimit: 30, postChannelLimit: null });
     // Explicit null = unlimited free posts.
-    expect(all.developer).toEqual({
+    expect(all.developer).toMatchObject({
       postSendLimit: null,
       postChannelLimit: null,
     });
     // Entirely unset plan gets the product default: zero free posts,
     // unlimited channels.
-    expect(all.pro).toEqual({ postSendLimit: 0, postChannelLimit: null });
+    expect(all.pro).toMatchObject({ postSendLimit: 0, postChannelLimit: null });
   });
 });
 
@@ -119,12 +121,11 @@ describe('PostPlanLimitsService.getAll — sanitisation', () => {
     const all = await service.getAll();
     // Junk channel (-5, '50') → channel default null; junk send (1.5) → send
     // default 0 — a typo must not silently grant an unlimited send quota.
-    expect(all.starter).toEqual({ postSendLimit: 0, postChannelLimit: null });
-    expect(all.developer).toEqual({
-      postSendLimit: 0,
+    expect(all.starter).toMatchObject({ postSendLimit: 0, postChannelLimit: null });
+    expect(all.developer).toMatchObject({ postSendLimit: 0,
       postChannelLimit: null,
     });
-    expect(all.pro).toEqual({ postSendLimit: 300, postChannelLimit: null });
+    expect(all.pro).toMatchObject({ postSendLimit: 300, postChannelLimit: null });
   });
 });
 
@@ -193,5 +194,76 @@ describe('PostPlanLimitsService.applyOverrides', () => {
     const original = pkg({ name: 'Mystery Tier' });
     const result = await service.applyOverrides(original);
     expect(result).toEqual(original);
+  });
+});
+
+describe('PostPlanLimitsService.resolveDraftLimits', () => {
+  const ALLOWLIST_KEY = 'operation_plan.allowed_platforms';
+  // The production allowlist: linkedin-page counts as its own platform, which
+  // the product accepted rather than special-casing a merge with linkedin.
+  const PROD_ALLOWLIST = [
+    'x', 'linkedin', 'reddit', 'linkedin-page',
+    'medium', 'devto', 'hackernews', 'quora',
+  ];
+
+  it('multiplies the per-platform caps by the POST-domain allowlist', async () => {
+    const service = new PostPlanLimitsService(
+      settingsMock({ [ALLOWLIST_KEY]: PROD_ALLOWLIST })
+    );
+    expect(await service.resolveDraftLimits('growth-loop')).toEqual({
+      orgMax: 5000 * 8,
+      projectMax: 500 * 8,
+      platformCount: 8,
+    });
+  });
+
+  it('follows the allowlist rather than a frozen number', async () => {
+    // Widening the allowlist must widen the budget, not squeeze every existing
+    // platform's share of a fixed total.
+    const service = new PostPlanLimitsService(
+      settingsMock({ [ALLOWLIST_KEY]: ['x', 'reddit'] })
+    );
+    const limits = await service.resolveDraftLimits('growth-loop');
+    expect(limits.platformCount).toBe(2);
+    expect(limits.projectMax).toBe(1000);
+  });
+
+  it('treats an empty allowlist as the default count, never as zero platforms', async () => {
+    // Empty means "no extra restriction" for the allowlist itself; reading it as
+    // zero platforms would collapse the cap and refuse every draft.
+    const service = new PostPlanLimitsService(settingsMock({ [ALLOWLIST_KEY]: [] }));
+    const limits = await service.resolveDraftLimits('growth-loop');
+    expect(limits.platformCount).toBe(DEFAULT_DRAFT_PLATFORM_COUNT);
+    expect(limits.projectMax).toBe(500 * DEFAULT_DRAFT_PLATFORM_COUNT);
+  });
+
+  it('dedupes a repeated platform', async () => {
+    const service = new PostPlanLimitsService(
+      settingsMock({ [ALLOWLIST_KEY]: ['x', 'X', ' x ', 'reddit'] })
+    );
+    expect((await service.resolveDraftLimits('pro')).platformCount).toBe(2);
+  });
+
+  it('keeps null (unlimited) unlimited through the multiplication', async () => {
+    const service = new PostPlanLimitsService(
+      settingsMock({
+        [ALLOWLIST_KEY]: PROD_ALLOWLIST,
+        [POST_PLAN_LIMITS_KEY]: {
+          'growth-loop': { draftsPerPlatformMax: null, draftsPerPlatformPerProjectMax: null },
+        },
+      })
+    );
+    expect(await service.resolveDraftLimits('growth-loop')).toMatchObject({
+      orgMax: null,
+      projectMax: null,
+    });
+  });
+
+  it('enforces nothing when no plan code resolves', async () => {
+    const service = new PostPlanLimitsService(settingsMock({}));
+    expect(await service.resolveDraftLimits(null)).toMatchObject({
+      orgMax: null,
+      projectMax: null,
+    });
   });
 });

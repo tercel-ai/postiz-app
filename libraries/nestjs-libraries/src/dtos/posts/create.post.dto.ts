@@ -1,4 +1,5 @@
 import {
+  ArrayMaxSize,
   ArrayMinSize,
   IsArray,
   IsBoolean,
@@ -158,5 +159,10 @@ export class CreatePostDto {
   @IsArray()
   @ValidateNested({ each: true })
   @ArrayMinSize(1)
+  // Bounds ONE request. The draft ceiling and the send quota bound the total,
+  // but neither stops a single body from carrying an unbounded array — which is
+  // the cheapest way to make the server do a lot of work for one round trip.
+  // Well above any real batch: the editor sends one post per connected channel.
+  @ArrayMaxSize(100)
   posts: Post[];
 }

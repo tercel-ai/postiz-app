@@ -16,6 +16,10 @@ import {
 } from '@nestjs/common';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
+import {
+  limitFor,
+  RATE_LIMIT_TTL_MS,
+} from '@gitroom/nestjs-libraries/throttler/rate-limit-settings';
 import { EngageIngestQuotaService } from '@gitroom/nestjs-libraries/engage/engage-ingest-quota.service';
 import { Organization, User } from '@prisma/client';
 import { Request, Response } from 'express';
@@ -31,6 +35,7 @@ import { EngageScanTasksService } from '@gitroom/nestjs-libraries/engage/engage-
 import {
   EngageScanSyncDto,
   scanIngestPostToRawPost,
+  EngageScanPostsIngestDto,
 } from '@gitroom/nestjs-libraries/dtos/engage/scan-ingest.dto';
 import { EngageDraftService } from '@gitroom/nestjs-libraries/engage/engage-draft.service';
 import { TooSimilarToReferenceError } from '@gitroom/nestjs-libraries/engage/engage-reference-post.service';
@@ -116,6 +121,7 @@ export class EngageController {
     summary:
       'Extension scan loop: ingest a completed unit (optional) and claim the next batch of due units',
   })
+  @Throttle({ default: { limit: limitFor('engageIngest'), ttl: RATE_LIMIT_TTL_MS } })
   @Post('/scan-tasks/ingest')
   async scanTasksIngest(
     @GetOrgFromRequest() org: Organization,
@@ -173,9 +179,17 @@ export class EngageController {
       'Resets status → IDLE without advancing the cursor; select and claim the unit afterwards to bypass cadence.',
   })
   @Post('/scan-tasks/release')
-  async scanTasksRelease(@Body() body: { taskId: string }) {
+  async scanTasksRelease(
+    @GetOrgFromRequest() org: Organization,
+    @Body() body: { taskId: string }
+  ) {
     if (!body?.taskId) return { released: false };
-    const released = await this._scanTasksService.releaseTask(body.taskId);
+    // Org-scoped: releasing a lease someone else holds would hand their unit to
+    // the next claimant and throw away the pages they had already fetched.
+    const released = await this._scanTasksService.releaseTask(
+      org.id,
+      body.taskId
+    );
     return { released };
   }
 
@@ -183,10 +197,11 @@ export class EngageController {
     summary:
       'Ingest posts collected by the extension outside a claimed scan task.',
   })
+  @Throttle({ default: { limit: limitFor('engageIngest'), ttl: RATE_LIMIT_TTL_MS } })
   @Post('/scan-posts/ingest')
   async ingestScanPosts(
     @GetOrgFromRequest() org: Organization,
-    @Body() body: { posts?: any[] }
+    @Body() body: EngageScanPostsIngestDto
   ) {
     await this._ingestQuota.assertWithinQuota(org.id, body?.posts?.length ?? 0);
     const posts = (body?.posts ?? []).map(scanIngestPostToRawPost);
@@ -537,7 +552,7 @@ export class EngageController {
       'Trigger a due-only keyword/channel scan (new units scan immediately, cooldown-respecting)',
   })
   @ApiResponse({ status: 429, description: 'Rate limit exceeded (5/hour)' })
-  @Throttle({ default: { limit: 5, ttl: 3_600_000 } })
+  @Throttle({ default: { limit: limitFor('engageScan'), ttl: RATE_LIMIT_TTL_MS } })
   @Post('/scan')
   triggerScan(@GetOrgFromRequest() org: Organization) {
     return this._engageService.triggerDueScan(org);
@@ -680,7 +695,7 @@ export class EngageController {
   // the confirmed branch writes a globally-shared row no code path can undo.
   // The neighbouring /generate-post carries a throttle for a smaller blast
   // radius (its own org's spend); this one had none.
-  @Throttle({ default: { limit: 30, ttl: 3_600_000 } })
+  @Throttle({ default: { limit: limitFor('engageTargetGone'), ttl: RATE_LIMIT_TTL_MS } })
   @Post('/opportunities/:id/target-gone')
   reportTargetGone(
     @GetOrgFromRequest() org: Organization,
@@ -729,7 +744,7 @@ export class EngageController {
   })
   @ApiResponse({ status: 404, description: 'Opportunity not found' })
   @ApiResponse({ status: 429, description: 'Rate limit exceeded (20/hour)' })
-  @Throttle({ default: { limit: 20, ttl: 3_600_000 } })
+  @Throttle({ default: { limit: limitFor('engageDraft'), ttl: RATE_LIMIT_TTL_MS } })
   @Post('/opportunities/:id/draft')
   async generateDraft(
     @GetOrgFromRequest() org: Organization,
@@ -934,12 +949,12 @@ export class EngageController {
   @ApiResponse({
     status: 200,
     description:
-      'SSE stream ending with a data frame carrying {text, postId, parts, thread, threadSkippedReason?} then [DONE]. `parts` is one entry per post in the chain (a single-element array unless a thread was produced) and `thread` reports whether one actually was — a thread requested on a platform that cannot chain one (medium/quora/devto) degrades to a single post with threadSkippedReason=platform_unsupported. Failures (opportunity not found, generation failed, too similar to the reference, engage_insufficient_credits) end the stream with a typed error frame instead; the untyped `generation_failed` frame also carries a diagnostic `reason` string.',
+      'SSE stream ending with a data frame carrying {text, postId, parts, thread, threadSkippedReason?} then [DONE]. `parts` is one entry per post in the chain (a single-element array unless a thread was produced) and `thread` reports whether one actually was — a thread requested on a platform that cannot chain one (medium/quora/devto) degrades to a single post with threadSkippedReason=platform_unsupported. A thread whose tail overruns the platform character ceiling is delivered truncated to its valid prefix, with `droppedParts` counting what was discarded, rather than failing the whole generation. Failures (opportunity not found, generation failed, too similar to the reference, engage_insufficient_credits) end the stream with a typed error frame instead; the untyped `generation_failed` frame also carries a diagnostic `reason` string.',
   })
   @ApiResponse({ status: 404, description: 'Opportunity not found' })
   @ApiResponse({ status: 429, description: 'Rate limit exceeded (20/hour)' })
   @CheckPolicies([AuthorizationActions.Create, Sections.POSTS_PER_MONTH])
-  @Throttle({ default: { limit: 20, ttl: 3_600_000 } })
+  @Throttle({ default: { limit: limitFor('engageGeneratePost'), ttl: RATE_LIMIT_TTL_MS } })
   @Post('/opportunities/:id/generate-post')
   async generateReferencePost(
     @GetOrgFromRequest() org: Organization,
@@ -979,6 +994,12 @@ export class EngageController {
             // plain single-post request keeps its original frame shape.
             ...(result.threadSkippedReason
               ? { threadSkippedReason: result.threadSkippedReason }
+              : {}),
+            // Absent on the normal path: a thread whose tail overran the
+            // platform ceiling is delivered truncated rather than failed, and
+            // the client has to be able to say so.
+            ...(result.droppedParts
+              ? { droppedParts: result.droppedParts }
               : {}),
           })}\n\n`
         );
@@ -1517,7 +1538,7 @@ export class EngageController {
   // triggerable by an ordinary org member. Throttled like the other
   // external-API endpoints (/scan, /draft) to bound the upstream call volume.
   @CheckPolicies([AuthorizationActions.Create, Sections.ADMIN])
-  @Throttle({ default: { limit: 5, ttl: 3_600_000 } })
+  @Throttle({ default: { limit: limitFor('engageAdminSync'), ttl: RATE_LIMIT_TTL_MS } })
   @Post('/admin/resync-metrics')
   resyncEngageMetrics(
     @GetOrgFromRequest() org: Organization,
@@ -1541,7 +1562,7 @@ export class EngageController {
       'Manually wake up engage reply-metrics collection and return before/after stats.',
   })
   @CheckPolicies([AuthorizationActions.Create, Sections.ADMIN])
-  @Throttle({ default: { limit: 5, ttl: 3_600_000 } })
+  @Throttle({ default: { limit: limitFor('engageAdminSync'), ttl: RATE_LIMIT_TTL_MS } })
   @Post('/admin/sync-metrics')
   syncEngageMetrics(
     @GetOrgFromRequest() org: Organization,

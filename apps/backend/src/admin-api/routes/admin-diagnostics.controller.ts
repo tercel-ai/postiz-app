@@ -10,6 +10,9 @@ import {
   normalizeUsername,
 } from '@gitroom/nestjs-libraries/engage/engage-scan-lease.service';
 import { SCANNABLE_PLATFORMS } from '@gitroom/nestjs-libraries/engage/engage-scan-config.service';
+import { PostPlanLimitsService } from '@gitroom/nestjs-libraries/database/prisma/posts/post-plan-limits.service';
+import { PrismaRepository } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
+import { RiskControlTickService } from '@gitroom/nestjs-libraries/risk-control/risk-control-tick.service';
 
 type ReleaseScanCursorBody = {
   platform?: string;
@@ -32,8 +35,142 @@ export class AdminDiagnosticsController {
     private _postsRepository: PostsRepository,
     private _integrationRepository: IntegrationRepository,
     private _engageRepository: EngageRepository,
-    private _engageScanLeaseService: EngageScanLeaseService
+    private _engageScanLeaseService: EngageScanLeaseService,
+    private _postPlanLimits: PostPlanLimitsService,
+    private _post: PrismaRepository<'post'>,
+    private _riskTicks: RiskControlTickService
   ) {}
+
+  /**
+   * GET /admin/diagnostics/write-limits
+   *
+   * How close accounts are to the write-path ceilings (see
+   * docs/engage/write-path-limits.md).
+   *
+   * Reports HEAD-ROOM, not breaches, and the distinction is the point. A breach
+   * count reads zero whether a limit is perfectly tuned or a thousand times too
+   * high, so it cannot tell you the limit is wrong until it already hurt
+   * someone; the distance between the busiest account and the cap can, while
+   * there is still time to move it.
+   *
+   * Only the DRAFT cap is measurable from durable state. The ingest quota and
+   * the route throttles count in Redis under a short TTL, so nothing about
+   * yesterday survives — an accurate "who was refused yesterday" needs those
+   * refusals persisted, which is a schema change and not done here. Until then
+   * a refusal exists only as a logged warning (`post_draft_limit_reached`,
+   * `engage_ingest_quota_exceeded`, and the throttler's own 429s).
+   */
+  @Get('/write-limits')
+  async checkWriteLimits() {
+    // Sized for growth-loop, the only plan still sold; the legacy tiers share
+    // the same defaults today, so one set of numbers covers every live account.
+    const { orgMax, projectMax, platformCount } =
+      await this._postPlanLimits.resolveDraftLimits('growth-loop');
+
+    const [rows, rejections] = await Promise.all([
+      this._post.model.post.groupBy({
+        by: ['organizationId', 'projectId'],
+        where: { state: 'DRAFT', deletedAt: null, parentPostId: null },
+        _count: { _all: true },
+      }),
+      this._rejectionReport(),
+    ]);
+
+    const perOrg = new Map<string, number>();
+    for (const r of rows) {
+      perOrg.set(r.organizationId, (perOrg.get(r.organizationId) ?? 0) + r._count._all);
+    }
+
+    // "Approaching" at 80%: far enough out that there is room to react, close
+    // enough that it is not noise.
+    const NEAR = 0.8;
+    const near = (used: number, cap: number | null) =>
+      cap !== null && used >= cap * NEAR;
+
+    const orgs = [...perOrg.entries()]
+      .map(([organizationId, used]) => ({
+        organizationId,
+        used,
+        cap: orgMax,
+        pctOfCap: orgMax ? Math.round((used / orgMax) * 100) : null,
+      }))
+      .sort((a, b) => b.used - a.used);
+
+    const projects = rows
+      .filter((r) => r.projectId)
+      .map((r) => ({
+        organizationId: r.organizationId,
+        projectId: r.projectId as string,
+        used: r._count._all,
+        cap: projectMax,
+        pctOfCap: projectMax ? Math.round((r._count._all / projectMax) * 100) : null,
+      }))
+      .sort((a, b) => b.used - a.used);
+
+    const orgsNear = orgs.filter((o) => near(o.used, orgMax));
+    const projectsNear = projects.filter((p) => near(p.used, projectMax));
+
+    return {
+      drafts: {
+        caps: { perOrg: orgMax, perProject: projectMax, platformCount },
+        // The busiest few are the calibration signal: a top account sitting at
+        // 1% of the cap says the cap bounds nothing in practice.
+        topOrgs: orgs.slice(0, 10),
+        topProjects: projects.slice(0, 10),
+        approachingOrgs: orgsNear,
+        approachingProjects: projectsNear,
+      },
+      rejections,
+      summary: {
+        orgsApproachingCap: orgsNear.length,
+        projectsApproachingCap: projectsNear.length,
+        busiestOrgDrafts: orgs[0]?.used ?? 0,
+        busiestProjectDrafts: projects[0]?.used ?? 0,
+        rejectionsYesterday: rejections.yesterday.total,
+        rejectionsLast7Days: rejections.last7Days.total,
+        // Head-room alone reads healthy right up until a cap refuses a real
+        // customer, so a refusal counts against health even when nothing is
+        // near a cap — the two answer different questions.
+        healthy:
+          orgsNear.length === 0 &&
+          projectsNear.length === 0 &&
+          rejections.yesterday.total === 0,
+      },
+    };
+  }
+
+  /**
+   * Refusals actually served, from the durable counters (RiskControlTick).
+   *
+   * The counterpart to head-room above. Head-room says whether a cap is set
+   * sanely; this says whether anyone met it — and for the ingest quota and the
+   * route throttles it is the ONLY signal, since both count in Redis under short
+   * TTLs and leave no trace by the next day.
+   */
+  private async _rejectionReport() {
+    const startOfToday = new Date();
+    startOfToday.setUTCHours(0, 0, 0, 0);
+    const yesterday = new Date(startOfToday.getTime() - 86_400_000);
+    const weekAgo = new Date(startOfToday.getTime() - 7 * 86_400_000);
+
+    const [yesterdayByGate, yesterdayOrgs, weekByGate] = await Promise.all([
+      this._riskTicks.totalsByGate({ from: yesterday, to: yesterday }),
+      this._riskTicks.topOrgs({ from: yesterday, to: yesterday, limit: 10 }),
+      this._riskTicks.totalsByGate({ from: weekAgo }),
+    ]);
+    const sum = (m: Record<string, number>) =>
+      Object.values(m).reduce((a, b) => a + b, 0);
+
+    return {
+      yesterday: {
+        date: yesterday.toISOString().slice(0, 10),
+        byGate: yesterdayByGate,
+        topOrgs: yesterdayOrgs,
+        total: sum(yesterdayByGate),
+      },
+      last7Days: { byGate: weekByGate, total: sum(weekByGate) },
+    };
+  }
 
   /**
    * GET /admin/diagnostics/recurring-posts
@@ -470,7 +607,7 @@ export class AdminDiagnosticsController {
    */
   @Get('/overview')
   async overview() {
-    const [recurring, stuck, integrations, errors, scanCursors, failedScans, deadReplyAccounts, replyErrors] =
+    const [recurring, stuck, integrations, errors, scanCursors, failedScans, deadReplyAccounts, replyErrors, writeLimits] =
       await Promise.all([
         this.checkRecurringPosts(),
         this.checkStuckPosts(),
@@ -480,6 +617,7 @@ export class AdminDiagnosticsController {
         this.checkEngageFailedScans(),
         this.checkEngageDeadReplyAccounts(),
         this.checkEngageReplyErrors(),
+        this.checkWriteLimits(),
       ]);
 
     return {
@@ -492,7 +630,8 @@ export class AdminDiagnosticsController {
         scanCursors.summary.healthy &&
         failedScans.summary.healthy &&
         deadReplyAccounts.summary.healthy &&
-        replyErrors.summary.healthy,
+        replyErrors.summary.healthy &&
+        writeLimits.summary.healthy,
       recurringPosts: recurring.summary,
       stuckPosts: stuck.summary,
       integrations: integrations.summary,
@@ -509,6 +648,7 @@ export class AdminDiagnosticsController {
         replyErrors: replyErrors.summary.count,
         healthy: deadReplyAccounts.summary.healthy && replyErrors.summary.healthy,
       },
+      writeLimits: writeLimits.summary,
     };
   }
 }

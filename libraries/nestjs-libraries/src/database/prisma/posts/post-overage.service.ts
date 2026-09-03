@@ -1,9 +1,15 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { ForbiddenException, Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { SettingsService } from '@gitroom/nestjs-libraries/database/prisma/settings/settings.service';
 import { PostsRepository } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.repository';
 import { AiseeCreditService } from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/aisee-credit.service';
 import { AiseeBusinessType } from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/aisee.client';
 import { UsersService } from '@gitroom/nestjs-libraries/database/prisma/users/users.service';
+import { PostPlanLimitsService } from '@gitroom/nestjs-libraries/database/prisma/posts/post-plan-limits.service';
+import { resolveAiseePlanCode } from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/aisee.client';
+import {
+  RISK_GATES,
+  RiskControlTickService,
+} from '@gitroom/nestjs-libraries/risk-control/risk-control-tick.service';
 
 const SETTINGS_KEY = 'post_send_overage_cost';
 const DEFAULT_OVERAGE_COST = 25;
@@ -16,8 +22,87 @@ export class PostOverageService implements OnModuleInit {
     private readonly _settingsService: SettingsService,
     private readonly _postsRepository: PostsRepository,
     private readonly _aiseeCreditService: AiseeCreditService,
-    private readonly _usersService: UsersService
+    private readonly _usersService: UsersService,
+    // Optional so the specs that build this service positionally keep working;
+    // DatabaseModule always provides it at runtime. A missing one disables the
+    // draft gate rather than blocking every draft.
+    private readonly _postPlanLimits?: PostPlanLimitsService,
+    private readonly _riskTicks?: RiskControlTickService
   ) {}
+
+  /**
+   * Refuse a batch of DRAFTS that would carry the org past its plan's ceiling.
+   *
+   * Drafts are deliberately NOT billed — a free scratchpad is the intended
+   * product semantics — which is exactly why they need a different bound.
+   * `countPostsFromDay` counts only QUEUE and PUBLISHED, so a draft never moves
+   * the number the overage charge tests against: before this, draft creation was
+   * free, unrated and batchable all at once.
+   *
+   * Both scopes are checked and the effective head-room is the smaller, matching
+   * how the engage caps work. The org cap is what actually bounds an account:
+   * growth-loop's project limit in aisee-core is null (unlimited), so a
+   * per-project cap alone would be `cap x infinity`.
+   */
+  async assertDraftQuota(
+    orgId: string,
+    userId: string | undefined,
+    requested: number,
+    projectId?: string | null
+  ): Promise<void> {
+    if (!this._postPlanLimits || !userId || requested <= 0) return;
+
+    const pkg = await this._usersService.getUserLimits(userId);
+    // Billing off (null) or no active subscription: nothing to size a cap from,
+    // and the latter is already refused by the permissions gate — a second,
+    // differently-worded refusal here would only obscure the real reason.
+    if (!pkg || 'noActiveSubscription' in pkg) return;
+
+    const { orgMax, projectMax, platformCount } =
+      await this._postPlanLimits.resolveDraftLimits(resolveAiseePlanCode(pkg));
+    if (orgMax === null && projectMax === null) return;
+
+    const [orgCount, projectCount] = await Promise.all([
+      orgMax === null ? Promise.resolve(0) : this._postsRepository.countLiveDrafts(orgId),
+      projectMax === null || !projectId
+        ? Promise.resolve(0)
+        : this._postsRepository.countLiveDrafts(orgId, projectId),
+    ]);
+
+    const breach =
+      orgMax !== null && orgCount + requested > orgMax
+        ? { scope: 'organization' as const, max: orgMax, current: orgCount }
+        : projectMax !== null && projectId && projectCount + requested > projectMax
+          ? { scope: 'project' as const, max: projectMax, current: projectCount }
+          : null;
+    if (!breach) return;
+
+    this.logger.warn(
+      `[drafts orgId=${orgId}${projectId ? ` projectId=${projectId}` : ''}] ` +
+        `${breach.scope} cap reached: ${breach.current} + ${requested} > ${breach.max}`
+    );
+    // The draft cap is the one control whose head-room IS queryable, but a
+    // refusal still needs recording: head-room says how close accounts are, not
+    // whether anyone actually met the cap and got turned away.
+    await this._riskTicks?.record({
+      gate: RISK_GATES.postDraftLimit,
+      organizationId: orgId,
+      detail: breach.scope,
+    });
+    throw new ForbiddenException({
+      code: 'post_draft_limit_reached',
+      // Which cap refused this — the frontend needs it to word the remedy
+      // ("delete drafts in this project" vs "across the account").
+      scope: breach.scope,
+      max: breach.max,
+      current: breach.current,
+      requested,
+      platformCount,
+      message:
+        `Draft limit reached: this ${breach.scope} already holds ` +
+        `${breach.current} of ${breach.max} drafts. Delete or publish some to make room.`,
+    });
+  }
 
   async onModuleInit(): Promise<void> {
     const existing = await this._settingsService.get(SETTINGS_KEY);

@@ -542,9 +542,29 @@ describe('EngageScanTasksService.sync — ingest completed', () => {
     expect(ingest.ingestForOrg).toHaveBeenCalledTimes(2); // o1 + o2
     expect(res.accepted).toBe(6); // 3 per org (mock)
     // cursor derived from the NEWEST post, not trusting the client
-    const [token, cursor] = lease.completeByToken.mock.calls[0];
+    const [token, completingOrgId, cursor] = lease.completeByToken.mock
+      .calls[0] as any[];
     expect(token).toBe('tok_abc');
+    // The lease is completed AS the submitting org, so a token held by someone
+    // else cannot close this unit (the WHERE in completeByToken matches on it).
+    expect(completingOrgId).toBe('org1');
     expect(cursor).toEqual({ lastSeenExternalId: 't3_new', lastSeenAt: newest });
+  });
+
+  it('looks the lease up scoped to the SUBMITTING org, not by token alone', async () => {
+    // Without the org in the lookup, any authenticated caller holding a token
+    // could submit posts that then fan out to every other subscriber of that
+    // unit — the cross-tenant path this scoping closes.
+    const { svc, engageRepo } = build({
+      unitByToken: { id: 'cur1', platform: 'reddit', scanType: 'keyword', scanKey: 'ai' },
+    });
+    await svc.sync('org1', {
+      completed: { taskId: 'tok_abc', posts: [] },
+    });
+    expect(engageRepo.findScanCursorByToken).toHaveBeenCalledWith(
+      'tok_abc',
+      'org1'
+    );
   });
 
   it('isolates a per-org ingest failure and STILL completes the lease (W2)', async () => {
@@ -570,7 +590,7 @@ describe('EngageScanTasksService.sync — ingest completed', () => {
       completed: { taskId: 'tok_abc', posts: [] } as any,
     });
     expect(res.accepted).toBe(0);
-    expect(lease.releaseByToken).toHaveBeenCalledWith('tok_abc');
+    expect(lease.releaseByToken).toHaveBeenCalledWith('tok_abc', 'org1');
     expect(lease.completeByToken).not.toHaveBeenCalled(); // cursor not advanced
   });
 
@@ -586,7 +606,7 @@ describe('EngageScanTasksService.sync — ingest completed', () => {
       { externalPostId: 't3_forged', postPublishedAt: future },
     ];
     await svc.sync('org1', { completed: { taskId: 'tok_abc', posts } as any });
-    const [, cursor] = lease.completeByToken.mock.calls[0];
+    const [, , cursor] = lease.completeByToken.mock.calls[0] as any[];
     // The forged future post must NOT become the cursor (id or timestamp).
     expect(cursor).toEqual({ lastSeenExternalId: 't3_real', lastSeenAt: past });
   });

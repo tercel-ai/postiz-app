@@ -1656,6 +1656,15 @@ model EngageScanCursor {
   // every claim and is cleared on complete/release, so a leaked/old token cannot
   // complete a lease it no longer owns (session binding for the async path).
   leaseToken        String?
+  // Which organization holds the current lease; null for a server-side
+  // (workflow) claim, which completes by row id and never uses the token path.
+  //
+  // The unit itself stays global and shared — one fetch still fans out to every
+  // subscribing org, which is the design. This binds only the RIGHT TO COMPLETE
+  // it: without it the token was the sole credential, so any authenticated org
+  // holding one could submit posts that the backend would then score, classify
+  // and persist for every OTHER subscriber of that unit.
+  claimedByOrgId    String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1728,6 +1737,40 @@ model EngageDataTicks {
 // code/Settings, never in this table, so cost = SUM(quantity) * price computed
 // at report time and re-priceable without backfill. Deliberately global (no org
 // / integration) to keep cardinality tiny (~platforms * categories rows/day).
+// Risk-control telemetry: how often each write-path control ACTED, per org per
+// day. One row per (day, org, gate, outcome, detail); `quantity` is upserted.
+//
+// Counts, never events. A row per refusal would put its heaviest write load
+// exactly when the system is under the pressure these controls exist for, and
+// nobody reads refusal-by-refusal detail anyway — the questions that get asked
+// are "is anyone hitting this", "who", and "is it trending up", all of which a
+// daily counter answers.
+//
+// Deliberately generic, so a control added later needs a call site and not a
+// migration: `gate`, `outcome` and `detail` are free strings rather than enums.
+// `outcome` is 'rejected' everywhere today; it exists so a control that wants to
+// record 'allowed' or 'degraded' (and thus a RATE rather than a bare count) can,
+// without reshaping the table.
+//
+// Complements — does not replace — the two existing measurements. Head-room
+// (diagnostics/write-limits) says whether a cap is set sanely; this says whether
+// anyone actually met it. A cap reads healthy on head-room alone right up until
+// it refuses a real customer.
+model RiskControlTick {
+  date           DateTime // day bucket (UTC midnight)
+  organizationId String // '' = system / no org
+  gate           String // 'engage_ingest_quota' | 'post_draft_limit' | 'route_throttle' | ...
+  outcome        String // 'rejected' today; room for 'allowed' / 'degraded'
+  detail         String // gate-specific sub-dimension (cap scope, route bucket); '' when none
+  quantity       BigInt   @default(0)
+  updatedAt      DateTime @updatedAt
+
+  @@unique([date, organizationId, gate, outcome, detail])
+  @@index([date])
+  @@index([organizationId, date])
+  @@index([gate, date])
+}
+
 model ApiUsageTick {
   date      DateTime // day bucket (UTC midnight)
   platform  String // 'x' | 'reddit' | ...

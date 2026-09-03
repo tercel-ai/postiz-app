@@ -1838,6 +1838,30 @@ export class PostsRepository {
     });
   }
 
+  /**
+   * Live DRAFT roots for an org, optionally scoped to one project.
+   *
+   * `deletedAt: null` is the point of the query, not a detail: re-running an
+   * operation plan soft-deletes the previous run's drafts (the supersede sweep
+   * in operation-plan.repository), so counting deleted rows would let a project
+   * that merely refreshes its plan each month fill its own quota with rows
+   * nothing can see any more.
+   *
+   * Roots only (`parentPostId: null`), matching countPostsFromDay: a thread is
+   * one draft to the user, not one per segment.
+   */
+  countLiveDrafts(orgId: string, projectId?: string | null) {
+    return this._post.model.post.count({
+      where: {
+        organizationId: orgId,
+        state: 'DRAFT',
+        deletedAt: null,
+        parentPostId: null,
+        ...(projectId ? { projectId } : {}),
+      },
+    });
+  }
+
   async createOrUpdatePost(
     state: 'draft' | 'schedule' | 'now',
     orgId: string,

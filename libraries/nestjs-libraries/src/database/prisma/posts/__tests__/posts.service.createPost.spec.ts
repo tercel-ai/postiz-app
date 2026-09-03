@@ -36,6 +36,9 @@ function createMocks() {
     temporalService: {},
     refreshIntegrationService: {},
     postOverageService: {
+      // Default: the draft ceiling admits everything, so cases asserting other
+      // behaviour are not refused before they reach it.
+      assertDraftQuota: vi.fn().mockResolvedValue(undefined),
       deductIfOverage: vi.fn().mockResolvedValue(undefined),
     },
   };
@@ -456,5 +459,77 @@ describe('PostsService.mapTypeToPost — accountless posts', () => {
 
     expect((result.posts[0].settings as any).__type).toBe('mastodon');
     expect((mocks.integrationService as any).getIntegrationById).toHaveBeenCalledWith('org-1', 'int-1');
+  });
+});
+
+describe('PostsService.createPost — draft ceiling', () => {
+  let mocks: ReturnType<typeof createMocks>;
+  let service: PostsService;
+
+  beforeEach(() => {
+    mocks = createMocks();
+    service = createService(mocks);
+  });
+
+  it('checks the ceiling ONCE for the whole batch, before anything is written', async () => {
+    // Per batch, not per post: a partially-admitted batch would leave the caller
+    // unable to tell which of its posts landed.
+    await service.createPost(
+      'org-1',
+      { ...makeBody({ type: 'draft' }), projectId: 'proj-1' } as any,
+      'user-1'
+    );
+    expect(mocks.postOverageService.assertDraftQuota).toHaveBeenCalledTimes(1);
+    expect(mocks.postOverageService.assertDraftQuota).toHaveBeenCalledWith(
+      'org-1',
+      'user-1',
+      1,
+      'proj-1'
+    );
+  });
+
+  it('does not charge an EDIT against the cap', async () => {
+    // createOrUpdatePost upserts on value[0].id, so an entry carrying one
+    // updates a draft that already counts — charging for it would leave an org
+    // at its ceiling unable to edit its way down, only delete.
+    const body = makeBody({ type: 'draft' }) as any;
+    body.posts[0].value[0].id = 'existing-post-1';
+    await service.createPost('org-1', body, 'user-1');
+    expect(mocks.postOverageService.assertDraftQuota).toHaveBeenCalledWith(
+      'org-1',
+      'user-1',
+      0,
+      undefined
+    );
+  });
+
+  it('counts only the NEW entries in a mixed batch', async () => {
+    const body = makeBody({ type: 'draft' }) as any;
+    body.posts = [
+      { ...body.posts[0], value: [{ content: 'edit', id: 'existing-1' }] },
+      { ...body.posts[0], value: [{ content: 'new' }] },
+    ];
+    await service.createPost('org-1', body, 'user-1');
+    expect(mocks.postOverageService.assertDraftQuota).toHaveBeenCalledWith(
+      'org-1',
+      'user-1',
+      1,
+      undefined
+    );
+  });
+
+  it('leaves scheduled posts to the send quota instead', async () => {
+    await service.createPost('org-1', makeBody({ type: 'schedule' }) as any, 'user-1');
+    expect(mocks.postOverageService.assertDraftQuota).not.toHaveBeenCalled();
+  });
+
+  it('writes nothing when the ceiling refuses', async () => {
+    mocks.postOverageService.assertDraftQuota.mockRejectedValue(
+      new Error('post_draft_limit_reached')
+    );
+    await expect(
+      service.createPost('org-1', makeBody({ type: 'draft' }) as any, 'user-1')
+    ).rejects.toThrow('post_draft_limit_reached');
+    expect(mocks.postRepository.createOrUpdatePost).not.toHaveBeenCalled();
   });
 });

@@ -28,6 +28,43 @@ export interface PostPlanLimits {
   postSendLimit: number | null;
   /** Max connected channels. */
   postChannelLimit: number | null;
+  /**
+   * Live (non-deleted) DRAFT posts allowed PER PLATFORM, org-wide. The
+   * effective cap is this x the size of the `operation_plan.allowed_platforms`
+   * allowlist, so widening the allowlist widens the cap instead of squeezing it.
+   *
+   * Per-platform for the same reason `priorityAccountsMax` is: a draft budget is
+   * spent per surface, and a flat total would mean adding a platform silently
+   * cut every other platform's share.
+   */
+  draftsPerPlatformMax: number | null;
+  /** The same budget scoped to ONE project. Both caps apply; see the invariant. */
+  draftsPerPlatformPerProjectMax: number | null;
+}
+
+/**
+ * Mirrors OPERATION_PLAN_ALLOWED_PLATFORMS_KEY, re-declared rather than imported
+ * to avoid a posts <-> operation-plan module cycle (operation-plan already
+ * imports from posts). Same trick, and same reason, as
+ * engage-scan-config.service.ts.
+ */
+const OPERATION_PLAN_ALLOWED_PLATFORMS_SETTING = 'operation_plan.allowed_platforms';
+
+/**
+ * Platform count the draft caps multiply by, when the allowlist is unreadable or
+ * empty. "Empty = no extra restriction" for the allowlist itself, but an empty
+ * list must not collapse the cap to zero and block every draft.
+ */
+export const DEFAULT_DRAFT_PLATFORM_COUNT = 8;
+
+/** The two draft caps resolved to absolute row counts for one org. */
+export interface ResolvedDraftLimits {
+  /** Org-wide ceiling on live DRAFT rows; null = unlimited. */
+  orgMax: number | null;
+  /** Per-project ceiling on live DRAFT rows; null = unlimited. */
+  projectMax: number | null;
+  /** How many platforms the per-platform numbers were multiplied by. */
+  platformCount: number;
 }
 
 export type PostPlanLimitsMap = Record<AiseePlanCode, PostPlanLimits>;
@@ -50,11 +87,42 @@ export type ResolvedPostLimitsPackage = Omit<
 // starter/developer/pro are legacy tiers, retained only so pre-existing
 // subscriptions keep resolving (see AiseePlanCode). 'growth-loop' is the only
 // plan aisee-core sells going forward.
+// Draft caps are per PLATFORM, multiplied by the allowlist at read time. 500 per
+// platform per project is roughly an order of magnitude above what a project
+// actually holds: one 30-day operation plan materializes a few hundred rows
+// across every platform, and re-running the plan soft-deletes the previous run's
+// drafts (the supersede sweep in operation-plan.repository), so the live count
+// does not stack plan over plan. The org number is 10x the project one — the
+// ratio keywordsMax and priorityAccountsMax already use, i.e. a budget sized for
+// about ten projects.
+const DEFAULT_DRAFTS_PER_PLATFORM_PER_PROJECT = 500;
+const DEFAULT_DRAFTS_PER_PLATFORM = 5000;
+
 const DEFAULT_POST_PLAN_LIMITS: PostPlanLimitsMap = {
-  starter: { postSendLimit: 0, postChannelLimit: null },
-  developer: { postSendLimit: 0, postChannelLimit: null },
-  pro: { postSendLimit: 0, postChannelLimit: null },
-  'growth-loop': { postSendLimit: 0, postChannelLimit: null },
+  starter: {
+    postSendLimit: 0,
+    postChannelLimit: null,
+    draftsPerPlatformMax: DEFAULT_DRAFTS_PER_PLATFORM,
+    draftsPerPlatformPerProjectMax: DEFAULT_DRAFTS_PER_PLATFORM_PER_PROJECT,
+  },
+  developer: {
+    postSendLimit: 0,
+    postChannelLimit: null,
+    draftsPerPlatformMax: DEFAULT_DRAFTS_PER_PLATFORM,
+    draftsPerPlatformPerProjectMax: DEFAULT_DRAFTS_PER_PLATFORM_PER_PROJECT,
+  },
+  pro: {
+    postSendLimit: 0,
+    postChannelLimit: null,
+    draftsPerPlatformMax: DEFAULT_DRAFTS_PER_PLATFORM,
+    draftsPerPlatformPerProjectMax: DEFAULT_DRAFTS_PER_PLATFORM_PER_PROJECT,
+  },
+  'growth-loop': {
+    postSendLimit: 0,
+    postChannelLimit: null,
+    draftsPerPlatformMax: DEFAULT_DRAFTS_PER_PLATFORM,
+    draftsPerPlatformPerProjectMax: DEFAULT_DRAFTS_PER_PLATFORM_PER_PROJECT,
+  },
 };
 
 /**
@@ -143,6 +211,16 @@ export class PostPlanLimitsService implements OnModuleInit {
           'postChannelLimit',
           raw.postChannelLimit
         ),
+        draftsPerPlatformMax: this._sanitize(
+          code,
+          'draftsPerPlatformMax',
+          raw.draftsPerPlatformMax
+        ),
+        draftsPerPlatformPerProjectMax: this._sanitize(
+          code,
+          'draftsPerPlatformPerProjectMax',
+          raw.draftsPerPlatformPerProjectMax
+        ),
       };
       return acc;
     }, {} as PostPlanLimitsMap);
@@ -193,5 +271,61 @@ export class PostPlanLimitsService implements OnModuleInit {
       );
       return pkg;
     }
+  }
+
+  /**
+   * How many platforms the per-platform draft caps multiply by.
+   *
+   * Reads the POST-domain allowlist (`operation_plan.allowed_platforms`), not
+   * the engage scan one: drafts are posts, and a plan generates them for exactly
+   * these platforms — reading a different list would let a plan produce content
+   * for a platform the draft budget was never sized for.
+   */
+  private async _platformCount(): Promise<number> {
+    try {
+      const raw = await this._settings.get<unknown>(
+        OPERATION_PLAN_ALLOWED_PLATFORMS_SETTING
+      );
+      const list = Array.isArray(raw)
+        ? raw
+        : typeof raw === 'string'
+          ? raw.split(',')
+          : [];
+      const distinct = new Set(
+        list.map((p) => String(p).trim().toLowerCase()).filter(Boolean)
+      );
+      // Empty allowlist means "no extra restriction", never "no platforms" — it
+      // must not collapse the cap to zero and refuse every draft.
+      return distinct.size || DEFAULT_DRAFT_PLATFORM_COUNT;
+    } catch (err) {
+      this.logger.error(
+        `Failed to read ${OPERATION_PLAN_ALLOWED_PLATFORMS_SETTING}; sizing draft caps for ${DEFAULT_DRAFT_PLATFORM_COUNT} platforms`,
+        err
+      );
+      return DEFAULT_DRAFT_PLATFORM_COUNT;
+    }
+  }
+
+  /**
+   * Absolute live-DRAFT ceilings for one plan: the per-platform numbers times
+   * the allowlist size. `null` (unlimited) survives the multiplication.
+   */
+  async resolveDraftLimits(
+    code: AiseePlanCode | null
+  ): Promise<ResolvedDraftLimits> {
+    const platformCount = await this._platformCount();
+    // No resolvable plan → no draft ceiling to enforce. Posting itself is
+    // already blocked for those accounts by the no-active-subscription sentinel
+    // in getUserLimits, so gating drafts here would only add a second, more
+    // confusing refusal on a path that never gets that far.
+    if (!code) return { orgMax: null, projectMax: null, platformCount };
+    const limits = (await this.getAll())[code];
+    const scale = (per: number | null) =>
+      per === null ? null : per * platformCount;
+    return {
+      orgMax: scale(limits.draftsPerPlatformMax),
+      projectMax: scale(limits.draftsPerPlatformPerProjectMax),
+      platformCount,
+    };
   }
 }

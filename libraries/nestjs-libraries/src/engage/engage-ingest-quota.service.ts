@@ -9,6 +9,10 @@ import { SettingsService } from '@gitroom/nestjs-libraries/database/prisma/setti
 import { EngageScanConfigService } from '@gitroom/nestjs-libraries/engage/engage-scan-config.service';
 import { EngageEntitlementService } from '@gitroom/nestjs-libraries/engage/engage-entitlement.service';
 import { ioRedis } from '@gitroom/nestjs-libraries/redis/redis.service';
+import {
+  RISK_GATES,
+  RiskControlTickService,
+} from '@gitroom/nestjs-libraries/risk-control/risk-control-tick.service';
 
 // ─── Settings key (admin-configurable via /admin/settings, no redeploy) ──────
 export const ENGAGE_INGEST_QUOTA_KEY = 'engage_ingest_quota';
@@ -92,7 +96,9 @@ export class EngageIngestQuotaService implements OnModuleInit {
   constructor(
     private readonly _settings: SettingsService,
     private readonly _scanConfig: EngageScanConfigService,
-    private readonly _entitlement: EngageEntitlementService
+    private readonly _entitlement: EngageEntitlementService,
+    // Optional so the specs that build this service positionally keep working.
+    private readonly _riskTicks?: RiskControlTickService
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -364,7 +370,7 @@ export class EngageIngestQuotaService implements OnModuleInit {
   ): Promise<void> {
     if (!organizationId || records <= 0) return;
 
-    const { enabled, recordsPerHour } = await this.resolveLimit(organizationId);
+    const { enabled, recordsPerHour, source } = await this.resolveLimit(organizationId);
     if (!enabled) return;
 
     const now = Date.now();
@@ -400,6 +406,16 @@ export class EngageIngestQuotaService implements OnModuleInit {
           used
         )} + requested=${records} > ${recordsPerHour}/hour`
       );
+      // Recorded before throwing: the Redis window this decision came from
+      // expires within the hour, so without a durable counter a mistuned
+      // ceiling refusing real collection is invisible by tomorrow.
+      await this._riskTicks?.record({
+        gate: RISK_GATES.engageIngestQuota,
+        organizationId,
+        // Which term produced the ceiling that refused this — the first thing
+        // you want when deciding whether the ceiling or the caller is wrong.
+        detail: source,
+      });
       throw new HttpException(
         {
           code: 'engage_ingest_quota_exceeded',

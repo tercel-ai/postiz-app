@@ -124,6 +124,12 @@ export interface ClaimArgs {
   leaseTtlMs?: number;
   /** Injectable clock for tests. */
   now?: Date;
+  /**
+   * Organization taking the lease, recorded so only it may complete or release
+   * by token. Omit on the server-side workflow path, which holds the row for one
+   * activity and finishes by id.
+   */
+  claimedByOrgId?: string | null;
 }
 
 export interface ReleaseByUnitArgs {
@@ -227,7 +233,15 @@ export class EngageScanLeaseService {
           { status: 'SCANNING', lastScanStartedAt: null },
         ],
       },
-      data: { status: 'SCANNING', lastScanStartedAt: now, leaseToken },
+      data: {
+        status: 'SCANNING',
+        lastScanStartedAt: now,
+        leaseToken,
+        // Always written, including the null of a workflow claim — a leftover
+        // owner from a previous claim would otherwise outlive its lease and
+        // decide who may complete this one.
+        claimedByOrgId: args.claimedByOrgId ?? null,
+      },
     });
     if (claimed.count !== 1) return null; // lost the race
 
@@ -251,11 +265,17 @@ export class EngageScanLeaseService {
    */
   async completeByToken(
     leaseToken: string,
+    orgId: string,
     next: { lastSeenExternalId?: string | null; lastSeenAt?: Date | null },
     now: Date = new Date()
   ): Promise<boolean> {
     const res = await this._scanCursor.model.engageScanCursor.updateMany({
-      where: { leaseToken, status: 'SCANNING' },
+      // `claimedByOrgId` is matched, not merely read: a token is a bearer
+      // credential, so possession alone must not be enough to complete someone
+      // else's lease. A lease claimed before this column existed carries null
+      // and therefore no longer matches — it is left to expire on the 5-minute
+      // TTL and be reclaimed, which is the whole cost of the migration.
+      where: { leaseToken, status: 'SCANNING', claimedByOrgId: orgId },
       data: {
         status: 'IDLE',
         lastScannedAt: now,
@@ -263,16 +283,22 @@ export class EngageScanLeaseService {
         lastSeenAt: next.lastSeenAt ?? null,
         cooldownUntil: null,
         leaseToken: null,
+        claimedByOrgId: null,
       },
     });
     return res.count === 1;
   }
 
-  /** Release a token-held lease without advancing (skipped/aborted by client). */
-  async releaseByToken(leaseToken: string): Promise<boolean> {
+  /**
+   * Release a token-held lease without advancing (skipped/aborted by client).
+   * Scoped to the holder for the same reason as {@link completeByToken}:
+   * releasing someone else's in-flight lease hands their unit to whoever claims
+   * it next, discarding the pages they already fetched.
+   */
+  async releaseByToken(leaseToken: string, orgId: string): Promise<boolean> {
     const res = await this._scanCursor.model.engageScanCursor.updateMany({
-      where: { leaseToken, status: 'SCANNING' },
-      data: { status: 'IDLE', leaseToken: null },
+      where: { leaseToken, status: 'SCANNING', claimedByOrgId: orgId },
+      data: { status: 'IDLE', leaseToken: null, claimedByOrgId: null },
     });
     return res.count === 1;
   }
@@ -328,8 +354,9 @@ export class EngageScanLeaseService {
     const data: {
       status: 'IDLE';
       leaseToken: null;
+      claimedByOrgId: null;
       cooldownUntil?: null;
-    } = { status: 'IDLE', leaseToken: null };
+    } = { status: 'IDLE', leaseToken: null, claimedByOrgId: null };
     if (args.clearCooldown) data.cooldownUntil = null;
 
     const res = await this._scanCursor.model.engageScanCursor.updateMany({
@@ -375,6 +402,7 @@ export class EngageScanLeaseService {
         lastSeenAt: next.lastSeenAt ?? null,
         cooldownUntil: null,
         leaseToken: null,
+        claimedByOrgId: null,
       },
     });
   }
@@ -383,7 +411,12 @@ export class EngageScanLeaseService {
   async cooldown(id: string, until: Date): Promise<void> {
     await this._scanCursor.model.engageScanCursor.update({
       where: { id },
-      data: { status: 'IDLE', cooldownUntil: until, leaseToken: null },
+      data: {
+        status: 'IDLE',
+        cooldownUntil: until,
+        leaseToken: null,
+        claimedByOrgId: null,
+      },
     });
   }
 
@@ -401,6 +434,7 @@ export class EngageScanLeaseService {
       data: {
         status: 'IDLE',
         leaseToken: null,
+        claimedByOrgId: null,
         ...(opts.resetStartedAt && { lastScanStartedAt: null }),
       },
     });

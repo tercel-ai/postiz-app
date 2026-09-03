@@ -201,6 +201,13 @@ export interface ReferencePostResult {
   thread: boolean;
   /** Only when `thread` was requested but a single post came back. */
   threadSkippedReason?: 'platform_unsupported' | 'single_post_generated';
+  /**
+   * Trailing thread parts discarded for overrunning the platform ceiling.
+   * Present only when it happened. `parts`/`postId` already describe the
+   * truncated chain — this is here so the UI can say the thread came back
+   * shorter than it was written, instead of silently showing fewer posts.
+   */
+  droppedParts?: number;
 }
 
 @Injectable()
@@ -1355,6 +1362,10 @@ export class EngageService implements OnApplicationBootstrap {
     // persist leaves the caller with nothing, so the charge waits until the
     // post is on disk — see the billing call at the end of this method.
     let usages: ReferencePostUsage[];
+    // Trailing parts the generator had to discard for length — reported back
+    // so the caller can surface it rather than silently returning a shorter
+    // thread than was asked for.
+    let droppedParts = 0;
     try {
       const result = await this._referencePostService.generate(opportunity, {
         strategy: dto.strategy,
@@ -1367,6 +1378,7 @@ export class EngageService implements OnApplicationBootstrap {
         signal,
       });
       usages = result.usages;
+      droppedParts = result.droppedParts ?? 0;
       text = result.text;
       // An aborted generation comes back with no parts at all; keep the
       // single-(empty)-post shape the persistence below has always been
@@ -1479,6 +1491,7 @@ export class EngageService implements OnApplicationBootstrap {
       postId,
       parts,
       thread: parts.length > 1,
+      ...(droppedParts ? { droppedParts } : {}),
       ...(wantsThread && parts.length <= 1
         ? {
             threadSkippedReason: threadCapable

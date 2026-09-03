@@ -132,6 +132,28 @@ export class EngageScanIngestDto {
 }
 
 /**
+ * Request body for POST /engage/scan-posts/ingest — posts the extension collected
+ * OUTSIDE a claimed scan task (no lease, no cursor to advance).
+ *
+ * Typed for the same reason the task-bound ingest is: the route used to take a
+ * bare `any[]`, so nothing validated the shape and nothing bounded the length.
+ * The per-org hourly quota bounds the RATE, but a single request still has to be
+ * bounded on its own — and this route is not in the 5mb body allowlist that
+ * `/scan-tasks/ingest` gets, so it was relying on the default body limit alone.
+ *
+ * Capped lower than the task-bound ingest (500): that one mirrors one full paged
+ * run of a claimed unit, while this is an opportunistic side-channel with no
+ * unit behind it.
+ */
+export class EngageScanPostsIngestDto {
+  @IsArray()
+  @ArrayMaxSize(200)
+  @ValidateNested({ each: true })
+  @Type(() => ScanIngestPostDto)
+  posts: ScanIngestPostDto[];
+}
+
+/**
  * All platforms the scan system can serve. Mirrors `ScanTaskPlatform` in
  * scan-task.types.ts — keep them in sync when a platform is added/removed,
  * otherwise the extension's selectedUnits get rejected at the DTO gate while

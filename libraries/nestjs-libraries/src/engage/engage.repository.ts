@@ -709,9 +709,11 @@ export class EngageRepository {
   /** Resolve a SCANNING scan cursor by its lease token (the extension's taskId).
    * Returns the unit identity needed to fan out; null when the token is
    * invalid/expired/rotated. */
-  async findScanCursorByToken(leaseToken: string) {
+  async findScanCursorByToken(leaseToken: string, orgId: string) {
     return this._scanCursor.model.engageScanCursor.findFirst({
-      where: { leaseToken, status: 'SCANNING' },
+      // Scoped to the claiming org: the token is a bearer credential, so
+      // matching it alone would let any holder complete a lease it never took.
+      where: { leaseToken, status: 'SCANNING', claimedByOrgId: orgId },
       select: { id: true, platform: true, scanType: true, scanKey: true },
     });
   }

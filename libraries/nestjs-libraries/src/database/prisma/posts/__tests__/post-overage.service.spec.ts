@@ -343,3 +343,114 @@ describe('PostOverageService', () => {
     ).resolves.toBeUndefined();
   });
 });
+
+describe('PostOverageService.assertDraftQuota', () => {
+  // 500 per platform x 8 platforms.
+  const ORG_MAX = 40_000;
+  const PROJECT_MAX = 4_000;
+
+  function draftBuild(
+    counts: { org?: number; project?: number } = {},
+    limits?: unknown
+  ) {
+    const mocks = createMocks();
+    mocks.usersService.getUserLimits = vi.fn().mockResolvedValue(
+      limits === undefined
+        ? { plan: 'growth-loop', postSendLimit: 0, postChannelLimit: null }
+        : limits
+    );
+    (mocks.postsRepository as any).countLiveDrafts = vi.fn(
+      async (_org: string, projectId?: string | null) =>
+        projectId ? (counts.project ?? 0) : (counts.org ?? 0)
+    );
+    const postPlanLimits = {
+      resolveDraftLimits: vi.fn(async () => ({
+        orgMax: ORG_MAX,
+        projectMax: PROJECT_MAX,
+        platformCount: 8,
+      })),
+    };
+    const service = new PostOverageService(
+      mocks.settingsService as any,
+      mocks.postsRepository as any,
+      mocks.aiseeCreditService as any,
+      mocks.usersService as any,
+      postPlanLimits as any
+    );
+    return { service, mocks, postPlanLimits };
+  }
+
+  it('admits a batch that fits both caps', async () => {
+    const { service } = draftBuild({ org: 10, project: 5 });
+    await expect(
+      service.assertDraftQuota('org-1', 'user-1', 3, 'proj-1')
+    ).resolves.toBeUndefined();
+  });
+
+  it('refuses when the batch would cross the ORG cap', async () => {
+    // The org cap is what actually bounds an account: growth-loop's project
+    // limit in aisee-core is null, so a per-project cap alone is cap x infinity.
+    const { service } = draftBuild({ org: ORG_MAX - 1, project: 0 });
+    await expect(
+      service.assertDraftQuota('org-1', 'user-1', 5, 'proj-1')
+    ).rejects.toMatchObject({
+      response: { code: 'post_draft_limit_reached', scope: 'organization' },
+    });
+  });
+
+  it('refuses when the batch would cross the PROJECT cap', async () => {
+    const { service } = draftBuild({ org: 10, project: PROJECT_MAX });
+    await expect(
+      service.assertDraftQuota('org-1', 'user-1', 1, 'proj-1')
+    ).rejects.toMatchObject({
+      response: { code: 'post_draft_limit_reached', scope: 'project' },
+    });
+  });
+
+  it('checks only the org cap when no project scopes the call', async () => {
+    const { service, mocks } = draftBuild({ org: 10, project: PROJECT_MAX });
+    await expect(
+      service.assertDraftQuota('org-1', 'user-1', 1)
+    ).resolves.toBeUndefined();
+    expect((mocks.postsRepository as any).countLiveDrafts).toHaveBeenCalledTimes(1);
+  });
+
+  it('counts nothing for an empty batch', async () => {
+    const { service, mocks } = draftBuild({ org: ORG_MAX });
+    await service.assertDraftQuota('org-1', 'user-1', 0, 'proj-1');
+    expect((mocks.postsRepository as any).countLiveDrafts).not.toHaveBeenCalled();
+  });
+
+  it('does not gate a plan with no active subscription', async () => {
+    // Already refused by the permissions gate — a second, differently-worded
+    // refusal here would only obscure the real reason.
+    const { service, postPlanLimits } = draftBuild(
+      { org: ORG_MAX },
+      { postSendLimit: 0, postChannelLimit: 0, noActiveSubscription: true }
+    );
+    await expect(
+      service.assertDraftQuota('org-1', 'user-1', 100, 'proj-1')
+    ).resolves.toBeUndefined();
+    expect(postPlanLimits.resolveDraftLimits).not.toHaveBeenCalled();
+  });
+
+  it('does not gate when billing is off (null limits)', async () => {
+    const { service } = draftBuild({ org: ORG_MAX }, null);
+    await expect(
+      service.assertDraftQuota('org-1', 'user-1', 100, 'proj-1')
+    ).resolves.toBeUndefined();
+  });
+
+  it('is a no-op when the plan-limits service is not wired', async () => {
+    const mocks = createMocks();
+    const service = new PostOverageService(
+      mocks.settingsService as any,
+      mocks.postsRepository as any,
+      mocks.aiseeCreditService as any,
+      mocks.usersService as any
+    );
+    await expect(
+      service.assertDraftQuota('org-1', 'user-1', 1_000_000, 'proj-1')
+    ).resolves.toBeUndefined();
+  });
+});

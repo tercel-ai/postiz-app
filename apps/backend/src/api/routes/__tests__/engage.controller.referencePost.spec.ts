@@ -142,6 +142,24 @@ describe('EngageController.generateReferencePost', () => {
     expect(frames.join('')).toContain('"threadSkippedReason":"platform_unsupported"');
   });
 
+  it('reports a thread that was truncated for length via droppedParts', async () => {
+    const { controller } = build({
+      generateReferencePost: vi.fn(async () => ({
+        text: 'anchor\n\nsecond',
+        postId: 'post1',
+        parts: ['anchor', 'second'],
+        thread: true,
+        droppedParts: 2,
+      })),
+    });
+    const { res, frames } = makeRes();
+    const { req } = makeReq();
+
+    await controller.generateReferencePost(ORG, USER, 'opp1', { ...BODY, thread: true } as any, req, res);
+
+    expect(frames.join('')).toContain('"droppedParts":2');
+  });
+
   it('passes the userId through to EngageService (needed to persist the draft)', async () => {
     const { controller, engageService } = build();
     const { res } = makeRes();

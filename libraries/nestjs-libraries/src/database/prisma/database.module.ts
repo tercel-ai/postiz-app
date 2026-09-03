@@ -62,6 +62,8 @@ import { EngageScanLeaseService } from '@gitroom/nestjs-libraries/engage/engage-
 import { EngageScanIngestService } from '@gitroom/nestjs-libraries/engage/engage-scan-ingest.service';
 import { EngageScanTasksService } from '@gitroom/nestjs-libraries/engage/engage-scan-tasks.service';
 import { EngageIngestQuotaService } from '@gitroom/nestjs-libraries/engage/engage-ingest-quota.service';
+import { ApiRateLimitService } from '@gitroom/nestjs-libraries/throttler/rate-limit-settings';
+import { RiskControlTickService } from '@gitroom/nestjs-libraries/risk-control/risk-control-tick.service';
 import { EngageIntentClassifierService } from '@gitroom/nestjs-libraries/engage/engage-intent-classifier.service';
 import { EngageDraftService } from '@gitroom/nestjs-libraries/engage/engage-draft.service';
 import { EngageReferencePostService } from '@gitroom/nestjs-libraries/engage/engage-reference-post.service';
@@ -143,6 +145,8 @@ import { AutomationService } from '@gitroom/nestjs-libraries/automation/automati
     EngageScanIngestService,
     EngageScanTasksService,
     EngageIngestQuotaService,
+    ApiRateLimitService,
+    RiskControlTickService,
     EngageIntentClassifierService,
     EngageDraftService,
     EngageReferencePostService,

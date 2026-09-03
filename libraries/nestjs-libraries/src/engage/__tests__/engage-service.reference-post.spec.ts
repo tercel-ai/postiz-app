@@ -380,6 +380,38 @@ describe('EngageService.generateReferencePost', () => {
     });
   });
 
+  describe('truncated threads (droppedParts)', () => {
+    it('forwards droppedParts and persists only the parts that survived', async () => {
+      const { service, posts } = buildService({
+        referencePost: {
+          generate: vi.fn(async () => ({
+            text: 'anchor\n\nsecond',
+            parts: ['anchor', 'second'],
+            usages: [],
+            droppedParts: 2,
+          })),
+        },
+      });
+
+      const result = await service.generateReferencePost(ORG, 'user1', 'opp1', {
+        ...GEN_DTO,
+        thread: true,
+      } as any);
+
+      expect(result.droppedParts).toBe(2);
+      const [dto] = posts.mapTypeToPost.mock.calls[0];
+      expect(dto.posts[0].value).toHaveLength(2);
+    });
+
+    it('omits droppedParts entirely on a clean generation', async () => {
+      const { service } = buildService();
+
+      const result = await service.generateReferencePost(ORG, 'user1', 'opp1', GEN_DTO);
+
+      expect(result).not.toHaveProperty('droppedParts');
+    });
+  });
+
   describe('source adaptation', () => {
     it('resolves the default (REFRAME) once and uses it for BOTH generation and the billing record', async () => {
       const { service, referencePost, aisee } = buildService();

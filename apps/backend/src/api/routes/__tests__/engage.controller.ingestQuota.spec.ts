@@ -69,12 +69,14 @@ describe('EngageController ingest quota gate', () => {
 
   it('charges scan-posts ingest too, and blocks it on rejection', async () => {
     const ok = build();
-    await ok.controller.ingestScanPosts(ORG, { posts: [post('a'), post('b'), post('c')] });
+    await ok.controller.ingestScanPosts(ORG, {
+      posts: [post('a'), post('b'), post('c')],
+    } as any);
     expect(ok.ingestQuota.assertWithinQuota).toHaveBeenCalledWith('org1', 3);
 
     const blocked = build(true);
     await expect(
-      blocked.controller.ingestScanPosts(ORG, { posts: [post('a')] })
+      blocked.controller.ingestScanPosts(ORG, { posts: [post('a')] } as any)
     ).rejects.toThrow(HttpException);
     expect(blocked.scanTasksService.ingestCollectedPosts).not.toHaveBeenCalled();
   });

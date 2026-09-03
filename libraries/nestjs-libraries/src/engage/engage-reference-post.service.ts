@@ -114,6 +114,11 @@ export interface ReferencePostGenerationResult {
   // similarity corrective retry, if it happened) — the caller must bill for
   // all of them, not just the last. See reference-post-generation.md §7.1.
   usages: ReferencePostUsage[];
+  // How many trailing thread parts were discarded for overrunning the
+  // platform ceiling after the shortening retry. Absent/0 on the normal
+  // path. `parts` is already the truncated chain; this exists so the caller
+  // can TELL the user their thread came back shorter than it was written.
+  droppedParts?: number;
 }
 
 /**
@@ -174,9 +179,12 @@ export class TooSimilarToReferenceError extends ReferencePostGenerationError {
   }
 }
 
-// 1 initial attempt + 1 corrective retry if the similarity gate rejects the
-// first draft — see reference-post-generation.md §6 step 2.
-const MAX_ATTEMPTS = 2;
+// 1 initial attempt + up to one corrective retry EACH for the similarity gate
+// and the length ceiling — see reference-post-generation.md §6 step 2. Matches
+// engage-draft.service.ts, which also budgets 3 and tracks its two correctives
+// independently: the two problems are unrelated, so one must not be able to
+// consume the other's only retry.
+const MAX_ATTEMPTS = 3;
 
 // Delimiter the model puts between thread parts. A bracketed sentinel rather
 // than the usual `---`/`1/5` conventions precisely because those DO occur
@@ -249,11 +257,24 @@ export class EngageReferencePostService {
       limit,
       maxThreadParts
     );
-    const userPrompt = this._buildUserPrompt(reference, maxThreadParts);
+    const userPrompt = this._buildUserPrompt(
+      reference,
+      maxThreadParts,
+      platform,
+      limit
+    );
     const maxTokens = MAX_TOKENS_PER_POST * maxParts;
 
     const usages: ReferencePostUsage[] = [];
     let attemptSystemPrompt = systemPrompt;
+    // Independent budgets, mirroring engage-draft.service.ts's own
+    // lengthRetryUsed / mentionRetryUsed pair. Sharing one attempt counter
+    // meant a similarity retry spent the ONLY chance a later length overrun
+    // would have had (and the reverse) — two unrelated problems competing for
+    // the same budget, so whichever surfaced first got the fix and the other
+    // failed the whole generation on its very first occurrence.
+    let similarityRetryUsed = false;
+    let lengthRetryUsed = false;
 
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
       if (signal?.aborted) return { text: '', parts: [], usages };
@@ -298,59 +319,97 @@ export class EngageReferencePostService {
         reference.postContent ?? ''
       );
 
-      // ONE delivery path for "similarity gate passed", whether or not the
-      // brand mention made it in. These used to be two branches with two
-      // separate length checks, and only the first wrapped its failure in a
-      // ReferencePostGenerationError — so an over-long draft that ALSO
-      // missed its mandatory mention threw a bare Error, the caller's
-      // `instanceof ReferencePostGenerationError` guard skipped billing, and
-      // a model call that really happened was never charged for.
-      if (!similarity.tooSimilar) {
-        if (missingMention) {
-          // Otherwise-valid post, just missing the brand — ship it with a
-          // warning rather than burning a retry/credits on a hard failure,
-          // same posture as engage-draft.service.ts's own mention handling.
-          this.logger.warn(
-            `Reference-post draft omitted the required brand mention (${requiredMentions.join(
-              ', '
-            )}); delivering it anyway.`
-          );
+      // Similarity first: a draft that plagiarises the reference is not worth
+      // length-checking, and its corrective rewrite changes the text anyway.
+      if (similarity.tooSimilar) {
+        this.logger.warn(
+          `Reference-post draft too similar to source (overlap=${similarity.overlapRatio.toFixed(
+            2
+          )}, verbatimRun=${similarity.hasLongVerbatimRun}); ${
+            similarityRetryUsed ? 'no retries left' : 'retrying'
+          }.`
+        );
+        if (similarityRetryUsed) {
+          throw new TooSimilarToReferenceError(usages);
         }
-        try {
-          this._assertPartsWithinPlatformLimit(platform, parts, outputLength);
-        } catch (err) {
-          throw new ReferencePostGenerationError(
-            err instanceof Error ? err.message : String(err),
-            usages,
-            err
-          );
-        }
+        similarityRetryUsed = true;
+        // The corrective has to push away from the reference's WORDING without
+        // contradicting the adaptation the caller asked for: telling a
+        // PRESERVE_STRUCTURE request to "keep only the topic" would silently
+        // turn it into a FRESH_ANGLE one on the retry.
+        attemptSystemPrompt = `${systemPrompt}
+
+Your previous draft reused too much of the reference post's own wording (shared phrases and sentence structure). Rewrite it with entirely new phrasing of your own. ${
+          sourceAdaptation === 'PRESERVE_STRUCTURE'
+            ? 'You may still follow the same order of ideas, but not one of its sentences or distinctive phrases may survive — re-express every beat from scratch.'
+            : 'Keep only the topic and general angle from the reference, and do not reuse any of its sentences or distinctive phrases.'
+        } The hard length limit stated above still applies to the rewrite — reaching for new phrasing is not a reason to run longer.`;
+        continue;
+      }
+
+      if (missingMention) {
+        // Otherwise-valid post, just missing the brand — ship it with a
+        // warning rather than burning a retry/credits on a hard failure,
+        // same posture as engage-draft.service.ts's own mention handling.
+        this.logger.warn(
+          `Reference-post draft omitted the required brand mention (${requiredMentions.join(
+            ', '
+          )}); delivering it anyway.`
+        );
+      }
+
+      const overrun = this._findOverLengthPart(platform, parts, outputLength);
+      if (!overrun) {
         return { text, parts, usages };
       }
 
-      this.logger.warn(
-        `Reference-post draft too similar to source (overlap=${similarity.overlapRatio.toFixed(
-          2
-        )}, verbatimRun=${similarity.hasLongVerbatimRun}); ${
-          attempt === MAX_ATTEMPTS - 1 ? 'no retries left' : 'retrying'
-        }.`
-      );
+      // Length is retryable, exactly like similarity. The system prompt states
+      // the per-post ceiling and the model mostly respects it — but "mostly"
+      // across a four-post thread is four independent chances to overshoot,
+      // and failing outright threw away a complete, already-billed draft over
+      // a single long part.
+      if (!lengthRetryUsed) {
+        lengthRetryUsed = true;
+        this.logger.warn(
+          `Reference-post draft exceeded the platform ceiling (${overrun.message}); retrying with a shortening corrective.`
+        );
+        // Cut CONTENT, not typography: a model told only "make it shorter"
+        // strips spaces after punctuation and mashes words together to squeeze
+        // under the count, which passes the check and reads terribly. "Do not
+        // truncate mid-thought" is the same guard the reply path uses.
+        attemptSystemPrompt = `${systemPrompt}
 
-      if (attempt === MAX_ATTEMPTS - 1) {
-        throw new TooSimilarToReferenceError(usages);
+Your previous draft was too long: ${overrun.message} Rewrite it so EVERY post independently fits the platform constraint stated above, with room to spare. Do not truncate mid-thought. Cut or condense actual content — never compress by removing spaces, dropping punctuation, or abbreviating words. ${
+          maxThreadParts
+            ? 'Prefer making a post say less over spilling its overflow into an extra part.'
+            : 'Keep it to a single post.'
+        }`;
+        continue;
       }
 
-      // The corrective has to push away from the reference's WORDING without
-      // contradicting the adaptation the caller asked for: telling a
-      // PRESERVE_STRUCTURE request to "keep only the topic" would silently
-      // turn it into a FRESH_ANGLE one on the retry.
-      attemptSystemPrompt = `${systemPrompt}
-
-Your previous draft reused too much of the reference post's own wording (shared phrases and sentence structure). Rewrite it with entirely new phrasing of your own. ${
-        sourceAdaptation === 'PRESERVE_STRUCTURE'
-          ? 'You may still follow the same order of ideas, but not one of its sentences or distinctive phrases may survive — re-express every beat from scratch.'
-          : 'Keep only the topic and general angle from the reference, and do not reuse any of its sentences or distinctive phrases.'
-      }`;
+      // Retried and still over. A thread is a linear argument, so the salvage
+      // is to KEEP A PREFIX: drop the offending part and everything after it.
+      // Dropping only the offending part would leave the ones after it
+      // referring back to a beat the reader never saw. index 0 is the anchor —
+      // there is no prefix to keep and no post at all without it, so that one
+      // still fails.
+      if (overrun.index > 0) {
+        const kept = parts.slice(0, overrun.index);
+        this.logger.warn(
+          `Reference-post thread truncated to ${kept.length} of ${parts.length} parts: ${overrun.message}`
+        );
+        return {
+          text: kept.join('\n\n'),
+          parts: kept,
+          usages,
+          droppedParts: parts.length - kept.length,
+        };
+      }
+      throw new ReferencePostGenerationError(
+        overrun.message,
+        usages,
+        overrun.error
+      );
     }
 
     // Unreachable — every path in the loop above returns or throws.
@@ -399,23 +458,55 @@ Your previous draft reused too much of the reference post's own wording (shared 
    * ceiling on its own — the same hard gate a single post gets, not a budget
    * shared across the chain.
    */
-  private _assertPartsWithinPlatformLimit(
+  private _findOverLengthPart(
     platform: string,
     parts: string[],
     outputLength: number | undefined
-  ): void {
-    parts.forEach((part, index) => {
+  ): { index: number; message: string; error: Error } | null {
+    for (let index = 0; index < parts.length; index++) {
       try {
-        assertDraftWithinPlatformLimit(platform, part, outputLength);
+        assertDraftWithinPlatformLimit(platform, parts[index], outputLength);
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        throw new Error(
+        const base = err instanceof Error ? err.message : String(err);
+        const message =
           parts.length > 1
-            ? `${message} (thread part ${index + 1} of ${parts.length})`
-            : message
-        );
+            ? `${base} (thread part ${index + 1} of ${parts.length})`
+            : base;
+        return { index, message, error: new Error(message) };
       }
-    });
+    }
+    return null;
+  }
+
+  /**
+   * ONE phrasing of the length rule, shared by every place that states it: the
+   * opening hard constraint, the mid-prompt restatement, the closing reminder,
+   * and the user message. Four copies that could drift apart would be four
+   * chances to tell the model something subtly different about the single rule
+   * it most needs to get right.
+   *
+   * The safety margin is engage-draft.service.ts's, for the same measured
+   * reason: asked for "under 250" the model returns 251–294. X gets its margin
+   * structurally (a 260 target under a 280 ceiling) so it keeps the full target
+   * and is only TOLD to leave room; on every other platform the requested
+   * length IS the ceiling, so the prompted target shrinks to 85%.
+   */
+  private _describeLengthConstraint(
+    platform: string,
+    limit: number,
+    maxThreadParts: number
+  ): { charLimit: string; lengthScope: string } {
+    const SAFETY_MARGIN = 0.85;
+    const marginTarget = Math.round(limit * SAFETY_MARGIN);
+    return {
+      charLimit:
+        platform === 'x'
+          ? `under ${limit} Twitter-weighted characters (CJK/emoji count as 2, URLs as 23 — leave a safety margin)`
+          : platform === 'reddit'
+            ? `under ${marginTarget} characters (a firm limit; aim a little under, never over)`
+            : `up to ${marginTarget} characters`,
+      lengthScope: maxThreadParts ? 'EACH post of the thread' : 'the post',
+    };
   }
 
   private _buildSystemPrompt(
@@ -445,15 +536,24 @@ Your previous draft reused too much of the reference post's own wording (shared 
     const mandatoryBrandBlock = requiredMentions.length
       ? `\n${buildMandatoryBrandBlock(requiredMentions, 'post')}\n`
       : '';
-    const charLimit =
-      platform === 'x'
-        ? `under ${limit} Twitter-weighted characters (CJK/emoji count as 2, URLs as 23)`
-        : `up to about ${limit} characters`;
+    const { charLimit } = this._describeLengthConstraint(
+      platform,
+      limit,
+      maxThreadParts
+    );
+    const { lengthScope } = this._describeLengthConstraint(
+      platform,
+      limit,
+      maxThreadParts
+    );
+    const brandReminder = requiredMentions.length
+      ? ` and must name ${requiredMentions.map((m) => `"${m}"`).join(' or ')}`
+      : '';
     const threadBlock = maxThreadParts
       ? `
 Thread: write this as a native ${platform} thread — a first (anchor) post plus up to ${maxThreadParts} follow-up posts that publish as a reply chain beneath it, ${
           maxThreadParts + 1
-        } posts at most in total. Separate every post with a line containing exactly ${THREAD_PART_SEPARATOR} and nothing else. Use only as many follow-ups as the topic genuinely earns — never pad to reach the maximum, and every part must add something the previous ones did not. The anchor has to stand on its own as a hook, and EACH post — anchor and follow-ups alike — must independently fit the platform constraint below.
+        } posts at most in total. Separate every post with a line containing exactly ${THREAD_PART_SEPARATOR} and nothing else. Use only as many follow-ups as the topic genuinely earns — never pad to reach the maximum, and every part must add something the previous ones did not. The anchor has to stand on its own as a hook, and EACH post — anchor and follow-ups alike — must independently fit the length constraint stated at the top; a thread is not a licence to spend more characters per post.
 `
       : '';
     // The blanket do-not-copy clause names STRUCTURE among the things not to
@@ -470,32 +570,54 @@ Thread: write this as a native ${platform} thread — a first (anchor) post plus
       ? `Only output the post text, with ${THREAD_PART_SEPARATOR} between posts — no preface, no numbering like "1/5", no meta-commentary, no quotation of the reference.`
       : 'Only output the post text — no preface, no meta-commentary, no quotation of the reference.';
 
+    // Length is stated FIRST, restated mid-prompt, and repeated last — the same
+    // head/tail sandwich engage-draft.service.ts uses, because it is the one
+    // rule whose violation is fatal: an over-long post is rejected outright and
+    // costs the whole generation, while every other instruction here degrades
+    // gracefully. Saying it once in the middle of a long prompt is exactly
+    // where an instruction gets lost.
     return `You are a social media copywriter. Write an ORIGINAL ${platform} post INSPIRED BY a reference post — you are not replying to it, and the reference's author will never see this post.
+
+HARD LENGTH LIMIT — THIS OUTRANKS EVERY OTHER INSTRUCTION BELOW: keep ${lengthScope} ${charLimit}. If the strategy, the thread length, the brand mention, or finishing a thought would push a post past it, cut the content instead. A post that overruns is thrown away entirely, so a shorter post that fits always beats a better one that does not.
+
 ${strategyInstruction}
 Relationship to the reference: ${adaptationInstruction}
 ${brandInstruction}
 
 ${doNotCopyClause}
 ${mandatoryBrandBlock}${threadBlock}
-Platform constraint: keep ${
-      maxThreadParts ? 'EACH post of the thread' : 'the post'
-    } ${charLimit}.
+Platform constraint (restated because it is the one that fails hardest): keep ${lengthScope} ${charLimit}.
 Write in the same language as the reference post unless it explicitly asks for another language.
 
 ${ORIGINAL_POST_INJECTION_NOTICE}
 
-${outputInstruction}`;
+${outputInstruction}
+
+IMPORTANT: ${lengthScope} must stay ${charLimit}${brandReminder}. Check the length of every post before you answer; if one is over, cut content and rewrite it — never truncate mid-thought.`;
   }
 
   private _buildUserPrompt(
     reference: ReferencePostFields,
-    maxThreadParts: number
+    maxThreadParts: number,
+    platform: string,
+    limit: number
   ): string {
+    const { charLimit, lengthScope } = this._describeLengthConstraint(
+      platform,
+      limit,
+      maxThreadParts
+    );
+    // The user message is the LAST thing the model reads before answering, so
+    // the length rule is repeated here as well as at both ends of the system
+    // prompt. The reference post sits between them and is often much longer
+    // than the limit — an unrepeated constraint competes with that example.
     return `${buildOriginalPostXml(reference)}
 
 Write a new, original ${
       maxThreadParts ? 'thread' : 'post'
-    } inspired by this one, following the relationship to the reference stated above. Do not reply to it and do not reword it — write something new.`;
+    } inspired by this one, following the relationship to the reference stated above. Do not reply to it and do not reword it — write something new.
+
+Length is the hard constraint: keep ${lengthScope} ${charLimit}, regardless of how long the reference post above is.`;
   }
 
   private async _callModel(

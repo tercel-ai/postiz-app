@@ -1394,6 +1394,24 @@ export class PostsService {
     this.logger.log(
       `createPost: orgId=${orgId} userId=${userId ?? 'N/A'} type=${body.type} postsCount=${body.posts?.length ?? 0}`
     );
+    // Draft ceiling, checked ONCE for the whole batch before anything is written
+    // — a partially-admitted batch would leave the caller unable to tell which
+    // of its posts landed. Only drafts: scheduled/now posts are bounded by the
+    // send quota and its overage charge instead.
+    if (body.type === 'draft') {
+      // Only the entries that would CREATE a row. createOrUpdatePost upserts on
+      // `value[0].id`, so an entry carrying one is an EDIT of a draft already
+      // counted against the cap — charging for it would mean an org at its
+      // ceiling could no longer edit its way down, only delete.
+      const newRoots = body.posts.filter((p) => !p.value?.[0]?.id).length;
+      await this._postOverageService.assertDraftQuota(
+        orgId,
+        userId,
+        newRoots,
+        body.projectId
+      );
+    }
+
     const postList = [];
     const postNowErrors: string[] = [];
     const allCreatedPostIds: string[] = [];

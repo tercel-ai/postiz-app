@@ -228,8 +228,8 @@ export class EngageScanTasksService {
    * Safe to call on a stale or failed scan — if the token is invalid or already
    * released, returns false (no-op).
    */
-  async releaseTask(taskId: string): Promise<boolean> {
-    return this._lease.releaseByToken(taskId);
+  async releaseTask(orgId: string, taskId: string): Promise<boolean> {
+    return this._lease.releaseByToken(taskId, orgId);
   }
 
   /**
@@ -294,7 +294,7 @@ export class EngageScanTasksService {
     // a Quora unit was losing every post to the TTL gate.
     let reason: string | undefined;
     if (body.completed) {
-      ({ accepted, reason } = await this.ingestCompleted(body.completed));
+      ({ accepted, reason } = await this.ingestCompleted(orgId, body.completed));
     }
     const want = Math.min(Math.max(1, body.want ?? DEFAULT_WANT), MAX_WANT);
     // Snapshot the fast-lane hint BEFORE claiming, so the retraction below can
@@ -340,13 +340,22 @@ export class EngageScanTasksService {
    * cursor (server-DERIVED, not trusting the client) and release the lease.
    */
   private async ingestCompleted(
+    orgId: string,
     completed: CompletedUnitInput
   ): Promise<{ accepted: number; reason?: string }> {
     this.logger.log(`[scan-ingest] ingestCompleted called, taskId=${completed.taskId}, posts=${completed.posts?.length ?? 0}`);
-    const unit = await this._engageRepo.findScanCursorByToken(completed.taskId);
+    const unit = await this._engageRepo.findScanCursorByToken(
+      completed.taskId,
+      orgId
+    );
     if (!unit) {
-      // Invalid / expired / rotated token, or the lease was reclaimed — ignore.
-      this.logger.warn(`Ingest with stale/invalid lease token; dropped`);
+      // Invalid / expired / rotated token, the lease was reclaimed, or it is
+      // held by a DIFFERENT org. The four are deliberately not distinguished to
+      // the caller: saying "that lease is someone else's" would confirm a
+      // guessed token belongs to a real unit.
+      this.logger.warn(
+        `Ingest from org=${orgId} with a lease token that is stale, invalid or not theirs; dropped`
+      );
       return { accepted: 0, reason: 'lease token was stale, expired or reclaimed' };
     }
 
@@ -375,7 +384,9 @@ export class EngageScanTasksService {
       this.logger.error(
         `Scan ingest: subscriber resolution failed for ${unit.platform}/${unit.scanType}/${unit.scanKey}: ${(err as Error).message}`
       );
-      await this._lease.releaseByToken(completed.taskId).catch(() => undefined);
+      await this._lease
+        .releaseByToken(completed.taskId, orgId)
+        .catch(() => undefined);
       return { accepted: 0, reason: 'subscriber lookup failed; unit will be retried' };
     }
 
@@ -394,7 +405,7 @@ export class EngageScanTasksService {
     }
 
     await this._lease
-      .completeByToken(completed.taskId, nextCursor)
+      .completeByToken(completed.taskId, orgId, nextCursor)
       .catch(() => undefined);
     return {
       accepted,
@@ -464,6 +475,10 @@ export class EngageScanTasksService {
         scanKey: u.scanKey,
         cadenceMs,
         force: opts.force || Boolean(selectedUnitSet),
+        // Binds the lease to this org so only it can complete or release the
+        // unit — the token alone is a bearer credential and possession of one
+        // must not be enough to write into every OTHER subscriber's feed.
+        claimedByOrgId: orgId,
       });
       if (snap) tasks.push(await this._buildTask(snap, pacing, activeKeywords));
     }
