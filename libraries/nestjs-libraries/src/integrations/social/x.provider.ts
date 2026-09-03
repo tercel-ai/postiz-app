@@ -13,7 +13,11 @@ import {
 import { lookup } from 'mime-types';
 import sharp from 'sharp';
 import { readOrFetch } from '@gitroom/helpers/utils/read.or.fetch';
-import { RefreshToken, SocialAbstract } from '@gitroom/nestjs-libraries/integrations/social.abstract';
+import {
+  ReferencePostSettingsContext,
+  RefreshToken,
+  SocialAbstract,
+} from '@gitroom/nestjs-libraries/integrations/social.abstract';
 import { Plug } from '@gitroom/helpers/decorators/plug.decorator';
 import { Integration } from '@prisma/client';
 import { timer } from '@gitroom/helpers/utils/timer';
@@ -85,6 +89,12 @@ export class XProvider extends SocialAbstract implements SocialProvider {
 
   editor = 'normal' as const;
   dto = XDto;
+
+  override buildReferencePostSettings(
+    _context: ReferencePostSettingsContext
+  ): Record<string, unknown> {
+    return { __type: this.identifier, who_can_reply_post: 'everyone' };
+  }
 
   /**
    * Detect whether a stored access token is in OAuth 1.0a format ("accessToken:accessSecret").

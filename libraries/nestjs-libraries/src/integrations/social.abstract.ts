@@ -30,6 +30,26 @@ export class NotEnoughScopes {
   constructor(public message = 'Not enough scopes') {}
 }
 
+/**
+ * Inputs a provider can safely use to prepare an original post generated from
+ * an Engage opportunity. `title` is derived from the generated text by the
+ * caller, so providers never need to copy the reference's title.
+ */
+export interface ReferencePostSettingsContext {
+  externalPostUrl: string;
+  title: string;
+}
+
+/** Create a valid generic title without copying the source post's headline. */
+export function referencePostTitle(content: string): string {
+  const title = content
+    .replace(/^\s*#+\s*/, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 280);
+  return title.length >= 2 ? title : 'Generated post';
+}
+
 export interface SocialUserLookupSuccess {
   id: string;
   username: string;
@@ -94,6 +114,17 @@ function safeStringify(obj: any) {
 export abstract class SocialAbstract {
   abstract identifier: string;
   maxConcurrentJob = 1;
+
+  /**
+   * Platform-owned defaults for an original Engage reference post. Providers
+   * with no required settings inherit the discriminator-only implementation;
+   * providers with required fields override it alongside their DTO/publisher.
+   */
+  buildReferencePostSettings(
+    _context: ReferencePostSettingsContext
+  ): Record<string, unknown> | undefined {
+    return { __type: this.identifier };
+  }
 
   public handleErrors(
     body: string

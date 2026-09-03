@@ -1,5 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { BadRequestException, InternalServerErrorException } from '@nestjs/common';
+import { plainToInstance } from 'class-transformer';
+import { validate } from 'class-validator';
+import { CreatePostDto } from '@gitroom/nestjs-libraries/dtos/posts/create.post.dto';
 import { EngageService } from '../engage.service';
 import { TooSimilarToReferenceError } from '../engage-reference-post.service';
 
@@ -250,9 +253,50 @@ describe('EngageService.generateReferencePost', () => {
       expect(dto.date).toBe('2026-09-05T10:00:00.000Z');
       expect(dto.posts[0].integration).toBeUndefined();
       expect(dto.posts[0].providerIdentifier).toBe('x');
+      // Reference posts are initially account-less, but their settings still
+      // have to be valid when the client later binds an account and re-submits
+      // the draft through POST /api/posts.
+      expect(dto.posts[0].settings).toEqual({
+        __type: 'x',
+        who_can_reply_post: 'everyone',
+      });
       expect(dto.posts[0].value[0].content).toBe('an original take on ceramics pricing');
       expect(posts.createPost).toHaveBeenCalledWith('org1', dto, 'user1');
     });
+
+    it.each([
+      ['x', 'https://x.com/coolwriter/status/1'],
+      ['reddit', 'https://www.reddit.com/r/typescript/comments/abc123/a_post/'],
+      ['medium', 'https://medium.com/@writer/a-post-123'],
+      ['quora', 'https://www.quora.com/A-question'],
+      ['linkedin', 'https://www.linkedin.com/posts/writer_activity-123'],
+      ['devto', 'https://dev.to/writer/a-post'],
+      ['hackernews', 'https://news.ycombinator.com/item?id=123'],
+    ])(
+      'persists valid POST /posts settings for a %s reference',
+      async (platform, externalPostUrl) => {
+        const { service, posts } = buildService({
+          repo: {
+            getOpportunityById: vi.fn(async () => ({
+              id: 'opp1',
+              platform,
+              externalPostUrl,
+              authorUsername: 'writer',
+              title: 'A useful generated post title',
+              postContent: 'Reference content.',
+            })),
+          },
+        });
+
+        await service.generateReferencePost(ORG, 'user1', 'opp1', GEN_DTO);
+
+        const [generatedDto] = posts.mapTypeToPost.mock.calls[0];
+        const errors = await validate(
+          plainToInstance(CreatePostDto, { ...generatedDto, type: 'schedule' })
+        );
+        expect(errors).toEqual([]);
+      }
+    );
 
     it('attaches referenceOpportunityId and a content snapshot to the created post', async () => {
       const { service, repo } = buildService();

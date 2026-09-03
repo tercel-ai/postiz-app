@@ -4,7 +4,11 @@ import {
   PostResponse,
   SocialProvider,
 } from '@gitroom/nestjs-libraries/integrations/social/social.integrations.interface';
-import { BadBody, SocialAbstract } from '@gitroom/nestjs-libraries/integrations/social.abstract';
+import {
+  BadBody,
+  ReferencePostSettingsContext,
+  SocialAbstract,
+} from '@gitroom/nestjs-libraries/integrations/social.abstract';
 import { Integration } from '@prisma/client';
 import { makeId } from '@gitroom/nestjs-libraries/services/make.is';
 import { HackernewsSettingsDto } from '@gitroom/nestjs-libraries/dtos/posts/providers-settings/hackernews.settings.dto';
@@ -31,6 +35,13 @@ export class HackernewsProvider extends SocialAbstract implements SocialProvider
   scopes = [] as string[];
   extensionPublish = true;
   dto = HackernewsSettingsDto;
+
+  override buildReferencePostSettings(
+    context: ReferencePostSettingsContext
+  ): Record<string, unknown> {
+    return { __type: this.identifier, title: context.title };
+  }
+
   maxLength() {
     // HN item text has no hard cap the way tweets do; keep it generous.
     return 20000;

@@ -4,7 +4,10 @@ import {
   PostResponse,
   SocialProvider,
 } from '@gitroom/nestjs-libraries/integrations/social/social.integrations.interface';
-import { SocialAbstract } from '@gitroom/nestjs-libraries/integrations/social.abstract';
+import {
+  ReferencePostSettingsContext,
+  SocialAbstract,
+} from '@gitroom/nestjs-libraries/integrations/social.abstract';
 import dayjs from 'dayjs';
 import { Integration } from '@prisma/client';
 import { makeId } from '@gitroom/nestjs-libraries/services/make.is';
@@ -22,6 +25,12 @@ export class DevToProvider extends SocialAbstract implements SocialProvider {
     return 100000;
   }
   dto = DevToSettingsDto;
+
+  override buildReferencePostSettings(
+    context: ReferencePostSettingsContext
+  ): Record<string, unknown> {
+    return { __type: this.identifier, title: context.title, tags: [] };
+  }
 
   async generateAuthUrl() {
     const state = makeId(6);

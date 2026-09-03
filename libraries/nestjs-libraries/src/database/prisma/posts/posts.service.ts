@@ -10,6 +10,7 @@ import { randomUUID } from 'crypto';
 import dayjs from 'dayjs';
 import {
   IntegrationManager,
+  socialIntegrationList,
   PublishMethod,
   PublishMethodError,
   isExtensionOnlyProvider,
@@ -49,7 +50,10 @@ import { extractMetrics } from '@gitroom/nestjs-libraries/integrations/social/an
 import { timer } from '@gitroom/helpers/utils/timer';
 import { stripHtmlValidation } from '@gitroom/helpers/utils/strip.html.validation';
 import { ioRedis } from '@gitroom/nestjs-libraries/redis/redis.service';
-import { RefreshToken } from '@gitroom/nestjs-libraries/integrations/social.abstract';
+import {
+  referencePostTitle,
+  RefreshToken,
+} from '@gitroom/nestjs-libraries/integrations/social.abstract';
 import { RefreshIntegrationService } from '@gitroom/nestjs-libraries/integrations/refresh.integration.service';
 import { PostOverageService } from '@gitroom/nestjs-libraries/database/prisma/posts/post-overage.service';
 import {
@@ -112,6 +116,39 @@ function resolveScheduledPostPlatform(post: {
   } catch {
     return '';
   }
+}
+
+/**
+ * Merge platform-owned defaults into a post before DTO validation. This also
+ * repairs legacy reference drafts written before generate-post stored complete
+ * settings. Explicit caller values win, including invalid values, so validation
+ * still rejects a malformed user request instead of silently changing it.
+ */
+function withDefaultPostSettings(
+  providerIdentifier: string,
+  settings: unknown,
+  content = ''
+): Record<string, unknown> {
+  const existing =
+    settings && typeof settings === 'object'
+      ? (settings as Record<string, unknown>)
+      : {};
+  const reference = existing.referenceOpportunity as
+      | { externalPostUrl?: unknown }
+      | undefined;
+  const externalPostUrl =
+    reference && typeof reference.externalPostUrl === 'string'
+      ? reference.externalPostUrl
+      : '';
+  const provider = socialIntegrationList.find(
+    (candidate) => candidate.identifier === providerIdentifier
+  );
+  const defaults = provider?.buildReferencePostSettings({
+    externalPostUrl,
+    title: referencePostTitle(content),
+  });
+
+  return { ...defaults, ...existing, __type: providerIdentifier };
 }
 
 /**
@@ -838,10 +875,11 @@ export class PostsService {
             return {
               ...post,
               providerIdentifier,
-              settings: {
-                ...(post.settings || ({} as any)),
-                __type: providerIdentifier,
-              },
+              settings: withDefaultPostSettings(
+                providerIdentifier,
+                post.settings,
+                post.value?.[0]?.content
+              ),
             };
           }
 
@@ -859,10 +897,11 @@ export class PostsService {
           return {
             ...post,
             providerIdentifier: integration.providerIdentifier,
-            settings: {
-              ...(post.settings || ({} as any)),
-              __type: integration.providerIdentifier,
-            },
+            settings: withDefaultPostSettings(
+              integration.providerIdentifier,
+              post.settings,
+              post.value?.[0]?.content
+            ),
           };
         })
       ),

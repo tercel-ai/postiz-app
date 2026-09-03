@@ -442,6 +442,15 @@ describe('PostsService.mapTypeToPost — accountless posts', () => {
     expect((mocks.integrationService as any).getIntegrationById).not.toHaveBeenCalled();
   });
 
+  it('defaults X reply permissions for a legacy account-less draft before validating it', async () => {
+    const result = await service.mapTypeToPost(
+      body(accountlessPost({ settings: { __type: 'x' } })),
+      'org-1'
+    );
+
+    expect((result.posts[0].settings as any).who_can_reply_post).toBe('everyone');
+  });
+
   // Round-trip: a client that GETs a post and POSTs it back returns `settings`
   // wholesale but has no reason to know about the newer top-level
   // providerIdentifier column. Without __type in settings, an account-less post

@@ -4,7 +4,11 @@ import {
   PostResponse,
   SocialProvider,
 } from '@gitroom/nestjs-libraries/integrations/social/social.integrations.interface';
-import { BadBody, SocialAbstract } from '@gitroom/nestjs-libraries/integrations/social.abstract';
+import {
+  BadBody,
+  ReferencePostSettingsContext,
+  SocialAbstract,
+} from '@gitroom/nestjs-libraries/integrations/social.abstract';
 import { Integration } from '@prisma/client';
 import { makeId } from '@gitroom/nestjs-libraries/services/make.is';
 import { MediumSettingsDto } from '@gitroom/nestjs-libraries/dtos/posts/providers-settings/medium.settings.dto';
@@ -28,6 +32,13 @@ export class MediumProvider extends SocialAbstract implements SocialProvider {
   editor = 'markdown' as const;
   extensionPublish = true;
   dto = MediumSettingsDto;
+
+  override buildReferencePostSettings(
+    context: ReferencePostSettingsContext
+  ): Record<string, unknown> {
+    return { __type: this.identifier, title: context.title, tags: [] };
+  }
+
   maxLength() {
     return 100000;
   }

@@ -121,6 +121,8 @@ import {
 } from '@gitroom/nestjs-libraries/engage/dtos/engage.dto';
 import { parseXTweetId } from '@gitroom/nestjs-libraries/engage/x-tweet';
 import { isThreadCapablePlatform } from '@gitroom/nestjs-libraries/integrations/thread-capability';
+import { socialIntegrationList } from '@gitroom/nestjs-libraries/integrations/integration.manager';
+import { referencePostTitle } from '@gitroom/nestjs-libraries/integrations/social.abstract';
 import { normalizeEngagePlatform } from '@gitroom/nestjs-libraries/engage/engage-draft-length';
 import {
   fetchRedditAuthorProfile,
@@ -1433,7 +1435,19 @@ export class EngageService implements OnApplicationBootstrap {
         date,
         posts: [
           {
-            providerIdentifier: opportunity.platform,
+            // The stored platform and settings discriminator must agree. In
+            // particular, `twitter` opportunities are published through the
+            // `x` provider.
+            providerIdentifier: normalizeEngagePlatform(opportunity.platform),
+            // An account-less DRAFT is later re-submitted through POST /posts
+            // after the user picks an account. Give it the platform-specific
+            // defaults now, rather than only a discriminator which can fail
+            // the regular CreatePostDto validation on that later save.
+            settings: this._buildReferencePostSettings(
+              opportunity.platform,
+              opportunity.externalPostUrl,
+              text
+            ),
             // One value entry per post in the chain — createOrUpdatePost
             // turns entries 2..N into parentPostId-chained rows, which IS
             // how every thread in this app is stored. Media rides on the
@@ -2921,6 +2935,38 @@ export class EngageService implements OnApplicationBootstrap {
       );
     }
     return this.sendReply(org, userId, opportunityId, body);
+  }
+
+  /**
+   * Resolve settings through the provider registered for the opportunity's
+   * platform. Engage deliberately owns no per-platform switch: a provider owns
+   * its DTO, publishing semantics, and the matching reference-post defaults.
+   */
+  private _buildReferencePostSettings(
+    platform: string,
+    externalPostUrl: string,
+    generatedText: string
+  ): Record<string, unknown> {
+    const providerIdentifier = normalizeEngagePlatform(platform);
+    const provider = socialIntegrationList.find(
+      (candidate) => candidate.identifier === providerIdentifier
+    );
+    if (!provider) {
+      throw new BadRequestException(
+        `Reference-post generation is not supported for platform "${platform}"`
+      );
+    }
+
+    const settings = provider.buildReferencePostSettings({
+      externalPostUrl,
+      title: referencePostTitle(generatedText),
+    });
+    if (!settings) {
+      throw new BadRequestException(
+        `Cannot derive required settings for a ${providerIdentifier} reference post`
+      );
+    }
+    return settings;
   }
 
   /**

@@ -11,7 +11,11 @@ import { RedditSettingsDto } from '@gitroom/nestjs-libraries/dtos/posts/provider
 import { timer } from '@gitroom/helpers/utils/timer';
 import dayjs from 'dayjs';
 import { groupBy } from 'lodash';
-import { RefreshToken, SocialAbstract } from '@gitroom/nestjs-libraries/integrations/social.abstract';
+import {
+  ReferencePostSettingsContext,
+  RefreshToken,
+  SocialAbstract,
+} from '@gitroom/nestjs-libraries/integrations/social.abstract';
 import { lookup } from 'mime-types';
 import axios from 'axios';
 import WebSocket from 'ws';
@@ -39,6 +43,39 @@ export class RedditProvider extends SocialAbstract implements SocialProvider {
   requiredScopes = ['read', 'identity', 'submit'];
   editor = 'normal' as const;
   dto = RedditSettingsDto;
+
+  override buildReferencePostSettings(
+    context: ReferencePostSettingsContext
+  ): Record<string, unknown> | undefined {
+    // A Reddit submission must target a subreddit. The opportunity's canonical
+    // source URL is the only reliable account-independent target we have.
+    let subreddit: string | undefined;
+    try {
+      const url = new URL(context.externalPostUrl);
+      if (/(^|\.)reddit\.com$/i.test(url.hostname)) {
+        subreddit = url.pathname.match(/^\/r\/([a-z0-9_]{3,21})(?:\/|$)/i)?.[1];
+      }
+    } catch {
+      // Fall through: caller turns the missing settings into a clear 400.
+    }
+    if (!subreddit) return undefined;
+
+    return {
+      __type: this.identifier,
+      subreddit: [
+        {
+          value: {
+            subreddit: subreddit.toLowerCase(),
+            title: context.title,
+            type: 'self',
+            url: '',
+            // A flair ID is account/API specific; never manufacture one.
+            is_flair_required: false,
+          },
+        },
+      ],
+    };
+  }
 
   maxLength() {
     return 10000;
