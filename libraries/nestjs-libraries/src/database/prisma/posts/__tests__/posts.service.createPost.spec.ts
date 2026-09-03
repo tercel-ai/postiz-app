@@ -442,6 +442,63 @@ describe('PostsService.mapTypeToPost — accountless posts', () => {
     expect((mocks.integrationService as any).getIntegrationById).not.toHaveBeenCalled();
   });
 
+  // Round-trip: a client that GETs a post and POSTs it back returns `settings`
+  // wholesale but has no reason to know about the newer top-level
+  // providerIdentifier column. Without __type in settings, an account-less post
+  // came back with no platform marker the caller could return, and re-submitting
+  // it was rejected by the guard as having neither — a post this very method had
+  // just accepted.
+  it('writes __type into settings for an account-less post, so it can be re-submitted', async () => {
+    const mocks = createMocks();
+    const service = createService(mocks);
+
+    const mapped: any = await service.mapTypeToPost(
+      {
+        type: 'draft',
+        date: '2026-04-01T10:00:00',
+        shortLink: false,
+        tags: [],
+        posts: [
+          {
+            providerIdentifier: 'x',
+            value: [{ content: 'an original post', image: [] }],
+          },
+        ],
+      } as any,
+      'org-1'
+    );
+
+    expect(mapped.posts[0].providerIdentifier).toBe('x');
+    expect(mapped.posts[0].settings.__type).toBe('x');
+  });
+
+  it('preserves the rest of settings when stamping __type', async () => {
+    const mocks = createMocks();
+    const service = createService(mocks);
+
+    const mapped: any = await service.mapTypeToPost(
+      {
+        type: 'draft',
+        date: '2026-04-01T10:00:00',
+        shortLink: false,
+        tags: [],
+        posts: [
+          {
+            providerIdentifier: 'reddit',
+            settings: { subreddit: [{ value: { name: 'r/test' } }] },
+            value: [{ content: 'an original post', image: [] }],
+          },
+        ],
+      } as any,
+      'org-1'
+    );
+
+    expect(mapped.posts[0].settings).toMatchObject({
+      __type: 'reddit',
+      subreddit: [{ value: { name: 'r/test' } }],
+    });
+  });
+
   it('rejects a post that has neither an integration nor a platform marker', async () => {
     await expect(
       service.mapTypeToPost(

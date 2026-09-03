@@ -12,6 +12,7 @@ import {
 import { SCANNABLE_PLATFORMS } from '@gitroom/nestjs-libraries/engage/engage-scan-config.service';
 import { PostPlanLimitsService } from '@gitroom/nestjs-libraries/database/prisma/posts/post-plan-limits.service';
 import { PrismaRepository } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
+import { isExtensionPublishProvider } from '@gitroom/nestjs-libraries/integrations/integration.manager';
 import { RiskControlTickService } from '@gitroom/nestjs-libraries/risk-control/risk-control-tick.service';
 
 type ReleaseScanCursorBody = {
@@ -312,21 +313,39 @@ export class AdminDiagnosticsController {
   async checkStuckPosts() {
     const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
 
-    const stuckPosts = await this._postsRepository.findStuckQueuePosts(twoHoursAgo);
+    const rows = await this._postsRepository.findStuckQueuePosts(twoHoursAgo);
+
+    // A post with no publishMethod on an extension-routed platform is NOT
+    // stuck — it is waiting for the user's browser, which is the normal state
+    // of the default send path. Counting those as stuck would bury the genuinely
+    // stuck ones in noise; dropping them would hide an extension fleet that is
+    // offline. Report both, separately.
+    const shape = (p: (typeof rows)[number]) => ({
+      id: p.id,
+      publishDate: p.publishDate,
+      createdAt: p.createdAt,
+      stuckHours: +((Date.now() - new Date(p.publishDate).getTime()) / (60 * 60 * 1000)).toFixed(1),
+      intervalInDays: p.intervalInDays,
+      integration: p.integration,
+      organizationId: p.organizationId,
+      providerIdentifier: p.providerIdentifier,
+    });
+    const waitingForExtension = rows.filter((p) =>
+      isExtensionPublishProvider(
+        p.providerIdentifier || p.integration?.providerIdentifier || ''
+      )
+    );
+    const stuckPosts = rows.filter((p) => !waitingForExtension.includes(p));
 
     return {
       checkedAt: new Date().toISOString(),
-      stuckPosts: stuckPosts.map((p) => ({
-        id: p.id,
-        publishDate: p.publishDate,
-        createdAt: p.createdAt,
-        stuckHours: +((Date.now() - new Date(p.publishDate).getTime()) / (60 * 60 * 1000)).toFixed(1),
-        intervalInDays: p.intervalInDays,
-        integration: p.integration,
-        organizationId: p.organizationId,
-      })),
+      stuckPosts: stuckPosts.map(shape),
+      // Expected to be non-empty whenever browsers are simply not open; a large
+      // or growing number is the signal that the extension fleet is down.
+      waitingForExtension: waitingForExtension.map(shape),
       summary: {
         count: stuckPosts.length,
+        waitingForExtensionCount: waitingForExtension.length,
         healthy: stuckPosts.length === 0,
       },
     };

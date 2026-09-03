@@ -59,7 +59,7 @@ describe('getDueExtensionPublishPosts', () => {
     await repo.getDueExtensionPublishPosts('org-1', ['hackernews', 'quora'], new Date(), 10);
 
     const where = findMany.mock.calls[0][0].where;
-    expect(where.OR).toHaveLength(2);
+    expect(where.OR).toHaveLength(3);
     expect(where.OR[0]).toEqual({ publishMethod: 'EXTENSION' });
     expect(where.OR[1]).toEqual({
       publishMethod: null,
@@ -68,6 +68,25 @@ describe('getDueExtensionPublishPosts', () => {
         disabled: false,
         deletedAt: null,
       },
+    });
+  });
+
+  // An account-less post (reference-post / operation-plan drafts for a platform
+  // the org never connected) carries its platform in Post.providerIdentifier and
+  // has no integration to join on — routed to the extension by platform, it
+  // would otherwise never be OFFERED to it and would sit in QUEUE until the
+  // stale sweep flipped it to ERROR.
+  it('offers account-less null-method posts whose own platform is extension-routed', async () => {
+    const findMany = vi.fn().mockResolvedValue([]);
+    const repo = createRepo({ findMany });
+
+    await repo.getDueExtensionPublishPosts('org-1', ['x', 'reddit'], new Date(), 10);
+
+    const where = findMany.mock.calls[0][0].where;
+    expect(where.OR[2]).toEqual({
+      publishMethod: null,
+      integrationId: null,
+      providerIdentifier: { in: ['x', 'reddit'] },
     });
   });
 });
@@ -199,14 +218,59 @@ describe('markStaleQueuePostsAsError — never sweeps what waits for a browser',
         { publishMethod: 'EXTENSION' },
         {
           publishMethod: null,
-          integration: { providerIdentifier: { in: ['hackernews', 'quora'] } },
+          // The live-account condition is shared with the due query on purpose:
+          // a post on a DISABLED account is not offered to the extension, so it
+          // must NOT be excluded from the sweep — otherwise it is diverted from
+          // Temporal, never offered, never swept, and sits in QUEUE forever with
+          // nothing reporting it.
+          integration: {
+            providerIdentifier: { in: ['hackernews', 'quora'] },
+            disabled: false,
+            deletedAt: null,
+          },
         },
-        // Engage replies match NEITHER routing branch — no publishMethod, no
-        // integration — so they need naming separately. They are drained by
-        // reply-due, another pull executor waiting on the same browser.
+        // Account-less posts route by their own providerIdentifier. The sweep
+        // MUST exclude them for the same reason the due query offers them —
+        // otherwise a post the extension is being handed gets ERRORed out from
+        // under it seven days later, and retryPost cannot resurrect it (no
+        // integration to retry through).
+        {
+          publishMethod: null,
+          integrationId: null,
+          providerIdentifier: { in: ['hackernews', 'quora'] },
+        },
+        // Engage replies match NO routing branch — no publishMethod, no
+        // integration, and their platform column is not what routes them — so
+        // they need naming separately. They are drained by reply-due, another
+        // pull executor waiting on the same browser.
         { source: 'engage' },
       ],
     });
+  });
+
+  // Regression: the sweep and the due query each built this predicate by hand
+  // and drifted — the due query grew the account-less branch, the sweep did
+  // not, and posts the extension was actively being offered were swept to ERROR
+  // a week later. They now share extensionRouteBranches.
+  it('excludes exactly what the publish-due query offers', async () => {
+    const sweepFindMany = vi.fn().mockResolvedValue([]);
+    const sweepRepo = createRepo({ findMany: sweepFindMany, updateMany: vi.fn() });
+    await sweepRepo.markStaleQueuePostsAsError(['x', 'reddit']);
+
+    const dueFindMany = vi.fn().mockResolvedValue([]);
+    const dueRepo = createRepo({ findMany: dueFindMany });
+    await dueRepo.getDueExtensionPublishPosts('org-1', ['x', 'reddit'], new Date(), 10);
+
+    const swept = sweepFindMany.mock.calls[0][0].where.NOT.OR.filter(
+      (branch: any) => !branch.source
+    );
+    const offered = dueFindMany.mock.calls[0][0].where.OR;
+
+    // IDENTICAL, not merely similar: "excluded from the sweep" must mean
+    // exactly "the due query will offer it". Any branch the sweep excludes but
+    // the due query does not offer is a post nothing publishes and nothing
+    // reports.
+    expect(swept).toEqual(offered);
   });
 
   it('excludes only explicit EXTENSION when no provider list is passed', async () => {
@@ -431,7 +495,7 @@ describe('countDueExtensionPublishPosts', () => {
     expect(where.parentPostId).toBeNull();
     expect(where.intervalInDays).toBeNull();
     expect(where.NOT).toEqual({ source: 'engage' });
-    expect(where.OR).toHaveLength(2);
+    expect(where.OR).toHaveLength(3);
     // Not yet due means not yet leasable — the lease predicate has no business
     // narrowing this one.
     expect(where).not.toHaveProperty('releaseId');

@@ -826,7 +826,23 @@ export class PostsService {
           if (!post.integration?.id) {
             const providerIdentifier =
               post.providerIdentifier || (post.settings as any)?.__type;
-            return { ...post, providerIdentifier };
+            // `__type` is written back into settings for the SAME reason the
+            // bound-account branch below does it: settings is persisted
+            // wholesale, and a client that fetches a post and posts it back
+            // (the calendar editor, aisee-app) round-trips settings but has no
+            // reason to know about the newer top-level providerIdentifier
+            // column. Without this, an account-less post came back carrying no
+            // platform marker a caller could return, and re-submitting it was
+            // rejected by the guard above as having neither an integration nor
+            // a platform — a post this very method had just accepted.
+            return {
+              ...post,
+              providerIdentifier,
+              settings: {
+                ...(post.settings || ({} as any)),
+                __type: providerIdentifier,
+              },
+            };
           }
 
           const integration = await this._integrationService.getIntegrationById(
@@ -1023,26 +1039,130 @@ export class PostsService {
     }
   }
 
+  /**
+   * The same post, shaped so it can be handed straight back to `POST /posts`.
+   *
+   * The read shape and the write shape are not the same object and should not
+   * be forced into each other: a row read back carries ~38 columns of runtime
+   * state (state, releaseURL, error, impressions, analytics, claimedAt …) that
+   * `PostContent`'s four fields have no place for, and a group is one channel's
+   * chain while `CreatePostDto.posts` is a list of CHANNELS. So `posts` stays
+   * exactly as it was and this is added alongside it.
+   *
+   * It exists because the conversion is easy to get subtly wrong in a way that
+   * does not fail loudly. Above all `value[].id`: createOrUpdatePost upserts on
+   * `value.id || uuidv4()`, so a client that drops the ids does not update the
+   * chain — it silently creates a second one, and a 4-part thread edited once
+   * becomes 8 rows. The rest are quieter: `settings` is a JSON STRING on each
+   * row but must be sent as an object, `integration` reads back as a bare id
+   * string but must be sent as `{ id }`, and publishMethod is persisted
+   * uppercase but accepted lowercase.
+   *
+   * `type` is derived from the row's state (DRAFT stays a draft, anything else
+   * is already scheduled) so the payload is complete as returned; a caller that
+   * wants to publish now overrides it with 'now'.
+   */
+  private toEditablePayload(rows: any[], settings: any) {
+    try {
+      return this.buildEditablePayload(rows, settings);
+    } catch (err) {
+      // Best-effort by construction. This is an ADDITIVE convenience field on a
+      // read endpoint whose actual job is to return the post; a row this cannot
+      // be derived from (a malformed publishDate, say) must cost the caller
+      // that one field, never the whole response. Absent `editable` simply
+      // means "convert it yourself", which is where every client started.
+      this.logger.warn(
+        `Could not derive the editable payload for post ${
+          rows?.[0]?.id ?? 'unknown'
+        }: ${err instanceof Error ? err.message : err}`
+      );
+      return undefined;
+    }
+  }
+
+  private buildEditablePayload(rows: any[], settings: any) {
+    const first = rows[0];
+    const publishDate = new Date(first.publishDate);
+    if (Number.isNaN(publishDate.getTime())) {
+      throw new Error(`unusable publishDate ${String(first.publishDate)}`);
+    }
+    // Tags are attached to a single-post group only (createOrUpdatePost skips
+    // them for chains), so which row carries them is not fixed — collect across
+    // the chain and dedupe. `label` is what the write path matches on (by name);
+    // `value` is required by the DTO but unused, so the id goes there.
+    const tags = Object.values(
+      Object.fromEntries(
+        rows
+          .flatMap((row: any) => row.tags ?? [])
+          .filter((t: any) => t?.tag?.name)
+          .map((t: any) => [t.tag.id, { value: t.tag.id, label: t.tag.name }])
+      )
+    );
+    return {
+      type: first.state === 'DRAFT' ? ('draft' as const) : ('schedule' as const),
+      date: publishDate.toISOString(),
+      // Always false: the stored content ALREADY has its links shortened, so
+      // re-submitting with true would shorten the shortened ones again.
+      shortLink: false,
+      tags,
+      ...(first.projectId ? { projectId: first.projectId } : {}),
+      ...(first.source ? { source: first.source } : {}),
+      ...(first.intervalInDays ? { inter: first.intervalInDays } : {}),
+      posts: [
+        {
+          // Omitted entirely when there is no bound account — an
+          // account-less post is legitimate and `{ id: null }` is not.
+          ...(first.integrationId
+            ? { integration: { id: first.integrationId } }
+            : {}),
+          ...(first.providerIdentifier
+            ? { providerIdentifier: first.providerIdentifier }
+            : {}),
+          ...(first.publishMethod
+            ? {
+                publishMethod: String(
+                  first.publishMethod
+                ).toLowerCase() as 'extension' | 'api',
+              }
+            : {}),
+          settings,
+          // One entry per post in the chain, in publish order — the ids are
+          // what make this an UPDATE rather than a second chain.
+          value: rows.map((row: any) => ({
+            id: row.id,
+            content: row.content,
+            image: row.image ?? [],
+            ...(row.delay ? { delay: row.delay } : {}),
+          })),
+        },
+      ],
+    };
+  }
+
   async getPostsByGroup(orgId: string, group: string) {
     const convertToJPEG = false;
     const loadAll = await this._postRepository.getPostsByGroup(orgId, group);
     const posts = this.arrangePostsByGroup(loadAll, undefined);
 
+    const withMedia = await Promise.all(
+      (posts || []).map(async (post) => ({
+        ...post,
+        image: await this.updateMedia(
+          post.id,
+          JSON.parse(post.image || '[]'),
+          convertToJPEG
+        ),
+      }))
+    );
+    const settings = JSON.parse(posts[0].settings || '{}');
+
     return {
       group: posts?.[0]?.group,
-      posts: await Promise.all(
-        (posts || []).map(async (post) => ({
-          ...post,
-          image: await this.updateMedia(
-            post.id,
-            JSON.parse(post.image || '[]'),
-            convertToJPEG
-          ),
-        }))
-      ),
+      posts: withMedia,
       integrationPicture: posts[0]?.integration?.picture,
       integration: posts[0].integrationId,
-      settings: JSON.parse(posts[0].settings || '{}'),
+      settings,
+      editable: this.toEditablePayload(withMedia, settings),
     };
   }
 
@@ -1077,21 +1197,25 @@ export class PostsService {
       true,
       projectId
     );
+    const withMedia = await Promise.all(
+      (posts || []).map(async (post) => ({
+        ...post,
+        image: await this.updateMedia(
+          post.id,
+          JSON.parse(post.image || '[]'),
+          convertToJPEG
+        ),
+      }))
+    );
+    const settings = JSON.parse(posts[0].settings || '{}');
+
     const list = {
       group: posts?.[0]?.group,
-      posts: await Promise.all(
-        (posts || []).map(async (post) => ({
-          ...post,
-          image: await this.updateMedia(
-            post.id,
-            JSON.parse(post.image || '[]'),
-            convertToJPEG
-          ),
-        }))
-      ),
+      posts: withMedia,
       integrationPicture: posts[0]?.integration?.picture,
       integration: posts[0].integrationId,
-      settings: JSON.parse(posts[0].settings || '{}'),
+      settings,
+      editable: this.toEditablePayload(withMedia, settings),
     };
 
     return list;

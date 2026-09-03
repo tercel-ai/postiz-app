@@ -96,6 +96,26 @@ const ENV_EXTENSION_PUBLISH_PLATFORMS: string[] = (
   .filter(Boolean);
 
 /**
+ * The send path a post takes when it carries NO explicit publishMethod.
+ *
+ * Now 'extension' by default: the in-browser session path is the direction this
+ * product is going and the backend API path is slated for removal, so a post
+ * that does not choose goes to the extension for every platform the extension
+ * can actually publish. EXTENSION_PUBLISH_PLATFORMS is therefore redundant for
+ * those platforms (they are all routed already) and stays only for back-compat.
+ *
+ * OPERATIONAL ESCAPE HATCH: `DEFAULT_PUBLISH_METHOD=api` restores the previous
+ * behaviour — divert only the platforms with no server write API at all, plus
+ * whatever EXTENSION_PUBLISH_PLATFORMS names. Set it if the extension fleet is
+ * down: without it, unchosen posts on the seven publishable platforms simply
+ * wait in QUEUE for a browser that is not coming. An explicit
+ * publishMethod=API on a post always wins over this default either way.
+ */
+const DEFAULT_TO_EXTENSION =
+  (process.env.DEFAULT_PUBLISH_METHOD ?? 'extension').trim().toLowerCase() !==
+  'api';
+
+/**
  * Whether a provider identifier publishes through the browser extension instead
  * of the backend post workflow. Standalone (not an instance method) so callers
  * without the DI'd manager — including the post workflow's scheduling divert —
@@ -104,14 +124,28 @@ const ENV_EXTENSION_PUBLISH_PLATFORMS: string[] = (
  */
 export function isExtensionPublishProvider(providerIdentifier: string): boolean {
   const id = (providerIdentifier || '').toLowerCase();
+  // The SYNC GUARD, unchanged and load-bearing: a platform the extension cannot
+  // publish is never diverted, whatever the defaults say. Diverting one would
+  // strand its posts in QUEUE with no executor — a silent stall, strictly worse
+  // than publishing them through the backend.
   if (!id || !EXTENSION_PUBLISHABLE.has(id)) return false;
   const provider = socialIntegrationList.find((p) => p.identifier === id);
   if (provider?.extensionPublish) return true;
+  if (DEFAULT_TO_EXTENSION) return true;
   return ENV_EXTENSION_PUBLISH_PLATFORMS.includes(id);
 }
 
-/** The provider identifiers currently routed to the extension (flag ∪ env), ∩ publishable. */
+/**
+ * The provider identifiers currently routed to the extension, ∩ publishable.
+ * With the default send path set to the extension that is simply every
+ * publishable platform; under DEFAULT_PUBLISH_METHOD=api it narrows back to
+ * (intrinsic flag ∪ env allowlist). Must stay in agreement with
+ * {@link isExtensionPublishProvider} — this list is what the publish-due query
+ * matches legacy null-method posts against, so a platform routed by one and not
+ * the other is a post that is never published by either path.
+ */
 export function extensionPublishProviderIds(): string[] {
+  if (DEFAULT_TO_EXTENSION) return [...EXTENSION_PUBLISHABLE_PLATFORMS];
   const fromFlag = socialIntegrationList
     .filter((p) => p.extensionPublish)
     .map((p) => p.identifier);

@@ -1107,6 +1107,60 @@ export class PostsRepository {
    * These fell outside the recovery window and will never be published.
    * Excludes recurring originals (intervalInDays set) and thread children (parentPostId set).
    */
+  /**
+   * "This QUEUE post waits for the browser extension, not Temporal."
+   *
+   * ONE definition, because three call sites must agree on it and they drifted
+   * once already: the publish-due offer ({@link extensionRoutedWhere}), the
+   * stale sweep ({@link markStaleQueuePostsAsError}), and the backlog count. A
+   * post the due query OFFERS but the sweep does not EXCLUDE gets ERRORed out
+   * from under the extension seven days later; a post the sweep excludes but
+   * the due query never offers waits in QUEUE forever. Neither failure is
+   * visible until someone goes looking.
+   *
+   * Three ways a post routes to the extension:
+   *   (1) publishMethod = EXTENSION — the explicit decision written at schedule
+   *       time. Carries NO integration constraint: it holds even when
+   *       integrationId is null.
+   *   (2) publishMethod = null on a post bound to an extension-routed account.
+   *   (3) publishMethod = null on a post with NO account at all, whose own
+   *       providerIdentifier is extension-routed — reference-post and
+   *       operation-plan drafts for a platform the org never connected. (2)'s
+   *       integration join structurally cannot match these.
+   *
+   * The disabled/deleted account condition on (2) is part of the shared
+   * definition, NOT a per-caller option, and that is what makes the invariant
+   * hold: a post this predicate excludes from the sweep is exactly a post the
+   * due query will offer. Letting the sweep match on a DISABLED account while
+   * the due query would not was a silent black hole — such a post is diverted
+   * away from Temporal, never offered to the extension because the account is
+   * dead, and then never swept either, so it sits in QUEUE forever with nothing
+   * reporting it. Swept, it surfaces as an ERROR the user can see and retry
+   * (retryPost works: the post HAS an integration). Account-less posts are
+   * unaffected — (3) carries no account condition at all, so they stay excluded
+   * from the sweep, which matters because retryPost could not resurrect one.
+   */
+  private static extensionRouteBranches(
+    providerIdentifiers: string[]
+  ): Prisma.PostWhereInput[] {
+    const routes: Prisma.PostWhereInput[] = [{ publishMethod: 'EXTENSION' }];
+    if (!providerIdentifiers.length) return routes;
+    routes.push({
+      publishMethod: null,
+      integration: {
+        providerIdentifier: { in: providerIdentifiers },
+        disabled: false,
+        deletedAt: null,
+      },
+    });
+    routes.push({
+      publishMethod: null,
+      integrationId: null,
+      providerIdentifier: { in: providerIdentifiers },
+    });
+    return routes;
+  }
+
   async markStaleQueuePostsAsError(
     extensionProviderIds: string[] = []
   ): Promise<number> {
@@ -1115,16 +1169,10 @@ export class PostsRepository {
     // until the user's browser comes online (a pull executor, not Temporal), so a
     // time-based "never published" sweep would wrongly ERROR them — and an
     // integration-less operation-plan draft can't even be retried afterwards
-    // (retryPost needs an integration), stranding it permanently. Mirrors
-    // extensionDueWhere's routing: explicit EXTENSION, or legacy null-method on an
-    // extension-routed integration.
-    const extensionRoutes: Prisma.PostWhereInput[] = [{ publishMethod: 'EXTENSION' }];
-    if (extensionProviderIds.length) {
-      extensionRoutes.push({
-        publishMethod: null,
-        integration: { providerIdentifier: { in: extensionProviderIds } },
-      });
-    }
+    // (retryPost needs an integration), stranding it permanently. Shares its
+    // routing definition with the publish-due offer; see extensionRouteBranches.
+    const extensionRoutes =
+      PostsRepository.extensionRouteBranches(extensionProviderIds);
     // Engage replies are excluded for the same reason as extension-routed
     // posts, and they need saying separately because they match neither
     // routing branch: a reply Post carries no `publishMethod` and no
@@ -1353,8 +1401,15 @@ export class PostsRepository {
         intervalInDays: null,
         // Extension-routed posts wait in QUEUE by design (published in-browser
         // when the user's browser is online), so they are not "stuck" — exclude
-        // them from the diagnostic. `NOT: {}` (not `{ not: 'EXTENSION' }`) so
-        // legacy null-method rows are kept, not dropped by SQL NULL semantics.
+        // the explicitly-routed ones. `NOT: {}` (not `{ not: 'EXTENSION' }`) so
+        // null-method rows are kept, not dropped by SQL NULL semantics.
+        //
+        // Null-method rows are deliberately NOT excluded here even though most
+        // of them now route to the extension too: a whole fleet of browsers
+        // being offline is precisely what an operator needs this diagnostic to
+        // show. They are returned with `publishMethod`/`providerIdentifier` so
+        // the caller can separate "waiting for a browser" from "genuinely
+        // stuck" instead of the two being one indistinguishable number.
         NOT: { publishMethod: 'EXTENSION' },
       },
       select: {
@@ -1363,6 +1418,8 @@ export class PostsRepository {
         createdAt: true,
         intervalInDays: true,
         organizationId: true,
+        publishMethod: true,
+        providerIdentifier: true,
         integration: {
           select: {
             id: true,
@@ -2389,6 +2446,10 @@ export class PostsRepository {
    *   (2) publishMethod = null (legacy/unset) — fall back to the platform-
    *       capability routing: an extension-routed integration. Preserves the
    *       original behaviour for posts created before publishMethod existed.
+   *   (3) publishMethod = null on a post with NO integration at all, whose own
+   *       providerIdentifier is extension-routed. Same fallback as (2) for a
+   *       post that has a platform but no account — the case (2)'s integration
+   *       join structurally cannot express.
    */
   private extensionDueWhere(
     organizationId: string,
@@ -2415,17 +2476,8 @@ export class PostsRepository {
     organizationId: string,
     providerIdentifiers: string[]
   ): Prisma.PostWhereInput {
-    const routes: Prisma.PostWhereInput[] = [{ publishMethod: 'EXTENSION' }];
-    if (providerIdentifiers.length) {
-      routes.push({
-        publishMethod: null,
-        integration: {
-          providerIdentifier: { in: providerIdentifiers },
-          disabled: false,
-          deletedAt: null,
-        },
-      });
-    }
+    const routes =
+      PostsRepository.extensionRouteBranches(providerIdentifiers);
     return {
       organizationId,
       deletedAt: null,

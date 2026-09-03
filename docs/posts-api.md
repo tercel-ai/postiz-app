@@ -38,6 +38,57 @@ list / metrics / tags / extension callbacks). For the deep request-body detail o
 
 ---
 
+## Reading a post back for editing (`editable`)
+
+`GET /posts/:id` and `GET /posts/group/:group` return the stored rows under
+`posts`, which is a **different shape from what `POST /posts` accepts** and is
+not meant to be sent back verbatim:
+
+- read `posts[]` = one entry per **post in the chain** (a thread segment);
+  write `posts[]` = one entry per **channel**, with the chain in `value[]`
+- each read row carries runtime state (`state`, `releaseURL`, `error`,
+  `impressions`, `analytics`, …) that the write DTO has no field for
+- `settings` is a JSON **string** on each row; the write path wants an object
+- `integration` reads back as a bare id **string**; the write path wants `{ id }`
+- `publishMethod` is persisted uppercase; the write path accepts lowercase
+
+Both responses therefore also include **`editable`** — the same post already
+converted into a valid `CreatePostDto`. Send it to `POST /posts` as-is, or
+override `type` (it is derived from the row's state: `DRAFT` → `draft`,
+otherwise `schedule`; use `now` to publish immediately).
+
+```jsonc
+{
+  "group": "...",
+  "posts": [ /* stored rows, unchanged */ ],
+  "integration": null,
+  "settings": { "__type": "x" },
+  "editable": {
+    "type": "draft",
+    "date": "2026-09-03T07:36:00.000Z",
+    "shortLink": false,
+    "tags": [],
+    "source": "calendar",
+    "posts": [{
+      "providerIdentifier": "x",
+      "settings": { "__type": "x" },
+      "value": [
+        { "id": "cmtl7ogyy0001qmtj89zns9jr", "content": "anchor", "image": [] },
+        { "id": "cmtl8abcd0002qmtj89zns9jr", "content": "follow-up", "image": [] }
+      ]
+    }]
+  }
+}
+```
+
+> **`value[].id` is load-bearing.** `createOrUpdatePost` upserts on
+> `value.id || uuidv4()`, so a payload that drops the ids does not update the
+> chain — it silently creates a second one, and a 4-part thread edited once
+> becomes 8 rows. `editable` always carries them.
+
+`shortLink` is always `false` here: the stored content already has its links
+shortened, so re-submitting with `true` would shorten them again.
+
 ## Publish method & the send queue
 
 The **DB `QUEUE` state is the single source of truth** for what should be sent. A
@@ -46,17 +97,33 @@ and recorded in `Post.publishMethod`:
 
 | `publishMethod` | Sent by | When |
 | --- | --- | --- |
-| `API` | The Temporal post workflow (provider backend write API) | Platform has a usable write API **and** a bound OAuth account. |
-| `EXTENSION` | The browser extension, in-browser with the user's own session | Platform has no usable write API (hackernews/medium/quora), or an operator/user routed a dual-capable platform (x/reddit/linkedin) to the extension. |
+| `API` | The Temporal post workflow (provider backend write API) | Explicitly chosen, on a platform with a usable write API **and** a bound OAuth account. |
+| `EXTENSION` | The browser extension, in-browser with the user's own session | Explicitly chosen, **or** the post made no choice — see the default below. |
 
 Both send paths read the **same** `publishMethod`, so a post can never be picked
 up by both — the structural **double-publish guard**. A second guard exists at
 execution time: the API path uses the `releaseId` optimistic claim; the extension
 path uses the [publish-due lease](#post-postspublish-due).
 
-`publishMethod` is nullable: when unset, routing falls back to the
-platform-capability check (`isExtensionPublishProvider`), preserving legacy
-behavior. It is set two ways:
+`publishMethod` is nullable. **When unset, the post goes to the extension** for
+every platform the extension can actually publish — `x`, `reddit`, `linkedin`,
+`hackernews`, `medium`, `quora`, `devto` (`isExtensionPublishProvider`). The
+in-browser session path is the product direction and the API path is slated for
+removal, so a post that does not choose gets the extension.
+
+Platforms outside that list (instagram, facebook, mastodon, …) are **never**
+diverted and keep the backend API path regardless — routing them to an executor
+that cannot publish them would strand their posts in `QUEUE` with nothing to send
+them. This intersection is a hard guard, not a preference.
+
+`DEFAULT_PUBLISH_METHOD=api` restores the previous default (divert only
+hackernews/medium/quora, plus anything named in the legacy additive allowlist
+`EXTENSION_PUBLISH_PLATFORMS`). It is the operational escape hatch for an
+extension fleet that is down: without it, unchosen posts wait in `QUEUE` for a
+browser that is not coming. An explicit `publishMethod` on a post always wins
+over this default either way.
+
+`publishMethod` is set two ways:
 
 - **Bulk**, for hand-picked drafts: [`POST /posts/schedule`](#post-postsschedule)
   resolves + stamps it while flipping DRAFT → QUEUE (and can set a new schedule
