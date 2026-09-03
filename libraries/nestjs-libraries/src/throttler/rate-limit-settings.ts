@@ -56,8 +56,8 @@ const FALLBACK_INGEST_PER_SESSION = 60;
 
 export const DEFAULT_API_RATE_LIMIT_SETTINGS: ApiRateLimitSettings = {
   createPost: 300,
-  engageDraft: 20,
-  engageGeneratePost: 20,
+  engageDraft: 100,
+  engageGeneratePost: 100,
   engageScan: 5,
   engageTargetGone: 30,
   engageAdminSync: 5,
@@ -71,8 +71,28 @@ export const DEFAULT_API_RATE_LIMITS: ApiRateLimits = {
   createPost: 300,
   // Both AI paths are metered by credits as well; the throttle is only the
   // second line, bounding damage before a balance can even be drawn down.
-  engageDraft: 20,
-  engageGeneratePost: 20,
+  //
+  // engageDraft was 20 until measurement showed that was the one limit at real
+  // risk of refusing paying work. Over 30 days the busiest org generated 28
+  // reply drafts in a DAY, and generation is the one path here that legitimately
+  // bursts: the unattended loop cannot (maxPerPoll 1, minGapMinutes 25), but a
+  // person working through a feed easily lands a day's worth inside an hour.
+  // 100/hour clears that peak with room, and still sits far under the business
+  // gate that actually governs replies — engage_reply_account_daily_cap, 50 per
+  // account per day. A throttle tighter than the quota it guards only refuses
+  // requests the customer is paying credits for.
+  //
+  // engageGeneratePost is MATCHED to engageDraft, not measured. It has no
+  // frontend entry point yet (docs/engage/reference-post-generation.md), so 30
+  // days of billing records show zero calls — there is nothing to tune it from.
+  // Given that, matching the one path of the same shape (user-driven, credit
+  // metered, generated one at a time) beats inventing a third number with its
+  // own unstated reasoning. Re-check it against the `engageGeneratePost` row in
+  // scripts/analyze-write-limits.ts once the UI ships; the two paths may well
+  // burst differently, since a reply is clicked while working a feed and an
+  // original post tends to be composed deliberately.
+  engageDraft: 100,
+  engageGeneratePost: 100,
   // Whole-org work per call, so tight on purpose.
   engageScan: 5,
   engageTargetGone: 30,

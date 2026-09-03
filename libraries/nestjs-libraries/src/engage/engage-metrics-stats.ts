@@ -119,6 +119,11 @@ export interface NormalizedReplyMetrics {
   upvotes?: number;
   comments?: number;
   estReach?: number;
+  // Dev.to. Its own name for the counter, not folded into `likes`/`upvotes`,
+  // because a reaction is neither: it is the one applause-shaped signal a
+  // dev.to comment carries. Its reply count reuses `comments` above, and is
+  // absent (not 0) when it could not be read — see normalizeReplyMetrics.
+  reactions?: number;
 }
 
 export function normalizeReplyMetrics(
@@ -131,8 +136,22 @@ export function normalizeReplyMetrics(
     ? (analytics as RawAnalyticsEntry[])
     : [];
   const get = (pattern: RegExp): number => {
-    const entry = series.find((a) => typeof a?.label === 'string' && pattern.test(a.label));
+    const entry = series.find(
+      (a) => typeof a?.label === 'string' && pattern.test(a.label)
+    );
     const value = Number(entry?.data?.[0]?.total ?? 0);
+    return Number.isFinite(value) ? value : 0;
+  };
+  // Same read, except a MISSING series stays missing instead of defaulting to
+  // 0. Only worth the distinction where a series is written conditionally (see
+  // dev.to's reply count): a 0 there would claim "no replies" on a comment
+  // whose replies were simply never read.
+  const getOptional = (pattern: RegExp): number | undefined => {
+    const entry = series.find(
+      (a) => typeof a?.label === 'string' && pattern.test(a.label)
+    );
+    if (!entry) return undefined;
+    const value = Number(entry.data?.[0]?.total ?? 0);
     return Number.isFinite(value) ? value : 0;
   };
   const traffic = trafficScore ?? 0;
@@ -176,6 +195,21 @@ export function normalizeReplyMetrics(
       visibility,
       upvotes: get(/score|point/i),
       comments: get(/comment/i),
+    };
+  }
+
+  // Dev.to publishes a reaction count and a reply count per comment, but no
+  // reach figure of any kind, so the generic branch below would render every
+  // dev.to reply as a flat `impressions: 0` — a number that reads as "nobody
+  // saw it" when the truth is "the platform does not say". The reply count is
+  // read optionally for the same reason at one level down: it takes a second
+  // request that can fail, and an unread count must not report itself as none.
+  if (platform === 'devto') {
+    return {
+      trafficScore: traffic,
+      visibility,
+      reactions: get(/reaction|like/i),
+      comments: getOptional(/comment/i),
     };
   }
 

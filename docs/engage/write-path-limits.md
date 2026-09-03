@@ -110,8 +110,23 @@ gets only an ExecutionContext, so the value has to be somewhere a plain function
 can reach, and a settings round trip per request would put the database on the
 hot path of the thing meant to protect it.
 
-Defaults: createPost 300/h, engageDraft 20/h, engageGeneratePost 20/h,
+Defaults: createPost 300/h, engageDraft 100/h, engageGeneratePost 100/h,
 engageScan 5/h, engageTargetGone 30/h, engageAdminSync 5/h — all per user.
+`engageDraft` is 100 because measurement said so rather than because 100 felt
+right: over 30 days the busiest org generated 28 reply drafts in a DAY, and
+generation is the one path here that legitimately bursts — the unattended loop
+cannot (maxPerPoll 1, minGapMinutes 25), but a person working a feed lands a
+day's worth inside an hour. It was 20, which is under that peak; a throttle
+tighter than the quota it guards (engage_reply_account_daily_cap, 50/account/day)
+only refuses requests the customer pays credits for. `engageGeneratePost` is MATCHED to it rather than
+measured: it has no frontend entry point yet, so 30 days of billing records show
+zero calls and there is nothing to tune it from. Matching the one path of the
+same shape beat inventing a third number — but it is the weakest of these values,
+and `scripts/analyze-write-limits.ts` now reports that endpoint separately so it
+can be set from its own data once the UI ships. The two may burst differently: a
+reply is clicked while working a feed, an original post tends to be composed
+deliberately.
+
 `engageIngest` is not a literal: it derives as
 `3600s / engage_scan_pacing.extension.interUnit.delayMs x engageIngestAllowance`
 (60s and 5 today → 300/h), so widening the client's pacing is not silently

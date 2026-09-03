@@ -135,10 +135,12 @@ import { redditPublicGet } from '@gitroom/nestjs-libraries/engage/reddit-loid';
 import {
   dispatchReplyMetricsSync,
   buildReplyMetricsFromRaw,
+  REPLY_METRICS_PLATFORMS,
   type MetricsSyncDeps,
   type RawReplyMetrics,
 } from '@gitroom/nestjs-libraries/engage/engage-metrics-sync';
 import { normalizeReplyMetrics } from '@gitroom/nestjs-libraries/engage/engage-metrics-stats';
+import { parseDevtoCommentShortId } from '@gitroom/nestjs-libraries/engage/devto-url';
 import { normalizeKeyword } from '@gitroom/nestjs-libraries/engage/engage-scan-lease.service';
 import {
   buildScanTargetKey,
@@ -2170,6 +2172,13 @@ export class EngageService implements OnApplicationBootstrap {
           '(share params like ?utm_source are fine).'
       );
     }
+    if (platform === 'devto' && !parseDevtoCommentShortId(url)) {
+      throw new BadRequestException(
+        'Invalid dev.to reply URL — must link to a specific comment, e.g. ' +
+          'https://dev.to/<author>/comment/<id> or the article link ending in ' +
+          '#comment-<id> (dev.to\'s own "Copy link" gives the second form).'
+      );
+    }
     if (platform === 'x' && !parseXTweetId(url)) {
       throw new BadRequestException(
         'Invalid X reply URL — must link to a specific tweet, e.g. ' +
@@ -3663,9 +3672,13 @@ export class EngageService implements OnApplicationBootstrap {
       sentReplyId
     );
     if (!ctx) throw new NotFoundException('Sent reply not found');
-    if (ctx.platform !== 'x' && ctx.platform !== 'reddit') {
+    // The platforms whose reply carries a page the extension can read counters
+    // off. Everything else (linkedin, hackernews, medium, quora) either has no
+    // addressable reply or publishes no per-reply figure, so an ingest for one
+    // could only be noise.
+    if (!REPLY_METRICS_PLATFORMS.includes(ctx.platform)) {
       throw new BadRequestException(
-        'Metrics ingest is only valid for X or Reddit replies'
+        'Metrics ingest is only valid for X, Reddit or Dev.to replies'
       );
     }
     if (raw.platform !== ctx.platform) {

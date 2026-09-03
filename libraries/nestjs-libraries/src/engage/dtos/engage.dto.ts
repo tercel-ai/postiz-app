@@ -857,13 +857,15 @@ export class RefreshMetricsDto {
 }
 
 // Extension-sourced metrics for ONE published reply. The browser extension
-// scrapes the reply's own page (X TweetDetail / Reddit comment .json) and posts
-// the raw public counters here; the server computes impressions/traffic and
-// persists them. Only the platform's own counter set is sent — unknown fields
-// are ignored, missing ones default to 0 server-side.
+// scrapes the reply's own page (X TweetDetail / Reddit comment .json / the
+// dev.to comment permalink) and posts the raw public counters here; the server
+// computes impressions/traffic and persists them. Only the platform's own
+// counter set is sent — unknown fields are ignored, missing ones default to 0
+// server-side. Dev.to sends its reaction count in `likes`; the server relabels
+// it (see RawReplyMetrics).
 export class IngestReplyMetricsDto {
-  @IsIn(['x', 'reddit'])
-  platform: 'x' | 'reddit';
+  @IsIn(['x', 'reddit', 'devto'])
+  platform: 'x' | 'reddit' | 'devto';
 
   // X public_metrics
   @IsOptional()

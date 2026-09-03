@@ -1,6 +1,10 @@
-import { getRedditToken, redditAuthHeaders } from '@gitroom/nestjs-libraries/engage/reddit-auth';
+import {
+  getRedditToken,
+  redditAuthHeaders,
+} from '@gitroom/nestjs-libraries/engage/reddit-auth';
 import { redditPublicGet } from '@gitroom/nestjs-libraries/engage/reddit-loid';
 import { parseRedditCommentId } from '@gitroom/nestjs-libraries/engage/reddit-url';
+import { parseDevtoCommentShortId } from '@gitroom/nestjs-libraries/engage/devto-url';
 import { computeTrafficScore } from '@gitroom/nestjs-libraries/integrations/social/traffic.calculator';
 
 /**
@@ -18,7 +22,11 @@ export interface MetricsSyncDeps {
     trafficScore?: number
   ): Promise<unknown>;
   markAuthorReplied(sentReplyId: string): Promise<unknown>;
-  checkPostAnalytics(orgId: string, postId: string, when: number): Promise<unknown>;
+  checkPostAnalytics(
+    orgId: string,
+    postId: string,
+    when: number
+  ): Promise<unknown>;
   warn(msg: string): void;
   log(msg: string): void;
 }
@@ -32,7 +40,24 @@ export interface MetricsSyncDeps {
  *   unreachable  the fetch failed (network / WAF / API error) — nothing written.
  *   skipped      a precondition was missing (no comment/tweet id, no integration).
  */
-export type MetricsSyncOutcome = 'written' | 'empty' | 'unreachable' | 'skipped';
+export type MetricsSyncOutcome =
+  | 'written'
+  | 'empty'
+  | 'unreachable'
+  | 'skipped';
+
+/**
+ * The engage platforms a reply's own metrics can be read for at all — the same
+ * set `dispatchReplyMetricsSync` branches on, exported so the ingest endpoint
+ * cannot drift from it. Everything else (linkedin, hackernews, medium, quora)
+ * either leaves no addressable reply behind or publishes no per-reply counter,
+ * so there is nothing to fetch and nothing to accept.
+ */
+export const REPLY_METRICS_PLATFORMS: readonly string[] = [
+  'x',
+  'reddit',
+  'devto',
+];
 
 export async function syncRedditMetrics(
   postId: string,
@@ -70,11 +95,17 @@ export async function syncRedditMetrics(
     const infoRes = await fetchReddit(infoUrl, token);
     if (!infoRes.ok) {
       const body = await infoRes.text().catch(() => '<unreadable>');
-      deps.warn(`Reddit /api/info returned ${infoRes.status} for t1_${commentId}: ${body.slice(0, 200)}`);
+      deps.warn(
+        `Reddit /api/info returned ${
+          infoRes.status
+        } for t1_${commentId}: ${body.slice(0, 200)}`
+      );
       return 'unreachable';
     }
     const infoJson = JSON.parse(await infoRes.text()) as {
-      data?: { children?: Array<{ data: { score?: number; num_comments?: number } }> };
+      data?: {
+        children?: Array<{ data: { score?: number; num_comments?: number } }>;
+      };
     };
     const commentData = infoJson.data?.children?.[0]?.data;
     if (!commentData) return 'empty';
@@ -88,7 +119,9 @@ export async function syncRedditMetrics(
     let safeComments = Number(commentData.num_comments ?? 0);
     safeComments = Number.isFinite(safeComments) ? safeComments : 0;
 
-    const threadMatch = releaseURL.match(/\/r\/([^/]+)\/comments\/([a-z0-9]+)\//);
+    const threadMatch = releaseURL.match(
+      /\/r\/([^/]+)\/comments\/([a-z0-9]+)\//
+    );
     let childReplies: Array<{ data?: { author?: string }; kind?: string }> = [];
     if (threadMatch) {
       try {
@@ -107,24 +140,54 @@ export async function syncRedditMetrics(
         const threadRes = await fetchReddit(threadUrl, threadToken);
         if (threadRes.ok) {
           const threadJson = JSON.parse(await threadRes.text()) as Array<{
-            data?: { children?: Array<{ data?: { replies?: { data?: { children?: Array<{ data?: { author?: string }; kind?: string }> } } } }> };
+            data?: {
+              children?: Array<{
+                data?: {
+                  replies?: {
+                    data?: {
+                      children?: Array<{
+                        data?: { author?: string };
+                        kind?: string;
+                      }>;
+                    };
+                  };
+                };
+              }>;
+            };
           }>;
           childReplies =
-            threadJson[1]?.data?.children?.[0]?.data?.replies?.data?.children ?? [];
+            threadJson[1]?.data?.children?.[0]?.data?.replies?.data?.children ??
+            [];
           safeComments = childReplies.filter((r) => r.kind !== 'more').length;
         } else {
           const body = await threadRes.text().catch(() => '<unreadable>');
-          deps.warn(`Reddit thread .json returned ${threadRes.status} for r/${subreddit}/${threadId}: ${body.slice(0, 200)}`);
+          deps.warn(
+            `Reddit thread .json returned ${
+              threadRes.status
+            } for r/${subreddit}/${threadId}: ${body.slice(0, 200)}`
+          );
         }
       } catch (err) {
-        deps.warn(`Reddit child-reply count failed for t1_${commentId}: ${(err as Error).message}`);
+        deps.warn(
+          `Reddit child-reply count failed for t1_${commentId}: ${
+            (err as Error).message
+          }`
+        );
       }
     }
 
     const today = new Date().toISOString().slice(0, 10);
     const analytics = [
-      { label: 'score', data: [{ total: String(safeScore), date: today }], percentageChange: 0 },
-      { label: 'comments', data: [{ total: String(safeComments), date: today }], percentageChange: 0 },
+      {
+        label: 'score',
+        data: [{ total: String(safeScore), date: today }],
+        percentageChange: 0,
+      },
+      {
+        label: 'comments',
+        data: [{ total: String(safeComments), date: today }],
+        percentageChange: 0,
+      },
     ];
     // Reddit_traffic_index = score×1 + num_comments×3 (Appendix formula).
     const trafficScore = safeScore * 1 + safeComments * 3;
@@ -148,6 +211,169 @@ export async function syncRedditMetrics(
     deps.warn(`Reddit metrics sync failed: ${(err as Error).message}`);
     // If the write already landed, a later author-check throw doesn't undo it.
     return wrote ? 'written' : 'unreachable';
+  }
+}
+
+/**
+ * Count the DIRECT replies to one dev.to comment.
+ *
+ * A reaction is the only counter the comment's own markup carries, but it is not
+ * the only public signal the comment has: a reply IS the stronger one, and Forem
+ * publishes the whole thread as a tree at /api/comments?a_id=<articleId> — open,
+ * anonymous, no key. That endpoint carries no reaction count (which is why the
+ * page is still scraped for that), so the two sources are complements, not
+ * alternatives.
+ *
+ * The article id is read off the page already fetched rather than requested
+ * separately: Forem stamps it on the comment permalink page as
+ * `data-article-id`, so the count costs exactly one extra request.
+ *
+ * Returns null — NOT 0 — when the count cannot be established (no article id,
+ * the endpoint failed, our comment is not in the tree). Null means "unknown" and
+ * the caller omits the series entirely; a 0 would be persisted as a fact and
+ * scored as one, which is the same invented-figure problem `impressions` avoids.
+ */
+async function fetchDevtoChildReplyCount(
+  articlePageHtml: string,
+  shortId: string,
+  deps: MetricsSyncDeps
+): Promise<number | null> {
+  const articleId = articlePageHtml.match(/data-article-id="(\d+)"/)?.[1];
+  if (!articleId) return null;
+
+  interface ForemComment {
+    id_code?: string;
+    children?: ForemComment[];
+  }
+
+  try {
+    const res = await fetch(`https://dev.to/api/comments?a_id=${articleId}`, {
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) {
+      deps.warn(
+        `dev.to /api/comments returned ${res.status} for article ${articleId}`
+      );
+      return null;
+    }
+    const tree = JSON.parse(await res.text()) as unknown;
+    if (!Array.isArray(tree)) return null;
+
+    // The thread nests arbitrarily deep and our comment can sit at any level.
+    const find = (nodes: ForemComment[]): ForemComment | null => {
+      for (const node of nodes) {
+        if (node?.id_code === shortId) return node;
+        const hit = find(Array.isArray(node?.children) ? node.children : []);
+        if (hit) return hit;
+      }
+      return null;
+    };
+
+    const own = find(tree as ForemComment[]);
+    if (!own) return null;
+    return Array.isArray(own.children) ? own.children.length : 0;
+  } catch (err) {
+    deps.warn(
+      `dev.to child-reply count failed for ${shortId}: ${
+        (err as Error).message
+      }`
+    );
+    return null;
+  }
+}
+
+/**
+ * Read ONE dev.to comment's reaction count, server-side and anonymously.
+ *
+ * Forem has no public API for a single comment (/api/comments?a_id= returns the
+ * thread but never a reaction count), so the source is the comment permalink
+ * page itself: Forem server-renders the article there with the per-comment like
+ * button (`#button-for-comment-<nodeId> .reactions-count`) already in the HTML.
+ * No session, no tab, no hydration — which is why this can run on the server at
+ * all, unlike the LinkedIn/Medium/Quora replies that only a logged-in browser
+ * can see.
+ *
+ * The nodeId is NOT the shortId in the URL: Forem's markup keys the like button
+ * on the comment's numeric internal id, and the two are not derivable from each
+ * other, so the numeric id is resolved first from the wrapper whose `data-path`
+ * ends in our shortId. Matching on that path is what keeps a neighbouring
+ * comment's count from being read as ours.
+ */
+export async function syncDevtoMetrics(
+  postId: string,
+  releaseURL: string,
+  deps: MetricsSyncDeps
+): Promise<MetricsSyncOutcome> {
+  const shortId = parseDevtoCommentShortId(releaseURL);
+  if (!shortId) return 'skipped';
+
+  try {
+    const res = await fetch(releaseURL, {
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) {
+      deps.warn(`dev.to comment page returned ${res.status} for ${releaseURL}`);
+      return 'unreachable';
+    }
+    const html = await res.text();
+
+    const nodeId = html.match(
+      new RegExp(
+        `<div\\s+id="comment-node-(\\d+)"[^>]*data-path="[^"]*?/comments/${shortId}"`,
+        's'
+      )
+    )?.[1];
+    // The comment is gone (deleted / the article was taken down), or Forem
+    // changed its markup. Either way there is nothing to write.
+    if (!nodeId) return 'empty';
+
+    // The like button and its count sit well past the node id in the DOM (past
+    // the avatar, header and body markup) — a wide but bounded window, so a
+    // LATER comment's count can never be mistaken for ours.
+    const raw = html.match(
+      new RegExp(
+        `id="button-for-comment-${nodeId}"[\\s\\S]{0,3000}?reactions-count">(\\d+)</span>`
+      )
+    )?.[1];
+    if (raw === undefined) return 'empty';
+
+    const reactions = Number(raw);
+    const safeReactions = Number.isFinite(reactions) ? reactions : 0;
+
+    const today = new Date().toISOString().slice(0, 10);
+    const entry = (label: string, value: number) => ({
+      label,
+      data: [{ total: String(value), date: today }],
+      percentageChange: 0,
+    });
+    const analytics = [entry('reactions', safeReactions)];
+
+    // The reply count is a second request and may not resolve; a comment with
+    // an unknown reply count is still worth its reaction count, so a null here
+    // narrows what is written rather than failing the sync.
+    const childReplies = await fetchDevtoChildReplyCount(html, shortId, deps);
+    if (childReplies !== null) analytics.push(entry('comments', childReplies));
+
+    // Devto_traffic_index = reactions×1 + comments×3, straight off the shared
+    // per-platform weight table (TRAFFIC_WEIGHTS.devto), so an article and a
+    // comment on this platform are scored with the same ruler — and the same
+    // 1/3 ratio Reddit's replies already use (score×1 + comments×3).
+    //
+    // impressions is 0 on purpose, NOT an estimate: dev.to publishes no reach
+    // figure for a comment (page_views_count is author-only and article-level),
+    // and Reddit's ×20 estimate is a documented formula for Reddit, not a
+    // licence to invent one here. normalizeReplyMetrics omits the field for
+    // devto so the UI shows no reach rather than a fabricated zero.
+    await deps.updatePostMetrics(
+      postId,
+      0,
+      analytics,
+      computeTrafficScore('devto', analytics) ?? 0
+    );
+    return 'written';
+  } catch (err) {
+    deps.warn(`dev.to metrics sync failed: ${(err as Error).message}`);
+    return 'unreachable';
   }
 }
 
@@ -181,10 +407,17 @@ export async function syncXMetrics(
   try {
     // A non-empty result means data landed; an empty array means the X API gave
     // nothing (tier block, no releaseId, or no app-only bearer configured).
-    const analytics = await deps.checkPostAnalytics(orgId, postDbId, Date.now());
-    outcome = Array.isArray(analytics) && analytics.length > 0 ? 'written' : 'empty';
+    const analytics = await deps.checkPostAnalytics(
+      orgId,
+      postDbId,
+      Date.now()
+    );
+    outcome =
+      Array.isArray(analytics) && analytics.length > 0 ? 'written' : 'empty';
   } catch (err) {
-    deps.warn(`X analytics sync failed for post ${postDbId}: ${(err as Error).message}`);
+    deps.warn(
+      `X analytics sync failed for post ${postDbId}: ${(err as Error).message}`
+    );
     outcome = 'unreachable';
   }
 
@@ -237,6 +470,9 @@ export async function dispatchReplyMetricsSync(
       deps
     );
   }
+  if (reply.opportunity.platform === 'devto') {
+    return syncDevtoMetrics(reply.post.id, releaseURL, deps);
+  }
   return 'skipped';
 }
 
@@ -250,7 +486,7 @@ export async function dispatchReplyMetricsSync(
  * refresh is indistinguishable from a backend-sourced one downstream.
  */
 export interface RawReplyMetrics {
-  platform: 'x' | 'reddit';
+  platform: 'x' | 'reddit' | 'devto';
   // X public_metrics
   impressions?: number;
   likes?: number;
@@ -261,6 +497,14 @@ export interface RawReplyMetrics {
   // Reddit comment counters
   score?: number;
   comments?: number;
+  // Dev.to reuses two fields it already had rather than adding its own: the
+  // comment's reaction count arrives as `likes`, and its direct reply count as
+  // `comments`. The server relabels the first to `reactions` on the way in,
+  // because that is the label the shared TRAFFIC_WEIGHTS.devto table scores —
+  // `likes` is not a devto weight and would silently score 0. `comments` is
+  // already the right label and passes through. A sender that knows only the
+  // reaction count omits `comments` entirely: absent means unknown, and an
+  // omitted series is what keeps an unknown from being scored as a zero.
 }
 
 export interface BuiltReplyMetrics {
@@ -302,6 +546,21 @@ export function buildReplyMetricsFromRaw(
       // Reddit_traffic_index = score×1 + num_comments×3 (Appendix formula).
       trafficScore: score * 1 + comments * 3,
       analytics: [entry('score', score), entry('comments', comments)],
+    };
+  }
+
+  if (raw.platform === 'devto') {
+    const analytics = [entry('reactions', num(raw.likes))];
+    // Only when the sender actually carried one — see RawReplyMetrics on why an
+    // absent reply count must not become a zero.
+    if (raw.comments !== undefined) {
+      analytics.push(entry('comments', num(raw.comments)));
+    }
+    return {
+      // No reach estimate — see syncDevtoMetrics for why 0 is deliberate here.
+      impressions: 0,
+      trafficScore: computeTrafficScore('devto', analytics) ?? 0,
+      analytics,
     };
   }
 

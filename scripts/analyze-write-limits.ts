@@ -55,6 +55,26 @@ function describe(values: number[]) {
  * 0 means nobody exercises the path at all — also a finding, and one a ratio
  * would hide behind Infinity.
  */
+/**
+ * Head-room for a DAILY observation against an HOURLY cap.
+ *
+ * The two are not the same unit, and dividing them as if they were is how a
+ * report talks someone into moving a limit it never measured. A daily peak only
+ * approaches an hourly cap if the whole day's work lands inside one hour, so
+ * this states the comparison it is actually making instead of printing a bare
+ * ratio.
+ */
+function dailyVsHourly(cap: number, busiestDay: number): string {
+  if (busiestDay === 0) return `${cap}/hour cap — no usage measured on this path`;
+  const verdict =
+    busiestDay > cap
+      ? 'AT RISK — one busy hour of this day would have been refused'
+      : busiestDay > cap * 0.5
+        ? 'watch — half a day compressed into an hour would trip it'
+        : 'safe by construction — a whole day fits inside one hour of budget';
+  return `busiest DAY was ${busiestDay} vs a ${cap}/HOUR cap — ${verdict}`;
+}
+
 function headroom(cap: number | null, busiest: number): string {
   if (cap === null) return 'UNLIMITED — no ceiling to compare against';
   if (busiest === 0) return `${cap} cap — no usage measured on this path`;
@@ -145,8 +165,8 @@ async function main() {
   out.postsCreated = {
     capPerHour: rateLimits?.createPost ?? 300,
     perOrgPerDay: describe(postsPerOrgDay),
-    verdict: headroom(rateLimits?.createPost ?? 300, describe(postsPerOrgDay).max),
-    note: 'daily counts vs an HOURLY cap — a daily max under the cap is safe by construction',
+    verdict: dailyVsHourly(rateLimits?.createPost ?? 300, describe(postsPerOrgDay).max),
+    note: 'Counts EVERY post row, but the throttle only sees HTTP requests — autopost, plan materialization, engage and the chat tool call createPost internally and bypass it. True exposure is lower than this.',
   };
 
   // ── 3. Engage opportunities persisted per org per HOUR — ingest proxy ─────
@@ -176,6 +196,33 @@ async function main() {
     note: 'PERSISTED rows only — the quota counts SUBMITTED ones, so true usage is higher and the real headroom smaller',
   };
 
+  // ── 3b. scanned : persisted — what the ingest numbers above are missing ───
+  // The quota counts SUBMITTED records; EngageOpportunityState only holds what
+  // survived the TTL, keyword and score gates. EngageScoreTick records both
+  // phases, so the ratio between them converts the persisted figures above into
+  // an estimate of real submitted volume — the number the ceiling is compared
+  // against. Without it, "20x head-room" could really be 4x.
+  const phases = await prisma.$queryRaw<{ phase: string; n: bigint }[]>`
+    SELECT phase, SUM(quantity) AS n
+    FROM "EngageScoreTick"
+    WHERE date >= ${since}
+    GROUP BY 1`;
+  const scanned = Number(phases.find((p) => p.phase === 'scanned')?.n ?? 0);
+  const persisted = Number(phases.find((p) => p.phase === 'persisted')?.n ?? 0);
+  const ratio = persisted > 0 ? scanned / persisted : null;
+  const ingestStats = describe(ingestPerOrgHour);
+  (out.engageIngest as Record<string, unknown>).submittedVsPersisted = {
+    scanned,
+    persisted,
+    ratio: ratio ? Number(ratio.toFixed(2)) : null,
+    estimatedBusiestSubmittedPerHour: ratio
+      ? Math.round(ingestStats.max * ratio)
+      : null,
+    note: ratio
+      ? `Persisted rows are ~1/${ratio.toFixed(1)} of what is submitted, so multiply the per-hour figures above by ${ratio.toFixed(1)} before comparing them to the ceiling.`
+      : 'No EngageScoreTick data in this window — the persisted figures above are a LOWER bound of unknown tightness.',
+  };
+
   // ── 4. Reply drafts per org per period — the credit-metered path ──────────
   const replies = await prisma.$queryRaw<{ org: string; day: Date; n: bigint }[]>`
     SELECT "organizationId" AS org, date_trunc('day', "createdAt") AS day, COUNT(*) AS n
@@ -185,8 +232,34 @@ async function main() {
   out.engageReplies = {
     capPerHour: rateLimits?.engageDraft ?? 20,
     perOrgPerDay: describe(replies.map((r) => Number(r.n))),
-    verdict: headroom(rateLimits?.engageDraft ?? 20, describe(replies.map((r) => Number(r.n))).max),
-    note: 'daily counts vs an HOURLY cap, same caveat as posts',
+    verdict: dailyVsHourly(
+      rateLimits?.engageDraft ?? 20,
+      describe(replies.map((r) => Number(r.n))).max
+    ),
+    note: 'User-initiated generation CAN burst (someone working a feed); the unattended loop cannot (maxPerPoll 1, minGapMinutes 25). A refusal here turns away a request the customer pays credits for.',
+  };
+
+  // ── 5. Reference-post generation — the one path with no UI behind it yet ──
+  // Measured separately from replies because they bill under different types,
+  // and because this endpoint has no frontend entry point (see
+  // docs/engage/reference-post-generation.md). A zero here is expected today and
+  // is itself the finding: its rate limit currently bounds nothing, so raising
+  // it would be tuning an unmeasured limit on an unreachable route. Once the UI
+  // ships, this is where the number to set it from comes from.
+  const refPosts = await prisma.$queryRaw<{ org: string; day: Date; n: bigint }[]>`
+    SELECT "organizationId" AS org, date_trunc('day', "createdAt") AS day, COUNT(*) AS n
+    FROM "BillingRecord"
+    WHERE "createdAt" >= ${since} AND "subType" = 'post_gen_reference'
+    GROUP BY 1, 2`;
+  const refStats = describe(refPosts.map((r) => Number(r.n)));
+  out.engageGeneratePost = {
+    capPerHour: rateLimits?.engageGeneratePost ?? 20,
+    perOrgPerDay: refStats,
+    verdict:
+      refStats.n === 0
+        ? 'no usage at all — the endpoint has no frontend entry point yet, so this cap bounds nothing and there is nothing to tune it from'
+        : dailyVsHourly(rateLimits?.engageGeneratePost ?? 20, refStats.max),
+    note: 'Same shape as engageDraft (user-driven, credit-metered) — set it from THIS row once the UI ships, not from the reply numbers.',
   };
 
   if (asJson) {

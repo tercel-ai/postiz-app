@@ -151,10 +151,33 @@ describe('ingestReplyMetrics — persist extension-scraped reply metrics', () =>
     expect(updatePostMetrics).not.toHaveBeenCalled();
   });
 
-  it('rejects a non X/Reddit reply', async () => {
+  it('rejects a reply on a platform that publishes no per-reply counter', async () => {
     const { service } = build({ ...xCtx, platform: 'linkedin' });
     await expect(
       service.ingestReplyMetrics(org, 'r1', { platform: 'x' })
-    ).rejects.toThrow(/only valid for X or Reddit/i);
+    ).rejects.toThrow(/only valid for X, Reddit or Dev\.to/i);
+  });
+
+  it('accepts a dev.to reply and persists its reaction count', async () => {
+    const { service, updatePostMetrics } = build({
+      ...xCtx,
+      platform: 'devto',
+      releaseURL: 'https://dev.to/tercelyi/comment/3e1fm',
+    });
+
+    const out = await service.ingestReplyMetrics(org, 'r1', {
+      platform: 'devto',
+      likes: 3,
+    });
+
+    const [postId, impressions, analytics, trafficScore] =
+      updatePostMetrics.mock.calls[0];
+    expect(postId).toBe('p1');
+    expect(impressions).toBe(0);
+    expect((analytics as any)[0].label).toBe('reactions');
+    expect(trafficScore).toBe(3);
+    // What the card reads back: the reaction count, and no invented reach.
+    expect(out.metrics.reactions).toBe(3);
+    expect(out.metrics.estReach).toBeUndefined();
   });
 });
