@@ -160,6 +160,58 @@ describe('EngageController.generateReferencePost', () => {
     expect(frames.join('')).toContain('"droppedParts":2');
   });
 
+  // maxThreadParts is an exact count the generator can still undershoot, so a
+  // short chain has to be visible on the wire — otherwise it is the same
+  // silent "I asked for 5 and got 2" the exact count was meant to end.
+  it('reports a chain shorter than the requested count via requestedParts', async () => {
+    const { controller } = build({
+      generateReferencePost: vi.fn(async () => ({
+        text: 'anchor\n\nsecond',
+        postId: 'post1',
+        parts: ['anchor', 'second'],
+        thread: true,
+        requestedParts: 5,
+      })),
+    });
+    const { res, frames } = makeRes();
+    const { req } = makeReq();
+
+    await controller.generateReferencePost(
+      ORG,
+      USER,
+      'opp1',
+      { ...BODY, thread: true, maxThreadParts: 5 } as any,
+      req,
+      res
+    );
+
+    expect(frames.join('')).toContain('"requestedParts":5');
+  });
+
+  it('omits requestedParts when the chain came back at full length', async () => {
+    const { controller } = build({
+      generateReferencePost: vi.fn(async () => ({
+        text: 'anchor\n\nsecond',
+        postId: 'post1',
+        parts: ['anchor', 'second'],
+        thread: true,
+      })),
+    });
+    const { res, frames } = makeRes();
+    const { req } = makeReq();
+
+    await controller.generateReferencePost(
+      ORG,
+      USER,
+      'opp1',
+      { ...BODY, thread: true, maxThreadParts: 2 } as any,
+      req,
+      res
+    );
+
+    expect(frames.join('')).not.toContain('requestedParts');
+  });
+
   it('passes the userId through to EngageService (needed to persist the draft)', async () => {
     const { controller, engageService } = build();
     const { res } = makeRes();

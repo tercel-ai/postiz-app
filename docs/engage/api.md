@@ -1746,7 +1746,7 @@ Stored as a normal `Post` with `source='calendar'` (behaves exactly like any oth
 | `sourceAdaptation` | `PRESERVE_STRUCTURE` \| `REFRAME` \| `FRESH_ANGLE` | — | How closely the post may follow the reference. Default `REFRAME`. Orthogonal to `strategy` (which picks the voice) — see the table below |
 | `includeReferenceMedia` | `boolean` | — | Opt-in (default `false`): re-host the reference's own images/video onto the generated post. Unlike the text, media is reused as-is — see `reference-post-generation.md` §6.1 |
 | `thread` | `boolean` | — | Opt-in (default `false`): produce a native **thread** (anchor + follow-up posts stored as a `parentPostId` chain in one `group`) instead of a single post. Honoured only where the platform can chain one — see the table below |
-| `maxThreadParts` | `integer` (1–5) | — | Follow-up parts beyond the anchor, so the chain is `1 + this`. Default 3. Read only when `thread` is `true`; a shorter chain the model judged sufficient is never padded up to it |
+| `maxThreadParts` | `integer` (1–5) | — | How many posts the chain has **IN TOTAL, the anchor INCLUDED** — `3` is the anchor plus 2 follow-ups, `1` is a single post. Default 3. Read only when `thread` is `true`. **Despite the name it is an EXACT count of POSTS**, neither a maximum nor a count of follow-ups; the generator is instructed to write exactly this many and retried once if it writes fewer. A chain can still come back short — see `requestedParts` below. ⚠️ **This changed meaning.** It used to be a ceiling over follow-ups (chain = `1 + this`, model free to undershoot), so the same value now yields one post fewer: `5` was "up to 6 posts", it is now exactly 5. The name and the 1–5 range were kept so nothing starts rejecting, which means the output length changes silently for existing callers — see `reference-post-generation.md` §6.2 |
 
 **Source adaptation** — the relationship between the generated post and the
 reference. **No mode relaxes the anti-plagiarism gate**: all three sit under
@@ -1790,7 +1790,9 @@ degrades to a single post and reports it in the response.
 | `postId` | The **root** `Post` id. Follow-up parts are its `parentPostId` chain, in the same `group`, and move/schedule/publish with it |
 | `parts` | One entry per post in the chain, in publish order. Single-element array unless a thread was produced |
 | `thread` | Whether a thread was actually produced (`parts.length > 1`) |
-| `threadSkippedReason` | Only present when `thread` was requested but one post came back: `platform_unsupported` (the platform cannot chain — see the table above) or `single_post_generated` (the model judged one post enough) |
+| `threadSkippedReason` | Only present when a thread of **more than one post** was requested but one post came back: `platform_unsupported` (the platform cannot chain — see the table above) or `single_post_generated` (the model judged one post enough). Absent for `maxThreadParts: 1`, which asks for a single post outright — nothing was skipped |
+| `requestedParts` | Only present when `parts` came back **shorter than the `maxThreadParts` asked for**. A total post count, directly comparable to `parts.length`. Two causes: the model still wrote fewer posts after its corrective retry, or a too-long tail part was dropped for length (`droppedParts` is then also present). The short chain is still delivered and still billed — this field is what lets a client say it is short |
+| `droppedParts` | Only present when trailing thread parts were discarded for overrunning the platform character ceiling. `parts`/`postId` already describe the truncated chain |
 
 **On error**, one typed frame then `[DONE]`:
 

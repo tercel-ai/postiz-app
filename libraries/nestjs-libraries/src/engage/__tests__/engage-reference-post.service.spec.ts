@@ -140,15 +140,36 @@ describe('EngageReferencePostService', () => {
       expect(systemPrompt.trimEnd().endsWith('never truncate mid-thought.')).toBe(true);
     });
 
-    it('says length wins over strategy, threading and the brand mention', async () => {
+    it('says length wins over strategy and the brand mention', async () => {
       anthropicCreate.mockResolvedValueOnce(anthropicResponse('An original take.'));
 
       await service.generate(REFERENCE, { strategy: 'EXPERT_ANSWER', brandStrength: 1, outputLength: 260 });
 
       const systemPrompt: string = anthropicCreate.mock.calls[0][0].system;
       expect(systemPrompt).toContain(
-        'If the strategy, the thread length, the brand mention, or finishing a thought would push a post past it, cut the content instead'
+        'If the strategy, the brand mention, or finishing a thought would push a post past it, cut the content instead'
       );
+    });
+
+    // Length used to outrank "the thread length" too, which under an EXACT
+    // part count would license the model to drop a post the caller asked for.
+    // It still outranks everything about what a post SAYS.
+    it('tells a thread to cut what a post says, never the number of posts', async () => {
+      anthropicCreate.mockResolvedValueOnce(anthropicResponse('a\n[[PART]]\nb'));
+
+      await service.generate(REFERENCE, {
+        strategy: 'EXPERT_ANSWER',
+        brandStrength: 1,
+        outputLength: 260,
+        thread: true,
+        maxThreadParts: 2,
+      });
+
+      const systemPrompt: string = anthropicCreate.mock.calls[0][0].system;
+      expect(systemPrompt).toContain(
+        'cut what a post SAYS, never the number of posts, which is fixed below'
+      );
+      expect(systemPrompt).not.toContain('the thread length');
     });
 
     it('scopes the limit to EACH post when a thread was asked for', async () => {
@@ -159,6 +180,7 @@ describe('EngageReferencePostService', () => {
         brandStrength: 1,
         outputLength: 260,
         thread: true,
+        maxThreadParts: 2,
       });
 
       const systemPrompt: string = anthropicCreate.mock.calls[0][0].system;
@@ -520,7 +542,8 @@ describe('EngageReferencePostService', () => {
 
       const systemPrompt = anthropicCreate.mock.calls[0][0].system;
       expect(systemPrompt).toContain('[[PART]]');
-      expect(systemPrompt).toContain('up to 3 follow-up posts');
+      expect(systemPrompt).toContain('EXACTLY 3 posts');
+      expect(systemPrompt).toContain('exactly 2 follow-up posts');
       expect(systemPrompt).toContain('EACH post of the thread');
       expect(result.parts).toEqual(['Anchor hook.', 'Second beat.', 'Third beat.']);
       // `text` stays the whole thing, so a caller that only renders it is fine.
@@ -528,22 +551,24 @@ describe('EngageReferencePostService', () => {
     });
 
     it('raises the token budget with the number of posts asked for', async () => {
-      anthropicCreate.mockResolvedValueOnce(anthropicResponse('a\n[[PART]]\nb'));
+      anthropicCreate.mockResolvedValueOnce(
+        anthropicResponse('a\n[[PART]]\nb\n[[PART]]\nc')
+      );
 
       await service.generate(REFERENCE, {
         strategy: 'EXPERT_ANSWER',
         brandStrength: 1,
         outputLength: 260,
         thread: true,
-        maxThreadParts: 2,
+        maxThreadParts: 3,
       });
 
-      // 3 posts (anchor + 2) × the per-post budget — a single-post request
-      // asks for exactly one post's worth.
+      // maxThreadParts counts the anchor, so 3 posts × the per-post budget — a
+      // single-post request asks for exactly one post's worth.
       expect(anthropicCreate.mock.calls[0][0].max_tokens).toBe(1500);
     });
 
-    it('truncates a chain that came back longer than the requested ceiling', async () => {
+    it('truncates a chain that came back longer than the requested count', async () => {
       anthropicCreate.mockResolvedValueOnce(
         anthropicResponse('one\n[[PART]]\ntwo\n[[PART]]\nthree\n[[PART]]\nfour')
       );
@@ -553,14 +578,18 @@ describe('EngageReferencePostService', () => {
         brandStrength: 1,
         outputLength: 260,
         thread: true,
-        maxThreadParts: 1,
+        maxThreadParts: 2,
       });
 
+      // Truncation lands ON the requested count, so this is not a shortfall.
       expect(result.parts).toEqual(['one', 'two']);
+      expect(result.requestedParts).toBeUndefined();
     });
 
-    it('clamps a caller-supplied ceiling above the hard maximum', async () => {
-      anthropicCreate.mockResolvedValueOnce(anthropicResponse('one\n[[PART]]\ntwo'));
+    it('clamps a caller-supplied count above the hard maximum', async () => {
+      // Not mockResolvedValueOnce: 2 posts is short of the clamped 5, so the
+      // part-count corrective runs and needs a second response.
+      anthropicCreate.mockResolvedValue(anthropicResponse('one\n[[PART]]\ntwo'));
 
       await service.generate(REFERENCE, {
         strategy: 'EXPERT_ANSWER',
@@ -571,7 +600,7 @@ describe('EngageReferencePostService', () => {
       });
 
       expect(anthropicCreate.mock.calls[0][0].system).toContain(
-        'up to 5 follow-up posts'
+        'EXACTLY 5 posts'
       );
     });
 
@@ -606,6 +635,7 @@ describe('EngageReferencePostService', () => {
         brandStrength: 1,
         outputLength: 260,
         thread: true,
+        maxThreadParts: 2,
       });
 
       expect(result.parts).toEqual(['A fine anchor post.']);
@@ -634,10 +664,185 @@ describe('EngageReferencePostService', () => {
         brandStrength: 1,
         outputLength: 260,
         thread: true,
+        maxThreadParts: 2,
       });
 
       expect(anthropicCreate).toHaveBeenCalledTimes(2);
       expect(result.parts).toHaveLength(2);
+    });
+  });
+
+  // maxThreadParts is an EXACT count, not a ceiling. It used to be one, and the
+  // prompt told the model to "use only as many follow-ups as the topic
+  // genuinely earns" — so 2 and 3 both produced 2 posts while 4 and 5 both
+  // produced 5, and nothing in the response explained why. These pin the
+  // count down: the model is told the exact number, retried once if it comes
+  // back short, and the shortfall is REPORTED when even that does not work.
+  describe('exact part count', () => {
+    const four = 'one\n[[PART]]\ntwo\n[[PART]]\nthree\n[[PART]]\nfour';
+
+    it('delivers exactly the count asked for in one call when the model complies', async () => {
+      anthropicCreate.mockResolvedValueOnce(anthropicResponse(four));
+
+      const result = await service.generate(REFERENCE, {
+        strategy: 'EXPERT_ANSWER',
+        brandStrength: 1,
+        outputLength: 260,
+        thread: true,
+        maxThreadParts: 4,
+      });
+
+      expect(anthropicCreate).toHaveBeenCalledTimes(1);
+      expect(result.parts).toHaveLength(4);
+      expect(result.requestedParts).toBeUndefined();
+    });
+
+    it('retries with a corrective when the model writes fewer posts than asked', async () => {
+      anthropicCreate
+        .mockResolvedValueOnce(anthropicResponse('one\n[[PART]]\ntwo'))
+        .mockResolvedValueOnce(anthropicResponse(four));
+
+      const result = await service.generate(REFERENCE, {
+        strategy: 'EXPERT_ANSWER',
+        brandStrength: 1,
+        outputLength: 260,
+        thread: true,
+        maxThreadParts: 4,
+      });
+
+      expect(anthropicCreate).toHaveBeenCalledTimes(2);
+      expect(result.parts).toHaveLength(4);
+      expect(result.requestedParts).toBeUndefined();
+      // Both attempts are real spend, so both must be billable.
+      expect(result.usages).toHaveLength(2);
+
+      const corrective: string = anthropicCreate.mock.calls[1][0].system;
+      expect(corrective).toContain('Your previous draft was only 2 post(s)');
+      expect(corrective).toContain('EXACTLY 4 posts');
+      // Says WHERE the extra posts come from. Told only "write 4 posts", a
+      // model that considers the topic finished pads with restatement.
+      expect(corrective).toContain('Do not pad with restatement');
+      expect(corrective).toContain('break it down further');
+    });
+
+    it('ships the short thread and reports the shortfall when the corrective does not take', async () => {
+      anthropicCreate.mockResolvedValue(anthropicResponse('one\n[[PART]]\ntwo'));
+
+      const result = await service.generate(REFERENCE, {
+        strategy: 'EXPERT_ANSWER',
+        brandStrength: 1,
+        outputLength: 260,
+        thread: true,
+        maxThreadParts: 4,
+      });
+
+      // One corrective, then the draft ships: a coherent, already-billed
+      // thread is not worth failing over a post that would have been filler.
+      expect(anthropicCreate).toHaveBeenCalledTimes(2);
+      expect(result.parts).toEqual(['one', 'two']);
+      expect(result.requestedParts).toBe(4);
+    });
+
+    // The retry is SHARED (MAX_ATTEMPTS = 2), so the count corrective spends
+    // it and a length overrun on the final attempt gets no corrective of its
+    // own. What matters is that it still takes its TERMINAL branch — the
+    // valid-prefix salvage — instead of continuing into a spent budget and
+    // falling out of the loop.
+    it('spends the shared retry on the count, then salvages a later length overrun', async () => {
+      const LONG = 'x'.repeat(300);
+      anthropicCreate
+        // 1: short → part-count corrective spends the only retry
+        .mockResolvedValueOnce(anthropicResponse('one\n[[PART]]\ntwo'))
+        // 2: right count now, but the tail is too long — no retry left
+        .mockResolvedValueOnce(
+          anthropicResponse(`one\n[[PART]]\ntwo\n[[PART]]\n${LONG}`)
+        );
+
+      const result = await service.generate(REFERENCE, {
+        strategy: 'EXPERT_ANSWER',
+        brandStrength: 1,
+        outputLength: 260,
+        thread: true,
+        maxThreadParts: 3,
+      });
+
+      expect(anthropicCreate).toHaveBeenCalledTimes(2);
+      // Truncated to the valid prefix, not failed and not returned over-long.
+      expect(result.parts).toEqual(['one', 'two']);
+      expect(result.droppedParts).toBe(1);
+      expect(result.requestedParts).toBe(3);
+      // Both attempts are real spend and must both be billable.
+      expect(result.usages).toHaveLength(2);
+    });
+
+    // The whole budget is 2 calls, whichever combination of problems shows
+    // up. This is what bounds the cost of one generation, which is billed per
+    // token — a regression here is a silent spend increase.
+    it('never exceeds the two-call budget, even when a second problem appears', async () => {
+      const LONG = 'x'.repeat(300);
+      anthropicCreate.mockResolvedValue(
+        anthropicResponse(`one\n[[PART]]\n${LONG}`)
+      );
+
+      const result = await service.generate(REFERENCE, {
+        strategy: 'EXPERT_ANSWER',
+        brandStrength: 1,
+        outputLength: 260,
+        thread: true,
+        maxThreadParts: 3,
+      });
+
+      expect(anthropicCreate).toHaveBeenCalledTimes(2);
+      expect(result.usages).toHaveLength(2);
+    });
+
+    it('keeps the exact count in the shortening corrective, so length never costs a post', async () => {
+      const LONG = 'x'.repeat(300);
+      anthropicCreate
+        .mockResolvedValueOnce(anthropicResponse(`one\n[[PART]]\ntwo\n[[PART]]\n${LONG}`))
+        .mockResolvedValueOnce(anthropicResponse('one\n[[PART]]\ntwo\n[[PART]]\nthree'));
+
+      await service.generate(REFERENCE, {
+        strategy: 'EXPERT_ANSWER',
+        brandStrength: 1,
+        outputLength: 260,
+        thread: true,
+        maxThreadParts: 3,
+      });
+
+      expect(anthropicCreate.mock.calls[1][0].system).toContain(
+        'Keep the thread at EXACTLY 3 posts'
+      );
+    });
+
+    it('treats a one-post thread as a single post, with no chain instructions', async () => {
+      anthropicCreate.mockResolvedValueOnce(anthropicResponse('One original post.'));
+
+      const result = await service.generate(REFERENCE, {
+        strategy: 'EXPERT_ANSWER',
+        brandStrength: 1,
+        outputLength: 260,
+        thread: true,
+        maxThreadParts: 1,
+      });
+
+      expect(anthropicCreate).toHaveBeenCalledTimes(1);
+      expect(anthropicCreate.mock.calls[0][0].system).not.toContain('[[PART]]');
+      expect(result.parts).toEqual(['One original post.']);
+      expect(result.requestedParts).toBeUndefined();
+    });
+
+    it('never runs the count corrective for a single-post request', async () => {
+      anthropicCreate.mockResolvedValueOnce(anthropicResponse('One original post.'));
+
+      const result = await service.generate(REFERENCE, {
+        strategy: 'EXPERT_ANSWER',
+        brandStrength: 1,
+        outputLength: 260,
+      });
+
+      expect(anthropicCreate).toHaveBeenCalledTimes(1);
+      expect(result.requestedParts).toBeUndefined();
     });
   });
 
@@ -657,6 +862,7 @@ describe('EngageReferencePostService', () => {
         brandStrength: 1,
         outputLength: 260,
         thread: true,
+        maxThreadParts: 2,
       });
 
       expect(anthropicCreate).toHaveBeenCalledTimes(2);
@@ -714,12 +920,15 @@ describe('EngageReferencePostService', () => {
         brandStrength: 1,
         outputLength: 260,
         thread: true,
+        maxThreadParts: 4,
       });
 
       // 'd' goes too — it followed the dropped beat.
       expect(result.parts).toEqual(['a', 'b']);
       expect(result.droppedParts).toBe(2);
       expect(result.text).toBe('a\n\nb');
+      // A dropped tail always leaves the chain short of the count asked for.
+      expect(result.requestedParts).toBe(4);
     });
 
     it('still fails when the ANCHOR is the over-long part — there is no prefix to keep', async () => {
@@ -734,34 +943,42 @@ describe('EngageReferencePostService', () => {
           brandStrength: 1,
           outputLength: 260,
           thread: true,
+          maxThreadParts: 2,
         })
       ).rejects.toThrow('thread part 1 of 2');
     });
 
-    // The two correctives used to share ONE attempt budget, so a similarity
-    // retry spent the only chance a later length overrun would have had — and
-    // the length failure then killed a generation that a second try would
-    // have fixed. engage-draft.service.ts tracks its own two independently
-    // for exactly this reason.
-    it('does not let the similarity retry consume the length retry', async () => {
-      const copied = REFERENCE.postContent;
+    // The correctives SHARE one retry (MAX_ATTEMPTS = 2). The hazard that
+    // creates: a corrective issued on the final attempt would `continue` into
+    // nothing, the loop would end, and control would fall through to the
+    // throw after it — reporting THAT line's error (historically
+    // "too similar") for whatever problem was really left unfixed, after
+    // billing every attempt. `canRetry` keys off the attempt index precisely
+    // so the final attempt takes a terminal branch instead.
+    it('reports the problem that actually remains, not the one that spent the retry', async () => {
       anthropicCreate
-        // 1: too similar → similarity corrective
-        .mockResolvedValueOnce(anthropicResponse(copied))
-        // 2: original now, but too long → length corrective
-        .mockResolvedValueOnce(anthropicResponse(LONG))
-        // 3: fine
-        .mockResolvedValueOnce(anthropicResponse('A short original post.'));
+        // 1: plagiarised → similarity corrective spends the only retry
+        .mockResolvedValueOnce(anthropicResponse(REFERENCE.postContent))
+        // 2: original now, but too long — and no retry left to shorten it
+        .mockResolvedValueOnce(anthropicResponse(LONG));
 
-      const result = await service.generate(REFERENCE, {
-        strategy: 'EXPERT_ANSWER',
-        brandStrength: 1,
-        outputLength: 260,
-      });
+      const error = await service
+        .generate(REFERENCE, {
+          strategy: 'EXPERT_ANSWER',
+          brandStrength: 1,
+          outputLength: 260,
+        })
+        .catch((err) => err);
 
-      expect(anthropicCreate).toHaveBeenCalledTimes(3);
-      expect(result.parts).toEqual(['A short original post.']);
-      expect(result.usages).toHaveLength(3);
+      expect(anthropicCreate).toHaveBeenCalledTimes(2);
+      // The LENGTH failure, not TooSimilarToReferenceError — the draft that
+      // came back was original, so blaming plagiarism would be a lie the
+      // client surfaces as `too_similar_to_reference`.
+      expect(error.name).toBe('ReferencePostGenerationError');
+      expect(error).not.toBeInstanceOf(TooSimilarToReferenceError);
+      expect(error.message).toMatch(/character|length|limit/i);
+      // Both paid attempts still reach the caller for billing.
+      expect(error.usages).toHaveLength(2);
     });
 
     it('reports no droppedParts on a clean generation', async () => {
@@ -772,9 +989,11 @@ describe('EngageReferencePostService', () => {
         brandStrength: 1,
         outputLength: 260,
         thread: true,
+        maxThreadParts: 2,
       });
 
       expect(result.droppedParts).toBeUndefined();
+      expect(result.requestedParts).toBeUndefined();
     });
   });
 

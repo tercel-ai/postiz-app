@@ -554,19 +554,55 @@ describe('EngageService.generateReferencePost', () => {
       });
     }
 
-    it('asks the generator for a thread and forwards the requested part ceiling', async () => {
+    it('asks the generator for a thread and forwards the requested post count', async () => {
       const { service, referencePost } = buildThreadService();
 
       await service.generateReferencePost(ORG, 'user1', 'opp1', {
         ...GEN_DTO,
         thread: true,
-        maxThreadParts: 2,
+        maxThreadParts: 3,
       });
 
       expect(referencePost.generate).toHaveBeenCalledWith(
         expect.objectContaining({ platform: 'x' }),
-        expect.objectContaining({ thread: true, maxThreadParts: 2 })
+        expect.objectContaining({ thread: true, maxThreadParts: 3 })
       );
+    });
+
+    // A short chain is not an error — but it must not be silent either, or it
+    // is exactly the "I asked for 5 and got 2" mystery this replaced.
+    it('passes the generator-reported shortfall through to the caller', async () => {
+      const { service } = buildThreadService({
+        referencePost: {
+          generate: vi.fn(async () => ({
+            text: 'anchor post\n\nfollow-up one',
+            parts: ['anchor post', 'follow-up one'],
+            usages: [],
+            requestedParts: 5,
+          })),
+        },
+      });
+
+      const result = await service.generateReferencePost(ORG, 'user1', 'opp1', {
+        ...GEN_DTO,
+        thread: true,
+        maxThreadParts: 5,
+      });
+
+      expect(result.parts).toHaveLength(2);
+      expect(result.requestedParts).toBe(5);
+    });
+
+    it('omits requestedParts when the chain came back at full length', async () => {
+      const { service } = buildThreadService();
+
+      const result = await service.generateReferencePost(ORG, 'user1', 'opp1', {
+        ...GEN_DTO,
+        thread: true,
+        maxThreadParts: 3,
+      });
+
+      expect(result.requestedParts).toBeUndefined();
     });
 
     it('persists the chain as one value entry per part, in publish order', async () => {
@@ -660,6 +696,34 @@ describe('EngageService.generateReferencePost', () => {
 
       expect(result.thread).toBe(false);
       expect(result.threadSkippedReason).toBe('single_post_generated');
+    });
+
+    // `maxThreadParts: 1` is a valid request (@Min(1)) for exactly one post.
+    // Under exact-count semantics the generator is TOLD to write one post and
+    // emits no thread instructions at all, so calling that a skipped thread
+    // would report a model decision that never happened. The generator-level
+    // test ('treats a one-post thread as a single post') stops at `parts`;
+    // the skip reason is assigned here, which is why this case needs its own.
+    it('reports no skip reason when the caller explicitly asked for a single post', async () => {
+      const { service } = buildThreadService({
+        referencePost: {
+          generate: vi.fn(async () => ({
+            text: 'One original post.',
+            parts: ['One original post.'],
+            usages: [],
+          })),
+        },
+      });
+
+      const result = await service.generateReferencePost(ORG, 'user1', 'opp1', {
+        ...GEN_DTO,
+        thread: true,
+        maxThreadParts: 1,
+      });
+
+      expect(result.thread).toBe(false);
+      expect(result.threadSkippedReason).toBeUndefined();
+      expect(result.requestedParts).toBeUndefined();
     });
 
     it('never reports a skip reason when no thread was asked for', async () => {

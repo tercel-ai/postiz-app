@@ -7,13 +7,13 @@ or composer wiring yet; the endpoint below is only reachable directly.
 Implementation:
 - Schema: `Post.referenceOpportunityId` (§4.2), `AiseeBusinessSubType.POST_GEN_REFERENCE` (§7) — **live**, pushed and backfilled (485 rows) against the deployment server on 2026-09-01
 - Source adaptation (§6.3): `sourceAdaptation` = `PRESERVE_STRUCTURE` | `REFRAME` (default) | `FRESH_ANGLE`, prompt-side only — no mode relaxes the similarity gate, and the corrective retry is mode-aware so a rejected `PRESERVE_STRUCTURE` draft is not silently retried as a fresh angle.
-- Threads (§6.2): opt-in `thread`/`maxThreadParts`, gated by the shared capability rule in [`integrations/thread-capability.ts`](../../libraries/nestjs-libraries/src/integrations/thread-capability.ts) (also adopted by `operation-plan.service.ts`, which previously judged by `comment()` alone and so dropped Hacker News threads). No schema change — a thread is N `value` entries, chained by the existing `createOrUpdatePost` path.
+- Threads (§6.2): opt-in `thread`/`maxThreadParts` (an EXACT post count INCLUDING the anchor, 1–5, default 3 — the name is historical, see §6.2), gated by the shared capability rule in [`integrations/thread-capability.ts`](../../libraries/nestjs-libraries/src/integrations/thread-capability.ts) (also adopted by `operation-plan.service.ts`, which previously judged by `comment()` alone and so dropped Hacker News threads). No schema change — a thread is N `value` entries, chained by the existing `createOrUpdatePost` path.
 - Generation: [`engage-reference-post.service.ts`](../../libraries/nestjs-libraries/src/engage/engage-reference-post.service.ts), reusing [`prompt-source-envelope.ts`](../../libraries/nestjs-libraries/src/engage/prompt-source-envelope.ts), [`engage-brand-instruction.ts`](../../libraries/nestjs-libraries/src/engage/engage-brand-instruction.ts), and [`reference-similarity.ts`](../../libraries/nestjs-libraries/src/engage/reference-similarity.ts) (§6). Failures still carry every already-completed model call's usage via `ReferencePostGenerationError`/`TooSimilarToReferenceError(usages)`, so a similarity-gate rejection is billed like any other real spend (§7.1).
 - Orchestration + billing + persistence: `EngageService.generateReferencePost` (§5/§7.1) — **one** call now does generate, bill, and save (see the second design revision below).
 - API: `engage.controller.ts` `POST /opportunities/:id/generate-post` — see `docs/engage/api.md` §"Reference-Post Generation"
 - Backfill: [`scripts/backfill-engage-reference-opportunity.ts`](../../scripts/backfill-engage-reference-opportunity.ts) (§4.4) — **run**, 485 reply posts across 14 orgs backfilled on the deployment server.
-- Tests: `reference-similarity.spec.ts`, `engage-reference-post.service.spec.ts`, `engage-service.reference-post.spec.ts`, `engage.controller.referencePost.spec.ts`, `thread-capability.spec.ts` — full repo suite green as of the last revision.
-- Deployment: schema pushed, backend restarted, backfill run — see §10. **The API contract changed again since that deploy (thread support, this revision) — needs another `git pull` + backend restart, still no new schema/env changes.**
+- Tests: `reference-similarity.spec.ts`, `reference-post-thread-parts.spec.ts`, `engage-reference-post.service.spec.ts`, `engage-service.reference-post.spec.ts`, `engage.controller.referencePost.spec.ts`, `thread-capability.spec.ts` — full repo suite green as of the last revision.
+- Deployment: schema pushed, backend restarted, backfill run — see §10. **The API contract changed again since that deploy (thread support, then `maxThreadParts` becoming an exact count of TOTAL posts — this revision) — needs another `git pull` + backend restart, still no new schema/env changes.** ⚠️ That last one is a BEHAVIOURAL break for existing callers even though nothing starts 400-ing: the field name and its 1-5 range are unchanged, but the same value now yields one post fewer and is honoured exactly rather than as a ceiling (`thread:true` with no count went from 2-4 posts to always 3; `5` went from up to 6 posts to exactly 5). No in-repo caller sends the field, so this is an integrator-facing note.
 
 Design revision 1 (post-deploy, still backend-only — no frontend consumes
 this endpoint yet, so these were safe API-contract changes):
@@ -320,7 +320,7 @@ same UI the reply-draft composer already has:
 | `sourceAdaptation` | `PRESERVE_STRUCTURE` \| `REFRAME` \| `FRESH_ANGLE` | | How closely the post may follow the reference; default `REFRAME`. A separate axis from `strategy` — that picks the voice, this picks the distance from the source. No mode relaxes the anti-plagiarism gate. See §6.3 |
 | `includeReferenceMedia` | `boolean` | | Default `false`. Reuse the reference's own images/video as-is on the generated post — opt-in, no rewrite-mitigation exists for media the way it does for text. See §6.1 |
 | `thread` | `boolean` | | Default `false`. Produce a native thread (anchor + `parentPostId`-chained follow-ups in one `group`) instead of a single post. Honoured only where the platform can chain one; elsewhere the call degrades to a single post and reports it. See §6.2 |
-| `maxThreadParts` | `integer` (1–5) | | Follow-up parts beyond the anchor (chain = `1 + this`), default 3. Read only when `thread` is `true`. A ceiling, not a target. See §6.2 |
+| `maxThreadParts` | `integer` (1–5) | | How many posts the chain has IN TOTAL, the anchor INCLUDED — `3` is the anchor plus 2 follow-ups. Default 3. Read only when `thread` is `true`. **Neither a max nor a count of parts: an EXACT count of POSTS.** The name is historical; the range is unchanged. See §6.2 |
 
 **SSE success frame**: `data: {"text": "...", "postId": "...", "parts": ["..."], "thread": false}`
 then `data: [DONE]`. `text` is the whole post (thread parts joined by a blank
@@ -328,6 +328,10 @@ line), `postId` is the ROOT post, `parts` is one entry per post in the chain,
 and `thread` says whether one was actually produced — with
 `threadSkippedReason` (`platform_unsupported` | `single_post_generated`)
 present only when a requested thread came back as one post (§6.2).
+`requestedParts` is present only when `parts` is SHORTER than the
+`maxThreadParts` asked for, whether because a too-long tail part was dropped
+(`droppedParts`) or because the model still wrote fewer posts after its
+corrective retry (§6.2).
 
 **On error**, a typed frame then `[DONE]` — see §7's `error code` table in
 `docs/engage/api.md`; a persistence failure (rare — a DB error after a
@@ -414,7 +418,8 @@ await this._engageRepository.attachReferenceOpportunity(postId, {
 
 // The ROOT post carries the provenance; its chained children ride along in
 // the same group. `threadSkippedReason` is added only when a requested
-// thread came back as a single post (§6.2).
+// thread came back as a single post, `requestedParts` only when the chain is
+// shorter than the count that was asked for (§6.2).
 return { text, postId, parts, thread: parts.length > 1 };
 ```
 
@@ -615,7 +620,11 @@ punishing the caller for something it cannot control. The call degrades to a
 single post and *says so*: the final SSE frame carries `thread: false` plus
 `threadSkippedReason: "platform_unsupported"` (or `"single_post_generated"`
 when the platform could have chained one but the model judged a single post
-enough). See `docs/engage/api.md`.
+enough). Both reasons answer "you asked for a thread and did not get one", so
+neither is emitted for `maxThreadParts: 1` — that asks for a single post
+outright, the generator is told to write one and emits no thread instructions
+at all, and reporting it as a skipped thread would blame the model for a
+decision the caller made. See `docs/engage/api.md`.
 
 **Generation.** One model call produces the whole chain, with the posts
 separated by a `[[PART]]` sentinel line — a bracketed token rather than the
@@ -624,11 +633,47 @@ post text. The token cannot, so splitting on it can never cut a post in half;
 a response that carries it when no thread was asked for is joined back into
 one post rather than leaking the sentinel into published text. `max_tokens`
 scales with the number of posts requested so the last part is never truncated
-mid-sentence. `maxThreadParts` (1–5, default 3) counts FOLLOW-UPS beyond the
-anchor — same semantics as the operation plan's own
-`operation_plan.max_thread_parts` — and is a ceiling, not a target: a shorter
-chain the model judged sufficient is never padded up to it, and an over-long
-one is truncated rather than failing an already-paid generation.
+mid-sentence.
+
+`maxThreadParts` (1–5, default 3) is the TOTAL number of posts including the
+anchor, and it is an **exact count, not a ceiling**. Both halves of the name
+are historical:
+
+- **"max"** — it really was a ceiling, and the prompt told the model to "use
+  only as many follow-ups as the topic genuinely earns".
+- **"parts"** — it counted FOLLOW-UPS beyond the anchor, so the chain was
+  `1 + this`.
+
+Together those made the endpoint look broken from outside: `2` and `3` both
+came back as 2 posts, `4` and `5` both came back as 5, and nothing in the
+response explained why. A caller asking for a 4-post thread wants 4 posts.
+The field kept its name and its 1–5 range so existing clients did not have to
+be rewritten; only the meaning of the number moved.
+
+So the count is now enforced on three levels:
+
+- **The prompt** asks for EXACTLY N posts and says where the extra posts come
+  from — break the material down further (steps, examples, caveats), never
+  pad with restatement or a summary post. Padding was and remains forbidden;
+  the fix for "this topic does not fill 5 posts" is finer cuts, not 2 posts.
+- **A corrective retry** when the chain comes back short. The generator's
+  whole budget is `MAX_ATTEMPTS = 2` — one initial call plus one retry — and
+  that retry is SHARED with the similarity and length correctives, so
+  whichever problem surfaces first spends it. Accepted deliberately: every
+  attempt is a paid model call, and of the three only similarity hard-fails
+  without its retry (a short count ships with `requestedParts`, an over-long
+  tail truncates to its valid prefix). The shortening corrective also
+  restates the exact count, so fixing length can never cost a post.
+- **A reported shortfall.** If the retry does not take, the short chain still
+  ships — it is coherent and already billed, and a post the model refused to
+  write would have been filler — but the response carries `requestedParts` so
+  the client can say the thread is short instead of silently showing fewer
+  posts than the user asked for.
+
+An over-long chain is still truncated to the requested count rather than
+failing an already-paid generation. `operation_plan.max_thread_parts` keeps
+its own follow-ups-beyond-the-anchor CEILING semantics — despite the near
+identical name, the two fields no longer mean the same thing.
 
 **Both guardrails still apply, at the right granularity:**
 
@@ -772,9 +817,10 @@ Messages API does return) is read nowhere
   `messages.create()` response already being made.
 - **Retries count.** `_generateDraftWithConstraints` can call the model up to
   3 times for one logical draft (length + brand-mention corrective retries,
-  `MAX_ATTEMPTS = 3`). If this feature adopts the same retry shape for its
-  own similarity retry (§6), every attempt is a real, separately-billed
-  Anthropic call. Push one `AiUsageInfo` entry per attempt into an array and
+  `MAX_ATTEMPTS = 3`). This feature adopted the same retry shape but a
+  tighter budget — `MAX_ATTEMPTS = 2`, one initial call plus a single retry
+  shared by its similarity, part-count and length correctives (§6.2) — and
+  every attempt is a real, separately-billed Anthropic call. Push one `AiUsageInfo` entry per attempt into an array and
   pass the whole array to a single `billCollectedUsages` call after the loop
   ends — one `BillingRecord` per `/generate-post` request, not one per
   attempt (fragmenting the ledger) and not just the last attempt (undercounts

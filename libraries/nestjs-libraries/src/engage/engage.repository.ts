@@ -43,8 +43,10 @@ import {
 import {
   buildScanTargetKey,
   CHANNEL_SCOPE_PLATFORMS,
+  normalizePlatform,
   partitionScanTargets,
   scanKeyFor,
+  ScanTargetScope,
   scanTypeFor,
   toChannelShape,
 } from '@gitroom/nestjs-libraries/engage/engage-scan-target';
@@ -977,64 +979,119 @@ export class EngageRepository {
   // null/null. NOTE: a keyword/subreddit shared with a more aggressive org is
   // scanned on that org's cadence, so the reported time can be fresher than this
   // org's own interval — intentional (shared data, always fresher is fine).
+  //
+  // The reported set MUST equal the set the scan loop actually enumerates
+  // (claimNext → getEnabledConfigsForOrg → _enumerateUnits), on both axes:
+  //
+  //   config — units are read through the SAME config filter (enabled + a
+  //     non-null projectId). Reading them org-wide instead pulled in the legacy
+  //     null-project config's keywords/targets, which no scan path touches any
+  //     more; their cursors froze on the day that exclusion landed, and since
+  //     `nextScanAt` folds with min() one such cursor pinned the aggregate to a
+  //     permanently-overdue time — so the top-level pair (floored at `now`) read
+  //     "due right now" forever and refreshOnVisit's due gate never throttled.
+  //
+  //   platform — `platforms` is the resolved scan allowlist
+  //     (settings.operation_plan.allowed_platforms || ENGAGE_SUPPORTED_PLATFORMS)
+  //     and gates every track, exactly as it gates enumeration. Keyword units fan
+  //     out per platform, so switching X off (its documented kill switch) strands
+  //     every keyword's x cursor — counted here, never scanned there.
+  //
+  // Omitting `platforms` (or passing an empty list) applies NO platform gate:
+  // the caller could not resolve the allowlist, and a status reader must not
+  // silently narrow to zero over a wiring gap — same posture as the scan loop's
+  // own env fallback.
   async getOrgScanStatus(
     organizationId: string,
-    scanIntervalHours: number = DEFAULT_SCAN_INTERVAL_HOURS
+    scanIntervalHours: number = DEFAULT_SCAN_INTERVAL_HOURS,
+    platforms?: readonly string[]
   ): Promise<OrgScanStatus> {
     const now = Date.now();
     const cadenceMs =
       (Number.isFinite(scanIntervalHours) && scanIntervalHours > 0
         ? scanIntervalHours
         : DEFAULT_SCAN_INTERVAL_HOURS) * 3_600_000;
+    const allowed = platforms?.length
+      ? new Set(platforms.map((p) => p.trim().toLowerCase()).filter(Boolean))
+      : null;
+    // Same predicate as getEnabledConfigsForOrg — expressed as a relation filter
+    // so the two cannot drift into different SQL. Annotated because outside a
+    // Prisma argument position this file's tsconfig infers the bare `null` as an
+    // implicit any (TS7018).
+    const scannedConfig: { enabled: boolean; projectId: { not: null } } = {
+      enabled: true,
+      projectId: { not: null },
+    };
 
     const [targets, keywords] = await Promise.all([
       this._trackedAccount.model.engageTrackedAccount.findMany({
-        where: { organizationId, enabled: true },
+        where: { organizationId, enabled: true, config: scannedConfig },
         select: { platform: true, username: true },
       }),
       this._keyword.model.engageKeyword.findMany({
-        where: { organizationId, enabled: true },
+        where: { organizationId, enabled: true, config: scannedConfig },
         select: { keyword: true },
       }),
     ]);
     // One table, two scopes: `platform` decides which cursor namespace a target
-    // belongs to. Both sides key by the NORMALIZED value (matching the writer +
+    // belongs to (scanTypeFor: reddit → channel, everything else → an author
+    // feed). Both sides key by the NORMALIZED value (matching the writer +
     // extension), so look up cursors by those keys.
-    const subredditIds = targets
-      .filter((t) => scanTypeFor(t.platform) === 'channel')
-      .map(scanKeyFor);
-    const usernames = targets
-      .filter((t) => scanTypeFor(t.platform) === 'tracked')
-      .map(scanKeyFor);
+    //
+    // Grouped BY PLATFORM rather than pinned to one: the two queries used to
+    // hardcode `platform: 'reddit'` / `platform: 'x'`, from when those were the
+    // only two scannable platforms. `scanKeyFor` normalizes per platform and
+    // scan keys are only unique WITHIN a platform, so a pinned query both
+    // dropped every other platform's targets (a LinkedIn/dev.to/Medium/Quora/
+    // Hacker News account simply never appeared in the status) and risked
+    // reading a same-named key from the wrong namespace.
+    const allowedTarget = (platform: string) => !allowed || allowed.has(platform);
+    const keysByPlatform = new Map<string, Set<string>>();
+    for (const t of targets) {
+      const platform = normalizePlatform(t.platform) || 'x';
+      if (!allowedTarget(platform)) continue;
+      const key = scanKeyFor(t);
+      if (!key) continue;
+      const bucket = keysByPlatform.get(platform);
+      if (bucket) bucket.add(key);
+      else keysByPlatform.set(platform, new Set([key]));
+    }
+    // One OR arm per platform — `{ platform, scanKey: { in: [...] } }` — so each
+    // key is only ever matched inside its own namespace.
+    const armsFor = (scope: ScanTargetScope) =>
+      [...keysByPlatform]
+        .filter(([platform]) => scanTypeFor(platform) === scope)
+        .map(([platform, keys]) => ({ platform, scanKey: { in: [...keys] } }));
+    const channelArms = armsFor('channel');
+    const trackedArms = armsFor('tracked');
     // Keywords are scanned as per-keyword global units keyed by their normalized
     // form (shared across orgs + the extension path), so look up THIS org's
     // keyword cursors by those keys — mirroring the channel/tracked lookups.
+    // A keyword carries no platform of its own (it fans out to every allowlisted
+    // one), so here the allowlist narrows the query instead of the key set.
     const keywordKeys = Array.from(
       new Set(keywords.map((k) => normalizeKeyword(k.keyword)).filter(Boolean))
     );
+    const keywordPlatforms = allowed ? [...allowed] : null;
 
     const [keywordCursors, channelCursors, trackedCursors] = await Promise.all([
       keywordKeys.length
         ? this._scanCursor.model.engageScanCursor.findMany({
-            where: { scanType: 'keyword', scanKey: { in: keywordKeys } },
-          })
-        : Promise.resolve([]),
-      subredditIds.length
-        ? this._scanCursor.model.engageScanCursor.findMany({
             where: {
-              platform: 'reddit',
-              scanType: 'channel',
-              scanKey: { in: subredditIds },
+              scanType: 'keyword',
+              scanKey: { in: keywordKeys },
+              ...(keywordPlatforms && { platform: { in: keywordPlatforms } }),
             },
           })
         : Promise.resolve([]),
-      usernames.length
+      channelArms.length
         ? this._scanCursor.model.engageScanCursor.findMany({
-            where: {
-              platform: 'x',
-              scanType: 'tracked',
-              scanKey: { in: usernames },
-            },
+            where: { scanType: 'channel', OR: channelArms },
+          })
+        : Promise.resolve([]),
+      trackedArms.length
+        ? this._scanCursor.model.engageScanCursor.findMany({
+            where: { scanType: 'tracked', OR: trackedArms },
           })
         : Promise.resolve([]),
     ]);
@@ -1078,11 +1135,18 @@ export class EngageRepository {
    * Per-keyword per-platform scan cursor times for this org's active keywords.
    * Returns a map: normalizedKey → array of { platform, lastScannedAt, lastScanStartedAt, cooldownUntil }.
    * Used by getConfig to annotate each keyword with its actual scan history.
+   *
+   * `platforms` is the resolved scan allowlist, gating the rows the same way it
+   * gates getOrgScanStatus and unit enumeration: a platform the operator has
+   * switched off keeps its stale cursor row, and surfacing it here would show
+   * every keyword a permanently-overdue "next scan" for a platform nothing
+   * scans. Omitted/empty applies no gate (see getOrgScanStatus).
    */
   async getKeywordCursors(
     keywordKeys: string[],
     cadenceMs: number,
-    now: number = Date.now()
+    now: number = Date.now(),
+    platforms?: readonly string[]
   ): Promise<
     Record<
       string,
@@ -1094,8 +1158,15 @@ export class EngageRepository {
     >
   > {
     if (!keywordKeys.length) return {};
+    const allowed = platforms?.length
+      ? platforms.map((p) => p.trim().toLowerCase()).filter(Boolean)
+      : null;
     const rows = await this._scanCursor.model.engageScanCursor.findMany({
-      where: { scanType: 'keyword', scanKey: { in: keywordKeys } },
+      where: {
+        scanType: 'keyword',
+        scanKey: { in: keywordKeys },
+        ...(allowed && { platform: { in: allowed } }),
+      },
       select: {
         platform: true,
         scanKey: true,
@@ -1130,12 +1201,15 @@ export class EngageRepository {
    * EngageTrackedAccount.lastCheckedAt bookkeeping field, which only the
    * workflow writes (so a unit advanced by the extension scan path left it stale
    * and the UI showed an old "last scanned" while the cursor was fresh).
-   * Keyed by the caller's original `${platform}:${channelId}`.
+   * Keyed by the caller's original `${platform}:${channelId}`. `platforms` is the
+   * resolved scan allowlist, applied for the same reason as in getKeywordCursors
+   * (a target on a switched-off platform has no upcoming scan to report).
    */
   async getChannelCursors(
     channels: { platform: string; channelId: string }[],
     cadenceMs: number,
-    now: number = Date.now()
+    now: number = Date.now(),
+    platforms?: readonly string[]
   ): Promise<
     Record<string, { lastScannedAt: Date | null; nextScanAt: Date | null }>
   > {
@@ -1143,7 +1217,8 @@ export class EngageRepository {
       'channel',
       channels.map((c) => ({ platform: c.platform, key: c.channelId })),
       cadenceMs,
-      now
+      now,
+      platforms
     );
   }
 
@@ -1157,7 +1232,8 @@ export class EngageRepository {
   async getTrackedCursors(
     accounts: { platform: string; username: string }[],
     cadenceMs: number,
-    now: number = Date.now()
+    now: number = Date.now(),
+    platforms?: readonly string[]
   ): Promise<
     Record<string, { lastScannedAt: Date | null; nextScanAt: Date | null }>
   > {
@@ -1165,7 +1241,8 @@ export class EngageRepository {
       'tracked',
       accounts.map((a) => ({ platform: a.platform, key: a.username })),
       cadenceMs,
-      now
+      now,
+      platforms
     );
   }
 
@@ -1174,21 +1251,37 @@ export class EngageRepository {
    * scan-target tables merged; only the cursor namespace differs. Looks cursors
    * up by the NORMALIZED key, then re-keys the result by the caller's ORIGINAL
    * `${platform}:${key}` so no caller needs a normaliser of its own.
+   * Targets on a platform outside `platforms` (the resolved scan allowlist) are
+   * dropped before the lookup, so they report no cursor at all rather than a
+   * frozen one — see getOrgScanStatus for why a stale cursor must not surface as
+   * an upcoming scan. An absent/empty allowlist applies no gate.
    */
   private async _getTargetCursors(
     scanType: 'channel' | 'tracked',
     targets: { platform: string; key: string }[],
     cadenceMs: number,
-    now: number
+    now: number,
+    platforms?: readonly string[]
   ): Promise<
     Record<string, { lastScannedAt: Date | null; nextScanAt: Date | null }>
   > {
     if (!targets.length) return {};
+    const allowed = platforms?.length
+      ? new Set(platforms.map((p) => p.trim().toLowerCase()).filter(Boolean))
+      : null;
+    const inScope = allowed
+      ? targets.filter((t) => allowed.has(normalizePlatform(t.platform) || 'x'))
+      : targets;
+    if (!inScope.length) return {};
     const norm = (t: { platform: string; key: string }) =>
       normalizeUsername(t.platform ?? 'x', t.key);
-    const keys = Array.from(new Set(targets.map(norm)));
+    const keys = Array.from(new Set(inScope.map(norm)));
     const rows = await this._scanCursor.model.engageScanCursor.findMany({
-      where: { scanType, scanKey: { in: keys } },
+      where: {
+        scanType,
+        scanKey: { in: keys },
+        ...(allowed && { platform: { in: [...allowed] } }),
+      },
       select: {
         platform: true,
         scanKey: true,
@@ -1211,7 +1304,7 @@ export class EngageRepository {
       string,
       { lastScannedAt: Date | null; nextScanAt: Date | null }
     > = {};
-    for (const t of targets) {
+    for (const t of inScope) {
       const platform = t.platform ?? 'x';
       const hit = byNorm.get(`${platform}:${norm(t)}`);
       if (hit) out[`${platform}:${t.key}`] = hit;

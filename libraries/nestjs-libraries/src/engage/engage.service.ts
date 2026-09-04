@@ -111,6 +111,7 @@ import {
   SaveDraftDto,
   GenerateReferencePostDto,
   resolveSourceAdaptation,
+  resolveThreadPostCount,
   ScoreStatsDto,
   SendReplyDto,
   UpdateKeywordDto,
@@ -212,6 +213,14 @@ export interface ReferencePostResult {
    * shorter than it was written, instead of silently showing fewer posts.
    */
   droppedParts?: number;
+  /**
+   * How many posts were asked for (`maxThreadParts`, directly comparable to
+   * `parts.length`), present only when `parts` came back shorter than that.
+   * That field is an exact count, so a short chain is an outcome the UI has
+   * to be able to name — whether the model would not write the last post or
+   * the length gate dropped it (see `droppedParts`).
+   */
+  requestedParts?: number;
 }
 
 @Injectable()
@@ -294,9 +303,10 @@ export class EngageService implements OnApplicationBootstrap {
   // ─── Config ───────────────────────────────────────────────────────────────
 
   async getConfig(org: Organization, projectId?: string | null) {
-    const entitlement = await this._entitlementService.getEntitlementSummary(
-      org.id
-    );
+    const [entitlement, scanPlatforms] = await Promise.all([
+      this._entitlementService.getEntitlementSummary(org.id),
+      this._resolveScanPlatforms(),
+    ]);
     const scanIntervalHours = entitlement.limits.scanIntervalHours;
     const cadenceMs = scanIntervalHours * 3_600_000;
     const [config, scanStatus, priorityUsageByPlatform] = await Promise.all([
@@ -309,8 +319,14 @@ export class EngageService implements OnApplicationBootstrap {
         ? this._engageRepository.getOrCreateConfig(org.id, projectId)
         : this._engageRepository.getOrgAggregateConfig(org.id),
       // getOrgScanStatus stays org-scoped (not yet project-aware) — a known,
-      // separately-flagged gap, not a regression introduced here.
-      this._engageRepository.getOrgScanStatus(org.id, scanIntervalHours),
+      // separately-flagged gap, not a regression introduced here. It DOES take
+      // the resolved scan allowlist, so what it reports as pending matches what
+      // the scan loop enumerates (see its own comment).
+      this._engageRepository.getOrgScanStatus(
+        org.id,
+        scanIntervalHours,
+        scanPlatforms
+      ),
       // Org-wide enabled tracked+channels per platform — feeds the per-platform
       // priority-accounts rollup in entitlement.counts.priorityAccounts.
       this._entitlementService.getPriorityAccountsUsageByPlatform(org.id),
@@ -328,7 +344,9 @@ export class EngageService implements OnApplicationBootstrap {
     );
     const kwCursors = await this._engageRepository.getKeywordCursors(
       keywordKeys,
-      cadenceMs
+      cadenceMs,
+      Date.now(),
+      scanPlatforms
     );
     // Decorate each keyword with its per-platform scan cursor times.
     const keywords = config.keywords.map((kw) => {
@@ -349,14 +367,18 @@ export class EngageService implements OnApplicationBootstrap {
           platform: c.platform,
           channelId: c.channelId,
         })),
-        cadenceMs
+        cadenceMs,
+        Date.now(),
+        scanPlatforms
       ),
       this._engageRepository.getTrackedCursors(
         config.trackedAccounts.map((a) => ({
           platform: a.platform,
           username: a.username,
         })),
-        cadenceMs
+        cadenceMs,
+        Date.now(),
+        scanPlatforms
       ),
     ]);
     const monitoredChannels = config.monitoredChannels.map((ch) => {
@@ -533,6 +555,32 @@ export class EngageService implements OnApplicationBootstrap {
    * directly) — mirrors `_scanConfig`'s own never-throws posture elsewhere in
    * this file.
    */
+  /**
+   * The live scan-platform allowlist (settings.operation_plan.allowed_platforms
+   * || ENGAGE_SUPPORTED_PLATFORMS), as EngageScanTasksService resolves it for
+   * unit enumeration. Handed to the scan-status readers so they report the same
+   * set the scan loop actually works on.
+   *
+   * Returns undefined rather than [] when it cannot be resolved (`_scanConfig`
+   * not wired in, or the Settings read threw): the callers treat undefined as
+   * "no platform gate", so a wiring gap degrades to the old, wider reading
+   * instead of silently reporting that nothing is scheduled.
+   */
+  private async _resolveScanPlatforms(): Promise<string[] | undefined> {
+    if (!this._scanConfig?.getSupportedScanPlatforms) return undefined;
+    try {
+      const resolved = await this._scanConfig.getSupportedScanPlatforms();
+      return resolved?.length ? [...resolved] : undefined;
+    } catch (err) {
+      this.logger.warn(
+        `Scan platform resolution failed; reporting scan status ungated: ${
+          (err as Error)?.message ?? err
+        }`
+      );
+      return undefined;
+    }
+  }
+
   private async _getOpportunityTtlDaysConfig(): Promise<OpportunityTtlDays> {
     if (!this._scanConfig) return fallbackOpportunityTtlDaysMap();
     try {
@@ -1353,6 +1401,19 @@ export class EngageService implements OnApplicationBootstrap {
     );
     const wantsThread = !!dto.thread;
     const threadRequested = wantsThread && threadCapable;
+    // How many posts the caller actually asked for. Needed HERE — not just
+    // inside the generator — because `threadSkippedReason` is only honest
+    // when a thread was possible in the first place: `maxThreadParts: 1` is
+    // an explicitly valid request (@Min(1)) for a single post, and under the
+    // exact-count semantics the generator is then TOLD to write one post and
+    // emits no thread instructions at all. Reporting that as a skipped thread
+    // would tell the client the model declined to thread when nobody ever
+    // asked it to.
+    // Keyed off `wantsThread`, NOT `threadRequested`: how many posts the
+    // caller asked for is independent of whether the platform can chain them.
+    // Using the capability-gated flag here would resolve every unsupported
+    // platform to 1 and silently retire `platform_unsupported`.
+    const requestedPosts = wantsThread ? resolveThreadPostCount(dto) : 1;
     if (wantsThread && !threadCapable) {
       this.logger.warn(
         `Thread requested for opportunity ${opportunityId} on ${opportunity.platform}, which cannot publish a native thread; generating a single post instead.`
@@ -1390,6 +1451,9 @@ export class EngageService implements OnApplicationBootstrap {
     // so the caller can surface it rather than silently returning a shorter
     // thread than was asked for.
     let droppedParts = 0;
+    // The count asked for, echoed back only when the chain came up short of
+    // it — see ReferencePostResult.requestedParts.
+    let requestedParts = 0;
     try {
       const result = await this._referencePostService.generate(opportunity, {
         strategy: dto.strategy,
@@ -1403,6 +1467,7 @@ export class EngageService implements OnApplicationBootstrap {
       });
       usages = result.usages;
       droppedParts = result.droppedParts ?? 0;
+      requestedParts = result.requestedParts ?? 0;
       text = result.text;
       // An aborted generation comes back with no parts at all; keep the
       // single-(empty)-post shape the persistence below has always been
@@ -1528,7 +1593,11 @@ export class EngageService implements OnApplicationBootstrap {
       parts,
       thread: parts.length > 1,
       ...(droppedParts ? { droppedParts } : {}),
-      ...(wantsThread && parts.length <= 1
+      ...(requestedParts ? { requestedParts } : {}),
+      // A skip reason answers "you asked for a thread and did not get one".
+      // Neither half of that is true when the request itself resolved to a
+      // single post, so a 1-post request reports no reason at all.
+      ...(wantsThread && parts.length <= 1 && requestedPosts > 1
         ? {
             threadSkippedReason: threadCapable
               ? ('single_post_generated' as const)
@@ -3588,13 +3657,19 @@ export class EngageService implements OnApplicationBootstrap {
     nextRefreshAt: string;
   }> {
     const now = Date.now();
-    const scanIntervalHours =
-      await this._entitlementService.getScanIntervalHours(org.id);
+    const [scanIntervalHours, scanPlatforms] = await Promise.all([
+      this._entitlementService.getScanIntervalHours(org.id),
+      this._resolveScanPlatforms(),
+    ]);
 
     // ── Scan side: per-unit cadence gate (EngageScanCursor) ──────────────────
+    // Allowlist-gated for the same reason the gate exists: a cursor no scan path
+    // enumerates any more is permanently overdue, and counting it here pinned
+    // `scanDue` to true on every visit — the throttle branch was unreachable.
     const scanStatus = await this._engageRepository.getOrgScanStatus(
       org.id,
-      scanIntervalHours
+      scanIntervalHours,
+      scanPlatforms
     );
     // No cursors yet → never scanned → empty feed. The visit kicks the first scan.
     const coldStart = scanStatus.lastScanAt == null;

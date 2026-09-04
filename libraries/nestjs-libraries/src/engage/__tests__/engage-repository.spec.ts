@@ -4284,12 +4284,12 @@ describe('EngageRepository.getOrgScanStatus', () => {
     const st = await repo.getOrgScanStatus('org1');
     expect(st.channel.lastScanAt).toEqual(bScanned); // max of completions
     expect(st.channel.nextScanAt).toEqual(new Date(aStart.getTime() + 24 * H)); // earliest due
-    // Queried exactly this org's subreddit ids.
+    // Queried exactly this org's subreddit ids, under their own platform's arm.
     expect(cursorFindMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
           scanType: 'channel',
-          scanKey: { in: ['a', 'b'] },
+          OR: [{ platform: 'reddit', scanKey: { in: ['a', 'b'] } }],
         }),
       })
     );
@@ -4310,10 +4310,281 @@ describe('EngageRepository.getOrgScanStatus', () => {
       expect.objectContaining({
         where: expect.objectContaining({
           scanType: 'tracked',
-          scanKey: { in: ['openai', 'vercel'] },
+          OR: [{ platform: 'x', scanKey: { in: ['openai', 'vercel'] } }],
         }),
       })
     );
+  });
+
+  // REGRESSION. The author-feed lookup pinned `platform: 'x'`, from back when X
+  // was the only one — so a LinkedIn / dev.to / Medium / Quora / Hacker News
+  // account was configured, enumerated and scanned, yet never appeared in the
+  // status at all. Each platform gets its OWN arm because scan keys are unique
+  // only within a platform, and because normalisation is per-platform: x and
+  // dev.to handles lowercase, LinkedIn's stay verbatim.
+  it('groups author-feed targets by platform instead of pinning x', async () => {
+    const {
+      repo,
+      channelFindMany,
+      trackedFindMany,
+      cursorFindMany,
+      keywordFindMany,
+    } = buildRepo();
+    channelFindMany.mockResolvedValue([
+      { platform: 'reddit', username: 'Programming' },
+    ]);
+    trackedFindMany.mockResolvedValue([
+      { platform: 'x', username: 'OpenAI' },
+      { platform: 'linkedin', username: 'Acme' },
+      { platform: 'devto', username: 'Ben' },
+    ]);
+    keywordFindMany.mockResolvedValue([]);
+    const started = new Date('2026-06-01T00:00:00Z');
+    const scanned = new Date('2026-06-01T00:05:00Z');
+    cursorFindMany.mockImplementation(async ({ where }: any) =>
+      where.scanType === 'tracked'
+        ? [
+            {
+              lastScanStartedAt: started,
+              lastScannedAt: scanned,
+              cooldownUntil: null,
+            },
+          ]
+        : []
+    );
+
+    const st = await repo.getOrgScanStatus('org1');
+
+    const trackedCall = cursorFindMany.mock.calls.find(
+      ([args]: any) => args?.where?.scanType === 'tracked'
+    );
+    expect(trackedCall![0].where.OR).toEqual([
+      { platform: 'x', scanKey: { in: ['openai'] } },
+      { platform: 'linkedin', scanKey: { in: ['Acme'] } },
+      { platform: 'devto', scanKey: { in: ['ben'] } },
+    ]);
+    // The reddit row stays in the channel scope, not folded in with the authors.
+    const channelCall = cursorFindMany.mock.calls.find(
+      ([args]: any) => args?.where?.scanType === 'channel'
+    );
+    expect(channelCall![0].where.OR).toEqual([
+      { platform: 'reddit', scanKey: { in: ['programming'] } },
+    ]);
+    expect(st.tracked.lastScanAt).toEqual(scanned);
+  });
+
+  // The reported set must equal the set the scan loop enumerates. The next four
+  // cover the two axes on which they had drifted apart; either drift strands a
+  // cursor that is counted here but scanned nowhere, and since `nextScanAt`
+  // folds with min(), ONE such cursor pins the aggregate to a permanently
+  // overdue time — which the top-level floor then renders as "due right now" on
+  // every single call, making refreshOnVisit's throttle branch unreachable.
+  const SCANNED_CONFIG = { enabled: true, projectId: { not: null } };
+
+  // REGRESSION (config axis). Keywords/targets used to be read org-wide, which
+  // included the legacy null-project config — excluded from every scan path, so
+  // its cursors froze on the day that exclusion landed.
+  it('reads keywords and targets through the same config filter the scan loop uses', async () => {
+    const {
+      repo,
+      channelFindMany,
+      trackedFindMany,
+      cursorFindMany,
+      keywordFindMany,
+    } = buildRepo();
+    channelFindMany.mockResolvedValue([]);
+    trackedFindMany.mockResolvedValue([]);
+    keywordFindMany.mockResolvedValue([]);
+    cursorFindMany.mockResolvedValue([]);
+
+    await repo.getOrgScanStatus('org1');
+
+    expect(keywordFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          organizationId: 'org1',
+          enabled: true,
+          config: SCANNED_CONFIG,
+        }),
+      })
+    );
+    // Channels and tracked accounts are one query on the merged table, so the
+    // spec's dispatcher hands it to both stubs.
+    expect(trackedFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          organizationId: 'org1',
+          enabled: true,
+          config: SCANNED_CONFIG,
+        }),
+      })
+    );
+  });
+
+  // REGRESSION (platform axis). Keyword units fan out per allowlist platform, so
+  // switching X off (its documented kill switch) leaves every keyword's x cursor
+  // frozen. The lookup used to span all platforms and counted them.
+  it('narrows keyword cursors to the resolved scan allowlist', async () => {
+    const {
+      repo,
+      channelFindMany,
+      trackedFindMany,
+      cursorFindMany,
+      keywordFindMany,
+    } = buildRepo();
+    channelFindMany.mockResolvedValue([]);
+    trackedFindMany.mockResolvedValue([]);
+    keywordFindMany.mockResolvedValue([{ keyword: 'ai' }]);
+    cursorFindMany.mockResolvedValue([]);
+
+    await repo.getOrgScanStatus('org1', 24, ['reddit']);
+
+    expect(cursorFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          scanType: 'keyword',
+          platform: { in: ['reddit'] },
+        }),
+      })
+    );
+  });
+
+  // A target carries its own platform, so there the allowlist filters the
+  // targets before they are grouped into query arms — a platform with nothing
+  // left is not queried at all.
+  it('drops the channel and tracked tracks when their platform is off the allowlist', async () => {
+    const {
+      repo,
+      channelFindMany,
+      trackedFindMany,
+      cursorFindMany,
+      keywordFindMany,
+    } = buildRepo();
+    channelFindMany.mockResolvedValue([{ platform: 'reddit', username: 'a' }]);
+    trackedFindMany.mockResolvedValue([{ platform: 'x', username: 'openai' }]);
+    keywordFindMany.mockResolvedValue([]);
+    cursorFindMany.mockResolvedValue([]);
+
+    const st = await repo.getOrgScanStatus('org1', 24, ['linkedin']);
+
+    expect(st.channel).toEqual({ lastScanAt: null, nextScanAt: null });
+    expect(st.tracked).toEqual({ lastScanAt: null, nextScanAt: null });
+    // Not merely folded away afterwards — never queried at all.
+    expect(cursorFindMany).not.toHaveBeenCalled();
+
+    // A PARTIAL allowlist drops only what falls outside it: same two targets,
+    // allowlist `x` — the reddit channel goes, the x author feed stays.
+    const partial = buildRepo();
+    partial.channelFindMany.mockResolvedValue([
+      { platform: 'reddit', username: 'a' },
+    ]);
+    partial.trackedFindMany.mockResolvedValue([
+      { platform: 'x', username: 'openai' },
+    ]);
+    partial.keywordFindMany.mockResolvedValue([]);
+    partial.cursorFindMany.mockResolvedValue([]);
+
+    await partial.repo.getOrgScanStatus('org1', 24, ['x']);
+
+    expect(
+      partial.cursorFindMany.mock.calls.map(([args]: any) => args.where.scanType)
+    ).toEqual(['tracked']);
+  });
+
+  // A status reader must not narrow to zero because a caller could not resolve
+  // the allowlist (no scan-config service wired in, or the Settings read threw):
+  // an unresolvable gate degrades to the old, wider reading.
+  it('applies no platform gate when the allowlist is absent or empty', async () => {
+    for (const platforms of [undefined, []]) {
+      const {
+        repo,
+        channelFindMany,
+        trackedFindMany,
+        cursorFindMany,
+        keywordFindMany,
+      } = buildRepo();
+      channelFindMany.mockResolvedValue([]);
+      trackedFindMany.mockResolvedValue([]);
+      keywordFindMany.mockResolvedValue([{ keyword: 'ai' }]);
+      cursorFindMany.mockResolvedValue([]);
+
+      await repo.getOrgScanStatus('org1', 24, platforms);
+
+      const kwCall = cursorFindMany.mock.calls.find(
+        ([args]: any) => args?.where?.scanType === 'keyword'
+      );
+      expect(kwCall?.[0].where.platform).toBeUndefined();
+    }
+  });
+
+  // These decorate each keyword / channel / account on /engage/config with its
+  // own cursor row. Same gate as the aggregate above, same reason: a platform
+  // the operator switched off would otherwise show a permanently-overdue "next
+  // scan" for something nothing scans.
+  describe('per-unit cursor decorators — allowlist gate', () => {
+    it('narrows the keyword lookup to the allowlist, and applies none without one', async () => {
+      const { repo, cursorFindMany } = buildRepo();
+      cursorFindMany.mockResolvedValue([]);
+
+      await repo.getKeywordCursors(['ai'], 24 * H, Date.now(), ['reddit']);
+      expect(cursorFindMany).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ platform: { in: ['reddit'] } }),
+        })
+      );
+
+      await repo.getKeywordCursors(['ai'], 24 * H);
+      expect(
+        cursorFindMany.mock.calls.at(-1)![0].where.platform
+      ).toBeUndefined();
+    });
+
+    it('drops a target whose platform is off the allowlist', async () => {
+      const { repo, cursorFindMany } = buildRepo();
+      cursorFindMany.mockResolvedValue([
+        {
+          platform: 'x',
+          scanKey: 'openai',
+          lastScanStartedAt: new Date('2026-06-01T00:00:00Z'),
+          lastScannedAt: new Date('2026-06-01T00:05:00Z'),
+          cooldownUntil: null,
+        },
+      ]);
+
+      const out = await repo.getTrackedCursors(
+        [
+          { platform: 'x', username: 'openai' },
+          { platform: 'linkedin', username: 'Acme' },
+        ],
+        24 * H,
+        Date.now(),
+        ['x']
+      );
+
+      // The LinkedIn account reports no cursor at all rather than a frozen one,
+      // and is gone before the query is built — its key is not even asked for.
+      expect(Object.keys(out)).toEqual(['x:openai']);
+      expect(cursorFindMany).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            scanType: 'tracked',
+            scanKey: { in: ['openai'] },
+            platform: { in: ['x'] },
+          }),
+        })
+      );
+
+      // Nothing left in scope → no query at all, not an empty-result one.
+      const allOut = buildRepo();
+      const empty = await allOut.repo.getTrackedCursors(
+        [{ platform: 'linkedin', username: 'Acme' }],
+        24 * H,
+        Date.now(),
+        ['x']
+      );
+      expect(empty).toEqual({});
+      expect(allOut.cursorFindMany).not.toHaveBeenCalled();
+    });
   });
 
   describe('getOpportunityForReply — status gate (no time-based expiry)', () => {

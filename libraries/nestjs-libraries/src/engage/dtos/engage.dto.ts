@@ -1059,14 +1059,67 @@ export function resolveSourceAdaptation(value?: string): SourceAdaptation {
     : DEFAULT_SOURCE_ADAPTATION;
 }
 
-// Thread ceiling for a generated reference post: follow-up parts BEYOND the
-// anchor, so the longest chain this endpoint can produce is 1 + 5 posts. A
-// ceiling, not a target — the generator is told to use only as many parts as
-// the topic earns. Lives here rather than in engage-reference-post.service.ts
-// because the DTO's own @Max reads it, and that service already imports from
-// this file (the reverse import would be a cycle).
+// Thread length for a generated reference post: how many posts the chain has
+// IN TOTAL, the anchor INCLUDED. `maxThreadParts: 3` is the anchor plus 2
+// follow-ups, 1 is a lone post, and 5 is the longest chain this endpoint can
+// produce.
+//
+// TWO THINGS ABOUT THIS FIELD ARE HISTORICAL, and both used to be true:
+//
+//  - "max" — it is an EXACT count now, not a ceiling. The prompt used to tell
+//    the model to "use only as many parts as the topic earns", which made the
+//    endpoint look broken from outside: 2 and 3 both came back as 2 posts
+//    while 4 and 5 both came back as 5, and nothing in the response explained
+//    why. A caller asking for a 4-post thread wants 4 posts; how long their
+//    thread should be was never this endpoint's call to make.
+//  - "parts" — it counted FOLLOW-UPS beyond the anchor, so the chain was
+//    `1 + this`. That off-by-one is what made the field read as if it did
+//    nothing, since a caller asking for "4" and getting 5 posts looks exactly
+//    like a caller being ignored.
+//
+// The name is kept regardless, and so is the 1-5 range, so nothing an
+// existing client sends starts being rejected. Be clear about what that does
+// and does not buy: every such caller's OUTPUT still changes shape, because
+// the same number now means one post fewer and is honoured exactly.
+//
+//   thread:true, no count  →  was 2-4 posts (ceiling 4, model chose), now always 3
+//   maxThreadParts: 2      →  was up to 3 posts, now exactly 2
+//   maxThreadParts: 5      →  was up to 6 posts, now exactly 5
+//
+// Nothing in this monorepo sends the field except this endpoint's own tests,
+// so the exposure is external integrators. See EngageReferencePostService for
+// how the count is enforced.
+//
+// Lives here rather than in engage-reference-post.service.ts because the DTO's
+// own @Max reads it, and that service already imports from this file (the
+// reverse import would be a cycle).
 export const REFERENCE_POST_MAX_THREAD_PARTS = 5;
 export const DEFAULT_REFERENCE_POST_THREAD_PARTS = 3;
+
+/**
+ * How many posts to write for the chain, anchor included.
+ *
+ * A named resolver rather than a bare `?? DEFAULT` inside the generator so
+ * that the default and the clamp sit in the same file as the `@Min`/`@Max`
+ * they have to agree with — split across two files, a bound could be widened
+ * on one side only. It has a single production caller today
+ * (EngageReferencePostService.generate); that is the point, not an oversight.
+ *
+ * Clamped into [1, REFERENCE_POST_MAX_THREAD_PARTS] because internal callers
+ * bypass the DTO's own @Min/@Max, and an unclamped value would set the
+ * model's token budget as well as its instructions.
+ */
+export function resolveThreadPostCount(input: {
+  maxThreadParts?: number;
+}): number {
+  return Math.min(
+    Math.max(
+      Math.floor(input.maxThreadParts ?? DEFAULT_REFERENCE_POST_THREAD_PARTS),
+      1
+    ),
+    REFERENCE_POST_MAX_THREAD_PARTS
+  );
+}
 
 // ─── Reference-Post Generation (docs/engage/reference-post-generation.md) ─────
 // Generates AND persists an ORIGINAL post inspired by an opportunity — not a
@@ -1142,11 +1195,19 @@ export class GenerateReferencePostDto {
   @IsBoolean()
   thread?: boolean;
 
-  // How many FOLLOW-UP parts beyond the anchor, so the full chain is
-  // 1 + this. Same semantics as the operation plan's own
-  // `operation_plan.max_thread_parts` ceiling. Read only when `thread` is
-  // true; a model that decides fewer parts serve the topic better is not
-  // padded up to it.
+  // How many posts the chain has IN TOTAL, the anchor INCLUDED — `3` is the
+  // anchor plus 2 follow-ups, `1` is simply a single post. Default 3. Read
+  // only when `thread` is true.
+  //
+  // DESPITE THE NAME, an EXACT count rather than a maximum, and a count of
+  // POSTS rather than of follow-ups (see the constants above for why both
+  // halves of the name are historical). The generator is instructed to write
+  // exactly this many posts and is retried once if it writes fewer. Two
+  // things can still leave the chain short: a model that will not write the
+  // last post even after that retry, and a too-long tail part dropped by the
+  // length gate. The response then carries `requestedParts` alongside the
+  // shorter `parts`, so a client can say the thread came up short instead of
+  // silently showing a thread nobody asked for.
   @IsOptional()
   @IsInt()
   @Min(1)

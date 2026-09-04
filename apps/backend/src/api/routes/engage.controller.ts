@@ -987,12 +987,12 @@ export class EngageController {
 
   @ApiOperation({
     summary:
-      'Generate AND save an AI-written ORIGINAL post inspired by an opportunity, via SSE (text/event-stream) — not a reply. Always persists as an account-less DRAFT Post; `sourceAdaptation` (PRESERVE_STRUCTURE | REFRAME | FRESH_ANGLE, default REFRAME) sets how closely it may follow the reference, and `thread: true` produces a native thread (anchor + parentPostId-chained follow-ups) where the platform supports one.',
+      'Generate AND save an AI-written ORIGINAL post inspired by an opportunity, via SSE (text/event-stream) — not a reply. Always persists as an account-less DRAFT Post; `sourceAdaptation` (PRESERVE_STRUCTURE | REFRAME | FRESH_ANGLE, default REFRAME) sets how closely it may follow the reference, and `thread: true` produces a native thread (anchor + parentPostId-chained follow-ups) where the platform supports one. `maxThreadParts` sets how many posts that chain has IN TOTAL, the anchor INCLUDED (1-5, default 3) — despite the name it is an EXACT count of POSTS, not a maximum and not a count of follow-ups.',
   })
   @ApiResponse({
     status: 200,
     description:
-      'SSE stream ending with a data frame carrying {text, postId, parts, thread, threadSkippedReason?} then [DONE]. `parts` is one entry per post in the chain (a single-element array unless a thread was produced) and `thread` reports whether one actually was — a thread requested on a platform that cannot chain one (medium/quora/devto) degrades to a single post with threadSkippedReason=platform_unsupported. A thread whose tail overruns the platform character ceiling is delivered truncated to its valid prefix, with `droppedParts` counting what was discarded, rather than failing the whole generation. Failures (opportunity not found, generation failed, too similar to the reference, engage_insufficient_credits) end the stream with a typed error frame instead; the untyped `generation_failed` frame also carries a diagnostic `reason` string.',
+      'SSE stream ending with a data frame carrying {text, postId, parts, thread, threadSkippedReason?} then [DONE]. `parts` is one entry per post in the chain (a single-element array unless a thread was produced) and `thread` reports whether one actually was — a thread requested on a platform that cannot chain one (medium/quora/devto) degrades to a single post with threadSkippedReason=platform_unsupported. A thread whose tail overruns the platform character ceiling is delivered truncated to its valid prefix, with `droppedParts` counting what was discarded, rather than failing the whole generation. `requestedParts` appears whenever `parts` is shorter than the `maxThreadParts` asked for — either because a tail part was dropped for length, or because the model still wrote fewer posts after its corrective retry. Failures (opportunity not found, generation failed, too similar to the reference, engage_insufficient_credits) end the stream with a typed error frame instead; the untyped `generation_failed` frame also carries a diagnostic `reason` string.',
   })
   @ApiResponse({ status: 404, description: 'Opportunity not found' })
   @ApiResponse({ status: 429, description: 'Rate limit exceeded (20/hour)' })
@@ -1043,6 +1043,12 @@ export class EngageController {
             // the client has to be able to say so.
             ...(result.droppedParts
               ? { droppedParts: result.droppedParts }
+              : {}),
+            // Absent unless the chain came back shorter than
+            // `maxThreadParts` asked for — an exact count the generator can
+            // still undershoot.
+            ...(result.requestedParts
+              ? { requestedParts: result.requestedParts }
               : {}),
           })}\n\n`
         );

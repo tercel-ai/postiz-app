@@ -20,9 +20,8 @@ import {
   buildMandatoryBrandBlock,
 } from '@gitroom/nestjs-libraries/engage/engage-brand-instruction';
 import {
-  DEFAULT_REFERENCE_POST_THREAD_PARTS,
-  REFERENCE_POST_MAX_THREAD_PARTS,
   resolveSourceAdaptation,
+  resolveThreadPostCount,
   SourceAdaptation,
   VALID_STRATEGIES,
 } from '@gitroom/nestjs-libraries/engage/dtos/engage.dto';
@@ -119,6 +118,15 @@ export interface ReferencePostGenerationResult {
   // path. `parts` is already the truncated chain; this exists so the caller
   // can TELL the user their thread came back shorter than it was written.
   droppedParts?: number;
+  // How many posts were ASKED for (`maxThreadParts`, so it compares directly
+  // against `parts.length`), present only when the chain came back shorter.
+  // That count is exact, but two things can still
+  // undershoot it: a model that writes fewer posts even after the corrective
+  // retry, and a too-long tail part dropped by the length gate. Neither is
+  // worth throwing away an already-billed generation over, so the short chain
+  // ships — and this field is what lets the caller say it is short rather
+  // than quietly handing back a thread nobody asked for.
+  requestedParts?: number;
 }
 
 /**
@@ -145,7 +153,13 @@ export interface ReferencePostGenerateOptions {
    * be a second, driftable copy of that rule.
    */
   thread?: boolean;
-  /** Follow-up parts beyond the anchor; clamped to [1, REFERENCE_POST_MAX_THREAD_PARTS]. */
+  /**
+   * TOTAL posts in the chain, the anchor INCLUDED. Read only when `thread` is
+   * set, and — despite the name, which is kept for the clients already
+   * sending it — an EXACT count rather than a ceiling. Clamped to
+   * [1, REFERENCE_POST_MAX_THREAD_PARTS] by resolveThreadPostCount, since
+   * internal callers bypass the DTO's own bounds.
+   */
   maxThreadParts?: number;
   signal?: AbortSignal;
 }
@@ -179,12 +193,26 @@ export class TooSimilarToReferenceError extends ReferencePostGenerationError {
   }
 }
 
-// 1 initial attempt + up to one corrective retry EACH for the similarity gate
-// and the length ceiling — see reference-post-generation.md §6 step 2. Matches
-// engage-draft.service.ts, which also budgets 3 and tracks its two correctives
-// independently: the two problems are unrelated, so one must not be able to
-// consume the other's only retry.
-const MAX_ATTEMPTS = 3;
+// 1 initial attempt + ONE corrective retry, total — deliberately tighter than
+// engage-draft.service.ts's 3, because every attempt is a paid model call and
+// this endpoint bills per token.
+//
+// The retry is SHARED by all three correctives (similarity, exact part count,
+// length ceiling), so whichever problem surfaces first spends it and the
+// others get no second chance. That is a real cost and it is accepted: of the
+// three, only similarity hard-fails without its retry — a short part count
+// ships the shorter chain with `requestedParts` set, and an over-long tail is
+// truncated to its valid prefix, both of which still deliver a usable post.
+//
+// `canRetry` below keys off the attempt index, so no corrective is ever set
+// on an attempt that will not run — that part stays correct at any value.
+// RAISING THIS ABOVE 2 IS NOT: `promptWithCorrective` appends its corrective
+// to the BASE prompt, which is only sound while at most one corrective can
+// ever be issued. At 3+, a second corrective silently discards the first —
+// and a count or length retry dropping the anti-plagiarism corrective hands
+// the model back the exact prompt it already copied under, with the
+// similarity retry spent. Make the correctives accumulate before raising it.
+const MAX_ATTEMPTS = 2;
 
 // Delimiter the model puts between thread parts. A bracketed sentinel rather
 // than the usual `---`/`1/5` conventions precisely because those DO occur
@@ -234,19 +262,13 @@ export class EngageReferencePostService {
     const limit =
       outputLength ??
       (platform === 'reddit' ? REDDIT_TARGET_CHAR_LIMIT : X_WEIGHTED_CHAR_LIMIT);
-    // Follow-up parts beyond the anchor, so the chain is 1 + this. Clamped
-    // here as well as at the DTO: internal callers bypass the DTO, and an
-    // unclamped value would set the model's token budget below.
-    const maxThreadParts = options.thread
-      ? Math.min(
-          Math.max(
-            Math.floor(options.maxThreadParts ?? DEFAULT_REFERENCE_POST_THREAD_PARTS),
-            1
-          ),
-          REFERENCE_POST_MAX_THREAD_PARTS
-        )
-      : 0;
-    const maxParts = maxThreadParts + 1;
+    // Total posts in the chain — 1 when no thread was asked for, so every
+    // `threadPosts > 1` below reads as "this is a thread". Named for what it
+    // holds rather than after the option it comes from, since `maxThreadParts`
+    // is neither a max nor a count of parts any more. Clamped here as well as
+    // at the DTO: internal callers bypass the DTO, and an unclamped value
+    // would set the model's token budget as well as its instructions.
+    const threadPosts = options.thread ? resolveThreadPostCount(options) : 1;
     const requiredMentions = requiresMention(brandStrength, mentions);
     const systemPrompt = this._buildSystemPrompt(
       platform,
@@ -255,18 +277,30 @@ export class EngageReferencePostService {
       brandStrength,
       mentions,
       limit,
-      maxThreadParts
+      threadPosts
     );
     const userPrompt = this._buildUserPrompt(
       reference,
-      maxThreadParts,
+      threadPosts,
       platform,
       limit
     );
-    const maxTokens = MAX_TOKENS_PER_POST * maxParts;
+    const maxTokens = MAX_TOKENS_PER_POST * threadPosts;
 
     const usages: ReferencePostUsage[] = [];
     let attemptSystemPrompt = systemPrompt;
+    // Correctives ACCUMULATE; they do not replace one another. Each is
+    // written for a different failure and stays true for the rest of the
+    // generation, so rebuilding from `systemPrompt` alone was actively
+    // harmful: a similarity corrective was dropped the moment a later attempt
+    // came up short on posts or long on characters, handing the model back
+    // the very prompt it had already plagiarised under — with its similarity
+    // retry now spent, so the next copy failed the whole (already-billed)
+    // generation outright.
+    // Exactly one corrective is ever issued (the shared retry allows a single
+    // `continue`), so it is simply appended to the base prompt.
+    const promptWithCorrective = (corrective: string) =>
+      `${systemPrompt}\n\n${corrective}`;
     // Independent budgets, mirroring engage-draft.service.ts's own
     // lengthRetryUsed / mentionRetryUsed pair. Sharing one attempt counter
     // meant a similarity retry spent the ONLY chance a later length overrun
@@ -275,8 +309,19 @@ export class EngageReferencePostService {
     // failed the whole generation on its very first occurrence.
     let similarityRetryUsed = false;
     let lengthRetryUsed = false;
+    let partCountRetryUsed = false;
 
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+      // A corrective may only be issued when its own retry is unspent AND
+      // there is a further attempt to actually run it in. The second half is
+      // not redundant: without it, a corrective set on the FINAL attempt
+      // `continue`d into nothing — the loop simply ended and fell through to
+      // the throw after it, reporting that line's error (historically
+      // "too similar") no matter which problem was really left unfixed, after
+      // billing the caller for every attempt. Keying off the attempt index
+      // instead of a separate counter keeps this correct at any MAX_ATTEMPTS.
+      const canRetry = (retryUsed: boolean) =>
+        !retryUsed && attempt < MAX_ATTEMPTS - 1;
       if (signal?.aborted) return { text: '', parts: [], usages };
 
       let raw: string;
@@ -304,7 +349,7 @@ export class EngageReferencePostService {
       }
       if (usage) usages.push(usage);
 
-      const parts = this._splitThreadParts(raw, maxParts);
+      const parts = this._splitThreadParts(raw, threadPosts);
       // Both gates below judge the WHOLE post — a thread that scatters the
       // reference's own sentences across its parts is exactly as much of a
       // copy as one that reproduces them in a single post, and a brand
@@ -326,10 +371,10 @@ export class EngageReferencePostService {
           `Reference-post draft too similar to source (overlap=${similarity.overlapRatio.toFixed(
             2
           )}, verbatimRun=${similarity.hasLongVerbatimRun}); ${
-            similarityRetryUsed ? 'no retries left' : 'retrying'
+            canRetry(similarityRetryUsed) ? 'retrying' : 'no retries left'
           }.`
         );
-        if (similarityRetryUsed) {
+        if (!canRetry(similarityRetryUsed)) {
           throw new TooSimilarToReferenceError(usages);
         }
         similarityRetryUsed = true;
@@ -337,14 +382,45 @@ export class EngageReferencePostService {
         // contradicting the adaptation the caller asked for: telling a
         // PRESERVE_STRUCTURE request to "keep only the topic" would silently
         // turn it into a FRESH_ANGLE one on the retry.
-        attemptSystemPrompt = `${systemPrompt}
-
-Your previous draft reused too much of the reference post's own wording (shared phrases and sentence structure). Rewrite it with entirely new phrasing of your own. ${
+        attemptSystemPrompt = promptWithCorrective(`Your previous draft reused too much of the reference post's own wording (shared phrases and sentence structure). Rewrite it with entirely new phrasing of your own. ${
           sourceAdaptation === 'PRESERVE_STRUCTURE'
             ? 'You may still follow the same order of ideas, but not one of its sentences or distinctive phrases may survive — re-express every beat from scratch.'
             : 'Keep only the topic and general angle from the reference, and do not reuse any of its sentences or distinctive phrases.'
-        } The hard length limit stated above still applies to the rewrite — reaching for new phrasing is not a reason to run longer.`;
+        } The hard length limit stated above still applies to the rewrite — reaching for new phrasing is not a reason to run longer.`);
         continue;
+      }
+
+      // Exact part count. _splitThreadParts has already truncated an OVER-long
+      // chain, so the only way to be wrong here is SHORT: the model deciding a
+      // 5-post thread has said everything it has to say in 3. That used to be
+      // allowed — `maxThreadParts` was a ceiling and the prompt told the model
+      // to use only as many parts as the topic earned — which made the count a
+      // caller passed look like it did nothing. It gets its own corrective,
+      // run before the length gate because a rewrite replaces the text the
+      // length gate would have been checking.
+      if (threadPosts > 1 && parts.length < threadPosts) {
+        if (canRetry(partCountRetryUsed)) {
+          partCountRetryUsed = true;
+          this.logger.warn(
+            `Reference-post thread came back as ${parts.length} of the ${threadPosts} posts requested; retrying with a part-count corrective.`
+          );
+          // Says WHERE the extra posts come from. Told only "write 5 posts",
+          // a model that already considers the topic finished pads with
+          // restatement — the exact failure the old "never pad" wording was
+          // written to prevent. Splitting existing material finer is the way
+          // to hit the count without inventing filler.
+          attemptSystemPrompt = promptWithCorrective(`Your previous draft was only ${parts.length} post(s). This thread must be EXACTLY ${threadPosts} posts, separated by ${THREAD_PART_SEPARATOR}. Do not pad with restatement, filler, or a summary post: go back to the material and break it down further — more concrete steps, examples, caveats, or specifics — so that each of the ${threadPosts} posts carries something the others do not. The hard length limit stated above still applies to every post.`);
+          continue;
+        }
+        // No retry available — either it was already spent on this problem,
+        // or another corrective took the shared budget first. The draft
+        // itself is fine: a coherent, already-billed thread that simply runs
+        // shorter than asked. Ship it and report the shortfall
+        // (requestedParts below) rather than failing the generation over a
+        // post that would have been filler anyway.
+        this.logger.warn(
+          `Reference-post thread stayed at ${parts.length} of the ${threadPosts} posts requested with no retry left; delivering the shorter thread.`
+        );
       }
 
       if (missingMention) {
@@ -360,7 +436,12 @@ Your previous draft reused too much of the reference post's own wording (shared 
 
       const overrun = this._findOverLengthPart(platform, parts, outputLength);
       if (!overrun) {
-        return { text, parts, usages };
+        return {
+          text,
+          parts,
+          usages,
+          ...(parts.length < threadPosts ? { requestedParts: threadPosts } : {}),
+        };
       }
 
       // Length is retryable, exactly like similarity. The system prompt states
@@ -368,7 +449,7 @@ Your previous draft reused too much of the reference post's own wording (shared 
       // across a four-post thread is four independent chances to overshoot,
       // and failing outright threw away a complete, already-billed draft over
       // a single long part.
-      if (!lengthRetryUsed) {
+      if (canRetry(lengthRetryUsed)) {
         lengthRetryUsed = true;
         this.logger.warn(
           `Reference-post draft exceeded the platform ceiling (${overrun.message}); retrying with a shortening corrective.`
@@ -377,13 +458,11 @@ Your previous draft reused too much of the reference post's own wording (shared 
         // strips spaces after punctuation and mashes words together to squeeze
         // under the count, which passes the check and reads terribly. "Do not
         // truncate mid-thought" is the same guard the reply path uses.
-        attemptSystemPrompt = `${systemPrompt}
-
-Your previous draft was too long: ${overrun.message} Rewrite it so EVERY post independently fits the platform constraint stated above, with room to spare. Do not truncate mid-thought. Cut or condense actual content — never compress by removing spaces, dropping punctuation, or abbreviating words. ${
-          maxThreadParts
-            ? 'Prefer making a post say less over spilling its overflow into an extra part.'
+        attemptSystemPrompt = promptWithCorrective(`Your previous draft was too long: ${overrun.message} Rewrite it so EVERY post independently fits the platform constraint stated above, with room to spare. Do not truncate mid-thought. Cut or condense actual content — never compress by removing spaces, dropping punctuation, or abbreviating words. ${
+          threadPosts > 1
+            ? `Keep the thread at EXACTLY ${threadPosts} posts — make a post say less rather than merging two posts or spilling overflow into an extra one.`
             : 'Keep it to a single post.'
-        }`;
+        }`);
         continue;
       }
 
@@ -403,6 +482,10 @@ Your previous draft was too long: ${overrun.message} Rewrite it so EVERY post in
           parts: kept,
           usages,
           droppedParts: parts.length - kept.length,
+          // Always set on this path: `kept` is a strict prefix, so it is
+          // shorter than the chain that was generated and therefore shorter
+          // than the count asked for.
+          requestedParts: threadPosts,
         };
       }
       throw new ReferencePostGenerationError(
@@ -412,8 +495,16 @@ Your previous draft was too long: ${overrun.message} Rewrite it so EVERY post in
       );
     }
 
-    // Unreachable — every path in the loop above returns or throws.
-    throw new TooSimilarToReferenceError(usages);
+    // Unreachable: `canRetry` is false on the final attempt, so every gate
+    // above takes its terminal branch (return, ship-short, truncate, or
+    // throw) rather than continuing. Kept as a defensive backstop, and
+    // deliberately NOT TooSimilarToReferenceError — naming one specific
+    // failure here is what made the old fallthrough misreport a length
+    // problem as plagiarism.
+    throw new ReferencePostGenerationError(
+      'Reference-post generation exhausted its attempt budget without reaching a terminal outcome.',
+      usages
+    );
   }
 
   /**
@@ -494,7 +585,7 @@ Your previous draft was too long: ${overrun.message} Rewrite it so EVERY post in
   private _describeLengthConstraint(
     platform: string,
     limit: number,
-    maxThreadParts: number
+    threadPosts: number
   ): { charLimit: string; lengthScope: string } {
     const SAFETY_MARGIN = 0.85;
     const marginTarget = Math.round(limit * SAFETY_MARGIN);
@@ -505,7 +596,7 @@ Your previous draft was too long: ${overrun.message} Rewrite it so EVERY post in
           : platform === 'reddit'
             ? `under ${marginTarget} characters (a firm limit; aim a little under, never over)`
             : `up to ${marginTarget} characters`,
-      lengthScope: maxThreadParts ? 'EACH post of the thread' : 'the post',
+      lengthScope: threadPosts > 1 ? 'EACH post of the thread' : 'the post',
     };
   }
 
@@ -516,7 +607,7 @@ Your previous draft was too long: ${overrun.message} Rewrite it so EVERY post in
     brandStrength: number,
     mentions: string[] | undefined,
     limit: number,
-    maxThreadParts: number
+    threadPosts: number
   ): string {
     // The DTO's @IsIn(VALID_STRATEGIES) already rejects anything else at the
     // controller boundary; this fallback only covers internal callers that
@@ -536,26 +627,28 @@ Your previous draft was too long: ${overrun.message} Rewrite it so EVERY post in
     const mandatoryBrandBlock = requiredMentions.length
       ? `\n${buildMandatoryBrandBlock(requiredMentions, 'post')}\n`
       : '';
-    const { charLimit } = this._describeLengthConstraint(
+    const { charLimit, lengthScope } = this._describeLengthConstraint(
       platform,
       limit,
-      maxThreadParts
-    );
-    const { lengthScope } = this._describeLengthConstraint(
-      platform,
-      limit,
-      maxThreadParts
+      threadPosts
     );
     const brandReminder = requiredMentions.length
       ? ` and must name ${requiredMentions.map((m) => `"${m}"`).join(' or ')}`
       : '';
-    const threadBlock = maxThreadParts
-      ? `
-Thread: write this as a native ${platform} thread — a first (anchor) post plus up to ${maxThreadParts} follow-up posts that publish as a reply chain beneath it, ${
-          maxThreadParts + 1
-        } posts at most in total. Separate every post with a line containing exactly ${THREAD_PART_SEPARATOR} and nothing else. Use only as many follow-ups as the topic genuinely earns — never pad to reach the maximum, and every part must add something the previous ones did not. The anchor has to stand on its own as a hook, and EACH post — anchor and follow-ups alike — must independently fit the length constraint stated at the top; a thread is not a licence to spend more characters per post.
+    // EXACTLY n, not "up to n". The instruction that used to live here ("use
+    // only as many follow-ups as the topic genuinely earns — never pad")
+    // handed the length of the thread to the model, so the number the caller
+    // passed only ever set an unreachable ceiling. Padding is still forbidden
+    // — but the fix for "this topic does not fill 5 posts" is now to cut the
+    // material finer, not to return 2.
+    const threadBlock =
+      threadPosts > 1
+        ? `
+Thread: write this as a native ${platform} thread of EXACTLY ${threadPosts} posts — a first (anchor) post plus exactly ${
+            threadPosts - 1
+          } follow-up posts that publish as a reply chain beneath it. Not more, not fewer. Separate every post with a line containing exactly ${THREAD_PART_SEPARATOR} and nothing else. Every post must carry something the others do not: to reach ${threadPosts}, break the material down further — separate steps, examples, caveats, specifics — rather than padding with restatement, filler, or a summary post. The anchor has to stand on its own as a hook, and EACH post — anchor and follow-ups alike — must independently fit the length constraint stated at the top; a thread is not a licence to spend more characters per post.
 `
-      : '';
+        : '';
     // The blanket do-not-copy clause names STRUCTURE among the things not to
     // reuse, which flatly contradicts a PRESERVE_STRUCTURE request — the
     // model would be told to keep the shape and to drop it in the same
@@ -566,9 +659,12 @@ Thread: write this as a native ${platform} thread — a first (anchor) post plus
       sourceAdaptation === 'PRESERVE_STRUCTURE'
         ? "Hard requirement — do not copy: write a genuinely original post in your own words. Do not paraphrase-copy, closely reword, or reuse the reference's sentences or distinctive phrases. Following its structure is required of you above; that covers the ORDER of its ideas ONLY, never its wording. Reusing another person's wording is a copyright problem for the person publishing this post, not just a style issue."
         : "Hard requirement — do not copy: write a genuinely original post in your own words. Do not paraphrase-copy, closely reword, or reuse the reference's sentences, distinctive phrases, or structure. Reusing another person's wording is a copyright problem for the person publishing this post, not just a style issue.";
-    const outputInstruction = maxThreadParts
-      ? `Only output the post text, with ${THREAD_PART_SEPARATOR} between posts — no preface, no numbering like "1/5", no meta-commentary, no quotation of the reference.`
-      : 'Only output the post text — no preface, no meta-commentary, no quotation of the reference.';
+    const outputInstruction =
+      threadPosts > 1
+        ? `Only output the post text, with ${THREAD_PART_SEPARATOR} between posts — exactly ${
+            threadPosts - 1
+          } separators for ${threadPosts} posts, and no preface, no numbering like "1/${threadPosts}", no meta-commentary, no quotation of the reference.`
+        : 'Only output the post text — no preface, no meta-commentary, no quotation of the reference.';
 
     // Length is stated FIRST, restated mid-prompt, and repeated last — the same
     // head/tail sandwich engage-draft.service.ts uses, because it is the one
@@ -578,7 +674,11 @@ Thread: write this as a native ${platform} thread — a first (anchor) post plus
     // where an instruction gets lost.
     return `You are a social media copywriter. Write an ORIGINAL ${platform} post INSPIRED BY a reference post — you are not replying to it, and the reference's author will never see this post.
 
-HARD LENGTH LIMIT — THIS OUTRANKS EVERY OTHER INSTRUCTION BELOW: keep ${lengthScope} ${charLimit}. If the strategy, the thread length, the brand mention, or finishing a thought would push a post past it, cut the content instead. A post that overruns is thrown away entirely, so a shorter post that fits always beats a better one that does not.
+HARD LENGTH LIMIT — THIS OUTRANKS EVERY OTHER INSTRUCTION BELOW: keep ${lengthScope} ${charLimit}. If the strategy, the brand mention, or finishing a thought would push a post past it, cut the content instead${
+      threadPosts > 1
+        ? ' — cut what a post SAYS, never the number of posts, which is fixed below'
+        : ''
+    }. A post that overruns is thrown away entirely, so a shorter post that fits always beats a better one that does not.
 
 ${strategyInstruction}
 Relationship to the reference: ${adaptationInstruction}
@@ -598,14 +698,14 @@ IMPORTANT: ${lengthScope} must stay ${charLimit}${brandReminder}. Check the leng
 
   private _buildUserPrompt(
     reference: ReferencePostFields,
-    maxThreadParts: number,
+    threadPosts: number,
     platform: string,
     limit: number
   ): string {
     const { charLimit, lengthScope } = this._describeLengthConstraint(
       platform,
       limit,
-      maxThreadParts
+      threadPosts
     );
     // The user message is the LAST thing the model reads before answering, so
     // the length rule is repeated here as well as at both ends of the system
@@ -614,7 +714,7 @@ IMPORTANT: ${lengthScope} must stay ${charLimit}${brandReminder}. Check the leng
     return `${buildOriginalPostXml(reference)}
 
 Write a new, original ${
-      maxThreadParts ? 'thread' : 'post'
+      threadPosts > 1 ? `thread of exactly ${threadPosts} posts` : 'post'
     } inspired by this one, following the relationship to the reference stated above. Do not reply to it and do not reword it — write something new.
 
 Length is the hard constraint: keep ${lengthScope} ${charLimit}, regardless of how long the reference post above is.`;
