@@ -1046,6 +1046,26 @@ export class EngageService implements OnApplicationBootstrap {
   }
 
   /**
+   * The extension reporting that the PLATFORM refuses replies on this post —
+   * comments turned off, thread locked, responses closed.
+   *
+   * Straight through to the repository, which owns the entitlement check and
+   * both writes. See markOpportunityRepliesDisabled for why this one stamps a
+   * globally-shared row when an unconfirmed target-gone report may not.
+   */
+  async markOpportunityRepliesDisabled(
+    org: Organization,
+    id: string,
+    reason: string
+  ) {
+    return this._engageRepository.markOpportunityRepliesDisabled(
+      org.id,
+      id,
+      reason
+    );
+  }
+
+  /**
    * The extension reporting a send that fired but was never confirmed, so the
    * record is closed rather than re-offered. See closeUnconfirmedReply for why
    * closing beats leaving it queued.

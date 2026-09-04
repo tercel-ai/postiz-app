@@ -2014,6 +2014,12 @@ export class EngageRepository {
       createdAt,
       updatedAt: opportunity.updatedAt,
       deletedAt: opportunity.deletedAt,
+      // Returned so the feed can say WHY a post it is still showing never gets
+      // an automatic reply. The row deliberately stays visible (that is the
+      // whole difference from deletedAt — see the column's note in schema.prisma),
+      // and without this the card would look identical to one that is simply
+      // waiting its turn.
+      repliesDisabledAt: opportunity.repliesDisabledAt,
       // ── Per-org fields (EngageOpportunityState) ───────────────────────────
       status,
       bookmarked,
@@ -2164,7 +2170,18 @@ export class EngageRepository {
       // closes those queued replies outright. Without the filter, though, any
       // reply that gets stamped by some other route — the admin sweep, a
       // partial failure — would keep looping.
-      opportunity: { platform, externalPostUrl: { not: '' }, deletedAt: null },
+      // `repliesDisabledAt` is the third cause with the same shape: the address
+      // resolves and the post is alive, but the platform does not accept
+      // replies on it (comments turned off, thread locked, responses closed).
+      // Same guardrail role as `deletedAt` above — markOpportunityRepliesDisabled
+      // already closes the queued replies, this stops any that some other route
+      // leaves behind from being handed out forever.
+      opportunity: {
+        platform,
+        externalPostUrl: { not: '' },
+        deletedAt: null,
+        repliesDisabledAt: null,
+      },
       post: {
         state: 'QUEUE',
         deletedAt: null,
@@ -2277,6 +2294,16 @@ export class EngageRepository {
         }),
         opportunity: {
           deletedAt: null,
+          // A post whose replies the platform has turned off, for the same
+          // reason the empty address below is excluded here rather than at send
+          // time: drafting is where the money goes. Without this, every poll
+          // pays an LLM to write a reply into a box that does not exist, and
+          // the only thing that learns anything is the failed attempt.
+          //
+          // Cross-org by design. The write is on the shared opportunity row, so
+          // one org's poster discovering that comments are off spares every
+          // other org the same wasted generation.
+          repliesDisabledAt: null,
           platform,
           // Drafting is where the money is spent, so an address that cannot be
           // replied to has to be excluded HERE, not at send time — otherwise
@@ -2362,6 +2389,9 @@ export class EngageRepository {
         }),
         opportunity: {
           deletedAt: null,
+          // Mirrors pickAutoReplyCandidates — see the note on the disagreement
+          // this pair exists to prevent, immediately below.
+          repliesDisabledAt: null,
           platform,
           // Mirrors pickAutoReplyCandidates. Without it this reports work the
           // pick will never hand out, which is precisely the disagreement the
@@ -3164,6 +3194,97 @@ export class EngageRepository {
       // unconfirmed report closes replies without retiring anything, and a
       // caller told otherwise would have no way to tell the two apart.
       return { retired: confirmed, repliesClosed: closed.count };
+    });
+  }
+
+  /**
+   * Mark a post the PLATFORM itself refuses replies on, and close the caller's
+   * replies parked against it.
+   *
+   * The failure this closes is the one target-gone does not: the post is alive,
+   * its address resolves, and every read of the page succeeds — but the reply
+   * box does not exist, because the author turned comments off, locked the
+   * thread, or closed responses. Reported as an ordinary failure it looked like
+   * markup drift worth retrying, so the same un-repliable post was drafted
+   * against and handed out on every poll, each round paying for one LLM
+   * generation to produce a reply nothing could accept.
+   *
+   * WHY THIS IS A GLOBAL WRITE, unlike an unconfirmed target-gone report.
+   * "Comments are off on this post" is a property of the POST: every org that
+   * scanned it sees the same closed box, so one org's poster discovering it
+   * spares all the others the same wasted generation. Contrast the refusals
+   * target-gone grades as unconfirmed — a protected account, a private
+   * community, an author who blocked one login — which are true of a SESSION
+   * and would be a lie if written globally.
+   *
+   * WHY NOT `deletedAt`, given both are written once and never cleared:
+   * deletedAt is filtered by every engage read (the feed, keyword previews,
+   * score stats, even the admin list), so a false positive would erase a
+   * healthy post from every tenant's surface SILENTLY — nobody notices what is
+   * missing. This column is filtered by the three automated-reply queries only,
+   * so a false positive leaves the post on the feed where it can be seen,
+   * acted on by hand, and reported. With six of the seven platform detectors
+   * newly written, that difference is the point.
+   *
+   * The authorisation check is the same as target-gone's and for the same
+   * reason: `EngageOpportunity` is shared across orgs, so the caller must own a
+   * reply actually parked against this one. No such reply, no write, 404.
+   *
+   * Idempotent: a second report (two orgs, one closed post) finds the row
+   * already stamped and keeps the ORIGINAL timestamp — when the closure was
+   * first observed, not when the latest report arrived.
+   */
+  async markOpportunityRepliesDisabled(
+    organizationId: string,
+    opportunityId: string,
+    reason: string,
+    now = new Date()
+  ): Promise<{ marked: boolean; repliesClosed: number }> {
+    // Entitlement check and work list in one query — exactly the replies closed
+    // below, exactly as markOpportunityTargetGone does it.
+    const parked = await this._sentReply.model.engageSentReply.findMany({
+      where: {
+        organizationId,
+        opportunityId,
+        post: { state: 'QUEUE', deletedAt: null, releaseURL: null },
+      },
+      select: { postId: true },
+    });
+    if (!parked.length) {
+      throw new NotFoundException(
+        'No queued reply of yours is waiting on that opportunity'
+      );
+    }
+
+    const error =
+      `Replies are disabled on this post: ${reason}`.slice(0, 400) +
+      ' — the post accepts no replies, so this one will not be retried.';
+
+    // One transaction, for the same reason target-gone uses one: a stamped row
+    // whose replies stayed QUEUE would go on being claimed until the filter
+    // caught it, and replies closed against an unstamped row would let the next
+    // poll draft a fresh one for the same closed post.
+    return this._tx.model.$transaction(async (tx) => {
+      // `repliesDisabledAt: null` in the where rather than a blind update, so a
+      // row another org already stamped keeps its first-observed timestamp.
+      const stamped = await tx.engageOpportunity.updateMany({
+        where: { id: opportunityId, repliesDisabledAt: null },
+        data: { repliesDisabledAt: now },
+      });
+      // Scoped to THIS org's replies. Other orgs' parked replies are left for
+      // their own runners — but unlike the target-gone case, they are not
+      // stranded by it: the filter added to claimDueEngageReplies stops the
+      // hand-out, and the housekeeping shelf-life sweep closes the row.
+      //
+      // `releaseId` cleared so no lease token points at a post that will never
+      // be handed out again; `claimedAt` deliberately preserved — it is the
+      // sole reply-side input to getLastPlatformWriteAt, and rewinding it would
+      // let the next poll write to the same account inside the pacing floor.
+      const closed = await tx.post.updateMany({
+        where: { id: { in: parked.map((p) => p.postId) }, state: 'QUEUE' },
+        data: { state: 'ERROR', error, releaseId: null },
+      });
+      return { marked: stamped.count > 0, repliesClosed: closed.count };
     });
   }
 
@@ -4578,6 +4699,11 @@ export class EngageRepository {
           // queue with nowhere to send to.
           authorUsername: true,
           postPublishedAt: true,
+          // Surfaced here on purpose. This is the column's audit trail: the
+          // admin list is where someone can ask "which posts did the detectors
+          // close, and were they right", which is the whole reason the verdict
+          // lands on a row that stays visible instead of on `deletedAt`.
+          repliesDisabledAt: true,
         },
       }),
       this._opportunity.model.engageOpportunity.count({ where }),

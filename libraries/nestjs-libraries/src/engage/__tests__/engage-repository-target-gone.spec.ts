@@ -341,3 +341,125 @@ describe('EngageRepository.closeUnconfirmedReply', () => {
     expect(error).toMatch(/NOT be re-sent/i);
   });
 });
+
+// The SIBLING claim: the post is alive and its address resolves, but the
+// platform accepts no replies on it — comments turned off, thread locked,
+// responses closed. Same loop being closed as target-gone's (a reply that can
+// never succeed being handed out on every poll), a different fact about the
+// world, and deliberately a different column.
+//
+// What these tests hold in place is the column choice. `deletedAt` would have
+// been less code and it is filtered by every engage read, so a false positive
+// would erase a healthy post from every tenant's feed, keyword preview, score
+// stats and admin list at once — silently, because nobody notices a post that
+// is missing. `repliesDisabledAt` is read by the three automated-reply queries
+// only, so the same false positive leaves the post on the feed where it can be
+// seen and corrected. Six of the seven platform detectors are newly written,
+// which is exactly when that difference is worth paying for.
+describe('EngageRepository.markOpportunityRepliesDisabled', () => {
+  it('refuses a caller with no queued reply waiting on the opportunity', async () => {
+    // Same safety property as target-gone's, and it matters MORE here: this
+    // write is unconditionally global (there is no `confirmed` flag to fall
+    // back to), so owning a parked reply is the only thing standing between an
+    // authenticated caller and every other tenant's draft pipeline.
+    const { repo, oppUpdateMany, postUpdateMany } = buildRepo({ parked: [] });
+
+    await expect(
+      repo.markOpportunityRepliesDisabled(
+        'org-1',
+        'opp-1',
+        'comments are disabled',
+        now
+      )
+    ).rejects.toBeInstanceOf(NotFoundException);
+
+    expect(oppUpdateMany).not.toHaveBeenCalled();
+    expect(postUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it('stamps the shared row and closes the caller’s parked replies', async () => {
+    const { repo, oppUpdateMany, postUpdateMany } = buildRepo({
+      parked: [{ postId: 'p1' }, { postId: 'p2' }],
+    });
+
+    const res = await repo.markOpportunityRepliesDisabled(
+      'org-1',
+      'opp-1',
+      'Quora shows commenting as disabled on this answer',
+      now
+    );
+
+    expect(res).toEqual({ marked: true, repliesClosed: 2 });
+    expect(oppUpdateMany).toHaveBeenCalledWith({
+      where: { id: 'opp-1', repliesDisabledAt: null },
+      data: { repliesDisabledAt: now },
+    });
+    // QUEUE → ERROR, or the replies stop being handed out but sit in QUEUE
+    // forever — invisible to the queue counts and to whoever is wondering why
+    // the project's reply budget never drains.
+    const closed = postUpdateMany.mock.calls[0][0];
+    expect(closed.where).toEqual({ id: { in: ['p1', 'p2'] }, state: 'QUEUE' });
+    expect(closed.data.state).toBe('ERROR');
+    expect(closed.data.error).toContain('Replies are disabled on this post');
+    expect(closed.data.error).toContain(
+      'Quora shows commenting as disabled on this answer'
+    );
+  });
+
+  it('never touches deletedAt — the post stays on the feed', async () => {
+    // THE design decision, pinned. deletedAt is filtered by every engage read;
+    // this column by the automated-reply queries only. Writing both would throw
+    // away the whole reason for having a second column.
+    const { repo, oppUpdateMany, postUpdateMany } = buildRepo({
+      parked: [{ postId: 'p1' }],
+    });
+
+    await repo.markOpportunityRepliesDisabled('org-1', 'opp-1', 'locked', now);
+
+    for (const call of oppUpdateMany.mock.calls) {
+      expect(call[0].data).not.toHaveProperty('deletedAt');
+    }
+    for (const call of postUpdateMany.mock.calls) {
+      expect(call[0].data).not.toHaveProperty('deletedAt');
+    }
+  });
+
+  it('keeps the first-observed timestamp when another org already stamped it', async () => {
+    // Two orgs scanned the same closed post; both their posters find the same
+    // shut box. The `repliesDisabledAt: null` guard in the where means the
+    // second report changes nothing, and `marked` reports that honestly rather
+    // than claiming a write it did not make.
+    const { repo, oppUpdateMany, postUpdateMany } = buildRepo({
+      parked: [{ postId: 'p9' }],
+    });
+    oppUpdateMany.mockResolvedValueOnce({ count: 0 });
+
+    const res = await repo.markOpportunityRepliesDisabled(
+      'org-2',
+      'opp-1',
+      'comments are disabled',
+      now
+    );
+
+    expect(res.marked).toBe(false);
+    // The second org's OWN parked reply is still closed — the stamp was
+    // already there, its reply was not.
+    expect(res.repliesClosed).toBe(1);
+    expect(postUpdateMany).toHaveBeenCalled();
+  });
+
+  it('clears releaseId but preserves claimedAt', async () => {
+    // `claimedAt` is not only a lease column: it is the sole reply-side input
+    // to getLastPlatformWriteAt, so erasing it would rewind the pacing floor
+    // and let the next poll write to the same account inside the window that
+    // floor exists to protect. Same rule markOpportunityTargetGone follows.
+    const { repo, postUpdateMany } = buildRepo({ parked: [{ postId: 'p1' }] });
+
+    await repo.markOpportunityRepliesDisabled('org-1', 'opp-1', 'off', now);
+
+    const data = postUpdateMany.mock.calls[0][0].data;
+    expect(data.releaseId).toBeNull();
+    expect(data).not.toHaveProperty('claimedAt');
+  });
+});
+

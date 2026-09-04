@@ -52,6 +52,7 @@ import {
   ReportRedditChannelCapabilityDto,
   AddTrackedAccountDto,
   ConfirmManualReplyDto,
+  ReportRepliesDisabledDto,
   ReportTargetGoneDto,
   DashboardImpressionsDto,
   DashboardRepliesTrendDto,
@@ -715,6 +716,48 @@ export class EngageController {
       // reading of silence is to close only this org's replies rather than
       // retire a row every tenant shares.
       body.confirmed === true
+    );
+  }
+
+  /**
+   * The extension reporting that the platform accepts NO replies on this post.
+   *
+   * A sibling of /target-gone, not a variant of it, because the claim is
+   * different: that post is gone, this one is alive and simply closed to
+   * replies (comments turned off, thread locked, responses closed). Both end
+   * the retry loop; only this one leaves the post on the feed.
+   *
+   * Stamps `EngageOpportunity.repliesDisabledAt` — a GLOBAL write, deliberately
+   * and unlike an unconfirmed target-gone report, because a closed reply box is
+   * a property of the post that every org sees. 404 when the caller has no
+   * queued reply waiting on it, which is also the authorisation check.
+   */
+  @ApiOperation({
+    summary:
+      'Report that a post accepts no replies (comments off / thread locked / responses closed). Stamps the shared opportunity so no org drafts against it again, and closes the caller’s queued replies. Does NOT hide the post from the feed — use /target-gone for a post that no longer exists.',
+  })
+  @ApiResponse({
+    status: 404,
+    description: 'No queued reply of this org is waiting on that opportunity',
+  })
+  // Shares target-gone's bucket rather than adding a knob: same caller, same
+  // cadence (a handful a day from a healthy extension), and the same reason to
+  // cap it — both write a row every tenant shares.
+  @Throttle({ default: { limit: limitFor('engageTargetGone'), ttl: RATE_LIMIT_TTL_MS } })
+  @Post('/opportunities/:id/replies-disabled')
+  reportRepliesDisabled(
+    @GetOrgFromRequest() org: Organization,
+    @Param('id') id: string,
+    @Body() body: ReportRepliesDisabledDto
+  ) {
+    this.logger.log(
+      `[engage] replies disabled reported org=${org.id} opportunity=${id} ` +
+        `platform=${logSafe(body.platform)} reason=${logSafe(body.reason)}`
+    );
+    return this._engageService.markOpportunityRepliesDisabled(
+      org,
+      id,
+      body.reason || 'the platform does not accept replies on this post'
     );
   }
 

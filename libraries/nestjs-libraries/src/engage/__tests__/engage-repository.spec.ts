@@ -2694,6 +2694,37 @@ describe('EngageRepository — two-table reads', () => {
   });
 
   describe('pickAutoReplyCandidates', () => {
+    it('never offers an opportunity whose replies the platform disabled', async () => {
+      // The generation is the expensive half, so a post with no reply box has
+      // to be excluded HERE rather than at send time. Before this filter, every
+      // poll paid for a draft that the poster could only refuse — and refusing
+      // it left the record QUEUE, so the next poll paid again.
+      const findMany = vi.fn(async () => []);
+      const oppState = { model: { engageOpportunityState: { findMany } } } as any;
+      const repo = new EngageRepository(
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        oppState, // _oppState
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any,
+        {} as any
+      );
+
+      await repo.pickAutoReplyCandidates('org1', 'proj-1', 'quora', {
+        limit: 5,
+      });
+
+      expect(findMany.mock.calls[0][0].where.opportunity).toMatchObject({
+        repliesDisabledAt: null,
+      });
+    });
+
     it('never offers an opportunity with no address for drafting', async () => {
       const findMany = vi.fn(async () => []);
       const oppState = { model: { engageOpportunityState: { findMany } } } as any;
@@ -2755,6 +2786,10 @@ describe('EngageRepository — two-table reads', () => {
       expect(where.score).toEqual({ gte: 70 });
       expect(where.opportunity).toEqual({
         deletedAt: null,
+        // A post the platform accepts no replies on is not eligible work, for
+        // the same reason a deleted one is not — drafting against either buys
+        // an LLM generation nothing can accept.
+        repliesDisabledAt: null,
         platform: 'x',
         externalPostUrl: { not: '' },
         sentReplies: { none: { organizationId: 'org1', projectId: 'proj-1' } },

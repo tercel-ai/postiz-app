@@ -1456,6 +1456,33 @@ model EngageOpportunity {
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
   deletedAt DateTime?
+  // Set when a poster read the PLATFORM's own "replies are off here" state on
+  // this post: Quora's "Adding comments disabled" bar, a locked Reddit thread,
+  // a Medium story with responses closed. That is a property of the POST and
+  // identical for every org that scanned it, which is why it belongs on this
+  // shared row rather than in per-org EngageOpportunityState.
+  //
+  // NOT deletedAt, deliberately, even though both are written once and never
+  // cleared. deletedAt removes the opportunity from EVERY engage read — the
+  // post vanishes from the feed and no one can act on it at all. This column
+  // gates only the AUTOMATED reply path (drafting in pickAutoReplyCandidates,
+  // hand-out in claimDueEngageReplies); the post stays visible and a human can
+  // still bookmark it, quote it, or use it as post inspiration.
+  //
+  // NO reactivation path, by decision rather than oversight. An author who
+  // turns replies off rarely turns them back on, and the opportunity's own TTL
+  // (2 days on hackernews, 30 on quora — engage-scan-config.service.ts) expires
+  // the post well before that would pay off. The scan could not supply the
+  // signal anyway: it reads search-result listings and never opens the post
+  // page, so a re-ingest knows nothing about commentability and would only be
+  // clearing this on the unrelated evidence that the post still matches a
+  // keyword. Left nullable so reviving one by hand stays a plain UPDATE.
+  //
+  // Session-scoped refusals do NOT belong here. "Only people X follows can
+  // reply" is true of one login, not of the post, so X reports those through
+  // the target-gone channel as unconfirmed instead — see target-gone.ts in the
+  // extension on blast radius.
+  repliesDisabledAt DateTime?
 
   states      EngageOpportunityState[]
   sentReplies EngageSentReply[]

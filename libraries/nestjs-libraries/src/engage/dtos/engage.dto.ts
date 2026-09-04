@@ -1265,6 +1265,41 @@ export class ReportTargetGoneDto {
   confirmed?: boolean;
 }
 
+/**
+ * The extension reporting that a post accepts no replies at all.
+ *
+ * Everything here is DIAGNOSTIC — the opportunity id in the route is what is
+ * acted on, and authorisation comes from the caller owning a queued reply
+ * against it, never from this body.
+ *
+ * Note what is deliberately ABSENT: target-gone's `confirmed` flag. That flag
+ * exists because page text cannot separate "deleted for everyone" from
+ * "invisible to this session", so the caller has to grade its own evidence.
+ * This endpoint carries no such ambiguity by construction — a poster only calls
+ * it after reading the platform's own "replies are off" state on a page that
+ * otherwise rendered fine, which is true for every viewer. A refusal that IS
+ * session-scoped (X's "only people they follow can reply") must go through
+ * /target-gone as unconfirmed instead, and must not be reported here.
+ */
+export class ReportRepliesDisabledDto {
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  platform?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(2048)
+  url?: string;
+
+  /** The poster's own words ("Quora shows commenting as disabled on this
+   *  answer"), which end up on the closed reply's error message. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  reason?: string;
+}
+
 export class ConfirmManualReplyDto {
   @IsString()
   @MaxLength(4000)
