@@ -7,6 +7,11 @@ import {
   ScanCursorSnapshot,
 } from '@gitroom/nestjs-libraries/engage/engage-scan-lease.service';
 import { EngageScanIngestService } from '@gitroom/nestjs-libraries/engage/engage-scan-ingest.service';
+import { ProjectValidationService } from '@gitroom/nestjs-libraries/projects/project-validation.service';
+import {
+  ProjectInactiveException,
+  ProjectNotFoundException,
+} from '@gitroom/nestjs-libraries/projects/project.exception';
 import {
   normalizePlatform,
   scanKeyFor,
@@ -193,8 +198,102 @@ export class EngageScanTasksService {
     private readonly _lease: EngageScanLeaseService,
     private readonly _ingest: EngageScanIngestService,
     private readonly _config: EngageScanConfigService,
-    private readonly _entitlement: EngageEntitlementService
+    private readonly _entitlement: EngageEntitlementService,
+    private readonly _projectValidation?: ProjectValidationService
   ) {}
+
+  /**
+   * Drop configs whose aisee-core project has been deactivated
+   * (`Product.is_active = false`). Deactivating a project must stop it
+   * consuming scan budget and producing new opportunities, without touching
+   * `EngageConfig.enabled` — that is the user's own engage switch, and
+   * clobbering it would leave engage off after reactivation.
+   *
+   * The Temporal path already does this (EngageScanActivity._filterActiveProjects);
+   * the extension path enumerated units straight off `getEnabledConfigsForOrg`,
+   * whose only predicate is `enabled + projectId != null`, so a deactivated
+   * project kept handing its keywords to the extension and kept receiving the
+   * posts they matched.
+   *
+   * `keepOnUnknown` decides what an aisee-core OUTAGE means, and the two scan
+   * stages need opposite answers. Claiming fails closed (false): no work is
+   * lost, the next tick retries. Ingesting fails OPEN (true): the posts are
+   * already fetched and the cursor advances right after, so dropping them over
+   * a transient lookup failure loses that page for good — a far worse outcome
+   * than one extra page attributed to a project switched off moments ago.
+   *
+   * Verdicts are cached in ProjectValidationService (60s positive / 30s
+   * negative), so a whole sync costs at most one aisee-core call per distinct
+   * project. Left unfiltered when the service is not wired (unit tests build
+   * this service positionally).
+   */
+  private async _filterActiveProjects<
+    T extends { organizationId: string; projectId: string | null }
+  >(
+    contexts: T[],
+    stage: string,
+    { keepOnUnknown = false }: { keepOnUnknown?: boolean } = {}
+  ): Promise<T[]> {
+    if (!this._projectValidation || !contexts.length) return contexts;
+
+    const verdicts = await Promise.all(
+      contexts.map((ctx) =>
+        ctx.projectId
+          ? this._isProjectScannable(
+              ctx.organizationId,
+              ctx.projectId,
+              keepOnUnknown
+            )
+          : // A null-project config carries no aisee-core product to check. No
+            // scan path reaches one today (getEnabledConfigsForOrg excludes
+            // them), so this arm only guards a future caller — pass it through
+            // rather than silently dropping work this gate has no verdict on.
+            Promise.resolve(true)
+      )
+    );
+    const active = contexts.filter((_, index) => verdicts[index]);
+    if (active.length !== contexts.length) {
+      this.logger.log(
+        `[${stage}] skipped ${contexts.length - active.length} deactivated project(s)`
+      );
+    }
+    return active;
+  }
+
+  /**
+   * Tri-state project verdict flattened to a boolean by `keepOnUnknown`.
+   *
+   * `isProjectActive` cannot serve here: it collapses "deactivated" and
+   * "aisee-core unreachable" into the same `false`, and the ingest stage must
+   * tell them apart (see `_filterActiveProjects`).
+   */
+  private async _isProjectScannable(
+    organizationId: string,
+    projectId: string,
+    keepOnUnknown: boolean
+  ): Promise<boolean> {
+    try {
+      await this._projectValidation!.assertProjectActive(
+        organizationId,
+        projectId
+      );
+      return true;
+    } catch (err) {
+      if (
+        err instanceof ProjectInactiveException ||
+        err instanceof ProjectNotFoundException
+      ) {
+        return false;
+      }
+      // Unavailable, or anything unexpected — no verdict was reached.
+      this.logger.warn(
+        `Project activation check inconclusive for org=${organizationId} projectId=${projectId}: ${
+          (err as Error).message
+        }`
+      );
+      return keepOnUnknown;
+    }
+  }
 
   /**
    * Back-attribute existing global opportunities to this org without any
@@ -210,6 +309,10 @@ export class EngageScanTasksService {
   ): Promise<number> {
     const ctx = await this._engageRepo.getEnabledOrgContext(orgId, opts.projectId ?? null);
     if (!ctx) return 0;
+    // A deactivated project must not be back-attributed either: the feed it
+    // would populate is exactly the feed deactivation is meant to stop.
+    const [activeCtx] = await this._filterActiveProjects([ctx], 'backfill');
+    if (!activeCtx) return 0;
 
     const windowDays = opts.windowDays ?? (await this._entitlement.getMetricsWindowDays(orgId));
     const since = new Date(Date.now() - windowDays * 86_400_000);
@@ -254,8 +357,11 @@ export class EngageScanTasksService {
     // project-scoped one), so a post matching a project-only keyword is kept and
     // its project-scoped opportunity state is written — not silently dropped
     // because only the null-project config was consulted.
-    const ctxs = await this._engageRepo.getEnabledConfigsForOrg(orgId);
-    if (!ctxs.length) return { accepted: 0, keywordMatched: 0, scoreFiltered: 0, staleFiltered, reason: 'no engage config found for org' };
+    const allCtxs = await this._engageRepo.getEnabledConfigsForOrg(orgId);
+    const ctxs = await this._filterActiveProjects(allCtxs, 'collected-ingest', {
+      keepOnUnknown: true,
+    });
+    if (!ctxs.length) return { accepted: 0, keywordMatched: 0, scoreFiltered: 0, staleFiltered, reason: allCtxs.length ? 'every enabled engage config belongs to a deactivated project' : 'no engage config found for org' };
     const withKeywords = ctxs.filter((c) => c.keywords.length);
     if (!withKeywords.length) {
       return { accepted: 0, keywordMatched: 0, scoreFiltered: 0, staleFiltered, reason: 'org has no enabled keywords configured' };
@@ -370,10 +476,14 @@ export class EngageScanTasksService {
 
     let ctxs;
     try {
-      ctxs = await this._engageRepo.getOrgContextsForUnit(
-        unit.platform,
-        unit.scanType as 'keyword' | 'channel' | 'tracked',
-        unit.scanKey
+      ctxs = await this._filterActiveProjects(
+        await this._engageRepo.getOrgContextsForUnit(
+          unit.platform,
+          unit.scanType as 'keyword' | 'channel' | 'tracked',
+          unit.scanKey
+        ),
+        'scan-ingest',
+        { keepOnUnknown: true }
       );
       this.logger.log(
         `[scan-ingest] unit=${unit.platform}/${unit.scanType}/${unit.scanKey} posts=${posts.length} staleFiltered=${staleFiltered} ctxs=${ctxs.length}`
@@ -428,7 +538,11 @@ export class EngageScanTasksService {
     // one. A keyword/channel/tracked account activated on a project's config
     // (e.g. from a committed operation plan) must be scanned too, not only the
     // org-level ones. Scan units are global, so we merge across configs and dedup.
-    const ctxs = await this._engageRepo.getEnabledConfigsForOrg(orgId);
+    const allCtxs = await this._engageRepo.getEnabledConfigsForOrg(orgId);
+    // Deactivated projects (aisee-core `Product.is_active = false`) drop out
+    // BEFORE unit enumeration — otherwise their keywords/channels/tracked
+    // accounts are still handed to the extension to scan.
+    const ctxs = await this._filterActiveProjects(allCtxs, 'scan-claim');
     if (!ctxs.length) return [];
 
     const cadenceMs =
