@@ -16,6 +16,7 @@ import {
   EngageRepository,
   GenerationHistoryEntry,
 } from '@gitroom/nestjs-libraries/engage/engage.repository';
+import { ProjectValidationService } from '@gitroom/nestjs-libraries/projects/project-validation.service';
 import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.service';
 import { PostOverageService } from '@gitroom/nestjs-libraries/database/prisma/posts/post-overage.service';
 import { SettingsService } from '@gitroom/nestjs-libraries/database/prisma/settings/settings.service';
@@ -260,7 +261,10 @@ export class EngageService implements OnApplicationBootstrap {
     // (reference-post-generation.md).
     private _aiseeCredit?: AiseeCreditService,
     private _referencePostService?: EngageReferencePostService,
-    private _mediaService?: MediaService
+    private _mediaService?: MediaService,
+    // Same optional-positional reason as above. Gates the org-wide aggregate
+    // config on aisee-core's project switch (see getConfig).
+    private _projectValidation?: ProjectValidationService
   ) { }
 
   // Auto-start global workflows on every app boot so pnpm dev / Docker restart
@@ -315,9 +319,39 @@ export class EngageService implements OnApplicationBootstrap {
       // config, deduped) so its selectable scan units match what the server-side
       // scan loop actually enumerates. A concrete projectId → that project's
       // config only. aisee-app always passes projectId, so it is unaffected.
+      // The two branches treat aisee-core's `Product.is_active` switch
+      // DIFFERENTLY, because they answer different questions:
+      //
+      //   projectId → a READ of one project, for aisee-app's per-project
+      //     Engage settings page. It must NOT filter: the user edits keywords
+      //     here, and hiding them on a deactivated project reads as data loss
+      //     rather than "switched off". Reads stay open on a deactivated
+      //     project by design (ProjectAuthGuard only asserts ACCESS on GET) so
+      //     it can be inspected and switched back on. The verdict is reported
+      //     instead, as `projectActive` below.
+      //
+      //   no projectId → the browser extension's org-wide scan panel, whose
+      //     whole contract is to list the units claimNext will actually claim.
+      //     It has no project dimension at all (keywords are deduped across
+      //     projects into one flat list), so there is nothing a per-row status
+      //     flag could even be attached to — filtering is the only coherent
+      //     answer, and it restores the parity claimNext's own gate broke.
       projectId
         ? this._engageRepository.getOrCreateConfig(org.id, projectId)
-        : this._engageRepository.getOrgAggregateConfig(org.id),
+        : this._engageRepository.getOrgAggregateConfig(
+            org.id,
+            this._projectValidation
+              ? async (pid) =>
+                  // Fails OPEN on `unknown`: this list is read-only, so wrongly
+                  // showing a keyword costs one empty claim, while wrongly
+                  // hiding the org's whole configuration over a brief
+                  // aisee-core blip reads as data loss.
+                  (await this._projectValidation!.getActivationVerdict(
+                    org.id,
+                    pid
+                  )) !== 'inactive'
+              : undefined
+          ),
       // getOrgScanStatus stays org-scoped (not yet project-aware) — a known,
       // separately-flagged gap, not a regression introduced here. It DOES take
       // the resolved scan allowlist, so what it reports as pending matches what
@@ -545,7 +579,37 @@ export class EngageService implements OnApplicationBootstrap {
       // via PUT /admin/settings/:key); surfaced here read-only so a client can
       // show "expires in N days" without a separate call.
       opportunityTtlDays: await this._getOpportunityTtlDaysConfig(),
+      // Is this project still switched on in aisee-core (`Product.is_active`)?
+      // Reported rather than enforced: everything above is still returned for a
+      // deactivated project so the settings page stays inspectable, and this
+      // flag is what lets the UI say "scanning and replying are paused" instead
+      // of silently showing a configuration that no longer runs.
+      //
+      // Costs no extra aisee-core call: ProjectAuthGuard already validated this
+      // projectId on the way in, and the verdict it cached is what this reads.
+      // `null` when there is no project to report on (the org-wide aggregate)
+      // or when the verdict could not be reached — a client must not render
+      // "deactivated" on the strength of an aisee-core outage.
+      projectActive: await this._resolveProjectActive(org.id, projectId),
     };
+  }
+
+  /**
+   * Tri-state `projectActive` for the getConfig response: true/false when
+   * aisee-core answered, null when there is nothing to ask about or the answer
+   * did not arrive. Never throws — this decorates a read that must still
+   * succeed when project validation is down.
+   */
+  private async _resolveProjectActive(
+    organizationId: string,
+    projectId?: string | null
+  ): Promise<boolean | null> {
+    if (!projectId || !this._projectValidation) return null;
+    const verdict = await this._projectValidation.getActivationVerdict(
+      organizationId,
+      projectId
+    );
+    return verdict === 'unknown' ? null : verdict === 'active';
   }
 
   /**

@@ -355,10 +355,17 @@ export class AdminDiagnosticsController {
    * GET /admin/diagnostics/integrations
    *
    * Finds integrations with health issues:
-   * 1. refreshNeeded: token expired, needs reconnection
+   * 1. refreshNeeded: token expired, needs reconnection via the 'api' send path.
+   *    Extension-routed posts don't go through this token at all — see
+   *    posts.repository's extensionRouteBranches(), which gates only on
+   *    `disabled`/`deletedAt` — so a refreshNeeded integration on the
+   *    'extension' path keeps publishing normally. Don't read this flag as
+   *    "can't publish" without checking the integration's actual send path.
    * 2. inBetweenSteps: stuck in OAuth flow
-   * 3. disabled: manually disabled
-   * Also counts QUEUE posts per unhealthy integration (posts that can't publish).
+   * 3. disabled: manually disabled — blocks every send path
+   * Also counts QUEUE posts per unhealthy integration. For 'api'-routed
+   * integrations these are genuinely blocked; for 'extension'-routed ones
+   * flagged only by refreshNeeded, they are not.
    */
   @Get('/integrations')
   async checkIntegrations() {
@@ -554,8 +561,14 @@ export class AdminDiagnosticsController {
    * GET /admin/diagnostics/engage-dead-reply-accounts
    *
    * Finds project bindings with engageEnabled=true but whose linked
-   * Integration has refreshNeeded=true or disabled=true. These accounts will
-   * silently fail to send or auto-reply without any user-visible error.
+   * Integration has refreshNeeded=true or disabled=true. `disabled` accounts
+   * silently fail to send or auto-reply on every path, with no user-visible
+   * error. `refreshNeeded` only blocks the 'api' send path — engage replies
+   * follow the same backend-schedules/extension-executes split as publish-due
+   * (see engage-auto-reply.service), so an extension-routed account keeps
+   * auto-replying normally despite refreshNeeded=true. Treat a
+   * refreshNeeded-only row here as a lead to verify against the account's
+   * send path, not a confirmed outage.
    */
   @Get('/engage-dead-reply-accounts')
   async checkEngageDeadReplyAccounts() {

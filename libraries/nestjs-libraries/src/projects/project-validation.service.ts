@@ -105,6 +105,35 @@ export class ProjectValidationService {
   }
 
   /**
+   * Three-way activation verdict for background work that must tell "switched
+   * off" apart from "aisee-core did not answer".
+   *
+   * {@link isProjectActive} collapses both into `false`, which is the right
+   * default for work that can simply be retried — but a caller holding data it
+   * cannot re-fetch, or rendering a list the user would read as lost, needs to
+   * choose its own posture for `unknown`. Never throws.
+   */
+  async getActivationVerdict(
+    organizationId: string,
+    projectId: string
+  ): Promise<'active' | 'inactive' | 'unknown'> {
+    try {
+      const verdict = await this._resolveVerdict(organizationId, projectId);
+      if (!verdict.valid) return 'inactive';
+      return verdict.active ? 'active' : 'inactive';
+    } catch (err) {
+      if (err instanceof ProjectNotFoundException) return 'inactive';
+      // Unavailable, or anything unexpected — no verdict was reached.
+      this.logger.warn(
+        `Project activation verdict inconclusive: org=${organizationId} projectId=${projectId}: ${
+          (err as Error).message
+        }`
+      );
+      return 'unknown';
+    }
+  }
+
+  /**
    * One cached aisee-core lookup yielding both the ownership and activation
    * verdicts. Throws ProjectValidationUnavailableException when aisee-core
    * cannot be reached (never cached, so the next call retries fresh).

@@ -498,6 +498,33 @@ export class EngageRepository {
   }
 
   /**
+   * Keep only the rows whose project is still active in aisee-core.
+   *
+   * A no-op without a validator, so every existing caller keeps its behaviour.
+   * Fails OPEN on a validator that throws: this backs a read-only panel, where
+   * wrongly SHOWING a keyword costs an empty claim, while wrongly HIDING the
+   * org's whole configuration during a brief aisee-core blip reads as data loss
+   * and invites the user to rebuild what is still there.
+   */
+  private async _filterActiveProjectRows<T extends { projectId: string | null }>(
+    rows: T[],
+    isProjectActive?: (projectId: string) => Promise<boolean>
+  ): Promise<T[]> {
+    if (!isProjectActive || !rows.length) return rows;
+    const verdicts = await Promise.all(
+      rows.map(async (row) => {
+        if (!row.projectId) return true;
+        try {
+          return await isProjectActive(row.projectId);
+        } catch {
+          return true;
+        }
+      })
+    );
+    return rows.filter((_, index) => verdicts[index]);
+  }
+
+  /**
    * Org-level aggregate config for clients that have no project context — the
    * browser extension's scan panel, which enumerates keywords/channels/tracked
    * accounts client-side to render the selectable scan units. It must see the
@@ -517,8 +544,19 @@ export class EngageRepository {
    * are excluded — consistent with claimNext, which only scans enabled configs.
    * Duplicates prefer an enabled row so a keyword enabled under any project
    * surfaces as enabled.
+   *
+   * `isProjectActive` extends that same "match claimNext" contract to aisee-core's
+   * `Product.is_active` switch, which lives outside this database and so cannot be
+   * expressed as a Prisma predicate. Passing it drops deactivated projects from
+   * the union — without it the panel would keep listing keywords the scan loop
+   * refuses to claim, and selecting one would return an empty batch with nothing
+   * saying why. Omitted (unit tests, any caller with no validator) = no gate,
+   * exactly as before.
    */
-  async getOrgAggregateConfig(organizationId: string) {
+  async getOrgAggregateConfig(
+    organizationId: string,
+    isProjectActive?: (projectId: string) => Promise<boolean>
+  ) {
     const include = {
       keywords: {
         orderBy: { createdAt: 'asc' as const },
@@ -540,8 +578,17 @@ export class EngageRepository {
       // automation running. This is the only field read off these rows.
       this._config.model.engageConfig.findMany({
         where: { organizationId, projectId: { not: null } },
-        select: { metadata: true },
+        select: { projectId: true, metadata: true },
       }),
+    ]);
+
+    // Deactivated projects drop out of BOTH lists. `configs` feeds the scan-unit
+    // union (the claimNext parity above); `automationRows` feeds the org-wide
+    // "is anything automated" flag, which must not stay true on the strength of
+    // a project that can no longer publish or reply.
+    const [activeConfigs, activeAutomationRows] = await Promise.all([
+      this._filterActiveProjectRows(configs, isProjectActive),
+      this._filterActiveProjectRows(automationRows, isProjectActive),
     ]);
 
     const pickEnabled = <T extends { enabled: boolean }>(
@@ -558,7 +605,7 @@ export class EngageRepository {
       string,
       (typeof configs)[number]['trackedAccounts'][number]
     >();
-    for (const c of configs) {
+    for (const c of activeConfigs) {
       for (const kw of c.keywords) {
         const key = normalizeKeyword(kw.keyword);
         if (key) pickEnabled(kwByKey, key, kw);
@@ -582,7 +629,7 @@ export class EngageRepository {
       // project to report a scoped switch for, so "is anything automated"
       // is the only question it can answer. Read by getConfig() in place of
       // the null-project base row's own (always-off) metadata.
-      automationEnabled: automationRows.some(
+      automationEnabled: activeAutomationRows.some(
         (row) => readEngageConfigMetadata(row as any).automationEnabled
       ),
     };

@@ -1,10 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { EngageScanTasksService } from '../engage-scan-tasks.service';
 import { DEFAULT_SCAN_PACING } from '../engage-scan-config.service';
-import {
-  ProjectInactiveException,
-  ProjectValidationUnavailableException,
-} from '../../projects/project.exception';
 
 /**
  * Deactivating a project in aisee-core (`Product.is_active = false`) must stop
@@ -15,15 +11,14 @@ import {
  * matched.
  */
 
-// `assertProjectActive` resolves for an active project and throws otherwise;
-// the map keys projects by id so a test can mix active/inactive in one org.
-function validation(verdicts: Record<string, 'active' | 'inactive' | 'down'>) {
+// ProjectValidationService.getActivationVerdict is the tri-state contract this
+// service depends on ('unknown' = aisee-core did not answer). The map keys
+// projects by id so one test can mix active/inactive within an org.
+function validation(verdicts: Record<string, 'active' | 'inactive' | 'unknown'>) {
   return {
-    assertProjectActive: vi.fn(async (_org: string, projectId: string) => {
-      const verdict = verdicts[projectId] ?? 'active';
-      if (verdict === 'inactive') throw new ProjectInactiveException();
-      if (verdict === 'down') throw new ProjectValidationUnavailableException();
-    }),
+    getActivationVerdict: vi.fn(
+      async (_org: string, projectId: string) => verdicts[projectId] ?? 'active'
+    ),
   };
 }
 
@@ -32,7 +27,7 @@ function build(opts: {
   subscribers?: any[];
   unitByToken?: any;
   claimResults?: any[];
-  verdicts?: Record<string, 'active' | 'inactive' | 'down'>;
+  verdicts?: Record<string, 'active' | 'inactive' | 'unknown'>;
 }) {
   let claimCall = 0;
   const contexts = opts.orgContexts ?? [];
@@ -135,7 +130,7 @@ describe('scan claim — deactivated projects', () => {
   it('fails CLOSED when aisee-core cannot be reached: no work is lost, the next tick retries', async () => {
     const { svc, lease } = build({
       orgContexts: [ctx('p1', 'alpha')],
-      verdicts: { p1: 'down' },
+      verdicts: { p1: 'unknown' },
       claimResults: [snap()],
     });
 
@@ -196,7 +191,7 @@ describe('scan ingest — deactivated projects', () => {
         scanKey: 'alpha',
       },
       subscribers: [{ organizationId: 'o1', projectId: 'p1' }],
-      verdicts: { p1: 'down' },
+      verdicts: { p1: 'unknown' },
     });
 
     const res = await svc.sync('org1', {

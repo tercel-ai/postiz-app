@@ -9,10 +9,6 @@ import {
 import { EngageScanIngestService } from '@gitroom/nestjs-libraries/engage/engage-scan-ingest.service';
 import { ProjectValidationService } from '@gitroom/nestjs-libraries/projects/project-validation.service';
 import {
-  ProjectInactiveException,
-  ProjectNotFoundException,
-} from '@gitroom/nestjs-libraries/projects/project.exception';
-import {
   normalizePlatform,
   scanKeyFor,
   scanTypeFor,
@@ -260,39 +256,18 @@ export class EngageScanTasksService {
     return active;
   }
 
-  /**
-   * Tri-state project verdict flattened to a boolean by `keepOnUnknown`.
-   *
-   * `isProjectActive` cannot serve here: it collapses "deactivated" and
-   * "aisee-core unreachable" into the same `false`, and the ingest stage must
-   * tell them apart (see `_filterActiveProjects`).
-   */
+  /** Tri-state project verdict flattened to a boolean by `keepOnUnknown`. */
   private async _isProjectScannable(
     organizationId: string,
     projectId: string,
     keepOnUnknown: boolean
   ): Promise<boolean> {
-    try {
-      await this._projectValidation!.assertProjectActive(
-        organizationId,
-        projectId
-      );
-      return true;
-    } catch (err) {
-      if (
-        err instanceof ProjectInactiveException ||
-        err instanceof ProjectNotFoundException
-      ) {
-        return false;
-      }
-      // Unavailable, or anything unexpected — no verdict was reached.
-      this.logger.warn(
-        `Project activation check inconclusive for org=${organizationId} projectId=${projectId}: ${
-          (err as Error).message
-        }`
-      );
-      return keepOnUnknown;
-    }
+    const verdict = await this._projectValidation!.getActivationVerdict(
+      organizationId,
+      projectId
+    );
+    if (verdict === 'unknown') return keepOnUnknown;
+    return verdict === 'active';
   }
 
   /**

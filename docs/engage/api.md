@@ -474,6 +474,21 @@ The first call will automatically create a default configuration (`enabled: fals
 |---|---|---|
 | `projectId` | string | Optional project scope. Omit to get the org-wide aggregate (every real project's enabled keywords/channels/tracked accounts, unioned) layered onto the legacy null-project row's own settings — this is what the browser extension, which has no project context, calls. |
 
+> **Deactivated projects** (`Product.is_active = false` in aisee-core) are
+> treated differently by the two shapes, because they answer different
+> questions:
+>
+> - **With a `projectId`** nothing is filtered. This is a read of one project,
+>   and it stays open on a deactivated one by design so the user can inspect it
+>   and switch it back on — hiding its keywords would read as data loss rather
+>   than "paused". The verdict is reported as **`projectActive`** instead.
+> - **Without a `projectId`** deactivated projects are **excluded from the
+>   union**. This shape's contract is to list exactly the scan units the server
+>   will actually claim (see `POST /scan-tasks/ingest`), and the scan loop skips
+>   deactivated projects — so leaving them in would show units that can never
+>   run. It also has no project dimension to hang a status flag on: keywords are
+>   deduped across projects into one flat list.
+
 **Response** `200 OK`
 
 ```json
@@ -489,7 +504,8 @@ The first call will automatically create a default configuration (`enabled: fals
   "trackedAccounts": [],
   "autoReplyEnabled": false,
   "replyPolicies": null,
-  "automationEnabled": false
+  "automationEnabled": false,
+  "projectActive": true
 }
 ```
 
@@ -503,6 +519,14 @@ The first call will automatically create a default configuration (`enabled: fals
 > automation running anywhere." A client that needs a specific project's
 > switch — or wants to change it — must call
 > `GET /projects/:projectId/automation` directly.
+
+> **`projectActive`** mirrors aisee-core's `Product.is_active` for the requested
+> project: `true` = live, `false` = switched off (scanning, replying and
+> publishing are paused for it, though everything above is still returned so the
+> page stays editable), `null` = nothing to report — either no `projectId` was
+> passed, or aisee-core could not be reached. **Treat `null` as "unknown", never
+> as deactivated**: rendering a "deactivated" banner on the strength of a
+> transient lookup failure is worse than showing none.
 
 ---
 
