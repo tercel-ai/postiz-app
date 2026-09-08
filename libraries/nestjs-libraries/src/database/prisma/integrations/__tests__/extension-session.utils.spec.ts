@@ -1,8 +1,12 @@
 import { describe, it, expect } from 'vitest';
 import {
   normalizeHandle,
+  normalizeAccountId,
   matchExtensionSessionCandidate,
   mergeSessionHandleIntoMetadata,
+  isUsableStoredPicture,
+  buildExtensionSessionSeed,
+  planExtensionSessionSync,
   ExtensionSessionCandidate,
 } from '../extension-session.utils';
 
@@ -144,5 +148,169 @@ describe('mergeSessionHandleIntoMetadata', () => {
 
   it('should return null when there is neither existing metadata nor a handle', () => {
     expect(mergeSessionHandleIntoMetadata(null, null)).toBeNull();
+  });
+});
+
+describe('isUsableStoredPicture', () => {
+  it('should reject the .html avatar an error page left behind', () => {
+    // Observed in production: an avatar url that answered with an error page
+    // was re-hosted as HTML and has rendered broken ever since.
+    expect(
+      isUsableStoredPicture('https://files.aisee.live/HhV1fkROgq.html')
+    ).toBe(false);
+  });
+
+  it('should keep a normal re-hosted image', () => {
+    expect(
+      isUsableStoredPicture('https://files.aisee.live/Jhz2748YZ0.jpeg')
+    ).toBe(true);
+  });
+
+  it('should treat a missing or blank picture as unusable', () => {
+    expect(isUsableStoredPicture(null)).toBe(false);
+    expect(isUsableStoredPicture('   ')).toBe(false);
+  });
+
+  it('should leave an extension-less CDN url alone rather than churn it', () => {
+    expect(isUsableStoredPicture('https://cdn.example.com/avatar/12345')).toBe(
+      true
+    );
+  });
+
+  it('should judge the path, not a query string that happens to contain dots', () => {
+    expect(
+      isUsableStoredPicture('https://cdn.example.com/a.jpg?v=1.2.html')
+    ).toBe(true);
+  });
+});
+
+describe('buildExtensionSessionSeed', () => {
+  it('should seed a channel from the platform id when the probe recovered one', () => {
+    expect(
+      buildExtensionSessionSeed({
+        id: 'tercelyi',
+        handle: 'tercelyi',
+        name: 'Tercel Yi',
+        picture: 'https://cdn.example.com/a.jpg',
+      })
+    ).toEqual({
+      internalId: 'tercelyi',
+      name: 'Tercel Yi',
+      username: 'tercelyi',
+      picture: 'https://cdn.example.com/a.jpg',
+    });
+  });
+
+  it('should fall back to the handle as the identity when no id was reported', () => {
+    expect(buildExtensionSessionSeed({ handle: 'Tercel-Yi' })).toEqual({
+      internalId: 'Tercel-Yi',
+      name: 'Tercel-Yi',
+      username: 'Tercel-Yi',
+    });
+  });
+
+  it('should refuse to seed a channel it cannot name', () => {
+    expect(buildExtensionSessionSeed({})).toBeNull();
+    expect(buildExtensionSessionSeed({ name: 'Someone' })).toBeNull();
+  });
+
+  it('should drop an avatar the server could never fetch', () => {
+    const seed = buildExtensionSessionSeed({
+      handle: 'a',
+      picture: 'blob:https://quora.com/9f2',
+    });
+    expect(seed).not.toHaveProperty('picture');
+  });
+});
+
+describe('planExtensionSessionSync', () => {
+  const row = {
+    id: 'int_1',
+    internalId: 'u-42',
+    profile: 'oldhandle',
+    picture: 'https://files.aisee.live/ok.jpeg',
+  };
+
+  it('should correct a stale handle when the report matched the row by platform id', () => {
+    expect(
+      planExtensionSessionSync(row, { id: 'u-42', handle: 'newhandle' })
+    ).toEqual({ profile: 'newhandle' });
+  });
+
+  it('should not touch the handle on a handle-only match', () => {
+    // Without an id there is no way to tell a renamed account from a different
+    // one — writing the handle here could relabel the wrong row.
+    expect(planExtensionSessionSync(row, { handle: 'newhandle' })).toEqual({});
+  });
+
+  it('should leave an already-correct handle alone, prefix and casing aside', () => {
+    expect(
+      planExtensionSessionSync(row, { id: 'u-42', handle: '@OldHandle' })
+    ).toEqual({});
+  });
+
+  it('should replace a picture that was stored as a non-image', () => {
+    expect(
+      planExtensionSessionSync(
+        { ...row, picture: 'https://files.aisee.live/broken.html' },
+        { id: 'u-42', handle: 'oldhandle', picture: 'https://cdn.example.com/a.jpg' }
+      )
+    ).toEqual({ picture: 'https://cdn.example.com/a.jpg' });
+  });
+
+  it('should backfill a picture for a row that never had one', () => {
+    expect(
+      planExtensionSessionSync(
+        { ...row, picture: null },
+        { id: 'u-42', handle: 'oldhandle', picture: 'https://cdn.example.com/a.jpg' }
+      )
+    ).toEqual({ picture: 'https://cdn.example.com/a.jpg' });
+  });
+
+  it('should not re-upload a picture the row already has', () => {
+    // The stored copy is re-hosted and can never compare equal to the platform
+    // url; refreshing on every hourly report would churn storage and overwrite
+    // a picture the user set by hand.
+    expect(
+      planExtensionSessionSync(row, {
+        id: 'u-42',
+        handle: 'oldhandle',
+        picture: 'https://cdn.example.com/a.jpg',
+      })
+    ).toEqual({});
+  });
+});
+
+describe('normalizeAccountId', () => {
+  it("should strip Reddit's t2_ fullname prefix so both sides compare equal", () => {
+    expect(normalizeAccountId('t2_abc123')).toBe('abc123');
+  });
+
+  it('should leave a bare id untouched', () => {
+    expect(normalizeAccountId('abc123')).toBe('abc123');
+    expect(normalizeAccountId('2035914746877345792')).toBe(
+      '2035914746877345792'
+    );
+  });
+});
+
+describe('matchExtensionSessionCandidate — Reddit id forms', () => {
+  it('should match the JWT fullname against the bare id the OAuth flow stored', () => {
+    // The whole reason a Reddit login never flipped its own channel: the probe
+    // reports `t2_abc123`, /api/v1/me stored `abc123`, and the cookie-only
+    // probe has no handle to fall back on.
+    expect(
+      matchExtensionSessionCandidate({ id: 't2_abc123' }, [
+        candidate('int_reddit', 'abc123', null),
+      ])
+    ).toBe('int_reddit');
+  });
+
+  it('should match a row that was itself created carrying the prefix', () => {
+    expect(
+      matchExtensionSessionCandidate({ id: 'abc123' }, [
+        candidate('int_reddit', 't2_abc123', null),
+      ])
+    ).toBe('int_reddit');
   });
 });

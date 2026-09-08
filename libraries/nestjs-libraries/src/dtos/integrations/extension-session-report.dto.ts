@@ -40,6 +40,21 @@ export class ExtensionSessionPlatformDto {
   @IsString()
   @MaxLength(256)
   name?: string;
+
+  /**
+   * Avatar url as the extension read it from the platform, http(s) only. Used
+   * to picture a channel CREATED from this report, and to backfill one whose
+   * stored picture is missing or was never an image — never to re-upload a
+   * picture that is already good (the stored copy is re-hosted, so it can't be
+   * compared to this url, and a user can set their own from the UI).
+   *
+   * Longer cap than the identity fields: platform CDN avatar urls carry signing
+   * and sizing query strings that routinely run past 256 characters.
+   */
+  @IsOptional()
+  @IsString()
+  @MaxLength(2048)
+  picture?: string;
 }
 
 /**

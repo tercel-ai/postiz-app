@@ -635,6 +635,10 @@ export class IntegrationRepository {
         internalId: true,
         profile: true,
         metadata: true,
+        // Both feed planExtensionSessionSync: `picture` decides whether this
+        // row still needs one, `name` is read by callers that log what changed.
+        name: true,
+        picture: true,
       },
     });
   }
@@ -651,24 +655,33 @@ export class IntegrationRepository {
    * statement removes the window where the matched row briefly read as API.
    * An org holds a handful of integrations per platform, so the extra
    * statements cost nothing at this size.
+   *
+   * `matchedUpdates` carries the display corrections the caller decided this
+   * report is entitled to make (see planExtensionSessionSync). They apply to
+   * the MATCHED row only — the siblings are, by definition, accounts this
+   * browser is not signed into, so the report says nothing about their handle
+   * or picture.
    */
   async recordExtensionSession(
     rows: ReadonlyArray<{ id: string; metadata: Prisma.JsonValue }>,
     matchedId: string | null,
     handle: string | null,
-    checkedAt: Date
+    checkedAt: Date,
+    matchedUpdates: { profile?: string; picture?: string } = {}
   ) {
     for (const row of rows) {
       const merged = mergeSessionHandleIntoMetadata(row.metadata, handle);
+      const isMatched = row.id === matchedId;
 
       await this._integration.model.integration.update({
         where: { id: row.id },
         data: {
-          activeSessionClient: row.id === matchedId ? 'EXTENSION' : 'API',
+          activeSessionClient: isMatched ? 'EXTENSION' : 'API',
           extensionSessionCheckedAt: checkedAt,
           // DbNull (not JsonNull): an empty bucket should clear the column to
           // SQL NULL, not store the JSON literal `null` as its value.
           metadata: merged ? (merged as Prisma.InputJsonValue) : Prisma.DbNull,
+          ...(isMatched ? matchedUpdates : {}),
         },
       });
     }

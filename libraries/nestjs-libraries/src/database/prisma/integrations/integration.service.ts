@@ -36,9 +36,36 @@ import { AutopostRepository } from '@gitroom/nestjs-libraries/database/prisma/au
 import { RefreshIntegrationService } from '@gitroom/nestjs-libraries/integrations/refresh.integration.service';
 import { TemporalService } from 'nestjs-temporal-core';
 import { ExtensionSessionReportDto } from '@gitroom/nestjs-libraries/dtos/integrations/extension-session-report.dto';
-import { matchExtensionSessionCandidate } from '@gitroom/nestjs-libraries/database/prisma/integrations/extension-session.utils';
+import {
+  buildExtensionSessionSeed,
+  matchExtensionSessionCandidate,
+  planExtensionSessionSync,
+} from '@gitroom/nestjs-libraries/database/prisma/integrations/extension-session.utils';
+import { isExtensionPublishablePlatform } from '@gitroom/nestjs-libraries/integrations/integration.manager';
+import { fetchMediaAsDataUri } from '@gitroom/nestjs-libraries/engage/safe-media-fetch';
 
 dayjs.extend(utc);
+
+/** Generous for a profile picture; small enough that a hostile url cannot dump. */
+const AVATAR_MAX_BYTES = 5 * 1024 * 1024;
+const AVATAR_FETCH_TIMEOUT_MS = 10_000;
+
+/**
+ * Channels created from a browser session are stored with NO `tokenExpiration`,
+ * which is what this 0 buys (createOrUpdateIntegration only sets the column
+ * when expiresIn is truthy).
+ *
+ * Load-bearing, not cosmetic. Any row with a non-null tokenExpiration is picked
+ * up by the hourly refresh-workflow recovery sweep
+ * (getIntegrationsWithTokenExpiration), and for a provider with `refreshCron`
+ * — x among them — that starts a refresh against the empty refreshToken these
+ * rows carry. That refresh fails permanently, and a permanent failure marks the
+ * channel refreshNeeded, disconnects it and notifies the user: an auto-created
+ * channel would disable itself within the hour. There is no server-side token
+ * to expire here anyway — the browser session is the credential, and the
+ * extension maintains it.
+ */
+const NO_SERVER_SIDE_TOKEN_EXPIRY = 0;
 
 @Injectable()
 export class IntegrationService {
@@ -278,7 +305,11 @@ export class IntegrationService {
    * for all seven platforms yet, so an unmatched report leaves every row at
    * `activeSessionClient: API` rather than guessing which one to flip.
    */
-  async reportExtensionSession(org: string, report: ExtensionSessionReportDto) {
+  async reportExtensionSession(
+    org: string,
+    report: ExtensionSessionReportDto,
+    opts: { canCreateChannels?: boolean } = {}
+  ) {
     const checkedAt = new Date(report.checkedAt);
 
     for (const entry of report.platforms) {
@@ -286,7 +317,16 @@ export class IntegrationService {
         org,
         entry.platform
       );
-      if (rows.length === 0) continue;
+
+      if (rows.length === 0) {
+        await this.createChannelFromExtensionSession(
+          org,
+          entry,
+          checkedAt,
+          !!opts.canCreateChannels
+        );
+        continue;
+      }
 
       // Signed out of the platform entirely: nobody matches, and there is no
       // handle to record — every row goes back to API with the check stamped.
@@ -295,12 +335,147 @@ export class IntegrationService {
         : null;
       const handle = entry.loggedIn ? entry.handle ?? entry.name ?? null : null;
 
+      const matchedRow = matchedId
+        ? rows.find((row) => row.id === matchedId)
+        : undefined;
+      const sync = matchedRow
+        ? planExtensionSessionSync(matchedRow, entry)
+        : {};
+      const picture = sync.picture
+        ? await this.storeReportedAvatar(sync.picture)
+        : undefined;
+
       await this._integrationRepository.recordExtensionSession(
         rows,
         matchedId,
         handle,
+        checkedAt,
+        {
+          ...(sync.profile ? { profile: sync.profile } : {}),
+          ...(picture ? { picture } : {}),
+        }
+      );
+    }
+  }
+
+  /**
+   * Create the channel a reported login has no row for yet.
+   *
+   * Open to every platform the extension can publish — the browser session IS
+   * the credential now that `extension` is the default send path, so a channel
+   * created from one can publish even with no OAuth token behind it. The
+   * handle-only platforms (hackernews / medium / quora) get exactly the row
+   * their manual "type your handle" form would have produced; x / linkedin /
+   * reddit / devto get a working extension-published channel whose API-path
+   * features (metrics, token refresh, api publishing) stay dormant until the
+   * user connects that account properly, which UPDATES this row rather than
+   * adding one — as long as the reported id matches what OAuth stores, which
+   * is what normalizeAccountId in buildExtensionSessionSeed is for.
+   *
+   * A platform outside EXTENSION_PUBLISHABLE_PLATFORMS is still refused: the
+   * extension cannot publish it, so a row created from a session would be a
+   * channel nothing can send through.
+   *
+   * `canCreateChannels` is the caller's plan check: creating a channel counts
+   * against the org's channel allowance exactly like connecting one by hand, so
+   * a report from an org at its cap records sessions and creates nothing.
+   * Never throws — a failed creation must not cost the rest of the report.
+   */
+  private async createChannelFromExtensionSession(
+    org: string,
+    entry: ExtensionSessionReportDto['platforms'][number],
+    checkedAt: Date,
+    canCreateChannels: boolean
+  ) {
+    if (!entry.loggedIn || !canCreateChannels) return;
+    if (!isExtensionPublishablePlatform(entry.platform)) return;
+
+    const seed = buildExtensionSessionSeed(entry);
+    if (!seed) return;
+
+    try {
+      // Fetched here rather than handed to createOrUpdateIntegration as a url:
+      // that method would pass it straight to uploadSimple's unguarded GET,
+      // which is the very thing storeReportedAvatar exists to avoid. A data URI
+      // is a shape uploadSimple ingests without touching the network at all.
+      const picture = seed.picture
+        ? await this.fetchReportedAvatar(seed.picture)
+        : undefined;
+
+      const created = await this.createOrUpdateIntegration(
+        undefined,
+        false,
+        org,
+        seed.name,
+        picture,
+        'social',
+        seed.internalId,
+        entry.platform,
+        // The handle IS the credential on these platforms — the same value
+        // their provider's authenticate() returns as the access token.
+        seed.username,
+        '',
+        NO_SERVER_SIDE_TOKEN_EXPIRY,
+        seed.username
+      );
+
+      // Stamp the session immediately: the browser is signed into this account
+      // right now, which is the only reason the row exists. Waiting for the
+      // next hourly report would leave a fresh channel reading "never checked".
+      await this._integrationRepository.recordExtensionSession(
+        [{ id: created.id, metadata: created.metadata }],
+        created.id,
+        seed.username,
         checkedAt
       );
+    } catch (err) {
+      console.warn(
+        `[extension-session] could not create ${entry.platform} channel for org ${org}:`,
+        (err as Error)?.message || err
+      );
+    }
+  }
+
+  /**
+   * Re-host a reported avatar, or undefined when that fails. An avatar is the
+   * least important thing in a session report, so a platform CDN that 403s a
+   * server-side fetch must cost the report nothing.
+   *
+   * NOT storage.uploadSimple(url) directly, for the reason engage's reference
+   * media isn't either (see safe-media-fetch.ts's header): the extension reads
+   * these urls off a third-party page's DOM, so fetching one server-side with
+   * uploadSimple's bare, unrestricted GET would make the page an SSRF vector.
+   * Downloading under guards first also settles the content type — which is
+   * how an avatar url that answered with an error page came to be stored as a
+   * `.html` "picture" and render broken ever since.
+   */
+  private async storeReportedAvatar(url: string): Promise<string | undefined> {
+    const dataUri = await this.fetchReportedAvatar(url);
+    if (!dataUri) return undefined;
+    try {
+      return await this.storage.uploadSimple(dataUri);
+    } catch (err) {
+      console.warn(
+        '[extension-session] avatar upload failed:',
+        (err as Error)?.message || err
+      );
+      return undefined;
+    }
+  }
+
+  /** The guarded download half of {@link storeReportedAvatar}. */
+  private async fetchReportedAvatar(url: string): Promise<string | undefined> {
+    try {
+      return await fetchMediaAsDataUri(url, {
+        maxBytes: AVATAR_MAX_BYTES,
+        timeoutMs: AVATAR_FETCH_TIMEOUT_MS,
+      });
+    } catch (err) {
+      console.warn(
+        '[extension-session] avatar fetch refused:',
+        (err as Error)?.message || err
+      );
+      return undefined;
     }
   }
 

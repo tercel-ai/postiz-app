@@ -51,6 +51,7 @@ import { uniqBy } from 'lodash';
 import { RefreshIntegrationService } from '@gitroom/nestjs-libraries/integrations/refresh.integration.service';
 import { AiseeCreditService } from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/aisee-credit.service';
 import { ExtensionSessionReportDto } from '@gitroom/nestjs-libraries/dtos/integrations/extension-session-report.dto';
+import { PermissionsService } from '@gitroom/backend/services/auth/permissions/permissions.service';
 
 /**
  * How long an `activeSessionClient`/`extensionSessionCheckedAt` reading stays
@@ -75,7 +76,8 @@ export class IntegrationsController {
     private _postService: PostsService,
     private _refreshIntegrationService: RefreshIntegrationService,
     private _dataTicksService: DataTicksService,
-    private _aiseeClient: AiseeCreditService
+    private _aiseeClient: AiseeCreditService,
+    private _permissionsService: PermissionsService
   ) {}
 
   private resolveCallbackBaseUrl(origin?: string): string {
@@ -207,13 +209,48 @@ export class IntegrationsController {
    * signed into, per platform. Feeds `activeSessionClient` above; never
    * touches `disabled`/`refreshNeeded` or the publish-due queue. Org-scoped,
    * idempotent (each report fully replaces the prior reading per platform).
+   *
+   * A report can also CREATE a channel, on the platforms whose connection is
+   * just a handle (see createChannelFromExtensionSession). That is a channel
+   * creation like any other, so it is checked against the org's channel
+   * allowance here — but the check is resolved into a flag rather than being a
+   * @CheckPolicies guard on the route: an org at its cap must go on having its
+   * sessions recorded, and a 403 would silently stop that.
    */
   @Patch('/extension-session')
-  reportExtensionSession(
+  async reportExtensionSession(
     @GetOrgFromRequest() org: Organization,
+    @GetUserFromRequest() user: User,
     @Body() body: ExtensionSessionReportDto
   ) {
-    return this._integrationService.reportExtensionSession(org.id, body);
+    let canCreateChannels = false;
+    try {
+      const ability = await this._permissionsService.check(
+        org.id,
+        org.createdAt,
+        // @ts-ignore - `users` is loaded onto the org by the auth middleware,
+        // exactly as PoliciesGuard reads it.
+        org.users[0].role,
+        [[AuthorizationActions.Create, Sections.CHANNEL]],
+        user.id
+      );
+      canCreateChannels = ability.can(
+        AuthorizationActions.Create,
+        Sections.CHANNEL
+      );
+    } catch (err) {
+      // Recording sessions is what this endpoint is FOR; creating a channel is
+      // the extra. An allowance that could not be resolved therefore costs the
+      // extra and nothing else, rather than failing the whole report.
+      console.warn(
+        '[extension-session] channel allowance check failed:',
+        (err as Error)?.message || err
+      );
+    }
+
+    return this._integrationService.reportExtensionSession(org.id, body, {
+      canCreateChannels,
+    });
   }
 
   @Post('/:id/settings')
