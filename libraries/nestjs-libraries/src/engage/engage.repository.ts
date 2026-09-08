@@ -163,6 +163,17 @@ const NON_ACTIONABLE_REPLY_REASONS: Record<
   },
 };
 
+/**
+ * Prefix of the error stamped on a reply closed by a "replies disabled" report.
+ *
+ * Shared by the write (markOpportunityRepliesDisabled) and its undo
+ * (restoreOpportunityRepliesForAdmin) on purpose: the error string is the ONLY
+ * marker distinguishing a reply that this verdict closed from one that failed
+ * for any other reason, so the two must not be able to drift apart.
+ */
+export const REPLIES_DISABLED_ERROR_PREFIX =
+  'Replies are disabled on this post: ';
+
 export interface ScanTiming {
   lastScanAt: Date | null; // most recent successful completion
   nextScanAt: Date | null; // earliest upcoming scan (derived, not stored)
@@ -3397,7 +3408,7 @@ export class EngageRepository {
     }
 
     const error =
-      `Replies are disabled on this post: ${reason}`.slice(0, 400) +
+      `${REPLIES_DISABLED_ERROR_PREFIX}${reason}`.slice(0, 400) +
       ' — the post accepts no replies, so this one will not be retried.';
 
     // One transaction, for the same reason target-gone uses one: a stamped row
@@ -4906,6 +4917,77 @@ export class EngageRepository {
     return { deleted: res.count, skipped: ids.length - deletable.length };
   }
 
+  /**
+   * Clear `repliesDisabledAt` — the ONE reactivation path for a post the
+   * detectors closed, and deliberately an admin-only one.
+   *
+   * The column is written on the word of a browser extension reporting what it
+   * saw on a page, through seven platform detectors, six of them new. A false
+   * positive there costs EVERY tenant the automated replies on a perfectly open
+   * post, and until now nothing but a hand-written UPDATE could undo it (see
+   * the column's note in schema.prisma). This is that UPDATE, made reviewable.
+   *
+   * **Reopening the closed replies is part of the undo, not an extra.** The
+   * stamp alone would restore almost nothing: pickAutoReplyCandidates skips an
+   * opportunity this org/project already has a reply row for, so the org whose
+   * poster made the false report would never draft against it again — its one
+   * reply would simply stay ERROR forever. Only replies THIS verdict closed are
+   * reopened, identified by the error prefix the same write stamped
+   * ({@link REPLIES_DISABLED_ERROR_PREFIX}); a reply that failed for any other
+   * reason keeps its own error and stays closed.
+   *
+   * Cross-org, matching the write it undoes: the stamp closed replies belonging
+   * to whichever orgs had one parked, and leaving those shut while the row goes
+   * back into circulation would be a half-undo nobody can see.
+   *
+   * Idempotent: a row that is not stamped is counted as untouched rather than
+   * rewritten, so `restored` reports real work.
+   */
+  async restoreOpportunityRepliesForAdmin(
+    ids: string[]
+  ): Promise<{ restored: number; repliesReopened: number }> {
+    if (!ids.length) return { restored: 0, repliesReopened: 0 };
+
+    // Read OUTSIDE the transaction, exactly as markOpportunityRepliesDisabled
+    // does: Post carries no opportunityId, so the reply rows are the only route
+    // from an opportunity to the posts to reopen.
+    const parked = await this._sentReply.model.engageSentReply.findMany({
+      where: { opportunityId: { in: ids } },
+      select: { postId: true },
+    });
+
+    return this._tx.model.$transaction(async (tx) => {
+      // `repliesDisabledAt: { not: null }` rather than a blind update, so an
+      // untouched row is reported as untouched.
+      const cleared = await tx.engageOpportunity.updateMany({
+        where: { id: { in: ids }, repliesDisabledAt: { not: null } },
+        data: { repliesDisabledAt: null },
+      });
+
+      let repliesReopened = 0;
+      if (parked.length) {
+        // ERROR → QUEUE puts the reply back within claimDueEngageReplies' reach:
+        // the close already nulled `releaseId`, so nothing else is holding it.
+        // `releaseURL: null` and `deletedAt: null` are re-asserted here because
+        // a reply that DID go out (or was removed afterwards) must never be
+        // re-sent, however its error text reads.
+        const reopened = await tx.post.updateMany({
+          where: {
+            id: { in: parked.map((p) => p.postId) },
+            state: 'ERROR',
+            deletedAt: null,
+            releaseURL: null,
+            error: { startsWith: REPLIES_DISABLED_ERROR_PREFIX },
+          },
+          data: { state: 'QUEUE', error: null },
+        });
+        repliesReopened = reopened.count;
+      }
+
+      return { restored: cleared.count, repliesReopened };
+    });
+  }
+
   async listSentRepliesForAdmin(query: {
     page?: number;
     pageSize?: number;
@@ -4913,6 +4995,12 @@ export class EngageRepository {
     platform?: string;
     externalPostUrl?: string;
     state?: State;
+    // Tri-state on the SHARED opportunity's `repliesDisabledAt`: true = only
+    // posts the platform was reported as closed to replies, false = only open
+    // ones, undefined = no filter. Answers the question this list is opened
+    // with — "which of these stopped going out because the box is shut, and
+    // which failed for their own reasons" — which `state=ERROR` alone cannot.
+    repliesDisabled?: boolean;
     sortOrder?: 'asc' | 'desc';
   }) {
     const page = query.page ?? 1;
@@ -4946,6 +5034,14 @@ export class EngageRepository {
             },
           }
         : {}),
+      // `undefined` means "no filter", so the check is against undefined rather
+      // than falsiness — `false` is a filter of its own (only open posts), and
+      // treating it as absent would answer a question nobody asked.
+      ...(query.repliesDisabled === undefined
+        ? {}
+        : {
+            repliesDisabledAt: query.repliesDisabled ? { not: null } : null,
+          }),
     };
 
     const where: Prisma.EngageSentReplyWhereInput = {
@@ -5018,6 +5114,13 @@ export class EngageRepository {
               authorFollowers: true,
               authorAvatarUrl: true,
               postPublishedAt: true,
+              // Why a reply row carries a column that lives on the shared
+              // opportunity: this list is where an operator lands when someone
+              // reports "my replies stopped going out", and a closed reply box
+              // is the answer in the one case where the post itself still looks
+              // fine. It is also the trigger for the undo —
+              // PATCH /admin/engage/opportunities/replies-disabled.
+              repliesDisabledAt: true,
             },
           },
         },

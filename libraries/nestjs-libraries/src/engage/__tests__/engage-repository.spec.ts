@@ -1129,6 +1129,53 @@ describe('EngageRepository — two-table reads', () => {
       });
     });
 
+    it('filters to posts the platform closed to replies', async () => {
+      const { repo, sentFindMany, sentCount } = buildRepo();
+      sentFindMany.mockResolvedValue([]);
+      sentCount.mockResolvedValue(0);
+
+      await repo.listSentRepliesForAdmin({ repliesDisabled: true });
+      expect(sentFindMany.mock.calls[0][0].where.opportunity).toEqual({
+        repliesDisabledAt: { not: null },
+      });
+    });
+
+    it('treats repliesDisabled=false as its own filter, not as absent', async () => {
+      // THE reason this is tri-state. `false` asks for the posts that are still
+      // open — the replies whose failure has some OTHER cause — and folding it
+      // into "no filter" would answer with everything and look like it worked.
+      const { repo, sentFindMany, sentCount } = buildRepo();
+      sentFindMany.mockResolvedValue([]);
+      sentCount.mockResolvedValue(0);
+
+      await repo.listSentRepliesForAdmin({ repliesDisabled: false });
+      expect(sentFindMany.mock.calls[0][0].where.opportunity).toEqual({
+        repliesDisabledAt: null,
+      });
+    });
+
+    it('merges repliesDisabled with the other opportunity filters', async () => {
+      // Same trap as platform + externalPostUrl: three filters narrowing one
+      // relation have to end up in ONE `opportunity` object.
+      const { repo, sentFindMany, sentCount } = buildRepo();
+      sentFindMany.mockResolvedValue([]);
+      sentCount.mockResolvedValue(0);
+
+      await repo.listSentRepliesForAdmin({
+        platform: 'reddit',
+        externalPostUrl: 'https://reddit.com/r/x/comments/1',
+        repliesDisabled: true,
+      });
+      expect(sentFindMany.mock.calls[0][0].where.opportunity).toEqual({
+        platform: 'reddit',
+        externalPostUrl: {
+          contains: 'https://reddit.com/r/x/comments/1',
+          mode: 'insensitive',
+        },
+        repliesDisabledAt: { not: null },
+      });
+    });
+
     it('ignores a blank externalPostUrl rather than matching everything', async () => {
       const { repo, sentFindMany, sentCount } = buildRepo();
       sentFindMany.mockResolvedValue([]);

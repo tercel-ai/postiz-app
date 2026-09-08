@@ -273,6 +273,12 @@ org/user scoping plus Engage-specific filters. Each row carries the reply `post`
   too. Combines with `platform`; a blank/whitespace value is ignored rather than
   matching everything.
 - `state` (enum): reply `Post.state` — `DRAFT`, `QUEUE`, `PUBLISHED`, `ERROR`.
+- `repliesDisabled` (`true` | `false`, also `1` / `0`): whether the answered
+  opportunity carries a `repliesDisabledAt` stamp. **Tri-state** — `true` = only
+  posts the platform was reported as closed to replies, `false` = only open
+  ones, omitted = both. Pairs with `state=ERROR` to split failed replies into
+  "the box is shut" and "something else went wrong". A value that is neither
+  boolean shape is a `400`, not a silent `false`.
 - `sortOrder` (`asc` | `desc`, default `desc`): by `createdAt`.
 
 **Response:** `{ results, total, page, pageSize, totalPages }`.
@@ -280,6 +286,33 @@ org/user scoping plus Engage-specific filters. Each row carries the reply `post`
 To repair an opportunity found this way (a body still holding `t.co` shortlinks),
 see `scripts/refresh-engage-opportunity-content.ts` in
 [engage/scripts.md](engage/scripts.md).
+
+Each row's `opportunity` also carries `repliesDisabledAt` — non-null means the
+platform was reported as accepting no replies on that post, which is why this
+reply (and every other org's) stopped being retried. Undo it with the endpoint
+below.
+
+#### PATCH /admin/engage/opportunities/replies-disabled
+
+Clear `EngageOpportunity.repliesDisabledAt` and reopen the replies that verdict
+closed. **The only reactivation path for the column** — it is stamped by
+`POST /engage/opportunities/:id/replies-disabled` on a browser extension
+detector's report, globally for every tenant, so the correction is SuperAdmin-only
+by design.
+
+**Body:** `{ "ids": ["<opportunityId>", …] }` — 1–200 ids.
+
+**Response `200`:** `{ "restored": 1, "repliesReopened": 2 }`
+
+- `restored` counts rows that were actually stamped; re-running a batch reports
+  `0` rather than claiming work it did not do.
+- `repliesReopened` counts replies moved `ERROR` → `QUEUE`. Only replies closed
+  by *this* verdict are touched (matched on the error text the same write
+  stamped) and only if they never went out — a reply with a `releaseURL`, a
+  soft-deleted one, or one that failed for its own reason stays closed.
+- Reopening is not optional garnish: `pickAutoReplyCandidates` skips an
+  opportunity the org already has a reply row for, so clearing the stamp alone
+  would leave the reporting org unable to draft against it ever again.
 
 ### Dashboard
 

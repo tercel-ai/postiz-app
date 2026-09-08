@@ -14,6 +14,7 @@ import { AdminEngageQueryDto } from '@gitroom/nestjs-libraries/dtos/admin/admin-
 import {
   AdminOpportunityDeleteBodyDto,
   AdminOpportunityQueryDto,
+  AdminOpportunityRestoreRepliesBodyDto,
   AdminOpportunityUrlBodyDto,
 } from '@gitroom/nestjs-libraries/dtos/admin/admin-engage-opportunity.dto';
 import { SuperAdmin } from '@gitroom/backend/services/auth/admin/super-admin.decorator';
@@ -53,6 +54,7 @@ export class AdminEngageController {
       platform: query.platform,
       externalPostUrl: query.externalPostUrl,
       state: query.state,
+      repliesDisabled: query.repliesDisabled,
       sortOrder: query.sortOrder,
     });
   }
@@ -87,6 +89,28 @@ export class AdminEngageController {
       );
     }
     return this._engageService.repairOpportunityUrlsForAdmin(body.items);
+  }
+
+  /**
+   * Undo a "replies disabled" verdict — the only reactivation path for
+   * `EngageOpportunity.repliesDisabledAt`.
+   *
+   * That column is stamped by POST /engage/opportunities/:id/replies-disabled
+   * on the report of a browser extension's platform detector, and the write is
+   * global: one org's poster mis-reading a page costs every tenant the
+   * automated replies on that post. The correction therefore cannot live on the
+   * same side as the mistake — it is SuperAdmin-only, like the rest of this
+   * controller.
+   *
+   * Also reopens the replies that verdict closed (ERROR → QUEUE). Without that
+   * the clear is close to a no-op for the reporting org: the draft picker skips
+   * an opportunity it already has a reply row for.
+   */
+  @Patch('/opportunities/replies-disabled')
+  async restoreOpportunityReplies(
+    @Body() body: AdminOpportunityRestoreRepliesBodyDto,
+  ) {
+    return this._engageService.restoreOpportunityRepliesForAdmin(body.ids);
   }
 
   @Delete('/opportunities')

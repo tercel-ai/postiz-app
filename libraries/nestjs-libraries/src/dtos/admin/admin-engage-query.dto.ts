@@ -1,5 +1,14 @@
-import { IsEnum, IsIn, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
-import { Type } from 'class-transformer';
+import {
+  IsBoolean,
+  IsEnum,
+  IsIn,
+  IsInt,
+  IsOptional,
+  IsString,
+  Max,
+  Min,
+} from 'class-validator';
+import { Transform, Type } from 'class-transformer';
 import { State } from '@prisma/client';
 
 // Admin-side query for the cross-org Engage reply list (GET /admin/engage/sent).
@@ -47,6 +56,25 @@ export class AdminEngageQueryDto {
   @IsOptional()
   @IsEnum(State)
   state?: State;
+
+  // Whether the opportunity this reply answers carries a `repliesDisabledAt`
+  // stamp — the platform was reported as accepting no replies on that post.
+  //
+  // TRI-STATE, unlike AdminOpportunityQueryDto.onlyBrokenUrls: `true` = only
+  // closed posts, `false` = only open ones, omitted = both. Which is why the
+  // transform hands anything it does not recognise straight to @IsBoolean and
+  // takes the 400. Coercing (the `value === 'true'` shorthand) would read a
+  // typo'd `repliesDisabled=yes` as `false` and quietly answer "only the open
+  // ones" — the opposite of what was asked, with nothing to show for it.
+  @IsOptional()
+  @Transform(({ value }) => {
+    if (value === '' || value === undefined || value === null) return undefined;
+    if (value === true || value === 'true' || value === '1') return true;
+    if (value === false || value === 'false' || value === '0') return false;
+    return value;
+  })
+  @IsBoolean()
+  repliesDisabled?: boolean;
 
   @IsOptional()
   @IsIn(['asc', 'desc'])

@@ -1860,6 +1860,14 @@ export class EngageService implements OnApplicationBootstrap {
     return this._engageRepository.deleteOpportunitiesForAdmin(ids);
   }
 
+  // The undo of markOpportunityRepliesDisabled: clears the shared stamp and
+  // reopens the replies that same verdict closed. Admin-only by design — the
+  // stamp is written on an extension detector's word, so the correction has to
+  // come from somewhere the detector cannot reach.
+  restoreOpportunityRepliesForAdmin(ids: string[]) {
+    return this._engageRepository.restoreOpportunityRepliesForAdmin(ids);
+  }
+
   listSentRepliesForAdmin(query: {
     page?: number;
     pageSize?: number;
@@ -1867,6 +1875,8 @@ export class EngageService implements OnApplicationBootstrap {
     platform?: string;
     externalPostUrl?: string;
     state?: State;
+    // Tri-state — see the repository for why `false` is not the same as absent.
+    repliesDisabled?: boolean;
     sortOrder?: 'asc' | 'desc';
   }) {
     return this._engageRepository.listSentRepliesForAdmin(query);

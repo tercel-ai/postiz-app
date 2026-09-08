@@ -64,6 +64,16 @@ export class AdminOpportunityUrlBodyDto {
   items: AdminOpportunityUrlItemDto[];
 }
 
+// Undo of a "replies disabled" verdict. Same shape and same bound as the delete
+// body — a list of opportunity ids, capped so one call cannot rewrite the table.
+export class AdminOpportunityRestoreRepliesBodyDto {
+  @IsArray()
+  @ArrayNotEmpty()
+  @ArrayMaxSize(200)
+  @IsString({ each: true })
+  ids: string[];
+}
+
 export class AdminOpportunityDeleteBodyDto {
   @IsArray()
   @ArrayNotEmpty()

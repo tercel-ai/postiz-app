@@ -233,3 +233,13 @@ deliberate — a flagged account costs far more than a slow repair — so a page
 the limit.
 
 Listing and deleting are ordinary API calls with no such constraint.
+
+---
+
+## Not part of this flow: `PATCH /admin/engage/opportunities/replies-disabled`
+
+Same controller, different problem. That endpoint undoes a *replies disabled*
+verdict — a post whose address is fine and which the platform simply reported as
+closed to replies. It clears `EngageOpportunity.repliesDisabledAt` and reopens
+the replies that verdict closed, and it is driven from the admin console rather
+than the extension. See [admin-api.md](admin-api.md#patch-adminengageopportunitiesreplies-disabled).
