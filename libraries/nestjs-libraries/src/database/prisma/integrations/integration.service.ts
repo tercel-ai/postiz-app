@@ -35,6 +35,8 @@ import utc from 'dayjs/plugin/utc';
 import { AutopostRepository } from '@gitroom/nestjs-libraries/database/prisma/autopost/autopost.repository';
 import { RefreshIntegrationService } from '@gitroom/nestjs-libraries/integrations/refresh.integration.service';
 import { TemporalService } from 'nestjs-temporal-core';
+import { ExtensionSessionReportDto } from '@gitroom/nestjs-libraries/dtos/integrations/extension-session-report.dto';
+import { matchExtensionSessionCandidate } from '@gitroom/nestjs-libraries/database/prisma/integrations/extension-session.utils';
 
 dayjs.extend(utc);
 
@@ -256,6 +258,50 @@ export class IntegrationService {
 
   getIntegrationsList(org: string) {
     return this._integrationRepository.getIntegrationsList(org);
+  }
+
+  /**
+   * Consume one PATCH /integrations/extension-session report: the browser
+   * extension's hourly session-maintenance job telling us, per platform,
+   * which account (if any) the user's Chrome is currently signed into. This
+   * only feeds diagnostics and the 'extension' send path's display status —
+   * it never touches `disabled`/`refreshNeeded` (those are 'api'-path OAuth
+   * health) or the publish-due queue (extensionRouteBranches()).
+   *
+   * Matching is per platform, against every integration the org has for it
+   * (an org can bind more than one account on the same platform): `id`
+   * (comparable to `Integration.internalId`) is the primary, reliable match
+   * key — see aisee-browser-extension's `PlatformLoginEntry.id`. `handle` is
+   * a same-account fallback for platforms whose probe couldn't recover an id.
+   * Normalization here is deliberately conservative (trim/lowercase, strip a
+   * leading @ or u/) — per-platform `profile` formatting hasn't been audited
+   * for all seven platforms yet, so an unmatched report leaves every row at
+   * `activeSessionClient: API` rather than guessing which one to flip.
+   */
+  async reportExtensionSession(org: string, report: ExtensionSessionReportDto) {
+    const checkedAt = new Date(report.checkedAt);
+
+    for (const entry of report.platforms) {
+      const rows = await this._integrationRepository.getIntegrationsForPlatform(
+        org,
+        entry.platform
+      );
+      if (rows.length === 0) continue;
+
+      // Signed out of the platform entirely: nobody matches, and there is no
+      // handle to record — every row goes back to API with the check stamped.
+      const matchedId = entry.loggedIn
+        ? matchExtensionSessionCandidate(entry, rows)
+        : null;
+      const handle = entry.loggedIn ? entry.handle ?? entry.name ?? null : null;
+
+      await this._integrationRepository.recordExtensionSession(
+        rows,
+        matchedId,
+        handle,
+        checkedAt
+      );
+    }
   }
 
   getByIdForAdmin(id: string) {

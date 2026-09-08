@@ -5,6 +5,7 @@ import {
   Get,
   HttpException,
   Param,
+  Patch,
   Post,
   Put,
   Query,
@@ -49,6 +50,21 @@ import {
 import { uniqBy } from 'lodash';
 import { RefreshIntegrationService } from '@gitroom/nestjs-libraries/integrations/refresh.integration.service';
 import { AiseeCreditService } from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/aisee-credit.service';
+import { ExtensionSessionReportDto } from '@gitroom/nestjs-libraries/dtos/integrations/extension-session-report.dto';
+
+/**
+ * How long an `activeSessionClient`/`extensionSessionCheckedAt` reading stays
+ * trustworthy before a consumer (CLI, diagnostics) should flag it as possibly
+ * out of date. 2.5x the extension's hourly session-maintenance interval —
+ * enough slack for one missed run (device asleep, MV3 worker recycled)
+ * without papering over a browser that's genuinely stopped reporting.
+ */
+const EXTENSION_SESSION_STALE_AFTER_MS = 150 * 60 * 1000;
+
+/** True once a reading is old enough that it shouldn't be acted on as current. */
+function isExtensionSessionStale(checkedAt: Date | null): boolean {
+  return !!checkedAt && Date.now() - checkedAt.getTime() > EXTENSION_SESSION_STALE_AFTER_MS;
+}
 
 @ApiTags('Integrations')
 @Controller('/integrations')
@@ -162,6 +178,12 @@ export class IntegrationsController {
             identifier: p.providerIdentifier,
             inBetweenSteps: p.inBetweenSteps,
             refreshNeeded: p.refreshNeeded,
+            activeSessionClient: p.activeSessionClient,
+            extensionSessionCheckedAt: p.extensionSessionCheckedAt,
+            extensionSessionStale: isExtensionSessionStale(p.extensionSessionCheckedAt),
+            extensionSessionHandle:
+              (p.metadata as { extensionSessionHandle?: string } | null)
+                ?.extensionSessionHandle ?? null,
             isCustomFields: !!findIntegration.customFields,
             ...(findIntegration.customFields
               ? { customFields: await findIntegration.customFields() }
@@ -177,6 +199,21 @@ export class IntegrationsController {
         })
       ),
     };
+  }
+
+  /**
+   * The browser extension's hourly session-maintenance job reports what it
+   * already probed — which account (if any) this org's Chrome is currently
+   * signed into, per platform. Feeds `activeSessionClient` above; never
+   * touches `disabled`/`refreshNeeded` or the publish-due queue. Org-scoped,
+   * idempotent (each report fully replaces the prior reading per platform).
+   */
+  @Patch('/extension-session')
+  reportExtensionSession(
+    @GetOrgFromRequest() org: Organization,
+    @Body() body: ExtensionSessionReportDto
+  ) {
+    return this._integrationService.reportExtensionSession(org.id, body);
   }
 
   @Post('/:id/settings')

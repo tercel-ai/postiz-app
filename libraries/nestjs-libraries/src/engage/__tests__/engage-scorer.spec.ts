@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { postSearchText, scorePost, RawPost } from '../engage-scorer';
+import {
+  postSearchText,
+  scorePost,
+  matchKeywordStrength,
+  RawPost,
+} from '../engage-scorer';
 import type { EngageKeyword } from '@prisma/client';
 
 // Test fixtures
@@ -130,6 +135,146 @@ describe('engage-scorer', () => {
       // "\b" must still anchor both ends: no matching inside a longer token.
       const post = makePost({ postContent: 'reopen-source AIs' });
       expect(scorePost(post, kw)).toBeNull();
+    });
+  });
+
+  describe('matchKeywordStrength — loose (same-root inflection) matches', () => {
+    // The motivating case: a LinkedIn search for "ai agents" surfaces posts
+    // that only ever write "AI agent" (singular) — on-topic, and rejecting it
+    // outright was dropping most of a keyword's real hits.
+    it('matches the singular form of a plural keyword — "loose"', () => {
+      expect(matchKeywordStrength('Your AI agent remembers things', 'ai agents')).toBe(
+        'loose'
+      );
+    });
+
+    it('matches the plural form of a singular keyword — "loose"', () => {
+      expect(matchKeywordStrength('AI agents are everywhere now', 'ai agent')).toBe(
+        'loose'
+      );
+    });
+
+    it('matches verb inflections of the last word — governs/governing/governed', () => {
+      expect(matchKeywordStrength('who governs this system', 'govern')).toBe('loose');
+      expect(matchKeywordStrength('governing the rollout', 'govern')).toBe('loose');
+      expect(matchKeywordStrength('AI was governed by policy', 'govern')).toBe(
+        'loose'
+      );
+    });
+
+    it('does NOT match the -ance/-ation/-ion derivational forms (cut for safety)', () => {
+      // Dropped deliberately: the same stem-then-suffix mechanism that let
+      // "govern" match "governance" also let "rate" match "ration" (via the
+      // "rat" stem + "ion") — a derived form's stem collides with unrelated
+      // real words far more often than a plain plural/tense stem does. See
+      // the "does not misfire on short words" block below for that case.
+      expect(matchKeywordStrength('AI governance is a big topic', 'govern')).toBeNull();
+      expect(matchKeywordStrength('under EU regulation now', 'regulate')).toBeNull();
+    });
+
+    it('does not misfire on short words whose stem collides with a real word', () => {
+      // "rate" → stem "rat" → "rat" + "ion" used to match "ration", a
+      // completely unrelated word. "use" → stem "us" → the bare stem "us" is
+      // already a real, unrelated word on its own. Below LOOSE_MIN_WORD_LENGTH,
+      // these keywords only ever match their own exact phrase.
+      expect(matchKeywordStrength('military ration packs', 'rate')).toBeNull();
+      expect(matchKeywordStrength('let us know what you think', 'use')).toBeNull();
+      // The exact phrase itself is unaffected.
+      expect(matchKeywordStrength('what is the rate today', 'rate')).toBe('exact');
+    });
+
+    it('the exact phrase itself still scores "exact", not "loose"', () => {
+      expect(matchKeywordStrength('AI agents are everywhere', 'ai agents')).toBe(
+        'exact'
+      );
+    });
+
+    it('only widens the LAST word — "open sourcing AI" still does not hit "open source AI"', () => {
+      // Same fixture as the hyphenation suite above: "source" is not the last
+      // word, so it stays literal even under loose matching.
+      expect(
+        matchKeywordStrength('By open sourcing AI, OpenAI helps', 'open source AI')
+      ).toBeNull();
+    });
+
+    it('does not loosen a single-word ALL-CAPS keyword (looks like an abbreviation)', () => {
+      // "AI" has vowels but is short and all-caps as configured; inflecting it
+      // ("AIs", "AIing") is meaningless noise, not a real widening.
+      expect(matchKeywordStrength('nothing relevant here', 'AI')).toBeNull();
+    });
+
+    it('does not loosen a short vowel-less keyword like "mcp"', () => {
+      expect(matchKeywordStrength('completely unrelated post', 'mcp')).toBeNull();
+    });
+
+    it('rejects unrelated content entirely', () => {
+      expect(matchKeywordStrength('a totally different topic', 'ai agents')).toBeNull();
+    });
+  });
+
+  describe('matchKeywordStrength — abbreviation/expansion equivalents (score as "exact")', () => {
+    it('a bare acronym keyword matches its spelled-out form in content', () => {
+      expect(
+        matchKeywordStrength(
+          'We integrated with the Model Context Protocol today',
+          'mcp'
+        )
+      ).toBe('exact');
+    });
+
+    it('a spelled-out keyword matches a bare acronym in content (auto-derived)', () => {
+      expect(
+        matchKeywordStrength('Our agent now speaks MCP', 'model context protocol')
+      ).toBe('exact');
+    });
+
+    it('is case-insensitive and works through scorePost end to end', () => {
+      const post = makePost({ postContent: 'Announcing our new MCP server' });
+      const result = scorePost(post, [makeKeyword('Model Context Protocol')]);
+      expect(result).not.toBeNull();
+      expect(result!.scoreKeyword).toBe(15); // full exact-match weight, not the loose discount
+    });
+
+    it('does not match an unrelated acronym-shaped word', () => {
+      expect(matchKeywordStrength('ask the DBA about this', 'mcp')).toBeNull();
+    });
+
+    it('does NOT auto-derive a 2-letter acronym from a 2-word keyword', () => {
+      // "open source" → "os" would otherwise count ANY mention of an
+      // operating system as an exact hit for "open source" — a 2-letter
+      // acronym collides with real short words far too often to be safe.
+      // The exact phrase itself is unaffected.
+      expect(
+        matchKeywordStrength('Windows is a popular OS choice', 'open source')
+      ).toBeNull();
+      expect(
+        matchKeywordStrength('this is fully open source', 'open source')
+      ).toBe('exact');
+    });
+
+    it('does not auto-derive a 3-letter acronym that collides with a common word', () => {
+      // STOP_ACRONYMS backstop: even at 3+ words, an acronym that happens to
+      // spell out an ordinary word must not become a silent exact-match
+      // trigger for that word everywhere it appears.
+      expect(
+        matchKeywordStrength('the weather is nice today', 'total hardware efficiency')
+      ).toBeNull();
+    });
+  });
+
+  describe('computeKeywordScore — loose hits score roughly half of an exact hit', () => {
+    it('a loose-only hit scores less than the same keyword matched exactly', () => {
+      const exact = scorePost(
+        makePost({ postContent: 'AI agents are everywhere' }),
+        [makeKeyword('ai agents')]
+      )!;
+      const loose = scorePost(
+        makePost({ postContent: 'Your AI agent remembers things' }),
+        [makeKeyword('ai agents')]
+      )!;
+      expect(exact.scoreKeyword).toBe(15);
+      expect(loose.scoreKeyword).toBe(7);
+      expect(loose.scoreKeyword).toBeLessThan(exact.scoreKeyword);
     });
   });
 

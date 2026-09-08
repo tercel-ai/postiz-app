@@ -1,4 +1,5 @@
 import { EngageKeyword } from '@prisma/client';
+import { getKeywordAbbreviations } from './keyword-abbreviations-loader';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -82,14 +83,21 @@ export function scorePost(
   post: RawPost,
   keywords: Pick<EngageKeyword, 'keyword' | 'type' | 'enabled'>[]
 ): ScoredPost | null {
-  // Layer 1: keyword hard filter — must hit at least one enabled keyword
+  // Layer 1: keyword hard filter — must hit at least one enabled keyword,
+  // exactly or loosely (see matchKeywordStrength).
   const searchText = postSearchText(post);
-  const hits = keywords.filter(
-    (k) => k.enabled && postMatchesKeyword(searchText, k.keyword)
-  );
+  const hits = keywords
+    .filter((k) => k.enabled)
+    .map((k) => ({ keyword: k, strength: matchKeywordStrength(searchText, k.keyword) }))
+    .filter(
+      (h): h is { keyword: (typeof keywords)[number]; strength: KeywordMatchStrength } =>
+        h.strength !== null
+    );
   if (hits.length === 0) return null;
 
-  const scoreKeyword = computeKeywordScore(hits);
+  const scoreKeyword = computeKeywordScore(
+    hits.map((h) => ({ type: h.keyword.type, strength: h.strength }))
+  );
   const scoreHeat = (() => {
     switch (post.platform) {
       case 'x':
@@ -133,7 +141,7 @@ export function scorePost(
     ...post,
     score,
     scoreKeyword,
-    matchedKeywords: hits.map((k) => k.keyword),
+    matchedKeywords: hits.map((h) => h.keyword.keyword),
     scoreHeat,
     scoreAuthority,
     scoreRecency,
@@ -151,30 +159,211 @@ export function scorePost(
 // re-implementing it in the script would risk drift between scan-time and
 // backfill-time keyword hits.
 export function postMatchesKeyword(content: string, keyword: string): boolean {
-  const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  // A space INSIDE a multi-word keyword also matches a hyphen/dash/underscore
+  return matchKeywordStrength(content, keyword) !== null;
+}
+
+export type KeywordMatchStrength = 'exact' | 'loose';
+
+/**
+ * How strongly `content` hits `keyword`:
+ *  - 'exact' — the literal phrase (space/hyphen/underscore interchangeable,
+ *              see exactPhraseMatches), or one of its abbreviation/expansion
+ *              equivalents (the repo-root keyword-abbreviations.json / the
+ *              auto-derived acronym) — those are the SAME term, just spelled
+ *              differently, never a weaker signal.
+ *  - 'loose' — only a same-root English inflection of the keyword's last
+ *              word (see loosePattern) — the configured phrase itself never
+ *              appears.
+ *  -  null   — no hit at all.
+ *
+ * A LinkedIn search for "ai agents" routinely surfaces posts that only ever
+ * write "AI agent" (singular), and an "ai governance" scan misses posts that
+ * spell out "Model Context Protocol" instead of "MCP" — on-topic both times,
+ * but not the exact string a plain substring test requires. Rejecting those
+ * outright was dropping most of a keyword's real hits, one lease at a time,
+ * forever (a scan never retries a post it already saw). 'loose' hits still
+ * count, just at a reduced keyword weight (see computeKeywordScore) instead
+ * of either extreme — reject, or score them the same as a real exact hit.
+ */
+export function matchKeywordStrength(
+  content: string,
+  keyword: string
+): KeywordMatchStrength | null {
+  if (exactPhraseMatches(content, keyword)) return 'exact';
+  for (const variant of keywordVariants(keyword)) {
+    if (exactPhraseMatches(content, variant)) return 'exact';
+  }
+  return looseSuffixMatches(content, keyword) ? 'loose' : null;
+}
+
+function exactPhraseMatches(content: string, phrase: string): boolean {
+  const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // A space INSIDE a multi-word phrase also matches a hyphen/dash/underscore
   // joiner: the same phrase is spelled both ways in the wild, and the platform
   // search that surfaced the post does not distinguish them. A Quora scan for
   // "open source AI" came back with ten answers, six of them on-topic, but only
   // the two that happened to use a literal space were kept — "open-source AI"
   // was rejected four times over purely on the hyphen.
   const flexible = escaped.replace(/\s+/g, '[\\s\\-–—_]+');
-  // For ASCII keywords, keep \b boundaries to prevent "AI" matching "rail".
-  // For keywords containing any non-ASCII character (CJK, accented, emoji),
+  // For ASCII phrases, keep \b boundaries to prevent "AI" matching "rail".
+  // For phrases containing any non-ASCII character (CJK, accented, emoji),
   // do a case-insensitive substring match. CJK text has no whitespace-based
   // word boundaries, and \b is ASCII-only — using either \b or \p{L}-aware
   // lookarounds on mixed Chinese content (e.g. "SEO媒体" inside "推荐SEO媒体") rejects
   // legitimate hits. Substring is the conventional match semantics for CJK.
-  const isAscii = /^[\x00-\x7F]+$/.test(keyword);
+  const isAscii = /^[\x00-\x7F]+$/.test(phrase);
   return isAscii
     ? new RegExp(`\\b${flexible}\\b`, 'i').test(content)
     : new RegExp(flexible, 'i').test(content);
 }
 
+// ─── Abbreviation / expansion equivalents ────────────────────────────────────
+
+// The table itself lives in keyword-abbreviations.json at the REPO ROOT
+// (hot-reloaded by content hash, see keyword-abbreviations-loader.ts) rather
+// than here, so adding a term is a data-file edit reviewed on its own, not a
+// diff to this scoring logic. It is maintained by hand, not inferred: an
+// abbreviation is ambiguous outside its own domain ("AI" is never anything
+// but "artificial intelligence" here, but "MCP" or "RAG" could easily mean
+// something else in a different industry), so it is scoped to the
+// AI/dev-tooling vocabulary this product's own keyword configs actually draw
+// from — not a general-purpose dictionary. A wrong guess there would
+// silently match an unrelated post, so it stays short and reviewed rather
+// than broad.
+
+/**
+ * Every equivalent phrase for `keyword` (never including `keyword` itself):
+ * lookups from the abbreviations table above, plus an acronym mechanically
+ * derived from `keyword` when it is itself a multi-word phrase ("model
+ * context protocol" → "mcp"). Only that direction is derivable automatically
+ * — an acronym can be spelled out only one way, but a bare acronym could
+ * stand for many phrases, which is why the reverse direction needs the
+ * hand-maintained table instead.
+ */
+// A 2-letter acronym collides with real English words far too often to be
+// safe unconditionally ("open source" → "os", "day one" → "do" — both would
+// then count ANY mention of an operating system, or the word "do", as an
+// exact hit for a completely unrelated keyword). Requiring 3+ letters (so
+// 3+ words) cuts the collision rate sharply; STOP_ACRONYMS is a second net
+// under that for the handful of common short words that still happen to
+// land on a real 3-letter word ("the", "for", …) if some future keyword's
+// initials spell one out.
+const STOP_ACRONYMS = new Set([
+  'the', 'and', 'for', 'are', 'but', 'not', 'you', 'all', 'can', 'has',
+  'was', 'one', 'our', 'out', 'day', 'get', 'him', 'his', 'how',
+  'man', 'new', 'now', 'old', 'see', 'two', 'way', 'who', 'boy', 'did',
+  'its', 'let', 'put', 'say', 'she', 'too', 'use',
+]);
+
+function keywordVariants(keyword: string): string[] {
+  const lower = keyword.trim().toLowerCase();
+  const variants = [...(getKeywordAbbreviations()[lower] ?? [])];
+  const words = lower.split(/[\s\-–—_]+/).filter(Boolean);
+  if (words.length >= 3) {
+    const acronym = words.map((w) => w[0]).join('');
+    if (acronym.length >= 3 && !STOP_ACRONYMS.has(acronym)) {
+      variants.push(acronym);
+    }
+  }
+  return variants;
+}
+
+// ─── Loose (inflection-only) matching ────────────────────────────────────────
+
+/**
+ * True for a word that is itself an abbreviation/initialism — inflecting one
+ * ("mcps", "aiing") is meaningless, so loose matching skips it entirely
+ * (keywordVariants above is the only widening an abbreviation keyword gets).
+ * Three signals, case-insensitively: it's a configured abbreviation-table
+ * entry ("rag" is one whether typed upper- or lower-case — the ORIGINAL
+ * all-caps-only check missed a lower-case config entirely); all-caps as
+ * typed; or short with no vowel. None of this is reachable for anything
+ * loosePattern would touch anyway once LOOSE_MIN_WORD_LENGTH excludes it,
+ * but a keyword this short should never even reach the stemming logic below.
+ */
+function looksLikeAbbreviation(word: string): boolean {
+  const lower = word.toLowerCase();
+  if (Object.prototype.hasOwnProperty.call(getKeywordAbbreviations(), lower)) {
+    return true;
+  }
+  if (/^[a-z0-9]+$/.test(lower) && word === word.toUpperCase()) return true;
+  return word.length <= 4 && !/[aeiou]/i.test(word);
+}
+
+// Below this length, stripping a word down to its stem is too likely to land
+// on an unrelated real word rather than a spelling variant of the SAME word:
+// "rate" → stem "rat" → "rat"+"ion" = "ration" (a real, unrelated word);
+// "use" → stem "us" → the bare stem "us" is already a real, unrelated word.
+// Every case that motivated loose matching (agent/agents, govern/governing)
+// clears this comfortably; short words just don't get the widening.
+const LOOSE_MIN_WORD_LENGTH = 5;
+
+/**
+ * A same-root English inflection of `word`: plural/singular (agent/agents)
+ * and verb forms (govern/governs/governing/governed). Built by stripping
+ * `word`'s own trailing s/es (if any) down to a stem, then allowing a small,
+ * purely-inflectional suffix set back onto it. Deliberately NOT a stemmer
+ * for DERIVATIONAL forms (govern→governance, regulate→regulation): dropping
+ * a trailing "e" and adding "-ance"/"-ation"/"-ion" back covered those, but
+ * the same mechanism is what turns "rate" into "ration" — a derived form's
+ * stem collides with unrelated real words far more often than a plain
+ * plural/tense stem does, so that coverage was cut rather than fenced
+ * further; govern/governing/governed still match, governance no longer
+ * does. Returns null for a word too short to stem safely — see
+ * LOOSE_MIN_WORD_LENGTH — and no general dictionary or irregular forms
+ * either way, so any match can only ever be a spelling variant of THIS
+ * word, never a different word that happens to share a stem.
+ */
+function loosePattern(word: string): string | null {
+  if (word.length < LOOSE_MIN_WORD_LENGTH) return null;
+  const escaped = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  let stem = escaped;
+  if (/[^aeiou]es$/i.test(stem)) stem = stem.slice(0, -2);
+  else if (/s$/i.test(stem) && !/ss$/i.test(stem)) stem = stem.slice(0, -1);
+  return `${stem}(?:s|es|ed|ing)?`;
+}
+
+/**
+ * Loose match: every word but the LAST stays an exact, literal token (the
+ * "open source AI" fixture must still reject "open sourcing AI" — only
+ * "source" itself gates that, and it is not the last word), and the last
+ * word is widened via loosePattern. ASCII keywords only, same reasoning as
+ * exactPhraseMatches: CJK has no word-boundary/inflection concept this
+ * suffix logic applies to.
+ */
+function looseSuffixMatches(content: string, keyword: string): boolean {
+  if (!/^[\x00-\x7F]+$/.test(keyword)) return false;
+  const words = keyword.trim().split(/[\s\-–—_]+/).filter(Boolean);
+  const lastWord = words[words.length - 1];
+  if (!lastWord || looksLikeAbbreviation(lastWord)) return false;
+  const lastPattern = loosePattern(lastWord);
+  if (!lastPattern) return false;
+  const leadingWords = words
+    .slice(0, -1)
+    .map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  const pattern = [...leadingWords, lastPattern].join('[\\s\\-–—_]+');
+  return new RegExp(`\\b${pattern}\\b`, 'i').test(content);
+}
+
+// Roughly half an exact hit: a same-root inflection or an abbreviation/
+// expansion equivalent (the latter still scores EXACT — see
+// matchKeywordStrength) is real signal, but not the literal phrase the org
+// configured, so it should not compete on equal footing with a post that
+// used the exact keyword.
+const EXACT_KEYWORD_SCORE = 15;
+const LOOSE_KEYWORD_SCORE = 7;
+
 function computeKeywordScore(
-  hits: Pick<EngageKeyword, 'type'>[]
+  hits: Array<Pick<EngageKeyword, 'type'> & { strength: KeywordMatchStrength }>
 ): number {
-  const base = Math.min(hits.length * 15, 35);
+  const base = Math.min(
+    hits.reduce(
+      (sum, h) =>
+        sum + (h.strength === 'exact' ? EXACT_KEYWORD_SCORE : LOOSE_KEYWORD_SCORE),
+      0
+    ),
+    35
+  );
   const hasBrand = hits.some((k) => k.type === 'BRAND');
   const hasCompetitor = hits.some((k) => k.type === 'COMPETITOR');
   return Math.min(base + (hasBrand ? 5 : 0) + (hasCompetitor ? 3 : 0), 35);

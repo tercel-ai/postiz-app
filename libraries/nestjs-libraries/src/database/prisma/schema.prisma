@@ -374,6 +374,26 @@ model Integration {
   updatedAt             DateTime?              @updatedAt
   inBetweenSteps        Boolean                @default(false)
   refreshNeeded         Boolean                @default(false)
+  // Extension session health: reported by the browser extension's session-maintenance
+  // job, not the OAuth flow. `refreshNeeded` above only tracks the 'api' send path's
+  // token; this tracks which client the org's browser is currently confirmed signed
+  // into THIS account through. Defaults to API (every integration starts out that
+  // way, before any extension report ever names it as the currently-matched account
+  // for its platform); flips to EXTENSION on a matching report, and back to API when
+  // a later report shows the browser signed into a different account (or none).
+  // Deliberately NOT `@updatedAt` — this must only move on an actual extension
+  // report, never on unrelated writes (disableChannel, updateOnCustomerName, etc.),
+  // or staleness reads would be meaningless. See admin diagnostics for how staleness
+  // is derived from it at read time (not stored). Diagnostic extras (e.g. the handle
+  // actually seen logged in, even on rows that didn't match) live in `metadata`.
+  activeSessionClient       PublishMethod          @default(API)
+  extensionSessionCheckedAt DateTime?
+  // Loosely-typed diagnostic extras that don't warrant their own column — first use is
+  // `extensionSessionHandle` (the handle actually seen logged in on the platform for the
+  // report that set activeSessionClient/extensionSessionCheckedAt, kept even on rows that
+  // didn't match, for "browser is signed into @X" messaging). `additionalSettings` above
+  // is a separate, unrelated legacy field and is not affected by this.
+  metadata              Json?
   postingTimes          String                 @default("{\"version\":2,\"schedules\":[]}")
   customInstanceDetails String?
   customerId            String?

@@ -6,6 +6,7 @@ import { makeId } from '@gitroom/nestjs-libraries/services/make.is';
 import { UploadFactory } from '@gitroom/nestjs-libraries/upload/upload.factory';
 import { PlugDto } from '@gitroom/nestjs-libraries/dtos/plugs/plug.dto';
 import { mergeAdditionalSettings, parseAdditionalSettings } from './additional-settings.utils';
+import { mergeSessionHandleIntoMetadata } from './extension-session.utils';
 
 @Injectable()
 export class IntegrationRepository {
@@ -619,6 +620,58 @@ export class IntegrationRepository {
         customer: true,
       },
     });
+  }
+
+  /** All of an org's integrations for one platform, for extension-session matching. */
+  getIntegrationsForPlatform(org: string, platform: string) {
+    return this._integration.model.integration.findMany({
+      where: {
+        organizationId: org,
+        providerIdentifier: platform,
+        deletedAt: null,
+      },
+      select: {
+        id: true,
+        internalId: true,
+        profile: true,
+        metadata: true,
+      },
+    });
+  }
+
+  /**
+   * Write one platform's extension-session report across the rows it covers:
+   * the matched row becomes EXTENSION, its siblings on that platform go back
+   * to API, and all of them get `checkedAt` plus the diagnostic handle ("the
+   * browser is signed into @X" is worth recording even on rows that aren't @X).
+   *
+   * Row-at-a-time rather than `updateMany`, for two reasons: `metadata` is a
+   * shared bucket that has to be merged key-wise instead of replaced, which
+   * `updateMany` cannot express; and settling each row's client in the same
+   * statement removes the window where the matched row briefly read as API.
+   * An org holds a handful of integrations per platform, so the extra
+   * statements cost nothing at this size.
+   */
+  async recordExtensionSession(
+    rows: ReadonlyArray<{ id: string; metadata: Prisma.JsonValue }>,
+    matchedId: string | null,
+    handle: string | null,
+    checkedAt: Date
+  ) {
+    for (const row of rows) {
+      const merged = mergeSessionHandleIntoMetadata(row.metadata, handle);
+
+      await this._integration.model.integration.update({
+        where: { id: row.id },
+        data: {
+          activeSessionClient: row.id === matchedId ? 'EXTENSION' : 'API',
+          extensionSessionCheckedAt: checkedAt,
+          // DbNull (not JsonNull): an empty bucket should clear the column to
+          // SQL NULL, not store the JSON literal `null` as its value.
+          metadata: merged ? (merged as Prisma.InputJsonValue) : Prisma.DbNull,
+        },
+      });
+    }
   }
 
   async disableChannel(org: string, id: string) {

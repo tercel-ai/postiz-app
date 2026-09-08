@@ -1,0 +1,16 @@
+{
+  "ai": ["artificial intelligence"],
+  "ml": ["machine learning"],
+  "nlp": ["natural language processing"],
+  "llm": ["large language model"],
+  "llms": ["large language models"],
+  "mcp": ["model context protocol"],
+  "a2a": ["agent to agent", "agent-to-agent protocol"],
+  "rag": ["retrieval augmented generation"],
+  "genai": ["generative ai", "generative artificial intelligence"],
+  "saas": ["software as a service"],
+  "api": ["application programming interface"],
+  "sdk": ["software development kit"],
+  "iot": ["internet of things"],
+  "rpa": ["robotic process automation"]
+}
