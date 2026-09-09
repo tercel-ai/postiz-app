@@ -10,6 +10,11 @@ import {
   type EngageReplyPolicy,
 } from '@gitroom/nestjs-libraries/engage/engage.service';
 import { EngageDraftService } from '@gitroom/nestjs-libraries/engage/engage-draft.service';
+import {
+  AiseeNotificationChannel,
+  AiseeNotificationClient,
+  AiseeNotificationEvent,
+} from '@gitroom/nestjs-libraries/notifications/aisee-notification.client';
 import { SettingsService } from '@gitroom/nestjs-libraries/database/prisma/settings/settings.service';
 import {
   assertDraftWithinPlatformLimit,
@@ -202,7 +207,11 @@ export class EngageAutoReplyService implements OnModuleInit {
     private _engageService: EngageService,
     private _engageDraftService: EngageDraftService,
     private _settingsService: SettingsService,
-    private _platformPacing: PlatformPacingConfigService
+    private _platformPacing: PlatformPacingConfigService,
+    // Optional so the positional constructors in existing specs keep working,
+    // mirroring EngageService. A missing client means no Aisee notification,
+    // which is the correct degradation for a side channel.
+    private _aiseeNotificationClient?: AiseeNotificationClient
   ) {}
 
   /**
@@ -765,6 +774,26 @@ export class EngageAutoReplyService implements OnModuleInit {
             err instanceof Error ? err.stack : err
           )
         );
+
+      // Aisee notification centre. Only the unattended path notifies: the
+      // manual generator streams the draft back over SSE while the user watches
+      // it appear, so a "Reply ready" there would be pure noise. Here nobody is
+      // looking — the draft was produced by the automation switch and waits in
+      // Awaiting review until someone is told about it.
+      await this._aiseeNotificationClient?.notify({
+        organizationId: org.id,
+        eventKey: AiseeNotificationEvent.ENGAGE_GENERATED,
+        // Keyed on the saved reply, matching how EngageSentReply is tracked
+        // (postId @unique, one row per reply rather than per opportunity).
+        dedupKey: `engage.generated:${saved.id}`,
+        data: {
+          platform: opportunity.platform,
+          sent_reply_id: saved.id,
+          opportunity_id: candidate.opportunityId,
+          project_id: projectId || undefined,
+        },
+        channel: AiseeNotificationChannel.ENGAGE,
+      });
 
       // No lease stamped here. The reply is in QUEUE, so the very next poll's
       // claim lane picks it up and leases it there — one code path holding the

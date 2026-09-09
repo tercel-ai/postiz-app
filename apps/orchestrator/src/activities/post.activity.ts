@@ -28,6 +28,11 @@ import {
 import { getSocialTaskQueue } from '@gitroom/nestjs-libraries/temporal/task-queue';
 import { PrismaRepository } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
 import {
+  AiseeNotificationClient,
+  AiseeNotificationEvent,
+  AiseeNotifyRequest,
+} from '@gitroom/nestjs-libraries/notifications/aisee-notification.client';
+import {
   BIZ_USAGE,
   runWithBizUsage,
 } from '@gitroom/nestjs-libraries/database/prisma/api-usage/api-usage.service';
@@ -53,7 +58,8 @@ export class PostActivity {
     private _webhookService: WebhooksService,
     private _temporalService: TemporalService,
     private _engageSentReply: PrismaRepository<'engageSentReply'>,
-    private _engageOppState: PrismaRepository<'engageOpportunityState'>
+    private _engageOppState: PrismaRepository<'engageOpportunityState'>,
+    private _aiseeNotificationClient: AiseeNotificationClient
   ) {}
 
   @ActivityMethod()
@@ -271,6 +277,18 @@ export class PostActivity {
       digest,
       type
     );
+  }
+
+  /**
+   * Push a post event to the Aisee notification centre.
+   *
+   * Separate from inAppNotification above, which writes Postiz's own bell: this
+   * one carries an event key plus variables instead of rendered HTML, and is
+   * keyed for idempotency because a workflow replay re-runs the activity.
+   */
+  @ActivityMethod()
+  async aiseeNotify(req: AiseeNotifyRequest): Promise<boolean> {
+    return this._aiseeNotificationClient.notify(req);
   }
 
   @ActivityMethod()

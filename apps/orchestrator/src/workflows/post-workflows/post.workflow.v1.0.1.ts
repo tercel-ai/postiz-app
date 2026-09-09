@@ -45,6 +45,7 @@ const proxyTaskQueueHeavy = (taskQueue: string, noRetry = false) => {
 const {
   getPostsList,
   inAppNotification,
+  aiseeNotify,
   changeState,
   logError,
   updatePost,
@@ -267,6 +268,31 @@ export async function postWorkflowV101({
     // When i>0 (thread item) fails, the main post is already PUBLISHED — mark only
     // the failed thread item and any remaining unposted items as ERROR.
     // Loop starts at j=i, so already-PUBLISHED items (j<i) are never touched.
+    // Aisee notification centre. Keyed on the post id, so the several failure
+    // paths below plus any workflow replay still produce a single notification.
+    const notifyPublishFailed = async (errMsg: string) => {
+      try {
+        await aiseeNotify({
+          organizationId: post.organizationId,
+          eventKey: 'post.publish_failed',
+          // cycleCloneId, not postId: a recurring post keeps the same postId
+          // across every cycle (continueAsNew re-enters with it), so keying on
+          // postId alone would report the first cycle and silently swallow
+          // every later one. The clone id is this cycle's own row, and it is
+          // stable across a replay because prepareRecurringCycle is an activity.
+          dedupKey: `post.publish_failed:${cycleCloneId || postId}`,
+          data: {
+            platform: capitalize(post.integration?.providerIdentifier || ''),
+            post_id: postId,
+            project_id: post.projectId || undefined,
+            short_reason: errMsg || undefined,
+          },
+        });
+      } catch (_) {
+        // the post is already marked ERROR; a notification must not undo that
+      }
+    };
+
     const markError = async (errMsg: string) => {
       if (i === 0) {
         await changeState(postsList[0].id, 'ERROR', errMsg, postsList);
@@ -432,6 +458,7 @@ export async function postWorkflowV101({
             false,
             'fail'
           );
+          await notifyPublishFailed(errMsg);
           if (isRecurring) {
             await continueAsNew<typeof postWorkflowV101>({ taskQueue, postId, organizationId });
           }
@@ -450,6 +477,7 @@ export async function postWorkflowV101({
       await logError(postsList[i].id, lastErr, postsList);
       await finalizeCycle(errMsg);
       await markError(errMsg);
+      await notifyPublishFailed(errMsg);
       if (isRecurring) {
         await continueAsNew<typeof postWorkflowV101>({ taskQueue, postId, organizationId });
       }
@@ -512,6 +540,25 @@ export async function postWorkflowV101({
         );
       } catch (_) {
         // notification failure should not affect post state
+      }
+
+      // Aisee notification centre. Keyed on the post id so a workflow replay —
+      // the normal outcome of any activity retry — cannot notify twice.
+      try {
+        await aiseeNotify({
+          organizationId: post.integration.organizationId,
+          eventKey: 'post.published',
+          // Per cycle, not per post — see the note on post.publish_failed above.
+          dedupKey: `post.published:${cycleCloneId || postId}`,
+          data: {
+            platform: capitalize(post.integration.providerIdentifier),
+            post_id: postId,
+            project_id: post.projectId || undefined,
+            external_url: postsResults[0].releaseURL || undefined,
+          },
+        });
+      } catch (_) {
+        // same contract as above: the post is already live
       }
     }
   }

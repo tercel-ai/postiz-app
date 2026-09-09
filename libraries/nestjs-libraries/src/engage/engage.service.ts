@@ -27,6 +27,11 @@ import { hasValidMediaExtension } from '@gitroom/helpers/utils/valid.url.path';
 import { fetchMediaAsDataUri } from '@gitroom/nestjs-libraries/engage/safe-media-fetch';
 import { AiseeCreditService } from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/aisee-credit.service';
 import {
+  AiseeNotificationChannel,
+  AiseeNotificationClient,
+  AiseeNotificationEvent,
+} from '@gitroom/nestjs-libraries/notifications/aisee-notification.client';
+import {
   AiseeBusinessType,
   AiseeBusinessSubType,
   AiseeClient,
@@ -264,7 +269,11 @@ export class EngageService implements OnApplicationBootstrap {
     private _mediaService?: MediaService,
     // Same optional-positional reason as above. Gates the org-wide aggregate
     // config on aisee-core's project switch (see getConfig).
-    private _projectValidation?: ProjectValidationService
+    private _projectValidation?: ProjectValidationService,
+    // Optional for the same reason as the params above: tests build this
+    // service positionally. A missing client simply means no Aisee
+    // notification, which is the correct degradation for a side channel.
+    private _aiseeNotificationClient?: AiseeNotificationClient
   ) { }
 
   // Auto-start global workflows on every app boot so pnpm dev / Docker restart
@@ -1187,11 +1196,33 @@ export class EngageService implements OnApplicationBootstrap {
     sentReplyId: string,
     reason: string
   ) {
-    return this._engageRepository.closeUnconfirmedReply(
+    const result = await this._engageRepository.closeUnconfirmedReply(
       org.id,
       sentReplyId,
       reason
     );
+
+    // Only when a row actually moved to ERROR. `closed: false` means the reply
+    // had already reached PUBLISHED, so telling the user it failed would
+    // contradict a confirmed send.
+    if (result.closed) {
+      const ctx = await this._engageRepository
+        .getSentReplyContext(org.id, sentReplyId)
+        .catch(() => null);
+      await this._aiseeNotificationClient?.notify({
+        organizationId: org.id,
+        eventKey: AiseeNotificationEvent.ENGAGE_REPLY_FAILED,
+        dedupKey: `engage.reply_failed:${sentReplyId}`,
+        data: {
+          platform: ctx?.platform,
+          sent_reply_id: sentReplyId,
+          project_id: ctx?.projectId || undefined,
+        },
+        channel: AiseeNotificationChannel.ENGAGE,
+      });
+    }
+
+    return result;
   }
 
   async toggleBookmark(
@@ -2237,6 +2268,25 @@ export class EngageService implements OnApplicationBootstrap {
         url
       );
     }
+
+    // Aisee notification centre. Keyed on the sent reply rather than the
+    // opportunity: an org may reply to the same opportunity from several of its
+    // accounts, and each of those is its own event. The early return above
+    // already absorbs a repeat callback, but only when a URL was captured —
+    // a URL-less confirm re-runs this whole path, so the dedup key is what
+    // actually holds the guarantee.
+    await this._aiseeNotificationClient?.notify({
+      organizationId: org.id,
+      eventKey: AiseeNotificationEvent.ENGAGE_REPLIED,
+      dedupKey: `engage.replied:${sentReplyId}`,
+      data: {
+        platform: ctx.platform,
+        sent_reply_id: sentReplyId,
+        project_id: ctx.projectId || undefined,
+        external_url: url || undefined,
+      },
+      channel: AiseeNotificationChannel.ENGAGE,
+    });
 
     return { id: sentReplyId, state: 'PUBLISHED', replyUrl: url || null };
   }
