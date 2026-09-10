@@ -903,6 +903,24 @@ answers; a mis-formatted first line is not worth voiding it.
 `referencePostTitle` itself is untouched, and so is its other caller
 (`posts.service.ts` — a different flow).
 
+**The title is returned to the caller** (`ReferencePostResult.title`, and the
+`title` field of the SSE data frame), on those four platforms and only there.
+It has to be: step 1 above lifts the headline OFF the response before
+`text`/`parts` are built, and step 2 strips it again if the model repeated it,
+so a client rendering the streamed text alone gets a Reddit/HN/Medium/dev.to
+post with no headline anywhere and no field to read one from — which reads as
+"this platform did not generate a title" even though it did, and saved it.
+
+It is read back with `titleFromSettings(targetPlatform, settings)` from the
+settings object that was just persisted, NOT re-derived from
+`generatedTitle ?? referencePostTitle(text)`. Two reasons: a second copy of that
+fallback rule can drift from the one the post was saved with, and *where* a
+title lives in settings is per-platform (Reddit nests it under
+`subreddit[0].value.title`, the other three keep it top-level) — knowledge that
+already has exactly one home. It also means `x`/`linkedin`/`quora` need no
+branch here at all: their settings carry no title, so the field is simply
+absent and their response frame is unchanged.
+
 ## 7. Billing
 
 Two independent charges, at two different points in the flow — do not

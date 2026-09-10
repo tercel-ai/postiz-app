@@ -1365,4 +1365,112 @@ describe('EngageService.generateReferencePost — separated post title', () => {
     expect(dto.posts[0].settings.subreddit[0].value.title).not.toBe('');
     expect(dto.posts[0].settings.subreddit[0].value.title).toContain('Most makers');
   });
+
+  // The title is lifted OFF the response before text/parts are built, so
+  // without this field a client rendering the streamed text alone shows a
+  // Reddit/HN/Medium/dev.to post with no headline at all — indistinguishable
+  // from the platform never having generated one.
+  it.each([
+    ['medium', 'https://medium.com/@writer/a-post-123'],
+    ['devto', 'https://dev.to/writer/a-post'],
+    ['hackernews', 'https://news.ycombinator.com/item?id=123'],
+  ])('returns the saved title to the caller on a %s target', async (
+    platform,
+    externalPostUrl
+  ) => {
+    const { service } = buildService({
+      repo: {
+        getOpportunityById: vi.fn(async () => ({
+          id: 'opp1',
+          platform,
+          externalPostUrl,
+          authorUsername: 'writer',
+          title: null,
+          postContent: 'Reference content.',
+        })),
+      },
+      referencePost: titledGenerate('What most ceramic sellers get wrong'),
+    });
+
+    const result = await service.generateReferencePost(
+      ORG,
+      'user1',
+      'opp1',
+      GEN_DTO as any
+    );
+
+    expect(result.title).toBe('What most ceramic sellers get wrong');
+    // The body never carries it: repeating it here is what makes the platform
+    // print the headline twice.
+    expect(result.text).not.toContain('What most ceramic sellers get wrong');
+  });
+
+  // Reddit keeps its title nested under subreddit[0].value, so it is the case
+  // a hand-rolled `settings.title` read would silently return nothing for.
+  it('returns the saved title on a reddit target, read out of the nested settings', async () => {
+    const { service } = buildService({
+      repo: redditOpportunity,
+      referencePost: titledGenerate('Three pricing mistakes I keep seeing'),
+    });
+
+    const result = await service.generateReferencePost(
+      ORG,
+      'user1',
+      'opp1',
+      GEN_DTO
+    );
+
+    expect(result.title).toBe('Three pricing mistakes I keep seeing');
+  });
+
+  // The fallback is what actually publishes when the model skips its TITLE
+  // line, so the caller has to be shown THAT — not the absent model title.
+  it('returns the body-derived fallback title when the generator returned none', async () => {
+    const { service, posts } = buildService({
+      repo: redditOpportunity,
+      referencePost: titledGenerate(),
+    });
+
+    const result = await service.generateReferencePost(
+      ORG,
+      'user1',
+      'opp1',
+      GEN_DTO
+    );
+
+    const [dto] = posts.mapTypeToPost.mock.calls[0];
+    expect(result.title).toBe(dto.posts[0].settings.subreddit[0].value.title);
+  });
+
+  // x/linkedin/quora have no title field on any publish path, so the frame
+  // they always had must not grow one.
+  it.each([
+    ['x', 'https://x.com/writer/status/123'],
+    ['linkedin', 'https://www.linkedin.com/posts/writer_activity-123'],
+    ['quora', 'https://www.quora.com/A-question'],
+  ])('omits the title entirely on a %s target', async (platform, externalPostUrl) => {
+    const { service } = buildService({
+      repo: {
+        getOpportunityById: vi.fn(async () => ({
+          id: 'opp1',
+          platform,
+          externalPostUrl,
+          authorUsername: 'writer',
+          title: null,
+          postContent: 'Reference content.',
+        })),
+      },
+      referencePost: titledGenerate('A title nothing on this platform can use'),
+    });
+
+    const result = await service.generateReferencePost(
+      ORG,
+      'user1',
+      'opp1',
+      GEN_DTO as any
+    );
+
+    expect(result.title).toBeUndefined();
+    expect('title' in result).toBe(false);
+  });
 });

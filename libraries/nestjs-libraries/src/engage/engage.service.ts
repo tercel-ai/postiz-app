@@ -130,6 +130,7 @@ import { parseXTweetId } from '@gitroom/nestjs-libraries/engage/x-tweet';
 import { isThreadCapablePlatform } from '@gitroom/nestjs-libraries/integrations/thread-capability';
 import { socialIntegrationList } from '@gitroom/nestjs-libraries/integrations/integration.manager';
 import { referencePostTitle } from '@gitroom/nestjs-libraries/integrations/social.abstract';
+import { titleFromSettings } from '@gitroom/nestjs-libraries/database/prisma/posts/settings-title';
 import { normalizeEngagePlatform } from '@gitroom/nestjs-libraries/engage/engage-draft-length';
 import {
   fetchRedditAuthorProfile,
@@ -210,6 +211,22 @@ export interface ReferencePostResult {
   parts: string[];
   /** Whether a thread was actually produced (parts.length > 1). */
   thread: boolean;
+  /**
+   * The post's own headline, on the platforms that submit one through a field
+   * of its own (`TITLE_SEPARATED_PLATFORMS`: reddit/hackernews/medium/devto).
+   * Absent everywhere else, where the post has no title at all.
+   *
+   * This is the title that was PERSISTED — the model's own `TITLE:` line, or
+   * the `referencePostTitle` fallback when it emitted none — read back out of
+   * the settings actually saved, so it can never disagree with what publishes.
+   *
+   * Returned because the caller otherwise cannot see it: the title is lifted
+   * OFF the response before `text`/`parts` are built (the body must not repeat
+   * it — see reference-post-generation.md §6.5), so a client that renders the
+   * streamed text alone shows a Reddit/Medium/dev.to/HN post with its headline
+   * missing, and has no field to read it from.
+   */
+  title?: string;
   /** Only when `thread` was requested but a single post came back. */
   threadSkippedReason?: 'platform_unsupported' | 'single_post_generated';
   /**
@@ -1652,6 +1669,20 @@ export class EngageService implements OnApplicationBootstrap {
       ? await this._fetchReferenceMedia(org.id, opportunityId)
       : [];
 
+    // Built ONCE and held, rather than inlined into the post below, because
+    // the persisted title is read back out of it for the response (see the
+    // `title` field on ReferencePostResult). Re-deriving that title in the
+    // return statement would be a second copy of "the model's title, else the
+    // body-derived fallback" — and where a platform KEEPS its title differs
+    // per platform anyway, which is knowledge only titleFromSettings has.
+    const settings = this._buildReferencePostSettings(
+      targetPlatform,
+      opportunity.externalPostUrl,
+      text,
+      generatedTitle,
+      targetChannel
+    );
+
     // Persist as an account-less draft. CreatePostDto.date is unconditionally
     // required even for a draft with nothing scheduled yet, so this value is a
     // placeholder — nothing ever publishes off it.
@@ -1681,13 +1712,7 @@ export class EngageService implements OnApplicationBootstrap {
             // after the user picks an account. Give it the platform-specific
             // defaults now, rather than only a discriminator which can fail
             // the regular CreatePostDto validation on that later save.
-            settings: this._buildReferencePostSettings(
-              targetPlatform,
-              opportunity.externalPostUrl,
-              text,
-              generatedTitle,
-              targetChannel
-            ),
+            settings,
             // One value entry per post in the chain — createOrUpdatePost
             // turns entries 2..N into parentPostId-chained rows, which IS
             // how every thread in this app is stored. Media rides on the
@@ -1743,11 +1768,21 @@ export class EngageService implements OnApplicationBootstrap {
       usages
     );
 
+    // Read back from the settings that were just saved, so the response and
+    // the stored post can never disagree — and so the four title-separated
+    // platforms are covered without a per-platform branch here: Reddit keeps
+    // its title nested under `subreddit[0].value`, the other three at the top
+    // level, and titleFromSettings is the one place that knows which. Undefined
+    // on x/linkedin/quora, whose settings carry no title at all, which keeps
+    // the frame shape unchanged for them.
+    const title = titleFromSettings(targetPlatform, settings);
+
     return {
       text,
       postId,
       parts,
       thread: parts.length > 1,
+      ...(title ? { title } : {}),
       ...(droppedParts ? { droppedParts } : {}),
       ...(requestedParts ? { requestedParts } : {}),
       // A skip reason answers "you asked for a thread and did not get one".

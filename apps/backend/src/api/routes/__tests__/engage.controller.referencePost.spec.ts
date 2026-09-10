@@ -124,6 +124,41 @@ describe('EngageController.generateReferencePost', () => {
     expect(stream).not.toContain('threadSkippedReason');
   });
 
+  it('forwards the post title on a title-separated target', async () => {
+    // The body deliberately does NOT contain the headline (repeating it makes
+    // the platform display it twice), so this field is the ONLY way a client
+    // can render the Reddit/HN/Medium/dev.to post it just generated.
+    const { controller } = build({
+      generateReferencePost: vi.fn(async () => ({
+        text: 'a fresh original post',
+        postId: 'post1',
+        parts: ['a fresh original post'],
+        thread: false,
+        title: 'What most ceramic sellers get wrong about price',
+      })),
+    });
+    const { res, frames } = makeRes();
+    const { req } = makeReq();
+
+    await controller.generateReferencePost(ORG, USER, 'opp1', BODY, req, res);
+
+    expect(frames.join('')).toContain(
+      '"title":"What most ceramic sellers get wrong about price"'
+    );
+  });
+
+  it('omits the title for a target that has none', async () => {
+    // x / linkedin / quora carry no title on any publish path; their frame
+    // must keep exactly the shape it always had.
+    const { controller } = build();
+    const { res, frames } = makeRes();
+    const { req } = makeReq();
+
+    await controller.generateReferencePost(ORG, USER, 'opp1', BODY, req, res);
+
+    expect(frames.join('')).not.toContain('"title"');
+  });
+
   it('reports a thread that degraded to one post on an unsupported platform', async () => {
     const { controller } = build({
       generateReferencePost: vi.fn(async () => ({

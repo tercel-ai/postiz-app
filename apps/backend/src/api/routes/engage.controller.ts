@@ -1021,7 +1021,7 @@ export class EngageController {
   @ApiResponse({
     status: 200,
     description:
-      'SSE stream ending with a data frame carrying {text, postId, parts, thread, threadSkippedReason?} then [DONE]. `parts` is one entry per post in the chain (a single-element array unless a thread was produced) and `thread` reports whether one actually was — a thread requested for a TARGET platform that cannot chain one (medium/quora/devto) degrades to a single post with threadSkippedReason=platform_unsupported. A thread whose tail overruns the platform character ceiling is delivered truncated to its valid prefix, with `droppedParts` counting what was discarded, rather than failing the whole generation. `requestedParts` appears whenever `parts` is shorter than the `maxThreadParts` asked for — either because a tail part was dropped for length, or because the model still wrote fewer posts after its corrective retry. Failures (opportunity not found, generation failed, too similar to the reference, engage_insufficient_credits) end the stream with a typed error frame instead; the untyped `generation_failed` frame also carries a diagnostic `reason` string.',
+      'SSE stream ending with a data frame carrying {text, postId, parts, thread, title?, threadSkippedReason?} then [DONE]. `title` is present ONLY for a TARGET that submits its title through a field of its own (reddit/hackernews/medium/devto) — it is the headline actually saved on the draft, and it is deliberately absent from `text`/`parts`, which carry the BODY only so the platform does not display it twice. `parts` is one entry per post in the chain (a single-element array unless a thread was produced) and `thread` reports whether one actually was — a thread requested for a TARGET platform that cannot chain one (medium/quora/devto) degrades to a single post with threadSkippedReason=platform_unsupported. A thread whose tail overruns the platform character ceiling is delivered truncated to its valid prefix, with `droppedParts` counting what was discarded, rather than failing the whole generation. `requestedParts` appears whenever `parts` is shorter than the `maxThreadParts` asked for — either because a tail part was dropped for length, or because the model still wrote fewer posts after its corrective retry. Failures (opportunity not found, generation failed, too similar to the reference, engage_insufficient_credits) end the stream with a typed error frame instead; the untyped `generation_failed` frame also carries a diagnostic `reason` string.',
   })
   @ApiResponse({ status: 404, description: 'Opportunity not found' })
   @ApiResponse({ status: 429, description: 'Rate limit exceeded (20/hour)' })
@@ -1062,6 +1062,12 @@ export class EngageController {
             postId: result.postId,
             parts: result.parts,
             thread: result.thread,
+            // Only on the platforms that submit a title separately
+            // (reddit/hackernews/medium/devto). It is deliberately NOT inside
+            // `text`/`parts` — the body must not repeat the headline — so this
+            // is the only place a client can read it, and a platform without
+            // one keeps the frame it always had.
+            ...(result.title ? { title: result.title } : {}),
             // Absent unless a requested thread came back as one post, so a
             // plain single-post request keeps its original frame shape.
             ...(result.threadSkippedReason

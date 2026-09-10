@@ -1812,10 +1812,11 @@ degrades to a single post and reports it in the response.
 
 | Field | Description |
 |---|---|
-| `text` | The whole post — thread parts joined by a blank line. Equals `parts[0]` for a single post |
+| `text` | The whole post — thread parts joined by a blank line. Equals `parts[0]` for a single post. **BODY only**: on the four title-separated platforms the headline is not in here (see `title`) |
 | `postId` | The **root** `Post` id. Follow-up parts are its `parentPostId` chain, in the same `group`, and move/schedule/publish with it |
 | `parts` | One entry per post in the chain, in publish order. Single-element array unless a thread was produced |
 | `thread` | Whether a thread was actually produced (`parts.length > 1`) |
+| `title` | The post's headline, **only** for a target that submits its title through a field of its own (`reddit`, `hackernews`, `medium`, `devto` — see `reference-post-generation.md` §6.5). Absent for `x`, `linkedin` and `quora`, which have no title at all. It is the title actually saved on the draft (`Post.title` / `Post.settings.title`) — the model's own `TITLE:` line, or the body-derived fallback when it emitted none. Deliberately **not** part of `text`/`parts`, which are the body alone so the platform does not display the headline twice: rendering only the streamed text on these four platforms therefore shows a post with its title missing |
 | `threadSkippedReason` | Only present when a thread of **more than one post** was requested but one post came back: `platform_unsupported` (the platform cannot chain — see the table above) or `single_post_generated` (the model judged one post enough). Absent for `maxThreadParts: 1`, which asks for a single post outright — nothing was skipped |
 | `requestedParts` | Only present when `parts` came back **shorter than the `maxThreadParts` asked for**. A total post count, directly comparable to `parts.length`. Two causes: the model still wrote fewer posts after its corrective retry, or a too-long tail part was dropped for length (`droppedParts` is then also present). The short chain is still delivered and still billed — this field is what lets a client say it is short |
 | `droppedParts` | Only present when trailing thread parts were discarded for overrunning the platform character ceiling. `parts`/`postId` already describe the truncated chain |
