@@ -32,4 +32,19 @@ describe('EngageController opportunity count routes', () => {
       { name: 'upsertReplyAccountSettings', method: RequestMethod.POST, path: '/reply-accounts/:integrationId' },
     ]);
   });
+
+  it('exposes manual opportunity import at the fixed contract path, over POST', () => {
+    expect(
+      Reflect.getMetadata(
+        PATH_METADATA,
+        EngageController.prototype.manualImportOpportunity
+      )
+    ).toBe('/opportunities/manual-import');
+    expect(
+      Reflect.getMetadata(
+        METHOD_METADATA,
+        EngageController.prototype.manualImportOpportunity
+      )
+    ).toBe(RequestMethod.POST);
+  });
 });

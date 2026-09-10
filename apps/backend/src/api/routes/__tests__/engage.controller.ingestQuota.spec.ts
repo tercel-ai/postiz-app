@@ -8,6 +8,7 @@ function build(quotaThrows = false) {
   const scanTasksService = {
     sync: vi.fn(async () => ({ accepted: 0, nextTasks: [] })),
     ingestCollectedPosts: vi.fn(async () => ({ accepted: 0 })),
+    ingestManualPost: vi.fn(async () => 'opp_manual_1'),
   };
   const ingestQuota = {
     assertWithinQuota: vi.fn(async () => {
@@ -79,5 +80,36 @@ describe('EngageController ingest quota gate', () => {
       blocked.controller.ingestScanPosts(ORG, { posts: [post('a')] } as any)
     ).rejects.toThrow(HttpException);
     expect(blocked.scanTasksService.ingestCollectedPosts).not.toHaveBeenCalled();
+  });
+
+  it('charges manual import for exactly one post, and blocks it on rejection', async () => {
+    const ok = build();
+    const result = await ok.controller.manualImportOpportunity(ORG, {
+      ...post('manual-a'),
+      projectId: 'proj-1',
+    } as any);
+    expect(ok.ingestQuota.assertWithinQuota).toHaveBeenCalledWith('org1', 1);
+    expect(ok.scanTasksService.ingestManualPost).toHaveBeenCalledWith(
+      'org1',
+      'proj-1',
+      expect.objectContaining({ externalPostId: 'manual-a' })
+    );
+    expect(result).toEqual({ opportunityId: 'opp_manual_1' });
+
+    const blocked = build(true);
+    await expect(
+      blocked.controller.manualImportOpportunity(ORG, post('manual-b') as any)
+    ).rejects.toThrow(HttpException);
+    expect(blocked.scanTasksService.ingestManualPost).not.toHaveBeenCalled();
+  });
+
+  it('manual import resolves a missing projectId to null, not undefined', async () => {
+    const { controller, scanTasksService } = build();
+    await controller.manualImportOpportunity(ORG, post('manual-c') as any);
+    expect(scanTasksService.ingestManualPost).toHaveBeenCalledWith(
+      'org1',
+      null,
+      expect.anything()
+    );
   });
 });

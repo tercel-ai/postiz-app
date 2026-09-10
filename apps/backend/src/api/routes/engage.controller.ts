@@ -36,6 +36,7 @@ import {
   EngageScanSyncDto,
   scanIngestPostToRawPost,
   EngageScanPostsIngestDto,
+  ManualOpportunityImportDto,
 } from '@gitroom/nestjs-libraries/dtos/engage/scan-ingest.dto';
 import { EngageDraftService } from '@gitroom/nestjs-libraries/engage/engage-draft.service';
 import { TooSimilarToReferenceError } from '@gitroom/nestjs-libraries/engage/engage-reference-post.service';
@@ -211,6 +212,32 @@ export class EngageController {
       posts
     );
     return result;
+  }
+
+  @ApiOperation({
+    summary:
+      'Manually import ONE post the user pasted a URL for, as an opportunity. ' +
+      'Unlike /scan-posts/ingest, this ALWAYS saves the post — the keyword ' +
+      'score gate and the opportunity TTL gate (both meant to filter ' +
+      'unattended scan noise) are bypassed, since the user explicitly chose ' +
+      'this post. Returns the opportunity id so the caller can immediately ' +
+      'call POST /opportunities/:id/generate-post.',
+  })
+  @ApiResponse({ status: 201, description: '{ opportunityId: string }' })
+  @Throttle({ default: { limit: limitFor('engageIngest'), ttl: RATE_LIMIT_TTL_MS } })
+  @Post('/opportunities/manual-import')
+  async manualImportOpportunity(
+    @GetOrgFromRequest() org: Organization,
+    @Body() body: ManualOpportunityImportDto
+  ) {
+    await this._ingestQuota.assertWithinQuota(org.id, 1);
+    const post = scanIngestPostToRawPost(body);
+    const opportunityId = await this._scanTasksService.ingestManualPost(
+      org.id,
+      body.projectId ?? null,
+      post
+    );
+    return { opportunityId };
   }
 
   // ─── Config ───────────────────────────────────────────────────────────────

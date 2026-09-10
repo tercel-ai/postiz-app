@@ -301,6 +301,34 @@ export class EngageScanIngestService {
   }
 
   /**
+   * Score ONE manually-submitted post for one org — the manual-import path
+   * (POST /engage/opportunities/manual-import). Applies the same tracked-
+   * account/monitored-channel bonus as scoreAllForOrg, but bypasses BOTH the
+   * keyword hard filter and the MIN_SCORE persistence gate: a post the user
+   * explicitly pasted a URL for must always be scored and saved, whether or
+   * not it happens to match a configured keyword. Unlike scoreAllForOrg, this
+   * never returns null/empty because the org has no keywords configured —
+   * `ctx.keywords` may legitimately be `[]` here (e.g. a stub context for a
+   * project with no enabled EngageConfig row).
+   */
+  scoreManualPost(post: RawPost, ctx: OrgScanContext): ScoredPost {
+    const trackedUsernames = new Set(
+      ctx.trackedAccounts.map((a) => a.username.toLowerCase())
+    );
+    const monitoredSubreddits = new Set(
+      ctx.monitoredChannels.map((c) => c.channelId.toLowerCase())
+    );
+    const tracked =
+      (post.platform === 'x' &&
+        trackedUsernames.has(post.authorUsername.toLowerCase())) ||
+      (post.platform === 'reddit' &&
+        !!post.channelId &&
+        monitoredSubreddits.has(post.channelId.toLowerCase()));
+    const taggedPost = tracked ? { ...post, isFromTrackedAccount: true } : post;
+    return scorePost(taggedPost, ctx.keywords, { requireKeywordMatch: false });
+  }
+
+  /**
    * Record the engage score distribution for one phase, grouped by platform (a
    * scan unit is normally single-platform, but back-attribution may mix). Each
    * scored post's total score is bucketed into a fixed non-overlapping band.
@@ -538,19 +566,33 @@ export class EngageScanIngestService {
    *             score + matched keywords. status/bookmark are preserved
    *             across re-scans.
    * opportunities[i] aligns with posts[i] because phase 1 pushes in order.
+   *
+   * Returns the persisted (or updated) global opportunity rows, `posts`-
+   * aligned — the manual-import path (ingestManualPost, below) needs the
+   * resulting id back; the scan paths that call this ignore the return value.
+   *
+   * `options.skipTtlGate` lets the manual-import path opt out of the TTL
+   * drop below: a post the user explicitly pasted a URL for must always be
+   * saved, even one published before the platform's opportunity TTL window —
+   * unlike a scan result, it was not discovered by the noisy keyword scan
+   * this gate exists to filter.
    */
   async persistOpportunities(
     orgId: string,
     projectId: string | null,
-    rawPosts: ScoredPost[]
-  ): Promise<void> {
-    if (!rawPosts.length) return;
+    rawPosts: ScoredPost[],
+    options?: { skipTtlGate?: boolean }
+  ): Promise<Array<{ id: string }>> {
+    if (!rawPosts.length) return [];
     // Authoritative TTL gate. ingestForOrg already filters (before paying for
     // intent classification), but the Temporal scan activity calls this method
     // directly, so the only place that can guarantee no expired post is ever
-    // written is here, immediately before the writes.
-    const { kept: fresh } = await this.filterExpiredByPublishTime(rawPosts);
-    if (!fresh.length) return;
+    // written is here, immediately before the writes — unless the caller
+    // explicitly opted out (manual import; see doc comment above).
+    const fresh = options?.skipTtlGate
+      ? rawPosts
+      : (await this.filterExpiredByPublishTime(rawPosts)).kept;
+    if (!fresh.length) return [];
     // Same reasoning as the TTL gate above, and the same reason it is repeated
     // here: ingestForOrg filters before paying for intent classification, but
     // the Temporal scan activity calls this method directly, so this is the
@@ -562,7 +604,7 @@ export class EngageScanIngestService {
         { orgId, projectId, dropped: addressless }
       );
     }
-    if (!addressed.length) return;
+    if (!addressed.length) return [];
     const normalizedPosts = addressed.map(normalizeExternalPost);
 
     // Dedup by the GLOBAL natural key so the same post id/URL appearing twice in one
@@ -726,6 +768,40 @@ export class EngageScanIngestService {
         )
       );
     }
+    return opportunities;
+  }
+
+  /**
+   * End-to-end manual import for ONE user-submitted post: score (keyword gate
+   * bypassed) → classify intent → persist (TTL gate bypassed too) — both
+   * gates exist to filter unattended scan noise, and neither applies to a
+   * post the user explicitly pasted a URL for. Returns the resulting global
+   * EngageOpportunity id so the caller can immediately chain
+   * POST /engage/opportunities/:id/generate-post, which resolves through
+   * EngageOpportunityState (organizationId + projectId + opportunityId) — the
+   * same two-table write persistOpportunities always performs, so the
+   * manually-imported row is indistinguishable from a scanned one downstream.
+   *
+   * Throws if nothing was persisted, which should not happen for a
+   * DTO-validated post (non-empty externalPostUrl) — a defensive guard, not
+   * an expected path.
+   */
+  async ingestManualPost(ctx: OrgScanContext, post: RawPost): Promise<string> {
+    const scored = this.scoreManualPost(post, ctx);
+    const [classified] = await this.classifyIntents([scored]);
+    const persisted = await this.persistOpportunities(
+      ctx.organizationId,
+      ctx.projectId,
+      [classified],
+      { skipTtlGate: true }
+    );
+    const [opportunity] = persisted;
+    if (!opportunity) {
+      throw new Error(
+        'Manual opportunity import produced no persisted row (unexpected — check externalPostUrl)'
+      );
+    }
+    return opportunity.id;
   }
 
   /**

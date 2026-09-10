@@ -79,12 +79,36 @@ export function postSearchText(
 
 // ─── Main entry point ─────────────────────────────────────────────────────────
 
+/**
+ * Score a post against one org's keyword set. Returns null when the post hits
+ * no enabled keyword (the hard filter every scan path relies on) — UNLESS
+ * `options.requireKeywordMatch` is explicitly set to `false`, in which case a
+ * ScoredPost is always returned (scoreKeyword: 0, matchedKeywords: [] when
+ * nothing matched). That escape hatch exists for the manual-import path
+ * (POST /engage/opportunities/manual-import): a post the user explicitly
+ * pasted a URL for must be scored and persisted regardless of whether it
+ * happens to match a configured keyword — the hard filter and the MIN_SCORE
+ * gate downstream only make sense for unattended scan noise, not an
+ * intentional single-post submission.
+ */
 export function scorePost(
   post: RawPost,
   keywords: Pick<EngageKeyword, 'keyword' | 'type' | 'enabled'>[]
+): ScoredPost | null;
+export function scorePost(
+  post: RawPost,
+  keywords: Pick<EngageKeyword, 'keyword' | 'type' | 'enabled'>[],
+  options: { requireKeywordMatch: false }
+): ScoredPost;
+export function scorePost(
+  post: RawPost,
+  keywords: Pick<EngageKeyword, 'keyword' | 'type' | 'enabled'>[],
+  options?: { requireKeywordMatch?: boolean }
 ): ScoredPost | null {
+  const requireKeywordMatch = options?.requireKeywordMatch ?? true;
   // Layer 1: keyword hard filter — must hit at least one enabled keyword,
-  // exactly or loosely (see matchKeywordStrength).
+  // exactly or loosely (see matchKeywordStrength) — unless the caller
+  // explicitly opted out of the gate (see doc comment above).
   const searchText = postSearchText(post);
   const hits = keywords
     .filter((k) => k.enabled)
@@ -93,7 +117,7 @@ export function scorePost(
       (h): h is { keyword: (typeof keywords)[number]; strength: KeywordMatchStrength } =>
         h.strength !== null
     );
-  if (hits.length === 0) return null;
+  if (hits.length === 0 && requireKeywordMatch) return null;
 
   const scoreKeyword = computeKeywordScore(
     hits.map((h) => ({ type: h.keyword.type, strength: h.strength }))

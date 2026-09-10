@@ -580,3 +580,109 @@ describe('EngageScanIngestService — addressless posts', () => {
     expect(kept).toHaveLength(1);
   });
 });
+
+describe('EngageScanIngestService — manual import (POST /engage/opportunities/manual-import)', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  const manualRawPost: any = {
+    id: 'manual-1',
+    platform: 'reddit',
+    externalPostId: 'ext-manual-1',
+    externalPostUrl: 'https://reddit.com/r/webdev/comments/manual-1',
+    authorUsername: 'someone',
+    postContent: 'this post matches no configured keyword at all',
+    postPublishedAt: recentlyPublished(),
+    metricLikes: 0,
+    metricReplies: 0,
+    metricRetweets: 0,
+    metricQuotes: 0,
+    metricScore: 0,
+    metricComments: 0,
+  };
+
+  it('scoreManualPost never returns null even when no keyword matches and none are configured', () => {
+    const { svc } = build();
+    const ctx = {
+      organizationId: 'org1',
+      projectId: null,
+      keywords: [],
+      trackedAccounts: [],
+      monitoredChannels: [],
+    };
+    const scored = svc.scoreManualPost(manualRawPost, ctx);
+    expect(scored).not.toBeNull();
+    expect(scored.scoreKeyword).toBe(0);
+    expect(scored.matchedKeywords).toEqual([]);
+  });
+
+  it('scoreManualPost still applies the tracked-account bonus', () => {
+    const { svc } = build();
+    const ctx = {
+      organizationId: 'org1',
+      projectId: null,
+      keywords: [],
+      trackedAccounts: [{ platform: 'reddit', username: 'someone' }],
+      monitoredChannels: [],
+    };
+    // Tracked bonus only applies to 'x' by construction (see scoreAllForOrg);
+    // an x post from a tracked username must score the +5 bonus even through
+    // the manual-import path.
+    const scored = svc.scoreManualPost(
+      { ...manualRawPost, platform: 'x' },
+      { ...ctx, trackedAccounts: [{ platform: 'x', username: 'someone' }] }
+    );
+    expect(scored.scoreTracked).toBe(5);
+  });
+
+  it('persistOpportunities({ skipTtlGate: true }) keeps a post the default TTL gate would drop', async () => {
+    const { svc, oppUpsert } = build();
+    const stale = {
+      ...makeScoredPost(9),
+      postPublishedAt: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000), // 30d old, past reddit's 7d default TTL
+    };
+
+    const droppedByDefault = await svc.persistOpportunities('org1', null, [stale]);
+    expect(droppedByDefault).toEqual([]);
+    expect(oppUpsert).not.toHaveBeenCalled();
+
+    const kept = await svc.persistOpportunities('org1', null, [stale], {
+      skipTtlGate: true,
+    });
+    expect(kept).toHaveLength(1);
+    expect(oppUpsert).toHaveBeenCalledTimes(1);
+  });
+
+  it('ingestManualPost persists unconditionally and returns the opportunity id', async () => {
+    const { svc, oppUpsert, stateCreate } = build();
+    const ctx = {
+      organizationId: 'org1',
+      projectId: null,
+      keywords: [{ id: 'k1', keyword: 'nonmatching', type: 'GENERAL', enabled: true }],
+      trackedAccounts: [],
+      monitoredChannels: [],
+    };
+
+    const opportunityId = await svc.ingestManualPost(ctx as any, manualRawPost);
+
+    expect(opportunityId).toBe('opp_ext-manual-1');
+    expect(oppUpsert).toHaveBeenCalledTimes(1);
+    expect(stateCreate).toHaveBeenCalledTimes(1);
+    expect(stateCreate.mock.calls[0][0].data.opportunityId).toBe(opportunityId);
+  });
+
+  it('ingestManualPost throws instead of silently returning nothing when nothing persisted', async () => {
+    const { svc } = build();
+    const ctx = {
+      organizationId: 'org1',
+      projectId: null,
+      keywords: [],
+      trackedAccounts: [],
+      monitoredChannels: [],
+    };
+    // externalPostUrl empty would fail DTO validation before reaching here in
+    // production, but the service itself must not swallow that case silently.
+    await expect(
+      svc.ingestManualPost(ctx as any, { ...manualRawPost, externalPostUrl: '' })
+    ).rejects.toThrow(/no persisted row/);
+  });
+});

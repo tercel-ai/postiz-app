@@ -154,6 +154,20 @@ export class EngageScanPostsIngestDto {
 }
 
 /**
+ * Request body for POST /engage/opportunities/manual-import — ONE post the
+ * user explicitly pasted a URL for (as opposed to something a scan
+ * discovered). Field-for-field identical to ScanIngestPostDto — the extension
+ * normalises a manually-fetched post the exact same way it normalises a
+ * scanned one — plus an optional `projectId` so a project-scoped org
+ * attributes the resulting EngageOpportunityState to the right project (the
+ * same project the caller will pass to the follow-up
+ * /opportunities/:id/generate-post call).
+ */
+export class ManualOpportunityImportDto extends ScanIngestPostDto {
+  @IsOptional() @IsString() projectId?: string;
+}
+
+/**
  * All platforms the scan system can serve. Mirrors `ScanTaskPlatform` in
  * scan-task.types.ts — keep them in sync when a platform is added/removed,
  * otherwise the extension's selectedUnits get rejected at the DTO gate while

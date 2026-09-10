@@ -6,7 +6,10 @@ import {
   normalizeUsername,
   ScanCursorSnapshot,
 } from '@gitroom/nestjs-libraries/engage/engage-scan-lease.service';
-import { EngageScanIngestService } from '@gitroom/nestjs-libraries/engage/engage-scan-ingest.service';
+import {
+  EngageScanIngestService,
+  OrgScanContext,
+} from '@gitroom/nestjs-libraries/engage/engage-scan-ingest.service';
 import { ProjectValidationService } from '@gitroom/nestjs-libraries/projects/project-validation.service';
 import {
   normalizePlatform,
@@ -360,6 +363,37 @@ export class EngageScanTasksService {
       return { accepted: 0, keywordMatched: 0, scoreFiltered, staleFiltered, reason: `no posts matched any keyword (configured: ${configured})` };
     }
     return { accepted, keywordMatched, scoreFiltered, staleFiltered };
+  }
+
+  /**
+   * Manually import ONE post the user pasted a URL for — POST
+   * /engage/opportunities/manual-import. Unlike ingestCollectedPosts (which
+   * silently drops anything under the keyword score gate), this path always
+   * persists: the keyword score gate and the TTL gate exist to filter
+   * unattended scan noise, and neither applies to an intentional single-post
+   * submission the caller needs an id back from.
+   *
+   * projectId resolves the same project-scoped EngageConfig the scan paths
+   * use (getEnabledOrgContext), falling back to an empty stub context — no
+   * keywords/tracked accounts/monitored channels — when that project has no
+   * enabled config row (or none at all for a legacy null-project org): the
+   * manual import must still succeed, it just scores with the tracked-account
+   * bonus and keyword match both absent.
+   */
+  async ingestManualPost(
+    orgId: string,
+    projectId: string | null,
+    post: RawPost
+  ): Promise<string> {
+    const config = await this._engageRepo.getEnabledOrgContext(orgId, projectId);
+    const ctx: OrgScanContext = config ?? {
+      organizationId: orgId,
+      projectId,
+      keywords: [],
+      trackedAccounts: [],
+      monitoredChannels: [],
+    };
+    return this._ingest.ingestManualPost(ctx, post);
   }
 
   /** Complete (if any) + claim next batch. Bootstrap = call with no `completed`. */

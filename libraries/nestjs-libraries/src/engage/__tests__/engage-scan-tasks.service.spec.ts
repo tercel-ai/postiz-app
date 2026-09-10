@@ -738,3 +738,59 @@ describe('ingestDropReason', () => {
     expect(reason).toContain('remaining 2');
   });
 });
+
+describe('EngageScanTasksService.ingestManualPost', () => {
+  const manualPost: any = {
+    id: 'manual-1',
+    platform: 'reddit',
+    externalPostId: 'ext-1',
+    externalPostUrl: 'https://reddit.com/manual-1',
+    authorUsername: 'someone',
+    postContent: 'body',
+    postPublishedAt: new Date(),
+    metricLikes: 0,
+    metricReplies: 0,
+    metricRetweets: 0,
+    metricQuotes: 0,
+    metricScore: 0,
+    metricComments: 0,
+  };
+
+  it('delegates to the ingest service using the resolved project config context', async () => {
+    const orgContext = {
+      organizationId: 'org1',
+      projectId: 'proj-1',
+      keywords: [{ id: 'k1', keyword: 'foo', enabled: true }],
+      trackedAccounts: [],
+      monitoredChannels: [],
+    };
+    const { svc, ingest, engageRepo } = build({ orgContext });
+    (ingest as any).ingestManualPost = vi.fn(async () => 'opp-123');
+
+    const id = await svc.ingestManualPost('org1', 'proj-1', manualPost);
+
+    expect(engageRepo.getEnabledOrgContext).toHaveBeenCalledWith('org1', 'proj-1');
+    expect((ingest as any).ingestManualPost).toHaveBeenCalledWith(orgContext, manualPost);
+    expect(id).toBe('opp-123');
+  });
+
+  it('falls back to an empty stub context when the project has no enabled EngageConfig', async () => {
+    const { svc, ingest, engageRepo } = build({ orgContext: null as any });
+    (ingest as any).ingestManualPost = vi.fn(async () => 'opp-456');
+
+    const id = await svc.ingestManualPost('org1', null, manualPost);
+
+    expect(engageRepo.getEnabledOrgContext).toHaveBeenCalledWith('org1', null);
+    expect((ingest as any).ingestManualPost).toHaveBeenCalledWith(
+      {
+        organizationId: 'org1',
+        projectId: null,
+        keywords: [],
+        trackedAccounts: [],
+        monitoredChannels: [],
+      },
+      manualPost
+    );
+    expect(id).toBe('opp-456');
+  });
+});
