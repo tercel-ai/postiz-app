@@ -132,6 +132,9 @@ describe('EngageService.generateReferencePost', () => {
       expect.objectContaining({ id: 'opp1', platform: 'x' }),
       {
         strategy: 'EXPERT_ANSWER',
+        // Defaulted to the opportunity's own platform — an omitted
+        // targetPlatform keeps the original a→a behaviour.
+        targetPlatform: 'x',
         sourceAdaptation: 'REFRAME',
         brandStrength: 1,
         mentions: undefined,
@@ -1000,5 +1003,366 @@ describe('EngageService.generateReferencePost — credit gate', () => {
     });
     await service.generateReferencePost(ORG, 'user1', 'opp1', GEN_DTO);
     expect(referencePost.generate).toHaveBeenCalled();
+  });
+});
+
+// ─── Cross-platform targets (dto.targetPlatform) ──────────────────────────
+// `opportunity.platform` keeps meaning "where the reference came from"; the
+// DRAFT that gets persisted belongs to the TARGET.
+describe('EngageService.generateReferencePost — cross-platform targets', () => {
+  const CROSS_DTO = { ...GEN_DTO, targetPlatform: 'linkedin' };
+
+  it('forwards the resolved target to the generator', async () => {
+    const { service, referencePost } = buildService();
+
+    await service.generateReferencePost(ORG, 'user1', 'opp1', CROSS_DTO);
+
+    expect(referencePost.generate).toHaveBeenCalledWith(
+      expect.objectContaining({ platform: 'x' }),
+      expect.objectContaining({ targetPlatform: 'linkedin' })
+    );
+  });
+
+  it('persists the draft under the TARGET platform, with the TARGET settings', async () => {
+    const { service, posts } = buildService();
+
+    await service.generateReferencePost(ORG, 'user1', 'opp1', CROSS_DTO);
+
+    const [dto] = posts.mapTypeToPost.mock.calls[0];
+    expect(dto.posts[0].providerIdentifier).toBe('linkedin');
+    expect(dto.posts[0].settings.__type).toBe('linkedin');
+  });
+
+  it('still records the SOURCE platform as the reference provenance', async () => {
+    const { service, repo } = buildService();
+
+    await service.generateReferencePost(ORG, 'user1', 'opp1', CROSS_DTO);
+
+    // The opportunity did not move platforms just because the post did.
+    expect(repo.attachReferenceOpportunity).toHaveBeenCalledWith(
+      'post1',
+      expect.objectContaining({ platform: 'x' })
+    );
+  });
+
+  it('bills the target platform and records the source alongside it', async () => {
+    const { service, aisee } = buildService();
+
+    await service.generateReferencePost(ORG, 'user1', 'opp1', CROSS_DTO);
+
+    const [opts] = aisee.billCollectedUsages.mock.calls[0];
+    expect(opts.data).toMatchObject({
+      platform: 'linkedin',
+      sourcePlatform: 'x',
+    });
+  });
+
+  it('normalizes a legacy twitter target onto the x provider', async () => {
+    const { service, posts } = buildService({
+      repo: {
+        getOpportunityById: vi.fn(async () => ({
+          id: 'opp1',
+          platform: 'reddit',
+          externalPostUrl:
+            'https://www.reddit.com/r/typescript/comments/abc123/a_post/',
+          authorUsername: 'writer',
+          title: null,
+          postContent: 'Reference content.',
+        })),
+      },
+    });
+
+    await service.generateReferencePost(ORG, 'user1', 'opp1', {
+      ...GEN_DTO,
+      targetPlatform: 'twitter',
+    });
+
+    const [dto] = posts.mapTypeToPost.mock.calls[0];
+    expect(dto.posts[0].providerIdentifier).toBe('x');
+    expect(dto.posts[0].settings.__type).toBe('x');
+  });
+
+  it('produces a draft POST /posts still accepts, for every target', async () => {
+    for (const targetPlatform of [
+      'x',
+      'medium',
+      'quora',
+      'linkedin',
+      'devto',
+      'hackernews',
+    ]) {
+      const { service, posts } = buildService();
+
+      await service.generateReferencePost(ORG, 'user1', 'opp1', {
+        ...GEN_DTO,
+        targetPlatform,
+      });
+
+      const [generatedDto] = posts.mapTypeToPost.mock.calls[0];
+      const errors = await validate(
+        plainToInstance(CreatePostDto, { ...generatedDto, type: 'schedule' })
+      );
+      expect(errors, `settings invalid for ${targetPlatform}`).toEqual([]);
+    }
+  });
+
+  // An X opportunity carries no subreddit in any of its fields, and the caller
+  // named none, so there is no destination to submit to. Refused BEFORE the
+  // model runs — the draft is unsavable either way, and failing after the
+  // spend would burn a paid generation on a post that can never be persisted.
+  it('refuses a reddit target it cannot derive a subreddit for, without generating', async () => {
+    const { service, referencePost, aisee } = buildService();
+
+    await expect(
+      service.generateReferencePost(ORG, 'user1', 'opp1', {
+        ...GEN_DTO,
+        targetPlatform: 'reddit',
+      })
+    ).rejects.toBeInstanceOf(BadRequestException);
+
+    expect(referencePost.generate).not.toHaveBeenCalled();
+    expect(aisee.billCollectedUsages).not.toHaveBeenCalled();
+  });
+
+  // Which subreddit a reddit-targeted post is submitted to, most specific
+  // source first: the caller's `targetChannel`, then the subreddit the
+  // scanner recorded on the opportunity, then the opportunity URL re-parsed
+  // inside RedditProvider.
+  describe('subreddit resolution', () => {
+    const submittedSubreddit = (posts: any): string =>
+      posts.mapTypeToPost.mock.calls[0][0].posts[0].settings.subreddit[0].value
+        .subreddit;
+
+    const redditOpportunityIn = (channelId: string | null) => ({
+      getOpportunityById: vi.fn(async () => ({
+        id: 'opp1',
+        platform: 'reddit',
+        externalPostUrl:
+          'https://www.reddit.com/r/fromtheurl/comments/abc123/a_post/',
+        channelId,
+        authorUsername: 'writer',
+        title: null,
+        postContent: 'Reference content.',
+      })),
+    });
+
+    // The whole point of the parameter: an X opportunity has no subreddit
+    // anywhere, so this is the ONLY thing that makes a cross-platform reddit
+    // post possible at all.
+    it('lets targetChannel make a cross-platform reddit post possible', async () => {
+      const { service, posts, referencePost } = buildService();
+
+      await service.generateReferencePost(ORG, 'user1', 'opp1', {
+        ...GEN_DTO,
+        targetPlatform: 'reddit',
+        targetChannel: 'pottery',
+      } as any);
+
+      expect(referencePost.generate).toHaveBeenCalled();
+      expect(submittedSubreddit(posts)).toBe('pottery');
+    });
+
+    it('prefers targetChannel over the recorded channel', async () => {
+      const { service, posts } = buildService({
+        repo: redditOpportunityIn('recordedsub'),
+      });
+
+      await service.generateReferencePost(ORG, 'user1', 'opp1', {
+        ...GEN_DTO,
+        targetChannel: 'callerschoice',
+      } as any);
+
+      expect(submittedSubreddit(posts)).toBe('callerschoice');
+    });
+
+    // reddit→reddit needs no caller input: the scanner already stored the
+    // subreddit, and that column beats re-parsing the URL for the same value.
+    it('uses the recorded channel when the caller names none', async () => {
+      const { service, posts } = buildService({
+        repo: redditOpportunityIn('recordedsub'),
+      });
+
+      await service.generateReferencePost(ORG, 'user1', 'opp1', GEN_DTO);
+
+      expect(submittedSubreddit(posts)).toBe('recordedsub');
+    });
+
+    // Rows stored before channelId was populated still resolve.
+    it('falls back to the opportunity URL when no channel was recorded', async () => {
+      const { service, posts } = buildService({
+        repo: redditOpportunityIn(null),
+      });
+
+      await service.generateReferencePost(ORG, 'user1', 'opp1', GEN_DTO);
+
+      expect(submittedSubreddit(posts)).toBe('fromtheurl');
+    });
+  });
+
+  describe('thread capability follows the TARGET', () => {
+    const threadDto = (targetPlatform: string) => ({
+      ...GEN_DTO,
+      targetPlatform,
+      thread: true,
+      maxThreadParts: 3,
+    });
+
+    // medium cannot chain a thread on either publish path. Asking for one
+    // from a thread-capable X opportunity degrades to a single post and says
+    // why, rather than 400-ing.
+    it('degrades to a single post when the target cannot chain one', async () => {
+      const { service, referencePost } = buildService();
+
+      const result = await service.generateReferencePost(
+        ORG,
+        'user1',
+        'opp1',
+        threadDto('medium')
+      );
+
+      expect(referencePost.generate).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ thread: false, targetPlatform: 'medium' })
+      );
+      expect(result.thread).toBe(false);
+      expect(result.threadSkippedReason).toBe('platform_unsupported');
+    });
+
+    // The mirror image: a medium OPPORTUNITY targeting X can thread, even
+    // though the source platform cannot.
+    it('allows a thread when the target can chain one but the source cannot', async () => {
+      const { service, referencePost } = buildService({
+        repo: {
+          getOpportunityById: vi.fn(async () => ({
+            id: 'opp1',
+            platform: 'medium',
+            externalPostUrl: 'https://medium.com/@writer/a-post-123',
+            authorUsername: 'writer',
+            title: null,
+            postContent: 'Reference content.',
+          })),
+        },
+        referencePost: {
+          generate: vi.fn(async () => ({
+            text: 'one\n\ntwo',
+            parts: ['one', 'two'],
+            usages: [],
+          })),
+        },
+      });
+
+      const result = await service.generateReferencePost(
+        ORG,
+        'user1',
+        'opp1',
+        threadDto('x')
+      );
+
+      expect(referencePost.generate).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ thread: true, targetPlatform: 'x' })
+      );
+      expect(result.thread).toBe(true);
+      expect(result.threadSkippedReason).toBeUndefined();
+    });
+  });
+});
+
+// `Post.settings.title` is the real, user-visible title on the four platforms
+// that submit one separately. It used to be `referencePostTitle(text)` — the
+// generated body's first 280 characters — unconditionally, so a long-form post
+// published a title cut off mid-sentence that its own body then repeated. The
+// generator now returns the model's own title and this is where it lands.
+describe('EngageService.generateReferencePost — separated post title', () => {
+  const titledGenerate = (title?: string) => ({
+    generate: vi.fn(async () => ({
+      text: 'Most makers set a number in 2019 and never revisited it. '.repeat(8),
+      parts: ['Most makers set a number in 2019 and never revisited it. '.repeat(8)],
+      ...(title ? { title } : {}),
+      usages: [
+        {
+          promptTokens: 100,
+          completionTokens: 40,
+          totalTokens: 140,
+          provider: 'anthropic',
+          model: 'claude-sonnet-4-6',
+        },
+      ],
+    })),
+  });
+
+  const redditOpportunity = {
+    getOpportunityById: vi.fn(async () => ({
+      id: 'opp1',
+      platform: 'reddit',
+      externalPostUrl: 'https://www.reddit.com/r/pottery/comments/abc123/a_post/',
+      authorUsername: 'writer',
+      title: null,
+      postContent: 'Reference content.',
+    })),
+  };
+
+  it("uses the model's own title on a devto target", async () => {
+    const { service, posts } = buildService({
+      referencePost: titledGenerate('What most ceramic sellers get wrong about price'),
+    });
+
+    await service.generateReferencePost(ORG, 'user1', 'opp1', {
+      ...GEN_DTO,
+      targetPlatform: 'devto',
+    } as any);
+
+    const [dto] = posts.mapTypeToPost.mock.calls[0];
+    expect(dto.posts[0].settings.title).toBe(
+      'What most ceramic sellers get wrong about price'
+    );
+  });
+
+  it("carries the model's title into reddit's nested submission settings", async () => {
+    const { service, posts } = buildService({
+      repo: redditOpportunity,
+      referencePost: titledGenerate('Three pricing mistakes I keep seeing'),
+    });
+
+    await service.generateReferencePost(ORG, 'user1', 'opp1', GEN_DTO);
+
+    const [dto] = posts.mapTypeToPost.mock.calls[0];
+    expect(dto.posts[0].settings.subreddit[0].value.title).toBe(
+      'Three pricing mistakes I keep seeing'
+    );
+  });
+
+  // The old behaviour, kept as the LAST resort rather than the norm: a
+  // generation is paid for the moment the model answers, so a missing TITLE
+  // line degrades instead of failing.
+  it('falls back to a body-derived title when the generator returned none', async () => {
+    const { service, posts } = buildService({
+      repo: redditOpportunity,
+      referencePost: titledGenerate(),
+    });
+
+    await service.generateReferencePost(ORG, 'user1', 'opp1', GEN_DTO);
+
+    const [dto] = posts.mapTypeToPost.mock.calls[0];
+    expect(dto.posts[0].settings.subreddit[0].value.title).toBe(
+      'Most makers set a number in 2019 and never revisited it. '
+        .repeat(8)
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 280)
+    );
+  });
+
+  it('ignores a blank title rather than publishing an empty one', async () => {
+    const { service, posts } = buildService({
+      repo: redditOpportunity,
+      referencePost: titledGenerate('   '),
+    });
+
+    await service.generateReferencePost(ORG, 'user1', 'opp1', GEN_DTO);
+
+    const [dto] = posts.mapTypeToPost.mock.calls[0];
+    expect(dto.posts[0].settings.subreddit[0].value.title).not.toBe('');
+    expect(dto.posts[0].settings.subreddit[0].value.title).toContain('Most makers');
   });
 });

@@ -47,16 +47,31 @@ export class RedditProvider extends SocialAbstract implements SocialProvider {
   override buildReferencePostSettings(
     context: ReferencePostSettingsContext
   ): Record<string, unknown> | undefined {
-    // A Reddit submission must target a subreddit. The opportunity's canonical
-    // source URL is the only reliable account-independent target we have.
-    let subreddit: string | undefined;
-    try {
-      const url = new URL(context.externalPostUrl);
-      if (/(^|\.)reddit\.com$/i.test(url.hostname)) {
-        subreddit = url.pathname.match(/^\/r\/([a-z0-9_]{3,21})(?:\/|$)/i)?.[1];
+    // A Reddit submission must target a subreddit, and there are two
+    // account-independent places to find one. `targetChannel` is the subreddit
+    // the SCANNER already recorded (EngageOpportunity.channelId — both the
+    // server-side adapter and the extension store the bare name), so it is
+    // preferred: parsing the URL again only re-derives what that column
+    // already holds, and fails outright on an address the pattern below does
+    // not cover, such as a redd.it short link.
+    //
+    // The URL remains the fallback for rows stored before the column was
+    // populated. Validated against the same subreddit-name shape either way,
+    // so a malformed stored value falls through to the URL rather than
+    // producing a submission aimed at a subreddit that cannot exist.
+    const SUBREDDIT_NAME = /^[a-z0-9_]{3,21}$/i;
+    const recorded = context.targetChannel?.trim();
+    let subreddit =
+      recorded && SUBREDDIT_NAME.test(recorded) ? recorded : undefined;
+    if (!subreddit) {
+      try {
+        const url = new URL(context.externalPostUrl);
+        if (/(^|\.)reddit\.com$/i.test(url.hostname)) {
+          subreddit = url.pathname.match(/^\/r\/([a-z0-9_]{3,21})(?:\/|$)/i)?.[1];
+        }
+      } catch {
+        // Fall through: caller turns the missing settings into a clear 400.
       }
-    } catch {
-      // Fall through: caller turns the missing settings into a clear 400.
     }
     if (!subreddit) return undefined;
 

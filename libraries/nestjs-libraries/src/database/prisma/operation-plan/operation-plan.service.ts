@@ -26,8 +26,14 @@ import {
 import { PostsService } from '@gitroom/nestjs-libraries/database/prisma/posts/posts.service';
 import { postTitleFromTheme } from './theme-title';
 import { weightedLength, textSlicer } from '@gitroom/helpers/utils/count.length';
-import { socialIntegrationList } from '@gitroom/nestjs-libraries/integrations/integration.manager';
 import { threadCapablePlatforms } from '@gitroom/nestjs-libraries/integrations/thread-capability';
+import {
+  buildCharacterLimitLines,
+  buildPlatformNativeFormatLine,
+  hardLimitFor,
+  targetFor,
+  CROSS_PLATFORM_ADAPT_INSTRUCTION,
+} from '@gitroom/nestjs-libraries/integrations/platform-content-profile';
 import { createHash, randomUUID } from 'crypto';
 import { z } from 'zod';
 
@@ -219,52 +225,12 @@ const DEFAULT_PLATFORM_CADENCE: Record<string, PlatformCadence> = {
 // exactly how whole platforms used to end up with zero generated content.
 const GENERIC_PLATFORM_CADENCE: PlatformCadence = { cadence: '2-3 posts per week' };
 
-const DEFAULT_CONTENT_LIMIT = 3000;
-
-// Hard per-platform content ceiling for generated posts — content over this can
-// never publish (the plan would materialize DRAFT Posts doomed to fail at
-// release). The SINGLE SOURCE OF TRUTH is each provider's own `maxLength()` (the
-// exact ceiling the publisher enforces), so this never drifts as providers are
-// added/changed and it automatically covers every provider AND its variants
-// (linkedin-page, mastodon-custom, instagram-standalone inherit their base's
-// maxLength). Unknown/unregistered platform → DEFAULT_CONTENT_LIMIT. X's
-// maxLength takes an isTwitterPremium flag; we omit it → the conservative
-// non-premium 280, measured with twitter-text WEIGHTED counting (every URL
-// counts as 23 regardless of real length; CJK/emoji count 2), matching
-// EngageDraftService's ceiling and _contentLength() below.
-const hardLimitFor = (platform: string): number =>
-  socialIntegrationList.find((p) => p.identifier === platform)?.maxLength() ??
-  DEFAULT_CONTENT_LIMIT;
-
-// What we INSTRUCT the model to stay within — deliberately BELOW the hard
-// ceiling, and the gap is the whole point.
-//
-// The model treats a stated budget as a soft aim and DRIFTS past it: with 240
-// declared (twice — prompt head and tail), measured runs came back at 0/13 over
-// 240 (max 239) and 7/16 over 240 (max 260). The 40-char gap to X's real 280 is
-// sized to absorb that drift, and it did: 0/29 posts exceeded 280.
-//
-// So do NOT "tidy" this by making the target the hard limit (a 260-char post is
-// perfectly publishable — rejecting it would throw away an entire paid
-// generation over nothing), and do NOT close the gap by raising the target to
-// 280 (drift would then land above X's real ceiling and the plan WOULD fail).
-// Same soft-target/hard-ceiling split as EngageDraftService (260/280).
-//
-// Only X needs a hand-tuned soft target. For every other platform the soft
-// budget is its hard limit, but CAPPED at MAX_CONTENT_TARGET so a platform with
-// a huge ceiling (facebook 63206, blog providers 100000, listmonk 100000000)
-// does not invite a novel — a marketing-plan post stays concise. The cap equals
-// the largest real target under the previous hardcoded table (linkedin 3000),
-// so the six originally-tuned platforms are unchanged.
-const MAX_CONTENT_TARGET = 3000;
-const PLATFORM_CONTENT_TARGETS: Record<string, number> = {
-  x: 240,
-};
-const targetFor = (platform: string): number =>
-  Math.min(
-    PLATFORM_CONTENT_TARGETS[platform] ?? hardLimitFor(platform),
-    MAX_CONTENT_TARGET
-  );
+// Per-platform content limits and the cross-platform rewrite instructions live
+// in integrations/platform-content-profile.ts — the ONE definition, shared with
+// engage's reference-post generation, which needs the identical rules the
+// moment it can target a platform other than the reference's own. They used to
+// be private to this file; a second private copy over there would have been a
+// second copy that could disagree with this one.
 
 // Whether a platform can publish a native thread — resolved by the ONE shared
 // capability rule (integrations/thread-capability.ts), which covers BOTH
@@ -780,13 +746,9 @@ export class OperationPlanService implements OnApplicationBootstrap {
     // The first live run ignored a single mid-prompt mention and produced 20/20
     // unpublishable posts; repeating the constraint at both ends is what makes
     // long-output models actually hold the line.
-    const limitLines = platforms.map(
-      (p) =>
-        `    • ${p}: max ${targetFor(p)} characters` +
-        (p === 'x'
-          ? ` (X WEIGHTED counting: every URL counts as 23 characters regardless of its real length; CJK characters and emoji count as 2 each. X's own ceiling is ${hardLimitFor('x')} — ${targetFor('x')} is your budget, so you have margin.)`
-          : '')
-    );
+    const limitLines = buildCharacterLimitLines(platforms, {
+      statedMargin: true,
+    });
 
     // Which requested platforms can actually publish a thread (provider `comment`
     // capability). Feeds the prompt so the model never threads an unsupported
@@ -1539,13 +1501,7 @@ export class OperationPlanService implements OnApplicationBootstrap {
     usage: AiUsageInfo;
   } | null> {
     const { start, end, task, baselineScore, platformPlaybook } = ctx;
-    const limitLines = missingPlatforms.map(
-      (p) =>
-        `    • ${p}: max ${targetFor(p)} characters` +
-        (p === 'x'
-          ? ` (X WEIGHTED counting: every URL counts as 23 characters regardless of its real length; CJK characters and emoji count as 2 each.)`
-          : '')
-    );
+    const limitLines = buildCharacterLimitLines(missingPlatforms);
     const backfillPlaybook = Object.fromEntries(
       missingPlatforms.map((p) => [p, platformPlaybook[p]]).filter(([, v]) => v)
     );
@@ -1586,8 +1542,8 @@ export class OperationPlanService implements OnApplicationBootstrap {
           '',
           '- Generate EXACTLY ONE contentItem per listed missing platform (distinct themeKey/themeTitle per item, dated anywhere inside the given range).',
           '- Each contentItem carries exactly ONE `platforms` entry, for the missing platform it corresponds to. Set `thread` to null on every entry — no multi-part threads here.',
-          '- ADAPT, don\'t copy: the same message expressed for a different audience and format. For example, an X thread about a data insight becomes a single LinkedIn post with professional framing, or a longer dev.to article with code examples. Keep the theme and the core point; rewrite the delivery.',
-          '- Adapt content to each platform\'s native format: LinkedIn = professional, longer; dev.to = technical, tutorial-style; Medium = narrative, explanatory; Quora = direct answer format; HackerNews = concise, factual, no fluff.',
+          `- ${CROSS_PLATFORM_ADAPT_INSTRUCTION}`,
+          `- ${buildPlatformNativeFormatLine()}`,
           '- TITLE vs BODY: on reddit, hackernews, medium and devto the themeTitle is submitted SEPARATELY as the post/story title, so `content` is the BODY ONLY — never open it with the title.',
           '- REDDIT TARGETING: if `reddit` is in the missing list, set `subreddit` to the single most relevant EXISTING, ACTIVE, PUBLIC subreddit (bare name, no "r/"). Set `flairLabel`/`titleTag` when you are confident the community requires them, else null. For every non-reddit entry set all three to null.',
           '- REDDIT SELF-PROMOTION / SPAM GUARDRAILS: if `reddit` is in the missing list, NEVER include the project\'s own URL or "I built X" framing in its `content` — write it as a genuine discussion/question, not an announcement, with a clear title and substantive body (no self-promotion, no spam links, no low-effort/empty content, no leaked material verbatim).',

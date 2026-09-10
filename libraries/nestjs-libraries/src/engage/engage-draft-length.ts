@@ -1,4 +1,9 @@
 import { weightedLength } from '@gitroom/helpers/utils/count.length';
+import { SCANNABLE_PLATFORMS } from '@gitroom/nestjs-libraries/engage/engage-scan-config.service';
+import {
+  hardLimitFor,
+  targetFor,
+} from '@gitroom/nestjs-libraries/integrations/platform-content-profile';
 
 // Draft length policy for engage replies — ONE definition, shared by the
 // user-driven SSE endpoint and the unattended auto-reply driver. Duplicating it
@@ -42,6 +47,21 @@ export function outputLengthForLength(
  * requested `outputLength` only steers the prompt — it is a soft target, so a
  * draft that overshoots it is kept as long as the platform would still accept
  * it (see the engage draft-length note in the module docs).
+ *
+ * Covers EVERY platform engage can generate for, not just x/reddit. It used to
+ * check those two and silently pass anything else, which was harmless only
+ * while every generation targeted the opportunity's own platform and engage
+ * effectively replied on x/reddit alone. Reference-post generation can now be
+ * pointed at any of the seven, so a linkedin post at 4000 characters — over
+ * LinkedIn's real 3000 ceiling — would otherwise sail through this gate and
+ * fail at publish time instead.
+ *
+ * x and reddit keep their OWN engage numbers rather than the provider's: x's
+ * 280 is the provider ceiling anyway, and engage's reddit ceiling (2000) is
+ * deliberately stricter than the provider's 10000 — an engage post is a short
+ * post, and loosening it here would be a behaviour change nobody asked for.
+ * The other five take the provider's `maxLength()` through the shared
+ * `hardLimitFor`, so they track the publisher's real limit automatically.
  */
 export function assertDraftWithinPlatformLimit(
   platform: string,
@@ -58,6 +78,7 @@ export function assertDraftWithinPlatformLimit(
         `Generated X draft exceeded ${hardLimit} Twitter-weighted characters.`
       );
     }
+    return;
   }
   if (normalized === 'reddit') {
     const hardLimit = Math.max(
@@ -67,5 +88,20 @@ export function assertDraftWithinPlatformLimit(
     if (draft.length > hardLimit) {
       throw new Error(`Generated Reddit draft exceeded ${hardLimit} characters.`);
     }
+    return;
+  }
+  // Anything outside the scannable set has no engage generation path and no
+  // agreed ceiling — staying silent there preserves the previous behaviour
+  // for callers passing a platform this module was never taught about,
+  // rather than inventing a limit for it.
+  if (!(SCANNABLE_PLATFORMS as readonly string[]).includes(normalized)) return;
+  const hardLimit = Math.max(
+    outputLength ?? targetFor(normalized),
+    hardLimitFor(normalized)
+  );
+  if (draft.length > hardLimit) {
+    throw new Error(
+      `Generated ${normalized} draft exceeded ${hardLimit} characters.`
+    );
   }
 }

@@ -38,6 +38,21 @@ export class NotEnoughScopes {
 export interface ReferencePostSettingsContext {
   externalPostUrl: string;
   title: string;
+  /**
+   * The community the post belongs to, as the scanner recorded it — Reddit's
+   * subreddit today, named platform-neutrally because it is the same column
+   * (`EngageOpportunity.channelId`) on every community platform.
+   *
+   * Reddit needs a destination and had only `externalPostUrl` to find one in,
+   * so it re-derived the subreddit by regex from a URL the scanner had ALREADY
+   * parsed into this field. That round trip fails on any address whose shape
+   * the regex does not cover (a redd.it short link, an unusual permalink),
+   * while the recorded value sits right there and is correct.
+   *
+   * Absent on platforms that have no channel (X) and on rows stored before the
+   * column was populated, so a provider reading it must still fall back.
+   */
+  targetChannel?: string;
 }
 
 /** Create a valid generic title without copying the source post's headline. */

@@ -1441,8 +1441,9 @@ export class EngageService implements OnApplicationBootstrap {
   // getOpportunityById (no reply-eligibility status gate — §5 of the doc).
   //
   // One call, not a generate-then-save pair: it always persists as an
-  // account-less DRAFT (source='calendar', providerIdentifier=
-  // opportunity.platform, no bound integration — same shape as an
+  // account-less DRAFT (source='calendar', providerIdentifier= the TARGET
+  // platform — `dto.targetPlatform` when the caller names one, otherwise the
+  // opportunity's own — with no bound integration, the same shape as an
   // operation-plan post for a platform the org hasn't connected). Everything
   // after that — editing content, picking which of the org's accounts to
   // publish through, scheduling, publishing — is the EXISTING generic
@@ -1484,16 +1485,29 @@ export class EngageService implements OnApplicationBootstrap {
     // an internal caller (which bypasses the DTO's @IsIn) can send anything.
     const sourceAdaptation = resolveSourceAdaptation(dto.sourceAdaptation);
 
-    // A thread is only ever produced on a platform that can actually chain
-    // one — the caller never picks the platform here (it is always the
-    // opportunity's own), so an unsupported one degrades to a single post
-    // and SAYS SO in the result, rather than 400-ing a request whose only
-    // fault is the opportunity it points at. Capability comes from the one
-    // shared rule (integrations/thread-capability.ts), which covers both the
-    // API and the extension publish paths.
-    const threadCapable = isThreadCapablePlatform(
-      normalizeEngagePlatform(opportunity.platform)
+    // WHICH PLATFORM THIS POST IS FOR. `opportunity.platform` keeps its
+    // original meaning — where the REFERENCE came from — and everything about
+    // the post being written (length budget, style, the draft's provider, its
+    // settings, thread capability) keys off `targetPlatform` instead. Omitted
+    // by the caller, they are the same value and the whole method behaves
+    // exactly as it did before this became an a→any generator.
+    //
+    // Normalized once, here, rather than at each use: the DTO's @IsIn accepts
+    // the scannable vocabulary, but an internal caller bypasses it and legacy
+    // rows still say `twitter`.
+    const targetPlatform = normalizeEngagePlatform(
+      dto.targetPlatform ?? opportunity.platform
     );
+
+    // A thread is only ever produced on a platform that can actually chain
+    // one — and it is the TARGET that has to chain it, not the platform the
+    // reference happened to come from. An unsupported target degrades to a
+    // single post and SAYS SO in the result, rather than 400-ing (the client
+    // may well not have chosen the platform in the first place: an omitted
+    // targetPlatform inherits the opportunity's). Capability comes from the
+    // one shared rule (integrations/thread-capability.ts), which covers both
+    // the API and the extension publish paths.
+    const threadCapable = isThreadCapablePlatform(targetPlatform);
     const wantsThread = !!dto.thread;
     const threadRequested = wantsThread && threadCapable;
     // How many posts the caller actually asked for. Needed HERE — not just
@@ -1511,7 +1525,7 @@ export class EngageService implements OnApplicationBootstrap {
     const requestedPosts = wantsThread ? resolveThreadPostCount(dto) : 1;
     if (wantsThread && !threadCapable) {
       this.logger.warn(
-        `Thread requested for opportunity ${opportunityId} on ${opportunity.platform}, which cannot publish a native thread; generating a single post instead.`
+        `Thread requested for opportunity ${opportunityId} targeting ${targetPlatform}, which cannot publish a native thread; generating a single post instead.`
       );
     }
 
@@ -1536,8 +1550,46 @@ export class EngageService implements OnApplicationBootstrap {
       });
     }
 
+    // Where a reddit-targeted post gets submitted, most specific source first:
+    //
+    //  1. `dto.targetChannel` — the caller said so. The ONLY source a
+    //     cross-platform reddit post has: an X or LinkedIn opportunity carries
+    //     no subreddit anywhere, and guessing one would publish into a
+    //     community the post does not belong to.
+    //  2. `opportunity.channelId` — what the scanner recorded for a reddit
+    //     opportunity (both the server adapter and the extension store the
+    //     bare name), so a reddit→reddit generation needs no caller input.
+    //  3. the opportunity URL, re-parsed inside RedditProvider — the last
+    //     resort for rows stored before that column was populated.
+    //
+    // Ignored by every non-reddit target: no other platform's settings need a
+    // destination the post does not already carry.
+    const targetChannel = dto.targetChannel ?? opportunity.channelId;
+
+    // Pre-flight the TARGET's Post.settings before spending a model call on a
+    // draft that cannot be persisted. Reddit is the case that makes this
+    // necessary: with none of the three sources above yielding a subreddit —
+    // `targetPlatform: 'reddit'` on an X opportunity and no `targetChannel`
+    // — the draft is unsavable, which used to surface as a 400 raised at the
+    // persistence step BELOW, after the generation had already run and cost
+    // real tokens. Same exception, same message, just raised before the spend
+    // instead of after it. The title is a throwaway here (referencePostTitle
+    // floors to "Generated post"); the real settings are still built from the
+    // real text at persistence time.
+    this._buildReferencePostSettings(
+      targetPlatform,
+      opportunity.externalPostUrl,
+      '',
+      undefined,
+      targetChannel
+    );
+
     let text: string;
     let parts: string[];
+    // The model's own title, on a target that submits one separately. Left
+    // undefined everywhere else — `_buildReferencePostSettings` then derives
+    // one from the body, which is what every platform used to get.
+    let generatedTitle: string | undefined;
     // Held, NOT billed here. A generation that succeeds and then fails to
     // persist leaves the caller with nothing, so the charge waits until the
     // post is on disk — see the billing call at the end of this method.
@@ -1552,6 +1604,7 @@ export class EngageService implements OnApplicationBootstrap {
     try {
       const result = await this._referencePostService.generate(opportunity, {
         strategy: dto.strategy,
+        targetPlatform,
         sourceAdaptation,
         brandStrength: dto.brandStrength,
         mentions: dto.mentions,
@@ -1564,6 +1617,7 @@ export class EngageService implements OnApplicationBootstrap {
       droppedParts = result.droppedParts ?? 0;
       requestedParts = result.requestedParts ?? 0;
       text = result.text;
+      generatedTitle = result.title;
       // An aborted generation comes back with no parts at all; keep the
       // single-(empty)-post shape the persistence below has always been
       // handed rather than building a post with zero content entries, which
@@ -1580,6 +1634,7 @@ export class EngageService implements OnApplicationBootstrap {
         await this._billReferencePostUsages(
           org,
           opportunityId,
+          targetPlatform,
           opportunity.platform,
           dto.strategy,
           sourceAdaptation,
@@ -1615,18 +1670,23 @@ export class EngageService implements OnApplicationBootstrap {
         date,
         posts: [
           {
-            // The stored platform and settings discriminator must agree. In
-            // particular, `twitter` opportunities are published through the
-            // `x` provider.
-            providerIdentifier: normalizeEngagePlatform(opportunity.platform),
+            // The stored platform and settings discriminator must agree, and
+            // both describe the platform this draft PUBLISHES to — the
+            // target, which is the opportunity's own only when the caller
+            // did not ask for another. (`twitter` opportunities publish
+            // through the `x` provider; targetPlatform is already normalized
+            // for that.)
+            providerIdentifier: targetPlatform,
             // An account-less DRAFT is later re-submitted through POST /posts
             // after the user picks an account. Give it the platform-specific
             // defaults now, rather than only a discriminator which can fail
             // the regular CreatePostDto validation on that later save.
             settings: this._buildReferencePostSettings(
-              opportunity.platform,
+              targetPlatform,
               opportunity.externalPostUrl,
-              text
+              text,
+              generatedTitle,
+              targetChannel
             ),
             // One value entry per post in the chain — createOrUpdatePost
             // turns entries 2..N into parentPostId-chained rows, which IS
@@ -1676,6 +1736,7 @@ export class EngageService implements OnApplicationBootstrap {
     await this._billReferencePostUsages(
       org,
       opportunityId,
+      targetPlatform,
       opportunity.platform,
       dto.strategy,
       sourceAdaptation,
@@ -1819,7 +1880,14 @@ export class EngageService implements OnApplicationBootstrap {
   private async _billReferencePostUsages(
     org: Organization,
     opportunityId: string,
+    // The platform the post was WRITTEN FOR. `platform` on the billing record
+    // has always meant "what did this generation produce", which is the
+    // target — a cross-platform generation that cost X tokens to write a
+    // LinkedIn post is a LinkedIn generation, not an X one.
     platform: string,
+    // Where the reference came from, recorded alongside it so a cross-platform
+    // generation is still identifiable in the ledger. Audit-only.
+    sourcePlatform: string,
     strategy: string,
     // Audit-only, like `strategy`: it does not change what is charged, but it
     // is the axis that most affects how close the output sits to the source,
@@ -1839,7 +1907,7 @@ export class EngageService implements OnApplicationBootstrap {
           // generation time (§7 of the design doc).
           relatedId: opportunityId,
           description: 'Reference-post generation (Engage)',
-          data: { platform, strategy, sourceAdaptation },
+          data: { platform, sourcePlatform, strategy, sourceAdaptation },
         },
         usages.map((usage) => ({
           servicer: usage.provider,
@@ -3158,7 +3226,27 @@ export class EngageService implements OnApplicationBootstrap {
   private _buildReferencePostSettings(
     platform: string,
     externalPostUrl: string,
-    generatedText: string
+    generatedText: string,
+    /**
+     * The title the MODEL wrote, on the platforms that submit one separately
+     * (reddit/hackernews/medium/devto ask for an explicit `TITLE:` line — see
+     * reference-post-generation.md §6.5). Absent on every other platform, and
+     * absent on those four when the model ignored the format; both fall back
+     * to `referencePostTitle`, which slices the body.
+     *
+     * That slice is a LAST RESORT, not the norm it used to be: it takes the
+     * body's first 280 characters, so on a long-form post it is a sentence cut
+     * in half that the body then repeats verbatim — exactly what the
+     * body-only prompt rule exists to prevent.
+     */
+    generatedTitle?: string,
+    /**
+     * The opportunity's recorded community (`EngageOpportunity.channelId`: a
+     * bare subreddit on Reddit, null on X and every other channel-less
+     * platform). Reddit prefers it over re-parsing `externalPostUrl` for a
+     * value the scanner already extracted into that column.
+     */
+    targetChannel?: string | null
   ): Record<string, unknown> {
     const providerIdentifier = normalizeEngagePlatform(platform);
     const provider = socialIntegrationList.find(
@@ -3172,7 +3260,8 @@ export class EngageService implements OnApplicationBootstrap {
 
     const settings = provider.buildReferencePostSettings({
       externalPostUrl,
-      title: referencePostTitle(generatedText),
+      title: generatedTitle?.trim() || referencePostTitle(generatedText),
+      targetChannel: targetChannel ?? undefined,
     });
     if (!settings) {
       throw new BadRequestException(

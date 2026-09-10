@@ -5,6 +5,10 @@ import {
   ReferencePostGenerationError,
   TooSimilarToReferenceError,
 } from '../engage-reference-post.service';
+import {
+  buildPlatformStyleGuidance,
+  CROSS_PLATFORM_ADAPT_INSTRUCTION,
+} from '@gitroom/nestjs-libraries/integrations/platform-content-profile';
 
 const anthropicCreate = vi.fn();
 
@@ -87,14 +91,14 @@ describe('EngageReferencePostService', () => {
     ]);
   });
 
-  it('derives the target platform from the reference itself, not a client-supplied value', async () => {
+  it("defaults the target platform to the reference's own when none is given", async () => {
     anthropicCreate.mockResolvedValueOnce(anthropicResponse('An original take on ceramics.'));
 
     await service.generate({ ...REFERENCE, platform: 'reddit' }, { strategy: 'EXPERT_ANSWER', brandStrength: 1 });
 
     // Reddit's default target (1000 chars, prompted at the 0.85 safety margin
     // = 850), not X's (260) — proves platform came from reference.platform,
-    // since no outputLength was passed.
+    // since neither outputLength nor targetPlatform was passed.
     expect(anthropicCreate.mock.calls[0][0].system).toContain('under 850 characters');
   });
 
@@ -1005,5 +1009,412 @@ describe('EngageReferencePostService', () => {
 
     const result = await service.generate(REFERENCE, { strategy: 'EXPERT_ANSWER', brandStrength: 1, outputLength: 260 });
     expect(result.usages).toEqual([]);
+  });
+
+  // ─── Cross-platform generation (targetPlatform) ─────────────────────────
+  // The reference keeps saying where the inspiration came FROM; targetPlatform
+  // says what the post is written FOR. Everything that shapes the output has
+  // to follow the target, and nothing may change when the two are the same.
+  describe('cross-platform generation (a→any)', () => {
+    const systemPrompt = () => anthropicCreate.mock.calls[0][0].system as string;
+
+    it("uses the TARGET platform's character budget, not the reference's", async () => {
+      anthropicCreate.mockResolvedValueOnce(anthropicResponse('A considered take on artisan pricing.'));
+
+      // X reference → LinkedIn post. LinkedIn's shared target is 3000, prompted
+      // at the 0.85 safety margin = 2550. X's 260 would have produced 221.
+      await service.generate(REFERENCE, {
+        strategy: 'EXPERT_ANSWER',
+        brandStrength: 1,
+        targetPlatform: 'linkedin',
+      });
+
+      expect(systemPrompt()).toContain('up to 2550 characters');
+      expect(systemPrompt()).not.toContain('Twitter-weighted');
+    });
+
+    it('names BOTH platforms so the model knows it is adapting', async () => {
+      anthropicCreate.mockResolvedValueOnce(anthropicResponse('A considered take.'));
+
+      await service.generate(REFERENCE, {
+        strategy: 'EXPERT_ANSWER',
+        brandStrength: 1,
+        targetPlatform: 'linkedin',
+      });
+
+      expect(systemPrompt()).toContain('Write an ORIGINAL linkedin post');
+      expect(systemPrompt()).toContain('published on x');
+      expect(systemPrompt()).toContain(
+        'the reference was written for x, but your post publishes on linkedin'
+      );
+    });
+
+    it('injects the shared ADAPT instruction and the target house style', async () => {
+      anthropicCreate.mockResolvedValueOnce(anthropicResponse('A considered take.'));
+
+      await service.generate(REFERENCE, {
+        strategy: 'EXPERT_ANSWER',
+        brandStrength: 1,
+        targetPlatform: 'linkedin',
+      });
+
+      // The SAME string the operation plan sends — one asset, not a second
+      // wording of the same advice living in engage.
+      expect(systemPrompt()).toContain(CROSS_PLATFORM_ADAPT_INSTRUCTION);
+      expect(systemPrompt()).toContain(buildPlatformStyleGuidance('linkedin'));
+      // ...and only the target's style: the other six platforms' conventions
+      // are exactly what a model should not be blending in here.
+      expect(systemPrompt()).not.toContain('narrative, explanatory');
+      expect(systemPrompt()).not.toContain('concise, factual, no fluff');
+    });
+
+    it("carries a title-separated target's BODY-ONLY rule", async () => {
+      anthropicCreate.mockResolvedValueOnce(anthropicResponse('A considered take.'));
+
+      await service.generate(REFERENCE, {
+        strategy: 'EXPERT_ANSWER',
+        brandStrength: 1,
+        targetPlatform: 'medium',
+      });
+
+      expect(systemPrompt()).toContain('BODY ONLY');
+    });
+
+    it('normalizes a legacy twitter target onto x', async () => {
+      anthropicCreate.mockResolvedValueOnce(anthropicResponse('A considered take.'));
+
+      await service.generate(
+        { ...REFERENCE, platform: 'reddit' },
+        { strategy: 'EXPERT_ANSWER', brandStrength: 1, targetPlatform: 'twitter' }
+      );
+
+      expect(systemPrompt()).toContain('Write an ORIGINAL x post');
+      // X's structural margin wording, i.e. it really took the x branch.
+      expect(systemPrompt()).toContain('Twitter-weighted characters');
+    });
+
+    it('threads for the TARGET platform', async () => {
+      anthropicCreate.mockResolvedValueOnce(anthropicResponse('one\n[[PART]]\ntwo'));
+
+      await service.generate(REFERENCE, {
+        strategy: 'EXPERT_ANSWER',
+        brandStrength: 1,
+        targetPlatform: 'linkedin',
+        thread: true,
+        maxThreadParts: 2,
+      });
+
+      expect(systemPrompt()).toContain('native linkedin thread');
+    });
+
+    it("length-gates the output against the TARGET's ceiling", async () => {
+      // 3001 characters: fine on medium (100000), over LinkedIn's real 3000.
+      // Both attempts overrun, so the shortening retry is spent and it throws.
+      anthropicCreate
+        .mockResolvedValueOnce(anthropicResponse('a'.repeat(3001)))
+        .mockResolvedValueOnce(anthropicResponse('a'.repeat(3001)));
+
+      const error = await service
+        .generate(REFERENCE, {
+          strategy: 'EXPERT_ANSWER',
+          brandStrength: 1,
+          targetPlatform: 'linkedin',
+        })
+        .catch((err) => err);
+
+      expect(error.name).toBe('ReferencePostGenerationError');
+      expect(error.message).toMatch(/linkedin draft exceeded 3000 characters/);
+    });
+
+    // Backwards compatibility, asserted as an exact prompt comparison rather
+    // than a spot-check: a same-platform request must produce the prompt it
+    // always produced, with no cross-platform instruction bolted on.
+    it('changes NOTHING when the target equals the source', async () => {
+      anthropicCreate.mockResolvedValueOnce(anthropicResponse('A considered take.'));
+      await service.generate(REFERENCE, {
+        strategy: 'EXPERT_ANSWER',
+        brandStrength: 1,
+        outputLength: 260,
+      });
+      const withoutTarget = systemPrompt();
+
+      anthropicCreate.mockReset();
+      anthropicCreate.mockResolvedValueOnce(anthropicResponse('A considered take.'));
+      await service.generate(REFERENCE, {
+        strategy: 'EXPERT_ANSWER',
+        brandStrength: 1,
+        outputLength: 260,
+        targetPlatform: 'x',
+      });
+
+      expect(systemPrompt()).toBe(withoutTarget);
+      expect(withoutTarget).not.toContain('Cross-platform adaptation');
+      expect(withoutTarget).not.toContain("ADAPT, don't copy");
+    });
+  });
+
+  // A same-platform generation on one of the five platforms that are NEITHER
+  // x nor reddit was quietly prompted at X's 260 characters, because the
+  // fallback was `platform === 'reddit' ? reddit : X`. That is a bug fix, not
+  // a cross-platform feature: it needs no targetPlatform to show up.
+  describe('non-x/non-reddit length fallback (fixed)', () => {
+    it.each(['linkedin', 'medium', 'devto', 'quora', 'hackernews'])(
+      'prompts a %s post at its own target, not X’s 260',
+      async (platform) => {
+        anthropicCreate.mockResolvedValueOnce(anthropicResponse('A considered take.'));
+
+        await service.generate(
+          { ...REFERENCE, platform },
+          { strategy: 'EXPERT_ANSWER', brandStrength: 1 }
+        );
+
+        const prompt = anthropicCreate.mock.calls[0][0].system as string;
+        expect(prompt).toContain('up to 2550 characters');
+        expect(prompt).not.toContain('up to 221 characters');
+      }
+    );
+
+    it('still lets an explicit outputLength win', async () => {
+      anthropicCreate.mockResolvedValueOnce(anthropicResponse('A considered take.'));
+
+      await service.generate(
+        { ...REFERENCE, platform: 'linkedin' },
+        { strategy: 'EXPERT_ANSWER', brandStrength: 1, outputLength: 600 }
+      );
+
+      expect(anthropicCreate.mock.calls[0][0].system).toContain('up to 510 characters');
+    });
+  });
+
+  // The title on reddit/hackernews/medium/devto is submitted through a field
+  // of its own (`Post.settings.title`) and is what a reader actually sees
+  // first. It used to be `referencePostTitle(body)` — the body's first 280
+  // characters — so the prompt told the model to write the BODY ONLY, the code
+  // then sliced a title out of that body, and a long-form post got a title cut
+  // off mid-sentence that the body immediately repeated: precisely the double
+  // display the body-only rule exists to prevent. The model is asked for the
+  // title outright instead.
+  describe('title-separated targets (TITLE: line)', () => {
+    const systemPrompt = () => anthropicCreate.mock.calls[0][0].system as string;
+    const userPrompt = () =>
+      anthropicCreate.mock.calls[0][0].messages[0].content as string;
+
+    it('asks a title-separated target for an explicit TITLE line', async () => {
+      anthropicCreate.mockResolvedValueOnce(
+        anthropicResponse('TITLE: Pricing handmade work\n\nA considered take.')
+      );
+
+      await service.generate(REFERENCE, {
+        strategy: 'EXPERT_ANSWER',
+        brandStrength: 1,
+        targetPlatform: 'reddit',
+      });
+
+      expect(systemPrompt()).toContain('"TITLE: <your title>"');
+      expect(systemPrompt()).toContain('Write EXACTLY ONE such line, at the very top');
+      // The closing output rule has to permit the line it just demanded — the
+      // unconditional "Only output the post text" that used to stand there
+      // contradicted it outright.
+      expect(systemPrompt()).toContain(
+        'Only output the TITLE: line and then the post text'
+      );
+      // ...and the length rule has to say the title is not body characters.
+      expect(systemPrompt()).toContain(
+        'The TITLE: line is not part of the body and does not count towards it.'
+      );
+      // Restated in the user message, the last thing the model reads.
+      expect(userPrompt()).toContain('Start with the "TITLE: <your title>" line');
+    });
+
+    it.each([
+      ['reddit', 300],
+      ['hackernews', 80],
+      ['medium', 100],
+      ['devto', 128],
+    ])("states %s's own title budget", async (platform, budget) => {
+      anthropicCreate.mockResolvedValueOnce(
+        anthropicResponse('TITLE: Pricing handmade work\n\nA considered take.')
+      );
+
+      await service.generate(REFERENCE, {
+        strategy: 'EXPERT_ANSWER',
+        brandStrength: 1,
+        targetPlatform: platform as string,
+      });
+
+      expect(systemPrompt()).toContain(`at most ${budget} characters`);
+    });
+
+    it('returns the title separately from the body', async () => {
+      anthropicCreate.mockResolvedValueOnce(
+        anthropicResponse(
+          'TITLE: What most ceramic sellers get wrong about price\n\nMost makers set a number in 2019 and never revisited it.'
+        )
+      );
+
+      const result = await service.generate(REFERENCE, {
+        strategy: 'EXPERT_ANSWER',
+        brandStrength: 1,
+        targetPlatform: 'reddit',
+      });
+
+      expect(result.title).toBe('What most ceramic sellers get wrong about price');
+      // The body no longer carries the TITLE line, in `text` or in `parts`.
+      expect(result.text).toBe(
+        'Most makers set a number in 2019 and never revisited it.'
+      );
+      expect(result.parts).toEqual([
+        'Most makers set a number in 2019 and never revisited it.',
+      ]);
+    });
+
+    // reddit and hackernews are BOTH title-separated and thread-capable, so
+    // the two formats have to compose: one title for the chain, [[PART]]
+    // between the posts.
+    it('takes ONE title for a whole thread and splits the parts under it', async () => {
+      anthropicCreate.mockResolvedValueOnce(
+        anthropicResponse(
+          'TITLE: Three pricing mistakes\n\nMistake one.\n[[PART]]\nMistake two.\n[[PART]]\nMistake three.'
+        )
+      );
+
+      const result = await service.generate(REFERENCE, {
+        strategy: 'EXPERT_ANSWER',
+        brandStrength: 1,
+        targetPlatform: 'reddit',
+        thread: true,
+        maxThreadParts: 3,
+      });
+
+      expect(result.title).toBe('Three pricing mistakes');
+      expect(result.parts).toEqual([
+        'Mistake one.',
+        'Mistake two.',
+        'Mistake three.',
+      ]);
+      // The anchor is the body's first post, not the title line.
+      expect(result.parts[0]).not.toContain('TITLE');
+      expect(systemPrompt()).toContain(
+        'the title belongs to the whole thread, not to each post'
+      );
+    });
+
+    // A generation is paid for the moment the model answers. A first line that
+    // did not come back in the requested shape is a formatting miss, not a
+    // reason to void it.
+    it('falls back without failing when the model emits no TITLE line', async () => {
+      anthropicCreate.mockResolvedValueOnce(
+        anthropicResponse('Most makers set a number in 2019 and never revisited it.')
+      );
+
+      const result = await service.generate(REFERENCE, {
+        strategy: 'EXPERT_ANSWER',
+        brandStrength: 1,
+        targetPlatform: 'reddit',
+      });
+
+      expect(result.title).toBeUndefined();
+      expect(result.text).toBe(
+        'Most makers set a number in 2019 and never revisited it.'
+      );
+      expect(anthropicCreate).toHaveBeenCalledTimes(1);
+    });
+
+    it('strips a title the model repeated at the top of the body', async () => {
+      anthropicCreate.mockResolvedValueOnce(
+        anthropicResponse(
+          'TITLE: Three pricing mistakes\n\n## Three pricing mistakes\n\nMistake one.'
+        )
+      );
+
+      const result = await service.generate(REFERENCE, {
+        strategy: 'EXPERT_ANSWER',
+        brandStrength: 1,
+        targetPlatform: 'reddit',
+      });
+
+      expect(result.title).toBe('Three pricing mistakes');
+      expect(result.text).toBe('Mistake one.');
+    });
+
+    // The TITLE line is lifted off BEFORE the body is split, so it can never
+    // eat into a post's character budget: reddit's engage ceiling is 2000, and
+    // a body sitting exactly on it still passes with a title above it.
+    it('does not charge the TITLE line against the body budget', async () => {
+      const body = 'a'.repeat(2000);
+      anthropicCreate.mockResolvedValueOnce(
+        anthropicResponse(`TITLE: A long-form reddit post\n\n${body}`)
+      );
+
+      const result = await service.generate(REFERENCE, {
+        strategy: 'EXPERT_ANSWER',
+        brandStrength: 1,
+        targetPlatform: 'reddit',
+      });
+
+      expect(result.title).toBe('A long-form reddit post');
+      expect(result.parts[0]).toHaveLength(2000);
+    });
+  });
+
+  // x, linkedin and quora carry no separate title field, so nothing about
+  // them may change: an inert instruction in a prompt this tightly tuned is
+  // not free, and a parser run over a response that is already nothing but
+  // the body can only ever take something away from it.
+  describe('platforms with no separate title field are untouched', () => {
+    it.each(['x', 'linkedin', 'quora'])(
+      'never mentions a TITLE line to %s',
+      async (platform) => {
+        anthropicCreate.mockResolvedValueOnce(anthropicResponse('A considered take.'));
+
+        await service.generate(
+          { ...REFERENCE, platform },
+          { strategy: 'EXPERT_ANSWER', brandStrength: 1 }
+        );
+
+        const prompt = anthropicCreate.mock.calls[0][0].system as string;
+        expect(prompt).not.toContain('TITLE');
+        // The historical closing instruction, verbatim.
+        expect(prompt).toContain(
+          'Only output the post text — no preface, no meta-commentary, no quotation of the reference.'
+        );
+        expect(anthropicCreate.mock.calls[0][0].messages[0].content).not.toContain(
+          'TITLE'
+        );
+      }
+    );
+
+    it('keeps the historical thread output instruction verbatim', async () => {
+      anthropicCreate.mockResolvedValueOnce(anthropicResponse('one\n[[PART]]\ntwo'));
+
+      await service.generate(
+        { ...REFERENCE, platform: 'linkedin' },
+        {
+          strategy: 'EXPERT_ANSWER',
+          brandStrength: 1,
+          thread: true,
+          maxThreadParts: 2,
+        }
+      );
+
+      expect(anthropicCreate.mock.calls[0][0].system).toContain(
+        'Only output the post text, with [[PART]] between posts'
+      );
+    });
+
+    it('leaves a stray TITLE line in the body rather than parsing it', async () => {
+      anthropicCreate.mockResolvedValueOnce(
+        anthropicResponse('TITLE: not a field here\n\nA considered take.')
+      );
+
+      const result = await service.generate(REFERENCE, {
+        strategy: 'EXPERT_ANSWER',
+        brandStrength: 1,
+        outputLength: 260,
+      });
+
+      expect(result.title).toBeUndefined();
+      expect(result.text).toBe('TITLE: not a field here\n\nA considered take.');
+    });
   });
 });

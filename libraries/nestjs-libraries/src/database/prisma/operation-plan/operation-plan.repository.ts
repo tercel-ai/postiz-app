@@ -2,10 +2,8 @@ import { ConflictException, Injectable, NotFoundException } from '@nestjs/common
 import { v5 as uuidv5 } from 'uuid';
 import { PrismaRepository } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
 import { OperationPlan, Prisma } from '@prisma/client';
-import {
-  postTitleFromTheme,
-  stripDuplicatedTitleFromContent,
-} from './theme-title';
+import { postTitleFromTheme } from './theme-title';
+import { stripDuplicatedTitleFromContent } from '@gitroom/nestjs-libraries/integrations/title-body-split';
 import { TITLE_REQUIRED_PLATFORMS } from '@gitroom/helpers/extension/post-publish';
 import { COMMUNITY_TITLE_PLATFORMS } from '@gitroom/nestjs-libraries/database/prisma/posts/settings-title';
 import type { ResolvedRedditTarget as ResolverRedditTarget } from './reddit-target-resolver';

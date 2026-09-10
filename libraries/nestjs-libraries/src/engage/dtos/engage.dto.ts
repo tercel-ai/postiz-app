@@ -11,6 +11,7 @@ import {
   IsObject,
   IsOptional,
   IsString,
+  Matches,
   Max,
   MaxLength,
   Min,
@@ -20,6 +21,7 @@ import {
 import { Transform, Type } from 'class-transformer';
 import { OmitType, PickType } from '@nestjs/swagger';
 import { EngageOpportunityStatus } from '@prisma/client';
+import { SCANNABLE_PLATFORMS } from '@gitroom/nestjs-libraries/engage/engage-scan-config.service';
 
 // @IsIn rejects values missing here at the controller boundary (400) before
 // either generator service sees them. Two prompt maps key off this list:
@@ -1130,9 +1132,13 @@ export function resolveThreadPostCount(input: {
 // goes through the existing generic POST /api/posts/ edit flow, same as any
 // other draft; there is no separate save-generated-post endpoint.
 //
-// No integrationId/platform field: the target platform is always the
-// opportunity's OWN platform (opportunity.platform), not a client choice —
-// simpler than resolving it from an account. Deliberately mirrors
+// No integrationId field: `targetPlatform` names the platform to WRITE FOR
+// directly, rather than making the caller resolve it from one of their
+// accounts. Omitting it keeps the original a→a behaviour — the post is
+// written for the opportunity's OWN platform (opportunity.platform) — while
+// supplying it turns this into an a→any generation, where the reference is
+// still the opportunity but the character budget and the format/style
+// guidance come from the TARGET platform instead. Deliberately mirrors
 // GenerateDraftDto's shape (same strategy/brandStrength/mentions/outputLength
 // vocabulary the reply-draft endpoint already uses) rather than a bespoke
 // tone axis, for a consistent creative-control UI across both.
@@ -1164,6 +1170,54 @@ export class GenerateReferencePostDto {
   @IsOptional()
   @IsString()
   projectId?: string;
+
+  // Which platform the generated post is WRITTEN FOR. Omitted → the
+  // opportunity's own platform, which is what this endpoint always did.
+  //
+  // Constrained to SCANNABLE_PLATFORMS rather than the ~30 providers the app
+  // can publish to: those seven are the platforms Engage has a scanner (and
+  // therefore opportunities) for, so they are the vocabulary every other
+  // engage field already speaks. Sourced from that one exported list, never a
+  // literal copy — a platform added there must not need a second edit here to
+  // become a valid target.
+  @IsOptional()
+  @IsString()
+  @IsIn(SCANNABLE_PLATFORMS as readonly string[])
+  targetPlatform?: string;
+
+  // The community a post is submitted INTO, where the target platform has one
+  // the post does not carry itself. Reddit reads it as the subreddit (bare
+  // name, no `r/`); every other target today ignores it.
+  //
+  // Named for the concept, not for Reddit, because that is what the rest of
+  // the chain already calls it: the scanner writes this value to
+  // `EngageOpportunity.channelId`, and it reaches the provider as
+  // `ReferencePostSettingsContext.targetChannel`. Reddit is merely the first
+  // platform to need it — Lemmy (communities) and Farcaster (channels) are
+  // already-supported providers with the same concept, and this repo's habit
+  // of calling all three "subreddit" in their settings DTOs is exactly the
+  // misnomer not worth repeating on a public API field.
+  //
+  // Required in practice for a CROSS-platform reddit post, and only there: a
+  // reddit→reddit generation already knows its subreddit (the scanner recorded
+  // it), but an X or LinkedIn opportunity has no community anywhere in its
+  // data and none can be soundly inferred — a guessed community is worse than
+  // a refusal, since the post lands somewhere it does not belong. So the
+  // caller states it, or the request is refused.
+  //
+  // The shape below is REDDIT's rule (3-21 letters, digits, underscores),
+  // enforced here rather than in the provider because reddit is the only
+  // consumer: validating at the boundary is what makes a malformed name a 400
+  // instead of a silent fall-through to the opportunity's own channel, which
+  // would ignore what the caller explicitly asked for. Move it into the
+  // providers the day a second platform reads this field.
+  @IsOptional()
+  @IsString()
+  @Matches(/^[a-z0-9_]{3,21}$/i, {
+    message:
+      'targetChannel must be a bare subreddit name (3-21 letters, digits or underscores), without the "r/" prefix',
+  })
+  targetChannel?: string;
 
   // How closely this post may follow the reference — see
   // VALID_SOURCE_ADAPTATIONS. Defaults to REFRAME server-side when omitted.

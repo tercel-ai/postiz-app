@@ -14,6 +14,17 @@ import {
   assertDraftWithinPlatformLimit,
 } from '@gitroom/nestjs-libraries/engage/engage-draft-length';
 import {
+  buildPlatformStyleGuidance,
+  isTitleSeparatedPlatform,
+  targetFor,
+  titleLengthTargetFor,
+  CROSS_PLATFORM_ADAPT_INSTRUCTION,
+} from '@gitroom/nestjs-libraries/integrations/platform-content-profile';
+import {
+  parseTitledOutput,
+  TITLE_LINE_PREFIX,
+} from '@gitroom/nestjs-libraries/integrations/title-body-split';
+import {
   requiresMention,
   containsRequiredMention,
   buildBrandInstruction,
@@ -37,10 +48,19 @@ import {
 // anyone), and adds an output-side similarity gate reply generation has no
 // need for.
 //
-// The target platform is always the reference opportunity's OWN platform
-// (reference.platform) — not a client-supplied value. See §3: the caller
-// picks WHICH of their own accounts on that platform to eventually save to
-// (SaveGeneratedPostDto.integrationId), not which platform to write for.
+// The target platform — the platform the generated post is WRITTEN FOR — is
+// an explicit argument (`ReferencePostGenerateOptions.targetPlatform`), NOT
+// derived from the reference. It defaults to the reference's own platform, so
+// the original same-platform behaviour is what an omitted value still gets;
+// supplying a different one makes this a cross-platform generation, where the
+// reference stays whatever platform it came from and the character budget,
+// the format rules and the style guidance all come from the TARGET.
+//
+// The two are kept distinct on purpose: `reference.platform` answers "where
+// did this inspiration come from" (it colours how the reference itself reads
+// — an X thread and a Medium essay are different source material), and the
+// target answers "where does what I write have to publish". Collapsing them
+// back into one value is what limited this endpoint to a→a.
 
 // Typed against VALID_STRATEGIES rather than Record<string, string>: adding a
 // strategy to that list without adding its prompt here is then a compile
@@ -109,6 +129,17 @@ export interface ReferencePostGenerationResult {
   // its own `Post` row (parentPostId chain), so each is length-checked
   // against the platform ceiling on its own.
   parts: string[];
+  // The model's OWN title, present only on a title-separated target
+  // (reddit/hackernews/medium/devto) that actually emitted a `TITLE:` line.
+  // Those platforms submit the title through a field of their own
+  // (`Post.settings.title`), so it is a real user-visible string rather than
+  // a label — and slicing it out of the body, as this used to, produced a
+  // mid-sentence fragment that the body then repeated verbatim.
+  //
+  // Absent everywhere else, INCLUDING when a title-separated target ignored
+  // the format: the caller falls back to deriving one from `text`. Never
+  // absent for a reason worth failing a paid generation over.
+  title?: string;
   // One entry per model call made for this generation (initial + the
   // similarity corrective retry, if it happened) — the caller must bill for
   // all of them, not just the last. See reference-post-generation.md §7.1.
@@ -137,6 +168,18 @@ export interface ReferencePostGenerationResult {
 export interface ReferencePostGenerateOptions {
   strategy: string;
   brandStrength: number;
+  /**
+   * The platform the generated post is WRITTEN FOR — its character budget,
+   * its format rules, its house style. Absent falls back to the reference's
+   * own platform, which is the behaviour every caller had before this became
+   * a cross-platform generator.
+   *
+   * Expected already-normalized (`normalizeEngagePlatform`), like every other
+   * platform value crossing into this service; it is normalized again here so
+   * an internal caller passing raw `twitter` still lands on `x` rather than
+   * silently falling through every platform branch below.
+   */
+  targetPlatform?: string;
   /**
    * How closely the post may follow the reference. Absent or unrecognized
    * falls back to DEFAULT_SOURCE_ADAPTATION via `resolveSourceAdaptation` —
@@ -225,6 +268,28 @@ const THREAD_PART_SEPARATOR = '[[PART]]';
 // asked for so the last part is never truncated mid-sentence.
 const MAX_TOKENS_PER_POST = 500;
 
+/**
+ * The prompted character target for a platform when the caller states no
+ * `outputLength` — the TARGET platform's, which is the whole point of a
+ * cross-platform generation.
+ *
+ * x and reddit keep engage's own tuned numbers: X's 260 sits structurally
+ * under its 280 ceiling, and engage's reddit target (1000) is deliberately
+ * shorter than the shared 3000 cap because an engage post is a short post.
+ * Every other platform takes the shared `targetFor`, which is what the
+ * operation plan already generates against.
+ *
+ * This replaces a fallback that handed X's 260 to EVERY non-reddit platform.
+ * That was invisible while the target was always the reference's own platform
+ * and engage only really scanned x/reddit; the moment a caller can ask for a
+ * LinkedIn or Medium post it means generating a 260-character article.
+ */
+function defaultTargetForPlatform(platform: string): number {
+  if (platform === 'x') return X_WEIGHTED_CHAR_LIMIT;
+  if (platform === 'reddit') return REDDIT_TARGET_CHAR_LIMIT;
+  return targetFor(platform);
+}
+
 @Injectable()
 export class EngageReferencePostService {
   private readonly logger = new Logger(EngageReferencePostService.name);
@@ -258,10 +323,15 @@ export class EngageReferencePostService {
   ): Promise<ReferencePostGenerationResult> {
     const { strategy, brandStrength, mentions, outputLength, signal } = options;
     const sourceAdaptation = resolveSourceAdaptation(options.sourceAdaptation);
-    const platform = normalizeEngagePlatform(reference.platform);
-    const limit =
-      outputLength ??
-      (platform === 'reddit' ? REDDIT_TARGET_CHAR_LIMIT : X_WEIGHTED_CHAR_LIMIT);
+    // Where the reference came FROM vs what we are writing FOR. Everything
+    // below that shapes the OUTPUT — length, thread wording, format rules,
+    // style — keys off `platform`; `sourcePlatform` is only ever used to tell
+    // the model that the two differ.
+    const sourcePlatform = normalizeEngagePlatform(reference.platform);
+    const platform = normalizeEngagePlatform(
+      options.targetPlatform ?? reference.platform
+    );
+    const limit = outputLength ?? defaultTargetForPlatform(platform);
     // Total posts in the chain — 1 when no thread was asked for, so every
     // `threadPosts > 1` below reads as "this is a thread". Named for what it
     // holds rather than after the option it comes from, since `maxThreadParts`
@@ -269,21 +339,33 @@ export class EngageReferencePostService {
     // at the DTO: internal callers bypass the DTO, and an unclamped value
     // would set the model's token budget as well as its instructions.
     const threadPosts = options.thread ? resolveThreadPostCount(options) : 1;
+    // Does the TARGET submit its title through a field of its own? That, and
+    // nothing about the reference, decides whether the model is asked for an
+    // explicit `TITLE:` line and whether the response is parsed for one. A
+    // target that has no separate title field (x, linkedin, quora) gets the
+    // prompt it always got and its response parsed the way it always was —
+    // an instruction with nothing to act on is not free in a prompt this
+    // tightly tuned, and a parser can only ever take something away from a
+    // response that is already nothing but the body.
+    const expectsTitle = isTitleSeparatedPlatform(platform);
     const requiredMentions = requiresMention(brandStrength, mentions);
     const systemPrompt = this._buildSystemPrompt(
       platform,
+      sourcePlatform,
       strategy,
       sourceAdaptation,
       brandStrength,
       mentions,
       limit,
-      threadPosts
+      threadPosts,
+      expectsTitle
     );
     const userPrompt = this._buildUserPrompt(
       reference,
       threadPosts,
       platform,
-      limit
+      limit,
+      expectsTitle
     );
     const maxTokens = MAX_TOKENS_PER_POST * threadPosts;
 
@@ -349,18 +431,42 @@ export class EngageReferencePostService {
       }
       if (usage) usages.push(usage);
 
-      const parts = this._splitThreadParts(raw, threadPosts);
+      // Title FIRST, parts second. The `TITLE:` line is one line at the very
+      // top of the whole response — the anchor post's title, not one per
+      // part — so it is lifted off before the body is split, which is also
+      // what keeps it out of every per-part length check below: the parts
+      // never contain it, so it can never eat into a post's budget.
+      // `parseTitledOutput` also drops a title the model repeated at the top
+      // of the body.
+      const { title, body } = expectsTitle
+        ? parseTitledOutput(raw)
+        : { title: null, body: raw };
+      if (expectsTitle && !title) {
+        // Log and carry on. The caller derives a title from the body instead
+        // (EngageService falls back to `referencePostTitle`), because this
+        // generation is already paid for and a mis-formatted first line is
+        // not worth voiding it.
+        this.logger.warn(
+          `Reference-post generation for ${platform} returned no "${TITLE_LINE_PREFIX}" line; falling back to a title derived from the body.`
+        );
+      }
+      const parts = this._splitThreadParts(body, threadPosts);
       // Both gates below judge the WHOLE post — a thread that scatters the
       // reference's own sentences across its parts is exactly as much of a
       // copy as one that reproduces them in a single post, and a brand
       // mention anywhere in the chain is a brand mention.
       const text = parts.join('\n\n');
+      // Everything this generation will PUBLISH. On a title-separated target
+      // the title is a user-visible field, so it faces the anti-plagiarism
+      // and brand gates like any other published text; everywhere else
+      // `title` is null and this IS `text`, so no other platform's gates move.
+      const publishedText = title ? `${title}\n\n${text}` : text;
 
       const missingMention =
         requiredMentions.length > 0 &&
-        !containsRequiredMention(text, requiredMentions);
+        !containsRequiredMention(publishedText, requiredMentions);
       const similarity = checkReferenceSimilarity(
-        text,
+        publishedText,
         reference.postContent ?? ''
       );
 
@@ -440,6 +546,7 @@ export class EngageReferencePostService {
           text,
           parts,
           usages,
+          ...(title ? { title } : {}),
           ...(parts.length < threadPosts ? { requestedParts: threadPosts } : {}),
         };
       }
@@ -481,6 +588,10 @@ export class EngageReferencePostService {
           text: kept.join('\n\n'),
           parts: kept,
           usages,
+          // The title belongs to the ANCHOR, and index 0 is always kept on
+          // this path (the branch only runs for overrun.index > 0), so a
+          // truncated thread keeps its title.
+          ...(title ? { title } : {}),
           droppedParts: parts.length - kept.length,
           // Always set on this path: `kept` is a strict prefix, so it is
           // shorter than the chain that was generated and therefore shorter
@@ -602,12 +713,14 @@ export class EngageReferencePostService {
 
   private _buildSystemPrompt(
     platform: string,
+    sourcePlatform: string,
     strategy: string,
     sourceAdaptation: SourceAdaptation,
     brandStrength: number,
     mentions: string[] | undefined,
     limit: number,
-    threadPosts: number
+    threadPosts: number,
+    expectsTitle: boolean
   ): string {
     // The DTO's @IsIn(VALID_STRATEGIES) already rejects anything else at the
     // controller boundary; this fallback only covers internal callers that
@@ -649,6 +762,24 @@ Thread: write this as a native ${platform} thread of EXACTLY ${threadPosts} post
           } follow-up posts that publish as a reply chain beneath it. Not more, not fewer. Separate every post with a line containing exactly ${THREAD_PART_SEPARATOR} and nothing else. Every post must carry something the others do not: to reach ${threadPosts}, break the material down further — separate steps, examples, caveats, specifics — rather than padding with restatement, filler, or a summary post. The anchor has to stand on its own as a hook, and EACH post — anchor and follow-ups alike — must independently fit the length constraint stated at the top; a thread is not a licence to spend more characters per post.
 `
         : '';
+    // Stated ONLY when the two platforms actually differ. A same-platform
+    // generation is the original behaviour and gets the original prompt,
+    // byte for byte: telling a model writing an X post from an X reference to
+    // "adapt across platforms" is an instruction with nothing to act on, and
+    // an inert instruction in a prompt this tightly tuned is not free.
+    //
+    // Both halves come from the shared platform profile the operation plan
+    // generates against — the ADAPT clause and the target's own house style —
+    // rather than a second wording of the same advice living over here.
+    const styleGuidance = buildPlatformStyleGuidance(platform);
+    const crossPlatformBlock =
+      platform === sourcePlatform
+        ? ''
+        : `
+Cross-platform adaptation: the reference was written for ${sourcePlatform}, but your post publishes on ${platform} — a different audience, reading in a different format. ${CROSS_PLATFORM_ADAPT_INSTRUCTION} This governs DELIVERY only; how much of the reference's substance carries over is set by the relationship to the reference stated above, not by this.${
+            styleGuidance ? `\n${styleGuidance}` : ''
+          }
+`;
     // The blanket do-not-copy clause names STRUCTURE among the things not to
     // reuse, which flatly contradicts a PRESERVE_STRUCTURE request — the
     // model would be told to keep the shape and to drop it in the same
@@ -659,12 +790,44 @@ Thread: write this as a native ${platform} thread of EXACTLY ${threadPosts} post
       sourceAdaptation === 'PRESERVE_STRUCTURE'
         ? "Hard requirement — do not copy: write a genuinely original post in your own words. Do not paraphrase-copy, closely reword, or reuse the reference's sentences or distinctive phrases. Following its structure is required of you above; that covers the ORDER of its ideas ONLY, never its wording. Reusing another person's wording is a copyright problem for the person publishing this post, not just a style issue."
         : "Hard requirement — do not copy: write a genuinely original post in your own words. Do not paraphrase-copy, closely reword, or reuse the reference's sentences, distinctive phrases, or structure. Reusing another person's wording is a copyright problem for the person publishing this post, not just a style issue.";
+    // On a title-separated platform the title is a SEPARATE submitted field,
+    // so the model has to write it separately too. Before this block it did
+    // not: the prompt said "write the BODY ONLY" (correctly — opening the body
+    // with the title makes the platform print it twice) and the code then took
+    // the body's first 280 characters as the title, which on a long-form post
+    // is a sentence cut in half that the body immediately repeats. Asking for
+    // the title outright is the only way both halves can be right at once.
+    //
+    // ONE line, at the very top of the whole answer — a thread has one title
+    // (the anchor's), not one per part.
+    const titleBlock = expectsTitle
+      ? `
+Title: ${platform} submits the title as its own field, separate from the body — so write it separately too, and any "body only" rule stated above governs what comes AFTER it. Begin your answer with a single line of exactly "${TITLE_LINE_PREFIX} <your title>", then one blank line, then the ${
+          threadPosts > 1 ? 'posts themselves' : 'post itself'
+        }. Write EXACTLY ONE such line, at the very top${
+          threadPosts > 1 ? ' — the title belongs to the whole thread, not to each post' : ''
+        }. The title must be concrete and specific about what the ${
+          threadPosts > 1 ? 'thread' : 'post'
+        } actually says (never a generic label), at most ${titleLengthTargetFor(
+          platform
+        )} characters, plain text with no Markdown and no surrounding quotes. Then write the body WITHOUT it: do not open the body with the title, a heading, or a bold restatement of it, or the platform displays it twice.
+`
+      : '';
+    // The closing output rule and the TITLE line above are the same
+    // instruction seen from two ends, so they are branched together: the
+    // unconditional "Only output the post text" that used to stand here flatly
+    // contradicts a required first line, and a model handed both obeys
+    // whichever it read last.
     const outputInstruction =
       threadPosts > 1
-        ? `Only output the post text, with ${THREAD_PART_SEPARATOR} between posts — exactly ${
+        ? `Only output${
+            expectsTitle ? ` the ${TITLE_LINE_PREFIX} line and then` : ''
+          } the post text, with ${THREAD_PART_SEPARATOR} between posts — exactly ${
             threadPosts - 1
           } separators for ${threadPosts} posts, and no preface, no numbering like "1/${threadPosts}", no meta-commentary, no quotation of the reference.`
-        : 'Only output the post text — no preface, no meta-commentary, no quotation of the reference.';
+        : `Only output${
+            expectsTitle ? ` the ${TITLE_LINE_PREFIX} line and then` : ''
+          } the post text — no preface, no meta-commentary, no quotation of the reference.`;
 
     // Length is stated FIRST, restated mid-prompt, and repeated last — the same
     // head/tail sandwich engage-draft.service.ts uses, because it is the one
@@ -672,7 +835,9 @@ Thread: write this as a native ${platform} thread of EXACTLY ${threadPosts} post
     // costs the whole generation, while every other instruction here degrades
     // gracefully. Saying it once in the middle of a long prompt is exactly
     // where an instruction gets lost.
-    return `You are a social media copywriter. Write an ORIGINAL ${platform} post INSPIRED BY a reference post — you are not replying to it, and the reference's author will never see this post.
+    return `You are a social media copywriter. Write an ORIGINAL ${platform} post INSPIRED BY a reference post${
+      platform === sourcePlatform ? '' : ` that was published on ${sourcePlatform}`
+    } — you are not replying to it, and the reference's author will never see this post.
 
 HARD LENGTH LIMIT — THIS OUTRANKS EVERY OTHER INSTRUCTION BELOW: keep ${lengthScope} ${charLimit}. If the strategy, the brand mention, or finishing a thought would push a post past it, cut the content instead${
       threadPosts > 1
@@ -685,8 +850,10 @@ Relationship to the reference: ${adaptationInstruction}
 ${brandInstruction}
 
 ${doNotCopyClause}
-${mandatoryBrandBlock}${threadBlock}
-Platform constraint (restated because it is the one that fails hardest): keep ${lengthScope} ${charLimit}.
+${crossPlatformBlock}${mandatoryBrandBlock}${titleBlock}${threadBlock}
+Platform constraint (restated because it is the one that fails hardest): keep ${lengthScope} ${charLimit}.${
+      expectsTitle ? ` The ${TITLE_LINE_PREFIX} line is not part of the body and does not count towards it.` : ''
+    }
 Write in the same language as the reference post unless it explicitly asks for another language.
 
 ${ORIGINAL_POST_INJECTION_NOTICE}
@@ -700,7 +867,8 @@ IMPORTANT: ${lengthScope} must stay ${charLimit}${brandReminder}. Check the leng
     reference: ReferencePostFields,
     threadPosts: number,
     platform: string,
-    limit: number
+    limit: number,
+    expectsTitle: boolean
   ): string {
     const { charLimit, lengthScope } = this._describeLengthConstraint(
       platform,
@@ -716,7 +884,13 @@ IMPORTANT: ${lengthScope} must stay ${charLimit}${brandReminder}. Check the leng
 Write a new, original ${
       threadPosts > 1 ? `thread of exactly ${threadPosts} posts` : 'post'
     } inspired by this one, following the relationship to the reference stated above. Do not reply to it and do not reword it — write something new.
-
+${
+      expectsTitle
+        ? `
+Start with the "${TITLE_LINE_PREFIX} <your title>" line, then a blank line, then the body — the title is a separate ${platform} field and must not be repeated at the top of the body.
+`
+        : ''
+    }
 Length is the hard constraint: keep ${lengthScope} ${charLimit}, regardless of how long the reference post above is.`;
   }
 

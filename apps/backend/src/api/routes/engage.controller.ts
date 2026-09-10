@@ -1003,8 +1003,10 @@ export class EngageController {
 
   // ─── Reference-Post Generation (docs/engage/reference-post-generation.md) ─
   // Generates AND saves an ORIGINAL post inspired by an opportunity — NOT a
-  // reply. One call: it always persists as an account-less DRAFT Post
-  // (referenceOpportunityId attached); there is no separate save endpoint —
+  // reply, and since `targetPlatform` was added, not necessarily for the
+  // opportunity's own platform either. One call: it always persists as an
+  // account-less DRAFT Post for the TARGET platform (referenceOpportunityId
+  // attached, still pointing at the source); there is no separate save endpoint —
   // further editing (content, picking an account, scheduling) goes through
   // the existing generic POST /api/posts/ edit flow, same as any other
   // draft. Uses getOpportunityById (no reply-eligibility status gate: an
@@ -1014,12 +1016,12 @@ export class EngageController {
 
   @ApiOperation({
     summary:
-      'Generate AND save an AI-written ORIGINAL post inspired by an opportunity, via SSE (text/event-stream) — not a reply. Always persists as an account-less DRAFT Post; `sourceAdaptation` (PRESERVE_STRUCTURE | REFRAME | FRESH_ANGLE, default REFRAME) sets how closely it may follow the reference, and `thread: true` produces a native thread (anchor + parentPostId-chained follow-ups) where the platform supports one. `maxThreadParts` sets how many posts that chain has IN TOTAL, the anchor INCLUDED (1-5, default 3) — despite the name it is an EXACT count of POSTS, not a maximum and not a count of follow-ups.',
+      'Generate AND save an AI-written ORIGINAL post inspired by an opportunity, via SSE (text/event-stream) — not a reply. Always persists as an account-less DRAFT Post; `targetPlatform` (optional, one of the scannable platforms) names the platform the post is WRITTEN FOR — omitted, it is the opportunity\'s own platform, and supplied it makes this a cross-platform generation whose character budget, format rules and house style all come from the TARGET while the opportunity stays the reference; `targetChannel` (bare name, no `r/`) names the subreddit a `targetPlatform: \'reddit\'` post is submitted to, and is REQUIRED when the opportunity is not itself a reddit post — a reddit→reddit generation reuses the subreddit the scanner already recorded, but nothing in an X or LinkedIn opportunity implies one, so without it the request is refused rather than guessing a community; `sourceAdaptation` (PRESERVE_STRUCTURE | REFRAME | FRESH_ANGLE, default REFRAME) sets how closely it may follow the reference, and `thread: true` produces a native thread (anchor + parentPostId-chained follow-ups) where the TARGET platform supports one. `maxThreadParts` sets how many posts that chain has IN TOTAL, the anchor INCLUDED (1-5, default 3) — despite the name it is an EXACT count of POSTS, not a maximum and not a count of follow-ups.',
   })
   @ApiResponse({
     status: 200,
     description:
-      'SSE stream ending with a data frame carrying {text, postId, parts, thread, threadSkippedReason?} then [DONE]. `parts` is one entry per post in the chain (a single-element array unless a thread was produced) and `thread` reports whether one actually was — a thread requested on a platform that cannot chain one (medium/quora/devto) degrades to a single post with threadSkippedReason=platform_unsupported. A thread whose tail overruns the platform character ceiling is delivered truncated to its valid prefix, with `droppedParts` counting what was discarded, rather than failing the whole generation. `requestedParts` appears whenever `parts` is shorter than the `maxThreadParts` asked for — either because a tail part was dropped for length, or because the model still wrote fewer posts after its corrective retry. Failures (opportunity not found, generation failed, too similar to the reference, engage_insufficient_credits) end the stream with a typed error frame instead; the untyped `generation_failed` frame also carries a diagnostic `reason` string.',
+      'SSE stream ending with a data frame carrying {text, postId, parts, thread, threadSkippedReason?} then [DONE]. `parts` is one entry per post in the chain (a single-element array unless a thread was produced) and `thread` reports whether one actually was — a thread requested for a TARGET platform that cannot chain one (medium/quora/devto) degrades to a single post with threadSkippedReason=platform_unsupported. A thread whose tail overruns the platform character ceiling is delivered truncated to its valid prefix, with `droppedParts` counting what was discarded, rather than failing the whole generation. `requestedParts` appears whenever `parts` is shorter than the `maxThreadParts` asked for — either because a tail part was dropped for length, or because the model still wrote fewer posts after its corrective retry. Failures (opportunity not found, generation failed, too similar to the reference, engage_insufficient_credits) end the stream with a typed error frame instead; the untyped `generation_failed` frame also carries a diagnostic `reason` string.',
   })
   @ApiResponse({ status: 404, description: 'Opportunity not found' })
   @ApiResponse({ status: 429, description: 'Rate limit exceeded (20/hour)' })

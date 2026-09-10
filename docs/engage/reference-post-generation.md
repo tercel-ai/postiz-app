@@ -18,10 +18,10 @@ Implementation:
 Design revision 1 (post-deploy, still backend-only — no frontend consumes
 this endpoint yet, so these were safe API-contract changes):
 - `/generate-post` no longer takes `integrationId`/`tone`. The target platform
-  is always the reference opportunity's OWN platform
-  (`normalizeEngagePlatform(opportunity.platform)`), not a client choice —
-  simpler, and it removes an entire class of "which platform is this for"
-  mismatch. Creative controls now mirror `/draft`'s existing
+  defaulted to the reference opportunity's OWN platform
+  (`normalizeEngagePlatform(opportunity.platform)`) — see design revision 3,
+  which made it an optional `targetPlatform` field that still defaults to
+  exactly that. Creative controls now mirror `/draft`'s existing
   `strategy`/`brandStrength`/`mentions`/`outputLength` vocabulary instead of a
   bespoke `tone` axis, for UI/API consistency with the reply-draft feature
   users already know (§5/§6).
@@ -38,7 +38,8 @@ does the whole job in one call):
   composer — these endpoints aren't a general-purpose "attribute any post to
   an opportunity" tool.
 - `/generate-post` now always persists the result as an **account-less DRAFT**
-  `Post` (`source='calendar'`, `providerIdentifier=opportunity.platform`, no
+  `Post` (`source='calendar'`, `providerIdentifier=` the target platform —
+  the opportunity's own unless `targetPlatform` names another (§6.4) — no
   bound integration, `referenceOpportunityId` + snapshot attached). Choosing
   which account to publish through, further content edits, and
   scheduling/publishing all go through the **existing generic
@@ -68,6 +69,16 @@ Known gaps vs this design (tracked, not silently dropped):
   LinkedIn and Hacker News — both long-form-friendly — can produce chains.
   Fixing it means per-platform targets sourced from the provider's own
   `maxLength()`, the way `operation-plan.service.ts` already does it.
+
+Design revision 3 (**cross-platform generation** — `a→any`):
+- `/generate-post` takes an optional `targetPlatform`. Omitting it is exactly
+  the old behaviour (write for the opportunity's own platform); supplying one
+  of `SCANNABLE_PLATFORMS` writes for THAT platform instead, with the
+  opportunity still serving as the reference. See §6.4.
+- The character budget, format rules, house style, the draft's
+  `providerIdentifier`/`Post.settings`, and thread capability all follow the
+  TARGET. `settings.referenceOpportunity.platform` and the reference-provenance
+  row keep naming the SOURCE — the two were never the same question.
 
 ## 1. Overview
 
@@ -304,11 +315,12 @@ underlying Anthropic/OpenRouter calls are non-streaming, same as `/draft`).
 Unlike `/draft`, the success frame also carries the created post's id, since
 this call — unlike that one — actually persists something:
 
-No `integrationId` or platform field: the target platform is always
-`normalizeEngagePlatform(opportunity.platform)` — the reference's own
-platform — never a client choice. The creative-control fields mirror
-`GenerateDraftDto` (`/draft`'s own body) rather than a bespoke shape, for the
-same UI the reply-draft composer already has:
+No `integrationId` field: the target platform is named directly by the
+optional `targetPlatform`, and defaults to
+`normalizeEngagePlatform(opportunity.platform)` — the reference's own platform
+— when it is omitted. The creative-control fields mirror `GenerateDraftDto`
+(`/draft`'s own body) rather than a bespoke shape, for the same UI the
+reply-draft composer already has:
 
 | Field | Type | Required | Description |
 |---|---|---|---|
@@ -317,6 +329,7 @@ same UI the reply-draft composer already has:
 | `mentions` | `string[]` (≤20) | | Optional brand names, used when `brandStrength` ≥ 2 |
 | `outputLength` | `integer` (≥ 2) | | Target length; same soft-target semantics as reply drafts |
 | `projectId` | `string` | | Optional project scope |
+| `targetPlatform` | `string` (one of `SCANNABLE_PLATFORMS`) | | The platform the post is WRITTEN FOR. Omitted → the opportunity's own platform (the original a→a behaviour). Supplied → an a→any generation: the character budget, the format rules, the house style, the draft's `providerIdentifier` and its `Post.settings` all come from the TARGET, while the opportunity stays the reference (`settings.referenceOpportunity.platform` keeps naming the SOURCE). Thread capability follows the target too, so `thread: true` for a `medium`/`quora`/`devto` target degrades to a single post rather than 400-ing. See §6.4 |
 | `sourceAdaptation` | `PRESERVE_STRUCTURE` \| `REFRAME` \| `FRESH_ANGLE` | | How closely the post may follow the reference; default `REFRAME`. A separate axis from `strategy` — that picks the voice, this picks the distance from the source. No mode relaxes the anti-plagiarism gate. See §6.3 |
 | `includeReferenceMedia` | `boolean` | | Default `false`. Reuse the reference's own images/video as-is on the generated post — opt-in, no rewrite-mitigation exists for media the way it does for text. See §6.1 |
 | `thread` | `boolean` | | Default `false`. Produce a native thread (anchor + `parentPostId`-chained follow-ups in one `group`) instead of a single post. Honoured only where the platform can chain one; elsewhere the call degrades to a single post and reports it. See §6.2 |
@@ -351,15 +364,21 @@ const opportunity = await this._engageRepository.getOpportunityById(org.id, oppo
 // billing record can never disagree about which mode ran (§6.3).
 const sourceAdaptation = resolveSourceAdaptation(dto.sourceAdaptation);
 
-// A thread is only asked for on a platform that can publish one (§6.2); an
-// unsupported platform degrades to a single post and is reported back.
-const threadCapable = isThreadCapablePlatform(normalizeEngagePlatform(opportunity.platform));
+// The platform this post is WRITTEN FOR, resolved once (§6.4). Defaults to
+// the opportunity's own, which is the original a→a behaviour.
+const targetPlatform = normalizeEngagePlatform(dto.targetPlatform ?? opportunity.platform);
+
+// A thread is only asked for on a platform that can publish one (§6.2) — and
+// it is the TARGET that has to chain it; an unsupported one degrades to a
+// single post and is reported back.
+const threadCapable = isThreadCapablePlatform(targetPlatform);
 
 // `parts` is the chain in publish order: [anchor] for a single post. Wrapped
 // in a try/catch (elided here) that bills a ReferencePostGenerationError's
 // own usages before rethrowing — see §7.1.
 const { text, parts, usages } = await this._referencePostService.generate(opportunity, {
   strategy: dto.strategy,
+  targetPlatform,
   sourceAdaptation,
   brandStrength: dto.brandStrength,
   mentions: dto.mentions,
@@ -369,7 +388,7 @@ const { text, parts, usages } = await this._referencePostService.generate(opport
   signal,
 });
 await this._billReferencePostUsages(
-  org, opportunityId, opportunity.platform, dto.strategy, sourceAdaptation, usages
+  org, opportunityId, targetPlatform, opportunity.platform, dto.strategy, sourceAdaptation, usages
 );
 
 // Opt-in, best-effort, after generation succeeds — see §6.1.
@@ -394,7 +413,7 @@ const mapped = await this._postsService.mapTypeToPost(
     // entries 2..N by parentPostId inside one group. Media on the ANCHOR
     // only: thread continuations are text-only on the extension path.
     posts: [{
-      providerIdentifier: opportunity.platform,
+      providerIdentifier: targetPlatform,
       value: parts.map((content, i) => ({ content, image: i === 0 ? media : [] })),
     }],
   },
@@ -747,7 +766,7 @@ the second attempt; under that mode it instead says the order of ideas may
 stay while no sentence or distinctive phrase of the reference may survive.
 
 `sourceAdaptation` is recorded in the billing record's `data` alongside
-`platform`/`strategy` (§7.1) — audit-only, it changes nothing about what is
+`platform`/`sourcePlatform`/`strategy` (§7.1) — audit-only, it changes nothing about what is
 charged, but it is the axis that most affects how close the output sits to the
 source, so a billed generation should say which mode produced it. Generation
 and that record resolve the mode through ONE function
@@ -756,6 +775,121 @@ own fallback: HTTP callers are gated by the DTO's `@IsIn`, internal callers
 build the dto by hand and are not, and two independent fallbacks meant such a
 caller's invalid value was generated as `REFRAME` but billed as whatever it
 sent.
+
+### 6.4 Cross-platform targets (`targetPlatform`)
+
+The reference and the post being written are two different platforms'
+problems. `opportunity.platform` answers "where did this inspiration come
+from"; `targetPlatform` answers "where does what I write have to publish".
+Collapsing them into one value is what limited this endpoint to `a→a`.
+
+`EngageService.generateReferencePost` resolves the target ONCE
+(`normalizeEngagePlatform(dto.targetPlatform ?? opportunity.platform)`) and
+threads it through every output-shaped decision: the thread-capability gate,
+`EngageReferencePostService.generate`, the persisted draft's
+`providerIdentifier`, and `_buildReferencePostSettings`. The reference's own
+platform is used for exactly two things — the provenance snapshot, and telling
+the model that the two differ.
+
+The length budget and the style guidance are NOT written here. They come from
+`integrations/platform-content-profile.ts`, the shared module the operation
+plan generates against (`targetFor`, `hardLimitFor`,
+`CROSS_PLATFORM_ADAPT_INSTRUCTION`, `buildPlatformStyleGuidance`) — a second
+copy of "linkedin = professional, longer" in engage would be a second copy
+that can disagree with the first. When target and source are the same, none of
+it is injected: a same-platform request produces the prompt it always produced,
+byte for byte, and an inert cross-platform instruction in a prompt this tightly
+tuned is not free.
+
+Two fixes ride along, both visible without ever sending `targetPlatform`:
+
+- The prompted length fallback was `platform === 'reddit' ? 1000 : 260`, so
+  **every** non-reddit platform — linkedin, medium, devto, quora, hackernews —
+  was asked for an X-sized 260-character post. It now takes the shared
+  `targetFor(platform)` (x and reddit keep engage's own tuned 260/1000).
+- `assertDraftWithinPlatformLimit` checked x and reddit and silently passed
+  everything else. It now covers all seven, taking the other five ceilings from
+  the provider's own `maxLength()` via `hardLimitFor`. Engage's stricter reddit
+  ceiling (2000, against the provider's 10000) is deliberately kept.
+
+A `reddit` target derives its destination subreddit from the opportunity's own
+URL, so it is only satisfiable from a Reddit opportunity. That is checked
+BEFORE the model runs — the draft would be unsavable either way, and failing
+after the spend burns a paid generation on a post that can never persist.
+
+### 6.5 The post title on title-separated platforms (`TITLE:`)
+
+`reddit`, `hackernews`, `medium` and `devto` submit a post as a TITLE plus a
+BODY, through two separate fields (`TITLE_SEPARATED_PLATFORMS` in
+`integrations/platform-content-profile.ts`). The title reaches the platform
+through each provider's `buildReferencePostSettings()` → `Post.settings.title`,
+so it is a real user-visible string, not a label.
+
+It used to be `referencePostTitle(generatedText)` — **the generated body's first
+280 characters** — for every platform. Combined with the format rule the
+cross-platform work injected ("the title is submitted SEPARATELY, so write the
+BODY ONLY — never open with the title"), that produced a contradiction:
+
+1. the prompt told the model to write only a body, so no title line existed;
+2. the code sliced the first 280 characters of that body and called it a title;
+3. the published post therefore showed a title cut off mid-sentence, with the
+   body repeating it verbatim underneath — exactly the double display the rule
+   in step 1 exists to prevent.
+
+The defect was latent while every generation was `a→a`, engage only really
+scanned x/reddit, bodies were capped at 260/1000 characters and X has no title
+at all. §6.4 made a long-form title platform a first-class target (up to ~2550
+characters), which is where a 280-character slice stops being a plausible title.
+
+**The model writes the title.** When — and only when — the TARGET is
+title-separated, the system prompt asks for:
+
+```
+TITLE: <your title>
+<blank line>
+<body…>
+```
+
+stated with the platform's own title budget (Reddit 300, Hacker News 80, dev.to
+128 — their real ceilings; Medium 100, editorial) and restated in the user
+message, which is the last thing the model reads. The closing output rule is
+branched with it: the unconditional "Only output the post text — no preface…"
+that stands for every other platform flatly contradicts a required first line,
+and a model handed both obeys whichever it read last.
+
+For `x`, `linkedin` and `quora` the prompt and the response parsing are
+**unchanged, byte for byte**. An instruction with nothing to act on is not free
+in a prompt this tightly tuned, and a parser run over a response that is already
+nothing but the body can only ever take something away from it.
+
+Parsing (`integrations/title-body-split.ts`, which also owns
+`stripDuplicatedTitleFromContent` — moved there from
+`operation-plan/theme-title.ts`, since it is a rule about these platforms and
+not about marketing plans):
+
+1. Lift the `TITLE:` line off the top of the whole response. It appears
+   **once**, even for a thread: `reddit`/`hackernews` are thread-capable, and
+   the title belongs to the anchor, not to each part.
+2. Run `stripDuplicatedTitleFromContent` over what is left — the model can
+   still repeat the headline as the body's first line, and that de-duplicator
+   already normalizes markdown headings, bold, quotes and trailing punctuation
+   before comparing.
+3. **Then** split the body on `[[PART]]`.
+
+Because step 3 runs last, the title is never inside a part, so
+`_findOverLengthPart`/`assertDraftWithinPlatformLimit` see the body alone and
+the title cannot eat into a post's character budget.
+
+Parsing never fails a generation. The line is matched leniently (`**TITLE:**`,
+`## TITLE:`, a lowercase `Title:`, a fullwidth colon), and a response with no
+recognisable title line — or one that is *nothing but* a title line — comes back
+as `{title: null, body: raw}`: `generate()` logs a warning and omits
+`ReferencePostGenerationResult.title`, and `EngageService` falls back to
+`referencePostTitle(text)`. A generation is paid for the moment the model
+answers; a mis-formatted first line is not worth voiding it.
+
+`referencePostTitle` itself is untouched, and so is its other caller
+(`posts.service.ts` — a different flow).
 
 ## 7. Billing
 
@@ -953,7 +1087,8 @@ not an automated suite):
   opportunity's `postContent`.
 - [ ] Query that `postId`'s `Post` row directly (Prisma Studio or `psql`):
   `state` is `'DRAFT'`, `integrationId` is `NULL`, `providerIdentifier`
-  equals the opportunity's platform, `source` is `'calendar'` (not
+  equals the target platform (the opportunity's own when `targetPlatform` was
+  not sent), `source` is `'calendar'` (not
   `'engage'`), `referenceOpportunityId` is set to the opportunity's id, and
   `settings` (parsed) contains a `referenceOpportunity` key with
   `snapshotContent`.
