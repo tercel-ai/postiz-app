@@ -812,9 +812,21 @@ Two fixes ride along, both visible without ever sending `targetPlatform`:
   the provider's own `maxLength()` via `hardLimitFor`. Engage's stricter reddit
   ceiling (2000, against the provider's 10000) is deliberately kept.
 
-A `reddit` target derives its destination subreddit from the opportunity's own
-URL, so it is only satisfiable from a Reddit opportunity. That is checked
-BEFORE the model runs — the draft would be unsavable either way, and failing
+A `reddit` target needs a destination subreddit, resolved from three sources,
+most specific first:
+
+1. **`targetChannel`** — the caller names it (bare name, no `r/`). This is the
+   ONLY source a CROSS-platform reddit post has: an X or LinkedIn opportunity
+   carries no community anywhere in its data, and guessing one would publish
+   into a subreddit the post does not belong to.
+2. **`opportunity.channelId`** — the subreddit the scanner already recorded, so
+   a reddit→reddit generation needs no caller input.
+3. **the opportunity URL**, re-parsed inside `RedditProvider` — the last resort
+   for rows stored before that column was populated.
+
+When none of the three yields one — `targetPlatform: 'reddit'` on a non-reddit
+opportunity with no `targetChannel` — the request is refused. That is checked
+BEFORE the model runs: the draft would be unsavable either way, and failing
 after the spend burns a paid generation on a post that can never persist.
 
 ### 6.5 The post title on title-separated platforms (`TITLE:`)

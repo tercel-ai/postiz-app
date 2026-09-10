@@ -1,4 +1,5 @@
 import { socialIntegrationList } from '@gitroom/nestjs-libraries/integrations/integration.manager';
+import { TITLE_REQUIRED_PLATFORMS } from '@gitroom/helpers/extension/post-publish';
 
 /**
  * ONE definition of "how long may a generated post be on platform X, and how
@@ -124,13 +125,20 @@ interface PlatformNativeFormat {
  * A post on `reddit`, `hackernews`, `medium` and `devto` is submitted as a
  * TITLE plus a BODY, through two separate fields. A generator that opens the
  * body with the title makes the platform display it twice.
+ *
+ * Aliased from the publish side's `TITLE_REQUIRED_PLATFORMS` rather than
+ * restated: "needs a title field" and "submits its title separately" are the
+ * same property read from the two ends of one pipeline, and the publish list
+ * already governs whether operation-plan strips a duplicated title and writes
+ * `settings.title` (operation-plan.repository.ts) and whether the extension's
+ * publish queue demands one. A second list here would be exactly the private
+ * copy this module's header says drifts — and it would drift silently, since
+ * nothing links the two: a fifth title-separated platform added to one alone
+ * would make the generator's TITLE protocol and the publisher's title handling
+ * disagree, with no compiler error and no test spanning both.
  */
-export const TITLE_SEPARATED_PLATFORMS: readonly string[] = [
-  'reddit',
-  'hackernews',
-  'medium',
-  'devto',
-];
+export const TITLE_SEPARATED_PLATFORMS: readonly string[] =
+  TITLE_REQUIRED_PLATFORMS;
 
 /** Whether `platform` submits its title through a field of its own. */
 export const isTitleSeparatedPlatform = (platform: string): boolean =>

@@ -79,7 +79,16 @@ export function stripDuplicatedTitleFromContent(
 // only the literal would reject a perfectly good title over a pair of asterisks
 // and send the caller back to slicing a title out of the body, which is the
 // exact defect this module exists to remove.
-const TITLE_LINE_RE = /^[*_#\s]*title[*_\s]*[:：][*_\s]*(.+)$/i;
+//
+// Two branches, because a marker run sitting after the colon is ambiguous on
+// its own: in `**TITLE:** Foo` it CLOSES the decorated label, in
+// `TITLE: **Foo** and **Bar**` it OPENS the title's own bold. What resolves it
+// is whether the LABEL was decorated, i.e. whether the line began with markers.
+// Consuming it unconditionally (as one combined branch did) swallowed the
+// title's opening `**` and left every later `**` paired with the wrong partner
+// — `**Redis** vs **Postgres**` came back as `Redis vs Postgres**`.
+const TITLE_LINE_RE =
+  /^(?:[*_#]+\s*title[*_\s]*[:：][*_\s]*|\s*title[*_\s]*[:：]\s*)(.+)$/i;
 
 /**
  * The title VALUE, cleaned of decoration that would otherwise publish
@@ -93,6 +102,17 @@ function cleanTitleValue(value: string): string {
   return value
     .trim()
     .replace(/^([*_]{1,3})([\s\S]+?)\1$/, '$2')
+    // Bold applied to PART of the title — a model emphasising one term inside
+    // its own headline, which the whole-string rule above cannot reach.
+    // Restricted to `**…**` deliberately: `*`, `_` and `__` all occur as
+    // ordinary characters in the titles these four platforms carry, and
+    // stripping them costs more than the decoration does. `user_id`,
+    // `snake_case`, `SELECT * FROM`, `__init__` are dev.to and Hacker News
+    // titles, not markup — a general emphasis strip corrupts every one of
+    // them, and would fire far more often than a model disobeys the "plain
+    // text, no Markdown" instruction it is given. A stray single marker
+    // publishes literally; a mangled identifier is worse and much likelier.
+    .replace(/\*\*([\s\S]+?)\*\*/g, '$1')
     .replace(/[*_]+$/, '')
     .replace(/^["'“”‘’]+|["'“”‘’]+$/g, '')
     .replace(/\s+/g, ' ')

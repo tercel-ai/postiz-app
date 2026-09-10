@@ -148,4 +148,39 @@ describe('parseTitledOutput', () => {
   it('exports the exact prefix a prompt must ask for', () => {
     expect(TITLE_LINE_PREFIX).toBe('TITLE:');
   });
+
+  // The title publishes into a field of its own on all four title-separated
+  // platforms, so leftover markup shows up literally. Bold is stripped; the
+  // single-character markers are NOT, because on dev.to and Hacker News they
+  // are far more often part of the title than markup around it.
+  describe('decoration inside the title value', () => {
+    const titleOf = (line: string) => parseTitledOutput(`${line}\n\nbody`).title;
+
+    it('strips bold applied to one term inside the title', () => {
+      expect(titleOf('TITLE: Why **MCP** matters for agents')).toBe(
+        'Why MCP matters for agents'
+      );
+    });
+
+    it('strips several bold spans in one title', () => {
+      expect(titleOf('TITLE: **Redis** vs **Postgres** for queues')).toBe(
+        'Redis vs Postgres for queues'
+      );
+    });
+
+    it('still strips bold wrapping the whole title', () => {
+      expect(titleOf('TITLE: **Fully wrapped**')).toBe('Fully wrapped');
+    });
+
+    // The reason the strip stops at `**`: each of these is a real title on the
+    // platforms this runs for, and a general emphasis strip would corrupt it.
+    it.each([
+      'Understanding user_id vs user_name in Postgres',
+      'A guide to snake_case_naming conventions',
+      'SELECT * FROM users WHERE id * 2 > 10',
+      'Using __init__ and __repr__ in Python',
+    ])('leaves ordinary punctuation alone: %s', (title) => {
+      expect(titleOf(`TITLE: ${title}`)).toBe(title);
+    });
+  });
 });
