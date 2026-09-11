@@ -2521,6 +2521,14 @@ export class PostsRepository {
         lastMetricsFetchAt: true,
         releaseURL: true,
         integrationId: true,
+        // Identity for the extension's Sync Activity list, which is otherwise
+        // a column of opaque post ids: a person checking "did MY post sync?"
+        // needs to recognise the row. `content` is the post body as stored
+        // (HTML for the rich-text platforms); the extension strips tags and
+        // truncates for display rather than the server shaping it here, so
+        // this stays the same field every other caller reads.
+        title: true,
+        content: true,
         integration: {
           select: { id: true, name: true, providerIdentifier: true, picture: true, profile: true },
         },
