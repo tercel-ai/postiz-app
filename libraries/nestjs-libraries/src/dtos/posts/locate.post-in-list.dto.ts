@@ -87,6 +87,23 @@ export class LocatePostInListDto {
   @IsString()
   operationPlanId?: string;
 
+  // Must mirror GetPostsListDto.referenceOpportunityId/isReferencePost so the
+  // located page index matches the index the post occupies under the same
+  // /posts/list filters.
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  referenceOpportunityId?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'true = only AI posts generated from an engage opportunity; false = only posts that are not. Ignored when referenceOpportunityId is set.',
+  })
+  @IsOptional()
+  @Transform(({ value }) => value === 'true' || value === true)
+  @IsBoolean()
+  isReferencePost?: boolean;
+
   // Must mirror GetPostsListDto.hasOperationPlan so the located page index
   // matches the index the post occupies under the same /posts/list filters.
   @ApiPropertyOptional({

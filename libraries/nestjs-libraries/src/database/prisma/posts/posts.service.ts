@@ -21,7 +21,7 @@ import { Integration, Post, Media, From, State, PublishMethod as PrismaPublishMe
 import { GetPostsDto } from '@gitroom/nestjs-libraries/dtos/posts/get.posts.dto';
 import { GetPostsListDto } from '@gitroom/nestjs-libraries/dtos/posts/get.posts-list.dto';
 import { LocatePostInListDto } from '@gitroom/nestjs-libraries/dtos/posts/locate.post-in-list.dto';
-import { shuffle } from 'lodash';
+import { capitalize, shuffle } from 'lodash';
 import { CreateGeneratedPostsDto } from '@gitroom/nestjs-libraries/dtos/generator/create.generated.posts.dto';
 import { IntegrationService } from '@gitroom/nestjs-libraries/database/prisma/integrations/integration.service';
 import { makeId } from '@gitroom/nestjs-libraries/services/make.is';
@@ -78,6 +78,10 @@ import {
 } from '@gitroom/nestjs-libraries/engage/resolve-x-reply-integration';
 import { fetchXAuthorProfile } from '@gitroom/nestjs-libraries/engage/x-tweet';
 import { EngageAuthorProfile } from '@gitroom/nestjs-libraries/engage/engage-author';
+import {
+  AiseeNotificationClient,
+  AiseeNotificationEvent,
+} from '@gitroom/nestjs-libraries/notifications/aisee-notification.client';
 /**
  * One thread segment the extension reported as PUBLISHED (the transport shape is
  * PublishedSegmentDto). `postId` is OUR Post id echoed from the due-item, so
@@ -207,7 +211,11 @@ export class PostsService {
     // Same reason as above. Only the project-scoped plan branch of
     // schedulePlanPosts touches it, and that branch requires a projectId the
     // legacy positional test callers never pass.
-    private _projectPublishingService?: ProjectPublishingService
+    private _projectPublishingService?: ProjectPublishingService,
+    // Same optional-positional reason again. A missing client means no Aisee
+    // notification, which is the correct degradation for a side channel — the
+    // post is published or failed either way.
+    private _aiseeNotificationClient?: AiseeNotificationClient
   ) {}
 
   searchForMissingThreeHoursPosts() {
@@ -319,6 +327,64 @@ export class PostsService {
   }
 
   /**
+   * Push a post outcome to the Aisee notification centre.
+   *
+   * The extension publish path has no Temporal workflow, so the two emits the
+   * API path makes from post.workflow.v1.0.1 (`post.published` on success,
+   * `post.publish_failed` on a settled failure) have no home there — an
+   * extension-published post used to produce no notification at all, in either
+   * direction, while an identical API-published one produced both.
+   *
+   * Same event keys, same data shape and the same dedup-key format as the
+   * workflow's, deliberately: a post reaches the user through exactly one of
+   * the two paths, and if the routing ever changed under a queued post the
+   * matching keys make the second emit a no-op instead of a duplicate.
+   *
+   * Keyed on the row being published — for the extension that is always this
+   * cycle's own row, since markPublishedFromExtension refuses recurring
+   * originals outright (`blocked-recurring-original`), which is what
+   * `cycleCloneId || postId` buys the workflow.
+   *
+   * Never throws: the state change is already committed, and a notification
+   * must not turn a published post into a failed call.
+   */
+  private async _notifyPostOutcome(
+    post: {
+      id: string;
+      organizationId: string;
+      projectId?: string | null;
+      providerIdentifier?: string | null;
+      integration?: { providerIdentifier?: string } | null;
+    },
+    eventKey: AiseeNotificationEvent,
+    extra: Record<string, unknown>
+  ) {
+    if (!this._aiseeNotificationClient) return;
+    try {
+      await this._aiseeNotificationClient.notify({
+        organizationId: post.organizationId,
+        eventKey,
+        dedupKey: `${eventKey}:${post.id}`,
+        data: {
+          // `integration` is null for an extension post with no bound account
+          // (Quora/HN), which is exactly the path this method exists for — so
+          // the persisted scalar is the fallback, not an afterthought.
+          platform: capitalize(
+            post.integration?.providerIdentifier || post.providerIdentifier || ''
+          ),
+          post_id: post.id,
+          project_id: post.projectId || undefined,
+          ...extra,
+        },
+      });
+    } catch (err) {
+      this.logger.warn(
+        `_notifyPostOutcome: ${eventKey} for postId=${post.id} failed: ${(err as Error)?.message || err}`
+      );
+    }
+  }
+
+  /**
    * Extension publish-on-success callback for a Post. The browser extension
    * published the post in-browser (X / Reddit) with the user's own platform
    * session and reports the permalink (+ platform post id) back; flip the saved
@@ -385,6 +451,25 @@ export class PostsService {
         );
       }
     }
+
+    // One notification per chain, on the anchor — the workflow notifies on
+    // i===0 and not once per thread item, and a thread is one thing that
+    // happened, not N. The guard is what makes that true rather than merely
+    // customary: the publish-due query is roots-only, so in practice only an
+    // anchor is ever reported here, but this endpoint accepts any id of the org
+    // and a child arriving would be a SECOND notification for one thread.
+    //
+    // The early returns above are deliberately NOT notified either:
+    // `alreadyPublished` is a repeat callback whose first pass already emitted,
+    // and a blocked recurring original published nothing.
+    if (!post.parentPostId) {
+      await this._notifyPostOutcome(post, AiseeNotificationEvent.POST_PUBLISHED, {
+        // Empty for a URL-less publish (Quora), where the post is genuinely
+        // live with no permalink to link to — absent, never an empty string.
+        external_url: releaseURL || undefined,
+      });
+    }
+
     return { ok: true };
   }
 
@@ -426,7 +511,31 @@ export class PostsService {
     this.logger.log(
       `markExtensionPostRemoved: postId=${id} reason=${verdict} evidence=${(evidence || '?').replace(/\s+/g, ' ').trim()}`
     );
+    // `removedAt` before the write, so a re-check that reports the same removal
+    // twice notifies once. markPostRemoved is a blind update (it re-stamps the
+    // timestamp), so the row itself cannot answer this afterwards — and the
+    // Aisee dedup key is a backstop for retries, not a licence to emit
+    // something we already know is a repeat.
+    const firstReport = !post.removedAt;
+
     await this._postRepository.markPostRemoved(id, verdict, releaseURL);
+
+    // Deliberately NOT post.publish_failed. The post went out and was live;
+    // what happened afterwards is the platform's doing, it says something
+    // different to the user (a rule was broken, the account may be at risk),
+    // and there is nothing to retry. Same reason the row keeps state=PUBLISHED
+    // instead of being flipped to ERROR — see markPostRemoved.
+    if (firstReport) {
+      await this._notifyPostOutcome(post, AiseeNotificationEvent.POST_REMOVED, {
+        // `verdict`, NOT `short_reason`. In the registry that field name means
+        // "a sentence to append to the message", and 'gone'/'removed' is a
+        // detector label — rendering it would read "...was removed. gone". It
+        // is carried for support triage and the copy ignores it.
+        verdict,
+        external_url: releaseURL || post.releaseURL || undefined,
+      });
+    }
+
     return { ok: true };
   }
 
@@ -516,6 +625,34 @@ export class PostsService {
         );
       }
     }
+
+    // A PARTIAL thread failure emits BOTH events, and that is not a bug: the
+    // anchor really is live on the platform and the rest really did fail, so
+    // suppressing either one would misreport what the user can now see. The API
+    // path produces the same pair for the same situation — the workflow emits
+    // post.published at the end of the i===0 iteration and post.publish_failed
+    // when a later thread item fails.
+    if (!post.parentPostId) {
+      if (anchorPublished) {
+        await this._notifyPostOutcome(post, AiseeNotificationEvent.POST_PUBLISHED, {
+          external_url: anchorPublished.url || undefined,
+        });
+      }
+      await this._notifyPostOutcome(
+        post,
+        AiseeNotificationEvent.POST_PUBLISH_FAILED,
+        {
+          // `error`, NOT `reason`. They differ by exactly the internal default
+          // ('extension publish failed'), which the ERROR column wants and the
+          // user-facing copy must not have: short_reason is appended to the
+          // message, so the default would render "Your Quora post couldn't be
+          // published. extension publish failed". Absent instead lets the
+          // registry use its own clean fallback sentence.
+          short_reason: error || undefined,
+        }
+      );
+    }
+
     return published.length
       ? { ok: true, partial: true, published: published.length }
       : { ok: true };

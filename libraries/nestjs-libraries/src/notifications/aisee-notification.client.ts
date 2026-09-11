@@ -20,9 +20,27 @@ export const AiseeNotificationEvent = {
   POST_GENERATION_FAILED: 'post.generation_failed',
   POST_PUBLISHED: 'post.published',
   POST_PUBLISH_FAILED: 'post.publish_failed',
+  /**
+   * The platform took a published post down. Not a publish failure: the post
+   * went out, was live, and something on the other side removed it afterwards
+   * — the user needs to know for a different reason (a rule was broken, an
+   * account is in trouble) and can do nothing about it by retrying.
+   *
+   * Only the extension can observe this, from a logged-out re-check seconds
+   * after publishing; the API path has no equivalent detector.
+   */
+  POST_REMOVED: 'post.removed',
   ENGAGE_GENERATED: 'engage.generated',
   ENGAGE_REPLIED: 'engage.replied',
   ENGAGE_REPLY_FAILED: 'engage.reply_failed',
+  /**
+   * The platform took a published reply down — the engage twin of
+   * POST_REMOVED, and the same distinction against ENGAGE_REPLY_FAILED: that
+   * one means the reply never went out and the user can retry, this one means
+   * it was live and re-sending it into the rule that just removed it is the
+   * wrong thing to suggest.
+   */
+  ENGAGE_REPLY_REMOVED: 'engage.reply_removed',
 } as const;
 
 export type AiseeNotificationEvent =

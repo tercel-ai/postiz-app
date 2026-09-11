@@ -11,6 +11,8 @@ import {
 } from '@gitroom/nestjs-libraries/engage/engage.service';
 import { EngageDraftService } from '@gitroom/nestjs-libraries/engage/engage-draft.service';
 import {
+  // The Channel/Event values are referenced only by the muted ENGAGE_GENERATED
+  // emit further down. Kept imported so restoring it is uncommenting, nothing else.
   AiseeNotificationChannel,
   AiseeNotificationClient,
   AiseeNotificationEvent,
@@ -780,20 +782,29 @@ export class EngageAutoReplyService implements OnModuleInit {
       // it appear, so a "Reply ready" there would be pure noise. Here nobody is
       // looking — the draft was produced by the automation switch and waits in
       // Awaiting review until someone is told about it.
-      await this._aiseeNotificationClient?.notify({
-        organizationId: org.id,
-        eventKey: AiseeNotificationEvent.ENGAGE_GENERATED,
-        // Keyed on the saved reply, matching how EngageSentReply is tracked
-        // (postId @unique, one row per reply rather than per opportunity).
-        dedupKey: `engage.generated:${saved.id}`,
-        data: {
-          platform: opportunity.platform,
-          sent_reply_id: saved.id,
-          opportunity_id: candidate.opportunityId,
-          project_id: projectId || undefined,
-        },
-        channel: AiseeNotificationChannel.ENGAGE,
-      });
+      //
+      // DISABLED (2026-09-11): one automated reply produced TWO notifications —
+      // this "Reply ready" and the "Reply published" that follows it minutes
+      // later from publishExtensionReply. The pair says nothing the second one
+      // does not, so the ready half is muted rather than removed: the draft is
+      // still queued and still published, only the interim ping is gone. Kept
+      // in place (not deleted) because whether a queued-but-unsent draft is
+      // worth telling the user about is a product question that may come back —
+      // uncomment to restore it.
+      // await this._aiseeNotificationClient?.notify({
+      //   organizationId: org.id,
+      //   eventKey: AiseeNotificationEvent.ENGAGE_GENERATED,
+      //   // Keyed on the saved reply, matching how EngageSentReply is tracked
+      //   // (postId @unique, one row per reply rather than per opportunity).
+      //   dedupKey: `engage.generated:${saved.id}`,
+      //   data: {
+      //     platform: opportunity.platform,
+      //     sent_reply_id: saved.id,
+      //     opportunity_id: candidate.opportunityId,
+      //     project_id: projectId || undefined,
+      //   },
+      //   channel: AiseeNotificationChannel.ENGAGE,
+      // });
 
       // No lease stamped here. The reply is in QUEUE, so the very next poll's
       // claim lane picks it up and leases it there — one code path holding the

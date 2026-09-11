@@ -57,6 +57,53 @@ function operationPlanWhere(query: {
 }
 
 /**
+ * Build the reference-post clauses shared by `getPosts`, `getPostsList` and
+ * `locatePostInList` — like `operationPlanWhere` above, the three must stay
+ * identical or the page index `locatePostInList` computes stops matching
+ * `/posts/list`.
+ *
+ * A reference-post is one produced by `POST /engage/opportunities/:id/
+ * generate-post` (docs/engage/reference-post-generation.md §4). It has no
+ * `source` of its own — by design it stays `'calendar'` so it behaves like any
+ * other calendar post everywhere (§4.1) — so the marker is the
+ * `referenceOpportunityId` column, plus a `source != 'engage'` guard: §4.4
+ * plans to backfill that same column onto engage REPLY posts, and a reply is
+ * not a reference-post. An explicit `referenceOpportunityId` wins and is left
+ * unguarded: asking for one opportunity's posts by id means every post that
+ * traces back to it, reply included.
+ *
+ * Returned as a clause ARRAY for the caller's `AND`, never as top-level `where`
+ * keys: `source` is already a top-level key here (`query.source`) and
+ * `getPosts` already owns a top-level `OR`, so spreading these in would
+ * silently overwrite one filter with the other.
+ *
+ * Known limitation (accepted — schema.prisma `Post.referenceOpportunityId`,
+ * §4.2): the column is `onDelete: SetNull` and `EngageOpportunity` rows are
+ * hard-deleted, so a post whose source opportunity is gone stops matching
+ * `isReferencePost=true`. The durable copy lives in
+ * `settings.referenceOpportunity`, which is a String column and not a query
+ * key.
+ */
+function referencePostWhere(query: {
+  referenceOpportunityId?: string;
+  isReferencePost?: boolean;
+}): Prisma.PostWhereInput[] {
+  if (query.referenceOpportunityId) {
+    return [{ referenceOpportunityId: query.referenceOpportunityId }];
+  }
+  if (query.isReferencePost === true) {
+    return [
+      { referenceOpportunityId: { not: null } },
+      { source: { not: 'engage' } },
+    ];
+  }
+  if (query.isReferencePost === false) {
+    return [{ OR: [{ referenceOpportunityId: null }, { source: 'engage' }] }];
+  }
+  return [];
+}
+
+/**
  * Flatten a stored `Post.analytics` value (an AnalyticsData[] of
  * `{ label, data: [{ total, date }] }`) into a plain `{ label: number }` map,
  * taking each metric's latest `total`. Returns null when there is no analytics
@@ -347,6 +394,9 @@ export class PostsRepository {
 
   async getPostsList(orgId: string, query: GetPostsListDto) {
     const skip = (query.page - 1) * query.pageSize;
+    // Kept out of the object literal below: these clauses constrain `source`,
+    // which is already a top-level key there — see referencePostWhere.
+    const referenceClauses = referencePostWhere(query);
     const where = {
       organizationId: orgId,
       deletedAt: null,
@@ -384,6 +434,7 @@ export class PostsRepository {
       // during migration — project-scoped-post-engage-design.md §8/§11).
       ...(query.projectId ? { projectId: query.projectId } : {}),
       ...operationPlanWhere(query),
+      ...(referenceClauses.length ? { AND: referenceClauses } : {}),
     };
 
     const [results, total] = await Promise.all([
@@ -411,6 +462,11 @@ export class PostsRepository {
           sourcePostId: true,
           operationPlanId: true,
           providerIdentifier: true,
+          // See the same pair in getPosts' select: `source` separates an engage
+          // reply from a calendar post, `referenceOpportunityId` marks a
+          // reference-post under the rule referencePostWhere filters on.
+          source: true,
+          referenceOpportunityId: true,
           impressions: true,
           trafficScore: true,
           lastMetricsFetchAt: true,
@@ -447,6 +503,7 @@ export class PostsRepository {
   async locatePostInList(orgId: string, query: LocatePostInListDto) {
     // Mirror the `where` from `getPostsList` exactly so the position we
     // compute matches the index the post occupies in `/posts/list`.
+    const referenceClauses = referencePostWhere(query);
     const where = {
       organizationId: orgId,
       deletedAt: null,
@@ -466,6 +523,7 @@ export class PostsRepository {
       // — see the "Mirror the where from getPostsList" note above.
       ...(query.projectId ? { projectId: query.projectId } : {}),
       ...operationPlanWhere(query),
+      ...(referenceClauses.length ? { AND: referenceClauses } : {}),
     };
 
     const sortBy = query.sortBy!;
@@ -594,6 +652,10 @@ export class PostsRepository {
               },
             ],
           },
+          // Reference-post filter. Lives inside this `AND` rather than beside
+          // `query.source` below because it constrains `source` itself — see
+          // referencePostWhere's own note.
+          ...referencePostWhere(query),
         ],
         deletedAt: null,
         parentPostId: null,
@@ -665,6 +727,12 @@ export class PostsRepository {
         sourcePostId: true,
         operationPlanId: true,
         providerIdentifier: true,
+        // Attribution the calendar renders badges from: `source` separates an
+        // engage reply from a calendar post, and `referenceOpportunityId` marks
+        // a reference-post (non-null + source != 'engage', the same rule
+        // referencePostWhere filters on).
+        source: true,
+        referenceOpportunityId: true,
         tags: {
           select: {
             tag: true,

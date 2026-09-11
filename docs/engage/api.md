@@ -1758,6 +1758,8 @@ Stream an AI-generated **original** post via SSE (`text/event-stream`) and persi
 
 Stored as a normal `Post` with `source='calendar'` (behaves exactly like any other calendar post — publish queue, dashboard analytics, billing), `state='DRAFT'`, no bound `integrationId` (`providerIdentifier` set to the resolved TARGET platform instead — `targetPlatform` when the caller names one, otherwise the opportunity's own), `referenceOpportunityId` set to the opportunity id, plus a content snapshot merged into `settings.referenceOpportunity` (the opportunity itself can be deleted or its content can drift later; the snapshot is what survives). **No** `EngageSentReply` is created and the opportunity is **not** claimed. Picking which account to publish through, further edits, and scheduling/publishing all happen afterward through the **generic** `POST /api/posts/` edit flow (re-post with the same `group`) — exactly like any other draft already in the calendar.
 
+Listing them back: `GET /api/posts` and `GET /api/posts/list` (and `/posts/list/locate`) take `isReferencePost=true|false` — `referenceOpportunityId IS NOT NULL AND source <> 'engage'` — or `referenceOpportunityId=<id>` for one opportunity's posts specifically. Both endpoints return `referenceOpportunityId` and `source` so a client can render the badge itself. See [reference-post-generation.md §4.6](reference-post-generation.md).
+
 **Request Body**
 
 | Field | Type | Required | Description |

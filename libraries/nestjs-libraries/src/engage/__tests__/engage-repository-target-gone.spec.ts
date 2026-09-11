@@ -17,7 +17,7 @@ import { EngageRepository } from '../engage.repository';
 function buildRepo(opts: { parked?: any[]; reply?: any } = {}) {
   const sentFindMany = vi.fn(async () => opts.parked ?? []);
   const sentFindFirst = vi.fn(async () =>
-    'reply' in opts ? opts.reply : { postId: 'p1' }
+    'reply' in opts ? opts.reply : { id: 'r1', postId: 'p1' }
   );
   const oppUpdateMany = vi.fn(async () => ({ count: 1 }));
   // Answers like Prisma would: how many rows the where-clause named. The two
@@ -72,7 +72,7 @@ describe('EngageRepository.markOpportunityTargetGone — authorisation', () => {
   });
 
   it('looks for the caller’s own live queue rows, not anyone’s reply ever', async () => {
-    const { repo, sentFindMany } = buildRepo({ parked: [{ postId: 'p1' }] });
+    const { repo, sentFindMany } = buildRepo({ parked: [{ id: 'r1', postId: 'p1' }] });
 
     await repo.markOpportunityTargetGone('org-1', 'opp-1', 'gone', true, now);
 
@@ -88,7 +88,7 @@ describe('EngageRepository.markOpportunityTargetGone — authorisation', () => {
 
 describe('EngageRepository.markOpportunityTargetGone — the two writes', () => {
   it('stamps deletedAt so nothing is drafted or claimed against it again', async () => {
-    const { repo, oppUpdateMany } = buildRepo({ parked: [{ postId: 'p1' }] });
+    const { repo, oppUpdateMany } = buildRepo({ parked: [{ id: 'r1', postId: 'p1' }] });
 
     await repo.markOpportunityTargetGone('org-1', 'opp-1', 'gone', true, now);
 
@@ -101,7 +101,7 @@ describe('EngageRepository.markOpportunityTargetGone — the two writes', () => 
   it('keeps the FIRST retirement timestamp when a second org reports the same post', async () => {
     // `deletedAt: null` in the where is what does this: the stamp means "when
     // the post was first observed gone", not "when the last report arrived".
-    const { repo, oppUpdateMany } = buildRepo({ parked: [{ postId: 'p1' }] });
+    const { repo, oppUpdateMany } = buildRepo({ parked: [{ id: 'r1', postId: 'p1' }] });
 
     await repo.markOpportunityTargetGone('org-2', 'opp-1', 'gone', true, now);
 
@@ -113,7 +113,7 @@ describe('EngageRepository.markOpportunityTargetGone — the two writes', () => 
     // They would then sit in QUEUE indefinitely — invisible to the queue counts
     // and to anyone wondering why a project's reply budget never drains.
     const { repo, postUpdateMany } = buildRepo({
-      parked: [{ postId: 'p1' }, { postId: 'p2' }],
+      parked: [{ id: 'r1', postId: 'p1' }, { id: 'r2', postId: 'p2' }],
     });
 
     const result = await repo.markOpportunityTargetGone(
@@ -137,7 +137,11 @@ describe('EngageRepository.markOpportunityTargetGone — the two writes', () => 
     // is already what stops the row being handed out again.
     expect(call.data.releaseId).toBeNull();
     expect('claimedAt' in call.data).toBe(false);
-    expect(result).toEqual({ retired: true, repliesClosed: 2 });
+    expect(result).toEqual({
+      retired: true,
+      repliesClosed: 2,
+      closedReplyIds: ['r1', 'r2'],
+    });
   });
 
   it('preserves claimedAt — it is the platform write clock, not just a lease', async () => {
@@ -159,7 +163,7 @@ describe('EngageRepository.markOpportunityTargetGone — the two writes', () => 
   it('records the poster’s own reason on the closed reply', async () => {
     // This string is what a user reads in the extension history and on the
     // record. "Failed" tells them nothing; the platform's own verdict does.
-    const { repo, postUpdateMany } = buildRepo({ parked: [{ postId: 'p1' }] });
+    const { repo, postUpdateMany } = buildRepo({ parked: [{ id: 'r1', postId: 'p1' }] });
 
     await repo.markOpportunityTargetGone(
       'org-1',
@@ -176,7 +180,7 @@ describe('EngageRepository.markOpportunityTargetGone — the two writes', () => 
   });
 
   it('does not let an oversized reason overflow the error column', async () => {
-    const { repo, postUpdateMany } = buildRepo({ parked: [{ postId: 'p1' }] });
+    const { repo, postUpdateMany } = buildRepo({ parked: [{ id: 'r1', postId: 'p1' }] });
 
     await repo.markOpportunityTargetGone('org-1', 'opp-1', 'x'.repeat(5_000), true, now);
 
@@ -211,7 +215,7 @@ describe('EngageRepository.markOpportunityTargetGone — the two writes', () => 
 describe('EngageRepository.markOpportunityTargetGone — blast radius', () => {
   it('does NOT retire the shared opportunity on an unconfirmed report', async () => {
     const { repo, oppUpdateMany, postUpdateMany } = buildRepo({
-      parked: [{ postId: 'p1' }],
+      parked: [{ id: 'r1', postId: 'p1' }],
     });
 
     const result = await repo.markOpportunityTargetGone(
@@ -229,13 +233,17 @@ describe('EngageRepository.markOpportunityTargetGone — blast radius', () => {
     // pickAutoReplyCandidates will not draft another (it excludes opportunities
     // this project already has a reply against).
     expect(postUpdateMany.mock.calls[0][0].data.state).toBe('ERROR');
-    expect(result).toEqual({ retired: false, repliesClosed: 1 });
+    expect(result).toEqual({
+      retired: false,
+      repliesClosed: 1,
+      closedReplyIds: ['r1'],
+    });
   });
 
   it('reports what it did, not what was asked — retired mirrors confirmed', async () => {
     // A caller told `retired: true` after an unconfirmed report would have no
     // way to tell the two outcomes apart.
-    const { repo } = buildRepo({ parked: [{ postId: 'p1' }] });
+    const { repo } = buildRepo({ parked: [{ id: 'r1', postId: 'p1' }] });
 
     expect(
       (await repo.markOpportunityTargetGone('org-1', 'opp-1', 'gone', false, now))
@@ -379,7 +387,7 @@ describe('EngageRepository.markOpportunityRepliesDisabled', () => {
 
   it('stamps the shared row and closes the caller’s parked replies', async () => {
     const { repo, oppUpdateMany, postUpdateMany } = buildRepo({
-      parked: [{ postId: 'p1' }, { postId: 'p2' }],
+      parked: [{ id: 'r1', postId: 'p1' }, { id: 'r2', postId: 'p2' }],
     });
 
     const res = await repo.markOpportunityRepliesDisabled(
@@ -389,7 +397,11 @@ describe('EngageRepository.markOpportunityRepliesDisabled', () => {
       now
     );
 
-    expect(res).toEqual({ marked: true, repliesClosed: 2 });
+    expect(res).toEqual({
+      marked: true,
+      repliesClosed: 2,
+      closedReplyIds: ['r1', 'r2'],
+    });
     expect(oppUpdateMany).toHaveBeenCalledWith({
       where: { id: 'opp-1', repliesDisabledAt: null },
       data: { repliesDisabledAt: now },
@@ -411,7 +423,7 @@ describe('EngageRepository.markOpportunityRepliesDisabled', () => {
     // this column by the automated-reply queries only. Writing both would throw
     // away the whole reason for having a second column.
     const { repo, oppUpdateMany, postUpdateMany } = buildRepo({
-      parked: [{ postId: 'p1' }],
+      parked: [{ id: 'r1', postId: 'p1' }],
     });
 
     await repo.markOpportunityRepliesDisabled('org-1', 'opp-1', 'locked', now);
@@ -430,7 +442,7 @@ describe('EngageRepository.markOpportunityRepliesDisabled', () => {
     // second report changes nothing, and `marked` reports that honestly rather
     // than claiming a write it did not make.
     const { repo, oppUpdateMany, postUpdateMany } = buildRepo({
-      parked: [{ postId: 'p9' }],
+      parked: [{ id: 'r9', postId: 'p9' }],
     });
     oppUpdateMany.mockResolvedValueOnce({ count: 0 });
 
@@ -453,7 +465,7 @@ describe('EngageRepository.markOpportunityRepliesDisabled', () => {
     // to getLastPlatformWriteAt, so erasing it would rewind the pacing floor
     // and let the next poll write to the same account inside the window that
     // floor exists to protect. Same rule markOpportunityTargetGone follows.
-    const { repo, postUpdateMany } = buildRepo({ parked: [{ postId: 'p1' }] });
+    const { repo, postUpdateMany } = buildRepo({ parked: [{ id: 'r1', postId: 'p1' }] });
 
     await repo.markOpportunityRepliesDisabled('org-1', 'opp-1', 'off', now);
 

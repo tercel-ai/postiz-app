@@ -60,6 +60,33 @@ export class GetPostsDto {
   @IsBoolean()
   hasOperationPlan?: boolean;
 
+  // Filter to only the posts generated from ONE EngageOpportunity. Unguarded
+  // by design: asking for an opportunity's posts by id means everything that
+  // traces back to it, engage reply included.
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  referenceOpportunityId?: string;
+
+  // Presence filter for reference-posts — the AI originals produced by
+  // POST /engage/opportunities/:id/generate-post
+  // (docs/engage/reference-post-generation.md). `true` keeps only them,
+  // `false` keeps everything else; omitting it returns both. Ignored when
+  // `referenceOpportunityId` is also given (the explicit id wins).
+  //
+  // A reference-post keeps `source: 'calendar'` by design (§4.1), so it is
+  // identified by a non-null `Post.referenceOpportunityId` plus
+  // `source != 'engage'` (§4.4 backfills the same column onto engage replies,
+  // which are NOT reference-posts).
+  @ApiPropertyOptional({
+    description:
+      'true = only AI posts generated from an engage opportunity; false = only posts that are not. Ignored when referenceOpportunityId is set.',
+  })
+  @IsOptional()
+  @Transform(({ value }) => value === 'true' || value === true)
+  @IsBoolean()
+  isReferencePost?: boolean;
+
   @ApiPropertyOptional({ enum: State })
   @IsOptional()
   @IsEnum(State)

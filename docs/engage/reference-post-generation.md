@@ -272,6 +272,45 @@ forever" by not deciding:
   that nulls `snapshotContent` after N days, keeping only `opportunityId` /
   `platform` / `externalPostUrl` for provenance).
 
+### 4.6 Reading / filtering reference-posts (`/posts`, `/posts/list`)
+
+No extra column and no migration: the marker IS `referenceOpportunityId`
+(§4.2). Both calendar and list endpoints — plus `/posts/list/locate`, which
+must mirror `/posts/list` byte-for-byte — accept the same two query params,
+built by one shared helper (`referencePostWhere` in `posts.repository.ts`,
+sibling of `operationPlanWhere`):
+
+| Param | Meaning |
+|---|---|
+| `referenceOpportunityId=<id>` | Posts generated from exactly that opportunity. **Unguarded**: asking by id means everything tracing back to it, engage reply included. Wins over `isReferencePost`. |
+| `isReferencePost=true` | `referenceOpportunityId IS NOT NULL AND source <> 'engage'` |
+| `isReferencePost=false` | the complement of the above |
+| (omitted) | both, i.e. today's behavior |
+
+The `source <> 'engage'` half is what keeps §4.4's backfill from turning every
+engage REPLY into a "reference-post": a reply traces back to an opportunity
+but was not written by this feature.
+
+Both clauses go into the query's `AND`, never into the top-level `where`
+object — `source` is already a top-level key there (`query.source`) and
+`getPosts` already owns a top-level `OR`, so spreading them in would silently
+overwrite one filter with the other. Pinned by
+`posts.repository.reference-post.spec.ts`.
+
+Responses: `/posts` and `/posts/list` now select `referenceOpportunityId` and
+`source`, so a client decides the badge itself
+(`referenceOpportunityId != null && source !== 'engage'`). The full snapshot
+(§4.3) is not in the list payload — `settings` is not selected there — and
+stays where it already was, on `GET /posts/:id`.
+
+**Known limitation, accepted.** `referenceOpportunityId` is `onDelete:
+SetNull` and `EngageOpportunity` rows are hard-deleted (admin cleanup, TTL
+housekeeping), so a post whose source opportunity is gone silently stops
+matching `isReferencePost=true`. The durable copy is
+`settings.referenceOpportunity` (§4.3), which is inside a `String` column and
+therefore not a query key. If that loss ever matters, the fix is a dedicated
+durable flag column, not a `LIKE` over `settings`.
+
 ## 5. API
 
 **One** endpoint — not the generate/save pair an earlier revision of this

@@ -3279,7 +3279,11 @@ export class EngageRepository {
     reason: string,
     confirmed: boolean,
     now = new Date()
-  ): Promise<{ retired: boolean; repliesClosed: number }> {
+  ): Promise<{
+    retired: boolean;
+    repliesClosed: number;
+    closedReplyIds: string[];
+  }> {
     // The entitlement check AND the work list in one query: these are exactly
     // the replies that get closed below.
     const parked = await this._sentReply.model.engageSentReply.findMany({
@@ -3288,7 +3292,9 @@ export class EngageRepository {
         opportunityId,
         post: { state: 'QUEUE', deletedAt: null, releaseURL: null },
       },
-      select: { postId: true },
+      // `id` alongside `postId` so the caller can name the replies it just
+      // closed — the notification layer keys on the reply, not the post.
+      select: { id: true, postId: true },
     });
     if (!parked.length) {
       throw new NotFoundException(
@@ -3344,7 +3350,18 @@ export class EngageRepository {
       // `retired` reports what actually happened, not what was asked for: an
       // unconfirmed report closes replies without retiring anything, and a
       // caller told otherwise would have no way to tell the two apart.
-      return { retired: confirmed, repliesClosed: closed.count };
+      //
+      // `closedReplyIds` lists the replies this report was ABOUT, and is empty
+      // when nothing moved. It is the parked set rather than the update's own
+      // rows because updateMany returns a count, not ids; the two differ only
+      // if a parked reply left QUEUE between the read above and this write,
+      // which the caller (the extension reporting a target it just found dead)
+      // has no way to produce. Consumers must treat it as best-effort.
+      return {
+        retired: confirmed,
+        repliesClosed: closed.count,
+        closedReplyIds: closed.count ? parked.map((p) => p.id) : [],
+      };
     });
   }
 
@@ -3390,7 +3407,11 @@ export class EngageRepository {
     opportunityId: string,
     reason: string,
     now = new Date()
-  ): Promise<{ marked: boolean; repliesClosed: number }> {
+  ): Promise<{
+    marked: boolean;
+    repliesClosed: number;
+    closedReplyIds: string[];
+  }> {
     // Entitlement check and work list in one query — exactly the replies closed
     // below, exactly as markOpportunityTargetGone does it.
     const parked = await this._sentReply.model.engageSentReply.findMany({
@@ -3399,7 +3420,8 @@ export class EngageRepository {
         opportunityId,
         post: { state: 'QUEUE', deletedAt: null, releaseURL: null },
       },
-      select: { postId: true },
+      // `id` for the same reason as target-gone: the caller notifies per reply.
+      select: { id: true, postId: true },
     });
     if (!parked.length) {
       throw new NotFoundException(
@@ -3435,7 +3457,13 @@ export class EngageRepository {
         where: { id: { in: parked.map((p) => p.postId) }, state: 'QUEUE' },
         data: { state: 'ERROR', error, releaseId: null },
       });
-      return { marked: stamped.count > 0, repliesClosed: closed.count };
+      // Best-effort, with the same caveat as target-gone's: parked ids, not the
+      // update's own rows, because updateMany answers with a count.
+      return {
+        marked: stamped.count > 0,
+        repliesClosed: closed.count,
+        closedReplyIds: closed.count ? parked.map((p) => p.id) : [],
+      };
     });
   }
 
@@ -6285,6 +6313,10 @@ export class EngageRepository {
         postId: true,
         opportunityId: true,
         projectId: true,
+        // markSentReplyRemoved re-stamps this unconditionally, so a caller that
+        // needs to know whether a removal report is NEW has to read it here,
+        // before the write — see markExtensionReplyRemoved.
+        removedAt: true,
         post: { select: { state: true, releaseURL: true } },
         opportunity: { select: { platform: true } },
       },
@@ -6295,6 +6327,7 @@ export class EngageRepository {
       postId: reply.postId,
       opportunityId: reply.opportunityId,
       projectId: reply.projectId,
+      removedAt: reply.removedAt ?? null,
       state: reply.post?.state ?? null,
       releaseURL: reply.post?.releaseURL ?? null,
       platform: reply.opportunity?.platform ?? null,

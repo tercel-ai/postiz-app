@@ -1165,9 +1165,9 @@ export class EngageService implements OnApplicationBootstrap {
    * The extension reporting that a reply target no longer exists on the
    * platform (deleted post, removed article, suspended author).
    *
-   * Straight through to the repository, which owns both the entitlement check
-   * and the two writes — see markOpportunityTargetGone for why a global row is
-   * safe to stamp from an org-scoped call.
+   * The repository owns both the entitlement check and the two writes — see
+   * markOpportunityTargetGone for why a global row is safe to stamp from an
+   * org-scoped call. This layer adds only the user-facing notification.
    */
   async markOpportunityTargetGone(
     org: Organization,
@@ -1175,32 +1175,90 @@ export class EngageService implements OnApplicationBootstrap {
     reason: string,
     confirmed: boolean
   ) {
-    return this._engageRepository.markOpportunityTargetGone(
+    const result = await this._engageRepository.markOpportunityTargetGone(
       org.id,
       id,
       reason,
       confirmed
     );
+
+    // A reply the extension was carrying just ended without going out, so the
+    // user hears about it here — the same ENGAGE_REPLY_FAILED that
+    // closeUnconfirmedReply sends, because from the user's side the two are one
+    // outcome: "the queued reply will not be sent." Retryable failures (signed
+    // out, rate limited, markup moved) never reach this method — they stay in
+    // QUEUE and go out on a later poll, and notifying on those would announce a
+    // failure that has not happened yet.
+    await this._notifyRepliesFailed(org, result.closedReplyIds);
+
+    return result;
   }
 
   /**
    * The extension reporting that the PLATFORM refuses replies on this post —
    * comments turned off, thread locked, responses closed.
    *
-   * Straight through to the repository, which owns the entitlement check and
-   * both writes. See markOpportunityRepliesDisabled for why this one stamps a
-   * globally-shared row when an unconfirmed target-gone report may not.
+   * The repository owns the entitlement check and both writes; see
+   * markOpportunityRepliesDisabled for why this one stamps a globally-shared
+   * row when an unconfirmed target-gone report may not. This layer adds only
+   * the user-facing notification.
    */
   async markOpportunityRepliesDisabled(
     org: Organization,
     id: string,
     reason: string
   ) {
-    return this._engageRepository.markOpportunityRepliesDisabled(
+    const result = await this._engageRepository.markOpportunityRepliesDisabled(
       org.id,
       id,
       reason
     );
+
+    // Same reasoning as markOpportunityTargetGone: whatever the platform's
+    // reason, the queued reply is closed and will not be re-sent.
+    await this._notifyRepliesFailed(org, result.closedReplyIds);
+
+    return result;
+  }
+
+  /**
+   * Tell the Aisee notification centre that queued replies were closed without
+   * being sent.
+   *
+   * Shared by every terminal extension-failure path: the target is gone, the
+   * post refuses replies, or a send fired and could never be confirmed. All
+   * three leave a reply in ERROR that nothing will retry, which is the only
+   * thing the user can act on — so all three emit the same event, keyed per
+   * reply (`engage.reply_failed:{sentReplyId}`) exactly as the published event
+   * is, since an org may have several replies parked on one opportunity.
+   *
+   * Best-effort throughout: the client never throws, a context lookup that
+   * fails still emits with the platform/project fields absent rather than
+   * dropping the notification, and nothing here can fail the report that
+   * triggered it — the reply is already closed in the database.
+   */
+  private async _notifyRepliesFailed(
+    org: Organization,
+    sentReplyIds: string[]
+  ) {
+    if (!sentReplyIds?.length || !this._aiseeNotificationClient) return;
+
+    for (const sentReplyId of sentReplyIds) {
+      const ctx = await this._engageRepository
+        .getSentReplyContext(org.id, sentReplyId)
+        .catch(() => null);
+      await this._aiseeNotificationClient.notify({
+        organizationId: org.id,
+        eventKey: AiseeNotificationEvent.ENGAGE_REPLY_FAILED,
+        dedupKey: `engage.reply_failed:${sentReplyId}`,
+        data: {
+          platform: ctx?.platform,
+          sent_reply_id: sentReplyId,
+          project_id: ctx?.projectId || undefined,
+        },
+        channel: AiseeNotificationChannel.ENGAGE,
+      });
+    }
   }
 
   /**
@@ -1223,20 +1281,7 @@ export class EngageService implements OnApplicationBootstrap {
     // had already reached PUBLISHED, so telling the user it failed would
     // contradict a confirmed send.
     if (result.closed) {
-      const ctx = await this._engageRepository
-        .getSentReplyContext(org.id, sentReplyId)
-        .catch(() => null);
-      await this._aiseeNotificationClient?.notify({
-        organizationId: org.id,
-        eventKey: AiseeNotificationEvent.ENGAGE_REPLY_FAILED,
-        dedupKey: `engage.reply_failed:${sentReplyId}`,
-        data: {
-          platform: ctx?.platform,
-          sent_reply_id: sentReplyId,
-          project_id: ctx?.projectId || undefined,
-        },
-        channel: AiseeNotificationChannel.ENGAGE,
-      });
+      await this._notifyRepliesFailed(org, [sentReplyId]);
     }
 
     return result;
@@ -2231,12 +2276,69 @@ export class EngageService implements OnApplicationBootstrap {
       `markExtensionReplyRemoved: ${sentReplyId} (${ctx.platform}) verdict=${verdict}`
     );
 
-    return this._engageRepository.markSentReplyRemoved(
+    // Read before the write: markSentReplyRemoved re-stamps removedAt
+    // unconditionally, so afterwards the row can no longer answer "was this
+    // report new?" and a re-check reporting the same removal twice would notify
+    // twice. The Aisee dedup key catches retries of one emit, not two genuine
+    // emits for the same fact.
+    const firstReport = !ctx.removedAt;
+
+    const result = await this._engageRepository.markSentReplyRemoved(
       org.id,
       sentReplyId,
       verdict,
       url
     );
+
+    // Deliberately NOT engage.reply_failed. The reply was posted and was live;
+    // the platform removing it afterwards says something different to the user
+    // and offering "Retry" would send them straight back into the rule that
+    // just removed them. Same split as the Post side's post.removed.
+    if (firstReport) {
+      await this._notifyReplyRemoved(org, ctx, verdict, url);
+    }
+
+    return result;
+  }
+
+  /**
+   * Tell the Aisee notification centre that the platform took a published reply
+   * down.
+   *
+   * Separate from _notifyRepliesFailed rather than a flag on it, because the two
+   * events are not variants of one outcome: that one is "it never went out, try
+   * again", this one is "it went out, then was taken down". The context is
+   * already loaded by the caller, so nothing is re-read here.
+   */
+  private async _notifyReplyRemoved(
+    org: Organization,
+    ctx: {
+      sentReplyId: string;
+      platform: string | null;
+      projectId: string | null;
+      releaseURL: string | null;
+    },
+    verdict: string,
+    url?: string | null
+  ) {
+    if (!this._aiseeNotificationClient) return;
+    await this._aiseeNotificationClient.notify({
+      organizationId: org.id,
+      eventKey: AiseeNotificationEvent.ENGAGE_REPLY_REMOVED,
+      dedupKey: `engage.reply_removed:${ctx.sentReplyId}`,
+      data: {
+        platform: ctx.platform,
+        sent_reply_id: ctx.sentReplyId,
+        project_id: ctx.projectId || undefined,
+        // 'removed' (a tombstone was left) vs 'gone' (not publicly visible at
+        // all). Carried for triage only — the copy treats both the same, and
+        // the name is NOT short_reason, which in the registry means a sentence
+        // to append to the message.
+        verdict,
+        external_url: url || ctx.releaseURL || undefined,
+      },
+      channel: AiseeNotificationChannel.ENGAGE,
+    });
   }
 
   /**
