@@ -2666,6 +2666,48 @@ export class PostsRepository {
   }
 
   /**
+   * Stamp the account an extension send actually went out as onto the rows it
+   * published — the anchor and its thread segments together, since a group is
+   * one channel's chain and they all went out as the same browser session.
+   *
+   * Every clause of the WHERE is load-bearing:
+   *   - `integrationId: null` is the entire point. This fills a blank the
+   *     extension path leaves behind (the browser session, not an OAuth
+   *     account, is what published), and must never overwrite an account the
+   *     user explicitly chose when scheduling.
+   *   - `providerIdentifier` so a resolution for one platform can never land
+   *     on a row of another.
+   *   - `state: PUBLISHED` restricts this to rows that HAVE been sent. Called
+   *     after the chain is settled, that is the anchor plus its segments — and
+   *     never a QUEUE row this callback did not publish.
+   *   - `intervalInDays: null` excludes a recurring ORIGINAL. A cycle clone
+   *     shares its template's `group` (findOrCreateCycleClone), so without
+   *     this a published clone could stamp an account onto the permanent QUEUE
+   *     template — changing how every FUTURE cycle routes (extensionDueWhere's
+   *     integration-joined branches) off one session reading. The template is
+   *     never itself published, so it is never a row this may describe.
+   */
+  attributeExtensionPublisher(
+    organizationId: string,
+    group: string,
+    providerIdentifier: string,
+    integrationId: string
+  ) {
+    return this._post.model.post.updateMany({
+      where: {
+        organizationId,
+        group,
+        deletedAt: null,
+        integrationId: null,
+        providerIdentifier,
+        state: State.PUBLISHED,
+        intervalInDays: null,
+      },
+      data: { integrationId },
+    });
+  }
+
+  /**
    * Mark SPECIFIC chain nodes ERROR — the segments of a partially-published
    * thread that never went out. Addressed by id rather than by group so the
    * segments that DID publish are left untouched.

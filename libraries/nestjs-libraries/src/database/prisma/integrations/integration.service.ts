@@ -4,6 +4,7 @@ import {
   HttpStatus,
   Inject,
   Injectable,
+  Logger,
 } from '@nestjs/common';
 import { IntegrationRepository } from '@gitroom/nestjs-libraries/database/prisma/integrations/integration.repository';
 import { IntegrationManager } from '@gitroom/nestjs-libraries/integrations/integration.manager';
@@ -40,6 +41,8 @@ import {
   buildExtensionSessionSeed,
   matchExtensionSessionCandidate,
   planExtensionSessionSync,
+  resolveExtensionPublisher,
+  ExtensionSessionEntry,
 } from '@gitroom/nestjs-libraries/database/prisma/integrations/extension-session.utils';
 import { isExtensionPublishablePlatform } from '@gitroom/nestjs-libraries/integrations/integration.manager';
 import { fetchMediaAsDataUri } from '@gitroom/nestjs-libraries/engage/safe-media-fetch';
@@ -69,6 +72,7 @@ const NO_SERVER_SIDE_TOKEN_EXPIRY = 0;
 
 @Injectable()
 export class IntegrationService {
+  private readonly logger = new Logger(IntegrationService.name);
   private storage = UploadFactory.createStorage();
   constructor(
     private _integrationRepository: IntegrationRepository,
@@ -285,6 +289,46 @@ export class IntegrationService {
 
   getIntegrationsList(org: string) {
     return this._integrationRepository.getIntegrationsList(org);
+  }
+
+  /**
+   * Which of the org's accounts on `platform` an extension send went out as.
+   *
+   * The extension publishes with the browser's own platform session, so the
+   * post/reply it reports back carries no account of its own — that is why an
+   * extension-published row has historically been left with `integrationId`
+   * null. The hourly session report already records the answer
+   * (`activeSessionClient: EXTENSION`), so the publish-on-success callbacks can
+   * read it back and attribute the send.
+   *
+   * `reported` is the account the caller OBSERVED posting, when it has one
+   * (engage's reply author, captured from the platform's response); it outranks
+   * the session reading, being about this send rather than about the browser in
+   * general. Returns null when neither names a row — the caller then stores no
+   * integration, exactly as before.
+   *
+   * Never throws: attribution is a nicety on a send that has already happened,
+   * and must not turn a published post into a failed callback.
+   */
+  async resolveExtensionPublisherId(
+    org: string,
+    platform: string,
+    reported?: ExtensionSessionEntry | null
+  ): Promise<string | null> {
+    try {
+      const rows = await this._integrationRepository.getIntegrationsForPlatform(
+        org,
+        platform
+      );
+      return resolveExtensionPublisher(rows, reported)?.integrationId ?? null;
+    } catch (err) {
+      this.logger.warn(
+        `resolveExtensionPublisherId: org=${org} platform=${platform} failed: ${
+          (err as Error)?.message || err
+        }`
+      );
+      return null;
+    }
   }
 
   /**

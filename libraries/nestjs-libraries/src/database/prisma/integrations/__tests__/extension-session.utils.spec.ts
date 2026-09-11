@@ -7,7 +7,10 @@ import {
   isUsableStoredPicture,
   buildExtensionSessionSeed,
   planExtensionSessionSync,
+  isExtensionSessionStale,
+  resolveExtensionPublisher,
   ExtensionSessionCandidate,
+  ExtensionPublisherCandidate,
 } from '../extension-session.utils';
 
 function candidate(
@@ -312,5 +315,134 @@ describe('matchExtensionSessionCandidate — Reddit id forms', () => {
         candidate('int_reddit', 't2_abc123', null),
       ])
     ).toBe('int_reddit');
+  });
+});
+
+describe('isExtensionSessionStale', () => {
+  const now = new Date('2026-09-11T12:00:00Z').getTime();
+
+  it('should treat a reading from the last maintenance run as current', () => {
+    expect(
+      isExtensionSessionStale(new Date('2026-09-11T11:10:00Z'), now)
+    ).toBe(false);
+  });
+
+  it('should tolerate ONE missed hourly run before calling a reading stale', () => {
+    // 2h old: the run at T-1h never happened, the one before it did.
+    expect(
+      isExtensionSessionStale(new Date('2026-09-11T10:00:00Z'), now)
+    ).toBe(false);
+  });
+
+  it('should call a reading stale once two runs in a row have been missed', () => {
+    expect(
+      isExtensionSessionStale(new Date('2026-09-11T09:00:00Z'), now)
+    ).toBe(true);
+  });
+
+  it('should NOT call a row that was never reported on stale — it has no reading', () => {
+    expect(isExtensionSessionStale(null, now)).toBe(false);
+  });
+});
+
+describe('resolveExtensionPublisher', () => {
+  const now = new Date('2026-09-11T12:00:00Z').getTime();
+  const fresh = new Date('2026-09-11T11:30:00Z');
+  const stale = new Date('2026-09-11T06:00:00Z');
+
+  function publisher(
+    id: string,
+    internalId: string,
+    profile: string | null,
+    activeSessionClient: string,
+    extensionSessionCheckedAt: Date | null
+  ): ExtensionPublisherCandidate {
+    return {
+      id,
+      internalId,
+      profile,
+      activeSessionClient,
+      extensionSessionCheckedAt,
+    };
+  }
+
+  it('should name the account the browser is signed into when nobody reported an author', () => {
+    const rows = [
+      publisher('int_a', '111', 'alpha', 'API', fresh),
+      publisher('int_b', '222', 'beta', 'EXTENSION', fresh),
+    ];
+
+    expect(resolveExtensionPublisher(rows, null, now)).toEqual({
+      integrationId: 'int_b',
+      matchedBy: 'active-session',
+    });
+  });
+
+  it('should prefer the OBSERVED poster over the session reading when the two disagree', () => {
+    // The browser last reported @beta, but the platform's own response says the
+    // reply went out as @alpha — a second profile in the same browser, an
+    // account switch since the last report. What posted wins.
+    const rows = [
+      publisher('int_a', '111', 'alpha', 'API', fresh),
+      publisher('int_b', '222', 'beta', 'EXTENSION', fresh),
+    ];
+
+    expect(
+      resolveExtensionPublisher(rows, { handle: '@alpha' }, now)
+    ).toEqual({ integrationId: 'int_a', matchedBy: 'reported-account' });
+  });
+
+  it('should fall back to the session reading when the reported author matches no row', () => {
+    const rows = [publisher('int_b', '222', 'beta', 'EXTENSION', fresh)];
+
+    expect(
+      resolveExtensionPublisher(rows, { handle: 'someone_else' }, now)
+    ).toEqual({ integrationId: 'int_b', matchedBy: 'active-session' });
+  });
+
+  it('should refuse a STALE session reading rather than attribute to a guess', () => {
+    // The browser may have been signed out or switched accounts hours ago;
+    // naming the wrong account is worse than naming none.
+    const rows = [publisher('int_b', '222', 'beta', 'EXTENSION', stale)];
+
+    expect(resolveExtensionPublisher(rows, null, now)).toBeNull();
+  });
+
+  it('should ignore a row no report has ever covered, even if it reads EXTENSION', () => {
+    const rows = [publisher('int_b', '222', 'beta', 'EXTENSION', null)];
+
+    expect(resolveExtensionPublisher(rows, null, now)).toBeNull();
+  });
+
+  it('should return null when every row is on the API client', () => {
+    const rows = [
+      publisher('int_a', '111', 'alpha', 'API', fresh),
+      publisher('int_b', '222', 'beta', 'API', fresh),
+    ];
+
+    expect(resolveExtensionPublisher(rows, null, now)).toBeNull();
+  });
+
+  it('should pick the newest reading if a half-applied report ever left two EXTENSION rows', () => {
+    const rows = [
+      publisher('int_a', '111', 'alpha', 'EXTENSION', new Date('2026-09-11T11:00:00Z')),
+      publisher('int_b', '222', 'beta', 'EXTENSION', new Date('2026-09-11T11:45:00Z')),
+    ];
+
+    expect(resolveExtensionPublisher(rows, null, now)?.integrationId).toBe('int_b');
+  });
+
+  it('should match a reported Reddit account across the t2_ fullname prefix', () => {
+    // Same normalization the session report itself uses — the OAuth flow stores
+    // the bare id, the extension recovers the prefixed one.
+    const rows = [publisher('int_r', 'abc123', null, 'API', fresh)];
+
+    expect(
+      resolveExtensionPublisher(rows, { id: 't2_abc123' }, now)
+    ).toEqual({ integrationId: 'int_r', matchedBy: 'reported-account' });
+  });
+
+  it('should return null for an org with no accounts on the platform at all', () => {
+    expect(resolveExtensionPublisher([], { handle: 'alpha' }, now)).toBeNull();
   });
 });

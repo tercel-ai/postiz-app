@@ -622,7 +622,16 @@ export class IntegrationRepository {
     });
   }
 
-  /** All of an org's integrations for one platform, for extension-session matching. */
+  /**
+   * All of an org's integrations for one platform, for extension-session
+   * matching — both consuming a report (reportExtensionSession) and reading the
+   * result back to attribute an extension send (resolveExtensionPublisher).
+   *
+   * NOT filtered on `disabled`: the session columns describe which account the
+   * browser is signed into, which stays true of a channel the user has switched
+   * off, and attribution has to be able to name it — a post that went out under
+   * a disabled channel still went out under it.
+   */
   getIntegrationsForPlatform(org: string, platform: string) {
     return this._integration.model.integration.findMany({
       where: {
@@ -639,6 +648,11 @@ export class IntegrationRepository {
         // row still needs one, `name` is read by callers that log what changed.
         name: true,
         picture: true,
+        // The reading a prior report left behind. Written by
+        // recordExtensionSession below; read back by resolveExtensionPublisher
+        // to answer "which account did the browser publish this as?".
+        activeSessionClient: true,
+        extensionSessionCheckedAt: true,
       },
     });
   }

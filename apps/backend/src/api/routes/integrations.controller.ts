@@ -52,20 +52,10 @@ import { RefreshIntegrationService } from '@gitroom/nestjs-libraries/integration
 import { AiseeCreditService } from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/aisee-credit.service';
 import { ExtensionSessionReportDto } from '@gitroom/nestjs-libraries/dtos/integrations/extension-session-report.dto';
 import { PermissionsService } from '@gitroom/backend/services/auth/permissions/permissions.service';
-
-/**
- * How long an `activeSessionClient`/`extensionSessionCheckedAt` reading stays
- * trustworthy before a consumer (CLI, diagnostics) should flag it as possibly
- * out of date. 2.5x the extension's hourly session-maintenance interval —
- * enough slack for one missed run (device asleep, MV3 worker recycled)
- * without papering over a browser that's genuinely stopped reporting.
- */
-const EXTENSION_SESSION_STALE_AFTER_MS = 150 * 60 * 1000;
-
-/** True once a reading is old enough that it shouldn't be acted on as current. */
-function isExtensionSessionStale(checkedAt: Date | null): boolean {
-  return !!checkedAt && Date.now() - checkedAt.getTime() > EXTENSION_SESSION_STALE_AFTER_MS;
-}
+// Shared with the extension-publisher attribution that reads the same two
+// columns (resolveExtensionPublisher): one definition of "this reading is
+// too old to act on", so diagnostics and attribution can never disagree.
+import { isExtensionSessionStale } from '@gitroom/nestjs-libraries/database/prisma/integrations/extension-session.utils';
 
 @ApiTags('Integrations')
 @Controller('/integrations')

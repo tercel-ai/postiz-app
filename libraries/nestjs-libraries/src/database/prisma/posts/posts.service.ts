@@ -385,6 +385,63 @@ export class PostsService {
   }
 
   /**
+   * Fill in the account an extension-published post went out as, when the row
+   * has none.
+   *
+   * The browser session IS the credential on this path, so a post can be
+   * published perfectly well with `integrationId` null — and then no read path
+   * (the Sent/calendar card, metrics sync, per-channel analytics) can say who
+   * posted it. `activeSessionClient: EXTENSION` on the org's integration for
+   * that platform is the record of which account the browser is signed into,
+   * which is exactly the missing answer.
+   *
+   * Scoped to the post's `group`, so a thread published as one extension task
+   * attributes its follow-up segments too — they went out as the same session,
+   * and settling only the anchor would leave the chain half-attributed.
+   *
+   * Never throws: the publish already succeeded and is committed.
+   */
+  private async _attributeExtensionPublisher(
+    orgId: string,
+    post: {
+      id: string;
+      group: string;
+      integrationId?: string | null;
+      providerIdentifier?: string | null;
+    }
+  ): Promise<void> {
+    // An account was chosen at schedule time — that is the user's own answer
+    // and outranks anything a session reading could say.
+    if (post.integrationId) return;
+    // No platform on the row means nothing to resolve against. Such a post
+    // cannot reach the extension queue via the platform-routed branches either,
+    // so this is only the belt to publishMethod=EXTENSION's braces.
+    if (!post.providerIdentifier) return;
+
+    try {
+      const integrationId =
+        await this._integrationService.resolveExtensionPublisherId(
+          orgId,
+          post.providerIdentifier
+        );
+      if (!integrationId) return;
+
+      await this._postRepository.attributeExtensionPublisher(
+        orgId,
+        post.group,
+        post.providerIdentifier,
+        integrationId
+      );
+    } catch (err) {
+      this.logger.warn(
+        `_attributeExtensionPublisher: postId=${post.id} failed: ${
+          (err as Error)?.message || err
+        }`
+      );
+    }
+  }
+
+  /**
    * Extension publish-on-success callback for a Post. The browser extension
    * published the post in-browser (X / Reddit) with the user's own platform
    * session and reports the permalink (+ platform post id) back; flip the saved
@@ -451,6 +508,21 @@ export class PostsService {
         );
       }
     }
+
+    // Record WHICH account this went out as. An extension-routed post can reach
+    // here with no integration at all (operation-plan posts route by platform,
+    // not by a connected account — see extensionDueWhere branch 1/3), and the
+    // browser session that published it is not an account this row knows about.
+    // The session report does know it, so resolve and stamp it now the send is
+    // confirmed.
+    //
+    // Runs LAST of the writes, after the chain is settled, because the stamp
+    // only touches PUBLISHED rows — the thread's segments have to have been
+    // flipped first or they would be skipped and the chain left half
+    // attributed. Best-effort throughout: the post is already live, and an
+    // unattributed PUBLISHED row is a far better outcome than a failed callback
+    // that leaves it QUEUE to be published twice.
+    await this._attributeExtensionPublisher(orgId, post);
 
     // One notification per chain, on the anchor — the workflow notifies on
     // i===0 and not once per thread item, and a thread is one thing that
@@ -707,6 +779,24 @@ export class PostsService {
       dayjs(getIntegration?.tokenExpiration).isBefore(dayjs()) ||
       forceRefresh
     ) {
+      // A channel whose credential is the BROWSER SESSION has no server-side
+      // token to refresh: createChannelFromExtensionSession stores it with no
+      // tokenExpiration exactly so the hourly refresh sweep skips it (see
+      // NO_SERVER_SIDE_TOKEN_EXPIRY). Refreshing one anyway calls
+      // refreshToken('') — a permanent failure, which refreshProcess answers by
+      // flagging refreshNeeded, telling the user to reconnect, and
+      // disconnecting the channel. The channel would disable itself, which is
+      // the precise outcome that sentinel exists to prevent.
+      //
+      // Reachable since extension-published posts started carrying an
+      // integrationId (_attributeExtensionPublisher): the provider 401s on a
+      // handle-as-token, social.abstract turns ANY 401 into RefreshToken, and
+      // the catch below re-enters here with forceRefresh. There is no token to
+      // read metrics with either way, so stop rather than "fix" a row that has
+      // nothing to fix.
+      if (!getIntegration.tokenExpiration) {
+        return [];
+      }
       const data = await this._refreshIntegrationService.refresh(
         getIntegration
       );

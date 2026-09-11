@@ -2916,11 +2916,18 @@ describe('EngageRepository — two-table reads', () => {
         integrationId: null,
         settings: null,
       }));
+      // No account on the platform, so the publishing-account attribution
+      // resolves nothing — these tests are about the URL/author handling, and
+      // attribution has its own spec (engage-reply-integration-attribution).
+      const integrationFindMany = vi.fn(async () => [] as any[]);
       const sentReply = {
         model: { engageSentReply: { findFirst: sentFindFirst } },
       } as any;
       const post = {
         model: { post: { update: postUpdate, findUnique: postFindUnique } },
+      } as any;
+      const integration = {
+        model: { integration: { findMany: integrationFindMany } },
       } as any;
       const repo = new EngageRepository(
         {} as any,
@@ -2929,14 +2936,14 @@ describe('EngageRepository — two-table reads', () => {
         {} as any,
         {} as any,
         sentReply, // _sentReply
-        {} as any,
+        integration, // _integration
         {} as any,
         post, // _post
         {} as any,
         {} as any,
         {} as any
       );
-      return { repo, postUpdate, postFindUnique };
+      return { repo, postUpdate, postFindUnique, integrationFindMany };
     }
 
     // The extension posts as the logged-in session, so it KNOWS who replied and
@@ -2971,15 +2978,20 @@ describe('EngageRepository — two-table reads', () => {
 
     // Resolving an OAuth account back from the reply URL is genuinely X-only —
     // opening author recording to every platform must not drag that along.
-    it('does not attempt an integration lookup on a non-X platform', async () => {
-      const { repo, postFindUnique } = buildRepo('hackernews');
+    // (A non-X reply can still gain an account, but from the browser-session
+    // reading for its OWN platform — never by parsing an x.com permalink.)
+    it('does not parse an X permalink for an account on a non-X platform', async () => {
+      const { repo, integrationFindMany } = buildRepo('hackernews');
 
       await repo.updateReplyUrl('org1', 'r1', 'https://news.ycombinator.com/item?id=1', undefined, {
         markPublished: true,
       });
 
-      // No author and not X → nothing to read the post for at all.
-      expect(postFindUnique).not.toHaveBeenCalled();
+      // The only lookup is the session-based one, scoped to hackernews.
+      expect(integrationFindMany).toHaveBeenCalledTimes(1);
+      expect(integrationFindMany.mock.calls[0][0]).toMatchObject({
+        where: { providerIdentifier: 'hackernews' },
+      });
     });
 
     it('flips a devto reply to PUBLISHED — every SCANNABLE_PLATFORMS platform can commit, not just X/Reddit', async () => {

@@ -75,6 +75,10 @@ import {
 import { parseXTweetId } from '@gitroom/nestjs-libraries/engage/x-tweet';
 import { normalizeExternalPostUrl } from '@gitroom/nestjs-libraries/engage/engage-scan-ingest.service';
 import { EngageAuthorProfile } from '@gitroom/nestjs-libraries/engage/engage-author';
+// Shared with the Post-side extension attribution (PostsService): one rule for
+// "which account did the browser publish this as?", so a reply and a post can
+// never disagree about it.
+import { resolveExtensionPublisher } from '@gitroom/nestjs-libraries/database/prisma/integrations/extension-session.utils';
 import dayjs from 'dayjs';
 import isoWeek from 'dayjs/plugin/isoWeek';
 import utc from 'dayjs/plugin/utc';
@@ -6245,10 +6249,10 @@ export class EngageRepository {
     const releaseId =
       platform === 'x' && url ? parseXTweetId(url) ?? undefined : undefined;
 
-    // If this X reply was recorded without a connected account, the freshly
-    // supplied URL lets us resolve the author's integration now (handle match)
-    // so metrics sync can finally read it. Only fill when currently null —
-    // never override an account the user explicitly chose at confirm time.
+    // If this reply was recorded without a connected account, resolve one now —
+    // so the Sent card can say who replied and metrics sync has an account to
+    // read with. Only fill when currently null — never override an account the
+    // user explicitly chose at confirm time.
     let integrationId: string | undefined;
     let mergedSettings: string | undefined;
     // One read serves both jobs below, on every platform. It used to sit inside
@@ -6256,20 +6260,41 @@ export class EngageRepository {
     // which meant a hackernews/quora/linkedin/medium/devto reply had its author
     // SILENTLY DROPPED even when the extension had captured and sent one — the
     // caller supplied ground truth and the write threw it away.
-    if (engageAuthor || (platform === 'x' && url)) {
+    if (engageAuthor || opts.markPublished || (platform === 'x' && url)) {
       const post = await this._post.model.post.findUnique({
         where: { id: reply.postId },
         select: { integrationId: true, settings: true },
       });
 
-      // X ONLY: an OAuth account can be matched back from the reply URL's
-      // handle, so a reply recorded without one can still gain the integration
-      // its metrics sync needs. No other engage platform has an integration to
-      // resolve — this genuinely is X-specific, unlike the author recording.
-      if (platform === 'x' && url && !post?.integrationId) {
-        integrationId =
-          (await this.resolveXReplyIntegrationId(organizationId, url))
-            ?.integrationId ?? undefined;
+      if (!post?.integrationId) {
+        // X ONLY: an OAuth account can be matched back from the reply URL's
+        // own handle, which is the strongest evidence available on that
+        // platform — it names the account the permalink belongs to.
+        if (platform === 'x' && url) {
+          integrationId =
+            (await this.resolveXReplyIntegrationId(organizationId, url))
+              ?.integrationId ?? undefined;
+        }
+
+        // Every platform: the extension publishes as the browser's own session,
+        // so the reply carries no account of its own and these rows were left
+        // unattributed forever. The reported author (captured from the
+        // platform's response) names it outright; failing that, the session
+        // report's `activeSessionClient: EXTENSION` row for this platform says
+        // which account the browser is signed into.
+        if (!integrationId) {
+          integrationId = await this._resolveExtensionReplyIntegrationId(
+            organizationId,
+            platform,
+            engageAuthor,
+            // Only the extension publish-on-success path may fall back to the
+            // session reading: it is the one caller we know published from THIS
+            // browser just now. The human "paste your reply link" path may well
+            // have replied from another device, where the reading describes a
+            // browser that had nothing to do with it.
+            !!opts.markPublished
+          );
+        }
       }
 
       // Record the actual poster whenever one is supplied, on ANY platform. The
@@ -6299,6 +6324,64 @@ export class EngageRepository {
         ...(opts.markPublished ? { state: 'PUBLISHED' as const } : {}),
       },
     });
+  }
+
+  /**
+   * Which of the org's accounts on `platform` posted an extension-driven reply.
+   *
+   * The Post-side mirror of this lives in PostsService, but the rule is one
+   * pure function shared by both (resolveExtensionPublisher): the reported
+   * author outranks the session reading, and the session reading only counts
+   * while it is fresh. `allowActiveSession` is the caller's statement that the
+   * send came from THIS browser now — without it only an author match can
+   * attribute the reply.
+   *
+   * Never throws: this runs on a reply that is already live on the platform,
+   * and a failed lookup must not fail the commit that records it.
+   */
+  private async _resolveExtensionReplyIntegrationId(
+    organizationId: string,
+    platform: string,
+    engageAuthor: EngageAuthorProfile | undefined,
+    allowActiveSession: boolean
+  ): Promise<string | undefined> {
+    const reported = engageAuthor?.handle || engageAuthor?.id
+      ? { id: engageAuthor.id, handle: engageAuthor.handle }
+      : null;
+    if (!reported && !allowActiveSession) return undefined;
+
+    try {
+      const rows = await this._integration.model.integration.findMany({
+        where: {
+          organizationId,
+          providerIdentifier: platform,
+          deletedAt: null,
+        },
+        select: {
+          id: true,
+          internalId: true,
+          profile: true,
+          activeSessionClient: true,
+          extensionSessionCheckedAt: true,
+        },
+      });
+
+      const pick = resolveExtensionPublisher(rows, reported);
+      if (!pick) return undefined;
+      // A session-based pick is only allowed for the extension publish path;
+      // an author match stands either way.
+      if (pick.matchedBy === 'active-session' && !allowActiveSession) {
+        return undefined;
+      }
+      return pick.integrationId;
+    } catch (err) {
+      this._logger.warn(
+        `_resolveExtensionReplyIntegrationId: org=${organizationId} platform=${platform} failed: ${
+          (err as Error)?.message || err
+        }`
+      );
+      return undefined;
+    }
   }
 
   // Lightweight read for the extension publish-on-success path: enough to decide

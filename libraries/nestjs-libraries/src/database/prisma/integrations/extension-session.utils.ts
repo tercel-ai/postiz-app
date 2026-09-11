@@ -232,3 +232,97 @@ export function mergeSessionHandleIntoMetadata(
 
   return Object.keys(base).length > 0 ? base : null;
 }
+
+/**
+ * How long an `activeSessionClient`/`extensionSessionCheckedAt` reading stays
+ * trustworthy before a consumer should stop acting on it as current. 2.5x the
+ * extension's hourly session-maintenance interval — enough slack for one missed
+ * run (device asleep, MV3 worker recycled) without papering over a browser
+ * that's genuinely stopped reporting.
+ */
+export const EXTENSION_SESSION_STALE_AFTER_MS = 150 * 60 * 1000;
+
+/**
+ * True once a reading is old enough that it shouldn't be acted on as current.
+ * A row that was NEVER reported on is not stale — it has no reading at all, a
+ * different thing, and callers that display staleness must not mark it.
+ */
+export function isExtensionSessionStale(
+  checkedAt: Date | null | undefined,
+  now: number = Date.now()
+): boolean {
+  return !!checkedAt && now - checkedAt.getTime() > EXTENSION_SESSION_STALE_AFTER_MS;
+}
+
+/** An integration considered as the account an extension send went out as. */
+export interface ExtensionPublisherCandidate extends ExtensionSessionCandidate {
+  /** Which client the org's browser was last confirmed signed in through. */
+  activeSessionClient: string;
+  /** When that reading was taken; null on a row no report has ever covered. */
+  extensionSessionCheckedAt: Date | null;
+}
+
+/** Which integration an extension-published post/reply should be attributed to. */
+export interface ExtensionPublisherResolution {
+  integrationId: string;
+  /**
+   * `reported-account` — the caller knew the handle/id that actually posted
+   * (the extension captured it from the platform's own response), so this is
+   * observed fact. `active-session` — nobody reported an author, so the account
+   * the browser is currently signed into on that platform answers for it.
+   */
+  matchedBy: 'reported-account' | 'active-session';
+}
+
+/**
+ * Resolve WHICH of an org's accounts on one platform an extension send went out
+ * as — the attribution an extension-published Post/reply otherwise has no way
+ * to record, because the browser session (not an OAuth token) is what published
+ * it.
+ *
+ * Two sources, strongest first:
+ *   1. `reported` — the account the caller observed posting (engage's reply
+ *      author, captured from the platform's own response). Matched with the
+ *      same id-then-handle rules the session report uses, since it is the same
+ *      kind of evidence about the same thing.
+ *   2. `activeSessionClient: EXTENSION` — the row the hourly session report
+ *      last confirmed this browser is signed into for the platform. Only while
+ *      that reading is FRESH: a stale one predates whatever the browser is
+ *      signed into now, and attributing a live post to the wrong account is
+ *      worse than leaving it unattributed.
+ *
+ * Returns null when neither source names a row. The caller then leaves
+ * `integrationId` null, exactly as before this existed — an unattributed post
+ * is the status quo, never a guess.
+ */
+export function resolveExtensionPublisher(
+  candidates: ReadonlyArray<ExtensionPublisherCandidate>,
+  reported?: ExtensionSessionEntry | null,
+  now: number = Date.now()
+): ExtensionPublisherResolution | null {
+  if (reported) {
+    const matched = matchExtensionSessionCandidate(reported, candidates);
+    if (matched) return { integrationId: matched, matchedBy: 'reported-account' };
+  }
+
+  // recordExtensionSession settles every sibling on the platform back to API in
+  // the same pass, so at most one row should be EXTENSION here. Sorting by the
+  // reading's own timestamp keeps the pick deterministic (newest wins) if a
+  // half-applied report ever left two.
+  const live = candidates
+    .filter(
+      (c) =>
+        c.activeSessionClient === 'EXTENSION' &&
+        !!c.extensionSessionCheckedAt &&
+        !isExtensionSessionStale(c.extensionSessionCheckedAt, now)
+    )
+    .sort(
+      (a, b) =>
+        (b.extensionSessionCheckedAt?.getTime() ?? 0) -
+        (a.extensionSessionCheckedAt?.getTime() ?? 0)
+    );
+
+  return live[0]
+    ? { integrationId: live[0].id, matchedBy: 'active-session' }
+    : null;
+}
