@@ -471,6 +471,13 @@ export class PostsRepository {
           trafficScore: true,
           lastMetricsFetchAt: true,
           analytics: true,
+          // Selected, deliberately NOT filtered on. A post the platform removed
+          // stays in the list — the user was notified once and this is the only
+          // place they can see it afterwards — so the row needs the fact to
+          // render it. Same treatment engage gives replies in
+          // getSentReplyContext.
+          removedAt: true,
+          removedReason: true,
           tags: {
             select: {
               tag: true,
@@ -733,6 +740,10 @@ export class PostsRepository {
         // referencePostWhere filters on).
         source: true,
         referenceOpportunityId: true,
+        // Selected, not filtered — see the same pair in getPostsList. The
+        // calendar must keep rendering a removed post, with the fact attached.
+        removedAt: true,
+        removedReason: true,
         tags: {
           select: {
             tag: true,
@@ -2485,6 +2496,18 @@ export class PostsRepository {
         organizationId,
         deletedAt: null,
         state: State.PUBLISHED,
+        // The platform took it down, so there is nothing left to read. Filtered
+        // here and NOT in the display queries (getPosts / getPostsList), which
+        // must keep showing the post — see the Post.removedAt note in the
+        // schema: `state` stays PUBLISHED on purpose, and removal is a separate
+        // axis meaning "it was sent, and this is what happened after".
+        //
+        // Without this clause a removed post is due FOREVER: ingest is what
+        // stamps lastMetricsFetchAt, an unreadable post never reaches ingest,
+        // so `lastMetricsFetchAt IS NULL` keeps matching for the whole
+        // monitoring window. Mirrors findPendingEngageMetrics /
+        // findEngageRepliesByPostIds, which have always filtered this way.
+        removedAt: null,
         publishDate: { gte: windowStart },
         OR: [
           { lastMetricsFetchAt: null },
