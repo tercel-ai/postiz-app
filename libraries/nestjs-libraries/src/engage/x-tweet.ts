@@ -1,5 +1,6 @@
 import { parseXHandle } from '@gitroom/nestjs-libraries/engage/resolve-x-reply-integration';
 import { EngageAuthorProfile } from '@gitroom/nestjs-libraries/engage/engage-author';
+import { xApiEnabled } from '@gitroom/nestjs-libraries/engage/x-api-gate';
 import {
   recordApiUsage,
   X_USAGE,
@@ -59,6 +60,11 @@ export async function fetchXAuthorProfile(
 ): Promise<EngageAuthorProfile | null> {
   const handle = parseXHandle(url);
   if (!handle) return null;
+
+  // Same shape as the missing-bearer case below: return the handle we parsed and
+  // make no network call. The caller stores engageAuthor either way, so a gated
+  // lookup costs an avatar and a display name, never a failure.
+  if (!xApiEnabled()) return { handle };
 
   const bearer = bearerToken || process.env.X_BEARER_TOKEN;
   if (!bearer) return { handle };

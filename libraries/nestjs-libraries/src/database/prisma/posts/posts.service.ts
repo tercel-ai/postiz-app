@@ -77,6 +77,10 @@ import {
   parseXHandle,
 } from '@gitroom/nestjs-libraries/engage/resolve-x-reply-integration';
 import { fetchXAuthorProfile } from '@gitroom/nestjs-libraries/engage/x-tweet';
+import {
+  xApiDisabledReason,
+  xApiEnabled,
+} from '@gitroom/nestjs-libraries/engage/x-api-gate';
 import { EngageAuthorProfile } from '@gitroom/nestjs-libraries/engage/engage-author';
 import {
   AiseeNotificationClient,
@@ -984,6 +988,14 @@ export class PostsService {
     postId: string,
     date: number
   ): Promise<AnalyticsData[]> {
+    // Server-side X reads are gated; the extension covers this one through
+    // metrics.reply.ts. `[]` is the shape this method already returns when it
+    // has nothing, and syncXMetrics reads that as 'empty' rather than an
+    // error — so a gated read is a missing sample, never a failed sync.
+    if (!xApiEnabled()) {
+      this.logger.log(xApiDisabledReason(`engage X analytics for post ${postId}`));
+      return [];
+    }
     const post = await this._postRepository.getPostById(postId, orgId);
     if (!post || !post.releaseId) {
       return [];

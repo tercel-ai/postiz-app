@@ -174,52 +174,107 @@ describe('EngageScanActivity cursor claim with bucketed keyword key (shared leas
 
 describe('xScanEnabled (X kill switch)', () => {
   const saved = {
+    api: process.env.X_API_ENABLED,
     enabled: process.env.ENGAGE_X_SCAN_ENABLED,
     platforms: process.env.ENGAGE_SUPPORTED_PLATFORMS,
   };
   afterEach(() => {
+    process.env.X_API_ENABLED = saved.api;
     process.env.ENGAGE_X_SCAN_ENABLED = saved.enabled;
     process.env.ENGAGE_SUPPORTED_PLATFORMS = saved.platforms;
+    if (saved.api === undefined) delete process.env.X_API_ENABLED;
     if (saved.enabled === undefined) delete process.env.ENGAGE_X_SCAN_ENABLED;
     if (saved.platforms === undefined) delete process.env.ENGAGE_SUPPORTED_PLATFORMS;
   });
 
-  it('defaults to enabled when nothing is set', () => {
-    delete process.env.ENGAGE_X_SCAN_ENABLED;
-    delete process.env.ENGAGE_SUPPORTED_PLATFORMS;
-    expect(xScanEnabled()).toBe(true);
+  // X_API_ENABLED is the master gate and it defaults OFF, so every case that
+  // expects scanning to be ON has to turn it on first. That asymmetry is the
+  // point: the two switches below default ON and only turn X off when set, so
+  // a host that never heard of any of them would otherwise call the X API.
+  function allowServerXApi() {
+    process.env.X_API_ENABLED = 'true';
+  }
+
+  describe('the X_API_ENABLED master gate', () => {
+    it('is OFF when nothing is set at all', () => {
+      delete process.env.X_API_ENABLED;
+      delete process.env.ENGAGE_X_SCAN_ENABLED;
+      delete process.env.ENGAGE_SUPPORTED_PLATFORMS;
+      expect(xScanEnabled()).toBe(false);
+    });
+
+    it('stays OFF even when every other switch says yes', () => {
+      delete process.env.X_API_ENABLED;
+      process.env.ENGAGE_X_SCAN_ENABLED = 'true';
+      process.env.ENGAGE_SUPPORTED_PLATFORMS = 'x,reddit';
+      expect(xScanEnabled(['x', 'reddit'])).toBe(false);
+    });
+
+    it.each([['false'], [''], ['  '], ['TRUEISH'], ['0'], ['no']])(
+      'treats %o as OFF — anything but an explicit yes is off',
+      (value) => {
+        process.env.X_API_ENABLED = value;
+        delete process.env.ENGAGE_X_SCAN_ENABLED;
+        delete process.env.ENGAGE_SUPPORTED_PLATFORMS;
+        expect(xScanEnabled()).toBe(false);
+      }
+    );
+
+    it.each([['true'], ['TRUE'], [' True '], ['1'], ['yes']])(
+      'accepts %o as an explicit opt-in',
+      (value) => {
+        process.env.X_API_ENABLED = value;
+        delete process.env.ENGAGE_X_SCAN_ENABLED;
+        delete process.env.ENGAGE_SUPPORTED_PLATFORMS;
+        expect(xScanEnabled()).toBe(true);
+      }
+    );
   });
 
-  it('is disabled by the explicit ENGAGE_X_SCAN_ENABLED=false toggle', () => {
-    delete process.env.ENGAGE_SUPPORTED_PLATFORMS;
-    process.env.ENGAGE_X_SCAN_ENABLED = 'false';
-    expect(xScanEnabled()).toBe(false);
-  });
+  describe('the pre-existing switches, once the master gate allows X', () => {
+    it('is enabled when nothing narrower is set', () => {
+      allowServerXApi();
+      delete process.env.ENGAGE_X_SCAN_ENABLED;
+      delete process.env.ENGAGE_SUPPORTED_PLATFORMS;
+      expect(xScanEnabled()).toBe(true);
+    });
 
-  it('is disabled when ENGAGE_SUPPORTED_PLATFORMS excludes x (shared with extension)', () => {
-    delete process.env.ENGAGE_X_SCAN_ENABLED;
-    process.env.ENGAGE_SUPPORTED_PLATFORMS = 'reddit';
-    expect(xScanEnabled()).toBe(false);
-  });
+    it('is disabled by the explicit ENGAGE_X_SCAN_ENABLED=false toggle', () => {
+      allowServerXApi();
+      delete process.env.ENGAGE_SUPPORTED_PLATFORMS;
+      process.env.ENGAGE_X_SCAN_ENABLED = 'false';
+      expect(xScanEnabled()).toBe(false);
+    });
 
-  it('stays enabled when the allowlist includes x', () => {
-    delete process.env.ENGAGE_X_SCAN_ENABLED;
-    process.env.ENGAGE_SUPPORTED_PLATFORMS = 'x,reddit';
-    expect(xScanEnabled()).toBe(true);
-  });
+    it('is disabled when ENGAGE_SUPPORTED_PLATFORMS excludes x (shared with extension)', () => {
+      allowServerXApi();
+      delete process.env.ENGAGE_X_SCAN_ENABLED;
+      process.env.ENGAGE_SUPPORTED_PLATFORMS = 'reddit';
+      expect(xScanEnabled()).toBe(false);
+    });
 
-  it('honours a resolved allowlist argument over the env var', () => {
-    // Simulates settings.operation_plan.allowed_platforms winning: env still lists
-    // x, but the resolved allowlist (passed in) does not → X disabled.
-    delete process.env.ENGAGE_X_SCAN_ENABLED;
-    process.env.ENGAGE_SUPPORTED_PLATFORMS = 'x,reddit';
-    expect(xScanEnabled(['reddit', 'linkedin'])).toBe(false);
-    expect(xScanEnabled(['x', 'reddit'])).toBe(true);
-  });
+    it('stays enabled when the allowlist includes x', () => {
+      allowServerXApi();
+      delete process.env.ENGAGE_X_SCAN_ENABLED;
+      process.env.ENGAGE_SUPPORTED_PLATFORMS = 'x,reddit';
+      expect(xScanEnabled()).toBe(true);
+    });
 
-  it('explicit ENGAGE_X_SCAN_ENABLED=false still wins over a resolved allowlist with x', () => {
-    process.env.ENGAGE_X_SCAN_ENABLED = 'false';
-    expect(xScanEnabled(['x', 'reddit'])).toBe(false);
+    it('honours a resolved allowlist argument over the env var', () => {
+      // Simulates settings.operation_plan.allowed_platforms winning: env still lists
+      // x, but the resolved allowlist (passed in) does not → X disabled.
+      allowServerXApi();
+      delete process.env.ENGAGE_X_SCAN_ENABLED;
+      process.env.ENGAGE_SUPPORTED_PLATFORMS = 'x,reddit';
+      expect(xScanEnabled(['reddit', 'linkedin'])).toBe(false);
+      expect(xScanEnabled(['x', 'reddit'])).toBe(true);
+    });
+
+    it('explicit ENGAGE_X_SCAN_ENABLED=false still wins over a resolved allowlist with x', () => {
+      allowServerXApi();
+      process.env.ENGAGE_X_SCAN_ENABLED = 'false';
+      expect(xScanEnabled(['x', 'reddit'])).toBe(false);
+    });
   });
 });
 

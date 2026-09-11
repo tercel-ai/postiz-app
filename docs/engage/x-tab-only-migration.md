@@ -88,6 +88,37 @@ cutting all five at once.
 
 ---
 
+## 3b. `X_API_ENABLED` — the master gate (**DONE**)
+
+Every X switch that existed before this one defaults **ON** and turns X off only
+when explicitly set (`ENGAGE_X_SCAN_ENABLED`, or an allowlist that omits `x`).
+That is the wrong way round for this API: a host that never heard of any of them
+calls X from a datacentre IP, and the account — not the server — carries the
+consequence.
+
+`X_API_ENABLED` (`engage/x-api-gate.ts`) inverts it. **Default OFF**; only
+`true` / `1` / `yes` opens it. Unset, empty, misspelt (`ture`) → off.
+
+| Gated read | Behaviour when off |
+|---|---|
+| #0 scan adapter (`xScanEnabled`) | X units skipped entirely; Reddit unaffected |
+| #1 own reply metrics (`checkEngageXAnalyticsWithFallback`) | returns `[]` — `syncXMetrics` reads that as `'empty'`, not an error |
+| #4 reply author profile (`fetchXAuthorProfile`) | returns `{ handle }` — the same degraded shape the no-bearer path already returned |
+
+Each gated path reuses an "I have nothing" branch the caller already handled, so
+turning the switch off changes what is collected, never whether a call succeeds.
+
+**Not gated:** `integrations/social/x.provider.ts`. That is publishing to the
+org's own account with the org's own OAuth token — the sanctioned use of the
+API, unrelated to the scraping risk this switch exists for. Gating it would only
+break posting.
+
+The decision was to **keep the code behind the switch rather than delete it**:
+the switch already removes the whole risk, and a reversible gate is worth more
+than a deletion if the server path is ever needed again.
+
+---
+
 ## 4. Retire #0 — the scan adapter
 
 The extension's `scanX` is feature-complete, so this is a switch flip, not
@@ -106,11 +137,16 @@ Switches, in the order they should be used:
 [`startup-checklist.md`](./startup-checklist.md) it disables X on *both* paths,
 which is the opposite of the goal.
 
-- [ ] Ship the extension release; confirm the allowlist includes `x`.
-- [ ] Observe extension X collection volume against the current server baseline.
-- [ ] `engage_touch_x_switch=false` (revert instantly if coverage disappoints).
-- [ ] After a stable period, `ENGAGE_X_SCAN_ENABLED=false` to make it permanent.
-- [ ] Only then consider deleting `x-scan-adapter.ts`.
+- [x] Ship the extension release; confirm the allowlist includes `x`.
+- [x] Observe extension X collection volume against the current server baseline.
+- [x] `engage_touch_x_switch=false` (revert instantly if coverage disappoints).
+- [x] Server-side X API reads are off. Made permanent by `X_API_ENABLED`
+      defaulting OFF (§3b) rather than by `ENGAGE_X_SCAN_ENABLED=false` — the
+      new gate covers #1 and #4 as well, and fails closed instead of open.
+- [ ] ~~Only then consider deleting `x-scan-adapter.ts`.~~ **Decided against.**
+      The code stays behind `X_API_ENABLED` so the server path remains
+      available if it is ever needed again. Deleting it would buy no further
+      risk reduction — the gate already denies every call.
 
 ---
 
@@ -280,6 +316,8 @@ relying only on the page bridge.
 extension release (gate removal)
         ↓
 #0 scan   → switch flip, no code           ← highest value, lowest cost
+        ↓
+X_API_ENABLED (§3b) → one master gate, default OFF, covers #0 #1 #4
         ↓
 #2 #3     → DONE (was dead code; X_BEARER_TOKEN was never set)
         ↓

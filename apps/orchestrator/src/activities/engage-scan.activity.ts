@@ -38,6 +38,7 @@ import {
   runWithBizUsage,
 } from '@gitroom/nestjs-libraries/database/prisma/api-usage/api-usage.service';
 import { XScanAdapter } from '@gitroom/nestjs-libraries/engage/scan/x-scan-adapter';
+import { xApiEnabled } from '@gitroom/nestjs-libraries/engage/x-api-gate';
 import { RedditScanAdapter } from '@gitroom/nestjs-libraries/engage/scan/reddit-scan-adapter';
 import { TokenPool } from '@gitroom/nestjs-libraries/engage/scan/token-pool';
 import {
@@ -122,6 +123,12 @@ function trackedBackoffCadenceMs(
 // directly, preserving the original env-only behaviour. An empty/absent list =
 // "not scoped" ⇒ X stays enabled.
 export function xScanEnabled(allowedPlatforms?: string[] | null): boolean {
+  // Master gate, checked FIRST and defaulting to OFF: the server reads X only
+  // when X_API_ENABLED explicitly says so. The two switches below default ON
+  // (they turn X off only when set), so without this a host that never heard of
+  // any of them would call the X API — see x-api-gate.ts for why that default
+  // is the wrong way round for this particular API.
+  if (!xApiEnabled()) return false;
   if ((process.env.ENGAGE_X_SCAN_ENABLED ?? '').trim().toLowerCase() === 'false') {
     return false;
   }

@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { XScanAdapter } from '../scan/x-scan-adapter';
 import type { ScanResult } from '../scan/platform-scan-adapter';
+import { xApiEnabled } from '../x-api-gate';
 
 // ─── REAL integration test (hits the live X API) ──────────────────────────────
 //
@@ -39,7 +40,13 @@ const CASES: { account: string; keywords: string[] }[] = [
 
 const HAS_BEARER = !!process.env.X_BEARER_TOKEN;
 const HAS_CONSUMER = !!(process.env.X_API_KEY && process.env.X_API_SECRET);
-const CAN_AUTH = HAS_BEARER || HAS_CONSUMER;
+// X_API_ENABLED is part of the run condition, not just the credentials: this
+// file proves that the SERVER's X API calls work, and the server does not make
+// them unless that switch is on (engage/x-api-gate.ts). With the switch off the
+// whole file is inert — including the beforeAll token exchange, which otherwise
+// reaches api.twitter.com on every `vitest run` and fails the suite on any host
+// that has credentials in .env but no route to X.
+const CAN_AUTH = (HAS_BEARER || HAS_CONSUMER) && xApiEnabled();
 
 // Exchange consumer key/secret for an app-only bearer token (OAuth2
 // client_credentials). Basic auth = base64(urlencode(key):urlencode(secret)).
