@@ -29,6 +29,7 @@ import { weightedLength, textSlicer } from '@gitroom/helpers/utils/count.length'
 import { threadCapablePlatforms } from '@gitroom/nestjs-libraries/integrations/thread-capability';
 import {
   buildCharacterLimitLines,
+  buildMarkupGuidanceLines,
   buildPlatformNativeFormatLine,
   hardLimitFor,
   targetFor,
@@ -797,7 +798,11 @@ export class OperationPlanService implements OnApplicationBootstrap {
         '- CROSS-PLATFORM SHARING: a single `contentItem` SHOULD carry multiple platforms when the theme applies to all of them. For example, a data-story theme can have `platforms: [{platform:"x", ...}, {platform:"linkedin", ...}, {platform:"medium", ...}]` — one item, three platforms, each with content adapted to that platform\'s audience and format. This is MORE efficient than creating separate items per platform (fewer contentItems = lower token cost, better coherence). Prefer consolidating related platforms under one contentItem rather than splitting them. Every contentItem MUST still have at least one platform entry; a theme that only fits one platform stays single-platform. The platformPlaybook cadence drives how many contentItems each platform appears in — match those frequencies, not just the total post count.',
         '- TITLE vs BODY: on reddit, hackernews, medium and devto the themeTitle is submitted SEPARATELY as the post/story title, so `content` is the BODY ONLY. NEVER open `content` with the title (or a heading/bold restatement of it) — the platform would display the title twice. Start directly with the body text.',
         '- Respect the character budgets declared at the top (and repeated below). This is a hard gate, not a style note.',
-        '- Write PLAIN TEXT for X: no Markdown. `**bold**`, headings and backticks are NOT rendered — they appear literally as asterisks. Plain prose, line breaks and simple bullets ("•") only.',
+        // One line per markup ANSWER, covering every platform in this plan —
+        // not the single hand-written X line this replaces, which named one
+        // platform and left the model to guess about the rest. It guessed
+        // wrong on dev.to and Medium, whose native format is structured.
+        ...buildMarkupGuidanceLines(platforms).map((line) => `- ${line}`),
         '- Hashtags: a hashtag ENDS at the first space, so a multi-word tag silently breaks — "#MCP protocol" renders as the tag "#MCP" followed by the loose word "protocol". Never hashtag a multi-word keyword: either write it as plain prose (preferred — keywords belong in the sentence, not bolted on as tags) or close it up into one word ("#MCPprotocol"). Use at most 1-2 hashtags, and only single-word ones.',
         '- Prefer content AI systems can cite: concrete data points and answer-style framing. For owned/blog channels, reference the project\'s own canonical URL. "Build-in-public" (sharing real, specific progress/metrics) tends to be the most citable. Keep copy concise and publish-ready.',
         '- REDDIT TARGETING: for every `reddit` platform entry, set `subreddit` to the single most relevant EXISTING, ACTIVE, PUBLIC subreddit for this content (bare name, no "r/" prefix, e.g. "webdev"). Pick a real community you are confident exists and accepts text (self) posts on this topic — the backend verifies it against Reddit and DROPS the post if the subreddit is missing, private, link-only, or inactive, so a wrong guess wastes the post. For EVERY non-reddit platform entry, set `subreddit` to null.',
@@ -1548,7 +1553,7 @@ export class OperationPlanService implements OnApplicationBootstrap {
           '- REDDIT TARGETING: if `reddit` is in the missing list, set `subreddit` to the single most relevant EXISTING, ACTIVE, PUBLIC subreddit (bare name, no "r/"). Set `flairLabel`/`titleTag` when you are confident the community requires them, else null. For every non-reddit entry set all three to null.',
           '- REDDIT SELF-PROMOTION / SPAM GUARDRAILS: if `reddit` is in the missing list, NEVER include the project\'s own URL or "I built X" framing in its `content` — write it as a genuine discussion/question, not an announcement, with a clear title and substantive body (no self-promotion, no spam links, no low-effort/empty content, no leaked material verbatim).',
           '- DEV.TO TAGGING: if `devto` is in the missing list, set `tags` to 1-4 single-word lowercase topic tags. For every non-devto entry set `tags` to null.',
-          '- Write PLAIN TEXT for X: no Markdown.',
+          ...buildMarkupGuidanceLines(missingPlatforms).map((l) => `- ${l}`),
           '- Follow the per-platform rhythm in `platformPlaybook` for tone/substance.',
         ].join('\n'),
         JSON.stringify({

@@ -526,9 +526,96 @@ their own modules so `engage-draft.service.ts` and this service import the
   verbatim for a standalone original post that never addresses anyone reads
   as a non-sequitur, and risks nudging the model toward reply-shaped output.
   `REFERENCE_POST_STRATEGY_PROMPTS` in `engage-reference-post.service.ts` is
-  its own set, same 7 keys (`VALID_STRATEGIES`, exported from `engage.dto.ts`
-  so both services and the DTO share one vocabulary), reworded for "write an
-  original post inspired by the topic" instead of "reply to this post."
+  its own set, reworded for "write an original post inspired by the topic"
+  instead of "reply to this post."
+
+  **Vocabulary (13 keys, a superset of the reply path's 7).** The reply
+  strategies (`VALID_STRATEGIES`) are each built around a rhetorical move
+  aimed at someone — answer, cite, empathise, oppose, ask, quip, agree. Six
+  more (`REFERENCE_POST_ONLY_STRATEGIES`: OPERATOR, EXPLAINER, CT_NATIVE,
+  NEWS, THESIS, STORYTELLER) are built around the POSITION the writer speaks
+  from, and only make sense for a post whose reader never sees the reference.
+  `GenerateReferencePostDto` validates against the union
+  (`VALID_REFERENCE_POST_STRATEGIES`); the reply DTOs keep the 7. Widening the
+  shared list instead would have made a reply asking for NEWS come back as an
+  EXPERT_ANSWER reply with no error anywhere — `engage-draft.service.ts`'s
+  `STRATEGY_PROMPTS` is a loose `Record<string, string>` that falls back
+  silently, so an unknown key there is a wrong answer rather than a 400.
+
+  **Four rule blocks ride on every call, whatever the strategy**, and they are
+  hoisted rather than repeated per strategy so a NEW strategy inherits them:
+
+  - `DE_AI_STYLE_BLOCK` — the tells that read as model-written (reject-then-
+    supply framing, rhetorical triads, colon reveals, self-summary, the usual
+    vocabulary), identical whichever strategy ran. PROSE only: the markup half
+    it originally carried ("no bold, no bullet points, no headers") is a
+    property of the TARGET platform, not of good writing, and lives in
+    `buildMarkupRule` (see below).
+  - `SOURCE_INTEGRITY_BLOCK` — exists BECAUSE of the block above: stripping a
+    model's hedging removes what it used to stay safe on a subject it
+    half-knows, so the post arrives with an expert's register and no expert's
+    grounding, under the user's own name. Never assert what the reference did
+    not state; a company describing its own metric is making a claim, not
+    establishing a fact.
+  - `STRATEGY_PRECONDITION_BLOCK` — a strategy is a method and a method has
+    inputs, but the caller picks one from a menu BEFORE reading the reference,
+    so a mismatch is routine. Each entry says what to do instead (narrow the
+    post, keep the voice) rather than inventing the missing input — a
+    DATA_BACKED prompt on a reference with no figure used to produce a
+    confident invented one.
+  - `CONSEQUENTIAL_CLAIM_BLOCK` — health, medicine, diet, investment/trading,
+    legal exposure, physical safety. The question is not whether the claim is
+    true but whether this author is the one making it; EXPLAINER supplying a
+    plausible mechanism for an unestablished claim is the worst case, because
+    it argues for it rather than passing it along.
+
+  **Formatting is per-target, not global** (`buildMarkupRule`,
+  `platform-content-profile.ts`). Each profiled platform declares a required
+  `markup: 'none' | 'markdown'` axis, and the prompt states the target's rule on
+  EVERY generation — a platform renders Markdown or it does not, whether or not
+  anything was adapted across platforms. Plain-text targets (x, linkedin,
+  quora, hackernews) are told that `**bold**` and `# heading` publish as the
+  literal characters; Markdown targets (reddit, devto, medium) may use real
+  structure but not decorate with it. Without this, `targetPlatform: 'devto'`
+  asked for "a longer dev.to article with code examples"
+  (`CROSS_PLATFORM_ADAPT_INSTRUCTION`) and banned headings and lists in the
+  same prompt.
+
+  The axis is NOT derived from the provider's `editor` field, which looks like
+  the same question and is not: `editor` picks the composer the Postiz UI
+  shows, and `reddit.provider.ts` sets `'normal'` while a Reddit self-post body
+  is markdown at the API.
+
+  **Article platforms get a length FLOOR, not just a ceiling** (`form: 'short'
+  | 'long'` + `minTargetFor`, same module). "up to 2550 characters" is
+  satisfied by 200, and on dev.to or Medium that publishes as a stub under a
+  title promising an article — the ceiling was the only number in the prompt,
+  so the model had no reason to write more. Those two are `form: 'long'` and
+  are prompted with a range (`between 1275 and 2550 characters`); every
+  short-form surface keeps `up to N`, because a two-line X post, a
+  one-paragraph Quora answer and a short LinkedIn post are all correct there
+  and a floor would buy length with padding.
+
+  The floor is a RATIO of the ceiling in force (`LONG_FORM_MIN_RATIO`, 0.5),
+  not an absolute: a caller passing `outputLength: 400` must not be told to
+  write "between 1275 and 340 characters". And it is prompt-side ONLY — a
+  draft that comes back under it is delivered with a warning, never rejected.
+  Every other gate in the generate loop may throw a draft away; this one may
+  not, because a short article is a usable, already-billed post while a
+  rejection returns nothing for the same money.
+
+  The operation plan states both halves the same way, from the same module:
+  `buildCharacterLimitLines` emits the range for its long-form platforms, and
+  `buildMarkupGuidanceLines` replaces its hand-written "Write PLAIN TEXT for X:
+  no Markdown" bullet with one line per markup answer covering every platform
+  in the plan.
+
+  **Thin-reference guard.** A reference whose text is a handful of characters
+  plus an image or link carries no topic of its own — the media is the post
+  and this service never receives it. Under `THIN_REFERENCE_WEIGHTED_CHARS`
+  (30, CJK weighing 2) the prompt gains a block telling the model to write the
+  smallest honest post the reference supports instead of inventing substance
+  for it. Empty on a normal reference, so it costs nothing on the common path.
 
 **Anti-plagiarism is a hard requirement, not prompt wording alone.** A system
 prompt telling the model not to copy is necessary but not sufficient —

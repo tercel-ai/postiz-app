@@ -3,8 +3,12 @@ import {
   DEFAULT_CONTENT_LIMIT,
   DEFAULT_TITLE_LENGTH_TARGET,
   MAX_CONTENT_TARGET,
+  PROFILED_PLATFORMS,
   TITLE_SEPARATED_PLATFORMS,
   buildCharacterLimitLines,
+  buildMarkupGuidanceLines,
+  buildMarkupRule,
+  minTargetFor,
   buildPlatformNativeFormatLine,
   buildPlatformStyleGuidance,
   hardLimitFor,
@@ -68,6 +72,15 @@ describe('buildCharacterLimitLines', () => {
     ]);
   });
 
+  // A ceiling alone is satisfied by 200 characters. On an article platform
+  // that publishes as a stub under a title promising an article, so those
+  // platforms get both ends of the range.
+  it('states a range on an article platform', () => {
+    expect(buildCharacterLimitLines(['devto'])).toEqual([
+      '    • devto: 1500-3000 characters — this is an ARTICLE, not a short post. Under 1500 reads as a stub; aim for the upper half of the range.',
+    ]);
+  });
+
   // The operation plan's MAIN generation prompt states the margin; its narrow
   // coverage-backfill prompt does not.
   it('adds the margin sentence only when asked for', () => {
@@ -114,8 +127,10 @@ describe('buildPlatformStyleGuidance', () => {
     for (const platform of ['reddit', 'hackernews', 'medium', 'devto']) {
       expect(buildPlatformStyleGuidance(platform)).toContain('BODY ONLY');
     }
-    // X renders no Markdown at all.
-    expect(buildPlatformStyleGuidance('x')).toContain('PLAIN TEXT');
+    // X's "renders no Markdown" rule is NOT here — it moved to buildMarkupRule,
+    // which callers state on every generation rather than only a
+    // cross-platform one. See the tests for it below.
+    expect(buildPlatformStyleGuidance('x')).not.toContain('renders NO markup');
     // ...and platforms without one say nothing extra.
     expect(buildPlatformStyleGuidance('quora')).toBe(
       "Quora's native format: direct answer format."
@@ -124,6 +139,111 @@ describe('buildPlatformStyleGuidance', () => {
 
   it('is empty for a platform with no profile, so a caller can drop the block', () => {
     expect(buildPlatformStyleGuidance('not-a-platform')).toBe('');
+  });
+});
+
+describe('minTargetFor', () => {
+  it('floors the article platforms at half their budget', () => {
+    for (const platform of ['devto', 'medium']) {
+      expect(minTargetFor(platform)).toBe(1500);
+    }
+  });
+
+  it('leaves every short-form platform unfloored', () => {
+    // Not an oversight: a two-line X post, a one-paragraph Quora answer and a
+    // short LinkedIn post are all correct on their platform. A floor there
+    // would buy length with padding.
+    for (const platform of ['x', 'reddit', 'linkedin', 'quora', 'hackernews']) {
+      expect(minTargetFor(platform), platform).toBe(0);
+    }
+    expect(minTargetFor('not-a-platform')).toBe(0);
+  });
+
+  it('follows the caller down when the ceiling narrows', () => {
+    // The whole reason it is a ratio: an absolute floor would eventually ask
+    // for a post "between 1500 and 340 characters".
+    expect(minTargetFor('devto', 340)).toBe(170);
+    expect(minTargetFor('devto', 340)).toBeLessThan(340);
+  });
+});
+
+describe('buildMarkupGuidanceLines', () => {
+  // Replaces a hand-written "Write PLAIN TEXT for X: no Markdown" line in the
+  // operation-plan prompt, which named one platform and left the model to
+  // guess about the rest of the plan's platforms.
+  it('groups the plan’s platforms by what the platform does with markup', () => {
+    const lines = buildMarkupGuidanceLines(['x', 'devto', 'linkedin', 'medium']);
+
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain('x, linkedin render NO markup');
+    expect(lines[1]).toContain('devto, medium render Markdown');
+  });
+
+  it('emits only the groups the platforms actually fall into', () => {
+    expect(buildMarkupGuidanceLines(['x'])).toHaveLength(1);
+    expect(buildMarkupGuidanceLines(['devto'])).toHaveLength(1);
+    expect(buildMarkupGuidanceLines([])).toEqual([]);
+  });
+
+  it('skips a platform it has no profile for rather than guessing', () => {
+    const lines = buildMarkupGuidanceLines(['x', 'not-a-platform']);
+
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).not.toContain('not-a-platform');
+  });
+
+  it('says the same thing as the single-platform rule', () => {
+    // Two builders, one wording — a plan and a reference-post must not be
+    // told subtly different things about the same platform.
+    const grouped = buildMarkupGuidanceLines(['devto'])[0];
+    const single = buildMarkupRule('devto');
+    const body = 'use structure only where the content genuinely has it';
+
+    expect(grouped).toContain(body);
+    expect(single).toContain(body);
+  });
+});
+
+describe('buildMarkupRule', () => {
+  // The rule this replaced was a flat "no bold, no bullet points, no headers"
+  // inside engage's own style block, written when a generated post could only
+  // be for x or reddit. The moment the same prompt could target dev.to it was
+  // asking for a tutorial and forbidding the structure a tutorial is made of.
+  it('tells a plain-text platform that markup publishes as characters', () => {
+    for (const platform of ['x', 'linkedin', 'quora', 'hackernews']) {
+      const rule = buildMarkupRule(platform);
+      expect(rule).toContain('renders NO markup');
+      expect(rule).toContain('no headings');
+    }
+  });
+
+  it('lets a Markdown platform use the structure its format is made of', () => {
+    for (const platform of ['reddit', 'devto', 'medium']) {
+      const rule = buildMarkupRule(platform);
+      expect(rule).toContain('renders Markdown');
+      // The whole point: a dev.to tutorial may carry a fenced code block and a
+      // subheading. What it may not do is decorate.
+      expect(rule).not.toContain('no headings');
+      expect(rule).toContain('Do not decorate');
+    }
+  });
+
+  it('names only the platform asked for', () => {
+    expect(buildMarkupRule('devto')).toContain('dev.to');
+    expect(buildMarkupRule('devto')).not.toContain('Medium');
+  });
+
+  it('is empty for a platform with no profile, so a caller can drop the line', () => {
+    expect(buildMarkupRule('not-a-platform')).toBe('');
+  });
+
+  it('covers every platform in the profile table', () => {
+    // `markup` is a required field, so this cannot silently regress — but a
+    // platform added with a profile and no rule would still be a prompt with
+    // nothing to say about its formatting.
+    for (const platform of PROFILED_PLATFORMS) {
+      expect(buildMarkupRule(platform), platform).not.toBe('');
+    }
   });
 });
 

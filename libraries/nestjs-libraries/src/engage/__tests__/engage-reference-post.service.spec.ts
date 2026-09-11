@@ -7,6 +7,7 @@ import {
 } from '../engage-reference-post.service';
 import {
   buildPlatformStyleGuidance,
+  minTargetFor,
   CROSS_PLATFORM_ADAPT_INSTRUCTION,
 } from '@gitroom/nestjs-libraries/integrations/platform-content-profile';
 
@@ -1169,8 +1170,14 @@ describe('EngageReferencePostService', () => {
         );
 
         const prompt = anthropicCreate.mock.calls[0][0].system as string;
-        expect(prompt).toContain('up to 2550 characters');
-        expect(prompt).not.toContain('up to 221 characters');
+        // Article platforms (medium, devto) state the budget as a RANGE, so
+        // the assertion asks the profile which phrasing to expect rather than
+        // hardcoding which platforms are long-form.
+        const floor = minTargetFor(platform, 2550);
+        expect(prompt).toContain(
+          floor ? `between ${floor} and 2550 characters` : 'up to 2550 characters'
+        );
+        expect(prompt).not.toContain('221 characters');
       }
     );
 

@@ -41,6 +41,40 @@ export const VALID_STRATEGIES = [
   'AMPLIFY',
 ] as const;
 
+// Voices that only make sense for a STANDALONE post, so they are valid on
+// `POST /engage/opportunities/:id/generate-post` and nowhere else. The seven
+// above are built around a rhetorical move aimed at someone (answer, cite,
+// empathise, oppose, ask, quip, agree); these six are built around the
+// POSITION the writer speaks from, and every one of them is written for a post
+// whose reader never sees the reference — "this post stands alone", "the
+// reference's author will never see this".
+//
+// Kept OUT of VALID_STRATEGIES deliberately. That list gates the reply
+// endpoints too (GenerateDraftDto, the EngagePolicy default, auto-reply), and
+// engage-draft.service.ts's STRATEGY_PROMPTS is a loose Record<string, string>
+// that falls back to EXPERT_ANSWER for an unknown key — so widening the shared
+// list would make a user who picks NEWS for a REPLY silently receive an
+// EXPERT_ANSWER reply, with no error anywhere. A separate list makes that a
+// 400 at the boundary instead.
+export const REFERENCE_POST_ONLY_STRATEGIES = [
+  'OPERATOR',
+  'EXPLAINER',
+  'CT_NATIVE',
+  'NEWS',
+  'THESIS',
+  'STORYTELLER',
+] as const;
+
+// The vocabulary the reference-post generator accepts: every reply strategy
+// plus the standalone-only ones. REFERENCE_POST_STRATEGY_PROMPTS
+// (engage-reference-post.service.ts) types itself against this, so adding a
+// value here without its prompt is a compile error rather than a silent
+// EXPERT_ANSWER fallback at runtime.
+export const VALID_REFERENCE_POST_STRATEGIES = [
+  ...VALID_STRATEGIES,
+  ...REFERENCE_POST_ONLY_STRATEGIES,
+] as const;
+
 // Keyword types must match the literals the scorer strict-equals (engage-scorer.ts
 // computeKeywordScore). Without this enum, lowercase / mis-cased values silently
 // store but never receive the +5/+3 brand/competitor bonus.
@@ -1144,8 +1178,10 @@ export function resolveThreadPostCount(input: {
 // tone axis, for a consistent creative-control UI across both.
 
 export class GenerateReferencePostDto {
+  // The reference-post vocabulary, not the reply one: a standalone post can be
+  // written in voices a reply cannot (see REFERENCE_POST_ONLY_STRATEGIES).
   @IsString()
-  @IsIn(VALID_STRATEGIES)
+  @IsIn(VALID_REFERENCE_POST_STRATEGIES)
   strategy: string;
 
   @IsInt()

@@ -1571,7 +1571,12 @@ describe('OperationPlanService.create', () => {
     expect(systemPrompt).toContain('FINAL REMINDER — CHARACTER LIMITS');
 
     expect(systemPrompt).toContain('WEIGHTED counting');
-    expect(systemPrompt).toMatch(/PLAIN TEXT for X: no Markdown/);
+    // Formatting is stated per platform, grouped by what each does with
+    // markup — the single hand-written "PLAIN TEXT for X" line this replaced
+    // named one platform and left the model to guess about the rest, which on
+    // dev.to and Medium meant guessing away the structure their format needs.
+    expect(systemPrompt).toContain('render NO markup');
+    expect(systemPrompt).not.toContain('PLAIN TEXT for X: no Markdown');
   });
 
   it('sources per-platform character limits from each provider maxLength() (capped soft target)', async () => {
