@@ -879,11 +879,7 @@ export class EngageController {
         // Client gone mid-stream — uncount the reservation; nothing delivered.
         await this._engageService.releaseReplyGeneration(reservation.taskId);
       } else {
-        assertDraftWithinPlatformLimit(
-          opportunity.platform,
-          draft,
-          outputLength
-        );
+        assertDraftWithinPlatformLimit(opportunity.platform, draft);
         // Settle only after a successful, non-aborted generation (spec §3.3).
         // Best-effort: a billing hiccup must not fail an already-produced draft —
         // the reservation stays counted (status reserved/unbilled) so the cap holds.

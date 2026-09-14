@@ -72,15 +72,15 @@ describe('assertDraftWithinPlatformLimit', () => {
       ).not.toThrow();
     });
 
-    // Same soft-target/hard-ceiling posture as x and reddit: outputLength only
-    // steers the prompt, so it can raise the gate but never tighten it.
-    it('treats an explicit outputLength as a floor of the ceiling, never a cap', () => {
+    // outputLength is not accepted by this hard-limit helper: it belongs only
+    // to prompt construction and can never alter the provider ceiling.
+    it('always enforces the provider ceiling', () => {
       expect(() =>
-        assertDraftWithinPlatformLimit('linkedin', text(2000), 500)
+        assertDraftWithinPlatformLimit('linkedin', text(2000))
       ).not.toThrow();
       expect(() =>
-        assertDraftWithinPlatformLimit('linkedin', text(4000), 5000)
-      ).not.toThrow();
+        assertDraftWithinPlatformLimit('linkedin', text(4000))
+      ).toThrow(/Generated linkedin draft exceeded 3000 characters/);
     });
   });
 

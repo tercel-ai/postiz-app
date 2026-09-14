@@ -2,7 +2,6 @@ import { weightedLength } from '@gitroom/helpers/utils/count.length';
 import { SCANNABLE_PLATFORMS } from '@gitroom/nestjs-libraries/engage/engage-scan-config.service';
 import {
   hardLimitFor,
-  targetFor,
 } from '@gitroom/nestjs-libraries/integrations/platform-content-profile';
 
 // Draft length policy for engage replies — ONE definition, shared by the
@@ -26,7 +25,7 @@ export function normalizeEngagePlatform(platform: string): string {
 }
 
 // Length tier → generation target. Used only when the caller doesn't pass an
-// explicit outputLength; the model clamps to the platform ceiling regardless.
+// explicit outputLength; it only supplies an advisory prompt target.
 const LENGTH_TARGETS: Record<ReplyLengthTier, { x: number; reddit: number }> = {
   short: { x: 120, reddit: 400 },
   medium: { x: 200, reddit: REDDIT_TARGET_CHAR_LIMIT },
@@ -65,28 +64,20 @@ export function outputLengthForLength(
  */
 export function assertDraftWithinPlatformLimit(
   platform: string,
-  draft: string,
-  outputLength?: number
+  draft: string
 ) {
   const normalized = normalizeEngagePlatform(platform);
   if (normalized === 'x') {
-    // Mirror the draft service: reject only above the hard ceiling, with the
-    // requested target as the soft floor of that ceiling.
-    const hardLimit = Math.max(outputLength ?? X_WEIGHTED_CHAR_LIMIT, X_HARD_CHAR_LIMIT);
-    if (weightedLength(draft) > hardLimit) {
+    if (weightedLength(draft) > X_HARD_CHAR_LIMIT) {
       throw new Error(
-        `Generated X draft exceeded ${hardLimit} Twitter-weighted characters.`
+        `Generated X draft exceeded ${X_HARD_CHAR_LIMIT} Twitter-weighted characters.`
       );
     }
     return;
   }
   if (normalized === 'reddit') {
-    const hardLimit = Math.max(
-      outputLength ?? REDDIT_TARGET_CHAR_LIMIT,
-      REDDIT_HARD_CHAR_LIMIT
-    );
-    if (draft.length > hardLimit) {
-      throw new Error(`Generated Reddit draft exceeded ${hardLimit} characters.`);
+    if (draft.length > REDDIT_HARD_CHAR_LIMIT) {
+      throw new Error(`Generated Reddit draft exceeded ${REDDIT_HARD_CHAR_LIMIT} characters.`);
     }
     return;
   }
@@ -95,10 +86,7 @@ export function assertDraftWithinPlatformLimit(
   // for callers passing a platform this module was never taught about,
   // rather than inventing a limit for it.
   if (!(SCANNABLE_PLATFORMS as readonly string[]).includes(normalized)) return;
-  const hardLimit = Math.max(
-    outputLength ?? targetFor(normalized),
-    hardLimitFor(normalized)
-  );
+  const hardLimit = hardLimitFor(normalized);
   if (draft.length > hardLimit) {
     throw new Error(
       `Generated ${normalized} draft exceeded ${hardLimit} characters.`

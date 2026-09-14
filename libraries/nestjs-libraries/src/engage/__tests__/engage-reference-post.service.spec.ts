@@ -29,10 +29,15 @@ vi.mock('openai', () => {
   };
 });
 
-function anthropicResponse(text: string, usage = { input_tokens: 100, output_tokens: 40 }) {
+function anthropicResponse(
+  text: string,
+  usage = { input_tokens: 100, output_tokens: 40 },
+  stopReason: 'end_turn' | 'max_tokens' = 'end_turn'
+) {
   return {
     content: [{ type: 'text', text }],
     usage,
+    stop_reason: stopReason,
   };
 }
 
@@ -128,10 +133,51 @@ describe('EngageReferencePostService', () => {
     expect(anthropicCreate.mock.calls[0][0].system).toContain('under 340 characters');
   });
 
-  // The one rule whose violation is fatal — an over-long post is rejected
-  // outright — so it is stated first, restated mid-prompt, and repeated last,
-  // the same sandwich engage-draft.service.ts uses. Stated once in the middle
-  // of a long prompt is exactly where an instruction gets lost.
+  it('treats outputLength as an advisory target while retaining the platform hard limit', async () => {
+    const overTargetButPublishable = 'x'.repeat(300);
+    anthropicCreate
+      .mockResolvedValueOnce(anthropicResponse(overTargetButPublishable))
+      .mockResolvedValueOnce(anthropicResponse(overTargetButPublishable));
+
+    await expect(
+      service.generate(REFERENCE, {
+        strategy: 'EXPERT_ANSWER',
+        brandStrength: 1,
+        outputLength: 1000,
+      })
+    ).rejects.toThrow(/280/);
+
+    const prompt = anthropicCreate.mock.calls[0][0].system as string;
+    expect(prompt).toContain('TARGET LENGTH');
+    expect(prompt).toContain('advisory target, not a rejection threshold');
+    expect(prompt).toContain('under 280 Twitter-weighted characters');
+  });
+
+  it('gives Medium enough output tokens for its default target instead of a fixed 500-token cap', async () => {
+    anthropicCreate.mockResolvedValueOnce(anthropicResponse('A complete Medium article.'));
+
+    await service.generate(REFERENCE, {
+      strategy: 'EXPERT_ANSWER',
+      brandStrength: 1,
+      targetPlatform: 'medium',
+    });
+
+    expect(anthropicCreate.mock.calls[0][0].max_tokens).toBe(3750);
+  });
+
+  it('does not return a partial post when the model reaches its output-token limit', async () => {
+    anthropicCreate.mockResolvedValueOnce(
+      anthropicResponse('This sentence ends unexpectedly', { input_tokens: 100, output_tokens: 500 }, 'max_tokens')
+    );
+
+    await expect(
+      service.generate(REFERENCE, { strategy: 'EXPERT_ANSWER', brandStrength: 1 })
+    ).rejects.toThrow(/token limit before completion/);
+  });
+
+  // The platform ceiling is fatal, while outputLength remains an advisory
+  // target. The prompt must state both independently so the model does not cut
+  // a coherent post merely for going slightly over the requested target.
   describe('length emphasis in the prompt', () => {
     it('states the limit at the top, in the middle, and at the very end', async () => {
       anthropicCreate.mockResolvedValueOnce(anthropicResponse('An original take.'));
@@ -139,9 +185,10 @@ describe('EngageReferencePostService', () => {
       await service.generate(REFERENCE, { strategy: 'EXPERT_ANSWER', brandStrength: 1, outputLength: 260 });
 
       const systemPrompt: string = anthropicCreate.mock.calls[0][0].system;
-      const occurrences = systemPrompt.split('under 260 Twitter-weighted characters').length - 1;
-      expect(occurrences).toBe(3);
-      expect(systemPrompt).toContain('HARD LENGTH LIMIT — THIS OUTRANKS EVERY OTHER INSTRUCTION');
+      expect(systemPrompt).toContain('TARGET LENGTH');
+      expect(systemPrompt).toContain('advisory target, not a rejection threshold');
+      expect(systemPrompt).toContain('PLATFORM HARD LENGTH LIMIT — THIS OUTRANKS EVERY OTHER INSTRUCTION');
+      expect(systemPrompt).toContain('under 280 Twitter-weighted characters');
       expect(systemPrompt.trimEnd().endsWith('never truncate mid-thought.')).toBe(true);
     });
 
@@ -152,7 +199,7 @@ describe('EngageReferencePostService', () => {
 
       const systemPrompt: string = anthropicCreate.mock.calls[0][0].system;
       expect(systemPrompt).toContain(
-        'If the strategy, the brand mention, or finishing a thought would push a post past it, cut the content instead'
+        'If the strategy, the brand mention, or finishing a thought would push a post past it, cut or condense the content instead'
       );
     });
 
@@ -202,8 +249,9 @@ describe('EngageReferencePostService', () => {
       await service.generate(REFERENCE, { strategy: 'EXPERT_ANSWER', brandStrength: 1, outputLength: 260 });
 
       const userContent: string = anthropicCreate.mock.calls[0][0].messages[0].content;
-      expect(userContent).toContain('Length is the hard constraint');
+      expect(userContent).toContain('Length target: aim to keep');
       expect(userContent).toContain('under 260 Twitter-weighted characters');
+      expect(userContent).toContain('under 280 Twitter-weighted characters');
       expect(userContent).toContain('regardless of how long the reference post above is');
     });
 
@@ -233,7 +281,9 @@ describe('EngageReferencePostService', () => {
       });
 
       const systemPrompt: string = anthropicCreate.mock.calls[0][0].system;
-      expect(systemPrompt).toContain('must stay under 260 Twitter-weighted characters (CJK/emoji count as 2, URLs as 23 — leave a safety margin) and must name "AISEE"');
+      expect(systemPrompt).toContain(
+        'must never exceed under 280 Twitter-weighted characters and must name "AISEE"'
+      );
     });
   });
 

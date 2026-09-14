@@ -727,7 +727,7 @@ export class EngageAutoReplyService implements OnModuleInit {
         )) {
           text += chunk;
         }
-        assertDraftWithinPlatformLimit(opportunity.platform, text, outputLength);
+        assertDraftWithinPlatformLimit(opportunity.platform, text);
       } catch (err) {
         await this._engageService
           .releaseReplyGeneration(reservation.taskId)
@@ -839,4 +839,3 @@ export class EngageAutoReplyService implements OnModuleInit {
     }
   }
 }
-
