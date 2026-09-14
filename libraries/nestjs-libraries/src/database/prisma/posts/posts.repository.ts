@@ -2720,7 +2720,12 @@ export class PostsRepository {
    *     on a row of another.
    *   - `state: PUBLISHED` restricts this to rows that HAVE been sent. Called
    *     after the chain is settled, that is the anchor plus its segments — and
-   *     never a QUEUE row this callback did not publish.
+   *     never a QUEUE row this callback did not publish. Nor an ERROR one:
+   *     the FAILURE callback calls this too (for the live segments of a
+   *     partial thread), and a failed post can be retried under a DIFFERENT
+   *     account. Stamping a reading onto an ERROR row would consume the
+   *     `integrationId: null` blank that the retry's success callback needs,
+   *     leaving the row naming an account that never published it.
    *   - `intervalInDays: null` excludes a recurring ORIGINAL. A cycle clone
    *     shares its template's `group` (findOrCreateCycleClone), so without
    *     this a published clone could stamp an account onto the permanent QUEUE

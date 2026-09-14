@@ -702,6 +702,27 @@ export class PostsService {
       }
     }
 
+    // Stamp the account the LIVE segments of a partial thread went out as.
+    //
+    // Deliberately reuses the PUBLISHED-only sweep rather than widening it to
+    // ERROR rows, and that restriction is the whole safety argument: a failed
+    // post can be RETRIED, and the user may well switch accounts before they
+    // retry it — that is often why it failed. Stamping this reading onto an
+    // ERROR row would fill the very blank the retry's own success callback
+    // needs (`integrationId: null` is that sweep's guard), so the account that
+    // actually published would be silently skipped and the row would keep the
+    // account that did NOT publish it. Null means "unknown" and self-corrects
+    // on the retry; a wrong account is asserted as fact and never does.
+    //
+    // A PUBLISHED segment has no such hazard: it is live and terminal (the
+    // extension refuses Retry once any segment went out), so the session that
+    // sent it is the final answer. Runs after the chain settling above for the
+    // same reason as the success path — the sweep only sees rows already
+    // flipped PUBLISHED.
+    if (published.length) {
+      await this._attributeExtensionPublisher(orgId, post);
+    }
+
     // A PARTIAL thread failure emits BOTH events, and that is not a bug: the
     // anchor really is live on the platform and the rest really did fail, so
     // suppressing either one would misreport what the user can now see. The API

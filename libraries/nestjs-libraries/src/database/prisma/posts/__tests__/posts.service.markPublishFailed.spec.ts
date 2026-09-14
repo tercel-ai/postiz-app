@@ -1,9 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { PostsService } from '../posts.service';
 
-// Smallest viable PostsService — markPublishFailedFromExtension only touches
-// the repository (getPostById + changeState).
-function makeService(post: any, chainNodes?: any[]) {
+// Smallest viable PostsService — markPublishFailedFromExtension touches the
+// repository (getPostById + changeState) and, once a partial thread has live
+// segments to attribute, the integration service.
+function makeService(post: any, chainNodes?: any[], publisherId?: string) {
   const repo: any = {
     getPostById: vi.fn().mockResolvedValue(post),
     changeState: vi.fn().mockResolvedValue({}),
@@ -15,11 +16,17 @@ function makeService(post: any, chainNodes?: any[]) {
     publishExtensionChainNodes: vi.fn().mockResolvedValue({ count: 0 }),
     failExtensionChainNodesByIds: vi.fn().mockResolvedValue({ count: 0 }),
     getExtensionPublishChainNodes: vi.fn().mockResolvedValue(chainNodes ?? []),
+    attributeExtensionPublisher: vi.fn().mockResolvedValue({ count: 0 }),
+  };
+  const integrations: any = {
+    resolveExtensionPublisherId: vi
+      .fn()
+      .mockResolvedValue(publisherId ?? null),
   };
   const svc = new PostsService(
     repo,
     {} as any,
-    {} as any,
+    integrations,
     {} as any,
     {} as any,
     {} as any,
@@ -28,7 +35,7 @@ function makeService(post: any, chainNodes?: any[]) {
     {} as any,
     {} as any
   );
-  return { svc, repo };
+  return { svc, repo, integrations };
 }
 
 describe('PostsService.markPublishFailedFromExtension', () => {
@@ -329,5 +336,74 @@ describe('reported segments are constrained to the chain', () => {
       { id: 'anchor', url: 'https://x.com/u/1', releaseId: undefined },
     ]);
     expect(repo.failExtensionChainNodesByIds).toHaveBeenCalledWith('org-1', ['c1'], 'boom');
+  });
+});
+
+// Attribution on the FAILURE path. An extension-routed post can be scheduled
+// with no account at all (Quora/HN bind no API credential), so the row reaches
+// here with integrationId null and nothing downstream can say which channel it
+// belongs to. The session report knows — but only the LIVE segments of a
+// partial thread may be stamped from it.
+describe('markPublishFailedFromExtension — publisher attribution', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  const anchor = {
+    id: 'anchor',
+    state: 'QUEUE',
+    group: 'g1',
+    parentPostId: null,
+    integrationId: null,
+    providerIdentifier: 'x',
+  };
+  const chain = [
+    { id: 'anchor', group: 'g1', parentPostId: null },
+    { id: 'c1', group: 'g1', parentPostId: 'anchor' },
+  ];
+
+  it('stamps the resolved account when a partial thread left segments live', async () => {
+    const { svc, repo, integrations } = makeService(anchor, chain, 'int-9');
+
+    await svc.markPublishFailedFromExtension('org-1', 'anchor', 'segment 2 failed', [
+      { postId: 'anchor', url: 'https://x.com/u/1' },
+    ]);
+
+    expect(integrations.resolveExtensionPublisherId).toHaveBeenCalledWith('org-1', 'x');
+    // Group-scoped and PUBLISHED-filtered in the repository, so only the anchor
+    // just flipped live is touched — never the c1 row this same call errored.
+    expect(repo.attributeExtensionPublisher).toHaveBeenCalledWith(
+      'org-1',
+      'g1',
+      'x',
+      'int-9'
+    );
+  });
+
+  it('leaves a total failure unattributed so a retry under another account can still claim it', async () => {
+    // Nothing went out, so this post is retryable — and the user may well
+    // switch accounts before retrying, which is often why it failed. Writing a
+    // reading here would consume the integrationId:null blank the retry's own
+    // success callback needs, and the row would name an account that never
+    // published it.
+    const { svc, repo, integrations } = makeService(anchor, chain, 'int-9');
+
+    await svc.markPublishFailedFromExtension('org-1', 'anchor', 'wrong account');
+
+    expect(integrations.resolveExtensionPublisherId).not.toHaveBeenCalled();
+    expect(repo.attributeExtensionPublisher).not.toHaveBeenCalled();
+  });
+
+  it('never overwrites an account the user chose at schedule time', async () => {
+    const { svc, repo, integrations } = makeService(
+      { ...anchor, integrationId: 'chosen-by-user' },
+      chain,
+      'int-9'
+    );
+
+    await svc.markPublishFailedFromExtension('org-1', 'anchor', 'segment 2 failed', [
+      { postId: 'anchor', url: 'https://x.com/u/1' },
+    ]);
+
+    expect(integrations.resolveExtensionPublisherId).not.toHaveBeenCalled();
+    expect(repo.attributeExtensionPublisher).not.toHaveBeenCalled();
   });
 });
