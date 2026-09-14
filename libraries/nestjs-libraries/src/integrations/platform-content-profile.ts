@@ -116,7 +116,8 @@ export const minTargetFor = (
     : 0;
 
 /**
- * The per-platform character budget lines a prompt states as a hard gate.
+ * The per-platform length guidance lines a prompt states as an advisory target
+ * plus the platform's non-negotiable hard limit.
  *
  * `statedMargin` additionally tells the model that X's budget sits under X's
  * real ceiling — worth saying when the prompt writes the FULL plan (the model
@@ -129,21 +130,22 @@ export function buildCharacterLimitLines(
 ): string[] {
   return platforms.map((p) => {
     const target = targetFor(p);
+    const hardLimit = hardLimitFor(p);
     const floor = minTargetFor(p);
     // A long-form platform gets a RANGE, not a ceiling: "max 3000" alone is
     // satisfied by 200 characters, which publishes as a stub under a title
     // promising an article.
     const budget = floor
-      ? `    • ${p}: ${floor}-${target} characters — this is an ARTICLE, not a short post. Under ${floor} reads as a stub; aim for the upper half of the range.`
-      : `    • ${p}: max ${target} characters`;
+      ? `    • ${p}: aim for ${floor}-${target} characters — this is an ARTICLE, not a short post. Under ${floor} reads as a stub; aim for the upper half of the range. Platform hard limit: ${hardLimit} characters.`
+      : `    • ${p}: aim for up to ${target} characters; platform hard limit: ${hardLimit} characters`;
     return (
       budget +
       (p === 'x'
         ? ` (X WEIGHTED counting: every URL counts as 23 characters regardless of its real length; CJK characters and emoji count as 2 each.${
             options.statedMargin
-              ? ` X's own ceiling is ${hardLimitFor('x')} — ${targetFor(
+              ? ` ${targetFor('x')} is an advisory target below X's ${hardLimitFor(
                   'x'
-                )} is your budget, so you have margin.`
+                )} hard limit, so you have margin.`
               : ''
           })`
         : '')

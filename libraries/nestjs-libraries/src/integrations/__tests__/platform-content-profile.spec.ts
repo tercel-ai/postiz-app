@@ -59,16 +59,16 @@ describe('targetFor', () => {
 });
 
 describe('buildCharacterLimitLines', () => {
-  it('states a plain budget line per platform', () => {
+  it('states an advisory target and hard limit per platform', () => {
     expect(buildCharacterLimitLines(['linkedin', 'quora'])).toEqual([
-      '    • linkedin: max 3000 characters',
-      '    • quora: max 3000 characters',
+      '    • linkedin: aim for up to 3000 characters; platform hard limit: 3000 characters',
+      '    • quora: aim for up to 3000 characters; platform hard limit: 20000 characters',
     ]);
   });
 
   it('explains X weighted counting, and only for X', () => {
     expect(buildCharacterLimitLines(['x'])).toEqual([
-      "    • x: max 240 characters (X WEIGHTED counting: every URL counts as 23 characters regardless of its real length; CJK characters and emoji count as 2 each.)",
+      "    • x: aim for up to 240 characters; platform hard limit: 280 characters (X WEIGHTED counting: every URL counts as 23 characters regardless of its real length; CJK characters and emoji count as 2 each.)",
     ]);
   });
 
@@ -77,7 +77,7 @@ describe('buildCharacterLimitLines', () => {
   // platforms get both ends of the range.
   it('states a range on an article platform', () => {
     expect(buildCharacterLimitLines(['devto'])).toEqual([
-      '    • devto: 1500-3000 characters — this is an ARTICLE, not a short post. Under 1500 reads as a stub; aim for the upper half of the range.',
+      '    • devto: aim for 1500-3000 characters — this is an ARTICLE, not a short post. Under 1500 reads as a stub; aim for the upper half of the range. Platform hard limit: 100000 characters.',
     ]);
   });
 
@@ -85,7 +85,7 @@ describe('buildCharacterLimitLines', () => {
   // coverage-backfill prompt does not.
   it('adds the margin sentence only when asked for', () => {
     expect(buildCharacterLimitLines(['x'], { statedMargin: true })).toEqual([
-      "    • x: max 240 characters (X WEIGHTED counting: every URL counts as 23 characters regardless of its real length; CJK characters and emoji count as 2 each. X's own ceiling is 280 — 240 is your budget, so you have margin.)",
+      "    • x: aim for up to 240 characters; platform hard limit: 280 characters (X WEIGHTED counting: every URL counts as 23 characters regardless of its real length; CJK characters and emoji count as 2 each. 240 is an advisory target below X's 280 hard limit, so you have margin.)",
     ]);
   });
 });

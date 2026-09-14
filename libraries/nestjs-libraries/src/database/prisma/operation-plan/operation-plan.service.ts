@@ -743,7 +743,7 @@ export class OperationPlanService implements OnApplicationBootstrap {
       dayjs.utc(start).startOf('day').add(index, 'day').format('YYYY-MM-DD')
     );
 
-    // Per-platform length budget, stated TWICE in the prompt (opening + closing).
+    // Per-platform length guidance, stated TWICE in the prompt (opening + closing).
     // The first live run ignored a single mid-prompt mention and produced 20/20
     // unpublishable posts; repeating the constraint at both ends is what makes
     // long-output models actually hold the line.
@@ -765,8 +765,8 @@ export class OperationPlanService implements OnApplicationBootstrap {
       [
         'You are an operations planner. Generate a practical, UTC-dated operation plan from the supplied analysis result for a single project. Use ONLY the requested platforms, and keep every content utcDate within the requested [startAt, endAt] range.',
         '',
-        '### CHARACTER LIMITS — THE #1 CONSTRAINT (repeated at the end; obey both) ###',
-        'Every `contentItems[].platforms[].content` MUST fit its platform budget. Over-budget content is REJECTED and the whole plan fails. Count BEFORE you write, and write to the budget — do not draft long and hope.',
+        '### LENGTH TARGETS + PLATFORM HARD LIMITS — THE #1 CONSTRAINT (repeated at the end; obey both) ###',
+        'Every `contentItems[].platforms[].content` should aim for its stated target. The target is advisory: it may be exceeded when needed for a complete thought. The platform hard limit is non-negotiable; content over that limit cannot publish and will be shortened before validation.',
         ...limitLines,
         '',
         '### PLATFORM COVERAGE — EVERY REQUESTED PLATFORM ###',
@@ -797,7 +797,7 @@ export class OperationPlanService implements OnApplicationBootstrap {
         '',
         '- CROSS-PLATFORM SHARING: a single `contentItem` SHOULD carry multiple platforms when the theme applies to all of them. For example, a data-story theme can have `platforms: [{platform:"x", ...}, {platform:"linkedin", ...}, {platform:"medium", ...}]` — one item, three platforms, each with content adapted to that platform\'s audience and format. This is MORE efficient than creating separate items per platform (fewer contentItems = lower token cost, better coherence). Prefer consolidating related platforms under one contentItem rather than splitting them. Every contentItem MUST still have at least one platform entry; a theme that only fits one platform stays single-platform. The platformPlaybook cadence drives how many contentItems each platform appears in — match those frequencies, not just the total post count.',
         '- TITLE vs BODY: on reddit, hackernews, medium and devto the themeTitle is submitted SEPARATELY as the post/story title, so `content` is the BODY ONLY. NEVER open `content` with the title (or a heading/bold restatement of it) — the platform would display the title twice. Start directly with the body text.',
-        '- Respect the character budgets declared at the top (and repeated below). This is a hard gate, not a style note.',
+        '- Respect the length guidance declared at the top (and repeated below): targets guide the draft length, while platform hard limits are the only rejection boundary.',
         // One line per markup ANSWER, covering every platform in this plan —
         // not the single hand-written X line this replaces, which named one
         // platform and left the model to guess about the rest. It guessed
@@ -828,10 +828,10 @@ export class OperationPlanService implements OnApplicationBootstrap {
         '',
         'Use warnings[] to flag any infeasibility (range too short for the intended cadence, a requested platform with weak supply, etc.).',
         '',
-        '### FINAL REMINDER — CHARACTER LIMITS + PLATFORM COVERAGE (same rules as the top) ###',
-        'Before returning, re-check EVERY content string against its budget:',
+        '### FINAL REMINDER — LENGTH TARGETS + PLATFORM HARD LIMITS + PLATFORM COVERAGE (same rules as the top) ###',
+        'Before returning, re-check EVERY content string against its target and hard limit:',
         ...limitLines,
-        'Any single over-budget string fails the entire plan. If a post does not fit, CUT it down — shorten the prose, drop a bullet, or drop a link. Never exceed the budget.',
+        'A post may exceed its target, but it must never exceed its platform hard limit. If it does not fit, CUT it down — shorten the prose, drop a bullet, or drop a link.',
         '',
         `Also re-check that EVERY platform listed below appears in at least one \`contentItems[].platforms[].platform\` — a plan that silently skips a platform is REJECTED. The requested platforms are: ${platforms.join(', ')}.`,
       ].join('\n'),

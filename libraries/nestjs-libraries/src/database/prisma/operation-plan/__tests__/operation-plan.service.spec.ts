@@ -1541,7 +1541,7 @@ describe('OperationPlanService.create', () => {
     );
   });
 
-  it('declares the X character budget (240, under the 280 ceiling) TWICE — at the top and the bottom of the prompt', async () => {
+  it('declares the X advisory target and hard limit TWICE — at the top and the bottom of the prompt', async () => {
     const { openaiService, service } = createGenerationDependencies({
       contentItems: [],
       engagePolicies: [],
@@ -1559,16 +1559,16 @@ describe('OperationPlanService.create', () => {
 
     // The budget we instruct with is 240 — deliberately under X's real 280
     // ceiling (which validation still allows, to tolerate small overshoot).
-    const budgetMentions = systemPrompt.match(/x: max 240 characters/g) ?? [];
+    const budgetMentions = systemPrompt.match(/x: aim for up to 240 characters; platform hard limit: 280 characters/g) ?? [];
     expect(budgetMentions).toHaveLength(2);
 
     // ...and they bracket the prompt: one near the top, one at the very end.
-    const first = systemPrompt.indexOf('x: max 240 characters');
-    const last = systemPrompt.lastIndexOf('x: max 240 characters');
+    const first = systemPrompt.indexOf('x: aim for up to 240 characters; platform hard limit: 280 characters');
+    const last = systemPrompt.lastIndexOf('x: aim for up to 240 characters; platform hard limit: 280 characters');
     expect(first).toBeLessThan(systemPrompt.length / 2);
     expect(last).toBeGreaterThan(systemPrompt.length / 2);
-    expect(systemPrompt).toContain('CHARACTER LIMITS — THE #1 CONSTRAINT');
-    expect(systemPrompt).toContain('FINAL REMINDER — CHARACTER LIMITS');
+    expect(systemPrompt).toContain('LENGTH TARGETS + PLATFORM HARD LIMITS — THE #1 CONSTRAINT');
+    expect(systemPrompt).toContain('FINAL REMINDER — LENGTH TARGETS + PLATFORM HARD LIMITS');
 
     expect(systemPrompt).toContain('WEIGHTED counting');
     // Formatting is stated per platform, grouped by what each does with
@@ -1597,9 +1597,36 @@ describe('OperationPlanService.create', () => {
     });
 
     const systemPrompt: string = openaiService.generateStructuredText.mock.calls[0][0];
-    expect(systemPrompt).toContain('pinterest: max 500 characters');
-    expect(systemPrompt).toContain('reddit: max 3000 characters');
-    expect(systemPrompt).toContain('facebook: max 3000 characters');
+    expect(systemPrompt).toContain('pinterest: aim for up to 500 characters; platform hard limit: 500 characters');
+    expect(systemPrompt).toContain('reddit: aim for up to 3000 characters; platform hard limit: 10000 characters');
+    expect(systemPrompt).toContain('facebook: aim for up to 3000 characters; platform hard limit: 63206 characters');
+  });
+
+  it('keeps Medium content that exceeds its prompt target but fits the platform hard limit', async () => {
+    const { openaiService, service } = createGenerationDependencies({
+      contentItems: [],
+      engagePolicies: [],
+      warnings: [],
+    });
+    const plan = {
+      contentItems: [
+        {
+          contentId: 'D01',
+          platforms: [
+            {
+              platform: 'medium',
+              content: 'a'.repeat(5000),
+              thread: null,
+            },
+          ],
+        },
+      ],
+    };
+
+    await (service as any)._enforceContentLimits(plan);
+
+    expect(plan.contentItems[0].platforms[0].content).toHaveLength(5000);
+    expect(openaiService.shrinkToLimit).not.toHaveBeenCalled();
   });
 
   // P2(9): a single scalar target could not express the reference plan's
@@ -3066,4 +3093,3 @@ describe('OperationPlanService — cross-platform content sharing in create', ()
     expect(missing).toEqual(['linkedin', 'medium']);
   });
 });
-
