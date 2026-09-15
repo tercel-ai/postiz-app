@@ -36,6 +36,7 @@ import {
   BIZ_USAGE,
   runWithBizUsage,
 } from '@gitroom/nestjs-libraries/database/prisma/api-usage/api-usage.service';
+import { limitToOnePostableVideo } from '@gitroom/helpers/utils/postable-media';
 
 // A publish/comment activity serves either an active calendar post or an engage
 // reply; the Post.source field (set at creation) is the discriminator that
@@ -204,10 +205,21 @@ export class PostActivity {
                 getIntegration.mentionFormat
               ),
               settings: JSON.parse(p.settings || '{}'),
-              media: await this._postService.updateMedia(
-                p.id,
-                JSON.parse(p.image || '[]'),
-                getIntegration?.convertToJPEG || false
+              // This posts DIRECTLY to the platform's API (unlike the
+              // extension's queue, there is no per-item check downstream), so
+              // a post whose media is really two videos — updateMedia stamps
+              // every item `type: 'image'` regardless of what it actually is —
+              // must be capped here, or the platform simply rejects the call.
+              media: limitToOnePostableVideo(
+                await this._postService.updateMedia(
+                  p.id,
+                  JSON.parse(p.image || '[]'),
+                  getIntegration?.convertToJPEG || false
+                ),
+                (dropped) =>
+                  console.warn(
+                    `postComment: dropping video ${dropped} on post ${p.id} — a post carries one video or several images, never a mix`
+                  )
               ),
             }))
           ),
@@ -248,10 +260,17 @@ export class PostActivity {
                 getIntegration.mentionFormat
               ),
               settings: JSON.parse(p.settings || '{}'),
-              media: await this._postService.updateMedia(
-                p.id,
-                JSON.parse(p.image || '[]'),
-                getIntegration?.convertToJPEG || false
+              // Same reasoning as postComment above.
+              media: limitToOnePostableVideo(
+                await this._postService.updateMedia(
+                  p.id,
+                  JSON.parse(p.image || '[]'),
+                  getIntegration?.convertToJPEG || false
+                ),
+                (dropped) =>
+                  console.warn(
+                    `postSocial: dropping video ${dropped} on post ${p.id} — a post carries one video or several images, never a mix`
+                  )
               ),
             }))
           ),

@@ -49,6 +49,7 @@ import { computeTrafficScore } from '@gitroom/nestjs-libraries/integrations/soci
 import { extractMetrics } from '@gitroom/nestjs-libraries/integrations/social/analytics.utils';
 import { timer } from '@gitroom/helpers/utils/timer';
 import { stripHtmlValidation } from '@gitroom/helpers/utils/strip.html.validation';
+import { limitToOnePostableVideo } from '@gitroom/helpers/utils/postable-media';
 import { ioRedis } from '@gitroom/nestjs-libraries/redis/redis.service';
 import {
   referencePostTitle,
@@ -1446,10 +1447,22 @@ export class PostsService {
     const withMedia = await Promise.all(
       (posts || []).map(async (post) => ({
         ...post,
-        image: await this.updateMedia(
-          post.id,
-          JSON.parse(post.image || '[]'),
-          convertToJPEG
+        // Reload-time normalization: a post whose media is really two videos
+        // (updateMedia stamps every item `type: 'image'` regardless) would
+        // otherwise round-trip straight back into aisee-app's edit dialog
+        // still broken. Capping it here means simply reopening a stuck draft
+        // fixes it, the same way create-post-validators.ts already refuses to
+        // let a fresh one be saved in this shape.
+        image: limitToOnePostableVideo(
+          await this.updateMedia(
+            post.id,
+            JSON.parse(post.image || '[]'),
+            convertToJPEG
+          ),
+          (dropped) =>
+            this.logger.warn(
+              `getPostsByGroup: dropping video ${dropped} on post ${post.id} — a post carries one video or several images, never a mix`
+            )
         ),
       }))
     );
@@ -1499,10 +1512,17 @@ export class PostsService {
     const withMedia = await Promise.all(
       (posts || []).map(async (post) => ({
         ...post,
-        image: await this.updateMedia(
-          post.id,
-          JSON.parse(post.image || '[]'),
-          convertToJPEG
+        // Same reload-time normalization as getPostsByGroup above.
+        image: limitToOnePostableVideo(
+          await this.updateMedia(
+            post.id,
+            JSON.parse(post.image || '[]'),
+            convertToJPEG
+          ),
+          (dropped) =>
+            this.logger.warn(
+              `getPost: dropping video ${dropped} on post ${post.id} — a post carries one video or several images, never a mix`
+            )
         ),
       }))
     );
@@ -2479,7 +2499,24 @@ export class PostsService {
               node.id,
               JSON.parse(node.image || '[]')
             );
-            images = (resolved || [])
+            // updateMedia stamps every item `type: 'image'` regardless of what
+            // it actually is (a pre-existing gap — see postable-media.ts's
+            // header), so a post whose media is really two videos (X stores an
+            // animated GIF as an mp4) reaches here looking like "two images".
+            // The extension has no per-item check of its own — it hands
+            // whatever it's given straight to the platform's file input — so
+            // without this, that post reaches x.com as an attachment the
+            // composer can never actually send. Same rule already applied to
+            // engage-generated drafts in engage.service.ts's
+            // _fetchReferenceMedia; this is the due-publish-time backstop for
+            // every OTHER way a post's media can end up this way (old data,
+            // manual edits, a future producer that skips the engage path).
+            const postable = limitToOnePostableVideo(resolved || [], (dropped) =>
+              this.logger.warn(
+                `getDuePublishPosts: dropping video ${dropped} on post ${p.id} segment ${segmentIndex} — a post carries one video or several images, never a mix`
+              )
+            );
+            images = postable
               .map((m: any) => m?.url)
               .filter((url: any): url is string => typeof url === 'string' && !!url);
           } catch {

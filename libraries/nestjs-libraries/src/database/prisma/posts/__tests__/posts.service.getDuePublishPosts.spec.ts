@@ -70,6 +70,72 @@ describe('PostsService.getDuePublishPosts', () => {
     ]);
   });
 
+  // Regression for the case postable-media.ts documents: X stores an animated
+  // GIF as an mp4, so a post built from a reference opportunity holding two
+  // GIFs arrives here as two videos — and updateMedia stamps `type: 'image'`
+  // on every item regardless (a pre-existing gap), so the type field can't be
+  // trusted to catch this. Without limitToOnePostableVideo, both mp4s would
+  // reach the extension as "images" and the post would sit as a draft X's own
+  // composer can never actually send (a post carries one video or several
+  // images, never two videos).
+  it('keeps only the first video when a post carries more than one, despite updateMedia stamping them all type:"image"', async () => {
+    const { svc } = makeService({
+      rows: [
+        {
+          id: 'post12',
+          content: 'two GIFs from one reference opportunity',
+          image: JSON.stringify([
+            { id: 'm1', path: 'https://files.aisee.live/a.mp4', url: 'https://files.aisee.live/a.mp4', type: 'image' },
+            { id: 'm2', path: 'https://files.aisee.live/b.mp4', url: 'https://files.aisee.live/b.mp4', type: 'image' },
+          ]),
+          settings: '{}',
+          title: null,
+          publishDate: new Date('2026-07-01T00:00:00.000Z'),
+          integration: null,
+        },
+      ],
+    });
+
+    const { due } = await svc.getDuePublishPosts('org-1', 10);
+
+    expect(due[0].segments).toEqual([
+      {
+        postId: 'post12',
+        text: 'two GIFs from one reference opportunity',
+        images: ['https://files.aisee.live/a.mp4'],
+      },
+    ]);
+  });
+
+  it('keeps every image and drops only the video when a post mixes images with one video', async () => {
+    const { svc } = makeService({
+      rows: [
+        {
+          id: 'post13',
+          content: 'mixed media',
+          image: JSON.stringify([
+            { id: 'm1', path: 'https://cdn.example.com/a.png', url: 'https://cdn.example.com/a.png' },
+            { id: 'm2', path: 'https://files.aisee.live/b.mp4', url: 'https://files.aisee.live/b.mp4' },
+          ]),
+          settings: '{}',
+          title: null,
+          publishDate: new Date('2026-07-01T00:00:00.000Z'),
+          integration: null,
+        },
+      ],
+    });
+
+    const { due } = await svc.getDuePublishPosts('org-1', 10);
+
+    expect(due[0].segments).toEqual([
+      {
+        postId: 'post13',
+        text: 'mixed media',
+        images: ['https://cdn.example.com/a.png'],
+      },
+    ]);
+  });
+
   it('omits images when the post has none', async () => {
     const { svc } = makeService({
       rows: [
