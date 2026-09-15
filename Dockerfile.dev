@@ -1,12 +1,16 @@
 FROM node:22.20-bookworm-slim
 ARG NEXT_PUBLIC_VERSION
 ENV NEXT_PUBLIC_VERSION=$NEXT_PUBLIC_VERSION
+# ffmpeg backs transcodeMp4ToAnimatedGif (x-animated-gif.ts): without it, every
+# X-animated-GIF reference falls back to a static poster frame instead of a
+# real animated .gif.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     g++ \
     make \
     python3-pip \
     bash \
     nginx \
+    ffmpeg \
 && rm -rf /var/lib/apt/lists/*
 
 RUN addgroup --system www \
