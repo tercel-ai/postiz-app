@@ -12,6 +12,7 @@ import { Request, Response } from 'express';
 import crypto from 'crypto';
 import path from 'path';
 import { makeId } from '@gitroom/nestjs-libraries/services/make.is';
+import { isUploadableMimeType } from '@gitroom/nestjs-libraries/upload/custom.upload.validation';
 
 const {
   CLOUDFLARE_ACCOUNT_ID,
@@ -80,6 +81,20 @@ export async function simpleUpload(
 
 export async function createMultipartUpload(req: Request, res: Response) {
   const { file, fileHash, contentType } = req.body;
+
+  // This request is the ONLY validation point in the whole multipart flow —
+  // every step after it (prepare-upload-parts, sign-part, complete) just
+  // moves bytes against an already-issued key/uploadId and never sees a
+  // mimetype again. Reject here or not at all. contentType is client-
+  // declared, same trust level CustomFileValidationPipe already accepts for
+  // uploadServer/uploadSimple's Multer-parsed mimetype — not a regression.
+  if (typeof contentType !== 'string' || !isUploadableMimeType(contentType)) {
+    return res.status(400).json({
+      source: { status: 400 },
+      message: 'Unsupported file type.',
+    });
+  }
+
   const fileExtension = path.extname(file.name); // Extract extension
   const randomFilename = generateRandomString() + fileExtension; // Append extension
 

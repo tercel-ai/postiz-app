@@ -7,6 +7,16 @@ import {
   PipeTransform,
 } from '@nestjs/common';
 
+/**
+ * Shared with r2.uploader.ts's createMultipartUpload, which validates the
+ * client-declared contentType the same way but has no Express.Multer.File to
+ * hand this pipe — that flow issues a presigned URL before any bytes reach
+ * this server, so a Multer-shaped file object never exists for it.
+ */
+export function isUploadableMimeType(mimeType: string): boolean {
+  return mimeType.startsWith('image/') || mimeType.startsWith('video/mp4');
+}
+
 @Injectable()
 export class CustomFileValidationPipe implements PipeTransform {
   async transform(value: any) {
@@ -21,9 +31,7 @@ export class CustomFileValidationPipe implements PipeTransform {
     // Set the maximum file size based on the MIME type
     const maxSize = this.getMaxSize(value.mimetype);
     const validation =
-      (value.mimetype.startsWith('image/') ||
-        value.mimetype.startsWith('video/mp4')) &&
-      value.size <= maxSize;
+      isUploadableMimeType(value.mimetype) && value.size <= maxSize;
 
     if (validation) {
       return value;
