@@ -10,7 +10,6 @@ import {
   Res,
   UploadedFile,
   UseInterceptors,
-  UsePipes,
 } from '@nestjs/common';
 import { Request, Response } from 'express';
 import { GetOrgFromRequest } from '@gitroom/nestjs-libraries/user/org.from.request';
@@ -83,10 +82,9 @@ export class MediaController {
 
   @Post('/upload-server')
   @UseInterceptors(FileInterceptor('file'))
-  @UsePipes(new CustomFileValidationPipe())
   async uploadServer(
     @GetOrgFromRequest() org: Organization,
-    @UploadedFile() file: Express.Multer.File
+    @UploadedFile(new CustomFileValidationPipe()) file: Express.Multer.File
   ) {
     const uploadedFile = await this.storage.uploadFile(file);
     return this._mediaService.saveFile(
@@ -122,10 +120,16 @@ export class MediaController {
 
   @Post('/upload-simple')
   @UseInterceptors(FileInterceptor('file'))
-  @UsePipes(new CustomFileValidationPipe())
   async uploadSimple(
     @GetOrgFromRequest() org: Organization,
-    @UploadedFile('file') file: Express.Multer.File,
+    // Scoped to this param, not @UsePipes at the method level: that applies
+    // the pipe to EVERY parameter, including preventSave below — which is
+    // `undefined` on any request that omits it (the common case, since it
+    // defaults to 'false'), and CustomFileValidationPipe throws 'No file
+    // provided.' on any falsy value. Wiring it here means it only ever sees
+    // the actual file.
+    @UploadedFile('file', new CustomFileValidationPipe())
+    file: Express.Multer.File,
     @Body('preventSave') preventSave: string = 'false'
   ) {
     const getFile = await this.storage.uploadFile(file);
