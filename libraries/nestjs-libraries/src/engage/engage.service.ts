@@ -24,6 +24,13 @@ import { OperationPlanRepository } from '@gitroom/nestjs-libraries/database/pris
 import { MediaService } from '@gitroom/nestjs-libraries/database/prisma/media/media.service';
 import { UploadFactory } from '@gitroom/nestjs-libraries/upload/upload.factory';
 import { hasValidMediaExtension } from '@gitroom/helpers/utils/valid.url.path';
+import { limitToOnePostableVideo } from '@gitroom/helpers/utils/postable-media';
+import {
+  dataUriToBuffer,
+  isXAnimatedGifMp4,
+  transcodeMp4ToAnimatedGif,
+  xAnimatedGifPosterUrl,
+} from '@gitroom/nestjs-libraries/engage/x-animated-gif';
 import { fetchMediaAsDataUri } from '@gitroom/nestjs-libraries/engage/safe-media-fetch';
 import { AiseeCreditService } from '@gitroom/nestjs-libraries/database/prisma/ai-pricing/aisee-credit.service';
 import {
@@ -1920,10 +1927,7 @@ export class EngageService implements OnApplicationBootstrap {
         // uploadSimple's bare axios.get would make a hostile post author an
         // SSRF vector. Download under guards first, hand storage an inert
         // data: URI — a shape it already ingests (the DALL-E path).
-        const dataUri = await fetchMediaAsDataUri(url, {
-          maxBytes: this._maxReferenceMediaBytes,
-          timeoutMs: this._referenceMediaTimeoutMs,
-        });
+        const dataUri = await this._referenceMediaDataUri(url, opportunityId);
         const uploaded = await this._storage.uploadSimple(dataUri);
         // uploadSimple names the file from the content type
         // (`mime.getExtension(...) || 'png'`), and third-party CDNs serve
@@ -1951,7 +1955,69 @@ export class EngageService implements OnApplicationBootstrap {
         );
       }
     }
-    return results;
+    return limitToOnePostableVideo(results, (dropped) =>
+      this.logger.warn(
+        `Dropping reference media ${dropped} for opportunity ${opportunityId}: ` +
+          'a post carries one video or several images, never a mix'
+      )
+    );
+  }
+
+  /**
+   * The inert data: URI to hand storage for one reference-media URL.
+   *
+   * Ordinary media is just downloaded under the SSRF guard. An X ANIMATED GIF
+   * is not ordinary: X stores it as an mp4, so re-hosting it verbatim makes a
+   * GIF into a "video", and a post carries one video or several images — a
+   * source with two GIFs then seeds a draft that cannot be published at all.
+   *
+   * Three steps, each a strict improvement on the next:
+   *
+   *   1. transcode the mp4 back to a real .gif — an IMAGE, so several
+   *      compose, and the X provider uploads it as `tweet_gif` with the
+   *      animation intact;
+   *   2. failing that (no ffmpeg on this host, clip too large, output over
+   *      budget), fetch X's own poster frame — a still, but still an image,
+   *      so nothing is dropped from a multi-GIF post;
+   *   3. failing that too, the mp4 as before, which limitToOnePostableVideo
+   *      will cap to one.
+   */
+  private async _referenceMediaDataUri(
+    url: string,
+    opportunityId: string
+  ): Promise<string> {
+    const fetchOpts = {
+      maxBytes: this._maxReferenceMediaBytes,
+      timeoutMs: this._referenceMediaTimeoutMs,
+    };
+    if (!isXAnimatedGifMp4(url)) {
+      return fetchMediaAsDataUri(url, fetchOpts);
+    }
+
+    const mp4 = await fetchMediaAsDataUri(url, fetchOpts);
+    const gif = await transcodeMp4ToAnimatedGif(dataUriToBuffer(mp4));
+    if (gif) {
+      return `data:image/gif;base64,${gif.toString('base64')}`;
+    }
+
+    const poster = xAnimatedGifPosterUrl(url);
+    if (poster) {
+      try {
+        const still = await fetchMediaAsDataUri(poster, fetchOpts);
+        this.logger.warn(
+          `Reference media ${url} for opportunity ${opportunityId}: could not ` +
+            'transcode the GIF, attaching X\'s poster frame instead'
+        );
+        return still;
+      } catch {
+        // Poster unavailable — fall through to the mp4 below.
+      }
+    }
+    this.logger.warn(
+      `Reference media ${url} for opportunity ${opportunityId}: neither a GIF ` +
+        'transcode nor a poster frame was available, keeping the mp4'
+    );
+    return mp4;
   }
 
   /** Best-effort: a billing failure must not withhold a draft that was

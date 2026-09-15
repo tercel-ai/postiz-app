@@ -19,11 +19,49 @@ export const VALID_MEDIA_EXTENSIONS = [
   '.mp4',
 ] as const;
 
-/** Whether `path` ends in a MediaDto-acceptable extension (query string ignored). */
+/**
+ * Whether `path` names a file MediaDto will accept.
+ *
+ * Normally that is the extension on the path itself, with the query string
+ * ignored — `…/photo.jpg?name=large` is a jpg.
+ *
+ * Some CDNs put the format in the QUERY instead, and for those there is no
+ * path extension to find. X's link-preview card images are the case this was
+ * written for:
+ *
+ *   https://pbs.twimg.com/card_img/2099484736326418433/DnKAG7nW?format=jpg&name=orig
+ *
+ * That URL serves `image/jpeg` (verified live: HTTP 200, 53 KB) but its last
+ * path segment is a bare hash, and there is no extension-bearing form of it to
+ * rewrite to — `.jpg`, `.jpeg`, `:orig` and `/img.jpg` all 404 on that host,
+ * only `?format=` works. Rejecting it made every X post whose only picture is
+ * a link-preview card unusable, under an error that reads as "unsupported
+ * format" for an ordinary JPEG.
+ *
+ * Reading the declared format is not a weaker check than reading the path.
+ * Neither inspects bytes, and anyone who can name a file `x.jpg` can equally
+ * append `?format=jpg`. What constrains WHERE media may come from is
+ * ValidUrlPath / RESTRICT_UPLOAD_DOMAINS below, which is untouched.
+ */
 export function hasValidMediaExtension(path: string): boolean {
-  const withoutQuery = path?.split?.('?')?.[0];
+  const [withoutQuery, query] = (path ?? '').split('?');
   if (!withoutQuery) return false;
-  return VALID_MEDIA_EXTENSIONS.some((ext) => withoutQuery.endsWith(ext));
+  if (VALID_MEDIA_EXTENSIONS.some((ext) => withoutQuery.endsWith(ext))) {
+    return true;
+  }
+  if (!query) return false;
+  // URLSearchParams rather than a regex: the format can sit anywhere in the
+  // query (`?name=orig&format=jpg` is served just as happily as the other
+  // order) and its value arrives percent-encoded.
+  let format: string | null = null;
+  try {
+    format = new URLSearchParams(query).get('format');
+  } catch {
+    return false;
+  }
+  if (!format) return false;
+  const declared = `.${format.trim().toLowerCase()}`;
+  return VALID_MEDIA_EXTENSIONS.some((ext) => ext === declared);
 }
 
 @ValidatorConstraint({ name: 'checkValidExtension', async: false })

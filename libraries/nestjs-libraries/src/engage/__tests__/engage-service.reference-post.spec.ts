@@ -30,6 +30,17 @@ vi.mock('@gitroom/nestjs-libraries/engage/safe-media-fetch', () => ({
   fetchMediaAsDataUri: (...args: any[]) => fetchMediaAsDataUri(...args),
 }));
 
+// The mp4→gif transcode shells out to ffmpeg and has its own suite
+// (x-animated-gif.spec.ts, which runs the real binary when one is present).
+// Here only the DECISION matters: does an X animated GIF get transcoded, and
+// what happens when it cannot be. The url helpers stay real — they are pure
+// regex and mocking them would hide a convention change.
+const transcodeMp4ToAnimatedGif = vi.fn(async () => null as Buffer | null);
+vi.mock('@gitroom/nestjs-libraries/engage/x-animated-gif', async (orig) => ({
+  ...((await orig()) as object),
+  transcodeMp4ToAnimatedGif: (...a: any[]) => transcodeMp4ToAnimatedGif(...a),
+}));
+
 function buildService(deps: {
   repo?: Record<string, any>;
   posts?: Record<string, any>;
@@ -114,6 +125,8 @@ const GEN_DTO = { strategy: 'EXPERT_ANSWER', brandStrength: 1, outputLength: 260
 
 beforeEach(() => {
   uploadSimple.mockReset();
+  transcodeMp4ToAnimatedGif.mockReset();
+  transcodeMp4ToAnimatedGif.mockResolvedValue(null);
   fetchMediaAsDataUri.mockReset();
   // Default: the guarded download succeeds, yielding an inert data: URI.
   fetchMediaAsDataUri.mockImplementation(
@@ -782,9 +795,12 @@ describe('EngageService.generateReferencePost', () => {
         'https://cdn.example.com/uploads/two.mp4'
       );
       const [dto] = posts.mapTypeToPost.mock.calls[0];
+      // Both were downloaded, re-hosted and saved (asserted above) — but only
+      // the image is ATTACHED. A post carries one video or several images,
+      // never a mix, so this set is capped before it reaches the draft; see
+      // 'prefers the images over the video when a set mixes them'.
       expect(dto.posts[0].value[0].image).toEqual([
         { id: 'media-one.jpg', path: 'https://cdn.example.com/uploads/one.jpg' },
-        { id: 'media-two.mp4', path: 'https://cdn.example.com/uploads/two.mp4' },
       ]);
     });
 
@@ -840,6 +856,177 @@ describe('EngageService.generateReferencePost', () => {
       ]);
     });
 
+    // X stores an animated GIF as a VIDEO, so re-hosting its mp4 verbatim
+    // turns a gif into a "video" and two of them into an unpublishable draft.
+    // The transcode puts it back: a .gif is an IMAGE, so several compose, and
+    // the X provider uploads image/gif as `tweet_gif` with the animation
+    // intact. Three steps, each a strict fallback from the last.
+    describe('X animated GIFs (stored as mp4, re-hosted as real gifs)', () => {
+      const GIF_A = 'https://video.twimg.com/tweet_video/HSOXegAbkAACBtP.mp4';
+      const GIF_B = 'https://video.twimg.com/tweet_video/HSOXfSTbEAA4qB2.mp4';
+
+      it('transcodes both GIFs so BOTH survive onto the post', async () => {
+        const { service, posts } = buildService({
+          repo: { getOpportunityMediaUrls: vi.fn(async () => [GIF_A, GIF_B]) },
+        });
+        transcodeMp4ToAnimatedGif.mockResolvedValue(Buffer.from('GIF89a-fake'));
+        uploadSimple
+          .mockResolvedValueOnce('https://cdn.example.com/uploads/a.gif')
+          .mockResolvedValueOnce('https://cdn.example.com/uploads/b.gif');
+
+        const result = await service.generateReferencePost(ORG, 'user1', 'opp1', {
+          ...GEN_DTO,
+          includeReferenceMedia: true,
+        });
+
+        expect(result.postId).toBe('post1');
+        // Storage was handed GIF bytes, not the mp4 — that is what makes the
+        // attachment an image rather than a video.
+        for (const [arg] of uploadSimple.mock.calls) {
+          expect(arg).toMatch(/^data:image\/gif;base64,/);
+        }
+        // And nothing was capped away, because two images are legal.
+        const [dto] = posts.mapTypeToPost.mock.calls[0];
+        expect(dto.posts[0].value[0].image).toEqual([
+          { id: 'media-a.gif', path: 'https://cdn.example.com/uploads/a.gif' },
+          { id: 'media-b.gif', path: 'https://cdn.example.com/uploads/b.gif' },
+        ]);
+      });
+
+      it('falls back to X’s poster frame when the transcode cannot run', async () => {
+        // No ffmpeg on the host, clip too big, or output over budget. A still
+        // is still an IMAGE, so both GIFs keep a place on the post.
+        const { service, posts } = buildService({
+          repo: { getOpportunityMediaUrls: vi.fn(async () => [GIF_A, GIF_B]) },
+        });
+        transcodeMp4ToAnimatedGif.mockResolvedValue(null);
+        uploadSimple
+          .mockResolvedValueOnce('https://cdn.example.com/uploads/a.jpg')
+          .mockResolvedValueOnce('https://cdn.example.com/uploads/b.jpg');
+
+        await service.generateReferencePost(ORG, 'user1', 'opp1', {
+          ...GEN_DTO,
+          includeReferenceMedia: true,
+        });
+
+        // The poster url is DERIVED from the mp4 url — same media id.
+        expect(fetchMediaAsDataUri).toHaveBeenCalledWith(
+          'https://pbs.twimg.com/tweet_video_thumb/HSOXegAbkAACBtP.jpg',
+          expect.anything()
+        );
+        const [dto] = posts.mapTypeToPost.mock.calls[0];
+        expect(dto.posts[0].value[0].image).toHaveLength(2);
+      });
+
+      it('keeps the mp4 (capped to one) when even the poster cannot be fetched', async () => {
+        const { service, posts } = buildService({
+          repo: { getOpportunityMediaUrls: vi.fn(async () => [GIF_A, GIF_B]) },
+        });
+        transcodeMp4ToAnimatedGif.mockResolvedValue(null);
+        fetchMediaAsDataUri.mockImplementation(async (url: string) => {
+          if (url.includes('tweet_video_thumb')) throw new Error('404');
+          return `data:video/mp4;base64,${Buffer.from(url).toString('base64')}`;
+        });
+        uploadSimple
+          .mockResolvedValueOnce('https://cdn.example.com/uploads/a.mp4')
+          .mockResolvedValueOnce('https://cdn.example.com/uploads/b.mp4');
+
+        await service.generateReferencePost(ORG, 'user1', 'opp1', {
+          ...GEN_DTO,
+          includeReferenceMedia: true,
+        });
+
+        // Last resort: still publishable, just one GIF poorer.
+        const [dto] = posts.mapTypeToPost.mock.calls[0];
+        expect(dto.posts[0].value[0].image).toEqual([
+          { id: 'media-a.mp4', path: 'https://cdn.example.com/uploads/a.mp4' },
+        ]);
+      });
+
+      it('never transcodes a REAL video', async () => {
+        // ext_tw_video is actual video content; turning it into a gif would be
+        // an enormous size and quality regression.
+        const { service } = buildService({
+          repo: {
+            getOpportunityMediaUrls: vi.fn(async () => [
+              'https://video.twimg.com/ext_tw_video/1/pu/vid/720x1280/real.mp4',
+            ]),
+          },
+        });
+        uploadSimple.mockResolvedValue('https://cdn.example.com/uploads/real.mp4');
+
+        await service.generateReferencePost(ORG, 'user1', 'opp1', {
+          ...GEN_DTO,
+          includeReferenceMedia: true,
+        });
+
+        expect(transcodeMp4ToAnimatedGif).not.toHaveBeenCalled();
+      });
+    });
+
+    it('carries at most one video, so the seeded draft can actually be published', async () => {
+      // X stores an animated GIF as a VIDEO — its only playable form is an
+      // mp4 — so a post with two GIFs archives as two .mp4 urls. Measured on
+      // x.com/vaato5455/status/2099688427440759097: two `animated_gif`
+      // entries, which became files.aisee.live/RtNhFVwvFR.mp4 +
+      // 8nUclyou1z.mp4. Seeding both makes the draft unpublishable — the
+      // frontend refuses it with "Main post: only one video or all images
+      // allowed" and the user cannot tell which attachment is at fault.
+      const { service, posts, media } = buildService({
+        repo: {
+          getOpportunityMediaUrls: vi.fn(async () => [
+            'https://video.twimg.com/tweet_video/one.mp4',
+            'https://video.twimg.com/tweet_video/two.mp4',
+          ]),
+        },
+      });
+      uploadSimple
+        .mockResolvedValueOnce('https://cdn.example.com/uploads/one.mp4')
+        .mockResolvedValueOnce('https://cdn.example.com/uploads/two.mp4');
+
+      const result = await service.generateReferencePost(ORG, 'user1', 'opp1', {
+        ...GEN_DTO,
+        includeReferenceMedia: true,
+      });
+
+      expect(result.postId).toBe('post1');
+      const [dto] = posts.mapTypeToPost.mock.calls[0];
+      expect(dto.posts[0].value[0].image).toEqual([
+        { id: 'media-one.mp4', path: 'https://cdn.example.com/uploads/one.mp4' },
+      ]);
+      // Both were re-hosted before the cap applied — the second is simply not
+      // attached to the post, not deleted from the library.
+      expect(media!.saveFile).toHaveBeenCalledTimes(2);
+    });
+
+    it('prefers the images over the video when a set mixes them', async () => {
+      const { service, posts } = buildService({
+        repo: {
+          getOpportunityMediaUrls: vi.fn(async () => [
+            'https://video.twimg.com/tweet_video/clip.mp4',
+            'https://pbs.twimg.com/media/a.jpg',
+            'https://pbs.twimg.com/media/b.jpg',
+          ]),
+        },
+      });
+      uploadSimple
+        .mockResolvedValueOnce('https://cdn.example.com/uploads/clip.mp4')
+        .mockResolvedValueOnce('https://cdn.example.com/uploads/a.jpg')
+        .mockResolvedValueOnce('https://cdn.example.com/uploads/b.jpg');
+
+      const result = await service.generateReferencePost(ORG, 'user1', 'opp1', {
+        ...GEN_DTO,
+        includeReferenceMedia: true,
+      });
+
+      expect(result.postId).toBe('post1');
+      const [dto] = posts.mapTypeToPost.mock.calls[0];
+      expect(dto.posts[0].value[0].image).toEqual([
+        { id: 'media-a.jpg', path: 'https://cdn.example.com/uploads/a.jpg' },
+        { id: 'media-b.jpg', path: 'https://cdn.example.com/uploads/b.jpg' },
+      ]);
+    });
+
     it('drops a re-hosted file whose extension MediaDto would reject, instead of failing the whole post', async () => {
       // uploadSimple names files from the response Content-Type, and X serves
       // image/avif while Reddit serves video/webm — both yield extensions
@@ -875,7 +1062,7 @@ describe('EngageService.generateReferencePost', () => {
     });
 
     it('accepts every extension MediaDto allows', async () => {
-      const { service, posts } = buildService({
+      const { service, posts, media } = buildService({
         repo: {
           getOpportunityMediaUrls: vi.fn(async () => [
             'https://x.com/a',
@@ -896,8 +1083,14 @@ describe('EngageService.generateReferencePost', () => {
         includeReferenceMedia: true,
       });
 
+      // What this test is about: NONE of the four was dropped by the
+      // EXTENSION check — every one reached saveFile.
+      expect(media!.saveFile).toHaveBeenCalledTimes(4);
+      // Attachment is a separate rule. The mp4 cannot ride along with three
+      // images, so the draft gets the images; see 'prefers the images over
+      // the video when a set mixes them'.
       const [dto] = posts.mapTypeToPost.mock.calls[0];
-      expect(dto.posts[0].value[0].image).toHaveLength(4);
+      expect(dto.posts[0].value[0].image).toHaveLength(3);
     });
 
     it('caps the number of media items fetched', async () => {
