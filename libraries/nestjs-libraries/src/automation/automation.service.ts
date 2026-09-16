@@ -15,8 +15,11 @@ import {
   EngagePlatformPolicy,
   readEngageConfigMetadata,
 } from '@gitroom/nestjs-libraries/engage/engage-config-metadata';
+import { normalizeReplyPolicyWindow } from '@gitroom/nestjs-libraries/engage/reply-policy.validator';
 import {
   daysSince,
+  localDayRange,
+  replyGapMinutes,
   resolveReplySchedule,
   type ReplyScheduleInput,
   type ReplyScheduleOptions,
@@ -122,7 +125,10 @@ export class AutomationService {
     // before it ever queries EngageSentReply (engage-auto-reply.service.ts) —
     // a policy key written with different casing must still resolve.
     const lowerPlatformKeys = platformKeys.map((platform) => platform.toLowerCase());
-    const [lastSentAtByPlatform, firstSentAtByPlatform] = await Promise.all([
+    const nowForCounts = new Date();
+    const dayForCounts = localDayRange(commonTimezone, nowForCounts);
+    const [lastSentAtByPlatform, firstSentAtByPlatform, sentTodayByPlatform] =
+      await Promise.all([
       repliesActive && platformKeys.length
         ? this._engageRepository.getLastSentReplyAtByPlatform(
             org.id,
@@ -138,8 +144,28 @@ export class AutomationService {
             lowerPlatformKeys
           )
         : {},
+      // The day's progress, because the gap the driver waits shrinks as a
+      // platform works through its limit — a page reporting the flat
+      // window/limit would drift further from the driver with every reply.
+      platformKeys.length
+        ? this._engageRepository.countTodaySentRepliesByPlatform(
+            org.id,
+            projectId,
+            lowerPlatformKeys,
+            dayForCounts.since,
+            dayForCounts.until
+          )
+        : {},
     ]);
-    const now = new Date();
+    const now = nowForCounts;
+    // Resolved from the EFFECTIVE schedules, not the stored blob: a platform
+    // that never set a zone is driven in UTC, and a hoist that ignored it would
+    // state a zone that platform is not enforced in — the exact bug the
+    // publishing hoist was written to avoid.
+    const commonReplyTimezone = resolveCommonReplyTimezone(
+      stripPublishingKeys(storedPolicies),
+      { ceilings, warmupTiers, channelDailyLimits }
+    );
 
     return {
       projectId,
@@ -186,6 +212,14 @@ export class AutomationService {
         scanEnabled: config?.enabled ?? false,
         // The one reply switch this page has.
         autoReplyEnabled: settings.autoReplyEnabled,
+        // The zone every `activeHours` below is expressed in, unless that
+        // platform says otherwise — the same hoist, with the same unanimity
+        // rule, that `publishing.timezone` uses. A project writes ONE zone for
+        // all its platforms (the browser's), so repeating it per platform was
+        // the same string seven times; absent when they genuinely disagree.
+        ...(commonReplyTimezone !== undefined
+          ? { timezone: commonReplyTimezone }
+          : {}),
         // ONE entry per platform, same shape rationale as publishing above.
         //
         // Connected reply ACCOUNTS are deliberately absent, because Automation
@@ -216,7 +250,9 @@ export class AutomationService {
           repliesActive,
           lastSentAtByPlatform,
           firstSentAtByPlatform,
-          { minGapMinutes: pacing.minGapMinutes, ceilings, warmupTiers, channelDailyLimits },
+          { ceilings, warmupTiers, channelDailyLimits },
+          { minGapMinutes: pacing.minGapMinutes, sentTodayByPlatform },
+          commonReplyTimezone,
           now
         ),
       },
@@ -725,10 +761,17 @@ function replaceReplyPolicies(
 
   for (const [platform, policy] of Object.entries(incoming)) {
     const key = platform.toLowerCase();
-    const merged = {
+    const merged: Record<string, unknown> = {
       ...(out[key] ?? {}),
-      ...stripPublishingKeysFromPolicy(policy),
+      // `activeHours` folded down to the stored window keys first, so the blob
+      // keeps one spelling of the window however the caller wrote it.
+      ...stripPublishingKeysFromPolicy(normalizeReplyPolicyWindow(policy)),
     };
+    // An explicit `undefined` (a cleared timezone) is a deletion, not a value:
+    // stored as-is it would be a JSON `null` the readers have to special-case.
+    for (const [field, value] of Object.entries(merged)) {
+      if (value === undefined) delete merged[field];
+    }
     if (Object.keys(merged).length) out[key] = merged;
     else delete out[key];
   }
@@ -770,12 +813,41 @@ function stripPublishingKeys(
  * still echoed back inside the policy — this function copies the blob — but no
  * number on this page is computed from it any more.
  */
+/**
+ * The one timezone every platform's ACTIVE HOURS share, or undefined when they
+ * differ — the reply half of `resolveCommonTimezone`, and unanimous by the same
+ * rule for the same reason.
+ *
+ * A platform with no stored zone is not "unset", it is UTC: it does not agree
+ * with a sibling that names one, and hoisting that sibling's zone would state
+ * the wrong zone for it.
+ */
+function resolveCommonReplyTimezone(
+  policies: Record<string, Record<string, unknown>>,
+  options: ReplyScheduleOptions
+): string | undefined {
+  const platforms = Object.keys(policies);
+  if (!platforms.length) return undefined;
+  const zones = new Set(
+    platforms.map(
+      (platform) =>
+        resolveReplySchedule(policies[platform] as ReplyScheduleInput, platform, options)
+          .timezone ?? ''
+    )
+  );
+  if (zones.size !== 1) return undefined;
+  const [only] = [...zones];
+  return only || undefined;
+}
+
 function withResolvedSchedule(
   policies: Record<string, Record<string, unknown>>,
   repliesActive: boolean,
   lastSentAtByPlatform: Record<string, Date>,
   firstSentAtByPlatform: Record<string, Date>,
   options: ReplyScheduleOptions,
+  gap: { minGapMinutes: number; sentTodayByPlatform: Record<string, number> },
+  commonTimezone: string | undefined,
   now: Date
 ): Record<string, Record<string, unknown>> {
   const out: Record<string, Record<string, unknown>> = {};
@@ -790,10 +862,18 @@ function withResolvedSchedule(
     let nextCheckAt: string | null = null;
     if (active) {
       const lastSentAt = lastSentAtByPlatform[platform.toLowerCase()];
+      // The SAME gap the driver will gate on, day's progress and jitter
+      // included — which is why the count below is fetched at all. A page
+      // computing the flat window/limit instead would report a later time than
+      // the driver actually waits for, and drift further from it with every
+      // reply the day places.
+      const gapMinutes = replyGapMinutes(schedule, now, {
+        sentToday: gap.sentTodayByPlatform[platform.toLowerCase()],
+        minGapMinutes: gap.minGapMinutes,
+        lastAt: lastSentAt ?? null,
+      });
       nextCheckAt = lastSentAt
-        ? new Date(
-            lastSentAt.getTime() + schedule.cadenceMinutes * 60_000
-          ).toISOString()
+        ? new Date(lastSentAt.getTime() + gapMinutes * 60_000).toISOString()
         : now.toISOString();
     }
     out[platform] = {
@@ -801,7 +881,12 @@ function withResolvedSchedule(
       activeHours: {
         start: schedule.windowStart,
         end: schedule.windowEnd,
-        ...(schedule.timezone ? { timezone: schedule.timezone } : {}),
+        // Stated only when it differs from the hoisted default, so the common
+        // case carries the zone once instead of once per platform — the same
+        // rule `buildPublishingPlatforms` applies to a publish window.
+        ...(schedule.timezone && schedule.timezone !== commonTimezone
+          ? { timezone: schedule.timezone }
+          : {}),
       },
       dailyReplyLimit: schedule.dailyReplyLimit,
       // Stated only while it is actually discounting something, so the common

@@ -880,6 +880,77 @@ describe('EngageAutoReplyService.getDueReplies — warm-up', () => {
   });
 });
 
+// BUDGET PACING. The gap between two replies is what is LEFT of the active
+// hours divided by what is still OWED today — so a day that falls behind speeds
+// up instead of finishing under its limit with hours of window unused.
+describe('EngageAutoReplyService.getDueReplies — budget pacing', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  // 09:00–17:00 across 4 replies. The fixtures below move `now` and `sentToday`
+  // to put the day ahead of or behind where it should be.
+  const paced = (over: Record<string, unknown>) => ({
+    configs: [
+      {
+        ...enabledConfig,
+        replyPolicies: {
+          reddit: {
+            autoReplyEnabled: true,
+            windowStart: '09:00',
+            windowEnd: '17:00',
+            dailyReplyLimit: 4,
+          },
+        },
+      },
+    ],
+    budget: budgetWith(),
+    candidates: [{ opportunityId: 'opp-1', score: 90, matchedKeywords: [] as string[] }],
+    pacing: { minGapMinutes: 10 },
+    ...over,
+  });
+
+  it('holds a day that is running ahead of its budget', async () => {
+    // 10:00, 3 of 4 already sent: 420 minutes left for the one still owed, and
+    // only 40 have passed since the last.
+    const { svc, repo } = makeService(
+      paced({ sentToday: 3, lastSentAt: new Date('2026-08-18T09:20:00Z') })
+    );
+
+    await svc.getDueReplies(org, new Date('2026-08-18T10:00:00Z'));
+
+    expect(repo.pickAutoReplyCandidates).not.toHaveBeenCalled();
+  });
+
+  // The self-correction the whole mechanism exists for: under the old flat
+  // window/limit this same state waited another 120 minutes and the day ended
+  // one reply short with the window closed.
+  it('releases a day that has fallen behind, on the same elapsed time', async () => {
+    // 15:00, nothing sent: 120 minutes left, 4 still owed — a 30-minute pace, and
+    // 40 minutes have passed.
+    const { svc, repo } = makeService(
+      paced({ sentToday: 0, lastSentAt: new Date('2026-08-18T14:20:00Z') })
+    );
+
+    await svc.getDueReplies(org, new Date('2026-08-18T15:00:00Z'));
+
+    expect(repo.pickAutoReplyCandidates).toHaveBeenCalled();
+  });
+
+  it('still refuses to go under the org-wide floor', async () => {
+    // Same catching-up day, but the operator has slowed everything to 90.
+    const { svc, repo } = makeService(
+      paced({
+        sentToday: 0,
+        lastSentAt: new Date('2026-08-18T14:20:00Z'),
+        pacing: { minGapMinutes: 90 },
+      })
+    );
+
+    await svc.getDueReplies(org, new Date('2026-08-18T15:00:00Z'));
+
+    expect(repo.pickAutoReplyCandidates).not.toHaveBeenCalled();
+  });
+});
+
 // SAME-CHANNEL CONCENTRATION. A daily total says nothing about spread, and
 // spread is what reddit's spam filter actually reads: three comments across
 // three subreddits is three people having a day, three in one subreddit is a
@@ -1589,8 +1660,8 @@ describe('EngageAutoReplyService.getReplyQueueStatus — mirrors the dispatch ga
   it('reports the LATER of the cadence and the floor', async () => {
     const { svc } = makeService({
       configs: [{ ...enabledConfig, replyPolicies: { reddit: { autoReplyEnabled: true } } }],
-      // The default schedule: 8 AM–6 PM across 4 replies, one every 150 minutes
-      // — so the cadence clears at 14:20.
+      // The default schedule leaves hours of window across 4 replies, so the
+      // cadence clears well after the floor does.
       lastSentAt: new Date('2026-08-18T11:50:00Z'),
       lastPlatformWriteAt: new Date('2026-08-18T11:55:00Z'), // floor clears at 12:10
       writeFloorMinutes: 15,
@@ -1598,7 +1669,14 @@ describe('EngageAutoReplyService.getReplyQueueStatus — mirrors the dispatch ga
 
     const rows = await svc.getReplyQueueStatus(org, new Date('2026-08-18T12:00:00Z'));
 
-    expect(rows[0].nextEligibleAt).toBe(new Date('2026-08-18T14:20:00Z').toISOString());
+    // The cadence is budget-derived and jittered, so the assertion is the
+    // RELATIONSHIP the row exists to report — whichever clock holds the reply
+    // back longer is the one shown — not a minute the jitter may move.
+    const reported = new Date(rows[0].nextEligibleAt!).getTime();
+    expect(reported).toBeGreaterThan(new Date('2026-08-18T12:10:00Z').getTime());
+    expect(reported).toBe(
+      new Date('2026-08-18T11:50:00Z').getTime() + rows[0].minGapMinutes * 60_000
+    );
   });
 
   it('resolves the pacing config ONCE, not per row', async () => {
@@ -1714,10 +1792,17 @@ describe('EngageAutoReplyService.getReplyQueueStatus', () => {
 
     const rows = await svc.getReplyQueueStatus(org, new Date('2026-08-18T12:00:00Z'));
 
-    // 10 minutes since the last reply, 120-minute spacing → still gated.
+    // 12:00 with nothing sent: 120 minutes of window left across 2 replies is a
+    // 60-minute pace, ±25% of jitter — and 10 minutes have passed, so the row
+    // is still gated whichever way the jitter fell.
     expect(rows[0].withinMinGap).toBe(false);
-    expect(rows[0].minGapMinutes).toBe(120);
-    expect(rows[0].nextEligibleAt).toBe(new Date('2026-08-18T13:50:00Z').toISOString());
+    expect(rows[0].minGapMinutes).toBeGreaterThanOrEqual(45);
+    expect(rows[0].minGapMinutes).toBeLessThanOrEqual(75);
+    expect(rows[0].nextEligibleAt).toBe(
+      new Date(
+        new Date('2026-08-18T11:50:00Z').getTime() + rows[0].minGapMinutes * 60_000
+      ).toISOString()
+    );
   });
 
   it('reports withinMinGap=true and nextEligibleAt=null once the spacing has elapsed', async () => {

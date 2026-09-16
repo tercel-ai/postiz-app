@@ -45,10 +45,11 @@ export function IsReplyPolicyMap(options?: ValidationOptions) {
         },
         defaultMessage() {
           return (
-            'each policy may set autoReplyEnabled as a boolean, windowStart/windowEnd as ' +
-            '"HH:MM" (both, and not equal), timezone as a non-empty string, ' +
-            'dailyReplyLimit as an integer >= 0, length as short|medium|long, and ' +
-            'mentionTags as an array of strings'
+            'each policy may set autoReplyEnabled as a boolean, activeHours as ' +
+            '{ start: "HH:MM", end: "HH:MM", timezone?: string } with start !== end ' +
+            '(or the legacy windowStart/windowEnd/timezone), dailyReplyLimit as an ' +
+            'integer >= 0, length as short|medium|long, and mentionTags as an array ' +
+            'of strings'
           );
         },
       },
@@ -65,6 +66,34 @@ function isReplyPolicy(entry: unknown): boolean {
     return false;
   }
 
+  // ACTIVE HOURS, in either spelling.
+  //
+  // `activeHours: { start, end, timezone? }` is the shape `GET /automation`
+  // reports and the shape a publish window already uses, so a client can write
+  // back what it read. The flat `windowStart`/`windowEnd`/`timezone` are the
+  // STORED column keys: older clients send them, and every GET echoes them
+  // back inside the policy blob, so a naive read-modify-write round trip
+  // carries both. Both are accepted and `activeHours` wins — see
+  // `normalizeReplyPolicyWindow`.
+  if (policy.activeHours !== undefined) {
+    if (
+      !policy.activeHours ||
+      typeof policy.activeHours !== 'object' ||
+      Array.isArray(policy.activeHours)
+    ) {
+      return false;
+    }
+    const w = policy.activeHours as Record<string, unknown>;
+    if (typeof w.start !== 'string' || !CLOCK_TIME.test(w.start)) return false;
+    if (typeof w.end !== 'string' || !CLOCK_TIME.test(w.end)) return false;
+    // start === end is a moment, not a window — and `withinLocalWindow` fails
+    // closed on it, so it would silently stop this platform replying at all.
+    if (w.start === w.end) return false;
+    if (w.timezone !== undefined && (typeof w.timezone !== 'string' || !w.timezone)) {
+      return false;
+    }
+  }
+
   const hasStart = policy.windowStart !== undefined;
   const hasEnd = policy.windowEnd !== undefined;
   // Both or neither: half a window is not a window, and the resolver would drop
@@ -77,8 +106,6 @@ function isReplyPolicy(entry: unknown): boolean {
     if (typeof policy.windowEnd !== 'string' || !CLOCK_TIME.test(policy.windowEnd)) {
       return false;
     }
-    // start === end is a moment, not a window — and `withinLocalWindow` fails
-    // closed on it, so it would silently stop this platform replying at all.
     if (policy.windowStart === policy.windowEnd) return false;
   }
 
@@ -112,4 +139,40 @@ function isReplyPolicy(entry: unknown): boolean {
   }
 
   return true;
+}
+
+/**
+ * Fold an `activeHours` object down to the stored window keys.
+ *
+ * The API speaks `{ start, end, timezone? }` — what `GET /automation` reports,
+ * and what a publish window already uses — while the column keeps
+ * `windowStart`/`windowEnd`/`timezone`. Publishing translates the same way
+ * (`savePublishing` writes `publishingWindow*` from a `windows` entry), so the
+ * shape a client reads is the shape it can write back without knowing the
+ * column at all.
+ *
+ * `activeHours` WINS over the flat keys when a body carries both, which a naive
+ * read-modify-write does: every GET echoes the stored keys back inside the
+ * policy blob alongside the `activeHours` it computed. Honouring the flat keys
+ * there would silently discard the edit the client actually made.
+ */
+export function normalizeReplyPolicyWindow(
+  policy: Record<string, unknown>
+): Record<string, unknown> {
+  const { activeHours, ...rest } = policy;
+  if (!activeHours || typeof activeHours !== 'object' || Array.isArray(activeHours)) {
+    return { ...rest };
+  }
+  const w = activeHours as Record<string, unknown>;
+  return {
+    ...rest,
+    windowStart: w.start,
+    windowEnd: w.end,
+    // Absent clears a stored zone rather than leaving it: the window the client
+    // just sent is the whole window, and a leftover zone from a previous save
+    // would enforce those hours somewhere the client never asked for.
+    ...(typeof w.timezone === 'string' && w.timezone
+      ? { timezone: w.timezone }
+      : { timezone: undefined }),
+  };
 }

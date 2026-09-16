@@ -304,13 +304,6 @@ export interface ResolvedReplySchedule {
    * undefined where the platform is unconstrained.
    */
   channelDailyLimit?: number;
-  /**
-   * Minutes between two replies, DERIVED from the two settings above — the
-   * window spread evenly across the limit. Never stored: it is a consequence of
-   * the schedule, and storing it beside the schedule is what let a cadence and
-   * a daily limit describe two different rates at once.
-   */
-  cadenceMinutes: number;
 }
 
 /** Minutes the window is open for, honouring a window that wraps past midnight. */
@@ -483,13 +476,6 @@ export function resolveReplyDailyLimit(
 
 /** Everything a schedule needs that does NOT come from the policy itself. */
 export interface ReplyScheduleOptions {
-  /**
-   * The org-wide minimum spacing (`engage_reply_pacing.minGapMinutes`), applied
-   * as a FLOOR under the derived cadence and never as a default beside it: an
-   * operator who slows every project down must not be undercut by a project
-   * that divides a wide window by a big limit.
-   */
-  minGapMinutes?: number;
   /** Ceilings in force, from `resolveReplyDailyCeilings`. Omit for the built-ins. */
   ceilings?: Record<string, number>;
   /**
@@ -523,7 +509,6 @@ export function resolveReplySchedule(
   policy: ReplyScheduleInput | null | undefined,
   platform: string,
   {
-    minGapMinutes = 0,
     ceilings,
     warmupDays,
     warmupTiers,
@@ -549,14 +534,6 @@ export function resolveReplySchedule(
   );
   const channelDailyLimit = channelDailyLimits[platform.toLowerCase()];
 
-  // A zero limit replies never, so there is no spacing to compute — the whole
-  // window is the gap. Guarded explicitly because the division below would
-  // otherwise return Infinity and every comparison against it would pass.
-  const derived =
-    dailyReplyLimit > 0
-      ? Math.max(1, Math.floor(windowMinutes(windowStart, windowEnd) / dailyReplyLimit))
-      : windowMinutes(windowStart, windowEnd);
-
   // Typed as a string, but this comes off a JSON column: a non-string here
   // would reach dayjs.tz and throw inside every gate that reads the schedule.
   const zone = typeof policy?.timezone === 'string' ? policy.timezone : '';
@@ -568,7 +545,6 @@ export function resolveReplySchedule(
     dailyReplyLimit,
     warmupFactor,
     ...(channelDailyLimit !== undefined ? { channelDailyLimit } : {}),
-    cadenceMinutes: Math.max(derived, minGapMinutes),
   };
 }
 
@@ -595,4 +571,131 @@ export function localDayRange(
   }
   const start = local.startOf('day');
   return { since: start.toDate(), until: start.add(1, 'day').toDate() };
+}
+
+/**
+ * Minutes left in this schedule's active hours, from `now`.
+ *
+ * 0 when the window is shut. A window that wraps past midnight is measured
+ * through the wrap, so 23:00 inside a 22:00–02:00 window has three hours left,
+ * not none.
+ */
+export function minutesLeftInWindow(
+  schedule: Pick<ResolvedReplySchedule, 'windowStart' | 'windowEnd' | 'timezone'>,
+  now: Date
+): number {
+  const start = clockTimeToMinutes(schedule.windowStart);
+  const end = clockTimeToMinutes(schedule.windowEnd);
+  if (start === null || end === null || start === end) return 0;
+
+  let local: dayjs.Dayjs;
+  try {
+    local = schedule.timezone ? dayjs(now).tz(schedule.timezone) : dayjs.utc(now);
+    if (!local.isValid()) return 0;
+  } catch {
+    return 0;
+  }
+  const minutes = local.hour() * 60 + local.minute();
+
+  if (start <= end) return minutes >= start && minutes < end ? end - minutes : 0;
+  // Wrapping window: the tail of today, or the head of tomorrow.
+  if (minutes >= start) return 1440 - minutes + end;
+  if (minutes < end) return end - minutes;
+  return 0;
+}
+
+/**
+ * A stable multiplier in [1 - spread, 1 + spread] derived from `seed`.
+ *
+ * DETERMINISTIC, and that is the whole point. `platform_pacing` draws its
+ * jitter once per operation and stores the result, because "drawing on every
+ * check would let a track that polls often re-roll until it got a short gap,
+ * which is the opposite of what the jitter is for" — and the reply gate is
+ * re-evaluated on every poll, five minutes apart. Deriving the factor from the
+ * LAST REPLY's timestamp gets the same guarantee with no stored state: every
+ * poll within one cycle computes the same gap, and the next cycle (a new
+ * timestamp) gets a different one.
+ */
+export function jitterFactor(
+  seed: number | null | undefined,
+  spread = REPLY_GAP_JITTER_SPREAD
+): number {
+  if (typeof seed !== 'number' || !Number.isFinite(seed)) return 1;
+  // xorshift-ish scramble of the epoch millis: adjacent timestamps must land on
+  // very different factors, or a cycle that starts a minute later than the last
+  // one gets almost the same gap and the pattern survives.
+  let x = Math.floor(seed) >>> 0;
+  x ^= x << 13;
+  x >>>= 0;
+  x ^= x >> 17;
+  x ^= x << 5;
+  x >>>= 0;
+  return 1 - spread + (x / 0xffffffff) * spread * 2;
+}
+
+/** ±25%: wide enough to break the pattern, narrow enough to keep the budget. */
+export const REPLY_GAP_JITTER_SPREAD = 0.25;
+
+export interface ReplyGapOptions {
+  /** Replies already sent today for this project+platform. */
+  sentToday?: number;
+  /** The org-wide floor (`engage_reply_pacing.minGapMinutes`). */
+  minGapMinutes?: number;
+  /**
+   * The last reply's timestamp, used BOTH as the jitter seed and as the anchor
+   * the caller compares against. Absent = no jitter (a preview, a test, or a
+   * platform that has never replied — where there is nothing to space from).
+   */
+  lastAt?: Date | null;
+}
+
+/**
+ * How long this platform must wait between two replies, right now.
+ *
+ * BUDGET-BASED, not a fixed division of the window. The old formula spread the
+ * whole window across the whole limit once and never looked again — a FLOOR, so
+ * any reply the day failed to place (no eligible opportunity at that minute, a
+ * send that failed, a closed browser) was lost for good and the account
+ * finished under its limit with hours of window unused. Dividing what is LEFT
+ * by what is still OWED self-corrects: fall behind and the gap shortens, run
+ * ahead and it stretches.
+ *
+ *   gap = minutes left in the window / replies still owed today
+ *
+ * Then jittered, because a reply every 48 minutes on the dot is the bot
+ * signature this product spends `platform_pacing` avoiding, and floored by the
+ * org-wide minimum so an operator can still slow everything down.
+ *
+ * Falls back to the flat `window / limit` when the caller does not know the
+ * day's progress, or when the window is shut (where the window gate has already
+ * refused and this number only feeds a projection).
+ */
+export function replyGapMinutes(
+  schedule: ResolvedReplySchedule,
+  now: Date,
+  { sentToday, minGapMinutes = 0, lastAt }: ReplyGapOptions = {}
+): number {
+  const span = windowMinutes(schedule.windowStart, schedule.windowEnd);
+  const limit = schedule.dailyReplyLimit;
+
+  // A zero limit replies never, so there is no spacing to compute — the whole
+  // window is the gap. Guarded explicitly because the divisions below would
+  // otherwise return Infinity and every comparison against it would pass.
+  if (limit <= 0) return Math.max(span, minGapMinutes);
+
+  const flat = Math.max(1, Math.floor(span / limit));
+
+  const owed = typeof sentToday === 'number' ? limit - sentToday : null;
+  const left = minutesLeftInWindow(schedule, now);
+  const paced =
+    owed !== null && owed > 0 && left > 0
+      ? Math.max(1, Math.floor(left / owed))
+      : flat;
+
+  const jittered = Math.round(paced * jitterFactor(lastAt ? lastAt.getTime() : null));
+
+  // Never longer than the window has left: the last reply of the day must stay
+  // reachable, or a gap drawn long at 17:50 parks it past closing time.
+  const bounded = left > 0 ? Math.min(jittered, Math.max(1, left)) : jittered;
+  return Math.max(1, bounded, minGapMinutes);
 }

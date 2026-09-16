@@ -54,6 +54,34 @@ describe.each(doors)('%s.replyPolicies validation', (_name, cls, body) => {
     expect(check(cls, body({ reddit: { autoReplyEnabled: 1 } }))).toEqual([field]);
   });
 
+  it('accepts the nested activeHours the GET reports', () => {
+    expect(
+      check(cls, body({ x: { activeHours: { start: '09:00', end: '17:00' } } }))
+    ).toEqual([]);
+    expect(
+      check(
+        cls,
+        body({ x: { activeHours: { start: '09:00', end: '17:00', timezone: 'UTC' } } })
+      )
+    ).toEqual([]);
+  });
+
+  it('holds activeHours to the same rules as the flat keys', () => {
+    expect(check(cls, body({ x: { activeHours: { start: '9am', end: '17:00' } } }))).toEqual([
+      field,
+    ]);
+    // Half a window is not a window.
+    expect(check(cls, body({ x: { activeHours: { start: '09:00' } } }))).toEqual([field]);
+    // start === end is a moment, and the gate fails closed on it.
+    expect(
+      check(cls, body({ x: { activeHours: { start: '09:00', end: '09:00' } } }))
+    ).toEqual([field]);
+    expect(check(cls, body({ x: { activeHours: 'all day' } }))).toEqual([field]);
+    expect(
+      check(cls, body({ x: { activeHours: { start: '09:00', end: '17:00', timezone: '' } } }))
+    ).toEqual([field]);
+  });
+
   it('rejects a malformed active-hours window', () => {
     expect(check(cls, body({ x: { windowStart: '9am', windowEnd: '18:00' } }))).toEqual([
       field,

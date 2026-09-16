@@ -153,9 +153,16 @@ export class SaveAutomationRepliesDto {
 
   /**
    * Per-platform REPLY policy: what a reply says (strategy, length, mention
-   * tags) and when it may be sent — `windowStart`/`windowEnd`/`timezone` are
-   * that platform's ACTIVE HOURS and `dailyReplyLimit` its replies-per-day
-   * ceiling.
+   * tags) and when it may be sent — `activeHours` is that platform's window and
+   * `dailyReplyLimit` its replies-per-day ceiling.
+   *
+   * `activeHours: { start, end, timezone? }` is the shape `GET /automation`
+   * reports and the shape a publish window already uses, so a client writes
+   * back exactly what it read. The flat `windowStart`/`windowEnd`/`timezone`
+   * are the stored column keys; they are still accepted for older clients, and
+   * `activeHours` wins when a body carries both (which a read-modify-write
+   * does, since the GET echoes the stored keys back beside the computed
+   * `activeHours`).
    *
    * Those two ARE the schedule. How long the driver waits between two replies
    * is derived from them (the window spread across the limit) rather than set

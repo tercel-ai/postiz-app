@@ -349,6 +349,13 @@ does **not** create an `EngageConfig` row for a project that has never used Enga
     // The managed-reply switch.
     "autoReplyEnabled": false,
 
+    // The zone every `activeHours` below is expressed in, unless that platform
+    // says otherwise — the same hoist, with the same unanimity rule, that
+    // `publishing.timezone` uses. Absent when the platforms genuinely disagree,
+    // or when they all run on UTC (a platform with no zone is UTC, not
+    // "unset", so it does not agree with a sibling that names one).
+    "timezone": "Asia/Shanghai",
+
     // ONE entry per platform: that platform's reply policy.
     //
     // Connected reply ACCOUNTS are deliberately absent. Automation never picks
@@ -389,14 +396,16 @@ does **not** create an `EngageConfig` row for a project that has never used Enga
       "x": {
         "autoReplyEnabled": true,
         "length": "short",
-        "activeHours": { "start": "08:00", "end": "18:00", "timezone": "Asia/Shanghai" },
+        // No `timezone` here: it matches the hoisted one above.
+        "activeHours": { "start": "08:00", "end": "18:00" },
         "dailyReplyLimit": 4,
         "nextCheckAt": "2026-08-21T15:30:00.000Z"
       },
       "reddit": {
         "autoReplyEnabled": true,
         "length": "medium",
-        "activeHours": { "start": "08:00", "end": "18:00" },
+        // Stated because it DIFFERS from the hoisted zone.
+        "activeHours": { "start": "08:00", "end": "18:00", "timezone": "Europe/Berlin" },
         // 20 was asked for. reddit's safety ceiling is 25, but this account has
         // only been driven for two days, so the ceiling is 25 × 0.3 = 7.
         "dailyReplyLimit": 7,
@@ -418,14 +427,39 @@ derived from them rather than configured beside them:
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `windowStart` / `windowEnd` / `timezone` | `08:00`–`18:00`, UTC when no zone is named | the hours this account may be seen replying in |
-| `dailyReplyLimit` | `4`, clamped to the platform's ceiling × warm-up | replies per LOCAL day (the day rolls over in `timezone`) |
+| `dailyReplyLimit` | `4`, clamped to the platform's ceiling × warm-up | replies per LOCAL day (the day rolls over in `timezone`); also the denominator the spacing is paced against |
 
 ```
-spacing = max(active-hours minutes / dailyReplyLimit, engage_reply_pacing.minGapMinutes)
+pace    = minutes LEFT in the active hours / replies still OWED today
+spacing = max(clamp(pace × jitter, 1, minutes left), engage_reply_pacing.minGapMinutes)
 ```
 
-So 08:00–18:00 with 4 replies is one every 150 minutes. The org-wide
-`minGapMinutes` (default 25) is a FLOOR under that, never a default beside it.
+**Budget-based, not a flat division of the window.** At 09:00 with an
+08:00–18:00 window and nothing sent, 600 minutes across 4 replies is a
+150-minute pace. By 15:00 with one sent, it is 180 minutes across the 3 still
+owed — 60 minutes. The gap self-corrects: a day that falls behind speeds up, a
+day running ahead stretches out.
+
+The flat `window / limit` it replaced was a FLOOR that never looked again, so
+every reply the day failed to place (no eligible opportunity at that minute, a
+send that failed, a closed browser) was lost for good and the account finished
+under its limit with hours of window unused. Measured against a day where 80% of
+poll moments have something worth replying to and 10% of sends fail, 8h/10
+replies completed 51% of the time under the flat gap and 100% under this one.
+
+**Jittered by ±25%**, because a reply every 150 minutes on the dot is the same
+bot signature `platform_pacing` spends its ranges avoiding. The factor is
+DERIVED from the last reply's timestamp rather than drawn per check: the gate is
+re-evaluated every poll, and a fresh draw each time would let it re-roll until
+it got a short gap. Within one cycle the factor is fixed, so the gap only ever
+tightens as the window drains — it never bounces.
+
+**Never past the end of the window**, or a gap drawn long at 16:50 would park
+the day's last reply after closing time. And never under `minGapMinutes`
+(default **10**), the org-wide floor an operator can raise to slow every project
+down at once — raise it above a platform's derived pace, though, and it becomes
+the binding constraint and silently caps that platform under its configured
+daily limit.
 
 `dailyReplyLimit` in that formula is the EFFECTIVE one — after the safety clamp
 and the warm-up discount — so a warming-up account is spaced further apart as
@@ -547,7 +581,10 @@ nextCheckAt = (last reply GENERATED on this platform, or now if never) + spacing
 ```
 
 The spacing is the derived one above — the same value the driver gates on, from
-the same anchor, so the two cannot disagree.
+the same anchor, so the two cannot disagree. Because the pace tracks the
+REMAINING window, a client polling this endpoint sees the value move EARLIER as
+the day goes on, never later: treat it as an upper bound that converges, not as
+a fixed appointment.
 
 **The anchor is the last reply GENERATED, not sent.** It reads
 `EngageSentReply.createdAt`, which is written when the backend drafts a reply,
@@ -1004,27 +1041,43 @@ Save the managed-reply half: the config flags and the per-platform reply policy.
   // to leave every policy untouched.
   //
   // What a reply SAYS (strategy, length, mention tags) and WHEN it may be sent
-  // (`windowStart`/`windowEnd`/`timezone` = active hours, `dailyReplyLimit` =
-  // replies per local day) share one object. Omitting the schedule keys runs
-  // that platform on the defaults — see "The reply schedule" above.
+  // (`activeHours`, `dailyReplyLimit`) share one object. Omitting the schedule
+  // keys runs that platform on the defaults — see "The reply schedule" above.
+  //
+  // `activeHours` is the same `{ start, end, timezone? }` a publish window
+  // uses and the same shape the GET reports, so a client writes back exactly
+  // what it read.
   "policies": {
     "x": {
       "autoReplyEnabled": true,
       "length": "short",
       "mentionTags": ["@acme"],
-      "windowStart": "08:00",
-      "windowEnd": "18:00",
-      "timezone": "Asia/Shanghai",
+      "activeHours": { "start": "08:00", "end": "18:00", "timezone": "Asia/Shanghai" },
       "dailyReplyLimit": 4
     }
   }
 }
 ```
 
+> **Two spellings of the window, and `activeHours` wins.** The column stores
+> `windowStart` / `windowEnd` / `timezone`, and the GET echoes those stored keys
+> back inside the policy blob beside the `activeHours` it computed — so a
+> read-modify-write carries both. The flat keys are still accepted for older
+> clients, but when a body has both, `activeHours` is the one applied: honouring
+> the echoed keys would silently discard the edit the client just made. An
+> `activeHours` that names no `timezone` CLEARS a stored one, because the window
+> a client sends is the whole window.
+
+**Unlike publishing**, the window is not a separate `windows` map. `policies` is
+already keyed by platform, so a second map keyed the same way would mean writing
+into two places to configure one platform; publishing needs one only because its
+`platforms` is a list.
+
 **Validated at the boundary**, by the same constraint `POST /engage/config` uses
 — one blob, two doors, one rule. `autoReplyEnabled` must be a boolean,
-`windowStart`/`windowEnd` `"HH:MM"` (both or neither, and not equal), `timezone`
-a non-empty string, `dailyReplyLimit` a whole number ≥ 0, `length` one of
+`activeHours` `{ start: "HH:MM", end: "HH:MM", timezone?: string }` with
+`start !== end` (or the legacy `windowStart`/`windowEnd`/`timezone`, both or
+neither), `dailyReplyLimit` a whole number ≥ 0, `length` one of
 `short|medium|long`, `mentionTags` an array of strings. A malformed one is a
 `400` rather than a `200` that silently stores the default — the caller would
 otherwise only notice when the number it set was not the number being enforced.

@@ -27,6 +27,7 @@ import {
   clockTimeToMinutes,
   daysSince,
   localDayRange,
+  replyGapMinutes,
   resolveChannelDailyLimits,
   resolveReplyDailyCeilings,
   resolveReplySchedule,
@@ -106,7 +107,13 @@ export interface EngageReplyPacing {
    * call.
    */
   maxPerPoll: number;
-  /** Minimum spacing between two replies for the SAME project+platform. */
+  /**
+   * FLOOR under the gap the schedule derives for a project+platform — never a
+   * cadence of its own. The gap itself is "what is left of the active hours
+   * divided by what is still owed today" (engage-reply-schedule.ts); this only
+   * stops that arithmetic going somewhere absurd, and lets an operator slow
+   * every project down at once.
+   */
   minGapMinutes: number;
   /**
    * REMOVED — the write window now lives in `platform_pacing`, per platform and
@@ -154,7 +161,13 @@ export interface EngageReplyPacing {
 
 export const DEFAULT_REPLY_PACING: EngageReplyPacing = {
   maxPerPoll: 1,
-  minGapMinutes: 25,
+  // 10, not 25. This is a FLOOR under a gap the schedule derives, and at 25 it
+  // silently became the binding constraint on any busy platform: x may be
+  // configured for 30 replies a day, which across a ten-hour window is one
+  // every twenty minutes — a 25-minute floor caps that account at 24/day and
+  // says nothing. 10 sits under every gap a legitimate configuration derives
+  // while still catching a schedule that has gone wrong.
+  minGapMinutes: 10,
   // No activeHoursUtc: the write window moved to platform_pacing. Seeding it
   // here again would re-create the second source of truth this removed.
   // 0 = defer to the ingest gate; see the field doc above.
@@ -262,10 +275,15 @@ export class EngageAutoReplyService implements OnModuleInit {
             type: 'json',
             description:
               'Unattended engage-reply pacing: how many drafts one poll may hand out PER ' +
-              'PLATFORM, minimum spacing per project+platform, the minimum opportunity ' +
-              'score, and the claim lease (how long a reply handed to a browser stays ' +
-              'spoken for before it is offered again). The WRITE WINDOW is not here: it ' +
-              'moved to platform_pacing[*].window, shared with publishing.',
+              'PLATFORM, the FLOOR under the spacing per project+platform, the minimum ' +
+              'opportunity score, and the claim lease (how long a reply handed to a ' +
+              'browser stays spoken for before it is offered again). minGapMinutes is a ' +
+              'floor, not a cadence: the real gap is derived per platform from what is ' +
+              'LEFT of its active hours divided by what is still OWED against its daily ' +
+              'limit, then jittered. Raising this above a platform\'s derived gap makes it ' +
+              'the binding constraint and silently caps that platform under its configured ' +
+              'daily limit. The WRITE WINDOW is not here: it moved to ' +
+              'platform_pacing[*].window, shared with publishing.',
             defaultValue: DEFAULT_REPLY_PACING,
           }
         );
@@ -555,7 +573,6 @@ export class EngageAutoReplyService implements OnModuleInit {
         // platform, so the window, the day's ceiling and the spacing can never
         // be enforced against different numbers.
         const schedule = resolveReplySchedule(policy, platform, {
-          minGapMinutes: pacing.minGapMinutes,
           ceilings,
           warmupDays: daysSince(firstSentAt[platform], now),
           warmupTiers,
@@ -628,13 +645,19 @@ export class EngageAutoReplyService implements OnModuleInit {
           this._engageRepository.getLastSentReplyAt(org.id, projectId, platform),
           this._engageRepository.getLastPlatformWriteAt(org.id, platform),
         ]);
-        // DERIVED from the schedule — the active hours spread across the daily
-        // limit — with the org-wide `minGapMinutes` as the floor under it, never
-        // as a default beside it (`resolveReplySchedule` applies both). The
-        // retired `checkIntervalMinutes` is deliberately not consulted: a stored
-        // 8-hour cadence would let two replies through a 10-hour window and
-        // silently contradict the 4/day the same policy asks for.
-        const cadenceMinutes = schedule.cadenceMinutes;
+        // What is LEFT of the window divided by what is still OWED today, then
+        // jittered off `lastAt`. Not a fixed division of the whole window: that
+        // was a floor, so a reply the day failed to place was lost for good and
+        // the account finished under its limit with hours of window unused.
+        //
+        // The retired `checkIntervalMinutes` is deliberately not consulted: a
+        // stored 8-hour cadence would let two replies through a 10-hour window
+        // and silently contradict the 4/day the same policy asks for.
+        const cadenceMinutes = replyGapMinutes(schedule, now, {
+          sentToday,
+          minGapMinutes: pacing.minGapMinutes,
+          lastAt,
+        });
         if (
           lastAt &&
           dayjs.utc(now).diff(dayjs.utc(lastAt), 'minute') < cadenceMinutes
@@ -855,7 +878,6 @@ export class EngageAutoReplyService implements OnModuleInit {
         const warmupDays = daysSince(firstSentAt.get(platform) ?? null, now);
 
         const schedule = resolveReplySchedule(policy, platform, {
-          minGapMinutes: pacing.minGapMinutes,
           ceilings,
           warmupDays,
           warmupTiers,
@@ -905,7 +927,11 @@ export class EngageAutoReplyService implements OnModuleInit {
           now
         );
 
-        const minGapMinutes = schedule.cadenceMinutes;
+        const minGapMinutes = replyGapMinutes(schedule, now, {
+          sentToday,
+          minGapMinutes: pacing.minGapMinutes,
+          lastAt: lastSentReplyAt,
+        });
         const floorMinutes = this._platformPacing.writeFloorMinutesFor(
           pacingConfig,
           platform

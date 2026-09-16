@@ -4486,6 +4486,48 @@ export class EngageRepository {
     return row?.createdAt ?? null;
   }
 
+  /**
+   * Today's reply count per PLATFORM for one project, in ONE query — what the
+   * Automation page needs to report the gap the driver will actually wait.
+   *
+   * Per project, unlike the channel tally beside it: this feeds the daily LIMIT,
+   * which is a number the user configured for this project.
+   *
+   * One window for every platform, so a project whose platforms sit in different
+   * timezones is counted against the caller's day rather than each platform's.
+   * That is the page's own tolerance, not the gate's: the driver counts each
+   * platform in its own local day, and this only feeds a projected time the API
+   * already documents as "not before".
+   */
+  async countTodaySentRepliesByPlatform(
+    organizationId: string,
+    projectId: string,
+    platforms: string[],
+    since: Date,
+    until: Date
+  ): Promise<Record<string, number>> {
+    if (!platforms.length) return {};
+    const rows = await this._sentReply.model.engageSentReply.findMany({
+      where: {
+        organizationId,
+        projectId,
+        post: {
+          publishDate: { gte: since, lt: until },
+          state: { in: ['QUEUE', 'PUBLISHED'] },
+        },
+        opportunity: { platform: { in: platforms } },
+      },
+      select: { opportunity: { select: { platform: true } } },
+    });
+    const out: Record<string, number> = {};
+    for (const row of rows) {
+      const platform = row.opportunity?.platform;
+      if (!platform) continue;
+      out[platform] = (out[platform] ?? 0) + 1;
+    }
+    return out;
+  }
+
   /** {@link getFirstSentReplyAt} for several platforms in one query. */
   async getFirstSentReplyAtByPlatform(
     organizationId: string,

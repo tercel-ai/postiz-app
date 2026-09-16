@@ -586,6 +586,8 @@ by platform:
       "length": "medium",           // optional; omit for 'medium'
       "mentionTags": ["@aisee"],    // optional; omit for none
       "dailyReplyLimit": 4          // optional; omit for 4, clamped to the platform ceiling
+      // `activeHours: { start, end, timezone? }` is also accepted here and wins
+      // over the flat window keys above — see the Automation API for why.
     }
   }
 }
@@ -628,7 +630,8 @@ path's `mentions` are.
 `dailyReplyLimit` is how many replies this platform may send per LOCAL day
 (omit for 4). With the window above it forms the platform's whole reply
 SCHEDULE, and the spacing between two replies is DERIVED from the pair —
-`max(window minutes / dailyReplyLimit, engage_reply_pacing.minGapMinutes)` —
+`max(minutes LEFT in the window / replies still OWED today, jittered ±25%,
+floored by `engage_reply_pacing.minGapMinutes`)` —
 rather than configured beside them. The value is clamped on read to that
 platform's account-safety ceiling (x 30, reddit 25, linkedin 25, devto 15,
 quora 15, medium 10, hackernews 10; admin-tunable via the
@@ -685,8 +688,9 @@ for this to run at all — see **Plan budget** below.
 1) bounds how much one poll may hand out **for each platform independently** —
 a busy Reddit slate does not starve X, and vice versa, within the same poll,
 though it IS shared across every project on that platform. Also: the minimum
-spacing between two replies of the same project+platform (`minGapMinutes`,
-default 25), the UTC active-hours window, the maximum age of a post worth
+FLOOR under the spacing between two replies of the same project+platform
+(`minGapMinutes`, default 10 — the spacing itself is derived per platform from
+its remaining window and remaining daily budget), the UTC active-hours window, the maximum age of a post worth
 replying to, and the minimum opportunity score. A trickle per poll is what
 spreads a day's target across the day — handing out a whole budget at once is
 what gets an account rate-limited.

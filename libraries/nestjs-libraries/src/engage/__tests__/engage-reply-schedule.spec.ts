@@ -12,6 +12,9 @@ import {
   resolveChannelDailyLimits,
   resolveReplyDailyCeilings,
   resolveReplyDailyLimit,
+  jitterFactor,
+  minutesLeftInWindow,
+  replyGapMinutes,
   resolveReplySchedule,
   resolveReplyWarmupTiers,
   warmupFactorForDays,
@@ -30,17 +33,17 @@ describe('resolveReplySchedule', () => {
     expect(schedule.windowStart).toBe(DEFAULT_REPLY_ACTIVE_HOURS.start);
     expect(schedule.windowEnd).toBe(DEFAULT_REPLY_ACTIVE_HOURS.end);
     expect(schedule.dailyReplyLimit).toBe(DEFAULT_REPLY_DAILY_LIMIT);
-    // 8 AM–6 PM is 600 minutes; 4 replies is one every 150.
-    expect(schedule.cadenceMinutes).toBe(150);
   });
 
-  it('derives the spacing from the configured hours and limit', () => {
+  it('keeps the configured hours and limit', () => {
     const schedule = resolveReplySchedule(
       { windowStart: '09:00', windowEnd: '17:00', dailyReplyLimit: 4 },
       'x'
     );
 
-    expect(schedule.cadenceMinutes).toBe(120);
+    expect(schedule.windowStart).toBe('09:00');
+    expect(schedule.windowEnd).toBe('17:00');
+    expect(schedule.dailyReplyLimit).toBe(4);
   });
 
   // Half a window is not a window: pairing a stored bound with a defaulted one
@@ -63,26 +66,12 @@ describe('resolveReplySchedule', () => {
     expect(schedule.windowEnd).toBe('18:00');
   });
 
-  it('takes the org-wide minimum as a FLOOR under the derived spacing', () => {
-    // An operator slowing every project down must not be undercut by a project
-    // that divides a wide window by a big limit.
-    const schedule = resolveReplySchedule(
-      { windowStart: '09:00', windowEnd: '17:00', dailyReplyLimit: 4 },
-      'x',
-      { minGapMinutes: 300 }
-    );
-
-    expect(schedule.cadenceMinutes).toBe(300);
-  });
-
   it('resolves the limit against an ADMIN ceiling when one is passed', () => {
     const schedule = resolveReplySchedule({ dailyReplyLimit: 20 }, 'x', {
       ceilings: { x: 6 },
     });
 
     expect(schedule.dailyReplyLimit).toBe(6);
-    // …and the spacing follows the clamped limit, not the asked-for one.
-    expect(schedule.cadenceMinutes).toBe(100);
   });
 
   it('keeps a window that wraps past midnight as a wrap, not as empty', () => {
@@ -92,7 +81,8 @@ describe('resolveReplySchedule', () => {
     );
 
     // Four hours across two replies, not "a negative window".
-    expect(schedule.cadenceMinutes).toBe(120);
+    expect(windowMinutes(schedule.windowStart, schedule.windowEnd)).toBe(240);
+    expect(replyGapMinutes(schedule, new Date('2026-08-18T22:00:00Z'))).toBe(120);
   });
 
   it('drops a timezone that is not a string', () => {
@@ -110,7 +100,9 @@ describe('resolveReplySchedule', () => {
     const schedule = resolveReplySchedule({ dailyReplyLimit: 0 }, 'x');
 
     expect(schedule.dailyReplyLimit).toBe(0);
-    expect(Number.isFinite(schedule.cadenceMinutes)).toBe(true);
+    expect(
+      Number.isFinite(replyGapMinutes(schedule, new Date('2026-08-18T12:00:00Z')))
+    ).toBe(true);
   });
 });
 
@@ -466,5 +458,163 @@ describe('resolveChannelDailyLimits', () => {
       DEFAULT_CHANNEL_DAILY_LIMIT.reddit
     );
     expect(resolveReplySchedule(undefined, 'x').channelDailyLimit).toBeUndefined();
+  });
+});
+
+// The gap is BUDGET-based: what is LEFT of the active hours divided by what is
+// still OWED today. The old formula divided the WHOLE window by the WHOLE limit
+// once and never looked again — a floor, so any reply the day failed to place
+// was lost for good and the account finished under its limit with hours of
+// window unused.
+describe('replyGapMinutes', () => {
+  const schedule = (over: Record<string, unknown> = {}) =>
+    resolveReplySchedule(
+      { windowStart: '09:00', windowEnd: '17:00', dailyReplyLimit: 4, ...over },
+      'x'
+    );
+  const at = (hhmm: string) => new Date(`2026-08-18T${hhmm}:00.000Z`);
+
+  it('divides the REMAINING window by the REMAINING budget', () => {
+    // 09:00, nothing sent: 480 minutes across 4 replies.
+    expect(replyGapMinutes(schedule(), at('09:00'), { sentToday: 0 })).toBe(120);
+    // 13:00, two sent: 240 minutes across the 2 still owed.
+    expect(replyGapMinutes(schedule(), at('13:00'), { sentToday: 2 })).toBe(120);
+  });
+
+  // The self-correction the whole change exists for.
+  it('tightens the gap for a day that has fallen behind', () => {
+    // 15:00 with nothing sent: 120 minutes left, still 4 owed.
+    expect(replyGapMinutes(schedule(), at('15:00'), { sentToday: 0 })).toBe(30);
+  });
+
+  it('stretches the gap for a day that is running ahead', () => {
+    // 10:00 and 3 of 4 already sent: 420 minutes left for the last one.
+    expect(replyGapMinutes(schedule(), at('10:00'), { sentToday: 3 })).toBe(420);
+  });
+
+  // Never longer than the window has left, or the last reply of the day is
+  // parked past closing time by a gap drawn at 16:50.
+  it('never reaches past the end of the window', () => {
+    const gap = replyGapMinutes(schedule(), at('16:50'), { sentToday: 3 });
+
+    expect(gap).toBeLessThanOrEqual(10);
+    expect(gap).toBeGreaterThanOrEqual(1);
+  });
+
+  it('falls back to the flat window/limit when the day is unknown', () => {
+    expect(replyGapMinutes(schedule(), at('09:00'))).toBe(120);
+  });
+
+  it('falls back to the flat window/limit outside the window', () => {
+    // The window gate has already refused; this number only feeds a projection.
+    expect(replyGapMinutes(schedule(), at('20:00'), { sentToday: 0 })).toBe(120);
+  });
+
+  it('honours the org-wide floor', () => {
+    expect(
+      replyGapMinutes(schedule(), at('15:00'), { sentToday: 0, minGapMinutes: 60 })
+    ).toBe(60);
+  });
+
+  it('treats a spent day as having no pace to compute', () => {
+    expect(replyGapMinutes(schedule(), at('13:00'), { sentToday: 4 })).toBe(120);
+  });
+
+  describe('jitter', () => {
+    const lastAt = (iso: string) => new Date(iso);
+
+    // A reply every 120 minutes on the dot is the bot signature this product
+    // spends platform_pacing avoiding.
+    it('varies the gap around the pace', () => {
+      const gaps = new Set(
+        ['09:01', '09:07', '09:23', '09:41', '10:05', '11:13'].map((hhmm) =>
+          replyGapMinutes(schedule(), at('09:00'), {
+            sentToday: 0,
+            lastAt: lastAt(`2026-08-18T${hhmm}:00.000Z`),
+          })
+        )
+      );
+
+      expect(gaps.size).toBeGreaterThan(3);
+      for (const gap of gaps) {
+        expect(gap).toBeGreaterThanOrEqual(90);
+        expect(gap).toBeLessThanOrEqual(150);
+      }
+    });
+
+    // DETERMINISTIC, and that is the point: the gate is re-evaluated every five
+    // minutes, and a factor DRAWN per check would let it re-roll until it got a
+    // short gap — the opposite of what the jitter is for. The factor is derived
+    // from the last reply's timestamp instead, so it is fixed for a cycle and
+    // polling more often cannot change it.
+    it('draws the same factor for a whole cycle, however often it is asked', () => {
+      const seed = lastAt('2026-08-18T09:07:00.000Z').getTime();
+
+      expect(jitterFactor(seed)).toBe(jitterFactor(seed));
+      expect(jitterFactor(seed)).not.toBe(
+        jitterFactor(lastAt('2026-08-18T09:12:00.000Z').getTime())
+      );
+    });
+
+    // The gap DOES move within a cycle — the window is draining, so the pace
+    // tightens. What matters is that it only ever moves one way: a number that
+    // bounced up and down between polls would be a re-roll wearing a disguise,
+    // and `nextCheckAt` would jitter around in front of the user.
+    it('only ever tightens as the window drains, never bounces', () => {
+      const seed = lastAt('2026-08-18T09:07:00.000Z');
+      const gaps = ['09:10', '09:30', '09:50', '10:30', '11:30', '13:00'].map((hhmm) =>
+        replyGapMinutes(schedule(), at(hhmm), { sentToday: 0, lastAt: seed })
+      );
+
+      for (let i = 1; i < gaps.length; i += 1) {
+        expect(gaps[i]).toBeLessThanOrEqual(gaps[i - 1]);
+      }
+    });
+
+    it('applies no jitter when there is no last reply to seed from', () => {
+      expect(
+        replyGapMinutes(schedule(), at('09:00'), { sentToday: 0, lastAt: null })
+      ).toBe(120);
+    });
+  });
+});
+
+describe('minutesLeftInWindow', () => {
+  const at = (hhmm: string) => new Date(`2026-08-18T${hhmm}:00.000Z`);
+
+  it('measures to the end of a plain window', () => {
+    const s = resolveReplySchedule({ windowStart: '09:00', windowEnd: '17:00' }, 'x');
+
+    expect(minutesLeftInWindow(s, at('09:00'))).toBe(480);
+    expect(minutesLeftInWindow(s, at('16:30'))).toBe(30);
+    expect(minutesLeftInWindow(s, at('17:00'))).toBe(0);
+    expect(minutesLeftInWindow(s, at('08:59'))).toBe(0);
+  });
+
+  it('measures through a window that wraps past midnight', () => {
+    const s = resolveReplySchedule({ windowStart: '22:00', windowEnd: '02:00' }, 'x');
+
+    expect(minutesLeftInWindow(s, at('23:00'))).toBe(180);
+    expect(minutesLeftInWindow(s, at('01:00'))).toBe(60);
+    expect(minutesLeftInWindow(s, at('12:00'))).toBe(0);
+  });
+
+  it('reads the window in the policy timezone', () => {
+    const s = resolveReplySchedule(
+      { windowStart: '09:00', windowEnd: '17:00', timezone: 'Asia/Shanghai' },
+      'x'
+    );
+
+    // 02:00 UTC = 10:00 Shanghai — seven hours of the working day left.
+    expect(minutesLeftInWindow(s, at('02:00'))).toBe(420);
+  });
+
+  it('fails closed on an unusable timezone', () => {
+    const s = resolveReplySchedule(
+      { windowStart: '09:00', windowEnd: '17:00', timezone: 'Not/A_Timezone' },
+      'x'
+    );
+
+    expect(minutesLeftInWindow(s, at('12:00'))).toBe(0);
   });
 });

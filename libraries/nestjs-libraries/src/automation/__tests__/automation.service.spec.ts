@@ -23,6 +23,8 @@ function makeService(over: {
   lastSentAtByPlatform?: Record<string, Date>;
   /** When this org FIRST replied per platform — the warm-up clock. */
   firstSentAtByPlatform?: Record<string, Date>;
+  /** Replies already sent today per platform — the gap's remaining budget. */
+  sentTodayByPlatform?: Record<string, number>;
 } = {}) {
   const getActivePlanId = vi
     .fn()
@@ -72,6 +74,11 @@ function makeService(over: {
   // every one of these accounts for a year", so cases that are not about warm-up
   // see undiscounted ceilings — derived from the platforms actually asked for,
   // so a new platform in a fixture never silently falls to day 0.
+  // The day's progress per platform, so `nextCheckAt` can report the gap the
+  // driver will actually wait. Empty by default = nothing sent yet today.
+  const countTodaySentRepliesByPlatform = vi
+    .fn()
+    .mockResolvedValue(over.sentTodayByPlatform ?? {});
   const getFirstSentReplyAtByPlatform = vi
     .fn()
     .mockImplementation(async (_orgId: string, platforms: string[]) =>
@@ -104,6 +111,7 @@ function makeService(over: {
       saveConfig: saveConfigRaw,
       getLastSentReplyAtByPlatform,
       getFirstSentReplyAtByPlatform,
+      countTodaySentRepliesByPlatform,
     } as any,
     { resolve } as any,
     {
@@ -133,6 +141,7 @@ function makeService(over: {
     getChannelDailyLimits,
     getLastSentReplyAtByPlatform,
     getFirstSentReplyAtByPlatform,
+    countTodaySentRepliesByPlatform,
     uncommitPlanPosts,
   };
 }
@@ -932,6 +941,85 @@ describe('AutomationService.saveReplies', () => {
     });
   });
 
+  // The API speaks `activeHours: { start, end, timezone? }` — what the GET
+  // reports, and what a publish window already uses — while the column keeps
+  // the flat window keys. Publishing translates the same way, so a client can
+  // write back exactly what it read without knowing the column at all.
+  it('folds an activeHours object down to the stored window keys', async () => {
+    const { service, saveConfig } = makeService();
+
+    await service.saveReplies(org, 'proj-1', {
+      policies: {
+        x: {
+          autoReplyEnabled: true,
+          activeHours: { start: '09:00', end: '17:00', timezone: 'Asia/Shanghai' },
+        },
+      },
+    });
+
+    const policies = saveConfig.mock.calls[0][1].replyPolicies as Record<string, any>;
+    expect(policies.x).toEqual({
+      autoReplyEnabled: true,
+      windowStart: '09:00',
+      windowEnd: '17:00',
+      timezone: 'Asia/Shanghai',
+    });
+    expect(policies.x).not.toHaveProperty('activeHours');
+  });
+
+  // A read-modify-write carries BOTH spellings: the GET echoes the stored keys
+  // back beside the `activeHours` it computed. Honouring the flat keys there
+  // would silently discard the edit the client actually made.
+  it('lets activeHours win over the flat keys a GET echoed back', async () => {
+    const { service, saveConfig } = makeService();
+
+    await service.saveReplies(org, 'proj-1', {
+      policies: {
+        x: {
+          activeHours: { start: '10:00', end: '14:00' },
+          windowStart: '08:00',
+          windowEnd: '18:00',
+        },
+      },
+    });
+
+    const policies = saveConfig.mock.calls[0][1].replyPolicies as Record<string, any>;
+    expect(policies.x.windowStart).toBe('10:00');
+    expect(policies.x.windowEnd).toBe('14:00');
+  });
+
+  // The window the client just sent is the WHOLE window: a zone left over from
+  // an earlier save would enforce those hours somewhere nobody asked for.
+  it('clears a stored zone when activeHours names none', async () => {
+    const { service, saveConfig } = makeService({
+      config: {
+        metadata: {
+          replyPolicies: {
+            x: { windowStart: '09:00', windowEnd: '17:00', timezone: 'Asia/Shanghai' },
+          },
+        },
+      },
+    });
+
+    await service.saveReplies(org, 'proj-1', {
+      policies: { x: { activeHours: { start: '10:00', end: '14:00' } } },
+    });
+
+    const policies = saveConfig.mock.calls[0][1].replyPolicies as Record<string, any>;
+    expect(policies.x).not.toHaveProperty('timezone');
+  });
+
+  it('still accepts the flat window keys from an older client', async () => {
+    const { service, saveConfig } = makeService();
+
+    await service.saveReplies(org, 'proj-1', {
+      policies: { x: { windowStart: '09:00', windowEnd: '17:00' } },
+    });
+
+    const policies = saveConfig.mock.calls[0][1].replyPolicies as Record<string, any>;
+    expect(policies.x).toEqual({ windowStart: '09:00', windowEnd: '17:00' });
+  });
+
   it('clears the reply policy of every platform the caller omits', async () => {
     // Whole-set semantics. Under a merge, "stop replying on reddit" could not be
     // said at all: the client can only overwrite keys whose names it knows.
@@ -1374,35 +1462,93 @@ describe('AutomationService.getOverview — replies.platforms[].nextCheckAt', ()
     }
   });
 
-  it('spaces the next check by the active hours divided by the daily limit', async () => {
+  // The gap is BUDGET-based and jittered, so these pin the clock and assert the
+  // band rather than one exact minute. Asserting a single number would either
+  // re-implement the jitter in the test (and pass whatever the code did) or
+  // depend on what time the suite happens to run at.
+  const gapMinutes = (nextCheckAt: string, lastSentAt: Date) =>
+    (new Date(nextCheckAt).getTime() - lastSentAt.getTime()) / 60_000;
+
+  const atClock = async (iso: string, run: () => Promise<void>) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(iso));
+    try {
+      await run();
+    } finally {
+      vi.useRealTimers();
+    }
+  };
+
+  it('spaces the next check by what is LEFT of the window over what is still owed', async () => {
     const lastSentAt = new Date('2026-08-21T08:00:00.000Z');
-    const { service, getLastSentReplyAtByPlatform } = makeService({
-      config: {
-        enabled: true,
-        metadata: {
-          autoReplyEnabled: true,
-          replyPolicies: {
-            // 09:00–17:00 is 480 minutes; 4 replies a day is one every 120.
-            x: {
-              autoReplyEnabled: true,
-              windowStart: '09:00',
-              windowEnd: '17:00',
-              dailyReplyLimit: 4,
+    // 09:00 with a 09:00–17:00 window and nothing sent yet: 480 minutes left,
+    // 4 still owed — a 120-minute pace, ±25% of jitter.
+    await atClock('2026-08-21T09:00:00.000Z', async () => {
+      const { service, getLastSentReplyAtByPlatform } = makeService({
+        config: {
+          enabled: true,
+          metadata: {
+            autoReplyEnabled: true,
+            replyPolicies: {
+              x: {
+                autoReplyEnabled: true,
+                windowStart: '09:00',
+                windowEnd: '17:00',
+                dailyReplyLimit: 4,
+              },
             },
           },
         },
-      },
-      publishing: withSwitches({}),
-      pacing: { minGapMinutes: 25 },
-      lastSentAtByPlatform: { x: lastSentAt },
+        publishing: withSwitches({}),
+        pacing: { minGapMinutes: 10 },
+        lastSentAtByPlatform: { x: lastSentAt },
+      });
+
+      const res = await service.getOverview(org, 'proj-1');
+
+      expect(getLastSentReplyAtByPlatform).toHaveBeenCalledWith('org-1', 'proj-1', ['x']);
+      const gap = gapMinutes(res.replies.platforms.x.nextCheckAt as string, lastSentAt);
+      expect(gap).toBeGreaterThanOrEqual(90);
+      expect(gap).toBeLessThanOrEqual(150);
     });
+  });
 
-    const res = await service.getOverview(org, 'proj-1');
+  // The point of budget pacing: a platform that has already placed most of its
+  // day has FEWER replies left to fit in LESS window, and the page must report
+  // the tighter gap the driver will actually wait.
+  it('shortens the gap as the day is spent', async () => {
+    const lastSentAt = new Date('2026-08-21T12:00:00.000Z');
+    // 13:00, window closes at 17:00 — 240 minutes left. Three of four sent, so
+    // one is owed: a 240-minute pace against the 120 an empty day would give.
+    await atClock('2026-08-21T13:00:00.000Z', async () => {
+      const { service } = makeService({
+        config: {
+          enabled: true,
+          metadata: {
+            autoReplyEnabled: true,
+            replyPolicies: {
+              x: {
+                autoReplyEnabled: true,
+                windowStart: '09:00',
+                windowEnd: '17:00',
+                dailyReplyLimit: 4,
+              },
+            },
+          },
+        },
+        publishing: withSwitches({}),
+        pacing: { minGapMinutes: 10 },
+        lastSentAtByPlatform: { x: lastSentAt },
+        sentTodayByPlatform: { x: 3 },
+      });
 
-    expect(getLastSentReplyAtByPlatform).toHaveBeenCalledWith('org-1', 'proj-1', ['x']);
-    expect(res.replies.platforms.x.nextCheckAt).toBe(
-      new Date(lastSentAt.getTime() + 120 * 60_000).toISOString()
-    );
+      const res = await service.getOverview(org, 'proj-1');
+
+      // Capped at what the window has left, so the last reply stays reachable.
+      const gap = gapMinutes(res.replies.platforms.x.nextCheckAt as string, lastSentAt);
+      expect(gap).toBeLessThanOrEqual(240);
+      expect(gap).toBeGreaterThan(120);
+    });
   });
 
   // The retired cadence knob. A stored value is still echoed back — the policy
@@ -1410,45 +1556,49 @@ describe('AutomationService.getOverview — replies.platforms[].nextCheckAt', ()
   // it, or the page would promise a rhythm the driver no longer runs on.
   it('ignores a stored checkIntervalMinutes', async () => {
     const lastSentAt = new Date('2026-08-21T08:00:00.000Z');
-    const { service } = makeService({
-      config: {
-        enabled: true,
-        metadata: {
-          autoReplyEnabled: true,
-          replyPolicies: {
-            x: { autoReplyEnabled: true, checkIntervalMinutes: 480 },
+    await atClock('2026-08-21T09:00:00.000Z', async () => {
+      const { service } = makeService({
+        config: {
+          enabled: true,
+          metadata: {
+            autoReplyEnabled: true,
+            replyPolicies: {
+              x: { autoReplyEnabled: true, checkIntervalMinutes: 480 },
+            },
           },
         },
-      },
-      publishing: withSwitches({}),
-      pacing: { minGapMinutes: 25 },
-      lastSentAtByPlatform: { x: lastSentAt },
+        publishing: withSwitches({}),
+        pacing: { minGapMinutes: 10 },
+        lastSentAtByPlatform: { x: lastSentAt },
+      });
+
+      const res = await service.getOverview(org, 'proj-1');
+
+      // The default 8 AM–6 PM schedule has 9 hours left at 09:00 across 4
+      // replies — nowhere near the stored 480 minutes.
+      const gap = gapMinutes(res.replies.platforms.x.nextCheckAt as string, lastSentAt);
+      expect(gap).toBeLessThan(480);
+      expect(res.replies.platforms.x.checkIntervalMinutes).toBe(480);
     });
-
-    const res = await service.getOverview(org, 'proj-1');
-
-    // The default schedule (8 AM–6 PM = 600 minutes, 4 replies) = 150, not 480.
-    expect(res.replies.platforms.x.nextCheckAt).toBe(
-      new Date(lastSentAt.getTime() + 150 * 60_000).toISOString()
-    );
-    expect(res.replies.platforms.x.checkIntervalMinutes).toBe(480);
   });
 
   it('never spaces tighter than the org-wide pacing floor', async () => {
     const lastSentAt = new Date('2026-08-21T08:00:00.000Z');
-    const { service } = makeService({
-      config: activeConfig,
-      publishing: withSwitches({}),
-      // Above the derived 150, so the operator's floor is what applies.
-      pacing: { minGapMinutes: 300 },
-      lastSentAtByPlatform: { x: lastSentAt },
+    await atClock('2026-08-21T09:00:00.000Z', async () => {
+      const { service } = makeService({
+        config: activeConfig,
+        publishing: withSwitches({}),
+        // Above anything the budget can derive, so the operator's floor applies.
+        pacing: { minGapMinutes: 600 },
+        lastSentAtByPlatform: { x: lastSentAt },
+      });
+
+      const res = await service.getOverview(org, 'proj-1');
+
+      expect(res.replies.platforms.x.nextCheckAt).toBe(
+        new Date(lastSentAt.getTime() + 600 * 60_000).toISOString()
+      );
     });
-
-    const res = await service.getOverview(org, 'proj-1');
-
-    expect(res.replies.platforms.x.nextCheckAt).toBe(
-      new Date(lastSentAt.getTime() + 300 * 60_000).toISOString()
-    );
   });
 });
 
@@ -1509,12 +1659,88 @@ describe('AutomationService.getOverview — replies.platforms[].activeHours/dail
 
     const res = await service.getOverview(org, 'proj-1');
 
+    // The zone is HOISTED, exactly as publishing hoists its window zone: one
+    // platform means a unanimous set, so it is stated once on `replies` and not
+    // repeated inside `activeHours`.
+    expect(res.replies.timezone).toBe('Asia/Shanghai');
     expect(res.replies.platforms.x.activeHours).toEqual({
       start: '10:00',
       end: '16:00',
-      timezone: 'Asia/Shanghai',
     });
     expect(res.replies.platforms.x.dailyReplyLimit).toBe(2);
+  });
+
+  it('states a platform zone only where it DIFFERS from the hoisted one', async () => {
+    const { service } = makeService({
+      config: {
+        enabled: true,
+        metadata: {
+          autoReplyEnabled: true,
+          replyPolicies: {
+            x: { autoReplyEnabled: true, timezone: 'Asia/Shanghai' },
+            reddit: { autoReplyEnabled: true, timezone: 'Asia/Shanghai' },
+            medium: { autoReplyEnabled: true, timezone: 'Europe/Berlin' },
+          },
+        },
+      },
+      publishing: withSwitches({
+        enabledPlatforms: ['x', 'reddit', 'medium'],
+        platformDecisions: { x: true, reddit: true, medium: true },
+      }),
+    });
+
+    const res = await service.getOverview(org, 'proj-1');
+
+    // Not unanimous, so nothing is hoisted and every platform carries its own.
+    expect(res.replies.timezone).toBeUndefined();
+    expect(res.replies.platforms.x.activeHours.timezone).toBe('Asia/Shanghai');
+    expect(res.replies.platforms.medium.activeHours.timezone).toBe('Europe/Berlin');
+  });
+
+  // A platform with no stored zone is not "unset", it is UTC — so it does not
+  // agree with a sibling that names one, and hoisting that sibling's zone would
+  // state the wrong zone for it.
+  it('hoists nothing when one platform is on UTC and another names a zone', async () => {
+    const { service } = makeService({
+      config: {
+        enabled: true,
+        metadata: {
+          autoReplyEnabled: true,
+          replyPolicies: {
+            x: { autoReplyEnabled: true, timezone: 'Asia/Shanghai' },
+            reddit: { autoReplyEnabled: true },
+          },
+        },
+      },
+      publishing: withSwitches({
+        enabledPlatforms: ['x', 'reddit'],
+        platformDecisions: { x: true, reddit: true },
+      }),
+    });
+
+    const res = await service.getOverview(org, 'proj-1');
+
+    expect(res.replies.timezone).toBeUndefined();
+    expect(res.replies.platforms.x.activeHours.timezone).toBe('Asia/Shanghai');
+    expect(res.replies.platforms.reddit.activeHours).not.toHaveProperty('timezone');
+  });
+
+  it('states no zone at all when every platform runs on UTC', async () => {
+    const { service } = makeService({
+      config: {
+        enabled: true,
+        metadata: {
+          autoReplyEnabled: true,
+          replyPolicies: { x: { autoReplyEnabled: true } },
+        },
+      },
+      publishing: withSwitches(),
+    });
+
+    const res = await service.getOverview(org, 'proj-1');
+
+    expect(res.replies).not.toHaveProperty('timezone');
+    expect(res.replies.platforms.x.activeHours).toEqual({ start: '08:00', end: '18:00' });
   });
 
   // The page must show what will be ENFORCED, not what was asked for.
