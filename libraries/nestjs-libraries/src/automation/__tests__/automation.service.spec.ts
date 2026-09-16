@@ -1,6 +1,11 @@
 import 'reflect-metadata';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { AutomationService } from '../automation.service';
+import {
+  DEFAULT_CHANNEL_DAILY_LIMIT,
+  DEFAULT_REPLY_WARMUP_TIERS,
+  PLATFORM_REPLY_RISK_CEILING,
+} from '../../engage/engage-reply-schedule';
 
 const org = { id: 'org-1' } as any;
 
@@ -11,7 +16,13 @@ function makeService(over: {
   lastPublishedAt?: Date | null;
   count?: any;
   pacing?: any;
+  /** Per-platform daily safety ceilings, as the admin setting resolves them. */
+  ceilings?: Record<string, number>;
+  warmupTiers?: { days: number; factor: number }[];
+  channelDailyLimits?: Record<string, number>;
   lastSentAtByPlatform?: Record<string, Date>;
+  /** When this org FIRST replied per platform — the warm-up clock. */
+  firstSentAtByPlatform?: Record<string, Date>;
 } = {}) {
   const getActivePlanId = vi
     .fn()
@@ -46,6 +57,29 @@ function makeService(over: {
   const getPacing = vi
     .fn()
     .mockResolvedValue(over.pacing ?? { minGapMinutes: 25 });
+  // The account-safety ceilings the page must REPORT against (built-ins unless a
+  // case is about an admin override).
+  const getReplyDailyCeilings = vi
+    .fn()
+    .mockResolvedValue(over.ceilings ?? PLATFORM_REPLY_RISK_CEILING);
+  const getReplyWarmupTiers = vi
+    .fn()
+    .mockResolvedValue(over.warmupTiers ?? DEFAULT_REPLY_WARMUP_TIERS);
+  const getChannelDailyLimits = vi
+    .fn()
+    .mockResolvedValue(over.channelDailyLimits ?? DEFAULT_CHANNEL_DAILY_LIMIT);
+  // The warm-up clock, org-wide per platform. Defaults to "we have been driving
+  // every one of these accounts for a year", so cases that are not about warm-up
+  // see undiscounted ceilings — derived from the platforms actually asked for,
+  // so a new platform in a fixture never silently falls to day 0.
+  const getFirstSentReplyAtByPlatform = vi
+    .fn()
+    .mockImplementation(async (_orgId: string, platforms: string[]) =>
+      over.firstSentAtByPlatform ??
+      Object.fromEntries(
+        platforms.map((platform) => [platform, new Date('2025-01-01T00:00:00.000Z')])
+      )
+    );
   const getLastSentReplyAtByPlatform = vi
     .fn()
     .mockResolvedValue(over.lastSentAtByPlatform ?? {});
@@ -65,9 +99,19 @@ function makeService(over: {
     } as any,
     { getActivePlanId } as any,
     { countOpportunities, saveConfig, upsertReplyAccountSettings } as any,
-    { getConfigCore, saveConfig: saveConfigRaw, getLastSentReplyAtByPlatform } as any,
+    {
+      getConfigCore,
+      saveConfig: saveConfigRaw,
+      getLastSentReplyAtByPlatform,
+      getFirstSentReplyAtByPlatform,
+    } as any,
     { resolve } as any,
-    { getPacing } as any
+    {
+      getPacing,
+      getReplyDailyCeilings,
+      getReplyWarmupTiers,
+      getChannelDailyLimits,
+    } as any
   );
 
   return {
@@ -84,7 +128,11 @@ function makeService(over: {
     saveConfig,
     upsertReplyAccountSettings,
     getPacing,
+    getReplyDailyCeilings,
+    getReplyWarmupTiers,
+    getChannelDailyLimits,
     getLastSentReplyAtByPlatform,
+    getFirstSentReplyAtByPlatform,
     uncommitPlanPosts,
   };
 }
@@ -846,6 +894,44 @@ describe('AutomationService.saveReplies', () => {
     });
   });
 
+  it('stores the active hours and daily limit beside the rest of the reply half', async () => {
+    // The two keys ARE the schedule the driver gates on, and they live in the
+    // reply half of the shared policy blob — next to, and never colliding with,
+    // the publishing window's own `publishing*` keys.
+    const { service, saveConfig } = makeService({
+      config: {
+        metadata: {
+          replyPolicies: {
+            x: { publishingEnabled: true, publishingWindowStart: '09:00' },
+          },
+        },
+      },
+    });
+
+    await service.saveReplies(org, 'proj-1', {
+      policies: {
+        x: {
+          autoReplyEnabled: true,
+          windowStart: '08:00',
+          windowEnd: '18:00',
+          timezone: 'Asia/Shanghai',
+          dailyReplyLimit: 4,
+        },
+      },
+    });
+
+    const policies = saveConfig.mock.calls[0][1].replyPolicies as Record<string, any>;
+    expect(policies.x).toEqual({
+      autoReplyEnabled: true,
+      windowStart: '08:00',
+      windowEnd: '18:00',
+      timezone: 'Asia/Shanghai',
+      dailyReplyLimit: 4,
+      publishingEnabled: true,
+      publishingWindowStart: '09:00',
+    });
+  });
+
   it('clears the reply policy of every platform the caller omits', async () => {
     // Whole-set semantics. Under a merge, "stop replying on reddit" could not be
     // said at all: the client can only overwrite keys whose names it knows.
@@ -1288,9 +1374,43 @@ describe('AutomationService.getOverview — replies.platforms[].nextCheckAt', ()
     }
   });
 
-  it('is lastSentReplyAt + checkIntervalMinutes when the platform overrides the interval', async () => {
+  it('spaces the next check by the active hours divided by the daily limit', async () => {
     const lastSentAt = new Date('2026-08-21T08:00:00.000Z');
     const { service, getLastSentReplyAtByPlatform } = makeService({
+      config: {
+        enabled: true,
+        metadata: {
+          autoReplyEnabled: true,
+          replyPolicies: {
+            // 09:00–17:00 is 480 minutes; 4 replies a day is one every 120.
+            x: {
+              autoReplyEnabled: true,
+              windowStart: '09:00',
+              windowEnd: '17:00',
+              dailyReplyLimit: 4,
+            },
+          },
+        },
+      },
+      publishing: withSwitches({}),
+      pacing: { minGapMinutes: 25 },
+      lastSentAtByPlatform: { x: lastSentAt },
+    });
+
+    const res = await service.getOverview(org, 'proj-1');
+
+    expect(getLastSentReplyAtByPlatform).toHaveBeenCalledWith('org-1', 'proj-1', ['x']);
+    expect(res.replies.platforms.x.nextCheckAt).toBe(
+      new Date(lastSentAt.getTime() + 120 * 60_000).toISOString()
+    );
+  });
+
+  // The retired cadence knob. A stored value is still echoed back — the policy
+  // blob is copied verbatim — but no number on this page may be computed from
+  // it, or the page would promise a rhythm the driver no longer runs on.
+  it('ignores a stored checkIntervalMinutes', async () => {
+    const lastSentAt = new Date('2026-08-21T08:00:00.000Z');
+    const { service } = makeService({
       config: {
         enabled: true,
         metadata: {
@@ -1307,26 +1427,244 @@ describe('AutomationService.getOverview — replies.platforms[].nextCheckAt', ()
 
     const res = await service.getOverview(org, 'proj-1');
 
-    expect(getLastSentReplyAtByPlatform).toHaveBeenCalledWith('org-1', 'proj-1', ['x']);
+    // The default schedule (8 AM–6 PM = 600 minutes, 4 replies) = 150, not 480.
     expect(res.replies.platforms.x.nextCheckAt).toBe(
-      new Date(lastSentAt.getTime() + 480 * 60_000).toISOString()
+      new Date(lastSentAt.getTime() + 150 * 60_000).toISOString()
     );
+    expect(res.replies.platforms.x.checkIntervalMinutes).toBe(480);
   });
 
-  it('falls back to the org-wide pacing default when the platform sets no interval', async () => {
+  it('never spaces tighter than the org-wide pacing floor', async () => {
     const lastSentAt = new Date('2026-08-21T08:00:00.000Z');
     const { service } = makeService({
       config: activeConfig,
       publishing: withSwitches({}),
-      pacing: { minGapMinutes: 25 },
+      // Above the derived 150, so the operator's floor is what applies.
+      pacing: { minGapMinutes: 300 },
       lastSentAtByPlatform: { x: lastSentAt },
     });
 
     const res = await service.getOverview(org, 'proj-1');
 
     expect(res.replies.platforms.x.nextCheckAt).toBe(
-      new Date(lastSentAt.getTime() + 25 * 60_000).toISOString()
+      new Date(lastSentAt.getTime() + 300 * 60_000).toISOString()
     );
+  });
+});
+
+// The schedule the driver will actually run each platform on — reported with
+// the defaults already applied, because a platform that has never been
+// configured is still driven (8 AM–6 PM, 4 a day). A client rendering the
+// stored blob alone would show blanks for hours that are being enforced.
+describe('AutomationService.getOverview — replies.platforms[].activeHours/dailyReplyLimit', () => {
+  beforeEach(() => vi.restoreAllMocks());
+
+  const withSwitches = (over: Record<string, unknown> = {}) => ({
+    automationEnabled: true,
+    publishingEnabled: true,
+    publishingConfigured: true,
+    enabledPlatforms: ['x'],
+    platformDecisions: { x: true },
+    windows: {},
+    ...over,
+  });
+
+  it('reports the defaults for a platform that has configured no schedule', async () => {
+    const { service } = makeService({
+      config: {
+        enabled: true,
+        metadata: {
+          autoReplyEnabled: true,
+          replyPolicies: { x: { autoReplyEnabled: true } },
+        },
+      },
+      publishing: withSwitches(),
+    });
+
+    const res = await service.getOverview(org, 'proj-1');
+
+    expect(res.replies.platforms.x.activeHours).toEqual({ start: '08:00', end: '18:00' });
+    expect(res.replies.platforms.x.dailyReplyLimit).toBe(4);
+  });
+
+  it('reports the platform\'s own hours and timezone when it set them', async () => {
+    const { service } = makeService({
+      config: {
+        enabled: true,
+        metadata: {
+          autoReplyEnabled: true,
+          replyPolicies: {
+            x: {
+              autoReplyEnabled: true,
+              windowStart: '10:00',
+              windowEnd: '16:00',
+              timezone: 'Asia/Shanghai',
+              dailyReplyLimit: 2,
+            },
+          },
+        },
+      },
+      publishing: withSwitches(),
+    });
+
+    const res = await service.getOverview(org, 'proj-1');
+
+    expect(res.replies.platforms.x.activeHours).toEqual({
+      start: '10:00',
+      end: '16:00',
+      timezone: 'Asia/Shanghai',
+    });
+    expect(res.replies.platforms.x.dailyReplyLimit).toBe(2);
+  });
+
+  // The page must show what will be ENFORCED, not what was asked for.
+  it('reports a limit clamped to the platform safety ceiling', async () => {
+    const { service } = makeService({
+      config: {
+        enabled: true,
+        metadata: {
+          autoReplyEnabled: true,
+          replyPolicies: { reddit: { autoReplyEnabled: true, dailyReplyLimit: 99 } },
+        },
+      },
+      publishing: withSwitches({
+        enabledPlatforms: ['reddit'],
+        platformDecisions: { reddit: true },
+      }),
+    });
+
+    const res = await service.getOverview(org, 'proj-1');
+
+    expect(res.replies.platforms.reddit.dailyReplyLimit).toBe(
+      PLATFORM_REPLY_RISK_CEILING.reddit
+    );
+  });
+
+  // The ceiling is the SAFETY one, not the editorial volume an operation plan
+  // is generated against — a deliberate 10 a day on x used to come back as 4,
+  // because a content-quality suggestion was standing in for a rate limit.
+  it('does not clamp to the editorial reply volume', async () => {
+    const { service } = makeService({
+      config: {
+        enabled: true,
+        metadata: {
+          autoReplyEnabled: true,
+          replyPolicies: { x: { autoReplyEnabled: true, dailyReplyLimit: 10 } },
+        },
+      },
+      publishing: withSwitches(),
+    });
+
+    const res = await service.getOverview(org, 'proj-1');
+
+    expect(res.replies.platforms.x.dailyReplyLimit).toBe(10);
+  });
+
+  // An account we have only just started driving runs at a fraction of the
+  // ceiling, and the page has to say the discounted number — showing the full
+  // one would promise a rate the driver spends the first month refusing.
+  it('discounts the ceiling while the account is still warming up', async () => {
+    const now = new Date();
+    const { service } = makeService({
+      config: {
+        enabled: true,
+        metadata: {
+          autoReplyEnabled: true,
+          replyPolicies: { x: { autoReplyEnabled: true, dailyReplyLimit: 30 } },
+        },
+      },
+      publishing: withSwitches(),
+      // First reply two days ago → the 0-6 day tier, ×0.3 of x's 30.
+      firstSentAtByPlatform: { x: new Date(now.getTime() - 2 * 86_400_000) },
+    });
+
+    const res = await service.getOverview(org, 'proj-1');
+
+    expect(res.replies.platforms.x.dailyReplyLimit).toBe(9);
+    expect(res.replies.platforms.x.warmupFactor).toBe(0.3);
+  });
+
+  it('states no warmupFactor once the account is fully warmed up', async () => {
+    const { service } = makeService({
+      config: {
+        enabled: true,
+        metadata: {
+          autoReplyEnabled: true,
+          replyPolicies: { x: { autoReplyEnabled: true } },
+        },
+      },
+      publishing: withSwitches(),
+    });
+
+    const res = await service.getOverview(org, 'proj-1');
+
+    expect(res.replies.platforms.x).not.toHaveProperty('warmupFactor');
+    expect(res.replies.platforms.x.dailyReplyLimit).toBe(4);
+  });
+
+  // An org that has NEVER replied on a platform is day 0, not "unknown, go
+  // ahead" — it is the account most worth starting slowly on.
+  it('treats a platform with no reply history as day zero', async () => {
+    const { service } = makeService({
+      config: {
+        enabled: true,
+        metadata: {
+          autoReplyEnabled: true,
+          replyPolicies: { x: { autoReplyEnabled: true, dailyReplyLimit: 30 } },
+        },
+      },
+      publishing: withSwitches(),
+      firstSentAtByPlatform: {},
+    });
+
+    const res = await service.getOverview(org, 'proj-1');
+
+    expect(res.replies.platforms.x.dailyReplyLimit).toBe(9);
+  });
+
+  it('reports the same-channel cap where the platform has one', async () => {
+    const { service } = makeService({
+      config: {
+        enabled: true,
+        metadata: {
+          autoReplyEnabled: true,
+          replyPolicies: {
+            reddit: { autoReplyEnabled: true },
+            x: { autoReplyEnabled: true },
+          },
+        },
+      },
+      publishing: withSwitches({
+        enabledPlatforms: ['reddit', 'x'],
+        platformDecisions: { reddit: true, x: true },
+      }),
+    });
+
+    const res = await service.getOverview(org, 'proj-1');
+
+    expect(res.replies.platforms.reddit.channelDailyLimit).toBe(
+      DEFAULT_CHANNEL_DAILY_LIMIT.reddit
+    );
+    // x has no channel at all, so there is no concentration to cap.
+    expect(res.replies.platforms.x).not.toHaveProperty('channelDailyLimit');
+  });
+
+  it('reports against the ADMIN ceiling when one is configured', async () => {
+    const { service } = makeService({
+      config: {
+        enabled: true,
+        metadata: {
+          autoReplyEnabled: true,
+          replyPolicies: { x: { autoReplyEnabled: true, dailyReplyLimit: 20 } },
+        },
+      },
+      publishing: withSwitches(),
+      ceilings: { ...PLATFORM_REPLY_RISK_CEILING, x: 8 },
+    });
+
+    const res = await service.getOverview(org, 'proj-1');
+
+    expect(res.replies.platforms.x.dailyReplyLimit).toBe(8);
   });
 });
 

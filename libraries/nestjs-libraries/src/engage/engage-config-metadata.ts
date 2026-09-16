@@ -25,7 +25,21 @@ export interface EngagePlatformPolicy {
   defaultStrategy?: string;
   length?: 'short' | 'medium' | 'long';
   mentionTags?: string[];
-  /** Minimum minutes between two auto-replies on THIS platform. */
+  /**
+   * Replies allowed per LOCAL day on this platform. Absent = the default
+   * (DEFAULT_REPLY_DAILY_LIMIT), and either way clamped to the platform's own
+   * ceiling — engage-reply-schedule.ts owns both rules.
+   *
+   * This and the window above are the whole reply schedule: how often the
+   * driver may hand out a reply is DERIVED from them, never stored beside them.
+   */
+  dailyReplyLimit?: number;
+  /**
+   * @deprecated The retired "check every N hours" cadence, replaced by
+   * `dailyReplyLimit` + the active-hours window (see engage-reply-schedule.ts).
+   * Still declared so rows written by an older client keep type-checking on
+   * read; nothing consults it.
+   */
   checkIntervalMinutes?: number;
 
   // ── Publishing side ─────────────────────────────────────────────────────

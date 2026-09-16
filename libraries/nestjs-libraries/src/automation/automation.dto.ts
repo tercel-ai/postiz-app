@@ -9,6 +9,7 @@ import {
   registerDecorator,
   ValidationOptions,
 } from 'class-validator';
+import { IsReplyPolicyMap } from '@gitroom/nestjs-libraries/engage/reply-policy.validator';
 
 /** 'HH:MM', 24-hour. Same shape the admin-level publish window setting uses. */
 const CLOCK_TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
@@ -151,7 +152,21 @@ export class SaveAutomationRepliesDto {
   autoReplyEnabled?: boolean;
 
   /**
-   * Per-platform REPLY policy (strategy, length, mention tags, pacing…).
+   * Per-platform REPLY policy: what a reply says (strategy, length, mention
+   * tags) and when it may be sent — `windowStart`/`windowEnd`/`timezone` are
+   * that platform's ACTIVE HOURS and `dailyReplyLimit` its replies-per-day
+   * ceiling.
+   *
+   * Those two ARE the schedule. How long the driver waits between two replies
+   * is derived from them (the window spread across the limit) rather than set
+   * beside them, so there is no third number that can disagree with the first
+   * two. The retired `checkIntervalMinutes` is still accepted and stored for
+   * older clients, but nothing reads it any more.
+   *
+   * Omitting the schedule keys is not "no schedule": the driver then runs this
+   * platform on the defaults (8 AM–6 PM, 4 replies a day, clamped to what the
+   * platform tolerates — see engage-reply-schedule.ts), which is what
+   * `GET /automation` reports back under `replies.platforms[p]`.
    *
    * This is the COMPLETE set, not a delta — the same shape rule as
    * `SaveAutomationPublishingDto.platforms`, for the same reason. A platform
@@ -173,6 +188,7 @@ export class SaveAutomationRepliesDto {
    */
   @IsOptional()
   @IsObject()
+  @IsReplyPolicyMap()
   policies?: Record<string, Record<string, unknown>>;
 }
 

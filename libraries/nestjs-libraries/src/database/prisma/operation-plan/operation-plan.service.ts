@@ -18,6 +18,8 @@ import { AiseeCreditService } from '../ai-pricing/aisee-credit.service';
 import { SettingsService } from '../settings/settings.service';
 import { OpenaiService, AiUsageInfo } from '@gitroom/nestjs-libraries/openai/openai.service';
 import { EngageRepository } from '@gitroom/nestjs-libraries/engage/engage.repository';
+import type { ScanPlatform } from '@gitroom/nestjs-libraries/engage/engage-scan-config.service';
+import { OPERATION_PLAN_REPLY_VOLUME } from '@gitroom/nestjs-libraries/engage/engage-reply-schedule';
 import {
   resolveRedditTargets,
   MonitoredRedditChannel,
@@ -225,6 +227,119 @@ const DEFAULT_PLATFORM_CADENCE: Record<string, PlatformCadence> = {
 // platform: an absent entry reads as "no volume" to the model, and that is
 // exactly how whole platforms used to end up with zero generated content.
 const GENERIC_PLATFORM_CADENCE: PlatformCadence = { cadence: '2-3 posts per week' };
+
+// Per-platform ENGAGE reply volume — the sibling of DEFAULT_PLATFORM_CADENCE
+// above: cadence steers how much a plan POSTS, OPERATION_PLAN_REPLY_VOLUME steers how
+// much it REPLIES. The generator used to get no number at all for replies. The
+// prompt asked for "a sustainable weekday-level reply count" and pointed at the
+// playbook, which only ever described posting, so `targetRepliesPerDay` came out
+// as whatever the model felt like on that run — the one plan input with no
+// anchor.
+//
+// The table itself lives in engage (engage-reply-schedule.ts), because its
+// `max` is now enforced on two paths: the clamp below, and the Automation reply
+// limit the unattended driver gates on. One ceiling, one home — and the import
+// only runs this way, since engage must never import from operation-plan.
+
+// Stated whenever a plan requests a platform with no engage capability. Without
+// it the model reads "set targetRepliesPerDay for each requested platform" and
+// invents a policy for, say, instagram — dead config that can never fire,
+// because replies only ever come from a scanned opportunity.
+const REPLY_VOLUME_UNSUPPORTED_LINE =
+  'Any requested platform NOT listed above has NO engage reply path (nothing scans it, so it never produces an opportunity to reply to): emit NO policy for it at all — not a policy with a guessed target, and not one with `enabled: false`.';
+
+/**
+ * The per-platform reply ceilings as prompt lines, one per requested platform
+ * that can actually receive replies, plus the unsupported-platform rule when
+ * the plan requests anything outside the engage capability list.
+ *
+ * Built per plan rather than stated wholesale, for the same reason
+ * `buildCharacterLimitLines` is: a two-platform plan should not spend five
+ * bullets on platforms it will never touch, which is how a model starts
+ * treating the whole block as background noise.
+ */
+function buildReplyVolumeLines(platforms: readonly string[]): string[] {
+  const supported = platforms.filter(
+    (platform): platform is ScanPlatform => platform in OPERATION_PLAN_REPLY_VOLUME
+  );
+  const lines = supported.map((platform) => {
+    const { typical, max, why } = OPERATION_PLAN_REPLY_VOLUME[platform];
+    // Singular for the one-a-day platforms: "1 replies/day" reads as a typo,
+    // and a rule that looks sloppy is a rule the model feels free to round up.
+    const unit = typical === '1' ? 'reply' : 'replies';
+    return `${platform}: ${typical} ${unit}/day, HARD MAX ${max} — ${why}.`;
+  });
+  return supported.length < platforms.length
+    ? [...lines, REPLY_VOLUME_UNSUPPORTED_LINE]
+    : lines;
+}
+
+/**
+ * The same ceilings as one compact "x 3, reddit 3" clause, for the second
+ * statement of the rule in the ENGAGE POLICIES section.
+ *
+ * Stated twice on purpose, the same way the character limits are: the first
+ * live run of this generator ignored a single mid-prompt constraint, and the
+ * reply ceilings sit even further from the policy objects the model writes
+ * last. Empty string when no requested platform can receive replies, so the
+ * caller drops the bullet entirely.
+ */
+/**
+ * Fit a policy's per-keyword daily targets under `cap`, preserving the SHAPE of
+ * the distribution the plan chose (largest-remainder apportionment: scale every
+ * target by cap/total, floor, then hand the leftover units to the biggest
+ * fractions). Entries that end at 0 are dropped — `getReplyBudget` and
+ * `_assertProjectDailyTarget` both filter `target > 0`, so a stored 0 and an
+ * absent keyword already behave identically; dropping just keeps the payload
+ * honest about what the plan is actually pacing.
+ *
+ * Why apportion rather than truncate: "give the first keywords their full
+ * target until the budget runs out" lets one keyword eat the whole day, which
+ * is a different plan, not a smaller one.
+ *
+ * Deterministic: ties in the fractional part are broken by the larger original
+ * target, then by position, so the same generation always folds the same way.
+ */
+function fitKeywordTargetsToCap<T extends { target?: number }>(
+  entries: readonly T[],
+  cap: number
+): T[] {
+  // The generated shape types `target` as optional (the plan schema is inferred
+  // under a non-strict compiler), so a missing one counts as 0 rather than
+  // poisoning the arithmetic with NaN.
+  const targetOf = (entry: T): number => entry.target ?? 0;
+  const total = entries.reduce((sum, entry) => sum + targetOf(entry), 0);
+  if (total <= cap) return [...entries];
+  if (cap <= 0) return [];
+
+  const scaled = entries.map((entry, index) => {
+    const exact = (targetOf(entry) * cap) / total;
+    const floor = Math.floor(exact);
+    return { entry, index, target: floor, remainder: exact - floor };
+  });
+  let leftover = cap - scaled.reduce((sum, item) => sum + item.target, 0);
+  const byPriority = [...scaled].sort(
+    (a, b) =>
+      b.remainder - a.remainder ||
+      targetOf(b.entry) - targetOf(a.entry) ||
+      a.index - b.index
+  );
+  for (const item of byPriority) {
+    if (leftover <= 0) break;
+    item.target += 1;
+    leftover -= 1;
+  }
+  return scaled
+    .filter((item) => item.target > 0)
+    .map((item) => ({ ...item.entry, target: item.target }));
+}
+
+function buildReplyMaxRecap(platforms: readonly string[]): string {
+  return platforms
+    .filter((platform): platform is ScanPlatform => platform in OPERATION_PLAN_REPLY_VOLUME)
+    .map((platform) => `${platform} ${OPERATION_PLAN_REPLY_VOLUME[platform].max}`)
+    .join(', ');
+}
 
 // Per-platform content limits and the cross-platform rewrite instructions live
 // in integrations/platform-content-profile.ts — the ONE definition, shared with
@@ -751,6 +866,13 @@ export class OperationPlanService implements OnApplicationBootstrap {
       statedMargin: true,
     });
 
+    // Per-platform ENGAGE reply ceilings (OPERATION_PLAN_REPLY_VOLUME), narrowed to this
+    // plan's platforms. The reply half of the playbook: `platformPlaybook` covers
+    // posting volume only, so without these the model had no number to anchor
+    // `targetRepliesPerDay` to and simply invented one per run.
+    const replyVolumeLines = buildReplyVolumeLines(platforms);
+    const replyMaxRecap = buildReplyMaxRecap(platforms);
+
     // Which requested platforms can actually publish a thread (provider `comment`
     // capability). Feeds the prompt so the model never threads an unsupported
     // platform; _normalizeThreads strips any it does anyway.
@@ -786,7 +908,9 @@ export class OperationPlanService implements OnApplicationBootstrap {
         // unconditional — and "lean into higher-citation channels" is volume
         // steering only, bounded by the PLATFORM COVERAGE rule above.
         '- FOLLOW the per-platform playbook in `platformPlaybook` (posting frequency + how strongly AI systems cite that channel). It is the team\'s configured rhythm — match its cadence rather than inventing your own volume. FIRST ensure EVERY requested platform gets at least one contentItem (see PLATFORM COVERAGE above — this is a hard gate, not a suggestion). THEN, once every platform has its minimum, you may weight ADDITIONAL volume toward the higher-citation channels. Never let "lean into higher-citation" override the minimum-coverage rule.',
-        '- For each requested platform set `targetRepliesPerDay` to a sustainable WEEKDAY-level reply count — it is the default for any day you do not override.',
+        '- ENGAGE REPLY VOLUME — for each requested platform set `targetRepliesPerDay` to its WEEKDAY-level reply count from the table below (it is the default for any day you do not override). These are ceilings on what one human account can plausibly reply in a day, NOT quotas to fill: NEVER exceed a platform\'s HARD MAX, and go BELOW the typical range when this project has few keywords, a narrow niche, or a weak fit with that platform. A smaller number that actually gets met beats a big one that turns into filler.',
+        ...replyVolumeLines.map((line) => `  - ${line}`),
+        '- Weekend rhythm: use `dailyTargets` (next bullet) to drop each weekend date to about HALF the weekday number, rounded down — so a weekday 3 becomes 1, and a weekday 1 may legitimately become 0.',
         '- Then express the weekday/weekend rhythm concretely in `dailyTargets`: one { date, target } per date that should differ from the default (typically the weekends — a lower target). Every `date` MUST be copied VERBATIM from the `range.dates` list supplied in the payload (UTC "YYYY-MM-DD") — that list is the complete set of days this plan covers, so do NOT compute dates yourself, do NOT extend a partial final week past the last entry, and do NOT repeat a date. A date outside that list is discarded and the day silently keeps the default. Omit a date to leave it at `targetRepliesPerDay`. Return an empty list only if every day genuinely has the same target.',
         '',
         'SCORE-DRIVEN SELECTION',
@@ -824,6 +948,11 @@ export class OperationPlanService implements OnApplicationBootstrap {
             ]),
         '',
         'ENGAGE POLICIES',
+        ...(replyMaxRecap
+          ? [
+              `- Before you write each policy, re-check its \`targetRepliesPerDay\` against the HARD MAX stated under CADENCE (${replyMaxRecap}). A policy above its max is not a more ambitious plan: \`targetRepliesPerDay\` IS the send-time ceiling the pacing gate enforces, so a number you inflate here is a guardrail you removed — nothing downstream catches it, and the account keeps replying until the PLATFORM rate-limits, filters or bans it.`,
+            ]
+          : []),
         '- Each policy needs a human-readable themeTitle and keywordTargets: a LIST of { keyword, target } where `keyword` is the VERBATIM keyword text and `target` is that keyword\'s daily reply count. The sum of all `target` values must not exceed targetRepliesPerDay. Use ONLY keywords from the provided `keywords` list — do not invent keywords outside it, and do not repeat a keyword. The backend maps each keyword to its EngageKeyword id on save. If `keywords` is empty, return an empty keywordTargets list. Omit legacy keyword text arrays and daily hard caps.',
         '',
         'Use warnings[] to flag any infeasibility (range too short for the intended cadence, a requested platform with weak supply, etc.).',
@@ -887,6 +1016,9 @@ export class OperationPlanService implements OnApplicationBootstrap {
     // Drop unusable per-day Engage overrides (out-of-range / repeated dates)
     // before validation, so a stray date cannot throw away a paid generation.
     this._normalizeEngagePolicyDates(generation.data, start, end, projectId);
+    // Hold every reply target to its platform ceiling AFTER the date repair, so
+    // only overrides that survive to a real day are clamped (and logged).
+    this._clampEngageReplyVolume(generation.data, projectId);
     this._validateGeneratedPlan(generation.data, platforms, start, end);
 
     // Plan-level goal summary for the `data` column. targetScore is clamped to
@@ -1392,6 +1524,74 @@ export class OperationPlanService implements OnApplicationBootstrap {
     }
   }
 
+  // OPERATION_PLAN_REPLY_VOLUME states each platform's HARD MAX in the prompt, but a
+  // prompt is guidance and `targetRepliesPerDay` is not: it IS the ceiling the
+  // send-time pacing gate enforces (EngageService._assertProjectDailyTarget /
+  // getReplyBudget). A model that writes 8 for x is therefore not making an
+  // ambitious plan — it is removing the guardrail, and nothing downstream
+  // catches it. So the ceiling is applied HERE, in code, and the prompt's job
+  // is only to stop the clamp from firing in the first place.
+  //
+  // Clamped, never rejected: same repair-before-validate contract as
+  // _normalizeThreads / _normalizeEngagePolicyDates. An over-max target is a
+  // routine model overshoot, and failing a paid generation over it would be a
+  // far worse outcome than pacing the plan correctly.
+  //
+  // A platform with no OPERATION_PLAN_REPLY_VOLUME entry is outside the engage
+  // capability list: nothing scans it, so it never yields an opportunity and
+  // its policy can never fire. There is no ceiling to apply and nothing to
+  // repair — left as-is (the prompt asks for no such policy at all).
+  private _clampEngageReplyVolume(
+    plan: z.infer<typeof GeneratedPlanSchema>,
+    projectId: string
+  ): void {
+    for (const policy of plan.engagePolicies) {
+      const ceiling = OPERATION_PLAN_REPLY_VOLUME[policy.platform as ScanPlatform]?.max;
+      if (ceiling === undefined) continue;
+
+      const clamped: string[] = [];
+      if (policy.targetRepliesPerDay > ceiling) {
+        clamped.push(`default ${policy.targetRepliesPerDay}->${ceiling}`);
+        policy.targetRepliesPerDay = ceiling;
+      }
+      // Per-day overrides need the same ceiling: an override WINS over the
+      // default at send time, so clamping only the default would leave the
+      // exact same hole open one date at a time.
+      for (const entry of policy.dailyTargets ?? []) {
+        if (entry.target > ceiling) {
+          clamped.push(`${entry.date} ${entry.target}->${ceiling}`);
+          entry.target = ceiling;
+        }
+      }
+      // Lowering the default can strand keyword targets ABOVE it, and
+      // _validateGeneratedPlan rejects that sum — so the repair would have
+      // caused the very failure it exists to prevent. Refit them to whatever
+      // the day is now allowed to send.
+      const keywordTotal = policy.keywordTargets.reduce(
+        (sum, item) => sum + item.target,
+        0
+      );
+      if (keywordTotal > policy.targetRepliesPerDay) {
+        policy.keywordTargets = fitKeywordTargetsToCap(
+          policy.keywordTargets,
+          policy.targetRepliesPerDay
+        );
+        clamped.push(
+          `keywordTargets ${keywordTotal}->${policy.targetRepliesPerDay}`
+        );
+      }
+      if (clamped.length) {
+        // The only trace of the repair — the response shows the clamped numbers
+        // with no sign they were ever higher — so it names the plan's project
+        // and every value it moved.
+        this.logger.warn(
+          `Operation plan (project ${projectId}) Engage policy "${policy.platform}" exceeded the ` +
+          `${ceiling}/day reply ceiling; clamped ${clamped.join(', ')}.`
+        );
+      }
+    }
+  }
+
   // Returns the AI usage of every shrink call it fired, so the caller can bill
   // those tokens alongside the main generation (a plan can trigger many shrink
   // calls — one per over-budget anchor / thread part).
@@ -1724,6 +1924,9 @@ export class OperationPlanService implements OnApplicationBootstrap {
       // caller runs _normalizeEngagePolicyDates immediately before it, and that
       // normalizer's `usable` predicate is the exact complement of the four
       // conditions below, so every offending entry has already been dropped.
+      // The keyword-sum throw above is unreachable for the same reason —
+      // _clampEngageReplyVolume refits keywordTargets whenever it lowers a
+      // default — and the same warning applies to it.
       // They are kept deliberately, as the invariant's single written statement
       // and as a loud backstop if the normalizer is ever loosened — and because
       // this method is also exercised directly by unit tests. If you change one

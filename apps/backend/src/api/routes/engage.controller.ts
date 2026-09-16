@@ -549,8 +549,9 @@ export class EngageController {
   /**
    * Read-only status of the unattended reply driver, per (project, platform):
    * how many replies are already queued, how many opportunities are still
-   * eligible to be drafted, and whether pacing (active hours / local window /
-   * minimum gap) currently allows a poll to hand any of it out.
+   * eligible to be drafted, how much of the day's reply limit is spent, and
+   * whether pacing (the project's active hours, the platform write window, the
+   * derived spacing) currently allows a poll to hand any of it out.
    *
    * A GET, unlike `/reply-due`: it claims nothing, drafts nothing, and is safe
    * to poll as often as a debug panel wants — `/reply-due` cannot answer "is

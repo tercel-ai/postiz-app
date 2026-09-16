@@ -112,11 +112,81 @@ describe('SaveAutomationRepliesDto', () => {
             defaultStrategy: 'expert_answer',
             length: 'short',
             mentionTags: [],
-            checkIntervalMinutes: 300,
+            windowStart: '08:00',
+            windowEnd: '18:00',
+            timezone: 'Asia/Shanghai',
+            dailyReplyLimit: 4,
           },
         },
       })
     ).toEqual([]);
+  });
+
+  it('accepts a policy that states no schedule \u2014 the driver applies the defaults', () => {
+    expect(
+      check(SaveAutomationRepliesDto, {
+        policies: { x: { autoReplyEnabled: true, length: 'short' } },
+      })
+    ).toEqual([]);
+  });
+
+  it('still accepts the retired checkIntervalMinutes from an older client', () => {
+    // Stored and echoed back, never read. Rejecting it would 400 a client that
+    // is otherwise sending a perfectly valid policy.
+    expect(
+      check(SaveAutomationRepliesDto, {
+        policies: { x: { autoReplyEnabled: true, checkIntervalMinutes: 300 } },
+      })
+    ).toEqual([]);
+  });
+
+  // The schedule keys are checked HERE rather than left to the resolver's
+  // defaults: that resolver falls back silently, which is right at read time and
+  // wrong at the boundary — `dailyReplyLimit: "4"` would get a 200 and the
+  // default 4 back, and the caller would only notice when the number it set was
+  // not the number being enforced.
+  it('rejects a malformed active-hours window', () => {
+    expect(
+      check(SaveAutomationRepliesDto, { policies: { x: { windowStart: '9am', windowEnd: '18:00' } } })
+    ).toEqual(['policies']);
+    // Half a window is not a window — the resolver would drop it back to the
+    // default hours rather than honour it.
+    expect(check(SaveAutomationRepliesDto, { policies: { x: { windowStart: '08:00' } } })).toEqual([
+      'policies',
+    ]);
+    // start === end is a moment, and `withinLocalWindow` fails closed on it —
+    // so it would silently stop this platform replying at all.
+    expect(
+      check(SaveAutomationRepliesDto, { policies: { x: { windowStart: '08:00', windowEnd: '08:00' } } })
+    ).toEqual(['policies']);
+    expect(check(SaveAutomationRepliesDto, { policies: { x: { timezone: '' } } })).toEqual([
+      'policies',
+    ]);
+  });
+
+  it('rejects a daily limit that is not a whole non-negative number', () => {
+    expect(check(SaveAutomationRepliesDto, { policies: { x: { dailyReplyLimit: '4' } } })).toEqual([
+      'policies',
+    ]);
+    expect(check(SaveAutomationRepliesDto, { policies: { x: { dailyReplyLimit: 2.5 } } })).toEqual([
+      'policies',
+    ]);
+    expect(check(SaveAutomationRepliesDto, { policies: { x: { dailyReplyLimit: -1 } } })).toEqual([
+      'policies',
+    ]);
+  });
+
+  it('accepts a daily limit of 0 \u2014 "configured, and off for now"', () => {
+    expect(check(SaveAutomationRepliesDto, { policies: { x: { dailyReplyLimit: 0 } } })).toEqual([]);
+  });
+
+  // Clamping is the RESOLVER's job (it is what the driver enforces), so a body
+  // asking for more than a platform tolerates is saved, not refused — the same
+  // repair-before-validate contract plan generation uses for the same ceiling.
+  it('accepts a limit above the platform ceiling', () => {
+    expect(check(SaveAutomationRepliesDto, { policies: { reddit: { dailyReplyLimit: 9 } } })).toEqual(
+      []
+    );
   });
 
   it('accepts a switch-only body — the page has exactly one reply control', () => {

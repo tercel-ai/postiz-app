@@ -23,6 +23,22 @@ import {
   outputLengthForLength,
 } from '@gitroom/nestjs-libraries/engage/engage-draft-length';
 import { PlatformPacingConfigService } from '@gitroom/nestjs-libraries/engage/platform-pacing-config.service';
+import {
+  clockTimeToMinutes,
+  daysSince,
+  localDayRange,
+  resolveChannelDailyLimits,
+  resolveReplyDailyCeilings,
+  resolveReplySchedule,
+  resolveReplyWarmupTiers,
+  DEFAULT_CHANNEL_DAILY_LIMIT,
+  DEFAULT_REPLY_WARMUP_TIERS,
+  ENGAGE_REPLY_CHANNEL_LIMIT_KEY,
+  ENGAGE_REPLY_DAILY_CEILING_KEY,
+  ENGAGE_REPLY_WARMUP_KEY,
+  PLATFORM_REPLY_RISK_CEILING,
+  type ReplyWarmupTier,
+} from '@gitroom/nestjs-libraries/engage/engage-reply-schedule';
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -33,7 +49,7 @@ export const ENGAGE_REPLY_PACING_KEY = 'engage_reply_pacing';
  * Whether the unattended driver still gates on the operation plan's daily
  * reply budget (`EngageService.getReplyBudget` — `targetRepliesPerDay` /
  * `dailyHardCap` / `keywordTargets`). OFF by default: the driver's day-to-day
- * job is spacing (active hours + `checkIntervalMinutes`), and most projects
+ * job is spacing (active hours + the daily reply limit), and most projects
  * running Automation never generate an operation plan at all — gating on one
  * by default silently produced zero replies for them. Set to `'true'` to
  * restore the stricter behaviour, where a project with no active plan (or an
@@ -45,8 +61,10 @@ function isReplyBudgetGateEnabled(): boolean {
 }
 
 /**
- * Whether `now` falls inside the policy's LOCAL-time window. Absent bounds mean
- * no restriction.
+ * Whether `now` falls inside the policy's LOCAL-time ACTIVE HOURS. Absent bounds
+ * mean no restriction — callers pass a resolved schedule
+ * (`resolveReplySchedule`), which has already filled in the default 8 AM–6 PM,
+ * so "absent" only ever reaches here from a direct caller.
  *
  * Local rather than UTC because a window is a human statement ("office hours").
  * The account-level window in platform_pacing is the separate, wider constraint
@@ -59,14 +77,8 @@ export function withinLocalWindow(
 ): boolean {
   const { windowStart, windowEnd } = policy;
   if (!windowStart || !windowEnd) return true;
-  const toMinutes = (hhmm: string) => {
-    if (!/^\d{2}:\d{2}$/.test(hhmm)) return null;
-    const [hours, minutes] = hhmm.split(':').map(Number);
-    if (hours > 23 || minutes > 59) return null;
-    return hours * 60 + minutes;
-  };
-  const start = toMinutes(windowStart);
-  const end = toMinutes(windowEnd);
+  const start = clockTimeToMinutes(windowStart);
+  const end = clockTimeToMinutes(windowEnd);
   if (start === null || end === null || start === end) return false;
   let local: dayjs.Dayjs;
   try {
@@ -174,10 +186,28 @@ export interface ReplyQueueStatusRow {
   eligibleCount: number;
   /** The pacing setting's UTC active-hours window. */
   withinActiveHours: boolean;
-  /** This policy's own local-time window (windowStart/windowEnd/timezone). */
+  /** This policy's own local-time ACTIVE HOURS, defaults applied. */
   withinLocalWindow: boolean;
+  /** The active hours the line above was decided against ('HH:MM', local). */
+  activeHours: { start: string; end: string; timezone?: string };
+  /** Replies already sent on this platform in the current LOCAL day. */
+  sentToday: number;
+  /** This platform's replies-per-day ceiling, after the clamp and warm-up. */
+  dailyReplyLimit: number;
+  /**
+   * The warm-up fraction currently applied to the ceiling, and the days of
+   * driving history it came from (null = this org has never replied here, which
+   * counts as day 0).
+   */
+  warmupFactor: number;
+  warmupDays: number | null;
+  /** Channels already at their same-channel cap today; empty when uncapped. */
+  exhaustedChannelIds: string[];
+  /** Whether the day's ceiling still has room (`sentToday < dailyReplyLimit`). */
+  withinDailyLimit: boolean;
   /** Human-like spacing since this project+platform's last sent reply. */
   withinMinGap: boolean;
+  /** The DERIVED spacing (active hours / daily limit), floored by pacing. */
   minGapMinutes: number;
   lastSentReplyAt: string | null;
   /** ISO timestamp of when the min-gap gate next opens; null when not gated by it. */
@@ -185,9 +215,9 @@ export interface ReplyQueueStatusRow {
 }
 
 /**
- * The unattended reply DRIVER: paces auto-replies by active hours and
- * per-project/platform interval, optionally against an operation plan's daily
- * reply targets.
+ * The unattended reply DRIVER: paces auto-replies by each project+platform's
+ * active hours and daily reply limit (engage-reply-schedule.ts), optionally
+ * against an operation plan's daily reply targets as well.
  *
  * The pacing gate in EngageService is a BRAKE — it runs at send time and refuses
  * a reply that would exceed the plan. This service is the ACCELERATOR: no other
@@ -195,7 +225,8 @@ export interface ReplyQueueStatusRow {
  * `ENGAGE_REPLY_BUDGET_GATE_ENABLED=true`, both read the same budget
  * (EngageService.getReplyBudget), so what is handed out can never exceed what
  * would be let through — with the gate at its default (off), this driver is
- * paced by interval alone and does not require an active plan.
+ * paced by the project's own active hours and daily limit alone and does not
+ * require an active plan.
  *
  * Backend = scheduler, extension = executor — the same split as publish-due and
  * the scan loop. This service makes NO platform call; it only decides and drafts.
@@ -245,6 +276,143 @@ export class EngageAutoReplyService implements OnModuleInit {
         err
       );
     }
+
+    // Seeded as its own row rather than as a field on the pacing object above:
+    // that one is about SPACING (how close two replies may be) and is read on
+    // every poll; this is the account-safety ceiling on a whole day, and an
+    // operator tuning one has no reason to restate the other.
+    try {
+      const existing = await this._settingsService.get(
+        ENGAGE_REPLY_DAILY_CEILING_KEY
+      );
+      if (existing === null || existing === undefined) {
+        await this._settingsService.set(
+          ENGAGE_REPLY_DAILY_CEILING_KEY,
+          PLATFORM_REPLY_RISK_CEILING,
+          {
+            type: 'json',
+            description:
+              'Account-SAFETY ceiling on engage replies per platform per local day, as ' +
+              '{ "<platform>": <n> } — the most a project may be configured to send, ' +
+              'whatever its Automation reply limit asks for. NOT the editorial "normal" ' +
+              'volume an operation plan is generated against (that is 3-4/day and lives in ' +
+              'code): these are the rates at which the PLATFORM starts limiting, filtering ' +
+              'or banning an account, so raising one is an account-risk decision. ' +
+              'Merged onto the built-in defaults per platform, so naming one platform ' +
+              'leaves the rest alone; an unusable entry falls back to the built-in, and ' +
+              'every value is capped at 100/day so a typo cannot remove the ceiling. ' +
+              'Reply VOLUME is only half of what gets an account limited — content ' +
+              'similarity, link ratio, per-subreddit/thread concentration and account AGE ' +
+              'matter at least as much, and none of them is bounded by this number.',
+            defaultValue: PLATFORM_REPLY_RISK_CEILING,
+          }
+        );
+      }
+    } catch (err) {
+      this.logger.error(
+        `Failed to seed default setting ${ENGAGE_REPLY_DAILY_CEILING_KEY}:`,
+        err
+      );
+    }
+
+    try {
+      const existing = await this._settingsService.get(ENGAGE_REPLY_WARMUP_KEY);
+      if (existing === null || existing === undefined) {
+        await this._settingsService.set(
+          ENGAGE_REPLY_WARMUP_KEY,
+          DEFAULT_REPLY_WARMUP_TIERS,
+          {
+            type: 'json',
+            description:
+              'Warm-up ladder for engage replies: [{ "days": <inclusive lower bound>, ' +
+              '"factor": <0..1> }], applied to the platform ceiling so a newly driven ' +
+              'account ramps up instead of starting at its limit. "days" counts from the ' +
+              'FIRST reply this org ever sent on that platform — how long WE have been ' +
+              'driving the account, which is the only age signal available (engage replies ' +
+              'go out through the extension\'s own browser session, so no registration date ' +
+              'is ever visible). An account we have never driven counts as day 0, the ' +
+              'slowest tier. The ladder must start at day 0 and is taken whole: any ' +
+              'unusable rung discards the stored ladder for the built-in, rather than ' +
+              'applying half a curve. A factor never raises a ceiling (values above 1 are ' +
+              'clamped) and never stops a platform outright (the result is floored at 1/day).',
+            defaultValue: DEFAULT_REPLY_WARMUP_TIERS,
+          }
+        );
+      }
+    } catch (err) {
+      this.logger.error(
+        `Failed to seed default setting ${ENGAGE_REPLY_WARMUP_KEY}:`,
+        err
+      );
+    }
+
+    try {
+      const existing = await this._settingsService.get(
+        ENGAGE_REPLY_CHANNEL_LIMIT_KEY
+      );
+      if (existing === null || existing === undefined) {
+        await this._settingsService.set(
+          ENGAGE_REPLY_CHANNEL_LIMIT_KEY,
+          DEFAULT_CHANNEL_DAILY_LIMIT,
+          {
+            type: 'json',
+            description:
+              'Replies allowed to the SAME channel per local day, as { "<platform>": <n> } — ' +
+              'one subreddit, one publication, one tag feed. A daily total says nothing ' +
+              'about spread, and spread is what the platform reads: three comments across ' +
+              'three subreddits is three people having a day, three in one subreddit is a ' +
+              'campaign, and reddit\'s spam filter is tuned for that shape. Only reddit is ' +
+              'capped by default, because it is the only platform where the channel is both ' +
+              'populated and meaningful as a community (x has none; the article platforms ' +
+              'set a publication or tag, where concentration means much less). A platform ' +
+              'with no entry is unconstrained. Merged onto the built-ins per platform.',
+            defaultValue: DEFAULT_CHANNEL_DAILY_LIMIT,
+          }
+        );
+      }
+    } catch (err) {
+      this.logger.error(
+        `Failed to seed default setting ${ENGAGE_REPLY_CHANNEL_LIMIT_KEY}:`,
+        err
+      );
+    }
+  }
+
+  /**
+   * The per-platform daily ceilings in force — built-ins with the admin setting
+   * folded on. A settings hiccup falls back to the built-ins rather than to "no
+   * ceiling", the same way `getPacing` does.
+   */
+  async getReplyDailyCeilings(): Promise<Record<string, number>> {
+    try {
+      return resolveReplyDailyCeilings(
+        await this._settingsService.get(ENGAGE_REPLY_DAILY_CEILING_KEY)
+      );
+    } catch {
+      return resolveReplyDailyCeilings();
+    }
+  }
+
+  /** The warm-up ladder in force. Falls back to the built-in curve. */
+  async getReplyWarmupTiers(): Promise<ReplyWarmupTier[]> {
+    try {
+      return resolveReplyWarmupTiers(
+        await this._settingsService.get(ENGAGE_REPLY_WARMUP_KEY)
+      );
+    } catch {
+      return resolveReplyWarmupTiers();
+    }
+  }
+
+  /** The per-platform same-channel daily caps in force. */
+  async getChannelDailyLimits(): Promise<Record<string, number>> {
+    try {
+      return resolveChannelDailyLimits(
+        await this._settingsService.get(ENGAGE_REPLY_CHANNEL_LIMIT_KEY)
+      );
+    } catch {
+      return resolveChannelDailyLimits();
+    }
   }
 
   /** Effective pacing: the stored setting merged onto the defaults. */
@@ -270,13 +438,18 @@ export class EngageAutoReplyService implements OnModuleInit {
    * day by construction — no separate scheduling clock needed.
    */
   async getDueReplies(org: Organization, now = new Date()): Promise<DueReply[]> {
-    // Both resolved ONCE. The window and the floor are consulted per
-    // (project × platform) below, and getPlatformPacing is a settings query on
-    // every call — reading it inside the loop was an N+1 on a global admin value.
-    const [pacing, pacingConfig] = await Promise.all([
-      this.getPacing(),
-      this._platformPacing.getPlatformPacing(),
-    ]);
+    // All resolved ONCE. The window, the floor and the day's ceiling are
+    // consulted per (project × platform) below, and each of these is a settings
+    // query — reading them inside the loop was an N+1 on global admin values.
+    const [pacing, pacingConfig, ceilings, warmupTiers, channelDailyLimits] =
+      await Promise.all([
+        this.getPacing(),
+        this._platformPacing.getPlatformPacing(),
+        this.getReplyDailyCeilings(),
+        this.getReplyWarmupTiers(),
+        this.getChannelDailyLimits(),
+      ]);
+
     // The write window is checked PER PLATFORM further down, not once here.
     // It used to be one global pair of UTC hours (`activeHoursUtc`), which could
     // neither name a timezone nor differ between platforms — and posting had its
@@ -294,6 +467,29 @@ export class EngageAutoReplyService implements OnModuleInit {
       );
       return [];
     }
+
+    // The warm-up clock is per (org, PLATFORM): the account belongs to the
+    // platform, and this org's projects drive the same one, so a second project
+    // must not get a fresh warm-up on an account that has been replying for
+    // months.
+    //
+    // Fetched for every configured platform in ONE query, before the loop,
+    // rather than lazily inside it. Lazily was a query per platform charged
+    // against the schedule resolution — which happens BEFORE the window gates —
+    // so an org sitting outside its active hours, the most common poll outcome
+    // of the day, paid N queries to be told nothing was due.
+    const firstSentAt = await this._engageRepository.getFirstSentReplyAtByPlatform(
+      org.id,
+      [
+        ...new Set(
+          configs.flatMap((config) =>
+            Object.keys((config.replyPolicies ?? {}) as Record<string, unknown>).map(
+              (platform) => platform.toLowerCase()
+            )
+          )
+        ),
+      ]
+    );
 
     const due: DueReply[] = [];
     // Counted per PLATFORM, not globally: `maxPerPoll` caps each platform's own
@@ -352,11 +548,25 @@ export class EngageAutoReplyService implements OnModuleInit {
         // outside the hours the project set, or in a burst the gap exists to
         // prevent — and a reply that failed to send once is exactly the one most
         // likely to be re-offered at 3am.
-        if (!withinLocalWindow(policy, now)) {
+        //
+        // The schedule the user configured on the Automation page: active hours
+        // plus a daily limit, with the spacing between two replies DERIVED from
+        // the pair rather than configured beside them. Resolved ONCE per
+        // platform, so the window, the day's ceiling and the spacing can never
+        // be enforced against different numbers.
+        const schedule = resolveReplySchedule(policy, platform, {
+          minGapMinutes: pacing.minGapMinutes,
+          ceilings,
+          warmupDays: daysSince(firstSentAt[platform], now),
+          warmupTiers,
+          channelDailyLimits,
+        });
+
+        if (!withinLocalWindow(schedule, now)) {
           this.logger.debug(
             `[reply-gate] ${projectId}/${platform} SKIP project-local-window ` +
-              `(${policy.windowStart ?? '-'}..${policy.windowEnd ?? '-'} ${
-                policy.timezone ?? 'UTC'
+              `(${schedule.windowStart}..${schedule.windowEnd} ${
+                schedule.timezone ?? 'UTC'
               })`
           );
           continue;
@@ -369,6 +579,33 @@ export class EngageAutoReplyService implements OnModuleInit {
         if (!this._platformPacing.isWithinWriteWindowFor(pacingConfig, platform, now)) {
           this.logger.debug(
             `[reply-gate] ${projectId}/${platform} SKIP platform-write-window`
+          );
+          continue;
+        }
+
+        // The day's ceiling. Counted over the LOCAL day the active hours are
+        // stated in, so the count rolls over with the window rather than in the
+        // middle of it.
+        //
+        // Checked BEFORE the spacing below because it is the cheaper answer to
+        // give: a project that has spent its day is done regardless of when it
+        // last replied, and asking about spacing first would cost two clock
+        // queries to reach the same skip.
+        const { since, until } = localDayRange(schedule.timezone, now);
+        const sentToday = await this._engageRepository.countProjectSentRepliesToday(
+          org.id,
+          projectId,
+          platform,
+          since,
+          until
+        );
+        if (sentToday >= schedule.dailyReplyLimit) {
+          this.logger.debug(
+            `[reply-gate] ${projectId}/${platform} SKIP daily-limit — ` +
+              `sentToday=${sentToday} >= ${schedule.dailyReplyLimit}` +
+              (schedule.warmupFactor < 1
+                ? ` (warm-up ×${schedule.warmupFactor})`
+                : '')
           );
           continue;
         }
@@ -391,13 +628,13 @@ export class EngageAutoReplyService implements OnModuleInit {
           this._engageRepository.getLastSentReplyAt(org.id, projectId, platform),
           this._engageRepository.getLastPlatformWriteAt(org.id, platform),
         ]);
-        // `??`, deliberately: minGapMinutes is the DEFAULT cadence for a project
-        // that set none, not a floor. A project asking for a tighter interval is
-        // stating a preference, and preferences are allowed to be tighter than
-        // other preferences. What a preference may NOT undercut is the platform
-        // floor below — which is why that is a separate setting rather than an
-        // attempt to make this one mean two things.
-        const cadenceMinutes = policy.checkIntervalMinutes ?? pacing.minGapMinutes;
+        // DERIVED from the schedule — the active hours spread across the daily
+        // limit — with the org-wide `minGapMinutes` as the floor under it, never
+        // as a default beside it (`resolveReplySchedule` applies both). The
+        // retired `checkIntervalMinutes` is deliberately not consulted: a stored
+        // 8-hour cadence would let two replies through a 10-hour window and
+        // silently contradict the 4/day the same policy asks for.
+        const cadenceMinutes = schedule.cadenceMinutes;
         if (
           lastAt &&
           dayjs.utc(now).diff(dayjs.utc(lastAt), 'minute') < cadenceMinutes
@@ -430,6 +667,28 @@ export class EngageAutoReplyService implements OnModuleInit {
           continue;
         }
 
+        // Communities that have already had their allowance today. Both lanes
+        // below are given the list rather than checking after the fact: the
+        // claim lane would otherwise LEASE a reply it must not hand out, and the
+        // generation lane would pay an LLM to write one it must not send.
+        //
+        // Resolved HERE, after the spacing gates, because it is the only query
+        // on this path that neither gate above needs: a platform inside its gap
+        // is skipped without ever asking which of its communities are full.
+        const excludeChannelIds = await this._exhaustedChannels(
+          org.id,
+          platform,
+          schedule.channelDailyLimit,
+          since,
+          until
+        );
+        if (excludeChannelIds.length) {
+          this.logger.debug(
+            `[reply-gate] ${projectId}/${platform} channel-cap — ` +
+              `${excludeChannelIds.length} at ${schedule.channelDailyLimit}/day`
+          );
+        }
+
         // ── Queued first ────────────────────────────────────────────────────
         //
         // A reply already in QUEUE is claimed before anything new is generated.
@@ -446,7 +705,13 @@ export class EngageAutoReplyService implements OnModuleInit {
           org.id,
           projectId,
           platform,
-          { limit: 1, leaseToken: `claim_${randomUUID()}`, leaseCutoff, now }
+          {
+            limit: 1,
+            leaseToken: `claim_${randomUUID()}`,
+            leaseCutoff,
+            now,
+            ...(excludeChannelIds.length ? { excludeChannelIds } : {}),
+          }
         );
         if (claimed.length) {
           for (const row of claimed) {
@@ -496,7 +761,7 @@ export class EngageAutoReplyService implements OnModuleInit {
             } keywords=${budget.keywords.length})`
         );
         const drafted = await this._draftOne(
-          org, projectId, platform, budget, pacing, policy
+          org, projectId, platform, budget, pacing, policy, excludeChannelIds
         );
         if (drafted) {
           due.push(drafted);
@@ -527,12 +792,19 @@ export class EngageAutoReplyService implements OnModuleInit {
     // every call and this loop is (projects × platforms) deep — reading it
     // inside was an N+1 on a value that changes on the order of weeks. The
     // helpers below are pure functions over the resolved object.
-    const [pacing, pacingConfig] = await Promise.all([
-      this.getPacing(),
-      this._platformPacing.getPlatformPacing(),
-    ]);
+    const [pacing, pacingConfig, ceilings, warmupTiers, channelDailyLimits] =
+      await Promise.all([
+        this.getPacing(),
+        this._platformPacing.getPlatformPacing(),
+        this.getReplyDailyCeilings(),
+        this.getReplyWarmupTiers(),
+        this.getChannelDailyLimits(),
+      ]);
 
     const configs = await this._engageRepository.getAutoReplyConfigs(org.id);
+    // Same per-platform memo as the gate: the warm-up clock belongs to the
+    // account, so two projects on one platform must read one answer.
+    const firstSentAt = new Map<string, Date | null>();
     const rows: ReplyQueueStatusRow[] = [];
 
     for (const config of configs) {
@@ -571,7 +843,34 @@ export class EngageAutoReplyService implements OnModuleInit {
           .filter((k) => k.remaining > 0)
           .map((k) => k.keyword);
 
-        const [queuedCount, eligibleCount, lastSentReplyAt, lastWriteAt] =
+        // Same resolution the gate performs, for the same reason the clocks
+        // below are mirrored: a row that disagrees with the gate is worse than
+        // no row.
+        if (!firstSentAt.has(platform)) {
+          firstSentAt.set(
+            platform,
+            await this._engageRepository.getFirstSentReplyAt(org.id, platform)
+          );
+        }
+        const warmupDays = daysSince(firstSentAt.get(platform) ?? null, now);
+
+        const schedule = resolveReplySchedule(policy, platform, {
+          minGapMinutes: pacing.minGapMinutes,
+          ceilings,
+          warmupDays,
+          warmupTiers,
+          channelDailyLimits,
+        });
+        const { since, until } = localDayRange(schedule.timezone, now);
+        const exhaustedChannelIds = await this._exhaustedChannels(
+          org.id,
+          platform,
+          schedule.channelDailyLimit,
+          since,
+          until
+        );
+
+        const [queuedCount, eligibleCount, lastSentReplyAt, lastWriteAt, sentToday] =
           await Promise.all([
             this._engageRepository.countQueuedEngageReplies(org.id, projectId, platform),
             this._engageRepository.countEligibleOpportunities(org.id, projectId, platform, {
@@ -580,6 +879,13 @@ export class EngageAutoReplyService implements OnModuleInit {
             }),
             this._engageRepository.getLastSentReplyAt(org.id, projectId, platform),
             this._engageRepository.getLastPlatformWriteAt(org.id, platform),
+            this._engageRepository.countProjectSentRepliesToday(
+              org.id,
+              projectId,
+              platform,
+              since,
+              until
+            ),
           ]);
 
         // This row exists to EXPLAIN the dispatch gate, so it has to be computed
@@ -590,14 +896,16 @@ export class EngageAutoReplyService implements OnModuleInit {
         //   · the platform write floor     (gate 4)
         // Missing the floor was exactly this bug in miniature: the overview said
         // "eligible now" while getDueReplies withheld the reply, because a post
-        // published minutes earlier had moved a clock this row never read.
+        // published minutes earlier had moved a clock this row never read. The
+        // day's ceiling is mirrored for the same reason — an exhausted limit is
+        // the one hold that no clock explains.
         const withinActiveHours = this._platformPacing.isWithinWriteWindowFor(
           pacingConfig,
           platform,
           now
         );
 
-        const minGapMinutes = policy.checkIntervalMinutes ?? pacing.minGapMinutes;
+        const minGapMinutes = schedule.cadenceMinutes;
         const floorMinutes = this._platformPacing.writeFloorMinutesFor(
           pacingConfig,
           platform
@@ -624,7 +932,18 @@ export class EngageAutoReplyService implements OnModuleInit {
           queuedCount,
           eligibleCount,
           withinActiveHours,
-          withinLocalWindow: withinLocalWindow(policy, now),
+          withinLocalWindow: withinLocalWindow(schedule, now),
+          activeHours: {
+            start: schedule.windowStart,
+            end: schedule.windowEnd,
+            ...(schedule.timezone ? { timezone: schedule.timezone } : {}),
+          },
+          sentToday,
+          dailyReplyLimit: schedule.dailyReplyLimit,
+          withinDailyLimit: sentToday < schedule.dailyReplyLimit,
+          warmupFactor: schedule.warmupFactor,
+          warmupDays,
+          exhaustedChannelIds,
           withinMinGap,
           minGapMinutes,
           lastSentReplyAt: lastSentReplyAt ? lastSentReplyAt.toISOString() : null,
@@ -634,6 +953,30 @@ export class EngageAutoReplyService implements OnModuleInit {
       }
     }
     return rows;
+  }
+
+  /**
+   * Channels that have already had `limit` replies today, for a platform that
+   * caps same-channel concentration. Empty when the platform is unconstrained —
+   * and then no query runs at all, which is every platform but reddit today.
+   */
+  private async _exhaustedChannels(
+    organizationId: string,
+    platform: string,
+    limit: number | undefined,
+    since: Date,
+    until: Date
+  ): Promise<string[]> {
+    if (limit === undefined) return [];
+    const byChannel = await this._engageRepository.countTodayRepliesByChannel(
+      organizationId,
+      platform,
+      since,
+      until
+    );
+    return Object.entries(byChannel)
+      .filter(([, count]) => count >= limit)
+      .map(([channelId]) => channelId);
   }
 
   /**
@@ -651,7 +994,9 @@ export class EngageAutoReplyService implements OnModuleInit {
     platform: string,
     budget: Awaited<ReturnType<EngageService['getReplyBudget']>>,
     pacing: EngageReplyPacing,
-    policy: EngageReplyPolicy
+    policy: EngageReplyPolicy,
+    /** Channels that have had their allowance today; never drafted into. */
+    excludeChannelIds: string[] = []
   ): Promise<DueReply | null> {
     const hungryKeywords = budget.keywords
       .filter((k) => k.remaining > 0)
@@ -665,6 +1010,7 @@ export class EngageAutoReplyService implements OnModuleInit {
         limit: 1,
         minScore: pacing.minScore,
         ...(hungryKeywords.length ? { keywords: hungryKeywords } : {}),
+        ...(excludeChannelIds.length ? { excludeChannelIds } : {}),
       }
     );
     const candidate = candidates[0];

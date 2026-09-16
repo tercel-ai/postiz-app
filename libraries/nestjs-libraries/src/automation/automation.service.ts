@@ -16,6 +16,12 @@ import {
   readEngageConfigMetadata,
 } from '@gitroom/nestjs-libraries/engage/engage-config-metadata';
 import {
+  daysSince,
+  resolveReplySchedule,
+  type ReplyScheduleInput,
+  type ReplyScheduleOptions,
+} from '@gitroom/nestjs-libraries/engage/engage-reply-schedule';
+import {
   SaveAutomationPublishingDto,
   SaveAutomationRepliesDto,
 } from '@gitroom/nestjs-libraries/automation/automation.dto';
@@ -68,11 +74,27 @@ export class AutomationService {
    * here).
    */
   async getOverview(org: Organization, projectId: string) {
-    const [config, publishing, lastPublishedAt, pacing] = await Promise.all([
+    const [
+      config,
+      publishing,
+      lastPublishedAt,
+      pacing,
+      ceilings,
+      warmupTiers,
+      channelDailyLimits,
+    ] = await Promise.all([
       this._engageRepository.getConfigCore(org.id, projectId),
       this._projectPublishing.resolve(org.id, projectId),
       this._postsService.getLastPublishedAt(org.id, projectId),
       this._engageAutoReply.getPacing(),
+      // Read here too, so the limit this page REPORTS is the one the driver
+      // will enforce — including an admin's override of the built-in ceiling,
+      // and the warm-up discount on an account we have only just started
+      // driving. A page that showed the undiscounted number would promise a
+      // rate the driver spends the first month refusing.
+      this._engageAutoReply.getReplyDailyCeilings(),
+      this._engageAutoReply.getReplyWarmupTiers(),
+      this._engageAutoReply.getChannelDailyLimits(),
     ]);
 
     // Resolved once so the hoisted default and the per-window overrides below
@@ -99,14 +121,24 @@ export class AutomationService {
     // Keyed lowercase to match how the driver normalizes a policy's platform
     // before it ever queries EngageSentReply (engage-auto-reply.service.ts) —
     // a policy key written with different casing must still resolve.
-    const lastSentAtByPlatform =
+    const lowerPlatformKeys = platformKeys.map((platform) => platform.toLowerCase());
+    const [lastSentAtByPlatform, firstSentAtByPlatform] = await Promise.all([
       repliesActive && platformKeys.length
-        ? await this._engageRepository.getLastSentReplyAtByPlatform(
+        ? this._engageRepository.getLastSentReplyAtByPlatform(
             org.id,
             projectId,
-            platformKeys.map((platform) => platform.toLowerCase())
+            lowerPlatformKeys
           )
-        : {};
+        : {},
+      // ORG-wide, unlike the line above: the warm-up clock belongs to the
+      // platform ACCOUNT, which this org's projects share.
+      platformKeys.length
+        ? this._engageRepository.getFirstSentReplyAtByPlatform(
+            org.id,
+            lowerPlatformKeys
+          )
+        : {},
+    ]);
     const now = new Date();
 
     return {
@@ -169,14 +201,22 @@ export class AutomationService {
         // set it with — so listing accounts here only invited a managed-reply
         // save to write an Engage-owned flag on every account at once.
         //
-        // Each entry also carries `nextCheckAt`: the next time AIsee will check
-        // THIS platform for reply opportunities, or null while that platform is
-        // not being driven at all (see withNextCheckAt below for the formula).
-        platforms: withNextCheckAt(
+        // Each entry also carries its EFFECTIVE reply schedule — `activeHours`
+        // and `dailyReplyLimit` with the defaults already applied — plus
+        // `nextCheckAt`: the next time AIsee will check THIS platform for reply
+        // opportunities, or null while that platform is not being driven at all
+        // (see withResolvedSchedule below for the formula).
+        //
+        // Effective, not stored: a platform that has never been configured is
+        // still driven on the default 8 AM–6 PM / 4-a-day schedule, so a client
+        // rendering the stored blob alone would show blanks for hours the driver
+        // is in fact enforcing.
+        platforms: withResolvedSchedule(
           stripPublishingKeys(storedPolicies),
           repliesActive,
           lastSentAtByPlatform,
-          pacing.minGapMinutes,
+          firstSentAtByPlatform,
+          { minGapMinutes: pacing.minGapMinutes, ceilings, warmupTiers, channelDailyLimits },
           now
         ),
       },
@@ -708,38 +748,72 @@ function stripPublishingKeys(
 }
 
 /**
- * Adds, to every platform policy, the next time AIsee will check that platform
- * for reply opportunities — the same anchor and interval the driver itself
- * gates on (`EngageAutoReplyService.getDueReplies`), so this can never show a
- * time the driver disagrees with:
+ * Adds, to every platform policy, the schedule the driver will actually run it
+ * on and the next time it will check that platform for reply opportunities.
  *
- *   nextCheckAt = (last reply sent on this platform, or now if never) + minutes
+ * Resolved through `resolveReplySchedule` — the same function
+ * `EngageAutoReplyService.getDueReplies` gates on — so this can never show
+ * hours, a limit or a time the driver disagrees with:
  *
- * `minutes` is the platform's own `checkIntervalMinutes` if it set one, else the
- * org-wide pacing default — again, the exact fallback the driver applies.
+ *   activeHours      the policy's window, or the default 8 AM–6 PM
+ *   dailyReplyLimit  the policy's limit, or the default, clamped to that
+ *                    platform's account-SAFETY ceiling (and to an admin's
+ *                    `engage_reply_daily_ceiling` override of it), then
+ *                    discounted by the account's WARM-UP factor
+ *   warmupFactor     present only while that discount is biting
+ *   channelDailyLimit  replies allowed to one subreddit/publication a day,
+ *                    present only where the platform is capped
+ *   nextCheckAt      (last reply sent on this platform, or now if never)
+ *                    + the spacing DERIVED from those two
+ *
+ * The retired `checkIntervalMinutes` is not read here either. A stored one is
+ * still echoed back inside the policy — this function copies the blob — but no
+ * number on this page is computed from it any more.
  */
-function withNextCheckAt(
+function withResolvedSchedule(
   policies: Record<string, Record<string, unknown>>,
   repliesActive: boolean,
   lastSentAtByPlatform: Record<string, Date>,
-  defaultMinGapMinutes: number,
+  firstSentAtByPlatform: Record<string, Date>,
+  options: ReplyScheduleOptions,
   now: Date
 ): Record<string, Record<string, unknown>> {
   const out: Record<string, Record<string, unknown>> = {};
   for (const [platform, policy] of Object.entries(policies)) {
+    // Cast, not trust: `policies` is the raw JSON blob, and every field
+    // resolveReplySchedule reads is type-checked there before it is used.
+    const schedule = resolveReplySchedule(policy as ReplyScheduleInput, platform, {
+      ...options,
+      warmupDays: daysSince(firstSentAtByPlatform[platform.toLowerCase()], now),
+    });
     const active = repliesActive && policy.autoReplyEnabled === true;
     let nextCheckAt: string | null = null;
     if (active) {
       const lastSentAt = lastSentAtByPlatform[platform.toLowerCase()];
-      const minGapMinutes =
-        typeof policy.checkIntervalMinutes === 'number'
-          ? policy.checkIntervalMinutes
-          : defaultMinGapMinutes;
       nextCheckAt = lastSentAt
-        ? new Date(lastSentAt.getTime() + minGapMinutes * 60_000).toISOString()
+        ? new Date(
+            lastSentAt.getTime() + schedule.cadenceMinutes * 60_000
+          ).toISOString()
         : now.toISOString();
     }
-    out[platform] = { ...policy, nextCheckAt };
+    out[platform] = {
+      ...policy,
+      activeHours: {
+        start: schedule.windowStart,
+        end: schedule.windowEnd,
+        ...(schedule.timezone ? { timezone: schedule.timezone } : {}),
+      },
+      dailyReplyLimit: schedule.dailyReplyLimit,
+      // Stated only while it is actually discounting something, so the common
+      // case (a warmed-up account) carries no field the client has to explain.
+      ...(schedule.warmupFactor < 1
+        ? { warmupFactor: schedule.warmupFactor }
+        : {}),
+      ...(schedule.channelDailyLimit !== undefined
+        ? { channelDailyLimit: schedule.channelDailyLimit }
+        : {}),
+      nextCheckAt,
+    };
   }
   return out;
 }

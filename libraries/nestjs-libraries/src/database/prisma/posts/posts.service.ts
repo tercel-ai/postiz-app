@@ -465,10 +465,23 @@ export class PostsService {
     const post = await this._postRepository.getPostById(id, orgId);
     if (!post) return { ok: false, reason: 'not-found' };
     if (post.state === 'PUBLISHED') return { ok: true, alreadyPublished: true };
+    // WHEN this actually went out, resolved once and shared by every row the
+    // callback settles. The extension publishes on its own clock — a browser
+    // that was closed at the scheduled minute, a lease taken minutes later, a
+    // platform that needed a retry — so the saved `publishDate` is the only
+    // thing still claiming the post went out at 10:00 when it went out at
+    // 11:47. This callback IS the moment we learn the truth, and one instant
+    // for the anchor and its segments keeps a thread a single event.
+    const publishedAt = new Date();
     // updatePost carries the recurring-original guard (returns null there).
     // releaseURL may be empty for a URL-less publish (e.g. Quora) — the post
     // still flips PUBLISHED so it leaves QUEUE and is never re-published.
-    const updated = await this.updatePost(id, releaseId || '', releaseURL || '');
+    const updated = await this.updatePost(
+      id,
+      releaseId || '',
+      releaseURL || '',
+      publishedAt
+    );
     if (!updated) return { ok: false, reason: 'blocked-recurring-original' };
     // A thread is published as ONE extension task that reports back against the
     // anchor only, so settle its children here. Best-effort: the anchor is
@@ -503,10 +516,18 @@ export class PostsService {
               releaseId: reported.get(n.id)?.releaseId,
             }));
           if (children.length) {
-            await this._postRepository.publishExtensionChainNodes(orgId, children);
+            await this._postRepository.publishExtensionChainNodes(
+              orgId,
+              children,
+              publishedAt
+            );
           }
         }
-        await this._postRepository.publishExtensionChainChildren(orgId, post.group);
+        await this._postRepository.publishExtensionChainChildren(
+          orgId,
+          post.group,
+          publishedAt
+        );
       } catch (err) {
         this.logger.warn(
           `markPublishedFromExtension: settling thread children failed for postId=${id} group=${post.group}: ${(err as Error)?.message || err}`
@@ -648,6 +669,12 @@ export class PostsService {
       return { ok: false, reason: 'blocked-recurring-original' };
     }
     const reason = error || 'extension publish failed';
+    // Same instant for every segment that DID go out — a partially-broken
+    // thread is still one send, and the two publishExtensionChainNodes calls
+    // below (anchor, then live children) would otherwise date the same thread
+    // twice. See markPublishedFromExtension for why the send time is stamped
+    // at all.
+    const publishedAt = new Date();
     const published = (segments || []).filter((sg) => sg?.postId);
     const publishedById = new Map(published.map((sg) => [sg.postId, sg]));
 
@@ -657,9 +684,11 @@ export class PostsService {
     // reported rather than by the callback's name.
     const anchorPublished = publishedById.get(id);
     if (anchorPublished) {
-      await this._postRepository.publishExtensionChainNodes(orgId, [
-        { id, url: anchorPublished.url, releaseId: anchorPublished.releaseId },
-      ]);
+      await this._postRepository.publishExtensionChainNodes(
+        orgId,
+        [{ id, url: anchorPublished.url, releaseId: anchorPublished.releaseId }],
+        publishedAt
+      );
     } else {
       await this._postRepository.changeState(id, 'ERROR', reason);
     }
@@ -688,7 +717,11 @@ export class PostsService {
             }));
           const dead = childIds.filter((cid) => !publishedById.has(cid));
           if (live.length) {
-            await this._postRepository.publishExtensionChainNodes(orgId, live);
+            await this._postRepository.publishExtensionChainNodes(
+              orgId,
+              live,
+              publishedAt
+            );
           }
           await this._postRepository.failExtensionChainNodesByIds(orgId, dead, reason);
         } else {
@@ -756,7 +789,20 @@ export class PostsService {
       : { ok: true };
   }
 
-  async updatePost(id: string, postId: string, releaseURL: string) {
+  /**
+   * `publishedAt` is the instant the send actually landed, which the repository
+   * writes into `publishDate` (see its note there). Callers that settle several
+   * rows for one send pass a shared instant; the Temporal activity omits it,
+   * because there this write follows the platform call by milliseconds — but
+   * the stamp still matters on that path, since a post the orchestrator picks
+   * up out of its recovery window can be days past the time it was scheduled.
+   */
+  async updatePost(
+    id: string,
+    postId: string,
+    releaseURL: string,
+    publishedAt?: Date
+  ) {
     // Defense-in-depth: recurring originals must NEVER be directly published.
     // They use the clone-per-cycle mechanism (prepareRecurringCycle + finalizeRecurringCycle).
     const post = await this._postRepository.getPostById(id);
@@ -768,7 +814,7 @@ export class PostsService {
       return null;
     }
 
-    return this._postRepository.updatePost(id, postId, releaseURL);
+    return this._postRepository.updatePost(id, postId, releaseURL, publishedAt);
   }
 
   async recordFailedRelease(postId: string, releaseId: string, error: string) {

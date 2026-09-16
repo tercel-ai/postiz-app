@@ -289,3 +289,83 @@ Bootstrapping NestJS context...
 Done: 98 total ticks upserted, 0 total error(s).
 ```
 
+
+---
+
+## repair-stale-publish-date.ts
+
+One-off repair for posts and engage replies that were PUBLISHED **before** `publishDate` started recording the real send time. Until that fix, every publish-success commit flipped `state` to PUBLISHED and left `publishDate` holding the moment we *intended* to send — the scheduled minute for a post, the save-draft moment for an engage reply — while the extension actually sent minutes to hours later.
+
+### The evidence it uses
+
+There is no `publishedAt` column, so the repair leans on the one timestamp the codebase already treats as the real write moment: **`Post.claimedAt`**, stamped when the extension takes the post/reply to publish it (`claimExtensionPublishPosts`, `claimDueEngageReplies`). See `getLastPlatformWriteAt`'s note — *"it is stamped when the extension takes the post to publish, which is the instant the platform actually sees traffic."*
+
+`updatedAt` is deliberately **not** used as a fallback: it is bumped by metrics sync, publisher attribution, author enrichment and removal callbacks, so for an engage reply still being polled it can sit days past the send. Rows with no `claimedAt` are reported as unrecoverable rather than guessed at.
+
+### Quick Start
+
+```bash
+# 1. Preview — how many rows are wrong, and by how much (dry-run, no changes)
+npx ts-node --project scripts/tsconfig.json scripts/repair-stale-publish-date.ts
+
+# 2. Apply
+npx ts-node --project scripts/tsconfig.json scripts/repair-stale-publish-date.ts --execute
+```
+
+### Options
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--dry-run` | Report only, write nothing | Yes (default) |
+| `--execute` | Apply the repairs | — |
+| `--org <id>` | Scope to one organization | All |
+| `--source <name>` | Scope to one `Post.source` (`engage`, `calendar`, …) | All |
+| `--since <YYYY-MM-DD>` | Only rows whose `publishDate` is on/after this date | All time |
+| `--min-drift-minutes <n>` | Ignore drift under n minutes | 2 |
+| `--max-drift-hours <n>` | Skip drift over n hours, `0` = no ceiling | 168 (7 days) |
+| `--limit <n>` | Max candidate rows to read | 5000 |
+| `--help` | Show usage help | — |
+
+### What it refuses to touch
+
+- **Any group containing a recurring post** (`intervalInDays > 0`). There `publishDate` is not a timestamp but the cycle clone's *identity* — `findOrCreateCycleClone` matches a cycle by `(group, publishDate)`, so moving it would hide the published clone and let a restarted workflow post the content twice.
+- **Any row that is not PUBLISHED.** A QUEUE row's `publishDate` is when it is still *due*; rewriting it would reschedule a pending post.
+- **Anything that would move a date backwards**, or whose drift is under `--min-drift-minutes`. (The API/Temporal path commits within seconds and has no `claimedAt`, so it is excluded for free.)
+- **`EngageSentReply.createdAt`** — that is the drafting time and feeds reply pacing (`getLastSentReplyAt`).
+
+A thread is repaired as a whole: only the anchor is ever claimed (the publish-due query is roots-only), so its segments inherit the anchor's instant — exactly what the fixed publish path now does for new sends.
+
+### Output Example
+
+```
+=== Repair stale publishDate ===
+
+Mode:       DRY RUN (no changes)
+Org:        all
+Source:     engage
+Since:      all time
+Min drift:  2m
+Max drift:  7.0d
+Limit:      5000 candidate row(s)
+
+Found 412 claimed published row(s) across 397 group(s).
+38 published row(s) in scope have no claimedAt — not repairable, left as-is.
+
+── Would apply 331 group(s) / 344 row(s) ──
+  [engage/reddit] group=8f3c… 1 row(s)  2026-09-02 09:14:03 → 2026-09-02 14:51:10 (+5.6h)
+  [engage/x] group=1a90… 1 row(s)  2026-09-02 10:02:00 → 2026-09-02 10:39:41 (+38m)
+  … and 291 more
+
+Drift distribution (groups):
+  5m–30m   84
+  30m–2h   147
+  2h–12h   96
+  > 24h    4
+
+Skipped groups:
+     42  drift under --min-drift-minutes
+     20  no claimedAt on any row
+      4  recurring — publishDate is the cycle clone identity
+
+Re-run with --execute to write these changes.
+```

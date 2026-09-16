@@ -133,7 +133,11 @@ describe('extension callbacks settle the whole thread chain', () => {
     );
 
     expect(r).toEqual({ ok: true });
-    expect(repo.publishExtensionChainChildren).toHaveBeenCalledWith('org-1', 'g1');
+    expect(repo.publishExtensionChainChildren).toHaveBeenCalledWith(
+      'org-1',
+      'g1',
+      expect.any(Date)
+    );
   });
 
   it('a callback for a CHILD never re-settles the chain', async () => {
@@ -193,12 +197,16 @@ describe('markPublishFailedFromExtension — partial thread success', () => {
     expect(r).toEqual({ ok: true, partial: true, published: 2 });
     // The anchor is live — it must NOT be flipped to ERROR.
     expect(repo.changeState).not.toHaveBeenCalled();
-    expect(repo.publishExtensionChainNodes).toHaveBeenCalledWith('org-1', [
-      { id: 'anchor', url: 'https://x.com/u/1', releaseId: 'rid-1' },
-    ]);
-    expect(repo.publishExtensionChainNodes).toHaveBeenCalledWith('org-1', [
-      { id: 'c1', url: 'https://x.com/u/2', releaseId: undefined },
-    ]);
+    expect(repo.publishExtensionChainNodes).toHaveBeenCalledWith(
+      'org-1',
+      [{ id: 'anchor', url: 'https://x.com/u/1', releaseId: 'rid-1' }],
+      expect.any(Date)
+    );
+    expect(repo.publishExtensionChainNodes).toHaveBeenCalledWith(
+      'org-1',
+      [{ id: 'c1', url: 'https://x.com/u/2', releaseId: undefined }],
+      expect.any(Date)
+    );
     // Only the segment that never went out becomes ERROR.
     expect(repo.failExtensionChainNodesByIds).toHaveBeenCalledWith(
       'org-1',
@@ -232,9 +240,11 @@ describe('markPublishFailedFromExtension — partial thread success', () => {
       { postId: 'c2', url: 'https://x.com/u/3' },
     ]);
 
-    expect(repo.publishExtensionChainNodes).toHaveBeenCalledWith('org-1', [
-      { id: 'c2', url: 'https://x.com/u/3', releaseId: undefined },
-    ]);
+    expect(repo.publishExtensionChainNodes).toHaveBeenCalledWith(
+      'org-1',
+      [{ id: 'c2', url: 'https://x.com/u/3', releaseId: undefined }],
+      expect.any(Date)
+    );
     expect(repo.failExtensionChainNodesByIds).toHaveBeenCalledWith('org-1', ['c1'], 'x');
   });
 
@@ -278,12 +288,18 @@ describe('markPublishedFromExtension — per-segment permalinks', () => {
     expect(r).toEqual({ ok: true });
     // The anchor goes through updatePost (it carries the recurring guard); only
     // the follow-ups are settled here, so it must not be double-written.
-    expect(repo.publishExtensionChainNodes).toHaveBeenCalledWith('org-1', [
-      { id: 'c1', url: 'https://x.com/u/2', releaseId: 'rid-2' },
-    ]);
+    expect(repo.publishExtensionChainNodes).toHaveBeenCalledWith(
+      'org-1',
+      [{ id: 'c1', url: 'https://x.com/u/2', releaseId: 'rid-2' }],
+      expect.any(Date)
+    );
     // The group sweep still runs to mop up anything not reported; it is
     // QUEUE-guarded, so it cannot overwrite what was just published.
-    expect(repo.publishExtensionChainChildren).toHaveBeenCalledWith('org-1', 'g1');
+    expect(repo.publishExtensionChainChildren).toHaveBeenCalledWith(
+      'org-1',
+      'g1',
+      expect.any(Date)
+    );
   });
 
   it('an older extension (no segments) still settles children URL-less', async () => {
@@ -292,7 +308,11 @@ describe('markPublishedFromExtension — per-segment permalinks', () => {
     await svc.markPublishedFromExtension('org-1', 'anchor', 'https://x.com/u/1', 'rid-1');
 
     expect(repo.publishExtensionChainNodes).not.toHaveBeenCalled();
-    expect(repo.publishExtensionChainChildren).toHaveBeenCalledWith('org-1', 'g1');
+    expect(repo.publishExtensionChainChildren).toHaveBeenCalledWith(
+      'org-1',
+      'g1',
+      expect.any(Date)
+    );
   });
 });
 
@@ -316,9 +336,11 @@ describe('reported segments are constrained to the chain', () => {
       { postId: 'someone-elses-post', url: 'https://evil.example/1' },
     ]);
 
-    expect(repo.publishExtensionChainNodes).toHaveBeenCalledWith('org-1', [
-      { id: 'c1', url: 'https://x.com/u/2', releaseId: undefined },
-    ]);
+    expect(repo.publishExtensionChainNodes).toHaveBeenCalledWith(
+      'org-1',
+      [{ id: 'c1', url: 'https://x.com/u/2', releaseId: undefined }],
+      expect.any(Date)
+    );
   });
 
   it('failure path ignores a reported id that is not a child of this chain', async () => {
@@ -332,9 +354,11 @@ describe('reported segments are constrained to the chain', () => {
     // c1 is the only real child and it did not publish → ERROR; the foreign id
     // is never written at all.
     expect(repo.publishExtensionChainNodes).toHaveBeenCalledTimes(1);
-    expect(repo.publishExtensionChainNodes).toHaveBeenCalledWith('org-1', [
-      { id: 'anchor', url: 'https://x.com/u/1', releaseId: undefined },
-    ]);
+    expect(repo.publishExtensionChainNodes).toHaveBeenCalledWith(
+      'org-1',
+      [{ id: 'anchor', url: 'https://x.com/u/1', releaseId: undefined }],
+      expect.any(Date)
+    );
     expect(repo.failExtensionChainNodesByIds).toHaveBeenCalledWith('org-1', ['c1'], 'boom');
   });
 });

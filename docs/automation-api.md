@@ -216,6 +216,26 @@ else parses the column.
 > `engageConfig` model reference and `PrismaRepository<'engageConfig'>` type
 > argument, so it is tracked separately. Read it as "project automation config".
 
+### What is NOT in that column: the safety limits
+
+The column holds what a USER configured for one project. What bounds it is
+operator-level and lives in admin `Settings` rows, seeded on boot and never
+overwritten once stored:
+
+| Setting | Answers | Detail |
+| --- | --- | --- |
+| `engage_reply_daily_ceiling` | the most replies a day a project may be configured to send on a platform | [Reply limit](#the-reply-schedule-active-hours--a-daily-limit) |
+| `engage_reply_warmup` | how much of that ceiling a newly driven account may use | [Warm-up](#warm-up-a-new-account-does-not-start-at-its-ceiling) |
+| `engage_reply_channel_daily_limit` | replies to ONE community a day | [Same-channel concentration](#same-channel-concentration) |
+| `engage_reply_pacing` | `minGapMinutes` (the floor under the derived spacing), `maxPerPoll`, `minScore`, `claimLeaseMinutes` | — |
+| `platform_pacing` | the account-level write FLOOR and write WINDOW, shared with publishing | — |
+
+The split is deliberate: a project's own settings are a preference and belong to
+the project, while these are what the PLATFORM tolerates — the same for every
+project on that account, and not a user's to raise. Every one of them is merged
+onto a built-in default per key, so a malformed or partial row degrades to the
+shipped value rather than to "unbounded".
+
 ## What Automation does NOT touch
 
 **Hand-created posts.** A post the user wrote themselves carries
@@ -336,13 +356,31 @@ does **not** create an `EngageConfig` row for a project that has never used Enga
     // identity is whoever the user is already signed in as. Choosing a specific
     // account is a per-post edit, on a different surface.
     //
+    // `activeHours` and `dailyReplyLimit` are that platform's REPLY SCHEDULE,
+    // reported as the driver will actually enforce it: the policy's own values
+    // where it set them, the defaults (08:00–18:00, 4 a day) where it did not,
+    // the limit clamped to the platform's safety ceiling, and THEN discounted by
+    // the account's warm-up factor. A client rendering the stored policy alone
+    // would show blanks for hours that ARE being enforced — an unconfigured
+    // platform is still driven, not unscheduled.
+    //
+    // Two fields appear CONDITIONALLY, so the common case carries nothing a
+    // client has to explain:
+    //   `warmupFactor`      while this account is still warming up (< 1). Note
+    //                       it is reported whenever the account is in warm-up,
+    //                       even when the discount did not actually lower the
+    //                       configured limit — it describes the ACCOUNT, not the
+    //                       arithmetic.
+    //   `channelDailyLimit` where the platform caps replies to one channel a
+    //                       day (reddit; x has no channel at all).
+    //
     // `nextCheckAt` is the next time AIsee will check THAT platform for reply
     // opportunities: (last reply GENERATED on this platform, or now if it never
-    // has) + `checkIntervalMinutes` (falling back to the org-wide pacing default
-    // when the platform sets none). It is `null` whenever this platform is not
-    // actually being driven — the master switch, `scanEnabled`, the global
-    // `autoReplyEnabled`, or this platform's own `autoReplyEnabled` is off — so a
-    // null never implies a time that will never arrive.
+    // has) + the spacing DERIVED from those two (the window spread across the
+    // limit). It is `null` whenever this platform is not actually being driven
+    // — the master switch, `scanEnabled`, the global `autoReplyEnabled`, or this
+    // platform's own `autoReplyEnabled` is off — so a null never implies a time
+    // that will never arrive.
     //
     // `null` is the NORMAL value for any platform the user has not switched on,
     // and a past value is a health signal rather than an error. Both need
@@ -351,24 +389,165 @@ does **not** create an `EngageConfig` row for a project that has never used Enga
       "x": {
         "autoReplyEnabled": true,
         "length": "short",
-        "checkIntervalMinutes": 480,
+        "activeHours": { "start": "08:00", "end": "18:00", "timezone": "Asia/Shanghai" },
+        "dailyReplyLimit": 4,
         "nextCheckAt": "2026-08-21T15:30:00.000Z"
       },
-      "reddit": { "autoReplyEnabled": true, "length": "medium", "nextCheckAt": "2026-08-21T08:10:00.000Z" }
+      "reddit": {
+        "autoReplyEnabled": true,
+        "length": "medium",
+        "activeHours": { "start": "08:00", "end": "18:00" },
+        // 20 was asked for. reddit's safety ceiling is 25, but this account has
+        // only been driven for two days, so the ceiling is 25 × 0.3 = 7.
+        "dailyReplyLimit": 7,
+        "warmupFactor": 0.3,
+        // reddit is the one platform capped per community by default.
+        "channelDailyLimit": 2,
+        "nextCheckAt": "2026-08-21T08:10:00.000Z"
+      }
     }
   }
 }
 ```
 
+### The reply schedule: active hours + a daily limit
+
+A platform's reply rhythm is TWO settings, and the spacing between replies is
+derived from them rather than configured beside them:
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `windowStart` / `windowEnd` / `timezone` | `08:00`–`18:00`, UTC when no zone is named | the hours this account may be seen replying in |
+| `dailyReplyLimit` | `4`, clamped to the platform's ceiling × warm-up | replies per LOCAL day (the day rolls over in `timezone`) |
+
+```
+spacing = max(active-hours minutes / dailyReplyLimit, engage_reply_pacing.minGapMinutes)
+```
+
+So 08:00–18:00 with 4 replies is one every 150 minutes. The org-wide
+`minGapMinutes` (default 25) is a FLOOR under that, never a default beside it.
+
+`dailyReplyLimit` in that formula is the EFFECTIVE one — after the safety clamp
+and the warm-up discount — so a warming-up account is spaced further apart as
+well as capped lower, and `nextCheckAt` moves with it.
+
+**The ceiling is per platform, and it is an ACCOUNT-SAFETY limit** — the rate at
+which the platform itself starts limiting, filtering or banning:
+
+| | x | reddit | linkedin | devto | quora | medium | hackernews |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| safety ceiling /day | 30 | 25 | 25 | 15 | 15 | 10 | 10 |
+
+A `dailyReplyLimit` above one is accepted and stored, then clamped on read — and
+clamped again by the account's [warm-up](#warm-up-a-new-account-does-not-start-at-its-ceiling)
+factor. `GET /automation` reports the number after BOTH: what the page shows is
+what the driver enforces.
+
+> **Not the same number as an operation plan's reply volume.**
+> `OPERATION_PLAN_REPLY_VOLUME` (x 4, reddit 3, linkedin 3, devto 2, quora 2,
+> medium 1, hackernews 1) belongs to PLAN GENERATION — it is stated in the
+> generation prompt and clamps the model's `targetRepliesPerDay`, and nothing at
+> send time reads it. Using it as the safety cap is what this split fixed: a
+> user deliberately asking for 10 a day on x was silently given 4.
+
+**Admin-tunable** via the `engage_reply_daily_ceiling` Setting
+(`{ "<platform>": <n> }`). It is MERGED onto the built-ins per platform, so
+naming one platform leaves the rest alone; an unusable entry falls back to the
+built-in, and every value is capped at 100/day so a typo cannot remove the
+ceiling.
+
+> ⚠️ These numbers are engineering judgement about each platform's throttling
+> mechanism, not published rules — no platform documents a reply-rate ban
+> threshold. And volume is only half of what gets an account limited: content
+> similarity and link ratio matter at least as much, and neither is bounded by
+> this number. The two that ARE bounded, below, are concentration and ramp.
+
+#### Warm-up: a new account does not start at its ceiling
+
+The ceiling is multiplied by a warm-up factor before anything is enforced:
+
+| days driving this account | factor | x's effective ceiling |
+| --- | --- | --- |
+| 0–6 | ×0.3 | 9 |
+| 7–29 | ×0.6 | 18 |
+| 30+ | ×1 | 30 |
+
+**"Days" is not the platform account's age, and cannot be.** Engage replies go
+out through the extension's own browser session, so no registration date is ever
+visible to this codebase. The clock is the **org's first reply on that
+platform** — how long *we* have been driving the account — which is the variable
+actually worth controlling: an account that has been in the product for a day
+and is already running at its ceiling is the exact pattern that gets one
+limited. An org that has never replied on a platform counts as **day 0**, the
+slowest tier, not as "unknown, go ahead".
+
+Its blind spot: swapping in a NEW platform account keeps the old one's
+first-reply date, so the new account skips its warm-up. `Integration.createdAt`
+would catch some of those, but only the platforms that have an integration.
+
+The clock is ORG-wide, not per project — two projects driving one reddit login
+share its history. Warm-up bounds the CEILING, so a project asking for less than
+the discounted number keeps what it asked for, and the result is floored at
+1/day: warm-up slows an account, it never stops one. Admin-tunable via
+`engage_reply_warmup` (`[{ "days": 0, "factor": 0.3 }, …]`), taken **whole** —
+any unusable rung discards the stored ladder for the built-in rather than
+applying half a curve, and a ladder must start at day 0.
+
+`GET /automation` reports `warmupFactor` on a platform **only while that account
+is still warming up** (factor < 1), so a warmed-up account carries no field the
+client has to explain. It is reported whenever the account is in warm-up, even
+when the discount did not lower the configured limit — a project asking for 4 a
+day on x is under the discounted ceiling either way, and the field still says
+the account is ramping.
+
+#### Same-channel concentration
+
+`channelDailyLimit` caps replies to ONE channel — a subreddit, a publication, a
+tag feed — per local day. **reddit: 2**; every other platform is unconstrained by
+default.
+
+A daily total says nothing about spread, and spread is what the platform reads:
+three comments across three subreddits is three people having a day, three in one
+subreddit is a campaign, and reddit's spam filter is tuned for that shape. Only
+reddit is capped because it is the only platform where the channel is both
+populated and meaningful as a community (x has none at all; the article platforms
+set a publication or tag, where concentration means much less).
+
+Enforced on BOTH lanes: an exhausted channel is excluded from the candidate pick
+(a reply we would refuse to send must not be paid for) and from the queued claim
+(a backlog must not deliver the stack of comments the cap exists to prevent).
+
+**Counted ORG-wide, not per project** — unlike `dailyReplyLimit`, which enforces
+a number the user configured for one project. A community's spam filter counts
+the ACCOUNT's comments and cannot see our project boundaries, so two projects
+driving one reddit login share this budget.
+
+Admin-tunable via `engage_reply_channel_daily_limit` (`{ "<platform>": <n> }`),
+merged onto the built-ins per platform — so it can cap a platform the defaults
+leave alone. The minimum is 1: a 0 would read as "no channel may receive a
+reply" but the gate works by excluding channels that already have replies today,
+so it would silently have behaved as 1. Use the platform switch to stop a
+platform.
+
+**Omitting the schedule keys is not "no schedule".** The platform is driven on
+the defaults above. To stop it replying, switch `autoReplyEnabled` off (or set
+`dailyReplyLimit: 0`, which is honoured as "not today" and is distinct from an
+absent field).
+
+> **Retired: `checkIntervalMinutes`.** The old single "check every N hours"
+> cadence. It is still accepted and echoed back for older clients, but nothing
+> reads it: a stored 8 hours would let two replies through a ten-hour window
+> while the same policy asked for four, and a number that can contradict the
+> schedule beside it is the reason the pair replaced it.
+
 ### Reading `nextCheckAt`
 
 ```
-nextCheckAt = (last reply GENERATED on this platform, or now if never) + checkIntervalMinutes
+nextCheckAt = (last reply GENERATED on this platform, or now if never) + spacing
 ```
 
-`checkIntervalMinutes` is the platform's own value, falling back to
-`engage_reply_pacing.minGapMinutes` (default 25) — the same fallback the driver
-applies, from the same anchor, so the two cannot disagree about the interval.
+The spacing is the derived one above — the same value the driver gates on, from
+the same anchor, so the two cannot disagree.
 
 **The anchor is the last reply GENERATED, not sent.** It reads
 `EngageSentReply.createdAt`, which is written when the backend drafts a reply,
@@ -421,18 +600,22 @@ change:
 
 #### What it does NOT account for
 
-`nextCheckAt` applies the interval only. The driver has two further gates, and
-neither moves this timestamp:
+`nextCheckAt` applies the spacing only. The driver has three further gates, and
+none of them moves this timestamp:
 
 | Driver gate | Reflected in `nextCheckAt` |
 | --- | --- |
-| minimum gap / `checkIntervalMinutes` | ✅ |
-| local-time window (`windowStart` / `windowEnd`) | ❌ |
+| derived spacing (active hours / daily limit) | ✅ |
+| active hours themselves (`windowStart` / `windowEnd`) | ❌ |
+| the day's `dailyReplyLimit` | ❌ |
+| the same-channel cap (`channelDailyLimit`) | ❌ |
 | plan budget (when `ENGAGE_REPLY_BUDGET_GATE_ENABLED`) | ❌ |
 
-So a platform with a `09:00`–`18:00` window can report `22:30`: the interval
+So a platform with a `09:00`–`18:00` window can report `22:30`: the spacing
 elapses then, but the driver skips it and the next real attempt is the following
-morning. Treat the value as "not before this", not "at this".
+morning. A platform that has already spent its `dailyReplyLimit` reports a time
+today and will not reply until tomorrow. Treat the value as "not before this",
+not "at this".
 
 ---
 
@@ -819,11 +1002,37 @@ Save the managed-reply half: the config flags and the per-platform reply policy.
   // The COMPLETE per-platform reply policy set — not a delta. Any platform
   // absent from this map has its reply policy CLEARED. Omit the field entirely
   // to leave every policy untouched.
+  //
+  // What a reply SAYS (strategy, length, mention tags) and WHEN it may be sent
+  // (`windowStart`/`windowEnd`/`timezone` = active hours, `dailyReplyLimit` =
+  // replies per local day) share one object. Omitting the schedule keys runs
+  // that platform on the defaults — see "The reply schedule" above.
   "policies": {
-    "x": { "autoReplyEnabled": true, "length": "short", "mentionTags": ["@acme"] }
+    "x": {
+      "autoReplyEnabled": true,
+      "length": "short",
+      "mentionTags": ["@acme"],
+      "windowStart": "08:00",
+      "windowEnd": "18:00",
+      "timezone": "Asia/Shanghai",
+      "dailyReplyLimit": 4
+    }
   }
 }
 ```
+
+**Validated at the boundary**, by the same constraint `POST /engage/config` uses
+— one blob, two doors, one rule. `autoReplyEnabled` must be a boolean,
+`windowStart`/`windowEnd` `"HH:MM"` (both or neither, and not equal), `timezone`
+a non-empty string, `dailyReplyLimit` a whole number ≥ 0, `length` one of
+`short|medium|long`, `mentionTags` an array of strings. A malformed one is a
+`400` rather than a `200` that silently stores the default — the caller would
+otherwise only notice when the number it set was not the number being enforced.
+`autoReplyEnabled` is the field where that matters most: `"false"` is a
+non-empty string, so an unvalidated one would read as **true** and start the
+platform replying. A limit ABOVE the platform's ceiling is
+accepted and clamped on read, so `GET /automation` is where you see what will
+actually run.
 
 ### `policies` is the complete set, not a delta
 

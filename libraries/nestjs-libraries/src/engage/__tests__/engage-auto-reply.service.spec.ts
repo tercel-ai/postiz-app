@@ -5,6 +5,13 @@ import {
   DEFAULT_REPLY_PACING,
   withinLocalWindow,
 } from '../engage-auto-reply.service';
+import {
+  DEFAULT_CHANNEL_DAILY_LIMIT,
+  ENGAGE_REPLY_CHANNEL_LIMIT_KEY,
+  ENGAGE_REPLY_DAILY_CEILING_KEY,
+  ENGAGE_REPLY_WARMUP_KEY,
+  PLATFORM_REPLY_RISK_CEILING,
+} from '../engage-reply-schedule';
 
 // The unattended reply DRIVER. By default (ENGAGE_REPLY_BUDGET_GATE_ENABLED
 // unset) it is paced by interval/active-hours alone and does not require an
@@ -14,6 +21,12 @@ import {
 // whose plan does not set one.
 
 const org = { id: 'org-1' } as any;
+
+// Every policy now has active hours — the default 8 AM–6 PM when it set none —
+// so a spec that lets the driver read the wall clock passes or fails depending
+// on what time the suite runs at. Cases that are not ABOUT the window pin this
+// one instead.
+const DURING_ACTIVE_HOURS = new Date('2026-08-18T12:00:00Z');
 
 function makeService(over: {
   configs?: any[];
@@ -31,6 +44,18 @@ function makeService(over: {
   writeFloorMinutes?: number;
   /** Whether the platform's write window allows writing now. */
   withinWriteWindow?: boolean;
+  /** Replies already sent today for this project+platform (the daily limit's count). */
+  sentToday?: number;
+  /** The admin `engage_reply_daily_ceiling` setting, if a case is about it. */
+  ceilings?: Record<string, number>;
+  /** The admin `engage_reply_warmup` ladder, if a case is about it. */
+  warmupTiers?: { days: number; factor: number }[];
+  /** The admin `engage_reply_channel_daily_limit` map, if a case is about it. */
+  channelDailyLimits?: Record<string, number>;
+  /** When this org first replied on the platform — the warm-up clock. */
+  firstSentAt?: Date | null;
+  /** Today's reply count per channel, for the same-channel cap. */
+  repliesByChannel?: Record<string, number>;
 } = {}) {
   const repo = {
     getAutoReplyConfigs: vi.fn().mockResolvedValue(over.configs ?? []),
@@ -44,6 +69,35 @@ function makeService(over: {
     claimDueEngageReplies: vi.fn().mockResolvedValue(over.queued ?? []),
     countQueuedEngageReplies: vi.fn().mockResolvedValue(over.queuedCount ?? 0),
     countEligibleOpportunities: vi.fn().mockResolvedValue(over.eligibleCount ?? 0),
+    // The day's tally behind the reply limit. 0 by default so the specs below
+    // exercise the other gates in isolation; the cases that are ABOUT the limit
+    // set it.
+    countProjectSentRepliesToday: vi.fn().mockResolvedValue(over.sentToday ?? 0),
+    // Fully warmed up by default (a year of driving), so the specs below
+    // exercise the configured limits rather than the ramp.
+    getFirstSentReplyAt: vi
+      .fn()
+      .mockResolvedValue(
+        over.firstSentAt === undefined
+          ? new Date('2025-01-01T00:00:00.000Z')
+          : over.firstSentAt
+      ),
+    // The gate reads the clock for every configured platform in ONE call; the
+    // status endpoint still reads it per platform. Both are mocked off the same
+    // `firstSentAt` override so a case cannot set one and forget the other.
+    getFirstSentReplyAtByPlatform: vi
+      .fn()
+      .mockImplementation(async (_orgId: string, platforms: string[]) => {
+        const at =
+          over.firstSentAt === undefined
+            ? new Date('2025-01-01T00:00:00.000Z')
+            : over.firstSentAt;
+        if (!at) return {};
+        return Object.fromEntries(platforms.map((platform) => [platform, at]));
+      }),
+    countTodayRepliesByChannel: vi
+      .fn()
+      .mockResolvedValue(over.repliesByChannel ?? {}),
   } as any;
 
   const engage = {
@@ -72,8 +126,18 @@ function makeService(over: {
     }),
   } as any;
 
+  // Keyed, not one blanket value: the service reads two settings now (pacing and
+  // the per-platform daily ceilings), and answering both with the pacing object
+  // would hand the ceiling resolver a shape it can only discard.
   const settings = {
-    get: vi.fn().mockResolvedValue({ ...DEFAULT_REPLY_PACING, ...(over.pacing ?? {}) }),
+    get: vi.fn().mockImplementation(async (key: string) => {
+      if (key === ENGAGE_REPLY_DAILY_CEILING_KEY) return over.ceilings ?? null;
+      if (key === ENGAGE_REPLY_WARMUP_KEY) return over.warmupTiers ?? null;
+      if (key === ENGAGE_REPLY_CHANNEL_LIMIT_KEY) {
+        return over.channelDailyLimits ?? null;
+      }
+      return { ...DEFAULT_REPLY_PACING, ...(over.pacing ?? {}) };
+    }),
     set: vi.fn().mockResolvedValue(undefined),
   } as any;
 
@@ -440,6 +504,508 @@ describe('EngageAutoReplyService.getDueReplies', () => {
   });
 });
 
+// The schedule the Automation page configures: ACTIVE HOURS and a DAILY LIMIT.
+// They replaced a single "check every N hours" cadence, which could only answer
+// "when may this account be seen replying" and "how many replies a day is still
+// a person" by accident — both depend on how long the window is open.
+describe('EngageAutoReplyService.getDueReplies — active hours and daily limit', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  const dueConfig = {
+    configs: [{ ...enabledConfig, replyPolicies: { reddit: { autoReplyEnabled: true } } }],
+    budget: budgetWith(),
+    candidates: [{ opportunityId: 'opp-1', score: 90, matchedKeywords: [] as string[] }],
+  };
+
+  it('holds a platform that set no window to the default 8 AM–6 PM', async () => {
+    const { svc, repo } = makeService(dueConfig);
+
+    await svc.getDueReplies(org, new Date('2026-08-18T22:00:00Z'));
+
+    expect(repo.pickAutoReplyCandidates).not.toHaveBeenCalled();
+  });
+
+  it('drives that same platform inside those hours', async () => {
+    const { svc, repo } = makeService(dueConfig);
+
+    await svc.getDueReplies(org, new Date('2026-08-18T09:00:00Z'));
+
+    expect(repo.pickAutoReplyCandidates).toHaveBeenCalled();
+  });
+
+  it('stops for the day once the limit is spent', async () => {
+    // The default limit is 4 — well under every platform's safety ceiling, so
+    // this is the configured limit biting, not the clamp.
+    const { svc, repo } = makeService({ ...dueConfig, sentToday: 4 });
+
+    await svc.getDueReplies(org, new Date('2026-08-18T12:00:00Z'));
+
+    expect(repo.pickAutoReplyCandidates).not.toHaveBeenCalled();
+  });
+
+  it('keeps going while the day still has room', async () => {
+    const { svc, repo } = makeService({ ...dueConfig, sentToday: 3 });
+
+    await svc.getDueReplies(org, new Date('2026-08-18T12:00:00Z'));
+
+    expect(repo.pickAutoReplyCandidates).toHaveBeenCalled();
+  });
+
+  it('clamps a requested limit to the platform SAFETY ceiling', async () => {
+    // Asking for 99 on reddit is not a more ambitious configuration, it is a
+    // guardrail removed — so the ceiling applies and the day ends at 25.
+    const { svc, repo } = makeService({
+      configs: [
+        {
+          ...enabledConfig,
+          replyPolicies: {
+            reddit: { autoReplyEnabled: true, dailyReplyLimit: 99 },
+          },
+        },
+      ],
+      budget: budgetWith(),
+      candidates: [{ opportunityId: 'opp-1', score: 90, matchedKeywords: [] }],
+      sentToday: PLATFORM_REPLY_RISK_CEILING.reddit,
+    });
+
+    await svc.getDueReplies(org, new Date('2026-08-18T12:00:00Z'));
+
+    expect(repo.pickAutoReplyCandidates).not.toHaveBeenCalled();
+  });
+
+  it('does not clamp a raised limit down to the EDITORIAL volume', async () => {
+    // 10 a day on x is a rate decision; the plan generator's 4 is a content
+    // one. Confusing the two silently held this project to 4.
+    const { svc, repo } = makeService({
+      configs: [
+        {
+          ...enabledConfig,
+          replyPolicies: { x: { autoReplyEnabled: true, dailyReplyLimit: 10 } },
+        },
+      ],
+      budget: budgetWith(),
+      candidates: [{ opportunityId: 'opp-1', score: 90, matchedKeywords: [] }],
+      sentToday: 6,
+    });
+
+    await svc.getDueReplies(org, new Date('2026-08-18T12:00:00Z'));
+
+    expect(repo.pickAutoReplyCandidates).toHaveBeenCalled();
+  });
+
+  it('applies each platform\'s OWN ceiling, not one flat number', async () => {
+    // x tolerates 30 where medium tolerates 10: with both asking for the moon,
+    // the same day's count closes medium and leaves x running.
+    const raised = (platform: string) => ({
+      configs: [
+        {
+          ...enabledConfig,
+          replyPolicies: {
+            [platform]: { autoReplyEnabled: true, dailyReplyLimit: 99 },
+          },
+        },
+      ],
+      budget: budgetWith(),
+      candidates: [{ opportunityId: 'opp-1', score: 90, matchedKeywords: [] as string[] }],
+      sentToday: 12,
+    });
+    const onX = makeService(raised('x'));
+    const onMedium = makeService(raised('medium'));
+
+    await onX.svc.getDueReplies(org, new Date('2026-08-18T12:00:00Z'));
+    await onMedium.svc.getDueReplies(org, new Date('2026-08-18T12:00:00Z'));
+
+    expect(onX.repo.pickAutoReplyCandidates).toHaveBeenCalled();
+    expect(onMedium.repo.pickAutoReplyCandidates).not.toHaveBeenCalled();
+  });
+
+  it('honours the admin ceiling setting over the built-in', async () => {
+    const { svc, repo } = makeService({
+      configs: [
+        {
+          ...enabledConfig,
+          replyPolicies: { x: { autoReplyEnabled: true, dailyReplyLimit: 20 } },
+        },
+      ],
+      budget: budgetWith(),
+      candidates: [{ opportunityId: 'opp-1', score: 90, matchedKeywords: [] }],
+      // The built-in would allow 20; the operator has pulled x back to 5.
+      ceilings: { x: 5 },
+      sentToday: 5,
+    });
+
+    await svc.getDueReplies(org, new Date('2026-08-18T12:00:00Z'));
+
+    expect(repo.pickAutoReplyCandidates).not.toHaveBeenCalled();
+  });
+
+  it('honours a limit of 0 as "not today"', async () => {
+    // Distinct from an absent field, which asks for the default. `??` would
+    // have read the two the same way and handed back 4.
+    const { svc, repo } = makeService({
+      configs: [
+        {
+          ...enabledConfig,
+          replyPolicies: { reddit: { autoReplyEnabled: true, dailyReplyLimit: 0 } },
+        },
+      ],
+      budget: budgetWith(),
+      candidates: [{ opportunityId: 'opp-1', score: 90, matchedKeywords: [] }],
+      sentToday: 0,
+    });
+
+    await svc.getDueReplies(org, new Date('2026-08-18T12:00:00Z'));
+
+    expect(repo.pickAutoReplyCandidates).not.toHaveBeenCalled();
+  });
+
+  it('counts the day in the timezone the active hours are stated in', async () => {
+    // A UTC day would roll the count over in the middle of a UTC+8 afternoon,
+    // handing that project a second day's replies inside one of its own.
+    const { svc, repo } = makeService({
+      configs: [
+        {
+          ...enabledConfig,
+          replyPolicies: {
+            reddit: {
+              autoReplyEnabled: true,
+              windowStart: '08:00',
+              windowEnd: '23:00',
+              timezone: 'Asia/Shanghai',
+            },
+          },
+        },
+      ],
+      budget: budgetWith(),
+      candidates: [{ opportunityId: 'opp-1', score: 90, matchedKeywords: [] }],
+    });
+
+    // 12:00 UTC = 20:00 Shanghai, inside the window and inside the Shanghai day
+    // that began at 16:00 UTC the day before.
+    await svc.getDueReplies(org, new Date('2026-08-18T12:00:00Z'));
+
+    expect(repo.countProjectSentRepliesToday).toHaveBeenCalledWith(
+      'org-1',
+      'proj-1',
+      'reddit',
+      new Date('2026-08-17T16:00:00.000Z'),
+      new Date('2026-08-18T16:00:00.000Z')
+    );
+  });
+
+  it('will not hand over a QUEUED reply once the day is spent', async () => {
+    // A queued reply was generated under conditions that no longer hold. Sending
+    // it is still sending one today, so the ceiling has to apply to the claim
+    // lane as well — otherwise a backlog spends a day the limit already closed.
+    const { svc, repo } = makeService({
+      configs: [{ ...enabledConfig, replyPolicies: { reddit: { autoReplyEnabled: true } } }],
+      queued: [
+        {
+          id: 'sent-old',
+          projectId: 'proj-1',
+          opportunityId: 'opp-old',
+          platform: 'reddit',
+          url: 'https://reddit.com/r/x/comments/old',
+          content: 'a reply waiting to go out',
+        },
+      ],
+      sentToday: 4,
+    });
+
+    const due = await svc.getDueReplies(org, new Date('2026-08-18T12:00:00Z'));
+
+    expect(due).toHaveLength(0);
+    expect(repo.claimDueEngageReplies).not.toHaveBeenCalled();
+  });
+});
+
+// WARM-UP. An account we have only just started driving runs at a fraction of
+// its ceiling. The clock is the org's FIRST reply on that platform — how long
+// WE have been driving the account, which is the only age signal available,
+// since replies go out through the extension's own browser session and no
+// registration date is ever visible.
+describe('EngageAutoReplyService.getDueReplies — warm-up', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  const now = new Date('2026-08-18T12:00:00Z');
+  const daysAgo = (days: number) => new Date(now.getTime() - days * 86_400_000);
+  const raisedOnX = (over: Record<string, unknown>) => ({
+    configs: [
+      {
+        ...enabledConfig,
+        // Asking for x's full ceiling, so the only thing that can lower it is
+        // the ramp.
+        replyPolicies: { x: { autoReplyEnabled: true, dailyReplyLimit: 30 } },
+      },
+    ],
+    budget: budgetWith(),
+    candidates: [{ opportunityId: 'opp-1', score: 90, matchedKeywords: [] as string[] }],
+    ...over,
+  });
+
+  it('holds a two-day-old account to 30% of the ceiling', async () => {
+    // 30 × 0.3 = 9, so a tenth reply today is refused.
+    const { svc, repo } = makeService(
+      raisedOnX({ firstSentAt: daysAgo(2), sentToday: 9 })
+    );
+
+    await svc.getDueReplies(org, now);
+
+    expect(repo.pickAutoReplyCandidates).not.toHaveBeenCalled();
+  });
+
+  it('lets that same account run up to its discounted limit', async () => {
+    const { svc, repo } = makeService(
+      raisedOnX({ firstSentAt: daysAgo(2), sentToday: 8 })
+    );
+
+    await svc.getDueReplies(org, now);
+
+    expect(repo.pickAutoReplyCandidates).toHaveBeenCalled();
+  });
+
+  it('opens up to 60% in the second tier', async () => {
+    // 30 × 0.6 = 18: the same 9 replies that closed the day above are fine here.
+    const { svc, repo } = makeService(
+      raisedOnX({ firstSentAt: daysAgo(10), sentToday: 9 })
+    );
+
+    await svc.getDueReplies(org, now);
+
+    expect(repo.pickAutoReplyCandidates).toHaveBeenCalled();
+  });
+
+  it('applies no discount once the account is fully warmed up', async () => {
+    const { svc, repo } = makeService(
+      raisedOnX({ firstSentAt: daysAgo(45), sentToday: 29 })
+    );
+
+    await svc.getDueReplies(org, now);
+
+    expect(repo.pickAutoReplyCandidates).toHaveBeenCalled();
+  });
+
+  // Never replied here = day 0, not "unknown, go ahead": an account we have
+  // never driven is the one to start slowest on.
+  it('treats a platform with no reply history as day zero', async () => {
+    const { svc, repo } = makeService(
+      raisedOnX({ firstSentAt: null, sentToday: 9 })
+    );
+
+    await svc.getDueReplies(org, now);
+
+    expect(repo.pickAutoReplyCandidates).not.toHaveBeenCalled();
+  });
+
+  // The clock belongs to the ACCOUNT, which this org's projects share — so it is
+  // read ONCE for the whole poll, not once per (project, platform). Lazily was a
+  // query per platform charged before the window gates, so an org outside its
+  // active hours paid N of them to be told nothing was due.
+  it('reads the warm-up clock in one batched call for the whole poll', async () => {
+    const { svc, repo } = makeService({
+      configs: [
+        { id: 'cfg-1', projectId: 'proj-1', replyPolicies: { x: { autoReplyEnabled: true } } },
+        { id: 'cfg-2', projectId: 'proj-2', replyPolicies: { x: { autoReplyEnabled: true } } },
+      ],
+      budget: budgetWith(),
+      candidates: [{ opportunityId: 'opp-1', score: 90, matchedKeywords: [] }],
+    });
+
+    await svc.getDueReplies(org, now);
+
+    expect(repo.getFirstSentReplyAtByPlatform).toHaveBeenCalledTimes(1);
+    expect(repo.getFirstSentReplyAtByPlatform).toHaveBeenCalledWith(org.id, ['x']);
+    expect(repo.getFirstSentReplyAt).not.toHaveBeenCalled();
+  });
+
+  it('asks for every configured platform exactly once, de-duplicated', async () => {
+    const { svc, repo } = makeService({
+      configs: [
+        {
+          id: 'cfg-1',
+          projectId: 'proj-1',
+          replyPolicies: { x: { autoReplyEnabled: true }, reddit: { autoReplyEnabled: true } },
+        },
+        // Same platform under a second project, and a differently-cased key —
+        // neither may produce a second entry.
+        { id: 'cfg-2', projectId: 'proj-2', replyPolicies: { X: { autoReplyEnabled: true } } },
+      ],
+      budget: budgetWith(),
+      candidates: [{ opportunityId: 'opp-1', score: 90, matchedKeywords: [] }],
+    });
+
+    await svc.getDueReplies(org, now);
+
+    const [, platforms] = repo.getFirstSentReplyAtByPlatform.mock.calls[0];
+    expect([...platforms].sort()).toEqual(['reddit', 'x']);
+  });
+
+  it('honours an admin warm-up ladder over the built-in curve', async () => {
+    const { svc, repo } = makeService(
+      raisedOnX({
+        firstSentAt: daysAgo(2),
+        sentToday: 9,
+        // The operator has decided a new account may use half the ceiling from
+        // day one: 30 × 0.5 = 15, so 9 sent today is still inside it.
+        warmupTiers: [{ days: 0, factor: 0.5 }],
+      })
+    );
+
+    await svc.getDueReplies(org, now);
+
+    expect(repo.pickAutoReplyCandidates).toHaveBeenCalled();
+  });
+
+  // Warm-up slows an account down; it never stops one. A platform that may not
+  // reply at all for its first week only looks abandoned.
+  it('never discounts a ceiling below one reply a day', async () => {
+    const { svc, repo } = makeService({
+      configs: [
+        {
+          ...enabledConfig,
+          // hackernews tolerates 10; 10 × 0.01 would round to 0 without the floor.
+          replyPolicies: { hackernews: { autoReplyEnabled: true } },
+        },
+      ],
+      budget: budgetWith(),
+      candidates: [{ opportunityId: 'opp-1', score: 90, matchedKeywords: [] }],
+      firstSentAt: null,
+      warmupTiers: [{ days: 0, factor: 0.01 }],
+      sentToday: 0,
+    });
+
+    await svc.getDueReplies(org, now);
+
+    expect(repo.pickAutoReplyCandidates).toHaveBeenCalled();
+  });
+});
+
+// SAME-CHANNEL CONCENTRATION. A daily total says nothing about spread, and
+// spread is what reddit's spam filter actually reads: three comments across
+// three subreddits is three people having a day, three in one subreddit is a
+// campaign.
+describe('EngageAutoReplyService.getDueReplies — same-channel cap', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  const onReddit = (over: Record<string, unknown>) => ({
+    configs: [{ ...enabledConfig, replyPolicies: { reddit: { autoReplyEnabled: true } } }],
+    budget: budgetWith(),
+    candidates: [{ opportunityId: 'opp-1', score: 90, matchedKeywords: [] as string[] }],
+    ...over,
+  });
+
+  it('excludes a subreddit that has had its allowance today', async () => {
+    const { svc, repo } = makeService(
+      onReddit({
+        repliesByChannel: {
+          't5_busy': DEFAULT_CHANNEL_DAILY_LIMIT.reddit,
+          't5_quiet': 1,
+        },
+      })
+    );
+
+    await svc.getDueReplies(org, new Date('2026-08-18T12:00:00Z'));
+
+    // Excluded at the PICK, not after: a candidate we would refuse to send is a
+    // draft we must not pay an LLM to write.
+    expect(repo.pickAutoReplyCandidates).toHaveBeenCalledWith(
+      org.id,
+      'proj-1',
+      'reddit',
+      expect.objectContaining({ excludeChannelIds: ['t5_busy'] })
+    );
+    // Counted ORG-wide: a community's spam filter counts the ACCOUNT's
+    // comments and cannot see our project boundaries.
+    expect(repo.countTodayRepliesByChannel).toHaveBeenCalledWith(
+      org.id,
+      'reddit',
+      expect.any(Date),
+      expect.any(Date)
+    );
+  });
+
+  it('holds the QUEUED lane to the same exclusion', async () => {
+    // A queued reply is still a reply ARRIVING in that community, so a backlog
+    // must not deliver the stack of comments the cap exists to prevent.
+    const { svc, repo } = makeService(
+      onReddit({ repliesByChannel: { 't5_busy': 9 } })
+    );
+
+    await svc.getDueReplies(org, new Date('2026-08-18T12:00:00Z'));
+
+    expect(repo.claimDueEngageReplies).toHaveBeenCalledWith(
+      org.id,
+      'proj-1',
+      'reddit',
+      expect.objectContaining({ excludeChannelIds: ['t5_busy'] })
+    );
+  });
+
+  it('passes no exclusion while every channel still has room', async () => {
+    const { svc, repo } = makeService(onReddit({ repliesByChannel: { 't5_quiet': 1 } }));
+
+    await svc.getDueReplies(org, new Date('2026-08-18T12:00:00Z'));
+
+    expect(repo.pickAutoReplyCandidates).toHaveBeenCalledWith(
+      org.id,
+      'proj-1',
+      'reddit',
+      expect.not.objectContaining({ excludeChannelIds: expect.anything() })
+    );
+  });
+
+  // x has no channel at all, so there is no concentration to measure — and no
+  // query to pay for.
+  it('does not even count channels on an uncapped platform', async () => {
+    const { svc, repo } = makeService({
+      configs: [{ ...enabledConfig, replyPolicies: { x: { autoReplyEnabled: true } } }],
+      budget: budgetWith(),
+      candidates: [{ opportunityId: 'opp-1', score: 90, matchedKeywords: [] }],
+    });
+
+    await svc.getDueReplies(org, new Date('2026-08-18T12:00:00Z'));
+
+    expect(repo.countTodayRepliesByChannel).not.toHaveBeenCalled();
+  });
+
+  it('honours an admin per-platform cap over the built-in', async () => {
+    const { svc, repo } = makeService(
+      onReddit({
+        channelDailyLimits: { reddit: 1 },
+        repliesByChannel: { 't5_one': 1 },
+      })
+    );
+
+    await svc.getDueReplies(org, new Date('2026-08-18T12:00:00Z'));
+
+    expect(repo.pickAutoReplyCandidates).toHaveBeenCalledWith(
+      org.id,
+      'proj-1',
+      'reddit',
+      expect.objectContaining({ excludeChannelIds: ['t5_one'] })
+    );
+  });
+
+  it('can cap a platform the built-ins leave alone', async () => {
+    const { svc, repo } = makeService({
+      configs: [{ ...enabledConfig, replyPolicies: { linkedin: { autoReplyEnabled: true } } }],
+      budget: budgetWith(),
+      candidates: [{ opportunityId: 'opp-1', score: 90, matchedKeywords: [] }],
+      channelDailyLimits: { linkedin: 1 },
+      repliesByChannel: { 'company-page': 1 },
+    });
+
+    await svc.getDueReplies(org, new Date('2026-08-18T12:00:00Z'));
+
+    expect(repo.pickAutoReplyCandidates).toHaveBeenCalledWith(
+      org.id,
+      'proj-1',
+      'linkedin',
+      expect.objectContaining({ excludeChannelIds: ['company-page'] })
+    );
+  });
+});
+
 describe('EngageAutoReplyService.getDueReplies — platform write window', () => {
   beforeEach(() => vi.clearAllMocks());
 
@@ -452,7 +1018,10 @@ describe('EngageAutoReplyService.getDueReplies — platform write window', () =>
   it('hands out nothing outside the platform write window', async () => {
     const { svc, repo } = makeService({ ...dueConfig, withinWriteWindow: false });
 
-    await svc.getDueReplies(org, new Date('2026-08-18T03:00:00Z'));
+    // Noon: inside the project's own default active hours, so this asserts the
+    // PLATFORM window and nothing else. At 03:00 the project window would skip
+    // the platform first and the spec would pass without testing anything.
+    await svc.getDueReplies(org, new Date('2026-08-18T12:00:00Z'));
 
     expect(repo.pickAutoReplyCandidates).not.toHaveBeenCalled();
   });
@@ -554,22 +1123,35 @@ describe('EngageAutoReplyService.getDueReplies — platform write floor', () => 
     expect(repo.pickAutoReplyCandidates).toHaveBeenCalled();
   });
 
-  it('a tighter project cadence cannot get under the floor', async () => {
-    // checkIntervalMinutes is a preference and may be tighter than the global
-    // default cadence — but never tighter than what the platform tolerates.
-    // This is the split that keeps `??` correct on the cadence above.
+  it('a tighter derived cadence cannot get under the floor', async () => {
+    // A narrow window divided by a full day's limit is the one way the derived
+    // spacing gets small — and it is still only a preference. What a preference
+    // may never undercut is what the platform tolerates, which is why the floor
+    // is a separate setting resolved with max() rather than — like the cadence
+    // — with the schedule.
     const { svc, repo } = makeService({
       configs: [
         {
           ...enabledConfig,
-          replyPolicies: { reddit: { autoReplyEnabled: true, checkIntervalMinutes: 1 } },
+          replyPolicies: {
+            reddit: {
+              autoReplyEnabled: true,
+              // A one-hour window, 3 replies (reddit's ceiling) — one every 20.
+              windowStart: '11:30',
+              windowEnd: '12:30',
+              dailyReplyLimit: 3,
+            },
+          },
         },
       ],
       budget: budgetWith(),
       candidates: [{ opportunityId: 'opp-1', score: 90, matchedKeywords: [] }],
-      lastSentAt: new Date('2026-08-18T11:58:00Z'), // 2 min — clears the 1-min cadence
-      lastPlatformWriteAt: new Date('2026-08-18T11:58:00Z'),
-      writeFloorMinutes: 15,
+      // Out of the way, so the 20-minute derived cadence is what the floor is
+      // being tested against.
+      pacing: { minGapMinutes: 5 },
+      lastSentAt: new Date('2026-08-18T11:38:00Z'), // 22 min — clears the 20-min cadence
+      lastPlatformWriteAt: new Date('2026-08-18T11:38:00Z'),
+      writeFloorMinutes: 25,
     });
 
     await svc.getDueReplies(org, new Date('2026-08-18T12:00:00Z'));
@@ -581,19 +1163,36 @@ describe('EngageAutoReplyService.getDueReplies — platform write floor', () => 
 describe('EngageAutoReplyService.getDueReplies — per-platform overrides', () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it('uses the platform\'s checkIntervalMinutes instead of the global default', async () => {
+  it('paces by the spacing DERIVED from the schedule, not the retired checkIntervalMinutes', async () => {
     const { svc, repo } = makeService({
       configs: [
         {
           ...enabledConfig,
+          // A stored cadence from an older client. Honouring it would let two
+          // replies through a ten-hour window while the same policy asks for
+          // three — the contradiction the pair replaced it to remove.
           replyPolicies: { reddit: { autoReplyEnabled: true, checkIntervalMinutes: 5 } },
         },
       ],
       budget: budgetWith(),
       candidates: [{ opportunityId: 'opp-1', score: 90, matchedKeywords: [] }],
-      // 10 minutes ago: under the 25-min GLOBAL default, but over this
-      // platform's 5-min override — so it should still be due.
+      // 10 minutes ago: over the stored 5-minute cadence, far under the
+      // schedule's own (8 AM–6 PM across 4 a day = one every 150).
       lastSentAt: new Date('2026-08-18T11:50:00Z'),
+    });
+
+    await svc.getDueReplies(org, new Date('2026-08-18T12:00:00Z'));
+
+    expect(repo.pickAutoReplyCandidates).not.toHaveBeenCalled();
+  });
+
+  it('is due once the derived spacing has elapsed', async () => {
+    const { svc, repo } = makeService({
+      configs: [{ ...enabledConfig, replyPolicies: { reddit: { autoReplyEnabled: true } } }],
+      budget: budgetWith(),
+      candidates: [{ opportunityId: 'opp-1', score: 90, matchedKeywords: [] }],
+      // 210 minutes ago, against the default schedule's 150.
+      lastSentAt: new Date('2026-08-18T08:30:00Z'),
     });
 
     await svc.getDueReplies(org, new Date('2026-08-18T12:00:00Z'));
@@ -601,12 +1200,30 @@ describe('EngageAutoReplyService.getDueReplies — per-platform overrides', () =
     expect(repo.pickAutoReplyCandidates).toHaveBeenCalled();
   });
 
-  it('falls back to the global minGapMinutes when the platform sets none', async () => {
+  it('never spaces tighter than the org-wide minGapMinutes', async () => {
+    // The org-wide setting is a FLOOR under the derived cadence, not a default
+    // beside it: an operator slowing every project down must not be undercut by
+    // a project that divides a wide window by a big limit.
     const { svc, repo } = makeService({
-      configs: [{ ...enabledConfig, replyPolicies: { reddit: { autoReplyEnabled: true } } }],
+      configs: [
+        {
+          ...enabledConfig,
+          replyPolicies: {
+            // 60 minutes across 3 replies = one every 20…
+            reddit: {
+              autoReplyEnabled: true,
+              windowStart: '11:30',
+              windowEnd: '12:30',
+              dailyReplyLimit: 3,
+            },
+          },
+        },
+      ],
       budget: budgetWith(),
       candidates: [{ opportunityId: 'opp-1', score: 90, matchedKeywords: [] }],
-      lastSentAt: new Date('2026-08-18T11:50:00Z'), // 10 min ago, under the 25-min default
+      // … but the operator says never under 45.
+      pacing: { minGapMinutes: 45 },
+      lastSentAt: new Date('2026-08-18T11:30:00Z'), // 30 min ago
     });
 
     await svc.getDueReplies(org, new Date('2026-08-18T12:00:00Z'));
@@ -780,7 +1397,7 @@ describe('EngageAutoReplyService.getDueReplies — the queue lane', () => {
       queued: [queued()],
     });
 
-    const due = await svc.getDueReplies(org);
+    const due = await svc.getDueReplies(org, DURING_ACTIVE_HOURS);
 
     expect(due).toHaveLength(1);
     expect(due[0]).toMatchObject({
@@ -805,7 +1422,7 @@ describe('EngageAutoReplyService.getDueReplies — the queue lane', () => {
       candidates: [{ opportunityId: 'opp-new', stateId: 'st-new' }],
     });
 
-    const due = await svc.getDueReplies(org);
+    const due = await svc.getDueReplies(org, DURING_ACTIVE_HOURS);
 
     expect(due).toHaveLength(1);
     expect(due[0].sentReplyId).toBe('sent-old');
@@ -840,7 +1457,7 @@ describe('EngageAutoReplyService.getDueReplies — the queue lane', () => {
       candidates: [{ opportunityId: 'opp-1', stateId: 'st-1' }],
     });
 
-    await svc.getDueReplies(org);
+    await svc.getDueReplies(org, DURING_ACTIVE_HOURS);
 
     expect(engage.queueAutoReply).toHaveBeenCalledTimes(1);
     expect(engage.saveDraft).not.toHaveBeenCalled();
@@ -854,7 +1471,7 @@ describe('EngageAutoReplyService.getDueReplies — the queue lane', () => {
       candidates: [{ opportunityId: 'opp-1', stateId: 'st-1' }],
     });
 
-    const due = await svc.getDueReplies(org);
+    const due = await svc.getDueReplies(org, DURING_ACTIVE_HOURS);
 
     expect(due).toHaveLength(1);
     expect(repo.claimDueEngageReplies).toHaveBeenCalledTimes(1);
@@ -914,7 +1531,7 @@ describe('EngageAutoReplyService.getDueReplies — the queue lane', () => {
       budget: { cap: 5, sentToday: 5, remaining: 0, keywords: [] },
     });
 
-    const due = await svc.getDueReplies(org);
+    const due = await svc.getDueReplies(org, DURING_ACTIVE_HOURS);
 
     expect(due).toHaveLength(1);
     expect(due[0].sentReplyId).toBe('sent-old');
@@ -930,7 +1547,7 @@ describe('EngageAutoReplyService.getDueReplies — the queue lane', () => {
       queued: [queued()],
     });
 
-    await svc.getDueReplies(org);
+    await svc.getDueReplies(org, DURING_ACTIVE_HOURS);
 
     expect(repo.claimDueEngageReplies.mock.calls[0][3].limit).toBe(1);
   });
@@ -940,7 +1557,7 @@ describe('EngageAutoReplyService.getDueReplies — the queue lane', () => {
       configs: [{ ...enabledConfig, replyPolicies: { reddit: { autoReplyEnabled: false } } }],
     });
 
-    await svc.getDueReplies(org);
+    await svc.getDueReplies(org, DURING_ACTIVE_HOURS);
 
     expect(repo.claimDueEngageReplies).not.toHaveBeenCalled();
   });
@@ -972,14 +1589,16 @@ describe('EngageAutoReplyService.getReplyQueueStatus — mirrors the dispatch ga
   it('reports the LATER of the cadence and the floor', async () => {
     const { svc } = makeService({
       configs: [{ ...enabledConfig, replyPolicies: { reddit: { autoReplyEnabled: true } } }],
-      lastSentAt: new Date('2026-08-18T11:50:00Z'), // cadence clears at 12:15 (25m)
+      // The default schedule: 8 AM–6 PM across 4 replies, one every 150 minutes
+      // — so the cadence clears at 14:20.
+      lastSentAt: new Date('2026-08-18T11:50:00Z'),
       lastPlatformWriteAt: new Date('2026-08-18T11:55:00Z'), // floor clears at 12:10
       writeFloorMinutes: 15,
     });
 
     const rows = await svc.getReplyQueueStatus(org, new Date('2026-08-18T12:00:00Z'));
 
-    expect(rows[0].nextEligibleAt).toBe(new Date('2026-08-18T12:15:00Z').toISOString());
+    expect(rows[0].nextEligibleAt).toBe(new Date('2026-08-18T14:20:00Z').toISOString());
   });
 
   it('resolves the pacing config ONCE, not per row', async () => {
@@ -1036,7 +1655,7 @@ describe('EngageAutoReplyService.getReplyQueueStatus', () => {
       configs: [{ ...enabledConfig, replyPolicies: { reddit: { autoReplyEnabled: false } } }],
     });
 
-    const rows = await svc.getReplyQueueStatus(org);
+    const rows = await svc.getReplyQueueStatus(org, DURING_ACTIVE_HOURS);
 
     expect(rows).toHaveLength(0);
   });
@@ -1073,24 +1692,39 @@ describe('EngageAutoReplyService.getReplyQueueStatus', () => {
     expect(rows[0].withinLocalWindow).toBe(false);
   });
 
-  it('computes nextEligibleAt from the last sent reply + the min gap, when still inside it', async () => {
+  it('computes nextEligibleAt from the last sent reply + the derived spacing', async () => {
     const { svc } = makeService({
-      configs: [{ ...enabledConfig, replyPolicies: { reddit: { autoReplyEnabled: true } } }],
+      configs: [
+        {
+          ...enabledConfig,
+          // 10:00–14:00 across 2 replies = one every 120 minutes.
+          replyPolicies: {
+            reddit: {
+              autoReplyEnabled: true,
+              windowStart: '10:00',
+              windowEnd: '14:00',
+              dailyReplyLimit: 2,
+            },
+          },
+        },
+      ],
       lastSentAt: new Date('2026-08-18T11:50:00Z'),
       pacing: { minGapMinutes: 25 },
     });
 
     const rows = await svc.getReplyQueueStatus(org, new Date('2026-08-18T12:00:00Z'));
 
-    // 10 minutes since the last reply, 25-minute gap → still gated, 15 to go.
+    // 10 minutes since the last reply, 120-minute spacing → still gated.
     expect(rows[0].withinMinGap).toBe(false);
-    expect(rows[0].nextEligibleAt).toBe(new Date('2026-08-18T12:15:00Z').toISOString());
+    expect(rows[0].minGapMinutes).toBe(120);
+    expect(rows[0].nextEligibleAt).toBe(new Date('2026-08-18T13:50:00Z').toISOString());
   });
 
-  it('reports withinMinGap=true and nextEligibleAt=null once the gap has elapsed', async () => {
+  it('reports withinMinGap=true and nextEligibleAt=null once the spacing has elapsed', async () => {
     const { svc } = makeService({
       configs: [{ ...enabledConfig, replyPolicies: { reddit: { autoReplyEnabled: true } } }],
-      lastSentAt: new Date('2026-08-18T11:00:00Z'),
+      // 220 minutes back, against the default schedule's 150.
+      lastSentAt: new Date('2026-08-18T08:20:00Z'),
       pacing: { minGapMinutes: 25 },
     });
 
@@ -1100,13 +1734,61 @@ describe('EngageAutoReplyService.getReplyQueueStatus', () => {
     expect(rows[0].nextEligibleAt).toBeNull();
   });
 
+  // The row exists to EXPLAIN a hold, and an exhausted day is the one hold no
+  // clock on the row accounts for.
+  it('reports the day\'s ceiling and how much of it is spent', async () => {
+    const { svc } = makeService({
+      configs: [
+        {
+          ...enabledConfig,
+          replyPolicies: {
+            reddit: {
+              autoReplyEnabled: true,
+              windowStart: '09:00',
+              windowEnd: '17:00',
+              dailyReplyLimit: 3,
+            },
+          },
+        },
+      ],
+      sentToday: 3,
+    });
+
+    const rows = await svc.getReplyQueueStatus(org, new Date('2026-08-18T12:00:00Z'));
+
+    expect(rows[0]).toMatchObject({
+      activeHours: { start: '09:00', end: '17:00' },
+      dailyReplyLimit: 3,
+      sentToday: 3,
+      withinDailyLimit: false,
+    });
+  });
+
+  it('reports the DEFAULT schedule for a platform that configured none', async () => {
+    const { svc } = makeService({
+      configs: [{ ...enabledConfig, replyPolicies: { reddit: { autoReplyEnabled: true } } }],
+      sentToday: 1,
+    });
+
+    const rows = await svc.getReplyQueueStatus(org, new Date('2026-08-18T12:00:00Z'));
+
+    expect(rows[0]).toMatchObject({
+      activeHours: { start: '08:00', end: '18:00' },
+      // The default, untouched: it is far below reddit's safety ceiling, so
+      // nothing clamps it.
+      dailyReplyLimit: 4,
+      sentToday: 1,
+      withinDailyLimit: true,
+    });
+  });
+
   it('never gates on the min gap when this project+platform has never sent a reply', async () => {
     const { svc } = makeService({
       configs: [{ ...enabledConfig, replyPolicies: { reddit: { autoReplyEnabled: true } } }],
       lastSentAt: null,
     });
 
-    const rows = await svc.getReplyQueueStatus(org);
+    const rows = await svc.getReplyQueueStatus(org, DURING_ACTIVE_HOURS);
 
     expect(rows[0].withinMinGap).toBe(true);
     expect(rows[0].nextEligibleAt).toBeNull();
@@ -1118,7 +1800,7 @@ describe('EngageAutoReplyService.getReplyQueueStatus', () => {
       pacing: { minScore: 80 },
     });
 
-    await svc.getReplyQueueStatus(org);
+    await svc.getReplyQueueStatus(org, DURING_ACTIVE_HOURS);
 
     expect(repo.countEligibleOpportunities).toHaveBeenCalledWith(
       org.id,
@@ -1136,7 +1818,7 @@ describe('EngageAutoReplyService.getReplyQueueStatus', () => {
       ],
     });
 
-    const rows = await svc.getReplyQueueStatus(org);
+    const rows = await svc.getReplyQueueStatus(org, DURING_ACTIVE_HOURS);
 
     expect(rows.map((r) => `${r.projectId}:${r.platform}`).sort()).toEqual([
       'proj-1:reddit',

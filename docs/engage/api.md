@@ -284,7 +284,8 @@ interface ReplyPolicy {
   defaultStrategy?: ReplyStrategy;
   length?: 'short' | 'medium' | 'long';   // draft length tier; omit for 'medium'
   mentionTags?: string[];                 // @-mentions steered into the draft
-  checkIntervalMinutes?: number;          // overrides engage_reply_pacing.minGapMinutes for THIS platform
+  dailyReplyLimit?: number;               // replies per LOCAL day; omit for 4
+  checkIntervalMinutes?: number;          // DEPRECATED, no longer read
 }
 ```
 
@@ -584,11 +585,23 @@ by platform:
       "defaultStrategy": "EXPERT_ANSWER",
       "length": "medium",           // optional; omit for 'medium'
       "mentionTags": ["@aisee"],    // optional; omit for none
-      "checkIntervalMinutes": 30    // optional; omit to use the org-wide default
+      "dailyReplyLimit": 4          // optional; omit for 4, clamped to the platform ceiling
     }
   }
 }
 ```
+
+**Validated at the boundary**, by the same constraint
+`POST /projects/:projectId/automation/replies` uses — one blob, two doors, one
+rule: `autoReplyEnabled` must be a boolean, `windowStart`/`windowEnd` must be
+`"HH:MM"` (both, and not equal), `timezone` a non-empty string,
+`dailyReplyLimit` a whole number ≥ 0, `length` one of `short|medium|long`, and
+`mentionTags` an array of strings. Anything else is a `400` rather than a `200`
+that stores a value no gate will read the way you meant it — `dailyReplyLimit:
+"4"` would resolve as the default, and `autoReplyEnabled: "false"` is a
+non-empty string, so the driver would read it as **true** and start replying.
+Keys the gates do not read (`defaultStrategy`, `brandStrength`, the retired
+`checkIntervalMinutes`…) pass through untouched.
 
 A platform absent from the map — or present with `autoReplyEnabled: false` —
 is never auto-replied to, **even when the project-level `autoReplyEnabled` is
@@ -610,10 +623,38 @@ replies for this platform (a window that wraps past midnight, e.g. `22:00`–
 platform; omit for `EXPERT_ANSWER`. `length` is the draft length tier (mirrors
 the user-driven `POST /opportunities/:id/draft`'s `length`); omit for `medium`.
 `mentionTags` are steered into the generated draft the same way the user-driven
-path's `mentions` are. `checkIntervalMinutes` overrides the org-wide
-`engage_reply_pacing.minGapMinutes` for THIS platform only — useful because
-platforms carry very different account risk (e.g. a slower cadence on X than on
-Reddit).
+path's `mentions` are.
+
+`dailyReplyLimit` is how many replies this platform may send per LOCAL day
+(omit for 4). With the window above it forms the platform's whole reply
+SCHEDULE, and the spacing between two replies is DERIVED from the pair —
+`max(window minutes / dailyReplyLimit, engage_reply_pacing.minGapMinutes)` —
+rather than configured beside them. The value is clamped on read to that
+platform's account-safety ceiling (x 30, reddit 25, linkedin 25, devto 15,
+quora 15, medium 10, hackernews 10; admin-tunable via the
+`engage_reply_daily_ceiling` Setting), which is deliberately NOT the same number
+as `OPERATION_PLAN_REPLY_VOLUME.max`, the ceiling an operation plan's
+`targetRepliesPerDay` is generated against. A limit of `0` means "no replies
+today" and is distinct from omitting the field.
+
+That ceiling is then multiplied by a **warm-up** factor — 0.3 for the first
+week of driving the account, 0.6 to day 30, 1 after (`engage_reply_warmup`).
+"Days" counts from the org's FIRST reply on that platform, which is the only
+age signal available: replies go out through the extension's own browser
+session, so no registration date is ever visible. Never having replied there
+counts as day 0. The result is floored at 1/day — warm-up slows an account, it
+never stops one.
+
+Two further gates bound WHERE the replies land, not just how many:
+`engage_reply_channel_daily_limit` caps replies to one channel per day
+(subreddit, publication…; reddit 2 by default, other platforms unconstrained),
+applied to both the candidate pick and the queued claim.
+
+> `checkIntervalMinutes` is **deprecated**: it used to override the org-wide
+> `engage_reply_pacing.minGapMinutes` for this platform. It is still accepted
+> and echoed back for older clients, but no gate reads it — a stored 8-hour
+> cadence would let two replies through a ten-hour window while the same policy
+> asked for four.
 
 **Unattended reach.** The backend driver (this endpoint's scheduling half) will
 draft for any platform with a policy — Reddit, X, LinkedIn, whatever. Sending

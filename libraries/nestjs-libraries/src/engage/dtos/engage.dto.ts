@@ -18,6 +18,7 @@ import {
   MinLength,
   ValidateNested,
 } from 'class-validator';
+import { IsReplyPolicyMap } from '@gitroom/nestjs-libraries/engage/reply-policy.validator';
 import { Transform, Type } from 'class-transformer';
 import { OmitType, PickType } from '@nestjs/swagger';
 import { EngageOpportunityStatus } from '@prisma/client';
@@ -132,12 +133,24 @@ export class SaveEngageConfigDto {
   /**
    * Per-PLATFORM reply policy, keyed by platform:
    *   { "reddit": { autoReplyEnabled, windowStart, windowEnd, timezone,
-   *                 defaultStrategy } }
+   *                 dailyReplyLimit, defaultStrategy, length, mentionTags } }
    * Refines autoReplyEnabled (which decides WHETHER this project replies at all)
-   * with WHERE and WHEN. Replaces the key wholesale — send the full map.
+   * with WHERE, WHEN and HOW MUCH. Replaces the key wholesale — send the full
+   * map.
+   *
+   * The active hours (`windowStart`/`windowEnd`/`timezone`) and `dailyReplyLimit`
+   * are the reply SCHEDULE; the spacing between two replies is derived from the
+   * pair. The retired `checkIntervalMinutes` is still accepted and stored for
+   * older clients, but no gate reads it.
+   *
+   * Validated by the same constraint the Automation endpoint uses, so the two
+   * doors onto this blob cannot drift apart — and so a value of the wrong type
+   * is a 400 here rather than a 200 that stores something no gate will read the
+   * way the caller meant it.
    */
   @IsOptional()
   @IsObject()
+  @IsReplyPolicyMap()
   replyPolicies?: Record<string, unknown>;
 
   // Opaque aisee-core products.id. Omit for the legacy, single (null-project)

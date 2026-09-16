@@ -2294,7 +2294,19 @@ export class EngageRepository {
     organizationId: string,
     projectId: string,
     platform: string,
-    opts: { limit: number; leaseToken: string; leaseCutoff: Date; now: Date }
+    opts: {
+      limit: number;
+      leaseToken: string;
+      leaseCutoff: Date;
+      now: Date;
+      /**
+       * Channels that have already had their allowance today. A queued reply is
+       * still a reply ARRIVING in that community, so the concentration cap has
+       * to hold here too — otherwise a backlog delivers exactly the stack of
+       * comments in one subreddit that the cap exists to prevent.
+       */
+      excludeChannelIds?: string[];
+    }
   ) {
     if (opts.limit <= 0) return [];
 
@@ -2336,6 +2348,9 @@ export class EngageRepository {
         externalPostUrl: { not: '' },
         deletedAt: null,
         repliesDisabledAt: null,
+        ...(opts.excludeChannelIds?.length && {
+          channelId: { notIn: opts.excludeChannelIds },
+        }),
       },
       post: {
         state: 'QUEUE',
@@ -2434,6 +2449,13 @@ export class EngageRepository {
       limit: number;
       keywords?: string[];
       minScore?: number;
+      /**
+       * Channels (subreddits…) that have already had their allowance today.
+       * Excluded HERE rather than after the pick, for the same reason the dead
+       * addresses above are: this is where the money goes, and a candidate we
+       * would refuse to send is a draft we must not pay to write.
+       */
+      excludeChannelIds?: string[];
     }
   ) {
     if (opts.limit <= 0) return [];
@@ -2469,6 +2491,9 @@ export class EngageRepository {
           // No reply record for THIS project yet (another project replying to the
           // same global post is fine — state is per-org/project).
           sentReplies: { none: { organizationId, projectId } },
+          ...(opts.excludeChannelIds?.length && {
+            channelId: { notIn: opts.excludeChannelIds },
+          }),
         },
       },
       // Score first; same-score ties go to the freshest underlying post — a
@@ -4438,6 +4463,100 @@ export class EngageRepository {
   }
 
   /**
+   * When this org FIRST replied on a platform — the warm-up clock.
+   *
+   * ORG-wide, not per project, for the same reason `getLastPlatformWriteAt` is:
+   * a project is our concept, and the account being warmed up belongs to the
+   * platform. Two projects driving one reddit login share its history, and
+   * scoping this per project would hand a second project a fresh warm-up on an
+   * account that has been replying for months.
+   *
+   * Null when the org has never replied there, which the caller reads as day 0
+   * — the slowest tier — rather than as "unknown, go ahead".
+   */
+  async getFirstSentReplyAt(
+    organizationId: string,
+    platform: string
+  ): Promise<Date | null> {
+    const row = await this._sentReply.model.engageSentReply.findFirst({
+      where: { organizationId, opportunity: { platform } },
+      orderBy: { createdAt: 'asc' },
+      select: { createdAt: true },
+    });
+    return row?.createdAt ?? null;
+  }
+
+  /** {@link getFirstSentReplyAt} for several platforms in one query. */
+  async getFirstSentReplyAtByPlatform(
+    organizationId: string,
+    platforms: string[]
+  ): Promise<Record<string, Date>> {
+    if (!platforms.length) return {};
+    const rows = await this._sentReply.model.engageSentReply.findMany({
+      where: { organizationId, opportunity: { platform: { in: platforms } } },
+      orderBy: { createdAt: 'asc' },
+      select: { createdAt: true, opportunity: { select: { platform: true } } },
+    });
+    const out: Record<string, Date> = {};
+    // Ascending, so the FIRST row seen for a platform is its earliest.
+    for (const row of rows) {
+      const platform = row.opportunity.platform;
+      if (!out[platform]) out[platform] = row.createdAt;
+    }
+    return out;
+  }
+
+  /**
+   * Today's reply count per CHANNEL for one platform — how many went to each
+   * subreddit (or publication, tag…), keyed by `channelId`.
+   *
+   * ORG-wide, deliberately, unlike {@link countProjectSentRepliesToday} beside
+   * it. That one enforces a number the USER configured, which is a per-project
+   * setting; this one exists because a community's spam filter counts an
+   * ACCOUNT's comments and cannot see our project boundaries — two projects
+   * driving one reddit login stacking two comments each in r/foo is exactly the
+   * four-in-a-row this prevents. Same reasoning as `getLastPlatformWriteAt`.
+   *
+   * Same window and state semantics as {@link countProjectSentRepliesToday}, so
+   * the two can never disagree about what "sent today" means; this one only
+   * splits a wider set by where each reply landed.
+   *
+   * Counted in memory rather than with `groupBy`, because the column lives on
+   * the joined EngageOpportunity and Prisma can only group by a model's OWN
+   * scalars. The set being tallied is one project+platform's replies for ONE
+   * day — tens of rows at the ceilings we allow — so the join-and-count is
+   * cheaper than the raw query it would take to push the grouping down.
+   *
+   * Replies whose opportunity carries no channel (x has none) are skipped:
+   * there is no community to concentrate in, so there is nothing to cap.
+   */
+  async countTodayRepliesByChannel(
+    organizationId: string,
+    platform: string,
+    since: Date,
+    until: Date
+  ): Promise<Record<string, number>> {
+    const rows = await this._sentReply.model.engageSentReply.findMany({
+      where: {
+        organizationId,
+        post: {
+          publishDate: { gte: since, lt: until },
+          state: { in: ['QUEUE', 'PUBLISHED'] },
+        },
+        opportunity: { platform },
+      },
+      select: { opportunity: { select: { channelId: true } } },
+    });
+    const out: Record<string, number> = {};
+    for (const row of rows) {
+      const channelId = row.opportunity?.channelId;
+      if (!channelId) continue;
+      out[channelId] = (out[channelId] ?? 0) + 1;
+    }
+    return out;
+  }
+
+  /**
    * Resolve EngageKeyword ids to their keyword TEXT.
    *
    * An operation plan stores `engagePolicies[].keywordTargets` keyed by keyword
@@ -6223,9 +6342,10 @@ export class EngageRepository {
     url: string | null,
     engageAuthor?: EngageAuthorProfile,
     // When markPublished is set (extension publish-on-success path), also flip the
-    // post DRAFT→PUBLISHED in the same write. The human manual-paste path leaves it
-    // unset: its post is already PUBLISHED (created so by confirmManualReply), so a
-    // backfill there only fills the URL.
+    // post DRAFT→PUBLISHED and re-stamp publishDate to now in the same write —
+    // this call is the moment the reply went live. The human manual-paste path
+    // leaves it unset: its post is already PUBLISHED (created so by
+    // confirmManualReply), so a backfill there only fills the URL.
     opts: { markPublished?: boolean } = {}
   ) {
     // Join the opportunity for its platform: X gets releaseId derived from the
@@ -6321,7 +6441,19 @@ export class EngageRepository {
         ...(releaseId ? { releaseId } : {}),
         ...(integrationId ? { integrationId } : {}),
         ...(mergedSettings ? { settings: mergedSettings } : {}),
-        ...(opts.markPublished ? { state: 'PUBLISHED' as const } : {}),
+        // The commit, and with it the ONLY moment this reply's send time is
+        // known. The draft's `publishDate` was stamped when save-draft wrote
+        // the row — the extension then posts whenever the browser, the
+        // platform's pacing and the reply queue allow, routinely hours later,
+        // and every engage read path (the Sent list's time, replies-trend's
+        // daily buckets, the metrics freshness gate) reported that stale draft
+        // time as the reply time. Deliberately tied to `markPublished`: the
+        // human paste-the-link path backfills a URL onto a post that has been
+        // PUBLISHED since confirm time, and moving its date to whenever
+        // somebody got round to pasting would be a fresh lie.
+        ...(opts.markPublished
+          ? { state: 'PUBLISHED' as const, publishDate: new Date() }
+          : {}),
       },
     });
   }
@@ -6429,6 +6561,12 @@ export class EngageRepository {
    *     removed, and `changeState(ERROR)` nulls releaseId, discarding the id
    *     needed to investigate. Not DRAFT either: that reads as "never sent" and
    *     invites a duplicate.
+   *     `publishDate` is pointedly NOT re-stamped, unlike every other write
+   *     that sets PUBLISHED (see updateReplyUrl's markPublished branch): this
+   *     runs when a removal is DETECTED, which is minutes to hours after the
+   *     send and on the ordinary path a row that publishExtensionReply already
+   *     dated correctly. Stamping now() would overwrite a true send time with
+   *     the time we noticed the post was gone.
    *
    *   removedAt / removedReason on the reply. What the platform did afterwards
    *     is an engage-domain fact, not a state of our publish.

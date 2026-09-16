@@ -82,11 +82,19 @@ export interface EngageReplyPolicy {
   /** @-mentions steered into the generated draft on this platform. */
   mentionTags?: string[];
   /**
-   * Minimum minutes between two auto-replies on THIS platform, overriding the
-   * org-wide engage_reply_pacing.minGapMinutes default for it. Absent = use the
-   * global default. A per-platform override exists because platforms carry very
-   * different account risk — a slower cadence on X than on Reddit, say — that a
-   * single global number can't express.
+   * Replies allowed per LOCAL day on this platform, clamped to the platform's
+   * ceiling. Absent = DEFAULT_REPLY_DAILY_LIMIT. With the window above it forms
+   * this platform's whole reply schedule, and the driver's spacing is derived
+   * from the pair — see engage-reply-schedule.ts.
+   */
+  dailyReplyLimit?: number;
+  /**
+   * @deprecated The per-platform "check every N minutes" cadence. It answered
+   * neither question a user actually has ("when may this account be seen
+   * replying", "how many replies a day is still a person"), and answering both
+   * from one number is only possible once the window's length is known — so the
+   * pair replaced it and the spacing is now derived. Read-only legacy: rows
+   * written by an older client still carry it, no gate consults it.
    */
   checkIntervalMinutes?: number;
 }

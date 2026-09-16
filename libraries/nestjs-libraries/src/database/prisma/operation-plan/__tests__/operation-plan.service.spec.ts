@@ -942,10 +942,12 @@ describe('OperationPlanService.create', () => {
         {
           platform: 'x',
           themeTitle: 'Helpful GEO answers',
-          targetRepliesPerDay: 5,
+          // Within x's 4/day ceiling (OPERATION_PLAN_REPLY_VOLUME), so this fixture
+          // exercises the schema rather than the clamp.
+          targetRepliesPerDay: 4,
           // A LIST (not a Record) — OpenAI structured outputs forbids dynamic keys.
           keywordTargets: [
-            { keyword: 'kw-geo', target: 3 },
+            { keyword: 'kw-geo', target: 2 },
             { keyword: 'kw-ai-search', target: 2 },
           ],
           // Required (may be empty): per-day overrides keyed by concrete date.
@@ -1639,7 +1641,7 @@ describe('OperationPlanService.create', () => {
         {
           platform: 'x',
           themeTitle: 'GEO answers',
-          targetRepliesPerDay: 6,
+          targetRepliesPerDay: 4,
           dailyTargets: [{ date: '2030-01-02', target: 3 }],
           keywordTargets: [],
           enabled: true,
@@ -1659,7 +1661,7 @@ describe('OperationPlanService.create', () => {
     // The generated payload is written on completeGeneration (the stub create()
     // persisted first carried empty payloads).
     const policy = repo.completeGeneration.mock.calls[0][1].planPayload.engagePolicies[0];
-    expect(policy.targetRepliesPerDay).toBe(6); // default for un-overridden days
+    expect(policy.targetRepliesPerDay).toBe(4); // default for un-overridden days
     expect(policy.dailyTargets).toEqual([{ date: '2030-01-02', target: 3 }]);
   });
 
@@ -1674,7 +1676,7 @@ describe('OperationPlanService.create', () => {
         {
           platform: 'x',
           themeTitle: 't',
-          targetRepliesPerDay: 6,
+          targetRepliesPerDay: 4,
           dailyTargets: [
             { date: '2030-01-02', target: 3 },
             { date: '2030-02-15', target: 3 }, // outside [01-01, 01-02]
@@ -1705,7 +1707,7 @@ describe('OperationPlanService.create', () => {
         {
           platform: 'x',
           themeTitle: 't',
-          targetRepliesPerDay: 6,
+          targetRepliesPerDay: 4,
           dailyTargets: [
             { date: '2030-01-02', target: 3 },
             { date: '2030-01-02', target: 4 },
@@ -1993,6 +1995,267 @@ describe('OperationPlanService.create', () => {
     expect(systemPrompt).toContain('PLATFORM COVERAGE');
     expect(systemPrompt).toContain('(x, reddit)');
     expect(systemPrompt).toContain('NEVER leave a requested platform with zero posts');
+  });
+
+  // `targetRepliesPerDay` used to be the one plan input with NO number behind
+  // it: the prompt asked for "a sustainable weekday-level reply count" and
+  // pointed at platformPlaybook, which only ever described POSTING. Whatever
+  // the model picked became the send-time cap verbatim.
+  it('states the per-platform engage reply ceilings for the requested platforms only', async () => {
+    const { openaiService, service } = createGenerationDependencies({
+      contentItems: [],
+      engagePolicies: [],
+      warnings: [],
+    });
+
+    await service.create('org-1', 'proj-1', {
+      taskId: 'task-1',
+      startAt: '2030-01-01T00:00:00.000Z',
+      endAt: '2030-01-02T00:00:00.000Z',
+      platforms: ['x', 'medium'],
+    });
+
+    const [systemPrompt] = openaiService.generateStructuredText.mock.calls[0];
+    expect(systemPrompt).toContain('ENGAGE REPLY VOLUME');
+    expect(systemPrompt).toContain('x: 3-4 replies/day, HARD MAX 4');
+    // Long-form platforms are the one-a-day tier, and the line says "reply",
+    // not "replies" — a rule that reads as a typo is one the model rounds up.
+    expect(systemPrompt).toContain('medium: 1 reply/day, HARD MAX 1');
+    // Only the requested platforms are stated — five more ceilings would turn
+    // the block into background the model skims past.
+    expect(systemPrompt).not.toContain('quora: ');
+    expect(systemPrompt).not.toContain('reddit: ');
+  });
+
+  it('restates the reply hard max next to the policy objects (same both-ends rule as the length limits)', async () => {
+    const { openaiService, service } = createGenerationDependencies({
+      contentItems: [],
+      engagePolicies: [],
+      warnings: [],
+    });
+
+    await service.create('org-1', 'proj-1', {
+      taskId: 'task-1',
+      startAt: '2030-01-01T00:00:00.000Z',
+      endAt: '2030-01-02T00:00:00.000Z',
+      platforms: ['x', 'reddit'],
+    });
+
+    const [systemPrompt] = openaiService.generateStructuredText.mock.calls[0];
+    const cadenceStatement = systemPrompt.indexOf('ENGAGE REPLY VOLUME');
+    const policyStatement = systemPrompt.indexOf('re-check its `targetRepliesPerDay`');
+    expect(cadenceStatement).toBeGreaterThan(-1);
+    // The recap sits LATER, in the ENGAGE POLICIES section the model writes last.
+    expect(policyStatement).toBeGreaterThan(cadenceStatement);
+    expect(systemPrompt).toContain('(x 4, reddit 3)');
+  });
+
+  it('tells the model to emit no policy for a requested platform with no engage reply path', async () => {
+    const { openaiService, service } = createGenerationDependencies({
+      contentItems: [],
+      engagePolicies: [],
+      warnings: [],
+    });
+
+    await service.create('org-1', 'proj-1', {
+      taskId: 'task-1',
+      startAt: '2030-01-01T00:00:00.000Z',
+      endAt: '2030-01-02T00:00:00.000Z',
+      // instagram is outside the engage capability list: nothing scans it, so
+      // it never produces an opportunity to reply to.
+      platforms: ['x', 'instagram'],
+    });
+
+    const [systemPrompt] = openaiService.generateStructuredText.mock.calls[0];
+    expect(systemPrompt).toContain('x: 3-4 replies/day, HARD MAX 4');
+    expect(systemPrompt).toContain('NOT listed above has NO engage reply path');
+    expect(systemPrompt).toContain('emit NO policy for it at all');
+  });
+
+  // ── The ceiling in code, not only in the prompt ────────────────────────────
+  // `targetRepliesPerDay` IS the cap EngageService enforces at send time, so a
+  // model that writes a bigger number is not being ambitious — it is deleting
+  // the guardrail, with nothing downstream to catch it.
+
+  it('clamps a reply target above the platform ceiling instead of persisting it', async () => {
+    const { repo, service } = createGenerationDependencies({
+      contentItems: [],
+      engagePolicies: [
+        {
+          platform: 'x',
+          themeTitle: 'GEO answers',
+          targetRepliesPerDay: 8, // over x's 4/day ceiling
+          dailyTargets: [],
+          keywordTargets: [],
+          enabled: true,
+        },
+      ],
+      warnings: [],
+    });
+
+    const { background } = await createAndSettle(service, {
+      taskId: 'task-1',
+      startAt: '2030-01-01T00:00:00.000Z',
+      endAt: '2030-01-02T00:00:00.000Z',
+      platforms: ['x'],
+    });
+    await background;
+
+    const policy = repo.completeGeneration.mock.calls[0][1].planPayload.engagePolicies[0];
+    expect(policy.targetRepliesPerDay).toBe(4);
+  });
+
+  it('clamps a per-day override above the ceiling — an override WINS over the default at send time', async () => {
+    const { repo, service } = createGenerationDependencies({
+      contentItems: [],
+      engagePolicies: [
+        {
+          platform: 'hackernews',
+          themeTitle: 'HN comments',
+          targetRepliesPerDay: 1,
+          // The default is already legal; without clamping the overrides too,
+          // this single date would reopen the exact hole, one day at a time.
+          dailyTargets: [{ date: '2030-01-02', target: 9 }],
+          keywordTargets: [],
+          enabled: true,
+        },
+      ],
+      warnings: [],
+    });
+
+    const { background } = await createAndSettle(service, {
+      taskId: 'task-1',
+      startAt: '2030-01-01T00:00:00.000Z',
+      endAt: '2030-01-02T00:00:00.000Z',
+      platforms: ['hackernews'],
+    });
+    await background;
+
+    const policy = repo.completeGeneration.mock.calls[0][1].planPayload.engagePolicies[0];
+    expect(policy.dailyTargets).toEqual([{ date: '2030-01-02', target: 1 }]);
+  });
+
+  // Lowering the default strands keywordTargets above it, and the validator
+  // REJECTS that sum — so an unrefitted clamp would cause the very failed
+  // generation the repair pass exists to prevent.
+  it('refits keywordTargets under a clamped default rather than failing the generation', async () => {
+    const { repo, engageRepository, service } = createGenerationDependencies({
+      contentItems: [],
+      engagePolicies: [
+        {
+          platform: 'x',
+          themeTitle: 'GEO answers',
+          targetRepliesPerDay: 8,
+          keywordTargets: [
+            { keyword: 'GEO', target: 5 },
+            { keyword: 'AI search', target: 3 },
+          ],
+          dailyTargets: [],
+          enabled: true,
+        },
+      ],
+      warnings: [],
+    });
+    engageRepository.resolveOrCreateKeywordIds.mockResolvedValue({
+      GEO: 'kw-1',
+      'AI search': 'kw-2',
+    });
+
+    const { background } = await createAndSettle(service, {
+      taskId: 'task-1',
+      startAt: '2030-01-01T00:00:00.000Z',
+      endAt: '2030-01-02T00:00:00.000Z',
+      platforms: ['x'],
+    });
+    await background;
+
+    const plan = repo.completeGeneration.mock.calls[0][1];
+    expect(plan.status).not.toBe('FAILED');
+    const policy = plan.planPayload.engagePolicies[0];
+    expect(policy.targetRepliesPerDay).toBe(4);
+    // 5:3 apportioned into 4 — the plan's own weighting survives the squeeze
+    // (both floor to .5; the larger original target takes the leftover unit).
+    expect(policy.keywordTargets).toEqual({ 'kw-1': 3, 'kw-2': 1 });
+  });
+
+  it('never raises a target the model set BELOW the ceiling', async () => {
+    const { repo, service } = createGenerationDependencies({
+      contentItems: [],
+      engagePolicies: [
+        {
+          platform: 'x',
+          themeTitle: 'GEO answers',
+          // A deliberately quiet plan stays quiet: the ceiling is a maximum,
+          // not a quota to fill.
+          targetRepliesPerDay: 1,
+          dailyTargets: [{ date: '2030-01-02', target: 0 }],
+          keywordTargets: [],
+          enabled: true,
+        },
+      ],
+      warnings: [],
+    });
+
+    const { background } = await createAndSettle(service, {
+      taskId: 'task-1',
+      startAt: '2030-01-01T00:00:00.000Z',
+      endAt: '2030-01-02T00:00:00.000Z',
+      platforms: ['x'],
+    });
+    await background;
+
+    const policy = repo.completeGeneration.mock.calls[0][1].planPayload.engagePolicies[0];
+    expect(policy.targetRepliesPerDay).toBe(1);
+    expect(policy.dailyTargets).toEqual([{ date: '2030-01-02', target: 0 }]);
+  });
+
+  it('leaves a policy for a platform outside the engage capability list untouched', async () => {
+    const { repo, service } = createGenerationDependencies({
+      contentItems: [],
+      engagePolicies: [
+        {
+          platform: 'instagram',
+          themeTitle: 'IG comments',
+          targetRepliesPerDay: 9,
+          dailyTargets: [],
+          keywordTargets: [],
+          enabled: true,
+        },
+      ],
+      warnings: [],
+    });
+
+    const { background } = await createAndSettle(service, {
+      taskId: 'task-1',
+      startAt: '2030-01-01T00:00:00.000Z',
+      endAt: '2030-01-02T00:00:00.000Z',
+      platforms: ['instagram'],
+    });
+    await background;
+
+    // Nothing scans instagram, so the policy can never fire — there is no
+    // ceiling to apply and nothing to repair. (The prompt asks for no such
+    // policy at all; this only pins down that the clamp does not invent one.)
+    const policy = repo.completeGeneration.mock.calls[0][1].planPayload.engagePolicies[0];
+    expect(policy.targetRepliesPerDay).toBe(9);
+  });
+
+  it('omits the unsupported-platform rule when every requested platform can receive replies', async () => {
+    const { openaiService, service } = createGenerationDependencies({
+      contentItems: [],
+      engagePolicies: [],
+      warnings: [],
+    });
+
+    await service.create('org-1', 'proj-1', {
+      taskId: 'task-1',
+      startAt: '2030-01-01T00:00:00.000Z',
+      endAt: '2030-01-02T00:00:00.000Z',
+      platforms: ['x', 'reddit'],
+    });
+
+    const [systemPrompt] = openaiService.generateStructuredText.mock.calls[0];
+    expect(systemPrompt).not.toContain('NOT listed above has NO engage reply path');
   });
 
   it('rejects a generated plan that produced no content for a requested platform', async () => {
@@ -2341,10 +2604,10 @@ describe('OperationPlanService.create', () => {
         {
           platform: 'x',
           themeTitle: 'GEO answers',
-          targetRepliesPerDay: 5,
+          targetRepliesPerDay: 4,
           keywordTargets: [
             { keyword: 'GEO', target: 3 },
-            { keyword: 'AI search', target: 2 },
+            { keyword: 'AI search', target: 1 },
           ],
           enabled: true,
         },
@@ -2373,7 +2636,7 @@ describe('OperationPlanService.create', () => {
     // planPayload persisted to the DB (via completeGeneration) carries
     // EngageKeyword.id keys, not text.
     const persisted = repo.completeGeneration.mock.calls[0][1].planPayload;
-    expect(persisted.engagePolicies[0].keywordTargets).toEqual({ 'kw-1': 3, 'kw-2': 2 });
+    expect(persisted.engagePolicies[0].keywordTargets).toEqual({ 'kw-1': 3, 'kw-2': 1 });
   });
 
   it('persists a data goal from the LLM goal + source total_score (baseline rounded, targetScore clamped up to baseline)', async () => {
@@ -2513,7 +2776,7 @@ describe('OperationPlanService.create', () => {
         {
           platform: 'x',
           themeTitle: 'GEO answers',
-          targetRepliesPerDay: 5,
+          targetRepliesPerDay: 4,
           keywordTargets: [{ keyword: 'GEO', target: 3 }],
           enabled: true,
         },
@@ -2532,6 +2795,36 @@ describe('OperationPlanService.create', () => {
     // Preview must not create/resolve keyword rows; targets stay text-keyed.
     expect(engageRepository.resolveOrCreateKeywordIds).not.toHaveBeenCalled();
     expect(result.engagePolicies[0].keywordTargets).toEqual({ GEO: 3 });
+  });
+
+  // The preview is what a caller eyeballs before spending credits, so it has to
+  // show the plan that would actually run — the same reason the dry run mirrors
+  // linkedin personal/page resolution. Both paths share _generatePlanArtifacts;
+  // this pins that down so the clamp cannot be moved to the persist side only.
+  it('dryRun previews clamped reply targets, not the raw generated ones', async () => {
+    const { service } = createGenerationDependencies({
+      contentItems: [],
+      engagePolicies: [
+        {
+          platform: 'quora',
+          themeTitle: 'Quora answers',
+          targetRepliesPerDay: 7, // over quora's 2/day ceiling
+          dailyTargets: [],
+          keywordTargets: [],
+          enabled: true,
+        },
+      ],
+      warnings: [],
+    });
+
+    const result = await service.create('org-1', 'proj-1', {
+      taskId: 'task-1',
+      startAt: '2030-01-01T00:00:00.000Z',
+      endAt: '2030-01-02T00:00:00.000Z',
+      platforms: ['quora'],
+    }, { dryRun: true });
+
+    expect(result.engagePolicies[0].targetRepliesPerDay).toBe(2);
   });
 
   it('dryRun on an already-planned task returns the existing plan read-only (no generation/billing/materialization)', async () => {

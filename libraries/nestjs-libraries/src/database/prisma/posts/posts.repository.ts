@@ -967,13 +967,40 @@ export class PostsRepository {
     });
   }
 
-  updatePost(id: string, postId: string, releaseURL: string) {
+  /**
+   * Commit a successful send: PUBLISHED + the platform's permalink/id, and
+   * `publishDate` re-stamped to WHEN THE SEND ACTUALLY HAPPENED.
+   *
+   * Until the send, `publishDate` is an intention ("go out at 10:00"); once it
+   * lands it is the only column that answers "when did this go out", and every
+   * read path treats it as exactly that — the calendar, `/dashboard/*`, the
+   * engage replies-trend buckets and the metrics freshness window all slice on
+   * it. Leaving the scheduled value behind is what made a post the extension
+   * picked up an hour late (or a whole engage reply drafted this morning and
+   * posted this evening) report a send time that never happened.
+   *
+   * `publishedAt` lets one caller stamp a whole thread with a single instant —
+   * a chain is one send, and the segments must not fan out across the calendar
+   * (they share one `publishDate` at schedule time for the same reason). Left
+   * out, now() is correct: this write runs immediately after the platform call.
+   *
+   * Recurring cycle clones deliberately do NOT come through here — see
+   * {@link finalizeCycleClone}, whose `publishDate` is an identity, not a
+   * timestamp.
+   */
+  updatePost(
+    id: string,
+    postId: string,
+    releaseURL: string,
+    publishedAt?: Date
+  ) {
     return this._post.model.post.update({
       where: {
         id,
       },
       data: {
         state: 'PUBLISHED',
+        publishDate: publishedAt ?? new Date(),
         releaseURL,
         releaseId: postId,
         error: null,
@@ -1085,6 +1112,21 @@ export class PostsRepository {
 
   /**
    * Finalize a cycle clone after publish attempt.
+   *
+   * The ONE publish-success commit that does not re-stamp `publishDate` to the
+   * real send time the way {@link updatePost} does, and it must stay that way:
+   * for a cycle clone `publishDate` is not a timestamp but the clone's
+   * IDENTITY. `findOrCreateCycleClone` recognises an already-handled cycle by
+   * `(group, publishDate)`, so moving it here would hide the PUBLISHED clone
+   * from the next lookup for that same cycle — a retried or restarted workflow
+   * would then create a fresh QUEUE clone and post the content a second time.
+   * (`admin-diagnostics` hunts for exactly that shape: several PUBLISHED clones
+   * sharing one day.)
+   *
+   * The drift it leaves behind is a Temporal timer's worth of seconds, not the
+   * hours the extension path used to accumulate, so it buys nothing worth a
+   * duplicate post. A truthful send time for recurring cycles needs its own
+   * column, not this one.
    */
   async finalizeCycleClone(
     cloneId: string,
@@ -2681,8 +2723,15 @@ export class PostsRepository {
    */
   async publishExtensionChainNodes(
     organizationId: string,
-    nodes: Array<{ id: string; url?: string; releaseId?: string }>
+    nodes: Array<{ id: string; url?: string; releaseId?: string }>,
+    publishedAt?: Date
   ) {
+    // ONE instant for the whole chain, resolved before the loop: a thread is a
+    // single send, and segments stamped a few milliseconds apart would sort and
+    // bucket as separate events on every read path that slices publishDate. The
+    // caller normally passes the anchor's own instant so the chain lands
+    // together; the local default only covers a direct call.
+    const publishTime = publishedAt ?? new Date();
     let count = 0;
     for (const node of nodes) {
       const res = await this._post.model.post.updateMany({
@@ -2694,6 +2743,7 @@ export class PostsRepository {
         },
         data: {
           state: 'PUBLISHED',
+          publishDate: publishTime,
           error: null,
           // Only overwrite when the extension actually recovered one: a
           // confirmed-but-URL-less send must not blank an existing value.
@@ -2789,7 +2839,11 @@ export class PostsRepository {
    *
    * QUEUE-only guard keeps it idempotent: a repeated callback is a no-op.
    */
-  publishExtensionChainChildren(organizationId: string, group: string) {
+  publishExtensionChainChildren(
+    organizationId: string,
+    group: string,
+    publishedAt?: Date
+  ) {
     return this._post.model.post.updateMany({
       where: {
         organizationId,
@@ -2798,7 +2852,13 @@ export class PostsRepository {
         parentPostId: { not: null },
         state: State.QUEUE,
       },
-      data: { state: 'PUBLISHED', error: null },
+      // Same instant as the anchor (see publishExtensionChainNodes): whatever
+      // this sweep catches went out as part of that one thread.
+      data: {
+        state: 'PUBLISHED',
+        publishDate: publishedAt ?? new Date(),
+        error: null,
+      },
     });
   }
 
