@@ -30,16 +30,52 @@ import { ScanTaskPlatform } from '@gitroom/nestjs-libraries/engage/scan/scan-tas
  * responses deliberately omit rawData (see engage.repository's _merge), so
  * nothing stored here is returned to the frontend as-is.
  */
+/**
+ * How many archived media URLs one post's `rawData` keeps. A CLAMP applied by
+ * pickIngestRawData, deliberately NOT a validator that rejects.
+ *
+ * It was `@ArrayMaxSize(4)` on the field — X's platform limit ("at most 4
+ * photos or 1 video") — until the extension started archiving a Medium
+ * article's inline images, where a dozen is ordinary. Raising that number
+ * would have missed the actual defect: `posts` is validated with
+ * `@ValidateNested({ each: true })`, so ONE over-long list failed the whole
+ * `POST /engage/scan-tasks/ingest` body — up to 500 posts and their cursor —
+ * and made a manual import fail outright rather than import without its
+ * pictures. A bigger ceiling only moves that cliff; it does not remove it.
+ *
+ * mediaUrls is an OPTIONAL ARCHIVE. Nothing the ingest exists to do — score
+ * the post, persist it, advance the cursor — depends on it, so its length is
+ * not a reason to refuse any of that. Clamping keeps the column bounded, which
+ * is all the old validator actually bought, while an over-eager client loses
+ * at most its surplus URLs. Request SIZE stays bounded by the body limit in
+ * main.ts, which is the layer for that.
+ *
+ * The extension self-caps at the same number (MEDIUM_MAX_IMAGES in
+ * scan.medium.ts) to keep the payload small on the wire. Equal is safe
+ * precisely because this clamps: the two repos cannot share a constant, and
+ * with no cliff a client that drifts past it is no longer a broken batch.
+ */
+export const INGEST_MAX_MEDIA_URLS = 20;
+
 export class ScanIngestRawDataDto {
   /**
-   * X only: direct URLs of the photos/videos attached to the tweet. X's body
-   * carries only a t.co placeholder for those, which postContent strips —
+   * Direct URLs of the pictures a reader sees on the post, in the order they
+   * appear. Set on X and Medium — the two platforms whose postContent is text
+   * that cannot carry an image.
+   *
+   * X: the body carries only a t.co placeholder, which postContent strips —
    * x.com renders them as an attachment, not as text — so the real URLs would
    * otherwise be lost. A tweet carries at most 4 photos or 1 video.
+   *
+   * Medium: the article's inline images, so index 0 is the hero it opens with.
+   * The extension's body reader returns paragraph text only, which dropped
+   * them entirely (the URL is not even on the `<img>` — see
+   * readMediumImagesInPage).
    */
+  // No @ArrayMaxSize: see INGEST_MAX_MEDIA_URLS. An over-long list is clamped
+  // by pickIngestRawData, not turned into a 400 that takes the batch with it.
   @IsOptional()
   @IsArray()
-  @ArrayMaxSize(4)
   @IsString({ each: true })
   mediaUrls?: string[];
 
@@ -223,9 +259,12 @@ export class EngageScanSyncDto {
 function pickIngestRawData(
   raw?: ScanIngestRawDataDto
 ): Record<string, unknown> | undefined {
-  const mediaUrls = (raw?.mediaUrls ?? []).filter(
-    (u): u is string => typeof u === 'string' && !!u.trim()
-  );
+  const mediaUrls = (raw?.mediaUrls ?? [])
+    .filter((u): u is string => typeof u === 'string' && !!u.trim())
+    // The ONLY bound on this list, by design — see INGEST_MAX_MEDIA_URLS. This
+    // function is the layer that decides what the column receives, so the
+    // archive stays finite without a validator that would reject the request.
+    .slice(0, INGEST_MAX_MEDIA_URLS);
   const picked: Record<string, unknown> = {};
   if (mediaUrls.length) picked.mediaUrls = mediaUrls;
   if (raw?.postContentType === 'article') picked.postContentType = 'article';

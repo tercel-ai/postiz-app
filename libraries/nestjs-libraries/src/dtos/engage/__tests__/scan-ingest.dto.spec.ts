@@ -4,6 +4,7 @@ import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import {
   EngageScanIngestDto,
+  INGEST_MAX_MEDIA_URLS,
   ScanUnitSelectorDto,
   scanIngestPostToRawPost,
 } from '../scan-ingest.dto';
@@ -91,12 +92,69 @@ describe('EngageScanIngestDto', () => {
     });
   });
 
-  it('rejects more mediaUrls than a tweet can carry', async () => {
+  it("accepts a Medium article's worth of images, not just a tweet's 4", async () => {
+    // The ceiling was X's platform limit of 4 until the extension started
+    // archiving Medium article images, where a dozen is ordinary. Because
+    // `posts` is @ValidateNested({ each: true }), an over-long list does not
+    // merely lose the extra URLs — it fails the WHOLE ingest body.
+    const mediaUrls = Array.from(
+      { length: 12 },
+      (_, i) => `https://miro.medium.com/v2/resize:fit:1400/0*img${i}`
+    );
+    const post = { ...validPost, rawData: { mediaUrls } };
+
+    expect(await errorsFor({ taskId: 'c', posts: [post] })).toEqual([]);
+    expect(scanIngestPostToRawPost(post as any).rawData).toEqual({ mediaUrls });
+  });
+
+  it('CLAMPS a media list past the ceiling instead of rejecting it', async () => {
+    // The bound is a clamp, not a validator. mediaUrls is an optional archive:
+    // nothing the ingest exists to do depends on it, so its length must not be
+    // able to refuse the request.
+    const post = {
+      ...validPost,
+      rawData: {
+        mediaUrls: Array.from(
+          { length: INGEST_MAX_MEDIA_URLS + 10 },
+          (_, i) => `https://x/${i}.jpg`
+        ),
+      },
+    };
+
+    expect(await errorsFor({ taskId: 'c', posts: [post] })).toEqual([]);
+    expect(
+      (scanIngestPostToRawPost(post as any).rawData as any).mediaUrls
+    ).toHaveLength(INGEST_MAX_MEDIA_URLS);
+  });
+
+  it('never lets one post\'s media list fail the whole batch', async () => {
+    // The defect the clamp exists to prevent: `posts` is
+    // @ValidateNested({ each: true }), so a per-item rejection used to take
+    // every other post in the body — and the cursor — down with it.
     const errs = await errorsFor({
       taskId: 'c',
-      posts: [{ ...validPost, rawData: { mediaUrls: ['a', 'b', 'c', 'd', 'e'] } }],
+      posts: [
+        validPost,
+        {
+          ...validPost,
+          externalPostId: 'other',
+          rawData: {
+            mediaUrls: Array.from(
+              { length: INGEST_MAX_MEDIA_URLS * 50 },
+              (_, i) => `https://x/${i}.jpg`
+            ),
+          },
+        },
+      ],
     });
-    expect(errs).toContain('arrayMaxSize');
+    expect(errs).toEqual([]);
+  });
+
+  it('keeps the clamp at or above what the extension sends', () => {
+    // The extension self-caps at MEDIUM_MAX_IMAGES (20, scan.medium.ts). If
+    // this ever drops below that, Medium articles start losing images here
+    // silently — the failure a clamp trades for the batch-killing 400.
+    expect(INGEST_MAX_MEDIA_URLS).toBeGreaterThanOrEqual(20);
   });
 
   it('rejects non-string mediaUrls', async () => {
