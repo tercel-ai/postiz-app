@@ -355,17 +355,24 @@ export class AdminDiagnosticsController {
    * GET /admin/diagnostics/integrations
    *
    * Finds integrations with health issues:
-   * 1. refreshNeeded: token expired, needs reconnection via the 'api' send path.
-   *    Extension-routed posts don't go through this token at all — see
-   *    posts.repository's extensionRouteBranches(), which gates only on
-   *    `disabled`/`deletedAt` — so a refreshNeeded integration on the
-   *    'extension' path keeps publishing normally. Don't read this flag as
-   *    "can't publish" without checking the integration's actual send path.
-   * 2. inBetweenSteps: stuck in OAuth flow
-   * 3. disabled: manually disabled — blocks every send path
-   * Also counts QUEUE posts per unhealthy integration. For 'api'-routed
-   * integrations these are genuinely blocked; for 'extension'-routed ones
-   * flagged only by refreshNeeded, they are not.
+   * 1. refreshNeeded: token expired — blocks the 'api' send path ONLY.
+   * 2. inBetweenSteps: stuck in OAuth flow — same, 'api' only.
+   * 3. disabled: manually disabled — blocks EVERY send path.
+   *
+   * THE SEND PATH IS PART OF THE ANSWER, not a caveat a reader is expected to
+   * remember. Seven providers publish through the browser extension, which uses
+   * the user's own session and never touches the OAuth token — posts.repository's
+   * `extensionRouteBranches()` gates them on `disabled`/`deletedAt` alone. So an
+   * expired token on an extension-routed integration blocks NOTHING, and this
+   * endpoint used to report it beside a count of that integration's queued posts
+   * under a field named `blockedQueuePosts`: an operator saw "token expired, 12
+   * posts blocked" and went to reconnect an OAuth app that has nothing to do
+   * with how those posts go out. Every row therefore carries `sendPath` and
+   * `blocking`, and the counts below only ever describe what is genuinely stuck.
+   *
+   * The row is still RETURNED either way. An expired token on an extension
+   * platform is worth seeing (that integration cannot fall back to the API path,
+   * and its analytics reads still use the token); it just is not an outage.
    */
   @Get('/integrations')
   async checkIntegrations() {
@@ -378,9 +385,18 @@ export class AdminDiagnosticsController {
 
     const blockedMap = new Map(blockedPostCounts.map((r) => [r.integrationId, r._count]));
 
-    return {
-      checkedAt: new Date().toISOString(),
-      unhealthyIntegrations: unhealthy.map((i) => ({
+    const rows = unhealthy.map((i) => {
+      const sendPath = isExtensionPublishProvider(i.providerIdentifier)
+        ? ('extension' as const)
+        : ('api' as const);
+      // `disabled` stops every path. The two OAuth states stop only the path
+      // that uses the token, so on an extension-routed integration they are a
+      // warning about the API fallback, not a reason its posts are not going
+      // out.
+      const blocking =
+        i.disabled || (sendPath === 'api' && (i.refreshNeeded || i.inBetweenSteps));
+      const queuePosts = blockedMap.get(i.id) || 0;
+      return {
         id: i.id,
         name: i.name,
         provider: i.providerIdentifier,
@@ -388,14 +404,31 @@ export class AdminDiagnosticsController {
         refreshNeeded: i.refreshNeeded,
         inBetweenSteps: i.inBetweenSteps,
         disabled: i.disabled,
-        blockedQueuePosts: blockedMap.get(i.id) || 0,
-      })),
+        sendPath,
+        blocking,
+        /** Every QUEUE post on this integration, whether or not it is stuck. */
+        queuePosts,
+        /** Only the ones this integration's state actually holds up. */
+        blockedQueuePosts: blocking ? queuePosts : 0,
+      };
+    });
+
+    const blockingRows = rows.filter((r) => r.blocking);
+    return {
+      checkedAt: new Date().toISOString(),
+      unhealthyIntegrations: rows,
       summary: {
-        total: unhealthy.length,
-        refreshNeeded: unhealthy.filter((i) => i.refreshNeeded).length,
-        inBetweenSteps: unhealthy.filter((i) => i.inBetweenSteps).length,
-        disabled: unhealthy.filter((i) => i.disabled).length,
-        healthy: unhealthy.length === 0,
+        total: rows.length,
+        refreshNeeded: rows.filter((r) => r.refreshNeeded).length,
+        inBetweenSteps: rows.filter((r) => r.inBetweenSteps).length,
+        disabled: rows.filter((r) => r.disabled).length,
+        /** Rows whose state stops something from publishing. */
+        blocking: blockingRows.length,
+        blockedQueuePosts: blockingRows.reduce((sum, r) => sum + r.queuePosts, 0),
+        // Health is about what is BROKEN, not about what is untidy: a stale
+        // OAuth token on a platform that publishes through the browser turned
+        // the whole dashboard red while every post went out on time.
+        healthy: blockingRows.length === 0,
       },
     };
   }

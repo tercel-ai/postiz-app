@@ -197,7 +197,7 @@ Response:
   "healthy": false,
   "recurringPosts": { "recurringPostsCount": 5, "prematureCount": 1, "duplicateCount": 0, "missedCount": 0, "healthy": false },
   "stuckPosts": { "count": 0, "healthy": true },
-  "integrations": { "total": 1, "refreshNeeded": 1, "inBetweenSteps": 0, "disabled": 0, "healthy": false },
+  "integrations": { "total": 2, "refreshNeeded": 2, "inBetweenSteps": 0, "disabled": 0, "blocking": 1, "blockedQueuePosts": 7, "healthy": false },
   "errorPosts": { "count": 3, "healthy": false },
   "engageScans": { "stuckCursors": 1, "failedKeywordScans": 2, "stuckKeywordScans": 0, "healthy": false },
   "engageReplies": { "deadReplyAccounts": 1, "autoReplyAffected": 1, "replyErrors": 0, "healthy": false }
@@ -220,7 +220,35 @@ Finds non-recurring QUEUE posts whose `publishDate` passed more than 2 hours ago
 
 #### GET /admin/diagnostics/integrations
 
-Lists unhealthy integrations (`refreshNeeded`, `inBetweenSteps`, or `disabled`) and counts how many QUEUE posts are blocked by each.
+Lists unhealthy integrations (`refreshNeeded`, `inBetweenSteps`, or `disabled`) and counts how many QUEUE posts each one actually holds up.
+
+**The send path is part of the answer.** Seven providers (x, reddit, linkedin,
+hackernews, medium, quora, devto) publish through the browser extension, which
+uses the user's own session and never touches the OAuth token — `posts.repository`'s
+`extensionRouteBranches()` gates them on `disabled`/`deletedAt` alone. So an
+expired token on one of those blocks **nothing**:
+
+| Flag | `sendPath: "api"` | `sendPath: "extension"` |
+| --- | --- | --- |
+| `refreshNeeded` | blocks | does not block |
+| `inBetweenSteps` | blocks | does not block |
+| `disabled` | blocks | blocks |
+
+Each row therefore carries:
+
+| Field | Meaning |
+| --- | --- |
+| `sendPath` | `"extension"` or `"api"`, resolved by `isExtensionPublishProvider` — so it follows this deployment's `DEFAULT_PUBLISH_METHOD`, not a hardcoded list |
+| `blocking` | whether this row's state stops something publishing |
+| `queuePosts` | every QUEUE post on the integration, stuck or not |
+| `blockedQueuePosts` | only the ones genuinely held up (`0` when `blocking` is false) |
+
+`summary.healthy` is `blocking === 0`, **not** `total === 0`. A non-blocking row
+is still returned and still counted in `total`: an expired token on an extension
+platform means that integration has no API fallback left and its analytics reads
+will fail, which is worth seeing — it is just not an outage. Reporting it as one
+is what sent operators to reconnect an OAuth app that had no part in how those
+posts go out.
 
 #### GET /admin/diagnostics/error-posts
 
