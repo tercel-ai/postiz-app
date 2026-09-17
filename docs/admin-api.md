@@ -280,6 +280,14 @@ Each orphan carries a `reason`:
 | `platform-disabled` | the platform is not in the resolved scan allowlist (`ENGAGE_SUPPORTED_PLATFORMS` / the operation-plan allowlist), so the unit is never enumerated |
 | `unit-removed` | the keyword / channel / tracked account was deleted or disabled |
 
+Each orphan also carries `sweepable`, and `summary.sweepableCount` counts them.
+It is **not** the same as being orphaned: a `platform-disabled` row still has a
+live keyword behind it, so the sweep leaves it alone and re-enabling the platform
+brings the unit straight back. Those rows are dormant, not dead — reporting them
+as cleanup would promise a tidy-up that never arrives. The diagnostic and the
+sweep decide liveness with the SAME predicate (`isLiveScanUnit`), so one can
+never report a row as cleanable that the other refuses to delete.
+
 Orphans are swept automatically: the hourly engage housekeeping job
 (`engage-orphaned-scan-cursor-cleanup`) deletes cursors that are both older than
 `engage_scan_cursor_orphan_ttl_days` (default **30**) and

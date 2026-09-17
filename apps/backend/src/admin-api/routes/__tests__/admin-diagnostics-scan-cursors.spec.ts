@@ -190,6 +190,51 @@ describe('AdminDiagnosticsController.checkEngageScanCursors', () => {
     });
   });
 
+  // The diagnostic REPORTS a row as cleanable and the sweep DELETES it, so they
+  // must agree on which rows are dead. A `platform-disabled` row is the one case
+  // where they legitimately differ: the keyword behind it is still live, so the
+  // sweep leaves it alone and re-enabling the platform brings the unit back.
+  // Calling it cleanable would promise a tidy-up that never arrives.
+  it('marks a dormant platform row as NOT sweepable', async () => {
+    const { controller } = makeController(
+      [cursor({ platform: 'medium', scanKey: 'design community' })],
+      liveKeys({ keywords: new Set(['design community']) }),
+      ['x', 'reddit']
+    );
+
+    const res = await controller.checkEngageScanCursors();
+
+    expect(res.orphanedCursors[0]).toMatchObject({
+      reason: 'platform-disabled',
+      sweepable: false,
+    });
+    expect(res.summary.orphanedCount).toBe(1);
+    expect(res.summary.sweepableCount).toBe(0);
+  });
+
+  it('marks a genuinely dead row as sweepable', async () => {
+    const { controller } = makeController([cursor({ scanKey: 'deleted keyword' })]);
+
+    const res = await controller.checkEngageScanCursors();
+
+    expect(res.orphanedCursors[0].sweepable).toBe(true);
+    expect(res.summary.sweepableCount).toBe(1);
+  });
+
+  // Both ends normalize the platform the same way. Hand-rolling `.toLowerCase()`
+  // at one of them is how a live unit gets judged orphaned — and then deleted.
+  it('matches a padded or upper-cased platform the way the enumerator wrote it', async () => {
+    const { controller } = makeController(
+      [cursor({ platform: ' Reddit ', scanType: 'channel', scanKey: 'ui_design' })],
+      liveKeys({ targets: new Set(['reddit:ui_design']) })
+    );
+
+    const res = await controller.checkEngageScanCursors();
+
+    expect(res.stuckCursors).toHaveLength(1);
+    expect(res.orphanedCursors).toHaveLength(0);
+  });
+
   it('reports the lease it measured against, so the number is checkable', async () => {
     const { controller } = makeController([]);
 

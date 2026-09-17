@@ -408,6 +408,28 @@ function resolveReplyAuthor(
  */
 const DEFAULT_CLAIM_LEASE_MINUTES = 30;
 
+/**
+ * Whether a scan cursor still corresponds to a unit the enumerator produces.
+ *
+ * Shared by the stuck-cursor diagnostic and the orphan sweep so the two can
+ * never disagree about what "live" means: one of them REPORTS a row as
+ * cleanable and the other DELETES it, and a split definition would have them
+ * acting on different sets.
+ *
+ * Keys are compared through the same helper the enumerator writes them with
+ * (`normalizePlatform`). Hand-rolling `.toLowerCase()` here instead would be a
+ * second spelling of the rule, and the failure that produces is not a missed
+ * row — it is a LIVE unit judged orphaned and deleted.
+ */
+export function isLiveScanUnit(
+  cursor: { platform: string | null; scanType: string; scanKey: string },
+  live: { keywords: Set<string>; targets: Set<string> }
+): boolean {
+  return (cursor.scanType || '').toLowerCase() === 'keyword'
+    ? live.keywords.has(cursor.scanKey)
+    : live.targets.has(`${normalizePlatform(cursor.platform)}:${cursor.scanKey}`);
+}
+
 @Injectable()
 export class EngageRepository {
   private readonly _logger = new Logger(EngageRepository.name);
@@ -7528,15 +7550,16 @@ export class EngageRepository {
         ],
       },
       select: { id: true, platform: true, scanType: true, scanKey: true },
+      // Oldest first, and ordered at all: `take` without an order is an
+      // arbitrary page, so a run whose page happened to be mostly live units
+      // would delete little and could be handed the same rows again next hour.
+      // Ordering makes each run finish the oldest backlog first and guarantees
+      // progress across runs.
+      orderBy: { lastScanStartedAt: 'asc' },
       take: limit,
     });
 
-    const doomed = candidates.filter((c) => {
-      const platform = (c.platform || '').toLowerCase();
-      return c.scanType === 'keyword'
-        ? !live.keywords.has(c.scanKey)
-        : !live.targets.has(`${platform}:${c.scanKey}`);
-    });
+    const doomed = candidates.filter((c) => !isLiveScanUnit(c, live));
     if (!doomed.length) return { deleted: 0, examined: candidates.length };
 
     const { count } = await this._scanCursor.model.engageScanCursor.deleteMany({

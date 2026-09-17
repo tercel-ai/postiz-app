@@ -14,6 +14,8 @@ import {
   SCANNABLE_PLATFORMS,
 } from '@gitroom/nestjs-libraries/engage/engage-scan-config.service';
 import { SCAN_LEASE_TTL_MS } from '@gitroom/nestjs-libraries/engage/engage-scan-lease.service';
+import { isLiveScanUnit } from '@gitroom/nestjs-libraries/engage/engage.repository';
+import { normalizePlatform } from '@gitroom/nestjs-libraries/engage/engage-scan-target';
 import { PostPlanLimitsService } from '@gitroom/nestjs-libraries/database/prisma/posts/post-plan-limits.service';
 import { PrismaRepository } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
 import { isExtensionPublishProvider } from '@gitroom/nestjs-libraries/integrations/integration.manager';
@@ -513,12 +515,12 @@ export class AdminDiagnosticsController {
     const supported = new Set<string>(supportedPlatforms);
 
     const rows = cursors.map((c) => {
-      const platform = (c.platform || '').toLowerCase();
-      const isKeyword = c.scanType === 'keyword';
+      const platform = normalizePlatform(c.platform);
+      const isKeyword = (c.scanType || '').toLowerCase() === 'keyword';
       const targetKey = `${platform}:${c.scanKey}`;
-      const liveNow = isKeyword
-        ? live.keywords.has(c.scanKey)
-        : live.targets.has(targetKey);
+      // The SAME predicate the sweep deletes by, so the two can never disagree
+      // about which rows are dead.
+      const liveNow = isLiveScanUnit(c, live);
       const legacyOnly = isKeyword
         ? live.nullProjectKeywords.has(c.scanKey)
         : live.nullProjectTargets.has(targetKey);
@@ -545,6 +547,17 @@ export class AdminDiagnosticsController {
           : null,
         state: reason === null ? ('stale' as const) : ('orphaned' as const),
         reason,
+        /**
+         * Whether the housekeeping sweep will actually delete this row.
+         *
+         * NOT the same as `orphaned`, and the gap is deliberate: a
+         * `platform-disabled` row still has a live keyword behind it, so the
+         * sweep leaves it alone and re-enabling the platform brings the unit
+         * straight back. Reporting every orphan as cleanup would promise a
+         * tidy-up that never arrives for that bucket — those rows are dormant,
+         * not dead.
+         */
+        sweepable: !liveNow,
       };
     });
 
@@ -554,6 +567,9 @@ export class AdminDiagnosticsController {
       acc[r.reason!] = (acc[r.reason!] ?? 0) + 1;
       return acc;
     }, {});
+    // Counted separately from `orphanedCount` because the sweep leaves the
+    // dormant ones behind — see `sweepable` on the row.
+    const sweepableCount = orphaned.filter((r) => r.sweepable).length;
 
     return {
       checkedAt: new Date().toISOString(),
@@ -566,6 +582,8 @@ export class AdminDiagnosticsController {
       summary: {
         count: stale.length,
         orphanedCount: orphaned.length,
+        /** Of those, the ones the housekeeping sweep will actually delete. */
+        sweepableCount,
         orphanedByReason: byReason,
         healthy: stale.length === 0,
       },
