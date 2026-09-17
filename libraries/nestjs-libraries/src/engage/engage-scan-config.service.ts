@@ -50,6 +50,27 @@ export type SettingSource = 'db' | 'env' | 'default';
 // default. Seeded on first boot so the admin UI can edit it via
 // PUT /admin/settings/:key immediately.
 export const ENGAGE_OPPORTUNITY_TTL_DAYS_KEY = 'engage_opportunity_ttl_days';
+
+/**
+ * How long an EngageScanCursor may sit unclaimed before the housekeeping sweep
+ * deletes it — the cleanup for units the enumerator no longer produces.
+ *
+ * Nothing else ever deletes a cursor row, so every change to what gets
+ * enumerated leaves a layer behind: a keyword deleted, a platform dropped from
+ * the allowlist, the legacy null-project config excluded from scanning (which
+ * froze every one of its cursors on the day it shipped). They block nothing —
+ * the lease reclaims any of them on sight — but they accumulate, and they made
+ * the stuck-cursor diagnostic unreadable.
+ *
+ * 30 days, and generous on purpose: the sweep already refuses to touch a unit
+ * the enumerator still produces, so this window only decides how long a
+ * genuinely dead row lingers. Deleting one is close to free either way —
+ * `claim()` upserts the row back the moment anything asks for that unit again,
+ * losing only an incremental cursor position that a dead unit does not have.
+ */
+export const ENGAGE_SCAN_CURSOR_ORPHAN_TTL_DAYS_KEY =
+  'engage_scan_cursor_orphan_ttl_days';
+export const DEFAULT_SCAN_CURSOR_ORPHAN_TTL_DAYS = 30;
 export const DEFAULT_OPPORTUNITY_TTL_DAYS = 7;
 
 // Per-platform opportunity TTL (days). Supersedes the single-value key above,
@@ -645,6 +666,30 @@ export class EngageScanConfigService implements OnModuleInit {
         resolveOpportunityTtlFor(p, storedMap, legacy).value,
       ])
     ) as OpportunityTtlDays;
+  }
+
+  /**
+   * Days an unclaimed, un-enumerated scan cursor survives before the
+   * housekeeping sweep deletes it. A non-positive or unusable value disables
+   * the sweep rather than deleting everything — the safe reading of a
+   * misconfigured deletion window is "delete nothing".
+   */
+  async getScanCursorOrphanTtlDays(): Promise<number> {
+    try {
+      const raw = await this._settings.get(
+        ENGAGE_SCAN_CURSOR_ORPHAN_TTL_DAYS_KEY
+      );
+      const n = Number(raw);
+      if (!Number.isFinite(n)) return DEFAULT_SCAN_CURSOR_ORPHAN_TTL_DAYS;
+      return n > 0 ? Math.floor(n) : 0;
+    } catch (err) {
+      this.logger.warn(
+        `Failed to read ${ENGAGE_SCAN_CURSOR_ORPHAN_TTL_DAYS_KEY}; using the default: ${
+          (err as Error)?.message || err
+        }`
+      );
+      return DEFAULT_SCAN_CURSOR_ORPHAN_TTL_DAYS;
+    }
   }
 
   /** The two Settings keys the TTL chain can consult, read concurrently. */

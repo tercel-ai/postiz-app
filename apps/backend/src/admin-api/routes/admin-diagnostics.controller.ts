@@ -9,7 +9,11 @@ import {
   normalizeKeyword,
   normalizeUsername,
 } from '@gitroom/nestjs-libraries/engage/engage-scan-lease.service';
-import { SCANNABLE_PLATFORMS } from '@gitroom/nestjs-libraries/engage/engage-scan-config.service';
+import {
+  EngageScanConfigService,
+  SCANNABLE_PLATFORMS,
+} from '@gitroom/nestjs-libraries/engage/engage-scan-config.service';
+import { SCAN_LEASE_TTL_MS } from '@gitroom/nestjs-libraries/engage/engage-scan-lease.service';
 import { PostPlanLimitsService } from '@gitroom/nestjs-libraries/database/prisma/posts/post-plan-limits.service';
 import { PrismaRepository } from '@gitroom/nestjs-libraries/database/prisma/prisma.service';
 import { isExtensionPublishProvider } from '@gitroom/nestjs-libraries/integrations/integration.manager';
@@ -39,7 +43,11 @@ export class AdminDiagnosticsController {
     private _engageScanLeaseService: EngageScanLeaseService,
     private _postPlanLimits: PostPlanLimitsService,
     private _post: PrismaRepository<'post'>,
-    private _riskTicks: RiskControlTickService
+    private _riskTicks: RiskControlTickService,
+    // Resolves the platform allowlist the enumerator actually gates on, so a
+    // cursor for a switched-off platform is named as such instead of being
+    // reported as an outage nobody can fix.
+    private _engageScanConfig: EngageScanConfigService
   ) {}
 
   /**
@@ -464,31 +472,102 @@ export class AdminDiagnosticsController {
   /**
    * GET /admin/diagnostics/engage-scan-cursors
    *
-   * Finds EngageScanCursor rows stuck in SCANNING state for more than 2 hours.
-   * A stuck cursor means the Temporal workflow that owns the scan exited without
-   * resetting it, blocking all future scans for that platform/scanType/scanKey.
+   * EngageScanCursor rows sitting in SCANNING past their lease, split by whether
+   * anything is still going to pick them up.
+   *
+   * WHAT THIS USED TO SAY, AND WHY IT WAS WRONG. It reported every row in
+   * SCANNING for over 2 hours as stuck, on the premise that such a row "blocks
+   * all future scans for that platform/scanType/scanKey". That stopped being
+   * true when the lease landed: `EngageScanLeaseService.claim` reclaims a unit
+   * whose `lastScanStartedAt` is older than SCAN_LEASE_TTL_MS (5 minutes) in the
+   * same compare-and-swap it uses to claim an idle one. Nothing was blocked — a
+   * row could only sit there because NOBODY WAS ASKING for that unit.
+   *
+   * Which turned the list into a graveyard rather than an alarm: 53 rows, the
+   * oldest frozen 71 days, none of them an outage. They accumulate whenever the
+   * enumerator stops producing a unit — the keyword was deleted or disabled, its
+   * platform left `ENGAGE_SUPPORTED_PLATFORMS`, or (the big one) it belongs to
+   * the legacy null-project config that `253cce37` excluded from scanning, which
+   * froze every one of its cursors on the day it shipped. Nothing deletes a
+   * cursor row, so each such change silently leaves another layer behind.
+   *
+   * So the question this answers is no longer "is it old" but "is it LIVE":
+   *
+   *   leased    within the lease — someone is scanning it right now. Not listed.
+   *   stale     past the lease AND the enumerator still produces this unit.
+   *             Something that should be scanning is not. THE ONLY ALARM.
+   *   orphaned  past the lease and nothing will ever claim it again, with the
+   *             reason attached so it can be cleaned up rather than re-read
+   *             every week.
    */
   @Get('/engage-scan-cursors')
   async checkEngageScanCursors() {
-    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
-    const stuckCursors = await this._engageRepository.findStuckScanCursors(twoHoursAgo);
+    // Tied to the lease, not to a magic number: raise SCAN_LEASE_TTL_MS and this
+    // follows, instead of quietly reporting rows the claim path would take.
+    const staleCutoff = new Date(Date.now() - SCAN_LEASE_TTL_MS);
+    const [cursors, live, supportedPlatforms] = await Promise.all([
+      this._engageRepository.findStuckScanCursors(staleCutoff),
+      this._engageRepository.getLiveScanUnitKeys(),
+      this._engageScanConfig.getSupportedScanPlatforms(),
+    ]);
+    const supported = new Set<string>(supportedPlatforms);
 
-    return {
-      checkedAt: new Date().toISOString(),
-      stuckCursors: stuckCursors.map((c) => ({
+    const rows = cursors.map((c) => {
+      const platform = (c.platform || '').toLowerCase();
+      const isKeyword = c.scanType === 'keyword';
+      const targetKey = `${platform}:${c.scanKey}`;
+      const liveNow = isKeyword
+        ? live.keywords.has(c.scanKey)
+        : live.targets.has(targetKey);
+      const legacyOnly = isKeyword
+        ? live.nullProjectKeywords.has(c.scanKey)
+        : live.nullProjectTargets.has(targetKey);
+
+      // Order matters: a unit can be off for several reasons at once, and the
+      // one worth showing is the one an operator would act on first. A platform
+      // the operator turned off explains everything below it.
+      let reason: string | null = null;
+      if (!supported.has(platform)) reason = 'platform-disabled';
+      else if (liveNow) reason = null;
+      else if (legacyOnly) reason = 'null-project';
+      else reason = 'unit-removed';
+
+      return {
         id: c.id,
         platform: c.platform,
         scanType: c.scanType,
         scanKey: c.scanKey,
         lastScanStartedAt: c.lastScanStartedAt,
         lastScannedAt: c.lastScannedAt,
-        stuckHours: c.lastScanStartedAt
+        /** Hours since the claim. Named for what it measures, not for a verdict. */
+        sinceClaimHours: c.lastScanStartedAt
           ? +((Date.now() - new Date(c.lastScanStartedAt).getTime()) / (60 * 60 * 1000)).toFixed(1)
           : null,
-      })),
+        state: reason === null ? ('stale' as const) : ('orphaned' as const),
+        reason,
+      };
+    });
+
+    const stale = rows.filter((r) => r.state === 'stale');
+    const orphaned = rows.filter((r) => r.state === 'orphaned');
+    const byReason = orphaned.reduce<Record<string, number>>((acc, r) => {
+      acc[r.reason!] = (acc[r.reason!] ?? 0) + 1;
+      return acc;
+    }, {});
+
+    return {
+      checkedAt: new Date().toISOString(),
+      leaseTtlMinutes: SCAN_LEASE_TTL_MS / 60_000,
+      // Unchanged field name, now carrying only what the name claims. The
+      // orphans are beside it rather than inside it — they are a cleanup job,
+      // not an incident, and mixing them is what made this endpoint unreadable.
+      stuckCursors: stale,
+      orphanedCursors: orphaned,
       summary: {
-        count: stuckCursors.length,
-        healthy: stuckCursors.length === 0,
+        count: stale.length,
+        orphanedCount: orphaned.length,
+        orphanedByReason: byReason,
+        healthy: stale.length === 0,
       },
     };
   }
@@ -702,7 +781,11 @@ export class AdminDiagnosticsController {
       integrations: integrations.summary,
       errorPosts: errors.summary,
       engageScans: {
+        // Only the units that should be scanning and are not. The orphans ride
+        // beside it rather than inside: they are a cleanup backlog, and folding
+        // them in is what made this number read as 53 outages.
         stuckCursors: scanCursors.summary.count,
+        orphanedCursors: scanCursors.summary.orphanedCount,
         failedKeywordScans: failedScans.summary.total,
         stuckKeywordScans: failedScans.summary.stuckCount,
         healthy: scanCursors.summary.healthy && failedScans.summary.healthy,

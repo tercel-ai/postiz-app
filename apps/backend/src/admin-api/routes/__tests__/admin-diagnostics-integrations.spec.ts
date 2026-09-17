@@ -38,6 +38,7 @@ function makeController(
     {} as any,
     {} as any,
     {} as any,
+    {} as any,
     {} as any
   );
 }
@@ -188,6 +189,7 @@ describe('AdminDiagnosticsController.checkIntegrations — send path', () => {
           .fn()
           .mockResolvedValue([integration({ providerIdentifier: 'reddit', refreshNeeded: true })]),
       } as any,
+      {} as any,
       {} as any,
       {} as any,
       {} as any,

@@ -256,7 +256,40 @@ Lists posts with ERROR state from the last 7 days, including error details. Cove
 
 #### GET /admin/diagnostics/engage-scan-cursors
 
-Finds `EngageScanCursor` rows stuck in `SCANNING` status for more than 2 hours. A stuck cursor blocks all future scans for that `platform`/`scanType`/`scanKey` combination — the Temporal workflow that owns the scan exited without resetting it.
+`EngageScanCursor` rows sitting in `SCANNING` past their lease, split by whether
+anything will claim them again.
+
+> **A row here does not block anything.** `EngageScanLeaseService.claim()`
+> reclaims a cursor whose `lastScanStartedAt` is older than `SCAN_LEASE_TTL_MS`
+> (5 minutes) in the same compare-and-swap it uses to claim an idle one. The
+> old text — "a stuck cursor blocks all future scans for that unit" — described
+> the pre-lease, Temporal-only world. A row can now only sit here because
+> **nobody is asking for that unit**.
+
+| Bucket | Meaning | Alarm |
+| --- | --- | --- |
+| *(not listed)* | within the lease — someone is scanning it right now | — |
+| `stuckCursors` | past the lease **and** the enumerator still produces this unit: something that should be scanning is not | **yes** — `summary.healthy` is false |
+| `orphanedCursors` | past the lease and nothing will ever claim it again | no — cleanup |
+
+Each orphan carries a `reason`:
+
+| `reason` | Cause |
+| --- | --- |
+| `null-project` | the unit belongs to the legacy null-project config that `253cce37` excluded from all scan operations; every one of those cursors froze on the day it shipped |
+| `platform-disabled` | the platform is not in the resolved scan allowlist (`ENGAGE_SUPPORTED_PLATFORMS` / the operation-plan allowlist), so the unit is never enumerated |
+| `unit-removed` | the keyword / channel / tracked account was deleted or disabled |
+
+Orphans are swept automatically: the hourly engage housekeeping job
+(`engage-orphaned-scan-cursor-cleanup`) deletes cursors that are both older than
+`engage_scan_cursor_orphan_ttl_days` (default **30**) and
+absent from the live enumeration set. A unit the enumerator still produces keeps
+its cursor however old the row looks, and setting the window to `0` disables the
+sweep entirely — the safe reading of a misconfigured deletion window is "delete
+nothing". Deleting is close to free: `claim()` upserts the row back the moment
+anything asks for that unit again.
+`sinceClaimHours` replaces `stuckHours`: it measures how long since the unit was
+last claimed, which is what the number always was.
 
 Response includes `stuckCursors[]` with `platform`, `scanType`, `scanKey`, `lastScanStartedAt`, `lastScannedAt`, and `stuckHours`.
 

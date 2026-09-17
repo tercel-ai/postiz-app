@@ -14,15 +14,45 @@ import { EngageHousekeepingActivity } from '../engage-housekeeping.activity';
 
 const DAY = 86_400_000;
 
-function build(ttl: Record<string, number>) {
+function build(
+  ttl: Record<string, number>,
+  cursors: {
+    orphanTtlDays?: number;
+    live?: { keywords: Set<string>; targets: Set<string> };
+    deleted?: { deleted: number; examined: number };
+  } = {}
+) {
   const updateMany = vi.fn(async () => ({ count: 0 }));
   const postUpdateMany = vi.fn(async () => ({ count: 0 }));
+  const getLiveScanUnitKeys = vi.fn(async () => ({
+    keywords: new Set<string>(),
+    targets: new Set<string>(),
+    nullProjectKeywords: new Set<string>(),
+    nullProjectTargets: new Set<string>(),
+    ...(cursors.live ?? {}),
+  }));
+  const deleteOrphanedScanCursors = vi.fn(
+    async (
+      _cutoff: Date,
+      _live: { keywords: Set<string>; targets: Set<string> }
+    ) => cursors.deleted ?? { deleted: 0, examined: 0 }
+  );
   const activity = new EngageHousekeepingActivity(
     { model: { engageOpportunityState: { updateMany } } } as any,
     { model: { post: { updateMany: postUpdateMany } } } as any,
-    { getOpportunityTtlDaysMap: vi.fn(async () => ttl) } as any
+    {
+      getOpportunityTtlDaysMap: vi.fn(async () => ttl),
+      getScanCursorOrphanTtlDays: vi.fn(async () => cursors.orphanTtlDays ?? 30),
+    } as any,
+    { getLiveScanUnitKeys, deleteOrphanedScanCursors } as any
   );
-  return { activity, updateMany, postUpdateMany };
+  return {
+    activity,
+    updateMany,
+    postUpdateMany,
+    getLiveScanUnitKeys,
+    deleteOrphanedScanCursors,
+  };
 }
 
 /** The stale-queued-reply sweep's call for one platform. */
@@ -223,5 +253,68 @@ describe('EngageHousekeepingActivity — stale queued replies', () => {
     await activity.runDueMaintenanceJobs();
 
     expect(replyCallFor(postUpdateMany, 'x')).toBeDefined();
+  });
+});
+
+// The orphan sweep. Nothing else deletes an EngageScanCursor row, so every
+// change to WHAT GETS ENUMERATED leaves a layer behind — a keyword deleted, a
+// platform dropped from the allowlist, the legacy null-project config excluded
+// from scanning (which froze every one of its cursors on the day it shipped).
+describe('EngageHousekeepingActivity — orphaned scan cursors', () => {
+  it('deletes rows older than the configured window', async () => {
+    const { activity, deleteOrphanedScanCursors } = build(
+      {},
+      { orphanTtlDays: 30, deleted: { deleted: 12, examined: 40 } }
+    );
+
+    await activity.runDueMaintenanceJobs();
+
+    const [cutoff] = deleteOrphanedScanCursors.mock.calls[0];
+    const days = (Date.now() - cutoff.getTime()) / DAY;
+    expect(days).toBeGreaterThan(29.9);
+    expect(days).toBeLessThan(30.1);
+  });
+
+  // The safety half: the cutoff alone would delete a unit that is simply
+  // between scans. The live set is what keeps a still-enumerated unit's cursor
+  // however old the row looks.
+  it('hands the live enumeration set to the delete', async () => {
+    const live = {
+      keywords: new Set(['ai visibility']),
+      targets: new Set(['reddit:ui_design']),
+    };
+    const { activity, deleteOrphanedScanCursors } = build({}, { live });
+
+    await activity.runDueMaintenanceJobs();
+
+    const [, passed] = deleteOrphanedScanCursors.mock.calls[0];
+    expect(passed.keywords.has('ai visibility')).toBe(true);
+    expect(passed.targets.has('reddit:ui_design')).toBe(true);
+  });
+
+  // A misconfigured deletion window must delete NOTHING, not everything.
+  it('does not delete anything when the window is zero or negative', async () => {
+    const { activity, deleteOrphanedScanCursors, getLiveScanUnitKeys } = build(
+      {},
+      { orphanTtlDays: 0 }
+    );
+
+    await activity.runDueMaintenanceJobs();
+
+    expect(deleteOrphanedScanCursors).not.toHaveBeenCalled();
+    // Not even read: the sweep exits before paying for the query.
+    expect(getLiveScanUnitKeys).not.toHaveBeenCalled();
+  });
+
+  // Every job runs under Promise.allSettled, so one failing sweep must not stop
+  // the others — this one is new and performs a DELETE, which makes it the most
+  // likely to throw.
+  it('does not stop the other sweeps when it fails', async () => {
+    const { activity, deleteOrphanedScanCursors, updateMany } = build({ x: 7 });
+    deleteOrphanedScanCursors.mockRejectedValue(new Error('db down'));
+
+    await expect(activity.runDueMaintenanceJobs()).resolves.toBeUndefined();
+
+    expect(updateMany).toHaveBeenCalled();
   });
 });

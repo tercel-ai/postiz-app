@@ -7,6 +7,7 @@ import {
   SCANNABLE_PLATFORMS,
   opportunityExpiryCutoff,
 } from '@gitroom/nestjs-libraries/engage/engage-scan-config.service';
+import { EngageRepository } from '@gitroom/nestjs-libraries/engage/engage.repository';
 import dayjs from 'dayjs';
 import utc from 'dayjs/plugin/utc';
 
@@ -37,7 +38,8 @@ export class EngageHousekeepingActivity {
   constructor(
     private _oppState: PrismaRepository<'engageOpportunityState'>,
     private _post: PrismaRepository<'post'>,
-    private _scanConfig: EngageScanConfigService
+    private _scanConfig: EngageScanConfigService,
+    private _engageRepository: EngageRepository
   ) {}
 
   private get _jobs(): MaintenanceJob[] {
@@ -49,6 +51,10 @@ export class EngageHousekeepingActivity {
       {
         key: 'engage-stale-queued-reply-expiry',
         run: () => this._closeStaleQueuedReplies(),
+      },
+      {
+        key: 'engage-orphaned-scan-cursor-cleanup',
+        run: () => this._deleteOrphanedScanCursors(),
       },
     ];
   }
@@ -170,6 +176,42 @@ export class EngageHousekeepingActivity {
     return `closed ${total} stale queued engage replies${
       parts.length ? ` (${parts.join(', ')})` : ''
     }`;
+  }
+
+  /**
+   * Delete scan cursors for units the enumerator no longer produces.
+   *
+   * Nothing else ever deletes an EngageScanCursor row, so every change to WHAT
+   * GETS ENUMERATED leaves a layer behind: a keyword deleted or disabled, a
+   * platform dropped from the scan allowlist, and above all the legacy
+   * null-project config that `253cce37` excluded from scanning — every one of
+   * its cursors froze mid-SCANNING on the day it shipped, with nothing left to
+   * claim them. None of it blocks anything (the lease reclaims an expired row on
+   * sight), but it accumulates: 53 rows, the oldest 71 days old, drowning the
+   * stuck-cursor diagnostic in rows nobody could act on.
+   *
+   * A SWEEP rather than a hook on each delete path, deliberately. The dominant
+   * cause here is not a user deleting a keyword — it is the enumeration rule
+   * itself changing, which no delete hook can observe. A sweep keyed on "is this
+   * unit still produced" catches every cause, including the ones nobody has
+   * thought of yet.
+   *
+   * The live set is what makes it safe: a unit still being enumerated keeps its
+   * cursor however old the row looks, so the TTL only decides how long a
+   * genuinely dead row lingers.
+   */
+  private async _deleteOrphanedScanCursors(): Promise<string> {
+    const ttlDays = await this._scanConfig.getScanCursorOrphanTtlDays();
+    // 0 disables the sweep — the safe reading of a misconfigured deletion
+    // window is "delete nothing".
+    if (ttlDays <= 0) return 'skipped (orphan TTL disabled)';
+
+    const cutoff = dayjs.utc().subtract(ttlDays, 'day').toDate();
+    const live = await this._engageRepository.getLiveScanUnitKeys();
+    const { deleted, examined } =
+      await this._engageRepository.deleteOrphanedScanCursors(cutoff, live);
+
+    return `deleted ${deleted} orphaned scan cursors (examined ${examined} older than ${ttlDays}d)`;
   }
 
   // Opportunity TTL is system-wide (not per-org) but per-PLATFORM, so this is

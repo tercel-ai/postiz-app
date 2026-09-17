@@ -7426,6 +7426,125 @@ export class EngageRepository {
 
   // ─── Admin diagnostics ───────────────────────────────────────────────────
 
+  /**
+   * Every scan unit the enumerator would produce right now, GLOBALLY — the set a
+   * cursor row has to be in to still mean anything.
+   *
+   * A cursor is keyed by (platform, scanType, scanKey) and org-independent, so
+   * "is this unit live" is a question about the whole install, not one org. The
+   * filters mirror `getEnabledConfigsForOrg` exactly — `enabled: true` AND a
+   * NON-NULL projectId — because that is what decides whether anything will ever
+   * claim the cursor again. The legacy null-project config is the reason this
+   * exists: excluding it from scanning left its cursors frozen mid-SCANNING with
+   * nothing to pick them up, and the stuck-cursor diagnostic then reported them
+   * as outages for months.
+   *
+   * Returned as SETS of scanKey, keyed the same way the enumerator keys them
+   * (`normalizeKeyword` / `scanKeyFor`), so the caller compares like with like.
+   */
+  async getLiveScanUnitKeys(): Promise<{
+    keywords: Set<string>;
+    targets: Set<string>;
+    /** Keys that exist ONLY under a null-project config — the legacy population. */
+    nullProjectKeywords: Set<string>;
+    nullProjectTargets: Set<string>;
+  }> {
+
+    const [live, legacy, liveTargets, legacyTargets] = await Promise.all([
+      this._keyword.model.engageKeyword.findMany({
+        where: { enabled: true, config: { enabled: true, projectId: { not: null } } },
+        select: { keyword: true },
+      }),
+      this._keyword.model.engageKeyword.findMany({
+        where: { enabled: true, config: { enabled: true, projectId: null } },
+        select: { keyword: true },
+      }),
+      this._trackedAccount.model.engageTrackedAccount.findMany({
+        where: { enabled: true, config: { enabled: true, projectId: { not: null } } },
+        select: { platform: true, username: true },
+      }),
+      this._trackedAccount.model.engageTrackedAccount.findMany({
+        where: { enabled: true, config: { enabled: true, projectId: null } },
+        select: { platform: true, username: true },
+      }),
+    ]);
+
+    const keywords = new Set(
+      live.map((k) => normalizeKeyword(k.keyword)).filter(Boolean)
+    );
+    const targets = new Set(
+      liveTargets.map((t) => `${normalizePlatform(t.platform)}:${scanKeyFor(t)}`)
+    );
+    return {
+      keywords,
+      targets,
+      // "Only under a legacy config" — a keyword that ALSO lives under a real
+      // project is live, and saying otherwise would blame the wrong thing.
+      nullProjectKeywords: new Set(
+        legacy
+          .map((k) => normalizeKeyword(k.keyword))
+          .filter((k) => k && !keywords.has(k))
+      ),
+      nullProjectTargets: new Set(
+        legacyTargets
+          .map((t) => `${normalizePlatform(t.platform)}:${scanKeyFor(t)}`)
+          .filter((k) => !targets.has(k))
+      ),
+    };
+  }
+
+  /**
+   * Delete scan cursors nothing will ever claim again.
+   *
+   * Two conditions, both required. The row must be older than `cutoff` — so a
+   * unit merely between scans is never touched — AND absent from the live
+   * enumeration set, which is the part that makes this safe: a keyword still
+   * being scanned keeps its cursor however old the row looks.
+   *
+   * Deleting is close to free even when wrong: `EngageScanLeaseService.claim`
+   * upserts the row back the moment anything asks for that unit, losing only an
+   * incremental cursor position — which for a unit nobody enumerates does not
+   * exist. That is why this deletes rather than marking: a tombstone column
+   * would need its own sweep, and the row carries nothing worth keeping.
+   *
+   * Candidates are read before deleting (rather than one `deleteMany` with a
+   * NOT-IN) because the live set is a composite of keyword text and
+   * platform:key pairs that no single Prisma filter expresses — and because the
+   * caller logs which units went, which a blind count cannot say.
+   */
+  async deleteOrphanedScanCursors(
+    cutoff: Date,
+    live: { keywords: Set<string>; targets: Set<string> },
+    limit = 500
+  ): Promise<{ deleted: number; examined: number }> {
+    const candidates = await this._scanCursor.model.engageScanCursor.findMany({
+      where: {
+        OR: [
+          { lastScanStartedAt: { lt: cutoff } },
+          // Never claimed and never completed: a row created by an upsert whose
+          // claim then lost the CAS. Bounded by createdAt so a row from the last
+          // few minutes is not swept mid-race.
+          { lastScanStartedAt: null, createdAt: { lt: cutoff } },
+        ],
+      },
+      select: { id: true, platform: true, scanType: true, scanKey: true },
+      take: limit,
+    });
+
+    const doomed = candidates.filter((c) => {
+      const platform = (c.platform || '').toLowerCase();
+      return c.scanType === 'keyword'
+        ? !live.keywords.has(c.scanKey)
+        : !live.targets.has(`${platform}:${c.scanKey}`);
+    });
+    if (!doomed.length) return { deleted: 0, examined: candidates.length };
+
+    const { count } = await this._scanCursor.model.engageScanCursor.deleteMany({
+      where: { id: { in: doomed.map((d) => d.id) } },
+    });
+    return { deleted: count, examined: candidates.length };
+  }
+
   async findStuckScanCursors(before: Date) {
     return this._scanCursor.model.engageScanCursor.findMany({
       where: {
