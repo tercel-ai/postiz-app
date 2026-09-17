@@ -162,13 +162,69 @@ describe('EngageReferencePostService', () => {
       targetPlatform: 'medium',
     });
 
-    expect(anthropicCreate.mock.calls[0][0].max_tokens).toBe(3750);
+    // 6000-character generation ceiling x 2 tokens/char + the reasoning
+    // reserve. Sized off the CEILING the prompt states, never off the
+    // advisory target: budgeting for the target alone is what cut long
+    // articles off mid-sentence.
+    expect(anthropicCreate.mock.calls[0][0].max_tokens).toBe(16000);
+  });
+
+  it('states a generation ceiling it can actually afford, not the platform publish ceiling', async () => {
+    anthropicCreate.mockResolvedValueOnce(anthropicResponse('A complete Medium article.'));
+
+    await service.generate(REFERENCE, {
+      strategy: 'EXPERT_ANSWER',
+      brandStrength: 1,
+      targetPlatform: 'medium',
+    });
+
+    const prompt = anthropicCreate.mock.calls[0][0].system as string;
+    // Medium's provider maxLength is 100000. Handing the model that number
+    // while budgeting max_tokens for a 3000-character target is what produced
+    // "reached its token limit before completion" on a perfectly legal post.
+    expect(prompt).not.toContain('100000');
+    expect(prompt).toContain('under 6000 characters');
+  });
+
+  it('keeps stating the real platform ceiling where the budget can afford it', async () => {
+    anthropicCreate.mockResolvedValueOnce(anthropicResponse('An original take.'));
+
+    await service.generate({ ...REFERENCE, platform: 'reddit' }, {
+      strategy: 'EXPERT_ANSWER',
+      brandStrength: 1,
+    });
+
+    // Unchanged from before the budget rework: reddit's engage ceiling (2000)
+    // is already within reach, so only the platforms whose publish ceiling is
+    // far above any sane post hear a different number.
+    expect(anthropicCreate.mock.calls[0][0].system).toContain('under 2000 characters');
+  });
+
+  it('retries once with a shortening corrective when the model runs out of output budget', async () => {
+    anthropicCreate
+      .mockResolvedValueOnce(
+        anthropicResponse('This sentence ends unexpectedly', { input_tokens: 100, output_tokens: 500 }, 'max_tokens')
+      )
+      .mockResolvedValueOnce(anthropicResponse('A complete, shorter post.'));
+
+    const result = await service.generate(REFERENCE, {
+      strategy: 'EXPERT_ANSWER',
+      brandStrength: 1,
+    });
+
+    expect(result.text).toBe('A complete, shorter post.');
+    expect(anthropicCreate).toHaveBeenCalledTimes(2);
+    expect(anthropicCreate.mock.calls[1][0].system).toContain('cut off before it finished');
   });
 
   it('does not return a partial post when the model reaches its output-token limit', async () => {
-    anthropicCreate.mockResolvedValueOnce(
-      anthropicResponse('This sentence ends unexpectedly', { input_tokens: 100, output_tokens: 500 }, 'max_tokens')
-    );
+    anthropicCreate
+      .mockResolvedValueOnce(
+        anthropicResponse('This sentence ends unexpectedly', { input_tokens: 100, output_tokens: 500 }, 'max_tokens')
+      )
+      .mockResolvedValueOnce(
+        anthropicResponse('So does this one', { input_tokens: 100, output_tokens: 500 }, 'max_tokens')
+      );
 
     await expect(
       service.generate(REFERENCE, { strategy: 'EXPERT_ANSWER', brandStrength: 1 })
@@ -618,9 +674,10 @@ describe('EngageReferencePostService', () => {
         maxThreadParts: 3,
       });
 
-      // maxThreadParts counts the anchor, so 3 posts × the per-post budget — a
-      // single-post request asks for exactly one post's worth.
-      expect(anthropicCreate.mock.calls[0][0].max_tokens).toBe(1500);
+      // maxThreadParts counts the anchor, so 3 posts × the per-post budget,
+      // plus the one-per-REQUEST reasoning reserve (a model thinks once about
+      // the whole chain, not once per post): 3 × 560 + 4000.
+      expect(anthropicCreate.mock.calls[0][0].max_tokens).toBe(5680);
     });
 
     it('truncates a chain that came back longer than the requested count', async () => {

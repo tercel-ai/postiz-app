@@ -10,20 +10,19 @@ import { checkReferenceSimilarity } from '@gitroom/nestjs-libraries/engage/refer
 import {
   X_WEIGHTED_CHAR_LIMIT,
   REDDIT_TARGET_CHAR_LIMIT,
-  REDDIT_HARD_CHAR_LIMIT,
-  X_HARD_CHAR_LIMIT,
   normalizeEngagePlatform,
   assertDraftWithinPlatformLimit,
+  platformHardCeilingFor,
 } from '@gitroom/nestjs-libraries/engage/engage-draft-length';
 import {
   buildMarkupRule,
   buildPlatformStyleGuidance,
   isTitleSeparatedPlatform,
-  hardLimitFor,
   minTargetFor,
   targetFor,
   titleLengthTargetFor,
   CROSS_PLATFORM_ADAPT_INSTRUCTION,
+  DEFAULT_CONTENT_LIMIT,
 } from '@gitroom/nestjs-libraries/integrations/platform-content-profile';
 import {
   parseTitledOutput,
@@ -244,6 +243,19 @@ const CONSEQUENTIAL_CLAIM_BLOCK = `If the reference makes a claim about health, 
 // is all any caller is guaranteed to supply.
 const THIN_REFERENCE_WEIGHTED_CHARS = 30;
 
+/**
+ * One model round-trip's result. `reasoningTokens` is diagnostics only — it is
+ * what tells a truncated response apart as "the post ran long" from "a
+ * reasoning model spent the entire budget thinking and emitted nothing", which
+ * are the same `finish_reason: "length"` on the wire and need opposite fixes.
+ */
+interface ModelCallResult {
+  text: string;
+  usage: ReferencePostUsage | null;
+  outputTruncated: boolean;
+  reasoningTokens: number;
+}
+
 export interface ReferencePostUsage {
   promptTokens: number;
   completionTokens: number;
@@ -399,21 +411,111 @@ const MAX_ATTEMPTS = 2;
 // cannot, so splitting on it can never cut a post in half.
 const THREAD_PART_SEPARATOR = '[[PART]]';
 
-// A target is expressed in characters, while CJK can take roughly one token
-// per character. Reserve enough output for a completed response even when the
-// model modestly exceeds its advisory target. The cap keeps a malformed or
-// intentionally huge outputLength from turning one request into an unbounded
-// model call; a provider length-stop is detected below and is never persisted.
-const MIN_TOKENS_PER_POST = 500;
-const MAX_TOKENS_PER_POST = 8192;
-const TOKENS_PER_TARGET_CHARACTER = 1.25;
+// How far past its advisory target a generation may run before the prompt
+// calls it over the line. The target is deliberately soft — a coherent post
+// slightly over it is worth more than a rejected generation — so the model IS
+// told it may exceed it, and this is how much "may exceed" is worth.
+const GENERATION_CEILING_TARGET_MULTIPLE = 2;
 
-function outputTokensForTarget(targetCharacters: number, threadPosts: number): number {
+// Characters are converted to an output-token budget at this rate. Sized for
+// CJK, where a character can cost MORE than one token, not for English (~0.25)
+// — the prompt tells the model to answer in the reference's own language, so a
+// budget tuned to English is a budget that truncates every Chinese post. The
+// slack over 1.0 also covers a markdown body's headings and fences.
+const TOKENS_PER_CEILING_CHARACTER = 2;
+
+// Floor: below this even a one-line X post has no room to finish a sentence.
+const MIN_TOKENS_PER_POST = 500;
+// Per-post cap: keeps a malformed or intentionally huge `outputLength` from
+// turning one request into an unbounded model call.
+const MAX_TOKENS_PER_POST = 16384;
+// Whole-request cap, threads included. Every model this service can reach
+// accepts at least this many output tokens (the tightest is gpt-4.1's 32768),
+// so a 5-post chain can never be rejected outright for asking too much.
+const MAX_TOKENS_PER_REQUEST = 32000;
+
+// Headroom for a REASONING model's hidden thinking, which both OpenRouter and
+// the Anthropic SDK charge against `max_tokens` alongside the answer itself.
+// This is not a nicety: with `OPENROUTER_TEXT_MODEL` pointed at a reasoning
+// model (openai/gpt-5.1, o-series, deepseek-r1, …) a 500-token X budget is
+// spent entirely on thinking, and the request comes back `finish_reason:
+// "length"` having emitted NO post at all — the same "reached its token limit"
+// failure the character maths above fixes, but hitting every platform rather
+// than the long-form ones.
+//
+// Added unconditionally rather than sniffed from the model name: the id is an
+// env var that can be repointed at any moment, a substring match on it would
+// be wrong the week a new family ships, and `max_tokens` is a CEILING —
+// unused headroom is never billed, so over-reserving costs nothing while
+// under-reserving costs the whole generation.
+const REASONING_TOKEN_RESERVE = 4000;
+
+/**
+ * The ONE place the generation's length budget is decided — and deliberately
+ * ONE function returning BOTH numbers, because they are two views of the same
+ * decision and the bug that motivated this was them disagreeing.
+ *
+ * `max_tokens` used to be sized off the advisory TARGET (target x 1.25) while
+ * the prompt handed the model the platform's raw publish ceiling as its hard
+ * limit. On medium and dev.to those are 3000 and 100000 — a 33x gap — so a
+ * model writing a perfectly legal 5000-character article ran out of budget
+ * mid-sentence and the whole (already-billed) generation failed with
+ * "reached its token limit before completion". Reddit had the same defect at
+ * 1.6x, which CJK output alone was enough to trip.
+ *
+ * So `ceilingChars` is derived FROM the token budget, not alongside it: the
+ * model is never permitted a length this request cannot pay to produce.
+ *
+ * `ceilingChars` is also never above what `assertDraftWithinPlatformLimit`
+ * enforces, so a draft that honours the prompt still publishes. On x, reddit
+ * and linkedin under default targets it lands exactly ON that limit (280 /
+ * 2000 / 3000), which is what those platforms' prompts already said — their
+ * wording is unchanged by this. Only the platforms whose publish ceiling is
+ * far above any sane post (medium/devto 100000, quora/hackernews 20000) now
+ * hear a smaller, honest number.
+ */
+function resolveGenerationBudget(
+  platform: string,
+  targetCharacters: number,
+  threadPosts: number
+): { maxTokens: number; ceilingChars: number } {
+  const platformCeiling =
+    platformHardCeilingFor(platform) ?? DEFAULT_CONTENT_LIMIT;
+  // What we WOULD allow, before asking whether it is affordable.
+  const wantedCeiling = Math.min(
+    platformCeiling,
+    Math.max(
+      targetCharacters,
+      Math.ceil(targetCharacters * GENERATION_CEILING_TARGET_MULTIPLE)
+    )
+  );
+
   const perPost = Math.min(
     MAX_TOKENS_PER_POST,
-    Math.max(MIN_TOKENS_PER_POST, Math.ceil(targetCharacters * TOKENS_PER_TARGET_CHARACTER))
+    Math.max(
+      MIN_TOKENS_PER_POST,
+      Math.ceil(wantedCeiling * TOKENS_PER_CEILING_CHARACTER)
+    )
   );
-  return perPost * threadPosts;
+
+  // A long chain can push a per-post budget that is fine on its own over the
+  // whole-request cap. Shrink the per-post share rather than the post count:
+  // the count is an exact contract with the caller, the length is not.
+  const contentCap = MAX_TOKENS_PER_REQUEST - REASONING_TOKEN_RESERVE;
+  let affordablePerPost = perPost;
+  if (perPost * threadPosts > contentCap) {
+    affordablePerPost = Math.floor(contentCap / threadPosts);
+  }
+
+  return {
+    // The reserve is per-REQUEST, not per-post: a model thinks once about the
+    // whole answer, not once per post in the chain.
+    maxTokens: affordablePerPost * threadPosts + REASONING_TOKEN_RESERVE,
+    ceilingChars: Math.min(
+      wantedCeiling,
+      Math.floor(affordablePerPost / TOKENS_PER_CEILING_CHARACTER)
+    ),
+  };
 }
 
 /**
@@ -450,6 +552,26 @@ export class EngageReferencePostService {
     process.env.OPENROUTER_TEXT_MODEL ?? 'anthropic/claude-sonnet-4-6';
   private readonly openRouterFallbackModel =
     process.env.OPENROUTER_TEXT_FALLBACK_MODEL ?? 'openrouter/auto';
+  /**
+   * How hard a REASONING model may think before writing the post.
+   *
+   * OpenRouter charges thinking against the same `max_tokens` as the answer,
+   * and allocates by effort — 'high' reserves roughly 80% of the budget for
+   * thinking alone, which on a 500-token X post leaves no room to write one.
+   * Writing a social post in a stated voice is not a task that rewards a long
+   * chain of thought, so the default is 'low'.
+   *
+   * NOT 'none': OpenRouter documents that models with mandatory reasoning
+   * REJECT `effort: "none"` outright, so the value that looks most economical
+   * is the one that can 400 the whole request. Env-overridable so a model that
+   * genuinely needs more can get it without a deploy.
+   *
+   * Sent on every OpenRouter call, including to models that cannot reason:
+   * OpenRouter's documented behaviour is to drop a parameter the chosen model
+   * does not support rather than error on it.
+   */
+  private readonly openRouterReasoningEffort =
+    process.env.OPENROUTER_REASONING_EFFORT ?? 'low';
 
   private readonly openRouterClient: OpenAI | null = this.useOpenRouter
     ? new OpenAI({
@@ -497,6 +619,14 @@ export class EngageReferencePostService {
     // response that is already nothing but the body.
     const expectsTitle = isTitleSeparatedPlatform(platform);
     const requiredMentions = requiresMention(brandStrength, mentions);
+    // Resolved BEFORE the prompts, because the prompts quote it: the ceiling
+    // the model is told it must not cross is the same ceiling `max_tokens`
+    // was sized to afford. See resolveGenerationBudget.
+    const { maxTokens, ceilingChars } = resolveGenerationBudget(
+      platform,
+      limit,
+      threadPosts
+    );
     const systemPrompt = this._buildSystemPrompt(
       platform,
       sourcePlatform,
@@ -507,16 +637,17 @@ export class EngageReferencePostService {
       limit,
       threadPosts,
       expectsTitle,
-      reference.postContent ?? ''
+      reference.postContent ?? '',
+      ceilingChars
     );
     const userPrompt = this._buildUserPrompt(
       reference,
       threadPosts,
       platform,
       limit,
-      expectsTitle
+      expectsTitle,
+      ceilingChars
     );
-    const maxTokens = outputTokensForTarget(limit, threadPosts);
 
     const usages: ReferencePostUsage[] = [];
     let attemptSystemPrompt = systemPrompt;
@@ -541,6 +672,7 @@ export class EngageReferencePostService {
     let similarityRetryUsed = false;
     let lengthRetryUsed = false;
     let partCountRetryUsed = false;
+    let truncationRetryUsed = false;
 
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
       // A corrective may only be issued when its own retry is unspent AND
@@ -558,8 +690,14 @@ export class EngageReferencePostService {
       let raw: string;
       let usage: ReferencePostUsage | null;
       let outputTruncated: boolean;
+      let reasoningTokens: number;
       try {
-        ({ text: raw, usage, outputTruncated } = await this._callModel(
+        ({
+          text: raw,
+          usage,
+          outputTruncated,
+          reasoningTokens,
+        } = await this._callModel(
           attemptSystemPrompt,
           userPrompt,
           maxTokens,
@@ -581,6 +719,41 @@ export class EngageReferencePostService {
       }
       if (usage) usages.push(usage);
       if (outputTruncated) {
+        // Everything the diagnosis needs, because the two causes are the same
+        // stop reason on the wire and have opposite fixes: a post that simply
+        // ran long shows `reasoningTokens` at or near zero, while a reasoning
+        // model that spent the budget thinking and wrote nothing shows it at
+        // most of `completionTokens`. Logged BEFORE the retry so both attempts
+        // leave a trace, and logged at all because this used to throw with no
+        // record of the platform, the budget, or where the tokens went.
+        const spent = usage?.completionTokens ?? 0;
+        this.logger.warn(
+          `Reference-post model output hit max_tokens for ${platform} ` +
+            `(maxTokens=${maxTokens}, completionTokens=${spent}, ` +
+            `reasoningTokens=${reasoningTokens}, ceilingChars=${ceilingChars}, ` +
+            `threadPosts=${threadPosts}, chars=${raw.length}); ` +
+            `${canRetry(truncationRetryUsed) ? 'retrying' : 'no retries left'}.`
+        );
+        if (canRetry(truncationRetryUsed)) {
+          truncationRetryUsed = true;
+          // A truncated draft is not a draft — it stops mid-sentence — so
+          // unlike the length gate below there is nothing to salvage and the
+          // corrective is the only way through. It asks for a SHORTER post
+          // rather than more budget: the budget is already sized to the
+          // ceiling this same prompt states, so a response that overran it
+          // overran what it was told, and raising max_tokens mid-flight would
+          // just move the cliff.
+          attemptSystemPrompt = promptWithCorrective(`Your previous answer was cut off before it finished: it ran past the output budget for this request. Write a COMPLETE, SELF-CONTAINED ${
+            threadPosts > 1 ? 'thread' : 'post'
+          } this time, and make it materially shorter — aim at the LOW end of the stated length target rather than the ceiling. Finish every sentence${
+            threadPosts > 1
+              ? ` and every one of the ${threadPosts} posts`
+              : ''
+          }. Do not open with a preamble, a plan, or any commentary before the ${
+            expectsTitle ? `${TITLE_LINE_PREFIX} line` : 'post itself'
+          }.`);
+          continue;
+        }
         throw new ReferencePostGenerationError(
           'Reference-post model output reached its token limit before completion.',
           usages
@@ -699,7 +872,8 @@ export class EngageReferencePostService {
       const { minChars } = this._describeLengthConstraint(
         platform,
         limit,
-        threadPosts
+        threadPosts,
+        ceilingChars
       );
       if (minChars && text.length < minChars) {
         // Prompt-side only, deliberately: every other gate in this loop can
@@ -884,15 +1058,31 @@ export class EngageReferencePostService {
    * reason: asked for "under 250" the model returns 251–294. X gets its margin
    * structurally (a 260 target under a 280 ceiling) so it keeps the full target
    * and is only told to leave room; on every other platform the advisory target
-   * shrinks to 85%, while the real platform ceiling remains separate.
+   * shrinks to 85%, while the ceiling remains separate.
+   *
+   * `ceilingChars` is that ceiling and is supplied by the CALLER, from
+   * `resolveGenerationBudget` — it is not re-derived here. That is the whole
+   * point: the number stated to the model and the `max_tokens` it has to
+   * write within are two halves of one decision, and this helper reading the
+   * platform's raw publish limit independently is exactly how they came to
+   * disagree by 33x on medium. See resolveGenerationBudget.
    */
   private _describeLengthConstraint(
     platform: string,
     limit: number,
-    threadPosts: number
+    threadPosts: number,
+    ceilingChars: number
   ): { charTarget: string; hardLimit: string; lengthScope: string; minChars: number } {
     const SAFETY_MARGIN = 0.85;
-    const marginTarget = Math.round(limit * SAFETY_MARGIN);
+    // Clamped to the ceiling, so the prompt can never state a target ABOVE the
+    // limit it also says must never be crossed. That only binds where a long
+    // chain has squeezed the per-post budget (see resolveGenerationBudget's
+    // whole-request cap); on every ordinary generation the margin target sits
+    // well under the ceiling and this is a no-op.
+    const marginTarget = Math.min(
+      ceilingChars,
+      Math.round(limit * SAFETY_MARGIN)
+    );
     // Article platforms get a FLOOR as well as a ceiling. "up to 2550
     // characters" is satisfied by 200, which on dev.to or Medium publishes as
     // a stub under a title promising an article — the ceiling was the only
@@ -912,10 +1102,8 @@ export class EngageReferencePostService {
               : `up to ${marginTarget} characters`,
       hardLimit:
         platform === 'x'
-          ? `under ${X_HARD_CHAR_LIMIT} Twitter-weighted characters`
-          : platform === 'reddit'
-            ? `under ${REDDIT_HARD_CHAR_LIMIT} characters`
-            : `under ${hardLimitFor(platform)} characters`,
+          ? `under ${ceilingChars} Twitter-weighted characters`
+          : `under ${ceilingChars} characters`,
       lengthScope: threadPosts > 1 ? 'EACH post of the thread' : 'the post',
       minChars,
     };
@@ -935,7 +1123,8 @@ export class EngageReferencePostService {
     // never embeds it — the reference reaches the model once, inside the
     // isolation envelope in the user turn, and a second uncontained copy here
     // would be a second injection surface for no gain.
-    referenceContent: string
+    referenceContent: string,
+    ceilingChars: number
   ): string {
     // The DTO's @IsIn(VALID_REFERENCE_POST_STRATEGIES) rejects anything else at the
     // controller boundary; this fallback only covers internal callers that
@@ -958,7 +1147,8 @@ export class EngageReferencePostService {
     const { charTarget, hardLimit, lengthScope } = this._describeLengthConstraint(
       platform,
       limit,
-      threadPosts
+      threadPosts,
+      ceilingChars
     );
     const brandReminder = requiredMentions.length
       ? ` and must name ${requiredMentions.map((m) => `"${m}"`).join(' or ')}`
@@ -1108,12 +1298,14 @@ IMPORTANT: ${lengthScope} may exceed the target, but must never exceed ${hardLim
     threadPosts: number,
     platform: string,
     limit: number,
-    expectsTitle: boolean
+    expectsTitle: boolean,
+    ceilingChars: number
   ): string {
     const { charTarget, hardLimit, lengthScope } = this._describeLengthConstraint(
       platform,
       limit,
-      threadPosts
+      threadPosts,
+      ceilingChars
     );
     // The user message is the LAST thing the model reads before answering, so
     // the length rule is repeated here as well as at both ends of the system
@@ -1139,7 +1331,7 @@ Length target: aim to keep ${lengthScope} ${charTarget}. It may exceed that targ
     userPrompt: string,
     maxTokens: number,
     signal?: AbortSignal
-  ): Promise<{ text: string; usage: ReferencePostUsage | null; outputTruncated: boolean }> {
+  ): Promise<ModelCallResult> {
     if (this.useOpenRouter && this.openRouterClient) {
       return this._callViaOpenRouter(systemPrompt, userPrompt, maxTokens, signal);
     }
@@ -1156,7 +1348,7 @@ Length target: aim to keep ${lengthScope} ${charTarget}. It may exceed that targ
     userPrompt: string,
     maxTokens: number,
     signal?: AbortSignal
-  ): Promise<{ text: string; usage: ReferencePostUsage | null; outputTruncated: boolean }> {
+  ): Promise<ModelCallResult> {
     const response = await this.anthropicClient!.messages.create(
       {
         model: 'claude-sonnet-4-6',
@@ -1184,7 +1376,14 @@ Length target: aim to keep ${lengthScope} ${charTarget}. It may exceed that targ
         }
       : null;
 
-    return { text, usage, outputTruncated: response.stop_reason === 'max_tokens' };
+    // No reasoning tokens to report: this path never enables extended
+    // thinking, so anything that fills the budget here really is the post.
+    return {
+      text,
+      usage,
+      outputTruncated: response.stop_reason === 'max_tokens',
+      reasoningTokens: 0,
+    };
   }
 
   private async _callViaOpenRouter(
@@ -1192,19 +1391,27 @@ Length target: aim to keep ${lengthScope} ${charTarget}. It may exceed that targ
     userPrompt: string,
     maxTokens: number,
     signal?: AbortSignal
-  ): Promise<{ text: string; usage: ReferencePostUsage | null; outputTruncated: boolean }> {
-    const call = (model: string) =>
-      this.openRouterClient!.chat.completions.create(
-        {
-          model,
-          max_tokens: maxTokens,
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: userPrompt },
-          ],
-        },
-        { signal }
-      );
+  ): Promise<ModelCallResult> {
+    const call = (model: string) => {
+      // `reasoning` is an OpenRouter extension the OpenAI SDK's types do not
+      // model, so the params are widened by intersection rather than cast:
+      // an intersection still type-checks every field the SDK DOES know, and
+      // it keeps the non-streaming overload (and therefore the ChatCompletion
+      // return type) that a cast to the full params union would discard.
+      // See openRouterReasoningEffort for why it is always sent.
+      const body: OpenAI.Chat.ChatCompletionCreateParamsNonStreaming & {
+        reasoning: { effort: string };
+      } = {
+        model,
+        max_tokens: maxTokens,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+        reasoning: { effort: this.openRouterReasoningEffort },
+      };
+      return this.openRouterClient!.chat.completions.create(body, { signal });
+    };
 
     let response;
     let modelUsed = this.openRouterModel;
@@ -1255,6 +1462,12 @@ Length target: aim to keep ${lengthScope} ${charTarget}. It may exceed that targ
       text,
       usage,
       outputTruncated: response.choices[0]?.finish_reason === 'length',
+      reasoningTokens:
+        (
+          response.usage as
+            | { completion_tokens_details?: { reasoning_tokens?: number } }
+            | undefined
+        )?.completion_tokens_details?.reasoning_tokens ?? 0,
     };
   }
 }

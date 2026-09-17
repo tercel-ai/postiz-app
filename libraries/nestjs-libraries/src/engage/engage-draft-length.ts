@@ -42,6 +42,34 @@ export function outputLengthForLength(
 }
 
 /**
+ * The hard character ceiling this module ENFORCES for a platform, or `null`
+ * where it enforces none.
+ *
+ * Split out of `assertDraftWithinPlatformLimit` so that generation can be
+ * sized against the very number publication is judged by. A generator that
+ * picks its own ceiling — as reference-post generation did, stating the
+ * provider's raw `maxLength()` in its prompt while budgeting `max_tokens` off
+ * a much smaller advisory target — permits the model an output length it
+ * cannot afford to produce, and the response comes back cut off mid-sentence.
+ * One number, read by both sides, is what stops that.
+ *
+ * The counting RULE stays with the caller: x is measured with twitter-text
+ * weighting (CJK/emoji 2, URLs 23) and everything else by raw `.length`, so
+ * this returns the limit only, never a verdict.
+ */
+export function platformHardCeilingFor(platform: string): number | null {
+  const normalized = normalizeEngagePlatform(platform);
+  if (normalized === 'x') return X_HARD_CHAR_LIMIT;
+  if (normalized === 'reddit') return REDDIT_HARD_CHAR_LIMIT;
+  // Anything outside the scannable set has no engage generation path and no
+  // agreed ceiling — see assertDraftWithinPlatformLimit's note.
+  if (!(SCANNABLE_PLATFORMS as readonly string[]).includes(normalized)) {
+    return null;
+  }
+  return hardLimitFor(normalized);
+}
+
+/**
  * Throws when a generated draft exceeds the PLATFORM's hard ceiling. The
  * requested `outputLength` only steers the prompt — it is a soft target, so a
  * draft that overshoots it is kept as long as the platform would still accept
@@ -67,26 +95,26 @@ export function assertDraftWithinPlatformLimit(
   draft: string
 ) {
   const normalized = normalizeEngagePlatform(platform);
+  // Anything outside the scannable set has no engage generation path and no
+  // agreed ceiling — staying silent there preserves the previous behaviour
+  // for callers passing a platform this module was never taught about,
+  // rather than inventing a limit for it.
+  const hardLimit = platformHardCeilingFor(normalized);
+  if (hardLimit === null) return;
   if (normalized === 'x') {
-    if (weightedLength(draft) > X_HARD_CHAR_LIMIT) {
+    if (weightedLength(draft) > hardLimit) {
       throw new Error(
-        `Generated X draft exceeded ${X_HARD_CHAR_LIMIT} Twitter-weighted characters.`
+        `Generated X draft exceeded ${hardLimit} Twitter-weighted characters.`
       );
     }
     return;
   }
   if (normalized === 'reddit') {
-    if (draft.length > REDDIT_HARD_CHAR_LIMIT) {
-      throw new Error(`Generated Reddit draft exceeded ${REDDIT_HARD_CHAR_LIMIT} characters.`);
+    if (draft.length > hardLimit) {
+      throw new Error(`Generated Reddit draft exceeded ${hardLimit} characters.`);
     }
     return;
   }
-  // Anything outside the scannable set has no engage generation path and no
-  // agreed ceiling — staying silent there preserves the previous behaviour
-  // for callers passing a platform this module was never taught about,
-  // rather than inventing a limit for it.
-  if (!(SCANNABLE_PLATFORMS as readonly string[]).includes(normalized)) return;
-  const hardLimit = hardLimitFor(normalized);
   if (draft.length > hardLimit) {
     throw new Error(
       `Generated ${normalized} draft exceeded ${hardLimit} characters.`
